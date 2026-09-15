@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# cel - the celestial plane.
+#
+# One entry point for setting up and diagnosing this box, and for driving every
+# workspace on it. Deliberately bash with no runtime deps: its job is installing
+# prerequisites, so it cannot have any of its own beyond git and curl.
+#
+# This file is dispatch only. Logic lives in lib/.
+set -euo pipefail
+
+# Check before loading runtime modules or using GNU-only path operations.
+if [ "$(uname -s)" != Linux ] || [ "$(uname -o 2>/dev/null || true)" != GNU/Linux ]; then
+  printf 'cel requires GNU/Linux; this platform is unsupported. No action was taken.\n' >&2
+  exit 1
+fi
+
+CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export CEL_ROOT
+# shellcheck source=lib/common.sh
+. "$CEL_ROOT/lib/common.sh"
+
+cmd_shellenv() {
+  cat <<EOS
+# cel shellenv - add to your shell rc:  eval "\$(cel shellenv)"
+# Keeps the plane's PATH requirements out of your personal dotfiles, and gives
+# core skills a stable root to resolve their executables from.
+export CEL_ROOT="$CEL_ROOT"
+export PATH="\$HOME/.local/bin:\$PATH"
+[ -d "\$HOME/.local/share/mise/shims" ] && export PATH="\$HOME/.local/share/mise/shims:\$PATH"
+export PATH="$CEL_ROOT/bin:\$PATH"
+export PATH="$CEL_ROOT/core/skills/fanout/bin:\$PATH"
+export PATH="$CEL_ROOT/core/skills/linear/bin:\$PATH"
+# A shell that starts inside a workspace inherits its env: map and env.local
+# overrides. Silent no-op elsewhere; re-run by hand after cd-ing between
+# workspaces: eval "\$(cel ws env)"
+eval "\$('$CEL_ROOT/bin/cel' ws env 2>/dev/null || true)"
+EOS
+}
+
+cmd_agents() {
+  # shellcheck source=lib/manifest.sh
+  . "$CEL_ROOT/lib/manifest.sh"
+  printf '  %-10s %-11s %-26s %s\n' AGENT STATUS SKILLS_DIR INJECTION
+  local a st
+  for a in $(agent_names); do
+    have "$(agent_get "$a" bin)" && st=installed || st='-'
+    printf '  %-10s %-11s %-26s %s\n' \
+      "$a" "$st" "$(agent_skills_dir "$a")" "$(agent_injection "$a" strategy)"
+  done
+}
+
+usage() {
+  cat <<'EOS'
+cel - the celestial plane
+
+  cel version                   installed version + commit
+  cel setup [--agents a,b|all]  install tools + agents, link core, install externals
+  cel doctor                    diagnose this box (non-zero on problems)
+  cel update                    pull the plane, re-link, re-render
+  cel agents                    list agents, install status and injection strategy
+  cel shellenv                  print shell env; eval this in your rc
+
+  cel ws new <name> [--org o]   scaffold a workspace that does not exist yet
+  cel ws add <git-url> [name]   register and clone a workspace that does
+  cel ws sync [name]            clone repos, install tools, scope-link skills
+  cel ws list                   registered workspaces
+  cel ws push <name>            create the workspace repo on GitHub and push
+  cel ws env [name]             print workspace env exports; eval after a cd
+  cel run [role] [--repo r]     start an agent pane; no role = Direct mode
+  cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab
+                                --profile p / --model m / --thinking l:
+                                launch on a different CLI, model or effort
+  cel profiles [name]           worker profiles this workspace declares, and
+                                the exact launch flags each one resolves to
+  cel quota [provider]          credit left per provider, asked of the provider;
+                                a route below its floor is vetoed before a
+                                pane spawns (unknown never vetoes)
+  cel publish <file> [name]     host an HTML doc on this box; prints its URL
+                                --public: internet-reachable tier, own root
+  cel pages [--public]          serve published docs (tailnet 7780; public 7781)
+                                --ensure: start it only if it is not already up
+  cel pages tunnel              expose the public tier without tailscale
+                                (cloudflared quick tunnel needs no account)
+  cel dash [--port n] [--ensure]  workspace dashboard: worktrees, PRs, services,
+                                backlog, agent prompt box (localhost by default)
+  cel inbox send|read|count|watch   agent messages that never type into a pane
+  cel inbox open|resolve|whoami     decisions stay OPEN until resolved - reading
+                                one does not answer it; whoami = your role by cwd
+  cel learn add|list|reinforce|stow   durable facts this workspace has established,
+                                tiered (pinned / aging 30d / perishable 7d) and
+                                budgeted into every agent's policy block
+  cel effects install|status    optional Canvas UI dashboard effects (Chrome)
+  cel steward                   one proactive tick: gc, review + ticket sweeps,
+                                stall nudges, blocked agents, server liveness
+  cel steward --install         run it every 5 min via a systemd user timer -
+                                without this NOTHING is proactive; --interval
+                                <min> to retune, --remove to stop
+  cel gc [--reap <hours>]       remove merged/closed worker worktrees; --reap
+                                also exits idle agents that old (panes survive)
+  cel spike <name>              throwaway repo in the current workspace
+  cel promote <spike>           spike -> real repo + manifest entry
+EOS
+}
+
+case "${1:-help}" in
+  setup)    shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"; cmd_setup "$@";;
+  doctor)   shift; . "$CEL_ROOT/lib/doctor.sh";  cmd_doctor "$@";;
+  update)   shift; . "$CEL_ROOT/lib/link.sh"
+            git -C "$CEL_ROOT" pull --ff-only && link_all;;
+  agents)   shift; cmd_agents;;
+  shellenv) shift; cmd_shellenv;;
+  ws)       shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"
+            . "$CEL_ROOT/lib/ws.sh";    cmd_ws "$@";;
+  run)      shift; . "$CEL_ROOT/lib/run.sh";     cmd_run "$@";;
+  profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
+  quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;
+  learn)    shift; . "$CEL_ROOT/lib/learn.sh";    cmd_learn "$@";;
+  gc)       shift; . "$CEL_ROOT/lib/gc.sh";      cmd_gc "$@";;
+  inbox)    shift; . "$CEL_ROOT/lib/inbox.sh";   cmd_inbox "$@";;
+  effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
+  version|--version|-v)
+            . "$CEL_ROOT/lib/version.sh"
+            printf 'celestial v%s (%s)\n' "$(cel_version)" \
+              "$(git -C "$CEL_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no-git')";;
+  steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
+  dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;
+  pages)    shift; . "$CEL_ROOT/lib/pages.sh"
+            if [ "${1:-}" = "tunnel" ]; then shift; cmd_pages_tunnel "$@"; else cmd_pages "$@"; fi;;
+  publish)  shift; . "$CEL_ROOT/lib/pages.sh";   cmd_publish "$@";;
+  spike)    shift; . "$CEL_ROOT/lib/spike.sh";   cmd_spike "$@";;
+  promote)  shift; . "$CEL_ROOT/lib/spike.sh";   cmd_promote "$@";;
+  help|-h|--help) usage;;
+  *)        c_err "unknown command: $1"; echo; usage; exit 2;;
+esac

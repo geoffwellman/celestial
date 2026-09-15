@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/razajamil/herdr-plugin-workspace-manager/main/schema.json
+#
+# herdr-plugin-workspace-manager config. Linked to the plugin's config directory
+# by `cel setup` (see lib/link.sh). The plugin reads config.yml from
+# `herdr plugin config-dir herdr-plugin-workspace-manager` and NOWHERE ELSE -
+# in particular it does not read ~/.config/herdr/layouts, which is where this
+# repo's layouts used to be linked and therefore had no effect at all.
+#
+# NOTE: `apply` REPLACES a workspace's first tab, closing its panes and the
+# processes in them. Safe on a fresh worktree, destructive on a working one.
+#
+#   herdr plugin action invoke validate --plugin herdr-plugin-workspace-manager
+#   herdr plugin action invoke apply --plugin herdr-plugin-workspace-manager
+#
+# This file holds only GENERIC layouts. Workspace layouts live in the
+# workspace's own layouts.yml (beside workspace.yaml) and WIN over this file -
+# cel run resolves workspace-first, so workspace content never lands here.
+layouts:
+  - id: worker
+    tabs:
+      - title: agent
+        panes:
+          - title: agent
+            agent: claude
+      - title: shell
+        panes:
+          - title: shell

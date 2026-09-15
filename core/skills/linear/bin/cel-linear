@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# cel-linear - thin shim over Linear's GraphQL API for runtimes that cannot
+# speak MCP (claude sessions get the OFFICIAL Linear MCP instead; this exists
+# so omp/codex workers and scripts share one ticket surface). Auth is
+# LINEAR_API_KEY, delivered per-workspace via env/env.local - never hardcoded.
+set -euo pipefail
+
+: "${CEL_ROOT:=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../.." && pwd)}"
+# shellcheck source=lib/common.sh
+. "$CEL_ROOT/lib/common.sh"
+# shellcheck source=lib/workspace.sh
+. "$CEL_ROOT/lib/workspace.sh"
+
+API="${LINEAR_API_URL:-https://api.linear.app/graphql}"
+
+# LOAD THE KEY OURSELVES rather than trusting the caller's environment.
+#
+# `cel shellenv` sources the workspace env into every NEW shell, but an agent
+# inherits whatever its pane's shell had when that shell started - and pane
+# shells outlive env.local edits. Read the workspace when the caller has no
+# key, so adding credentials does not require recreating an existing pane.
+_linear_load_env() {
+  [ -z "${LINEAR_API_KEY:-}" ] || return 0
+  local d; d="$(ws_current 2>/dev/null)" || return 0
+  eval "$(ws_env_exports "$d" 2>/dev/null)" >/dev/null 2>&1 || true
+}
+
+_gql() ( # <query> [variables-json]
+  _linear_load_env
+  [ -n "${LINEAR_API_KEY:-}" ] \
+    || die "LINEAR_API_KEY is not set. It belongs in this workspace's gitignored env.local as 'export LINEAR_API_KEY=...' (personal key from linear.app Settings -> API). Run from inside the workspace so it can be found." >&2
+  local q="$1" vars="${2:-{\}}" resp headers
+  # stdin carries the JSON body. A private, per-request header file keeps
+  # credentials out of curl's argv; the subshell owns cleanup on every exit.
+  umask 077
+  headers="$(mktemp "${TMPDIR:-/tmp}/cel-linear-headers.XXXXXX")" \
+    || die "linear: could not prepare request" >&2
+  trap 'rm -f -- "$headers"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  printf 'Authorization: %s\n' "$LINEAR_API_KEY" > "$headers"
+  resp="$(jq -n --arg q "$q" --argjson v "$vars" '{query: $q, variables: $v}' \
+    | curl -sf -m 20 -X POST "$API" \
+        -H "@$headers" -H 'Content-Type: application/json' \
+        --data-binary @-)" || die "linear: API request failed" >&2
+  if printf '%s' "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+    die "linear: $(printf '%s' "$resp" | jq -r '.errors[0].message')" >&2
+  fi
+  printf '%s' "$resp"
+)
+
+cmd_me() {
+  _gql 'query { viewer { id name email } }' | jq '.data.viewer'
+}
+
+cmd_teams() {
+  _gql 'query { teams(first: 50) { nodes { id key name } } }' | jq -r '.data.teams.nodes[] | "\(.key)\t\(.name)\t\(.id)"'
+}
+
+cmd_search() { # <terms...> [--team KEY]
+  local team="" terms=()
+  while [ $# -gt 0 ]; do case "$1" in
+    --team) team="$2"; shift 2;; *) terms+=("$1"); shift;; esac; done
+  [ "${#terms[@]}" -gt 0 ] || die "usage: cel-linear search <terms> [--team KEY]"
+  local q="${terms[*]}"
+  _gql 'query($t: String!, $first: Int) { searchIssues(term: $t, first: $first)
+          { nodes { identifier title url state { name } assignee { name } } } }'     "$(jq -n --arg t "$q" '{t: $t, first: 20}')"     | jq -r --arg team "$team" '.data.searchIssues.nodes[]
+        | select($team == "" or (.identifier | startswith($team + "-")))
+        | "\(.identifier)	\(.state.name)	\(.assignee.name // "-")	\(.title)"'
+}
+
+# The `celestial` label marks agent-filed tickets so humans can filter them.
+# Ensured per team, created on first use.
+_ensure_label() { # <team-id> -> label id
+  local lid
+  lid="$(_gql 'query($t: ID) { issueLabels(filter: {name: {eq: "celestial"}, team: {id: {eq: $t}}}, first: 1) { nodes { id } } }'     "$(jq -n --arg t "$1" '{t: $t}')" | jq -r '.data.issueLabels.nodes[0].id // empty')"
+  [ -n "$lid" ] && { printf '%s' "$lid"; return 0; }
+  _gql 'mutation($in: IssueLabelCreateInput!) { issueLabelCreate(input: $in) { issueLabel { id } } }'     "$(jq -n --arg t "$1" '{in: {teamId: $t, name: "celestial", color: "#e3b34c"}}')"     | jq -r '.data.issueLabelCreate.issueLabel.id // empty'
+}
+
+cmd_issue() { # <IDENTIFIER e.g. WG-12>
+  [ $# -ge 1 ] || die "usage: cel-linear issue <IDENTIFIER>"
+  _gql 'query($id: String!) { issue(id: $id) { identifier title description url
+          state { name } assignee { name } priorityLabel
+          comments(first: 10) { nodes { user { name } body createdAt } } } }' \
+    "$(jq -n --arg id "$1" '{id: $id}')" | jq '.data.issue'
+}
+
+cmd_my_issues() {
+  _gql 'query { viewer { assignedIssues(first: 30, filter: {state: {type: {nin: ["completed","canceled"]}}})
+          { nodes { identifier title url state { name } priorityLabel } } } }' \
+    | jq -r '.data.viewer.assignedIssues.nodes[] | "\(.identifier)\t\(.state.name)\t\(.title)"'
+}
+
+cmd_create() { # --team KEY --title T [--description D] [--assignee me|none|<id>]
+  local team="" title="" desc="" assignee="me"
+  while [ $# -gt 0 ]; do case "$1" in
+    --team) team="$2"; shift 2;; --title) title="$2"; shift 2;;
+    --description) desc="$2"; shift 2;;
+    --assignee) assignee="$2"; shift 2;;
+    *) die "create: unknown argument '$1'";; esac; done
+  [ -n "$team" ] && [ -n "$title" ] || die "usage: cel-linear create --team <KEY> --title <t> [--description <d>] [--assignee me|none]"
+  local team_id
+  team_id="$(_gql 'query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id } } }' \
+    "$(jq -n --arg k "$team" '{k: $k}')" | jq -r '.data.teams.nodes[0].id // empty')"
+  [ -n "$team_id" ] || die "create: no team with key '$team'"
+  local label_id; label_id="$(_ensure_label "$team_id" || true)"
+
+  # ASSIGNED BY DEFAULT, to whoever owns the key. An unassigned ticket appears
+  # on nobody's list - including the "assigned to me" view the dashboard is
+  # built on - so agent-created work was landing on the board and still being
+  # invisible, which is the exact problem tickets were meant to solve. The key
+  # owner is the accountable human for anything the fleet does under it.
+  # `--assignee none` opts out deliberately.
+  local assignee_id=""
+  case "$assignee" in
+    none|"") assignee_id="" ;;
+    me)      assignee_id="$(_gql 'query { viewer { id } }' | jq -r '.data.viewer.id // empty')" ;;
+    *)       assignee_id="$assignee" ;;
+  esac
+
+  _gql 'mutation($in: IssueCreateInput!) { issueCreate(input: $in) { issue { identifier url } } }' \
+    "$(jq -n --arg t "$team_id" --arg ti "$title" --arg d "$desc" --arg l "$label_id" --arg a "$assignee_id" \
+       '{in: ({teamId: $t, title: $ti}
+              + (if $d != "" then {description: $d} else {} end)
+              + (if $l != "" then {labelIds: [$l]} else {} end)
+              + (if $a != "" then {assigneeId: $a} else {} end))}')" \
+    | jq -r '.data.issueCreate.issue | "\(.identifier) \(.url)"'
+}
+
+# Retrofit for tickets created before assignment was the default, and the way
+# back out again: `none` clears the assignee. Needed because assignment follows
+# PR OWNERSHIP, not who happens to hold the API key - a ticket our fleet opened
+# to track a COLLEAGUE'S pull request must not land on our list as if it were
+# ours to deliver.
+cmd_assign() { # <IDENTIFIER> [me|none|<user-id>]
+  [ $# -ge 1 ] || die "usage: cel-linear assign <IDENTIFIER> [me|none|<user-id>]"
+  local who="${2:-me}" uid="" iid
+  case "$who" in
+    none) uid="" ;;
+    me)   uid="$(_gql 'query { viewer { id } }' | jq -r '.data.viewer.id // empty')"
+          [ -n "$uid" ] || die "assign: could not resolve the viewer" ;;
+    *)    uid="$who" ;;
+  esac
+  iid="$(_gql 'query($id: String!) { issue(id: $id) { id } }' \
+    "$(jq -n --arg id "$1" '{id: $id}')" | jq -r '.data.issue.id // empty')"
+  [ -n "$iid" ] || die "assign: no issue '$1'"
+  _gql 'mutation($id: String!, $in: IssueUpdateInput!) { issueUpdate(id: $id, input: $in) { success } }' \
+    "$(jq -n --arg id "$iid" --arg a "$uid" '{id: $id, in: {assigneeId: (if $a == "" then null else $a end)}}')" >/dev/null
+  [ -n "$uid" ] && c_ok "$1 assigned" || c_ok "$1 unassigned"
+}
+
+cmd_comment() { # <IDENTIFIER> <body>
+  [ $# -ge 2 ] || die "usage: cel-linear comment <IDENTIFIER> <body>"
+  local iid
+  iid="$(_gql 'query($id: String!) { issue(id: $id) { id } }' \
+    "$(jq -n --arg id "$1" '{id: $id}')" | jq -r '.data.issue.id')"
+  _gql 'mutation($in: CommentCreateInput!) { commentCreate(input: $in) { success } }' \
+    "$(jq -n --arg i "$iid" --arg b "$2" '{in: {issueId: $i, body: $b}}')" \
+    | jq -r 'if .data.commentCreate.success then "commented" else "failed" end'
+}
+
+cmd_state() { # <IDENTIFIER> <state-name e.g. "In Progress">
+  [ $# -ge 2 ] || die "usage: cel-linear state <IDENTIFIER> <state-name>"
+  local resp iid sid
+  resp="$(_gql 'query($id: String!) { issue(id: $id) { id team { states(first: 50) { nodes { id name } } } } }' \
+    "$(jq -n --arg id "$1" '{id: $id}')")"
+  iid="$(printf '%s' "$resp" | jq -r '.data.issue.id')"
+  sid="$(printf '%s' "$resp" | jq -r --arg n "$2" \
+    '.data.issue.team.states.nodes[] | select(.name | ascii_downcase == ($n | ascii_downcase)) | .id' | head -1)"
+  [ -n "$sid" ] || die "state: issue's team has no state named '$2' (states: $(printf '%s' "$resp" | jq -r '[.data.issue.team.states.nodes[].name] | join(", ")'))"
+  _gql 'mutation($i: String!, $s: String!) { issueUpdate(id: $i, input: {stateId: $s}) { success } }' \
+    "$(jq -n --arg i "$iid" --arg s "$sid" '{i: $i, s: $s}')" \
+    | jq -r 'if .data.issueUpdate.success then "moved to '"$2"'" else "failed" end'
+}
+
+# Resolve auth in the MAIN shell, before any command runs. Doing it inside
+# _gql meant the failure happened inside a pipeline, where `die` exits only the
+# subshell and the waiting `jq` then parsed the error text - so a missing key
+# surfaced as "jq: parse error" instead of saying which variable to set.
+case "${1:-help}" in
+  help|--help|-h|'') : ;;
+  *) _linear_load_env
+     [ -n "${LINEAR_API_KEY:-}" ] \
+       || die "LINEAR_API_KEY is not set. It belongs in this workspace's gitignored env.local as 'export LINEAR_API_KEY=...' (personal key from linear.app Settings -> API). Run from inside the workspace so it can be found." ;;
+esac
+
+case "${1:-help}" in
+  me)        shift; cmd_me;;
+  teams)     shift; cmd_teams;;
+  issue)     shift; cmd_issue "$@";;
+  search)    shift; cmd_search "$@";;
+  my-issues) shift; cmd_my_issues;;
+  create)    shift; cmd_create "$@";;
+  comment)   shift; cmd_comment "$@";;
+  state)     shift; cmd_state "$@";;
+  assign)    shift; cmd_assign "$@";;
+  *) cat <<'EOS'
+cel-linear - Linear tickets from any runtime (GraphQL, LINEAR_API_KEY)
+  cel-linear me                              who the key belongs to
+  cel-linear teams                           team keys and ids
+  cel-linear issue <ID>                      one issue with recent comments
+  cel-linear search <terms> [--team K]       find existing tickets BEFORE creating
+  cel-linear my-issues                       my open issues
+  cel-linear create --team K --title T [--description D] [--assignee me|none]
+                                             assigned to the key owner unless
+                                             you pass --assignee none
+  cel-linear assign <ID> [me|<user-id>]      retrofit an unassigned ticket
+  cel-linear comment <ID> <body>
+  cel-linear state <ID> <state-name>         e.g. "In Progress", "In Review"
+EOS
+  [ "${1:-help}" = help ] || exit 2;;
+esac

@@ -1,0 +1,33 @@
+name: profiled
+kind: hustle
+org: someone
+tickets: { system: none, adhoc: "AH-<yymmdd>" }
+policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
+runtime: { root: claude, orchestrator: claude, worker: omp }
+tools: []
+thinking: xhigh
+
+# Only OPENROUTER_API_KEY is present here: the `remote` profile must therefore
+# fall back, and `remote_primary` must not.
+env:
+  OPENROUTER_API_KEY: sk-test-openrouter
+
+worker_profiles:
+  swap:      { runtime: codex, model: gpt-6-astra, thinking: max }
+  bare:      { runtime: omp, model: some-model }
+  remote:    { runtime: omp, model: deepseek/deepseek-flash,
+               fallback: openrouter/deepseek/deepseek-v4.1-flash }
+  stranded:  { runtime: omp, model: deepseek/deepseek-flash }
+  inherit:   { runtime: omp, model: some-model }
+  effortonly: { runtime: omp, thinking: low }   # names no model on purpose
+
+# Bindings: what each role launches on when no --profile is passed.
+role_profiles:
+  root: swap
+  worker: bare
+
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test

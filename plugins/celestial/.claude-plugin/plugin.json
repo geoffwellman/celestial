@@ -1,0 +1,8 @@
+{
+  "name": "celestial",
+  "version": "0.2.0",
+  "description": "Workspace setup commands for Celestial, an AI software factory with visible coding agents and human control.",
+  "author": {
+    "name": "Geoff Wellman"
+  }
+}

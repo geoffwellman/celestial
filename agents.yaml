@@ -1,0 +1,300 @@
+# Agent manifest. Single source of truth for which coding agents the plane
+# installs, how to install them, where each one looks for skills, and how a role
+# prompt is injected into a launch.
+#
+# Everything setup and linking needs reads from here, so adding an agent is a
+# data change rather than a code change. Read only through lib/manifest.sh.
+#
+# Fields:
+#   bin                the executable to look for on PATH
+#   install            trusted GNU/Linux installation command, with exact pins
+#   version            release installed when missing; existing CLIs are retained
+#   assets             architecture-specific URLs, SHA-256 and optional tar member
+#   skills_dir         where this agent discovers skills/<name>/SKILL.md
+#   agents_dir         optional: where it discovers agent role definitions
+#   herdr_integration  optional: name passed to `herdr integration install <x>`
+#   role_injection     how a role prompt reaches a launched session
+#   launch_args        optional: extra flags cel run puts on every launch of
+#                      this agent, ahead of the role-injection args
+#   model_flag         optional: how this CLI takes a model id. Absent means
+#                      the runtime cannot be pointed at a model and a profile
+#                      that names one is rejected rather than silently ignored.
+#   thinking           optional: how this CLI takes a reasoning/thinking level.
+#                      strategy `flag` emits `<flag> <level>`; strategy
+#                      `config` emits `-c <key>="<level>"`. `levels` is the
+#                      set the CLI accepts - a requested level outside it is
+#                      clamped down the ladder rather than passed through and
+#                      rejected at launch. Absent means the runtime has no
+#                      command-line thinking control.
+#   extensions_file    optional: newline-delimited manifest under tools/<agent>/
+#   required           setup fails without it
+#   notes              anything a human needs to know
+
+agents:
+  claude:
+    bin: claude
+    version: 2.1.272
+    install: 'install_pinned_binary agents claude && claude install "$CEL_INSTALL_VERSION"'
+    # Published manifest: https://downloads.claude.ai/claude-code-releases/2.1.272/manifest.json
+    assets:
+      x64: { url: "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-x64/claude", sha256: d81396a668eb76fbddb49a2a5841f1b5d7af96b4c1f6500ced92f2c988f5bcd4 }
+      arm64: { url: "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-arm64/claude", sha256: 214a90efdd16ee0ea81132ffecced588dba394d178cc494f285ba04b5288c8de }
+    skills_dir: ~/.claude/skills
+    agents_dir: ~/.claude/agents
+    herdr_integration: claude
+    required: true
+    # File-based: herdr agent start cannot encode a multi-line body as a
+    # command-line argument (invalid_agent_argument), so the role travels as
+    # a file path.
+    role_injection: { strategy: append_flag_file, flag: --append-system-prompt-file }
+    # Unattended plane-launched sessions skip permission prompts.
+    launch_args: [--dangerously-skip-permissions]
+    model_flag: --model
+    # `claude --help`: "--effort <level>  Effort level for the current session
+    # (low, medium, high, xhigh, max)". No `minimal` and no `off`.
+    thinking:
+      strategy: flag
+      flag: --effort
+      levels: [low, medium, high, xhigh, max]
+    notes: >
+      Use the NATIVE installer. The npm package @anthropic-ai/claude-code is bound
+      to the node it was installed under and disappears on a node upgrade.
+
+  omp:
+    bin: omp
+    version: 18.2.0
+    install: "install_pinned_binary agents omp"
+    # Digests: https://api.github.com/repos/can1357/oh-my-pi/releases/tags/v18.2.0
+    assets:
+      x64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.2.0/omp-linux-x64", sha256: 41b67a43f18a7cd33cc0dd772a4fa042cd20ab6c57e6bd451ff6dbe55a7978d8 }
+      arm64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.2.0/omp-linux-arm64", sha256: afd6884b192290d02ff79008e891cabee326dea23e853af549aff8ce88064566 }
+    skills_dir: ~/.omp/skills
+    agents_dir: ~/.omp/agent/agents
+    herdr_integration: omp
+    required: false
+    # omp's --append-system-prompt accepts "text or file contents": a value
+    # that is a path to an existing file is read as the file. Same herdr
+    # multi-line constraint as claude, so we always pass the path.
+    role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
+    # Approval prompts block unattended workers and reviewers.
+    launch_args: [--auto-approve]
+    # Fuzzy-matches a bare id ("opus") and accepts the explicit `provider/model`
+    # form, which is what every cross-provider profile uses - `omp models`
+    # lists anthropic, deepseek, openai-codex, opencode-go and openrouter, so
+    # this one runtime reaches every provider a profile is likely to name.
+    model_flag: --model
+    thinking:
+      strategy: flag
+      flag: --thinking
+      levels: [off, minimal, low, medium, high, xhigh, max, auto]
+    # How to ask this runtime which credential it will ACTUALLY use, given a
+    # provider id. omp keeps its own credential vault (`omp auth-broker`) and
+    # that vault BEATS the environment: a key exported from a workspace's
+    # env.local is ignored outright if the vault holds one for that provider.
+    # So an exported key does not identify the billed account. The probe lets
+    # the plane compare the effective credential and refuse a mismatch.
+    credential_probe: "omp token"
+    # Read-only orchestrators (lib/guard.sh). cel run loads this on ROOT and
+    # ORCHESTRATOR launches only; workers write, that is their job. The file
+    # is an adapter over tools/hooks/guard-classify.sh, so the rules stay in
+    # one place. claude needs no entry: its guard is a global PreToolUse hook
+    # that decides by the pane's cwd.
+    guard_hook: { flag: --hook, file: tools/hooks/orchestrator-guard.omp.ts }
+    # An isolated profile has no vault, so it falls back to the environment -
+    # the way to make a workspace's env.local authoritative without touching
+    # the personal credentials omp uses interactively.
+    isolated_profile_flag: --profile
+    notes: >
+      oh-my-pi (can1357/oh-my-pi), homepage omp.sh. Greediest skill reader: it
+      discovers from .omp (priority 100), .claude (80), .codex/.agents (70) and
+      opencode (55), so skills linked for other agents are visible to omp too.
+      Do NOT install from npm - `omp` and `oh-my-pi` there are unrelated packages.
+
+  pi:
+    bin: pi
+    version: 0.85.1
+    install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
+    skills_dir: ~/.pi/skills
+    herdr_integration: pi
+    extensions_file: tools/pi/extensions.txt
+    required: false
+    # Same text-or-file flag as omp (both pi-family) - see the omp note.
+    role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
+    model_flag: --model
+    # pi also understands the `provider/id:<thinking>` shorthand, but the plane
+    # always spells the level as its own flag so one profile field renders the
+    # same way across every runtime.
+    thinking:
+      strategy: flag
+      flag: --thinking
+      levels: [off, minimal, low, medium, high, xhigh, max]
+    # Same extension API as omp (pi-family), same adapter.
+    guard_hook: { flag: --extension, file: tools/hooks/orchestrator-guard.omp.ts }
+    notes: >
+      earendil-works/pi. Install ONLY the scoped package above - bare `pi` on npm
+      is an unrelated maths library that also ships a `pi` binary and will shadow
+      the agent on PATH. Deliberately lightweight; extensions do the work.
+
+  codex:
+    bin: codex
+    version: 0.154.0
+    install: 'CODEX_NON_INTERACTIVE=1 install_script https://github.com/openai/codex/releases/download/rust-v0.154.0/install.sh ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a sh --release "$CEL_INSTALL_VERSION"'
+    skills_dir: ~/.codex/skills
+    herdr_integration: codex
+    required: false
+    # codex has no system-prompt flag: the role arrives as the positional
+    # prompt and therefore does not survive compaction. Short workers only.
+    role_injection: { strategy: prompt_arg }
+    # Same intent as claude's skip-permissions and omp's --auto-approve: an
+    # unattended worker that stops for approval is indistinguishable from one
+    # thinking hard. Deliberately NOT
+    # `--dangerously-bypass-approvals-and-sandbox`, which also removes the
+    # sandbox - a worker only ever needs to write inside its own worktree, so
+    # it keeps workspace-write and just stops asking. Network access is turned
+    # back on explicitly because workspace-write disables it by default and the
+    # worker's last two steps are `git push` and `gh pr create`.
+    launch_args:
+      - --ask-for-approval
+      - never
+      - --sandbox
+      - workspace-write
+      - -c
+      - sandbox_workspace_write.network_access=true
+    model_flag: --model
+    # Codex takes reasoning effort as a config override, not a thinking flag.
+    thinking:
+      strategy: config
+      key: model_reasoning_effort
+      levels: [low, medium, high, xhigh, max]
+    notes: >
+      openai/codex. Native installer, not npm - same reasoning as claude: an
+      npm global is bound to the node that installed it.
+
+  opencode:
+    bin: opencode
+    version: 1.18.31
+    install: "install_pinned_binary agents opencode"
+    # Baseline x64 runs without AVX2. Digests are from the release assets API.
+    assets:
+      x64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.18.31/opencode-linux-x64-baseline.tar.gz", sha256: b283e8dbe9e6fc224bb4b79992ce3bd2174b8b7b0c3e7d1b4e6024a1d11edc84, member: opencode }
+      arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.18.31/opencode-linux-arm64.tar.gz", sha256: d4e332f46b227448582c0d9fc75f6f826dfe95c9f751bc2011fc4d937a042be6, member: opencode }
+    skills_dir: ~/.config/opencode/skills
+    herdr_integration: opencode
+    required: false
+    # OpenCode injects the role through its agent registry.
+    role_injection: { strategy: agent_file, dir: ~/.config/opencode/agent }
+    # opencode's equivalent of the other runtimes' approval bypass.
+    launch_args: [--auto]
+    # Always the explicit `provider/model` form - opencode has no fuzzy match.
+    model_flag: --model
+    # No `thinking:` block on purpose: opencode carries reasoning effort in its
+    # per-model config, not on the command line. A profile that asks for a
+    # level on this runtime is told so rather than having it dropped.
+    notes: >
+      anomalyco/opencode. Native release binary, not a Node global package.
+
+# Model providers a worker profile can name, and the credential each one needs.
+#
+# This exists for ONE job: deciding whether a profile's primary model is
+# actually reachable on this box before a pane is spawned. A profile names a
+# model as `<provider>/<model>` (`deepseek/deepseek-v4-flash`,
+# `openrouter/deepseek/deepseek-v4.1-flash`); the leading segment is looked up
+# here, and if its key_env is unset in the workspace environment the profile
+# falls back to its declared alternative. Without this the failure surfaces as
+# an agent pane that starts, prints an auth error and sits there idle - which
+# reads exactly like a worker thinking hard.
+#
+# Keys themselves NEVER live here or anywhere else in this repo: they belong in
+# the workspace's gitignored env.local (see lib/workspace.sh ws_env_exports).
+# `auth: cli` means the runtime carries its own OAuth session and there is no
+# key to test, so a profile on that provider is always considered reachable.
+providers:
+  anthropic:    { key_env: ANTHROPIC_API_KEY,  console: https://console.anthropic.com/settings/keys }
+  openai:       { key_env: OPENAI_API_KEY,     console: https://platform.openai.com/api-keys }
+  openai-codex: { auth: cli, notes: "codex's own ChatGPT sign-in; no key to check" }
+  # `balance:` is how the plane asks a provider what is left BEFORE a pane
+  # spawns (lib/quota.sh). Shapes verified against the live APIs on
+  # 2026-09-12: DeepSeek reports an overdrawn account as a negative
+  # total_balance with is_available=false; OpenRouter's credits endpoint gives
+  # lifetime totals, so remaining is the difference. `floor` is where a route
+  # is vetoed - a worker that dies mid-flight when the account hits zero is
+  # worse than one never started.
+  deepseek:
+    key_env: DEEPSEEK_API_KEY
+    console: https://platform.deepseek.com/api_keys
+    balance:
+      url: https://api.deepseek.com/user/balance
+      jq: "[.balance_infos[]? | .total_balance | tonumber] | add"
+      available: ".is_available"
+      unit: usd
+      floor: 1
+  openrouter:
+    key_env: OPENROUTER_API_KEY
+    console: https://openrouter.ai/keys
+    balance:
+      url: https://openrouter.ai/api/v1/credits
+      jq: ".data.total_credits - .data.total_usage"
+      unit: usd
+      floor: 2
+  google:       { key_env: GEMINI_API_KEY,     console: https://aistudio.google.com/apikey }
+
+# The reasoning level every plane-launched agent gets when nothing overrides it.
+# Precedence, widest last: this -> workspace.yaml `thinking:` -> the profile's
+# own `thinking:` -> an explicit `--thinking` on the command line. `high`
+# because these are unattended agents working from a written spec with no human
+# to catch a shallow answer; the cost of re-running a botched worker dwarfs the
+# extra tokens. Levels above this (`xhigh`, `max`) are worth setting per profile
+# on architectural work, not globally.
+defaults:
+  thinking: high
+
+# Missing application tools install these exact releases. Existing executables
+# are retained (gh must be >=2.90). System build/download tools follow distro repositories;
+# Python yq 4.1.2 is bootstrapped in lib/install.sh before this file can be read.
+# Package-manager transitive dependencies and later upstream self-updates are
+# outside this bootstrap's reproducibility guarantee.
+base_tools:
+  mise:
+    version: 2026.9.9
+    install: "install_pinned_binary base_tools mise"
+    assets:
+      x64: { url: "https://github.com/jdx/mise/releases/download/v2026.9.9/mise-v2026.9.9-linux-x64.tar.gz", sha256: e4767e4854af5daeff2191b2bbdc94f834742a23efad591dbd33187861d41604, member: mise/bin/mise }
+      arm64: { url: "https://github.com/jdx/mise/releases/download/v2026.9.9/mise-v2026.9.9-linux-arm64.tar.gz", sha256: 5f72efaa1265c9c3562ecf8d22e6623b5278700bd7ef1014a785d0ce1d1a90b2, member: mise/bin/mise }
+  gh:
+    version: 2.100.0
+    install: "install_pinned_binary base_tools gh"
+    assets:
+      x64: { url: "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_amd64.tar.gz", sha256: e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be, member: gh_2.100.0_linux_amd64/bin/gh }
+      arm64: { url: "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_arm64.tar.gz", sha256: ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961, member: gh_2.100.0_linux_arm64/bin/gh }
+  node:
+    version: 24.21.0
+    install: 'mise use -g "node@$CEL_INSTALL_VERSION"'
+  bun:
+    version: 1.4.2
+    install: 'mise use -g "bun@$CEL_INSTALL_VERSION"'
+  lazygit:
+    version: 0.65.1
+    install: 'mise use -g "lazygit@$CEL_INSTALL_VERSION"'
+  herdr:
+    version: 0.9.0
+    install: "install_pinned_binary base_tools herdr"
+    # Pinned assets and hashes from https://herdr.dev/latest.json, 2026-09-15.
+    assets:
+      x64: { url: "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64", sha256: 4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f }
+      arm64: { url: "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-aarch64", sha256: 9c8db20fb7e7427b138d5367113f1621ffd319f2f65d6f009e2594029115f0d2 }
+  cargo:
+    version: 1.98.1
+    install: 'install_pinned_binary base_tools cargo rustup-init && "$HOME/.local/bin/rustup-init" -y --profile minimal --default-toolchain "$CEL_INSTALL_VERSION" --no-modify-path'
+    # workspace-manager builds from source; exact Rust toolchain, not stable.
+    # Digests: static.rust-lang.org/rustup/archive/1.29.1/<target>/rustup-init.sha256
+    assets:
+      x64: { url: "https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init", sha256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 }
+      arm64: { url: "https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-unknown-linux-gnu/rustup-init", sha256: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 }
+
+# Skills generated from an installed binary at setup time rather than vendored.
+# The tool itself is the authority for its own command syntax, so a checked-in
+# copy would drift from whatever version is actually installed.
+generated_skills:
+  herdr:
+    command: "herdr --skill"
+    requires: herdr

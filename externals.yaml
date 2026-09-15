@@ -1,0 +1,14 @@
+# Third-party plugins installed globally by cel setup and workspace sync.
+# Overlays may add entries but must agree on BOTH source and exact ref.
+# `ref` is an immutable Git commit, consumed by herdr --ref or a Claude
+# plugin-source `sha`. A plugin CLI's @marketplace suffix is NOT a version pin.
+# These commits and package manifests were read from GitHub on 2026-09-15.
+plugins:
+  superpowers: { source: obra/superpowers, ref: b36e0829c6d0140e93cfef2ca599b1b07d4a7797 } # 6.3.0
+  eli5: { source: anthropics/claude-plugins-community/eli5, ref: a727be1c7bd6064419b6f60d71993a19198adc17 } # 1.0.0
+  claude-hud: { source: jarrodwatts/claude-hud, ref: 939eb66485832dead1b0a28a954f76f7aa2bdb06 } # 0.8.0
+
+herdr_plugins:
+  workspace-manager: { source: razajamil/herdr-plugin-workspace-manager, ref: 8302970a088b8dff4aca9a3d9034907d66be80a7 } # 0.8.0
+  triage: { source: natori-hrj/herdr-triage, ref: 20e8f562656479b7ca70a6b95fa3f0bf6642de64 } # 0.2.1
+  pr-tracker: { source: Matovidlo/herdr-pr-tracker, ref: 6a287cec49de2327ee2b78c5b2cee750ad84b58d } # 0.1.0

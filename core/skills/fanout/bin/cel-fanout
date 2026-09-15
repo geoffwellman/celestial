@@ -1,0 +1,869 @@
+#!/usr/bin/env bash
+# cel-fanout - the delegation binary. Drives herdr to spawn one
+# worker per ticket, tracks them in a per-workspace ledger, and folds their
+# results back into the orchestrator. Lives inside the fanout skill so the
+# skill and the binary that implements it never drift apart; symlinked onto
+# PATH by `cel shellenv`, so it must resolve CEL_ROOT from its own location.
+set -euo pipefail
+
+: "${CEL_ROOT:=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../.." && pwd)}"
+export CEL_ROOT
+# shellcheck source=lib/common.sh
+. "$CEL_ROOT/lib/common.sh"
+# shellcheck source=lib/workspace.sh
+. "$CEL_ROOT/lib/workspace.sh"
+# shellcheck source=lib/manifest.sh
+. "$CEL_ROOT/lib/manifest.sh"
+# shellcheck source=lib/run.sh
+. "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
+
+# Overridable so tests can point this at a stub that logs its argv and prints
+# canned JSON - that is the whole test strategy, no live herdr in tests.
+HERDR="${CEL_FANOUT_HERDR:-herdr}"
+
+_fanout_wsdir() {
+  ws_current "$PWD" || die "not inside a workspace (cel ws new/add first)"
+}
+
+# The ticket id carried by a branch name, upper-cased, or empty.
+#
+# Branch naming is the CHEAPEST possible link: Linear's GitHub integration
+# attaches a PR to a ticket automatically when the branch name contains the
+# identifier, with no API call and no agent remembering to do anything. That is
+# why the id is required in the branch rather than tracked beside it - the
+# integration only ever sees the branch.
+# Matched anywhere in the name and case-insensitively, the same way Linear
+# matches, so both `ABC-12-slug` and `someone/abc-12-slug` link.
+# NEVER FAILS. "No ticket in this branch" is an ordinary answer, not an error,
+# but this script runs under `set -e -o pipefail` and an unmatched grep would
+# make the calling assignment non-zero and kill the run before the check that
+# wants the empty string could even execute.
+# Matches the current prefix or any alias, and always returns the CANONICAL
+# id. A re-keyed team keeps its issue numbers, so a branch cut as `ABC-3`
+# still means `ABCD-3` - normalising here means the ledger and every state
+# call downstream speak today's identifier, not a historical one.
+_fanout_ticket_id() { # <wsdir> <repo> <branch>
+  local canon="" p out
+  while read -r p; do
+    [ -n "$p" ] || continue
+    [ -n "$canon" ] || canon="$p"
+    out="$(printf '%s' "$3" | grep -oiE "${p}-[0-9]+" | head -1 || true)"
+    if [ -n "$out" ]; then
+      printf '%s-%s' "$canon" "${out##*-}" | tr '[:lower:]' '[:upper:]'
+      return 0
+    fi
+  done < <(ws_repo_prefixes "$1" "$2")
+  return 0
+}
+
+# Ticket side effects are ALWAYS best-effort: a Linear outage, a missing key or
+# a state this team does not define must never fail a delegation or strand a
+# worker. Every call reports what it did and moves on.
+# Overridable so tests can point at a stub that logs its argv - these are the
+# only calls here that reach a live API, and a test suite must never touch the
+# real board.
+LINEAR="${CEL_FANOUT_LINEAR:-cel-linear}"
+# gh too: land merges real PRs, and a test suite must never merge one.
+GH="${CEL_FANOUT_GH:-gh}"
+# and the verifier, which runs a repo's real test gate
+VERIFY="${CEL_FANOUT_VERIFY:-$CEL_ROOT/core/skills/verify/bin/cel-verify}"
+
+_repo_slug() { # <wsdir> <repo>
+  ws_repo_get "$1" "$2" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##'
+}
+
+# Run the verifier for a delegation and fold its verdict into the ledger row.
+# Prints the verdict's one-line summary. Never fails the caller: a verifier
+# that cannot run is a verdict of "unknown", which land treats as not passed.
+_fanout_verify() { # <wsdir> <id> <entry-json>
+  local wsdir="$1" id="$2" entry="$3"
+  local wt repo branch gate slug
+  wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+  repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
+  [ -d "$wt" ] || return 0
+  gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  local line
+  line="$("$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} --branch "$branch" 2>/dev/null || true)"
+  [ -n "$line" ] && printf '%s\n' "$line"
+  if [ -f "$wt/.agent/verdict.json" ]; then
+    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    if [ -n "$v" ]; then
+      local cur; cur="$(_ledger_read "$wsdir")"
+      _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson v "$v" 'map(if .id == $id then .verdict = $v else . end)')"
+    fi
+  fi
+}
+
+_fanout_ticket_state() { # <id> <state>
+  [ -n "$1" ] || return 0
+  have "$LINEAR" || return 0
+  if "$LINEAR" state "$1" "$2" >/dev/null 2>&1; then
+    c_ok "$1 -> $2"
+  else
+    c_warn "could not move $1 to '$2' (does the team have that state?) - do it by hand"
+  fi
+}
+
+_fanout_ticket_comment() { # <id> <body>
+  [ -n "$1" ] || return 0
+  have "$LINEAR" || return 0
+  "$LINEAR" comment "$1" "$2" >/dev/null 2>&1 \
+    || c_warn "could not comment on $1 - do it by hand"
+}
+
+_ledger_file() { printf '%s/.cel/delegations.json' "$1"; }
+
+_ledger_read() {
+  local f; f="$(_ledger_file "$1")"
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then printf '[]'; return 0; fi
+  jq -ce 'if type == "array" and all(.[]; type == "object" and (.id | type == "string") and (.state | type == "string")) then . else error("invalid delegation ledger") end' "$f"
+}
+
+# CLI mutations hold the workspace lock from admission through completion.
+# That fences concurrent status/collect writers AND GC while delegate creates
+# a worktree before it can write the running row. wait is read-only/unlocked.
+_ledger_write() ( # <wsdir> <json>
+  local f tmp; f="$(_ledger_file "$1")"
+  mkdir -p "$(dirname "$f")" || return 1
+  tmp="$(mktemp "$f.tmp.XXXXXX")" || return 1
+  trap 'rm -f -- "$tmp"' EXIT
+  printf '%s' "$2" | jq -ce 'if type == "array" then . else error("invalid ledger") end' > "$tmp" || return 1
+  mv -f -- "$tmp" "$f" || return 1
+)
+
+# REPLACES any existing row with the same id. Re-delegating a branch - after an
+# orphan, a crash, or a credit outage - used to append a second row, and
+# _ledger_entry takes the FIRST match, so every later collect/release read the
+# STALE row: its worktree path, its state, its model. The board and the ledger
+# then disagreed about work that had already been redone. Observed as 190 rows
+# for 178 delegations.
+_ledger_append() { # <wsdir> <entry-json>
+  local cur; cur="$(_ledger_read "$1")"
+  _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" \
+    'map(select(.id != $e.id)) + [$e]')"
+}
+
+_ledger_update_state() { # <wsdir> <id> <state>
+  local cur; cur="$(_ledger_read "$1")"
+  _ledger_write "$1" "$(printf '%s' "$cur" | jq --arg id "$2" --arg s "$3" \
+    'map(if .id == $id then .state = $s else . end)')"
+}
+
+# How many commits the worker carries beyond the verified remote default.
+# Unknown remains visible, including detached HEAD and failed Git queries.
+_wt_ahead() { # <worktree> -> count | ?
+  local wt="$1" base n
+  [ -d "$wt" ] \
+    && git -C "$wt" symbolic-ref --quiet HEAD >/dev/null 2>&1 \
+    && base="$(repo_default_ref "$wt")" \
+    && n="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null)" \
+    && [[ "$n" =~ ^[0-9]+$ ]] || { printf '?'; return 0; }
+  printf '%s' "$n"
+}
+
+# Empty means verified safe to remove. Unknown is held work, never zero.
+# Scouts may omit ONLY their generated report, not arbitrary dirty files.
+_wt_unlanded() { # <worktree> [ship|scout] -> "" | reason
+  local wt="$1" br status dirty unpushed base
+  [ -d "$wt" ] || { printf 'unknown=worktree'; return 0; }
+  local -a paths=(.)
+  [ "${2:-ship}" != scout ] || paths+=(':(exclude).agent/report.md')
+  status="$(git -C "$wt" status --porcelain --untracked-files=all -- "${paths[@]}" 2>/dev/null)" \
+    || { printf 'unknown=status'; return 0; }
+  dirty=0
+  [ -z "$status" ] || dirty="$(printf '%s\n' "$status" | wc -l | tr -d ' ')"
+  br="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" \
+    || { printf 'unknown=branch dirty=%s' "$dirty"; return 0; }
+  if git -C "$wt" show-ref --verify --quiet "refs/remotes/origin/$br"; then
+    base="refs/remotes/origin/$br"
+  else
+    local rc=$?
+    [ "$rc" -eq 1 ] && base="$(repo_default_ref "$wt")" \
+      || { printf 'unknown=base dirty=%s' "$dirty"; return 0; }
+  fi
+  unpushed="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null)" \
+    && [[ "$unpushed" =~ ^[0-9]+$ ]] \
+    || { printf 'unknown=commits dirty=%s' "$dirty"; return 0; }
+  if [ "$dirty" -gt 0 ] || [ "$unpushed" -gt 0 ]; then
+    printf 'unpushed=%s dirty=%s' "$unpushed" "$dirty"
+  fi
+  return 0
+}
+
+_ledger_entry() { # <wsdir> <id> -> json object, empty if unknown
+  _ledger_read "$1" | jq -c --arg id "$2" '.[] | select(.id == $id)' | head -1
+}
+
+_ledger_field() { # <wsdir> <id> <field>
+  _ledger_entry "$1" "$2" | jq -r --arg k "$3" '.[$k] // empty'
+}
+
+_now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+_now_ms()  { date +%s%3N; }
+
+# How a worker opens its PR, from `policy.pr_open` in workspace.yaml:
+#   draft (default) - "open a DRAFT pull request"; the original behaviour.
+#   ready           - "open a pull request READY FOR REVIEW", and request the
+#                     workspace's `policy.reviewer` when one is declared.
+# Anything else is a config error - fail loud rather than guess.
+_fanout_pr_phrase() {
+  local wsdir="$1" mode reviewer
+  mode="$(ws_policy "$wsdir" pr_open)"; reviewer="$(ws_policy "$wsdir" reviewer)"
+  case "${mode:-draft}" in
+    draft) printf 'open a DRAFT pull request for it' ;;
+    ready)
+      if [ -n "$reviewer" ] && [ "$reviewer" != "null" ]; then
+        printf 'open a pull request for it READY FOR REVIEW (not a draft), requesting reviewer %s and verifying with gh pr view --json reviewRequests that the request attached' "$reviewer"
+      else
+        printf 'open a pull request for it READY FOR REVIEW (not a draft)'
+      fi ;;
+    *) die "workspace.yaml policy.pr_open must be draft or ready (got: $mode)" ;;
+  esac
+}
+
+cmd_delegate() {
+  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
+  local repo="$1" branch="$2" spec="$3"; shift 3
+  local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --herdr-workspace) herdr_ws="$2"; shift 2 ;;
+      --profile)  profile="$2"; shift 2 ;;
+      --because)  because="$2"; shift 2 ;;
+      --model)    model_opt="$2"; shift 2 ;;
+      --thinking) thinking_opt="$2"; shift 2 ;;
+      --adhoc)    adhoc=1; shift ;;
+      --reuse)    reuse=1; shift ;;
+      --shape)    shape="$2"; shift 2 ;;
+      *) die "delegate: unknown argument: $1" ;;
+    esac
+  done
+
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  local repodir="$wsdir/repos/$repo"
+  [ -d "$repodir" ] || die "repo '$repo' not found under $wsdir/repos"
+  [ -f "$spec" ] || die "spec file not found: $spec"
+
+  # THE TICKET GATE. A work package without a ticket is invisible: no status to
+  # read, nothing for a PR to attach to, no way to tell it apart from abandoned
+  # work. Measured on this box, 15 of 15 agent-opened PRs carried no ticket,
+  # because "one ticket per work package" was advice in a policy block while
+  # the mechanism happily accepted any branch name.
+  # Deliberately does NOT create the ticket: an agent that auto-creates on
+  # every delegation duplicates work someone is already doing. Search first,
+  # reuse if it exists, and create only when it genuinely does not.
+  local ticket=""
+  case "$shape" in ship|scout) ;; *) die "delegate: --shape must be ship or scout";; esac
+  # A scout produces knowledge, not a change: no PR will ever exist to link to
+  # a ticket, so the ticket gate does not apply. That is the whole reason the
+  # shape exists - investigations were being forced into ad-hoc branches to
+  # get past the gate, or done in an orchestrator's own checkout.
+  [ "$shape" = scout ] && adhoc=1
+  if [ "$(ws_ticket "$wsdir" system)" = "linear" ]; then
+    ticket="$(_fanout_ticket_id "$wsdir" "$repo" "$branch")"
+    if [ -z "$ticket" ] && [ "$adhoc" -eq 0 ]; then
+      local pfx; pfx="$(ws_repo_get "$wsdir" "$repo" prefix)"
+      die "delegate: branch '$branch' names no $pfx ticket.
+  Linear links a PR to its ticket from the BRANCH NAME, so an unticketed
+  branch can never be tracked. Before delegating:
+    cel-linear search '<a few words from the task>' --team $pfx
+    # reuse the id if it already exists - never start work someone else has
+    cel-linear create --team $pfx --title '<title>' --description '<why>'
+  then name the branch ${pfx}-<n>-<slug>.
+  For genuinely throwaway work, pass --adhoc to skip this deliberately."
+    fi
+  fi
+  local abs_spec; abs_spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")"
+
+  if [ -z "$herdr_ws" ]; then
+    local toplevel; toplevel="$(git -C "$repodir" rev-parse --show-toplevel)"
+    herdr_ws="$("$HERDR" workspace list | jq -r --arg t "$toplevel" \
+      '.result.workspaces[] | select(.worktree.is_linked_worktree == false) | select(.worktree.repo_root == $t) | .workspace_id' \
+      | head -1)"
+    [ -n "$herdr_ws" ] || die "no herdr workspace found for $toplevel - pass --herdr-workspace"
+  fi
+
+  # BRANCH FROM THE REMOTE DEFAULT, NEVER FROM THE CHECKOUT'S CURRENT HEAD.
+  # Without a --base, herdr cuts the worktree from whatever the repo is sitting
+  # on. A long-lived checkout parked on a feature branch (or simply behind) then
+  # hands every worker a contaminated base: its commits ride along on the ticket
+  # branch, the PR carries changes nobody reviewed, and the eventual rebase
+  # conflicts in files the ticket never touched. Observed repeatedly - two stray
+  # commits reached seven ticket branches this way before this fix.
+  #
+  # Fetched first so the base is today's remote tip rather than a stale local
+  # ref. Best-effort: a repo with no reachable origin still delegates, it just
+  # falls back to herdr's default (the old behaviour), because refusing to
+  # delegate offline is worse than an occasional rebase.
+  # The fetch is best-effort and its FAILURE MUST NOT SKIP THE BASE: offline, or a
+  # remote that needs credentials, still leaves a usable (if slightly stale)
+  # origin ref on disk, and branching from that beats branching from whatever the
+  # checkout is parked on. Only a repo with no origin ref at all falls through to
+  # herdr's default.
+  # Noninteractive by construction: delegation runs from agent panes, so a
+  # remote that wants credentials must fail fast into the offline fallback,
+  # never park the run on a prompt nobody can see.
+  local base="" head_ref=""
+  # Bounded and noninteractive: BatchMode/no-prompt stop credential hangs,
+  # and timeout(1) - where present - stops a wedged transport from stalling
+  # delegation forever.
+  _git_q() {
+    local -a t=(); have timeout && t=(timeout 20)
+    GIT_TERMINAL_PROMPT=0 "${t[@]}" git -C "$repodir" \
+      -c core.sshCommand='ssh -oBatchMode=yes -oConnectTimeout=10' "$@"
+  }
+  _git_q fetch --quiet origin 2>/dev/null || true
+  # Always re-ask which branch is the default: a remote that MOVED its
+  # default leaves a stale origin/HEAD behind, and cutting tickets from the
+  # abandoned branch is the same contamination this block exists to prevent.
+  # Offline the call fails and the existing local answer stands.
+  _git_q remote set-head origin --auto >/dev/null 2>&1 || true
+  base="$(repo_default_ref "$repodir")" || base=""
+
+  # Continue an existing remote branch from its tip. A diverged local branch
+  # holds unreconciled work and must not be silently overwritten.
+  local origin_sha local_sha
+  origin_sha="$(git -C "$repodir" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" 2>/dev/null || true)"
+  if [ -n "$origin_sha" ]; then
+    local_sha="$(git -C "$repodir" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null || true)"
+    if [ -n "$local_sha" ] && [ "$local_sha" != "$origin_sha" ] \
+       && ! git -C "$repodir" merge-base --is-ancestor "$local_sha" "$origin_sha" 2>/dev/null; then
+      die "delegate: branch '$branch' has DIVERGED - local $local_sha is not an ancestor of origin $origin_sha; reconcile the refs before delegating (using either silently would lose the other)"
+    fi
+    base="origin/$branch"
+  fi
+
+  local resp child_ws worktree pane
+  # AN OCCUPIED PATH MUST NOT BE PAPERED OVER. `herdr worktree create` cannot
+  # make a worktree where one already exists, and instead returns a PLAIN
+  # workspace with no worktree metadata. That workspace has no repo_root, so
+  # herdr's sidebar has nothing to nest it under and it appears at top level -
+  # "homeless" - while the ledger records it as if it were the worktree. A
+  # later `release` then removes nothing and the real worktree is stranded.
+  # Re-delegating after an orphaned worker is routine, so this compounded.
+  local existing
+  existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
+    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
+  if [ -n "$existing" ]; then
+    # Find the workspace by CHECKOUT PATH, never by label: labels are not
+    # unique, and matching on one is how the ledger got bound to the bare
+    # workspace instead of the real worktree.
+    local ews
+    ews="$("$HERDR" workspace list | jq -r --arg p "$existing" \
+      '[.result.workspaces[] | select(.worktree.checkout_path == $p)][0].workspace_id // empty')"
+    if [ "$reuse" -ne 1 ]; then
+      die "delegate: a worktree for '$branch' already exists at
+    $existing${ews:+  (herdr workspace $ews)}
+  Creating another would produce a workspace with no worktree attached, which
+  herdr shows at top level with no parent and which 'release' cannot clean up.
+  Either:
+    cel-fanout release $branch      # discard it, then delegate afresh
+    cel-fanout delegate ... --reuse # continue IN that worktree, keeping its work"
+    fi
+    [ -n "$ews" ] || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it.
+  Remove the stale checkout first: git -C '$repodir' worktree remove --force '$existing'"
+    child_ws="$ews"
+    worktree="$existing"
+    pane="$("$HERDR" pane list --workspace "$ews" 2>/dev/null \
+      | jq -r '.result.panes[0].pane_id // empty')"
+    c_warn "reusing the existing worktree for $branch ($existing) - its current contents are kept"
+  else
+    resp="$("$HERDR" worktree create --workspace "$herdr_ws" --branch "$branch" --label "$branch" --no-focus \
+      ${base:+--base "$base"})"
+    child_ws="$(printf '%s' "$resp" | jq -r '.. | .workspace_id? // empty' | head -1)"
+    worktree="$(printf '%s' "$resp" | jq -r '.. | .checkout_path? // empty' | head -1)"
+    pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
+    # A response with no checkout path means herdr did NOT attach a worktree.
+    # Recording that as a delegation is what stranded the real ones, so it is
+    # a hard failure rather than something to guess around.
+    [ -n "$worktree" ] || die "herdr worktree create for '$branch' returned no checkout path - it did not attach a worktree. Check 'herdr workspace list' for a stray workspace labelled '$branch' and remove it before retrying."
+  fi
+  [ -n "$child_ws" ] || die "herdr worktree create for '$branch' did not return a workspace id"
+  [ -n "$worktree" ] || die "herdr worktree create for '$branch' did not return a checkout path"
+  [ -n "$pane" ] || pane="${child_ws}:p1"
+
+  # What the worker's pre-push check compares against: the resolved base, or -
+  # when delegation fell back to herdr's default - the worktree's actual first
+  # commit, so the check never names a ref that may not exist or may contain
+  # unrelated history.
+  local check_base="$base"
+  [ -n "$check_base" ] || check_base="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || true)"
+  [ -n "$check_base" ] || check_base="origin/main"
+
+  # A profile may swap the RUNTIME, not just the model, so it resolves before
+  # the role body is injected - the runtime decides the injection shape.
+  local rt; rt="$(ws_runtime "$wsdir" worker)"
+  local model="" thinking; thinking="$(ws_thinking "$wsdir")"
+  # Same role binding cel run uses: an orchestrator that never passes --profile
+  # still delegates onto the workspace's chosen worker profile. A scout reads
+  # and reports rather than writes, and often needs web tools the volume
+  # worker's CLI lacks, so it has its own binding; without one it takes the
+  # worker's, which is where an orchestrator otherwise has to remember a flag.
+  if [ -z "$profile" ] && [ "$shape" = scout ]; then
+    profile="$(role_profile_for "$wsdir" scout "$repo")"
+  fi
+  [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
+  if [ -n "$profile" ]; then
+    profile_resolve "$wsdir" "$profile" "$rt"
+    [ -z "$PROFILE_VETO" ] || die "delegate: profile '$profile' is vetoed - $PROFILE_VETO"
+    rt="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
+    [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
+  fi
+  [ -z "$model_opt" ]    || model="$model_opt"
+  [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+
+  local rolefile="$CEL_ROOT/core/roles/worker.md" roletag=worker
+  [ "$shape" = scout ] && { rolefile="$CEL_ROOT/core/roles/scout.md"; roletag=scout; }
+  local body; body="$(ws_render_role "$wsdir" "$rolefile")"
+  local AGENT_ARGS=()
+  _run_agent_args "$rt" "$roletag" "$body" 0 "$wsdir"
+  local -a PROFILE_ARGS=()
+  profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
+  [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
+
+  # Runtime-wide launch flags, same as cel run. THESE WERE MISSING HERE: every
+  # worker delegated through fanout started without its runtime's approval
+  # bypass (omp --auto-approve, claude --dangerously-skip-permissions), so it
+  # ran until the first tool call needing approval and then sat blocked with
+  # nobody watching - which the ledger reports as `running`, indistinguishable
+  # from a worker that is simply slow. cel run has applied them since the flags
+  # were added; only this path was skipped.
+  local -a launch_args=()
+  mapfile -t launch_args < <(agent_launch_args "$rt")
+  [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
+
+  # herdr agent names must be [a-z][a-z0-9_-]{0,31}; the readable repo/branch
+  # form lives on as the worktree label only.
+  local alias; alias="$(_run_agent_name "$repo/$branch")"
+
+  # THE WORKER'S SHELL MUST CARRY THE WORKSPACE ENV, and nothing else gives it
+  # one. A worktree lives at ~/.herdr/worktrees/<repo>/<branch> - OUTSIDE the
+  # workspace tree - so `ws_current` finds nothing from there and the pane
+  # starts with a bare login shell: no env.local, no provider keys.
+  #
+  # That is invisible until a profile depends on a key. An `isolated:` profile
+  # deliberately has no credential vault so it can only spend the workspace's
+  # own key (see lib/profiles.sh) - and with no env it has no key at all. The
+  # worker dies on its first call with "No API key found for <provider>", while
+  # the ORCHESTRATOR's preflight passes, because profile_resolve evaluates the
+  # same env.local from inside the workspace. Keep the selected profile intact;
+  # fix the missing environment propagation rather than changing the model.
+  #
+  # `cel ws env` prints `set -a; . <ws>/env.local; set +a` - a SOURCE, never
+  # the values - so no secret is typed into a pane or kept in its scrollback.
+  # %q on the workspace name: `_ws_new` does not forbid whitespace, and an
+  # unquoted two-word name would reach `cel ws env` as two arguments, of which
+  # it reads only the first. The lookup then fails, `eval` of empty output
+  # still succeeds, and the agent starts with no credentials at all - a silent
+  # version of the failure above.
+  local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
+  if ! "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
+    c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
+  fi
+
+  "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
+  # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
+  # silent loss indistinguishable from success: a worker that reported done while
+  # its rebase had eaten its own commit, and a branch that sat unlanded for two
+  # days, both looked exactly like a finished job from outside. Pushing and opening
+  # a PR makes the work addressable the moment it exists. Whether that PR opens as
+  # a DRAFT or READY FOR REVIEW is workspace policy (`policy.pr_open`, default
+  # draft): a workspace whose reviewer bot ignores drafts (some do) wants
+  # `ready`, or every worker PR sits unreviewed until someone notices and flips it.
+  # Review still gates the merge either way.
+  #
+  # `git log origin/main..HEAD` before the push is the specific check that catches
+  # the lost-commit case, which is why it is spelled out rather than left to
+  # judgement.
+  # The orchestrator's own mailbox name, derived exactly as lib/inbox.sh derives
+  # it from a cwd of <ws>/repos/<repo>. The worker cannot ask - it is standing
+  # in a worktree, which resolves to its OWN name - so it is told.
+  #
+  # Through the SHARED sanitiser, not a hand-rolled copy of half of it: the
+  # lowercase-and-substitute part is easy to reproduce and the 32-character
+  # truncation is easy to forget, and forgetting it is silent. A repo name
+  # longer than 27 characters would produce an untruncated `<repo>-orch` here
+  # while the orchestrator answers to the truncated form, so every completion
+  # notice from that repo would be filed to a mailbox nobody reads - the exact
+  # failure this prompt was added to end.
+  # _run_agent_name is character-for-character _inbox_sanitise; tests/steward
+  # asserts that identity so this stays true.
+  local orch_mailbox
+  orch_mailbox="$(_run_agent_name "$repo-orch")"
+  # ...AND THE WORKSPACE IT LIVES IN. A worker stands in ~/.herdr/worktrees/...,
+  # where `ws_current` finds nothing, so an unqualified `cel inbox send` resolves
+  # the workspace to the literal string `default` - a mailbox no orchestrator
+  # reads. Every completion notice would have been filed there, making the
+  # announcement a no-op in exactly the silent way it was written to prevent.
+  # Quote the workspace selector for the same reason as the environment line.
+  local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
+
+  if [ "$shape" = scout ]; then
+    "$HERDR" agent prompt "$alias" \
+      "Your investigation brief is $abs_spec. Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop." > /dev/null
+  else
+    local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
+    "$HERDR" agent prompt "$alias" \
+      "Your task spec is $abs_spec. Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
+
+If your spec says the deliverable is research, a document, or explicitly says not to open a PR, then do not push and do not open one - write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop." > /dev/null
+  fi
+
+  local entry
+  entry="$(jq -n \
+    --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
+    --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
+    --arg spec "$abs_spec" --arg state running --arg created "$(_now_iso)" \
+    --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
+    --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
+    --arg shape "$shape" --arg because "$because" \
+    '{id:$id, repo:$repo, branch:$branch, alias:$alias, herdr_ws:$herdr_ws, pane:$pane,
+      worktree:$worktree, spec:$spec, state:$state, created:$created,
+      profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
+      provider:$provider, shape:$shape, profile_reason:$because}')"
+  _ledger_append "$wsdir" "$entry"
+  # In Progress the moment a worker actually exists, not when an agent
+  # remembers to say so. Best-effort by design - see _fanout_ticket_state.
+  [ "$shape" = scout ] || _fanout_ticket_state "$ticket" "In Progress"
+  printf '%s\n' "$branch"
+}
+
+# A SCOUT: knowledge, not a change. Same worktree machinery as a worker so it
+# reads a clean checkout and shows up in the ledger and the dashboard, but no
+# ticket gate, no PR expectation, and a role that forbids shipping. The
+# branch name is generated - a scout's branch is a scratch coordinate, never a
+# thing anyone links to.
+cmd_scout() { # <repo> <spec-file> [delegate options]
+  [ $# -ge 2 ] || die "usage: cel-fanout scout <repo> <brief-file> [--profile NAME] [--because TEXT]"
+  local repo="$1" spec="$2"; shift 2
+  [ -f "$spec" ] || die "scout: brief file not found: $spec"
+  local slug; slug="$(basename "$spec" | sed -E 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed -E 's/^-+|-+$//g' | cut -c1-24)"
+  local branch="scout-$(date +%y%m%d)-${slug:-brief}-$(date +%H%M%S)"
+  cmd_delegate "$repo" "$branch" "$spec" --shape scout "$@"
+}
+
+cmd_wait() {
+  local timeout_ms="" have_timeout=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout) timeout_ms="$2"; have_timeout=1; shift 2 ;;
+      *) die "wait: unknown argument: $1" ;;
+    esac
+  done
+
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  local running; running="$(_ledger_read "$wsdir" | jq -r '.[] | select(.state == "running") | .id')"
+  local settled; settled="$(_ledger_read "$wsdir" | jq -r \
+    '.[] | select(.state == "finished" or .state == "orphaned") | .id' | head -1)"
+  [ -n "$running" ] || [ -n "$settled" ] || die "nothing delegated"
+
+  local start_ms; start_ms="$(_now_ms)"
+  while :; do
+    # A row reconciled elsewhere (status marked it finished/orphaned after
+    # its agent vanished) is already settled: return it instead of polling a
+    # pane that no longer exists.
+    settled="$(_ledger_read "$wsdir" | jq -r \
+      '.[] | select(.state == "finished" or .state == "orphaned") | .id' | head -1)"
+    [ -z "$settled" ] || { printf '%s\n' "$settled"; return 0; }
+
+    local agents id pane status
+    if ! agents="$("$HERDR" agent list)"; then agents=""; fi
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      pane="$(_ledger_field "$wsdir" "$id" pane)"
+      status="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
+        '.result.agents[]? | select(.pane_id == $p) | .agent_status' | head -1)"
+      case "$status" in
+        idle|blocked|done) printf '%s\n' "$id"; return 0 ;;
+      esac
+    done <<< "$running"
+
+    if [ "$have_timeout" -eq 1 ]; then
+      local now_ms; now_ms="$(_now_ms)"
+      [ $(( now_ms - start_ms )) -lt "$timeout_ms" ] || return 1
+    fi
+    sleep 5
+  done
+}
+
+cmd_collect() {
+  [ $# -ge 1 ] || die "usage: cel-fanout collect <id>"
+  local id="$1"
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "no delegation with id '$id'"
+  local worktree alias ticket repo branch
+  worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
+  alias="$(printf '%s' "$entry" | jq -r '.alias')"
+  ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
+  repo="$(printf '%s' "$entry" | jq -r '.repo')"
+  branch="$(printf '%s' "$entry" | jq -r '.branch')"
+
+  # Collect is where the work becomes reviewable, so it is where the ticket
+  # moves - in the mechanism, rather than relying on the worker to remember
+  # after it has already written its result and stopped. The PR link is
+  # commented as well as attached: the attachment comes free from Linear's
+  # branch-name matching, the comment is what a human reading the ticket
+  # actually sees in the timeline.
+  if [ -n "$ticket" ]; then
+    local prurl
+    prurl="$(gh pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
+      | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')" \
+      --json url --jq .url 2>/dev/null || true)"
+    if [ -n "$prurl" ]; then
+      _fanout_ticket_state "$ticket" "In Review"
+      _fanout_ticket_comment "$ticket" "PR ready for review: $prurl (branch \`$branch\`, delegated worker \`$alias\`)"
+    fi
+  fi
+
+  local shape; shape="$(printf '%s' "$entry" | jq -r '.shape // "ship"')"
+  if [ "$shape" = scout ]; then
+    if [ -f "$worktree/.agent/report.md" ]; then
+      cat "$worktree/.agent/report.md"
+      _ledger_update_state "$wsdir" "$id" reported
+    else
+      c_warn "$id is a scout with no .agent/report.md yet - prompt it to write one, or read its pane"
+    fi
+    return 0
+  fi
+  # THE VERDICT BEFORE THE RESULT. result.md is what the worker says happened;
+  # the verdict is what did - the gate actually run, the commit order, the
+  # diff size, CI and review. Printed first so the reader meets the facts
+  # before the account of them.
+  _fanout_verify "$wsdir" "$id" "$entry"
+
+  if [ -f "$worktree/.agent/result.md" ]; then
+    cat "$worktree/.agent/result.md"
+    _ledger_update_state "$wsdir" "$id" collected
+  else
+    local salvage; salvage="$wsdir/.cel/salvage-$id.txt"
+    mkdir -p "$(dirname "$salvage")"
+    "$HERDR" agent read "$alias" --source recent --lines 200 > "$salvage"
+    cat "$salvage"
+    _ledger_update_state "$wsdir" "$id" salvaged
+    c_warn "$id has no .agent/result.md - salvaged recent pane output to $salvage"
+  fi
+}
+
+cmd_status() {
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  # A FAILED agent list is not evidence that agents died - herdr being
+  # unreachable must never convert every running row to finished/orphaned
+  # during an outage. Reconciliation below requires have_agents=1.
+  local agents="" have_agents=0
+  if agents="$("$HERDR" agent list 2>/dev/null)" && printf '%s' "$agents" | jq -e \
+      '.result.agents | type == "array" and all(.[]; (.pane_id | type == "string" and length > 0) and (.agent_status | IN("idle", "done", "working", "blocked", "unknown"))) and (map(.pane_id) | length == (unique | length))' >/dev/null 2>&1; then
+    have_agents=1
+  else
+    agents=""
+  fi
+
+  # MODEL is here because comparing two models on the same kind of ticket is
+  # the whole point of profiles, and an unlabelled row makes that anecdote
+  # rather than evidence. Rows delegated before profiles existed have no model
+  # field and render as `-`.
+  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET MODEL
+  local e id repo branch state pane live model ticket
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    id="$(printf '%s' "$e" | jq -r '.id')"
+    repo="$(printf '%s' "$e" | jq -r '.repo')"
+    branch="$(printf '%s' "$e" | jq -r '.branch')"
+    state="$(printf '%s' "$e" | jq -r '.state')"
+    pane="$(printf '%s' "$e" | jq -r '.pane')"
+    live="-"
+    if [ -n "$agents" ]; then
+      live="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
+        '.result.agents[]? | select(.pane_id == $p) | .agent_status' | head -1)"
+      [ -n "$live" ] || live="-"
+    fi
+
+    # RECONCILE THE LEDGER AGAINST REALITY. An agent can vanish without ever
+    # updating its own row — a herdr restart, a closed pane, a crashed runtime —
+    # and the row then reads `running` forever. That is the worst possible
+    # rendering: finished work sits invisible (found only by walking worktrees by
+    # hand) and abandoned work looks healthy. Both were observed in one day. So a
+    # `running` row whose agent is gone is re-stated from what is ON DISK:
+    #
+    #   result.md present -> `finished`  (it got there; it just needs landing)
+    #   result.md absent  -> `orphaned`  (it died mid-flight; re-delegate or salvage)
+    #
+    # Only `running` is reconciled: a row the operator already collected or
+    # released is never re-opened by a missing agent, and a WORKING agent is
+    # always believed over the disk.
+    #
+    # But a worker that has written its result and gone IDLE is finished, and
+    # was being read as still running - the live-agent rule was written to stop
+    # a busy agent being declared done, and "still alive" was standing in for
+    # "still working". It does not: idle is the settled state herdr reports
+    # when a worker has stopped, and the last instruction a worker is given is
+    # to write result.md and stop. So the row sat `running` with the work
+    # pushed, the PR open and nobody looking.
+    # `working` and `blocked` still hold the row open; blocked in particular is
+    # waiting for a human, not finished.
+    local wt ahead settled=0
+    wt="$(printf '%s' "$e" | jq -r '.worktree')"
+    case "$live" in
+      -) settled=1 ;;                                  # the agent is gone
+      idle|done) [ -f "$wt/.agent/result.md" ] && settled=1 ;;
+    esac
+    if [ "$have_agents" -eq 1 ] && [ "$state" = "running" ] && [ "$settled" -eq 1 ]; then
+      if [ -f "$wt/.agent/result.md" ]; then state=finished; else state=orphaned; fi
+      _ledger_update_state "$wsdir" "$id" "$state"
+    fi
+    ahead="$(_wt_ahead "$wt")"
+    model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"
+    ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
+    [ "$(printf '%s' "$e" | jq -r '.shape // "ship"')" = scout ] && ticket="scout"
+    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %s\n' \
+      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "${model:--}"
+  done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
+}
+
+cmd_release() {
+  [ $# -ge 1 ] || die "usage: cel-fanout release <id> [--keep-worktree] [--discard]"
+  local id="$1"; shift
+  local keep=0 discard=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep-worktree) keep=1; shift ;;
+      --discard)       discard=1; shift ;;
+      *) die "release: unknown argument: $1" ;;
+    esac
+  done
+
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "no delegation with id '$id'"
+  local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
+
+  # Done ONLY on a merged PR. Releasing a worktree is not the same as landing
+  # the work - a release after an abandoned or closed PR must not mark the
+  # ticket complete, or the board lies in the one direction nobody checks.
+  local ticket branch repo
+  ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
+  branch="$(printf '%s' "$entry" | jq -r '.branch')"
+  repo="$(printf '%s' "$entry" | jq -r '.repo')"
+  if [ -n "$ticket" ]; then
+    local merged
+    merged="$(gh pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
+      | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')" \
+      --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
+    if [ -n "$merged" ] && [ "$merged" != "null" ]; then
+      _fanout_ticket_state "$ticket" "Done"
+    else
+      c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge)"
+    fi
+  fi
+
+  # FAIL CLOSED. Releasing is not landing: a worktree with unpushed commits or
+  # uncommitted changes is work, and destroying it needs the word for it.
+  # --keep-worktree sidesteps the question (nothing is removed); --discard
+  # answers it, and is logged so the loss is on record rather than silent.
+  local wt held; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+  held="$(_wt_unlanded "$wt" "$(printf '%s' "$entry" | jq -r '.shape // "ship"')")"
+  if [ -n "$held" ] && [ "$keep" -eq 0 ] && [ "$discard" -eq 0 ]; then
+    die "release: $id still holds work ($held) at
+    $wt
+  Releasing is not landing. Either push and land it, keep the checkout with
+  --keep-worktree, or say what you mean:
+    cel-fanout release $id --discard
+  (the changes are gone for good - nothing here snapshots them first)"
+  fi
+  if [ -n "$held" ] && [ "$discard" -eq 1 ]; then
+    c_warn "DISCARDED $held in $wt on explicit --discard"
+  fi
+
+  # --force: the decision about held work was made ABOVE, by a check that knows
+  # what a scout is. herdr's own dirty-worktree refusal does not, so a scout
+  # whose only content is its report could never be released without it.
+  # Reaching this line means either nothing is held or --discard was said.
+  [ "$keep" -eq 1 ] || "$HERDR" worktree remove --workspace "$herdr_ws" --force
+  _ledger_update_state "$wsdir" "$id" released
+}
+
+# THE ONE MERGE PATH. Orchestrators are read-only over repositories (see
+# lib/guard.sh); an orchestrator that judges a PR ready asks this to land it,
+# and this checks the things a prompt cannot be trusted to: whose PR it is,
+# what the workspace's merge policy says, whether review and checks actually
+# passed. The orchestrator DECIDES; the script PROVES it is allowed to.
+# Deterministic logic in scripts, judgement in agents - and never the reverse.
+cmd_land() { # <id>
+  [ $# -ge 1 ] || die "usage: cel-fanout land <id>"
+  local id="$1"
+  local wsdir; wsdir="$(_fanout_wsdir)"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "land: no delegation with id '$id'"
+  local repo branch slug ticket
+  repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
+  ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
+  slug="$(ws_repo_get "$wsdir" "$repo" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
+
+  [ "$(ws_policy "$wsdir" merge)" = "self" ] \
+    || die "land: this workspace's policy.merge is humans-only - surface the PR to a human; do not merge it"
+
+  local pr; pr="$("$GH" pr view "$branch" --repo "$slug" \
+    --json number,author,reviewDecision,statusCheckRollup,isDraft,mergeable,state 2>/dev/null)" \
+    || die "land: no PR found for $branch on $slug"
+  local me; me="$("$GH" api user --jq .login 2>/dev/null)"
+  local author num; author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"; num="$(printf '%s' "$pr" | jq -r .number)"
+  [ -n "$me" ] && [ "$author" = "$me" ] \
+    || die "land: PR #$num was opened by '$author', not by this fleet ('$me') - colleagues' PRs are theirs to land"
+  [ "$(printf '%s' "$pr" | jq -r .state)" = "OPEN" ] || die "land: PR #$num is not open"
+  [ "$(printf '%s' "$pr" | jq -r .isDraft)" = "false" ] || die "land: PR #$num is still a draft"
+  [ "$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')" = "APPROVED" ] \
+    || die "land: PR #$num is not approved (reviewDecision=$(printf '%s' "$pr" | jq -r '.reviewDecision // "none"'))"
+  local red; red="$(printf '%s' "$pr" | jq '[.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
+  [ "$red" = "0" ] || die "land: PR #$num has $red failing check(s) - a red gate is a finding, not a formality"
+  [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != "CONFLICTING" ] || die "land: PR #$num has conflicts - a worker rebases it, then land again"
+
+  # A configured gate that has not PASSED is a refusal - CI green on the PR is
+  # not the same fact, since the branch may have moved since. Verify now if
+  # there is no verdict yet; unknown is not passed.
+  local gate; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
+  if [ -n "$gate" ]; then
+    _fanout_verify "$wsdir" "$id" "$entry" >/dev/null
+    local wt gp; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
+    [ "$gp" = true ] || die "land: the repo's gate (\`$gate\`) did not pass on $branch (verdict: $gp) - a worker fixes it, then land again. A red gate is a finding, not a formality."
+  fi
+  "$GH" pr merge "$num" --repo "$slug" --squash --delete-branch >/dev/null 2>&1 \
+    || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
+  c_ok "landed $id as #$num on $slug"
+  _fanout_ticket_state "$ticket" "Done"
+  _ledger_update_state "$wsdir" "$id" landed
+}
+
+# All mutating entrypoints serialize the complete read/modify/write cycle.
+# Do not lock wait: it must let other invocations settle the ledger it reads.
+case "${1:-}" in
+  delegate|scout|collect|status|release|land)
+    lock_ws="$(_fanout_wsdir)"
+    mkdir -p "$lock_ws/.cel"
+    exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
+    flock "$ledger_fd" || die "cannot lock delegation ledger"
+    ;;
+esac
+
+case "${1:-}" in
+  delegate) shift; cmd_delegate "$@" ;;
+  scout)    shift; cmd_scout "$@" ;;
+  wait)     shift; cmd_wait "$@" ;;
+  collect)  shift; cmd_collect "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  release)  shift; cmd_release "$@" ;;
+  land)     shift; cmd_land "$@" ;;
+  *) die "usage: cel-fanout delegate|scout|wait|collect|status|release|land ..." ;;
+esac

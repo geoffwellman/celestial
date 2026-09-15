@@ -1,0 +1,2 @@
+herdr_plugins:
+  linear: { source: example/linear, ref: ffffffffffffffffffffffffffffffffffffffff }

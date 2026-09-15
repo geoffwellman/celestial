@@ -1,0 +1,7 @@
+workspaces:
+  alpha:
+    path: ~/ws/alpha
+    remote: git@github.com:someone/ws-alpha.git
+  beta:
+    path: /srv/beta
+    remote: null

@@ -1,0 +1,205 @@
+# shellcheck shell=bash
+# Reads workspace.yaml and renders everything derived from it: the policy block
+# injected into agents, the CLAUDE.md block rendered into repos, and the
+# per-repo skill symlinks. A "wsdir" is the directory holding workspace.yaml.
+[ -n "${_CEL_WORKSPACE:-}" ] && return 0
+_CEL_WORKSPACE=1
+# shellcheck source=lib/common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+_wsy() { # _wsy <wsdir> <program>  - yq over the workspace file, "" for absent
+  yq -r "$2 // \"\" | tostring" "$1/workspace.yaml"
+}
+
+ws_current() {
+  local d; d="$(cd "${1:-$PWD}" 2>/dev/null && pwd)" || return 1
+  while [ "$d" != "/" ]; do
+    [ -f "$d/workspace.yaml" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+ws_name()   { _wsy "$1" '.name'; }
+ws_kind()   { _wsy "$1" '.kind'; }
+ws_org()    { _wsy "$1" '.org'; }
+ws_layout() { _wsy "$1" '.layout'; }
+ws_ticket() { yq -r --arg k "$2" '.tickets[$k] // "" | tostring' "$1/workspace.yaml"; }
+ws_policy() { yq -r --arg k "$2" '.policy[$k]  // "" | tostring' "$1/workspace.yaml"; }
+
+# Default runtimes: claude orchestrators, omp workers.
+ws_runtime() {
+  local r
+  r="$(yq -r --arg k "$2" '.runtime[$k] // ""' "$1/workspace.yaml")"
+  [ -n "$r" ] && { printf '%s' "$r"; return 0; }
+  case "$2" in worker) printf 'omp';; *) printf 'claude';; esac
+}
+
+ws_env_names() { yq -r '.env // {} | keys[]' "$1/workspace.yaml"; }
+ws_env_get()   { yq -r --arg k "$2" '.env[$k] // "" | tostring' "$1/workspace.yaml"; }
+
+# Workspace env as eval-able shell: the committed `env:` map first, then a
+# source of the gitignored env.local so secrets and per-box overrides win.
+# Values are single-quoted and keys validated, so a stray yaml entry can never
+# inject shell into the caller's eval.
+ws_env_exports() { # <wsdir>
+  local d="$1" k v
+  for k in $(ws_env_names "$d"); do
+    if ! printf '%s' "$k" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+      # stdout is eval'd by the caller, so the warning must ride stderr
+      c_warn "workspace env: skipping invalid variable name '$k'" >&2
+      continue
+    fi
+    v="$(ws_env_get "$d" "$k")"
+    v=${v//"'"/"'\\''"}
+    printf "export %s='%s'\n" "$k" "$v"
+  done
+  if [ -f "$d/env.local" ]; then
+    # `set -a` around the source so a plain `KEY=value` line is exported too.
+    # env.local is SOURCED, and without export an assignment makes a shell
+    # variable that child processes do not inherit - so the key would be
+    # visible to your shell and invisible to every agent launched from it.
+    # That failure is silent and looks like a bad key rather than a missing
+    # export, so the file is treated as what it is: an environment file.
+    # Restored rather than left on, so nothing after this is auto-exported.
+    local p="$d/env.local"; p=${p//"'"/"'\\''"}
+    printf 'set -a; . %s; set +a\n' "'$p'"
+  fi
+}
+
+# The `review:` block configures local PR reviewer panes (cel run reviewer).
+# Distinct from policy.reviewer, which names an EXTERNAL GitHub reviewer for
+# the pr-loop skill; a workspace can have either, both, or neither.
+ws_review() { yq -r --arg k "$2" '.review[$k] // "" | tostring' "$1/workspace.yaml"; }
+
+# Every ticket prefix this repo answers to, CURRENT ONE FIRST then any
+# `prefix_aliases`. Aliases exist because a Linear team can be re-keyed
+# (ABC -> ABCD) without renumbering its issues: Linear still resolves the old
+# identifiers, but branches and worktrees cut before the rename keep their old
+# names forever. Without the alias every in-flight branch would suddenly read
+# as unticketed - refused by the delegate gate and nagged by the steward.
+ws_repo_prefixes() { # <wsdir> <repo>
+  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0] as $r
+    | ([$r.prefix // empty] + ($r.prefix_aliases // [])) | .[]' "$1/workspace.yaml"
+}
+
+ws_repo_names() { yq -r '.repos // [] | .[].name' "$1/workspace.yaml"; }
+ws_repo_get() {
+  yq -r --arg n "$2" --arg k "$3" \
+    '.repos // [] | map(select(.name == $n))[0][$k] // "" | tostring' \
+    "$1/workspace.yaml"
+}
+
+# The single source for every injection surface: cel run, cel-fanout, and the
+# rendered CLAUDE.md block all call this, so policy is worded exactly once.
+ws_policy_block() {
+  local d="$1" name kind org tsys tadhoc merge pr workers reviewer r
+  name="$(ws_name "$d")"; kind="$(ws_kind "$d")"; org="$(ws_org "$d")"
+  tsys="$(ws_ticket "$d" system)"; tadhoc="$(ws_ticket "$d" adhoc)"
+  merge="$(ws_policy "$d" merge)"; pr="$(ws_policy "$d" pr)"
+  workers="$(ws_policy "$d" workers)"; reviewer="$(ws_policy "$d" reviewer)"
+  printf '## Workspace policy\n'
+  printf -- '- workspace: %s (kind: %s, org: %s)\n' "$name" "${kind:-unset}" "${org:-unset}"
+  if [ "$tsys" = "none" ]; then
+    printf -- '- tickets: none - never invent ticket references; ad-hoc refs look like %s\n' "${tadhoc:-AH-<yymmdd>}"
+  elif [ "$tsys" = "linear" ]; then
+    printf -- '- tickets: linear (use the linear skill; MCP tools if present, else `cel-linear`). ONE ticket per work package, and SEARCH BEFORE CREATE - never start work on a ticket someone else has In Progress. THE BRANCH NAME CARRIES THE TICKET ID (`<PREFIX>-<n>-<slug>`): Linear links a PR to its ticket from the branch name alone, so a branch without one is invisible on the board and `cel-fanout delegate` will refuse it. The lifecycle is then automatic - delegate sets In Progress, collect sets In Review and comments the PR link, release sets Done on a merged PR - so do not hand-drive states for delegated work. Ad-hoc refs (%s) are for throwaway work only and need `--adhoc`\n' "${tadhoc:-unset}"
+  else
+    printf -- '- tickets: %s; ad-hoc refs look like %s\n' "${tsys:-unset}" "${tadhoc:-unset}"
+  fi
+  if [ "$merge" = "self" ]; then
+    printf -- '- merge: self - you may merge after the review skill passes\n'
+  else
+    printf -- '- merge: humans-only - open a PR and stop; only humans merge\n'
+  fi
+  local pr_open; pr_open="$(ws_policy "$d" pr_open)"
+  if [ "${pr_open:-draft}" = "ready" ]; then
+    printf -- '- pr: %s, opened READY FOR REVIEW (never draft; a draft is invisible to the reviewer); max concurrent workers: %s\n' "${pr:-required}" "${workers:-4}"
+  else
+    printf -- '- pr: %s, opened as a draft; max concurrent workers: %s\n' "${pr:-required}" "${workers:-4}"
+  fi
+  printf -- '- worker runtime: %s - spawn workers via `cel-fanout delegate` (or `herdr agent start <name> --kind %s`); never start workers on the orchestrator runtime (%s)\n' \
+    "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" orchestrator)"
+  # Profiles are read straight from the file rather than through lib/profiles.sh:
+  # that file sources THIS one, and a policy block is not worth a source cycle.
+  local profs wbound
+  profs="$(yq -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"
+  wbound="$(yq -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"
+  if [ -n "$profs" ]; then
+    printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
+      "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
+    yq -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true
+    local sbound; sbound="$(yq -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"
+    printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
+      "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
+  fi
+  if [ -n "$reviewer" ]; then
+    printf -- '- reviewer: %s (pr-loop requests this reviewer)\n' "$reviewer"
+  else
+    printf -- '- reviewer: none (the pr-loop skill is disabled here)\n'
+  fi
+  local rrt rmodel
+  rrt="$(ws_review "$d" runtime)"; rmodel="$(ws_review "$d" model)"
+  if [ -n "$rrt" ]; then
+    printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
+      "$rrt" "${rmodel:+ model $rmodel}"
+  fi
+  local lt
+  for r in $(ws_repo_names "$d"); do
+    lt="$(ws_repo_get "$d" "$r" linear_team)"
+    printf -- '- repo %s: branch prefix %s, gate `%s`%s\n' \
+      "$r" "$(ws_repo_get "$d" "$r" prefix)" "$(ws_repo_get "$d" "$r" gate)" \
+      "${lt:+, linear team $lt}"
+  done
+  # What this workspace has learned, budgeted (lib/learn.sh). Rendered by a
+  # CHILD `cel learn render` rather than by sourcing learn.sh here: learn.sh
+  # sources this file for ws_current, and a source cycle for a paragraph is a
+  # bad trade. Empty output when there is nothing to say.
+  local learned
+  learned="$("$CEL_ROOT/bin/cel" learn render --dir "$d" 2>/dev/null || true)"
+  [ -z "$learned" ] || printf '\n%s' "$learned"
+}
+
+ws_render_role() { # <wsdir> <rolefile>
+  [ -f "$2" ] || die "role file not found: $2"
+  cat "$2"; printf '\n'; ws_policy_block "$1"
+}
+
+# Replace-or-append the marked block. Body travels via the environment, not
+# awk -v: -v would interpret backslash escapes inside the rendered text.
+ws_render_claude_block() { # <wsdir> <targetdir>
+  local f="$2/CLAUDE.md" block
+  block="$(BODY="$(ws_policy_block "$1")" \
+    awk '{ if ($0 == "{{POLICY_BLOCK}}") printf "%s\n", ENVIRON["BODY"]; else print }' \
+    "$CEL_ROOT/templates/CLAUDE.md.tmpl")"
+  if [ -f "$f" ] && grep -q 'cel:policy:begin' "$f"; then
+    BLK="$block" awk '
+      /cel:policy:begin/ { inblk=1; printf "%s\n", ENVIRON["BLK"]; next }
+      /cel:policy:end/   { inblk=0; next }
+      !inblk { print }' "$f" > "$f.cel-tmp" && mv "$f.cel-tmp" "$f"
+  else
+    { [ -f "$f" ] && cat "$f" && printf '\n'; printf '%s\n' "$block"; } \
+      > "$f.cel-tmp" && mv "$f.cel-tmp" "$f"
+  fi
+}
+
+# Workspace skills are scoped: linked into this workspace's checkouts only, and
+# the links are gitignored - they point into $HOME and must never be committed.
+ws_link_skills() { # <wsdir> <targetdir>
+  local s t="$2/.claude/skills"
+  mkdir -p "$t"
+  # Self-heal: a skill deleted from the workspace must take its repo links
+  # with it, or the dangling link keeps shadowing the plane copy of the same
+  # name (observed: stale pr-loop/fanout shadows outliving their source).
+  # Only links that point into THIS workspace's skills dir are ours to prune.
+  for s in "$t"/*; do
+    [ -L "$s" ] && [ ! -e "$s" ] || continue
+    case "$(readlink "$s")" in "$1"/skills/*) rm -f "$s";; esac
+  done
+  for s in "$1"/skills/*/; do
+    [ -f "$s/SKILL.md" ] || continue
+    ln -sfn "${s%/}" "$t/$(basename "${s%/}")"
+  done
+  grep -qxF '.claude/skills' "$2/.gitignore" 2>/dev/null \
+    || printf '.claude/skills\n' >> "$2/.gitignore"
+}

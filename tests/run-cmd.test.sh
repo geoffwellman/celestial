@@ -1,0 +1,156 @@
+# shellcheck shell=bash
+source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/lib/run.sh"
+
+_ws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+        mkdir -p "$T/repos/widget"; }
+
+# cmd_run dies via die() (exit) on the failure paths below. assert_fails runs
+# its argument as a plain function call in this same process, so a bare exit
+# would kill the whole test invocation instead of being observed as a failing
+# exit status. Route through a subshell to contain it.
+_cmd_run_in_subshell() { ( cmd_run "$@" ); }
+
+test_run_direct_defaults_single_repo_and_injects_no_role() {
+  _ws; local out; out="$(cd "$T" && cmd_run --dry-run)"
+  assert_contains "$out" "workspace create"
+  assert_contains "$out" "widget/direct"
+  assert_contains "$out" "--kind claude"
+  ! printf '%s' "$out" | grep -q "root-orchestrator"
+  rm -rf "$T"
+}
+test_run_root_targets_workspace_dir() {
+  _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" "alpha/root"
+  assert_contains "$out" "--cwd $T"
+  rm -rf "$T"
+}
+test_run_orchestrator_targets_repo() {
+  _ws; local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "widget/orch"
+  assert_contains "$out" "--append-system-prompt"
+  rm -rf "$T"
+}
+test_run_worker_creates_a_herdr_worktree() {
+  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" "worktree create"
+  assert_contains "$out" "--kind omp"
+  rm -rf "$T"
+}
+test_run_worker_requires_branch() {
+  _ws; ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --dry-run ); rm -rf "$T"
+}
+test_run_outside_a_workspace_dies() {
+  ( cd /tmp && assert_fails _cmd_run_in_subshell --dry-run )
+}
+# herdr rejects agent names outside [a-z][a-z0-9_-]{0,31}: the `repo/role`
+# alias keeps the slash only as the workspace label, never as the agent name.
+test_run_agent_start_uses_a_herdr_legal_name() {
+  _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" "agent start alpha-root"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" "agent start widget-wg-1-x"
+  rm -rf "$T"
+}
+# herdr agent start rejects any argument it cannot encode on one line
+# (invalid_agent_argument), so multi-line role bodies must travel as files.
+test_run_role_body_travels_as_a_file_path() {
+  _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" "--append-system-prompt-file $T/.cel/role-root.md"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" "--append-system-prompt $T/.cel/role-worker.md"
+  rm -rf "$T"
+}
+test_append_flag_file_writes_the_body_and_no_arg_holds_a_newline() {
+  _ws
+  local AGENT_ARGS=() body=$'# Role\n\nline two' a
+  _run_agent_args claude root "$body" 0 "$T"
+  assert_eq "${AGENT_ARGS[0]}" "--append-system-prompt-file"
+  assert_eq "${AGENT_ARGS[1]}" "$T/.cel/role-root.md"
+  assert_eq "$(cat "$T/.cel/role-root.md")" "$body"
+  for a in "${AGENT_ARGS[@]}"; do
+    case "$a" in *$'\n'*) echo "arg contains a newline: $a"; return 1;; esac
+  done
+  rm -rf "$T"
+}
+# agents.yaml launch_args ride every launch of that runtime, ahead of the
+# role-injection args - claude declares --dangerously-skip-permissions and
+# omp declares --auto-approve, so nothing plane-launched stops on prompts.
+# The thinking flag sits between them: it is per-launch (a profile can change
+# it), the launch args are per-runtime, and the role body always goes last.
+test_run_launch_args_precede_role_injection() {
+  _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" " -- --dangerously-skip-permissions --effort high --append-system-prompt-file"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" " -- --auto-approve --thinking high --append-system-prompt"
+  ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
+  rm -rf "$T"
+}
+
+# A workspace may declare a herdr workspace-manager layout; only root mode
+# applies it (the whole working view), and it must come before agent start
+# because apply replaces the workspace's first tab.
+test_run_root_applies_declared_layout() {
+  _ws
+  printf 'layout: example\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" "herdr-workspace-manager apply example"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "worker applied a layout"; return 1; }
+  rm -rf "$T"
+}
+test_run_without_layout_skips_apply() {
+  _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "layout applied with none declared"; return 1; }
+  rm -rf "$T"
+}
+# Reviewer mode joins the caller's herdr view (tab "PR reviewer") instead of
+# creating a workspace, injects the pr-reviewer role, and puts the workspace's
+# review model ahead of the role args.
+_ws_review() { _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
+test_run_reviewer_targets_review_tab_with_model() {
+  _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
+  assert_contains "$out" 'tab "PR reviewer"'
+  assert_contains "$out" "agent start widget-pr-12-review --kind omp"
+  assert_contains "$out" " -- --auto-approve --model gpt-5.6-sol --thinking high --append-system-prompt"
+  ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
+  rm -rf "$T"
+}
+test_run_reviewer_requires_pr_and_review_block() {
+  _ws_review; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --dry-run )
+  rm -rf "$T"
+  _ws; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run )
+  rm -rf "$T"
+}
+test_run_agent_name_sanitiser() {
+  assert_eq "$(_run_agent_name 'example/root')" "example-root"
+  assert_eq "$(_run_agent_name 'repo/AH-260901-ws-example-demote')" "repo-ah-260901-ws-example-demote"
+  assert_eq "$(_run_agent_name '9lives/x')" "lives-x"
+  assert_eq "$(_run_agent_name 'a-very-long-repo-name/with-a-very-long-branch')" \
+            "a-very-long-repo-name-with-a-ver"
+}
+
+# Layouts resolve workspace-first: <wsdir>/layouts.yml beats the plane file,
+# the plane file is the fallback, and neither defining the id is a failure.
+test_layout_config_resolves_workspace_first() {
+  _ws
+  printf 'layouts:\n  - id: example\n    tabs: []\n' > "$T/layouts.yml"
+  assert_eq "$(_run_layout_config "$T" example)" "$T/layouts.yml"
+  assert_eq "$(_run_layout_config "$T" worker)" "$CEL_ROOT/tools/herdr/layouts/config.yml"
+  assert_fails _run_layout_config "$T" no-such-layout
+  rm -rf "$T"
+}
+
+# READ-ONLY ORCHESTRATORS: root and orchestrator launches on a runtime that
+# has a guard_hook get it; workers never do - writing is their whole job.
+test_run_loads_the_guard_hook_for_orchestrators_only() {
+  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
+  assert_contains "$out" "orchestrator-guard.omp.ts"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

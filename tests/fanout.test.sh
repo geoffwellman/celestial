@@ -1,0 +1,977 @@
+# shellcheck shell=bash
+# cel-fanout is an external binary (not a sourced lib), so every test shells
+# out to it against a herdr stub that logs its argv and returns canned JSON.
+source "$CEL_ROOT/lib/common.sh"
+BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
+
+_fanout_setup() {
+  T="$(mktemp -d)"
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+  mkdir -p "$T/repos/widget"
+  git -C "$T/repos/widget" init -q
+  STUB_WT="$T/widget-worker"
+  mkdir -p "$STUB_WT"
+  git -C "$STUB_WT" init -q
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
+  git -C "$STUB_WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  STUB_REPO="$(git -C "$T/repos/widget" rev-parse --show-toplevel)"
+  STUB_LOG="$T/stub.log"
+  : > "$STUB_LOG"
+  STUB="$T/herdr-stub.sh"
+  cat > "$STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$STUB_LOG"
+case "$1 $2" in
+  "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
+  "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
+  "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
+                     elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
+                     elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
+                     else echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"'"${STUB_STATUS:-idle}"'"}]}}'; fi;;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$STUB"
+  export CEL_FANOUT_HERDR="$STUB"
+  export STUB_LOG STUB_WT STUB_REPO
+  printf 'do the thing\n' > "$T/spec.md"
+}
+
+# A dead agent must not leave its row reading `running` forever: finished work
+# would sit invisible and abandoned work would look healthy. Both were observed.
+test_status_marks_finished_when_agent_gone_and_result_exists() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-FIN "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)"
+  assert_contains "$out" "finished"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "finished"
+  rm -rf "$T"
+}
+
+test_status_marks_orphaned_when_agent_gone_and_no_result() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ORPH "$T/spec.md") > /dev/null
+  rm -f "$STUB_WT/.agent/result.md"
+  local out; out="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)"
+  assert_contains "$out" "orphaned"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "orphaned"
+  rm -rf "$T"
+}
+
+# herdr being unreachable is not evidence anyone died: a failed agent list
+# must leave running rows untouched instead of reconciling them all.
+test_status_keeps_running_when_agent_list_fails() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-HERDRDOWN "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_AGENTS_FAIL=1 "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  rm -rf "$T"
+}
+
+# A row reconciled to finished/orphaned is settled: wait must return it
+# instead of polling a pane that no longer exists.
+test_wait_returns_reconciled_id() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-REC "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status) > /dev/null
+  local id; id="$(cd "$T" && "$BIN" wait --timeout 2000)"
+  assert_eq "$id" "WG-REC"
+  rm -rf "$T"
+}
+
+# A LIVE agent is always believed over the disk — a working agent that has
+# already written a result.md is still working.
+test_status_leaves_running_row_alone_while_agent_is_live() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LIVE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_STATUS=working "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  rm -rf "$T"
+}
+
+# A row the operator already dealt with is not re-opened by a missing agent.
+test_status_does_not_reopen_a_collected_row() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-COLL "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-COLL) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  (cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  rm -rf "$T"
+}
+
+# The worktree must be cut from the REMOTE default, never from whatever the
+# checkout is parked on — a contaminated base put two stray commits onto seven
+# ticket branches before this was fixed.
+test_delegate_branches_from_origin_default_when_reachable() {
+  _fanout_setup
+  # Give the fixture repo a commit and an origin/main to branch from.
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/main HEAD
+  git -C "$T/repos/widget" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+  (cd "$T" && "$BIN" delegate widget WG-BASE "$T/spec.md") > /dev/null
+  local wc; wc="$(grep '^worktree create' "$STUB_LOG" | head -1)"
+  assert_contains "$wc" "--base origin/main"
+  rm -rf "$T"
+}
+
+# A master-only remote with no origin/HEAD must resolve to origin/master -
+# hard-coding main here either picked an unrelated branch or dropped the base
+# entirely. The resolved base must also reach the
+# worker's pre-push check, or it validates against a ref that may not exist.
+test_delegate_resolves_master_default_without_origin_head() {
+  _fanout_setup
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/master HEAD
+  (cd "$T" && "$BIN" delegate widget WG-MASTER "$T/spec.md") > /dev/null
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$(grep '^worktree create' <<<"$log" | head -1)" "--base origin/master"
+  assert_contains "$log" "git log --oneline origin/master..HEAD"
+  rm -rf "$T"
+}
+
+# A branch that already exists on origin is continued from ORIGIN'S tip, not
+# from whatever stale local ref shares its name - that reuse nearly
+# force-pushed over an arm commit.
+test_delegate_bases_existing_branch_on_origin_tip() {
+  _fanout_setup
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/main HEAD
+  git -C "$T/repos/widget" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  # local WG-OLD parked at base; origin's copy one commit ahead
+  git -C "$T/repos/widget" branch WG-OLD HEAD
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m ahead
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/WG-OLD HEAD
+  (cd "$T" && "$BIN" delegate widget WG-OLD "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--base origin/WG-OLD"
+  rm -rf "$T"
+}
+# ...but a local ref that DIVERGED from origin's is unreconciled work on both
+# sides: delegate must refuse with both shas, never silently pick one.
+test_delegate_refuses_diverged_local_branch() {
+  _fanout_setup
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/main HEAD
+  git -C "$T/repos/widget" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m origin-side
+  git -C "$T/repos/widget" update-ref refs/remotes/origin/WG-DIV HEAD
+  git -C "$T/repos/widget" checkout -q -b WG-DIV HEAD~1
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-side
+  git -C "$T/repos/widget" checkout -q -
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-DIV "$T/spec.md") 2>&1 )" && \
+    { echo "delegate should have refused: $out"; return 1; }
+  assert_contains "$out" "DIVERGED"
+  assert_contains "$out" "$(git -C "$T/repos/widget" rev-parse refs/heads/WG-DIV)"
+  assert_contains "$out" "$(git -C "$T/repos/widget" rev-parse refs/remotes/origin/WG-DIV)"
+  rm -rf "$T"
+}
+
+# Offline or origin-less repos must still delegate — falling back to herdr's
+# default is worse than a rebase, but refusing to delegate is worse than both.
+test_delegate_omits_base_when_origin_unreachable() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-NOBASE "$T/spec.md") > /dev/null
+  local wc; wc="$(grep '^worktree create' "$STUB_LOG" | head -1)"
+  case "$wc" in *--base*) echo "unexpected --base with no origin: $wc"; return 1;; esac
+  rm -rf "$T"
+}
+
+
+# `policy.pr_open: ready` flips the prompt to a ready-for-review PR and names the
+# workspace reviewer - a draft is invisible to a reviewer bot that ignores drafts.
+test_delegate_prompt_ready_pr_when_policy_says_so() {
+  _fanout_setup
+  yq -y -i '.policy.pr_open = "ready" | .policy.reviewer = "review-bot"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-RDY "$T/spec.md") > /dev/null
+  local pr; pr="$(cat "$STUB_LOG")"
+  assert_contains "$pr" "READY FOR REVIEW"
+  assert_contains "$pr" "requesting reviewer review-bot"
+  if printf '%s' "$pr" | grep -q "DRAFT pull request"; then fail "ready policy still asked for a draft"; fi
+  rm -rf "$T"
+}
+
+test_delegate_refuses_unknown_pr_open() {
+  _fanout_setup
+  yq -y -i '.policy.pr_open = "sometimes"' "$T/workspace.yaml"
+  if (cd "$T" && "$BIN" delegate widget WG-BAD "$T/spec.md") > /dev/null 2>&1; then
+    fail "unknown pr_open value was accepted"
+  fi
+  rm -rf "$T"
+}
+
+test_delegate_writes_ledger_and_calls_herdr_in_order() {
+  _fanout_setup
+  local id; id="$(cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md")"
+  assert_eq "$id" "WG-1-x"
+
+  local log wc_line ast_line apr_line
+  log="$(cat "$STUB_LOG")"
+  wc_line="$(grep -n '^worktree create' <<<"$log" | head -1 | cut -d: -f1)"
+  ast_line="$(grep -n '^agent start' <<<"$log" | head -1 | cut -d: -f1)"
+  apr_line="$(grep -n '^agent prompt' <<<"$log" | head -1 | cut -d: -f1)"
+  [ -n "$wc_line" ] || { echo "no worktree create call: $log"; return 1; }
+  [ -n "$ast_line" ] || { echo "no agent start call: $log"; return 1; }
+  [ -n "$apr_line" ] || { echo "no agent prompt call: $log"; return 1; }
+  [ "$wc_line" -lt "$ast_line" ] || { echo "worktree create not before agent start: $log"; return 1; }
+  [ "$ast_line" -lt "$apr_line" ] || { echo "agent start not before agent prompt: $log"; return 1; }
+
+  # the agent name is herdr-legal (no slash/uppercase) and the multi-line role
+  # body travels as a file path, not an inline argument
+  assert_contains "$log" "agent start widget-wg-1-x"
+  assert_contains "$log" "--append-system-prompt $T/.cel/role-worker.md"
+
+  local ledger; ledger="$(cat "$T/.cel/delegations.json")"
+  assert_eq "$(printf '%s' "$ledger" | jq -r '.[0].id')" "WG-1-x"
+  assert_eq "$(printf '%s' "$ledger" | jq -r '.[0].state')" "running"
+  assert_eq "$(printf '%s' "$ledger" | jq -r '.[0].repo')" "widget"
+  rm -rf "$T"
+}
+
+test_delegate_outside_workspace_dies() {
+  _fanout_setup
+  ( cd /tmp && assert_fails "$BIN" delegate widget WG-1-x "$T/spec.md" )
+  rm -rf "$T"
+}
+
+test_wait_returns_settled_id() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  local id; id="$(cd "$T" && "$BIN" wait)"
+  assert_eq "$id" "WG-1-x"
+  rm -rf "$T"
+}
+
+test_collect_reads_result_md() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  mkdir -p "$STUB_WT/.agent"
+  printf '# Result\nall good\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$(cd "$T" && "$BIN" collect WG-1-x)"
+  assert_contains "$out" "all good"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  rm -rf "$T"
+}
+
+test_collect_salvages_when_result_missing() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  (cd "$T" && "$BIN" collect WG-1-x >/dev/null 2>&1)
+  [ -f "$T/.cel/salvage-WG-1-x.txt" ] || { echo "no salvage file written"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "salvaged"
+  rm -rf "$T"
+}
+
+test_release_removes_worktree_and_marks() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  (cd "$T" && "$BIN" release WG-1-x)
+  assert_contains "$(cat "$STUB_LOG")" "worktree remove --workspace wZ"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "released"
+
+  (cd "$T" && "$BIN" delegate widget WG-2-x "$T/spec.md" >/dev/null)
+  : > "$STUB_LOG"
+  (cd "$T" && "$BIN" release WG-2-x --keep-worktree)
+  case "$(cat "$STUB_LOG")" in
+    *"worktree remove"*) echo "unexpected worktree remove with --keep-worktree"; return 1;;
+  esac
+  assert_eq "$(jq -r '.[1].state' "$T/.cel/delegations.json")" "released"
+  rm -rf "$T"
+}
+
+test_status_lists_delegations() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  local out; out="$(cd "$T" && "$BIN" status)"
+  assert_contains "$out" "WG-1-x"
+  assert_contains "$out" "widget"
+  assert_contains "$out" "running"
+  rm -rf "$T"
+}
+
+# ---- the ticket gate -------------------------------------------------------
+# Work with no ticket is invisible: Linear attaches a PR to its ticket purely
+# from the branch name, so an unticketed branch can never appear on the board.
+# Measured on a live box, 15 of 15 agent-opened PRs carried no ticket, because
+# "one ticket per work package" was advice while the mechanism took any name.
+
+# ws-alpha declares `tickets: {system: none}`, so the gate must stay dormant
+# there - these set it to linear explicitly.
+_fanout_linear_setup() {
+  _fanout_setup
+  yq -y '.tickets.system = "linear"' "$T/workspace.yaml" > "$T/ws.tmp" 2>/dev/null \
+    && mv "$T/ws.tmp" "$T/workspace.yaml"
+  LINEAR_LOG="$T/linear.log"; : > "$LINEAR_LOG"
+  LINEAR_STUB="$T/cel-linear-stub.sh"
+  cat > "$LINEAR_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$LINEAR_LOG"
+EOF
+  chmod +x "$LINEAR_STUB"
+  export CEL_FANOUT_LINEAR="$LINEAR_STUB" LINEAR_LOG
+}
+
+test_delegate_refuses_a_branch_with_no_ticket() {
+  _fanout_linear_setup
+  local out; out="$( (cd "$T" && "$BIN" delegate widget scratch-no-ticket "$T/spec.md") 2>&1 )" && {
+    echo "delegate accepted an unticketed branch"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "names no WG ticket"
+  assert_contains "$out" "cel-linear search"
+  # and it must refuse BEFORE any side effect - no worktree was cut
+  [ ! -s "$STUB_LOG" ] || { echo "gate ran after herdr was called"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_delegate_accepts_a_ticketed_branch_and_records_it() {
+  _fanout_linear_setup
+  (cd "$T" && "$BIN" delegate widget WG-12-do-the-thing "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" WG-12
+  rm -rf "$T"
+}
+
+# The id is matched the way Linear matches it: anywhere in the name, any case.
+# A colleague's `someone/wg-7-slug` links exactly as `WG-7-slug` does.
+test_delegate_matches_a_ticket_id_anywhere_and_any_case() {
+  _fanout_linear_setup
+  (cd "$T" && "$BIN" delegate widget someone/wg-7-live "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" WG-7
+  rm -rf "$T"
+}
+
+# In Progress must come from the mechanism, not from a worker remembering.
+test_delegate_moves_the_ticket_to_in_progress() {
+  _fanout_linear_setup
+  (cd "$T" && "$BIN" delegate widget WG-12-x "$T/spec.md") > /dev/null
+  assert_contains "$(cat "$LINEAR_LOG")" "state WG-12 In Progress"
+  rm -rf "$T"
+}
+
+# The escape hatch has to exist, but it has to be DELIBERATE.
+test_delegate_adhoc_opts_out_of_the_gate() {
+  _fanout_linear_setup
+  (cd "$T" && "$BIN" delegate widget scratch-throwaway "$T/spec.md" --adhoc) > /dev/null
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" ""
+  assert_eq "$(cat "$LINEAR_LOG")" ""
+  rm -rf "$T"
+}
+
+# A workspace that does not use Linear must be completely unaffected.
+test_delegate_gate_is_dormant_without_linear_tickets() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget scratch-local "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" ""
+  rm -rf "$T"
+}
+
+# ---- team re-key (prefix aliases) ------------------------------------------
+# A Linear team can be re-keyed (ABC -> ABCD) without renumbering its issues.
+# Linear still resolves the old identifiers, but branches and worktrees cut
+# before the rename keep their old names forever - so without aliases every
+# in-flight branch would suddenly read as unticketed and be refused.
+_fanout_rekey_setup() {
+  _fanout_linear_setup
+  yq -y '.repos[0].prefix = "WGT" | .repos[0].prefix_aliases = ["WG"]' \
+    "$T/workspace.yaml" > "$T/ws.tmp" && mv "$T/ws.tmp" "$T/workspace.yaml"
+}
+
+test_prefixes_list_current_first_then_aliases() {
+  # this suite otherwise only shells out to the binary, so the accessor has to
+  # be pulled in explicitly
+  source "$CEL_ROOT/lib/workspace.sh"
+  _fanout_rekey_setup
+  assert_eq "$(ws_repo_prefixes "$T" widget | tr '\n' ' ')" "WGT WG "
+  rm -rf "$T"
+}
+
+test_delegate_accepts_a_branch_cut_before_the_rekey() {
+  _fanout_rekey_setup
+  (cd "$T" && "$BIN" delegate widget WG-12-old-name "$T/spec.md") > /dev/null
+  # normalised to TODAY'S identifier, so every downstream state call speaks the
+  # current key rather than a historical one
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" WGT-12
+  rm -rf "$T"
+}
+
+test_delegate_accepts_the_new_prefix_unchanged() {
+  _fanout_rekey_setup
+  (cd "$T" && "$BIN" delegate widget WGT-9-new "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].ticket' "$T/.cel/delegations.json")" WGT-9
+  rm -rf "$T"
+}
+
+# An alias must not become a loophole: a branch with no number is still no ticket.
+test_rekey_aliases_do_not_weaken_the_gate() {
+  _fanout_rekey_setup
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WGT-nonumber "$T/spec.md") 2>&1 )" && {
+    echo "gate accepted a branch with no ticket number"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "names no WGT ticket"
+  rm -rf "$T"
+}
+
+# Re-delegating a branch must REPLACE its ledger row, not add a second. The
+# reader takes the first match, so a duplicate means every later collect and
+# release acts on the STALE row - its worktree, its state, its model.
+test_redelegating_replaces_the_ledger_row() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-DUP "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" delegate widget WG-DUP "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '[.[] | select(.id=="WG-DUP")] | length' "$T/.cel/delegations.json")" 1
+  # and the row that survived is the NEW one, in `running`
+  assert_eq "$(jq -r '.[] | select(.id=="WG-DUP") | .state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
+
+# ---- an occupied worktree path ---------------------------------------------
+# `herdr worktree create` cannot make a worktree where one exists; it returns a
+# PLAIN workspace with no worktree metadata. herdr then has no repo_root to
+# nest it under, so it shows at top level with no parent - "homeless" - while
+# the ledger records it as though it were the worktree, and `release` later
+# removes nothing. Re-delegation after an orphan is routine, so this compounded
+# on a live box until several worktrees were stranded.
+_fanout_existing_wt() {
+  _fanout_setup
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" worktree add -q -b WG-TAKEN "$T/taken" >/dev/null 2>&1
+}
+
+test_delegate_refuses_an_occupied_worktree_path() {
+  _fanout_existing_wt
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-TAKEN "$T/spec.md") 2>&1 )" && {
+    echo "delegate proceeded onto an occupied path"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "already exists"
+  assert_contains "$out" "--reuse"
+  # and nothing was recorded, so the ledger never points at a bare workspace
+  [ ! -f "$T/.cel/delegations.json" ] || \
+    assert_eq "$(jq -r '[.[] | select(.id=="WG-TAKEN")] | length' "$T/.cel/delegations.json")" 0
+  rm -rf "$T"
+}
+
+# --reuse without a herdr workspace holding that path is still a hard failure:
+# guessing would re-create the bare-workspace problem.
+test_reuse_fails_when_no_workspace_holds_the_path() {
+  _fanout_existing_wt
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-TAKEN "$T/spec.md" --reuse) 2>&1 )" && {
+    echo "reuse invented a workspace"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no herdr workspace holds it"
+  rm -rf "$T"
+}
+
+# A create that comes back with no checkout path did not attach a worktree, and
+# must fail loudly rather than be recorded as a delegation.
+test_delegate_fails_when_create_attaches_no_worktree() {
+  _fanout_setup
+  cat > "$STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$STUB_LOG"
+case "$1 $2" in
+  "worktree create") echo '{"result":{"workspace_id":"wBARE","pane_id":"wBARE:p1"}}';;
+  "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$STUB"
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-BARE "$T/spec.md") 2>&1 )" && {
+    echo "recorded a delegation with no worktree"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "did not attach a worktree"
+  rm -rf "$T"
+}
+
+# ---- fail-closed release ---------------------------------------------------
+# Three worktrees had their uncommitted work hand-salvaged to patches in one
+# day because release removed whatever it was pointed at. Releasing is not
+# landing: a worktree with unpushed commits or uncommitted changes is work,
+# and destroying it needs the word for it.
+_fanout_dirty_release() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-DIRTY "$T/spec.md") > /dev/null
+  git -C "$STUB_WT" init -q
+  printf 'unsaved\n' > "$STUB_WT/work.txt"
+}
+test_release_refuses_a_dirty_worktree() {
+  _fanout_dirty_release
+  local out; out="$( (cd "$T" && "$BIN" release WG-DIRTY) 2>&1 )" && {
+    echo "release removed a dirty worktree"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "dirty=1"
+  assert_contains "$out" "--discard"
+  ! grep -q "^worktree remove" "$STUB_LOG" || { echo "herdr remove was called"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
+test_release_discard_is_explicit_and_logged() {
+  _fanout_dirty_release
+  local out; out="$( (cd "$T" && "$BIN" release WG-DIRTY --discard) 2>&1 )"
+  assert_contains "$out" "DISCARDED"
+  grep -q "^worktree remove" "$STUB_LOG" || { echo "discard did not remove"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
+# --keep-worktree never removes anything, so held work is not a reason to stop.
+test_release_keep_worktree_ignores_held_work() {
+  _fanout_dirty_release
+  (cd "$T" && "$BIN" release WG-DIRTY --keep-worktree) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
+test_release_of_a_clean_worktree_is_unchanged() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-CLEAN "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" release WG-CLEAN) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
+# Unpushed commits count as held work even with a clean tree.
+test_release_refuses_unpushed_commits() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-UNPUSHED "$T/spec.md") > /dev/null
+  git -C "$STUB_WT" init -q && git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unpushed
+  local out; out="$( (cd "$T" && "$BIN" release WG-UNPUSHED) 2>&1 )" && {
+    echo "release removed unpushed commits"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "unpushed=1"
+  rm -rf "$T"
+}
+
+# ---- land: the one merge path -----------------------------------------------
+# Orchestrators are read-only over repositories; `land` is how a PR they judge
+# ready actually merges, and it checks what a prompt cannot be trusted to:
+# whose PR it is, the workspace's merge policy, review and checks.
+_fanout_land_setup() { # <author> <review> <failing> [<draft>] [<state>]
+  _fanout_setup
+  yq -y '.policy.merge = "self"' "$T/workspace.yaml" > "$T/ws.tmp" && mv "$T/ws.tmp" "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
+  GH_LOG="$T/gh.log"; : > "$GH_LOG"
+  GH_STUB="$T/gh-stub.sh"
+  cat > "$GH_STUB" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+case "\$1 \$2" in
+  "api user") echo fleetbot;;
+  "pr view")  echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
+  "pr merge") exit 0;;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$GH_STUB"; export CEL_FANOUT_GH="$GH_STUB" GH_LOG
+  # the fixture repo declares a gate, and land now refuses an unverified one:
+  # a passing verdict by default, so tests about OTHER refusals still merge
+  _fanout_verify_stub true
+}
+test_land_merges_an_approved_green_fleet_pr() {
+  _fanout_land_setup fleetbot APPROVED 0
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" landed
+  rm -rf "$T"
+}
+test_land_refuses_a_colleagues_pr() {
+  _fanout_land_setup someone-else APPROVED 0
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "merged a colleague's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "theirs to land"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_land_refuses_without_approval() {
+  _fanout_land_setup fleetbot CHANGES_REQUESTED 0
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "merged unapproved"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not approved"; rm -rf "$T"
+}
+test_land_refuses_a_red_gate() {
+  _fanout_land_setup fleetbot APPROVED 1
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "merged with failing checks"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "failing check"; rm -rf "$T"
+}
+test_land_refuses_a_draft() {
+  _fanout_land_setup fleetbot APPROVED 0 true
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "merged a draft"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "draft"; rm -rf "$T"
+}
+# policy.merge: humans-only is a hard stop regardless of how good the PR is.
+test_land_refuses_under_humans_only_policy() {
+  _fanout_land_setup fleetbot APPROVED 0
+  yq -y '.policy.merge = "humans-only"' "$T/workspace.yaml" > "$T/ws.tmp" && mv "$T/ws.tmp" "$T/workspace.yaml"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "merged under humans-only"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "humans-only"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# ---- scouts: knowledge, not a change -----------------------------------------
+# Investigations were being forced into ad-hoc branches to get past the ticket
+# gate, or done in an orchestrator's own checkout. A scout gets a disposable
+# worktree, a role that forbids shipping, and a report as its deliverable.
+test_scout_bypasses_the_ticket_gate_and_records_its_shape() {
+  _fanout_linear_setup
+  printf 'why is the build slow?\n' > "$T/why-slow.md"
+  (cd "$T" && "$BIN" scout widget "$T/why-slow.md") > /dev/null
+  local e; e="$(jq -c '.[0]' "$T/.cel/delegations.json")"
+  assert_eq "$(printf '%s' "$e" | jq -r .shape)" scout
+  assert_eq "$(printf '%s' "$e" | jq -r .ticket)" ""
+  assert_contains "$(printf '%s' "$e" | jq -r .branch)" "scout-"
+  assert_contains "$(printf '%s' "$e" | jq -r .branch)" "why-slow"
+  # no ticket ever moves for a scout
+  assert_eq "$(cat "$LINEAR_LOG")" ""
+  # the scout role, not the worker role, and a report, not a PR
+  local started; started="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$started" "role-scout.md"
+  assert_contains "$(grep '^agent prompt' "$STUB_LOG" | head -1)" "report.md"
+  ! grep '^agent prompt' "$STUB_LOG" | grep -q "pull request" || { echo "scout told to open a PR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_collect_of_a_scout_prints_the_report_and_marks_reported() {
+  _fanout_setup
+  printf 'brief\n' > "$T/look.md"
+  (cd "$T" && "$BIN" scout widget "$T/look.md") > /dev/null
+  local id; id="$(jq -r '.[0].id' "$T/.cel/delegations.json")"
+  mkdir -p "$STUB_WT/.agent"; printf 'FINDING: it is the cache\n' > "$STUB_WT/.agent/report.md"
+  local out; out="$(cd "$T" && "$BIN" collect "$id")"
+  assert_contains "$out" "FINDING: it is the cache"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" reported
+  rm -rf "$T"
+}
+# The report makes the worktree dirty by design; that is not held work.
+test_release_of_a_scout_ignores_its_dirty_report() {
+  _fanout_setup
+  printf 'brief\n' > "$T/look.md"
+  (cd "$T" && "$BIN" scout widget "$T/look.md") > /dev/null
+  local id; id="$(jq -r '.[0].id' "$T/.cel/delegations.json")"
+  git -C "$STUB_WT" init -q; mkdir -p "$STUB_WT/.agent"; printf 'r\n' > "$STUB_WT/.agent/report.md"
+  (cd "$T" && "$BIN" release "$id") > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  # herdr has its own dirty-worktree refusal and knows nothing about scouts;
+  # release decided the report is not held work, so it must tell herdr so.
+  assert_contains "$(grep '^worktree remove' "$STUB_LOG")" "--force"
+  rm -rf "$T"
+}
+test_status_shows_scouts_as_such() {
+  _fanout_setup
+  printf 'brief\n' > "$T/look.md"
+  (cd "$T" && "$BIN" scout widget "$T/look.md") > /dev/null
+  assert_contains "$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)" "scout"
+  rm -rf "$T"
+}
+
+# ---- profile choice is recorded with its reason -------------------------------
+test_delegate_records_why_a_profile_was_chosen() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-WHY "$T/spec.md" --because "design-heavy ticket") > /dev/null
+  assert_eq "$(jq -r '.[0].profile_reason' "$T/.cel/delegations.json")" "design-heavy ticket"
+  rm -rf "$T"
+}
+
+# A scout reads and reports; the CLI that ships tickets in bulk is often the
+# wrong one for that (no web tools, shallow model). Binding role_profiles.scout
+# means nobody has to remember --profile, and the ledger shows which model did
+# the research. Without the binding a scout takes the worker's profile, as before.
+_fanout_bind_profiles() { # [scout-binding]
+  cat >> "$T/workspace.yaml" <<EOF
+worker_profiles:
+  cheap: { runtime: omp, model: worker-model, thinking: low }
+  deep:  { runtime: omp, model: scout-model, thinking: high }
+role_profiles:
+  worker: cheap
+${1:+  scout: $1}
+EOF
+}
+test_scout_uses_its_own_role_binding() {
+  _fanout_setup; _fanout_bind_profiles deep
+  printf 'brief\n' > "$T/b.md"
+  (cd "$T" && "$BIN" scout widget "$T/b.md") > /dev/null
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" deep
+  assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" scout-model
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "scout-model"
+  rm -rf "$T"
+}
+test_scout_falls_back_to_the_worker_binding_when_unbound() {
+  _fanout_setup; _fanout_bind_profiles
+  printf 'brief\n' > "$T/b.md"
+  (cd "$T" && "$BIN" scout widget "$T/b.md") > /dev/null
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" cheap
+  rm -rf "$T"
+}
+test_ship_delegation_ignores_the_scout_binding() {
+  _fanout_setup; _fanout_bind_profiles deep
+  (cd "$T" && "$BIN" delegate widget WG-9 "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" cheap
+  rm -rf "$T"
+}
+
+# ---- the verdict in collect and land -------------------------------------------
+# result.md is what the worker says happened; the verdict is what did. collect
+# records it in the ledger, and land refuses a configured gate that did not pass.
+_fanout_verify_stub() { # <gate-passed true|false>
+  VSTUB="$T/verify-stub.sh"
+  cat > "$VSTUB" <<EOF
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+printf '{"at":"x","gate":{"configured":true,"passed":$1},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:$([ "$1" = true ] && echo PASS || echo FAIL)"
+EOF
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_collect_records_the_verdict_in_the_ledger() {
+  _fanout_setup; _fanout_verify_stub true
+  (cd "$T" && "$BIN" delegate widget WG-VER "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$(cd "$T" && "$BIN" collect WG-VER)"
+  assert_contains "$out" "verdict gate:PASS"
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" true
+  assert_eq "$(jq -r '.[0].verdict.red_then_green' "$T/.cel/delegations.json")" true
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_refuses_a_failed_gate() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_stub false
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed with a failed gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "did not pass"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_proceeds_when_the_gate_passes() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_stub true
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  grep -q "^pr merge" "$GH_LOG" || { echo "did not merge with a passing gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# A worktree sits OUTSIDE the workspace tree, so a worker's pane starts with a
+# bare login shell and no env.local. Any profile that depends on a provider key
+# - every `isolated:` one by construction - then dies on its first call, while
+# the orchestrator's own preflight passes because it can still read env.local.
+# The env has to be loaded into the pane before the agent starts, and by
+# SOURCING, so no secret is ever typed into a pane.
+test_worker_pane_loads_the_workspace_env_before_the_agent_starts() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ENV "$T/spec.md") > /dev/null
+  local run_line start_line
+  run_line="$(grep -n '^pane run' "$STUB_LOG" | head -1 | cut -d: -f1)"
+  start_line="$(grep -n '^agent start' "$STUB_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$run_line" ] || { echo "workspace env was never loaded: $(cat "$STUB_LOG")"; rm -rf "$T"; return 1; }
+  [ "$run_line" -lt "$start_line" ] || { echo "env loaded after the agent started"; rm -rf "$T"; return 1; }
+  assert_contains "$(grep '^pane run' "$STUB_LOG" | head -1)" "ws env alpha"
+  # the command is a source, never the values
+  ! grep '^pane run' "$STUB_LOG" | grep -q 'API_KEY=' || { echo "a key was typed into the pane"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A worker that has written its result and gone IDLE is finished. The live-agent
+# rule was meant to stop a BUSY agent being declared done; "still alive" stood in
+# for "still working" and did not survive contact with a worker that finishes and
+# waits. Its row read `running` with the work pushed and the PR open.
+test_status_marks_finished_when_agent_is_idle_with_a_result() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-IDLE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_STATUS=idle "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "finished"
+  rm -rf "$T"
+}
+# ...but an idle agent that wrote nothing is still thinking or wedged, not
+# orphaned: only a DEAD agent with no result is orphaned.
+test_idle_agent_without_a_result_stays_running() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-IDLE2 "$T/spec.md") > /dev/null
+  rm -f "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_STATUS=idle "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  rm -rf "$T"
+}
+# Blocked is waiting on a human, not finished, even with a result on disk.
+test_blocked_agent_is_not_reconciled_to_finished() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-BLK "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent" && printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && STUB_STATUS=blocked "$BIN" status) > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  rm -rf "$T"
+}
+# Reconciliation is a poll, so it only helps someone who runs status. The worker
+# is also told to say so itself, to the orchestrator's mailbox - which it cannot
+# derive, standing as it does in a worktree that resolves to its own name.
+test_worker_is_told_to_report_to_the_orchestrator_mailbox() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-SAY "$T/spec.md") > /dev/null
+  # the stub logs `echo "$@"`, so a multi-line prompt spans multiple log lines
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$log" "cel inbox send widget-orch"
+  assert_contains "$log" "WG-SAY:"
+  rm -rf "$T"
+}
+test_scout_is_told_to_report_to_the_orchestrator_mailbox() {
+  _fanout_setup
+  printf 'brief\n' > "$T/look.md"
+  (cd "$T" && "$BIN" scout widget "$T/look.md") > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "cel inbox send widget-orch"
+  rm -rf "$T"
+}
+
+# The orchestrator mailbox must use the complete shared sanitiser, not half
+# of the sanitiser - lowercase and substitute, but no 32-character truncation.
+# A repo name past 27 characters therefore addressed an untruncated mailbox
+# while the orchestrator answered to the truncated one, so every completion
+# notice from that repo was filed where nobody reads.
+test_the_orchestrator_mailbox_is_truncated_like_every_other_name() {
+  local long=repository-with-a-very-long-name
+  assert_eq "$(bash -c 'source "$1/lib/run.sh"; _run_agent_name "$2-orch"' _ "$CEL_ROOT" "$long")" \
+            "$(bash -c 'source "$1/lib/inbox.sh"; _inbox_sanitise "$2-orch"' _ "$CEL_ROOT" "$long")"
+}
+# A workspace name is not validated against whitespace, and an unquoted two-word
+# name reaches `cel ws env` as two arguments - of which it reads only the first.
+# The lookup fails, eval of empty output still succeeds, and the agent starts
+# with no credentials at all.
+test_the_workspace_env_selector_is_shell_quoted() {
+  _fanout_setup
+  sed -i 's/^name: alpha$/name: two words/' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-Q "$T/spec.md") > /dev/null 2>&1 || true
+  local line; line="$(grep '^pane run' "$STUB_LOG" | head -1)"
+  assert_contains "$line" "ws env"
+  ! printf '%s' "$line" | grep -q "ws env two words" \
+    || { echo "unquoted multi-word workspace name reached the pane"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A worker stands in ~/.herdr/worktrees/..., where
+# ws_current finds nothing, so an unqualified `cel inbox send` resolves the
+# workspace to the literal `default` - a mailbox no orchestrator reads. The
+# completion notice has to name the workspace, or the whole announcement is a
+# no-op in exactly the silent way it was written to prevent.
+test_the_completion_notice_names_the_workspace() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-WS "$T/spec.md") > /dev/null
+  local log; log="$(cat "$STUB_LOG")"
+  # AND IN THE POSITION THE PARSER ACCEPTS. `cel inbox send` takes <to> and
+  # <message> positionally and flags only after them, so `--workspace` placed
+  # before the message is read AS the message and the command dies with
+  # "unknown argument". A prompt that cannot run is worth nothing.
+  assert_contains "$log" "cel inbox send widget-orch"
+  assert_contains "$log" "--workspace alpha --kind status"
+  ! printf '%s' "$log" | grep -q "send widget-orch --workspace" \
+    || { echo "--workspace precedes the message; the command would die"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_the_scouts_notice_names_the_workspace_too() {
+  _fanout_setup
+  printf 'brief\n' > "$T/b.md"
+  (cd "$T" && "$BIN" scout widget "$T/b.md") > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "--workspace alpha"
+  rm -rf "$T"
+}
+
+test_release_refuses_unknown_base_and_detached_head() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-UNKNOWN "$T/spec.md") >/dev/null
+  git -C "$STUB_WT" checkout -q -b task-without-remote
+  git -C "$STUB_WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/missing
+  local out
+  if out="$(cd "$T" && "$BIN" release WG-UNKNOWN 2>&1)"; then echo "released with unknown base"; return 1; fi
+  assert_contains "$out" "unknown=base"
+  git -C "$STUB_WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$STUB_WT" checkout --detach -q
+  if out="$(cd "$T" && "$BIN" release WG-UNKNOWN 2>&1)"; then echo "released detached HEAD"; return 1; fi
+  assert_contains "$out" "unknown=branch"
+  ! grep -q '^worktree remove' "$STUB_LOG" || { echo "destructive sink called"; return 1; }
+  rm -rf "$T"
+}
+
+test_release_refuses_git_status_and_commit_comparison_errors() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ERROR "$T/spec.md") >/dev/null
+  local real_git; real_git="$(command -v git)"
+  mkdir "$T/bin"
+  cat > "$T/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *" $FAIL_GIT_COMMAND "*) exit 128;; esac
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$T/bin/git"
+  local op out
+  for op in status rev-list; do
+    if out="$(cd "$T" && PATH="$T/bin:$PATH" REAL_GIT="$real_git" FAIL_GIT_COMMAND="$op" "$BIN" release WG-ERROR 2>&1)"; then
+      echo "release ignored Git error"; return 1
+    fi
+    assert_contains "$out" "unknown="
+  done
+  ! grep -q '^worktree remove' "$STUB_LOG" || { echo "destructive sink called"; return 1; }
+  rm -rf "$T"
+}
+
+test_scout_release_does_not_exempt_unrelated_dirty_files() {
+  _fanout_setup
+  (cd "$T" && "$BIN" scout widget "$T/spec.md") >/dev/null
+  local id; id="$(jq -r '.[0].id' "$T/.cel/delegations.json")"
+  mkdir -p "$STUB_WT/.agent"
+  printf 'report\n' > "$STUB_WT/.agent/report.md"
+  printf 'source work\n' > "$STUB_WT/source.txt"
+  if (cd "$T" && "$BIN" release "$id" >/dev/null 2>&1); then echo "scout lost source work"; return 1; fi
+  ! grep -q '^worktree remove' "$STUB_LOG" || { echo "destructive sink called"; return 1; }
+  rm -rf "$T"
+}
+
+test_status_invalid_roster_does_not_reconcile_live_delegations() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LIVE "$T/spec.md") >/dev/null
+  local json
+  for json in '{}' '{"result":{"agents":null}}' '{"result":{"agents":[{"pane_id":"wZ:p1"}]}}'; do
+    (cd "$T" && STUB_AGENTS_JSON="$json" "$BIN" status) >/dev/null
+    assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  done
+  rm -rf "$T"
+}
+
+test_fanout_ledger_replacement_is_atomic_even_with_foreign_tmpdir() {
+  _fanout_setup
+  mkdir -p "$T/bin" "$T/foreign"
+  local real_mv; real_mv="$(command -v mv)"
+  cat > "$T/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+src="${@: -2:1}"; dst="${@: -1}"
+if [ "$(dirname "$src")" != "$(dirname "$dst")" ]; then
+  echo 'non-atomic cross-directory ledger replace' >&2; exit 96
+fi
+before="$(stat -c '%d:%i' "$src")"
+"$REAL_MV" "$@" || exit
+[ "$(stat -c '%d:%i' "$dst")" = "$before" ] || exit 97
+EOF
+  chmod +x "$T/bin/mv"
+  local foreign="$T/foreign"
+  [ ! -d /dev/shm ] || foreign=/dev/shm
+  (cd "$T" && TMPDIR="$foreign" PATH="$T/bin:$PATH" REAL_MV="$real_mv" "$BIN" delegate widget WG-ATOMIC "$T/spec.md") >/dev/null
+  assert_eq "$(jq -r '.[0].id' "$T/.cel/delegations.json")" WG-ATOMIC
+  rm -rf "$T"
+}
+
+test_concurrent_fanout_writers_preserve_both_delegations() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-FIRST "$T/spec.md") >/dev/null &
+  local first=$!
+  (cd "$T" && "$BIN" delegate widget WG-SECOND "$T/spec.md") >/dev/null &
+  local second=$!
+  wait "$first"; wait "$second"
+  assert_eq "$(jq -r 'map(.id) | sort | join(",")' "$T/.cel/delegations.json")" "WG-FIRST,WG-SECOND"
+  rm -rf "$T"
+}
+
+test_fanout_failed_ledger_rename_preserves_rows_and_cleans_temp() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-RENAME "$T/spec.md") >/dev/null
+  local before; before="$(cat "$T/.cel/delegations.json")"
+  mkdir "$T/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/mv"
+  chmod +x "$T/bin/mv"
+  if (cd "$T" && STUB_AGENTS_EMPTY=1 PATH="$T/bin:$PATH" "$BIN" status >/dev/null 2>&1); then
+    echo "failed ledger replacement reported success"; return 1
+  fi
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  local f
+  for f in "$T/.cel/delegations.json".tmp.*; do
+    [ ! -e "$f" ] || { echo "failed replacement leaked temporary file"; return 1; }
+  done
+  rm -rf "$T"
+}

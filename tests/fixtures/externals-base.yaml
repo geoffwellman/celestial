@@ -1,0 +1,6 @@
+plugins:
+  superpowers: { source: example/superpowers, ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
+  eli5:        { source: example/explanations/eli5, ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb }
+herdr_plugins:
+  workspace-manager: { source: example/workspace-manager, ref: cccccccccccccccccccccccccccccccccccccccc }
+  triage:            { source: example/triage, ref: dddddddddddddddddddddddddddddddddddddddd }

@@ -1,0 +1,29 @@
+{
+  "lineLayout": "expanded",
+  "pathLevels": 2,
+  "gitStatus": {
+    "enabled": true,
+    "showDirty": true,
+    "showAheadBehind": true
+  },
+  "display": {
+    "showContextBar": true,
+    "contextValue": "percent",
+    "showCompactions": true,
+    "showAgents": true,
+    "showTodos": true,
+    "showTools": true,
+    "toolsMaxVisible": 4,
+    "showUsage": true,
+    "showDuration": true,
+    "showOutputStyle": true,
+    "showConfigCounts": true,
+    "showSessionName": true
+  },
+  "colors": {
+    "context": "green",
+    "usage": "brightBlue",
+    "warning": "yellow",
+    "critical": "red"
+  }
+}

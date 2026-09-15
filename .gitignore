@@ -1,0 +1,22 @@
+core/skills/herdr/
+workspace/
+spikes/
+.claude/skills/
+.env
+.env.*
+!.env.example
+env.local
+*.local
+*.local.*
+*.pem
+*.key
+secrets.json
+.agent/
+.cel/
+.claude/worktrees/
+__pycache__/
+*.pyc
+
+# Machine-local session snapshots are never publication inputs.
+tools/herdr/snapshots/
+/registry.yaml

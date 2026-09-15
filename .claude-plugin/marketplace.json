@@ -1,0 +1,16 @@
+{
+  "name": "celestial",
+  "owner": {
+    "name": "Geoff Wellman"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Celestial, an AI software factory for coordinating coding agents across workspaces."
+  },
+  "plugins": [
+    {
+      "name": "celestial",
+      "source": "./plugins/celestial",
+      "description": "Set up your Celestial AI software factory: /celestial:setup walks through the human setup steps for a workspace."
+    }
+  ]
+}

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# cel-verify - a VERDICT for a worker's branch, not a prose review.
+#
+# "Generation is not the bottleneck anymore. Verification is." Delegation here
+# is cheap, parallel, ticketed and model-agnostic; verification was a prose
+# skill and a `gate: null`. This writes <worktree>/.agent/verdict.json with
+# one structured answer per dimension, so collect can print it, land can
+# refuse on it, and the dashboard can show it - and so "did the gate pass" is
+# a field, not a sentence somebody has to read.
+#
+#   gate    the repo's configured test command, actually run here, with its
+#           exit and the last lines of output
+#   tests   whether tests were written BEFORE the implementation - a test-only
+#           commit ahead of the first source commit on the branch. Evidence,
+#           not enforcement: post-hoc tests pass regardless of correctness,
+#           and this makes that visible per branch rather than arguing about it
+#   diff    size, so a "one-line fix" that touched forty files is seen
+#   checks  CI state on the PR, review decision on the PR (via gh)
+#
+# Never dies on a missing input: absent gate -> configured=false, no PR ->
+# unknown. The verdict is always written; a partial verdict beats none.
+set -uo pipefail
+: "${CEL_ROOT:=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../.." && pwd)}"
+# shellcheck source=lib/common.sh
+. "$CEL_ROOT/lib/common.sh"
+GH="${CEL_VERIFY_GH:-gh}"
+
+usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--base <ref>] [--slug owner/repo] [--branch b] [--quiet]"; }
+[ $# -ge 1 ] || usage
+wt="$1"; shift
+gate="" base="" slug="" branch="" quiet=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gate) gate="$2"; shift 2;; --base) base="$2"; shift 2;; --slug) slug="$2"; shift 2;;
+    --branch) branch="$2"; shift 2;; --quiet) quiet=1; shift;; *) usage;;
+  esac
+done
+[ -d "$wt" ] || die "cel-verify: no such worktree: $wt"
+git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || die "cel-verify: $wt is not a git checkout"
+
+[ -n "$branch" ] || branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [ -z "$base" ]; then
+  base="$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  [ -n "$base" ] || base="origin/main"
+fi
+git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
+
+# --- gate ------------------------------------------------------------------
+g_conf=false g_ran=false g_pass=null g_tail=""
+if [ -n "$gate" ] && [ "$gate" != "null" ]; then
+  g_conf=true; g_ran=true
+  out="$(cd "$wt" && timeout "${CEL_VERIFY_GATE_TIMEOUT:-600}" bash -lc "$gate" 2>&1)"; rc=$?
+  [ "$rc" -eq 0 ] && g_pass=true || g_pass=false
+  g_tail="$(printf '%s' "$out" | tail -n 12)"
+fi
+
+# --- tests: red then green? --------------------------------------------------
+# Walk the branch's commits oldest-first. A commit that touches ONLY test files
+# before any commit touching source is red-then-green evidence. null when no
+# test file was touched at all.
+is_test() { case "$1" in *test*|*spec*|*__tests__*|*.test.*|*.spec.*) return 0;; esac; return 1; }
+t_files=0 rg=null rg_detail="no commits past base"
+if [ -n "$base" ]; then
+  first_test_only="" first_src=""
+  n=0
+  while read -r sha; do
+    [ -n "$sha" ] || continue
+    n=$((n+1))
+    has_test=0 has_src=0
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if is_test "$f"; then has_test=1; t_files=$((t_files+1)); else has_src=1; fi
+    done < <(git -C "$wt" diff-tree --no-commit-id --name-only -r "$sha" 2>/dev/null)
+    [ "$has_test" = 1 ] && [ "$has_src" = 0 ] && [ -z "$first_test_only" ] && first_test_only=$n
+    [ "$has_src" = 1 ] && [ -z "$first_src" ] && first_src=$n
+  done < <(git -C "$wt" rev-list --reverse "$base..HEAD" 2>/dev/null)
+  if [ "$n" -eq 0 ]; then rg_detail="no commits past base"
+  elif [ "$t_files" -eq 0 ]; then rg=null; rg_detail="no test files touched in $n commit(s)"
+  elif [ -n "$first_test_only" ] && { [ -z "$first_src" ] || [ "$first_test_only" -lt "$first_src" ]; }; then
+    rg=true; rg_detail="test-only commit #$first_test_only precedes first source commit${first_src:+ #$first_src}"
+  else
+    rg=false; rg_detail="tests arrived with or after the implementation (first source commit #$first_src)"
+  fi
+fi
+
+# --- diff ------------------------------------------------------------------
+d_files=0 d_ins=0 d_del=0
+if [ -n "$base" ]; then
+  read -r d_files d_ins d_del < <(git -C "$wt" diff --shortstat "$base..HEAD" 2>/dev/null \
+    | awk '{f=0;i=0;d=0; for(k=1;k<=NF;k++){ if($(k+1)~/^files?/)f=$k; if($(k+1)~/^insertion/)i=$k; if($(k+1)~/^deletion/)d=$k } print f+0, i+0, d+0}')
+  : "${d_files:=0}"; : "${d_ins:=0}"; : "${d_del:=0}"
+fi
+
+# --- PR: checks + review -------------------------------------------------------
+c_state=unknown r_dec=unknown pr_num=null
+if [ -n "$slug" ] && [ -n "$branch" ] && command -v "$GH" >/dev/null 2>&1; then
+  prj="$("$GH" pr view "$branch" --repo "$slug" --json number,reviewDecision,statusCheckRollup 2>/dev/null || true)"
+  if [ -n "$prj" ]; then
+    pr_num="$(printf '%s' "$prj" | jq -r '.number // null')"
+    r_dec="$(printf '%s' "$prj" | jq -r 'if (.reviewDecision // "") == "" then "NONE" else .reviewDecision end')"
+    c_state="$(printf '%s' "$prj" | jq -r '
+      [.statusCheckRollup[]? | (.conclusion // .state // "")] as $s
+      | if ($s|length)==0 then "NONE"
+        elif ($s|map(select(.=="FAILURE" or .=="ERROR"))|length)>0 then "FAILURE"
+        elif ($s|map(select(.=="PENDING" or .=="IN_PROGRESS" or .=="QUEUED" or .==""))|length)>0 then "PENDING"
+        else "SUCCESS" end')"
+  else c_state=NONE; r_dec=NONE; fi
+fi
+
+mkdir -p "$wt/.agent"
+jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg base "$base" \
+  --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
+  --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
+  --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
+  --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
+  { at: $at, branch: $branch, base: $base,
+    gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, tail: $gtail },
+    tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
+    diff:   { files: $df, insertions: $di, deletions: $dd },
+    checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
+
+if [ "$quiet" -eq 0 ]; then
+  gs="gate:$([ "$g_conf" = true ] && { [ "$g_pass" = true ] && echo PASS || echo FAIL; } || echo none)"
+  rs="red-green:$(case "$rg" in true) echo yes;; false) echo no;; *) echo n/a;; esac)"
+  printf 'verdict %s  %s  diff:%s files +%s/-%s  checks:%s  review:%s\n' "$gs" "$rs" "$d_files" "$d_ins" "$d_del" "$c_state" "$r_dec"
+fi
+# exit reflects the gate only: that is the one dimension with a right answer
+[ "$g_pass" = false ] && exit 1
+exit 0

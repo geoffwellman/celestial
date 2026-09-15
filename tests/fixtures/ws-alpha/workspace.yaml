@@ -1,0 +1,12 @@
+name: alpha
+kind: hustle
+org: someone
+tickets: { system: none, adhoc: "AH-<yymmdd>" }
+policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
+runtime: { root: claude, orchestrator: claude, worker: omp }
+tools: []
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test

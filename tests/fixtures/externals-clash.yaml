@@ -1,0 +1,2 @@
+herdr_plugins:
+  triage: { source: example/triage, ref: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee }

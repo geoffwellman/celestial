@@ -1,0 +1,37 @@
+agents:
+  claude:
+    bin: claude
+    version: 0.0.0
+    install: "printf '%s\\n' 'exit 0' | bash"
+    skills_dir: ~/.claude/skills
+    agents_dir: ~/.claude/agents
+    herdr_integration: claude
+    required: true
+    role_injection:
+      strategy: append_flag
+      flag: --append-system-prompt
+    launch_args: [--dangerously-skip-permissions]
+  omp:
+    bin: omp
+    version: 0.0.0
+    install: "true"
+    skills_dir: ~/.omp/skills
+    agents_dir: ~/.omp/agent/agents
+    required: false
+    role_injection:
+      strategy: append_flag
+      flag: --append-system-prompt
+    launch_args: [--auto-approve]
+  codex:
+    bin: codex
+    version: 0.0.0
+    install: "true"
+    skills_dir: ~/.codex/skills
+    required: false
+    role_injection:
+      strategy: prompt_arg
+
+generated_skills:
+  herdr:
+    command: "herdr --skill"
+    requires: herdr

@@ -1,0 +1,15 @@
+# pi extensions, installed by `cel setup` (agents.yaml extensions_file).
+# pi is deliberately minimal; these fill in the capabilities the plane expects.
+# Direct versions verified at registry.npmjs.org on 2026-09-15. npm verifies
+# registry integrity, but transitive dependencies are not locked by this list.
+@ollama/pi-web-search@0.0.5
+@superwhisper/pi@1.0.2
+@gotgenes/pi-anthropic-auth@2.0.9
+pi-mcp-adapter@2.34.0
+pi-subagents@0.68.0
+pi-lens@4.1.6
+pi-background-tasks@2.5.0
+@plannotator/pi-extension@0.27.14
+@juicesharp/rpiv-todo@2.10.1
+@narumitw/pi-statusline@0.50.0
+pi-memory@0.4.2
