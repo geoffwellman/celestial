@@ -150,6 +150,16 @@ test_gc_keeps_work_during_delegate_admission_lock() {
 
 _gc_idle_fixture() {
   _gc_managed_fixture
+  # Control only the uptime read. A fresh CI host may not yet have two
+  # hours of uptime to backdate into; process ownership stays real /proc.
+  GC_UPTIME=10000
+  read() {
+    if [[ "$(readlink /proc/self/fd/0)" == /proc/uptime ]]; then
+      builtin read "$@" <<< "$GC_UPTIME 0"
+    else
+      builtin read "$@"
+    fi
+  }
   CEL_MANIFEST="$T/agents.yaml"
   printf 'agents:\n  bash:\n    role_injection: {strategy: append_flag_file, flag: --role-file}\n' > "$CEL_MANIFEST"
   printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
@@ -168,10 +178,7 @@ _gc_idle_fixture() {
 }
 
 _gc_age_observation() {
-  local uptime rest file="$HOME/.local/state/cel/gc-idle.json"
-  read -r uptime rest < /proc/uptime
-  jq --argjson since "$((${uptime%%.*}-7200))" '.idle |= with_entries(.value = $since)' "$file" > "$T/aged"
-  mv "$T/aged" "$file"
+  GC_UPTIME=$((GC_UPTIME + 7200))
 }
 
 test_gc_reaps_only_after_observed_idle_duration_for_exact_owned_process() {

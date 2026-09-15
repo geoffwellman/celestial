@@ -14,6 +14,15 @@ source "$CEL_ROOT/lib/doctor.sh"
 _doctor_ws_setup() {
   T="$(mktemp -d)"
   CEL_REGISTRY="$T/registry.yaml"
+  CEL_MANIFEST="$CEL_ROOT/tests/fixtures/agents.yaml"
+  # Doctor checks executable availability, not a real agent installation.
+  mkdir -p "$T/bin"
+  local bin_
+  for bin_ in claude omp; do
+    printf '#!/bin/sh\nexit 0\n' > "$T/bin/$bin_"
+    chmod +x "$T/bin/$bin_"
+  done
+  PATH="$T/bin:$PATH"
   mkdir -p "$T/alpha/repos/widget"
   cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/alpha/workspace.yaml"
   printf 'repos/\nspikes/\n.cel/\n' > "$T/alpha/.gitignore"
@@ -25,6 +34,7 @@ test_check_workspaces_passes_and_warns_local_only() {
   _doctor_ws_setup
   local out rc=0
   out="$(check_workspaces)" || rc=$?
+  [ "$rc" -eq 0 ] || printf '%s\n' "$out"
   assert_eq "$rc" "0"
   assert_contains "$out" "alpha is local-only"
   rm -rf "$T"
