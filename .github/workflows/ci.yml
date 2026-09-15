@@ -35,6 +35,8 @@ jobs:
           git config --global init.defaultBranch main
       - name: Run regression suite
         run: bash tests/run.sh
+      - name: Run HTTP security regressions
+        run: node --test tests/http-server.test.mjs
       - name: Scan source and every published local ref
         run: python3 tools/release/hygiene.py --all-history
       - name: Install checksum-verified secret scanner

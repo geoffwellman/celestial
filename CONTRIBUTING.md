@@ -12,6 +12,7 @@ third-party tools into your real user environment.
 
 ```sh
 bash tests/run.sh
+node --test tests/http-server.test.mjs
 python3 tools/release/hygiene.py
 ```
 

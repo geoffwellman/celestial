@@ -21,8 +21,9 @@ separate publication surfaces.
 - Inspect filenames, source, tests, documentation, generated files and
   configuration examples. Replace identifying incidents with general rules and
   synthetic fixtures. Keep credentials and machine state out of Git.
-- Run `bash tests/run.sh`; verify changed CLI/browser behavior against isolated
-  real runtimes. Record failures honestly and resolve regressions.
+- Run `bash tests/run.sh` and `node --test tests/http-server.test.mjs`; verify
+  changed CLI/browser behavior against isolated real runtimes. Record failures
+  honestly and resolve regressions.
 - Review public documentation, installation pins, error handling, supported
   platforms and security reporting instructions.
 - Stage the intended publication files. The current-source scanner uses
