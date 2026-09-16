@@ -154,3 +154,53 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# --- products -------------------------------------------------------------
+# An orchestrator owns a PRODUCT: one or more repos. `bundle` is declared over
+# widget+gadget, `lone` is undeclared and therefore implicit - and an implicit
+# product must launch byte-for-byte the way a repo always has.
+_ws_products() {
+  T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-products/workspace.yaml" "$T/"
+  mkdir -p "$T/repos/widget" "$T/repos/gadget" "$T/repos/lone"
+}
+test_run_orchestrator_targets_a_declared_product() {
+  _ws_products; local out; out="$(cd "$T" && cmd_run orchestrator --product bundle --dry-run)"
+  assert_contains "$out" "--cwd $T/products/bundle"
+  assert_contains "$out" "--label bundle/orch"
+  assert_contains "$out" "agent start bundle-orch"
+  assert_contains "$out" "--append-system-prompt-file $T/.cel/products/bundle/role-orchestrator.md"
+  rm -rf "$T"
+}
+test_run_orchestrator_for_an_implicit_product_is_unchanged() {
+  _ws_products; local out; out="$(cd "$T" && cmd_run orchestrator --repo lone --dry-run)"
+  assert_contains "$out" "--cwd $T/repos/lone"
+  assert_contains "$out" "--label lone/orch"
+  assert_contains "$out" "agent start lone-orch"
+  assert_contains "$out" "--append-system-prompt-file $T/.cel/role-orchestrator.md"
+  rm -rf "$T"
+}
+# --repo still works for an orchestrator and means "the product this repo is
+# in" - so a member repo lands in the product's pane, not one of its own.
+test_run_orchestrator_repo_resolves_to_its_product() {
+  _ws_products; local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "--cwd $T/products/bundle"
+  assert_contains "$out" "agent start bundle-orch"
+  rm -rf "$T"
+}
+# The single-repo auto-fill becomes a single-PRODUCT auto-fill: ws-alpha has
+# one repo, hence one implicit product, and nothing about it changes.
+test_run_orchestrator_autofills_a_lone_product() {
+  _ws; local out; out="$(cd "$T" && cmd_run orchestrator --dry-run)"
+  assert_contains "$out" "widget/orch"
+  rm -rf "$T"
+}
+# The role body of two products must not overwrite each other, and the name
+# must keep ending in role-orchestrator.md: lib/gc.sh recognises long-lived
+# agents by that substring in the cmdline.
+test_run_role_file_is_per_declared_product() {
+  _ws_products
+  assert_eq "$(_run_role_file "$T" orchestrator bundle)" "$T/.cel/products/bundle/role-orchestrator.md"
+  assert_eq "$(_run_role_file "$T" orchestrator lone)" "$T/.cel/role-orchestrator.md"
+  assert_eq "$(_run_role_file "$T" orchestrator)" "$T/.cel/role-orchestrator.md"
+  rm -rf "$T"
+}
