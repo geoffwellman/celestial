@@ -287,7 +287,7 @@ test_inbox_cursors_are_per_reader() {
 }
 
 _inbox_registry_fixture() { # two registered workspaces, mail in each
-  _inbox_sandbox
+  _inbox_sandbox; export CEL_INBOX_DIR
   REG="$(mktemp -d)"; export CEL_REGISTRY="$REG/registry.yaml"
   mkdir -p "$REG/alpha" "$REG/beta"
   printf 'workspaces:\n  alpha:\n    path: %s\n  beta:\n    path: %s\n' "$REG/alpha" "$REG/beta" > "$CEL_REGISTRY"
@@ -327,7 +327,7 @@ test_inbox_watch_all_workspaces_sees_a_new_line_from_either() {
 
 # A decision or a blocker is the only mail worth interrupting a human for.
 _inbox_notify_fixture() {
-  _inbox_sandbox
+  _inbox_sandbox; export CEL_INBOX_DIR
   NB="$(mktemp -d)"; export PATH="$NB:$PATH" HERDR_ENV=1
   export NB_LOG="$NB/log"; : > "$NB_LOG"
   cat > "$NB/herdr" <<'EOS'
