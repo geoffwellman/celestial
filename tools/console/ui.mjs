@@ -218,18 +218,22 @@ const App = ({ refresh }) => {
       return;
     }
     setBusy(true);
-    setStatus('translating…');
+    setStatus(`asking ${translatorLabel()}…`);
     try {
       const state = `fleet: ${JSON.stringify(doc)}\nopen decisions: ${JSON.stringify(items)}`;
-      const cmd = await translate({ sentence: text, state });
+      const { cmd, raw } = await translate({ sentence: text, state });
       setBusy(false);
-      if (!cmd) { setStatus("couldn't translate - type the command"); return; }
+      if (!cmd) {
+        const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
+        setStatus(`no command for that - rephrase, or type the command${said}`);
+        return;
+      }
       setProposed(cmd);
       setValue(cmd);
       setStatus('proposed - Enter runs it, Esc discards it');
     } catch (e) {
       setBusy(false);
-      setStatus(e instanceof NoTranslator ? e.message : `translator: ${e.message}`);
+      setStatus(e instanceof NoTranslator ? e.message : `model: ${e.message}`);
     }
   }, [value, proposed, doc, items, execute]);
 

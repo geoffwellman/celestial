@@ -91,6 +91,11 @@ First public release, published from a reviewed clean source snapshot.
   require an explicit keep/discard decision.
 
 ### Fixed
+- `cel console` no longer says "translate": a sentence is *asked* of the
+  model (`--ask` on the CLI; `--translate` still accepted), a miss shows what
+  the model actually said so you can rephrase, and the prompt carries worked
+  examples so "what's blocked" is plain `cel fleet`, "what is waiting on me"
+  spans all workspaces, and "take me to <product>" focuses `<product>-orch`
 - `cel console` no longer steals the first letter of what you type: the
   navigation keys (`j`/`k`/`f`/`o`/`r`/`w`/`q`/`i`) were bound on an empty
   command line, so "what's blocked" flipped the panel and "quit" exited. Every

@@ -148,7 +148,7 @@ test_console_translate_returns_one_command() {
   export OPENROUTER_API_KEY=test-key
   _console_stub_server 'cel inbox read --for root --workspace alpha'
   local out
-  out="$(node "$CONSOLE_MJS" --translate 'what is waiting on me in alpha')"
+  out="$(node "$CONSOLE_MJS" --ask 'what is waiting on me in alpha')"
   assert_eq "$out" 'cel inbox read --for root --workspace alpha'
   _console_stub_stop
   _console_teardown
@@ -160,9 +160,10 @@ test_console_translate_rejects_prose() {
   export OPENROUTER_API_KEY=test-key
   _console_stub_server 'I think you probably want to look at the fleet first.'
   local out rc=0
-  out="$(node "$CONSOLE_MJS" --translate 'muse at me' 2>&1)" || rc=$?
+  out="$(node "$CONSOLE_MJS" --ask 'muse at me' 2>&1)" || rc=$?
   assert_eq "$rc" 1
-  assert_contains "$out" "couldn't translate"
+  assert_contains "$out" 'no command for that'
+  assert_contains "$out" 'model said: I think you probably want' 
   _console_stub_stop
   _console_teardown
 }
@@ -173,9 +174,9 @@ test_console_translate_rejects_prose() {
 test_console_translate_without_config_says_so() {
   _console_setup
   local out rc=0
-  out="$(node "$CONSOLE_MJS" --translate 'anything' 2>&1)" || rc=$?
+  out="$(node "$CONSOLE_MJS" --ask 'anything' 2>&1)" || rc=$?
   assert_eq "$rc" 1
-  assert_contains "$out" 'no translator configured'
+  assert_contains "$out" 'no model configured'
   assert_contains "$out" 'console.provider'
   # The panels still render without any translator at all.
   out="$(node "$CONSOLE_MJS" --render-once)"
@@ -188,7 +189,7 @@ test_console_translate_request_carries_vocabulary_and_fleet() {
   _console_config
   export OPENROUTER_API_KEY=test-key
   _console_stub_server 'cel fleet'
-  node "$CONSOLE_MJS" --translate 'how is the box' >/dev/null
+  node "$CONSOLE_MJS" --ask 'how is the box' >/dev/null
   local body
   body="$(cat "$T/body.json")"
   assert_contains "$body" 'cel-fanout status'
@@ -203,7 +204,7 @@ test_console_key_from_env_beats_key_in_file() {
   _console_config 'key: file-key'
   export OPENROUTER_API_KEY=env-key
   _console_stub_server 'cel fleet'
-  node "$CONSOLE_MJS" --translate 'how is the box' >/dev/null
+  node "$CONSOLE_MJS" --ask 'how is the box' >/dev/null
   local h
   h="$(cat "$T/headers.json")"
   assert_contains "$h" 'env-key'
@@ -221,7 +222,7 @@ test_console_warns_about_a_world_readable_config() {
   chmod 644 "$T/config.yaml"
   _console_stub_server 'cel fleet'
   local err
-  err="$(node "$CONSOLE_MJS" --translate 'how is the box' 2>&1 >/dev/null)"
+  err="$(node "$CONSOLE_MJS" --ask 'how is the box' 2>&1 >/dev/null)"
   assert_contains "$err" 'chmod 600'
   _console_stub_stop
   _console_teardown

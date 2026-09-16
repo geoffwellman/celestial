@@ -44,16 +44,16 @@ console_install_deps() { # [tool-dir]
   c_ok "console UI deps (ink)"
 }
 
-cmd_console() { # [--refresh SECS] [--render-once] [--run "<cmd>"] [--translate "<text>"]
+cmd_console() { # [--refresh SECS] [--render-once] [--run "<cmd>"] [--ask "<text>"]
   have node || die "cel console: node is not on PATH"
   local dir; dir="$(console_tool_dir)"
 
   # The non-interactive modes are deliberately allowed WITHOUT the ink install:
-  # --render-once and --translate are what the tests drive and what a pipe
+  # --render-once and --ask are what the tests drive and what a pipe
   # wants, and neither draws anything.
   local interactive=1 a
   for a in "$@"; do
-    case "$a" in --render-once|--translate|--run) interactive=0 ;; esac
+    case "$a" in --render-once|--ask|--translate|--run) interactive=0 ;; esac
   done
   if [ "$interactive" -eq 1 ] && ! console_deps_ok "$dir"; then
     c_err "$(console_deps_hint "$dir")"
