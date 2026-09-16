@@ -253,3 +253,134 @@ test_inbox_me_still_knows_repos_and_root() {
   assert_eq "$(cd "$IT" && _inbox_me)" "root"
   rm -rf "$IT"
 }
+
+# --- the console stands outside every workspace ------------------------------
+# Identity comes from where an agent stands, and the console stands nowhere:
+# its directory is not a workspace, so without a case of its own it fell
+# through to "root" and drained the root orchestrator's mailbox - the same
+# silent theft the products/ case was written to stop.
+test_inbox_me_is_console_from_its_directory_or_its_role() {
+  local C; C="$(mktemp -d)"
+  assert_eq "$(CEL_INBOX_ME='' CEL_CONSOLE_DIR="$C" bash -c 'cd "$1"; source "$2/lib/inbox.sh"; _inbox_me' _ "$C" "$CEL_ROOT")" "console"
+  mkdir -p "$C/sub"
+  assert_eq "$(CEL_INBOX_ME='' CEL_CONSOLE_DIR="$C" bash -c 'cd "$1/sub"; source "$2/lib/inbox.sh"; _inbox_me' _ "$C" "$CEL_ROOT")" "console"
+  assert_eq "$(CEL_INBOX_ME='' CEL_ROLE=console bash -c 'source "$1/lib/inbox.sh"; _inbox_me' _ "$CEL_ROOT")" "console"
+  rm -rf "$C"
+}
+
+# TWO READERS OF ONE MAILBOX MUST NOT SHARE A CURSOR. "root" is the address
+# orchestrators escalate to - the top, whoever is listening - and both a
+# standing root pane and the console read it. One cursor between them means
+# whichever looked first consumed the other's mail.
+test_inbox_cursors_are_per_reader() {
+  _inbox_sandbox
+  ( CEL_INBOX_ME=root _inbox_send root "a question" --from games-orch --workspace demo ) >/dev/null 2>&1
+  assert_contains "$(CEL_INBOX_ME=root _inbox_read --for root --workspace demo)" "a question"
+  [ -f "$CEL_INBOX_DIR/demo.root.cursor" ] || { echo "no recipient cursor"; return 1; }
+  assert_eq "$(CEL_INBOX_ME=root _inbox_read --for root --workspace demo)" ""
+  # the console reads the same mailbox and still sees it, on its own cursor
+  assert_contains "$(CEL_INBOX_ME=console _inbox_read --for root --workspace demo)" "a question"
+  [ -f "$CEL_INBOX_DIR/demo.root.console.cursor" ] || { echo "no per-reader cursor"; return 1; }
+  assert_eq "$(CEL_INBOX_ME=console _inbox_read --for root --workspace demo)" ""
+  assert_eq "$(CEL_INBOX_ME=console _inbox_count --for root --workspace demo)" "0"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+_inbox_registry_fixture() { # two registered workspaces, mail in each
+  _inbox_sandbox
+  REG="$(mktemp -d)"; export CEL_REGISTRY="$REG/registry.yaml"
+  mkdir -p "$REG/alpha" "$REG/beta"
+  printf 'workspaces:\n  alpha:\n    path: %s\n  beta:\n    path: %s\n' "$REG/alpha" "$REG/beta" > "$CEL_REGISTRY"
+}
+test_inbox_read_all_workspaces_prefixes_every_line() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "from alpha" --workspace alpha ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "from beta"  --workspace beta  ) >/dev/null 2>&1
+  local out; out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces)"
+  assert_contains "$out" "[alpha]"
+  assert_contains "$out" "from alpha"
+  assert_contains "$out" "[beta]"
+  assert_contains "$out" "from beta"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+test_inbox_count_all_workspaces_sums_every_mailbox() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "one" --workspace alpha ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "two" --workspace beta  ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "three" --workspace beta ) >/dev/null 2>&1
+  assert_eq "$(CEL_INBOX_ME=console _inbox_count --for root --all-workspaces)" "3"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+# A decision landing in one workspace must not wait for the operator to be on
+# that tab: the console tails every mailbox at once.
+test_inbox_watch_all_workspaces_sees_a_new_line_from_either() {
+  _inbox_registry_fixture
+  local out; out="$(mktemp)"
+  ( CEL_INBOX_ME=console CEL_INBOX_NOTIFY=0 timeout 5 bash -c 'source "$1/lib/inbox.sh"; _inbox_watch --for root --all-workspaces' _ "$CEL_ROOT" > "$out" 2>/dev/null & )
+  sleep 1.5
+  ( CEL_INBOX_ME=t _inbox_send root "late news" --workspace beta ) >/dev/null 2>&1
+  sleep 2
+  assert_contains "$(cat "$out")" "late news"
+  assert_contains "$(cat "$out")" "[beta]"
+  rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+
+# A decision or a blocker is the only mail worth interrupting a human for.
+_inbox_notify_fixture() {
+  _inbox_sandbox
+  NB="$(mktemp -d)"; export PATH="$NB:$PATH" HERDR_ENV=1
+  export NB_LOG="$NB/log"; : > "$NB_LOG"
+  cat > "$NB/herdr" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NB_LOG"
+EOS
+  chmod +x "$NB/herdr"
+}
+_inbox_watch_then_send() { # <kind> <notify>
+  ( CEL_INBOX_ME=root CEL_INBOX_NOTIFY="$2" timeout 5 bash -c 'source "$1/lib/inbox.sh"; _inbox_watch --for root --workspace demo' _ "$CEL_ROOT" >/dev/null 2>&1 & )
+  sleep 1.5
+  ( CEL_INBOX_ME=t _inbox_send root "needs you" --kind "$1" --workspace demo ) >/dev/null 2>&1
+  sleep 2
+}
+test_watch_raises_a_notification_for_a_decision_only() {
+  _inbox_notify_fixture
+  _inbox_watch_then_send decision 1
+  assert_contains "$(cat "$NB_LOG")" "notification show"
+  : > "$NB_LOG"
+  _inbox_watch_then_send status 1
+  assert_eq "$(cat "$NB_LOG")" ""
+  rm -rf "$NB" "$CEL_INBOX_DIR"
+}
+test_watch_notifications_can_be_switched_off() {
+  _inbox_notify_fixture
+  _inbox_watch_then_send decision 0
+  assert_eq "$(cat "$NB_LOG")" ""
+  rm -rf "$NB" "$CEL_INBOX_DIR"
+}
+
+# The console has no cwd to derive a workspace from, so every cel-linear
+# subcommand takes --workspace and resolves the key from THAT workspace's
+# env.local rather than from whatever the pane's shell happened to inherit.
+test_cel_linear_workspace_flag_loads_that_workspaces_key() {
+  local T; T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" TMPDIR="$T" PATH="$T:$PATH"
+  export LINEAR_TEST_DIR="$T" LINEAR_API_URL=https://linear.invalid/graphql
+  unset LINEAR_API_KEY
+  mkdir -p "$T/gadget"
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/gadget/"
+  printf 'export LINEAR_API_KEY=key-from-gadget\n' > "$T/gadget/env.local"
+  printf 'workspaces:\n  gadget:\n    path: %s\n' "$T/gadget" > "$CEL_REGISTRY"
+  cat > "$T/curl" <<'EOS'
+#!/usr/bin/env bash
+set -eu
+while [ $# -gt 0 ]; do
+  case "$1" in -H) case "$2" in @*) cat "${2#@}" > "$LINEAR_TEST_DIR/header";; esac; shift 2;; *) shift;; esac
+done
+cat >/dev/null
+printf '{"data":{"viewer":{"name":"Example"}}}'
+EOS
+  chmod +x "$T/curl"
+  ( cd "$T" && "$CEL_ROOT/core/skills/linear/bin/cel-linear" me --workspace gadget ) >/dev/null 2>&1
+  assert_eq "$(cat "$T/header")" 'Authorization: key-from-gadget'
+  rm -rf "$T"
+}
