@@ -24,7 +24,8 @@ _fanout_setup() {
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
+  "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
+  "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
@@ -1056,10 +1057,11 @@ _fanout_products_setup() {
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  echo '{"result":{"workspaces":[
+  "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[
       {"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}},
       {"workspace_id":"wG","worktree":{"repo_root":"'"$STUB_REPO_GADGET"'","is_linked_worktree":false}},
-      {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}';;
+      {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}'; fi;;
+  "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "pane list")       printf '%s' "${STUB_PANES_JSON:-{\"result\":{\"panes\":[]}}}";;
   "agent list")      echo '{"result":{"agents":[]}}';;
   *) echo '{}';;
@@ -1118,19 +1120,28 @@ test_status_reports_slots_per_product() {
 # A declared product's orchestrator stands in <ws>/products/<name>, which is
 # not a git toplevel - so the toplevel lookup finds the REPO orchestrator's
 # workspace and nests every worker under the wrong parent.
-test_delegate_nests_under_the_product_pane_when_one_exists() {
+# herdr will only cut a worktree of the repo a workspace OWNS, and offers no
+# way to nest under an arbitrary parent (measured live, 2026-09-16: under a
+# product pane it cut a worktree of the workspace-config repo). So a product
+# pane is never the nest target - the repo's own workspace is, always.
+test_delegate_nests_under_the_repo_workspace_even_when_a_product_pane_exists() {
   _fanout_products_setup
   export STUB_PANES_JSON='{"result":{"panes":[{"pane_id":"wP:p1","cwd":"'"$T"'/products/bundle","workspace_id":"wP"}]}}'
   (cd "$T" && "$BIN" delegate widget WG-NEST "$T/spec.md") > /dev/null
-  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wP"
+  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wY"
+  ! grep '^worktree create' "$STUB_LOG" | grep -q -- '--workspace wP' || { echo "nested under the product pane"; rm -rf "$T"; return 1; }
   unset STUB_PANES_JSON
   rm -rf "$T"
 }
-
-test_delegate_falls_back_to_the_toplevel_match_without_a_product_pane() {
+# When the repo's orchestrator has been retired in favour of a product one, no
+# workspace holds the repo - a container is created so workers have a home.
+test_delegate_creates_a_container_workspace_when_none_holds_the_repo() {
   _fanout_products_setup
-  (cd "$T" && "$BIN" delegate widget WG-NONEST "$T/spec.md") > /dev/null
-  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wY"
+  export STUB_NO_WS=1
+  (cd "$T" && "$BIN" delegate widget WG-HOME "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^workspace create' "$STUB_LOG" | head -1)" "--label widget/workers"
+  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wC"
+  unset STUB_NO_WS
   rm -rf "$T"
 }
 

@@ -338,25 +338,29 @@ cmd_delegate() {
   fi
 
   # WHERE THE WORKER NESTS. herdr shows a worktree under the workspace it was
-  # created from, so this picks the ORCHESTRATOR'S pane: the worker appears
-  # beneath whoever is responsible for it. That used to be the repo's own
-  # workspace, found by matching its git toplevel - which is exactly right for
-  # a repo standing alone. A declared product's orchestrator stands in
-  # <ws>/products/<p>, a directory that is no git repository at all, so the
-  # toplevel match would nest its workers under one of the repos instead and
-  # the product pane would show none of them. Look for the product pane first,
-  # fall back to the toplevel, and only then admit defeat.
-  if [ -z "$herdr_ws" ]; then
-    local pdir; pdir="$(ws_product_dir "$wsdir" "$product")"
-    herdr_ws="$("$HERDR" pane list 2>/dev/null | jq -r --arg d "$pdir" \
-      '.result.panes[]? | select(.cwd == $d) | .workspace_id' | head -1 || true)"
-  fi
+  # created from - and it will only create a worktree of the repo that
+  # workspace OWNS. Measured live on 2026-09-16: asked to create under a
+  # product orchestrator's pane (cwd <ws>/products/<p>, no repo of its own),
+  # herdr walked up to the nearest git repository - the WORKSPACE CONFIG repo
+  # - and cut a worktree of that. There is no parent/nesting option in herdr
+  # at all. So the nest target is always the repo's own workspace, found by
+  # its git toplevel, whether or not a product orchestrator exists; and when
+  # no workspace holds that repo (its orchestrator retired in favour of a
+  # product one), a CONTAINER workspace is created for it - a bare shell
+  # labelled <repo>/workers - so workers still have a home in the sidebar
+  # instead of appearing at the top level, homeless, which is how this file
+  # once lost track of a whole batch.
   if [ -z "$herdr_ws" ]; then
     local toplevel; toplevel="$(git -C "$repodir" rev-parse --show-toplevel)"
     herdr_ws="$("$HERDR" workspace list | jq -r --arg t "$toplevel" \
       '.result.workspaces[] | select(.worktree.is_linked_worktree == false) | select(.worktree.repo_root == $t) | .workspace_id' \
       | head -1)"
-    [ -n "$herdr_ws" ] || die "no herdr workspace found for $toplevel - pass --herdr-workspace"
+    if [ -z "$herdr_ws" ]; then
+      herdr_ws="$("$HERDR" workspace create --cwd "$repodir" --label "$repo/workers" --no-focus 2>/dev/null \
+        | jq -r '.result.workspace.workspace_id // empty')"
+      [ -n "$herdr_ws" ] && c_ok "no workspace held $repo - created container '$repo/workers' ($herdr_ws) for its workers"
+    fi
+    [ -n "$herdr_ws" ] || die "no herdr workspace holds $toplevel and one could not be created - pass --herdr-workspace"
   fi
 
   # BRANCH FROM THE REMOTE DEFAULT, NEVER FROM THE CHECKOUT'S CURRENT HEAD.
