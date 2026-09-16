@@ -1275,3 +1275,136 @@ test_status_shows_spikes_as_such() {
   assert_contains "$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)" "spike"
   rm -rf "$T"
 }
+
+# ---- a gate that ran out of time is not a gate that failed --------------------
+# `timeout` returns 124 when it killed the command. Read as a failure, a green
+# branch was recorded as gate:FAIL and land refused a verdict that did not
+# exist. Unknown is not passed - but it is not failed either, and the two lead
+# to opposite actions.
+_fanout_verify_timeout_stub() { # [secs]
+  VSTUB="$T/verify-timeout-stub.sh"
+  local secs="${1:-600}"
+  cat > "$VSTUB" <<EOF
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+printf '{"at":"x","gate":{"configured":true,"passed":null,"timed_out":true,"timeout_secs":$secs,"tail":"killed after ${secs}s - no verdict"},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:TIMEOUT(${secs}s)"
+exit 2
+EOF
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_collect_warns_and_records_a_timed_out_gate() {
+  _fanout_setup; _fanout_verify_timeout_stub 600
+  (cd "$T" && "$BIN" delegate widget WG-TO "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$( (cd "$T" && "$BIN" collect WG-TO) 2>&1 )"
+  assert_contains "$out" "gate:TIMEOUT(600s)"
+  assert_contains "$out" "--gate-timeout"
+  assert_contains "$out" "CEL_VERIFY_GATE_TIMEOUT"
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
+  assert_eq "$(jq -r '.[0].verdict.gate_timed_out' "$T/.cel/delegations.json")" true
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_refuses_a_timed_out_gate_as_unknown_not_failed() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed an unfinished gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gate did not complete"
+  assert_contains "$out" "CEL_VERIFY_GATE_TIMEOUT"
+  assert_contains "$out" "--gate-from-ci"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# CI can only stand in for the gate if the checks that stood in are the ones the
+# base branch is PROTECTED by. Any-green-check-will-do proves nothing: a docs
+# build or a lint job going green says nothing about the suite.
+_fanout_ci_gh_stub() { # <protection-json|empty to make it unreadable> <check-runs-json>
+  cat > "$T/gh-stub.sh" <<STUB_EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+case "\$1 \$2" in
+  "api user") echo fleetbot;;
+  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"deadbeefcafe","baseRefName":"main","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr merge") exit 0;;
+  *) case "\$2" in
+       */protection) [ -n '$1' ] || exit 1; printf '%s' '$1';;
+       *check-runs)  printf '%s' '$2';;
+       *) echo '{}';;
+     esac;;
+esac
+STUB_EOF
+  chmod +x "$T/gh-stub.sh"
+}
+test_gate_from_ci_lands_on_the_required_check_and_names_it() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"},{"name":"suite","conclusion":"success"}]}'
+  (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) > /dev/null
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge with CI evidence"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "Gate: CI (suite) on deadbeefcafe" "$GH_LOG" || { echo "merge body does not name the required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# The finding that produced this rule: an unrelated green check must not carry
+# a merge while the check that actually gates the branch never ran.
+test_gate_from_ci_refuses_when_the_required_check_is_absent() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed on an unrelated green check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_refuses_a_required_check_that_failed_or_is_pending() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"},{"name":"suite","status":"in_progress","conclusion":null}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed on a pending required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# EVERY required context, not the first one that happens to be green.
+test_gate_from_ci_requires_every_required_check() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite","lint"]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed with a missing required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "lint"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# An unprotected base has no such thing as "the required check", so there is
+# nothing for CI to stand in with. Same for protection this token cannot read:
+# absence of evidence is not evidence.
+test_gate_from_ci_refuses_when_protection_is_absent_or_unreadable() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '' '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed without readable branch protection"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "protection"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_refuses_protection_with_no_required_contexts() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":[]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed with no required contexts"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "requires no check"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_status_renders_a_timed_out_gate_as_TO() {
+  _fanout_setup; _fanout_verify_timeout_stub 600
+  (cd "$T" && "$BIN" delegate widget WG-TOS "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-TOS) > /dev/null 2>&1
+  local out; out="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)"
+  assert_contains "$out" "GATE"
+  assert_contains "$out" "TO"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
