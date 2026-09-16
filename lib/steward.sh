@@ -63,7 +63,9 @@ _steward_agent_name() {
 # Which herdr agent owns a mailbox - the inverse of lib/inbox.sh's identity.
 #
 #   root            -> <workspace>-root
-#   <repo>-orch     -> <repo>-orch
+#   <repo>-orch     -> <repo>-orch   (and <product>-orch alike: a product
+#                      orchestrator's mailbox is named by the same rule, so
+#                      the *-orch case below already covers it)
 #   anything else   -> A WORKER, whose mailbox name IS its agent name: both
 #                      come from the same <repo>-<branch> string through the
 #                      same sanitiser (_inbox_sanitise and _run_agent_name are
@@ -77,6 +79,19 @@ _steward_mailbox_want() { # <who> <workspace-name>
     *-orch) _steward_agent_name "${1%-orch}/orch" ;;
     *) printf '%s' "$1" ;;
   esac
+}
+
+# Where a <name>-orch actually stands, for the cwd fallbacks below. A DECLARED
+# product has its own directory under products/; an implicit one is only a
+# repo. Telling them apart by reading workspace.yaml is not available here -
+# identity in this plane is derived from paths, deliberately - so the
+# directory's existence is the test. Both sweeps call this rather than
+# spelling the choice out twice, which is how the two of them drifted before.
+_steward_orch_dir() { # <wsdir> <name>
+  local wsdir="$1" name="$2" p="${2%-orch}"
+  [ "$p" != "$name" ] || return 0
+  if [ -d "$wsdir/products/$p" ]; then printf '%s/products/%s' "$wsdir" "$p"
+  else printf '%s/repos/%s' "$wsdir" "$p"; fi
 }
 
 _steward_review_sweep() { # <agents-json>
@@ -507,10 +522,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
       if [ "$who" = root ]; then
         target="$wsdir"
       else
-        local repo="${who%-orch}"
-        if [ "$repo" != "$who" ]; then
-          target="$wsdir/repos/$repo"
-        fi
+        target="$(_steward_orch_dir "$wsdir" "$who")"
         # A WORKER gets no `target`: splitting <repo>-<branch> back apart is
         # guesswork the moment a repo name contains a hyphen, and this file
         # already learned that nudging the wrong pane is worse than nudging
@@ -565,7 +577,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
         want2="$(_steward_agent_name "$(registry_name_of_dir "$(registry_path "$ws")" 2>/dev/null || printf '%s' "$ws")/root")"; target2="$(registry_path "$ws")"
       else
         local repo2="${who%-orch}"
-        [ "$repo2" != "$who" ] && { want2="$(_steward_agent_name "$repo2/orch")"; target2="$(registry_path "$ws")/repos/$repo2"; }
+        [ "$repo2" != "$who" ] && { want2="$(_steward_agent_name "$repo2/orch")"; target2="$(_steward_orch_dir "$(registry_path "$ws")" "$who")"; }
       fi
       [ -n "$want2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg n "$want2" '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
       [ -n "$pane2" ] || { [ -n "$target2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg d "$target2" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
