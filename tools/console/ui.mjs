@@ -130,7 +130,7 @@ const App = ({ refresh }) => {
   const [items, setItems] = useState([]);
   const [tail, setTail] = useState([]);
   const [sel, setSel] = useState(0);
-  const [pane, setPane] = useState('fleet');      // which panel j/k moves in
+  const [pane, setPane] = useState('fleet');      // which panel the selection moves in
   const [detail, setDetail] = useState(null);
   const [value, setValue] = useState('');
   const [proposed, setProposed] = useState('');
@@ -207,6 +207,7 @@ const App = ({ refresh }) => {
   const submit = useCallback(async () => {
     const text = value.trim();
     if (!text) return;
+    if (/^(q|quit|exit)$/.test(text)) { exit(); return; }
     // A PROPOSED command runs on the SECOND Enter and not before. The model
     // never executes anything: it writes a line, the operator reads it, and
     // the keystroke that runs it is theirs.
@@ -238,12 +239,18 @@ const App = ({ refresh }) => {
       setProposed(''); setValue(''); setStatus('discarded');
       return;
     }
-    if (key.ctrl && input === 'c') { exit(); return; }
     if (key.return) { if (detail) { setDetail(null); return; } submit(); return; }
     if (key.tab) {
       const { value: v, hits } = complete(value, doc);
       setValue(v);
       if (hits.length > 1) setStatus(hits.slice(0, 8).join('  '));
+      return;
+    }
+    // Selection moves on Shift+arrows (or Ctrl+N / Ctrl+P); plain arrows are
+    // history, as in a shell.
+    if ((key.upArrow || key.downArrow) && key.shift) {
+      const list = pane === 'fleet' ? rows : items;
+      setSel((s) => key.upArrow ? Math.max(0, s - 1) : Math.min(list.length - 1, s + 1));
       return;
     }
     if (key.upArrow || key.downArrow) {
@@ -257,42 +264,48 @@ const App = ({ refresh }) => {
     }
     if (key.backspace || key.delete) { setValue((v) => v.slice(0, -1)); return; }
 
-    // Navigation keys act only on an EMPTY command line. The alternative -
-    // a modal console - means an operator typing `cel fleet` discovers halfway
-    // through that f focused a pane, and a UI that eats your keystrokes is one
-    // people stop trusting.
-    if (!value) {
+    // Every action is a Ctrl chord. The first cut bound bare letters (j, k,
+    // f, o, r, w, q, i) "only on an empty command line" - which is exactly
+    // where the first letter of every sentence lands: "what's blocked" flipped
+    // the panel and lost its w, "quit" exited, "resolve 12" resolved the
+    // selected row instead. A letter typed into a console must always be a
+    // letter typed.
+    if (key.ctrl) {
       const list = pane === 'fleet' ? rows : items;
-      if (input === 'j') { setSel((s) => Math.min(list.length - 1, s + 1)); return; }
-      if (input === 'k') { setSel((s) => Math.max(0, s - 1)); return; }
-      if (input === '\t') return;
-      if (input === 'w') { setPane((p) => (p === 'fleet' ? 'open' : 'fleet')); setSel(0); return; }
-      if (input === 'q') { exit(); return; }
-      if (input === 'f' && pane === 'fleet') {
-        const r = rows[sel];
-        if (r && r.kind === 'unit') execute(`herdr agent focus ${r.name}-orch`);
-        return;
-      }
-      if (input === 'o' && pane === 'fleet') {
-        const r = rows[sel];
-        if (r) {
+      switch (input) {
+        case 'c': exit(); return;
+        case 'u': setValue(''); setProposed(''); return;
+        case 'n': setSel((s) => Math.min(list.length - 1, s + 1)); return;
+        case 'p': setSel((s) => Math.max(0, s - 1)); return;
+        case 't': setPane((p) => (p === 'fleet' ? 'open' : 'fleet')); setSel(0); return;
+        case 'f': {
+          const r = rows[sel];
+          if (pane === 'fleet' && r && r.kind === 'unit') execute(`herdr agent focus ${r.name}-orch`);
+          else setStatus('Ctrl+F focuses the selected unit on the fleet panel (Ctrl+T switches panel)');
+          return;
+        }
+        case 'o': {
+          const r = rows[sel];
+          if (pane !== 'fleet' || !r) { setStatus('Ctrl+O opens the selected workspace dashboard on the fleet panel'); return; }
           (async () => {
             const out = await run(CEL_BIN, ['dash', '--ensure', '--workspace', r.ws]);
             const url = /(https?:\/\/\S+)/.exec(out.out + out.err);
             if (url) { spawn('xdg-open', [url[1]], { stdio: 'ignore', detached: true }).unref(); setStatus(`opened ${url[1]}`); }
             else setStatus('no dashboard URL - try cel dash --ensure');
           })();
+          return;
         }
-        return;
+        case 'r': {
+          const it = detail || (pane === 'open' ? items[sel] : null);
+          if (it) { setDetail(null); execute(`cel inbox resolve ${it.id} --workspace ${it.ws}`); }
+          else setStatus('Ctrl+R resolves the selected item on the waiting panel');
+          return;
+        }
+        case 'e': if (pane === 'open') setDetail(items[sel] || null); else setStatus('Ctrl+E shows the selected item on the waiting panel'); return;
+        default: return;
       }
-      if (input === 'r' && (pane === 'open' || detail)) {
-        const it = detail || items[sel];
-        if (it) { setDetail(null); execute(`cel inbox resolve ${it.id} --workspace ${it.ws}`); }
-        return;
-      }
-      if (input === 'i' && pane === 'open') { setDetail(items[sel] || null); return; }
     }
-    if (input && !key.ctrl && !key.meta) setValue((v) => v + input);
+    if (input && !key.meta) setValue((v) => v + input);
   });
 
   const width = stdout?.columns || 80;
@@ -311,7 +324,7 @@ const App = ({ refresh }) => {
       h(Text, { color: C.dim }, '▏')),
     h(Box, null,
       h(Text, { color: C.dim },
-        `${busy ? '… ' : ''}${status || 'j/k select · w switch panel · f focus · o dashboard · i detail · r resolve · q quit'}`),
+        `${busy ? '… ' : ''}${status || '⇧↑/↓ select · ^T panel · ^F focus · ^O dashboard · ^E detail · ^R resolve · ^U clear · quit: ^C or type quit'}`),
       h(Box, { flexGrow: 1 }),
       h(Text, { color: C.dim }, `${translatorLabel()} · ${at}`)));
 };
