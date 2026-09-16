@@ -171,7 +171,7 @@ test_hook_fails_open_on_garbage() {
 }
 
 # --- a product orchestrator -------------------------------------------------
-# CEL-2's product orchestrator stands in <ws>/products/<p>, not in a repo
+# A product orchestrator stands in <ws>/products/<p>, not in a repo
 # checkout. It is an orchestrator by the same path derivation, which means the
 # same refusals: it may write its own notes and specs, and it may not reach
 # into a repo.

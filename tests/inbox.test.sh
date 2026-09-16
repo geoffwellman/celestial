@@ -230,6 +230,8 @@ test_prune_dry_run_changes_nothing() {
   _inbox_prune --workspace w --dry-run >/dev/null
   assert_eq "$(wc -l < "$T/w.jsonl")" "$before"
   rm -rf "$T"
+}
+
 # A PRODUCT orchestrator stands in <ws>/products/<p>, not in a repo checkout,
 # and until it was taught that coordinate it drained root's mailbox - the same
 # silent theft of root's mail the repos/ case was written to stop. Identity
