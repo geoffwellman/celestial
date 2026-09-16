@@ -25,7 +25,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
 const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm ci --ignore-scripts) - or run cel setup`;
 
-const usage = `usage: cel console [--refresh SECS] [--render-once] [--run "<cmd>"] [--translate "<text>"]`;
+const usage = `usage: cel console [--refresh SECS] [--render-once] [--run "<cmd>"] [--ask "<text>"]`;
 
 const argv = process.argv.slice(2);
 const opts = { refresh: 10, renderOnce: false, run: '', translate: '' };
@@ -34,7 +34,7 @@ for (let i = 0; i < argv.length; i += 1) {
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
-  else if (a === '--translate') { opts.translate = argv[++i] || ''; }
+  else if (a === '--ask' || a === '--translate') { opts.translate = argv[++i] || ''; }
   else if (a === '-h' || a === '--help') { process.stdout.write(`${usage}\n`); process.exit(0); }
   else { process.stderr.write(`cel console: unknown argument '${a}'\n${usage}\n`); process.exit(2); }
 }
@@ -51,16 +51,17 @@ const translatorState = async () => {
 
 const main = async () => {
   if (opts.translate) {
-    let cmd;
+    let cmd, raw;
     try {
-      cmd = await translate({ sentence: opts.translate, state: await translatorState() });
+      ({ cmd, raw } = await translate({ sentence: opts.translate, state: await translatorState() }));
     } catch (e) {
       if (e instanceof NoTranslator) { process.stderr.write(`${e.message}\n`); process.exit(1); }
       process.stderr.write(`${e.message}\n`);
       process.exit(1);
     }
     if (!cmd) {
-      process.stderr.write("couldn't translate - type the command\n");
+      const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
+      process.stderr.write(`no command for that - rephrase, or type the command${said}\n`);
       process.exit(1);
     }
     process.stdout.write(`${cmd}\n`);
