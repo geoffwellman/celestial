@@ -1419,3 +1419,73 @@ test_status_renders_a_timed_out_gate_as_TO() {
   assert_contains "$out" "TO"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+
+# ---- the ledger lock must not outlive the invocation that took it -----------
+# On 2026-09-16 every `cel-fanout release` on a workspace blocked on flock of
+# .cel/delegations.lock for an hour and a half. The holders were seven test
+# servers a gate had booted: collect held the lock on an inherited descriptor,
+# the verifier it spawned inherited that descriptor, the gate died, and the
+# servers it had backgrounded did not. A lock whose owner is gone but whose
+# descriptor is still open cannot be told apart from a lock in use, so nothing
+# recovered - the fleet just waited. The descriptor must therefore be closed
+# on every spawn out of the locked region.
+test_collect_does_not_leak_the_ledger_lock_into_the_verifier() {
+  _fanout_setup
+  local vstub="$T/verify-leaky.sh" fds="$T/verifier-fds" spid="$T/sleeper.pid"
+  cat > "$vstub" <<STUB
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+ls -l /proc/\$\$/fd > "$fds" 2>&1
+# a server of the kind a gate boots: outlives the verifier, inherits its fds
+sleep 60 >/dev/null 2>&1 &
+echo \$! > "$spid"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+STUB
+  chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
+  (cd "$T" && "$BIN" delegate widget WG-LOCK "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-LOCK) > /dev/null
+  local sleeper; sleeper="$(cat "$spid")"
+  # the child a gate leaves behind is still alive - that is the whole point
+  kill -0 "$sleeper" 2>/dev/null || { echo "sleeper died before the assertion"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  local leaked=0
+  grep -q 'delegations\.lock' "$fds" && leaked=1
+  [ "$leaked" -eq 0 ] || { echo "verifier inherited the ledger lock:"; cat "$fds"; }
+  local relocked=0
+  flock -n "$T/.cel/delegations.lock" -c true && relocked=1
+  kill "$sleeper" 2>/dev/null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+  assert_eq "$leaked" 0
+  assert_eq "$relocked" 1
+}
+
+# The same proof at the level of the mechanism every locked region uses, and
+# of its two halves: a child spawned through lock_spawn never sees the
+# descriptor, the CALLER still holds the lock afterwards (a helper that closed
+# it in the calling process would release a ledger mid-update), and a
+# backgrounded spawn that closes the descriptor inline leaves the lock free
+# the moment the region ends, even while the child runs on.
+test_lock_spawn_children_do_not_hold_the_lock_open() {
+  local D out; D="$(mktemp -d)"
+  out="$(CEL_ROOT="$CEL_ROOT" LOCKFILE="$D/delegations.lock" bash -c '
+    set -u
+    . "$CEL_ROOT/lib/registry.sh"
+    exec {fd}>"$LOCKFILE"
+    flock "$fd"
+    if lock_spawn "$fd" bash -c "ls -l /proc/\$\$/fd" | grep -q delegations.lock
+      then echo leaked-into-child; else echo no-lock-fd; fi
+    if flock -n "$LOCKFILE" -c true; then echo lost-the-lock; else echo still-mine; fi
+    sleep 60 {fd}>&- &
+    child=$!
+    exec {fd}>&-
+    kill -0 "$child" 2>/dev/null && echo alive
+    if flock -n "$LOCKFILE" -c true; then echo relocked; else echo still-held; fi
+    kill "$child" 2>/dev/null
+  ' 2>&1)"
+  rm -rf "$D"
+  assert_contains "$out" no-lock-fd
+  assert_contains "$out" still-mine
+  assert_contains "$out" alive
+  assert_contains "$out" relocked
+}

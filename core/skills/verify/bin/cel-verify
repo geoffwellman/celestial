@@ -61,7 +61,40 @@ git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
-  out="$(cd "$wt" && timeout "$gate_timeout" bash -lc "$gate" 2>&1)"; rc=$?
+  # A KILLED GATE MUST TAKE ITS CHILDREN WITH IT. The same 2026-09-16 run that
+  # produced the timeout above also left seven `node tools/pages/server.mjs`
+  # processes alive for a hundred minutes: the suite booted them, the timeout
+  # ended the suite, and nothing ended them. Reparented to init, they kept
+  # every descriptor they had inherited - including the ledger lock of the
+  # collect that had spawned this verifier - and blocked the whole workspace.
+  # So the gate gets its OWN SESSION (setsid) and the timeout kills the GROUP,
+  # escalating to SIGKILL: a single TERM is a request, and a process that is
+  # mid-shutdown or ignoring TERM answers it by staying. The group is also
+  # swept after a gate that finished, because a gate that passes can still
+  # leave a server running, and that server holds the same descriptors.
+  gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
+  gate_killed="$gate_out.killed"
+  ( cd "$wt" && exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
+  gate_pid=$!
+  ( sleep "$gate_timeout"
+    kill -0 "$gate_pid" 2>/dev/null || exit 0
+    : > "$gate_killed"
+    kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null
+  ) > /dev/null 2>&1 &
+  gate_watchdog=$!
+  rc=0; wait "$gate_pid" || rc=$?
+  kill "$gate_watchdog" 2>/dev/null || true
+  wait "$gate_watchdog" 2>/dev/null || true
+  if [ -e "$gate_killed" ]; then
+    rc=124
+    rm -f "$gate_killed"
+    # TERM has already been delivered and the time is up: nothing in the group
+    # gets to negotiate. This is `timeout --kill-after`, applied to the group.
+    kill -KILL -- -"$gate_pid" 2>/dev/null || true
+  else
+    kill -TERM -- -"$gate_pid" 2>/dev/null || true
+  fi
+  out="$(cat "$gate_out")"; rm -f "$gate_out"
   g_tail="$(printf '%s' "$out" | tail -n 12)"
   case "$rc" in
     0) g_pass=true;;

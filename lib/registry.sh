@@ -12,6 +12,35 @@ _CEL_REGISTRY=1
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 _CEL_REGISTRY_DEFAULT="$HOME/.local/share/cel/registry.yaml"
+
+# A LOCK MUST NOT OUTLIVE THE PROCESS THAT TOOK IT. flock lives on the open
+# file description, not on the process, so any child that inherits the
+# descriptor keeps the lock held after its parent is gone - and a lock held by
+# a process that has nothing to do with the data looks exactly like a lock in
+# use, so nothing recovers from it. On 2026-09-16 every `cel-fanout release`
+# on one workspace blocked on .cel/delegations.lock for an hour and a half
+# behind seven test servers a killed gate had left running on inherited
+# descriptors. Bash cannot set FD_CLOEXEC, so every spawn out of a locked
+# region goes through here instead: the descriptor is closed and then the
+# command is exec'd, leaving no copy of the lock anywhere down the tree - not
+# even in an intermediate shell, which would hold it just as effectively as
+# the child. It is a SUBSHELL function on purpose: the close (and the exec)
+# must happen in a forked copy, never in the caller - bash 5.3 can run a
+# command substitution without forking, and a bare `exec` there would replace
+# the caller outright and drop the lock. An external command is exec'd so no
+# intermediate shell is left behind; a shell function or builtin cannot be
+# exec'd and is called in place, which is equally safe once the descriptor is
+# closed. An empty <fd> means "no lock held" and is not an error, so callers
+# pass "${fd:-}" unguarded. A BACKGROUNDED spawn does not go through here:
+# `&` forks a job shell that would keep its own copy of the descriptor for as
+# long as the child runs, so write `cmd {fd}>&- &` and close it inline.
+lock_spawn() ( # <fd>[ <fd>...] <cmd> [args...] - descriptors as ONE argument
+  local _lock_fds="$1" _lock_fd _lock_kind; shift
+  [ $# -gt 0 ] || return 2
+  for _lock_fd in $_lock_fds; do exec {_lock_fd}>&-; done
+  _lock_kind="$(type -t "$1" 2>/dev/null)" || _lock_kind=file
+  case "$_lock_kind" in function|builtin|keyword) "$@" ;; *) exec "$@" ;; esac
+)
 CEL_REGISTRY="${CEL_REGISTRY:-$_CEL_REGISTRY_DEFAULT}"
 
 # One-time migration from the pre-public in-repo location. Fires only when the
@@ -63,9 +92,9 @@ _registry_update() (
   tmp="$(mktemp "$CEL_REGISTRY.tmp.XXXXXX")" || return 1
   trap 'rm -f -- "$tmp"' EXIT
   if [ -e "$CEL_REGISTRY" ] || [ -L "$CEL_REGISTRY" ]; then
-    yq -y "$@" "$CEL_REGISTRY" > "$tmp" || return 1
+    lock_spawn "$fd" yq -y "$@" "$CEL_REGISTRY" > "$tmp" || return 1
   else
-    yq -y "$@" <<< 'workspaces: {}' > "$tmp" || return 1
+    lock_spawn "$fd" yq -y "$@" <<< 'workspaces: {}' > "$tmp" || return 1
   fi
   mv -f -- "$tmp" "$CEL_REGISTRY" || return 1
 )

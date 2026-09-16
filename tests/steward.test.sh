@@ -250,3 +250,63 @@ SH
   assert_eq "$(grep -c widget-orch "$T/prompts" || true)" "0"
   rm -rf "$T"
 }
+
+# ---- orphaned test servers ---------------------------------------------------
+# The seven `node tools/pages/server.mjs` processes that held a workspace's
+# ledger lock for a hundred minutes on 2026-09-16 were invisible: nothing on
+# this box names a test server whose worktree no longer has an agent, so they
+# aged out of everyone's attention while the fleet blocked behind them. The
+# steward names them with pid and port, and reaps one older than an hour.
+# Servers under CEL_ROOT are the box's own services and are never touched.
+_orphan_fixture() { # <age-seconds>; sets ORPHAN_PID and stubs process listing
+  ORPHAN_ROOT="$(mktemp -d)"
+  export CEL_WORKTREE_ROOT="$ORPHAN_ROOT"
+  ORPHAN_WT="$ORPHAN_ROOT/widget-WG-1-x"
+  mkdir -p "$ORPHAN_WT"
+  sleep 60 >/dev/null 2>&1 &
+  ORPHAN_PID=$!
+  ORPHAN_AGE="$1"
+  _steward_server_procs() { printf '%s %s %s %s\n' "$ORPHAN_PID" "$ORPHAN_AGE" 4319 "$ORPHAN_WT"; }
+}
+_orphan_cleanup() { kill -9 "$ORPHAN_PID" 2>/dev/null || true; rm -rf "$ORPHAN_ROOT"; unset CEL_WORKTREE_ROOT; }
+
+test_orphan_sweep_names_a_server_whose_worktree_has_no_agent() {
+  _orphan_fixture 300
+  local out; out="$(_steward_orphan_servers '{"result":{"agents":[]}}' 2>&1)"
+  local alive=0; if kill -0 "$ORPHAN_PID" 2>/dev/null; then alive=1; fi
+  _orphan_cleanup
+  assert_contains "$out" "$ORPHAN_PID"
+  assert_contains "$out" "4319"
+  assert_eq "$alive" 1
+}
+test_orphan_sweep_reaps_a_server_older_than_an_hour() {
+  _orphan_fixture 7200
+  local out; out="$(_steward_orphan_servers '{"result":{"agents":[]}}' 2>&1)"
+  # reap the signalled child, or kill -0 would still find the zombie
+  wait "$ORPHAN_PID" 2>/dev/null || true
+  local alive=0; if kill -0 "$ORPHAN_PID" 2>/dev/null; then alive=1; fi
+  _orphan_cleanup
+  assert_contains "$out" "reaped"
+  assert_eq "$alive" 0
+}
+test_orphan_sweep_leaves_a_server_whose_worktree_still_has_an_agent() {
+  _orphan_fixture 7200
+  local roster out
+  roster="$(printf '{"result":{"agents":[{"pane_id":"p1","agent_status":"idle","cwd":"%s"}]}}' "$ORPHAN_WT")"
+  out="$(_steward_orphan_servers "$roster" 2>&1)"
+  sleep 0.5
+  local alive=0; if kill -0 "$ORPHAN_PID" 2>/dev/null; then alive=1; fi
+  _orphan_cleanup
+  assert_eq "$out" ""
+  assert_eq "$alive" 1
+}
+test_orphan_sweep_never_touches_a_server_outside_the_worktree_root() {
+  _orphan_fixture 7200
+  _steward_server_procs() { printf '%s %s %s %s\n' "$ORPHAN_PID" 7200 4318 "$CEL_ROOT"; }
+  local out; out="$(_steward_orphan_servers '{"result":{"agents":[]}}' 2>&1)"
+  sleep 0.5
+  local alive=0; if kill -0 "$ORPHAN_PID" 2>/dev/null; then alive=1; fi
+  _orphan_cleanup
+  assert_eq "$out" ""
+  assert_eq "$alive" 1
+}
