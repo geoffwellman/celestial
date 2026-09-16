@@ -18,6 +18,15 @@
 # checkout the day this was written. With the guard on, "all work goes through
 # a delegated worker" is a property of the system rather than a request.
 #
+# THE CONSOLE IS THE OTHER WAY ROUND: an allowlist, not a deny list. An
+# orchestrator's job is broad - it reads anything, writes specs, drives the
+# whole factory - and its genuinely dangerous verbs are few, so naming them is
+# both possible and honest. The console's job is narrow: it routes, and its
+# entire vocabulary is a handful of `cel` commands the operator could have
+# typed. Everything outside that vocabulary is a mistake by definition, so the
+# list that must be complete is the list of things it MAY do, and a command
+# nobody thought about is refused rather than waved through.
+#
 # Sourced by tools/hooks/orchestrator-guard.sh (claude PreToolUse) and by the
 # tests. Depends on nothing but common.sh so the hook stays fast and cannot be
 # taken down by unrelated library breakage.
@@ -28,13 +37,21 @@ _CEL_GUARD=1
 # derivation lib/inbox.sh uses for mail identity, duplicated on purpose: the
 # guard must not import inbox state to decide whether to block a command.
 #   ~/.herdr/worktrees/...        worker       (writes are its whole job)
+#   the console dir               console      (routes; allowlisted)
 #   <ws>/repos/<repo>[/...]       orchestrator (reads, delegates, lands)
 #   <ws>/products/<p>[/...]       orchestrator (a product orchestrator: same
 #                                 powers, same refusals, different standpoint)
 #   <ws>[/...not under repos]     root
 #   anywhere else                 other        (not the plane's concern)
+#
+# CEL_ROLE=console in the environment says so outright, because unlike every
+# other role the console's cwd is a plain directory a human could also be
+# standing in - path alone is not enough to be sure.
 guard_role_of() { # <cwd>
   local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
+  [ "${CEL_ROLE:-}" = console ] && { printf console; return 0; }
+  local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+  case "$p" in "$cons"|"$cons"/*) printf console; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
   local d="$p"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
@@ -57,8 +74,44 @@ guard_role_of() { # <cwd>
 # orchestrator that has to delegate a typo fix; the cost of a false allow is
 # the incident above. When in doubt the list errs towards deny, and the
 # refusal always says what to do instead.
+# The console's allowlist. Matched against the command with leading whitespace
+# stripped, so the verb has to BE the command rather than appear somewhere in
+# it: `git log` is reading, `cd x && git commit` is not, and a deny list that
+# only looked for "git commit" would pass the second half of a chain it never
+# examined. The refusal names the sanctioned route when there is an obvious
+# one, because "no" without "instead" is how an agent starts improvising.
+_guard_console() { # <command>
+  local c="$1"
+  c="${c#"${c%%[![:space:]]*}"}"
+  case "$c" in
+    cel\ *|*/bin/cel\ *|cel-fanout\ *|*/cel-fanout\ *|cel-linear\ *|*/cel-linear\ *)
+      printf allow; return 0;;
+    gh\ pr\ view*|gh\ pr\ list*|gh\ pr\ checks*|gh\ pr\ comment*|gh\ pr\ diff*|\
+    gh\ issue\ view*|gh\ issue\ list*)
+      printf allow; return 0;;
+    herdr\ agent\ list*|herdr\ agent\ get*|herdr\ agent\ read*|herdr\ agent\ prompt*|\
+    herdr\ agent\ focus*|herdr\ agent\ wait*|herdr\ pane\ read*|herdr\ pane\ list*|\
+    herdr\ workspace\ list*|herdr\ notification\ show*)
+      printf allow; return 0;;
+    cat\ *|ls|ls\ *|grep\ *|jq\ *|yq\ *|head\ *|tail\ *|wc\ *|date|date\ *|\
+    echo\ *|printf\ *|pwd|which\ *)
+      printf allow; return 0;;
+    git\ log*|git\ status*|git\ diff*|git\ show*)
+      printf allow; return 0;;
+  esac
+  local hint="ask the orchestrator that owns it, or route it with cel inbox send"
+  case "$c" in
+    *git\ commit*|*git\ push*|*git\ add\ *|*git\ rebase*|*git\ merge*) hint="delegate it";;
+    *gh\ pr\ merge*|*gh\ pr\ ready*|*gh\ pr\ close*) hint="landing a PR is the owning orchestrator's cel-fanout land";;
+    *herdr\ worktree\ *) hint="worktree lifecycle is cel-fanout delegate / release";;
+    *repos/*|*products/*) hint="a worker does that";;
+  esac
+  printf 'deny the console routes; it does not build - %s' "$hint"
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
+  case "$role" in console) _guard_console "$cmd"; return 0;; esac
   case "$role" in worker|other) printf allow; return 0;; esac
 
   # The sanctioned write paths. These are the mechanism; refusing them would
@@ -146,6 +199,15 @@ guard_classify() { # <role> <command>
 # file, scratch - is the orchestrator's to write.
 guard_classify_path() { # <role> <file_path>
   local role="$1" path="$2"
+  # The console writes its own notes and nothing else: it has no workspace, so
+  # every path outside its directory belongs to someone whose job it is not.
+  if [ "$role" = console ]; then
+    local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+    case "$path" in
+      "$cons"/*) printf allow; return 0;;
+      *) printf 'deny the console routes; it does not build - a worker does that'; return 0;;
+    esac
+  fi
   case "$role" in worker|other) printf allow; return 0;; esac
   case "$path" in
     */repos/*) printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'; return 0;;
