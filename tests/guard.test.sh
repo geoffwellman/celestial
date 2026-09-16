@@ -54,12 +54,57 @@ test_orchestrator_may_write_its_own_notes() {
   _gws; assert_eq "$(guard_classify_path orchestrator "$T/.cel/spec.md")" allow; rm -rf "$T"
 }
 
+# An orchestrator owns the STATE of its own checkout, never its authorship.
+# Before this, `gh pr checkout 1393` was allowed by omission and `git checkout
+# main` was denied: an orchestrator could move onto a PR branch to run it
+# locally and could not move back, so its checkout drifted off main with
+# nobody else standing over it. Moving between refs that already exist creates
+# and discards nothing - the incidents the guard was written for are all
+# authorship.
+test_orchestrator_may_move_its_own_checkout() {
+  local c
+  for c in 'git checkout main' 'git switch main' 'git checkout origin/W-49-slug' \
+           'gh pr checkout 1393' 'git branch -d W-49-slug' \
+           'gh pr edit 12 --add-label builder-preview' 'gh pr edit 12 --remove-label x'; do
+    assert_eq "$(guard_classify orchestrator "$c")" allow
+  done
+}
+# Creating a branch, discarding a file, or reaching into someone else's
+# checkout is not state - it is authorship, or it is another agent's business.
+test_orchestrator_may_not_author_via_checkout() {
+  local c
+  for c in 'git checkout -b new' 'git switch -c new' 'git checkout -- apps/foo.ts' \
+           'git checkout .' 'git restore x' 'git checkout main -- file' \
+           'git -C ~/ws/vhs/repos/widget checkout main' \
+           'git -C ~/.herdr/worktrees/widget/w-49 checkout main' \
+           'git branch -D old' 'git branch -m a b' \
+           'gh pr edit 12 --title x' 'gh pr edit 12 --add-label x --body y' \
+           'gh pr ready 12' 'gh pr merge 12'; do
+    assert_contains "$(guard_classify orchestrator "$c")" deny
+  done
+}
+# The same table from the other two standpoints is untouched: a worker writes,
+# and root's own config repo is not a product checkout.
+test_checkout_table_unchanged_for_root_and_worker() {
+  local c
+  for c in 'git checkout main' 'git checkout -b new' 'git branch -d W-49-slug' \
+           'gh pr edit 12 --title x' 'gh pr merge 12'; do
+    assert_eq "$(guard_classify worker "$c")" allow
+  done
+  assert_eq "$(guard_classify root 'git checkout main')" allow
+  assert_eq "$(guard_classify root 'git checkout -b new')" allow
+  assert_contains "$(guard_classify root 'git -C repos/widget checkout main')" deny
+  assert_contains "$(guard_classify root 'gh pr merge 12')" deny
+  assert_contains "$(guard_classify root 'gh pr edit 12 --add-label x')" deny
+}
+
 # --- what it may not -------------------------------------------------------
 test_orchestrator_may_not_mutate_git() {
   local c
   for c in 'git commit -m x' 'git push origin main' 'git merge feature' 'git rebase main' \
            'git reset --hard' 'git checkout -b new' 'git switch -c new' 'git stash' \
            'git add -A' 'git worktree remove foo' 'git branch -D old' 'git cherry-pick abc' \
+           'git restore x' 'git checkout .' \
            'cd repos/widget && git commit -am fix'; do
     assert_contains "$(guard_classify orchestrator "$c")" deny
   done
