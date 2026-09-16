@@ -29,6 +29,8 @@ _CEL_GUARD=1
 # guard must not import inbox state to decide whether to block a command.
 #   ~/.herdr/worktrees/...        worker       (writes are its whole job)
 #   <ws>/repos/<repo>[/...]       orchestrator (reads, delegates, lands)
+#   <ws>/products/<p>[/...]       orchestrator (a product orchestrator: same
+#                                 powers, same refusals, different standpoint)
 #   <ws>[/...not under repos]     root
 #   anywhere else                 other        (not the plane's concern)
 guard_role_of() { # <cwd>
@@ -38,7 +40,7 @@ guard_role_of() { # <cwd>
   while [ -n "$d" ] && [ "$d" != "/" ]; do
     if [ -f "$d/workspace.yaml" ]; then
       case "$p" in
-        "$d"/repos/*) printf orchestrator;;
+        "$d"/repos/*|"$d"/products/*) printf orchestrator;;
         *)            printf root;;
       esac
       return 0
