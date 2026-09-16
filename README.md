@@ -173,8 +173,11 @@ that returns exactly one command. That command is *proposed*: it lands on your
 command line and runs when you press Enter again, or disappears on `Esc`. The
 model never executes anything.
 
-The translator is optional, and everything above works without it. To wire one
-in, write `~/.local/share/cel/config.yaml` (chmod 600 — it may hold a key):
+The model is optional, and everything above works without it. It is a router,
+not a chat: it knows the vocabulary table and the current fleet, and it can
+only pick a command from that table. "What's blocked" and "take me to standout"
+map; "why did the last build fail" does not, and you get the model's reply on
+the status line so you can rephrase. To wire one in, write `~/.local/share/cel/config.yaml` (chmod 600 — it may hold a key):
 
 ```yaml
 console:

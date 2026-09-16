@@ -95,7 +95,7 @@ export const vocabulary = (root = CEL_ROOT) => {
   } catch { return ''; }
 };
 
-const SYSTEM = (vocab) => `You translate one sentence from a human operator into exactly ONE shell
+const SYSTEM = (vocab) => `You turn one sentence from a human operator into exactly ONE shell
 command from the celestial console's vocabulary. You never explain, never
 apologise and never emit more than one line.
 
@@ -104,9 +104,26 @@ ${vocab}
 
 Rules:
 - Answer with the command alone, on one line, with no backticks and no prose.
-- Use the workspace, repo and agent names from the state below; never invent one.
+- Use the workspace, product and agent names from the state below; never
+  invent one. An orchestrator is named <product>-orch.
+- Questions about state ("how is …", "what's blocked", "what's running") are
+  \`cel fleet\` - plain, never --json, a human reads it.
+- "What is waiting on me" with no workspace named is
+  \`cel inbox open --for root --all-workspaces\`; with one named, that workspace.
+- "Take me to <x>" is \`herdr agent focus <x>-orch\` when <x> is a product.
 - If the sentence does not map onto exactly one of those commands, answer with
-  a single question mark: ?`;
+  a single question mark: ?
+
+Examples:
+what's blocked -> cel fleet
+how is vhs going -> cel fleet
+what is waiting on me -> cel inbox open --for root --all-workspaces
+anything for me on sandbox -> cel inbox open --for root --workspace sandbox
+take me to standout -> herdr agent focus standout-orch
+tell standout-orch to pick up W-49 next -> cel inbox send standout-orch "pick up W-49 next" --workspace vhs
+resolve 1789208557174615054 -> cel inbox resolve 1789208557174615054
+what is in flight on plane -> cel-fanout status --workspace plane
+why did the last build fail -> ?`;
 
 // What a command looks like. The console's allowlist is the real gate (the
 // guard in lib/guard.sh decides what runs), but a model that returns a
@@ -134,7 +151,7 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   const provider = cfg.console.provider;
   if (!provider) {
     throw new NoTranslator(
-      'no translator configured: add console.provider to ~/.local/share/cel/config.yaml',
+      'no model configured: add console.provider to ~/.local/share/cel/config.yaml',
     );
   }
   const table = readProvider(provider, root) || {};
@@ -147,12 +164,12 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   const base = process.env.CEL_CONSOLE_PROVIDER_URL || table.api;
   if (!base) {
     throw new NoTranslator(
-      `no translator configured: provider '${provider}' has no api: in agents.yaml`,
+      `no model configured: provider '${provider}' has no api: in agents.yaml`,
     );
   }
   if (!key) {
     throw new NoTranslator(
-      `no translator configured: ${keyEnv || 'the provider key'} is unset and console.key is absent`,
+      `no model configured: ${keyEnv || 'the provider key'} is unset and console.key is absent`,
     );
   }
 
@@ -185,16 +202,18 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) throw new Error(`translator: ${provider} answered HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`model: ${provider} answered HTTP ${res.status}`);
   const doc = await res.json();
   const text = anthropic
     ? (doc.content || []).map((c) => c.text || '').join('')
     : doc.choices?.[0]?.message?.content;
-  return parseReply(text);
+  // Both halves come back: the command (or null) and what the model actually
+  // said, so a refusal can show the operator WHY instead of a bare "no".
+  return { cmd: parseReply(text), raw: String(text || '').trim() };
 };
 
 export const translatorLabel = (configPath) => {
   const cfg = readConfig(configPath);
-  if (!cfg.console.provider) return 'no translator';
+  if (!cfg.console.provider) return 'no model';
   return `${cfg.console.provider}/${cfg.console.model || '?'}`;
 };
