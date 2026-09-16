@@ -108,6 +108,7 @@ cmd_inbox() {
     watch) _inbox_watch "$@";;
     open)  _inbox_open "$@";;
     resolve) _inbox_resolve "$@";;
+    prune) _inbox_prune "$@";;
     whoami) _inbox_me; printf '\n';;
     help|--help|-h) _inbox_usage;;
     *) c_err "cel inbox: unknown subcommand '$sub'"; _inbox_usage; return 2;;
@@ -124,6 +125,9 @@ cel inbox - messages between agents that never type into a pane
       --for defaults to WHO YOU ARE, derived from your cwd: a workspace root
       is "root", <ws>/repos/<repo> is "<repo>-orch", a worktree is its
       worker alias. Override with CEL_INBOX_ME.
+  cel inbox prune [--workspace w] [--dry-run]
+      archive mail addressed to a WORKER that no longer exists. Long-lived
+      recipients (root, <repo>-orch) are never pruned - they come back.
   cel inbox count [--for <who>] [--workspace w]      unread count, for hooks
   cel inbox watch [--for <who>] [--workspace w]      tail new items, one line each
       (what a Monitor background task runs - stdout is the notification)
@@ -139,9 +143,90 @@ cel inbox - messages between agents that never type into a pane
 EOS
 }
 
+# Mail to a worker that no longer exists can never be read by anyone: a worker
+# mailbox is named for one worktree on one branch, and when that agent is gone
+# the name refers to nobody. Left in place it is permanent noise - the steward
+# reports the backlog every tick, and a watcher that always has something to
+# say is a watcher people stop reading. Observed 2026-09-15 in a live inbox:
+# 31 recipients holding unread mail, every one of them a dead worker, and not
+# a single live agent behind.
+#
+# Archived rather than deleted: it is the record of what was said to a worker
+# that never heard it, which is exactly the evidence you want when asking why
+# a ticket stalled.
+#
+# ROOT AND ORCHESTRATORS ARE NEVER PRUNED. They are restarted routinely - a
+# compaction, a model change, a crash - and mail sent while one was down is
+# the mail it most needs on the way back up.
+_inbox_prune() { # [--workspace w] [--dry-run]
+  local ws="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws="$2"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      *) die "cel inbox prune: unknown argument '$1'" ;;
+    esac
+  done
+  ws="$(_inbox_ws "$ws")"
+  local f; f="$(_inbox_file "$ws")"
+  [ -f "$f" ] || { c_ok "no mailbox for $ws"; return 0; }
+
+  local live; live="$(herdr agent list 2>/dev/null | jq -r '.result.agents[].name // empty' | sort -u || true)"
+  # herdr unreachable is not evidence that everyone died - the same rule the
+  # steward and cel-fanout both learned.
+  [ -n "$live" ] || { c_warn "herdr returned no agents - refusing to prune on no evidence"; return 0; }
+
+  local keep archive n_a
+  keep="$(mktemp)"; archive="$(mktemp)"
+  local line to
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    to="$(printf '%s' "$line" | jq -r '.to // ""')"
+    case "$to" in
+      ''|all|root|*-orch) printf '%s\n' "$line" >> "$keep"; continue ;;
+    esac
+    if printf '%s\n' "$live" | grep -qxF "$to"; then
+      printf '%s\n' "$line" >> "$keep"
+    else
+      printf '%s\n' "$line" >> "$archive"
+    fi
+  done < "$f"
+
+  n_a="$(grep -c . "$archive" 2>/dev/null || printf 0)"
+  if [ "$n_a" -eq 0 ]; then
+    rm -f "$keep" "$archive"; c_ok "$ws: nothing to prune"; return 0
+  fi
+  if [ "$dry" -eq 1 ]; then
+    printf '%s\n' "would archive $n_a message(s), by recipient:"
+    jq -r '.to' "$archive" | sort | uniq -c | sort -rn | head -20
+    rm -f "$keep" "$archive"; return 0
+  fi
+  cat "$archive" >> "$(_inbox_dir)/$ws.archive.jsonl"
+  mv "$keep" "$f"
+  rm -f "$archive"
+  c_ok "$ws: archived $n_a message(s) addressed to workers that no longer exist -> $ws.archive.jsonl"
+}
+
 _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
   [ $# -ge 2 ] || die "usage: cel inbox send <to> <message> [--from x] [--kind status|escalation]"
+  # THE RECIPIENT IS NORMALISED THE SAME WAY IT NORMALISES ITSELF.
+  #
+  # A pane derives its own mailbox with _inbox_sanitise - lowercased and cut to
+  # 32 characters - but the sender wrote whatever string it had to hand, and
+  # the two only agreed by luck. A branch named ABC-20-faithful-integrity
+  # produced `product-games-ABC-20-faithful-integrity`, while the worker
+  # itself answered to the lowercased 32-character form, so the message sat in
+  # a mailbox with almost the right name that nobody would ever open. Found in
+  # the vhs inbox on 2026-09-15: 50-odd messages across a dozen phantom
+  # mailboxes, several of them the same recipient spelled two ways.
+  #
+  # Normalising here makes the address canonical at the point of sending, so a
+  # caller can be careless about case and length and still be delivered.
   local to="$1" message="$2"; shift 2
+  case "$to" in
+    all) ;;                       # the broadcast address, left alone
+    *) to="$(_inbox_sanitise "$to")" ;;
+  esac
   local from="" ws="" kind=status
   while [ $# -gt 0 ]; do
     case "$1" in
