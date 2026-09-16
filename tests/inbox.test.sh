@@ -231,3 +231,25 @@ test_prune_dry_run_changes_nothing() {
   assert_eq "$(wc -l < "$T/w.jsonl")" "$before"
   rm -rf "$T"
 }
+
+# A PRODUCT orchestrator stands in <ws>/products/<p>, not in a repo checkout,
+# and until it was taught that coordinate it drained root's mailbox - the same
+# silent theft of root's mail the repos/ case was written to stop. Identity
+# still comes from the PATH: no workspace.yaml lookup, no env plumbing.
+
+_inbox_ws_fixture() { # a workspace dir with a product and a repo, in $IT
+  IT="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$IT/"
+  mkdir -p "$IT/products/bundle/notes" "$IT/repos/lone"
+}
+test_inbox_me_is_the_product_orchestrator_under_products() {
+  _inbox_ws_fixture
+  assert_eq "$(cd "$IT/products/bundle" && _inbox_me)" "bundle-orch"
+  assert_eq "$(cd "$IT/products/bundle/notes" && _inbox_me)" "bundle-orch"
+  rm -rf "$IT"
+}
+test_inbox_me_still_knows_repos_and_root() {
+  _inbox_ws_fixture
+  assert_eq "$(cd "$IT/repos/lone" && _inbox_me)" "lone-orch"
+  assert_eq "$(cd "$IT" && _inbox_me)" "root"
+  rm -rf "$IT"
+}
