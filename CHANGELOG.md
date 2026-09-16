@@ -50,6 +50,10 @@ watch the repo (Watch → Custom → Releases) to be notified.
 - The console's vocabulary table lives in `tools/console/vocabulary.md` and is
   included by both consoles, so the TUI's translator and the agent role file
   cannot drift apart
+- `cel fleet` counts by **product**, not by repo: one row per product with
+  its repos named, `<product>-orch` liveness, and the worker cap
+  `cel-fanout delegate` actually enforces (`products[].workers`, else
+  `policy.workers`); `--json` units gain `repos` and `declared`
 - `cel update` refuses a dirty tree or a checkout that is not on `main`: the
   plane's developer moves with git, everyone else moves with `cel update`
 - The documented shape of the factory is console -> orchestrator per product
