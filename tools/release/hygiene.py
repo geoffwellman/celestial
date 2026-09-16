@@ -9,7 +9,10 @@ import sys
 
 # Examples use these fictional ticket prefixes. Technical standard references
 # are not project tickets. Everything else needs review, including test data.
-EXAMPLE_PREFIXES = {"ABC", "ABCD", "WG", "WGT", "OT", "AH"}
+# CEL is the plane's OWN ticket prefix - the work orders that build celestial
+# itself, whose branch names and commit messages are public by definition.
+# It is not an example; it is the one real prefix this repository may name.
+EXAMPLE_PREFIXES = {"ABC", "ABCD", "WG", "WGT", "OT", "AH", "CEL"}
 STANDARD_PREFIXES = {"UTF", "SHA", "ISO", "RFC", "TLS", "HTTP", "CWE", "CVE", "NIST", "PKCS", "RSA"}
 TICKET = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-[0-9]+\b")
 SECRET_RULES = {

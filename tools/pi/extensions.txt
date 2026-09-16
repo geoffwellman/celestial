@@ -3,11 +3,16 @@
 # Direct versions verified at registry.npmjs.org on 2026-09-15. npm verifies
 # registry integrity, but transitive dependencies are not locked by this list.
 @ollama/pi-web-search@0.0.5
-@superwhisper/pi@1.0.2
 @gotgenes/pi-anthropic-auth@2.0.9
 pi-mcp-adapter@2.34.0
 pi-subagents@0.68.0
-pi-lens@4.1.6
+# pi-lens is NOT here on purpose. It reformats files after a tool call and
+# rewrites the tool-result message to match, so the conversation is no longer
+# append-only - and pi-background-tasks, which pins Anthropic prompt-cache
+# lineage to the message prefix, then refuses every further request:
+#   Error: Anthropic cache lineage diverged before transport: message history is not append-only
+# Two of four workers died on that within three minutes of starting,
+# 2026-09-16. The thrower is right; the mutator goes.
 pi-background-tasks@2.5.0
 @plannotator/pi-extension@0.27.14
 @juicesharp/rpiv-todo@2.10.1

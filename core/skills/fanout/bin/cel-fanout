@@ -276,6 +276,26 @@ cmd_delegate() {
   fi
   local abs_spec; abs_spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")"
 
+  # THE CAP IS ENFORCED HERE, not remembered by whoever is delegating.
+  # `policy.workers` was a sentence in the injected policy block and nothing
+  # else, so each orchestrator kept a private count - which only ever goes up,
+  # because delegating is an act it performs and finishing is an event nobody
+  # reports to it. Both failure directions were live on 2026-09-15: one
+  # orchestrator sat on four tickets believing it was at capacity with no
+  # workers running at all, while nothing would have stopped another from
+  # starting a fifth. A number in a prompt is a wish; this is the number.
+  local wcap wused
+  wcap="$(ws_policy "$wsdir" workers)"; wcap="${wcap:-4}"
+  wused="$(_ledger_read "$wsdir" | jq --arg r "$repo" \
+    '[.[] | select(.repo == $r and .state == "running")] | length')"
+  if [ "$wused" -ge "$wcap" ]; then
+    die "delegate: $repo already has $wused running worker(s), cap is $wcap.
+  Free a slot first - a finished worker still holds one until it is collected:
+    cel-fanout status             # what is actually running, reconciled
+    cel-fanout collect <id>       # take the result, then release
+  Raise policy.workers in workspace.yaml if the cap itself is wrong."
+  fi
+
   if [ -z "$herdr_ws" ]; then
     local toplevel; toplevel="$(git -C "$repodir" rev-parse --show-toplevel)"
     herdr_ws="$("$HERDR" workspace list | jq -r --arg t "$toplevel" \
@@ -730,6 +750,29 @@ cmd_status() {
     printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %s\n' \
       "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
+
+  # SLOTS ARE A FACT, NOT A MEMORY. `policy.workers` was only ever a sentence
+  # in the injected policy block, so every orchestrator kept its own count -
+  # and a count kept in an agent's head is incremented when it delegates and
+  # then never decremented, because nothing tells it a worker finished.
+  # Observed 2026-09-15: an orchestrator holding four tickets as "blocked until
+  # a slot frees" with ZERO running workers, its last one collected the
+  # previous day. Printed per repo, after reconciliation, so the number shown
+  # is the number that is true.
+  _fanout_slots "$wsdir"
+}
+
+# Used / free per repo, from the reconciled ledger.
+_fanout_slots() { # <wsdir>
+  local cap; cap="$(ws_policy "$1" workers)"; cap="${cap:-4}"
+  local repo used
+  printf '\n'
+  for repo in $(ws_repo_names "$1"); do
+    used="$(_ledger_read "$1" | jq --arg r "$repo" '[.[] | select(.repo == $r and .state == "running")] | length')"
+    printf 'slots %-20s %s/%s used' "$repo" "$used" "$cap"
+    if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
+    else printf ' - %s free\n' "$(( cap - used ))"; fi
+  done
 }
 
 cmd_release() {

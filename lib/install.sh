@@ -156,10 +156,40 @@ install_extensions() {
   while read -r ext; do
     case "$ext" in ''|\#*) continue;; esac
     if [ "$a" = pi ]; then
-      npm install -g --ignore-scripts "$ext" || return
+      # THROUGH pi's OWN INSTALLER, not npm. `npm install -g` puts the package
+      # on disk and nothing more; pi loads only what `pi install <source>` has
+      # registered in its settings, so every extension this file has ever
+      # listed was installed and never loaded - `pi list` said "No packages
+      # installed" with ten of them sitting in node_modules. Among them the
+      # Anthropic auth extension, which is the only way pi reaches a Claude
+      # subscription. Found 2026-09-16 when the first pi worker could not
+      # start. `npm:` is pi's source scheme; the version pin rides along.
+      "$(agent_get "$a" bin)" install "npm:$ext" || return
       echo "      + $ext"
     fi
   done < "$CEL_ROOT/$f"
+}
+
+# The declared package names, version stripped, for anything that wants to
+# compare against `pi list`.
+extension_names() { # <agent>
+  local f; f="$(agent_get "$1" extensions_file)" || return
+  [ -n "$f" ] && [ -f "$CEL_ROOT/$f" ] || return 0
+  grep -vE '^\s*(#|$)' "$CEL_ROOT/$f" | sed -E 's/^(@?[^@]+)@.*$/\1/'
+}
+
+# Which declared extensions pi does NOT have loaded. Empty when all present, or
+# when pi is absent (nothing to check).
+extensions_missing() { # <agent>
+  local a="$1" have_list n
+  local bin; bin="$(agent_get "$a" bin)"
+  have "$bin" || return 0
+  [ "$a" = pi ] || return 0
+  have_list="$("$bin" list 2>/dev/null || true)"
+  while read -r n; do
+    [ -n "$n" ] || continue
+    printf '%s\n' "$have_list" | grep -qF -- "$n" || printf '%s\n' "$n"
+  done < <(extension_names "$a")
 }
 
 # Generate to a temporary file so failure retains an existing usable skill.

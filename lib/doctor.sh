@@ -13,6 +13,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 # shellcheck source=lib/workspace.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+# shellcheck source=lib/install.sh
+. "$(dirname "${BASH_SOURCE[0]}")/install.sh"   # extensions_missing
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
 
@@ -209,6 +211,13 @@ cmd_doctor() {
     if have "$bin"; then c_ok "$a ($($bin --version 2>/dev/null | head -1 | cut -c1-30))"
     elif [ "$(agent_get "$a" required)" = "true" ]; then c_err "$a MISSING (required)"; fail=1
     else c_warn "$a not installed (optional)"; fi
+    # Declared but unloaded extensions are a silent capability gap - pi
+    # without its auth extension cannot reach a Claude subscription, and looks
+    # identical to pi that can until a worker fails to start.
+    local missing; missing="$(extensions_missing "$a" 2>/dev/null || true)"
+    if [ -n "$missing" ]; then
+      c_warn "$a extensions not loaded: $(printf '%s' "$missing" | tr '\n' ' ')- run: cel setup --agents $a"
+    fi
   done
 
   c_hd "Authentication"
