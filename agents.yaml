@@ -253,7 +253,12 @@ defaults:
   # instead. Cheap and shallow on purpose - its whole vocabulary is a handful
   # of cel commands, and a model that reasons about them is a model spending
   # money to re-derive what the allowlist already decided.
-  console: { runtime: omp, model: openai-codex/gpt-5.6-sol, thinking: low }
+  # Claude Code + haiku: the runtime the README leads with, and the cheapest
+  # model that handles a fixed vocabulary of cel commands. The previous
+  # default (omp/gpt-5.6-sol) rode on a ChatGPT subscription quota that was
+  # exhausted the day the console first ran - the kind of dependency a
+  # default must not have.
+  console: { runtime: claude, model: haiku, thinking: low }
 
 # Missing application tools install these exact releases. Existing executables
 # are retained (gh must be >=2.90). System build/download tools follow distro repositories;

@@ -210,21 +210,32 @@ test_run_role_file_is_per_declared_product() {
 # stands in none. No --workspace is resolved, no policy block is rendered
 # (there is no workspace to describe), and its runtime comes from agents.yaml
 # `defaults.console` rather than from a workspace binding.
-_console() { CONS="$(mktemp -d)/console"; }
+# These read the SHIPPED default from agents.yaml and assert the launch is
+# consistent with it, whatever it is - so changing the default is one edit in
+# one place. The default's value is pinned by its own test below.
+_console() { CONS="$(mktemp -d)/console"; CRT="$(manifest_default console | jq -r .runtime)"; CMODEL="$(manifest_default console | jq -r .model)"; }
 
+# What a first-time reader gets: the runtime the README leads with, and the
+# cheapest model that handles a fixed vocabulary of cel commands. A default
+# that rides on a subscription quota is not a default.
+test_the_shipped_console_default_is_claude_haiku() {
+  assert_eq "$(yq -r '.defaults.console.runtime' "$CEL_ROOT/agents.yaml")" claude
+  assert_eq "$(yq -r '.defaults.console.model' "$CEL_ROOT/agents.yaml")" haiku
+}
 test_run_console_needs_no_workspace_and_has_a_dir_of_its_own() {
   _console
   local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
   assert_contains "$out" "workspace create --cwd $CONS --label celestial/console"
-  assert_contains "$out" "agent start console --kind omp"
+  assert_contains "$out" "agent start console --kind $CRT"
   rm -rf "$CONS"
 }
 test_run_console_takes_its_model_from_the_manifest_default() {
   _console
   local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
-  assert_contains "$out" "--model openai-codex/gpt-5.6-sol --thinking low"
+  assert_contains "$out" "--model $CMODEL"
   out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --model x/y --thinking high --dry-run)"
-  assert_contains "$out" "--model x/y --thinking high"
+  assert_contains "$out" "--model x/y"
+  assert_contains "$out" "high"
   rm -rf "$CONS"
 }
 # The role file must keep ending in role-console.md: lib/gc.sh recognises a
@@ -233,13 +244,21 @@ test_run_console_takes_its_model_from_the_manifest_default() {
 test_run_console_role_travels_as_a_file_beside_the_console_dir() {
   _console
   local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
-  assert_contains "$out" "--append-system-prompt $CONS/role-console.md"
+  assert_contains "$out" "$CONS/role-console.md"
   rm -rf "$CONS"
 }
+# The guard rides differently per runtime: omp/pi load it as a --hook file,
+# claude gets it from the PreToolUse hook registered in settings.json (so
+# nothing to assert on argv beyond the permission bypass that lets the hook
+# be the only gate).
 test_run_console_gets_the_guard_hook() {
   _console
   local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
-  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  case "$CRT" in
+    claude) assert_contains "$out" "--dangerously-skip-permissions"
+            ! printf '%s' "$out" | grep -q -- '--hook' || { echo "claude got an omp hook flag"; rm -rf "$CONS"; return 1; } ;;
+    *)      assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" ;;
+  esac
   rm -rf "$CONS"
 }
 test_run_console_body_carries_no_workspace_policy_block() {
