@@ -1315,26 +1315,87 @@ test_land_refuses_a_timed_out_gate_as_unknown_not_failed() {
   ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
-test_gate_from_ci_lands_a_timed_out_gate_and_names_the_check() {
-  _fanout_land_setup fleetbot APPROVED 0
-  _fanout_verify_timeout_stub 600
-  cat > "$T/gh-stub.sh" <<EOF
+# CI can only stand in for the gate if the checks that stood in are the ones the
+# base branch is PROTECTED by. Any-green-check-will-do proves nothing: a docs
+# build or a lint job going green says nothing about the suite.
+_fanout_ci_gh_stub() { # <protection-json|empty to make it unreadable> <check-runs-json>
+  cat > "$T/gh-stub.sh" <<STUB_EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
 case "\$1 \$2" in
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"deadbeefcafe","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"deadbeefcafe","baseRefName":"main","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
   "pr merge") exit 0;;
   *) case "\$2" in
-       *check-runs) echo '{"check_runs":[{"name":"suite","conclusion":"success"}]}';;
+       */protection) [ -n '$1' ] || exit 1; printf '%s' '$1';;
+       *check-runs)  printf '%s' '$2';;
        *) echo '{}';;
      esac;;
 esac
-EOF
+STUB_EOF
   chmod +x "$T/gh-stub.sh"
+}
+test_gate_from_ci_lands_on_the_required_check_and_names_it() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"},{"name":"suite","conclusion":"success"}]}'
   (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) > /dev/null
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge with CI evidence"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
-  grep -q "Gate: CI (suite) on deadbeefcafe" "$GH_LOG" || { echo "merge body does not name the check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "Gate: CI (suite) on deadbeefcafe" "$GH_LOG" || { echo "merge body does not name the required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# The finding that produced this rule: an unrelated green check must not carry
+# a merge while the check that actually gates the branch never ran.
+test_gate_from_ci_refuses_when_the_required_check_is_absent() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed on an unrelated green check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_refuses_a_required_check_that_failed_or_is_pending() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"},{"name":"suite","status":"in_progress","conclusion":null}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed on a pending required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# EVERY required context, not the first one that happens to be green.
+test_gate_from_ci_requires_every_required_check() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite","lint"]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed with a missing required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "lint"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# An unprotected base has no such thing as "the required check", so there is
+# nothing for CI to stand in with. Same for protection this token cannot read:
+# absence of evidence is not evidence.
+test_gate_from_ci_refuses_when_protection_is_absent_or_unreadable() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '' '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed without readable branch protection"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "protection"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_refuses_protection_with_no_required_contexts() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_timeout_stub 600
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":[]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed with no required contexts"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "requires no check"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 test_status_renders_a_timed_out_gate_as_TO() {
