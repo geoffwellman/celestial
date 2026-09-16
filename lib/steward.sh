@@ -448,6 +448,53 @@ _steward_servers() {
   cmd_pages --public --ensure >/dev/null 2>&1 || c_err "public pages server is down and would not start - cel pages --public --ensure"
 }
 
+# ORPHANED TEST SERVERS HAVE NO OWNER TO NOTICE THEM. On 2026-09-16 seven
+# `node tools/pages/server.mjs` processes, booted by a repo's suite inside a
+# gate run that was killed mid-flight, stayed alive for a hundred minutes
+# parented to init - and because they had inherited the ledger lock of the
+# collect that started the gate, every delegation command on that workspace
+# blocked behind them. Nobody was looking: a server in a worktree is not a
+# pane, not an agent and not a box service, so no sweep on this box named it.
+# This one does. Age comes from the listing rather than being read again here
+# so the sweep can be tested without a real server.
+_steward_server_procs() { # "<pid> <age-seconds> <port> <cwd>" per pages/dash server
+  local pid cmd cwd age port
+  for pid in $(pgrep -u "$(id -u)" -f 'tools/(pages|dash)/server\.mjs' 2>/dev/null || true); do
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    case "$cmd" in *tools/pages/server.mjs*|*tools/dash/server.mjs*) ;; *) continue;; esac
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+    age="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')" || continue
+    [ -n "$cwd" ] && [[ "$age" =~ ^[0-9]+$ ]] || continue
+    port="$(printf '%s' "$cmd" | grep -oE '(--port|PORT=)[ =]?[0-9]+' | grep -oE '[0-9]+$' | head -n1 || true)"
+    printf '%s %s %s %s\n' "$pid" "$age" "${port:-?}" "$cwd"
+  done
+}
+
+_steward_orphan_servers() { # <agents-json>
+  local agents="$1" root pid age port cwd live
+  root="${CEL_WORKTREE_ROOT:-$HOME/.herdr/worktrees}"
+  while read -r pid age port cwd; do
+    [ -n "${pid:-}" ] || continue
+    # Only worktrees. The servers under CEL_ROOT are this box's own services,
+    # kept alive on purpose by _steward_servers, and are never touched here.
+    case "$cwd" in "$root"/*) ;; *) continue;; esac
+    # A worktree with a live agent still owns its servers, whatever their age:
+    # a worker running its own suite is the normal case, not an orphan.
+    live="$(printf '%s' "$agents" | jq -r --arg d "$cwd" \
+      '[.result.agents[]? | select((.cwd // "") == $d or (($d + "/") | startswith((.cwd // "\u0000") + "/")))] | length' 2>/dev/null || printf 0)"
+    [ "${live:-0}" -eq 0 ] || continue
+    if [ "$age" -ge 3600 ]; then
+      if kill -TERM "$pid" 2>/dev/null; then
+        c_warn "reaped orphaned test server pid $pid (port $port, $((age / 60))m old) in $cwd - its worktree has no agent"
+      else
+        c_warn "orphaned test server pid $pid (port $port) in $cwd would not die - kill it by hand"
+      fi
+    else
+      c_warn "orphaned test server pid $pid (port $port, $((age / 60))m old) in $cwd - its worktree has no agent"
+    fi
+  done < <(_steward_server_procs)
+}
+
 _STEWARD_UNIT="cel-steward"
 _steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 
@@ -710,6 +757,7 @@ $text2" >/dev/null 2>&1 \
   _steward_ready_tickets "$agents_json"
   _steward_quota
   _steward_servers
+  _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"
   c_ok "tick complete"
 }

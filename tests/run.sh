@@ -17,8 +17,23 @@ FILTER="${1:-}"
 # interruption. Individual tests can fail before their own cleanup; retaining
 # whole temporary Git repositories across runs would exhaust temporary storage.
 export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cel-tests.XXXXXX")"
-trap 'rm -rf "$TMPDIR"' EXIT
-trap 'rm -rf "$TMPDIR"; exit 130' INT TERM
+
+# AND EVERY PROCESS A TEST STARTED GOES WITH IT. On 2026-09-16 a gate run that
+# was killed mid-suite left seven test servers from tests/pages-server.test.sh
+# alive for a hundred minutes, holding the descriptors they had inherited -
+# including a workspace's delegation ledger lock, which blocked the whole
+# fleet. Temporary files are not the only thing a killed suite leaks. So each
+# test runs in its own process group and the group is killed when the test
+# ends, whether it ended by passing, failing, or this runner being killed.
+CURRENT_GROUP=""
+_kill_current_group() {
+  [ -n "$CURRENT_GROUP" ] || return 0
+  kill -TERM -- "-$CURRENT_GROUP" 2>/dev/null
+  CURRENT_GROUP=""
+  return 0
+}
+trap '_kill_current_group; rm -rf "$TMPDIR"' EXIT
+trap '_kill_current_group; rm -rf "$TMPDIR"; exit 130' INT TERM
 PRELUDE="set -e; source '$CEL_ROOT/tests/lib/assert.sh'"
 pass=0; fail=0
 
@@ -42,7 +57,13 @@ for f in "$CEL_ROOT"/tests/*.test.sh; do
 
   for t in $names; do
     if [ -n "$FILTER" ]; then case "$t" in *"$FILTER"*) ;; *) continue;; esac; fi
-    if out="$(bash -c "$PRELUDE; source '$f'; $t" 2>&1)"; then
+    tout="$TMPDIR/.test-output"
+    setsid bash -c "$PRELUDE; source '$f'; $t" > "$tout" 2>&1 &
+    CURRENT_GROUP=$!
+    rc=0; wait "$CURRENT_GROUP" || rc=$?
+    _kill_current_group
+    out="$(cat "$tout")"; rm -f "$tout"
+    if [ "$rc" -eq 0 ]; then
       pass=$((pass+1)); printf '  \033[32mok\033[0m   %s\n' "$t"
     else
       fail=$((fail+1))

@@ -89,6 +89,20 @@ GH="${CEL_FANOUT_GH:-gh}"
 # and the verifier, which runs a repo's real test gate
 VERIFY="${CEL_FANOUT_VERIFY:-$CEL_ROOT/core/skills/verify/bin/cel-verify}"
 
+# EVERY SPAWN OUT OF THE LOCKED REGION CLOSES THE LEDGER LOCK FIRST. The
+# mutating entrypoints hold .cel/delegations.lock on $ledger_fd for the whole
+# invocation, and a descriptor is inherited by every child unless it is closed
+# on the spawn. On 2026-09-16 that inheritance chain ran collect -> verifier ->
+# gate -> seven test servers: the gate was killed by the verifier's timeout,
+# the servers were not, and for the next hundred minutes they held a lock on
+# a ledger they had never read while every release on the workspace waited.
+# Anything that can outlive this process - the verifier, a herdr call that may
+# start a daemon, an agent - is started through here. See lock_spawn in
+# lib/registry.sh.
+_ledger_spawn() { # <cmd> [args...]
+  lock_spawn "${ledger_fd:-}" "$@"
+}
+
 _repo_slug() { # <wsdir> <repo>
   ws_repo_get "$1" "$2" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##'
 }
@@ -105,7 +119,7 @@ _fanout_verify() { # <wsdir> <id> <entry-json>
   gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
   slug="$(_repo_slug "$wsdir" "$repo")"
   local line
-  line="$("$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} --branch "$branch" 2>/dev/null || true)"
+  line="$(_ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} --branch "$branch" 2>/dev/null || true)"
   [ -n "$line" ] && printf '%s\n' "$line"
   if [ -f "$wt/.agent/verdict.json" ]; then
     local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
@@ -541,11 +555,11 @@ cmd_delegate() {
   # still succeeds, and the agent starts with no credentials at all - a silent
   # version of the failure above.
   local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
-  if ! "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
+  if ! _ledger_spawn "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
     c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
   fi
 
-  "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
+  _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
   # its rebase had eaten its own commit, and a branch that sat unlanded for two

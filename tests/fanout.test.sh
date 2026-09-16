@@ -1460,9 +1460,12 @@ STUB
   assert_eq "$relocked" 1
 }
 
-# The same proof at the level of the helper every locked region spawns
-# through: a child started from inside the region does not hold the lock open
-# once the region is left, even while that child is still running.
+# The same proof at the level of the mechanism every locked region uses, and
+# of its two halves: a child spawned through lock_spawn never sees the
+# descriptor, the CALLER still holds the lock afterwards (a helper that closed
+# it in the calling process would release a ledger mid-update), and a
+# backgrounded spawn that closes the descriptor inline leaves the lock free
+# the moment the region ends, even while the child runs on.
 test_lock_spawn_children_do_not_hold_the_lock_open() {
   local D out; D="$(mktemp -d)"
   out="$(CEL_ROOT="$CEL_ROOT" LOCKFILE="$D/delegations.lock" bash -c '
@@ -1470,14 +1473,19 @@ test_lock_spawn_children_do_not_hold_the_lock_open() {
     . "$CEL_ROOT/lib/registry.sh"
     exec {fd}>"$LOCKFILE"
     flock "$fd"
-    lock_spawn "$fd" sleep 60 &
+    if lock_spawn "$fd" bash -c "ls -l /proc/\$\$/fd" | grep -q delegations.lock
+      then echo leaked-into-child; else echo no-lock-fd; fi
+    if flock -n "$LOCKFILE" -c true; then echo lost-the-lock; else echo still-mine; fi
+    sleep 60 {fd}>&- &
     child=$!
     exec {fd}>&-
     kill -0 "$child" 2>/dev/null && echo alive
-    flock -n "$LOCKFILE" -c true && echo relocked || echo still-held
+    if flock -n "$LOCKFILE" -c true; then echo relocked; else echo still-held; fi
     kill "$child" 2>/dev/null
   ' 2>&1)"
   rm -rf "$D"
+  assert_contains "$out" no-lock-fd
+  assert_contains "$out" still-mine
   assert_contains "$out" alive
   assert_contains "$out" relocked
 }
