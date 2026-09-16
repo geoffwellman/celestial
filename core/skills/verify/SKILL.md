@@ -27,3 +27,14 @@ Each field is a fact, not an opinion:
 `cel-fanout land` refuses a branch whose configured gate did not pass. Read
 the verdict before the result.md, not after: the result is what the worker
 says happened, the verdict is what did.
+
+A gate that ran out of time is not a gate that failed. The gate runs under
+`timeout` (`--gate-timeout <secs>`, else `CEL_VERIFY_GATE_TIMEOUT`, else 600);
+when the timeout kills it the verdict records `gate.passed = null`,
+`gate.timed_out = true` and `gate.timeout_secs`, the tail ends in
+`killed after <n>s - no verdict`, the summary reads `gate:TIMEOUT(600s)` and
+the exit code is `2` - never `1`, which stays reserved for a gate that
+genuinely failed. A loaded box once pushed a suite past 600 s and a green
+branch was filed as `gate:FAIL`; "ran out of time" and "the code is wrong"
+lead to opposite actions, so `land` treats a timeout as unknown and asks for
+either a longer timeout or explicit CI evidence (`--gate-from-ci`).
