@@ -72,6 +72,19 @@ ws_env_exports() { # <wsdir>
 # the pr-loop skill; a workspace can have either, both, or neither.
 ws_review() { yq -r --arg k "$2" '.review[$k] // "" | tostring' "$1/workspace.yaml"; }
 
+# Where a reviewer's verdict is published. On a public repo whose only GitHub
+# identity is the owner's, a reviewer agent posting a review is the owner
+# reviewing his own PR in public - and GitHub refuses the approval anyway. So
+# the review is recorded in the ledger and reported by inbox, and `github` is
+# opt-in for repos where the reviewer has an identity of its own (a GitHub App
+# or a second account). The default lives HERE and nowhere else: a second
+# copy of it in a role file or a launch path is how the two drift apart.
+ws_review_post() { # <wsdir>
+  local p; p="$(ws_review "$1" post)"
+  [ "$p" = "github" ] && { printf 'github\n'; return 0; }
+  printf 'inbox\n'
+}
+
 # Every ticket prefix this repo answers to, CURRENT ONE FIRST then any
 # `prefix_aliases`. Aliases exist because a Linear team can be re-keyed
 # (ABC -> ABCD) without renumbering its issues: Linear still resolves the old
@@ -205,6 +218,11 @@ ws_policy_block() { # <wsdir> [product]
   if [ -n "$rrt" ]; then
     printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
       "$rrt" "${rmodel:+ model $rmodel}"
+    if [ "$(ws_review_post "$d")" = "github" ]; then
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
+    else
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
+    fi
   fi
   local lt
   for r in $(ws_repo_names "$d"); do
