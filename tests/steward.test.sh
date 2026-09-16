@@ -117,3 +117,136 @@ test_steward_orch_dir_prefers_a_declared_product() {
   assert_eq "$(_steward_orch_dir "$T" lone-orch)" "$T/repos/lone"
   rm -rf "$T"
 }
+
+# --- ensuring orchestrators ------------------------------------------------
+# Root used to start the orchestrators by hand, which produced duplicate
+# panes and workspaces nobody could tell apart. Starting a declared
+# `orchestrator: auto` product is mechanical, so the steward does it the same
+# way it ensures a dashboard.
+_orch_fixture() { # [roster-json]
+  T="$(mktemp -d)"
+  export HOME="$T/home"; mkdir -p "$HOME"
+  export CEL_REGISTRY="$T/registry.yaml"
+  export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  mkdir -p "$T/alpha/repos/widget" "$T/alpha/products/bundle"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  cat > "$T/alpha/workspace.yaml" <<YAML
+name: alpha
+tickets: {system: linear, trigger_state: Ready}
+products:
+  - {name: bundle, repos: [widget], orchestrator: auto}
+  - {name: lone, repos: [gadget], orchestrator: manual}
+repos:
+  - {name: widget, url: "git@github.com:someone/widget.git", prefix: WG, linear_team: ALPHA}
+  - {name: gadget, url: "git@github.com:someone/gadget.git", prefix: OT, linear_team: ALPHA}
+YAML
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  : > "$T/launched"
+  # The launch is one function precisely so a test can replace it: running
+  # `cel run` for real would start a pane on the live box.
+  _steward_launch_orch() { printf '%s %s\n' "$1" "$2" >> "$T/launched"; return "${STUB_LAUNCH_RC:-0}"; }
+  ROSTER='{"result":{"agents":[{"name":"alpha-root","agent_status":"idle","pane_id":"w:p1"}]}}'
+  LIVE_ROSTER='{"result":{"agents":[{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p2"}]}}'
+}
+
+test_steward_starts_an_auto_orchestrator_once_per_window() {
+  _orch_fixture
+  local out; out="$(_steward_orchestrators "$ROSTER")"
+  assert_contains "$out" "bundle"
+  assert_eq "$(cat "$T/launched")" "bundle alpha"
+  # a second tick inside the 30 minute window must not launch again
+  _steward_orchestrators "$ROSTER" >/dev/null
+  assert_eq "$(wc -l < "$T/launched")" "1"
+  rm -rf "$T"
+}
+
+test_steward_leaves_live_manual_and_unknown_orchestrators_alone() {
+  _orch_fixture
+  _steward_orchestrators "$LIVE_ROSTER" >/dev/null   # bundle-orch already up
+  assert_eq "$(cat "$T/launched")" ""
+  # `lone` is manual and is never started, live or not
+  assert_eq "$(grep -c lone "$T/launched" || true)" "0"
+  rm -rf "$T"
+}
+
+# Herdr unreachable reads as an empty roster, and an empty roster is not
+# evidence that anyone died - every other sweep here learned that already.
+test_steward_starts_nothing_when_the_roster_is_empty() {
+  _orch_fixture
+  _steward_orchestrators '{"result":{"agents":[]}}' >/dev/null
+  assert_eq "$(cat "$T/launched")" ""
+  rm -rf "$T"
+}
+
+test_steward_reports_a_failed_orchestrator_launch() {
+  _orch_fixture
+  local out; out="$(STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER")"
+  assert_contains "$out" "bundle"
+  assert_contains "$out" "✗"
+  rm -rf "$T"
+}
+
+# --- routing ready tickets -------------------------------------------------
+# A ready ticket used to go to root, which then forwarded it by mail nobody
+# drained. Its prefix names a repo, the repo names a product, and that
+# product's orchestrator can take it directly.
+_ready_route_fixture() { # <roster>
+  _orch_fixture
+  printf 'LINEAR_API_KEY=fixture-alpha\n' > "$T/alpha/env.local"
+  : > "$T/sent"
+  cmd_inbox() { printf '%s\n' "$2" >> "$T/sent"; }
+  STUB_TICKET="${STUB_TICKET:-WG-1}"
+  curl() {
+    printf '{"data":{"issues":{"nodes":[{"identifier":"%s","title":"a thing"}]}}}' "$STUB_TICKET"
+  }
+}
+
+test_ready_ticket_goes_to_the_product_orchestrator_that_owns_its_prefix() {
+  _ready_route_fixture
+  local out; out="$(_steward_ready_tickets "$LIVE_ROSTER")"
+  assert_eq "$(cat "$T/sent")" "bundle-orch"
+  assert_contains "$out" "bundle-orch"
+  rm -rf "$T"
+}
+
+test_ready_ticket_falls_back_to_root_without_a_live_orchestrator() {
+  _ready_route_fixture
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(cat "$T/sent")" "root"
+  rm -rf "$T"
+}
+
+test_ready_ticket_with_an_unknown_prefix_goes_to_root() {
+  STUB_TICKET=ABCD-9 _ready_route_fixture
+  STUB_TICKET=ABCD-9 _steward_ready_tickets "$LIVE_ROSTER" >/dev/null
+  assert_eq "$(cat "$T/sent")" "root"
+  rm -rf "$T"
+}
+
+# --- the review sweep finds the PRODUCT's orchestrator ---------------------
+# A repo in a declared product has no orchestrator of its own; addressing
+# <repo>/orch nudged a pane that does not exist.
+test_review_sweep_nudges_the_products_orchestrator() {
+  _orch_fixture
+  mkdir -p "$T/bin"
+  : > "$T/prompts"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
+SH
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent get")    [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
+  "agent prompt") printf '%s\n' "\$3" >> "$T/prompts" ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
+  assert_contains "$(cat "$T/prompts")" "bundle-orch"
+  # never the repo's own name: `widget` is a member of `bundle`, so a
+  # widget-orch pane does not exist and nudging it reports a success nobody got
+  assert_eq "$(grep -c widget-orch "$T/prompts" || true)" "0"
+  rm -rf "$T"
+}
