@@ -6,7 +6,11 @@
 #
 # Never writes to the pane, never fails the prompt: any error exits 0 silent.
 set -uo pipefail
-CEL_ROOT="${CEL_ROOT:-$HOME/celestial-plane}"
+# The hooks run in place under <CEL_ROOT>/tools/hooks, so the plane's root is
+# two directories up from this file. Guessing a folder name instead meant a
+# reader who cloned anywhere else got a hook that silently drained nothing -
+# and silence is exactly what this hook looks like when it works.
+CEL_ROOT="${CEL_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)}"
 [ -x "$CEL_ROOT/bin/cel" ] || exit 0
 
 # The hook runs in the agent's cwd, so `cel inbox read` derives BOTH the

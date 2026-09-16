@@ -100,3 +100,16 @@ test_hygiene_rejects_sensitive_paths_and_external_symlinks() {
   assert_fails _hygiene_scan
   rm -rf "$T"
 }
+
+# The README tells a reader to clone into ~/celestial. That instruction is only
+# honest if nothing in the tree falls back to the old folder name when CEL_ROOT
+# is unset: a reader who followed the README once got a dashboard that resolved
+# CEL_ROOT to a directory that did not exist, and an inbox hook that silently
+# drained nothing. CHANGELOG.md is exempt because it is history, not behaviour.
+test_no_file_assumes_the_old_clone_folder_name() {
+  # The needle is assembled rather than written, so this file is not itself a hit.
+  local needle hits
+  needle="celestial-$(printf 'plane')"
+  hits="$(cd "$CEL_ROOT" && git grep -l -- "$needle" -- . ':!CHANGELOG.md' || true)"
+  assert_eq "" "$hits"
+}

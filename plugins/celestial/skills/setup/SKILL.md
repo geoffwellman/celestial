@@ -13,7 +13,7 @@ moving on.
 
 Walk up from the current directory to the nearest `workspace.yaml`. If there is
 none, list registered workspaces (`cel ws list`, with `cel` at
-`$CEL_ROOT/bin/cel`; `CEL_ROOT` defaults to `~/celestial-plane`) and ask which
+`$CEL_ROOT/bin/cel`; `CEL_ROOT` defaults to where celestial is cloned) and ask which
 one to set up, then work from its directory.
 
 ## Read the declared steps

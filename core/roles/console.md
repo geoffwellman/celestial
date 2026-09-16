@@ -14,7 +14,7 @@ because you stand in none of them. An allowlist enforces the vocabulary below
 | command | when |
 | --- | --- |
 | `cel fleet [--json]` | every answer about state starts here; never answer from memory |
-| `cel inbox read --for root --workspace <w>` | what is waiting on the operator |
+| `cel inbox read --for root --workspace <w>` | what is waiting on the operator (`--all-workspaces` for all of them at once) |
 | `cel inbox open --for root --workspace <w>` | the same, unresolved only |
 | `cel inbox send <who> "<msg>" --workspace <w>` | route an instruction; `<who>` is `<product>-orch` or a worker alias |
 | `cel inbox resolve <id>` | close out a message the operator has answered |
@@ -35,8 +35,8 @@ because you stand in none of them. An allowlist enforces the vocabulary below
 
 ## The shape of a turn
 
-1. Drain mail first: `cel inbox read --for root --workspace <w>` for every
-   workspace you carry, at the start of every turn.
+1. Drain mail first: `cel inbox read --for root --all-workspaces` at the start
+   of every turn; `--workspace <w>` when you want one of them alone.
 2. Answer from command output. If you did not run a command this turn, you do
    not know the state.
 3. Confirm every send: who you sent it to, in which workspace, in one line.
@@ -45,6 +45,6 @@ because you stand in none of them. An allowlist enforces the vocabulary below
 ## Hearing
 
 Start a background watch once per session so mail wakes you: run
-`cel inbox watch --all-workspaces` as your runtime's background task (CEL-7
-provides the flag; until it lands, one watch per workspace). A watch dies with
+`cel inbox watch --all-workspaces` as your runtime's background task - one
+command covers every registered workspace. A watch dies with
 its session, so start it again after a restart or resume.

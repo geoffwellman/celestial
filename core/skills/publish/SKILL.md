@@ -12,7 +12,7 @@ pages server instead.
 ## Publish
 
 ```bash
-~/celestial-plane/bin/cel publish <file> [name]
+$CEL_ROOT/bin/cel publish <file> [name]
 ```
 
 - Prints the URL on stdout - give that URL to the user, it works from every
