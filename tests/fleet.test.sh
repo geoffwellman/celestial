@@ -76,6 +76,7 @@ EOF
 case "$1 $2" in
   "agent list") printf '%s\n' '{"result":{"agents":[
       {"name":"widget-orch","agent_status":"idle","pane_id":"wA:p1"},
+      {"name":"bundle-orch","agent_status":"idle","pane_id":"wA:p9"},
       {"name":"widget-widget-work","agent_status":"idle","pane_id":"wA:p2"}]}}' ;;
   "pane read")  printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}" ;;
   *) printf '%s\n' '{}' ;;
@@ -172,6 +173,78 @@ test_fleet_survives_herdr_being_down() {
   doc="$(STUB_HERDR_FAIL=1 cmd_fleet --json)"
   assert_eq "$(printf '%s' "$doc" | jq -r '[.workspaces[].units[].orch] | unique | join(",")')" "-"
   assert_eq "$(printf '%s' "$doc" | jq -r '[.workspaces[].units[].stalled] | add')" "0"
+  _fleet_teardown
+}
+
+# PRODUCTS. The unit of the view is the thing an orchestrator actually stands
+# over. Measured on 2026-09-17: a workspace declaring one product over two
+# repos, with one live orchestrator for it, rendered as two repo rows both
+# saying `orch -` - the one orchestrator that existed was invisible, and the
+# cap `cel-fanout delegate` enforces per product was shown per repo.
+_fleet_declare_bundle() { # [workers-cap]
+  local cap="${1:-}"
+  {
+    printf 'products:\n  - name: bundle\n    repos: [widget, gadget]\n'
+    [ -n "$cap" ] && printf '    workers: %s\n' "$cap"
+  } >>"$T/alpha/workspace.yaml"
+  # A second running worker, in the product's OTHER repo: the product count is
+  # the sum across its repos, which is exactly what the cap is measured against.
+  local led="$T/alpha/.cel/delegations.json"
+  jq -c '. + [{"id":"three","repo":"gadget","branch":"gadget-work","pane":"wA:p4","worktree":"'"$T/none"'","state":"running","ticket":""}]' \
+    "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+}
+
+test_fleet_counts_a_declared_product_as_one_unit() {
+  _fleet_setup
+  _fleet_declare_bundle
+  local doc
+  doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units | length')" "1"
+  local u
+  u="$(printf '%s' "$doc" | jq -c '.workspaces[0].units[0]')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.name')" "bundle"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch')" "LIVE"
+  assert_eq "$(printf '%s' "$u" | jq -r '.declared')" "true"
+  assert_eq "$(printf '%s' "$u" | jq -r '.repos | join(",")')" "widget,gadget"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '.cap')" "4"
+  printf '%s' "$doc" | jq -e '.workspaces[0].units[0] | .repos|length == 2' >/dev/null \
+    || { echo "repos was not a two-element array: $u"; _fleet_teardown; return 1; }
+  _fleet_teardown
+}
+
+# The cap is the orchestrator's, so `products[].workers` wins over
+# `policy.workers` - the same precedence `cel-fanout delegate` uses, so the
+# view and the thing that refuses a fifth worker never disagree.
+test_fleet_prefers_the_products_worker_cap() {
+  _fleet_setup
+  _fleet_declare_bundle 3
+  assert_eq "$(cmd_fleet --json --workspace alpha | jq -r '.workspaces[0].units[0].cap')" "3"
+  assert_contains "$(cmd_fleet --workspace alpha)" "workers 2/3"
+  _fleet_teardown
+}
+
+# A declared product says which repos it is; an implicit one is a repo and
+# renders exactly as it always did.
+test_fleet_text_names_a_declared_products_repos() {
+  _fleet_setup
+  _fleet_declare_bundle
+  local out
+  out="$(cmd_fleet --workspace alpha)"
+  assert_contains "$out" "(1 products)"
+  assert_contains "$out" "bundle (widget, gadget)"
+  _fleet_teardown
+}
+
+test_fleet_leaves_an_undeclared_workspace_as_repos() {
+  _fleet_setup
+  local out doc
+  out="$(cmd_fleet --workspace alpha)"
+  doc="$(cmd_fleet --json --workspace alpha)"
+  assert_contains "$out" "(2 products)"
+  assert_contains "$out" "$(printf '  %-12s orch %-5s workers 1/4' widget LIVE)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units[0].declared')" "false"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units[0].repos | join(",")')" "widget"
   _fleet_teardown
 }
 

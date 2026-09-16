@@ -231,8 +231,9 @@ next turn. Escalations that truly cannot wait still prompt, deliberately.
 ## Watch and steer
 
 - **`cel fleet`** — the whole box in one deterministic read: every workspace,
-  every repo, whether its orchestrator is live, workers in flight against the
-  cap, stalled and unlanded work, and root's mail. Token-free and free of
+  every product (a repo in no declared product is its own), whether its
+  orchestrator is live, workers in flight across the product's repos against
+  the cap, stalled and unlanded work, and root's mail. Token-free and free of
   agent judgement; `--json` for scripts. The console answers from this, never
   from memory.
 - **`cel dash`** — per-workspace dashboard: an attention queue ("needs you"),
@@ -411,7 +412,7 @@ policy block into every agent.
 | Command | What |
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
-| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
+| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per product, root's mail per workspace |
 | `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
 | `cel console` | the desk you keep open: fleet, decisions, inbox and a command line that also takes a sentence |
