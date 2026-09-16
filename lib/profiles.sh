@@ -53,23 +53,32 @@ role_profile() { # <wsdir> <role>
   yq -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1/workspace.yaml"
 }
 
-# The same binding, narrowed to one repo. A workspace's repos are not alike:
-# the one under active research wants a different orchestrator from the one
-# grinding through well-specified tickets, and a repo with a heavy gate may
-# want a stronger worker than its neighbours. Without this the only choices
+# The same binding, narrowed to one product or repo. A workspace's products are
+# not alike: the one under active research wants a different orchestrator from
+# the one grinding through well-specified tickets, and a repo with a heavy gate
+# may want a stronger worker than its neighbours. Without this the only choices
 # were to re-point EVERY orchestrator in the workspace or to pass --profile by
 # hand at each launch - and a flag nobody is there to type is the exact thing
 # role bindings exist to avoid.
 #
-# Repo first, then the workspace, then nothing:
+# Resolution order, strongest first: a products[] entry whose name is $3, then
+# a repos[] entry whose name is $3, then the workspace's own role_profiles.
+# Products come first because an orchestrator is launched per PRODUCT - its
+# name is a product name, and a repo that happens to share it must not steal
+# the binding.
+#   products:
+#     - name: bundle
+#       role_profiles: { orchestrator: deep-model }
 #   repos:
 #     - name: widget
 #       role_profiles: { orchestrator: deep-model }
-role_profile_for() { # <wsdir> <role> [repo]
+role_profile_for() { # <wsdir> <role> [name]
   if [ -n "${3:-}" ]; then
     local p
     p="$(yq -r --arg n "$3" --arg r "$2" \
-      '.repos // [] | map(select(.name == $n))[0].role_profiles[$r] // "" | tostring' \
+      '((.products // [] | map(select(.name == $n))[0].role_profiles[$r])
+        // (.repos // [] | map(select(.name == $n))[0].role_profiles[$r])
+        // "") | tostring' \
       "$1/workspace.yaml")"
     [ -n "$p" ] && { printf '%s' "$p"; return 0; }
   fi
