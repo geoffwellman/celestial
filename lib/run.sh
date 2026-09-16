@@ -12,11 +12,31 @@ _CEL_RUN=1
 # shellcheck source=lib/profiles.sh
 . "$(dirname "${BASH_SOURCE[0]}")/profiles.sh"
 
+# Where a role's body is written for a runtime that injects it from a file.
+#
+# Every orchestrator launch used to overwrite $wsdir/.cel/role-orchestrator.md,
+# which was harmless while there was one orchestrator per workspace and is not
+# now: two products' orchestrators would trade role bodies underneath each
+# other. A DECLARED product gets its own directory; an implicit one keeps the
+# original path so nothing about an existing workspace moves.
+#
+# The filename must keep ending in `role-orchestrator.md`: lib/gc.sh tells a
+# long-lived agent from a stray one by that substring in the cmdline, and a
+# renamed file would have the reaper collecting orchestrators.
+_run_role_file() { # <wsdir> <tag> [product]
+  local wsdir="$1" tag="$2" p="${3:-}"
+  if [ -n "$p" ] && ws_product_declared "$wsdir" "$p"; then
+    printf '%s' "$wsdir/.cel/products/$p/role-$tag.md"
+  else
+    printf '%s' "$wsdir/.cel/role-$tag.md"
+  fi
+}
+
 # Fills the global AGENT_ARGS array per the runtime's role_injection strategy
 # in agents.yaml. File writes are real side effects, so they are skipped on a dry
 # run - only the herdr command line is ever a preview.
-_run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir>
-  local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" strategy
+_run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
+  local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
   strategy="$(agent_injection "$rt" strategy)"
   case "$strategy" in
     append_flag)
@@ -27,9 +47,9 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir>
       # any argument it cannot encode on one line (newlines, control chars),
       # so a multi-line role body travels as a file and only its path goes on
       # the command line.
-      local file="$wsdir/.cel/role-$tag.md"
+      local file="${rolefile:-$wsdir/.cel/role-$tag.md}"
       if [ "$dry" -eq 0 ]; then
-        mkdir -p "$wsdir/.cel"
+        mkdir -p "$(dirname "$file")"
         printf '%s\n' "$body" > "$file"
       fi
       AGENT_ARGS=("$(agent_injection "$rt" flag)" "$file")
@@ -173,8 +193,8 @@ _run_dry_agent_args() {
   printf '%s' "${out[*]}"
 }
 
-cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
-  local role="" repo="" workspace="" branch="" pr="" dry_run=0
+cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
+  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -188,6 +208,7 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
   while [ $# -gt 0 ]; do
     case "$1" in
       --repo)      repo="$2"; shift 2 ;;
+      --product)   product="$2"; shift 2 ;;
       --workspace) workspace="$2"; shift 2 ;;
       --branch)    branch="$2"; shift 2 ;;
       --pr)        pr="$2"; shift 2 ;;
@@ -206,18 +227,28 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
     wsdir="$(ws_current)" || die "cel run: not inside a workspace (cd into one, or pass --workspace <name>)"
   fi
 
-  # --repo is required for every mode but root, unless the workspace has
-  # exactly one repo to default to.
-  if [ "$role" != "root" ] && [ -z "$repo" ]; then
-    local repos; mapfile -t repos < <(ws_repo_names "$wsdir")
-    if [ "${#repos[@]}" -eq 1 ]; then
+  # --repo is required for every mode but root, unless there is exactly one
+  # thing to default to. For an orchestrator that thing is a PRODUCT: a
+  # workspace of two repos in one declared product has one orchestrator, and
+  # making it name a repo would be asking for information it does not have.
+  if [ "$role" != "root" ] && [ -z "$repo" ] && [ -z "$product" ]; then
+    local repos prods; mapfile -t repos < <(ws_repo_names "$wsdir")
+    mapfile -t prods < <(ws_product_names "$wsdir")
+    if [ "$role" = "orchestrator" ] && [ "${#prods[@]}" -eq 1 ]; then
+      product="${prods[0]}"
+    elif [ "${#repos[@]}" -eq 1 ]; then
       repo="${repos[0]}"
+    elif [ "$role" = "orchestrator" ]; then
+      die "cel run: --product or --repo is required (workspace '$(ws_name "$wsdir")' has ${#prods[@]} products)"
     else
       die "cel run: --repo is required (workspace '$(ws_name "$wsdir")' has ${#repos[@]} repos)"
     fi
   fi
+  # --product is an orchestrator's flag; every other role works in a checkout.
+  [ "$role" = "orchestrator" ] || [ -n "$repo" ] || [ "$role" = "root" ] \
+    || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
 
-  local tag="${role:-direct}" alias_name cwd runtime rolefile=""
+  local tag="${role:-direct}" alias_name cwd runtime rolefile="" bind="$repo"
   case "$role" in
     "")
       alias_name="$repo/direct"
@@ -231,8 +262,12 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
       rolefile="$CEL_ROOT/core/roles/root-orchestrator.md"
       ;;
     orchestrator)
-      alias_name="$repo/orch"
-      cwd="$wsdir/repos/$repo"
+      # --repo still works and means "the product this repo belongs to", so a
+      # member repo never opens an orchestrator of its own.
+      [ -n "$product" ] || product="$(ws_product_of_repo "$wsdir" "$repo")"
+      bind="$product"
+      alias_name="$product/orch"
+      cwd="$(ws_product_dir "$wsdir" "$product")"
       runtime="$(ws_runtime "$wsdir" orchestrator)"
       rolefile="$CEL_ROOT/core/roles/project-orchestrator.md"
       ;;
@@ -266,8 +301,8 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
   # No --profile? The workspace may still bind one to this role. That binding
   # is what makes root and the orchestrators configurable at all: neither is
   # launched by hand, so a flag would never reach them.
-  # A repo may narrow that binding for itself; see role_profile_for.
-  [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$repo")"
+  # A repo or product may narrow that binding for itself; see role_profile_for.
+  [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
   if [ -n "$profile" ]; then
@@ -284,13 +319,14 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
-    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile")"
+    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}")"
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
 
   local AGENT_ARGS=()
-  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir"
+  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" \
+    "$(_run_role_file "$wsdir" "$tag" "${product:-}")"
 
   # Model and thinking flags ride ahead of the role injection, spelled the way
   # THIS runtime spells them (agents.yaml model_flag / thinking) rather than
@@ -341,6 +377,12 @@ cmd_run() { # [role] [--repo r] [--workspace w] [--branch b] [--pr n] [--profile
     local repodir="$wsdir/repos/$repo"
     CREATE_ARGS=(worktree create --cwd "$repodir" --branch "$branch" --label "$branch" --no-focus)
   else
+    # A declared product's directory is cel's to make: it is not a checkout,
+    # so nothing else ever creates it and herdr would refuse a missing cwd.
+    if [ "$role" = "orchestrator" ] && [ "$dry_run" -eq 0 ] \
+       && ws_product_declared "$wsdir" "$product"; then
+      mkdir -p "$cwd"
+    fi
     CREATE_ARGS=(workspace create --cwd "$cwd" --label "$alias_name")
   fi
 

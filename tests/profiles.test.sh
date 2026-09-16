@@ -432,3 +432,48 @@ test_quota_accounts_are_isolated_and_credentials_stay_out_of_argv() {
   assert_eq "$(jq -s '[.[] | .argv | test("fixture-alpha|fixture-beta")] | any' "$T/requests")" false
   rm -rf "$T"
 }
+
+# --- product bindings ------------------------------------------------------
+# An orchestrator is launched per PRODUCT, not per repo, so a product binding
+# has to be the one that reaches it. Order: product, then repo, then the
+# workspace.
+_pws_product_binding() {
+  T="$(mktemp -d)"
+  cat > "$T/workspace.yaml" <<'YAML'
+name: profiled
+kind: hustle
+org: someone
+policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
+runtime: { root: claude, orchestrator: claude, worker: omp }
+worker_profiles:
+  swap: { runtime: codex, model: gpt-6-astra }
+  bare: { runtime: omp, model: some-model }
+role_profiles: { orchestrator: swap, worker: bare }
+products:
+  - name: bundle
+    repos: [widget, gadget]
+    role_profiles: { orchestrator: bare }
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test
+    role_profiles: { orchestrator: bare }
+  - name: gadget
+    url: git@github.com:someone/gadget.git
+    prefix: WGT
+    gate: bun test
+YAML
+}
+test_product_binding_beats_repo_and_workspace() {
+  _pws_product_binding
+  assert_eq "$(role_profile_for "$T" orchestrator bundle)" bare
+  assert_eq "$(role_profile_for "$T" root bundle)" "$(role_profile "$T" root)"
+  rm -rf "$T"
+}
+test_repo_binding_beats_the_workspace_when_no_product_matches() {
+  _pws_product_binding
+  assert_eq "$(role_profile_for "$T" orchestrator widget)" bare
+  assert_eq "$(role_profile_for "$T" worker gadget)" "$(role_profile "$T" worker)"
+  rm -rf "$T"
+}

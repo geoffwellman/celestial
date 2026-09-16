@@ -90,16 +90,78 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
+# PRODUCTS. An orchestrator used to be bound to exactly one repo, so two repos
+# that are really one system - a platform and the things that consume it -
+# needed two orchestrators and a tier above them purely to sequence work that
+# crossed the line between them. That hop is where most of a workspace's mail
+# went, and a hop exists to be removed. A product is one or more repos with one
+# orchestrator; a repo named in no declared product is its own IMPLICIT
+# product, in place, so a workspace written before any of this behaves exactly
+# as it did.
+#
+# A repo named in two declared products is a config error that belongs to
+# `cel doctor`, not here: these helpers just resolve the FIRST declaration so
+# the same file always produces the same panes.
+
+ws_product_names() { # <wsdir> - declared in file order, then implicit ones
+  yq -r '(.products // []) as $ps
+    | ([$ps[].repos // []] | flatten) as $used
+    | (($ps | map(.name)) + ((.repos // [] | map(.name)) - $used))[]' \
+    "$1/workspace.yaml"
+}
+
+ws_product_repos() { # <wsdir> <product> - an implicit product is its own repo
+  local r
+  r="$(yq -r --arg p "$2" '.products // [] | map(select(.name == $p))[0].repos // [] | .[]' \
+    "$1/workspace.yaml")"
+  [ -n "$r" ] && { printf '%s\n' "$r"; return 0; }
+  printf '%s\n' "$2"
+}
+
+ws_product_of_repo() { # <wsdir> <repo> - its product, else the repo itself
+  yq -r --arg n "$2" '.products // []
+    | map(select((.repos // []) | index($n)))[0].name // $n | tostring' \
+    "$1/workspace.yaml"
+}
+
+ws_product_declared() { # <wsdir> <product> - 0 declared, 1 implicit or unknown
+  [ "$(yq -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
+    "$1/workspace.yaml")" != "0" ]
+}
+
+ws_product_get() { # <wsdir> <product> <key>
+  yq -r --arg p "$2" --arg k "$3" \
+    '.products // [] | map(select(.name == $p))[0][$k] // "" | tostring' \
+    "$1/workspace.yaml"
+}
+
+# Where that product's orchestrator stands. A declared product has no checkout
+# of its own - it is the directory ABOVE its repos' worktrees - so it gets a
+# products/ dir; an implicit one keeps standing in its repo, unchanged.
+ws_product_dir() { # <wsdir> <product>
+  if ws_product_declared "$1" "$2"; then
+    printf '%s' "$1/products/$2"
+  else
+    printf '%s' "$1/repos/$2"
+  fi
+}
+
 # The single source for every injection surface: cel run, cel-fanout, and the
 # rendered CLAUDE.md block all call this, so policy is worded exactly once.
-ws_policy_block() {
-  local d="$1" name kind org tsys tadhoc merge pr workers reviewer r
+# The optional product argument adds one line and changes nothing else: an
+# agent launched for a product has to be told the cross-repo hop is its own.
+ws_policy_block() { # <wsdir> [product]
+  local d="$1" product="${2:-}" name kind org tsys tadhoc merge pr workers reviewer r
   name="$(ws_name "$d")"; kind="$(ws_kind "$d")"; org="$(ws_org "$d")"
   tsys="$(ws_ticket "$d" system)"; tadhoc="$(ws_ticket "$d" adhoc)"
   merge="$(ws_policy "$d" merge)"; pr="$(ws_policy "$d" pr)"
   workers="$(ws_policy "$d" workers)"; reviewer="$(ws_policy "$d" reviewer)"
   printf '## Workspace policy\n'
   printf -- '- workspace: %s (kind: %s, org: %s)\n' "$name" "${kind:-unset}" "${org:-unset}"
+  if [ -n "$product" ]; then
+    printf -- '- product: %s (repos: %s) - cross-repo sequencing inside this product is yours; there is no tier above you for it\n' \
+      "$product" "$(ws_product_repos "$d" "$product" | paste -sd, - | sed 's/,/, /g')"
+  fi
   if [ "$tsys" = "none" ]; then
     printf -- '- tickets: none - never invent ticket references; ad-hoc refs look like %s\n' "${tadhoc:-AH-<yymmdd>}"
   elif [ "$tsys" = "linear" ]; then
@@ -160,9 +222,9 @@ ws_policy_block() {
   [ -z "$learned" ] || printf '\n%s' "$learned"
 }
 
-ws_render_role() { # <wsdir> <rolefile>
+ws_render_role() { # <wsdir> <rolefile> [product]
   [ -f "$2" ] || die "role file not found: $2"
-  cat "$2"; printf '\n'; ws_policy_block "$1"
+  cat "$2"; printf '\n'; ws_policy_block "$1" "${3:-}"
 }
 
 # Replace-or-append the marked block. Body travels via the environment, not
