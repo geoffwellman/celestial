@@ -82,6 +82,9 @@ private refs to the new destination. Never push old tags or use `--mirror`.
   enable/verify any security settings unavailable while it was private.
 - Create a release tag pointing only to reviewed clean history; verify its
   target and release notes. Do not recreate private historical tags.
+- Verify the upgrade path from a **second clone**, never the working checkout:
+  `cel update --check` shows the new version and the changelog sections it
+  brings, `cel update` lands it, and `cel doctor` comes back green.
 - Verify the original archive remains private. Tell collaborators which clone
   and remote to use, and warn against pushing historical branches/tags.
 
