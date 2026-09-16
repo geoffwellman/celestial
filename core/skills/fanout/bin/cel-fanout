@@ -108,10 +108,16 @@ _fanout_verify() { # <wsdir> <id> <entry-json>
   line="$("$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} --branch "$branch" 2>/dev/null || true)"
   [ -n "$line" ] && printf '%s\n' "$line"
   if [ -f "$wt/.agent/verdict.json" ]; then
-    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
     if [ -n "$v" ]; then
       local cur; cur="$(_ledger_read "$wsdir")"
       _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson v "$v" 'map(if .id == $id then .verdict = $v else . end)')"
+    fi
+    # A killed gate reached no verdict at all, and the reader's next move is to
+    # give it more time - not to send a worker after code that may be fine. Say
+    # both knobs by name so nobody has to go read the verifier to find them.
+    if [ "$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)" = true ]; then
+      c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$wt/.agent/verdict.json")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
     fi
   fi
 }
@@ -790,8 +796,11 @@ cmd_status() {
   # REVIEW is here because on a solo repo GitHub cannot carry the verdict at
   # all - author and reviewer are one account - so the ledger does, and a
   # verdict nobody can see is a verdict nobody acts on.
-  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW MODEL
-  local e id repo branch state pane live model ticket review
+  # GATE is here because "did the gate pass" is the one dimension with a right
+  # answer, and a killed gate is not a wrong one: `TO` reads differently from
+  # `FAIL` on purpose, the same way `+?` reads differently from `+0`.
+  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE MODEL
+  local e id repo branch state pane live model ticket review gatecol
   while IFS= read -r e; do
     [ -n "$e" ] || continue
     id="$(printf '%s' "$e" | jq -r '.id')"
@@ -851,8 +860,16 @@ cmd_status() {
       changes)  review=chg ;;
       *)        review=- ;;
     esac
-    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %s\n' \
-      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "${model:--}"
+    if [ "$(printf '%s' "$e" | jq -r '.verdict.gate_timed_out // false')" = true ]; then gatecol=TO
+    else
+      case "$(printf '%s' "$e" | jq -r '.verdict.gate // ""')" in
+        true)  gatecol=ok ;;
+        false) gatecol=FAIL ;;
+        *)     gatecol=- ;;
+      esac
+    fi
+    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %s\n' \
+      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "$gatecol" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
 
   # SLOTS ARE A FACT, NOT A MEMORY. `policy.workers` was only ever a sentence
@@ -1001,12 +1018,13 @@ cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
 # passed. The orchestrator DECIDES; the script PROVES it is allowed to.
 # Deterministic logic in scripts, judgement in agents - and never the reverse.
 cmd_land() { # <id>
-  [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME]"
+  [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME] [--gate-from-ci]"
   local id="$1"; shift
-  local ws_opt=""
+  local ws_opt="" gate_from_ci=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
+      --gate-from-ci) gate_from_ci=1; shift ;;
       *) die "land: unknown argument: $1" ;;
     esac
   done
@@ -1022,7 +1040,7 @@ cmd_land() { # <id>
     || die "land: this workspace's policy.merge is humans-only - surface the PR to a human; do not merge it"
 
   local pr; pr="$("$GH" pr view "$branch" --repo "$slug" \
-    --json number,author,reviewDecision,statusCheckRollup,isDraft,mergeable,state 2>/dev/null)" \
+    --json number,author,reviewDecision,statusCheckRollup,isDraft,mergeable,state,headRefOid,baseRefName 2>/dev/null)" \
     || die "land: no PR found for $branch on $slug"
   local me; me="$("$GH" api user --jq .login 2>/dev/null)"
   local author num; author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"; num="$(printf '%s' "$pr" | jq -r .number)"
@@ -1055,22 +1073,65 @@ cmd_land() { # <id>
   # A configured gate that has not PASSED is a refusal - CI green on the PR is
   # not the same fact, since the branch may have moved since. Verify now if
   # there is no verdict yet; unknown is not passed.
-  local gate; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
+  local gate ci_gate_body=""; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
   if [ -n "$gate" ]; then
-    _fanout_verify "$wsdir" "$id" "$entry" >/dev/null
-    local wt gp; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    _fanout_verify "$wsdir" "$id" "$entry" >/dev/null || true
+    local wt gp gto; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
     gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
-    [ "$gp" = true ] || die "land: the repo's gate (\`$gate\`) did not pass on $branch (verdict: $gp) - a worker fixes it, then land again. A red gate is a finding, not a formality."
+    gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"
+    # UNKNOWN IS NOT FAILED. A gate the timeout killed produced no verdict, so
+    # there is nothing here to call a finding; refusing it as a red gate sent a
+    # worker to fix code that was never shown to be wrong. Either give the gate
+    # the time it needs, or lean on CI - and if CI, say so out loud and record
+    # which check carried the branch.
+    if [ "$gto" = true ]; then
+      if [ "$gate_from_ci" -eq 1 ]; then
+        # WHAT MAY STAND IN FOR A GATE. The first cut of this accepted any
+        # successful check run on the head - a docs build or a lint job going
+        # green would have carried a merge while the suite was red, which is
+        # exactly the confusion this ticket exists to remove. CI substitutes
+        # for the gate only when EVERY check the base branch is PROTECTED by
+        # concluded success on this head, matched by name. No protection, or
+        # protection this token cannot read, is not permission: absence of
+        # evidence is not evidence.
+        local head base prot req cr missing
+        head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+        base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')"
+        [ -n "$head" ] || die "land --gate-from-ci: the PR reports no head commit - nothing to check CI against"
+        [ -n "$base" ] || die "land --gate-from-ci: the PR reports no base branch - nothing to read protection from"
+        prot="$("$GH" api "repos/$slug/branches/$base/protection" 2>/dev/null || true)"
+        [ -n "$prot" ] || die "land --gate-from-ci: cannot read branch protection for $base on $slug - with no readable protection there is no required check for CI to stand in with. Give the gate more time instead (CEL_VERIFY_GATE_TIMEOUT)."
+        req="$(printf '%s' "$prot" | jq -r '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique | .[]' 2>/dev/null || true)"
+        [ -n "$req" ] || die "land --gate-from-ci: $base on $slug requires no check - a branch nothing gates cannot lend its verdict to this one"
+        cr="$("$GH" api "repos/$slug/commits/$head/check-runs" 2>/dev/null || true)"
+        missing="$(printf '%s' "$cr" | jq -r --argjson want "$(printf '%s' "$req" | jq -R . | jq -sc .)" '
+          [.check_runs[]? | select((.conclusion // "") == "success") | .name] as $green
+          | [$want[] | select(. as $w | ($green | index($w)) | not)] | join(", ")' 2>/dev/null || true)"
+        [ -z "$missing" ] || die "land --gate-from-ci: required check(s) not green on $head: $missing - CI cannot stand in for a gate it did not pass"
+        local names; names="$(printf '%s' "$req" | paste -sd, - | sed 's/,/, /g')"
+        ci_gate_body="Gate: CI ($names) on $head"
+        c_warn "$id: the local gate did not complete; landing on CI evidence - $ci_gate_body"
+      else
+        die "land: gate did not complete - re-run \`cel-fanout collect $id\` with a longer CEL_VERIFY_GATE_TIMEOUT, or rely on CI (checks: SUCCESS) and say so with --gate-from-ci"
+      fi
+    else
+      [ "$gp" = true ] || die "land: the repo's gate (\`$gate\`) did not pass on $branch (verdict: $gp) - a worker fixes it, then land again. A red gate is a finding, not a formality."
+    fi
   fi
   # The verdict travels into the permanent log rather than a comment thread:
   # on a solo repo the squash body is the only place a public record of who
   # reviewed this, and what they said, can actually live.
   local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch)
+  local body=""
   if [ -n "$review_by" ]; then
-    local body; body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"
+    body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"
     [ -z "$review_note" ] || body="$body"$'\n'"$review_note"
-    merge_args+=(--body "$body")
   fi
+  if [ -n "$ci_gate_body" ]; then
+    [ -z "$body" ] || body="$body"$'\n'
+    body="$body$ci_gate_body"
+  fi
+  [ -z "$body" ] || merge_args+=(--body "$body")
   "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"

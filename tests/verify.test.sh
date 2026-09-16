@@ -74,3 +74,49 @@ test_summary_line_reads_as_a_verdict() {
   assert_contains "$out" "red-green:yes"
   rm -rf "$T"
 }
+
+# A gate that was killed by `timeout` never reached a verdict. Recording that
+# as `passed=false` sent a green branch back to a worker to fix code that was
+# not broken - the plane's own suite grew past 600 s on a loaded box and the
+# tail was all `ok` lines, cut off mid-run. "Ran out of time" and "the code is
+# wrong" lead to opposite actions, so they must not render alike.
+test_a_gate_killed_by_the_timeout_has_no_verdict() {
+  _vrepo; _vcommit impl src/a.ts
+  local out rc=0
+  out="$("$VERIFY" "$T" --gate 'echo working; sleep 5' --gate-timeout 1)" || rc=$?
+  assert_eq "$rc" 2
+  assert_eq "$(_v .gate.passed)" null
+  assert_eq "$(_v .gate.timed_out)" true
+  assert_eq "$(_v .gate.timeout_secs)" 1
+  assert_contains "$(_v .gate.tail)" "working"
+  assert_contains "$(_v .gate.tail)" "killed after 1s - no verdict"
+  assert_contains "$out" "gate:TIMEOUT(1s)"
+  case "$out" in *gate:FAIL*) echo "a timeout rendered as FAIL"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+test_a_genuinely_failing_gate_still_exits_one() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'false' --quiet || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(_v .gate.passed)" false
+  assert_eq "$(_v .gate.timed_out)" false
+  rm -rf "$T"
+}
+test_a_passing_gate_exits_zero() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'true' --quiet || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$T"
+}
+# The flag overrides the env var so one slow suite does not need the whole box
+# reconfigured.
+test_the_flag_overrides_the_env_var() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  CEL_VERIFY_GATE_TIMEOUT=600 "$VERIFY" "$T" --gate 'sleep 5' --gate-timeout 1 --quiet || rc=$?
+  assert_eq "$rc" 2
+  assert_eq "$(_v .gate.timeout_secs)" 1
+  rm -rf "$T"
+}

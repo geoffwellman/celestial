@@ -25,16 +25,21 @@ set -uo pipefail
 . "$CEL_ROOT/lib/common.sh"
 GH="${CEL_VERIFY_GH:-gh}"
 
-usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--base <ref>] [--slug owner/repo] [--branch b] [--quiet]"; }
+usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--gate-timeout <secs>] [--base <ref>] [--slug owner/repo] [--branch b] [--quiet]"; }
 [ $# -ge 1 ] || usage
 wt="$1"; shift
-gate="" base="" slug="" branch="" quiet=0
+gate="" base="" slug="" branch="" quiet=0 gate_timeout=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --gate) gate="$2"; shift 2;; --base) base="$2"; shift 2;; --slug) slug="$2"; shift 2;;
+    --gate-timeout) gate_timeout="$2"; shift 2;;
     --branch) branch="$2"; shift 2;; --quiet) quiet=1; shift;; *) usage;;
   esac
 done
+# The flag beats the env var so one caller with a slow suite can say so for one
+# run, rather than the whole box being reconfigured for its worst repo.
+[ -n "$gate_timeout" ] || gate_timeout="${CEL_VERIFY_GATE_TIMEOUT:-600}"
+case "$gate_timeout" in ''|*[!0-9]*) die "cel-verify: --gate-timeout must be whole seconds (got: $gate_timeout)";; esac
 [ -d "$wt" ] || die "cel-verify: no such worktree: $wt"
 git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || die "cel-verify: $wt is not a git checkout"
 
@@ -46,12 +51,28 @@ fi
 git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 
 # --- gate ------------------------------------------------------------------
-g_conf=false g_ran=false g_pass=null g_tail=""
+# A GATE THAT RAN OUT OF TIME IS NOT A GATE THAT FAILED. `timeout` returns 124
+# when it killed the command (137 when the kill had to be a SIGKILL). On
+# 2026-09-16 the plane's own suite grew past 600 s on a loaded box and a green
+# branch was recorded as gate:FAIL - the tail was all `ok` lines, cut off
+# mid-run, with no summary - and land correctly refused a verdict that did not
+# exist. "Ran out of time" and "the code is wrong" lead to opposite actions and
+# must not render alike, the same rule _wt_ahead already states for `?` vs `0`.
+g_conf=false g_ran=false g_pass=null g_tail="" g_to=false
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
-  out="$(cd "$wt" && timeout "${CEL_VERIFY_GATE_TIMEOUT:-600}" bash -lc "$gate" 2>&1)"; rc=$?
-  [ "$rc" -eq 0 ] && g_pass=true || g_pass=false
+  out="$(cd "$wt" && timeout "$gate_timeout" bash -lc "$gate" 2>&1)"; rc=$?
   g_tail="$(printf '%s' "$out" | tail -n 12)"
+  case "$rc" in
+    0) g_pass=true;;
+    124|137)
+      g_to=true; g_pass=null
+      # the LAST line is where it got to; the sentence after it is why there is
+      # nothing after that line.
+      g_tail="$(printf '%s' "$out" | tail -n 1)"$'\n'"killed after ${gate_timeout}s - no verdict"
+      ;;
+    *) g_pass=false;;
+  esac
 fi
 
 # --- tests: red then green? --------------------------------------------------
@@ -110,20 +131,29 @@ fi
 mkdir -p "$wt/.agent"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg base "$base" \
   --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
+  --argjson gto "$g_to" --argjson gtos "$gate_timeout" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
   --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
   { at: $at, branch: $branch, base: $base,
-    gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, tail: $gtail },
+    gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, tail: $gtail,
+              timed_out: $gto, timeout_secs: $gtos },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
     checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
 
 if [ "$quiet" -eq 0 ]; then
-  gs="gate:$([ "$g_conf" = true ] && { [ "$g_pass" = true ] && echo PASS || echo FAIL; } || echo none)"
+  if [ "$g_conf" != true ]; then gs="gate:none"
+  elif [ "$g_to" = true ]; then gs="gate:TIMEOUT(${gate_timeout}s)"
+  elif [ "$g_pass" = true ]; then gs="gate:PASS"
+  else gs="gate:FAIL"; fi
   rs="red-green:$(case "$rg" in true) echo yes;; false) echo no;; *) echo n/a;; esac)"
   printf 'verdict %s  %s  diff:%s files +%s/-%s  checks:%s  review:%s\n' "$gs" "$rs" "$d_files" "$d_ins" "$d_del" "$c_state" "$r_dec"
 fi
-# exit reflects the gate only: that is the one dimension with a right answer
+# exit reflects the gate only: that is the one dimension with a right answer.
+# Three outcomes, three codes, so a caller does not have to parse prose: 0 the
+# gate passed (or was never configured), 1 it genuinely failed, 2 it ran out of
+# time and there is no verdict to act on.
+[ "$g_to" = true ] && exit 2
 [ "$g_pass" = false ] && exit 1
 exit 0
