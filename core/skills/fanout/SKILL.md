@@ -75,9 +75,42 @@ cel-fanout delegate <repo> <branch> <spec> --profile astra
   not landing. `--discard` is the only way past that refusal, and it is
   logged; nothing snapshots the work first, so say it only when you mean it.
 
+Shapes: what a delegation is for
+
+```
+cel-fanout delegate <repo> <branch> <spec>   # worker: the deliverable is a PR
+cel-fanout scout <repo> <brief>              # scout:  a report; may not write code
+cel-fanout spike <repo> <brief>              # spike:  a report, backed by throwaway code
+```
+
+- A **spike** answers "try it and tell me if it works", which is neither a
+  worker's job nor a scout's. It writes code freely in its worktree and may
+  commit locally, but never pushes, opens a PR or creates a ticket; its
+  deliverable is `.agent/report.md`. `collect` prints that report and marks the
+  row `reported` without running the verifier, and `release` throws the
+  worktree away without `--discard` — dirty and unpushed are a spike's expected
+  end state — while naming what went.
+
+Products and the review verdict
+
+- The worker's completion notice goes to the **product's** orchestrator
+  (`<product>-orch`), and the worker cap counts every running row across the
+  product's repos, from `products[].workers` or `policy.workers`. A repo in no
+  declared product is its own product, so nothing changes for one.
+- `--workspace <name>` on `delegate`, `scout`, `spike`, `status`, `collect`,
+  `release`, `land` resolves the workspace from the registry instead of the
+  cwd — for driving a fleet from outside its tree.
+- `cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note …]`
+  records the verdict on the ledger row; `status` shows it in the REVIEW
+  column. On a repo whose PR author and reviewer are one GitHub account,
+  GitHub refuses approval outright, so `land` accepts an `approved` ledger
+  verdict **only there** — everywhere else GitHub's decision remains the
+  authority — and writes `Reviewed-by: <by> (<verdict>)` into the squash-merge
+  body so the record is public in the log.
+
 Rules
-- ≤ `policy.workers` concurrent delegations (`cel-fanout status` shows the
-  running count).
+- ≤ the product's worker cap concurrent delegations (`cel-fanout status` shows
+  the running count per product).
 - One ticket per worker; never reuse a worker pane for a second ticket.
 - The task spec always travels as a FILE, never pasted prose: workers can
   re-read it after compaction.
