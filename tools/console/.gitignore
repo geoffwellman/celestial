@@ -1,0 +1,5 @@
+# The console's dependency tree is PINNED (package-lock.json is committed) and
+# INSTALLED (cel setup runs npm ci --ignore-scripts here). The tree itself is
+# never a publication input: it is thousands of third-party files that the
+# hygiene scan would have to read on every release.
+node_modules/

@@ -17,6 +17,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/install.sh"   # extensions_missing
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
+# shellcheck source=lib/console.sh
+. "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
 
 check_roles_and_runtimes() {
   local fail=0 a ad l target strat
@@ -186,6 +188,21 @@ check_externals() {
   return 1
 }
 
+# The console is ink, so it has node_modules - and a box where `cel setup` ran
+# before this ticket landed has a perfectly healthy plane and no console. That
+# is a WARNING, not a failure: nothing else on the box depends on it, and a red
+# doctor for an optional UI teaches people to ignore a red doctor.
+check_console_deps() {
+  local d; d="$(console_tool_dir)"
+  c_hd "Console"
+  if console_deps_ok "$d"; then
+    c_ok "console UI deps installed (ink)"
+  else
+    c_warn "$(console_deps_hint "$d")"
+  fi
+  return 0
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -267,6 +284,7 @@ cmd_doctor() {
     c_warn "no registry yet ($CEL_REGISTRY) - created on first cel ws new/add"
   fi
 
+  check_console_deps || fail=1
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1
   check_externals || fail=1

@@ -206,15 +206,44 @@ _run_console_dir() { printf '%s' "${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/cons
 # because the workspace is the thing it is bound to; the console is bound to
 # the box, and a policy block from an arbitrary workspace would read as
 # authority it does not have.
-_run_console_body() { cat "$CEL_ROOT/core/roles/console.md"; }
+#
+# The vocabulary table is INCLUDED rather than carried: the TUI's translator
+# puts the same table in its system message (tools/console/translate.mjs), and
+# two copies of it would mean the two consoles disagreeing about what the
+# console may do the first time someone edited one of them.
+_run_console_body() {
+  local f="$CEL_ROOT/core/roles/console.md" vocab="$CEL_ROOT/tools/console/vocabulary.md"
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      '<!-- cel:include tools/console/vocabulary.md -->')
+        # Strip the file's own explanatory comment: it is addressed to whoever
+        # edits the table, not to the agent reading the prompt.
+        sed '/^<!--/,/-->$/d' "$vocab" | sed '/^$/{ /./!d }'
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$f"
+}
 
 # The console's launch settings come from agents.yaml `defaults.console`.
 _run_console_default() { # <runtime|model|thinking>
   manifest_default console | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
 }
 
-_run_console() { # <profile> <model-opt> <thinking-opt> <dry-run>
-  local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4"
+_run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
+  local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4" agent="${5:-1}"
+  # THE DEFAULT CONSOLE IS NOT AN AGENT ANY MORE. `cel console` is the plane's
+  # own interface (lib/console.sh): deterministic panels and a small model
+  # wired into one job. The Claude pane survives behind --agent for people who
+  # want to talk to a full agent, but a bare `cel run console` must not
+  # silently start the expensive thing when the cheap thing is what the README
+  # now leads with.
+  if [ "$agent" -ne 1 ]; then
+    printf 'cel run console now starts an AGENT pane; the console itself is `cel console`.\n' >&2
+    printf 'Use `cel console` for the TUI, or `cel run console --agent` for the agent pane.\n' >&2
+    return 2
+  fi
   [ -z "$profile" ] || die "cel run console: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
   have jq || die "cel run console: jq is not on PATH"
 
@@ -269,7 +298,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run>
 }
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
-  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0
+  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -291,6 +320,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --model)     model_opt="$2"; shift 2 ;;
       --thinking)  thinking_opt="$2"; shift 2 ;;
       --dry-run)   dry_run=1; shift ;;
+      --agent)     agent=1; shift ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
@@ -298,7 +328,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   # The console resolves NO workspace - see _run_console. It has to return
   # before the resolution below, which would otherwise die for want of one.
   if [ "$role" = console ]; then
-    _run_console "$profile" "$model_opt" "$thinking_opt" "$dry_run"
+    _run_console "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$agent"
     return $?
   fi
 

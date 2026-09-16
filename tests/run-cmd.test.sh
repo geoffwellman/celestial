@@ -224,16 +224,16 @@ test_the_shipped_console_default_is_claude_haiku() {
 }
 test_run_console_needs_no_workspace_and_has_a_dir_of_its_own() {
   _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
   assert_contains "$out" "workspace create --cwd $CONS --label celestial/console"
   assert_contains "$out" "agent start console --kind $CRT"
   rm -rf "$CONS"
 }
 test_run_console_takes_its_model_from_the_manifest_default() {
   _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
   assert_contains "$out" "--model $CMODEL"
-  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --model x/y --thinking high --dry-run)"
+  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --model x/y --thinking high --dry-run)"
   assert_contains "$out" "--model x/y"
   assert_contains "$out" "high"
   rm -rf "$CONS"
@@ -243,7 +243,7 @@ test_run_console_takes_its_model_from_the_manifest_default() {
 # longest-lived pane on the box.
 test_run_console_role_travels_as_a_file_beside_the_console_dir() {
   _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
   assert_contains "$out" "$CONS/role-console.md"
   rm -rf "$CONS"
 }
@@ -253,7 +253,7 @@ test_run_console_role_travels_as_a_file_beside_the_console_dir() {
 # be the only gate).
 test_run_console_gets_the_guard_hook() {
   _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
   case "$CRT" in
     claude) assert_contains "$out" "--dangerously-skip-permissions"
             ! printf '%s' "$out" | grep -q -- '--hook' || { echo "claude got an omp hook flag"; rm -rf "$CONS"; return 1; } ;;
@@ -271,6 +271,6 @@ test_run_console_body_carries_no_workspace_policy_block() {
 # one from, so asking for one is a mistake rather than a silent no-op.
 test_run_console_refuses_a_profile() {
   _console
-  ( cd /tmp && CEL_CONSOLE_DIR="$CONS" assert_fails _cmd_run_in_subshell console --profile opus-pi --dry-run )
+  ( cd /tmp && CEL_CONSOLE_DIR="$CONS" assert_fails _cmd_run_in_subshell console --agent --profile opus-pi --dry-run )
   rm -rf "$CONS"
 }

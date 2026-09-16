@@ -294,6 +294,9 @@ cmd_setup() {
   install_base || return
   export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
   install_agents "$agents" || return
+  # shellcheck source=lib/console.sh
+  . "$CEL_ROOT/lib/console.sh"
+  console_install_deps || return
   link_all || return
   herdr_integrations || return
   install_externals || return

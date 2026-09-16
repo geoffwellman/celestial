@@ -8,6 +8,19 @@ watch the repo (Watch → Custom → Releases) to be notified.
 ## [Unreleased]
 
 ### Added
+- `cel console` - Celestial's own terminal interface, built with ink: the
+  fleet table, every open decision addressed to root across all workspaces,
+  the inbox tail and a command line, in one full-screen pane that is not an
+  agent. `--render-once` prints the panels as plain text and exits
+- A translator wired into that command line: type a sentence and a small model
+  (`console.provider` in `~/.local/share/cel/config.yaml`, endpoints from
+  `agents.yaml`) proposes exactly ONE command, which runs only when you press
+  Enter again. No key configured means no translation and a console that is
+  otherwise fully useful; the model never executes anything
+- `cel console` runs commands through the same `lib/guard.sh` allowlist the
+  agent console is held to - one policy, two surfaces
+- `cel setup` installs the console's pinned UI dependencies with
+  `npm ci --ignore-scripts`; `cel doctor` reports them missing
 - `cel update` is a real upgrade path: it lands on the newest **release tag**
   (never main's tip), records the previous build, re-applies everything the
   installation touched (links, claude settings, `ws sync`, dashboards, pages),
@@ -31,6 +44,12 @@ watch the repo (Watch → Custom → Releases) to be notified.
   console's `cel inbox watch --all-workspaces` background watch.
 
 ### Changed
+- `cel run console` now requires `--agent`: the console is `cel console`, and
+  the Claude pane survives behind the flag. A bare `cel run console` exits 2
+  and names the new command
+- The console's vocabulary table lives in `tools/console/vocabulary.md` and is
+  included by both consoles, so the TUI's translator and the agent role file
+  cannot drift apart
 - `cel update` refuses a dirty tree or a checkout that is not on `main`: the
   plane's developer moves with git, everyone else moves with `cel update`
 - The documented shape of the factory is console -> orchestrator per product
