@@ -23,10 +23,24 @@ watch the repo (Watch → Custom → Releases) to be notified.
   file per request and shows `update available vX → cel update`
 - Listing after an update of long-lived agents still carrying the previous
   build's role prompt and guard hook
+- README "Give this to your agent": one pasteable prompt block that installs
+  and starts the factory through the reader's own coding agent.
+- README factory vocabulary table: ticket, verdict, land, steward, console.
+- README rows for `cel fleet`, `cel run console`, `cel run orchestrator
+  --product`, `cel-fanout spike` and `cel update --check/--rollback`, and the
+  console's `cel inbox watch --all-workspaces` background watch.
 
 ### Changed
 - `cel update` refuses a dirty tree or a checkout that is not on `main`: the
   plane's developer moves with git, everyone else moves with `cel update`
+- The documented shape of the factory is console -> orchestrator per product
+  -> stations (worker, scout, spike, reviewer); the old root -> project
+  orchestrator -> worker tier diagram is gone.
+- A workspace is documented as configuration and grouping scope, not a tier;
+  a product holding all its repos is "the workspace orchestrator".
+- `cel run root` is documented and prompted as optional; `root` remains the
+  mailbox name for "the top, whoever is listening".
+- Quick start boots `cel run console` and explains when to prefer `cel run root`.
 
 ## [0.2.0] - 2026-09-15
 
