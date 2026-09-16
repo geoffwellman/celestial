@@ -9,12 +9,17 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { readdirSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import { controlSecurity, internalError } from '../http-security.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
-const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial-plane');
+// The plane's own directory name is the reader's choice, so resolve it from
+// this file (tools/dash/server.mjs -> two levels up) the way bin/cel does.
+// A hardcoded fallback meant anyone who cloned under a different name got a
+// dashboard reading role files out of a directory that did not exist.
+const CEL_ROOT = process.env.CEL_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FX_DIR = process.env.CEL_EFFECTS_DIR || join(homedir(), '.local/share/cel/vendor/canvasui');
 const WORKTREES = join(homedir(), '.herdr', 'worktrees');
 const security = controlSecurity({

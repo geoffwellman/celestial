@@ -42,18 +42,46 @@ visibility and housekeeping around the agents:
   distinguishes active work, waiting, blocked work and missing signals.
   Its task list remains available when you need a denser operational view.
 
+## Give this to your agent
+
+You already have a coding agent — Claude Code, oh-my-pi, pi, codex, opencode.
+Paste this into it and let it do the install:
+
+```
+Install Celestial on this machine and get it running:
+1. git clone https://github.com/geoffwellman/celestial.git ~/celestial
+2. Add  eval "$(~/celestial/bin/cel shellenv)"  to my shell rc and load it.
+3. Run cel setup, then cel doctor. Fix everything red; ask me for anything
+   that needs my account (gh auth login, claude setup-token, pi /login).
+4. Ask me: a workspace name, my GitHub org, and the repos I want in it.
+   Run cel ws new <name> --org <org>, add the repos to workspace.yaml, run
+   cel ws sync <name>, then cel doctor again.
+5. Start the console with cel run console, then run cel fleet and
+   cel dash --ensure. Show me both outputs and the dashboard URL, and tell
+   me the one command I use from now on.
+```
+
+Setup installs third-party code and may invoke `sudo`; read the block before
+you paste it, and read [requirements](#requirements) first. If you would
+rather type it yourself, the same install is below.
+
 ## Quick start
 
 ```sh
-git clone https://github.com/geoffwellman/celestial.git ~/celestial-plane
-eval "$(~/celestial-plane/bin/cel shellenv)"  # add this line to your shell rc
-cel setup                                  # review the manifests before installing
-cel doctor                                 # verify prerequisites and account setup
+git clone https://github.com/geoffwellman/celestial.git ~/celestial
+eval "$(~/celestial/bin/cel shellenv)"  # add this line to your shell rc
+cel setup                               # review the manifests before installing
+cel doctor                              # verify prerequisites and account setup
 
-cel ws new acme --org your-gh-user  # scaffold a workspace
-cel ws sync acme                    # clone its repos, link skills, check tools
-cd ~/ws/acme && cel run root        # boot the workspace: layout + root agent
+cel ws new acme --org your-gh-user      # scaffold a workspace
+cel ws sync acme                        # clone its repos, link skills, check tools
+cel run console                         # the pane you keep open: routes the box
 ```
+
+`cel run console` is the pane a person keeps open — one per box, across every
+workspace. `cd ~/ws/acme && cel run root` is the alternative: it boots that
+one workspace's layout with a standing root agent. Pick the console unless you
+want a director that lives inside a single workspace and plans for it.
 
 Requires GNU/Linux; automatic prerequisite installation targets apt-based
 distributions. Fresh binary installs support x86-64 and arm64. See
@@ -63,10 +91,10 @@ you into GitHub, Linear or agent accounts.
 
 ## How it works
 
-Three layers on disk, three tiers of agents.
+Three layers on disk, and a factory floor of agents above them.
 
 ```
-~/celestial-plane          the plane: mechanism only (this repo, public)
+~/celestial                the plane: mechanism only (this repo, public)
 ├── bin/cel                one CLI for everything
 ├── core/roles/            role prompts, injected at launch
 ├── core/skills/           skills linked into every agent
@@ -83,18 +111,42 @@ Three layers on disk, three tiers of agents.
 ```
 
 ```
-root orchestrator          one per workspace - coordinates, never edits code
-   └── project orchestrator   one per repo - decomposes work into tickets
-          └── workers            one ticket, one worktree, one pane (fanout)
-          └── reviewer panes     one per PR, hand off with workers directly
+console                one per box - routes; reads cel fleet; never builds
+   └── orchestrator        one per product (1..n repos) - plans, delegates, judges, lands
+          ├── worker          one ticket, one worktree, one PR
+          ├── scout           reads and reports; never writes code
+          ├── spike           tries and reports; throwaway code, never shipped
+          └── reviewer        one PR, one review per round
 ```
 
-`cel run <role>` starts any tier with its role injected and permissions
+A **workspace** is not a tier. It is the scope that holds configuration and
+grouping: policy, ticket tracker, environment, worker profiles, dashboard. A
+**product** is the unit an orchestrator owns — one repo, or several that ship
+together. A product that contains all of a workspace's repos is simply "the
+workspace orchestrator"; there is no third tier below it, and never was a need
+for one. `cel run root` is optional: a standing director for a workspace that
+wants one. `root` remains the mailbox name for "the top, whoever is listening",
+which is the console otherwise.
+
+`cel run <role>` starts any station with its role injected and permissions
 pre-approved; workers are spawned by orchestrators through the `fanout` skill,
 which cuts worktrees from origin's real default branch, refuses diverged refs,
 and makes every worker land its work as a PR — finished work is never
 invisible. `policy.pr_open: draft | ready` decides whether that PR opens as a
 draft (default) or ready for review with the workspace reviewer requested.
+
+## Factory vocabulary
+
+The floor has its own words. They are used in the prose below, and none of
+them renames a command:
+
+| Word | Means |
+|---|---|
+| ticket | a work order — the unit a worker is given |
+| verdict | the QA gate on a branch: gate result, red-then-green, diff, CI, review |
+| land | ship it — squash, merge, clean up |
+| steward | the conveyor: the timer that keeps the floor moving without you |
+| console | the floor manager's desk: one per box, routes, never builds |
 
 ## The review loop runs itself
 
@@ -104,8 +156,16 @@ Declare a reviewer in `workspace.yaml`:
 review: { runtime: omp, model: gpt-5.6-sol }
 ```
 
-and orchestrators start one reviewer pane per PR. Reviewers prompt workers
-directly on request-changes; workers fix, push, and prompt back for
+and orchestrators start one reviewer pane per PR. A reviewer delivers one
+verdict per round and **records it in the delegation ledger** — `cel-fanout
+review <id> approved|changes --by <alias>` — which is where a review exists;
+`cel-fanout land` accepts that verdict on repos where the PR author and the
+reviewer share one GitHub account, and GitHub approval remains the authority
+where they do not. `review.post: github` opts a repo into posting the review
+to GitHub as well, for reviewers that have an identity of their own; the
+default is `inbox`, because an agent approving its owner's PR under the
+owner's account is the owner approving himself in public. Reviewers prompt
+workers directly on request-changes; workers fix, push, and prompt back for
 re-review; you hear about it only on approval or escalation. A steward tick
 (every 5 minutes by default, deterministic, token-free) backstops the whole
 thing: verified disposable worktrees are removed, positively identified idle
@@ -117,14 +177,21 @@ work, not evidence that it is safe to delete.
 
 `herdr agent prompt` types into a pane, so a status report landing while you
 are mid-sentence merges with your draft. Routine agent-to-agent traffic goes
-through `cel inbox` instead - a JSONL mailbox per workspace with a read
-cursor per recipient - and delivery is out-of-band: recipients run a
-`Monitor` background task (`cel inbox watch`) so new mail arrives as a
+through `cel inbox` instead - a JSONL mailbox per workspace, with a read
+cursor per *reader* so a standing root pane and the console can both drain
+root's mail without stealing each other's place - and delivery is out-of-band:
+recipients run a `Monitor` background task (`cel inbox watch`, or `cel inbox
+watch --all-workspaces` for the console) so new mail arrives as a
 notification, and a `UserPromptSubmit` hook drains anything missed on your
 next turn. Escalations that truly cannot wait still prompt, deliberately.
 
 ## Watch and steer
 
+- **`cel fleet`** — the whole box in one deterministic read: every workspace,
+  every repo, whether its orchestrator is live, workers in flight against the
+  cap, stalled and unlanded work, and root's mail. Token-free and free of
+  agent judgement; `--json` for scripts. The console answers from this, never
+  from memory.
 - **`cel dash`** — per-workspace dashboard: an attention queue ("needs you"),
   every in-flight branch joined with its agent + PR + CI state, sticky
   filters, and a prompt box that drives any agent in the workspace.
@@ -221,10 +288,15 @@ what catch it.
 
 ### The agents
 
-Root, the sub-orchestrators, workers and reviewers are herdr panes, not
-services. They are started by `cel run` and `cel-fanout delegate`, and they
-stop when their pane does. `cel-fanout status` is the ledger of what was
-delegated, on which model, and where it got to.
+The console, the orchestrators, workers, scouts, spikes and reviewers are herdr
+panes, not services. They are started by `cel run` and `cel-fanout delegate`,
+and they stop when their pane does. `cel-fanout status` is the ledger of what
+was delegated, on which model, and where it got to.
+
+The console arms one background task of its own, once per session: `cel inbox
+watch --all-workspaces`, so a decision raised in any workspace wakes it rather
+than waiting for someone to look. Like every watch it is not a daemon — the
+Stop hook and the steward's stale-mailbox check are what notice when it dies.
 
 ## Any model, any CLI, per worker
 
@@ -296,22 +368,25 @@ policy block into every agent.
 | Command | What |
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
+| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
 | `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
+| `cel run console` | the pane you keep open: one per box, routes every workspace |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
+| `cel run orchestrator --product <p>` | start the orchestrator for a product (1..n repos) |
 | `cel profiles` | worker profiles and the exact launch flags each resolves to |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
 | `cel quota [provider]` | credit left per provider, asked of the provider; a route below its floor is vetoed before a pane spawns |
 | `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |
 | `cel inbox open · resolve` | decisions stay open until resolved; reading one does not answer it |
 | `cel-fanout scout <repo> <brief>` | an investigation: disposable worktree, a report as the deliverable, no ticket, no PR |
+| `cel-fanout spike <repo> <brief>` | a trial: throwaway code in a disposable worktree, a report as the deliverable, never shipped |
 | `cel-fanout land <id>` | the one merge path — fleet-authored, approved, green, gate passed, `policy.merge` allows |
 | `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
 | `cel dash` | workspace dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h]` | reclaim worktrees + idle agents |
-| `cel inbox send · read · count · watch` | agent messages that never type into a pane |
-| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
+| `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |
 
@@ -321,7 +396,7 @@ The repo is **mechanism only**. Your setup never lands in it:
 
 | | Where | Committed? |
 |---|---|---|
-| The tool | `~/celestial-plane` | public repo (this one) |
+| The tool | `~/celestial` | public repo (this one) |
 | Which workspaces exist on this box | `~/.local/share/cel/registry.yaml` | never |
 | Published pages | `~/.local/share/cel/pages*` | never |
 | Workspace content + overrides | `~/ws/<name>` (own private repo) | yours |
