@@ -452,6 +452,27 @@ WantedBy=timers.target
   fi
 }
 
+# Is this box behind its latest release? The steward is the only thing that
+# asks on its own, so it is also the only thing that can tell the dashboard:
+# the marker file it writes here is what the dash build chip reads per request,
+# hours after the dashboard booted. Removing it when current matters as much as
+# writing it - a stale chip would nag about an update that already landed.
+_steward_update_check() {
+  # shellcheck source=lib/version.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+  local v latest dir
+  dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"
+  v="$(cel_version)"; latest="$(cel_latest_remote_version)"
+  if [ -n "$latest" ] && cel_version_lt "$v" "$latest"; then
+    mkdir -p "$dir"
+    printf '%s\n' "$latest" >"$dir/available"
+    c_warn "celestial v$latest is out (installed v$v) - run: cel update"
+  else
+    rm -f "$dir/available"
+  fi
+  return 0
+}
+
 cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   local do_gc=1
   if [ "${1:-}" = "--install" ]; then shift; _steward_install "$@"; return $?; fi
@@ -608,14 +629,8 @@ $text2" >/dev/null 2>&1 \
   # Once a day: is the plane itself behind its latest release? The steward
   # is the thing the human actually reads, so the update notice lives here
   # too, not only in doctor.
-  # shellcheck source=lib/version.sh
-  . "$CEL_ROOT/lib/version.sh"
   if _STEWARD_WINDOW=86400 _steward_due "cel-update-check"; then
-    local _v _latest
-    _v="$(cel_version)"; _latest="$(cel_latest_remote_version)"
-    if [ -n "$_latest" ] && cel_version_lt "$_v" "$_latest"; then
-      c_warn "celestial v$_latest is out (installed v$_v) - run: cel update"
-    fi
+    _steward_update_check
   fi
 
   _steward_ready_tickets

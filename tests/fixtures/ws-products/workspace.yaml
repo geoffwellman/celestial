@@ -1,0 +1,29 @@
+name: bundled
+kind: hustle
+org: someone
+tickets: { system: none, adhoc: "AH-<yymmdd>" }
+policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
+runtime: { root: claude, orchestrator: claude, worker: omp }
+tools: []
+
+# One declared product over two repos, and `lone` left out of it on purpose:
+# an undeclared repo is its own implicit product, in place.
+products:
+  - name: bundle
+    repos: [widget, gadget]
+    orchestrator: auto
+    workers: 2
+
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test
+  - name: gadget
+    url: git@github.com:someone/gadget.git
+    prefix: WGT
+    gate: bun test
+  - name: lone
+    url: git@github.com:someone/lone.git
+    prefix: OT
+    gate: bun test
