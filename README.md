@@ -309,6 +309,7 @@ policy block into every agent.
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h]` | reclaim worktrees + idle agents |
 | `cel inbox send · read · count · watch` | agent messages that never type into a pane |
+| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |
 
