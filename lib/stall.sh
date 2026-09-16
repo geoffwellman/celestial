@@ -36,7 +36,7 @@ _CEL_STALL=1
 # marker that fires on "server_error" appearing anywhere would report a
 # healthy worker as dead. These are shapes the RUNTIME emits when it has
 # stopped: a retry affordance, a fatal transport error, a crashed process.
-_STALL_MARKERS='F5 to Retry|↻ *Retry|server_error|Stream error|h2 protocol error|Upstream error from|context deadline exceeded|ECONNRESET|socket hang up|panic: |fatal error: |Killed *$|command not found'
+_STALL_MARKERS='lineage diverged|not append-only|F5 to Retry|↻ *Retry|server_error|Stream error|h2 protocol error|Upstream error from|context deadline exceeded|ECONNRESET|socket hang up|panic: |fatal error: |Killed *$|command not found'
 
 # "" when the tail looks like ordinary work, else the marker that matched.
 stall_marker() { # <pane-text>

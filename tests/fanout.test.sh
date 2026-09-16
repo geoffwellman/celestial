@@ -975,3 +975,57 @@ test_fanout_failed_ledger_rename_preserves_rows_and_cleans_temp() {
   done
   rm -rf "$T"
 }
+
+# --- the worker cap ---------------------------------------------------------
+# policy.workers was a sentence in the injected policy block and nothing else,
+# so each orchestrator kept a private count - which only ever goes up, because
+# delegating is an act it performs and finishing is an event nobody reports to
+# it. Both directions were live on one day: an orchestrator holding four
+# tickets as "blocked until a slot frees" with zero workers running, and
+# nothing that would have stopped another from starting a fifth.
+_cap_fill() { # <n> running rows for widget
+  local i; for i in $(seq 1 "$1"); do
+    (cd "$T" && "$BIN" delegate widget "WG-9$i" "$T/spec.md") > /dev/null 2>&1
+    jq --arg id "WG-9$i" 'map(if .id == $id then .state = "running" else . end)' \
+      "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  done
+}
+test_delegate_refuses_past_the_worker_cap() {
+  _fanout_setup
+  _cap_fill 4
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-FIFTH "$T/spec.md") 2>&1 )" && {
+    echo "a fifth worker was allowed past a cap of 4"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cap is 4"
+  assert_contains "$out" "cel-fanout collect"
+  rm -rf "$T"
+}
+test_a_freed_slot_allows_the_next_delegation() {
+  _fanout_setup
+  _cap_fill 4
+  jq 'map(if .id == "WG-91" then .state = "collected" else . end)' \
+    "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  (cd "$T" && "$BIN" delegate widget WG-FIFTH "$T/spec.md") > /dev/null \
+    || { echo "a freed slot was still refused"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The cap is PER REPO: one repo at capacity must not block its neighbour.
+test_the_cap_is_per_repo() {
+  _fanout_setup
+  mkdir -p "$T/repos/gadget" && git -C "$T/repos/gadget" init -q
+  printf '  - name: gadget\n    url: git@github.com:someone/gadget.git\n    prefix: OT\n' >> "$T/workspace.yaml"
+  _cap_fill 4
+  # The stub only knows the widget repo, so gadget cannot complete a real
+  # delegation here; what matters is that it is not refused BY THE CAP.
+  local out; out="$( (cd "$T" && "$BIN" delegate gadget OT-1 "$T/spec.md") 2>&1 || true )"
+  ! printf '%s' "$out" | grep -q "cap is" \
+    || { echo "a full repo blocked a different one: $out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# And status says what is true, so nobody has to keep the number in their head.
+test_status_reports_slots_per_repo() {
+  _fanout_setup
+  local out; out="$( (cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status) 2>&1 )"
+  assert_contains "$out" "slots widget"
+  assert_contains "$out" "free"
+  rm -rf "$T"
+}

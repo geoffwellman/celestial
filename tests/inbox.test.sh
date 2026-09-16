@@ -148,3 +148,86 @@ test_stop_hook_passes_with_nothing_open() {
 test_stop_hook_fails_open_without_cel() {
   CEL_ROOT="$(mktemp -d)" bash "$CEL_ROOT/tools/hooks/inbox-guard.sh" >/dev/null 2>&1 || { echo "failed closed with no cel"; return 1; }
 }
+
+# A pane derives its own mailbox with _inbox_sanitise - lowercased, cut to 32
+# characters - but the sender wrote whatever string it had to hand, and the two
+# agreed only by luck. Observed in a live inbox: fifty-odd messages across a
+# dozen phantom mailboxes, several of them the same recipient spelled two ways.
+test_the_recipient_is_normalised_at_send_time() {
+  local T; T="$(mktemp -d)"; export CEL_INBOX_DIR="$T"
+  cel_inbox_send() { ( CEL_INBOX_ME=tester _inbox_send "$@" --workspace w ); }
+  cel_inbox_send 'widget-WG-20-Faithful-Integrity' 'upper and long' >/dev/null
+  cel_inbox_send 'widget-wg-20-faithful-integrity' 'already canonical' >/dev/null
+  # both land in ONE mailbox, the one the recipient will actually look in
+  local tos; tos="$(jq -r '.to' "$T/w.jsonl" | sort -u)"
+  assert_eq "$(printf '%s\n' "$tos" | wc -l)" "1"
+  assert_eq "$tos" "$(_inbox_sanitise 'widget-wg-20-faithful-integrity')"
+  rm -rf "$T"
+}
+# ...and a recipient addressed in full still reaches a pane that answers to the
+# truncated form, which is every worker with a long branch name.
+test_an_overlong_recipient_reaches_the_pane_that_truncates() {
+  local T; T="$(mktemp -d)"; export CEL_INBOX_DIR="$T"
+  ( CEL_INBOX_ME=tester _inbox_send 'product-platform-wg-46-terminal-transcript-durability' 'hi' --workspace w ) >/dev/null
+  local to; to="$(jq -r '.to' "$T/w.jsonl")"
+  assert_eq "$to" "$(CEL_INBOX_ME='' bash -c 'source "$1/lib/inbox.sh"; _inbox_sanitise "product-platform-wg-46-terminal-transcript-durability"' _ "$CEL_ROOT")"
+  [ "${#to}" -le 32 ] || { echo "recipient not truncated: $to"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The broadcast address is not a pane name and must survive untouched.
+test_the_broadcast_address_is_left_alone() {
+  local T; T="$(mktemp -d)"; export CEL_INBOX_DIR="$T"
+  ( CEL_INBOX_ME=tester _inbox_send all 'everyone' --workspace w ) >/dev/null
+  assert_eq "$(jq -r '.to' "$T/w.jsonl")" "all"
+  rm -rf "$T"
+}
+
+# --- prune ------------------------------------------------------------------
+_prune_fixture() { # a mailbox with mail for a live worker, a dead one, and root
+  T="$(mktemp -d)"; export CEL_INBOX_DIR="$T"
+  ( CEL_INBOX_ME=t _inbox_send widget-wg-1-live  'to the living' --workspace w ) >/dev/null
+  ( CEL_INBOX_ME=t _inbox_send widget-wg-2-dead  'to the departed' --workspace w ) >/dev/null
+  ( CEL_INBOX_ME=t _inbox_send root              'to root' --workspace w ) >/dev/null
+  ( CEL_INBOX_ME=t _inbox_send widget-orch       'to the orchestrator' --workspace w ) >/dev/null
+  STUB="$T/herdr"; cat > "$STUB" <<'EOS'
+#!/usr/bin/env bash
+echo '{"result":{"agents":[{"name":"widget-wg-1-live"}]}}'
+EOS
+  chmod +x "$STUB"; export PATH="$T:$PATH"
+}
+test_prune_archives_mail_for_workers_that_no_longer_exist() {
+  _prune_fixture
+  _inbox_prune --workspace w >/dev/null
+  local left; left="$(jq -r '.to' "$T/w.jsonl" | sort -u | tr '\n' ' ')"
+  assert_contains "$left" "widget-wg-1-live"
+  assert_contains "$left" "root"
+  assert_contains "$left" "widget-orch"
+  ! printf '%s' "$left" | grep -q "wg-2-dead" || { echo "dead worker's mail kept"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/w.archive.jsonl")" "to the departed"
+  rm -rf "$T"
+}
+# Root and the orchestrators are restarted routinely - a compaction, a model
+# change, a crash - and mail sent while one was down is what it most needs on
+# the way back up.
+test_prune_never_touches_root_or_an_orchestrator() {
+  _prune_fixture
+  _inbox_prune --workspace w >/dev/null
+  assert_contains "$(cat "$T/w.jsonl")" "to root"
+  assert_contains "$(cat "$T/w.jsonl")" "to the orchestrator"
+  rm -rf "$T"
+}
+# herdr being unreachable is not evidence that everyone died.
+test_prune_refuses_when_the_roster_is_unreadable() {
+  _prune_fixture
+  printf '#!/usr/bin/env bash\necho "{}"\n' > "$T/herdr"; chmod +x "$T/herdr"
+  _inbox_prune --workspace w >/dev/null 2>&1
+  assert_contains "$(cat "$T/w.jsonl")" "to the departed"
+  rm -rf "$T"
+}
+test_prune_dry_run_changes_nothing() {
+  _prune_fixture
+  local before; before="$(wc -l < "$T/w.jsonl")"
+  _inbox_prune --workspace w --dry-run >/dev/null
+  assert_eq "$(wc -l < "$T/w.jsonl")" "$before"
+  rm -rf "$T"
+}

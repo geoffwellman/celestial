@@ -30,7 +30,15 @@ expand() {
 
 # yq must be the PYTHON build (kislyuk, jq syntax). The Go build (mikefarah)
 # parses the same file differently and returns different results silently.
-yq_ok() { have yq && yq --version 2>&1 | grep -qiv 'mikefarah'; }
+# Capture, do not pipe: under `set -o pipefail` a `grep -q` short-circuit
+# SIGPIPEs yq and the non-zero exit made every build look like the wrong one.
+yq_ok() {
+  local v
+  have yq || return 1
+  v="$(yq --version 2>&1)" || return 1
+  case "$v" in *[Mm]ikefarah*) return 1;; esac
+  return 0
+}
 
 # Resolve the locally known origin default; never guess past a broken
 # authoritative origin/HEAD. Reuse main/master only when that symbolic ref
