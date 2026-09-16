@@ -309,3 +309,86 @@ test_console_dependencies_are_pinned_and_committed() {
   tracked="$(git -C "$CEL_ROOT" ls-files tools/console/node_modules | head -1)"
   assert_eq "$tracked" ''
 }
+
+# --- v2: mouse, line editing, options and chains ---------------------------
+
+# The mouse parser and the hit map are PURE on purpose: a terminal that has to
+# be driven by hand to prove a click lands on the right row is a thing nobody
+# proves, and "off by one row" is the whole failure mode of a hit map.
+test_console_mouse_parser_and_hit_test_are_proved() {
+  node "$CEL_ROOT/tools/console/mouse.test.mjs"
+}
+
+# The command line edits like a shell, and the history walk filters by prefix.
+# Both are pure functions for the same reason as the mouse: keystroke behaviour
+# nobody can assert is keystroke behaviour that regresses in silence.
+test_console_line_editor_and_history_walk_are_proved() {
+  node "$CEL_ROOT/tools/console/edit.test.mjs"
+}
+
+# A MISS IS NOT A DEAD END. "no command for that" told the operator nothing
+# they did not already know; the second ask returns candidates with reasons and
+# the operator picks one, which is what a person expects of a thing that failed
+# to understand them.
+test_console_ask_offers_numbered_options_on_a_miss() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel inbox open --for root --workspace alpha -- see what is open first
+cel fleet -- the whole box at a glance
+cel-fanout status --workspace alpha -- what is in flight there'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'sort out alpha' 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" '1  cel inbox open --for root --workspace alpha'
+  assert_contains "$out" 'see what is open first'
+  assert_contains "$out" '2  cel fleet'
+  assert_contains "$out" '3  cel-fanout status --workspace alpha'
+  _console_stub_stop
+  _console_teardown
+}
+
+# One sentence can be a SEQUENCE. "clean the blockers on alpha" is a read and
+# then a resolve; a translator that can only ever return one line makes the
+# operator type the second half themselves.
+test_console_ask_returns_a_chain_of_commands() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel inbox open --for root --workspace alpha
+cel inbox resolve --all --from widget-orch --workspace alpha'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'clean the blockers on alpha')" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" 'cel inbox open --for root --workspace alpha'
+  assert_contains "$out" 'cel inbox resolve --all --from widget-orch --workspace alpha'
+  _console_stub_stop
+  _console_teardown
+}
+
+# The response line used to overwrite the key legend and never clear, so the
+# operator lost their bindings to a message from four minutes ago. Two lines,
+# always: the transient one and the permanent one.
+test_console_render_once_keeps_status_and_legend_apart() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --status 'hello')"
+  assert_contains "$out" 'hello'
+  assert_contains "$out" 'F1 help'
+  local sline lline
+  sline="$(printf '%s\n' "$out" | grep -n 'hello' | head -1 | cut -d: -f1)"
+  lline="$(printf '%s\n' "$out" | grep -n 'F1 help' | head -1 | cut -d: -f1)"
+  [ "$sline" != "$lline" ] || { echo 'status and legend share a line'; return 1; }
+  _console_teardown
+}
+
+# History is the operator's own record of what they typed. A --run that did not
+# append it would make the console's history depend on which entry point ran
+# the command.
+test_console_run_appends_to_history() {
+  _console_setup
+  export CEL_CONSOLE_HISTORY="$T/history"
+  node "$CONSOLE_MJS" --run 'cel fleet' >/dev/null
+  assert_contains "$(cat "$T/history")" 'cel fleet'
+  _console_teardown
+}
