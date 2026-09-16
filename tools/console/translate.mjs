@@ -86,8 +86,13 @@ export const readProvider = (name, root = CEL_ROOT) => {
   return found ? fields : null;
 };
 
+// The table only. The file's leading HTML comment is addressed to whoever
+// edits it, not to a model being billed per token for reading it.
 export const vocabulary = (root = CEL_ROOT) => {
-  try { return readFileSync(join(root, 'tools/console/vocabulary.md'), 'utf8'); } catch { return ''; }
+  try {
+    const text = readFileSync(join(root, 'tools/console/vocabulary.md'), 'utf8');
+    return text.replace(/<!--[\s\S]*?-->\s*/g, '').trim();
+  } catch { return ''; }
 };
 
 const SYSTEM = (vocab) => `You translate one sentence from a human operator into exactly ONE shell
