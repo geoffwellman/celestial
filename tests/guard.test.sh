@@ -169,3 +169,22 @@ test_hook_fails_open_on_garbage() {
   printf 'not json' | bash "$HOOK" >/dev/null 2>&1 || { echo "hook failed closed on garbage"; return 1; }
   printf '' | bash "$HOOK" >/dev/null 2>&1 || { echo "hook failed closed on empty input"; return 1; }
 }
+
+# --- a product orchestrator -------------------------------------------------
+# CEL-2's product orchestrator stands in <ws>/products/<p>, not in a repo
+# checkout. It is an orchestrator by the same path derivation, which means the
+# same refusals: it may write its own notes and specs, and it may not reach
+# into a repo.
+_gws_product() { _gws; mkdir -p "$T/products/x" "$T/repos/y"; }
+test_role_orchestrator_from_product_dir() {
+  _gws_product
+  assert_eq "$(guard_role_of "$T/products/x")" orchestrator
+  assert_eq "$(guard_role_of "$T/products/x/notes")" orchestrator; rm -rf "$T"
+}
+test_product_orchestrator_writes_its_own_dir_but_no_repo() {
+  _gws_product
+  assert_contains "$(guard_classify orchestrator 'git commit -m x')" deny
+  assert_eq "$(guard_classify_path orchestrator "$T/products/x/spec.md")" allow
+  assert_contains "$(guard_classify_path orchestrator "$T/repos/y/a.ts")" deny
+  rm -rf "$T"
+}
