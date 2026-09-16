@@ -41,9 +41,10 @@ _fleet_running_rows() { # <wsdir> <repo>
   jq -c --arg r "$2" '.[]? | select(.repo == $r and .state == "running")' "$led" 2>/dev/null || true
 }
 
-# The unit line. `ws_repo_names` is today's unit and products are tomorrow's
-# (a later ticket makes that swap), so the rendering lives here and the swap
-# is one call site rather than a format rewritten under time pressure.
+# The unit line. The unit is the PRODUCT: the thing one orchestrator stands
+# over. A declared product names its repos after itself, because `bundle` on
+# its own tells an operator nothing about which checkouts are moving; an
+# implicit product IS its repo and renders byte-for-byte as it always has.
 _fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded>
   printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6"
@@ -51,10 +52,23 @@ _fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded>
 
 # One unit's facts as JSON, so text and --json cannot drift apart: both
 # render from this.
-_fleet_unit() { # <wsdir> <repo> <roster-json> -> JSON
-  local wsdir="$1" repo="$2" roster="$3"
-  local orch="-" workers=0 stalled=0 unlanded=0 cap
-  cap="$(ws_policy "$wsdir" workers)"; [ -n "$cap" ] || cap=4
+_fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
+  local wsdir="$1" product="$2" roster="$3"
+  local orch="-" workers=0 stalled=0 unlanded=0 cap declared=false
+
+  local repos=() repo
+  while IFS= read -r repo; do
+    [ -n "$repo" ] && repos+=("$repo")
+  done < <(ws_product_repos "$wsdir" "$product")
+  ws_product_declared "$wsdir" "$product" && declared=true
+
+  # THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO - the same precedence
+  # `cel-fanout delegate` uses when it refuses a worker. A view that counted
+  # per repo would show a two-repo product as half as busy as the thing that
+  # actually stops it, and the two numbers people compare must be one number.
+  cap="$(ws_product_get "$wsdir" "$product" workers)"
+  [ -n "$cap" ] || cap="$(ws_policy "$wsdir" workers)"
+  [ -n "$cap" ] || cap=4
 
   # An empty roster means herdr did not answer. That is not evidence that
   # anyone died - lib/stall.sh learned that the hard way - so with no roster
@@ -64,7 +78,7 @@ _fleet_unit() { # <wsdir> <repo> <roster-json> -> JSON
 
   if [ "$have_roster" = 1 ]; then
     local want status
-    want="$(_run_agent_name "$repo-orch")"
+    want="$(_run_agent_name "$product-orch")"
     status="$(printf '%s' "$roster" | jq -r --arg n "$want" \
       '[.result.agents[]? | select(.name == $n) | .agent_status // ""][0] // ""' 2>/dev/null || true)"
     if [ -n "$status" ]; then
@@ -95,12 +109,14 @@ _fleet_unit() { # <wsdir> <repo> <roster-json> -> JSON
     fi
     quiet="$(stall_quiet_secs "$wt")"
     [ -n "$(stall_verdict "$live" "$text" "$quiet")" ] && stalled=$((stalled + 1))
-  done < <(_fleet_running_rows "$wsdir" "$repo")
+  done < <(for repo in "${repos[@]}"; do _fleet_running_rows "$wsdir" "$repo"; done)
 
-  jq -nc --arg name "$repo" --arg orch "$orch" \
+  jq -nc --arg name "$product" --arg orch "$orch" \
     --argjson workers "$workers" --argjson cap "$cap" \
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
-    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded}'
+    --argjson repos "$(printf '%s\n' "${repos[@]}" | jq -R . | jq -sc .)" \
+    --argjson declared "$declared" \
+    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, repos: $repos, declared: $declared}'
 }
 
 _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
@@ -109,15 +125,15 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   [ -d "$wsdir" ] || return 0
   [ -f "$wsdir/workspace.yaml" ] || return 0
 
-  local unread open units repo
+  local unread open units product
   unread="$(_inbox_count --for root --workspace "$ws" 2>/dev/null || printf 0)"
   [ -n "$unread" ] || unread=0
   open="$(_inbox_open --for root --workspace "$ws" 2>/dev/null | grep -c . || true)"
   [ -n "$open" ] || open=0
 
   units=""
-  for repo in $(ws_repo_names "$wsdir" 2>/dev/null); do
-    units="$units$(_fleet_unit "$wsdir" "$repo" "$roster")
+  for product in $(ws_product_names "$wsdir" 2>/dev/null); do
+    units="$units$(_fleet_unit "$wsdir" "$product" "$roster")
 "
   done
 
@@ -128,9 +144,11 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 
 _fleet_render() { # <doc>
   printf '%s' "$1" | jq -r '.workspaces[]
-    | "\(.name)   (\(.units | length) repos)   root mail: \(.root.unread) unread, \(.root.open) open"
+    | "\(.name)   (\(.units | length) products)   root mail: \(.root.unread) unread, \(.root.open) open"
       as $head
-    | [$head] + [.units[] | "UNIT\t\(.name)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)"]
+    | [$head] + [.units[]
+        | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
+        | "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)"]
     | .[]' \
   | while IFS= read -r line; do
       case "$line" in
