@@ -217,7 +217,7 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
   # produced `product-games-ABC-20-faithful-integrity`, while the worker
   # itself answered to the lowercased 32-character form, so the message sat in
   # a mailbox with almost the right name that nobody would ever open. Found in
-  # the vhs inbox on 2026-09-15: 50-odd messages across a dozen phantom
+  # a live inbox on 2026-09-15: 50-odd messages across a dozen phantom
   # mailboxes, several of them the same recipient spelled two ways.
   #
   # Normalising here makes the address canonical at the point of sending, so a
