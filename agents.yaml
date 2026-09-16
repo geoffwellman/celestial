@@ -208,9 +208,14 @@ agents:
 # the workspace's gitignored env.local (see lib/workspace.sh ws_env_exports).
 # `auth: cli` means the runtime carries its own OAuth session and there is no
 # key to test, so a profile on that provider is always considered reachable.
+# `api:` is where `cel console`'s translator POSTs (tools/console/translate.mjs):
+# one endpoint per provider, here rather than in the JavaScript, so the box has
+# ONE answer to "how do I reach <provider>" and a moved endpoint is one edit.
+# Anthropic speaks its own Messages API; everything else here is
+# OpenAI-compatible chat completions.
 providers:
-  anthropic:    { key_env: ANTHROPIC_API_KEY,  console: https://console.anthropic.com/settings/keys }
-  openai:       { key_env: OPENAI_API_KEY,     console: https://platform.openai.com/api-keys }
+  anthropic:    { key_env: ANTHROPIC_API_KEY,  api: https://api.anthropic.com/v1/messages, console: https://console.anthropic.com/settings/keys }
+  openai:       { key_env: OPENAI_API_KEY,     api: https://api.openai.com/v1/chat/completions, console: https://platform.openai.com/api-keys }
   openai-codex: { auth: cli, notes: "codex's own ChatGPT sign-in; no key to check" }
   # `balance:` is how the plane asks a provider what is left BEFORE a pane
   # spawns (lib/quota.sh). Shapes verified against the live APIs on
@@ -221,6 +226,7 @@ providers:
   # worse than one never started.
   deepseek:
     key_env: DEEPSEEK_API_KEY
+    api: https://api.deepseek.com/chat/completions
     console: https://platform.deepseek.com/api_keys
     balance:
       url: https://api.deepseek.com/user/balance
@@ -230,6 +236,7 @@ providers:
       floor: 1
   openrouter:
     key_env: OPENROUTER_API_KEY
+    api: https://openrouter.ai/api/v1/chat/completions
     console: https://openrouter.ai/keys
     balance:
       url: https://openrouter.ai/api/v1/credits

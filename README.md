@@ -56,7 +56,7 @@ Install Celestial on this machine and get it running:
 4. Ask me: a workspace name, my GitHub org, and the repos I want in it.
    Run cel ws new <name> --org <org>, add the repos to workspace.yaml, run
    cel ws sync <name>, then cel doctor again.
-5. Start the console with cel run console, then run cel fleet and
+5. Start the console with cel console, then run cel fleet and
    cel dash --ensure. Show me both outputs and the dashboard URL, and tell
    me the one command I use from now on.
 ```
@@ -75,10 +75,10 @@ cel doctor                              # verify prerequisites and account setup
 
 cel ws new acme --org your-gh-user      # scaffold a workspace
 cel ws sync acme                        # clone its repos, link skills, check tools
-cel run console                         # the pane you keep open: routes the box
+cel console                             # the desk you keep open: routes the box
 ```
 
-`cel run console` is the pane a person keeps open — one per box, across every
+`cel console` is the interface a person keeps open — one per box, across every
 workspace. `cd ~/ws/acme && cel run root` is the alternative: it boots that
 one workspace's layout with a standing root agent. Pick the console unless you
 want a director that lives inside a single workspace and plans for it.
@@ -147,6 +147,49 @@ them renames a command:
 | land | ship it — squash, merge, clean up |
 | steward | the conveyor: the timer that keeps the floor moving without you |
 | console | the floor manager's desk: one per box, routes, never builds |
+
+## The console
+
+`cel console` is Celestial's own interface — drawn by the plane, not an agent
+pretending to be one. Four panels, top to bottom:
+
+- **Fleet** — `cel fleet --json` as a table, one block per workspace, coloured
+  by state and refreshed every 10 seconds (`--refresh`) and after every command
+  you run. `j`/`k` select a row, `f` focuses that unit's orchestrator pane, `o`
+  opens its dashboard.
+- **Waiting on you** — every open decision and blocker addressed to `root`,
+  across all workspaces, oldest first with their ids. `i` shows the full text,
+  `r` resolves it.
+- **Inbox tail** — the newest mail, prefixed with its workspace. A decision or
+  a blocker also rings the bell and raises a desktop notification.
+- **Command line** — with history and Tab completion over the cel vocabulary,
+  workspace names and orchestrator aliases.
+
+What you type is either a **command** (it starts with `cel`, `cel-fanout`,
+`cel-linear`, `gh` or `herdr`) — which runs as-is, after the same allowlist the
+agent console is held to — or a **sentence**, which is sent to a small model
+that returns exactly one command. That command is *proposed*: it lands on your
+command line and runs when you press Enter again, or disappears on `Esc`. The
+model never executes anything.
+
+The translator is optional, and everything above works without it. To wire one
+in, write `~/.local/share/cel/config.yaml` (chmod 600 — it may hold a key):
+
+```yaml
+console:
+  provider: openrouter          # openrouter | anthropic | openai | deepseek
+  model: anthropic/claude-haiku-4-5
+  key_env: OPENROUTER_API_KEY   # read from the environment, else console.key
+```
+
+Endpoints come from `agents.yaml`'s provider table; the request is one plain
+`fetch` with no SDK. With no provider configured, a sentence gets one line
+saying so and the command line carries on working.
+
+`cel console --render-once` prints the panels as plain text and exits, for
+pipes and for when a full-screen UI is the last thing you want. `cel run
+console --agent` still starts the original Claude pane for people who would
+rather talk to a full agent.
 
 ## The review loop runs itself
 
@@ -288,15 +331,15 @@ what catch it.
 
 ### The agents
 
-The console, the orchestrators, workers, scouts, spikes and reviewers are herdr
-panes, not services. They are started by `cel run` and `cel-fanout delegate`,
-and they stop when their pane does. `cel-fanout status` is the ledger of what
-was delegated, on which model, and where it got to.
+The orchestrators, workers, scouts, spikes and reviewers are herdr panes, not
+services. They are started by `cel run` and `cel-fanout delegate`, and they
+stop when their pane does. `cel-fanout status` is the ledger of what was
+delegated, on which model, and where it got to.
 
-The console arms one background task of its own, once per session: `cel inbox
-watch --all-workspaces`, so a decision raised in any workspace wakes it rather
-than waiting for someone to look. Like every watch it is not a daemon — the
-Stop hook and the steward's stale-mailbox check are what notice when it dies.
+The console runs one background watch of its own: `cel inbox watch --for root
+--all-workspaces`, so a decision raised in any workspace raises a desktop
+notification rather than waiting for someone to look. Like every watch it is
+not a daemon — it lives and dies with the console.
 
 ## Any model, any CLI, per worker
 
@@ -371,7 +414,7 @@ policy block into every agent.
 | `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
 | `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
-| `cel run console` | the pane you keep open: one per box, routes every workspace |
+| `cel console` | the desk you keep open: fleet, decisions, inbox and a command line that also takes a sentence |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
 | `cel run orchestrator --product <p>` | start the orchestrator for a product (1..n repos) |
 | `cel profiles` | worker profiles and the exact launch flags each resolves to |
