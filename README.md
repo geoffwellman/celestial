@@ -49,8 +49,8 @@ Paste this into it and let it do the install:
 
 ```
 Install Celestial on this machine and get it running:
-1. git clone https://github.com/geoffwellman/celestial.git ~/celestial-plane
-2. Add  eval "$(~/celestial-plane/bin/cel shellenv)"  to my shell rc and load it.
+1. git clone https://github.com/geoffwellman/celestial.git ~/celestial
+2. Add  eval "$(~/celestial/bin/cel shellenv)"  to my shell rc and load it.
 3. Run cel setup, then cel doctor. Fix everything red; ask me for anything
    that needs my account (gh auth login, claude setup-token, pi /login).
 4. Ask me: a workspace name, my GitHub org, and the repos I want in it.
@@ -67,8 +67,8 @@ rather type it yourself, the same install is below.
 ## Quick start
 
 ```sh
-git clone https://github.com/geoffwellman/celestial.git ~/celestial-plane
-eval "$(~/celestial-plane/bin/cel shellenv)"  # add this line to your shell rc
+git clone https://github.com/geoffwellman/celestial.git ~/celestial
+eval "$(~/celestial/bin/cel shellenv)"  # add this line to your shell rc
 cel setup                                  # review the manifests before installing
 cel doctor                                 # verify prerequisites and account setup
 
@@ -93,7 +93,7 @@ you into GitHub, Linear or agent accounts.
 Three layers on disk, and a factory floor of agents above them.
 
 ```
-~/celestial-plane          the plane: mechanism only (this repo, public)
+~/celestial                the plane: mechanism only (this repo, public)
 ├── bin/cel                one CLI for everything
 ├── core/roles/            role prompts, injected at launch
 ├── core/skills/           skills linked into every agent
@@ -386,7 +386,7 @@ The repo is **mechanism only**. Your setup never lands in it:
 
 | | Where | Committed? |
 |---|---|---|
-| The tool | `~/celestial-plane` | public repo (this one) |
+| The tool | `~/celestial` | public repo (this one) |
 | Which workspaces exist on this box | `~/.local/share/cel/registry.yaml` | never |
 | Published pages | `~/.local/share/cel/pages*` | never |
 | Workspace content + overrides | `~/ws/<name>` (own private repo) | yours |
