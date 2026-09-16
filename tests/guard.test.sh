@@ -188,3 +188,43 @@ test_product_orchestrator_writes_its_own_dir_but_no_repo() {
   assert_contains "$(guard_classify_path orchestrator "$T/repos/y/a.ts")" deny
   rm -rf "$T"
 }
+
+# --- the console -----------------------------------------------------------
+# The console's vocabulary is an ALLOWLIST: its job is narrow, so everything
+# outside it is a mistake rather than a judgement call.
+_cons() { CONS="$(mktemp -d)/console"; mkdir -p "$CONS"; }
+
+test_role_console_from_the_console_dir() {
+  _cons
+  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_role_of "$CONS")" console
+  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_role_of "$CONS/notes")" console
+  rm -rf "$CONS"
+}
+# The console's cwd is a plain directory a human could also stand in, so the
+# environment can say so outright.
+test_role_console_from_the_environment() {
+  assert_eq "$(CEL_ROLE=console guard_role_of /tmp)" console
+}
+test_console_may_route() {
+  assert_eq "$(guard_classify console 'cel fleet --json')" allow
+  assert_eq "$(guard_classify console 'cel inbox send x "y" --workspace w')" allow
+  assert_eq "$(guard_classify console 'cel-fanout status --workspace w')" allow
+  assert_eq "$(guard_classify console 'gh pr view 3')" allow
+  assert_eq "$(guard_classify console 'herdr agent focus a')" allow
+  assert_eq "$(guard_classify console 'git log --oneline')" allow
+  assert_eq "$(guard_classify console 'jq -r .x /tmp/a.json')" allow
+}
+test_console_may_not_build() {
+  local c
+  for c in 'git commit -m x' 'gh pr merge 3' 'herdr worktree remove --force' \
+           'npm install' 'sed -i s/a/b/ x.ts' 'git -C repos/x status'; do
+    assert_contains "$(guard_classify console "$c")" "deny the console routes; it does not build -"
+  done
+}
+test_console_writes_only_its_own_directory() {
+  _cons; _gws
+  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$CONS/notes.md")" allow
+  assert_contains "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$T/repos/x/a.ts")" deny
+  assert_contains "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$T/products/p/spec.md")" deny
+  rm -rf "$CONS" "$T"
+}

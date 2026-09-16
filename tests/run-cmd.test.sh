@@ -204,3 +204,54 @@ test_run_role_file_is_per_declared_product() {
   assert_eq "$(_run_role_file "$T" orchestrator)" "$T/.cel/role-orchestrator.md"
   rm -rf "$T"
 }
+
+# --- the console ----------------------------------------------------------
+# The console is BOX-LEVEL: it routes across every workspace and therefore
+# stands in none. No --workspace is resolved, no policy block is rendered
+# (there is no workspace to describe), and its runtime comes from agents.yaml
+# `defaults.console` rather than from a workspace binding.
+_console() { CONS="$(mktemp -d)/console"; }
+
+test_run_console_needs_no_workspace_and_has_a_dir_of_its_own() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  assert_contains "$out" "workspace create --cwd $CONS --label celestial/console"
+  assert_contains "$out" "agent start console --kind omp"
+  rm -rf "$CONS"
+}
+test_run_console_takes_its_model_from_the_manifest_default() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  assert_contains "$out" "--model openai-codex/gpt-5.6-sol --thinking low"
+  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --model x/y --thinking high --dry-run)"
+  assert_contains "$out" "--model x/y --thinking high"
+  rm -rf "$CONS"
+}
+# The role file must keep ending in role-console.md: lib/gc.sh recognises a
+# long-lived agent by a role-*.md in its cmdline, and the console is the
+# longest-lived pane on the box.
+test_run_console_role_travels_as_a_file_beside_the_console_dir() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  assert_contains "$out" "--append-system-prompt $CONS/role-console.md"
+  rm -rf "$CONS"
+}
+test_run_console_gets_the_guard_hook() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --dry-run)"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  rm -rf "$CONS"
+}
+test_run_console_body_carries_no_workspace_policy_block() {
+  local body; body="$(_run_console_body)"
+  assert_contains "$body" "You are the console"
+  ! printf '%s' "$body" | grep -q "Workspace policy" \
+    || { echo "the console got a policy block for a workspace it does not have"; return 1; }
+}
+# A profile is a per-workspace binding; the console has no workspace to bind
+# one from, so asking for one is a mistake rather than a silent no-op.
+test_run_console_refuses_a_profile() {
+  _console
+  ( cd /tmp && CEL_CONSOLE_DIR="$CONS" assert_fails _cmd_run_in_subshell console --profile opus-pi --dry-run )
+  rm -rf "$CONS"
+}
