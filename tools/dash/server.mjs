@@ -22,6 +22,18 @@ const security = controlSecurity({
   trustedOrigins: process.env.CEL_DASH_TRUSTED_ORIGINS,
   csrfToken: process.env.CEL_DASH_CSRF_TOKEN,
 });
+const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(homedir(), '.local/share/cel/update');
+
+// The steward writes this file hours after the dashboard booted, so it is read
+// PER REQUEST and spliced into the shell below - a chip captured at startup
+// would never appear at all.
+const updateChip = () => {
+  try {
+    const v = readFileSync(join(UPDATE_DIR, 'available'), 'utf8').trim();
+    if (!/^[0-9][0-9a-zA-Z.\-]*$/.test(v)) return '';
+    return '<span id="upd" title="the steward saw a newer release">update available v' + v + ' \u2192 cel update</span>';
+  } catch { return ''; }
+};
 
 const run = (cmd, args, timeout = 15000) =>
   new Promise((resolve) =>
@@ -403,6 +415,8 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   #updated{color:var(--dim);font:12px var(--mono)}
   .grow{flex:1}
   #build{font:11px var(--mono);color:var(--dim);opacity:.6}
+  #upd{font:11px var(--mono);color:var(--accent);border:1px solid var(--line);
+    border-radius:999px;padding:2px 8px}
   #fxstate{font:11px var(--mono);color:var(--dim);opacity:.75}
   #fxstate.on{color:var(--accent);opacity:1}
   #themebtn{background:var(--raise);color:var(--dim);border:1px solid var(--line);
@@ -635,7 +649,7 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   <div id="updated"></div>
   <span class="grow"></span>
   <span id="fxstate" title=""></span>
-  <span id="build" title="the plane build this dashboard is running">${htmlText(cfg.build)}</span>
+  <span id="build" title="the plane build this dashboard is running">${htmlText(cfg.build)}</span><!--UPDATE-CHIP-->
   <button id="themebtn" title="light / dark / follow system">◐ theme</button>
 </header>
 <div id="strip"></div>
@@ -1429,7 +1443,7 @@ const server = createServer(async (req, res) => {
         // plane is developed, and a browser holding yesterday's shell is
         // indistinguishable from a broken deploy
         'cache-control': 'no-store, must-revalidate',
-      }).end(req.method === 'HEAD' ? undefined : PAGE);
+      }).end(req.method === 'HEAD' ? undefined : PAGE.replace('<!--UPDATE-CHIP-->', updateChip()));
     } else if (req.method === 'GET' && req.url === '/api/state') {
       const body = JSON.stringify(await state());
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body);

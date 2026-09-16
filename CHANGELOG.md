@@ -5,6 +5,29 @@ versions follow [semver](https://semver.org). Releases are announced on the
 [GitHub Releases page](https://github.com/geoffwellman/celestial/releases) -
 watch the repo (Watch → Custom → Releases) to be notified.
 
+## [Unreleased]
+
+### Added
+- `cel update` is a real upgrade path: it lands on the newest **release tag**
+  (never main's tip), records the previous build, re-applies everything the
+  installation touched (links, claude settings, `ws sync`, dashboards, pages),
+  then runs `cel doctor` and offers a way back when it is red
+- `cel update --check` - installed/available versions plus only the changelog
+  sections you have not got yet; exit 1 when behind, so scripts can test it
+- `cel update --rollback` - reset to the recorded previous build and re-apply
+- `cel dash --restart` / `cel pages [--public] --restart` - stop this
+  workspace's (or this tier's) server and ensure it again, so an update does
+  not leave the old code serving
+- The steward records an available release in
+  `~/.local/share/cel/update/available`; the dashboard build chip reads that
+  file per request and shows `update available vX → cel update`
+- Listing after an update of long-lived agents still carrying the previous
+  build's role prompt and guard hook
+
+### Changed
+- `cel update` refuses a dirty tree or a checkout that is not on `main`: the
+  plane's developer moves with git, everyone else moves with `cel update`
+
 ## [0.2.0] - 2026-09-15
 
 First public release, published from a reviewed clean source snapshot.
