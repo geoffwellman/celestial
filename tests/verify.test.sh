@@ -120,3 +120,38 @@ test_the_flag_overrides_the_env_var() {
   assert_eq "$(_v .gate.timeout_secs)" 1
   rm -rf "$T"
 }
+
+# A GATE THAT IS KILLED MUST TAKE ITS CHILDREN WITH IT. The 2026-09-16 hang
+# was seven test servers left running for a hundred minutes by a suite the
+# verifier's timeout cut off mid-run. A single SIGTERM is not a kill: a node
+# server with a shutdown handler, or anything that ignores TERM while it
+# finishes, simply stays - reparented to init, still holding every descriptor
+# it inherited, including the ledger lock of the collect that spawned the
+# verifier. The gate therefore runs in its own process group and the timeout
+# escalates to SIGKILL on that whole group.
+test_a_timed_out_gate_leaves_no_background_children() {
+  _vrepo; _vcommit impl src/a.ts
+  local pidfile="$T/sleeper.pid" rc=0
+  "$VERIFY" "$T" --gate "bash -c 'trap \"\" TERM; sleep 300' >/dev/null 2>&1 & echo \$! > '$pidfile'; sleep 30" \
+    --gate-timeout 1 --quiet || rc=$?
+  assert_eq "$rc" 2
+  assert_eq "$(_v .gate.timed_out)" true
+  local sleeper; sleeper="$(cat "$pidfile")"
+  sleep 2
+  local alive=0
+  kill -0 "$sleeper" 2>/dev/null && { alive=1; kill -9 "$sleeper" 2>/dev/null; }
+  rm -rf "$T"
+  assert_eq "$alive" 0
+}
+
+# And the ordinary case is unchanged: a gate that finishes keeps its output
+# and its exit code, own process group or not.
+test_a_gate_in_its_own_group_still_reports_output_and_code() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'echo hello-from-gate; exit 3' --quiet || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(_v .gate.passed)" false
+  assert_contains "$(_v .gate.tail)" "hello-from-gate"
+  rm -rf "$T"
+}

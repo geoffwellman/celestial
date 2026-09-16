@@ -212,7 +212,7 @@ _gc_agents_removable() { # <agents-json> <dir> <registry-names>
     else error("invalid agent roster") end')" || return 1
   while IFS= read -r row; do
     pane="$(printf '%s' "$row" | jq -r .pane_id)"
-    info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" \
+    info="$(lock_spawn "${lock_fd:-} ${fd:-}" herdr pane process-info --pane "$pane" 2>/dev/null)" \
       && pid="$(printf '%s' "$info" | jq -er '.result.process_info.foreground_processes | if length == 1 then .[0].pid else empty end')" \
       && _gc_process_identity "$pid" "$agents" "$3" >/dev/null || return 1
   done < <(printf '%s' "$rows" | jq -c '.[]')
@@ -227,6 +227,9 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   [[ "$now" =~ ^[0-9]+$ ]] || return 0
   if [ "$dry" -eq 0 ]; then
     mkdir -p "$(dirname "$file")" || return 0
+    # Held on an inherited descriptor, so every spawn below goes through
+    # lock_spawn: a child that outlives this sweep would hold the lock with
+    # it (the 2026-09-16 ledger hang, lib/registry.sh).
     exec {fd}>"$file.lock" && flock -n "$fd" || return 0
   fi
   if [ -e "$file" ]; then
@@ -244,7 +247,7 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
     since="$(printf '%s' "$previous" | jq -r --arg k "$key" '.[$k] // empty')"
     [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
     if [ $((now - since)) -ge $((hours * 3600)) ]; then
-      fresh="$(herdr agent list 2>/dev/null)" || continue
+      fresh="$(lock_spawn "${fd:-} ${lock_fd:-}" herdr agent list 2>/dev/null)" || continue
       current="$(_gc_process_identity "$pid" "$fresh" "$names")" || continue
       [ "$identity" = "$current" ] || continue
       if [ "$dry" -eq 1 ]; then
@@ -286,6 +289,9 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
 
   # A missing registry or failed roster is not an empty fleet. Writer locks
   # also fence delegate's pre-ledger creation window and concurrent re-use.
+  # Both locks are held on inherited descriptors for the whole of this
+  # subshell, so anything spawned from here - every herdr call, any of which
+  # may start a daemon that never exits - is spawned through lock_spawn.
   local lock_fd names ws wsdir roster ids agents panes ws_id cwd state row known=1
   [ -f "$CEL_REGISTRY" ] && [ -r "$CEL_REGISTRY" ] || { c_warn "registry unavailable - GC skipped"; return 0; }
   exec {lock_fd}>"$CEL_REGISTRY.lock" || { c_warn "registry lock unavailable - GC skipped"; return 0; }
@@ -301,9 +307,9 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
       && flock -n "$lock_fd" || { known=0; break; }
   done <<< "$names"
   [ "$known" -eq 1 ] || { c_warn "delegation discovery busy or unavailable - GC skipped"; return 0; }
-  roster="$(herdr workspace list 2>/dev/null)" \
+  roster="$(lock_spawn "${lock_fd:-}" herdr workspace list 2>/dev/null)" \
     && ids="$(printf '%s' "$roster" | jq -er '.result.workspaces | if type == "array" and all(.[]; .workspace_id | type == "string" and length > 0) then map(.workspace_id) | join("\n") else error("invalid workspace list") end')" \
-    && agents="$(herdr agent list 2>/dev/null)" \
+    && agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
     && printf '%s' "$agents" | jq -e '.result.agents | type == "array" and all(.[]; (.cwd | type == "string") and (.pane_id | type == "string") and (.agent_status | type == "string"))' >/dev/null \
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
@@ -312,7 +318,7 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
   # make its worktree look orphaned to a later pass.
   while IFS= read -r ws_id; do
     [ -n "$ws_id" ] || continue
-    panes="$(herdr pane list --workspace "$ws_id" 2>/dev/null)" && _gc_panes_known "$panes" \
+    panes="$(lock_spawn "${lock_fd:-}" herdr pane list --workspace "$ws_id" 2>/dev/null)" && _gc_panes_known "$panes" \
       || { c_warn "pane discovery unavailable - GC skipped"; return 0; }
     cwd="$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')"
     case "$cwd" in "$HOME"/.herdr/worktrees/*) ;; *) continue;; esac
@@ -345,18 +351,18 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
     # Re-read the exact managed workspace; an orphan must have NO live agent
     # at its path. Unknown/blocked/working never age out of either veto.
     if [ -n "$ws_id" ]; then
-      panes="$(herdr pane list --workspace "$ws_id" 2>/dev/null)" \
+      panes="$(lock_spawn "${lock_fd:-}" herdr pane list --workspace "$ws_id" 2>/dev/null)" \
         && _gc_panes_settled "$panes" \
         && [ "$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')" = "$cwd" ] \
         || { kept=$((kept+1)); continue; }
     fi
-    agents="$(herdr agent list 2>/dev/null)" \
+    agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
       && _gc_agents_removable "$agents" "$cwd" "$names" \
       || { kept=$((kept+1)); continue; }
     if [ "$dry" -eq 1 ]; then
       c_ok "would remove ${ws_id:-orphan} ($cwd, PR $state, settled and landed clean)"
     elif [ -n "$ws_id" ]; then
-      herdr worktree remove --workspace "$ws_id" >/dev/null \
+      lock_spawn "${lock_fd:-}" herdr worktree remove --workspace "$ws_id" >/dev/null \
         || { c_warn "$ws_id: worktree remove refused"; kept=$((kept+1)); continue; }
       c_ok "removed $ws_id ($cwd)"
     else
