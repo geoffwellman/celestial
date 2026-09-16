@@ -155,11 +155,12 @@ pretending to be one. Four panels, top to bottom:
 
 - **Fleet** — `cel fleet --json` as a table, one block per workspace, coloured
   by state and refreshed every 10 seconds (`--refresh`) and after every command
-  you run. `j`/`k` select a row, `f` focuses that unit's orchestrator pane, `o`
-  opens its dashboard.
+  you run. Shift+↑/↓ (or Ctrl+N / Ctrl+P) select a row, Ctrl+F focuses that
+  unit's orchestrator pane, Ctrl+O opens its dashboard. Every action is a Ctrl
+  chord: a letter you type is always a letter typed.
 - **Waiting on you** — every open decision and blocker addressed to `root`,
-  across all workspaces, oldest first with their ids. `i` shows the full text,
-  `r` resolves it.
+  across all workspaces, oldest first with their ids. Ctrl+T switches the
+  selection to this panel, Ctrl+E shows the full text, Ctrl+R resolves it.
 - **Inbox tail** — the newest mail, prefixed with its workspace. A decision or
   a blocker also rings the bell and raises a desktop notification.
 - **Command line** — with history and Tab completion over the cel vocabulary,

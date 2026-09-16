@@ -91,6 +91,12 @@ First public release, published from a reviewed clean source snapshot.
   require an explicit keep/discard decision.
 
 ### Fixed
+- `cel console` no longer steals the first letter of what you type: the
+  navigation keys (`j`/`k`/`f`/`o`/`r`/`w`/`q`/`i`) were bound on an empty
+  command line, so "what's blocked" flipped the panel and "quit" exited. Every
+  action is now a Ctrl chord (Shift+↑/↓ or Ctrl+N/P select, Ctrl+T panel,
+  Ctrl+F focus, Ctrl+O dashboard, Ctrl+E detail, Ctrl+R resolve, Ctrl+U clear);
+  `quit`/`exit`/`q` + Enter leaves
 - `cel-fanout delegate` nests workers under the repo's own herdr workspace
   even when a product orchestrator exists (herdr only cuts a worktree of the
   repo a workspace owns, and has no parent option - nesting under the product
