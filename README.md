@@ -56,8 +56,9 @@ Install Celestial on this machine and get it running:
 4. Ask me: a workspace name, my GitHub org, and the repos I want in it.
    Run cel ws new <name> --org <org>, add the repos to workspace.yaml, run
    cel ws sync <name>, then cel doctor again.
-5. Start the console with cel run console, run cel fleet, and show me the
-   output and the dashboard URL. Tell me the one command I use from now on.
+5. Start the console with cel run console, then run cel fleet and cel dash.
+   Show me both outputs and the dashboard URL, and tell me the one command
+   I use from now on.
 ```
 
 Setup installs third-party code and may invoke `sudo`; read the block before
@@ -69,12 +70,12 @@ rather type it yourself, the same install is below.
 ```sh
 git clone https://github.com/geoffwellman/celestial.git ~/celestial
 eval "$(~/celestial/bin/cel shellenv)"  # add this line to your shell rc
-cel setup                                  # review the manifests before installing
-cel doctor                                 # verify prerequisites and account setup
+cel setup                               # review the manifests before installing
+cel doctor                              # verify prerequisites and account setup
 
-cel ws new acme --org your-gh-user  # scaffold a workspace
-cel ws sync acme                    # clone its repos, link skills, check tools
-cel run console                     # the pane you keep open: routes the whole box
+cel ws new acme --org your-gh-user      # scaffold a workspace
+cel ws sync acme                        # clone its repos, link skills, check tools
+cel run console                         # the pane you keep open: routes the box
 ```
 
 `cel run console` is the pane a person keeps open — one per box, across every
@@ -155,8 +156,16 @@ Declare a reviewer in `workspace.yaml`:
 review: { runtime: omp, model: gpt-5.6-sol }
 ```
 
-and orchestrators start one reviewer pane per PR. Reviewers prompt workers
-directly on request-changes; workers fix, push, and prompt back for
+and orchestrators start one reviewer pane per PR. A reviewer delivers one
+verdict per round and **records it in the delegation ledger** — `cel-fanout
+review <id> approved|changes --by <alias>` — which is where a review exists;
+`cel-fanout land` accepts that verdict on repos where the PR author and the
+reviewer share one GitHub account, and GitHub approval remains the authority
+where they do not. `review.post: github` opts a repo into posting the review
+to GitHub as well, for reviewers that have an identity of their own; the
+default is `inbox`, because an agent approving its owner's PR under the
+owner's account is the owner approving himself in public. Reviewers prompt
+workers directly on request-changes; workers fix, push, and prompt back for
 re-review; you hear about it only on approval or escalation. A steward tick
 (every 5 minutes by default, deterministic, token-free) backstops the whole
 thing: verified disposable worktrees are removed, positively identified idle
@@ -168,18 +177,21 @@ work, not evidence that it is safe to delete.
 
 `herdr agent prompt` types into a pane, so a status report landing while you
 are mid-sentence merges with your draft. Routine agent-to-agent traffic goes
-through `cel inbox` instead - a JSONL mailbox per workspace with a read
-cursor per recipient - and delivery is out-of-band: recipients run a
-`Monitor` background task (`cel inbox watch`) so new mail arrives as a
+through `cel inbox` instead - a JSONL mailbox per workspace, with a read
+cursor per *reader* so a standing root pane and the console can both drain
+root's mail without stealing each other's place - and delivery is out-of-band:
+recipients run a `Monitor` background task (`cel inbox watch`, or `cel inbox
+watch --all-workspaces` for the console) so new mail arrives as a
 notification, and a `UserPromptSubmit` hook drains anything missed on your
 next turn. Escalations that truly cannot wait still prompt, deliberately.
 
 ## Watch and steer
 
 - **`cel fleet`** — the whole box in one deterministic read: every workspace,
-  every product, whether its orchestrator is live, workers in flight against
-  the cap, stalled and unlanded work. Token-free and free of agent judgement;
-  `--json` for scripts. The console answers from this, never from memory.
+  every repo, whether its orchestrator is live, workers in flight against the
+  cap, stalled and unlanded work, and root's mail. Token-free and free of
+  agent judgement; `--json` for scripts. The console answers from this, never
+  from memory.
 - **`cel dash`** — per-workspace dashboard: an attention queue ("needs you"),
   every in-flight branch joined with its agent + PR + CI state, sticky
   filters, and a prompt box that drives any agent in the workspace.
@@ -356,13 +368,12 @@ policy block into every agent.
 | Command | What |
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
+| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
 | `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
 | `cel run console` | the pane you keep open: one per box, routes every workspace |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
 | `cel run orchestrator --product <p>` | start the orchestrator for a product (1..n repos) |
-| `cel fleet [--json]` | every workspace, product, worker and stall in one read |
-| `cel update [--check·--rollback]` | upgrade the plane; check without touching it, undo the last one |
 | `cel profiles` | worker profiles and the exact launch flags each resolves to |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
 | `cel quota [provider]` | credit left per provider, asked of the provider; a route below its floor is vetoed before a pane spawns |
@@ -375,8 +386,7 @@ policy block into every agent.
 | `cel dash` | workspace dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h]` | reclaim worktrees + idle agents |
-| `cel inbox send · read · count · watch` | agent messages that never type into a pane |
-| `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per repo, root's mail per workspace |
+| `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |
 

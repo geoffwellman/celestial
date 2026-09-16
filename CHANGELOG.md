@@ -41,6 +41,11 @@ watch the repo (Watch → Custom → Releases) to be notified.
 - `cel run root` is documented and prompted as optional; `root` remains the
   mailbox name for "the top, whoever is listening".
 - Quick start boots `cel run console` and explains when to prefer `cel run root`.
+- The review loop section documents the ledger verdict (`cel-fanout review`)
+  and `review.post: inbox | github`, not GitHub approval alone.
+- The inbox section documents the per-reader cursor and `--all-workspaces`.
+- `core/roles/console.md` no longer says the `--all-workspaces` flag is
+  pending, and drains every workspace in one command.
 
 ## [0.2.0] - 2026-09-15
 
