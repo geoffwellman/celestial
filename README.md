@@ -56,9 +56,9 @@ Install Celestial on this machine and get it running:
 4. Ask me: a workspace name, my GitHub org, and the repos I want in it.
    Run cel ws new <name> --org <org>, add the repos to workspace.yaml, run
    cel ws sync <name>, then cel doctor again.
-5. Start the console with cel run console, then run cel fleet and cel dash.
-   Show me both outputs and the dashboard URL, and tell me the one command
-   I use from now on.
+5. Start the console with cel run console, then run cel fleet and
+   cel dash --ensure. Show me both outputs and the dashboard URL, and tell
+   me the one command I use from now on.
 ```
 
 Setup installs third-party code and may invoke `sudo`; read the block before
