@@ -174,8 +174,9 @@ Each tick, in order:
 | **stalled workers** | the one failure no inbox watcher can see: a worker whose provider stream died sends no mail and reads as `idle`. A fatal pane marker (`server_error`, `F5 to Retry`) quiet for 15 minutes, or an agent gone from the roster, escalates to root naming the ticket, pane, stall age, whether the branch is pushed and what is uncommitted — louder when the work is unlanded, because that is when delay costs the work itself |
 | **stale mailboxes** | a recipient with unread mail older than 30 minutes has probably lost its inbox monitor, so its pane is told to re-arm and drain |
 | **page feedback** | feedback whose publishing pane is gone stays a warning until someone drains it |
-| **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to root's inbox — this is what makes "move it to Todo" start work |
+| **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to the product's orchestrator, else root — this is what makes "move it to Todo" start work |
 | **servers** | `cel dash --ensure` for every workspace declaring a port; expired public shares are deleted, not merely refused |
+| **ensure orchestrators** | every product declaring `orchestrator: auto` with no live pane is started with `cel run orchestrator`, at most once every 30 minutes so a crash-looping one is not relaunched every tick |
 | **updates** | once a day, whether this plane is behind its latest release |
 
 Nudges are **rate-limited per subject** (4 hours; the update check, 24) through

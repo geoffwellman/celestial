@@ -22,6 +22,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
 # shellcheck source=lib/stall.sh
 . "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
+# shellcheck source=lib/run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
 # the failure this sweep exists for is a specific string in a specific pane,
@@ -94,6 +96,47 @@ _steward_orch_dir() { # <wsdir> <name>
   else printf '%s/repos/%s' "$wsdir" "$p"; fi
 }
 
+# Starting an orchestrator is MECHANICAL, so the steward does it rather than
+# root. Root started them by hand and produced duplicate panes bound to
+# hand-made workspaces nobody could tell apart; a product declaring
+# `orchestrator: auto` is a standing instruction to have one, which is the
+# same shape as "this workspace declares a dashboard port".
+#
+# The launch is its own function so tests can replace it: calling `cel run`
+# for real would open a pane on the live box.
+_steward_launch_orch() { # <product> <workspace>
+  cel run orchestrator --product "$1" --workspace "$2" >/dev/null 2>&1
+}
+
+_steward_orchestrators() { # <agents-json>
+  local agents_json="$1" ws wsdir p want live
+  # An empty roster means herdr did not answer, not that every orchestrator
+  # died - launching one per product on a transport failure is how you get a
+  # box full of duplicates, which is the incident this whole function is for.
+  [ "$(printf '%s' "$agents_json" | jq -r '[.result.agents[]?] | length' 2>/dev/null || printf 0)" -gt 0 ] || return 0
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for p in $(ws_product_names "$wsdir"); do
+      # Only `auto`. A product whose orchestrator is started deliberately
+      # (or not at all) must never be started behind the operator's back.
+      [ "$(ws_product_get "$wsdir" "$p" orchestrator)" = "auto" ] || continue
+      want="$(_run_agent_name "$p-orch")"
+      live="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
+        '[.result.agents[]? | select(.name == $n)] | length')"
+      [ "$live" = "0" ] || continue
+      # An orchestrator that crash-loops would otherwise be relaunched every
+      # tick, which is a fork bomb at five-minute cadence. Half an hour.
+      _STEWARD_WINDOW=1800 _steward_due "orch-ensure-$ws-$p" || continue
+      if _steward_launch_orch "$p" "$ws"; then
+        c_ok "started $want - $ws/$p declares orchestrator: auto and had no live pane (retried at most every 30m)"
+      else
+        c_err "could not start $want for $ws/$p - cel run orchestrator --product $p --workspace $ws (retried at most every 30m)"
+      fi
+    done
+  done
+}
+
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj
   for ws in $(registry_names); do
@@ -106,9 +149,13 @@ _steward_review_sweep() { # <agents-json>
       # Address the orchestrator by the alias cel run gave it; when that name
       # is not registered (started by hand), fall back to whichever agent
       # pane lives in the repo checkout.
-      orch="$(_steward_agent_name "$repo/orch")"
+      # THE PRODUCT'S orchestrator, not the repo's: a repo inside a declared
+      # product has no pane of its own, so `widget/orch` named something that
+      # never existed and every nudge about it was reported as delivered.
+      local prod; prod="$(ws_product_of_repo "$wsdir" "$repo")"
+      orch="$(_run_agent_name "$prod-orch")"
       local fallback
-      fallback="$(printf '%s' "$agents_json" | jq -r --arg d "$wsdir/repos/$repo" \
+      fallback="$(printf '%s' "$agents_json" | jq -r --arg d "$(_steward_orch_dir "$wsdir" "$prod-orch")" \
         '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"
       herdr agent get "$orch" >/dev/null 2>&1 || { [ -n "$fallback" ] && orch="$fallback"; }
       # ONLY THE FLEET'S OWN PRs. Every PR a worker opens is authored by the
@@ -239,7 +286,33 @@ _steward_stalled_workers() { # <agents-json>
   done
 }
 
-_steward_ready_tickets() {
+# Which mailbox should a ready ticket go to? Its prefix names a repo, the repo
+# names a product, and that product's orchestrator can take the work without
+# the hop through root - the hop where most of it used to be lost, forwarded
+# by mail nobody drained. Ambiguity (two products answering to one prefix) or
+# a product whose orchestrator is not on the roster falls back to root, which
+# is where every ready ticket went before.
+_steward_ready_ticket_dest() { # <wsdir> <ticket-id> <agents-json>
+  local wsdir="$1" id="$2" agents_json="$3" repo pfx prods
+  pfx="${id%-*}"
+  [ -n "$pfx" ] && [ "$pfx" != "$id" ] || { printf root; return 0; }
+  prods=""
+  for repo in $(ws_repo_names "$wsdir"); do
+    if ws_repo_prefixes "$wsdir" "$repo" | grep -qix -- "$pfx"; then
+      prods="$prods$(ws_product_of_repo "$wsdir" "$repo")"$'\n'
+    fi
+  done
+  prods="$(printf '%s' "$prods" | sed '/^$/d' | sort -u)"
+  case "$prods" in ""|*$'\n'*) printf root; return 0;; esac
+  local live
+  live="$(printf '%s' "$agents_json" | jq -r --arg n "$(_run_agent_name "$prods-orch")" \
+    '[.result.agents[]? | select(.name == $n)] | length' 2>/dev/null || printf 0)"
+  [ "$live" = "0" ] && { printf root; return 0; }
+  printf '%s-orch' "$prods"
+}
+
+_steward_ready_tickets() { # [agents-json]
+  local agents_json="${1:-}"
   local ws wsdir trigger teams key ids id title repo found
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
@@ -294,10 +367,11 @@ _steward_ready_tickets() {
         # moved into Todo straight back to Backlog, silently and without a
         # comment. If it genuinely cannot be started, say so ON the ticket and
         # leave the state for the human to change.
-        cmd_inbox send root \
+        local dest; dest="$(_steward_ready_ticket_dest "$wsdir" "$id" "$agents_json")"
+        cmd_inbox send "$dest" \
           "steward: $id is in '$trigger' with no branch anywhere - $title. The owner moved it there to say BUILD THIS: plan it and delegate to the owning repo orchestrator. DO NOT change its state out of '$trigger' yourself - if it cannot be started, comment on the ticket saying exactly what is missing and leave the state alone for the owner to decide." \
           --from steward --workspace "$ws" --kind status >/dev/null 2>&1 \
-          && c_ok "ready ticket $id handed to root's inbox"
+          && c_ok "ready ticket $id handed to $dest's inbox"
       done <<< "$ids"
     done
     ) || true
@@ -633,8 +707,9 @@ $text2" >/dev/null 2>&1 \
     _steward_update_check
   fi
 
-  _steward_ready_tickets
+  _steward_ready_tickets "$agents_json"
   _steward_quota
   _steward_servers
+  _steward_orchestrators "$agents_json"
   c_ok "tick complete"
 }
