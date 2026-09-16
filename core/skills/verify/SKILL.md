@@ -37,4 +37,6 @@ the exit code is `2` - never `1`, which stays reserved for a gate that
 genuinely failed. A loaded box once pushed a suite past 600 s and a green
 branch was filed as `gate:FAIL`; "ran out of time" and "the code is wrong"
 lead to opposite actions, so `land` treats a timeout as unknown and asks for
-either a longer timeout or explicit CI evidence (`--gate-from-ci`).
+either a longer timeout or explicit CI evidence (`--gate-from-ci`, which
+accepts only when every check the base branch's protection requires concluded
+`success` on the PR head, and records those names in the merge body).
