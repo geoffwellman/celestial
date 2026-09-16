@@ -103,6 +103,50 @@ _ledger_spawn() { # <cmd> [args...]
   lock_spawn "${ledger_fd:-}" "$@"
 }
 
+# SEEDING A WORKTREE. A fresh checkout is missing every gitignored file the
+# repo needs to run, so a worker can build the ticket and never once start it -
+# and the owner symlinks the same keys file into worktree after worktree by
+# hand. Runs before the agent does, so the files are there from its first
+# command. Sets SEEDED to the paths the worktree now has, for the prompt line;
+# nothing here is ever fatal, because a repo without the file locally still
+# deserves its worker.
+SEEDED=""
+_fanout_seed_worktree() { # <wsdir> <repo> <worktree>
+  local wsdir="$1" repo="$2" wt="$3" path mode src dst
+  SEEDED=""
+  [ -d "$wt" ] || return 0
+  while IFS=$'\t' read -r path mode; do
+    [ -n "$path" ] || continue
+    src="$wsdir/repos/$repo/$path"
+    dst="$wt/$path"
+    # An existing target is somebody's: --reuse hands back a worktree a
+    # previous run may have written into, and overwriting it would throw that
+    # away for a file the checkout cannot even see.
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+      c_ok "seed: $path is already in the worktree - left alone"
+      SEEDED="${SEEDED:+$SEEDED, }$path"
+      continue
+    fi
+    if [ ! -e "$src" ]; then
+      c_warn "seed: $repo has no $path in this workspace's checkout - the worktree starts without it"
+      continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    # The link is ABSOLUTE on purpose: a relative one would be resolved from
+    # inside ~/.herdr/worktrees/... and point at nothing.
+    if [ "$mode" = copy ]; then cp -a "$src" "$dst"; else ln -s "$src" "$dst"; fi
+    # These paths are gitignored BECAUSE they were missing from the checkout.
+    # One git would track is a commit waiting to happen - a keys file in a PR -
+    # so it is named rather than left for review to catch.
+    if ! git -C "$wt" check-ignore -q "$path" 2>/dev/null; then
+      c_warn "seed: $path is not ignored by $repo's .gitignore - git would track it; the worker must not commit it"
+    fi
+    c_ok "seeded $path ($mode)"
+    SEEDED="${SEEDED:+$SEEDED, }$path"
+  done < <(ws_repo_seed "$wsdir" "$repo")
+  return 0
+}
+
 _repo_slug() { # <wsdir> <repo>
   ws_repo_get "$1" "$2" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##'
 }
@@ -554,6 +598,13 @@ cmd_delegate() {
   # it reads only the first. The lookup then fails, `eval` of empty output
   # still succeeds, and the agent starts with no credentials at all - a silent
   # version of the failure above.
+  # ...AND THE LOCAL FILES GIT NEVER CARRIED. Before the agent starts, not
+  # after: a worker that cannot run the app spends its first minutes finding
+  # that out.
+  _fanout_seed_worktree "$wsdir" "$repo" "$worktree"
+  local seedline=""
+  [ -z "$SEEDED" ] || seedline=$'\n\n'"Seeded local config, not yours to commit: $SEEDED"
+
   local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
   if ! _ledger_spawn "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
     c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
@@ -599,14 +650,14 @@ cmd_delegate() {
 
   if [ "$shape" = spike ]; then
     "$HERDR" agent prompt "$alias" \
-      "Your spike brief is $abs_spec. Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
+      "Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
 
 FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
 Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop." > /dev/null
   elif [ "$shape" = scout ]; then
     "$HERDR" agent prompt "$alias" \
-      "Your investigation brief is $abs_spec. Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
+      "Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
 
 FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
@@ -614,7 +665,7 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   else
     local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
     "$HERDR" agent prompt "$alias" \
-      "Your task spec is $abs_spec. Read it fully and execute exactly it, then run the gate.
+      "Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
 
 When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
 
@@ -817,8 +868,8 @@ cmd_status() {
   # GATE is here because "did the gate pass" is the one dimension with a right
   # answer, and a killed gate is not a wrong one: `TO` reads differently from
   # `FAIL` on purpose, the same way `+?` reads differently from `+0`.
-  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE MODEL
-  local e id repo branch state pane live model ticket review gatecol
+  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
+  local e id repo branch state pane live model ticket review gatecol trycol
   while IFS= read -r e; do
     [ -n "$e" ] || continue
     id="$(printf '%s' "$e" | jq -r '.id')"
@@ -886,8 +937,9 @@ cmd_status() {
         *)     gatecol=- ;;
       esac
     fi
-    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %s\n' \
-      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "$gatecol" "${model:--}"
+    trycol="$(printf '%s' "$e" | jq -r '.try.port // "-"')"
+    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' \
+      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "$gatecol" "$trycol" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
 
   # SLOTS ARE A FACT, NOT A MEMORY. `policy.workers` was only ever a sentence
@@ -924,6 +976,141 @@ _fanout_slots() { # <wsdir>
   done
 }
 
+# ── try: a running instance of a ticket ──────────────────────────────────────
+# Nothing used to hand anyone a running copy of a branch. The two ways of
+# getting one were both bad: switch the orchestrator's shared checkout onto the
+# PR branch, which parks the one local instance on one ticket, or start the app
+# from the worktree by hand and collide with whatever else is on the same fixed
+# ports. So each try gets a BLOCK of ports of its own and a pane of its own,
+# and the ledger row remembers both.
+
+# Free means nothing answers. Deliberately dependency-free - /dev/tcp is in
+# bash itself, and reaching for nc or lsof here would make a preview depend on
+# whatever a given box happens to have installed.
+_port_free() { # <port>
+  ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# A BLOCK of ten, not a port: a preview is usually several processes (an api,
+# a ui, sometimes a websocket), and handing out single ports one at a time is
+# how two previews end up interleaved and neither can be moved.
+_try_alloc_port() { # -> base, or fails
+  local base="${CEL_TRY_PORT_BASE:-4400}" i p free
+  while [ "$base" -le 65525 ]; do
+    free=1
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+      p=$(( base + i ))
+      _port_free "$p" || { free=0; break; }
+    done
+    [ "$free" -eq 1 ] && { printf '%s' "$base"; return 0; }
+    base=$(( base + 10 ))
+  done
+  return 1
+}
+
+_try_subst() { # <string> <base>
+  local s="$1" base="$2" n
+  while [[ "$s" =~ \{port\+([0-9]+)\} ]]; do
+    n="${BASH_REMATCH[1]}"
+    s="${s//\{port+$n\}/$(( base + n ))}"
+  done
+  printf '%s' "${s//\{port\}/$base}"
+}
+
+# Shared by `try --stop` and `release`, which must not leave a pane pointing at
+# a worktree it is about to remove. Silent when there is no try to stop.
+_try_stop() { # <wsdir> <id>
+  local wsdir="$1" id="$2" pane
+  pane="$(_ledger_entry "$wsdir" "$id" | jq -r '.try.pane // ""')"
+  [ -n "$pane" ] || return 1
+  "$HERDR" pane close "$pane" >/dev/null 2>&1 \
+    || c_warn "could not close pane $pane - close it by hand"
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" \
+    'map(if .id == $id then del(.try) else . end)')"
+  return 0
+}
+
+cmd_try() { # <id> [--stop] [--workspace NAME]
+  [ $# -ge 1 ] || die "usage: cel-fanout try <id> [--stop] [--workspace NAME]"
+  local id="$1"; shift
+  local stop=0 ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      --stop)      stop=1; shift ;;
+      *) die "try: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "no delegation with id '$id'"
+  local repo wt pane
+  repo="$(printf '%s' "$entry" | jq -r .repo)"
+  wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+  pane="$(printf '%s' "$entry" | jq -r '.pane // ""')"
+
+  if [ "$stop" -eq 1 ]; then
+    _try_stop "$wsdir" "$id" && c_ok "$id: preview stopped" || c_warn "$id has no preview running"
+    return 0
+  fi
+
+  # Already running: the same ticket on the same branch is the same instance,
+  # and the answer is the url it is already on. Starting a second would take a
+  # second block of ports for one branch.
+  local running_url; running_url="$(printf '%s' "$entry" | jq -r '.try.url // ""')"
+  if [ -n "$running_url" ]; then
+    c_ok "$id is already running"
+    printf '%s\n' "$running_url"
+    return 0
+  fi
+
+  [ -n "$wt" ] && [ -d "$wt" ] \
+    || die "try: $id has no worktree on disk${wt:+ ($wt)} - it was released, or never got one. Re-delegate it before trying to run it."
+  local cmd; cmd="$(ws_repo_preview "$wsdir" "$repo" cmd)"
+  [ -n "$cmd" ] || die "try: repo '$repo' declares no preview.cmd in workspace.yaml - add
+    preview: { cmd: \"<how to start it>\", env: { PORT: \"{port}\" }, url: \"http://localhost:{port}\" }
+  under that repo, and every ticket on it becomes runnable."
+
+  # Re-seeded here too: a worktree delegated before the repo declared `seed:`,
+  # or one whose source file appeared afterwards, would otherwise start without
+  # the very config that makes it runnable.
+  _fanout_seed_worktree "$wsdir" "$repo" "$wt"
+
+  local port; port="$(_try_alloc_port)" \
+    || die "try: no free block of 10 ports from ${CEL_TRY_PORT_BASE:-4400} - stop a preview first (cel-fanout try <id> --stop)"
+  local url; url="$(_try_subst "$(ws_repo_preview "$wsdir" "$repo" url)" "$port")"
+
+  local -a envs=()
+  local kv
+  while IFS= read -r kv; do
+    [ -n "$kv" ] || continue
+    envs+=("$(_try_subst "$kv" "$port")")
+  done < <(ws_repo_preview_env "$wsdir" "$repo")
+
+  # Split under the WORKER'S pane, so the preview appears beside the ticket it
+  # belongs to rather than wherever the operator happened to be standing.
+  local resp newpane
+  resp="$(_ledger_spawn "$HERDR" pane split --pane "$pane" --direction down --cwd "$wt" --no-focus)"
+  newpane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
+  [ -n "$newpane" ] || die "try: herdr pane split returned no pane id - nothing was started"
+
+  local runline="$cmd"
+  [ "${#envs[@]}" -eq 0 ] || runline="env ${envs[*]} $cmd"
+  _ledger_spawn "$HERDR" pane run "$newpane" "$runline" >/dev/null 2>&1 \
+    || c_warn "$id: could not start the preview in $newpane - read the pane"
+
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" \
+    --arg pane "$newpane" --argjson port "$port" --arg url "$url" --arg at "$(_now_iso)" \
+    'map(if .id == $id then .try = {pane:$pane, port:$port, url:$url, started:$at} else . end)')"
+
+  c_ok "$id running in $newpane on ports $port-$(( port + 9 ))"
+  # LAST LINE ON PURPOSE: the console shows the tail of a command's output in
+  # its OUTPUT panel, and the url is the whole point of having run this.
+  printf '%s\n' "$url"
+}
+
 cmd_release() {
   [ $# -ge 1 ] || die "usage: cel-fanout release <id> [--keep-worktree] [--discard] [--workspace NAME]"
   local id="$1"; shift
@@ -941,6 +1128,14 @@ cmd_release() {
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
   local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
+
+  # A preview of this branch goes first: its pane is cwd'd into the worktree
+  # about to be removed, and a dev server left running there holds ports for a
+  # ticket that no longer exists.
+  if _try_stop "$wsdir" "$id"; then
+    c_ok "$id: preview stopped before release"
+    entry="$(_ledger_entry "$wsdir" "$id")"
+  fi
 
   # Done ONLY on a merged PR. Releasing a worktree is not the same as landing
   # the work - a release after an abandoned or closed PR must not mark the
@@ -1160,7 +1355,7 @@ cmd_land() { # <id>
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review)
+  delegate|scout|spike|collect|status|release|land|review|try)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
@@ -1175,8 +1370,9 @@ case "${1:-}" in
   wait)     shift; cmd_wait "$@" ;;
   collect)  shift; cmd_collect "$@" ;;
   status)   shift; cmd_status "$@" ;;
+  try)      shift; cmd_try "$@" ;;
   release)  shift; cmd_release "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|release|review|land ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|try|release|review|land ..." ;;
 esac

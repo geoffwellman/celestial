@@ -91,6 +91,35 @@ cel-fanout spike <repo> <brief>              # spike:  a report, backed by throw
   worktree away without `--discard` — dirty and unpushed are a spike's expected
   end state — while naming what went.
 
+Local config, and running a ticket
+
+```yaml
+repos:
+  - name: widget
+    seed:
+      - apps/builder/.dev.vars                  # symlinked into every worktree
+      - { path: apps/pf/src/wasm, copy: true }  # copied instead
+    preview:
+      cmd: "pnpm --filter builder dev"
+      env: { API_PORT: "{port}", UI_PORT: "{port+1}" }
+      url: "http://localhost:{port+1}"
+```
+
+- `seed:` names the gitignored files a fresh checkout does not have but the
+  app needs to RUN. `delegate`, `scout` and `spike` place them in the worktree
+  before the agent starts - symlinked to the workspace checkout, or copied with
+  `copy: true` for a directory a build rewrites in place - and the worker's
+  first prompt says which ones are there and that they are not its to commit. A
+  missing source is a warning, never a failed delegation; a target that already
+  exists is left alone.
+- `cel-fanout try <id>` runs the ticket's branch from its own worktree on a
+  free block of ten ports (from `CEL_TRY_PORT_BASE`, default 4400), in a pane
+  split under the worker's, and prints the url as its last line. `--stop`
+  closes that pane; `release` stops a running preview before it removes the
+  worktree; `status` shows the port in the `TRY` column. Trying a ticket twice
+  just prints the url it is already on - it is one branch, so it is one
+  instance.
+
 Products and the review verdict
 
 - The worker's completion notice goes to the **product's** orchestrator
