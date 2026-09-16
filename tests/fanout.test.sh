@@ -1029,3 +1029,249 @@ test_status_reports_slots_per_repo() {
   assert_contains "$out" "free"
   rm -rf "$T"
 }
+
+# ---- products: the orchestrator above a worker may own several repos --------
+# cel-fanout is the only thing that spawns workers, and it encoded the old
+# one-repo-one-orchestrator shape in three places: the mailbox it hands the
+# worker, the cap it counts against, and the herdr workspace it nests the
+# worktree under. With products declared, a worker in `widget` reports to
+# `bundle-orch`, shares its cap with `gadget`, and nests under a pane that is
+# not a git toplevel at all.
+_fanout_products_setup() {
+  _fanout_setup
+  local r
+  for r in gadget lone; do
+    mkdir -p "$T/repos/$r"
+    git -C "$T/repos/$r" init -q
+  done
+  STUB_REPO_GADGET="$(git -C "$T/repos/gadget" rev-parse --show-toplevel)"
+  STUB_REPO_LONE="$(git -C "$T/repos/lone" rev-parse --show-toplevel)"
+  yq -y -i '.repos += [{"name":"gadget","url":"git@github.com:someone/gadget.git","prefix":"OT"},
+                       {"name":"lone","url":"git@github.com:someone/lone.git","prefix":"ABC"}]
+            | .products = [{"name":"bundle","repos":["widget","gadget"],"workers":3}]' \
+    "$T/workspace.yaml"
+  mkdir -p "$T/products/bundle"
+  cat > "$STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$STUB_LOG"
+case "$1 $2" in
+  "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
+  "workspace list")  echo '{"result":{"workspaces":[
+      {"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}},
+      {"workspace_id":"wG","worktree":{"repo_root":"'"$STUB_REPO_GADGET"'","is_linked_worktree":false}},
+      {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}';;
+  "pane list")       printf '%s' "${STUB_PANES_JSON:-{\"result\":{\"panes\":[]}}}";;
+  "agent list")      echo '{"result":{"agents":[]}}';;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$STUB"
+  export STUB_REPO_GADGET STUB_REPO_LONE
+}
+
+test_delegate_reports_to_the_products_orchestrator() {
+  _fanout_products_setup
+  (cd "$T" && "$BIN" delegate widget WG-PROD "$T/spec.md") > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "cel inbox send bundle-orch"
+  rm -rf "$T"
+}
+
+# A repo in no declared product is its own product, in place, exactly as before.
+test_delegate_for_an_undeclared_repo_keeps_its_own_mailbox() {
+  _fanout_products_setup
+  : > "$STUB_LOG"
+  (cd "$T" && "$BIN" delegate lone ABC-1 "$T/spec.md") > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "cel inbox send lone-orch"
+  rm -rf "$T"
+}
+
+# The cap belongs to the ORCHESTRATOR, and one orchestrator now stands over
+# several repos: counting per repo would let a product run cap x repos workers.
+test_the_cap_counts_the_whole_product() {
+  _fanout_products_setup
+  (cd "$T" && "$BIN" delegate widget WG-P1 "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" delegate widget WG-P2 "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" delegate gadget OT-1 "$T/spec.md") > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-P4 "$T/spec.md") 2>&1 )" && {
+    echo "a fourth worker was allowed past the product cap of 3"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cap is 3"
+  # the same refusal from the product's OTHER repo
+  out="$( (cd "$T" && "$BIN" delegate gadget OT-2 "$T/spec.md") 2>&1 )" && {
+    echo "the cap did not apply across the product"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cap is 3"
+  # ...and a repo outside the product is untouched by it
+  out="$( (cd "$T" && "$BIN" delegate lone ABC-2 "$T/spec.md") 2>&1 || true )"
+  ! printf '%s' "$out" | grep -q "cap is" \
+    || { echo "a full product blocked an unrelated repo: $out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_status_reports_slots_per_product() {
+  _fanout_products_setup
+  local out; out="$( (cd "$T" && "$BIN" status) 2>&1 )"
+  assert_contains "$out" "slots bundle"
+  assert_contains "$out" "(widget, gadget)"
+  assert_contains "$out" "slots lone"
+  rm -rf "$T"
+}
+
+# A declared product's orchestrator stands in <ws>/products/<name>, which is
+# not a git toplevel - so the toplevel lookup finds the REPO orchestrator's
+# workspace and nests every worker under the wrong parent.
+test_delegate_nests_under_the_product_pane_when_one_exists() {
+  _fanout_products_setup
+  export STUB_PANES_JSON='{"result":{"panes":[{"pane_id":"wP:p1","cwd":"'"$T"'/products/bundle","workspace_id":"wP"}]}}'
+  (cd "$T" && "$BIN" delegate widget WG-NEST "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wP"
+  unset STUB_PANES_JSON
+  rm -rf "$T"
+}
+
+test_delegate_falls_back_to_the_toplevel_match_without_a_product_pane() {
+  _fanout_products_setup
+  (cd "$T" && "$BIN" delegate widget WG-NONEST "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^worktree create' "$STUB_LOG" | head -1)" "--workspace wY"
+  rm -rf "$T"
+}
+
+# ---- --workspace -----------------------------------------------------------
+# An orchestrator standing in a product dir, or anywhere else, must be able to
+# name its workspace instead of relying on where its cwd happens to be.
+test_workspace_flag_resolves_the_ledger_from_an_unrelated_cwd() {
+  _fanout_products_setup
+  export CEL_REGISTRY="$T/registry.json"
+  printf '{"workspaces":{"alpha":{"path":"%s","remote":null}}}\n' "$T" > "$CEL_REGISTRY"
+  (cd /tmp && "$BIN" delegate widget WG-FLAG "$T/spec.md" --workspace alpha) > /dev/null
+  assert_eq "$(jq -r '.[0].id' "$T/.cel/delegations.json")" WG-FLAG
+  local out; out="$( (cd /tmp && "$BIN" status --workspace alpha) 2>&1 )"
+  assert_contains "$out" "WG-FLAG"
+  unset CEL_REGISTRY
+  rm -rf "$T"
+}
+
+# ---- the review verdict as a ledger fact ------------------------------------
+# On a repo whose PR author and reviewer are one GitHub account, GitHub refuses
+# approval outright and a posted review reads as the owner talking to himself in
+# public. The verdict has to live somewhere; the ledger is where.
+test_review_records_the_verdict_on_the_row() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-REV "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-REV approved --by widget-pr-7-review --note "gate green") > /dev/null
+  local r; r="$(jq -c '.[0].review' "$T/.cel/delegations.json")"
+  assert_eq "$(printf '%s' "$r" | jq -r .verdict)" approved
+  assert_eq "$(printf '%s' "$r" | jq -r .by)" widget-pr-7-review
+  assert_eq "$(printf '%s' "$r" | jq -r .note)" "gate green"
+  rm -rf "$T"
+}
+
+test_review_refuses_an_unknown_verdict() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-REV2 "$T/spec.md") > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" review WG-REV2 maybe --by r) 2>&1 )" && {
+    echo "an unknown verdict was recorded"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "approved"
+  rm -rf "$T"
+}
+
+# A ledger verdict satisfies land ONLY where GitHub approval is impossible -
+# the PR's author is the account doing the reviewing. Otherwise GitHub stays
+# the authority.
+test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "gate green") > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )"
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge on a ledger verdict: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "ledger"
+  # the public record lives in the log, not in a comment nobody reads
+  assert_contains "$(cat "$GH_LOG")" "Reviewed-by: widget-pr-7-review (approved)"
+  assert_contains "$(cat "$GH_LOG")" "gate green"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_says_which_path_approved_it() {
+  _fanout_land_setup fleetbot APPROVED 0
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )"
+  assert_contains "$out" "GitHub"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_refuses_a_changes_verdict() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND changes --by widget-pr-7-review) > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
+    echo "landed on a changes-requested verdict"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not approved"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_status_shows_the_review_column() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-RCOL "$T/spec.md") > /dev/null
+  assert_contains "$(cd "$T" && "$BIN" status)" "REVIEW"
+  (cd "$T" && "$BIN" review WG-RCOL approved --by r) > /dev/null
+  assert_contains "$(cd "$T" && "$BIN" status)" " ok "
+  (cd "$T" && "$BIN" review WG-RCOL changes --by r) > /dev/null
+  assert_contains "$(cd "$T" && "$BIN" status)" " chg "
+  rm -rf "$T"
+}
+
+# ---- spikes: throwaway code that answers a question -------------------------
+# A worker's deliverable is a PR, a scout's is a report and it may not write
+# code. "Try it and tell me if it works" is neither, and was being run as one
+# of them - either shipping unreviewed experiments or a scout reading code it
+# should have been running.
+test_spike_records_its_shape_and_is_forbidden_to_ship() {
+  _fanout_linear_setup
+  printf 'does the cache help?\n' > "$T/try-cache.md"
+  (cd "$T" && "$BIN" spike widget "$T/try-cache.md") > /dev/null
+  local e; e="$(jq -c '.[0]' "$T/.cel/delegations.json")"
+  assert_eq "$(printf '%s' "$e" | jq -r .shape)" spike
+  assert_eq "$(printf '%s' "$e" | jq -r .ticket)" ""
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "role-spike.md"
+  assert_contains "$log" "report.md"
+  ! printf '%s' "$log" | grep -q "pull request" || { echo "a spike was told to open a PR"; rm -rf "$T"; return 1; }
+  assert_contains "$log" "never push"
+  rm -rf "$T"
+}
+
+test_collect_of_a_spike_reports_without_running_the_verifier() {
+  _fanout_setup
+  printf 'brief\n' > "$T/try.md"
+  (cd "$T" && "$BIN" spike widget "$T/try.md") > /dev/null
+  local id; id="$(jq -r '.[0].id' "$T/.cel/delegations.json")"
+  cat > "$T/verify-marker.sh" <<EOF
+#!/usr/bin/env bash
+touch "$T/verifier-ran"
+EOF
+  chmod +x "$T/verify-marker.sh"
+  mkdir -p "$STUB_WT/.agent"; printf 'FINDING: the cache helps\n' > "$STUB_WT/.agent/report.md"
+  local out; out="$(cd "$T" && CEL_FANOUT_VERIFY="$T/verify-marker.sh" "$BIN" collect "$id")"
+  assert_contains "$out" "FINDING: the cache helps"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" reported
+  [ ! -f "$T/verifier-ran" ] || { echo "the verifier ran on a spike"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A spike's worktree is throwaway by definition: dirty and unpushed are the
+# expected end state, not held work someone must be asked about. But what is
+# thrown away is still said out loud.
+test_release_of_a_dirty_spike_needs_no_discard_but_says_what_went() {
+  _fanout_setup
+  printf 'brief\n' > "$T/try.md"
+  (cd "$T" && "$BIN" spike widget "$T/try.md") > /dev/null
+  local id; id="$(jq -r '.[0].id' "$T/.cel/delegations.json")"
+  printf 'experiment\n' > "$STUB_WT/scratch.txt"
+  local out; out="$( (cd "$T" && "$BIN" release "$id") 2>&1 )"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  assert_contains "$out" "dirty=1"
+  rm -rf "$T"
+}
+
+test_status_shows_spikes_as_such() {
+  _fanout_setup
+  printf 'brief\n' > "$T/try.md"
+  (cd "$T" && "$BIN" spike widget "$T/try.md") > /dev/null
+  assert_contains "$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status)" "spike"
+  rm -rf "$T"
+}

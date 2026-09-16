@@ -21,8 +21,29 @@ export CEL_ROOT
 # canned JSON - that is the whole test strategy, no live herdr in tests.
 HERDR="${CEL_FANOUT_HERDR:-herdr}"
 
-_fanout_wsdir() {
-  ws_current "$PWD" || die "not inside a workspace (cel ws new/add first)"
+# Which workspace this invocation is about. WITHOUT an argument it is wherever
+# the caller is standing, as it always was; WITH one it is the registered
+# workspace of that name. A product orchestrator stands in <ws>/products/<p>,
+# which is inside the tree, but a reviewer or a human driving the fleet from a
+# terminal elsewhere is not - and an unqualified call there resolved to
+# whatever workspace happened to contain the cwd, or died.
+_fanout_wsdir() { # [workspace-name]
+  if [ -n "${1:-}" ]; then
+    registry_require "$1"
+  else
+    ws_current "$PWD" || die "not inside a workspace (cel ws new/add first)"
+  fi
+}
+
+# The lock at the bottom needs the workspace BEFORE any command parses its own
+# arguments, so it reads the flag out of the raw argv. Commands still parse it
+# themselves; this only finds it.
+_fanout_ws_arg() { # <argv...> -> the --workspace value, or empty
+  while [ $# -gt 0 ]; do
+    case "$1" in --workspace) printf '%s' "${2:-}"; return 0 ;; esac
+    shift
+  done
+  return 0
 }
 
 # The ticket id carried by a branch name, upper-cased, or empty.
@@ -225,9 +246,10 @@ _fanout_pr_phrase() {
 cmd_delegate() {
   [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
   local repo="$1" branch="$2" spec="$3"; shift 3
-  local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because=""
+  local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
       --herdr-workspace) herdr_ws="$2"; shift 2 ;;
       --profile)  profile="$2"; shift 2 ;;
       --because)  because="$2"; shift 2 ;;
@@ -240,7 +262,7 @@ cmd_delegate() {
     esac
   done
 
-  local wsdir; wsdir="$(_fanout_wsdir)"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local repodir="$wsdir/repos/$repo"
   [ -d "$repodir" ] || die "repo '$repo' not found under $wsdir/repos"
   [ -f "$spec" ] || die "spec file not found: $spec"
@@ -254,12 +276,14 @@ cmd_delegate() {
   # every delegation duplicates work someone is already doing. Search first,
   # reuse if it exists, and create only when it genuinely does not.
   local ticket=""
-  case "$shape" in ship|scout) ;; *) die "delegate: --shape must be ship or scout";; esac
+  case "$shape" in ship|scout|spike) ;; *) die "delegate: --shape must be ship, scout or spike";; esac
   # A scout produces knowledge, not a change: no PR will ever exist to link to
   # a ticket, so the ticket gate does not apply. That is the whole reason the
   # shape exists - investigations were being forced into ad-hoc branches to
-  # get past the gate, or done in an orchestrator's own checkout.
-  [ "$shape" = scout ] && adhoc=1
+  # get past the gate, or done in an orchestrator's own checkout. A spike is
+  # the same bargain with code: it answers the question by building something
+  # and then throws it away, so nothing it makes will ever reach a board.
+  case "$shape" in scout|spike) adhoc=1 ;; esac
   if [ "$(ws_ticket "$wsdir" system)" = "linear" ]; then
     ticket="$(_fanout_ticket_id "$wsdir" "$repo" "$branch")"
     if [ -z "$ticket" ] && [ "$adhoc" -eq 0 ]; then
@@ -284,18 +308,43 @@ cmd_delegate() {
   # orchestrator sat on four tickets believing it was at capacity with no
   # workers running at all, while nothing would have stopped another from
   # starting a fifth. A number in a prompt is a wish; this is the number.
-  local wcap wused
-  wcap="$(ws_policy "$wsdir" workers)"; wcap="${wcap:-4}"
-  wused="$(_ledger_read "$wsdir" | jq --arg r "$repo" \
-    '[.[] | select(.repo == $r and .state == "running")] | length')"
+  #
+  # AND THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO. With products one
+  # orchestrator stands over several repos; counting per repo would quietly let
+  # it run cap-times-repos workers, which is the same unbounded number the cap
+  # was introduced to remove. `workers` on the product overrides policy.workers
+  # for exactly that reason: a two-repo product is not automatically entitled
+  # to twice the attention.
+  local product wcap wused
+  product="$(ws_product_of_repo "$wsdir" "$repo")"
+  wcap="$(ws_product_get "$wsdir" "$product" workers)"
+  [ -n "$wcap" ] || wcap="$(ws_policy "$wsdir" workers)"
+  wcap="${wcap:-4}"
+  local prepos; prepos="$(ws_product_repos "$wsdir" "$product" | jq -R . | jq -sc .)"
+  wused="$(_ledger_read "$wsdir" | jq --argjson rs "$prepos" \
+    '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
   if [ "$wused" -ge "$wcap" ]; then
-    die "delegate: $repo already has $wused running worker(s), cap is $wcap.
+    die "delegate: $product already has $wused running worker(s), cap is $wcap.
   Free a slot first - a finished worker still holds one until it is collected:
     cel-fanout status             # what is actually running, reconciled
     cel-fanout collect <id>       # take the result, then release
   Raise policy.workers in workspace.yaml if the cap itself is wrong."
   fi
 
+  # WHERE THE WORKER NESTS. herdr shows a worktree under the workspace it was
+  # created from, so this picks the ORCHESTRATOR'S pane: the worker appears
+  # beneath whoever is responsible for it. That used to be the repo's own
+  # workspace, found by matching its git toplevel - which is exactly right for
+  # a repo standing alone. A declared product's orchestrator stands in
+  # <ws>/products/<p>, a directory that is no git repository at all, so the
+  # toplevel match would nest its workers under one of the repos instead and
+  # the product pane would show none of them. Look for the product pane first,
+  # fall back to the toplevel, and only then admit defeat.
+  if [ -z "$herdr_ws" ]; then
+    local pdir; pdir="$(ws_product_dir "$wsdir" "$product")"
+    herdr_ws="$("$HERDR" pane list 2>/dev/null | jq -r --arg d "$pdir" \
+      '.result.panes[]? | select(.cwd == $d) | .workspace_id' | head -1 || true)"
+  fi
   if [ -z "$herdr_ws" ]; then
     local toplevel; toplevel="$(git -C "$repodir" rev-parse --show-toplevel)"
     herdr_ws="$("$HERDR" workspace list | jq -r --arg t "$toplevel" \
@@ -435,7 +484,10 @@ cmd_delegate() {
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
 
   local rolefile="$CEL_ROOT/core/roles/worker.md" roletag=worker
-  [ "$shape" = scout ] && { rolefile="$CEL_ROOT/core/roles/scout.md"; roletag=scout; }
+  case "$shape" in
+    scout) rolefile="$CEL_ROOT/core/roles/scout.md"; roletag=scout ;;
+    spike) rolefile="$CEL_ROOT/core/roles/spike.md"; roletag=spike ;;
+  esac
   local body; body="$(ws_render_role "$wsdir" "$rolefile")"
   local AGENT_ARGS=()
   _run_agent_args "$rt" "$roletag" "$body" 0 "$wsdir"
@@ -497,21 +549,22 @@ cmd_delegate() {
   # `git log origin/main..HEAD` before the push is the specific check that catches
   # the lost-commit case, which is why it is spelled out rather than left to
   # judgement.
-  # The orchestrator's own mailbox name, derived exactly as lib/inbox.sh derives
-  # it from a cwd of <ws>/repos/<repo>. The worker cannot ask - it is standing
-  # in a worktree, which resolves to its OWN name - so it is told.
+  # The orchestrator's own mailbox name. It is the PRODUCT's orchestrator, not
+  # the repo's: with products declared, `widget` and `gadget` may answer to one
+  # `bundle-orch`, and a notice addressed to `widget-orch` would be filed to a
+  # mailbox nobody reads. An undeclared repo is its own product, so this is the
+  # old name unchanged.
   #
   # Through the SHARED sanitiser, not a hand-rolled copy of half of it: the
   # lowercase-and-substitute part is easy to reproduce and the 32-character
-  # truncation is easy to forget, and forgetting it is silent. A repo name
-  # longer than 27 characters would produce an untruncated `<repo>-orch` here
-  # while the orchestrator answers to the truncated form, so every completion
-  # notice from that repo would be filed to a mailbox nobody reads - the exact
-  # failure this prompt was added to end.
+  # truncation is easy to forget, and forgetting it is silent. A name longer
+  # than 27 characters would produce an untruncated `<name>-orch` here while
+  # the orchestrator answers to the truncated form, so every completion notice
+  # would be filed where nobody reads - the exact failure this prompt ends.
   # _run_agent_name is character-for-character _inbox_sanitise; tests/steward
   # asserts that identity so this stays true.
   local orch_mailbox
-  orch_mailbox="$(_run_agent_name "$repo-orch")"
+  orch_mailbox="$(_run_agent_name "$product-orch")"
   # ...AND THE WORKSPACE IT LIVES IN. A worker stands in ~/.herdr/worktrees/...,
   # where `ws_current` finds nothing, so an unqualified `cel inbox send` resolves
   # the workspace to the literal string `default` - a mailbox no orchestrator
@@ -520,7 +573,14 @@ cmd_delegate() {
   # Quote the workspace selector for the same reason as the environment line.
   local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
 
-  if [ "$shape" = scout ]; then
+  if [ "$shape" = spike ]; then
+    "$HERDR" agent prompt "$alias" \
+      "Your spike brief is $abs_spec. Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop." > /dev/null
+  elif [ "$shape" = scout ]; then
     "$HERDR" agent prompt "$alias" \
       "Your investigation brief is $abs_spec. Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
 
@@ -556,7 +616,7 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   _ledger_append "$wsdir" "$entry"
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
-  [ "$shape" = scout ] || _fanout_ticket_state "$ticket" "In Progress"
+  if [ "$shape" = ship ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
   printf '%s\n' "$branch"
 }
 
@@ -567,11 +627,27 @@ Your orchestrator is not watching your pane; that message is how it learns you a
 # thing anyone links to.
 cmd_scout() { # <repo> <spec-file> [delegate options]
   [ $# -ge 2 ] || die "usage: cel-fanout scout <repo> <brief-file> [--profile NAME] [--because TEXT]"
-  local repo="$1" spec="$2"; shift 2
-  [ -f "$spec" ] || die "scout: brief file not found: $spec"
+  _fanout_adhoc_shape scout "$@"
+}
+
+# A SPIKE: throwaway code that answers a question. Shapes are defined by their
+# deliverable - a worker's is a PR, a scout's is a report and it may not write
+# code - and "try it and tell me if it works" is neither. It was being run as
+# one of them anyway: either as a worker, which ships an experiment nobody
+# meant to keep, or as a scout, reading code it should have been running.
+cmd_spike() { # <repo> <brief-file> [delegate options]
+  [ $# -ge 2 ] || die "usage: cel-fanout spike <repo> <brief-file> [--profile NAME] [--because TEXT]"
+  _fanout_adhoc_shape spike "$@"
+}
+
+# The branch name is generated for both: a scout's or a spike's branch is a
+# scratch coordinate, never a thing anyone links to.
+_fanout_adhoc_shape() { # <shape> <repo> <brief-file> [delegate options]
+  local shape="$1" repo="$2" spec="$3"; shift 3
+  [ -f "$spec" ] || die "$shape: brief file not found: $spec"
   local slug; slug="$(basename "$spec" | sed -E 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed -E 's/^-+|-+$//g' | cut -c1-24)"
-  local branch="scout-$(date +%y%m%d)-${slug:-brief}-$(date +%H%M%S)"
-  cmd_delegate "$repo" "$branch" "$spec" --shape scout "$@"
+  local branch="$shape-$(date +%y%m%d)-${slug:-brief}-$(date +%H%M%S)"
+  cmd_delegate "$repo" "$branch" "$spec" --shape "$shape" "$@"
 }
 
 cmd_wait() {
@@ -619,9 +695,16 @@ cmd_wait() {
 }
 
 cmd_collect() {
-  [ $# -ge 1 ] || die "usage: cel-fanout collect <id>"
-  local id="$1"
-  local wsdir; wsdir="$(_fanout_wsdir)"
+  [ $# -ge 1 ] || die "usage: cel-fanout collect <id> [--workspace NAME]"
+  local id="$1"; shift
+  local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "collect: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
   local worktree alias ticket repo branch
@@ -649,12 +732,15 @@ cmd_collect() {
   fi
 
   local shape; shape="$(printf '%s' "$entry" | jq -r '.shape // "ship"')"
-  if [ "$shape" = scout ]; then
+  # A scout and a spike both deliver a report, and neither has a PR or a gate
+  # to judge: running the verifier on one would report a missing gate as a
+  # finding about work that was never meant to ship.
+  if [ "$shape" = scout ] || [ "$shape" = spike ]; then
     if [ -f "$worktree/.agent/report.md" ]; then
       cat "$worktree/.agent/report.md"
       _ledger_update_state "$wsdir" "$id" reported
     else
-      c_warn "$id is a scout with no .agent/report.md yet - prompt it to write one, or read its pane"
+      c_warn "$id is a $shape with no .agent/report.md yet - prompt it to write one, or read its pane"
     fi
     return 0
   fi
@@ -678,7 +764,14 @@ cmd_collect() {
 }
 
 cmd_status() {
-  local wsdir; wsdir="$(_fanout_wsdir)"
+  local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "status: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   # A FAILED agent list is not evidence that agents died - herdr being
   # unreachable must never convert every running row to finished/orphaned
   # during an outage. Reconciliation below requires have_agents=1.
@@ -694,8 +787,11 @@ cmd_status() {
   # the whole point of profiles, and an unlabelled row makes that anecdote
   # rather than evidence. Rows delegated before profiles existed have no model
   # field and render as `-`.
-  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET MODEL
-  local e id repo branch state pane live model ticket
+  # REVIEW is here because on a solo repo GitHub cannot carry the verdict at
+  # all - author and reviewer are one account - so the ledger does, and a
+  # verdict nobody can see is a verdict nobody acts on.
+  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW MODEL
+  local e id repo branch state pane live model ticket review
   while IFS= read -r e; do
     [ -n "$e" ] || continue
     id="$(printf '%s' "$e" | jq -r '.id')"
@@ -746,9 +842,17 @@ cmd_status() {
     ahead="$(_wt_ahead "$wt")"
     model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"
     ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
-    [ "$(printf '%s' "$e" | jq -r '.shape // "ship"')" = scout ] && ticket="scout"
-    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %s\n' \
-      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "${model:--}"
+    case "$(printf '%s' "$e" | jq -r '.shape // "ship"')" in
+      scout) ticket=scout ;;
+      spike) ticket=spike ;;
+    esac
+    case "$(printf '%s' "$e" | jq -r '.review.verdict // ""')" in
+      approved) review=ok ;;
+      changes)  review=chg ;;
+      *)        review=- ;;
+    esac
+    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %s\n' \
+      "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
 
   # SLOTS ARE A FACT, NOT A MEMORY. `policy.workers` was only ever a sentence
@@ -762,32 +866,43 @@ cmd_status() {
   _fanout_slots "$wsdir"
 }
 
-# Used / free per repo, from the reconciled ledger.
+# Used / free per PRODUCT, from the reconciled ledger - the cap belongs to the
+# orchestrator, and one orchestrator may stand over several repos. A repo in no
+# declared product is its own product, so a workspace without products prints
+# exactly what it printed before.
 _fanout_slots() { # <wsdir>
-  local cap; cap="$(ws_policy "$1" workers)"; cap="${cap:-4}"
-  local repo used
+  local p cap used repos n label
   printf '\n'
-  for repo in $(ws_repo_names "$1"); do
-    used="$(_ledger_read "$1" | jq --arg r "$repo" '[.[] | select(.repo == $r and .state == "running")] | length')"
-    printf 'slots %-20s %s/%s used' "$repo" "$used" "$cap"
+  for p in $(ws_product_names "$1"); do
+    cap="$(ws_product_get "$1" "$p" workers)"
+    [ -n "$cap" ] || cap="$(ws_policy "$1" workers)"
+    cap="${cap:-4}"
+    repos="$(ws_product_repos "$1" "$p" | jq -R . | jq -sc .)"
+    n="$(printf '%s' "$repos" | jq 'length')"
+    label="$p"
+    [ "$n" -le 1 ] || label="$p ($(ws_product_repos "$1" "$p" | paste -sd, - | sed 's/,/, /g'))"
+    used="$(_ledger_read "$1" | jq --argjson rs "$repos" \
+      '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+    printf 'slots %-28s %s/%s used' "$label" "$used" "$cap"
     if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
     else printf ' - %s free\n' "$(( cap - used ))"; fi
   done
 }
 
 cmd_release() {
-  [ $# -ge 1 ] || die "usage: cel-fanout release <id> [--keep-worktree] [--discard]"
+  [ $# -ge 1 ] || die "usage: cel-fanout release <id> [--keep-worktree] [--discard] [--workspace NAME]"
   local id="$1"; shift
-  local keep=0 discard=0
+  local keep=0 discard=0 ws_opt=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --workspace)     ws_opt="$2"; shift 2 ;;
       --keep-worktree) keep=1; shift ;;
       --discard)       discard=1; shift ;;
       *) die "release: unknown argument: $1" ;;
     esac
   done
 
-  local wsdir; wsdir="$(_fanout_wsdir)"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
   local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
@@ -815,8 +930,19 @@ cmd_release() {
   # uncommitted changes is work, and destroying it needs the word for it.
   # --keep-worktree sidesteps the question (nothing is removed); --discard
   # answers it, and is logged so the loss is on record rather than silent.
-  local wt held; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
-  held="$(_wt_unlanded "$wt" "$(printf '%s' "$entry" | jq -r '.shape // "ship"')")"
+  local wt held shape; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+  shape="$(printf '%s' "$entry" | jq -r '.shape // "ship"')"
+  held="$(_wt_unlanded "$wt" "$shape")"
+  # A SPIKE'S WORKTREE IS THROWAWAY BY DEFINITION. Dirty and unpushed are its
+  # expected end state - the code was written to answer a question and the
+  # answer is in the report - so demanding --discard here would only teach
+  # whoever releases spikes to type it by reflex, which is how the word stops
+  # meaning anything on the worktrees where it matters. It is still said out
+  # loud: what went is named, so the loss is on the record.
+  if [ -n "$held" ] && [ "$shape" = spike ] && [ "$keep" -eq 0 ]; then
+    c_warn "spike $id discarded on release: $held in $wt"
+    held=""
+  fi
   if [ -n "$held" ] && [ "$keep" -eq 0 ] && [ "$discard" -eq 0 ]; then
     die "release: $id still holds work ($held) at
     $wt
@@ -837,6 +963,37 @@ cmd_release() {
   _ledger_update_state "$wsdir" "$id" released
 }
 
+# THE REVIEW VERDICT IS A LEDGER FACT. On a repository whose PR author and
+# reviewer are one GitHub account - every solo repo here - GitHub refuses to
+# accept an approval at all, and a posted review reads as the owner talking to
+# himself in public. The verdict still has to exist somewhere a machine can
+# read: `land` needs it, `status` shows it, and the merge commit carries it
+# into the permanent log. The inbox message a reviewer sends is the
+# notification; THIS is the record.
+cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
+  [ $# -ge 2 ] || die "usage: cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
+  local id="$1" verdict="$2"; shift 2
+  local by="" note="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by)        by="$2"; shift 2 ;;
+      --note)      note="$2"; shift 2 ;;
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "review: unknown argument: $1" ;;
+    esac
+  done
+  case "$verdict" in approved|changes) ;; *) die "review: verdict must be approved or changes (got: $verdict)";; esac
+  [ -n "$by" ] || die "review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  [ -n "$(_ledger_entry "$wsdir" "$id")" ] || die "review: no delegation with id '$id'"
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg v "$verdict" \
+    --arg by "$by" --arg note "$note" --arg at "$(_now_iso)" \
+    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at} else . end)')"
+  c_ok "$id reviewed: $verdict by $by"
+}
+
 # THE ONE MERGE PATH. Orchestrators are read-only over repositories (see
 # lib/guard.sh); an orchestrator that judges a PR ready asks this to land it,
 # and this checks the things a prompt cannot be trusted to: whose PR it is,
@@ -844,9 +1001,16 @@ cmd_release() {
 # passed. The orchestrator DECIDES; the script PROVES it is allowed to.
 # Deterministic logic in scripts, judgement in agents - and never the reverse.
 cmd_land() { # <id>
-  [ $# -ge 1 ] || die "usage: cel-fanout land <id>"
-  local id="$1"
-  local wsdir; wsdir="$(_fanout_wsdir)"
+  [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME]"
+  local id="$1"; shift
+  local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "land: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
   local repo branch slug ticket
@@ -866,8 +1030,24 @@ cmd_land() { # <id>
     || die "land: PR #$num was opened by '$author', not by this fleet ('$me') - colleagues' PRs are theirs to land"
   [ "$(printf '%s' "$pr" | jq -r .state)" = "OPEN" ] || die "land: PR #$num is not open"
   [ "$(printf '%s' "$pr" | jq -r .isDraft)" = "false" ] || die "land: PR #$num is still a draft"
-  [ "$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')" = "APPROVED" ] \
-    || die "land: PR #$num is not approved (reviewDecision=$(printf '%s' "$pr" | jq -r '.reviewDecision // "none"'))"
+  # WHO SAYS THIS IS APPROVED. GitHub's own decision is the authority wherever
+  # it can exist. Where it cannot - the PR's author is the account that would
+  # have to approve it, so GitHub refuses outright - the ledger verdict stands
+  # in, recorded by `cel-fanout review` from the reviewer role. That exception
+  # is narrow on purpose: on any repo with a second account, an approval that
+  # bypassed GitHub would be a private note claiming public review.
+  local rd review_by="" review_note="" approved_via=""
+  rd="$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')"
+  if [ "$rd" = "APPROVED" ]; then
+    approved_via="GitHub approval"
+  elif [ "$author" = "$me" ] \
+    && [ "$(printf '%s' "$entry" | jq -r '.review.verdict // ""')" = approved ]; then
+    review_by="$(printf '%s' "$entry" | jq -r '.review.by // ""')"
+    review_note="$(printf '%s' "$entry" | jq -r '.review.note // ""')"
+    approved_via="ledger verdict by $review_by (GitHub cannot approve a PR its own author would review)"
+  else
+    die "land: PR #$num is not approved (reviewDecision=${rd:-none}, ledger verdict=$(printf '%s' "$entry" | jq -r '.review.verdict // "none"'))"
+  fi
   local red; red="$(printf '%s' "$pr" | jq '[.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
   [ "$red" = "0" ] || die "land: PR #$num has $red failing check(s) - a red gate is a finding, not a formality"
   [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != "CONFLICTING" ] || die "land: PR #$num has conflicts - a worker rebases it, then land again"
@@ -882,9 +1062,18 @@ cmd_land() { # <id>
     gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
     [ "$gp" = true ] || die "land: the repo's gate (\`$gate\`) did not pass on $branch (verdict: $gp) - a worker fixes it, then land again. A red gate is a finding, not a formality."
   fi
-  "$GH" pr merge "$num" --repo "$slug" --squash --delete-branch >/dev/null 2>&1 \
+  # The verdict travels into the permanent log rather than a comment thread:
+  # on a solo repo the squash body is the only place a public record of who
+  # reviewed this, and what they said, can actually live.
+  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch)
+  if [ -n "$review_by" ]; then
+    local body; body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"
+    [ -z "$review_note" ] || body="$body"$'\n'"$review_note"
+    merge_args+=(--body "$body")
+  fi
+  "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
-  c_ok "landed $id as #$num on $slug"
+  c_ok "landed $id as #$num on $slug (approved via $approved_via)"
   _fanout_ticket_state "$ticket" "Done"
   _ledger_update_state "$wsdir" "$id" landed
 }
@@ -892,8 +1081,8 @@ cmd_land() { # <id>
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 case "${1:-}" in
-  delegate|scout|collect|status|release|land)
-    lock_ws="$(_fanout_wsdir)"
+  delegate|scout|spike|collect|status|release|land|review)
+    lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
     flock "$ledger_fd" || die "cannot lock delegation ledger"
@@ -903,10 +1092,12 @@ esac
 case "${1:-}" in
   delegate) shift; cmd_delegate "$@" ;;
   scout)    shift; cmd_scout "$@" ;;
+  spike)    shift; cmd_spike "$@" ;;
   wait)     shift; cmd_wait "$@" ;;
   collect)  shift; cmd_collect "$@" ;;
   status)   shift; cmd_status "$@" ;;
   release)  shift; cmd_release "$@" ;;
+  review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|wait|collect|status|release|land ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|release|review|land ..." ;;
 esac
