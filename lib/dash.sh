@@ -58,15 +58,35 @@ _dash_ensure() { # <workspace> <port> <host>
   return 1
 }
 
-cmd_dash() { # [--workspace w] [--port n] [--host h] [--ensure]
-  local workspace="" port="" host="" ensure=0
+# `--ensure` leaves a running server alone, which is exactly wrong after an
+# update: the old code keeps serving until someone notices. `--restart` stops
+# THIS workspace's dashboard only - matched by the server.mjs path plus the
+# port in its own CEL_DASH_CONFIG, never by a bare pkill that would take every
+# other workspace's dashboard down with it - and then ensures as usual.
+_dash_stop() { # <port>
+  local port="$1" pid env
+  for pid in $(pgrep -f 'tools/dash/server\.mjs' 2>/dev/null); do
+    env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep '^CEL_DASH_CONFIG=' || true)"
+    case "$env" in *'"port":'"$port"*) kill "$pid" 2>/dev/null && c_ok "stopped dash on $port (pid $pid)" ;; esac
+  done
+  return 0
+}
+
+_dash_restart() { # <workspace> <port> <host>
+  _dash_stop "$2"
+  _dash_ensure "$1" "$2" "$3"
+}
+
+cmd_dash() { # [--workspace w] [--port n] [--host h] [--ensure] [--restart]
+  local workspace="" port="" host="" ensure=0 restart=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) workspace="$2"; shift 2 ;;
       --port)      port="$2"; shift 2 ;;
       --host)      host="$2"; shift 2 ;;
       --ensure)    ensure=1; shift ;;
-      *) die "cel dash: unknown argument '$1' (want --workspace, --port, --host, --ensure)" ;;
+      --restart)   restart=1; shift ;;
+      *) die "cel dash: unknown argument '$1' (want --workspace, --port, --host, --ensure, --restart)" ;;
     esac
   done
   have node || die "cel dash: node is not on PATH"
@@ -86,6 +106,7 @@ cmd_dash() { # [--workspace w] [--port n] [--host h] [--ensure]
     host="$(tailscale ip -4 2>/dev/null | head -1)"
     [ -n "$host" ] || host=127.0.0.1
   fi
+  [ "$restart" -eq 1 ] && { _dash_restart "$(ws_name "$wsdir")" "$port" "$host"; return $?; }
   [ "$ensure" -eq 1 ] && { _dash_ensure "$(ws_name "$wsdir")" "$port" "$host"; return $?; }
 
   # A dashboard runs with its workspace's env, exactly like a pane started

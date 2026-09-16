@@ -35,8 +35,13 @@ _inbox_ws() { # [name]
 # from where the agent is standing, which is unambiguous and needs no env
 # plumbing through herdr:
 #   <ws>                        -> root
+#   <ws>/products/<product>     -> <product>-orch
 #   <ws>/repos/<repo>           -> <repo>-orch
 #   ~/.herdr/worktrees/<r>/<b>  -> <r>-<b>   (the worker alias cel run gave it)
+# A product orchestrator stands in <ws>/products/<p> rather than a repo
+# checkout; before it had a coordinate of its own it fell through to "root"
+# and drained root's mailbox - exactly the loss the repos/ case was written
+# to stop. No workspace.yaml lookup here on purpose: the path IS the answer.
 _inbox_me() {
   [ -n "${CEL_INBOX_ME:-}" ] && { printf '%s' "$CEL_INBOX_ME"; return 0; }
   local p wt rest repo branch d
@@ -52,6 +57,11 @@ _inbox_me() {
     fi
   fi
   d="$(ws_current 2>/dev/null)" || { _inbox_pane_name; return 0; }
+  if [ "${p#"$d/products/"}" != "$p" ]; then
+    rest="${p#"$d/products/"}"
+    repo="${rest%%/*}"
+    if [ -n "$repo" ]; then _inbox_sanitise "$repo-orch"; return 0; fi
+  fi
   if [ "${p#"$d/repos/"}" != "$p" ]; then
     rest="${p#"$d/repos/"}"
     repo="${rest%%/*}"
@@ -123,7 +133,8 @@ cel inbox - messages between agents that never type into a pane
   cel inbox read [--for <who>] [--workspace w] [--all] [--json]
       unread items; marks them read (cursor), --all is a look that does not.
       --for defaults to WHO YOU ARE, derived from your cwd: a workspace root
-      is "root", <ws>/repos/<repo> is "<repo>-orch", a worktree is its
+      is "root", <ws>/repos/<repo> and <ws>/products/<p> are "<name>-orch",
+      a worktree is its
       worker alias. Override with CEL_INBOX_ME.
   cel inbox prune [--workspace w] [--dry-run]
       archive mail addressed to a WORKER that no longer exists. Long-lived

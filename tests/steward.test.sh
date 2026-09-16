@@ -104,3 +104,16 @@ test_ready_workspaces_preserve_explicit_caller_credential_fallback() {
   assert_eq "$CEL_ISOLATION_MARKER" parent
   rm -rf "$T"
 }
+
+# Where does a <p>-orch live? A DECLARED product has its own directory; an
+# implicit one is just a repo. The steward cannot read workspace.yaml to tell
+# them apart (identity is derived from paths, deliberately), so the
+# directory's existence is the test. Both cwd-fallback sweeps share this one
+# function so they cannot drift - they had already been written twice.
+test_steward_orch_dir_prefers_a_declared_product() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/products/bundle" "$T/repos/lone"
+  assert_eq "$(_steward_orch_dir "$T" bundle-orch)" "$T/products/bundle"
+  assert_eq "$(_steward_orch_dir "$T" lone-orch)" "$T/repos/lone"
+  rm -rf "$T"
+}

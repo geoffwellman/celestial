@@ -295,6 +295,7 @@ policy block into every agent.
 | Command | What |
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
+| `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
 | `cel profiles` | worker profiles and the exact launch flags each resolves to |

@@ -56,7 +56,9 @@ cel - the celestial plane
   cel version                   installed version + commit
   cel setup [--agents a,b|all]  install tools + agents, link core, install externals
   cel doctor                    diagnose this box (non-zero on problems)
-  cel update                    pull the plane, re-link, re-render
+  cel update                    move to the newest release, re-link, re-render
+                                --check: what a newer release would bring
+                                (exit 1 when behind); --rollback: undo it
   cel agents                    list agents, install status and injection strategy
   cel shellenv                  print shell env; eval this in your rc
 
@@ -108,8 +110,7 @@ EOS
 case "${1:-help}" in
   setup)    shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"; cmd_setup "$@";;
   doctor)   shift; . "$CEL_ROOT/lib/doctor.sh";  cmd_doctor "$@";;
-  update)   shift; . "$CEL_ROOT/lib/link.sh"
-            git -C "$CEL_ROOT" pull --ff-only && link_all;;
+  update)   shift; . "$CEL_ROOT/lib/update.sh"; cmd_update "$@";;
   agents)   shift; cmd_agents;;
   shellenv) shift; cmd_shellenv;;
   ws)       shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"

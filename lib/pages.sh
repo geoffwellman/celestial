@@ -186,16 +186,37 @@ _pages_reindex() { # <root>
   c_ok "reindexed $filled document(s)$([ "$skipped" -gt 0 ] && printf ', %s left unfiled (cwd names no workspace)' "$skipped")"
 }
 
-cmd_pages() { # [--public] [--ensure] [--reindex] [--port n] [--host h]
-  local port="" host="" public=0 ensure=0 reindex=0
+# `--ensure` leaves a running server alone, so after an update the old code
+# keeps serving. `--restart` stops the server for THIS TIER only - matched by
+# the pages server.mjs path plus the port it was started on, so restarting the
+# public tier never takes the private one down - then ensures as usual. A stop
+# that finds nothing is not an error: the updater and the steward both call it.
+_pages_stop() { # <public 0|1>
+  local port pid env
+  if [ "$1" = 1 ]; then port="$(_pages_public_port)"; else port="$(_pages_port)"; fi
+  for pid in $(pgrep -f 'tools/pages/server\.mjs' 2>/dev/null); do
+    env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep '^CEL_PAGES_PORT=' || true)"
+    [ "$env" = "CEL_PAGES_PORT=$port" ] && { kill "$pid" 2>/dev/null && c_ok "stopped pages on $port (pid $pid)"; }
+  done
+  return 0
+}
+
+_pages_restart() { # <public 0|1>
+  _pages_stop "$1"
+  _pages_ensure "$1"
+}
+
+cmd_pages() { # [--public] [--ensure] [--restart] [--reindex] [--port n] [--host h]
+  local port="" host="" public=0 ensure=0 reindex=0 restart=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --public) public=1; shift ;;
       --ensure) ensure=1; shift ;;
+      --restart) restart=1; shift ;;
       --reindex) reindex=1; shift ;;
       --port) port="$2"; shift 2 ;;
       --host) host="$2"; shift 2 ;;
-      *) die "cel pages: unknown argument '$1' (want --public, --ensure, --reindex, --port, --host)" ;;
+      *) die "cel pages: unknown argument '$1' (want --public, --ensure, --restart, --reindex, --port, --host)" ;;
     esac
   done
   if [ "$reindex" -eq 1 ]; then
@@ -203,6 +224,7 @@ cmd_pages() { # [--public] [--ensure] [--reindex] [--port n] [--host h]
     return $?
   fi
   have node || die "cel pages: node is not on PATH"
+  [ "$restart" -eq 1 ] && { _pages_restart "$public"; return $?; }
   [ "$ensure" -eq 1 ] && { _pages_ensure "$public"; return $?; }
   local root
   if [ "$public" -eq 1 ]; then

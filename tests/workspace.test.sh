@@ -168,3 +168,58 @@ test_ws_policy_block_lists_profile_purposes_and_scouts() {
   assert_contains "$b" "scouts run on profile fast automatically"
   rm -rf "$tmp"
 }
+
+# --- products: the 1..n-repo unit an orchestrator owns ---------------------
+# ws-products declares `bundle` over widget+gadget and leaves `lone` out of
+# it. An undeclared repo is its own implicit product, in place - that is what
+# keeps every workspace written before products behave exactly as before.
+WSP="$CEL_ROOT/tests/fixtures/ws-products"
+
+test_ws_product_names_lists_declared_then_implicit() {
+  assert_eq "$(ws_product_names "$WSP")" "$(printf 'bundle\nlone')"
+  # A workspace with no products: block is all implicit, in repos order.
+  assert_eq "$(ws_product_names "$WSA")" "widget"
+}
+test_ws_product_repos_of_declared_and_implicit() {
+  assert_eq "$(ws_product_repos "$WSP" bundle)" "$(printf 'widget\ngadget')"
+  assert_eq "$(ws_product_repos "$WSP" lone)" "lone"
+}
+test_ws_product_of_repo_both_ways() {
+  assert_eq "$(ws_product_of_repo "$WSP" widget)" "bundle"
+  assert_eq "$(ws_product_of_repo "$WSP" gadget)" "bundle"
+  assert_eq "$(ws_product_of_repo "$WSP" lone)" "lone"
+  # An unknown repo is its own answer rather than an error: callers use this
+  # to name a cwd, and dying there would be worse than naming the repo.
+  assert_eq "$(ws_product_of_repo "$WSP" nosuch)" "nosuch"
+}
+test_ws_product_declared_exit_codes() {
+  ws_product_declared "$WSP" bundle || { echo "declared product read as implicit"; return 1; }
+  assert_fails ws_product_declared "$WSP" lone
+  assert_fails ws_product_declared "$WSP" nosuch
+}
+test_ws_product_get_reads_keys_and_never_fails() {
+  assert_eq "$(ws_product_get "$WSP" bundle workers)" "2"
+  assert_eq "$(ws_product_get "$WSP" bundle orchestrator)" "auto"
+  assert_eq "$(ws_product_get "$WSP" bundle nosuchkey)" ""
+  assert_eq "$(ws_product_get "$WSP" lone workers)" ""
+}
+test_ws_product_dir_declared_vs_implicit() {
+  assert_eq "$(ws_product_dir "$WSP" bundle)" "$WSP/products/bundle"
+  assert_eq "$(ws_product_dir "$WSP" lone)" "$WSP/repos/lone"
+}
+# With a product the orchestrator is told the cross-repo hop is its own; with
+# no product the block must be what it has always been, byte for byte.
+test_ws_policy_block_names_the_product_only_when_given_one() {
+  local b; b="$(ws_policy_block "$WSP" bundle)"
+  assert_contains "$b" "- product: bundle (repos: widget, gadget) - cross-repo sequencing inside this product is yours; there is no tier above you for it"
+  assert_contains "$b" "- repo widget: branch prefix WG"
+  assert_eq "$(ws_policy_block "$WSP")" "$(ws_policy_block "$WSP" "")"
+  ! printf '%s' "$(ws_policy_block "$WSP")" | grep -q '^- product:' \
+    || { echo "product line rendered with no product"; return 1; }
+}
+test_ws_render_role_passes_the_product_through() {
+  local out; out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/project-orchestrator.md" bundle)"
+  assert_contains "$out" "- product: bundle (repos: widget, gadget)"
+  out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/project-orchestrator.md")"
+  ! printf '%s' "$out" | grep -q '^- product:' || { echo "product line with no product"; return 1; }
+}
