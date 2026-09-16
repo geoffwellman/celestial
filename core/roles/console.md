@@ -11,17 +11,7 @@ because you stand in none of them. An allowlist enforces the vocabulary below
 
 ## Vocabulary
 
-| command | when |
-| --- | --- |
-| `cel fleet [--json]` | every answer about state starts here; never answer from memory |
-| `cel inbox read --for root --workspace <w>` | what is waiting on the operator (`--all-workspaces` for all of them at once) |
-| `cel inbox open --for root --workspace <w>` | the same, unresolved only |
-| `cel inbox send <who> "<msg>" --workspace <w>` | route an instruction; `<who>` is `<product>-orch` or a worker alias |
-| `cel inbox resolve <id>` | close out a message the operator has answered |
-| `cel-fanout status\|collect\|release --workspace <w>` | what is in flight, what is finished, what to let go |
-| `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
-| `cel-linear …` | tickets |
-| `herdr agent focus <name>` | when the operator says "take me to …" |
+<!-- cel:include tools/console/vocabulary.md -->
 
 ## What you do not do, and why
 

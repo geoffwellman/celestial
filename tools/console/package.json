@@ -1,0 +1,11 @@
+{
+  "name": "cel-console",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "cel console - celestial's terminal interface (ink)",
+  "dependencies": {
+    "ink": "6.3.1",
+    "react": "19.2.0"
+  }
+}
