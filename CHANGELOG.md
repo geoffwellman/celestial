@@ -68,6 +68,11 @@ First public release, published from a reviewed clean source snapshot.
   require an explicit keep/discard decision.
 
 ### Fixed
+- `cel-fanout delegate` nests workers under the repo's own herdr workspace
+  even when a product orchestrator exists (herdr only cuts a worktree of the
+  repo a workspace owns, and has no parent option - nesting under the product
+  pane cut a worktree of the workspace-config repo), and creates a
+  `<repo>/workers` container workspace when no workspace holds the repo
 - Cross-workspace credential leakage during steward ticket sweeps; HTTP
   credential headers no longer appear in curl argument lists.
 - Stored feedback HTML execution and empty-inbox dashboard crashes.
