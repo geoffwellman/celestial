@@ -193,15 +193,90 @@ _run_dry_agent_args() {
   printf '%s' "${out[*]}"
 }
 
+# --- the console ----------------------------------------------------------
+# The console is the one pane that is not IN a workspace. It routes across all
+# of them, so resolving a workspace for it would be arbitrary: whichever
+# directory the operator happened to start it from would silently become the
+# default for every command that takes a --workspace. It gets a directory of
+# its own instead, outside every checkout, where its notes and its role file
+# live and where the guard lets it write.
+_run_console_dir() { printf '%s' "${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"; }
+
+# No policy block. Every other role's body ends with the workspace's policy
+# because the workspace is the thing it is bound to; the console is bound to
+# the box, and a policy block from an arbitrary workspace would read as
+# authority it does not have.
+_run_console_body() { cat "$CEL_ROOT/core/roles/console.md"; }
+
+# The console's launch settings come from agents.yaml `defaults.console`.
+_run_console_default() { # <runtime|model|thinking>
+  manifest_default console | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
+}
+
+_run_console() { # <profile> <model-opt> <thinking-opt> <dry-run>
+  local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4"
+  [ -z "$profile" ] || die "cel run console: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
+  have jq || die "cel run console: jq is not on PATH"
+
+  local cwd runtime model thinking
+  cwd="$(_run_console_dir)"
+  runtime="$(_run_console_default runtime)"
+  [ -n "$runtime" ] || die "cel run console: agents.yaml declares no defaults.console.runtime"
+  model="$(_run_console_default model)"; thinking="$(_run_console_default thinking)"
+  [ -z "$model_opt" ]    || model="$model_opt"
+  [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+
+  [ "$dry" -eq 1 ] || mkdir -p "$cwd"
+
+  local RUN_BODY; RUN_BODY="$(_run_console_body)"
+  local AGENT_ARGS=()
+  # The role file keeps the `role-*.md` shape on purpose: lib/gc.sh tells a
+  # long-lived agent from a stray one by that substring in the cmdline, and
+  # the console is the longest-lived pane on the box.
+  _run_agent_args "$runtime" console "$RUN_BODY" "$dry" "$cwd" "$cwd/role-console.md"
+
+  local -a PROFILE_ARGS=()
+  profile_launch_args "$runtime" "$model" "$thinking"
+  [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
+
+  # Same guard hook as root and the orchestrators - for the console it carries
+  # an allowlist rather than a deny list (lib/guard.sh).
+  local gflag gfile
+  gflag="$(agent_guard_hook "$runtime" flag)"; gfile="$(agent_guard_hook "$runtime" file)"
+  if [ -n "$gflag" ] && [ -n "$gfile" ]; then
+    AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
+  fi
+
+  local -a launch_args=()
+  mapfile -t launch_args < <(agent_launch_args "$runtime")
+  [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
+
+  local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label celestial/console)
+  if [ "$dry" -eq 1 ]; then
+    printf 'herdr %s\n' "${CREATE_ARGS[*]}"
+    printf 'herdr agent start console --kind %s --pane <pane> -- %s\n' \
+      "$runtime" "$(_run_dry_agent_args)"
+    return 0
+  fi
+
+  have herdr || die "cel run: herdr is not on PATH"
+  local resp ws_id pane_id
+  resp="$(herdr "${CREATE_ARGS[@]}")"
+  ws_id="$(printf '%s' "$resp" | jq -r '.. | .workspace_id? // empty' | head -1)"
+  pane_id="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
+  [ -n "$pane_id" ] && [ "$pane_id" != "null" ] || pane_id="${ws_id}:p1"
+  herdr agent start console --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+}
+
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
     case "$1" in
-      root|orchestrator|worker|reviewer) role="$1"; shift ;;
+      root|orchestrator|worker|reviewer|console) role="$1"; shift ;;
       --*) : ;;
-      *) die "cel run: unknown role '$1' (want root, orchestrator, worker or reviewer; omit for direct)" ;;
+      *) die "cel run: unknown role '$1' (want root, orchestrator, worker, reviewer or console; omit for direct)" ;;
     esac
   fi
 
@@ -219,6 +294,13 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
+
+  # The console resolves NO workspace - see _run_console. It has to return
+  # before the resolution below, which would otherwise die for want of one.
+  if [ "$role" = console ]; then
+    _run_console "$profile" "$model_opt" "$thinking_opt" "$dry_run"
+    return $?
+  fi
 
   local wsdir
   if [ -n "$workspace" ]; then

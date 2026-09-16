@@ -247,6 +247,13 @@ providers:
 # on architectural work, not globally.
 defaults:
   thinking: high
+  # The console (cel run console) is BOX-LEVEL: it routes across every
+  # workspace and therefore stands in none, so there is no workspace to bind a
+  # profile from and no `runtime:` block to read. Its launch is described here
+  # instead. Cheap and shallow on purpose - its whole vocabulary is a handful
+  # of cel commands, and a model that reasons about them is a model spending
+  # money to re-derive what the allowlist already decided.
+  console: { runtime: omp, model: openai-codex/gpt-5.6-sol, thinking: low }
 
 # Missing application tools install these exact releases. Existing executables
 # are retained (gh must be >=2.90). System build/download tools follow distro repositories;
