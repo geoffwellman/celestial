@@ -18,6 +18,8 @@ _CEL_INBOX=1
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=lib/workspace.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+# shellcheck source=lib/registry.sh
+. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 
 _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
 
@@ -38,14 +40,22 @@ _inbox_ws() { # [name]
 #   <ws>/products/<product>     -> <product>-orch
 #   <ws>/repos/<repo>           -> <repo>-orch
 #   ~/.herdr/worktrees/<r>/<b>  -> <r>-<b>   (the worker alias cel run gave it)
+#   the console directory       -> console   (also CEL_ROLE=console)
+# The console stands OUTSIDE every workspace - it is the operator's one pane
+# over the whole box - so there is no coordinate to derive and it fell through
+# to "root", draining the root orchestrator's mailbox: the same silent theft
+# the products/ case below was written to stop.
 # A product orchestrator stands in <ws>/products/<p> rather than a repo
 # checkout; before it had a coordinate of its own it fell through to "root"
 # and drained root's mailbox - exactly the loss the repos/ case was written
 # to stop. No workspace.yaml lookup here on purpose: the path IS the answer.
 _inbox_me() {
   [ -n "${CEL_INBOX_ME:-}" ] && { printf '%s' "$CEL_INBOX_ME"; return 0; }
-  local p wt rest repo branch d
+  local p wt rest repo branch d c
   p="$PWD"
+  [ "${CEL_ROLE:-}" = console ] && { printf 'console'; return 0; }
+  c="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+  { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'console'; return 0; }
   wt="$HOME/.herdr/worktrees"
   if [ "${p#"$wt/"}" != "$p" ]; then
     rest="${p#"$wt/"}"
@@ -94,7 +104,28 @@ _inbox_sanitise() {
 }
 
 _inbox_file()   { printf '%s/%s.jsonl' "$(_inbox_dir)" "$1"; }
-_inbox_cursor() { printf '%s/%s.%s.cursor' "$(_inbox_dir)" "$1" "$2"; }
+
+# ONE CURSOR PER READER, NOT PER MAILBOX. "root" is the address orchestrators
+# escalate to - the top, whoever is listening - and it now has two readers: a
+# standing root pane and the console that watches every workspace at once.
+# Sharing one cursor means whichever looked first consumed the other's mail,
+# which is exactly the loss the cursor was introduced to prevent. When the
+# reader IS the recipient the name is unchanged, so existing cursors keep
+# their place.
+_inbox_cursor() { # <ws> <recipient>
+  local reader; reader="$(_inbox_me)"
+  if [ -n "$reader" ] && [ "$reader" != "$2" ]; then
+    printf '%s/%s.%s.%s.cursor' "$(_inbox_dir)" "$1" "$2" "$reader"
+  else
+    printf '%s/%s.%s.cursor' "$(_inbox_dir)" "$1" "$2"
+  fi
+}
+
+# Every registered workspace, for the console: mailboxes are per workspace and
+# the console belongs to none of them, so it drains them all. Output lines are
+# prefixed [<ws>] because "a decision from games-orch" means nothing without
+# knowing which box it came from.
+_inbox_all_ws() { registry_names 2>/dev/null || true; }
 
 # Append is atomic enough for one line under O_APPEND, but two senders can
 # still interleave partial writes on some filesystems, so serialise on a lock
@@ -130,18 +161,23 @@ _inbox_usage() {
 cel inbox - messages between agents that never type into a pane
 
   cel inbox send <to> <message> [--from x] [--workspace w] [--kind status|escalation]
-  cel inbox read [--for <who>] [--workspace w] [--all] [--json]
+  cel inbox read [--for <who>] [--workspace w|--all-workspaces] [--all] [--json]
       unread items; marks them read (cursor), --all is a look that does not.
       --for defaults to WHO YOU ARE, derived from your cwd: a workspace root
       is "root", <ws>/repos/<repo> and <ws>/products/<p> are "<name>-orch",
-      a worktree is its
-      worker alias. Override with CEL_INBOX_ME.
+      a worktree is its worker alias, the console dir is "console". Override
+      with CEL_INBOX_ME.
+      --all-workspaces reads every registered mailbox, each line prefixed
+      [<ws>]. The cursor is per READER, so the console reading root's mail
+      does not consume it from under a root pane.
   cel inbox prune [--workspace w] [--dry-run]
       archive mail addressed to a WORKER that no longer exists. Long-lived
       recipients (root, <repo>-orch) are never pruned - they come back.
-  cel inbox count [--for <who>] [--workspace w]      unread count, for hooks
-  cel inbox watch [--for <who>] [--workspace w]      tail new items, one line each
-      (what a Monitor background task runs - stdout is the notification)
+  cel inbox count [--for <who>] [--workspace w|--all-workspaces]  unread count
+  cel inbox watch [--for <who>] [--workspace w|--all-workspaces]
+      tail new items, one line each (what a Monitor background task runs -
+      stdout is the notification). A decision or blocker also raises a desktop
+      notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
   cel inbox open [--for <who>] [--workspace w] [--json]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
@@ -194,7 +230,7 @@ _inbox_prune() { # [--workspace w] [--dry-run]
     [ -n "$line" ] || continue
     to="$(printf '%s' "$line" | jq -r '.to // ""')"
     case "$to" in
-      ''|all|root|*-orch) printf '%s\n' "$line" >> "$keep"; continue ;;
+      ''|all|root|console|*-orch) printf '%s\n' "$line" >> "$keep"; continue ;;
     esac
     if printf '%s\n' "$live" | grep -qxF "$to"; then
       printf '%s\n' "$line" >> "$keep"
@@ -264,19 +300,31 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
 
 # Unread = after the recipient's cursor. Reading MOVES the cursor, so an item
 # is delivered once even when a Monitor and the prompt hook both look.
-_inbox_read() { # [--for who] [--workspace w] [--all] [--json]
-  local who="" ws="" all=0 json=0
+_inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
+  local who="" ws="" all=0 json=0 every=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --for) who="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
+      --all-workspaces) every=1; shift ;;
       --all) all=1; shift ;;
       --json) json=1; shift ;;
       *) die "cel inbox read: unknown argument '$1'" ;;
     esac
   done
-  ws="$(_inbox_ws "$ws")"
   [ -n "$who" ] || who="$(_inbox_me)"
+  if [ "$every" -eq 1 ]; then
+    local n
+    for n in $(_inbox_all_ws); do
+      _inbox_read_one "$n" "$who" "$all" "$json" | sed "s/^/[$n] /"
+    done
+    return 0
+  fi
+  _inbox_read_one "$(_inbox_ws "$ws")" "$who" "$all" "$json"
+}
+
+_inbox_read_one() { # <ws> <who> <all> <json>
+  local ws="$1" who="$2" all="$3" json="$4"
   local f c last items
   f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
   [ -f "$f" ] || return 0
@@ -296,17 +344,30 @@ _inbox_read() { # [--for who] [--workspace w] [--all] [--json]
   printf '%s' "$(printf '%s\n' "$items" | jq -r '.id' | tail -1)" > "$c"
 }
 
-_inbox_count() { # [--for who] [--workspace w]
-  local who="" ws=""
+_inbox_count() { # [--for who] [--workspace w|--all-workspaces]
+  local who="" ws="" every=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --for) who="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
+      --all-workspaces) every=1; shift ;;
       *) die "cel inbox count: unknown argument '$1'" ;;
     esac
   done
-  ws="$(_inbox_ws "$ws")"
   [ -n "$who" ] || who="$(_inbox_me)"
+  if [ "$every" -eq 1 ]; then
+    # a hook wants ONE number: the operator has one attention, not one per box
+    local n total=0
+    for n in $(_inbox_all_ws); do
+      total=$(( total + $(_inbox_count_one "$n" "$who") ))
+    done
+    printf '%s\n' "$total"; return 0
+  fi
+  _inbox_count_one "$(_inbox_ws "$ws")" "$who"
+}
+
+_inbox_count_one() { # <ws> <who>
+  local ws="$1" who="$2"
   local f c last
   f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
   [ -f "$f" ] || { printf '0\n'; return 0; }
@@ -320,22 +381,61 @@ _inbox_count() { # [--for who] [--workspace w]
 # arrives as a single notification. Deliberately does not mark items read -
 # the recipient's own `cel inbox read` does that, and a monitor that consumed
 # the cursor would starve the catch-up hook.
-_inbox_watch() { # [--workspace w] [--for who]
-  local ws="" who=""
+_inbox_watch() { # [--workspace w|--all-workspaces] [--for who]
+  local ws="" who="" every=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws="$2"; shift 2 ;;
+      --all-workspaces) every=1; shift ;;
       --for) who="$2"; shift 2 ;;
       *) die "cel inbox watch: unknown argument '$1'" ;;
     esac
   done
-  ws="$(_inbox_ws "$ws")"
   [ -n "$who" ] || who="$(_inbox_me)"
+  if [ "$every" -eq 0 ]; then _inbox_watch_one "$(_inbox_ws "$ws")" "$who" ""; return 0; fi
+  # One tail per workspace, merged onto this stdout. The children are killed on
+  # the way out: a console restarted a few times otherwise leaves a tail per
+  # mailbox per restart, all writing to a pane that no longer exists.
+  local n pids=""
+  for n in $(_inbox_all_ws); do
+    _inbox_watch_one "$n" "$who" "[$n] " &
+    pids="$pids $!"
+  done
+  [ -n "$pids" ] || return 0
+  # shellcheck disable=SC2064
+  trap "kill $pids 2>/dev/null; trap - EXIT; exit 130" INT TERM
+  # shellcheck disable=SC2064
+  trap "kill $pids 2>/dev/null" EXIT
+  wait
+}
+
+_inbox_watch_one() { # <ws> <who> <prefix>
+  local ws="$1" who="$2" prefix="$3"
   local f; f="$(_inbox_file "$ws")"
   mkdir -p "$(dirname "$f")"; touch "$f"
+  # Fields first, formatting in the shell: the notification needs the kind and
+  # the sender, and re-parsing a rendered line to get them back is how a
+  # message containing a colon becomes a notification from nobody.
   tail -n 0 -F "$f" 2>/dev/null | jq -r --unbuffered --arg who "$who" \
     'select(.kind != "resolution") | select(.to == $who or .to == "all")
-     | "INBOX \(.kind) from \(.from): \(.message)  (cel inbox read --for \($who))"'
+     | [.kind, .from, (.message | gsub("\n"; " "))] | @tsv' \
+  | while IFS=$'\t' read -r kind from msg; do
+      printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
+      case "$kind" in decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" ;; esac
+    done
+}
+
+# A DECISION MUST NOT WAIT FOR THE OPERATOR TO CHANGE TABS. stdout is a
+# notification only to whatever is reading this pane; a question addressed to
+# the top of the tree, landing in a workspace nobody is looking at, sat unseen
+# for hours. So the two kinds that block someone also raise a desktop
+# notification. Best-effort in every direction: no herdr, no HERDR_ENV, or a
+# failing call must never kill the watch that is the only delivery path.
+_inbox_notify() { # <kind> <from> <ws> <message>
+  [ "${CEL_INBOX_NOTIFY:-1}" = 0 ] && return 0
+  [ "${HERDR_ENV:-}" = "1" ] || return 0
+  have herdr || return 0
+  herdr notification show "$1 from $2 ($3)" --body "$(printf '%.120s' "$4")" >/dev/null 2>&1 || true
 }
 
 # DECISIONS ARE A LEDGER, NOT A QUEUE. `read` moves a cursor; that is right for

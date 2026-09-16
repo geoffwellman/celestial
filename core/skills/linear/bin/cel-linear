@@ -10,6 +10,8 @@ set -euo pipefail
 . "$CEL_ROOT/lib/common.sh"
 # shellcheck source=lib/workspace.sh
 . "$CEL_ROOT/lib/workspace.sh"
+# shellcheck source=lib/registry.sh
+. "$CEL_ROOT/lib/registry.sh"
 
 API="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 
@@ -19,7 +21,20 @@ API="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 # inherits whatever its pane's shell had when that shell started - and pane
 # shells outlive env.local edits. Read the workspace when the caller has no
 # key, so adding credentials does not require recreating an existing pane.
+# --workspace <name> ON EVERY SUBCOMMAND. The workspace was derived from the
+# cwd, which is fine for a pane standing inside one - and useless to the
+# console, which stands outside all of them and still has tickets to file. The
+# flag is stripped from argv here so each cmd_* keeps its own arguments, and an
+# explicitly named workspace BEATS an inherited key: naming it is the caller
+# saying which board they mean.
+CEL_LINEAR_WS=""
+
 _linear_load_env() {
+  if [ -n "$CEL_LINEAR_WS" ]; then
+    local w; w="$(registry_require "$CEL_LINEAR_WS")"
+    eval "$(ws_env_exports "$w" 2>/dev/null)" >/dev/null 2>&1 || true
+    return 0
+  fi
   [ -z "${LINEAR_API_KEY:-}" ] || return 0
   local d; d="$(ws_current 2>/dev/null)" || return 0
   eval "$(ws_env_exports "$d" 2>/dev/null)" >/dev/null 2>&1 || true
@@ -174,6 +189,17 @@ cmd_state() { # <IDENTIFIER> <state-name e.g. "In Progress">
     "$(jq -n --arg i "$iid" --arg s "$sid" '{i: $i, s: $s}')" \
     | jq -r 'if .data.issueUpdate.success then "moved to '"$2"'" else "failed" end'
 }
+
+# Strip --workspace out of argv before anything dispatches on "$1".
+ARGV=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) [ $# -ge 2 ] || die "--workspace needs a workspace name"
+                 CEL_LINEAR_WS="$2"; shift 2 ;;
+    *) ARGV+=("$1"); shift ;;
+  esac
+done
+if [ "${#ARGV[@]}" -gt 0 ]; then set -- "${ARGV[@]}"; else set --; fi
 
 # Resolve auth in the MAIN shell, before any command runs. Doing it inside
 # _gql meant the failure happened inside a pipeline, where `die` exits only the
