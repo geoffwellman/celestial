@@ -109,6 +109,75 @@ _guard_console() { # <command>
   printf 'deny the console routes; it does not build - %s' "$hint"
 }
 
+# An orchestrator owns the STATE of its own checkout, never its authorship.
+# Until this was added, `gh pr checkout 1393` was allowed by omission while
+# `git checkout main` was denied: an orchestrator could move ONTO a PR branch
+# to run it locally and could not move back, and one product orchestrator told
+# its owner its checkout "goes back to main when the PR merges". Nobody else
+# stands over that checkout, so keeping `main` current in it is its job.
+# Moving between refs that ALREADY EXIST creates nothing and discards nothing;
+# every incident at the top of this file is authorship - a merged colleague's
+# PR, pushed commits, hundreds of uncommitted files - and none of them is a
+# branch switch.
+#
+# The line: exactly one ref, no flag that creates (-b/-B/-c/-C/--orphan/
+# --track/--detach), no `--` or path (that discards working-tree state), and
+# nothing that reaches into ANOTHER checkout (-C, --git-dir, --work-tree, or
+# a worker's worktree - that one is the worker's).
+_guard_orch_owns_checkout() { # <command> -> 0 = allow
+  local c="$1"
+  c="${c#"${c%%[![:space:]]*}"}"
+  # Reaching into another checkout is never this checkout's state.
+  case "$c" in *" -C "*|*--git-dir*|*--work-tree*|*.herdr/worktrees*) return 1;; esac
+  # The verb has to BE the command: in a chain, half of it goes unexamined.
+  case "$c" in *"&"*|*"|"*|*";"*|*'`'*|*'$('*|*">"*|*"<"*) return 1;; esac
+  local -a t
+  read -r -a t <<<"$c"
+  local n=${#t[@]}
+  case "${t[0]:-} ${t[1]:-}" in
+    "git checkout"|"git switch")
+      [ "$n" -eq 3 ] || return 1
+      local ref="${t[2]}"
+      case "$ref" in -*|.|..|*/) return 1;; esac
+      # An existing path is a discard (`git checkout src/x.ts`), not a move.
+      [ -e "$ref" ] && return 1
+      return 0;;
+    "git branch")
+      # Lowercase -d only: it refuses to delete unmerged work. -D/-m/-M do not.
+      [ "$n" -eq 4 ] && [ "${t[2]}" = "-d" ] || return 1
+      case "${t[3]}" in -*) return 1;; esac
+      return 0;;
+    "gh pr")
+      case "${t[2]:-}" in
+        checkout)
+          # Allowed by omission before this existed; explicit so that a later
+          # tightening of the gh rules below cannot silently regress it.
+          [ "$n" -eq 4 ] || return 1
+          case "${t[3]}" in -*) return 1;; esac
+          return 0;;
+        edit)
+          # A label is a workflow signal (preview deploy, triage), not PR
+          # content. Any other flag is editing somebody else's pull request.
+          [ "$n" -ge 5 ] || return 1
+          case "${t[3]}" in -*) return 1;; esac
+          local i=4
+          while [ "$i" -lt "$n" ]; do
+            case "${t[$i]}" in
+              --add-label|--remove-label)
+                i=$((i+1)); [ "$i" -lt "$n" ] || return 1
+                case "${t[$i]}" in -*) return 1;; esac;;
+              --add-label=*|--remove-label=*) ;;
+              *) return 1;;
+            esac
+            i=$((i+1))
+          done
+          return 0;;
+      esac
+      return 1;;
+  esac
+  return 1
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   case "$role" in console) _guard_console "$cmd"; return 0;; esac
@@ -122,6 +191,13 @@ guard_classify() { # <role> <command>
     cel\ *|*\ cel\ *|*/bin/cel\ *)                  printf allow; return 0;;
     *gh\ pr\ comment*|*gh\ pr\ review*|*gh\ issue\ comment*|*gh\ pr\ checks*) printf allow; return 0;;
   esac
+
+  # The orchestrator's own checkout state: see _guard_orch_owns_checkout above.
+  # Root is untouched - its rules below already allow git in its config repo
+  # and deny anything reaching into repos/ or a worker's worktree.
+  if [ "$role" = orchestrator ] && _guard_orch_owns_checkout "$cmd"; then
+    printf allow; return 0
+  fi
 
   # Repository mutation. An ORCHESTRATOR's cwd is a product checkout, so any
   # git write from it is a product write - denied, in its own checkout or a

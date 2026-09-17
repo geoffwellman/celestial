@@ -44,6 +44,11 @@ watch the repo (Watch → Custom → Releases) to be notified.
   console's `cel inbox watch --all-workspaces` background watch.
 
 ### Changed
+- An orchestrator owns the STATE of its own checkout, never its authorship:
+  `git checkout <ref>` / `git switch <ref>` between existing refs, `gh pr
+  checkout <n>`, `git branch -d`, and `gh pr edit --add-label/--remove-label`
+  are now allowed, while creating branches, discarding paths and reaching into
+  another checkout stay denied
 - `cel run console` now requires `--agent`: the console is `cel console`, and
   the Claude pane survives behind the flag. A bare `cel run console` exits 2
   and names the new command
