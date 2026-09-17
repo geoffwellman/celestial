@@ -415,3 +415,28 @@ test_console_render_once_never_switches_screens() {
   assert_contains "$out" 'alpha'
   _console_teardown
 }
+
+# Since CEL-14 a unit is a PRODUCT, which may carry several repos. The console
+# said "(2 repos)" for two products and showed a declared product under its
+# bare name, which is the one place an operator cannot tell a product from the
+# repo it happens to share a name with.
+test_console_counts_products_and_names_their_repos() {
+  _console_setup
+  cat >"$T/fleet.json" <<'EOF'
+{"workspaces":[
+ {"name":"alpha","root":{"unread":1,"open":1},"units":[
+   {"name":"widget","orch":"LIVE","workers":1,"cap":4,"stalled":0,"unlanded":0,
+    "repos":["widget-core","widget-web"],"declared":true},
+   {"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,
+    "repos":["gadget"],"declared":false}]}]}
+EOF
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" '(2 products)'
+  assert_contains "$out" 'widget (widget-core, widget-web)'
+  case "$out" in *'repos)'*) echo 'the head line still counts repos'; return 1;; esac
+  # An undeclared unit is still just its name - a repo dressed up as a product
+  # with "(gadget)" after it is noise.
+  case "$out" in *'gadget (gadget)'*) echo 'an undeclared unit got a repo list'; return 1;; esac
+  _console_teardown
+}
