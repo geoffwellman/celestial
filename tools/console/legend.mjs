@@ -9,7 +9,7 @@ export const BINDINGS = {
   'command line': [
     ['←/→ Home/End', 'move the cursor (Ctrl+A / Ctrl+E jump)'],
     ['Ctrl+W / Ctrl+K / Ctrl+U', 'kill the word / to end of line / the line'],
-    ['↑/↓', 'history - filtered by what is already typed'],
+    ['Ctrl+P / Ctrl+N', 'history previous / next - filtered by what is already typed'],
     ['Ctrl+R', 'history picker (type to filter, Enter takes it, Esc closes)'],
     ['Tab', 'complete'],
     ['Enter', 'run it, or ask the model to translate it'],
@@ -17,7 +17,7 @@ export const BINDINGS = {
     ['Esc', 'discard a proposal'],
   ],
   fleet: [
-    ['Ctrl+N / Ctrl+P', 'select down / up'],
+    ['↑/↓', 'select up / down'],
     ['Ctrl+T', 'switch panel'],
     ['Ctrl+F', 'focus the selected unit\u2019s orchestrator'],
     ['Ctrl+O', 'open the workspace dashboard'],
@@ -25,7 +25,7 @@ export const BINDINGS = {
     ['wheel', 'scroll the panel'],
   ],
   waiting: [
-    ['Ctrl+N / Ctrl+P', 'select down / up'],
+    ['↑/↓', 'select up / down'],
     ['Enter on a selection', 'open the detail view'],
     ['Ctrl+D', 'open the detail view'],
     ['click / double-click', 'select / open the detail view'],
@@ -53,13 +53,13 @@ export const BINDINGS = {
 export const legend = (pane) => {
   switch (pane) {
     case 'detail':
-      return 'r resolve · p reply · g go to · Esc back · F1 help';
+      return 'r resolve · p reply · g go to · Esc back · ? help';
     case 'waiting':
-      return '^N/^P select · Enter detail · ^D detail · ^T panel · ^L output · F1 help';
+      return '↑/↓ select · Enter detail · ^T panel · ^L output · ^P/^N history · ? help';
     case 'output':
-      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · F1 help';
+      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · ? help';
     default:
-      return '^N/^P select · ^T panel · ^F focus · ^O dashboard · ^L output · ^U clear · F1 help';
+      return '↑/↓ select · ^T panel · ^F focus · ^O dashboard · ^L output · ^P/^N history · ? help';
   }
 };
 

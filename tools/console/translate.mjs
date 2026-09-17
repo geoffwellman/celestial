@@ -116,8 +116,12 @@ Rules:
   in the order they should run. Never pad: if one command answers it, send one.
 - Use the workspace, product and agent names from the state below; never
   invent one. An orchestrator is named <product>-orch.
-- Questions about state ("how is …", "what's blocked", "what's running") are
+- Questions about the WHOLE BOX ("what's blocked", "what's running") are
   \`cel fleet\` - plain, never --json, a human reads it.
+- Questions about ONE product or workspace ("how is widget going", "what is
+  happening with widget") are a chain of three: \`cel fleet\`, then
+  \`cel-fanout status --workspace <w>\`, then \`cel inbox open --for root
+  --workspace <w>\` - <w> is the workspace that owns the product in the state.
 - "What is waiting on me" with no workspace named is
   \`cel inbox open --for root --all-workspaces\`; with one named, that workspace.
 - "Take me to <x>" is \`herdr agent focus <x>-orch\` when <x> is a product.
@@ -126,7 +130,14 @@ Rules:
 
 Examples:
 what's blocked -> cel fleet
-how is widget going -> cel fleet
+how is widget going ->
+cel fleet
+cel-fanout status --workspace alpha
+cel inbox open --for root --workspace alpha
+what is happening with gadget ->
+cel fleet
+cel-fanout status --workspace alpha
+cel inbox open --for root --workspace alpha
 what is waiting on me -> cel inbox open --for root --all-workspaces
 anything for me on sandbox -> cel inbox open --for root --workspace sandbox
 take me to gadget -> herdr agent focus gadget-orch
@@ -220,6 +231,84 @@ export class NoTranslator extends Error {}
 // One request, one answer, 15 seconds. No streaming: there is nothing to
 // stream - the reply is one short line - and a stream would mean partial
 // commands appearing on an operator's command line as they arrive.
+// One request, one reply, no streaming: the reply is a few short lines and a
+// stream would mean partial text appearing while the operator reads.
+const _chat = async ({ cfg, table, key, base, system, user, timeout, maxTokens = 400 }) => {
+  const provider = cfg.console.provider;
+  const model = cfg.console.model || table.default_model || '';
+  const anthropic = provider === 'anthropic';
+  const url = /\/(messages|chat\/completions)$/.test(base)
+    ? base
+    : base.replace(/\/$/, '') + (anthropic ? '/v1/messages' : '/v1/chat/completions');
+  const headers = { 'content-type': 'application/json' };
+  let body;
+  if (anthropic) {
+    headers['x-api-key'] = key;
+    headers['anthropic-version'] = '2023-06-01';
+    body = { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+  } else {
+    headers.authorization = `Bearer ${key}`;
+    body = { model, max_tokens: maxTokens, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
+  }
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeout) });
+  if (!res.ok) throw new Error(`model: ${provider} answered HTTP ${res.status}`);
+  const doc = await res.json();
+  return anthropic
+    ? (doc.content || []).map((c) => c.text || '').join('')
+    : doc.choices?.[0]?.message?.content;
+};
+
+// Provider, key and endpoint for this box, or a NoTranslator saying what is
+// missing. Shared by every model call so the three error messages exist once.
+const _connection = (configPath, root) => {
+  const cfg = readConfig(configPath);
+  for (const w of cfg.warnings) process.stderr.write(`  ! ${w}\n`);
+  const provider = cfg.console.provider;
+  if (!provider) throw new NoTranslator('no model configured: add console.provider to ~/.local/share/cel/config.yaml');
+  const table = readProvider(provider, root) || {};
+  const keyEnv = cfg.console.key_env || table.key_env;
+  const key = (keyEnv && process.env[keyEnv]) || cfg.console.key || '';
+  const base = process.env.CEL_CONSOLE_PROVIDER_URL || table.api;
+  if (!base) throw new NoTranslator(`no model configured: provider '${provider}' has no api: in agents.yaml`);
+  if (!key) throw new NoTranslator(`no model configured: ${keyEnv || 'the provider key'} is unset and console.key is absent`);
+  return { cfg, table, key, base };
+};
+
+const ANSWER_SYSTEM = `You are the celestial console answering its operator. They asked a question;
+the console ran commands for it and their output follows. Answer the question
+in at most six short plain-text lines, from the output ONLY - never from
+memory, never invented. Name products, tickets, agents and workspaces exactly
+as the output prints them. If the output does not answer the question, say so
+in one line and name the command that would. No markdown, no headings, no
+apologies.`;
+
+// After a sentence's commands have run: what do they say? Off with
+// console.answer: off in the config. Returns null when off or on any failure -
+// the raw output is still on screen, the answer is a courtesy on top of it.
+export const trimTranscript = (transcript, cap = 6000, head = 40, tail = 20) => {
+  const blocks = String(transcript || '').split(/\n(?=\$ )/);
+  const out = blocks.map((b) => {
+    const lines = b.split('\n');
+    if (lines.length <= head + tail + 1) return b;
+    return [...lines.slice(0, head), `… ${lines.length - head - tail} lines omitted …`, ...lines.slice(-tail)].join('\n');
+  }).join('\n');
+  return out.length > cap ? `${out.slice(0, cap)}\n… (cut at ${cap} chars)` : out;
+};
+
+export const answer = async ({ sentence, transcript, root = CEL_ROOT, configPath }) => {
+  const { cfg, table, key, base } = _connection(configPath, root);
+  if (String(cfg.console.answer || '').toLowerCase() === 'off') return null;
+  // What the model reads: each command's output trimmed to its first 40 and
+  // last 20 lines, and the whole thing capped. A ledger table of eighty
+  // released rows is not what anyone asked about, and a 30-second timeout on
+  // an 8 KB transcript was the first thing to fail on this box.
+  const clipped = trimTranscript(transcript, 6000);
+  const user = `Question: ${sentence}\n\nWhat ran, and what it printed:\n${clipped}`;
+  const text = await _chat({ cfg, table, key, base, system: ANSWER_SYSTEM, user, timeout: 60000, maxTokens: 300 });
+  const out = String(text || '').trim();
+  return out || null;
+};
+
 export const translate = async ({ sentence, state = '', root = CEL_ROOT, configPath, mode = 'command' }) => {
   const cfg = readConfig(configPath);
   for (const w of cfg.warnings) process.stderr.write(`  ! ${w}\n`);
@@ -249,46 +338,13 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
     );
   }
 
-  const model = cfg.console.model || table.default_model || '';
-  const anthropic = provider === 'anthropic';
-  const url = /\/(messages|chat\/completions)$/.test(base)
-    ? base
-    : base.replace(/\/$/, '') + (anthropic ? '/v1/messages' : '/v1/chat/completions');
   const options = mode === 'options';
   const system = options ? OPTIONS_SYSTEM(vocabulary(root)) : SYSTEM(vocabulary(root));
   const user = `Current state:\n${state}\n\nSentence: ${sentence}`;
-
-  const headers = { 'content-type': 'application/json' };
-  let body;
-  if (anthropic) {
-    headers['x-api-key'] = key;
-    headers['anthropic-version'] = '2023-06-01';
-    body = { model, max_tokens: 400, system, messages: [{ role: 'user', content: user }] };
-  } else {
-    headers.authorization = `Bearer ${key}`;
-    body = {
-      model,
-      max_tokens: 400,
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    };
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    // The SECOND ask gets longer: the operator has already been told the first
-    // one missed, they are waiting on purpose, and a 15-second cut-off turned a
-    // menu of three good options into "no command for that" on this box.
-    signal: AbortSignal.timeout(options ? 30000 : 15000),
-  });
-  if (!res.ok) throw new Error(`model: ${provider} answered HTTP ${res.status}`);
-  const doc = await res.json();
-  const text = anthropic
-    ? (doc.content || []).map((c) => c.text || '').join('')
-    : doc.choices?.[0]?.message?.content;
-  // Both halves come back: what was parsed and what the model actually said, so
-  // a refusal can show the operator WHY instead of a bare "no".
+  // The SECOND ask gets longer: the operator has already been told the first
+  // one missed, they are waiting on purpose, and a 15-second cut-off turned a
+  // menu of three good options into "no command for that" on this box.
+  const text = await _chat({ cfg, table, root, key, base, system, user, timeout: options ? 30000 : 15000 });
   if (options) return parseOptions(text);
   const { cmds, raw } = parseReply(text);
   return { cmds, cmd: cmds[0] || null, raw };
