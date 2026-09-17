@@ -260,3 +260,34 @@ test_ws_render_role_passes_the_product_through() {
   out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/project-orchestrator.md")"
   ! printf '%s' "$out" | grep -q '^- product:' || { echo "product line with no product"; return 1; }
 }
+
+# SEED: the gitignored local files a worktree needs to run at all. A plain
+# string is a symlink (the common case - one keys file); a mapping with
+# `copy: true` is copied, for the things a symlink cannot stand in for (a
+# built directory a bundler rewrites in place).
+test_ws_repo_seed_reads_plain_and_mapping_entries() {
+  local tmp; tmp="$(mktemp -d)"
+  printf 'name: t\nrepos:\n  - name: widget\n    seed:\n      - apps/builder/.dev.vars\n      - { path: apps/pf/src/wasm, copy: true }\n      - { path: apps/pf/other }\n' > "$tmp/workspace.yaml"
+  local out; out="$(ws_repo_seed "$tmp" widget)"
+  assert_eq "$out" "$(printf 'apps/builder/.dev.vars\tlink\napps/pf/src/wasm\tcopy\napps/pf/other\tlink')"
+  rm -rf "$tmp"
+}
+test_ws_repo_seed_is_empty_when_absent() {
+  assert_eq "$(ws_repo_seed "$WSA" widget)" ""
+  assert_eq "$(ws_repo_seed "$WSA" nosuch)" ""
+}
+test_ws_repo_preview_reads_cmd_url_and_env() {
+  local tmp; tmp="$(mktemp -d)"
+  printf 'name: t\nrepos:\n  - name: widget\n    preview:\n      cmd: "pnpm --filter builder dev"\n      env: { API_PORT: "{port}", UI_PORT: "{port+1}" }\n      url: "http://localhost:{port+1}"\n' > "$tmp/workspace.yaml"
+  assert_eq "$(ws_repo_preview "$tmp" widget cmd)" "pnpm --filter builder dev"
+  assert_eq "$(ws_repo_preview "$tmp" widget url)" "http://localhost:{port+1}"
+  local env; env="$(ws_repo_preview_env "$tmp" widget)"
+  assert_contains "$env" "API_PORT={port}"
+  assert_contains "$env" "UI_PORT={port+1}"
+  rm -rf "$tmp"
+}
+test_ws_repo_preview_is_empty_without_a_preview_block() {
+  assert_eq "$(ws_repo_preview "$WSA" widget cmd)" ""
+  assert_eq "$(ws_repo_preview "$WSA" widget url)" ""
+  assert_eq "$(ws_repo_preview_env "$WSA" widget)" ""
+}
