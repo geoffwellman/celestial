@@ -32,7 +32,8 @@ import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
 } from './edit.mjs';
-import { parseMouseAll, hasMouse, hitTest, MOUSE_ON, MOUSE_OFF } from './mouse.mjs';
+import { parseMouseAll, hasMouse, hitTest } from './mouse.mjs';
+import { enterTerminal, LEAVE } from './term.mjs';
 import { legend, helpLines } from './legend.mjs';
 
 const COMMAND = /^(cel|cel-fanout|cel-linear|gh|herdr)(\s|$)/;
@@ -285,32 +286,15 @@ const App = ({ refresh, statusSecs }) => {
     return () => child.kill();
   }, [stdout, say]);
 
-  // A TERMINAL LEFT IN MOUSE MODE IS A TERMINAL NOBODY CAN COPY OUT OF. Mouse
-  // reporting is turned off on every exit path there is - a clean exit, an
-  // uncaught throw, a SIGTERM from the pane being closed - because the operator
-  // has no way to know the cure is `printf '\e[?1000l'`.
-  useEffect(() => {
-    stdout.write(MOUSE_ON);
-    const off = () => { try { stdout.write(MOUSE_OFF); } catch { /* the pipe is gone */ } };
-    const bye = (code) => { off(); process.exit(code); };
-    const onTerm = () => bye(143);
-    const onHup = () => bye(129);
-    const onInt = () => bye(130);
-    const onErr = (e) => { off(); process.stderr.write(`cel console: ${e?.stack || e}\n`); process.exit(1); };
-    process.on('exit', off);
-    process.on('SIGTERM', onTerm);
-    process.on('SIGHUP', onHup);
-    process.on('SIGINT', onInt);
-    process.on('uncaughtException', onErr);
-    return () => {
-      off();
-      process.off('exit', off);
-      process.off('SIGTERM', onTerm);
-      process.off('SIGHUP', onHup);
-      process.off('SIGINT', onInt);
-      process.off('uncaughtException', onErr);
-    };
-  }, [stdout]);
+  // A TERMINAL LEFT IN MOUSE MODE IS A TERMINAL NOBODY CAN COPY OUT OF, and a
+  // console that drew over the operator's scrollback is a console that ate the
+  // output they were reading when they opened it. Both modes go on here and
+  // come off on every exit path there is - see term.mjs, which owns the pairs
+  // and is unit-tested on each of those paths.
+  useEffect(() => enterTerminal({
+    write: (s2) => stdout.write(s2),
+    onError: (e) => process.stderr.write(`cel console: ${e?.stack || e}\n`),
+  }), [stdout]);
 
   useEffect(() => {
     const onResize = () => setTick((t) => t + 1);
@@ -699,7 +683,7 @@ const App = ({ refresh, statusSecs }) => {
 
   const pickerMatches = picker ? historyFilter(history.current, picker.query).slice(0, 12) : [];
 
-  return h(Box, { flexDirection: 'column', width },
+  return h(Box, { flexDirection: 'column', width, height: screen },
     h(FleetPanel, {
       doc, rows, sel: pane === 'fleet' ? sel : -1, offset: offsets.fleet,
       height: layout.fleet, innerRef: refs.fleet,
@@ -726,6 +710,11 @@ const App = ({ refresh, statusSecs }) => {
         ? pickerMatches.map((l, i) => `${i === picker.sel ? '>' : ' '} ${l}`)
         : ['  nothing matches'],
     }) : null,
+    // THE BOTTOM THREE ROWS ARE THE OPERATOR'S. The spacer absorbs whatever
+    // height the panels did not use, so the command line, the status and the
+    // legend sit on the last rows of the screen rather than floating halfway
+    // up it on a tall terminal.
+    h(Box, { flexGrow: 1 }),
     h(CommandLine, { value, cursor, proposed: !!proposed }),
     // TWO LINES, ALWAYS. The transient one on top with the time it was set,
     // the permanent legend under it.
@@ -739,5 +728,14 @@ const App = ({ refresh, statusSecs }) => {
 export const start = async (opts) => {
   const app = render(h(App, { refresh: opts.refresh || 10, statusSecs: opts.statusSecs ?? 8 }), { exitOnCtrlC: true });
   await app.waitUntilExit();
-  try { process.stdout.write(MOUSE_OFF); } catch { /* the pipe is gone */ }
+  // Belt and braces: the effect's own cleanup has already run by here on a
+  // normal quit, and LEAVE is idempotent at the terminal's end for the two
+  // sequences it carries. A console that exits into a half-restored terminal is
+  // the one bug in this file an operator cannot work around.
+  try { process.stdout.write(LEAVE); } catch { /* the pipe is gone */ }
+  // AND THEN WE GO. Reading stdin directly for mouse reports keeps a handle on
+  // the terminal that outlives the React tree, so a console that merely
+  // returned from start() sat there after Ctrl+C with the screen restored and
+  // no way to type at it - the worst of both. Quitting means quitting.
+  process.exit(0);
 };

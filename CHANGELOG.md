@@ -23,6 +23,31 @@ watch the repo (Watch → Custom → Releases) to be notified.
   on a free block of ten ports (`repos[].preview`, `CEL_TRY_PORT_BASE`) in a
   pane of its own, prints the url, and is stopped by `--stop` or by `release`;
   `cel-fanout status` gains a `TRY` column
+- `cel console` edits like a shell: a real cursor (←/→, Home/End, Ctrl+A /
+  Ctrl+E), Ctrl+W / Ctrl+K / Ctrl+U, a history walk filtered by the prefix
+  already typed, and Ctrl+R for a history picker you can type into
+- The console's status message and its key legend are two lines: the status
+  clears itself after 8 seconds (`--status-secs`, 0 = never) and can no longer
+  overwrite the bindings; the OUTPUT panel keeps the last command's full
+  output, scrolls, and folds away on Ctrl+L
+- The console takes the mouse: click to select, double-click for the panel's
+  primary action, the wheel scrolls the panel under it, and the detail view's
+  `[resolve]` `[reply]` `[go to]` are buttons. Mouse mode is turned off on
+  every exit path, including SIGTERM and a crash
+- A decision opens into a detail view that is a place rather than a popup: the
+  whole message, its sender and workspace, and the thread around it - same
+  `ref`, or the same sender within the hour - with `r` resolve, `p` reply and
+  `g` go to
+- The console's model offers options and may answer with a chain: a miss is
+  asked a second time for up to three candidate commands each with a reason,
+  and a sentence that needs a sequence comes back as up to five commands that
+  run in order, stopping at the first non-zero exit. Nothing runs without the
+  operator's Enter
+- F1 (and `help`) lists every binding by panel; the layout survives a resize
+  with the command line and its two lines always visible
+- The console runs on the terminal's alternate screen, like `htop` or `vim`:
+  it fills the terminal, draws nothing into the scrollback and restores the
+  screen you had on the way out
 - `cel console` - Celestial's own terminal interface, built with ink: the
   fleet table, every open decision addressed to root across all workspaces,
   the inbox tail and a command line, in one full-screen pane that is not an

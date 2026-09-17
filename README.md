@@ -151,33 +151,71 @@ them renames a command:
 ## The console
 
 `cel console` is Celestial's own interface — drawn by the plane, not an agent
-pretending to be one. Four panels, top to bottom:
+pretending to be one. It takes the whole terminal: the alternate screen, like
+`htop` or `vim`, so nothing it draws lands in your scrollback and quitting
+gives you back the screen you had. Panels, top to bottom:
 
 - **Fleet** — `cel fleet --json` as a table, one block per workspace, coloured
   by state and refreshed every 10 seconds (`--refresh`) and after every command
-  you run. Shift+↑/↓ (or Ctrl+N / Ctrl+P) select a row, Ctrl+F focuses that
-  unit's orchestrator pane, Ctrl+O opens its dashboard. Every action is a Ctrl
-  chord: a letter you type is always a letter typed.
+  you run. Ctrl+N / Ctrl+P (or Shift+↑/↓) select a row, Ctrl+F focuses that
+  unit's orchestrator pane, Ctrl+O opens its dashboard. Every keyboard action
+  is a Ctrl chord: a letter you type is always a letter typed.
 - **Waiting on you** — every open decision and blocker addressed to `root`,
   across all workspaces, oldest first with their ids. Ctrl+T switches the
-  selection to this panel, Ctrl+E shows the full text, Ctrl+R resolves it.
+  selection here; Enter (or a double-click) opens the item.
+- **Detail** — a place, not a popup: the whole message, who sent it and when,
+  and the **thread** around it — everything else in that workspace's mailbox
+  with the same `ref`, or from the same sender within the hour. `r` resolves,
+  `p` starts a reply with the cursor inside the quotes, `g` goes to the sender,
+  `Esc` comes back. Bare letters act *here* and only here, because the detail
+  view has no command line.
 - **Inbox tail** — the newest mail, prefixed with its workspace. A decision or
   a blocker also rings the bell and raises a desktop notification.
-- **Command line** — with history and Tab completion over the cel vocabulary,
-  workspace names and orchestrator aliases.
+- **Output** — the last command's full output, scrolling with PageUp/PageDown
+  or the wheel; Ctrl+L collapses it and gives the room back.
+- **Command line** — it edits like a shell: a real cursor (←/→, Home/End,
+  Ctrl+A / Ctrl+E), Ctrl+W, Ctrl+K, Ctrl+U, Tab completion over the cel
+  vocabulary and live workspace and orchestrator names. ↑/↓ walk the history,
+  filtered by whatever is already typed, and Ctrl+R opens a history picker you
+  can type into. Under it are two lines that never overwrite each other: a
+  **status** message that clears itself after 8 seconds (`--status-secs`,
+  0 = never) and a permanent **legend** for the focused panel. F1 lists every
+  binding.
+
+The mouse works: click a row to select it, double-click for that panel's
+primary action (focus the orchestrator, open the decision), roll the wheel over
+a panel to scroll it, click `[resolve]` `[reply]` `[go to]` in the detail view.
+Mouse reporting and the alternate screen are turned off on every exit path
+there is — quit, Ctrl+C, SIGTERM, a crash — because a terminal left in mouse
+mode is a terminal you cannot select text in.
 
 What you type is either a **command** (it starts with `cel`, `cel-fanout`,
 `cel-linear`, `gh` or `herdr`) — which runs as-is, after the same allowlist the
-agent console is held to — or a **sentence**, which is sent to a small model
-that returns exactly one command. That command is *proposed*: it lands on your
-command line and runs when you press Enter again, or disappears on `Esc`. The
-model never executes anything.
+agent console is held to — or a **sentence**, which is sent to a small model.
+Anything it returns is *proposed*: it lands on your command line and runs when
+you press Enter again, or disappears on `Esc`. The model never executes
+anything.
+
+A sentence can come back as a **chain** of up to five commands when it needs a
+sequence — they run in order, each through the allowlist, stopping at the first
+one that exits non-zero. And a miss is not a dead end: the model is asked a
+second time for up to three candidates, each with a one-line reason, and they
+are listed in the OUTPUT panel:
+
+```
+no command for that - did you mean:
+1  cel inbox read --for root --workspace alpha     -- what the steward left there
+2  cel fleet                                       -- state of every workspace
+3  cel-fanout status --workspace alpha             -- what is in flight
+```
+
+Type `1`, `2` or `3` and Enter — or click one — to put it on the command line.
+It is still only a proposal.
 
 The model is optional, and everything above works without it. It is a router,
 not a chat: it knows the vocabulary table and the current fleet, and it can
-only pick a command from that table. "What's blocked" and "take me to standout"
-map; "why did the last build fail" does not, and you get the model's reply on
-the status line so you can rephrase. To wire one in, write `~/.local/share/cel/config.yaml` (chmod 600 — it may hold a key):
+only pick commands from that table. To wire one in, write
+`~/.local/share/cel/config.yaml` (chmod 600 — it may hold a key):
 
 ```yaml
 console:
@@ -190,10 +228,12 @@ Endpoints come from `agents.yaml`'s provider table; the request is one plain
 `fetch` with no SDK. With no provider configured, a sentence gets one line
 saying so and the command line carries on working.
 
-`cel console --render-once` prints the panels as plain text and exits, for
-pipes and for when a full-screen UI is the last thing you want. `cel run
-console --agent` still starts the original Claude pane for people who would
-rather talk to a full agent.
+`cel console --render-once` prints the panels as plain text and exits — no
+alternate screen, no mouse — for pipes and for when a full-screen UI is the
+last thing you want; `--status "…"` renders a status line with it. `cel
+console --ask "<sentence>"` prints the chain one command per line (exit 0), or
+the numbered options on a miss (exit 1). `cel run console --agent` still starts
+the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
 

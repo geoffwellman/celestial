@@ -277,7 +277,10 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    // The SECOND ask gets longer: the operator has already been told the first
+    // one missed, they are waiting on purpose, and a 15-second cut-off turned a
+    // menu of three good options into "no command for that" on this box.
+    signal: AbortSignal.timeout(options ? 30000 : 15000),
   });
   if (!res.ok) throw new Error(`model: ${provider} answered HTTP ${res.status}`);
   const doc = await res.json();
