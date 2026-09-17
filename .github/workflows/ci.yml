@@ -47,7 +47,12 @@ jobs:
           # only let two workspace names into this tree on 2026-09-18.
           umask 077
           printf '%s\n' "$CEL_PRIVATE_PATTERNS" > "$RUNNER_TEMP/private-patterns.txt"
-          python3 tools/release/hygiene.py --all-history --require-private-patterns \
+          # Two scans: every ref's history with the generic checks (a dirty
+          # branch anywhere fails every PR), and the TREE with the private
+          # vocabulary required. History predating the vocabulary is the
+          # owner's to rewrite or accept; new work cannot add to it.
+          python3 tools/release/hygiene.py --all-history
+          python3 tools/release/hygiene.py --require-private-patterns \
             --private-patterns "$RUNNER_TEMP/private-patterns.txt"
       - name: Install checksum-verified secret scanner
         env:
