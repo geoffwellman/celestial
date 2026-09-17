@@ -44,6 +44,73 @@ _steward_due() { # <key>
     > "$_STEWARD_STATE.tmp" && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
 }
 
+# THE STEWARD SAYS A THING ONCE. Measured 2026-09-17: root's mailbox held
+# twenty-four open `blocked` items from the steward, all the same sentence
+# about one exhausted provider, one every four hours since the 12th - because
+# each reopening of the dedup window posted a FRESH item and nothing ever
+# looked at what had already been said. The owner: "it's the same message over
+# and over so it can be rolled up". A raise carries a condition key, so a
+# repeat lands as an update on the item that is already open.
+_steward_raise() { # <ws> <fp> <kind> <message>
+  cmd_inbox send root "$4" --from steward --workspace "$1" --kind "$3" --fp "$2" \
+    >/dev/null 2>&1 || true
+}
+
+# ...and takes it down again. The other half of the same measurement was four
+# STALLED WORKER items whose panes had been gone for days: nothing resolved an
+# item when its condition stopped being true, so the backlog only ever grew. A
+# `cleared:` status line goes with it, because an item that vanishes silently
+# leaves the operator wondering whether it was fixed or merely lost.
+_steward_clear_id() { # <ws> <id> <message>
+  [ -n "${2:-}" ] || return 0
+  cmd_inbox resolve "$2" --by steward --workspace "$1" >/dev/null 2>&1 || true
+  cmd_inbox send root "cleared: $3" --from steward --workspace "$1" --kind status \
+    >/dev/null 2>&1 || true
+  c_ok "$1: cleared - $3"
+}
+
+_steward_clear() { # <ws> <fp> <message>
+  local id; id="$(_inbox_open_fp "$1" "$2" steward root)"
+  [ -n "$id" ] || return 0
+  _steward_clear_id "$1" "$id" "$3"
+}
+
+# Every pane herdr can see, one per line. Empty means herdr did not answer,
+# and the caller must treat that as no evidence rather than as a dead box.
+_steward_panes() {
+  local ids w
+  ids="$("$_STEWARD_HERDR" workspace list 2>/dev/null \
+    | jq -r '.result.workspaces[]?.workspace_id // empty' 2>/dev/null || true)"
+  if [ -n "$ids" ]; then
+    for w in $ids; do
+      "$_STEWARD_HERDR" pane list --workspace "$w" 2>/dev/null \
+        | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null || true
+    done
+  fi
+}
+
+# THE FOUR-DAYS-DEAD CASE. A STALLED WORKER item names the pane the operator
+# would go and look at; when that pane no longer exists on the box there is
+# nothing left to act on, and the item is pure noise in a mailbox someone has
+# to read. Cleared once per tick, and only when herdr actually answered -
+# an unreachable herdr is not evidence that every pane died.
+_steward_clear_dead_panes() {
+  local panes; panes="$(_steward_panes)"
+  [ -n "$panes" ] || return 0
+  local ws id pane
+  for ws in $(registry_names); do
+    while IFS=$'\t' read -r id pane; do
+      [ -n "$id" ] && [ -n "$pane" ] || continue
+      if printf '%s\n' "$panes" | grep -qxF "$pane"; then continue; fi
+      _steward_clear_id "$ws" "$id" "pane gone"
+    done < <(cmd_inbox open --for root --workspace "$ws" --json 2>/dev/null \
+      | jq -r 'select(.from == "steward")
+               | select(.message | startswith("STALLED WORKER"))
+               | [.id, ((.message | capture("^STALLED WORKER [^(]*\\((?<p>[^)]*)\\)") | .p) // "")]
+               | @tsv' 2>/dev/null || true)
+  done
+}
+
 _steward_nudge() { # <agent-name> <key> <message>
   _steward_due "$2" || return 0
   if herdr agent prompt "$1" "$3" >/dev/null 2>&1; then
@@ -124,14 +191,18 @@ _steward_orchestrators() { # <agents-json>
       want="$(_run_agent_name "$p-orch")"
       live="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
         '[.result.agents[]? | select(.name == $n)] | length')"
-      [ "$live" = "0" ] || continue
+      # It came back: whatever the steward raised about it is no longer true.
+      [ "$live" = "0" ] || { _steward_clear "$ws" "orch-ensure-$p" "$want is back on the roster"; continue; }
       # An orchestrator that crash-loops would otherwise be relaunched every
       # tick, which is a fork bomb at five-minute cadence. Half an hour.
       _STEWARD_WINDOW=1800 _steward_due "orch-ensure-$ws-$p" || continue
       if _steward_launch_orch "$p" "$ws"; then
         c_ok "started $want - $ws/$p declares orchestrator: auto and had no live pane (retried at most every 30m)"
+        _steward_clear "$ws" "orch-ensure-$p" "$want was started again"
       else
         c_err "could not start $want for $ws/$p - cel run orchestrator --product $p --workspace $ws (retried at most every 30m)"
+        _steward_raise "$ws" "orch-ensure-$p" blocked \
+          "steward: $ws/$p declares orchestrator: auto and $want will not start - cel run orchestrator --product $p --workspace $ws"
       fi
     done
   done
@@ -246,12 +317,20 @@ _steward_stalled_workers() { # <agents-json>
     local row
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      local id pane wt ticket branch live text quiet verdict risk sev
+      local id pane wt ticket branch live text quiet verdict risk sev state
       id="$(printf '%s' "$row" | jq -r '.id')"
+      state="$(printf '%s' "$row" | jq -r '.state // ""')"
       pane="$(printf '%s' "$row" | jq -r '.pane // ""')"
       wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"
       ticket="$(printf '%s' "$row" | jq -r '.ticket // ""')"
       branch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+
+      # A row that has LEFT `running` - collected, released, finished - is no
+      # longer stalled by definition, and its blocker must go with it.
+      if [ "$state" != running ]; then
+        _steward_clear "$ws" "stall-$id" "delegation $id is no longer running ($state)"
+        continue
+      fi
 
       live="$(printf '%s' "$agents_json" | jq -r --arg p "$pane" \
         '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""')"
@@ -265,7 +344,12 @@ _steward_stalled_workers() { # <agents-json>
       quiet="$(stall_quiet_secs "$wt")"
       local wrote=0; [ -f "$wt/.agent/result.md" ] || [ -f "$wt/.agent/report.md" ] && wrote=1
       verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote")"
-      [ -n "$verdict" ] || continue
+      # Working again: the sweep has already computed that, so it is also the
+      # moment to resolve what it raised.
+      if [ -z "$verdict" ]; then
+        _steward_clear "$ws" "stall-$id" "$ws/$id is working again"
+        continue
+      fi
 
       risk="$(stall_work_at_risk "$wt")"
       sev="$(stall_severity "$verdict" "$risk")"
@@ -277,12 +361,12 @@ _steward_stalled_workers() { # <agents-json>
       # repeats. A stalled worker whose work is already pushed is a warning.
       if [ "$sev" = loud ]; then
         _STEWARD_WINDOW=1800 _steward_due "stall-$ws-$id" \
-          && cmd_inbox send root "$msg" --workspace "$ws" --kind blocked >/dev/null 2>&1
+          && _steward_raise "$ws" "stall-$id" blocked "$msg"
         c_err "$ws/$id: $msg"
       else
         _steward_due "stall-$ws-$id" && c_warn "$ws/$id: $msg"
       fi
-    done < <(jq -c '.[] | select(.state == "running")' "$led" 2>/dev/null || true)
+    done < <(jq -c '.[]' "$led" 2>/dev/null || true)
   done
 }
 
@@ -399,11 +483,16 @@ _steward_quota() {
       floor="$(provider_balance "$p" floor)"
       if quota_vetoed "$p" "$r"; then
         c_err "$ws: $p has $(printf '%.2f' "$r") $(provider_balance "$p" unit) left (floor $floor) - workers routed there are VETOED until it is topped up: $(provider_get "$p" console)"
-        _steward_due "quota-dry-$ws-$p" && cmd_inbox send root \
-          "steward: $p credit is $(printf '%.2f' "$r") (floor $floor). Profiles routed there are vetoed; delegations on them will refuse. Top up or repoint the profile." \
-          --from steward --workspace "$ws" --kind blocked >/dev/null 2>&1 || true
-      elif awk -v r="$r" -v f="$floor" 'BEGIN { exit !(r+0 < 3*f+0) }'; then
-        c_warn "$ws: $p is down to $(printf '%.2f' "$r") $(provider_balance "$p" unit) (floor $floor) - running low"
+        _steward_due "quota-dry-$ws-$p" && _steward_raise "$ws" "quota-dry-$p" blocked \
+          "steward: $p credit is $(printf '%.2f' "$r") (floor $floor). Profiles routed there are vetoed; delegations on them will refuse. Top up or repoint the profile." || true
+      else
+        # Back above the floor: the blocker the steward raised is no longer
+        # true, so the steward takes it down rather than leaving a human to
+        # work out whether a four-day-old item still applies.
+        _steward_clear "$ws" "quota-dry-$p" "$p credit is $(printf '%.2f' "$r") (floor $floor) - back above the floor, routes to it are live again"
+        if awk -v r="$r" -v f="$floor" 'BEGIN { exit !(r+0 < 3*f+0) }'; then
+          c_warn "$ws: $p is down to $(printf '%.2f' "$r") $(provider_balance "$p" unit) (floor $floor) - running low"
+        fi
       fi
     done
   done
@@ -625,6 +714,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # Before the inbox sweeps: a dead worker is the one failure no inbox watcher
   # can see, and the one whose delay can cost the work rather than just time.
   _steward_stalled_workers "$agents_json"
+  # An item naming a pane that no longer exists cannot be acted on by anyone.
+  _steward_clear_dead_panes
 
   # blocked agents are the human's queue - name them every tick, no dedup
   printf '%s' "$agents_json" | jq -r \

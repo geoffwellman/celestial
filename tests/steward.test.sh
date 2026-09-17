@@ -310,3 +310,91 @@ test_orphan_sweep_never_touches_a_server_outside_the_worktree_root() {
   assert_eq "$out" ""
   assert_eq "$alive" 1
 }
+
+# --- the steward says a thing once -------------------------------------------
+# Measured 2026-09-17: root's mailbox held twenty-four open `blocked` items
+# from the steward, all the same sentence about the same exhausted provider,
+# one every four hours since the 12th - plus four STALLED WORKER items whose
+# panes had been gone for days. The steward posted a fresh item every time its
+# window reopened and never looked at what it had already said, and nothing
+# resolved an item when the condition stopped being true.
+_rollup_fixture() { # a registry with one workspace and a sandbox mailbox
+  source "$CEL_ROOT/lib/quota.sh"
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  export CEL_MANIFEST="$T/agents.yaml"
+  printf 'providers:\n  deepseek:\n    balance: {unit: usd, floor: "1"}\n' > "$CEL_MANIFEST"
+  QUOTA_REMAINING="-0.24"
+  quota_remaining() { printf '%s' "$QUOTA_REMAINING"; }
+  quota_vetoed() { awk -v r="$2" 'BEGIN { exit !(r+0 < 1) }'; }
+  provider_get() { printf 'https://example.invalid/billing'; }
+  _quota_key() { printf 'a-key'; }
+}
+
+# Three ticks with the window forced open: ONE open item, counted three times.
+test_steward_raises_one_item_for_a_condition_that_persists() {
+  _rollup_fixture
+  local i
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1; done
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_eq "$(printf '%s\n' "$open" | wc -l)" "1"
+  assert_contains "$open" "×3"
+  assert_contains "$open" "deepseek"
+  rm -rf "$T"
+}
+
+# ...and when the credit comes back, the steward takes its own blocker down and
+# says so, rather than leaving it open for a human to guess about.
+test_steward_clears_a_condition_that_stopped_being_true() {
+  _rollup_fixture
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  QUOTA_REMAINING="42.00"
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_contains "$mail" "cleared:"
+  assert_contains "$mail" "deepseek"
+  rm -rf "$T"
+}
+
+# The four-days-dead case: a STALLED WORKER item naming a pane that no longer
+# exists on this box. Nobody can act on it, and it sat open for days.
+test_steward_clears_a_stalled_item_whose_pane_is_gone() {
+  _rollup_fixture
+  local live dead
+  live="$(cmd_inbox send root "STALLED WORKER WG-1 (w:alive): nothing has been written for 40m. branch x pushed=yes" \
+    --from steward --kind blocked --fp stall-1 --workspace alpha 2>/dev/null)"
+  dead="$(cmd_inbox send root "STALLED WORKER WG-2 (w:gone): nothing has been written for 40m. branch y pushed=yes" \
+    --from steward --kind blocked --fp stall-2 --workspace alpha 2>/dev/null)"
+  cat > "$T/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w"}]}}' ;;
+  "pane list")      printf '{"result":{"panes":[{"pane_id":"w:alive"}]}}' ;;
+  *) printf '{}' ;;
+esac
+SH
+  chmod +x "$T/herdr"
+  _STEWARD_HERDR="$T/herdr" _steward_clear_dead_panes >/dev/null 2>&1
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_contains "$open" "WG-1"
+  ! printf '%s' "$open" | grep -q "WG-2" || { echo "item for a pane that is gone stayed open"; rm -rf "$T"; return 1; }
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared: pane gone"
+  rm -rf "$T"
+}
+
+# herdr unreachable is not evidence that every pane died - the same rule every
+# other sweep in this file learned the hard way.
+test_steward_clears_no_panes_when_herdr_is_unreachable() {
+  _rollup_fixture
+  cmd_inbox send root "STALLED WORKER WG-2 (w:gone): stalled" \
+    --from steward --kind blocked --fp stall-2 --workspace alpha >/dev/null 2>&1
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/herdr"; chmod +x "$T/herdr"
+  _STEWARD_HERDR="$T/herdr" _steward_clear_dead_panes >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "WG-2"
+  rm -rf "$T"
+}
