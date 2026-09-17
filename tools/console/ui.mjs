@@ -19,6 +19,7 @@
 import React, {
   createElement as h, useState, useEffect, useRef, useCallback, useMemo,
 } from 'react';
+import { appendFileSync } from 'node:fs';
 import { render, Box, Text, useInput, useApp, useStdout, measureElement } from 'ink';
 import { spawn } from 'node:child_process';
 
@@ -234,6 +235,8 @@ const App = ({ refresh, statusSecs }) => {
   const hIndex = useRef(-1);
   const lastRaw = useRef('');
   const asked = useRef('');   // the sentence behind the current proposal, for the answer
+  const escTimer = useRef(null);   // a lone ESC waits 40 ms for a mouse tail (see useInput)
+  const escapeRef = useRef(() => {});
   const typed = useRef('');
   const lastClick = useRef({ panel: '', index: -1, at: 0 });
   const hitMap = useRef([]);
@@ -567,6 +570,9 @@ const App = ({ refresh, statusSecs }) => {
     const onData = (chunk) => {
       const s = String(chunk);
       lastRaw.current = s;
+      // CEL_CONSOLE_KEYLOG=<file>: every raw stdin chunk, JSON-escaped, one per
+      // line - the only honest way to learn what a terminal host really sends.
+      if (process.env.CEL_CONSOLE_KEYLOG) { try { appendFileSync(process.env.CEL_CONSOLE_KEYLOG, `${JSON.stringify(s)}\n`); } catch { /* a log is not worth a crash */ } }
       if (!hasMouse(s)) return;
       for (const ev of parseMouseAll(s)) onMouse(ev);
     };
@@ -582,6 +588,23 @@ const App = ({ refresh, statusSecs }) => {
     // A mouse report that reached the keyboard is not text: without this it
     // types `[<0;40;12M` into the command line.
     if (hasMouse(input)) return;
+    // SPLIT REPORTS. Over a remote herdr session the ESC of a mouse report
+    // arrives in its own chunk and the rest - `[<0;40;12M`, or `[M` and three
+    // bytes - in the next. ink sees a lone Escape (which discarded the
+    // proposal) and then text (which was typed). So: a chunk shaped like a
+    // report's tail is a report, ESC or not; and a lone ESC waits 40 ms to
+    // see whether a tail follows before it counts as Escape.
+    if (input && /^\[?(<\d+;\d+;\d+[Mm]|M[\s\S]{3})$/.test(input)) {
+      if (escTimer.current) { clearTimeout(escTimer.current); escTimer.current = null; }
+      const seq = `\x1b${input.startsWith('[') ? '' : '['}${input}`;
+      for (const ev of parseMouseAll(seq)) onMouse(ev);
+      return;
+    }
+    if (key.escape && !input) {
+      if (escTimer.current) clearTimeout(escTimer.current);
+      escTimer.current = setTimeout(() => { escTimer.current = null; escapeRef.current(); }, 40);
+      return;
+    }
 
     if (help) { if (key.escape || key.return || input === '\u001bOP' || key.f1) setHelp(false); return; }
     if (view === 'output' && !value) {
@@ -799,6 +822,15 @@ const App = ({ refresh, statusSecs }) => {
   // the screen put them below the last row, where nobody ever saw them - the
   // owner's "? did nothing" was exactly that.
   const view = help ? 'help' : picker ? 'picker' : detail ? 'detail' : (outView && output && !outCollapsed) ? 'output' : 'main';
+  escapeRef.current = () => {
+    if (help) { setHelp(false); return; }
+    if (picker) { setPicker(null); return; }
+    if (detail) { setDetail(null); setPane('waiting'); say('back'); return; }
+    if (view === 'output' && !value) { setOutView(false); say('back'); return; }
+    const had = !!proposed || options.length > 0 || !!value;
+    setProposed(null); setOptions([]); setLine('');
+    if (had) say('discarded');
+  };
   const stack = view === 'help'
     ? [h(Overlay, { key: 'help', title: 'KEYS  ·  Esc closes', lines: helpLines() })]
     : view === 'picker'
