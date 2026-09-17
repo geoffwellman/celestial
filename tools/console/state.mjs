@@ -6,9 +6,11 @@
 // `--render-once` prints and what the tests drive, so the panels can be proved
 // correct without a terminal.
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+
+import { legend } from './legend.mjs';
 
 export const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial');
 export const CEL_BIN = process.env.CEL_BIN || 'cel';
@@ -65,6 +67,56 @@ export const inboxTail = (doc, n = 8) => {
   return lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts))).slice(-n);
 };
 
+// The THREAD behind one waiting item: every other message in that workspace's
+// mailbox carrying the same `ref`, plus anything from the same sender within an
+// hour either side. The second half is there because most mail on this box has
+// no ref at all - a blocker and the status line that explains it arrive four
+// minutes apart from the same agent, and showing one without the other is how
+// the operator ends up opening a pane to read the rest.
+export const thread = (item, span = 3600 * 1000) => {
+  if (!item) return [];
+  let text;
+  try { text = readFileSync(join(INBOX_DIR(), `${item.ws}.jsonl`), 'utf8'); } catch { return []; }
+  const centre = Date.parse(item.ts) || 0;
+  const out = [];
+  for (const raw of text.split('\n')) {
+    if (!raw.trim()) continue;
+    let m;
+    try { m = JSON.parse(raw); } catch { continue; }
+    if (m.id === item.id) continue;
+    const sameRef = item.ref && m.ref && m.ref === item.ref;
+    const near = m.from === item.from && centre
+      && Math.abs((Date.parse(m.ts) || 0) - centre) <= span;
+    if (!sameRef && !near) continue;
+    out.push({ ws: item.ws, ...m });
+  }
+  return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+};
+
+// --- the command history ----------------------------------------------------
+// It lives here rather than in the ink component because `--run` writes to it
+// too: a history that only recorded what was typed in the TUI would depend on
+// which entry point ran the command, which is not something an operator can
+// see or reason about.
+export const HISTORY_PATH = () => process.env.CEL_CONSOLE_HISTORY
+  || join(homedir(), '.local/share/cel/console/history');
+export const HISTORY_MAX = 500;
+
+export const readHistory = () => {
+  try { return readFileSync(HISTORY_PATH(), 'utf8').split('\n').filter(Boolean); } catch { return []; }
+};
+
+export const appendHistory = (line) => {
+  if (!String(line || '').trim()) return;
+  try {
+    const path = HISTORY_PATH();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${line}\n`);
+    const all = readHistory();
+    if (all.length > HISTORY_MAX * 1.5) writeFileSync(path, `${all.slice(-HISTORY_MAX).join('\n')}\n`);
+  } catch { /* a console that cannot write its history is still a console */ }
+};
+
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
 
@@ -103,7 +155,11 @@ export const runCommand = async (cmd) => {
 // The whole desk as plain text: `cel console --render-once`. It is what the
 // tests assert on and what an operator pipes into a file when something is
 // wrong and a full-screen UI is the last thing they want.
-export const renderOnce = async () => {
+// STATUS AND LEGEND ARE TWO LINES. The v1 console wrote its responses over the
+// key legend and never cleared them, so the operator lost their bindings to a
+// message from four minutes ago. Here - and in the TUI - the transient line and
+// the permanent one are separate rows that cannot overwrite each other.
+export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const doc = await fleet();
   const out = [];
   out.push('FLEET');
@@ -123,5 +179,9 @@ export const renderOnce = async () => {
   const tail = inboxTail(doc, 8);
   if (!tail.length) out.push('  quiet');
   for (const m of tail) out.push(`  ${tailLine(m)}`);
+
+  out.push('');
+  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(legend(pane));
   return out.join('\n');
 };
