@@ -507,3 +507,166 @@ test_console_chain_runs_its_lines_in_order() {
   assert_contains "$out" 'ship gadget or hold?'
   _console_teardown
 }
+
+# --- CEL-20: depth ---------------------------------------------------------
+
+# A box with WORKERS in it. CEL-19's `workers_list` is the frozen contract the
+# console is written against: until it lands the shape comes from this stub,
+# which is the same thing the console will read from `cel fleet --json`.
+_console_depth_setup() {
+  _console_setup
+  cat >"$T/fleet.json" <<'EOF'
+{"workspaces":[
+ {"name":"alpha","root":{"unread":1,"open":1},"units":[
+   {"name":"bundle","orch":"LIVE","pane":"w1:p0","workers":2,"cap":4,"stalled":1,"unlanded":0,
+    "repos":["widget","gadget"],"declared":true,
+    "workers_list":[
+      {"id":"ABC-49-slug","ticket":"ABC-49","repo":"widget","branch":"ABC-49-slug","shape":"ship",
+       "state":"running","live":"idle","quiet_secs":812,"verdict":"stalled","severity":"warn",
+       "ahead":"3","pr":"https://example.invalid/widget/pull/12","alias":"widget/ABC-49-slug","pane":"w3:p1"},
+      {"id":"ABC-50-other","ticket":"ABC-50","repo":"gadget","branch":"ABC-50-other","shape":"ship",
+       "state":"running","live":"working","quiet_secs":10,"verdict":"","severity":"",
+       "ahead":"0","pr":"","alias":"gadget/ABC-50-other","pane":"w3:p2"}]}]}]}
+EOF
+  printf '%s\n' \
+    '{"id":"d1","ts":"2026-09-20T10:11:12+00:00","kind":"decision","from":"bundle-orch","to":"root","message":"ship gadget or hold?"}' \
+    >"$T/open.alpha.json"
+  printf '%s\n' \
+    '{"id":"m1","ts":"2026-09-20T09:00:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"first line"}' \
+    >"$T/inbox/alpha.jsonl"
+
+  cat >"$T/bin/cel-fanout" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  why) printf '%s\n' \
+        "$2 (ABC-49, widget) - running, agent idle, stalled (warn)" \
+        "quiet for 13m, work at risk, branch not pushed" \
+        "pane, last 25 lines:" \
+        "  waiting for review" \
+        "mail from it, last 5:" \
+        "  asked a question" \
+        "pr: open, review pending" \
+        "next: prompt it to commit and push, or collect" ;;
+  *) printf 'ran: %s\n' "$*" ;;
+esac
+EOF
+  chmod +x "$T/bin/cel-fanout"
+  export CEL_FANOUT_BIN="$T/bin/cel-fanout"
+}
+
+# THE UNIT VIEW IS THE ANSWER TO "what is going on with bundle". Before it, a
+# fleet row said "workers 2/4 stalled 1" and every follow-up question meant
+# leaving the console.
+test_console_render_once_unit_shows_orchestrator_workers_and_mail() {
+  _console_depth_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --unit bundle)"
+  assert_contains "$out" 'UNIT bundle'
+  assert_contains "$out" 'ORCHESTRATOR'
+  assert_contains "$out" 'bundle-orch'
+  assert_contains "$out" 'w1:p0'
+  assert_contains "$out" 'WORKERS'
+  assert_contains "$out" 'ABC-49-slug'
+  assert_contains "$out" 'ABC-50-other'
+  assert_contains "$out" '13m'
+  assert_contains "$out" 'stalled'
+  assert_contains "$out" '#12'
+  assert_contains "$out" 'WAITING'
+  assert_contains "$out" 'ship gadget or hold?'
+  assert_contains "$out" 'RECENT MAIL'
+  assert_contains "$out" 'first line'
+  _console_teardown
+}
+
+test_console_render_once_unit_that_does_not_exist_says_so() {
+  _console_depth_setup
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --render-once --unit nosuch 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'nosuch'
+  _console_teardown
+}
+
+# THE WORKER VIEW IS THE ANSWER TO "why". It runs `cel-fanout why` on open and
+# shows what it said, because telling the operator to go and run the command
+# themselves is what the console did before and it is what they complained of.
+test_console_render_once_worker_runs_why_and_shows_it() {
+  _console_depth_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --worker ABC-49-slug)"
+  assert_contains "$out" 'WORKER ABC-49-slug'
+  assert_contains "$out" 'ABC-49'
+  assert_contains "$out" 'widget'
+  assert_contains "$out" 'next: prompt it to commit and push, or collect'
+  assert_contains "$out" '[prompt]'
+  assert_contains "$out" '[collect]'
+  assert_contains "$out" '[release]'
+  assert_contains "$out" '[why again]'
+  _console_teardown
+}
+
+test_console_render_once_worker_that_does_not_exist_says_so() {
+  _console_depth_setup
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --render-once --worker ABC-99-ghost 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'ABC-99-ghost'
+  _console_teardown
+}
+
+# NO RAW JSON, EVER. The console knows the shape of everything it runs, so an
+# operator who clicked a row got a box of braces for no reason at all.
+test_console_output_rendering_is_proved() {
+  node "$CEL_ROOT/tools/console/views.test.mjs"
+}
+
+# THE MODEL ANSWERS FROM STATE. "which workers are idle" is in the state the
+# console already sends; running three commands to re-learn it is the console
+# handing the operator homework.
+test_console_ask_can_answer_from_state_without_running_anything() {
+  _console_depth_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'ANSWER: two workers are idle'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'which workers are idle')" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" 'two workers are idle'
+  case "$out" in *'ANSWER:'*) echo 'the reply form leaked into the answer'; return 1;; esac
+  _console_stub_stop
+  _console_teardown
+}
+
+# The state the model is asked from must carry the workers, or every question
+# about one of them comes back as a command to go and look.
+test_console_ask_state_carries_the_workers_list() {
+  _console_depth_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'ANSWER: nothing is stalled'
+  node "$CONSOLE_MJS" --ask 'which workers are idle' >/dev/null
+  local body
+  body="$(cat "$T/body.json")"
+  assert_contains "$body" 'workers_list'
+  assert_contains "$body" 'ABC-49-slug'
+  assert_contains "$body" 'ship gadget or hold?'
+  _console_stub_stop
+  _console_teardown
+}
+
+# Every view's own actions are in its own legend, or they are bindings nobody
+# can discover - which is the same as not having them.
+test_console_legends_name_the_depth_views() {
+  local out
+  out="$(node --input-type=module -e "
+    import { legend, helpLines } from '$CEL_ROOT/tools/console/legend.mjs';
+    process.stdout.write([legend('unit'), legend('worker'), legend('inbox'), helpLines().join('\n')].join('\n'));
+  ")"
+  assert_contains "$out" 'f focus'
+  assert_contains "$out" 'm message'
+  assert_contains "$out" 'p prompt'
+  assert_contains "$out" 'c collect'
+  assert_contains "$out" 'x release'
+  assert_contains "$out" 'w why'
+  assert_contains "$out" 'Enter'
+}
