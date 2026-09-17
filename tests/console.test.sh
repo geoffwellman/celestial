@@ -228,6 +228,34 @@ test_console_warns_about_a_world_readable_config() {
   _console_teardown
 }
 
+# After a sentence's commands run, the model answers the sentence from what
+# they printed - it reads output, never runs anything. The request carries the
+# transcript; the reply is returned verbatim; console.answer: off disables it.
+test_console_answer_reads_the_transcript() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'standout has one worker on ABC-1 and nothing waiting.'
+  local out
+  out="$(cd "$CEL_ROOT" && node --input-type=module -e "
+    import { answer } from './tools/console/translate.mjs';
+    const a = await answer({ sentence: 'what is happening with standout', transcript: '\$ cel fleet\nstandout orch LIVE workers 1/4' });
+    process.stdout.write(a);
+  ")"
+  assert_eq "$out" 'standout has one worker on ABC-1 and nothing waiting.'
+  assert_contains "$(cat "$STUB_BODY_FILE")" 'what is happening with standout'
+  assert_contains "$(cat "$STUB_BODY_FILE")" 'workers 1/4'
+  _console_stub_stop
+  _console_config 'answer: off'
+  out="$(cd "$CEL_ROOT" && node --input-type=module -e "
+    import { answer } from './tools/console/translate.mjs';
+    const a = await answer({ sentence: 'x', transcript: 'y' });
+    process.stdout.write(String(a));
+  ")"
+  assert_eq "$out" 'null'
+  _console_teardown
+}
+
 # --- the two consoles share one vocabulary ---------------------------------
 
 test_console_vocabulary_is_shared_by_both_consoles() {
