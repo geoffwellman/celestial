@@ -23,6 +23,9 @@ watch the repo (Watch → Custom → Releases) to be notified.
   on a free block of ten ports (`repos[].preview`, `CEL_TRY_PORT_BASE`) in a
   pane of its own, prints the url, and is stopped by `--stop` or by `release`;
   `cel-fanout status` gains a `TRY` column
+- The console's fleet panel counts PRODUCTS, not repos, and a declared product
+  names the repos it bundles - `widget (widget-core, widget-web)` - as
+  `cel fleet` already did
 - `cel console` edits like a shell: a real cursor (←/→, Home/End, Ctrl+A /
   Ctrl+E), Ctrl+W / Ctrl+K / Ctrl+U, a history walk filtered by the prefix
   already typed, and Ctrl+R for a history picker you can type into

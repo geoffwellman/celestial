@@ -120,6 +120,13 @@ export const appendHistory = (line) => {
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
 
+// A UNIT IS A PRODUCT, not a repo (CEL-14). A declared product names the repos
+// it bundles, exactly as `cel fleet` does - without it the one row where a
+// product and a repo of the same name differ is the row that looks identical.
+export const unitLabel = (u) => (u && u.declared && (u.repos || []).length
+  ? `${u.name} (${u.repos.join(', ')})`
+  : String(u?.name || ''));
+
 // The rows the fleet panel draws, flattened so the TUI's selection is one
 // index into one list rather than a pair of cursors over a nested structure.
 export const fleetRows = (doc) => {
@@ -165,9 +172,9 @@ export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   out.push('FLEET');
   if (doc.error) out.push(`  ! ${doc.error}`);
   for (const ws of doc.workspaces || []) {
-    out.push(`  ${ws.name}   (${(ws.units || []).length} repos)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
+    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
     for (const u of ws.units || []) {
-      out.push(`    ${u.name.padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
+      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
     }
   }
   const items = await openItems(doc);

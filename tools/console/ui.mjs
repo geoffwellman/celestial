@@ -25,7 +25,7 @@ import { spawn } from 'node:child_process';
 import { C, orchColour, kindColour } from './theme.mjs';
 import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, run, thread,
-  readHistory, appendHistory,
+  readHistory, appendHistory, unitLabel,
 } from './state.mjs';
 import { translate, NoTranslator, translatorLabel } from './translate.mjs';
 import {
@@ -105,12 +105,12 @@ const FleetPanel = ({ doc, rows, sel, offset, height, innerRef }) => {
     if (r.kind === 'ws') {
       return h(Text, { key: `w${r.ws}`, color: C.ink, bold: true, inverse: on },
         `${r.ws}  `,
-        h(Text, { color: C.dim }, `(${r.units} repos)  root mail: ${r.root.unread} unread, `),
+        h(Text, { color: C.dim }, `(${r.units} products)  root mail: ${r.root.unread} unread, `),
         h(Text, { color: r.root.open ? C.accent : C.dim }, `${r.root.open} open`));
     }
     return h(Text, { key: `u${r.ws}/${r.name}`, inverse: on },
       h(Text, { color: C.dim }, '  '),
-      h(Text, { color: C.ink }, r.name.padEnd(14)),
+      h(Text, { color: C.ink }, unitLabel(r).padEnd(14)),
       h(Text, { color: orchColour(r.orch) }, `orch ${String(r.orch).padEnd(8)}`),
       h(Text, { color: C.dim }, 'workers '),
       h(Text, { color: r.workers ? C.ink : C.dim }, `${r.workers}/${r.cap}   `),
