@@ -248,6 +248,60 @@ test_fleet_leaves_an_undeclared_workspace_as_repos() {
   _fleet_teardown
 }
 
+# THE COUNT WAS NEVER THE ANSWER. `stalled 1` told an operator that something
+# was wrong and nothing about which worker, why, or what it was holding - so
+# the console could only tell them to run the view they were already staring
+# at. These are the rows behind the number, and the console (CEL-20) is
+# written against exactly these keys.
+test_fleet_workers_list_carries_a_row_per_unreleased_worker() {
+  _fleet_setup
+  local led="$T/alpha/.cel/delegations.json"
+  jq -c '. + [{"id":"three","repo":"widget","branch":"widget-let-go","pane":"wA:p5","worktree":"'"$T/none"'","state":"released","ticket":""}]' \
+    "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  # the running row and the collected one; the released row is gone
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].id] | join(",")')" "one,two"
+  local w
+  w="$(printf '%s' "$u" | jq -c '.workers_list[0]')"
+  assert_eq "$(printf '%s' "$w" | jq -r '.repo')" "widget"
+  assert_eq "$(printf '%s' "$w" | jq -r '.branch')" "widget-work"
+  assert_eq "$(printf '%s' "$w" | jq -r '.state')" "running"
+  assert_eq "$(printf '%s' "$w" | jq -r '.live')" "idle"
+  assert_eq "$(printf '%s' "$w" | jq -r '.pane')" "wA:p2"
+  assert_eq "$(printf '%s' "$w" | jq -r '.worktree')" "$WT"
+  assert_eq "$(printf '%s' "$w" | jq -r '.quiet_secs | type')" "number"
+  assert_eq "$(printf '%s' "$w" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree"] - keys | join(",")')" ""
+  _fleet_teardown
+}
+
+# A working worker is not news. The verdict is empty and the count agrees.
+test_fleet_workers_list_leaves_a_working_worker_unjudged() {
+  _fleet_setup
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].verdict')" ""
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].severity')" ""
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "0"
+  _fleet_teardown
+}
+
+# The number and the rows are one fact computed once: if they could disagree,
+# whichever the operator read second would be the one they stopped trusting.
+test_fleet_workers_list_verdict_matches_the_stalled_count() {
+  _fleet_setup
+  find "$WT" -exec touch -d '2 hours ago' {} + 2>/dev/null || true
+  local u
+  u="$(STUB_PANE_TEXT="$(_fleet_death)" cmd_fleet --json --workspace alpha \
+        | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "1"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[] | select(.verdict != "")] | length')" "1"
+  assert_contains "$(printf '%s' "$u" | jq -r '.workers_list[0].verdict')" "dead-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].severity')" "normal"
+  _fleet_teardown
+}
+
 test_fleet_rejects_unknown_arguments() {
   _fleet_setup
   assert_fails bash -c "source '$CEL_ROOT/lib/fleet.sh'; cmd_fleet --nonsense"
