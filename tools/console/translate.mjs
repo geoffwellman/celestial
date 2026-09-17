@@ -10,8 +10,16 @@
 //
 // The model NEVER executes anything. It returns text; the TUI puts that text on
 // the command line as a proposal and the operator presses Enter. Anything that
-// is not exactly one command is treated as a failure to translate, because a
-// model apologising in prose must not become a command nobody read.
+// is not made of commands is treated as a failure to translate, because a model
+// apologising in prose must not become a command nobody read.
+//
+// Two things changed on 2026-09-17, both because a person expected them. A
+// sentence can need a SEQUENCE ("clean the blockers on sandbox" is a read and
+// then a resolve), so the first ask may return up to five command lines and the
+// TUI proposes them as one chain. And a MISS is not a dead end: the second ask
+// runs in options mode, where the model returns up to three candidates each
+// with a one-line reason, and the operator picks. Neither path runs anything;
+// both end on the command line waiting for Enter.
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -95,15 +103,17 @@ export const vocabulary = (root = CEL_ROOT) => {
   } catch { return ''; }
 };
 
-const SYSTEM = (vocab) => `You turn one sentence from a human operator into exactly ONE shell
-command from the celestial console's vocabulary. You never explain, never
-apologise and never emit more than one line.
+const SYSTEM = (vocab) => `You turn one sentence from a human operator into celestial console
+commands. You never explain, never apologise and never emit prose.
 
 Vocabulary - these are the only commands you may produce:
 ${vocab}
 
 Rules:
-- Answer with the command alone, on one line, with no backticks and no prose.
+- Answer with commands alone, one per line, with no backticks, no numbering
+  and no prose. Usually ONE line.
+- When the sentence genuinely needs a SEQUENCE, answer with up to FIVE lines
+  in the order they should run. Never pad: if one command answers it, send one.
 - Use the workspace, product and agent names from the state below; never
   invent one. An orchestrator is named <product>-orch.
 - Questions about state ("how is …", "what's blocked", "what's running") are
@@ -111,19 +121,48 @@ Rules:
 - "What is waiting on me" with no workspace named is
   \`cel inbox open --for root --all-workspaces\`; with one named, that workspace.
 - "Take me to <x>" is \`herdr agent focus <x>-orch\` when <x> is a product.
-- If the sentence does not map onto exactly one of those commands, answer with
-  a single question mark: ?
+- If the sentence does not map onto the vocabulary, answer with a single
+  question mark: ?
 
 Examples:
 what's blocked -> cel fleet
-how is vhs going -> cel fleet
+how is widget going -> cel fleet
 what is waiting on me -> cel inbox open --for root --all-workspaces
 anything for me on sandbox -> cel inbox open --for root --workspace sandbox
-take me to standout -> herdr agent focus standout-orch
-tell standout-orch to pick up W-49 next -> cel inbox send standout-orch "pick up W-49 next" --workspace vhs
+take me to gadget -> herdr agent focus gadget-orch
+tell gadget-orch to pick up ABC-49 next -> cel inbox send gadget-orch "pick up ABC-49 next" --workspace alpha
 resolve 1789208557174615054 -> cel inbox resolve 1789208557174615054
-what is in flight on plane -> cel-fanout status --workspace plane
+what is in flight on alpha -> cel-fanout status --workspace alpha
+clean the steward's blockers on sandbox ->
+cel inbox open --for root --workspace sandbox
+cel inbox resolve --all --from steward --workspace sandbox
 why did the last build fail -> ?`;
+
+// Options mode: the SECOND ask, after a miss. The operator has already been
+// told "no command for that" once and it taught them nothing; what a person
+// expects of something that failed to understand them is an interpretation and
+// a choice, not a shrug.
+const OPTIONS_SYSTEM = (vocab) => `A human operator typed a sentence at the celestial console and it
+could not be turned into a command. Offer up to THREE candidate command lines
+they might have meant, best first.
+
+Vocabulary - these are the only commands you may produce:
+${vocab}
+
+Rules:
+- One candidate per line, in the form: <command> -- <one-line reason>
+- At most three lines. No numbering, no backticks, no prose around them.
+- The reason is short and says what the command would show or do.
+- Use the workspace, product and agent names from the state below; never
+  invent one.
+- If the sentence is not about anything in the vocabulary at all, answer with
+  a single question mark: ?
+
+Example:
+sort out sandbox ->
+cel inbox open --for root --workspace sandbox -- see what is waiting there first
+cel fleet -- the whole box at a glance
+cel-fanout status --workspace sandbox -- what is in flight`;
 
 // What a command looks like. The console's allowlist is the real gate (the
 // guard in lib/guard.sh decides what runs), but a model that returns a
@@ -131,12 +170,49 @@ why did the last build fail -> ?`;
 // though they were a command.
 const COMMAND = /^(cel|cel-fanout|cel-linear|gh|herdr)(\s|$)/;
 
+// The most commands a chain may carry. Five is not a round number: it is the
+// point past which an operator stops reading the proposal before pressing
+// Enter, and a chain nobody read is the model executing things.
+export const CHAIN_MAX = 5;
+export const OPTIONS_MAX = 3;
+
+const clean = (text) => String(text || '')
+  .trim()
+  .replace(/^```[a-z]*\s*/i, '')
+  .replace(/\s*```$/, '')
+  .trim();
+
+// EVERY line must be a command, or none of them are. A reply of one good
+// command and one line of apology is a reply that would put an apology on the
+// command line as the second step of a chain.
 export const parseReply = (text) => {
-  const line = String(text || '').trim().replace(/^```[a-z]*\s*|\s*```$/g, '').trim();
-  if (!line || line === '?') return null;
-  if (line.includes('\n')) return null;
-  if (!COMMAND.test(line)) return null;
-  return line;
+  const raw = clean(text);
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length || raw === '?') return { cmds: [], raw };
+  if (lines.length > CHAIN_MAX) return { cmds: [], raw };
+  // ` -- ` is the reason separator of options mode. A model that answered the
+  // first ask in that shape has offered candidates, not a chain, and running
+  // them in order would run three alternatives one after another.
+  for (const line of lines) if (!COMMAND.test(line) || line.includes(' -- ')) return { cmds: [], raw };
+  return { cmds: lines, raw };
+};
+
+// `<command> -- <reason>`. The separator is ` -- ` with spaces so a command
+// carrying `--workspace` cannot be cut in half by it.
+export const parseOptions = (text) => {
+  const raw = clean(text);
+  const options = [];
+  for (const line of raw.split('\n')) {
+    const l = line.trim().replace(/^\d+[.)]?\s+/, '');
+    if (!l || !COMMAND.test(l)) continue;
+    const i = l.indexOf(' -- ');
+    const cmd = (i < 0 ? l : l.slice(0, i)).trim();
+    const reason = i < 0 ? '' : l.slice(i + 4).trim();
+    if (!COMMAND.test(cmd)) continue;
+    options.push({ cmd, reason });
+    if (options.length === OPTIONS_MAX) break;
+  }
+  return { options, raw };
 };
 
 export class NoTranslator extends Error {}
@@ -144,7 +220,7 @@ export class NoTranslator extends Error {}
 // One request, one answer, 15 seconds. No streaming: there is nothing to
 // stream - the reply is one short line - and a stream would mean partial
 // commands appearing on an operator's command line as they arrive.
-export const translate = async ({ sentence, state = '', root = CEL_ROOT, configPath }) => {
+export const translate = async ({ sentence, state = '', root = CEL_ROOT, configPath, mode = 'command' }) => {
   const cfg = readConfig(configPath);
   for (const w of cfg.warnings) process.stderr.write(`  ! ${w}\n`);
 
@@ -178,7 +254,8 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   const url = /\/(messages|chat\/completions)$/.test(base)
     ? base
     : base.replace(/\/$/, '') + (anthropic ? '/v1/messages' : '/v1/chat/completions');
-  const system = SYSTEM(vocabulary(root));
+  const options = mode === 'options';
+  const system = options ? OPTIONS_SYSTEM(vocabulary(root)) : SYSTEM(vocabulary(root));
   const user = `Current state:\n${state}\n\nSentence: ${sentence}`;
 
   const headers = { 'content-type': 'application/json' };
@@ -186,12 +263,12 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   if (anthropic) {
     headers['x-api-key'] = key;
     headers['anthropic-version'] = '2023-06-01';
-    body = { model, max_tokens: 200, system, messages: [{ role: 'user', content: user }] };
+    body = { model, max_tokens: 400, system, messages: [{ role: 'user', content: user }] };
   } else {
     headers.authorization = `Bearer ${key}`;
     body = {
       model,
-      max_tokens: 200,
+      max_tokens: 400,
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     };
   }
@@ -200,16 +277,21 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    // The SECOND ask gets longer: the operator has already been told the first
+    // one missed, they are waiting on purpose, and a 15-second cut-off turned a
+    // menu of three good options into "no command for that" on this box.
+    signal: AbortSignal.timeout(options ? 30000 : 15000),
   });
   if (!res.ok) throw new Error(`model: ${provider} answered HTTP ${res.status}`);
   const doc = await res.json();
   const text = anthropic
     ? (doc.content || []).map((c) => c.text || '').join('')
     : doc.choices?.[0]?.message?.content;
-  // Both halves come back: the command (or null) and what the model actually
-  // said, so a refusal can show the operator WHY instead of a bare "no".
-  return { cmd: parseReply(text), raw: String(text || '').trim() };
+  // Both halves come back: what was parsed and what the model actually said, so
+  // a refusal can show the operator WHY instead of a bare "no".
+  if (options) return parseOptions(text);
+  const { cmds, raw } = parseReply(text);
+  return { cmds, cmd: cmds[0] || null, raw };
 };
 
 export const translatorLabel = (configPath) => {

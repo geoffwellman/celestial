@@ -18,22 +18,27 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, runCommand, fleet, openItems } from './state.mjs';
+import { renderOnce, runCommand, runChain, fleet, openItems, appendHistory } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
 const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm ci --ignore-scripts) - or run cel setup`;
 
-const usage = `usage: cel console [--refresh SECS] [--render-once] [--run "<cmd>"] [--ask "<text>"]`;
+const usage = `usage: cel console [--refresh SECS] [--render-once] [--status TEXT]
+                   [--status-secs N] [--run "<cmd>"]
+                   [--chain "<cmd>" ...] [--ask "<text>"]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, run: '', translate: '' };
+const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [] };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
+  else if (a === '--chain') { const c = argv[++i] || ''; if (c) opts.chain.push(c); }
+  else if (a === '--status') { opts.status = argv[++i] || ''; }
+  else if (a === '--status-secs') { const n = Number(argv[++i]); opts.statusSecs = Number.isFinite(n) ? n : 8; }
   else if (a === '--ask' || a === '--translate') { opts.translate = argv[++i] || ''; }
   else if (a === '-h' || a === '--help') { process.stdout.write(`${usage}\n`); process.exit(0); }
   else { process.stderr.write(`cel console: unknown argument '${a}'\n${usage}\n`); process.exit(2); }
@@ -51,20 +56,59 @@ const translatorState = async () => {
 
 const main = async () => {
   if (opts.translate) {
-    let cmd, raw;
+    const state = await translatorState();
+    let cmds = [], raw = '';
     try {
-      ({ cmd, raw } = await translate({ sentence: opts.translate, state: await translatorState() }));
+      ({ cmds, raw } = await translate({ sentence: opts.translate, state }));
     } catch (e) {
-      if (e instanceof NoTranslator) { process.stderr.write(`${e.message}\n`); process.exit(1); }
       process.stderr.write(`${e.message}\n`);
       process.exit(1);
     }
-    if (!cmd) {
-      const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
-      process.stderr.write(`no command for that - rephrase, or type the command${said}\n`);
+    if (cmds.length) {
+      // A chain prints one command per line: the caller pipes it into a shell
+      // or reads it, and either way the order is the whole content.
+      process.stdout.write(`${cmds.join('\n')}\n`);
+      return;
+    }
+    // THE SECOND ASK. A miss used to end here with "no command for that",
+    // which told the operator nothing; now the model is asked what the
+    // sentence might have meant and the answers are offered as a numbered
+    // list. Exit 1 either way: nothing was translated, and a caller testing
+    // the exit status must not mistake a menu for a command.
+    let options = [];
+    try {
+      ({ options } = await translate({ sentence: opts.translate, state, mode: 'options' }));
+    } catch (e) {
+      if (!(e instanceof NoTranslator)) process.stderr.write(`${e.message}\n`);
+    }
+    if (options.length) {
+      process.stdout.write('no command for that - did you mean:\n');
+      options.forEach((o, i) => {
+        process.stdout.write(`${i + 1}  ${o.cmd}${o.reason ? `   -- ${o.reason}` : ''}\n`);
+      });
       process.exit(1);
     }
-    process.stdout.write(`${cmd}\n`);
+    const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
+    process.stderr.write(`no command for that - rephrase, or type the command${said}\n`);
+    process.exit(1);
+  }
+
+  // The same whole-chain check the TUI does, on the command line: every line is
+  // put to the guard before any of them runs.
+  if (opts.chain.length) {
+    const r = await runChain(opts.chain);
+    if (!r.allow) {
+      process.stderr.write(`refused: ${r.reason}\n  the chain ran nothing - the refused line was: ${r.denied}\n`);
+      process.exit(1);
+    }
+    for (const step of r.results) {
+      process.stdout.write(`${step.out}\n`);
+      appendHistory(step.cmd);
+    }
+    if (r.stoppedAt != null) {
+      process.stderr.write(`stopped at ${r.stoppedAt + 1}/${opts.chain.length} - it exited non-zero\n`);
+      process.exit(1);
+    }
     return;
   }
 
@@ -72,15 +116,16 @@ const main = async () => {
     const r = await runCommand(opts.run);
     if (!r.allow) {
       process.stderr.write(`refused: ${r.reason}\n`);
-      if (opts.renderOnce) process.stdout.write(`${await renderOnce()}\n`);
+      if (opts.renderOnce) process.stdout.write(`${await renderOnce({ status: `refused: ${r.reason}` })}\n`);
       process.exit(1);
     }
+    appendHistory(opts.run);
     process.stdout.write(`${r.out}\n`);
     if (!opts.renderOnce) return;
   }
 
   if (opts.renderOnce) {
-    process.stdout.write(`${await renderOnce()}\n`);
+    process.stdout.write(`${await renderOnce({ status: opts.status })}\n`);
     return;
   }
 
