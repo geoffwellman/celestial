@@ -458,6 +458,9 @@ case "\$1" in
 esac
 EOF
   chmod +x "$T/bin/cel"
+  # The chain runs through `bash -c`, so the stub has to be on PATH as well as
+  # in CEL_BIN - otherwise the test drives the live box.
+  PATH="$T/bin:$PATH"
   local out rc=0
   out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'git commit -m x' 2>&1)" || rc=$?
   assert_eq "$rc" 1
@@ -469,6 +472,7 @@ EOF
 
 test_console_chain_runs_its_lines_in_order() {
   _console_setup
+  PATH="$T/bin:$PATH"
   local out
   out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'cel inbox open --for root --workspace alpha')"
   assert_contains "$out" 'alpha'

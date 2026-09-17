@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, runCommand, fleet, openItems, appendHistory } from './state.mjs';
+import { renderOnce, runCommand, runChain, fleet, openItems, appendHistory } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,15 +26,17 @@ const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
 const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm ci --ignore-scripts) - or run cel setup`;
 
 const usage = `usage: cel console [--refresh SECS] [--render-once] [--status TEXT]
-                   [--status-secs N] [--run "<cmd>"] [--ask "<text>"]`;
+                   [--status-secs N] [--run "<cmd>"]
+                   [--chain "<cmd>" ...] [--ask "<text>"]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8 };
+const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [] };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
+  else if (a === '--chain') { const c = argv[++i] || ''; if (c) opts.chain.push(c); }
   else if (a === '--status') { opts.status = argv[++i] || ''; }
   else if (a === '--status-secs') { const n = Number(argv[++i]); opts.statusSecs = Number.isFinite(n) ? n : 8; }
   else if (a === '--ask' || a === '--translate') { opts.translate = argv[++i] || ''; }
@@ -89,6 +91,25 @@ const main = async () => {
     const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
     process.stderr.write(`no command for that - rephrase, or type the command${said}\n`);
     process.exit(1);
+  }
+
+  // The same whole-chain check the TUI does, on the command line: every line is
+  // put to the guard before any of them runs.
+  if (opts.chain.length) {
+    const r = await runChain(opts.chain);
+    if (!r.allow) {
+      process.stderr.write(`refused: ${r.reason}\n  the chain ran nothing - the refused line was: ${r.denied}\n`);
+      process.exit(1);
+    }
+    for (const step of r.results) {
+      process.stdout.write(`${step.out}\n`);
+      appendHistory(step.cmd);
+    }
+    if (r.stoppedAt != null) {
+      process.stderr.write(`stopped at ${r.stoppedAt + 1}/${opts.chain.length} - it exited non-zero\n`);
+      process.exit(1);
+    }
+    return;
   }
 
   if (opts.run) {

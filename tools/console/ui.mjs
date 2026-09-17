@@ -24,7 +24,7 @@ import { spawn } from 'node:child_process';
 
 import { C, orchColour, kindColour } from './theme.mjs';
 import {
-  CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, run, thread,
+  CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
   readHistory, appendHistory, unitLabel,
 } from './state.mjs';
 import { translate, NoTranslator, translatorLabel } from './translate.mjs';
@@ -322,18 +322,35 @@ const App = ({ refresh, statusSecs }) => {
     return r.ok;
   }, [reload, say]);
 
-  // A CHAIN STOPS AT THE FIRST FAILURE, with its output. Running the rest of a
-  // sequence after step one failed is how a console turns a typo into a mess
-  // the operator then has to reconstruct.
+  // A CHAIN IS ALLOWLISTED WHOLE BEFORE ANY OF IT RUNS (state.mjs:runChain), and
+  // then stops at the first non-zero exit. The operator pressed Enter once, on
+  // a proposal they were told the guard would check - so a refusal on line two
+  // must not arrive after line one has already changed the box.
   const executeChain = useCallback(async (cmds) => {
-    for (let i = 0; i < cmds.length; i += 1) {
-      say(`running ${i + 1}/${cmds.length}: ${cmds[i]}`);
-      // eslint-disable-next-line no-await-in-loop
-      const ok = await execute(cmds[i]);
-      if (!ok) { say(`stopped at ${i + 1}/${cmds.length} - it exited non-zero`); return; }
+    if (cmds.length === 1) { await execute(cmds[0]); return; }
+    setBusy(true);
+    say(`checking ${cmds.length} commands…`);
+    const r = await runChain(cmds, (cmd, i, n) => say(`running ${i + 1}/${n}: ${cmd}`));
+    setBusy(false);
+    if (!r.allow) {
+      setOutput([
+        `refused: ${r.reason}`,
+        `the chain ran nothing - the refused line was:`,
+        `  ${r.denied}`,
+      ].join('\n'));
+      setOutOffset(0);
+      say('refused by the console allowlist - nothing ran');
+      return;
     }
-    say(cmds.length > 1 ? `done - ${cmds.length} commands` : 'done');
-  }, [execute, say]);
+    setOutput(r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)');
+    setOutOffset(0);
+    for (const s2 of r.results) appendHistory(s2.cmd);
+    history.current = [...history.current, ...r.results.map((s2) => s2.cmd)];
+    reload();
+    say(r.stoppedAt != null
+      ? `stopped at ${r.stoppedAt + 1}/${cmds.length} - it exited non-zero`
+      : `done - ${cmds.length} commands`);
+  }, [execute, reload, say]);
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
 

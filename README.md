@@ -197,8 +197,8 @@ you press Enter again, or disappears on `Esc`. The model never executes
 anything.
 
 A sentence can come back as a **chain** of up to five commands when it needs a
-sequence — they run in order, each through the allowlist, stopping at the first
-one that exits non-zero. And a miss is not a dead end: the model is asked a
+sequence — every line is put to the allowlist *before any of them runs*, and
+then they run in order, stopping at the first one that exits non-zero. And a miss is not a dead end: the model is asked a
 second time for up to three candidates, each with a one-line reason, and they
 are listed in the OUTPUT panel:
 

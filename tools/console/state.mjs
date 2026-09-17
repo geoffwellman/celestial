@@ -159,6 +159,33 @@ export const runCommand = async (cmd) => {
   return { allow: true, reason: '', out: (r.out + (r.err ? `\n${r.err}` : '')).trimEnd(), ok: r.ok };
 };
 
+// A CHAIN IS CHECKED WHOLE, THEN RUN. The model may answer a sentence with a
+// sequence, and the operator presses Enter once for the lot - so the allowlist
+// has to have seen every line before the first one runs. Interleaving the two
+// meant a refusal on line two arrived after line one had already changed the
+// box, which is precisely the outcome the guard exists to prevent.
+//
+// Execution still stops at the first non-zero exit: passing the guard is not
+// the same as succeeding, and running step three over a failed step two is how
+// a typo becomes a mess someone has to reconstruct.
+export const runChain = async (cmds, onStep = () => {}) => {
+  const list = (cmds || []).filter((c) => String(c || '').trim());
+  for (const cmd of list) {
+    // eslint-disable-next-line no-await-in-loop
+    const verdict = await classify(cmd);
+    if (!verdict.allow) return { allow: false, denied: cmd, reason: verdict.reason, results: [] };
+  }
+  const results = [];
+  for (let i = 0; i < list.length; i += 1) {
+    onStep(list[i], i, list.length);
+    // eslint-disable-next-line no-await-in-loop
+    const r = await runCommand(list[i]);
+    results.push({ cmd: list[i], ...r });
+    if (!r.ok) return { allow: true, results, stoppedAt: i };
+  }
+  return { allow: true, results };
+};
+
 // The whole desk as plain text: `cel console --render-once`. It is what the
 // tests assert on and what an operator pipes into a file when something is
 // wrong and a full-screen UI is the last thing they want.
