@@ -402,10 +402,10 @@ test_console_render_once_keeps_status_and_legend_apart() {
   local out
   out="$(node "$CONSOLE_MJS" --render-once --status 'hello')"
   assert_contains "$out" 'hello'
-  assert_contains "$out" 'F1 help'
+  assert_contains "$out" '? help'
   local sline lline
   sline="$(printf '%s\n' "$out" | grep -n 'hello' | head -1 | cut -d: -f1)"
-  lline="$(printf '%s\n' "$out" | grep -n 'F1 help' | head -1 | cut -d: -f1)"
+  lline="$(printf '%s\n' "$out" | grep -n '? help' | head -1 | cut -d: -f1)"
   [ "$sline" != "$lline" ] || { echo 'status and legend share a line'; return 1; }
   _console_teardown
 }
