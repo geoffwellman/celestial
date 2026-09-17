@@ -1660,3 +1660,27 @@ test_try_refuses_without_a_worktree_or_a_preview_cmd() {
   assert_contains "$out" "worktree"
   rm -rf "$T"
 }
+
+# `herdr pane run` takes ONE command line, so every env value is parsed by the
+# pane's shell. A value with a space would split into two words - the second
+# read as the program to run - and a `$(...)` or `;` in workspace.yaml would
+# simply execute. Preview env is ordinary config, so it must be safe without
+# anyone remembering to quote their yaml.
+test_try_shell_quotes_preview_env_values() {
+  _fanout_setup
+  cat >> "$T/workspace.yaml" <<'YAML'
+    preview:
+      cmd: "printenv GREETING"
+      env: { GREETING: "hello world", RISKY: "$(touch {port}.pwned); echo x", PORT: "{port}" }
+      url: "http://localhost:{port}"
+YAML
+  (cd "$T" && "$BIN" delegate widget WG-TRYQ "$T/spec.md") > /dev/null
+  (cd "$T" && CEL_TRY_PORT_BASE=48720 "$BIN" try WG-TRYQ) > /dev/null
+  local runline; runline="$(grep '^pane run wZ:p9 ' "$STUB_LOG" | head -1)"
+  runline="${runline#pane run wZ:p9 }"
+  # The proof is what a real shell makes of that line, not how it is spelled.
+  assert_eq "$(cd "$T" && bash -c "$runline")" "hello world"
+  assert_eq "$(cd "$T" && bash -c "${runline%printenv GREETING}printenv RISKY")" '$(touch 48720.pwned); echo x'
+  [ ! -e "$T/48720.pwned" ] || { echo "a preview env value executed"; return 1; }
+  rm -rf "$T"
+}

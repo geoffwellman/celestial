@@ -1082,10 +1082,24 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
   local url; url="$(_try_subst "$(ws_repo_preview "$wsdir" "$repo" url)" "$port")"
 
   local -a envs=()
-  local kv
+  local kv k v
   while IFS= read -r kv; do
     [ -n "$kv" ] || continue
-    envs+=("$(_try_subst "$kv" "$port")")
+    k="${kv%%=*}"; v="${kv#*=}"
+    # The whole assignment is SHELL-QUOTED before it joins the command string.
+    # `herdr pane run` takes ONE command line, so an unquoted value is parsed
+    # by the pane's shell: a space splits one variable into two words (the
+    # second read as the program to run), and a `$`, backtick or `;` in a
+    # value out of workspace.yaml would be executed. A preview env value is
+    # ordinary config - a flag string, a url - so this has to be safe by
+    # construction rather than by everyone remembering to quote their yaml.
+    # A malformed key is skipped rather than passed through: `env` would
+    # otherwise treat it as the command to run.
+    if ! printf '%s' "$k" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+      c_warn "try: skipping preview.env entry with an invalid variable name: $k"
+      continue
+    fi
+    envs+=("$(printf '%s=%q' "$k" "$(_try_subst "$v" "$port")")")
   done < <(ws_repo_preview_env "$wsdir" "$repo")
 
   # Split under the WORKER'S pane, so the preview appears beside the ticket it
