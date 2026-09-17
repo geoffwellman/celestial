@@ -708,6 +708,13 @@ _steward_update_check() {
   return 0
 }
 
+# `| sed -n 1p`, NEVER `| head -1`, on anything that can be long. bin/cel runs
+# under `set -euo pipefail`: when `head` closes the pipe after one line the
+# producer takes SIGPIPE, the pipeline's status is 141, and `set -e` ends the
+# tick right there - silently. The stale-mailbox sweep did exactly that once
+# the product workspace's mailbox passed a pipe buffer in size: 55 failed
+# ticks in a day, "Main process exited, status=2", no message. sed reads to
+# the end and exits 0.
 cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   local do_gc=1
   if [ "${1:-}" = "--install" ]; then shift; _steward_install "$@"; return $?; fi
@@ -768,7 +775,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
       # recipient has actually been behind
       local cur; cur="$(cat "$(_inbox_cursor "$ws" "$who")" 2>/dev/null || printf '')"
       oldest="$(jq -r --arg w "$who" --arg last "$cur" \
-        'select(.to == $w) | select($last == "" or (.id > $last)) | .ts' "$f" 2>/dev/null | head -1)"
+        'select(.to == $w) | select($last == "" or (.id > $last)) | .ts' "$f" 2>/dev/null | sed -n 1p)"
       [ -n "$oldest" ] || continue
       age=$(( $(date +%s) - $(date -d "$oldest" +%s 2>/dev/null || date +%s) ))
       [ "$age" -ge 1800 ] || continue
@@ -826,7 +833,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
       open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null || true)"
       [ -n "$open" ] || continue
       n2="$(printf '%s\n' "$open" | wc -l | tr -d ' ')"
-      oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | head -1)"
+      oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | sed -n 1p)"
       age2=$(( $(date +%s) - $(date -d "$oldest2" +%s 2>/dev/null || date +%s) ))
       [ "$age2" -ge 3600 ] || continue
       local text2; text2="$(printf '%s\n' "$open" | jq -r '"[\(.id)] \(.kind) from \(.from): \(.message)"' | head -3)"
