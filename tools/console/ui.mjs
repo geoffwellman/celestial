@@ -26,8 +26,10 @@ import { spawn } from 'node:child_process';
 import { C, orchColour, kindColour } from './theme.mjs';
 import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
-  readHistory, appendHistory, unitLabel,
+  readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
+  renderOutput,
 } from './state.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons } from './views.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import {
   insert, backspace, del, left, right, home, end,
@@ -147,7 +149,7 @@ const OpenPanel = ({ items, sel, offset, height, innerRef, focused, loaded }) =>
 // conversation was somewhere else entirely - so reading a decision meant
 // leaving the console for a pane. Now it takes the room, carries the whole
 // message and the thread around it, and has buttons you can click.
-const DetailView = ({ item, thread: rows, innerRef }) =>
+const DetailView = ({ item, thread: rows, innerRef, target }) =>
   h(Panel, { title: `${String(item.kind || 'item').toUpperCase()} · ${item.ws}`, innerRef, focused: true, right: `${String(item.ts).slice(0, 16).replace('T', ' ')} · Esc back` },
     h(Text, null,
       h(Text, { color: C.dim }, 'from '),
@@ -166,7 +168,11 @@ const DetailView = ({ item, thread: rows, innerRef }) =>
       h(Text, { color: C.dim }, '  '),
       h(Text, { color: C.accent }, '[reply]'),
       h(Text, { color: C.dim }, '  '),
-      h(Text, { color: C.ink }, '[go to]')));
+      h(Text, { color: C.ink }, '[go to]'),
+      // WHO SENT THIS IS A PLACE. A blocker from a worker and no way from it to
+      // that worker is the message being a dead end.
+      target ? h(Text, { color: C.dim }, '  ') : null,
+      target ? h(Text, { color: C.accent }, target.kind === 'unit' ? '[unit]' : '[worker]') : null));
 
 const TailPanel = ({ lines, offset, height, innerRef, focused, loaded }) => {
   const w = window_(lines, offset, height);
@@ -205,6 +211,92 @@ const Overlay = ({ title, lines, innerRef }) =>
   h(Panel, { title, innerRef },
     ...lines.map((l, i) => h(Text, { key: i, color: C.ink, wrap: 'truncate-end' }, l || ' ')));
 
+
+// --- CEL-20: the unit view ---------------------------------------------------
+//
+// A fleet row said "workers 2/4  stalled 1" and every question after that one
+// meant leaving the console. This is the page behind the row: who the
+// orchestrator is, every worker it has out, what is waiting, what was said.
+
+const verdictColour = (w) => {
+  if (!w.verdict) return C.dim;
+  if (w.severity === 'bad' || w.verdict === 'vanished') return C.bad;
+  return C.warn;
+};
+
+const OrchPanel = ({ unit, innerRef }) =>
+  h(Panel, { title: `ORCHESTRATOR · ${unit.name}-orch`, innerRef, right: `workspace ${unit.ws}` },
+    h(Text, null,
+      h(Text, { color: orchColour(unit.orch) }, String(unit.orch).padEnd(6)),
+      h(Text, { color: C.dim }, '  pane '),
+      h(Text, { color: C.ink }, String(unit.pane || '-')),
+      h(Text, { color: C.dim }, '   slots '),
+      h(Text, { color: C.ink }, `${unit.workers}/${unit.cap}`),
+      h(Text, { color: C.dim }, `   repos ${(unit.repos || []).join(', ') || '-'}`)),
+    h(Box, null,
+      h(Text, { color: C.ink }, '[focus]'),
+      h(Text, { color: C.dim }, '  '),
+      h(Text, { color: C.accent }, '[message]')));
+
+const WorkersPanel = ({ workers, sel, innerRef, focused }) =>
+  h(Panel, { title: 'WORKERS', innerRef, focused, right: workers.length ? `${workers.length} out · Enter says why` : '' },
+    workers.length === 0 ? h(Text, { color: C.dim }, '  no workers') : null,
+    ...workers.map((w, i) => h(Text, { key: w.id, inverse: i === sel, wrap: 'truncate-end' },
+      h(Text, { color: i === sel ? C.ink : C.dim }, i === sel ? '▸ ' : '  '),
+      h(Text, { color: C.ink }, String(w.ticket || '-').padEnd(9)),
+      h(Text, { color: C.dim }, String(w.id).padEnd(22)),
+      h(Text, { color: C.ink }, String(w.state || '-').padEnd(9)),
+      h(Text, { color: w.live === 'working' ? C.ok : C.dim }, String(w.live || '-').padEnd(8)),
+      h(Text, { color: C.dim }, quiet(w.quiet_secs).padStart(5)),
+      h(Text, { color: verdictColour(w) }, `  ${String(w.verdict || '-').padEnd(10)}`),
+      h(Text, { color: C.dim }, `ahead ${String(w.ahead ?? '?').padEnd(4)}`),
+      h(Text, { color: C.accent }, prNumber(w.pr) || ''))));
+
+const UnitWaiting = ({ items, innerRef }) =>
+  h(Panel, { title: 'WAITING', innerRef, right: items.length ? `${items.length} open · Enter opens` : '' },
+    items.length === 0 ? h(Text, { color: C.dim }, '  nothing open') : null,
+    ...items.map((it) => h(Text, { key: it.id, wrap: 'truncate-end' },
+      h(Text, { color: C.dim }, `  ${String(it.ts).slice(5, 16).replace('T', ' ')} `),
+      h(Text, { color: kindColour(it.kind) }, `${it.kind} `),
+      h(Text, { color: C.dim }, `${it.from}: `),
+      h(Text, { color: C.ink }, it.message))));
+
+const UnitMail = ({ lines, innerRef }) =>
+  h(Panel, { title: 'RECENT MAIL', innerRef },
+    lines.length === 0 ? h(Text, { color: C.dim }, '  quiet') : null,
+    ...lines.map((m, i) => h(Text, { key: `${m.ts}${i}`, wrap: 'truncate-end' },
+      h(Text, { color: C.dim }, `  ${String(m.ts).slice(5, 16).replace('T', ' ')} `),
+      h(Text, { color: kindColour(m.kind) }, `${m.kind} `),
+      h(Text, { color: C.dim }, `${m.from}: `),
+      h(Text, { color: C.ink }, m.message))));
+
+// --- CEL-20: the worker view, which is the answer to "why" -------------------
+//
+// It runs `cel-fanout why` on open. The complaint this ticket exists for was a
+// console that answered "why is this one stalled" with the name of a command.
+
+const WorkerView = ({ worker, ws, why, busy, preview, innerRef }) =>
+  h(Panel, {
+    title: `WORKER · ${worker.id}`, innerRef, focused: true,
+    right: `${ws} · Esc back`,
+  },
+  h(Text, { wrap: 'truncate-end' },
+    h(Text, { color: C.ink }, workerFacts(worker))),
+  h(Text, { color: C.dim, wrap: 'truncate-end' },
+    `quiet ${quiet(worker.quiet_secs)}   ahead ${worker.ahead ?? '?'}   branch ${worker.branch || '-'}   pane ${worker.pane || '-'}   PR ${prNumber(worker.pr) || 'none'}`),
+  h(Text, null, ' '),
+  busy && !why ? h(Text, { color: C.dim }, 'asking cel-fanout why…') : null,
+  ...String(why || '').split('\n').map((l, i) => h(Text, {
+    key: i,
+    color: /^next:/.test(l) ? C.accent : C.dim,
+    wrap: 'truncate-end',
+  }, l || ' ')),
+  h(Box, { marginTop: 1 },
+    ...workerButtons(preview).flatMap((b, i) => [
+      i ? h(Text, { key: `s${i}`, color: C.dim }, '  ') : null,
+      h(Text, { key: b, color: b === '[release]' ? C.warn : C.ink }, b),
+    ].filter(Boolean))));
+
 const App = ({ refresh, statusSecs }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -231,6 +323,12 @@ const App = ({ refresh, statusSecs }) => {
   const [, setTick] = useState(0);                // a resize is a re-render
   const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
+  const [unit, setUnit] = useState(null);         // the unit view: one product, whole
+  const [wsel, setWsel] = useState(0);            // which worker row the unit view has
+  const [worker, setWorker] = useState(null);     // {worker, ws, why, busy} - the answer to "why"
+  const [raw, setRaw] = useState(false);          // the output view showing the text as it came
+  const rawText = useRef('');                     // what the command actually printed
+  const renderedRef = useRef('');                 // and the console's reading of it
   const history = useRef(readHistory());
   const hIndex = useRef(-1);
   const lastRaw = useRef('');
@@ -243,10 +341,15 @@ const App = ({ refresh, statusSecs }) => {
   const refs = {
     fleet: useRef(null), detail: useRef(null), waiting: useRef(null),
     inbox: useRef(null), output: useRef(null),
+    unitOrch: useRef(null), unitWorkers: useRef(null),
+    unitWaiting: useRef(null), unitMail: useRef(null), worker: useRef(null),
   };
   const rows = fleetRows(doc);
   const rowsRef = useRef(rows); rowsRef.current = rows;
   const itemsRef = useRef(items); itemsRef.current = items;
+  const tailRef = useRef(tail); tailRef.current = tail;
+  const unitRef = useRef(null); unitRef.current = unit;
+  const workerRef = useRef(null); workerRef.current = worker;
 
   // A status message is TRANSIENT and the legend is not. The v1 console wrote
   // the response over the legend and left it there, so five minutes after a
@@ -337,7 +440,13 @@ const App = ({ refresh, statusSecs }) => {
       say('refused by the console allowlist');
       return false;
     }
-    setOutput(r.out || '(no output)');
+    // NO RAW JSON, EVER (views.mjs). The console ran the command, so it knows
+    // the shape of the answer; a box of braces was the console saying "here,
+    // you parse it". `r` in the output view brings the text back.
+    rawText.current = r.out || '(no output)';
+    setRaw(false);
+    renderedRef.current = renderOutput(cmd, r.out) || '(no output)';
+    setOutput(renderedRef.current);
     setOutOffset(0); setOutView(true); setOutCollapsed(false);
     say(r.ok ? 'done - Esc returns to the panels' : 'command exited non-zero - Esc returns to the panels');
     appendHistory(cmd);
@@ -366,7 +475,10 @@ const App = ({ refresh, statusSecs }) => {
       say('refused by the console allowlist - nothing ran');
       return '';
     }
-    const transcript = r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)';
+    const transcript = r.results.map((s2) => `$ ${s2.cmd}\n${renderOutput(s2.cmd, s2.out) || '(no output)'}`).join('\n\n') || '(no output)';
+    rawText.current = r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)';
+    setRaw(false);
+    renderedRef.current = transcript;
     setOutput(transcript);
     setOutOffset(1); setOutView(true); setOutCollapsed(false);
     setOutOffset(0);
@@ -424,13 +536,26 @@ const App = ({ refresh, statusSecs }) => {
   const ask = useCallback(async (text) => {
     setBusy(true);
     say(`asking ${translatorLabel()}…`);
-    const state = `fleet: ${JSON.stringify(doc)}\nopen decisions: ${JSON.stringify(items)}`;
-    let cmds = [], raw = '';
+    const state = askState(doc, items);
+    let cmds = [], raw = '', answered = '';
     try {
-      ({ cmds, raw } = await translate({ sentence: text, state }));
+      ({ cmds, raw, answer: answered = '' } = await translate({ sentence: text, state }));
     } catch (e) {
       setBusy(false);
       say(e instanceof NoTranslator ? e.message : `model: ${e.message}`);
+      return;
+    }
+    // THE ANSWER. The state the model was handed already carries every worker,
+    // its verdict and its quiet time; proposing three commands to rediscover
+    // that is the console handing the operator homework.
+    if (answered) {
+      setBusy(false);
+      rawText.current = answered;
+      renderedRef.current = answered;
+      setRaw(false);
+      setOutput(answered);
+      setOutOffset(1); setOutView(true); setOutCollapsed(false);
+      say('answered from the fleet state - nothing ran · Esc returns to the panels');
       return;
     }
     if (cmds.length) { setBusy(false); asked.current = text; propose(cmds); return; }
@@ -464,6 +589,34 @@ const App = ({ refresh, statusSecs }) => {
     setPane('detail');
   }, []);
 
+  // ENTER IS A PLACE, EVERYWHERE. A fleet row opens the unit it names, a worker
+  // row opens the answer to "why", a message opens the message. The console
+  // that only ever printed to an output box was a console you could read and
+  // not drive.
+  const openUnit = useCallback((name) => {
+    const u = findUnit(doc, name);
+    if (!u) { say(`no unit named ${name} in the fleet`); return; }
+    setUnit(u);
+    setWsel(0);
+    setWorker(null);
+    setPane('unit');
+  }, [doc, say]);
+
+  const openWhy = useCallback(async (w, ws) => {
+    if (!w) return;
+    setWorker({ worker: w, ws, why: '', busy: true });
+    setPane('worker');
+    const text = await whyOf(w.id, ws);
+    setWorker((prev) => (prev && prev.worker.id === w.id ? { ...prev, why: text, busy: false } : prev));
+  }, []);
+
+  const openWorkerById = useCallback((id) => {
+    const found = findWorker(doc, id);
+    if (!found) { say(`no worker ${id} in the fleet`); return; }
+    setUnit(found.unit);
+    openWhy(found.worker, found.ws);
+  }, [doc, openWhy, say]);
+
   const resolveItem = useCallback((it) => {
     if (!it) return;
     setDetail(null);
@@ -482,6 +635,28 @@ const App = ({ refresh, statusSecs }) => {
     setProposed(null);
     setLine(`${head}" --workspace ${it.ws}`, head.length);
     say('reply - type the message, Enter sends it');
+  }, [say, setLine]);
+
+  // A message is FROM something that has a page of its own: a worker alias has
+  // a worker view, `<product>-orch` has a unit view. Reading "ABC-49 is
+  // blocked" and having no way from there to ABC-49 is the whole complaint.
+  const senderTarget = useCallback((from) => {
+    const name = String(from || '');
+    const m = /^(.+)-orch$/.exec(name);
+    if (m && findUnit(doc, m[1])) return { kind: 'unit', name: m[1] };
+    const bare = name.includes('/') ? name.split('/').pop() : name;
+    if (findWorker(doc, bare)) return { kind: 'worker', name: bare };
+    return null;
+  }, [doc]);
+
+  // The same trick as reply, for every form that ends in a message the operator
+  // still has to write: the cursor lands INSIDE the quotes, because a form that
+  // leaves it at the end of the line is a form where every message starts with
+  // two presses of the left arrow.
+  const composeLine = useCallback((head, tail, what) => {
+    setProposed(null);
+    setLine(`${head}"${tail}`, head.length + 1);
+    say(`${what} - type it, Enter sends`);
   }, [say, setLine]);
 
   const submitValue = useCallback(async (raw) => {
@@ -530,14 +705,57 @@ const App = ({ refresh, statusSecs }) => {
     if (!hit) return;
     if (ev.wheel) { scroll(hit.panel, ev.wheel === 'up' ? -1 : 1); return; }
     if (!ev.press || ev.button !== 0) return;
+    // A DOUBLE CLICK IS TWO CLICKS ON THE SAME ROW INSIDE 400 ms, and it has to
+    // be known before the branches below - the depth views open on one.
+    const now2 = Date.now();
+    const last2 = lastClick.current;
+    const dbl2 = last2.panel === hit.panel && last2.index === hit.index && now2 - last2.at < DOUBLE_CLICK_MS;
     if (hit.panel === 'detail') {
       const it = detail?.item;
       if (hit.index === 0) resolveItem(it);
       else if (hit.index === 1) replyTo(it);
       else if (hit.index === 2) execute(`herdr agent focus ${it.from}`);
+      else if (hit.index === 3) {
+        const t2 = senderTarget(it.from);
+        setDetail(null);
+        if (t2?.kind === 'unit') openUnit(t2.name);
+        else if (t2?.kind === 'worker') openWorkerById(t2.name);
+      }
       return;
     }
-    if (hit.index < 0) { setPane(hit.panel === 'fleet' || hit.panel === 'waiting' ? hit.panel : pane); return; }
+    if (hit.panel === 'unitorch') {
+      if (!unitRef.current) return;
+      const u = unitRef.current;
+      if (hit.index === 0) execute(`herdr agent focus ${u.name}-orch`);
+      else if (hit.index === 1) composeLine(`cel inbox send ${u.name}-orch `, ` --workspace ${u.ws}`, 'message');
+      return;
+    }
+    if (hit.panel === 'unitworkers') {
+      const w = (unitRef.current ? workersOf(unitRef.current) : [])[hit.index];
+      setWsel(hit.index);
+      if (dbl2 && w) openWhy(w, unitRef.current.ws);
+      return;
+    }
+    if (hit.panel === 'unitwaiting' || hit.panel === 'unitmail') {
+      const src = hit.panel === 'unitwaiting'
+        ? itemsRef.current.filter((it) => it.ws === unitRef.current?.ws)
+        : tailRef.current.filter((m) => m.ws === unitRef.current?.ws).slice(-10);
+      openDetail(src[hit.index]);
+      return;
+    }
+    if (hit.panel === 'worker') {
+      const w = workerRef.current;
+      if (!w) return;
+      const label = workerButtons(w.preview)[hit.index];
+      if (label === '[prompt]') composeLine(`herdr agent prompt ${w.worker.alias || w.worker.id} `, '', 'prompt');
+      else if (label === '[focus]') execute(`herdr agent focus ${w.worker.alias || w.worker.id}`);
+      else if (label === '[collect]') propose([`cel-fanout collect ${w.worker.id} --workspace ${w.ws}`]);
+      else if (label === '[release]') propose([`cel-fanout release ${w.worker.id} --workspace ${w.ws}`]);
+      else if (label === '[try]') propose([`cel-fanout try ${w.worker.id} --workspace ${w.ws}`]);
+      else if (label === '[why again]') openWhy(w.worker, w.ws);
+      return;
+    }
+    if (hit.index < 0) { setPane(['fleet', 'waiting', 'inbox'].includes(hit.panel) ? hit.panel : pane); return; }
     const now = Date.now();
     const last = lastClick.current;
     const dbl = last.panel === hit.panel && last.index === hit.index && now - last.at < DOUBLE_CLICK_MS;
@@ -552,15 +770,24 @@ const App = ({ refresh, statusSecs }) => {
       setPane('fleet');
       setSel(hit.index);
       const r = rowsRef.current[hit.index];
-      if (dbl && r && r.kind === 'unit') execute(`herdr agent focus ${r.name}-orch`);
+      if (dbl && r && r.kind === 'unit') openUnit(r.name);
       return;
     }
     if (hit.panel === 'waiting') {
       setPane('waiting');
       setSel(hit.index);
       if (dbl) openDetail(itemsRef.current[hit.index]);
+      return;
     }
-  }, [detail, options, pane, execute, openDetail, propose, replyTo, resolveItem, scroll]);
+    // "I can't click on stuff in the inbox" - the tail was the one panel with
+    // no selection and no Enter at all.
+    if (hit.panel === 'inbox') {
+      setPane('inbox');
+      setSel(hit.index);
+      if (dbl) openDetail(tailRef.current[hit.index]);
+    }
+  }, [detail, options, pane, execute, openDetail, openUnit, openWhy, openWorkerById,
+    composeLine, senderTarget, propose, replyTo, resolveItem, scroll]);
 
   // ink's useInput hands a mouse report through as ordinary input on some
   // terminals and swallows it on others, so stdin is read directly and ONLY
@@ -582,7 +809,10 @@ const App = ({ refresh, statusSecs }) => {
     return () => process.stdin.off('data', onData);
   }, [onMouse]);
 
-  const list = pane === 'waiting' ? items : rows;
+  const unitWorkers = unit ? workersOf(unit) : [];
+  const unitItems = unit ? items.filter((it) => it.ws === unit.ws) : [];
+  const unitMail = unit ? tail.filter((m) => m.ws === unit.ws).slice(-10) : [];
+  const list = pane === 'waiting' ? items : pane === 'inbox' ? tail : rows;
 
   useInput((input, key) => {
     // A mouse report that reached the keyboard is not text: without this it
@@ -610,6 +840,18 @@ const App = ({ refresh, statusSecs }) => {
     if (view === 'output' && !value) {
       const step = Math.max(1, outFullH - 2);
       if (key.escape) { setOutView(false); say('back'); return; }
+      // The rendering is the console's reading of the output; `r` shows what
+      // the command actually printed, because a console that hides the real
+      // bytes is a console you cannot debug from.
+      if (input === 'r') {
+        setRaw((v) => {
+          const next = !v;
+          setOutput(next ? rawText.current : renderedRef.current);
+          return next;
+        });
+        setOutOffset(1);
+        return;
+      }
       if (key.upArrow) { setOutOffset((o) => Math.max(1, (o === 1 ? 1 : o) - 1)); return; }
       if (key.downArrow) { setOutOffset((o) => Math.min(Math.max(1, outAll.length - outFullH + 1), (o === 1 ? 1 : o) + 1)); return; }
       if (key.pageUp) { setOutOffset((o) => Math.max(1, (o === 1 ? 1 : o) - step)); return; }
@@ -640,8 +882,47 @@ const App = ({ refresh, statusSecs }) => {
     // only here. Everywhere else a typed letter is a letter - the first cut of
     // this console bound bare j/k/f/o/r/w/q and "what's blocked" flipped the
     // panel and lost its w.
+    // THE DEPTH VIEWS. Bare letters are actions here only while the command
+    // line is EMPTY: the moment the operator has typed something they are
+    // typing, not pressing keys, and a view that ate their `f` would be a view
+    // they could not type a command from.
+    if (worker && !detail) {
+      const w = worker.worker;
+      if (key.escape) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
+      if (!value) {
+        if (key.return) return;
+        if (input === 'p') { composeLine(`herdr agent prompt ${w.alias || w.id} `, '', 'prompt'); return; }
+        if (input === 'f') { execute(`herdr agent focus ${w.alias || w.id}`); return; }
+        if (input === 'c') { propose([`cel-fanout collect ${w.id} --workspace ${worker.ws}`]); return; }
+        if (input === 'x') { propose([`cel-fanout release ${w.id} --workspace ${worker.ws}`]); return; }
+        if (input === 't') { propose([`cel-fanout try ${w.id} --workspace ${worker.ws}`]); return; }
+        if (input === 'w') { openWhy(w, worker.ws); return; }
+      }
+    } else if (unit && pane === 'unit' && !detail) {
+      if (key.escape) { setUnit(null); setPane('fleet'); say('back'); return; }
+      if (key.upArrow) { setWsel((i) => Math.max(0, i - 1)); return; }
+      if (key.downArrow) { setWsel((i) => Math.min(unitWorkers.length - 1, i + 1)); return; }
+      if (key.return && !value.trim()) { openWhy(unitWorkers[wsel], unit.ws); return; }
+      if (!value) {
+        if (input === 'f') { execute(`herdr agent focus ${unit.name}-orch`); return; }
+        if (input === 'm') { composeLine(`cel inbox send ${unit.name}-orch `, ` --workspace ${unit.ws}`, 'message'); return; }
+      }
+    }
+
     if (detail) {
       if (key.escape) { setDetail(null); setPane('waiting'); say('back'); return; }
+      if (input === 'u') {
+        const t2 = senderTarget(detail.item.from);
+        if (t2 && t2.kind === 'unit') { setDetail(null); openUnit(t2.name); return; }
+        say('that message is not from an orchestrator');
+        return;
+      }
+      if (input === 'k') {
+        const t2 = senderTarget(detail.item.from);
+        if (t2 && t2.kind === 'worker') { setDetail(null); openWorkerById(t2.name); return; }
+        say('that message is not from a worker');
+        return;
+      }
       if (input === 'r') { resolveItem(detail.item); return; }
       if (input === 'p') { replyTo(detail.item); return; }
       if (input === 'g') { setDetail(null); setPane('fleet'); execute(`herdr agent focus ${detail.item.from}`); return; }
@@ -655,7 +936,15 @@ const App = ({ refresh, statusSecs }) => {
       return;
     }
     if (key.return) {
-      if (pane === 'waiting' && !value.trim()) { openDetail(items[sel]); return; }
+      if (!value.trim()) {
+        if (pane === 'waiting') { openDetail(items[sel]); return; }
+        if (pane === 'inbox') { openDetail(tail[sel]); return; }
+        if (pane === 'fleet') {
+          const r = rows[sel];
+          if (r && r.kind === 'unit') { openUnit(r.name); return; }
+          if (r && r.kind === 'ws') { say(`${r.ws}: ${r.units} products - select one to open it`); return; }
+        }
+      }
       submit();
       return;
     }
@@ -704,8 +993,9 @@ const App = ({ refresh, statusSecs }) => {
           setLine(r.value);
           return;
         }
-        case 't': setPane((p) => (p === 'fleet' ? 'waiting' : 'fleet')); setSel(0); return;
-        case 'd': if (pane === 'waiting') openDetail(items[sel]); return;
+        // Three panels now, not two: the inbox tail is a list you can enter.
+        case 't': setPane((p) => (p === 'fleet' ? 'waiting' : p === 'waiting' ? 'inbox' : 'fleet')); setSel(0); return;
+        case 'd': if (pane === 'waiting') openDetail(items[sel]); else if (pane === 'inbox') openDetail(tail[sel]); return;
         case 'f': {
           const r = rows[sel];
           if (pane === 'fleet' && r && r.kind === 'unit') execute(`herdr agent focus ${r.name}-orch`);
@@ -768,6 +1058,7 @@ const App = ({ refresh, statusSecs }) => {
     return {
       fleet: fleetH,
       detail: detail ? Math.max(6, screen - chrome - 3 - (outputRows ? outputRows + 3 : 0)) : 0,
+      unitWorkers: Math.max(3, Math.floor((screen - chrome - 12) / 2)),
       full: Math.max(6, screen - chrome - 3),
       waiting: Math.max(1, Math.ceil(remaining / 2)),
       inbox: Math.max(1, Math.floor(remaining / 2)),
@@ -801,7 +1092,7 @@ const App = ({ refresh, statusSecs }) => {
       });
       top += height;
     };
-    if (!detail) push('fleet', refs.fleet, Math.min(layout.fleet, rows.length), offsets.fleet > 0 ? 1 : 0);
+    if (view === 'main') push('fleet', refs.fleet, Math.min(layout.fleet, rows.length), offsets.fleet > 0 ? 1 : 0);
     if (detail) push('detail', refs.detail, 0);
     // The detail view's three buttons are its "rows": resolve, reply, go to -
     // all on one line, which the click handler maps by index.
@@ -809,8 +1100,22 @@ const App = ({ refresh, statusSecs }) => {
       const d = map[map.length - 1];
       d.rows = [d.bottom - 1, d.bottom - 1, d.bottom - 1];
     }
-    if (!detail) push('waiting', refs.waiting, Math.min(layout.waiting, items.length), offsets.waiting > 0 ? 1 : 0);
-    if (!detail) push('inbox', refs.inbox, Math.min(layout.inbox, tail.length), offsets.inbox > 0 ? 1 : 0);
+    if (view === 'unit') {
+      push('unitorch', refs.unitOrch, 2);
+      push('unitworkers', refs.unitWorkers, unitWorkers.length);
+      push('unitwaiting', refs.unitWaiting, unitItems.length);
+      push('unitmail', refs.unitMail, unitMail.length);
+      // The orchestrator panel's two buttons share one line, the last of it.
+      const o = map.find((m2) => m2.panel === 'unitorch');
+      if (o) o.rows = [o.bottom - 1, o.bottom - 1];
+    }
+    if (view === 'worker') {
+      push('worker', refs.worker, 0);
+      const wv = map[map.length - 1];
+      if (wv && wv.panel === 'worker') wv.rows = workerButtons(worker?.preview).map(() => wv.bottom - 1);
+    }
+    if (view === 'main') push('waiting', refs.waiting, Math.min(layout.waiting, items.length), offsets.waiting > 0 ? 1 : 0);
+    if (view === 'main') push('inbox', refs.inbox, Math.min(layout.inbox, tail.length), offsets.inbox > 0 ? 1 : 0);
     if (layout.output) push('output', refs.output, outWin.rows.length);
     hitMap.current = map;
   });
@@ -821,11 +1126,15 @@ const App = ({ refresh, statusSecs }) => {
   // take the whole stack; appending them under three panels that already fill
   // the screen put them below the last row, where nobody ever saw them - the
   // owner's "? did nothing" was exactly that.
-  const view = help ? 'help' : picker ? 'picker' : detail ? 'detail' : (outView && output && !outCollapsed) ? 'output' : 'main';
+  const view = help ? 'help' : picker ? 'picker' : detail ? 'detail'
+    : worker ? 'worker' : unit ? 'unit'
+      : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
     if (picker) { setPicker(null); return; }
-    if (detail) { setDetail(null); setPane('waiting'); say('back'); return; }
+    if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
+    if (worker) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
+    if (unit) { setUnit(null); setPane('fleet'); say('back'); return; }
     if (view === 'output' && !value) { setOutView(false); say('back'); return; }
     const had = !!proposed || options.length > 0 || !!value;
     setProposed(null); setOptions([]); setLine('');
@@ -842,11 +1151,26 @@ const App = ({ refresh, statusSecs }) => {
           : ['  nothing matches'],
       })]
       : view === 'detail'
-        ? [h(DetailView, { key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail })]
+        ? [h(DetailView, {
+          key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail,
+          target: senderTarget(detail.item.from),
+        })]
+        : view === 'worker'
+          ? [h(WorkerView, {
+            key: 'worker', worker: worker.worker, ws: worker.ws, why: worker.why,
+            busy: worker.busy, preview: !!worker.preview, innerRef: refs.worker,
+          })]
+          : view === 'unit'
+            ? [
+              h(OrchPanel, { key: 'orch', unit, innerRef: refs.unitOrch }),
+              h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: wsel, innerRef: refs.unitWorkers, focused: true }),
+              h(UnitWaiting, { key: 'uwait', items: unitItems, innerRef: refs.unitWaiting }),
+              h(UnitMail, { key: 'umail', lines: unitMail, innerRef: refs.unitMail }),
+            ]
         : view === 'output'
           ? [h(Panel, {
             key: 'output', title: 'OUTPUT', innerRef: refs.output, focused: true,
-            right: `${outAll.length} lines · ↑/↓ PgUp/PgDn scroll · Esc back`,
+            right: `${outAll.length} lines · ${raw ? '[raw] on' : '[raw] r'} · ↑/↓ PgUp/PgDn · Esc back`,
           }, h(More, { n: outFull.above, up: true }),
           ...outFull.rows.map((l, i) => h(Text, { key: i, wrap: 'truncate-end' }, l || ' ')),
           h(More, { n: outFull.below }))]
@@ -885,7 +1209,9 @@ const App = ({ refresh, statusSecs }) => {
       h(Text, { color: status ? C.ink : C.dim }, `${busy ? '… ' : ''}${status || ''}`),
       h(Box, { flexGrow: 1 }),
       h(Text, { color: C.dim }, status ? statusAt : `${translatorLabel()} · ${at}`)),
-    h(Box, null, h(Text, { color: C.dim }, legend(detail ? 'detail' : pane))));
+    h(Box, null, h(Text, { color: C.dim }, legend(
+      view === 'detail' ? 'detail' : view === 'worker' ? 'worker' : view === 'unit' ? 'unit'
+        : view === 'output' ? 'output' : pane))));
 };
 
 export const start = async (opts) => {

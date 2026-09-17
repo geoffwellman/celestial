@@ -128,6 +128,22 @@ Rules:
 - If the sentence does not map onto the vocabulary, answer with a single
   question mark: ?
 
+ANSWERING INSTEAD OF RUNNING:
+- The state below carries every product, every worker in \`workers_list\`
+  (its ticket, state, live agent, quiet seconds, verdict, ahead count and PR)
+  and every open decision. When the question is fully answerable from that
+  state, do NOT propose commands: answer with ONE line of the form
+  \`ANSWER: <text>\` - plain prose, at most three sentences, naming things
+  exactly as the state spells them.
+- Only from the state. If it does not hold the answer, send commands instead.
+- "why is <ticket> stuck" is \`cel-fanout why <id> --workspace <w>\` - the id
+  from \`workers_list\`, not the ticket, when they differ.
+
+Answer examples:
+why is ABC-49 stalled -> ANSWER: ABC-49 (ABC-49-slug on widget) has been quiet 13m and the fleet calls it stalled; it is 3 commits ahead with PR #12 open.
+which workers are idle -> ANSWER: one - ABC-49-slug on widget, idle for 13m.
+what is waiting on me on alpha -> ANSWER: one decision from bundle-orch: ship gadget or hold?
+
 Examples:
 what's blocked -> cel fleet
 how is widget going ->
@@ -198,14 +214,22 @@ const clean = (text) => String(text || '')
 // command line as the second step of a chain.
 export const parseReply = (text) => {
   const raw = clean(text);
+  // `ANSWER: …` is the model saying the state already holds it. It is checked
+  // before anything else and it is never mixed with commands: a reply that is
+  // half prose and half command line is a reply nobody can act on safely.
+  const ans = /^ANSWER:\s*([\s\S]+)$/.exec(raw);
+  if (ans) {
+    const body = ans[1].trim();
+    return body ? { cmds: [], raw, answer: body } : { cmds: [], raw, answer: '' };
+  }
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (!lines.length || raw === '?') return { cmds: [], raw };
-  if (lines.length > CHAIN_MAX) return { cmds: [], raw };
+  if (!lines.length || raw === '?') return { cmds: [], raw, answer: '' };
+  if (lines.length > CHAIN_MAX) return { cmds: [], raw, answer: '' };
   // ` -- ` is the reason separator of options mode. A model that answered the
   // first ask in that shape has offered candidates, not a chain, and running
   // them in order would run three alternatives one after another.
-  for (const line of lines) if (!COMMAND.test(line) || line.includes(' -- ')) return { cmds: [], raw };
-  return { cmds: lines, raw };
+  for (const line of lines) if (!COMMAND.test(line) || line.includes(' -- ')) return { cmds: [], raw, answer: '' };
+  return { cmds: lines, raw, answer: '' };
 };
 
 // `<command> -- <reason>`. The separator is ` -- ` with spaces so a command
@@ -346,8 +370,8 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   // menu of three good options into "no command for that" on this box.
   const text = await _chat({ cfg, table, root, key, base, system, user, timeout: options ? 30000 : 15000 });
   if (options) return parseOptions(text);
-  const { cmds, raw } = parseReply(text);
-  return { cmds, cmd: cmds[0] || null, raw };
+  const { cmds, raw, answer: answered } = parseReply(text);
+  return { cmds, cmd: cmds[0] || null, raw, answer: answered };
 };
 
 export const translatorLabel = (configPath) => {

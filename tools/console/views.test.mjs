@@ -50,7 +50,7 @@ t('the unit view carries the orchestrator, every worker and the mail', () => {
   assert.match(text, /ORCHESTRATOR/);
   assert.match(text, /bundle-orch/);
   assert.match(text, /w1:p0/);
-  assert.match(text, /1\/4/);                       // used slots of the cap
+  assert.match(text, /2\/4/);                       // used slots of the cap
   assert.match(text, /\[focus\]/);
   assert.match(text, /\[message\]/);
   assert.match(text, /WORKERS/);

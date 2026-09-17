@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, runCommand, runChain, fleet, openItems, appendHistory } from './state.mjs';
+import { renderOnce, renderUnit, renderWorker, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,16 +26,18 @@ const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
 const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm ci --ignore-scripts) - or run cel setup`;
 
 const usage = `usage: cel console [--refresh SECS] [--render-once] [--status TEXT]
-                   [--status-secs N] [--run "<cmd>"]
+                   [--status-secs N] [--run "<cmd>"] [--unit NAME] [--worker ID]
                    [--chain "<cmd>" ...] [--ask "<text>"]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [] };
+const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '' };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
+  else if (a === '--unit') { opts.unit = argv[++i] || ''; }
+  else if (a === '--worker') { opts.worker = argv[++i] || ''; }
   else if (a === '--chain') { const c = argv[++i] || ''; if (c) opts.chain.push(c); }
   else if (a === '--status') { opts.status = argv[++i] || ''; }
   else if (a === '--status-secs') { const n = Number(argv[++i]); opts.statusSecs = Number.isFinite(n) ? n : 8; }
@@ -51,18 +53,25 @@ for (let i = 0; i < argv.length; i += 1) {
 const translatorState = async () => {
   const doc = await fleet();
   const items = await openItems(doc);
-  return `fleet: ${JSON.stringify(doc)}\nopen decisions: ${JSON.stringify(items)}`;
+  return askState(doc, items);
 };
 
 const main = async () => {
   if (opts.translate) {
     const state = await translatorState();
-    let cmds = [], raw = '';
+    let cmds = [], raw = '', answered = '';
     try {
-      ({ cmds, raw } = await translate({ sentence: opts.translate, state }));
+      ({ cmds, raw, answer: answered = '' } = await translate({ sentence: opts.translate, state }));
     } catch (e) {
       process.stderr.write(`${e.message}\n`);
       process.exit(1);
+    }
+    // THE ANSWER FORM. The state the model was handed already says which
+    // workers are idle and what is waiting; proposing three commands to
+    // rediscover it is the console making the operator do the reading.
+    if (answered) {
+      process.stdout.write(`${answered}\n`);
+      return;
     }
     if (cmds.length) {
       // A chain prints one command per line: the caller pipes it into a shell
@@ -125,6 +134,21 @@ const main = async () => {
   }
 
   if (opts.renderOnce) {
+    // A DRILL-DOWN IS A RENDER TOO. `--unit` and `--worker` print exactly the
+    // pages the TUI draws, so the views are testable and an operator with a
+    // pipe can have the depth as well.
+    if (opts.worker) {
+      const text = await renderWorker(opts.worker, { status: opts.status });
+      if (!text) { process.stderr.write(`cel console: no worker '${opts.worker}' in the fleet\n`); process.exit(1); }
+      process.stdout.write(`${text}\n`);
+      return;
+    }
+    if (opts.unit) {
+      const text = await renderUnit(opts.unit, { status: opts.status });
+      if (!text) { process.stderr.write(`cel console: no unit '${opts.unit}' in the fleet\n`); process.exit(1); }
+      process.stdout.write(`${text}\n`);
+      return;
+    }
     process.stdout.write(`${await renderOnce({ status: opts.status })}\n`);
     return;
   }
