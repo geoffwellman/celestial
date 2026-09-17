@@ -392,3 +392,26 @@ test_console_run_appends_to_history() {
   assert_contains "$(cat "$T/history")" 'cel fleet'
   _console_teardown
 }
+
+# --- full screen -----------------------------------------------------------
+
+# The console runs on the alternate screen, like htop or vim: it fills the
+# terminal, nothing it draws lands in the scrollback, and quitting gives the
+# operator back the screen they had. The enter/leave pairs are proved by a unit
+# test because the failure mode - leaving on one exit path and not another - is
+# a terminal the owner has to reset by hand.
+test_console_terminal_mode_pairs_are_proved() {
+  node "$CEL_ROOT/tools/console/term.test.mjs"
+}
+
+# --render-once is PLAIN STDOUT. It is what an operator pipes into a file when
+# the full-screen UI is the last thing they want, and an alternate-screen
+# switch in the middle of that file would be the UI following them into it.
+test_console_render_once_never_switches_screens() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  case "$out" in *$'\033[?1049'*) echo 'render-once switched to the alternate screen'; return 1;; esac
+  assert_contains "$out" 'alpha'
+  _console_teardown
+}
