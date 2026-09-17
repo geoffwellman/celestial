@@ -27,7 +27,7 @@ import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
   readHistory, appendHistory, unitLabel,
 } from './state.mjs';
-import { translate, NoTranslator, translatorLabel } from './translate.mjs';
+import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
@@ -216,6 +216,7 @@ const App = ({ refresh, statusSecs }) => {
   const history = useRef(readHistory());
   const hIndex = useRef(-1);
   const lastRaw = useRef('');
+  const asked = useRef('');   // the sentence behind the current proposal, for the answer
   const typed = useRef('');
   const lastClick = useRef({ panel: '', index: -1, at: 0 });
   const hitMap = useRef([]);
@@ -320,7 +321,7 @@ const App = ({ refresh, statusSecs }) => {
     appendHistory(cmd);
     history.current = [...history.current, cmd];
     reload();
-    return r.ok;
+    return `$ ${cmd}\n${r.out || '(no output)'}`;
   }, [reload, say]);
 
   // A CHAIN IS ALLOWLISTED WHOLE BEFORE ANY OF IT RUNS (state.mjs:runChain), and
@@ -328,7 +329,7 @@ const App = ({ refresh, statusSecs }) => {
   // a proposal they were told the guard would check - so a refusal on line two
   // must not arrive after line one has already changed the box.
   const executeChain = useCallback(async (cmds) => {
-    if (cmds.length === 1) { await execute(cmds[0]); return; }
+    if (cmds.length === 1) return execute(cmds[0]);
     setBusy(true);
     say(`checking ${cmds.length} commands…`);
     const r = await runChain(cmds, (cmd, i, n) => say(`running ${i + 1}/${n}: ${cmd}`));
@@ -341,9 +342,10 @@ const App = ({ refresh, statusSecs }) => {
       ].join('\n'));
       setOutOffset(0);
       say('refused by the console allowlist - nothing ran');
-      return;
+      return '';
     }
-    setOutput(r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)');
+    const transcript = r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)';
+    setOutput(transcript);
     setOutOffset(0);
     for (const s2 of r.results) appendHistory(s2.cmd);
     history.current = [...history.current, ...r.results.map((s2) => s2.cmd)];
@@ -351,7 +353,30 @@ const App = ({ refresh, statusSecs }) => {
     say(r.stoppedAt != null
       ? `stopped at ${r.stoppedAt + 1}/${cmds.length} - it exited non-zero`
       : `done - ${cmds.length} commands`);
+    return transcript;
   }, [execute, reload, say]);
+
+  // THE ANSWER. A sentence that became commands is still a question, and
+  // "what is happening with widget" answered with a fleet table is the console
+  // handing the operator homework. Once the commands have run, the model reads
+  // what they printed and answers the sentence in a few lines above the raw
+  // output. It reads; it never runs anything.
+  const explain = useCallback(async (sentence, transcript) => {
+    if (!sentence || !transcript) return;
+    setBusy(true);
+    say(`answering from the output (${translatorLabel()})…`);
+    try {
+      const a = await answer({ sentence, transcript });
+      setBusy(false);
+      if (!a) { say('done'); return; }
+      setOutput(`${a}\n\n${'─'.repeat(40)}\n${transcript}`);
+      setOutOffset(0);
+      say('answered - the raw output is below the line');
+    } catch (e) {
+      setBusy(false);
+      say(e instanceof NoTranslator ? 'done' : `model: ${e.message} - raw output kept`);
+    }
+  }, [say]);
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
 
@@ -378,7 +403,7 @@ const App = ({ refresh, statusSecs }) => {
       say(e instanceof NoTranslator ? e.message : `model: ${e.message}`);
       return;
     }
-    if (cmds.length) { setBusy(false); propose(cmds); return; }
+    if (cmds.length) { setBusy(false); asked.current = text; propose(cmds); return; }
     // The second ask: what might they have meant? A miss that only says "no"
     // leaves the operator exactly where they were.
     say('no command for that - asking for options…');
@@ -441,21 +466,24 @@ const App = ({ refresh, statusSecs }) => {
     // Enter, which is the whole rule the model is held to.
     if (options.length && /^[123]$/.test(text)) {
       const pick = options[Number(text) - 1];
-      if (pick) { setOptions([]); propose([pick.cmd]); return; }
+      if (pick) { setOptions([]); propose([pick.cmd]); return; }   // asked.current still holds the sentence
     }
     // A PROPOSED command runs on the SECOND Enter and not before. The model
     // never executes anything: it writes a line, the operator reads it, and
     // the keystroke that runs it is theirs.
     if (proposed && text === proposed.cmds.join(' ; ')) {
       const { cmds } = proposed;
+      const sentence = asked.current;
+      asked.current = '';
       setProposed(null);
       setLine('');
-      await executeChain(cmds);
+      const transcript = await executeChain(cmds);
+      if (sentence && transcript) await explain(sentence, transcript);
       return;
     }
-    if (COMMAND.test(text)) { setLine(''); await execute(text); return; }
+    if (COMMAND.test(text)) { setLine(''); asked.current = ''; await execute(text); return; }
     await ask(text);
-  }, [value, proposed, options, exit, execute, executeChain, ask, propose, setLine]);
+  }, [value, proposed, options, exit, execute, executeChain, explain, ask, propose, setLine]);
 
   const scroll = useCallback((panel, delta) => {
     if (panel === 'output') { setOutOffset((o) => Math.max(0, o + delta)); return; }
