@@ -49,8 +49,14 @@ export const openItems = async (doc) => {
 // `cel inbox watch`: a render-once run has no child to watch, and the file is
 // the same thing the watch is tailing. The live TUI still runs the watch - that
 // is what raises the desktop notification - and appends its lines on top.
+// The tail is TODAY'S mail: the last 24 hours of root-addressed lines, newest
+// last. The whole history is `cel inbox read`; a week of two retired
+// orchestrators reporting every step to root (458 status lines on one box)
+// is not a tail, it is an archive, and "▲ 194 more" was the console saying so.
+export const TAIL_HOURS = Number(process.env.CEL_CONSOLE_TAIL_HOURS || 24);
 export const inboxTail = (doc, n = 8) => {
   const lines = [];
+  const since = Date.now() - TAIL_HOURS * 3600 * 1000;
   for (const ws of doc.workspaces || []) {
     let text;
     try { text = readFileSync(join(INBOX_DIR(), `${ws.name}.jsonl`), 'utf8'); } catch { continue; }
@@ -60,6 +66,7 @@ export const inboxTail = (doc, n = 8) => {
         const m = JSON.parse(raw);
         if (m.kind === 'resolution' || m.kind === 'update') continue;   // rollups: the item carries the count
         if (m.to !== 'root' && m.to !== 'all') continue;
+        if ((Date.parse(m.ts) || 0) < since) continue;
         lines.push({ ws: ws.name, ts: m.ts || '', kind: m.kind, from: m.from, message: String(m.message || '').replace(/\n/g, ' ') });
       } catch { /* likewise */ }
     }
