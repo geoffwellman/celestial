@@ -324,7 +324,9 @@ _rollup_fixture() { # a registry with one workspace and a sandbox mailbox
   export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
   mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
-  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  # one profile routes to the provider under test - a dry provider nobody
+  # routes to is deliberately NOT a blocker (see the test below)
+  printf 'name: alpha\nworker_profiles:\n  cheap: {runtime: omp, model: deepseek/deepseek-chat}\n' > "$T/alpha/workspace.yaml"
   CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
   export CEL_MANIFEST="$T/agents.yaml"
   printf 'providers:\n  deepseek:\n    balance: {unit: usd, floor: "1"}\n' > "$CEL_MANIFEST"
@@ -358,6 +360,19 @@ test_steward_clears_a_condition_that_stopped_being_true() {
   local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
   assert_contains "$mail" "cleared:"
   assert_contains "$mail" "deepseek"
+  rm -rf "$T"
+}
+
+# A dry account that no profile routes to vetoes nothing, so it is not a
+# blocker - and an item raised for it earlier is taken down.
+test_steward_stays_quiet_about_a_dry_provider_nobody_routes_to() {
+  _rollup_fixture
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "deepseek"
+  printf 'name: alpha\nworker_profiles:\n  cheap: {runtime: omp, model: openrouter/deepseek/deepseek-chat}\n' > "$T/alpha/workspace.yaml"
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "no profile in alpha routes to it"
   rm -rf "$T"
 }
 
