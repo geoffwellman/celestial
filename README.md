@@ -158,9 +158,10 @@ gives you back the screen you had. Panels, top to bottom:
 - **Fleet** — `cel fleet --json` as a table, one block per workspace, coloured
   by state and refreshed every 10 seconds (`--refresh`) and after every command
   you run. ↑/↓ select a row, Ctrl+F focuses that unit's orchestrator pane,
-  Ctrl+O opens its dashboard. Command history is Ctrl+P / Ctrl+N and the
-  Ctrl+R picker, as in a shell. Every other keyboard action is a Ctrl chord: a
-  letter you type is always a letter typed.
+  Ctrl+O opens its dashboard, and **Enter (or a double-click) opens the unit
+  view**. Command history is Ctrl+P / Ctrl+N and the Ctrl+R picker, as in a
+  shell. Every other keyboard action on this screen is a Ctrl chord: a letter
+  you type is always a letter typed.
 - **Waiting on you** — every open decision and blocker addressed to `root`,
   across all workspaces, oldest first with their ids. Ctrl+T switches the
   selection here; Enter (or a double-click) opens the item.
@@ -170,9 +171,25 @@ gives you back the screen you had. Panels, top to bottom:
   `p` starts a reply with the cursor inside the quotes, `g` goes to the sender,
   `Esc` comes back. Bare letters act *here* and only here, because the detail
   view has no command line.
-- **Inbox tail** — the newest mail, prefixed with its workspace. A decision or
-  a blocker also rings the bell and raises a desktop notification.
-- **Output** — the last command's full output, scrolling with PageUp/PageDown
+- **Inbox tail** — the newest mail, prefixed with its workspace. Ctrl+T cycles
+  the selection fleet → waiting → inbox, and Enter (or a double-click) opens
+  the message here too. A decision or a blocker also rings the bell and raises
+  a desktop notification.
+- **Unit view** — one product, whole: its orchestrator (state, pane, slots,
+  workspace and repos) with `[focus]` and `[message]`; every worker it has out
+  as a row — ticket, id, state, live agent, quiet time, verdict in colour,
+  commits ahead and PR number; that workspace's open decisions; and the last
+  ten lines of its mail. ↑/↓ pick a worker, Enter opens it, `Esc` goes back.
+- **Worker view** — the answer to *why*. It runs `cel-fanout why <id>` when it
+  opens and shows what it said: the facts line, the pane tail, the mail from
+  that worker, the PR and a `next:` sentence. `p` prompts it, `f` focuses its
+  pane, `c` collects, `x` releases, `t` tries the preview, `w` asks again.
+  Anything that changes state is *proposed* on the command line and runs when
+  you press Enter, never on the keypress alone.
+- **Output** — the last command's full output, rendered rather than dumped: the
+  console knows the shape of what it ran, so `--json` comes back as the same
+  tables the panels use and anything else that parses as JSON as `key: value`
+  lines. `r` toggles `[raw]` — the bytes exactly as the command printed them. scrolling with PageUp/PageDown
   or the wheel; Ctrl+L collapses it and gives the room back.
 - **Command line** — it edits like a shell: a real cursor (←/→, Home/End,
   Ctrl+A / Ctrl+E), Ctrl+W, Ctrl+K, Ctrl+U, Tab completion over the cel
@@ -184,8 +201,10 @@ gives you back the screen you had. Panels, top to bottom:
   binding.
 
 The mouse works: click a row to select it, double-click for that panel's
-primary action (focus the orchestrator, open the decision), roll the wheel over
-a panel to scroll it, click `[resolve]` `[reply]` `[go to]` in the detail view.
+primary action (open the unit, open the message), roll the wheel over a panel
+to scroll it, click `[resolve]` `[reply]` `[go to]` in the detail view — or
+`[worker]` / `[unit]`, which take you to the page of whoever sent it — and the
+buttons in the unit and worker views.
 Mouse reporting and the alternate screen are turned off on every exit path
 there is — quit, Ctrl+C, SIGTERM, a crash — because a terminal left in mouse
 mode is a terminal you cannot select text in.
@@ -197,7 +216,11 @@ Anything it returns is *proposed*: it lands on your command line and runs when
 you press Enter again, or disappears on `Esc`. The model never executes
 anything.
 
-A sentence can come back as a **chain** of up to five commands when it needs a
+A sentence the console can already answer comes back as an **answer** rather
+than as homework. The state the model is given carries every worker, its
+verdict, its quiet time and its PR, so "which workers are idle", "why is ABC-49
+stalled" and "what is waiting on me on alpha" are answered from it and nothing
+runs. Otherwise a sentence can come back as a **chain** of up to five commands when it needs a
 sequence — every line is put to the allowlist *before any of them runs*, and
 then they run in order, stopping at the first one that exits non-zero. And a miss is not a dead end: the model is asked a
 second time for up to three candidates, each with a one-line reason, and they
@@ -232,8 +255,10 @@ saying so and the command line carries on working.
 `cel console --render-once` prints the panels as plain text and exits — no
 alternate screen, no mouse — for pipes and for when a full-screen UI is the
 last thing you want; `--status "…"` renders a status line with it. `cel
-console --ask "<sentence>"` prints the chain one command per line (exit 0), or
-the numbered options on a miss (exit 1). `cel run console --agent` still starts
+console --ask "<sentence>"` prints the chain one command per line, or the
+answer when the state holds one (exit 0), or the numbered options on a miss
+(exit 1). `--render-once --unit <product>` and `--render-once --worker <id>`
+print the two depth views the same way. `cel run console --agent` still starts
 the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
