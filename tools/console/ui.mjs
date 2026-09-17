@@ -32,7 +32,7 @@ import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
 } from './edit.mjs';
-import { parseMouseAll, hasMouse, hitTest } from './mouse.mjs';
+import { parseMouseAll, hasMouse, hasControl, hitTest } from './mouse.mjs';
 import { enterTerminal, LEAVE } from './term.mjs';
 import { legend, helpLines } from './legend.mjs';
 
@@ -580,17 +580,12 @@ const App = ({ refresh, statusSecs }) => {
     if (key.leftArrow) { const r = left(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
     if (key.rightArrow) { const r = right(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
 
-    // Selection moves on Shift+arrows (or Ctrl+N / Ctrl+P); plain arrows are
-    // history, as in a shell.
-    if ((key.upArrow || key.downArrow) && key.shift) {
-      setSel((s) => (key.upArrow ? Math.max(0, s - 1) : Math.min(list.length - 1, s + 1)));
-      return;
-    }
+    // Arrows move the selection - they are what anyone reaches for first,
+    // and Shift+arrow never arrived through the owner's terminal host. The
+    // command history is Ctrl+P / Ctrl+N (previous / next, the shell
+    // spelling) and the Ctrl+R picker.
     if (key.upArrow || key.downArrow) {
-      if (hIndex.current < 0) typed.current = value;
-      const r = historyWalk(history.current, hIndex.current, key.upArrow ? 'up' : 'down', typed.current);
-      hIndex.current = r.index;
-      setLine(r.value);
+      setSel((s) => (key.upArrow ? Math.max(0, s - 1) : Math.min(list.length - 1, s + 1)));
       return;
     }
     if (key.backspace) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
@@ -606,8 +601,13 @@ const App = ({ refresh, statusSecs }) => {
         case 'u': { const r = killLine(); setValue(r.value); setCursor(r.cursor); setProposed(null); return; }
         case 'l': setOutCollapsed((v) => !v); return;
         case 'r': setPicker({ query: '', sel: 0 }); return;
-        case 'n': setSel((s) => Math.min(list.length - 1, s + 1)); return;
-        case 'p': setSel((s) => Math.max(0, s - 1)); return;
+        case 'p': case 'n': {
+          if (hIndex.current < 0) typed.current = value;
+          const r = historyWalk(history.current, hIndex.current, input === 'p' ? 'up' : 'down', typed.current);
+          hIndex.current = r.index;
+          setLine(r.value);
+          return;
+        }
         case 't': setPane((p) => (p === 'fleet' ? 'waiting' : 'fleet')); setSel(0); return;
         case 'd': if (pane === 'waiting') openDetail(items[sel]); return;
         case 'f': {
@@ -630,7 +630,7 @@ const App = ({ refresh, statusSecs }) => {
         default: return;
       }
     }
-    if (input && !key.meta) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
+    if (input && !key.meta && !hasControl(input)) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
   });
 
   const width = stdout?.columns || 80;

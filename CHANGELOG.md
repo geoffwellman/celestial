@@ -141,6 +141,12 @@ First public release, published from a reviewed clean source snapshot.
   require an explicit keep/discard decision.
 
 ### Fixed
+- `cel console` under a terminal host that reports the mouse in X10 form
+  (herdr) no longer types `[M !!` into the command line: X10 reports are
+  decoded, and any input carrying an escape or control byte is dropped
+  rather than inserted
+- `cel console`: ↑/↓ move the selection; command history is Ctrl+P / Ctrl+N
+  and the Ctrl+R picker (Shift+arrows never reached the console through herdr)
 - `cel console` no longer says "translate": a sentence is *asked* of the
   model (`--ask` on the CLI; `--translate` still accepted), a miss shows what
   the model actually said so you can rephrase, and the prompt carries worked
