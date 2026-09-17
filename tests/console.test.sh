@@ -440,3 +440,38 @@ EOF
   case "$out" in *'gadget (gadget)'*) echo 'an undeclared unit got a repo list'; return 1;; esac
   _console_teardown
 }
+
+# A CHAIN IS CHECKED WHOLE, THEN RUN. Validating each line as it came up meant a
+# chain whose second line the guard refuses had already run its first: the
+# operator pressed Enter on a proposal they were told would be checked, and got
+# half of it plus a refusal. Nothing runs until every line is allowed.
+test_console_chain_runs_nothing_when_a_later_line_is_denied() {
+  _console_setup
+  local ran="$T/ran.log"
+  cat >"$T/bin/cel" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$ran"
+case "\$1" in
+  fleet) cat "$T/fleet.json" ;;
+  inbox) cat "$T/open.alpha.json" 2>/dev/null || true ;;
+  *) printf 'ran: %s\n' "\$*" ;;
+esac
+EOF
+  chmod +x "$T/bin/cel"
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'git commit -m x' 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'refused'
+  assert_contains "$out" 'git commit -m x'
+  [ ! -s "$ran" ] || { echo "the chain ran something before it was refused: $(cat "$ran")"; return 1; }
+  _console_teardown
+}
+
+test_console_chain_runs_its_lines_in_order() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'cel inbox open --for root --workspace alpha')"
+  assert_contains "$out" 'alpha'
+  assert_contains "$out" 'ship gadget or hold?'
+  _console_teardown
+}
