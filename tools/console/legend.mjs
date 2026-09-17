@@ -53,13 +53,13 @@ export const BINDINGS = {
 export const legend = (pane) => {
   switch (pane) {
     case 'detail':
-      return 'r resolve · p reply · g go to · Esc back · F1 help';
+      return 'r resolve · p reply · g go to · Esc back · ? help';
     case 'waiting':
-      return '↑/↓ select · Enter detail · ^T panel · ^L output · ^P/^N history · F1 help';
+      return '↑/↓ select · Enter detail · ^T panel · ^L output · ^P/^N history · ? help';
     case 'output':
-      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · F1 help';
+      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · ? help';
     default:
-      return '↑/↓ select · ^T panel · ^F focus · ^O dashboard · ^L output · ^P/^N history · F1 help';
+      return '↑/↓ select · ^T panel · ^F focus · ^O dashboard · ^L output · ^P/^N history · ? help';
   }
 };
 

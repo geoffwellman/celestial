@@ -180,7 +180,7 @@ gives you back the screen you had. Panels, top to bottom:
   filtered by whatever is already typed, and Ctrl+R opens a history picker you
   can type into. Under it are two lines that never overwrite each other: a
   **status** message that clears itself after 8 seconds (`--status-secs`,
-  0 = never) and a permanent **legend** for the focused panel. F1 lists every
+  0 = never) and a permanent **legend** for the focused panel. `?` + Enter lists every
   binding.
 
 The mouse works: click a row to select it, double-click for that panel's
