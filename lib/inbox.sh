@@ -89,7 +89,7 @@ _inbox_pane_name() {
   if [ -n "$id" ] && have herdr && have jq; then
     label="$(herdr workspace list 2>/dev/null \
       | jq -r --arg w "$id" '.result.workspaces[]? | select(.workspace_id == $w) | .label // empty' \
-      | head -1)"
+      | sed -n 1p)"
   fi
   [ -n "$label" ] || label="${HERDR_PANE_ID:-unknown}"
   _inbox_sanitise "$label"
@@ -621,7 +621,7 @@ _inbox_resolve() { # <id> [--by who] [--workspace w] | --all [filters]
   local f; f="$(_inbox_file "$ws")"
   [ -f "$f" ] || die "cel inbox resolve: no mailbox for $ws"
   local target
-  target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"))' "$f" 2>/dev/null | head -1 || true)"
+  target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"))' "$f" 2>/dev/null | sed -n 1p || true)"
   [ -n "$target" ] || die "cel inbox resolve: no open decision or blocker with id $id in $ws"
   local to; to="$(printf '%s' "$target" | jq -r .to)"
   _inbox_append_resolution "$f" "$id" "$to" "$by"
