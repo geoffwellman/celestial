@@ -384,3 +384,110 @@ EOS
   assert_eq "$(cat "$T/header")" 'Authorization: key-from-gadget'
   rm -rf "$T"
 }
+
+# --- rollup: one open item per condition --------------------------------------
+# Measured in a live mailbox: twenty-four open `blocked` items from the
+# steward, all the same sentence about the same exhausted provider, one every
+# four hours. The condition was one condition; the console showed it
+# twenty-four times. A fingerprint makes the repeat an UPDATE on the item that
+# is already open rather than another item nobody will read.
+_inbox_raw() { # <ws> <id> <ts> <from> <kind> <message>
+  local f="$CEL_INBOX_DIR/$1.jsonl"; mkdir -p "$CEL_INBOX_DIR"
+  jq -nc --arg id "$2" --arg ts "$3" --arg from "$4" --arg kind "$5" --arg msg "$6" \
+    '{id:$id, ts:$ts, to:"root", from:$from, kind:$kind, message:$msg}' >> "$f"
+}
+
+test_a_fingerprint_rolls_a_repeat_into_the_open_item() {
+  _inbox_sandbox
+  local a b
+  a="$(_inbox_send root "deepseek credit is -0.24 (floor 1)" --from steward --kind blocked --fp quota-dry-deepseek --workspace demo 2>/dev/null)"
+  b="$(_inbox_send root "deepseek credit is -0.31 (floor 1)" --from steward --kind blocked --fp quota-dry-deepseek --workspace demo 2>/dev/null)"
+  # the repeat reports the id it rolled into, not a new one
+  assert_eq "$b" "$a"
+  local open; open="$(_inbox_open --for root --workspace demo)"
+  assert_eq "$(printf '%s\n' "$open" | wc -l)" "1"
+  assert_contains "$open" "×2, last "
+  assert_contains "$open" "blocked from steward"
+  local j; j="$(_inbox_open --for root --workspace demo --json)"
+  assert_eq "$(printf '%s' "$j" | jq -r .count)" "2"
+  assert_eq "$(printf '%s' "$j" | jq -r .last_ts)" \
+    "$(jq -r 'select(.kind == "update") | .ts' "$CEL_INBOX_DIR/demo.jsonl" | tail -1)"
+  # resolving the item takes its updates with it
+  _inbox_resolve "$a" --by steward --workspace demo >/dev/null 2>&1
+  assert_eq "$(_inbox_open --for root --workspace demo)" ""
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# An update is ONE new line to the reader: the bell still rings, once per
+# tick, rather than twelve rows deep.
+test_read_shows_an_update_as_one_line_not_a_second_item() {
+  _inbox_sandbox
+  _inbox_send root "deepseek credit is -0.24" --from steward --kind blocked --fp quota-dry-deepseek --workspace demo >/dev/null 2>&1
+  _inbox_send root "deepseek credit is -0.31" --from steward --kind blocked --fp quota-dry-deepseek --workspace demo >/dev/null 2>&1
+  assert_eq "$(_inbox_count --for root --workspace demo)" "2"
+  local out; out="$(_inbox_read --for root --workspace demo)"
+  assert_eq "$(printf '%s\n' "$out" | wc -l)" "2"
+  assert_contains "$out" "↻ steward (×2)"
+  assert_eq "$(_inbox_count --for root --workspace demo)" "0"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# --- bulk resolve -------------------------------------------------------------
+_resolve_all_fixture() {
+  _inbox_sandbox
+  _inbox_raw demo 100 "$(date -Is -d '10 hours ago')" steward blocked "quota is dry"
+  _inbox_raw demo 200 "$(date -Is)"                    steward blocked "a stalled worker"
+  _inbox_raw demo 300 "$(date -Is)"                    bundle-orch decision "ship v2 or wait?"
+}
+test_resolve_all_narrows_by_sender() {
+  _resolve_all_fixture
+  local out; out="$(_inbox_resolve --all --from steward --for root --by human --workspace demo 2>&1)"
+  assert_contains "$out" "resolved 2"
+  local open; open="$(_inbox_open --for root --workspace demo)"
+  assert_contains "$open" "ship v2 or wait?"
+  assert_eq "$(printf '%s\n' "$open" | wc -l)" "1"
+  rm -rf "$CEL_INBOX_DIR"
+}
+test_resolve_all_narrows_by_matching_kind_and_age() {
+  _resolve_all_fixture
+  assert_contains "$(_inbox_resolve --all --matching "stalled" --for root --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_open --for root --workspace demo)" "quota is dry"
+  _resolve_all_fixture
+  assert_contains "$(_inbox_resolve --all --kind decision --for root --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_open --for root --workspace demo)" "quota is dry"
+  _resolve_all_fixture
+  assert_contains "$(_inbox_resolve --all --older-than 5 --for root --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_open --for root --workspace demo)" "a stalled worker"
+  rm -rf "$CEL_INBOX_DIR"
+}
+# No filter is allowed and means everything open for the reader - the count is
+# printed, so the operator sees what one line just did.
+test_resolve_all_with_no_filter_clears_the_reader() {
+  _resolve_all_fixture
+  assert_contains "$(_inbox_resolve --all --for root --by human --workspace demo 2>&1)" "resolved 3"
+  assert_eq "$(_inbox_open --for root --workspace demo)" ""
+  rm -rf "$CEL_INBOX_DIR"
+}
+# An update is not a separate thing to resolve: it goes with its item.
+test_resolve_all_counts_a_rolled_up_item_once() {
+  _inbox_sandbox
+  _inbox_send root "dry" --from steward --kind blocked --fp q --workspace demo >/dev/null 2>&1
+  _inbox_send root "dry" --from steward --kind blocked --fp q --workspace demo >/dev/null 2>&1
+  assert_contains "$(_inbox_resolve --all --from steward --for root --by human --workspace demo 2>&1)" "resolved 1"
+  assert_eq "$(_inbox_open --for root --workspace demo)" ""
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# The console loops the workspaces itself today, but a chain (or a human) must
+# be able to see everything waiting in ONE call.
+test_inbox_open_all_workspaces_prefixes_every_line() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "alpha question" --kind decision --workspace alpha ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "beta blocker"   --kind blocked  --workspace beta  ) >/dev/null 2>&1
+  local out; out="$(CEL_INBOX_ME=console _inbox_open --for root --all-workspaces)"
+  assert_contains "$out" "[alpha]"
+  assert_contains "$out" "alpha question"
+  assert_contains "$out" "[beta]"
+  assert_contains "$out" "beta blocker"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}

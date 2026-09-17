@@ -8,6 +8,13 @@ watch the repo (Watch → Custom → Releases) to be notified.
 ## [Unreleased]
 
 ### Added
+- The steward says a thing once: every item it raises carries a condition key
+  (`cel inbox send --fp`), so a repeat becomes an update on the item already
+  open - `cel inbox open` shows `(×12, last 17:35)` - and the steward resolves
+  its own item, with a `cleared:` line, when the condition stops being true
+- `cel inbox resolve --all [--from x] [--matching s] [--kind k] [--older-than h]`
+  cleans a mailbox in one line, and `cel inbox open --all-workspaces` shows
+  everything waiting on one reader across every registered workspace
 - `cel console` - Celestial's own terminal interface, built with ink: the
   fleet table, every open decision addressed to root across all workspaces,
   the inbox tail and a command line, in one full-screen pane that is not an

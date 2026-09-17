@@ -160,7 +160,10 @@ _inbox_usage() {
   cat <<'EOS'
 cel inbox - messages between agents that never type into a pane
 
-  cel inbox send <to> <message> [--from x] [--workspace w] [--kind status|escalation]
+  cel inbox send <to> <message> [--from x] [--workspace w] [--kind status|escalation] [--fp <key>]
+      --fp is a CONDITION KEY. While an item with that key is still open, a
+      repeat is recorded as an update on it instead of a second item - the
+      same sentence said twenty-four times is one condition, not twenty-four.
   cel inbox read [--for <who>] [--workspace w|--all-workspaces] [--all] [--json]
       unread items; marks them read (cursor), --all is a look that does not.
       --for defaults to WHO YOU ARE, derived from your cwd: a workspace root
@@ -178,10 +181,16 @@ cel inbox - messages between agents that never type into a pane
       tail new items, one line each (what a Monitor background task runs -
       stdout is the notification). A decision or blocker also raises a desktop
       notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
-  cel inbox open [--for <who>] [--workspace w] [--json]
+  cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
+      A rolled-up item shows (×n, last HH:MM); --json carries count and
+      last_ts. --all-workspaces prefixes each line [<ws>].
   cel inbox resolve <id> [--by <who>] [--workspace w]  close a decision/blocker
+  cel inbox resolve --all [--from <who>] [--matching <substr>] [--kind k]
+                    [--older-than <hours>] [--by <who>] [--workspace w]
+      close every open item that matches every filter given. No filter means
+      everything open for the reader; the count is printed either way.
   cel inbox whoami                                    who this pane is, by cwd
 
   kinds: status (default) | escalation | decision | blocked. A decision or
@@ -254,8 +263,25 @@ _inbox_prune() { # [--workspace w] [--dry-run]
   c_ok "$ws: archived $n_a message(s) addressed to workers that no longer exist -> $ws.archive.jsonl"
 }
 
-_inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
-  [ $# -ge 2 ] || die "usage: cel inbox send <to> <message> [--from x] [--kind status|escalation]"
+# The id of the OPEN item carrying this condition key, or nothing. Resolved
+# items do not count: a condition that came back is news again.
+_inbox_open_fp() { # <ws> <fp> [from] [to]
+  local f; f="$(_inbox_file "$1")"
+  [ -f "$f" ] || return 0
+  [ -n "${2:-}" ] || return 0
+  jq -r -s --arg fp "$2" --arg from "${3:-}" --arg to "${4:-}" '
+    ([.[] | select(.kind == "resolution") | .ref]) as $done
+    | [ .[]
+        | select((.fp // "") == $fp)
+        | select(.kind == "decision" or .kind == "blocked")
+        | select($from == "" or .from == $from)
+        | select($to == "" or .to == $to)
+        | select([.id] | inside($done) | not) ]
+    | last | (.id // empty)' "$f" 2>/dev/null
+}
+
+_inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key]
+  [ $# -ge 2 ] || die "usage: cel inbox send <to> <message> [--from x] [--kind status|escalation] [--fp key]"
   # THE RECIPIENT IS NORMALISED THE SAME WAY IT NORMALISES ITSELF.
   #
   # A pane derives its own mailbox with _inbox_sanitise - lowercased and cut to
@@ -274,12 +300,13 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
     all) ;;                       # the broadcast address, left alone
     *) to="$(_inbox_sanitise "$to")" ;;
   esac
-  local from="" ws="" kind=status
+  local from="" ws="" kind=status fp=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --from) from="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
+      --fp) fp="$2"; shift 2 ;;
       *) die "cel inbox send: unknown argument '$1'" ;;
     esac
   done
@@ -287,12 +314,29 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k]
     *) die "cel inbox send: --kind must be status, escalation, decision or blocked (got '$kind')";; esac
   ws="$(_inbox_ws "$ws")"
   [ -n "$from" ] || from="$(_inbox_me)"
-  local id line
+  local id line ref=""
   id="$(date +%s%N)"
+  # ONE OPEN ITEM PER CONDITION. The steward reopens its window every four
+  # hours and posted a fresh blocker each time, so one exhausted provider
+  # filled a mailbox with twenty-four copies of one sentence and the console
+  # showed twenty-four rows where one was true. While the item it already
+  # posted is still open, the repeat becomes an update ON that item: still one
+  # new line for the reader (the bell rings, once), still one thing to resolve.
+  [ -n "$fp" ] && ref="$(_inbox_open_fp "$ws" "$fp" "$from" "$to")"
+  if [ -n "$ref" ]; then
+    line="$(jq -nc --arg id "$id" --arg ts "$(date -Is)" --arg to "$to" --arg from "$from" \
+      --arg ref "$ref" --arg msg "$message" \
+      '{id: $id, ts: $ts, to: $to, from: $from, kind: "update", ref: $ref, message: $msg}')"
+    _inbox_append "$(_inbox_file "$ws")" "$line"
+    c_ok "rolled up into $ref for $to in $ws" >&2
+    printf '%s\n' "$ref"
+    return 0
+  fi
   line="$(jq -nc --arg id "$id" --arg ts "$(date -Is)" --arg to "$to" --arg from "$from" \
     --arg kind "$kind" --arg msg "$message" --arg cwd "$PWD" \
-    --arg pane "${HERDR_PANE_ID:-}" \
-    '{id: $id, ts: $ts, to: $to, from: $from, kind: $kind, message: $msg, cwd: $cwd, pane: $pane}')"
+    --arg pane "${HERDR_PANE_ID:-}" --arg fp "$fp" \
+    '{id: $id, ts: $ts, to: $to, from: $from, kind: $kind, message: $msg, cwd: $cwd, pane: $pane}
+     | if $fp == "" then . else . + {fp: $fp} end')"
   _inbox_append "$(_inbox_file "$ws")" "$line"
   c_ok "queued for $to in $ws" >&2
   printf '%s\n' "$id"
@@ -329,13 +373,26 @@ _inbox_read_one() { # <ws> <who> <all> <json>
   f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
   [ -f "$f" ] || return 0
   last=""; [ "$all" -eq 0 ] && [ -f "$c" ] && last="$(cat "$c")"
-  items="$(jq -c --arg who "$who" --arg last "$last" \
-    'select(.kind != "resolution") | select(.to == $who or .to == "all") | select($last == "" or (.id > $last))' "$f" 2>/dev/null)"
+  # An update is ONE new line, rendered as the repeat it is rather than as a
+  # second full item: the reader needs to know the condition is still true,
+  # not to read the same paragraph again.
+  items="$(jq -cs --arg who "$who" --arg last "$last" '
+    . as $all
+    | [ .[] | select(.kind != "resolution")
+        | select(.to == $who or .to == "all")
+        | select($last == "" or (.id > $last)) ]
+    | map(if .kind == "update"
+          then (.ref as $r | .id as $i
+                | . + {count: (1 + ([$all[] | select(.kind == "update" and .ref == $r and .id <= $i)] | length))})
+          else . end)
+    | .[]' "$f" 2>/dev/null)"
   [ -n "$items" ] || return 0
   if [ "$json" -eq 1 ]; then
     printf '%s\n' "$items"
   else
-    printf '%s\n' "$items" | jq -r '"[\(.ts[11:16]) \(.kind) from \(.from)] \(.message)"'
+    printf '%s\n' "$items" | jq -r 'if .kind == "update"
+      then "\u21bb \(.from) (\u00d7\(.count)): \(.message)"
+      else "[\(.ts[11:16]) \(.kind) from \(.from)] \(.message)" end'
   fi
   # --all is a LOOK, not a read: a human eyeballing the mailbox must not
   # consume items the recipient has not seen. Only a real read advances.
@@ -445,33 +502,111 @@ _inbox_notify() { # <kind> <from> <ws> <message>
 # blocker stays OPEN, regardless of the cursor, until a `resolution` record
 # names its id. Resolutions are appended (the file is append-only and has
 # many writers), never edited in.
-_inbox_open() { # [--for who] [--workspace w] [--json]
-  local who="" ws="" json=0
+_inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json]
+  local who="" ws="" json=0 every=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --for) who="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
+      --all-workspaces) every=1; shift ;;
       --json) json=1; shift ;;
       *) die "cel inbox open: unknown argument '$1'" ;;
     esac
   done
-  ws="$(_inbox_ws "$ws")"
   [ -n "$who" ] || who="$(_inbox_me)"
+  # Everything waiting on one reader, in ONE call. The console loops the
+  # registry itself today; a chain or a human has no such loop, and "what is
+  # waiting on me" is not a per-workspace question.
+  if [ "$every" -eq 1 ]; then
+    local n
+    for n in $(_inbox_all_ws); do
+      _inbox_open_one "$n" "$who" "$json" | sed "s/^/[$n] /"
+    done
+    return 0
+  fi
+  _inbox_open_one "$(_inbox_ws "$ws")" "$who" "$json"
+}
+
+# The open items for one reader, each carrying how many times its condition has
+# been reported (`count`, 1 when it was said once) and when it was last said.
+_inbox_open_one() { # <ws> <who> <json>
+  local ws="$1" who="$2" json="$3"
   local f; f="$(_inbox_file "$ws")"
   [ -f "$f" ] || return 0
   local items
   items="$(jq -cs --arg who "$who" '
-      ([.[] | select(.kind == "resolution") | .ref]) as $done
-      | .[] | select(.kind == "decision" or .kind == "blocked")
-      | select(.to == $who or .to == "all")
-      | select([.id] | inside($done) | not)' "$f" 2>/dev/null)"
+      . as $all
+      | ([.[] | select(.kind == "resolution") | .ref]) as $done
+      | [ .[] | select(.kind == "decision" or .kind == "blocked")
+          | select(.to == $who or .to == "all")
+          | select([.id] | inside($done) | not) ]
+      | map(.id as $i
+            | ([$all[] | select(.kind == "update" and .ref == $i)]) as $u
+            | . + {count: (1 + ($u | length)),
+                   last_ts: (($u | map(.ts) | max) // .ts)})
+      | .[]' "$f" 2>/dev/null)"
   [ -n "$items" ] || return 0
   if [ "$json" -eq 1 ]; then printf '%s\n' "$items"
-  else printf '%s\n' "$items" | jq -r '"[\(.id)] \(.ts[0:16]) \(.kind) from \(.from): \(.message)"'; fi
+  else printf '%s\n' "$items" | jq -r 'if (.count // 1) > 1
+    then "[\(.id)] \(.ts[0:16]) \(.kind) from \(.from) (\u00d7\(.count), last \(.last_ts[11:16])): \(.message)"
+    else "[\(.id)] \(.ts[0:16]) \(.kind) from \(.from): \(.message)" end'; fi
 }
 
-_inbox_resolve() { # <id> [--by who] [--workspace w]
+# One resolution record. The file is append-only and has many writers, so a
+# closed item is a later line naming it, never an edit in place.
+_inbox_append_resolution() { # <file> <ref> <to> <by>
+  _inbox_append "$1" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$2" \
+    --arg by "$4" --arg to "$3" \
+    '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: $to, message: ("resolved by " + $by)}')"
+}
+
+# CLEANING THE INBOX IS ONE LINE, NOT TWENTY-FOUR. Resolving by id is right
+# for an answer to one question and absurd for a mailbox full of a watcher's
+# repeats: root's held twenty-eight items that were four conditions. Every
+# filter given must match; none given means everything open for the reader,
+# which is allowed on purpose - the count is printed so the operator sees
+# exactly what the line did.
+_inbox_resolve_all() { # [--from w] [--matching s] [--kind k] [--older-than h] [--for w] [--by w] [--workspace w]
+  local who="" ws="" by="" from="" matching="" kind="" older=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from="$2"; shift 2 ;;
+      --matching) matching="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      --older-than) older="$2"; shift 2 ;;
+      --for) who="$2"; shift 2 ;;
+      --by) by="$2"; shift 2 ;;
+      --workspace) ws="$2"; shift 2 ;;
+      *) die "cel inbox resolve: unknown argument '$1'" ;;
+    esac
+  done
+  case "$kind" in ''|decision|blocked) ;;
+    *) die "cel inbox resolve: --kind must be decision or blocked (got '$kind')";; esac
+  ws="$(_inbox_ws "$ws")"
+  [ -n "$who" ] || who="$(_inbox_me)"
+  [ -n "$by" ] || by="$(_inbox_me)"
+  local f; f="$(_inbox_file "$ws")"
+  [ -f "$f" ] || { c_ok "resolved 0 (by $by)"; return 0; }
+  local cutoff=""
+  [ -n "$older" ] && cutoff="$(date -Is -d "$older hours ago" 2>/dev/null || true)"
+  local n=0 id to
+  while IFS=$'\t' read -r id to; do
+    [ -n "$id" ] || continue
+    _inbox_append_resolution "$f" "$id" "$to" "$by"
+    n=$((n + 1))
+  done < <(_inbox_open_one "$ws" "$who" 1 \
+    | jq -r --arg from "$from" --arg m "$matching" --arg k "$kind" --arg cut "$cutoff" '
+        select($from == "" or .from == $from)
+        | select($m == "" or (.message | contains($m)))
+        | select($k == "" or .kind == $k)
+        | select($cut == "" or (.ts < $cut))
+        | [.id, .to] | @tsv')
+  c_ok "resolved $n (by $by)"
+}
+
+_inbox_resolve() { # <id> [--by who] [--workspace w] | --all [filters]
   [ $# -ge 1 ] || die "usage: cel inbox resolve <id> [--by <who>] [--workspace w]"
+  if [ "$1" = --all ]; then shift; _inbox_resolve_all "$@"; return $?; fi
   local id="$1"; shift
   local by="" ws=""
   while [ $# -gt 0 ]; do
@@ -489,8 +624,6 @@ _inbox_resolve() { # <id> [--by who] [--workspace w]
   target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"))' "$f" 2>/dev/null | head -1 || true)"
   [ -n "$target" ] || die "cel inbox resolve: no open decision or blocker with id $id in $ws"
   local to; to="$(printf '%s' "$target" | jq -r .to)"
-  _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$id" \
-    --arg by "$by" --arg to "$to" \
-    '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: $to, message: ("resolved by " + $by)}')"
+  _inbox_append_resolution "$f" "$id" "$to" "$by"
   c_ok "resolved $id (by $by)" >&2
 }
