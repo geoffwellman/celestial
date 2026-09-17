@@ -243,6 +243,10 @@ _steward_review_sweep() { # <agents-json>
       # refuses to create one, but branches opened before that - or by hand -
       # still need surfacing, so the board and the repo cannot drift apart
       # silently. A day's grace, so work in flight is not nagged immediately.
+      # A DRAFT IS THE AUTHOR'S PRIVATE WORK. The review sweep below already
+      # leaves drafts alone; this check nagged them anyway (owner, 2026-09-17:
+      # "they are intentionally left as drafts"). The steward has no business
+      # with a PR its author has not put up for anything yet.
       # Any prefix the repo answers to, current or historical - a branch named
       # before a team re-key is still ticketed and must not be nagged.
       # `tprefix` is an ALTERNATION of every prefix the repo answers to, for
@@ -266,7 +270,7 @@ _steward_review_sweep() { # <agents-json>
           [ "$(( ( $(date +%s) - $(date -d "$uage" +%s 2>/dev/null || date +%s) ) / 86400 ))" -ge 1 ] || continue
           _steward_nudge "$orch" "$slug#$unum-noticket" \
             "steward: PR #$unum on $repo ($ubranch) has no $tcanon ticket in its branch name, so Linear cannot link it and it is invisible on the board. Find or create the ticket (cel-linear search / create), comment the PR link on it, and set its state. Name future branches ${tcanon}-<n>-<slug>."
-        done < <(printf '%s' "$prsj" | jq -r '.[] | [.number, .headRefName, .createdAt] | @tsv')
+        done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
 
       local num branch review failing working
