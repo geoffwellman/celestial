@@ -235,15 +235,15 @@ test_console_answer_reads_the_transcript() {
   _console_setup
   _console_config
   export OPENROUTER_API_KEY=test-key
-  _console_stub_server 'standout has one worker on ABC-1 and nothing waiting.'
+  _console_stub_server 'bundle has one worker on ABC-1 and nothing waiting.'
   local out
   out="$(cd "$CEL_ROOT" && node --input-type=module -e "
     import { answer } from './tools/console/translate.mjs';
-    const a = await answer({ sentence: 'what is happening with standout', transcript: '\$ cel fleet\nstandout orch LIVE workers 1/4' });
+    const a = await answer({ sentence: 'what is happening with bundle', transcript: '\$ cel fleet\nbundle orch LIVE workers 1/4' });
     process.stdout.write(a);
   ")"
-  assert_eq "$out" 'standout has one worker on ABC-1 and nothing waiting.'
-  assert_contains "$(cat "$STUB_BODY_FILE")" 'what is happening with standout'
+  assert_eq "$out" 'bundle has one worker on ABC-1 and nothing waiting.'
+  assert_contains "$(cat "$STUB_BODY_FILE")" 'what is happening with bundle'
   assert_contains "$(cat "$STUB_BODY_FILE")" 'workers 1/4'
   _console_stub_stop
   _console_config 'answer: off'

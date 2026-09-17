@@ -75,7 +75,7 @@ test_orchestrator_may_not_author_via_checkout() {
   local c
   for c in 'git checkout -b new' 'git switch -c new' 'git checkout -- apps/foo.ts' \
            'git checkout .' 'git restore x' 'git checkout main -- file' \
-           'git -C ~/ws/vhs/repos/widget checkout main' \
+           'git -C ~/ws/alpha/repos/widget checkout main' \
            'git -C ~/.herdr/worktrees/widget/w-49 checkout main' \
            'git branch -D old' 'git branch -m a b' \
            'gh pr edit 12 --title x' 'gh pr edit 12 --add-label x --body y' \

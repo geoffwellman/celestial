@@ -141,6 +141,9 @@ First public release, published from a reviewed clean source snapshot.
   require an explicit keep/discard decision.
 
 ### Fixed
+- CI's publication-hygiene scan now requires the private vocabulary (repository
+  secret `CEL_PRIVATE_PATTERNS`, one regex per line) instead of running generic
+  checks only, which had let two workspace names into the tree
 - `cel console` under a terminal host that reports the mouse in X10 form
   (herdr) no longer types `[M !!` into the command line: X10 reports are
   decoded, and any input carrying an escape or control byte is dropped
