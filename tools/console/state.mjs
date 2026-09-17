@@ -6,9 +6,11 @@
 // `--render-once` prints and what the tests drive, so the panels can be proved
 // correct without a terminal.
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+
+import { legend } from './legend.mjs';
 
 export const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial');
 export const CEL_BIN = process.env.CEL_BIN || 'cel';
@@ -65,8 +67,65 @@ export const inboxTail = (doc, n = 8) => {
   return lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts))).slice(-n);
 };
 
+// The THREAD behind one waiting item: every other message in that workspace's
+// mailbox carrying the same `ref`, plus anything from the same sender within an
+// hour either side. The second half is there because most mail on this box has
+// no ref at all - a blocker and the status line that explains it arrive four
+// minutes apart from the same agent, and showing one without the other is how
+// the operator ends up opening a pane to read the rest.
+export const thread = (item, span = 3600 * 1000) => {
+  if (!item) return [];
+  let text;
+  try { text = readFileSync(join(INBOX_DIR(), `${item.ws}.jsonl`), 'utf8'); } catch { return []; }
+  const centre = Date.parse(item.ts) || 0;
+  const out = [];
+  for (const raw of text.split('\n')) {
+    if (!raw.trim()) continue;
+    let m;
+    try { m = JSON.parse(raw); } catch { continue; }
+    if (m.id === item.id) continue;
+    const sameRef = item.ref && m.ref && m.ref === item.ref;
+    const near = m.from === item.from && centre
+      && Math.abs((Date.parse(m.ts) || 0) - centre) <= span;
+    if (!sameRef && !near) continue;
+    out.push({ ws: item.ws, ...m });
+  }
+  return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+};
+
+// --- the command history ----------------------------------------------------
+// It lives here rather than in the ink component because `--run` writes to it
+// too: a history that only recorded what was typed in the TUI would depend on
+// which entry point ran the command, which is not something an operator can
+// see or reason about.
+export const HISTORY_PATH = () => process.env.CEL_CONSOLE_HISTORY
+  || join(homedir(), '.local/share/cel/console/history');
+export const HISTORY_MAX = 500;
+
+export const readHistory = () => {
+  try { return readFileSync(HISTORY_PATH(), 'utf8').split('\n').filter(Boolean); } catch { return []; }
+};
+
+export const appendHistory = (line) => {
+  if (!String(line || '').trim()) return;
+  try {
+    const path = HISTORY_PATH();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${line}\n`);
+    const all = readHistory();
+    if (all.length > HISTORY_MAX * 1.5) writeFileSync(path, `${all.slice(-HISTORY_MAX).join('\n')}\n`);
+  } catch { /* a console that cannot write its history is still a console */ }
+};
+
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
+
+// A UNIT IS A PRODUCT, not a repo (CEL-14). A declared product names the repos
+// it bundles, exactly as `cel fleet` does - without it the one row where a
+// product and a repo of the same name differ is the row that looks identical.
+export const unitLabel = (u) => (u && u.declared && (u.repos || []).length
+  ? `${u.name} (${u.repos.join(', ')})`
+  : String(u?.name || ''));
 
 // The rows the fleet panel draws, flattened so the TUI's selection is one
 // index into one list rather than a pair of cursors over a nested structure.
@@ -100,18 +159,49 @@ export const runCommand = async (cmd) => {
   return { allow: true, reason: '', out: (r.out + (r.err ? `\n${r.err}` : '')).trimEnd(), ok: r.ok };
 };
 
+// A CHAIN IS CHECKED WHOLE, THEN RUN. The model may answer a sentence with a
+// sequence, and the operator presses Enter once for the lot - so the allowlist
+// has to have seen every line before the first one runs. Interleaving the two
+// meant a refusal on line two arrived after line one had already changed the
+// box, which is precisely the outcome the guard exists to prevent.
+//
+// Execution still stops at the first non-zero exit: passing the guard is not
+// the same as succeeding, and running step three over a failed step two is how
+// a typo becomes a mess someone has to reconstruct.
+export const runChain = async (cmds, onStep = () => {}) => {
+  const list = (cmds || []).filter((c) => String(c || '').trim());
+  for (const cmd of list) {
+    // eslint-disable-next-line no-await-in-loop
+    const verdict = await classify(cmd);
+    if (!verdict.allow) return { allow: false, denied: cmd, reason: verdict.reason, results: [] };
+  }
+  const results = [];
+  for (let i = 0; i < list.length; i += 1) {
+    onStep(list[i], i, list.length);
+    // eslint-disable-next-line no-await-in-loop
+    const r = await runCommand(list[i]);
+    results.push({ cmd: list[i], ...r });
+    if (!r.ok) return { allow: true, results, stoppedAt: i };
+  }
+  return { allow: true, results };
+};
+
 // The whole desk as plain text: `cel console --render-once`. It is what the
 // tests assert on and what an operator pipes into a file when something is
 // wrong and a full-screen UI is the last thing they want.
-export const renderOnce = async () => {
+// STATUS AND LEGEND ARE TWO LINES. The v1 console wrote its responses over the
+// key legend and never cleared them, so the operator lost their bindings to a
+// message from four minutes ago. Here - and in the TUI - the transient line and
+// the permanent one are separate rows that cannot overwrite each other.
+export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const doc = await fleet();
   const out = [];
   out.push('FLEET');
   if (doc.error) out.push(`  ! ${doc.error}`);
   for (const ws of doc.workspaces || []) {
-    out.push(`  ${ws.name}   (${(ws.units || []).length} repos)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
+    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
     for (const u of ws.units || []) {
-      out.push(`    ${u.name.padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
+      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
     }
   }
   const items = await openItems(doc);
@@ -123,5 +213,9 @@ export const renderOnce = async () => {
   const tail = inboxTail(doc, 8);
   if (!tail.length) out.push('  quiet');
   for (const m of tail) out.push(`  ${tailLine(m)}`);
+
+  out.push('');
+  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(legend(pane));
   return out.join('\n');
 };

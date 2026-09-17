@@ -309,3 +309,173 @@ test_console_dependencies_are_pinned_and_committed() {
   tracked="$(git -C "$CEL_ROOT" ls-files tools/console/node_modules | head -1)"
   assert_eq "$tracked" ''
 }
+
+# --- v2: mouse, line editing, options and chains ---------------------------
+
+# The mouse parser and the hit map are PURE on purpose: a terminal that has to
+# be driven by hand to prove a click lands on the right row is a thing nobody
+# proves, and "off by one row" is the whole failure mode of a hit map.
+test_console_mouse_parser_and_hit_test_are_proved() {
+  node "$CEL_ROOT/tools/console/mouse.test.mjs"
+}
+
+# The command line edits like a shell, and the history walk filters by prefix.
+# Both are pure functions for the same reason as the mouse: keystroke behaviour
+# nobody can assert is keystroke behaviour that regresses in silence.
+test_console_line_editor_and_history_walk_are_proved() {
+  node "$CEL_ROOT/tools/console/edit.test.mjs"
+}
+
+# A MISS IS NOT A DEAD END. "no command for that" told the operator nothing
+# they did not already know; the second ask returns candidates with reasons and
+# the operator picks one, which is what a person expects of a thing that failed
+# to understand them.
+test_console_ask_offers_numbered_options_on_a_miss() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel inbox open --for root --workspace alpha -- see what is open first
+cel fleet -- the whole box at a glance
+cel-fanout status --workspace alpha -- what is in flight there'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'sort out alpha' 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" '1  cel inbox open --for root --workspace alpha'
+  assert_contains "$out" 'see what is open first'
+  assert_contains "$out" '2  cel fleet'
+  assert_contains "$out" '3  cel-fanout status --workspace alpha'
+  _console_stub_stop
+  _console_teardown
+}
+
+# One sentence can be a SEQUENCE. "clean the blockers on alpha" is a read and
+# then a resolve; a translator that can only ever return one line makes the
+# operator type the second half themselves.
+test_console_ask_returns_a_chain_of_commands() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel inbox open --for root --workspace alpha
+cel inbox resolve --all --from widget-orch --workspace alpha'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'clean the blockers on alpha')" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" 'cel inbox open --for root --workspace alpha'
+  assert_contains "$out" 'cel inbox resolve --all --from widget-orch --workspace alpha'
+  _console_stub_stop
+  _console_teardown
+}
+
+# The response line used to overwrite the key legend and never clear, so the
+# operator lost their bindings to a message from four minutes ago. Two lines,
+# always: the transient one and the permanent one.
+test_console_render_once_keeps_status_and_legend_apart() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --status 'hello')"
+  assert_contains "$out" 'hello'
+  assert_contains "$out" 'F1 help'
+  local sline lline
+  sline="$(printf '%s\n' "$out" | grep -n 'hello' | head -1 | cut -d: -f1)"
+  lline="$(printf '%s\n' "$out" | grep -n 'F1 help' | head -1 | cut -d: -f1)"
+  [ "$sline" != "$lline" ] || { echo 'status and legend share a line'; return 1; }
+  _console_teardown
+}
+
+# History is the operator's own record of what they typed. A --run that did not
+# append it would make the console's history depend on which entry point ran
+# the command.
+test_console_run_appends_to_history() {
+  _console_setup
+  export CEL_CONSOLE_HISTORY="$T/history"
+  node "$CONSOLE_MJS" --run 'cel fleet' >/dev/null
+  assert_contains "$(cat "$T/history")" 'cel fleet'
+  _console_teardown
+}
+
+# --- full screen -----------------------------------------------------------
+
+# The console runs on the alternate screen, like htop or vim: it fills the
+# terminal, nothing it draws lands in the scrollback, and quitting gives the
+# operator back the screen they had. The enter/leave pairs are proved by a unit
+# test because the failure mode - leaving on one exit path and not another - is
+# a terminal the owner has to reset by hand.
+test_console_terminal_mode_pairs_are_proved() {
+  node "$CEL_ROOT/tools/console/term.test.mjs"
+}
+
+# --render-once is PLAIN STDOUT. It is what an operator pipes into a file when
+# the full-screen UI is the last thing they want, and an alternate-screen
+# switch in the middle of that file would be the UI following them into it.
+test_console_render_once_never_switches_screens() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  case "$out" in *$'\033[?1049'*) echo 'render-once switched to the alternate screen'; return 1;; esac
+  assert_contains "$out" 'alpha'
+  _console_teardown
+}
+
+# Since CEL-14 a unit is a PRODUCT, which may carry several repos. The console
+# said "(2 repos)" for two products and showed a declared product under its
+# bare name, which is the one place an operator cannot tell a product from the
+# repo it happens to share a name with.
+test_console_counts_products_and_names_their_repos() {
+  _console_setup
+  cat >"$T/fleet.json" <<'EOF'
+{"workspaces":[
+ {"name":"alpha","root":{"unread":1,"open":1},"units":[
+   {"name":"widget","orch":"LIVE","workers":1,"cap":4,"stalled":0,"unlanded":0,
+    "repos":["widget-core","widget-web"],"declared":true},
+   {"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,
+    "repos":["gadget"],"declared":false}]}]}
+EOF
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" '(2 products)'
+  assert_contains "$out" 'widget (widget-core, widget-web)'
+  case "$out" in *'repos)'*) echo 'the head line still counts repos'; return 1;; esac
+  # An undeclared unit is still just its name - a repo dressed up as a product
+  # with "(gadget)" after it is noise.
+  case "$out" in *'gadget (gadget)'*) echo 'an undeclared unit got a repo list'; return 1;; esac
+  _console_teardown
+}
+
+# A CHAIN IS CHECKED WHOLE, THEN RUN. Validating each line as it came up meant a
+# chain whose second line the guard refuses had already run its first: the
+# operator pressed Enter on a proposal they were told would be checked, and got
+# half of it plus a refusal. Nothing runs until every line is allowed.
+test_console_chain_runs_nothing_when_a_later_line_is_denied() {
+  _console_setup
+  local ran="$T/ran.log"
+  cat >"$T/bin/cel" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$ran"
+case "\$1" in
+  fleet) cat "$T/fleet.json" ;;
+  inbox) cat "$T/open.alpha.json" 2>/dev/null || true ;;
+  *) printf 'ran: %s\n' "\$*" ;;
+esac
+EOF
+  chmod +x "$T/bin/cel"
+  # The chain runs through `bash -c`, so the stub has to be on PATH as well as
+  # in CEL_BIN - otherwise the test drives the live box.
+  PATH="$T/bin:$PATH"
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'git commit -m x' 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'refused'
+  assert_contains "$out" 'git commit -m x'
+  [ ! -s "$ran" ] || { echo "the chain ran something before it was refused: $(cat "$ran")"; return 1; }
+  _console_teardown
+}
+
+test_console_chain_runs_its_lines_in_order() {
+  _console_setup
+  PATH="$T/bin:$PATH"
+  local out
+  out="$(node "$CONSOLE_MJS" --chain 'cel fleet' --chain 'cel inbox open --for root --workspace alpha')"
+  assert_contains "$out" 'alpha'
+  assert_contains "$out" 'ship gadget or hold?'
+  _console_teardown
+}
