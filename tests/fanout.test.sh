@@ -26,6 +26,7 @@ case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
+  "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
   "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
@@ -1488,4 +1489,198 @@ test_lock_spawn_children_do_not_hold_the_lock_open() {
   assert_contains "$out" still-mine
   assert_contains "$out" alive
   assert_contains "$out" relocked
+}
+
+# ── seed: the local files a fresh checkout does not have ─────────────────────
+# A worktree is a fresh checkout, so every gitignored file the repo needs to
+# RUN is missing from it. Seven worktrees were symlinked by hand in one
+# evening before this existed.
+_seed_yaml() { # appends a seed: block to the fixture's widget entry
+  cat >> "$T/workspace.yaml" <<'YAML'
+    seed:
+      - apps/builder/.dev.vars
+      - { path: apps/pf/src/wasm, copy: true }
+YAML
+  mkdir -p "$T/repos/widget/apps/builder" "$T/repos/widget/apps/pf/src/wasm"
+  printf 'KEY=1\n' > "$T/repos/widget/apps/builder/.dev.vars"
+  printf 'x\n' > "$T/repos/widget/apps/pf/src/wasm/mod.wasm"
+  printf 'apps/builder/.dev.vars\napps/pf/src/wasm\n' > "$STUB_WT/.gitignore"
+}
+
+test_delegate_seeds_linked_and_copied_paths_and_tells_the_worker() {
+  _fanout_setup; _seed_yaml
+  (cd "$T" && "$BIN" delegate widget WG-SEED "$T/spec.md") > /dev/null
+  assert_eq "$(readlink "$STUB_WT/apps/builder/.dev.vars")" "$T/repos/widget/apps/builder/.dev.vars"
+  [ -d "$STUB_WT/apps/pf/src/wasm" ] && [ ! -L "$STUB_WT/apps/pf/src/wasm" ] \
+    || { echo "the copied entry is not a real directory"; return 1; }
+  assert_eq "$(cat "$STUB_WT/apps/pf/src/wasm/mod.wasm")" "x"
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$log" "Seeded local config, not yours to commit:"
+  assert_contains "$log" "apps/builder/.dev.vars"
+  assert_contains "$log" "apps/pf/src/wasm"
+  rm -rf "$T"
+}
+
+# A repo without the file locally still gets its worker: a missing source is
+# a warning, never a failed delegation.
+test_delegate_warns_but_succeeds_when_a_seed_source_is_missing() {
+  _fanout_setup; _seed_yaml
+  rm -f "$T/repos/widget/apps/builder/.dev.vars"
+  local out; out="$(cd "$T" && "$BIN" delegate widget WG-SEEDMISS "$T/spec.md")"
+  assert_contains "$out" "apps/builder/.dev.vars"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  [ ! -e "$STUB_WT/apps/builder/.dev.vars" ] || { echo "a missing source was seeded anyway"; return 1; }
+  rm -rf "$T"
+}
+
+# --reuse hands back a worktree that may already hold the file. Overwriting
+# it would throw away whatever the last run put there.
+test_delegate_leaves_an_existing_seed_target_alone() {
+  _fanout_setup; _seed_yaml
+  mkdir -p "$STUB_WT/apps/builder"
+  printf 'MINE=1\n' > "$STUB_WT/apps/builder/.dev.vars"
+  (cd "$T" && "$BIN" delegate widget WG-SEEDKEEP "$T/spec.md") > /dev/null
+  assert_eq "$(cat "$STUB_WT/apps/builder/.dev.vars")" "MINE=1"
+  [ ! -L "$STUB_WT/apps/builder/.dev.vars" ] || { echo "an existing file was replaced by a link"; return 1; }
+  rm -rf "$T"
+}
+
+# The seeded paths are gitignored BECAUSE they were missing from the checkout.
+# One that git would track is a commit waiting to happen, so it is named.
+test_delegate_warns_when_a_seeded_path_is_not_gitignored() {
+  _fanout_setup; _seed_yaml
+  : > "$STUB_WT/.gitignore"
+  local out; out="$(cd "$T" && "$BIN" delegate widget WG-SEEDTRACK "$T/spec.md")"
+  assert_contains "$out" "git would track"
+  rm -rf "$T"
+}
+
+# ── try: a running instance of a ticket, on ports of its own ────────────────
+_preview_yaml() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+    preview:
+      cmd: "pnpm --filter builder dev"
+      env: { API_PORT: "{port}", UI_PORT: "{port+1}" }
+      url: "http://localhost:{port+1}"
+YAML
+}
+
+_occupy() { # <port> - hold it for the life of the test
+  python3 - "$1" <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(1)
+print("up", flush=True)
+time.sleep(120)
+PY
+  OCCUPIER=$!
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+test_try_steps_past_an_occupied_port_base_and_runs_in_a_new_pane() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-TRY "$T/spec.md") > /dev/null
+  _occupy 48610 || { echo "could not occupy the base port"; return 1; }
+  local out; out="$(cd "$T" && CEL_TRY_PORT_BASE=48610 "$BIN" try WG-TRY)"
+  kill "$OCCUPIER" 2>/dev/null
+  assert_eq "$(printf '%s' "$out" | tail -1)" "http://localhost:48621"
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$log" "pane split --pane wZ:p1 --direction down --cwd $STUB_WT --no-focus"
+  assert_contains "$log" "pane run wZ:p9 env API_PORT=48620 UI_PORT=48621 pnpm --filter builder dev"
+  assert_eq "$(jq -r '.[0].try.port' "$T/.cel/delegations.json")" "48620"
+  assert_eq "$(jq -r '.[0].try.url' "$T/.cel/delegations.json")" "http://localhost:48621"
+  assert_eq "$(jq -r '.[0].try.pane' "$T/.cel/delegations.json")" "wZ:p9"
+  rm -rf "$T"
+}
+
+# Asking twice must not start a second instance on a second port - it is the
+# same ticket, and the answer is the url it is already on.
+test_try_twice_is_a_no_op_that_prints_the_same_url() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-TRY2 "$T/spec.md") > /dev/null
+  local first; first="$(cd "$T" && CEL_TRY_PORT_BASE=48640 "$BIN" try WG-TRY2 | tail -1)"
+  : > "$STUB_LOG"
+  local second; second="$(cd "$T" && CEL_TRY_PORT_BASE=48640 "$BIN" try WG-TRY2 | tail -1)"
+  assert_eq "$second" "$first"
+  ! grep -q '^pane split' "$STUB_LOG" || { echo "a second pane was split"; return 1; }
+  rm -rf "$T"
+}
+
+test_try_stop_closes_the_pane_and_clears_the_row() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-TRYSTOP "$T/spec.md") > /dev/null
+  (cd "$T" && CEL_TRY_PORT_BASE=48660 "$BIN" try WG-TRYSTOP) > /dev/null
+  : > "$STUB_LOG"
+  (cd "$T" && "$BIN" try WG-TRYSTOP --stop) > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "pane close wZ:p9"
+  assert_eq "$(jq -r '.[0].try // "none"' "$T/.cel/delegations.json")" "none"
+  rm -rf "$T"
+}
+
+# Releasing the worktree under a running preview would leave a pane pointing
+# at a directory that no longer exists.
+test_release_stops_a_running_try_first() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-TRYREL "$T/spec.md") > /dev/null
+  (cd "$T" && CEL_TRY_PORT_BASE=48680 "$BIN" try WG-TRYREL) > /dev/null
+  : > "$STUB_LOG"
+  (cd "$T" && "$BIN" release WG-TRYREL --keep-worktree) > /dev/null
+  assert_contains "$(cat "$STUB_LOG")" "pane close wZ:p9"
+  assert_eq "$(jq -r '.[0].try // "none"' "$T/.cel/delegations.json")" "none"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "released"
+  rm -rf "$T"
+}
+
+test_status_shows_the_try_port() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-TRYCOL "$T/spec.md") > /dev/null
+  local out; out="$(cd "$T" && STUB_STATUS=working "$BIN" status)"
+  assert_contains "$out" "TRY"
+  (cd "$T" && CEL_TRY_PORT_BASE=48700 "$BIN" try WG-TRYCOL) > /dev/null
+  out="$(cd "$T" && STUB_STATUS=working "$BIN" status)"
+  assert_contains "$out" "48700"
+  rm -rf "$T"
+}
+
+# Refusals say WHICH thing is missing: guessing between "no worktree" and
+# "this repo has no preview" is the whole cost of a bad message here.
+test_try_refuses_without_a_worktree_or_a_preview_cmd() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-NOPREV "$T/spec.md") > /dev/null
+  local out; out="$(cd "$T" && "$BIN" try WG-NOPREV 2>&1 || true)"
+  assert_contains "$out" "preview.cmd"
+  jq '[.[0] | .worktree = "/nonexistent/wt"]' "$T/.cel/delegations.json" > "$T/l.json"
+  mv "$T/l.json" "$T/.cel/delegations.json"
+  out="$(cd "$T" && "$BIN" try WG-NOPREV 2>&1 || true)"
+  assert_contains "$out" "worktree"
+  rm -rf "$T"
+}
+
+# `herdr pane run` takes ONE command line, so every env value is parsed by the
+# pane's shell. A value with a space would split into two words - the second
+# read as the program to run - and a `$(...)` or `;` in workspace.yaml would
+# simply execute. Preview env is ordinary config, so it must be safe without
+# anyone remembering to quote their yaml.
+test_try_shell_quotes_preview_env_values() {
+  _fanout_setup
+  cat >> "$T/workspace.yaml" <<'YAML'
+    preview:
+      cmd: "printenv GREETING"
+      env: { GREETING: "hello world", RISKY: "$(touch {port}.pwned); echo x", PORT: "{port}" }
+      url: "http://localhost:{port}"
+YAML
+  (cd "$T" && "$BIN" delegate widget WG-TRYQ "$T/spec.md") > /dev/null
+  (cd "$T" && CEL_TRY_PORT_BASE=48720 "$BIN" try WG-TRYQ) > /dev/null
+  local runline; runline="$(grep '^pane run wZ:p9 ' "$STUB_LOG" | head -1)"
+  runline="${runline#pane run wZ:p9 }"
+  # The proof is what a real shell makes of that line, not how it is spelled.
+  assert_eq "$(cd "$T" && bash -c "$runline")" "hello world"
+  assert_eq "$(cd "$T" && bash -c "${runline%printenv GREETING}printenv RISKY")" '$(touch 48720.pwned); echo x'
+  [ ! -e "$T/48720.pwned" ] || { echo "a preview env value executed"; return 1; }
+  rm -rf "$T"
 }

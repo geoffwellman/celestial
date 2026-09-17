@@ -15,6 +15,14 @@ watch the repo (Watch → Custom → Releases) to be notified.
 - `cel inbox resolve --all [--from x] [--matching s] [--kind k] [--older-than h]`
   cleans a mailbox in one line, and `cel inbox open --all-workspaces` shows
   everything waiting on one reader across every registered workspace
+- `repos[].seed` in `workspace.yaml` - the gitignored local files every
+  worktree needs to run (symlinked, or copied with `copy: true`), placed by
+  `cel-fanout delegate`/`scout`/`spike` before the worker starts and named in
+  its first prompt
+- `cel-fanout try <id> [--stop]` - runs a ticket's branch from its own worktree
+  on a free block of ten ports (`repos[].preview`, `CEL_TRY_PORT_BASE`) in a
+  pane of its own, prints the url, and is stopped by `--stop` or by `release`;
+  `cel-fanout status` gains a `TRY` column
 - `cel console` - Celestial's own terminal interface, built with ink: the
   fleet table, every open decision addressed to root across all workspaces,
   the inbox tail and a command line, in one full-screen pane that is not an

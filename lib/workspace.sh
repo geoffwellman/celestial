@@ -103,6 +103,49 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
+# SEED: the gitignored local files a worktree needs before it can RUN. A
+# worktree is a fresh checkout, so every file git was told to ignore - the keys
+# file, a built wasm directory - is simply absent, and the ticket cannot be
+# tested where it was written. On 2026-09-17 seven worktrees were symlinked by
+# hand in one evening for exactly this. Declared per repo:
+#
+#   seed:
+#     - apps/builder/.dev.vars                  # symlinked (the common case)
+#     - { path: apps/pf/src/wasm, copy: true }   # copied, for what a link cannot be
+#
+# One entry per line as `<path>\t<link|copy>`; absent prints nothing. A plain
+# string is a link because that is what a shared secret wants: edit it once in
+# the checkout and every worktree sees it. `copy` exists for directories a
+# build rewrites in place, where a link would write back into the checkout.
+ws_repo_seed() { # <wsdir> <repo>
+  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].seed // []
+    | .[]
+    | if type == "string" then . + "\tlink"
+      else ((.path // "") + (if .copy then "\tcopy" else "\tlink" end)) end' \
+    "$1/workspace.yaml"
+}
+
+# PREVIEW: how to run this repo from a worktree, on ports nobody else holds.
+#
+#   preview:
+#     cmd: "pnpm --filter builder dev"
+#     env: { API_PORT: "{port}", UI_PORT: "{port+1}" }
+#     url: "http://localhost:{port+1}"
+#
+# `{port}` and `{port+N}` are substituted by `cel-fanout try`, which allocates
+# the block. Values are returned RAW, placeholders and all: substitution needs
+# the allocated base, which only the caller has.
+ws_repo_preview() { # <wsdir> <repo> <cmd|url>
+  yq -r --arg n "$2" --arg k "$3" \
+    '.repos // [] | map(select(.name == $n))[0].preview[$k] // "" | tostring' \
+    "$1/workspace.yaml"
+}
+
+ws_repo_preview_env() { # <wsdir> <repo> - one KEY=VALUE per line, raw
+  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].preview.env // {}
+    | to_entries[] | "\(.key)=\(.value)"' "$1/workspace.yaml"
+}
+
 # PRODUCTS. An orchestrator used to be bound to exactly one repo, so two repos
 # that are really one system - a platform and the things that consume it -
 # needed two orchestrators and a tier above them purely to sequence work that

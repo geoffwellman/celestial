@@ -341,6 +341,16 @@ services. They are started by `cel run` and `cel-fanout delegate`, and they
 stop when their pane does. `cel-fanout status` is the ledger of what was
 delegated, on which model, and where it got to.
 
+A worktree is a fresh checkout, so the gitignored files an app needs to *run* —
+keys, a built wasm directory — are simply absent from it. `repos[].seed` in
+`workspace.yaml` names them and `cel-fanout delegate` places them (symlink, or
+`copy: true`) before the worker starts, telling it they are not its to commit.
+With `repos[].preview` declared, `cel-fanout try <id>` then starts that ticket's
+branch from its own worktree on a free block of ten ports and prints the url —
+so trying a PR no longer means parking the one shared checkout on it. `--stop`
+ends the preview, `release` ends it for you, and `cel-fanout status` shows the
+port it is on.
+
 The console runs one background watch of its own: `cel inbox watch --for root
 --all-workspaces`, so a decision raised in any workspace raises a desktop
 notification rather than waiting for someone to look. Like every watch it is
