@@ -38,7 +38,17 @@ jobs:
       - name: Run HTTP security regressions
         run: node --test tests/http-server.test.mjs
       - name: Scan source and every published local ref
-        run: python3 tools/release/hygiene.py --all-history
+        env:
+          CEL_PRIVATE_PATTERNS: ${{ secrets.CEL_PRIVATE_PATTERNS }}
+        run: |
+          # The private vocabulary - workspace, product and employer names, real
+          # ticket prefixes - lives in a repository secret, one regex per line,
+          # and the scan REFUSES to run without it: a scan with generic checks
+          # only let two workspace names into this tree on 2026-09-18.
+          umask 077
+          printf '%s\n' "$CEL_PRIVATE_PATTERNS" > "$RUNNER_TEMP/private-patterns.txt"
+          python3 tools/release/hygiene.py --all-history --require-private-patterns \
+            --private-patterns "$RUNNER_TEMP/private-patterns.txt"
       - name: Install checksum-verified secret scanner
         env:
           SCANNER_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
