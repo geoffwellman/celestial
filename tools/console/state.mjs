@@ -11,9 +11,19 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 import { legend } from './legend.mjs';
+import {
+  unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
+} from './views.mjs';
+
+export { unitLabel, openLine, tailLine } from './views.mjs';
+export { renderOutput } from './views.mjs';
 
 export const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial');
 export const CEL_BIN = process.env.CEL_BIN || 'cel';
+// `cel-fanout` is a skill binary on PATH, not a subcommand of cel: the console
+// shells out to exactly what an operator would type, and the tests point this
+// at a stub rather than at the live box.
+export const FANOUT_BIN = process.env.CEL_FANOUT_BIN || 'cel-fanout';
 const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
 
 export const run = (cmd, args, timeout = 20000) =>
@@ -134,15 +144,9 @@ export const appendHistory = (line) => {
   } catch { /* a console that cannot write its history is still a console */ }
 };
 
-export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
-export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
-
-// A UNIT IS A PRODUCT, not a repo (CEL-14). A declared product names the repos
-// it bundles, exactly as `cel fleet` does - without it the one row where a
-// product and a repo of the same name differ is the row that looks identical.
-export const unitLabel = (u) => (u && u.declared && (u.repos || []).length
-  ? `${u.name} (${u.repos.join(', ')})`
-  : String(u?.name || ''));
+// A UNIT IS A PRODUCT, not a repo (CEL-14) - unitLabel lives in views.mjs now,
+// with the rest of the rendering, and is re-exported above so the TUI's import
+// did not have to move house.
 
 // The rows the fleet panel draws, flattened so the TUI's selection is one
 // index into one list rather than a pair of cursors over a nested structure.
@@ -212,15 +216,7 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // the permanent one are separate rows that cannot overwrite each other.
 export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const doc = await fleet();
-  const out = [];
-  out.push('FLEET');
-  if (doc.error) out.push(`  ! ${doc.error}`);
-  for (const ws of doc.workspaces || []) {
-    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
-    for (const u of ws.units || []) {
-      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
-    }
-  }
+  const out = fleetTable(doc);
   const items = await openItems(doc);
   out.push('', 'WAITING ON YOU');
   if (!items.length) out.push('  nothing open');
@@ -236,3 +232,72 @@ export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   out.push(legend(pane));
   return out.join('\n');
 };
+
+// --- depth: one unit, one worker -------------------------------------------
+//
+// CEL-19 froze `units[].workers_list`; everything below consumes it and
+// nothing here computes a verdict of its own. Two places deciding whether a
+// worker is stalled is two answers to one question, and the wrong one is
+// always the one nobody is looking at.
+
+export const findUnit = (doc, name) => {
+  for (const ws of doc.workspaces || []) {
+    for (const u of ws.units || []) if (u.name === name) return { ...u, ws: ws.name };
+    if (ws.name === name) return null;
+  }
+  return null;
+};
+
+// A worker is found by id across the whole box: the operator says "ABC-49-slug"
+// and does not also say which workspace it is in - the console already knows.
+export const findWorker = (doc, id) => {
+  for (const ws of doc.workspaces || []) {
+    for (const u of ws.units || []) {
+      for (const w of workersOf(u)) {
+        if (w.id === id || w.ticket === id) return { worker: w, unit: { ...u, ws: ws.name }, ws: ws.name };
+      }
+    }
+  }
+  return null;
+};
+
+// THE DIAGNOSIS, RUN FOR THE OPERATOR RATHER THAN SUGGESTED TO THEM. The whole
+// complaint behind this ticket was a console that answered "why is this worker
+// stalled" with the name of a command to go and type.
+export const why = async (id, ws) => {
+  const args = ['why', id];
+  if (ws) args.push('--workspace', ws);
+  const r = await run(FANOUT_BIN, args, 30000);
+  const text = (r.out + (r.err && !r.ok ? `\n${r.err}` : '')).trimEnd();
+  return text || (r.ok ? '' : `cel-fanout why failed for ${id}`);
+};
+
+export const renderUnit = async (name, { status = '' } = {}) => {
+  const doc = await fleet();
+  const unit = findUnit(doc, name);
+  if (!unit) return null;
+  const items = (await openItems(doc)).filter((it) => it.ws === unit.ws);
+  const tail = inboxTail({ workspaces: (doc.workspaces || []).filter((w) => w.name === unit.ws) }, 10);
+  const out = [unitView({ unit, items, tail }), ''];
+  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(legend('unit'));
+  return out.join('\n');
+};
+
+export const renderWorker = async (id, { status = '' } = {}) => {
+  const doc = await fleet();
+  const found = findWorker(doc, id);
+  if (!found) return null;
+  const text = await why(found.worker.id, found.ws);
+  const out = [workerView({ worker: found.worker, ws: found.ws, why: text }), ''];
+  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(legend('worker'));
+  return out.join('\n');
+};
+
+// THE STATE THE MODEL IS ASKED FROM. It is the fleet document whole - which
+// since CEL-19 carries every worker, its verdict, its quiet time and its PR -
+// plus the open decisions. A model given only counts can only ever answer with
+// a command telling the operator to go and look, which is what it did.
+export const askState = (doc, items) =>
+  `fleet: ${JSON.stringify(doc)}\nopen decisions: ${JSON.stringify(items)}`;

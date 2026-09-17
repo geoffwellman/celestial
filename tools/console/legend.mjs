@@ -18,10 +18,11 @@ export const BINDINGS = {
   ],
   fleet: [
     ['↑/↓', 'select up / down'],
-    ['Ctrl+T', 'switch panel'],
+    ['Enter / double-click', 'the unit view - orchestrator, workers, mail'],
+    ['Ctrl+T', 'switch panel (fleet → waiting → inbox)'],
     ['Ctrl+F', 'focus the selected unit\u2019s orchestrator'],
     ['Ctrl+O', 'open the workspace dashboard'],
-    ['click / double-click', 'select / focus the orchestrator'],
+    ['click / double-click', 'select / open the unit view'],
     ['wheel', 'scroll the panel'],
   ],
   waiting: [
@@ -30,16 +31,42 @@ export const BINDINGS = {
     ['Ctrl+D', 'open the detail view'],
     ['click / double-click', 'select / open the detail view'],
   ],
+  // EVERY LIST IS A PLACE YOU CAN ENTER. The inbox tail was the one panel with
+  // no selection at all - "I can't click on stuff in the inbox" - so a line
+  // that told you something was happening was a line you could not follow.
+  inbox: [
+    ['↑/↓', 'select up / down (Ctrl+T cycles fleet → waiting → inbox)'],
+    ['Enter / double-click', 'open the message detail'],
+  ],
+  unit: [
+    ['↑/↓', 'select a worker'],
+    ['Enter', 'the worker view - the answer to \u201cwhy\u201d'],
+    ['f focus', 'focus the orchestrator pane'],
+    ['m message', 'cel inbox send to the orchestrator, on the command line'],
+    ['Esc', 'back to the fleet'],
+  ],
+  worker: [
+    ['p prompt', 'herdr agent prompt, on the command line'],
+    ['f focus', 'focus the worker pane'],
+    ['c collect', 'cel-fanout collect, proposed - Enter runs it'],
+    ['x release', 'cel-fanout release, proposed - Enter runs it'],
+    ['t try', 'cel-fanout try, where the repo has a preview'],
+    ['w why', 're-run cel-fanout why'],
+    ['Esc', 'back to the unit view'],
+  ],
   detail: [
     ['r', 'resolve'],
     ['p', 'reply (puts cel inbox send on the command line)'],
     ['g', 'go to the sender'],
+    ['u', 'the unit view, when the sender is an orchestrator'],
+    ['k', 'the worker view, when the sender is a worker'],
     ['Esc', 'back'],
     ['', 'bare letters act here: the detail view has no command line'],
   ],
   output: [
     ['PageUp / PageDown', 'scroll'],
     ['Ctrl+L', 'collapse or expand the panel'],
+    ['r', 'raw - the text exactly as the command printed it'],
     ['wheel', 'scroll'],
   ],
   everywhere: [
@@ -53,13 +80,19 @@ export const BINDINGS = {
 export const legend = (pane) => {
   switch (pane) {
     case 'detail':
-      return 'r resolve · p reply · g go to · Esc back · ? help';
+      return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
+    case 'unit':
+      return '↑/↓ worker · Enter why · f focus · m message · Esc back · ? help';
+    case 'worker':
+      return 'p prompt · f focus · c collect · x release · t try · w why · Esc back · ? help';
+    case 'inbox':
+      return '↑/↓ select · Enter detail · ^T panel · ^L output · ? help';
     case 'waiting':
       return '↑/↓ select · Enter detail · ^T panel · ^L output · ^P/^N history · ? help';
     case 'output':
-      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · ? help';
+      return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · ^T panel · ^F focus · ^O dashboard · ^L output · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · ^P/^N history · ? help';
   }
 };
 

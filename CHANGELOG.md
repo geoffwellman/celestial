@@ -8,6 +8,25 @@ watch the repo (Watch → Custom → Releases) to be notified.
 ## [Unreleased]
 
 ### Added
+- The console has a **unit view**: Enter or a double-click on a fleet row opens
+  one product whole - its orchestrator with `[focus]` and `[message]`, every
+  worker with ticket, state, quiet time, verdict, ahead count and PR, the open
+  decisions and the recent mail
+- The console has a **worker view**, the answer to "why": it runs `cel-fanout
+  why <id>` on open and offers `[prompt]` `[focus]` `[collect]` `[release]`
+  `[try]` `[why again]` - the ones that change state as proposals on the
+  command line
+- Every list in the console is a place you can enter: the inbox tail is
+  selectable (Ctrl+T cycles fleet → waiting → inbox), and a message from a
+  worker or an orchestrator carries `[worker]` / `[unit]` to its page
+- The console never shows raw JSON: `cel fleet --json`, `cel-fanout status
+  --json`, `cel inbox open --json`, `herdr agent focus` and `herdr agent get`
+  are rendered as the tables and lines the panels use, anything else that
+  parses as JSON as `key: value`, and `r` toggles `[raw]`
+- The console's model can answer from state: `ANSWER: <text>` for questions the
+  fleet document (which now carries `workers_list`) already holds, with nothing
+  run; `cel console --render-once --unit <product>` and `--worker <id>` print
+  the two new views
 - The steward says a thing once: every item it raises carries a condition key
   (`cel inbox send --fp`), so a repeat becomes an update on the item already
   open - `cel inbox open` shows `(×12, last 17:35)` - and the steward resolves

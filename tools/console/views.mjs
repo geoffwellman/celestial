@@ -1,0 +1,218 @@
+// The views that have depth, and the rule that the console never shows raw JSON.
+//
+// Split out of state.mjs and ui.mjs on purpose: these are pure functions from
+// data to text. `--render-once --unit bundle` prints exactly what the ink
+// unit view draws, the tests assert on the text, and a column that goes
+// missing goes missing in a test rather than in front of an operator.
+//
+// The owner, 2026-09-18, after an evening with the console: "when I click on
+// items in the fleet panel it gives me an output box with JSON"; "I'm unable
+// to learn what's going on at anything more than surface level". Both of those
+// are this file - a list you can enter, and output the console renders because
+// it already knows the shape of everything it runs.
+
+// A UNIT IS A PRODUCT, not a repo (CEL-14). A declared product names the repos
+// it bundles, exactly as `cel fleet` does - without it the one row where a
+// product and a repo of the same name differ is the row that looks identical.
+export const unitLabel = (u) => (u && u.declared && (u.repos || []).length
+  ? `${u.name} (${u.repos.join(', ')})`
+  : String(u?.name || ''));
+
+// Quiet time in the unit an operator thinks in. Seconds are noise at this
+// scale: nobody decides anything differently because a worker has been silent
+// for 812 seconds rather than 800.
+export const quiet = (secs) => {
+  const s = Math.max(0, Number(secs) || 0);
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+};
+
+// The PR as a NUMBER. A full GitHub URL in a table column pushes every other
+// column off the right edge, and the number is the thing anyone says out loud.
+export const prNumber = (url) => {
+  const m = /\/pull\/(\d+)/.exec(String(url || ''));
+  return m ? `#${m[1]}` : '';
+};
+
+export const workersOf = (unit) => (unit && Array.isArray(unit.workers_list) ? unit.workers_list : []);
+
+// One worker, one line: ticket, id, state, agent, quiet, verdict, ahead, PR.
+// The order is the order the questions arrive in - what is it, is it alive,
+// how long has it been quiet, is that bad.
+export const workerLine = (w) => [
+  String(w.ticket || '-').padEnd(8),
+  String(w.id || '').padEnd(24),
+  String(w.state || '-').padEnd(9),
+  String(w.live || '-').padEnd(8),
+  quiet(w.quiet_secs).padStart(5),
+  `  ${String(w.verdict || '-').padEnd(10)}`,
+  `ahead ${String(w.ahead ?? '?').padEnd(4)}`,
+  prNumber(w.pr) || '-',
+].join(' ');
+
+export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
+export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
+
+// --- section 1: the unit view ----------------------------------------------
+
+export const unitView = ({ unit, items = [], tail = [] }) => {
+  const ws = unit.ws || '';
+  const out = [];
+  out.push(`UNIT ${unitLabel(unit)}   workspace ${ws}`);
+  out.push('');
+  out.push('ORCHESTRATOR');
+  out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`);
+  out.push(`  workspace ${ws}   repos ${(unit.repos || []).join(', ') || '-'}`);
+  out.push('  [focus]  [message]');
+  out.push('');
+  out.push('WORKERS');
+  const workers = workersOf(unit);
+  if (!workers.length) out.push('  no workers');
+  for (const w of workers) out.push(`  ${workerLine(w)}`);
+  out.push('');
+  out.push('WAITING');
+  if (!items.length) out.push('  nothing open');
+  for (const it of items) out.push(`  ${openLine(it)}`);
+  out.push('');
+  out.push('RECENT MAIL');
+  if (!tail.length) out.push('  quiet');
+  for (const m of tail) out.push(`  ${tailLine(m)}`);
+  return out.join('\n');
+};
+
+// --- section 2: the worker view, which is the answer to "why" ---------------
+
+export const workerFacts = (w) => `${w.id} (${w.ticket}, ${w.repo}) - ${w.state}, agent ${w.live}`
+  + `, ${w.verdict ? `${w.verdict}${w.severity ? ` (${w.severity})` : ''}` : 'no stall'}`;
+
+// `[try]` only where a preview exists: a button that always fails is a button
+// that teaches the operator not to trust the row of them.
+export const workerButtons = (preview = false) => [
+  '[prompt]', '[focus]', '[collect]', '[release]',
+  ...(preview ? ['[try]'] : []),
+  '[why again]',
+];
+
+export const workerView = ({ worker, ws = '', why = '', preview = false }) => {
+  const out = [];
+  out.push(`WORKER ${workerFacts(worker)}`);
+  out.push(`  quiet ${quiet(worker.quiet_secs)}   ahead ${worker.ahead ?? '?'}   branch ${worker.branch || '-'}`
+    + `   PR ${prNumber(worker.pr) || 'none'}   workspace ${ws}`);
+  out.push('');
+  out.push('WHY');
+  const body = String(why || '').trimEnd();
+  if (!body) out.push('  (cel-fanout why said nothing)');
+  for (const line of body ? body.split('\n') : []) out.push(`  ${line}`);
+  out.push('');
+  out.push(workerButtons(preview).join('  '));
+  return out.join('\n');
+};
+
+// --- section 4: no raw JSON, ever ------------------------------------------
+
+// What came back: one document, a stream of one-per-line documents, or text.
+// JSONL is not a nicety here - `cel inbox open --json` is exactly that shape,
+// and treating it as prose is what put braces on the screen.
+export const parseJson = (text) => {
+  const raw = String(text || '').trim();
+  if (!raw || !/^[[{]/.test(raw)) return null;
+  try { return { kind: 'doc', value: JSON.parse(raw) }; } catch { /* maybe JSONL */ }
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const rows = [];
+  for (const l of lines) {
+    try { rows.push(JSON.parse(l)); } catch { return null; }
+  }
+  return rows.length ? { kind: 'rows', value: rows } : null;
+};
+
+// The fallback shape: key: value, nested objects indented, arrays numbered.
+// Deliberately boring. An operator reading an unfamiliar command's output
+// should be reading VALUES, not counting brackets to find where one ends.
+export const keyValue = (value, indent = 0) => {
+  const pad = ' '.repeat(indent);
+  const out = [];
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => {
+      if (v && typeof v === 'object') {
+        out.push(`${pad}${i + 1}.`);
+        out.push(...keyValue(v, indent + 2));
+      } else out.push(`${pad}${i + 1}. ${v}`);
+    });
+    return out;
+  }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (v && typeof v === 'object') {
+        out.push(`${pad}${k}:`);
+        out.push(...keyValue(v, indent + 2));
+      } else out.push(`${pad}${k}: ${v === '' ? '-' : v}`);
+    }
+    return out;
+  }
+  out.push(`${pad}${value}`);
+  return out;
+};
+
+export const fleetTable = (doc) => {
+  const out = ['FLEET'];
+  if (doc.error) out.push(`  ! ${doc.error}`);
+  for (const ws of doc.workspaces || []) {
+    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
+    for (const u of ws.units || []) {
+      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
+    }
+  }
+  return out;
+};
+
+export const workerTable = (rows) => {
+  const out = ['WORKERS'];
+  if (!rows.length) out.push('  none');
+  for (const w of rows) out.push(`  ${workerLine(w)}`);
+  return out;
+};
+
+export const waitingTable = (rows) => {
+  const out = ['WAITING'];
+  if (!rows.length) out.push('  nothing open');
+  for (const it of rows) out.push(`  ${openLine({ ws: '', ...it })}`);
+  return out;
+};
+
+// `herdr agent focus` prints a sentence about tmux. The operator asked for a
+// pane to be focused; the answer is that it was, and which one.
+const focusLine = (cmd, text) => {
+  const name = (/herdr\s+agent\s+focus\s+(\S+)/.exec(cmd) || [])[1] || '';
+  const doc = parseJson(text);
+  const pane = doc?.kind === 'doc' ? doc.value?.pane : null;
+  const found = pane || (/\b(\w+[:.]\w+(?:[:.]\w+)?|%\d+)\b/.exec(String(text).replace(/^\s*focused\s*/, '')) || [])[1] || '';
+  return `focused ${name}${found ? ` (${found})` : ''}`;
+};
+
+// THE CONSOLE KNOWS THE SHAPE OF WHAT IT RUNS. Everything below is a command
+// this console itself offers, so there is no excuse for showing the operator
+// the wire format - and the raw text is one keypress away in the output view.
+export const renderOutput = (cmd, text) => {
+  const c = String(cmd || '').trim();
+  if (/^herdr\s+agent\s+focus\b/.test(c)) return focusLine(c, text);
+  const parsed = parseJson(text);
+  if (!parsed) return String(text ?? '');
+  if (/^herdr\s+agent\s+get\b/.test(c) && parsed.kind === 'doc') {
+    const v = parsed.value || {};
+    const known = ['name', 'state', 'pane', 'cwd'];
+    const head = known.filter((k) => k in v).map((k) => `${k}: ${v[k]}`);
+    const rest = Object.entries(v).filter(([k]) => !known.includes(k));
+    return [...head, ...keyValue(Object.fromEntries(rest))].join('\n');
+  }
+  if (/^cel\s+fleet\b/.test(c) && parsed.kind === 'doc') return fleetTable(parsed.value).join('\n');
+  if (/^cel-fanout\s+status\b/.test(c)) {
+    const rows = parsed.kind === 'rows' ? parsed.value : [parsed.value];
+    return workerTable(rows).join('\n');
+  }
+  if (/^cel\s+inbox\s+(open|read)\b/.test(c)) {
+    const rows = parsed.kind === 'rows' ? parsed.value : [parsed.value];
+    return waitingTable(rows).join('\n');
+  }
+  return keyValue(parsed.value).join('\n');
+};
