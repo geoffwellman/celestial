@@ -467,6 +467,17 @@ _steward_ready_tickets() { # [agents-json]
 # visible before someone attempts another delegation.
 # Keys come from each workspace's env, so a provider is checked once per
 # workspace that can reach it; the balance is cached, so this is cheap.
+# Does any profile in the workspace route to this provider? worker_profiles
+# and the review profile are the routes; role_profiles only name them.
+_steward_provider_used() { # <wsdir> <provider> -> 0 yes, 1 no
+  command -v profile_provider >/dev/null 2>&1 || . "$CEL_ROOT/lib/profiles.sh"
+  local m
+  for m in $(yq -r '[(.worker_profiles // {} | .[]? | .model // empty), (.review.model // empty)] | .[]' "$1/workspace.yaml" 2>/dev/null); do
+    [ "$(profile_provider "$m" 2>/dev/null)" = "$2" ] && return 0
+  done
+  return 1
+}
+
 _steward_quota() {
   # shellcheck source=lib/quota.sh
   . "$CEL_ROOT/lib/quota.sh"
@@ -476,6 +487,16 @@ _steward_quota() {
     for p in $(yq -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST" 2>/dev/null); do
       r="$(quota_remaining "$p" "$wsdir" 2>/dev/null || printf unknown)"
       [ "$r" = unknown ] && continue
+      # A dry account nobody routes to vetoes nothing. Measured 2026-09-17:
+      # every workspace on the box carried a "deepseek credit is -0.24"
+      # blocker for a direct deepseek account no profile used - the deepseek
+      # models all go through openrouter - because the key was in the
+      # environment and the balance check ran for every provider with one.
+      # The blocker is about routes, so it needs a route to exist.
+      if ! _steward_provider_used "$wsdir" "$p"; then
+        _steward_clear "$ws" "quota-dry-$p" "$p is dry but no profile in $ws routes to it - nothing is vetoed"
+        continue
+      fi
       # two workspaces on the same key are one account: say it once per tick
       local fp; fp="$(_quota_key "$p" "$wsdir" | sha256sum | cut -c1-12)"
       case " $seen " in *" $p.$fp "*) continue;; esac
