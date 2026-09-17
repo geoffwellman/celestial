@@ -27,12 +27,12 @@ import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
   readHistory, appendHistory, unitLabel,
 } from './state.mjs';
-import { translate, NoTranslator, translatorLabel } from './translate.mjs';
+import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
 } from './edit.mjs';
-import { parseMouseAll, hasMouse, hitTest } from './mouse.mjs';
+import { parseMouseAll, hasMouse, hasControl, hitTest } from './mouse.mjs';
 import { enterTerminal, LEAVE } from './term.mjs';
 import { legend, helpLines } from './legend.mjs';
 
@@ -83,54 +83,61 @@ const More = ({ n, up }) => (n > 0
   ? h(Text, { color: C.dim }, `${up ? '▲' : '▼'} ${n} more`)
   : null);
 
-const Panel = ({ title, right, innerRef, children }) =>
-  h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: C.line, paddingX: 1, ref: innerRef },
+const Panel = ({ title, right, innerRef, focused, children }) =>
+  h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: focused ? C.accent : C.line, paddingX: 1, ref: innerRef },
     h(Box, null,
-      h(Text, { color: C.accent, bold: true }, title),
+      h(Text, { color: focused ? C.ink : C.accent, bold: true }, `${focused ? '● ' : ''}${title}`),
       h(Box, { flexGrow: 1 }),
       right ? h(Text, { color: C.dim }, right) : null),
     children);
 
-const FleetPanel = ({ doc, rows, sel, offset, height, innerRef }) => {
+const FleetPanel = ({ doc, rows, sel, offset, height, innerRef, focused, loaded }) => {
   const w = window_(rows, offset, height);
+  const nameW = Math.max(10, Math.min(22, ...rows.filter((r) => r.kind === 'unit').map((r) => String(r.name).length)));
   return h(Panel, {
     title: 'FLEET',
     innerRef,
+    focused,
     right: doc.error ? doc.error : `${rows.filter((r) => r.kind === 'unit').length} units`,
   },
-  rows.length === 0 ? h(Text, { color: C.dim }, '  no workspaces registered') : null,
+  rows.length === 0 ? h(Text, { color: C.dim }, loaded ? '  no workspaces registered' : '  loading…') : null,
   h(More, { n: w.above, up: true }),
   ...w.rows.map((r, i) => {
     const on = w.start + i === sel;
     if (r.kind === 'ws') {
-      return h(Text, { key: `w${r.ws}`, color: C.ink, bold: true, inverse: on },
-        `${r.ws}  `,
+      return h(Text, { key: `w${r.ws}`, color: C.ink, bold: true, inverse: on, wrap: 'truncate-end' },
+        `${on ? '▸ ' : ''}${r.ws}  `,
         h(Text, { color: C.dim }, `(${r.units} products)  root mail: ${r.root.unread} unread, `),
         h(Text, { color: r.root.open ? C.accent : C.dim }, `${r.root.open} open`));
     }
-    return h(Text, { key: `u${r.ws}/${r.name}`, inverse: on },
-      h(Text, { color: C.dim }, '  '),
-      h(Text, { color: C.ink }, unitLabel(r).padEnd(14)),
-      h(Text, { color: orchColour(r.orch) }, `orch ${String(r.orch).padEnd(8)}`),
+    const repos = r.declared && (r.repos || []).length ? `   ↳ ${r.repos.join(', ')}` : '';
+    return h(Text, { key: `u${r.ws}/${r.name}`, inverse: on, wrap: 'truncate-end' },
+      h(Text, { color: on ? C.ink : C.dim }, on ? '▸ ' : '  '),
+      h(Text, { color: C.ink }, String(r.name).slice(0, nameW).padEnd(nameW + 1)),
+      h(Text, { color: orchColour(r.orch) }, `orch ${String(r.orch).padEnd(6)}`),
       h(Text, { color: C.dim }, 'workers '),
-      h(Text, { color: r.workers ? C.ink : C.dim }, `${r.workers}/${r.cap}   `),
-      h(Text, { color: r.stalled ? C.bad : C.dim }, `stalled ${r.stalled}   `),
-      h(Text, { color: r.unlanded ? C.warn : C.dim }, `unlanded ${r.unlanded}`));
+      h(Text, { color: r.workers ? C.ink : C.dim }, `${r.workers}/${r.cap}  `),
+      h(Text, { color: r.stalled ? C.bad : C.dim }, `stalled ${r.stalled}  `),
+      h(Text, { color: r.unlanded ? C.warn : C.dim }, `unlanded ${r.unlanded}`),
+      h(Text, { color: C.dim }, repos));
   }),
   h(More, { n: w.below }));
 };
 
-const OpenPanel = ({ items, sel, offset, height, innerRef }) => {
+const OpenPanel = ({ items, sel, offset, height, innerRef, focused, loaded }) => {
   const w = window_(items, offset, height);
-  return h(Panel, { title: 'WAITING ON YOU', innerRef, right: items.length ? `${items.length} open` : '' },
-    items.length === 0 ? h(Text, { color: C.dim }, 'nothing open') : null,
+  return h(Panel, { title: 'WAITING ON YOU', innerRef, focused, right: items.length ? `${items.length} open · Enter opens` : '' },
+    items.length === 0 ? h(Text, { color: C.dim }, loaded ? 'nothing open' : 'loading…') : null,
     h(More, { n: w.above, up: true }),
-    ...w.rows.map((it, i) => h(Text, { key: it.id, inverse: w.start + i === sel, wrap: 'truncate-end' },
-      h(Text, { color: C.accent }, `[${it.id}] `),
-      h(Text, { color: C.dim }, `${String(it.ts).slice(0, 16)} ${it.ws} `),
-      h(Text, { color: kindColour(it.kind) }, `${it.kind} `),
-      h(Text, { color: C.dim }, `from ${it.from}: `),
-      h(Text, { color: C.ink }, it.message))),
+    ...w.rows.map((it, i) => {
+      const on = w.start + i === sel;
+      return h(Text, { key: it.id, inverse: on, wrap: 'truncate-end' },
+        h(Text, { color: on ? C.ink : C.dim }, on ? '▸ ' : '  '),
+        h(Text, { color: C.dim }, `${String(it.ts).slice(5, 16).replace('T', ' ')}  ${String(it.ws).padEnd(12)} `),
+        h(Text, { color: kindColour(it.kind) }, `${it.kind} `),
+        h(Text, { color: C.dim }, `${it.from}${it.count > 1 ? ` ×${it.count}` : ''}: `),
+        h(Text, { color: C.ink }, it.message));
+    }),
     h(More, { n: w.below }));
 };
 
@@ -140,11 +147,13 @@ const OpenPanel = ({ items, sel, offset, height, innerRef }) => {
 // leaving the console for a pane. Now it takes the room, carries the whole
 // message and the thread around it, and has buttons you can click.
 const DetailView = ({ item, thread: rows, innerRef }) =>
-  h(Panel, { title: 'DECISION', innerRef, right: `${item.ws} · ${String(item.ts).slice(0, 16)}` },
+  h(Panel, { title: `${String(item.kind || 'item').toUpperCase()} · ${item.ws}`, innerRef, focused: true, right: `${String(item.ts).slice(0, 16).replace('T', ' ')} · Esc back` },
     h(Text, null,
-      h(Text, { color: C.accent }, `[${item.id}] `),
-      h(Text, { color: kindColour(item.kind) }, `${item.kind} `),
-      h(Text, { color: C.dim }, `from ${item.from}`)),
+      h(Text, { color: C.dim }, 'from '),
+      h(Text, { color: C.ink, bold: true }, String(item.from)),
+      h(Text, { color: C.dim }, item.count > 1 ? `  (raised ×${item.count}, last ${String(item.last_ts || '').slice(0, 16).replace('T', ' ')})` : ''),
+      h(Text, { color: C.dim }, `   id ${item.id}`)),
+    h(Text, null, ' '),
     h(Text, { color: C.ink, wrap: 'wrap' }, item.message),
     rows.length ? h(Box, { flexDirection: 'column', marginTop: 1 },
       h(Text, { color: C.dim }, `thread (${rows.length})`),
@@ -158,15 +167,15 @@ const DetailView = ({ item, thread: rows, innerRef }) =>
       h(Text, { color: C.dim }, '  '),
       h(Text, { color: C.ink }, '[go to]')));
 
-const TailPanel = ({ lines, offset, height, innerRef }) => {
+const TailPanel = ({ lines, offset, height, innerRef, focused, loaded }) => {
   const w = window_(lines, offset, height);
-  return h(Panel, { title: 'INBOX', innerRef },
-    lines.length === 0 ? h(Text, { color: C.dim }, 'quiet') : null,
+  return h(Panel, { title: 'INBOX', innerRef, focused },
+    lines.length === 0 ? h(Text, { color: C.dim }, loaded ? 'quiet' : 'loading…') : null,
     h(More, { n: w.above, up: true }),
     ...w.rows.map((m, i) => h(Text, { key: `${m.ts}${i}`, wrap: 'truncate-end' },
       h(Text, { color: C.dim }, `[${m.ws}] `),
       h(Text, { color: kindColour(m.kind) }, `${m.kind} `),
-      h(Text, { color: C.dim }, `${m.from}: `),
+      h(Text, { color: C.dim }, `${m.from}${m.count > 1 ? ` ×${m.count}` : ''}: `),
       h(Text, { color: C.ink }, m.message))),
     h(More, { n: w.below }));
 };
@@ -178,6 +187,12 @@ const TailPanel = ({ lines, offset, height, innerRef }) => {
 const CommandLine = ({ value, cursor, proposed }) => {
   const c = Math.max(0, Math.min(cursor, value.length));
   const colour = proposed ? C.accent : C.ink;
+  if (!value) {
+    return h(Box, null,
+      h(Text, { color: C.ok }, '> '),
+      h(Text, { color: colour, inverse: true }, ' '),
+      h(Text, { color: C.dim }, ' type a command, or ask in plain words - Enter runs, ? help'));
+  }
   return h(Box, null,
     h(Text, { color: proposed ? C.accent : C.ok }, proposed ? '? ' : '> '),
     h(Text, { color: colour }, value.slice(0, c)),
@@ -213,8 +228,12 @@ const App = ({ refresh, statusSecs }) => {
   const [help, setHelp] = useState(false);
   const [picker, setPicker] = useState(null);     // {query, sel} - Ctrl+R
   const [, setTick] = useState(0);                // a resize is a re-render
+  const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
+  const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
   const history = useRef(readHistory());
   const hIndex = useRef(-1);
+  const lastRaw = useRef('');
+  const asked = useRef('');   // the sentence behind the current proposal, for the answer
   const typed = useRef('');
   const lastClick = useRef({ panel: '', index: -1, at: 0 });
   const hitMap = useRef([]);
@@ -237,6 +256,7 @@ const App = ({ refresh, statusSecs }) => {
 
   useEffect(() => {
     if (!status || !statusSecs) return undefined;
+    if (/^(model:|refused|no command|stopped at|command exited)/.test(status)) return undefined;   // problems stay put
     const t = setTimeout(() => setStatus(''), statusSecs * 1000);
     return () => clearTimeout(t);
   }, [status, statusAt, statusSecs]);
@@ -250,6 +270,7 @@ const App = ({ refresh, statusSecs }) => {
       return prev.length > seeded.length ? prev.slice(-200) : seeded;
     });
     setAt(new Date().toTimeString().slice(0, 8));
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
@@ -314,12 +335,12 @@ const App = ({ refresh, statusSecs }) => {
       return false;
     }
     setOutput(r.out || '(no output)');
-    setOutOffset(0);
-    say(r.ok ? 'done' : 'command exited non-zero');
+    setOutOffset(0); setOutView(true); setOutCollapsed(false);
+    say(r.ok ? 'done - Esc returns to the panels' : 'command exited non-zero - Esc returns to the panels');
     appendHistory(cmd);
     history.current = [...history.current, cmd];
     reload();
-    return r.ok;
+    return `$ ${cmd}\n${r.out || '(no output)'}`;
   }, [reload, say]);
 
   // A CHAIN IS ALLOWLISTED WHOLE BEFORE ANY OF IT RUNS (state.mjs:runChain), and
@@ -327,7 +348,7 @@ const App = ({ refresh, statusSecs }) => {
   // a proposal they were told the guard would check - so a refusal on line two
   // must not arrive after line one has already changed the box.
   const executeChain = useCallback(async (cmds) => {
-    if (cmds.length === 1) { await execute(cmds[0]); return; }
+    if (cmds.length === 1) return execute(cmds[0]);
     setBusy(true);
     say(`checking ${cmds.length} commands…`);
     const r = await runChain(cmds, (cmd, i, n) => say(`running ${i + 1}/${n}: ${cmd}`));
@@ -340,9 +361,11 @@ const App = ({ refresh, statusSecs }) => {
       ].join('\n'));
       setOutOffset(0);
       say('refused by the console allowlist - nothing ran');
-      return;
+      return '';
     }
-    setOutput(r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)');
+    const transcript = r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)';
+    setOutput(transcript);
+    setOutOffset(1); setOutView(true); setOutCollapsed(false);
     setOutOffset(0);
     for (const s2 of r.results) appendHistory(s2.cmd);
     history.current = [...history.current, ...r.results.map((s2) => s2.cmd)];
@@ -350,7 +373,37 @@ const App = ({ refresh, statusSecs }) => {
     say(r.stoppedAt != null
       ? `stopped at ${r.stoppedAt + 1}/${cmds.length} - it exited non-zero`
       : `done - ${cmds.length} commands`);
+    return transcript;
   }, [execute, reload, say]);
+
+  // THE ANSWER. A sentence that became commands is still a question, and
+  // "what is happening with widget" answered with a fleet table is the console
+  // handing the operator homework. Once the commands have run, the model reads
+  // what they printed and answers the sentence in a few lines above the raw
+  // output. It reads; it never runs anything.
+  const explain = useCallback(async (sentence, transcript) => {
+    if (!sentence || !transcript) return;
+    setBusy(true);
+    say(`answering from the output (${translatorLabel()})…`);
+    try {
+      const a = await answer({ sentence, transcript });
+      setBusy(false);
+      if (!a) { say('done'); return; }
+      const cols = Math.max(40, (stdout?.columns || 80) - 6);
+      const wrapped = a.split('\n').flatMap((line) => {
+        const words = line.split(/\s+/); const rows = []; let cur = '';
+        for (const w of words) { if ((cur + ' ' + w).trim().length > cols) { rows.push(cur.trim()); cur = w; } else cur = `${cur} ${w}`; }
+        rows.push(cur.trim()); return rows;
+      }).join('\n');
+      setOutput(`${wrapped}\n\n${'─'.repeat(40)}\n${transcript}`);
+      setOutOffset(1);   // 1 = pinned to the top: the answer is the point, the transcript is under the line
+      setOutView(true); setOutCollapsed(false);
+      say('answered - the raw output is below the line · Esc returns to the panels');
+    } catch (e) {
+      setBusy(false);
+      say(e instanceof NoTranslator ? 'done' : `model: ${e.message} - raw output kept`);
+    }
+  }, [say, stdout]);
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
 
@@ -377,7 +430,7 @@ const App = ({ refresh, statusSecs }) => {
       say(e instanceof NoTranslator ? e.message : `model: ${e.message}`);
       return;
     }
-    if (cmds.length) { setBusy(false); propose(cmds); return; }
+    if (cmds.length) { setBusy(false); asked.current = text; propose(cmds); return; }
     // The second ask: what might they have meant? A miss that only says "no"
     // leaves the operator exactly where they were.
     say('no command for that - asking for options…');
@@ -428,8 +481,8 @@ const App = ({ refresh, statusSecs }) => {
     say('reply - type the message, Enter sends it');
   }, [say, setLine]);
 
-  const submit = useCallback(async () => {
-    const text = value.trim();
+  const submitValue = useCallback(async (raw) => {
+    const text = String(raw ?? '').trim();
     hIndex.current = -1;
     typed.current = '';
     if (!text) return;
@@ -440,21 +493,25 @@ const App = ({ refresh, statusSecs }) => {
     // Enter, which is the whole rule the model is held to.
     if (options.length && /^[123]$/.test(text)) {
       const pick = options[Number(text) - 1];
-      if (pick) { setOptions([]); propose([pick.cmd]); return; }
+      if (pick) { setOptions([]); propose([pick.cmd]); return; }   // asked.current still holds the sentence
     }
     // A PROPOSED command runs on the SECOND Enter and not before. The model
     // never executes anything: it writes a line, the operator reads it, and
     // the keystroke that runs it is theirs.
     if (proposed && text === proposed.cmds.join(' ; ')) {
       const { cmds } = proposed;
+      const sentence = asked.current;
+      asked.current = '';
       setProposed(null);
       setLine('');
-      await executeChain(cmds);
+      const transcript = await executeChain(cmds);
+      if (sentence && transcript) await explain(sentence, transcript);
       return;
     }
-    if (COMMAND.test(text)) { setLine(''); await execute(text); return; }
+    if (COMMAND.test(text)) { setLine(''); asked.current = ''; await execute(text); return; }
     await ask(text);
-  }, [value, proposed, options, exit, execute, executeChain, ask, propose, setLine]);
+  }, [proposed, options, exit, execute, executeChain, explain, ask, propose, setLine]);
+  const submit = useCallback(() => submitValue(value), [submitValue, value]);
 
   const scroll = useCallback((panel, delta) => {
     if (panel === 'output') { setOutOffset((o) => Math.max(0, o + delta)); return; }
@@ -509,10 +566,13 @@ const App = ({ refresh, statusSecs }) => {
   useEffect(() => {
     const onData = (chunk) => {
       const s = String(chunk);
+      lastRaw.current = s;
       if (!hasMouse(s)) return;
       for (const ev of parseMouseAll(s)) onMouse(ev);
     };
-    process.stdin.on('data', onData);
+    // Prepended so it runs before ink's own listener: useInput below reads
+    // lastRaw to tell Backspace from Delete, which ink reports alike.
+    process.stdin.prependListener('data', onData);
     return () => process.stdin.off('data', onData);
   }, [onMouse]);
 
@@ -524,6 +584,14 @@ const App = ({ refresh, statusSecs }) => {
     if (hasMouse(input)) return;
 
     if (help) { if (key.escape || key.return || input === '\u001bOP' || key.f1) setHelp(false); return; }
+    if (view === 'output' && !value) {
+      const step = Math.max(1, outFullH - 2);
+      if (key.escape) { setOutView(false); say('back'); return; }
+      if (key.upArrow) { setOutOffset((o) => Math.max(1, (o === 1 ? 1 : o) - 1)); return; }
+      if (key.downArrow) { setOutOffset((o) => Math.min(Math.max(1, outAll.length - outFullH + 1), (o === 1 ? 1 : o) + 1)); return; }
+      if (key.pageUp) { setOutOffset((o) => Math.max(1, (o === 1 ? 1 : o) - step)); return; }
+      if (key.pageDown) { setOutOffset((o) => Math.min(Math.max(1, outAll.length - outFullH + 1), (o === 1 ? 1 : o) + step)); return; }
+    }
 
     // F1 arrives as an escape sequence rather than a key flag on most
     // terminals; both spellings are accepted.
@@ -550,7 +618,7 @@ const App = ({ refresh, statusSecs }) => {
     // this console bound bare j/k/f/o/r/w/q and "what's blocked" flipped the
     // panel and lost its w.
     if (detail) {
-      if (key.escape) { setDetail(null); setPane('waiting'); return; }
+      if (key.escape) { setDetail(null); setPane('waiting'); say('back'); return; }
       if (input === 'r') { resolveItem(detail.item); return; }
       if (input === 'p') { replyTo(detail.item); return; }
       if (input === 'g') { setDetail(null); setPane('fleet'); execute(`herdr agent focus ${detail.item.from}`); return; }
@@ -580,21 +648,21 @@ const App = ({ refresh, statusSecs }) => {
     if (key.leftArrow) { const r = left(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
     if (key.rightArrow) { const r = right(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
 
-    // Selection moves on Shift+arrows (or Ctrl+N / Ctrl+P); plain arrows are
-    // history, as in a shell.
-    if ((key.upArrow || key.downArrow) && key.shift) {
+    // Arrows move the selection - they are what anyone reaches for first,
+    // and Shift+arrow never arrived through the owner's terminal host. The
+    // command history is Ctrl+P / Ctrl+N (previous / next, the shell
+    // spelling) and the Ctrl+R picker.
+    if (key.upArrow || key.downArrow) {
       setSel((s) => (key.upArrow ? Math.max(0, s - 1) : Math.min(list.length - 1, s + 1)));
       return;
     }
-    if (key.upArrow || key.downArrow) {
-      if (hIndex.current < 0) typed.current = value;
-      const r = historyWalk(history.current, hIndex.current, key.upArrow ? 'up' : 'down', typed.current);
-      hIndex.current = r.index;
-      setLine(r.value);
-      return;
-    }
-    if (key.backspace) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
-    if (key.delete) { const r = del(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
+    // ink names the byte Backspace sends on almost every terminal (\x7f)
+    // "delete" and only \b "backspace"; the first cut forward-deleted on
+    // Backspace, which at the end of a line does nothing - "I cannot
+    // backspace". The raw chunk tells the two apart: Delete is \x1b[3~.
+    const forwardDelete = key.delete && lastRaw.current === '\x1b[3~';
+    if (key.backspace || (key.delete && !forwardDelete)) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
+    if (forwardDelete) { const r = del(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
 
     if (key.ctrl) {
       switch (input) {
@@ -606,8 +674,13 @@ const App = ({ refresh, statusSecs }) => {
         case 'u': { const r = killLine(); setValue(r.value); setCursor(r.cursor); setProposed(null); return; }
         case 'l': setOutCollapsed((v) => !v); return;
         case 'r': setPicker({ query: '', sel: 0 }); return;
-        case 'n': setSel((s) => Math.min(list.length - 1, s + 1)); return;
-        case 'p': setSel((s) => Math.max(0, s - 1)); return;
+        case 'p': case 'n': {
+          if (hIndex.current < 0) typed.current = value;
+          const r = historyWalk(history.current, hIndex.current, input === 'p' ? 'up' : 'down', typed.current);
+          hIndex.current = r.index;
+          setLine(r.value);
+          return;
+        }
         case 't': setPane((p) => (p === 'fleet' ? 'waiting' : 'fleet')); setSel(0); return;
         case 'd': if (pane === 'waiting') openDetail(items[sel]); return;
         case 'f': {
@@ -630,7 +703,26 @@ const App = ({ refresh, statusSecs }) => {
         default: return;
       }
     }
-    if (input && !key.meta) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
+    // A PASTE arrives bracketed (\x1b[200~ … \x1b[201~) from herdr and most
+    // terminals; the markers are control bytes but the text between them is
+    // exactly what the operator meant to type. Take the text, drop the rest.
+    // A WHOLE LINE IN ONE CHUNK - a paste with a newline, or herdr's `pane run`
+    // - is text followed by Enter, not a keypress ink has a name for: it came
+    // through as input with a \r inside, which the control-byte rule below
+    // then dropped whole. Insert the text, then submit it.
+    if (input && /[\r\n]/.test(input)) {
+      const first = input.replace(/\x1b\[20[01]~/g, '').split(/\r?\n|\r/)[0].replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+      const r = insert(value, cursor, first);
+      setValue(r.value); setCursor(r.cursor);
+      submitValue(r.value);
+      return;
+    }
+    if (input && input.includes('\x1b[200~')) {
+      const pasted = input.replace(/\x1b\[200~([\s\S]*?)\x1b\[201~/g, '$1').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').replace(/\r?\n/g, ' ');
+      if (pasted) { const r = insert(value, cursor, pasted); setValue(r.value); setCursor(r.cursor); }
+      return;
+    }
+    if (input && !key.meta && !hasControl(input)) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
   });
 
   const width = stdout?.columns || 80;
@@ -647,13 +739,13 @@ const App = ({ refresh, statusSecs }) => {
     const outputRows = outCollapsed || !output ? 0 : Math.max(3, Math.min(12, Math.floor(screen / 4)));
     const free = Math.max(6, screen - chrome - frames - (outputRows ? outputRows + 3 : 0));
     const fleetRowsMax = Math.max(2, Math.floor(screen / 3));
-    const fleetH = detail ? Math.min(3, fleetRowsMax) : Math.min(rows.length || 1, fleetRowsMax);
+    const fleetH = Math.min(rows.length || 1, fleetRowsMax);
     const rest = Math.max(4, free - fleetH);
-    const detailH = detail ? Math.max(4, Math.floor(rest / 2)) : 0;
-    const remaining = Math.max(2, rest - detailH);
+    const remaining = rest;
     return {
       fleet: fleetH,
-      detail: detailH,
+      detail: detail ? Math.max(6, screen - chrome - 3 - (outputRows ? outputRows + 3 : 0)) : 0,
+      full: Math.max(6, screen - chrome - 3),
       waiting: Math.max(1, Math.ceil(remaining / 2)),
       inbox: Math.max(1, Math.floor(remaining / 2)),
       output: outputRows,
@@ -662,6 +754,8 @@ const App = ({ refresh, statusSecs }) => {
 
   const outAll = output ? output.split('\n') : [];
   const outWin = window_(outAll, outOffset || Math.max(0, outAll.length - layout.output), layout.output);
+  const outFullH = Math.max(6, screen - 3 - 3);
+  const outFull = window_(outAll, outOffset === 1 ? 0 : (outOffset || Math.max(0, outAll.length - outFullH)), outFullH);
 
   // The hit map is rebuilt from the RENDERED boxes after every render and on
   // every resize. `measureElement` gives heights; the tops are the running sum
@@ -684,7 +778,7 @@ const App = ({ refresh, statusSecs }) => {
       });
       top += height;
     };
-    push('fleet', refs.fleet, Math.min(layout.fleet, rows.length), offsets.fleet > 0 ? 1 : 0);
+    if (!detail) push('fleet', refs.fleet, Math.min(layout.fleet, rows.length), offsets.fleet > 0 ? 1 : 0);
     if (detail) push('detail', refs.detail, 0);
     // The detail view's three buttons are its "rows": resolve, reply, go to -
     // all on one line, which the click handler maps by index.
@@ -692,41 +786,61 @@ const App = ({ refresh, statusSecs }) => {
       const d = map[map.length - 1];
       d.rows = [d.bottom - 1, d.bottom - 1, d.bottom - 1];
     }
-    push('waiting', refs.waiting, Math.min(layout.waiting, items.length), offsets.waiting > 0 ? 1 : 0);
-    push('inbox', refs.inbox, Math.min(layout.inbox, tail.length), offsets.inbox > 0 ? 1 : 0);
+    if (!detail) push('waiting', refs.waiting, Math.min(layout.waiting, items.length), offsets.waiting > 0 ? 1 : 0);
+    if (!detail) push('inbox', refs.inbox, Math.min(layout.inbox, tail.length), offsets.inbox > 0 ? 1 : 0);
     if (layout.output) push('output', refs.output, outWin.rows.length);
     hitMap.current = map;
   });
 
   const pickerMatches = picker ? historyFilter(history.current, picker.query).slice(0, 12) : [];
 
+  // ONE VIEW AT A TIME. Help, the history picker and a decision's detail each
+  // take the whole stack; appending them under three panels that already fill
+  // the screen put them below the last row, where nobody ever saw them - the
+  // owner's "? did nothing" was exactly that.
+  const view = help ? 'help' : picker ? 'picker' : detail ? 'detail' : (outView && output && !outCollapsed) ? 'output' : 'main';
+  const stack = view === 'help'
+    ? [h(Overlay, { key: 'help', title: 'KEYS  ·  Esc closes', lines: helpLines() })]
+    : view === 'picker'
+      ? [h(Overlay, {
+        key: 'picker',
+        title: `HISTORY  ${picker.query ? `/${picker.query}` : '(type to filter)'}  ·  Enter takes it, Esc closes`,
+        lines: pickerMatches.length
+          ? pickerMatches.map((l, i) => `${i === picker.sel ? '▸' : ' '} ${l}`)
+          : ['  nothing matches'],
+      })]
+      : view === 'detail'
+        ? [h(DetailView, { key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail })]
+        : view === 'output'
+          ? [h(Panel, {
+            key: 'output', title: 'OUTPUT', innerRef: refs.output, focused: true,
+            right: `${outAll.length} lines · ↑/↓ PgUp/PgDn scroll · Esc back`,
+          }, h(More, { n: outFull.above, up: true }),
+          ...outFull.rows.map((l, i) => h(Text, { key: i, wrap: 'truncate-end' }, l || ' ')),
+          h(More, { n: outFull.below }))]
+          : [
+          h(FleetPanel, {
+            key: 'fleet', doc, rows, sel: pane === 'fleet' ? sel : -1, offset: offsets.fleet,
+            height: layout.fleet, innerRef: refs.fleet, focused: pane === 'fleet', loaded,
+          }),
+          h(OpenPanel, {
+            key: 'waiting', items, sel: pane === 'waiting' ? sel : -1, offset: offsets.waiting,
+            height: layout.waiting, innerRef: refs.waiting, focused: pane === 'waiting', loaded,
+          }),
+          h(TailPanel, { key: 'inbox', lines: tail, offset: offsets.inbox || Math.max(0, tail.length - layout.inbox), height: layout.inbox, innerRef: refs.inbox, focused: pane === 'inbox', loaded }),
+        ];
   return h(Box, { flexDirection: 'column', width, height: screen },
-    h(FleetPanel, {
-      doc, rows, sel: pane === 'fleet' ? sel : -1, offset: offsets.fleet,
-      height: layout.fleet, innerRef: refs.fleet,
-    }),
-    detail ? h(DetailView, { item: detail.item, thread: detail.thread, innerRef: refs.detail }) : null,
-    h(OpenPanel, {
-      items, sel: pane === 'waiting' ? sel : -1, offset: offsets.waiting,
-      height: layout.waiting, innerRef: refs.waiting,
-    }),
-    h(TailPanel, { lines: tail, offset: offsets.inbox || Math.max(0, tail.length - layout.inbox), height: layout.inbox, innerRef: refs.inbox }),
-    layout.output
+    ...stack,
+    view === 'main' && layout.output
       ? h(Panel, {
         title: 'OUTPUT',
         innerRef: refs.output,
+        focused: pane === 'output',
         right: outAll.length > layout.output ? `${outAll.length} lines · PgUp/PgDn · ^L collapses` : '^L collapses',
       }, h(More, { n: outWin.above, up: true }),
       ...outWin.rows.map((l, i) => h(Text, { key: i, wrap: 'truncate-end' }, l || ' ')),
       h(More, { n: outWin.below }))
-      : (output ? h(Text, { color: C.dim }, `OUTPUT collapsed (${outAll.length} lines) - ^L expands`) : null),
-    help ? h(Overlay, { title: 'KEYS', lines: helpLines() }) : null,
-    picker ? h(Overlay, {
-      title: `HISTORY  ${picker.query ? `/${picker.query}` : '(type to filter)'}`,
-      lines: pickerMatches.length
-        ? pickerMatches.map((l, i) => `${i === picker.sel ? '>' : ' '} ${l}`)
-        : ['  nothing matches'],
-    }) : null,
+      : (output && view === 'main' ? h(Text, { color: C.dim }, `OUTPUT collapsed (${outAll.length} lines) - ^L expands`) : null),
     // THE BOTTOM THREE ROWS ARE THE OPERATOR'S. The spacer absorbs whatever
     // height the panels did not use, so the command line, the status and the
     // legend sit on the last rows of the screen rather than floating halfway

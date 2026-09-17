@@ -70,3 +70,23 @@ t('the enable and disable sequences are the documented pair', () => {
 });
 
 process.stdout.write('mouse.test.mjs: all good\n');
+
+// X10 encoding (hosts that answer ?1000h but not ?1006h): button 0 press at
+// (5,3) is \x1b[M followed by (0+32),(5+32),(3+32); release is code 3.
+{
+  const { parseMouse, parseMouseAll, hasMouse, hasControl } = await import('./mouse.mjs');
+  const press = '\x1b[M' + String.fromCharCode(32, 37, 35);
+  const rel = '\x1b[M' + String.fromCharCode(35, 37, 35);
+  const wheelDown = '\x1b[M' + String.fromCharCode(32 + 65, 37, 35);
+  const eq = (a, b, what) => { if (JSON.stringify(a) !== JSON.stringify(b)) { console.error('FAIL', what, a, b); process.exit(1); } };
+  eq(parseMouse(press), { button: 0, x: 5, y: 3, press: true, wheel: null }, 'x10 press');
+  eq(parseMouse(rel), { button: 3, x: 5, y: 3, press: false, wheel: null }, 'x10 release');
+  eq(parseMouse(wheelDown).wheel, 'down', 'x10 wheel');
+  eq(parseMouseAll(press + rel).length, 2, 'x10 chunk');
+  eq(hasMouse(press), true, 'x10 hasMouse');
+  eq(hasControl('[M !!'), false, 'plain text is not control');
+  eq(hasControl('\x1b[I'), true, 'focus event is control');
+  eq(hasControl('\x1b[200~'), true, 'paste bracket is control');
+  eq(hasControl('hello'), false, 'text');
+  console.log('ok x10 + control');
+}

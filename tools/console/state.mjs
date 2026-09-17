@@ -58,13 +58,23 @@ export const inboxTail = (doc, n = 8) => {
       if (!raw.trim()) continue;
       try {
         const m = JSON.parse(raw);
-        if (m.kind === 'resolution') continue;
+        if (m.kind === 'resolution' || m.kind === 'update') continue;   // rollups: the item carries the count
         if (m.to !== 'root' && m.to !== 'all') continue;
         lines.push({ ws: ws.name, ts: m.ts || '', kind: m.kind, from: m.from, message: String(m.message || '').replace(/\n/g, ' ') });
       } catch { /* likewise */ }
     }
   }
-  return lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts))).slice(-n);
+  lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  // The same sender saying the same thing again is one line with a count,
+  // not a screen of it: the steward's nudges and a worker's repeated status
+  // were most of what the tail showed.
+  const out = [];
+  for (const l of lines) {
+    const p = out[out.length - 1];
+    if (p && p.ws === l.ws && p.from === l.from && p.message === l.message) { p.count = (p.count || 1) + 1; p.ts = l.ts; continue; }
+    out.push({ ...l, count: 1 });
+  }
+  return out.slice(-n);
 };
 
 // The THREAD behind one waiting item: every other message in that workspace's

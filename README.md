@@ -157,9 +157,10 @@ gives you back the screen you had. Panels, top to bottom:
 
 - **Fleet** — `cel fleet --json` as a table, one block per workspace, coloured
   by state and refreshed every 10 seconds (`--refresh`) and after every command
-  you run. Ctrl+N / Ctrl+P (or Shift+↑/↓) select a row, Ctrl+F focuses that
-  unit's orchestrator pane, Ctrl+O opens its dashboard. Every keyboard action
-  is a Ctrl chord: a letter you type is always a letter typed.
+  you run. ↑/↓ select a row, Ctrl+F focuses that unit's orchestrator pane,
+  Ctrl+O opens its dashboard. Command history is Ctrl+P / Ctrl+N and the
+  Ctrl+R picker, as in a shell. Every other keyboard action is a Ctrl chord: a
+  letter you type is always a letter typed.
 - **Waiting on you** — every open decision and blocker addressed to `root`,
   across all workspaces, oldest first with their ids. Ctrl+T switches the
   selection here; Enter (or a double-click) opens the item.
@@ -179,7 +180,7 @@ gives you back the screen you had. Panels, top to bottom:
   filtered by whatever is already typed, and Ctrl+R opens a history picker you
   can type into. Under it are two lines that never overwrite each other: a
   **status** message that clears itself after 8 seconds (`--status-secs`,
-  0 = never) and a permanent **legend** for the focused panel. F1 lists every
+  0 = never) and a permanent **legend** for the focused panel. `?` + Enter lists every
   binding.
 
 The mouse works: click a row to select it, double-click for that panel's

@@ -16,10 +16,28 @@
 // terminal gives us and every row ink reports is 1-based too, and converting
 // in one place and not the other is how a hit map ends up off by one.
 const SGR = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/;
+// The X10 fallback: \x1b[M then three bytes, each value + 32. Some terminal
+// hosts - the owner's herdr panes, 2026-09-17 - answer ?1000h but never
+// ?1006h, so their reports arrive in this form; unparsed, they were typed
+// into the command line as "[M !!". Release is button code 3 here.
+const X10 = /\x1b\[M([\s\S])([\s\S])([\s\S])/;
+const ANY = new RegExp(`${SGR.source}|${X10.source}`);
+
+const fromX10 = (m) => {
+  const b = m[1].charCodeAt(0) - 32;
+  const x = m[2].charCodeAt(0) - 32;
+  const y = m[3].charCodeAt(0) - 32;
+  if (b < 0 || x < 1 || y < 1) return null;
+  const wheel = b & 64 ? ((b & 1) ? 'down' : 'up') : null;
+  const press = wheel ? true : (b & 3) !== 3;
+  const button = wheel ? -1 : (b & 3);
+  return { button, x, y, press, wheel };
+};
 
 export const parseMouse = (seq) => {
-  const m = SGR.exec(String(seq || ''));
-  if (!m) return null;
+  const str = String(seq || '');
+  const m = SGR.exec(str);
+  if (!m) { const x = X10.exec(str); return x ? fromX10(x) : null; }
   const b = Number(m[1]);
   const x = Number(m[2]);
   const y = Number(m[3]);
@@ -36,7 +54,7 @@ export const parseMouse = (seq) => {
 // feel like it misses every second notch.
 export const parseMouseAll = (chunk) => {
   const out = [];
-  const re = new RegExp(SGR.source, 'g');
+  const re = new RegExp(ANY.source, 'g');
   let m;
   while ((m = re.exec(String(chunk || '')))) {
     const ev = parseMouse(m[0]);
@@ -45,7 +63,12 @@ export const parseMouseAll = (chunk) => {
   return out;
 };
 
-export const hasMouse = (chunk) => SGR.test(String(chunk || ''));
+export const hasMouse = (chunk) => ANY.test(String(chunk || ''));
+
+// Anything with an escape or a C0 control byte in it is a sequence the
+// keyboard layer did not recognise - a mouse report in an encoding we do not
+// speak, a focus event, a paste bracket. It is never text to insert.
+export const hasControl = (s) => /[\x00-\x08\x0b-\x1f\x7f]/.test(String(s || ''));
 
 // The map is a list of rendered panels:
 //   { panel: 'fleet', top: 3, bottom: 9, rows: [4, 5, 6] }
