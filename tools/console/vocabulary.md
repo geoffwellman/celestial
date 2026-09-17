@@ -13,6 +13,8 @@
 | `cel inbox open --for root --workspace <w>` | the same, unresolved only |
 | `cel inbox send <who> "<msg>" --workspace <w>` | route an instruction; `<who>` is `<product>-orch` or a worker alias |
 | `cel inbox resolve <id>` | close out a message the operator has answered |
+| `cel inbox resolve --all --from steward --workspace <w>` | "clean the inbox", "clear the steward's blockers on <w>" |
+| `cel inbox open --all-workspaces` | "everything waiting on me" |
 | `cel-fanout status\|collect\|release --workspace <w>` | what is in flight, what is finished, what to let go |
 | `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
 | `cel-linear …` | tickets |

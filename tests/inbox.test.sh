@@ -441,7 +441,7 @@ _resolve_all_fixture() {
 }
 test_resolve_all_narrows_by_sender() {
   _resolve_all_fixture
-  local out; out="$(_inbox_resolve --all --from steward --by human --workspace demo 2>&1)"
+  local out; out="$(_inbox_resolve --all --from steward --for root --by human --workspace demo 2>&1)"
   assert_contains "$out" "resolved 2"
   local open; open="$(_inbox_open --for root --workspace demo)"
   assert_contains "$open" "ship v2 or wait?"
@@ -450,13 +450,13 @@ test_resolve_all_narrows_by_sender() {
 }
 test_resolve_all_narrows_by_matching_kind_and_age() {
   _resolve_all_fixture
-  assert_contains "$(_inbox_resolve --all --matching "stalled" --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_resolve --all --matching "stalled" --for root --by human --workspace demo 2>&1)" "resolved 1"
   assert_contains "$(_inbox_open --for root --workspace demo)" "quota is dry"
   _resolve_all_fixture
-  assert_contains "$(_inbox_resolve --all --kind decision --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_resolve --all --kind decision --for root --by human --workspace demo 2>&1)" "resolved 1"
   assert_contains "$(_inbox_open --for root --workspace demo)" "quota is dry"
   _resolve_all_fixture
-  assert_contains "$(_inbox_resolve --all --older-than 5 --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_resolve --all --older-than 5 --for root --by human --workspace demo 2>&1)" "resolved 1"
   assert_contains "$(_inbox_open --for root --workspace demo)" "a stalled worker"
   rm -rf "$CEL_INBOX_DIR"
 }
@@ -464,7 +464,7 @@ test_resolve_all_narrows_by_matching_kind_and_age() {
 # printed, so the operator sees what one line just did.
 test_resolve_all_with_no_filter_clears_the_reader() {
   _resolve_all_fixture
-  assert_contains "$(_inbox_resolve --all --by human --workspace demo 2>&1)" "resolved 3"
+  assert_contains "$(_inbox_resolve --all --for root --by human --workspace demo 2>&1)" "resolved 3"
   assert_eq "$(_inbox_open --for root --workspace demo)" ""
   rm -rf "$CEL_INBOX_DIR"
 }
@@ -473,7 +473,7 @@ test_resolve_all_counts_a_rolled_up_item_once() {
   _inbox_sandbox
   _inbox_send root "dry" --from steward --kind blocked --fp q --workspace demo >/dev/null 2>&1
   _inbox_send root "dry" --from steward --kind blocked --fp q --workspace demo >/dev/null 2>&1
-  assert_contains "$(_inbox_resolve --all --from steward --by human --workspace demo 2>&1)" "resolved 1"
+  assert_contains "$(_inbox_resolve --all --from steward --for root --by human --workspace demo 2>&1)" "resolved 1"
   assert_eq "$(_inbox_open --for root --workspace demo)" ""
   rm -rf "$CEL_INBOX_DIR"
 }
