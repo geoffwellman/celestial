@@ -285,12 +285,26 @@ apologies.`;
 // After a sentence's commands have run: what do they say? Off with
 // console.answer: off in the config. Returns null when off or on any failure -
 // the raw output is still on screen, the answer is a courtesy on top of it.
+export const trimTranscript = (transcript, cap = 6000, head = 40, tail = 20) => {
+  const blocks = String(transcript || '').split(/\n(?=\$ )/);
+  const out = blocks.map((b) => {
+    const lines = b.split('\n');
+    if (lines.length <= head + tail + 1) return b;
+    return [...lines.slice(0, head), `… ${lines.length - head - tail} lines omitted …`, ...lines.slice(-tail)].join('\n');
+  }).join('\n');
+  return out.length > cap ? `${out.slice(0, cap)}\n… (cut at ${cap} chars)` : out;
+};
+
 export const answer = async ({ sentence, transcript, root = CEL_ROOT, configPath }) => {
   const { cfg, table, key, base } = _connection(configPath, root);
   if (String(cfg.console.answer || '').toLowerCase() === 'off') return null;
-  const clipped = String(transcript || '').slice(-8000);
+  // What the model reads: each command's output trimmed to its first 40 and
+  // last 20 lines, and the whole thing capped. A ledger table of eighty
+  // released rows is not what anyone asked about, and a 30-second timeout on
+  // an 8 KB transcript was the first thing to fail on this box.
+  const clipped = trimTranscript(transcript, 6000);
   const user = `Question: ${sentence}\n\nWhat ran, and what it printed:\n${clipped}`;
-  const text = await _chat({ cfg, table, key, base, system: ANSWER_SYSTEM, user, timeout: 30000, maxTokens: 300 });
+  const text = await _chat({ cfg, table, key, base, system: ANSWER_SYSTEM, user, timeout: 60000, maxTokens: 300 });
   const out = String(text || '').trim();
   return out || null;
 };
