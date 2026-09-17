@@ -215,6 +215,7 @@ const App = ({ refresh, statusSecs }) => {
   const [, setTick] = useState(0);                // a resize is a re-render
   const history = useRef(readHistory());
   const hIndex = useRef(-1);
+  const lastRaw = useRef('');
   const typed = useRef('');
   const lastClick = useRef({ panel: '', index: -1, at: 0 });
   const hitMap = useRef([]);
@@ -509,10 +510,13 @@ const App = ({ refresh, statusSecs }) => {
   useEffect(() => {
     const onData = (chunk) => {
       const s = String(chunk);
+      lastRaw.current = s;
       if (!hasMouse(s)) return;
       for (const ev of parseMouseAll(s)) onMouse(ev);
     };
-    process.stdin.on('data', onData);
+    // Prepended so it runs before ink's own listener: useInput below reads
+    // lastRaw to tell Backspace from Delete, which ink reports alike.
+    process.stdin.prependListener('data', onData);
     return () => process.stdin.off('data', onData);
   }, [onMouse]);
 
@@ -588,8 +592,13 @@ const App = ({ refresh, statusSecs }) => {
       setSel((s) => (key.upArrow ? Math.max(0, s - 1) : Math.min(list.length - 1, s + 1)));
       return;
     }
-    if (key.backspace) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
-    if (key.delete) { const r = del(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
+    // ink names the byte Backspace sends on almost every terminal (\x7f)
+    // "delete" and only \b "backspace"; the first cut forward-deleted on
+    // Backspace, which at the end of a line does nothing - "I cannot
+    // backspace". The raw chunk tells the two apart: Delete is \x1b[3~.
+    const forwardDelete = key.delete && lastRaw.current === '\x1b[3~';
+    if (key.backspace || (key.delete && !forwardDelete)) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
+    if (forwardDelete) { const r = del(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
 
     if (key.ctrl) {
       switch (input) {
