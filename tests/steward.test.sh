@@ -251,6 +251,33 @@ SH
   rm -rf "$T"
 }
 
+# A DRAFT IS LEFT ALONE - by every sweep. The review sweep already skipped
+# drafts; the unticketed-branch reminder did not, and nagged the owner's
+# deliberately-draft PRs every window.
+test_review_sweep_never_nudges_about_a_draft() {
+  _orch_fixture
+  mkdir -p "$T/bin"
+  : > "$T/prompts"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":8,"headRefName":"experiment/no-ticket","reviewDecision":"","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
+             {"number":9,"headRefName":"experiment/draft-no-ticket","reviewDecision":"APPROVED","isDraft":true,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"}]'
+SH
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent get")    [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
+  "agent prompt") printf '%s\n' "\$3" >> "$T/prompts" ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
+  # #9 is a draft: unticketed, approved AND red, and still not one word about it
+  assert_eq "$(grep -c '#9' "$T/prompts" || true)" "0"
+  rm -rf "$T"
+}
+
 # ---- orphaned test servers ---------------------------------------------------
 # The seven `node tools/pages/server.mjs` processes that held a workspace's
 # ledger lock for a hundred minutes on 2026-09-16 were invisible: nothing on
