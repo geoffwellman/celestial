@@ -1601,6 +1601,19 @@ test_try_steps_past_an_occupied_port_base_and_runs_in_a_new_pane() {
   rm -rf "$T"
 }
 
+# The workspace's env: block reaches the preview pane too - the keys the worker
+# had are the keys the app needs, and a bare pane would say "unauthenticated".
+test_try_passes_the_workspace_env_to_the_pane() {
+  _fanout_setup; _preview_yaml
+  printf 'env:\n  WIDGET_API_KEY: "k-123"\n  TMPDIR: "/tmp/w"\n' >> "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-TRYENV "$T/spec.md") > /dev/null
+  (cd "$T" && CEL_TRY_PORT_BASE=48710 "$BIN" try WG-TRYENV) > /dev/null
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$log" "--env WIDGET_API_KEY=k-123"
+  assert_contains "$log" "--env TMPDIR=/tmp/w"
+  rm -rf "$T"
+}
+
 # Asking twice must not start a second instance on a second port - it is the
 # same ticket, and the answer is the url it is already on.
 test_try_twice_is_a_no_op_that_prints_the_same_url() {

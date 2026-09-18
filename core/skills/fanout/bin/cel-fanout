@@ -1251,10 +1251,22 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
     envs+=("$(printf '%s=%q' "$k" "$(_try_subst "$v" "$port")")")
   done < <(ws_repo_preview_env "$wsdir" "$repo")
 
+  # THE WORKSPACE'S OWN env: BLOCK COMES TOO. A worker pane is loaded with it
+  # at delegate time (provider keys, TMPDIR, gate timeouts); a preview pane
+  # started bare would run the app without the keys the worker had, and the
+  # first "why does the preview say unauthenticated" would be this. Passed to
+  # the split as --env so the whole pane has them, not only the run line.
+  local -a wsenv=()
+  local en
+  for en in $(ws_env_names "$wsdir" 2>/dev/null); do
+    printf '%s' "$en" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || continue
+    wsenv+=(--env "$en=$(ws_env_get "$wsdir" "$en")")
+  done
+
   # Split under the WORKER'S pane, so the preview appears beside the ticket it
   # belongs to rather than wherever the operator happened to be standing.
   local resp newpane
-  resp="$(_ledger_spawn "$HERDR" pane split --pane "$pane" --direction down --cwd "$wt" --no-focus)"
+  resp="$(_ledger_spawn "$HERDR" pane split --pane "$pane" --direction down --cwd "$wt" --no-focus "${wsenv[@]}")"
   newpane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
   [ -n "$newpane" ] || die "try: herdr pane split returned no pane id - nothing was started"
 
