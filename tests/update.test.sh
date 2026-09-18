@@ -71,7 +71,7 @@ EOS
 }
 _upd_cleanup() {
   CEL_ROOT="$_UPD_REPO"
-  unset CEL_CONFIG_FILE
+  unset CEL_CONFIG_FILE CEL_REGISTRY CEL_INBOX_DIR CEL_INBOX_ME
   rm -rf "$T"
 }
 
@@ -395,9 +395,18 @@ test_dash_restart_is_idempotent_when_nothing_is_running() {
 # about COMMITS; a box that tracks releases keeps today's behaviour. Both have
 # to say WHAT is new, which is why the fixture's origin carries both tags and
 # extra commits on main.
-_upd_channel_fixture() { # _upd_fixture + a box-level config file of our own
+# EVERY box-level path the code under test can reach goes into the fixture.
+# Measured while writing this ticket: the steward test below left CEL_REGISTRY
+# and CEL_INBOX_DIR alone, so three suite runs posted "3 new commits on
+# celestial main" into the real root mailbox of every workspace on the box. A
+# test that can write to the live box is a test that will.
+_upd_channel_fixture() { # _upd_fixture + box-level config, registry and mailbox
   _upd_fixture
   export CEL_CONFIG_FILE="$T/config.yaml"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" >"$CEL_REGISTRY"
+  printf 'name: alpha\n' >"$T/alpha/workspace.yaml"
 }
 
 test_update_check_prints_the_build_and_the_newest_tag_first() {

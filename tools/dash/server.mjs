@@ -31,10 +31,15 @@ const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(homedir(), '.local/share/c
 
 // The steward writes this file hours after the dashboard booted, so it is read
 // PER REQUEST and spliced into the shell below - a chip captured at startup
-// would never appear at all.
+// would never appear at all. It holds either a release version (`0.3.0`) or,
+// on the main channel, a distance and the sha the build came from
+// (`main+7 d43910c`): on main the tag never moves, so a version is not a thing
+// the chip can show.
 const updateChip = () => {
   try {
     const v = readFileSync(join(UPDATE_DIR, 'available'), 'utf8').trim();
+    const main = /^main\+([0-9]+)\b/.exec(v);
+    if (main) return '<span id="upd" title="the steward saw new commits on main">main +' + main[1] + ' \u2192 cel update</span>';
     if (!/^[0-9][0-9a-zA-Z.\-]*$/.test(v)) return '';
     return '<span id="upd" title="the steward saw a newer release">update available v' + v + ' \u2192 cel update</span>';
   } catch { return ''; }

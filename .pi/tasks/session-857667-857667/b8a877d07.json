@@ -1,0 +1,19 @@
+{
+  "id": "b8a877d07",
+  "name": "full test suite",
+  "command": "cd /home/geoff/.herdr/worktrees/celestial-plane/cel-21-update-channel && bash tests/run.sh 2>&1 | tail -40",
+  "status": "completed",
+  "outputPath": ".pi/tasks/session-857667-857667/b8a877d07.output",
+  "cwd": "/home/geoff/.herdr/worktrees/celestial-plane/cel-21-update-channel",
+  "startTime": 1789690923515,
+  "endTime": 1789692093411,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 1300571,
+  "bytesWritten": 2250,
+  "isAgent": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 2400
+}

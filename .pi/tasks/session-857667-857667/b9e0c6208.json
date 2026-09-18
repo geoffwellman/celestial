@@ -1,0 +1,19 @@
+{
+  "id": "b9e0c6208",
+  "name": "gate full suite",
+  "command": "cd /home/geoff/.herdr/worktrees/celestial-plane/cel-21-update-channel && bash tests/run.sh",
+  "status": "completed",
+  "outputPath": ".pi/tasks/session-857667-857667/b9e0c6208.output",
+  "cwd": "/home/geoff/.herdr/worktrees/celestial-plane/cel-21-update-channel",
+  "startTime": 1789693279772,
+  "endTime": 1789694232335,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 2140822,
+  "bytesWritten": 37559,
+  "isAgent": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 2400
+}
