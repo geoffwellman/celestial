@@ -498,6 +498,21 @@ _fanout_dirty_release() {
   git -C "$STUB_WT" init -q
   printf 'unsaved\n' > "$STUB_WT/work.txt"
 }
+# Bulk: the rows nobody works on any more go in one command; a running row
+# is never touched and one failure never stops the rest.
+test_release_all_takes_finished_and_collected_and_leaves_running_alone() {
+  _fanout_setup
+  for t in WG-A WG-B WG-C; do (cd "$T" && "$BIN" delegate widget "$t" "$T/spec.md" >/dev/null); done
+  jq '(.[] | select(.id=="WG-A") | .state) = "finished" | (.[] | select(.id=="WG-B") | .state) = "collected"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  local out; out="$(cd "$T" && "$BIN" release --all 2>&1)"
+  assert_contains "$out" "release --all: 2 done, 0 failed"
+  assert_eq "$(jq -r '[.[] | select(.state=="released")] | length' "$T/.cel/delegations.json")" "2"
+  assert_eq "$(jq -r '.[] | select(.id=="WG-C") | .state' "$T/.cel/delegations.json")" "running"
+  out="$(cd "$T" && "$BIN" release --all --state running 2>&1)"
+  assert_contains "$out" "1 done"
+  rm -rf "$T"
+}
+
 test_release_refuses_a_dirty_worktree() {
   _fanout_dirty_release
   local out; out="$( (cd "$T" && "$BIN" release WG-DIRTY) 2>&1 )" && {

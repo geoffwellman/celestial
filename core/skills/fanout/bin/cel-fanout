@@ -777,7 +777,8 @@ cmd_wait() {
 }
 
 cmd_collect() {
-  [ $# -ge 1 ] || die "usage: cel-fanout collect <id> [--workspace NAME]"
+  [ $# -ge 1 ] || die "usage: cel-fanout collect <id>|--all [--state finished] [--workspace NAME]"
+  if [ "$1" = --all ]; then shift; _fanout_bulk collect "finished" "$@"; return $?; fi
   local id="$1"; shift
   local ws_opt=""
   while [ $# -gt 0 ]; do
@@ -1286,8 +1287,36 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
   printf '%s\n' "$url"
 }
 
+# BULK: every row in the given states, one at a time, a failure on one row
+# never stopping the next. `release --all` defaults to finished,collected - the
+# rows nobody is working on any more; `collect --all` to finished. The owner,
+# 2026-09-18, looking at twenty-six rows: "can we have a bulk action on the
+# workers per workspace?"
+_fanout_bulk() { # <verb> <default-states> [args...]
+  local verb="$1" states="$2"; shift 2
+  local -a pass=(); local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --state) states="$2"; shift 2 ;;
+      --workspace) ws_opt="$2"; pass+=("$1" "$2"); shift 2 ;;
+      *) pass+=("$1"); shift ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local ids; ids="$(jq -r --arg s ",$states," '.[] | select(("," + (.state // "") + ",") as $k | $s | contains($k)) | .id' "$wsdir/.cel/delegations.json")"
+  [ -n "$ids" ] || { c_ok "$verb --all: nothing in state $states"; return 0; }
+  local id n=0 failed=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if ( "cmd_$verb" "$id" "${pass[@]}" ); then n=$((n + 1)); else failed=$((failed + 1)); c_warn "$verb --all: $id failed - see above"; fi
+  done <<< "$ids"
+  c_ok "$verb --all: $n done, $failed failed (states: $states)"
+  [ "$failed" -eq 0 ]
+}
+
 cmd_release() {
-  [ $# -ge 1 ] || die "usage: cel-fanout release <id> [--keep-worktree] [--discard] [--workspace NAME]"
+  [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--state finished,collected] [--keep-worktree] [--discard] [--workspace NAME]"
+  if [ "$1" = --all ]; then shift; _fanout_bulk release "finished,collected" "$@"; return $?; fi
   local id="$1"; shift
   local keep=0 discard=0 ws_opt=""
   while [ $# -gt 0 ]; do

@@ -929,6 +929,10 @@ const App = ({ refresh, statusSecs }) => {
         // collected is exactly the row these are for.
         if (input === 'c' && unitWorkers[wsel]) { propose([`cel-fanout collect ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
         if (input === 'x' && unitWorkers[wsel]) { propose([`cel-fanout release ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
+        // Shifted: the whole workspace. Finished and collected rows are the
+        // ones nobody is working on; running rows are never in the set.
+        if (input === 'X') { propose([`cel-fanout release --all --workspace ${unit.ws}`]); return; }
+        if (input === 'C') { propose([`cel-fanout collect --all --workspace ${unit.ws}`]); return; }
         if (input === 'm') { composeLine(`cel inbox send ${unit.name}-orch `, ` --workspace ${unit.ws}`, 'message'); return; }
         // `s` SORTS, it does not filter. The question it answers is "which of
         // these do I collect", and the selection follows the row it was on -
