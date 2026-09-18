@@ -98,7 +98,9 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="$(git log -1 --format=%s | sed -n 's/^release: v//p')"
+            # The squash of the release PR lands as `release: v0.3.0 (#57)`;
+            # the parsing (and its refusals) is tested in tests/release.test.sh.
+            version="$(python3 tools/release/cut.py --version-from-subject "$(git log -1 --format=%s)")"
           fi
           file="$(tr -d '[:space:]' < VERSION)"
           # A tag whose VERSION disagrees is a mis-cut, and publishing it would

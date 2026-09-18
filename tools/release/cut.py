@@ -17,6 +17,20 @@ from notes import UNRELEASED, section  # noqa: E402
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
+# The subject a release lands on main with. GitHub's squash merge appends the
+# pull request number - `release: v0.3.0 (#57)` - and a plain prefix strip left
+# `0.3.0 (#57)`, which never equalled VERSION, so the publish job refused the
+# only path a release can actually take while hand-pushed tags kept working.
+SUBJECT = re.compile(r"^release: v(\S+?)(?: \(#[0-9]+\))?$")
+
+
+def version_from_subject(subject):
+    match = SUBJECT.match(subject.strip())
+    if match is None or parse(match[1]) is None:
+        raise SystemExit(f"cut: '{subject}' is not a release commit subject")
+    return match[1]
+
+
 
 def parse(version):
     match = SEMVER.match(version)
@@ -59,11 +73,19 @@ def cut(changelog_path, version_path, version, today):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version")
+    parser.add_argument("version", nargs="?")
+    parser.add_argument("--version-from-subject", default=None,
+                        help="print the version in a `release: v<x.y.z> (#N)` commit subject")
     parser.add_argument("--changelog", default=None)
     parser.add_argument("--version-file", default=None)
     parser.add_argument("--today", default=None)
     args = parser.parse_args(argv)
+
+    if args.version_from_subject is not None:
+        print(version_from_subject(args.version_from_subject))
+        return 0
+    if not args.version:
+        raise SystemExit("cut: want a version, or --version-from-subject")
 
     root = Path(__file__).resolve().parents[2]
     changelog = Path(args.changelog) if args.changelog else root / "CHANGELOG.md"
