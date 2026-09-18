@@ -107,7 +107,10 @@ def main(argv=None):
     changelog = Path(args.changelog) if args.changelog else root / "CHANGELOG.md"
     version_file = Path(args.version_file) if args.version_file else root / "VERSION"
     today = args.today or datetime.date.today().isoformat()
-    fragments = Path(args.fragments) if args.fragments else root / "changelog.d"
+    # Beside the CHANGELOG being cut, never beside this file: tools/ is
+    # symlinked into test fixtures, and a default taken from __file__ made a
+    # fixture cut delete the real repository's fragments.
+    fragments = Path(args.fragments) if args.fragments else default_fragments(changelog)
     print(cut(changelog, version_file, args.version, today, fragments))
     return 0
 
