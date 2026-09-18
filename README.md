@@ -246,7 +246,37 @@ console:
   provider: openrouter          # openrouter | anthropic | openai | deepseek
   model: anthropic/claude-haiku-4-5
   key_env: OPENROUTER_API_KEY   # read from the environment, else console.key
+  router:                       # optional; without it, the chat model routes
+    provider: openrouter        # openrouter | typesafe
+    model: typesafe/jev-1.13    # on typesafe: jev-latest
+    key_env: OPENROUTER_API_KEY # else console.key_env, else console.key
+    min_confidence: 0.6         # below this, the top three become options
 ```
+
+### The router
+
+Routing a sentence is a classification problem — ten intents, one of them
+right — and a **decision model** answers exactly that: it does not generate
+text, it picks one option from a set you define and returns the whole
+probability distribution with it. Configure `console.router` and the sentence
+goes there first: "what is happening with bundle" came back in 0.4 s against
+6.5 s for the chat model, because the model picks a *label* and the console
+fills in the command itself.
+
+That last part is the safety property. The router never writes a command line.
+It answers `product_status 0.98`, and the console — not the model — finds the
+product in the fleet it already holds, takes the workspace that owns it and
+builds the three commands. A slot it cannot fill (no product named, a ticket
+no worker carries) is a **miss**, and a miss falls through to the chat model
+rather than guessing: a guessed `--workspace` is somebody else's mailbox.
+Below `min_confidence` the top three intents are offered as options, each
+already expanded to its command, with the probability as the reason.
+
+The chat model keeps the two jobs that need prose — the answer written from
+what the commands printed, and every sentence the router could not place — so
+a router that is down, misconfigured or absent costs nothing but latency.
+`--no-router` on the command line and `console.router.enabled: false` in the
+config bypass it entirely.
 
 Endpoints come from `agents.yaml`'s provider table; the request is one plain
 `fetch` with no SDK. With no provider configured, a sentence gets one line
@@ -257,7 +287,8 @@ alternate screen, no mouse — for pipes and for when a full-screen UI is the
 last thing you want; `--status "…"` renders a status line with it. `cel
 console --ask "<sentence>"` prints the chain one command per line, or the
 answer when the state holds one (exit 0), or the numbered options on a miss
-(exit 1). `--render-once --unit <product>` and `--render-once --worker <id>`
+(exit 1). `--ask` also prints what the router chose and how long it took on
+stderr (`router: product_status 0.98 in 0.4s`). `--render-once --unit <product>` and `--render-once --worker <id>`
 print the two depth views the same way. `cel run console --agent` still starts
 the original Claude pane for people who would rather talk to a full agent.
 

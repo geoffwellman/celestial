@@ -749,3 +749,200 @@ test_console_unit_legend_names_the_memory_sort() {
   ")"
   assert_contains "$out" 's mem'
 }
+
+# --- CEL-23: the decision router -------------------------------------------
+
+# A DECISION model, not a chat one: it does not write the command line, it
+# picks one label out of ten and the console fills the slots itself. The stub
+# is the same pattern as the chat one - a file on disk answering HTTP - but it
+# answers the decisions shape, and it runs BESIDE the chat stub so a test can
+# prove which of the two was asked.
+_console_router_stub() { # <intent> <confidence> [probabilities-json] [status]
+  cat >"$T/rstub.mjs" <<'EOF'
+import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+const s = createServer((req, res) => {
+  let b = '';
+  req.on('data', (c) => { b += c; });
+  req.on('end', () => {
+    writeFileSync(process.env.RSTUB_BODY_FILE, b);
+    writeFileSync(process.env.RSTUB_HEADERS_FILE, JSON.stringify(req.headers));
+    const code = Number(process.env.RSTUB_STATUS || '200');
+    if (code !== 200) { res.writeHead(code, { 'content-type': 'text/plain' }); res.end('nope'); return; }
+    const probs = process.env.RSTUB_PROBS ? JSON.parse(process.env.RSTUB_PROBS) : undefined;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ answers: { intent: {
+      value: process.env.RSTUB_INTENT,
+      confidence: Number(process.env.RSTUB_CONFIDENCE),
+      probabilities: probs,
+    } } }));
+  });
+});
+s.listen(0, '127.0.0.1', () => { writeFileSync(process.env.RSTUB_PORT_FILE, String(s.address().port)); });
+EOF
+  export RSTUB_BODY_FILE="$T/rbody.json" RSTUB_HEADERS_FILE="$T/rheaders.json"
+  export RSTUB_PORT_FILE="$T/rport" RSTUB_INTENT="$1" RSTUB_CONFIDENCE="$2"
+  export RSTUB_PROBS="${3:-}" RSTUB_STATUS="${4:-200}"
+  rm -f "$RSTUB_PORT_FILE" "$RSTUB_BODY_FILE"
+  node "$T/rstub.mjs" >"$T/rstub.log" 2>&1 </dev/null & RSTUB_PID=$!
+  local i=0
+  while [ ! -s "$RSTUB_PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$RSTUB_PORT_FILE" ] || { echo 'router stub never listened'; return 1; }
+  export CEL_CONSOLE_ROUTER_URL="http://127.0.0.1:$(cat "$RSTUB_PORT_FILE")"
+}
+
+_console_router_stop() {
+  [ -n "${RSTUB_PID:-}" ] || return 0
+  kill "$RSTUB_PID" 2>/dev/null || true
+  wait "$RSTUB_PID" 2>/dev/null || true
+  RSTUB_PID=""
+  unset CEL_CONSOLE_ROUTER_URL
+}
+
+_console_router_config() { # [min_confidence]
+  { printf 'console:\n  provider: openrouter\n  model: alpha/model-mini\n  key_env: OPENROUTER_API_KEY\n'
+    printf '  router:\n    provider: openrouter\n    model: alpha/decide-1\n'
+    printf '    key_env: OPENROUTER_API_KEY\n    min_confidence: %s\n' "${1:-0.6}"; } >"$T/config.yaml"
+  chmod 600 "$T/config.yaml"
+}
+
+# The router picks `product_status`; the console - not the model - turns that
+# into the three commands, with the workspace that owns the product.
+test_console_router_expands_an_intent_into_commands() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub product_status 0.98
+  local out err rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'what is happening with bundle' 2>"$T/err.txt")" || rc=$?
+  err="$(cat "$T/err.txt")"
+  assert_eq "$rc" 0
+  assert_contains "$out" 'cel fleet'
+  assert_contains "$out" 'cel-fanout status --workspace alpha'
+  assert_contains "$out" 'cel inbox open --for root --workspace alpha'
+  assert_contains "$err" 'router: product_status 0.98 in'
+  # The chat model was never asked: that is the whole point of the router.
+  [ ! -s "$T/body.json" ] || { echo 'the chat model was asked anyway'; return 1; }
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# The request carries the box's names (so the classifier knows what exists) and
+# NEVER the key - a key in a body is a key in every provider's request log.
+test_console_router_request_carries_the_names_and_never_the_key() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub fleet 0.9
+  node "$CONSOLE_MJS" --ask "what's blocked" >/dev/null 2>&1
+  local body headers
+  body="$(cat "$T/rbody.json")"
+  headers="$(cat "$T/rheaders.json")"
+  assert_contains "$body" 'alpha'
+  assert_contains "$body" 'bundle'
+  assert_contains "$body" "what's blocked"
+  assert_contains "$body" 'product_status'
+  assert_contains "$headers" 'test-key'
+  case "$body" in *test-key*) echo 'the key was in the request body'; return 1;; esac
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# Below the floor the router is guessing, and a guess belongs in the options
+# UI where the operator picks - not on the command line waiting for Enter.
+test_console_router_below_the_floor_offers_three_options() {
+  _console_depth_setup
+  _console_router_config 0.6
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub fleet 0.42 '{"fleet":0.42,"product_status":0.31,"waiting":0.2,"try":0.05}'
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask 'what is going on with bundle' 2>/dev/null)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'did you mean'
+  assert_contains "$out" 'cel fleet'
+  assert_contains "$out" 'cel-fanout status --workspace alpha'
+  assert_contains "$out" '0.42'
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# A router that is down is not an outage: the sentence path it replaced is
+# still there, and the operator should not be able to tell.
+test_console_router_failure_falls_through_to_the_chat_model() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub fleet 0.9 '' 500
+  local out rc=0
+  out="$(node "$CONSOLE_MJS" --ask "what's blocked" 2>/dev/null)" || rc=$?
+  assert_eq "$rc" 0
+  assert_eq "$out" 'cel fleet'
+  assert_contains "$(cat "$T/body.json")" "what's blocked"
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# `--no-router` is the escape hatch: one flag and the console is exactly what
+# it was before this ticket.
+test_console_no_router_asks_the_chat_model_directly() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub product_status 0.98
+  local out
+  out="$(node "$CONSOLE_MJS" --no-router --ask 'what is happening with bundle' 2>/dev/null)"
+  assert_eq "$out" 'cel fleet'
+  [ ! -s "$T/rbody.json" ] || { echo 'the router was asked despite --no-router'; return 1; }
+  # And the same for the config switch.
+  rm -f "$T/body.json"
+  { printf 'console:\n  provider: openrouter\n  model: alpha/model-mini\n  key_env: OPENROUTER_API_KEY\n'
+    printf '  router:\n    provider: openrouter\n    model: alpha/decide-1\n    enabled: false\n'; } >"$T/config.yaml"
+  chmod 600 "$T/config.yaml"
+  out="$(node "$CONSOLE_MJS" --ask 'what is happening with bundle' 2>/dev/null)"
+  assert_eq "$out" 'cel fleet'
+  [ ! -s "$T/rbody.json" ] || { echo 'the router was asked despite router.enabled: false'; return 1; }
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# The model picks a LABEL; every character of the command line is produced
+# here. That is the part worth proving without a network.
+test_console_router_slot_filling_is_proved() {
+  node "$CEL_ROOT/tools/console/router.test.mjs"
+}
+
+# COMMAND SUBSTITUTION IN A MESSAGE. The `message` intent is the one place an
+# operator's own words reach the command line, and that line is handed to
+# `bash -c`. Inside DOUBLE quotes bash still runs `$(...)` and backticks, and
+# the guard's console branch allows every `cel ...` line without looking at
+# metacharacters - so `tell bundle-orch "hi $(touch /tmp/pwned)"` was a
+# proposal that ran `touch` the moment the operator pressed Enter. The text is
+# single-quoted now, and this test runs the router's own output through the
+# console's real execution path to prove it.
+test_console_router_message_text_cannot_run_a_command() {
+  _console_depth_setup
+  PATH="$T/bin:$PATH"
+  local marker="$T/pwned" cmd
+  cmd="$(node --input-type=module -e "
+    import { readFileSync } from 'node:fs';
+    import { facts, plan } from '$CEL_ROOT/tools/console/router.mjs';
+    const doc = JSON.parse(readFileSync('$T/fleet.json', 'utf8'));
+    process.stdout.write(plan('message', 'tell bundle-orch \"ping \$(touch $marker)\"', facts(doc, []))[0]);
+  ")"
+  assert_contains "$cmd" 'cel inbox send bundle-orch'
+  node "$CONSOLE_MJS" --run "$cmd" >/dev/null 2>&1 || true
+  [ ! -e "$marker" ] || { echo 'the message text ran a command'; return 1; }
+  # And the substitution is still there, as text, for whoever reads the mail.
+  assert_contains "$cmd" 'touch'
+  _console_teardown
+}
