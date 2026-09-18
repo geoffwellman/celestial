@@ -426,9 +426,26 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
 _inbox_count_one() { # <ws> <who>
   local ws="$1" who="$2"
   local f c last
-  f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
+  f="$(_inbox_file "$ws")"
   [ -f "$f" ] || { printf '0\n'; return 0; }
-  last=""; [ -f "$c" ] && last="$(cat "$c")"
+  # THE RECIPIENT'S BACKLOG, NOT THE CALLER'S. A count asked from a shell or
+  # the steward used the caller's own per-reader cursor, so every caller saw
+  # a different number and the steward nagged about "root: 537 unread" that
+  # the console had drained days earlier. The recipient's own cursor is the
+  # measure - and for root, whose mail the console drains when no root pane
+  # exists (CEL-7), the console's cursor counts too: whichever is further.
+  # Three cursors can each prove the mail was read: the recipient's own, the
+  # caller's per-reader one (a Monitor that read on the recipient's behalf),
+  # and for root the console's. The furthest along wins - ids are fixed-width
+  # digits, so string order is time order.
+  local cand
+  last=""
+  for cand in "$(_inbox_dir)/$ws.$who.cursor" "$(_inbox_cursor "$ws" "$who")" \
+              $([ "$who" = root ] && printf '%s' "$(_inbox_dir)/$ws.root.console.cursor"); do
+    [ -f "$cand" ] || continue
+    c="$(cat "$cand")"
+    [ "$c" \> "$last" ] && last="$c"
+  done
   jq -c --arg who "$who" --arg last "$last" \
     'select(.kind != "resolution") | select(.to == $who or .to == "all") | select($last == "" or (.id > $last))' "$f" 2>/dev/null \
     | wc -l | tr -d ' '

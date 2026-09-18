@@ -22,3 +22,5 @@
 | `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
 | `cel-linear …` | tickets |
 | `herdr agent focus <name>` | when the operator says "take me to …" |
+| `cel-fanout release --all [--state finished,collected] --workspace <w>` | "clean up finished workers on <w>", "release everything that is done on <w>" |
+| `cel-fanout collect --all --workspace <w>` | "collect all the finished workers on <w>" |

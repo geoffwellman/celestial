@@ -49,6 +49,20 @@ test_inbox_count_is_zero_for_an_empty_mailbox() {
   rm -rf "$CEL_INBOX_DIR"
 }
 
+# A count is the RECIPIENT's backlog: the same number from any caller, and
+# root's mail drained by the console counts as read.
+test_inbox_count_is_the_recipients_backlog_and_the_console_reads_for_root() {
+  _inbox_sandbox
+  _inbox_send root "one" --workspace demo >/dev/null 2>&1
+  _inbox_send root "two" --workspace demo >/dev/null 2>&1
+  assert_eq "$(CEL_INBOX_ME=someone-else _inbox_count --for root --workspace demo)" "2"
+  local last; last="$(jq -r 'select(.to=="root") | .id' "$CEL_INBOX_DIR/demo.jsonl" | tail -1)"
+  printf '%s' "$last" > "$CEL_INBOX_DIR/demo.root.console.cursor"
+  assert_eq "$(CEL_INBOX_ME=someone-else _inbox_count --for root --workspace demo)" "0"
+  assert_eq "$(CEL_INBOX_ME=steward _inbox_count --for root --workspace demo)" "0"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
 # The message body survives quoting hostile enough to break a shell append.
 test_inbox_survives_quotes_and_newlines() {
   _inbox_sandbox
