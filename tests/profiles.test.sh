@@ -477,3 +477,61 @@ test_repo_binding_beats_the_workspace_when_no_product_matches() {
   assert_eq "$(role_profile_for "$T" worker gadget)" "$(role_profile "$T" worker)"
   rm -rf "$T"
 }
+
+# --- via: gateway ---------------------------------------------------------
+# A profile may reach its model through the box's auth-gateway rather than a
+# provider directly. `cel profiles` has to say so - and has to say how many
+# accounts are actually usable, because the whole feature is worthless with
+# none and the failure a worker sees is "Unknown model", not "auth expired".
+_gws() {
+  _aws
+  cat >>"$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+YAML
+  GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
+  export CEL_CONFIG_FILE="$GWT/config.yaml"
+  printf 'gateway:\n  broker_port: 47311\n  gateway_port: 47411\n' > "$CEL_CONFIG_FILE"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready)  exit "${GW_STUB_DOWN:-0}" ;;
+  models) printf '%s\n' '{"data":[{"id":"openai-codex/gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
+  cat >"$GWT/bin/omp" <<'EOS'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "auth-gateway check") printf '%s\n' '{"credentials":[{"id":1,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"aaaaaaaa-1111","report":{"limits":[]}},{"id":7,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"bbbbbbbb-2222","report":{"limits":[]}}]}' ;;
+  *) printf '%s\n' 'gw-fixture-token-do-not-print' ;;
+esac
+EOS
+  chmod +x "$GWT/bin/omp"; PATH="$GWT/bin:$PATH"
+}
+_gws_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB; }
+
+test_profiles_marks_a_gateway_profile_with_its_usable_accounts() {
+  _gws
+  local out; out="$(cd "$T" && cmd_profiles gw 2>&1)"
+  assert_contains "$out" "via gateway (2 accounts usable)"
+  assert_contains "$out" "ompgw/openai-codex/gpt-5.5"
+  _gws_clean
+}
+test_profile_via_gateway_resolves_to_the_ompgw_model() {
+  _gws
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
+  profile_resolve "$T" gw >/dev/null 2>&1
+  assert_eq "$PROFILE_MODEL" "ompgw/openai-codex/gpt-5.5"
+  assert_eq "$PROFILE_VIA" gateway
+  _gws_clean
+}
+# A dead gateway is a veto, not a warning: the account list behind it is
+# unreachable and the pane would idle on an auth error nobody is watching.
+test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {
+  _gws
+  local out; out="$(cd "$T" && GW_STUB_DOWN=1 cmd_profiles gw 2>&1)"
+  assert_contains "$out" "gateway"
+  assert_contains "$out" "cel gateway"
+  _gws_clean
+}
