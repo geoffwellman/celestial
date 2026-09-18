@@ -31,10 +31,11 @@ const CONFIG_PATH = () => process.env.CEL_CONSOLE_CONFIG
   || join(homedir(), '.local/share/cel/config.yaml');
 
 // A two-level YAML reader for ONE known shape (`console:` and its scalar
-// keys). Not a YAML parser and not pretending to be: the plane has no node
-// dependencies outside the console's own UI, and a config file of five string
-// keys does not justify one. Anything it cannot read is simply absent, which
-// lands on the "no translator configured" path rather than a crash.
+// keys, plus the one nested block `console.router:`). Not a YAML parser and
+// not pretending to be: the plane has no node dependencies outside the
+// console's own UI, and a config file of five string keys does not justify
+// one. Anything it cannot read is simply absent, which lands on the "no
+// translator configured" path rather than a crash.
 export const readConfig = (path = CONFIG_PATH()) => {
   let text;
   try { text = readFileSync(path, 'utf8'); } catch { return { console: {}, warnings: [] }; }
@@ -49,15 +50,26 @@ export const readConfig = (path = CONFIG_PATH()) => {
 
   const out = {};
   let section = null;
+  let sub = null;                 // the one nested block: console.router
+  const scalar = (v) => v.replace(/^["']|["']$/g, '').replace(/\s+#.*$/, '').trim();
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\s+$/, '');
     if (!line || /^\s*#/.test(line)) continue;
     const top = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
-    if (top) { section = top[1]; out[section] = out[section] || {}; continue; }
-    const kv = /^\s+([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
-    if (kv && section) {
-      out[section][kv[1]] = kv[2].replace(/^["']|["']$/g, '').replace(/\s+#.*$/, '').trim();
+    if (top) { section = top[1]; sub = null; out[section] = out[section] || {}; continue; }
+    const kv = /^(\s+)([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
+    if (!kv || !section) continue;
+    const indent = kv[1].length;
+    // A key with no value opens a nested block (`router:`); a key with one at
+    // that same depth closes it again. Deeper than four spaces is not a shape
+    // this file has, and guessing at it is how a silent mis-read starts.
+    if (indent <= 2) {
+      if (kv[3] === '') { sub = kv[2]; out[section][sub] = out[section][sub] || {}; continue; }
+      sub = null;
+      out[section][kv[2]] = scalar(kv[3]);
+      continue;
     }
+    if (sub) out[section][sub][kv[2]] = scalar(kv[3]);
   }
   return { console: out.console || {}, warnings };
 };

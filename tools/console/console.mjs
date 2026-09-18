@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import { renderOnce, renderUnit, renderWorker, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
+import { route, NoRouter } from './router.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
@@ -27,13 +28,14 @@ const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm
 
 const usage = `usage: cel console [--refresh SECS] [--render-once] [--status TEXT]
                    [--status-secs N] [--run "<cmd>"] [--unit NAME] [--worker ID]
-                   [--chain "<cmd>" ...] [--ask "<text>"]`;
+                   [--chain "<cmd>" ...] [--ask "<text>"] [--no-router]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '' };
+const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
+  else if (a === '--no-router') opts.router = false;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
   else if (a === '--unit') { opts.unit = argv[++i] || ''; }
@@ -46,19 +48,47 @@ for (let i = 0; i < argv.length; i += 1) {
   else { process.stderr.write(`cel console: unknown argument '${a}'\n${usage}\n`); process.exit(2); }
 }
 
-// The state the translator gets as context: the same two reads the panels show.
-// A model asked "what is waiting on me in alpha" cannot answer with a workspace
-// name unless it has been told which names exist - and a hallucinated
-// --workspace is a command that fails in front of the operator.
-const translatorState = async () => {
-  const doc = await fleet();
-  const items = await openItems(doc);
-  return askState(doc, items);
-};
+// The state the translator gets as context: the same two reads the panels
+// show. A model asked "what is waiting on me in alpha" cannot answer with a
+// workspace name unless it has been told which names exist - and a
+// hallucinated --workspace is a command that fails in front of the operator.
+// The router is handed the same two reads, reduced to names.
 
 const main = async () => {
   if (opts.translate) {
-    const state = await translatorState();
+    const doc = await fleet();
+    const items = await openItems(doc);
+    const state = askState(doc, items);
+
+    // THE ROUTER FIRST. It answers in under a second where the chat model
+    // took six, and when it cannot - not configured, down, an intent whose
+    // slots do not fill - the sentence carries on to the chat model exactly
+    // as it did before this existed. An operator should not be able to tell
+    // which of the two answered except by the line on stderr.
+    if (opts.router) {
+      try {
+        const r = await route({ sentence: opts.translate, doc, items });
+        const secs = (r.ms / 1000).toFixed(1);
+        process.stderr.write(`router: ${r.intent} ${r.confidence.toFixed(2)} in ${secs}s\n`);
+        if (r.cmds) {
+          process.stdout.write(`${r.cmds.join('\n')}\n`);
+          return;
+        }
+        // Below the floor the router is guessing; a guess is a menu, not a
+        // command line waiting for Enter. `other` on top means it is not a
+        // routing question at all, so the chat model gets it.
+        if (r.intent !== 'other' && r.options.some((o) => o.cmd)) {
+          process.stdout.write('no command for that - did you mean:\n');
+          r.options.forEach((o, i) => {
+            process.stdout.write(`${i + 1}  ${o.cmd || o.intent}   -- ${o.reason}\n`);
+          });
+          process.exit(1);
+        }
+      } catch (e) {
+        if (!(e instanceof NoRouter)) process.stderr.write(`${e.message} - asking the chat model\n`);
+      }
+    }
+
     let cmds = [], raw = '', answered = '';
     try {
       ({ cmds, raw, answer: answered = '' } = await translate({ sentence: opts.translate, state }));

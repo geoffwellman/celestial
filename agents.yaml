@@ -244,6 +244,12 @@ providers:
       unit: usd
       floor: 2
   google:       { key_env: GEMINI_API_KEY,     console: https://aistudio.google.com/apikey }
+  # A DECISION model, not a chat one: it answers typed questions about a state
+  # (`choice` returns one option plus the whole distribution) and never writes
+  # prose. The console's router uses it to classify a sentence into an intent;
+  # it is here so the endpoint lives in the same table as every other
+  # provider's, which is the only way the two stay in agreement.
+  typesafe:     { key_env: TYPESAFE_API_KEY,   api: https://api.typesafe.ai/v1/systemone, console: https://typesafe.ai/keys }
 
 # The reasoning level every plane-launched agent gets when nothing overrides it.
 # Precedence, widest last: this -> workspace.yaml `thinking:` -> the profile's
