@@ -69,6 +69,11 @@ t('facts carry the workspaces, the products and their workspace, and a count', (
 
 // --- every row of the INTENTS table, two sentences each ---------------------
 
+t('gateway is the account table, box-level and slotless', () => {
+  assert.deepEqual(plan('gateway', 'which accounts are usable', F), ['cel gateway status']);
+  assert.deepEqual(plan('gateway', 'how much codex quota is left', F), ['cel gateway status']);
+});
+
 t('fleet is the whole box, plain', () => {
   assert.deepEqual(plan('fleet', "what's blocked", F), ['cel fleet']);
   assert.deepEqual(plan('fleet', 'what is running on the box', F), ['cel fleet']);

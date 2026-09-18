@@ -279,6 +279,28 @@ const linear = () => cached('linear', 120000, async () => {
   } catch { return null; }
 });
 
+// CEL-28: the accounts behind this box's auth-gateway, in the SAME row shape
+// the signed-in subscriptions use, so the Subscriptions card has one renderer
+// rather than two that drift. `cel gateway status --json` is what is read -
+// the dashboard never talks to the gateway itself, because exactly one place
+// on the box knows that bearer and it is not a web server.
+//
+// Cached for a minute: the windows move in hours, and every read costs a
+// broker round trip. No gateway, no rows - never an error, never a fake zero.
+const gatewayAccounts = () => cached('gwsubs', 60000, async () => {
+  try {
+    const doc = JSON.parse(await run('cel', ['gateway', 'status', '--json'], 20000));
+    return (doc.accounts || []).map((a) => ({
+      source: 'gateway',
+      provider: a.provider,
+      account: a.id,
+      windows: (a.windows || []).map((w) => ({
+        name: w.label, used_pct: w.used_pct, resets_at: w.resets_at, state: w.state,
+      })),
+    }));
+  } catch { return []; }
+});
+
 const backlog = () => cached('backlog', 15000, async () => {
   const f = join(cfg.wsdir, 'backlog.yaml');
   if (!existsSync(f)) return null;
@@ -331,7 +353,7 @@ const subscriptions = async () => {
 };
 
 const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, gwsubs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), gatewayAccounts()]);
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -377,7 +399,9 @@ const state = async () => {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
     agents: ags, services: cfg.services || [], backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
-    subscriptions: subs,
+    // One list, two doors: a signed-in subscription and a gateway account are
+    // the same thing to whoever is reading the card - `source` says which.
+    subscriptions: [...subs.map((x) => ({ source: 'direct', ...x })), ...gwsubs],
   };
 };
 
@@ -1281,7 +1305,7 @@ function renderSubs(s){
       var w=ws[j], pct=Math.round(Number(w.used_pct)||0);
       var cls=pct>=100?'b':pct>=80?'w':'';
       html+='<tr class="agrow"><td>'+(j===0?esc(acc.provider):'')+'</td><td class="empty">'+
-        (j===0?esc(acc.account||''):'')+'</td><td>'+chip(w.name+' '+pct+'%',cls)+'</td><td class="empty">'+
+        (j===0?esc(acc.account||'')+(acc.source==='gateway'?' (gateway)':''):'')+'</td><td>'+chip(w.name+' '+pct+'%',cls)+'</td><td class="empty">'+
         (subReset(w.resets_at)?'resets '+esc(subReset(w.resets_at)):'')+'</td></tr>';
     }
     if(acc.extra&&acc.extra.state==='disabled'){

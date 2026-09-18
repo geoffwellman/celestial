@@ -38,6 +38,8 @@ _CEL_PROFILES=1
 . "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
 # shellcheck source=lib/quota.sh
 . "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
+# shellcheck source=lib/gateway.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
 
 # shellcheck source=lib/yaml.sh
 . "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
@@ -161,11 +163,14 @@ profile_clamp() { # <runtime> <level>
 #   PROFILE_MODEL    the model id ("" = the runtime's own default)
 #   PROFILE_THINKING the requested level, before per-runtime clamping
 #   PROFILE_NOTE     one line for logs/ledger, e.g. "fallback: DEEPSEEK_API_KEY unset"
+#   PROFILE_VIA      "gateway" when the model is reached through the box's
+#                    auth-gateway rather than a provider directly
 # Fails only for a profile that does not exist; everything else degrades with a
 # warning, because refusing to start a worker is worse than starting a slower one.
 profile_resolve() { # <wsdir> <name> [<default-runtime>]
   local d="$1" name="$2" rt_default="${3:-}"
-  PROFILE_RUNTIME=""; PROFILE_MODEL=""; PROFILE_THINKING=""; PROFILE_NOTE=""; PROFILE_VETO=""
+  PROFILE_WSDIR="$d"
+  PROFILE_RUNTIME=""; PROFILE_MODEL=""; PROFILE_THINKING=""; PROFILE_NOTE=""; PROFILE_VETO=""; PROFILE_VIA=""
   profile_exists "$d" "$name" \
     || die "no worker profile '$name' in $(ws_name "$d")/workspace.yaml (have: $(profile_names "$d" | tr '\n' ' '))"
 
@@ -174,6 +179,11 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
   [ -n "$PROFILE_RUNTIME" ] || die "profile '$name' names no runtime and no default applies"
 
   PROFILE_MODEL="$(profile_get "$d" "$name" model)"
+  PROFILE_VIA="$(profile_get "$d" "$name" via)"
+  if [ "$PROFILE_VIA" = gateway ]; then
+    _profile_gateway_route "$name"
+    return 0
+  fi
   local fb; fb="$(profile_get "$d" "$name" fallback)"
   local prov; prov="$(profile_provider "$PROFILE_MODEL")"
   if [ -n "$PROFILE_MODEL" ] && ! profile_provider_ready "$d" "$prov"; then
@@ -203,6 +213,46 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
     || _profile_credential_check "$PROFILE_RUNTIME" "$(profile_provider "$PROFILE_MODEL")" "$d"
 
   _profile_quota_check "$d" "$name" "$fb"
+}
+
+# `via: gateway` - the model is reached through this box's auth-gateway, which
+# holds several subscriptions per provider and picks one per session key.
+#
+# Everything below the gateway is ITS business, not the plane's: there is no
+# env key to check (the gateway mints the OAuth), no fallback provider to swap
+# to, and no balance endpoint - the account table is `cel gateway status`.
+# What IS the plane's business is the pair of ways this fails silently. A
+# gateway that is down serves no models at all, and a credential the broker
+# has disabled vanishes from /v1/models entirely, so a worker sent there dies
+# with "Unknown model" and looks from the outside like a worker thinking hard.
+# Both are vetoes, decided here, before a pane spawns.
+_profile_gateway_route() { # <profile name>
+  local name="$1"
+  [ -n "$PROFILE_MODEL" ] || die "profile '$name' says via: gateway but names no model (gateway ids are <provider>/<model>)"
+  PROFILE_THINKING="$(profile_get "$PROFILE_WSDIR" "$name" thinking)"
+  [ -n "$PROFILE_THINKING" ] || PROFILE_THINKING="$(ws_thinking "$PROFILE_WSDIR")"
+  PROFILE_ISOLATE=""
+  PROFILE_GATEWAY_ACCOUNTS=0
+  case "$PROFILE_MODEL" in ompgw/*) ;; *) PROFILE_MODEL="ompgw/$PROFILE_MODEL" ;; esac
+  if ! gateway_installed; then
+    PROFILE_VETO="no gateway on this box - cel gateway install"
+  elif ! gateway_ready; then
+    PROFILE_VETO="the gateway is not answering on $(gateway_url) - cel gateway status"
+  else
+    # The provider as the GATEWAY spells it: ompgw/openai-codex/gpt-5.5 is
+    # three segments, and the account list is keyed by the middle one.
+    local prov="${PROFILE_MODEL#ompgw/}"; prov="${prov%%/*}"
+    PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count "$prov" 2>/dev/null || printf 0)"
+    [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null \
+      || PROFILE_VETO="the gateway has no usable $prov account (a disabled credential is not listed at all) - cel gateway login $prov"
+  fi
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $name: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
+  fi
+  return 0
 }
 
 # QUOTA PREFLIGHT. A provider that is running dry is vetoed before the pane
@@ -350,6 +400,7 @@ EOS
   fi
 
   local n PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ARGS PROFILE_ISOLATE PROFILE_VETO
+  local PROFILE_VIA PROFILE_WSDIR PROFILE_GATEWAY_ACCOUNTS
   printf '%s (default thinking: %s)\n\n' "$(ws_name "$wsdir")" "$(ws_thinking "$wsdir")"
   for n in "${names[@]}"; do
     [ $# -eq 0 ] || [ "$n" = "$1" ] || continue

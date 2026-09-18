@@ -19,6 +19,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
 # shellcheck source=lib/console.sh
 . "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
+# shellcheck source=lib/gateway.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
 
 check_roles_and_runtimes() {
   local fail=0 a ad l target strat
@@ -301,6 +303,10 @@ cmd_doctor() {
   fi
 
   check_console_deps || fail=1
+  # One line, never a failure: most boxes have no gateway, and a red doctor
+  # for an optional door teaches people to ignore a red doctor.
+  c_hd "Gateway"
+  gateway_doctor_line
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1
   check_externals || fail=1

@@ -274,3 +274,66 @@ test_run_console_refuses_a_profile() {
   ( cd /tmp && CEL_CONSOLE_DIR="$CONS" assert_fails _cmd_run_in_subshell console --agent --profile opus-pi --dry-run )
   rm -rf "$CONS"
 }
+
+# --- through the gateway --------------------------------------------------
+# A profile that says `via: gateway` launches pi against the loopback gateway
+# instead of a provider: the model is the gateway's `<provider>/<model>` id
+# behind the `ompgw` provider, and the pane gets two env vars. pi sends no
+# session identity of its own, so CEL_SESSION_ID is the only thing the
+# gateway's balancer can pin an account by (SPIKE-gateway).
+_ws_gateway() {
+  _ws
+  cat >>"$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+YAML
+  GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
+  export CEL_CONFIG_FILE="$GWT/config.yaml"
+  printf 'gateway:\n  broker_port: 47311\n  gateway_port: 47411\n' > "$CEL_CONFIG_FILE"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready)  exit "${GW_STUB_DOWN:-0}" ;;
+  models) printf '%s\n' '{"data":[{"id":"openai-codex/gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
+  cat >"$GWT/bin/omp" <<'EOS'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "auth-gateway check") printf '%s\n' '{"credentials":[{"id":1,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"aaaaaaaa-1111","report":{"limits":[]}}]}' ;;
+  *) printf '%s\n' 'gw-fixture-token-do-not-print' ;;
+esac
+EOS
+  chmod +x "$GWT/bin/omp"; PATH="$GWT/bin:$PATH"
+}
+_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB; }
+
+test_run_worker_via_gateway_uses_the_ompgw_model_and_masks_the_env() {
+  _ws_gateway
+  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
+  assert_contains "$out" "--model ompgw/openai-codex/gpt-5.5"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN"
+  assert_contains "$out" "CEL_SESSION_ID"
+  ! printf '%s' "$out" | grep -q "gw-fixture-token" || { echo "the gateway token reached the launch line"; _ws_gateway_clean; return 1; }
+  _ws_gateway_clean
+}
+
+# A dry run is a PREVIEW. models.json is the owner's file and writing it for a
+# launch that never happened is a side effect nobody asked for.
+test_run_worker_via_gateway_writes_no_models_json_on_a_dry_run() {
+  _ws_gateway
+  export PI_CODING_AGENT_DIR="$GWT/pi"
+  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run >/dev/null 2>&1 )
+  [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset PI_CODING_AGENT_DIR; _ws_gateway_clean; return 1; }
+  unset PI_CODING_AGENT_DIR
+  _ws_gateway_clean
+}
+
+# Gateway down means every account behind it is unreachable, and a pane that
+# starts against a dead provider looks exactly like a worker thinking hard.
+test_run_worker_via_gateway_dies_when_the_gateway_is_down() {
+  _ws_gateway
+  ( cd "$T" && GW_STUB_DOWN=1 assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile gw --dry-run )
+  _ws_gateway_clean
+}
