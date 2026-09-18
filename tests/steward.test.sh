@@ -440,3 +440,52 @@ test_steward_clears_no_panes_when_herdr_is_unreachable() {
   assert_contains "$(cmd_inbox open --for root --workspace alpha)" "WG-2"
   rm -rf "$T"
 }
+
+# --- the plane is behind its own main ----------------------------------------
+# On a box that tracks main, "a new release is out" never fires: main is
+# thirty-odd merges past the newest tag and the tag has not moved. The steward
+# is the thing the human actually reads, so it says the same sentence about
+# COMMITS - once, rolled up, and taken down again when the box catches up.
+_update_rollup_fixture() { # a registry, a mailbox, and a checkout behind origin
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  export CEL_UPDATE_DIR="$T/update" CEL_CONFIG_FILE="$T/config.yaml"
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  printf 'update:\n  channel: main\n' > "$CEL_CONFIG_FILE"
+
+  git init -q --bare "$T/origin.git"
+  git init -q -b main "$T/root"
+  git -C "$T/root" config user.email t@example.com
+  git -C "$T/root" config user.name tester
+  printf '0.2.0\n' > "$T/root/VERSION"
+  git -C "$T/root" add -A
+  git -C "$T/root" commit -qm 'release 0.2.0'
+  git -C "$T/root" tag v0.2.0
+  printf 'later\n' > "$T/root/AFTER"
+  git -C "$T/root" add -A
+  git -C "$T/root" commit -qm 'after the release'
+  git -C "$T/root" remote add origin "$T/origin.git"
+  git -C "$T/root" push -q origin main --tags
+  git -C "$T/root" reset -q --hard v0.2.0
+  CEL_ROOT="$T/root"
+}
+
+test_steward_rolls_up_one_line_about_new_commits_on_main() {
+  local keep="$CEL_ROOT"
+  _update_rollup_fixture
+  local i
+  for i in 1 2 3; do _steward_update_check >/dev/null 2>&1; done
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_eq "$(printf '%s\n' "$open" | wc -l)" "1" || { CEL_ROOT="$keep"; rm -rf "$T"; return 1; }
+  assert_contains "$open" "new commits on celestial main" || { CEL_ROOT="$keep"; rm -rf "$T"; return 1; }
+
+  git -C "$T/root" fetch -q origin main
+  git -C "$T/root" reset -q --hard origin/main
+  _steward_update_check >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" "" || { CEL_ROOT="$keep"; rm -rf "$T"; return 1; }
+  CEL_ROOT="$keep"
+  rm -rf "$T"
+}
