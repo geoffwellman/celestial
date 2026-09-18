@@ -262,6 +262,7 @@ const WorkersPanel = ({ workers, sel, innerRef, focused, byMemory }) =>
         h(Text, { color: C.dim }, `${c.slug} `),
         h(Text, { color: w.state === 'running' ? C.ink : C.dim }, `${c.state} `),
         h(Text, { color: w.live === 'working' ? C.ok : w.live === 'gone' ? C.dim : C.ink }, `${c.live} `),
+        h(Text, { color: C.dim }, `${c.via} `),
         h(Text, { color: C.dim }, `${c.quiet} `),
         h(Text, { color: verdictColour(w) }, `${c.verdict} `),
         h(Text, { color: C.dim }, `${c.ahead} `),
@@ -931,7 +932,22 @@ const App = ({ refresh, statusSecs }) => {
         if (input === 'x' && unitWorkers[wsel]) { propose([`cel-fanout release ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
         // Shifted: the whole workspace. Finished and collected rows are the
         // ones nobody is working on; running rows are never in the set.
-        if (input === 'X') { propose([`cel-fanout release --all --workspace ${unit.ws}`]); return; }
+        // X offers the clean-up BY STATUS, with counts, through the same
+        // numbered options the model's misses use: 1 finished, 2 collected,
+        // 3 both. Nothing runs until the pick is on the line and Enter is hit.
+        if (input === 'X') {
+          const n = (st) => unitWorkers.filter((x) => x.state === st).length;
+          const opts = [];
+          if (n('finished')) opts.push({ cmd: `cel-fanout release --all --state finished --workspace ${unit.ws}`, reason: `${n('finished')} finished` });
+          if (n('collected')) opts.push({ cmd: `cel-fanout release --all --state collected --workspace ${unit.ws}`, reason: `${n('collected')} collected` });
+          if (opts.length === 2) opts.push({ cmd: `cel-fanout release --all --workspace ${unit.ws}`, reason: `${n('finished') + n('collected')} finished + collected` });
+          if (!opts.length) { say('nothing finished or collected to release here'); return; }
+          setOptions(opts);
+          setOutput(['release which?', ...opts.map((o, i) => `${i + 1}  ${o.cmd.padEnd(60)} -- ${o.reason}`), '', 'type 1, 2 or 3 and Enter to put it on the command line'].join('\n'));
+          setOutOffset(1); setOutView(true); setOutCollapsed(false);
+          say('pick a clean-up - nothing runs yet');
+          return;
+        }
         if (input === 'C') { propose([`cel-fanout collect --all --workspace ${unit.ws}`]); return; }
         if (input === 'm') { composeLine(`cel inbox send ${unit.name}-orch `, ` --workspace ${unit.ws}`, 'message'); return; }
         // `s` SORTS, it does not filter. The question it answers is "which of

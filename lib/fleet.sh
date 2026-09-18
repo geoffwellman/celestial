@@ -115,7 +115,8 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       branch: (.branch // ""), shape: (.shape // "ship"), state: (.state // ""),
       live: $live, quiet_secs: $quiet, verdict: $verdict, severity: $severity,
       ahead: $ahead, rss_mb: $rss, pr: (.pr // ""), created: (.created // ""),
-      alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // "")}'
+      alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
+      profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // "")}'
 }
 
 # The unit line. The unit is the PRODUCT: the thing one orchestrator stands
