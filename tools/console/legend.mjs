@@ -22,6 +22,7 @@ export const BINDINGS = {
     ['Ctrl+T', 'switch panel (fleet → waiting → inbox)'],
     ['Ctrl+F', 'focus the selected unit\u2019s orchestrator'],
     ['Ctrl+O', 'open the workspace dashboard'],
+    ['T / Ctrl+Y', 'the TIMELINE - mail, delegations and merges in one column'],
     ['click / double-click', 'select / open the unit view'],
     ['wheel', 'scroll the panel'],
   ],
@@ -38,8 +39,34 @@ export const BINDINGS = {
     ['↑/↓', 'select up / down (Ctrl+T cycles fleet → waiting → inbox)'],
     ['Enter / double-click', 'open the message detail'],
   ],
+  board: [
+    ['↑/↓', 'select a ticket'],
+    ['Enter', 'the ticket detail - description, last comments, the worker on it'],
+    ['s start', 'ask the orchestrator to pick this one up next, proposed'],
+    ['m move', 'move it to another state, with the team\u2019s states offered'],
+    ['o open', 'open the ticket in a browser'],
+  ],
+  prs: [
+    ['↑/↓', 'select a pull request'],
+    ['Enter', 'the PR detail - checks by name, review state, the worker'],
+    ['l land', 'cel-fanout land, when it is approved and the checks are green'],
+    ['v review', 'cel run reviewer on this PR, proposed'],
+    ['o open', 'open the PR in a browser'],
+  ],
+  page: [
+    ['Esc', 'back to the unit view'],
+  ],
+  timeline: [
+    ['↑/↓', 'select an event'],
+    ['Enter', 'the detail behind it - the message, the worker, the PR'],
+    ['Esc', 'back to the fleet'],
+  ],
   unit: [
     ['↑/↓', 'select a worker'],
+    ['Ctrl+T', 'cycle the focus: workers → board → PRs → waiting → mail'],
+    ['n nudge', 'herdr agent prompt the selected worker, on the command line'],
+    ['R restart', 'start the orchestrator again, when it is not live'],
+    ['a answer', 'reply to the selected waiting item and close it'],
     ['Enter', 'the worker view - the answer to \u201cwhy\u201d'],
     ['f focus', 'focus the orchestrator pane'],
     ['m message', 'cel inbox send to the orchestrator, on the command line'],
@@ -90,7 +117,15 @@ export const legend = (pane) => {
     case 'detail':
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
-      return '↑/↓ worker · Enter why · f focus · c/C collect one/all · x/X release one/all · m message · s mem · Esc back · ? help';
+      return '↑/↓ worker · Enter why · ^T panel · f focus · n nudge · c/C collect · x/X release · R restart · s mem · Esc back · ? help';
+    case 'board':
+      return '↑/↓ ticket · Enter detail · s start · m move · o open · ^T panel · Esc back · ? help';
+    case 'prs':
+      return '↑/↓ PR · Enter detail · l land · v review · o open · ^T panel · Esc back · ? help';
+    case 'timeline':
+      return '↑/↓ event · Enter detail · Esc back · ? help';
+    case 'page':
+      return 'Esc back · ? help';
     case 'worker':
       return 'p prompt · f focus · c collect · x release · t try · w why · Esc back · ? help';
     case 'inbox':
@@ -100,7 +135,7 @@ export const legend = (pane) => {
     case 'output':
       return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · q quota · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · q quota · T timeline · ^P/^N history · ? help';
   }
 };
 

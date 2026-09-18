@@ -13,8 +13,9 @@ import { homedir } from 'node:os';
 import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
-  memFree, sortWorkers, subsEdge, quotaView,
+  memFree, sortWorkers, subsEdge, quotaView, timelineView,
 } from './views.mjs';
+import { boardFor, prsFor, digestFor, timelineFor } from './board.mjs';
 
 export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
@@ -308,7 +309,17 @@ export const renderUnit = async (name, { status = '', byMemory = false } = {}) =
   if (!unit) return null;
   const items = (await openItems(doc)).filter((it) => it.ws === unit.ws);
   const tail = inboxTail({ workspaces: (doc.workspaces || []).filter((w) => w.name === unit.ws) }, 10);
-  const out = [unitView({ unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) }, items, tail }), ''];
+  // THE BOARD AND THE PRS ARE OPTIONAL PANELS. A box with no Linear key and no
+  // gh is still a box with a console on it, and the two reads that cross a
+  // network must never be able to take the unit view down with them: both
+  // answer null when they cannot be had, and a null panel is not drawn at all.
+  const repos = (unit.repos || [unit.name]);
+  const [board, prs] = await Promise.all([boardFor(unit.ws), prsFor(unit.ws, repos)]);
+  const digest = digestFor(unit.ws, { items, repos });
+  const out = [unitView({
+    unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) },
+    items, tail, board, prs, digest,
+  }), ''];
   out.push(statusRow(status, doc.box));
   out.push(legend('unit'));
   return out.join('\n');
@@ -322,6 +333,16 @@ export const renderWorker = async (id, { status = '' } = {}) => {
   const out = [workerView({ worker: found.worker, ws: found.ws, why: text }), ''];
   out.push(statusRow(status, doc.box));
   out.push(legend('worker'));
+  return out.join('\n');
+};
+
+// THE TIMELINE: the box's events, newest last, from every source at once.
+export const renderTimeline = async ({ status = '' } = {}) => {
+  const doc = await fleet();
+  const events = await timelineFor(doc);
+  const out = [timelineView(events), ''];
+  out.push(statusRow(status, doc.box));
+  out.push(legend('timeline'));
   return out.join('\n');
 };
 

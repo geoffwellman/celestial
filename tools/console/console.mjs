@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, renderUnit, renderWorker, renderQuota, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
+import { renderOnce, renderUnit, renderWorker, renderQuota, renderTimeline, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 import { route, NoRouter } from './router.mjs';
 
@@ -29,14 +29,16 @@ const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm
 const usage = `usage: cel console [--refresh SECS] [--render-once] [--render-quota]
                    [--status TEXT]
                    [--status-secs N] [--run "<cmd>"] [--unit NAME] [--worker ID]
-                   [--chain "<cmd>" ...] [--ask "<text>"] [--no-router]`;
+                   [--chain "<cmd>" ...] [--ask "<text>"] [--no-router]
+                   [--timeline]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, renderQuota: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true };
+const opts = { refresh: 10, renderOnce: false, renderQuota: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true, timeline: false };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--render-quota') opts.renderQuota = true;
+  else if (a === '--timeline') opts.timeline = true;
   else if (a === '--no-router') opts.router = false;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
@@ -181,6 +183,10 @@ const main = async () => {
       const text = await renderWorker(opts.worker, { status: opts.status });
       if (!text) { process.stderr.write(`cel console: no worker '${opts.worker}' in the fleet\n`); process.exit(1); }
       process.stdout.write(`${text}\n`);
+      return;
+    }
+    if (opts.timeline) {
+      process.stdout.write(`${await renderTimeline({ status: opts.status })}\n`);
       return;
     }
     if (opts.unit) {

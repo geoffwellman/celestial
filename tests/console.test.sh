@@ -1030,6 +1030,11 @@ EOF
   chmod +x "$T/bin/gh"
   export CEL_GH_BIN="$T/bin/gh" GH_CALLS="$T/gh.calls"
   : >"$GH_CALLS"
+  # `gh pr list --repo widget` is a request for a repository that does not
+  # exist under whatever owner gh guesses, so the console needs owner/name. It
+  # reads that from the workspace; here - and on a box where the console
+  # stands outside every workspace - the map is handed to it directly.
+  export CEL_CONSOLE_REPO_SLUGS='{"widget":"acme/widget","gadget":"acme/gadget"}'
   printf '2026-09-20T09:41:00Z' > "$T/state/alpha.root.console.cursor"
 }
 

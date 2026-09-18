@@ -60,7 +60,11 @@ t('facts carry the workspaces, the products and their workspace, and a count', (
   // The worker list is how `why` finds an id from a ticket; it never leaves
   // the box in the state, but the planner needs it.
   assert.equal(F.workers.length, 2);
-  assert.deepEqual(F.workers[0], { id: 'ABC-49-slug', ticket: 'ABC-49', workspace: 'alpha', product: 'bundle' });
+  assert.deepEqual(F.workers[0], {
+    id: 'ABC-49-slug', ticket: 'ABC-49', workspace: 'alpha', product: 'bundle',
+    // CEL-25: the pane to prompt, the repo a PR is in, and its number
+    alias: 'ABC-49-slug', repo: 'widget', pr: 0,
+  });
 });
 
 // --- every row of the INTENTS table, two sentences each ---------------------

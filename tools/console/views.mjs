@@ -150,10 +150,16 @@ export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind}
 
 // --- section 1: the unit view ----------------------------------------------
 
-export const unitView = ({ unit, items = [], tail = [] }) => {
+export const unitView = ({
+  unit, items = [], tail = [], board = null, prs = null, digest = '', now = Date.now(),
+}) => {
   const ws = unit.ws || '';
   const out = [];
   out.push(`UNIT ${unitLabel(unit)}   workspace ${ws}`);
+  // THE DIGEST SITS UNDER THE HEADER, not in a panel of its own: it is one
+  // line, and it answers the question an operator arrives with - what happened
+  // while I was not looking - before they have read anything else.
+  if (digest) out.push(digest);
   out.push('');
   out.push('ORCHESTRATOR');
   out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`
@@ -166,6 +172,28 @@ export const unitView = ({ unit, items = [], tail = [] }) => {
   const workers = workersOf(unit);
   if (!workers.length) out.push('  no workers');
   for (const w of workers) out.push(`  ${workerLine(w)}`);
+  // THE BOARD AND THE PRS, between what the box is running and what is waiting
+  // on the operator: the tickets are where work comes from and the pull
+  // requests are where it leaves, and a console with neither could say how
+  // busy the fleet was and nothing about whether it was getting anywhere.
+  // `null` means the panel was not asked for; an empty list means it was asked
+  // and there is nothing, which is a different sentence.
+  if (board) {
+    out.push('');
+    out.push('BOARD');
+    const groups = boardGroups(board);
+    if (!groups.length) out.push('  nothing on the board');
+    for (const g of groups) {
+      out.push(`  ${g.state}`);
+      for (const r of g.rows) out.push(`    ${boardLine(r, workerForTicket(workers, r.identifier), now)}`);
+    }
+  }
+  if (prs) {
+    out.push('');
+    out.push('PRS');
+    if (!prs.length) out.push('  no open pull requests');
+    for (const p of prs) out.push(`  ${prLine(p, now)}`);
+  }
   out.push('');
   out.push('WAITING');
   if (!items.length) out.push('  nothing open');
@@ -174,6 +202,203 @@ export const unitView = ({ unit, items = [], tail = [] }) => {
   out.push('RECENT MAIL');
   if (!tail.length) out.push('  quiet');
   for (const m of tail) out.push(`  ${tailLine(m)}`);
+  return out.join('\n');
+};
+
+// --- CEL-25: the board, the pull requests, the digest and the timeline ------
+//
+// The owner, 2026-09-18, after two days with the console: "it can be a lot
+// more informative yet, and it doesn't really feel like I can steer anything
+// from there". What was on screen was the FLEET'S OWN state - workers,
+// decisions, mail. What an operator actually steers by - the ticket board, the
+// open pull requests, what changed since they last looked - was not there at
+// all, so every one of those questions meant leaving the console.
+
+// An age the way it gets said out loud. Minutes under an hour, hours under two
+// days, days after that: nobody decides anything differently because a PR was
+// updated 47 hours ago rather than two days ago, and `47h` makes them do the
+// arithmetic to find out.
+export const ago = (iso, now = Date.now()) => {
+  const t = Date.parse(iso || '');
+  if (!t) return '-';
+  const m = Math.max(0, Math.round((now - t) / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+};
+
+// GROUPED IN THE ORDER THE BOARD GAVE THEM. `cel-linear board` already sorts
+// by the team's workflow position, so re-deciding the order here would be the
+// console and Linear disagreeing about what comes before what - and the
+// console would be the one that is wrong, because the workflow is the team's.
+export const boardGroups = (rows) => {
+  const out = [];
+  for (const r of rows || []) {
+    const state = String(r.state || '-');
+    let g = out.find((x) => x.state === state);
+    if (!g) { g = { state, rows: [] }; out.push(g); }
+    g.rows.push(r);
+  }
+  return out;
+};
+
+export const BOARD_COLS = { id: 9, state: 12, who: 22, age: 4, title: 44 };
+
+// The worker on a ticket, when the fleet has one. The board says what the team
+// thinks is happening; this column says what the box is actually doing about
+// it, and the gap between the two is most of what an operator is looking for.
+export const workerForTicket = (workers, ticket) => (workers || [])
+  .find((w) => String(w.ticket || '').toUpperCase() === String(ticket || '').toUpperCase()) || null;
+
+export const boardLine = (row, worker = null, now = Date.now()) => [
+  cut(row.identifier || '-', BOARD_COLS.id).padEnd(BOARD_COLS.id),
+  cut(row.state || '-', BOARD_COLS.state).padEnd(BOARD_COLS.state),
+  cut(worker ? `@${worker.alias || worker.id}` : (row.assignee || '-'), BOARD_COLS.who).padEnd(BOARD_COLS.who),
+  ago(row.updatedAt, now).padStart(BOARD_COLS.age),
+  cut(row.title || '', BOARD_COLS.title),
+].join('  ');
+
+// GREEN, RED, OR NOT YET. A rollup entry with no conclusion is a check still
+// running, and calling that green is how `land` gets pressed on a PR whose
+// gate is thirty seconds away from failing.
+export const ciState = (pr) => {
+  const rows = Array.isArray(pr && pr.statusCheckRollup) ? pr.statusCheckRollup : [];
+  if (!rows.length) return 'none';
+  let pending = false;
+  for (const c of rows) {
+    const v = String(c.conclusion || '').toUpperCase();
+    if (['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(v)) return 'fail';
+    if (!v) pending = true;
+  }
+  return pending ? 'pending' : 'pass';
+};
+const CI_MARK = { pass: '\u2713', fail: '\u2717', pending: '\u00b7', none: '-' };
+
+export const PR_COLS = { num: 5, branch: 24, review: 20, ci: 5, age: 4, title: 40 };
+
+// A draft says DRAFT and nothing about review: a draft with no reviewer on it
+// is not "review -", it is work its author has not offered to anyone yet.
+export const reviewOf = (pr) => (pr.isDraft ? 'draft' : `review ${pr.reviewDecision || '-'}`);
+
+export const prLine = (pr, now = Date.now()) => [
+  `#${pr.number}`.padEnd(PR_COLS.num),
+  cut(pr.headRefName || '-', PR_COLS.branch).padEnd(PR_COLS.branch),
+  cut(reviewOf(pr), PR_COLS.review).padEnd(PR_COLS.review),
+  `ci ${CI_MARK[ciState(pr)]}`.padEnd(PR_COLS.ci),
+  ago(pr.updatedAt, now).padStart(PR_COLS.age),
+  cut(pr.title || '', PR_COLS.title),
+].join('  ');
+
+// The worker row under a detail view, or a line saying there is none. A ticket
+// the board shows with no delegation behind it is the most common reason an
+// operator opens the detail at all.
+const workerBlock = (worker) => (worker
+  ? [`WORKER ${worker.id}`, `  ${workerHeader()}`, `  ${workerLine(worker)}`]
+  : ['WORKER', '  no delegation for this one']);
+
+export const ticketView = ({ ticket, worker = null, ws = '' }) => {
+  const out = [];
+  out.push(`TICKET ${ticket.identifier}   ${ticket.state || '-'}   workspace ${ws}`);
+  out.push(`  ${ticket.title || ''}`);
+  out.push(`  ${ticket.url || ''}`);
+  out.push('');
+  out.push('DESCRIPTION');
+  // THE HEAD, not the whole thing. A Linear description runs to pages and the
+  // panel it lands in is eight rows; the detail view is somewhere to decide
+  // from, and `[open]` is one key away for the rest.
+  const head = String(ticket.description || '').split('\n').filter(Boolean).slice(0, 4);
+  if (!head.length) out.push('  (no description)');
+  for (const l of head) out.push(`  ${cut(l, 100)}`);
+  out.push('');
+  out.push('LAST COMMENTS');
+  const comments = (ticket.comments || []).slice(-2);
+  if (!comments.length) out.push('  none');
+  for (const c of comments) {
+    out.push(`  ${String(c.createdAt || '').slice(0, 16)} ${c.user || '-'}: ${cut(String(c.body || '').replace(/\s+/g, ' '), 100)}`);
+  }
+  out.push('');
+  out.push(...workerBlock(worker));
+  out.push('');
+  out.push('[start]  [move]  [open]');
+  return out.join('\n');
+};
+
+export const prView = ({ pr, worker = null, ws = '', now = Date.now() }) => {
+  const out = [];
+  out.push(`PR #${pr.number} ${pr.repo || '-'}   ${pr.headRefName || '-'}   ${ago(pr.updatedAt, now)}   workspace ${ws}`);
+  out.push(`  ${pr.title || ''}`);
+  out.push('');
+  out.push('CHECKS');
+  const checks = Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : [];
+  if (!checks.length) out.push('  none reported');
+  for (const c of checks) {
+    out.push(`  ${cut(c.name || c.context || '-', 30).padEnd(30)} ${c.conclusion || c.status || 'pending'}`);
+  }
+  out.push('');
+  out.push('REVIEW');
+  out.push(`  ${pr.isDraft ? 'draft - not offered for review yet' : (pr.reviewDecision || 'no decision yet')}`);
+  out.push('');
+  out.push(...workerBlock(worker));
+  out.push('');
+  out.push('[land]  [open]  [review]');
+  return out.join('\n');
+};
+
+// The clock off an ISO string WITHOUT going through a local timezone. The
+// digest and the timeline are read against each other and against the mail
+// they were built from; rendering one in the box's zone and the other in the
+// string's is how 12:47 and 13:47 end up on the same screen.
+export const clock = (iso) => (/T(\d\d:\d\d)/.exec(String(iso || '')) || [])[1] || '--:--';
+
+// SINCE YOU LAST LOOKED, in one line. A count alone ("3 status") says that
+// something happened and not what, so the newest message of the biggest group
+// travels with it: the operator either recognises it and moves on, or opens
+// the panel it came from.
+export const digestLine = ({ since, mail = [], merged = 0, waiting = 0 }) => {
+  const parts = [];
+  const groups = [];
+  for (const m of mail) {
+    const key = `${m.kind}\u0000${m.from}`;
+    let g = groups.find((x) => x.key === key);
+    if (!g) { g = { key, kind: m.kind, from: m.from, n: 0, last: '' }; groups.push(g); }
+    g.n += 1;
+    g.last = String(m.message || '').replace(/\s+/g, ' ');
+  }
+  groups.sort((a, b) => b.n - a.n);
+  if (groups.length) {
+    const g = groups[0];
+    parts.push(`${g.n} ${g.kind} from ${g.from}${g.last ? ` (last: "${cut(g.last, 60)}")` : ''}`);
+    const rest = groups.slice(1).reduce((n, x) => n + x.n, 0);
+    if (rest) parts.push(`${rest} more`);
+  }
+  if (merged) parts.push(`${merged} PR${merged === 1 ? '' : 's'} merged`);
+  if (waiting) parts.push(`${waiting} decision${waiting === 1 ? '' : 's'} waiting`);
+  return `since ${clock(since)}: ${parts.length ? parts.join(' \u00b7 ') : 'nothing new'}`;
+};
+
+// --- the timeline ----------------------------------------------------------
+
+export const TIMELINE_COLS = { ws: 10, kind: 10 };
+
+export const timelineLine = (e) => [
+  clock(e.ts),
+  cut(e.ws || '-', TIMELINE_COLS.ws).padEnd(TIMELINE_COLS.ws),
+  cut(e.kind || '-', TIMELINE_COLS.kind).padEnd(TIMELINE_COLS.kind),
+  String(e.what || ''),
+].join(' ');
+
+// NEWEST LAST. Every other list in this console is newest-first because it is
+// a queue you work down; the timeline is a story, and a story read upwards is
+// why the operator kept scrolling to find where they had got to.
+export const timelineSort = (events) => [...(events || [])]
+  .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+
+export const timelineView = (events, sel = -1) => {
+  const rows = timelineSort(events);
+  const out = ['TIMELINE'];
+  if (!rows.length) out.push('  nothing yet');
+  rows.forEach((e, i) => out.push(`${i === sel ? '>' : ' '} ${timelineLine(e)}`));
   return out.join('\n');
 };
 

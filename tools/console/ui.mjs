@@ -29,7 +29,9 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState } from './views.mjs';
+import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
+import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import { route, NoRouter, routerLabel } from './router.mjs';
 import {
@@ -316,6 +318,68 @@ const WorkerView = ({ worker, ws, why, busy, preview, innerRef }) =>
       h(Text, { key: b, color: b === '[release]' ? C.warn : C.ink }, b),
     ].filter(Boolean))));
 
+// --- CEL-25: the two panels an operator steers by ---------------------------
+//
+// A PANEL THAT WOULD NOT FIT COLLAPSES TO ITS TITLE, with the count still on
+// it, and Enter (or Ctrl+T onto it) opens it again. CEL-17's rule is that
+// nothing renders below the last screen row; six panels on a 24-row terminal
+// cannot all be open, and a console that silently drew the last two off the
+// bottom is a console with two panels nobody knew it had.
+const Collapsed = ({ title, n, innerRef }) =>
+  h(Box, { ref: innerRef },
+    h(Text, { color: C.dim }, `${title}  (${n})  Enter expands`));
+
+const BoardPanel = ({ rows, sel, innerRef, focused, workers, collapsed }) => (collapsed
+  ? h(Collapsed, { title: 'BOARD', n: (rows || []).length, innerRef })
+  : h(Panel, {
+    title: 'BOARD',
+    innerRef,
+    focused,
+    right: rows === null ? 'no ticket system here' : `${rows.length} · ${legendFor('board')}`,
+  },
+  rows === null ? h(Text, { color: C.dim }, '  cel-linear could not read a board for this workspace') : null,
+  rows && !rows.length ? h(Text, { color: C.dim }, '  nothing on the board') : null,
+  ...(rows || []).map((r, i) => h(Text, { key: r.identifier, inverse: i === sel, wrap: 'truncate-end' },
+    h(Text, { color: C.dim }, i === sel ? '\u25b8 ' : '  '),
+    h(Text, { color: C.ink }, boardLine(r, workerForTicket(workers, r.identifier)))))));
+
+const PrsPanel = ({ rows, sel, innerRef, focused, collapsed }) => (collapsed
+  ? h(Collapsed, { title: 'PRS', n: (rows || []).length, innerRef })
+  : h(Panel, {
+    title: 'PRS',
+    innerRef,
+    focused,
+    right: rows === null ? 'no repo slug to ask about' : `${rows.length} open · ${legendFor('prs')}`,
+  },
+  rows === null ? h(Text, { color: C.dim }, '  gh could not list pull requests for these repos') : null,
+  rows && !rows.length ? h(Text, { color: C.dim }, '  no open pull requests') : null,
+  ...(rows || []).map((r, i) => h(Text, { key: `${r.repo}#${r.number}`, inverse: i === sel, wrap: 'truncate-end' },
+    h(Text, { color: C.dim }, i === sel ? '\u25b8 ' : '  '),
+    h(Text, { color: ciState(r) === 'fail' ? C.warn : C.ink }, prLine(r))))));
+
+// THE TIMELINE: the box's own history in one column, newest LAST. Three
+// sources that used to be three screens - the mailboxes, the ledger and the
+// pull requests - and an operator who had been away reconstructed the order
+// between them by hand.
+const TimelineView = ({ events, sel, innerRef }) =>
+  h(Panel, {
+    title: 'TIMELINE', innerRef, focused: true,
+    right: `${events.length} events \u00b7 newest last \u00b7 Enter opens \u00b7 Esc back`,
+  },
+  events.length === 0 ? h(Text, { color: C.dim }, '  nothing in the last day') : null,
+  ...events.slice(-200).map((e, i) => h(Text, { key: `${e.ts}${i}`, inverse: i === sel, wrap: 'truncate-end' },
+    h(Text, { color: C.dim }, i === sel ? '\u25b8 ' : '  '),
+    h(Text, { color: kindColour(e.kind) }, timelineLine(e)))));
+
+// The ticket and the PR, whole. Rendered from the same pure functions
+// `--render-once` prints, so the page an operator reads in the TUI and the one
+// they pipe into a file cannot drift apart.
+const TextView = ({ title, right, text, innerRef }) =>
+  h(Panel, { title, innerRef, focused: true, right },
+    ...String(text || '').split('\n').map((l, i) => h(Text, {
+      key: i, color: /^\[|^[A-Z ]+$/.test(l) ? C.ink : C.dim, wrap: 'truncate-end',
+    }, l || ' ')));
+
 const App = ({ refresh, statusSecs, noRouter = false }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -347,6 +411,17 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [wsel, setWsel] = useState(0);            // which worker row the unit view has
   const [wsort, setWsort] = useState(false);      // `s`: the workers by memory, biggest first
   const [worker, setWorker] = useState(null);     // {worker, ws, why, busy} - the answer to "why"
+  // CEL-25: the two panels the operator steers by, the line that says what
+  // changed, and the sub-panel Ctrl+T is currently on inside the unit view.
+  const [board, setBoard] = useState(null);       // null: no board to be had here
+  const [prs, setPrs] = useState(null);
+  const [digest, setDigest] = useState('');
+  const [upane, setUpane] = useState('workers');  // workers | board | prs | waiting | mail
+  const [bsel, setBsel] = useState(0);
+  const [psel, setPsel] = useState(0);
+  const [timeline, setTimeline] = useState(null); // the T view: every source, in order
+  const [tsel, setTsel] = useState(0);
+  const [page, setPage] = useState(null);         // {title, right, text} - ticket or PR detail
   const [raw, setRaw] = useState(false);          // the output view showing the text as it came
   const rawText = useRef('');                     // what the command actually printed
   const renderedRef = useRef('');                 // and the console's reading of it
@@ -364,9 +439,15 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     inbox: useRef(null), output: useRef(null),
     unitOrch: useRef(null), unitWorkers: useRef(null),
     unitWaiting: useRef(null), unitMail: useRef(null), worker: useRef(null),
+    unitBoard: useRef(null), unitPrs: useRef(null), timeline: useRef(null), page: useRef(null),
   };
   const rows = fleetRows(doc);
   const rowsRef = useRef(rows); rowsRef.current = rows;
+  const docRef = useRef(doc); docRef.current = doc;
+  // execute() is defined above loadPanels and refreshes it after a command; a
+  // ref rather than a reordering, because moving either one across the other
+  // would put a callback above the state it reads.
+  const loadPanelsRef = useRef(() => {});
   const itemsRef = useRef(items); itemsRef.current = items;
   const tailRef = useRef(tail); tailRef.current = tail;
   const unitRef = useRef(null); unitRef.current = unit;
@@ -473,6 +554,13 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     appendHistory(cmd);
     history.current = [...history.current, cmd];
     reload();
+    // THE CACHES GO AFTER A COMMAND. The board and the PR list are held for a
+    // minute so the refresh loop cannot hammer Linear and GitHub - but the
+    // command the operator just ran is precisely the change they want to see,
+    // and a panel that still says "Todo" thirty seconds after they moved the
+    // ticket is the console telling them it did not work.
+    refreshPanels();
+    if (unitRef.current) loadPanelsRef.current(unitRef.current, itemsRef.current.filter((it) => it.ws === unitRef.current.ws));
     return `$ ${cmd}\n${r.out || '(no output)'}`;
   }, [reload, say]);
 
@@ -650,14 +738,123 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // row opens the answer to "why", a message opens the message. The console
   // that only ever printed to an output box was a console you could read and
   // not drive.
+  // THE TWO SLOW PANELS, loaded when the unit opens and after every command.
+  // Both cross a network to somebody else's rate limit, so board.mjs holds
+  // them for a minute and `refreshPanels()` is what a command clears - the
+  // thing the operator just did is the change they want to see.
+  const loadPanels = useCallback(async (u, items2) => {
+    if (!u) return;
+    const repos = u.repos && u.repos.length ? u.repos : [u.name];
+    setDigest(digestFor(u.ws, { items: items2 || [], repos }));
+    const [b, p] = await Promise.all([boardFor(u.ws), prsFor(u.ws, repos)]);
+    setBoard(b); setPrs(p);
+    // The digest again, now that the merged PRs are in the cache: the first
+    // one is drawn immediately because an operator should never wait on
+    // GitHub to see their own mailbox counts.
+    setDigest(digestFor(u.ws, { items: items2 || [], repos }));
+  }, []);
+
+  loadPanelsRef.current = loadPanels;
+
   const openUnit = useCallback((name) => {
     const u = findUnit(doc, name);
     if (!u) { say(`no unit named ${name} in the fleet`); return; }
     setUnit(u);
     setWsel(0);
+    setBsel(0);
+    setPsel(0);
+    setUpane('workers');
     setWorker(null);
+    setBoard(null);
+    setPrs(null);
     setPane('unit');
-  }, [doc, say]);
+    // THE CURSOR MOVES WHEN YOU LOOK, and only then. It is the console's own
+    // mark, not the mailbox's read marker: moving `cel inbox`'s would mark
+    // mail read for the steward and the agent console as well, and the
+    // operator would have looked at one panel and answered for three.
+    const before = digestFor(u.ws, { items: (itemsRef.current || []).filter((it) => it.ws === u.ws) });
+    setDigest(before);
+    loadPanels(u, (itemsRef.current || []).filter((it) => it.ws === u.ws));
+    writeCursor(u.ws);
+  }, [doc, say, loadPanels]);
+
+  // What the key map is acting ON: one selection object per panel, built here
+  // from state the console already holds. verbs.mjs is pure and knows nothing
+  // about React; this is the only place the two meet.
+  const verbSelection = useCallback((which) => {
+    const u = unitRef.current;
+    if (!u) return null;
+    const ws = u.ws;
+    if (which === 'workers') {
+      const w = (sortWorkers(workersOf(u), wsort) || [])[wsel];
+      return w ? { ws, id: w.id, alias: w.alias || w.id } : null;
+    }
+    if (which === 'board') {
+      const r = (board || [])[bsel];
+      if (!r) return null;
+      const states = [];
+      for (const x of board || []) if (x.state && !states.includes(x.state)) states.push(x.state);
+      return { ws, product: u.name, ticket: r.identifier, state: r.state, states, url: r.url };
+    }
+    if (which === 'prs') {
+      const r = (prs || [])[psel];
+      if (!r) return null;
+      // The delegation behind the branch, when the fleet made it. A PR opened
+      // by hand has none, and `land` says so rather than inventing an id.
+      const w = workersOf(u).find((x) => x.branch === r.headRefName || x.id === r.headRefName);
+      return {
+        ws, repo: r.repo, number: r.number, branch: r.headRefName,
+        id: w ? w.id : '', reviewDecision: r.reviewDecision, ci: ciState(r),
+      };
+    }
+    if (which === 'waiting') {
+      const it = (itemsRef.current || []).filter((x) => x.ws === ws)[0];
+      return it ? { ws, id: it.id, from: it.from } : null;
+    }
+    return null;
+  }, [board, prs, bsel, psel, wsel, wsort]);
+
+  // Enter on a board row: the ticket whole - its description head, its last
+  // two comments and the worker on it, which is the gap between what the team
+  // thinks is happening and what the box is doing about it.
+  const openTicket = useCallback(async (row) => {
+    const u = unitRef.current;
+    if (!row || !u) return;
+    setPage({ title: `TICKET \u00b7 ${row.identifier}`, right: `${u.ws} \u00b7 Esc back`, text: ticketView({ ticket: row, worker: workerForTicket(workersOf(u), row.identifier), ws: u.ws }) });
+    const r = await run(process.env.CEL_LINEAR_BIN || 'cel-linear', ['issue', row.identifier, '--workspace', u.ws], 20000);
+    if (!r.ok) return;
+    try {
+      const doc2 = JSON.parse(r.out);
+      const full = {
+        ...row,
+        description: doc2.description || '',
+        comments: ((doc2.comments && doc2.comments.nodes) || []).map((c) => ({ user: c.user?.name || '-', body: c.body, createdAt: c.createdAt })),
+      };
+      setPage((prev) => (prev && prev.title.endsWith(row.identifier)
+        ? { ...prev, text: ticketView({ ticket: full, worker: workerForTicket(workersOf(u), row.identifier), ws: u.ws }) }
+        : prev));
+    } catch { /* cel-linear printed something that is not an issue */ }
+  }, []);
+
+  const openPr = useCallback((row) => {
+    const u = unitRef.current;
+    if (!row || !u) return;
+    const w = workersOf(u).find((x) => x.branch === row.headRefName || x.id === row.headRefName);
+    setPage({ title: `PR \u00b7 #${row.number} ${row.repo}`, right: `${u.ws} \u00b7 Esc back`, text: prView({ pr: row, worker: w || null, ws: u.ws }) });
+  }, []);
+
+  // `T` on the main screen. Not a bare `t`, which the ticket asked for and the
+  // command line cannot spare: the line is live on the main screen and "tell
+  // bundle-orch ..." is a sentence the router is documented to take, so a bare
+  // `t` would have eaten the first letter of it.
+  const openTimeline = useCallback(async () => {
+    setTimeline([]);
+    say('reading the mailboxes, the ledger and the pull requests\u2026');
+    const events = timelineSort(await timelineFor(docRef.current));
+    setTimeline(events);
+    setTsel(Math.max(0, events.length - 1));
+    say('');
+  }, [say]);
 
   const openWhy = useCallback(async (w, ws) => {
     if (!w) return;
@@ -946,6 +1143,27 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // line is EMPTY: the moment the operator has typed something they are
     // typing, not pressing keys, and a view that ate their `f` would be a view
     // they could not type a command from.
+    // The timeline and the ticket/PR pages are PLACES, like the detail view:
+    // no command line under them, so bare keys act and Esc goes back.
+    if (page) {
+      if (key.escape) { setPage(null); say('back'); return; }
+      return;
+    }
+    if (timeline) {
+      if (key.escape) { setTimeline(null); say('back'); return; }
+      if (key.upArrow) { setTsel((i) => Math.max(0, i - 1)); return; }
+      if (key.downArrow) { setTsel((i) => Math.min(timeline.length - 1, i + 1)); return; }
+      if (key.return) {
+        const e = timeline[tsel];
+        if (!e) return;
+        setTimeline(null);
+        if (e.worker) { openWorkerById(e.worker.id); return; }
+        if (e.item) { openDetail(e.item); return; }
+        if (e.pr) { execute(`gh pr view ${e.pr.number} --repo ${e.pr.slug}`); return; }
+        return;
+      }
+      return;
+    }
     if (worker && !detail) {
       const w = worker.worker;
       if (key.escape) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
@@ -960,10 +1178,60 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       }
     } else if (unit && pane === 'unit' && !detail) {
       if (key.escape) { setUnit(null); setPane('fleet'); say('back'); return; }
-      if (key.upArrow) { setWsel((i) => Math.max(0, i - 1)); return; }
-      if (key.downArrow) { setWsel((i) => Math.min(unitWorkers.length - 1, i + 1)); return; }
-      if (key.return && !value.trim()) { openWhy(unitWorkers[wsel], unit.ws); return; }
+      // CTRL+T CYCLES THE FOCUS round the six panels. Only the focused one is
+      // guaranteed room on a short terminal, so cycling is also how a
+      // collapsed panel is opened - and Enter on a collapsed title does the
+      // same thing from the mouse's side.
+      if (key.ctrl && input === 't') {
+        const order = ['workers', 'board', 'prs', 'waiting', 'mail'];
+        setUpane((p2) => order[(order.indexOf(p2) + 1) % order.length]);
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
+        const d = key.downArrow ? 1 : -1;
+        if (upane === 'board') setBsel((i) => Math.min(Math.max(0, (board || []).length - 1), Math.max(0, i + d)));
+        else if (upane === 'prs') setPsel((i) => Math.min(Math.max(0, (prs || []).length - 1), Math.max(0, i + d)));
+        else setWsel((i) => Math.min(unitWorkers.length - 1, Math.max(0, i + d)));
+        return;
+      }
+      if (key.return && !value.trim()) {
+        if (upane === 'board' && (board || [])[bsel]) { openTicket((board || [])[bsel]); return; }
+        if (upane === 'prs' && (prs || [])[psel]) { openPr((prs || [])[psel]); return; }
+        if (upane === 'waiting' && unitItems[0]) { openDetail(unitItems[0]); return; }
+        openWhy(unitWorkers[wsel], unit.ws); return;
+      }
       if (!value) {
+        // THE VERBS. One pure function decides what a key means on a panel, so
+        // "n proposed the wrong workspace" is a test failure in verbs.mjs
+        // rather than a message in a stranger's mailbox. Every one of them is
+        // a PROPOSAL: the line lands with the cursor where the words go and
+        // Enter is the operator's.
+        const selection = verbSelection(upane);
+        const v = verbFor(upane, input, selection) || verbFor('orch', input, { ws: unit.ws, product: unit.name, orch: unit.orch });
+        if (v) {
+          if (!v.cmds.length) { say(v.say); return; }
+          if (v.options && v.options.length) {
+            setOptions(v.options.map((o) => ({ cmd: v.cmds[0].replace('""', `"${o}"`), reason: o })));
+            setOutput(['move it where?', ...v.options.map((o, i) => `${i + 1}  ${o}`), '',
+              'type a number and Enter to put it on the command line'].join('\n'));
+            setOutOffset(1); setOutView(true); setOutCollapsed(false);
+            say('pick a state - nothing runs yet');
+            return;
+          }
+          setProposed({ cmds: v.cmds });
+          setLine(v.cmds.join(' ; '), v.cursor < 0 ? v.cmds.join(' ; ').length : v.cursor);
+          say(v.cmds.length > 1
+            ? `proposed a chain of ${v.cmds.length} - Enter runs them in order, Esc discards`
+            : 'proposed - Enter runs it, Esc discards it');
+          return;
+        }
+        if (input === 'o') {
+          const url = upane === 'board' ? (board || [])[bsel]?.url
+            : upane === 'prs' ? `https://github.com/${(prs || [])[psel]?.slug}/pull/${(prs || [])[psel]?.number}` : '';
+          if (!url) { say('nothing here to open'); return; }
+          execute(`gh browse --repo ${(prs || [])[psel]?.slug || ''} ${(prs || [])[psel]?.number || ''}`.trim());
+          return;
+        }
         if (input === 'f') { execute(`herdr agent focus ${unit.name}-orch`); return; }
         // Clean-up from the list itself (owner, 2026-09-18): `c` collects and
         // `x` releases the SELECTED worker - as proposals, so the command is
@@ -1003,7 +1271,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         // these do I collect", and the selection follows the row it was on -
         // reordering under a cursor that stayed put is how an operator
         // collects the wrong worker.
-        if (input === 's') {
+        if (input === 's' && upane === 'workers') {
           const on = unitWorkers[wsel];
           const next = sortWorkers(workersOf(unit), !wsort);
           setWsort((v) => !v);
@@ -1100,6 +1368,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         }
         // Three panels now, not two: the inbox tail is a list you can enter.
         case 't': setPane((p) => (p === 'fleet' ? 'waiting' : p === 'waiting' ? 'inbox' : 'fleet')); setSel(0); return;
+        case 'y': openTimeline(); return;
         case 'd': if (pane === 'waiting') openDetail(items[sel]); else if (pane === 'inbox') openDetail(tail[sel]); return;
         case 'f': {
           const r = rows[sel];
@@ -1149,6 +1418,12 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       setQuota(true);
       return;
     }
+    // THE TIMELINE, from the main screen. The ticket asked for a bare `t` and
+    // the command line cannot spare one: it is live here, and "tell
+    // bundle-orch ..." is a sentence the router is documented to take, so a
+    // bare `t` would eat the first letter of it. Shift+T on an EMPTY line, and
+    // Ctrl+Y anywhere, which is the binding for someone who types capitals.
+    if (input === 'T' && !value && view === 'main') { openTimeline(); return; }
     if (input && !key.meta && !hasControl(input)) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
   });
 
@@ -1179,6 +1454,14 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       output: outputRows,
     };
   }, [screen, rows.length, detail, output, outCollapsed]);
+
+  // WOULD THE SIX PANELS FIT? Orchestrator (4) + workers + board + PRs +
+  // waiting + mail, each with a border and a title, plus the three rows that
+  // belong to the operator. When they would not, everything but the focused
+  // panel collapses to its title and a count - which is the only honest
+  // alternative to drawing two of them below the last row of the screen.
+  const tight = (unitWorkers.length + (board || []).length + (prs || []).length
+    + unitItems.length + unitMail.length + 6 * 3 + 8) > screen;
 
   const outAll = output ? output.split('\n') : [];
   const outWin = window_(outAll, outOffset || Math.max(0, outAll.length - layout.output), layout.output);
@@ -1240,13 +1523,16 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // take the whole stack; appending them under three panels that already fill
   // the screen put them below the last row, where nobody ever saw them - the
   // owner's "? did nothing" was exactly that.
-  const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : detail ? 'detail'
-    : worker ? 'worker' : unit ? 'unit'
+  const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : page ? 'page'
+    : timeline ? 'timeline' : detail ? 'detail'
+      : worker ? 'worker' : unit ? 'unit'
       : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
     if (quota) { setQuota(false); return; }
     if (picker) { setPicker(null); return; }
+    if (page) { setPage(null); say('back'); return; }
+    if (timeline) { setTimeline(null); say('back'); return; }
     if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
     if (worker) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
     if (unit) { setUnit(null); setPane('fleet'); say('back'); return; }
@@ -1277,10 +1563,22 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
             key: 'worker', worker: worker.worker, ws: worker.ws, why: worker.why,
             busy: worker.busy, preview: !!worker.preview, innerRef: refs.worker,
           })]
+          : view === 'page'
+            ? [h(TextView, { key: 'page', title: page.title, right: page.right, text: page.text, innerRef: refs.page })]
+            : view === 'timeline'
+              ? [h(TimelineView, { key: 'timeline', events: timeline, sel: tsel, innerRef: refs.timeline })]
           : view === 'unit'
             ? [
+              // SIX PANELS ON A TERMINAL THAT MAY HAVE ROOM FOR THREE. The
+              // focused one is always open; the rest collapse to a title and a
+              // count when the screen is short, because CEL-17's rule is that
+              // nothing may render below the last row - and the panels that
+              // went below it were panels nobody knew the console had.
+              h(Box, { key: 'digest' }, h(Text, { color: C.dim, wrap: 'truncate-end' }, digest || ' ')),
               h(OrchPanel, { key: 'orch', unit, innerRef: refs.unitOrch }),
-              h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: wsel, innerRef: refs.unitWorkers, focused: true, byMemory: wsort }),
+              h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: upane === 'workers' ? wsel : -1, innerRef: refs.unitWorkers, focused: upane === 'workers', byMemory: wsort }),
+              h(BoardPanel, { key: 'board', rows: board, sel: upane === 'board' ? bsel : -1, innerRef: refs.unitBoard, focused: upane === 'board', workers: unitWorkers, collapsed: tight && upane !== 'board' }),
+              h(PrsPanel, { key: 'prs', rows: prs, sel: upane === 'prs' ? psel : -1, innerRef: refs.unitPrs, focused: upane === 'prs', collapsed: tight && upane !== 'prs' }),
               h(UnitWaiting, { key: 'uwait', items: unitItems, innerRef: refs.unitWaiting }),
               h(UnitMail, { key: 'umail', lines: unitMail, innerRef: refs.unitMail }),
             ]
@@ -1344,8 +1642,11 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         : null,
       h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
-      view === 'detail' ? 'detail' : view === 'worker' ? 'worker' : view === 'unit' ? 'unit'
-        : view === 'quota' ? 'quota' : view === 'output' ? 'output' : pane))));
+      view === 'detail' ? 'detail' : view === 'worker' ? 'worker'
+        : view === 'timeline' ? 'timeline' : view === 'page' ? 'page'
+          : view === 'quota' ? 'quota'
+            : view === 'unit' ? (upane === 'board' ? 'board' : upane === 'prs' ? 'prs' : 'unit')
+              : view === 'output' ? 'output' : pane))));
 };
 
 export const start = async (opts) => {

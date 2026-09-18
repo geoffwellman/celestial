@@ -21,7 +21,17 @@ cel-linear issue WG-12
 cel-linear create --team WG --title "..." --description "..."
 cel-linear comment WG-12 "PR: <url>"
 cel-linear state WG-12 "In Progress"
+cel-linear board --team WG            # the board, grouped by state
 ```
+
+`cel-linear board [--team K] [--state a,b] [--json]` is the whole board in one
+read: the team's open issues plus whatever it finished today, grouped by state
+in the team's own workflow order, with the assignee and the last update on each
+row. With no `--team` it takes the teams from the workspace's
+`repos[].linear_team`. `--json` is one object per line. THE RAW QUERY IS CACHED
+for 60 seconds under `$CEL_CACHE` because `cel console` redraws its BOARD panel
+after every command and on a ten-second loop - without the cache, one operator
+with the console open is a request to Linear every few seconds all day.
 
 Auth is `LINEAR_API_KEY` from the workspace env (`env.local`); if it is unset,
 say so and continue without ticket updates - never block the work on it.
