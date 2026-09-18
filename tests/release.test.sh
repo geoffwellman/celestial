@@ -211,3 +211,25 @@ test_release_tag_shows_as_available_on_the_release_channel() {
   CEL_ROOT="$keep"
   rm -rf "$T"
 }
+
+# --- the subject a squash merge actually leaves -------------------------------
+
+# The publish job reads the version off main's head subject, and GitHub's
+# squash merge appends the PR number: `release: v0.3.0 (#57)`. A naive strip of
+# the `release: v` prefix yields `0.3.0 (#57)`, which never equals VERSION, so
+# the VERSION-agrees check refused the ONLY path a release can actually take -
+# every hand-pushed tag worked and the real merge did not. Parsing lives in
+# cut.py so this shape is tested without GitHub.
+_subject() { python3 "$_REL_REPO/tools/release/cut.py" --version-from-subject "$1"; }
+
+test_release_version_from_a_squash_merge_subject() {
+  assert_eq "$(_subject 'release: v0.3.0 (#57)')" "0.3.0" || return 1
+  assert_eq "$(_subject 'release: v0.3.0')" "0.3.0" || return 1
+  assert_eq "$(_subject 'release: v10.2.13 (#1234)')" "10.2.13" || return 1
+}
+
+test_release_version_from_subject_refuses_anything_else() {
+  assert_fails _subject 'chore: tidy the widget' || return 1
+  assert_fails _subject 'release: v0.3 (#57)' || return 1
+  assert_fails _subject 'release: v0.3.0 and more (#57)' || return 1
+}
