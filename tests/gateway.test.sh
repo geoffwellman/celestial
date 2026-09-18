@@ -39,6 +39,11 @@ _gw_setup() {
   mkdir -p "$T/bin" "$T/pi"
   export CEL_CONFIG_FILE="$T/config.yaml"
   export CEL_GATEWAY_STATE="$T/state"
+  # services.d is a FIXTURE, always: `cel gateway install` writes two box
+  # services, and a test that let it write to the real ~/.config/cel/services.d
+  # left the live steward sweeping services this suite invented.
+  export CEL_SERVICES_D="$T/services.d"
+  export CEL_SERVICES_STATE="$T/services-state"
   export PI_CODING_AGENT_DIR="$T/pi"
   cat >"$T/bin/omp" <<EOF
 #!/usr/bin/env bash
@@ -67,7 +72,7 @@ EOF
   chmod +x "$T/gwstub"
   export CEL_GATEWAY_STUB="$T/gwstub"
 }
-_gw_teardown() { rm -rf "$T"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE PI_CODING_AGENT_DIR; }
+_gw_teardown() { rm -rf "$T"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE PI_CODING_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE; }
 
 # --- install --------------------------------------------------------------
 
@@ -277,7 +282,6 @@ test_gateway_reads_models_over_http() {
 # already look - that is the whole of CEL-34.
 test_gateway_install_writes_two_box_service_files() {
   _gw_setup
-  export CEL_SERVICES_D="$T/services.d"
   cmd_gateway install --no-start >/dev/null
   assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-broker.json")" cel-auth-broker
   assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-gateway.json")" cel-auth-gateway
@@ -295,7 +299,6 @@ test_gateway_install_writes_two_box_service_files() {
 # after a port change and must not end up with two brokers.
 test_gateway_install_is_idempotent() {
   _gw_setup
-  export CEL_SERVICES_D="$T/services.d"
   cmd_gateway install --no-start >/dev/null
   local out; out="$(cmd_gateway install --no-start)"
   assert_eq "$(ls "$T/services.d" | wc -l)" 2
@@ -310,7 +313,6 @@ test_gateway_install_is_idempotent() {
 # nobody to notice.
 test_gateway_status_says_whether_the_box_watches_it() {
   _gw_setup
-  export CEL_SERVICES_D="$T/services.d"
   cel_config_set gateway gateway_port 47411
   assert_contains "$(cmd_gateway status)" "(unsupervised)"
   cmd_gateway install --no-start >/dev/null
@@ -322,7 +324,6 @@ test_gateway_status_says_whether_the_box_watches_it() {
 # still never reaches stdout.
 test_gateway_install_prints_no_token() {
   _gw_setup
-  export CEL_SERVICES_D="$T/services.d"
   local out; out="$(cmd_gateway install --no-start; cmd_gateway status)"
   ! printf '%s' "$out" | grep -q "$GW_FIXTURE_TOKEN" \
     || { echo "the gateway token reached stdout through the services.d path"; _gw_teardown; return 1; }

@@ -29,6 +29,8 @@ _CEL_GATEWAY=1
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=lib/config.sh
 . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+# shellcheck source=lib/services.sh
+. "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # svc_box_write, svc_start
 
 _GATEWAY_DEFAULT_BROKER_PORT=47311
 _GATEWAY_DEFAULT_GATEWAY_PORT=47411
@@ -173,68 +175,70 @@ gateway_status_json() {
 
 # --- the services ---------------------------------------------------------
 
-# The two box services, as data. CEL-26 owns the registry that keeps them up;
-# until a box has it these are still the authoritative definition of what must
-# run, and `cel gateway install` starts them once so the feature works today.
+# The two box services, as data. They belong to the BOX and not to any
+# workspace - every workspace's workers go through this one door - so CEL-34
+# gives them a home in `services.d`, where `cel services` and the steward
+# sweep already look.
 #
 # The gateway process is useless without the broker's URL and bearer, so both
 # ride in its environment - the bearer by a command that READS it, never by
-# value: a service definition is a file on disk and a token in it is a token
-# on disk.
+# value: a service definition is a file on disk, and a token in it is a token
+# on disk waiting to be backed up somewhere it should not be.
 gateway_service_specs() {
   jq -n --arg b "$(gateway_port broker)" --arg g "$(gateway_port gateway)" '[
     { name: "cel-auth-broker",
       cmd: ("omp auth-broker serve --bind 127.0.0.1:" + $b),
       health: ("http://127.0.0.1:" + $b + "/") ,
+      restart: "auto",
       env: {} },
     { name: "cel-auth-gateway",
       cmd: ("omp auth-gateway serve --bind 127.0.0.1:" + $g),
       health: ("http://127.0.0.1:" + $g + "/v1/models"),
       health_auth: "bearer $OMP_GATEWAY_TOKEN",
+      restart: "auto",
       env: { OMP_AUTH_BROKER_URL: ("http://127.0.0.1:" + $b),
              OMP_AUTH_BROKER_TOKEN: "$(omp auth-broker token)" } }
   ]'
 }
 
-_gateway_services_file() { printf '%s' "$(gateway_state_dir)/services.json"; }
-
-# Hand the two definitions to CEL-26's service registry when this box has one,
-# and leave them on disk for it when it does not. `service_register` is
-# CEL-26's frozen name; calling it only when it exists is what lets this
-# ticket land on a box that has not got that one yet.
+# Hand the two definitions to the box's service registry. Before CEL-34 this
+# wrote them to a private file under the gateway's state directory and printed
+# "NOT supervised", which was true and stayed true: the processes ran for a day
+# with nothing watching them. `services.d` is the seam - one 0600 file per
+# service in a 0700 directory, and the steward sweep finds them itself.
+#
+# A `port:` and a `url:` are both accepted there; these carry a full health URL
+# and the port is read out of it, so nothing here needs to agree twice about
+# which port the gateway is on.
 _gateway_register_services() {
-  local specs; specs="$(gateway_service_specs)"
-  mkdir -p "$(gateway_state_dir)"
-  printf '%s\n' "$specs" > "$(_gateway_services_file)"
-  if command -v service_register >/dev/null 2>&1; then
-    local name cmd
-    while IFS=$'\t' read -r name cmd; do
-      [ -n "$name" ] || continue
-      service_register "$name" "$cmd" || c_warn "gateway: could not register service $name"
-    done < <(printf '%s' "$specs" | jq -r '.[] | [.name, .cmd] | @tsv')
-    c_ok "both services registered - the steward keeps them up"
-    return 0
-  fi
-  c_warn "no service registry on this box yet - the two processes are started here and are NOT supervised"
+  local specs name spec
+  specs="$(gateway_service_specs)"
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    name="$(printf '%s' "$spec" | jq -r '.name')"
+    # The declared url is the health url without its path: the port is the
+    # handle every service row keys off.
+    spec="$(printf '%s' "$spec" | jq -c '. + {url: (.health | capture("^(?<base>[a-z]+://[^/]+)").base)}')"
+    svc_box_write "$name" "$spec"
+  done < <(printf '%s' "$specs" | jq -c '.[]')
+  c_ok "both services are in $(svc_box_dir) - supervised by the steward"
   return 0
 }
 
-# Start whatever is not already answering. Deliberately dumb: one nohup each,
-# a pid file, and a health read. Supervision belongs to the steward.
+# Start whatever is not already answering, through the SAME path everything
+# else on this box is started by: a pane the steward can read and restart,
+# rather than the nohup-and-a-pid-file this used to do behind the plane's back.
+# Idempotent by construction - a service already listening is left alone.
 _gateway_start() {
-  local b g dir; dir="$(gateway_state_dir)"; mkdir -p "$dir"
+  local b g
   b="$(gateway_port broker)"; g="$(gateway_port gateway)"
-  if ! curl -sf -m 3 -o /dev/null "http://127.0.0.1:$b/" 2>/dev/null \
-     && ! curl -s -m 3 -o /dev/null "http://127.0.0.1:$b/" 2>/dev/null; then
-    nohup omp auth-broker serve --bind "127.0.0.1:$b" >"$dir/broker.log" 2>&1 &
-    printf '%s' "$!" > "$dir/broker.pid"
+  svc_listening "$b" || svc_start "" cel-auth-broker || true
+  if ! svc_listening "$g"; then
+    # The gateway mints OAuth against the broker at startup, so a gateway
+    # started in the same breath as its broker asks a door that is not open
+    # yet and exits. Two seconds is what the spike measured.
     sleep 2
-  fi
-  if ! gateway_ready; then
-    ( OMP_AUTH_BROKER_URL="$(gateway_broker_url)" OMP_AUTH_BROKER_TOKEN="$(_gateway_broker_token)" \
-      nohup omp auth-gateway serve --bind "127.0.0.1:$g" >"$dir/gateway.log" 2>&1 &
-      printf '%s' "$!" > "$dir/gateway.pid" )
-    sleep 2
+    svc_start "" cel-auth-gateway || true
   fi
 }
 
@@ -323,8 +327,8 @@ _gateway_usage() {
   cat <<'EOS'
 cel gateway - several subscriptions behind one loopback door
 
-  cel gateway install [--no-start]   write the ports, register broker+gateway
-                                     as services, mint the bearer
+  cel gateway install [--no-start]   write the ports, declare broker+gateway
+                                     as box services, mint the bearer
   cel gateway status [--json]        broker, gateway, and one row per account
   cel gateway login <provider>       sign another subscription in
   cel gateway logout <provider> <id> drop one
@@ -363,8 +367,15 @@ _gateway_install() {
 _gateway_status_text() {
   local js; js="$(gateway_status_json)"
   local ready; ready="$(printf '%s' "$js" | jq -r '.ready')"
+  # WHO IS WATCHING IT is the first thing to say. An unsupervised gateway is
+  # one lid-close away from being down with nobody on the box able to notice,
+  # and that is a different sentence from "not ready".
+  local watched="(unsupervised)"
+  svc_box_declared cel-auth-gateway && watched="(box service, steward-watched)"
   if [ "$(printf '%s' "$js" | jq -r '.installed')" != true ]; then
     c_warn "no gateway on this box - cel gateway install"
+  else
+    printf '  gateway on %s %s\n' "$(gateway_url)" "$watched"
   fi
   printf '  broker   %s  %s\n' "$(gateway_broker_url)" \
     "$([ "$(printf '%s' "$js" | jq -r '.broker_ok')" = true ] && echo ok || echo "NOT reachable")"
