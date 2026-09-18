@@ -84,6 +84,21 @@ cel-fanout delegate <repo> <branch> <spec> --profile astra
   commits not on origin — and names exactly what would be lost. Releasing is
   not landing. `--discard` is the only way past that refusal, and it is
   logged; nothing snapshots the work first, so say it only when you mean it.
+- `reconcile` closes the rows the world already closed. One `gh pr list` per
+  repo (never one call per row) over everything `finished`, `collected`, or
+  `running` with no pane left: a **merged** PR gets `land`'s bookkeeping
+  without the merge - ticket **Done**, row `landed`, worktree released with
+  `--discard`, because the branch is already in main; a PR **closed unmerged**
+  more than `CEL_RECONCILE_GRACE_HOURS` (default 24) ago becomes `abandoned`
+  with the branch named out loud and the ticket left to whoever closed it; a
+  scout or spike whose report has sat unread that long raises ONE rolled-up
+  item to the product's orchestrator and is never released, because the report
+  is the deliverable; a ship row with no PR and no worktree is simply
+  `released`. Everything else is untouched, and `--dry-run` prints the same
+  pass without doing any of it. The steward runs it once per tick per
+  workspace, so the ledger is not a list of work someone already merged
+  through GitHub by hand. `release --all --merged` is the same read on its own:
+  release exactly the rows GitHub has merged.
 
 Shapes: what a delegation is for
 

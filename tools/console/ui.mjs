@@ -979,12 +979,20 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         if (input === 'X') {
           const n = (st) => unitWorkers.filter((x) => x.state === st).length;
           const opts = [];
+          // FIRST, when there is anything it could touch: after a merge spree
+          // the operator's actual question is "clean up what is already in
+          // main", and by-state alone released branches that never landed.
+          // The console makes no network calls, so the count is the rows the
+          // command will READ - `release --all --merged` asks GitHub which of
+          // them merged, in one list per repo, and leaves the rest alone.
+          const candidates = n('finished') + n('collected');
+          if (candidates) opts.push({ cmd: `cel-fanout release --all --merged --workspace ${unit.ws}`, reason: `${candidates} finished/collected, merged only` });
           if (n('finished')) opts.push({ cmd: `cel-fanout release --all --state finished --workspace ${unit.ws}`, reason: `${n('finished')} finished` });
           if (n('collected')) opts.push({ cmd: `cel-fanout release --all --state collected --workspace ${unit.ws}`, reason: `${n('collected')} collected` });
-          if (opts.length === 2) opts.push({ cmd: `cel-fanout release --all --workspace ${unit.ws}`, reason: `${n('finished') + n('collected')} finished + collected` });
+          if (n('finished') && n('collected')) opts.push({ cmd: `cel-fanout release --all --workspace ${unit.ws}`, reason: `${n('finished') + n('collected')} finished + collected` });
           if (!opts.length) { say('nothing finished or collected to release here'); return; }
           setOptions(opts);
-          setOutput(['release which?', ...opts.map((o, i) => `${i + 1}  ${o.cmd.padEnd(60)} -- ${o.reason}`), '', 'type 1, 2 or 3 and Enter to put it on the command line'].join('\n'));
+          setOutput(['release which?', ...opts.map((o, i) => `${i + 1}  ${o.cmd.padEnd(60)} -- ${o.reason}`), '', 'type the number and Enter to put it on the command line'].join('\n'));
           setOutOffset(1); setOutView(true); setOutCollapsed(false);
           say('pick a clean-up - nothing runs yet');
           return;

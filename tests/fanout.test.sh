@@ -30,6 +30,7 @@ case "$1 $2" in
   "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
                      printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
+  "agent get")       if [ -n "${STUB_LIVE_ALIAS:-}" ] && [ "$3" = "$STUB_LIVE_ALIAS" ]; then exit 0; fi; exit 1;;
   "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
@@ -1821,4 +1822,173 @@ test_why_on_an_unknown_id_fails() {
   _fanout_why_setup
   assert_fails bash -c "cd '$T' && '$BIN' why WG-NOSUCH"
   rm -rf "$T"
+}
+
+# ---- reconcile: the ledger learns what the world already did ----------------
+# Measured on the box 2026-09-18: 37 rows sitting in finished/collected, 22 of
+# them PRs GitHub had merged up to a week earlier with no worktree left on
+# disk - merged through GitHub by hand, so `land` and `release` never ran and
+# the ledger never learned. A row the world has already resolved is noise on
+# the operator's list, and reconciling it by hand is a script somebody writes
+# twice. ONE `gh pr list` per repo: a workspace with forty rows must not make
+# forty requests.
+_reconcile_setup() {
+  _fanout_setup
+  export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  # NEVER THE LIVE BOARD: reconcile moves a merged row's ticket to Done, and
+  # the real cel-linear is on this box's PATH.
+  LINEAR_LOG="$T/linear.log"; : > "$LINEAR_LOG"
+  printf '#!/usr/bin/env bash\necho "$@" >> "%s"\n' "$LINEAR_LOG" > "$T/cel-linear-stub.sh"
+  chmod +x "$T/cel-linear-stub.sh"
+  export CEL_FANOUT_LINEAR="$T/cel-linear-stub.sh" LINEAR_LOG
+  GH_LOG="$T/gh.log"; : > "$GH_LOG"
+  local old new
+  old="$(date -u -d '25 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+  new="$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$T/bin"
+  cat > "$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+case "\$1 \$2" in
+  "pr list") printf '%s' '[{"number":1,"headRefName":"WG-1-merged-dirty","state":"MERGED","mergedAt":"2026-09-10T00:00:00Z","closedAt":"2026-09-10T00:00:00Z"},
+                           {"number":2,"headRefName":"WG-2-merged-gone","state":"MERGED","mergedAt":"2026-09-11T00:00:00Z","closedAt":"2026-09-11T00:00:00Z"},
+                           {"number":3,"headRefName":"WG-3-closed-old","state":"CLOSED","mergedAt":null,"closedAt":"$old"},
+                           {"number":4,"headRefName":"WG-4-closed-new","state":"CLOSED","mergedAt":null,"closedAt":"$new"}]';;
+  "pr view") printf '%s' '{"mergedAt":"2026-09-10T00:00:00Z","url":"https://example.invalid/pr/1"}';;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$T/bin/gh"
+  export CEL_FANOUT_GH="$T/bin/gh" GH_LOG
+  PATH="$T/bin:$PATH"; export PATH
+  # A worktree per row, because what release is allowed to do depends on it.
+  _reconcile_wt() { # <name> [dirty]
+    local wt="$T/$1"
+    mkdir -p "$wt"
+    git -C "$wt" init -q
+    git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+    git -C "$wt" update-ref refs/remotes/origin/main HEAD
+    git -C "$wt" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+    [ -z "${2:-}" ] || printf 'half a thought\n' > "$wt/scratch.txt"
+    printf '%s' "$wt"
+  }
+  local wt1 wt3 wt4 wtscout
+  wt1="$(_reconcile_wt wt-merged-dirty dirty)"
+  wt3="$(_reconcile_wt wt-closed-old)"
+  wt4="$(_reconcile_wt wt-closed-new)"
+  wtscout="$(_reconcile_wt wt-scout)"
+  mkdir -p "$wtscout/.agent"
+  printf 'the build is slow because of X\n' > "$wtscout/.agent/report.md"
+  touch -d '2 days ago' "$wtscout/.agent/report.md"
+  mkdir -p "$T/.cel"
+  jq -n --arg wt1 "$wt1" --arg wt3 "$wt3" --arg wt4 "$wt4" --arg wts "$wtscout" \
+     --arg gone2 "$T/gone-2" --arg gone6 "$T/gone-6" '
+    [ {id:"WG-1-merged-dirty", repo:"widget", branch:"WG-1-merged-dirty", ticket:"WG-1",
+       alias:"widget/WG-1", herdr_ws:"w1", worktree:$wt1, shape:"ship", state:"finished"},
+      {id:"WG-2-merged-gone", repo:"widget", branch:"WG-2-merged-gone", ticket:"",
+       alias:"widget/WG-2", herdr_ws:"w2", worktree:$gone2, shape:"ship", state:"collected"},
+      {id:"WG-3-closed-old", repo:"widget", branch:"WG-3-closed-old", ticket:"WG-3",
+       alias:"widget/WG-3", herdr_ws:"w3", worktree:$wt3, shape:"ship", state:"finished"},
+      {id:"WG-4-closed-new", repo:"widget", branch:"WG-4-closed-new", ticket:"WG-4",
+       alias:"widget/WG-4", herdr_ws:"w4", worktree:$wt4, shape:"ship", state:"finished"},
+      {id:"scout-why-slow", repo:"widget", branch:"scout-why-slow", ticket:"",
+       alias:"widget/scout", herdr_ws:"w5", worktree:$wts, shape:"scout", state:"finished"},
+      {id:"WG-6-no-pr", repo:"widget", branch:"WG-6-no-pr", ticket:"",
+       alias:"widget/WG-6", herdr_ws:"w6", worktree:$gone6, shape:"ship", state:"finished"},
+      {id:"WG-7-running", repo:"widget", branch:"WG-7-running", ticket:"",
+       alias:"widget/WG-7", herdr_ws:"w7", worktree:$wt4, shape:"ship", state:"running"} ]' \
+    > "$T/.cel/delegations.json"
+  export STUB_LIVE_ALIAS="widget/WG-7"
+}
+_reconcile_state() { jq -r --arg id "$1" '.[] | select(.id == $id) | .state' "$T/.cel/delegations.json"; }
+
+test_reconcile_lands_merged_rows_and_abandons_a_long_closed_one() {
+  _reconcile_setup
+  local out; out="$( (cd "$T" && "$BIN" reconcile) 2>&1 )"
+  # merged: the ticket is done, the row is landed, the worktree is let go -
+  # and a dirty one goes with --discard, because the branch is already merged.
+  assert_eq "$(_reconcile_state WG-1-merged-dirty)" released
+  assert_eq "$(_reconcile_state WG-2-merged-gone)" released
+  assert_contains "$out" "DISCARDED"
+  assert_contains "$out" "wt-merged-dirty"
+  # the ticket the merge settled, moved by the mechanism
+  assert_contains "$(cat "$LINEAR_LOG")" "state WG-1 Done"
+  # closed unmerged and cold: the loss is named, the ticket is left to whoever
+  # closed the PR - the board is theirs.
+  assert_eq "$(_reconcile_state WG-3-closed-old)" abandoned
+  assert_contains "$out" "WG-3-closed-old"
+  # closed an hour ago is somebody still deciding
+  assert_eq "$(_reconcile_state WG-4-closed-new)" finished
+  # a scout's report is the deliverable: named, never released
+  assert_eq "$(_reconcile_state scout-why-slow)" finished
+  assert_contains "$out" "report never collected: scout-why-slow"
+  # a ship row with no PR and no worktree holds nothing and lands nothing
+  assert_eq "$(_reconcile_state WG-6-no-pr)" released
+  # a running row with a live agent is somebody's concern
+  assert_eq "$(_reconcile_state WG-7-running)" running
+  assert_contains "$out" "reconcile: 2 landed, 1 abandoned, 1 reports waiting, 1 released"
+  rm -rf "$T"
+}
+
+# FORTY ROWS MUST NOT BE FORTY REQUESTS. One list per repo, matched by branch.
+test_reconcile_reads_github_once_per_repo() {
+  _reconcile_setup
+  (cd "$T" && "$BIN" reconcile) >/dev/null 2>&1
+  assert_eq "$(grep -c '^pr list' "$GH_LOG" || true)" "1"
+  rm -rf "$T"
+}
+
+# The unread report goes to the product's orchestrator through the same
+# rolled-up mechanism the steward raises with, so a report that waits a week
+# is one item rather than a hundred.
+test_reconcile_raises_an_unread_report_once() {
+  _reconcile_setup
+  (cd "$T" && "$BIN" reconcile) >/dev/null 2>&1
+  (cd "$T" && "$BIN" reconcile) >/dev/null 2>&1
+  local f="$T/inbox/alpha.jsonl"
+  assert_contains "$(cat "$f")" "report never collected: scout-why-slow"
+  assert_contains "$(cat "$f")" "widget-orch"
+  assert_eq "$(jq -r 'select(.kind == "status") | .fp' "$f" | sort -u)" "unread-report-scout-why-slow"
+  rm -rf "$T"
+}
+
+test_reconcile_dry_run_changes_nothing() {
+  _reconcile_setup
+  local before; before="$(cat "$T/.cel/delegations.json")"
+  local out; out="$( (cd "$T" && "$BIN" reconcile --dry-run) 2>&1 )"
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  assert_contains "$out" "would"
+  assert_contains "$out" "reconcile: 2 landed, 1 abandoned, 1 reports waiting, 1 released"
+  [ ! -d "$T/wt-merged-dirty" ] && { echo "dry run removed a worktree"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# `release --all --merged` is the same read, made on purpose: clean up exactly
+# what GitHub has already merged and leave everything else alone.
+test_release_all_merged_releases_only_the_merged_rows() {
+  _reconcile_setup
+  (cd "$T" && "$BIN" release --all --merged --discard) >/dev/null 2>&1
+  assert_eq "$(_reconcile_state WG-1-merged-dirty)" released
+  assert_eq "$(_reconcile_state WG-2-merged-gone)" released
+  assert_eq "$(_reconcile_state WG-3-closed-old)" finished
+  assert_eq "$(_reconcile_state WG-4-closed-new)" finished
+  assert_eq "$(_reconcile_state WG-7-running)" running
+  assert_eq "$(grep -c '^pr list' "$GH_LOG" || true)" "1"
+  rm -rf "$T"
+}
+
+# The console offers the same clean-up from the workers table. The option list
+# is asserted from ui.mjs's source rather than by importing it: the TUI is
+# ink, and console.mjs imports it lazily precisely so the suite never needs
+# node_modules to exist. (This lives here because CEL-24 owns the fanout and
+# steward test files only.)
+test_console_x_picker_offers_the_merged_cleanup_first() {
+  local src; src="$(cat "$CEL_ROOT/tools/console/ui.mjs")"
+  assert_contains "$src" "release --all --merged"
+  # first, before the by-status options - the numbering the operator types is
+  # the order of this array
+  local merged_at status_at
+  merged_at="$(grep -n 'release --all --merged' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
+  status_at="$(grep -n 'release --all --state finished' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
+  [ "$merged_at" -lt "$status_at" ] || { echo "the merged option is not first in the picker"; return 1; }
 }

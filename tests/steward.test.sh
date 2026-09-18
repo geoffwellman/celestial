@@ -663,3 +663,47 @@ test_steward_clears_a_subscription_blocker_when_the_window_drops() {
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
   rm -rf "$T"
 }
+
+# --- the steward closes what the world already closed ----------------------
+# Nothing ran `land` or `release` for the twenty-two PRs merged through GitHub
+# by hand, so the ledger kept them as somebody's concern. Reconciling is
+# deterministic, so the steward does it every tick - once per workspace, which
+# is one `gh pr list` per repo per tick and fine at a five-minute tick.
+_reconcile_tick_fixture() {
+  T="$(mktemp -d)"
+  export HOME="$T/home"; mkdir -p "$HOME"
+  export CEL_REGISTRY="$T/registry.yaml"
+  mkdir -p "$T/alpha" "$T/beta"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: []\n' > "$T/alpha/workspace.yaml"
+  printf 'name: beta\nrepos: []\n'  > "$T/beta/workspace.yaml"
+  : > "$T/reconciled"
+  mkdir -p "$T/bin"
+  cat > "$T/bin/cel-fanout-stub" <<SH
+#!/usr/bin/env bash
+echo "\$@" >> "$T/reconciled"
+echo "reconcile: 0 landed, 0 abandoned, 0 reports waiting, 0 released"
+SH
+  chmod +x "$T/bin/cel-fanout-stub"
+  export CEL_STEWARD_FANOUT="$T/bin/cel-fanout-stub"
+}
+
+test_steward_reconciles_every_workspace_once_per_tick() {
+  _reconcile_tick_fixture
+  local out; out="$(_steward_reconcile 2>&1)"
+  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "1"
+  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "1"
+  # the pass is in the tick log, or nobody can tell what it did
+  assert_contains "$out" "reconcile: 0 landed"
+  rm -rf "$T"
+}
+
+# A reconcile that cannot run is one sweep failing, not a tick dying: the
+# stalled-worker sweep below it is the one that costs work.
+test_steward_survives_a_reconcile_that_fails() {
+  _reconcile_tick_fixture
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/cel-fanout-stub"
+  local out; out="$(_steward_reconcile 2>&1)"
+  assert_contains "$out" "reconcile"
+  rm -rf "$T"
+}
