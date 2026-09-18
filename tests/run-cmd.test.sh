@@ -337,3 +337,33 @@ test_run_worker_via_gateway_dies_when_the_gateway_is_down() {
   ( cd "$T" && GW_STUB_DOWN=1 assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile gw --dry-run )
   _ws_gateway_clean
 }
+
+# THE LAUNCHER MARKS ITS CHILDREN. A runtime that rewrites its own argv (pi
+# sets process.title) leaves `cel gc` nothing to recognise in /proc/<pid>/cmdline,
+# so ownership travels in the environment instead, where exec fixes it for the
+# life of the process. `herdr agent start` has no --env option, so the three
+# variables are typed as an `env K=V ...` PREFIX to the launch line - set for
+# that command only, never exported into the pane's shell for good.
+test_run_worker_launch_carries_role_rolefile_and_workspace() {
+  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" "CEL_ROLE=worker"
+  assert_contains "$out" "CEL_ROLE_FILE=$T/.cel/role-worker.md"
+  assert_contains "$out" "CEL_WORKSPACE=$T"
+  rm -rf "$T"
+}
+test_run_root_and_orchestrator_are_marked_too() {
+  _ws
+  local out; out="$(cd "$T" && cmd_run root --dry-run)"
+  assert_contains "$out" "CEL_ROLE=root"
+  assert_contains "$out" "CEL_ROLE_FILE=$T/.cel/role-root.md"
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "CEL_ROLE=orchestrator"
+  rm -rf "$T"
+}
+# The values are a role name and two paths - nothing here is a secret, and the
+# preview is worthless if it hides what the pane will actually carry.
+test_run_dry_run_shows_the_prefix_ahead_of_the_agent_command() {
+  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
+  assert_contains "$out" "env CEL_ROLE=worker"
+  rm -rf "$T"
+}

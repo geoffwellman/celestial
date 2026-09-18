@@ -170,7 +170,10 @@ _gc_idle_fixture() {
   printf 'read -r line\n' > "$T/agent.sh"
   HERDR_PANE_ID=w1:p1 bash "$T/agent.sh" --role-file "$GC_WS/.cel/role-worker.md" < "$T/input" &
   GC_PID=$!
-  trap 'builtin kill "$GC_PID" 2>/dev/null || true; wait "$GC_PID" 2>/dev/null || true; rm -rf "$T"' EXIT
+  # -9, and no bare `wait`: a fixture that ignores TERM (the pi case this
+  # ticket is about) would otherwise hang the whole suite - it hung it for
+  # three hours once.
+  trap 'builtin kill -9 "$GC_PID" 2>/dev/null || true; rm -rf "$T"' EXIT
   GC_AGENTS="$(jq -n --arg d "$PWD" '{result:{agents:[{pane_id:"w1:p1",name:"widget-task",agent:"bash",cwd:$d,agent_status:"idle",terminal_id:"term-1",state_change_seq:4,agent_session:{value:"session-1"}}]}}')"
   pgrep() { printf '%s\n' "$GC_PID"; }
   kill() { printf '%s\n' "$*" >> "$GC_SINK"; }
@@ -299,4 +302,161 @@ test_gc_running_delegation_veto_follows_symlinked_parent_of_process_cwd() {
   _gc_reap 1 0 "$GC_AGENTS" demo
   assert_eq "$(cat "$GC_SINK")" ""
   assert_eq "$(jq '.idle | length' "$HOME/.local/state/cel/gc-idle.json")" 0
+}
+
+# --- the launch environment, not argv -------------------------------------
+# pi rewrites its own argv (process.title): /proc/<pid>/cmdline of a live pi
+# worker is `pi` and padding, so the role path the old identity gate looked
+# for is never there and every pi worker on the box read as unidentified -
+# 0 reaped, 0 removed, for weeks. The launcher's own variables survive that
+# rewrite because /proc/<pid>/environ is fixed at exec.
+_gc_env_fixture() {
+  _gc_managed_fixture
+  GC_UPTIME=10000
+  read() {
+    if [[ "$(readlink /proc/self/fd/0)" == /proc/uptime ]]; then
+      builtin read "$@" <<< "$GC_UPTIME 0"
+    else
+      builtin read "$@"
+    fi
+  }
+  CEL_MANIFEST="$T/agents.yaml"
+  { printf 'agents:\n'
+    printf '  bash:\n    role_injection: {strategy: append_flag_file, flag: --role-file}\n'
+    printf '  pi:\n    role_injection: {strategy: append_flag_file, flag: --append-system-prompt}\n    signal: int\n'
+  } > "$CEL_MANIFEST"
+  printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
+  # A real process whose comm is `pi` and whose argv holds no role path: a
+  # copy of bash under that name reproduces the rewrite without pi installed.
+  mkdir -p "$T/bin"
+  cp "$(command -v bash)" "$T/bin/pi"
+  mkfifo "$T/input"
+  exec {GC_INPUT}<>"$T/input"
+  printf 'read -r line\n' > "$T/agent.sh"
+  GC_AGENTS="$(jq -n --arg d "$PWD" '{result:{agents:[{pane_id:"w1:p1",name:"widget-task",agent:"pi",cwd:$d,agent_status:"idle",terminal_id:"term-1",state_change_seq:4,agent_session:{value:"session-1"}}]}}')"
+  pgrep() { printf '%s\n' "$GC_PID"; }
+  reaped=0
+}
+
+_gc_spawn_pi() { # <marked 0|1>
+  # --default-signal=INT: the runner starts each test asynchronously, so this
+  # shell has SIGINT IGNORED and every child would inherit that. The fixture
+  # would then survive the INT the reap depends on for a reason that has
+  # nothing to do with the code under test.
+  if [ "$1" -eq 1 ]; then
+    env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
+        CEL_ROLE_FILE="$GC_WS/.cel/role-worker.md" CEL_WORKSPACE="$GC_WS" \
+        "$T/bin/pi" "$T/agent.sh" < "$T/input" &
+  else
+    env --default-signal=INT HERDR_PANE_ID=w1:p1 "$T/bin/pi" "$T/agent.sh" < "$T/input" &
+  fi
+  GC_PID=$!
+  trap 'builtin kill -9 "$GC_PID" 2>/dev/null || true; rm -rf "$T"' EXIT
+  local i
+  for ((i=0;i<200;i++)); do
+    [ "$(cat "/proc/$GC_PID/comm" 2>/dev/null)" = pi ] && return 0
+    sleep 0.01
+  done
+  echo "test process did not start"; return 1
+}
+
+test_gc_identity_accepts_the_launch_environment_when_argv_is_rewritten() {
+  _gc_env_fixture
+  _gc_spawn_pi 1 || return 1
+  local identity; identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" \
+    || { echo "an environment-marked pi worker was not identified"; return 1; }
+  assert_contains "$identity" "$GC_WS/.cel/role-worker.md"
+}
+
+test_gc_identity_rejects_a_runtime_carrying_neither_marker() {
+  _gc_env_fixture
+  _gc_spawn_pi 0 || return 1
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
+}
+
+# Older omp and claude panes were launched before the variables existed and
+# must keep working until they restart, so the argv scan stays as a fallback.
+test_gc_identity_still_accepts_the_legacy_argv_stamp() {
+  _gc_idle_fixture
+  local i identity=""
+  for ((i=0;i<200;i++)); do
+    identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" && break
+    sleep 0.01
+  done
+  assert_contains "$identity" "$GC_WS/.cel/role-worker.md"
+}
+
+# A live agent whose herdr session id is null (observed on two omp panes)
+# could never pass the gate. The environment proof stands in for it; nothing
+# stands in for it when there is no proof.
+test_gc_null_agent_session_passes_only_with_the_launch_environment() {
+  _gc_env_fixture
+  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq '.result.agents[0].agent_session.value = null')"
+  _gc_spawn_pi 1 || return 1
+  _gc_process_identity "$GC_PID" "$GC_AGENTS" demo >/dev/null \
+    || { echo "a null session refused an environment-marked worker"; return 1; }
+  builtin kill -9 "$GC_PID" 2>/dev/null || true
+  _gc_spawn_pi 0 || return 1
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
+}
+
+# pi ignores SIGTERM, so an identified idle pi would have been "reaped" and
+# still be running. INT first, then TERM after the grace, and never -9: a
+# worker holding a half-written commit is worth more than a tidy process list.
+test_gc_reaps_a_pi_that_ignores_term_but_exits_on_int() {
+  _gc_env_fixture
+  CEL_GC_GRACE=1
+  printf 'trap "" TERM\nread -r line\n' > "$T/agent.sh"
+  _gc_spawn_pi 1 || return 1
+  local i
+  for ((i=0;i<200;i++)); do _gc_process_identity "$GC_PID" "$GC_AGENTS" demo >/dev/null && break; sleep 0.01; done
+  _gc_reap 1 0 "$GC_AGENTS" demo
+  _gc_age_observation
+  # NOT in a command substitution: _gc_reap's counters are what is asserted,
+  # and a subshell would throw them away.
+  _gc_reap 1 0 "$GC_AGENTS" demo > "$T/reap.out"
+  assert_contains "$(cat "$T/reap.out")" "reaped idle plane pid $GC_PID"
+  assert_eq "$reaped" 1
+}
+
+test_gc_reports_a_stubborn_worker_rather_than_killing_it() {
+  _gc_env_fixture
+  CEL_GC_GRACE=1
+  printf 'trap "" TERM INT\nwhile :; do read -r line; done\n' > "$T/agent.sh"
+  _gc_spawn_pi 1 || return 1
+  local i
+  for ((i=0;i<200;i++)); do _gc_process_identity "$GC_PID" "$GC_AGENTS" demo >/dev/null && break; sleep 0.01; done
+  _gc_reap 1 0 "$GC_AGENTS" demo
+  _gc_age_observation
+  _gc_reap 1 0 "$GC_AGENTS" demo > "$T/reap.out" 2>&1
+  assert_contains "$(cat "$T/reap.out")" "did not exit"
+  assert_eq "$reaped" 0
+  assert_eq "${GC_KEPT[stubborn]:-0}" 1
+  [ -d "/proc/$GC_PID" ] || { echo "GC killed a worker it could not stop politely"; return 1; }
+}
+
+# One number for every kept row made a completely blind GC print the same
+# line as an idle one, which is why the argv breakage ran for weeks.
+test_gc_kept_line_renders_reasons_in_order_and_omits_zeros() {
+  _gc_keep_reset
+  GC_KEPT=([live]=12 [unlanded]=9 [unidentified]=12)
+  assert_eq "$(_gc_kept_line summary)" " (12 live, 9 unlanded, 12 unidentified)"
+  _gc_keep_reset
+  assert_eq "$(_gc_kept_line summary)" ""
+  _gc_keep_reset
+  GC_KEPT=([unidentified]=3)
+  assert_eq "$(_gc_kept_line doctor)" "gc: 3 worktrees unidentified - cel gc --dry-run to see them"
+  _gc_keep_reset
+  assert_eq "$(_gc_kept_line doctor)" ""
+}
+
+test_gc_names_the_directories_it_could_not_identify() {
+  _gc_managed_fixture
+  GC_AGENTS="$(jq -n --arg d "$GC_WT" '{result:{agents:[{pane_id:"w1:p1",cwd:$d,agent_status:"idle"}]}}')"
+  GC_PID=0
+  local out; out="$(cmd_gc)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 unidentified"
+  assert_contains "$out" "$GC_WT"
+  rm -rf "$T"
 }
