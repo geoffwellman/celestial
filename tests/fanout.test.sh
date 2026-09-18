@@ -1991,6 +1991,8 @@ test_console_x_picker_offers_the_merged_cleanup_first() {
   merged_at="$(grep -n 'release --all --merged' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
   status_at="$(grep -n 'release --all --state finished' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
   [ "$merged_at" -lt "$status_at" ] || { echo "the merged option is not first in the picker"; return 1; }
+}
+
 # --- a worker does not run the factory --------------------------------------
 # The guard is a hook, and a hook can be missing (a pi launched by hand, a
 # future runtime). The binary refuses on its own, before any `gh` call and
