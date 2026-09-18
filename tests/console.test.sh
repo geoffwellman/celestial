@@ -946,3 +946,44 @@ test_console_router_message_text_cannot_run_a_command() {
   assert_contains "$cmd" 'touch'
   _console_teardown
 }
+
+# --- CEL-27: the subscriptions on the status edge and in their own view ------
+# Stubbed fleet JSON, because the console must never make the network call
+# itself: the edge and the QUOTA view render from whatever `cel fleet --json`
+# already carries, which is the 60 s cache.
+_console_subs_setup() {
+  _console_setup
+  cat >"$T/fleet.json" <<'EOF'
+{"workspaces":[
+ {"name":"alpha","root":{"unread":0,"open":0},"units":[
+   {"name":"widget","orch":"LIVE","workers":1,"cap":4,"stalled":0,"unlanded":0}]}],
+ "subscriptions":[
+  {"provider":"claude","account":"a1b2c3",
+   "windows":[{"name":"5h","used_pct":16,"resets_at":"2026-09-18T09:00:00Z"},
+              {"name":"7d","used_pct":41,"resets_at":"2026-09-19T19:00:00Z"}],
+   "extra":{"state":"disabled","reason":"out_of_credits"}},
+  {"provider":"codex","account":"acct-alpha-1",
+   "windows":[{"name":"5h","used_pct":9,"resets_at":"2026-09-18T07:30:00Z"},
+              {"name":"7d","used_pct":62,"resets_at":"2026-09-21T02:00:00Z"}],
+   "extra":{"state":"enabled","reason":""}}]}
+EOF
+}
+
+test_console_status_edge_shows_the_tightest_window_per_provider() {
+  _console_subs_setup
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" 'claude 16%/41%'
+  assert_contains "$out" 'codex 9%/62%'
+  _console_teardown
+}
+
+test_console_quota_view_renders_one_row_per_account_and_window() {
+  _console_subs_setup
+  local out; out="$(node "$CONSOLE_MJS" --render-quota)"
+  assert_contains "$out" 'SUBSCRIPTIONS'
+  assert_contains "$out" 'a1b2c3'
+  assert_contains "$out" '5h'
+  assert_contains "$out" '16%'
+  assert_contains "$out" 'out of credits'
+  _console_teardown
+}

@@ -78,9 +78,12 @@ cel - the celestial plane
                                 launch on a different CLI, model or effort
   cel profiles [name]           worker profiles this workspace declares, and
                                 the exact launch flags each one resolves to
-  cel quota [provider]          credit left per provider, asked of the provider;
-                                a route below its floor is vetoed before a
-                                pane spawns (unknown never vetoes)
+  cel quota [provider] [--json] the signed-in Claude and Codex subscriptions -
+                                each window, its percentage and when it resets -
+                                above the API balance per provider, asked of
+                                the provider; a route below its floor or on a
+                                spent 5h window is vetoed before a pane spawns
+                                (unknown never vetoes)
   cel publish <file> [name]     host an HTML doc on this box; prints its URL
                                 --public: internet-reachable tier, own root
   cel pages [--public]          serve published docs (tailnet 7780; public 7781)

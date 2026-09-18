@@ -603,3 +603,63 @@ test_steward_says_nothing_about_a_box_it_cannot_measure() {
   assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
   rm -rf "$T"
 }
+
+# --- CEL-27: the subscriptions the fleet actually runs on ---------------------
+# A Claude or Codex window at 100% stops every worker on that account, and
+# until this sweep existed nothing on the plane said so: `cel quota` knew API
+# balances and the subscription windows were invisible. The sweep speaks ONCE
+# per account per tick, rolled up like every other steward condition.
+_sub_fixture() { # <five-hour-pct>
+  source "$CEL_ROOT/lib/quota.sh"
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  SUB_PCT="$1"
+  _subscription_accounts() { printf 'claude\ta1b2c3\tfixture-token\n'; }
+  subscription_usage() {
+    jq -nc --argjson p "$SUB_PCT" \
+      '{provider: "claude", account: "a1b2c3",
+        windows: [{name: "5h", used_pct: $p, resets_at: "2026-09-18T09:00:00Z"}],
+        extra: {state: "enabled", reason: ""}}'
+  }
+}
+
+test_steward_warns_once_about_a_subscription_window_over_the_threshold() {
+  _sub_fixture 85
+  # Three ticks, the real dedup window: the steward says it ONCE. A window
+  # that sits at 85% for a morning is one fact, not one fact every five
+  # minutes, and the mailbox is what an operator actually reads.
+  local i
+  for i in 1 2 3; do _steward_subscriptions >/dev/null 2>&1; done
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'subscription a1b2c3')" "1"
+  assert_contains "$mail" "claude"
+  assert_contains "$mail" "85%"
+  rm -rf "$T"
+}
+
+test_steward_blocks_on_a_subscription_window_at_a_hundred() {
+  _sub_fixture 100
+  _steward_subscriptions >/dev/null 2>&1
+  # A spent window is a BLOCKER, not a note: it is the reason the next
+  # delegation refuses, and it stays open until someone or something clears it.
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_contains "$open" "blocked"
+  assert_contains "$open" "claude"
+  assert_contains "$open" "resets"
+  rm -rf "$T"
+}
+
+test_steward_clears_a_subscription_blocker_when_the_window_drops() {
+  _sub_fixture 100
+  _steward_subscriptions >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "claude"
+  SUB_PCT=40
+  _steward_subscriptions >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
+  rm -rf "$T"
+}

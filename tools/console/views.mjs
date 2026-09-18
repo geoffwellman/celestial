@@ -314,3 +314,102 @@ export const renderOutput = (cmd, text) => {
   }
   return keyValue(parsed.value).join('\n');
 };
+
+// --- CEL-27: the two subscriptions the fleet actually runs on ---------------
+//
+// The box does not run on API keys alone: it runs on a Claude subscription and
+// a Codex one, and until this existed neither was visible anywhere on the
+// plane. A five-hour window at 100% stops every worker on that account, and
+// the operator found out by watching a delegation refuse.
+//
+// All of this is pure over `cel fleet --json`, which carries the 60 s cache.
+// The console NEVER asks a provider itself: a status edge that makes a network
+// call is a status edge that stalls a draw.
+
+// The tightest window per provider, as the status edge says it:
+// `claude 16%/41% · codex 9%/62%`. Two figures because they answer two
+// different questions - "can I delegate now" and "can I delegate this week".
+export const subsEdge = (doc) => {
+  const subs = (doc && doc.subscriptions) || [];
+  if (!subs.length) return '';
+  const byProvider = new Map();
+  for (const s of subs) {
+    const p = String(s?.provider || '');
+    if (!p) continue;
+    const pick = (name) => {
+      const hits = (s.windows || []).filter((w) => w?.name === name && w.used_pct !== null && w.used_pct !== undefined);
+      // WORST ACCOUNT WINS. Two Claude logins are two accounts, and the one
+      // that is nearly spent is the one that decides what happens next.
+      return hits.length ? Math.max(...hits.map((w) => Number(w.used_pct) || 0)) : null;
+    };
+    const short = pick('5h');
+    const long = pick('7d');
+    if (short === null && long === null) continue;
+    const prev = byProvider.get(p) || { short: null, long: null };
+    byProvider.set(p, {
+      short: short === null ? prev.short : Math.max(prev.short ?? 0, short),
+      long: long === null ? prev.long : Math.max(prev.long ?? 0, long),
+    });
+  }
+  const parts = [];
+  for (const [p, v] of byProvider) {
+    const n = (x) => (x === null || x === undefined ? '-' : `${Math.round(x)}%`);
+    parts.push(`${p} ${n(v.short)}/${n(v.long)}`);
+  }
+  return parts.join(' · ');
+};
+
+// How alarmed to be about the edge. Amber at 80 because that is where the
+// steward starts saying so; red at 100 because at 100 the work has stopped.
+export const subsLevel = (doc) => {
+  const subs = (doc && doc.subscriptions) || [];
+  let worst = 0;
+  for (const s of subs) for (const w of s?.windows || []) worst = Math.max(worst, Number(w?.used_pct) || 0);
+  if (worst >= 100) return 'bad';
+  if (worst >= 80) return 'warn';
+  return 'ok';
+};
+
+// A reset an operator can act on: a clock time today, a day and a time beyond
+// that. Local, always - nobody converts UTC in their head at the moment they
+// need to, and this number exists to answer "when can I start again".
+export const resetHuman = (iso) => {
+  if (!iso) return '';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return String(iso);
+  const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  if (at.getTime() - Date.now() < 86400e3) return hhmm;
+  return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][at.getDay()]} ${hhmm}`;
+};
+
+// The QUOTA view: one row per account and window, the API balances beneath.
+// NEVER raw JSON, and never a token - the fleet document does not carry one,
+// and this is the screen where somebody would paste a screenshot.
+export const quotaView = (doc) => {
+  const out = ['SUBSCRIPTIONS'];
+  const subs = (doc && doc.subscriptions) || [];
+  if (!subs.length) {
+    out.push('  no signed-in subscriptions - cel quota asks the providers directly');
+  }
+  for (const s of subs) {
+    const windows = (s.windows || []).filter((w) => w && w.used_pct !== null && w.used_pct !== undefined);
+    if (!windows.length) {
+      out.push(`  ${String(s.provider || '').padEnd(8)} ${String(s.account || '').padEnd(14)} unreadable - not signed in here, or the endpoint is down`);
+      continue;
+    }
+    for (let i = 0; i < windows.length; i += 1) {
+      const w = windows[i];
+      // The account is named once per account, not once per row: a column
+      // that repeats the same string is a column the eye stops reading.
+      const head = i === 0
+        ? `${String(s.provider || '').padEnd(8)} ${String(s.account || '').padEnd(14)}`
+        : ' '.repeat(23);
+      const reset = resetHuman(w.resets_at);
+      out.push(`  ${head} ${String(w.name).padEnd(3)} ${`${Math.round(Number(w.used_pct) || 0)}%`.padStart(4)}${reset ? `   resets ${reset}` : ''}`);
+    }
+    if (s.extra && s.extra.state === 'disabled') {
+      out.push(`  ${' '.repeat(23)} extra: ${String(s.extra.reason || 'disabled').replace(/_/g, ' ')}`);
+    }
+  }
+  return out;
+};

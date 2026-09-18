@@ -34,6 +34,7 @@ export const INTENTS = [
   ['resolve', 'close one waiting decision or message'],
   ['clean_inbox', 'clear out the mailbox - sweep what has piled up in a workspace'],
   ['try', 'run or preview one worker\u2019s work so it can be looked at'],
+  ['quota', 'how much of the Claude or Codex subscription is left, and when a window resets'],
   ['other', 'none of the above, or the sentence is not about the fleet at all'],
 ];
 
@@ -232,6 +233,13 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
         `cel inbox resolve --all --from steward --workspace ${ws}`,
       ];
     }
+
+    case 'quota':
+      // NO SLOTS AT ALL. "how much Claude do I have left" and "when does codex
+      // reset" are one question about the box's two subscriptions, and there
+      // is no workspace or product that could narrow it - the accounts are the
+      // box's, not a workspace's.
+      return ['cel quota'];
 
     case 'try': {
       const w = workerIn(s, f);

@@ -523,6 +523,28 @@ Three things make this more than a flag:
 Keys live in the workspace's gitignored `env.local`; nothing but the model id
 ever reaches this repo.
 
+### Subscriptions
+
+The fleet does not run on API keys alone. It runs on two **signed-in
+subscriptions** — Claude (through pi's OAuth and through Claude Code) and
+Codex (ChatGPT, through omp) — and a five-hour window at 100% stops every
+worker on that account just as hard as an empty balance does, without an error
+message anywhere anyone looks.
+
+`cel quota` asks both accounts directly and prints them above the API
+balances: one row per signed-in account, each window with its percentage and
+the local time it resets, and whether extra usage is still a path. A token is
+never printed anywhere — an account is named by its provider and a short
+stable id. The readings are cached for 60 seconds, so the console's status
+edge (`claude 16%/41% · codex 9%/62%`, amber at 80, red at 100), the `q` QUOTA
+view, `cel fleet --json` and the dashboard's Subscriptions card all read the
+cache rather than calling a provider on every draw.
+
+The steward checks the windows once a tick and raises **one rolled-up item per
+account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and
+takes it down again when the window drops. A profile routed at a spent 5h
+window is vetoed before its pane spawns, the same way a dry balance is.
+
 ## Tickets
 
 Set `tickets: { system: linear }` and the plane wires Linear's **official MCP
@@ -544,7 +566,7 @@ policy block into every agent.
 | `cel run orchestrator --product <p>` | start the orchestrator for a product (1..n repos) |
 | `cel profiles` | worker profiles and the exact launch flags each resolves to |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
-| `cel quota [provider]` | credit left per provider, asked of the provider; a route below its floor is vetoed before a pane spawns |
+| `cel quota [provider] [--json]` | the signed-in Claude and Codex subscriptions — every window, its percentage and when it resets — above the credit left per API provider; a route below its floor, or on a spent 5h window, is vetoed before a pane spawns |
 | `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |
 | `cel inbox open · resolve` | decisions stay open until resolved; reading one does not answer it |
 | `cel-fanout scout <repo> <brief>` | an investigation: disposable worktree, a report as the deliverable, no ticket, no PR |

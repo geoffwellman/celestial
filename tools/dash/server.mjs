@@ -311,8 +311,27 @@ const paneNames = async () => {
   return m;
 };
 
+// THE SUBSCRIPTIONS, from the same 60 s cache `cel fleet` reads.
+//
+// The dashboard polls; a live call to Anthropic and ChatGPT on every poll
+// would spend two round trips a few seconds apart for a number that changes
+// slowly, and would make a provider's bad afternoon look like a broken
+// dashboard. No cache, no card - never an error, and never an invented zero.
+const subscriptions = async () => {
+  const dir = process.env.CEL_CACHE || join(homedir(), '.cache', 'cel');
+  try {
+    if (!existsSync(dir)) return [];
+    const out = [];
+    for (const f of readdirSync(dir)) {
+      if (!/^subscription-.*\.json$/.test(f)) continue;
+      try { out.push(JSON.parse(readFileSync(join(dir, f), 'utf8'))); } catch { /* a half-written cache file */ }
+    }
+    return out.filter((s2) => s2 && s2.provider);
+  } catch { return []; }
+};
+
 const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions()]);
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -358,6 +377,7 @@ const state = async () => {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
     agents: ags, services: cfg.services || [], backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
+    subscriptions: subs,
   };
 };
 
@@ -706,6 +726,7 @@ const PAGE = `<!doctype html><meta charset="utf-8">
       <button onclick="send()">Send</button><span id="promptmsg"></span></div></section>
     <section><h2>Services &amp; backlog</h2><div class="card"><div id="services"></div>
       <div id="backlog" style="margin-top:14px"></div></div></section>
+    <section><h2>Subscriptions</h2><div class="card"><div id="subs"></div></div></section>
   </div>
 </div>
 <div id="ctx"></div>
@@ -1228,6 +1249,47 @@ async function refresh(){
     chip(i.status||'todo',i.status==='in-progress'?'w':i.status==='done'?'ok':'')+'</td><td>'+esc(i.title)+
     (i.repo?' <span class="empty">'+esc(i.repo)+'</span>':'')+'</td></tr>').join('')+'</tbody></table>'
     :'<span class="empty">no backlog.yaml (items: [{title, repo, status}])</span>';
+  renderSubs(s);
+}
+
+// THE TWO SUBSCRIPTIONS THE FLEET RUNS ON. Amber at 80, red at 100 - the same
+// thresholds the steward and the console use, because three surfaces
+// disagreeing about when to worry is three surfaces nobody trusts. A window
+// with no percentage is absent, never a zero: "0% used" is a claim, and the
+// only honest answer to an unreadable endpoint is that it was unreadable.
+function subReset(iso){
+  if(!iso) return '';
+  var at=new Date(iso); if(isNaN(at.getTime())) return String(iso);
+  var hhmm=String(at.getHours()).padStart(2,'0')+':'+String(at.getMinutes()).padStart(2,'0');
+  if(at.getTime()-Date.now()<86400000) return hhmm;
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][at.getDay()]+' '+hhmm;
+}
+function renderSubs(s){
+  var el=$('subs'); if(!el) return;
+  var subs=s.subscriptions||[];
+  if(!subs.length){el.innerHTML='<span class="empty">no subscription readings cached yet - cel quota asks the providers</span>';return}
+  var html='<table><tbody>';
+  for(var i=0;i<subs.length;i++){
+    var acc=subs[i];
+    var ws=(acc.windows||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
+    if(!ws.length){
+      html+='<tr class="agrow"><td>'+esc(acc.provider)+'</td><td class="empty">'+esc(acc.account||'')+
+        '</td><td colspan="2" class="empty">unreadable</td></tr>';
+      continue;
+    }
+    for(var j=0;j<ws.length;j++){
+      var w=ws[j], pct=Math.round(Number(w.used_pct)||0);
+      var cls=pct>=100?'b':pct>=80?'w':'';
+      html+='<tr class="agrow"><td>'+(j===0?esc(acc.provider):'')+'</td><td class="empty">'+
+        (j===0?esc(acc.account||''):'')+'</td><td>'+chip(w.name+' '+pct+'%',cls)+'</td><td class="empty">'+
+        (subReset(w.resets_at)?'resets '+esc(subReset(w.resets_at)):'')+'</td></tr>';
+    }
+    if(acc.extra&&acc.extra.state==='disabled'){
+      html+='<tr class="agrow"><td></td><td></td><td colspan="2" class="empty">extra: '+
+        esc(String(acc.extra.reason||'disabled').replace(/_/g,' '))+'</td></tr>';
+    }
+  }
+  el.innerHTML=html+'</tbody></table>';
 }
 async function send(){
   const r=await post('/api/prompt',{target:$('target').value,message:$('msg').value});

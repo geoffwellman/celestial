@@ -386,3 +386,29 @@ test_fleet_rejects_unknown_arguments() {
   assert_fails bash -c "source '$CEL_ROOT/lib/fleet.sh'; cmd_fleet --nonsense"
   _fleet_teardown
 }
+
+# --- CEL-27: subscriptions, from the cache and never from the network --------
+# The fleet read is on the console's refresh loop. A live call to Anthropic or
+# ChatGPT on that path would put two network round trips between an operator
+# and every draw, so the field is whatever the 60 s cache already holds.
+test_fleet_json_carries_subscriptions_from_the_cache() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache"
+  mkdir -p "$CEL_CACHE"
+  jq -nc '{provider: "claude", account: "a1b2c3",
+           windows: [{name: "5h", used_pct: 16, resets_at: "2026-09-18T09:00:00Z"}],
+           extra: {state: "enabled", reason: ""}}' \
+    > "$CEL_CACHE/subscription-claude-a1b2c3.json"
+  local doc; doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions[0].provider')" claude
+  assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions[0].windows[0].used_pct')" 16
+  _fleet_teardown
+}
+
+test_fleet_json_carries_an_empty_subscription_list_when_nothing_is_cached() {
+  _fleet_setup
+  export CEL_CACHE="$T/empty-cache"
+  local doc; doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions | length')" 0
+  _fleet_teardown
+}
