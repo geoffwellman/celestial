@@ -13,10 +13,10 @@ import { homedir } from 'node:os';
 import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
-  memFree, sortWorkers,
+  memFree, sortWorkers, subsEdge, quotaView,
 } from './views.mjs';
 
-export { memHuman, memFree, memLevel, sortWorkers } from './views.mjs';
+export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
 export { unitLabel, openLine, tailLine } from './views.mjs';
 export { renderOutput } from './views.mjs';
@@ -220,11 +220,14 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // THE STATUS LINE'S RIGHT EDGE IS WHERE THE BOX ITSELF SPEAKS. It is the one
 // row that belongs to no panel, and the headroom is the fact that changes what
 // an operator may do next - there is no point opening a unit view to decide
-// whether to delegate when the box has 800 MB left.
-const statusRow = (status, box) => {
+// whether to delegate when the box has 800 MB left. The subscription windows
+// sit beside it for exactly the same reason: a 5h window at 100% means the
+// next delegation refuses, whatever the memory says.
+const statusRow = (status, box, doc) => {
   const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
   const mem = memFree(box);
-  return `${left}${mem ? `${left ? '   ' : ''}${mem}` : ''}`;
+  const subs = subsEdge(doc);
+  return [left, subs, mem].filter(Boolean).join('   ');
 };
 
 export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
@@ -241,8 +244,22 @@ export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   for (const m of tail) out.push(`  ${tailLine(m)}`);
 
   out.push('');
-  out.push(statusRow(status, doc.box));
+  out.push(statusRow(status, doc.box, doc));
   out.push(legend(pane));
+  return out.join('\n');
+};
+
+// `cel console --render-quota`: the QUOTA view as plain text. The same lines
+// the ink view draws, for the tests and for a pipe.
+export const renderQuota = async () => {
+  const doc = await fleet();
+  const out = quotaView(doc);
+  out.push('', 'API BALANCES');
+  const bal = await runCommand('cel quota');
+  for (const line of String(bal.out || '').split('\n')) {
+    // the subscription block is already above; only the balance table below it
+    if (/^\s*(PROVIDER|[a-z0-9-]+\s+[-0-9.]+)/.test(line)) out.push(`  ${line.trim()}`);
+  }
   return out.join('\n');
 };
 

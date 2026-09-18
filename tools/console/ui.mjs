@@ -29,7 +29,7 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView } from './views.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import { route, NoRouter, routerLabel } from './router.mjs';
 import {
@@ -338,6 +338,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [busy, setBusy] = useState(false);
   const [at, setAt] = useState('');
   const [help, setHelp] = useState(false);
+  const [quota, setQuota] = useState(false);      // `q`: the subscription windows, whole
   const [picker, setPicker] = useState(null);     // {query, sel} - Ctrl+R
   const [, setTick] = useState(0);                // a resize is a re-render
   const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
@@ -893,6 +894,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     }
 
     if (help) { if (key.escape || key.return || input === '\u001bOP' || key.f1) setHelp(false); return; }
+    // THE QUOTA VIEW IS A PAGE, not a panel: it answers one question outright
+    // ("what is left, and when does it come back") and Esc puts it away.
+    if (quota) { if (key.escape || key.return || input === 'q') setQuota(false); return; }
     if (view === 'output' && !value) {
       const step = Math.max(1, outFullH - 2);
       if (key.escape) { setOutView(false); say('back'); return; }
@@ -1128,6 +1132,15 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       if (pasted) { const r = insert(value, cursor, pasted); setValue(r.value); setCursor(r.cursor); }
       return;
     }
+    // `q` ON AN EMPTY COMMAND LINE IS THE QUOTA VIEW. Bare letters normally
+    // type, so this costs the one sentence that begins with a `q` and buys
+    // the question an operator asks most often before delegating: what is
+    // left on the two subscriptions, and when does it come back. Anything
+    // already typed still types - `q` only acts on an empty line.
+    if (input === 'q' && !value && view === 'main' && !key.ctrl && !key.meta) {
+      setQuota(true);
+      return;
+    }
     if (input && !key.meta && !hasControl(input)) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
   });
 
@@ -1219,11 +1232,12 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // take the whole stack; appending them under three panels that already fill
   // the screen put them below the last row, where nobody ever saw them - the
   // owner's "? did nothing" was exactly that.
-  const view = help ? 'help' : picker ? 'picker' : detail ? 'detail'
+  const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : detail ? 'detail'
     : worker ? 'worker' : unit ? 'unit'
       : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
+    if (quota) { setQuota(false); return; }
     if (picker) { setPicker(null); return; }
     if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
     if (worker) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
@@ -1235,6 +1249,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   };
   const stack = view === 'help'
     ? [h(Overlay, { key: 'help', title: 'KEYS  ·  Esc closes', lines: helpLines() })]
+    : view === 'quota'
+      ? [h(Overlay, { key: 'quota', title: 'QUOTA  ·  Esc closes', lines: quotaView(doc) })]
     : view === 'picker'
       ? [h(Overlay, {
         key: 'picker',
@@ -1305,6 +1321,14 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       // there is headroom, warn under 15% available, bad under 8% - at which
       // point the kernel is minutes from choosing what dies, and what it picks
       // is never what anyone would have chosen.
+      // ...and the two subscriptions beside it. Amber at 80, red at 100: at
+      // 100 the next delegation on that account refuses, which is a harder
+      // stop than any amount of free memory.
+      subsEdge(doc)
+        ? h(Text, {
+          color: { bad: C.bad, warn: C.warn }[subsLevel(doc)] || C.dim,
+        }, `${subsEdge(doc)}   `)
+        : null,
       memFree(doc.box)
         ? h(Text, {
           color: { bad: C.bad, warn: C.warn }[memLevel(doc.box)] || C.dim,
@@ -1313,7 +1337,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
       view === 'detail' ? 'detail' : view === 'worker' ? 'worker' : view === 'unit' ? 'unit'
-        : view === 'output' ? 'output' : pane))));
+        : view === 'quota' ? 'quota' : view === 'output' ? 'output' : pane))));
 };
 
 export const start = async (opts) => {
