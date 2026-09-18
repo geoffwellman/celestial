@@ -525,6 +525,57 @@ _steward_quota() {
   done
 }
 
+# THE SUBSCRIPTIONS, once per account per tick.
+#
+# The two windows the fleet actually runs on are invisible until they stop it:
+# a Claude or Codex five-hour window at 100% refuses every worker on that
+# account and says nothing anywhere an operator looks. So a window over the
+# warning threshold is a rolled-up `status` and a spent one is a `blocked`,
+# both keyed per account so a condition that persists lands as an update on
+# the item that is already open rather than as a fresh one every tick.
+#
+# A SUBSCRIPTION IS THE BOX'S, NOT A WORKSPACE'S. There is one Claude account
+# behind every workspace on this machine, so the item goes to the first
+# registered workspace's root mailbox - saying it once per box is the whole
+# point, and saying it per workspace would be the twenty-four-item pile this
+# rollup exists to prevent.
+_steward_subscriptions() {
+  # shellcheck source=lib/quota.sh
+  . "$CEL_ROOT/lib/quota.sh"
+  local ws; ws="$(registry_names | head -n1)"
+  [ -n "$ws" ] || return 0
+  local warn="${CEL_SUB_WARN_PCT:-80}"
+  local p a t doc worst wname resets state
+  while IFS=$'\t' read -r p a t; do
+    [ -n "$p" ] || continue
+    doc="$(subscription_usage "$p" "$t" "$a" 2>/dev/null || true)"
+    [ -n "$doc" ] || continue
+    # ONE LINE PER ACCOUNT, so the tightest window speaks for it: two lines
+    # about one account is the same fact twice, and the operator acts on the
+    # shorter reset either way.
+    IFS=$'\t' read -r worst wname resets state <<< "$(printf '%s' "$doc" | jq -r '
+      ((.windows // []) | sort_by(-(.used_pct // 0)) | first) as $w
+      | [(($w.used_pct // -1)), ($w.name // ""), ($w.resets_at // ""), (.extra.state // "")]
+      | @tsv' 2>/dev/null || true)"
+    case "$worst" in ''|-1) continue ;; esac
+
+    local pct; pct="$(printf '%.0f' "$worst" 2>/dev/null || printf 0)"
+    if [ "$pct" -ge 100 ]; then
+      c_err "$p $a: $wname window is spent (100%) - workers on that account are VETOED until it resets at $(sub_reset_human "$resets")"
+      _steward_due "sub-$p-$a" && _steward_raise "$ws" "sub-$p-$a" blocked \
+        "steward: the $p subscription $a has spent its $wname window (100%). Delegations routed there will refuse until it resets at $(sub_reset_human "$resets")." || true
+    elif [ "$pct" -ge "$warn" ]; then
+      c_warn "$p $a: $wname window at $pct% (resets $(sub_reset_human "$resets"))"
+      _steward_due "sub-$p-$a" && _steward_raise "$ws" "sub-$p-$a" status \
+        "steward: the $p subscription $a is at $pct% of its $wname window, resetting at $(sub_reset_human "$resets"). Work routed there will start refusing at 100%." || true
+    else
+      # Back under the threshold: the steward takes its own item down rather
+      # than leaving someone to work out whether a day-old warning still holds.
+      _steward_clear "$ws" "sub-$p-$a" "$p $a is back to $pct% of its $wname window - routes to it are clear"
+    fi
+  done < <(_subscription_accounts)
+}
+
 _steward_servers() {
   local ws wsdir port
   for ws in $(registry_names); do
@@ -1020,6 +1071,7 @@ $text2" >/dev/null 2>&1 \
 
   _steward_ready_tickets "$agents_json"
   _steward_quota
+  _steward_subscriptions
   # Before the server sweeps: a box at 5% available is why the next thing in
   # this tick fails to start, and reading that warning after three failures is
   # reading it in the wrong order.

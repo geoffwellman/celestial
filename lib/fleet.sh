@@ -280,6 +280,26 @@ _fleet_render() { # <doc>
     done
 }
 
+# THE SUBSCRIPTIONS, FROM THE CACHE AND ONLY FROM THE CACHE.
+#
+# This read is on the console's refresh loop and on the dashboard's poll. Two
+# network round trips to Anthropic and ChatGPT on that path would put a
+# provider's latency between an operator and every draw, and a provider having
+# a bad afternoon would make the fleet view feel broken. So the field is
+# whatever `subscription_usage` last wrote (it refreshes on a 60 s TTL from
+# `cel quota` and from the steward's tick) and an empty list when nothing has
+# asked yet - absent is absent, never a zero window.
+_fleet_subscriptions() {
+  local dir="${CEL_CACHE:-$HOME/.cache/cel}"
+  local f found=""
+  for f in "$dir"/subscription-*.json; do
+    [ -f "$f" ] || continue
+    found="$found$(cat "$f")
+"
+  done
+  printf '%s' "$found" | jq -sc '[.[] | select(type == "object")]' 2>/dev/null || printf '[]'
+}
+
 cmd_fleet() {
   local json=0 only=""
   while [ $# -gt 0 ]; do
@@ -309,7 +329,8 @@ cmd_fleet() {
   read -r total avail used <<<"$(mem_box)"
   doc="$(printf '%s' "$blocks" | jq -sc \
     --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
-    '{workspaces: .}
+    --argjson subs "$(_fleet_subscriptions)" \
+    '{workspaces: ., subscriptions: $subs}
      | .box = {total_mb: $total, available_mb: $avail, used_pct: $used,
                agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}')"
   mem_tree_snapshot_clear

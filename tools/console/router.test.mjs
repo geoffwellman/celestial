@@ -196,3 +196,11 @@ t('the top three become options, each expanded where the slots allow', () => {
 });
 
 process.stdout.write('router: all tests passed\n');
+
+// --- CEL-27: "how much Claude do I have left" ------------------------------
+// The subscription windows are the one fact the fleet document cannot answer
+// from a workspace name, so the intent takes no slots at all.
+t('the quota intent is the whole subscription read', () => {
+  assert.deepEqual(plan('quota', 'how much claude do i have left', facts(DOC, [])), ['cel quota']);
+  assert.deepEqual(plan('quota', 'when does codex reset', facts(DOC, [])), ['cel quota']);
+});

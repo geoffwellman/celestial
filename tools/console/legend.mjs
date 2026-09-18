@@ -70,8 +70,13 @@ export const BINDINGS = {
     ['r', 'raw - the text exactly as the command printed it'],
     ['wheel', 'scroll'],
   ],
+  quota: [
+    ['q / Esc', 'close the quota view'],
+    ['', 'one row per account and window, with the API balances beneath'],
+  ],
   everywhere: [
     ['F1', 'this help'],
+    ['q', 'the QUOTA view - the Claude and Codex windows, and when they reset'],
     ['Ctrl+C', 'quit'],
   ],
 };
@@ -80,6 +85,8 @@ export const BINDINGS = {
 // because a legend listing every binding on the box is a legend nobody reads.
 export const legend = (pane) => {
   switch (pane) {
+    case 'quota':
+      return 'the subscription windows · Esc back · ? help';
     case 'detail':
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
@@ -93,7 +100,7 @@ export const legend = (pane) => {
     case 'output':
       return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · q quota · ^P/^N history · ? help';
   }
 };
 

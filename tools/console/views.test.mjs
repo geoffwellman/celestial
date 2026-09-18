@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import {
   renderOutput, unitView, workerView, memHuman, sortWorkers,
+  subsEdge, subsLevel, quotaView,
 } from './views.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
@@ -197,3 +198,45 @@ t('the memory sort puts the biggest tree first and leaves the default order alon
 });
 
 process.stdout.write('views.test.mjs: all good\n');
+
+// --- CEL-27: subscriptions -------------------------------------------------
+// The fleet runs on two subscriptions and the console could not see either.
+// The edge is the one row that belongs to no panel, so it carries the
+// TIGHTEST window per provider - the number that decides whether delegating
+// again is worth doing at all.
+
+const SUBS = [
+  { provider: 'claude', account: 'a1b2c3', windows: [{ name: '5h', used_pct: 16, resets_at: '2026-09-18T09:00:00Z' }, { name: '7d', used_pct: 41, resets_at: '2026-09-19T19:00:00Z' }], extra: { state: 'disabled', reason: 'out_of_credits' } },
+  { provider: 'codex', account: 'acct-alpha-1', windows: [{ name: '5h', used_pct: 9, resets_at: '2026-09-18T07:30:00Z' }, { name: '7d', used_pct: 62, resets_at: '2026-09-21T02:00:00Z' }], extra: { state: 'enabled', reason: '' } },
+];
+
+t('the status edge shows one figure per provider', () => {
+  assert.equal(subsEdge({ subscriptions: SUBS }), 'claude 16%/41% · codex 9%/62%');
+});
+
+t('no subscriptions is no edge at all, never a zero', () => {
+  assert.equal(subsEdge({}), '');
+  assert.equal(subsEdge({ subscriptions: [] }), '');
+});
+
+t('amber at 80, red at 100', () => {
+  assert.equal(subsLevel({ subscriptions: SUBS }), 'ok');
+  assert.equal(subsLevel({ subscriptions: [{ provider: 'claude', windows: [{ name: '5h', used_pct: 82 }] }] }), 'warn');
+  assert.equal(subsLevel({ subscriptions: [{ provider: 'claude', windows: [{ name: '5h', used_pct: 100 }] }] }), 'bad');
+});
+
+t('the quota view is one row per account and window, with the balances under it', () => {
+  const out = quotaView({ subscriptions: SUBS }).join('\n');
+  assert.match(out, /SUBSCRIPTIONS/);
+  assert.match(out, /claude\s+a1b2c3/);
+  assert.match(out, /5h\s+16%/);
+  assert.match(out, /7d\s+41%/);
+  assert.match(out, /codex\s+acct-alpha-1/);
+  assert.match(out, /out of credits/);
+  // never a token, and never raw JSON
+  assert.ok(!out.includes('{'), 'the quota view showed raw JSON');
+});
+
+t('the quota view says so when nothing is signed in', () => {
+  assert.match(quotaView({}).join('\n'), /no signed-in subscriptions/);
+});

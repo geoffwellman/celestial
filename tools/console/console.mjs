@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, renderUnit, renderWorker, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
+import { renderOnce, renderUnit, renderWorker, renderQuota, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 import { route, NoRouter } from './router.mjs';
 
@@ -26,15 +26,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = process.env.CEL_CONSOLE_TOOL_DIR || HERE;
 const DEPS_HINT = `cel console needs its UI dependencies: (cd ${TOOL_DIR} && npm ci --ignore-scripts) - or run cel setup`;
 
-const usage = `usage: cel console [--refresh SECS] [--render-once] [--status TEXT]
+const usage = `usage: cel console [--refresh SECS] [--render-once] [--render-quota]
+                   [--status TEXT]
                    [--status-secs N] [--run "<cmd>"] [--unit NAME] [--worker ID]
                    [--chain "<cmd>" ...] [--ask "<text>"] [--no-router]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true };
+const opts = { refresh: 10, renderOnce: false, renderQuota: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
+  else if (a === '--render-quota') opts.renderQuota = true;
   else if (a === '--no-router') opts.router = false;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
@@ -161,6 +163,14 @@ const main = async () => {
     appendHistory(opts.run);
     process.stdout.write(`${r.out}\n`);
     if (!opts.renderOnce) return;
+  }
+
+  if (opts.renderQuota) {
+    // THE QUOTA VIEW IS A RENDER TOO, for the same reason the unit view is:
+    // the subscription windows are what an operator checks before delegating,
+    // and a page only the TUI can draw is a page no test can hold to account.
+    process.stdout.write(`${await renderQuota()}\n`);
+    return;
   }
 
   if (opts.renderOnce) {
