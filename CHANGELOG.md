@@ -8,6 +8,11 @@ watch the repo (Watch → Custom → Releases) to be notified.
 ## [Unreleased]
 
 ### Added
+- Update awareness by **commit**, not only by tag: an `update.channel` of
+  `main` or `release` in `~/.local/share/cel/config.yaml` (`cel update
+  --channel`), a build string of `v0.2.0+31 (d43910c, main)` everywhere, and a
+  `cel update --check`, steward item, dashboard chip and `cel doctor` line
+  that say how many commits are new and what they were
 - The console has a **unit view**: Enter or a double-click on a fleet row opens
   one product whole - its orchestrator with `[focus]` and `[message]`, every
   worker with ticket, state, quiet time, verdict, ahead count and PR, the open

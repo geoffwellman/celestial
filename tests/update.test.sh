@@ -47,8 +47,13 @@ EOS
   printf '0.3.0\n' >"$ROOT/VERSION"
   git -C "$ROOT" commit -qam 'release 0.3.0'
   git -C "$ROOT" tag v0.3.0
-  # unreleased work on main, ahead of the newest tag
+  # unreleased work on main, ahead of the newest tag - with the CHANGELOG
+  # note that goes with it, because "what is new on main" is the question the
+  # commit subjects alone only half answer
   printf 'later\n' >"$ROOT/UNRELEASED"
+  awk 'NR==2{print "\n## [Unreleased]\n\n### Added\n- sanding the gadget"} {print}' \
+    "$ROOT/CHANGELOG.md" >"$ROOT/CHANGELOG.new"
+  mv "$ROOT/CHANGELOG.new" "$ROOT/CHANGELOG.md"
   git -C "$ROOT" add -A
   git -C "$ROOT" commit -qm 'after the release'
   git -C "$ROOT" remote add origin "$ORIGIN"
@@ -66,6 +71,7 @@ EOS
 }
 _upd_cleanup() {
   CEL_ROOT="$_UPD_REPO"
+  unset CEL_CONFIG_FILE CEL_REGISTRY CEL_INBOX_DIR CEL_INBOX_ME
   rm -rf "$T"
 }
 
@@ -380,4 +386,183 @@ test_dash_restart_is_idempotent_when_nothing_is_running() {
   local rc=$?
   rm -rf "$log"
   return $rc
+}
+
+# --- the channel ------------------------------------------------------------
+# Everything that said "you are behind" compared the installed version to the
+# newest release TAG, so a box tracking main sat thirty-odd merges past v0.2.0
+# and every surface said "up to date". A box that tracks main has to be told
+# about COMMITS; a box that tracks releases keeps today's behaviour. Both have
+# to say WHAT is new, which is why the fixture's origin carries both tags and
+# extra commits on main.
+# EVERY box-level path the code under test can reach goes into the fixture.
+# Measured while writing this ticket: the steward test below left CEL_REGISTRY
+# and CEL_INBOX_DIR alone, so three suite runs posted "3 new commits on
+# celestial main" into the real root mailbox of every workspace on the box. A
+# test that can write to the live box is a test that will.
+_upd_channel_fixture() { # _upd_fixture + box-level config, registry and mailbox
+  _upd_fixture
+  export CEL_CONFIG_FILE="$T/config.yaml"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" >"$CEL_REGISTRY"
+  printf 'name: alpha\n' >"$T/alpha/workspace.yaml"
+}
+
+test_update_check_prints_the_build_and_the_newest_tag_first() {
+  _upd_channel_fixture
+  local out rc=0
+  out="$(cmd_update --check 2>&1)" || rc=$?
+  assert_contains "$out" "installed  v0.1.0+0  $(git -C "$ROOT" rev-parse --short HEAD)  (main)" || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'newest tag v0.3.0' || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+# At the newest tag with main ahead: the RELEASE channel is content, and the
+# header still shows how far past the tag this checkout is.
+test_update_check_on_release_is_quiet_at_the_tag_while_main_runs_ahead() {
+  _upd_channel_fixture
+  git -C "$ROOT" fetch -q origin main
+  git -C "$ROOT" reset -q --hard origin/main # a commit past v0.3.0
+  local out rc=0
+  out="$(cmd_update --check 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'installed  v0.3.0+1' || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'up to date at v0.3.0' || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+test_update_check_on_main_channel_lists_the_commits_and_the_unreleased_notes() {
+  _upd_channel_fixture
+  printf 'update:\n  channel: main\n' >"$CEL_CONFIG_FILE"
+  git -C "$ROOT" reset -q --hard v0.3.0
+  # CHANGELOG work that is on origin/main and not here yet
+  git -C "$ROOT" fetch -q origin main
+  local out rc=0
+  out="$(cmd_update --check 2>&1)" || rc=$?
+  assert_eq "$rc" 1 || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'main is 1 commits ahead:' || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'after the release' || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'sanding the gadget' || { _upd_cleanup; return 1; }
+
+  # caught up: nothing to say and exit 0
+  git -C "$ROOT" reset -q --hard origin/main
+  rc=0
+  out="$(cmd_update --check 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'up to date with origin/main' || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+# The subjects are read oldest first: they are a story of what happened since
+# your build, and newest-first makes it unreadable.
+test_update_check_on_main_channel_lists_subjects_oldest_first() {
+  _upd_channel_fixture
+  printf 'update:\n  channel: main\n' >"$CEL_CONFIG_FILE"
+  local out first
+  out="$(cmd_update --check 2>&1)" || true
+  first="$(printf '%s\n' "$out" | grep -n 'release 0.2.0' | cut -d: -f1)"
+  local last; last="$(printf '%s\n' "$out" | grep -n 'after the release' | cut -d: -f1)"
+  [ -n "$first" ] && [ -n "$last" ] && [ "$first" -lt "$last" ] || {
+    echo "subjects are not oldest first: $out"
+    _upd_cleanup
+    return 1
+  }
+  _upd_cleanup
+}
+
+test_update_on_main_channel_pulls_the_tip_and_records_previous() {
+  _upd_channel_fixture
+  printf 'update:\n  channel: main\n' >"$CEL_CONFIG_FILE"
+  local out rc=0 before
+  before="$(git -C "$ROOT" rev-parse HEAD)"
+  out="$(cmd_update 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { _upd_cleanup; return 1; }
+  git -C "$ROOT" fetch -q origin main
+  assert_eq "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse origin/main)" || { _upd_cleanup; return 1; }
+  assert_eq "$(tr -d '[:space:]' <"$CEL_UPDATE_DIR/previous")" "$before" || { _upd_cleanup; return 1; }
+  assert_eq "$(tr '\n' ' ' <"$LOG")" 'reapply verify ' || { _upd_cleanup; return 1; }
+
+  # and the way back is the same way back
+  : >"$LOG"
+  rc=0
+  out="$(cmd_update --rollback 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { _upd_cleanup; return 1; }
+  assert_eq "$(git -C "$ROOT" rev-parse HEAD)" "$before" || { _upd_cleanup; return 1; }
+
+  # a dirty tree is still refused on this channel
+  printf 'wip\n' >"$ROOT/scratch"
+  rc=0
+  out="$(cmd_update 2>&1)" || rc=$?
+  assert_eq "$rc" 1 || { _upd_cleanup; return 1; }
+  assert_contains "$out" 'uncommitted' || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+# The config file holds the console's provider key in another section, so
+# anything that creates it creates it unreadable by anyone else.
+test_update_channel_flag_writes_the_config_file_0600() {
+  _upd_channel_fixture
+  local out rc=0
+  out="$(cmd_update --channel main 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || { _upd_cleanup; return 1; }
+  assert_eq "$(stat -c '%a' "$CEL_CONFIG_FILE")" "600" || { _upd_cleanup; return 1; }
+  assert_eq "$(cel_config_get update channel)" "main" || { _upd_cleanup; return 1; }
+
+  # writing it again keeps neighbouring sections and flips the value
+  printf 'console:\n  provider: widget\nupdate:\n  channel: main\n' >"$CEL_CONFIG_FILE"
+  cmd_update --channel release >/dev/null 2>&1 || { _upd_cleanup; return 1; }
+  assert_eq "$(cel_config_get update channel)" "release" || { _upd_cleanup; return 1; }
+  assert_eq "$(cel_config_get console provider)" "widget" || { _upd_cleanup; return 1; }
+
+  rc=0
+  out="$(cmd_update --channel sideways 2>&1)" || rc=$?
+  assert_eq "$rc" 1 || { _upd_cleanup; return 1; }
+  _upd_cleanup
+}
+
+# What the steward writes is what the dashboard chip shows, so on main it has
+# to be the distance and the sha rather than a version that has not happened.
+test_steward_marks_main_commits_and_clears_when_caught_up() {
+  _upd_channel_fixture
+  printf 'update:\n  channel: main\n' >"$CEL_CONFIG_FILE"
+  source "$_UPD_REPO/lib/steward.sh"
+  CEL_ROOT="$ROOT"
+  _steward_update_check >/dev/null 2>&1
+  assert_contains "$(cat "$CEL_UPDATE_DIR/available")" 'main+3 ' || { _upd_cleanup; return 1; }
+
+  git -C "$ROOT" fetch -q origin main
+  git -C "$ROOT" reset -q --hard origin/main
+  _steward_update_check >/dev/null 2>&1
+  [ -f "$CEL_UPDATE_DIR/available" ] && {
+    echo "marker survived a box that is level with main"
+    _upd_cleanup
+    return 1
+  }
+  _upd_cleanup
+}
+
+# The chip reads whatever is in that file: on main there is no version to show,
+# only how far behind this box is and the command that fixes it.
+test_dash_build_chip_reports_commits_on_the_main_channel() {
+  local t port pid page
+  t="$(mktemp -d)"
+  mkdir -p "$t/update"
+  printf 'main+7 d43910c\n' >"$t/update/available"
+  port=$((17820 + RANDOM % 300))
+  CEL_DASH_CONFIG='{"name":"alpha","wsdir":"'"$t"'","port":'"$port"',"host":"127.0.0.1","repos":[],"services":[],"build":"v0.1.0 abc1234"}' \
+    CEL_UPDATE_DIR="$t/update" CEL_INBOX_DIR="$t/inbox" \
+    node "$_UPD_REPO/tools/dash/server.mjs" >"$t/log" 2>&1 &
+  pid=$!
+  local i ok=1
+  for i in $(seq 1 80); do
+    curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && { ok=0; break; }
+    sleep 0.5
+  done
+  [ "$ok" -eq 0 ] || { echo "dash server did not come up: $(cat "$t/log")"; kill "$pid" 2>/dev/null; rm -rf "$t"; return 1; }
+  page="$(curl -s "http://127.0.0.1:$port/")"
+  kill "$pid" 2>/dev/null
+  assert_contains "$page" 'main +7' || { rm -rf "$t"; return 1; }
+  assert_contains "$page" 'cel update' || { rm -rf "$t"; return 1; }
+  rm -rf "$t"
 }

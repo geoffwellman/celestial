@@ -15,12 +15,68 @@ _CEL_UPDATE=1
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=lib/version.sh
 . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+# shellcheck source=lib/config.sh
+. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 # shellcheck source=lib/link.sh
 . "$(dirname "${BASH_SOURCE[0]}")/link.sh"
 # shellcheck source=lib/registry.sh
 . "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 
 _update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
+
+# WHICH STREAM THIS BOX FOLLOWS. Everything that said "you are behind" -
+# --check, the steward's daily check, the dashboard chip, doctor - compared
+# the installed version to the newest release TAG, so a box tracking main sat
+# thirty-odd merges past v0.2.0 and every surface said "up to date". A box on
+# the `main` channel is told about COMMITS; a box on `release` keeps today's
+# behaviour, which is the default because releases are what users should run.
+_update_channel() {
+  local c
+  c="$(cel_config_get update channel)"
+  case "$c" in main) printf 'main' ;; *) printf 'release' ;; esac
+}
+
+_update_set_channel() { # <main|release>
+  case "$1" in
+    main | release) ;;
+    *) die "cel update --channel: unknown channel '$1' (want main or release)" ;;
+  esac
+  cel_config_set update channel "$1"
+  c_ok "update channel: $1 ($(cel_config_file))"
+  return 0
+}
+
+# Both channels open with the same two lines, because "what am I running" is
+# the question every one of these surfaces was silently answering wrong.
+_update_header() { # <newest-tag-or-empty>
+  printf '  installed  v%s  %s  (%s)\n' "$(cel_build_version)" "$(cel_build_sha)" "$(cel_build_branch)"
+  if [ -n "${1:-}" ]; then
+    printf '  newest tag v%s\n' "$1"
+  else
+    printf '  newest tag none reachable\n'
+  fi
+}
+
+# The `[Unreleased]` notes that exist on origin/main and not here: commit
+# subjects say what was done, this says what it means for the person reading.
+_update_unreleased_diff() {
+  local here there
+  here="$(_update_unreleased_section HEAD)"
+  there="$(_update_unreleased_section origin/main)"
+  [ -n "$there" ] || return 0
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$here" in *"$line"*) continue ;; esac
+    printf '%s\n' "$line"
+  done <<<"$there"
+  return 0
+}
+
+_update_unreleased_section() { # <rev>
+  git -C "$CEL_ROOT" show "$1:CHANGELOG.md" 2>/dev/null \
+    | awk 'index($0, "## [Unreleased]") == 1 { p = 1; next } p && /^## \[/ { exit } p { print }' || true
+}
 
 # Read-only checks are allowed on any tree; anything that moves HEAD is not.
 _update_require_pristine() {
@@ -101,10 +157,31 @@ _update_stale_agents() {
 }
 
 _update_check() { # read-only; exit 1 when behind so scripts can test it
-  local inst avail
+  local inst avail chan
+  chan="$(_update_channel)"
   git -C "$CEL_ROOT" fetch --tags -q 2>/dev/null || true
+  if [ "$chan" = main ]; then git -C "$CEL_ROOT" fetch -q origin main 2>/dev/null || true; fi
   inst="$(cel_version)"
   avail="$(cel_latest_remote_version)"
+  _update_header "$avail"
+
+  if [ "$chan" = main ]; then
+    local n
+    n="$(cel_commits_behind_main)"
+    if [ "$n" -gt 0 ] 2>/dev/null; then
+      c_warn "main is $n commits ahead:"
+      # oldest first: these read as the story of what happened since your
+      # build, and newest-first makes that story unreadable
+      git -C "$CEL_ROOT" log --reverse --format='  %h %s' HEAD..origin/main 2>/dev/null | sed -n '1,15p'
+      local notes
+      notes="$(_update_unreleased_diff)"
+      if [ -n "$notes" ]; then printf '%s\n' "$notes"; fi
+      return 1
+    fi
+    c_ok "up to date with origin/main"
+    return 0
+  fi
+
   if [ -z "$avail" ]; then
     c_warn "no release tags reachable on origin (offline?) - installed v$inst"
     return 0
@@ -129,19 +206,48 @@ _update_rollback() {
   return 0
 }
 
-cmd_update() { # [--check | --rollback]
-  local mode=update
+cmd_update() { # [--check | --rollback | --channel main|release]
+  local mode=update chan=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --check)    mode=check; shift ;;
       --rollback) mode=rollback; shift ;;
-      *) die "cel update: unknown argument '$1' (want --check or --rollback)" ;;
+      --channel)  mode=channel; chan="${2:-}"; [ -n "$chan" ] || die "cel update --channel: want main or release"; shift 2 ;;
+      *) die "cel update: unknown argument '$1' (want --check, --rollback or --channel)" ;;
     esac
   done
   if [ "$mode" = check ]; then _update_check; return $?; fi
   if [ "$mode" = rollback ]; then _update_rollback; return $?; fi
+  if [ "$mode" = channel ]; then _update_set_channel "$chan"; return $?; fi
 
   _update_require_pristine
+
+  # The main channel takes main's TIP: this box asked for what landed
+  # yesterday, and the same pristine check, previous-sha record, re-apply,
+  # doctor and rollback path carry it.
+  if [ "$(_update_channel)" = main ]; then
+    git -C "$CEL_ROOT" fetch -q origin main 2>/dev/null || true
+    local n before_main
+    n="$(cel_commits_behind_main)"
+    if [ "$n" -eq 0 ] 2>/dev/null; then
+      c_ok "up to date with origin/main at $(cel_build_line)"
+      return 0
+    fi
+    before_main="$(git -C "$CEL_ROOT" rev-parse HEAD)"
+    mkdir -p "$(_update_dir)"
+    printf '%s\n' "$before_main" >"$(_update_dir)/previous"
+    git -C "$CEL_ROOT" pull --ff-only -q origin main \
+      || die "could not fast-forward to origin/main from $before_main - this checkout has diverged from main"
+    c_ok "$n commits applied - now $(cel_build_line)"
+    _update_reapply
+    if ! _update_verify; then
+      c_err "update landed but doctor is red - inspect above, or: cel update --rollback"
+      return 1
+    fi
+    _update_stale_agents
+    return 0
+  fi
+
   git -C "$CEL_ROOT" fetch --tags -q 2>/dev/null || true
   local inst avail before
   inst="$(cel_version)"
