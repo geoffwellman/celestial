@@ -11,6 +11,9 @@ _CEL_REGISTRY=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+# shellcheck source=lib/yaml.sh
+. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+
 _CEL_REGISTRY_DEFAULT="$HOME/.local/share/cel/registry.yaml"
 
 # A LOCK MUST NOT OUTLIVE THE PROCESS THAT TOOK IT. flock lives on the open
@@ -67,20 +70,20 @@ _registry_migrate
 
 registry_names() {
   [ -f "$CEL_REGISTRY" ] || return 0
-  yq -r 'if type == "object" and (.workspaces | type == "object") and all(.workspaces[]; type == "object" and (.path | type == "string" and length > 0)) then .workspaces | keys_unsorted[] else error("invalid workspace registry") end' "$CEL_REGISTRY"
+  _yqr -r 'if type == "object" and (.workspaces | type == "object") and all(.workspaces[]; type == "object" and (.path | type == "string" and length > 0)) then .workspaces | keys_unsorted[] else error("invalid workspace registry") end' "$CEL_REGISTRY"
 }
 
 registry_path() {
   [ -f "$CEL_REGISTRY" ] || return 0
   local p
-  p="$(yq -r --arg n "$1" '.workspaces[$n].path // ""' "$CEL_REGISTRY")" || return 1
+  p="$(_yqr -r --arg n "$1" '.workspaces[$n].path // ""' "$CEL_REGISTRY")" || return 1
   [ -z "$p" ] && return 0
   expand "$p"
 }
 
 registry_remote() {
   [ -f "$CEL_REGISTRY" ] || return 0
-  yq -r --arg n "$1" '.workspaces[$n].remote // ""' "$CEL_REGISTRY"
+  _yqr -r --arg n "$1" '.workspaces[$n].remote // ""' "$CEL_REGISTRY"
 }
 
 # Serialize read/modify/replace, not just the final rename: separate CLI
