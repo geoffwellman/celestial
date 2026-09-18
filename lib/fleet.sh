@@ -25,6 +25,8 @@ _CEL_FLEET=1
 . "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+# shellcheck source=lib/memory.sh
+. "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
 
 # One herdr roster for the whole run. The sweep below asks about every
 # orchestrator and every running worker, and a call per question turned a
@@ -100,10 +102,11 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> -> one JSON object
     --arg live "$live" --argjson quiet "$quiet" \
     --arg verdict "$verdict" --arg severity "$severity" \
     --arg ahead "$(fleet_ahead "$wt")" \
+    --argjson rss "$(mem_tree_rss_mb "$wt")" \
     '{id: (.id // ""), ticket: (.ticket // ""), repo: (.repo // ""),
       branch: (.branch // ""), shape: (.shape // "ship"), state: (.state // ""),
       live: $live, quiet_secs: $quiet, verdict: $verdict, severity: $severity,
-      ahead: $ahead, pr: (.pr // ""), created: (.created // ""),
+      ahead: $ahead, rss_mb: $rss, pr: (.pr // ""), created: (.created // ""),
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // "")}'
 }
 
@@ -111,9 +114,20 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> -> one JSON object
 # over. A declared product names its repos after itself, because `bundle` on
 # its own tells an operator nothing about which checkouts are moving; an
 # implicit product IS its repo and renders byte-for-byte as it always has.
-_fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded>
-  printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6"
+_fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded> <mem>
+  printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s   mem %s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+}
+
+# WHERE THE ORCHESTRATOR PANE STANDS, which is the directory its memory is
+# attributed to. A declared product has its own directory under products/; an
+# implicit product is only a repo checkout. The same derivation lib/steward.sh
+# makes for the same reason - identity in this plane comes from paths - and
+# reading the wrong one reports zero for a live pane, which an operator cannot
+# tell apart from an orchestrator that is not running.
+_fleet_orch_dir() { # <wsdir> <product>
+  if ws_product_declared "$1" "$2"; then printf '%s/products/%s' "$1" "$2"
+  else printf '%s/repos/%s' "$1" "$2"; fi
 }
 
 # One unit's facts as JSON, so text and --json cannot drift apart: both
@@ -155,6 +169,9 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     fi
   fi
 
+  local rss=0 orch_rss
+  orch_rss="$(mem_tree_rss_mb "$(_fleet_orch_dir "$wsdir" "$product")")"
+
   local row rows=""
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -183,6 +200,11 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     local obj; obj="$(fleet_worker_row "$row" "$live" "$text")"
     rows="$rows$obj
 "
+    # The unit's footprint is the sum of its workers' - every state the list
+    # carries, not only `running`: a collected worker whose pane is still up
+    # is still holding the memory, and hiding it is how 3 GB goes missing
+    # between the row and the box.
+    rss=$((rss + $(printf '%s' "$obj" | jq -r '.rss_mb')))
     # The count IS the list: counted from the same verdict the row carries, so
     # the two numbers an operator compares can never disagree.
     [ -n "$(printf '%s' "$obj" | jq -r '.verdict')" ] && stalled=$((stalled + 1))
@@ -193,8 +215,9 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
     --argjson repos "$(printf '%s\n' "${repos[@]}" | jq -R . | jq -sc .)" \
     --argjson declared "$declared" \
+    --argjson rss "$rss" --argjson orch_rss "$orch_rss" \
     --argjson list "$(printf '%s' "$rows" | jq -sc .)" \
-    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, repos: $repos, declared: $declared, workers_list: $list}'
+    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $repos, declared: $declared, workers_list: $list}'
 }
 
 _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
@@ -221,18 +244,21 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 }
 
 _fleet_render() { # <doc>
-  printf '%s' "$1" | jq -r '.workspaces[]
-    | "\(.name)   (\(.units | length) products)   root mail: \(.root.unread) unread, \(.root.open) open"
+  local free total
+  free="$(mem_human "$(printf '%s' "$1" | jq -r '.box.available_mb // 0')")"
+  total="$(mem_human "$(printf '%s' "$1" | jq -r '.box.total_mb // 0')")"
+  printf '%s' "$1" | jq -r --arg box "box $free free of $total" '.workspaces[]
+    | "\(.name)   (\(.units | length) products)   root mail: \(.root.unread) unread, \(.root.open) open   \($box)"
       as $head
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
-        | "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)"]
+        | "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)\t\(.rss_mb // 0)"]
     | .[]' \
   | while IFS= read -r line; do
       case "$line" in
         UNIT*)
-          IFS=$'\t' read -r _ n o w c s u <<<"$line"
-          _fleet_unit_line "$n" "$o" "$w" "$c" "$s" "$u"
+          IFS=$'\t' read -r _ n o w c s u m <<<"$line"
+          _fleet_unit_line "$n" "$o" "$w" "$c" "$s" "$u" "$(mem_human "$m")"
           ;;
         *) printf '%s\n' "$line" ;;
       esac
@@ -252,6 +278,11 @@ cmd_fleet() {
 
   local roster names ws blocks=""
   roster="$(_fleet_roster)"
+  # ONE /proc WALK FOR THE WHOLE READ. Every worker, every orchestrator and
+  # the box's own total are answered from this one snapshot; a walk per
+  # question made the cost of the view scale with the number of workers, which
+  # is the one thing a view of the workers must not do.
+  mem_tree_snapshot
   if [ -n "$only" ]; then names="$only"; else names="$(registry_names)"; fi
 
   for ws in $names; do
@@ -259,8 +290,14 @@ cmd_fleet() {
 "
   done
 
-  local doc
-  doc="$(printf '%s' "$blocks" | jq -sc '{workspaces: .}')"
+  local total avail used doc
+  read -r total avail used <<<"$(mem_box)"
+  doc="$(printf '%s' "$blocks" | jq -sc \
+    --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
+    '{workspaces: .}
+     | .box = {total_mb: $total, available_mb: $avail, used_pct: $used,
+               agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}')"
+  mem_tree_snapshot_clear
   if [ "$json" -eq 1 ]; then printf '%s\n' "$doc"; else _fleet_render "$doc"; fi
   return 0
 }

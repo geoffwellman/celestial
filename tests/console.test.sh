@@ -670,3 +670,81 @@ test_console_legends_name_the_depth_views() {
   assert_contains "$out" 'w why'
   assert_contains "$out" 'Enter'
 }
+
+# --- CEL-22: memory --------------------------------------------------------
+# "how are we monitoring memory for the workers and can that be visualised in
+# the console too?" - the owner, 2026-09-18. The console reads the same
+# `cel fleet --json` every other answer comes from, so the fixture carries the
+# `box` block and the per-tree numbers CEL-22 added to it.
+_console_memory_setup() {
+  _console_depth_setup
+  cat >"$T/fleet.json" <<'EOF'
+{"box":{"total_mb":24576,"available_mb":7065,"used_pct":71,"agents_rss_mb":4200},
+ "workspaces":[
+ {"name":"alpha","root":{"unread":1,"open":1},"units":[
+   {"name":"bundle","orch":"LIVE","pane":"w1:p0","workers":2,"cap":4,"stalled":1,"unlanded":0,
+    "rss_mb":710,"orch_rss_mb":430,
+    "repos":["widget","gadget"],"declared":true,
+    "workers_list":[
+      {"id":"ABC-49-slug","ticket":"ABC-49","repo":"widget","branch":"ABC-49-slug","shape":"ship",
+       "state":"running","live":"idle","quiet_secs":812,"verdict":"stalled","severity":"warn",
+       "ahead":"3","pr":"https://example.invalid/widget/pull/12","alias":"widget/ABC-49-slug",
+       "pane":"w3:p1","rss_mb":370},
+      {"id":"ABC-50-other","ticket":"ABC-50","repo":"gadget","branch":"ABC-50-other","shape":"ship",
+       "state":"running","live":"working","quiet_secs":10,"verdict":"","severity":"",
+       "ahead":"0","pr":"","alias":"gadget/ABC-50-other","pane":"w3:p2","rss_mb":340}]}]}]}
+EOF
+}
+
+# THE FLEET ROW AND THE STATUS EDGE. A unit's footprint belongs beside its
+# worker count - the two numbers an operator weighs against each other before
+# delegating another one - and the box's headroom belongs where nothing else
+# competes for it.
+test_console_render_once_shows_memory_per_unit_and_the_boxs_headroom() {
+  _console_memory_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" 'mem 710M'
+  assert_contains "$out" 'mem 6.9G free'
+  _console_teardown
+}
+
+# A box with no `box` block (an older cel on PATH) must render, not crash: the
+# console is the thing an operator opens when something is already wrong.
+test_console_render_once_survives_a_fleet_without_memory() {
+  _console_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" 'alpha'
+  case "$out" in *'mem undefined'*|*'mem NaN'*) echo 'missing memory rendered as a number'; return 1;; esac
+  _console_teardown
+}
+
+test_console_render_once_unit_shows_a_footprint_per_worker() {
+  _console_memory_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --unit bundle)"
+  assert_contains "$out" '370M'
+  assert_contains "$out" '340M'
+  _console_teardown
+}
+
+test_console_render_once_worker_facts_carry_its_footprint() {
+  _console_memory_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --worker ABC-49-slug)"
+  assert_contains "$out" 'WORKER ABC-49-slug'
+  assert_contains "$out" '370M'
+  _console_teardown
+}
+
+# The legend is where a binding is discovered; one that is not in it is a
+# binding nobody will ever press.
+test_console_unit_legend_names_the_memory_sort() {
+  local out
+  out="$(node --input-type=module -e "
+    import { legend, helpLines } from '$CEL_ROOT/tools/console/legend.mjs';
+    process.stdout.write([legend('unit'), helpLines().join('\n')].join('\n'));
+  ")"
+  assert_contains "$out" 's mem'
+}

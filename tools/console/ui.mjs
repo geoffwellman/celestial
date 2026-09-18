@@ -29,7 +29,7 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers } from './views.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import {
   insert, backspace, del, left, right, home, end,
@@ -122,6 +122,10 @@ const FleetPanel = ({ doc, rows, sel, offset, height, innerRef, focused, loaded 
       h(Text, { color: r.workers ? C.ink : C.dim }, `${r.workers}/${r.cap}  `),
       h(Text, { color: r.stalled ? C.bad : C.dim }, `stalled ${r.stalled}  `),
       h(Text, { color: r.unlanded ? C.warn : C.dim }, `unlanded ${r.unlanded}`),
+      // What this product is holding, beside the count it is weighed against:
+      // "three workers out" and "three workers out costing 1.1G" are different
+      // facts when the question is whether to delegate a fourth.
+      h(Text, { color: C.dim }, memHuman(r.rss_mb) ? `  mem ${memHuman(r.rss_mb)}` : ''),
       h(Text, { color: C.dim }, repos));
   }),
   h(More, { n: w.below }));
@@ -232,14 +236,22 @@ const OrchPanel = ({ unit, innerRef }) =>
       h(Text, { color: C.ink }, String(unit.pane || '-')),
       h(Text, { color: C.dim }, '   slots '),
       h(Text, { color: C.ink }, `${unit.workers}/${unit.cap}`),
+      h(Text, { color: C.dim }, memHuman(unit.orch_rss_mb) ? `   mem ${memHuman(unit.orch_rss_mb)}` : ''),
       h(Text, { color: C.dim }, `   repos ${(unit.repos || []).join(', ') || '-'}`)),
     h(Box, null,
       h(Text, { color: C.ink }, '[focus]'),
       h(Text, { color: C.dim }, '  '),
       h(Text, { color: C.accent }, '[message]')));
 
-const WorkersPanel = ({ workers, sel, innerRef, focused }) =>
-  h(Panel, { title: 'WORKERS', innerRef, focused, right: workers.length ? `${workers.length} out · Enter says why` : '' },
+const WorkersPanel = ({ workers, sel, innerRef, focused, byMemory }) =>
+  h(Panel, {
+    title: 'WORKERS',
+    innerRef,
+    focused,
+    right: workers.length
+      ? `${workers.length} out · ${byMemory ? 'by memory · ' : ''}Enter says why`
+      : '',
+  },
     workers.length === 0 ? h(Text, { color: C.dim }, '  no workers') : null,
     ...workers.map((w, i) => h(Text, { key: w.id, inverse: i === sel, wrap: 'truncate-end' },
       h(Text, { color: i === sel ? C.ink : C.dim }, i === sel ? '▸ ' : '  '),
@@ -250,6 +262,7 @@ const WorkersPanel = ({ workers, sel, innerRef, focused }) =>
       h(Text, { color: C.dim }, quiet(w.quiet_secs).padStart(5)),
       h(Text, { color: verdictColour(w) }, `  ${String(w.verdict || '-').padEnd(10)}`),
       h(Text, { color: C.dim }, `ahead ${String(w.ahead ?? '?').padEnd(4)}`),
+      h(Text, { color: C.dim }, `rss ${(memHuman(w.rss_mb) || '-').padStart(5)} `),
       h(Text, { color: C.accent }, prNumber(w.pr) || ''))));
 
 const UnitWaiting = ({ items, innerRef }) =>
@@ -325,6 +338,7 @@ const App = ({ refresh, statusSecs }) => {
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
   const [unit, setUnit] = useState(null);         // the unit view: one product, whole
   const [wsel, setWsel] = useState(0);            // which worker row the unit view has
+  const [wsort, setWsort] = useState(false);      // `s`: the workers by memory, biggest first
   const [worker, setWorker] = useState(null);     // {worker, ws, why, busy} - the answer to "why"
   const [raw, setRaw] = useState(false);          // the output view showing the text as it came
   const rawText = useRef('');                     // what the command actually printed
@@ -809,7 +823,7 @@ const App = ({ refresh, statusSecs }) => {
     return () => process.stdin.off('data', onData);
   }, [onMouse]);
 
-  const unitWorkers = unit ? workersOf(unit) : [];
+  const unitWorkers = unit ? sortWorkers(workersOf(unit), wsort) : [];
   const unitItems = unit ? items.filter((it) => it.ws === unit.ws) : [];
   const unitMail = unit ? tail.filter((m) => m.ws === unit.ws).slice(-10) : [];
   const list = pane === 'waiting' ? items : pane === 'inbox' ? tail : rows;
@@ -906,6 +920,18 @@ const App = ({ refresh, statusSecs }) => {
       if (!value) {
         if (input === 'f') { execute(`herdr agent focus ${unit.name}-orch`); return; }
         if (input === 'm') { composeLine(`cel inbox send ${unit.name}-orch `, ` --workspace ${unit.ws}`, 'message'); return; }
+        // `s` SORTS, it does not filter. The question it answers is "which of
+        // these do I collect", and the selection follows the row it was on -
+        // reordering under a cursor that stayed put is how an operator
+        // collects the wrong worker.
+        if (input === 's') {
+          const on = unitWorkers[wsel];
+          const next = sortWorkers(workersOf(unit), !wsort);
+          setWsort((v) => !v);
+          setWsel(Math.max(0, next.findIndex((x) => x.id === on?.id)));
+          say(wsort ? 'workers in fleet order' : 'workers by memory, biggest first');
+          return;
+        }
       }
     }
 
@@ -1163,7 +1189,7 @@ const App = ({ refresh, statusSecs }) => {
           : view === 'unit'
             ? [
               h(OrchPanel, { key: 'orch', unit, innerRef: refs.unitOrch }),
-              h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: wsel, innerRef: refs.unitWorkers, focused: true }),
+              h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: wsel, innerRef: refs.unitWorkers, focused: true, byMemory: wsort }),
               h(UnitWaiting, { key: 'uwait', items: unitItems, innerRef: refs.unitWaiting }),
               h(UnitMail, { key: 'umail', lines: unitMail, innerRef: refs.unitMail }),
             ]
@@ -1208,6 +1234,15 @@ const App = ({ refresh, statusSecs }) => {
     h(Box, null,
       h(Text, { color: status ? C.ink : C.dim }, `${busy ? '… ' : ''}${status || ''}`),
       h(Box, { flexGrow: 1 }),
+      // THE BOX ITSELF, on the one row that belongs to no panel. Dim while
+      // there is headroom, warn under 15% available, bad under 8% - at which
+      // point the kernel is minutes from choosing what dies, and what it picks
+      // is never what anyone would have chosen.
+      memFree(doc.box)
+        ? h(Text, {
+          color: { bad: C.bad, warn: C.warn }[memLevel(doc.box)] || C.dim,
+        }, `${memFree(doc.box)}   `)
+        : null,
       h(Text, { color: C.dim }, status ? statusAt : `${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
       view === 'detail' ? 'detail' : view === 'worker' ? 'worker' : view === 'unit' ? 'unit'

@@ -306,6 +306,19 @@ next turn. Escalations that truly cannot wait still prompt, deliberately.
   the cap, stalled and unlanded work, and root's mail. Token-free and free of
   agent judgement; `--json` for scripts. The console answers from this, never
   from memory.
+- **Memory is part of that read.** Every process whose working directory is
+  under a worker's worktree is that worker's - its shell, its agent, its tools
+  and its test runs - so summing their `VmRSS` gives what a worker actually
+  costs: ~340 MB for a pi worker, ~370 MB mid-gate. `cel fleet` prints `mem`
+  per product and `box 6.9G free of 24G` on each workspace's head line;
+  `--json` carries `rss_mb` per worker, per unit and per orchestrator pane plus
+  a `box` block. The console shows the same numbers per row, with the box's
+  headroom on the status edge (warn under 15% available, bad under 8%) and `s`
+  in the unit view to sort workers by memory. The steward raises one blocker
+  under 10% naming the largest trees, and tells a product's orchestrator when
+  one worker passes `CEL_MEM_WORKER_WARN_MB` (2 GB) - it never kills anything,
+  because a sweep that reaped a worker mid-gate would destroy the work it was
+  measuring.
 - **`cel dash`** — per-workspace dashboard: an attention queue ("needs you"),
   every in-flight branch joined with its agent + PR + CI state, sticky
   filters, and a prompt box that drives any agent in the workspace.

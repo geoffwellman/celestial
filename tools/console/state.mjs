@@ -13,7 +13,10 @@ import { homedir } from 'node:os';
 import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
+  memFree, sortWorkers,
 } from './views.mjs';
+
+export { memHuman, memFree, memLevel, sortWorkers } from './views.mjs';
 
 export { unitLabel, openLine, tailLine } from './views.mjs';
 export { renderOutput } from './views.mjs';
@@ -214,6 +217,16 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // key legend and never cleared them, so the operator lost their bindings to a
 // message from four minutes ago. Here - and in the TUI - the transient line and
 // the permanent one are separate rows that cannot overwrite each other.
+// THE STATUS LINE'S RIGHT EDGE IS WHERE THE BOX ITSELF SPEAKS. It is the one
+// row that belongs to no panel, and the headroom is the fact that changes what
+// an operator may do next - there is no point opening a unit view to decide
+// whether to delegate when the box has 800 MB left.
+const statusRow = (status, box) => {
+  const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
+  const mem = memFree(box);
+  return `${left}${mem ? `${left ? '   ' : ''}${mem}` : ''}`;
+};
+
 export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const doc = await fleet();
   const out = fleetTable(doc);
@@ -228,7 +241,7 @@ export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   for (const m of tail) out.push(`  ${tailLine(m)}`);
 
   out.push('');
-  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(statusRow(status, doc.box));
   out.push(legend(pane));
   return out.join('\n');
 };
@@ -272,14 +285,14 @@ export const why = async (id, ws) => {
   return text || (r.ok ? '' : `cel-fanout why failed for ${id}`);
 };
 
-export const renderUnit = async (name, { status = '' } = {}) => {
+export const renderUnit = async (name, { status = '', byMemory = false } = {}) => {
   const doc = await fleet();
   const unit = findUnit(doc, name);
   if (!unit) return null;
   const items = (await openItems(doc)).filter((it) => it.ws === unit.ws);
   const tail = inboxTail({ workspaces: (doc.workspaces || []).filter((w) => w.name === unit.ws) }, 10);
-  const out = [unitView({ unit, items, tail }), ''];
-  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  const out = [unitView({ unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) }, items, tail }), ''];
+  out.push(statusRow(status, doc.box));
   out.push(legend('unit'));
   return out.join('\n');
 };
@@ -290,7 +303,7 @@ export const renderWorker = async (id, { status = '' } = {}) => {
   if (!found) return null;
   const text = await why(found.worker.id, found.ws);
   const out = [workerView({ worker: found.worker, ws: found.ws, why: text }), ''];
-  out.push(`${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`);
+  out.push(statusRow(status, doc.box));
   out.push(legend('worker'));
   return out.join('\n');
 };

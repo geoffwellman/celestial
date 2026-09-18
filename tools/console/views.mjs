@@ -35,11 +35,60 @@ export const prNumber = (url) => {
   return m ? `#${m[1]}` : '';
 };
 
+// MEGABYTES AS AN OPERATOR SAYS THEM: `370M`, `6.9G`, `24G`. One decimal
+// under ten gigabytes because 6G and 6.9G are a gigabyte apart, none above it
+// because nobody says "24.0 gigs". The same rule as lib/memory.sh's
+// `mem_human`, deliberately duplicated: the console renders from the fleet
+// document and shelling out to bash to format a number would cost a process
+// per row.
+//
+// ABSENT IS NOT ZERO. An older `cel` on PATH carries no `box` block and no
+// `rss_mb`, and `mem 0M` claims a measurement nobody made - so the empty
+// string is the answer and the caller leaves the column out.
+export const memHuman = (mb) => {
+  if (mb === null || mb === undefined || mb === '' || Number.isNaN(Number(mb))) return '';
+  const n = Math.max(0, Math.round(Number(mb)));
+  if (n < 1024) return `${n}M`;
+  const g = n / 1024;
+  return g >= 10 ? `${Math.round(g)}G` : `${g.toFixed(1)}G`;
+};
+
+// The box's headroom as the status edge shows it, or nothing at all.
+export const memFree = (box) => {
+  const free = memHuman(box?.available_mb);
+  return free ? `mem ${free} free` : '';
+};
+
+// How alarmed to be. Under 15% available the box is about to start refusing
+// things; under 8% the kernel is minutes from choosing what dies, and what it
+// picks is never what anyone would have chosen.
+export const memLevel = (box) => {
+  const total = Number(box?.total_mb || 0);
+  const avail = Number(box?.available_mb || 0);
+  if (total <= 0) return 'none';
+  const pct = (avail * 100) / total;
+  if (pct < 8) return 'bad';
+  if (pct < 15) return 'warn';
+  return 'ok';
+};
+
+// `s` in the unit view. BIGGEST FIRST, because the question the sort answers
+// is "which one do I collect". A copy, never the caller's array: the TUI holds
+// the fleet document across renders and sorting it in place would silently
+// reorder every other view of the same workers.
+export const sortWorkers = (workers, byMemory = false) => {
+  const list = [...(workers || [])];
+  if (!byMemory) return list;
+  // An unmeasured worker sorts LAST rather than above a measured one: -1 for
+  // absent would put "we do not know" at the top of a list about size.
+  return list.sort((a, b) => Number(b.rss_mb ?? -1) - Number(a.rss_mb ?? -1));
+};
+
 export const workersOf = (unit) => (unit && Array.isArray(unit.workers_list) ? unit.workers_list : []);
 
-// One worker, one line: ticket, id, state, agent, quiet, verdict, ahead, PR.
-// The order is the order the questions arrive in - what is it, is it alive,
-// how long has it been quiet, is that bad.
+// One worker, one line: ticket, id, state, agent, quiet, verdict, ahead, what
+// it is holding, PR. The order is the order the questions arrive in - what is
+// it, is it alive, how long has it been quiet, is that bad, what does it cost.
 export const workerLine = (w) => [
   String(w.ticket || '-').padEnd(8),
   String(w.id || '').padEnd(24),
@@ -48,6 +97,7 @@ export const workerLine = (w) => [
   quiet(w.quiet_secs).padStart(5),
   `  ${String(w.verdict || '-').padEnd(10)}`,
   `ahead ${String(w.ahead ?? '?').padEnd(4)}`,
+  `rss ${(memHuman(w.rss_mb) || '-').padStart(5)}`,
   prNumber(w.pr) || '-',
 ].join(' ');
 
@@ -62,7 +112,8 @@ export const unitView = ({ unit, items = [], tail = [] }) => {
   out.push(`UNIT ${unitLabel(unit)}   workspace ${ws}`);
   out.push('');
   out.push('ORCHESTRATOR');
-  out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`);
+  out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`
+    + `${memHuman(unit.orch_rss_mb) ? `   mem ${memHuman(unit.orch_rss_mb)}` : ''}`);
   out.push(`  workspace ${ws}   repos ${(unit.repos || []).join(', ') || '-'}`);
   out.push('  [focus]  [message]');
   out.push('');
@@ -84,6 +135,7 @@ export const unitView = ({ unit, items = [], tail = [] }) => {
 // --- section 2: the worker view, which is the answer to "why" ---------------
 
 export const workerFacts = (w) => `${w.id} (${w.ticket}, ${w.repo}) - ${w.state}, agent ${w.live}`
+  + `${memHuman(w.rss_mb) ? `, ${memHuman(w.rss_mb)} resident` : ''}`
   + `, ${w.verdict ? `${w.verdict}${w.severity ? ` (${w.severity})` : ''}` : 'no stall'}`;
 
 // `[try]` only where a preview exists: a button that always fails is a button
@@ -160,7 +212,8 @@ export const fleetTable = (doc) => {
   for (const ws of doc.workspaces || []) {
     out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
     for (const u of ws.units || []) {
-      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`);
+      out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`
+        + `${memHuman(u.rss_mb) ? `   mem ${memHuman(u.rss_mb)}` : ''}`);
     }
   }
   return out;
