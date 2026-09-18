@@ -133,3 +133,13 @@ test_no_file_assumes_the_old_clone_folder_name() {
   hits="$(cd "$CEL_ROOT" && git grep -l -- "$needle" -- . ':!CHANGELOG.md' || true)"
   assert_eq "" "$hits"
 }
+
+# A change worth a CHANGELOG line goes in changelog.d/<branch>.md now, so
+# [Unreleased] on main is empty and stays empty: a PR that edits it by hand is
+# caught here, by CI, instead of by the next PR's conflict on the same line.
+test_changelog_unreleased_is_empty_because_entries_are_fragments() {
+  local body
+  body="$(python3 "$CEL_ROOT/tools/release/notes.py" unreleased \
+            --changelog "$CEL_ROOT/CHANGELOG.md" --fragments /dev/null)" || return 1
+  assert_eq "" "$body"
+}

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from notes import UNRELEASED, section  # noqa: E402
+from notes import UNRELEASED, assemble, default_fragments, fragment_files, section  # noqa: E402
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -37,8 +37,8 @@ def parse(version):
     return tuple(int(part) for part in match.groups()) if match else None
 
 
-def cut(changelog_path, version_path, version, today):
-    """Rewrite both files; returns the section that is shipping."""
+def cut(changelog_path, version_path, version, today, fragments_dir=None):
+    """Rewrite both files, consume the fragments; returns the shipping section."""
     new = parse(version)
     if new is None:
         # `v0.3.0` and `0.3` both reach here from a dispatch input box, and
@@ -52,22 +52,37 @@ def cut(changelog_path, version_path, version, today):
         raise SystemExit(f"cut: {version} is not greater than the current {current}")
 
     text = changelog_path.read_text(encoding="utf-8")
-    body = section(text, UNRELEASED)
-    if body is None:
+    handwritten = section(text, UNRELEASED)
+    if handwritten is None:
         raise SystemExit(f"cut: no '## [{UNRELEASED}]' section in {changelog_path}")
+    if fragments_dir is None:
+        fragments_dir = default_fragments(changelog_path)
+    fragments = fragment_files(fragments_dir)
+    body = assemble(handwritten, fragments_dir)
     if not body.strip():
         # Forty-odd merges landed unreleased because nobody wrote them down.
         # An empty section means the notes were never written, and notes are
         # the only part of a release a human reads.
-        raise SystemExit(f"cut: the [{UNRELEASED}] section is empty - nothing to release")
+        raise SystemExit(
+            f"cut: no fragments in {fragments_dir} and nothing under "
+            f"[{UNRELEASED}] - nothing to release"
+        )
 
     heading = f"## [{UNRELEASED}]"
-    replacement = f"## [{UNRELEASED}]\n\n## [{version}] - {today}"
     if text.count(heading + "\n") < 1:
         raise SystemExit(f"cut: cannot locate the {heading} heading in {changelog_path}")
-    text = text.replace(heading + "\n", replacement + "\n", 1)
-    changelog_path.write_text(text, encoding="utf-8")
+    # The pending section is replaced wholesale rather than renamed: the
+    # entries being shipped came from the fragments as much as from the file.
+    before, _, rest = text.partition(heading + "\n")
+    _, _, after = rest.partition("\n## [")
+    tail = ("## [" + after) if after else ""
+    shipped = f"{heading}\n\n## [{version}] - {today}\n\n{body}\n\n"
+    changelog_path.write_text(before + shipped + tail, encoding="utf-8")
     version_path.write_text(version + "\n", encoding="utf-8")
+    # In the same commit as the section they became, or the next cut ships
+    # them twice.
+    for path in fragments:
+        path.unlink()
     return body
 
 
@@ -78,6 +93,7 @@ def main(argv=None):
                         help="print the version in a `release: v<x.y.z> (#N)` commit subject")
     parser.add_argument("--changelog", default=None)
     parser.add_argument("--version-file", default=None)
+    parser.add_argument("--fragments", default=None)
     parser.add_argument("--today", default=None)
     args = parser.parse_args(argv)
 
@@ -91,7 +107,11 @@ def main(argv=None):
     changelog = Path(args.changelog) if args.changelog else root / "CHANGELOG.md"
     version_file = Path(args.version_file) if args.version_file else root / "VERSION"
     today = args.today or datetime.date.today().isoformat()
-    print(cut(changelog, version_file, args.version, today))
+    # Beside the CHANGELOG being cut, never beside this file: tools/ is
+    # symlinked into test fixtures, and a default taken from __file__ made a
+    # fixture cut delete the real repository's fragments.
+    fragments = Path(args.fragments) if args.fragments else default_fragments(changelog)
+    print(cut(changelog, version_file, args.version, today, fragments))
     return 0
 
 

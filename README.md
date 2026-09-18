@@ -809,7 +809,11 @@ bumps `VERSION`, turns `[Unreleased]` into that version's section and opens a
 reviewed like any other change. Merging it tags `v<x.y.z>` and publishes the
 GitHub Release from the same notes, on its own. `--dry-run` shows what would
 ship, `cel release status` shows the open PR and the newest tag, and the
-[release checklist](docs/release-checklist.md) has the long form.
+[release checklist](docs/release-checklist.md) has the long form. A change
+worth a changelog line adds its own `changelog.d/<branch>.md` — first line the
+category heading (`### Added`, `### Changed`, `### Fixed`, `### Removed`), the
+rest the entry — and the cut assembles those fragments into the section and
+deletes them, so two open pull requests never edit the same `CHANGELOG.md` line.
 
 A box follows one of two **channels**, set in `~/.local/share/cel/config.yaml`
 (box-level, created 0600) and switched with `cel update --channel
