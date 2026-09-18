@@ -61,6 +61,13 @@ EOS
   git -C "$ROOT" reset -q --hard v0.1.0 # the installed box sits at v0.1.0
   export CEL_ROOT="$ROOT"
   export CEL_UPDATE_DIR="$T/updatestate"
+  # EVERY box-level path is isolated here, in the base fixture, not only in
+  # the channel one: the box this suite runs on is itself on the main
+  # channel since 2026-09-18, and three release-channel tests started
+  # reporting "main is 3 commits ahead" because they read the real config.
+  # An absent config file is the release channel; an absent registry has no
+  # workspaces to post to.
+  export CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
   # The two side effects are what the tests watch; the real ones re-link the
   # box and shell out to doctor, neither of which belongs in a unit test.
   _update_reapply() { printf 'reapply\n' >>"$LOG"; }
@@ -301,7 +308,12 @@ EOS
 # The steward is the only thing that checks for a new release on its own, so
 # it is also the only thing that can tell the dashboard about one.
 test_steward_writes_and_clears_the_available_marker() {
-  _upd_fixture
+  # The channel fixture, not the bare one: with the box itself on the main
+  # channel, an unisolated CEL_CONFIG_FILE made this test follow the REAL
+  # config and post "3 new commits" into every real root mailbox on each
+  # suite run (measured 2026-09-18, four times in an hour).
+  _upd_channel_fixture
+  printf 'update:\n  channel: release\n' >"$CEL_CONFIG_FILE"
   source "$_UPD_REPO/lib/steward.sh"
   CEL_ROOT="$ROOT"
   _steward_update_check >/dev/null 2>&1
