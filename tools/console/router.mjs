@@ -125,9 +125,13 @@ const addresseeIn = (sentence, f) => {
 // The message itself: whatever is in quotes, or everything after the
 // addressee with the joining word stripped. "tell bundle-orch to pick up
 // ABC-49" is not a message that starts with "to".
+//
+// Only double quotes (and the smart pair) delimit: an apostrophe is a
+// character people write - "tell bundle-orch don't bother" - and treating it
+// as a delimiter truncated the message at "don".
 const messageText = (sentence, hit) => {
-  const quoted = /["\u201c']([^"\u201d']{2,})["\u201d']/.exec(sentence);
-  if (quoted) return quoted[1].trim();
+  const quoted = /"([^"]{2,})"|“([^”]{2,})”/.exec(sentence);
+  if (quoted) return (quoted[1] || quoted[2]).trim();
   if (hit.at < 0) return '';
   const rest = sentence.slice(hit.at).replace(/^\S+\s*/, '');
   return rest.replace(/^(to|that|:|,)\s*/i, '').replace(/^[:,]\s*/, '').trim();
@@ -136,6 +140,24 @@ const messageText = (sentence, hit) => {
 // An inbox id is a long number the console printed; anything shorter is a
 // word that happens to be digits.
 const INBOX_ID = /\b\d{6,}\b/;
+
+// SINGLE QUOTES, ALWAYS, for anything a person typed.
+//
+// The message text is the only place an operator's own words reach the
+// command line, and that line is handed to `bash -c`. The first version of
+// this wrapped it in DOUBLE quotes and escaped the double quote, which is no
+// protection at all: inside double quotes bash still expands `$(...)`,
+// backticks and `$VAR`, so `tell bundle-orch "hi $(rm -rf ~)"` proposed a
+// line that deleted a home directory when the operator pressed Enter. Nothing
+// downstream catches it - the guard's console branch allows every `cel ...`
+// line without reading it for metacharacters, and it should not have to.
+//
+// Inside SINGLE quotes bash expands nothing at all; the only character that
+// matters is the single quote itself, which cannot be escaped and is instead
+// closed, emitted as a literal, and reopened. Newlines and carriage returns
+// become spaces first: a proposal that spans two lines is a second command
+// line the operator never read.
+export const shellQuote = (text) => `'${String(text).replace(/[\r\n\t]+/g, ' ').replace(/'/g, "'\\''")}'`;
 
 // One intent, one sentence, the facts: the command lines, or null for a miss.
 // `selected` is the waiting item the operator has highlighted, which is what
@@ -185,7 +207,7 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
       if (!hit) return null;
       const text = messageText(s, hit);
       if (!text) return null;
-      return [`cel inbox send ${hit.who} "${text.replace(/"/g, '\\"')}" --workspace ${hit.workspace}`];
+      return [`cel inbox send ${hit.who} ${shellQuote(text)} --workspace ${hit.workspace}`];
     }
 
     case 'resolve': {
