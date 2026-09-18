@@ -83,7 +83,7 @@ export const legend = (pane) => {
     case 'detail':
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
-      return '↑/↓ worker · Enter why · f focus · m message · s mem · Esc back · ? help';
+      return '↑/↓ worker · Enter why · f focus · c collect · x release · m message · s mem · Esc back · ? help';
     case 'worker':
       return 'p prompt · f focus · c collect · x release · t try · w why · Esc back · ? help';
     case 'inbox':

@@ -76,30 +76,58 @@ export const memLevel = (box) => {
 // is "which one do I collect". A copy, never the caller's array: the TUI holds
 // the fleet document across renders and sorting it in place would silently
 // reorder every other view of the same workers.
+// The order the eye needs: what is WRONG first (a verdict), then what is
+// running, then what is finished and waiting to be collected, then what is
+// collected and waiting to be landed or released. Inside a group the newest
+// first. Ledger order - the order tickets happened to be delegated in over
+// three weeks - told the operator nothing, and the screenshot that said so
+// had twenty-six rows of it.
+const STATE_RANK = { blocked: 0, running: 1, finished: 2, collected: 3 };
 export const sortWorkers = (workers, byMemory = false) => {
   const list = [...(workers || [])];
-  if (!byMemory) return list;
-  // An unmeasured worker sorts LAST rather than above a measured one: -1 for
-  // absent would put "we do not know" at the top of a list about size.
-  return list.sort((a, b) => Number(b.rss_mb ?? -1) - Number(a.rss_mb ?? -1));
+  if (byMemory) {
+    // An unmeasured worker sorts LAST rather than above a measured one: -1 for
+    // absent would put "we do not know" at the top of a list about size.
+    return list.sort((a, b) => Number(b.rss_mb ?? -1) - Number(a.rss_mb ?? -1));
+  }
+  const rank = (w) => (w.verdict ? -1 : (STATE_RANK[w.state] ?? 9));
+  return list.sort((a, b) => rank(a) - rank(b) || String(b.created || '').localeCompare(String(a.created || '')));
 };
+
+// Column widths, shared by the TUI panel and the text view so they cannot
+// drift. A cell is CUT to its width, never allowed to push its neighbours:
+// one forty-four-character scout id used to shove every column off the edge.
+export const WORKER_COLS = { ticket: 9, slug: 26, state: 9, live: 7, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+export const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s; };
+// The id minus its ticket prefix: `ABC-146-gradient-px` reads as `gradient-px`
+// beside the ABC-146 column; an adhoc id is shown whole.
+export const slugOf = (w) => {
+  const id = String(w.id || ''); const t = String(w.ticket || '');
+  return t && id.toLowerCase().startsWith(`${t.toLowerCase()}-`) ? id.slice(t.length + 1) : id;
+};
+export const workerHeader = () => [
+  'ticket'.padEnd(WORKER_COLS.ticket), 'worker'.padEnd(WORKER_COLS.slug), 'state'.padEnd(WORKER_COLS.state),
+  'agent'.padEnd(WORKER_COLS.live), 'quiet'.padStart(WORKER_COLS.quiet), '  ' + 'verdict'.padEnd(WORKER_COLS.verdict),
+  'ahead'.padEnd(WORKER_COLS.ahead), 'rss'.padStart(WORKER_COLS.rss), ' pr',
+].join(' ');
 
 export const workersOf = (unit) => (unit && Array.isArray(unit.workers_list) ? unit.workers_list : []);
 
 // One worker, one line: ticket, id, state, agent, quiet, verdict, ahead, what
 // it is holding, PR. The order is the order the questions arrive in - what is
 // it, is it alive, how long has it been quiet, is that bad, what does it cost.
-export const workerLine = (w) => [
-  String(w.ticket || '-').padEnd(8),
-  String(w.id || '').padEnd(24),
-  String(w.state || '-').padEnd(9),
-  String(w.live || '-').padEnd(8),
-  quiet(w.quiet_secs).padStart(5),
-  `  ${String(w.verdict || '-').padEnd(10)}`,
-  `ahead ${String(w.ahead ?? '?').padEnd(4)}`,
-  `rss ${(memHuman(w.rss_mb) || '-').padStart(5)}`,
-  prNumber(w.pr) || '-',
-].join(' ');
+export const workerCells = (w) => ({
+  ticket: cut(w.ticket || '-', WORKER_COLS.ticket).padEnd(WORKER_COLS.ticket),
+  slug: cut(slugOf(w), WORKER_COLS.slug).padEnd(WORKER_COLS.slug),
+  state: cut(w.state || '-', WORKER_COLS.state).padEnd(WORKER_COLS.state),
+  live: cut(w.live || '-', WORKER_COLS.live).padEnd(WORKER_COLS.live),
+  quiet: quiet(w.quiet_secs).padStart(WORKER_COLS.quiet),
+  verdict: `  ${cut(w.verdict || '-', WORKER_COLS.verdict).padEnd(WORKER_COLS.verdict)}`,
+  ahead: String(w.ahead ?? '?').padEnd(WORKER_COLS.ahead),
+  rss: (memHuman(w.rss_mb) || '-').padStart(WORKER_COLS.rss),
+  pr: ` ${prNumber(w.pr) || '-'}`,
+});
+export const workerLine = (w) => Object.values(workerCells(w)).join(' ');
 
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
@@ -118,6 +146,7 @@ export const unitView = ({ unit, items = [], tail = [] }) => {
   out.push('  [focus]  [message]');
   out.push('');
   out.push('WORKERS');
+  out.push(`  ${workerHeader()}`);
   const workers = workersOf(unit);
   if (!workers.length) out.push('  no workers');
   for (const w of workers) out.push(`  ${workerLine(w)}`);

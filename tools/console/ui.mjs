@@ -29,7 +29,7 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader } from './views.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import {
   insert, backspace, del, left, right, home, end,
@@ -249,21 +249,25 @@ const WorkersPanel = ({ workers, sel, innerRef, focused, byMemory }) =>
     innerRef,
     focused,
     right: workers.length
-      ? `${workers.length} out · ${byMemory ? 'by memory · ' : ''}Enter says why`
+      ? `${workers.length} · ${byMemory ? 'by memory' : 'stalled, running, finished, collected'} · Enter says why · s sorts`
       : '',
   },
     workers.length === 0 ? h(Text, { color: C.dim }, '  no workers') : null,
-    ...workers.map((w, i) => h(Text, { key: w.id, inverse: i === sel, wrap: 'truncate-end' },
-      h(Text, { color: i === sel ? C.ink : C.dim }, i === sel ? '▸ ' : '  '),
-      h(Text, { color: C.ink }, String(w.ticket || '-').padEnd(9)),
-      h(Text, { color: C.dim }, String(w.id).padEnd(22)),
-      h(Text, { color: C.ink }, String(w.state || '-').padEnd(9)),
-      h(Text, { color: w.live === 'working' ? C.ok : C.dim }, String(w.live || '-').padEnd(8)),
-      h(Text, { color: C.dim }, quiet(w.quiet_secs).padStart(5)),
-      h(Text, { color: verdictColour(w) }, `  ${String(w.verdict || '-').padEnd(10)}`),
-      h(Text, { color: C.dim }, `ahead ${String(w.ahead ?? '?').padEnd(4)}`),
-      h(Text, { color: C.dim }, `rss ${(memHuman(w.rss_mb) || '-').padStart(5)} `),
-      h(Text, { color: C.accent }, prNumber(w.pr) || ''))));
+    h(Text, { color: C.dim, wrap: 'truncate-end' }, `  ${workerHeader()}`),
+    ...workers.map((w, i) => {
+      const c = workerCells(w); const on = i === sel;
+      return h(Text, { key: w.id, inverse: on, wrap: 'truncate-end' },
+        h(Text, { color: on ? C.ink : C.dim }, on ? '▸ ' : '  '),
+        h(Text, { color: C.ink }, `${c.ticket} `),
+        h(Text, { color: C.dim }, `${c.slug} `),
+        h(Text, { color: w.state === 'running' ? C.ink : C.dim }, `${c.state} `),
+        h(Text, { color: w.live === 'working' ? C.ok : w.live === 'gone' ? C.dim : C.ink }, `${c.live} `),
+        h(Text, { color: C.dim }, `${c.quiet} `),
+        h(Text, { color: verdictColour(w) }, `${c.verdict} `),
+        h(Text, { color: C.dim }, `${c.ahead} `),
+        h(Text, { color: C.dim }, `${c.rss} `),
+        h(Text, { color: C.accent }, c.pr));
+    }));
 
 const UnitWaiting = ({ items, innerRef }) =>
   h(Panel, { title: 'WAITING', innerRef, right: items.length ? `${items.length} open · Enter opens` : '' },
@@ -919,6 +923,12 @@ const App = ({ refresh, statusSecs }) => {
       if (key.return && !value.trim()) { openWhy(unitWorkers[wsel], unit.ws); return; }
       if (!value) {
         if (input === 'f') { execute(`herdr agent focus ${unit.name}-orch`); return; }
+        // Clean-up from the list itself (owner, 2026-09-18): `c` collects and
+        // `x` releases the SELECTED worker - as proposals, so the command is
+        // on the line and Enter is the operator's. A row that is finished or
+        // collected is exactly the row these are for.
+        if (input === 'c' && unitWorkers[wsel]) { propose([`cel-fanout collect ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
+        if (input === 'x' && unitWorkers[wsel]) { propose([`cel-fanout release ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
         if (input === 'm') { composeLine(`cel inbox send ${unit.name}-orch `, ` --workspace ${unit.ws}`, 'message'); return; }
         // `s` SORTS, it does not filter. The question it answers is "which of
         // these do I collect", and the selection follows the row it was on -
@@ -1128,7 +1138,7 @@ const App = ({ refresh, statusSecs }) => {
     }
     if (view === 'unit') {
       push('unitorch', refs.unitOrch, 2);
-      push('unitworkers', refs.unitWorkers, unitWorkers.length);
+      push('unitworkers', refs.unitWorkers, unitWorkers.length, 1);   // 1: the header row
       push('unitwaiting', refs.unitWaiting, unitItems.length);
       push('unitmail', refs.unitMail, unitMail.length);
       // The orchestrator panel's two buttons share one line, the last of it.

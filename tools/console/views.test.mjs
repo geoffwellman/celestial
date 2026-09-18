@@ -60,11 +60,11 @@ t('the unit view carries the orchestrator, every worker and the mail', () => {
   assert.match(text, /\[message\]/);
   assert.match(text, /WORKERS/);
   assert.match(text, /ABC-49\b/);
-  assert.match(text, /ABC-49-slug/);
+  assert.match(text, /ABC-49 +slug/);
   assert.match(text, /13m/);                        // 812s quiet, in minutes
   assert.match(text, /stalled/);
   assert.match(text, /#12/);                        // the PR number, not the URL
-  assert.match(text, /ABC-50-other/);
+  assert.match(text, /ABC-50 +other/);
   assert.match(text, /WAITING/);
   assert.match(text, /ship gadget or hold\?/);
   assert.match(text, /RECENT MAIL/);
@@ -123,8 +123,8 @@ t('cel fleet --json becomes the fleet table', () => {
 t('cel-fanout status --json becomes the worker table', () => {
   const out = renderOutput('cel-fanout status --json --workspace alpha',
     WORKERS.map((w) => JSON.stringify(w)).join('\n'));
-  assert.match(out, /ABC-49-slug/);
-  assert.match(out, /ABC-50-other/);
+  assert.match(out, /ABC-49 +slug/);
+  assert.match(out, /ABC-50 +other/);
   assert.match(out, /stalled/);
   assert.ok(!out.includes('"ticket"'), 'the raw rows survived');
 });
