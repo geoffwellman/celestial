@@ -24,6 +24,12 @@ watch the repo (Watch → Custom → Releases) to be notified.
   blocked at 100) and clears it when the window drops, and a profile routed at
   a spent 5h window is vetoed before its pane spawns, with the reset time in
   the refusal
+- **The ledger closes what the world already closed**: `cel-fanout reconcile`
+  lands the rows whose PR GitHub merged, abandons the ones closed unmerged past
+  `CEL_RECONCILE_GRACE_HOURS`, raises one rolled-up item per unread scout
+  report and releases ship rows with no PR and no worktree - one `gh pr list`
+  per repo, run every steward tick, with `release --all --merged` and a console
+  `X` option for the same clean-up by hand
 - The console can be routed by a **decision model**: `console.router` in
   `~/.local/share/cel/config.yaml` sends the sentence to a classifier that
   picks one of ten intents (`fleet`, `product_status`, `why_worker`,

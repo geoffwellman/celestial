@@ -1314,9 +1314,232 @@ _fanout_bulk() { # <verb> <default-states> [args...]
   [ "$failed" -eq 0 ]
 }
 
+# ONE GITHUB READ PER REPO, not one per row. The pass below runs over every
+# row a repo has in flight, and asking `gh pr view` per row turned a forty-row
+# workspace into forty requests - slow enough that the operator stopped
+# running the reconcile script at all, which is how the rows piled up in the
+# first place. `--state all` because the interesting answers are MERGED and
+# CLOSED; `--limit 200` is well past any repo's in-flight count here and keeps
+# it to a single page.
+# NEVER FAILS: GitHub unreachable is no evidence about any row, so it answers
+# with an empty index and every row is left exactly as it was.
+_pr_index() { # <wsdir> <repo> -> JSON array of PRs
+  local slug; slug="$(_repo_slug "$1" "$2")"
+  [ -n "$slug" ] && [ "$slug" != null ] || { printf '[]'; return 0; }
+  "$GH" pr list --repo "$slug" --state all \
+    --json number,headRefName,state,mergedAt,closedAt --limit 200 2>/dev/null \
+    || printf '[]'
+}
+
+# The PR whose head is this branch, or empty. The branch name is the only link
+# that exists - see _fanout_ticket_id for why everything here hangs off it.
+_pr_for_branch() { # <prs-json> <branch> -> JSON object, empty if none
+  printf '%s' "$1" | jq -c --arg b "$2" 'map(select(.headRefName == $b)) | .[0] // empty'
+}
+
+# Rows whose PR GitHub has merged, in the given states, for `--all --merged`.
+_merged_ids() { # <wsdir> <states-csv>
+  local wsdir="$1" states="$2" repo rows prs
+  for repo in $(ws_repo_names "$wsdir"); do
+    rows="$(_ledger_read "$wsdir" | jq -r --arg r "$repo" --arg s ",$states," \
+      '.[] | select(.repo == $r) | select(("," + (.state // "") + ",") as $k | $s | contains($k)) | [.id, .branch] | @tsv')"
+    [ -n "$rows" ] || continue
+    prs="$(_pr_index "$wsdir" "$repo")"
+    local id branch pr
+    while IFS=$'\t' read -r id branch; do
+      [ -n "$id" ] || continue
+      pr="$(_pr_for_branch "$prs" "$branch")"
+      [ -n "$pr" ] || continue
+      [ "$(printf '%s' "$pr" | jq -r '.mergedAt // ""')" != "" ] || continue
+      printf '%s\n' "$id"
+    done <<< "$rows"
+  done
+}
+
+# Is this worker's pane gone? An unreachable herdr answers "gone" for
+# everything, which is why only `finished`/`collected` rows are reconciled on
+# GitHub's word alone and a `running` row needs this to agree.
+_agent_gone() { # <alias>
+  [ -n "$1" ] || return 0
+  ! "$HERDR" agent get "$1" >/dev/null 2>&1
+}
+
+# THE LEDGER IS THE OPERATOR'S LIST OF "SOMEBODY'S CONCERN". The owner, at the
+# console on 2026-09-18: "why do we have all these collected and finished
+# workers listed ... what are they all hanging around for?" 37 rows; 22 of
+# them PRs GitHub had merged up to a week earlier, merged through the web UI
+# with the checkouts removed by hand, so `land` and `release` never ran and
+# nothing ever told the ledger. Two more were closed unmerged. Seven were
+# reports written and never read. A row the world has already resolved is
+# noise on that list, and reconciling it by hand is a script somebody writes
+# twice - so it lives here, and the steward runs it every tick.
+cmd_reconcile() { # [--workspace NAME] [--dry-run]
+  local ws_opt="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      --dry-run)   dry=1; shift ;;
+      *) die "reconcile: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local ws; ws="$(ws_name "$wsdir")"
+  # A PR closed minutes ago is somebody still deciding; a day later it is a
+  # decision. Same grace before a report counts as unread.
+  local grace=$(( ${CEL_RECONCILE_GRACE_HOURS:-24} * 3600 ))
+  local now; now="$(date +%s)"
+  local n_landed=0 n_abandoned=0 n_waiting=0 n_released=0
+  local repo
+  for repo in $(ws_repo_names "$wsdir"); do
+    # Rows nobody is working on, plus running rows whose agent is gone: those
+    # are the ones the world may have resolved without us.
+    local rows; rows="$(_ledger_read "$wsdir" | jq -c --arg r "$repo" \
+      '.[] | select(.repo == $r) | select(.state == "finished" or .state == "collected" or .state == "running")')"
+    [ -n "$rows" ] || continue
+    local cand="" row
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      if [ "$(printf '%s' "$row" | jq -r '.state')" = running ]; then
+        _agent_gone "$(printf '%s' "$row" | jq -r '.alias // ""')" || continue
+      fi
+      cand="$cand$row"$'\n'
+    done <<< "$rows"
+    [ -n "${cand//[[:space:]]/}" ] || continue
+    local prs; prs="$(_pr_index "$wsdir" "$repo")"
+    local id branch shape wt ticket pr merged prstate closed
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      IFS= read -r id     <<< "$(printf '%s' "$row" | jq -r '.id')"
+      IFS= read -r branch <<< "$(printf '%s' "$row" | jq -r '.branch')"
+      IFS= read -r shape  <<< "$(printf '%s' "$row" | jq -r '.shape // "ship"')"
+      IFS= read -r wt     <<< "$(printf '%s' "$row" | jq -r '.worktree // ""')"
+      IFS= read -r ticket <<< "$(printf '%s' "$row" | jq -r '.ticket // ""')"
+      pr="$(_pr_for_branch "$prs" "$branch")"
+      merged=""; prstate=""; closed=""
+      if [ -n "$pr" ]; then
+        # ONE FIELD PER LINE, never @tsv into `read`: tab is IFS whitespace,
+        # so consecutive tabs collapse and an unmerged PR's empty mergedAt
+        # shifted closedAt into it - every closed PR read as merged.
+        { IFS= read -r prstate; IFS= read -r merged; IFS= read -r closed; } <<< "$(printf '%s' "$pr" \
+          | jq -r '(.state // ""), (.mergedAt // ""), (.closedAt // "")')"
+      fi
+
+      if [ -n "$merged" ] && [ "$merged" != null ]; then
+        # `land`'s bookkeeping without the merge - GitHub already did that
+        # part. --discard on purpose: the branch is merged, so a dirty
+        # worktree holds nothing that is not in main, and release names what
+        # went so the loss is still on the record.
+        n_landed=$((n_landed + 1))
+        if [ "$dry" -eq 1 ]; then
+          c_ok "would land $id: $branch merged as PR #$(printf '%s' "$pr" | jq -r '.number') - ticket Done, row landed, worktree released"
+        else
+          _fanout_ticket_state "$ticket" "Done"
+          _ledger_update_state "$wsdir" "$id" landed
+          ( cmd_release "$id" ${ws_opt:+--workspace "$ws_opt"} --discard ) \
+            || c_warn "$id: merged, but its worktree would not release - cel-fanout release $id --discard"
+          c_ok "reconciled $id: merged as PR #$(printf '%s' "$pr" | jq -r '.number')"
+        fi
+        continue
+      fi
+
+      if [ "$prstate" = CLOSED ] && [ -n "$closed" ]; then
+        local age; age=$(( now - $(date -d "$closed" +%s 2>/dev/null || printf '%s' "$now") ))
+        if [ "$age" -ge "$grace" ]; then
+          # A HUMAN CLOSED THIS PR, so the board is theirs: the ticket is left
+          # exactly where they left it. The branch is named out loud because
+          # the code on it is what is being thrown away.
+          n_abandoned=$((n_abandoned + 1))
+          if [ "$dry" -eq 1 ]; then
+            c_warn "would abandon $id: $branch - PR #$(printf '%s' "$pr" | jq -r '.number') was closed unmerged $((age / 3600))h ago"
+          else
+            c_warn "abandoned $id: $branch - PR #$(printf '%s' "$pr" | jq -r '.number') closed unmerged $((age / 3600))h ago; its work goes with the worktree"
+            ( cmd_release "$id" ${ws_opt:+--workspace "$ws_opt"} --discard ) \
+              || c_warn "$id: could not release its worktree - cel-fanout release $id --discard"
+            _ledger_update_state "$wsdir" "$id" abandoned
+          fi
+        fi
+        continue
+      fi
+
+      [ -z "$pr" ] || continue    # an OPEN PR is work in flight; leave it
+
+      if [ "$shape" = scout ] || [ "$shape" = spike ]; then
+        # THE REPORT IS THE DELIVERABLE, so this row is never released
+        # automatically: releasing it would delete the only copy of the answer
+        # somebody paid for. Seven of the 37 rows were exactly this.
+        local rep="$wt/.agent/report.md"
+        [ -f "$rep" ] || continue
+        local rage; rage=$(( now - $(date -r "$rep" +%s 2>/dev/null || printf '%s' "$now") ))
+        [ "$rage" -ge "$grace" ] || continue
+        n_waiting=$((n_waiting + 1))
+        local msg="report never collected: $id - read it or release it ($rep)"
+        if [ "$dry" -eq 1 ]; then
+          c_warn "would raise: $msg"
+        else
+          _reconcile_raise "$ws" "unread-report-$id" \
+            "$(ws_product_of_repo "$wsdir" "$repo")-orch" "$msg"
+          c_warn "$msg"
+        fi
+        continue
+      fi
+
+      if [ "$shape" = ship ] && [ ! -d "$wt" ]; then
+        # No PR, no checkout: there is nothing to land and nothing to hold.
+        n_released=$((n_released + 1))
+        if [ "$dry" -eq 1 ]; then
+          c_warn "would release $id: no PR for $branch and no worktree left - nothing to land"
+        else
+          c_warn "released $id: no PR for $branch and no worktree left - nothing to land, nothing to hold"
+          ( cmd_release "$id" ${ws_opt:+--workspace "$ws_opt"} --discard ) \
+            || _ledger_update_state "$wsdir" "$id" released
+        fi
+        continue
+      fi
+    done <<< "$cand"
+  done
+  c_ok "reconcile: $n_landed landed, $n_abandoned abandoned, $n_waiting reports waiting, $n_released released"
+  return 0
+}
+
+# The steward's rolled-up raise, addressed to the product's orchestrator
+# rather than to root: an unread report is that orchestrator's to read. The
+# condition key is what keeps a report that waits a week to ONE open item -
+# see lib/inbox.sh --fp, and the twenty-four copies of one sentence that
+# taught it.
+_reconcile_raise() { # <ws> <fp> <to> <message>
+  cmd_inbox send "$3" "$4" --from steward --workspace "$1" --kind status --fp "$2" \
+    >/dev/null 2>&1 || true
+}
+
 cmd_release() {
-  [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--state finished,collected] [--keep-worktree] [--discard] [--workspace NAME]"
-  if [ "$1" = --all ]; then shift; _fanout_bulk release "finished,collected" "$@"; return $?; fi
+  [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--state finished,collected] [--keep-worktree] [--discard] [--workspace NAME]"
+  if [ "$1" = --all ]; then
+    shift
+    # --merged: only rows GitHub has already merged, from the same single
+    # `gh pr list` read reconcile makes. The operator's actual question after
+    # a merge spree is "clean up what is already in main", and answering it by
+    # state alone released branches that had never landed.
+    local -a rest=(); local merged_only=0 a
+    for a in "$@"; do
+      if [ "$a" = --merged ]; then merged_only=1; else rest+=("$a"); fi
+    done
+    if [ "$merged_only" -eq 1 ]; then
+      local mw=""; mw="$(_fanout_ws_arg "${rest[@]+"${rest[@]}"}")"
+      local mwsdir; mwsdir="$(_fanout_wsdir "$mw")"
+      local ids; ids="$(_merged_ids "$mwsdir" "finished,collected")"
+      [ -n "$ids" ] || { c_ok "release --all --merged: nothing merged to release"; return 0; }
+      local mid n=0 failed=0
+      while IFS= read -r mid; do
+        [ -n "$mid" ] || continue
+        if ( cmd_release "$mid" ${rest[@]+"${rest[@]}"} ); then n=$((n + 1))
+        else failed=$((failed + 1)); c_warn "release --all --merged: $mid failed - see above"; fi
+      done <<< "$ids"
+      c_ok "release --all --merged: $n done, $failed failed"
+      [ "$failed" -eq 0 ]
+      return $?
+    fi
+    _fanout_bulk release "finished,collected" ${rest[@]+"${rest[@]}"}; return $?
+  fi
   local id="$1"; shift
   local keep=0 discard=0 ws_opt=""
   while [ $# -gt 0 ]; do
@@ -1571,7 +1794,7 @@ cmd_land() { # <id>
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review|try)
+  delegate|scout|spike|collect|status|release|land|review|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
@@ -1591,5 +1814,6 @@ case "${1:-}" in
   release)  shift; cmd_release "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|land ..." ;;
+  reconcile) shift; cmd_reconcile "$@" ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|land|reconcile ..." ;;
 esac

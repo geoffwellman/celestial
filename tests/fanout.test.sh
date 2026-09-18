@@ -1835,6 +1835,12 @@ test_why_on_an_unknown_id_fails() {
 _reconcile_setup() {
   _fanout_setup
   export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  # NEVER THE LIVE BOARD: reconcile moves a merged row's ticket to Done, and
+  # the real cel-linear is on this box's PATH.
+  LINEAR_LOG="$T/linear.log"; : > "$LINEAR_LOG"
+  printf '#!/usr/bin/env bash\necho "$@" >> "%s"\n' "$LINEAR_LOG" > "$T/cel-linear-stub.sh"
+  chmod +x "$T/cel-linear-stub.sh"
+  export CEL_FANOUT_LINEAR="$T/cel-linear-stub.sh" LINEAR_LOG
   GH_LOG="$T/gh.log"; : > "$GH_LOG"
   local old new
   old="$(date -u -d '25 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -1903,7 +1909,10 @@ test_reconcile_lands_merged_rows_and_abandons_a_long_closed_one() {
   # and a dirty one goes with --discard, because the branch is already merged.
   assert_eq "$(_reconcile_state WG-1-merged-dirty)" released
   assert_eq "$(_reconcile_state WG-2-merged-gone)" released
-  assert_contains "$out" "scratch.txt"
+  assert_contains "$out" "DISCARDED"
+  assert_contains "$out" "wt-merged-dirty"
+  # the ticket the merge settled, moved by the mechanism
+  assert_contains "$(cat "$LINEAR_LOG")" "state WG-1 Done"
   # closed unmerged and cold: the loss is named, the ticket is left to whoever
   # closed the PR - the board is theirs.
   assert_eq "$(_reconcile_state WG-3-closed-old)" abandoned
