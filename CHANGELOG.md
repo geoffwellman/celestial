@@ -30,6 +30,11 @@ watch the repo (Watch → Custom → Releases) to be notified.
   report and releases ship rows with no PR and no worktree - one `gh pr list`
   per repo, run every steward tick, with `release --all --merged` and a console
   `X` option for the same clean-up by hand
+- **Releasing is one verb**: `cel release <x.y.z>` dispatches a GitHub workflow
+  that checks hygiene and the suite, bumps `VERSION`, closes `[Unreleased]` and
+  opens the `release: v<x.y.z>` PR; merging it tags and publishes the GitHub
+  Release from the same notes. `--dry-run` shows what would ship and
+  `cel release status` the open PR and newest tag
 - The console can be routed by a **decision model**: `console.router` in
   `~/.local/share/cel/config.yaml` sends the sentence to a classifier that
   picks one of ten intents (`fleet`, `product_status`, `why_worker`,

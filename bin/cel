@@ -60,6 +60,10 @@ cel - the celestial plane
                                 --check: what you have not got yet
                                 (exit 1 when behind); --rollback: undo it;
                                 --channel main|release: follow commits or tags
+  cel release <version>         cut a version on GitHub: the Cut workflow opens
+                                the bump PR, and merging it tags and publishes
+                                --dry-run: the notes that would ship and the
+                                checks; `cel release status`: open PR + newest tag
   cel agents                    list agents, install status and injection strategy
   cel shellenv                  print shell env; eval this in your rc
 
@@ -118,6 +122,7 @@ case "${1:-help}" in
   setup)    shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"; cmd_setup "$@";;
   doctor)   shift; . "$CEL_ROOT/lib/doctor.sh";  cmd_doctor "$@";;
   update)   shift; . "$CEL_ROOT/lib/update.sh"; cmd_update "$@";;
+  release)  shift; . "$CEL_ROOT/lib/release.sh"; cmd_release "$@";;
   agents)   shift; cmd_agents;;
   shellenv) shift; cmd_shellenv;;
   ws)       shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"

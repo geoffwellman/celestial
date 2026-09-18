@@ -1,5 +1,29 @@
 # Public release checklist
 
+## Cutting a version
+
+One verb, and the rest follows. From the box:
+
+```
+cel release 0.3.0 --dry-run     # the notes that would ship, and the checks
+cel release 0.3.0               # dispatches the Cut job; prints the run URL
+cel release status              # the open release PR, and the newest tag
+```
+
+or run the **Release** workflow's `Cut` from the Actions tab with the same
+version. The job runs the suite and the hygiene scans, rewrites `VERSION`,
+renames `## [Unreleased]` to `## [<version>] - <date>` with a fresh empty
+`[Unreleased]` above it, and opens a `release: v<version>` pull request with
+the section as its body. **Merge that PR** - main takes no direct pushes, so
+the bump is a reviewed change like any other. The annotated `v<version>` tag
+and the GitHub Release are then cut from main by the same workflow, with the
+CHANGELOG section as their notes; boxes on the `release` channel see it on
+their next `cel update --check`. A `v*` tag pushed by hand publishes the same
+way, and a tag whose `VERSION` disagrees fails the job.
+
+Everything below is publication hygiene - the one-time question of whether
+this repository may be public at all, not the per-version one.
+
 A clean working tree does not establish that an existing private repository is
 safe to make public. Tags, unreachable-from-main branches, pull-request refs,
 commit authors/messages, discussions, workflow logs and release assets are

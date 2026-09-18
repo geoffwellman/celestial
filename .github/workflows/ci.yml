@@ -5,6 +5,10 @@ on:
     - cron: "17 3 * * *"   # nightly every-ref publication scan (not a PR gate)
   push:
   pull_request:
+  # The release workflow runs exactly these checks before it cuts a version,
+  # by calling this file rather than copying it - two definitions of "green"
+  # drift, and the one nobody looks at is the release one.
+  workflow_call:
 
 permissions:
   contents: read
