@@ -192,3 +192,22 @@ test_an_unheld_suite_lock_costs_the_gate_nothing() {
   assert_eq "$(_v .gate.waited_secs)" 0
   rm -rf "$T"
 }
+
+# cel-verify is usually called from INSIDE a suite (tests/fanout.test.sh runs
+# collect, which runs it, which runs a gate). A lock its own caller is holding
+# is a lock it must not wait for - that deadlock cancelled two CI jobs.
+test_the_gate_does_not_queue_behind_a_lock_its_caller_holds() {
+  _vrepo; _vcommit impl src/a.ts
+  local lock="$T/suite.lock"
+  ( flock 9; exec sleep 10 ) 9>>"$lock" &
+  local holder=$!
+  local i=0
+  while flock -n "$lock" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
+  local rc=0
+  CEL_SUITE_LOCK="$lock" CEL_SUITE_LOCK_HELD=1 timeout 20 "$VERIFY" "$T" --gate 'true' --quiet || rc=$?
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_eq "$rc" 0
+  assert_eq "$(_v .gate.passed)" true
+  assert_eq "$(_v .gate.waited_secs)" 0
+  rm -rf "$T"
+}

@@ -135,3 +135,37 @@ test_a_filtered_run_still_takes_the_lock() {
   wait "$p1" 2>/dev/null || true
   rm -rf "$T"
 }
+
+# RE-ENTRANT BY INHERITANCE, or the suite deadlocks on itself. CI found this
+# the honest way: tests/fanout.test.sh runs `cel-fanout collect`, which runs
+# cel-verify, which runs a gate - all of it INSIDE a suite that is already
+# holding the lock. Inner and outer compute the same path (no XDG_RUNTIME_DIR
+# on the runner), so the suite waited twenty minutes for itself and the job was
+# cancelled. Anything started under a held lock is already inside it: the
+# holder exports CEL_SUITE_LOCK_HELD, and everything that would otherwise queue
+# reads that and goes straight through.
+test_a_suite_started_inside_a_held_lock_does_not_wait() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  # a filter that matches nothing: this is about the lock, not about tests.
+  # timeout, because the failure being guarded against is an infinite wait
+  printf 'test_inner_run_goes_straight_through() { timeout 15 bash "%s/tests/run.sh" zzz_matches_nothing > "%s/inner.out" 2>&1; }\n' \
+    "$T" "$T" > "$T/tests/inner.test.sh"
+  local out; out="$(bash "$T/tests/run.sh" 2>&1)"
+  assert_contains "$out" "1 passed, 0 failed"
+  local inner; inner="$(cat "$T/inner.out")"
+  assert_contains "$inner" "0 passed, 0 failed"
+  case "$inner" in *"waiting for the suite lock"*) echo "the suite queued behind itself"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# ...and the holder says so in the environment, which is the whole mechanism.
+test_the_holder_exports_the_lock_it_holds() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  printf 'test_env_carries_the_lock() { printf "%%s %%s\\n" "${CEL_SUITE_LOCK_HELD:-unset}" "${CEL_SUITE_LOCK:-unset}" > "%s/env.out"; }\n' \
+    "$T" > "$T/tests/env.test.sh"
+  bash "$T/tests/run.sh" >/dev/null 2>&1
+  assert_eq "$(cat "$T/env.out")" "1 $T/suite.lock"
+  rm -rf "$T"
+}
