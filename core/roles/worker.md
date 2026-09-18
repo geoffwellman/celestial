@@ -12,7 +12,9 @@ Do
   whether a test-only commit preceded the first source commit - a test added
   after the fact passes regardless of correctness, and the verdict says so.
 - Implement, run the gate command given in your task spec, and commit on the
-  ticket branch. Follow the ticket and branch naming in your injected policy;
+  ticket branch. The suite takes a box-wide lock; if it prints `waiting for
+  the suite lock`, wait - do not start a second copy and do not kill the
+  holder. Follow the ticket and branch naming in your injected policy;
   where `tickets.system` is `none`, do not invent a ticket reference.
 - A change worth a CHANGELOG line goes in `changelog.d/<your-branch>.md`, never
   in CHANGELOG.md itself.

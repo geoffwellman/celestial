@@ -600,6 +600,71 @@ _steward_subscriptions() {
   done < <(_subscription_accounts)
 }
 
+# THE QUEUE IS VISIBLE OR IT IS A HANG. Since 2026-09-18 the suite takes a
+# box-wide lock (tests/run.sh): six concurrent copies took the load to 190 and
+# three workers had to be interrupted by hand. A worker whose gate is queued
+# behind another suite now looks, from outside, exactly like a worker that
+# died - and the failure mode of that mistake is somebody killing the holder
+# and losing both runs. So the steward watches the lock itself: held far
+# longer than any suite takes, and root is told who has it and for how long.
+# It NEVER kills it. A suite is the thing this whole plane exists to run.
+_STEWARD_SUITE_HOLD_WARN_SECS="${CEL_SUITE_HOLD_WARN_SECS:-1800}"
+
+_steward_suite_lock_path() {
+  if [ -n "${CEL_SUITE_LOCK:-}" ]; then printf '%s' "$CEL_SUITE_LOCK"; return 0; fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    printf '%s/cel-suite.lock' "$XDG_RUNTIME_DIR"; return 0
+  fi
+  printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
+}
+
+_steward_suite_lock() {
+  local path ws
+  path="$(_steward_suite_lock_path)"
+  [ "$path" = none ] && return 0
+  have flock || return 0
+
+  # Free, or gone entirely: whatever was said about it is no longer true. The
+  # file surviving an unheld lock is normal - it is the descriptor that holds
+  # it, not the file - so its existence proves nothing on its own.
+  local raised="$_STEWARD_STATE.suite-lock"
+  if [ ! -f "$path" ] || flock -n "$path" -c true >/dev/null 2>&1; then
+    [ -f "$raised" ] || return 0
+    for ws in $(registry_names); do
+      _steward_clear "$ws" suite-lock "the suite lock is free again"
+      cmd_inbox send root "cleared: the suite lock is free again - gates are no longer queued" \
+        --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
+    done
+    rm -f "$raised"
+    return 0
+  fi
+
+  # The holder wrote its pid into the first line after acquiring, and that
+  # write is also when the hold started - so the file's own mtime is the
+  # clock, with no second file to keep in step with it.
+  local held pid mtime age
+  held="$(sed -n 1p "$path" 2>/dev/null || true)"
+  pid="${held%% *}"
+  case "$pid" in ''|*[!0-9]*) pid="?" ;; esac
+  mtime="$(stat -c %Y "$path" 2>/dev/null || printf 0)"
+  [ "${mtime:-0}" -gt 0 ] || return 0
+  age=$(( $(date +%s) - mtime ))
+  [ "$age" -ge "$_STEWARD_SUITE_HOLD_WARN_SECS" ] || return 0
+
+  # Which tree it is running in, if the kernel will say. Unknown is not a
+  # reason to stay quiet: the pid and the duration are already actionable.
+  local wt="unknown"
+  [ "$pid" = "?" ] || wt="$(readlink "/proc/$pid/cwd" 2>/dev/null || printf unknown)"
+  local msg
+  msg="steward: suite lock held $(( age / 60 ))m by pid $pid (worktree $wt) - every other gate on this box is queued behind it. Nothing has been killed; check whether that run is still making progress."
+  c_warn "$msg"
+  # Once per window, not once per tick: the steward says a thing once, and a
+  # suite that is going to take an hour will still be there in five minutes.
+  _steward_due suite-lock || return 0
+  : > "$raised"
+  for ws in $(registry_names); do _steward_raise "$ws" suite-lock status "$msg"; done
+}
+
 _steward_servers() {
   local ws wsdir port
   for ws in $(registry_names); do
@@ -1105,6 +1170,9 @@ $text2" >/dev/null 2>&1 \
   # reading it in the wrong order.
   _steward_memory
   _steward_services
+  # And the other box-wide resource: one suite runs at a time, so a gate that
+  # is queued is not a gate that is stuck - but only if somebody says so.
+  _steward_suite_lock
   _steward_servers
   _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"

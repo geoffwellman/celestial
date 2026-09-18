@@ -108,3 +108,13 @@ scanner, an independent credential scanner, and an external private vocabulary
 scan performed by the release owner. GitHub discussions, pull-request refs,
 release assets and metadata need separate inspection: a clean current tree
 cannot establish that old repository surfaces are safe to publish.
+
+Only one test suite runs on a box at a time. `tests/run.sh` takes an exclusive
+`flock` (`$CEL_SUITE_LOCK`, else `$XDG_RUNTIME_DIR/cel-suite.lock`, else a
+per-user file under the temporary directory) before the first test file and
+names the holder while it waits; `cel-verify` queues on the same lock and
+starts its `--gate-timeout` clock only after acquiring it, recording the wait
+as `gate.waited_secs`. The lock is held by an open descriptor, so process exit
+releases it and no stale state survives an interrupted run. `--no-lock` and
+`CEL_SUITE_LOCK=none` opt out; a filtered run does not. The steward reports a
+lock held past `CEL_SUITE_HOLD_WARN_SECS` and never breaks it.
