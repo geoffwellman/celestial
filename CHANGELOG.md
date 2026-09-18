@@ -35,6 +35,25 @@ watch the repo (Watch → Custom → Releases) to be notified.
   opens the `release: v<x.y.z>` PR; merging it tags and publishes the GitHub
   Release from the same notes. `--dry-run` shows what would ship and
   `cel release status` the open PR and newest tag
+- The console is a **control panel**: the unit view now lays out ORCHESTRATOR ·
+  WORKERS · **BOARD** · **PRS** · WAITING · RECENT MAIL, with Ctrl+T cycling
+  the focus and panels that would not fit collapsing to a title and a count
+- **BOARD**: the product's tickets from `cel-linear board --json`, grouped by
+  state in the team's workflow order, with the worker on each; Enter opens the
+  ticket detail
+- **PRS**: the open pull requests on the product's repos from one `gh pr list`
+  per repo - review decision, checks, age - with `l` landing an approved, green
+  one through `cel-fanout land`
+- **"Since you last looked"**: a one-line digest under the unit view's header,
+  computed from the console's own cursor per workspace, and a **TIMELINE** view
+  (`T`, or Ctrl+Y) merging the mailboxes, the delegation ledger and the merged
+  pull requests into one column, newest last
+- **Seven verbs as keys and as intents**: start, answer, land, nudge, restart,
+  move and review, each a proposal on the command line and each a router intent
+  with its slots filled from state the console already holds
+- `cel-linear board [--team K] [--state a,b] [--json]`: a team's open issues and
+  what it finished today, grouped by state in workflow order, with the raw query
+  cached 60 s under `$CEL_CACHE` so the console's refresh cannot hammer Linear
 - The console can be routed by a **decision model**: `console.router` in
   `~/.local/share/cel/config.yaml` sends the sentence to a classifier that
   picks one of ten intents (`fleet`, `product_status`, `why_worker`,

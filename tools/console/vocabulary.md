@@ -21,6 +21,14 @@
 | `cel-fanout try <id> [--stop] --workspace <w>` | run a ticket's branch locally on its own ports; "try W-49", "stop the preview of W-49" |
 | `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
 | `cel-linear …` | tickets |
+| `cel-linear board [--team K] [--state a,b] [--json]` | the team's open tickets and what it finished today, grouped by state - what the console's BOARD panel reads (cached 60 s) |
+| `cel inbox send <p>-orch "pick up ABC-49 next" --workspace <w>` | "start ABC-49", "get bundle going on ABC-49" - work starts through the orchestrator, never behind its back |
+| `cel inbox send <from> "<text>" --workspace <w>` then `cel inbox resolve <id> --workspace <w>` | "answer that decision" - the reply and the close are one act; doing one of them is the failure mode |
+| `cel-fanout land <id> --workspace <w>` | "land #12", "merge ABC-49" - the DELEGATION, not the PR: merging by hand leaves a worker holding a branch nobody collects |
+| `herdr agent prompt <alias> "<text>"` | "nudge ABC-49", "remind him to push" - reaches the agent now, where mail is read when it next looks |
+| `cel run orchestrator --product <p> --workspace <w>` | "restart the bundle orchestrator" - only when it is not already live |
+| `cel-linear state ABC-49 "<state>"` | "move ABC-49 to In Review" - the state name comes off the board, not from memory |
+| `cel run reviewer --repo <r> --pr <n> --workspace <w>` | "get a reviewer on #12" |
 | `herdr agent focus <name>` | when the operator says "take me to …" |
 | `cel-fanout release --all [--state finished,collected] --workspace <w>` | "clean up finished workers on <w>", "release everything that is done on <w>" |
 | `cel-fanout collect --all --workspace <w>` | "collect all the finished workers on <w>" |

@@ -190,6 +190,99 @@ cmd_state() { # <IDENTIFIER> <state-name e.g. "In Progress">
     | jq -r 'if .data.issueUpdate.success then "moved to '"$2"'" else "failed" end'
 }
 
+# --- the board -------------------------------------------------------------
+#
+# What the console's BOARD panel reads. It is the only subcommand here with a
+# CACHE, and the reason is the console rather than Linear: the panel refreshes
+# after every command the operator runs, and an operator who keeps the console
+# open would otherwise be a request to Linear every few seconds for as long as
+# the box is up. Sixty seconds is short enough that a ticket someone just moved
+# appears on the next refresh and long enough that a busy minute costs one call.
+#
+# The cache holds the RAW response, not the rendering: `--json` and the text
+# form are two readings of one query, and caching each separately would have
+# them disagree about what the board says.
+CEL_CACHE_DIR="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}"
+BOARD_TTL="${CEL_LINEAR_BOARD_TTL:-60}"
+
+_board_raw() { # <team-key> -> the raw GraphQL response
+  local team="$1" f="$CEL_CACHE_DIR/linear-board-$1.json" age
+  if [ -s "$f" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
+    [ "$age" -lt "$BOARD_TTL" ] && { cat "$f"; return 0; }
+  fi
+  local since resp
+  # "Done today" is the board's own definition of recent: a column of
+  # everything ever completed is an archive, and the operator's question is
+  # what moved while they were away.
+  since="$(date -u +%Y-%m-%dT00:00:00.000Z)"
+  resp="$(_gql 'query($k: String!, $since: DateTimeOrDuration) {
+      teams(filter: {key: {eq: $k}}, first: 1) { nodes { key
+        states(first: 50) { nodes { name position type } }
+        issues(first: 100, filter: {or: [{state: {type: {nin: ["completed", "canceled"]}}},
+                                         {completedAt: {gt: $since}}]}) {
+          nodes { identifier title url updatedAt state { name } assignee { name } } } } } }' \
+    "$(jq -n --arg k "$team" --arg s "$since" '{k: $k, since: $s}')")" || return 1
+  mkdir -p "$CEL_CACHE_DIR"
+  printf '%s' "$resp" > "$f.$$" && mv -f "$f.$$" "$f"
+  printf '%s' "$resp"
+}
+
+# One row per issue, already in the team's workflow order. Every consumer -
+# the text form, `--json`, the console - reads this, so "grouped by state in
+# board order" is decided once.
+_board_rows() { # <team-key> [state-filter]
+  _board_raw "$1" | jq -c --arg only "${2:-}" '
+    .data.teams.nodes[0] // empty
+    | . as $t
+    | ([$t.states.nodes[] | {key: .name, value: .position}] | from_entries) as $ord
+    | [$t.issues.nodes[]
+       | {identifier, title, url, updatedAt,
+          state: (.state.name // ""), assignee: (.assignee.name // "")}]
+    | map(select($only == "" or ((($only | ascii_downcase | split(",")) | index(.state | ascii_downcase)) != null)))
+    | sort_by(($ord[.state] // 99), (.updatedAt | . // "") ) | reverse | sort_by($ord[.state] // 99)
+    | .[]'
+}
+
+cmd_board() { # [--team K] [--state a,b] [--json]
+  local teams=() only="" json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --team) teams+=("$2"); shift 2;;
+    --state) only="$2"; shift 2;;
+    --json) json=1; shift;;
+    *) die "board: unknown argument '$1'";; esac; done
+
+  # THE WORKSPACE'S TEAMS, when none is named. A box runs several products and
+  # the console asks per workspace, so the repos say which boards belong to it
+  # (`repos[].linear_team`) rather than the operator repeating them.
+  if [ "${#teams[@]}" -eq 0 ]; then
+    local d=""
+    if [ -n "$CEL_LINEAR_WS" ]; then d="$(registry_require "$CEL_LINEAR_WS")"; else d="$(ws_current 2>/dev/null || true)"; fi
+    if [ -n "$d" ] && [ -f "$d/workspace.yaml" ]; then
+      local k
+      while read -r k; do [ -n "$k" ] && teams+=("$k"); done < <(
+        yq -r '[.repos[].linear_team // empty] | unique | .[]' "$d/workspace.yaml" 2>/dev/null || true)
+    fi
+  fi
+  [ "${#teams[@]}" -gt 0 ] || die "board: no team - pass --team <KEY>, or run it against a workspace whose repos carry linear_team"
+
+  local team rows state last
+  for team in "${teams[@]}"; do
+    rows="$(_board_rows "$team" "$only")" || die "board: could not read team '$team'"
+    if [ "$json" = 1 ]; then
+      [ -n "$rows" ] && printf '%s\n' "$rows"
+      continue
+    fi
+    last=""
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      state="$(printf '%s' "$row" | jq -r '.state')"
+      [ "$state" = "$last" ] || { printf '%s\n' "$state"; last="$state"; }
+      printf '%s' "$row" | jq -r '"  \(.identifier)  \(if .assignee == "" then "-" else .assignee end)  \(.title)"'
+    done <<< "$rows"
+  done
+}
+
 # Strip --workspace out of argv before anything dispatches on "$1".
 ARGV=()
 while [ $# -gt 0 ]; do
@@ -221,6 +314,7 @@ case "${1:-help}" in
   create)    shift; cmd_create "$@";;
   comment)   shift; cmd_comment "$@";;
   state)     shift; cmd_state "$@";;
+  board)     shift; cmd_board "$@";;
   assign)    shift; cmd_assign "$@";;
   *) cat <<'EOS'
 cel-linear - Linear tickets from any runtime (GraphQL, LINEAR_API_KEY)
@@ -235,6 +329,13 @@ cel-linear - Linear tickets from any runtime (GraphQL, LINEAR_API_KEY)
   cel-linear assign <ID> [me|<user-id>]      retrofit an unassigned ticket
   cel-linear comment <ID> <body>
   cel-linear state <ID> <state-name>         e.g. "In Progress", "In Review"
+  cel-linear board [--team K] [--state a,b] [--json]
+                                             the team's open issues and what
+                                             it finished today, grouped by
+                                             state in workflow order; the raw
+                                             query is cached 60 s under
+                                             $CEL_CACHE so the console's
+                                             refresh cannot hammer Linear
 EOS
   [ "${1:-help}" = help ] || exit 2;;
 esac

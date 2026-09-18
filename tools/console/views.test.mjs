@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import {
   renderOutput, unitView, workerView, memHuman, sortWorkers,
   subsEdge, subsLevel, quotaView,
+  ago, boardGroups, boardLine, prLine, ticketView, prView,
+  timelineLine, timelineView, digestLine,
 } from './views.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
@@ -195,6 +197,157 @@ t('the memory sort puts the biggest tree first and leaves the default order alon
   // a worker with no number sorts last rather than above a measured one
   const mixed = [{ id: 'a' }, { id: 'b', rss_mb: 10 }];
   assert.deepEqual(sortWorkers(mixed, true).map((w) => w.id), ['b', 'a']);
+});
+
+
+// --- CEL-25: the board, the PRs, the digest and the timeline ---------------
+//
+// An operator steers by the ticket board and the pull requests, and neither
+// was on screen: the console showed the fleet's own state and nothing about
+// the work it exists to move. These are the rows, and they are pure so a
+// column that goes missing goes missing in a test.
+
+const NOW = Date.parse('2026-09-20T12:00:00Z');
+
+const TICKETS = [
+  { identifier: 'ABC-48', title: 'the kerning is wrong on the header', state: 'Todo', assignee: '', updatedAt: '2026-09-20T09:00:00Z', url: 'https://linear.invalid/ABC-48' },
+  { identifier: 'ABC-49', title: 'ship the gadget bundle', state: 'In Progress', assignee: 'Sam', updatedAt: '2026-09-20T10:00:00Z', url: 'https://linear.invalid/ABC-49' },
+  { identifier: 'ABC-50', title: 'retire the old widget', state: 'In Progress', assignee: '', updatedAt: '2026-09-20T11:55:00Z', url: 'https://linear.invalid/ABC-50' },
+  { identifier: 'ABC-47', title: 'done this morning', state: 'Done', assignee: 'Sam', updatedAt: '2026-09-20T08:00:00Z', url: 'https://linear.invalid/ABC-47' },
+];
+
+const PRS = [
+  { repo: 'widget', number: 12, title: 'ship the gadget bundle', headRefName: 'ABC-49-slug', isDraft: false, reviewDecision: 'APPROVED', statusCheckRollup: [{ conclusion: 'SUCCESS' }, { conclusion: 'SUCCESS' }], updatedAt: '2026-09-20T10:00:00Z' },
+  { repo: 'gadget', number: 13, title: 'retire the old widget', headRefName: 'ABC-50-other', isDraft: true, reviewDecision: '', statusCheckRollup: [{ conclusion: 'FAILURE' }], updatedAt: '2026-09-20T11:00:00Z' },
+];
+
+t('an age reads the way an operator says it', () => {
+  assert.equal(ago('2026-09-20T11:58:00Z', NOW), '2m');
+  assert.equal(ago('2026-09-20T10:00:00Z', NOW), '2h');
+  assert.equal(ago('2026-09-17T10:00:00Z', NOW), '3d');
+  assert.equal(ago('', NOW), '-');
+});
+
+t('the board groups by state in the order the board gave them', () => {
+  const groups = boardGroups(TICKETS);
+  assert.deepEqual(groups.map((g) => g.state), ['Todo', 'In Progress', 'Done']);
+  assert.deepEqual(groups[1].rows.map((r) => r.identifier), ['ABC-49', 'ABC-50']);
+});
+
+t('a board row names the ticket, its state, who is on it and how old it is', () => {
+  const line = boardLine(TICKETS[1], { id: 'ABC-49-slug', alias: 'widget/ABC-49-slug' }, NOW);
+  assert.match(line, /ABC-49/);
+  assert.match(line, /In Progress/);
+  assert.match(line, /@widget\/ABC-49-slug/);
+  assert.match(line, /\b2h\b/);
+  assert.match(line, /ship the gadget bundle/);
+  // no worker on it yet: the column says so rather than claiming an alias
+  assert.match(boardLine(TICKETS[0], null, NOW), /ABC-48/);
+});
+
+t('a PR row carries the review decision, the checks and the branch', () => {
+  const line = prLine(PRS[0], NOW);
+  assert.match(line, /#12/);
+  assert.match(line, /ABC-49-slug/);
+  assert.match(line, /review APPROVED/);
+  assert.match(line, /ci \u2713/);
+  assert.match(line, /\b2h\b/);
+  assert.match(line, /ship the gadget bundle/);
+  const red = prLine(PRS[1], NOW);
+  assert.match(red, /ci \u2717/);
+  assert.match(red, /draft/);
+});
+
+t('the ticket detail shows the description head, the last comments and the worker', () => {
+  const text = ticketView({
+    ticket: { ...TICKETS[1], description: 'first paragraph of the description\nand more', comments: [
+      { user: 'Sam', body: 'older note', createdAt: '2026-09-19T10:00:00Z' },
+      { user: 'Pat', body: 'newer note', createdAt: '2026-09-20T09:00:00Z' },
+    ] },
+    worker: { id: 'ABC-49-slug', ticket: 'ABC-49', state: 'running', live: 'idle', quiet_secs: 812 },
+    ws: 'alpha',
+  });
+  assert.match(text, /TICKET ABC-49/);
+  assert.match(text, /In Progress/);
+  assert.match(text, /first paragraph of the description/);
+  assert.match(text, /older note/);
+  assert.match(text, /newer note/);
+  assert.match(text, /ABC-49-slug/);
+  for (const b of ['[start]', '[move]', '[open]']) assert.ok(text.includes(b), `missing ${b}`);
+});
+
+t('the PR detail lists the checks by name and the review state', () => {
+  const text = prView({
+    pr: { ...PRS[0], statusCheckRollup: [{ name: 'gate', conclusion: 'SUCCESS' }, { name: 'lint', conclusion: 'FAILURE' }] },
+    worker: { id: 'ABC-49-slug', ticket: 'ABC-49', state: 'finished', live: '-', quiet_secs: 60 },
+    ws: 'alpha',
+  });
+  assert.match(text, /PR #12/);
+  assert.match(text, /ABC-49-slug/);
+  assert.match(text, /gate/);
+  assert.match(text, /lint/);
+  assert.match(text, /APPROVED/);
+  for (const b of ['[land]', '[open]', '[review]']) assert.ok(text.includes(b), `missing ${b}`);
+});
+
+t('the digest says what happened since the operator last looked', () => {
+  const line = digestLine({
+    since: '2026-09-20T09:41:00Z',
+    mail: [
+      { kind: 'status', from: 'bundle-orch', message: 'a long line that goes on and on and on past sixty characters for sure' },
+      { kind: 'status', from: 'bundle-orch', message: 'ABC-49 pushed' },
+      { kind: 'status', from: 'bundle-orch', message: 'ABC-50 delegated' },
+    ],
+    merged: 2,
+    waiting: 1,
+  });
+  assert.match(line, /^since 09:41: /);
+  assert.match(line, /3 status from bundle-orch/);
+  assert.match(line, /ABC-50 delegated/);
+  assert.match(line, /2 PRs merged/);
+  assert.match(line, /1 decision waiting/);
+  // nothing at all is said plainly, not as three zeroes
+  assert.match(digestLine({ since: '2026-09-20T09:41:00Z', mail: [], merged: 0, waiting: 0 }), /nothing new/);
+});
+
+t('the timeline is one line per event, newest last', () => {
+  const events = [
+    { ts: '2026-09-20T12:47:00Z', ws: 'alpha', kind: 'merged', what: '#2008 ABC-105' },
+    { ts: '2026-09-20T09:00:00Z', ws: 'alpha', kind: 'status', what: 'bundle-orch: first line' },
+  ];
+  assert.match(timelineLine(events[0]), /merged/);
+  assert.match(timelineLine(events[0]), /#2008 ABC-105/);
+  assert.match(timelineLine(events[0]), /alpha/);
+  const text = timelineView(events);
+  assert.match(text, /TIMELINE/);
+  // newest LAST: the eye lands at the bottom, where the newest thing is
+  assert.ok(text.indexOf('first line') < text.indexOf('#2008'), 'the timeline is upside down');
+});
+
+t('the unit view lays out the board and the PRs with the rest', () => {
+  const text = unitView({
+    unit: UNIT,
+    items: [],
+    tail: [],
+    board: TICKETS,
+    prs: PRS,
+    digest: 'since 09:41: nothing new',
+    now: NOW,
+  });
+  assert.match(text, /BOARD/);
+  assert.match(text, /In Progress/);
+  assert.match(text, /ABC-49/);
+  assert.match(text, /PRS/);
+  assert.match(text, /#12/);
+  assert.match(text, /review APPROVED/);
+  assert.match(text, /since 09:41/);
+  // the order the spec fixes: orchestrator, workers, board, PRs, waiting, mail
+  const at = (s) => text.indexOf(s);
+  assert.ok(at('ORCHESTRATOR') < at('WORKERS'), 'orchestrator is not first');
+  assert.ok(at('WORKERS') < at('BOARD'), 'the board is above the workers');
+  assert.ok(at('BOARD') < at('PRS'), 'the PRs are above the board');
+  assert.ok(at('PRS') < at('WAITING'), 'waiting is above the PRs');
+  assert.ok(at('WAITING') < at('RECENT MAIL'), 'the mail is above waiting');
 });
 
 process.stdout.write('views.test.mjs: all good\n');

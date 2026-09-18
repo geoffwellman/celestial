@@ -179,7 +179,35 @@ gives you back the screen you had. Panels, top to bottom:
   workspace and repos) with `[focus]` and `[message]`; every worker it has out
   as a row — ticket, id, state, live agent, quiet time, verdict in colour,
   commits ahead and PR number; that workspace's open decisions; and the last
-  ten lines of its mail. ↑/↓ pick a worker, Enter opens it, `Esc` goes back.
+  ten lines of its mail — and, since CEL-25, the **board** and the **PRs**
+  between them. Ctrl+T cycles the focus round the six panels; panels that would
+  not fit collapse to their title and a count, because nothing may render below
+  the last row of the screen. ↑/↓ pick a row, Enter opens it, `Esc` goes back.
+  `n` nudges the selected worker, `R` restarts an orchestrator that is not
+  live, `a` answers the waiting item and closes it — each a *proposal* on the
+  command line, never a keypress that changes the box.
+- **Board** — the product's tickets, from `cel-linear board --json`, grouped by
+  state in the team's own workflow order: `ABC-49  In Progress  @worker  2h
+  title…`, with the worker column saying what *this box* is doing about a
+  ticket the team thinks is in progress. Enter opens the ticket — description
+  head, last two comments, the worker on it — and `s` proposes "pick up ABC-49
+  next" to the orchestrator, `m` moves it with the team's states offered as
+  numbered options, `o` opens it in a browser.
+- **PRs** — the open pull requests on the product's repos, one `gh pr list` per
+  repo: `#12  ABC-49-slug  review APPROVED  ci ✓  2h  title…`. Enter shows the
+  checks by name, the review state and the worker behind the branch. `l` lands
+  it — only when the review is APPROVED and the checks are green, and through
+  `cel-fanout land` on the *delegation*, because merging by hand leaves a
+  worker holding a branch nobody will collect. `v` starts a reviewer.
+- **Since you last looked** — one line under the unit view's header, computed
+  from the console's own cursor for that workspace: `since 09:41: 3 status from
+  bundle-orch (last: "…") · 2 PRs merged · 1 decision waiting`. It is the
+  console's mark, not the mailbox's read marker — looking at a panel must not
+  mark anyone else's mail as read.
+- **Timeline** — `T` (or Ctrl+Y) from the main screen: the box's own history in
+  one column, newest *last*, from the mailboxes, the delegation ledger and the
+  pull request lists at once — `12:47 alpha  merged  #2008 ABC-105`. Enter
+  opens whatever the line is about; `Esc` comes back.
 - **Worker view** — the answer to *why*. It runs `cel-fanout why <id>` when it
   opens and shows what it said: the facts line, the pane tail, the mail from
   that worker, the PR and a `next:` sentence. `p` prompts it, `f` focuses its
