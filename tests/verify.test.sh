@@ -155,3 +155,40 @@ test_a_gate_in_its_own_group_still_reports_output_and_code() {
   assert_contains "$(_v .gate.tail)" "hello-from-gate"
   rm -rf "$T"
 }
+
+# A GATE THAT WAITED ITS TURN IS NOT A GATE THAT TIMED OUT. The suite takes a
+# box-wide lock (tests/suite-lock.test.sh), so on a busy box a verifier can sit
+# for twenty minutes before its gate runs a single test. The --gate-timeout
+# clock starts AFTER the lock is acquired, and the wait is recorded, so a slow
+# verdict is explained rather than being read as a failure.
+test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
+  _vrepo; _vcommit impl src/a.ts
+  local lock="$T/suite.lock"
+  flock "$lock" -c 'sleep 3' &
+  local holder=$!
+  local i=0
+  while flock -n "$lock" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i + 1)); [ "$i" -lt 50 ] || break; done
+  # a one-second timeout against a three-second wait: the gate itself is
+  # instant, so anything but PASS here is the clock having started too early
+  CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" --gate 'true' --gate-timeout 1 --quiet
+  wait "$holder" 2>/dev/null || true
+  assert_eq "$(_v .gate.timed_out)" false
+  assert_eq "$(_v .gate.passed)" true
+  local waited; waited="$(_v .gate.waited_secs)"
+  case "$waited" in
+    ''|*[!0-9]*) printf 'the wait for the suite lock was not recorded: [%s]\n' "$waited"; rm -rf "$T"; return 1;;
+  esac
+  if [ "$waited" -lt 1 ]; then
+    printf 'the wait for the suite lock was not recorded: [%s]s\n' "$waited"; rm -rf "$T"; return 1
+  fi
+  rm -rf "$T"
+}
+
+# Nobody holding it: no wait, and nothing about the verdict changes.
+test_an_unheld_suite_lock_costs_the_gate_nothing() {
+  _vrepo; _vcommit impl src/a.ts
+  CEL_SUITE_LOCK="$T/suite.lock" "$VERIFY" "$T" --gate 'true' --quiet
+  assert_eq "$(_v .gate.passed)" true
+  assert_eq "$(_v .gate.waited_secs)" 0
+  rm -rf "$T"
+}
