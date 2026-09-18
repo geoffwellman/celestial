@@ -1076,3 +1076,59 @@ test_console_timeline_merges_mail_delegations_and_prs() {
 test_console_verb_keys_are_proved() {
   node "$CEL_ROOT/tools/console/verbs.test.mjs"
 }
+
+# THE SERVICES VIEW. "is the builder up, and what is its URL from the laptop"
+# is one keypress from the main screen, and this is the text that key draws -
+# rendered from a stubbed `cel services --json` so the assertion is on the
+# columns rather than on whatever this box happens to be running.
+_console_services_setup() {
+  T="$(mktemp -d)"
+  mkdir -p "$T/bin" "$T/inbox"
+  printf '{"workspaces":[{"name":"alpha","root":{"unread":0,"open":0},"units":[]}]}\n' > "$T/fleet.json"
+  cat >"$T/services.json" <<'JSON'
+[{"name":"builder","kind":"declared","state":"up","port":4322,"rss_mb":312,"uptime_secs":7200,
+  "reach":"http://100.1.2.3:7770/svc/4322/","ticket":"","url":"http://127.0.0.1:4322","observe_only":false},
+ {"name":"try ABC-49","kind":"preview","state":"healthy","port":4401,"rss_mb":120,"uptime_secs":600,
+  "reach":"http://100.1.2.3:7770/svc/4401/","ticket":"ABC-49","url":"http://localhost:4401","observe_only":false},
+ {"name":"docs","kind":"declared","state":"down","port":9,"rss_mb":0,"uptime_secs":0,
+  "reach":"","ticket":"","url":"http://127.0.0.1:9/","observe_only":true}]
+JSON
+  cat >"$T/bin/cel" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  fleet)    cat "$T/fleet.json" ;;
+  services) cat "$T/services.json" ;;
+  *) printf '' ;;
+esac
+EOF
+  chmod +x "$T/bin/cel"
+  export CEL_BIN="$T/bin/cel"
+  export CEL_INBOX_DIR="$T/inbox"
+}
+
+test_console_services_view_renders_one_row_per_service_and_preview() {
+  _console_services_setup
+  local out; out="$(node "$CONSOLE_MJS" --render-once --services)"
+  assert_contains "$out" "SERVICES"
+  assert_contains "$out" "builder"
+  assert_contains "$out" ":4322"
+  assert_contains "$out" "312M"
+  assert_contains "$out" "2h"
+  assert_contains "$out" "http://100.1.2.3:7770/svc/4322/"
+  # a preview shows the ticket it belongs to
+  assert_contains "$out" "ABC-49"
+  # and a dead observe-only row still appears, because a service you declared
+  # and did not start is exactly what you want to see
+  assert_contains "$out" "docs"
+  assert_contains "$out" "down"
+  _console_teardown
+}
+
+# The workspace header answers "is anything down here" without entering the
+# view at all.
+test_console_fleet_header_counts_services_up_and_down() {
+  _console_services_setup
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" "services 2 up/1 down"
+  _console_teardown
+}
