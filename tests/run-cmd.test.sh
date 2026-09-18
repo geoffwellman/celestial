@@ -336,6 +336,8 @@ test_run_worker_via_gateway_dies_when_the_gateway_is_down() {
   _ws_gateway
   ( cd "$T" && GW_STUB_DOWN=1 assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile gw --dry-run )
   _ws_gateway_clean
+}
+
 # THE LAUNCHER MARKS ITS CHILDREN. A runtime that rewrites its own argv (pi
 # sets process.title) leaves `cel gc` nothing to recognise in /proc/<pid>/cmdline,
 # so ownership travels in the environment instead, where exec fixes it for the

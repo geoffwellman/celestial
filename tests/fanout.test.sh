@@ -2047,6 +2047,8 @@ test_the_same_commands_from_the_repo_checkout_still_run() {
   assert_contains "$out" "no delegation with id"
   ! printf '%s' "$out" | grep -q "a worker does not" || { echo "the repo checkout was treated as a worker"; _fanout_worker_teardown; return 1; }
   _fanout_worker_teardown
+}
+
 # A delegated worker gets the same three variables as one started by hand:
 # `cel gc` identifies a pi worker by its environment, not by its argv, and a
 # fanout worker that carried neither would be the unidentified row that keeps
