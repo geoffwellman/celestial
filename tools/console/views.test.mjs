@@ -350,6 +350,43 @@ t('the unit view lays out the board and the PRs with the rest', () => {
   assert.ok(at('WAITING') < at('RECENT MAIL'), 'the mail is above waiting');
 });
 
+// --- QUOTA: the subscriptions behind the box, direct and through the gateway
+// One row per ACCOUNT, because that is the thing that runs out. A gateway
+// account's windows are the same shape a direct subscription's are; only
+// `source` says which door it came through.
+const GATEWAY = {
+  installed: true, ready: true, port: 47411, credentials: 3,
+  accounts: [
+    { source: 'gateway', provider: 'openai-codex', id: 'aaaaaa', ok: true,
+      windows: [{ label: '7 days', used: 100, limit: 100, used_pct: 100, state: 'exhausted' }] },
+    { source: 'gateway', provider: 'opencode-go', id: 'cred-3', ok: true, windows: [] },
+  ],
+};
+
+t('the quota view lists gateway accounts under their own heading', () => {
+  const text = quotaView({ gateway: GATEWAY }).join('\n');
+  assert.match(text, /via gateway/);
+  assert.match(text, /openai-codex/);
+  assert.match(text, /aaaaaa/);
+  assert.match(text, /7 days 100%/);
+  assert.match(text, /exhausted/);
+});
+
+// A gateway that is not installed is not an error on the QUOTA view: most
+// boxes have none, and a red line about an optional door teaches people to
+// ignore red lines.
+t('the quota view says nothing alarming when there is no gateway', () => {
+  const text = quotaView({ gateway: { installed: false, accounts: [] } }).join('\n');
+  assert.match(text, /no gateway/);
+  assert.doesNotMatch(text, /exhausted/);
+});
+
+t('cel gateway status --json renders as the gateway section, never as JSON', () => {
+  const out = renderOutput('cel gateway status --json', JSON.stringify(GATEWAY));
+  assert.match(out, /via gateway/);
+  assert.doesNotMatch(out, /[{}]/);
+});
+
 process.stdout.write('views.test.mjs: all good\n');
 
 // --- CEL-27: subscriptions -------------------------------------------------

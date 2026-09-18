@@ -45,6 +45,7 @@ export const INTENTS = [
   ['restart_orchestrator', 'start a product\u2019s orchestrator again after it has stopped'],
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
+  ['gateway', 'which accounts or subscriptions are signed in and usable behind the box\u2019s gateway'],
   ['other', 'none of the above, or the sentence is not about the fleet at all'],
 ];
 
@@ -281,6 +282,12 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
       // is no workspace or product that could narrow it - the accounts are the
       // box's, not a workspace's.
       return ['cel quota'];
+
+    // Same box-level shape, one door further out: the gateway holds the
+    // accounts `cel quota` cannot see, because they are not signed in to a
+    // runtime at all.
+    case 'gateway':
+      return ['cel gateway status'];
 
     case 'try': {
       const w = workerIn(s, f);

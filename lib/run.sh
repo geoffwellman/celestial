@@ -11,6 +11,8 @@ _CEL_RUN=1
 . "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
 # shellcheck source=lib/profiles.sh
 . "$(dirname "${BASH_SOURCE[0]}")/profiles.sh"
+# shellcheck source=lib/gateway.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
 
 # Where a role's body is written for a runtime that injects it from a file.
 #
@@ -417,6 +419,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
+  local PROFILE_VIA="" PROFILE_WSDIR="" PROFILE_GATEWAY_ACCOUNTS=0
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$runtime"
     [ -z "$PROFILE_VETO" ] || die "cel run: profile '$profile' is vetoed - $PROFILE_VETO"
@@ -469,6 +472,30 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
 
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
 
+  # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
+  # it reaches this box's auth-gateway, which holds several subscriptions per
+  # provider and picks one BY SESSION KEY. pi sends no session identity of its
+  # own (proved with a logging proxy in SPIKE-gateway), so the only lever is a
+  # provider `headers` entry bound to an environment variable - which means
+  # the pane needs two variables set before the agent starts:
+  #
+  #   OMP_GATEWAY_TOKEN  the bearer, READ IN THE PANE by omp itself. The plane
+  #                      never handles the value: it types a line containing a
+  #                      command substitution, so no token reaches a launch
+  #                      line, a log, a pane's scrollback or this process.
+  #   CEL_SESSION_ID     the balancer's key. One worker, one key, one account
+  #                      for its life; the next worker may land on another.
+  local -a GATEWAY_ENV=()
+  if [ "${PROFILE_VIA:-}" = gateway ]; then
+    GATEWAY_ENV=(export 'OMP_GATEWAY_TOKEN=$(omp auth-gateway token)' "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
+    # models.json is the owner's file, so a dry run must not touch it.
+    if [ "$dry_run" -eq 0 ]; then
+      gateway_pi_models_write \
+        || die "cel run: could not read the gateway's model list - cel gateway status"
+    fi
+  fi
+
+
   # Reviewer panes join the caller's own view instead of creating one.
   if [ "$role" = "reviewer" ]; then
     if [ "$dry_run" -eq 1 ]; then
@@ -507,6 +534,10 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   if [ "$dry_run" -eq 1 ]; then
     printf 'herdr %s\n' "${CREATE_ARGS[*]}"
     [ -n "$layout" ] && printf 'herdr-workspace-manager apply %s\n' "$layout"
+    # Values MASKED: the session id is not a secret but the bearer beside it
+    # is, and a preview that prints one teaches people to paste both.
+    [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
+      || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
     printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
       "$agent_name" "$runtime" "$(_run_dry_agent_args)"
     return 0
@@ -524,6 +555,10 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   if [ -n "$layout" ]; then
     pane_id="$(_run_apply_layout "$layout" "$ws_id" "$wsdir" "$pane_id")"
   fi
+
+  # Typed into the pane's own shell, so the export survives into the agent the
+  # next command starts - and the bearer is expanded there, by omp, never here.
+  [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
 
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }

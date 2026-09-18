@@ -573,6 +573,54 @@ account** — a status over `CEL_SUB_WARN_PCT` (80), a blocker at 100 — and
 takes it down again when the window drops. A profile routed at a spent 5h
 window is vetoed before its pane spawns, the same way a dry balance is.
 
+## Gateway — several subscriptions behind one door
+
+One Codex or Claude subscription maxes out. `cel gateway` puts **all of them**
+behind one loopback door and spreads workers across them, and shows what each
+one has left.
+
+```bash
+cel gateway install          # broker + gateway as box services, loopback only
+cel gateway status           # one row per account: provider, id, ok, windows
+cel gateway login anthropic  # sign another subscription in
+```
+
+Under it are omp's two processes: `auth-broker` is the credential vault (several
+OAuth accounts per provider) and `auth-gateway` is an OpenAI/Anthropic surface
+on `127.0.0.1` that mints the OAuth itself, drops the accounts that are
+unavailable and picks one of the rest **by session key**. A profile reaches it
+with one field:
+
+```yaml
+worker_profiles:
+  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+```
+
+`cel run worker --profile gw` then writes an `ompgw` provider into
+`~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
+and the model list comes from the gateway's own `/v1/models`), launches pi at
+`ompgw/openai-codex/gpt-5.5`, and sets two variables in the pane:
+`OMP_GATEWAY_TOKEN`, read there by omp so no bearer ever passes through the
+plane, and `CEL_SESSION_ID`, which is the **only** thing the balancer can pin an
+account by — pi sends no session identity of its own, so without the injected
+`x-session-id` header every worker on the box is the same anonymous session.
+
+Three things are worth knowing before you rely on it:
+
+- **Availability filtering comes first, session choice second.** With one
+  usable account per provider the spreading is a no-op; the feature is worth
+  exactly as many subscriptions as are signed in and not rate-blocked.
+- **A disabled credential vanishes**, it does not error. It disappears from
+  `/v1/models`, so a worker sent at it dies with "Unknown model" rather than
+  "auth expired" — which is why `cel doctor` and the profile preflight both
+  say which providers have nothing usable, and veto the launch.
+- **The bearer grants every subscription in the vault** to anything that can
+  reach the port. The services bind loopback only; nothing writes the token.
+
+Its accounts land in the same places the signed-in subscriptions above do: the
+QUOTA view's `via gateway` section, the dashboard's Subscriptions card, and
+`cel gateway status --json` - one row per account, carrying `source: gateway`.
+
 ## Tickets
 
 Set `tickets: { system: linear }` and the plane wires Linear's **official MCP
