@@ -600,7 +600,7 @@ cmd_delegate() {
     spike) rolefile="$CEL_ROOT/core/roles/spike.md"; roletag=spike ;;
   esac
   local body; body="$(ws_render_role "$wsdir" "$rolefile")"
-  local AGENT_ARGS=()
+  local AGENT_ARGS=() AGENT_ROLE_FILE=""
   _run_agent_args "$rt" "$roletag" "$body" 0 "$wsdir"
   local -a PROFILE_ARGS=()
   profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
@@ -651,6 +651,15 @@ cmd_delegate() {
   local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
   if ! _ledger_spawn "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
     c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
+  fi
+
+  # Same launch mark as `cel run` (lib/run.sh _run_launch_env): a delegated
+  # worker whose runtime rewrites its argv is invisible to `cel gc` without
+  # it, and its worktree is then kept for ever. Pass-through only - the text
+  # is rendered there, typed here, so both paths mark a pane identically.
+  if ! _ledger_spawn "$HERDR" pane send-text "$pane" \
+       "$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE")" > /dev/null 2>&1; then
+    c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
   fi
 
   _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
