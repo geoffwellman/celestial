@@ -81,6 +81,13 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
   suite_lock_fd=""
   suite_lock="$(_verify_suite_lock_path)"
+  # A LOCK THE CALLER IS ALREADY HOLDING IS NOT A QUEUE, IT IS A DEADLOCK.
+  # This verifier is normally run from inside a suite (tests/fanout.test.sh ->
+  # collect -> here -> the gate), and on CI that inner run waited twenty
+  # minutes for the outer one until the job was cancelled. tests/run.sh exports
+  # CEL_SUITE_LOCK_HELD when it holds the lock; inheriting it means being
+  # inside it already.
+  [ -n "${CEL_SUITE_LOCK_HELD:-}" ] && suite_lock=none
   if [ "$suite_lock" != none ] && command -v flock >/dev/null 2>&1; then
     mkdir -p "$(dirname "$suite_lock")" 2>/dev/null || true
     if exec {suite_lock_fd}>>"$suite_lock"; then
@@ -90,6 +97,10 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
         flock "$suite_lock_fd"
         g_waited=$(( $(date +%s) - lock_t0 ))
       fi
+      # Whatever this gate starts is inside the lock now - and this gate is
+      # very often `bash tests/run.sh`, which would otherwise queue behind the
+      # verifier that launched it.
+      export CEL_SUITE_LOCK="$suite_lock" CEL_SUITE_LOCK_HELD=1
     else
       suite_lock_fd=""
     fi
@@ -107,7 +118,11 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   # leave a server running, and that server holds the same descriptors.
   gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
   gate_killed="$gate_out.killed"
-  ( cd "$wt" && exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
+  # The gate is inside the lock by ENVIRONMENT, not by descriptor: a gate that
+  # leaves a process behind (this file has seen seven at once) must not leave
+  # it holding the box's suite lock as well.
+  ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
+    exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
   gate_pid=$!
   ( sleep "$gate_timeout"
     kill -0 "$gate_pid" 2>/dev/null || exit 0

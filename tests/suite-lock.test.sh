@@ -19,6 +19,10 @@ _suite_fixture() {
   cp "$CEL_ROOT/tests/lib/assert.sh" "$T/tests/lib/assert.sh"
   printf 'test_slow_thing() { sleep 2; }\n' > "$T/tests/slow.test.sh"
   export CEL_SUITE_LOCK="$T/suite.lock"
+  # The suite that runs THIS test is itself holding a lock and says so in the
+  # environment. Here that inheritance is exactly what is being tested, so the
+  # fixture runner starts as an outermost run would.
+  unset CEL_SUITE_LOCK_HELD
 }
 
 # Block until somebody holds the fixture lock, so a test never races the
@@ -167,5 +171,20 @@ test_the_holder_exports_the_lock_it_holds() {
     "$T" > "$T/tests/env.test.sh"
   bash "$T/tests/run.sh" >/dev/null 2>&1
   assert_eq "$(cat "$T/env.out")" "1 $T/suite.lock"
+  rm -rf "$T"
+}
+
+# A LEAKED PROCESS MUST NOT LEAK THE LOCK WITH IT. This runner already tolerates
+# tests that leave a setsid process behind - that is why it kills process
+# groups - but such a process inherits every descriptor, and one of them is now
+# the box's suite lock. Held by an orphan, it blocks every gate on the box long
+# after the run that produced it has finished, which is exactly the outage this
+# ticket set out to prevent.
+test_a_leaked_test_process_does_not_keep_the_lock() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  printf 'test_leaks_a_process() { setsid sleep 30 >/dev/null 2>&1 & }\n' > "$T/tests/leak.test.sh"
+  bash "$T/tests/run.sh" >/dev/null 2>&1
+  _await_free "$CEL_SUITE_LOCK" 20 || { echo "an orphan kept the suite lock"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

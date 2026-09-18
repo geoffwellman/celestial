@@ -52,6 +52,14 @@ _suite_lock_take() {
   local path; path="$(suite_lock_path)"
   [ "$NO_LOCK" -eq 1 ] && return 0
   [ "$path" = none ] && return 0
+  # RE-ENTRANT BY INHERITANCE. tests/fanout.test.sh runs `cel-fanout collect`,
+  # which runs cel-verify, which runs a gate - a whole second suite, started
+  # from inside a suite that is already holding this lock. On CI, where
+  # XDG_RUNTIME_DIR is unset and both processes resolve the same path, that is
+  # a run waiting twenty minutes for itself until the job is cancelled. A
+  # process started under a held lock is ALREADY INSIDE IT and must not queue;
+  # the holder says so in the environment, which children inherit for free.
+  [ -n "${CEL_SUITE_LOCK_HELD:-}" ] && return 0
   command -v flock >/dev/null 2>&1 || return 0
   mkdir -p "$(dirname "$path")" 2>/dev/null || true
   exec {SUITE_LOCK_FD}>>"$path" || { SUITE_LOCK_FD=""; return 0; }
@@ -67,6 +75,9 @@ _suite_lock_take() {
     printf 'suite lock acquired after %ss\n' "$(( $(date +%s) - t0 ))"
   fi
   printf '%s %s\n' "$$" "$(date +%H:%M)" > "$path"
+  # The path as well as the fact: a child that resolved it differently (a
+  # different TMPDIR, say) would otherwise queue on a second lock nobody holds.
+  export CEL_SUITE_LOCK="$path" CEL_SUITE_LOCK_HELD=1
 }
 _suite_lock_take
 
@@ -115,7 +126,14 @@ for f in "$CEL_ROOT"/tests/*.test.sh; do
   for t in $names; do
     if [ -n "$FILTER" ]; then case "$t" in *"$FILTER"*) ;; *) continue;; esac; fi
     tout="$TMPDIR/.test-output"
-    setsid bash -c "$PRELUDE; source '$f'; $t" > "$tout" 2>&1 &
+    # THE LOCK DESCRIPTOR IS NOT THE TEST'S TO HOLD. Every child inherits it,
+    # and this runner deliberately tolerates tests that leak a process (the
+    # setsid servers the group-kill above exists for). A leaked process holding
+    # the suite lock is worse than a leaked process: it blocks every gate on
+    # the box until it dies, long after the run that produced it finished. So
+    # the descriptor is closed on the way into each test.
+    ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
+      exec setsid bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
     CURRENT_GROUP=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
     _kill_current_group

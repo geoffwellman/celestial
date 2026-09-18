@@ -170,7 +170,9 @@ test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
   while flock -n "$lock" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i + 1)); [ "$i" -lt 50 ] || break; done
   # a one-second timeout against a three-second wait: the gate itself is
   # instant, so anything but PASS here is the clock having started too early
-  CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" --gate 'true' --gate-timeout 1 --quiet
+  # -u: the suite running this test holds a lock of its own and says so; this
+  # case is about a verifier that is the outermost thing on the box
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" --gate 'true' --gate-timeout 1 --quiet
   wait "$holder" 2>/dev/null || true
   assert_eq "$(_v .gate.timed_out)" false
   assert_eq "$(_v .gate.passed)" true
@@ -187,7 +189,7 @@ test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
 # Nobody holding it: no wait, and nothing about the verdict changes.
 test_an_unheld_suite_lock_costs_the_gate_nothing() {
   _vrepo; _vcommit impl src/a.ts
-  CEL_SUITE_LOCK="$T/suite.lock" "$VERIFY" "$T" --gate 'true' --quiet
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$T/suite.lock" "$VERIFY" "$T" --gate 'true' --quiet
   assert_eq "$(_v .gate.passed)" true
   assert_eq "$(_v .gate.waited_secs)" 0
   rm -rf "$T"
