@@ -97,7 +97,16 @@ export const sortWorkers = (workers, byMemory = false) => {
 // Column widths, shared by the TUI panel and the text view so they cannot
 // drift. A cell is CUT to its width, never allowed to push its neighbours:
 // one forty-four-character scout id used to shove every column off the edge.
-export const WORKER_COLS = { ticket: 9, slug: 26, state: 9, live: 7, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+export const WORKER_COLS = { ticket: 9, slug: 24, state: 9, live: 7, via: 12, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+// What is running the ticket: the profile name when the delegation recorded
+// one (`opus-pi`, `deepseek`), else runtime/model with the provider prefix
+// and version tail dropped (`omp/deepseek-v4.1-flash` → `omp/deepseek`).
+export const viaOf = (w) => {
+  if (w.profile) return String(w.profile);
+  const rt = String(w.runtime || ''); let m = String(w.model || '');
+  m = m.split('/').pop().replace(/[-_]?v?\d[\w.]*$/, '').replace(/-+$/, '');
+  return rt && m ? `${rt}/${m}` : rt || m || '-';
+};
 export const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s; };
 // The id minus its ticket prefix: `ABC-146-gradient-px` reads as `gradient-px`
 // beside the ABC-146 column; an adhoc id is shown whole.
@@ -107,7 +116,7 @@ export const slugOf = (w) => {
 };
 export const workerHeader = () => [
   'ticket'.padEnd(WORKER_COLS.ticket), 'worker'.padEnd(WORKER_COLS.slug), 'state'.padEnd(WORKER_COLS.state),
-  'agent'.padEnd(WORKER_COLS.live), 'quiet'.padStart(WORKER_COLS.quiet), '  ' + 'verdict'.padEnd(WORKER_COLS.verdict),
+  'live'.padEnd(WORKER_COLS.live), 'via'.padEnd(WORKER_COLS.via), 'quiet'.padStart(WORKER_COLS.quiet), '  ' + 'verdict'.padEnd(WORKER_COLS.verdict),
   'ahead'.padEnd(WORKER_COLS.ahead), 'rss'.padStart(WORKER_COLS.rss), ' pr',
 ].join(' ');
 
@@ -121,6 +130,7 @@ export const workerCells = (w) => ({
   slug: cut(slugOf(w), WORKER_COLS.slug).padEnd(WORKER_COLS.slug),
   state: cut(w.state || '-', WORKER_COLS.state).padEnd(WORKER_COLS.state),
   live: cut(w.live || '-', WORKER_COLS.live).padEnd(WORKER_COLS.live),
+  via: cut(viaOf(w), WORKER_COLS.via).padEnd(WORKER_COLS.via),
   quiet: quiet(w.quiet_secs).padStart(WORKER_COLS.quiet),
   verdict: `  ${cut(w.verdict || '-', WORKER_COLS.verdict).padEnd(WORKER_COLS.verdict)}`,
   ahead: String(w.ahead ?? '?').padEnd(WORKER_COLS.ahead),
