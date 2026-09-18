@@ -53,12 +53,13 @@ usage() {
   cat <<'EOS'
 cel - the celestial plane
 
-  cel version                   installed version + commit
+  cel version                   installed build: version+commits, sha, branch
   cel setup [--agents a,b|all]  install tools + agents, link core, install externals
   cel doctor                    diagnose this box (non-zero on problems)
   cel update                    move to the newest release, re-link, re-render
-                                --check: what a newer release would bring
-                                (exit 1 when behind); --rollback: undo it
+                                --check: what you have not got yet
+                                (exit 1 when behind); --rollback: undo it;
+                                --channel main|release: follow commits or tags
   cel agents                    list agents, install status and injection strategy
   cel shellenv                  print shell env; eval this in your rc
 
@@ -128,8 +129,8 @@ case "${1:-help}" in
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
   version|--version|-v)
             . "$CEL_ROOT/lib/version.sh"
-            printf 'celestial v%s (%s)\n' "$(cel_version)" \
-              "$(git -C "$CEL_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no-git')";;
+            printf 'celestial v%s (%s, %s)\n' "$(cel_build_version)" \
+              "$(cel_build_sha)" "$(cel_build_branch)";;
   fleet)    shift; . "$CEL_ROOT/lib/fleet.sh";   cmd_fleet "$@";;
   steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
   dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;

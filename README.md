@@ -358,7 +358,7 @@ Each tick, in order:
 | **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to the product's orchestrator, else root — this is what makes "move it to Todo" start work |
 | **servers** | `cel dash --ensure` for every workspace declaring a port; expired public shares are deleted, not merely refused |
 | **ensure orchestrators** | every product declaring `orchestrator: auto` with no live pane is started with `cel run orchestrator`, at most once every 30 minutes so a crash-looping one is not relaunched every tick |
-| **updates** | once a day, whether this plane is behind its latest release |
+| **updates** | once a day, whether this plane is behind — the newest release tag on the `release` channel, the commits on `origin/main` on the `main` channel, rolled up into one root item naming how many and which build you are on |
 
 Nudges are **rate-limited per subject** (4 hours; the update check, 24) through
 `~/.local/share/cel/steward-state`, so a stuck orchestrator is reminded rather
@@ -493,7 +493,7 @@ policy block into every agent.
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
 | `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per product, root's mail per workspace |
-| `cel update [--check·--rollback]` | move to the newest release tag, re-link and re-render, then verify; `--check` prints what you'd get and exits 1 when behind; `--rollback` undoes the last update |
+| `cel update [--check·--rollback·--channel]` | move to the newest release tag (or to `origin/main` on the main channel), re-link and re-render, then verify; `--check` prints what you have not got yet and exits 1 when behind; `--rollback` undoes the last update; `--channel main·release` picks which stream this box follows |
 | `cel ws new · add · sync · list · push · env` | workspace lifecycle |
 | `cel console` | the desk you keep open: fleet, decisions, inbox and a command line that also takes a sentence |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
@@ -612,9 +612,28 @@ Celestial follows [semver](https://semver.org); `VERSION` + `v*` tags are the
 truth and every release is announced on
 [GitHub Releases](https://github.com/geoffwellman/celestial/releases) with
 notes from [CHANGELOG.md](CHANGELOG.md) — **Watch → Custom → Releases** to get
-notified. On the box, `cel version` tells you what you're running, `cel
-doctor` and the steward tell you when you're behind, and `cel update` brings
-you current.
+notified. On the box, `cel version` tells you what you're running as
+`celestial v0.2.0+31 (d43910c, main)`: the nearest tag, **the commits since
+it**, the sha and the branch — the `+31` is the part people quote, because a
+version alone says v0.2.0 for thirty-odd merges.
+
+A box follows one of two **channels**, set in `~/.local/share/cel/config.yaml`
+(box-level, created 0600) and switched with `cel update --channel
+main|release`:
+
+```yaml
+update:
+  channel: release      # release (default) | main
+```
+
+On `release` — the default, and what you want unless you are working on the
+plane itself — `cel doctor`, the steward and `cel update --check` compare you
+to the newest release tag and `cel update` lands on it. On `main` they compare
+you to `origin/main`: `--check` names how many commits are ahead of your
+build, lists their subjects oldest first and the `[Unreleased]` notes you
+haven't got, and `cel update` fast-forwards to main's tip. Both channels
+refuse to touch a dirty tree or one that is off `main`, record where they came
+from, and undo with `cel update --rollback`.
 
 ## Licence
 

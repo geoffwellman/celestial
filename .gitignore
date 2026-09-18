@@ -17,6 +17,9 @@ secrets.json
 __pycache__/
 *.pyc
 
-# Machine-local session snapshots are never publication inputs.
+# Machine-local session snapshots are never publication inputs. The agent
+# harness writes its background-task transcripts into .pi/tasks inside whatever
+# worktree it is working in; a `git add -A` swept eight of them into CEL-21.
 tools/herdr/snapshots/
+.pi/
 /registry.yaml

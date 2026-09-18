@@ -208,12 +208,28 @@ cmd_doctor() {
   c_hd "celestial"
   # shellcheck source=lib/version.sh
   . "$CEL_ROOT/lib/version.sh"
-  local _v _latest
+  # shellcheck source=lib/config.sh
+  . "$CEL_ROOT/lib/config.sh"
+  local _v _latest _chan _n
   _v="$(cel_version)"; _latest="$(cel_latest_remote_version)"
   if [ -n "$_latest" ] && cel_version_lt "$_v" "$_latest"; then
     c_warn "v$_v installed, v$_latest available - run: cel update"
   else
     c_ok "v$_v$([ -z "$_latest" ] && printf ' (offline - update check skipped)')"
+  fi
+  # The version alone hid the distance: a box on the main channel is thirty-odd
+  # merges past its tag and every surface used to call that "up to date".
+  _chan="$(cel_config_get update channel)"
+  case "$_chan" in main) ;; *) _chan=release ;; esac
+  if [ "$_chan" = main ]; then
+    _n="$(cel_commits_behind_main)"
+    if [ "$_n" -gt 0 ] 2>/dev/null; then
+      c_warn "build v$(cel_build_version) ($(cel_build_sha)) · channel main · $_n commits behind origin/main"
+    else
+      c_ok "build v$(cel_build_version) ($(cel_build_sha)) · channel main · up to date"
+    fi
+  else
+    c_ok "build v$(cel_build_version) ($(cel_build_sha)) · release channel: newest tag v${_latest:-unknown}"
   fi
 
   c_hd "Base tools"

@@ -695,8 +695,42 @@ WantedBy=timers.target
 _steward_update_check() {
   # shellcheck source=lib/version.sh
   . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
-  local v latest dir
+  # shellcheck source=lib/config.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+  local v latest dir chan
   dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"
+  chan="$(cel_config_get update channel)"
+  case "$chan" in main) ;; *) chan=release ;; esac
+
+  # On the main channel the tag never moves, so "a new release is out" never
+  # fires and the box hears nothing for thirty-odd merges. What it needs to
+  # hear is the distance and the sha its build came from.
+  if [ "$chan" = main ]; then
+    local n ws
+    git -C "$CEL_ROOT" fetch -q origin main 2>/dev/null || true
+    n="$(cel_commits_behind_main)"
+    if [ "$n" -gt 0 ] 2>/dev/null; then
+      mkdir -p "$dir"
+      printf 'main+%s %s\n' "$n" "$(cel_build_sha)" >"$dir/available"
+      c_warn "$n new commits on celestial main since $(cel_build_line) - run: cel update --check"
+      # A STATUS line, and exactly one: nobody has to ANSWER "there are new
+      # commits" - the console reads it and the operator runs the command when
+      # they feel like it. A decision or a blocker would sit in root's open
+      # list waiting on a human who owes it nothing. The once-a-day window
+      # around this check is what keeps it to one line.
+      for ws in $(registry_names 2>/dev/null); do
+        _steward_raise "$ws" cel-update status \
+          "steward: $n new commits on celestial main since your build ($(cel_build_sha)) - cel update --check lists them, cel update takes them"
+      done
+    else
+      rm -f "$dir/available"
+      for ws in $(registry_names 2>/dev/null); do
+        _steward_clear "$ws" cel-update "celestial is level with main again"
+      done
+    fi
+    return 0
+  fi
+
   v="$(cel_version)"; latest="$(cel_latest_remote_version)"
   if [ -n "$latest" ] && cel_version_lt "$v" "$latest"; then
     mkdir -p "$dir"
