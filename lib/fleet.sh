@@ -111,12 +111,14 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
     --arg verdict "$verdict" --arg severity "$severity" \
     --arg ahead "$(fleet_ahead "$wt")" \
     --argjson rss "$(mem_tree_rss_mb "$wt")" \
+    --arg harness "${FLEET_HARNESS:-}" \
     '{id: (.id // ""), ticket: (.ticket // ""), repo: (.repo // ""),
       branch: (.branch // ""), shape: (.shape // "ship"), state: (.state // ""),
       live: $live, quiet_secs: $quiet, verdict: $verdict, severity: $severity,
       ahead: $ahead, rss_mb: $rss, pr: (.pr // ""), created: (.created // ""),
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
-      profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // "")}'
+      profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
+      harness: $harness}'
 }
 
 # The unit line. The unit is the PRODUCT: the thing one orchestrator stands
@@ -187,9 +189,13 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     local pane wt state live="-" text=""
     IFS=$'\t' read -r pane wt state <<< "$(printf '%s' "$row" | jq -r '[(.pane // ""), (.worktree // ""), (.state // "")] | @tsv')"
 
+    local harness=""
     if [ "$have_roster" = 1 ]; then
-      live="$(printf '%s' "$roster" | jq -r --arg p "$pane" \
-        '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""' 2>/dev/null || true)"
+      # Status AND kind in one read: the kind (pi, omp, claude, hermes) is the
+      # harness the ticket runs in, and the roster is the one place that knows
+      # it for a row delegated before the ledger recorded a runtime.
+      IFS=$'\t' read -r live harness <<< "$(printf '%s' "$roster" | jq -r --arg p "$pane" \
+        '[.result.agents[]? | select(.pane_id == $p)][0] // {} | [(.agent_status // ""), (.agent // "")] | @tsv' 2>/dev/null || true)"
       # An agent the roster does not know is GONE, and says so in a word the
       # reader can act on. `-` is reserved for "herdr did not answer", which
       # is a statement about the observer, not the worker.
@@ -204,7 +210,7 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
       [ -n "$(stall_work_at_risk "$wt")" ] && unlanded=$((unlanded + 1))
     fi
 
-    local obj; obj="$(fleet_worker_row "$row" "$live" "$text" "$wt" "$state")"
+    local obj; obj="$(FLEET_HARNESS="${harness:-}" fleet_worker_row "$row" "$live" "$text" "$wt" "$state")"
     local orss overdict
     IFS=$'\t' read -r orss overdict <<< "$(printf '%s' "$obj" | jq -r '[(.rss_mb // 0), (.verdict // "")] | @tsv')"
     rows="$rows$obj

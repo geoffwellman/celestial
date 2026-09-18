@@ -97,15 +97,21 @@ export const sortWorkers = (workers, byMemory = false) => {
 // Column widths, shared by the TUI panel and the text view so they cannot
 // drift. A cell is CUT to its width, never allowed to push its neighbours:
 // one forty-four-character scout id used to shove every column off the edge.
-export const WORKER_COLS = { ticket: 9, slug: 24, state: 9, live: 7, via: 12, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+export const WORKER_COLS = { ticket: 9, slug: 20, state: 9, live: 7, via: 18, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
 // What is running the ticket: the profile name when the delegation recorded
 // one (`opus-pi`, `deepseek`), else runtime/model with the provider prefix
 // and version tail dropped (`omp/deepseek-v4.1-flash` → `omp/deepseek`).
 export const viaOf = (w) => {
-  if (w.profile) return String(w.profile);
-  const rt = String(w.runtime || ''); let m = String(w.model || '');
-  m = m.split('/').pop().replace(/[-_]?v?\d[\w.]*$/, '').replace(/-+$/, '');
-  return rt && m ? `${rt}/${m}` : rt || m || '-';
+  // HARNESS FIRST, always: the owner asked twice. The roster's agent kind
+  // (pi, omp, claude, hermes) or the ledger's runtime, then the profile name
+  // or the model with provider prefix and version tail dropped.
+  const h = String(w.harness || w.runtime || '');
+  // `default` is a profile NAME that says nothing; the model behind it does.
+  let tail = String(w.profile || '');
+  if (tail === 'default') tail = '';
+  if (!tail) tail = String(w.model || '').split('/').pop().split('-').filter((x) => !/^v?\d/.test(x)).join('-');
+  if (h && tail) return `${h}/${tail}`;
+  return h || tail || '-';
 };
 export const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s; };
 // The id minus its ticket prefix: `ABC-146-gradient-px` reads as `gradient-px`
