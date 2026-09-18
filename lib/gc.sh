@@ -152,6 +152,14 @@ _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
 # pi sets process.title, so a live pi worker's cmdline is `pi` plus padding
 # and the role path the argv scan below looks for is never in it. GC was
 # blind to every pi worker on the box for weeks because of that.
+
+# A readable-looking /proc/<pid>/environ can still refuse to open - a setuid
+# process, or one that exited between the check and the read. Failing quietly
+# is right; printing "Permission denied" over every GC summary is not.
+_gc_environ_lines() { # <pid> -> NUL-separated environ on stdout, or fail
+  { cat "/proc/$1/environ"; } 2>/dev/null
+}
+
 _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
   local pid="$1" names="$2" item role="" wsvar="" ws wsdir
   while IFS= read -r -d '' item; do
@@ -159,7 +167,7 @@ _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
       CEL_ROLE_FILE=*) role="${item#*=}";;
       CEL_WORKSPACE=*) wsvar="${item#*=}";;
     esac
-  done < "/proc/$pid/environ"
+  done < <(_gc_environ_lines "$pid")
   [ -n "$role" ] && [ -n "$wsvar" ] || return 1
   # A root or orchestrator pane is identified and deliberately NOT removable,
   # exactly as its argv form has always been.
@@ -185,7 +193,7 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
   [ -r "/proc/$pid/environ" ] && [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' item; do
     case "$item" in HERDR_PANE_ID=*) pane="${item#*=}";; esac
-  done < "/proc/$pid/environ"
+  done < <(_gc_environ_lines "$pid")
   [ -n "$pane" ] || return 1
   cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || return 1
   # An agent_session of null is a herdr-side gap, not evidence that the pid is
