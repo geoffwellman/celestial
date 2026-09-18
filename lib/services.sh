@@ -71,7 +71,8 @@ _svc_box() {
         name: (.name // $fb),
         url: (.url // (if (.port // "") != "" then "http://127.0.0.1:" + (.port|tostring) else "" end)),
         cmd: (.cmd // ""), cwd: (if (.cwd // "") != "" then .cwd else $home end),
-        health: (.health // ""), restart: (.restart // ""), env: (.env // {}),
+        health: (.health // ""), health_auth: (.health_auth // ""),
+        restart: (.restart // ""), env: (.env // {}),
         kind: "box", workspace: "box", ticket: ""
       }' "$f" 2>/dev/null || true
   done
@@ -112,15 +113,47 @@ svc_listening() { # <port>
   (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null
 }
 
+# A value a service declaration may name rather than hold: `$NAME` or
+# `$(one command)`. The gateway's health check needs a bearer that grants every
+# subscription in the vault, so the file names the command that reads it and
+# the value never sits on disk. The pattern is narrow on purpose - no quotes,
+# semicolons, backticks or pipes reach the eval.
+_svc_shell_value() { # <declared value> -> the value, expanded if it is such a form
+  local v="${1:-}"
+  if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then
+    eval "printf '%s' \"$v\"" 2>/dev/null || true
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
 # UP IS NOT HEALTHY. A dev server binds its port long before it can answer,
 # and a process wedged mid-compile keeps the socket open - so a declared
 # `health:` path is asked, with a short budget: a probe that can block for
 # thirty seconds turns one sick service into a console that will not draw.
-svc_health_ok() { # <port> <path>
-  local p="${1:-0}" path="${2:-}"
-  [ -n "$path" ] || return 1
-  case "$path" in /*) ;; *) path="/$path" ;; esac
-  curl -sf -m 2 -o /dev/null "http://127.0.0.1:$p$path" 2>/dev/null
+#
+# The declaration may be a path OR a whole URL, and it may name a bearer:
+# `cel gateway install` writes a full URL, and both the broker and the gateway
+# answer 401 to an unauthenticated read, so a check that could only GET a path
+# anonymously called a working gateway down once every tick forever. The token
+# rides stdin, never argv - a bearer in a command line is a bearer in `ps`.
+svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>"]
+  local p="${1:-0}" h="${2:-}" auth="${3:-}" url tok
+  [ -n "$h" ] || return 1
+  case "$h" in
+    http://*|https://*) url="$h" ;;
+    /*) url="http://127.0.0.1:$p$h" ;;
+    *)  url="http://127.0.0.1:$p/$h" ;;
+  esac
+  if [ -n "$auth" ]; then
+    tok="$(_svc_shell_value "${auth#bearer }")"
+    if [ -n "$tok" ]; then
+      printf 'Authorization: Bearer %s\n' "$tok" \
+        | curl -sf -m 2 -o /dev/null "$url" -H @- 2>/dev/null
+      return $?
+    fi
+  fi
+  curl -sf -m 2 -o /dev/null "$url" 2>/dev/null
 }
 
 # The first process whose cwd is inside the service's directory. herdr exposes
@@ -180,7 +213,8 @@ _svc_declared() { # <wsdir>
   [ -n "${1:-}" ] && [ -f "$1/workspace.yaml" ] || return 0
   _yqr -c --arg ws "$(ws_name "$1")" '.services // [] | .[] | {
       name: (.name // ""), url: (.url // ""), cmd: (.cmd // ""), cwd: (.cwd // ""),
-      health: (.health // ""), restart: (.restart // ""), env: (.env // {}),
+      health: (.health // ""), health_auth: (.health_auth // ""),
+      restart: (.restart // ""), env: (.env // {}),
       kind: "declared", workspace: $ws, ticket: ""
     }' "$1/workspace.yaml" 2>/dev/null || true
 }
@@ -193,7 +227,7 @@ _svc_previews() { # <wsdir>
   [ -f "$f" ] || return 0
   jq -c --arg ws "$(ws_name "$1")" '.[]? | select(.try.url != null) | {
       name: ("try " + (.ticket // .id)), url: .try.url, cmd: "", cwd: (.worktree // ""),
-      health: "", restart: "", env: {}, kind: "preview", workspace: $ws, ticket: (.ticket // ""),
+      health: "", health_auth: "", restart: "", env: {}, kind: "preview", workspace: $ws, ticket: (.ticket // ""),
       pane: (.try.pane // ""), id: (.id // "")
     }' "$f" 2>/dev/null || true
 }
@@ -223,7 +257,7 @@ _SVC_MASK_ENV='with_entries(.value = (if (.key | test("TOKEN|SECRET|KEY|PASSWORD
 
 # The full document: declaration joined to what is actually true right now.
 svc_rows() { # [wsdir] -> JSON array
-  local d="${1:-}" e name url cmd cwd health port pid rss up state reach pane
+  local d="${1:-}" e name url cmd cwd health hauth port pid rss up state reach pane
   mem_tree_snapshot
   svc_proc_snapshot
   _svc_all "$d" | while IFS= read -r e; do
@@ -233,14 +267,18 @@ svc_rows() { # [wsdir] -> JSON array
     cmd="$(printf '%s' "$e" | jq -r '.cmd')"
     cwd="$(printf '%s' "$e" | jq -r '.cwd')"
     health="$(printf '%s' "$e" | jq -r '.health')"
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
     port="$(svc_port_of_url "$url")"
     state=down
     if svc_listening "$port"; then
       state=up
-      [ -n "$health" ] && svc_health_ok "$port" "$health" && state=healthy
+      [ -n "$health" ] && svc_health_ok "$port" "$health" "$hauth" && state=healthy
     fi
     pid=0; rss=0; up=0
-    if [ "$state" != down ] && [ -n "$cwd" ]; then
+    # A box service's cwd defaults to $HOME, and "the memory of the process
+    # tree under this cwd" is then every process this user has: reporting the
+    # whole box as one service's footprint is worse than reporting nothing.
+    if [ "$state" != down ] && [ -n "$cwd" ] && [ "${cwd%/}" != "${HOME%/}" ]; then
       pid="$(svc_pid_of_dir "$cwd")"
       rss="$(mem_tree_rss_mb "$cwd")"
       up="$(svc_uptime_secs "$pid")"
@@ -354,8 +392,7 @@ svc_start() { # [wsdir] <name>
     # install` writes `$(omp auth-broker token)` and the token stays in omp's
     # own 0600 file. The pattern is narrow on purpose: no quotes, no
     # semicolons, no backticks, no pipes.
-    if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then
-      envs+=("$k=$v")
+    if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then      envs+=("$k=$v")
     else
       envs+=("$(printf '%s=%q' "$k" "$v")")
     fi

@@ -31,7 +31,7 @@ _CEL_DOCTOR=1
 # and the gateway spent a day up, unsupervised, with nothing on the box able to
 # notice if they stopped.
 doctor_box_services_line() {
-  local rows n healthy e url health port
+  local rows n healthy e url health hauth port
   rows="$(_svc_box)"
   n="$(printf '%s' "$rows" | grep -c . || true)"
   healthy=0
@@ -39,9 +39,10 @@ doctor_box_services_line() {
     [ -n "$e" ] || continue
     url="$(printf '%s' "$e" | jq -r '.url')"
     health="$(printf '%s' "$e" | jq -r '.health // ""')"
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
     port="$(svc_port_of_url "$url")"
     svc_listening "$port" || continue
-    if [ -n "$health" ] && ! svc_health_ok "$port" "$health"; then continue; fi
+    if [ -n "$health" ] && ! svc_health_ok "$port" "$health" "$hauth"; then continue; fi
     healthy=$((healthy + 1))
   done <<< "$rows"
   printf '  box services: %s declared, %s healthy\n' "${n:-0}" "$healthy"

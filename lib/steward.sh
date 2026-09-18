@@ -1153,7 +1153,7 @@ _steward_services() {
 
 # One workspace, or the box when <ws> is `box` and <wsdir> is empty.
 _steward_services_for() { # <ws> <wsdir>
-  local ws="$1" wsdir="$2" e name url health restart port key count restarted msg last note where
+  local ws="$1" wsdir="$2" e name url health hauth restart port key count restarted msg last note where
   if [ "$ws" != box ]; then
     [ -n "$wsdir" ] || return 0
     [ -f "$wsdir/workspace.yaml" ] || return 0
@@ -1171,7 +1171,8 @@ _steward_services_for() { # <ws> <wsdir>
     port="$(svc_port_of_url "$url")"
     key="$ws/$name"
     read -r count restarted <<<"$(_steward_svc_read "$key")"
-    if svc_listening "$port" && svc_health_ok "$port" "$health"; then
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
+    if svc_listening "$port" && svc_health_ok "$port" "$health" "$hauth"; then
       _steward_svc_write "$key" 0 0
       [ "${count:-0}" -ge 2 ] && _steward_clear "$ws" "service-$ws-$name" \
         "$name is answering on :$port again"

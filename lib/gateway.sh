@@ -183,18 +183,27 @@ gateway_status_json() {
 # The gateway process is useless without the broker's URL and bearer, so both
 # ride in its environment - the bearer by a command that READS it, never by
 # value: a service definition is a file on disk, and a token in it is a token
-# on disk waiting to be backed up somewhere it should not be.
+# on disk waiting to be backed up somewhere it should not be. The gateway's
+# health check names its bearer the same way, because /v1/models answers 401
+# unauthenticated and a check that could not present one would call a working
+# gateway down once a tick forever.
+#
+# ONLY THE GATEWAY DECLARES A HEALTH PATH. The broker (omp 18.1.17) has no GET
+# route at all - `/`, `/status` and `/healthz` all answer 404, bearer or not -
+# so any path declared for it is a permanent false alarm, and the rule here is
+# that no health beats a health check that always fails. The gateway's
+# /v1/models is the read that proves both: the gateway mints its OAuth through
+# the broker and cannot answer without it.
 gateway_service_specs() {
   jq -n --arg b "$(gateway_port broker)" --arg g "$(gateway_port gateway)" '[
     { name: "cel-auth-broker",
       cmd: ("omp auth-broker serve --bind 127.0.0.1:" + $b),
-      health: ("http://127.0.0.1:" + $b + "/") ,
       restart: "auto",
       env: {} },
     { name: "cel-auth-gateway",
       cmd: ("omp auth-gateway serve --bind 127.0.0.1:" + $g),
       health: ("http://127.0.0.1:" + $g + "/v1/models"),
-      health_auth: "bearer $OMP_GATEWAY_TOKEN",
+      health_auth: "bearer $(omp auth-gateway token)",
       restart: "auto",
       env: { OMP_AUTH_BROKER_URL: ("http://127.0.0.1:" + $b),
              OMP_AUTH_BROKER_TOKEN: "$(omp auth-broker token)" } }
@@ -216,9 +225,12 @@ _gateway_register_services() {
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     name="$(printf '%s' "$spec" | jq -r '.name')"
-    # The declared url is the health url without its path: the port is the
-    # handle every service row keys off.
-    spec="$(printf '%s' "$spec" | jq -c '. + {url: (.health | capture("^(?<base>[a-z]+://[^/]+)").base)}')"
+    # The declared url is the health url without its path when there is one,
+    # and the bind port otherwise: the port is the handle every service row
+    # keys off, and the broker declares no health check.
+    spec="$(printf '%s' "$spec" | jq -c --arg b "$(gateway_port broker)" \
+      '. + {url: (if (.health // "") != "" then (.health | capture("^(?<base>[a-z]+://[^/]+)").base)
+                  else "http://127.0.0.1:" + $b end)}')"
     svc_box_write "$name" "$spec"
   done < <(printf '%s' "$specs" | jq -c '.[]')
   c_ok "both services are in $(svc_box_dir) - supervised by the steward"

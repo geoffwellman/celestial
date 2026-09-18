@@ -6,6 +6,7 @@
 # logs its argv, the "service" is a python http server on a free port in a
 # fixture directory, and the registry points at a temporary workspace.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/lib/services.sh"
 
 CEL="$CEL_ROOT/bin/cel"
 
@@ -268,5 +269,38 @@ test_steward_sweep_watches_box_services() {
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.3; done
   _steward_services >/dev/null 2>&1
   assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  _svc_teardown
+}
+
+# A box service's `health:` is a whole URL, not a path - `cel gateway install`
+# writes one - and the broker and the gateway both answer 401 to an
+# unauthenticated read, so a health check that could not present a bearer
+# called a working gateway down and the sweep would have raised a blocker
+# about it every ten minutes.
+test_health_accepts_a_full_url_and_a_declared_bearer() {
+  _svc_box_setup
+  local port; port="$(_svc_free_port)"
+  mkdir -p "$T/srv/v1"; printf '{}' > "$T/srv/v1/models"
+  ( exec python3 -m http.server "$port" --bind 127.0.0.1 --directory "$T/srv" >/dev/null 2>&1 ) &
+  SVC_PID=$!
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/v1/models" && break; sleep 0.3; done
+  svc_health_ok "$port" "http://127.0.0.1:$port/v1/models" \
+    || { echo "a full health url was not read"; _svc_teardown; return 1; }
+  # and with a bearer the declaration names by command rather than by value
+  svc_health_ok "$port" "http://127.0.0.1:$port/v1/models" 'bearer $(echo fixture-token)' \
+    || { echo "a declared bearer was not presented"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# A box service defaults to $HOME as its cwd, and the memory of the process
+# tree under a cwd is how every other row is measured - which for $HOME is
+# every process this user has. Reporting the whole box as one service's
+# footprint is worse than reporting nothing.
+test_box_service_in_home_reports_no_process_tree_memory() {
+  _svc_box_setup
+  printf '{"name":"cel-auth-broker","port":47311}\n' > "$CEL_SERVICES_D/cel-auth-broker.json"
+  local js; js="$(cd "$T" && "$CEL" services --json)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].rss_mb')" 0
   _svc_teardown
 }
