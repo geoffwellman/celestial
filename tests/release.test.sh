@@ -61,6 +61,9 @@ EOS
   export CEL_ROOT="$ROOT"
 }
 _rel_cleanup() { CEL_ROOT="$_REL_REPO"; rm -rf "$T"; }
+# `die` exits the process it is called in, so every refusal is exercised in a
+# subshell - otherwise the first expected failure takes the test with it.
+_rel_try() { ( cmd_release "$@" ) >/dev/null 2>&1; }
 
 _notes() { python3 "$_REL_REPO/tools/release/notes.py" "$@"; }
 _cut() { python3 "$_REL_REPO/tools/release/cut.py" "$@"; }
@@ -135,9 +138,9 @@ test_release_cut_refuses_non_semver_and_not_greater_versions() {
 # run, a red check and an explanation.
 test_release_refuses_a_bad_version_without_calling_gh() {
   _rel_fixture
-  assert_fails cmd_release 0.3 || { _rel_cleanup; return 1; }
-  assert_fails cmd_release 0.1.0 || { _rel_cleanup; return 1; }
-  assert_fails cmd_release 0.2.0 || { _rel_cleanup; return 1; }
+  assert_fails _rel_try 0.3 || { _rel_cleanup; return 1; }
+  assert_fails _rel_try 0.1.0 || { _rel_cleanup; return 1; }
+  assert_fails _rel_try 0.2.0 || { _rel_cleanup; return 1; }
   assert_eq "$(cat "$LOG")" "" || { _rel_cleanup; return 1; }
   _rel_cleanup
 }
@@ -177,7 +180,7 @@ test_release_status_shows_the_open_pr_and_the_newest_tag() {
 test_release_tag_shows_as_available_on_the_release_channel() {
   local T ORIGIN A B rc out
   T="$(mktemp -d)"; ORIGIN="$T/origin.git"; A="$T/a"; B="$T/b"
-  git init -q --bare "$ORIGIN"
+  git init -q --bare -b main "$ORIGIN"
   git init -q -b main "$A"
   git -C "$A" config user.email t@example.com
   git -C "$A" config user.name tester

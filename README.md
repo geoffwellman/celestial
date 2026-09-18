@@ -683,6 +683,15 @@ notified. On the box, `cel version` tells you what you're running as
 it**, the sha and the branch — the `+31` is the part people quote, because a
 version alone says v0.2.0 for thirty-odd merges.
 
+Cutting a version is one verb: `cel release <x.y.z>` (or the **Release**
+workflow's `Cut` job in the Actions tab) runs the suite and the hygiene scans,
+bumps `VERSION`, turns `[Unreleased]` into that version's section and opens a
+`release: v<x.y.z>` pull request — main takes no direct pushes, so the bump is
+reviewed like any other change. Merging it tags `v<x.y.z>` and publishes the
+GitHub Release from the same notes, on its own. `--dry-run` shows what would
+ship, `cel release status` shows the open PR and the newest tag, and the
+[release checklist](docs/release-checklist.md) has the long form.
+
 A box follows one of two **channels**, set in `~/.local/share/cel/config.yaml`
 (box-level, created 0600) and switched with `cel update --channel
 main|release`:

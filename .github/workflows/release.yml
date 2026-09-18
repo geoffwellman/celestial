@@ -1,0 +1,134 @@
+name: Release
+
+# A version is a PR, a tag, and a GitHub Release, in that order, because main
+# takes no direct pushes: the bump has to arrive as a reviewed pull request
+# like any other change, the tag can only follow its squash merge, and the
+# Release is cut from the tag. Nothing was tagged for four days past v0.2.0
+# while forty-odd merges landed, so this is the process - not a checklist.
+#
+# The thinking lives in tools/release/cut.py and tools/release/notes.py and is
+# tested on fixtures; this file only calls them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version, x.y.z (must be greater than VERSION)'
+        required: true
+        type: string
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Exactly the checks every pull request gets, from the same file, so "the
+  # release passed" and "CI passed" cannot drift into meaning different things.
+  verify:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  cut:
+    name: Open the version bump PR
+    needs: verify
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Rewrite VERSION and CHANGELOG
+        id: cut
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'celestial release'
+          git config user.email 'release@users.noreply.github.com'
+          git switch -c "release-$VERSION"
+          # Refuses a non-semver or not-greater version and an empty
+          # [Unreleased] section; prints the section that is shipping.
+          python3 tools/release/cut.py "$VERSION" > "$RUNNER_TEMP/notes.md"
+          git commit -qam "release: v$VERSION"
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git push -u origin "release-$VERSION"
+          # Ready for review, never a draft: this PR still needs the required
+          # check like any other, and the owner merges it.
+          gh pr create --base main --head "release-$VERSION" \
+            --title "release: v$VERSION" --body-file "$RUNNER_TEMP/notes.md"
+
+  # The squash of that PR lands on main with the same subject, and a tag pushed
+  # by hand still works, so the old manual path is not taken away from anyone.
+  publish:
+    name: Tag and publish
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'push' &&
+       startsWith(github.event.head_commit.message, 'release: v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Work out the version and agree with VERSION
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git log -1 --format=%s | sed -n 's/^release: v//p')"
+          fi
+          file="$(tr -d '[:space:]' < VERSION)"
+          # A tag whose VERSION disagrees is a mis-cut, and publishing it would
+          # give the release channel a version the checkout does not admit to.
+          if [ "$version" != "$file" ]; then
+            printf 'refusing: tag/commit says %s, VERSION says %s\n' "$version" "$file" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+      - name: Create the annotated tag
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          python3 tools/release/notes.py "$version" > "$RUNNER_TEMP/notes.md"
+          if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            git config user.name 'celestial release'
+            git config user.email 'release@users.noreply.github.com'
+            git tag -a "v$version" -F "$RUNNER_TEMP/notes.md"
+            git push origin "v$version"
+          fi
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          # Nothing is uploaded but the notes: the install is a clone, not an
+          # artefact, and a stale tarball on a Release is a support question.
+          { printf 'Install: `git clone` this repository, then `cel update`.\n\n'
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release create "v$version" --title "celestial v$version" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
