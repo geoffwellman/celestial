@@ -100,6 +100,10 @@ cel - the celestial plane
                                 (cloudflared quick tunnel needs no account)
   cel dash [--port n] [--ensure]  workspace dashboard: worktrees, PRs, services,
                                 backlog, agent prompt box (localhost by default)
+  cel services [--json]         what this box is running on a port: declared
+                                services and every `try` preview - state,
+                                health, memory, and the URL that reaches it
+                                from the laptop; start|stop|restart|logs <name>
   cel inbox send|read|count|watch   agent messages that never type into a pane
   cel inbox open|resolve|whoami     decisions stay OPEN until resolved - reading
                                 one does not answer it; whoami = your role by cwd
@@ -139,6 +143,7 @@ case "${1:-help}" in
   learn)    shift; . "$CEL_ROOT/lib/learn.sh";    cmd_learn "$@";;
   gc)       shift; . "$CEL_ROOT/lib/gc.sh";      cmd_gc "$@";;
   inbox)    shift; . "$CEL_ROOT/lib/inbox.sh";   cmd_inbox "$@";;
+  services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
   version|--version|-v)
             . "$CEL_ROOT/lib/version.sh"
