@@ -273,3 +273,45 @@ test_console_writes_only_its_own_directory() {
   assert_contains "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$T/products/p/spec.md")" deny
   rm -rf "$CONS" "$T"
 }
+
+# --- the bottom tier reports; it does not run the factory --------------------
+# A worker whose PR had just been approved ran `cel-fanout land <its own id>`
+# from its own worktree: the ledger lock was held for three minutes while the
+# gate ran, the orchestrator's `status` hung on it, and only branch protection
+# stopped the merge. The role file already said "never merge"; nothing enforced
+# it, because every command was allowed for the worker role before any check.
+test_worker_may_not_land_release_or_delegate() {
+  local v
+  for v in land release delegate scout spike collect reconcile; do
+    assert_contains "$(guard_classify worker "cel-fanout $v ABC-1")" deny
+  done
+  assert_contains "$(guard_classify worker 'cel-fanout land ABC-1')" 'not yours'
+  assert_contains "$(guard_classify worker '/home/x/.local/share/cel/core/skills/fanout/bin/cel-fanout land ABC-1')" deny
+  assert_contains "$(guard_classify worker 'bash /home/x/core/skills/fanout/bin/cel-fanout release ABC-1')" deny
+  assert_contains "$(guard_classify worker 'cel-fanout land ABC-1 --workspace alpha')" deny
+  assert_contains "$(guard_classify worker 'cel-fanout -C /tmp/ws land ABC-1')" deny
+}
+test_worker_may_not_start_agents() {
+  local r
+  for r in orchestrator root console worker reviewer; do
+    assert_contains "$(guard_classify worker "cel run $r --repo widget")" deny
+  done
+  assert_contains "$(guard_classify worker 'cel run worker --repo widget')" 'does not start agents'
+}
+test_worker_keeps_the_rest_of_its_job() {
+  assert_eq "$(guard_classify worker 'cel-fanout status')" allow
+  assert_eq "$(guard_classify worker 'cel-fanout try ABC-1')" allow
+  assert_eq "$(guard_classify worker 'cel-fanout why ABC-1')" allow
+  assert_eq "$(guard_classify worker 'cel-fanout wait')" allow
+  assert_eq "$(guard_classify worker 'cel inbox send alpha-orch "done"')" allow
+  assert_eq "$(guard_classify worker 'cel-verify ABC-1')" allow
+  assert_eq "$(guard_classify worker 'gh pr create --fill')" allow
+  assert_eq "$(guard_classify worker 'gh pr edit 3 --title x')" allow
+  assert_eq "$(guard_classify worker 'gh pr ready 3')" allow
+}
+test_the_deny_is_the_workers_alone() {
+  assert_eq "$(guard_classify orchestrator 'cel-fanout land ABC-1')" allow
+  assert_eq "$(guard_classify root 'cel-fanout land ABC-1')" allow
+  assert_eq "$(guard_classify other 'cel-fanout land ABC-1')" allow
+  assert_eq "$(guard_classify other 'cel run worker --repo widget')" allow
+}

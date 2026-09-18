@@ -1991,4 +1991,53 @@ test_console_x_picker_offers_the_merged_cleanup_first() {
   merged_at="$(grep -n 'release --all --merged' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
   status_at="$(grep -n 'release --all --state finished' "$CEL_ROOT/tools/console/ui.mjs" | head -1 | cut -d: -f1)"
   [ "$merged_at" -lt "$status_at" ] || { echo "the merged option is not first in the picker"; return 1; }
+# --- a worker does not run the factory --------------------------------------
+# The guard is a hook, and a hook can be missing (a pi launched by hand, a
+# future runtime). The binary refuses on its own, before any `gh` call and
+# before the ledger lock - the lock is the part that hung an orchestrator's
+# `status` for three minutes the day this was written.
+_fanout_worker_cwd_setup() {
+  _fanout_setup
+  export CEL_WORKTREES="$T/wt"
+  mkdir -p "$CEL_WORKTREES/widget/ABC-1"
+  GH_STUB_DIR="$T/bin"; mkdir -p "$GH_STUB_DIR"
+  printf '#!/usr/bin/env bash\necho "gh was called: $*" >&2\nexit 7\n' > "$GH_STUB_DIR/gh"
+  chmod +x "$GH_STUB_DIR/gh"
+  export PATH="$GH_STUB_DIR:$PATH"
+  (cd "$T" && "$BIN" delegate widget ABC-1 "$T/spec.md") > /dev/null
+}
+_fanout_worker_teardown() { unset CEL_WORKTREES; rm -rf "$T"; }
+
+test_worker_cwd_is_refused_by_the_binary() {
+  _fanout_worker_cwd_setup
+  local wt="$CEL_WORKTREES/widget/ABC-1" out
+  local -a cases=("land ABC-1" "release ABC-1" "delegate widget ABC-2 $T/spec.md" \
+                  "collect ABC-1" "reconcile")
+  local c
+  for c in "${cases[@]}"; do
+    # shellcheck disable=SC2086
+    out="$(cd "$wt" && "$BIN" $c --workspace alpha 2>&1)" && { echo "$c was allowed"; _fanout_worker_teardown; return 1; }
+    assert_contains "$out" "a worker does not"
+    assert_contains "$out" "the orchestrator"
+    ! printf '%s' "$out" | grep -q "gh was called" || { echo "$c reached gh"; _fanout_worker_teardown; return 1; }
+  done
+  [ ! -e "$T/.cel/delegations.lock" ] || { echo "the ledger lock was taken"; _fanout_worker_teardown; return 1; }
+  _fanout_worker_teardown
+}
+
+test_worker_refusal_names_the_reply_mailbox() {
+  _fanout_worker_cwd_setup
+  local out
+  out="$(cd "$CEL_WORKTREES/widget/ABC-1" && "$BIN" land ABC-1 --workspace alpha 2>&1)" || true
+  assert_contains "$out" "widget-orch"
+  _fanout_worker_teardown
+}
+
+test_the_same_commands_from_the_repo_checkout_still_run() {
+  _fanout_worker_cwd_setup
+  local out
+  out="$(cd "$T/repos/widget" && "$BIN" collect ABC-NOSUCH 2>&1)" || true
+  assert_contains "$out" "no delegation with id"
+  ! printf '%s' "$out" | grep -q "a worker does not" || { echo "the repo checkout was treated as a worker"; _fanout_worker_teardown; return 1; }
+  _fanout_worker_teardown
 }
