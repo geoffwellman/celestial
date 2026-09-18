@@ -269,3 +269,62 @@ test_gateway_reads_models_over_http() {
   [ "$ready" -eq 1 ] || { echo "a gateway answering /v1/models was reported down"; _gw_teardown; return 1; }
   _gw_teardown
 }
+
+# --- the two box services -------------------------------------------------
+
+# CEL-28 wrote its two specs to a private file and printed "NOT supervised".
+# They belong in `services.d`, where the steward sweep and `cel services` both
+# already look - that is the whole of CEL-34.
+test_gateway_install_writes_two_box_service_files() {
+  _gw_setup
+  export CEL_SERVICES_D="$T/services.d"
+  cmd_gateway install --no-start >/dev/null
+  assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-broker.json")" cel-auth-broker
+  assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-gateway.json")" cel-auth-gateway
+  assert_contains "$(jq -r '.cmd' "$T/services.d/cel-auth-broker.json")" "auth-broker serve --bind 127.0.0.1:47311"
+  assert_contains "$(jq -r '.health' "$T/services.d/cel-auth-gateway.json")" "/v1/models"
+  assert_eq "$(jq -r '.restart' "$T/services.d/cel-auth-gateway.json")" auto
+  assert_eq "$(jq -r '.env.OMP_AUTH_BROKER_URL' "$T/services.d/cel-auth-gateway.json")" "http://127.0.0.1:47311"
+  # 0600, because `env` may carry a bearer; 0700 on the directory.
+  assert_eq "$(stat -c %a "$T/services.d/cel-auth-gateway.json")" 600
+  assert_eq "$(stat -c %a "$T/services.d")" 700
+  _gw_teardown
+}
+
+# A second install is a no-op that rewrites the files: the operator runs it
+# after a port change and must not end up with two brokers.
+test_gateway_install_is_idempotent() {
+  _gw_setup
+  export CEL_SERVICES_D="$T/services.d"
+  cmd_gateway install --no-start >/dev/null
+  local out; out="$(cmd_gateway install --no-start)"
+  assert_eq "$(ls "$T/services.d" | wc -l)" 2
+  assert_contains "$out" "supervised"
+  ! printf '%s' "$out" | grep -q "NOT supervised" \
+    || { echo "install still says its services are unsupervised"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+# Whether the steward knows about the gateway is the first thing status must
+# say: an unsupervised gateway is one lid-close away from being down with
+# nobody to notice.
+test_gateway_status_says_whether_the_box_watches_it() {
+  _gw_setup
+  export CEL_SERVICES_D="$T/services.d"
+  cel_config_set gateway gateway_port 47411
+  assert_contains "$(cmd_gateway status)" "(unsupervised)"
+  cmd_gateway install --no-start >/dev/null
+  assert_contains "$(cmd_gateway status)" "(box service, steward-watched)"
+  _gw_teardown
+}
+
+# The bearer rule again, over the new seam: the files are 0600 but the token
+# still never reaches stdout.
+test_gateway_install_prints_no_token() {
+  _gw_setup
+  export CEL_SERVICES_D="$T/services.d"
+  local out; out="$(cmd_gateway install --no-start; cmd_gateway status)"
+  ! printf '%s' "$out" | grep -q "$GW_FIXTURE_TOKEN" \
+    || { echo "the gateway token reached stdout through the services.d path"; _gw_teardown; return 1; }
+  _gw_teardown
+}
