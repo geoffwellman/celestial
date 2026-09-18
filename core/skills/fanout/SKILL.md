@@ -68,6 +68,16 @@ cel-fanout delegate <repo> <branch> <spec> --profile astra
   warns.
 - `cel-fanout status` lists every delegation with its ledger state and live
   herdr agent status.
+- `cel-fanout status --json` prints the same rows as one JSON object per line
+  — every state, `released` included — with the id, ticket, repo, branch,
+  shape, state, live agent status, `quiet_secs`, stall `verdict`/`severity`,
+  `ahead`, PR, alias, pane and worktree. It is the same object `cel fleet
+  --json` puts in `units[].workers_list`, rendered by the same function, so
+  the console and the fleet view can never describe one worker two ways.
+  `cel-fanout why <id>` answers the question a count cannot: the verdict, how
+  long it has been quiet and whether that costs work, the pane's last 25
+  lines, the last five messages it sent, its PR, and ONE next act. Both are
+  reads — they never prompt, release or write the ledger.
 - `release <id>` removes the herdr worktree (or keeps it with
   `--keep-worktree` for a post-mortem) and marks the ledger entry released.
   **It refuses a worktree that still holds work** — uncommitted changes or

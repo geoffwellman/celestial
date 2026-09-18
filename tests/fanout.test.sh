@@ -1697,7 +1697,7 @@ test_status_json_prints_one_object_per_row_with_the_contract_keys() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-JSON "$T/spec.md" >/dev/null)
   local out; out="$(cd "$T" && "$BIN" status --json)"
-  assert_eq "$(printf '%s' "$out" | wc -l | tr -d ' ')" "1"
+  assert_eq "$(printf '%s\n' "$out" | grep -c .)" "1"
   assert_eq "$(printf '%s' "$out" | jq -r '.id')" "WG-JSON"
   assert_eq "$(printf '%s' "$out" | jq -r '.repo')" "widget"
   assert_eq "$(printf '%s' "$out" | jq -r '.branch')" "WG-JSON"

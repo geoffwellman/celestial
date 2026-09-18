@@ -27,6 +27,14 @@ watch the repo (Watch → Custom → Releases) to be notified.
   fleet document (which now carries `workers_list`) already holds, with nothing
   run; `cel console --render-once --unit <product>` and `--worker <id>` print
   the two new views
+- `cel fleet --json` carries `units[].workers_list`: every unreleased worker
+  as data - id, ticket, repo, branch, shape, state, live agent status,
+  `quiet_secs`, stall `verdict` and `severity`, `ahead`, PR, alias, pane and
+  worktree - so the `stalled` count can be read back to its rows, and
+  `cel-fanout status --json` prints the same objects for one workspace
+- `cel-fanout why <id>` says why one worker is stuck in words: verdict, quiet
+  time and work at risk, the pane's last 25 lines, the last five messages it
+  sent, its PR, and the one next act
 - The steward says a thing once: every item it raises carries a condition key
   (`cel inbox send --fp`), so a repeat becomes an update on the item already
   open - `cel inbox open` shows `(×12, last 17:35)` - and the steward resolves
