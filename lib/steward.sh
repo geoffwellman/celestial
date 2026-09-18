@@ -32,6 +32,10 @@ _CEL_STEWARD=1
 # and a test that cannot supply that string proves nothing.
 _STEWARD_HERDR="${CEL_STEWARD_HERDR:-herdr}"
 _STEWARD_STATE="${CEL_STEWARD_STATE:-$HOME/.local/share/cel/steward-state}"
+# The reconcile binary, overridable so a test can watch the call without
+# reading a live GitHub. Addressed by path rather than by name: the steward
+# runs from a systemd timer, where `cel shellenv`'s PATH does not exist.
+_STEWARD_FANOUT="${CEL_STEWARD_FANOUT:-$CEL_ROOT/core/skills/fanout/bin/cel-fanout}"
 _STEWARD_WINDOW="${CEL_STEWARD_WINDOW:-14400}"   # repeat-nudge window, seconds
 
 # True (and records the nudge) when this key has not been nudged inside the
@@ -208,6 +212,24 @@ _steward_orchestrators() { # <agents-json>
       fi
     done
   done
+}
+
+# THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. Twenty-two of the 37 rows the
+# owner found in finished/collected were PRs GitHub had merged days earlier:
+# merged through the web UI, checkouts removed by hand, so nothing ever ran
+# `land` or `release`. Deciding that is deterministic, so it belongs in a tick
+# rather than in a human's afternoon. One `gh pr list` per repo per tick,
+# which is nothing at a five-minute tick.
+# A reconcile that fails is ONE sweep failing: the stalled-worker sweep after
+# it is the one whose delay costs work, so this never takes the tick with it.
+_steward_reconcile() {
+  local ws bin="${CEL_STEWARD_FANOUT:-$_STEWARD_FANOUT}"
+  for ws in $(registry_names); do
+    if ! "$bin" reconcile --workspace "$ws" 2>&1; then
+      c_warn "$ws: reconcile failed - run 'cel-fanout reconcile --workspace $ws' by hand"
+    fi
+  done
+  return 0
 }
 
 _steward_review_sweep() { # <agents-json>
@@ -935,6 +957,10 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   agents_json="$(herdr agent list 2>/dev/null || printf '{"result":{"agents":[]}}')"
 
   _steward_review_sweep "$agents_json"
+  # And then the ledger closes what the world already closed - after the
+  # review sweep, because a PR it nudged about this tick may be the very one
+  # that has just been merged.
+  _steward_reconcile
   # Before the inbox sweeps: a dead worker is the one failure no inbox watcher
   # can see, and the one whose delay can cost the work rather than just time.
   _steward_stalled_workers "$agents_json"

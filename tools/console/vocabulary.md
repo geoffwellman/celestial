@@ -25,3 +25,4 @@
 | `cel-fanout release --all [--state finished,collected] --workspace <w>` | "clean up finished workers on <w>", "release everything that is done on <w>" |
 | `cel-fanout collect --all --workspace <w>` | "collect all the finished workers on <w>" |
 | `cel quota [--json]` | "how much Claude/Codex have I got left", "when does the window reset" - the signed-in subscriptions above the API balances |
+| `cel-fanout reconcile --workspace <w>` | "clean up what's already merged on <w>" - lands the rows GitHub merged, names the ones closed unmerged, leaves reports alone |
