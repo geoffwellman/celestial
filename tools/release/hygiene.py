@@ -77,11 +77,17 @@ def current_inputs(root):
         # A tracked deletion is deliberately absent from the proposed snapshot.
 
 
-def history_inputs(root):
+def history_inputs(root, revs=None):
+    """Every commit's message and tree - across ALL refs, or only the commits
+    `git rev-list <revs>` names (e.g. `origin/main..HEAD`, a PR's own
+    ancestry). The all-refs form is the publication check; the range form is
+    what a pull request is judged on, so that one dirty branch elsewhere in
+    the repository does not fail every other PR - measured 2026-09-18, when
+    it did exactly that, twice in a day."""
     if git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError("history scan requires a complete clone (fetch-depth: 0)")
     blobs = {}
-    for commit in git(root, "rev-list", "--all").decode().splitlines():
+    for commit in git(root, "rev-list", *(revs if revs else ["--all"])).decode().splitlines():
         yield f"commit {commit}", git(root, "cat-file", "-p", commit), False
         for entry in git(root, "ls-tree", "-rz", commit).split(b"\0"):
             if not entry:
@@ -97,6 +103,8 @@ def history_inputs(root):
             if oid not in blobs:
                 blobs[oid] = git(root, "cat-file", "blob", oid)
             yield f"{commit}:{name}", blobs[oid], mode == "120000"
+    if revs:
+        return   # a range is about commits; ref and tag names belong to the all-refs scan
     for ref in git(root, "for-each-ref", "--format=%(refname)").decode().splitlines():
         yield f"ref {ref}", ref.encode(), False
         if git(root, "cat-file", "-t", ref).strip() == b"tag":
@@ -107,6 +115,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--all-history", action="store_true", help="also inspect all local refs, commits, tags and historical paths")
+    parser.add_argument("--history", metavar="REVS", help="also inspect the commits `git rev-list REVS` names, e.g. origin/main..HEAD (a PR's own ancestry)")
     parser.add_argument("--private-patterns", type=Path, default=os.environ.get("CEL_PRIVATE_PATTERNS_FILE"), help="private, external UTF-8 file: one case-insensitive regex per line")
     parser.add_argument("--require-private-patterns", action="store_true", help="refuse a release scan without a nonempty external vocabulary")
     args = parser.parse_args()
@@ -132,6 +141,8 @@ def main():
         sources = [current_inputs(root)]
         if args.all_history:
             sources.append(history_inputs(root))
+        elif args.history:
+            sources.append(history_inputs(root, args.history.split()))
         for source in sources:
             for label, content, link in source:
                 inputs += 1

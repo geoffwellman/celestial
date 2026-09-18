@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  schedule:
+    - cron: "17 3 * * *"   # nightly every-ref publication scan (not a PR gate)
   push:
   pull_request:
 
@@ -51,7 +53,15 @@ jobs:
           # branch anywhere fails every PR), and the TREE with the private
           # vocabulary required. History predating the vocabulary is the
           # owner's to rewrite or accept; new work cannot add to it.
-          python3 tools/release/hygiene.py --all-history
+          # A PULL REQUEST IS JUDGED ON ITS OWN ANCESTRY (base..head), a push
+          # on the pushed branch's history; the every-ref scan runs nightly
+          # below. Every ref on every PR meant one dirty branch failed every
+          # other PR - twice on 2026-09-18.
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            python3 tools/release/hygiene.py --history "${{ github.event.pull_request.base.sha }}..HEAD"
+          else
+            python3 tools/release/hygiene.py --history HEAD
+          fi
           python3 tools/release/hygiene.py --require-private-patterns \
             --private-patterns "$RUNNER_TEMP/private-patterns.txt"
       - name: Install checksum-verified secret scanner
@@ -68,3 +78,21 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
       - name: Scan complete Git history for credentials
         run: '"$RUNNER_TEMP/gitleaks-bin/gitleaks" git --redact --log-opts="--all" .'
+
+  every-ref-hygiene:
+    name: Every-ref publication hygiene (nightly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan every ref's history and the tree with the vocabulary
+        env:
+          CEL_PRIVATE_PATTERNS: ${{ secrets.CEL_PRIVATE_PATTERNS }}
+        run: |
+          umask 077
+          printf '%s\n' "$CEL_PRIVATE_PATTERNS" > "$RUNNER_TEMP/private-patterns.txt"
+          python3 tools/release/hygiene.py --all-history
+          python3 tools/release/hygiene.py --all-history --require-private-patterns \
+            --private-patterns "$RUNNER_TEMP/private-patterns.txt"
