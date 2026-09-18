@@ -35,10 +35,76 @@ _fleet_roster() {
 
 # The ledger is read with jq, deliberately, and not by sourcing cel-fanout:
 # cel-fanout is a BINARY that runs a delegation when sourced, not a library.
-_fleet_running_rows() { # <wsdir> <repo>
+# ONLY THE STATES THAT ARE STILL SOMEBODY'S CONCERN. The first cut of this
+# list took everything but `released`, and on the live box the unit view
+# filled with `landed`, `salvaged` and `orphaned` rows - finished business,
+# every one of them rendered as a worker with `live: gone` and no readable
+# worktree. A list of things nobody can act on is a list people stop reading,
+# and it buried the rows that mattered. `running` is working; `finished` and
+# `collected` are waiting on a human to land them or let them go. Everything
+# else is history, and history is what `cel-fanout status --json` is for -
+# that view still carries every state, `released` included.
+_fleet_unit_rows() { # <wsdir> <repo>
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
-  jq -c --arg r "$2" '.[]? | select(.repo == $r and .state == "running")' "$led" 2>/dev/null || true
+  jq -c --arg r "$2" \
+    '.[]? | select(.repo == $r and ((.state // "") | IN("running", "finished", "collected", "blocked")))' \
+    "$led" 2>/dev/null || true
+}
+
+# How many commits this worktree carries beyond the verified remote default.
+# The same answer `cel-fanout status` prints in its AHEAD column, computed the
+# same way: unknown stays visible as `?` rather than being flattened to zero,
+# because "no commits" and "could not ask" lead an operator to opposite acts.
+fleet_ahead() { # <worktree> -> count | ?
+  local wt="$1" base n
+  [ -d "$wt" ] \
+    && git -C "$wt" symbolic-ref --quiet HEAD >/dev/null 2>&1 \
+    && base="$(repo_default_ref "$wt")" \
+    && n="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null)" \
+    && [[ "$n" =~ ^[0-9]+$ ]] || { printf '?'; return 0; }
+  printf '%s' "$n"
+}
+
+# ONE LEDGER ROW AS THE THING AN OPERATOR ACTUALLY ASKS ABOUT.
+#
+# The owner, at the console on 2026-09-18: "when I asked it why one of my
+# workers was stalled it just told me to run cel fleet". The view carried a
+# stalled COUNT and nothing else - no id, no verdict, no reason - so neither
+# the console nor the model could answer from state they were never given.
+# This is that state. `cel fleet --json` and `cel-fanout status --json` both
+# render from HERE, so the two surfaces cannot describe the same worker
+# differently; the shape is a contract the console is written against.
+#
+# THE VERDICT IS ONLY EVER PASSED ON A RUNNING ROW. A collected or finished
+# worker is idle with nothing written since, by design - convicting it of
+# being stalled is how a watcher earns its reputation for crying wolf, and it
+# would put this list permanently out of step with the `stalled` count beside
+# it. An empty `live` (herdr did not answer at all) is not evidence either.
+fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> -> one JSON object
+  local e="$1" live="${2:--}" text="${3:-}"
+  [ -n "$live" ] || live="-"
+  local wt state quiet verdict="" severity="" risk
+  wt="$(printf '%s' "$e" | jq -r '.worktree // ""')"
+  state="$(printf '%s' "$e" | jq -r '.state // ""')"
+  quiet="$(stall_quiet_secs "$wt")"
+  if [ "$state" = running ] && [ "$live" != "-" ]; then
+    verdict="$(stall_verdict "$live" "$text" "$quiet")"
+    risk="$(stall_work_at_risk "$wt")"
+    severity="$(stall_severity "$verdict" "$risk")"
+  fi
+  # -1, not 0: a worktree that cannot be read has an UNKNOWN age, and zero
+  # would render as a worker that wrote something a moment ago.
+  [ -n "$quiet" ] || quiet=-1
+  printf '%s' "$e" | jq -c \
+    --arg live "$live" --argjson quiet "$quiet" \
+    --arg verdict "$verdict" --arg severity "$severity" \
+    --arg ahead "$(fleet_ahead "$wt")" \
+    '{id: (.id // ""), ticket: (.ticket // ""), repo: (.repo // ""),
+      branch: (.branch // ""), shape: (.shape // "ship"), state: (.state // ""),
+      live: $live, quiet_secs: $quiet, verdict: $verdict, severity: $severity,
+      ahead: $ahead, pr: (.pr // ""), created: (.created // ""),
+      alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // "")}'
 }
 
 # The unit line. The unit is the PRODUCT: the thing one orchestrator stands
@@ -89,34 +155,46 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     fi
   fi
 
-  local row
+  local row rows=""
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    workers=$((workers + 1))
-    local pane wt
+    local pane wt state live="-" text=""
     pane="$(printf '%s' "$row" | jq -r '.pane // ""')"
     wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"
+    state="$(printf '%s' "$row" | jq -r '.state // ""')"
 
-    [ -n "$(stall_work_at_risk "$wt")" ] && unlanded=$((unlanded + 1))
-
-    [ "$have_roster" = 1 ] || continue
-    local live text quiet
-    live="$(printf '%s' "$roster" | jq -r --arg p "$pane" \
-      '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""' 2>/dev/null || true)"
-    text=""
-    if [ -n "$pane" ] && [ -n "$live" ]; then
-      text="$(herdr pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
+    if [ "$have_roster" = 1 ]; then
+      live="$(printf '%s' "$roster" | jq -r --arg p "$pane" \
+        '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""' 2>/dev/null || true)"
+      # An agent the roster does not know is GONE, and says so in a word the
+      # reader can act on. `-` is reserved for "herdr did not answer", which
+      # is a statement about the observer, not the worker.
+      [ -n "$live" ] || live=gone
+      if [ "$state" = running ] && [ -n "$pane" ] && [ "$live" != gone ]; then
+        text="$(herdr pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
+      fi
     fi
-    quiet="$(stall_quiet_secs "$wt")"
-    [ -n "$(stall_verdict "$live" "$text" "$quiet")" ] && stalled=$((stalled + 1))
-  done < <(for repo in "${repos[@]}"; do _fleet_running_rows "$wsdir" "$repo"; done)
+
+    if [ "$state" = running ]; then
+      workers=$((workers + 1))
+      [ -n "$(stall_work_at_risk "$wt")" ] && unlanded=$((unlanded + 1))
+    fi
+
+    local obj; obj="$(fleet_worker_row "$row" "$live" "$text")"
+    rows="$rows$obj
+"
+    # The count IS the list: counted from the same verdict the row carries, so
+    # the two numbers an operator compares can never disagree.
+    [ -n "$(printf '%s' "$obj" | jq -r '.verdict')" ] && stalled=$((stalled + 1))
+  done < <(for repo in "${repos[@]}"; do _fleet_unit_rows "$wsdir" "$repo"; done)
 
   jq -nc --arg name "$product" --arg orch "$orch" \
     --argjson workers "$workers" --argjson cap "$cap" \
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
     --argjson repos "$(printf '%s\n' "${repos[@]}" | jq -R . | jq -sc .)" \
     --argjson declared "$declared" \
-    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, repos: $repos, declared: $declared}'
+    --argjson list "$(printf '%s' "$rows" | jq -sc .)" \
+    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, repos: $repos, declared: $declared, workers_list: $list}'
 }
 
 _fleet_workspace() { # <name> <roster-json> -> JSON or nothing

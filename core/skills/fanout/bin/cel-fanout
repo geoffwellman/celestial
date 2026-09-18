@@ -16,6 +16,13 @@ export CEL_ROOT
 . "$CEL_ROOT/lib/manifest.sh"
 # shellcheck source=lib/run.sh
 . "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
+# shellcheck source=lib/fleet.sh
+. "$CEL_ROOT/lib/fleet.sh" # fleet_worker_row - ONE definition of what a worker
+                          # looks like as data, so `cel fleet --json` and
+                          # `status --json` cannot describe the same worker
+                          # differently. Sourcing a lib is safe in both
+                          # directions; sourcing THIS file is not, which is
+                          # why the arrow points this way.
 
 # Overridable so tests can point this at a stub that logs its argv and prints
 # canned JSON - that is the whole test strategy, no live herdr in tests.
@@ -839,10 +846,11 @@ cmd_collect() {
 }
 
 cmd_status() {
-  local ws_opt=""
+  local ws_opt="" json=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
+      --json) json=1; shift ;;
       *) die "status: unknown argument: $1" ;;
     esac
   done
@@ -868,7 +876,7 @@ cmd_status() {
   # GATE is here because "did the gate pass" is the one dimension with a right
   # answer, and a killed gate is not a wrong one: `TO` reads differently from
   # `FAIL` on purpose, the same way `+?` reads differently from `+0`.
-  printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
+  [ "$json" -eq 1 ] || printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
   local e id repo branch state pane live model ticket review gatecol trycol
   while IFS= read -r e; do
     [ -n "$e" ] || continue
@@ -918,6 +926,23 @@ cmd_status() {
       _ledger_update_state "$wsdir" "$id" "$state"
     fi
     ahead="$(_wt_ahead "$wt")"
+    # THE MACHINE FORM IS THE SAME ROW, RECONCILED. The console asks this
+    # question of a whole workspace at once, so it gets every state - a
+    # `released` row still answers "what happened to W-49" - rendered by the
+    # one function `cel fleet --json` also renders from.
+    if [ "$json" -eq 1 ]; then
+      local text="" jlive="$live"
+      # `-` must mean "herdr did not answer", never "this agent is missing":
+      # an outage that reads as a fleet of dead workers is the false alarm
+      # lib/stall.sh exists to avoid. A roster that ANSWERED and does not
+      # list this pane is evidence, and says `gone`.
+      [ "$have_agents" -eq 1 ] && [ "$jlive" = "-" ] && jlive=gone
+      if [ "$state" = running ] && [ -n "$pane" ] && [ "$jlive" != "-" ] && [ "$jlive" != gone ]; then
+        text="$("$HERDR" pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
+      fi
+      fleet_worker_row "$(printf '%s' "$e" | jq -c --arg s "$state" '.state = $s')" "$jlive" "$text"
+      continue
+    fi
     model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"
     ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
     case "$(printf '%s' "$e" | jq -r '.shape // "ship"')" in
@@ -950,13 +975,137 @@ cmd_status() {
   # a slot frees" with ZERO running workers, its last one collected the
   # previous day. Printed per repo, after reconciliation, so the number shown
   # is the number that is true.
-  _fanout_slots "$wsdir"
+  # Slots are for a human reading the table; the machine form is rows only.
+  [ "$json" -eq 1 ] || _fanout_slots "$wsdir"
 }
 
 # Used / free per PRODUCT, from the reconciled ledger - the cap belongs to the
 # orchestrator, and one orchestrator may stand over several repos. A repo in no
 # declared product is its own product, so a workspace without products prints
 # exactly what it printed before.
+# WHY IS THIS ONE STUCK - the question the fleet view could not answer.
+#
+# The owner asked the console why a worker was stalled and was told to run
+# `cel fleet`, which was already on the screen in front of them. A count is
+# not a diagnosis: the facts that settle it are the verdict, how long it has
+# been quiet, whether losing the worktree would cost work, what its pane last
+# said, what it last told anyone, and what its PR thinks. Root gathered those
+# six by hand, every time. This gathers them in one read, in that order, and
+# ends with the single next act - because a report that stops at "something is
+# wrong" leaves the operator exactly where they started.
+#
+# A READ. It never prompts, never releases and never writes the ledger.
+cmd_why() { # <id> [--workspace NAME]
+  [ $# -ge 1 ] || die "usage: cel-fanout why <id> [--workspace NAME]"
+  local id="$1"; shift
+  local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "why: unknown argument: $1" ;;
+    esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "why: no delegation with id '$id'"
+
+  local pane alias wt state
+  pane="$(printf '%s' "$entry" | jq -r '.pane // ""')"
+  alias="$(printf '%s' "$entry" | jq -r '.alias // ""')"
+  wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+  state="$(printf '%s' "$entry" | jq -r '.state // ""')"
+
+  # Same roster rule as everywhere else: herdr failing to answer convicts
+  # nobody, so `-` rather than `gone`.
+  local agents="" live="-"
+  if agents="$("$HERDR" agent list 2>/dev/null)" && [ -n "$agents" ]; then
+    live="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
+      '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""' 2>/dev/null || true)"
+    [ -n "$live" ] || live=gone
+  fi
+  local text=""
+  if [ "$state" = running ] && [ -n "$pane" ] && [ "$live" != "-" ] && [ "$live" != gone ]; then
+    text="$("$HERDR" pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
+  fi
+
+  local row; row="$(fleet_worker_row "$entry" "$live" "$text")"
+  local verdict severity quiet
+  verdict="$(printf '%s' "$row" | jq -r '.verdict')"
+  severity="$(printf '%s' "$row" | jq -r '.severity')"
+  quiet="$(printf '%s' "$row" | jq -r '.quiet_secs')"
+
+  # 1. the headline
+  printf '%s (%s, %s) - %s, agent %s, %s (%s)\n' "$id" \
+    "$(printf '%s' "$entry" | jq -r '.ticket // "" | if . == "" then "no ticket" else . end')" \
+    "$(printf '%s' "$entry" | jq -r '.repo // "?"')" \
+    "$state" "$live" "${verdict:-no stall}" "${severity:-none}"
+
+  # 2. how long, and what it would cost to lose it
+  local risk pushed age
+  risk="$(stall_work_at_risk "$wt")"
+  pushed="$(stall_branch_pushed "$wt")"
+  if [ "$quiet" = "-1" ]; then age="quiet for an unknown time (no readable worktree)"
+  else age="quiet for $(( quiet / 60 ))m"; fi
+  printf '%s; %s; branch pushed: %s\n' "$age" \
+    "$([ -n "$risk" ] && printf 'WORK AT RISK (%s)' "$risk" || printf 'nothing at risk')" \
+    "$pushed"
+
+  # 3. what the pane last said
+  printf 'pane, last 25 lines:\n'
+  local recent=""
+  if [ -n "$alias" ] && recent="$("$HERDR" agent read "$alias" --source recent-unwrapped --lines 25 2>/dev/null)"; then
+    printf '%s\n' "$recent"
+  else
+    printf '  pane gone\n'
+  fi
+
+  # 4. what it last TOLD anyone. A worker that went quiet on the box may have
+  # said exactly why in its last message, and nobody read it.
+  printf 'mail from it, last 5:\n'
+  local mbox mail=""
+  mbox="$(_inbox_dir)/$(ws_name "$wsdir").jsonl"
+  if [ -f "$mbox" ] && [ -n "$alias" ]; then
+    mail="$(jq -r --arg a "$alias" 'select(.from == $a) | "  [\(.ts // "")] \(.message // "")"' \
+      "$mbox" 2>/dev/null | tail -5 || true)"
+  fi
+  [ -n "$mail" ] && printf '%s\n' "$mail" || printf '  none\n'
+
+  # 5. the PR, if the ledger knows one. Never discovered here: `why` is asked
+  # about a whole fleet in a loop, and a GitHub call per row makes a view
+  # people stop running.
+  local prurl pr=""
+  prurl="$(printf '%s' "$row" | jq -r '.pr')"
+  if [ -n "$prurl" ]; then
+    pr="$("$GH" pr view "$prurl" --json state,reviewDecision,statusCheckRollup 2>/dev/null || true)"
+    if [ -n "$pr" ]; then
+      printf 'pr: %s %s, review %s, checks %s\n' "$prurl" \
+        "$(printf '%s' "$pr" | jq -r '.state // "?"')" \
+        "$(printf '%s' "$pr" | jq -r '.reviewDecision // "none"')" \
+        "$(printf '%s' "$pr" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "")] | if length == 0 then "none" elif any(. == "FAILURE" or . == "ERROR") then "FAILING" else "green" end')"
+    else
+      printf 'pr: %s (GitHub did not answer)\n' "$prurl"
+    fi
+  else
+    printf 'pr: no PR yet\n'
+  fi
+
+  # 6. ONE act. Chosen from the verdict, in the order that decides it: work
+  # that may be lost outranks work that is merely waiting.
+  local next
+  case "$verdict" in
+    vanished) next="release it or restart with --reuse" ;;
+    ?*)       next="prompt it to commit and push, or collect" ;;
+    *)
+      case "$live:$state" in
+        blocked:*)     next="it is waiting on a question - focus the pane" ;;
+        *:finished)    next="collect it" ;;
+        *)             next="nothing to do" ;;
+      esac ;;
+  esac
+  printf 'next: %s\n' "$next"
+  return 0
+}
+
 _fanout_slots() { # <wsdir>
   local p cap used repos n label
   printf '\n'
@@ -1384,9 +1533,10 @@ case "${1:-}" in
   wait)     shift; cmd_wait "$@" ;;
   collect)  shift; cmd_collect "$@" ;;
   status)   shift; cmd_status "$@" ;;
+  why)      shift; cmd_why "$@" ;;
   try)      shift; cmd_try "$@" ;;
   release)  shift; cmd_release "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|try|release|review|land ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|land ..." ;;
 esac
