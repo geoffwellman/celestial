@@ -14,6 +14,8 @@ Do
 - Implement, run the gate command given in your task spec, and commit on the
   ticket branch. Follow the ticket and branch naming in your injected policy;
   where `tickets.system` is `none`, do not invent a ticket reference.
+- A change worth a CHANGELOG line goes in `changelog.d/<your-branch>.md`, never
+  in CHANGELOG.md itself.
 - On completion write `.agent/result.md`: summary, files changed, tests run, open questions. Then stop.
 - After your PR is open, a prompt from a reviewer alias (`<repo>-pr-<n>-review`)
   is a revision request: fix on the ticket branch, run the gate, commit, push
