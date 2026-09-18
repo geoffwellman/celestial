@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { renderOnce, renderUnit, renderWorker, renderQuota, renderTimeline, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
+import { allServices, renderOnce, renderUnit, renderWorker, renderQuota, renderTimeline, renderServices, runCommand, runChain, fleet, openItems, appendHistory, askState } from './state.mjs';
 import { translate, NoTranslator } from './translate.mjs';
 import { route, NoRouter } from './router.mjs';
 
@@ -30,15 +30,16 @@ const usage = `usage: cel console [--refresh SECS] [--render-once] [--render-quo
                    [--status TEXT]
                    [--status-secs N] [--run "<cmd>"] [--unit NAME] [--worker ID]
                    [--chain "<cmd>" ...] [--ask "<text>"] [--no-router]
-                   [--timeline]`;
+                   [--timeline] [--services]`;
 
 const argv = process.argv.slice(2);
-const opts = { refresh: 10, renderOnce: false, renderQuota: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', router: true, timeline: false };
+const opts = { refresh: 10, renderOnce: false, renderQuota: false, run: '', translate: '', status: '', statusSecs: 8, chain: [], unit: '', worker: '', services: false, router: true, timeline: false };
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (a === '--render-once') opts.renderOnce = true;
   else if (a === '--render-quota') opts.renderQuota = true;
   else if (a === '--timeline') opts.timeline = true;
+  else if (a === '--services') opts.services = true;
   else if (a === '--no-router') opts.router = false;
   else if (a === '--refresh') { opts.refresh = Number(argv[++i]) || 10; }
   else if (a === '--run') { opts.run = argv[++i] || ''; }
@@ -71,7 +72,7 @@ const main = async () => {
     // which of the two answered except by the line on stderr.
     if (opts.router) {
       try {
-        const r = await route({ sentence: opts.translate, doc, items });
+        const r = await route({ sentence: opts.translate, doc, items, services: await allServices(doc) });
         const secs = (r.ms / 1000).toFixed(1);
         process.stderr.write(`router: ${r.intent} ${r.confidence.toFixed(2)} in ${secs}s\n`);
         if (r.cmds) {
@@ -179,6 +180,10 @@ const main = async () => {
     // A DRILL-DOWN IS A RENDER TOO. `--unit` and `--worker` print exactly the
     // pages the TUI draws, so the views are testable and an operator with a
     // pipe can have the depth as well.
+    if (opts.services) {
+      process.stdout.write(`${await renderServices({ status: opts.status })}\n`);
+      return;
+    }
     if (opts.worker) {
       const text = await renderWorker(opts.worker, { status: opts.status });
       if (!text) { process.stderr.write(`cel console: no worker '${opts.worker}' in the fleet\n`); process.exit(1); }

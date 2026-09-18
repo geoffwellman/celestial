@@ -27,9 +27,9 @@ import { C, orchColour, kindColour } from './theme.mjs';
 import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
-  renderOutput,
+  renderOutput, allServices,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
@@ -53,7 +53,8 @@ const completions = (doc) => {
     'cel fleet', 'cel fleet --json', 'cel inbox read --for root', 'cel inbox open --for root',
     'cel inbox send', 'cel inbox resolve', 'cel dash --ensure', 'cel run orchestrator',
     'cel-fanout status', 'cel-fanout collect', 'cel-fanout release', 'cel-linear',
-    'cel steward', 'cel gc', 'cel profiles', 'cel quota', 'herdr agent focus', 'gh pr list',
+    'cel steward', 'cel gc', 'cel profiles', 'cel quota', 'cel services',
+    'cel services start', 'cel services stop', 'cel services restart', 'cel services logs', 'herdr agent focus', 'gh pr list',
     '--workspace', '--json', '--all-workspaces',
   ];
   for (const ws of doc.workspaces || []) {
@@ -231,6 +232,23 @@ const verdictColour = (w) => {
   return C.warn;
 };
 
+// EVERY PORT THIS BOX IS HOLDING, in one list. The owner drives this box from
+// a laptop: the row that matters is not the pid, it is the URL that reaches
+// the thing from somewhere else, so `reach` is the widest column and `o` is
+// the key that uses it.
+const ServicesPanel = ({ rows, sel, innerRef }) =>
+  h(Panel, {
+    title: 'SERVICES', innerRef, focused: true,
+    right: rows.length ? `${rows.filter((r) => r.state !== 'down').length}/${rows.length} up · Esc back` : 'Esc back',
+  },
+  ...(rows.length
+    ? rows.map((r, i) => h(Text, {
+      key: r.name + i,
+      color: i === sel ? C.accent : r.state === 'down' ? C.dim : C.ink,
+      wrap: 'truncate-end',
+    }, `${i === sel ? '▸' : ' '} ${serviceLine(r)}`))
+    : [h(Text, { key: 'none', color: C.dim }, '  nothing declared and no previews running')]));
+
 const OrchPanel = ({ unit, innerRef }) =>
   h(Panel, { title: `ORCHESTRATOR · ${unit.name}-orch`, innerRef, right: `workspace ${unit.ws}` },
     h(Text, null,
@@ -407,6 +425,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [, setTick] = useState(0);                // a resize is a re-render
   const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
+  const [svcs, setSvcs] = useState(null);         // the SERVICES view: null = closed
+  const [ssel, setSsel] = useState(0);
   const [unit, setUnit] = useState(null);         // the unit view: one product, whole
   const [wsel, setWsel] = useState(0);            // which worker row the unit view has
   const [wsort, setWsort] = useState(false);      // `s`: the workers by memory, biggest first
@@ -440,6 +460,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     unitOrch: useRef(null), unitWorkers: useRef(null),
     unitWaiting: useRef(null), unitMail: useRef(null), worker: useRef(null),
     unitBoard: useRef(null), unitPrs: useRef(null), timeline: useRef(null), page: useRef(null),
+    services: useRef(null),
   };
   const rows = fleetRows(doc);
   const rowsRef = useRef(rows); rowsRef.current = rows;
@@ -1164,6 +1185,41 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       }
       return;
     }
+    // THE SERVICES VIEW. `S` from the main screen, because "is the builder up
+    // and what is its URL from my laptop" is the question this box could not
+    // answer without opening a pane. Every control is a PROPOSAL on the
+    // command line: stopping a service someone else is looking at is not
+    // something a single keypress should do.
+    if (svcs && !detail) {
+      const row = svcs[ssel];
+      if (key.escape) { setSvcs(null); setPane('fleet'); say('back'); return; }
+      if (key.upArrow) { setSsel((i) => Math.max(0, i - 1)); return; }
+      if (key.downArrow) { setSsel((i) => Math.min(svcs.length - 1, i + 1)); return; }
+      if (!value) {
+        if (input === 'o' && row) {
+          // PRINTED AS WELL AS OPENED: the operator is usually looking at this
+          // through herdr from a laptop, where xdg-open lands on a box nobody
+          // is sitting at and the printed URL is a clickable OSC 8 link.
+          const url = row.reach || row.url || '';
+          if (!url) { say(`${row.name} has no URL to open`); return; }
+          spawn('xdg-open', [url], { stdio: 'ignore', detached: true }).unref();
+          setOutput(url); setOutView(true); setOutCollapsed(false);
+          say(`opened ${url}`);
+          return;
+        }
+        if (input === 'S' && row) {
+          propose([`cel services ${row.state === 'down' ? 'start' : 'stop'} '${row.name}' --workspace ${row.ws}`]);
+          return;
+        }
+        if (input === 'r' && row) { propose([`cel services restart '${row.name}' --workspace ${row.ws}`]); return; }
+        if (input === 'L' && row) { execute(`cel services logs '${row.name}' --workspace ${row.ws}`); return; }
+        if (input === 'x' && row && row.kind === 'preview') {
+          propose([`cel-fanout try ${row.id || row.ticket} --stop --workspace ${row.ws}`]);
+          return;
+        }
+      }
+    }
+
     if (worker && !detail) {
       const w = worker.worker;
       if (key.escape) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
@@ -1424,6 +1480,18 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // bare `t` would eat the first letter of it. Shift+T on an EMPTY line, and
     // Ctrl+Y anywhere, which is the binding for someone who types capitals.
     if (input === 'T' && !value && view === 'main') { openTimeline(); return; }
+    // `S` on the main screen with an empty command line opens the services
+    // view. A bare letter is an action ONLY when there is nothing typed - the
+    // first cut of this console ate the S of "status" out of a sentence.
+    if (input === 'S' && !value && !unit && !worker && !detail && !svcs) {
+      setBusy(true);
+      (async () => {
+        const rowsNow = await allServices(doc);
+        setSvcs(rowsNow); setSsel(0); setPane('services'); setBusy(false);
+        say(`${rowsNow.filter((r) => r.state !== 'down').length}/${rowsNow.length} services up`);
+      })();
+      return;
+    }
     if (input && !key.meta && !hasControl(input)) { const r = insert(value, cursor, input); setValue(r.value); setCursor(r.cursor); }
   });
 
@@ -1525,7 +1593,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // owner's "? did nothing" was exactly that.
   const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : page ? 'page'
     : timeline ? 'timeline' : detail ? 'detail'
-      : worker ? 'worker' : unit ? 'unit'
+      : svcs ? 'services' : worker ? 'worker' : unit ? 'unit'
       : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
@@ -1534,6 +1602,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     if (page) { setPage(null); say('back'); return; }
     if (timeline) { setTimeline(null); say('back'); return; }
     if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
+    if (svcs) { setSvcs(null); setPane('fleet'); say('back'); return; }
     if (worker) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
     if (unit) { setUnit(null); setPane('fleet'); say('back'); return; }
     if (view === 'output' && !value) { setOutView(false); say('back'); return; }
@@ -1553,6 +1622,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           ? pickerMatches.map((l, i) => `${i === picker.sel ? '▸' : ' '} ${l}`)
           : ['  nothing matches'],
       })]
+      : view === 'services'
+        ? [h(ServicesPanel, { key: 'services', rows: svcs, sel: ssel, innerRef: refs.services })]
       : view === 'detail'
         ? [h(DetailView, {
           key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail,
@@ -1642,7 +1713,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         : null,
       h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
-      view === 'detail' ? 'detail' : view === 'worker' ? 'worker'
+      view === 'detail' ? 'detail' : view === 'services' ? 'services'
+        : view === 'worker' ? 'worker'
         : view === 'timeline' ? 'timeline' : view === 'page' ? 'page'
           : view === 'quota' ? 'quota'
             : view === 'unit' ? (upane === 'board' ? 'board' : upane === 'prs' ? 'prs' : 'unit')

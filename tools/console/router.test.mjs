@@ -295,7 +295,45 @@ t('review starts a reviewer on the repo the PR is in', () => {
   assert.equal(plan('review', 'review the gadget work', VF), null);
 });
 
-process.stdout.write('router: all tests passed\n');
+// --- services (CEL-26) -----------------------------------------------------
+//
+// A service resolves by its own name, and a preview by the ticket it runs,
+// because "open the preview of ABC-49" is how anyone actually says it. The
+// control verb is READ, never defaulted: naming a service is not an
+// instruction to stop it.
+const FS = facts(DOC, [], [
+  { name: 'builder', ws: 'alpha' },
+  { name: 'try ABC-49', ws: 'alpha', ticket: 'ABC-49' },
+]);
+
+t('open_service resolves a service by name and a preview by its ticket', () => {
+  assert.deepEqual(plan('open_service', 'open the builder', FS),
+    ["cel services open 'builder' --workspace alpha"]);
+  assert.deepEqual(plan('open_service', 'open the preview of ABC-49', FS),
+    ["cel services open 'try ABC-49' --workspace alpha"]);
+  assert.equal(plan('open_service', 'open the thing', FS), null);
+});
+
+t('service_ctl reads the verb from the sentence and never invents one', () => {
+  assert.deepEqual(plan('service_ctl', 'restart the builder', FS),
+    ["cel services restart 'builder' --workspace alpha"]);
+  assert.deepEqual(plan('service_ctl', 'stop the builder please', FS),
+    ["cel services stop 'builder' --workspace alpha"]);
+  assert.equal(plan('service_ctl', 'the builder', FS), null);
+});
+
+t('service_logs asks the service what it is printing', () => {
+  assert.deepEqual(plan('service_logs', 'what is the builder printing', FS),
+    ["cel services logs 'builder' --workspace alpha"]);
+});
+
+// A box with no services declared can never route to one: a sentence that
+// names nothing is a miss, and a miss falls through to the chat model.
+t('no services means every service intent misses', () => {
+  assert.equal(plan('open_service', 'open the builder', F), null);
+  assert.equal(plan('service_ctl', 'restart the builder', F), null);
+});
+
 
 // --- CEL-27: "how much Claude do I have left" ------------------------------
 // The subscription windows are the one fact the fleet document cannot answer
@@ -304,3 +342,5 @@ t('the quota intent is the whole subscription read', () => {
   assert.deepEqual(plan('quota', 'how much claude do i have left', facts(DOC, [])), ['cel quota']);
   assert.deepEqual(plan('quota', 'when does codex reset', facts(DOC, [])), ['cel quota']);
 });
+
+process.stdout.write('router: all tests passed\n');

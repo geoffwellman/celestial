@@ -19,6 +19,10 @@
 | `cel-fanout why <id> --workspace <w>` | "why is <ticket> stuck", "what is <worker> doing" - the verdict, the quiet time, the pane, its mail, its PR, one next act |
 | `cel-fanout status --json --workspace <w>` | the machine form: one object per delegation, every state; what this console reads |
 | `cel-fanout try <id> [--stop] --workspace <w>` | run a ticket's branch locally on its own ports; "try W-49", "stop the preview of W-49" |
+| `cel services [--json] --workspace <w>` | everything this box is running on a port - declared services and every `try` preview - with state, health, memory and the URL that reaches it from the laptop |
+| `cel services start\|stop\|restart <name> --workspace <w>` | "start the builder", "restart the worker service"; a service that declares no `cmd` is observe-only |
+| `cel services logs <name> --workspace <w>` | "what is the builder printing" - the last 60 lines of its pane |
+| `cel services open <name> --workspace <w>` | "open the builder", "open the preview of ABC-49" - prints (and opens) the reachable URL |
 | `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
 | `cel-linear …` | tickets |
 | `cel-linear board [--team K] [--state a,b] [--json]` | the team's open tickets and what it finished today, grouped by state - what the console's BOARD panel reads (cached 60 s) |
