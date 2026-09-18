@@ -87,6 +87,26 @@ test_hygiene_history_catches_deleted_content_tags_and_metadata() {
   rm -rf "$T"
 }
 
+# A pull request is judged on ITS OWN commits: a dirty commit on another
+# branch fails the every-ref scan and leaves the range scan alone.
+test_hygiene_history_range_scopes_to_the_named_commits() {
+  _hygiene_fixture
+  printf 'private-client-example\n' > "$T/private-patterns"
+  printf 'clean\n' > "$T/repo/a.txt"
+  git -C "$T/repo" add a.txt && git -C "$T/repo" commit -qm 'base'
+  git -C "$T/repo" branch -q dirty
+  git -C "$T/repo" checkout -q dirty
+  printf 'private-client-example\n' > "$T/repo/leak.txt"
+  git -C "$T/repo" add leak.txt && git -C "$T/repo" commit -qm 'leak on a side branch'
+  git -C "$T/repo" checkout -q -
+  printf 'more\n' >> "$T/repo/a.txt"
+  git -C "$T/repo" commit -qam 'clean work on the main line'
+  _hygiene_scan --history "$(git -C "$T/repo" rev-parse HEAD~1)..HEAD" --private-patterns "$T/private-patterns"
+  assert_fails _hygiene_scan --history dirty --private-patterns "$T/private-patterns"
+  assert_fails _hygiene_scan --all-history --private-patterns "$T/private-patterns"
+  rm -rf "$T"
+}
+
 test_hygiene_rejects_sensitive_paths_and_external_symlinks() {
   _hygiene_fixture
   touch "$T/repo/.env.production"
