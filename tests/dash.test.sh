@@ -146,3 +146,36 @@ up.listen(Number(process.env.UP), "127.0.0.1", () => {
   assert_contains "$out" "echoed one-frame"
   _dash_shutdown
 }
+
+# A TOKEN IN A URL IS A TOKEN IN A LOG. The proxy takes its control token as a
+# query parameter because a browser cannot set a header on a plain navigation
+# - and the first cut of that logged `req.url` verbatim, so clicking a service
+# link wrote the dash's control token in cleartext into a log file that
+# outlives the process (PR #54 review). The query form is now exchanged for a
+# scoped cookie and bounced once to the same path without it, and the request
+# line is redacted on its way to the log either way.
+test_dash_proxy_never_logs_the_control_token() {
+  local up; up="$(_dash_free_port)"
+  _dash_boot "$up"
+  local d; d="$(mktemp -d)"
+  printf 'hello from the builder' > "$d/x.txt"
+  ( cd "$d" && exec python3 -m http.server "$up" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+  UP_PID=$!
+  local i; for i in $(seq 1 20); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$up/x.txt" && break; sleep 0.3; done
+  # the query form bounces once, hands back the cookie, and drops the token
+  local hdr; hdr="$(curl -s -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/svc/$up/x.txt?cel_token=$TOKEN")"
+  assert_contains "$hdr" "302"
+  assert_contains "$(tr 'A-Z' 'a-z' <<<"$hdr")" "location: /svc/$up/x.txt"
+  case "$hdr" in *"$TOKEN"*) ;; *) echo 'the bounce did not hand back the token as a cookie'; rm -rf "$d"; _dash_shutdown; return 1;; esac
+  case "$(printf '%s' "$hdr" | grep -i '^location:' || true)" in *cel_token*) echo 'the redirect target still carries the token'; rm -rf "$d"; _dash_shutdown; return 1;; esac
+  # following it with the cookie alone fetches the service
+  local body; body="$(curl -sf -b "cel_svc_token=$TOKEN" "http://127.0.0.1:$DASH_PORT/svc/$up/x.txt")"
+  assert_contains "$body" "hello from the builder"
+  # NOTHING the server logged may contain the token, and the parameter is
+  # visibly redacted rather than silently dropped
+  sleep 0.5
+  case "$(cat "$T/dash.log")" in *"$TOKEN"*) echo 'the control token reached the log'; rm -rf "$d"; _dash_shutdown; return 1;; esac
+  assert_contains "$(cat "$T/dash.log")" "cel_token=REDACTED"
+  rm -rf "$d"
+  _dash_shutdown
+}

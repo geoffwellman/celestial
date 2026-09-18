@@ -1539,9 +1539,19 @@ const readBody = async (req, max = 20000) => {
 // One line per request on stderr (so it lands in the dash log). Without it,
 // "I refreshed and nothing changed" is unanswerable: you cannot tell a stale
 // browser from a request that never arrived.
+// A LOG LINE IS A PLACE A SECRET CAN END UP. The proxy accepts its control
+// token as a query parameter, because a browser cannot set a header on a
+// plain navigation - and the first cut of this printed `req.url` verbatim, so
+// clicking a service link wrote the dash's control token, in cleartext, into
+// a log that outlives the process. Redaction lives in the ONE function that
+// writes a request line rather than at each call site, where the next one
+// would be forgotten.
+const SECRET_PARAMS = /\b(cel_token|token|access_token|authorization|api_key|key)=[^&\s]*/gi;
+const safeUrl = (url) => String(url || '').replace(SECRET_PARAMS, (m) => `${m.split('=')[0]}=REDACTED`);
+
 const logReq = (req, code) => {
   const ua = String(req.headers['user-agent'] || '-').slice(0, 40);
-  console.error(`${new Date().toISOString()} ${req.method} ${req.url} ${code} ${req.headers.host || '-'} "${ua}"`);
+  console.error(`${new Date().toISOString()} ${req.method} ${safeUrl(req.url)} ${code} ${req.headers.host || '-'} "${ua}"`);
 };
 
 const server = createServer(async (req, res) => {
@@ -1559,6 +1569,22 @@ const server = createServer(async (req, res) => {
       const auth = proxyToken(req, url);
       if (!auth.ok) { res.writeHead(403, { 'content-type': 'text/plain' }).end('proxy requires the dash control token'); return; }
       if (!(await proxyPorts()).has(port)) { res.writeHead(404).end('no service or preview on that port'); return; }
+      // ...AND IT NEVER TRAVELS FURTHER THAN THE FIRST REQUEST. A token in a
+      // query string survives in browser history, in a Referer handed to the
+      // dev server, and in anything downstream that logs a URL. So the
+      // query-param form is exchanged for the scoped cookie and bounced once
+      // to the SAME path without it: every request after the bounce - and
+      // every asset the page then fetches - carries no credential at all.
+      // GET and HEAD only; bouncing a bodied method would drop its body.
+      if (auth.fromQuery && (req.method === 'GET' || req.method === 'HEAD')) {
+        url.searchParams.delete('cel_token');
+        const clean = (svc[2] || '/') + (url.search && url.search !== '?' ? url.search : '');
+        res.writeHead(302, {
+          location: `/svc/${port}${clean}`,
+          'set-cookie': `${COOKIE}=${encodeURIComponent(security.token)}; Path=/svc/; SameSite=Strict`,
+        }).end();
+        return;
+      }
       url.searchParams.delete('cel_token');
       const path = (svc[2] || '/') + (url.search && url.search !== '?' ? url.search : '');
       const headers = { ...req.headers, host: `127.0.0.1:${port}` };
@@ -1566,9 +1592,9 @@ const server = createServer(async (req, res) => {
       delete headers.cookie;
       const upstream = httpRequest({ hostname: '127.0.0.1', port, path, method: req.method, headers },
         (up) => {
-          const out = { ...up.headers };
-          if (auth.fromQuery) out['set-cookie'] = `${COOKIE}=${encodeURIComponent(security.token)}; Path=/svc/; SameSite=Strict`;
-          res.writeHead(up.statusCode || 502, out);
+          // the bounce above already handed back the cookie; a proxied
+          // response never adds a Set-Cookie of the plane's own
+          res.writeHead(up.statusCode || 502, { ...up.headers });
           up.pipe(res);
         });
       upstream.on('error', () => { if (!res.headersSent) res.writeHead(502).end('service did not answer'); else res.destroy(); });
