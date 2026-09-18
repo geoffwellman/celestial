@@ -146,24 +146,68 @@ _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
   return 1
 }
 
+# The three variables `cel run` and fanout put in every agent's environment
+# (lib/run.sh). /proc/<pid>/environ is fixed at exec, so they survive a
+# runtime that rewrites its own argv - which is the whole reason they exist:
+# pi sets process.title, so a live pi worker's cmdline is `pi` plus padding
+# and the role path the argv scan below looks for is never in it. GC was
+# blind to every pi worker on the box for weeks because of that.
+
+# A readable-looking /proc/<pid>/environ can still refuse to open - a setuid
+# process, or one that exited between the check and the read. Failing quietly
+# is right; printing "Permission denied" over every GC summary is not.
+_gc_environ_lines() { # <pid> -> NUL-separated environ on stdout, or fail
+  { cat "/proc/$1/environ"; } 2>/dev/null
+}
+
+_gc_env_role() { # <pid> <registry-names> -> role file path, or fail
+  local pid="$1" names="$2" item role="" wsvar="" ws wsdir
+  while IFS= read -r -d '' item; do
+    case "$item" in
+      CEL_ROLE_FILE=*) role="${item#*=}";;
+      CEL_WORKSPACE=*) wsvar="${item#*=}";;
+    esac
+  done < <(_gc_environ_lines "$pid")
+  [ -n "$role" ] && [ -n "$wsvar" ] || return 1
+  # A root or orchestrator pane is identified and deliberately NOT removable,
+  # exactly as its argv form has always been.
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws")" || return 1
+    [ "$wsdir" = "$wsvar" ] || continue
+    case "$role" in
+      "$wsdir/.cel/role-worker.md"|"$wsdir/.cel/role-scout.md"|"$wsdir/.cel/role-spike.md"|"$wsdir/.cel/role-reviewer.md")
+        [ -f "$role" ] || return 1
+        printf '%s' "$role"; return 0 ;;
+    esac
+    return 1
+  done <<< "$names"
+  return 1
+}
+
 # Exact binding supported for runtimes launched with a plane role-file flag.
 # cwd/comm alone never establishes ownership. Root/orchestrator roles and
 # runtimes without that verifiable launch stamp are deliberately retained.
 _gc_process_identity() { # <pid> <agents-json> <registry-names>
-  local pid="$1" agents="$2" names="$3" pane="" item cwd row rt flag ws wsdir role="" statline start info
+  local pid="$1" agents="$2" names="$3" pane="" item cwd row rt flag ws wsdir role="" statline start info proof=false
   [ -r "/proc/$pid/environ" ] && [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' item; do
     case "$item" in HERDR_PANE_ID=*) pane="${item#*=}";; esac
-  done < "/proc/$pid/environ"
+  done < <(_gc_environ_lines "$pid")
   [ -n "$pane" ] || return 1
   cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || return 1
-  row="$(printf '%s' "$agents" | jq -ce --arg p "$pane" --arg d "$cwd" '
+  # An agent_session of null is a herdr-side gap, not evidence that the pid is
+  # a stranger: two live omp panes on this box carry one. It disqualifies a
+  # process only when nothing else proves whose it is.
+  if role="$(_gc_env_role "$pid" "$names")"; then proof=true; else role=""; fi
+  row="$(printf '%s' "$agents" | jq -ce --arg p "$pane" --arg d "$cwd" --argjson proof "$proof" '
     [.result.agents[] | select(.pane_id == $p and .cwd == $d)] |
     if length == 1 and (.[0].agent_status | IN("idle", "done")) and
       (.[0].state_change_seq | type == "number") and
       (.[0].terminal_id | type == "string") and
       (.[0].name | type == "string" and length > 0) and
-      (.[0].agent_session.value | type == "string" and length > 0)
+      ((.[0].agent_session.value | type == "string" and length > 0)
+       or ($proof and (.[0].agent_session.value == null)))
     then .[0] else empty end')" || return 1
   # The inherited pane id alone could also belong to a descendant. Herdr's
   # current foreground process group must independently bind this exact PID.
@@ -175,32 +219,135 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
       (.foreground_processes | type == "array" and length == 1 and .[0].pid == $pid)' >/dev/null || return 1
   rt="$(printf '%s' "$row" | jq -r .agent)"
   [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$rt" ] || return 1
-  [ "$(agent_injection "$rt" strategy)" = append_flag_file ] || return 1
-  flag="$(agent_injection "$rt" flag)" || return 1
-  [ -n "$flag" ] || return 1
-  local -a args=() fields=()
-  mapfile -d '' -t args < "/proc/$pid/cmdline"
-  for item in "${args[@]}"; do
-    case "$item" in *role-root.md*|*role-orchestrator.md*) return 1;; esac
-  done
-  while IFS= read -r ws; do
-    [ -n "$ws" ] || continue
-    wsdir="$(registry_path "$ws")" || return 1
-    local i
-    for ((i=0; i+1<${#args[@]}; i++)); do
-      [ "${args[i]}" = "$flag" ] || continue
-      case "${args[i+1]}" in
-        "$wsdir/.cel/role-worker.md"|"$wsdir/.cel/role-scout.md"|"$wsdir/.cel/role-reviewer.md") role="${args[i+1]}";;
-      esac
+  local -a fields=()
+  # ONLY when the launcher left no variables: an omp or claude pane started by
+  # an older build carries the role path in argv and nothing else, and must
+  # keep working until it restarts.
+  if [ "$proof" != true ]; then
+    [ "$(agent_injection "$rt" strategy)" = append_flag_file ] || return 1
+    flag="$(agent_injection "$rt" flag)" || return 1
+    [ -n "$flag" ] || return 1
+    local -a args=()
+    mapfile -d '' -t args < "/proc/$pid/cmdline"
+    for item in "${args[@]}"; do
+      case "$item" in *role-root.md*|*role-orchestrator.md*) return 1;; esac
     done
-  done <<< "$names"
+    while IFS= read -r ws; do
+      [ -n "$ws" ] || continue
+      wsdir="$(registry_path "$ws")" || return 1
+      local i
+      for ((i=0; i+1<${#args[@]}; i++)); do
+        [ "${args[i]}" = "$flag" ] || continue
+        case "${args[i+1]}" in
+          "$wsdir/.cel/role-worker.md"|"$wsdir/.cel/role-scout.md"|"$wsdir/.cel/role-spike.md"|"$wsdir/.cel/role-reviewer.md") role="${args[i+1]}";;
+        esac
+      done
+    done <<< "$names"
+  fi
   [ -n "$role" ] && [ -f "$role" ] || return 1
   statline="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
   read -r -a fields <<< "${statline##*) }"
   start="${fields[19]:-}"
   [[ "$start" =~ ^[0-9]+$ ]] || return 1
-  printf '%s' "$row" | jq -c --arg pid "$pid" --arg start "$start" --arg role "$role" \
-    '{pid:$pid,start:$start,role:$role,name:.name,pane:.pane_id,terminal:.terminal_id,session:.agent_session,seq:.state_change_seq,cwd:.cwd}'
+  printf '%s' "$row" | jq -c --arg pid "$pid" --arg start "$start" --arg role "$role" --arg rt "$rt" \
+    '{pid:$pid,start:$start,role:$role,runtime:$rt,name:.name,pane:.pane_id,terminal:.terminal_id,session:.agent_session,seq:.state_change_seq,cwd:.cwd}'
+}
+
+# Why a kept row was kept, in the order the checks run. One number for every
+# kept worktree meant a GC that could identify NOTHING printed the same line
+# as one with nothing to do - which is how the pi blindness above went
+# unnoticed for weeks.
+_GC_KEPT_REASONS=(busy symlink live unlanded open-pr unidentified refused stubborn)
+
+_gc_keep_reset() {
+  unset GC_KEPT GC_UNIDENTIFIED
+  declare -gA GC_KEPT=()
+  declare -ga GC_UNIDENTIFIED=()
+}
+
+_gc_keep() { # <reason> [dir]
+  local r="$1" d="${2:-}"
+  [ -n "${GC_KEPT[*]+set}" ] || _gc_keep_reset
+  GC_KEPT["$r"]=$(( ${GC_KEPT["$r"]:-0} + 1 ))
+  if [ "$r" = unidentified ] && [ -n "$d" ]; then GC_UNIDENTIFIED+=("$d"); fi
+  kept=$(( ${kept:-0} + 1 ))
+  return 0
+}
+
+_gc_kept_line() { # <summary|doctor>
+  local r n parts=() out=""
+  case "$1" in
+    summary)
+      for r in "${_GC_KEPT_REASONS[@]}"; do
+        n="${GC_KEPT[$r]:-0}"
+        [ "$n" -gt 0 ] || continue
+        parts+=("$n $r")
+      done
+      [ "${#parts[@]}" -gt 0 ] || return 0
+      printf -v out '%s, ' "${parts[@]}"
+      printf ' (%s)' "${out%, }"
+      ;;
+    doctor)
+      n="${GC_KEPT[unidentified]:-0}"
+      [ "$n" -gt 0 ] || return 0
+      printf 'gc: %d worktrees unidentified - cel gc --dry-run to see them' "$n"
+      ;;
+  esac
+  return 0
+}
+
+# cel doctor reports the LAST sweep's blindness rather than running its own:
+# a doctor that swept would take the registry lock every time anyone ran it.
+_gc_kept_state() { printf '%s' "${CEL_GC_KEPT_STATE:-$HOME/.local/state/cel/gc-kept.json}"; }
+
+_gc_kept_save() {
+  local f r json='{}' tmp=""
+  f="$(_gc_kept_state)"
+  for r in "${_GC_KEPT_REASONS[@]}"; do
+    json="$(printf '%s' "$json" | jq --arg k "$r" --argjson n "${GC_KEPT[$r]:-0}" '.[$k] = $n')" || return 0
+  done
+  mkdir -p "$(dirname "$f")" && tmp="$(mktemp "$f.tmp.XXXXXX")" || return 0
+  printf '%s\n' "$json" > "$tmp" && mv -f -- "$tmp" "$f" || rm -f -- "$tmp"
+  return 0
+}
+
+gc_doctor_line() { # the one line cel doctor prints, from the same renderer
+  local f r n
+  f="$(_gc_kept_state)"
+  _gc_keep_reset
+  [ -r "$f" ] || return 0
+  for r in "${_GC_KEPT_REASONS[@]}"; do
+    n="$(jq -r --arg k "$r" '.[$k] // 0 | tostring' "$f" 2>/dev/null)" || return 0
+    [[ "$n" =~ ^[0-9]+$ ]] && GC_KEPT["$r"]="$n"
+  done
+  _gc_kept_line doctor
+}
+
+# A zombie still has a /proc directory until its launcher waits for it, so
+# "the directory exists" is not "still running".
+_gc_alive() { # <pid>
+  local line state
+  line="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  state="${line##*) }"; state="${state%% *}"
+  [ "$state" != Z ]
+}
+
+# pi IGNORES SIGTERM, so the old single TERM reported a reap that never
+# happened. A runtime declaring `signal: int` in agents.yaml gets SIGINT
+# first, then CEL_GC_GRACE seconds, then TERM, then it is reported and kept.
+# GC never sends -9: a worker holding an unfinished commit is worth more than
+# a tidy process list.
+_gc_reap_signal() { # <pid> <runtime> -> 0 exited, 1 still alive
+  local pid="$1" rt="$2" grace="${CEL_GC_GRACE:-10}" i
+  if [ "$(agent_get "$rt" signal)" != int ]; then
+    kill -TERM "$pid" 2>/dev/null
+    return
+  fi
+  kill -INT "$pid" 2>/dev/null || return 1
+  for ((i=0; i<grace*10; i++)); do _gc_alive "$pid" || return 0; sleep 0.1; done
+  kill -TERM "$pid" 2>/dev/null || return 1
+  for ((i=0; i<grace*10; i++)); do _gc_alive "$pid" || return 0; sleep 0.1; done
+  return 1
 }
 
 _gc_agents_removable() { # <agents-json> <dir> <registry-names>
@@ -252,9 +399,11 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
       [ "$identity" = "$current" ] || continue
       if [ "$dry" -eq 1 ]; then
         c_ok "would reap idle plane pid $pid after $((now-since)) observed idle seconds"
-      elif kill -TERM "$pid" 2>/dev/null; then
+      elif _gc_reap_signal "$pid" "$(printf '%s' "$identity" | jq -r .runtime)"; then
         c_ok "reaped idle plane pid $pid after $((now-since)) observed idle seconds"
       else
+        c_warn "idle plane pid $pid did not exit - kept"
+        _gc_keep stubborn
         continue
       fi
       reaped=$((reaped+1))
@@ -314,6 +463,7 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
   local removed=0 reaped=0 kept=0 managed=$'\n' candidates='[]'
+  _gc_keep_reset
   # Complete discovery BEFORE removing anything. A failed pane read must not
   # make its worktree look orphaned to a later pass.
   while IFS= read -r ws_id; do
@@ -323,7 +473,7 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
     cwd="$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')"
     case "$cwd" in "$HOME"/.herdr/worktrees/*) ;; *) continue;; esac
     managed="$managed$cwd"$'\n'
-    _gc_panes_settled "$panes" || { kept=$((kept+1)); continue; }
+    _gc_panes_settled "$panes" || { _gc_keep busy; continue; }
     candidates="$(printf '%s' "$candidates" | jq --arg w "$ws_id" --arg d "$cwd" '. + [{workspace:$w, dir:$d}]')"
   done <<< "$ids"
   local d
@@ -336,43 +486,50 @@ cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
   while IFS= read -r row; do
     cwd="$(printf '%s' "$row" | jq -r .dir)"
     ws_id="$(printf '%s' "$row" | jq -r .workspace)"
-    [ "$(readlink -f "$cwd" 2>/dev/null)" = "$cwd" ] || { kept=$((kept+1)); continue; }
-    if [ -z "$ws_id" ] && _gc_has_process "$cwd"; then kept=$((kept+1)); continue; fi
-    if _gc_delegated_live "$cwd"; then kept=$((kept+1)); continue; fi
+    [ "$(readlink -f "$cwd" 2>/dev/null)" = "$cwd" ] || { _gc_keep symlink; continue; }
+    if [ -z "$ws_id" ] && _gc_has_process "$cwd"; then _gc_keep live; continue; fi
+    if _gc_delegated_live "$cwd"; then _gc_keep live; continue; fi
     # No force removal: Git/herdr must still refuse newly dirty work. Only
     # linked Git worktrees qualify, never an ordinary repository in this dir.
     local gitdir common
     gitdir="$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null)" \
       && common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-      && [ "$gitdir" != "$common" ] || { kept=$((kept+1)); continue; }
+      && [ "$gitdir" != "$common" ] || { _gc_keep unlanded; continue; }
     state="$(_gc_pr_state "$cwd")"
-    case "$state" in MERGED|CLOSED|NONE) ;; *) kept=$((kept+1)); continue;; esac
-    _gc_landed_clean "$cwd" "$state" || { _gc_flag_unlanded "$cwd"; kept=$((kept+1)); continue; }
+    case "$state" in MERGED|CLOSED|NONE) ;; *) _gc_keep open-pr; continue;; esac
+    _gc_landed_clean "$cwd" "$state" || { _gc_flag_unlanded "$cwd"; _gc_keep unlanded; continue; }
     # Re-read the exact managed workspace; an orphan must have NO live agent
     # at its path. Unknown/blocked/working never age out of either veto.
     if [ -n "$ws_id" ]; then
       panes="$(lock_spawn "${lock_fd:-}" herdr pane list --workspace "$ws_id" 2>/dev/null)" \
         && _gc_panes_settled "$panes" \
         && [ "$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')" = "$cwd" ] \
-        || { kept=$((kept+1)); continue; }
+        || { _gc_keep busy; continue; }
     fi
     agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
       && _gc_agents_removable "$agents" "$cwd" "$names" \
-      || { kept=$((kept+1)); continue; }
+      || { _gc_keep unidentified "$cwd"; continue; }
     if [ "$dry" -eq 1 ]; then
       c_ok "would remove ${ws_id:-orphan} ($cwd, PR $state, settled and landed clean)"
     elif [ -n "$ws_id" ]; then
       lock_spawn "${lock_fd:-}" herdr worktree remove --workspace "$ws_id" >/dev/null \
-        || { c_warn "$ws_id: worktree remove refused"; kept=$((kept+1)); continue; }
+        || { c_warn "$ws_id: worktree remove refused"; _gc_keep refused; continue; }
       c_ok "removed $ws_id ($cwd)"
     else
       git --git-dir="$common" worktree remove "$cwd" 2>/dev/null \
-        || { c_warn "$cwd: worktree remove refused"; kept=$((kept+1)); continue; }
+        || { c_warn "$cwd: worktree remove refused"; _gc_keep refused; continue; }
       c_ok "removed orphan $cwd"
     fi
     removed=$((removed+1))
   done < <(printf '%s' "$candidates" | jq -c '.[]')
   [ -z "$reap_hours" ] || _gc_reap "$reap_hours" "$dry" "$agents" "$names"
-  printf 'gc: %d worktrees removed, %d agents reaped, %d kept%s\n' \
-    "$removed" "$reaped" "$kept" "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
+  printf 'gc: %d worktrees removed, %d agents reaped, %d kept%s%s\n' \
+    "$removed" "$reaped" "$kept" "$(_gc_kept_line summary)" \
+    "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
+  # A BLIND GC MUST NOT LOOK LIKE AN IDLE ONE. Naming the directories is the
+  # difference between "nothing to do" and "I cannot see anything".
+  if [ "${GC_KEPT[unidentified]:-0}" -gt 0 ]; then
+    c_warn "unidentified agents kept: ${GC_UNIDENTIFIED[*]}"
+  fi
+  _gc_kept_save
 )

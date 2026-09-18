@@ -50,11 +50,21 @@ additional local commits invalidate that proof. Fanout release reports unknown
 work as held, with explicit keep/discard decisions rather than a zero count.
 
 Reaping is separate from worktree deletion. It requires a named plane-owned
-worker, a matching role-file argument and inherited pane identity, herdr's
-foreground-process attestation, and the same `/proc` PID/start time. The idle
-clock additionally binds boot, session, terminal and state-change sequence.
-First observation never reaps; active or unverifiable state resets eligibility.
+worker, proof of the role it was launched for, inherited pane identity,
+herdr's foreground-process attestation, and the same `/proc` PID/start time.
+That role proof is read from the launch environment (`CEL_ROLE`,
+`CEL_ROLE_FILE`, `CEL_WORKSPACE`, set as a prefix on the launch line by `cel
+run` and fanout), because a runtime may rewrite its own argv and leave nothing
+recognisable in `/proc/<pid>/cmdline`; the older role-file argument scan
+remains as a fallback for panes started by an earlier build. The idle clock
+additionally binds boot, session, terminal and state-change sequence. First
+observation never reaps; active or unverifiable state resets eligibility.
 Root/orchestrators, manual launches and unsupported ownership stamps remain.
+A runtime declaring `signal: int` in `agents.yaml` is asked to stop with
+SIGINT, then SIGTERM after `CEL_GC_GRACE`, and is otherwise reported and kept;
+GC never sends SIGKILL. The summary line splits `kept` by reason, and names
+the directories it could not identify, so a blind sweep cannot read as an idle
+one.
 
 Locks serialize cooperating Celestial lifecycle writers. Registry and ledger
 updates use temporary files beside their destination followed by atomic

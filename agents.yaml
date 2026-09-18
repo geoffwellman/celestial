@@ -16,6 +16,11 @@
 #   role_injection     how a role prompt reaches a launched session
 #   launch_args        optional: extra flags cel run puts on every launch of
 #                      this agent, ahead of the role-injection args
+#   signal             optional: how `cel gc` asks an idle agent of this
+#                      runtime to stop. `term` (the default) sends SIGTERM;
+#                      `int` sends SIGINT first and only then TERM, for a
+#                      runtime that ignores TERM - pi does, which made GC
+#                      report reaps that never happened. GC never sends -9.
 #   model_flag         optional: how this CLI takes a model id. Absent means
 #                      the runtime cannot be pointed at a model and a profile
 #                      that names one is rejected rather than silently ignored.
@@ -120,6 +125,8 @@ agents:
     required: false
     # Same text-or-file flag as omp (both pi-family) - see the omp note.
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
+    # pi ignores SIGTERM; Ctrl-C is what stops it. See `signal` above.
+    signal: int
     model_flag: --model
     # pi also understands the `provider/id:<thinking>` shorthand, but the plane
     # always spells the level as its own flag so one profile field renders the

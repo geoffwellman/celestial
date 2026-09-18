@@ -2048,3 +2048,22 @@ test_the_same_commands_from_the_repo_checkout_still_run() {
   ! printf '%s' "$out" | grep -q "a worker does not" || { echo "the repo checkout was treated as a worker"; _fanout_worker_teardown; return 1; }
   _fanout_worker_teardown
 }
+
+# A delegated worker gets the same three variables as one started by hand:
+# `cel gc` identifies a pi worker by its environment, not by its argv, and a
+# fanout worker that carried neither would be the unidentified row that keeps
+# a whole worktree alive for ever.
+test_delegate_marks_the_worker_with_the_plane_launch_environment() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ENVMARK "$T/spec.md") > /dev/null
+  local marked start_line mark_line
+  marked="$(grep '^pane send-text' "$STUB_LOG" | head -1)"
+  assert_contains "$marked" "CEL_ROLE=worker"
+  assert_contains "$marked" "CEL_ROLE_FILE=$T/.cel/role-worker.md"
+  assert_contains "$marked" "CEL_WORKSPACE=$T"
+  mark_line="$(grep -n '^pane send-text' "$STUB_LOG" | head -1 | cut -d: -f1)"
+  start_line="$(grep -n '^agent start' "$STUB_LOG" | head -1 | cut -d: -f1)"
+  [ "$mark_line" -lt "$start_line" ] \
+    || { echo "the launch was marked after the agent started"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}

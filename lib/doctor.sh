@@ -19,6 +19,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
 # shellcheck source=lib/console.sh
 . "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
+# shellcheck source=lib/gc.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gc.sh"   # gc_doctor_line, for the blind-GC line
 # shellcheck source=lib/gateway.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
 # shellcheck source=lib/services.sh
@@ -341,6 +343,12 @@ cmd_doctor() {
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1
   check_externals || fail=1
+
+  # A GC that can identify nothing is invisible otherwise: it prints the same
+  # summary as one with nothing to do. This is the last sweep's reading, not a
+  # sweep of its own - doctor must not take the registry lock to run.
+  local gcline; gcline="$(gc_doctor_line)"
+  [ -z "$gcline" ] || c_warn "$gcline"
 
   echo
   [ "$fail" = 0 ] && printf '\033[32mdoctor: OK\033[0m\n' || printf '\033[31mdoctor: problems found\033[0m\n'

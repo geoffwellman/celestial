@@ -37,8 +37,12 @@ _run_role_file() { # <wsdir> <tag> [product]
 # Fills the global AGENT_ARGS array per the runtime's role_injection strategy
 # in agents.yaml. File writes are real side effects, so they are skipped on a dry
 # run - only the herdr command line is ever a preview.
+#
+# AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
+# launch environment below carries it, and `cel gc` proves ownership with it.
 _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
+  AGENT_ROLE_FILE=""
   strategy="$(agent_injection "$rt" strategy)"
   case "$strategy" in
     append_flag)
@@ -55,6 +59,7 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
         printf '%s\n' "$body" > "$file"
       fi
       AGENT_ARGS=("$(agent_injection "$rt" flag)" "$file")
+      AGENT_ROLE_FILE="$file"
       ;;
     prompt_arg)
       c_warn "runtime $rt injects the role as a prompt argument - it may not survive compaction"
@@ -70,11 +75,47 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
           printf '%s\n' "$body"; } > "$file"
       fi
       AGENT_ARGS=(--agent "cel-$tag")
+      AGENT_ROLE_FILE="$file"
       ;;
     *)
       die "cel run: runtime '$rt' has no known role_injection strategy"
       ;;
   esac
+}
+
+# THE LAUNCHER MARKS ITS CHILDREN. `cel gc` used to prove a process was a
+# plane worker by finding the role file path in /proc/<pid>/cmdline. pi
+# rewrites its own argv (process.title), so a live pi worker's cmdline is the
+# two bytes `pi` and padding: every pi worker on the box read as unidentified,
+# GC kept their worktrees whole, and for weeks the steward journal printed
+# `0 worktrees removed, 0 agents reaped` without anyone noticing.
+# /proc/<pid>/environ is fixed at exec and no runtime rewrites it, so
+# ownership travels there instead.
+#
+# `herdr agent start` has no --env option (checked against `--help`), so the
+# variables go on as an `env K=V ...` PREFIX to the launch line it types. That
+# is deliberately scoped to the launch: an `export` in the pane would outlive
+# the agent and mark every later command in that shell as a plane worker.
+_run_launch_env() { # <role> <wsdir> [rolefile] -> `env K=V K=V K=V `
+  local role="$1" wsdir="$2" file="${3:-}" out
+  printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
+  # A runtime whose role is injected as a prompt argument has no file to name;
+  # the other two still say whose the process is.
+  [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
+  printf '%s ' "$out"
+}
+
+# The prefix is TYPED, not run: `herdr pane run` would execute it as its own
+# command and the variables would be gone before the agent started. send-text
+# leaves it on the shell's input line for `herdr agent start` to complete.
+# A pane that refuses the text still gets its agent - an unmarked worker is a
+# kept worktree, which is the safe direction.
+_run_mark_launch() { # <pane> <env-prefix>
+  local pane="$1" prefix="$2"
+  [ -n "$pane" ] && [ -n "$prefix" ] || return 0
+  herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1 \
+    || c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  return 0
 }
 
 # The herdr-workspace-manager CLI ships inside the plugin and is not put on
@@ -260,7 +301,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   [ "$dry" -eq 1 ] || mkdir -p "$cwd"
 
   local RUN_BODY; RUN_BODY="$(_run_console_body)"
-  local AGENT_ARGS=()
+  local AGENT_ARGS=() AGENT_ROLE_FILE=""
   # The role file keeps the `role-*.md` shape on purpose: lib/gc.sh tells a
   # long-lived agent from a stray one by that substring in the cmdline, and
   # the console is the longest-lived pane on the box.
@@ -283,8 +324,10 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
   local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label celestial/console)
+  local envprefix; envprefix="$(_run_launch_env console "$cwd" "$AGENT_ROLE_FILE")"
   if [ "$dry" -eq 1 ]; then
     printf 'herdr %s\n' "${CREATE_ARGS[*]}"
+    printf 'herdr pane send-text <pane> %s\n' "$envprefix"
     printf 'herdr agent start console --kind %s --pane <pane> -- %s\n' \
       "$runtime" "$(_run_dry_agent_args)"
     return 0
@@ -296,6 +339,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   ws_id="$(printf '%s' "$resp" | jq -r '.. | .workspace_id? // empty' | head -1)"
   pane_id="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
   [ -n "$pane_id" ] && [ "$pane_id" != "null" ] || pane_id="${ws_id}:p1"
+  _run_mark_launch "$pane_id" "$envprefix"
   herdr agent start console --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
 
@@ -439,7 +483,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
 
-  local AGENT_ARGS=()
+  local AGENT_ARGS=() AGENT_ROLE_FILE=""
   _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" \
     "$(_run_role_file "$wsdir" "$tag" "${product:-}")"
 
@@ -471,6 +515,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
+  local envprefix; envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE")"
 
   # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
   # it reaches this box's auth-gateway, which holds several subscriptions per
@@ -500,6 +545,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   if [ "$role" = "reviewer" ]; then
     if [ "$dry_run" -eq 1 ]; then
       printf 'herdr tab "PR reviewer": split its largest pane, or a new tab per %s panes\n' "$_RUN_REVIEW_TAB_CAP"
+      printf 'herdr pane send-text <pane> %s\n' "$envprefix"
       printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
         "$agent_name" "$runtime" "$(_run_dry_agent_args)"
       return 0
@@ -507,6 +553,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     have herdr || die "cel run: herdr is not on PATH"
     have jq    || die "cel run: jq is not on PATH"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
+    _run_mark_launch "$pane_id" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
     return 0
   fi
@@ -538,6 +585,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     # is, and a preview that prints one teaches people to paste both.
     [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
       || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
+    printf 'herdr pane send-text <pane> %s\n' "$envprefix"
     printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
       "$agent_name" "$runtime" "$(_run_dry_agent_args)"
     return 0
@@ -560,5 +608,8 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   # next command starts - and the bearer is expanded there, by omp, never here.
   [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
 
+  # ...and the role mark goes on the launch LINE, after any pane run above:
+  # it must not outlive the command it marks.
+  _run_mark_launch "$pane_id" "$envprefix"
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
