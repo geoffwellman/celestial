@@ -9,7 +9,7 @@
 // sentence and the fleet state. A slot filler nobody can assert is a slot
 // filler that will one day put someone else's workspace in a `--workspace`.
 import assert from 'node:assert/strict';
-import { facts, plan, options, shellQuote } from './router.mjs';
+import { facts, plan, options, shellQuote, INTENT_NAMES } from './router.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
 
@@ -193,6 +193,97 @@ t('the top three become options, each expanded where the slots allow', () => {
   // point of showing three.
   assert.equal(opts[2].cmd, '');
   assert.equal(opts[2].intent, 'why_worker');
+});
+
+
+// --- CEL-25: the verbs as intents ------------------------------------------
+//
+// Every key on a panel is also a sentence someone will type, and a console
+// that can only be steered by keys is a console you have to be looking at.
+// Two sentences each, because one is an example and two is a rule.
+
+const VDOC = {
+  workspaces: [{
+    name: 'alpha',
+    root: { unread: 0, open: 1 },
+    units: [{
+      name: 'bundle',
+      orch: '-',
+      workers: 2,
+      cap: 4,
+      repos: ['widget', 'gadget'],
+      workers_list: [
+        { id: 'ABC-49-slug', ticket: 'ABC-49', repo: 'widget', state: 'finished', alias: 'widget/ABC-49-slug', pr: 'https://example.invalid/acme/widget/pull/12' },
+        { id: 'ABC-50-other', ticket: 'ABC-50', repo: 'gadget', state: 'running', alias: 'gadget/ABC-50-other', pr: '' },
+      ],
+    }],
+  }],
+};
+const VF = facts(VDOC, ITEMS);
+
+t('the seven verbs are intents the router can choose', () => {
+  for (const n of ['start_ticket', 'answer', 'land', 'nudge', 'restart_orchestrator', 'move_ticket', 'review']) {
+    assert.ok(INTENT_NAMES.includes(n), `${n} is not an intent`);
+  }
+});
+
+t('start_ticket tells the product\u2019s orchestrator to pick the ticket up', () => {
+  assert.deepEqual(plan('start_ticket', 'start ABC-49 next', VF),
+    ["cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha"]);
+  assert.deepEqual(plan('start_ticket', 'get bundle going on ABC-51', VF),
+    ["cel inbox send bundle-orch 'pick up ABC-51 next' --workspace alpha"]);
+  // no ticket named is a miss, not a guess at whichever one is on top
+  assert.equal(plan('start_ticket', 'start something', VF), null);
+});
+
+t('answer writes to the sender of an open item and then closes it', () => {
+  assert.deepEqual(plan('answer', 'answer 1789208557174615054 "hold the gadget"', VF),
+    ["cel inbox send bundle-orch 'hold the gadget' --workspace alpha",
+      'cel inbox resolve 1789208557174615054 --workspace alpha']);
+  assert.deepEqual(plan('answer', 'tell bundle-orch "hold the gadget" and close it', VF),
+    ["cel inbox send bundle-orch 'hold the gadget' --workspace alpha",
+      'cel inbox resolve 1789208557174615054 --workspace alpha']);
+  // NO MATCHING OPEN ITEM IS A FALL-THROUGH. Answering a decision nobody
+  // asked is a message into a mailbox with no question in it.
+  assert.equal(plan('answer', 'answer widget-orch "go ahead"', VF), null);
+});
+
+t('land finds the delegation behind a PR number or a ticket', () => {
+  assert.deepEqual(plan('land', 'land #12', VF), ['cel-fanout land ABC-49-slug --workspace alpha']);
+  assert.deepEqual(plan('land', 'merge ABC-49 please', VF), ['cel-fanout land ABC-49-slug --workspace alpha']);
+  assert.equal(plan('land', 'land the other one', VF), null);
+});
+
+t('nudge prompts the worker by its herdr alias', () => {
+  assert.deepEqual(plan('nudge', 'nudge ABC-49 "push what you have"', VF),
+    ["herdr agent prompt widget/ABC-49-slug 'push what you have'"]);
+  assert.deepEqual(plan('nudge', 'remind ABC-50-other "commit before you stop"', VF),
+    ["herdr agent prompt gadget/ABC-50-other 'commit before you stop'"]);
+  assert.equal(plan('nudge', 'nudge ABC-49', VF), null);
+});
+
+t('restart_orchestrator names the product and its workspace', () => {
+  assert.deepEqual(plan('restart_orchestrator', 'restart the bundle orchestrator', VF),
+    ['cel run orchestrator --product bundle --workspace alpha']);
+  assert.deepEqual(plan('restart_orchestrator', 'bring bundle back up', VF),
+    ['cel run orchestrator --product bundle --workspace alpha']);
+  assert.equal(plan('restart_orchestrator', 'restart it', VF), null);
+});
+
+t('move_ticket carries the ticket and the state name', () => {
+  assert.deepEqual(plan('move_ticket', 'move ABC-49 to "In Review"', VF),
+    ['cel-linear state ABC-49 "In Review"']);
+  assert.deepEqual(plan('move_ticket', 'put ABC-50 in "Done"', VF),
+    ['cel-linear state ABC-50 "Done"']);
+  assert.equal(plan('move_ticket', 'move ABC-49', VF), null);
+});
+
+t('review starts a reviewer on the repo the PR is in', () => {
+  assert.deepEqual(plan('review', 'review #12', VF),
+    ['cel run reviewer --repo widget --pr 12 --workspace alpha']);
+  assert.deepEqual(plan('review', 'get a reviewer on ABC-49', VF),
+    ['cel run reviewer --repo widget --pr 12 --workspace alpha']);
+  assert.equal(plan('review', 'review the gadget work', VF), null);
 });
 
 process.stdout.write('router: all tests passed\n');
