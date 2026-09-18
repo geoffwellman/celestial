@@ -35,4 +35,6 @@ Do not
   Your injected policy block still governs the shape: where it says PRs are
   not required or names a different flow, the policy block wins over the spec.
 - Touch files outside this worktree.
+- Land, release, collect or delegate through `cel-fanout` - when your PR is
+  approved your work is done; the orchestrator lands it.
 - Broaden scope. If the ticket is wrong or blocked, say so in result.md and stop.

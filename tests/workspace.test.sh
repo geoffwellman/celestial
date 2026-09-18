@@ -291,3 +291,9 @@ test_ws_repo_preview_is_empty_without_a_preview_block() {
   assert_eq "$(ws_repo_preview "$WSA" widget url)" ""
   assert_eq "$(ws_repo_preview_env "$WSA" widget)" ""
 }
+
+# The role says in one line what the guard and the binary now enforce.
+test_worker_role_forbids_landing() {
+  local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/worker.md")"
+  assert_contains "$out" "Land, release, collect or delegate"
+}

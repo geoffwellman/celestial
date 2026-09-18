@@ -8,6 +8,10 @@ watch the repo (Watch → Custom → Releases) to be notified.
 ## [Unreleased]
 
 ### Added
+- A worker may no longer **land, release, delegate, scout, spike, collect or
+  reconcile**: the guard denies those verbs for the worker role and
+  `cel-fanout` refuses them on its own before any `gh` call or ledger lock, so
+  the bottom tier ships a PR and reports rather than driving the factory.
 - **The two signed-in subscriptions are visible at last.** The fleet runs on a
   Claude subscription (pi's OAuth and Claude Code) and a Codex one (ChatGPT,
   through omp), and nothing on the plane could see either: `cel quota` knew API

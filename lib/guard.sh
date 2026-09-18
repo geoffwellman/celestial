@@ -178,10 +178,47 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
   return 1
 }
 
+# A WORKER MAKES ONE DELIVERABLE AND REPORTS. On 2026-09-18 a worker whose
+# reviewer had just approved its PR ran `cel-fanout land <its own id>` from its
+# own worktree, as a background task: the ledger lock was held for three
+# minutes while `land` ran the gate, the orchestrator's `cel-fanout status`
+# hung on that lock, and the only thing that stopped the merge was branch
+# protection - the PR happened to be behind. The role file had said "never
+# merge" all along; nothing enforced it, because every command was allowed for
+# the worker role before any check ran. This is a SHORT deny list, not an
+# allowlist: a worker's job is to write code and its dangerous verbs are the
+# few that drive the factory rather than build in it.
+#
+# Matched on the normalised command the way the git rules below are, because
+# `cel-fanout` is reached by absolute path and through `bash .../cel-fanout`
+# as often as by name, and neither `-C` nor `--workspace` changes the verb.
+_guard_worker() { # <command> -> allow | deny <reason>
+  local c="$1"
+  c="${c#"${c%%[![:space:]]*}"}"
+  local n
+  n="$(printf '%s' "$c" \
+    | sed -E 's#(^|[[:space:]])(bash|sh|env)[[:space:]]+#\1#g' \
+    | sed -E 's#(^|[[:space:]])[^[:space:]]*/(cel-fanout|cel)([[:space:]])#\1\2\3#g' \
+    | sed -E 's#(^|[[:space:]])(cel-fanout|cel)([[:space:]]+-C[[:space:]]+[^[:space:]]+)+#\1\2#g')"
+  case "$n" in
+    cel-fanout\ land*|cel-fanout\ release*|cel-fanout\ delegate*|cel-fanout\ scout*|\
+    cel-fanout\ spike*|cel-fanout\ collect*|cel-fanout\ reconcile*)
+      printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
+      return 0;;
+    cel\ run\ orchestrator*|cel\ run\ root*|cel\ run\ console*|cel\ run\ worker*|cel\ run\ reviewer*)
+      printf 'deny a worker does not start agents'
+      return 0;;
+  esac
+  printf allow
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   case "$role" in console) _guard_console "$cmd"; return 0;; esac
-  case "$role" in worker|other) printf allow; return 0;; esac
+  # `other` is not the plane's concern; a worker has exactly the refusals above
+  # and is otherwise unrestricted, writing code being its whole job.
+  case "$role" in worker) _guard_worker "$cmd"; return 0;; esac
+  case "$role" in other) printf allow; return 0;; esac
 
   # The sanctioned write paths. These are the mechanism; refusing them would
   # refuse the orchestrator's actual job.
