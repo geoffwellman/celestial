@@ -6,7 +6,9 @@
 // gh, yq) - no daemons, no state of its own. The CLI launcher defaults to the
 // tailnet IP when available, otherwise loopback; --host overrides it. This
 // private control surface requires trusted Host/Origin and CSRF checks.
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
+import { timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -301,6 +303,46 @@ const gatewayAccounts = () => cached('gwsubs', 60000, async () => {
   } catch { return []; }
 });
 
+// WHAT IS RUNNING ON A PORT, asked of the plane rather than re-derived here.
+// `cel services --json` already joins the declared services to the previews
+// `try` started and answers state, health, memory and reach; a second
+// implementation in JavaScript would be a second answer to one question.
+const services = () => cached('services', 5000, async () => {
+  const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', cfg.name, '--json'], 10000);
+  try { return JSON.parse(out || '[]'); } catch { return []; }
+});
+
+// THE PROXY ONLY CARRIES PORTS THIS WORKSPACE KNOWS. A tailnet neighbour who
+// can reach the dashboard must not be able to browse this box's loopback by
+// walking port numbers - so the allowed set is exactly the ports of the
+// services and previews above, and everything else is 404.
+const proxyPorts = async () => new Set((await services())
+  .map((s) => Number(s.port)).filter((p) => Number.isInteger(p) && p > 0 && p < 65536));
+
+// ...and only with the dash's own control token, the one its control
+// endpoints require. A browser cannot set a header on a plain navigation, so
+// the token may also arrive as `?cel_token=` (which is then parked in a
+// cookie scoped to /svc/, because a dev server's own assets are fetched
+// without the query string that got you there).
+const COOKIE = 'cel_svc_token';
+const tokenOk = (value) => {
+  const supplied = String(value || '');
+  if (supplied.length !== security.token.length) return false;
+  try { return timingSafeEqual(Buffer.from(supplied), Buffer.from(security.token)); } catch { return false; }
+};
+const proxyToken = (req, url) => {
+  if (tokenOk(req.headers['x-cel-csrf'])) return { ok: true, fromQuery: false };
+  const q = url.searchParams.get('cel_token');
+  if (tokenOk(q)) return { ok: true, fromQuery: true };
+  const jar = String(req.headers.cookie || '').split(';')
+    .map((c) => c.trim().split('='));
+  const c = jar.find((p) => p[0] === COOKIE);
+  if (c && tokenOk(decodeURIComponent(c[1] || ''))) return { ok: true, fromQuery: false };
+  return { ok: false, fromQuery: false };
+};
+
+const SVC_RE = /^\/svc\/(\d{1,5})(\/[^?]*)?(\?.*)?$/;
+
 const backlog = () => cached('backlog', 15000, async () => {
   const f = join(cfg.wsdir, 'backlog.yaml');
   if (!existsSync(f)) return null;
@@ -353,7 +395,7 @@ const subscriptions = async () => {
 };
 
 const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, gwsubs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), gatewayAccounts()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, gwsubs, svcs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), gatewayAccounts(), services()]);
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -398,7 +440,7 @@ const state = async () => {
   return {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
-    agents: ags, services: cfg.services || [], backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
+    agents: ags, services: svcs, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
     // the same thing to whoever is reading the card - `source` says which.
     subscriptions: [...subs.map((x) => ({ source: 'direct', ...x })), ...gwsubs],
@@ -1266,8 +1308,17 @@ async function refresh(){
   $('target').innerHTML=s.agents.map(a=>'<option value="'+esc(a.pane)+'">'+esc(a.label)+'</option>').join('')
     +s.inflight.filter(w=>w.pane).map(w=>'<option value="'+esc(w.pane)+'">'+esc(w.repo)+'/'+esc(w.branch)+'</option>').join('');
   if(cur)$('target').value=cur;
-  $('services').innerHTML=s.services.length?s.services.map(x=>'<a href="'+esc(x.url)+
-    '" target="_blank">'+esc(x.name)+' ↗</a>').join(''):'<span class="empty">no services declared</span>';
+  $('services').innerHTML=s.services.length?'<table><tbody>'+s.services.map(function(x){
+    // a preview belongs to a ticket, and the thing you want next to a running
+    // preview is the PR it is a preview OF
+    var pr=x.ticket?s.inflight.find(function(w){return w.ticket&&w.ticket.id===x.ticket&&w.pr}):null;
+    var link=x.reach?'<a href="'+esc(x.reach)+(x.reach.indexOf('/svc/')>-1?'?cel_token='+encodeURIComponent(csrf):'')+
+      '" target="_blank">'+esc(x.reach)+' \u2197</a>':'<span class="empty">not reachable</span>';
+    return '<tr class="agrow"><td style="width:1%">'+chip(x.state,x.state==='healthy'?'ok':x.state==='up'?'w':'b')+
+      '</td><td class="branch">'+esc(x.name)+(x.observe_only?' <span class="empty">observe-only</span>':'')+
+      '</td><td class="owner">:'+esc(x.port)+'</td><td class="owner">'+esc(x.rss_mb>=1024?(x.rss_mb/1024).toFixed(1)+'G':(x.rss_mb||0)+'M')+'</td><td>'+link+
+      '</td><td>'+(pr?'<a href="'+esc(pr.pr.url)+'" target="_blank">#'+esc(pr.pr.number)+'</a>':'')+'</td></tr>';
+  }).join('')+'</tbody></table>':'<span class="empty">no services declared and no previews running</span>';
   $('backlog').innerHTML=(s.backlog&&s.backlog.items&&s.backlog.items.length)?
     '<table><tbody>'+s.backlog.items.map(i=>'<tr class="agrow"><td style="width:1%">'+
     chip(i.status||'todo',i.status==='in-progress'?'w':i.status==='done'?'ok':'')+'</td><td>'+esc(i.title)+
@@ -1488,15 +1539,68 @@ const readBody = async (req, max = 20000) => {
 // One line per request on stderr (so it lands in the dash log). Without it,
 // "I refreshed and nothing changed" is unanswerable: you cannot tell a stale
 // browser from a request that never arrived.
+// A LOG LINE IS A PLACE A SECRET CAN END UP. The proxy accepts its control
+// token as a query parameter, because a browser cannot set a header on a
+// plain navigation - and the first cut of this printed `req.url` verbatim, so
+// clicking a service link wrote the dash's control token, in cleartext, into
+// a log that outlives the process. Redaction lives in the ONE function that
+// writes a request line rather than at each call site, where the next one
+// would be forgotten.
+const SECRET_PARAMS = /\b(cel_token|token|access_token|authorization|api_key|key)=[^&\s]*/gi;
+const safeUrl = (url) => String(url || '').replace(SECRET_PARAMS, (m) => `${m.split('=')[0]}=REDACTED`);
+
 const logReq = (req, code) => {
   const ua = String(req.headers['user-agent'] || '-').slice(0, 40);
-  console.error(`${new Date().toISOString()} ${req.method} ${req.url} ${code} ${req.headers.host || '-'} "${ua}"`);
+  console.error(`${new Date().toISOString()} ${req.method} ${safeUrl(req.url)} ${code} ${req.headers.host || '-'} "${ua}"`);
 };
 
 const server = createServer(async (req, res) => {
   res.on('finish', () => logReq(req, res.statusCode));
   try {
     if (!security.allow(req, res)) return;
+    // THE REVERSE PROXY. Every dev server and every preview on this box binds
+    // 127.0.0.1, which from the owner's laptop is the laptop. The dashboard
+    // already listens on the tailnet IP, so it carries them: /svc/<port>/… is
+    // forwarded to loopback, for known ports only, with the control token.
+    const svc = SVC_RE.exec(req.url || '');
+    if (svc) {
+      const url = new URL(req.url, 'http://localhost');
+      const port = Number(svc[1]);
+      const auth = proxyToken(req, url);
+      if (!auth.ok) { res.writeHead(403, { 'content-type': 'text/plain' }).end('proxy requires the dash control token'); return; }
+      if (!(await proxyPorts()).has(port)) { res.writeHead(404).end('no service or preview on that port'); return; }
+      // ...AND IT NEVER TRAVELS FURTHER THAN THE FIRST REQUEST. A token in a
+      // query string survives in browser history, in a Referer handed to the
+      // dev server, and in anything downstream that logs a URL. So the
+      // query-param form is exchanged for the scoped cookie and bounced once
+      // to the SAME path without it: every request after the bounce - and
+      // every asset the page then fetches - carries no credential at all.
+      // GET and HEAD only; bouncing a bodied method would drop its body.
+      if (auth.fromQuery && (req.method === 'GET' || req.method === 'HEAD')) {
+        url.searchParams.delete('cel_token');
+        const clean = (svc[2] || '/') + (url.search && url.search !== '?' ? url.search : '');
+        res.writeHead(302, {
+          location: `/svc/${port}${clean}`,
+          'set-cookie': `${COOKIE}=${encodeURIComponent(security.token)}; Path=/svc/; SameSite=Strict`,
+        }).end();
+        return;
+      }
+      url.searchParams.delete('cel_token');
+      const path = (svc[2] || '/') + (url.search && url.search !== '?' ? url.search : '');
+      const headers = { ...req.headers, host: `127.0.0.1:${port}` };
+      delete headers['x-cel-csrf'];
+      delete headers.cookie;
+      const upstream = httpRequest({ hostname: '127.0.0.1', port, path, method: req.method, headers },
+        (up) => {
+          // the bounce above already handed back the cookie; a proxied
+          // response never adds a Set-Cookie of the plane's own
+          res.writeHead(up.statusCode || 502, { ...up.headers });
+          up.pipe(res);
+        });
+      upstream.on('error', () => { if (!res.headersSent) res.writeHead(502).end('service did not answer'); else res.destroy(); });
+      req.pipe(upstream);
+      return;
+    }
     if (req.method === 'GET' && req.url === '/api/session') {
       security.session(req, res);
       return;
@@ -1592,6 +1696,35 @@ const server = createServer(async (req, res) => {
   } catch (e) {
     internalError(res);
   }
+});
+
+// WEBSOCKET UPGRADES GO THROUGH TOO. A dev server that cannot upgrade is a
+// page that never hot-reloads, which is most of what a preview is for. Raw
+// sockets, no library: the request line and headers are rewritten once and
+// everything after the 101 is bytes in both directions.
+server.on('upgrade', async (req, socket, head) => {
+  const svc = SVC_RE.exec(req.url || '');
+  const refuse = (line) => { socket.write(`HTTP/1.1 ${line}\r\n\r\n`); socket.destroy(); };
+  if (!svc) return refuse('404 Not Found');
+  const url = new URL(req.url, 'http://localhost');
+  const port = Number(svc[1]);
+  if (!proxyToken(req, url).ok) return refuse('403 Forbidden');
+  if (!(await proxyPorts()).has(port)) return refuse('404 Not Found');
+  url.searchParams.delete('cel_token');
+  const path = (svc[2] || '/') + (url.search && url.search !== '?' ? url.search : '');
+  const up = connect(port, '127.0.0.1', () => {
+    const lines = [`${req.method} ${path} HTTP/1.1`, `host: 127.0.0.1:${port}`];
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (['host', 'cookie', 'x-cel-csrf'].includes(k)) continue;
+      for (const one of [].concat(v)) lines.push(`${k}: ${one}`);
+    }
+    up.write(`${lines.join('\r\n')}\r\n\r\n`);
+    if (head && head.length) up.write(head);
+    up.pipe(socket);
+    socket.pipe(up);
+  });
+  up.on('error', () => refuse('502 Bad Gateway'));
+  socket.on('error', () => up.destroy());
 });
 
 server.listen(cfg.port || 7770, cfg.host || '127.0.0.1', () => {

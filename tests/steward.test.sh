@@ -707,3 +707,71 @@ test_steward_survives_a_reconcile_that_fails() {
   assert_contains "$out" "reconcile"
   rm -rf "$T"
 }
+
+# ── services (CEL-26) ────────────────────────────────────────────────────────
+# A declared service with a `health:` path is probed every tick. ONE tick down
+# is a restart, a deploy, a laptop lid; TWO consecutive ticks is a service
+# that is not coming back on its own, and that is what root hears about -
+# once, rolled up, not every tick forever.
+_svc_steward_fixture() { # [restart-policy]
+  T="$(mktemp -d)"
+  mkdir -p "$T/alpha/.cel" "$T/bin"
+  export CEL_REGISTRY="$T/registry.yaml"
+  export CEL_INBOX_DIR="$T/inbox"
+  export CEL_STEWARD_STATE="$T/steward-state"
+  _STEWARD_STATE="$T/steward-state"
+  export CEL_SERVICES_HERDR="$T/bin/herdr"
+  export PATH="$T/bin:$PATH"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  SVC_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  printf 'name: alpha\nservices:\n  - {name: builder, url: "http://127.0.0.1:%s", health: "/", cmd: "python3 -m http.server %s", cwd: "%s/alpha"%s}\n' \
+    "$SVC_PORT" "$SVC_PORT" "$T" "${1:+, restart: $1}" > "$T/alpha/workspace.yaml"
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
+  'pane read')  printf 'EADDRINUSE 4322\n' ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  : > "$T/calls"
+}
+
+test_steward_raises_one_blocker_after_two_down_ticks_and_clears_it() {
+  _svc_steward_fixture
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  _steward_services >/dev/null 2>&1
+  local open; open="$(cmd_inbox open --for root --workspace alpha --json)"
+  assert_contains "$open" "builder"
+  assert_eq "$(printf '%s\n' "$open" | wc -l | tr -d ' ')" 1
+  # a third down tick rolls up onto the same item rather than posting a second
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha --json | wc -l | tr -d ' ')" 1
+  # back up: the item is resolved, because an item nobody takes down is how a
+  # mailbox fills with conditions that stopped being true days ago
+  ( cd "$T/alpha" && exec python3 -m http.server "$SVC_PORT" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+  SVC_PID=$!
+  local i; for i in $(seq 1 20); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$SVC_PORT/" && break; sleep 0.3; done
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  kill "$SVC_PID" 2>/dev/null
+  rm -rf "$T"
+}
+
+# `restart: auto` means the steward tries the obvious thing once before it
+# wakes anyone, and SAYS it tried - a blocker that hides an action taken on
+# the operator's behalf is worse than no automation.
+test_steward_restarts_an_auto_service_once_before_raising() {
+  _svc_steward_fixture auto
+  _steward_services >/dev/null 2>&1
+  _steward_services >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha --json)" "restarted"
+  assert_eq "$(grep -c 'pane split' "$T/calls")" 1
+  # and not again on the next tick: one restart per condition, not per tick
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(grep -c 'pane split' "$T/calls")" 1
+  rm -rf "$T"
+}

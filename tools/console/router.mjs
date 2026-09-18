@@ -46,6 +46,9 @@ export const INTENTS = [
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
   ['gateway', 'which accounts or subscriptions are signed in and usable behind the box\u2019s gateway'],
+  ['open_service', 'open or look at one named service or preview - give me its URL'],
+  ['service_ctl', 'start, stop or restart one named service'],
+  ['service_logs', 'what one named service is printing - its log or output'],
   ['other', 'none of the above, or the sentence is not about the fleet at all'],
 ];
 
@@ -56,7 +59,7 @@ export const INTENT_NAMES = INTENTS.map(([n]) => n);
 // The state, reduced. The chat model gets the whole fleet JSON because it has
 // to write names; the classifier only has to recognise them, and a 12 KB
 // state on a question with ten answers is money spent on tokens nobody reads.
-export const facts = (doc, items = []) => {
+export const facts = (doc, items = [], services = []) => {
   const workspaces = [];
   const products = [];
   const workers = [];
@@ -93,13 +96,19 @@ export const facts = (doc, items = []) => {
   // map: `answer` has to find the item a sentence is replying to, and "reply
   // to bundle-orch" names the sender, not the id.
   const open = items.map((it) => ({ id: it.id, ws: it.ws, from: it.from || '' }));
+  // Services travel by NAME and workspace only. "open the builder" has to
+  // resolve to one row and one mailbox; everything else about it - the port,
+  // the reach URL - is `cel services`' answer, not the router's to invent.
+  const svcs = (services || []).map((s) => ({ name: s.name, workspace: s.ws || s.workspace || '', ticket: s.ticket || '' }));
   return {
     workspaces, products, workers, tickets_seen: tickets, open_items: items.length, mailboxes, open,
+    services: svcs,
   };
 };
 
 const state = (sentence, f) => ({
   sentence,
+  services: (f.services || []).map((s) => s.name),
   workspaces: f.workspaces,
   products: f.products,
   tickets_seen: f.tickets_seen,
@@ -183,6 +192,18 @@ const messageText = (sentence, hit) => {
 // An inbox id is a long number the console printed; anything shorter is a
 // word that happens to be digits.
 const INBOX_ID = /\b\d{6,}\b/;
+
+// The service a sentence names: by its own name, or - for a preview - by the
+// ticket it is running, because "open the preview of ABC-49" is how anyone
+// actually says it.
+const serviceIn = (sentence, f) => {
+  const list = f.services || [];
+  const byName = list.find((x) => names(sentence, x.name));
+  if (byName) return byName;
+  const m = TICKET.exec(String(sentence).toUpperCase());
+  if (!m) return null;
+  return list.find((x) => String(x.ticket).toUpperCase() === m[0]) || null;
+};
 
 // SINGLE QUOTES, ALWAYS, for anything a person typed.
 //
@@ -372,6 +393,30 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
       return [`cel run reviewer --repo ${w.repo} --pr ${w.pr} --workspace ${w.workspace}`];
     }
 
+    case 'open_service': {
+      const svc = serviceIn(s, f);
+      if (!svc) return null;
+      return [`cel services open ${shellQuote(svc.name)}${svc.workspace ? ` --workspace ${svc.workspace}` : ''}`];
+    }
+
+    case 'service_ctl': {
+      const svc = serviceIn(s, f);
+      if (!svc) return null;
+      // The VERB is read from the sentence, never defaulted: "the builder" on
+      // its own is not an instruction to stop anything.
+      const verb = /\brestart|reboot|bounce\b/i.test(s) ? 'restart'
+        : /\bstop|kill|shut\b/i.test(s) ? 'stop'
+          : /\bstart|run|bring up\b/i.test(s) ? 'start' : '';
+      if (!verb) return null;
+      return [`cel services ${verb} ${shellQuote(svc.name)}${svc.workspace ? ` --workspace ${svc.workspace}` : ''}`];
+    }
+
+    case 'service_logs': {
+      const svc = serviceIn(s, f);
+      if (!svc) return null;
+      return [`cel services logs ${shellQuote(svc.name)}${svc.workspace ? ` --workspace ${svc.workspace}` : ''}`];
+    }
+
     default:
       return null;   // `other`, and anything a future model invents
   }
@@ -479,12 +524,12 @@ const askDecision = async (cfg, sentence, f) => {
 // is nothing configured and a plain Error on any failure - both mean the same
 // thing to the caller, which is "ask the chat model", and the caller is the
 // only place that knows how to say that to a person.
-export const route = async ({ sentence, doc, items = [], configPath, root = CEL_ROOT, selected = null }) => {
+export const route = async ({ sentence, doc, items = [], services = [], configPath, root = CEL_ROOT, selected = null }) => {
   const cfg = routerConfig(configPath, root);
   if (!cfg) throw new NoRouter('no router configured');
   if (!cfg.url) throw new NoRouter(`router: provider '${cfg.provider}' has no api: in agents.yaml`);
   if (!cfg.key) throw new NoRouter('router: no key for the router provider');
-  const f = facts(doc, items);
+  const f = facts(doc, items, services);
   const started = Date.now();
   const { intent, confidence, probabilities } = await askDecision(cfg, sentence, f);
   const ms = Date.now() - started;

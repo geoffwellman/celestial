@@ -26,6 +26,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 # shellcheck source=lib/memory.sh
 . "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+# shellcheck source=lib/services.sh
+. "$(dirname "${BASH_SOURCE[0]}")/services.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
 # the failure this sweep exists for is a specific string in a specific pane,
@@ -1102,8 +1104,82 @@ $text2" >/dev/null 2>&1 \
   # this tick fails to start, and reading that warning after three failures is
   # reading it in the wrong order.
   _steward_memory
+  _steward_services
   _steward_servers
   _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"
   c_ok "tick complete"
+}
+
+# ── declared services (CEL-26) ───────────────────────────────────────────────
+#
+# A service with a `health:` path is the only thing on this box that can be
+# asked, rather than guessed at, whether it is working - so it is asked, once
+# per tick. ONE down tick is a restart, a deploy, a laptop lid; TWO CONSECUTIVE
+# down ticks is a service that is not coming back on its own, and that is the
+# point at which root hears about it. The count lives beside the nudge state
+# because it is the same kind of fact: what was true last time this ran.
+# RESOLVED PER CALL, never captured at source time. The suite points
+# CEL_STEWARD_STATE at a fixture AFTER sourcing this file, and a path frozen
+# when the library loaded meant every test counted down-ticks in the real
+# box's state file - which is both a lie and a write to the live box.
+_steward_svc_state() {
+  printf '%s' "${CEL_STEWARD_SVC_STATE:-${CEL_STEWARD_STATE:-$_STEWARD_STATE}.services}"
+}
+
+_steward_svc_read() { # <key> -> "<down-count> <restarted>"
+  local f; f="$(_steward_svc_state)"
+  awk -v k="$1" '$1 == k { c = $2; r = $3 } END { printf "%d %d", c + 0, r + 0 }' "$f" 2>/dev/null \
+    || printf '0 0'
+}
+
+_steward_svc_write() { # <key> <down-count> <restarted>
+  local f; f="$(_steward_svc_state)"
+  mkdir -p "$(dirname "$f")"; touch "$f"
+  { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s\n' "$1" "$2" "$3"; } \
+    > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+_steward_services() {
+  local ws wsdir e name url health restart port key count restarted state msg last note
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    while IFS= read -r e; do
+      [ -n "$e" ] || continue
+      health="$(printf '%s' "$e" | jq -r '.health // ""')"
+      # No health path, no opinion. A port that is merely open is not evidence
+      # a service works, and raising a blocker on a guess is how a watcher
+      # earns the right to be ignored.
+      [ -n "$health" ] || continue
+      name="$(printf '%s' "$e" | jq -r '.name')"
+      url="$(printf '%s' "$e" | jq -r '.url')"
+      restart="$(printf '%s' "$e" | jq -r '.restart // ""')"
+      port="$(svc_port_of_url "$url")"
+      key="$ws/$name"
+      read -r count restarted <<<"$(_steward_svc_read "$key")"
+      if svc_listening "$port" && svc_health_ok "$port" "$health"; then
+        _steward_svc_write "$key" 0 0
+        [ "${count:-0}" -ge 2 ] && _steward_clear "$ws" "service-$ws-$name" \
+          "$name is answering on :$port again"
+        continue
+      fi
+      count=$((count + 1))
+      note=""
+      if [ "$count" -ge 2 ] && [ "$restart" = auto ] && [ "${restarted:-0}" -eq 0 ]; then
+        # ONE restart per condition, not one per tick. A service that dies on
+        # start would otherwise be restarted every five minutes forever, and
+        # the blocker would never say anything a human could act on.
+        ( svc_restart "$wsdir" "$name" ) >/dev/null 2>&1 || true
+        restarted=1
+        note=" I restarted it once (restart: auto) and it did not come back."
+      fi
+      _steward_svc_write "$key" "$count" "$restarted"
+      [ "$count" -ge 2 ] || { c_warn "$ws: $name did not answer on :$port (first miss)"; continue; }
+      last="$(svc_last_log_line "$wsdir" "$name" 2>/dev/null || true)"
+      msg="steward: service $name ($ws) is down - nothing answered $health on :$port for two consecutive ticks.${note} Last line of its pane: ${last:-nothing to read}. Start it with 'cel services start $name --workspace $ws' or read it with 'cel services logs $name --workspace $ws'."
+      c_err "$msg"
+      _steward_raise "$ws" "service-$ws-$name" blocked "$msg"
+    done < <(_svc_declared "$wsdir")
+  done
 }

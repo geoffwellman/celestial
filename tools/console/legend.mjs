@@ -118,6 +118,8 @@ export const legend = (pane) => {
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
       return '↑/↓ worker · Enter why · ^T panel · f focus · n nudge · c/C collect · x/X release · R restart · s mem · Esc back · ? help';
+    case 'services':
+      return '↑/↓ select · o open · S start/stop · r restart · L logs · x stop preview · Esc back · ? help';
     case 'board':
       return '↑/↓ ticket · Enter detail · s start · m move · o open · ^T panel · Esc back · ? help';
     case 'prs':
@@ -135,7 +137,7 @@ export const legend = (pane) => {
     case 'output':
       return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · Enter unit · ^T panel · ^F focus · ^O dashboard · q quota · T timeline · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · S services · ^T panel · ^F focus · ^O dashboard · q quota · T timeline · ^P/^N history · ? help';
   }
 };
 

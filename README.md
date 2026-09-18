@@ -472,6 +472,49 @@ inside its own session to notice mail arriving while it is idle. It is not a
 daemon; when it dies, the Stop hook and the steward's stale-mailbox check are
 what catch it.
 
+### Services
+
+`cel services` is one list of everything this box is running on a port: the
+services a workspace declares under `services:` and every `cel-fanout try`
+preview, joined.
+
+```yaml
+services:
+  - name: builder                    # name + url only stays valid, and is
+    url: http://localhost:4322       # observe-only: there is nothing to start
+    cmd: pnpm --filter builder dev   # with a cmd it can be started and stopped
+    cwd: repos/widget
+    health: /                        # a path that must answer 200 within 2 s
+    env: { MODE: dev }
+    restart: auto                    # the steward tries once before it escalates
+```
+
+Each row carries `state` (`up` when the port is listening, `healthy` when the
+health path answers, else `down`), the port, the pid and the resident memory of
+the process tree in its cwd, how long it has been up, and **reach** — the URL
+that works from somewhere that is not this box. `cel services start|stop|
+restart|logs <name>` runs it in a herdr pane under the workspace's own pane and
+remembers the pane in `<ws>/.cel/services.json`; a service without a `cmd` is
+observe-only and says so.
+
+Reach exists because every dev server and every preview binds `127.0.0.1`,
+which from a laptop is the laptop. The dashboard already listens on the tailnet
+IP, so it **proxies** them: `http://<tailnet-ip>:<dash-port>/svc/<port>/…` is
+forwarded to loopback, WebSocket upgrades included, for ports that belong to a
+known service or preview only, and only with the dashboard's own control token —
+a tailnet neighbour cannot browse this box's loopback. `cel-fanout try` prints
+that URL as its last line when the dashboard is up.
+
+The steward probes every service that declares `health:` once per tick. Two
+consecutive down ticks raise one rolled-up blocker to root naming the service
+and the last line of its pane; back up clears it. `restart: auto` restarts it
+once first, and says so in the blocker.
+
+In the console, `S` opens the SERVICES view — one row per service and preview,
+`o` opens its reachable URL (printed as well as opened, so the link is
+clickable through herdr from a laptop), `S` starts or stops, `r` restarts, `L`
+reads its log, `x` stops a preview. The dashboard has the same rows as a card.
+
 ### The agents
 
 The orchestrators, workers, scouts, spikes and reviewers are herdr panes, not

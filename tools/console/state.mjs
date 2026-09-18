@@ -13,13 +13,14 @@ import { homedir } from 'node:os';
 import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
-  memFree, sortWorkers, subsEdge, quotaView, timelineView,
+  memFree, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
 } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor } from './board.mjs';
 
 export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
 export { unitLabel, openLine, tailLine } from './views.mjs';
+export { servicesView, serviceLine, serviceCounts, svcUptime } from './views.mjs';
 export { renderOutput } from './views.mjs';
 
 export const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial');
@@ -231,9 +232,40 @@ const statusRow = (status, box, doc) => {
   return [left, subs, mem].filter(Boolean).join('   ');
 };
 
+// WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out
+// here: the declared services and every `try` preview, already joined, already
+// probed. One call per workspace, because that is the shape of the command.
+export const services = async (ws) => {
+  const args = ['services', '--json'];
+  if (ws) args.push('--workspace', ws);
+  const r = await run(CEL_BIN, args, 30000);
+  if (!r.ok) return [];
+  try { const v = JSON.parse(r.out); return Array.isArray(v) ? v : []; } catch { return []; }
+};
+
+export const servicesByWorkspace = async (doc) => {
+  const by = {};
+  for (const ws of doc.workspaces || []) by[ws.name] = await services(ws.name);
+  return by;
+};
+
+export const allServices = async (doc) => {
+  const by = await servicesByWorkspace(doc);
+  return Object.entries(by).flatMap(([ws, rows]) => rows.map((r) => ({ ...r, ws })));
+};
+
+export const renderServices = async ({ status = '' } = {}) => {
+  const doc = await fleet();
+  const out = servicesView(await allServices(doc));
+  out.push('');
+  out.push(statusRow(status, doc.box));
+  out.push(legend('services'));
+  return out.join('\n');
+};
+
 export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const doc = await fleet();
-  const out = fleetTable(doc);
+  const out = fleetTable(doc, await servicesByWorkspace(doc));
   const items = await openItems(doc);
   out.push('', 'WAITING ON YOU');
   if (!items.length) out.push('  nothing open');

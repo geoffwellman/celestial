@@ -18,6 +18,9 @@ export CEL_ROOT
 . "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
 # shellcheck source=lib/guard.sh
 . "$CEL_ROOT/lib/guard.sh" # guard_role_of - pure, reads nothing but its argument
+# shellcheck source=lib/services.sh
+. "$CEL_ROOT/lib/services.sh"  # svc_reach - `try` prints the URL that reaches
+                               # the preview from the laptop, not from this box
 # shellcheck source=lib/fleet.sh
 . "$CEL_ROOT/lib/fleet.sh" # fleet_worker_row - ONE definition of what a worker
                           # looks like as data, so `cel fleet --json` and
@@ -1318,7 +1321,14 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
   c_ok "$id running in $newpane on ports $port-$(( port + 9 ))"
   # LAST LINE ON PURPOSE: the console shows the tail of a command's output in
   # its OUTPUT panel, and the url is the whole point of having run this.
-  printf '%s\n' "$url"
+  #
+  # AND THE URL THAT WORKS FROM THE LAPTOP. A preview listens on 127.0.0.1,
+  # which from the machine the owner is actually sitting at is that machine -
+  # so when the workspace's dashboard is up, the line printed is its proxy
+  # path (CEL-26), and the loopback url only when there is nothing to proxy
+  # through. One line either way: two would be two things to try.
+  local reach; reach="$(svc_reach "$wsdir" "$(svc_port_of_url "$url")" 2>/dev/null || true)"
+  printf '%s\n' "${reach:-$url}"
 }
 
 # BULK: every row in the given states, one at a time, a failure on one row

@@ -476,11 +476,56 @@ export const keyValue = (value, indent = 0) => {
   return out;
 };
 
-export const fleetTable = (doc) => {
+// --- services: the ports this box is holding --------------------------------
+//
+// One row per service and per preview, in the shape an operator reads out
+// loud: is it up, on what port, how much is it costing, how long has it been
+// there, and the URL that reaches it FROM THE LAPTOP. The reach column is the
+// dashboard's proxy path, because 127.0.0.1 from a laptop is the laptop.
+export const svcUptime = (secs) => {
+  const s = Math.max(0, Number(secs) || 0);
+  if (!s) return '-';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
+};
+
+export const serviceLine = (s) => {
+  const dot = s.state === 'healthy' || s.state === 'up' ? '\u25cf' : '\u25cb';
+  const cells = [
+    dot,
+    cut(String(s.name || ''), 16).padEnd(16),
+    String(s.state || '').padEnd(8),
+    `:${s.port || '-'}`.padEnd(7),
+    (memHuman(s.rss_mb) || '-').padEnd(6),
+    svcUptime(s.uptime_secs).padEnd(5),
+    String(s.reach || s.url || ''),
+  ];
+  return `${cells.join(' ')}${s.ticket ? `   (${s.ticket})` : ''}${s.observe_only ? '   observe-only' : ''}`;
+};
+
+// `n up/n down` for a workspace header: the question "is anything down here"
+// answered without entering the view at all. `up` counts healthy too - a
+// service answering its health path is up by any reading.
+export const serviceCounts = (rows) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const up = list.filter((s) => s.state === 'up' || s.state === 'healthy').length;
+  return { up, down: list.length - up, total: list.length };
+};
+
+export const servicesView = (rows = []) => {
+  const out = ['SERVICES'];
+  if (!rows.length) return [...out, '  nothing declared and no previews running'];
+  for (const s of rows) out.push(`  ${serviceLine(s)}`);
+  return out;
+};
+
+export const fleetTable = (doc, services = {}) => {
   const out = ['FLEET'];
   if (doc.error) out.push(`  ! ${doc.error}`);
   for (const ws of doc.workspaces || []) {
-    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`);
+    const c = serviceCounts(services[ws.name]);
+    out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`
+      + (c.total ? `   services ${c.up} up/${c.down} down` : ''));
     for (const u of ws.units || []) {
       out.push(`    ${unitLabel(u).padEnd(12)} orch ${String(u.orch).padEnd(7)} workers ${u.workers}/${u.cap}   stalled ${u.stalled}   unlanded ${u.unlanded}`
         + `${memHuman(u.rss_mb) ? `   mem ${memHuman(u.rss_mb)}` : ''}`);
