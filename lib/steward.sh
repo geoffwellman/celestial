@@ -1141,45 +1141,62 @@ _steward_svc_write() { # <key> <down-count> <restarted>
 }
 
 _steward_services() {
-  local ws wsdir e name url health restart port key count restarted state msg last note
+  local ws
   for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    [ -f "$wsdir/workspace.yaml" ] || continue
-    while IFS= read -r e; do
-      [ -n "$e" ] || continue
-      health="$(printf '%s' "$e" | jq -r '.health // ""')"
-      # No health path, no opinion. A port that is merely open is not evidence
-      # a service works, and raising a blocker on a guess is how a watcher
-      # earns the right to be ignored.
-      [ -n "$health" ] || continue
-      name="$(printf '%s' "$e" | jq -r '.name')"
-      url="$(printf '%s' "$e" | jq -r '.url')"
-      restart="$(printf '%s' "$e" | jq -r '.restart // ""')"
-      port="$(svc_port_of_url "$url")"
-      key="$ws/$name"
-      read -r count restarted <<<"$(_steward_svc_read "$key")"
-      if svc_listening "$port" && svc_health_ok "$port" "$health"; then
-        _steward_svc_write "$key" 0 0
-        [ "${count:-0}" -ge 2 ] && _steward_clear "$ws" "service-$ws-$name" \
-          "$name is answering on :$port again"
-        continue
-      fi
-      count=$((count + 1))
-      note=""
-      if [ "$count" -ge 2 ] && [ "$restart" = auto ] && [ "${restarted:-0}" -eq 0 ]; then
-        # ONE restart per condition, not one per tick. A service that dies on
-        # start would otherwise be restarted every five minutes forever, and
-        # the blocker would never say anything a human could act on.
-        ( svc_restart "$wsdir" "$name" ) >/dev/null 2>&1 || true
-        restarted=1
-        note=" I restarted it once (restart: auto) and it did not come back."
-      fi
-      _steward_svc_write "$key" "$count" "$restarted"
-      [ "$count" -ge 2 ] || { c_warn "$ws: $name did not answer on :$port (first miss)"; continue; }
-      last="$(svc_last_log_line "$wsdir" "$name" 2>/dev/null || true)"
-      msg="steward: service $name ($ws) is down - nothing answered $health on :$port for two consecutive ticks.${note} Last line of its pane: ${last:-nothing to read}. Start it with 'cel services start $name --workspace $ws' or read it with 'cel services logs $name --workspace $ws'."
-      c_err "$msg"
-      _steward_raise "$ws" "service-$ws-$name" blocked "$msg"
-    done < <(_svc_declared "$wsdir")
+    _steward_services_for "$ws" "$(registry_path "$ws" || true)"
   done
+  # ...and the box's own. These are the services with nobody to speak for
+  # them: the auth broker and gateway ran unsupervised for a day because no
+  # workspace declared them, which is the whole reason services.d exists.
+  _steward_services_for box ""
+}
+
+# One workspace, or the box when <ws> is `box` and <wsdir> is empty.
+_steward_services_for() { # <ws> <wsdir>
+  local ws="$1" wsdir="$2" e name url health hauth restart port key count restarted msg last note where
+  if [ "$ws" != box ]; then
+    [ -n "$wsdir" ] || return 0
+    [ -f "$wsdir/workspace.yaml" ] || return 0
+  fi
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    health="$(printf '%s' "$e" | jq -r '.health // ""')"
+    # No health path, no opinion. A port that is merely open is not evidence
+    # a service works, and raising a blocker on a guess is how a watcher
+    # earns the right to be ignored.
+    [ -n "$health" ] || continue
+    name="$(printf '%s' "$e" | jq -r '.name')"
+    url="$(printf '%s' "$e" | jq -r '.url')"
+    restart="$(printf '%s' "$e" | jq -r '.restart // ""')"
+    port="$(svc_port_of_url "$url")"
+    key="$ws/$name"
+    read -r count restarted <<<"$(_steward_svc_read "$key")"
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
+    if svc_listening "$port" && svc_health_ok "$port" "$health" "$hauth"; then
+      _steward_svc_write "$key" 0 0
+      [ "${count:-0}" -ge 2 ] && _steward_clear "$ws" "service-$ws-$name" \
+        "$name is answering on :$port again"
+      continue
+    fi
+    count=$((count + 1))
+    note=""
+    if [ "$count" -ge 2 ] && [ "$restart" = auto ] && [ "${restarted:-0}" -eq 0 ]; then
+      # ONE restart per condition, not one per tick. A service that dies on
+      # start would otherwise be restarted every five minutes forever, and
+      # the blocker would never say anything a human could act on.
+      ( svc_restart "$wsdir" "$name" ) >/dev/null 2>&1 || true
+      restarted=1
+      note=" I restarted it once (restart: auto) and it did not come back."
+    fi
+    _steward_svc_write "$key" "$count" "$restarted"
+    [ "$count" -ge 2 ] || { c_warn "$ws: $name did not answer on :$port (first miss)"; continue; }
+    last="$(svc_last_log_line "$wsdir" "$name" 2>/dev/null || true)"
+    # A box service is addressed without --workspace, because it has none and
+    # a copy-pasted command that names one would fail in front of whoever is
+    # trying to fix it at 2am.
+    where=" --workspace $ws"; [ "$ws" = box ] && where=""
+    msg="steward: service $name ($ws) is down - nothing answered $health on :$port for two consecutive ticks.${note} Last line of its pane: ${last:-nothing to read}. Start it with 'cel services start $name$where' or read it with 'cel services logs $name$where'."
+    c_err "$msg"
+    _steward_raise "$ws" "service-$ws-$name" blocked "$msg"
+  done < <(if [ "$ws" = box ]; then _svc_box; else _svc_declared "$wsdir"; fi)
 }

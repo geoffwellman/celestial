@@ -510,6 +510,19 @@ consecutive down ticks raise one rolled-up blocker to root naming the service
 and the last line of its pane; back up clears it. `restart: auto` restarts it
 once first, and says so in the blocker.
 
+Some services belong to the **box** rather than to any workspace — the auth
+broker and gateway are used by every workspace and owned by none. They are
+declared one JSON file per service in `~/.config/cel/services.d/` (`CEL_SERVICES_D`),
+in exactly the shape of a `services:` row plus a bare `port:` shorthand, `0600`
+in a `0700` directory because `env` may carry a bearer. They appear in
+`cel services` under a `box` block — after the workspace's own rows, or alone
+when you run it from outside every workspace — carry `workspace: "box"` in
+`--json`, start and stop by name, are probed by the same steward sweep, and
+keep their state in `~/.local/share/cel/services/<name>.json` rather than in
+any workspace. `env` values whose key looks like a credential are rendered
+`***` everywhere. `cel gateway install` writes its two, and `cel doctor` says
+how many the box declares and how many are healthy.
+
 In the console, `S` opens the SERVICES view — one row per service and preview,
 `o` opens its reachable URL (printed as well as opened, so the link is
 clickable through herdr from a laptop), `S` starts or stops, `r` restarts, `L`

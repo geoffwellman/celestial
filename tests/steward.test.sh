@@ -721,6 +721,11 @@ _svc_steward_fixture() { # [restart-policy]
   export CEL_STEWARD_STATE="$T/steward-state"
   _STEWARD_STATE="$T/steward-state"
   export CEL_SERVICES_HERDR="$T/bin/herdr"
+  # The sweep now also walks the box's own services.d, so it is a fixture here
+  # too: without this the suite probed - and restarted - whatever this box
+  # really declares, and the down-tick counts were the live box's.
+  export CEL_SERVICES_D="$T/services.d"
+  export CEL_SERVICES_STATE="$T/services-state"
   export PATH="$T/bin:$PATH"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
   SVC_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"

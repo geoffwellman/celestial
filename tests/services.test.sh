@@ -6,6 +6,7 @@
 # logs its argv, the "service" is a python http server on a free port in a
 # fixture directory, and the registry points at a temporary workspace.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/lib/services.sh"
 
 CEL="$CEL_ROOT/bin/cel"
 
@@ -154,5 +155,152 @@ test_services_reach_is_the_dash_proxy_url() {
   CEL_DASH_HOST=127.0.0.1 assert_contains \
     "$(CEL_DASH_HOST=127.0.0.1 "$CEL" services --workspace alpha --json | jq -r '.[0].reach')" \
     "/svc/4322/"
+  _svc_teardown
+}
+
+# --- box services ------------------------------------------------------------
+#
+# A box service belongs to the box, not to a workspace: the auth broker and
+# gateway run for every workspace at once, and until CEL-34 they were started
+# by hand and watched by nobody. `services.d` is the seam - one JSON file per
+# service, the same shape as a `services:` row.
+
+_svc_box_setup() { # writes a fixture services.d and box state dir
+  _svc_setup
+  export CEL_SERVICES_D="$T/services.d"
+  export CEL_SERVICES_STATE="$T/state/services"
+  mkdir -p "$CEL_SERVICES_D"
+}
+
+# Outside any workspace there is still something to say: `cel services` run
+# from ~ used to answer "not inside a workspace", which is the one place the
+# box's own services are all there is to look at.
+test_box_services_are_listed_outside_any_workspace() {
+  _svc_box_setup
+  printf '{"name":"cel-auth-broker","url":"http://127.0.0.1:47311","cmd":"omp auth-broker serve","health":"/"}\n' \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  local out; out="$(cd "$T" && "$CEL" services 2>&1)"
+  assert_contains "$out" "box"
+  assert_contains "$out" "cel-auth-broker"
+  local js; js="$(cd "$T" && "$CEL" services --json)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].workspace')" box
+  _svc_teardown
+}
+
+# Inside a workspace the box rows come AFTER the workspace's own: the question
+# an operator is asking there is about the workspace first.
+test_box_services_follow_the_workspace_rows_inside_a_workspace() {
+  _svc_box_setup
+  printf 'name: alpha\nservices:\n  - {name: builder, url: "http://127.0.0.1:4322"}\n' > "$T/alpha/workspace.yaml"
+  printf '{"name":"cel-auth-gateway","port":47411,"cmd":"omp auth-gateway serve"}\n' \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local js; js="$("$CEL" services --workspace alpha --json)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].name')" builder
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].workspace')" alpha
+  assert_eq "$(printf '%s' "$js" | jq -r '.[1].name')" cel-auth-gateway
+  assert_eq "$(printf '%s' "$js" | jq -r '.[1].workspace')" box
+  # a bare `port:` is a url: the port is the handle everything else keys off
+  assert_eq "$(printf '%s' "$js" | jq -r '.[1].port')" 47411
+  assert_contains "$("$CEL" services --workspace alpha)" "box"
+  _svc_teardown
+}
+
+# `env` on a box service carries the broker's bearer, which grants every
+# subscription on the box. It is masked wherever the rows are rendered - the
+# dash card reads this same JSON.
+test_box_service_json_masks_secret_env_values() {
+  _svc_box_setup
+  printf '{"name":"cel-auth-gateway","port":47411,"env":{"OMP_AUTH_BROKER_TOKEN":"super-secret-value","MODE":"dev"}}\n' \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local js; js="$(cd "$T" && "$CEL" services --json)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].env.OMP_AUTH_BROKER_TOKEN')" '***'
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].env.MODE')" dev
+  ! printf '%s' "$js" | grep -q 'super-secret-value' \
+    || { echo "a secret env value reached cel services --json"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# Starting a box service goes through exactly the same path as a workspace
+# one, and its state lands under the box's own directory: a box service whose
+# pane id was written into some workspace's .cel/ would be lost the moment
+# that workspace was removed.
+test_box_service_start_records_state_off_any_workspace() {
+  _svc_box_setup
+  printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  ( cd "$T" && "$CEL" services start cel-auth-broker )
+  assert_eq "$(jq -r '.pane' "$CEL_SERVICES_STATE/cel-auth-broker.json")" "w1:p9"
+  assert_contains "$(cat "$T/calls")" "pane run"
+  [ ! -f "$T/alpha/.cel/services.json" ] \
+    || { echo "a box service wrote its state into a workspace"; _svc_teardown; return 1; }
+  ( cd "$T" && "$CEL" services stop cel-auth-broker )
+  assert_contains "$(cat "$T/calls")" "pane close w1:p9"
+  [ ! -f "$CEL_SERVICES_STATE/cel-auth-broker.json" ] \
+    || { echo "stop left the box service state behind"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# The steward sweep is the reason box services exist at all: tonight's broker
+# and gateway ran unsupervised because no workspace declared them. Two down
+# ticks raise ONE rolled-up blocker, `restart: auto` restarts once, and the
+# blocker clears when the service answers again.
+test_steward_sweep_watches_box_services() {
+  _svc_box_setup
+  source "$CEL_ROOT/lib/steward.sh"
+  export CEL_INBOX_DIR="$T/inbox"
+  export CEL_STEWARD_STATE="$T/steward-state"
+  printf 'workspaces: {}\n' > "$CEL_REGISTRY"
+  printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s","health":"/","restart":"auto"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  _steward_services >/dev/null 2>&1
+  local id; id="$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)"
+  [ -n "$id" ] || { echo "two down ticks raised no blocker for a box service"; _svc_teardown; return 1; }
+  assert_contains "$(cat "$T/calls")" "pane run"   # restart: auto, exactly once
+  # ...and it comes back: a real server on the declared port, and the blocker
+  # is resolved rather than left for someone to wonder about.
+  local port; port="$(_svc_free_port)"
+  printf '{"name":"cel-auth-broker","port":%s,"cmd":"omp auth-broker serve","cwd":"%s","health":"/","restart":"auto"}\n' "$port" "$T" \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  ( cd "$T" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+  SVC_PID=$!
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.3; done
+  _steward_services >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp box "service-box-cel-auth-broker" steward root)" ""
+  _svc_teardown
+}
+
+# A box service's `health:` is a whole URL, not a path - `cel gateway install`
+# writes one - and the broker and the gateway both answer 401 to an
+# unauthenticated read, so a health check that could not present a bearer
+# called a working gateway down and the sweep would have raised a blocker
+# about it every ten minutes.
+test_health_accepts_a_full_url_and_a_declared_bearer() {
+  _svc_box_setup
+  local port; port="$(_svc_free_port)"
+  mkdir -p "$T/srv/v1"; printf '{}' > "$T/srv/v1/models"
+  ( exec python3 -m http.server "$port" --bind 127.0.0.1 --directory "$T/srv" >/dev/null 2>&1 ) &
+  SVC_PID=$!
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/v1/models" && break; sleep 0.3; done
+  svc_health_ok "$port" "http://127.0.0.1:$port/v1/models" \
+    || { echo "a full health url was not read"; _svc_teardown; return 1; }
+  # and with a bearer the declaration names by command rather than by value
+  svc_health_ok "$port" "http://127.0.0.1:$port/v1/models" 'bearer $(echo fixture-token)' \
+    || { echo "a declared bearer was not presented"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# A box service defaults to $HOME as its cwd, and the memory of the process
+# tree under a cwd is how every other row is measured - which for $HOME is
+# every process this user has. Reporting the whole box as one service's
+# footprint is worse than reporting nothing.
+test_box_service_in_home_reports_no_process_tree_memory() {
+  _svc_box_setup
+  printf '{"name":"cel-auth-broker","port":47311}\n' > "$CEL_SERVICES_D/cel-auth-broker.json"
+  local js; js="$(cd "$T" && "$CEL" services --json)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.[0].rss_mb')" 0
   _svc_teardown
 }
