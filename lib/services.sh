@@ -32,6 +32,64 @@ _SERVICES_HERDR="${CEL_SERVICES_HERDR:-herdr}"
 
 svc_state_file() { printf '%s' "$1/.cel/services.json"; }
 
+# --- box services ------------------------------------------------------------
+#
+# THE SOURCE WITH NO WORKSPACE. The auth broker and auth gateway (47311/47411)
+# ran on this box for a day started by an acceptance run and watched by nobody:
+# `cel gateway install` wrote its two definitions to a private file because a
+# service could only belong to a workspace. They belong to the BOX - every
+# workspace uses them and none owns them - so they live in `services.d`, one
+# JSON file per service with exactly a `services:` row's shape, and every
+# consumer that iterates services gets them for free.
+#
+# 0600 files in a 0700 directory: `env` is where a service's bearer goes, and
+# the gateway's bearer grants every subscription in the vault to whatever can
+# read it.
+svc_box_dir() {
+  printf '%s' "${CEL_SERVICES_D:-${XDG_CONFIG_HOME:-$HOME/.config}/cel/services.d}"
+}
+
+# State for a box service is the box's, never a workspace's: a pane id written
+# into some workspace's .cel/ is lost the moment that workspace is removed,
+# and then nothing on this box can stop the service.
+svc_box_state_dir() {
+  printf '%s' "${CEL_SERVICES_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/services}"
+}
+
+svc_box_state_file() { printf '%s' "$(svc_box_state_dir)/$1.json"; }
+svc_box_declared() { [ -f "$(svc_box_dir)/$1.json" ]; }
+
+# One JSON object per box service, in the shape `_svc_declared` yields. A bare
+# `port:` is accepted because box services are loopback by construction and
+# repeating http://127.0.0.1: in every file is a typo waiting to happen.
+_svc_box() {
+  local d f; d="$(svc_box_dir)"
+  [ -d "$d" ] || return 0
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    jq -c --arg fb "$(basename "$f" .json)" --arg home "$HOME" '{
+        name: (.name // $fb),
+        url: (.url // (if (.port // "") != "" then "http://127.0.0.1:" + (.port|tostring) else "" end)),
+        cmd: (.cmd // ""), cwd: (if (.cwd // "") != "" then .cwd else $home end),
+        health: (.health // ""), health_auth: (.health_auth // ""),
+        restart: (.restart // ""), env: (.env // {}),
+        kind: "box", workspace: "box", ticket: ""
+      }' "$f" 2>/dev/null || true
+  done
+}
+
+# Write one, tight and atomically. The caller hands over the row it wants on
+# disk; the permissions are not the caller's to get wrong.
+svc_box_write() { # <name> <json-spec>
+  local d f tmp; d="$(svc_box_dir)"
+  mkdir -p "$d"; chmod 700 "$d" 2>/dev/null || true
+  f="$d/$1.json"
+  tmp="$(mktemp "$d/.svc.XXXXXX")"
+  chmod 600 "$tmp"
+  printf '%s\n' "$2" > "$tmp" && mv "$tmp" "$f"
+  chmod 600 "$f"
+}
+
 # A PORT IS THE HANDLE. Everything below - listening, health, the proxy path,
 # the row an operator clicks - keys off the port in the declared url, so a url
 # without one (http://host/path) is taken as the scheme's default rather than
@@ -55,15 +113,47 @@ svc_listening() { # <port>
   (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null
 }
 
+# A value a service declaration may name rather than hold: `$NAME` or
+# `$(one command)`. The gateway's health check needs a bearer that grants every
+# subscription in the vault, so the file names the command that reads it and
+# the value never sits on disk. The pattern is narrow on purpose - no quotes,
+# semicolons, backticks or pipes reach the eval.
+_svc_shell_value() { # <declared value> -> the value, expanded if it is such a form
+  local v="${1:-}"
+  if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then
+    eval "printf '%s' \"$v\"" 2>/dev/null || true
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
 # UP IS NOT HEALTHY. A dev server binds its port long before it can answer,
 # and a process wedged mid-compile keeps the socket open - so a declared
 # `health:` path is asked, with a short budget: a probe that can block for
 # thirty seconds turns one sick service into a console that will not draw.
-svc_health_ok() { # <port> <path>
-  local p="${1:-0}" path="${2:-}"
-  [ -n "$path" ] || return 1
-  case "$path" in /*) ;; *) path="/$path" ;; esac
-  curl -sf -m 2 -o /dev/null "http://127.0.0.1:$p$path" 2>/dev/null
+#
+# The declaration may be a path OR a whole URL, and it may name a bearer:
+# `cel gateway install` writes a full URL, and both the broker and the gateway
+# answer 401 to an unauthenticated read, so a check that could only GET a path
+# anonymously called a working gateway down once every tick forever. The token
+# rides stdin, never argv - a bearer in a command line is a bearer in `ps`.
+svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>"]
+  local p="${1:-0}" h="${2:-}" auth="${3:-}" url tok
+  [ -n "$h" ] || return 1
+  case "$h" in
+    http://*|https://*) url="$h" ;;
+    /*) url="http://127.0.0.1:$p$h" ;;
+    *)  url="http://127.0.0.1:$p/$h" ;;
+  esac
+  if [ -n "$auth" ]; then
+    tok="$(_svc_shell_value "${auth#bearer }")"
+    if [ -n "$tok" ]; then
+      printf 'Authorization: Bearer %s\n' "$tok" \
+        | curl -sf -m 2 -o /dev/null "$url" -H @- 2>/dev/null
+      return $?
+    fi
+  fi
+  curl -sf -m 2 -o /dev/null "$url" 2>/dev/null
 }
 
 # The first process whose cwd is inside the service's directory. herdr exposes
@@ -120,59 +210,81 @@ svc_reach() { # <wsdir> <port>
 # asked. `services:` entries of the old name+url shape stay valid - they
 # simply carry no cmd, and a service without a cmd is observe-only.
 _svc_declared() { # <wsdir>
-  _yqr -c '.services // [] | .[] | {
+  [ -n "${1:-}" ] && [ -f "$1/workspace.yaml" ] || return 0
+  _yqr -c --arg ws "$(ws_name "$1")" '.services // [] | .[] | {
       name: (.name // ""), url: (.url // ""), cmd: (.cmd // ""), cwd: (.cwd // ""),
-      health: (.health // ""), restart: (.restart // ""), env: (.env // {}),
-      kind: "declared", ticket: ""
+      health: (.health // ""), health_auth: (.health_auth // ""),
+      restart: (.restart // ""), env: (.env // {}),
+      kind: "declared", workspace: $ws, ticket: ""
     }' "$1/workspace.yaml" 2>/dev/null || true
 }
 
 # ...and every running preview. The ledger row IS the declaration: `try`
 # allocated the ports and wrote the url, so nothing is re-derived here.
 _svc_previews() { # <wsdir>
+  [ -n "${1:-}" ] || return 0
   local f="$1/.cel/delegations.json"
   [ -f "$f" ] || return 0
-  jq -c '.[]? | select(.try.url != null) | {
+  jq -c --arg ws "$(ws_name "$1")" '.[]? | select(.try.url != null) | {
       name: ("try " + (.ticket // .id)), url: .try.url, cmd: "", cwd: (.worktree // ""),
-      health: "", restart: "", env: {}, kind: "preview", ticket: (.ticket // ""),
+      health: "", health_auth: "", restart: "", env: {}, kind: "preview", workspace: $ws, ticket: (.ticket // ""),
       pane: (.try.pane // ""), id: (.id // "")
     }' "$f" 2>/dev/null || true
 }
 
-svc_names() { # <wsdir>
-  { _svc_declared "$1"; _svc_previews "$1"; } | jq -r '.name'
+# THE ENUMERATOR, and the reason box services cost every consumer nothing.
+# Workspace rows first, then the box's own: inside a workspace the workspace's
+# services are the question being asked and the box's are context underneath.
+_svc_all() { # [wsdir]
+  _svc_declared "${1:-}"
+  _svc_previews "${1:-}"
+  _svc_box
 }
 
-svc_entry() { # <wsdir> <name> -> the declaration, empty if unknown
-  { _svc_declared "$1"; _svc_previews "$1"; } | jq -c --arg n "$2" 'select(.name == $n)' | head -1
+svc_names() { # [wsdir]
+  _svc_all "${1:-}" | jq -r '.name'
 }
+
+svc_entry() { # [wsdir] <name> -> the declaration, empty if unknown
+  _svc_all "${1:-}" | jq -c --arg n "$2" 'select(.name == $n)' | head -1
+}
+
+# A secret in a rendered row is a secret on someone's screen and in whatever
+# they pasted it into, so rows carry the KEYS of `env` and not the values that
+# look like credentials. The name match is deliberately broad: a value wrongly
+# masked costs nobody anything, a bearer printed once has to be rotated.
+_SVC_MASK_ENV='with_entries(.value = (if (.key | test("TOKEN|SECRET|KEY|PASSWORD"; "i")) then "***" else .value end))'
 
 # The full document: declaration joined to what is actually true right now.
-svc_rows() { # <wsdir> -> JSON array
-  local d="$1" e name url cmd cwd health port pid rss up state reach pane
+svc_rows() { # [wsdir] -> JSON array
+  local d="${1:-}" e name url cmd cwd health hauth port pid rss up state reach pane
   mem_tree_snapshot
   svc_proc_snapshot
-  { _svc_declared "$d"; _svc_previews "$d"; } | while IFS= read -r e; do
+  _svc_all "$d" | while IFS= read -r e; do
     [ -n "$e" ] || continue
     name="$(printf '%s' "$e" | jq -r '.name')"
     url="$(printf '%s' "$e" | jq -r '.url')"
     cmd="$(printf '%s' "$e" | jq -r '.cmd')"
     cwd="$(printf '%s' "$e" | jq -r '.cwd')"
     health="$(printf '%s' "$e" | jq -r '.health')"
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
     port="$(svc_port_of_url "$url")"
     state=down
     if svc_listening "$port"; then
       state=up
-      [ -n "$health" ] && svc_health_ok "$port" "$health" && state=healthy
+      [ -n "$health" ] && svc_health_ok "$port" "$health" "$hauth" && state=healthy
     fi
     pid=0; rss=0; up=0
-    if [ "$state" != down ] && [ -n "$cwd" ]; then
+    # A box service's cwd defaults to $HOME, and "the memory of the process
+    # tree under this cwd" is then every process this user has: reporting the
+    # whole box as one service's footprint is worse than reporting nothing.
+    if [ "$state" != down ] && [ -n "$cwd" ] && [ "${cwd%/}" != "${HOME%/}" ]; then
       pid="$(svc_pid_of_dir "$cwd")"
       rss="$(mem_tree_rss_mb "$cwd")"
       up="$(svc_uptime_secs "$pid")"
     fi
-    reach="$(svc_reach "$d" "$port")"
-    [ -n "$reach" ] || reach=""
+    reach=""
+    [ -n "$d" ] && reach="$(svc_reach "$d" "$port")"
     pane="$(printf '%s' "$e" | jq -r '.pane // ""')"
     [ -n "$pane" ] || pane="$(svc_pane "$d" "$name")"
     printf '%s' "$e" | jq -c \
@@ -180,7 +292,8 @@ svc_rows() { # <wsdir> -> JSON array
       --argjson rss "${rss:-0}" --argjson up "${up:-0}" --arg reach "$reach" --arg pane "$pane" \
       '. + {port: $port, state: $state, pid: $pid, rss_mb: $rss, uptime_secs: $up,
             reach: (if $reach == "" then .url else $reach end), pane: $pane,
-            observe_only: (.kind == "declared" and (.cmd == ""))}'
+            observe_only: ((.kind == "declared" or .kind == "box") and (.cmd == "")),
+            env: ((.env // {}) | '"$_SVC_MASK_ENV"')}'
   done | jq -s '.'
   mem_tree_snapshot_clear
   svc_proc_snapshot_clear
@@ -193,22 +306,45 @@ svc_rows() { # <wsdir> -> JSON array
 # the pane id because that is the only handle herdr gives, and a service whose
 # pane id is lost is a service nobody can stop.
 
-svc_pane() { # <wsdir> <name>
-  local f; f="$(svc_state_file "$1")"
+svc_pane() { # [wsdir] <name>
+  local f
+  # The box's own state is asked first and by name, because a box service is
+  # answerable from anywhere - including from outside every workspace, which
+  # is where an operator stands when they ask about the gateway.
+  f="$(svc_box_state_file "$2")"
+  if [ -f "$f" ]; then jq -r '.pane // ""' "$f" 2>/dev/null || true; return 0; fi
+  [ -n "${1:-}" ] || return 0
+  f="$(svc_state_file "$1")"
   [ -f "$f" ] || return 0
   jq -r --arg n "$2" '.[$n].pane // ""' "$f" 2>/dev/null || true
 }
 
-_svc_pane_record() { # <wsdir> <name> <pane>
-  local f; f="$(svc_state_file "$1")"
+# One file per box service under the box's own data directory: the pane herdr
+# gave us, when it started, and the log to read. `pid` is a courtesy for
+# whoever opens the file by hand and is 0 when nothing could be attributed -
+# herdr exposes no pid for a pane, and inventing one would be a lie a later
+# reader acts on.
+_svc_box_record() { # <name> <pane>
+  local f; f="$(svc_box_state_file "$1")"
+  mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
+  jq -n --arg n "$1" --arg p "$2" --arg at "$(date -u +%FT%TZ)" \
+    '{name: $n, pane: $p, pid: 0, started: $at, log: ("pane:" + $p)}' > "$f"
+}
+
+_svc_pane_record() { # <wsdir|box> <name> <pane>
+  local f
+  if [ "$1" = box ]; then _svc_box_record "$2" "$3"; return 0; fi
+  f="$(svc_state_file "$1")"
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '{}\n' > "$f"
   jq --arg n "$2" --arg p "$3" --arg at "$(date -u +%FT%TZ)" \
     '.[$n] = {pane: $p, started: $at}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
-_svc_pane_forget() { # <wsdir> <name>
-  local f; f="$(svc_state_file "$1")"
+_svc_pane_forget() { # <wsdir|box> <name>
+  local f
+  if [ "$1" = box ]; then rm -f "$(svc_box_state_file "$2")"; return 0; fi
+  f="$(svc_state_file "$1")"
   [ -f "$f" ] || return 0
   jq --arg n "$2" 'del(.[$n])' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
@@ -221,10 +357,12 @@ _svc_ws_pane() { # <wsdir>
     | jq -r --arg d "$1" '[.result.agents[]? | select(.cwd == $d)][0].pane_id // empty' 2>/dev/null || true
 }
 
-svc_start() { # <wsdir> <name>
-  local d="$1" name="$2" e cmd cwd
+svc_start() { # [wsdir] <name>
+  local d="${1:-}" name="$2" e cmd cwd kind store
   e="$(svc_entry "$d" "$name")"
-  [ -n "$e" ] || { c_err "no service '$name' in this workspace"; return 1; }
+  [ -n "$e" ] || { c_err "no service '$name' in this workspace or in $(svc_box_dir)"; return 1; }
+  kind="$(printf '%s' "$e" | jq -r '.kind')"
+  store="$d"; [ "$kind" = box ] && store=box
   cmd="$(printf '%s' "$e" | jq -r '.cmd')"
   if [ -z "$cmd" ]; then
     c_warn "$name is observe-only: it declares a url and no cmd, so there is nothing here to start"
@@ -233,7 +371,7 @@ svc_start() { # <wsdir> <name>
   local existing; existing="$(svc_pane "$d" "$name")"
   [ -n "$existing" ] && { c_ok "$name is already running in $existing"; return 0; }
   cwd="$(printf '%s' "$e" | jq -r '.cwd')"
-  [ -n "$cwd" ] || cwd="$d"
+  [ -n "$cwd" ] || cwd="${d:-$HOME}"
 
   # The env map is SHELL-QUOTED before it joins the command line, exactly as
   # `try` does it: `herdr pane run` takes one command line, so an unquoted
@@ -247,11 +385,22 @@ svc_start() { # <wsdir> <name>
       continue
     fi
     v="$(printf '%s' "$e" | jq -r --arg k "$k" '.env[$k] | tostring')"
-    envs+=("$(printf '%s=%q' "$k" "$v")")
+    # ONE EXCEPTION TO THE QUOTING, and it is the reason the gateway works at
+    # all: a value that is exactly `$NAME` or `$(one command ...)` is passed
+    # through unquoted so the pane expands it itself. That is how a service
+    # definition names a bearer without ever holding one - `cel gateway
+    # install` writes `$(omp auth-broker token)` and the token stays in omp's
+    # own 0600 file. The pattern is narrow on purpose: no quotes, no
+    # semicolons, no backticks, no pipes.
+    if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then      envs+=("$k=$v")
+    else
+      envs+=("$(printf '%s=%q' "$k" "$v")")
+    fi
   done < <(printf '%s' "$e" | jq -r '.env // {} | keys[]' 2>/dev/null || true)
 
   local -a split=(pane split --cwd "$cwd" --no-focus)
-  local wspane; wspane="$(_svc_ws_pane "$d")"
+  local wspane=""
+  [ -n "$d" ] && wspane="$(_svc_ws_pane "$d")"
   [ -n "$wspane" ] && split=(pane split --pane "$wspane" --direction down --cwd "$cwd" --no-focus)
   local resp pane
   resp="$("$_SERVICES_HERDR" "${split[@]}" 2>/dev/null || true)"
@@ -261,21 +410,23 @@ svc_start() { # <wsdir> <name>
   [ "${#envs[@]}" -eq 0 ] || runline="env ${envs[*]} $cmd"
   "$_SERVICES_HERDR" pane run "$pane" "$runline" >/dev/null 2>&1 \
     || c_warn "$name: could not start it in $pane - read the pane"
-  _svc_pane_record "$d" "$name" "$pane"
-  c_ok "$name started in $pane ($runline)"
+  _svc_pane_record "$store" "$name" "$pane"
+  c_ok "$name started in $pane"
 }
 
-svc_stop() { # <wsdir> <name>
-  local d="$1" name="$2" pane e
+svc_stop() { # [wsdir] <name>
+  local d="${1:-}" name="$2" pane e store
   pane="$(svc_pane "$d" "$name")"
+  e="$(svc_entry "$d" "$name")"
+  store="$d"
+  [ "$(printf '%s' "$e" | jq -r '.kind // ""' 2>/dev/null || true)" = box ] && store=box
   if [ -z "$pane" ]; then
-    e="$(svc_entry "$d" "$name")"
     pane="$(printf '%s' "$e" | jq -r '.pane // ""' 2>/dev/null || true)"
   fi
   [ -n "$pane" ] || { c_warn "$name is not running under a pane this plane started"; return 0; }
   "$_SERVICES_HERDR" pane close "$pane" >/dev/null 2>&1 \
     || c_warn "could not close pane $pane - close it by hand"
-  _svc_pane_forget "$d" "$name"
+  _svc_pane_forget "$store" "$name"
   c_ok "$name stopped ($pane)"
 }
 
@@ -350,11 +501,17 @@ cmd_services() { # [start|stop|restart|logs|open <name>] [--workspace w] [--json
       *) die "cel services: unknown argument '$1' (want --workspace, --json)" ;;
     esac
   done
-  local wsdir
+  local wsdir=""
   if [ -n "$workspace" ]; then
     wsdir="$(registry_require "$workspace")"
   else
-    wsdir="$(ws_current)" || die "cel services: not inside a workspace (cd into one, or pass --workspace <name>)"
+    # NOT BEING IN A WORKSPACE IS NO LONGER AN ERROR. Run from ~ this used to
+    # say "not inside a workspace", which is exactly the place where the box's
+    # own services - the gateway, the broker - are all there is to look at.
+    wsdir="$(ws_current || true)"
+  fi
+  if [ -z "$wsdir" ] && [ -z "$(_svc_box)" ]; then
+    die "cel services: not inside a workspace and no box services in $(svc_box_dir) (cd into one, or pass --workspace <name>)"
   fi
 
   case "$verb" in
@@ -372,6 +529,17 @@ cmd_services() { # [start|stop|restart|logs|open <name>] [--workspace w] [--json
     c_warn "no services declared in $(ws_name "$wsdir") and no previews running"
     return 0
   fi
-  c_hd "services - $(ws_name "$wsdir")"
-  printf '%s' "$rows" | svc_rows_text
+  # Two blocks, because they answer two different questions: what this
+  # workspace runs, and what this box runs on everyone's behalf.
+  local wsrows boxrows
+  wsrows="$(printf '%s' "$rows" | jq -c '[.[] | select(.workspace != "box")]')"
+  boxrows="$(printf '%s' "$rows" | jq -c '[.[] | select(.workspace == "box")]')"
+  if [ "$(printf '%s' "$wsrows" | jq 'length')" -gt 0 ]; then
+    c_hd "services - $(ws_name "$wsdir")"
+    printf '%s' "$wsrows" | svc_rows_text
+  fi
+  if [ "$(printf '%s' "$boxrows" | jq 'length')" -gt 0 ]; then
+    c_hd "services - box"
+    printf '%s' "$boxrows" | svc_rows_text
+  fi
 }

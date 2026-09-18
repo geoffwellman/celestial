@@ -21,6 +21,36 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
 # shellcheck source=lib/gateway.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
+# shellcheck source=lib/services.sh
+. "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # _svc_box, for the box services line
+
+# One line for the services this box runs on nobody's behalf in particular:
+# how many it declares and how many are actually answering. The second half is
+# the part that matters - a gateway configured in cel.yaml with nothing in
+# services.d is a gateway no sweep is watching, which is exactly how the broker
+# and the gateway spent a day up, unsupervised, with nothing on the box able to
+# notice if they stopped.
+doctor_box_services_line() {
+  local rows n healthy e url health hauth port
+  rows="$(_svc_box)"
+  n="$(printf '%s' "$rows" | grep -c . || true)"
+  healthy=0
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    url="$(printf '%s' "$e" | jq -r '.url')"
+    health="$(printf '%s' "$e" | jq -r '.health // ""')"
+    hauth="$(printf '%s' "$e" | jq -r '.health_auth // ""')"
+    port="$(svc_port_of_url "$url")"
+    svc_listening "$port" || continue
+    if [ -n "$health" ] && ! svc_health_ok "$port" "$health" "$hauth"; then continue; fi
+    healthy=$((healthy + 1))
+  done <<< "$rows"
+  printf '  box services: %s declared, %s healthy\n' "${n:-0}" "$healthy"
+  if gateway_installed && ! svc_box_declared cel-auth-gateway; then
+    printf '  gateway not supervised - cel gateway install\n'
+  fi
+  return 0
+}
 
 check_roles_and_runtimes() {
   local fail=0 a ad l target strat
@@ -307,6 +337,7 @@ cmd_doctor() {
   # for an optional door teaches people to ignore a red doctor.
   c_hd "Gateway"
   gateway_doctor_line
+  doctor_box_services_line
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1
   check_externals || fail=1
