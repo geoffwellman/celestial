@@ -780,3 +780,63 @@ test_steward_restarts_an_auto_service_once_before_raising() {
   assert_eq "$(grep -c 'pane split' "$T/calls")" 1
   rm -rf "$T"
 }
+
+# THE QUEUE IS VISIBLE OR IT IS A HANG. With one suite running at a time, a
+# worker whose gate is waiting looks exactly like a worker that died - and on
+# 2026-09-18 three of them were interrupted by hand for that reason. A suite
+# held far longer than any suite takes is the one case worth a word to root.
+# The steward never kills it: it says who has it and for how long.
+_suite_lock_fixture() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha/.cel" "$T/inbox"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget}]\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  export CEL_SUITE_LOCK="$T/suite.lock"
+}
+
+test_steward_reports_a_suite_lock_held_past_the_warning_and_clears_it() {
+  _suite_lock_fixture
+  # `exec` so the holder IS the process the test kills: a shell that forks a
+  # sleep leaves the sleep holding the inherited descriptor after the shell dies
+  ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  local i=0
+  while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
+  # what a real runner writes after it acquires the lock, aged 31 minutes
+  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
+  touch -d '31 minutes ago' "$CEL_SUITE_LOCK"
+
+  # three ticks, one item: a suite that will take an hour is still there in
+  # five minutes and does not need saying again
+  local j
+  for j in 1 2 3; do _steward_suite_lock >/dev/null 2>&1; done
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'suite lock held' || true)" "1"
+  assert_contains "$mail" "by pid $holder"
+  assert_contains "$mail" "31m"
+
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  _steward_suite_lock >/dev/null 2>&1
+  mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_contains "$mail" "cleared: the suite lock is free again"
+  rm -rf "$T"
+}
+
+# A suite that has been running for four minutes is a suite. Nothing is said
+# about it, or the sweep is noise every tick on a box doing its job.
+test_steward_says_nothing_about_a_suite_lock_held_for_a_normal_run() {
+  _suite_lock_fixture
+  # `exec` so the holder IS the process the test kills: a shell that forks a
+  # sleep leaves the sleep holding the inherited descriptor after the shell dies
+  ( flock 9; exec sleep 30 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  local i=0
+  while flock -n "$CEL_SUITE_LOCK" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); [ "$i" -lt 50 ] || break; done
+  printf '%s %s\n' "$holder" "$(date +%H:%M)" > "$CEL_SUITE_LOCK"
+  _steward_suite_lock >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  rm -rf "$T"
+}

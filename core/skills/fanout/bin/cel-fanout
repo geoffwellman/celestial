@@ -1084,6 +1084,15 @@ cmd_why() { # <id> [--workspace NAME]
   pushed="$(stall_branch_pushed "$wt")"
   if [ "$quiet" = "-1" ]; then age="quiet for an unknown time (no readable worktree)"
   else age="quiet for $(( quiet / 60 ))m"; fi
+  # QUIET IS NOT THE SAME AS QUEUED. One suite runs at a time on this box
+  # (tests/run.sh takes a box-wide lock), so a worker whose gate is waiting its
+  # turn prints one line and then says nothing for as long as the run in front
+  # of it takes. Reported as "quiet for 22m" that reads as a dead worker, and
+  # the cure somebody reaches for - kill it, or start it again - costs both
+  # runs. The pane says which it is, so this says which it is.
+  local queued
+  queued="$(printf '%s' "$text" | grep -o 'waiting for the suite lock (held by pid [0-9]*' | tail -1 || true)"
+  [ -n "$queued" ] && age="queued for the suite lock behind pid ${queued##* }"
   printf '%s; %s; branch pushed: %s\n' "$age" \
     "$([ -n "$risk" ] && printf 'WORK AT RISK (%s)' "$risk" || printf 'nothing at risk')" \
     "$pushed"

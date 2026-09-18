@@ -51,6 +51,24 @@ fi
 git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 
 # --- gate ------------------------------------------------------------------
+# A GATE THAT WAITED ITS TURN IS NOT A GATE THAT RAN SLOWLY. The suite takes a
+# box-wide lock (tests/run.sh, after six concurrent suites drove this box to a
+# load of 190 on 2026-09-18), and the gate this verifier runs is usually that
+# suite - so it queues with everyone else. The wait is taken HERE, before the
+# timeout clock starts, and recorded: a verdict that took twenty-five minutes
+# because twenty of them were spent in a queue is explained by a number rather
+# than read as a hang. The lock is a descriptor this process holds, so the
+# gate (a child) runs under it and it is released when the gate is done; that
+# is the same guarantee `flock <path> -c '<gate>'` gives, minus the second
+# open that would make the wait unmeasurable.
+_verify_suite_lock_path() {
+  if [ -n "${CEL_SUITE_LOCK:-}" ]; then printf '%s' "$CEL_SUITE_LOCK"; return 0; fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    printf '%s/cel-suite.lock' "$XDG_RUNTIME_DIR"; return 0
+  fi
+  printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
+}
+
 # A GATE THAT RAN OUT OF TIME IS NOT A GATE THAT FAILED. `timeout` returns 124
 # when it killed the command (137 when the kill had to be a SIGKILL). On
 # 2026-09-16 the plane's own suite grew past 600 s on a loaded box and a green
@@ -58,9 +76,35 @@ git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 # mid-run, with no summary - and land correctly refused a verdict that did not
 # exist. "Ran out of time" and "the code is wrong" lead to opposite actions and
 # must not render alike, the same rule _wt_ahead already states for `?` vs `0`.
-g_conf=false g_ran=false g_pass=null g_tail="" g_to=false
+g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
+  suite_lock_fd=""
+  suite_lock="$(_verify_suite_lock_path)"
+  # A LOCK THE CALLER IS ALREADY HOLDING IS NOT A QUEUE, IT IS A DEADLOCK.
+  # This verifier is normally run from inside a suite (tests/fanout.test.sh ->
+  # collect -> here -> the gate), and on CI that inner run waited twenty
+  # minutes for the outer one until the job was cancelled. tests/run.sh exports
+  # CEL_SUITE_LOCK_HELD when it holds the lock; inheriting it means being
+  # inside it already.
+  [ -n "${CEL_SUITE_LOCK_HELD:-}" ] && suite_lock=none
+  if [ "$suite_lock" != none ] && command -v flock >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$suite_lock")" 2>/dev/null || true
+    if exec {suite_lock_fd}>>"$suite_lock"; then
+      if ! flock -n "$suite_lock_fd"; then
+        lock_t0="$(date +%s)"
+        [ "$quiet" -eq 1 ] || printf 'waiting for the suite lock \xe2\x80\xa6\n'
+        flock "$suite_lock_fd"
+        g_waited=$(( $(date +%s) - lock_t0 ))
+      fi
+      # Whatever this gate starts is inside the lock now - and this gate is
+      # very often `bash tests/run.sh`, which would otherwise queue behind the
+      # verifier that launched it.
+      export CEL_SUITE_LOCK="$suite_lock" CEL_SUITE_LOCK_HELD=1
+    else
+      suite_lock_fd=""
+    fi
+  fi
   # A KILLED GATE MUST TAKE ITS CHILDREN WITH IT. The same 2026-09-16 run that
   # produced the timeout above also left seven `node tools/pages/server.mjs`
   # processes alive for a hundred minutes: the suite booted them, the timeout
@@ -74,7 +118,11 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   # leave a server running, and that server holds the same descriptors.
   gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
   gate_killed="$gate_out.killed"
-  ( cd "$wt" && exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
+  # The gate is inside the lock by ENVIRONMENT, not by descriptor: a gate that
+  # leaves a process behind (this file has seen seven at once) must not leave
+  # it holding the box's suite lock as well.
+  ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
+    exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
   gate_pid=$!
   ( sleep "$gate_timeout"
     kill -0 "$gate_pid" 2>/dev/null || exit 0
@@ -106,6 +154,9 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
       ;;
     *) g_pass=false;;
   esac
+  # Somebody else is waiting on this: hand it over as soon as the gate is
+  # done, rather than at the end of the PR and GitHub work below.
+  [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-
 fi
 
 # --- tests: red then green? --------------------------------------------------
@@ -164,13 +215,13 @@ fi
 mkdir -p "$wt/.agent"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg base "$base" \
   --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
-  --argjson gto "$g_to" --argjson gtos "$gate_timeout" \
+  --argjson gto "$g_to" --argjson gtos "$gate_timeout" --argjson gwait "$g_waited" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
   --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
   { at: $at, branch: $branch, base: $base,
     gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, tail: $gtail,
-              timed_out: $gto, timeout_secs: $gtos },
+              timed_out: $gto, timeout_secs: $gtos, waited_secs: $gwait },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
     checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
@@ -180,6 +231,7 @@ if [ "$quiet" -eq 0 ]; then
   elif [ "$g_to" = true ]; then gs="gate:TIMEOUT(${gate_timeout}s)"
   elif [ "$g_pass" = true ]; then gs="gate:PASS"
   else gs="gate:FAIL"; fi
+  [ "$g_waited" -gt 0 ] && gs="$gs(queued ${g_waited}s)"
   rs="red-green:$(case "$rg" in true) echo yes;; false) echo no;; *) echo n/a;; esac)"
   printf 'verdict %s  %s  diff:%s files +%s/-%s  checks:%s  review:%s\n' "$gs" "$rs" "$d_files" "$d_ins" "$d_del" "$c_state" "$r_dec"
 fi
