@@ -83,13 +83,21 @@ fleet_ahead() { # <worktree> -> count | ?
 # being stalled is how a watcher earns its reputation for crying wolf, and it
 # would put this list permanently out of step with the `stalled` count beside
 # it. An empty `live` (herdr did not answer at all) is not evidence either.
-fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> -> one JSON object
+fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state] -> one JSON object
   local e="$1" live="${2:--}" text="${3:-}"
   [ -n "$live" ] || live="-"
-  local wt state quiet verdict="" severity="" risk
-  wt="$(printf '%s' "$e" | jq -r '.worktree // ""')"
-  state="$(printf '%s' "$e" | jq -r '.state // ""')"
-  quiet="$(stall_quiet_secs "$wt")"
+  local wt="${4:-}" state="${5:-}" quiet verdict="" severity="" risk
+  # One jq for both when the caller did not already have them: every jq is a
+  # process, and at seven per row the fleet spent longer parsing its own
+  # ledger than reading the box.
+  if [ -z "$wt" ] && [ -z "$state" ]; then
+    IFS=$'\t' read -r wt state <<< "$(printf '%s' "$e" | jq -r '[(.worktree // ""), (.state // "")] | @tsv')"
+  fi
+  # Quiet time is a question about a RUNNING worker. Answering it for every
+  # finished and collected row meant a `find` over every worktree on the box
+  # on every fleet call - most of the console's start. Those rows show '-'.
+  quiet=""
+  [ "$state" = running ] && quiet="$(stall_quiet_secs "$wt")"
   if [ "$state" = running ] && [ "$live" != "-" ]; then
     verdict="$(stall_verdict "$live" "$text" "$quiet")"
     risk="$(stall_work_at_risk "$wt")"
@@ -176,9 +184,7 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     local pane wt state live="-" text=""
-    pane="$(printf '%s' "$row" | jq -r '.pane // ""')"
-    wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"
-    state="$(printf '%s' "$row" | jq -r '.state // ""')"
+    IFS=$'\t' read -r pane wt state <<< "$(printf '%s' "$row" | jq -r '[(.pane // ""), (.worktree // ""), (.state // "")] | @tsv')"
 
     if [ "$have_roster" = 1 ]; then
       live="$(printf '%s' "$roster" | jq -r --arg p "$pane" \
@@ -197,17 +203,19 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
       [ -n "$(stall_work_at_risk "$wt")" ] && unlanded=$((unlanded + 1))
     fi
 
-    local obj; obj="$(fleet_worker_row "$row" "$live" "$text")"
+    local obj; obj="$(fleet_worker_row "$row" "$live" "$text" "$wt" "$state")"
+    local orss overdict
+    IFS=$'\t' read -r orss overdict <<< "$(printf '%s' "$obj" | jq -r '[(.rss_mb // 0), (.verdict // "")] | @tsv')"
     rows="$rows$obj
 "
     # The unit's footprint is the sum of its workers' - every state the list
     # carries, not only `running`: a collected worker whose pane is still up
     # is still holding the memory, and hiding it is how 3 GB goes missing
     # between the row and the box.
-    rss=$((rss + $(printf '%s' "$obj" | jq -r '.rss_mb')))
+    rss=$((rss + ${orss:-0}))
     # The count IS the list: counted from the same verdict the row carries, so
     # the two numbers an operator compares can never disagree.
-    [ -n "$(printf '%s' "$obj" | jq -r '.verdict')" ] && stalled=$((stalled + 1))
+    [ -n "$overdict" ] && stalled=$((stalled + 1))
   done < <(for repo in "${repos[@]}"; do _fleet_unit_rows "$wsdir" "$repo"; done)
 
   jq -nc --arg name "$product" --arg orch "$orch" \

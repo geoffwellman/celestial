@@ -41,15 +41,26 @@ MEM_SNAPSHOT="${MEM_SNAPSHOT:-}"
 # and the open. A walk that died on a vanished pid would fail most of the time
 # it ran.
 mem_tree_list() {
-  local p pid cwd rss
-  for p in /proc/[0-9]*; do
-    [ -O "$p" ] || continue
-    cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
-    [ -n "$cwd" ] || continue
-    rss="$(awk '/^VmRSS:/{print $2; exit}' "$p/status" 2>/dev/null)" || continue
-    [ -n "$rss" ] || continue
-    printf '%s\t%s\n' "$rss" "$cwd"
-  done
+  # TWO processes for the whole box, not two per pid. The first cut ran
+  # readlink and awk for each of ~900 processes: 4.5 seconds, most of the
+  # console's 12-second start. `ls -l` prints every cwd link in one go
+  # (owner in column 3 - only this user's processes are ours to read), and
+  # one awk over every status file gives every RSS, keyed by the pid in the
+  # file name. Processes that vanish between the two reads simply drop out.
+  local me; me="$(id -un)"
+  {
+    # `|| true` on both: other users' cwd links are unreadable and a pid can
+    # vanish mid-read, and either makes ls or awk exit non-zero - which under
+    # set -e and pipefail killed the whole fleet call, silently, exit 2.
+    { ls -l /proc/[0-9]*/cwd 2>/dev/null || true; } | awk -v me="$me" '$3 == me { i = NF - 2; p = $i; sub(/.*\/proc\//, "", p); sub(/\/cwd$/, "", p); print "C\t" p "\t" $NF }'
+    # grep -s, not awk over the files: gawk aborts the whole run when one
+    # status file has vanished between the glob and the open, and on this box
+    # one always has - the first cut counted 375 of 660 processes.
+    { grep -Hs '^VmRSS:' /proc/[0-9]*/status || true; } | awk -F'[:[:space:]]+' '{ p = $1; sub(/^\/proc\//, "", p); sub(/\/status$/, "", p); print "R\t" p "\t" $3 }'
+  } | awk -F'\t' '
+    $1 == "C" { cwd[$2] = $3 }
+    $1 == "R" { rss[$2] = $3 }
+    END { for (p in cwd) if (p in rss && cwd[p] != "") printf "%s\t%s\n", rss[p], cwd[p] }'
 }
 
 mem_tree_snapshot() { MEM_SNAPSHOT="$(mem_tree_list)"; }
