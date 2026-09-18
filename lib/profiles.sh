@@ -39,7 +39,10 @@ _CEL_PROFILES=1
 # shellcheck source=lib/quota.sh
 . "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
 
-profile_names() { yq -r '.worker_profiles // {} | keys_unsorted[]' "$1/workspace.yaml"; }
+# shellcheck source=lib/yaml.sh
+. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+
+profile_names() { _yqr -r '.worker_profiles // {} | keys_unsorted[]' "$1/workspace.yaml"; }
 
 # Which profile a role launches on when nobody passes --profile.
 #
@@ -50,7 +53,7 @@ profile_names() { yq -r '.worker_profiles // {} | keys_unsorted[]' "$1/workspace
 # Keyed by the same role names cel run takes - root, orchestrator, worker,
 # reviewer, direct.
 role_profile() { # <wsdir> <role>
-  yq -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1/workspace.yaml"
+  _yqr -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1/workspace.yaml"
 }
 
 # The same binding, narrowed to one product or repo. A workspace's products are
@@ -75,7 +78,7 @@ role_profile() { # <wsdir> <role>
 role_profile_for() { # <wsdir> <role> [name]
   if [ -n "${3:-}" ]; then
     local p
-    p="$(yq -r --arg n "$3" --arg r "$2" \
+    p="$(_yqr -r --arg n "$3" --arg r "$2" \
       '((.products // [] | map(select(.name == $n))[0].role_profiles[$r])
         // (.repos // [] | map(select(.name == $n))[0].role_profiles[$r])
         // "") | tostring' \
@@ -86,11 +89,11 @@ role_profile_for() { # <wsdir> <role> [name]
 }
 
 profile_get() { # <wsdir> <name> <key>
-  yq -r --arg n "$2" --arg k "$3" '.worker_profiles[$n][$k] // "" | tostring' "$1/workspace.yaml"
+  _yqr -r --arg n "$2" --arg k "$3" '.worker_profiles[$n][$k] // "" | tostring' "$1/workspace.yaml"
 }
 
 profile_exists() { # <wsdir> <name>
-  [ "$(yq -r --arg n "$2" '.worker_profiles // {} | has($n)' "$1/workspace.yaml")" = "true" ]
+  [ "$(_yqr -r --arg n "$2" '.worker_profiles // {} | has($n)' "$1/workspace.yaml")" = "true" ]
 }
 
 # The workspace's default reasoning level, else the plane's (agents.yaml

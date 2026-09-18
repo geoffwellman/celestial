@@ -7,8 +7,12 @@ _CEL_WORKSPACE=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+# shellcheck source=lib/yaml.sh
+. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+
+
 _wsy() { # _wsy <wsdir> <program>  - yq over the workspace file, "" for absent
-  yq -r "$2 // \"\" | tostring" "$1/workspace.yaml"
+  _yqr -r "$2 // \"\" | tostring" "$1/workspace.yaml"
 }
 
 ws_current() {
@@ -24,19 +28,19 @@ ws_name()   { _wsy "$1" '.name'; }
 ws_kind()   { _wsy "$1" '.kind'; }
 ws_org()    { _wsy "$1" '.org'; }
 ws_layout() { _wsy "$1" '.layout'; }
-ws_ticket() { yq -r --arg k "$2" '.tickets[$k] // "" | tostring' "$1/workspace.yaml"; }
-ws_policy() { yq -r --arg k "$2" '.policy[$k]  // "" | tostring' "$1/workspace.yaml"; }
+ws_ticket() { _yqr -r --arg k "$2" '.tickets[$k] // "" | tostring' "$1/workspace.yaml"; }
+ws_policy() { _yqr -r --arg k "$2" '.policy[$k]  // "" | tostring' "$1/workspace.yaml"; }
 
 # Default runtimes: claude orchestrators, omp workers.
 ws_runtime() {
   local r
-  r="$(yq -r --arg k "$2" '.runtime[$k] // ""' "$1/workspace.yaml")"
+  r="$(_yqr -r --arg k "$2" '.runtime[$k] // ""' "$1/workspace.yaml")"
   [ -n "$r" ] && { printf '%s' "$r"; return 0; }
   case "$2" in worker) printf 'omp';; *) printf 'claude';; esac
 }
 
-ws_env_names() { yq -r '.env // {} | keys[]' "$1/workspace.yaml"; }
-ws_env_get()   { yq -r --arg k "$2" '.env[$k] // "" | tostring' "$1/workspace.yaml"; }
+ws_env_names() { _yqr -r '.env // {} | keys[]' "$1/workspace.yaml"; }
+ws_env_get()   { _yqr -r --arg k "$2" '.env[$k] // "" | tostring' "$1/workspace.yaml"; }
 
 # Workspace env as eval-able shell: the committed `env:` map first, then a
 # source of the gitignored env.local so secrets and per-box overrides win.
@@ -70,7 +74,7 @@ ws_env_exports() { # <wsdir>
 # The `review:` block configures local PR reviewer panes (cel run reviewer).
 # Distinct from policy.reviewer, which names an EXTERNAL GitHub reviewer for
 # the pr-loop skill; a workspace can have either, both, or neither.
-ws_review() { yq -r --arg k "$2" '.review[$k] // "" | tostring' "$1/workspace.yaml"; }
+ws_review() { _yqr -r --arg k "$2" '.review[$k] // "" | tostring' "$1/workspace.yaml"; }
 
 # Where a reviewer's verdict is published. On a public repo whose only GitHub
 # identity is the owner's, a reviewer agent posting a review is the owner
@@ -92,13 +96,13 @@ ws_review_post() { # <wsdir>
 # names forever. Without the alias every in-flight branch would suddenly read
 # as unticketed - refused by the delegate gate and nagged by the steward.
 ws_repo_prefixes() { # <wsdir> <repo>
-  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0] as $r
+  _yqr -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0] as $r
     | ([$r.prefix // empty] + ($r.prefix_aliases // [])) | .[]' "$1/workspace.yaml"
 }
 
-ws_repo_names() { yq -r '.repos // [] | .[].name' "$1/workspace.yaml"; }
+ws_repo_names() { _yqr -r '.repos // [] | .[].name' "$1/workspace.yaml"; }
 ws_repo_get() {
-  yq -r --arg n "$2" --arg k "$3" \
+  _yqr -r --arg n "$2" --arg k "$3" \
     '.repos // [] | map(select(.name == $n))[0][$k] // "" | tostring' \
     "$1/workspace.yaml"
 }
@@ -118,7 +122,7 @@ ws_repo_get() {
 # the checkout and every worktree sees it. `copy` exists for directories a
 # build rewrites in place, where a link would write back into the checkout.
 ws_repo_seed() { # <wsdir> <repo>
-  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].seed // []
+  _yqr -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].seed // []
     | .[]
     | if type == "string" then . + "\tlink"
       else ((.path // "") + (if .copy then "\tcopy" else "\tlink" end)) end' \
@@ -136,13 +140,13 @@ ws_repo_seed() { # <wsdir> <repo>
 # the block. Values are returned RAW, placeholders and all: substitution needs
 # the allocated base, which only the caller has.
 ws_repo_preview() { # <wsdir> <repo> <cmd|url>
-  yq -r --arg n "$2" --arg k "$3" \
+  _yqr -r --arg n "$2" --arg k "$3" \
     '.repos // [] | map(select(.name == $n))[0].preview[$k] // "" | tostring' \
     "$1/workspace.yaml"
 }
 
 ws_repo_preview_env() { # <wsdir> <repo> - one KEY=VALUE per line, raw
-  yq -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].preview.env // {}
+  _yqr -r --arg n "$2" '.repos // [] | map(select(.name == $n))[0].preview.env // {}
     | to_entries[] | "\(.key)=\(.value)"' "$1/workspace.yaml"
 }
 
@@ -160,7 +164,7 @@ ws_repo_preview_env() { # <wsdir> <repo> - one KEY=VALUE per line, raw
 # the same file always produces the same panes.
 
 ws_product_names() { # <wsdir> - declared in file order, then implicit ones
-  yq -r '(.products // []) as $ps
+  _yqr -r '(.products // []) as $ps
     | ([$ps[].repos // []] | flatten) as $used
     | (($ps | map(.name)) + ((.repos // [] | map(.name)) - $used))[]' \
     "$1/workspace.yaml"
@@ -168,25 +172,25 @@ ws_product_names() { # <wsdir> - declared in file order, then implicit ones
 
 ws_product_repos() { # <wsdir> <product> - an implicit product is its own repo
   local r
-  r="$(yq -r --arg p "$2" '.products // [] | map(select(.name == $p))[0].repos // [] | .[]' \
+  r="$(_yqr -r --arg p "$2" '.products // [] | map(select(.name == $p))[0].repos // [] | .[]' \
     "$1/workspace.yaml")"
   [ -n "$r" ] && { printf '%s\n' "$r"; return 0; }
   printf '%s\n' "$2"
 }
 
 ws_product_of_repo() { # <wsdir> <repo> - its product, else the repo itself
-  yq -r --arg n "$2" '.products // []
+  _yqr -r --arg n "$2" '.products // []
     | map(select((.repos // []) | index($n)))[0].name // $n | tostring' \
     "$1/workspace.yaml"
 }
 
 ws_product_declared() { # <wsdir> <product> - 0 declared, 1 implicit or unknown
-  [ "$(yq -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
+  [ "$(_yqr -r --arg p "$2" '(.products // []) | map(select(.name == $p)) | length' \
     "$1/workspace.yaml")" != "0" ]
 }
 
 ws_product_get() { # <wsdir> <product> <key>
-  yq -r --arg p "$2" --arg k "$3" \
+  _yqr -r --arg p "$2" --arg k "$3" \
     '.products // [] | map(select(.name == $p))[0][$k] // "" | tostring' \
     "$1/workspace.yaml"
 }
@@ -241,13 +245,13 @@ ws_policy_block() { # <wsdir> [product]
   # Profiles are read straight from the file rather than through lib/profiles.sh:
   # that file sources THIS one, and a policy block is not worth a source cycle.
   local profs wbound
-  profs="$(yq -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"
-  wbound="$(yq -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"
+  profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"
+  wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"
   if [ -n "$profs" ]; then
     printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
       "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
-    yq -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true
-    local sbound; sbound="$(yq -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"
+    _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true
+    local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"
     printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
       "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
   fi
