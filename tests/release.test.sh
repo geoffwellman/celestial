@@ -233,3 +233,85 @@ test_release_version_from_subject_refuses_anything_else() {
   assert_fails _subject 'release: v0.3 (#57)' || return 1
   assert_fails _subject 'release: v0.3.0 and more (#57)' || return 1
 }
+
+# --- fragments: one PR, one file, no shared line ------------------------------
+
+# Seven open PRs each added a line under [Unreleased] and every squash merge
+# made the other six DIRTY on the same three lines. A PR now writes
+# changelog.d/<branch>.md and the cut assembles them, so two PRs never touch
+# the same line.
+_rel_fragment() { # <dir> <name> <heading> <bullet>
+  mkdir -p "$1"
+  printf '%s\n%s\n' "$3" "$4" >"$1/$2"
+}
+
+test_release_cut_assembles_fragments_in_category_then_filename_order() {
+  local T out
+  T="$(mktemp -d)"
+  printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n### Added\n- gadget mode arrives\n' >"$T/CHANGELOG.md"
+  printf '0.2.0\n' >"$T/VERSION"
+  _rel_fragment "$T/changelog.d" "b-second.md" '### Added' '- second added entry'
+  _rel_fragment "$T/changelog.d" "a-first.md" '### Added' '- first added entry'
+  _rel_fragment "$T/changelog.d" "c-fixed.md" '### Fixed' '- a fix lands'
+  out="$(_cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" \
+         --fragments "$T/changelog.d" --today 2026-02-01)" || { rm -rf "$T"; return 1; }
+
+  # category order Added before Fixed, file-name order within the category
+  local shipped; shipped="$(_notes 0.3.0 --changelog "$T/CHANGELOG.md")" || { rm -rf "$T"; return 1; }
+  local expected; expected='### Added
+- first added entry
+- second added entry
+
+### Fixed
+- a fix lands'
+  assert_eq "$shipped" "$expected" || { rm -rf "$T"; return 1; }
+  assert_eq "$out" "$expected" || { rm -rf "$T"; return 1; }
+
+  # the fragments are consumed, and [Unreleased] is left empty for the next PR
+  assert_eq "$(ls "$T/changelog.d")" "" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" "" \
+    || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_release_cut_refuses_no_fragments_and_an_empty_unreleased() {
+  local T; T="$(mktemp -d)"
+  printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n- gadget mode arrives\n' >"$T/CHANGELOG.md"
+  printf '0.2.0\n' >"$T/VERSION"
+  mkdir -p "$T/changelog.d"
+  assert_fails _cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" \
+    --fragments "$T/changelog.d" --today 2026-02-01 || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/VERSION")" "0.2.0" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The old habit keeps working through the transition: a hand-written entry and
+# no fragments still ships that entry.
+test_release_cut_ships_a_hand_written_unreleased_entry_with_no_fragments() {
+  local T out; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"; printf '0.2.0\n' >"$T/VERSION"
+  mkdir -p "$T/changelog.d"
+  out="$(_cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" \
+         --fragments "$T/changelog.d" --today 2026-02-01)" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "widget mode learns to hum" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/CHANGELOG.md")" "## [0.3.0] - 2026-02-01" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" "" \
+    || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# `cel release --dry-run` must show the REAL pending notes, which now live in
+# the fragments; and reading them must not touch the tree.
+test_release_notes_unreleased_assembles_fragments_without_touching_the_tree() {
+  local T out before; T="$(mktemp -d)"
+  printf '# Changelog\n\n## [Unreleased]\n\n### Changed\n- hand written still counts\n\n## [0.2.0] - 2026-01-02\n\n- gadget\n' >"$T/CHANGELOG.md"
+  _rel_fragment "$T/changelog.d" "z-added.md" '### Added' '- from a fragment'
+  before="$(cat "$T/CHANGELOG.md")"
+  out="$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" \
+    || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "- from a fragment" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "- hand written still counts" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/CHANGELOG.md")" "$before" || { rm -rf "$T"; return 1; }
+  assert_eq "$(ls "$T/changelog.d")" "z-added.md" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
