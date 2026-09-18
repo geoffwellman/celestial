@@ -4,6 +4,7 @@
 #
 #   tests/run.sh              run everything
 #   tests/run.sh expand       run tests whose name contains "expand"
+#   tests/run.sh --no-lock    run without queueing behind other suites
 #
 # A file that fails to source is reported as a failure, never skipped: a suite
 # that can silently run nothing is worse than no suite at all.
@@ -11,7 +12,63 @@ set -uo pipefail
 
 CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 export CEL_ROOT
-FILTER="${1:-}"
+FILTER="" NO_LOCK=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-lock) NO_LOCK=1 ;;
+    *) FILTER="$arg" ;;
+  esac
+done
+
+# ONE SUITE AT A TIME ON THIS BOX. On 2026-09-18 six copies of this script ran
+# at once - four workers rebasing after a merge, one fixing a review finding,
+# one finishing a build. Each run is ~650 tests forking yq, node and bun; on
+# six cores with sixteen agent sessions the load reached 190, swap filled, the
+# steward raised memory blockers, and every suite crawled past its timeout, so
+# the workers were about to retry and make it worse. The worker cap bounds how
+# many workers EXIST, not how many gates RUN, and nothing anywhere said "one
+# suite at a time", so nothing enforced it; three workers were interrupted by
+# hand. A suite now queues instead, and says so rather than looking hung.
+#
+# The path is one function so a test can point it at a fixture. It is resolved
+# before TMPDIR is replaced below, so the fallback names the real temporary
+# directory rather than this run's private one - a lock nobody else can find
+# is not a lock.
+suite_lock_path() {
+  if [ -n "${CEL_SUITE_LOCK:-}" ]; then printf '%s' "$CEL_SUITE_LOCK"; return 0; fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ]; then
+    printf '%s/cel-suite.lock' "$XDG_RUNTIME_DIR"; return 0
+  fi
+  printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
+}
+
+# The lock is held by an open descriptor, so it is released by process exit:
+# a killed suite frees it, with no stale-lock handling and no PID file for
+# somebody to clean up afterwards. A FILTERED RUN STILL QUEUES - a filter can
+# still be most of the suite, and "it's only a few tests" is what everyone says
+# while the load climbs.
+SUITE_LOCK_FD=""
+_suite_lock_take() {
+  local path; path="$(suite_lock_path)"
+  [ "$NO_LOCK" -eq 1 ] && return 0
+  [ "$path" = none ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  exec {SUITE_LOCK_FD}>>"$path" || { SUITE_LOCK_FD=""; return 0; }
+  if ! flock -n "$SUITE_LOCK_FD"; then
+    # The holder wrote its pid and start time into the first line after it
+    # acquired, so the waiting line can name what to go and look at instead of
+    # leaving an operator to guess which of sixteen sessions is in front.
+    local held; held="$(sed -n 1p "$path" 2>/dev/null || true)"
+    printf 'waiting for the suite lock (held by pid %s since %s) \xe2\x80\xa6\n' \
+      "${held%% *}" "${held##* }"
+    local t0; t0="$(date +%s)"
+    flock "$SUITE_LOCK_FD"
+    printf 'suite lock acquired after %ss\n' "$(( $(date +%s) - t0 ))"
+  fi
+  printf '%s %s\n' "$$" "$(date +%H:%M)" > "$path"
+}
+_suite_lock_take
 
 # Put every fixture under one per-run directory and remove it on exit or
 # interruption. Individual tests can fail before their own cleanup; retaining
