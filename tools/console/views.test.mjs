@@ -364,7 +364,7 @@ const GATEWAY = {
 };
 
 t('the quota view lists gateway accounts under their own heading', () => {
-  const text = quotaView({ gateway: GATEWAY });
+  const text = quotaView({ gateway: GATEWAY }).join('\n');
   assert.match(text, /via gateway/);
   assert.match(text, /openai-codex/);
   assert.match(text, /aaaaaa/);
@@ -376,7 +376,7 @@ t('the quota view lists gateway accounts under their own heading', () => {
 // boxes have none, and a red line about an optional door teaches people to
 // ignore red lines.
 t('the quota view says nothing alarming when there is no gateway', () => {
-  const text = quotaView({ gateway: { installed: false, accounts: [] } });
+  const text = quotaView({ gateway: { installed: false, accounts: [] } }).join('\n');
   assert.match(text, /no gateway/);
   assert.doesNotMatch(text, /exhausted/);
 });

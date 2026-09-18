@@ -253,11 +253,19 @@ test_gateway_reads_models_over_http() {
   mkdir -p "$T/srv/v1"
   printf '%s' '{"data":[{"id":"opencode-go/qwen3.8-flash","context_length":128000,"max_output_tokens":4096}]}' > "$T/srv/v1/models"
   local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
-  ( cd "$T/srv" && python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 & )
+  python3 -m http.server "$port" --bind 127.0.0.1 --directory "$T/srv" >/dev/null 2>&1 &
+  local srv=$!
   local i=0; while [ "$i" -lt 50 ] && ! curl -sf -m1 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); done
   cmd_gateway install --no-start >/dev/null
   cel_config_set gateway gateway_port "$port"
-  assert_eq "$(gateway_models_json | jq -r '.data[0].id')" "opencode-go/qwen3.8-flash"
-  gateway_ready || { echo "a gateway answering /v1/models was reported down"; _gw_teardown; return 1; }
+  local id ready=0
+  id="$(gateway_models_json | jq -r '.data[0].id')"
+  gateway_ready && ready=1
+  # The port goes back to the kernel HERE, not whenever this process group is
+  # reaped: an ephemeral port held across the rest of the suite is a port some
+  # other test wanted, and that failure reads as that test's bug.
+  kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null || true
+  assert_eq "$id" "opencode-go/qwen3.8-flash"
+  [ "$ready" -eq 1 ] || { echo "a gateway answering /v1/models was reported down"; _gw_teardown; return 1; }
   _gw_teardown
 }
