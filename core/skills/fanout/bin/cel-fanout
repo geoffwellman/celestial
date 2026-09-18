@@ -1367,6 +1367,15 @@ cmd_release() {
   local wt held shape; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
   shape="$(printf '%s' "$entry" | jq -r '.shape // "ship"')"
   held="$(_wt_unlanded "$wt" "$shape")"
+  # A WORKTREE THAT IS ALREADY GONE HOLDS NOTHING. Twenty-two rows on this box
+  # sat in finished/collected for a week with merged PRs and no directory:
+  # the old orchestrators removed the checkouts through herdr by hand and
+  # never released the row, and release then refused with "still holds
+  # work" about a path that did not exist. Say so, and let the row close.
+  if [ ! -d "$wt" ]; then
+    c_warn "$id: worktree already gone ($wt) - nothing to hold, releasing the row"
+    held=""
+  fi
   # A SPIKE'S WORKTREE IS THROWAWAY BY DEFINITION. Dirty and unpushed are its
   # expected end state - the code was written to answer a question and the
   # answer is in the report - so demanding --discard here would only teach
@@ -1393,7 +1402,10 @@ cmd_release() {
   # what a scout is. herdr's own dirty-worktree refusal does not, so a scout
   # whose only content is its report could never be released without it.
   # Reaching this line means either nothing is held or --discard was said.
-  [ "$keep" -eq 1 ] || "$HERDR" worktree remove --workspace "$herdr_ws" --force
+  # herdr may have nothing left to remove (the checkout went by hand, or the
+  # workspace with it); that is not a reason to leave the row open.
+  [ "$keep" -eq 1 ] || "$HERDR" worktree remove --workspace "$herdr_ws" --force \
+    || c_warn "$id: herdr had no worktree to remove for $herdr_ws - the row is released anyway"
   _ledger_update_state "$wsdir" "$id" released
 }
 

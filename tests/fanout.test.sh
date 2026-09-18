@@ -513,6 +513,19 @@ test_release_all_takes_finished_and_collected_and_leaves_running_alone() {
   rm -rf "$T"
 }
 
+# A worktree removed out from under the ledger (by hand, through herdr, by a
+# crash) holds nothing: the row must close rather than refuse about a path
+# that does not exist.
+test_release_of_a_row_whose_worktree_is_gone_closes_the_row() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-GONE "$T/spec.md" >/dev/null)
+  rm -rf "$STUB_WT"
+  local out; out="$(cd "$T" && "$BIN" release WG-GONE 2>&1)"
+  assert_contains "$out" "worktree already gone"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "released"
+  rm -rf "$T"
+}
+
 test_release_refuses_a_dirty_worktree() {
   _fanout_dirty_release
   local out; out="$( (cd "$T" && "$BIN" release WG-DIRTY) 2>&1 )" && {
