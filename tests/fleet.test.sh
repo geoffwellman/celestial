@@ -85,6 +85,26 @@ EOF
   chmod +x "$T/bin/herdr"
   PATH="$T/bin:$PATH"
 }
+
+# MEMORY. The box has 24 GB and no view on this plane could say where it had
+# gone: one pi worker is ~340 MB resident and a forgotten test server is
+# invisible until something is killed. A fixture meminfo stands in for the box
+# (a test may not arrange 5% available) and the tree walk is stubbed, because
+# what `cel fleet` owns is the SHAPE - which directory belongs to which row -
+# and not the arithmetic, which tests/memory.test.sh proves against a real
+# process.
+_fleet_stub_memory() {
+  printf 'MemTotal:       25165824 kB\nMemAvailable:    7235174 kB\n' >"$T/meminfo"
+  export CEL_MEMINFO="$T/meminfo"
+  mem_tree_snapshot() { :; }
+  mem_tree_rss_mb() {
+    case "$1" in
+      *wt-widget*) printf 370 ;;
+      *repos/widget*|*products/bundle*) printf 120 ;;
+      *) printf 0 ;;
+    esac
+  }
+}
 _fleet_teardown() { rm -rf "$T"; }
 
 test_fleet_prints_a_block_per_workspace_and_a_line_per_repo() {
@@ -276,7 +296,7 @@ test_fleet_workers_list_carries_a_row_per_live_worker() {
   assert_eq "$(printf '%s' "$w" | jq -r '.pane')" "wA:p2"
   assert_eq "$(printf '%s' "$w" | jq -r '.worktree')" "$WT"
   assert_eq "$(printf '%s' "$w" | jq -r '.quiet_secs | type')" "number"
-  assert_eq "$(printf '%s' "$w" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree"] - keys | join(",")')" ""
+  assert_eq "$(printf '%s' "$w" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree","rss_mb"] - keys | join(",")')" ""
   _fleet_teardown
 }
 
@@ -303,6 +323,61 @@ test_fleet_workers_list_verdict_matches_the_stalled_count() {
   assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[] | select(.verdict != "")] | length')" "1"
   assert_contains "$(printf '%s' "$u" | jq -r '.workers_list[0].verdict')" "dead-"
   assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].severity')" "normal"
+  _fleet_teardown
+}
+
+test_fleet_json_carries_the_box_and_a_footprint_per_worker() {
+  _fleet_setup
+  _fleet_stub_memory
+  local doc u
+  doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.box.total_mb')" "24576"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.box.available_mb')" "7065"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.box.used_pct')" "71"
+  u="$(printf '%s' "$doc" | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  # the worker's own tree, the unit's sum, and the orchestrator pane's tree
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].rss_mb')" "370"
+  assert_eq "$(printf '%s' "$u" | jq -r '.rss_mb')" "370"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch_rss_mb')" "120"
+  # every tree the fleet knows about: widget's worker and its orchestrator,
+  # with gadget contributing nothing
+  assert_eq "$(printf '%s' "$doc" | jq -r '.box.agents_rss_mb')" "490"
+  _fleet_teardown
+}
+
+# A DECLARED PRODUCT'S ORCHESTRATOR STANDS IN THE PRODUCT DIRECTORY, an
+# implicit one in the repo checkout - the same derivation the steward uses.
+# Reading the wrong one reports zero for a live pane, which is
+# indistinguishable from an orchestrator that is not running at all.
+test_fleet_reads_a_declared_products_orchestrator_from_its_product_dir() {
+  _fleet_setup
+  _fleet_declare_bundle
+  _fleet_stub_memory
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[0]')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.name')" "bundle"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch_rss_mb')" "120"
+  _fleet_teardown
+}
+
+test_fleet_text_shows_a_units_memory_and_the_boxs_headroom() {
+  _fleet_setup
+  _fleet_stub_memory
+  local out
+  out="$(cmd_fleet --workspace alpha)"
+  assert_contains "$out" "mem 370M"
+  assert_contains "$out" "box 6.9G free of 24G"
+  _fleet_teardown
+}
+
+# An unreadable meminfo is a statement about the observer: the read still
+# completes and every number it can still answer is unchanged.
+test_fleet_survives_a_box_it_cannot_measure() {
+  _fleet_setup
+  local doc
+  doc="$(CEL_MEMINFO=/nonexistent/meminfo cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.box.total_mb')" "0"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units | length')" "2"
   _fleet_teardown
 }
 

@@ -13,6 +13,13 @@ watch the repo (Watch → Custom → Releases) to be notified.
   --channel`), a build string of `v0.2.0+31 (d43910c, main)` everywhere, and a
   `cel update --check`, steward item, dashboard chip and `cel doctor` line
   that say how many commits are new and what they were
+- **Memory, everywhere state is read**: `cel fleet` carries `rss_mb` per
+  worker, unit and orchestrator pane plus a `box` block, prints `mem` per
+  product and the box's headroom on its head line; the console shows it per
+  row with the free figure on the status edge and `s` to sort a unit's workers
+  by memory; the steward raises one blocker under 10% available naming the
+  largest trees and tells an orchestrator about a worker over
+  `CEL_MEM_WORKER_WARN_MB` - reporting only, never killing
 - The console has a **unit view**: Enter or a double-click on a fleet row opens
   one product whole - its orchestrator with `[focus]` and `[message]`, every
   worker with ticket, state, quiet time, verdict, ahead count and PR, the open

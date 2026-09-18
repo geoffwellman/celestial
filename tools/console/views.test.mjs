@@ -7,7 +7,9 @@
 // something anyone will notice by looking at a terminal, and a view nobody can
 // assert is a view that rots.
 import assert from 'node:assert/strict';
-import { renderOutput, unitView, workerView } from './views.mjs';
+import {
+  renderOutput, unitView, workerView, memHuman, sortWorkers,
+} from './views.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
 
@@ -15,13 +17,14 @@ const WORKERS = [
   {
     id: 'ABC-49-slug', ticket: 'ABC-49', repo: 'widget', branch: 'ABC-49-slug',
     shape: 'ship', state: 'running', live: 'idle', quiet_secs: 812,
-    verdict: 'stalled', severity: 'warn', ahead: '3',
+    verdict: 'stalled', severity: 'warn', ahead: '3', rss_mb: 370,
     pr: 'https://example.invalid/widget/pull/12', alias: 'widget/ABC-49-slug', pane: 'w3:p1',
   },
   {
     id: 'ABC-50-other', ticket: 'ABC-50', repo: 'gadget', branch: 'ABC-50-other',
     shape: 'ship', state: 'running', live: 'working', quiet_secs: 10,
-    verdict: '', severity: '', ahead: '0', pr: '', alias: 'gadget/ABC-50-other', pane: 'w3:p2',
+    verdict: '', severity: '', ahead: '0', pr: '', rss_mb: 1536,
+    alias: 'gadget/ABC-50-other', pane: 'w3:p2',
   },
 ];
 
@@ -34,6 +37,8 @@ const UNIT = {
   cap: 4,
   stalled: 1,
   unlanded: 0,
+  rss_mb: 1906,
+  orch_rss_mb: 430,
   declared: true,
   repos: ['widget', 'gadget'],
   workers_list: WORKERS,
@@ -148,6 +153,47 @@ t('any other JSON becomes key: value lines, nested indented, arrays numbered', (
 t('text that is not JSON is left exactly as it came', () => {
   const raw = 'alpha   bundle   orch LIVE   workers 1/4\n';
   assert.equal(renderOutput('cel fleet', raw), raw);
+});
+
+// --- CEL-22: memory --------------------------------------------------------
+
+t('megabytes read the way an operator says them', () => {
+  assert.equal(memHuman(370), '370M');
+  assert.equal(memHuman(7065), '6.9G');
+  assert.equal(memHuman(24576), '24G');
+  // absent is not zero: an older cel on PATH carries no box block, and
+  // "mem NaN" on the status edge is worse than no number at all
+  assert.equal(memHuman(undefined), '');
+  assert.equal(memHuman(null), '');
+});
+
+t('the unit view carries a footprint per worker', () => {
+  const text = unitView({ unit: UNIT, items: [], tail: [] });
+  assert.match(text, /370M/);
+  assert.match(text, /1\.5G/);
+});
+
+t('the worker view names what it is holding', () => {
+  const text = workerView({ worker: WORKERS[0], ws: 'alpha', why: 'quiet for 13m' });
+  assert.match(text, /370M/);
+});
+
+t('the fleet table carries a unit\u2019s memory beside its counts', () => {
+  const doc = { workspaces: [{ name: 'alpha', root: { unread: 1, open: 1 }, units: [{ ...UNIT }] }] };
+  const out = renderOutput('cel fleet --json', JSON.stringify(doc));
+  assert.match(out, /unlanded 0 {3}mem 1\.9G/);
+});
+
+// `s` IS A TOGGLE, so both orders have to be an order someone asked for.
+// Biggest first: the question the sort answers is "which one do I collect".
+t('the memory sort puts the biggest tree first and leaves the default order alone', () => {
+  assert.deepEqual(sortWorkers(WORKERS, false).map((w) => w.id), ['ABC-49-slug', 'ABC-50-other']);
+  assert.deepEqual(sortWorkers(WORKERS, true).map((w) => w.id), ['ABC-50-other', 'ABC-49-slug']);
+  // and it does not reorder the caller's array under it
+  assert.equal(WORKERS[0].id, 'ABC-49-slug');
+  // a worker with no number sorts last rather than above a measured one
+  const mixed = [{ id: 'a' }, { id: 'b', rss_mb: 10 }];
+  assert.deepEqual(sortWorkers(mixed, true).map((w) => w.id), ['b', 'a']);
 });
 
 process.stdout.write('views.test.mjs: all good\n');

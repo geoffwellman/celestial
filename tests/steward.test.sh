@@ -490,3 +490,116 @@ test_steward_says_new_commits_on_main_once_as_a_status_line() {
   CEL_ROOT="$keep"
   rm -rf "$T"
 }
+
+# --- memory: the steward says something before the box does -------------------
+# The owner, 2026-09-18: "how are we monitoring memory for the workers and can
+# that be visualised in the console too?" Nothing did. The box has 24 GB, sits
+# at 17 GB used with agents up, and a runaway test server or a forgotten
+# session is invisible until something is killed - by which time the thing
+# killed is whatever the kernel picked, not whatever was expendable. These two
+# sweeps are the warning that used to be missing, and neither of them kills
+# anything: the steward reports, the orchestrator decides.
+_mem_steward_fixture() { # <total-kb> <available-kb>
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha/.cel" "$T/alpha/products/bundle" "$T/inbox" "$T/wt/ABC-49-slug"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget}, {name: gadget}]\nproducts:\n  - name: bundle\n    repos: [widget, gadget]\n' \
+    > "$T/alpha/workspace.yaml"
+  cat > "$T/alpha/.cel/delegations.json" <<EOF
+[{"id":"ABC-49-slug","ticket":"ABC-49","repo":"widget","branch":"ABC-49-slug","pane":"w3:p1","worktree":"$T/wt/ABC-49-slug","state":"running"},
+ {"id":"ABC-50-done","ticket":"ABC-50","repo":"gadget","branch":"ABC-50-done","pane":"w3:p2","worktree":"$T/wt/gone","state":"collected"}]
+EOF
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  printf 'MemTotal:       %s kB\nMemAvailable:   %s kB\n' "$1" "$2" > "$T/meminfo"
+  export CEL_MEMINFO="$T/meminfo"
+  # The walk itself is proved in tests/memory.test.sh against a real process;
+  # here the question is which directory the steward attributes to whom.
+  mem_tree_snapshot() { :; }
+  mem_tree_snapshot_clear() { :; }
+  mem_tree_rss_mb() {
+    case "$1" in
+      *"/wt/ABC-49-slug"*)  printf 2400 ;;
+      *products/bundle*)    printf 800 ;;
+      *) printf 0 ;;
+    esac
+  }
+}
+
+# 1.2 GB of 24 available is minutes from the kernel choosing what dies. One
+# blocked item, naming the trees big enough to be worth doing something about.
+test_steward_raises_one_blocker_when_the_box_runs_out_of_memory() {
+  _mem_steward_fixture 25165824 1258291
+  local i
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1; done
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_eq "$(printf '%s\n' "$open" | grep -c 'box memory low')" "1"
+  assert_contains "$open" "1.2G of 24G available"
+  assert_contains "$open" "ABC-49-slug 2.3G"
+  assert_contains "$open" "bundle-orch 800M"
+  # a collected delegation is finished business and its worktree is gone: it is
+  # not one of the trees anybody can act on
+  case "$open" in *ABC-50-done*) echo 'a collected worker was named as a live tree'; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# HYSTERESIS, deliberately: raised under 10% and cleared over 15%, so a box
+# hovering on one threshold does not post and resolve the same item every tick.
+test_steward_clears_the_memory_blocker_only_when_headroom_really_returns() {
+  _mem_steward_fixture 25165824 1258291
+  _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "box memory low"
+  # 12%: above the raise threshold, below the clear one - the item stands
+  printf 'MemTotal:       25165824 kB\nMemAvailable:   3019898 kB\n' > "$T/meminfo"
+  _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "box memory low"
+  # 20%: gone, and said to have gone
+  printf 'MemTotal:       25165824 kB\nMemAvailable:   5033164 kB\n' > "$T/meminfo"
+  _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
+  rm -rf "$T"
+}
+
+# A SINGLE WORKER OVER THE THRESHOLD IS THE ORCHESTRATOR'S BUSINESS, not
+# root's: the orchestrator is the thing that can collect it or let it finish.
+# The box itself is healthy here, so this is the only sweep that speaks.
+test_steward_tells_the_product_orchestrator_about_a_worker_over_the_threshold() {
+  _mem_steward_fixture 25165824 12582912
+  local out
+  out="$(_STEWARD_WINDOW=0 _steward_memory 2>&1)"
+  assert_contains "$out" "ABC-49-slug"
+  assert_contains "$out" "2.3G"
+  case "$out" in *'box memory low'*) echo 'a healthy box was reported as low'; rm -rf "$T"; return 1;; esac
+  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
+  assert_contains "$mail" "ABC-49-slug"
+  assert_contains "$mail" "2.3G"
+  # NO KILLING. The steward names it; a sweep that reaped a worker mid-gate
+  # would destroy the work it was measuring.
+  case "$mail" in *kill*) echo 'the steward offered to kill a worker'; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# Under the threshold is not news. A worker at a normal 340 MB reported every
+# tick is how an operator learns to skip the steward's output.
+test_steward_stays_quiet_about_a_worker_of_ordinary_size() {
+  _mem_steward_fixture 25165824 12582912
+  mem_tree_rss_mb() { printf 340; }
+  local out
+  out="$(_STEWARD_WINDOW=0 CEL_MEM_WORKER_WARN_MB=2048 _steward_memory 2>&1)"
+  assert_eq "$out" ""
+  assert_eq "$(cmd_inbox count --for bundle-orch --workspace alpha)" "0"
+  rm -rf "$T"
+}
+
+# A box that cannot be measured is not a box in crisis: the sweep says nothing
+# rather than raising a blocker about 0 MB of 0 MB.
+test_steward_says_nothing_about_a_box_it_cannot_measure() {
+  _mem_steward_fixture 25165824 1258291
+  export CEL_MEMINFO=/nonexistent/meminfo
+  local out
+  out="$(_STEWARD_WINDOW=0 _steward_memory 2>&1)"
+  assert_eq "$out" ""
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}

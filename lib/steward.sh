@@ -24,6 +24,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+# shellcheck source=lib/memory.sh
+. "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
 # the failure this sweep exists for is a specific string in a specific pane,
@@ -609,6 +611,111 @@ _steward_orphan_servers() { # <agents-json>
   done < <(_steward_server_procs)
 }
 
+# MEMORY: THE STEWARD SAYS SOMETHING BEFORE THE BOX DOES.
+#
+# The owner, 2026-09-18: "how are we monitoring memory for the workers and can
+# that be visualised in the console too?" Nothing was. The box has 24 GB and
+# sits at 17 GB used with agents up; a runaway test server or a forgotten
+# session was invisible until the kernel picked something to kill, and what it
+# picks is never what anyone would have chosen. Two warnings, and NO KILLING:
+# the steward reports, the orchestrator decides. A sweep that reaped a worker
+# mid-gate would destroy the work it was measuring, and the one number it has
+# is an attribution by cwd, not proof of who is at fault.
+_STEWARD_MEM_WORKER_WARN_MB="${CEL_MEM_WORKER_WARN_MB:-2048}"
+
+# Every tree the steward knows about, largest first, as `name<TAB>mb`. One
+# /proc walk for the whole sweep, as in lib/fleet.sh: the snapshot is what
+# keeps this cheap enough to run every five minutes.
+#
+# ONLY `running` DELEGATIONS. A collected or released row's worktree is gone
+# or going, so naming it as one of the largest trees points an operator at
+# something nobody can act on - the same rule the fleet's worker list learned.
+_steward_mem_trees() { # -> name<TAB>mb, biggest first
+  local ws wsdir p d id wt mb
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for p in $(ws_product_names "$wsdir" 2>/dev/null); do
+      d="$(_steward_orch_dir "$wsdir" "$p-orch")"
+      [ -n "$d" ] && [ -d "$d" ] || continue
+      mb="$(mem_tree_rss_mb "$d")"
+      [ "${mb:-0}" -gt 0 ] && printf '%s-orch\t%s\n' "$p" "$mb"
+    done
+    [ -f "$wsdir/.cel/delegations.json" ] || continue
+    while IFS=$'\t' read -r id wt; do
+      [ -n "$id" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
+      mb="$(mem_tree_rss_mb "$wt")"
+      [ "${mb:-0}" -gt 0 ] && printf '%s\t%s\n' "$id" "$mb"
+    done < <(jq -r '.[]? | select((.state // "") == "running")
+                    | [(.id // ""), (.worktree // "")] | @tsv' \
+      "$wsdir/.cel/delegations.json" 2>/dev/null || true)
+  done | sort -t"$(printf '\t')" -k2,2nr
+}
+
+# Which product owns a delegation, so the warning goes to the orchestrator that
+# can act on it rather than to root, who would only forward it.
+_steward_mem_owner() { # <wsdir> <repo>
+  printf '%s-orch' "$(ws_product_of_repo "$1" "$2")"
+}
+
+_steward_memory() {
+  local total avail used
+  read -r total avail used <<<"$(mem_box)"
+  # A box that cannot be measured is not a box in crisis. mem_box prints zeroes
+  # for an unreadable meminfo, and a sweep that treated "could not ask" as 0 MB
+  # available would raise a blocker every tick on a perfectly healthy box.
+  [ "${total:-0}" -gt 0 ] || return 0
+  mem_tree_snapshot
+
+  local availpct=$(( avail * 100 / total )) ws
+  # HYSTERESIS, 10% to raise and 15% to clear. A single threshold on a box
+  # hovering at it posts and resolves the same item every tick, which is the
+  # rolled-up version of the noise this file already fixed once.
+  if [ "$availpct" -lt 10 ]; then
+    local trees top="" name mb n=0
+    trees="$(_steward_mem_trees)"
+    while IFS=$'\t' read -r name mb; do
+      [ -n "$name" ] || continue
+      top="$top${top:+, }$name $(mem_human "$mb")"
+      n=$((n + 1)); [ "$n" -ge 3 ] && break
+    done <<<"$trees"
+    local msg
+    msg="steward: box memory low: $(mem_human "$avail") of $(mem_human "$total") available - the largest trees: ${top:-none this sweep can see}. Collect or let something go; nothing here has been killed."
+    c_err "$msg"
+    # The box is one box, but root's mailbox is per workspace - as with a
+    # provider account shared by two workspaces, the condition key makes it one
+    # rolled-up item in each rather than a fresh one every tick.
+    for ws in $(registry_names); do _steward_raise "$ws" mem-box blocked "$msg"; done
+  elif [ "$availpct" -ge 15 ]; then
+    for ws in $(registry_names); do
+      _steward_clear "$ws" mem-box "box memory is back to $(mem_human "$avail") of $(mem_human "$total") available"
+    done
+  fi
+
+  # AND ONE WORKER THAT IS THE PROBLEM ON ITS OWN. A pi worker is ~340 MB
+  # resident; a tree over 2 GB is a test server nobody stopped or a run that
+  # went wrong, and its own orchestrator is the thing that can collect it.
+  local wsdir id repo wt mb who
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/.cel/delegations.json" ] || continue
+    while IFS=$'\t' read -r id repo wt; do
+      [ -n "$id" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
+      mb="$(mem_tree_rss_mb "$wt")"
+      [ "${mb:-0}" -ge "$_STEWARD_MEM_WORKER_WARN_MB" ] || continue
+      who="$(_steward_mem_owner "$wsdir" "$repo")"
+      c_warn "$ws/$id is holding $(mem_human "$mb") in $wt - told $who"
+      _steward_due "mem-worker-$ws-$id" || continue
+      cmd_inbox send "$who" \
+        "steward: worker $id is holding $(mem_human "$mb") of memory (threshold $(mem_human "$_STEWARD_MEM_WORKER_WARN_MB")) in $wt. Nothing has been stopped - check whether it left a test server or a preview running, and collect it if it is done." \
+        --from steward --workspace "$ws" --kind status --fp "mem-worker-$id" >/dev/null 2>&1 || true
+    done < <(jq -r '.[]? | select((.state // "") == "running")
+                    | [(.id // ""), (.repo // ""), (.worktree // "")] | @tsv' \
+      "$wsdir/.cel/delegations.json" 2>/dev/null || true)
+  done
+  mem_tree_snapshot_clear
+}
+
 _STEWARD_UNIT="cel-steward"
 _steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 
@@ -913,6 +1020,10 @@ $text2" >/dev/null 2>&1 \
 
   _steward_ready_tickets "$agents_json"
   _steward_quota
+  # Before the server sweeps: a box at 5% available is why the next thing in
+  # this tick fails to start, and reading that warning after three failures is
+  # reading it in the wrong order.
+  _steward_memory
   _steward_servers
   _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"
