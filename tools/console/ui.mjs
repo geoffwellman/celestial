@@ -31,6 +31,7 @@ import {
 } from './state.mjs';
 import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader } from './views.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
+import { route, NoRouter, routerLabel } from './router.mjs';
 import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
@@ -315,7 +316,7 @@ const WorkerView = ({ worker, ws, why, busy, preview, innerRef }) =>
       h(Text, { key: b, color: b === '[release]' ? C.warn : C.ink }, b),
     ].filter(Boolean))));
 
-const App = ({ refresh, statusSecs }) => {
+const App = ({ refresh, statusSecs, noRouter = false }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [doc, setDoc] = useState({ workspaces: [] });
@@ -554,8 +555,44 @@ const App = ({ refresh, statusSecs }) => {
 
   const ask = useCallback(async (text) => {
     setBusy(true);
-    say(`asking ${translatorLabel()}…`);
     const state = askState(doc, items);
+    // THE ROUTER FIRST, when one is configured. It is a classifier: it picks
+    // one of ten intents and the console fills the slots itself, which is why
+    // it answers in under a second where the chat model took six. Everything
+    // it cannot place goes on to the chat model below, unchanged.
+    const rLabel = routerLabel();
+    if (rLabel && !noRouter) {
+      say(`asking ${rLabel} (router)…`);
+      const started = Date.now();
+      try {
+        const r = await route({ sentence: text, doc, items, selected: pane === 'waiting' ? items[sel] || null : null });
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        if (r.cmds) {
+          setBusy(false);
+          asked.current = text;
+          propose(r.cmds);
+          say(`proposed in ${secs} s - Enter runs it, Esc discards it`);
+          return;
+        }
+        if (r.intent !== 'other' && r.options.some((o) => o.cmd)) {
+          setBusy(false);
+          const opts = r.options.filter((o) => o.cmd);
+          setOptions(opts);
+          setOutput([
+            `not sure what you meant (${r.intent} ${r.confidence.toFixed(2)}) - did you mean:`,
+            ...opts.map((o, i) => `${i + 1}  ${o.cmd.padEnd(48)} -- ${o.reason}`),
+            '',
+            'type 1, 2 or 3 and Enter - or click one - to put it on the command line',
+          ].join('\n'));
+          setOutOffset(0);
+          say(`offered options in ${secs} s - pick one, nothing runs yet`);
+          return;
+        }
+      } catch (e) {
+        if (!(e instanceof NoRouter)) say(`${e.message} - asking the chat model`);
+      }
+    }
+    say(`asking ${translatorLabel()}…`);
     let cmds = [], raw = '', answered = '';
     try {
       ({ cmds, raw, answer: answered = '' } = await translate({ sentence: text, state }));
@@ -600,7 +637,7 @@ const App = ({ refresh, statusSecs }) => {
     }
     const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
     say(`no command for that - rephrase, or type the command${said}`);
-  }, [doc, items, propose, say]);
+  }, [doc, items, propose, say, pane, sel, noRouter]);
 
   const openDetail = useCallback((it) => {
     if (!it) return;
@@ -1273,14 +1310,14 @@ const App = ({ refresh, statusSecs }) => {
           color: { bad: C.bad, warn: C.warn }[memLevel(doc.box)] || C.dim,
         }, `${memFree(doc.box)}   `)
         : null,
-      h(Text, { color: C.dim }, status ? statusAt : `${translatorLabel()} · ${at}`)),
+      h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
       view === 'detail' ? 'detail' : view === 'worker' ? 'worker' : view === 'unit' ? 'unit'
         : view === 'output' ? 'output' : pane))));
 };
 
 export const start = async (opts) => {
-  const app = render(h(App, { refresh: opts.refresh || 10, statusSecs: opts.statusSecs ?? 8 }), { exitOnCtrlC: true });
+  const app = render(h(App, { refresh: opts.refresh || 10, statusSecs: opts.statusSecs ?? 8, noRouter: opts.router === false }), { exitOnCtrlC: true });
   await app.waitUntilExit();
   // Belt and braces: the effect's own cleanup has already run by here on a
   // normal quit, and LEAVE is idempotent at the terminal's end for the two
