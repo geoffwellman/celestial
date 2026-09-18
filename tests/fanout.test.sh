@@ -2000,13 +2000,18 @@ _fanout_worker_cwd_setup() {
   _fanout_setup
   export CEL_WORKTREES="$T/wt"
   mkdir -p "$CEL_WORKTREES/widget/ABC-1"
+  export CEL_REGISTRY="$T/registry.json"
+  printf '{"workspaces":{"alpha":{"path":"%s","remote":null}}}\n' "$T" > "$CEL_REGISTRY"
   GH_STUB_DIR="$T/bin"; mkdir -p "$GH_STUB_DIR"
   printf '#!/usr/bin/env bash\necho "gh was called: $*" >&2\nexit 7\n' > "$GH_STUB_DIR/gh"
   chmod +x "$GH_STUB_DIR/gh"
   export PATH="$GH_STUB_DIR:$PATH"
   (cd "$T" && "$BIN" delegate widget ABC-1 "$T/spec.md") > /dev/null
+  # The lock file is created by the setup's own delegate; removing it makes its
+  # reappearance the evidence that a refused command reached the lock.
+  rm -f "$T/.cel/delegations.lock"
 }
-_fanout_worker_teardown() { unset CEL_WORKTREES; rm -rf "$T"; }
+_fanout_worker_teardown() { unset CEL_WORKTREES CEL_REGISTRY; rm -rf "$T"; }
 
 test_worker_cwd_is_refused_by_the_binary() {
   _fanout_worker_cwd_setup

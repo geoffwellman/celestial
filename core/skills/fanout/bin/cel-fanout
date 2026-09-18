@@ -16,6 +16,8 @@ export CEL_ROOT
 . "$CEL_ROOT/lib/manifest.sh"
 # shellcheck source=lib/run.sh
 . "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
+# shellcheck source=lib/guard.sh
+. "$CEL_ROOT/lib/guard.sh" # guard_role_of - pure, reads nothing but its argument
 # shellcheck source=lib/fleet.sh
 . "$CEL_ROOT/lib/fleet.sh" # fleet_worker_row - ONE definition of what a worker
                           # looks like as data, so `cel fleet --json` and
@@ -314,7 +316,38 @@ _fanout_pr_phrase() {
   esac
 }
 
+# A WORKER DOES NOT RUN THE FACTORY. On 2026-09-18 a worker ran `cel-fanout
+# land <its own id>` from its worktree the moment its reviewer approved: the
+# ledger lock was held for three minutes while the gate ran, the orchestrator's
+# `status` hung on it, and branch protection - not this code - stopped the
+# merge. lib/guard.sh refuses the same verbs, but a guard is a hook and a hook
+# can be missing (a pi launched by hand, a runtime that has no hooks yet), so
+# the binary refuses on its own. Called before `gh` and before the ledger lock,
+# because taking that lock is half of the incident.
+_fanout_refuse_worker() { # <verb> [id] [workspace]
+  [ "$(guard_role_of "$PWD")" = worker ] || return 0
+  local verb="$1" id="${2:-}" ws_opt="${3:-}" mailbox="the orchestrator"
+  # Best-effort: the mailbox is a courtesy in the message, and a worker whose
+  # id or workspace cannot be resolved still gets refused.
+  local wsdir="" entry repo product
+  if [ -n "$ws_opt" ] && [ -n "$id" ]; then
+    wsdir="$( (registry_require "$ws_opt") 2>/dev/null || true)"
+    [ -d "$wsdir" ] || wsdir=""
+  fi
+  if [ -n "$wsdir" ]; then
+    entry="$( (_ledger_entry "$wsdir" "$id") 2>/dev/null || true)"
+    if [ -n "$entry" ]; then
+      repo="$( (printf '%s' "$entry" | jq -r '.repo // ""') 2>/dev/null || true)"
+      product="$( (ws_product_of_repo "$wsdir" "$repo") 2>/dev/null || true)"
+      [ -n "$product" ] && mailbox="$( (_run_agent_name "$product-orch") 2>/dev/null || true)"
+      [ -n "$mailbox" ] || mailbox="the orchestrator"
+    fi
+  fi
+  die "$verb: a worker does not $verb - report to $mailbox and the orchestrator lands it"
+}
+
 cmd_delegate() {
+  _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
   [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
   local repo="$1" branch="$2" spec="$3"; shift 3
   local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
@@ -777,6 +810,7 @@ cmd_wait() {
 }
 
 cmd_collect() {
+  _fanout_refuse_worker collect "${1:-}" "$(_fanout_ws_arg "$@")"
   [ $# -ge 1 ] || die "usage: cel-fanout collect <id>|--all [--state finished] [--workspace NAME]"
   if [ "$1" = --all ]; then shift; _fanout_bulk collect "finished" "$@"; return $?; fi
   local id="$1"; shift
@@ -1374,6 +1408,7 @@ _agent_gone() { # <alias>
 # noise on that list, and reconciling it by hand is a script somebody writes
 # twice - so it lives here, and the steward runs it every tick.
 cmd_reconcile() { # [--workspace NAME] [--dry-run]
+  _fanout_refuse_worker reconcile "" "$(_fanout_ws_arg "$@")"
   local ws_opt="" dry=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1512,6 +1547,7 @@ _reconcile_raise() { # <ws> <fp> <to> <message>
 }
 
 cmd_release() {
+  _fanout_refuse_worker release "${1:-}" "$(_fanout_ws_arg "$@")"
   [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--state finished,collected] [--keep-worktree] [--discard] [--workspace NAME]"
   if [ "$1" = --all ]; then
     shift
@@ -1670,6 +1706,7 @@ cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
 # passed. The orchestrator DECIDES; the script PROVES it is allowed to.
 # Deterministic logic in scripts, judgement in agents - and never the reverse.
 cmd_land() { # <id>
+  _fanout_refuse_worker land "${1:-}" "$(_fanout_ws_arg "$@")"
   [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME] [--gate-from-ci]"
   local id="$1"; shift
   local ws_opt="" gate_from_ci=0
@@ -1793,6 +1830,18 @@ cmd_land() { # <id>
 
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
+# The role check comes FIRST: the cost of the incident this closes was three
+# minutes of held lock, so the refusal has to happen before the lock is taken.
+# `reconcile` is a factory verb like the rest: it rewrites the ledger from what
+# GitHub says, which is the orchestrator's read of the world, not a worker's.
+case "${1:-}" in
+  land|release|collect)
+    _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
+  delegate|scout|spike|reconcile)
+    # No id to look a mailbox up by: the second argument here is a repo.
+    _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
+esac
+
 case "${1:-}" in
   delegate|scout|spike|collect|status|release|land|review|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
