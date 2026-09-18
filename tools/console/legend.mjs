@@ -43,6 +43,7 @@ export const BINDINGS = {
     ['Enter', 'the worker view - the answer to \u201cwhy\u201d'],
     ['f focus', 'focus the orchestrator pane'],
     ['m message', 'cel inbox send to the orchestrator, on the command line'],
+    ['s mem', 'sort the workers by memory, biggest first (again for the default order)'],
     ['Esc', 'back to the fleet'],
   ],
   worker: [
@@ -82,7 +83,7 @@ export const legend = (pane) => {
     case 'detail':
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
-      return '↑/↓ worker · Enter why · f focus · m message · Esc back · ? help';
+      return '↑/↓ worker · Enter why · f focus · m message · s mem · Esc back · ? help';
     case 'worker':
       return 'p prompt · f focus · c collect · x release · t try · w why · Esc back · ? help';
     case 'inbox':
