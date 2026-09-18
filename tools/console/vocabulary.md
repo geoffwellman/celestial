@@ -16,6 +16,8 @@
 | `cel inbox resolve --all --from steward --workspace <w>` | "clean the inbox", "clear the steward's blockers on <w>" |
 | `cel inbox open --all-workspaces` | "everything waiting on me" |
 | `cel-fanout status\|collect\|release --workspace <w>` | what is in flight, what is finished, what to let go |
+| `cel-fanout why <id> --workspace <w>` | "why is <ticket> stuck", "what is <worker> doing" - the verdict, the quiet time, the pane, its mail, its PR, one next act |
+| `cel-fanout status --json --workspace <w>` | the machine form: one object per delegation, every state; what this console reads |
 | `cel-fanout try <id> [--stop] --workspace <w>` | run a ticket's branch locally on its own ports; "try W-49", "stop the preview of W-49" |
 | `cel run orchestrator --product <p> --workspace <w>` | start a line of work |
 | `cel-linear …` | tickets |

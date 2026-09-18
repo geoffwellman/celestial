@@ -27,6 +27,9 @@ case "$1 $2" in
   "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
+  "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
+  "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
+                     printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
@@ -1682,5 +1685,99 @@ YAML
   assert_eq "$(cd "$T" && bash -c "$runline")" "hello world"
   assert_eq "$(cd "$T" && bash -c "${runline%printenv GREETING}printenv RISKY")" '$(touch 48720.pwned); echo x'
   [ ! -e "$T/48720.pwned" ] || { echo "a preview env value executed"; return 1; }
+  rm -rf "$T"
+}
+
+# ---- depth: the rows behind the count, and the diagnosis in words ----------
+# `cel fleet` carried a stalled COUNT and nothing else, so the console could
+# only ever tell the operator to run the view they were already watching.
+# `status --json` is the same rows as data; `why` is the same rows as prose.
+
+test_status_json_prints_one_object_per_row_with_the_contract_keys() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-JSON "$T/spec.md" >/dev/null)
+  local out; out="$(cd "$T" && "$BIN" status --json)"
+  assert_eq "$(printf '%s\n' "$out" | grep -c .)" "1"
+  assert_eq "$(printf '%s' "$out" | jq -r '.id')" "WG-JSON"
+  assert_eq "$(printf '%s' "$out" | jq -r '.repo')" "widget"
+  assert_eq "$(printf '%s' "$out" | jq -r '.branch')" "WG-JSON"
+  assert_eq "$(printf '%s' "$out" | jq -r '.state')" "running"
+  assert_eq "$(printf '%s' "$out" | jq -r '.shape')" "ship"
+  assert_eq "$(printf '%s' "$out" | jq -r '.quiet_secs | type')" "number"
+  assert_eq "$(printf '%s' "$out" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree"] - keys | join(",")')" ""
+  rm -rf "$T"
+}
+
+# Every state, released included: the text table shows them, so the machine
+# form must too or the console is reading a different fleet.
+test_status_json_includes_released_rows() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-REL "$T/spec.md" >/dev/null)
+  jq -c 'map(.state = "released")' "$T/.cel/delegations.json" > "$T/led.tmp" \
+    && mv "$T/led.tmp" "$T/.cel/delegations.json"
+  local out; out="$(cd "$T" && "$BIN" status --json)"
+  assert_eq "$(printf '%s' "$out" | jq -r '.state')" "released"
+  rm -rf "$T"
+}
+
+_fanout_why_setup() {
+  _fanout_setup
+  export CEL_INBOX_DIR="$T/inbox"
+  mkdir -p "$T/inbox"
+  (cd "$T" && "$BIN" delegate widget WG-WHY "$T/spec.md" >/dev/null)
+  WHY_ALIAS="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  local i
+  for i in 1 2 3 4 5 6; do
+    printf '{"id":"%s","ts":"2026-09-18T00:0%s:00+00:00","to":"root","from":"%s","kind":"status","message":"note %s","cwd":"/","pane":""}\n' \
+      "$i" "$i" "$WHY_ALIAS" "$i" >> "$T/inbox/alpha.jsonl"
+  done
+  printf '{"id":"x","ts":"2026-09-18T00:09:00+00:00","to":"root","from":"someone-else","kind":"status","message":"not from the worker","cwd":"/","pane":""}\n' \
+    >> "$T/inbox/alpha.jsonl"
+}
+
+# CEL_STALL_QUIET_SECS=0 makes the quiet verdict certain without sleeping:
+# the threshold is the thing under test elsewhere, not here.
+test_why_explains_a_stalled_worker_in_six_sections() {
+  _fanout_why_setup
+  local out
+  out="$(cd "$T" && CEL_STALL_QUIET_SECS=0 STUB_PANE_TEXT='running the gate again' "$BIN" why WG-WHY)"
+  assert_contains "$out" "WG-WHY"
+  assert_contains "$out" "running, agent idle"
+  assert_contains "$out" "quiet"
+  assert_contains "$out" "pane, last 25 lines:"
+  assert_contains "$out" "running the gate again"
+  assert_contains "$out" "mail from it, last 5:"
+  assert_contains "$out" "note 6"
+  assert_contains "$out" "note 2"
+  case "$out" in *"note 1"*) echo "why printed more than the newest five"; rm -rf "$T"; return 1;; esac
+  case "$out" in *"not from the worker"*) echo "why printed another sender's mail"; rm -rf "$T"; return 1;; esac
+  assert_contains "$out" "no PR yet"
+  assert_contains "$out" "next: prompt it to commit and push, or collect"
+  rm -rf "$T"
+}
+
+# A pane that cannot be read is a fact about the worker, not a crash in the
+# tool that reports on it.
+test_why_says_pane_gone_when_the_read_fails() {
+  _fanout_why_setup
+  local out
+  out="$(cd "$T" && STUB_AGENT_READ_FAIL=1 "$BIN" why WG-WHY)"
+  assert_contains "$out" "pane gone"
+  rm -rf "$T"
+}
+
+# A worker with nothing wrong with it gets the shortest possible answer.
+test_why_on_a_healthy_worker_says_nothing_to_do() {
+  _fanout_why_setup
+  local out
+  out="$(cd "$T" && STUB_STATUS=working "$BIN" why WG-WHY)"
+  assert_contains "$out" "no stall"
+  assert_contains "$out" "next: nothing to do"
+  rm -rf "$T"
+}
+
+test_why_on_an_unknown_id_fails() {
+  _fanout_why_setup
+  assert_fails bash -c "cd '$T' && '$BIN' why WG-NOSUCH"
   rm -rf "$T"
 }
