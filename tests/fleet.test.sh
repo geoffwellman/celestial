@@ -253,14 +253,18 @@ test_fleet_leaves_an_undeclared_workspace_as_repos() {
 # the console could only tell them to run the view they were already staring
 # at. These are the rows behind the number, and the console (CEL-20) is
 # written against exactly these keys.
-test_fleet_workers_list_carries_a_row_per_unreleased_worker() {
+test_fleet_workers_list_carries_a_row_per_live_worker() {
   _fleet_setup
   local led="$T/alpha/.cel/delegations.json"
-  jq -c '. + [{"id":"three","repo":"widget","branch":"widget-let-go","pane":"wA:p5","worktree":"'"$T/none"'","state":"released","ticket":""}]' \
+  jq -c '. + [{"id":"three","repo":"widget","branch":"widget-let-go","pane":"wA:p5","worktree":"'"$T/none"'","state":"released","ticket":""},
+              {"id":"four","repo":"widget","branch":"widget-shipped","pane":"wA:p6","worktree":"'"$T/none"'","state":"landed","ticket":""},
+              {"id":"five","repo":"widget","branch":"widget-lost","pane":"wA:p7","worktree":"'"$T/none"'","state":"orphaned","ticket":""}]' \
     "$led" >"$led.tmp" && mv "$led.tmp" "$led"
   local u
   u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
-  # the running row and the collected one; the released row is gone
+  # the running row and the collected one. A landed, released or orphaned row
+  # is finished business - nobody can act on it, and listing it as a worker
+  # buries the ones who need something.
   assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
   assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].id] | join(",")')" "one,two"
   local w

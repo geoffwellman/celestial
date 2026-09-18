@@ -35,15 +35,21 @@ _fleet_roster() {
 
 # The ledger is read with jq, deliberately, and not by sourcing cel-fanout:
 # cel-fanout is a BINARY that runs a delegation when sourced, not a library.
-# NOT ONLY THE RUNNING ONES. The counts below are about live work, but the
-# list this view now publishes is about the whole board an operator has to
-# reason over - a finished worker nobody collected is exactly the thing that
-# goes missing. `released` is the one state that is genuinely over: its
-# worktree is gone, so there is nothing left to ask about.
+# ONLY THE STATES THAT ARE STILL SOMEBODY'S CONCERN. The first cut of this
+# list took everything but `released`, and on the live box the unit view
+# filled with `landed`, `salvaged` and `orphaned` rows - finished business,
+# every one of them rendered as a worker with `live: gone` and no readable
+# worktree. A list of things nobody can act on is a list people stop reading,
+# and it buried the rows that mattered. `running` is working; `finished` and
+# `collected` are waiting on a human to land them or let them go. Everything
+# else is history, and history is what `cel-fanout status --json` is for -
+# that view still carries every state, `released` included.
 _fleet_unit_rows() { # <wsdir> <repo>
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
-  jq -c --arg r "$2" '.[]? | select(.repo == $r and .state != "released")' "$led" 2>/dev/null || true
+  jq -c --arg r "$2" \
+    '.[]? | select(.repo == $r and ((.state // "") | IN("running", "finished", "collected", "blocked")))' \
+    "$led" 2>/dev/null || true
 }
 
 # How many commits this worktree carries beyond the verified remote default.

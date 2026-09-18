@@ -27,9 +27,10 @@ watch the repo (Watch → Custom → Releases) to be notified.
   fleet document (which now carries `workers_list`) already holds, with nothing
   run; `cel console --render-once --unit <product>` and `--worker <id>` print
   the two new views
-- `cel fleet --json` carries `units[].workers_list`: every unreleased worker
-  as data - id, ticket, repo, branch, shape, state, live agent status,
-  `quiet_secs`, stall `verdict` and `severity`, `ahead`, PR, alias, pane and
+- `cel fleet --json` carries `units[].workers_list`: every worker still worth
+  acting on (`running`, `finished`, `collected`) - id, ticket, repo, branch,
+  shape, state, live agent status, `quiet_secs`, stall `verdict` and
+  `severity`, `ahead`, PR, alias, pane and
   worktree - so the `stalled` count can be read back to its rows, and
   `cel-fanout status --json` prints the same objects for one workspace
 - `cel-fanout why <id>` says why one worker is stuck in words: verdict, quiet
