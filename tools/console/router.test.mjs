@@ -9,7 +9,7 @@
 // sentence and the fleet state. A slot filler nobody can assert is a slot
 // filler that will one day put someone else's workspace in a `--workspace`.
 import assert from 'node:assert/strict';
-import { facts, plan, options } from './router.mjs';
+import { facts, plan, options, shellQuote } from './router.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
 
@@ -105,13 +105,45 @@ t('focus takes a product to its orchestrator and a worker to itself', () => {
 
 t('message splits the addressee from the text, quoted or not', () => {
   assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', F),
-    ['cel inbox send bundle-orch "pick up ABC-49 next" --workspace alpha']);
+    ["cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha"]);
   assert.deepEqual(plan('message', 'tell bundle "stop and push what you have"', F),
-    ['cel inbox send bundle-orch "stop and push what you have" --workspace alpha']);
+    ["cel inbox send bundle-orch 'stop and push what you have' --workspace alpha"]);
   // An addressee and nothing to say is a miss: an empty message is noise in
   // someone's mailbox.
   assert.equal(plan('message', 'tell bundle-orch', F), null);
   assert.equal(plan('message', 'tell them to hurry up', F), null);
+});
+
+// THE MESSAGE TEXT IS THE ONE PLACE A PERSON'S OWN WORDS REACH THE COMMAND
+// LINE, and that command line is run by `bash -c`. Inside DOUBLE quotes bash
+// still expands `$(...)`, `` `...` `` and `$VAR`, so the first version of this
+// - which escaped only the double quote - turned `tell bundle-orch "hi $(rm
+// -rf ~)"` into a proposal that deleted a home directory when the operator
+// pressed Enter. The guard's console branch allows every `cel *` line without
+// looking at metacharacters, so nothing downstream catches it either.
+t('message text cannot break out of its argument', () => {
+  const inj = plan('message', 'tell bundle-orch "hi $(rm -rf ~)"', F);
+  assert.deepEqual(inj, ["cel inbox send bundle-orch 'hi $(rm -rf ~)' --workspace alpha"]);
+  // Single quotes make every one of these inert; a literal single quote in the
+  // text closes and reopens rather than escaping, which is the only form bash
+  // accepts inside a single-quoted string.
+  assert.deepEqual(plan('message', "tell bundle-orch \"don't `whoami`; rm -rf x | tee y\"", F),
+    ["cel inbox send bundle-orch 'don'\\''t `whoami`; rm -rf x | tee y' --workspace alpha"]);
+  for (const cmd of [...inj, ...plan('message', 'tell bundle-orch "a && b; c"', F)]) {
+    // Everything after the closing quote is the console's own text: no
+    // operator word may appear outside the quoted argument.
+    const after = cmd.slice(cmd.lastIndexOf("'") + 1);
+    assert.equal(after, ' --workspace alpha');
+  }
+});
+
+t('shellQuote is single-quoting, and a quote in the text does not end it', () => {
+  assert.equal(shellQuote('plain'), "'plain'");
+  assert.equal(shellQuote("it's"), "'it'\\''s'");
+  assert.equal(shellQuote('$(id) `id` ${x} \\'), "'$(id) `id` ${x} \\'");
+  // A newline would split one proposal into two command lines, and the second
+  // is a line the operator never read.
+  assert.equal(shellQuote('one\ntwo\rthree'), "'one two three'");
 });
 
 t('resolve takes an id from the sentence, else the selected item', () => {

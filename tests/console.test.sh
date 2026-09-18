@@ -920,3 +920,29 @@ test_console_no_router_asks_the_chat_model_directly() {
 test_console_router_slot_filling_is_proved() {
   node "$CEL_ROOT/tools/console/router.test.mjs"
 }
+
+# COMMAND SUBSTITUTION IN A MESSAGE. The `message` intent is the one place an
+# operator's own words reach the command line, and that line is handed to
+# `bash -c`. Inside DOUBLE quotes bash still runs `$(...)` and backticks, and
+# the guard's console branch allows every `cel ...` line without looking at
+# metacharacters - so `tell bundle-orch "hi $(touch /tmp/pwned)"` was a
+# proposal that ran `touch` the moment the operator pressed Enter. The text is
+# single-quoted now, and this test runs the router's own output through the
+# console's real execution path to prove it.
+test_console_router_message_text_cannot_run_a_command() {
+  _console_depth_setup
+  PATH="$T/bin:$PATH"
+  local marker="$T/pwned" cmd
+  cmd="$(node --input-type=module -e "
+    import { readFileSync } from 'node:fs';
+    import { facts, plan } from '$CEL_ROOT/tools/console/router.mjs';
+    const doc = JSON.parse(readFileSync('$T/fleet.json', 'utf8'));
+    process.stdout.write(plan('message', 'tell bundle-orch \"ping \$(touch $marker)\"', facts(doc, []))[0]);
+  ")"
+  assert_contains "$cmd" 'cel inbox send bundle-orch'
+  node "$CONSOLE_MJS" --run "$cmd" >/dev/null 2>&1 || true
+  [ ! -e "$marker" ] || { echo 'the message text ran a command'; return 1; }
+  # And the substitution is still there, as text, for whoever reads the mail.
+  assert_contains "$cmd" 'touch'
+  _console_teardown
+}
