@@ -987,3 +987,92 @@ test_console_quota_view_renders_one_row_per_account_and_window() {
   assert_contains "$out" 'out of credits'
   _console_teardown
 }
+# --- CEL-25: the console as a control panel ---------------------------------
+
+# The BOARD and the PRS are the two things an operator actually steers by, and
+# neither was on screen: the console showed the fleet's own state and nothing
+# about the work it exists to move. Both are stubbed here for the same reason
+# the rest of this file stubs `cel` - a suite that asked Linear and GitHub for
+# the truth would be a suite that fails when someone else merges something.
+_console_panel_setup() {
+  _console_depth_setup
+  mkdir -p "$T/cache" "$T/state"
+  export CEL_CACHE="$T/cache" CEL_CONSOLE_STATE_DIR="$T/state"
+
+  cat >"$T/bin/cel-linear" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CEL_LINEAR_CALLS"
+cat <<'JSON'
+{"identifier":"ABC-48","title":"the kerning is wrong","state":"Todo","assignee":"","updatedAt":"2026-09-20T09:00:00Z","url":"https://linear.invalid/ABC-48"}
+{"identifier":"ABC-49","title":"ship the gadget bundle","state":"In Progress","assignee":"Sam","updatedAt":"2026-09-20T10:00:00Z","url":"https://linear.invalid/ABC-49"}
+JSON
+EOF
+  chmod +x "$T/bin/cel-linear"
+  export CEL_LINEAR_BIN="$T/bin/cel-linear" CEL_LINEAR_CALLS="$T/linear.calls"
+  : >"$CEL_LINEAR_CALLS"
+
+  cat >"$T/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_CALLS"
+case "$*" in
+  *"--state merged"*)
+    cat <<'JSON'
+[{"number":11,"title":"the old one","headRefName":"ABC-40-old","mergedAt":"2026-09-20T11:47:00Z","updatedAt":"2026-09-20T11:47:00Z"}]
+JSON
+    ;;
+  *)
+    cat <<'JSON'
+[{"number":12,"title":"ship the gadget bundle","headRefName":"ABC-49-slug","isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"name":"gate","conclusion":"SUCCESS"}],"updatedAt":"2026-09-20T10:00:00Z"}]
+JSON
+    ;;
+esac
+EOF
+  chmod +x "$T/bin/gh"
+  export CEL_GH_BIN="$T/bin/gh" GH_CALLS="$T/gh.calls"
+  : >"$GH_CALLS"
+  # `gh pr list --repo widget` is a request for a repository that does not
+  # exist under whatever owner gh guesses, so the console needs owner/name. It
+  # reads that from the workspace; here - and on a box where the console
+  # stands outside every workspace - the map is handed to it directly.
+  export CEL_CONSOLE_REPO_SLUGS='{"widget":"acme/widget","gadget":"acme/gadget"}'
+  printf '2026-09-20T09:41:00Z' > "$T/state/alpha.root.console.cursor"
+}
+
+test_console_unit_view_shows_the_board_the_prs_and_the_digest() {
+  _console_panel_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --unit bundle)"
+  assert_contains "$out" 'BOARD'
+  assert_contains "$out" 'ABC-48'
+  assert_contains "$out" 'In Progress'
+  assert_contains "$out" 'ship the gadget bundle'
+  assert_contains "$out" 'PRS'
+  assert_contains "$out" '#12'
+  assert_contains "$out" 'review APPROVED'
+  assert_contains "$out" 'ci '
+  assert_contains "$out" 'since 09:41'
+  # ONE gh call per repo, not one per row: the refresh loop runs every ten
+  # seconds and a call per PR is a rate limit waiting to happen.
+  assert_eq "$(grep -c 'pr list' "$GH_CALLS")" 2
+  _console_teardown
+}
+
+# The timeline is the box's own history in one column: what the mailboxes,
+# the ledger and the PR caches saw, oldest first so the newest is where the
+# eye lands.
+test_console_timeline_merges_mail_delegations_and_prs() {
+  _console_panel_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once --timeline)"
+  assert_contains "$out" 'TIMELINE'
+  assert_contains "$out" 'first line'
+  assert_contains "$out" 'merged'
+  assert_contains "$out" '#11'
+  _console_teardown
+}
+
+# A key is a proposal, and a proposal that names the wrong workspace is the
+# same accident as a router that guesses one.
+test_console_verb_keys_are_proved() {
+  node "$CEL_ROOT/tools/console/verbs.test.mjs"
+}

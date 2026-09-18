@@ -35,6 +35,16 @@ export const INTENTS = [
   ['clean_inbox', 'clear out the mailbox - sweep what has piled up in a workspace'],
   ['try', 'run or preview one worker\u2019s work so it can be looked at'],
   ['quota', 'how much of the Claude or Codex subscription is left, and when a window resets'],
+  // CEL-25: the seven verbs. Each is an ACT on the box rather than a read of
+  // it, and the rubric says what the operator wants rather than what the
+  // command is - a classifier reads rubrics, not examples.
+  ['start_ticket', 'get work started on a named ticket - pick it up, begin it, put someone on it'],
+  ['answer', 'reply to a decision or question waiting on the operator, and close it'],
+  ['land', 'land, merge or ship a finished pull request or ticket'],
+  ['nudge', 'prompt a worker directly, right now - poke it, remind it, tell it to push'],
+  ['restart_orchestrator', 'start a product\u2019s orchestrator again after it has stopped'],
+  ['move_ticket', 'move a ticket to another state on the board'],
+  ['review', 'get a reviewer onto a pull request'],
   ['other', 'none of the above, or the sentence is not about the fleet at all'],
 ];
 
@@ -55,7 +65,21 @@ export const facts = (doc, items = []) => {
     for (const u of ws.units || []) {
       products.push({ name: u.name, workspace: ws.name });
       for (const w of u.workers_list || []) {
-        workers.push({ id: w.id, ticket: w.ticket || '', workspace: ws.name, product: u.name });
+        // The alias, the repo and the PR number ride along for CEL-25's
+        // verbs: `nudge` addresses a herdr pane and `land`/`review` need the
+        // repo a PR is in, and both are in the fleet document the console
+        // already holds. Looking them up a second time from a command would
+        // be the console asking the box what it was just told.
+        const prNum = (/\/pull\/(\d+)/.exec(String(w.pr || '')) || [])[1] || '';
+        workers.push({
+          id: w.id,
+          ticket: w.ticket || '',
+          workspace: ws.name,
+          product: u.name,
+          alias: w.alias || w.id,
+          repo: w.repo || '',
+          pr: prNum ? Number(prNum) : 0,
+        });
         if (w.ticket && !tickets.includes(w.ticket)) tickets.push(w.ticket);
       }
     }
@@ -64,7 +88,13 @@ export const facts = (doc, items = []) => {
   // know which mailbox that id is in, and the console already knows.
   const mailboxes = {};
   for (const it of items) if (it && it.id) mailboxes[it.id] = it.ws;
-  return { workspaces, products, workers, tickets_seen: tickets, open_items: items.length, mailboxes };
+  // The open items whole (id, sender, workspace) as well as the id → mailbox
+  // map: `answer` has to find the item a sentence is replying to, and "reply
+  // to bundle-orch" names the sender, not the id.
+  const open = items.map((it) => ({ id: it.id, ws: it.ws, from: it.from || '' }));
+  return {
+    workspaces, products, workers, tickets_seen: tickets, open_items: items.length, mailboxes, open,
+  };
 };
 
 const state = (sentence, f) => ({
@@ -103,6 +133,17 @@ const workerIn = (sentence, f) => {
   const m = TICKET.exec(sentence.toUpperCase());
   if (!m) return null;
   return f.workers.find((w) => String(w.ticket).toUpperCase() === m[0]) || null;
+};
+
+// The delegation behind a PR the sentence names - by its number (`land #12`)
+// or through its ticket (`merge ABC-49`). A worker with no PR is not a `land`
+// and not a `review`: both verbs are about a pull request that exists.
+const PR_NUMBER = /#(\d{1,6})\b/;
+const prWorkerIn = (sentence, f) => {
+  const m = PR_NUMBER.exec(sentence);
+  if (m) return f.workers.find((w) => w.pr === Number(m[1])) || null;
+  const w = workerIn(sentence, f);
+  return w && w.pr ? w : null;
 };
 
 // Who a sentence is addressed to: a worker, an orchestrator named outright,
@@ -245,6 +286,83 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
       const w = workerIn(s, f);
       if (!w) return null;
       return [`cel-fanout try ${w.id} --workspace ${w.workspace}`];
+    }
+
+    // --- CEL-25: the verbs ------------------------------------------------
+
+    case 'start_ticket': {
+      const m = TICKET.exec(s.toUpperCase());
+      if (!m) return null;
+      // A ticket with no product named goes to the only product on the box,
+      // and nowhere at all when there are two: "start ABC-49" on a box with
+      // three orchestrators is a sentence with a missing word, and guessing
+      // which one fills it is guessing whose queue grows.
+      const p = productIn(s, f) || (f.products.length === 1 ? f.products[0] : null);
+      if (!p) return null;
+      return [`cel inbox send ${p.name}-orch ${shellQuote(`pick up ${m[0]} next`)} --workspace ${p.workspace}`];
+    }
+
+    case 'answer': {
+      const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
+      const text = quoted ? (quoted[1] || quoted[2]).trim() : '';
+      if (!text) return null;
+      const byId = INBOX_ID.exec(s);
+      const open = f.open || [];
+      // The item by its id, then by its sender, then whatever the operator
+      // has highlighted. NO MATCHING OPEN ITEM IS A MISS: a reply to a
+      // question nobody asked is mail into a mailbox, and the resolve that
+      // follows it would close something else.
+      let item = byId ? open.find((o) => o.id === byId[0]) : null;
+      if (!item) item = open.find((o) => o.from && names(s, o.from));
+      if (!item && selected && selected.id) item = { id: selected.id, ws: selected.ws, from: selected.from };
+      if (!item || !item.from) return null;
+      return [
+        `cel inbox send ${item.from} ${shellQuote(text)} --workspace ${item.ws}`,
+        `cel inbox resolve ${item.id} --workspace ${item.ws}`,
+      ];
+    }
+
+    case 'land': {
+      const w = prWorkerIn(s, f);
+      if (!w) return null;
+      // `cel-fanout land`, on the DELEGATION. Merging the PR by hand leaves a
+      // worker holding a branch nobody will collect and a ledger row that
+      // never closes; land folds the verdict, the worktree and the row
+      // together, which is why the id and not the number is the argument.
+      return [`cel-fanout land ${w.id} --workspace ${w.workspace}`];
+    }
+
+    case 'nudge': {
+      const w = workerIn(s, f);
+      if (!w) return null;
+      const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
+      if (!quoted) return null;
+      return [`herdr agent prompt ${w.alias || w.id} ${shellQuote((quoted[1] || quoted[2]).trim())}`];
+    }
+
+    case 'restart_orchestrator': {
+      // No fall-back to the only product here, unlike `start_ticket`: a
+      // restart with no product named is "restart it", and "it" on a console
+      // showing six panels is not a product.
+      const p = productIn(s, f);
+      if (!p) return null;
+      return [`cel run orchestrator --product ${p.name} --workspace ${p.workspace}`];
+    }
+
+    case 'move_ticket': {
+      const m = TICKET.exec(s.toUpperCase());
+      const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
+      if (!m || !quoted) return null;
+      // Double quotes, because a Linear state is a name the operator read off
+      // the board rather than words they wrote: nothing here came from a
+      // keyboard freely, and `cel-linear state` is documented with them.
+      return [`cel-linear state ${m[0]} "${(quoted[1] || quoted[2]).trim().replace(/"/g, '')}"`];
+    }
+
+    case 'review': {
+      const w = prWorkerIn(s, f);
+      if (!w || !w.repo) return null;
+      return [`cel run reviewer --repo ${w.repo} --pr ${w.pr} --workspace ${w.workspace}`];
     }
 
     default:
