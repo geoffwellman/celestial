@@ -18,3 +18,12 @@
   `inbox.top_n` (3), then `and N more`. The model supplies only the level;
   counts, ages, ordering, the cut and the per-id cache are the code's, and
   below `triage.min_confidence` (0.6) a message keeps its kind's default rank.
+
+### Changed
+- The dashboard partitions box-level material out of a workspace's own: the
+  services panel lists this workspace's services, and anything tagged `box` -
+  plus the subscriptions, which are box-level in their entirety - moves to a
+  `Box` panel drawn on exactly one dashboard (`dash.box: true`, defaulting to
+  the registry's first workspace). Every other dashboard shows one line
+  naming that URL. One broker and one gateway rendered on four dashboards
+  read as several; there is still no box-wide dashboard.
