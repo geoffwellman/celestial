@@ -760,7 +760,7 @@ test_console_unit_legend_names_the_memory_sort() {
 _console_router_stub() { # <intent> <confidence> [probabilities-json] [status]
   cat >"$T/rstub.mjs" <<'EOF'
 import { createServer } from 'node:http';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync } from 'node:fs';
 const s = createServer((req, res) => {
   let b = '';
   req.on('data', (c) => { b += c; });
@@ -770,12 +770,17 @@ const s = createServer((req, res) => {
     const code = Number(process.env.RSTUB_STATUS || '200');
     if (code !== 200) { res.writeHead(code, { 'content-type': 'text/plain' }); res.end('nope'); return; }
     const probs = process.env.RSTUB_PROBS ? JSON.parse(process.env.RSTUB_PROBS) : undefined;
+    // CEL-41: one request carries every question, so the stub counts the
+    // requests it was sent - a second call is the regression this file is
+    // here to catch - and answers whatever extra questions a test wants.
+    appendFileSync(process.env.RSTUB_COUNT_FILE, 'req\n');
+    const extra = process.env.RSTUB_EXTRA ? JSON.parse(process.env.RSTUB_EXTRA) : {};
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ answers: { intent: {
       value: process.env.RSTUB_INTENT,
       confidence: Number(process.env.RSTUB_CONFIDENCE),
       probabilities: probs,
-    } } }));
+    }, ...extra } }));
   });
 });
 s.listen(0, '127.0.0.1', () => { writeFileSync(process.env.RSTUB_PORT_FILE, String(s.address().port)); });
@@ -783,7 +788,9 @@ EOF
   export RSTUB_BODY_FILE="$T/rbody.json" RSTUB_HEADERS_FILE="$T/rheaders.json"
   export RSTUB_PORT_FILE="$T/rport" RSTUB_INTENT="$1" RSTUB_CONFIDENCE="$2"
   export RSTUB_PROBS="${3:-}" RSTUB_STATUS="${4:-200}"
-  rm -f "$RSTUB_PORT_FILE" "$RSTUB_BODY_FILE"
+  export RSTUB_COUNT_FILE="$T/rcount" RSTUB_EXTRA="${RSTUB_EXTRA:-}"
+  rm -f "$RSTUB_PORT_FILE" "$RSTUB_BODY_FILE" "$RSTUB_COUNT_FILE"
+  : >"$RSTUB_COUNT_FILE"
   node "$T/rstub.mjs" >"$T/rstub.log" 2>&1 </dev/null & RSTUB_PID=$!
   local i=0
   while [ ! -s "$RSTUB_PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
@@ -1241,5 +1248,267 @@ test_console_box_line_is_silent_when_there_are_no_orphans() {
   local out
   out="$(node "$CONSOLE_MJS" --render-once)"
   case "$out" in *orphan*) echo 'the box line invented orphans'; return 1;; esac
+  _console_teardown
+}
+
+# --- CEL-41: the console answers instead of transcribing --------------------
+
+# MANY QUESTIONS COST NOTHING EXTRA. The decisions endpoint evaluates every
+# question in one request in parallel, so the router asks for the slots, the
+# danger and the answerability beside the intent rather than spending its one
+# call on a single label and filling the rest with regexes. The count file is
+# the assertion that matters: a second request is latency the operator pays.
+test_console_router_asks_every_question_in_one_request() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  _console_stub_server 'cel fleet'
+  _console_router_stub product_status 0.98
+  node "$CONSOLE_MJS" --ask 'what is happening with bundle' >/dev/null 2>&1
+  local body
+  body="$(cat "$T/rbody.json")"
+  assert_contains "$body" '"intent"'
+  assert_contains "$body" '"workspace"'
+  assert_contains "$body" '"product"'
+  assert_contains "$body" '"destructive"'
+  assert_contains "$body" '"answerable"'
+  assert_eq "$(wc -l <"$T/rcount" | tr -d ' ')" 1
+  _console_router_stop
+  _console_stub_stop
+  _console_teardown
+}
+
+# The bands, the slots and the danger switch, driven through `route()` itself
+# because they are decisions rather than printing: which band a confidence
+# lands in, whose answer fills a workspace slot, and the one probability that
+# overrides a confident intent.
+test_console_router_bands_and_slots_are_proved() {
+  _console_depth_setup
+  _console_router_config
+  export OPENROUTER_API_KEY=test-key
+  RSTUB_EXTRA='{"product":{"value":"bundle","confidence":0.9},"workspace":{"value":"alpha","confidence":0.9}}' \
+    _console_router_stub product_status 0.98
+  cat >"$T/bands.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const mod = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
+const DOC = JSON.parse(readFileSync(process.env.RDOC, 'utf8'));
+const ask = (sentence) => mod.route({ sentence, doc: DOC, items: [] });
+
+// A named product beats whatever the model answered for the slots: the
+// regexes read the operator's own words, the model only guesses at them.
+let r = await ask('what is happening with bundle');
+assert.equal(r.decision, 'run');
+assert.ok(r.cmds.join(' ').includes('--workspace alpha'), r.cmds.join(' '));
+
+// Nothing named: the model's own `product` answer fills the slot instead.
+r = await ask('how is that one going');
+assert.ok(r.cmds && r.cmds.join(' ').includes('--workspace alpha'), JSON.stringify(r.cmds));
+EOF
+  RDOC="$T/fleet.json" node "$T/bands.test.mjs" || { _console_router_stop; _console_teardown; return 1; }
+  _console_router_stop
+
+  # `unclear` is not a workspace. A model that cannot see one must not have
+  # its non-answer turned into somebody else's mailbox on a command line.
+  RSTUB_EXTRA='{"product":{"value":"unclear"},"workspace":{"value":"unclear"}}' \
+    _console_router_stub product_status 0.98
+  cat >"$T/unclear.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const mod = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
+const DOC = JSON.parse(readFileSync(process.env.RDOC, 'utf8'));
+const r = await mod.route({ sentence: 'how is that one going', doc: DOC, items: [] });
+assert.equal(r.cmds, null);
+// The non-answer may be reported as the hint it was; what it must never do is
+// reach a command line.
+assert.ok(!JSON.stringify(r.options.map((o) => o.cmd)).includes('unclear'));
+EOF
+  RDOC="$T/fleet.json" node "$T/unclear.test.mjs" || { _console_router_stop; _console_teardown; return 1; }
+  _console_router_stop
+
+  # DESTRUCTIVE OVERRIDES CONFIDENCE. Sure is not the same as safe: a sweep
+  # the model is 0.95 certain about still closes decisions nobody read.
+  RSTUB_EXTRA='{"destructive":{"probability":0.82}}' _console_router_stub clean_inbox 0.95
+  cat >"$T/danger.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const mod = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
+const DOC = JSON.parse(readFileSync(process.env.RDOC, 'utf8'));
+const r = await mod.route({ sentence: 'clear out the alpha mailbox', doc: DOC, items: [] });
+assert.equal(r.decision, 'propose');
+assert.ok(r.reason.includes('clean_inbox'), r.reason);
+EOF
+  RDOC="$T/fleet.json" node "$T/danger.test.mjs" || { _console_router_stop; _console_teardown; return 1; }
+  _console_router_stop
+
+  # The three bands: 0.8 runs, 0.6 proposes, 0.3 asks with the top two
+  # intents in the model's own probability order.
+  local pair
+  # The bands themselves, not the legacy floor: a config that still carries
+  # `min_confidence` is read as a run threshold, which is what the older tests
+  # above prove.
+  { printf 'console:\n  provider: openrouter\n  model: alpha/model-mini\n  key_env: OPENROUTER_API_KEY\n'
+    printf '  router:\n    provider: openrouter\n    model: alpha/decide-1\n'
+    printf '    key_env: OPENROUTER_API_KEY\n    run_confidence: 0.75\n    propose_confidence: 0.5\n'; } >"$T/config.yaml"
+  chmod 600 "$T/config.yaml"
+  for pair in '0.8 run' '0.6 propose' '0.3 ask'; do
+    # shellcheck disable=SC2086
+    set -- $pair
+    RSTUB_EXTRA='' _console_router_stub product_status "$1" '{"product_status":0.3,"fleet":0.28,"waiting":0.2}'
+    cat >"$T/band.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const mod = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
+const DOC = JSON.parse(readFileSync(process.env.RDOC, 'utf8'));
+const r = await mod.route({ sentence: 'what is happening with bundle', doc: DOC, items: [] });
+assert.equal(r.decision, process.env.WANT, `${r.decision} for ${process.env.WANT}`);
+if (r.decision === 'ask') {
+  assert.equal(r.options.length, 2);
+  assert.deepEqual(r.options.map((o) => o.intent), ['product_status', 'fleet']);
+  assert.ok(r.reason.includes('did you mean'), r.reason);
+}
+EOF
+    RDOC="$T/fleet.json" WANT="$2" node "$T/band.test.mjs" || { _console_router_stop; _console_teardown; return 1; }
+    _console_router_stop
+  done
+  _console_teardown
+}
+
+# THE MODEL PICKS THE ROWS; THE CONSOLE WRITES THE LINE. Twenty-two workers
+# is a wall of text that answers nothing. The choice question ranks the rows
+# in one call, and every number in the sentence underneath them is counted
+# here in code - jev cannot count and is not asked to (jaggedness #2, #3).
+test_console_triage_picks_rows_and_the_console_counts_them() {
+  T="$(mktemp -d)"
+  cat >"$T/triage.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const r = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
+const v = await import(`${process.env.CEL_ROOT}/tools/console/views.mjs`);
+
+// 22 rows: 3 that need somebody, 14 landed, 3 running, 2 released.
+const rows = [];
+const mk = (n, state, extra = {}) => ({ id: `ABC-${n}-slug`, ticket: `ABC-${n}`, repo: 'widget', state, quiet_secs: 60, ...extra });
+rows.push(mk(49, 'blocked', { verdict: 'stalled', quiet_secs: 2460 }));
+rows.push(mk(51, 'finished', { pr: 'https://example.invalid/widget/pull/61' }));
+rows.push(mk(53, 'blocked', { verdict: 'refused' }));
+for (let i = 0; i < 14; i += 1) rows.push(mk(100 + i, 'landed'));
+for (let i = 0; i < 3; i += 1) rows.push(mk(200 + i, 'running'));
+for (let i = 0; i < 2; i += 1) rows.push(mk(300 + i, 'released'));
+assert.equal(rows.length, 22);
+
+const probs = { 'ABC-49-slug': 0.9, 'ABC-51-slug': 0.5, 'ABC-53-slug': 0.4, 'ABC-100-slug': 0.02, none: 0.01 };
+const ids = r.pickRelevant(probs);
+assert.deepEqual(ids, ['ABC-49-slug', 'ABC-51-slug', 'ABC-53-slug']);
+
+const picked = ids.map((id) => rows.find((w) => w.id === id));
+const lines = v.triageView({ rows, picked });
+assert.equal(lines[0], '3 of 22 workers need you.');
+assert.equal(lines.length, 5);
+assert.ok(lines[1].includes('ABC-49'), lines[1]);
+assert.ok(lines[1].includes('41m'), lines[1]);
+// The summary line is COUNTED, every number of it: 19 others, and the tally
+// by state as the fleet JSON has them.
+const last = lines[lines.length - 1];
+assert.ok(last.includes('19 others'), last);
+assert.ok(last.includes('14 landed'), last);
+assert.ok(last.includes('3 running normally'), last);
+assert.ok(last.includes('2 released'), last);
+assert.ok(last.includes('`a` shows them all'), last);
+
+// The whole triage is a question ABOUT ROWS, one option per row plus `none`,
+// and it carries no prose from the model into the sentence path at all.
+const q = r.relevantQuestion('which workers need me', rows);
+assert.equal(q.type, 'choice');
+assert.equal(Object.keys(q.criteria).length, 23);
+assert.ok('none' in q.criteria);
+assert.equal(r.attentionQuestion(rows[0]).type, 'score');
+// The summary is skipped entirely at `console.rows_inline` rows or fewer:
+// the table is already readable and a sentence about it would be noise.
+assert.equal(r.ROWS_INLINE, 6);
+assert.equal(r.ATTENTION_LEVELS.length, 4);
+EOF
+  CEL_ROOT="$CEL_ROOT" node "$T/triage.test.mjs" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The console's own thresholds are config, defaulted in code and written down
+# where an operator will look for them.
+test_console_row_and_confidence_keys_are_documented() {
+  local docs
+  docs="$(cat "$CEL_ROOT/tools/console/vocabulary.md" "$CEL_ROOT/core/roles/console.md")"
+  assert_contains "$docs" 'rows_inline'
+  assert_contains "$docs" 'run_confidence'
+  assert_contains "$docs" 'propose_confidence'
+  assert_contains "$docs" 'summary_timeout'
+}
+
+# THE CHAT MODEL WRITES THE SENTENCE; IT DOES NOT WRITE A NUMBER (CEL-41 §5,
+# the owner: "I'm not suggesting we use jev for summarisation, we can use
+# deepseek for that"). Every digit in the prose must already be in the facts
+# object the console computed, because "7 of 40 workers need you" is a figure
+# an operator acts on and no style rule catches it.
+test_console_summary_prose_never_invents_a_number() {
+  _console_setup
+  _console_config
+  export OPENROUTER_API_KEY=test-key
+  cat >"$T/sum.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const t = await import(`${process.env.CEL_ROOT}/tools/console/translate.mjs`);
+const v = await import(`${process.env.CEL_ROOT}/tools/console/views.mjs`);
+const facts = { question: 'who needs me', need: 3, total: 22, rows: [], others: { count: 19, tally: [['landed', 14]] } };
+assert.deepEqual(v.unknownNumbers('3 of 22 workers need you; 19 others, 14 landed.', facts), []);
+assert.deepEqual(v.unknownNumbers('7 of 40 workers need you.', facts), ['7', '40']);
+const out = await t.summarise({ facts }).catch((e) => e);
+if (process.env.WANT === 'ok') assert.equal(out, '3 of 22 workers need you.');
+else {
+  assert.ok(out instanceof Error, `expected the guard to refuse, got ${out}`);
+  assert.ok(out.message.includes('invented a number'), out.message);
+}
+EOF
+  _console_stub_server '3 of 22 workers need you.'
+  WANT=ok node "$T/sum.test.mjs" || { _console_stub_stop; _console_teardown; return 1; }
+  _console_stub_stop
+  _console_stub_server '7 of 40 workers need you, roughly half the box.'
+  WANT=bad node "$T/sum.test.mjs" || { _console_stub_stop; _console_teardown; return 1; }
+  _console_stub_stop
+  _console_teardown
+}
+
+# A TUI MUST NOT HANG WAITING FOR PROSE. The counted lines are already a
+# correct answer, so a slow or unreachable chat model costs nothing: the
+# template is what was drawn in the first place and it simply stays.
+test_console_summary_falls_back_to_the_counted_template() {
+  _console_setup
+  _console_config 'summary_timeout: 0.1'
+  export OPENROUTER_API_KEY=test-key
+  cat >"$T/slow.test.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const t = await import(`${process.env.CEL_ROOT}/tools/console/translate.mjs`);
+const v = await import(`${process.env.CEL_ROOT}/tools/console/views.mjs`);
+assert.equal(t.summaryTimeout(process.env.CEL_CONSOLE_CONFIG), 100);
+const rows = Array.from({ length: 9 }, (_, i) => ({ id: `ABC-${i}-slug`, ticket: `ABC-${i}`, state: 'landed' }));
+const facts = v.triageFacts({ rows, picked: [rows[0]], question: 'who needs me' });
+const err = await t.summarise({ facts }).then(() => null, (e) => e);
+assert.ok(err, 'a model that never answers must not resolve');
+// The fallback is a complete answer on its own - that is the whole point.
+const lines = v.triageView(facts);
+assert.equal(lines[0], '1 of 9 workers need you.');
+assert.ok(lines[lines.length - 1].includes('8 others: 8 landed'), lines[lines.length - 1]);
+EOF
+  # A server that accepts the connection and never answers.
+  cat >"$T/hang.mjs" <<'EOF'
+import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+const s = createServer(() => {});
+s.listen(0, '127.0.0.1', () => writeFileSync(process.env.HANG_PORT, String(s.address().port)));
+EOF
+  export HANG_PORT="$T/hport"
+  node "$T/hang.mjs" >/dev/null 2>&1 </dev/null & local hpid=$!
+  local i=0
+  while [ ! -s "$HANG_PORT" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  CEL_CONSOLE_PROVIDER_URL="http://127.0.0.1:$(cat "$HANG_PORT")" node "$T/slow.test.mjs" \
+    || { kill "$hpid" 2>/dev/null || true; _console_teardown; return 1; }
+  kill "$hpid" 2>/dev/null || true
+  wait "$hpid" 2>/dev/null || true
   _console_teardown
 }

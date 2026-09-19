@@ -42,3 +42,18 @@
 | `cel quota [--json]` | "how much Claude/Codex have I got left", "when does the window reset" - the signed-in subscriptions above the API balances |
 | `cel-fanout reconcile --workspace <w>` | "clean up what's already merged on <w>" - lands the rows GitHub merged, names the ones closed unmerged, leaves reports alone |
 | `cel gateway status [--json]` | which subscriptions are signed in and usable, and how much of each window is left - "which accounts can we use", "is codex out" |
+
+<!-- CEL-41: which model does which job, and the console's own keys. -->
+
+| who answers | what it does |
+| --- | --- |
+| the decision model (`console.router`, jev) | picks ONE label - the intent, the workspace, the product - and which table rows matter and how urgent they are. It writes no text, counts nothing and compares no dates |
+| the console itself (code) | every command line, every number, every count, age and tally - computed from the fleet JSON it already holds |
+| the chat model (`console.model`, deepseek) | the prose: the answer written from what commands printed, the two-to-four-line summary of a triaged table, and every sentence the router could not place |
+
+Console config keys, all defaulted in code: `console.rows_inline` (6 - more
+rows than this and the console answers instead of transcribing),
+`console.router.run_confidence` (0.75), `console.router.propose_confidence`
+(0.5 - between the two the intent is named on the proposal, below it the
+console asks back), `console.summary_timeout` (4 s - past this the counted
+lines stand on their own).
