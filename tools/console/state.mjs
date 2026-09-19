@@ -29,6 +29,10 @@ export const CEL_BIN = process.env.CEL_BIN || 'cel';
 // shells out to exactly what an operator would type, and the tests point this
 // at a stub rather than at the live box.
 export const FANOUT_BIN = process.env.CEL_FANOUT_BIN || 'cel-fanout';
+// herdr is the pane manager; the console shells out to it for the roster and
+// - since CEL-36 - for the relay. An env override exists for the same reason
+// as the two above: the tests must never reach the live box's panes.
+export const HERDR_BIN = process.env.CEL_HERDR_BIN || 'herdr';
 const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
 
 export const run = (cmd, args, timeout = 20000) =>
@@ -36,6 +40,20 @@ export const run = (cmd, args, timeout = 20000) =>
     execFile(cmd, args, { timeout, maxBuffer: 8 * 1024 * 1024 }, (err, out, errOut) =>
       resolve({ ok: !err, out: String(out || ''), err: String(errOut || (err && err.message) || '') }));
   });
+
+// THE ROSTER: the names herdr knows, which is not the same set as the fleet
+// document's. A product renamed last month leaves its pane running under the
+// old alias, and an operator reading that name off the board should be able
+// to address it (CEL-36). Empty on any failure - a console with no roster
+// still resolves every name the fleet carries.
+export const roster = async () => {
+  const r = await run(HERDR_BIN, ['agent', 'list'], 10000);
+  if (!r.ok) return [];
+  try {
+    const doc = JSON.parse(r.out);
+    return ((doc.result && doc.result.agents) || []).map((a) => a.name).filter(Boolean);
+  } catch { return []; }
+};
 
 export const fleet = async () => {
   const r = await run(CEL_BIN, ['fleet', '--json']);

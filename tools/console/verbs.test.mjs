@@ -27,8 +27,17 @@ const ORCH = { ws: 'alpha', product: 'bundle', orch: '-' };
 t('every verb the ticket names has a row', () => {
   assert.deepEqual(
     VERBS.map((v) => v.name).sort(),
-    ['answer', 'land', 'move', 'nudge', 'restart', 'review', 'start'],
+    ['answer', 'land', 'move', 'nudge', 'restart', 'review', 'start', 'talk'],
   );
+});
+
+// CEL-36: `t` on a unit's orchestrator row opens the relay. It is not a
+// command the guard runs - the console's own word, taken before the
+// allowlist ever sees the line - so the proposal is deliberately not a `cel`
+// line, and Enter hands it to the console rather than to bash.
+t('t on the orchestrator row opens the relay to its pane', () => {
+  assert.deepEqual(verbFor('orch', 't', ORCH).cmds, ['talk bundle-orch']);
+  assert.equal(verbFor('orch', 't', { ws: 'alpha' }).cmds.length, 0);
 });
 
 t('s on a board ticket asks the orchestrator to pick it up', () => {

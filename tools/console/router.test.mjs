@@ -113,10 +113,14 @@ t('focus takes a product to its orchestrator and a worker to itself', () => {
 });
 
 t('message splits the addressee from the text, quoted or not', () => {
-  assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', F),
-    ["cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha"]);
-  assert.deepEqual(plan('message', 'tell bundle "stop and push what you have"', F),
-    ["cel inbox send bundle-orch 'stop and push what you have' --workspace alpha"]);
+  // bundle-orch's pane is LIVE in this document, so the plan is the mail AND
+  // the tap on the shoulder (CEL-36); the send is always the first line.
+  assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', F), [
+    "cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha",
+    "herdr agent prompt bundle-orch 'inbox: pick up ABC-49 next - run cel inbox read'",
+  ]);
+  assert.equal(plan('message', 'tell bundle "stop and push what you have"', F)[0],
+    "cel inbox send bundle-orch 'stop and push what you have' --workspace alpha");
   // An addressee and nothing to say is a miss: an empty message is noise in
   // someone's mailbox.
   assert.equal(plan('message', 'tell bundle-orch', F), null);
@@ -132,17 +136,18 @@ t('message splits the addressee from the text, quoted or not', () => {
 // looking at metacharacters, so nothing downstream catches it either.
 t('message text cannot break out of its argument', () => {
   const inj = plan('message', 'tell bundle-orch "hi $(rm -rf ~)"', F);
-  assert.deepEqual(inj, ["cel inbox send bundle-orch 'hi $(rm -rf ~)' --workspace alpha"]);
+  assert.equal(inj[0], "cel inbox send bundle-orch 'hi $(rm -rf ~)' --workspace alpha");
   // Single quotes make every one of these inert; a literal single quote in the
   // text closes and reopens rather than escaping, which is the only form bash
   // accepts inside a single-quoted string.
-  assert.deepEqual(plan('message', "tell bundle-orch \"don't `whoami`; rm -rf x | tee y\"", F),
-    ["cel inbox send bundle-orch 'don'\\''t `whoami`; rm -rf x | tee y' --workspace alpha"]);
+  assert.equal(plan('message', "tell bundle-orch \"don't `whoami`; rm -rf x | tee y\"", F)[0],
+    "cel inbox send bundle-orch 'don'\\''t `whoami`; rm -rf x | tee y' --workspace alpha");
   for (const cmd of [...inj, ...plan('message', 'tell bundle-orch "a && b; c"', F)]) {
     // Everything after the closing quote is the console's own text: no
-    // operator word may appear outside the quoted argument.
+    // operator word may appear outside the quoted argument. The prompt line
+    // ENDS on its quote, which is the same rule with nothing after it.
     const after = cmd.slice(cmd.lastIndexOf("'") + 1);
-    assert.equal(after, ' --workspace alpha');
+    assert.ok(after === ' --workspace alpha' || after === '', cmd);
   }
 });
 
