@@ -297,3 +297,64 @@ test_worker_role_forbids_landing() {
   local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/worker.md")"
   assert_contains "$out" "Land, release, collect or delegate"
 }
+
+# RELEASE DECLARATIONS. A repo says how it is released - which workflow file,
+# which dispatch input, what values that input accepts - because the four
+# products on a box release four different ways and the plane must not own any
+# of those semantics. A repo with no `release:` block is simply not releasable,
+# and saying so is the whole point: before this, `cel release` assumed every
+# repo was celestial and handed a 403 to anyone else.
+_ws_release_fixture() { # -> $tmp with a workspace declaring three shapes
+  local tmp; tmp="$(mktemp -d)"
+  cat >"$tmp/workspace.yaml" <<'EOS'
+name: alpha
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    release:
+      workflow: release.yml
+      input: version
+      accepts: semver
+      version_file: VERSION
+      changelog: changelog.d/
+      tag: "v{version}"
+  - name: gizmo
+    url: git@github.com:someone/gizmo.git
+    release:
+      workflow: release.yaml
+      input: bump
+      accepts: [major, minor, patch]
+  - name: plain
+    url: git@github.com:someone/plain.git
+EOS
+  printf '%s' "$tmp"
+}
+
+test_ws_repo_release_reads_every_declared_key() {
+  local tmp; tmp="$(_ws_release_fixture)"
+  assert_eq "$(ws_repo_release "$tmp" widget workflow)" "release.yml" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" widget input)" "version" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" widget accepts)" "semver" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" widget version_file)" "VERSION" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" widget tag)" "v{version}" || { rm -rf "$tmp"; return 1; }
+  # a list of accepted words comes back space separated, so `case` and `for`
+  # both work on it without the caller learning jq
+  assert_eq "$(ws_repo_release "$tmp" gizmo accepts)" "major minor patch" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" gizmo version_file)" "" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" plain workflow)" "" || { rm -rf "$tmp"; return 1; }
+  assert_eq "$(ws_repo_release "$tmp" nosuch workflow)" "" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+}
+
+test_ws_repo_releasable_needs_a_workflow() {
+  local tmp; tmp="$(_ws_release_fixture)"
+  ws_repo_releasable "$tmp" widget || { rm -rf "$tmp"; return 1; }
+  ws_repo_releasable "$tmp" gizmo || { rm -rf "$tmp"; return 1; }
+  assert_fails ws_repo_releasable "$tmp" plain || { rm -rf "$tmp"; return 1; }
+  assert_fails ws_repo_releasable "$tmp" nosuch || { rm -rf "$tmp"; return 1; }
+  # a block without a workflow names nothing to dispatch, so it is not a
+  # release declaration however much else it carries
+  printf '  - name: half\n    release:\n      input: version\n' >> "$tmp/workspace.yaml"
+  assert_fails ws_repo_releasable "$tmp" half || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+}

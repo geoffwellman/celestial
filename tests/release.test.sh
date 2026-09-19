@@ -34,37 +34,6 @@ _rel_changelog() { # <path>
 EOS
 }
 
-# A throwaway root standing in for the plane: VERSION and CHANGELOG of its
-# own, the real tools/ borrowed by symlink, and a `gh` stub first on PATH that
-# logs its argv. Never the live checkout - `cel release` talks to GitHub.
-_rel_fixture() { # -> T, ROOT, LOG; CEL_ROOT and PATH point at the fixture
-  T="$(mktemp -d)"
-  ROOT="$T/root"
-  LOG="$T/gh.log"
-  mkdir -p "$ROOT" "$T/bin"
-  : >"$LOG"
-  printf '0.2.0\n' >"$ROOT/VERSION"
-  _rel_changelog "$ROOT/CHANGELOG.md"
-  ln -s "$_REL_REPO/tools" "$ROOT/tools"
-  cat >"$T/bin/gh" <<EOS
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >>"$LOG"
-case "\$1 \$2" in
-  'workflow run') printf 'Created workflow_dispatch event\n' ;;
-  'run list') printf 'https://github.com/example/celestial/actions/runs/42\n' ;;
-  'pr list') printf '#12 release: v0.3.0 https://github.com/example/celestial/pull/12\n' ;;
-  'release list') printf 'v0.2.0\n' ;;
-esac
-EOS
-  chmod +x "$T/bin/gh"
-  export PATH="$T/bin:$PATH"
-  export CEL_ROOT="$ROOT"
-}
-_rel_cleanup() { CEL_ROOT="$_REL_REPO"; rm -rf "$T"; }
-# `die` exits the process it is called in, so every refusal is exercised in a
-# subshell - otherwise the first expected failure takes the test with it.
-_rel_try() { ( cmd_release "$@" ) >/dev/null 2>&1; }
-
 _notes() { python3 "$_REL_REPO/tools/release/notes.py" "$@"; }
 _cut() { python3 "$_REL_REPO/tools/release/cut.py" "$@"; }
 
@@ -132,43 +101,284 @@ test_release_cut_refuses_non_semver_and_not_greater_versions() {
   rm -rf "$T"
 }
 
-# --- cel release: the wrapper ------------------------------------------------
+# --- cel release <product> <value>: the plane cuts ANY product's release -----
 
-# A bad version caught locally costs nothing; caught in the action it costs a
-# run, a red check and an explanation.
-test_release_refuses_a_bad_version_without_calling_gh() {
-  _rel_fixture
-  assert_fails _rel_try 0.3 || { _rel_cleanup; return 1; }
-  assert_fails _rel_try 0.1.0 || { _rel_cleanup; return 1; }
-  assert_fails _rel_try 0.2.0 || { _rel_cleanup; return 1; }
-  assert_eq "$(cat "$LOG")" "" || { _rel_cleanup; return 1; }
-  _rel_cleanup
+# `cel release` used to mean "cut a version of celestial itself" - it
+# dispatched celestial's own release.yml in whatever repo the box's checkout
+# pointed at. Every local refusal passed for anyone who was not the owner and
+# then `gh workflow run` returned 403, so it failed at the last step looking
+# like it should have worked. The plane now reads a per-repo `release:` block,
+# checks the caller may dispatch BEFORE spending anything, and releasing the
+# plane itself is one ordinary instance of that.
+
+# A whole fixture workspace: six repos across three release shapes, real repo
+# directories for the version files, and a `gh` stub first on PATH that logs
+# every argv - the call log is what proves a refusal dispatched nothing.
+_prel_fixture() { # -> T, WS, LOG
+  T="$(mktemp -d)"
+  WS="$T/ws"
+  LOG="$T/gh.log"
+  mkdir -p "$WS/repos/widget/changelog.d" "$WS/repos/doodad" "$T/bin"
+  : >"$LOG"
+  cat >"$WS/workspace.yaml" <<'EOS'
+name: alpha
+kind: hustle
+org: someone
+products:
+  - name: bundle
+    repos: [widget, gizmo]
+  - name: gadget
+    repos: [doodad, plain]
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    release:
+      workflow: release.yml
+      input: version
+      accepts: semver
+      version_file: VERSION
+      changelog: changelog.d/
+      tag: "v{version}"
+  - name: gizmo
+    url: git@github.com:someone/gizmo.git
+    release:
+      workflow: release.yaml
+      input: bump
+      accepts: [major, minor, patch]
+      tag: "v{version}"
+  - name: doodad
+    url: git@github.com:someone/doodad.git
+    release:
+      workflow: release.yml
+      input: version
+      accepts: semver
+      version_file: VERSION
+  - name: plain
+    url: git@github.com:someone/plain.git
+  - name: orphan
+    url: git@github.com:someone/orphan.git
+  - name: solo
+    url: git@github.com:someone/solo.git
+    release:
+      workflow: release.yaml
+      input: bump
+      accepts: [major, minor, patch]
+EOS
+  printf '0.2.0\n' >"$WS/repos/widget/VERSION"
+  printf '0.2.0\n' >"$WS/repos/doodad/VERSION"
+  printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n### Added\n- gadget mode arrives\n' \
+    >"$WS/repos/widget/CHANGELOG.md"
+  printf '### Added\n- widget mode learns to hum\n' >"$WS/repos/widget/changelog.d/WG-1-hum.md"
+  _prel_gh_stub
+  export PATH="$T/bin:$PATH"
 }
 
-test_release_dispatches_the_workflow_with_the_version_input() {
-  _rel_fixture
-  local out; out="$(cmd_release 0.3.0 2>&1)" || { _rel_cleanup; return 1; }
-  assert_contains "$(cat "$LOG")" "workflow run release.yml -f version=0.3.0" || { _rel_cleanup; return 1; }
-  assert_contains "$out" "actions/runs/42" || { _rel_cleanup; return 1; }
-  _rel_cleanup
+# One workspace, one releasable repo: the shape `cel release 0.3.0` with no
+# product must keep working in, because that is the plane's own workspace.
+_prel_single_fixture() { # -> T, WS, LOG
+  _prel_fixture
+  python3 - "$WS/workspace.yaml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+head, repos = s.split("repos:\n", 1)
+head = head.replace("""products:
+  - name: bundle
+    repos: [widget, gizmo]
+  - name: gadget
+    repos: [doodad, plain]
+""", "")
+first = repos.split("  - name: gizmo")[0]
+open(p, "w").write(head + "repos:\n" + first)
+PY
 }
 
-test_release_dry_run_prints_the_section_and_touches_nothing() {
-  _rel_fixture
-  local out; out="$(cmd_release 0.3.0 --dry-run 2>&1)" || { _rel_cleanup; return 1; }
-  assert_contains "$out" "widget mode learns to hum" || { _rel_cleanup; return 1; }
-  assert_contains "$out" "hygiene" || { _rel_cleanup; return 1; }
-  assert_eq "$(cat "$LOG")" "" || { _rel_cleanup; return 1; }
-  assert_eq "$(cat "$ROOT/VERSION")" "0.2.0" || { _rel_cleanup; return 1; }
-  _rel_cleanup
+_prel_gh_stub() {
+  cat >"$T/bin/gh" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$LOG"
+a="\$*"
+case "\$1 \$2" in
+  'repo view')    printf '%s\n' "\${CEL_TEST_PERM:-WRITE}" ;;
+  'workflow run') printf 'Created workflow_dispatch event\n' ;;
+  'run watch')    printf 'run completed with success\n' ;;
+  'release list') printf 'v0.2.0 https://github.com/someone/thing/releases/tag/v0.2.0\n' ;;
+  'run list')
+    case "\$a" in
+      *in_progress*) printf 'https://github.com/someone/thing/actions/runs/99\n' ;;
+      *)             printf '42 https://github.com/someone/thing/actions/runs/42\n' ;;
+    esac ;;
+  *)
+    case "\$1:\$a" in
+      api:*compare*) printf '7\n' ;;
+      api:*tags*)    printf 'v0.2.0\n' ;;
+    esac ;;
+esac
+EOS
+  chmod +x "$T/bin/gh"
 }
 
-test_release_status_shows_the_open_pr_and_the_newest_tag() {
-  _rel_fixture
-  local out; out="$(cmd_release status 2>&1)" || { _rel_cleanup; return 1; }
-  assert_contains "$out" "#12 release: v0.3.0" || { _rel_cleanup; return 1; }
-  assert_contains "$out" "v0.2.0" || { _rel_cleanup; return 1; }
-  _rel_cleanup
+_prel_cleanup() { rm -rf "$T"; }
+# `die` exits the process it is called in, so every refusal runs in a subshell
+# - otherwise the first expected failure takes the test with it. The workspace
+# is found by walking up from $PWD, so each call runs from inside it.
+_prel() { ( cd "$WS" && cmd_release "$@" ) 2>&1; }
+_prel_try() { _prel "$@" >/dev/null 2>&1; }
+
+# --- resolution: which repo is "the product's release"? ----------------------
+
+test_release_resolves_the_one_releasable_repo_in_a_product() {
+  _prel_fixture
+  local out; out="$(_prel gadget 0.3.0)" || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "--repo someone/doodad" || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "-f version=0.3.0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+test_release_refuses_a_product_with_two_releasable_repos() {
+  _prel_fixture
+  local out rc=0; out="$(_prel bundle 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "widget" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "gizmo" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "--repo" || { _prel_cleanup; return 1; }
+  assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
+  # and naming one of them settles it
+  _prel bundle 0.3.0 --repo widget >/dev/null || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "--repo someone/widget" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+test_release_refuses_a_product_that_declares_no_release_block() {
+  _prel_fixture
+  local out rc=0; out="$(_prel orphan 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "orphan declares no release: block" || { _prel_cleanup; return 1; }
+  assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# A repo named in no declared product is its own product, in place.
+test_release_accepts_an_implicit_product() {
+  _prel_fixture
+  _prel solo patch >/dev/null || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "workflow run release.yaml --repo someone/solo -f bump=patch" \
+    || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- the value: the repo's own vocabulary, not the plane's -------------------
+
+test_release_checks_the_value_against_accepts() {
+  _prel_fixture
+  # a bump repo takes a listed word and nothing else
+  _prel solo minor >/dev/null || { _prel_cleanup; return 1; }
+  assert_fails _prel_try solo 0.3.0 || { _prel_cleanup; return 1; }
+  # a semver repo takes x.y.z, greater than what version_file says
+  assert_fails _prel_try gadget patch || { _prel_cleanup; return 1; }
+  assert_fails _prel_try gadget 1.0 || { _prel_cleanup; return 1; }
+  assert_fails _prel_try gadget 0.2.0 || { _prel_cleanup; return 1; }
+  assert_fails _prel_try gadget 0.1.0 || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "-f bump=minor" || { _prel_cleanup; return 1; }
+  assert_eq "$(grep -c 'version=' "$LOG" || true)" "0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- permission: the refusal this whole ticket exists for --------------------
+
+# Every local check passed and then GitHub returned 403. A caller who cannot
+# dispatch is told so BEFORE anything is spent, and told where releases of
+# that product actually come from.
+test_release_refuses_a_caller_who_only_has_read() {
+  _prel_fixture
+  local out rc=0
+  out="$(CEL_TEST_PERM=READ _prel gadget 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "you have READ on someone/doodad" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "cel update" || { _prel_cleanup; return 1; }
+  # the call log is the proof: permission was read, nothing was dispatched
+  assert_contains "$(cat "$LOG")" "repo view someone/doodad" || { _prel_cleanup; return 1; }
+  assert_eq "$(grep -c 'workflow run' "$LOG" || true)" "0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+test_release_dispatches_for_write_maintain_and_admin() {
+  _prel_fixture
+  local p
+  for p in WRITE MAINTAIN ADMIN; do
+    : >"$LOG"
+    CEL_TEST_PERM="$p" _prel gadget 0.3.0 >/dev/null || { _prel_cleanup; return 1; }
+    assert_contains "$(cat "$LOG")" "workflow run release.yml --repo someone/doodad -f version=0.3.0" \
+      || { _prel_cleanup; return 1; }
+  done
+  _prel_cleanup
+}
+
+# --- --dry-run ---------------------------------------------------------------
+
+test_release_dry_run_prints_the_plan_and_dispatches_nothing() {
+  _prel_fixture
+  local out; out="$(_prel bundle 0.3.0 --repo widget --dry-run)" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "someone/widget" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "release.yml" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "version=0.3.0" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "hygiene" || { _prel_cleanup; return 1; }
+  # a repo that declares a changelog shows what would ship, fragments and all
+  assert_contains "$out" "widget mode learns to hum" || { _prel_cleanup; return 1; }
+  assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
+  assert_eq "$(cat "$WS/repos/widget/VERSION")" "0.2.0" || { _prel_cleanup; return 1; }
+  assert_eq "$(ls "$WS/repos/widget/changelog.d")" "WG-1-hum.md" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- status ------------------------------------------------------------------
+
+test_release_status_renders_one_product_and_a_whole_workspace() {
+  _prel_fixture
+  local out; out="$(_prel status gadget)" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "doodad" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "0.2.0" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "7" || { _prel_cleanup; return 1; }
+  case "$out" in *widget*) _prel_cleanup; printf 'a product listed another product\n' >&2; return 1;; esac
+
+  out="$(_prel status)" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "widget" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "gizmo" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "solo" || { _prel_cleanup; return 1; }
+  # a repo with no release block has no release state to show
+  case "$out" in *orphan*) _prel_cleanup; printf 'listed a repo that is not releasable\n' >&2; return 1;; esac
+  _prel_cleanup
+}
+
+test_release_status_json_carries_the_same_facts() {
+  _prel_fixture
+  local out; out="$(_prel status gadget --json)" || { _prel_cleanup; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.[0].repo')" "doodad" || { _prel_cleanup; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.[0].slug')" "someone/doodad" || { _prel_cleanup; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.[0].current')" "0.2.0" || { _prel_cleanup; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.[0].commits_since')" "7" || { _prel_cleanup; return 1; }
+  assert_contains "$(printf '%s' "$out" | jq -r '.[0].in_flight')" "runs/99" || { _prel_cleanup; return 1; }
+  assert_contains "$(printf '%s' "$out" | jq -r '.[0].newest')" "v0.2.0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- compatibility: the plane's own `cel release 0.3.0` ----------------------
+
+test_release_bare_version_works_where_one_repo_is_releasable() {
+  _prel_single_fixture
+  _prel 0.3.0 >/dev/null || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "workflow run release.yml --repo someone/widget -f version=0.3.0" \
+    || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+test_release_bare_version_refuses_where_several_repos_are_releasable() {
+  _prel_fixture
+  local out rc=0; out="$(_prel 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
+  assert_contains "$out" "cel release <product>" || { _prel_cleanup; return 1; }
+  assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
+  _prel_cleanup
 }
 
 # --- the box hears about it --------------------------------------------------
