@@ -1524,3 +1524,30 @@ test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
   assert_contains "$(cat "$v")" 'cel ws reset <w>'
   assert_contains "$(cat "$v")" 'PANES, never worktrees'
 }
+
+# --- CEL-43: the digest ranks what is left ----------------------------------
+# Root's mailbox is where everything shouts at once, and the console drew it
+# newest-first: a status line from a minute ago sat above an escalation from
+# yesterday saying a reviewer pane had died. The levels come from the model
+# through lib/triage.sh's cache - the console never scores anything itself,
+# it reads the cache and does the ordering and the cut in code.
+test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
+  _console_panel_setup
+  printf '%s\n' \
+    '{"id":"r1","ts":"2026-09-20T10:00:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"nothing to do"}' \
+    '{"id":"r2","ts":"2026-09-20T10:01:00+00:00","kind":"escalation","from":"bundle-orch","to":"root","message":"the reviewer pane is dead"}' \
+    '{"id":"r3","ts":"2026-09-20T10:02:00+00:00","kind":"decision","from":"bundle-orch","to":"root","message":"ship the bundle or hold"}' \
+    '{"id":"r4","ts":"2026-09-20T10:03:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"ABC-9 gate is green"}' \
+    '{"id":"r5","ts":"2026-09-20T10:04:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"also nothing to do"}' \
+    >>"$T/inbox/alpha.jsonl"
+  printf '%s\n' 'r1\t0' 'r2\t3' 'r3\t2' 'r4\t1' 'r5\t0' | sed 's/\\t/\t/' >"$T/triage.cache"
+  export CEL_TRIAGE_CACHE="$T/triage.cache"
+  local out; out="$(node "$CONSOLE_MJS" --render-once --unit bundle)"
+  assert_contains "$out" 'the reviewer pane is dead'
+  assert_contains "$out" 'ship the bundle or hold'
+  assert_contains "$out" 'and 2 more'
+  # the top line is the escalation, not the newest message
+  assert_contains "${out#*MAIL}" 'the reviewer pane is dead'
+  case "${out%%and 2 more*}" in *'also nothing to do'*) echo 'drew past the cut'; return 1;; esac
+  _console_teardown
+}
