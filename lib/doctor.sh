@@ -27,6 +27,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
 # shellcheck source=lib/services.sh
 . "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # _svc_box, for the box services line
+# shellcheck source=lib/wslife.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"   # wslife_doctor_lines, for the nameless agent
 
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
@@ -432,6 +434,15 @@ cmd_doctor() {
   # the line names it rather than describing the problem.
   local orphline; orphline="$(orphans_doctor_line)"
   [ -z "$orphline" ] || c_warn "$orphline"
+
+  # A LIVE AGENT WITH NO HERDR NAME. Not a failure - the agent is working -
+  # but it is invisible to everything that resolves an orchestrator by its
+  # alias, so `cel fleet` reads its product as dead and the next act is a
+  # second orchestrator on top of it. One line, and the cure is in it.
+  local wsline
+  while IFS= read -r wsline; do
+    [ -z "$wsline" ] || c_warn "$wsline"
+  done < <(wslife_doctor_lines 2>/dev/null || true)
 
   echo
   [ "$fail" = 0 ] && printf '\033[32mdoctor: OK\033[0m\n' || printf '\033[31mdoctor: problems found\033[0m\n'

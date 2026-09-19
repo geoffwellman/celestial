@@ -77,6 +77,17 @@ cel - the celestial plane
   cel ws list                   registered workspaces
   cel ws push <name>            create the workspace repo on GitHub and push
   cel ws env [name]             print workspace env exports; eval after a cd
+  cel ws up <name> [--dry-run]  put a workspace back to its declared shape:
+                                the herdr workspace, the panes it declares and
+                                an orchestrator for every product that wants
+                                one - and RENAME a live agent herdr has lost
+                                the name of. Idempotent; never destructive
+  cel ws down <name> [--force]  stop the agents it owns and close its panes;
+                                refuses over work that is neither pushed nor
+                                landed. PANES, never worktrees - letting work
+                                go is `cel-fanout release`
+  cel ws reset <name>           down, then up, with the same refusals
+  cel ws status [name] [--json] declared versus live, per member
   cel console                   the plane's own interface: fleet, decisions,
                                 inbox and a command line that also takes a
                                 sentence (--render-once to print it and exit)

@@ -51,6 +51,13 @@ export const VERBS = [
   // word for "wire my command line to that pane", and submitValue takes it
   // before the allowlist is ever asked. It is here rather than hard-coded in
   // the key map so the legend and the help table list it with the rest.
+  // CEL-44. `u` reconciles the whole workspace this unit lives in - the panes
+  // it declares, the orchestrators it wants, and the rename of any live agent
+  // herdr has lost the name of. The reset key is SHIFTED because it stops
+  // things first; `R` stays the single-orchestrator restart it has always
+  // been, which is the finer instrument of the two.
+  { name: 'up', panel: 'orch', key: 'u', what: 'put this workspace back to its declared shape (idempotent)' },
+  { name: 'reset', panel: 'orch', key: 'U', what: 'close this workspace down and open it again - stops agents' },
   { name: 'talk', panel: 'orch', key: 't', what: 'relay the command line to this orchestrator\u2019s pane until Esc' },
 ];
 
@@ -124,6 +131,14 @@ export const verbFor = (panel, key, sel) => {
         return refuse(`${sel.product}-orch is already live - focus it instead`);
       }
       return proposal([`cel run orchestrator --product ${sel.product} --workspace ${sel.ws}`], { cursor: -1 });
+
+    case 'up':
+      if (!sel.ws) return refuse('no workspace here');
+      return proposal([`cel ws up ${sel.ws}`], { cursor: -1 });
+
+    case 'reset':
+      if (!sel.ws) return refuse('no workspace here');
+      return proposal([`cel ws reset ${sel.ws}`], { cursor: -1 });
 
     case 'talk':
       if (!sel.product) return refuse('no orchestrator here to talk to');
