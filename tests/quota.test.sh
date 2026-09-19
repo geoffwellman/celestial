@@ -41,9 +41,16 @@ _quota_teardown() { rm -rf "$T"; }
 # One stub for both providers. It answers by PATH, counts the hits per path so
 # the cache can be proved, and records the headers so the Claude beta header
 # and the Codex account header are asserted rather than assumed.
-_quota_stub_server() { # <claude-json> <codex-json>
+#
+# A THIRD BODY, PICKED BY BEARER. CEL-35 turns on whether two Claude logins
+# read the same windows or different ones, and the only thing that tells the
+# two reads apart is the token they present - so the stub answers the
+# claude-code token from its own file when one is given.
+_quota_stub_server() { # <claude-json> <codex-json> [claude-code-json]
   printf '%s' "$1" > "$T/claude.json"
   printf '%s' "$2" > "$T/codex.json"
+  printf '%s' "${3:-$1}" > "$T/claude-cc.json"
+  export STUB_CC_TOKEN="$CC_TOKEN"
   cat >"$T/stub.mjs" <<'EOF'
 import { createServer } from 'node:http';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
@@ -51,7 +58,10 @@ const dir = process.env.STUB_DIR;
 const s = createServer((req, res) => {
   appendFileSync(`${dir}/hits`, `${req.url}\n`);
   appendFileSync(`${dir}/headers`, `${JSON.stringify(req.headers)}\n`);
-  const file = req.url.includes('codex') ? 'codex.json' : 'claude.json';
+  const auth = String(req.headers.authorization || '');
+  const file = req.url.includes('codex') ? 'codex.json'
+    : auth.includes(process.env.STUB_CC_TOKEN || '\u0000') ? 'claude-cc.json'
+    : 'claude.json';
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(readFileSync(`${dir}/${file}`, 'utf8'));
 });
@@ -109,6 +119,7 @@ _codex_body() { # [primary-pct] [secondary-pct]
 
 test_subscription_list_finds_both_providers_and_prints_no_token() {
   _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
   . "$CEL_ROOT/lib/quota.sh"
   local out; out="$(subscription_list)"
   assert_contains "$out" claude
@@ -116,16 +127,89 @@ test_subscription_list_finds_both_providers_and_prints_no_token() {
   assert_contains "$out" "$CX_ACCOUNT"
   case "$out" in *"$PI_TOKEN"*|*"$CC_TOKEN"*|*"$CX_TOKEN"*)
     printf 'subscription_list printed a token:\n%s\n' "$out" >&2; return 1;; esac
-  # two distinct Claude tokens are two accounts, plus codex
-  assert_eq "$(printf '%s\n' "$out" | grep -c .)" 3
+  _quota_stub_stop
   _quota_teardown
 }
 
-test_subscription_list_folds_one_claude_account_when_the_tokens_match() {
-  _quota_setup --same-claude-token
+# --- CEL-35: an account is WHERE it is signed in --------------------------
+#
+# The owner, 2026-09-19: "somehow we are showing 4 claude subscriptions? there
+# are only 3 I've signed into". CEL-27 named a Claude account by the first six
+# hex of its token's sha256, and pi refreshes that token: every refresh minted
+# a new account, a new cache file and a new row on every surface. The identity
+# is now the credential's HOME - pi, claude-code, the codex account id - so a
+# refresh overwrites one file and the row count is the login count.
+test_a_rotated_pi_token_leaves_one_row_and_one_cache_file() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  . "$CEL_ROOT/lib/quota.sh"
+  # the five stale files this box woke up with, as one of them
+  mkdir -p "$CEL_CACHE"
+  printf '%s' '{"provider":"claude","account":"abc123","windows":[],"extra":{}}' \
+    > "$CEL_CACHE/subscription-claude-abc123.json"
+
+  subscription_list >/dev/null
+  # pi refreshes its OAuth token between the two reads, as it does all day
+  jq -nc --arg t "${PI_TOKEN}-rotated" '{anthropic: {access: $t, refresh: "r"}}' \
+    > "$HOME/.pi/agent/auth.json"
+  rm -f "$CEL_CACHE"/subscription-claude-pi.json
+  local out; out="$(subscription_list)"
+
+  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 1
+  [ -f "$CEL_CACHE/subscription-claude-pi.json" ] || {
+    printf 'the cache is not keyed by identity: %s\n' "$(ls "$CEL_CACHE")" >&2; return 1; }
+  [ -f "$CEL_CACHE/subscription-claude-abc123.json" ] && {
+    printf 'the stale token-hashed cache file survived\n' >&2; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 1
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# pi and Claude Code hold two copies of one subscription. Same windows, one
+# row - two rows double every number on the display and halve nobody's trust
+# in it. Different windows are two subscriptions, and stay two rows.
+test_pi_and_claude_code_fold_into_one_row_when_the_windows_match() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
   . "$CEL_ROOT/lib/quota.sh"
   local out; out="$(subscription_list)"
-  assert_eq "$(printf '%s\n' "$out" | grep -c '^claude')" 1
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 1
+  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.provider == "claude") | .label')" 'pi + claude-code'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_two_claude_logins_with_different_windows_stay_two_rows() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)" "$(_claude_body 71.0 22.0)"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 2
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude") | .account] | sort | join(",")')" 'claude-code,pi'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# AN UNREADABLE ACCOUNT IS A ROW, NOT A SILENCE. Codex answers nothing on this
+# box, so CEL-27 cached nothing, so `cel fleet` listed nothing, so the console
+# showed Claude alone while the dashboard showed everything. A row that says
+# why is the only version of this an operator can act on.
+test_codex_unreadable_is_still_a_row_with_its_reason() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  # a port nobody is listening on: the read fails the way the live one does
+  export CEL_SUB_CODEX_URL="http://127.0.0.1:1/backend-api/wham/usage"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.provider == "codex")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 0
+  [ -n "$(printf '%s' "$row" | jq -r '.extra.reason')" ] || {
+    printf 'an unreadable row with no reason is a row nobody can act on\n' >&2; return 1; }
+  [ -f "$CEL_CACHE/subscription-codex-$CX_ACCOUNT.json" ] || {
+    printf 'the unreadable row was not cached, so the fleet path cannot see it\n' >&2; return 1; }
+  assert_contains "$(cmd_quota 2>/dev/null)" 'unreadable'
+  _quota_stub_stop
   _quota_teardown
 }
 
@@ -133,7 +217,7 @@ test_subscription_usage_parses_the_claude_shape() {
   _quota_setup
   _quota_stub_server "$(_claude_body)" "$(_codex_body)"
   . "$CEL_ROOT/lib/quota.sh"
-  local out; out="$(subscription_usage claude "$PI_TOKEN")"
+  local out; out="$(subscription_usage claude "$PI_TOKEN" pi)"
   assert_eq "$(printf '%s' "$out" | jq -r '.provider')" claude
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "5h") | .used_pct == 16')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "7d") | .used_pct == 41')" true
@@ -163,10 +247,10 @@ test_subscription_usage_caches_so_two_calls_ask_once() {
   _quota_setup
   _quota_stub_server "$(_claude_body)" "$(_codex_body)"
   . "$CEL_ROOT/lib/quota.sh"
-  subscription_usage claude "$PI_TOKEN" >/dev/null
-  subscription_usage claude "$PI_TOKEN" >/dev/null
+  subscription_usage claude "$PI_TOKEN" pi >/dev/null
+  subscription_usage claude "$PI_TOKEN" pi >/dev/null
   assert_eq "$(grep -c . "$T/hits")" 1
-  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 1
+  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-pi.json')" 1
   _quota_stub_stop
   _quota_teardown
 }
@@ -181,7 +265,7 @@ test_subscription_cache_is_readable_only_by_its_owner() {
   . "$CEL_ROOT/lib/quota.sh"
   # a permissive umask is the case this exists for
   ( umask 022
-    subscription_usage claude "$PI_TOKEN" >/dev/null )
+    subscription_usage claude "$PI_TOKEN" pi >/dev/null )
   local f; f="$(ls "$CEL_CACHE"/subscription-claude-*.json | head -n1)"
   assert_eq "$(stat -c %a "$f")" 600
   assert_eq "$(stat -c %a "$CEL_CACHE")" 700
@@ -232,6 +316,83 @@ test_cmd_quota_json_carries_subscriptions() {
   local out; out="$(cmd_quota --json 2>/dev/null)"
   assert_eq "$(printf '%s' "$out" | jq -r '.subscriptions | length >= 2')" true
   assert_eq "$(printf '%s' "$out" | jq -r '[.subscriptions[].provider] | sort | unique | join(",")')" 'claude,codex'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# --- CEL-35: the gateway's accounts are subscriptions too -------------------
+#
+# CEL-28 put them behind `cel gateway status` alone, so the dashboard (which
+# called it) showed them and the console (which reads the fleet document) did
+# not. One list, or two surfaces answer the same question differently.
+_quota_gateway_stub() { # [--down]
+  mkdir -p "$T/bin"
+  export CEL_CONFIG_FILE="$T/config.yaml"
+  printf 'gateway:\n  gateway_port: 47411\n  broker_port: 47311\n' > "$CEL_CONFIG_FILE"
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "auth-broker token"|"auth-gateway token") printf 'gw-fixture-token\n' ;;
+  "auth-gateway status") printf '%s\n' '{"ready":true,"reason":null,"credentialCount":2}' ;;
+  "auth-gateway check") cat <<'JSON'
+{"credentials":[
+ {"id":1,"provider":"openai-codex","type":"oauth","ok":true,
+  "accountId":"aaaaaaaa-1111-2222-3333-444444444444",
+  "report":{"limits":[{"label":"7 days","window":{"id":"7d","resetsAt":1789994511000},
+    "amount":{"used":12,"limit":100,"usedFraction":0.12},"status":"ok"}]}}]}
+JSON
+  ;;
+esac
+EOF
+  chmod +x "$T/bin/omp"
+  PATH="$T/bin:$PATH"
+  cat >"$T/gwstub" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in ready) exit "${GW_STUB_DOWN:-0}" ;; esac
+EOF
+  chmod +x "$T/gwstub"
+  export CEL_GATEWAY_STUB="$T/gwstub"
+  [ "${1:-}" = --down ] && export GW_STUB_DOWN=1
+  return 0
+}
+
+test_gateway_accounts_join_the_subscription_list() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _quota_gateway_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.source == "gateway")')"
+  [ -n "$row" ] || { printf 'no gateway row in the subscription list\n' >&2; return 1; }
+  assert_eq "$(printf '%s' "$row" | jq -r '.provider')" openai-codex
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows[0].used_pct')" 12
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_a_gateway_that_is_down_adds_no_rows_and_no_error() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _quota_gateway_stub --down
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.source == "gateway")] | length')" 0
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length >= 1')" true
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The fleet path never asks a provider: it reads the cache and folds exactly
+# as the live path does, or the console and `cel quota` disagree about how
+# many subscriptions this box has - which is the bug this ticket exists for.
+test_the_cached_list_is_the_same_list_as_the_live_one() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  . "$CEL_ROOT/lib/quota.sh"
+  local live cached
+  live="$(subscription_list | jq -S .)"
+  cached="$(subscription_list --cached | jq -S .)"
+  assert_eq "$cached" "$live"
   _quota_stub_stop
   _quota_teardown
 }
