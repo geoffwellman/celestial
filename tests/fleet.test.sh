@@ -412,3 +412,25 @@ test_fleet_json_carries_an_empty_subscription_list_when_nothing_is_cached() {
   assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions | length')" 0
   _fleet_teardown
 }
+
+# CEL-35: the fleet field is not a directory listing, it is the subscription
+# list read from the cache. Two copies of one Claude login (pi's and Claude
+# Code's) with the same windows are one subscription here exactly as they are
+# in `cel quota`, or the console and the dashboard count this box's logins
+# differently - which is how five rows appeared for two accounts.
+test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache35"
+  mkdir -p "$CEL_CACHE"
+  local w='[{"name":"5h","used_pct":16,"resets_at":"2026-09-18T09:00:00Z"}]'
+  jq -nc --argjson w "$w" '{provider: "claude", account: "pi", label: "pi", source: "direct",
+                            windows: $w, extra: {state: "enabled", reason: ""}}' \
+    > "$CEL_CACHE/subscription-claude-pi.json"
+  jq -nc --argjson w "$w" '{provider: "claude", account: "claude-code", label: "claude-code",
+                            source: "direct", windows: $w, extra: {state: "enabled", reason: ""}}' \
+    > "$CEL_CACHE/subscription-claude-claude-code.json"
+  local doc; doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions | length')" 1
+  assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions[0].label')" 'pi + claude-code'
+  _fleet_teardown
+}

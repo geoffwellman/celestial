@@ -574,7 +574,6 @@ export const renderOutput = (cmd, text) => {
     return [...head, ...keyValue(Object.fromEntries(rest))].join('\n');
   }
   if (/^cel\s+fleet\b/.test(c) && parsed.kind === 'doc') return fleetTable(parsed.value).join('\n');
-  if (/^cel\s+gateway\s+status\b/.test(c) && parsed.kind === 'doc') return quotaView({ gateway: parsed.value }).join('\n');
   if (/^cel-fanout\s+status\b/.test(c)) {
     const rows = parsed.kind === 'rows' ? parsed.value : [parsed.value];
     return workerTable(rows).join('\n');
@@ -653,67 +652,64 @@ export const resetHuman = (iso) => {
   return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][at.getDay()]} ${hhmm}`;
 };
 
-// The QUOTA view: one row per account and window, the API balances beneath.
-// NEVER raw JSON, and never a token - the fleet document does not carry one,
-// and this is the screen where somebody would paste a screenshot.
+// THE CELLS A SUBSCRIPTION ROW BECOMES, and the whole of CEL-35's "one
+// renderer's data, two views". The console pads them into columns and the
+// dashboard puts them in a table, but the strings are built here (and by the
+// marked copy in tools/dash/server.mjs, which the suite compares against this
+// one): the console and the dashboard disagreeing about how many
+// subscriptions this box has is the bug this function exists to prevent.
+//
+// One array per line: [provider, label, window, reset]. The provider and the
+// label are named once per account, because a column that repeats the same
+// string is a column the eye stops reading.
+export const subCells = (s) => {
+  const provider = String((s && s.provider) || '');
+  const label = String((s && (s.label || s.account)) || '');
+  const windows = ((s && s.windows) || []).filter((w) => w && w.used_pct !== null && w.used_pct !== undefined);
+  if (!windows.length) {
+    const reason = (s && s.extra && s.extra.reason) || 'not signed in here, or the endpoint is down';
+    return [[provider, label, `unreadable: ${reason}`, '']];
+  }
+  const rows = windows.map((w, i) => [
+    i === 0 ? provider : '',
+    i === 0 ? label : '',
+    `${w.name} ${Math.round(Number(w.used_pct) || 0)}%`,
+    resetHuman(w.resets_at) ? `resets ${resetHuman(w.resets_at)}` : '',
+  ]);
+  if (s && s.extra && s.extra.state === 'disabled') {
+    rows.push(['', '', `extra: ${String(s.extra.reason || 'disabled').replace(/_/g, ' ')}`, '']);
+  }
+  return rows;
+};
+
+// The QUOTA view: one row per account and window, direct accounts first and
+// the gateway's under their own heading. NEVER raw JSON, and never a token -
+// the fleet document does not carry one, and this is the screen where somebody
+// would paste a screenshot.
+//
+// CEL-35 removed the `cel gateway status` detour this view used to take for
+// the second half of its rows. The gateway's accounts arrive in the fleet
+// document with everything else now, and a view that runs its own command is
+// a view that can disagree with the list it is drawn beside.
 export const quotaView = (doc) => {
   const out = ['SUBSCRIPTIONS'];
   const subs = (doc && doc.subscriptions) || [];
   if (!subs.length) {
     out.push('  no signed-in subscriptions - cel quota asks the providers directly');
-  }
-  for (const s of subs) {
-    const windows = (s.windows || []).filter((w) => w && w.used_pct !== null && w.used_pct !== undefined);
-    if (!windows.length) {
-      out.push(`  ${String(s.provider || '').padEnd(8)} ${String(s.account || '').padEnd(14)} unreadable - not signed in here, or the endpoint is down`);
-      continue;
-    }
-    for (let i = 0; i < windows.length; i += 1) {
-      const w = windows[i];
-      // The account is named once per account, not once per row: a column
-      // that repeats the same string is a column the eye stops reading.
-      const head = i === 0
-        ? `${String(s.provider || '').padEnd(8)} ${String(s.account || '').padEnd(14)}`
-        : ' '.repeat(23);
-      const reset = resetHuman(w.resets_at);
-      out.push(`  ${head} ${String(w.name).padEnd(3)} ${`${Math.round(Number(w.used_pct) || 0)}%`.padStart(4)}${reset ? `   resets ${reset}` : ''}`);
-    }
-    if (s.extra && s.extra.state === 'disabled') {
-      out.push(`  ${' '.repeat(23)} extra: ${String(s.extra.reason || 'disabled').replace(/_/g, ' ')}`);
-    }
-  }
-  out.push('');
-  out.push(...gatewaySection(doc && doc.gateway));
-  return out;
-};
-
-// CEL-28: the accounts behind this box's auth-gateway, under their own
-// heading. They are subscriptions like the two above - the difference is the
-// door they are reached through, which is why the rows say `source: gateway`
-// and why the count of them is the thing that decides whether spreading work
-// across accounts means anything at all.
-//
-// A box with no gateway is NOT an alarm here: most have none, and a red line
-// about an optional door is how an operator learns to ignore red lines.
-export const gatewayAccountLine = (a) => {
-  const windows = (a.windows || []).length
-    ? a.windows.map((w) => `${w.label || w.name} ${w.used_pct ?? '?'}% ${w.state || ''}`.trim()).join(' | ')
-    : 'no usage probe';
-  const ok = a.ok === false ? 'no' : a.ok === true ? 'yes' : '?';
-  return `${String(a.provider || '?').padEnd(14)} ${String(a.id || a.account || '?').padEnd(9)} ${ok.padEnd(3)} ${windows}`;
-};
-
-export const gatewaySection = (gateway) => {
-  const out = [];
-  if (!gateway || !gateway.installed) {
-    out.push('via gateway');
-    out.push('  no gateway on this box - cel gateway install');
     return out;
   }
-  out.push(`via gateway   ${gateway.ready ? 'ready' : 'NOT ready'}`
-    + `   port ${gateway.port ?? '-'}   ${gateway.credentials ?? 0} credentials`);
-  const accounts = gateway.accounts || [];
-  if (!accounts.length) out.push('  no account usable - cel gateway login <provider>');
-  for (const a of accounts) out.push(`  ${gatewayAccountLine(a)}`);
+  const groups = [['direct', subs.filter((s) => s && s.source !== 'gateway')],
+    ['via gateway', subs.filter((s) => s && s.source === 'gateway')]];
+  for (const [heading, rows] of groups) {
+    if (!rows.length) continue;
+    out.push(heading);
+    for (const s of rows) {
+      for (const c of subCells(s)) {
+        // The label is truncated, not wrapped: a 36-character Codex account id
+        // left whole pushed every window off the right of the terminal.
+        out.push(`  ${c[0].padEnd(12)} ${c[1].slice(0, 24).padEnd(24)} ${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
+      }
+    }
+  }
   return out;
 };

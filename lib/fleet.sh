@@ -289,15 +289,16 @@ _fleet_render() { # <doc>
 # whatever `subscription_usage` last wrote (it refreshes on a 60 s TTL from
 # `cel quota` and from the steward's tick) and an empty list when nothing has
 # asked yet - absent is absent, never a zero window.
+#
+# CEL-35: it is the SAME FUNCTION `cel quota --json` calls, not a second
+# reading of the same directory. This field listed one row per cache file and
+# the quota command folded pi's login into Claude Code's, so the console said
+# five subscriptions where `cel quota` said two, and the operator had to guess
+# which surface was lying.
 _fleet_subscriptions() {
-  local dir="${CEL_CACHE:-$HOME/.cache/cel}"
-  local f found=""
-  for f in "$dir"/subscription-*.json; do
-    [ -f "$f" ] || continue
-    found="$found$(cat "$f")
-"
-  done
-  printf '%s' "$found" | jq -sc '[.[] | select(type == "object")]' 2>/dev/null || printf '[]'
+  # shellcheck source=lib/quota.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
+  subscription_list --cached
 }
 
 cmd_fleet() {

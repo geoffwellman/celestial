@@ -351,40 +351,45 @@ t('the unit view lays out the board and the PRs with the rest', () => {
 });
 
 // --- QUOTA: the subscriptions behind the box, direct and through the gateway
-// One row per ACCOUNT, because that is the thing that runs out. A gateway
-// account's windows are the same shape a direct subscription's are; only
-// `source` says which door it came through.
-const GATEWAY = {
-  installed: true, ready: true, port: 47411, credentials: 3,
-  accounts: [
-    { source: 'gateway', provider: 'openai-codex', id: 'aaaaaa', ok: true,
-      windows: [{ label: '7 days', used: 100, limit: 100, used_pct: 100, state: 'exhausted' }] },
-    { source: 'gateway', provider: 'opencode-go', id: 'cred-3', ok: true, windows: [] },
-  ],
-};
+//
+// CEL-35: ONE LIST. The gateway's accounts used to be fetched by the view
+// itself with a second command and drawn from a second shape, so the console
+// and the dashboard answered "how many subscriptions does this box have"
+// differently. Now every row - direct or through the gateway - arrives in the
+// fleet document, and `source` is the only thing that says which door it came
+// through.
+const SUBS35 = [
+  { source: 'direct', provider: 'claude', account: 'pi+claude-code', label: 'pi + claude-code',
+    windows: [{ name: '5h', used_pct: 16, resets_at: '2026-09-18T09:00:00Z' }],
+    extra: { state: 'enabled', reason: '' } },
+  { source: 'direct', provider: 'codex', account: 'acct-alpha-1', label: 'acct-alpha-1',
+    windows: [], extra: { state: 'unreadable', reason: 'the usage endpoint could not be read' } },
+  { source: 'gateway', provider: 'openai-codex', account: 'aaaaaa', label: 'aaaaaa',
+    windows: [{ name: '7 days', used_pct: 100, resets_at: null }],
+    extra: { state: 'enabled', reason: '' } },
+];
 
-t('the quota view lists gateway accounts under their own heading', () => {
-  const text = quotaView({ gateway: GATEWAY }).join('\n');
+t('the quota view groups direct rows above gateway rows, from one list', () => {
+  const text = quotaView({ subscriptions: SUBS35 }).join('\n');
+  const at = (x) => text.indexOf(x);
+  assert.match(text, /direct/);
   assert.match(text, /via gateway/);
-  assert.match(text, /openai-codex/);
-  assert.match(text, /aaaaaa/);
-  assert.match(text, /7 days 100%/);
-  assert.match(text, /exhausted/);
+  assert.ok(at('direct') < at('via gateway'), 'gateway rows are not under their own heading');
+  assert.ok(at('pi + claude-code') < at('via gateway'), 'a direct row fell under the gateway heading');
+  assert.ok(at('openai-codex') > at('via gateway'), 'a gateway row is not under the gateway heading');
 });
 
-// A gateway that is not installed is not an error on the QUOTA view: most
-// boxes have none, and a red line about an optional door teaches people to
-// ignore red lines.
-t('the quota view says nothing alarming when there is no gateway', () => {
-  const text = quotaView({ gateway: { installed: false, accounts: [] } }).join('\n');
-  assert.match(text, /no gateway/);
-  assert.doesNotMatch(text, /exhausted/);
+// An account nobody can read is a ROW WITH A REASON, not a silence: the empty
+// console view next to a full dashboard is what started this ticket.
+t('an unreadable account is a row that says why', () => {
+  const text = quotaView({ subscriptions: SUBS35 }).join('\n');
+  assert.match(text, /acct-alpha-1\s+unreadable: the usage endpoint could not be read/);
 });
 
-t('cel gateway status --json renders as the gateway section, never as JSON', () => {
-  const out = renderOutput('cel gateway status --json', JSON.stringify(GATEWAY));
-  assert.match(out, /via gateway/);
-  assert.doesNotMatch(out, /[{}]/);
+t('the quota view never asks the gateway itself', () => {
+  const text = quotaView({ subscriptions: [] }).join('\n');
+  assert.match(text, /no signed-in subscriptions/);
+  assert.ok(!text.includes('cel gateway install'), 'the view still carries the gateway detour');
 });
 
 process.stdout.write('views.test.mjs: all good\n');

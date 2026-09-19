@@ -79,7 +79,12 @@ Each steward workspace sweep has its own subshell: one workspace's override
 cannot become another's fallback or mutate the parent. Provider quota caches
 are keyed by provider and credential fingerprint rather than workspace order.
 Linear and quota HTTP requests keep credential headers out of curl's argument
-list. Credentials still exist in process environments/memory; the local user
+list. A signed-in subscription is identified by where the credential lives
+(`claude/pi`, `claude/claude-code`, `codex/<account id>`,
+`gateway/<provider>/<id>`), never by a hash of the token, so a token refresh
+overwrites one cache entry instead of inventing an account; `cel quota`,
+`cel fleet --json`, the console's QUOTA view and the dashboard all render that
+one list, and no token is ever printed. Credentials still exist in process environments/memory; the local user
 and root are trusted. Linear's private temporary header file is removed on
 normal exit and handled signals, but cannot promise cleanup after SIGKILL.
 

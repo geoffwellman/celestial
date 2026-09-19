@@ -281,28 +281,6 @@ const linear = () => cached('linear', 120000, async () => {
   } catch { return null; }
 });
 
-// CEL-28: the accounts behind this box's auth-gateway, in the SAME row shape
-// the signed-in subscriptions use, so the Subscriptions card has one renderer
-// rather than two that drift. `cel gateway status --json` is what is read -
-// the dashboard never talks to the gateway itself, because exactly one place
-// on the box knows that bearer and it is not a web server.
-//
-// Cached for a minute: the windows move in hours, and every read costs a
-// broker round trip. No gateway, no rows - never an error, never a fake zero.
-const gatewayAccounts = () => cached('gwsubs', 60000, async () => {
-  try {
-    const doc = JSON.parse(await run('cel', ['gateway', 'status', '--json'], 20000));
-    return (doc.accounts || []).map((a) => ({
-      source: 'gateway',
-      provider: a.provider,
-      account: a.id,
-      windows: (a.windows || []).map((w) => ({
-        name: w.label, used_pct: w.used_pct, resets_at: w.resets_at, state: w.state,
-      })),
-    }));
-  } catch { return []; }
-});
-
 // WHAT IS RUNNING ON A PORT, asked of the plane rather than re-derived here.
 // `cel services --json` already joins the declared services to the previews
 // `try` started and answers state, health, memory and reach; a second
@@ -377,25 +355,27 @@ const paneNames = async () => {
 
 // THE SUBSCRIPTIONS, from the same 60 s cache `cel fleet` reads.
 //
-// The dashboard polls; a live call to Anthropic and ChatGPT on every poll
-// would spend two round trips a few seconds apart for a number that changes
-// slowly, and would make a provider's bad afternoon look like a broken
-// dashboard. No cache, no card - never an error, and never an invented zero.
-const subscriptions = async () => {
-  const dir = process.env.CEL_CACHE || join(homedir(), '.cache', 'cel');
+// THE SUBSCRIPTIONS, from `cel fleet --json` and from nowhere else.
+//
+// This card used to merge `cel quota --json` with `cel gateway status --json`
+// itself while the console read the fleet document, so the two surfaces
+// answered "which subscriptions does this box have" differently: the owner,
+// 2026-09-19, "The TUI is not showing any usage other than claude; the
+// dashboard is showing all usage". CEL-35 makes the fleet document the one
+// list - direct logins and gateway accounts, already folded - and the card
+// draws it without a merge of its own.
+//
+// Cached a minute, like the windows it reports: they move in hours, and the
+// fleet read walks /proc once for the whole box.
+const subscriptions = () => cached('subs', 60000, async () => {
   try {
-    if (!existsSync(dir)) return [];
-    const out = [];
-    for (const f of readdirSync(dir)) {
-      if (!/^subscription-.*\.json$/.test(f)) continue;
-      try { out.push(JSON.parse(readFileSync(join(dir, f), 'utf8'))); } catch { /* a half-written cache file */ }
-    }
-    return out.filter((s2) => s2 && s2.provider);
+    const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000) || '{}');
+    return Array.isArray(doc.subscriptions) ? doc.subscriptions : [];
   } catch { return []; }
-};
+});
 
 const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, gwsubs, svcs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), gatewayAccounts(), services()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), services()]);
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -442,8 +422,9 @@ const state = async () => {
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
     agents: ags, services: svcs, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
-    // the same thing to whoever is reading the card - `source` says which.
-    subscriptions: [...subs.map((x) => ({ source: 'direct', ...x })), ...gwsubs],
+    // the same thing to whoever is reading the card - `source` says which, and
+    // `cel fleet` decided both before this line ran.
+    subscriptions: subs,
   };
 };
 
@@ -1332,6 +1313,7 @@ async function refresh(){
 // disagreeing about when to worry is three surfaces nobody trusts. A window
 // with no percentage is absent, never a zero: "0% used" is a claim, and the
 // only honest answer to an unreadable endpoint is that it was unreadable.
+// <cel35:sub-cells>
 function subReset(iso){
   if(!iso) return '';
   var at=new Date(iso); if(isNaN(at.getTime())) return String(iso);
@@ -1339,29 +1321,53 @@ function subReset(iso){
   if(at.getTime()-Date.now()<86400000) return hhmm;
   return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][at.getDay()]+' '+hhmm;
 }
+// THE SAME CELLS THE CONSOLE DRAWS. This is a copy of subCells() in
+// tools/console/views.mjs - the dashboard's client script is served as text
+// and cannot import it - and tests/console.test.sh runs both over one fixture
+// and fails when they differ. They differed once, silently, and the owner saw
+// Claude alone in the TUI and everything on this page.
+function subCells(s){
+  var provider=String((s&&s.provider)||'');
+  var label=String((s&&(s.label||s.account))||'');
+  var windows=((s&&s.windows)||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
+  if(!windows.length){
+    var reason=(s&&s.extra&&s.extra.reason)||'not signed in here, or the endpoint is down';
+    return [[provider,label,'unreadable: '+reason,'']];
+  }
+  var rows=windows.map(function(w,i){
+    return [i===0?provider:'', i===0?label:'',
+      w.name+' '+Math.round(Number(w.used_pct)||0)+'%',
+      subReset(w.resets_at)?'resets '+subReset(w.resets_at):''];
+  });
+  if(s&&s.extra&&s.extra.state==='disabled'){
+    rows.push(['','','extra: '+String(s.extra.reason||'disabled').replace(/_/g,' '),'']);
+  }
+  return rows;
+}
+// </cel35:sub-cells>
 function renderSubs(s){
   var el=$('subs'); if(!el) return;
   var subs=s.subscriptions||[];
   if(!subs.length){el.innerHTML='<span class="empty">no subscription readings cached yet - cel quota asks the providers</span>';return}
   var html='<table><tbody>';
-  for(var i=0;i<subs.length;i++){
-    var acc=subs[i];
-    var ws=(acc.windows||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
-    if(!ws.length){
-      html+='<tr class="agrow"><td>'+esc(acc.provider)+'</td><td class="empty">'+esc(acc.account||'')+
-        '</td><td colspan="2" class="empty">unreadable</td></tr>';
-      continue;
-    }
-    for(var j=0;j<ws.length;j++){
-      var w=ws[j], pct=Math.round(Number(w.used_pct)||0);
-      var cls=pct>=100?'b':pct>=80?'w':'';
-      html+='<tr class="agrow"><td>'+(j===0?esc(acc.provider):'')+'</td><td class="empty">'+
-        (j===0?esc(acc.account||'')+(acc.source==='gateway'?' (gateway)':''):'')+'</td><td>'+chip(w.name+' '+pct+'%',cls)+'</td><td class="empty">'+
-        (subReset(w.resets_at)?'resets '+esc(subReset(w.resets_at)):'')+'</td></tr>';
-    }
-    if(acc.extra&&acc.extra.state==='disabled'){
-      html+='<tr class="agrow"><td></td><td></td><td colspan="2" class="empty">extra: '+
-        esc(String(acc.extra.reason||'disabled').replace(/_/g,' '))+'</td></tr>';
+  var groups=[['direct',subs.filter(function(x){return x&&x.source!=='gateway'})],
+              ['via gateway',subs.filter(function(x){return x&&x.source==='gateway'})]];
+  for(var g=0;g<groups.length;g++){
+    var rows=groups[g][1];
+    if(!rows.length) continue;
+    html+='<tr class="agrow"><td colspan="4" class="empty">'+esc(groups[g][0])+'</td></tr>';
+    for(var i=0;i<rows.length;i++){
+      var acc=rows[i], cells=subCells(acc);
+      // the chip's colour is the window the cell names, so a spent account is
+      // red on this page for the same reason it is red on the status edge
+      var ws=(acc.windows||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
+      for(var j=0;j<cells.length;j++){
+        var c=cells[j], pct=ws[j]?Math.round(Number(ws[j].used_pct)||0):null;
+        var cls=pct===null?'':pct>=100?'b':pct>=80?'w':'';
+        html+='<tr class="agrow"><td>'+esc(c[0])+'</td><td class="empty">'+esc(c[1])+'</td><td>'+
+          (pct===null?'<span class="empty">'+esc(c[2])+'</span>':chip(c[2],cls))+
+          '</td><td class="empty">'+esc(c[3])+'</td></tr>';
+      }
     }
   }
   el.innerHTML=html+'</tbody></table>';

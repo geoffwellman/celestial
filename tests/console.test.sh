@@ -987,6 +987,48 @@ test_console_quota_view_renders_one_row_per_account_and_window() {
   assert_contains "$out" 'out of credits'
   _console_teardown
 }
+
+# --- CEL-35: the console and the dashboard draw the SAME rows ---------------
+#
+# They disagreed because they read different things: the console read the
+# fleet document's cache-built list and the dashboard merged `cel quota` with
+# `cel gateway status` itself. The owner saw Claude alone on one screen and
+# everything on the other. One list now, and the cells that list becomes are
+# one function - proved here by running both copies over one fixture.
+test_console_and_dash_build_the_same_subscription_cells() {
+  _console_setup
+  cat >"$T/parity.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const { subCells } = await import(process.env.VIEWS_MJS);
+
+const src = readFileSync(process.env.SERVER_MJS, 'utf8');
+const start = src.indexOf('// <cel35:sub-cells>');
+const end = src.indexOf('// </cel35:sub-cells>');
+assert.ok(start > 0 && end > start, 'the dash card has no marked sub-cell builder');
+const body = src.slice(start, end);
+// eslint-disable-next-line no-new-func
+const dashCells = new Function(`${body}; return subCells;`)();
+
+const rows = [
+  { source: 'direct', provider: 'claude', account: 'pi+claude-code', label: 'pi + claude-code',
+    windows: [{ name: '5h', used_pct: 16, resets_at: '2026-09-18T09:00:00Z' },
+              { name: '7d', used_pct: 41, resets_at: '2026-09-19T19:00:00Z' }],
+    extra: { state: 'enabled', reason: '' } },
+  { source: 'direct', provider: 'codex', account: 'acct-alpha-1', label: 'acct-alpha-1',
+    windows: [], extra: { state: 'unreadable', reason: 'the endpoint could not be read' } },
+  { source: 'gateway', provider: 'openai-codex', account: 'aaaaaa', label: 'aaaaaa',
+    windows: [{ name: '7 days', used_pct: 100, resets_at: null }], extra: { state: 'enabled', reason: '' } },
+];
+for (const r of rows) assert.deepEqual(dashCells(r), subCells(r), `the dash and the console differ on ${r.account}`);
+process.stdout.write('parity: all good\n');
+EOF
+  local out
+  out="$(VIEWS_MJS="$CEL_ROOT/tools/console/views.mjs" SERVER_MJS="$CEL_ROOT/tools/dash/server.mjs" \
+    node "$T/parity.mjs" 2>&1)" || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'parity: all good'
+  _console_teardown
+}
 # --- CEL-25: the console as a control panel ---------------------------------
 
 # The BOARD and the PRS are the two things an operator actually steers by, and
