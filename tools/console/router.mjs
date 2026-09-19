@@ -41,7 +41,11 @@ export const INTENTS = [
   ['start_ticket', 'get work started on a named ticket - pick it up, begin it, put someone on it'],
   ['answer', 'reply to a decision or question waiting on the operator, and close it'],
   ['land', 'land, merge or ship a finished pull request or ticket'],
-  ['nudge', 'prompt a worker directly, right now - poke it, remind it, tell it to push'],
+  ['nudge', 'prompt a worker or an orchestrator directly, right now - poke it, remind it, tell it to push'],
+  // CEL-36: the one place the console relays a conversation. `message` is
+  // mail with a tap on the shoulder; `talk` is the operator's command line
+  // wired to a pane until they press Esc.
+  ['talk', 'open a back-and-forth with an orchestrator - talk to it, speak to it, have a word'],
   ['restart_orchestrator', 'start a product\u2019s orchestrator again after it has stopped'],
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
@@ -59,15 +63,28 @@ export const INTENT_NAMES = INTENTS.map(([n]) => n);
 // The state, reduced. The chat model gets the whole fleet JSON because it has
 // to write names; the classifier only has to recognise them, and a 12 KB
 // state on a question with ten answers is money spent on tokens nobody reads.
-export const facts = (doc, items = [], services = []) => {
+export const facts = (doc, items = [], services = [], roster = []) => {
   const workspaces = [];
   const products = [];
+  // CEL-36: the orchestrators as addressees in their own right - the alias to
+  // write to, the workspace its mailbox is in, the repos it owns (so "tell the
+  // platform to ..." reaches the product that holds `platform`) and whether
+  // its pane is live, which is the difference between mail read in an hour and
+  // a prompt that lands now.
+  const orchs = [];
   const workers = [];
   const tickets = [];
   for (const ws of (doc && doc.workspaces) || []) {
     workspaces.push(ws.name);
     for (const u of ws.units || []) {
       products.push({ name: u.name, workspace: ws.name });
+      orchs.push({
+        who: `${u.name}-orch`,
+        product: u.name,
+        workspace: ws.name,
+        repos: u.repos || [],
+        live: LIVE_PANE.test(String(u.orch || '')),
+      });
       for (const w of u.workers_list || []) {
         // The alias, the repo and the PR number ride along for CEL-25's
         // verbs: `nudge` addresses a herdr pane and `land`/`review` need the
@@ -102,7 +119,12 @@ export const facts = (doc, items = [], services = []) => {
   const svcs = (services || []).map((s) => ({ name: s.name, workspace: s.ws || s.workspace || '', ticket: s.ticket || '' }));
   return {
     workspaces, products, workers, tickets_seen: tickets, open_items: items.length, mailboxes, open,
-    services: svcs,
+    services: svcs, orchs,
+    // The names `herdr agent list` carries. A pane outlives the product name
+    // it was started under - a rename leaves `oldname-orch` on the roster and
+    // nowhere in the fleet document - and a name the operator can see is a
+    // name they will address.
+    roster: (roster || []).filter(Boolean),
   };
 };
 
@@ -127,6 +149,12 @@ const names = (sentence, name) => {
 };
 
 const TICKET = /\b[A-Z][A-Z0-9]+-\d+\b/;
+
+// A pane is LIVE when herdr says it is idle, done or working - the three
+// states in which a prompt reaches somebody. `cel fleet` writes LIVE for the
+// same thing, and both spellings arrive here depending on which read filled
+// the document.
+const LIVE_PANE = /^(live|idle|done|working)$/i;
 
 const workspaceIn = (sentence, f) => f.workspaces.find((w) => names(sentence, w)) || null;
 
@@ -156,20 +184,58 @@ const prWorkerIn = (sentence, f) => {
   return w && w.pr ? w : null;
 };
 
-// Who a sentence is addressed to: a worker, an orchestrator named outright,
-// or a product - which means its orchestrator.
-const addresseeIn = (sentence, f) => {
-  const w = f.workers.find((x) => names(sentence, x.id));
-  if (w) return { who: w.id, workspace: w.workspace, at: sentence.toLowerCase().indexOf(w.id.toLowerCase()) };
-  for (const p of f.products) {
-    const orch = `${p.name}-orch`;
-    if (names(sentence, orch)) {
-      return { who: orch, workspace: p.workspace, at: sentence.toLowerCase().indexOf(orch.toLowerCase()) };
+// WHO A SENTENCE IS ADDRESSED TO, in one ladder, most specific first: a
+// worker id, `<product>-orch`, the product itself, a workspace that holds
+// exactly one product, a repo inside a product, and finally a name only the
+// roster knows.
+//
+// The order is the safety property. Each rung is narrower than the one under
+// it, so a sentence that names a worker can never resolve to the orchestrator
+// above it - and a workspace with two products resolves to NOTHING, returning
+// the question instead. Guessing there is mail, and now a pane prompt, in
+// somebody else's session.
+export const addresseeIn = (sentence, f) => {
+  const s = String(sentence || '');
+  const at = (name) => s.toLowerCase().indexOf(String(name).toLowerCase());
+  const orchs = f.orchs || [];
+  const hit = (o, where) => ({ who: o.who, workspace: o.workspace, at: where, orch: true, live: !!o.live });
+
+  const w = f.workers.find((x) => names(s, x.id));
+  if (w) return { who: w.id, workspace: w.workspace, at: at(w.id), orch: false, live: false, alias: w.alias || w.id };
+
+  const named = orchs.find((o) => names(s, o.who));
+  if (named) return hit(named, at(named.who));
+
+  const byProduct = orchs.find((o) => names(s, o.product));
+  if (byProduct) return hit(byProduct, at(byProduct.product));
+
+  const ws = (f.workspaces || []).find((x) => names(s, x));
+  if (ws) {
+    const mine = orchs.filter((o) => o.workspace === ws);
+    if (mine.length === 1) return hit(mine[0], at(ws));
+    if (mine.length > 1) {
+      return { ask: `${ws} has ${mine.length} products - say ${mine.map((o) => o.who).join(' or ')}` };
     }
   }
-  const p = f.products.find((x) => names(sentence, x.name));
-  if (p) {
-    return { who: `${p.name}-orch`, workspace: p.workspace, at: sentence.toLowerCase().indexOf(p.name.toLowerCase()) };
+
+  for (const o of orchs) {
+    for (const r of o.repos || []) if (names(s, r)) return hit(o, at(r));
+  }
+
+  const alias = (f.roster || []).find((a) => names(s, a));
+  if (alias) {
+    const known = orchs.find((o) => o.who === alias);
+    if (known) return hit(known, at(alias));
+    // A roster name with no unit behind it has no mailbox the console can be
+    // sure of. On a one-workspace box there is only one it could be; on any
+    // other the send misses rather than picking one.
+    return {
+      who: alias,
+      workspace: (f.workspaces || []).length === 1 ? f.workspaces[0] : '',
+      at: at(alias),
+      orch: /-orch$/.test(alias),
+      live: false,
+    };
   }
   return null;
 };
@@ -268,10 +334,30 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
 
     case 'message': {
       const hit = addresseeIn(s, f);
-      if (!hit) return null;
+      if (!hit || hit.ask || !hit.workspace) return null;
       const text = messageText(s, hit);
       if (!text) return null;
-      return [`cel inbox send ${hit.who} ${shellQuote(text)} --workspace ${hit.workspace}`];
+      const cmds = [`cel inbox send ${hit.who} ${shellQuote(text)} --workspace ${hit.workspace}`];
+      // TWO STEPS WHEN THERE IS A PANE TO TAP. Mail is the record and is read
+      // when the agent next looks - minutes to hours - which from the
+      // operator's seat looked exactly like nothing happening (owner,
+      // 2026-09-19: "so we can't actually steer the orchestrators from the
+      // TUI?"). The prompt is the tap on the shoulder, and it says to go and
+      // READ the mail rather than repeating it: the mailbox stays the record,
+      // and the pane never gets two versions of one instruction.
+      if (hit.orch && hit.live) {
+        cmds.push(`herdr agent prompt ${hit.who} ${shellQuote(`inbox: ${text.slice(0, 80)} - run cel inbox read`)}`);
+      }
+      return cmds;
+    }
+
+    // `talk to bundle-orch`. Not a command the guard runs: it is the console's
+    // own relay mode, and this line is what the command line carries into it.
+    // Every line typed once it is open becomes `herdr agent prompt`.
+    case 'talk': {
+      const hit = addresseeIn(s, f);
+      if (!hit || hit.ask || !hit.orch) return null;
+      return [`talk ${hit.who}`];
     }
 
     case 'resolve': {
@@ -361,11 +447,19 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
     }
 
     case 'nudge': {
-      const w = workerIn(s, f);
-      if (!w) return null;
       const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
       if (!quoted) return null;
-      return [`herdr agent prompt ${w.alias || w.id} ${shellQuote((quoted[1] || quoted[2]).trim())}`];
+      // AN ORCHESTRATOR IS A PANE TOO (CEL-36). This was `workerIn` only, so
+      // the one agent an operator most often wants right now - the one handing
+      // out the work - had no immediate path at all.
+      const w = workerIn(s, f);
+      let who = w ? (w.alias || w.id) : '';
+      if (!who) {
+        const hit = addresseeIn(s, f);
+        who = hit && hit.orch && !hit.ask ? hit.who : '';
+      }
+      if (!who) return null;
+      return [`herdr agent prompt ${who} ${shellQuote((quoted[1] || quoted[2]).trim())}`];
     }
 
     case 'restart_orchestrator': {
@@ -420,6 +514,29 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
     default:
       return null;   // `other`, and anything a future model invents
   }
+};
+
+// WHAT THE CONSOLE SAYS AFTER IT SENDS, and whether it then watches for an
+// answer. It lives beside the plan because the fact that decides the second
+// command - is the pane live - is the same fact that decides both, and two
+// places reading it is two answers to one question.
+export const steerFor = (intent, sentence, f) => {
+  const hit = addresseeIn(String(sentence || ''), f);
+  if (!hit) return null;
+  if (hit.ask) return { ask: hit.ask };
+  if (intent === 'talk') return hit.orch ? { who: hit.who, workspace: hit.workspace, mode: 'talk' } : null;
+  if (intent !== 'message') return null;
+  return {
+    who: hit.who,
+    workspace: hit.workspace,
+    orch: !!hit.orch,
+    live: !!(hit.orch && hit.live),
+    say: hit.orch && hit.live
+      ? `sent to ${hit.who} (pane live, prompted)`
+      : hit.orch
+        ? `sent to ${hit.who} (no live pane - it reads this when it next starts; run "start ${hit.who}" to wake it)`
+        : `sent to ${hit.who}`,
+  };
 };
 
 export const OPTIONS_MAX = 3;
@@ -524,12 +641,12 @@ const askDecision = async (cfg, sentence, f) => {
 // is nothing configured and a plain Error on any failure - both mean the same
 // thing to the caller, which is "ask the chat model", and the caller is the
 // only place that knows how to say that to a person.
-export const route = async ({ sentence, doc, items = [], services = [], configPath, root = CEL_ROOT, selected = null }) => {
+export const route = async ({ sentence, doc, items = [], services = [], roster = [], configPath, root = CEL_ROOT, selected = null }) => {
   const cfg = routerConfig(configPath, root);
   if (!cfg) throw new NoRouter('no router configured');
   if (!cfg.url) throw new NoRouter(`router: provider '${cfg.provider}' has no api: in agents.yaml`);
   if (!cfg.key) throw new NoRouter('router: no key for the router provider');
-  const f = facts(doc, items, services);
+  const f = facts(doc, items, services, roster);
   const started = Date.now();
   const { intent, confidence, probabilities } = await askDecision(cfg, sentence, f);
   const ms = Date.now() - started;
@@ -539,7 +656,7 @@ export const route = async ({ sentence, doc, items = [], services = [], configPa
   // worker on the box - so the chat model gets it rather than the console
   // inventing an id.
   if (confidence >= cfg.minConfidence && cmds) {
-    return { intent, confidence, probabilities, ms, cmds, options: [] };
+    return { intent, confidence, probabilities, ms, cmds, options: [], steer: steerFor(intent, sentence, f) };
   }
   return {
     intent,
@@ -547,6 +664,7 @@ export const route = async ({ sentence, doc, items = [], services = [], configPa
     probabilities,
     ms,
     cmds: null,
+    steer: steerFor(intent, sentence, f),
     options: options(probabilities, sentence, f, { selected }).filter((o) => o.intent !== 'other'),
   };
 };

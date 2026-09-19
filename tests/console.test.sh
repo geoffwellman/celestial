@@ -1132,3 +1132,34 @@ test_console_fleet_header_counts_services_up_and_down() {
   assert_contains "$out" "services 2 up/1 down"
   _console_teardown
 }
+
+# CEL-36: reaching an orchestrator now, and seeing it answer. The watch and
+# the relay are ink in the TUI and cannot be driven without a terminal, so
+# what is asserted is everything that DECIDES: which message counts as the
+# reply, which command a relayed line becomes, and what the operator is told
+# when nothing comes back.
+test_console_steering_helpers_are_proved() {
+  node "$CEL_ROOT/tools/console/steer.test.mjs"
+}
+
+# ONE VOCABULARY, TWO CONSOLES (tools/console/vocabulary.md). A relay the TUI
+# can do and the agent console has never heard of is the two of them
+# disagreeing about what the console is, and the one that is wrong is always
+# the one nobody is watching.
+test_console_vocabulary_documents_the_relay_and_the_two_step() {
+  local vocab="$CEL_ROOT/tools/console/vocabulary.md"
+  assert_contains "$(cat "$vocab")" 'herdr agent read'
+  assert_contains "$(cat "$vocab")" 'talk'
+  # The role says when NOT to relay: a long design discussion belongs in the
+  # pane itself, which is what `focus` is for.
+  assert_contains "$(cat "$CEL_ROOT/core/roles/console.md")" 'focus'
+}
+
+# The legend is the console's only permanent instruction, and a mode with no
+# way out drawn on the screen is a mode an operator force-quits out of.
+test_console_talk_mode_has_a_legend_that_says_how_to_leave() {
+  local out
+  out="$(node -e "import('$CEL_ROOT/tools/console/legend.mjs').then(m => console.log(m.legend('talk')))")"
+  assert_contains "$out" 'Esc'
+  assert_contains "$out" 'relay'
+}

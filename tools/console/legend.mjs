@@ -70,6 +70,7 @@ export const BINDINGS = {
     ['Enter', 'the worker view - the answer to \u201cwhy\u201d'],
     ['f focus', 'focus the orchestrator pane'],
     ['m message', 'cel inbox send to the orchestrator, on the command line'],
+    ['t talk', 'relay the command line to the orchestrator\u2019s pane until Esc'],
     ['s mem', 'sort the workers by memory, biggest first (again for the default order)'],
     ['Esc', 'back to the fleet'],
   ],
@@ -81,6 +82,15 @@ export const BINDINGS = {
     ['t try', 'cel-fanout try, where the repo has a preview'],
     ['w why', 're-run cel-fanout why'],
     ['Esc', 'back to the unit view'],
+  ],
+  // CEL-36: THE ONE PLACE THE CONSOLE RELAYS A CONVERSATION. Everything else
+  // it does is a command; this is a wire to a pane, and the way out of it has
+  // to be on the screen or an operator force-quits the console to get out.
+  talk: [
+    ['Enter', 'send the line to the pane (herdr agent prompt)'],
+    ['', 'the pane\u2019s last 40 lines refresh every 2 s while it is working'],
+    ['Esc', 'stop relaying and come back to the panels'],
+    ['', 'a long design discussion belongs in the pane itself - use focus'],
   ],
   detail: [
     ['r', 'resolve'],
@@ -112,12 +122,14 @@ export const BINDINGS = {
 // because a legend listing every binding on the box is a legend nobody reads.
 export const legend = (pane) => {
   switch (pane) {
+    case 'talk':
+      return 'relaying every line to the pane · Enter sends · Esc to stop · ? help';
     case 'quota':
       return 'the subscription windows · Esc back · ? help';
     case 'detail':
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
-      return '↑/↓ worker · Enter why · ^T panel · f focus · n nudge · c/C collect · x/X release · R restart · s mem · Esc back · ? help';
+      return '↑/↓ worker · Enter why · ^T panel · f focus · n nudge · m message · t talk · c/C collect · x/X release · R restart · s mem · Esc back · ? help';
     case 'services':
       return '↑/↓ select · o open · S start/stop · r restart · L logs · x stop preview · Esc back · ? help';
     case 'board':
