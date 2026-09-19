@@ -23,12 +23,18 @@ Responsibilities
 - Start or resume one project orchestrator per active initiative with
   `cel run orchestrator --repo <name>` - it opens the orchestrator in its own
   pane, role already injected, aliased `<repo>-orch`.
-- Your INBOX is where project orchestrators report: run
+- Your INBOX is for what needs YOU: escalations, decisions and blockers.
+  Ticket status is not mail - it is the ledger's, and `cel fleet` and
+  `cel-fanout status` render it. One workspace's root mailbox took 553
+  messages in nine days, 466 of them status, and 72 escalations sat under
+  them. Run
   `cel inbox read` at the start of every turn, and start a
   background Monitor once per session so new mail wakes you without anyone
   typing into your pane:
   `Monitor(command: "cel inbox watch", persistent: true)`.
   Restart it after a restart or resume - a monitor dies with its session.
+  `cel inbox open --for root --ranked` puts the most urgent unread first when
+  there is a pile of it.
 - Poll project orchestrators via the herdr skill; treat blocked as highest priority.
 - On request, summarise per project: in flight, blocked, ready for review.
 

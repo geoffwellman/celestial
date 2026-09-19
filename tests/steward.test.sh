@@ -901,3 +901,66 @@ test_steward_memory_trees_include_the_orphans_as_one_tree() {
   assert_eq "$(printf '%s\n' "$trees" | awk -F'\t' '$1 == "orphans" { print $2 }')" "398"
   rm -rf "$T"
 }
+
+# --- CEL-43: a mailbox with no reader must not swallow an escalation --------
+# 72 escalations landed in root's mailbox since the 10th. Nothing was obliged
+# to read it: the standing root panes are gone and the console that replaced
+# them is a process that may not be running. One of those escalations, still
+# unread when this was written, said a reviewer pane had been dead for two
+# days. So the steward escalates the FACT - once per workspace, rolled up,
+# self-clearing - as a `blocked` item, which is the kind that already raises a
+# desktop notification.
+_root_unread_fixture() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR" "$T/bin" "$T/proc"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  export CEL_PROC_DIR="$T/proc"
+  cat > "$T/bin/herdr" <<'EOS'
+#!/usr/bin/env bash
+[ -n "${STUB_AGENTS:-}" ] || STUB_AGENTS='"'"'{"result":{"agents":[]}}'"'"'
+printf '%s\n' "$STUB_AGENTS"
+EOS
+  chmod +x "$T/bin/herdr"
+  PATH="$T/bin:$PATH"
+  export STUB_AGENTS='{"result":{"agents":[]}}'
+  # two hours old, which is past CEL_ROOT_UNREAD_SECS
+  local old; old="$(date -Is -d '2 hours ago')"
+  printf '%s\n' \
+    "$(jq -nc --arg ts "$old" '{id:"100", ts:$ts, to:"root", from:"widget-orch", kind:"escalation", message:"the reviewer pane has been dead for two days"}')" \
+    "$(jq -nc --arg ts "$old" '{id:"101", ts:$ts, to:"root", from:"widget-orch", kind:"status", message:"ABC-9 gate green"}')" \
+    > "$CEL_INBOX_DIR/alpha.jsonl"
+}
+
+test_steward_raises_one_blocker_for_root_mail_nobody_is_reading() {
+  _root_unread_fixture
+  local i
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_root_unread >/dev/null 2>&1; done
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_eq "$(printf '%s\n' "$open" | wc -l)" "1"
+  assert_contains "$open" "nobody is reading"
+  assert_contains "$open" "widget-orch"
+  assert_contains "$open" "blocked"
+  rm -rf "$T"
+}
+
+test_steward_says_nothing_about_root_mail_when_a_reader_is_alive() {
+  _root_unread_fixture
+  export STUB_AGENTS='{"result":{"agents":[{"name":"alpha-root"}]}}'
+  _STEWARD_WINDOW=0 _steward_root_unread >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}
+
+test_steward_clears_the_root_mail_blocker_once_the_mail_is_read() {
+  _root_unread_fixture
+  _STEWARD_WINDOW=0 _steward_root_unread >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "nobody is reading"
+  printf '999' > "$CEL_INBOX_DIR/alpha.root.cursor"
+  _STEWARD_WINDOW=0 _steward_root_unread >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
+  rm -rf "$T"
+}

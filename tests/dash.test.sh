@@ -179,3 +179,92 @@ test_dash_proxy_never_logs_the_control_token() {
   rm -rf "$d"
   _dash_shutdown
 }
+
+# --- CEL-43 section 4: box material appears four times -----------------------
+# The owner, 2026-09-19: "why are there multiple cel broker and gateway
+# services?" There is exactly one of each. What multiplied was the DISPLAY:
+# four per-workspace dashboards on this box each rendered the same box-level
+# rows inside their own services panel, and each rendered the whole
+# subscriptions panel, which is box-level in its entirety. Flipping between
+# tabs reads as several brokers.
+#
+# Two workspaces, one box service and one workspace service, so the partition
+# and the single-owner rule are both visible in one fixture.
+_dash_box_boot() { # <this-workspace> [box-owner]
+  local me="$1" owner="${2:-}"
+  T="$(mktemp -d)"
+  mkdir -p "$T/bin" "$T/alpha" "$T/beta" "$T/inbox"
+  cat >"$T/bin/cel" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  services) printf '%s\n' '[{"name":"builder","port":5173,"state":"up","kind":"declared","workspace":"alpha"},{"name":"cel-auth-broker","port":47311,"state":"healthy","kind":"box","workspace":"box"}]' ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+  chmod +x "$T/bin/cel"
+  cat >"$T/bin/herdr" <<'EOF'
+#!/usr/bin/env bash
+printf '{"result":{"agents":[],"workspaces":[],"panes":[]}}'
+EOF
+  cat >"$T/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '[]'
+EOF
+  chmod +x "$T/bin/herdr" "$T/bin/gh"
+  export CEL_REGISTRY="$T/registry.yaml"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" >"$CEL_REGISTRY"
+  printf 'name: alpha\ndash: {port: 7770%s}\n' \
+    "$([ "$owner" = alpha ] && printf ', box: true')" >"$T/alpha/workspace.yaml"
+  printf 'name: beta\ndash: {port: 7771%s}\n' \
+    "$([ "$owner" = beta ] && printf ', box: true')" >"$T/beta/workspace.yaml"
+  mkdir -p "$T/root/bin" "$T/root/tools"
+  cp -r "$CEL_ROOT/tools/dash" "$T/root/tools/dash"
+  cp "$CEL_ROOT/tools/http-security.mjs" "$T/root/tools/http-security.mjs"
+  cp "$T/bin/cel" "$T/root/bin/cel"
+  DASH_PORT="$(_dash_free_port)"
+  CEL_DASH_CONFIG="{\"name\":\"$me\",\"wsdir\":\"$T/$me\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]}" \
+  CEL_ROOT="$T/root" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$CEL_REGISTRY" PATH="$T/bin:$PATH" \
+    node "$T/root/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
+  DASH_PID=$!
+  local i
+  for i in $(seq 1 30); do
+    curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" && break
+    sleep 0.3
+  done
+  STATE="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/state")"
+}
+
+# The designated dash: the box row is in the Box panel, never in the
+# workspace's own services list, and the subscriptions come with it.
+test_dash_box_panel_belongs_to_the_designated_workspace() {
+  _dash_box_boot alpha
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.mine')" "true"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.boxServices[].name] | join(",")')" "cel-auth-broker"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.services[].name] | join(",")')" "builder"
+  # the panel exists in the page for the dash that owns it
+  assert_contains "$(curl -sf "http://127.0.0.1:$DASH_PORT/")" 'id="box"'
+  _dash_shutdown
+}
+
+# Every OTHER dashboard shows one pointer line instead, naming the box dash's
+# URL - and still never mixes the box row into its own services.
+test_dash_without_the_box_flag_points_at_the_one_that_has_it() {
+  _dash_box_boot beta
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.mine')" "false"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.owner')" "alpha"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.url')" "http://127.0.0.1:7770"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.boxServices | length')" "0"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.subscriptions | length')" "0"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.services[].name] | join(",")')" "builder"
+  _dash_shutdown
+}
+
+# `dash.box: true` on the second workspace moves it: the default is the
+# registry's first workspace, and a declaration beats the default.
+test_dash_box_flag_moves_the_panel_to_the_workspace_that_declares_it() {
+  _dash_box_boot beta beta
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.mine')" "true"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.box.owner')" "beta"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.boxServices[].name] | join(",")')" "cel-auth-broker"
+  _dash_shutdown
+}
