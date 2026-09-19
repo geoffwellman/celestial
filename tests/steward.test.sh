@@ -877,7 +877,7 @@ test_steward_reaps_orphans_and_reports_one_rolled_up_line() {
   assert_contains "$out" "reaped 2 orphans (1 watcher, 1 fixture)"
   local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
   assert_eq "$(printf '%s\n' "$mail" | grep -c 'reaped 2 orphans')" "1"
-  kill -9 "$w" "$f" 2>/dev/null
+  kill -9 "$w" "$f" 2>/dev/null || true
   rm -rf "$T"
 }
 

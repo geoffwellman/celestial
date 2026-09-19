@@ -167,7 +167,7 @@ test_orphans_reap_terminates_a_watcher_and_says_what_it_did() {
   assert_contains "$out" "reaped 2 orphans"
   sleep 0.2
   assert_fails kill -0 "$WPID"
-  kill -9 "$SPID" 2>/dev/null
+  kill -9 "$SPID" 2>/dev/null || true
   rm -rf "$T"
 }
 
@@ -178,7 +178,7 @@ test_orphans_reap_kills_what_ignores_the_term_after_the_grace() {
   orphans_reap >/dev/null
   sleep 0.3
   assert_fails kill -0 "$SPID"
-  kill -9 "$WPID" 2>/dev/null
+  kill -9 "$WPID" 2>/dev/null || true
   rm -rf "$T"
 }
 
@@ -188,7 +188,7 @@ test_orphans_reap_dry_run_kills_nothing_and_still_lists() {
   assert_contains "$out" "would reap 2 orphans"
   kill -0 "$WPID"
   kill -0 "$SPID"
-  kill -9 "$WPID" "$SPID" 2>/dev/null
+  kill -9 "$WPID" "$SPID" 2>/dev/null || true
   rm -rf "$T"
 }
 
