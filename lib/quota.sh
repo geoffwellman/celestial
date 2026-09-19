@@ -99,10 +99,20 @@ quota_remaining() { # <provider> [wsdir]
 # A TOKEN IS NEVER PRINTED, ANYWHERE. These are live bearer credentials for
 # the owner's own accounts, and this file is read by `cel quota`, by the
 # steward's mail, by the console's status edge and by a dashboard served over
-# a tailnet. An account is identified by provider plus a short stable id:
-# Codex hands us an `account_id`, Anthropic's endpoint carries no account
-# field at all, so the id there is the first six hex of the token's sha256 -
-# stable across a run, meaningless to anyone who reads it.
+# a tailnet.
+#
+# AN ACCOUNT IS WHERE IT IS SIGNED IN, NOT WHICH TOKEN IT HOLDS. CEL-27 named
+# a Claude account by the first six hex of its token's sha256, and pi refreshes
+# that token whenever it feels like it: every refresh minted a new "account",
+# a new `subscription-claude-<fp>.json` and a new row on every surface that
+# lists that directory. The owner, 2026-09-19: "somehow we are showing 4
+# claude subscriptions? there are only 3 I've signed into." So the identity is
+# the credential's HOME - `claude/pi`, `claude/claude-code`,
+# `codex/<account_id>`, `gateway/<provider>/<short id>` - which survives a
+# refresh, and the cache file keyed by it is OVERWRITTEN rather than joined by
+# a sibling. Files that match no current identity are swept on the next list,
+# which is also the one-off migration for the five that existed when this
+# landed.
 _sub_cache_dir() { printf '%s' "${CEL_CACHE:-$HOME/.cache/cel}"; }
 _SUB_TTL="${CEL_SUB_TTL:-60}"
 
@@ -138,66 +148,104 @@ _sub_gateway_base() {
 
 _sub_fp() { printf '%s' "$1" | sha256sum | cut -c1-6; }
 
-# provider<TAB>account<TAB>token, for the callers that have to spend the
-# token. INTERNAL: everything an operator can see goes through
-# subscription_list, which drops the third column.
-_subscription_accounts() {
-  local pi_tok cc_tok cx_tok cx_acct
-  pi_tok="$(jq -r '.anthropic.access // empty' "$HOME/.pi/agent/auth.json" 2>/dev/null || true)"
-  cc_tok="$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null || true)"
-  cx_tok="$(jq -r '.tokens.access_token // empty' "$HOME/.codex/auth.json" 2>/dev/null || true)"
-  cx_acct="$(jq -r '.tokens.account_id // empty' "$HOME/.codex/auth.json" 2>/dev/null || true)"
+# A DISPLAY LABEL IS NOT AN IDENTITY. The identity is where the credential
+# lives; the label is whatever stable account field the file itself carries -
+# an email, an account id, an org - because `pi` tells an operator which
+# runtime holds the token and `someone@example.invalid` tells them which
+# subscription it is. Absent, the identity is the label.
+_sub_label_from() { # <file> <jq-path> <fallback>
+  local v; v="$(jq -r "$2 // empty" "$1" 2>/dev/null || true)"
+  printf '%s' "${v:-$3}"
+}
 
-  if [ -n "$pi_tok" ]; then printf 'claude\t%s\t%s\n' "$(_sub_fp "$pi_tok")" "$pi_tok"; fi
-  # TWO TOKENS, ONE ACCOUNT, usually. pi refreshes its own copy of the owner's
-  # Claude OAuth and Claude Code keeps another; the same subscription read
-  # twice would double every window on the display and halve nobody's trust in
-  # it. Same token, one row; different tokens, two accounts, because that is
-  # what two different tokens mean.
-  if [ -n "$cc_tok" ] && [ "$cc_tok" != "$pi_tok" ]; then
-    printf 'claude\t%s\t%s\n' "$(_sub_fp "$cc_tok")" "$cc_tok"
+# provider<TAB>account<TAB>token<TAB>label, one line per credential FILE on
+# this box. INTERNAL, and frozen at three columns for `_subscription_accounts`
+# below, which the steward reads.
+_sub_direct_accounts() {
+  local pi_f="$HOME/.pi/agent/auth.json" cc_f="$HOME/.claude/.credentials.json" cx_f="$HOME/.codex/auth.json"
+  local pi_tok cc_tok cx_tok cx_acct
+  pi_tok="$(jq -r '.anthropic.access // empty' "$pi_f" 2>/dev/null || true)"
+  cc_tok="$(jq -r '.claudeAiOauth.accessToken // empty' "$cc_f" 2>/dev/null || true)"
+  cx_tok="$(jq -r '.tokens.access_token // empty' "$cx_f" 2>/dev/null || true)"
+  cx_acct="$(jq -r '.tokens.account_id // empty' "$cx_f" 2>/dev/null || true)"
+
+  if [ -n "$pi_tok" ]; then
+    printf 'claude\tpi\t%s\t%s\n' "$pi_tok" \
+      "$(_sub_label_from "$pi_f" '.anthropic.account.email_address // .anthropic.account.email // .anthropic.email' pi)"
+  fi
+  if [ -n "$cc_tok" ]; then
+    printf 'claude\tclaude-code\t%s\t%s\n' "$cc_tok" \
+      "$(_sub_label_from "$cc_f" '.claudeAiOauth.account.email_address // .claudeAiOauth.account.email // .claudeAiOauth.email' claude-code)"
   fi
   if [ -n "$cx_tok" ]; then
-    printf 'codex\t%s\t%s\n' "${cx_acct:-$(_sub_fp "$cx_tok")}" "$cx_tok"
+    local cx_id="${cx_acct:-cli}"
+    printf 'codex\t%s\t%s\t%s\n' "$cx_id" "$cx_tok" \
+      "$(_sub_label_from "$cx_f" '.tokens.email // .tokens.account_email' "$cx_id")"
   fi
-  # ...and every OTHER ChatGPT account the broker holds. The file names one;
-  # the fleet routes through whatever omp has, and an account nobody can see
-  # is an account whose wall arrives as a mystery. The token column is empty
-  # for these: their usage is read through the gateway, which holds the
-  # credential itself and never hands it out.
-  local gacct
-  for gacct in $(_sub_gateway_accounts); do
-    [ "$gacct" = "$cx_acct" ] && continue
-    printf 'codex\t%s\t\n' "$gacct"
-  done
   return 0
 }
 
-# The codex account ids the broker holds, or nothing when the gateway is down.
-_sub_gateway_accounts() {
-  local gw; gw="$(_sub_gateway_base)"
-  [ -n "$gw" ] || return 0
-  local resp; resp="$(printf 'authorization: Bearer %s\n' "$(omp auth-gateway token 2>/dev/null || true)" |
-    curl -sf -m 10 "${gw%/}/v1/usage" -H @- 2>/dev/null || true)"
-  [ -n "$resp" ] || return 0
-  printf '%s' "$resp" | jq -r '
-    ((.accounts // .usage // .) | if type == "array" then . else [.] end)
-    | .[]? | (.account_id // .account // empty)' 2>/dev/null || true
+# provider<TAB>account<TAB>token. FROZEN: lib/steward.sh reads exactly this.
+_subscription_accounts() {
+  _sub_direct_accounts | cut -f1,2,3
+}
+
+# The gateway's accounts, as subscription rows, or nothing at all when there
+# is no gateway or the door is shut. CEL-28 put these behind `cel gateway
+# status` alone, so the dashboard (which called it) listed them and the
+# console (which reads the fleet document) did not: two surfaces, two answers
+# to one question. They belong in the list with everything else, and `source`
+# says which door they came through.
+#
+# `check --json` is asked, never `check --strict`: strict probes each
+# credential against its provider and SPENDS QUOTA, which is not a thing a
+# status read may do behind someone's back.
+_sub_gateway_rows() {
+  command -v omp >/dev/null 2>&1 || return 0
+  # sourced here rather than at the top: lib/gateway.sh pulls in the config and
+  # the service registry, and every caller of quota.sh does not need them.
+  # shellcheck source=lib/gateway.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+  gateway_installed || return 0
+  gateway_ready || return 0
+  local raw; raw="$(gateway_accounts_json 2>/dev/null || true)"
+  [ -n "$raw" ] || return 0
+  printf '%s' "$raw" | jq -c '.[]? | {
+    provider: (.provider // "gateway"),
+    account: (.id // "?"),
+    label: (.id // "?"),
+    source: "gateway",
+    windows: [ (.windows // [])[] | select(.used_pct != null) | {
+      name: (.label // "window"),
+      used_pct: .used_pct,
+      # omp reports a reset as epoch MILLISECONDS; every other window on this
+      # display is an ISO string, and a bare 1789994511000 on the console was
+      # read as a percentage more than once.
+      resets_at: (if (.resets_at | type) == "number"
+                  then (.resets_at / 1000 | floor | todate)
+                  else .resets_at end) } ],
+    extra: {state: (if .ok == false then "unreadable"
+                    elif ((.windows // []) | map(select(.used_pct != null)) | length) == 0
+                    then "unreadable" else "enabled" end),
+            reason: (if .ok == false then "the gateway reports this credential as failing"
+                     elif ((.windows // []) | map(select(.used_pct != null)) | length) == 0
+                     then "no usage probe for this provider" else "" end)} }' 2>/dev/null || true
   return 0
 }
 
-# One line per signed-in account: `<provider>\t<account>`. No token, ever.
-subscription_list() {
-  _subscription_accounts | cut -f1,2
-}
-
-# {provider, account, windows: [{name, used_pct, resets_at}], extra: {state, reason}}
-# for one account, cached 60 s. A failure to ask is an EMPTY windows list, not
-# an error and not a zero: the whole point of the fleet path is that it can
-# always draw, and `unknown` never vetoes anything (see quota_remaining).
-subscription_usage() { # <provider> <token> [account]
-  local p="$1" tok="$2" acct="${3:-}"
+# {provider, account, label, source, windows: [{name, used_pct, resets_at}],
+#  extra: {state, reason}} for one account, cached 60 s.
+#
+# A FAILURE TO ASK IS A ROW, NOT A SILENCE. Until CEL-35 an unreadable account
+# was left out of the cache entirely, so `cel fleet` never mentioned it and
+# the console showed Claude alone while the dashboard (which asked the
+# providers itself) showed Codex too. An empty windows list with `state:
+# unreadable` and the reason is the version of that an operator can act on,
+# and it is cached like any other answer so every surface shows the same row.
+subscription_usage() { # <provider> <token> [account] [label]
+  local p="$1" tok="$2" acct="${3:-}" label="${4:-}"
   [ -n "$acct" ] || acct="$(_sub_fp "$tok")"
+  [ -n "$label" ] || label="$acct"
   local cache; cache="$(_sub_cache_dir)/subscription-$p-$acct.json"
   if [ -f "$cache" ]; then
     local age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
@@ -212,8 +260,8 @@ subscription_usage() { # <provider> <token> [account]
       resp="$(printf 'authorization: Bearer %s\n' "$tok" |
         curl -sf -m 10 "$_SUB_ANTHROPIC_URL" -H @- \
           -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null || true)"
-      [ -n "$resp" ] && doc="$(printf '%s' "$resp" | jq -c --arg a "$acct" '
-        {provider: "claude", account: $a,
+      [ -n "$resp" ] && doc="$(printf '%s' "$resp" | jq -c --arg a "$acct" --arg l "$label" '
+        {provider: "claude", account: $a, label: $l, source: "direct",
          windows: ([{name: "5h", used_pct: (.five_hour.utilization // null),
                      resets_at: (.five_hour.resets_at // null)},
                     {name: "7d", used_pct: (.seven_day.utilization // null),
@@ -242,9 +290,9 @@ subscription_usage() { # <provider> <token> [account]
       # `window_minutes` names the window, not the order of the fields: Codex
       # calls them primary and secondary, and which of those is the five hour
       # one is a decision nobody should have to remember.
-      [ -n "$resp" ] && doc="$(printf '%s' "$resp" | jq -c --arg a "$acct" '
+      [ -n "$resp" ] && doc="$(printf '%s' "$resp" | jq -c --arg a "$acct" --arg l "$label" '
         ((.rate_limits // .) as $r
-         | {provider: "codex", account: $a,
+         | {provider: "codex", account: $a, label: $l, source: "direct",
             windows: ([$r.primary, $r.secondary] | map(select(. != null))
                       | map({name: (if (.window_minutes // 0) >= 10080 then "7d"
                                     elif (.window_minutes // 0) >= 1440 then "1d"
@@ -262,11 +310,15 @@ subscription_usage() { # <provider> <token> [account]
   esac
 
   if [ -z "$doc" ]; then
-    # NOT CACHED. A cached failure would hold for the next sixty seconds and
-    # turn one flaky read into a minute of blindness.
-    jq -nc --arg p "$p" --arg a "$acct" \
-      '{provider: $p, account: $a, windows: [], extra: {state: "unknown", reason: ""}}'
-    return 0
+    # CACHED, deliberately, since CEL-35. A cached failure holds for sixty
+    # seconds, which is the price of the row being THERE at all: the row that
+    # was missing from the cache was missing from `cel fleet`, from the console
+    # and from the steward, and an account nobody can see is an account whose
+    # wall arrives as a mystery. The reason travels with it.
+    doc="$(jq -nc --arg p "$p" --arg a "$acct" --arg l "$label" \
+      '{provider: $p, account: $a, label: $l, source: "direct", windows: [],
+        extra: {state: "unreadable",
+                reason: "the usage endpoint could not be read - not signed in here, or it is down"}}')"
   fi
   # 0700 ON THE DIRECTORY, 0600 ON THE FILE. These answers are derived from a
   # credentialed request against the owner's own accounts: they carry no token,
@@ -281,15 +333,86 @@ subscription_usage() { # <provider> <token> [account]
   printf '%s' "$doc"
 }
 
-# Every signed-in account's usage, one JSON object per line. This is what
-# `cel quota`, the steward and `cel fleet` all read.
-subscription_all() {
-  local p a t
-  while IFS=$'\t' read -r p a t; do
+# THE LIST. One JSON array of subscription rows, and the only answer anything
+# on this box gives to "which subscriptions does it have": `cel quota --json
+# .subscriptions`, `cel fleet --json .subscriptions`, the console's QUOTA view
+# and the dashboard's card are all this function, so two surfaces cannot
+# disagree about how many accounts are signed in.
+#
+# `--cached` reads the cache directory and asks nobody: that is the fleet
+# path, which is on the console's refresh loop and the dashboard's poll, where
+# a provider having a bad afternoon must not put its latency in front of a
+# draw.
+subscription_list() { # [--cached]
+  local dir; dir="$(_sub_cache_dir)"
+  if [ "${1:-}" = --cached ]; then
+    local f found=""
+    for f in "$dir"/subscription-*.json; do
+      [ -f "$f" ] || continue
+      found="$found$(cat "$f")
+"
+    done
+    printf '%s' "$found" | _sub_fold
+    return 0
+  fi
+
+  local p a t label rows="" keep=""
+  while IFS=$'\t' read -r p a t label; do
     [ -n "$p" ] || continue
-    subscription_usage "$p" "$t" "$a"
-    printf '\n'
-  done < <(_subscription_accounts)
+    rows="$rows$(subscription_usage "$p" "$t" "$a" "$label")
+"
+    keep="$keep subscription-$p-$a.json"
+  done < <(_sub_direct_accounts)
+
+  local row gp ga
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    gp="$(printf '%s' "$row" | jq -r '.provider')"
+    ga="$(printf '%s' "$row" | jq -r '.account')"
+    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+    printf '%s' "$row" > "$dir/subscription-gateway-$gp-$ga.json"
+    chmod 600 "$dir/subscription-gateway-$gp-$ga.json" 2>/dev/null || true
+    rows="$rows$row
+"
+    keep="$keep subscription-gateway-$gp-$ga.json"
+  done < <(_sub_gateway_rows)
+
+  # THE SWEEP. Every file that is not one of this run's identities is a token
+  # hash from before CEL-35 or an account that has been signed out, and both
+  # of them are a row on the console for a subscription that does not exist.
+  local f base
+  for f in "$dir"/subscription-*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    case " $keep " in *" $base "*) continue ;; esac
+    rm -f "$f"
+  done
+
+  printf '%s' "$rows" | _sub_fold
+}
+
+# ONE SUBSCRIPTION READ TWICE IS ONE ROW. pi keeps its own copy of the owner's
+# Claude OAuth and Claude Code keeps another; two rows for it double every
+# window on the display and halve nobody's trust in it. Identical window
+# numbers are the evidence that it is one subscription - different numbers are
+# two logins, and stay two rows.
+#
+# Reads JSON objects on stdin, one per line; prints the array, ordered direct
+# before gateway so the cached path and the live path draw the same list.
+_sub_fold() {
+  jq -sc '
+    [.[] | select(type == "object")]
+    | sort_by((if .source == "gateway" then 1 else 0 end), .provider, .account)
+    | (map(select(.source != "gateway" and .provider == "claude"
+                  and (.account == "pi" or .account == "claude-code")))) as $c
+    | def wk: [.windows[]? | {name, used_pct}] | sort_by(.name);
+      if ($c | length) == 2 and (($c[0] | wk) == ($c[1] | wk)) and (($c[0].windows | length) > 0)
+      then map(select(((.source != "gateway") and (.provider == "claude")
+                       and (.account == "claude-code")) | not))
+           | map(if (.source != "gateway" and .provider == "claude" and .account == "pi")
+                 then .account = "pi+claude-code" | .label = "pi + claude-code"
+                 else . end)
+      else . end' 2>/dev/null || printf '[]'
 }
 
 # Which subscription, if any, a cel provider spends. `anthropic` is the OAuth
@@ -381,7 +504,7 @@ _sub_line() { # <usage-json>
   local state reason
   IFS=$'\t' read -r state reason <<< "$(printf '%s' "$1" | jq -r '[(.extra.state // ""), (.extra.reason // "")] | @tsv')"
   [ "$state" = disabled ] && out="${out}extra: ${reason//_/ }"
-  [ "$state" = unknown ] && out="${out}unreadable (not signed in here, or the endpoint is down)"
+  [ "$state" = unreadable ] && out="${out}unreadable: ${reason}"
   printf '%s' "$out"
 }
 
@@ -400,7 +523,7 @@ cmd_quota() { # [provider] [--json]
   # SUBSCRIPTIONS FIRST, because they are what the fleet actually runs on: the
   # API balances underneath are the fallback routes, and reading the cheap
   # thing before the expensive one is the wrong order for a decision.
-  local subs; subs="$(subscription_all | jq -sc .)"
+  local subs; subs="$(subscription_list)"
   if [ "$json" -eq 1 ]; then
     local bal="[]" p
     for p in $(_quota_providers "$only"); do
@@ -414,20 +537,21 @@ cmd_quota() { # [provider] [--json]
     return 0
   fi
 
-  printf '  %-9s %-14s %s\n' SUBSCRIPTION ACCOUNT WINDOWS
+  printf '  %-9s %-24s %s\n' SUBSCRIPTION ACCOUNT WINDOWS
   if [ "$(printf '%s' "$subs" | jq -r 'length')" = 0 ]; then
     printf '  none - no signed-in Claude or Codex credential on this box\n'
   fi
   local row acct
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    # The account is an IDENTIFIER, not a fact anyone reads in full: Codex's
-    # is a 36-character uuid, and left whole it pushed every window off the
-    # right of the table. Twelve characters still tell two accounts apart.
-    acct="$(printf '%s' "$row" | jq -r '.account')"
-    printf '  %-9s %-14s %s\n' \
+    # The label is what an operator reads - `pi + claude-code`, or the email
+    # the credential file carries. The account underneath it is an IDENTIFIER:
+    # Codex's is a 36-character uuid, and left whole it pushed every window off
+    # the right of the table.
+    acct="$(printf '%s' "$row" | jq -r '.label // .account')"
+    printf '  %-9s %-24s %s\n' \
       "$(printf '%s' "$row" | jq -r '.provider')" \
-      "${acct:0:12}" \
+      "${acct:0:24}" \
       "$(_sub_line "$row")"
   done < <(printf '%s' "$subs" | jq -c '.[]')
   printf '\n'

@@ -155,7 +155,10 @@ test_a_rotated_pi_token_leaves_one_row_and_one_cache_file() {
   rm -f "$CEL_CACHE"/subscription-claude-pi.json
   local out; out="$(subscription_list)"
 
-  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 1
+  # pi and Claude Code are two credential files and so two cache files; what
+  # must NOT be there is a third one minted by the refresh.
+  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 2
+  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-pi.json$')" 1
   [ -f "$CEL_CACHE/subscription-claude-pi.json" ] || {
     printf 'the cache is not keyed by identity: %s\n' "$(ls "$CEL_CACHE")" >&2; return 1; }
   [ -f "$CEL_CACHE/subscription-claude-abc123.json" ] && {
