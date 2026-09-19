@@ -908,8 +908,62 @@ _steward_orphans() {
 }
 
 _STEWARD_UNIT="cel-steward"
-_steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
+# A MAILBOX NOBODY READS MUST NOT BE ABLE TO SWALLOW AN ESCALATION.
+#
+# Counted on this box on 2026-09-19: one workspace's `root` mailbox had taken
+# 553 messages since 10 September - 72 of them escalations - and nothing was
+# obliged to open it. The standing root panes are gone; the console that
+# replaced them is a process that may not be running, and `lib/inbox.sh`
+# raised a desktop notification for the blocking kinds only. One escalation,
+# still unread when this was written, said a reviewer pane had been dead for
+# two days.
+#
+# So the steward escalates the FACT, once per workspace, rolled up on
+# `root-unread-<ws>` and self-clearing: a `blocked` item, which is the kind
+# that already takes the notification path. It names the count and the oldest
+# sender, because "you have mail" is not a reason to go and look.
+#
+# Mail FROM the steward is excluded from the count on purpose: its own alarm
+# would otherwise be the alarm's evidence, and the condition could never clear.
+_STEWARD_ROOT_UNREAD_SECS="${CEL_ROOT_UNREAD_SECS:-3600}"
+_steward_root_unread() {
+  local ws n oldest_secs oldest_from reader rc
+  for ws in $(registry_names); do
+    local f; f="$(_inbox_file "$ws")"
+    [ -s "$f" ] || continue
+    # Only what a person must answer, decide or unblock. Status is the ledger's
+    # job now (CEL-43 part 1), and ranking a pile of it would have been a way
+    # of living with the pile.
+    local waiting
+    waiting="$(inbox_unread_json "$ws" root \
+      | jq -sc --argjson age "$_STEWARD_ROOT_UNREAD_SECS" --arg now "$(date -Is)" '
+          [ .[] | select(.kind == "escalation" or .kind == "decision" or .kind == "blocked")
+                | select(.from != "steward") ]
+          | sort_by(.ts)' 2>/dev/null || printf '[]')"
+    n="$(printf '%s' "$waiting" | jq -r 'length' 2>/dev/null || printf 0)"
+    if [ "${n:-0}" -eq 0 ]; then
+      _steward_clear "$ws" "root-unread-$ws" "root's mail in $ws has been read"
+      continue
+    fi
+    oldest_secs="$(inbox_oldest_unread_secs "$ws" root 'escalation|decision|blocked')"
+    [ "${oldest_secs:-0}" -ge "$_STEWARD_ROOT_UNREAD_SECS" ] || continue
+    # herdr unreachable is NOT evidence that nobody is reading - the same rule
+    # `cel inbox prune` and the orchestrator sweep both learned. Unknown says
+    # nothing this tick.
+    reader="$(inbox_reader_of "$ws" root)"; rc=$?
+    [ "$rc" -eq 2 ] && continue
+    if [ -n "$reader" ]; then
+      _steward_clear "$ws" "root-unread-$ws" "$reader is reading root's mail in $ws again"
+      continue
+    fi
+    oldest_from="$(printf '%s' "$waiting" | jq -r '.[0].from // "someone"')"
+    _steward_raise "$ws" "root-unread-$ws" blocked \
+      "steward: $n unread escalation(s)/decision(s) in $ws addressed to root and nobody is reading that mailbox - oldest is $((oldest_secs / 60))m old, from $oldest_from. Start a root pane, open the console, or read it with 'cel inbox open --for root --workspace $ws --ranked'."
+    c_warn "$ws: root has $n unread, oldest $((oldest_secs / 60))m, nobody reading it"
+  done
+}
 
+_steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 # `cel steward --install` - the thing that actually makes the steward proactive.
 #
 # Every trigger the steward owns (a Linear ticket moved into the workspace's
@@ -1084,6 +1138,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_stalled_workers "$agents_json"
   # An item naming a pane that no longer exists cannot be acted on by anyone.
   _steward_clear_dead_panes
+  # And the mailbox itself: unread escalations with nobody alive to read them.
+  _steward_root_unread
 
   # blocked agents are the human's queue - name them every tick, no dedup
   printf '%s' "$agents_json" | jq -r \

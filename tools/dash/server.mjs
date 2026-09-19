@@ -170,6 +170,18 @@ const viewer = () => cached('viewer', 3600000, async () => {
 // into a pane, so the dashboard is where a human watches it move. Read
 // straight off the JSONL - no cursor is touched here, looking is not reading.
 const INBOX_DIR = process.env.CEL_INBOX_DIR || join(homedir(), '.local', 'share', 'cel', 'inbox');
+const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE || join(INBOX_DIR, 'triage.cache');
+const triageRanks = () => {
+  const out = new Map();
+  let text;
+  try { text = readFileSync(TRIAGE_CACHE(), 'utf8'); } catch { return out; }
+  for (const line of text.split('\n')) {
+    const [id, rank] = line.split('\t');
+    const n = Number(rank);
+    if (id && Number.isFinite(n)) out.set(id, n);
+  }
+  return out;
+};
 const inbox = () => cached('inbox', 8000, async () => {
   const f = join(INBOX_DIR, `${cfg.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
@@ -193,6 +205,14 @@ const inbox = () => cached('inbox', 8000, async () => {
     .filter((it) => (it.kind === 'decision' || it.kind === 'blocked') && !resolved.has(it.id))
     .map((it) => ({ id: it.id, ts: it.ts, to: it.to, from: it.from, kind: it.kind, message: it.message }));
   const marked = mail.map((it) => ({ ...it, unread: !cursors[it.to] || it.id > cursors[it.to] }));
+  // CEL-43: THE SAME ORDER THE CONSOLE DRAWS. A level per message comes from a
+  // decision model through lib/triage.sh, which scores each id once and writes
+  // `<id>\t<rank>` to a cache; this card reads the cache and does the ordering
+  // itself - the model supplies the level and nothing else. No cache (or no
+  // model) is today's ordering, by the kind's own default, not a loss.
+  const ranks = triageRanks();
+  const KIND_RANK = { blocked: 3, decision: 2, escalation: 2, update: 1, status: 0 };
+  for (const it of marked) it.rank = ranks.has(it.id) ? ranks.get(it.id) : (KIND_RANK[it.kind] ?? 0);
   // "Are the inboxes backed up?" should be answerable without counting rows:
   // per recipient, how many unread and how long the OLDEST has waited.
   const byWho = {};
@@ -201,7 +221,12 @@ const inbox = () => cached('inbox', 8000, async () => {
     w.total += 1;
     if (it.unread) { w.unread += 1; if (!w.oldest) w.oldest = it.ts; }
   }
-  return { items: marked.slice(-40).reverse(), byWho: Object.values(byWho).sort((a, b) => b.unread - a.unread), open };
+  // Unread first, most urgent first inside that, newest first inside a level:
+  // the top of this card is what a person should answer next, and read mail
+  // keeps its old newest-first shape underneath.
+  const shown = marked.slice(-40).reverse().sort((a, b) =>
+    (Number(b.unread) - Number(a.unread)) || (b.rank - a.rank));
+  return { items: shown, byWho: Object.values(byWho).sort((a, b) => b.unread - a.unread), open };
 });
 
 // My Linear queue, SCOPED TO THIS WORKSPACE's teams (repos' linear_team

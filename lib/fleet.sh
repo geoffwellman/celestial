@@ -256,11 +256,17 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   [ -d "$wsdir" ] || return 0
   [ -f "$wsdir/workspace.yaml" ] || return 0
 
-  local unread open units product
+  local unread open units product mail
   unread="$(_inbox_count --for root --workspace "$ws" 2>/dev/null || printf 0)"
   [ -n "$unread" ] || unread=0
   open="$(_inbox_open --for root --workspace "$ws" 2>/dev/null | grep -c . || true)"
   [ -n "$open" ] || open=0
+  # WHETHER ROOT'S MAIL IS GOING ANYWHERE AT ALL. Every view of this box reads
+  # `cel fleet --json`, and until CEL-43 none of them could say who was alive
+  # to read the mailbox everything escalates to - so 72 escalations in nine
+  # days landed somewhere nobody was obliged to look.
+  mail="$(inbox_mail_json "$ws" root 2>/dev/null)"
+  [ -n "$mail" ] || mail='{"to_root_unread":0,"oldest_secs":0,"reader":""}'
 
   units=""
   for product in $(ws_product_names "$wsdir" 2>/dev/null); do
@@ -269,8 +275,28 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   done
 
   printf '%s' "$units" | jq -sc --arg name "$ws" \
-    --argjson unread "$unread" --argjson open "$open" \
-    '{name: $name, root: {unread: $unread, open: $open}, units: .}'
+    --argjson unread "$unread" --argjson open "$open" --argjson mail "$mail" \
+    '{name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: .}'
+}
+
+# ONE LINE FOR A MAILBOX NOBODY READS, for `cel doctor`. It lives here rather
+# than in lib/doctor.sh for the same reason gc_doctor_line and
+# orphans_doctor_line do: the check belongs beside the facts it reads.
+#
+# Silent when someone is reading, and silent when there is nothing unread. A
+# watcher that speaks every tick is a watcher people stop reading - which is
+# how root got to 553 messages in the first place.
+fleet_mail_doctor_line() { # <ws> -> one line, or nothing
+  local mail n secs reader age
+  mail="$(inbox_mail_json "$1" root 2>/dev/null)" || return 0
+  [ -n "$mail" ] || return 0
+  n="$(printf '%s' "$mail" | jq -r '.to_root_unread')"
+  secs="$(printf '%s' "$mail" | jq -r '.oldest_secs')"
+  reader="$(printf '%s' "$mail" | jq -r '.reader')"
+  [ "${n:-0}" -gt 0 ] || return 0
+  [ -z "$reader" ] || return 0
+  if [ "${secs:-0}" -ge 3600 ]; then age="$(( secs / 3600 ))h"; else age="$(( secs / 60 ))m"; fi
+  printf '  %s: root has %s unread, oldest %s, nobody reading it\n' "$1" "$n" "$age"
 }
 
 _fleet_render() { # <doc>

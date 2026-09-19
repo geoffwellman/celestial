@@ -1534,8 +1534,9 @@ test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
   assert_contains "$out" 'the reviewer pane is dead'
   assert_contains "$out" 'ship the bundle or hold'
   assert_contains "$out" 'and 2 more'
-  # the top line is the escalation, not the newest message
-  assert_contains "${out#*MAIL}" 'the reviewer pane is dead'
-  case "${out%%and 2 more*}" in *'also nothing to do'*) echo 'drew past the cut'; return 1;; esac
+  # the ranked block itself: the escalation on top, and nothing past the cut
+  local block; block="${out#*MAIL (most urgent first)}"; block="${block%%and 2 more*}"
+  assert_contains "$(printf '%s' "$block" | sed -n 2p)" 'the reviewer pane is dead'
+  case "$block" in *'also nothing to do'*) echo 'drew past the cut'; return 1;; esac
   _console_teardown
 }

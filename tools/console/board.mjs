@@ -175,10 +175,56 @@ export const mailSince = (ws, iso) => {
     try {
       const m = JSON.parse(raw);
       if ((Date.parse(m.ts) || 0) < floor) continue;
-      out.push({ ws, ts: m.ts || '', kind: m.kind || 'status', from: m.from || '-', to: m.to || '', message: String(m.message || '').replace(/\n/g, ' ') });
+      out.push({ ws, id: m.id || '', ts: m.ts || '', kind: m.kind || 'status', from: m.from || '-', to: m.to || '', message: String(m.message || '').replace(/\n/g, ' ') });
     } catch { /* a half-written line is not a message */ }
   }
   return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+};
+
+// --- CEL-43: what is left, ranked -------------------------------------------
+//
+// Root's mailbox was drawn newest-first, so a status line from a minute ago
+// sat above an escalation from yesterday saying a reviewer pane had died.
+// The LEVELS come from a decision model through lib/triage.sh, which scores a
+// message once and writes `<id>\t<rank>` to a cache; the console reads that
+// cache and does the ordering and the cut itself. The console never scores
+// anything: it redraws every ten seconds, and a score per draw is a provider
+// bill per operator per day.
+export const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE
+  || join(homedir(), '.local/share/cel/inbox/triage.cache');
+
+export const triageRanks = () => {
+  const out = new Map();
+  let text;
+  try { text = readFileSync(TRIAGE_CACHE(), 'utf8'); } catch { return out; }
+  for (const line of text.split('\n')) {
+    const [id, rank] = line.split('\t');
+    if (!id) continue;
+    const n = Number(rank);
+    if (Number.isFinite(n)) out.set(id, n);
+  }
+  return out;
+};
+
+// What a kind means when nobody has scored it - the same table as
+// lib/triage.sh's triage_default_rank, so an unreachable model degrades to
+// today's ordering on both surfaces rather than to two different ones.
+export const KIND_RANK = { blocked: 3, decision: 2, escalation: 2, update: 1, status: 0 };
+export const rankOf = (m, ranks) => (ranks.has(m.id) ? ranks.get(m.id) : (KIND_RANK[m.kind] ?? 0));
+
+export const TOP_N = Number(process.env.CEL_INBOX_TOP_N || 3);
+
+// The top `top` since the cursor, most urgent first and oldest first inside a
+// level, plus how many were cut. Ordering and the cut are CODE's: a ranker
+// that also decided how much to show could hide a message by scoring it low
+// and shortening the list in the same breath.
+export const rankedMail = (ws, { now = Date.now(), top = TOP_N } = {}) => {
+  const ranks = triageRanks();
+  const mail = mailSince(ws, since(ws, now))
+    .filter((m) => m.to === 'root' || m.to === 'all')
+    .map((m) => ({ ...m, rank: rankOf(m, ranks) }))
+    .sort((a, b) => (b.rank - a.rank) || String(a.ts).localeCompare(String(b.ts)));
+  return { top: mail.slice(0, top), more: Math.max(0, mail.length - top) };
 };
 
 // --- the digest ------------------------------------------------------------
