@@ -265,6 +265,48 @@ check_console_deps() {
   return 0
 }
 
+# A LEAKED SUITE LOCK IS A BOX-WIDE OUTAGE AND NOTHING ELSE SAYS SO. On
+# 2026-09-19 every gate on this box queued behind the suite lock for eighteen
+# minutes; the holder was a `sleep 1800` with ppid 1 that had inherited the
+# runner's lock descriptor and kept the lock alive after the runner was gone.
+# The lock is fixed at the source (tests/run.sh and cel-verify now spawn every
+# child with the descriptor closed), but a lock is held by whatever holds it,
+# and an operator staring at a queue needs to be told which of the two it is.
+# Held by a live suite is normal and silent; held while the pid in the file is
+# gone, or is running somewhere that is not a checkout, is a leak - a suite
+# runs from inside a checkout, a stray `sleep` does not.
+#
+# The path is resolved the same way tests/run.sh resolves it; doctor takes no
+# lock of its own, it only asks whether one can be taken.
+_doctor_suite_lock_path() {
+  if [ -n "${CEL_SUITE_LOCK:-}" ]; then printf '%s' "$CEL_SUITE_LOCK"; return 0; fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    printf '%s/cel-suite.lock' "$XDG_RUNTIME_DIR"; return 0
+  fi
+  printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
+}
+
+doctor_suite_lock_line() { # -> one line when the box's suite lock has leaked
+  local path pid cwd cmd
+  path="$(_doctor_suite_lock_path)"
+  [ "$path" = none ] && return 0
+  [ -f "$path" ] || return 0
+  have flock || return 0
+  # Nobody is holding it: there is nothing to report, stale contents or not.
+  flock -n "$path" -c true >/dev/null 2>&1 && return 0
+  pid="$(sed -n 1p "$path" 2>/dev/null | awk '{print $1}' || true)"
+  case "$pid" in ''|*[!0-9]*) printf 'suite lock held with no holder recorded (%s) - kill it or run cel gc --orphans\n' "$path"; return 0;; esac
+  if kill -0 "$pid" 2>/dev/null; then
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    # A checkout is where a suite runs from. Anything else holding this lock
+    # inherited it rather than took it.
+    [ -n "$cwd" ] && [ -e "$cwd/.git" ] && return 0
+  fi
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-40)"
+  [ -n "$cmd" ] || cmd="gone"
+  printf 'suite lock leaked (pid %s, %s) - kill it or run cel gc --orphans\n' "$pid" "${cmd% }"
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -377,6 +419,11 @@ cmd_doctor() {
   # sweep of its own - doctor must not take the registry lock to run.
   local gcline; gcline="$(gc_doctor_line)"
   [ -z "$gcline" ] || c_warn "$gcline"
+
+  # One line, and only when the box-wide suite lock is held by something that
+  # is not running tests - which blocks every gate on the box until it dies.
+  local lockline; lockline="$(doctor_suite_lock_line)"
+  [ -z "$lockline" ] || c_warn "$lockline"
 
   echo
   [ "$fail" = 0 ] && printf '\033[32mdoctor: OK\033[0m\n' || printf '\033[31mdoctor: problems found\033[0m\n'

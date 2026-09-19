@@ -97,6 +97,9 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
         flock "$suite_lock_fd"
         g_waited=$(( $(date +%s) - lock_t0 ))
       fi
+      # pid, start time and cwd, in the same shape tests/run.sh writes: a
+      # waiter (and `cel doctor`) can then name what is in front of it.
+      printf '%s %s %s\n' "$$" "$(date +%H:%M)" "$wt" > "$suite_lock"
       # Whatever this gate starts is inside the lock now - and this gate is
       # very often `bash tests/run.sh`, which would otherwise queue behind the
       # verifier that launched it.
@@ -124,7 +127,14 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
     exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
   gate_pid=$!
-  ( sleep "$gate_timeout"
+  # AND NEITHER DOES THE WATCHDOG. On 2026-09-19 every gate on the box queued
+  # for eighteen minutes behind `sleep 1800`, ppid 1: this watchdog's sleep,
+  # orphaned when the gate finished early and the watchdog shell was killed,
+  # still holding the suite lock descriptor it had inherited. The gate's own
+  # children were already spawned with the descriptor closed; this one was not,
+  # and a lock held by a stray sleep looks exactly like a lock in use.
+  ( { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; } || true
+    sleep "$gate_timeout"
     kill -0 "$gate_pid" 2>/dev/null || exit 0
     : > "$gate_killed"
     kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null

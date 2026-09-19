@@ -213,3 +213,38 @@ test_the_gate_does_not_queue_behind_a_lock_its_caller_holds() {
   assert_eq "$(_v .gate.waited_secs)" 0
   rm -rf "$T"
 }
+
+# THE TIMEOUT WATCHDOG MUST NOT HOLD THE LOCK EITHER. On 2026-09-19 every gate
+# on the box queued for eighteen minutes behind a `sleep 1800` with ppid 1:
+# this verifier's watchdog sleep, orphaned when the gate finished early and the
+# watchdog shell was killed, still holding the suite lock descriptor it had
+# inherited. The gate's own children were already spawned with the descriptor
+# closed; the watchdog was not, and a lock held by a stray sleep looks exactly
+# like a lock in use.
+test_the_gate_timeout_watchdog_does_not_keep_the_suite_lock() {
+  _vrepo; _vcommit impl src/a.ts
+  local lock="$T/suite.lock"
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" --gate 'true' --gate-timeout 30 --quiet
+  local i=0
+  while ! flock -n "$lock" -c true >/dev/null 2>&1; do
+    sleep 0.1; i=$((i + 1))
+    [ "$i" -lt 20 ] || { echo "the suite lock outlived the verifier that took it"; rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+
+# A gate that backgrounds a process does not hand it the box's suite lock: the
+# gate and everything under it are inside the lock by ENVIRONMENT, never by
+# descriptor.
+test_a_process_the_gate_leaves_behind_does_not_hold_the_suite_lock() {
+  _vrepo; _vcommit impl src/a.ts
+  local lock="$T/suite.lock" pidfile="$T/sleeper.pid"
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" \
+    --gate "setsid sleep 30 >/dev/null 2>&1 & echo \$! > '$pidfile'" --gate-timeout 30 --quiet
+  local sleeper; sleeper="$(cat "$pidfile")"
+  local held=0
+  ls -l "/proc/$sleeper/fd" 2>/dev/null | grep -q "suite.lock" && held=1
+  kill -9 "$sleeper" 2>/dev/null || true
+  rm -rf "$T"
+  assert_eq "$held" 0
+}
