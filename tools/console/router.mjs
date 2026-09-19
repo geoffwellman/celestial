@@ -128,6 +128,29 @@ export const facts = (doc, items = [], services = [], roster = []) => {
   };
 };
 
+// The model's own answers for the two slots a sentence can leave out. They
+// are HINTS and nothing else: every one of them is checked against the names
+// the box actually has before it reaches a command line, and `unclear` - the
+// option that exists so the model has somewhere honest to put "I cannot see
+// one" - is never an answer at all.
+export const UNCLEAR = 'unclear';
+
+const hintedProduct = (s, f, hints) => {
+  const named = productIn(s, f);
+  if (named) return named;
+  const h = hints && hints.product;
+  if (!h || h === UNCLEAR) return null;
+  return (f.products || []).find((p) => p.name === h) || null;
+};
+
+const hintedWorkspace = (s, f, hints) => {
+  const named = workspaceIn(s, f);
+  if (named) return named;
+  const h = hints && hints.workspace;
+  if (!h || h === UNCLEAR) return null;
+  return (f.workspaces || []).includes(h) ? h : null;
+};
+
 const state = (sentence, f) => ({
   sentence,
   services: (f.services || []).map((s) => s.name),
@@ -292,15 +315,18 @@ export const shellQuote = (text) => `'${String(text).replace(/[\r\n\t]+/g, ' ').
 // One intent, one sentence, the facts: the command lines, or null for a miss.
 // `selected` is the waiting item the operator has highlighted, which is what
 // "resolve that one" means in front of a screen.
-export const plan = (intent, sentence, f, { selected = null } = {}) => {
+export const plan = (intent, sentence, f, { selected = null, hints = null } = {}) => {
   const s = String(sentence || '');
   switch (intent) {
     case 'fleet':
       return ['cel fleet'];
 
     case 'product_status': {
-      const p = productIn(s, f);
-      const ws = p ? p.workspace : workspaceIn(s, f);
+      // The deterministic filler first, ALWAYS: a name the operator typed
+      // beats a name a model guessed at, and only when there is no name at
+      // all does the model's own answer get to fill the slot.
+      const p = hintedProduct(s, f, hints);
+      const ws = p ? p.workspace : hintedWorkspace(s, f, hints);
       if (!ws) return null;
       return [
         'cel fleet',
@@ -310,7 +336,7 @@ export const plan = (intent, sentence, f, { selected = null } = {}) => {
     }
 
     case 'waiting': {
-      const ws = workspaceIn(s, f);
+      const ws = hintedWorkspace(s, f, hints);
       return [ws
         ? `cel inbox open --for root --workspace ${ws}`
         : 'cel inbox open --for root --all-workspaces'];
@@ -541,6 +567,13 @@ export const steerFor = (intent, sentence, f) => {
 
 export const OPTIONS_MAX = 3;
 
+// TWO, not three, when the console is asking a question back. "did you mean
+// (1) a or (2) b?" is a question a person answers; a menu of three with
+// probabilities beside them is a form they fill in. The ordering is the
+// model's own probability map, which arrives in the same answer - `choice`
+// returns a probability for EVERY option, so ranking costs no second call.
+export const ASK_OPTIONS = 2;
+
 // Below the confidence floor the router is guessing, and a guess belongs in
 // the options UI where a person picks. The three most likely intents, each
 // already expanded where its slots allow, with the probability as the reason:
@@ -549,7 +582,7 @@ export const OPTIONS_MAX = 3;
 export const options = (probabilities, sentence, f, opts = {}) => Object
   .entries(probabilities || {})
   .sort((a, b) => b[1] - a[1])
-  .slice(0, OPTIONS_MAX)
+  .slice(0, opts.limit || OPTIONS_MAX)
   .map(([intent, p]) => {
     const cmds = plan(intent, sentence, f, opts) || [];
     return { intent, cmd: cmds.join(' ; '), cmds, reason: p.toFixed(2), p };
@@ -582,12 +615,28 @@ export const routerConfig = (configPath, root = CEL_ROOT) => {
   const api = process.env.CEL_CONSOLE_ROUTER_URL || table.api;
   const url = decisionsUrl(provider, api);
   const floor = Number(r.min_confidence);
+  const num = (v, dflt) => (Number.isFinite(Number(v)) ? Number(v) : dflt);
+  // THE BAND, not a single floor. `min_confidence` was one threshold with
+  // nothing below it: under it the console shrugged and the operator typed
+  // the command themselves. Confidence is a distribution and it should route
+  // - sure runs, unsure proposes, lost asks - so the old key survives as the
+  // run threshold for boxes that set it, and the two new ones are defaulted
+  // here rather than required in anybody's config.
+  const legacy = Number.isFinite(floor) ? floor : null;
+  const run = num(r.run_confidence, legacy === null ? RUN_CONFIDENCE : legacy);
+  const propose = num(r.propose_confidence, PROPOSE_CONFIDENCE);
   return {
     provider,
     model: r.model || table.default_model || '',
     key,
     url,
-    minConfidence: Number.isFinite(floor) ? floor : 0.6,
+    minConfidence: legacy === null ? run : legacy,
+    runConfidence: run,
+    // A propose floor above the run floor is a config that can never propose.
+    // Clamped rather than refused: the console is not the place to fail a box
+    // over an edited number.
+    proposeConfidence: Math.min(propose, run),
+    rowsInline: num(cfg.console.rows_inline, ROWS_INLINE),
   };
 };
 
@@ -598,26 +647,166 @@ export const routerLabel = (configPath, root = CEL_ROOT) => {
 
 export class NoRouter extends Error {}
 
+// The bands, defaulted here and overridable under `console.router:` as
+// `run_confidence` and `propose_confidence`; `console.rows_inline` is the
+// number of rows past which a table stops being readable and starts being a
+// wall of text.
+export const RUN_CONFIDENCE = 0.75;
+export const PROPOSE_CONFIDENCE = 0.5;
+export const ROWS_INLINE = 6;
+
+// Above this a sentence is treated as dangerous whatever the intent's own
+// confidence says. Sure is not the same as safe.
+export const DESTRUCTIVE_FLOOR = 0.5;
+// Below this the state does not hold the answer, and proposing a command that
+// cannot help is worse than saying so - the semantic-find existence check.
+export const ANSWERABLE_FLOOR = 0.35;
+
 // One request per sentence, ten seconds, NO RETRIES. A router that retries is
 // a router that costs more than the chat model it replaced on exactly the
 // days the provider is unwell; the fall-through is already a working path.
 export const ROUTER_TIMEOUT = 10000;
 
-const askDecision = async (cfg, sentence, f) => {
-  const body = {
-    model: cfg.model,
-    state: state(sentence, f),
-    questions: {
-      intent: {
-        type: 'choice',
-        instructions: 'What does the operator want the console to do?',
-        // `criteria`, not `options`: the endpoint's own name for the set, one
-        // rubric per choice. Verified against the live API on 2026-09-18 -
-        // sending `options:` is a 400 naming this field.
-        criteria: Object.fromEntries(INTENTS),
-      },
+// MANY QUESTIONS COST NOTHING. The decisions endpoint evaluates every
+// question in one request IN PARALLEL, so a speculative question you may not
+// use is free - and the router used to spend its one call on a single label
+// and then fill every slot with a regex. It still fills ids with regexes,
+// because an id the model invented is somebody else's worker; what the model
+// adds is the two slots a sentence can leave implicit, and two yes/no
+// questions about what should happen next.
+export const questions = (f) => {
+  const listed = (names, what) => Object.fromEntries([
+    ...names.map((n) => [n, `the ${what} called ${n}`]),
+    [UNCLEAR, `the sentence does not name a ${what}`],
+  ]);
+  return {
+    intent: {
+      type: 'choice',
+      instructions: 'What does the operator want the console to do?',
+      // `criteria`, not `options`: the endpoint's own name for the set, one
+      // rubric per choice. Verified against the live API on 2026-09-18 -
+      // sending `options:` is a 400 naming this field.
+      criteria: Object.fromEntries(INTENTS),
+    },
+    workspace: {
+      type: 'choice',
+      instructions: 'Which workspace is the sentence about?',
+      criteria: listed(f.workspaces || [], 'workspace'),
+    },
+    product: {
+      type: 'choice',
+      instructions: 'Which product is the sentence about?',
+      criteria: listed((f.products || []).map((p) => p.name), 'product'),
+    },
+    destructive: {
+      type: 'noul',
+      instructions: 'Would carrying this out discard work, kill a process, or change GitHub state?',
+    },
+    answerable: {
+      type: 'noul',
+      instructions: 'Does the state above contain what is needed to answer the sentence?',
     },
   };
+};
+
+// The endpoint spells an answer three or four ways depending on the question
+// type and the provider in front of it. Read defensively, never guess: an
+// unreadable probability is ABSENT, and absent means the band it would have
+// moved is left where it was.
+const choiceOf = (a) => (typeof a === 'string' ? a : (a?.value || a?.choice || a?.answer || ''));
+const numberOf = (a) => {
+  const n = Number(typeof a === 'object' && a !== null
+    ? (a.probability ?? a.value ?? a.score ?? a.confidence)
+    : a);
+  return Number.isFinite(n) ? n : null;
+};
+
+// --- CEL-41: triage -------------------------------------------------------
+//
+// `choice` returns a probability for EVERY option, which is how the
+// semantic-find cookbook ranks 218 lines in one request. A worker table is
+// the same shape of problem: one option per row, plus `none` so "no row
+// answers this" has somewhere to go.
+export const rowId = (row) => String((row && (row.id || row.ticket)) || '');
+
+export const relevantQuestion = (sentence, rows) => ({
+  type: 'choice',
+  instructions: `Which of these rows answer the operator's question: "${sentence}"?`,
+  criteria: Object.fromEntries([
+    ...(rows || []).map((r) => [rowId(r), rowLabel(r)]),
+    ['none', 'none of these rows answers the question'],
+  ]),
+});
+
+// What a row looks like to the classifier: the fields that decide whether it
+// matters, and not the whole record. The console holds the rest.
+export const rowLabel = (r) => [
+  r.ticket || r.id, r.state, r.verdict ? `verdict ${r.verdict}` : '', r.live ? `agent ${r.live}` : '',
+  r.pr ? 'has a pull request' : '',
+].filter(Boolean).join(', ');
+
+// The levels, in order, as the score question takes them. Ordered level
+// DESCRIPTIONS rather than a number the model is asked to pick: `score`
+// returns a probability-weighted position over them, which is a thing a
+// classifier can do and "rate this 0-3" is not.
+export const ATTENTION_LEVELS = [
+  'finished or landed - nothing to do',
+  'running normally',
+  'waiting on a person (review, approval, a decision)',
+  'stuck or failing - needs the operator now',
+];
+
+export const attentionQuestion = (row) => ({
+  type: 'score',
+  instructions: `How much does ${rowLabel(row)} need the operator right now?`,
+  levels: ATTENTION_LEVELS,
+});
+
+// Above the floor, in probability order, capped. The floor exists because a
+// choice over 22 options gives every one of them some probability, and a row
+// at 0.02 is the model saying no.
+export const RELEVANT_FLOOR = 0.15;
+export const RELEVANT_MAX = 5;
+export const pickRelevant = (probabilities, { floor = RELEVANT_FLOOR, max = RELEVANT_MAX } = {}) => Object
+  .entries(probabilities || {})
+  .filter(([id, p]) => id !== 'none' && Number(p) >= floor)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, max)
+  .map(([id]) => id);
+
+// One request for a table: which rows matter, and how urgent each one is.
+// Every question in it is evaluated in parallel, so the attention scores cost
+// nothing beside the selection they refine. Rows are capped because a ledger
+// with three hundred rows in it is state nobody asked about (#5).
+export const TRIAGE_ROWS_MAX = 40;
+export const triage = async ({ sentence, rows = [], configPath, root = CEL_ROOT, attention = true }) => {
+  const cfg = routerConfig(configPath, root);
+  if (!cfg) throw new NoRouter('no router configured');
+  if (!cfg.url) throw new NoRouter(`router: provider '${cfg.provider}' has no api: in agents.yaml`);
+  if (!cfg.key) throw new NoRouter('router: no key for the router provider');
+  const list = rows.slice(0, TRIAGE_ROWS_MAX);
+  const qs = { relevant: relevantQuestion(sentence, list) };
+  if (attention) for (const r of list) qs[`attention_${rowId(r)}`] = attentionQuestion(r);
+  const doc = await post(cfg, {
+    model: cfg.model,
+    state: { sentence, rows: list.map((r) => ({ id: rowId(r), about: rowLabel(r) })) },
+    questions: qs,
+  });
+  const a = doc?.answers?.relevant;
+  const probabilities = (a && typeof a === 'object' && a.probabilities) || {};
+  const ids = pickRelevant(probabilities);
+  const scores = {};
+  for (const r of list) {
+    const s = numberOf(doc?.answers?.[`attention_${rowId(r)}`]);
+    if (s !== null) scores[rowId(r)] = s;
+  }
+  // Sorted by the model's own urgency where it gave one: the operator reads
+  // the top line first and it should be the one that is on fire.
+  const ordered = [...ids].sort((x, y) => (scores[y] ?? -1) - (scores[x] ?? -1));
+  return { ids: ordered, attention: scores, probabilities };
+};
+
+const post = async (cfg, body) => {
   const res = await fetch(cfg.url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
@@ -625,15 +814,29 @@ const askDecision = async (cfg, sentence, f) => {
     signal: AbortSignal.timeout(ROUTER_TIMEOUT),
   });
   if (!res.ok) throw new Error(`router: ${cfg.provider} answered HTTP ${res.status}`);
-  const doc = await res.json();
+  return res.json();
+};
+
+const askDecision = async (cfg, sentence, f) => {
+  const doc = await post(cfg, {
+    model: cfg.model,
+    state: state(sentence, f),
+    questions: questions(f),
+  });
   const a = doc?.answers?.intent;
-  const value = typeof a === 'string' ? a : a?.value || a?.choice || a?.answer || '';
+  const value = choiceOf(a);
   if (!INTENT_NAMES.includes(value)) throw new Error(`router: unknown intent '${value}'`);
   const confidence = Number(typeof a === 'object' ? a.confidence : NaN);
   return {
     intent: value,
     confidence: Number.isFinite(confidence) ? confidence : 1,
     probabilities: (typeof a === 'object' && a.probabilities) || { [value]: Number.isFinite(confidence) ? confidence : 1 },
+    hints: {
+      workspace: choiceOf(doc?.answers?.workspace) || '',
+      product: choiceOf(doc?.answers?.product) || '',
+    },
+    destructive: numberOf(doc?.answers?.destructive),
+    answerable: numberOf(doc?.answers?.answerable),
   };
 };
 
@@ -641,6 +844,28 @@ const askDecision = async (cfg, sentence, f) => {
 // is nothing configured and a plain Error on any failure - both mean the same
 // thing to the caller, which is "ask the chat model", and the caller is the
 // only place that knows how to say that to a person.
+// WHICH BAND A SENTENCE LANDS IN. One threshold used to gate: above it the
+// console proposed, below it nothing happened at all. A probability carries
+// more than a yes, so it routes - and two of the speculative questions can
+// pull a sentence DOWN a band whatever the intent's own confidence says.
+export const band = ({ confidence, destructive = null, answerable = null, cmds, cfg }) => {
+  if (!cmds) return 'ask';
+  // Sure is not safe. A release the model is 0.95 certain about still
+  // discards somebody's branch, so it is proposed and a person presses Enter.
+  if (destructive !== null && destructive > DESTRUCTIVE_FLOOR) return 'propose';
+  // The state does not hold the answer: say so rather than proposing a
+  // command that cannot help.
+  if (answerable !== null && answerable < ANSWERABLE_FLOOR) return 'ask';
+  if (confidence >= cfg.runConfidence) return 'run';
+  if (confidence >= cfg.proposeConfidence) return 'propose';
+  return 'ask';
+};
+
+export const proposeReason = (intent) => `I think you mean ${intent} - Enter runs it`;
+export const askReason = (opts) => (opts.length >= 2
+  ? `did you mean (1) ${opts[0].intent} or (2) ${opts[1].intent}?`
+  : `did you mean ${opts.length ? `(1) ${opts[0].intent}` : 'something else'}?`);
+
 export const route = async ({ sentence, doc, items = [], services = [], roster = [], configPath, root = CEL_ROOT, selected = null }) => {
   const cfg = routerConfig(configPath, root);
   if (!cfg) throw new NoRouter('no router configured');
@@ -648,23 +873,30 @@ export const route = async ({ sentence, doc, items = [], services = [], roster =
   if (!cfg.key) throw new NoRouter('router: no key for the router provider');
   const f = facts(doc, items, services, roster);
   const started = Date.now();
-  const { intent, confidence, probabilities } = await askDecision(cfg, sentence, f);
+  const { intent, confidence, probabilities, hints, destructive, answerable } = await askDecision(cfg, sentence, f);
   const ms = Date.now() - started;
-  const cmds = plan(intent, sentence, f, { selected });
+  const cmds = plan(intent, sentence, f, { selected, hints });
   // Confident and fillable is a proposal. Confident and UNFILLABLE is a miss
   // for that intent - the model was sure it was a `why`, and there is no such
   // worker on the box - so the chat model gets it rather than the console
   // inventing an id.
-  if (confidence >= cfg.minConfidence && cmds) {
-    return { intent, confidence, probabilities, ms, cmds, options: [], steer: steerFor(intent, sentence, f) };
-  }
-  return {
-    intent,
-    confidence,
-    probabilities,
-    ms,
-    cmds: null,
+  const decision = band({ confidence, destructive, answerable, cmds, cfg });
+  const common = {
+    intent, confidence, probabilities, ms, decision, destructive, answerable, hints,
     steer: steerFor(intent, sentence, f),
-    options: options(probabilities, sentence, f, { selected }).filter((o) => o.intent !== 'other'),
   };
+  if (decision !== 'ask') {
+    return {
+      ...common,
+      cmds,
+      options: [],
+      reason: decision === 'propose' ? proposeReason(intent) : '',
+    };
+  }
+  // THE QUESTION BACK, built from the top two intents by the model's own
+  // probabilities. The console used to offer three candidates off a miss
+  // list; the probabilities came back in the same answer all along.
+  const opts = options(probabilities, sentence, f, { selected, hints, limit: ASK_OPTIONS })
+    .filter((o) => o.intent !== 'other');
+  return { ...common, cmds: null, options: opts, reason: askReason(opts) };
 };

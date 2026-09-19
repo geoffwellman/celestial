@@ -278,7 +278,11 @@ console:
     provider: openrouter        # openrouter | typesafe
     model: typesafe/jev-1.13    # on typesafe: jev-latest
     key_env: OPENROUTER_API_KEY # else console.key_env, else console.key
-    min_confidence: 0.6         # below this, the top three become options
+    run_confidence: 0.75        # at or above this, the chain is proposed as usual
+    propose_confidence: 0.5     # at or above this, proposed with the intent named
+  rows_inline: 6                # more rows than this and the console answers instead
+  summary_timeout: 4            # seconds the English summary may take before the
+                                # counted lines stand on their own
 ```
 
 ### The router
@@ -297,8 +301,54 @@ product in the fleet it already holds, takes the workspace that owns it and
 builds the three commands. A slot it cannot fill (no product named, a ticket
 no worker carries) is a **miss**, and a miss falls through to the chat model
 rather than guessing: a guessed `--workspace` is somebody else's mailbox.
-Below `min_confidence` the top three intents are offered as options, each
-already expanded to its command, with the probability as the reason.
+
+Every question goes in **one request**. The decisions endpoint evaluates them
+in parallel, so asking five costs what asking one costs: beside the intent the
+console asks which workspace and which product the sentence is about (used
+*only* where no name was typed — an id always comes from the sentence, never
+from the model), whether carrying it out would discard work, kill a process or
+change GitHub state, and whether the state even holds the answer.
+
+Confidence then **routes** rather than merely gating:
+
+- at or above `run_confidence` (0.75) the chain is proposed as it always was;
+- at or above `propose_confidence` (0.5) it is proposed with the intent named
+  — `I think you mean product_status - Enter runs it`;
+- below that, the console asks one question back, built from the top two
+  intents in the model's own probability order: `did you mean (1)
+  product_status or (2) fleet?`
+
+A sentence the model calls destructive is proposed rather than run however
+sure it was of the label: sure is not the same as safe. (`min_confidence` from
+before this still works and is read as `run_confidence`.)
+
+### Answers instead of transcripts
+
+Ask about one stalled worker and the console used to print the whole worker
+table. When a command returns more than `rows_inline` (6) rows, three things
+now share the work and none of them does another's job:
+
+- the **decision model** picks *which* rows answer the question — `choice`
+  returns a probability for every option, so ranking twenty-two rows is one
+  request — and scores how urgent each is, from `nothing to do` to `stuck or
+  failing - needs you now`. It writes nothing;
+- the **console** computes every number exactly from the fleet JSON it already
+  holds: the counts, the ages, the tally of everything left out;
+- the **chat model** turns those counted facts into two to four plain lines.
+
+```
+  3 of 22 workers need you.
+  ABC-49    stuck - needs you now, stalled 41m   (worker ABC-49-slug)
+  ABC-51    waiting on a person, finished 2h, PR #61   (worker ABC-51-slug)
+  ABC-53    stuck - needs you now, refused 5m   (worker ABC-53-slug)
+  19 others: 14 landed, 3 running normally, 2 released.  `a` shows them all.
+```
+
+No number in the prose may be absent from the facts it was given — an invented
+count is refused and the counted lines stay. Those lines are drawn first and
+the English is swapped in only if it arrives inside `summary_timeout` (4 s),
+so the console never waits on a model for an answer it already has. `a` (or
+`r`) shows the full transcript, unchanged.
 
 The chat model keeps the two jobs that need prose — the answer written from
 what the commands printed, and every sentence the router could not place — so
