@@ -274,3 +274,95 @@ test_inbox_watch_exits_when_its_parent_is_gone() {
   rm -rf "$T2"
   return 1
 }
+
+# --- box services are protected by IDENTITY, not by a hopeful substring ----
+
+# THE FIRST CUT OF THIS PROTECTION WAS DEAD CODE. It matched the strings
+# `cel-auth-gateway`, `cel-auth-broker` and `/services.d/` against the
+# cmdline - and lib/gateway.sh declares those services as
+# `omp auth-broker serve --bind 127.0.0.1:47311`, so not one of the three
+# substrings occurs in any process on this box. The gateway survived the
+# sweep by luck: its cwd happened to exist. Give it a deleted cwd, or a
+# `--reap` that ever widens, and the plane kills the door to every
+# subscription it owns and cannot say why.
+#
+# So a box service is now identified the way the box itself identifies one:
+# the declaration in services.d, resolved to the pid that is actually
+# listening on its port or the pid its state file records - and the whole
+# tree under that pid, because a service that forks a worker did not stop
+# being a service. The argv in this fixture is deliberately unrelated to
+# anything the plane greps for.
+_service_fixture() { # -> T, P, SVC_PID, PORT
+  T="$(mktemp -d)"
+  P="$T/proc"
+  mkdir -p "$P" "$T/services.d" "$T/state" "$T/bin"
+  export CEL_PROC="$P" CEL_SERVICES_D="$T/services.d" CEL_SERVICES_STATE="$T/state"
+  _herdr_stub "$T/bin"
+
+  # A service with an argv that says nothing about cel, omp or services.d,
+  # holding a real listening socket - exactly what `omp auth-broker serve`
+  # looks like to a string matcher that is looking for the wrong string.
+  python3 -c '
+import socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(1)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+time.sleep(60)
+' "$T/port" &
+  SVC_PID=$!
+  local i=0
+  while [ ! -s "$T/port" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  PORT="$(cat "$T/port")"
+  printf '{"name":"widget-vault","url":"http://127.0.0.1:%s","cmd":"widgetd serve --bind 127.0.0.1:%s"}\n' \
+    "$PORT" "$PORT" > "$T/services.d/widget-vault.json"
+
+  # And it is standing in a directory that no longer exists, which is what
+  # makes it a `fixture` to every other rule in this file.
+  _proc_add "$P" "$SVC_PID" 1 python3 90000 "$T/gone" python3 -c 'import socket' "$T/port"
+  # ...and a worker it forked. A live child has a live parent, so the ppid-1
+  # rule already keeps it; it is here so that rule is exercised beside the
+  # service rather than asserted on its own.
+  _proc_add "$P" 777001 "$SVC_PID" python3 4000 "$T/gone" python3 -c 'worker'
+}
+
+test_orphans_never_reaps_a_declared_box_service_listening_on_its_port() {
+  _service_fixture
+  local rows; rows="$(PATH="$T/bin:$PATH" orphans_list)"
+  assert_eq "$(_class_of "$rows" "$SVC_PID")" ""
+  kill -9 "$SVC_PID" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# A service that is declared and momentarily NOT listening - restarting,
+# wedged, or up on a port `ss` could not be asked about - is still a service.
+# The state file is the second identity, and the only one that survives the
+# service being down at the moment the sweep runs.
+test_orphans_never_reaps_a_box_service_recorded_in_its_state_file() {
+  _service_fixture
+  # The declaration now points at a port nothing is listening on, so the only
+  # identity left is the recorded pid.
+  printf '{"name":"widget-vault","url":"http://127.0.0.1:1","cmd":"widgetd serve"}\n' \
+    > "$T/services.d/widget-vault.json"
+  printf '{"name":"widget-vault","pane":"","pid":%s,"started":"now","log":""}\n' \
+    "$SVC_PID" > "$T/state/widget-vault.json"
+  local rows; rows="$(PATH="$T/bin:$PATH" orphans_list)"
+  assert_eq "$(_class_of "$rows" "$SVC_PID")" ""
+  kill -9 "$SVC_PID" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# SECOND LINE OF DEFENCE, matched against the line lib/gateway.sh actually
+# declares (`omp auth-broker serve --bind 127.0.0.1:47311`) rather than
+# against the service's name, which appears nowhere in any process. This is
+# what stands between the sweep and the box's subscriptions on a box whose
+# services.d has not been written yet.
+test_orphans_never_reaps_the_auth_broker_or_gateway_by_their_real_launch_line() {
+  _orphans_fixture
+  _proc_add "$P" 4050 1 omp 700000 "$T/gone" omp auth-broker serve --bind 127.0.0.1:47311
+  _proc_add "$P" 4051 1 omp 700000 "$T/gone" omp auth-gateway serve --bind 127.0.0.1:47411
+  local rows; rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 4050)" ""
+  assert_eq "$(_class_of "$rows" 4051)" ""
+  rm -rf "$T"
+}

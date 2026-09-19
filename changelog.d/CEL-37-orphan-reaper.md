@@ -22,3 +22,9 @@ memory sweep groups by pane and these have no pane.
 Nothing under a live herdr pane, no box service, no auth broker or gateway,
 no Claude daemon and nothing belonging to another user is ever a candidate; a
 pane list that cannot be read keeps every shell.
+
+A box service is identified by IDENTITY, not by its name appearing in an
+argv where it never appears: each `services.d` declaration is resolved to the
+pid listening on its port or the pid its state file records, and that tree is
+excluded. The cmdline test is only a second line of defence, and it matches
+the line the gateway actually launches (`omp auth-broker serve --bind ...`).
