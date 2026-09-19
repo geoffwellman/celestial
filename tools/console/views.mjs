@@ -725,3 +725,131 @@ export const quotaView = (doc) => {
   }
   return out;
 };
+
+// --- CEL-41: the triage answer ---------------------------------------------
+//
+// Ask the console about one stalled worker and it used to hand back the whole
+// worker table - forty rows, thirty-nine of them released weeks ago (owner,
+// 2026-09-19: "output is often just a wall of text, especially if you're
+// listing out past workers"). The fix is a division of labour with a hard
+// edge in the middle:
+//
+//   jev  chooses WHICH rows matter and how urgent each one is. It writes
+//        nothing - it is a classifier, and asking it for prose, a count or a
+//        date comparison is the documented way to get a confident wrong
+//        answer (model-jaggedness #2, #3, #9).
+//   code (this file) computes every number exactly from the fleet JSON the
+//        console already holds: the tally, the ages, how many were left out.
+//   the chat model turns that small object into two to four English lines.
+//        It is GIVEN the facts; it never fetches or computes them, and a
+//        number it invents is caught below rather than shown.
+//
+// Everything here is pure, so the sentence an operator reads is a value a
+// test can hold to account.
+
+// The states as an operator says them, in the order they want to hear them.
+// A state this table has never seen is printed under its own name rather than
+// dropped: a tally that silently loses rows is a tally that does not add up.
+const OTHER_LABELS = [
+  ['landed', 'landed'],
+  ['collected', 'collected'],
+  ['finished', 'finished, waiting to land'],
+  ['running', 'running normally'],
+  ['released', 'released'],
+  ['blocked', 'stuck'],
+];
+
+export const stateTally = (rows) => {
+  const counts = {};
+  for (const w of rows || []) {
+    const s = String((w && w.state) || 'unknown');
+    counts[s] = (counts[s] || 0) + 1;
+  }
+  const out = [];
+  for (const [state, label] of OTHER_LABELS) if (counts[state]) out.push([label, counts[state]]);
+  for (const s of Object.keys(counts).sort()) {
+    if (!OTHER_LABELS.some(([k]) => k === s)) out.push([s, counts[s]]);
+  }
+  return out;
+};
+
+// What a selected row says about itself, as facts rather than a sentence: the
+// summariser gets these and the template below prints them.
+export const rowFacts = (w, attention = null) => {
+  const f = {
+    ticket: String((w && w.ticket) || (w && w.id) || ''),
+    worker: String((w && w.id) || ''),
+    state: String((w && w.state) || ''),
+    quiet: quiet(w && w.quiet_secs),
+  };
+  if (w && w.verdict) f.verdict = String(w.verdict);
+  const pr = prNumber(w && w.pr);
+  if (pr) f.pr = pr;
+  if (attention !== null && attention !== undefined && Number.isFinite(Number(attention))) {
+    f.attention = ATTENTION_WORDS[Math.min(ATTENTION_WORDS.length - 1, Math.max(0, Math.round(Number(attention))))];
+  }
+  return f;
+};
+
+// The four levels the `attention` score is taken over, as one word each for
+// the sentence. The score itself is the model's; the WORDS are ours, because
+// a level description is a rubric and a rubric is not prose to be repeated.
+export const ATTENTION_WORDS = ['nothing to do', 'running normally', 'waiting on a person', 'stuck - needs you now'];
+
+// The whole object the chat model is handed. Small on purpose: the selected
+// rows and a tally of what was left out, and not one field more. A decision
+// or a summary given the whole fleet is a model reading state nobody asked
+// about, which is jaggedness #5 and the failure this codebase is one careless
+// edit away from.
+export const triageFacts = ({ rows = [], picked = [], attention = {}, question = '' }) => {
+  const pickedIds = new Set(picked.map((w) => String(w && w.id)));
+  const rest = rows.filter((w) => !pickedIds.has(String(w && w.id)));
+  return {
+    question: String(question || ''),
+    need: picked.length,
+    total: rows.length,
+    rows: picked.map((w) => rowFacts(w, attention[String(w && w.id)])),
+    others: { count: rest.length, tally: stateTally(rest) },
+  };
+};
+
+// ONE LINE PER SELECTED ROW, from the facts and nothing else. This is the
+// FALLBACK the console shows the instant the commands return - and the only
+// thing it ever shows when the chat model is unreachable, errors, or takes
+// longer than `console.summary_timeout`. A TUI that waits on prose is a TUI
+// that hangs, and the operator's question was already answered by these
+// numbers.
+export const triageLine = (f) => {
+  const parts = [];
+  if (f.attention) parts.push(f.attention);
+  if (f.verdict) parts.push(`${f.verdict} ${f.quiet}`);
+  else parts.push(`${f.state || 'unknown'} ${f.quiet}`);
+  if (f.pr) parts.push(`PR ${f.pr}`);
+  return `${String(f.ticket).padEnd(9)} ${parts.join(', ')}   (worker ${f.worker})`;
+};
+
+export const triageView = (input) => {
+  const facts = input && input.rows && !Array.isArray(input.others) && input.total !== undefined
+    ? input
+    : triageFacts(input || {});
+  const noun = facts.total === 1 ? 'worker' : 'workers';
+  const out = [`${facts.need} of ${facts.total} ${noun} need you.`];
+  for (const f of facts.rows) out.push(`  ${triageLine(f)}`);
+  if (facts.others.count) {
+    const tally = facts.others.tally.map(([label, n]) => `${n} ${label}`).join(', ');
+    out.push(`  ${facts.others.count} others${tally ? `: ${tally}` : ''}.  \`a\` shows them all.`);
+  }
+  return out;
+};
+
+// THE GUARD ON THE PROSE. The chat model writes the sentence; it does not get
+// to write a number. Every digit run in what it returns must already appear in
+// the object it was given - "3 of 22" is fine because both came from the
+// count, "7 workers" against a fleet of 22 is a hallucinated figure an
+// operator would act on. A summariser that invents a count is a failure
+// rather than a style problem, so the caller falls back to the template.
+export const numbersIn = (text) => (String(text ?? '').match(/\d+/g) || []);
+export const unknownNumbers = (text, facts) => {
+  const known = new Set(numbersIn(JSON.stringify(facts ?? {})));
+  return numbersIn(text).filter((n) => !known.has(n));
+};

@@ -22,6 +22,7 @@
 // both end on the command line waiting for Enter.
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { unknownNumbers } from './views.mjs';
 import { homedir } from 'node:os';
 
 export const CEL_ROOT = process.env.CEL_ROOT
@@ -390,4 +391,65 @@ export const translatorLabel = (configPath) => {
   const cfg = readConfig(configPath);
   if (!cfg.console.provider) return 'no model';
   return `${cfg.console.provider}/${cfg.console.model || '?'}`;
+};
+
+// --- CEL-41: the summary, and the three-way split it belongs to -------------
+//
+// The owner, 2026-09-19: "I'm not suggesting we use jev for summarisation, we
+// can use deepseek for that." So three different things do three different
+// jobs and none of them does another's:
+//
+//   jev (the decision model, router.mjs) chooses WHICH rows matter and how
+//       urgent each one is. It writes nothing - it cannot, and asking it to
+//       count or compare dates is the documented way to get a confident wrong
+//       answer.
+//   code (views.mjs) computes every number exactly from the fleet JSON and
+//       assembles the small facts object below.
+//   this function hands that object to the chat model and gets two to four
+//       lines of English back. It is GIVEN the facts; it never fetches them.
+//
+// Two rules keep it honest. A number that was not in the object is not in the
+// answer - `unknownNumbers` catches an invented count and the caller shows the
+// template instead - and the whole thing is on a short timeout, because the
+// console already has a correct answer to draw and a TUI must never sit
+// waiting for prose.
+const SUMMARY_SYSTEM = `You are the celestial console telling its operator what needs them.
+You are given a small JSON object that the console computed itself: the rows
+that matter, and a tally of the ones left out. Write TWO to FOUR short plain
+lines of English from it.
+
+Rules:
+- Use ONLY the numbers, names, states and ages in the object. Never compute,
+  estimate, add up or infer a number - every digit you write must already
+  appear in the object.
+- One line per row given, in the order given, then at most one closing line
+  about the others.
+- Name tickets and workers exactly as the object spells them.
+- No markdown, no headings, no bullets, no apologies, no advice.`;
+
+// 4 seconds, from `console.summary_timeout`. Longer than this and the operator
+// is watching a spinner where a correct answer was already available.
+export const SUMMARY_TIMEOUT = 4000;
+export const summaryTimeout = (configPath) => {
+  const n = Number(readConfig(configPath).console.summary_timeout);
+  return Number.isFinite(n) ? n * 1000 : SUMMARY_TIMEOUT;
+};
+
+export const summarise = async ({ facts, root = CEL_ROOT, configPath, timeout }) => {
+  const { cfg, table, key, base } = _connection(configPath, root);
+  if (String(cfg.console.summary || '').toLowerCase() === 'off') return null;
+  const text = await _chat({
+    cfg, table, key, base,
+    system: SUMMARY_SYSTEM,
+    user: `The operator asked: ${facts.question || '(nothing in particular)'}\n\nFacts:\n${JSON.stringify(facts, null, 1)}`,
+    timeout: timeout || summaryTimeout(configPath),
+    maxTokens: 220,
+  });
+  const out = String(text || '').trim();
+  if (!out) return null;
+  // THE GUARD. A summariser that invents a count is a failure, not a style
+  // problem: "7 of 40 workers need you" is a sentence an operator acts on.
+  const bad = unknownNumbers(out, facts);
+  if (bad.length) throw new Error(`summary invented a number (${bad.join(', ')}) - showing the counted lines`);
+  return out;
 };

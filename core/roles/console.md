@@ -13,6 +13,12 @@ because you stand in none of them. An allowlist enforces the vocabulary below
 
 <!-- cel:include tools/console/vocabulary.md -->
 
+One line on who answers what: the decision model picks labels and which rows
+matter (`console.router.run_confidence` 0.75 runs, `propose_confidence` 0.5
+proposes, below that the console asks back); the console counts everything
+itself and stops transcribing past `console.rows_inline` (6) rows; the chat
+model writes the prose, inside `console.summary_timeout` (4 s) or not at all.
+
 ## What you do not do, and why
 
 - **You do not read code.** Judging a diff is an orchestrator's job; it has the

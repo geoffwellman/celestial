@@ -29,11 +29,11 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput, allServices, roster as rosterOf,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, triageFacts, triageView, parseJson } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
-import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
-import { route, NoRouter, routerLabel } from './router.mjs';
+import { translate, answer, summarise, NoTranslator, translatorLabel } from './translate.mjs';
+import { route, NoRouter, routerLabel, triage, routerConfig, ROWS_INLINE, DESTRUCTIVE_FLOOR } from './router.mjs';
 import {
   replyWaitSecs, replyFrom, replyLine, noReplyLine, REPLY_POLL_MS,
   talkPrompt, talkRead, paneLines, talkLegend, TALK_REFRESH_MS,
@@ -48,6 +48,20 @@ import { startWatcher } from './watcher.mjs';
 import { legend, helpLines } from './legend.mjs';
 
 const COMMAND = /^(cel|cel-fanout|cel-linear|gh|herdr)(\s|$)/;
+
+// THE ROWS A CHAIN PRINTED, if any of it printed rows at all. The worker
+// table is the one that turns a question into a wall of text, and the console
+// already parses it to draw the table - so triage reads the same JSON rather
+// than the text it rendered. Anything that is not a row list is not triaged.
+const ROW_COMMANDS = /^(cel-fanout\s+status|cel\s+inbox\s+(open|read))\b/;
+const rowsIn = (results) => {
+  for (const s of results || []) {
+    if (!ROW_COMMANDS.test(String(s.cmd || '').trim())) continue;
+    const p = parseJson(s.out);
+    if (p && p.kind === 'rows' && Array.isArray(p.value) && p.value.length) return p.value;
+  }
+  return [];
+};
 const DOUBLE_CLICK_MS = 400;
 
 // What Tab completes: the vocabulary, every registered workspace and every
@@ -468,6 +482,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const steerRef = useRef(null);   // what the proposal on the line will need afterwards
   const watchRef = useRef(null);   // the reply watch's timer, so a second send replaces the first
   const rawText = useRef('');                     // what the command actually printed
+  const tableRowsRef = useRef([]);                // the table rows the last chain printed, for triage
   const renderedRef = useRef('');                 // and the console's reading of it
   const history = useRef(readHistory());
   const hIndex = useRef(-1);
@@ -588,6 +603,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // the shape of the answer; a box of braces was the console saying "here,
     // you parse it". `r` in the output view brings the text back.
     rawText.current = r.out || '(no output)';
+    tableRowsRef.current = rowsIn([{ cmd, out: r.out }]);
     setRaw(false);
     renderedRef.current = renderOutput(cmd, r.out) || '(no output)';
     setOutput(renderedRef.current);
@@ -628,6 +644,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     }
     const transcript = r.results.map((s2) => `$ ${s2.cmd}\n${renderOutput(s2.cmd, s2.out) || '(no output)'}`).join('\n\n') || '(no output)';
     rawText.current = r.results.map((s2) => `$ ${s2.cmd}\n${s2.out || '(no output)'}`).join('\n\n') || '(no output)';
+    tableRowsRef.current = rowsIn(r.results);
     setRaw(false);
     renderedRef.current = transcript;
     setOutput(transcript);
@@ -672,6 +689,66 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   }, [say, stdout]);
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
+
+  // CEL-41: THE ANSWER TO A QUESTION ABOUT MANY ROWS.
+  //
+  // "which workers need me" used to be answered with the worker table - forty
+  // rows, thirty-nine of them released weeks ago (owner, 2026-09-19: "output
+  // is often just a wall of text, especially if you're listing out past
+  // workers"). Three things share the work now and none of them does
+  // another's: the decision model picks WHICH rows matter and how urgent each
+  // is, views.mjs counts every number exactly from the rows themselves, and
+  // the chat model turns those counted facts into English.
+  //
+  // The counted lines are drawn FIRST and the prose is swapped in if it
+  // arrives. A console that waits on a model before it draws is a console
+  // that hangs, and the numbers already answered the question.
+  const triageAnswer = useCallback(async (sentence, transcript, rows) => {
+    const under = (text) => `${text}\n\n${'─'.repeat(40)}\n${transcript}`;
+    let picked = [], attention = {};
+    try {
+      const t = await triage({ sentence, rows });
+      picked = t.ids.map((id) => rows.find((w) => String(w.id) === id)).filter(Boolean);
+      attention = t.attention;
+    } catch (e) {
+      if (e instanceof NoRouter) return false;
+      say(`triage: ${e.message} - showing the output`);
+      return false;
+    }
+    if (!picked.length) return false;
+    const facts = triageFacts({ rows, picked, attention, question: sentence });
+    const lines = triageView(facts).join('\n');
+    renderedRef.current = under(lines);
+    setRaw(false);
+    setOutput(renderedRef.current);
+    setOutOffset(1); setOutView(true); setOutCollapsed(false);
+    say(`${facts.need} of ${facts.total} need you - a shows everything · Esc returns to the panels`);
+    // And now the prose, on its own short timeout. Any failure at all leaves
+    // the counted lines exactly where they are.
+    try {
+      const prose = await summarise({ facts });
+      if (prose) {
+        renderedRef.current = under(prose);
+        setOutput(renderedRef.current);
+        setOutOffset(1);
+      }
+    } catch (e) {
+      if (!(e instanceof NoTranslator)) say(`${e.message}`);
+    }
+    return true;
+  }, [say]);
+
+  // Which answer a sentence gets: the triage one when the commands printed
+  // more rows than anybody reads, the chat model's reading of the transcript
+  // otherwise. `console.rows_inline` (6) is where one becomes the other - at
+  // six rows the table IS the answer and a summary is noise.
+  const answerFor = useCallback(async (sentence, transcript) => {
+    const rows = tableRowsRef.current || [];
+    const cfg = routerConfig();
+    const inline = cfg && Number.isFinite(cfg.rowsInline) ? cfg.rowsInline : ROWS_INLINE;
+    if (rows.length > inline && await triageAnswer(sentence, transcript, rows)) return;
+    await explain(sentence, transcript);
+  }, [explain, triageAnswer]);
 
   // THE REPLY WATCH. A send used to end in silence: the mail was the record
   // and the record is invisible until somebody opens the mailbox. For up to
@@ -761,7 +838,15 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           asked.current = text;
           steerRef.current = r.steer || null;
           propose(r.cmds);
-          say(`proposed in ${secs} s - Enter runs it, Esc discards it`);
+          // THE BANDS (CEL-41). The console never runs a sentence without an
+          // Enter - that rule is older than the router and it stays - so
+          // what a band changes is what the operator is TOLD. `run` is the
+          // line as it always was; `propose` names the intent it is unsure
+          // of, and a destructive sentence lands here however sure the model
+          // was of the label.
+          say(r.decision === 'run'
+            ? `proposed in ${secs} s - Enter runs it, Esc discards it`
+            : `${r.reason} (${r.confidence.toFixed(2)}${r.destructive > DESTRUCTIVE_FLOOR ? ', this changes things' : ''}) - Esc discards it`);
           return;
         }
         // A WORKSPACE WITH TWO PRODUCTS IS A QUESTION, not a miss to hand to
@@ -771,13 +856,16 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         if (r.intent !== 'other' && r.options.some((o) => o.cmd)) {
           setBusy(false);
           const opts = r.options.filter((o) => o.cmd);
-          setOptions(opts);
           setOutput([
-            `not sure what you meant (${r.intent} ${r.confidence.toFixed(2)}) - did you mean:`,
+            // The question back, in the model's own probability order - not a
+            // miss list. `choice` returns a probability for every option, so
+            // the ranking was in the answer the console already had.
+            r.reason || 'did you mean:',
             ...opts.map((o, i) => `${i + 1}  ${o.cmd.padEnd(48)} -- ${o.reason}`),
             '',
-            'type 1, 2 or 3 and Enter - or click one - to put it on the command line',
+            'type 1 or 2 and Enter - or click one - to put it on the command line',
           ].join('\n'));
+          setOptions(opts);
           setOutOffset(0);
           say(`offered options in ${secs} s - pick one, nothing runs yet`);
           return;
@@ -1069,12 +1157,12 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         if (steer.live) watchReply(steer.who, steer.workspace);
         return;
       }
-      if (sentence && transcript) await explain(sentence, transcript);
+      if (sentence && transcript) await answerFor(sentence, transcript);
       return;
     }
     if (COMMAND.test(text)) { setLine(''); asked.current = ''; steerRef.current = null; await execute(text); return; }
     await ask(text);
-  }, [proposed, options, exit, execute, executeChain, explain, ask, propose, setLine,
+  }, [proposed, options, exit, execute, executeChain, answerFor, ask, propose, setLine,
     openTalk, talkRefresh, watchReply, say]);
   const submit = useCallback(() => submitValue(value), [submitValue, value]);
 
@@ -1232,8 +1320,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       if (key.escape) { setOutView(false); say('back'); return; }
       // The rendering is the console's reading of the output; `r` shows what
       // the command actually printed, because a console that hides the real
-      // bytes is a console you cannot debug from.
-      if (input === 'r') {
+      // bytes is a console you cannot debug from. `a` is the same toggle
+      // under the key the triage answer names - an operator told "a shows
+      // them all" should not have to translate that into `r`.
+      if (input === 'r' || input === 'a') {
         setRaw((v) => {
           const next = !v;
           setOutput(next ? rawText.current : renderedRef.current);

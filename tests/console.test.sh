@@ -1319,7 +1319,9 @@ const mod = await import(`${process.env.CEL_ROOT}/tools/console/router.mjs`);
 const DOC = JSON.parse(readFileSync(process.env.RDOC, 'utf8'));
 const r = await mod.route({ sentence: 'how is that one going', doc: DOC, items: [] });
 assert.equal(r.cmds, null);
-assert.ok(!JSON.stringify(r).includes('unclear'));
+// The non-answer may be reported as the hint it was; what it must never do is
+// reach a command line.
+assert.ok(!JSON.stringify(r.options.map((o) => o.cmd)).includes('unclear'));
 EOF
   RDOC="$T/fleet.json" node "$T/unclear.test.mjs" || { _console_router_stop; _console_teardown; return 1; }
   _console_router_stop
@@ -1342,6 +1344,13 @@ EOF
   # The three bands: 0.8 runs, 0.6 proposes, 0.3 asks with the top two
   # intents in the model's own probability order.
   local pair
+  # The bands themselves, not the legacy floor: a config that still carries
+  # `min_confidence` is read as a run threshold, which is what the older tests
+  # above prove.
+  { printf 'console:\n  provider: openrouter\n  model: alpha/model-mini\n  key_env: OPENROUTER_API_KEY\n'
+    printf '  router:\n    provider: openrouter\n    model: alpha/decide-1\n'
+    printf '    key_env: OPENROUTER_API_KEY\n    run_confidence: 0.75\n    propose_confidence: 0.5\n'; } >"$T/config.yaml"
+  chmod 600 "$T/config.yaml"
   for pair in '0.8 run' '0.6 propose' '0.3 ask'; do
     # shellcheck disable=SC2086
     set -- $pair
