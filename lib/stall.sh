@@ -139,16 +139,63 @@ stall_branch_pushed() { # <worktree> -> yes|no|?
 : "${CEL_STALL_MARKER_SECS:=900}"
 : "${CEL_STALL_QUIET_SECS:=10800}"
 
+# WHO GETS ASKED ABOUT, and it is deliberately almost nobody (CEL-42).
+#
+# The steward sweeps every five minutes across every workspace. A sweep that
+# asked a model about twenty healthy workers would be a waste, and it would
+# also feed the classifier a pile of state nobody needed - a documented way to
+# make its answers worse. So code filters first and the model judges few: a
+# worker is a CANDIDATE only when the box has already noticed something odd
+# about it.
+#
+#   working, but the pane text has not moved in five minutes
+#                        Three of the four failures this exists for reported
+#                        `working` throughout. Five minutes is longer than a
+#                        model turn and shorter than a test run.
+#   idle or done, ledger still running
+#                        The runtime says there is nothing to do and the ledger
+#                        says the work is not finished. One of them is wrong.
+#   the marker rule fired
+#                        Already evidence; the question is only whether it is
+#                        a crash or a worker quoting one.
+#
+# A vanished agent is the TIMERS' business - there is no pane left to read -
+# and a worker that wrote its result is finished, not stalled (CEL-22).
+: "${CEL_LIVENESS_STILL_SECS:=300}"
+stall_liveness_candidate() { # <live> <ledger-state> <secs-since-output-changed> <marker> <has-result 0|1>
+  local live="$1" state="$2" still="${3:-}" marker="${4:-}" done_="${5:-0}"
+  [ "$state" = running ] || return 1
+  [ "$done_" = 1 ] && return 1
+  case "$live" in ''|'-'|gone) return 1 ;; esac
+  [ -n "$marker" ] && return 0
+  case "$live" in
+    working) [ -n "$still" ] && [ "$still" -ge "$CEL_LIVENESS_STILL_SECS" ] && return 0; return 1 ;;
+    idle|done) return 0 ;;
+  esac
+  return 1
+}
+
 # The verdict for one delegation.
 #   dead-<marker>   a fatal marker, quiet long enough to believe it
 #   vanished        no agent on the roster at all
 #   quiet           no marker, but nothing has moved in a very long time
 #   ""              alive, or not yet conclusive
-stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1]
-  local live="$1" text="$2" quiet="${3:-}" done_="${4:-0}"
+#
+# CEL-42 adds a fifth outcome and a fifth argument: the classification of what
+# the pane is DOING (lib/liveness.sh), which is an EXTRA input and never a
+# replacement. The marker and quiet rules still stand on their own and still
+# fire first, so a box with no router, no key or a failing endpoint behaves
+# exactly as it did before; the classification only fills the gaps they leave -
+# which, on the evidence of the last two days, is where every real failure was.
+#   looping|crashed|waiting_on_input|finished   what the pane is doing
+stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1] [liveness-verdict]
+  local live="$1" text="$2" quiet="${3:-}" done_="${4:-0}" lv="${5:-}"
   case "$live" in
     ''|'-'|gone) printf 'vanished'; return 0 ;;
-    working)     return 0 ;;   # busy is busy, whatever its pane says
+    # Busy is busy, whatever its pane says - unless something has READ the
+    # pane and found it repeating itself, which is the one piece of evidence
+    # that outranks the runtime's own word for its state.
+    working)     [ -n "$lv" ] && printf '%s' "$lv"; return 0 ;;
   esac
   # A WORKER THAT WROTE ITS RESULT IS FINISHED, NOT STALLED. It has reached the
   # last instruction it was given - write .agent/result.md and stop - so of
@@ -162,9 +209,11 @@ stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1]
   if [ -n "$marker" ]; then
     [ -n "$quiet" ] && [ "$quiet" -ge "$CEL_STALL_MARKER_SECS" ] \
       && { printf 'dead-%s' "$marker"; return 0; }
+    [ -n "$lv" ] && printf '%s' "$lv"
     return 0
   fi
-  [ -n "$quiet" ] && [ "$quiet" -ge "$CEL_STALL_QUIET_SECS" ] && printf 'quiet'
+  [ -n "$quiet" ] && [ "$quiet" -ge "$CEL_STALL_QUIET_SECS" ] && { printf 'quiet'; return 0; }
+  [ -n "$lv" ] && printf '%s' "$lv"
   return 0
 }
 
@@ -188,6 +237,12 @@ stall_message() { # <verdict> <ticket> <pane> <quiet-secs> <pushed> <at-risk> <b
   case "$verdict" in
     vanished) what="its agent is GONE from the roster (ledger still says running)" ;;
     quiet)    what="nothing has been written for $age and it is not working" ;;
+    # CEL-42: read off the pane rather than off the clock, which is why none
+    # of these mentions an age at all.
+    looping)  what="its pane is REPEATING itself - the same command and output over and over, with no progress" ;;
+    crashed)  what="its pane is showing a crash, not an agent" ;;
+    waiting_on_input) what="it is WAITING for someone to answer it and has been for $age" ;;
+    finished) what="it has finished and is reporting, while the ledger still says running - nobody has collected it" ;;
     dead-*)   what="its pane is dead on '${verdict#dead-}' and nothing has been written for $age" ;;
     *)        what="stalled" ;;
   esac
