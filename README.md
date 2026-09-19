@@ -586,7 +586,7 @@ logs to `~/.local/share/cel/logs/`.
 
 | Service | Where | Kept alive by |
 |---|---|---|
-| `cel dash` | per workspace, port from `dash.port` | the steward, every tick |
+| `cel dash` | per workspace, port from `dash.port`; `dash.box: true` names the one that draws box services and subscriptions | the steward, every tick |
 | `cel pages` | tailnet tier, `:7780` | `cel pages --ensure` |
 | `cel pages --public` | internet-reachable tier, `:7781` | `cel pages --ensure` |
 | `cel pages tunnel` | cloudflared/ngrok, for sharing without Tailscale | started by hand |
@@ -647,6 +647,18 @@ forwarded to loopback, WebSocket upgrades included, for ports that belong to a
 known service or preview only, and only with the dashboard's own control token —
 a tailnet neighbour cannot browse this box's loopback. `cel-fanout try` prints
 that URL as its last line when the dashboard is up.
+
+**Box-level material is drawn on one dashboard, not on every one.** There is
+one broker and one gateway on this box, registered once in `services.d` — but
+four per-workspace dashboards each rendered them inside their own services
+panel and each rendered the whole subscriptions panel, so flipping between
+tabs read as several brokers. A workspace's services panel now lists only its
+own services; anything tagged `box` (and the subscriptions, which are
+box-level in their entirety) appears in a separate **Box** panel on exactly
+one dashboard — the workspace whose `dash:` block says `box: true`, defaulting
+to the registry's first — and every other dashboard shows one line pointing at
+it. There is still no box-wide dashboard: `cel fleet` and the console are the
+box-wide views.
 
 The steward probes every service that declares `health:` once per tick. Two
 consecutive down ticks raise one rolled-up blocker to root naming the service
