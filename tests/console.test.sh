@@ -1205,3 +1205,41 @@ test_console_talk_mode_has_a_legend_that_says_how_to_leave() {
   assert_contains "$out" 'Esc'
   assert_contains "$out" 'relay'
 }
+
+# --- CEL-37: the console takes its watcher with it -------------------------
+
+# THIRTEEN WATCHERS REPARENTED TO INIT, four of them days old. Every console
+# that exited left `cel inbox watch` and its `tail`/`jq` children running
+# against a pane that no longer existed. The lifetime is a unit test for the
+# same reason the screen modes are: the failure is invisible until someone
+# walks /proc a week later.
+test_console_watcher_lifetime_is_proved() {
+  node "$CEL_ROOT/tools/console/watcher.test.mjs"
+}
+
+# A gigabyte of orphans under `celestial-orch 1.7G` went unmentioned because
+# no view had a field for it. The box line is where an operator looks at the
+# box, so that is where the count goes - and only when there is one.
+test_console_box_line_names_the_orphans_when_there_are_any() {
+  _console_memory_setup
+  local out
+  python3 - "$T/fleet.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["box"]["orphans"] = {"count": 6, "rss_mb": 410}
+json.dump(d, open(p, "w"))
+PY
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" '6 orphans'
+  assert_contains "$out" '410M'
+  _console_teardown
+}
+
+test_console_box_line_is_silent_when_there_are_no_orphans() {
+  _console_memory_setup
+  local out
+  out="$(node "$CONSOLE_MJS" --render-once)"
+  case "$out" in *orphan*) echo 'the box line invented orphans'; return 1;; esac
+  _console_teardown
+}
