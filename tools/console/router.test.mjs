@@ -9,7 +9,7 @@
 // sentence and the fleet state. A slot filler nobody can assert is a slot
 // filler that will one day put someone else's workspace in a `--workspace`.
 import assert from 'node:assert/strict';
-import { facts, plan, options, shellQuote, INTENT_NAMES, addresseeIn, steerFor } from './router.mjs';
+import { facts, plan, options, shellQuote, INTENT_NAMES, addresseeIn, steerFor, band, RUN_CONFIDENCE, PROPOSE_CONFIDENCE } from './router.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
 
@@ -448,6 +448,31 @@ t('talk is an intent, and it resolves to the console\u2019s relay mode', () => {
   assert.deepEqual(plan('talk', 'talk to bundle-orch', SF), ['talk bundle-orch']);
   assert.deepEqual(plan('talk', 'let me speak to platform', SF), ['talk bundle-orch']);
   assert.equal(plan('talk', 'let me speak to somebody', SF), null);
+});
+
+// --- CEL-44: opening, closing and resetting a workspace ---------------------
+
+t('the three workspace-lifecycle intents emit their cel ws lines', () => {
+  for (const n of ['workspace_up', 'workspace_down', 'workspace_reset']) {
+    assert.ok(INTENT_NAMES.includes(n), `${n} is not an intent`);
+  }
+  assert.deepEqual(plan('workspace_up', 'open alpha', SF), ['cel ws up alpha']);
+  assert.deepEqual(plan('workspace_down', 'close down alpha', SF), ['cel ws down alpha']);
+  assert.deepEqual(plan('workspace_reset', 'reset alpha to its layout', SF), ['cel ws reset alpha']);
+  // A workspace nobody named is not a workspace: `down` on a guess closes
+  // somebody else's panes.
+  assert.equal(plan('workspace_down', 'close it down', SF), null);
+});
+
+// SURE IS NOT SAFE. `down` and `reset` stop agents, so they are PROPOSED at
+// any confidence - the model being certain is not the operator having read it.
+t('down and reset are proposed, never run, even at 0.95', () => {
+  const cfg = { runConfidence: RUN_CONFIDENCE, proposeConfidence: PROPOSE_CONFIDENCE };
+  const at = (intent) => band({ intent, confidence: 0.95, destructive: 0, answerable: 1, cmds: ['x'], cfg });
+  assert.equal(at('workspace_down'), 'propose');
+  assert.equal(at('workspace_reset'), 'propose');
+  // `up` is a reconcile: idempotent and never destructive, so it runs.
+  assert.equal(at('workspace_up'), 'run');
 });
 
 process.stdout.write('router: all tests passed\n');

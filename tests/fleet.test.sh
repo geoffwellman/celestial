@@ -74,10 +74,16 @@ EOF
 #!/usr/bin/env bash
 [ -n "${STUB_HERDR_FAIL:-}" ] && exit 1
 case "$1 $2" in
-  "agent list") printf '%s\n' '{"result":{"agents":[
-      {"name":"widget-orch","agent_status":"idle","pane_id":"wA:p1"},
-      {"name":"bundle-orch","agent_status":"idle","pane_id":"wA:p9"},
-      {"name":"widget-widget-work","agent_status":"idle","pane_id":"wA:p2"}]}}' ;;
+  "agent list")
+    # CEL-44: a live agent with NO herdr name, in a cwd the caller names. The
+    # fleet must not read it as an absence.
+    extra=""
+    [ -z "${STUB_UNNAMED_CWD:-}" ] \
+      || extra=",{\"name\":null,\"agent_status\":\"idle\",\"pane_id\":\"wA:p7\",\"cwd\":\"$STUB_UNNAMED_CWD\"}"
+    printf '{"result":{"agents":[%s%s]}}\n' '
+      {"name":"widget-orch","agent_status":"idle","pane_id":"wA:p1","cwd":"/nowhere/widget"},
+      {"name":"bundle-orch","agent_status":"idle","pane_id":"wA:p9","cwd":"/nowhere/bundle"},
+      {"name":"widget-widget-work","agent_status":"idle","pane_id":"wA:p2","cwd":"/nowhere/wt"}' "$extra" ;;
   "pane read")  printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}" ;;
   *) printf '%s\n' '{}' ;;
 esac
@@ -432,5 +438,22 @@ test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
   local doc; doc="$(cmd_fleet --json --workspace alpha)"
   assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions | length')" 1
   assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions[0].label')" 'pi + claude-code'
+  _fleet_teardown
+}
+
+# A NAMELESS AGENT IS A FAULT, NOT AN ABSENCE (CEL-44). herdr cleared a live
+# orchestrator's name on restart; `cel fleet` resolves one by its alias on the
+# roster, so the product read `orch -` - which anyone acting on would answer by
+# starting a SECOND orchestrator on top of the live one. A live agent in the
+# product's own cwd reads as `unnamed`, which is a state with a cure.
+test_fleet_reports_a_live_unnamed_agent_as_unnamed() {
+  _fleet_setup
+  local doc
+  doc="$(STUB_UNNAMED_CWD="$T/alpha/repos/gadget" cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units[] | select(.name=="gadget") | .orch')" "unnamed"
+  assert_contains "$(STUB_UNNAMED_CWD="$T/alpha/repos/gadget" cmd_fleet --workspace alpha)" "orch unnamed"
+  # And with nothing there it is still the dash it always was.
+  doc="$(cmd_fleet --json --workspace alpha)"
+  assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units[] | select(.name=="gadget") | .orch')" "-"
   _fleet_teardown
 }
