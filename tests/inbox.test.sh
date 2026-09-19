@@ -591,9 +591,12 @@ _triage_fixture() {
 #!/usr/bin/env bash
 body="$(cat)"
 printf '%s\n' "$body" >> "$CEL_TRIAGE_CALLS"
+# the live shape, verified against the endpoint on 2026-09-19: a `score`
+# answer carries a fractional score, a probability per level and a confidence
 printf '%s' "$body" | jq -c '{answers: (.questions | to_entries
   | map({key: .key, value: {
-      value: ((.value.instructions | capture("LEVEL(?<n>[0-9])") | .n | tonumber)),
+      type: "score",
+      score: ((.value.instructions | capture("LEVEL(?<n>[0-9])") | .n | tonumber)),
       confidence: (if (.value.instructions | test("UNSURE")) then 0.1 else 0.9 end)}})
   | from_entries)}'
 EOS

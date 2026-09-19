@@ -32,6 +32,11 @@ _CEL_TRIAGE=1
 
 # The levels, concrete and in order. Vague levels ("high", "medium") make a
 # classifier guess at the rubric; these say what a person would DO.
+#
+# They travel as `criteria`, which is the endpoint's own name for the set -
+# verified against the live API on 2026-09-19, where sending `levels:` is a
+# 400 naming this field. tools/console/router.mjs learned the same thing about
+# `choice` a day earlier.
 TRIAGE_LEVELS='[
   "informational - a person never needs to act",
   "useful context - read when convenient",
@@ -146,7 +151,7 @@ _triage_score() { # <json-lines on stdin>
                       value: {type: "score",
                               instructions: ("How much does this message need the operator right now? "
                                              + .kind + " from " + .from + ": " + .message),
-                              levels: $levels}}) | from_entries)}')"
+                              criteria: $levels}}) | from_entries)}')"
   doc="$(printf '%s' "$body" | _triage_post)" || return 1
   [ -n "$doc" ] || return 1
   # The endpoint spells an answer several ways depending on the provider in
@@ -160,7 +165,7 @@ _triage_score() { # <json-lines on stdin>
   done < <(printf '%s' "$doc" | jq -r --argjson floor "$floor" '
     (.answers // {}) | to_entries[]
     | .key as $k | .value as $a
-    | ((if ($a | type) == "object" then ($a.value // $a.score // $a.level) else $a end) | tonumber?) as $v
+    | ((if ($a | type) == "object" then ($a.score // $a.value // $a.level) else $a end) | tonumber?) as $v
     | ((if ($a | type) == "object" then ($a.confidence // $a.probability // 1) else 1 end) | tonumber?) as $c
     | select($v != null and $c != null and $c >= $floor)
     | [($k | sub("^m_"; "")), ($v | round)] | @tsv' 2>/dev/null || true)
