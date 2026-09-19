@@ -1512,3 +1512,15 @@ EOF
   wait "$hpid" 2>/dev/null || true
   _console_teardown
 }
+
+# CEL-44: the vocabulary is the one place both consoles read what they may do.
+# `cel ws down` stops PANES; the line that says so exists because the nearest
+# words to it - "close the workspace", "clean it up" - are what an operator
+# reaches for when they mean worktrees, and that is `cel-fanout release`.
+test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
+  local v="$CEL_ROOT/tools/console/vocabulary.md"
+  assert_contains "$(cat "$v")" 'cel ws up <w>'
+  assert_contains "$(cat "$v")" 'cel ws down <w>'
+  assert_contains "$(cat "$v")" 'cel ws reset <w>'
+  assert_contains "$(cat "$v")" 'PANES, never worktrees'
+}
