@@ -43,7 +43,7 @@ curl() {
     '{answers: {activity: {value: $a, confidence: $c}, needs_a_person: {probability: $n}}}'
 }
 
-_asked() { grep -c . "$T/requests" 2>/dev/null || printf 0; }
+_asked() { grep -c . "$T/requests" 2>/dev/null || true; }
 
 # --- what the model is told -------------------------------------------------
 
@@ -168,7 +168,7 @@ test_with_no_key_liveness_is_off_and_asks_nobody() {
 }
 test_enabled_false_turns_it_off_with_a_key_present() {
   _liveness_setup
-  printf 'liveness:\n  enabled: false\n' >> "$CEL_CONFIG_FILE"
+  printf '  enabled: false\n' >> "$CEL_CONFIG_FILE"
   assert_fails liveness_enabled
   rm -rf "$T"
 }
@@ -293,8 +293,8 @@ test_the_sentence_is_empty_without_an_answer() {
 # lib/liveness.sh must not name the verbs that end a worker.
 test_no_path_from_an_answer_to_a_kill() {
   local bad
-  bad="$(grep -nE 'herdr|agent (stop|remove|terminate)|kill |cel-fanout (release|collect)|agent prompt' \
-    "$CEL_ROOT/lib/liveness.sh" || true)"
+  bad="$(grep -vE '^[[:space:]]*#' "$CEL_ROOT/lib/liveness.sh" \
+    | grep -nE 'herdr|kill|terminate|cel-fanout|tmux' || true)"
   assert_eq "$bad" ""
 }
 

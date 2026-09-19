@@ -109,7 +109,34 @@ export const sortWorkers = (workers, byMemory = false) => {
 // Column widths, shared by the TUI panel and the text view so they cannot
 // drift. A cell is CUT to its width, never allowed to push its neighbours:
 // one forty-four-character scout id used to shove every column off the edge.
-export const WORKER_COLS = { ticket: 9, slug: 20, state: 9, live: 7, via: 18, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+export const WORKER_COLS = { ticket: 9, slug: 20, state: 9, live: 12, via: 18, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
+
+// THE DISAGREEMENT IS THE SIGNAL (CEL-42). herdr's word for a pane and what
+// the pane is actually doing agreed on none of the four failures this box saw
+// in two days: `working` while a suite hung, `idle` while three cores burned,
+// `working` through a chain of sleeps, `done` while a background task ran. So
+// the live column shows the runtime's word alone while the two agree, and both
+// - `working!loop` - the moment they do not. A column that always showed both
+// would be twice as wide and say nothing new on the healthy rows.
+const ACTIVITY_SHORT = {
+  working: 'work', waiting_on_input: 'wait', looping: 'loop', crashed: 'crash', finished: 'done',
+};
+// What each runtime status is entitled to mean. `idle` covers the whole of the
+// space between turns, so a pane that is waiting on a person or has finished
+// is idle being idle; `working` means output is advancing and nothing else.
+const AGREES = {
+  working: ['working'],
+  idle: ['waiting_on_input', 'finished', 'working'],
+  done: ['finished'],
+};
+export const liveOf = (w) => {
+  const live = String((w && w.live) || '-');
+  const activity = String((w && w.activity) || '');
+  // `unclear` is the model saying it cannot tell, which is not a disagreement.
+  if (!activity || activity === 'unclear') return live;
+  if ((AGREES[live.toLowerCase()] || []).includes(activity)) return live;
+  return `${live}!${ACTIVITY_SHORT[activity] || activity}`;
+};
 // What is running the ticket: the profile name when the delegation recorded
 // one (`opus-pi`, `deepseek`), else runtime/model with the provider prefix
 // and version tail dropped (`omp/deepseek-v4.1-flash` → `omp/deepseek`).
@@ -147,7 +174,7 @@ export const workerCells = (w) => ({
   ticket: cut(w.ticket || '-', WORKER_COLS.ticket).padEnd(WORKER_COLS.ticket),
   slug: cut(slugOf(w), WORKER_COLS.slug).padEnd(WORKER_COLS.slug),
   state: cut(w.state || '-', WORKER_COLS.state).padEnd(WORKER_COLS.state),
-  live: cut(w.live || '-', WORKER_COLS.live).padEnd(WORKER_COLS.live),
+  live: cut(liveOf(w), WORKER_COLS.live).padEnd(WORKER_COLS.live),
   via: cut(viaOf(w), WORKER_COLS.via).padEnd(WORKER_COLS.via),
   quiet: quiet(w.quiet_secs).padStart(WORKER_COLS.quiet),
   verdict: `  ${cut(w.verdict || '-', WORKER_COLS.verdict).padEnd(WORKER_COLS.verdict)}`,

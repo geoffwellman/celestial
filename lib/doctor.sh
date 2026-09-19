@@ -19,6 +19,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
 # shellcheck source=lib/console.sh
 . "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
+# shellcheck source=lib/liveness.sh
+. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"  # liveness_doctor_line
 # shellcheck source=lib/gc.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gc.sh"   # gc_doctor_line, for the blind-GC line
 # shellcheck source=lib/orphans.sh
@@ -264,6 +266,10 @@ check_console_deps() {
   else
     c_warn "$(console_deps_hint "$d")"
   fi
+  # WHETHER THE BOX CAN SEE WHAT ITS PANES ARE DOING (CEL-42), and which model
+  # answers. Never a failure: liveness is an addition to the stall timers, and
+  # a box without it watches its workers exactly as it always did.
+  c_ok "$(liveness_doctor_line)"
   return 0
 }
 

@@ -972,7 +972,7 @@ EOF
 test_the_sweep_asks_about_the_candidate_and_nobody_else() {
   _stall_sweep_setup
   _steward_stalled_workers "$AGENTS_JSON" >/dev/null 2>&1
-  assert_eq "$(grep -c . "$T/requests")" 1
+  assert_eq "$(grep -c . "$T/requests" || true)" 1
   assert_contains "$(cat "$T/requests")" 'npm test'
   case "$(cat "$T/requests")" in *moving\ along*) echo 'the healthy worker was asked about'; return 1;; esac
   rm -rf "$T"
@@ -1009,7 +1009,7 @@ test_the_sweep_asks_nobody_without_a_key() {
   _stall_sweep_setup
   unset OPENROUTER_API_KEY
   local out; out="$(_steward_stalled_workers "$AGENTS_JSON" 2>&1)"
-  assert_eq "$(grep -c . "$T/requests")" 0
+  assert_eq "$(grep -c . "$T/requests" || true)" 0
   case "$out" in *looping*) echo 'a verdict appeared with no model behind it'; return 1;; esac
   rm -rf "$T"
 }

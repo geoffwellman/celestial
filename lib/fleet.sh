@@ -23,6 +23,8 @@ _CEL_FLEET=1
 . "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
 # shellcheck source=lib/stall.sh
 . "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
+# shellcheck source=lib/liveness.sh
+. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 # shellcheck source=lib/memory.sh
@@ -121,8 +123,20 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
   # -1, not 0: a worktree that cannot be read has an UNKNOWN age, and zero
   # would render as a worker that wrote something a moment ago.
   [ -n "$quiet" ] || quiet=-1
+  # WHAT THE PANE IS DOING, when somebody has recently asked (CEL-42). The
+  # fleet never asks itself: this view is read in a loop and a network call per
+  # row is a view people stop running. It carries the steward's last answer,
+  # which is why a row nobody has classified simply has neither field filled -
+  # and why a stale answer is dropped rather than shown as current.
+  local activity="" aconf="" cached
+  cached="$(liveness_cached "$(printf '%s' "$e" | jq -r '.id // ""')")"
+  if [ -n "$cached" ]; then
+    activity="$(printf '%s' "$cached" | cut -f1)"
+    aconf="$(printf '%s' "$cached" | cut -f2)"
+  fi
   printf '%s' "$e" | jq -c \
     --arg live "$live" --argjson quiet "$quiet" \
+    --arg activity "$activity" --arg aconf "$aconf" \
     --arg verdict "$verdict" --arg severity "$severity" \
     --arg ahead "$(fleet_ahead "$wt")" \
     --argjson rss "$(mem_tree_rss_mb "$wt")" \
@@ -133,6 +147,7 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       ahead: $ahead, rss_mb: $rss, pr: (.pr // ""), created: (.created // ""),
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
       profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
+      activity: $activity, activity_confidence: $aconf,
       harness: $harness}'
 }
 
