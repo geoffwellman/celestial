@@ -188,3 +188,105 @@ test_a_leaked_test_process_does_not_keep_the_lock() {
   _await_free "$CEL_SUITE_LOCK" 20 || { echo "an orphan kept the suite lock"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# A LOCK ON A DESCRIPTOR IS HELD BY EVERY CHILD THAT INHERITS IT. On
+# 2026-09-19, hours after the lock landed, every gate on the box queued behind
+# it for eighteen minutes and the holder was a `sleep 1800` with ppid 1: a
+# background process that had inherited the runner's lock descriptor and kept
+# the lock alive long after the runner was gone. This is CEL-12's ledger-lock
+# bug in a second place - bash cannot mark a descriptor close-on-exec, so every
+# child the runner starts must be spawned with the descriptor closed. The
+# runner starts children before it ever reaches a test: it sources each file to
+# check it, and again to list its test functions.
+test_a_process_leaked_before_the_tests_run_does_not_keep_the_lock() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  # backgrounded at SOURCE time, so it is a child of the runner's own
+  # source-check and function-listing shells, not of any test
+  printf 'setsid sleep 30 >/dev/null 2>&1 &\ntest_nothing() { :; }\n' > "$T/tests/src.test.sh"
+  bash "$T/tests/run.sh" >/dev/null 2>&1
+  _await_free "$CEL_SUITE_LOCK" 20 || { echo "a process the runner started kept the suite lock"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The first line names the holder well enough to go and look: pid, the time it
+# started, and the directory it is running in. Sixteen agent sessions on a box
+# is too many for "pid 972217" on its own to mean anything.
+test_the_lock_file_names_its_holders_pid_time_and_cwd() {
+  _suite_fixture
+  ( cd "$T" && bash "$T/tests/run.sh" > "$T/out" 2>&1 ) &
+  local p=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$p" 2>/dev/null; rm -rf "$T"; return 1; }
+  sleep 0.3
+  local first; first="$(sed -n 1p "$CEL_SUITE_LOCK")"
+  case "$first" in
+    [0-9]*" "[0-9][0-9]:[0-9][0-9]" "/*) ;;
+    *) printf 'lock file first line is not "<pid> <HH:MM> <cwd>": [%s]\n' "$first"; kill "$p" 2>/dev/null; rm -rf "$T"; return 1;;
+  esac
+  assert_contains "$first" "$T"
+  wait "$p" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# A wait that has gone on long enough to be a problem says who to go and ask.
+# The one-line "waiting" notice is printed once at the start and then the run
+# is silent; after CEL_SUITE_WAIT_WARN seconds it says it again, with the
+# holder's directory, so an operator does not have to read the lock file.
+test_a_long_wait_names_the_live_holder() {
+  _suite_fixture
+  ( flock 9; printf '%s 03:04 /tmp/a-checkout\n' "$BASHPID" > "$CEL_SUITE_LOCK"; exec sleep 4 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "still waiting for the suite lock - held by pid"
+  assert_contains "$out" "since 03:04 (/tmp/a-checkout)"
+  rm -rf "$T"
+}
+
+# And when the pid in the file is gone, the lock is held by something that
+# inherited the descriptor - the 2026-09-19 outage exactly. Saying "leaked"
+# rather than naming a process that no longer exists is the difference between
+# an operator waiting and an operator fixing it.
+test_a_long_wait_says_when_the_recorded_holder_is_dead() {
+  _suite_fixture
+  ( flock 9; printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"; exec sleep 4 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "still waiting for the suite lock - held by a dead pid 4194303 - the lock leaked; see cel doctor"
+  rm -rf "$T"
+}
+
+# `cel doctor` is where a box-wide problem gets named, and a leaked suite lock
+# is box-wide: it blocks every gate on the box. It is a leak when the recorded
+# holder is gone, or is running somewhere that is not a checkout - a suite runs
+# from inside one, a `sleep` that inherited the descriptor does not.
+test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
+  source "$CEL_ROOT/lib/doctor.sh"
+  T="$(mktemp -d)"
+  export CEL_SUITE_LOCK="$T/suite.lock"
+  : > "$CEL_SUITE_LOCK"
+  assert_eq "$(doctor_suite_lock_line)" ""
+
+  ( flock 9; exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
+  local holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  printf '4194303 03:04 /tmp/a-checkout\n' > "$CEL_SUITE_LOCK"
+  local line; line="$(doctor_suite_lock_line)"
+  assert_contains "$line" "suite lock leaked (pid 4194303"
+  assert_contains "$line" "cel gc --orphans"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+
+  # a live runner, in a checkout, holding it for as long as its suite takes:
+  # that is the lock working, and doctor says nothing about it
+  ( cd "$CEL_ROOT" && flock 9 && printf '%s 03:04 %s\n' "$BASHPID" "$CEL_ROOT" > "$CEL_SUITE_LOCK" && exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
+  holder=$!
+  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  sleep 0.2
+  assert_eq "$(doctor_suite_lock_line)" ""
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  unset CEL_SUITE_LOCK
+  rm -rf "$T"
+}
