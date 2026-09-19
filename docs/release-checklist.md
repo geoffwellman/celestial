@@ -5,10 +5,15 @@
 One verb, and the rest follows. From the box:
 
 ```
-cel release 0.3.0 --dry-run     # the notes that would ship, and the checks
-cel release 0.3.0               # dispatches the Cut job; prints the run URL
-cel release status              # the open release PR, and the newest tag
+cel release celestial 0.3.0 --dry-run   # the notes that would ship, and the plan
+cel release celestial 0.3.0             # dispatches the Cut job; prints the run URL
+cel release status celestial            # current version, commits since, newest Release
 ```
+
+From `~/ws/plane`, where celestial is the only repo declaring a `release:`
+block, the older short form `cel release 0.3.0` still means exactly this; see
+["Releasing a product"](../README.md#releasing-a-product) for the declaration
+the verb reads.
 
 or run the **Release** workflow's `Cut` from the Actions tab with the same
 version. The job runs the suite and the hygiene scans, rewrites `VERSION`,

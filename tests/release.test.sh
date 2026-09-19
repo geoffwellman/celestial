@@ -202,11 +202,11 @@ case "\$1 \$2" in
   'repo view')    printf '%s\n' "\${CEL_TEST_PERM:-WRITE}" ;;
   'workflow run') printf 'Created workflow_dispatch event\n' ;;
   'run watch')    printf 'run completed with success\n' ;;
-  'release list') printf 'v0.2.0 https://github.com/someone/widget/releases/tag/v0.2.0\n' ;;
+  'release list') printf 'v0.2.0 https://github.com/someone/thing/releases/tag/v0.2.0\n' ;;
   'run list')
     case "\$a" in
-      *in_progress*) printf 'https://github.com/someone/widget/actions/runs/99\n' ;;
-      *)             printf '42 https://github.com/someone/widget/actions/runs/42\n' ;;
+      *in_progress*) printf 'https://github.com/someone/thing/actions/runs/99\n' ;;
+      *)             printf '42 https://github.com/someone/thing/actions/runs/42\n' ;;
     esac ;;
   *)
     case "\$1:\$a" in
@@ -237,7 +237,8 @@ test_release_resolves_the_one_releasable_repo_in_a_product() {
 
 test_release_refuses_a_product_with_two_releasable_repos() {
   _prel_fixture
-  local out; out="$(_prel bundle 0.3.0)" && { _prel_cleanup; return 1; }
+  local out rc=0; out="$(_prel bundle 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
   assert_contains "$out" "widget" || { _prel_cleanup; return 1; }
   assert_contains "$out" "gizmo" || { _prel_cleanup; return 1; }
   assert_contains "$out" "--repo" || { _prel_cleanup; return 1; }
@@ -250,7 +251,8 @@ test_release_refuses_a_product_with_two_releasable_repos() {
 
 test_release_refuses_a_product_that_declares_no_release_block() {
   _prel_fixture
-  local out; out="$(_prel orphan 0.3.0)" && { _prel_cleanup; return 1; }
+  local out rc=0; out="$(_prel orphan 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
   assert_contains "$out" "orphan declares no release: block" || { _prel_cleanup; return 1; }
   assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
   _prel_cleanup
@@ -289,8 +291,9 @@ test_release_checks_the_value_against_accepts() {
 # that product actually come from.
 test_release_refuses_a_caller_who_only_has_read() {
   _prel_fixture
-  local out
-  out="$(CEL_TEST_PERM=READ _prel gadget 0.3.0)" && { _prel_cleanup; return 1; }
+  local out rc=0
+  out="$(CEL_TEST_PERM=READ _prel gadget 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
   assert_contains "$out" "you have READ on someone/doodad" || { _prel_cleanup; return 1; }
   assert_contains "$out" "cel update" || { _prel_cleanup; return 1; }
   # the call log is the proof: permission was read, nothing was dispatched
@@ -371,7 +374,8 @@ test_release_bare_version_works_where_one_repo_is_releasable() {
 
 test_release_bare_version_refuses_where_several_repos_are_releasable() {
   _prel_fixture
-  local out; out="$(_prel 0.3.0)" && { _prel_cleanup; return 1; }
+  local out rc=0; out="$(_prel 0.3.0)" || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
   assert_contains "$out" "cel release <product>" || { _prel_cleanup; return 1; }
   assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
   _prel_cleanup

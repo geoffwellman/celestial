@@ -60,10 +60,14 @@ cel - the celestial plane
                                 --check: what you have not got yet
                                 (exit 1 when behind); --rollback: undo it;
                                 --channel main|release: follow commits or tags
-  cel release <version>         cut a version on GitHub: the Cut workflow opens
-                                the bump PR, and merging it tags and publishes
-                                --dry-run: the notes that would ship and the
-                                checks; `cel release status`: open PR + newest tag
+  cel release <product> <v>     cut a release of a product the factory makes:
+                                dispatch the workflow its repo declares, with
+                                <v> as that workflow's input (a version, or a
+                                bump word). --repo <n> picks between a product's
+                                repos; --dry-run shows the plan and dispatches
+                                nothing; `cel release status [<product>]
+                                [--all-workspaces] [--json]`: current version,
+                                commits since, runs in flight, newest Release
   cel agents                    list agents, install status and injection strategy
   cel shellenv                  print shell env; eval this in your rc
 
