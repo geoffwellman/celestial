@@ -142,8 +142,29 @@ _kill_current_group() {
   CURRENT_GROUP=""
   return 0
 }
-trap '_kill_current_group; rm -rf "$TMPDIR"' EXIT
-trap '_kill_current_group; rm -rf "$TMPDIR"; exit 130' INT TERM
+
+# AND EVERY PROCESS THAT ESCAPED ITS GROUP. A walk of the box on 2026-09-19
+# found fifty-six `/bin/sh .../bin/long-running` fixtures still up, all
+# reparented to init, whose cwd was a `cel-tests.*` directory deleted nine
+# days earlier: a `last-words` test starts deliberately long-lived processes
+# with setsid - which is precisely a process the group kill above cannot
+# reach - and the suite that started them was killed. The CWD is the handle
+# (lib/memory.sh made the same argument for measuring a worker): anything
+# still sitting in this run's private TMPDIR was started by this run and has
+# nothing left to do, because the directory it is standing in is about to go.
+_kill_tmpdir_strays() {
+  case "${TMPDIR:-}" in */cel-tests.*) ;; *) return 0;; esac
+  local link pid target
+  for link in /proc/[0-9]*/cwd; do
+    pid="${link#/proc/}"; pid="${pid%/cwd}"
+    [ "$pid" = "$$" ] && continue
+    target="$(readlink "$link" 2>/dev/null)" || continue
+    case "$target" in "$TMPDIR"|"$TMPDIR"/*) kill -KILL "$pid" 2>/dev/null ;; esac
+  done
+  return 0
+}
+trap '_kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"' EXIT
+trap '_kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; exit 130' INT TERM
 PRELUDE="set -e; source '$CEL_ROOT/tests/lib/assert.sh'"
 pass=0; fail=0
 

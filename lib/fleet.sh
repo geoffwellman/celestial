@@ -27,6 +27,21 @@ _CEL_FLEET=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 # shellcheck source=lib/memory.sh
 . "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+# shellcheck source=lib/orphans.sh
+. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"
+
+# The processes with no owner at all, as one field of the box.
+#
+# Every view of this box reads `cel fleet --json`, so a class of process that
+# is not in this document is a class no view can mention - which is how a
+# gigabyte of reparented watchers, fixtures and dead pane shells sat under a
+# headline that said `celestial-orch 1.7G`. Zeroes rather than an absent key:
+# a console that has to ask whether the field exists gets it wrong once.
+fleet_orphans_json() { # -> {count, rss_mb}
+  local n mb
+  read -r n mb <<<"$(orphans_list 2>/dev/null | orphans_totals)"
+  printf '{"count":%d,"rss_mb":%d}' "${n:-0}" "${mb:-0}"
+}
 
 # One herdr roster for the whole run. The sweep below asks about every
 # orchestrator and every running worker, and a call per question turned a
@@ -262,7 +277,12 @@ _fleet_render() { # <doc>
   local free total
   free="$(mem_human "$(printf '%s' "$1" | jq -r '.box.available_mb // 0')")"
   total="$(mem_human "$(printf '%s' "$1" | jq -r '.box.total_mb // 0')")"
-  printf '%s' "$1" | jq -r --arg box "box $free free of $total" '.workspaces[]
+  local orph orph_n
+  orph_n="$(printf '%s' "$1" | jq -r '.box.orphans.count // 0')"
+  orph=""
+  [ "${orph_n:-0}" -gt 0 ] 2>/dev/null \
+    && orph="   $orph_n orphans ($(mem_human "$(printf '%s' "$1" | jq -r '.box.orphans.rss_mb // 0')")) - cel gc --orphans"
+  printf '%s' "$1" | jq -r --arg box "box $free free of $total$orph" '.workspaces[]
     | "\(.name)   (\(.units | length) products)   root mail: \(.root.unread) unread, \(.root.open) open   \($box)"
       as $head
     | [$head] + [.units[]
@@ -331,8 +351,9 @@ cmd_fleet() {
   doc="$(printf '%s' "$blocks" | jq -sc \
     --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
     --argjson subs "$(_fleet_subscriptions)" \
+    --argjson orphans "$(fleet_orphans_json)" \
     '{workspaces: ., subscriptions: $subs}
-     | .box = {total_mb: $total, available_mb: $avail, used_pct: $used,
+     | .box = {total_mb: $total, available_mb: $avail, used_pct: $used, orphans: $orphans,
                agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}')"
   mem_tree_snapshot_clear
   if [ "$json" -eq 1 ]; then printf '%s\n' "$doc"; else _fleet_render "$doc"; fi

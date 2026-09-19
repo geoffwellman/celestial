@@ -840,3 +840,64 @@ test_steward_says_nothing_about_a_suite_lock_held_for_a_normal_run() {
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   rm -rf "$T"
 }
+
+# --- CEL-37: the orphan sweep ----------------------------------------------
+
+# The memory sweep groups by pane, so it never saw the thirteen watchers, the
+# fifty-six fixtures and the 173 pane shells that had no pane at all:
+# `celestial-orch 1.7G` was the headline while a gigabyte of orphans went
+# unmentioned. The sweep reaps them and says so ONCE - one rolled-up line,
+# never one item per pid, or root's mailbox becomes the litter.
+_orphan_steward_fixture() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
+  mkdir -p "$T/alpha" "$T/inbox" "$T/proc"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget}]\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  export CEL_PROC="$T/proc" CEL_ORPHAN_GRACE=1
+}
+
+test_steward_reaps_orphans_and_reports_one_rolled_up_line() {
+  _orphan_steward_fixture
+  local w f
+  sleep 60 & w=$!
+  sleep 60 & f=$!
+  mkdir -p "$T/proc/$w" "$T/proc/$f"
+  printf 'Name:\tbash\nPPid:\t1\nUid:\t%s\t%s\t%s\t%s\nVmRSS:\t8000 kB\n' \
+    "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$T/proc/$w/status"
+  ln -sfn "$T" "$T/proc/$w/cwd"
+  printf 'cel\0inbox\0watch\0--for\0root\0' > "$T/proc/$w/cmdline"
+  printf 'Name:\tsh\nPPid:\t1\nUid:\t%s\t%s\t%s\t%s\nVmRSS:\t2000 kB\n' \
+    "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$T/proc/$f/status"
+  ln -sfn "$T/gone" "$T/proc/$f/cwd"
+  printf '/bin/sh\0%s/gone/bin/long-running\0' "$T" > "$T/proc/$f/cmdline"
+
+  local out; out="$(_steward_orphans 2>&1)"
+  assert_contains "$out" "reaped 2 orphans (1 watcher, 1 fixture)"
+  local mail; mail="$(cmd_inbox read --for root --workspace alpha --all)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'reaped 2 orphans')" "1"
+  kill -9 "$w" "$f" 2>/dev/null || true
+  rm -rf "$T"
+}
+
+# NOTHING TO SAY IS SAID BY SAYING NOTHING. A sweep that posts "reaped 0" every
+# five minutes is the noise this whole file was written to stop.
+test_steward_orphan_sweep_is_silent_when_it_reaped_nothing() {
+  _orphan_steward_fixture
+  local out; out="$(_steward_orphans 2>&1)"
+  assert_eq "$out" ""
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  rm -rf "$T"
+}
+
+# The largest-trees line could only name panes, which is why a gigabyte of
+# orphans never appeared in it.
+test_steward_memory_trees_include_the_orphans_as_one_tree() {
+  _mem_steward_fixture 25165824 1258291
+  orphans_list() { printf 'watcher\t1\t8000\t10\t/w\tcel inbox watch\nfixture\t2\t400000\t10\t/w\tsh\n'; }
+  local trees; trees="$(_steward_mem_trees)"
+  assert_contains "$trees" "orphans"
+  assert_eq "$(printf '%s\n' "$trees" | awk -F'\t' '$1 == "orphans" { print $2 }')" "398"
+  rm -rf "$T"
+}

@@ -21,6 +21,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
 # shellcheck source=lib/gc.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gc.sh"   # gc_doctor_line, for the blind-GC line
+# shellcheck source=lib/orphans.sh
+. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # orphans_doctor_line
 # shellcheck source=lib/gateway.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
 # shellcheck source=lib/services.sh
@@ -424,6 +426,12 @@ cmd_doctor() {
   # is not running tests - which blocks every gate on the box until it dies.
   local lockline; lockline="$(doctor_suite_lock_line)"
   [ -z "$lockline" ] || c_warn "$lockline"
+
+  # And the processes with no owner at all. A warning, never a failure: they
+  # cost memory, not correctness, and the cure is one command - which is why
+  # the line names it rather than describing the problem.
+  local orphline; orphline="$(orphans_doctor_line)"
+  [ -z "$orphline" ] || c_warn "$orphline"
 
   echo
   [ "$fail" = 0 ] && printf '\033[32mdoctor: OK\033[0m\n' || printf '\033[31mdoctor: problems found\033[0m\n'

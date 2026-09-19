@@ -386,7 +386,10 @@ next turn. Escalations that truly cannot wait still prompt, deliberately.
   feedback widget that routes straight back to the agent that published them —
   select text to comment on the exact passage.
 - **`cel gc`** / **`cel steward`** — the cleanup and liveness machinery, also
-  runnable by hand.
+  runnable by hand. `cel gc --orphans` reaps what the plane started and nobody
+  owns any more: inbox watchers whose console exited, test fixtures whose
+  worktree is gone, bare shells on ptys no pane owns, gate runners whose suite
+  was killed. The steward does it once a tick and says so in one line.
 
 ## What runs in the background
 
@@ -707,7 +710,7 @@ policy block into every agent.
 | `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
 | `cel dash` | workspace dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
-| `cel gc [--reap h]` | reclaim worktrees + idle agents |
+| `cel gc [--reap h] [--orphans]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner |
 | `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |
