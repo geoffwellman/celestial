@@ -705,7 +705,9 @@ export const quotaView = (doc) => {
     out.push(heading);
     for (const s of rows) {
       for (const c of subCells(s)) {
-        out.push(`  ${c[0].padEnd(8)} ${c[1].padEnd(18)} ${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
+        // The label is truncated, not wrapped: a 36-character Codex account id
+        // left whole pushed every window off the right of the terminal.
+        out.push(`  ${c[0].padEnd(12)} ${c[1].slice(0, 24).padEnd(24)} ${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
       }
     }
   }

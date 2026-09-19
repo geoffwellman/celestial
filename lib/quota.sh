@@ -537,7 +537,7 @@ cmd_quota() { # [provider] [--json]
     return 0
   fi
 
-  printf '  %-9s %-24s %s\n' SUBSCRIPTION ACCOUNT WINDOWS
+  printf '  %-12s %-24s %s\n' SUBSCRIPTION ACCOUNT WINDOWS
   if [ "$(printf '%s' "$subs" | jq -r 'length')" = 0 ]; then
     printf '  none - no signed-in Claude or Codex credential on this box\n'
   fi
@@ -549,7 +549,7 @@ cmd_quota() { # [provider] [--json]
     # Codex's is a 36-character uuid, and left whole it pushed every window off
     # the right of the table.
     acct="$(printf '%s' "$row" | jq -r '.label // .account')"
-    printf '  %-9s %-24s %s\n' \
+    printf '  %-12s %-24s %s\n' \
       "$(printf '%s' "$row" | jq -r '.provider')" \
       "${acct:0:24}" \
       "$(_sub_line "$row")"
