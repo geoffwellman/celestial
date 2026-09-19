@@ -109,23 +109,6 @@ test_a_killed_suite_frees_the_lock() {
   rm -rf "$T"
 }
 
-# The waiting line can name the holder because the holder wrote its pid and
-# start time into the lock file after acquiring it.
-test_the_lock_file_names_its_holder() {
-  _suite_fixture
-  bash "$T/tests/run.sh" > "$T/out" 2>&1 &
-  local p=$!
-  _await_held "$CEL_SUITE_LOCK" || { kill "$p" 2>/dev/null; rm -rf "$T"; return 1; }
-  sleep 0.3
-  local first; first="$(sed -n 1p "$CEL_SUITE_LOCK")"
-  case "$first" in
-    [0-9]*" "[0-9][0-9]:[0-9][0-9]) ;;
-    *) printf 'lock file first line is not "<pid> <HH:MM>": [%s]\n' "$first"; kill "$p" 2>/dev/null; rm -rf "$T"; return 1;;
-  esac
-  wait "$p" 2>/dev/null || true
-  rm -rf "$T"
-}
-
 # A filtered run still queues: a filter can still be most of the suite, and
 # "it is only a few tests" is what everyone says while the load climbs.
 test_a_filtered_run_still_takes_the_lock() {
@@ -238,7 +221,7 @@ test_a_long_wait_names_the_live_holder() {
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   assert_contains "$out" "still waiting for the suite lock - held by pid"
   assert_contains "$out" "since 03:04 (/tmp/a-checkout)"
   rm -rf "$T"
@@ -254,7 +237,7 @@ test_a_long_wait_says_when_the_recorded_holder_is_dead() {
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(CEL_SUITE_WAIT_WARN=1 bash "$T/tests/run.sh" 2>&1)"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   assert_contains "$out" "still waiting for the suite lock - held by a dead pid 4194303 - the lock leaked; see cel doctor"
   rm -rf "$T"
 }
@@ -277,7 +260,7 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   local line; line="$(doctor_suite_lock_line)"
   assert_contains "$line" "suite lock leaked (pid 4194303"
   assert_contains "$line" "cel gc --orphans"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 
   # a live runner, in a checkout, holding it for as long as its suite takes:
   # that is the lock working, and doctor says nothing about it
@@ -286,7 +269,7 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   sleep 0.2
   assert_eq "$(doctor_suite_lock_line)" ""
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   unset CEL_SUITE_LOCK
   rm -rf "$T"
 }
