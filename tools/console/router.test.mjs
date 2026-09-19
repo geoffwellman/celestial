@@ -9,7 +9,7 @@
 // sentence and the fleet state. A slot filler nobody can assert is a slot
 // filler that will one day put someone else's workspace in a `--workspace`.
 import assert from 'node:assert/strict';
-import { facts, plan, options, shellQuote, INTENT_NAMES } from './router.mjs';
+import { facts, plan, options, shellQuote, INTENT_NAMES, addresseeIn, steerFor } from './router.mjs';
 
 const t = (name, fn) => { fn(); process.stdout.write(`  ok ${name}\n`); };
 
@@ -341,6 +341,108 @@ t('no services means every service intent misses', () => {
 t('the quota intent is the whole subscription read', () => {
   assert.deepEqual(plan('quota', 'how much claude do i have left', facts(DOC, [])), ['cel quota']);
   assert.deepEqual(plan('quota', 'when does codex reset', facts(DOC, [])), ['cel quota']);
+});
+
+
+// --- CEL-36: reaching an orchestrator, and seeing it answer ----------------
+//
+// "so we can't actually steer the orchestrators from the TUI?" (owner,
+// 2026-09-19). Everything below is the resolution half of the answer: who a
+// sentence is addressed to, and what reaching them costs. A wrong addressee
+// is mail - or worse, a pane prompt - in a stranger's session, so every rung
+// of the ladder is asserted rather than assumed.
+
+const SDOC = {
+  workspaces: [
+    {
+      name: 'alpha',
+      root: { unread: 0, open: 0 },
+      units: [{
+        name: 'bundle',
+        orch: 'working',
+        workers: 1,
+        cap: 4,
+        repos: ['platform', 'widget'],
+        workers_list: [{ id: 'ABC-49-slug', ticket: 'ABC-49', repo: 'platform', state: 'running', alias: 'platform/ABC-49-slug' }],
+      }],
+    },
+    {
+      name: 'beta',
+      root: { unread: 0, open: 0 },
+      units: [
+        { name: 'gadget', orch: '-', workers: 0, cap: 4, workers_list: [] },
+        { name: 'trinket', orch: '-', workers: 0, cap: 4, workers_list: [] },
+      ],
+    },
+  ],
+};
+const SF = facts(SDOC, [], [], ['bundle-orch', 'alpha/root', 'oldname-orch']);
+
+t('the addressee ladder: worker, <p>-orch, product, workspace, repo, alias', () => {
+  assert.equal(addresseeIn('nudge ABC-49-slug "push"', SF).who, 'ABC-49-slug');
+  assert.equal(addresseeIn('tell bundle-orch "hi"', SF).who, 'bundle-orch');
+  assert.equal(addresseeIn('tell bundle "hi"', SF).who, 'bundle-orch');
+  // A workspace with exactly one product IS that product's orchestrator.
+  assert.equal(addresseeIn('tell alpha "hi"', SF).who, 'bundle-orch');
+  // A repo inside a product reaches the product that owns it: "tell the
+  // platform to ..." is how anyone actually says it.
+  assert.equal(addresseeIn('tell platform "hi"', SF).who, 'bundle-orch');
+  assert.equal(addresseeIn('tell platform "hi"', SF).workspace, 'alpha');
+  // And a name only the roster knows - a pane whose product was renamed.
+  assert.equal(addresseeIn('tell oldname-orch "hi"', SF).who, 'oldname-orch');
+});
+
+t('a workspace with two products asks which one instead of guessing', () => {
+  const hit = addresseeIn('tell beta "hi"', SF);
+  assert.ok(hit && hit.ask, 'beta has two products and must not resolve');
+  assert.match(hit.ask, /gadget/);
+  assert.match(hit.ask, /trinket/);
+  assert.equal(plan('message', 'tell beta "hi"', SF), null);
+});
+
+t('message to a LIVE orchestrator is the mail AND the tap on the shoulder', () => {
+  assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', SF), [
+    "cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha",
+    "herdr agent prompt bundle-orch 'inbox: pick up ABC-49 next - run cel inbox read'",
+  ]);
+  assert.equal(steerFor('message', 'tell bundle-orch to pick up ABC-49 next', SF).say,
+    'sent to bundle-orch (pane live, prompted)');
+});
+
+t('message to an orchestrator with no live pane is mail alone, and says so', () => {
+  assert.deepEqual(plan('message', 'tell gadget-orch "hold the release"', SF),
+    ["cel inbox send gadget-orch 'hold the release' --workspace beta"]);
+  assert.equal(steerFor('message', 'tell gadget-orch "hold the release"', SF).say,
+    'sent to gadget-orch (no live pane - it reads this when it next starts; run "start gadget-orch" to wake it)');
+});
+
+// A worker is mail as it always was: the two-step is for orchestrators, whose
+// panes are the thing the operator could not reach at all.
+t('message to a worker is unchanged', () => {
+  assert.deepEqual(plan('message', 'tell ABC-49-slug "push what you have"', SF),
+    ["cel inbox send ABC-49-slug 'push what you have' --workspace alpha"]);
+});
+
+t('the prompt carries the first 80 characters of the message and no more', () => {
+  const long = 'x'.repeat(200);
+  const cmds = plan('message', `tell bundle-orch "${long}"`, SF);
+  const head = /'inbox: (x+) - run cel inbox read'/.exec(cmds[1]);
+  assert.ok(head, cmds[1]);
+  assert.equal(head[1].length, 80);
+});
+
+t('nudge reaches an orchestrator as well as a worker', () => {
+  assert.deepEqual(plan('nudge', 'nudge bundle-orch "push what you have"', SF),
+    ["herdr agent prompt bundle-orch 'push what you have'"]);
+  assert.deepEqual(plan('nudge', 'poke ABC-49 "status please"', SF),
+    ["herdr agent prompt platform/ABC-49-slug 'status please'"]);
+});
+
+t('talk is an intent, and it resolves to the console\u2019s relay mode', () => {
+  assert.ok(INTENT_NAMES.includes('talk'), 'talk is not an intent');
+  assert.deepEqual(plan('talk', 'talk to bundle-orch', SF), ['talk bundle-orch']);
+  assert.deepEqual(plan('talk', 'let me speak to platform', SF), ['talk bundle-orch']);
+  assert.equal(plan('talk', 'let me speak to somebody', SF), null);
 });
 
 process.stdout.write('router: all tests passed\n');
