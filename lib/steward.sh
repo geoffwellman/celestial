@@ -26,6 +26,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 # shellcheck source=lib/memory.sh
 . "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+# shellcheck source=lib/orphans.sh
+. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"
 # shellcheck source=lib/services.sh
 . "$(dirname "${BASH_SOURCE[0]}")/services.sh"
 
@@ -771,6 +773,10 @@ _STEWARD_MEM_WORKER_WARN_MB="${CEL_MEM_WORKER_WARN_MB:-2048}"
 # or going, so naming it as one of the largest trees points an operator at
 # something nobody can act on - the same rule the fleet's worker list learned.
 _steward_mem_trees() { # -> name<TAB>mb, biggest first
+  _steward_mem_trees_raw | sort -t"$(printf '\t')" -k2,2nr
+}
+
+_steward_mem_trees_raw() {
   local ws wsdir p d id wt mb
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
@@ -789,7 +795,14 @@ _steward_mem_trees() { # -> name<TAB>mb, biggest first
     done < <(jq -r '.[]? | select((.state // "") == "running")
                     | [(.id // ""), (.worktree // "")] | @tsv' \
       "$wsdir/.cel/delegations.json" 2>/dev/null || true)
-  done | sort -t"$(printf '\t')" -k2,2nr
+  done
+  # ORPHANS ARE A TREE TOO, even though no pane owns them: the line exists to
+  # answer "what is holding the memory", and for four days the true answer
+  # was "a thousand processes nobody is looking at" while it named panes.
+  local on omb
+  read -r on omb <<<"$(orphans_list 2>/dev/null | orphans_totals)"
+  [ "${on:-0}" -gt 0 ] && [ "${omb:-0}" -gt 0 ] && printf 'orphans\t%s\n' "$omb"
+  printf ''
 }
 
 # Which product owns a delegation, so the warning goes to the orchestrator that
@@ -854,6 +867,44 @@ _steward_memory() {
       "$wsdir/.cel/delegations.json" 2>/dev/null || true)
   done
   mem_tree_snapshot_clear
+}
+
+# THE ORPHANS, ONCE PER TICK, AND ONE LINE ABOUT IT.
+#
+# Unlike every other sweep in this file, this one ACTS: the memory sweep
+# reports and never kills, because what it is looking at is a worker mid-gate
+# whose work a kill would destroy. Nothing in the four orphan classes has any
+# work to lose - a watcher for a console that exited, a fixture whose worktree
+# was deleted nine days ago, a shell on a pty nobody can reach, a runner whose
+# suite was killed - and the alternative was proved on 2026-09-19 to be a
+# gigabyte of them accumulating over four days with the steward running every
+# five minutes and mentioning none of it.
+#
+# ONE ROLLED-UP LINE, AND ONLY WHEN SOMETHING WENT. `reaped 6 orphans (2
+# watchers, 3 fixtures, 1 shell), 410 MB` is a sentence somebody reads; 173
+# items saying "reaped pid 40213" is the litter moved from /proc to root's
+# mailbox. And a tick that reaped nothing says nothing at all.
+_steward_orphans() {
+  local rows line n mb ws
+  rows="$(orphans_list 2>/dev/null)" || return 0
+  [ -n "$rows" ] || return 0
+  local class pid rss age cwd args
+  while IFS=$'\t' read -r class pid rss age cwd args; do
+    [ -n "$class" ] || continue
+    _orphans_kill "$class" "$pid"
+  done <<<"$rows"
+  line="$(printf '%s\n' "$rows" | orphans_reaped_line)"
+  [ -n "$line" ] || return 0
+  c_warn "$line"
+  read -r n mb <<<"$(printf '%s\n' "$rows" | orphans_totals)"
+  # The box is one box and root's mailbox is per workspace, as with the memory
+  # blocker: the condition key keeps it one rolled-up item in each rather than
+  # a fresh one every tick.
+  for ws in $(registry_names); do
+    cmd_inbox send root "steward: $line - processes with no owner (reparented watchers, fixtures whose worktree is gone, shells on dead ptys). cel gc --orphans --dry-run shows what a sweep would take." \
+      --from steward --workspace "$ws" --kind status --fp orphans >/dev/null 2>&1 || true
+  done
+  return 0
 }
 
 _STEWARD_UNIT="cel-steward"
@@ -1169,6 +1220,11 @@ $text2" >/dev/null 2>&1 \
   # this tick fails to start, and reading that warning after three failures is
   # reading it in the wrong order.
   _steward_memory
+  # AND WHAT HAS NO PANE AT ALL. The sweep above groups by worktree and pane,
+  # so every reparented watcher, dead-worktree fixture and pane-less shell on
+  # the box was invisible to it - a gigabyte of them, under a headline that
+  # named an orchestrator.
+  _steward_orphans
   _steward_services
   # And the other box-wide resource: one suite runs at a time, so a gate that
   # is queued is not a gate that is stuck - but only if somebody says so.

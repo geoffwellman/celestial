@@ -121,6 +121,10 @@ cel - the celestial plane
                                 <min> to retune, --remove to stop
   cel gc [--reap <hours>]       remove merged/closed worker worktrees; --reap
                                 also exits idle agents that old (panes survive)
+                                --orphans: reap processes with no owner at all
+                                (watchers whose console exited, fixtures whose
+                                worktree is gone, shells on dead ptys, killed
+                                gate runners); --dry-run to see them first
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS

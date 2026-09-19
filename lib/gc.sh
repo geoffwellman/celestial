@@ -10,6 +10,8 @@ _CEL_GC=1
 . "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 # shellcheck source=lib/manifest.sh
 . "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+# shellcheck source=lib/orphans.sh
+. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # cel gc --orphans
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
   local def status head pr
@@ -423,17 +425,33 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   return 0
 }
 
-cmd_gc() ( # [--reap <hours>] [--dry-run]; subshell owns lock descriptors
-  local reap_hours="" dry=0
+cmd_gc() ( # [--reap <hours>] [--orphans] [--dry-run]; subshell owns lock descriptors
+  local reap_hours="" dry=0 orphans=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --reap)
         [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "cel gc: --reap requires a positive whole number of hours"
         reap_hours="$2"; shift 2 ;;
+      --orphans) orphans=1; shift ;;
       --dry-run) dry=1; shift ;;
-      *) die "cel gc: unknown argument '$1' (want --reap <hours>, --dry-run)" ;;
+      *) die "cel gc: unknown argument '$1' (want --reap <hours>, --orphans, --dry-run)" ;;
     esac
   done
+
+  # THE PROCESS SWEEP IS ITS OWN VERB, deliberately not a stage of the
+  # worktree GC. The worktree GC needs herdr, gh and every ledger's writer
+  # lock, and skips itself entirely when any of them is unavailable - which is
+  # the state a box is in precisely when it is covered in orphans. A sweep of
+  # processes nobody owns needs none of that, so it must not inherit the
+  # reasons not to run.
+  if [ "$orphans" -eq 1 ]; then
+    local out
+    out="$(orphans_reap "$([ "$dry" -eq 1 ] && printf -- --dry-run)")"
+    if [ -z "$out" ]; then printf 'no orphans\n'; return 0; fi
+    printf '%s\n' "$out"
+    return 0
+  fi
+
   have herdr && have jq && have gh && have flock && have python3 || die "cel gc: herdr, jq, gh, flock and python3 are required"
 
   # A missing registry or failed roster is not an empty fleet. Writer locks

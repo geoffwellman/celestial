@@ -177,7 +177,7 @@ cel inbox - messages between agents that never type into a pane
       archive mail addressed to a WORKER that no longer exists. Long-lived
       recipients (root, <repo>-orch) are never pruned - they come back.
   cel inbox count [--for <who>] [--workspace w|--all-workspaces]  unread count
-  cel inbox watch [--for <who>] [--workspace w|--all-workspaces]
+  cel inbox watch [--for <who>] [--workspace w|--all-workspaces] [--parent <pid>]
       tail new items, one line each (what a Monitor background task runs -
       stdout is the notification). A decision or blocker also raises a desktop
       notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
@@ -455,17 +455,30 @@ _inbox_count_one() { # <ws> <who>
 # arrives as a single notification. Deliberately does not mark items read -
 # the recipient's own `cel inbox read` does that, and a monitor that consumed
 # the cursor would starve the catch-up hook.
-_inbox_watch() { # [--workspace w|--all-workspaces] [--for who]
-  local ws="" who="" every=0
+_inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
+  local ws="" who="" every=0 parent=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
       --for) who="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
       *) die "cel inbox watch: unknown argument '$1'" ;;
     esac
   done
   [ -n "$who" ] || who="$(_inbox_me)"
+  # BELT AND BRACES FOR A CONSOLE THAT DID NOT GET TO KILL US. A walk of the
+  # box on 2026-09-19 found thirteen of these trees reparented to init, four
+  # of them days old: every console that exited uncleanly left one tailing a
+  # mailbox for a pane that no longer existed. The console now kills the group
+  # on every exit path (tools/console/watcher.mjs), and this is the half that
+  # survives the path nobody thought of - the watcher follows the pid it was
+  # told owns it, and goes when that pid goes. Signalling our own process
+  # group, not just this pid, because the work is a `tail | jq` pipeline.
+  if [ -n "$parent" ]; then
+    ( while kill -0 "$parent" 2>/dev/null; do sleep "${CEL_WATCH_PARENT_POLL:-5}"; done
+      kill -TERM -- "-$$" 2>/dev/null || kill -TERM "$$" 2>/dev/null ) &
+  fi
   if [ "$every" -eq 0 ]; then _inbox_watch_one "$(_inbox_ws "$ws")" "$who" ""; return 0; fi
   # One tail per workspace, merged onto this stdout. The children are killed on
   # the way out: a console restarted a few times otherwise leaves a tail per

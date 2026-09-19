@@ -59,6 +59,18 @@ export const memFree = (box) => {
   return free ? `mem ${free} free` : '';
 };
 
+// The processes with no owner at all, when there are any. A gigabyte of
+// reparented watchers, dead-worktree fixtures and shells on ptys nobody can
+// reach sat unmentioned on this box for four days while the status edge
+// showed the headroom they were eating; the edge names them now, with the
+// command that takes them away. SILENT AT ZERO - a permanent "0 orphans" is
+// a row that teaches an operator to stop reading the row.
+export const orphansEdge = (box) => {
+  const n = Number(box?.orphans?.count || 0);
+  if (!(n > 0)) return '';
+  return `${n} orphans ${memHuman(box?.orphans?.rss_mb) || '0M'} - cel gc --orphans`;
+};
+
 // How alarmed to be. Under 15% available the box is about to start refusing
 // things; under 8% the kernel is minutes from choosing what dies, and what it
 // picks is never what anyone would have chosen.

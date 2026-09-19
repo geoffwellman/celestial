@@ -13,7 +13,7 @@ import { homedir } from 'node:os';
 import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
-  memFree, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
+  memFree, orphansEdge, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
 } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor } from './board.mjs';
 
@@ -247,7 +247,7 @@ const statusRow = (status, box, doc) => {
   const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
   const mem = memFree(box);
   const subs = subsEdge(doc);
-  return [left, subs, mem].filter(Boolean).join('   ');
+  return [left, subs, mem, orphansEdge(box)].filter(Boolean).join('   ');
 };
 
 // WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out

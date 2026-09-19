@@ -29,7 +29,7 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput, allServices, roster as rosterOf,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
@@ -44,6 +44,7 @@ import {
 } from './edit.mjs';
 import { parseMouseAll, hasMouse, hasControl, hitTest } from './mouse.mjs';
 import { enterTerminal, LEAVE } from './term.mjs';
+import { startWatcher } from './watcher.mjs';
 import { legend, helpLines } from './legend.mjs';
 
 const COMMAND = /^(cel|cel-fanout|cel-linear|gh|herdr)(\s|$)/;
@@ -537,28 +538,24 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // CEL-7). The console runs one so that mail arriving while the operator is
   // looking at another tab still reaches them; the bell below is the same
   // event, for the operator who IS looking.
-  useEffect(() => {
-    const child = spawn(CEL_BIN, ['inbox', 'watch', '--for', 'root', '--all-workspaces'],
-      { stdio: ['ignore', 'pipe', 'ignore'] });
-    let buf = '';
-    child.stdout.on('data', (chunk) => {
-      buf += chunk;
-      const parts = buf.split('\n');
-      buf = parts.pop() || '';
-      for (const line of parts) {
-        if (!line.trim()) continue;
-        const m = /^\[([^\]]+)\]\s*INBOX\s+(\S+)\s+from\s+(\S+):\s*(.*)$/.exec(line)
-          || /^INBOX\s+(\S+)\s+from\s+(\S+):\s*(.*)$/.exec(line);
-        const item = m && m.length === 5
-          ? { ws: m[1], kind: m[2], from: m[3], message: m[4], ts: new Date().toISOString() }
-          : { ws: '?', kind: 'status', from: '-', message: line, ts: new Date().toISOString() };
-        if (item.kind === 'decision' || item.kind === 'blocked') stdout.write('\u0007');
-        setTail((prev) => [...prev, item].slice(-200));
-      }
-    });
-    child.on('error', () => say('cel inbox watch could not start - mail will still refresh'));
-    return () => child.kill();
-  }, [stdout, say]);
+  //
+  // Its LIFETIME is watcher.mjs's, not this effect's: a React cleanup runs on
+  // a clean unmount and on none of the exit paths that actually happen, which
+  // is how thirteen of these ended up reparented to init.
+  useEffect(() => startWatcher({
+    bin: CEL_BIN,
+    spawn,
+    onLine: (line) => {
+      const m = /^\[([^\]]+)\]\s*INBOX\s+(\S+)\s+from\s+(\S+):\s*(.*)$/.exec(line)
+        || /^INBOX\s+(\S+)\s+from\s+(\S+):\s*(.*)$/.exec(line);
+      const item = m && m.length === 5
+        ? { ws: m[1], kind: m[2], from: m[3], message: m[4], ts: new Date().toISOString() }
+        : { ws: '?', kind: 'status', from: '-', message: line, ts: new Date().toISOString() };
+      if (item.kind === 'decision' || item.kind === 'blocked') stdout.write('\u0007');
+      setTail((prev) => [...prev, item].slice(-200));
+    },
+    onError: () => say('cel inbox watch could not start - mail will still refresh'),
+  }), [stdout, say]);
 
   // A TERMINAL LEFT IN MOUSE MODE IS A TERMINAL NOBODY CAN COPY OUT OF, and a
   // console that drew over the operator's scrollback is a console that ate the
@@ -1833,6 +1830,11 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         ? h(Text, {
           color: { bad: C.bad, warn: C.warn }[memLevel(doc.box)] || C.dim,
         }, `${memFree(doc.box)}   `)
+        : null,
+      // A gigabyte of processes nobody owns is not a memory reading, it is a
+      // chore - so it sits beside the headroom with the command that does it.
+      orphansEdge(doc.box)
+        ? h(Text, { color: C.warn }, `${orphansEdge(doc.box)}   `)
         : null,
       h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
