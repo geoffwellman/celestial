@@ -84,6 +84,24 @@ cel-fanout delegate <repo> <branch> <spec> --profile astra
   commits not on origin — and names exactly what would be lost. Releasing is
   not landing. `--discard` is the only way past that refusal, and it is
   logged; nothing snapshots the work first, so say it only when you mean it.
+  `release --all` takes only the rows the world has finished with - `landed`
+  and `abandoned` - and `--merged` ADDS the rows GitHub says are merged to
+  that same pass; `running`, `finished`, `collected` and `reported` are
+  somebody's open work and are never taken in bulk (one explicit
+  `release <id>` each, or name the states with `--state`). Every `--all` run
+  prints its plan first - what it will take, and every row it skips with the
+  state that spared it - and `--dry-run` stops there. Releasing the last child
+  under a `<repo>/workers` container leaves that container standing, and
+  recreates it if herdr closed it, so the next delegate still has a home;
+  `status` shows `detached` for a worker whose container went anyway (herdr
+  0.9 has no re-parent verb, so that is a report, not a fix).
+- `collect` and `land` run `cel-verify` with the workspace's `env:` block
+  applied, so a declared `CEL_VERIFY_GATE_TIMEOUT` (or TMPDIR, or any other
+  gate setting) actually reaches the gate; `--gate-timeout <secs>` on either
+  command still wins over the file. Neither holds the ledger lock across the
+  gate - it is released before `cel-verify` and retaken to write the verdict,
+  because that lock serialises ledger writes, not gates - so a row that moved
+  while the gate ran is refused ("re-run collect") instead of overwritten.
 - `reconcile` closes the rows the world already closed. One `gh pr list` per
   repo (never one call per row) over everything `finished`, `collected`, or
   `running` with no pane left: a **merged** PR gets `land`'s bookkeeping

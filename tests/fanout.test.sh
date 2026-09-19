@@ -499,15 +499,18 @@ _fanout_dirty_release() {
   git -C "$STUB_WT" init -q
   printf 'unsaved\n' > "$STUB_WT/work.txt"
 }
-# Bulk: the rows nobody works on any more go in one command; a running row
-# is never touched and one failure never stops the rest.
-test_release_all_takes_finished_and_collected_and_leaves_running_alone() {
+# Bulk: `--all` takes the rows the world has finished with - landed and
+# abandoned - and nothing else. It once defaulted to finished,collected and
+# released twelve rows of work awaiting review; the wider set is still
+# reachable, but only by naming it.
+test_release_all_takes_landed_and_abandoned_and_leaves_the_rest_alone() {
   _fanout_setup
   for t in WG-A WG-B WG-C; do (cd "$T" && "$BIN" delegate widget "$t" "$T/spec.md" >/dev/null); done
-  jq '(.[] | select(.id=="WG-A") | .state) = "finished" | (.[] | select(.id=="WG-B") | .state) = "collected"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  jq '(.[] | select(.id=="WG-A") | .state) = "landed" | (.[] | select(.id=="WG-B") | .state) = "collected"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
   local out; out="$(cd "$T" && "$BIN" release --all 2>&1)"
-  assert_contains "$out" "release --all: 2 done, 0 failed"
-  assert_eq "$(jq -r '[.[] | select(.state=="released")] | length' "$T/.cel/delegations.json")" "2"
+  assert_contains "$out" "release --all: 1 done, 0 failed"
+  assert_eq "$(jq -r '.[] | select(.id=="WG-A") | .state' "$T/.cel/delegations.json")" "released"
+  assert_eq "$(jq -r '.[] | select(.id=="WG-B") | .state' "$T/.cel/delegations.json")" "collected"
   assert_eq "$(jq -r '.[] | select(.id=="WG-C") | .state' "$T/.cel/delegations.json")" "running"
   out="$(cd "$T" && "$BIN" release --all --state running 2>&1)"
   assert_contains "$out" "1 done"
@@ -759,6 +762,125 @@ test_collect_records_the_verdict_in_the_ledger() {
   assert_eq "$(jq -r '.[0].verdict.red_then_green' "$T/.cel/delegations.json")" true
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+# A stub verifier that records the environment and argv it was handed, for the
+# question "did the workspace's env: block actually reach the gate?"
+_fanout_verify_env_stub() {
+  VSTUB="$T/verify-env-stub.sh"
+  cat > "$VSTUB" <<'EOF'
+#!/usr/bin/env bash
+wt="$1"; mkdir -p "$wt/.agent"
+printf '%s\n' "CEL_VERIFY_GATE_TIMEOUT=${CEL_VERIFY_GATE_TIMEOUT:-}" > "$VERIFY_ENV_LOG"
+printf 'argv: %s\n' "$*" >> "$VERIFY_ENV_LOG"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF
+  chmod +x "$VSTUB"
+  VERIFY_ENV_LOG="$T/verify-env.log"; : > "$VERIFY_ENV_LOG"
+  export CEL_FANOUT_VERIFY="$VSTUB" VERIFY_ENV_LOG
+}
+
+# THE WORKSPACE'S ENV HAS TO REACH THE GATE. `cel-fanout` read the env: block
+# in exactly one place - the pane split in `try` - so collect ran cel-verify
+# with the caller's environment and the plane's declared
+# CEL_VERIFY_GATE_TIMEOUT never applied: two collects came back
+# gate:TIMEOUT(600s) - no verdict at all - while CI ran the same suite green.
+test_collect_applies_the_workspace_env_to_the_gate() {
+  _fanout_setup; _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-GTO "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && CEL_VERIFY_GATE_TIMEOUT= "$BIN" collect WG-GTO) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "CEL_VERIFY_GATE_TIMEOUT=1234"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# ...and the command line still beats the file: an operator giving the gate
+# more time for one run must not have to edit the workspace to do it.
+test_collect_gate_timeout_flag_beats_the_workspace_env() {
+  _fanout_setup; _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-GTO2 "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-GTO2 --gate-timeout 99) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "--gate-timeout 99"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# land runs the same verifier and needs the same environment: a gate that
+# times out there refuses a merge that CI has already passed.
+test_land_applies_the_workspace_env_to_the_gate() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && CEL_VERIFY_GATE_TIMEOUT= "$BIN" land WG-LAND) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "CEL_VERIFY_GATE_TIMEOUT=1234"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# THE LEDGER LOCK IS FOR LEDGER WRITES, NOT FOR GATES. collect took the lock,
+# then ran cel-verify, whose gate queues on the box-wide suite lock - so the
+# ledger lock was held for the queue plus the whole gate, and every other
+# fanout command on the box waited behind it (a release waited six minutes).
+test_collect_releases_the_ledger_lock_while_the_gate_runs() {
+  _fanout_setup
+  local fifo="$T/gate.fifo" started="$T/gate.started"
+  mkfifo "$fifo"
+  local vstub="$T/verify-blocking.sh"
+  cat > "$vstub" <<STUB
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+: > "$started"
+read -r _ < "$fifo"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+STUB
+  chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
+  (cd "$T" && "$BIN" delegate widget WG-SLOWGATE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  # a finished row: what collect is actually given, and a state the concurrent
+  # `status` below has no reason to re-state
+  jq '(.[0].state) = "finished"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  (cd "$T" && "$BIN" collect WG-SLOWGATE) > "$T/collect.out" 2>&1 &
+  local cpid=$! i=0
+  while [ ! -f "$started" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -f "$started" ] || { echo "the gate never started"; kill "$cpid" 2>/dev/null; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  # ...and now another fanout command must not be stuck behind the gate
+  if ! ( cd "$T" && timeout 20 "$BIN" status ) > /dev/null 2>&1; then
+    echo "status blocked on the ledger lock while the gate ran"
+    printf 'x\n' > "$fifo"; wait "$cpid" 2>/dev/null
+    unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1
+  fi
+  printf 'x\n' > "$fifo"
+  wait "$cpid"
+  assert_contains "$(cat "$T/collect.out")" "verdict gate:PASS"
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" true
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# Letting go of the lock means somebody else can move the row while the gate
+# runs, so the row is re-read before the verdict is written: writing a verdict
+# onto a row that has since been released or re-delegated is worse than saying
+# so and being run again.
+test_collect_refuses_a_row_that_changed_state_while_the_gate_ran() {
+  _fanout_setup
+  local vstub="$T/verify-racing.sh"
+  cat > "$vstub" <<STUB
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+jq '(.[0].state) = "released"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+STUB
+  chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
+  (cd "$T" && "$BIN" delegate widget WG-RACE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$( (cd "$T" && "$BIN" collect WG-RACE) 2>&1 )" && {
+    echo "collect wrote a verdict onto a row that moved"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "WG-RACE changed state to released while the gate ran"
+  assert_eq "$(jq -r '.[0].verdict // "none"' "$T/.cel/delegations.json")" none
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_land_refuses_a_failed_gate() {
   _fanout_land_setup fleetbot APPROVED 0
   _fanout_verify_stub false
