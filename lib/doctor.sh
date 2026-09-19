@@ -101,6 +101,33 @@ check_roles_and_runtimes() {
 # c_err findings do. Herdr/ledger checks are guarded behind `have herdr` so
 # this runs on a box with no server, and behind the ledger file existing so a
 # workspace that has never fanned out is never penalised for it.
+# A WORKSPACE WITH WORKERS AND NO CONTAINER TO HOLD THEM. herdr shows a worker
+# worktree nested under the `<repo>/workers` workspace it was cut from, and
+# closes that container when its last child is released - which detached a
+# whole batch of survivors to the sidebar's top level on 2026-09-19 with
+# nothing saying so. `release` puts the container straight back; this is what
+# notices when something else took it away. herdr is read through the same
+# override the fanout tests stub, so this check is testable without a server.
+doctor_worker_containers() { # <wsdir>
+  local wsdir="$1" r top h ledger
+  ledger="$wsdir/.cel/delegations.json"
+  h="${CEL_FANOUT_HERDR:-herdr}"
+  [ -f "$ledger" ] || return 0
+  have "$h" || [ -x "$h" ] || return 0
+  for r in $(ws_repo_names "$wsdir"); do
+    jq -e --arg r "$r" '[.[] | select(.repo == $r)
+      | select(.state != "released") | select((.worktree // "") != "")] | length > 0' \
+      "$ledger" >/dev/null 2>&1 || continue
+    top="$(git -C "$wsdir/repos/$r" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$top" ] || continue
+    "$h" workspace list 2>/dev/null | jq -e --arg t "$top" \
+      '[.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
+        | select(.worktree.repo_root == $t)] | length > 0' >/dev/null 2>&1 \
+      || c_warn "$r: worker worktrees on the roster but no $r/workers container - they are detached in the sidebar; the next cel-fanout delegate or release recreates it"
+  done
+  return 0
+}
+
 check_workspaces() {
   local fail=0 n path remote r url gate first role rt bin_
   local ledger agents id pane
@@ -205,6 +232,7 @@ check_workspaces() {
         fi
       done < <(jq -r '.[] | select(.state == "running") | .id' "$ledger" 2>/dev/null)
     fi
+    doctor_worker_containers "$path"
   done
 
   return "$fail"
