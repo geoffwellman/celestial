@@ -1,0 +1,2 @@
+### Changed
+- `cel release <product> <version|bump>` cuts a release of anything the factory makes: a repo declares its `release:` workflow, input and accepted values in `workspace.yaml`, and the plane dispatches it, follows it and reports the tag and Release. A caller without write access is refused locally, by name, instead of taking a 403 from GitHub at the last step; `cel release status [--all-workspaces] [--json]` reports every releasable repo. The old `cel release <x.y.z>` still works where the workspace has exactly one releasable repo.

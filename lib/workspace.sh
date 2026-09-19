@@ -107,6 +107,41 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
+# RELEASE: how this repo is released, if it is at all.
+#
+#   release:
+#     workflow: release.yaml     # file name in .github/workflows/
+#     input: bump                # the dispatch input's NAME
+#     accepts: [major, minor, patch]   # or the literal word `semver`
+#     tag: "v{version}"          # how the resulting tag is named
+#     version_file: VERSION      # what `status` reads as "current"
+#     changelog: changelog.d/    # fragment dir, for --dry-run's pending section
+#
+# The plane owns none of these semantics on purpose: the products on one box
+# release four different ways - a bump input deriving the version from the
+# newest tag, an exact version with a VERSION file, plain tags with no script,
+# nothing at all - and a plane that hardcodes one of them is useful to exactly
+# one person. Before this existed, `cel release` assumed every repo was
+# celestial: every local refusal passed for anyone else and `gh workflow run`
+# then returned 403, failing at the last step looking like it should have
+# worked. A repo with no block is NOT releasable, and says so first.
+#
+# A list value (`accepts`) comes back space separated so `case` and `for` both
+# work on it without the caller learning jq.
+ws_repo_release() { # <wsdir> <repo> <key>
+  _yqr -r --arg n "$2" --arg k "$3" \
+    '.repos // [] | map(select(.name == $n))[0].release[$k] // ""
+     | if type == "array" then map(tostring) | join(" ") else tostring end' \
+    "$1/workspace.yaml"
+}
+
+# Releasable means there is something to dispatch. A block carrying everything
+# but a `workflow` names no run, so it is not a release declaration however
+# much else it holds.
+ws_repo_releasable() { # <wsdir> <repo>
+  [ -n "$(ws_repo_release "$1" "$2" workflow)" ]
+}
+
 # SEED: the gitignored local files a worktree needs before it can RUN. A
 # worktree is a fresh checkout, so every file git was told to ignore - the keys
 # file, a built wasm directory - is simply absent, and the ticket cannot be
