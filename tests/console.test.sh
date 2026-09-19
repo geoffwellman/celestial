@@ -1540,3 +1540,72 @@ test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
   case "$block" in *'also nothing to do'*) echo 'drew past the cut'; return 1;; esac
   _console_teardown
 }
+
+# --- CEL-43 section 5: a detail view that cannot resolve what it shows ------
+# Observed by the owner on a real BLOCKED item: the header read `id undefined`
+# and [resolve] did nothing. Two faults. The INBOX tail dropped the id of the
+# record it had just parsed, so a detail opened from that pane had no identity
+# (one opened from WAITING did, which is why it worked there); and a tail row
+# can be a HISTORICAL record whose item the steward already self-cleared, yet
+# the view offered a button that could never work.
+test_console_tail_rows_carry_the_id_of_the_record() {
+  _console_setup
+  printf '%s\n' \
+    '{"id":"b7","ts":"2036-09-20T10:00:00+00:00","kind":"blocked","from":"bundle-orch","to":"root","message":"memory is gone","fp":"mem-alpha"}' \
+    '{"id":"b8","ts":"2036-09-20T10:05:00+00:00","kind":"update","ref":"b7","to":"root","from":"bundle-orch","message":"still gone"}' \
+    '{"id":"b9","ts":"2036-09-20T10:09:00+00:00","kind":"resolution","ref":"b7","to":"root","by":"steward","message":"resolved by steward"}' \
+    >"$T/inbox/alpha.jsonl"
+  cat >"$T/tail.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const { inboxTail } = await import(process.env.STATE_MJS);
+const rows = inboxTail({ workspaces: [{ name: 'alpha' }] }, 8);
+assert.equal(rows.length, 1, 'the blocker is the one row');
+assert.equal(rows[0].id, 'b7', 'the tail dropped the id of the record it parsed');
+assert.equal(rows[0].fp, 'mem-alpha');
+assert.equal(rows[0].resolved.by, 'steward', 'the tail did not see the resolution that closed it');
+process.stdout.write('tail: all good\n');
+EOF
+  local out
+  out="$(STATE_MJS="$CEL_ROOT/tools/console/state.mjs" CEL_INBOX_DIR="$T/inbox" node "$T/tail.mjs" 2>&1)" \
+    || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'tail: all good'
+  _console_teardown
+}
+
+# NEVER SHOW A BUTTON THAT CANNOT WORK. What the detail view offers is
+# computed from the item's live state, not from the pane it was opened in.
+test_console_detail_view_offers_only_actions_that_can_work() {
+  _console_setup
+  cat >"$T/actions.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const { detailActions, detailButtons, resolveOutcome } = await import(process.env.VIEWS_MJS);
+
+const open = { id: 'b1', ws: 'alpha', kind: 'blocked', from: 'bundle-orch', message: 'x' };
+assert.deepEqual(detailActions(open, ['b1']), { resolve: true, note: '' });
+assert.deepEqual(detailButtons(open, ['b1'], true), ['resolve', 'reply', 'go to', 'target']);
+
+// resolved: no button, and it says when and by whom
+const done = { ...open, resolved: { ts: '2036-09-20T10:09:00+00:00', by: 'steward' } };
+const a = detailActions(done, []);
+assert.equal(a.resolve, false);
+assert.match(a.note, /^resolved 2036-09-20 10:09 by steward$/);
+assert.deepEqual(detailButtons(done, [], false), ['reply', 'go to']);
+
+// a tail row for something that was never an open item at all
+assert.equal(detailActions({ id: 'm1', kind: 'status' }, []).note, 'not an open item - this is the log');
+// and the id-less row that started this: no identity, no button
+assert.equal(detailActions({ kind: 'blocked' }, []).resolve, false);
+
+// the outcome of a resolve is REPORTED, either way
+assert.equal(resolveOutcome(open, { allow: true, ok: true, out: '' }), 'resolved b1');
+assert.equal(resolveOutcome(open, { allow: true, ok: false, out: 'no open decision or blocker with id b1\nmore' }),
+  'could not resolve b1: no open decision or blocker with id b1');
+assert.equal(resolveOutcome(open, { allow: false, reason: 'the console routes' }), 'refused: the console routes');
+process.stdout.write('actions: all good\n');
+EOF
+  local out
+  out="$(VIEWS_MJS="$CEL_ROOT/tools/console/views.mjs" node "$T/actions.mjs" 2>&1)" \
+    || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'actions: all good'
+  _console_teardown
+}
