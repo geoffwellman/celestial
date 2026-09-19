@@ -224,6 +224,13 @@ test_up_renames_a_live_unnamed_agent_only_in_a_cwd_it_owns() {
   assert_contains "$(cat "$STUB_DIR/calls.log")" "agent rename wQ:p1 bundle-orch"
   ! grep -q 'agent rename wQ:p9' "$STUB_DIR/calls.log" \
     || { echo "renamed an agent in a cwd this workspace does not own"; _wslife_teardown; return 1; }
+  # AND A MANUAL PRODUCT IS RENAMED TOO. `orchestrators: manual` says the
+  # plane does not start them, not that a live one may stay invisible.
+  _wslife_put_agent - wQ:p2 "$T/alpha/products/gadget"
+  cmd_ws_up alpha >/dev/null
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "agent rename wQ:p2 gadget-orch"
+  ! grep -q 'agent start gadget-orch' "$STUB_DIR/calls.log" \
+    || { echo "a manual product was started"; _wslife_teardown; return 1; }
   # A rename is not a start: the live agent keeps its pane.
   ! grep -q 'agent start bundle-orch' "$STUB_DIR/calls.log" \
     || { echo "started a second orchestrator over a live one"; _wslife_teardown; return 1; }

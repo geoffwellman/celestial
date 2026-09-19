@@ -207,6 +207,18 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
         blocked) orch="blocked" ;;
         *)       orch="LIVE" ;;
       esac
+    else
+      # NO ALIAS IS NOT NO ORCHESTRATOR (CEL-44). herdr cleared a live
+      # orchestrator's name when it restarted on 2026-09-18 and this view,
+      # which resolves one by its alias, reported `orch -` for a product whose
+      # pane was running - and the act that follows `-` is starting another one
+      # on top of it. An agent alive in the product's OWN directory is that
+      # product's orchestrator whatever herdr calls it, and `unnamed` is a
+      # state with a cure: cel ws up <workspace>.
+      local here
+      here="$(printf '%s' "$roster" | jq -r --arg c "$(_fleet_orch_dir "$wsdir" "$product")" \
+        '[.result.agents[]? | select((.cwd // "") == $c) | select((.agent_status // "") != "")] | length' 2>/dev/null || printf 0)"
+      [ "${here:-0}" -gt 0 ] 2>/dev/null && orch="unnamed"
     fi
   fi
 
