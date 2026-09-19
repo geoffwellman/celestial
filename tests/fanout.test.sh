@@ -499,15 +499,18 @@ _fanout_dirty_release() {
   git -C "$STUB_WT" init -q
   printf 'unsaved\n' > "$STUB_WT/work.txt"
 }
-# Bulk: the rows nobody works on any more go in one command; a running row
-# is never touched and one failure never stops the rest.
-test_release_all_takes_finished_and_collected_and_leaves_running_alone() {
+# Bulk: `--all` takes the rows the world has finished with - landed and
+# abandoned - and nothing else. It once defaulted to finished,collected and
+# released twelve rows of work awaiting review; the wider set is still
+# reachable, but only by naming it.
+test_release_all_takes_landed_and_abandoned_and_leaves_the_rest_alone() {
   _fanout_setup
   for t in WG-A WG-B WG-C; do (cd "$T" && "$BIN" delegate widget "$t" "$T/spec.md" >/dev/null); done
-  jq '(.[] | select(.id=="WG-A") | .state) = "finished" | (.[] | select(.id=="WG-B") | .state) = "collected"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+  jq '(.[] | select(.id=="WG-A") | .state) = "landed" | (.[] | select(.id=="WG-B") | .state) = "collected"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
   local out; out="$(cd "$T" && "$BIN" release --all 2>&1)"
-  assert_contains "$out" "release --all: 2 done, 0 failed"
-  assert_eq "$(jq -r '[.[] | select(.state=="released")] | length' "$T/.cel/delegations.json")" "2"
+  assert_contains "$out" "release --all: 1 done, 0 failed"
+  assert_eq "$(jq -r '.[] | select(.id=="WG-A") | .state' "$T/.cel/delegations.json")" "released"
+  assert_eq "$(jq -r '.[] | select(.id=="WG-B") | .state' "$T/.cel/delegations.json")" "collected"
   assert_eq "$(jq -r '.[] | select(.id=="WG-C") | .state' "$T/.cel/delegations.json")" "running"
   out="$(cd "$T" && "$BIN" release --all --state running 2>&1)"
   assert_contains "$out" "1 done"
@@ -759,6 +762,61 @@ test_collect_records_the_verdict_in_the_ledger() {
   assert_eq "$(jq -r '.[0].verdict.red_then_green' "$T/.cel/delegations.json")" true
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+# A stub verifier that records the environment and argv it was handed, for the
+# question "did the workspace's env: block actually reach the gate?"
+_fanout_verify_env_stub() {
+  VSTUB="$T/verify-env-stub.sh"
+  cat > "$VSTUB" <<'EOF'
+#!/usr/bin/env bash
+wt="$1"; mkdir -p "$wt/.agent"
+printf '%s\n' "CEL_VERIFY_GATE_TIMEOUT=${CEL_VERIFY_GATE_TIMEOUT:-}" > "$VERIFY_ENV_LOG"
+printf 'argv: %s\n' "$*" >> "$VERIFY_ENV_LOG"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF
+  chmod +x "$VSTUB"
+  VERIFY_ENV_LOG="$T/verify-env.log"; : > "$VERIFY_ENV_LOG"
+  export CEL_FANOUT_VERIFY="$VSTUB" VERIFY_ENV_LOG
+}
+
+# THE WORKSPACE'S ENV HAS TO REACH THE GATE. `cel-fanout` read the env: block
+# in exactly one place - the pane split in `try` - so collect ran cel-verify
+# with the caller's environment and the plane's declared
+# CEL_VERIFY_GATE_TIMEOUT never applied: two collects came back
+# gate:TIMEOUT(600s) - no verdict at all - while CI ran the same suite green.
+test_collect_applies_the_workspace_env_to_the_gate() {
+  _fanout_setup; _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-GTO "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && CEL_VERIFY_GATE_TIMEOUT= "$BIN" collect WG-GTO) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "CEL_VERIFY_GATE_TIMEOUT=1234"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# ...and the command line still beats the file: an operator giving the gate
+# more time for one run must not have to edit the workspace to do it.
+test_collect_gate_timeout_flag_beats_the_workspace_env() {
+  _fanout_setup; _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-GTO2 "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-GTO2 --gate-timeout 99) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "--gate-timeout 99"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# land runs the same verifier and needs the same environment: a gate that
+# times out there refuses a merge that CI has already passed.
+test_land_applies_the_workspace_env_to_the_gate() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_env_stub
+  yq -y -i '.env.CEL_VERIFY_GATE_TIMEOUT = "1234"' "$T/workspace.yaml"
+  (cd "$T" && CEL_VERIFY_GATE_TIMEOUT= "$BIN" land WG-LAND) > /dev/null
+  assert_contains "$(cat "$VERIFY_ENV_LOG")" "CEL_VERIFY_GATE_TIMEOUT=1234"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_land_refuses_a_failed_gate() {
   _fanout_land_setup fleetbot APPROVED 0
   _fanout_verify_stub false
