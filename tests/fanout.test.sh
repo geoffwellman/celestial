@@ -837,6 +837,9 @@ STUB
   chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
   (cd "$T" && "$BIN" delegate widget WG-SLOWGATE "$T/spec.md") > /dev/null
   mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  # a finished row: what collect is actually given, and a state the concurrent
+  # `status` below has no reason to re-state
+  jq '(.[0].state) = "finished"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
   (cd "$T" && "$BIN" collect WG-SLOWGATE) > "$T/collect.out" 2>&1 &
   local cpid=$! i=0
   while [ ! -f "$started" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done

@@ -98,7 +98,10 @@ cel-fanout delegate <repo> <branch> <spec> --profile astra
 - `collect` and `land` run `cel-verify` with the workspace's `env:` block
   applied, so a declared `CEL_VERIFY_GATE_TIMEOUT` (or TMPDIR, or any other
   gate setting) actually reaches the gate; `--gate-timeout <secs>` on either
-  command still wins over the file.
+  command still wins over the file. Neither holds the ledger lock across the
+  gate - it is released before `cel-verify` and retaken to write the verdict,
+  because that lock serialises ledger writes, not gates - so a row that moved
+  while the gate ran is refused ("re-run collect") instead of overwritten.
 - `reconcile` closes the rows the world already closed. One `gh pr list` per
   repo (never one call per row) over everything `finished`, `collected`, or
   `running` with no pane left: a **merged** PR gets `land`'s bookkeeping

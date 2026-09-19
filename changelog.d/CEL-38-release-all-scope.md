@@ -10,3 +10,8 @@
 - `cel-fanout collect` and `land` apply the workspace `env:` block before
   running `cel-verify`, so a declared `CEL_VERIFY_GATE_TIMEOUT` reaches the
   gate; `--gate-timeout <secs>` on either command overrides it.
+- `collect` and `land` no longer hold the delegation-ledger lock while the gate
+  runs: the lock is released before `cel-verify` and retaken to write the
+  verdict, so other `cel-fanout` commands are not stuck behind a gate queueing
+  on the box-wide suite lock. If the row changed state while the gate ran,
+  collect refuses and says to re-run rather than writing a stale verdict.
