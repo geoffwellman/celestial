@@ -27,3 +27,14 @@
   the registry's first workspace). Every other dashboard shows one line
   naming that URL. One broker and one gateway rendered on four dashboards
   read as several; there is still no box-wide dashboard.
+
+### Fixed
+- The console's INBOX tail dropped the id of the record it had just parsed,
+  so a detail view opened from that pane read `id undefined` and its
+  `[resolve]` did nothing, while the same item opened from WAITING resolved
+  fine. The tail carries `id` (and `ref`, `fp` and what resolved it).
+- A detail view computes its actions from the item's live state: an item that
+  is not open shows `[reply]` and `[go to]` only, with one line saying
+  `resolved <when> by <who>` or `not an open item - this is the log`. A
+  resolve now reports its outcome - `resolved <id>`, or the command's error -
+  instead of failing silently.
