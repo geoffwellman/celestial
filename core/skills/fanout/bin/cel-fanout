@@ -159,6 +159,52 @@ _fanout_seed_worktree() { # <wsdir> <repo> <worktree>
   return 0
 }
 
+# THE CONTAINER A REPO'S WORKERS NEST UNDER, created if nothing holds the repo.
+# herdr shows a worktree under the workspace it was created from and has no
+# parent/nesting option at all, so the nest target is always the workspace that
+# owns the repo by its git toplevel; when none does (the repo's orchestrator
+# retired in favour of a product one, or herdr closed an empty container when
+# its last child was released) a bare shell labelled `<repo>/workers` is made
+# for it. Without one the workers appear at the sidebar's top level, homeless -
+# which is how this file once lost track of a whole batch, and how a
+# `release --all` scattered the survivors on 2026-09-19.
+_container_ensure() { # <repodir> <repo> -> workspace id, empty if impossible
+  local repodir="$1" repo="$2" toplevel id
+  [ -d "$repodir" ] || return 1
+  toplevel="$(git -C "$repodir" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$toplevel" ] || return 1
+  id="$(_container_id "$toplevel")"
+  if [ -z "$id" ]; then
+    id="$("$HERDR" workspace create --cwd "$repodir" --label "$repo/workers" --no-focus 2>/dev/null \
+      | jq -r '.result.workspace.workspace_id // empty')"
+    [ -n "$id" ] && c_ok "no workspace held $repo - created container '$repo/workers' ($id) for its workers" >&2
+  fi
+  printf '%s' "$id"
+  [ -n "$id" ]
+}
+
+# The workspace that OWNS this checkout: not a linked worktree, same repo root.
+_container_id() { # <repo-toplevel> -> workspace id or empty
+  "$HERDR" workspace list 2>/dev/null | jq -r --arg t "$1" \
+    '.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
+     | select(.worktree.repo_root == $t) | .workspace_id' | head -1
+}
+
+# A LINKED WORKTREE WHOSE CONTAINER IS GONE IS DETACHED: it still exists, it
+# just hangs at the sidebar's top level with nothing above it. herdr 0.9 has no
+# re-parent verb, so status says so and leaves the fixing to a person.
+_ws_detached() { # <workspace-list-json> <workspace_id>
+  [ -n "$1" ] || return 1
+  printf '%s' "$1" | jq -e --arg id "$2" '
+    (.result.workspaces // []) as $w
+    | (first($w[] | select(.workspace_id == $id)) // null) as $me
+    | ($me != null)
+      and ($me.worktree.is_linked_worktree == true)
+      and ([$w[] | select(.worktree.is_linked_worktree == false)
+            | select(.worktree.repo_root == $me.worktree.repo_root)] | length == 0)
+  ' >/dev/null 2>&1
+}
+
 _repo_slug() { # <wsdir> <repo>
   ws_repo_get "$1" "$2" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##'
 }
@@ -169,13 +215,25 @@ _repo_slug() { # <wsdir> <repo>
 _fanout_verify() { # <wsdir> <id> <entry-json>
   local wsdir="$1" id="$2" entry="$3"
   local wt repo branch gate slug
+  local gate_timeout="${4:-}"
   wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
   [ -d "$wt" ] || return 0
   gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
   slug="$(_repo_slug "$wsdir" "$repo")"
   local line
-  line="$(_ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} --branch "$branch" 2>/dev/null || true)"
+  # THE WORKSPACE'S ENV REACHES THE GATE. It was read in exactly one place -
+  # the pane split in `try` - so collect and land ran the verifier with the
+  # caller's environment, and the plane's declared CEL_VERIFY_GATE_TIMEOUT
+  # (its suite outgrew the 600s default on a loaded box) never applied: two
+  # collects came back gate:TIMEOUT(600s), which is no verdict at all, while
+  # CI ran the same suite green. Scoped to a subshell so env.local cannot
+  # leak into the rest of this process; an explicit --gate-timeout still wins,
+  # because giving one run more time must not mean editing the workspace.
+  line="$( set +u
+           eval "$(ws_env_exports "$wsdir" 2>/dev/null)" >/dev/null 2>&1 || true
+           _ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} \
+             ${gate_timeout:+--gate-timeout "$gate_timeout"} --branch "$branch" 2>/dev/null || true )"
   [ -n "$line" ] && printf '%s\n' "$line"
   if [ -f "$wt/.agent/verdict.json" ]; then
     local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
@@ -452,16 +510,8 @@ cmd_delegate() {
   # instead of appearing at the top level, homeless, which is how this file
   # once lost track of a whole batch.
   if [ -z "$herdr_ws" ]; then
-    local toplevel; toplevel="$(git -C "$repodir" rev-parse --show-toplevel)"
-    herdr_ws="$("$HERDR" workspace list | jq -r --arg t "$toplevel" \
-      '.result.workspaces[] | select(.worktree.is_linked_worktree == false) | select(.worktree.repo_root == $t) | .workspace_id' \
-      | head -1)"
-    if [ -z "$herdr_ws" ]; then
-      herdr_ws="$("$HERDR" workspace create --cwd "$repodir" --label "$repo/workers" --no-focus 2>/dev/null \
-        | jq -r '.result.workspace.workspace_id // empty')"
-      [ -n "$herdr_ws" ] && c_ok "no workspace held $repo - created container '$repo/workers' ($herdr_ws) for its workers"
-    fi
-    [ -n "$herdr_ws" ] || die "no herdr workspace holds $toplevel and one could not be created - pass --herdr-workspace"
+    herdr_ws="$(_container_ensure "$repodir" "$repo")"
+    [ -n "$herdr_ws" ] || die "no herdr workspace holds $repodir and one could not be created - pass --herdr-workspace"
   fi
 
   # BRANCH FROM THE REMOTE DEFAULT, NEVER FROM THE CHECKOUT'S CURRENT HEAD.
@@ -823,13 +873,14 @@ cmd_wait() {
 
 cmd_collect() {
   _fanout_refuse_worker collect "${1:-}" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 1 ] || die "usage: cel-fanout collect <id>|--all [--state finished] [--workspace NAME]"
+  [ $# -ge 1 ] || die "usage: cel-fanout collect <id>|--all [--state finished] [--gate-timeout <secs>] [--workspace NAME]"
   if [ "$1" = --all ]; then shift; _fanout_bulk collect "finished" "$@"; return $?; fi
   local id="$1"; shift
-  local ws_opt=""
+  local ws_opt="" gate_timeout=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --workspace) ws_opt="$2"; shift 2 ;;
+      --workspace)    ws_opt="$2"; shift 2 ;;
+      --gate-timeout) gate_timeout="$2"; shift 2 ;;
       *) die "collect: unknown argument: $1" ;;
     esac
   done
@@ -877,7 +928,7 @@ cmd_collect() {
   # the verdict is what did - the gate actually run, the commit order, the
   # diff size, CI and review. Printed first so the reader meets the facts
   # before the account of them.
-  _fanout_verify "$wsdir" "$id" "$entry"
+  _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout"
 
   if [ -f "$worktree/.agent/result.md" ]; then
     cat "$worktree/.agent/result.md"
@@ -912,6 +963,8 @@ cmd_status() {
   else
     agents=""
   fi
+
+  local wslist=""; wslist="$("$HERDR" workspace list 2>/dev/null || true)"
 
   # MODEL is here because comparing two models on the same kind of ticket is
   # the whole point of profiles, and an unlabelled row makes that anecdote
@@ -990,8 +1043,11 @@ cmd_status() {
       fleet_worker_row "$(printf '%s' "$e" | jq -c --arg s "$state" '.state = $s')" "$jlive" "$text"
       continue
     fi
-    model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"
-    ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
+    # DETACHED beats a status: a linked worktree whose container is gone is
+    # hanging at the sidebar's top level, which is the fact the operator has to
+    # act on. There is no re-parent verb in herdr 0.9, so this is a report.
+    if _ws_detached "$wslist" "$(printf '%s' "$e" | jq -r '.herdr_ws // ""')"; then live=detached; fi
+    model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"    ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
     case "$(printf '%s' "$e" | jq -r '.shape // "ship"')" in
       scout) ticket=scout ;;
       spike) ticket=spike ;;
@@ -1516,8 +1572,14 @@ cmd_reconcile() { # [--workspace NAME] [--dry-run]
             c_warn "would abandon $id: $branch - PR #$(printf '%s' "$pr" | jq -r '.number') was closed unmerged $((age / 3600))h ago"
           else
             c_warn "abandoned $id: $branch - PR #$(printf '%s' "$pr" | jq -r '.number') closed unmerged $((age / 3600))h ago; its work goes with the worktree"
+            # The state moves BEFORE the release: release reads it to decide
+            # whether an unmerged ticket means "leave everything alone", and a
+            # row this pass has already judged abandoned is not that.
+            _ledger_update_state "$wsdir" "$id" abandoned
             ( cmd_release "$id" ${ws_opt:+--workspace "$ws_opt"} --discard ) \
               || c_warn "$id: could not release its worktree - cel-fanout release $id --discard"
+            # Release writes `released`; the row's truth is that it was
+            # abandoned, and that is what the operator has to read tomorrow.
             _ledger_update_state "$wsdir" "$id" abandoned
           fi
         fi
@@ -1576,33 +1638,69 @@ _reconcile_raise() { # <ws> <fp> <to> <message>
 
 cmd_release() {
   _fanout_refuse_worker release "${1:-}" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--state finished,collected] [--keep-worktree] [--discard] [--workspace NAME]"
+  [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--dry-run] [--state landed,abandoned] [--keep-worktree] [--discard] [--workspace NAME]"
   if [ "$1" = --all ]; then
     shift
-    # --merged: only rows GitHub has already merged, from the same single
-    # `gh pr list` read reconcile makes. The operator's actual question after
-    # a merge spree is "clean up what is already in main", and answering it by
-    # state alone released branches that had never landed.
-    local -a rest=(); local merged_only=0 a
-    for a in "$@"; do
-      if [ "$a" = --merged ]; then merged_only=1; else rest+=("$a"); fi
+    # ONE DECISION PER ROW, TAKEN BEFORE ANYTHING IS REMOVED. 2026-09-19: an
+    # orchestrator ran `release --all` to free memory and meant "release the
+    # landed rows". It released twelve rows in `finished` and `collected` -
+    # work awaiting collection or review, with open PRs - because --all
+    # defaulted to those states, and the --merged pass and the state pass each
+    # reached their own verdict about the same row. So: `--all` is `landed`
+    # and `abandoned`, the states that mean the world has finished with the
+    # row; `--merged` ADDS rows GitHub has already merged rather than replacing
+    # the set; anything else is one explicit `release <id>` per row, with the
+    # refusals that come with it. `--state` still names a wider set out loud.
+    local -a rest=(); local merged_only=0 dry=0 states="landed,abandoned" ws_opt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --merged)    merged_only=1; shift ;;
+        --dry-run)   dry=1; shift ;;
+        --state)     states="$2"; shift 2 ;;
+        --workspace) ws_opt="$2"; rest+=("$1" "$2"); shift 2 ;;
+        *)           rest+=("$1"); shift ;;
+      esac
     done
+    local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+    local ledger; ledger="$(_ledger_read "$wsdir")"
+    local ids; ids="$(printf '%s' "$ledger" | jq -r --arg s ",$states," \
+      '.[] | select(("," + (.state // "") + ",") as $k | $s | contains($k)) | .id')"
     if [ "$merged_only" -eq 1 ]; then
-      local mw=""; mw="$(_fanout_ws_arg "${rest[@]+"${rest[@]}"}")"
-      local mwsdir; mwsdir="$(_fanout_wsdir "$mw")"
-      local ids; ids="$(_merged_ids "$mwsdir" "finished,collected")"
-      [ -n "$ids" ] || { c_ok "release --all --merged: nothing merged to release"; return 0; }
-      local mid n=0 failed=0
-      while IFS= read -r mid; do
-        [ -n "$mid" ] || continue
-        if ( cmd_release "$mid" ${rest[@]+"${rest[@]}"} ); then n=$((n + 1))
-        else failed=$((failed + 1)); c_warn "release --all --merged: $mid failed - see above"; fi
-      done <<< "$ids"
-      c_ok "release --all --merged: $n done, $failed failed"
-      [ "$failed" -eq 0 ]
-      return $?
+      # The same single `gh pr list` read reconcile makes - the operator's
+      # actual question after a merge spree is "clean up what is already in
+      # main", and answering it by state alone released branches that had
+      # never landed.
+      ids="$ids"$'\n'"$(_merged_ids "$wsdir" "finished,collected,reported")"
     fi
-    _fanout_bulk release "finished,collected" ${rest[@]+"${rest[@]}"}; return $?
+    local take; take="$(printf '%s\n' "$ids" | awk 'NF && !seen[$0]++')"
+
+    # THE PLAN GOES FIRST, EVERY RUN. The operator who lost twelve rows had no
+    # way to see what the verb was about to do until it had already done it,
+    # so every skipped row is named with the state that spared it.
+    local tspace; tspace=" $(printf '%s' "$take" | tr '\n' ' ') "
+    local taken skipped n_take n_skip
+    taken="$(printf '%s' "$ledger" | jq -r --arg t "$tspace" \
+      '[.[] | select((" " + .id + " ") as $k | $t | contains($k))
+        | .id + " " + (.state // "?")] | join(", ")')"
+    skipped="$(printf '%s' "$ledger" | jq -r --arg t "$tspace" \
+      '[.[] | select(((" " + .id + " ") as $k | $t | contains($k)) | not)
+        | select(.state != "released") | .id + " " + (.state // "?")] | join(", ")')"
+    n_take="$(printf '%s' "$take" | grep -c . || true)"
+    n_skip=0
+    [ -z "$skipped" ] || n_skip="$(printf '%s' "$skipped" | tr ',' '\n' | grep -c . || true)"
+    c_ok "release --all: $n_take rows${taken:+ ($taken)}; skipping $n_skip${skipped:+ ($skipped)}"
+    [ "$dry" -eq 0 ] || { c_ok "release --all --dry-run: nothing removed"; return 0; }
+    [ -n "$take" ] || { c_ok "release --all: nothing in state $states"; return 0; }
+
+    local rid n=0 failed=0
+    while IFS= read -r rid; do
+      [ -n "$rid" ] || continue
+      if ( cmd_release "$rid" ${rest[@]+"${rest[@]}"} ); then n=$((n + 1))
+      else failed=$((failed + 1)); c_warn "release --all: $rid failed - see above"; fi
+    done <<< "$take"
+    c_ok "release --all: $n done, $failed failed"
+    [ "$failed" -eq 0 ]
+    return $?
   fi
   local id="$1"; shift
   local keep=0 discard=0 ws_opt=""
@@ -1631,10 +1729,11 @@ cmd_release() {
   # Done ONLY on a merged PR. Releasing a worktree is not the same as landing
   # the work - a release after an abandoned or closed PR must not mark the
   # ticket complete, or the board lies in the one direction nobody checks.
-  local ticket branch repo
+  local ticket branch repo state
   ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
   branch="$(printf '%s' "$entry" | jq -r '.branch')"
   repo="$(printf '%s' "$entry" | jq -r '.repo')"
+  state="$(printf '%s' "$entry" | jq -r '.state // ""')"
   if [ -n "$ticket" ]; then
     local merged
     merged="$(gh pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
@@ -1642,8 +1741,22 @@ cmd_release() {
       --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
     if [ -n "$merged" ] && [ "$merged" != "null" ]; then
       _fanout_ticket_state "$ticket" "Done"
+    elif [ "$state" = landed ] || [ "$state" = abandoned ] || [ "$keep" -eq 1 ]; then
+      # The row is already finished with (or nothing is being removed anyway),
+      # so only the BOARD is left alone: a release after an abandoned or
+      # closed PR must not mark the ticket complete, or the board lies in the
+      # one direction nobody checks.
+      c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge); the row is ${state:-unknown}, so its worktree goes"
     else
-      c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge)"
+      # A "LEFT AS-IS" LINE IS A PROMISE. On 2026-09-19 this line was printed
+      # about a row that still had an open PR and then its worktree was
+      # removed anyway, and the work had to be rebuilt by hand. The path that
+      # prints it now returns before anything is removed: an unmerged ticket
+      # on a row nobody has finished with is a decision for a person.
+      c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge) - nothing removed, the row stays $state.
+  Land it, or mark the row landed/abandoned, or keep the checkout:
+    cel-fanout release $id --keep-worktree"
+      return 0
     fi
   fi
 
@@ -1693,6 +1806,13 @@ cmd_release() {
   # workspace with it); that is not a reason to leave the row open.
   [ "$keep" -eq 1 ] || "$HERDR" worktree remove --workspace "$herdr_ws" --force \
     || c_warn "$id: herdr had no worktree to remove for $herdr_ws - the row is released anyway"
+  # THE CONTAINER OUTLIVES ITS CHILDREN. Removing the last worktree under a
+  # `<repo>/workers` container closed the container with it, and the surviving
+  # workers - linked worktrees with nothing left to nest under - were detached
+  # to the sidebar's top level where nobody was looking for them. The container
+  # is one bare shell; putting it straight back costs nothing and keeps the
+  # sidebar's home for the next delegate.
+  [ "$keep" -eq 1 ] || _container_ensure "$wsdir/repos/$repo" "$repo" >/dev/null || true
   _ledger_update_state "$wsdir" "$id" released
 }
 
@@ -1735,13 +1855,14 @@ cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
 # Deterministic logic in scripts, judgement in agents - and never the reverse.
 cmd_land() { # <id>
   _fanout_refuse_worker land "${1:-}" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME] [--gate-from-ci]"
+  [ $# -ge 1 ] || die "usage: cel-fanout land <id> [--workspace NAME] [--gate-from-ci] [--gate-timeout <secs>]"
   local id="$1"; shift
-  local ws_opt="" gate_from_ci=0
+  local ws_opt="" gate_from_ci=0 gate_timeout=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
       --gate-from-ci) gate_from_ci=1; shift ;;
+      --gate-timeout) gate_timeout="$2"; shift 2 ;;
       *) die "land: unknown argument: $1" ;;
     esac
   done
@@ -1792,7 +1913,7 @@ cmd_land() { # <id>
   # there is no verdict yet; unknown is not passed.
   local gate ci_gate_body=""; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
   if [ -n "$gate" ]; then
-    _fanout_verify "$wsdir" "$id" "$entry" >/dev/null || true
+    _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout" >/dev/null || true
     local wt gp gto; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
     gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
     gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"

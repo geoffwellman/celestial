@@ -14,6 +14,9 @@ BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
 _relt_setup() {
   T="$(mktemp -d)"
   cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+  # Six rows, one per state, need six slots: the worker cap is about live
+  # workers, and these rows are a ledger fixture rather than running agents.
+  yq -y -i '.policy.workers = 9' "$T/workspace.yaml"
   mkdir -p "$T/repos/widget"
   git -C "$T/repos/widget" init -q
   STUB_WT="$T/widget-worker"
@@ -131,7 +134,6 @@ EOF
 # row's work had to be rebuilt by hand.
 test_release_left_as_is_never_removes_a_worktree() {
   _relt_setup
-  yq -y -i '.tickets.system = "linear"' "$T/workspace.yaml"
   (cd "$T" && "$BIN" delegate widget WG-TICKET "$T/spec.md" >/dev/null)
   jq '(.[0].ticket) = "WG-77" | (.[0].state) = "collected"' \
     "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
