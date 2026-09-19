@@ -436,6 +436,31 @@ watch --all-workspaces` for the console) so new mail arrives as a
 notification, and a `UserPromptSubmit` hook drains anything missed on your
 next turn. Escalations that truly cannot wait still prompt, deliberately.
 
+**Mail to `root` is for a person: `escalation`, `decision`, `blocked`.**
+Ticket status is the ledger's job — `cel-fanout status` is the authority and
+`cel fleet`, the dashboard and the console all render it — so nothing reports
+it to root as mail. One box's root mailbox had taken 553 messages in nine
+days, 466 of them status, and 72 escalations were sitting under them; `cel
+inbox send root --kind status` now warns and still sends, because a role file
+in the wild may still do it.
+
+A mailbox nobody reads is a **fault**, not silence. `cel fleet --json` carries
+`mail: {to_root_unread, oldest_secs, reader}` per workspace — `reader` is the
+live pane whose alias matches the mailbox, or a running console, or empty —
+`cel doctor` says `alpha: root has 13 unread, oldest 7h, nobody reading it`,
+and the steward raises one rolled-up `blocked` item per workspace (which takes
+the desktop-notification path, as an `escalation` now does too) when an unread
+escalation is older than `CEL_ROOT_UNREAD_SECS` with nobody alive to read it.
+
+What is left gets **ranked**. `cel inbox open --for root --ranked`, the
+console's digest and the dashboard card show the top `inbox.top_n` (3) of the
+unread, then `and N more`. A decision model scores each message once against
+four concrete levels (`0 informational` … `3 blocking work right now`) and
+supplies *only* that level; counts, ages, ordering, the cut and the caching
+are the code's. Below `triage.min_confidence` (0.6) a message keeps its kind's
+default rank, so an unreachable model degrades to the old ordering rather than
+losing messages.
+
 ## Watch and steer
 
 - **`cel fleet`** — the whole box in one deterministic read: every workspace,
@@ -819,7 +844,7 @@ policy block into every agent.
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |
 | `cel quota [provider] [--json]` | the signed-in Claude and Codex subscriptions — every window, its percentage and when it resets — above the credit left per API provider; a route below its floor, or on a spent 5h window, is vetoed before a pane spawns |
 | `cel learn add · list · reinforce · stow` | durable facts the workspace has established — pinned / aging / perishable — budgeted into every agent's policy block |
-| `cel inbox open · resolve` | decisions stay open until resolved; reading one does not answer it |
+| `cel inbox open · resolve` | decisions stay open until resolved; reading one does not answer it; `--ranked` puts the most urgent unread first |
 | `cel-fanout scout <repo> <brief>` | an investigation: disposable worktree, a report as the deliverable, no ticket, no PR |
 | `cel-fanout spike <repo> <brief>` | a trial: throwaway code in a disposable worktree, a report as the deliverable, never shipped |
 | `cel-fanout land <id>` | the one merge path — fleet-authored, approved, green, gate passed, `policy.merge` allows |

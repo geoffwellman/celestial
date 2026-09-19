@@ -184,13 +184,24 @@ export const workerCells = (w) => ({
 });
 export const workerLine = (w) => Object.values(workerCells(w)).join(' ');
 
+// CEL-43: the ranked mailbox. One line per message with the level in front of
+// it, then `and N more` - because a list that silently stops is a list an
+// operator cannot tell from an empty one.
+export const rankedLines = ({ top = [], more = 0 } = {}) => {
+  if (!top.length) return [];
+  const out = ['MAIL (most urgent first)'];
+  for (const m of top) out.push(`  ${m.rank} ${String(m.ts).slice(11, 16)} ${m.kind} from ${m.from}: ${m.message}`);
+  if (more > 0) out.push(`  and ${more} more`);
+  return out;
+};
+
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
 
 // --- section 1: the unit view ----------------------------------------------
 
 export const unitView = ({
-  unit, items = [], tail = [], board = null, prs = null, digest = '', now = Date.now(),
+  unit, items = [], tail = [], board = null, prs = null, digest = '', mail = null, now = Date.now(),
 }) => {
   const ws = unit.ws || '';
   const out = [];
@@ -199,6 +210,11 @@ export const unitView = ({
   // line, and it answers the question an operator arrives with - what happened
   // while I was not looking - before they have read anything else.
   if (digest) out.push(digest);
+  // AND THE MAILBOX, RANKED, RIGHT UNDER IT. Everything that escalates
+  // addresses `root`, and the console is what listens; drawing it
+  // newest-first put a status line above an escalation saying a reviewer pane
+  // had been dead for two days.
+  for (const line of rankedLines(mail || {})) out.push(line);
   out.push('');
   out.push('ORCHESTRATOR');
   out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`

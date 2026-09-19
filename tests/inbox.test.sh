@@ -542,7 +542,8 @@ _inbox_reader_fixture() {
   export CEL_PROC_DIR="$RB/proc"; mkdir -p "$CEL_PROC_DIR"
   cat > "$RB/herdr" <<'EOS'
 #!/usr/bin/env bash
-printf '%s\n' "${STUB_AGENTS:-{\"result\":{\"agents\":[]}}}"
+[ -n "${STUB_AGENTS:-}" ] || STUB_AGENTS='"'"'{"result":{"agents":[]}}'"'"'
+printf '%s\n' "$STUB_AGENTS"
 EOS
   chmod +x "$RB/herdr"
   export STUB_AGENTS='{"result":{"agents":[]}}'

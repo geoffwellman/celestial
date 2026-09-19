@@ -15,7 +15,7 @@ import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
   memFree, orphansEdge, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
 } from './views.mjs';
-import { boardFor, prsFor, digestFor, timelineFor } from './board.mjs';
+import { boardFor, prsFor, digestFor, rankedMail, timelineFor } from './board.mjs';
 
 export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
@@ -368,7 +368,7 @@ export const renderUnit = async (name, { status = '', byMemory = false } = {}) =
   const digest = digestFor(unit.ws, { items, repos });
   const out = [unitView({
     unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) },
-    items, tail, board, prs, digest,
+    items, tail, board, prs, digest, mail: rankedMail(unit.ws),
   }), ''];
   out.push(statusRow(status, doc.box));
   out.push(legend('unit'));

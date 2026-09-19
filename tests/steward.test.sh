@@ -1032,7 +1032,8 @@ _root_unread_fixture() {
   export CEL_PROC_DIR="$T/proc"
   cat > "$T/bin/herdr" <<'EOS'
 #!/usr/bin/env bash
-printf '%s\n' "${STUB_AGENTS:-{\"result\":{\"agents\":[]}}}"
+[ -n "${STUB_AGENTS:-}" ] || STUB_AGENTS='"'"'{"result":{"agents":[]}}'"'"'
+printf '%s\n' "$STUB_AGENTS"
 EOS
   chmod +x "$T/bin/herdr"
   PATH="$T/bin:$PATH"
