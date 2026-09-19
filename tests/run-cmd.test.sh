@@ -367,3 +367,45 @@ test_run_dry_run_shows_the_prefix_ahead_of_the_agent_command() {
   assert_contains "$out" "env CEL_ROLE=worker"
   rm -rf "$T"
 }
+
+# CEL-44: A LIVE AGENT IN THE PRODUCT'S CWD IS AN ORCHESTRATOR, NAMED OR NOT.
+# On 2026-09-18 herdr cleared `standout-orch`'s name when it restarted; every
+# surface resolves an orchestrator by its alias on the roster, so the live one
+# read as dead and the cure for a dead one is to start another - on top of it.
+# The refusal is here, at the one door that starts them.
+_run_stub_roster() { # <cwd> <name|->
+  mkdir -p "$T/bin"
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[{"name":$([ "$2" = "-" ] && printf null || printf '"%s"' "$2"),"agent_status":"idle","pane_id":"wQ:p1","cwd":"$1"}]}}' ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  PATH="$T/bin:$PATH"
+}
+
+test_run_orchestrator_refuses_a_duplicate_over_a_live_agent() {
+  _ws; _run_stub_roster "$T/repos/widget" widget-orch
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --repo widget --dry-run )
+  rm -rf "$T"
+}
+test_run_orchestrator_refuses_over_an_unnamed_live_agent_too() {
+  _ws; _run_stub_roster "$T/repos/widget" -
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --repo widget --dry-run )
+  rm -rf "$T"
+}
+test_run_orchestrator_force_starts_anyway() {
+  _ws; _run_stub_roster "$T/repos/widget" -
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run --force)"
+  assert_contains "$out" "agent start widget-orch"
+  rm -rf "$T"
+}
+# A live agent somewhere else is not this product's orchestrator.
+test_run_orchestrator_ignores_a_live_agent_in_another_cwd() {
+  _ws; _run_stub_roster "$T/elsewhere" -
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "agent start widget-orch"
+  rm -rf "$T"
+}
