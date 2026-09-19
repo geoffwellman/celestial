@@ -29,7 +29,10 @@
 | `cel inbox send <p>-orch "pick up ABC-49 next" --workspace <w>` | "start ABC-49", "get bundle going on ABC-49" - work starts through the orchestrator, never behind its back |
 | `cel inbox send <from> "<text>" --workspace <w>` then `cel inbox resolve <id> --workspace <w>` | "answer that decision" - the reply and the close are one act; doing one of them is the failure mode |
 | `cel-fanout land <id> --workspace <w>` | "land #12", "merge ABC-49" - the DELEGATION, not the PR: merging by hand leaves a worker holding a branch nobody collects |
-| `herdr agent prompt <alias> "<text>"` | "nudge ABC-49", "remind him to push" - reaches the agent now, where mail is read when it next looks |
+| `herdr agent prompt <alias> "<text>"` | "nudge ABC-49", "remind him to push" - reaches the agent now, where mail is read when it next looks; the alias may be a worker OR a `<product>-orch` |
+| `cel inbox send <p>-orch "<msg>" --workspace <w>` **then** `herdr agent prompt <p>-orch "inbox: <first 80> - run cel inbox read"` | "tell bundle-orch to pick up ABC-49" when its pane is live - the mail is the record and the prompt is the tap on the shoulder; say `sent to <p>-orch (pane live, prompted)`. With no live pane, the send alone, and say it will be read when the orchestrator next starts |
+| `herdr agent read <alias> --source recent-unwrapped` | what a pane is saying right now - the last lines of it, which is what the TUI's `talk` mode draws while it relays |
+| `talk <p>-orch` (TUI: `t` on the orchestrator row, or "talk to bundle-orch") | a back-and-forth with one orchestrator: every line typed becomes `herdr agent prompt`, the pane refreshes beside it, `Esc` ends it. For ONE exchange - a long design discussion belongs in the pane itself, which is what `herdr agent focus` is for |
 | `cel run orchestrator --product <p> --workspace <w>` | "restart the bundle orchestrator" - only when it is not already live |
 | `cel-linear state ABC-49 "<state>"` | "move ABC-49 to In Review" - the state name comes off the board, not from memory |
 | `cel run reviewer --repo <r> --pr <n> --workspace <w>` | "get a reviewer on #12" |

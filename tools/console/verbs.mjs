@@ -47,6 +47,11 @@ export const VERBS = [
   { name: 'answer', panel: 'waiting', key: 'a', what: 'reply to the sender and close the item' },
   { name: 'nudge', panel: 'workers', key: 'n', what: 'prompt this worker' },
   { name: 'restart', panel: 'orch', key: 'R', what: 'start the orchestrator again when it is not live' },
+  // CEL-36. Not a proposal the guard runs: `talk <who>` is the console's own
+  // word for "wire my command line to that pane", and submitValue takes it
+  // before the allowlist is ever asked. It is here rather than hard-coded in
+  // the key map so the legend and the help table list it with the rest.
+  { name: 'talk', panel: 'orch', key: 't', what: 'relay the command line to this orchestrator\u2019s pane until Esc' },
 ];
 
 export const verbsFor = (panel) => VERBS.filter((v) => v.panel === panel);
@@ -119,6 +124,10 @@ export const verbFor = (panel, key, sel) => {
         return refuse(`${sel.product}-orch is already live - focus it instead`);
       }
       return proposal([`cel run orchestrator --product ${sel.product} --workspace ${sel.ws}`], { cursor: -1 });
+
+    case 'talk':
+      if (!sel.product) return refuse('no orchestrator here to talk to');
+      return proposal([`talk ${sel.product}-orch`], { cursor: -1 });
 
     default:
       return null;

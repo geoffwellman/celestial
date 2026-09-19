@@ -27,13 +27,17 @@ import { C, orchColour, kindColour } from './theme.mjs';
 import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
-  renderOutput, allServices,
+  renderOutput, allServices, roster as rosterOf,
 } from './state.mjs';
 import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine } from './views.mjs';
 import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, NoTranslator, translatorLabel } from './translate.mjs';
 import { route, NoRouter, routerLabel } from './router.mjs';
+import {
+  replyWaitSecs, replyFrom, replyLine, noReplyLine, REPLY_POLL_MS,
+  talkPrompt, talkRead, paneLines, talkLegend, TALK_REFRESH_MS,
+} from './steer.mjs';
 import {
   insert, backspace, del, left, right, home, end,
   killWord, killToEnd, killLine, historyWalk, historyFilter,
@@ -398,6 +402,17 @@ const TextView = ({ title, right, text, innerRef }) =>
       key: i, color: /^\[|^[A-Z ]+$/.test(l) ? C.ink : C.dim, wrap: 'truncate-end',
     }, l || ' ')));
 
+// CEL-36: THE RELAY. The pane's own last lines, drawn in the console's frame,
+// with the command line still under it - that is the whole difference between
+// steering an orchestrator and reading about one.
+const TalkPanel = ({ who, lines, innerRef }) =>
+  h(Panel, {
+    title: `TALKING TO ${String(who).toUpperCase()}`, innerRef, focused: true,
+    right: 'Enter sends · refreshing every 2 s · Esc to stop',
+  },
+  lines.length === 0 ? h(Text, { color: C.dim }, '  reading the pane…') : null,
+  ...lines.map((l, i) => h(Text, { key: i, color: C.ink, wrap: 'truncate-end' }, l || ' ')));
+
 const App = ({ refresh, statusSecs, noRouter = false }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -424,6 +439,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [picker, setPicker] = useState(null);     // {query, sel} - Ctrl+R
   const [, setTick] = useState(0);                // a resize is a re-render
   const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
+  const [rosterNames, setRosterNames] = useState([]);  // the names herdr knows (CEL-36)
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
   const [svcs, setSvcs] = useState(null);         // the SERVICES view: null = closed
   const [ssel, setSsel] = useState(0);
@@ -443,6 +459,13 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [tsel, setTsel] = useState(0);
   const [page, setPage] = useState(null);         // {title, right, text} - ticket or PR detail
   const [raw, setRaw] = useState(false);          // the output view showing the text as it came
+  // CEL-36: steering. `talk` is the relay mode - {who, lines} - and `reply` is
+  // the answer the watch caught, kept so Enter can open it whole.
+  const [talk, setTalk] = useState(null);
+  const [reply, setReply] = useState(null);
+  const talkRef = useRef(null); talkRef.current = talk;
+  const steerRef = useRef(null);   // what the proposal on the line will need afterwards
+  const watchRef = useRef(null);   // the reply watch's timer, so a second send replaces the first
   const rawText = useRef('');                     // what the command actually printed
   const renderedRef = useRef('');                 // and the console's reading of it
   const history = useRef(readHistory());
@@ -460,7 +483,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     unitOrch: useRef(null), unitWorkers: useRef(null),
     unitWaiting: useRef(null), unitMail: useRef(null), worker: useRef(null),
     unitBoard: useRef(null), unitPrs: useRef(null), timeline: useRef(null), page: useRef(null),
-    services: useRef(null),
+    services: useRef(null), talk: useRef(null),
   };
   const rows = fleetRows(doc);
   const rowsRef = useRef(rows); rowsRef.current = rows;
@@ -500,6 +523,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     });
     setAt(new Date().toTimeString().slice(0, 8));
     setLoaded(true);
+    setRosterNames(await rosterOf());
   }, []);
 
   useEffect(() => {
@@ -652,6 +676,64 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
 
+  // THE REPLY WATCH. A send used to end in silence: the mail was the record
+  // and the record is invisible until somebody opens the mailbox. For up to
+  // `console.reply_wait` seconds after a message to a live orchestrator the
+  // console polls that mailbox for the agent's next line to the operator, puts
+  // its first line in the status and keeps the whole thing for Enter.
+  //
+  // It is a TIMER, not a wait: the render loop keeps drawing, typing is never
+  // blocked, and a second send replaces the watch rather than stacking one on
+  // top of it. When the window closes the console says where the answer will
+  // turn up instead of pretending it is still looking - the inbox tail shows
+  // it when it lands (CEL-7/CEL-20).
+  const watchReply = useCallback((who, ws) => {
+    if (!who || !ws) return;
+    if (watchRef.current) { clearTimeout(watchRef.current); watchRef.current = null; }
+    setReply(null);
+    const since = new Date().toISOString();
+    const deadline = Date.now() + replyWaitSecs() * 1000;
+    const tick = () => {
+      const msg = replyFrom({ ws, who, since });
+      if (msg) {
+        watchRef.current = null;
+        setReply(msg);
+        say(`${replyLine(who, msg)} - Enter opens it`);
+        return;
+      }
+      if (Date.now() >= deadline) { watchRef.current = null; say(noReplyLine(who)); return; }
+      watchRef.current = setTimeout(tick, REPLY_POLL_MS);
+    };
+    watchRef.current = setTimeout(tick, REPLY_POLL_MS);
+  }, [say]);
+
+  useEffect(() => () => { if (watchRef.current) clearTimeout(watchRef.current); }, []);
+
+  // THE RELAY. Every 2 s while it is open the pane's last 40 lines are read
+  // back - `herdr agent read`, which the allowlist already permits - so the
+  // operator sees the answer forming rather than a command that returned.
+  const talkRefresh = useCallback(async (who) => {
+    const r = await runCommand(talkRead(who));
+    if (!r.allow) { say(`refused: ${r.reason}`); return; }
+    setTalk((prev) => (prev && prev.who === who ? { ...prev, lines: paneLines(r.out) } : prev));
+  }, [say]);
+
+  const openTalk = useCallback((who) => {
+    if (!who) return;
+    setTalk({ who, lines: [] });
+    setProposed(null); setOptions([]); setLine('');
+    setUnit(null); setWorker(null); setDetail(null);
+    setPane('talk');
+    say(talkLegend(who));
+  }, [say, setLine]);
+
+  useEffect(() => {
+    if (!talk) return undefined;
+    talkRefresh(talk.who);
+    const t = setInterval(() => talkRefresh(talk.who), TALK_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [talk && talk.who, talkRefresh]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   const propose = useCallback((cmds) => {
     setProposed({ cmds });
     setOptions([]);
@@ -675,15 +757,20 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       say(`asking ${rLabel} (router)…`);
       const started = Date.now();
       try {
-        const r = await route({ sentence: text, doc, items, selected: pane === 'waiting' ? items[sel] || null : null });
+        const r = await route({ sentence: text, doc, items, roster: rosterNames, selected: pane === 'waiting' ? items[sel] || null : null });
         const secs = ((Date.now() - started) / 1000).toFixed(1);
         if (r.cmds) {
           setBusy(false);
           asked.current = text;
+          steerRef.current = r.steer || null;
           propose(r.cmds);
           say(`proposed in ${secs} s - Enter runs it, Esc discards it`);
           return;
         }
+        // A WORKSPACE WITH TWO PRODUCTS IS A QUESTION, not a miss to hand to
+        // the chat model: the operator named something real and the console
+        // knows exactly which two things it could be.
+        if (r.steer && r.steer.ask) { setBusy(false); say(r.steer.ask); return; }
         if (r.intent !== 'other' && r.options.some((o) => o.cmd)) {
           setBusy(false);
           const opts = r.options.filter((o) => o.cmd);
@@ -747,7 +834,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     }
     const said = raw && raw !== '?' ? ` (model said: ${raw.replace(/\s+/g, ' ').slice(0, 70)})` : '';
     say(`no command for that - rephrase, or type the command${said}`);
-  }, [doc, items, propose, say, pane, sel, noRouter]);
+  }, [doc, items, propose, say, pane, sel, noRouter, rosterNames]);
 
   const openDetail = useCallback((it) => {
     if (!it) return;
@@ -939,8 +1026,25 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     hIndex.current = -1;
     typed.current = '';
     if (!text) return;
+    // IN TALK MODE EVERY LINE IS THE PANE'S, including one that looks like a
+    // command: the operator opened a conversation, and a console that quietly
+    // ran `cel fleet` instead of sending it would be reading their mail out
+    // loud. Esc is the way out and the legend says so.
+    if (talkRef.current) {
+      const who = talkRef.current.who;
+      setLine('');
+      const r = await runCommand(talkPrompt(who, text));
+      say(r.allow ? `sent to ${who} - ${talkLegend(who)}` : `refused: ${r.reason}`);
+      talkRefresh(who);
+      return;
+    }
     if (/^(q|quit|exit)$/.test(text)) { exit(); return; }
     if (text === 'help' || text === '?') { setLine(''); setHelp(true); return; }
+    // `talk <who>` is the console's own word, not a command the guard runs -
+    // so it is taken before the allowlist ever sees the line. It is also what
+    // the router's `talk` intent and the unit view's `t` put here.
+    const wantsTalk = /^talk\s+(\S+)$/.exec(text);
+    if (wantsTalk) { openTalk(wantsTalk[1]); return; }
     // A numbered pick after a miss: 1, 2 or 3 puts that candidate on the
     // command line. It is still a proposal - nothing runs without the next
     // Enter, which is the whole rule the model is held to.
@@ -954,16 +1058,27 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     if (proposed && text === proposed.cmds.join(' ; ')) {
       const { cmds } = proposed;
       const sentence = asked.current;
+      const steer = steerRef.current;
       asked.current = '';
+      steerRef.current = null;
       setProposed(null);
       setLine('');
       const transcript = await executeChain(cmds);
+      // WHAT THE SEND ACTUALLY DID, in the operator's words: which mailbox,
+      // and whether a pane was tapped. Then the watch, when there is a pane
+      // that could answer.
+      if (steer && steer.say && transcript) {
+        say(steer.say);
+        if (steer.live) watchReply(steer.who, steer.workspace);
+        return;
+      }
       if (sentence && transcript) await explain(sentence, transcript);
       return;
     }
-    if (COMMAND.test(text)) { setLine(''); asked.current = ''; await execute(text); return; }
+    if (COMMAND.test(text)) { setLine(''); asked.current = ''; steerRef.current = null; await execute(text); return; }
     await ask(text);
-  }, [proposed, options, exit, execute, executeChain, explain, ask, propose, setLine]);
+  }, [proposed, options, exit, execute, executeChain, explain, ask, propose, setLine,
+    openTalk, talkRefresh, watchReply, say]);
   const submit = useCallback(() => submitValue(value), [submitValue, value]);
 
   const scroll = useCallback((panel, delta) => {
@@ -1366,6 +1481,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     }
     if (key.return) {
       if (!value.trim()) {
+        // THE REPLY THE WATCH CAUGHT. Its first line is in the status; Enter
+        // is how the rest of it is read, because a reply worth waiting for is
+        // usually longer than one line.
+        if (reply) { const r2 = reply; setReply(null); openDetail(r2); return; }
         if (pane === 'waiting') { openDetail(items[sel]); return; }
         if (pane === 'inbox') { openDetail(tail[sel]); return; }
         if (pane === 'fleet') {
@@ -1483,7 +1602,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // `S` on the main screen with an empty command line opens the services
     // view. A bare letter is an action ONLY when there is nothing typed - the
     // first cut of this console ate the S of "status" out of a sentence.
-    if (input === 'S' && !value && !unit && !worker && !detail && !svcs) {
+    if (input === 'S' && !value && !unit && !worker && !detail && !svcs && !talk) {
       setBusy(true);
       (async () => {
         const rowsNow = await allServices(doc);
@@ -1593,12 +1712,14 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   // owner's "? did nothing" was exactly that.
   const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : page ? 'page'
     : timeline ? 'timeline' : detail ? 'detail'
+      : talk ? 'talk'
       : svcs ? 'services' : worker ? 'worker' : unit ? 'unit'
       : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
     if (quota) { setQuota(false); return; }
     if (picker) { setPicker(null); return; }
+    if (talk) { setTalk(null); setPane('fleet'); setLine(''); say('stopped talking'); return; }
     if (page) { setPage(null); say('back'); return; }
     if (timeline) { setTimeline(null); say('back'); return; }
     if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
@@ -1624,6 +1745,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       })]
       : view === 'services'
         ? [h(ServicesPanel, { key: 'services', rows: svcs, sel: ssel, innerRef: refs.services })]
+      : view === 'talk'
+        ? [h(TalkPanel, { key: 'talk', who: talk.who, lines: talk.lines, innerRef: refs.talk })]
       : view === 'detail'
         ? [h(DetailView, {
           key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail,
@@ -1714,6 +1837,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       h(Text, { color: C.dim }, status ? statusAt : `${routerLabel() && !noRouter ? `${routerLabel()} · ` : ''}${translatorLabel()} · ${at}`)),
     h(Box, null, h(Text, { color: C.dim }, legend(
       view === 'detail' ? 'detail' : view === 'services' ? 'services'
+        : view === 'talk' ? 'talk'
         : view === 'worker' ? 'worker'
         : view === 'timeline' ? 'timeline' : view === 'page' ? 'page'
           : view === 'quota' ? 'quota'
