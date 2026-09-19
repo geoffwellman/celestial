@@ -817,6 +817,67 @@ test_land_applies_the_workspace_env_to_the_gate() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
+# THE LEDGER LOCK IS FOR LEDGER WRITES, NOT FOR GATES. collect took the lock,
+# then ran cel-verify, whose gate queues on the box-wide suite lock - so the
+# ledger lock was held for the queue plus the whole gate, and every other
+# fanout command on the box waited behind it (a release waited six minutes).
+test_collect_releases_the_ledger_lock_while_the_gate_runs() {
+  _fanout_setup
+  local fifo="$T/gate.fifo" started="$T/gate.started"
+  mkfifo "$fifo"
+  local vstub="$T/verify-blocking.sh"
+  cat > "$vstub" <<STUB
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+: > "$started"
+read -r _ < "$fifo"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+STUB
+  chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
+  (cd "$T" && "$BIN" delegate widget WG-SLOWGATE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-SLOWGATE) > "$T/collect.out" 2>&1 &
+  local cpid=$! i=0
+  while [ ! -f "$started" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -f "$started" ] || { echo "the gate never started"; kill "$cpid" 2>/dev/null; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  # ...and now another fanout command must not be stuck behind the gate
+  if ! ( cd "$T" && timeout 20 "$BIN" status ) > /dev/null 2>&1; then
+    echo "status blocked on the ledger lock while the gate ran"
+    printf 'x\n' > "$fifo"; wait "$cpid" 2>/dev/null
+    unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1
+  fi
+  printf 'x\n' > "$fifo"
+  wait "$cpid"
+  assert_contains "$(cat "$T/collect.out")" "verdict gate:PASS"
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" true
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# Letting go of the lock means somebody else can move the row while the gate
+# runs, so the row is re-read before the verdict is written: writing a verdict
+# onto a row that has since been released or re-delegated is worse than saying
+# so and being run again.
+test_collect_refuses_a_row_that_changed_state_while_the_gate_ran() {
+  _fanout_setup
+  local vstub="$T/verify-racing.sh"
+  cat > "$vstub" <<STUB
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+jq '(.[0].state) = "released"' "$T/.cel/delegations.json" > "$T/l.json" && mv "$T/l.json" "$T/.cel/delegations.json"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+STUB
+  chmod +x "$vstub"; export CEL_FANOUT_VERIFY="$vstub"
+  (cd "$T" && "$BIN" delegate widget WG-RACE "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$( (cd "$T" && "$BIN" collect WG-RACE) 2>&1 )" && {
+    echo "collect wrote a verdict onto a row that moved"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "WG-RACE changed state to released while the gate ran"
+  assert_eq "$(jq -r '.[0].verdict // "none"' "$T/.cel/delegations.json")" none
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_land_refuses_a_failed_gate() {
   _fanout_land_setup fleetbot APPROVED 0
   _fanout_verify_stub false
