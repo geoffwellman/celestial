@@ -901,3 +901,115 @@ test_steward_memory_trees_include_the_orphans_as_one_tree() {
   assert_eq "$(printf '%s\n' "$trees" | awk -F'\t' '$1 == "orphans" { print $2 }')" "398"
   rm -rf "$T"
 }
+
+# --- CEL-42: the stalled sweep asks what the pane is doing -------------------
+#
+# Every real failure on this box in the two days before this ticket slipped
+# through both timers, because the runtime's own status was wrong and the clock
+# had not run out. The sweep now asks a classifier about the FEW workers code
+# has already singled out - and about nobody else, because a request per
+# healthy worker every five minutes is both a waste and a documented way to
+# make the answers worse.
+_stall_sweep_setup() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml"
+  export CEL_INBOX_DIR="$T/inbox"
+  export CEL_STEWARD_STATE="$T/steward-state"
+  export CEL_LIVENESS_STATE="$T/liveness-state"
+  export CEL_CONFIG_FILE="$T/config.yaml"
+  export CEL_LIVENESS_URL="https://stub.invalid/alpha/decisions"
+  export OPENROUTER_API_KEY=test-key
+  _STEWARD_STATE="$CEL_STEWARD_STATE"
+  mkdir -p "$T/inbox" "$T/alpha/.cel" "$T/bin"
+  printf 'console:\n  router:\n    provider: openrouter\n    model: alpha/decide-1\n    key_env: OPENROUTER_API_KEY\n' \
+    > "$CEL_CONFIG_FILE"
+  printf 'workspaces:\n  alpha: { path: %s/alpha, remote: null }\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nkind: hustle\ntickets: { system: none }\nrepos: [{name: widget, prefix: WG}]\n' \
+    > "$T/alpha/workspace.yaml"
+  mkdir -p "$T/wt-busy" "$T/wt-stuck"
+  cat > "$T/alpha/.cel/delegations.json" <<EOF
+[{"id":"busy","repo":"widget","branch":"widget-busy","pane":"wA:p1","alias":"widget-busy","worktree":"$T/wt-busy","state":"running","ticket":"WG-1"},
+ {"id":"stuck","repo":"widget","branch":"widget-stuck","pane":"wA:p2","alias":"widget-stuck","worktree":"$T/wt-stuck","state":"running","ticket":"WG-2"}]
+EOF
+  cat > "$T/bin/herdr" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$STUB_LOG"
+case "$1 $2" in
+  "pane read")  printf '%s\n' "reading src and running the gate" ;;
+  "agent read") case "$3" in
+                  *stuck*) printf '%s\n' "${STUB_STUCK_TEXT:-npm test}" ;;
+                  *) printf '%s\n' "moving along $RANDOM" ;;
+                esac ;;
+  *) printf '%s\n' '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  export STUB_LOG="$T/herdr.log"; : > "$STUB_LOG"
+  _STEWARD_HERDR="$T/bin/herdr"
+  AGENTS_JSON='{"result":{"agents":[{"pane_id":"wA:p1","agent_status":"working"},{"pane_id":"wA:p2","agent_status":"working"}]}}'
+  : > "$T/requests"
+  STUB_ACTIVITY=looping STUB_CONFIDENCE=0.81
+  curl() {
+    local body=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -H) case "$2" in @-) cat >/dev/null ;; esac; shift 2 ;;
+        -d) body="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$body" >> "$T/requests"
+    jq -nc --arg a "$STUB_ACTIVITY" --argjson c "$STUB_CONFIDENCE" \
+      '{answers: {activity: {value: $a, confidence: $c}, needs_a_person: {probability: 0.2}}}'
+  }
+  # One worker's pane has looked the same for an hour; the other's moves every
+  # read. The age is kept by lib/liveness.sh, so it is seeded the same way.
+  source "$CEL_ROOT/lib/liveness.sh"
+  liveness_output_age alpha/stuck "${STUB_STUCK_TEXT:-npm test}" >/dev/null
+  liveness_backdate alpha/stuck 3600
+}
+
+test_the_sweep_asks_about_the_candidate_and_nobody_else() {
+  _stall_sweep_setup
+  _steward_stalled_workers "$AGENTS_JSON" >/dev/null 2>&1
+  assert_eq "$(grep -c . "$T/requests")" 1
+  assert_contains "$(cat "$T/requests")" 'npm test'
+  case "$(cat "$T/requests")" in *moving\ along*) echo 'the healthy worker was asked about'; return 1;; esac
+  rm -rf "$T"
+}
+
+# `working` for an hour with a frozen pane is exactly the shape the timers miss:
+# no marker, and three hours away from the quiet rule.
+test_a_looping_worker_is_reported_before_the_timer_would_have() {
+  _stall_sweep_setup
+  local out; out="$(_steward_stalled_workers "$AGENTS_JSON" 2>&1)"
+  assert_contains "$out" 'looping'
+  assert_contains "$out" 'WG-2'
+  case "$out" in *WG-1*) echo 'the healthy worker was reported'; return 1;; esac
+  rm -rf "$T"
+}
+
+# The model REPORTS. Nothing it can answer reaches a verb that ends a process -
+# the memory sweep's posture, and the reason this feature is allowed to exist.
+test_no_answer_reaches_a_kill() {
+  _stall_sweep_setup
+  STUB_ACTIVITY=crashed
+  _steward_stalled_workers "$AGENTS_JSON" >/dev/null 2>&1
+  local log; log="$(cat "$STUB_LOG")"
+  case "$log" in
+    *"agent stop"*|*"agent remove"*|*kill*|*terminate*|*"agent prompt"*)
+      echo "the sweep acted on a pane: $log"; return 1 ;;
+  esac
+  rm -rf "$T"
+}
+
+# With no key on the box nothing is asked and the timers decide alone, which is
+# every box that has not configured a router.
+test_the_sweep_asks_nobody_without_a_key() {
+  _stall_sweep_setup
+  unset OPENROUTER_API_KEY
+  local out; out="$(_steward_stalled_workers "$AGENTS_JSON" 2>&1)"
+  assert_eq "$(grep -c . "$T/requests")" 0
+  case "$out" in *looping*) echo 'a verdict appeared with no model behind it'; return 1;; esac
+  rm -rf "$T"
+}
