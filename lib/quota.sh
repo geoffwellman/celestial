@@ -43,6 +43,36 @@ _quota_key() { # <provider> [wsdir]
     printf '%s' "${!keyenv:-}" )
 }
 
+# WHY A CREDIT READ CAME BACK EMPTY. `unknown` answered two different
+# questions with one word: "there is no key for this provider in this
+# workspace" - a fact about where you are standing, and correct, since CEL-49
+# left credit workspace-scoped on purpose - and "I asked and could not tell",
+# which is a fault. An operator who cannot tell those apart reads every
+# workspace without an OpenRouter key as broken.
+#
+#   ok      a number was read
+#   no_key  this provider declares a balance and this workspace has no key
+#   unknown asked and could not tell (or the provider declares no balance)
+quota_state() { # <provider> [wsdir] [remaining]
+  local p="$1" d="${2:-}" r="${3:-}"
+  local url jqx; url="$(provider_balance "$p" url)"; jqx="$(provider_balance "$p" jq)"
+  if [ -n "$url" ] && [ -n "$jqx" ] && [ -z "$(_quota_key "$p" "$d")" ]; then
+    printf no_key; return 0
+  fi
+  [ -n "$r" ] || r="$(quota_remaining "$p" "$d")"
+  [ "$r" = unknown ] && { printf unknown; return 0; }
+  printf ok
+}
+
+# How that state reads to a human. One word each was the whole requirement.
+quota_state_human() { # <state>
+  case "$1" in
+    no_key) printf 'unknown - no key in this workspace' ;;
+    unknown) printf 'unknown - asked and could not tell' ;;
+    *) printf ok ;;
+  esac
+}
+
 # <number> | unknown. Number is the remaining credit in the provider's unit,
 # possibly negative (DeepSeek reports overdrawn accounts as such). `unknown`
 # for: no balance config, no key, network failure, unparseable response.
@@ -133,6 +163,76 @@ _SUB_CODEX_URL="${CEL_SUB_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}
 # the Codex endpoint above is the fallback - a box with no broker configured
 # is the normal case, not an error.
 _SUB_GATEWAY_URL="${CEL_SUB_GATEWAY_URL:-}"
+
+# THE BOX ALREADY KNOWS. CEL-49: every symptom the owner reported on
+# 2026-09-20 - Codex reading `unreadable`, Fable missing, one Anthropic
+# account of three missing, opencode absent - was cel reading a file it hoped
+# was fresh while `omp usage --json` sat on PATH holding REFRESHED OAUTH PER
+# ACCOUNT and answering for all of them in one call. ~/.codex/auth.json last
+# refreshed 2026-09-04 and that endpoint answers `401 token_expired`; no
+# amount of parsing fixes a stale token.
+#
+# So omp is the source when it is there, and the per-provider endpoint reads
+# below are the fallback for a box without it - which is the normal case for
+# this repo, and must degrade to exactly the old behaviour, never to an error.
+_sub_omp_usage() {
+  command -v omp >/dev/null 2>&1 || return 0
+  omp usage --json 2>/dev/null || true
+}
+
+# The rows omp's document becomes. `.limits[]` is the AUTHORITATIVE window
+# list - the old jq read the `.five_hour`/`.seven_day` subset and so lost
+# every scoped window, of which Fable is one; naming Fable here would lose
+# the next one - and each limit carries {label, window:{id,label,durationMs,
+# resetsAt}, amount:{used,limit,remaining,usedFraction,unit}, status}, which
+# is exactly the shape a bar needs.
+_sub_omp_rows() {
+  local raw; raw="$(_sub_omp_usage)"
+  [ -n "$raw" ] || return 0
+  printf '%s' "$raw" | jq -c '
+    def iso: if . == null then null
+             elif type == "number"
+             then ((if . > 100000000000 then . / 1000 else . end) | floor | todate)
+             else . end;
+    def wname($id; $ms): if $ms == null or $ms == 0 then ($id // "window")
+                         elif $ms >= 604800000 then "7d"
+                         elif $ms >= 86400000 then "1d"
+                         else "5h" end;
+    ((.accounts // .usage // .) | if type == "array" then . else [.] end)[]
+    | select(type == "object")
+    | . as $a
+    | ((.provider // "unknown") | ascii_downcase) as $p
+    | {provider: (if $p == "anthropic" or $p == "claude" then "claude"
+                  elif $p == "openai-codex" or $p == "codex" or $p == "chatgpt" then "codex"
+                  else $p end),
+       account: ((.accountId // .account_id // .id // .account // "?") | tostring),
+       label: ((.email // .accountEmail // .label // .accountId // .account_id // .id // "?") | tostring),
+       source: "omp",
+       windows: [ (.limits // .windows // .report.limits // [])[]
+                  | select(type == "object")
+                  | . as $w
+                  | (($w.amount.usedFraction // $w.amount.used_fraction
+                      // (if (($w.amount.limit // 0) > 0) and ($w.amount.used != null)
+                          then ($w.amount.used / $w.amount.limit) else null end))) as $f
+                  | select($f != null)
+                  | {name: wname(($w.window.id // $w.window.label // $w.label);
+                                 ($w.window.durationMs // $w.window.duration_ms)),
+                     scope: ($w.scope.model.display_name // $w.scope.model.displayName
+                             // $w.scope.label // $w.scope.name // null),
+                     used_pct: ($f * 100),
+                     resets_at: (($w.window.resetsAt // $w.window.resets_at // $w.resetsAt // null) | iso)} ],
+       extra: (($a.extra_usage.disabled_reason // $a.extraUsage.disabledReason // null) as $dr
+               | if $dr != null
+                 then {state: "disabled",
+                       reason: (if (($a.spend.enabled // false) == false)
+                                then "top-up is off" else ($dr | gsub("_"; " ")) end)}
+                 elif ($a.ok // true) == false
+                 then {state: "unreadable",
+                       reason: ($a.error // "the broker reports this credential as failing")}
+                 else {state: "enabled", reason: ""} end)}
+    | select((.windows | length) > 0 or (.extra.state != "enabled"))' 2>/dev/null || true
+  return 0
+}
 
 # The gateway's base, or nothing at all. `status --json` is the only thing
 # asked of omp here: it is local, it does not spend a token, and `ready:false`
@@ -267,9 +367,16 @@ subscription_usage() { # <provider> <token> [account] [label]
                     {name: "7d", used_pct: (.seven_day.utilization // null),
                      resets_at: (.seven_day.resets_at // null)}]
                    | map(select(.used_pct != null))),
-         extra: {state: (if (.extra_usage.disabled_reason // null) != null
-                         then "disabled" else "enabled" end),
-                 reason: (.extra_usage.disabled_reason // "")}}' 2>/dev/null || true)"
+         extra: ((.extra_usage.disabled_reason // null) as $dr
+                 | if $dr == null then {state: "enabled", reason: ""}
+                   # `disabled_reason: out_of_credits` with `spend.enabled:
+                   # false` means TOP-UP IS SWITCHED OFF, not "this account is
+                   # spent". Saying the second about a healthy account is
+                   # worse than saying nothing (CEL-49).
+                   else {state: "disabled",
+                         reason: (if ((.spend.enabled // false) == false)
+                                  then "top-up is off"
+                                  else ($dr | gsub("_"; " ")) end)} end)}' 2>/dev/null || true)"
       ;;
     codex)
       local gw; gw="$(_sub_gateway_base)"
@@ -357,8 +464,33 @@ subscription_list() { # [--cached]
   fi
 
   local p a t label rows="" keep=""
+
+  # OMP FIRST, WHEN IT IS THERE. It holds its own refreshed OAuth per account
+  # and covers every provider it knows in one call, so for those providers the
+  # per-file token reads below are not a second opinion - they are a worse one,
+  # and a stale token read beside a fresh one is how an account came to read
+  # `unreadable` while the owner's own prompt tool showed it fine.
+  local orow op oa omp_providers="" omp_seen=0
+  while IFS= read -r orow; do
+    [ -n "$orow" ] || continue
+    omp_seen=1
+    op="$(printf '%s' "$orow" | jq -r '.provider')"
+    oa="$(printf '%s' "$orow" | jq -r '.account')"
+    case " $omp_providers " in *" $op "*) ;; *) omp_providers="$omp_providers $op" ;; esac
+    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+    printf '%s' "$orow" > "$dir/subscription-$op-$oa.json"
+    chmod 600 "$dir/subscription-$op-$oa.json" 2>/dev/null || true
+    rows="$rows$orow
+"
+    keep="$keep subscription-$op-$oa.json"
+  done < <(_sub_omp_rows)
+
   while IFS=$'\t' read -r p a t label; do
     [ -n "$p" ] || continue
+    # a provider omp answered for is answered; anything else still reads its
+    # own credential file, so a box where omp knows Claude and not Codex
+    # still sees Codex.
+    case " $omp_providers " in *" $p "*) continue ;; esac
     rows="$rows$(subscription_usage "$p" "$t" "$a" "$label")
 "
     keep="$keep subscription-$p-$a.json"
@@ -375,7 +507,9 @@ subscription_list() { # [--cached]
     rows="$rows$row
 "
     keep="$keep subscription-gateway-$gp-$ga.json"
-  done < <(_sub_gateway_rows)
+    # the gateway is the older door onto the same broker: when `omp usage`
+    # answered, its rows are that answer already, at one account each.
+  done < <(if [ "$omp_seen" -eq 1 ]; then :; else _sub_gateway_rows; fi)
 
   # THE SWEEP. Every file that is not one of this run's identities is a token
   # hash from before CEL-35 or an account that has been signed out, and both
@@ -493,14 +627,40 @@ quota_vetoed() { # <provider> <remaining>
   awk -v r="$2" -v f="$floor" 'BEGIN { exit !(r+0 < f+0) }'
 }
 
-# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   extra: out of credits`
-_sub_line() { # <usage-json>
-  local out="" n p r
-  while IFS=$'\t' read -r n p r; do
+# A BAR, IN THE ONE PLACE BASH DRAWS ONE. The rule is the renderer's rule in
+# tools/console/views.mjs and it is the same rule for a reason: a filled
+# prefix of a fixed-width track, 100% the only percentage that fills it, so
+# "the next delegation refuses" never looks like "there is room for one more";
+# and never wider than the track, because a bar that wraps is worse than no
+# bar. A track too narrow to be honest draws nothing and the text stands alone.
+sub_bar() { # <pct> <width>
+  local w="${2:-0}"
+  case "$w" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$w" -ge 6 ] || return 0
+  awk -v p="${1:-0}" -v w="$w" 'BEGIN {
+    if (p < 0 || p == "") p = 0
+    f = (p >= 100) ? w : int((p / 100) * w)
+    if (p < 100 && f > w - 1) f = w - 1
+    if (f < 0) f = 0
+    s = ""
+    for (i = 0; i < f; i++) s = s "\342\226\210"
+    for (i = f; i < w; i++) s = s "\342\226\221"
+    printf "%s", s }'
+}
+
+# `5h 16% (resets 19:00)   7d 41% (resets Sat 05:00)   7d Fable 75%`
+_sub_line() { # <usage-json> [bar-width]
+  local out="" n p r s bw="${2:-0}"
+  while IFS=$'\t' read -r n p r s; do
     [ -n "$n" ] || continue
-    out="$out$(printf '%s %s%%%s   ' "$n" "$(printf '%.0f' "$p")" \
+    # A SCOPE IS PART OF THE WINDOW'S NAME, not a footnote: two 7d windows on
+    # one account are told apart by the model they are scoped to.
+    [ -n "$s" ] && n="$n $s"
+    out="$out$(printf '%s%s %s%%%s   ' "$n" \
+      "$([ "$bw" -ge 6 ] 2>/dev/null && printf ' %s' "$(sub_bar "$p" "$bw")" || true)" \
+      "$(printf '%.0f' "$p")" \
       "$([ -n "$r" ] && printf ' (resets %s)' "$(sub_reset_human "$r")" || true)")"
-  done < <(printf '%s' "$1" | jq -r '.windows[]? | [.name, (.used_pct // 0), (.resets_at // "")] | @tsv')
+  done < <(printf '%s' "$1" | jq -r '.windows[]? | [.name, (.used_pct // 0), (.resets_at // ""), (.scope // "")] | @tsv')
   local state reason
   IFS=$'\t' read -r state reason <<< "$(printf '%s' "$1" | jq -r '[(.extra.state // ""), (.extra.reason // "")] | @tsv')"
   [ "$state" = disabled ] && out="${out}extra: ${reason//_/ }"
@@ -525,19 +685,25 @@ cmd_quota() { # [provider] [--json]
   # thing before the expensive one is the wrong order for a decision.
   local subs; subs="$(subscription_list)"
   if [ "$json" -eq 1 ]; then
-    local bal="[]" p
+    local bal="[]" p r
     for p in $(_quota_providers "$only"); do
+      r="$(quota_remaining "$p" "$wsdir")"
       bal="$(printf '%s' "$bal" | jq -c --arg p "$p" \
-        --arg r "$(quota_remaining "$p" "$wsdir")" \
+        --arg r "$r" \
+        --arg st "$(quota_state "$p" "$wsdir" "$r")" \
         --arg f "$(provider_balance "$p" floor)" \
         --arg u "$(provider_balance "$p" unit)" \
-        '. + [{provider: $p, remaining: $r, floor: $f, unit: $u}]')"
+        '. + [{provider: $p, remaining: $r, state: $st, floor: $f, unit: $u}]')"
     done
     jq -nc --argjson s "$subs" --argjson b "$bal" '{subscriptions: $s, balances: $b}'
     return 0
   fi
 
   printf '  %-12s %-24s %s\n' SUBSCRIPTION ACCOUNT WINDOWS
+  # The track is sized to the terminal, and a terminal too narrow for one is
+  # given the text it had before.
+  local cols="${COLUMNS:-0}"; [ "$cols" -gt 0 ] 2>/dev/null || cols="$(tput cols 2>/dev/null || echo 80)"
+  local bw=0; [ "$cols" -ge 100 ] 2>/dev/null && bw=10
   if [ "$(printf '%s' "$subs" | jq -r 'length')" = 0 ]; then
     printf '  none - no signed-in Claude or Codex credential on this box\n'
   fi
@@ -552,7 +718,7 @@ cmd_quota() { # [provider] [--json]
     printf '  %-12s %-24s %s\n' \
       "$(printf '%s' "$row" | jq -r '.provider')" \
       "${acct:0:24}" \
-      "$(_sub_line "$row")"
+      "$(_sub_line "$row" "$bw")"
   done < <(printf '%s' "$subs" | jq -c '.[]')
   printf '\n'
 
@@ -576,7 +742,11 @@ _quota_balances() { # [provider] [wsdir]
   local r floor st
   for p in $list; do
     r="$(quota_remaining "$p" "$wsdir")"; floor="$(provider_balance "$p" floor)"
-    if [ "$r" = unknown ]; then st="unknown (no key here, or endpoint unreachable)"
+    # TWO KINDS OF `unknown`, AND THEY ARE NOT THE SAME NEWS. No key in this
+    # workspace is where you are standing - credit is workspace-scoped by
+    # decision, and a workspace without the key is behaving correctly.
+    # Asking and not being able to tell is a fault.
+    if [ "$r" = unknown ]; then st="$(quota_state_human "$(quota_state "$p" "$wsdir" "$r")")"
     elif quota_vetoed "$p" "$r"; then st="VETOED - below floor; workers will not be sent here"
     else st="ok"; fi
     [ "$r" = unknown ] || r="$(printf '%.2f' "$r")"

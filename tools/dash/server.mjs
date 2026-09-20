@@ -651,6 +651,17 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   .chip.b{color:#fff;background:var(--bad);border-radius:7px;padding:1px 9px 1px 7px}
   .chip.b::before{background:#fff;opacity:1}
 
+  /* CEL-49: a real bar, not a coloured chip. The track is a fixed-width
+     element and the fill is a percentage of it, so the fill can never be
+     drawn wider than the track whatever the number says; 100% is the only
+     value that reaches the end, and it is the only one that is solid red. */
+  .bar{display:inline-block;width:120px;height:9px;border-radius:5px;
+    background:var(--raise);border:1px solid var(--line);overflow:hidden;vertical-align:middle}
+  .bar-fill{display:block;height:100%;background:var(--ok);border-radius:5px 0 0 5px}
+  .bar-fill.w{background:var(--warn)}
+  .bar-fill.b{background:var(--bad);border-radius:5px}
+  td .bad{color:var(--bad)}td .warn{color:var(--warn)}
+
   .sechead{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap}
   #filters{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;
     font:12px var(--mono);color:var(--dim)}
@@ -1411,19 +1422,35 @@ function subCells(s){
   var windows=((s&&s.windows)||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
   if(!windows.length){
     var reason=(s&&s.extra&&s.extra.reason)||'not signed in here, or the endpoint is down';
-    return [[provider,label,'unreadable: '+reason,'']];
+    return [[provider,label,'unreadable: '+reason,'',null]];
   }
   var rows=windows.map(function(w,i){
     return [i===0?provider:'', i===0?label:'',
-      w.name+' '+Math.round(Number(w.used_pct)||0)+'%',
-      subReset(w.resets_at)?'resets '+subReset(w.resets_at):''];
+      w.name+(w.scope?' '+w.scope:'')+' '+Math.round(Number(w.used_pct)||0)+'%',
+      subReset(w.resets_at)?'resets '+subReset(w.resets_at):'',
+      Number(w.used_pct)||0];
   });
   if(s&&s.extra&&s.extra.state==='disabled'){
-    rows.push(['','','extra: '+String(s.extra.reason||'disabled').replace(/_/g,' '),'']);
+    rows.push(['','','extra: '+String(s.extra.reason||'disabled').replace(/_/g,' '),'',null]);
   }
   return rows;
 }
 // </cel35:sub-cells>
+// A REAL BAR, NOT A COLOURED CHIP (CEL-49). The chip said "this number is
+// large" in three steps; the bar says how large at a glance and lines up with
+// the account above it. It is drawn from the used_pct the cells carry -
+// never a number computed here - it can never be wider than its track because
+// the track is the element and the fill is a percentage of it, and 100% is the
+// only value that fills it, which is why the fill is capped at 99% below 100.
+function usageBar(pct){
+  if(pct===null||pct===undefined) return '';
+  var p=Number(pct); if(!isFinite(p)||p<0) p=0;
+  var full=p>=100;
+  var w=full?100:Math.min(99,p);
+  var cls=full?'bar-fill b':p>=80?'bar-fill w':'bar-fill';
+  return '<span class="bar" title="'+esc(String(Math.round(p))+'%')+'">'+
+    '<span class="'+cls+'" style="width:'+w.toFixed(1)+'%"></span></span>';
+}
 // The Box panel: what this box runs on nobody's behalf in particular, drawn
 // on the one dashboard that owns it and replaced by a single pointer line on
 // every other. Four dashboards each drawing this is how one broker read as
@@ -1458,17 +1485,15 @@ function renderSubs(s){
   for(var g=0;g<groups.length;g++){
     var rows=groups[g][1];
     if(!rows.length) continue;
-    html+='<tr class="agrow"><td colspan="4" class="empty">'+esc(groups[g][0])+'</td></tr>';
+    html+='<tr class="agrow"><td colspan="5" class="empty">'+esc(groups[g][0])+'</td></tr>';
     for(var i=0;i<rows.length;i++){
       var acc=rows[i], cells=subCells(acc);
-      // the chip's colour is the window the cell names, so a spent account is
-      // red on this page for the same reason it is red on the status edge
-      var ws=(acc.windows||[]).filter(function(w){return w&&w.used_pct!==null&&w.used_pct!==undefined});
       for(var j=0;j<cells.length;j++){
-        var c=cells[j], pct=ws[j]?Math.round(Number(ws[j].used_pct)||0):null;
+        var c=cells[j], pct=(c[4]===null||c[4]===undefined)?null:Math.round(Number(c[4])||0);
         var cls=pct===null?'':pct>=100?'b':pct>=80?'w':'';
         html+='<tr class="agrow"><td>'+esc(c[0])+'</td><td class="empty">'+esc(c[1])+'</td><td>'+
-          (pct===null?'<span class="empty">'+esc(c[2])+'</span>':chip(c[2],cls))+
+          (pct===null?'':usageBar(pct))+'</td><td>'+
+          (pct===null?'<span class="empty">'+esc(c[2])+'</span>':'<span class="'+(cls==='b'?'bad':cls==='w'?'warn':'')+'">'+esc(c[2])+'</span>')+
           '</td><td class="empty">'+esc(c[3])+'</td></tr>';
       }
     }

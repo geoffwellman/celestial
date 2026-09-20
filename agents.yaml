@@ -224,6 +224,13 @@ providers:
   anthropic:    { key_env: ANTHROPIC_API_KEY,  api: https://api.anthropic.com/v1/messages, console: https://console.anthropic.com/settings/keys }
   openai:       { key_env: OPENAI_API_KEY,     api: https://api.openai.com/v1/chat/completions, console: https://platform.openai.com/api-keys }
   openai-codex: { auth: cli, notes: "codex's own ChatGPT sign-in; no key to check" }
+  # PLAN WINDOWS AND NO CREDIT NUMBER, which is a whole provider and not a gap
+  # to fill with `unknown`: opencode signs in with its own OAuth (auth at
+  # ~/.local/share/opencode/auth.json) and its usage arrives with every other
+  # account through `omp usage --json` (lib/quota.sh). No `balance:` here is
+  # the declaration that it HAS no balance - `cel quota`'s credit table names
+  # providers that declare one, so opencode renders usage only.
+  opencode:     { auth: cli, usage: subscription, notes: "anomalyco/opencode's own sign-in; plan windows, no credit balance" }
   # `balance:` is how the plane asks a provider what is left BEFORE a pane
   # spawns (lib/quota.sh). Shapes verified against the live APIs on
   # 2026-09-12: DeepSeek reports an overdrawn account as a negative
