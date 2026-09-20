@@ -409,3 +409,43 @@ test_run_orchestrator_ignores_a_live_agent_in_another_cwd() {
   assert_contains "$out" "agent start widget-orch"
   rm -rf "$T"
 }
+
+# ---------------------------------------------------- the reviewer registry
+# A reviewer is started by `cel run reviewer --repo r --pr n` and was recorded
+# NOWHERE, so nothing downstream could know it had finished: seven idle
+# reviewer panes for six merged PRs held ~3.0 GB on this box one morning
+# because no sweep could even see them. The row is what makes the reviewer
+# collectable; `cel gc` reads it.
+_reviewers_fixture() { export CEL_REVIEWERS_STATE="$T/reviewers.json"; }
+
+test_reviewer_row_records_the_pr_and_is_found_and_dropped_again() {
+  _ws; _reviewers_fixture
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  assert_fails reviewers_find widget 72
+  reviewers_drop widget 71
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# A missing or corrupt registry is an empty one, never an error: a stale file
+# must not make the launcher - or the sweep that reads it - fail.
+test_reviewer_registry_reads_a_corrupt_file_as_empty() {
+  _ws; _reviewers_fixture
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# Today a second `cel run reviewer --pr 12` gives you two reviewers for one
+# PR and no way to tell them apart. One PR, one reviewer.
+test_second_reviewer_for_the_same_pr_reuses_the_pane_and_adds_no_row() {
+  _ws_review; _reviewers_fixture
+  reviewers_record widget 12 w1:p3 widget-pr-12-review
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
+  assert_contains "$out" w1:p3
+  case "$out" in *'tab "PR reviewer"'*) printf 'a second pane was split for one PR\n' >&2; return 1;; esac
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  rm -rf "$T"
+}

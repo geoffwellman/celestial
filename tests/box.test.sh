@@ -248,3 +248,37 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
   assert_eq "$(CEL_BOX_FREE_FLOOR_GB=0 box_doctor_line)" ""
   rm -rf "$T"
 }
+
+# ------------------------------------------------------------- the reviewers
+# 3 GB of idle reviewer panes was a bigger number than most of the disk rows
+# above it, and it was invisible: the report measured the floor and never the
+# agents standing on it.
+_box_reviewer_rows() {
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  herdr() { jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}'; }
+}
+
+test_box_space_reports_reviewer_panes_and_their_rss() {
+  _box_fixture
+  _box_reviewer_rows
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 1
+  [ "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" -gt 0 ] \
+    || { printf 'a live reviewer pane measured as zero RSS\n' >&2; return 1; }
+  assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" reviewers
+  unset -f herdr
+  rm -rf "$T"
+}
+
+# None is a number, not an absent row: "did it look?" must never be a question
+# the report leaves open.
+test_box_space_reports_zero_reviewers_cleanly() {
+  _box_fixture
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 0
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" 0
+  assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" "0 reviewer panes"
+  rm -rf "$T"
+}
