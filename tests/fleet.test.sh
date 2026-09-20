@@ -73,6 +73,9 @@ EOF
   cat >"$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${STUB_HERDR_FAIL:-}" ] && exit 1
+# A roster that ANSWERS with a truncated document: herdr killed mid-write, or
+# a pane manager that died between the opening brace and the rest of it.
+[ -n "${STUB_HERDR_BAD:-}" ] && { printf '%s' '{"result":{"agents":[{"name":"widget-orch",'; exit 0; }
 case "$1 $2" in
   "agent list")
     # CEL-44: a live agent with NO herdr name, in a cwd the caller names. The
@@ -797,5 +800,64 @@ test_fleet_worker_row_renders_from_the_entry_alone() {
   assert_eq "$(printf '%s' "$row" | jq -r '.id')" "one"
   assert_eq "$(printf '%s' "$row" | jq -r '.ahead')" "0"
   assert_eq "$(printf '%s' "$row" | jq -r '.state')" "running"
+  _fleet_teardown
+}
+
+# AN UNREADABLE ROSTER MUST NOT BE ABLE TO EMPTY THE FLEET.
+#
+# `herdr agent list` answering with non-empty MALFORMED JSON made `--argjson
+# roster` fail before jq ever opened the ledger, and the `|| true` that keeps
+# this read from dying turned that into an empty row list - so `cel fleet
+# --json` rendered a box with no workers on it, which is indistinguishable
+# from a box with no workers on it. A failure path that degrades to silence is
+# the worst kind: the operator acts on the silence.
+#
+# The rows are the LEDGER's, and the ledger is readable whatever herdr is
+# doing. An unusable roster is the same statement as an absent one - `-`, a
+# fact about the observer - and never a statement about the worker.
+test_fleet_rows_survive_a_roster_that_is_not_json() {
+  _fleet_setup
+  local doc u
+  doc="$(STUB_HERDR_BAD=1 cmd_fleet --json --workspace alpha)"
+  u="$(printf '%s' "$doc" | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].id] | join(",")')" "one,two"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers')" "1"
+  # ...and nobody is convicted on the strength of a document nobody could read
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "0"
+  _fleet_teardown
+}
+
+# herdr exiting non-zero is the same statement, by a different route, and the
+# rows are just as present.
+test_fleet_rows_survive_herdr_exiting_non_zero() {
+  _fleet_setup
+  local u
+  u="$(STUB_HERDR_FAIL=1 cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  _fleet_teardown
+}
+
+# AND THE CASE THAT IS NOT A FAILURE AT ALL. A roster that answers properly
+# with an empty agent list is EVIDENCE: it knows about nobody, so the rows it
+# does not mention are `gone`, not `-`. If an unreadable roster and an empty
+# one produced the same row, neither word would mean anything.
+test_fleet_tells_an_empty_roster_from_an_unreadable_one() {
+  _fleet_setup
+  cat >"$T/bin/herdr" <<'HERDR'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[]}}' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+HERDR
+  chmod +x "$T/bin/herdr"
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "gone"
   _fleet_teardown
 }
