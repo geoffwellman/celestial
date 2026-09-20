@@ -263,16 +263,37 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // whether to delegate when the box has 800 MB left. The subscription windows
 // sit beside it for exactly the same reason: a 5h window at 100% means the
 // next delegation refuses, whatever the memory says.
-const statusRow = (status, box, doc) => {
+//
+// CEL-51: THE DOCUMENT AND THE WIDTH ARE BOTH REQUIRED, AND THIS FUNCTION
+// REFUSES WITHOUT THE FIRST. CEL-49 landed the subscription edge here and four
+// of the five renderers below called `statusRow(status, doc.box)`; JavaScript
+// handed the declared third parameter `undefined`, `subsEdge(undefined)`
+// answered `''`, and the edge the owner asked for twice was ABSENT from the
+// services, unit, worker and timeline views - looking exactly like a box with
+// no subscriptions, which is why nobody noticed. A missing document is a
+// programming error and it now throws where it is written, rather than drawing
+// a row that looks fine on the operator's screen.
+export const statusRow = (status, box, doc, width) => {
+  if (!doc) throw new TypeError('statusRow: the fleet document is required - the status edge cannot say what it was not given');
   const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
   const mem = memFree(box);
-  const subs = subsEdge(doc);
+  const subs = subsEdge(doc, renderWidth(width));
   return [left, subs, mem, orphansEdge(box)].filter(Boolean).join('   ');
 };
 
 // WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out
 // here: the declared services and every `try` preview, already joined, already
 // probed. One call per workspace, because that is the shape of the command.
+// WHERE A TEXT RENDERER LEARNS ITS WIDTH. The ink UI has `stdout.columns` and
+// hands it down; these renderers print to whatever `--render-once` was piped
+// into, so the terminal says so through COLUMNS or through stdout itself. When
+// NEITHER answers, the width is genuinely unknown and stays 0: `usageBar` then
+// draws nothing, which is the honest outcome. A guessed 80 would draw a bar
+// into a row that may be 40 wide, and a status edge that wraps costs a line of
+// the desk - which is the whole reason usageBar has a minimum.
+const renderWidth = (width) =>
+  Math.floor(Number(width) || Number(process?.env?.COLUMNS) || process?.stdout?.columns || 0);
+
 export const services = async (ws) => {
   const args = ['services', '--json'];
   if (ws) args.push('--workspace', ws);
@@ -296,7 +317,7 @@ export const renderServices = async ({ status = '' } = {}) => {
   const doc = await fleet();
   const out = servicesView(await allServices(doc));
   out.push('');
-  out.push(statusRow(status, doc.box));
+  out.push(statusRow(status, doc.box, doc));
   out.push(legend('services'));
   return out.join('\n');
 };
@@ -390,7 +411,7 @@ export const renderUnit = async (name, { status = '', byMemory = false } = {}) =
     unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) },
     items, tail, board, prs, digest, mail: rankedMail(unit.ws),
   }), ''];
-  out.push(statusRow(status, doc.box));
+  out.push(statusRow(status, doc.box, doc));
   out.push(legend('unit'));
   return out.join('\n');
 };
@@ -401,7 +422,7 @@ export const renderWorker = async (id, { status = '' } = {}) => {
   if (!found) return null;
   const text = await why(found.worker.id, found.ws);
   const out = [workerView({ worker: found.worker, ws: found.ws, why: text }), ''];
-  out.push(statusRow(status, doc.box));
+  out.push(statusRow(status, doc.box, doc));
   out.push(legend('worker'));
   return out.join('\n');
 };
@@ -411,7 +432,7 @@ export const renderTimeline = async ({ status = '' } = {}) => {
   const doc = await fleet();
   const events = await timelineFor(doc);
   const out = [timelineView(events), ''];
-  out.push(statusRow(status, doc.box));
+  out.push(statusRow(status, doc.box, doc));
   out.push(legend('timeline'));
   return out.join('\n');
 };
