@@ -628,24 +628,51 @@ test_a_below_threshold_answer_keeps_its_kinds_default_rank() {
 }
 
 # A message is scored ONCE. The console redraws every ten seconds; a score per
-# draw is a provider bill per operator per day.
+# draw is a provider bill per operator per day. This holds however the answer
+# came back: a confident score AND a below-floor one are each asked about at
+# most once, because the fallback is remembered too. The below-floor case was
+# the leak - an unsure answer wrote no cache line and was re-posted every draw,
+# and those are exactly the messages the model stays unsure about.
 test_a_message_is_scored_once_however_often_it_is_drawn() {
   _triage_fixture
   _triage_send decision "LEVEL2 ship the bundle or hold"
+  _triage_send blocked  "UNSURE LEVEL0 the gate cannot run"
   triage_ranked demo root >/dev/null
   triage_ranked demo root >/dev/null
+  triage_ranked demo root >/dev/null
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
+  # the below-floor message still keeps its kind's default, not a stale re-ask
+  assert_eq "$(triage_ranked demo root | jq -r 'select(.kind=="blocked") | .rank')" "3"
   assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
   rm -rf "$TB" "$CEL_INBOX_DIR"
 }
 
-# An unreachable model is today's ordering, not an error and not a loss.
+# An unreachable OR FAILING model is today's ordering, not an error and not a
+# loss - and it is asked at most ONCE, not a doomed HTTP call per ten-second
+# redraw. A failed post records the fallback for every pending id so the next
+# draw reads the cache instead of re-posting. The old code wrote nothing on a
+# failure and re-posted forever.
 test_an_unreachable_model_falls_back_to_the_kind_defaults() {
   _triage_fixture
-  export CEL_TRIAGE_POST="$TB/nope"
+  # a model that is reached but FAILS: it logs one line per attempt, then
+  # errors. (Consume stdin and log a fixed marker - appending the raw body has
+  # no trailing newline, so repeated calls would fold into one line and hide a
+  # re-post.)
+  cat > "$TB/failing" <<'EOS'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'call\n' >> "$CEL_TRIAGE_CALLS"
+exit 1
+EOS
+  chmod +x "$TB/failing"
+  export CEL_TRIAGE_POST="$TB/failing"
   _triage_send status  "LEVEL3 a status message"
   _triage_send blocked "LEVEL0 a blocker"
   local n; n="$(_inbox_lines)"
   assert_eq "$(triage_ranked demo root | jq -r '.rank' | tr '\n' ' ')" "3 0 "
+  triage_ranked demo root >/dev/null
+  triage_ranked demo root >/dev/null
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
   assert_eq "$(_inbox_lines)" "$n"
   rm -rf "$TB" "$CEL_INBOX_DIR"
 }
