@@ -105,6 +105,116 @@ _inbox_sanitise() {
 
 _inbox_file()   { printf '%s/%s.jsonl' "$(_inbox_dir)" "$1"; }
 
+# --- WHO IS ALIVE TO READ THIS MAILBOX -------------------------------------
+#
+# When the plan retired standing root agents, `root` survived as a NAME - the
+# top, whoever is listening - with the console as the intended listener. A
+# console that is not running listens to nothing. Counted on one box on
+# 2026-09-19: root had taken 553 messages since the 10th, 72 of them
+# escalations, into a mailbox nothing was obliged to open; one of them, still
+# unread, said a reviewer pane had been dead for two days.
+#
+# So "nobody is reading this" becomes a FACT the box can state, rather than a
+# silence every watcher mistakes for calm.
+
+# Every pane herdr can see, one name per line. Fails (rc 1) when herdr could
+# not answer at all, which is NOT the same as "nobody is alive" - the same
+# rule prune, the steward and cel-fanout all learned the hard way.
+_inbox_roster() {
+  have herdr || return 1
+  have jq || return 1
+  local out
+  out="$(herdr agent list 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -e '.result.agents' >/dev/null 2>&1 || return 1
+  printf '%s' "$out" | jq -r '.result.agents[]?.name // empty'
+}
+
+# The console stands outside every workspace and has no pane alias, so the
+# roster cannot see it. CEL-32's marker can: `cel console` exports
+# CEL_ROLE=console, and /proc/<pid>/environ is fixed at exec, so it survives a
+# runtime that rewrites its own argv (the reason lib/gc.sh reads environ too).
+# CEL_PROC_DIR is the seam a test drives this through; nothing else moves it.
+_inbox_console_live() {
+  local d="${CEL_PROC_DIR:-/proc}" p
+  for p in "$d"/[0-9]*; do
+    [ -r "$p/environ" ] || continue
+    if tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx 'CEL_ROLE=console'; then return 0; fi
+  done
+  return 1
+}
+
+# The herdr agent name that would be standing in a mailbox: the inverse of
+# _inbox_me. Kept here beside the derivation it inverts, because the two
+# drifting apart is how a live pane reads as nobody.
+_inbox_agent_want() { # <mailbox> <ws>
+  case "$1" in
+    root) _inbox_sanitise "$2-root" ;;
+    *) printf '%s' "$1" ;;    # an orchestrator's and a worker's mailbox IS its alias
+  esac
+}
+
+# Who is alive to read <mailbox> in <ws>, or nothing. Returns 2 when herdr
+# could not be asked: unknown is not the same as nobody, and a caller that
+# raises an alarm on this must not raise it on a transport failure.
+inbox_reader_of() { # <ws> <mailbox> -> reader name, or empty
+  local ws="$1" box="$2" roster want
+  roster="$(_inbox_roster)" || return 2
+  if printf '%s\n' "$roster" | grep -qxF "$box"; then printf '%s' "$box"; return 0; fi
+  want="$(_inbox_agent_want "$box" "$ws")"
+  if [ -n "$want" ] && printf '%s\n' "$roster" | grep -qxF "$want"; then printf '%s' "$want"; return 0; fi
+  # The console drains every workspace's ROOT mailbox and no other (CEL-7), so
+  # it is a reader of root and is not evidence for anybody else's.
+  if [ "$box" = root ] && _inbox_console_live; then printf 'console'; return 0; fi
+  return 0
+}
+
+# The unread items for a recipient WITHOUT touching a cursor: looking is not
+# reading. Everything that reports on a backlog - fleet, doctor, the steward,
+# the ranking - reads through here, so they cannot disagree about what unread
+# means.
+inbox_unread_json() { # <ws> <who>
+  local f c last cand
+  f="$(_inbox_file "$1")"
+  [ -f "$f" ] || return 0
+  last=""
+  for cand in "$(_inbox_dir)/$1.$2.cursor" \
+              $([ "$2" = root ] && printf '%s' "$(_inbox_dir)/$1.root.console.cursor"); do
+    [ -f "$cand" ] || continue
+    c="$(cat "$cand")"
+    [ "$c" \> "$last" ] && last="$c"
+  done
+  jq -c --arg who "$2" --arg last "$last" \
+    'select(.kind != "resolution") | select(.to == $who or .to == "all")
+     | select($last == "" or (.id > $last))' "$f" 2>/dev/null
+}
+
+# How long the OLDEST unread item has waited, in seconds; 0 when there is
+# none. The age of the newest says how busy the senders are; the age of the
+# oldest says how far behind the reader is, which is the question.
+inbox_oldest_unread_secs() { # <ws> <who> [kinds-regex]
+  local ts
+  ts="$(inbox_unread_json "$1" "$2" \
+    | jq -r --arg k "${3:-}" 'select($k == "" or (.kind | test($k))) | .ts' 2>/dev/null | sed -n 1p)"
+  [ -n "$ts" ] || { printf '0'; return 0; }
+  local then now
+  then="$(date -d "$ts" +%s 2>/dev/null || printf 0)"
+  now="$(date +%s)"
+  [ "$then" -gt 0 ] || { printf '0'; return 0; }
+  printf '%s' "$(( now - then ))"
+}
+
+# The three facts every view of this box needs about one mailbox, as one JSON
+# object so text and --json cannot drift apart.
+inbox_mail_json() { # <ws> [who]
+  local ws="$1" who="${2:-root}" n secs reader
+  n="$(inbox_unread_json "$ws" "$who" | grep -c . || true)"
+  [ -n "$n" ] || n=0
+  secs="$(inbox_oldest_unread_secs "$ws" "$who")"
+  reader="$(inbox_reader_of "$ws" "$who" 2>/dev/null || true)"
+  jq -nc --argjson n "${n:-0}" --argjson secs "${secs:-0}" --arg reader "$reader" \
+    '{to_root_unread: $n, oldest_secs: $secs, reader: $reader}'
+}
+
 # ONE CURSOR PER READER, NOT PER MAILBOX. "root" is the address orchestrators
 # escalate to - the top, whoever is listening - and it now has two readers: a
 # standing root pane and the console that watches every workspace at once.
@@ -181,11 +291,15 @@ cel inbox - messages between agents that never type into a pane
       tail new items, one line each (what a Monitor background task runs -
       stdout is the notification). A decision or blocker also raises a desktop
       notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
-  cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json]
+  cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json] [--ranked]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
       A rolled-up item shows (×n, last HH:MM); --json carries count and
       last_ts. --all-workspaces prefixes each line [<ws>].
+      --ranked asks a different question of the same mailbox: of the UNREAD
+      mail, what needs a person now. A decision model scores each message once
+      (lib/triage.sh) and the top `inbox.top_n` are shown, then `and N more`.
+      Looking, not reading: the cursor does not move.
   cel inbox resolve <id> [--by <who>] [--workspace w]  close a decision/blocker
   cel inbox resolve --all [--from <who>] [--matching <substr>] [--kind k]
                     [--older-than <hours>] [--by <who>] [--workspace w]
@@ -196,6 +310,9 @@ cel inbox - messages between agents that never type into a pane
   kinds: status (default) | escalation | decision | blocked. A decision or
   blocker stays in `open` until someone resolves it, however much mail lands
   after it - a buried question is the failure this exists to prevent.
+  MAIL TO root IS FOR A PERSON: escalation, decision, blocked. Ticket status
+  belongs in the ledger (`cel-fanout status`), which every view already reads;
+  `--kind status` to root warns and still sends.
 EOS
 }
 
@@ -312,6 +429,18 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
   done
   case "$kind" in status|escalation|decision|blocked) ;;
     *) die "cel inbox send: --kind must be status, escalation, decision or blocked (got '$kind')";; esac
+  # STATUS TO ROOT IS WRITE-ONLY TELEMETRY. Of the 553 messages root's mailbox
+  # took on one box between 10 and 19 September, 466 were `status` - one
+  # instruction in core/roles/project-orchestrator.md told every orchestrator
+  # to report every ticket there, and the same facts were already in the
+  # ledger and rendered by `cel fleet`, `cel-fanout status` and the dashboard.
+  # Mail to root is for something a person must answer, decide or unblock.
+  #
+  # WARNED, NOT REFUSED: a role file somewhere in the wild still does this,
+  # and a refusal would break it mid-flight. The message still arrives.
+  if [ "$to" = root ] && [ "$kind" = status ]; then
+    c_warn "status to root is not read by anyone; the ledger already carries it" >&2
+  fi
   ws="$(_inbox_ws "$ws")"
   [ -n "$from" ] || from="$(_inbox_me)"
   local id line ref=""
@@ -508,7 +637,10 @@ _inbox_watch_one() { # <ws> <who> <prefix>
      | [.kind, .from, (.message | gsub("\n"; " "))] | @tsv' \
   | while IFS=$'\t' read -r kind from msg; do
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
-      case "$kind" in decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" ;; esac
+      # An ESCALATION is by definition the kind that cannot wait, and it was
+      # the one kind that raised nothing: 72 of them landed in root's mailbox
+      # in nine days with no signal anywhere else.
+      case "$kind" in escalation|decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" ;; esac
     done
 }
 
@@ -532,18 +664,36 @@ _inbox_notify() { # <kind> <from> <ws> <message>
 # blocker stays OPEN, regardless of the cursor, until a `resolution` record
 # names its id. Resolutions are appended (the file is append-only and has
 # many writers), never edited in.
-_inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json]
-  local who="" ws="" json=0 every=0
+_inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranked]
+  local who="" ws="" json=0 every=0 ranked=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --for) who="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
       --json) json=1; shift ;;
+      --ranked) ranked=1; shift ;;
       *) die "cel inbox open: unknown argument '$1'" ;;
     esac
   done
   [ -n "$who" ] || who="$(_inbox_me)"
+  # RANKED IS A DIFFERENT QUESTION ABOUT THE SAME MAILBOX: not "what is still
+  # open" but "of what I have not read, what needs me now". It runs over the
+  # UNREAD set, after the two fixes above have cut the volume, and it is a
+  # look - the cursor does not move.
+  if [ "$ranked" -eq 1 ]; then
+    # shellcheck source=lib/triage.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/triage.sh"
+    if [ "$every" -eq 1 ]; then
+      local m
+      for m in $(_inbox_all_ws); do
+        triage_render "$m" "$who" "$json" | sed "s/^/[$m] /"
+      done
+      return 0
+    fi
+    triage_render "$(_inbox_ws "$ws")" "$who" "$json"
+    return 0
+  fi
   # Everything waiting on one reader, in ONE call. The console loops the
   # registry itself today; a chain or a human has no such loop, and "what is
   # waiting on me" is not a per-workspace question.

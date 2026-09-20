@@ -29,8 +29,8 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput, allServices, roster as rosterOf,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, triageFacts, triageView, parseJson } from './views.mjs';
-import { boardFor, prsFor, digestFor, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, triageFacts, triageView, parseJson, detailActions, detailButtons, resolveOutcome } from './views.mjs';
+import { boardFor, prsFor, digestFor, rankedMail, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, summarise, NoTranslator, translatorLabel } from './translate.mjs';
 import { route, NoRouter, routerLabel, triage, routerConfig, ROWS_INLINE, DESTRUCTIVE_FLOOR } from './router.mjs';
@@ -176,13 +176,17 @@ const OpenPanel = ({ items, sel, offset, height, innerRef, focused, loaded }) =>
 // conversation was somewhere else entirely - so reading a decision meant
 // leaving the console for a pane. Now it takes the room, carries the whole
 // message and the thread around it, and has buttons you can click.
-const DetailView = ({ item, thread: rows, innerRef, target }) =>
-  h(Panel, { title: `${String(item.kind || 'item').toUpperCase()} · ${item.ws}`, innerRef, focused: true, right: `${String(item.ts).slice(0, 16).replace('T', ' ')} · Esc back` },
+const DetailView = ({ item, thread: rows, innerRef, target, openIds = [] }) => {
+  // WHAT THIS ITEM CAN ACTUALLY HAVE DONE TO IT, computed from its live state
+  // rather than from the pane it was opened in (views.mjs).
+  const acts = detailActions(item, openIds);
+  const buttons = detailButtons(item, openIds, !!target);
+  return h(Panel, { title: `${String(item.kind || 'item').toUpperCase()} · ${item.ws}`, innerRef, focused: true, right: `${String(item.ts).slice(0, 16).replace('T', ' ')} · Esc back` },
     h(Text, null,
       h(Text, { color: C.dim }, 'from '),
       h(Text, { color: C.ink, bold: true }, String(item.from)),
       h(Text, { color: C.dim }, item.count > 1 ? `  (raised ×${item.count}, last ${String(item.last_ts || '').slice(0, 16).replace('T', ' ')})` : ''),
-      h(Text, { color: C.dim }, `   id ${item.id}`)),
+      h(Text, { color: C.dim }, item.id ? `   id ${item.id}` : '')),
     h(Text, null, ' '),
     h(Text, { color: C.ink, wrap: 'wrap' }, item.message),
     rows.length ? h(Box, { flexDirection: 'column', marginTop: 1 },
@@ -190,16 +194,23 @@ const DetailView = ({ item, thread: rows, innerRef, target }) =>
       ...rows.map((m, i) => h(Text, { key: `${m.id || i}`, wrap: 'truncate-end' },
         h(Text, { color: C.dim }, `  ${String(m.ts).slice(0, 16)} ${m.from}: `),
         h(Text, { color: C.ink }, String(m.message || '').replace(/\n/g, ' '))))) : null,
+    // One dim line where the button would have been: "resolved 10:09 by
+    // steward" or "not an open item - this is the log". An absent button with
+    // no explanation is the same dead end in a quieter form.
+    acts.note ? h(Text, { color: C.dim }, acts.note) : null,
     h(Box, { marginTop: 1 },
-      h(Text, { color: C.ok }, '[resolve]'),
-      h(Text, { color: C.dim }, '  '),
-      h(Text, { color: C.accent }, '[reply]'),
-      h(Text, { color: C.dim }, '  '),
-      h(Text, { color: C.ink }, '[go to]'),
-      // WHO SENT THIS IS A PLACE. A blocker from a worker and no way from it to
-      // that worker is the message being a dead end.
-      target ? h(Text, { color: C.dim }, '  ') : null,
-      target ? h(Text, { color: C.accent }, target.kind === 'unit' ? '[unit]' : '[worker]') : null));
+      ...buttons.flatMap((b, i) => [
+        i ? h(Text, { key: `sp${i}`, color: C.dim }, '  ') : null,
+        h(Text, {
+          key: b,
+          color: b === 'resolve' ? C.ok : b === 'go to' ? C.ink : C.accent,
+        }, b === 'target'
+          // WHO SENT THIS IS A PLACE. A blocker from a worker and no way from
+          // it to that worker is the message being a dead end.
+          ? (target.kind === 'unit' ? '[unit]' : '[worker]')
+          : `[${b}]`),
+      ]).filter(Boolean)));
+};
 
 const TailPanel = ({ lines, offset, height, innerRef, focused, loaded }) => {
   const w = window_(lines, offset, height);
@@ -1064,12 +1075,23 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     openWhy(found.worker, found.ws);
   }, [doc, openWhy, say]);
 
-  const resolveItem = useCallback((it) => {
+  // A RESOLVE THAT REPORTS. It used to fire the command into the output view
+  // and say nothing of its own, so the owner pressing [resolve] on an item the
+  // steward had already cleared saw no message at all and no change - which
+  // reads exactly like a broken button.
+  const resolveItem = useCallback(async (it) => {
     if (!it) return;
+    const openIds = (itemsRef.current || []).filter((x) => x.ws === it.ws).map((x) => x.id);
+    const acts = detailActions(it, openIds);
+    if (!acts.resolve) { say(acts.note || 'nothing to resolve here'); return; }
     setDetail(null);
     setPane('waiting');
-    execute(`cel inbox resolve ${it.id} --workspace ${it.ws}`);
-  }, [execute]);
+    setBusy(true);
+    const r = await runCommand(`cel inbox resolve ${it.id} --workspace ${it.ws}`);
+    setBusy(false);
+    say(resolveOutcome(it, r));
+    if (r.allow && r.ok) reload();
+  }, [reload, say]);
 
   // Reply puts the command on the line with the cursor INSIDE the quotes. A
   // reply form that lands the cursor at the end of the line is a reply form
@@ -1187,10 +1209,15 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     const dbl2 = last2.panel === hit.panel && last2.index === hit.index && now2 - last2.at < DOUBLE_CLICK_MS;
     if (hit.panel === 'detail') {
       const it = detail?.item;
-      if (hit.index === 0) resolveItem(it);
-      else if (hit.index === 1) replyTo(it);
-      else if (hit.index === 2) execute(`herdr agent focus ${it.from}`);
-      else if (hit.index === 3) {
+      // The same list the view drew, so a missing [resolve] cannot shift every
+      // other button one place to the left under the mouse.
+      const openIds = (itemsRef.current || []).filter((x) => x.ws === it?.ws).map((x) => x.id);
+      const buttons = detailButtons(it || {}, openIds, !!senderTarget(it?.from));
+      const b = buttons[hit.index];
+      if (b === 'resolve') resolveItem(it);
+      else if (b === 'reply') replyTo(it);
+      else if (b === 'go to') execute(`herdr agent focus ${it.from}`);
+      else if (b === 'target') {
         const t2 = senderTarget(it.from);
         setDetail(null);
         if (t2?.kind === 'unit') openUnit(t2.name);
@@ -1286,7 +1313,21 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
 
   const unitWorkers = unit ? sortWorkers(workersOf(unit), wsort) : [];
   const unitItems = unit ? items.filter((it) => it.ws === unit.ws) : [];
-  const unitMail = unit ? tail.filter((m) => m.ws === unit.ws).slice(-10) : [];
+  // CEL-43: the unit's mail in the same order the text digest and the dash
+  // card use - most urgent first, by the level a decision model gave each
+  // message once (lib/triage.sh's cache), then oldest first inside a level.
+  // Newest-first put a status line above an escalation saying a reviewer pane
+  // had been dead for two days.
+  const unitMail = unit
+    ? (() => {
+      const ranked = rankedMail(unit.ws, { top: 10 });
+      const byId = new Map(ranked.top.map((m) => [String(m.id), m.rank]));
+      return tail.filter((m) => m.ws === unit.ws)
+        .map((m) => ({ ...m, rank: byId.has(String(m.id)) ? byId.get(String(m.id)) : null }))
+        .sort((a, b) => ((b.rank ?? -1) - (a.rank ?? -1)) || String(a.ts).localeCompare(String(b.ts)))
+        .slice(0, 10);
+    })()
+    : [];
   const list = pane === 'waiting' ? items : pane === 'inbox' ? tail : rows;
 
   useInput((input, key) => {
@@ -1765,11 +1806,14 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     };
     if (view === 'main') push('fleet', refs.fleet, Math.min(layout.fleet, rows.length), offsets.fleet > 0 ? 1 : 0);
     if (detail) push('detail', refs.detail, 0);
-    // The detail view's three buttons are its "rows": resolve, reply, go to -
-    // all on one line, which the click handler maps by index.
+    // The detail view's buttons are its "rows" - all on one line, which the
+    // click handler maps by index. There are three or four of them depending
+    // on whether this item can be resolved and whether its sender is a place.
     if (detail && map.length && map[map.length - 1].panel === 'detail') {
       const d = map[map.length - 1];
-      d.rows = [d.bottom - 1, d.bottom - 1, d.bottom - 1];
+      const openIds = (itemsRef.current || []).filter((x) => x.ws === detail.item?.ws).map((x) => x.id);
+      const n = detailButtons(detail.item || {}, openIds, !!senderTarget(detail.item?.from)).length;
+      d.rows = Array.from({ length: n }, () => d.bottom - 1);
     }
     if (view === 'unit') {
       push('unitorch', refs.unitOrch, 2);
@@ -1838,6 +1882,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
         ? [h(DetailView, {
           key: 'detail', item: detail.item, thread: detail.thread, innerRef: refs.detail,
           target: senderTarget(detail.item.from),
+          openIds: (items || []).filter((x) => x.ws === detail.item.ws).map((x) => x.id),
         })]
         : view === 'worker'
           ? [h(WorkerView, {

@@ -33,6 +33,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # _svc_box, for the box services line
 # shellcheck source=lib/wslife.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"   # wslife_doctor_lines, for the nameless agent
+# shellcheck source=lib/fleet.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fleet.sh"   # fleet_mail_doctor_line, for root's mailbox
 
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
@@ -163,6 +165,12 @@ check_workspaces() {
 
     remote="$(registry_remote "$n")"
     [ -n "$remote" ] || c_warn "$n is local-only (cel ws push $n to publish)"
+
+    # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` survived the
+    # retirement of standing root agents as a name - the top, whoever is
+    # listening - and a console that is not running listens to nothing.
+    local mailline; mailline="$(fleet_mail_doctor_line "$n" 2>/dev/null || true)"
+    [ -z "$mailline" ] || c_warn "${mailline#  }"
 
     for r in $(ws_repo_names "$path"); do
       url="$(ws_repo_get "$path" "$r" url)"

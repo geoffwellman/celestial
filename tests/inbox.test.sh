@@ -505,3 +505,191 @@ test_inbox_open_all_workspaces_prefixes_every_line() {
   assert_contains "$out" "beta blocker"
   rm -rf "$CEL_INBOX_DIR" "$REG"
 }
+
+# --- CEL-43: root is a mailbox nobody has to read ---------------------------
+#
+# Counted on one box on 2026-09-19: root had taken 553 messages since the 10th
+# and 466 of them were `status`. Three faults, three groups of assertions -
+# status stops being mail, a mailbox with no reader is a fault, and what is
+# left gets ranked. NOTHING HERE DELETES A MESSAGE, so every test below ends
+# by asserting the file is exactly as long as it was.
+_inbox_lines() { wc -l < "$CEL_INBOX_DIR/${1:-demo}.jsonl" 2>/dev/null | tr -d ' ' || printf 0; }
+
+# Rule 6 told every orchestrator to report ticket status to root, and that one
+# instruction is the 466. The warning is the migration: a role file in the
+# wild still does this, so the message is delivered and the sender is told.
+test_status_to_root_warns_and_still_delivers() {
+  _inbox_sandbox
+  local err
+  err="$( ( _inbox_send root "widget: ABC-9 landed" --from widget-orch --workspace demo >/dev/null ) 2>&1 )"
+  assert_contains "$err" "status to root is not read by anyone; the ledger already carries it"
+  assert_contains "$(_inbox_read --for root --workspace demo)" "widget: ABC-9 landed"
+  local n; n="$(_inbox_lines)"
+  err="$( ( _inbox_send root "ship or hold?" --kind decision --workspace demo >/dev/null ) 2>&1 )"
+  case "$err" in *"not read by anyone"*) echo "warned about a decision"; return 1;; esac
+  err="$( ( _inbox_send widget-orch "ABC-9 landed" --workspace demo >/dev/null ) 2>&1 )"
+  case "$err" in *"not read by anyone"*) echo "warned about a non-root recipient"; return 1;; esac
+  assert_eq "$(_inbox_lines)" "$((n + 2))"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# WHO IS ALIVE TO READ IT. A live pane whose alias matches the mailbox, a live
+# console, or nobody - and "nobody" is what turns an unread escalation into a
+# fault instead of silence.
+_inbox_reader_fixture() {
+  _inbox_sandbox
+  RB="$(mktemp -d)"; PATH="$RB:$PATH"; export PATH
+  export CEL_PROC_DIR="$RB/proc"; mkdir -p "$CEL_PROC_DIR"
+  cat > "$RB/herdr" <<'EOS'
+#!/usr/bin/env bash
+[ -n "${STUB_AGENTS:-}" ] || STUB_AGENTS='"'"'{"result":{"agents":[]}}'"'"'
+printf '%s\n' "$STUB_AGENTS"
+EOS
+  chmod +x "$RB/herdr"
+  export STUB_AGENTS='{"result":{"agents":[]}}'
+}
+
+test_inbox_reader_of_sees_a_pane_a_console_or_nobody() {
+  _inbox_reader_fixture
+  assert_eq "$(inbox_reader_of alpha root)" ""
+  export STUB_AGENTS='{"result":{"agents":[{"name":"alpha-root"}]}}'
+  assert_eq "$(inbox_reader_of alpha root)" "alpha-root"
+  export STUB_AGENTS='{"result":{"agents":[{"name":"widget-orch"}]}}'
+  assert_eq "$(inbox_reader_of alpha widget-orch)" "widget-orch"
+  assert_eq "$(inbox_reader_of alpha root)" ""
+  # the console watches every workspace's root mailbox at once (CEL-7), and
+  # CEL-32's marker is what proves one is actually running
+  mkdir -p "$CEL_PROC_DIR/4242"
+  printf 'CEL_ROLE=console\0HOME=/tmp\0' > "$CEL_PROC_DIR/4242/environ"
+  assert_eq "$(inbox_reader_of alpha root)" "console"
+  rm -rf "$RB" "$CEL_INBOX_DIR"
+}
+
+# An escalation is by definition the kind that cannot wait, and it was the one
+# kind that raised nothing: 72 of them landed in a mailbox with no reader.
+test_watch_raises_a_notification_for_an_escalation_too() {
+  _inbox_notify_fixture
+  _inbox_watch_then_send escalation 1
+  assert_contains "$(cat "$NB_LOG")" "notification show"
+  rm -rf "$NB" "$CEL_INBOX_DIR"
+}
+
+# --- ranking what is left ---------------------------------------------------
+# The model supplies ONE thing: a level per message. Counts, ages, ordering
+# and the cut are the code's, so an unreachable model degrades to today's
+# ordering rather than losing messages.
+_triage_fixture() {
+  _inbox_sandbox
+  source "$CEL_ROOT/lib/triage.sh"
+  TB="$(mktemp -d)"
+  export CEL_TRIAGE_CACHE="$TB/cache" CEL_TRIAGE_CALLS="$TB/calls" CEL_TRIAGE_POST="$TB/post"
+  : > "$CEL_TRIAGE_CALLS"
+  # The stub answers from the message text itself: LEVEL<n> is the level it
+  # returns and UNSURE drops the confidence under the floor, so one fixture
+  # drives every ranking assertion below.
+  cat > "$TB/post" <<'EOS'
+#!/usr/bin/env bash
+body="$(cat)"
+printf '%s\n' "$body" >> "$CEL_TRIAGE_CALLS"
+# the live shape, verified against the endpoint on 2026-09-19: a `score`
+# answer carries a fractional score, a probability per level and a confidence
+printf '%s' "$body" | jq -c '{answers: (.questions | to_entries
+  | map({key: .key, value: {
+      type: "score",
+      score: ((.value.instructions | capture("LEVEL(?<n>[0-9])") | .n | tonumber)),
+      confidence: (if (.value.instructions | test("UNSURE")) then 0.1 else 0.9 end)}})
+  | from_entries)}'
+EOS
+  chmod +x "$TB/post"
+}
+_triage_send() { # <kind> <text>
+  ( _inbox_send root "$2" --kind "$1" --from widget-orch --workspace demo ) >/dev/null 2>&1
+}
+
+test_triage_orders_the_unread_by_the_models_level() {
+  _triage_fixture
+  _triage_send escalation "LEVEL3 the reviewer pane has been dead for two days"
+  _triage_send status     "LEVEL1 ABC-9 gate is green"
+  _triage_send decision   "LEVEL2 ship the bundle or hold"
+  _triage_send status     "LEVEL0 nothing to do here"
+  local n; n="$(_inbox_lines)"
+  assert_eq "$(triage_ranked demo root | jq -r '.rank' | tr '\n' ' ')" "3 2 1 0 "
+  assert_eq "$(_inbox_lines)" "$n"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}
+
+test_a_below_threshold_answer_keeps_its_kinds_default_rank() {
+  _triage_fixture
+  _triage_send blocked "UNSURE LEVEL0 the gate cannot run"
+  local n; n="$(_inbox_lines)"
+  assert_eq "$(triage_ranked demo root | jq -r '.rank')" "3"
+  assert_eq "$(_inbox_lines)" "$n"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}
+
+# A message is scored ONCE. The console redraws every ten seconds; a score per
+# draw is a provider bill per operator per day. This holds however the answer
+# came back: a confident score AND a below-floor one are each asked about at
+# most once, because the fallback is remembered too. The below-floor case was
+# the leak - an unsure answer wrote no cache line and was re-posted every draw,
+# and those are exactly the messages the model stays unsure about.
+test_a_message_is_scored_once_however_often_it_is_drawn() {
+  _triage_fixture
+  _triage_send decision "LEVEL2 ship the bundle or hold"
+  _triage_send blocked  "UNSURE LEVEL0 the gate cannot run"
+  triage_ranked demo root >/dev/null
+  triage_ranked demo root >/dev/null
+  triage_ranked demo root >/dev/null
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
+  # the below-floor message still keeps its kind's default, not a stale re-ask
+  assert_eq "$(triage_ranked demo root | jq -r 'select(.kind=="blocked") | .rank')" "3"
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}
+
+# An unreachable OR FAILING model is today's ordering, not an error and not a
+# loss - and it is asked at most ONCE, not a doomed HTTP call per ten-second
+# redraw. A failed post records the fallback for every pending id so the next
+# draw reads the cache instead of re-posting. The old code wrote nothing on a
+# failure and re-posted forever.
+test_an_unreachable_model_falls_back_to_the_kind_defaults() {
+  _triage_fixture
+  # a model that is reached but FAILS: it logs one line per attempt, then
+  # errors. (Consume stdin and log a fixed marker - appending the raw body has
+  # no trailing newline, so repeated calls would fold into one line and hide a
+  # re-post.)
+  cat > "$TB/failing" <<'EOS'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'call\n' >> "$CEL_TRIAGE_CALLS"
+exit 1
+EOS
+  chmod +x "$TB/failing"
+  export CEL_TRIAGE_POST="$TB/failing"
+  _triage_send status  "LEVEL3 a status message"
+  _triage_send blocked "LEVEL0 a blocker"
+  local n; n="$(_inbox_lines)"
+  assert_eq "$(triage_ranked demo root | jq -r '.rank' | tr '\n' ' ')" "3 0 "
+  triage_ranked demo root >/dev/null
+  triage_ranked demo root >/dev/null
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "1"
+  assert_eq "$(_inbox_lines)" "$n"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}
+
+test_open_ranked_shows_the_top_three_and_then_how_many_more() {
+  _triage_fixture
+  _triage_send escalation "LEVEL3 the reviewer pane has been dead for two days"
+  _triage_send decision   "LEVEL2 ship the bundle or hold"
+  _triage_send status     "LEVEL1 ABC-9 gate is green"
+  _triage_send status     "LEVEL0 nothing to do here"
+  _triage_send status     "LEVEL0 nothing to do here either"
+  local n out; n="$(_inbox_lines)"
+  out="$(_inbox_open --for root --workspace demo --ranked)"
+  assert_contains "$out" "the reviewer pane has been dead"
+  assert_contains "$out" "ship the bundle or hold"
+  assert_contains "$out" "and 2 more"
+  case "$out" in *"nothing to do here either"*) echo "showed past the cut"; return 1;; esac
+  assert_eq "$(_inbox_lines)" "$n"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}

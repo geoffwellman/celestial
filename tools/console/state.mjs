@@ -15,7 +15,7 @@ import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
   memFree, orphansEdge, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
 } from './views.mjs';
-import { boardFor, prsFor, digestFor, timelineFor } from './board.mjs';
+import { boardFor, prsFor, digestFor, rankedMail, timelineFor } from './board.mjs';
 
 export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
@@ -93,15 +93,35 @@ export const inboxTail = (doc, n = 8) => {
   for (const ws of doc.workspaces || []) {
     let text;
     try { text = readFileSync(join(INBOX_DIR(), `${ws.name}.jsonl`), 'utf8'); } catch { continue; }
+    // WHAT CLOSED WHAT, read in the same pass. A tail row is frequently a
+    // historical record whose item is already resolved - the steward clears
+    // its own blockers when the condition stops being true - and a view that
+    // cannot tell offers a [resolve] that can never work.
+    const closed = {};
+    const records = [];
     for (const raw of text.split('\n')) {
       if (!raw.trim()) continue;
       try {
         const m = JSON.parse(raw);
-        if (m.kind === 'resolution' || m.kind === 'update') continue;   // rollups: the item carries the count
-        if (m.to !== 'root' && m.to !== 'all') continue;
-        if ((Date.parse(m.ts) || 0) < since) continue;
-        lines.push({ ws: ws.name, ts: m.ts || '', kind: m.kind, from: m.from, message: String(m.message || '').replace(/\n/g, ' ') });
+        if (m.kind === 'resolution') { if (m.ref) closed[m.ref] = { ts: m.ts || '', by: m.by || '' }; continue; }
+        records.push(m);
       } catch { /* likewise */ }
+    }
+    for (const m of records) {
+      if (m.kind === 'update') continue;   // rollups: the item carries the count
+      if (m.to !== 'root' && m.to !== 'all') continue;
+      if ((Date.parse(m.ts) || 0) < since) continue;
+      // IDENTITY SURVIVES THE TAIL. This row is a view of a real record and
+      // used to arrive without the id it had just parsed, so a detail view
+      // opened from the INBOX pane read `id undefined` and its [resolve] did
+      // nothing, while the same item opened from WAITING resolved fine.
+      lines.push({
+        ws: ws.name, id: m.id || '', ts: m.ts || '', kind: m.kind, from: m.from,
+        message: String(m.message || '').replace(/\n/g, ' '),
+        ...(m.ref ? { ref: m.ref } : {}),
+        ...(m.fp ? { fp: m.fp } : {}),
+        ...(m.id && closed[m.id] ? { resolved: closed[m.id] } : {}),
+      });
     }
   }
   lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
@@ -368,7 +388,7 @@ export const renderUnit = async (name, { status = '', byMemory = false } = {}) =
   const digest = digestFor(unit.ws, { items, repos });
   const out = [unitView({
     unit: { ...unit, workers_list: sortWorkers(workersOf(unit), byMemory) },
-    items, tail, board, prs, digest,
+    items, tail, board, prs, digest, mail: rankedMail(unit.ws),
   }), ''];
   out.push(statusRow(status, doc.box));
   out.push(legend('unit'));

@@ -170,6 +170,18 @@ const viewer = () => cached('viewer', 3600000, async () => {
 // into a pane, so the dashboard is where a human watches it move. Read
 // straight off the JSONL - no cursor is touched here, looking is not reading.
 const INBOX_DIR = process.env.CEL_INBOX_DIR || join(homedir(), '.local', 'share', 'cel', 'inbox');
+const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE || join(INBOX_DIR, 'triage.cache');
+const triageRanks = () => {
+  const out = new Map();
+  let text;
+  try { text = readFileSync(TRIAGE_CACHE(), 'utf8'); } catch { return out; }
+  for (const line of text.split('\n')) {
+    const [id, rank] = line.split('\t');
+    const n = Number(rank);
+    if (id && Number.isFinite(n)) out.set(id, n);
+  }
+  return out;
+};
 const inbox = () => cached('inbox', 8000, async () => {
   const f = join(INBOX_DIR, `${cfg.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
@@ -193,6 +205,14 @@ const inbox = () => cached('inbox', 8000, async () => {
     .filter((it) => (it.kind === 'decision' || it.kind === 'blocked') && !resolved.has(it.id))
     .map((it) => ({ id: it.id, ts: it.ts, to: it.to, from: it.from, kind: it.kind, message: it.message }));
   const marked = mail.map((it) => ({ ...it, unread: !cursors[it.to] || it.id > cursors[it.to] }));
+  // CEL-43: THE SAME ORDER THE CONSOLE DRAWS. A level per message comes from a
+  // decision model through lib/triage.sh, which scores each id once and writes
+  // `<id>\t<rank>` to a cache; this card reads the cache and does the ordering
+  // itself - the model supplies the level and nothing else. No cache (or no
+  // model) is today's ordering, by the kind's own default, not a loss.
+  const ranks = triageRanks();
+  const KIND_RANK = { blocked: 3, decision: 2, escalation: 2, update: 1, status: 0 };
+  for (const it of marked) it.rank = ranks.has(it.id) ? ranks.get(it.id) : (KIND_RANK[it.kind] ?? 0);
   // "Are the inboxes backed up?" should be answerable without counting rows:
   // per recipient, how many unread and how long the OLDEST has waited.
   const byWho = {};
@@ -201,7 +221,12 @@ const inbox = () => cached('inbox', 8000, async () => {
     w.total += 1;
     if (it.unread) { w.unread += 1; if (!w.oldest) w.oldest = it.ts; }
   }
-  return { items: marked.slice(-40).reverse(), byWho: Object.values(byWho).sort((a, b) => b.unread - a.unread), open };
+  // Unread first, most urgent first inside that, newest first inside a level:
+  // the top of this card is what a person should answer next, and read mail
+  // keeps its old newest-first shape underneath.
+  const shown = marked.slice(-40).reverse().sort((a, b) =>
+    (Number(b.unread) - Number(a.unread)) || (b.rank - a.rank));
+  return { items: shown, byWho: Object.values(byWho).sort((a, b) => b.unread - a.unread), open };
 });
 
 // My Linear queue, SCOPED TO THIS WORKSPACE's teams (repos' linear_team
@@ -287,7 +312,11 @@ const linear = () => cached('linear', 120000, async () => {
 // implementation in JavaScript would be a second answer to one question.
 const services = () => cached('services', 5000, async () => {
   const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', cfg.name, '--json'], 10000);
-  try { return JSON.parse(out || '[]'); } catch { return []; }
+  // ALWAYS A LIST. A `cel` that answers something else - an old build, a
+  // wrapper, an error document - used to flow straight into the card; since
+  // CEL-43 partitions these rows, a non-array reached `.filter` and took the
+  // whole /api/state read down with it, on every request, until a restart.
+  try { const doc = JSON.parse(out || '[]'); return Array.isArray(doc) ? doc : []; } catch { return []; }
 });
 
 // THE PROXY ONLY CARRIES PORTS THIS WORKSPACE KNOWS. A tailnet neighbour who
@@ -367,6 +396,47 @@ const paneNames = async () => {
 //
 // Cached a minute, like the windows it reports: they move in hours, and the
 // fleet read walks /proc once for the whole box.
+// --- CEL-43 section 4: box material belongs to ONE dashboard ---------------
+//
+// The owner, 2026-09-19: "why are there multiple cel broker and gateway
+// services?" There is exactly one of each - one broker, one gateway,
+// registered once in services.d and printed once by `cel services`. What
+// multiplied was the DISPLAY: four per-workspace dashboards run on this box,
+// each rendered the box-level rows inside its own services panel, and each
+// rendered the whole subscriptions panel, which is box-level in its entirety.
+// Flipping between tabs reads as several brokers.
+//
+// So box material renders on exactly ONE dashboard - the workspace whose
+// `dash:` block says `box: true`, defaulting to the registry's first - and
+// every other dashboard shows a line pointing at it. This is NOT a box-wide
+// dashboard, which the plane deliberately does not have (`cel fleet` and the
+// console are the box-wide views); it only stops four surfaces from repeating
+// one panel.
+const REGISTRY = () => process.env.CEL_REGISTRY || join(homedir(), '.local/share/cel/registry.yaml');
+const boxDash = () => cached('boxdash', 60000, async () => {
+  let list = [];
+  try {
+    list = JSON.parse(await run('yq', ['-c',
+      '[.workspaces // {} | to_entries[] | {name: .key, path: (.value.path // .value)}]',
+      REGISTRY()], 8000) || '[]');
+  } catch { list = []; }
+  if (!Array.isArray(list) || !list.length) return { owner: cfg.name, mine: true, url: '' };
+  let owner = null;
+  const ports = {};
+  for (const w of list) {
+    const row = String(await run('yq', ['-r', '[(.dash.box // false), (.dash.port // 7770)] | @tsv',
+      join(String(w.path || ''), 'workspace.yaml')], 8000) || '').trim();
+    const [flag, port] = row.split('\t');
+    ports[w.name] = Number(port) || 7770;
+    if (!owner && String(flag) === 'true') owner = w.name;
+  }
+  // No declaration anywhere: the registry's first workspace, so the panel has
+  // a home on a box nobody has configured rather than appearing everywhere
+  // again by default.
+  if (!owner) owner = list[0].name;
+  return { owner, mine: owner === cfg.name, url: `http://${cfg.host || '127.0.0.1'}:${ports[owner] || 7770}` };
+});
+
 const subscriptions = () => cached('subs', 60000, async () => {
   try {
     const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000) || '{}');
@@ -375,7 +445,12 @@ const subscriptions = () => cached('subs', 60000, async () => {
 });
 
 const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), services()]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, box] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), services(), boxDash()]);
+  // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
+  // with the workspace that owns it since CEL-34, and `box` is the tag for
+  // what belongs to nobody. A workspace's panel lists its own rows only.
+  const wsServices = svcs.filter((x) => (x.workspace || cfg.name) !== 'box');
+  const boxServices = box.mine ? svcs.filter((x) => (x.workspace || '') === 'box') : [];
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -420,11 +495,13 @@ const state = async () => {
   return {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
-    agents: ags, services: svcs, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
+    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
     // the same thing to whoever is reading the card - `source` says which, and
     // `cel fleet` decided both before this line ran.
-    subscriptions: subs,
+    // Subscriptions are box-level in their entirety, so they move with the
+    // box panel: four copies of one account list is the same complaint.
+    subscriptions: box.mine ? subs : [],
   };
 };
 
@@ -773,7 +850,8 @@ const PAGE = `<!doctype html><meta charset="utf-8">
       <button onclick="send()">Send</button><span id="promptmsg"></span></div></section>
     <section><h2>Services &amp; backlog</h2><div class="card"><div id="services"></div>
       <div id="backlog" style="margin-top:14px"></div></div></section>
-    <section><h2>Subscriptions</h2><div class="card"><div id="subs"></div></div></section>
+    <section><h2>Box</h2><div class="card"><div id="box"></div>
+      <div id="subs" style="margin-top:14px"></div></div></section>
   </div>
 </div>
 <div id="ctx"></div>
@@ -1305,6 +1383,7 @@ async function refresh(){
     chip(i.status||'todo',i.status==='in-progress'?'w':i.status==='done'?'ok':'')+'</td><td>'+esc(i.title)+
     (i.repo?' <span class="empty">'+esc(i.repo)+'</span>':'')+'</td></tr>').join('')+'</tbody></table>'
     :'<span class="empty">no backlog.yaml (items: [{title, repo, status}])</span>';
+  renderBox(s);
   renderSubs(s);
 }
 
@@ -1345,8 +1424,32 @@ function subCells(s){
   return rows;
 }
 // </cel35:sub-cells>
+// The Box panel: what this box runs on nobody's behalf in particular, drawn
+// on the one dashboard that owns it and replaced by a single pointer line on
+// every other. Four dashboards each drawing this is how one broker read as
+// several.
+function renderBox(s){
+  var el=$('box'); if(!el) return;
+  var b=s.box||{mine:true,owner:'',url:''};
+  if(!b.mine){
+    el.innerHTML='<span class="empty">box services and subscriptions: '+
+      (b.url?'<a href="'+esc(b.url)+'" target="_blank">'+esc(b.url)+' \u2197</a>':esc(b.owner))+'</span>';
+    return;
+  }
+  var rows=s.boxServices||[];
+  var note='<div class="empty" style="margin-bottom:8px">one broker, one gateway, one of each - the same on every dashboard, so it is drawn here only</div>';
+  el.innerHTML=note+(rows.length?'<table><tbody>'+rows.map(function(x){
+    var link=x.reach?'<a href="'+esc(x.reach)+'" target="_blank">'+esc(x.reach)+' \u2197</a>':'<span class="empty">not reachable</span>';
+    return '<tr class="agrow"><td style="width:1%">'+chip(x.state,x.state==='healthy'?'ok':x.state==='up'?'w':'b')+
+      '</td><td class="branch">'+esc(x.name)+'</td><td class="owner">:'+esc(x.port)+
+      '</td><td class="owner">'+esc(x.rss_mb>=1024?(x.rss_mb/1024).toFixed(1)+'G':(x.rss_mb||0)+'M')+
+      '</td><td>'+link+'</td></tr>';
+  }).join('')+'</tbody></table>':'<span class="empty">no box services declared - cel gateway install</span>');
+}
 function renderSubs(s){
   var el=$('subs'); if(!el) return;
+  // Box-level in their entirety, so they are drawn where the box panel is.
+  if(!(s.box||{mine:true}).mine){el.innerHTML='';return}
   var subs=s.subscriptions||[];
   if(!subs.length){el.innerHTML='<span class="empty">no subscription readings cached yet - cel quota asks the providers</span>';return}
   var html='<table><tbody>';

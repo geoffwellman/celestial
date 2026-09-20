@@ -90,6 +90,10 @@ esac
 EOF
   chmod +x "$T/bin/herdr"
   PATH="$T/bin:$PATH"
+  # No live console on this fixture box: CEL-43 reads the CEL-32 marker out of
+  # a process environment, and the real /proc would let whatever is running on
+  # the developer's box decide the answer.
+  export CEL_PROC_DIR="$T/proc"; mkdir -p "$CEL_PROC_DIR"
 }
 
 # MEMORY. The box has 24 GB and no view on this plane could say where it had
@@ -473,5 +477,38 @@ test_fleet_reports_a_live_unnamed_agent_as_unnamed() {
   # And with nothing there it is still the dash it always was.
   doc="$(cmd_fleet --json --workspace alpha)"
   assert_eq "$(printf '%s' "$doc" | jq -r '.workspaces[0].units[] | select(.name=="gadget") | .orch')" "-"
+  _fleet_teardown
+}
+
+# --- CEL-43: a mailbox with no reader --------------------------------------
+# Every view of this box reads `cel fleet --json`, so the three facts that
+# decide whether root's mail is going anywhere belong in it: how much is
+# unread, how long the oldest has waited, and WHO is alive to read it. The
+# herdr stub's roster has no alpha-root and the fixture has no console, so
+# alpha's mail is landing in a mailbox nobody reads - which is the fault.
+test_fleet_json_carries_the_mail_triple_per_workspace() {
+  _fleet_setup
+  local doc; doc="$(cmd_fleet --json)"
+  local alpha; alpha="$(printf '%s' "$doc" | jq -c '.workspaces[] | select(.name=="alpha") | .mail')"
+  assert_eq "$(printf '%s' "$alpha" | jq -r '.to_root_unread')" "1"
+  assert_eq "$(printf '%s' "$alpha" | jq -r '.reader')" ""
+  [ "$(printf '%s' "$alpha" | jq -r '.oldest_secs')" -gt 0 ] || { echo "no age on the oldest unread"; return 1; }
+  # a live root pane IS a reader, and then there is nothing to report
+  mkdir -p "$CEL_PROC_DIR/4242"
+  printf 'CEL_ROLE=console\0' > "$CEL_PROC_DIR/4242/environ"
+  assert_eq "$(cmd_fleet --json | jq -r '.workspaces[] | select(.name=="alpha") | .mail.reader')" "console"
+  _fleet_teardown
+}
+
+# The doctor line is the one a human reads. It says the count, the age and the
+# fact that nobody is reading it - and says nothing at all when someone is.
+test_fleet_mail_doctor_line_names_the_mailbox_nobody_reads() {
+  _fleet_setup
+  assert_contains "$(fleet_mail_doctor_line alpha)" "alpha: root has 1 unread"
+  assert_contains "$(fleet_mail_doctor_line alpha)" "nobody reading it"
+  assert_eq "$(fleet_mail_doctor_line beta)" ""
+  mkdir -p "$CEL_PROC_DIR/4242"
+  printf 'CEL_ROLE=console\0' > "$CEL_PROC_DIR/4242/environ"
+  assert_eq "$(fleet_mail_doctor_line alpha)" ""
   _fleet_teardown
 }
