@@ -77,20 +77,40 @@ wslife_orchestrators() { # <wsdir>
   done
 }
 
-# The worktrees under this workspace that still hold something. Read exactly
-# the way `cel-fanout release` reads them (lib/stall.sh) so the two refusals
-# cannot disagree about what "unlanded" means - a `down` that let go of work
-# `release` would have refused is the same loss by another door.
-_wslife_held_work() { # <wsdir> -> one line per worktree at risk
-  local led="$1/.cel/delegations.json" row branch wt risk
-  [ -f "$led" ] || return 0
+# The worktrees under this workspace that still hold something - and whether
+# the ledger could be read at all. Read exactly the way `cel-fanout release`
+# reads them (lib/stall.sh) so the two refusals cannot disagree about what
+# "unlanded" means - a `down` that let go of work `release` would have refused
+# is the same loss by another door.
+#
+# FAIL CLOSED WHEN IT CANNOT SEE. Every way of failing to READ the ledger once
+# produced an empty result, indistinguishable from "nothing is held", so the
+# refusal never fired over a missing, unreadable or malformed ledger - the
+# exact stranding it exists to prevent, with no warning at all. So a read that
+# cannot be trusted returns 3 with the reason on stdout; only a ledger that was
+# actually read returns 0, with one line per worktree at risk (empty when it
+# genuinely holds nothing).
+_wslife_held_work() { # <wsdir> -> lines; return 0 read ok, 3 cannot tell
+  local led="$1/.cel/delegations.json" branch wt risk rows
+  if [ ! -e "$led" ]; then
+    printf 'no delegation ledger at %s\n' "$led"; return 3
+  fi
+  if [ ! -r "$led" ]; then
+    printf 'the delegation ledger %s is not readable\n' "$led"; return 3
+  fi
+  # Parse once, and treat a parse failure as "cannot tell", never as empty: a
+  # jq that ends `|| true` swallows a malformed ledger into a silent yes.
+  if ! rows="$(jq -r '.[]? | select(((.state // "") | IN("running","finished","collected","blocked")))
+                     | [(.branch // ""), (.worktree // "")] | @tsv' "$led" 2>/dev/null)"; then
+    printf 'the delegation ledger %s is not valid JSON\n' "$led"; return 3
+  fi
   while IFS=$'\t' read -r branch wt; do
     [ -n "$wt" ] || continue
-    risk="$(stall_work_at_risk "$wt")"
+    risk="$(stall_work_at_risk "$wt" 2>/dev/null || true)"
     [ -n "$risk" ] || continue
     printf '    %s (%s) at %s\n' "${branch:-?}" "$risk" "$wt"
-  done < <(jq -r '.[]? | select(((.state // "") | IN("running","finished","collected","blocked")))
-                 | [(.branch // ""), (.worktree // "")] | @tsv' "$led" 2>/dev/null || true)
+  done <<< "$rows"
+  return 0
 }
 
 # --------------------------------------------------------------------- up
@@ -206,17 +226,32 @@ cmd_ws_down() { # <name> [--force]
   # FAIL CLOSED, exactly as `cel-fanout release` does. Closing a pane does not
   # destroy a worktree, but it does take away the agent that was about to push
   # it, and an operator who meant "tidy up" would never learn which branch they
-  # had stranded. The refusal NAMES them.
-  local held; held="$(_wslife_held_work "$wsdir")"
-  if [ -n "$held" ] && [ "$force" -eq 0 ]; then
+  # had stranded. The refusal NAMES them - and a ledger it CANNOT read is not a
+  # quiet yes: a guard that cannot see does not wave you through, it says why it
+  # cannot tell and stops.
+  local held rc=0
+  held="$(_wslife_held_work "$wsdir")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$force" -eq 0 ]; then
+      die "cel ws down: $name - cannot tell what work is at risk:
+    $held
+  Closing the panes might strand unpushed work, and you would never see which.
+  Fix the ledger, or say you mean it:
+    cel ws down $name --force
+  (nothing here removes a worktree or touches the ledger - that is cel-fanout release)"
+    fi
+    c_warn "cel ws down --force with a ledger it cannot read:
+    $held"
+  elif [ -n "$held" ] && [ "$force" -eq 0 ]; then
     die "cel ws down: $name still has work that is neither pushed nor landed:
 $held
   Closing the panes strands it. Land it, push it, or say you mean it:
     cel ws down $name --force
   (nothing here removes a worktree or touches the ledger - that is cel-fanout release)"
-  fi
-  [ -z "$held" ] || c_warn "cel ws down --force over unlanded work:
+  elif [ -n "$held" ]; then
+    c_warn "cel ws down --force over unlanded work:
 $held"
+  fi
 
   local list p alias id closed=0
   list="$(_wslife_ws_json)"

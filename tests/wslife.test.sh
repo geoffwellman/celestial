@@ -264,8 +264,67 @@ test_down_refuses_with_unlanded_work_named_and_force_proceeds() {
   _wslife_teardown
 }
 
+# THE GUARD THAT CANNOT SEE DOES NOT WAVE YOU THROUGH. Every way of failing to
+# READ the ledger once produced an empty result - indistinguishable from
+# "nothing is held" - so `down` closed the panes over a missing, unreadable or
+# malformed ledger silently, the exact stranding the refusal exists to prevent,
+# and with no --force warning because that only prints when something IS held.
+# Each unreadable state now refuses without --force and says why it cannot tell.
+test_down_refuses_when_the_ledger_cannot_be_read() {
+  _wslife_setup
+  cmd_ws_up alpha >/dev/null
+  : >"$STUB_DIR/calls.log"
+  local out
+
+  # ABSENT: setup left no delegations.json - once read as "nothing held".
+  rm -f "$T/alpha/.cel/delegations.json"
+  out="$( (cmd_ws_down alpha) 2>&1 )" && {
+    echo "down proceeded with an absent ledger"; _wslife_teardown; return 1; }
+  assert_contains "$out" "no delegation ledger"
+
+  # MALFORMED: a real path, unparseable content - the `|| true` used to eat it.
+  printf '[\n' >"$T/alpha/.cel/delegations.json"
+  out="$( (cmd_ws_down alpha) 2>&1 )" && {
+    echo "down proceeded over a malformed ledger"; _wslife_teardown; return 1; }
+  assert_contains "$out" "not valid JSON"
+
+  # UNREADABLE: present and well-formed, but no permission to read it.
+  printf '[]\n' >"$T/alpha/.cel/delegations.json"
+  chmod 000 "$T/alpha/.cel/delegations.json"
+  out="$( (cmd_ws_down alpha) 2>&1 )" && {
+    chmod 644 "$T/alpha/.cel/delegations.json"
+    echo "down proceeded over an unreadable ledger"; _wslife_teardown; return 1; }
+  assert_contains "$out" "not readable"
+  chmod 644 "$T/alpha/.cel/delegations.json"
+
+  # None of the three touched a pane: a refusal is not a partial teardown.
+  assert_eq "$(cat "$STUB_DIR/calls.log")" ""
+
+  # ...and --force still lets an operator who means it through.
+  rm -f "$T/alpha/.cel/delegations.json"
+  out="$(cmd_ws_down alpha --force)"
+  assert_contains "$out" "closed"
+  _wslife_teardown
+}
+
+# A LEDGER THAT WAS READ AND SAYS NOTHING IS A YES. The fix must not turn every
+# `down` into a refusal: a well-formed ledger with no unlanded work still
+# closes the panes without --force.
+test_down_proceeds_when_the_ledger_is_read_and_empty() {
+  _wslife_setup
+  cmd_ws_up alpha >/dev/null
+  : >"$STUB_DIR/calls.log"
+  printf '[]\n' >"$T/alpha/.cel/delegations.json"
+  local out; out="$(cmd_ws_down alpha)"
+  assert_contains "$out" "closed"
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "workspace close"
+  _wslife_teardown
+}
+
 test_reset_is_down_then_up_in_order() {
   _wslife_setup
+  # A ledger that was read and says nothing: reset must not refuse itself.
+  printf '[]\n' >"$T/alpha/.cel/delegations.json"
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
   local out; out="$(cmd_ws_reset alpha)"
