@@ -22,6 +22,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
 # shellcheck source=lib/stall.sh
 . "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
+# shellcheck source=lib/liveness.sh
+. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 # shellcheck source=lib/memory.sh
@@ -349,8 +351,9 @@ _steward_stalled_workers() { # <agents-json>
     local row
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      local id pane wt ticket branch live text quiet verdict risk sev state
+      local id pane wt ticket branch live text quiet verdict risk sev state alias
       id="$(printf '%s' "$row" | jq -r '.id')"
+      alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
       state="$(printf '%s' "$row" | jq -r '.state // ""')"
       pane="$(printf '%s' "$row" | jq -r '.pane // ""')"
       wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"
@@ -375,7 +378,33 @@ _steward_stalled_workers() { # <agents-json>
       fi
       quiet="$(stall_quiet_secs "$wt")"
       local wrote=0; [ -f "$wt/.agent/result.md" ] || [ -f "$wt/.agent/report.md" ] && wrote=1
-      verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote")"
+
+      # WHAT IS IT ACTUALLY DOING (CEL-42). Code filters, then the model
+      # judges the few that are left: a candidate is a worker the box has
+      # already noticed something odd about, and everything else is not asked
+      # about at all. The answer REPORTS - there is no branch below this that
+      # kills, releases or re-prompts anything.
+      local lv="" lact="" lconf="" ltext="" still=""
+      if liveness_enabled; then
+        CEL_LIVENESS_STILL_SECS="$(liveness_still_secs)"
+        # Its own read, its own source: `recent-unwrapped` is the pane as a
+        # person scrolling back sees it, which is what the question is about.
+        [ -n "$alias" ] && ltext="$("$_STEWARD_HERDR" agent read "$alias" \
+          --source recent-unwrapped --lines "$(liveness_lines)" 2>/dev/null || true)"
+        [ -n "$ltext" ] && still="$(liveness_output_age "$ws/$id" "$ltext")"
+        if stall_liveness_candidate "$live" "$state" "$still" "$(stall_marker "$ltext")" "$wrote"; then
+          local ans; ans="$(liveness_classify "$ltext" "$live" "${still:-0}" "$state")"
+          if [ -n "$ans" ]; then
+            lv="$(printf '%s' "$ans" | cut -f1)"
+            lact="$(printf '%s' "$ans" | cut -f2)"
+            lconf="$(printf '%s' "$ans" | cut -f3)"
+            # Remembered so `cel fleet` and the console can carry it without
+            # asking again - the views are read far more often than this runs.
+            liveness_remember "$id" "$lact" "$lconf"
+          fi
+        fi
+      fi
+      verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote" "$lv")"
       # Working again: the sweep has already computed that, so it is also the
       # moment to resolve what it raised.
       if [ -z "$verdict" ]; then
@@ -387,6 +416,9 @@ _steward_stalled_workers() { # <agents-json>
       sev="$(stall_severity "$verdict" "$risk")"
       local msg; msg="$(stall_message "$verdict" "$ticket" "$pane" "$quiet" \
         "$(stall_branch_pushed "$wt")" "$risk" "$branch")"
+      # The model's own sentence, appended rather than substituted: the four
+      # facts root used to gather by hand still lead, and the reason follows.
+      [ -n "$lv" ] && msg="$msg | $(liveness_sentence "$lv" "$lact" "$lconf" "${still:-0}")"
 
       # Loud means the work itself is at stake, so it goes to root's mailbox as
       # a BLOCKED item - the kind the inbox refuses to let anyone bury - and it

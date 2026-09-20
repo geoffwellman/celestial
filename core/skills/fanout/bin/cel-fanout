@@ -1192,6 +1192,19 @@ cmd_why() { # <id> [--workspace NAME]
     "$([ -n "$risk" ] && printf 'WORK AT RISK (%s)' "$risk" || printf 'nothing at risk')" \
     "$pushed"
 
+  # 2b. WHAT THE PANE IS DOING, when the steward's last sweep asked (CEL-42).
+  # The timer says how long; this says what, and how much longer the timer
+  # alone would have taken to notice - which is the whole reason it is here.
+  local cached lact lconf lv
+  cached="$(liveness_cached "$id")"
+  if [ -n "$cached" ]; then
+    lact="$(printf '%s' "$cached" | cut -f1)"
+    lconf="$(printf '%s' "$cached" | cut -f2)"
+    lv="$(liveness_verdict "$lact" "$lconf" "$([ "$quiet" = "-1" ] && printf 0 || printf '%s' "$quiet")" "$state")"
+    [ -n "$lv" ] && printf '%s\n' \
+      "$(liveness_sentence "$lv" "$lact" "$lconf" "$([ "$quiet" = "-1" ] && printf 0 || printf '%s' "$quiet")")"
+  fi
+
   # 3. what the pane last said
   printf 'pane, last 25 lines:\n'
   local recent=""

@@ -296,7 +296,7 @@ test_fleet_workers_list_carries_a_row_per_live_worker() {
   assert_eq "$(printf '%s' "$w" | jq -r '.pane')" "wA:p2"
   assert_eq "$(printf '%s' "$w" | jq -r '.worktree')" "$WT"
   assert_eq "$(printf '%s' "$w" | jq -r '.quiet_secs | type')" "number"
-  assert_eq "$(printf '%s' "$w" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree","rss_mb"] - keys | join(",")')" ""
+  assert_eq "$(printf '%s' "$w" | jq -r '["id","ticket","repo","branch","shape","state","live","quiet_secs","verdict","severity","ahead","pr","created","alias","pane","worktree","rss_mb","activity","activity_confidence"] - keys | join(",")')" ""
   _fleet_teardown
 }
 
@@ -432,5 +432,23 @@ test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
   local doc; doc="$(cmd_fleet --json --workspace alpha)"
   assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions | length')" 1
   assert_eq "$(printf '%s' "$doc" | jq -r '.subscriptions[0].label')" 'pi + claude-code'
+  _fleet_teardown
+}
+
+# CEL-42: what the pane is DOING, beside what herdr says it is doing. The
+# fleet never asks the model itself - a view that makes a network call per row
+# is a view people stop running - it carries the steward's last answer, which
+# is why the two fields are only present when one was remembered.
+test_fleet_workers_list_carries_the_last_liveness_answer() {
+  _fleet_setup
+  export CEL_LIVENESS_STATE="$T/liveness-state"
+  source "$CEL_ROOT/lib/liveness.sh"
+  liveness_remember one looping 0.81
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].activity')" "looping"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[0].activity_confidence')" "0.81"
+  # ...and a row nobody has classified says so by carrying nothing.
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list[1].activity')" ""
   _fleet_teardown
 }
