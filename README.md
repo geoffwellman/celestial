@@ -465,6 +465,17 @@ next turn. Escalations that truly cannot wait still prompt, deliberately.
   owns any more: inbox watchers whose console exited, test fixtures whose
   worktree is gone, bare shells on ptys no pane owns, gate runners whose suite
   was killed. The steward does it once a tick and says so in one line.
+- **`cel box space`** / **`cel gc --box`** — the box is a resource the factory
+  spends. `cel box space` measures what is large, what of it is reclaimable,
+  and which of three classes it is in: **ours** (worktrees, `~/.cache/cel`),
+  **regenerable** (docker images and build cache, toolchain caches — deleting
+  costs a re-download, never data) and **someone's** (restore dumps, dated
+  backups — reported with an age and a suggestion, and never swept by
+  anything). `cel gc --box` sweeps the first two after the worktree pass, on a
+  fourteen-day age for docker with base images exempt; `--dry-run` covers it
+  exactly as it covers the old work. The steward sweeps on a six-hour cadence
+  and `cel doctor` warns below a free-space floor, naming the largest
+  reclaimable class and the command that clears it.
 
 ## What runs in the background
 
@@ -785,7 +796,8 @@ policy block into every agent.
 | `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
 | `cel dash` | workspace dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
-| `cel gc [--reap h] [--orphans]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner |
+| `cel gc [--reap h] [--orphans] [--box]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
+| `cel box space [--json]` | what is large on this box, what is reclaimable, and what is nobody's to delete |
 | `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |

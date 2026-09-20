@@ -12,6 +12,8 @@ _CEL_GC=1
 . "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
 # shellcheck source=lib/orphans.sh
 . "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # cel gc --orphans
+# shellcheck source=lib/box.sh
+. "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # cel gc --box
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
   local def status head pr
@@ -425,16 +427,17 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   return 0
 }
 
-cmd_gc() ( # [--reap <hours>] [--orphans] [--dry-run]; subshell owns lock descriptors
-  local reap_hours="" dry=0 orphans=0
+cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
+  local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --reap)
         [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "cel gc: --reap requires a positive whole number of hours"
         reap_hours="$2"; shift 2 ;;
       --orphans) orphans=1; shift ;;
+      --box) box=1; shift ;;
       --dry-run) dry=1; shift ;;
-      *) die "cel gc: unknown argument '$1' (want --reap <hours>, --orphans, --dry-run)" ;;
+      *) die "cel gc: unknown argument '$1' (want --reap <hours>, --orphans, --box, --dry-run)" ;;
     esac
   done
 
@@ -541,8 +544,13 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--dry-run]; subshell owns lock descri
     removed=$((removed+1))
   done < <(printf '%s' "$candidates" | jq -c '.[]')
   [ -z "$reap_hours" ] || _gc_reap "$reap_hours" "$dry" "$agents" "$names"
-  printf 'gc: %d worktrees removed, %d agents reaped, %d kept%s%s\n' \
-    "$removed" "$reaped" "$kept" "$(_gc_kept_line summary)" \
+  # AFTER the worktree pass, deliberately: a freed worktree may have been the
+  # last reference to a cache entry, and sweeping first would leave that entry
+  # behind for another fortnight. `cel gc` is unchanged without --box.
+  local box_line=""
+  if [ "$box" -eq 1 ]; then box_sweep "$dry"; box_line="$(box_summary_fragment)"; fi
+  printf 'gc: %d worktrees removed, %d agents reaped, %d kept%s%s%s\n' \
+    "$removed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$box_line" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
   # A BLIND GC MUST NOT LOOK LIKE AN IDLE ONE. Naming the directories is the
   # difference between "nothing to do" and "I cannot see anything".
