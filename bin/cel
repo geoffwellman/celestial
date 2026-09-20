@@ -128,7 +128,13 @@ cel - the celestial plane
                                 --orphans: reap processes with no owner at all
                                 (watchers whose console exited, fixtures whose
                                 worktree is gone, shells on dead ptys, killed
-                                gate runners); --dry-run to see them first
+                                gate runners); --box: also sweep docker and
+                                the toolchain caches (never anything
+                                irreplaceable); --dry-run to see them first
+  cel box space [--json]        what is large on this box, what of it is
+                                reclaimable, and which of it the janitor may
+                                delete - ours, regenerable, or someone's
+                                (someone's is reported, never swept)
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS
@@ -150,6 +156,7 @@ case "${1:-help}" in
   gateway)  shift; . "$CEL_ROOT/lib/gateway.sh";  cmd_gateway "$@";;
   learn)    shift; . "$CEL_ROOT/lib/learn.sh";    cmd_learn "$@";;
   gc)       shift; . "$CEL_ROOT/lib/gc.sh";      cmd_gc "$@";;
+  box)      shift; . "$CEL_ROOT/lib/box.sh";     cmd_box "$@";;
   inbox)    shift; . "$CEL_ROOT/lib/inbox.sh";   cmd_inbox "$@";;
   services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
