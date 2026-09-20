@@ -14,6 +14,8 @@ _CEL_GC=1
 . "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # cel gc --orphans
 # shellcheck source=lib/box.sh
 . "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # cel gc --box
+# shellcheck source=lib/run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry cel run writes
 
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
   local def status head pr
@@ -427,6 +429,76 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   return 0
 }
 
+# THE STATE OF ONE PULL REQUEST, asked of GitHub directly rather than
+# inferred from a branch: a reviewer has no worktree and no branch of its
+# own, only the PR number it was started for. Anything that is not one of the
+# three states GitHub actually returns is UNKNOWN, and unknown is never
+# closed - this file's whole history is bugs where "could not tell" was
+# treated as "nothing there".
+_gc_reviewer_pr_state() { # <repo> <pr> -> MERGED|CLOSED|OPEN|UNKNOWN
+  local out state
+  out="$(gh pr view "$2" --repo "$1" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+  state="$(printf '%s' "$out" | jq -r 'if (.state | type) == "string" then .state else "UNKNOWN" end' 2>/dev/null)" \
+    || state=UNKNOWN
+  case "$state" in MERGED|CLOSED|OPEN) printf '%s' "$state";; *) printf UNKNOWN;; esac
+}
+
+# A reviewer exists to review one pull request, and when that pull request
+# closes the reviewer is done. Not idle-for-a-while, not probably-finished -
+# done, by a fact about the world. The vetoes are the worktree pass's own:
+# a reviewer mid-sentence on a PR that merged a second ago keeps its pane,
+# and a PR whose state cannot be read keeps its reviewer and says so.
+_gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
+  local dry="$1" agents="$2" rows keep repo pr pane state status
+  reviewers_closed=0
+  rows="$(reviewers_rows)"
+  printf '%s' "$rows" | jq -e 'length > 0' >/dev/null 2>&1 || return 0
+  keep='[]'
+  while IFS=$'\t' read -r repo pr pane; do
+    [ -n "$repo" ] && [ -n "$pane" ] || continue
+    # A pane that has gone by other means leaves a row behind. Dropping it is
+    # bookkeeping, not a closure: nothing is signalled and nothing fails.
+    status="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
+      '[.result.agents[]? | select(.pane_id == $p)][0].agent_status // "gone"' 2>/dev/null)" || status=unknown
+    if [ "$status" = gone ]; then
+      [ "$dry" -eq 0 ] || keep="$(_gc_reviewers_keep "$keep" "$rows" "$repo" "$pr")"
+      continue
+    fi
+    state="$(_gc_reviewer_pr_state "$repo" "$pr")"
+    keep="$(_gc_reviewers_keep "$keep" "$rows" "$repo" "$pr")"
+    case "$state" in
+      OPEN) continue ;;
+      UNKNOWN) c_warn "UNKNOWN: cannot read the state of $repo#$pr - its reviewer is kept"; continue ;;
+    esac
+    case "$status" in
+      idle|done|none) ;;
+      *) c_warn "reviewer for $repo#$pr is $status on a $state PR - kept until it is idle"; continue ;;
+    esac
+    if [ "$dry" -eq 1 ]; then
+      c_ok "would close the reviewer for $repo#$pr (PR $state, pane $pane)"
+      continue
+    fi
+    if ! lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+      c_warn "could not close pane $pane for $repo#$pr - kept"
+      continue
+    fi
+    keep="$(printf '%s' "$keep" | jq -c --arg r "$repo" --arg p "$pr" \
+      'map(select(.repo != $r or ((.pr | tostring) != $p)))')"
+    c_ok "closed the reviewer for $repo#$pr (PR $state, pane $pane)"
+    reviewers_closed=$((reviewers_closed + 1))
+  done < <(printf '%s' "$rows" | jq -r '.[] | [.repo, (.pr | tostring), .pane] | @tsv')
+  # The file is rewritten once, from the rows that survived. A dry run never
+  # reaches here having dropped anything: it keeps every row it looked at.
+  [ "$dry" -eq 1 ] || reviewers_write "$keep" \
+    || c_warn "could not rewrite the reviewer registry - stale rows remain"
+  return 0
+}
+
+_gc_reviewers_keep() { # <keep> <rows> <repo> <pr> -> keep with that row in it
+  printf '%s' "$2" | jq -c --argjson keep "$1" --arg r "$3" --arg p "$4" \
+    '$keep + [.[] | select(.repo == $r and ((.pr | tostring) == $p))]'
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -483,7 +555,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     && printf '%s' "$agents" | jq -e '.result.agents | type == "array" and all(.[]; (.cwd | type == "string") and (.pane_id | type == "string") and (.agent_status | type == "string"))' >/dev/null \
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
-  local removed=0 reaped=0 kept=0 managed=$'\n' candidates='[]'
+  local removed=0 reaped=0 kept=0 reviewers_closed=0 managed=$'\n' candidates='[]'
   _gc_keep_reset
   # Complete discovery BEFORE removing anything. A failed pane read must not
   # make its worktree look orphaned to a later pass.
@@ -544,13 +616,18 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     removed=$((removed+1))
   done < <(printf '%s' "$candidates" | jq -c '.[]')
   [ -z "$reap_hours" ] || _gc_reap "$reap_hours" "$dry" "$agents" "$names"
+  # THE REVIEWERS, which no pass here ever looked at: a reviewer runs in the
+  # orchestrator's own checkout, so the worktree filter above skips it, and
+  # the orphan reaper does not want it either - it has a live owner. Seven of
+  # them, six for merged PRs, were most of a `box memory low` warning.
+  _gc_reviewers "$dry" "$agents"
   # AFTER the worktree pass, deliberately: a freed worktree may have been the
   # last reference to a cache entry, and sweeping first would leave that entry
   # behind for another fortnight. `cel gc` is unchanged without --box.
   local box_line=""
   if [ "$box" -eq 1 ]; then box_sweep "$dry"; box_line="$(box_summary_fragment)"; fi
-  printf 'gc: %d worktrees removed, %d agents reaped, %d kept%s%s%s\n' \
-    "$removed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$box_line" \
+  printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s\n' \
+    "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$box_line" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
   # A BLIND GC MUST NOT LOOK LIKE AN IDLE ONE. Naming the directories is the
   # difference between "nothing to do" and "I cannot see anything".

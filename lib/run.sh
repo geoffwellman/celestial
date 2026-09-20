@@ -211,6 +211,67 @@ _run_reviewer_pane() { # <cwd> -> pane id
   printf '%s' "$pane"
 }
 
+# THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
+# worktree, a `release` verb and a gc pass, because something recorded that it
+# exists. A reviewer was started by `cel run reviewer --repo r --pr n` and
+# recorded NOWHERE, so nothing could know it was finished - measured on this
+# box on 2026-09-21, seven idle `<repo>-pr-N-review` panes, six of them for
+# PRs that had already merged, holding ~3.0 GB of RSS between them. `cel gc`
+# could not even see them: it considers only panes under ~/.herdr/worktrees,
+# and a reviewer runs in the orchestrator's own checkout.
+#
+# Deliberately NOT the delegation ledger: a reviewer is not a delegation and
+# must not appear in `cel-fanout status`. It is box-level state, so it lives
+# where the rest of the box's state does, beside gc-kept.json.
+_reviewers_state() { printf '%s' "${CEL_REVIEWERS_STATE:-$HOME/.local/state/cel/reviewers.json}"; }
+
+# A missing or corrupt file is an EMPTY registry, never an error: a stale file
+# must break neither the launcher nor the sweep that reads it.
+reviewers_rows() { # -> JSON array
+  local f rows
+  f="$(_reviewers_state)"
+  [ -r "$f" ] || { printf '[]'; return 0; }
+  rows="$(jq -ce 'if type == "array" and all(.[];
+      (.repo | type == "string") and (.pane | type == "string") and (.pr != null))
+    then . else [] end' "$f" 2>/dev/null)" || rows='[]'
+  printf '%s' "$rows"
+}
+
+reviewers_write() { # <json-array>
+  local f tmp
+  f="$(_reviewers_state)"
+  mkdir -p "$(dirname "$f")" || return 1
+  tmp="$(mktemp "$f.tmp.XXXXXX")" || return 1
+  printf '%s\n' "$1" > "$tmp" && mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; return 1; }
+}
+
+reviewers_find() { # <repo> <pr> -> the row, or fail
+  local row
+  row="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" \
+    '[.[] | select(.repo == $r and ((.pr | tostring) == $p))][0] // empty')" || return 1
+  [ -n "$row" ] || return 1
+  printf '%s' "$row"
+}
+
+# Replaces any row for the same repo+PR rather than appending: one pull
+# request has one reviewer, and two rows for it are two panes nobody can tell
+# apart.
+reviewers_record() { # <repo> <pr> <pane> <agent>
+  local rows
+  rows="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" --arg pane "$3" --arg a "$4" \
+    --argjson t "$(date +%s)" \
+    'map(select(.repo != $r or ((.pr | tostring) != $p)))
+     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]')" || return 1
+  reviewers_write "$rows"
+}
+
+reviewers_drop() { # <repo> <pr>
+  local rows
+  rows="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" \
+    'map(select(.repo != $r or ((.pr | tostring) != $p)))')" || return 1
+  reviewers_write "$rows"
+}
+
 # herdr agent names must match [a-z][a-z0-9_-]{0,31} - no slash, no uppercase.
 # The readable `repo/role` form survives as the herdr workspace label; this is
 # only what the agent answers to.
@@ -468,6 +529,16 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       alias_name="$repo/pr-$pr-review"
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
+      # ONE PULL REQUEST, ONE REVIEWER. Asking for a reviewer that is already
+      # standing gets that one back; before this, a second `cel run reviewer
+      # --pr 71` split another pane over the same PR and left no way to tell
+      # the two apart. Checked before anything is created, so a dry run
+      # previews the reuse honestly and no row is written twice.
+      local existing
+      if existing="$(reviewers_find "$repo" "$pr")"; then
+        c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $(printf '%s' "$existing" | jq -r .pane) - reusing it"
+        return 0
+      fi
       ;;
   esac
 
@@ -601,6 +672,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
     _run_mark_launch "$pane_id" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+    # Recorded AFTER the launch: a row for a pane that never started is a row
+    # `cel gc` would carry forever. A failed record is a warning, not a
+    # failure - the reviewer is alive and reviewing either way.
+    reviewers_record "$repo" "$pr" "$pane_id" "$agent_name" \
+      || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it"
     return 0
   fi
 
