@@ -84,18 +84,27 @@ export const fleet = async () => {
 
 // `cel inbox open` is per workspace by design (lib/inbox.sh), so the console
 // asks each mailbox in turn rather than inventing a flag in a library it does
-// not own. Oldest first: a decision that has been waiting two days belongs
-// above one that arrived a minute ago.
+// not own. IN TURN, NOT ONE AFTER ANOTHER: four workspaces at 0.05s each were
+// a fifth of a second of a render spent waiting on calls that have nothing to
+// say to one another, and this file already batches exactly this way where it
+// fetches a board and its PRs together. A workspace whose call fails is
+// skipped and the rest stand - which is what the `continue` did, and what a
+// bare Promise.all would have thrown away.
+// Oldest first: a decision that has been waiting two days belongs above one
+// that arrived a minute ago.
 export const openItems = async (doc) => {
+  const wss = doc.workspaces || [];
+  const results = await Promise.all(wss.map((ws) =>
+    run(CEL_BIN, ['inbox', 'open', '--for', 'root', '--workspace', ws.name, '--json'])
+      .catch(() => ({ ok: false, out: '', err: '' }))));
   const items = [];
-  for (const ws of doc.workspaces || []) {
-    const r = await run(CEL_BIN, ['inbox', 'open', '--for', 'root', '--workspace', ws.name, '--json']);
-    if (!r.ok) continue;
+  results.forEach((r, i) => {
+    if (!r.ok) return;
     for (const line of r.out.split('\n')) {
       if (!line.trim()) continue;
-      try { items.push({ ws: ws.name, ...JSON.parse(line) }); } catch { /* a half-written line is not an item */ }
+      try { items.push({ ws: wss[i].name, ...JSON.parse(line) }); } catch { /* a half-written line is not an item */ }
     }
-  }
+  });
   return items.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
 };
 
@@ -325,9 +334,15 @@ export const services = async (ws) => {
   try { const v = JSON.parse(r.out); return Array.isArray(v) ? v : []; } catch { return []; }
 };
 
+// One probe per workspace, all four at once and none of them able to take the
+// others down: `services` already answers [] for a failure, and the catch is
+// belt and braces for a call that rejects rather than resolving. The keys come
+// back in the document's order however the answers arrive.
 export const servicesByWorkspace = async (doc) => {
+  const wss = doc.workspaces || [];
+  const rows = await Promise.all(wss.map((ws) => services(ws.name).catch(() => [])));
   const by = {};
-  for (const ws of doc.workspaces || []) by[ws.name] = await services(ws.name);
+  wss.forEach((ws, i) => { by[ws.name] = rows[i]; });
   return by;
 };
 

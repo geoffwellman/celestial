@@ -580,16 +580,22 @@ _fleet_add_rows() { # <n>
 }
 
 # The ceiling, and the numbers behind it. AFTER CEL-48 this fixture costs
-# 20 jq and 5 git for three rows, and 38 jq and 5 git for twelve - one jq per
-# row to build it, one batched git query per worktree that exists, and a fixed
-# remainder for the two workspace documents. BEFORE it was 62 jq and 12 git
-# for three rows on the same fixture, with the git growing four to twelve per
-# row. The ceiling below has roughly a third of headroom over the measured
-# numbers: it is there to catch a per-row fan-out coming back, not to pin the
-# exact count of a refactor.
+# 39 jq and 4 git for three rows, and 48 jq and 4 git for twelve: ONE jq per
+# row to build it, one per repo to read the ledger, and a fixed remainder of
+# ~26 that belongs to lib/ws.sh, lib/inbox.sh and lib/services.sh reading
+# their own documents - not to this file. The git count is four per WORKTREE
+# (one for-each-ref, one status, at most two rev-list) and this fixture has
+# exactly one real worktree, which is why the git ceiling below is nowhere
+# near four per row: twelve per row is what it was before, and it must fail
+# here.
+#
+# BEFORE: 57 jq and 12 git for the same three rows, the git growing four to
+# twelve per row and the jq five. The headroom is about a fifth over the
+# measured numbers - enough that a refactor's odd extra process is not a
+# failure, tight enough that a per-row fan-out coming back is.
 _fleet_assert_budget() { # <rows> <jq-count> <git-count>
   local rows="$1" jqn="$2" gitn="$3"
-  local jqmax=$(( 18 + 3 * rows )) gitmax=$(( 4 + 2 * rows ))
+  local jqmax=$(( 40 + 3 * rows / 2 )) gitmax=$(( 6 + rows ))
   if [ "$jqn" -gt "$jqmax" ]; then
     printf 'jq spawns %s exceed the ceiling %s for %s rows\n' "$jqn" "$jqmax" "$rows" >&2
     return 1
