@@ -606,7 +606,7 @@ _fleet_add_rows() { # <n>
 
 # THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
 #
-# Measured on this fixture against main 931954c (CEL-43), with the box walk
+# Measured on this fixture against main b9f07fb (CEL-49), with the box walk
 # stubbed and PATH REPLACED by the shim so nothing can run uncounted:
 #
 #                3 rows                        12 rows
@@ -626,8 +626,9 @@ _fleet_add_rows() { # <n>
 # passed a change that traded a per-row jq for a per-row awk, which is the
 # same fan-out wearing different clothes; a budget that watches only the tools
 # its author was thinking about rots the moment somebody reaches for a third.
-# The ceiling below is the TOTAL, and main fails it at both sizes (179 > 158,
-# 224 > 176), which is the only way to know it is measuring anything. The
+# The ceiling below is the TOTAL, and main fails it at both sizes (174-179 >
+# 158, 219-224 > 176), which is the only way to know it is measuring
+# anything. The
 # branch measures 147 and 156 on consecutive runs, so the headroom is real
 # slack and not a repeat of the measurement. One of those jq is the roster
 # being validated once per render rather than being allowed to fail inside
