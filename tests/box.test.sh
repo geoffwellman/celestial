@@ -282,3 +282,20 @@ test_box_space_reports_zero_reviewers_cleanly() {
   assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" "0 reviewer panes"
   rm -rf "$T"
 }
+
+# The report counts the panes that are THERE, not the ones that were written
+# down: the seven that produced this ticket predated the registry entirely.
+test_box_space_counts_an_unrecorded_reviewer_pane_too() {
+  _box_fixture
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  herdr() {
+    case "$1 $2" in
+      "agent list") jq -n '{result:{agents:[{name:"widget-pr-71-review",pane_id:"w1:p3",cwd:"/w/repos/widget",agent_status:"idle"}]}}';;
+      *) jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}';;
+    esac
+  }
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 1
+  unset -f herdr
+  rm -rf "$T"
+}

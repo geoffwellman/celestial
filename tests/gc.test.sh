@@ -644,3 +644,56 @@ test_gc_summary_counts_reviewers_closed_even_when_there_were_none() {
   assert_contains "$out" "0 reviewers closed"
   rm -rf "$T"
 }
+
+# THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. The first cut of
+# this pass read only the rows `cel run reviewer` writes, so on the box that
+# produced this ticket it reported "0 reviewers closed" with seven idle
+# reviewer panes sitting in front of it: every one of them predated the
+# registry. A reviewer pane is recognisable by the name cel run gives it
+# (<repo>-pr-<n>-review), and an unrecorded one gets exactly the same rules.
+test_gc_closes_an_unrecorded_reviewer_pane_found_by_its_name() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# An unrecorded reviewer that is still needed is ADOPTED rather than left
+# unknown: the index catches up, so the next `cel run reviewer` for that PR
+# reuses the pane instead of splitting another.
+test_gc_adopts_an_unrecorded_reviewer_whose_pr_is_still_open() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  GC_PR_STATE=OPEN
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  rm -rf "$T"
+}
+
+# The vetoes are not weaker for a pane nobody recorded.
+test_gc_never_closes_a_working_or_unreadable_unrecorded_reviewer() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  GC_REVIEW_STATUS=working
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  GC_REVIEW_STATUS=idle GC_PR_STATE=UNKNOWN
+  reviewers_write '[]'
+  local out; out="$(_gc_reviewers 0 "$(_gc_reviewer_agents)" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "widget#71"
+  rm -rf "$T"
+}
+
+# A recorded reviewer and the same pane on the roster are ONE reviewer: the
+# pane must not be closed twice or counted twice.
+test_gc_counts_a_recorded_and_discovered_pane_once() {
+  _gc_reviewer_fixture
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$reviewers_closed" 1
+  rm -rf "$T"
+}
