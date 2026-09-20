@@ -529,3 +529,197 @@ test_mail_to_an_alias_with_no_live_pane_is_reported() {
   # lib/stall.sh already paid for.
   assert_eq "$(fleet_alias_undeliverable '' widget-ABC-48)" ""
 }
+
+# --- CEL-48: the cost of the read is itself a fact the suite holds ----------
+#
+# Measured on 2026-09-20, before any of this: `cel console --render-once`
+# took 7.1-7.4s wall with 62% of it SYSTEM time, and `cel fleet --json` was
+# ~70% of that - 278 jq and 112 git processes on one render, 154 of the jq and
+# all of the git inside this file. Nothing on the path talks to a network; the
+# whole cost was fork and exec for crumbs of work. A performance fix with no
+# test rots in a month, so the budget is asserted: jq and git are shimmed onto
+# a prepended PATH, they log their argv, and the counts must stay under a
+# ceiling that GROWS WITH THE ROWS rather than multiplying by them.
+
+# The shim: a counter in front of the real binary, so what is measured is the
+# same read the other tests in this file prove correct.
+# Not a subshell: it exports CEL_SPAWN_LOG, and a `$(...)` around this call
+# would leave the shims writing to an empty path and counting nothing - which
+# reads exactly like a budget that is being met.
+_fleet_spawn_shim() { # -> $T/shim, to prepend to PATH; argv lands in CEL_SPAWN_LOG
+  local s="$T/shim" b real
+  mkdir -p "$s"
+  export CEL_SPAWN_LOG="$T/spawns.log"
+  : >"$CEL_SPAWN_LOG"
+  for b in jq git; do
+    real="$(command -v "$b")"
+    cat >"$s/$b" <<SHIM
+#!/usr/bin/env bash
+printf '%s %s\n' "$b" "\$*" >>"\$CEL_SPAWN_LOG"
+exec "$real" "\$@"
+SHIM
+    chmod +x "$s/$b"
+  done
+}
+
+_fleet_spawns() { # <binary> -> how many times it was started
+  grep -c "^$1 " "$CEL_SPAWN_LOG" || true
+}
+
+# n more RUNNING rows in widget, each with its own pane and no worktree: the
+# cheapest row there is, which is the right thing to scale with - it isolates
+# the per-row process cost from the work any one row implies.
+_fleet_add_rows() { # <n>
+  local n="$1" led="$T/alpha/.cel/delegations.json" i add="[]"
+  for ((i = 0; i < n; i++)); do
+    add="$(jq -c --arg i "$i" '. + [{"id": ("bulk" + $i), "repo": "widget",
+            "branch": ("widget-bulk-" + $i), "pane": ("wA:b" + $i),
+            "worktree": "", "state": "running", "ticket": ""}]' <<<"$add")"
+  done
+  jq -c --argjson add "$add" '. + $add' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+}
+
+# The ceiling, and the numbers behind it. AFTER CEL-48 this fixture costs
+# 20 jq and 5 git for three rows, and 38 jq and 5 git for twelve - one jq per
+# row to build it, one batched git query per worktree that exists, and a fixed
+# remainder for the two workspace documents. BEFORE it was 62 jq and 12 git
+# for three rows on the same fixture, with the git growing four to twelve per
+# row. The ceiling below has roughly a third of headroom over the measured
+# numbers: it is there to catch a per-row fan-out coming back, not to pin the
+# exact count of a refactor.
+_fleet_assert_budget() { # <rows> <jq-count> <git-count>
+  local rows="$1" jqn="$2" gitn="$3"
+  local jqmax=$(( 18 + 3 * rows )) gitmax=$(( 4 + 2 * rows ))
+  if [ "$jqn" -gt "$jqmax" ]; then
+    printf 'jq spawns %s exceed the ceiling %s for %s rows\n' "$jqn" "$jqmax" "$rows" >&2
+    return 1
+  fi
+  if [ "$gitn" -gt "$gitmax" ]; then
+    printf 'git spawns %s exceed the ceiling %s for %s rows\n' "$gitn" "$gitmax" "$rows" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_fleet_stays_under_its_spawn_budget() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  local rc=0
+  _fleet_spawn_shim
+  PATH="$T/shim:$PATH" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 3 "$(_fleet_spawns jq)" "$(_fleet_spawns git)" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# ...and the shape of the growth, which is the whole point: four times the
+# rows must not be four times the processes plus a constant per row.
+test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  _fleet_add_rows 9
+  local rc=0
+  _fleet_spawn_shim
+  PATH="$T/shim:$PATH" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 12 "$(_fleet_spawns jq)" "$(_fleet_spawns git)" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# THE DOCUMENT DID NOT MOVE. CEL-48 changed how every row is computed - one
+# jq over the ledger, one batched git per worktree - and the one thing it was
+# not allowed to change is the answer. This is `cel fleet --json` captured on
+# this fixture before the rewrite, compact and in order, so a field that
+# silently reorders or loses its type fails here. The box, subscriptions and
+# orphan fields are the live machine's and are not part of the capture; the
+# worktree path and the age of the newest file are normalised for the same
+# reason.
+_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
+
+_fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
+  jq -c --arg t "$T" --arg wt "$WT" '
+    .workspaces
+    | walk(if type == "string"
+           then (sub("\\Q" + $wt + "\\E"; "WT") | sub("\\Q" + $t + "\\E"; "T"))
+           else . end)
+    | walk(if type == "object" and has("quiet_secs")
+           then .quiet_secs = (if .quiet_secs >= 0 then 0 else -1 end)
+           else . end)'
+}
+
+test_fleet_json_is_identical_to_the_document_captured_before_the_rewrite() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  printf 'work\n' >"$WT/scratch.txt"
+  local got rc=0
+  got="$(cmd_fleet --json | _fleet_normalise)"
+  assert_eq "$got" "$_FLEET_GOLDEN_WORKSPACES" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# A REPO IN A STATE NOBODY PLANNED FOR. The per-row git calls were forgiving -
+# every one of them ended in `|| true` or a `?` - and a batched query that
+# asks one question for four repos is exactly the kind of change that turns
+# "could not ask" into an error. Detached HEAD, a branch with no remote twin,
+# a checkout with no origin at all and a dirty tree each produce the row they
+# produced before, `?` and all.
+_fleet_broken_worktrees() {
+  local d
+  for d in detached noupstream noorigin dirty; do
+    mkdir -p "$T/$d"
+    git -C "$T/$d" init -q -b main
+    git -C "$T/$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+    case "$d" in
+      noorigin) ;;
+      *) git -C "$T/$d" update-ref refs/remotes/origin/main HEAD
+         git -C "$T/$d" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main ;;
+    esac
+  done
+  git -C "$T/detached" -c user.email=t@t -c user.name=t commit -q --allow-empty -m extra
+  git -C "$T/detached" checkout -q --detach HEAD
+  git -C "$T/noupstream" checkout -q -b feature
+  git -C "$T/noupstream" -c user.email=t@t -c user.name=t commit -q --allow-empty -m w1
+  git -C "$T/noorigin" checkout -q -b feature
+  git -C "$T/dirty" checkout -q -b feature
+  git -C "$T/dirty" update-ref refs/remotes/origin/feature HEAD
+  printf 'x\n' >"$T/dirty/a.txt"
+  mkdir -p "$T/dirty/.agent"
+  printf 'y\n' >"$T/dirty/.agent/result.md"
+  local led="$T/beta/.cel/delegations.json" d2
+  printf '[]' >"$led"
+  for d2 in detached noupstream noorigin dirty; do
+    jq -c --arg d "$d2" --arg wt "$T/$d2"       '. + [{"id": $d, "repo": "gadget", "branch": "feature", "pane": "", "worktree": $wt,
+             "state": "running", "ticket": ""}]' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+  done
+}
+
+test_fleet_rows_survive_a_repo_in_a_broken_state() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_broken_worktrees
+  local u rc=0
+  u="$(cmd_fleet --json --workspace beta | jq -c '.workspaces[0].units[0]')"
+  # a detached HEAD has no branch to count from, and says so rather than 0
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="detached") | .ahead' <<<"$u")" "?" || rc=1
+  # a branch the remote has never seen counts from origin/HEAD: one commit,
+  # and one commit of work that would be lost
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="noupstream") | .ahead' <<<"$u")" "1" || rc=1
+  # no origin at all is unknown, not zero
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="noorigin") | .ahead' <<<"$u")" "?" || rc=1
+  # dirty tree, pushed branch: nothing ahead, but work at risk - and
+  # `.agent/` is the worker's report, not work
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="dirty") | .ahead' <<<"$u")" "0" || rc=1
+  # noupstream (1 unpushed) and dirty (1 dirty file) are the two at risk
+  assert_eq "$(jq -r '.unlanded' <<<"$u")" "2" || rc=1
+  assert_eq "$(jq -r '.workers_list | length' <<<"$u")" "4" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
