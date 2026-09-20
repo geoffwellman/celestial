@@ -603,26 +603,33 @@ _fleet_add_rows() { # <n>
 
 # THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
 #
-# Measured on this fixture, with the box walk stubbed and PATH replaced by the
-# shim so nothing can run uncounted:
+# Measured on this fixture against main 931954c (CEL-43), with the box walk
+# stubbed and PATH REPLACED by the shim so nothing can run uncounted:
 #
-#            3 rows                 12 rows
-#   before   148 total (54 jq, 12 git)   193 total (99 jq, 12 git)
-#   after    120 total (36 jq,  4 git)   129 total (45 jq,  4 git)
+#                3 rows                        12 rows
+#   before   174-179 total (64 jq, 12 git)   219-224 total (109 jq, 12 git)
+#   after        146 total (46 jq,  4 git)       155 total ( 55 jq,  4 git)
 #
 # Five processes per extra row became one. The remainder is fixed cost that
-# belongs to other libraries reading their own documents - 16 `cksum` and 17
-# `stat` from lib/yaml.sh's cache key, 3 `yq`, and the jq those accessors run.
+# belongs to other libraries reading their own documents - `cksum` and `stat`
+# per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
+# accessors run - and it MOVES: CEL-43's mail triple added 26 to both sides
+# between one measurement and the next, which is why this number is taken
+# against the main the branch actually sits on and re-taken after every
+# rebase. A ceiling measured against a different main is how a branch gets
+# called three times slower than a checkout that predates two other tickets.
 #
 # The first version of this budget counted jq and git ALONE. It would have
 # passed a change that traded a per-row jq for a per-row awk, which is the
 # same fan-out wearing different clothes; a budget that watches only the tools
 # its author was thinking about rots the moment somebody reaches for a third.
-# The ceiling below is the TOTAL, and main fails it at both sizes (148 > 136,
-# 193 > 154), which is the only way to know it is measuring anything.
+# The ceiling below is the TOTAL, and main fails it at both sizes (179 > 158,
+# 224 > 176), which is the only way to know it is measuring anything. The
+# branch measures 146 and 155 on three consecutive runs, so the headroom is
+# real slack and not a repeat of the measurement.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
-  local max=$(( 130 + 2 * rows ))
+  local max=$(( 152 + 2 * rows ))
   if [ "$total" -gt "$max" ]; then
     printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
       "$total" "$max" "$rows" >&2
@@ -669,9 +676,11 @@ test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
 # this fixture before the rewrite, compact and in order, so a field that
 # silently reorders or loses its type fails here. The box, subscriptions and
 # orphan fields are the live machine's and are not part of the capture; the
-# worktree path and the age of the newest file are normalised for the same
-# reason.
-_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
+# worktree path, the age of the newest file and the age of the oldest unread
+# are normalised for the same reason. RE-CAPTURED after each rebase, from the
+# main the branch sits on: it landed first against 9f7cf2d and is taken here
+# against 931954c, which added the `mail` triple to every workspace.
+_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
 
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
   jq -c --arg t "$T" --arg wt "$WT" '
@@ -681,6 +690,11 @@ _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
            else . end)
     | walk(if type == "object" and has("quiet_secs")
            then .quiet_secs = (if .quiet_secs >= 0 then 0 else -1 end)
+           else . end)
+    # The oldest unread (CEL-43) is measured from a fixed timestamp in the
+    # fixture against the clock, so it grows by a second every second.
+    | walk(if type == "object" and has("oldest_secs")
+           then .oldest_secs = (if .oldest_secs > 0 then 1 else 0 end)
            else . end)'
 }
 
