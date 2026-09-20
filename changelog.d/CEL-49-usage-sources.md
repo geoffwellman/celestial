@@ -13,3 +13,5 @@
 - The console QUOTA page, the console status edge and the dashboard's
   subscriptions card draw each window as a bar sized from the `used_pct` that
   already existed, degrading to plain text on a terminal too narrow for one.
+- omp on PATH that answers nothing usable now says so once on stderr and falls
+  back; a box with no omp still falls back in silence, as before.

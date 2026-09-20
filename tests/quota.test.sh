@@ -597,3 +597,63 @@ test_the_omp_mapping_yields_a_row_per_report() {
   . "$CEL_ROOT/lib/quota.sh"
   assert_eq "$(_sub_omp_rows | grep -c .)" 6
 }
+
+# --- CEL-49 review: the two silences are not the same news ------------------
+#
+# A box with no omp falls back quietly, as the ticket requires. omp that IS
+# there and answers nothing usable falls back to the same stale reads - and
+# read the same way it is invisible, which is exactly how the `.accounts`
+# mapping shipped green. One line on stderr tells them apart.
+test_omp_present_but_useless_says_so_on_stderr() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/bin"
+  # omp is installed and answers a document this mapping cannot use: a shape
+  # drift, an error body, a truncated response - all of them land here.
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  usage) printf '%s\n' '{"error":"unsupported","reports":null}' ;;
+  auth-gateway) case "$2" in status) printf '%s\n' '{"ready":false}' ;; esac ;;
+esac
+EOF
+  chmod +x "$T/bin/omp"
+  export PATH="$T/bin:$PATH"
+  . "$CEL_ROOT/lib/quota.sh"
+  local err; err="$(subscription_list 2>&1 >/dev/null)"
+  assert_contains "$err" 'omp is on PATH but produced no usable subscription rows'
+  # and the fallback still answered, because the best available answer beats
+  # no answer - the line is a warning, not a refusal
+  local out; out="$(subscription_list 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length >= 1')" true
+  # stdout stays a parseable document: the warning may never land in it
+  case "$out" in *'omp is on PATH'*) printf 'the warning was printed to stdout\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_a_box_without_omp_falls_back_in_silence() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local err; err="$(subscription_list 2>&1 >/dev/null)"
+  [ -z "$err" ] || {
+    printf 'a box with no omp complained about omp:\n%s\n' "$err" >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The warning is about a source that answered badly, and the cached path asks
+# nobody: the console's refresh loop and the dashboard's poll must not print a
+# line per draw about a tool they never ran.
+test_the_cached_path_never_warns_about_omp() {
+  _quota_setup
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  subscription_list >/dev/null 2>&1
+  printf '#!/usr/bin/env bash\ncase "$1" in usage) printf "{}\\n" ;; esac\n' > "$T/bin/omp"
+  local err; err="$(subscription_list --cached 2>&1 >/dev/null)"
+  [ -z "$err" ] || {
+    printf 'the cached path warned about a tool it never ran:\n%s\n' "$err" >&2; return 1; }
+}

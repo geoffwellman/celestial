@@ -512,6 +512,21 @@ subscription_list() { # [--cached]
     keep="$keep subscription-$op-$oa.json"
   done < <(_sub_omp_rows)
 
+  # TWO SILENCES THAT ARE NOT THE SAME NEWS. A box with no omp on it falls
+  # back to the per-provider reads and says nothing, deliberately: that is the
+  # normal case for this repo and it is not a fault. But omp ON PATH that
+  # answers nothing usable - a shape drift, a truncated response, an error
+  # document, a jq expression that no longer matches - falls back to exactly
+  # the same stale reads, and read the same way it is invisible. That is how
+  # this shipped once: the mapping looked at `.accounts`, produced zero rows,
+  # and every surface printed the old output with nothing anywhere saying so.
+  # One line on stderr, and only in that case - stdout is a JSON document that
+  # callers parse, and the fallback still produces the best answer available.
+  if [ "$omp_seen" -eq 0 ] && command -v omp >/dev/null 2>&1; then
+    printf 'cel quota: omp is on PATH but produced no usable subscription rows (%s); falling back to the per-provider reads, which may be stale\n' \
+      "try: omp usage --json" >&2
+  fi
+
   while IFS=$'\t' read -r p a t label; do
     [ -n "$p" ] || continue
     # a provider omp answered for is answered; anything else still reads its
