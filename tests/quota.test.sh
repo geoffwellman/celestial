@@ -399,3 +399,187 @@ test_the_cached_list_is_the_same_list_as_the_live_one() {
   _quota_stub_stop
   _quota_teardown
 }
+
+# --- CEL-49: ask the box what it already knows ------------------------------
+#
+# The owner, 2026-09-20: Codex reads `unreadable` while their prompt tool shows
+# it fine, Fable is missing, one Anthropic account of three is missing, and
+# opencode is nowhere. Every one of those is cel reading a worse source than
+# the box already has: `omp usage --json` holds refreshed OAuth per account and
+# answers for all of them, with `.limits[]` as the authoritative window list.
+#
+# NOTHING HERE CALLS A PROVIDER. `omp` is a stub on a prepended PATH printing
+# canned JSON, exactly as the endpoint stub above serves the fallback path.
+
+# Three Anthropic logins, two ChatGPT ones and opencode, in the shape omp
+# normalises to: {label, window:{id,label,durationMs,resetsAt},
+# amount:{used,limit,remaining,usedFraction,unit}, status}. A `null` window
+# (several codenamed ones exist and answer null) and a scoped weekly window
+# (`kind: weekly_scoped`, the one Fable arrives as) are both in here because
+# both were dropped by the old jq.
+_omp_usage_body() {
+  cat <<'JSON'
+{"accounts":[
+ {"provider":"anthropic","accountId":"ant-one","email":"one@example.invalid",
+  "spend":{"enabled":false},"extra_usage":{"disabled_reason":"out_of_credits"},
+  "limits":[
+   {"label":"5 hours","window":{"id":"five_hour","label":"5 hours","durationMs":18000000,"resetsAt":1789994511000},
+    "amount":{"used":16,"limit":100,"remaining":84,"usedFraction":0.16,"unit":"pct"},"status":"ok"},
+   {"label":"7 days","window":{"id":"seven_day","label":"7 days","durationMs":604800000,"resetsAt":1790994511000},
+    "amount":{"usedFraction":0.41,"unit":"pct"},"status":"ok"},
+   {"label":"Fable weekly","kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},
+    "window":{"id":"seven_day_scoped","label":"7 days","durationMs":604800000,"resetsAt":1790994511000},
+    "amount":{"usedFraction":0.75,"unit":"pct"},"status":"ok"},
+   null]},
+ {"provider":"anthropic","accountId":"ant-two","email":"two@example.invalid",
+  "limits":[{"window":{"id":"five_hour","durationMs":18000000,"resetsAt":1789994511000},
+             "amount":{"usedFraction":0.30},"status":"ok"}]},
+ {"provider":"anthropic","accountId":"ant-three","email":"three@example.invalid",
+  "limits":[{"window":{"id":"five_hour","durationMs":18000000,"resetsAt":1789994511000},
+             "amount":{"usedFraction":0.55},"status":"ok"}]},
+ {"provider":"openai-codex","accountId":"cx-one","email":"one@example.invalid",
+  "limits":[{"window":{"id":"five_hour","durationMs":18000000,"resetsAt":1789994511000},
+             "amount":{"usedFraction":0.09},"status":"ok"},
+            {"window":{"id":"seven_day","durationMs":604800000,"resetsAt":1790994511000},
+             "amount":{"usedFraction":0.62},"status":"ok"}]},
+ {"provider":"openai-codex","accountId":"cx-two","email":"two@example.invalid",
+  "limits":[{"window":{"id":"five_hour","durationMs":18000000,"resetsAt":1789994511000},
+             "amount":{"usedFraction":0.04},"status":"ok"}]},
+ {"provider":"opencode","accountId":"oc-one","email":"one@example.invalid",
+  "limits":[{"window":{"id":"seven_day","durationMs":604800000,"resetsAt":1790994511000},
+             "amount":{"usedFraction":0.22},"status":"ok"}]}]}
+JSON
+}
+
+_omp_stub() { # [body-file]
+  mkdir -p "$T/bin"
+  _omp_usage_body > "$T/omp-usage.json"
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  usage) cat "$OMP_USAGE_JSON" ;;
+  auth-gateway) case "$2" in status) printf '%s\n' '{"ready":false}' ;; esac ;;
+esac
+EOF
+  chmod +x "$T/bin/omp"
+  export OMP_USAGE_JSON="$T/omp-usage.json"
+  export PATH="$T/bin:$PATH"
+}
+
+test_omp_usage_is_the_source_and_every_account_is_its_own_row() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 3
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "codex")] | length')" 2
+  # an account is provider + account id, and a reader tells them apart by email
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude") | .label] | sort | join(",")')" \
+    'one@example.invalid,three@example.invalid,two@example.invalid'
+  case "$out" in *"$PI_TOKEN"*|*"$CX_TOKEN"*)
+    printf 'the omp path printed a token\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# Fable is not a special case - it is one scoped window among several, and
+# hardcoding its name would reintroduce this bug for the next one.
+test_a_scoped_window_keeps_its_scope_and_is_not_dropped() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.scope == "Fable")] | length')" 1
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows[] | select(.scope == "Fable") | .used_pct')" 75
+  assert_contains "$(cmd_quota 2>/dev/null)" 'Fable'
+}
+
+test_a_null_window_is_skipped_rather_than_drawn_empty() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 3
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.used_pct == null)] | length')" 0
+}
+
+# This repo runs on boxes with no omp at all, and absent it must degrade to
+# exactly today's behaviour rather than to an error.
+test_without_omp_the_endpoint_reads_answer_exactly_as_before() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/empty"
+  export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" '5h 16%'
+  assert_contains "$out" '7d 41%'
+  assert_contains "$out" 'codex'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# A plan with windows and no credit number is normal, not a gap to fill with
+# `unknown`: opencode renders usage and no balance row at all.
+test_opencode_renders_usage_and_no_credit_row() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.provider == "opencode")] | length')" 1
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" 'opencode'
+  # the balances table names providers that declare a balance; opencode has none
+  assert_eq "$(printf '%s' "$out" | sed -n '/PROVIDER/,$p' | grep -c opencode)" 0
+}
+
+# "Out of credits" on a healthy account is worse than silence: the field is
+# `extra_usage.disabled_reason` with `spend.enabled=false`, which means top-up
+# is switched off.
+test_top_up_being_off_never_reads_as_out_of_credits() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  case "$out" in *'out of credits'*|*'out_of_credits'*)
+    printf 'a healthy account was reported as out of credits:\n%s\n' "$out" >&2; return 1;; esac
+  assert_contains "$out" 'top-up is off'
+}
+
+# CREDIT IS WORKSPACE-SCOPED, DECIDED. A workspace without the key reads
+# `unknown`, and that is a fact about where you are standing - not a fault.
+# The fault is asking and not being able to tell, and the two must not read
+# the same.
+_quota_manifest_stub() {
+  CEL_MANIFEST="$T/agents.yaml"
+  export CEL_MANIFEST
+  cat >"$CEL_MANIFEST" <<'YAML'
+providers:
+  nokeyhere:
+    key_env: CEL_TEST_ABSENT_KEY
+    balance: {url: "http://127.0.0.1:1/balance", jq: ".credit", unit: usd, floor: 1}
+  deadend:
+    key_env: CEL_TEST_PRESENT_KEY
+    balance: {url: "http://127.0.0.1:1/balance", jq: ".credit", unit: usd, floor: 1}
+YAML
+  unset CEL_TEST_ABSENT_KEY
+  export CEL_TEST_PRESENT_KEY=fixture-not-a-real-key
+  export CEL_QUOTA_DIR="$T/quota"
+}
+
+test_no_key_in_this_workspace_reads_differently_from_asked_and_failed() {
+  _quota_setup
+  _quota_manifest_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" 'no key in this workspace'
+  assert_contains "$out" 'could not tell'
+  local js; js="$(cmd_quota --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "nokeyhere") | .state')" no_key
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "deadend") | .state')" unknown
+  _quota_teardown
+}
