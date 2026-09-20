@@ -756,3 +756,32 @@ test_fleet_rows_survive_a_repo_in_a_broken_state() {
   _fleet_teardown
   return "$rc"
 }
+
+# THE HELPERS ARE A CONTRACT WITH cel-fanout, NOT PRIVATE TO THE SWEEP.
+# `fleet_ahead` is what `cel-fanout status` prints in its AHEAD column, and
+# `fleet_worker_row` with three arguments is how that binary renders a row.
+# The sweep inside this file reaches the batched git query directly, so
+# nothing here exercised either entry point - and a duplicated definition of
+# `fleet_ahead` calling a function that does not exist shipped green, because
+# bash keeps only the LAST definition of a name and no test ever called it.
+test_fleet_ahead_answers_the_external_caller() {
+  _fleet_setup
+  assert_eq "$(fleet_ahead "$WT")" "0"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+  assert_eq "$(fleet_ahead "$WT")" "1"
+  # A worktree that cannot be read is unknown, not zero.
+  assert_eq "$(fleet_ahead "$T/nowhere")" "?"
+  _fleet_teardown
+}
+
+# The three-argument form cel-fanout calls, which has to derive the worktree,
+# the state and the id from the entry on its own.
+test_fleet_worker_row_renders_from_the_entry_alone() {
+  _fleet_setup
+  local row
+  row="$(fleet_worker_row "$(jq -c '.[0]' "$T/alpha/.cel/delegations.json")" idle "")"
+  assert_eq "$(printf '%s' "$row" | jq -r '.id')" "one"
+  assert_eq "$(printf '%s' "$row" | jq -r '.ahead')" "0"
+  assert_eq "$(printf '%s' "$row" | jq -r '.state')" "running"
+  _fleet_teardown
+}
