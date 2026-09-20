@@ -180,12 +180,27 @@ _sub_omp_usage() {
   omp usage --json 2>/dev/null || true
 }
 
-# The rows omp's document becomes. `.limits[]` is the AUTHORITATIVE window
-# list - the old jq read the `.five_hour`/`.seven_day` subset and so lost
-# every scoped window, of which Fable is one; naming Fable here would lose
-# the next one - and each limit carries {label, window:{id,label,durationMs,
+# The rows omp's document becomes. MEASURED, not guessed (the first cut of
+# this read `.accounts`, which does not exist: every row fell out, every
+# caller fell back to the old path, and the output was byte-for-byte the
+# output the ticket was filed about). `omp usage --json` answers
+#
+#   {generatedAt, reports: [...], accountsWithoutUsage, disabledCredentials,
+#    capacity}
+#
+# and each report is {provider, fetchedAt, metadata:{accountId, email,
+# planType, ...}, limits:[...]}. THE EMAIL AND THE ACCOUNT ID LIVE UNDER
+# `.metadata`, not at the top of the report.
+#
+# `.limits[]` is the authoritative window list - the old jq read the
+# `.five_hour`/`.seven_day` subset and so lost every scoped window, of which
+# Fable is one; naming Fable here would lose the next one - and each limit is
+# {id, label, scope:{windowId,tier,modelId,...}, window:{id,label,durationMs,
 # resetsAt}, amount:{used,limit,remaining,usedFraction,unit}, status}, which
 # is exactly the shape a bar needs.
+#
+# tests/fixtures/omp-usage.json is this box's own answer with the identities
+# replaced: a stub that disagrees with the tool tests nothing.
 _sub_omp_rows() {
   local raw; raw="$(_sub_omp_usage)"
   [ -n "$raw" ] || return 0
@@ -194,43 +209,55 @@ _sub_omp_rows() {
              elif type == "number"
              then ((if . > 100000000000 then . / 1000 else . end) | floor | todate)
              else . end;
-    def wname($id; $ms): if $ms == null or $ms == 0 then ($id // "window")
+    def wname($id; $ms): if $id != null and $id != "" then ($id | tostring)
+                         elif $ms == null or $ms == 0 then "window"
                          elif $ms >= 604800000 then "7d"
                          elif $ms >= 86400000 then "1d"
                          else "5h" end;
-    ((.accounts // .usage // .) | if type == "array" then . else [.] end)[]
+    (.reports // .accounts // .usage // [])
+    | if type == "array" then . else [.] end
+    | .[]
     | select(type == "object")
     | . as $a
+    | (.metadata // {}) as $m
     | ((.provider // "unknown") | ascii_downcase) as $p
     | {provider: (if $p == "anthropic" or $p == "claude" then "claude"
                   elif $p == "openai-codex" or $p == "codex" or $p == "chatgpt" then "codex"
+                  elif ($p | startswith("opencode")) then "opencode"
                   else $p end),
-       account: ((.accountId // .account_id // .id // .account // "?") | tostring),
-       label: ((.email // .accountEmail // .label // .accountId // .account_id // .id // "?") | tostring),
+       account: (($m.accountId // $m.account_id // $m.orgId // $m.email // $p) | tostring),
+       label: (($m.email // $m.accountId // $m.account_id // $m.planType // $p) | tostring),
        source: "omp",
-       windows: [ (.limits // .windows // .report.limits // [])[]
+       windows: [ (.limits // .windows // [])[]
                   | select(type == "object")
                   | . as $w
                   | (($w.amount.usedFraction // $w.amount.used_fraction
                       // (if (($w.amount.limit // 0) > 0) and ($w.amount.used != null)
                           then ($w.amount.used / $w.amount.limit) else null end))) as $f
                   | select($f != null)
-                  | {name: wname(($w.window.id // $w.window.label // $w.label);
+                  | {name: wname(($w.window.id // $w.scope.windowId);
                                  ($w.window.durationMs // $w.window.duration_ms)),
-                     scope: ($w.scope.model.display_name // $w.scope.model.displayName
-                             // $w.scope.label // $w.scope.name // null),
+                     # A SCOPE IS A LABEL, NOT A SPECIAL CASE. A scoped window
+                     # is per-tier or per-model - Claude 7 Day (Fable) and
+                     # 7 days (gpt-reserve) are both this - and without the
+                     # label it reads as a duplicate of the window beside it.
+                     # The parenthetical in omp own label is preferred because
+                     # it is already capitalised the way the provider says it.
+                     scope: (($w.label // "" | capture("\\((?<s>[^)]+)\\)") | .s)?
+                             // $w.scope.tier // $w.scope.modelId
+                             // $w.scope.model.display_name // null),
                      used_pct: ($f * 100),
                      resets_at: (($w.window.resetsAt // $w.window.resets_at // $w.resetsAt // null) | iso)} ],
-       extra: (($a.extra_usage.disabled_reason // $a.extraUsage.disabledReason // null) as $dr
+       extra: (($m.extra_usage.disabled_reason // $m.extraUsage.disabledReason
+                // $a.extra_usage.disabled_reason // null) as $dr
                | if $dr != null
                  then {state: "disabled",
-                       reason: (if (($a.spend.enabled // false) == false)
+                       reason: (if ((($m.spend.enabled // $a.spend.enabled) // false) == false)
                                 then "top-up is off" else ($dr | gsub("_"; " ")) end)}
-                 elif ($a.ok // true) == false
+                 elif ($a.ok // true) == false or (($a.limits // []) | length) == 0
                  then {state: "unreadable",
-                       reason: ($a.error // "the broker reports this credential as failing")}
-                 else {state: "enabled", reason: ""} end)}
-    | select((.windows | length) > 0 or (.extra.state != "enabled"))' 2>/dev/null || true
+                       reason: ($a.error // "omp holds this credential but reported no usage for it")}
+                 else {state: "enabled", reason: ""} end)}' 2>/dev/null || true
   return 0
 }
 
