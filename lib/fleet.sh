@@ -215,21 +215,6 @@ fleet_ahead() { # <worktree> -> count | ?
   printf '%s' "$_FLEET_GIT_AHEAD"
 }
 
-# How many commits this worktree carries beyond the verified remote default.
-# The same answer `cel-fanout status` prints in its AHEAD column, computed the
-# same way: unknown stays visible as `?` rather than being flattened to zero,
-# because "no commits" and "could not ask" lead an operator to opposite acts.
-fleet_ahead() { # <worktree> -> count | ?
-  printf '%s' "$(_fleet_git_facts "$1")" | cut -d$'\x1f' -f1
-}
-
-# What would be LOST if this worktree went away right now, in the words
-# stall_work_at_risk uses - the same question, answered out of the batch above
-# rather than by four more git processes.
-_fleet_at_risk() { # <worktree> -> "" | "unpushed=K dirty=M"
-  printf '%s' "$(_fleet_git_facts "$1")" | cut -d$'\x1f' -f2
-}
-
 # EVERYTHING A ROW IS JUDGED ON, COMPUTED ONCE.
 #
 # The verdict, the age, the footprint and the at-risk answer were each
