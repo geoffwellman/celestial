@@ -1524,3 +1524,100 @@ test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
   assert_contains "$(cat "$v")" 'cel ws reset <w>'
   assert_contains "$(cat "$v")" 'PANES, never worktrees'
 }
+
+# --- CEL-43: the digest ranks what is left ----------------------------------
+# Root's mailbox is where everything shouts at once, and the console drew it
+# newest-first: a status line from a minute ago sat above an escalation from
+# yesterday saying a reviewer pane had died. The levels come from the model
+# through lib/triage.sh's cache - the console never scores anything itself,
+# it reads the cache and does the ordering and the cut in code.
+test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
+  _console_panel_setup
+  printf '%s\n' \
+    '{"id":"r1","ts":"2026-09-20T10:00:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"nothing to do"}' \
+    '{"id":"r2","ts":"2026-09-20T10:01:00+00:00","kind":"escalation","from":"bundle-orch","to":"root","message":"the reviewer pane is dead"}' \
+    '{"id":"r3","ts":"2026-09-20T10:02:00+00:00","kind":"decision","from":"bundle-orch","to":"root","message":"ship the bundle or hold"}' \
+    '{"id":"r4","ts":"2026-09-20T10:03:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"ABC-9 gate is green"}' \
+    '{"id":"r5","ts":"2026-09-20T10:04:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"also nothing to do"}' \
+    >>"$T/inbox/alpha.jsonl"
+  printf '%s\n' 'r1\t0' 'r2\t3' 'r3\t2' 'r4\t1' 'r5\t0' | sed 's/\\t/\t/' >"$T/triage.cache"
+  export CEL_TRIAGE_CACHE="$T/triage.cache"
+  local out; out="$(node "$CONSOLE_MJS" --render-once --unit bundle)"
+  assert_contains "$out" 'the reviewer pane is dead'
+  assert_contains "$out" 'ship the bundle or hold'
+  assert_contains "$out" 'and 2 more'
+  # the ranked block itself: the escalation on top, and nothing past the cut
+  local block; block="${out#*MAIL (most urgent first)}"; block="${block%%and 2 more*}"
+  assert_contains "$(printf '%s' "$block" | sed -n 2p)" 'the reviewer pane is dead'
+  case "$block" in *'also nothing to do'*) echo 'drew past the cut'; return 1;; esac
+  _console_teardown
+}
+
+# --- CEL-43 section 5: a detail view that cannot resolve what it shows ------
+# Observed by the owner on a real BLOCKED item: the header read `id undefined`
+# and [resolve] did nothing. Two faults. The INBOX tail dropped the id of the
+# record it had just parsed, so a detail opened from that pane had no identity
+# (one opened from WAITING did, which is why it worked there); and a tail row
+# can be a HISTORICAL record whose item the steward already self-cleared, yet
+# the view offered a button that could never work.
+test_console_tail_rows_carry_the_id_of_the_record() {
+  _console_setup
+  printf '%s\n' \
+    '{"id":"b7","ts":"2036-09-20T10:00:00+00:00","kind":"blocked","from":"bundle-orch","to":"root","message":"memory is gone","fp":"mem-alpha"}' \
+    '{"id":"b8","ts":"2036-09-20T10:05:00+00:00","kind":"update","ref":"b7","to":"root","from":"bundle-orch","message":"still gone"}' \
+    '{"id":"b9","ts":"2036-09-20T10:09:00+00:00","kind":"resolution","ref":"b7","to":"root","by":"steward","message":"resolved by steward"}' \
+    >"$T/inbox/alpha.jsonl"
+  cat >"$T/tail.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const { inboxTail } = await import(process.env.STATE_MJS);
+const rows = inboxTail({ workspaces: [{ name: 'alpha' }] }, 8);
+assert.equal(rows.length, 1, 'the blocker is the one row');
+assert.equal(rows[0].id, 'b7', 'the tail dropped the id of the record it parsed');
+assert.equal(rows[0].fp, 'mem-alpha');
+assert.equal(rows[0].resolved.by, 'steward', 'the tail did not see the resolution that closed it');
+process.stdout.write('tail: all good\n');
+EOF
+  local out
+  out="$(STATE_MJS="$CEL_ROOT/tools/console/state.mjs" CEL_INBOX_DIR="$T/inbox" node "$T/tail.mjs" 2>&1)" \
+    || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'tail: all good'
+  _console_teardown
+}
+
+# NEVER SHOW A BUTTON THAT CANNOT WORK. What the detail view offers is
+# computed from the item's live state, not from the pane it was opened in.
+test_console_detail_view_offers_only_actions_that_can_work() {
+  _console_setup
+  cat >"$T/actions.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const { detailActions, detailButtons, resolveOutcome } = await import(process.env.VIEWS_MJS);
+
+const open = { id: 'b1', ws: 'alpha', kind: 'blocked', from: 'bundle-orch', message: 'x' };
+assert.deepEqual(detailActions(open, ['b1']), { resolve: true, note: '' });
+assert.deepEqual(detailButtons(open, ['b1'], true), ['resolve', 'reply', 'go to', 'target']);
+
+// resolved: no button, and it says when and by whom
+const done = { ...open, resolved: { ts: '2036-09-20T10:09:00+00:00', by: 'steward' } };
+const a = detailActions(done, []);
+assert.equal(a.resolve, false);
+assert.match(a.note, /^resolved 2036-09-20 10:09 by steward$/);
+assert.deepEqual(detailButtons(done, [], false), ['reply', 'go to']);
+
+// a tail row for something that was never an open item at all
+assert.equal(detailActions({ id: 'm1', kind: 'status' }, []).note, 'not an open item - this is the log');
+// and the id-less row that started this: no identity, no button
+assert.equal(detailActions({ kind: 'blocked' }, []).resolve, false);
+
+// the outcome of a resolve is REPORTED, either way
+assert.equal(resolveOutcome(open, { allow: true, ok: true, out: '' }), 'resolved b1');
+assert.equal(resolveOutcome(open, { allow: true, ok: false, out: 'no open decision or blocker with id b1\nmore' }),
+  'could not resolve b1: no open decision or blocker with id b1');
+assert.equal(resolveOutcome(open, { allow: false, reason: 'the console routes' }), 'refused: the console routes');
+process.stdout.write('actions: all good\n');
+EOF
+  local out
+  out="$(VIEWS_MJS="$CEL_ROOT/tools/console/views.mjs" node "$T/actions.mjs" 2>&1)" \
+    || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'actions: all good'
+  _console_teardown
+}

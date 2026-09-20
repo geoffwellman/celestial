@@ -184,13 +184,71 @@ export const workerCells = (w) => ({
 });
 export const workerLine = (w) => Object.values(workerCells(w)).join(' ');
 
+// CEL-43: the ranked mailbox. One line per message with the level in front of
+// it, then `and N more` - because a list that silently stops is a list an
+// operator cannot tell from an empty one.
+export const rankedLines = ({ top = [], more = 0 } = {}) => {
+  if (!top.length) return [];
+  const out = ['MAIL (most urgent first)'];
+  for (const m of top) out.push(`  ${m.rank} ${String(m.ts).slice(11, 16)} ${m.kind} from ${m.from}: ${m.message}`);
+  if (more > 0) out.push(`  and ${more} more`);
+  return out;
+};
+
+// --- CEL-43: what a detail view may actually DO -----------------------------
+//
+// The owner opened a real `BLOCKED · productivity` item and pressed
+// [resolve]; nothing happened. The item had been self-cleared by the steward
+// hours earlier when the memory it complained about came back, so there was
+// nothing left to resolve - but the view offered the button anyway, because
+// the buttons were a fixed row rather than a fact about the item.
+//
+// So the actions are COMPUTED FROM THE ITEM'S LIVE STATE: only something that
+// is open right now, and has an id to name, can be resolved. Everything else
+// says why instead. Never show a button that cannot work.
+export const detailActions = (item = {}, openIds = []) => {
+  const id = String(item.id || '');
+  if (item.resolved) {
+    const when = String(item.resolved.ts || '').slice(0, 16).replace('T', ' ');
+    return { resolve: false, note: `resolved ${when} by ${item.resolved.by || 'someone'}` };
+  }
+  const resolvable = (item.kind === 'decision' || item.kind === 'blocked')
+    && !!id && (openIds || []).map(String).includes(id);
+  // A status line, a message whose record carried no id, an item somebody
+  // else closed since the panel was drawn: all the same answer to the
+  // operator - this is the log, not a queue.
+  return resolvable ? { resolve: true, note: '' } : { resolve: false, note: 'not an open item - this is the log' };
+};
+
+// The buttons, in the order they are drawn - which is also the order the
+// click handler maps by index, so the two cannot drift apart.
+export const detailButtons = (item, openIds = [], hasTarget = false) => {
+  const out = [];
+  if (detailActions(item, openIds).resolve) out.push('resolve');
+  out.push('reply', 'go to');
+  if (hasTarget) out.push('target');
+  return out;
+};
+
+// A RESOLVE SAYS WHAT HAPPENED. It used to run the command and show whatever
+// the output view showed, so a refusal or a non-zero exit was indistinguishable
+// from success: the operator pressed the button and the item stayed where it
+// was, with no sentence anywhere saying why.
+export const resolveOutcome = (item = {}, r = {}) => {
+  if (!r.allow) return `refused: ${r.reason || 'the console allowlist said no'}`;
+  if (r.ok) return `resolved ${item.id}`;
+  const first = String(r.out || r.err || '').split('\n').map((l) => l.trim()).filter(Boolean)[0]
+    || 'the command exited non-zero';
+  return `could not resolve ${item.id}: ${first}`;
+};
+
 export const openLine = (it) => `[${it.id}] ${String(it.ts).slice(0, 16)} ${it.ws} ${it.kind} from ${it.from}: ${it.message}`;
 export const tailLine = (m) => `[${m.ws}] ${String(m.ts).slice(0, 16)} ${m.kind} from ${m.from}: ${m.message}`;
 
 // --- section 1: the unit view ----------------------------------------------
 
 export const unitView = ({
-  unit, items = [], tail = [], board = null, prs = null, digest = '', now = Date.now(),
+  unit, items = [], tail = [], board = null, prs = null, digest = '', mail = null, now = Date.now(),
 }) => {
   const ws = unit.ws || '';
   const out = [];
@@ -199,6 +257,11 @@ export const unitView = ({
   // line, and it answers the question an operator arrives with - what happened
   // while I was not looking - before they have read anything else.
   if (digest) out.push(digest);
+  // AND THE MAILBOX, RANKED, RIGHT UNDER IT. Everything that escalates
+  // addresses `root`, and the console is what listens; drawing it
+  // newest-first put a status line above an escalation saying a reviewer pane
+  // had been dead for two days.
+  for (const line of rankedLines(mail || {})) out.push(line);
   out.push('');
   out.push('ORCHESTRATOR');
   out.push(`  ${unit.name}-orch   ${unit.orch}   pane ${unit.pane || '-'}   slots ${unit.workers}/${unit.cap}`
