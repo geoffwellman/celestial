@@ -89,6 +89,35 @@ distributions. Fresh binary installs support x86-64 and arm64. See
 code and may invoke `sudo`; it does not supply provider subscriptions or log
 you into GitHub, Linear or agent accounts.
 
+### The shape a workspace declares
+
+`workspace.yaml` may say what should be running in a workspace, and `cel ws up`
+puts it back:
+
+```yaml
+layout:
+  orchestrators: auto        # auto: one per product that wants one | manual | none
+  panes:                     # optional extra panes, opened at `up`, in order
+    - label: dash
+      cwd: .
+      cmd: cel dash --ensure # optional; an empty pane when absent
+    - label: notes
+      cwd: .
+```
+
+`products[].orchestrator` (`auto`/`manual`) decides per product underneath the
+workspace-wide switch. A workspace with **no** `layout:` block behaves as
+`orchestrators: manual` with no extra panes — exactly what it did before.
+
+`up` is a reconcile, not a launcher, and that is the point: when herdr loses a
+live agent's name (it clears it on restart), every surface that resolves an
+orchestrator by its alias reports the product as dead — and the answer to a
+dead orchestrator is to start another one on top of the running one. So a live
+agent in a product's own directory is that product's orchestrator whatever
+herdr calls it: `cel fleet` shows `orch unnamed` rather than `-`, `cel doctor`
+says which directory it is in, `cel ws up` renames it, and `cel run
+orchestrator` refuses to start a second one over it without `--force`.
+
 ## How it works
 
 Three layers on disk, and a factory floor of agents above them.
@@ -781,7 +810,8 @@ policy block into every agent.
 | `cel setup` / `cel doctor` | install everything / verify the box |
 | `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per product, root's mail per workspace |
 | `cel update [--check·--rollback·--channel]` | move to the newest release tag (or to `origin/main` on the main channel), re-link and re-render, then verify; `--check` prints what you have not got yet and exits 1 when behind; `--rollback` undoes the last update; `--channel main·release` picks which stream this box follows |
-| `cel ws new · add · sync · list · push · env` | workspace lifecycle |
+| `cel ws new · add · sync · list · push · env` | workspace setup |
+| `cel ws up · down · reset · status <name>` | a workspace has a declared shape and this puts it back: `up` reconciles (herdr workspace, declared panes, an orchestrator per product that wants one, and a rename for any live agent herdr has lost the name of) and is safe to run twice; `down` stops the agents it owns and closes its **panes**, refusing over work that is neither pushed nor landed; `reset` is down-then-up; `status` is `up --dry-run` as a table. It never removes a worktree or touches the ledger — letting work go is `cel-fanout release` |
 | `cel console` | the desk you keep open: fleet, decisions, inbox and a command line that also takes a sentence |
 | `cel run [root·orchestrator·worker·reviewer]` | start an agent, role injected |
 | `cel run orchestrator --product <p>` | start the orchestrator for a product (1..n repos) |

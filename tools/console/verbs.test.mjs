@@ -27,7 +27,7 @@ const ORCH = { ws: 'alpha', product: 'bundle', orch: '-' };
 t('every verb the ticket names has a row', () => {
   assert.deepEqual(
     VERBS.map((v) => v.name).sort(),
-    ['answer', 'land', 'move', 'nudge', 'restart', 'review', 'start', 'talk'],
+    ['answer', 'land', 'move', 'nudge', 'reset', 'restart', 'review', 'start', 'talk', 'up'],
   );
 });
 
@@ -105,6 +105,17 @@ t('a key on a panel that does not own it is nothing at all', () => {
   assert.equal(verbFor('board', 'l', TICKET), null);
   assert.equal(verbFor('prs', 's', PR), null);
   assert.equal(verbFor('board', 's', null), null);
+});
+
+// CEL-44: the unit view can open a workspace and put it back to its declared
+// shape. `u` is the idempotent reconcile; the reset key is SHIFTED because it
+// stops things first - and `R` stays what it was, the single-orchestrator
+// restart this ticket was told to leave alone.
+t('u proposes ws up and the shifted key proposes ws reset', () => {
+  assert.deepEqual(verbFor('orch', 'u', ORCH).cmds, ['cel ws up alpha']);
+  assert.deepEqual(verbFor('orch', 'U', ORCH).cmds, ['cel ws reset alpha']);
+  assert.deepEqual(verbFor('orch', 'R', ORCH).cmds, ['cel run orchestrator --product bundle --workspace alpha']);
+  assert.equal(verbFor('orch', 'u', { product: 'bundle' }).cmds.length, 0);
 });
 
 process.stdout.write('verbs.test.mjs: all good\n');

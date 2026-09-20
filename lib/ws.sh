@@ -1,10 +1,12 @@
 # shellcheck shell=bash
-# cel ws list|new|add|sync|push - the workspace-lifecycle commands. Dispatch
+# cel ws list|new|add|sync|push|up|down|reset|status - the workspace commands. Dispatch
 # wiring lives in bin/cel (Task 8); this file is command logic only.
 [ -n "${_CEL_WS:-}" ] && return 0
 _CEL_WS=1
 . "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+# shellcheck source=lib/wslife.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"
 
 # The three lines every workspace root ignores: cloned repos, disposable
 # spikes, and the fanout ledger - none of them belong in the workspace's own
@@ -32,7 +34,14 @@ cmd_ws() {
     sync) _ws_sync "$@";;
     push) _ws_push "$@";;
     env) _ws_env "$@";;
-    *) die "unknown: cel ws $sub (list|new|add|sync|push|env)";;
+    # CEL-44: the lifecycle verbs. `up` reconciles a workspace to its declared
+    # shape and is safe to run twice; `down` and `reset` stop things, and
+    # refuse over work that is neither pushed nor landed.
+    up) cmd_ws_up "$@";;
+    down) cmd_ws_down "$@";;
+    reset) cmd_ws_reset "$@";;
+    status) cmd_ws_status "$@";;
+    *) die "unknown: cel ws $sub (list|new|add|sync|push|env|up|down|reset|status)";;
   esac
 }
 

@@ -41,6 +41,11 @@
 | `cel-fanout collect --all --workspace <w>` | "collect all the finished workers on <w>" |
 | `cel quota [--json]` | "how much Claude/Codex have I got left", "when does the window reset" - the signed-in subscriptions above the API balances |
 | `cel-fanout reconcile --workspace <w>` | "clean up what's already merged on <w>" - lands the rows GitHub merged, names the ones closed unmerged, leaves reports alone |
+| `cel ws up <w>` | "open alpha", "put alpha back how it should be" - reconciles the workspace to its declared shape: its herdr workspace, the panes it declares, an orchestrator for every product that wants one, and a rename for any live agent herdr has lost the name of. Idempotent, never destructive |
+| `cel ws down <w> [--force]` | "close alpha down", "stop alpha" - stops the agents it owns and closes its PANES. It refuses over work that is neither pushed nor landed, and names it |
+| `cel ws reset <w>` | "restart alpha", "reset alpha to its layout" - down then up, with the same refusals |
+| `cel ws status [<w>] [--json]` | "what should be running in alpha" - declared versus live, per member; the table form of `cel ws up --dry-run` |
+| `cel ws down` is about PANES, never worktrees | letting WORK go is `cel-fanout release`: `down` closes windows, it does not remove a checkout or touch the ledger. An operator who means "clean up the finished workers" wants release, not down |
 | `cel gateway status [--json]` | which subscriptions are signed in and usable, and how much of each window is left - "which accounts can we use", "is codex out" |
 
 <!-- CEL-41: which model does which job, and the console's own keys. -->

@@ -47,6 +47,12 @@ export const INTENTS = [
   // wired to a pane until they press Esc.
   ['talk', 'open a back-and-forth with an orchestrator - talk to it, speak to it, have a word'],
   ['restart_orchestrator', 'start a product\u2019s orchestrator again after it has stopped'],
+  // CEL-44: the workspace as a thing with a shape, which can be opened,
+  // closed and put back. `up` is a reconcile and safe to repeat; the other
+  // two stop agents, which is why they are always proposed below.
+  ['workspace_up', 'open a workspace, or put it back to the layout and agents it declares'],
+  ['workspace_down', 'close a workspace down - stop its agents and shut its panes'],
+  ['workspace_reset', 'restart a whole workspace - close it and open it again in its declared shape'],
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
   ['gateway', 'which accounts or subscriptions are signed in and usable behind the box\u2019s gateway'],
@@ -497,6 +503,20 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
       return [`cel run orchestrator --product ${p.name} --workspace ${p.workspace}`];
     }
 
+    // THE WORKSPACE MUST BE NAMED. `down` on a guess closes somebody else's
+    // panes, and `up` on the wrong one starts agents nobody asked for - so
+    // unlike the read intents there is no fall-back to "the only workspace":
+    // a box with one workspace today has two tomorrow, and the sentence that
+    // was harmless becomes the sentence that was not.
+    case 'workspace_up':
+    case 'workspace_down':
+    case 'workspace_reset': {
+      const ws = workspaceIn(s, f);
+      if (!ws) return null;
+      const verb = intent === 'workspace_up' ? 'up' : intent === 'workspace_down' ? 'down' : 'reset';
+      return [`cel ws ${verb} ${ws}`];
+    }
+
     case 'move_ticket': {
       const m = TICKET.exec(s.toUpperCase());
       const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
@@ -848,8 +868,16 @@ const askDecision = async (cfg, sentence, f) => {
 // console proposed, below it nothing happened at all. A probability carries
 // more than a yes, so it routes - and two of the speculative questions can
 // pull a sentence DOWN a band whatever the intent's own confidence says.
-export const band = ({ confidence, destructive = null, answerable = null, cmds, cfg }) => {
+// STOPPING THINGS IS ALWAYS A PROPOSAL, whatever the model's own answers.
+// `destructive` is a question put to a model, and a model that says no on the
+// one sentence that closes a workspace full of live agents costs an operator
+// their afternoon. These two are known destructive here, in code, so nothing
+// depends on the guess.
+export const ALWAYS_PROPOSE = ['workspace_down', 'workspace_reset'];
+
+export const band = ({ intent = '', confidence, destructive = null, answerable = null, cmds, cfg }) => {
   if (!cmds) return 'ask';
+  if (ALWAYS_PROPOSE.includes(intent)) return 'propose';
   // Sure is not safe. A release the model is 0.95 certain about still
   // discards somebody's branch, so it is proposed and a person presses Enter.
   if (destructive !== null && destructive > DESTRUCTIVE_FLOOR) return 'propose';
@@ -880,7 +908,7 @@ export const route = async ({ sentence, doc, items = [], services = [], roster =
   // for that intent - the model was sure it was a `why`, and there is no such
   // worker on the box - so the chat model gets it rather than the console
   // inventing an id.
-  const decision = band({ confidence, destructive, answerable, cmds, cfg });
+  const decision = band({ intent, confidence, destructive, answerable, cmds, cfg });
   const common = {
     intent, confidence, probabilities, ms, decision, destructive, answerable, hints,
     steer: steerFor(intent, sentence, f),

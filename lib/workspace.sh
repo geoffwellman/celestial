@@ -27,7 +27,47 @@ ws_current() {
 ws_name()   { _wsy "$1" '.name'; }
 ws_kind()   { _wsy "$1" '.kind'; }
 ws_org()    { _wsy "$1" '.org'; }
-ws_layout() { _wsy "$1" '.layout'; }
+# THE LAYOUT, IN TWO SHAPES THAT MUST NOT COLLIDE. `layout: dev` has always
+# named the herdr workspace-manager layout `cel run root` applies. CEL-44 gives
+# a workspace a DECLARED SHAPE under the same key - what should be running in
+# it - so the value may now be a map:
+#
+#   layout:
+#     orchestrators: auto      # auto | manual | none
+#     panes:
+#       - { label: dash, cwd: ., cmd: cel dash --ensure }
+#
+# A map has no workspace-manager id unless it says `id:`, and a scalar declares
+# no shape. Reading one as the other is how `cel run root` would hand herdr a
+# block of yaml as a layout name, so each accessor answers for its own shape
+# and returns nothing for the other.
+ws_layout() { # <wsdir> - the workspace-manager layout id, or ""
+  _yqr -r '.layout as $l
+    | (if ($l | type) == "string" then $l
+       elif ($l | type) == "object" then ($l.id // "")
+       else "" end) | tostring' "$1/workspace.yaml"
+}
+
+# A workspace with no `layout:` block behaves as `orchestrators: manual` and no
+# extra panes - which is exactly what every workspace did before CEL-44. The
+# default lives here so `up`, `status` and the doctor line cannot each invent
+# their own idea of what silence means.
+ws_layout_get() { # <wsdir> <key>
+  local v
+  v="$(_yqr -r --arg k "$2" '.layout as $l
+    | (if ($l | type) == "object" then ($l[$k] // "") else "" end) | tostring' "$1/workspace.yaml")"
+  if [ -z "$v" ] && [ "$2" = orchestrators ]; then printf 'manual'; return 0; fi
+  printf '%s' "$v"
+}
+
+# One declared pane per line as `label\tcwd\tcmd`, IN FILE ORDER: the order is
+# the declaration - a dashboard above its notes - and a set would lose it.
+# `cwd` defaults to the workspace dir itself; an absent `cmd` is an empty pane.
+ws_layout_panes() { # <wsdir>
+  _yqr -r '.layout as $l
+    | (if ($l | type) == "object" then ($l.panes // []) else [] end)
+    | .[] | [(.label // ""), (.cwd // "."), (.cmd // "")] | @tsv' "$1/workspace.yaml"
+}
 ws_ticket() { _yqr -r --arg k "$2" '.tickets[$k] // "" | tostring' "$1/workspace.yaml"; }
 ws_policy() { _yqr -r --arg k "$2" '.policy[$k]  // "" | tostring' "$1/workspace.yaml"; }
 

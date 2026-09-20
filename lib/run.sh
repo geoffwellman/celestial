@@ -222,6 +222,31 @@ _run_agent_name() { # <alias>
   printf '%.32s' "$n"
 }
 
+# WHO IS ALREADY STANDING HERE. An orchestrator's identity in this plane is a
+# DIRECTORY, not a name: on 2026-09-18 herdr cleared `widget-orch`'s name
+# when it restarted and every surface that resolves an orchestrator by its
+# alias then read the live pane as dead - which invites starting a second one
+# on top of it. The roster carries each agent's cwd, so the question "is
+# anything alive in this product's directory" has an answer that survives a
+# lost name. Empty when herdr cannot be asked: silence from the observer is
+# not evidence about the observed, and a refusal on it would block every
+# launch on a box whose herdr is restarting.
+#
+# A NAMELESS AGENT REPORTS ITS NAME AS `-`, never as an empty field: tab is an
+# IFS whitespace character, so a leading empty column collapses under `read`
+# and the pane id would arrive in the name's place.
+_run_live_agent_in_cwd() { # <cwd> -> name<TAB>pane<TAB>status, or nothing
+  local cwd="$1" roster
+  have herdr && have jq || return 0
+  roster="$(herdr agent list 2>/dev/null)" || return 0
+  [ -n "$roster" ] || return 0
+  printf '%s' "$roster" | jq -r --arg c "$cwd" \
+    '[.result.agents[]? | select((.cwd // "") == $c)
+      | select((.agent_status // "") != "")][0] // empty
+     | [((.name // "") | if . == "" then "-" else . end),
+        (.pane_id // ""), (.agent_status // "")] | @tsv' 2>/dev/null || true
+}
+
 # Renders AGENT_ARGS for a --dry-run preview: whichever element IS the body
 # verbatim is replaced with its length, everything else prints as-is.
 _run_dry_agent_args() {
@@ -344,7 +369,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
 }
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
-  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0
+  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -366,6 +391,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --model)     model_opt="$2"; shift 2 ;;
       --thinking)  thinking_opt="$2"; shift 2 ;;
       --dry-run)   dry_run=1; shift ;;
+      --force)     force=1; shift ;;
       --agent)     agent=1; shift ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
@@ -444,6 +470,26 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
       ;;
   esac
+
+  # ONE ORCHESTRATOR PER PRODUCT, AND THE DUPLICATE IS REFUSED HERE. This is
+  # the only door that starts one, so it is the only place the refusal cannot
+  # be routed around. A live agent in the product's own directory IS its
+  # orchestrator whether or not herdr still knows its name - a nameless one is
+  # a fault with a cure (`cel ws up` renames it), never an absence. The check
+  # runs on a dry run too: a preview of a launch that would be refused is a
+  # preview of something that will not happen.
+  if [ "$role" = orchestrator ] && [ "$force" -eq 0 ]; then
+    local occupant oname opane
+    occupant="$(_run_live_agent_in_cwd "$cwd")"
+    if [ -n "$occupant" ]; then
+      IFS=$'\t' read -r oname opane _ <<< "$occupant"
+      [ "$oname" != "-" ] || oname="<unnamed>"
+      die "cel run orchestrator: an agent is already live in $cwd (pane ${opane:-?}, name $oname)
+  Starting a second orchestrator over a live one is the duplicate this refusal exists to prevent.
+  Name it and adopt it:  cel ws up $(ws_name "$wsdir")
+  Or say you mean it:    cel run orchestrator --product ${product:-$repo} --force"
+    fi
+  fi
 
   # Model and reasoning level, resolved before the role body is rendered
   # because a profile may CHANGE THE RUNTIME - and the runtime decides how the
