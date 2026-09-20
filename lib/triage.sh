@@ -143,6 +143,16 @@ _triage_score() { # <json-lines on stdin>
   local pending body doc
   pending="$(cat)"
   [ -n "$pending" ] || return 0
+  # Every pending id gets exactly ONE cache line before this returns: a real
+  # rank when the model gave a confident answer, the fallback marker '-' when
+  # it did not - below the floor, unreachable, or failing. '-' means "the kind
+  # default stands for this id" and is what stops a message the model is unsure
+  # about, or a box with no reachable model, from being re-posted on every
+  # ten-second redraw. It is distinct from an UNSCORED id, which has no line at
+  # all and is asked once. Without it the two leaks this closes each spent a
+  # whole redraw interval in a doomed or repeated call: a below-floor answer
+  # wrote nothing and was re-asked forever, and a failed post did the same.
+  local all_ids; all_ids="$(printf '%s\n' "$pending" | jq -r '.id')"
   body="$(printf '%s\n' "$pending" | jq -sc --argjson levels "$TRIAGE_LEVELS" \
     --arg model "$(cel_config_get console.router model)" '
     {model: $model,
@@ -152,23 +162,37 @@ _triage_score() { # <json-lines on stdin>
                               instructions: ("How much does this message need the operator right now? "
                                              + .kind + " from " + .from + ": " + .message),
                               criteria: $levels}}) | from_entries)}')"
-  doc="$(printf '%s' "$body" | _triage_post)" || return 1
-  [ -n "$doc" ] || return 1
+  if ! doc="$(printf '%s' "$body" | _triage_post)" || [ -z "$doc" ]; then
+    # Unreachable, failing or empty answer: remember the fallback for all of
+    # them so the doomed call is made at most once, not once per draw.
+    local mid
+    while IFS= read -r mid; do
+      [ -n "$mid" ] && _triage_remember "$mid" '-'
+    done <<< "$all_ids"
+    return 1
+  fi
   # The endpoint spells an answer several ways depending on the provider in
-  # front of it. Read defensively: an unreadable answer is ABSENT, and absent
-  # means the kind's default stands.
+  # front of it. Read defensively: an unreadable or below-floor answer is
+  # ABSENT, and absent means the kind's default stands - recorded as '-' so the
+  # message is not asked about again.
   local floor; floor="$(triage_min_confidence)"
-  local id rank
-  while IFS=$'\t' read -r id rank; do
-    [ -n "$id" ] && [ -n "$rank" ] || continue
-    _triage_remember "$id" "$rank"
-  done < <(printf '%s' "$doc" | jq -r --argjson floor "$floor" '
+  local scored; scored="$(printf '%s' "$doc" | jq -r --argjson floor "$floor" '
     (.answers // {}) | to_entries[]
     | .key as $k | .value as $a
     | ((if ($a | type) == "object" then ($a.score // $a.value // $a.level) else $a end) | tonumber?) as $v
     | ((if ($a | type) == "object" then ($a.confidence // $a.probability // 1) else 1 end) | tonumber?) as $c
     | select($v != null and $c != null and $c >= $floor)
-    | [($k | sub("^m_"; "")), ($v | round)] | @tsv' 2>/dev/null || true)
+    | [($k | sub("^m_"; "")), ($v | round)] | @tsv' 2>/dev/null || true)"
+  local mid rank
+  while IFS= read -r mid; do
+    [ -n "$mid" ] || continue
+    rank="$(printf '%s\n' "$scored" | awk -F'\t' -v id="$mid" '$1 == id { print $2; exit }')"
+    if [ -n "$rank" ]; then
+      _triage_remember "$mid" "$rank"
+    else
+      _triage_remember "$mid" '-'
+    fi
+  done <<< "$all_ids"
 }
 
 # The unread mail for a reader, each item carrying a `rank`, highest first.
