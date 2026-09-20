@@ -225,7 +225,9 @@ test_subscription_usage_parses_the_claude_shape() {
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "5h") | .used_pct == 16')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "7d") | .used_pct == 41')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.extra.state')" disabled
-  assert_eq "$(printf '%s' "$out" | jq -r '.extra.reason')" out_of_credits
+  # CEL-49: `disabled_reason: out_of_credits` with spending switched off means
+  # top-up is off, not "this account is spent", and the row says the true one.
+  assert_eq "$(printf '%s' "$out" | jq -r '.extra.reason')" 'top-up is off'
   # the endpoint only answers an OAuth token with its beta header
   assert_contains "$(cat "$T/headers")" 'oauth-2025-04-20'
   _quota_stub_stop
