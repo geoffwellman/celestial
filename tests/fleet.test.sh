@@ -541,29 +541,51 @@ test_mail_to_an_alias_with_no_live_pane_is_reported() {
 # a prepended PATH, they log their argv, and the counts must stay under a
 # ceiling that GROWS WITH THE ROWS rather than multiplying by them.
 
-# The shim: a counter in front of the real binary, so what is measured is the
-# same read the other tests in this file prove correct.
-# Not a subshell: it exports CEL_SPAWN_LOG, and a `$(...)` around this call
-# would leave the shims writing to an empty path and counting nothing - which
-# reads exactly like a budget that is being met.
-_fleet_spawn_shim() { # -> $T/shim, to prepend to PATH; argv lands in CEL_SPAWN_LOG
+# The shim: a counter in front of EVERY binary the read can reach, not just
+# the two this ticket set out to reduce. The first version of this budget
+# counted jq and git alone and would have passed while the total tripled -
+# "a budget that only watches the two tools you were thinking about is a
+# budget that rots the moment someone reaches for a third". PATH is REPLACED
+# rather than prepended, so a tool nobody listed here cannot run at all and
+# the render fails loudly instead of slipping past uncounted.
+_FLEET_SHIMMED_TOOLS=(
+  awk sed grep cut tr head tail sort uniq wc find stat readlink dirname
+  basename date id ls cat rm mkdir mktemp touch flock xargs getent ps
+  bash sh env jq git yq node python3 cksum mv cp chmod ln sleep tee expr seq
+)
+_fleet_spawn_shim() { # -> $T/shim, the whole PATH; argv lands in CEL_SPAWN_LOG
   local s="$T/shim" b real
   mkdir -p "$s"
   export CEL_SPAWN_LOG="$T/spawns.log"
   : >"$CEL_SPAWN_LOG"
-  for b in jq git; do
-    real="$(command -v "$b")"
+  for b in "${_FLEET_SHIMMED_TOOLS[@]}"; do
+    real="$(command -v "$b" 2>/dev/null)" || continue
+    [ -n "$real" ] || continue
     cat >"$s/$b" <<SHIM
-#!/usr/bin/env bash
-printf '%s %s\n' "$b" "\$*" >>"\$CEL_SPAWN_LOG"
+#!/bin/bash
+printf '%s\t%s\n' "$b" "\${*//$'\\n'/ }" >>"\$CEL_SPAWN_LOG"
 exec "$real" "\$@"
 SHIM
     chmod +x "$s/$b"
   done
 }
 
-_fleet_spawns() { # <binary> -> how many times it was started
-  grep -c "^$1 " "$CEL_SPAWN_LOG" || true
+# THE BOX'S PROCESS TABLE IS NOT THIS FIXTURE'S BUSINESS. `fleet_orphans_json`
+# walks every pid on the machine (lib/orphans.sh, CEL-47) and costs ~1050 awk,
+# 117 tr and 117 readlink on this box - three quarters of every process a real
+# `cel fleet` starts, identical on main and on this branch, and completely
+# outside anything a fixture can arrange. It is stubbed for the same reason
+# `_fleet_stub_memory` stubs the memory walk: what is being budgeted here is
+# what lib/fleet.sh does per row, and a number that moves with whatever else
+# is running on the box budgets nothing.
+_fleet_stub_box_walk() {
+  orphans_list() { :; }
+  orphans_totals() { printf '0 0\n'; }
+}
+
+_fleet_spawns() { # [binary] -> how many processes were started, in all or of one
+  if [ $# -eq 0 ]; then grep -c . "$CEL_SPAWN_LOG" || true; return 0; fi
+  grep -c "^$1	" "$CEL_SPAWN_LOG" || true
 }
 
 # n more RUNNING rows in widget, each with its own pane and no worktree: the
@@ -579,29 +601,32 @@ _fleet_add_rows() { # <n>
   jq -c --argjson add "$add" '. + $add' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
 }
 
-# The ceiling, and the numbers behind it. AFTER CEL-48 this fixture costs
-# 39 jq and 4 git for three rows, and 48 jq and 4 git for twelve: ONE jq per
-# row to build it, one per repo to read the ledger, and a fixed remainder of
-# ~26 that belongs to lib/ws.sh, lib/inbox.sh and lib/services.sh reading
-# their own documents - not to this file. The git count is four per WORKTREE
-# (one for-each-ref, one status, at most two rev-list) and this fixture has
-# exactly one real worktree, which is why the git ceiling below is nowhere
-# near four per row: twelve per row is what it was before, and it must fail
-# here.
+# THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
 #
-# BEFORE: 57 jq and 12 git for the same three rows, the git growing four to
-# twelve per row and the jq five. The headroom is about a fifth over the
-# measured numbers - enough that a refactor's odd extra process is not a
-# failure, tight enough that a per-row fan-out coming back is.
-_fleet_assert_budget() { # <rows> <jq-count> <git-count>
-  local rows="$1" jqn="$2" gitn="$3"
-  local jqmax=$(( 40 + 3 * rows / 2 )) gitmax=$(( 6 + rows ))
-  if [ "$jqn" -gt "$jqmax" ]; then
-    printf 'jq spawns %s exceed the ceiling %s for %s rows\n' "$jqn" "$jqmax" "$rows" >&2
-    return 1
-  fi
-  if [ "$gitn" -gt "$gitmax" ]; then
-    printf 'git spawns %s exceed the ceiling %s for %s rows\n' "$gitn" "$gitmax" "$rows" >&2
+# Measured on this fixture, with the box walk stubbed and PATH replaced by the
+# shim so nothing can run uncounted:
+#
+#            3 rows                 12 rows
+#   before   148 total (54 jq, 12 git)   193 total (99 jq, 12 git)
+#   after    120 total (36 jq,  4 git)   129 total (45 jq,  4 git)
+#
+# Five processes per extra row became one. The remainder is fixed cost that
+# belongs to other libraries reading their own documents - 16 `cksum` and 17
+# `stat` from lib/yaml.sh's cache key, 3 `yq`, and the jq those accessors run.
+#
+# The first version of this budget counted jq and git ALONE. It would have
+# passed a change that traded a per-row jq for a per-row awk, which is the
+# same fan-out wearing different clothes; a budget that watches only the tools
+# its author was thinking about rots the moment somebody reaches for a third.
+# The ceiling below is the TOTAL, and main fails it at both sizes (148 > 136,
+# 193 > 154), which is the only way to know it is measuring anything.
+_fleet_assert_budget() { # <rows> <total-spawns>
+  local rows="$1" total="$2"
+  local max=$(( 130 + 2 * rows ))
+  if [ "$total" -gt "$max" ]; then
+    printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
+      "$total" "$max" "$rows" >&2
+    printf 'by tool:\n%s\n' "$(cut -f1 "$CEL_SPAWN_LOG" | sort | uniq -c | sort -rn | head -10)" >&2
     return 1
   fi
   return 0
@@ -613,9 +638,10 @@ test_fleet_stays_under_its_spawn_budget() {
   export CEL_CACHE="$T/nocache"
   _fleet_declare_bundle
   local rc=0
+  _fleet_stub_box_walk
   _fleet_spawn_shim
-  PATH="$T/shim:$PATH" cmd_fleet --json >/dev/null
-  _fleet_assert_budget 3 "$(_fleet_spawns jq)" "$(_fleet_spawns git)" || rc=1
+  PATH="$T/shim:$T/bin" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 3 "$(_fleet_spawns)" || rc=1
   _fleet_teardown
   return "$rc"
 }
@@ -629,9 +655,10 @@ test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
   _fleet_declare_bundle
   _fleet_add_rows 9
   local rc=0
+  _fleet_stub_box_walk
   _fleet_spawn_shim
-  PATH="$T/shim:$PATH" cmd_fleet --json >/dev/null
-  _fleet_assert_budget 12 "$(_fleet_spawns jq)" "$(_fleet_spawns git)" || rc=1
+  PATH="$T/shim:$T/bin" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 12 "$(_fleet_spawns)" || rc=1
   _fleet_teardown
   return "$rc"
 }

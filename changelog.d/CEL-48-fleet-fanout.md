@@ -12,4 +12,7 @@ between the row and the unit's counts. The console's two serial loops over
 workspace whose call fails still leaves the others rendered.
 
 The document is unchanged, field for field and in order, and the suite holds
-a spawn-count ceiling against a shimmed `jq` and `git` so it stays that way.
+a ceiling on EVERY process the read starts - not just the two tools this work
+set out to reduce - with PATH replaced by a counting shim so nothing can run
+uncounted. On the fixture: 148 processes for three rows and 193 for twelve,
+down to 120 and 129; five processes per extra row become one.
