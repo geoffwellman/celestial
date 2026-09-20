@@ -54,8 +54,20 @@ fleet_orphans_json() { # -> {count, rss_mb}
 # One herdr roster for the whole run. The sweep below asks about every
 # orchestrator and every running worker, and a call per question turned a
 # read into a visible pause.
+#
+# AND IT IS A DOCUMENT OR IT IS NOTHING. herdr answering with a truncated
+# document - killed mid-write, or dead between the opening brace and the rest
+# of it - is not the same as herdr answering; passing those bytes on left the
+# roster to fail inside whichever jq touched it first. An unreadable answer is
+# an answer nobody got, which this file already has a word for: empty, every
+# orchestrator `-`, and nobody convicted. The validation costs one jq per
+# render, against a read that starts a hundred and forty.
 _fleet_roster() {
-  herdr agent list 2>/dev/null || printf '%s' ''
+  local out
+  out="$(herdr agent list 2>/dev/null)" || { printf '%s' ''; return 0; }
+  [ -n "$out" ] || { printf '%s' ''; return 0; }
+  printf '%s' "$out" | jq -e . >/dev/null 2>&1 || { printf '%s' ''; return 0; }
+  printf '%s' "$out"
 }
 
 # ONE PASS OVER THE LEDGER, NOT ONE PER ROW.
@@ -85,8 +97,15 @@ _fleet_roster() {
 _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree US state US live US harness US id
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
-  jq -r --arg r "$2" --argjson roster "${3:-null}" --arg us "$_FLEET_US" '
-    def agent($p): if $roster == null then null
+  # The roster arrives as a STRING and is parsed inside the program, not as
+  # --argjson: a malformed document there fails jq before it has opened the
+  # ledger, the `|| true` below swallows it, and the fleet renders with every
+  # worker row missing - a box that looks idle because the pane manager
+  # stuttered. `fromjson?` yields nothing rather than raising, so an
+  # unreadable roster degrades to the no-roster path instead of to silence.
+  jq -r --arg r "$2" --arg roster "${3:-}" --arg us "$_FLEET_US" '
+    (($roster | fromjson?) // null) as $roster
+    | def agent($p): if $roster == null then null
                    else ((($roster.result.agents? // []) | map(select(.pane_id == $p)))[0] // {}) end;
     .[]?
     | select(.repo == $r and ((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked")))

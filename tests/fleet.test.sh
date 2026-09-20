@@ -611,7 +611,7 @@ _fleet_add_rows() { # <n>
 #
 #                3 rows                        12 rows
 #   before   174-179 total (64 jq, 12 git)   219-224 total (109 jq, 12 git)
-#   after        146 total (46 jq,  4 git)       155 total ( 55 jq,  4 git)
+#   after        147 total (47 jq,  4 git)       156 total ( 56 jq,  4 git)
 #
 # Five processes per extra row became one. The remainder is fixed cost that
 # belongs to other libraries reading their own documents - `cksum` and `stat`
@@ -628,8 +628,10 @@ _fleet_add_rows() { # <n>
 # its author was thinking about rots the moment somebody reaches for a third.
 # The ceiling below is the TOTAL, and main fails it at both sizes (179 > 158,
 # 224 > 176), which is the only way to know it is measuring anything. The
-# branch measures 146 and 155 on three consecutive runs, so the headroom is
-# real slack and not a repeat of the measurement.
+# branch measures 147 and 156 on consecutive runs, so the headroom is real
+# slack and not a repeat of the measurement. One of those jq is the roster
+# being validated once per render rather than being allowed to fail inside
+# whichever program touched it first, which is a process well spent.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
   local max=$(( 152 + 2 * rows ))
