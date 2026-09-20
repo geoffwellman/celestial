@@ -968,7 +968,7 @@ _console_subs_setup() {
   {"provider":"claude","account":"a1b2c3",
    "windows":[{"name":"5h","used_pct":16,"resets_at":"2026-09-18T09:00:00Z"},
               {"name":"7d","used_pct":41,"resets_at":"2026-09-19T19:00:00Z"}],
-   "extra":{"state":"disabled","reason":"out_of_credits"}},
+   "extra":{"state":"disabled","reason":"top-up is off"}},
   {"provider":"codex","account":"acct-alpha-1",
    "windows":[{"name":"5h","used_pct":9,"resets_at":"2026-09-18T07:30:00Z"},
               {"name":"7d","used_pct":62,"resets_at":"2026-09-21T02:00:00Z"}],
@@ -991,7 +991,9 @@ test_console_quota_view_renders_one_row_per_account_and_window() {
   assert_contains "$out" 'a1b2c3'
   assert_contains "$out" '5h'
   assert_contains "$out" '16%'
-  assert_contains "$out" 'out of credits'
+  # CEL-49: the disabled reason is top-up being switched off, and it says so -
+  # "out of credits" on a healthy account is worse than silence.
+  assert_contains "$out" 'top-up is off'
   _console_teardown
 }
 

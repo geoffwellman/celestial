@@ -225,7 +225,9 @@ test_subscription_usage_parses_the_claude_shape() {
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "5h") | .used_pct == 16')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "7d") | .used_pct == 41')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.extra.state')" disabled
-  assert_eq "$(printf '%s' "$out" | jq -r '.extra.reason')" out_of_credits
+  # CEL-49: `disabled_reason: out_of_credits` with spending switched off means
+  # top-up is off, not "this account is spent", and the row says the true one.
+  assert_eq "$(printf '%s' "$out" | jq -r '.extra.reason')" 'top-up is off'
   # the endpoint only answers an OAuth token with its beta header
   assert_contains "$(cat "$T/headers")" 'oauth-2025-04-20'
   _quota_stub_stop
@@ -398,4 +400,260 @@ test_the_cached_list_is_the_same_list_as_the_live_one() {
   assert_eq "$cached" "$live"
   _quota_stub_stop
   _quota_teardown
+}
+
+# --- CEL-49: ask the box what it already knows ------------------------------
+#
+# The owner, 2026-09-20: Codex reads `unreadable` while their prompt tool shows
+# it fine, Fable is missing, one Anthropic account of three is missing, and
+# opencode is nowhere. Every one of those is cel reading a worse source than
+# the box already has: `omp usage --json` holds refreshed OAuth per account and
+# answers for all of them, with `.limits[]` as the authoritative window list.
+#
+# NOTHING HERE CALLS A PROVIDER. `omp` is a stub on a prepended PATH printing
+# canned JSON, exactly as the endpoint stub above serves the fallback path.
+
+# THE FIXTURE IS THIS BOX'S OWN ANSWER, with the identities replaced by
+# fictional ones: `omp usage --json | jq del(.reports[].limits)` carries no
+# secret, and a stub shaped like a document omp does not produce tests
+# nothing - the first cut of this file invented `{accounts: [...]}`, the code
+# was written to match the invention, and the gate passed while `cel quota`
+# never changed. So tests/fixtures/omp-usage.json is the real shape:
+# {generatedAt, reports:[{provider, metadata:{accountId,email,planType},
+# limits:[...]}], accountsWithoutUsage, disabledCredentials, capacity}, with
+# three Anthropic accounts (each carrying a Fable-scoped weekly window), two
+# ChatGPT accounts and opencode-go - plus one `null` limit added to the first
+# Anthropic report, because a window that answers null must be skipped rather
+# than drawn at 0%.
+_omp_stub() {
+  mkdir -p "$T/bin"
+  cp "$(fixture omp-usage.json)" "$T/omp-usage.json"
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  usage) cat "$OMP_USAGE_JSON" ;;
+  auth-gateway) case "$2" in status) printf '%s\n' '{"ready":false}' ;; esac ;;
+esac
+EOF
+  chmod +x "$T/bin/omp"
+  export OMP_USAGE_JSON="$T/omp-usage.json"
+  export PATH="$T/bin:$PATH"
+}
+
+test_omp_usage_is_the_source_and_every_account_is_its_own_row() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 3
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "codex")] | length')" 2
+  # an account is provider + account id, and a reader tells them apart by email
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude") | .label] | sort | join(",")')" \
+    'one@example.invalid,three@example.invalid,two@example.invalid'
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude") | .account] | sort | join(",")')" \
+    'ant-one,ant-three,ant-two'
+  case "$out" in *"$PI_TOKEN"*|*"$CX_TOKEN"*)
+    printf 'the omp path printed a token\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# Fable is not a special case - it is one scoped window among several, and
+# hardcoding its name would reintroduce this bug for the next one.
+test_a_scoped_window_keeps_its_scope_and_is_not_dropped() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.scope == "Fable")] | length')" 1
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows[] | select(.scope == "Fable") | .used_pct')" 31
+  # and it is told apart from the account-wide window of the same length
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.name == "7d")] | length')" 2
+  assert_contains "$(cmd_quota 2>/dev/null)" 'Fable'
+}
+
+test_a_null_window_is_skipped_rather_than_drawn_empty() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(subscription_list | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 3
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.used_pct == null)] | length')" 0
+}
+
+# This repo runs on boxes with no omp at all, and absent it must degrade to
+# exactly today's behaviour rather than to an error.
+test_without_omp_the_endpoint_reads_answer_exactly_as_before() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/empty"
+  export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" '5h 16%'
+  assert_contains "$out" '7d 41%'
+  assert_contains "$out" 'codex'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# A plan with windows and no credit number is normal, not a gap to fill with
+# `unknown`: opencode renders usage and no balance row at all.
+test_opencode_renders_usage_and_no_credit_row() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.provider == "opencode")] | length')" 1
+  # a plan with three windows and no credit number at all
+  assert_eq "$(subscription_list | jq -r '.[] | select(.provider == "opencode") | .windows | length')" 3
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" 'opencode'
+  # the balances table names providers that declare a balance; opencode has none
+  assert_eq "$(printf '%s' "$out" | sed -n '/PROVIDER/,$p' | grep -c opencode)" 0
+}
+
+# "Out of credits" on a healthy account is worse than silence: the field is
+# `extra_usage.disabled_reason` with `spend.enabled=false`, which means top-up
+# is switched off.
+# The field lives in the Anthropic OAuth usage response, which is the direct
+# path - omp's document does not carry it - so this drives that path with no
+# omp on PATH, exactly as a box without the broker runs.
+test_top_up_being_off_never_reads_as_out_of_credits() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  case "$out" in *'out of credits'*|*'out_of_credits'*)
+    printf 'a healthy account was reported as out of credits:\n%s\n' "$out" >&2; return 1;; esac
+  assert_contains "$out" 'top-up is off'
+}
+
+# CREDIT IS WORKSPACE-SCOPED, DECIDED. A workspace without the key reads
+# `unknown`, and that is a fact about where you are standing - not a fault.
+# The fault is asking and not being able to tell, and the two must not read
+# the same.
+_quota_manifest_stub() {
+  CEL_MANIFEST="$T/agents.yaml"
+  export CEL_MANIFEST
+  cat >"$CEL_MANIFEST" <<'YAML'
+providers:
+  nokeyhere:
+    key_env: CEL_TEST_ABSENT_KEY
+    balance: {url: "http://127.0.0.1:1/balance", jq: ".credit", unit: usd, floor: 1}
+  deadend:
+    key_env: CEL_TEST_PRESENT_KEY
+    balance: {url: "http://127.0.0.1:1/balance", jq: ".credit", unit: usd, floor: 1}
+YAML
+  unset CEL_TEST_ABSENT_KEY
+  export CEL_TEST_PRESENT_KEY=fixture-not-a-real-key
+  export CEL_QUOTA_DIR="$T/quota"
+}
+
+test_no_key_in_this_workspace_reads_differently_from_asked_and_failed() {
+  _quota_setup
+  _quota_manifest_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" 'no key in this workspace'
+  assert_contains "$out" 'could not tell'
+  local js; js="$(cmd_quota --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "nokeyhere") | .state')" no_key
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "deadend") | .state')" unknown
+  _quota_teardown
+}
+
+# A STUB THAT DISAGREES WITH THE TOOL IS THE BUG, NOT THE SAFETY NET. The
+# first cut of this file invented `{accounts: [...]}`; omp answers
+# `{generatedAt, reports, accountsWithoutUsage, disabledCredentials,
+# capacity}`, so every row fell out, every caller fell back to the old path,
+# and this suite passed while `cel quota` printed exactly the output the
+# ticket was filed about. The fixture is pinned to the real shape here, and
+# where omp is actually installed its own top-level keys are compared - which
+# is the assertion that would have caught it.
+test_the_omp_fixture_is_the_shape_the_tool_answers() {
+  local keys; keys="$(jq -r 'keys | sort | join(",")' "$(fixture omp-usage.json)")"
+  assert_eq "$keys" 'accountsWithoutUsage,capacity,disabledCredentials,generatedAt,reports'
+  # the identity fields the mapping depends on live under .metadata
+  assert_eq "$(jq -r '[.reports[] | select(.metadata.accountId != null)] | length >= 5' "$(fixture omp-usage.json)")" true
+  assert_eq "$(jq -r '[.reports[].limits[]? | select(.amount.usedFraction != null)] | length >= 10' "$(fixture omp-usage.json)")" true
+  command -v omp >/dev/null 2>&1 || return 0
+  local live; live="$(omp usage --json 2>/dev/null | jq -r 'keys | sort | join(",")' 2>/dev/null || true)"
+  [ -n "$live" ] || return 0
+  assert_eq "$live" "$keys"
+}
+
+# The row count is the whole point: a mapping that reads the wrong key yields
+# nothing and every caller silently falls back to the old path, which is
+# precisely how this shipped once. Zero rows from a document with six reports
+# is a failure, not an empty answer.
+test_the_omp_mapping_yields_a_row_per_report() {
+  _quota_setup
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(_sub_omp_rows | grep -c .)" 6
+}
+
+# --- CEL-49 review: the two silences are not the same news ------------------
+#
+# A box with no omp falls back quietly, as the ticket requires. omp that IS
+# there and answers nothing usable falls back to the same stale reads - and
+# read the same way it is invisible, which is exactly how the `.accounts`
+# mapping shipped green. One line on stderr tells them apart.
+test_omp_present_but_useless_says_so_on_stderr() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/bin"
+  # omp is installed and answers a document this mapping cannot use: a shape
+  # drift, an error body, a truncated response - all of them land here.
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  usage) printf '%s\n' '{"error":"unsupported","reports":null}' ;;
+  auth-gateway) case "$2" in status) printf '%s\n' '{"ready":false}' ;; esac ;;
+esac
+EOF
+  chmod +x "$T/bin/omp"
+  export PATH="$T/bin:$PATH"
+  . "$CEL_ROOT/lib/quota.sh"
+  local err; err="$(subscription_list 2>&1 >/dev/null)"
+  assert_contains "$err" 'omp is on PATH but produced no usable subscription rows'
+  # and the fallback still answered, because the best available answer beats
+  # no answer - the line is a warning, not a refusal
+  local out; out="$(subscription_list 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length >= 1')" true
+  # stdout stays a parseable document: the warning may never land in it
+  case "$out" in *'omp is on PATH'*) printf 'the warning was printed to stdout\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_a_box_without_omp_falls_back_in_silence() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local err; err="$(subscription_list 2>&1 >/dev/null)"
+  [ -z "$err" ] || {
+    printf 'a box with no omp complained about omp:\n%s\n' "$err" >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The warning is about a source that answered badly, and the cached path asks
+# nobody: the console's refresh loop and the dashboard's poll must not print a
+# line per draw about a tool they never ran.
+test_the_cached_path_never_warns_about_omp() {
+  _quota_setup
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  subscription_list >/dev/null 2>&1
+  printf '#!/usr/bin/env bash\ncase "$1" in usage) printf "{}\\n" ;; esac\n' > "$T/bin/omp"
+  local err; err="$(subscription_list --cached 2>&1 >/dev/null)"
+  [ -z "$err" ] || {
+    printf 'the cached path warned about a tool it never ran:\n%s\n' "$err" >&2; return 1; }
 }

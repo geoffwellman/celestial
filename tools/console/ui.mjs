@@ -1865,7 +1865,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const stack = view === 'help'
     ? [h(Overlay, { key: 'help', title: 'KEYS  ·  Esc closes', lines: helpLines() })]
     : view === 'quota'
-      ? [h(Overlay, { key: 'quota', title: 'QUOTA  ·  Esc closes', lines: quotaView(doc) })]
+      ? [h(Overlay, { key: 'quota', title: 'QUOTA  ·  Esc closes', lines: quotaView(doc, width) })]
     : view === 'picker'
       ? [h(Overlay, {
         key: 'picker',
@@ -1956,10 +1956,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       // ...and the two subscriptions beside it. Amber at 80, red at 100: at
       // 100 the next delegation on that account refuses, which is a harder
       // stop than any amount of free memory.
-      subsEdge(doc)
+      subsEdge(doc, width)
         ? h(Text, {
           color: { bad: C.bad, warn: C.warn }[subsLevel(doc)] || C.dim,
-        }, `${subsEdge(doc)}   `)
+        }, `${subsEdge(doc, width)}   `)
         : null,
       memFree(doc.box)
         ? h(Text, {

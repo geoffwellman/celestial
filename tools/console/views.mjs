@@ -701,7 +701,7 @@ export const renderOutput = (cmd, text) => {
 // The tightest window per provider, as the status edge says it:
 // `claude 16%/41% · codex 9%/62%`. Two figures because they answer two
 // different questions - "can I delegate now" and "can I delegate this week".
-export const subsEdge = (doc) => {
+export const subsEdge = (doc, width) => {
   const subs = (doc && doc.subscriptions) || [];
   if (!subs.length) return '';
   const byProvider = new Map();
@@ -724,11 +724,50 @@ export const subsEdge = (doc) => {
     });
   }
   const parts = [];
+  // THE BAR GOES AFTER THE FIGURES. This row is shared with the memory
+  // headroom and the orphan count, and the figures are what an operator reads
+  // first; the bar is the glance that says which of them to care about. The
+  // track is small, and it is the first thing dropped when the row is tight -
+  // a status edge that wraps costs a line of the desk.
+  const cols = Number(width) || 0;
+  const track = cols >= 100 ? 8 : cols >= 60 ? 6 : 0;
   for (const [p, v] of byProvider) {
     const n = (x) => (x === null || x === undefined ? '-' : `${Math.round(x)}%`);
-    parts.push(`${p} ${n(v.short)}/${n(v.long)}`);
+    const bar = usageBar(Math.max(v.short ?? 0, v.long ?? 0), track);
+    parts.push(`${p} ${n(v.short)}/${n(v.long)}${bar ? ` ${bar}` : ''}`);
   }
   return parts.join(' · ');
+};
+
+// --- CEL-49: the bar every surface already had the number for ---------------
+//
+// The owner, 2026-09-20: it is not drawing bar charts as asked. Every surface
+// carried `used_pct` and every one of them printed it as digits, so reading
+// six accounts meant reading twelve numbers and comparing them by hand.
+//
+// THE RULES, because three renderers draw this and none of them may disagree:
+//   - the track is a FIXED width and the bar is a filled prefix of it, so a
+//     bar can never render wider than its track. A bar that wraps is worse
+//     than no bar: it costs a line of the screen and lies about the length.
+//   - 100% is the ONLY percentage that fills the track. 99% and 100% are the
+//     difference between "there is room for one more" and "the next delegation
+//     refuses", and they must not look the same.
+//   - past 100% is still one full track. There is no wider than spent.
+//   - a track too narrow to be honest draws NOTHING, and the caller prints the
+//     text it printed before.
+//
+// The number comes from `used_pct` in the fleet document and is never computed
+// here: two renderers arriving at the same fact by different arithmetic is the
+// bug CEL-35 exists to prevent.
+export const BAR_MIN = 6;
+
+export const usageBar = (pct, width) => {
+  const w = Math.floor(Number(width) || 0);
+  if (!(w >= BAR_MIN)) return '';
+  const p = Number(pct);
+  const safe = Number.isFinite(p) && p > 0 ? p : 0;
+  const filled = safe >= 100 ? w : Math.min(w - 1, Math.floor((safe / 100) * w));
+  return `${'█'.repeat(filled)}${'░'.repeat(w - filled)}`;
 };
 
 // How alarmed to be about the edge. Amber at 80 because that is where the
@@ -761,25 +800,33 @@ export const resetHuman = (iso) => {
 // one): the console and the dashboard disagreeing about how many
 // subscriptions this box has is the bug this function exists to prevent.
 //
-// One array per line: [provider, label, window, reset]. The provider and the
-// label are named once per account, because a column that repeats the same
-// string is a column the eye stops reading.
+// One array per line: [provider, label, window, reset, pct]. The provider and
+// the label are named once per account, because a column that repeats the same
+// string is a column the eye stops reading. The PERCENTAGE travels with the
+// cells (CEL-49) so the bar a surface draws is sized and coloured from the
+// same number the text was written from, rather than matched back to a window
+// by index - which the dashboard did, and which put the wrong colour on the
+// extra-usage row the moment one existed.
 export const subCells = (s) => {
   const provider = String((s && s.provider) || '');
   const label = String((s && (s.label || s.account)) || '');
   const windows = ((s && s.windows) || []).filter((w) => w && w.used_pct !== null && w.used_pct !== undefined);
   if (!windows.length) {
     const reason = (s && s.extra && s.extra.reason) || 'not signed in here, or the endpoint is down';
-    return [[provider, label, `unreadable: ${reason}`, '']];
+    return [[provider, label, `unreadable: ${reason}`, '', null]];
   }
   const rows = windows.map((w, i) => [
     i === 0 ? provider : '',
     i === 0 ? label : '',
-    `${w.name} ${Math.round(Number(w.used_pct) || 0)}%`,
+    // A SCOPED WINDOW KEEPS ITS SCOPE. Two 7d windows on one account are the
+    // account-wide one and a per-model one (Fable arrives as exactly this),
+    // and without the label they read as a duplicate of each other.
+    `${w.name}${w.scope ? ` ${w.scope}` : ''} ${Math.round(Number(w.used_pct) || 0)}%`,
     resetHuman(w.resets_at) ? `resets ${resetHuman(w.resets_at)}` : '',
+    Number(w.used_pct) || 0,
   ]);
   if (s && s.extra && s.extra.state === 'disabled') {
-    rows.push(['', '', `extra: ${String(s.extra.reason || 'disabled').replace(/_/g, ' ')}`, '']);
+    rows.push(['', '', `extra: ${String(s.extra.reason || 'disabled').replace(/_/g, ' ')}`, '', null]);
   }
   return rows;
 };
@@ -793,13 +840,19 @@ export const subCells = (s) => {
 // the second half of its rows. The gateway's accounts arrive in the fleet
 // document with everything else now, and a view that runs its own command is
 // a view that can disagree with the list it is drawn beside.
-export const quotaView = (doc) => {
+export const quotaView = (doc, width) => {
   const out = ['SUBSCRIPTIONS'];
   const subs = (doc && doc.subscriptions) || [];
   if (!subs.length) {
     out.push('  no signed-in subscriptions - cel quota asks the providers directly');
     return out;
   }
+  // THE TRACK IS SIZED TO THE COLUMN AND NEVER GUESSED. The fixed part of a
+  // row is 2 + 12 + 1 + 24 + 1 = 40 columns, the window text and its reset
+  // take about 34 more, so a bar is only drawn where one fits whole; below
+  // that this is exactly the view it was before.
+  const cols = Math.floor(Number(width) || Number(process?.env?.COLUMNS) || process?.stdout?.columns || 80);
+  const track = cols >= 100 ? 14 : cols >= 84 ? 8 : 0;
   const groups = [['direct', subs.filter((s) => s && s.source !== 'gateway')],
     ['via gateway', subs.filter((s) => s && s.source === 'gateway')]];
   for (const [heading, rows] of groups) {
@@ -807,9 +860,10 @@ export const quotaView = (doc) => {
     out.push(heading);
     for (const s of rows) {
       for (const c of subCells(s)) {
+        const bar = c[4] === null || c[4] === undefined ? '' : usageBar(c[4], track);
         // The label is truncated, not wrapped: a 36-character Codex account id
         // left whole pushed every window off the right of the terminal.
-        out.push(`  ${c[0].padEnd(12)} ${c[1].slice(0, 24).padEnd(24)} ${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
+        out.push(`  ${c[0].padEnd(12)} ${c[1].slice(0, 24).padEnd(24)} ${bar ? `${bar} ` : track ? ' '.repeat(track + 1) : ''}${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
       }
     }
   }
