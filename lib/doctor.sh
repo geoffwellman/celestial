@@ -23,6 +23,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"  # liveness_doctor_line
 # shellcheck source=lib/gc.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gc.sh"   # gc_doctor_line, for the blind-GC line
+# shellcheck source=lib/box.sh
+. "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # box_doctor_line, for the floor check
 # shellcheck source=lib/orphans.sh
 . "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # orphans_doctor_line
 # shellcheck source=lib/gateway.sh
@@ -438,6 +440,14 @@ cmd_doctor() {
   # the line names it rather than describing the problem.
   local orphline; orphline="$(orphans_doctor_line)"
   [ -z "$orphline" ] || c_warn "$orphline"
+
+  # AND THE FLOOR SPACE. The factory measured its machines and never the box
+  # they stand on, so the first symptom of a full disk was a build failing.
+  # A warning rather than a failure, and it names the largest reclaimable
+  # class and the command that clears it: 144G of 193G was diagnosable for
+  # months and nothing anywhere diagnosed it.
+  local boxline; boxline="$(box_doctor_line)"
+  [ -z "$boxline" ] || c_warn "$boxline"
 
   echo
   [ "$fail" = 0 ] && printf '\033[32mdoctor: OK\033[0m\n' || printf '\033[31mdoctor: problems found\033[0m\n'

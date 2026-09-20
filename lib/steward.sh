@@ -14,6 +14,8 @@ _CEL_STEWARD=1
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
 # shellcheck source=lib/gc.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gc.sh"
+# shellcheck source=lib/box.sh
+. "$(dirname "${BASH_SOURCE[0]}")/box.sh"
 # shellcheck source=lib/pages.sh
 . "$(dirname "${BASH_SOURCE[0]}")/pages.sh"
 # shellcheck source=lib/dash.sh
@@ -939,9 +941,34 @@ _steward_orphans() {
   return 0
 }
 
+# THE BOX ITSELF, ON A CADENCE - NOT EVERY TICK. The steward runs every five
+# minutes; a `docker image prune` per tick is its own kind of waste, spending
+# disk churn and daemon time on a box whose litter accumulates over days. Six
+# hours is the interval at which a sweep still has something to take. Bytes
+# freed go into the steward's own state, so "how much has the janitor
+# actually reclaimed" is a question with an answer.
+_steward_box() {
+  # _steward_due reads this window from the enclosing scope; a local here is
+  # the whole of the override, and the box key cannot collide with a PR key
+  # because those always contain a '#'.
+  local _STEWARD_WINDOW="${CEL_STEWARD_BOX_WINDOW:-21600}"
+  _steward_due box-sweep || return 0
+  box_sweep 0 || return 0
+  local freed=$(( ${BOX_FREED_DOCKER:-0} + ${BOX_FREED_CACHES:-0} + ${BOX_FREED_OURS:-0} ))
+  local total=0
+  if [ -f "$_STEWARD_STATE" ]; then
+    total="$(awk '$1=="box-freed-bytes"{t=$2} END{print t+0}' "$_STEWARD_STATE")"
+  fi
+  total=$(( total + freed ))
+  { awk '$1!="box-freed-bytes"' "$_STEWARD_STATE" 2>/dev/null || true
+    printf 'box-freed-bytes %s\n' "$total"; } > "$_STEWARD_STATE.tmp" \
+    && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
+  c_ok "box: $(box_human "$freed") freed this sweep, $(box_human "$total") since this state file began"
+  return 0
+}
+
 _STEWARD_UNIT="cel-steward"
 _steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
-
 # `cel steward --install` - the thing that actually makes the steward proactive.
 #
 # Every trigger the steward owns (a Linear ticket moved into the workspace's
@@ -1102,6 +1129,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
     reap=2
   fi
   [ "$do_gc" -eq 1 ] && cmd_gc --reap "$reap"
+  [ "$do_gc" -eq 1 ] && _steward_box
 
   local agents_json
   agents_json="$(herdr agent list 2>/dev/null || printf '{"result":{"agents":[]}}')"

@@ -460,3 +460,81 @@ test_gc_names_the_directories_it_could_not_identify() {
   assert_contains "$out" "$GC_WT"
   rm -rf "$T"
 }
+
+# ------------------------------------------------------------- cel gc --box
+# The box is a resource the factory spends. `cel gc` is unchanged by default;
+# --box runs the box sweepers AFTER the worktree pass, because a freed
+# worktree may be the last reference to a cache entry.
+
+_gc_box_fixture() {
+  _gc_managed_fixture
+  export CEL_BOX_RM_LOG="$T/box-removed"
+  : > "$CEL_BOX_RM_LOG"
+  mkdir -p "$HOME/.bun/install/cache" "$HOME/.cache/cel" "$HOME/restore"
+  printf 'aged\n' > "$HOME/.bun/install/cache/old-package"
+  touch -d '60 days ago' "$HOME/.bun/install/cache/old-package"
+  printf 'irreplaceable\n' > "$HOME/restore/profile-dump.tar"
+  touch -d '400 days ago' "$HOME/restore/profile-dump.tar"
+  # NEVER the real docker: this fixture drives the box sweepers, and a
+  # resolvable docker here would prune the box the suite is running on.
+  export CEL_BOX_DOCKER=cel-no-such-docker
+}
+
+test_gc_without_box_sweeps_no_box_litter_at_all() {
+  _gc_box_fixture
+  local out; out="$(cmd_gc)"
+  assert_eq "$(cat "$GC_SINK")" "herdr remove"
+  assert_eq "$(cat "$CEL_BOX_RM_LOG")" ""
+  case "$out" in *box:*) printf 'plain cel gc mentioned the box sweep\n' >&2; return 1;; esac
+  rm -rf "$T"
+}
+
+test_gc_box_sweeps_after_the_worktree_pass_and_counts_every_class() {
+  _gc_box_fixture
+  local out; out="$(cmd_gc --box)"
+  assert_eq "$(cat "$GC_SINK")" "herdr remove"
+  assert_contains "$out" "worktrees removed"
+  assert_contains "$out" "box:"
+  assert_contains "$out" caches
+  assert_contains "$out" ours
+  assert_contains "$(cat "$CEL_BOX_RM_LOG")" "$HOME/.bun/install/cache/old-package"
+  rm -rf "$T"
+}
+
+# Docker absent is a normal box: the class is reported as skipped, never as
+# zero bytes freed, and never as a failure.
+test_gc_box_reports_docker_skipped_when_docker_is_not_on_path() {
+  _gc_box_fixture
+  local out; out="$(cmd_gc --box)"
+  assert_contains "$out" "docker"
+  assert_contains "$out" "skipped"
+  rm -rf "$T"
+}
+
+# --dry-run covers the new work exactly as it covers the old.
+test_gc_box_dry_run_reports_bytes_and_removes_nothing() {
+  _gc_box_fixture
+  local out; out="$(cmd_gc --box --dry-run)"
+  assert_contains "$out" "box:"
+  assert_eq "$(cat "$CEL_BOX_RM_LOG")" ""
+  assert_eq "$(cat "$GC_SINK")" ""
+  [ -e "$HOME/.bun/install/cache/old-package" ] || { printf 'dry run removed a cache entry\n' >&2; return 1; }
+  rm -rf "$T"
+}
+
+# Class-three paths are NEVER swept by any flag, including --box with --reap.
+test_gc_box_never_touches_a_class_three_path_even_with_reap() {
+  _gc_box_fixture
+  cmd_gc --box --reap 12 >/dev/null 2>&1 || true
+  case "$(cat "$CEL_BOX_RM_LOG")" in
+    *"$HOME/restore"*) printf 'gc --box --reap took a class-three path\n' >&2; return 1;;
+  esac
+  [ -e "$HOME/restore/profile-dump.tar" ] || { printf 'the dump is gone\n' >&2; return 1; }
+  rm -rf "$T"
+}
+
+test_gc_rejects_unknown_arguments_and_names_box() {
+  assert_fails cmd_gc --sweep-everything
+  local out; out="$(cmd_gc --nope 2>&1 || true)"
+  assert_contains "$out" "--box"
+}
