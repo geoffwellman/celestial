@@ -4,7 +4,7 @@
 #
 # The owner, 2026-09-19: "so there is no way to open or close a workspace from
 # the console? or reset it to the appropriate layout and initial setup - there
-# should be. I can't restart the framewright session." Three gaps behind that
+# should be. I can't restart the alpha session." Three gaps behind that
 # sentence, and this file answers all three:
 #
 #   1. A workspace declared no shape, so there was nothing to return it TO.

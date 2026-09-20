@@ -369,7 +369,7 @@ test_run_dry_run_shows_the_prefix_ahead_of_the_agent_command() {
 }
 
 # CEL-44: A LIVE AGENT IN THE PRODUCT'S CWD IS AN ORCHESTRATOR, NAMED OR NOT.
-# On 2026-09-18 herdr cleared `standout-orch`'s name when it restarted; every
+# On 2026-09-18 herdr cleared `widget-orch`'s name when it restarted; every
 # surface resolves an orchestrator by its alias on the roster, so the live one
 # read as dead and the cure for a dead one is to start another - on top of it.
 # The refusal is here, at the one door that starts them.

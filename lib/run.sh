@@ -223,7 +223,7 @@ _run_agent_name() { # <alias>
 }
 
 # WHO IS ALREADY STANDING HERE. An orchestrator's identity in this plane is a
-# DIRECTORY, not a name: on 2026-09-18 herdr cleared `standout-orch`'s name
+# DIRECTORY, not a name: on 2026-09-18 herdr cleared `widget-orch`'s name
 # when it restarted and every surface that resolves an orchestrator by its
 # alias then read the live pane as dead - which invites starting a second one
 # on top of it. The roster carries each agent's cwd, so the question "is
