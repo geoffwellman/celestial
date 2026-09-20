@@ -415,6 +415,31 @@ next turn. Escalations that truly cannot wait still prompt, deliberately.
   the cap, stalled and unlanded work, and root's mail. Token-free and free of
   agent judgement; `--json` for scripts. The console answers from this, never
   from memory.
+- **Liveness: what the pane is doing, not how long it has been quiet.** The
+  stall timers ask one question - how long since anything moved - and every
+  real failure on this box in the two days to 2026-09-20 slipped through them,
+  because the runtime's own status was wrong and the clock had not run out: a
+  suite hung for three hours while herdr said `working`, a worker burned three
+  cores while it said `idle`, another sat in `sleep` blocks reporting
+  `working`, a fourth said `done` while waiting on a task it had started. Code
+  filters first - only a worker whose pane text has not moved in
+  `still_secs` (300) while the runtime says `working`, one reported
+  `idle`/`done` against a `running` ledger row, or one the marker rule already
+  caught is a candidate - and each candidate costs one decision request
+  carrying the last 40 lines of its pane and three named facts, nothing else.
+  The answer is `working`, `waiting_on_input`, `looping`, `crashed`,
+  `finished` or `unclear` with a confidence: `looping` and `crashed` are
+  reported at any age, `waiting_on_input` after 15 minutes, `finished` while
+  the ledger still says running. It only ever REPORTS - no path from an answer
+  to a kill, a release or a prompt - and the timers decide alone whenever
+  there is no router, no key, a failing endpoint or an answer below
+  `liveness.min_confidence`. `cel-fanout why` prints the reason in words with
+  how much longer the timer would have taken; `cel fleet --json` carries
+  `activity` and `activity_confidence`; the console's `live` column shows
+  `working!loop` when the runtime and the pane disagree. Configure under
+  `liveness:` in `~/.local/share/cel/config.yaml` (`enabled`, `model`,
+  `min_confidence`, `still_secs`, `wait_secs`, `lines`); `cel doctor` says
+  whether it is on and which model answers.
 - **Memory is part of that read.** Every process whose working directory is
   under a worker's worktree is that worker's - its shell, its agent, its tools
   and its test runs - so summing their `VmRSS` gives what a worker actually
