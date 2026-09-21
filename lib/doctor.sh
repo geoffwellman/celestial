@@ -64,6 +64,41 @@ doctor_box_services_line() {
   return 0
 }
 
+# HOW FAR BEHIND THE TREE YOU ARE READING IS. On 2026-09-21 the orchestrator's
+# $ws/repos/celestial sat at d2da692 while main was at 81022b5 - eighteen
+# commits, all day - and every conclusion drawn from it was truthful about the
+# wrong tree: a branch "measured" 3x slower than a main that predated
+# lib/orphans.sh, and a review of #75 declaring that code which had landed
+# hours earlier did not exist. Nothing anywhere said the checkout was stale.
+# This is the cheap half of CEL-55 and it would have caught all three on the
+# first tick of the day.
+#
+# A CHECKOUT THAT CANNOT BE ASKED IS UNKNOWN. No remote, no network, a remote
+# that refuses - all of them say so out loud, because silence here reads as
+# "up to date", which is exactly the failure being guarded.
+doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
+  local dir="$1" label="$2" br n
+  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    printf '%s: UNKNOWN - no origin remote, so how current it is cannot be asked\n' "$label"
+    return 0
+  fi
+  br="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  br="${br#origin/}"
+  [ -n "$br" ] || br="$(git -C "$dir" remote show origin 2>/dev/null \
+    | awk '/HEAD branch:/{print $NF; exit}' || true)"
+  [ -n "$br" ] && [ "$br" != "(unknown)" ] || {
+    printf '%s: UNKNOWN - origin names no default branch\n' "$label"; return 0; }
+  if ! git -C "$dir" fetch -q origin "$br" 2>/dev/null; then
+    printf '%s: UNKNOWN - origin/%s could not be fetched (offline?), so staleness is unknown\n' "$label" "$br"
+    return 0
+  fi
+  n="$(git -C "$dir" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || true)"
+  case "$n" in ''|*[!0-9]*) printf '%s: UNKNOWN - HEAD and origin/%s cannot be compared\n' "$label" "$br"; return 0;; esac
+  [ "$n" -gt 0 ] || return 0
+  printf '%s: %s commits behind origin/%s - git -C %s pull --ff-only\n' "$label" "$n" "$br" "$dir"
+}
+
 check_roles_and_runtimes() {
   local fail=0 a ad l target strat
   c_hd "Roles and runtimes"
@@ -223,6 +258,11 @@ check_workspaces() {
       url="$(ws_repo_get "$path" "$r" url)"
       [ -z "$url" ] || [ -d "$path/repos/$r/.git" ] \
         || c_warn "$n/$r: not cloned - run cel ws sync"
+      # ...and if it IS cloned, whether what it holds is current. A reviewer
+      # or a benchmark reading a stale checkout answers about the wrong tree.
+      local behind
+      behind="$(doctor_checkout_behind_line "$path/repos/$r" "$n/$r" 2>/dev/null || true)"
+      [ -z "$behind" ] || c_warn "$behind"
       gate="$(ws_repo_get "$path" "$r" gate)"
       if [ -z "$gate" ] || [ "$gate" = null ]; then
         # Without a gate the only verification is a reviewer's prose, and
