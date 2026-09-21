@@ -266,7 +266,7 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
     || die "$verb: $id changed state to ${state_now:-gone} while the gate ran - re-run $verb"
   [ -n "$line" ] && printf '%s\n' "$line"
   if [ -f "$wt/.agent/verdict.json" ]; then
-    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), gate_outcome: (.gate.outcome // (if .gate.timed_out then "timeout" elif .gate.passed == true then "pass" elif .gate.passed == false then "fail" else "none" end)), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
     if [ -n "$v" ]; then
       local cur; cur="$(_ledger_read "$wsdir")"
       _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson v "$v" 'map(if .id == $id then .verdict = $v else . end)')"
@@ -276,6 +276,11 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
     # both knobs by name so nobody has to go read the verifier to find them.
     if [ "$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)" = true ]; then
       c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$wt/.agent/verdict.json")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
+    elif [ "$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)" = no_verdict ]; then
+      # AND A GATE THAT DIED SAYING NOTHING IS NOT A FAILURE EITHER. It did not
+      # run out of time, so more time is the wrong answer; something killed it,
+      # and the reader's next move is to find out what.
+      c_warn "$id: the gate produced no verdict - $(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json"). Nothing here says the code is wrong; re-run collect and see what is killing it."
     fi
   fi
 }
@@ -1004,7 +1009,8 @@ cmd_status() {
   # all - author and reviewer are one account - so the ledger does, and a
   # verdict nobody can see is a verdict nobody acts on.
   # GATE is here because "did the gate pass" is the one dimension with a right
-  # answer, and a killed gate is not a wrong one: `TO` reads differently from
+  # answer, and a gate that never answered is not a wrong one: `TO` (ran out of
+  # time) and `NV` (died without reporting anything) read differently from
   # `FAIL` on purpose, the same way `+?` reads differently from `+0`.
   [ "$json" -eq 1 ] || printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
   local e id repo branch state pane live model ticket review gatecol trycol
@@ -1088,6 +1094,7 @@ cmd_status() {
       *)        review=- ;;
     esac
     if [ "$(printf '%s' "$e" | jq -r '.verdict.gate_timed_out // false')" = true ]; then gatecol=TO
+    elif [ "$(printf '%s' "$e" | jq -r '.verdict.gate_outcome // ""')" = no_verdict ]; then gatecol=NV
     else
       case "$(printf '%s' "$e" | jq -r '.verdict.gate // ""')" in
         true)  gatecol=ok ;;
@@ -1957,15 +1964,21 @@ cmd_land() { # <id>
   local gate ci_gate_body=""; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
   if [ -n "$gate" ]; then
     _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout" land >/dev/null || true
-    local wt gp gto; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    local wt gp gto gout gnvr; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
     gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
     gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"
-    # UNKNOWN IS NOT FAILED. A gate the timeout killed produced no verdict, so
-    # there is nothing here to call a finding; refusing it as a red gate sent a
-    # worker to fix code that was never shown to be wrong. Either give the gate
-    # the time it needs, or lean on CI - and if CI, say so out loud and record
-    # which check carried the branch.
-    if [ "$gto" = true ]; then
+    gout="$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    # UNKNOWN IS NOT FAILED, AND THERE ARE TWO WAYS TO BE UNKNOWN. A gate the
+    # timeout killed produced no verdict, so there is nothing here to call a
+    # finding; refusing it as a red gate sent a worker to fix code that was
+    # never shown to be wrong. On 2026-09-21 the same refusal was printed for a
+    # gate that was killed by a signal and never reported anything at all -
+    # `passed:false`, `timed_out:false`, no output - which is a third state
+    # this branch did not have and read as the worst of the four. Either give
+    # the gate what it needs, or lean on CI - and if CI, say so out loud and
+    # record which check carried the branch.
+    if [ "$gto" = true ] || [ "$gout" = no_verdict ]; then
       if [ "$gate_from_ci" -eq 1 ]; then
         # WHAT MAY STAND IN FOR A GATE. The first cut of this accepted any
         # successful check run on the head - a docs build or a lint job going
@@ -1992,6 +2005,8 @@ cmd_land() { # <id>
         local names; names="$(printf '%s' "$req" | paste -sd, - | sed 's/,/, /g')"
         ci_gate_body="Gate: CI ($names) on $head"
         c_warn "$id: the local gate did not complete; landing on CI evidence - $ci_gate_body"
+      elif [ "$gout" = no_verdict ]; then
+        die "land: the gate produced no verdict on $branch - $gnvr. It did not fail and it did not run out of time, so there is nothing here to send a worker after: re-run \`cel-fanout collect $id\` and find out what is killing it, or rely on CI (every protected check green) and say so with --gate-from-ci"
       else
         die "land: gate did not complete - re-run \`cel-fanout collect $id\` with a longer CEL_VERIFY_GATE_TIMEOUT, or rely on CI (checks: SUCCESS) and say so with --gate-from-ci"
       fi

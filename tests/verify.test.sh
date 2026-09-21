@@ -233,6 +233,131 @@ test_the_gate_timeout_watchdog_does_not_keep_the_suite_lock() {
   rm -rf "$T"
 }
 
+# ---- a gate that produced NO VERDICT is not a gate that failed ---------------
+# Measured on 2026-09-21: `cel-fanout land` on an approved, CI-green branch
+# refused with "the repo's gate did not pass (verdict: unknown)" while the same
+# suite run by hand in the same worktree passed. The verdict said
+# `timed_out:false`, no output at all, and `passed:false` - so the timeout arm,
+# which exists precisely so that "no verdict" does not read as "the code is
+# wrong", never applied. The gate had been killed by a signal: `wait` returned
+# 128+n, which fell through to the `*)` arm and was recorded as a failure.
+#
+# A process that died without ever reporting a status did not fail. It said
+# nothing, and a worker sent to fix code that was never shown to be wrong is
+# the exact confusion this file's own comments exist to prevent. Four outcomes,
+# not three: pass, fail, timed out, and produced no verdict.
+test_a_gate_killed_by_a_signal_has_no_verdict_rather_than_failing() {
+  _vrepo; _vcommit impl src/a.ts
+  local out rc=0
+  # the honest reproduction: a gate that tears down its own process group, the
+  # way tests/run.sh's cleanup does when the gate IS the group leader.
+  out="$("$VERIFY" "$T" --gate 'kill -TERM -- -$$')" || rc=$?
+  assert_eq "$rc" 3
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_eq "$(_v .gate.passed)" null
+  assert_eq "$(_v .gate.code)" null
+  assert_eq "$(_v .gate.timed_out)" false
+  assert_contains "$(_v .gate.no_verdict_reason)" "SIGTERM"
+  assert_contains "$out" "gate:NO-VERDICT"
+  case "$out" in *gate:FAIL*) echo "a gate that said nothing rendered as FAIL"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+# A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The verdict above stored
+# `tail: ""` and moved on, so the one visible signature of the bug - a gate
+# with no output and no exit code - was in the record and said nothing to
+# anyone reading it.
+test_a_gate_that_printed_nothing_says_so_rather_than_storing_an_empty_tail() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'exit 4' --quiet || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(_v .gate.output_empty)" true
+  assert_contains "$(_v .gate.tail)" "no output"
+  "$VERIFY" "$T" --gate 'echo something' --quiet
+  assert_eq "$(_v .gate.output_empty)" false
+  rm -rf "$T"
+}
+
+# THE MEETING POINT THE BUG LIVED IN. The repo's real runner, under this
+# verifier, as the gate: the verifier gives the gate its own session so a
+# timeout can kill the whole group, and the runner kills process groups of its
+# own on the way out so a killed suite leaves no servers behind (it also sweeps
+# processes still standing in its temporary directory). Both protections exist
+# for named incidents and both stay. What must not happen is that their meeting
+# costs the run its answer: a suite that has printed "N passed, M failed" has
+# answered, and that answer is now written down by the gate itself at the
+# moment it exists, rather than surviving only as the exit status of a process
+# that a group teardown can signal.
+test_the_repos_runner_as_the_gate_always_reaches_a_verdict() {
+  _vrepo; _vcommit impl src/a.ts
+  mkdir -p "$T/tests/lib"
+  cp "$CEL_ROOT/tests/run.sh" "$T/tests/run.sh"
+  cp "$CEL_ROOT/tests/lib/assert.sh" "$T/tests/lib/assert.sh"
+  # one ordinary test and one that leaks a process out of its own group, which
+  # is exactly what the runner's stray sweep exists for
+  cat > "$T/tests/mini.test.sh" <<'MINI'
+test_one_real_thing() { assert_eq 1 1; }
+test_leaves_a_stray_behind() { cd "$TMPDIR"; setsid sleep 60 >/dev/null 2>&1 & assert_eq 1 1; }
+MINI
+  local rc=0
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$T/suite.lock" \
+    "$VERIFY" "$T" --gate 'bash tests/run.sh' --gate-timeout 120 --quiet || rc=$?
+  assert_eq "$(_v .gate.outcome)" pass
+  assert_eq "$(_v .gate.passed)" true
+  assert_eq "$(_v .gate.code)" 0
+  assert_eq "$rc" 0
+  assert_contains "$(_v .gate.tail)" "2 passed, 0 failed"
+  rm -rf "$T"
+}
+
+# A suite that was killed WHILE RUNNING has no answer, and the exit status of
+# whatever ran last inside it is not one: a gate that tore its own process
+# group down must not be read as the pass of its final builtin.
+test_a_suite_killed_mid_run_is_no_verdict_not_a_pass() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'echo starting; kill -TERM -- -$$; sleep 5' --quiet || rc=$?
+  assert_eq "$rc" 3
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_eq "$(_v .gate.passed)" null
+  assert_contains "$(_v .gate.tail)" "starting"
+  rm -rf "$T"
+}
+
+# And the three that already existed stay distinct from the fourth: a timeout
+# is a timeout, not a no-verdict, because the operator's next move differs
+# (more time, versus find out what killed it).
+test_a_timeout_is_recorded_as_a_timeout_and_not_as_no_verdict() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'echo working; sleep 5' --gate-timeout 1 --quiet || rc=$?
+  assert_eq "$rc" 2
+  assert_eq "$(_v .gate.outcome)" timeout
+  assert_eq "$(_v .gate.timed_out)" true
+  rm -rf "$T"
+}
+test_a_passing_and_a_failing_gate_record_their_exit_code() {
+  _vrepo; _vcommit impl src/a.ts
+  "$VERIFY" "$T" --gate 'true' --quiet
+  assert_eq "$(_v .gate.outcome)" pass
+  assert_eq "$(_v .gate.code)" 0
+  local rc=0
+  "$VERIFY" "$T" --gate 'echo boom; exit 7' --quiet || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(_v .gate.outcome)" fail
+  assert_eq "$(_v .gate.code)" 7
+  assert_eq "$(_v .gate.no_verdict_reason)" null
+  rm -rf "$T"
+}
+test_no_gate_at_all_is_not_a_no_verdict() {
+  _vrepo; _vcommit impl src/a.ts
+  "$VERIFY" "$T" --quiet
+  assert_eq "$(_v .gate.outcome)" none
+  assert_eq "$(_v .gate.code)" null
+  rm -rf "$T"
+}
+
 # A gate that backgrounds a process does not hand it the box's suite lock: the
 # gate and everything under it are inside the lock by ENVIRONMENT, never by
 # descriptor.
