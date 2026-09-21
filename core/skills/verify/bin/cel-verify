@@ -76,7 +76,18 @@ _verify_suite_lock_path() {
 # mid-run, with no summary - and land correctly refused a verdict that did not
 # exist. "Ran out of time" and "the code is wrong" lead to opposite actions and
 # must not render alike, the same rule _wt_ahead already states for `?` vs `0`.
+#
+# AND A GATE THAT PRODUCED NO VERDICT IS NEITHER. On 2026-09-21 an approved,
+# CI-green branch was refused by land with "did not pass (verdict: unknown)"
+# while the same suite passed by hand in the same worktree: the gate process
+# had been killed by a signal, so `wait` returned 128+n, which is not 0 and not
+# 124 and fell through to "it failed". It did not fail. It said nothing - and
+# "go and fix your code" is the wrong instruction for a branch that was never
+# shown to be wrong, which is the whole reason the paragraph above exists.
+# Four outcomes now, and the exit status of this file distinguishes them:
+# pass, fail, timed out, produced no verdict.
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
+g_code=null g_outcome=none g_nvr=null g_empty=false
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
   suite_lock_fd=""
@@ -121,11 +132,34 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   # leave a server running, and that server holds the same descriptors.
   gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
   gate_killed="$gate_out.killed"
+  # THE ANSWER IS WRITTEN DOWN BEFORE THE PROCESS THAT HAS IT CAN BE KILLED.
+  # The two protections above and in tests/run.sh are both load-bearing and
+  # both stay; the 2026-09-21 bug was where they meet. The gate gets its own
+  # SESSION here, so under `bash tests/run.sh` the runner is the leader of that
+  # session's group - and that runner kills process groups of its own on the
+  # way out, precisely so a killed suite leaves no servers behind. A suite that
+  # has already printed "980 passed, 3 failed" has answered the question; if
+  # the only record of that answer is the exit status of a process that its own
+  # cleanup then signals, the answer is lost and the branch is recorded as a
+  # failure. So the gate's status is recorded by the gate itself, in a file, at
+  # the moment it has one. `wait` is corroboration after that, not the only
+  # witness - and an absent file is now a fact with a name rather than an
+  # exit code nobody can account for.
+  gate_rc="$gate_out.rc"
   # The gate is inside the lock by ENVIRONMENT, not by descriptor: a gate that
   # leaves a process behind (this file has seen seven at once) must not leave
   # it holding the box's suite lock as well.
   ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
-    exec setsid bash -lc "$gate" ) > "$gate_out" 2>&1 &
+    # Traps, not a trailing command: a gate that ends in `exit` never reaches a
+    # line written after it. And a fatal signal is recorded AS a signal - a
+    # shell that is going down because something killed its process group has
+    # not reached a verdict, and must not leave behind the status of whatever
+    # ran last, which is how a suite that killed itself would read as a pass.
+    exec setsid bash -lc "trap 'printf %s \$? > \"$gate_rc\"' EXIT
+trap 'printf %s 129 > \"$gate_rc\"; exit 129' HUP
+trap 'printf %s 130 > \"$gate_rc\"; exit 130' INT
+trap 'printf %s 143 > \"$gate_rc\"; exit 143' TERM
+$gate" ) > "$gate_out" 2>&1 &
   gate_pid=$!
   # AND NEITHER DOES THE WATCHDOG. On 2026-09-19 every gate on the box queued
   # for eighteen minutes behind `sleep 1800`, ppid 1: this watchdog's sleep,
@@ -152,17 +186,45 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   else
     kill -TERM -- -"$gate_pid" 2>/dev/null || true
   fi
+  # The gate's own record beats the wait status: the process may have been
+  # signalled after it had already answered.
+  reported=""
+  if [ -s "$gate_rc" ]; then reported="$(cat "$gate_rc")"; fi
+  case "$reported" in ''|*[!0-9]*) reported="";; esac
+  rm -f "$gate_rc"
   out="$(cat "$gate_out")"; rm -f "$gate_out"
   g_tail="$(printf '%s' "$out" | tail -n 12)"
+  # A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The 2026-09-21 verdicts
+  # stored `tail: ""` and moved on, so the one visible signature of the bug -
+  # no output and no exit code - was sitting in the record saying nothing to
+  # anybody reading it.
+  if [ -z "$out" ]; then g_empty=true; g_tail="(the gate produced no output at all)"; fi
+  if [ -e "$gate_killed" ] || [ "$rc" = 124 ] || [ "$rc" = 137 ]; then reported=""; fi
+  if [ -n "$reported" ]; then rc="$reported"; fi
   case "$rc" in
-    0) g_pass=true;;
+    0) g_pass=true; g_code=0; g_outcome=pass;;
     124|137)
-      g_to=true; g_pass=null
+      g_to=true; g_pass=null; g_outcome=timeout
       # the LAST line is where it got to; the sentence after it is why there is
       # nothing after that line.
-      g_tail="$(printf '%s' "$out" | tail -n 1)"$'\n'"killed after ${gate_timeout}s - no verdict"
+      # The shell that carried the gate reports its killed children on the way
+      # down ("Terminated   sleep 5"); that notice is not where the suite got
+      # to, and it is the one line the reader most needs here.
+      if [ "$g_empty" = true ]; then last="(the gate produced no output at all)"
+      else last="$(printf '%s' "$out" | grep -v -e '^Terminated' -e '^Killed' -e '^Hangup' -e '^Interrupt' | tail -n 1)"; fi
+      g_tail="$last"$'\n'"killed after ${gate_timeout}s - no verdict"
       ;;
-    *) g_pass=false;;
+    *)
+      if [ "$rc" -gt 128 ]; then
+        # 128+n: killed, and a killed process never reached a status. That is
+        # not a failure - it is the absence of an answer, and it gets said so.
+        sig=$((rc - 128)); signame="$(kill -l "$sig" 2>/dev/null || true)"
+        g_outcome=no_verdict; g_pass=null
+        g_nvr="the gate's process was killed by SIG${signame:-$sig} before it reported an exit status"
+      else
+        g_pass=false; g_code="$rc"; g_outcome=fail
+      fi
+      ;;
   esac
   # Somebody else is waiting on this: hand it over as soon as the gate is
   # done, rather than at the end of the PR and GitHub work below.
@@ -226,29 +288,38 @@ mkdir -p "$wt/.agent"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg base "$base" \
   --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
   --argjson gto "$g_to" --argjson gtos "$gate_timeout" --argjson gwait "$g_waited" \
+  --argjson gcode "$g_code" --arg gout "$g_outcome" --arg gnvr "$g_nvr" --argjson gempty "$g_empty" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
   --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
   { at: $at, branch: $branch, base: $base,
-    gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, tail: $gtail,
+    gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, code: $gcode,
+              outcome: $gout, no_verdict_reason: (if $gnvr == "null" then null else $gnvr end),
+              tail: $gtail, output_empty: $gempty,
               timed_out: $gto, timeout_secs: $gtos, waited_secs: $gwait },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
     checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
 
 if [ "$quiet" -eq 0 ]; then
-  if [ "$g_conf" != true ]; then gs="gate:none"
-  elif [ "$g_to" = true ]; then gs="gate:TIMEOUT(${gate_timeout}s)"
-  elif [ "$g_pass" = true ]; then gs="gate:PASS"
-  else gs="gate:FAIL"; fi
+  case "$g_outcome" in
+    none)       gs="gate:none";;
+    timeout)    gs="gate:TIMEOUT(${gate_timeout}s)";;
+    no_verdict) gs="gate:NO-VERDICT";;
+    pass)       gs="gate:PASS";;
+    *)          gs="gate:FAIL";;
+  esac
   [ "$g_waited" -gt 0 ] && gs="$gs(queued ${g_waited}s)"
   rs="red-green:$(case "$rg" in true) echo yes;; false) echo no;; *) echo n/a;; esac)"
   printf 'verdict %s  %s  diff:%s files +%s/-%s  checks:%s  review:%s\n' "$gs" "$rs" "$d_files" "$d_ins" "$d_del" "$c_state" "$r_dec"
 fi
 # exit reflects the gate only: that is the one dimension with a right answer.
-# Three outcomes, three codes, so a caller does not have to parse prose: 0 the
+# Four outcomes, four codes, so a caller does not have to parse prose: 0 the
 # gate passed (or was never configured), 1 it genuinely failed, 2 it ran out of
-# time and there is no verdict to act on.
-[ "$g_to" = true ] && exit 2
+# time, 3 it produced no verdict at all. 2 and 3 both mean "there is nothing
+# here to act on", and they part company on what to do next: give it more time,
+# versus find out what killed it.
+[ "$g_outcome" = timeout ] && exit 2
+[ "$g_outcome" = no_verdict ] && exit 3
 [ "$g_pass" = false ] && exit 1
 exit 0

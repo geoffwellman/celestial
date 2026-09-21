@@ -279,23 +279,27 @@ test_a_gate_that_printed_nothing_says_so_rather_than_storing_an_empty_tail() {
   rm -rf "$T"
 }
 
-# THE REGRESSION ITSELF. The repo's real runner, under this verifier, as the
-# gate: it runs in its own session (so a timeout can kill the group), and it
-# kills process groups of its own on the way out (so a killed suite leaves no
-# servers behind). Both protections are load-bearing and neither is going
-# away, so the verdict must survive their meeting: a suite that reached
-# "N passed, M failed" has answered the question, whatever happens to its
-# process afterwards. Before this ticket the answer was thrown away and the
-# branch was recorded as a failure.
+# THE MEETING POINT THE BUG LIVED IN. The repo's real runner, under this
+# verifier, as the gate: the verifier gives the gate its own session so a
+# timeout can kill the whole group, and the runner kills process groups of its
+# own on the way out so a killed suite leaves no servers behind (it also sweeps
+# processes still standing in its temporary directory). Both protections exist
+# for named incidents and both stay. What must not happen is that their meeting
+# costs the run its answer: a suite that has printed "N passed, M failed" has
+# answered, and that answer is now written down by the gate itself at the
+# moment it exists, rather than surviving only as the exit status of a process
+# that a group teardown can signal.
 test_the_repos_runner_as_the_gate_always_reaches_a_verdict() {
   _vrepo; _vcommit impl src/a.ts
   mkdir -p "$T/tests/lib"
   cp "$CEL_ROOT/tests/run.sh" "$T/tests/run.sh"
   cp "$CEL_ROOT/tests/lib/assert.sh" "$T/tests/lib/assert.sh"
-  printf 'test_one_real_thing() { assert_eq 1 1; }\n' > "$T/tests/mini.test.sh"
-  # the runner tears its own group down at the end, which under the verifier's
-  # setsid is the very process the verifier is waiting on
-  printf 'kill -TERM -- -$$ 2>/dev/null || true\n' >> "$T/tests/run.sh"
+  # one ordinary test and one that leaks a process out of its own group, which
+  # is exactly what the runner's stray sweep exists for
+  cat > "$T/tests/mini.test.sh" <<'MINI'
+test_one_real_thing() { assert_eq 1 1; }
+test_leaves_a_stray_behind() { cd "$TMPDIR"; setsid sleep 60 >/dev/null 2>&1 & assert_eq 1 1; }
+MINI
   local rc=0
   env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$T/suite.lock" \
     "$VERIFY" "$T" --gate 'bash tests/run.sh' --gate-timeout 120 --quiet || rc=$?
@@ -303,7 +307,21 @@ test_the_repos_runner_as_the_gate_always_reaches_a_verdict() {
   assert_eq "$(_v .gate.passed)" true
   assert_eq "$(_v .gate.code)" 0
   assert_eq "$rc" 0
-  assert_contains "$(_v .gate.tail)" "1 passed, 0 failed"
+  assert_contains "$(_v .gate.tail)" "2 passed, 0 failed"
+  rm -rf "$T"
+}
+
+# A suite that was killed WHILE RUNNING has no answer, and the exit status of
+# whatever ran last inside it is not one: a gate that tore its own process
+# group down must not be read as the pass of its final builtin.
+test_a_suite_killed_mid_run_is_no_verdict_not_a_pass() {
+  _vrepo; _vcommit impl src/a.ts
+  local rc=0
+  "$VERIFY" "$T" --gate 'echo starting; kill -TERM -- -$$; sleep 5' --quiet || rc=$?
+  assert_eq "$rc" 3
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_eq "$(_v .gate.passed)" null
+  assert_contains "$(_v .gate.tail)" "starting"
   rm -rf "$T"
 }
 
