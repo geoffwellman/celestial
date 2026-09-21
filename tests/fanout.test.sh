@@ -2262,3 +2262,53 @@ test_delegate_marks_the_worker_with_the_plane_launch_environment() {
     || { echo "the launch was marked after the agent started"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# --- CEL-50: a pane is not a worker -----------------------------------------
+#
+# A delegate left the task prompt TYPED BUT UNSUBMITTED in the worker pane:
+# two workers sat two hours at +0 commits with the dispatch below the divider
+# and `ctx 0.0%`, while the ledger read `running`. The row now carries what
+# actually happened, and the worktree - which was fine - stays put so a
+# re-prompt is all the recovery anyone needs.
+_unstarted_pane() {
+  printf '%s\n' \
+    '────────────────────────────────────────' \
+    'Your task spec is /ws/alpha/.cel/specs/ABC-7.md. Read it fully' \
+    ' ctx 0.0%/1.0m'
+}
+
+test_delegate_whose_prompt_is_never_accepted_keeps_the_worktree() {
+  _fanout_setup
+  export STUB_PANE_TEXT="$(_unstarted_pane)"
+  (cd "$T" && CEL_FANOUT_CONFIRM_TRIES=1 CEL_FANOUT_CONFIRM_SLEEP=0 \
+     "$BIN" delegate widget WG-UNSUB "$T/spec.md") > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "unconfirmed"
+  # the work is not the casualty: the worktree survives for the re-prompt
+  [ -d "$STUB_WT" ] || { echo 'the worktree was thrown away'; return 1; }
+  # ONE re-submit, never a third: a dispatch that needs three tries is a fault
+  # to report, not to paper over.
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" "2"
+  unset STUB_PANE_TEXT
+  rm -rf "$T"
+}
+
+test_delegate_records_running_when_the_prompt_is_accepted() {
+  _fanout_setup
+  (cd "$T" && CEL_FANOUT_CONFIRM_TRIES=1 CEL_FANOUT_CONFIRM_SLEEP=0 \
+     "$BIN" delegate widget WG-OK "$T/spec.md") > /dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "running"
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" "1"
+  rm -rf "$T"
+}
+
+# A row reading `running` at +0 commits with a pane at zero context is the
+# exact shape that read like progress for two hours. It is now its own state
+# in the listing.
+test_status_shows_the_silence_instead_of_a_row_that_reads_like_progress() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-SIL "$T/spec.md") > /dev/null
+  local out
+  out="$(cd "$T" && STUB_STATUS=idle STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" status)"
+  assert_contains "$out" "unstarted"
+  rm -rf "$T"
+}

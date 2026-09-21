@@ -346,3 +346,176 @@ EOF
   assert_contains "$out" 'the timer would not have flagged this'
   rm -rf "$T"
 }
+
+# --- CEL-50: the three silences ---------------------------------------------
+#
+# A pane that exists is not a worker that is working. Three shapes cost this
+# box a day between them and every one of them renders exactly like an agent
+# thinking: a prompt that was typed but never submitted, a session that
+# accepts input and errors on every turn, and an account whose window is
+# spent. They are read from the pane text alone - no request, no key, no
+# router - because none of them needs judgement, only recognition.
+
+_silence_setup() {
+  T="$(mktemp -d)"
+  export CEL_LIVENESS_STATE="$T/liveness-state"
+}
+
+# The 2026-09-18 dispatch incident, as a pane: the whole prompt sitting below
+# the divider, the context at zero, and two hours of nothing.
+_pane_unstarted() {
+  cat <<'PANE'
+  pi - alpha/ABC-7
+────────────────────────────────────────
+Your task spec is /ws/alpha/.cel/specs/ABC-7.md. Read it fully and execute
+exactly it, then run the gate.
+ ctx 0.0%/1.0m
+PANE
+}
+
+test_a_pane_holding_an_unsubmitted_prompt_is_unstarted() {
+  _silence_setup
+  assert_eq "$(liveness_pane_silence "$(_pane_unstarted)")" unstarted
+  rm -rf "$T"
+}
+
+# The same pane once the agent has actually taken the turn: context has moved
+# and there is a turn on the pane, so there is nothing to report.
+test_a_pane_with_a_first_assistant_turn_is_not_unstarted() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    'Your task spec is /ws/alpha/.cel/specs/ABC-7.md.' \
+    '⏺ reading the spec' \
+    ' ctx 3.4%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" ""
+  rm -rf "$T"
+}
+
+# THE CLASS, NOT THE MESSAGE. The transport bug that produced this wrote one
+# sentence; the next one will write a different one, so the error asserted
+# here is deliberately NOT the one from the incident.
+test_a_repeated_terminal_error_with_no_turn_between_is_erroring() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '> fix the flake in tests/widget.test.sh' \
+    'Error: upstream stream closed before the first token' \
+    '> fix the flake in tests/widget.test.sh' \
+    'Error: upstream stream closed before the first token' \
+    ' ctx 8.1%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" erroring
+  rm -rf "$T"
+}
+
+# One error with the agent working after it is a bad turn, not a wedged
+# session, and reporting it would make the classifier noise.
+test_a_single_error_followed_by_work_is_not_erroring() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    'Error: upstream stream closed before the first token' \
+    '⏺ retrying, then editing lib/widget.sh' \
+    ' ctx 8.1%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" ""
+  rm -rf "$T"
+}
+
+# A spent window is a WAIT, and the only useful thing to say about a wait is
+# when it ends - so the reset travels with the verdict where quota knows it.
+test_a_rate_limited_pane_is_throttled_and_carries_the_reset() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    'API Error: 429 Too Many Requests {"type":"rate_limit_error"}' \
+    ' ctx 61.0%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" throttled
+  _subscription_accounts() { printf 'claude\talpha-acct\ttok\n'; }
+  subscription_usage() { printf '%s' '{"windows":[{"name":"5h","used_pct":100,"resets_at":"2099-01-01T00:00:00Z"}]}'; }
+  local out; out="$(liveness_pane_silence "$pane" anthropic)"
+  assert_eq "$(printf '%s' "$out" | cut -f1)" throttled
+  assert_contains "$out" "$(sub_reset_human 2099-01-01T00:00:00Z)"
+  unset -f _subscription_accounts subscription_usage
+  rm -rf "$T"
+}
+
+# ...and where it does not, the verdict stands alone rather than carrying an
+# empty field or the word "unknown" pretending to be a time.
+test_a_throttled_pane_omits_a_reset_nobody_can_supply() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' 'API Error: 429 Too Many Requests' ' ctx 61.0%/1.0m')"
+  _subscription_accounts() { :; }
+  subscription_usage() { printf '{}'; }
+  assert_eq "$(liveness_pane_silence "$pane" anthropic)" throttled
+  unset -f _subscription_accounts subscription_usage
+  rm -rf "$T"
+}
+
+# A FALSE POSITIVE HERE IS WORSE THAN THE SILENCE IT REPLACES: a busy worker
+# reported as throttled sends an orchestrator to wait on a window that is not
+# spent.
+test_a_healthy_working_pane_is_none_of_the_three() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '⏺ editing lib/widget.sh' \
+    '⏺ running bash tests/run.sh widget' \
+    '  27 passed, 0 failed' \
+    ' ctx 41.2%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" ""
+  rm -rf "$T"
+}
+
+# A REVIEWER IS A PANE TOO. `alpha-pr-80-review` was started, prompted twice
+# with success reported both times, and sat at context 0% with the prompt in
+# its composer. The defect is not about workers; it is about panes.
+test_a_reviewers_unstarted_pane_reads_exactly_like_a_workers() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '  pi - alpha-pr-80-review' \
+    '────────────────────────────────────────' \
+    '[Pasted text #1 +14 lines]' \
+    ' ctx 0.0%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" unstarted
+  rm -rf "$T"
+}
+
+# It says it in words, like every other verdict here, and the reset is the
+# half of the throttled sentence an operator can act on.
+test_the_silence_sentence_names_the_block_and_the_reset() {
+  _silence_setup
+  assert_contains "$(liveness_silence_sentence unstarted)" 'never submitted'
+  assert_contains "$(liveness_silence_sentence erroring)" 'every turn'
+  local s; s="$(liveness_silence_sentence throttled '19:00')"
+  assert_contains "$s" 'throttled'
+  assert_contains "$s" '19:00'
+  case "$(liveness_silence_sentence throttled)" in *19:00*) return 1 ;; esac
+  assert_eq "$(liveness_silence_sentence '')" ""
+  rm -rf "$T"
+}
+
+# A WORKER WHOSE WORK IS ABOUT RATE LIMITS IS NOT RATE LIMITED (PR #81 review).
+# `throttled` was recognised from the words appearing anywhere in the pane, so
+# a worker running the quota suite, grepping lib/quota.sh, or showing a diff
+# with `429` in it was reported as blocked on a provider - while it was
+# working, with turns on the pane and the context moving. That report sends an
+# orchestrator to wait for a window that was never spent, which is the exact
+# false positive the ticket calls worse than the silence it replaces.
+test_a_busy_pane_whose_own_output_mentions_rate_limits_is_not_throttled() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '⏺ running bash tests/run.sh quota' \
+    '  ok   test_quota_reports_a_rate_limit_error' \
+    '⏺ editing lib/quota.sh' \
+    '  +  429 Too Many Requests is a wait, not a failure' \
+    ' ctx 44.7%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" ""
+  rm -rf "$T"
+}
+
+# ...and the real thing is still the real thing: the refusal is the last word
+# on the pane, in the shape a provider writes one.
+test_a_provider_refusal_after_the_last_turn_is_still_throttled() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '⏺ editing lib/widget.sh' \
+    'API Error: 429 Too Many Requests {"type":"rate_limit_error"}' \
+    ' ctx 61.0%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" throttled
+  rm -rf "$T"
+}
