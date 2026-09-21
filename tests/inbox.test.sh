@@ -720,7 +720,7 @@ test_inbox_read_outside_any_workspace_refuses_rather_than_reading_empty() {
 test_inbox_read_with_no_mail_names_the_reader_and_the_workspace() {
   _inbox_sandbox
   ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace demo ) >/dev/null 2>&1
-  _inbox_read --for root --workspace demo >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace demo >/dev/null 2>&1
   local rc=0 err
   err="$( CEL_INBOX_ME=root _inbox_read --for root --workspace demo 2>&1 1>/dev/null )" || rc=$?
   assert_eq "$rc" "0"
@@ -741,7 +741,7 @@ test_inbox_read_says_where_the_mail_is_when_it_is_in_another_workspace() {
   _inbox_registry_fixture
   ( CEL_INBOX_ME=t _inbox_send widget-orch "over here" --workspace beta ) >/dev/null 2>&1
   ( CEL_INBOX_ME=t _inbox_send widget-orch "read me" --workspace alpha ) >/dev/null 2>&1
-  _inbox_read --for widget-orch --workspace alpha >/dev/null 2>&1
+  CEL_INBOX_ME=widget-orch _inbox_read --for widget-orch --workspace alpha >/dev/null 2>&1
   local err
   err="$( CEL_INBOX_ME=widget-orch _inbox_read --for widget-orch --workspace alpha 2>&1 1>/dev/null )"
   assert_contains "$err" "no unread mail"

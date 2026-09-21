@@ -103,7 +103,88 @@ _inbox_sanitise() {
   printf '%.32s' "$n"
 }
 
+# The same question as _inbox_ws, asked by a reader that must not guess: the
+# workspace named on the command line, or the one this cwd stands in, or rc 1
+# because standing here names none. `default` is a fine fallback for a SEND
+# (the message is kept somewhere and the sender is told where), and a terrible
+# one for a READ: it opens a mailbox nothing writes to and calls it empty.
+_inbox_ws_here() { # [name] -> <ws>, rc 1 when the cwd derives nothing
+  if [ -n "${1:-}" ]; then printf '%s' "$1"; return 0; fi
+  local d; d="$(ws_current 2>/dev/null)" || return 1
+  local n; n="$(ws_name "$d")"
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
+# CEL-53's lesson, applied again: a `die` inside `$( )` kills the subshell and
+# the caller carries on with an empty string, so the refusal never reaches the
+# terminal that needed it. This prints and returns; the caller returns 2 from
+# its own frame, where a non-zero status is visible.
+_inbox_no_workspace() { # <subcommand>
+  c_err "cel inbox $1: standing here names no workspace, so there is no mailbox to read - this is not 'no mail'" >&2
+  c_err "  name one with --workspace <name>, or read them all with --all-workspaces (cel ws list)" >&2
+}
+
 _inbox_file()   { printf '%s/%s.jsonl' "$(_inbox_dir)" "$1"; }
+
+# Has this name EVER been a mailbox here? A `--for` typo invents a recipient,
+# and an invented recipient is empty by construction - which read exactly like
+# a mailbox somebody was keeping up with. Evidence is a message ever addressed
+# to the name, or a cursor left by a past read. `root` and `console` exist by
+# definition: they are addresses, not agents, and are correct before their
+# first message.
+_inbox_known() { # <ws> <who>
+  case "$2" in root|console|all) return 0 ;; esac
+  local c; for c in "$(_inbox_dir)/$1.$2.cursor" "$(_inbox_dir)/$1.$2."*.cursor; do
+    [ -f "$c" ] && return 0
+  done
+  local f; f="$(_inbox_file "$1")"
+  [ -f "$f" ] || return 1
+  jq -e --arg who "$2" 'select(.to == $who)' "$f" >/dev/null 2>&1
+}
+
+# MAIL YOU HAVE, ELSEWHERE. One `<ws>:<count>` line per other registered
+# workspace holding unread mail for this reader. Counted through
+# inbox_unread_json, which looks without touching a cursor: nobody asked to
+# read those mailboxes and a cursor moved on their behalf is mail lost.
+_inbox_elsewhere() { # <ws> <who>
+  local n c
+  for n in $(_inbox_all_ws); do
+    [ "$n" = "$1" ] && continue
+    c="$(inbox_unread_json "$n" "$2" | grep -c . || true)"
+    [ "${c:-0}" -gt 0 ] && printf '%s:%s\n' "$n" "$c"
+  done
+  return 0
+}
+
+# WHAT NOTHING LOOKS LIKE, SAID OUT LOUD. The text goes to stderr on purpose:
+# stdout is the drain hook's and the console's channel and carries MESSAGES,
+# so a no-mail sentence there would be injected into every turn as if someone
+# had said it. --json is asked for deliberately, so its state object is stdout.
+_inbox_empty_report() { # <ws> <who> <json>
+  local ws="$1" who="$2" json="$3" state=empty lines="" where="" n c
+  _inbox_known "$ws" "$who" || state=no_mailbox
+  lines="$(_inbox_elsewhere "$ws" "$who")"
+  if [ "$json" -eq 1 ]; then
+    jq -nc --arg state "$state" --arg reader "$who" --arg ws "$ws" \
+      --argjson elsewhere "$(printf '%s' "$lines" | jq -R -s 'split("\n") | map(select(length > 0))
+        | map(split(":") | {workspace: .[0], unread: (.[1] | tonumber)})')" \
+      '{state: $state, reader: $reader, workspace: $ws, unread: 0, elsewhere: $elsewhere}'
+    return 0
+  fi
+  if [ "$state" = no_mailbox ]; then
+    c_warn "$who: no mailbox by that name in $ws - nothing has ever been addressed to it (a --for typo reads empty forever)" >&2
+  else
+    c_ok "$who: no unread mail in $ws" >&2
+  fi
+  if [ -n "$lines" ]; then
+    while IFS=: read -r n c; do
+      [ -n "$n" ] || continue
+      where="${where:+$where, }$c in $n"
+    done <<< "$lines"
+    c_warn "  but $who has unread mail elsewhere: $where (cel inbox read --all-workspaces)" >&2
+  fi
+}
 
 # --- WHO IS ALIVE TO READ THIS MAILBOX -------------------------------------
 #
@@ -283,10 +364,17 @@ cel inbox - messages between agents that never type into a pane
       --all-workspaces reads every registered mailbox, each line prefixed
       [<ws>]. The cursor is per READER, so the console reading root's mail
       does not consume it from under a root pane.
+      NOTHING IS SAID OUT LOUD: with no unread mail the reader is told which
+      identity and which workspace it just asked about, whether that mailbox
+      has ever existed, and whether the same reader has mail in another
+      workspace. A cwd that names no workspace is REFUSED, not answered with
+      emptiness - pass --workspace or --all-workspaces. --json carries the
+      three states as {state: empty|no_mailbox|no_workspace, elsewhere: [...]}.
   cel inbox prune [--workspace w] [--dry-run]
       archive mail addressed to a WORKER that no longer exists. Long-lived
       recipients (root, <repo>-orch) are never pruned - they come back.
   cel inbox count [--for <who>] [--workspace w|--all-workspaces]  unread count
+      stdout is the number; the state behind a 0 is said on stderr.
   cel inbox watch [--for <who>] [--workspace w|--all-workspaces] [--parent <pid>]
       tail new items, one line each (what a Monitor background task runs -
       stdout is the notification). A decision or blocker also raises a desktop
@@ -487,20 +575,31 @@ _inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
   done
   [ -n "$who" ] || who="$(_inbox_me)"
   if [ "$every" -eq 1 ]; then
-    local n
+    local n out="" one
     for n in $(_inbox_all_ws); do
-      _inbox_read_one "$n" "$who" "$all" "$json" | sed "s/^/[$n] /"
+      one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /")"
+      [ -n "$one" ] || continue
+      printf '%s\n' "$one"; out=1
     done
+    [ -n "$out" ] || c_ok "$who: no unread mail in any registered workspace" >&2
     return 0
   fi
-  _inbox_read_one "$(_inbox_ws "$ws")" "$who" "$all" "$json"
+  local wsname
+  wsname="$(_inbox_ws_here "$ws")" || { _inbox_no_workspace read
+    [ "$json" -eq 1 ] && jq -nc --arg reader "$who" \
+      '{state: "no_workspace", reader: $reader, workspace: null, unread: 0, elsewhere: []}'
+    return 2; }
+  _inbox_read_one "$wsname" "$who" "$all" "$json"
 }
 
-_inbox_read_one() { # <ws> <who> <all> <json>
-  local ws="$1" who="$2" all="$3" json="$4"
+_inbox_read_one() { # <ws> <who> <all> <json> [quiet]
+  local ws="$1" who="$2" all="$3" json="$4" quiet="${5:-}"
   local f c last items
   f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
-  [ -f "$f" ] || return 0
+  # Nothing here is not nothing anywhere, and an absent file is not an empty
+  # one: both go through the report so the reader learns which it was. The
+  # per-workspace sweep stays quiet - it has already looked everywhere.
+  [ -f "$f" ] || { [ -n "$quiet" ] || _inbox_empty_report "$ws" "$who" "$json"; return 0; }
   last=""; [ "$all" -eq 0 ] && [ -f "$c" ] && last="$(cat "$c")"
   # An update is ONE new line, rendered as the repeat it is rather than as a
   # second full item: the reader needs to know the condition is still true,
@@ -515,7 +614,7 @@ _inbox_read_one() { # <ws> <who> <all> <json>
                 | . + {count: (1 + ([$all[] | select(.kind == "update" and .ref == $r and .id <= $i)] | length))})
           else . end)
     | .[]' "$f" 2>/dev/null)"
-  [ -n "$items" ] || return 0
+  [ -n "$items" ] || { [ -n "$quiet" ] || _inbox_empty_report "$ws" "$who" "$json"; return 0; }
   if [ "$json" -eq 1 ]; then
     printf '%s\n' "$items"
   else
@@ -549,7 +648,15 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
     done
     printf '%s\n' "$total"; return 0
   fi
-  _inbox_count_one "$(_inbox_ws "$ws")" "$who"
+  local wsname
+  wsname="$(_inbox_ws_here "$ws")" || { _inbox_no_workspace count; return 2; }
+  # STDOUT STAYS A NUMBER. The steward and the hooks do arithmetic on this, so
+  # the sentence that tells a human which of the three states they are in goes
+  # to stderr beside it rather than into the sum.
+  local n; n="$(_inbox_count_one "$wsname" "$who")"
+  printf '%s\n' "$n"
+  [ "$n" -eq 0 ] && _inbox_empty_report "$wsname" "$who" 0
+  return 0
 }
 
 _inbox_count_one() { # <ws> <who>
