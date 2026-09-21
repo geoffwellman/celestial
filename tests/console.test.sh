@@ -24,13 +24,13 @@ _console_setup() {
 EOF
 
   printf '%s\n' \
-    '{"id":"d1","ts":"2026-09-20T10:11:12+00:00","kind":"decision","from":"widget-orch","to":"root","message":"ship gadget or hold?"}' \
+    "{\"id\":\"d1\",\"ts\":\"$(_console_ago 7200)\",\"kind\":\"decision\",\"from\":\"widget-orch\",\"to\":\"root\",\"message\":\"ship gadget or hold?\"}" \
     >"$T/open.alpha.json"
   : >"$T/open.beta.json"
 
   printf '%s\n' \
-    '{"id":"m1","ts":"2026-09-20T09:00:00+00:00","kind":"status","from":"widget-orch","to":"root","message":"first line"}' \
-    '{"id":"m2","ts":"2026-09-20T09:30:00+00:00","kind":"status","from":"widget-orch","to":"root","message":"second line"}' \
+    "{\"id\":\"m1\",\"ts\":\"$(_console_ago 10800)\",\"kind\":\"status\",\"from\":\"widget-orch\",\"to\":\"root\",\"message\":\"first line\"}" \
+    "{\"id\":\"m2\",\"ts\":\"$(_console_ago 9000)\",\"kind\":\"status\",\"from\":\"widget-orch\",\"to\":\"root\",\"message\":\"second line\"}" \
     >"$T/inbox/alpha.jsonl"
 
   cat >"$T/bin/cel" <<EOF
@@ -51,6 +51,15 @@ EOF
 }
 
 _console_teardown() { rm -rf "$T"; }
+
+# A timestamp <seconds> ago, in the shape the mailbox writes. Every fixture
+# that feeds one of the console's relative windows - the 24h tail, the digest
+# since the cursor, the timeline - is anchored HERE rather than on a date
+# somebody typed, so the suite says the same thing tomorrow as today. See
+# test_console_time_windowed_fixtures_carry_no_frozen_dates.
+_console_ago() { # <seconds> [format]
+  date -u -d "@$(( $(date -u +%s) - ${1:-0} ))" "+${2:-%Y-%m-%dT%H:%M:%S+00:00}"
+}
 
 test_console_render_once_shows_fleet_decisions_and_inbox() {
   _console_setup
@@ -529,10 +538,10 @@ _console_depth_setup() {
        "ahead":"0","pr":"","alias":"gadget/ABC-50-other","pane":"w3:p2"}]}]}]}
 EOF
   printf '%s\n' \
-    '{"id":"d1","ts":"2026-09-20T10:11:12+00:00","kind":"decision","from":"bundle-orch","to":"root","message":"ship gadget or hold?"}' \
+    "{\"id\":\"d1\",\"ts\":\"$(_console_ago 7200)\",\"kind\":\"decision\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"ship gadget or hold?\"}" \
     >"$T/open.alpha.json"
   printf '%s\n' \
-    '{"id":"m1","ts":"2026-09-20T09:00:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"first line"}' \
+    "{\"id\":\"m1\",\"ts\":\"$(_console_ago 10800)\",\"kind\":\"status\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"first line\"}" \
     >"$T/inbox/alpha.jsonl"
 
   cat >"$T/bin/cel-fanout" <<'EOF'
@@ -1067,8 +1076,8 @@ EOF
 printf '%s\n' "$*" >> "$GH_CALLS"
 case "$*" in
   *"--state merged"*)
-    cat <<'JSON'
-[{"number":11,"title":"the old one","headRefName":"ABC-40-old","mergedAt":"2026-09-20T11:47:00Z","updatedAt":"2026-09-20T11:47:00Z"}]
+    cat <<JSON
+[{"number":11,"title":"the old one","headRefName":"ABC-40-old","mergedAt":"$CEL_TEST_MERGED_AT","updatedAt":"$CEL_TEST_MERGED_AT"}]
 JSON
     ;;
   *)
@@ -1080,13 +1089,19 @@ esac
 EOF
   chmod +x "$T/bin/gh"
   export CEL_GH_BIN="$T/bin/gh" GH_CALLS="$T/gh.calls"
+  # the merge is an hour ago, not a date: the timeline only shows a day
+  export CEL_TEST_MERGED_AT="$(_console_ago 3600 '%Y-%m-%dT%H:%M:%SZ')"
   : >"$GH_CALLS"
   # `gh pr list --repo widget` is a request for a repository that does not
   # exist under whatever owner gh guesses, so the console needs owner/name. It
   # reads that from the workspace; here - and on a box where the console
   # stands outside every workspace - the map is handed to it directly.
   export CEL_CONSOLE_REPO_SLUGS='{"widget":"acme/widget","gadget":"acme/gadget"}'
-  printf '2026-09-20T09:41:00Z' > "$T/state/alpha.root.console.cursor"
+  # The cursor is "an hour ago", not a date: the digest counts what arrived
+  # since the operator last looked, so a frozen cursor decides which fixture
+  # mail is in the count purely by what today is.
+  export CEL_TEST_CURSOR_AGO=3600
+  _console_ago "$CEL_TEST_CURSOR_AGO" '%Y-%m-%dT%H:%M:%SZ' | tr -d '\n' > "$T/state/alpha.root.console.cursor"
 }
 
 test_console_unit_view_shows_the_board_the_prs_and_the_digest() {
@@ -1101,7 +1116,7 @@ test_console_unit_view_shows_the_board_the_prs_and_the_digest() {
   assert_contains "$out" '#12'
   assert_contains "$out" 'review APPROVED'
   assert_contains "$out" 'ci '
-  assert_contains "$out" 'since 09:41'
+  assert_contains "$out" "since $(_console_ago "$CEL_TEST_CURSOR_AGO" '%H:%M')"
   # ONE gh call per repo, not one per row: the refresh loop runs every ten
   # seconds and a call per PR is a rate limit waiting to happen.
   assert_eq "$(grep -c 'pr list' "$GH_CALLS")" 2
@@ -1536,11 +1551,11 @@ test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
 test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
   _console_panel_setup
   printf '%s\n' \
-    '{"id":"r1","ts":"2026-09-20T10:00:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"nothing to do"}' \
-    '{"id":"r2","ts":"2026-09-20T10:01:00+00:00","kind":"escalation","from":"bundle-orch","to":"root","message":"the reviewer pane is dead"}' \
-    '{"id":"r3","ts":"2026-09-20T10:02:00+00:00","kind":"decision","from":"bundle-orch","to":"root","message":"ship the bundle or hold"}' \
-    '{"id":"r4","ts":"2026-09-20T10:03:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"ABC-9 gate is green"}' \
-    '{"id":"r5","ts":"2026-09-20T10:04:00+00:00","kind":"status","from":"bundle-orch","to":"root","message":"also nothing to do"}' \
+    "{\"id\":\"r1\",\"ts\":\"$(_console_ago 3000)\",\"kind\":\"status\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"nothing to do\"}" \
+    "{\"id\":\"r2\",\"ts\":\"$(_console_ago 2940)\",\"kind\":\"escalation\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"the reviewer pane is dead\"}" \
+    "{\"id\":\"r3\",\"ts\":\"$(_console_ago 2880)\",\"kind\":\"decision\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"ship the bundle or hold\"}" \
+    "{\"id\":\"r4\",\"ts\":\"$(_console_ago 2820)\",\"kind\":\"status\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"ABC-9 gate is green\"}" \
+    "{\"id\":\"r5\",\"ts\":\"$(_console_ago 2760)\",\"kind\":\"status\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"also nothing to do\"}" \
     >>"$T/inbox/alpha.jsonl"
   printf '%s\n' 'r1\t0' 'r2\t3' 'r3\t2' 'r4\t1' 'r5\t0' | sed 's/\\t/\t/' >"$T/triage.cache"
   export CEL_TRIAGE_CACHE="$T/triage.cache"
@@ -1565,9 +1580,9 @@ test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
 test_console_tail_rows_carry_the_id_of_the_record() {
   _console_setup
   printf '%s\n' \
-    '{"id":"b7","ts":"2036-09-20T10:00:00+00:00","kind":"blocked","from":"bundle-orch","to":"root","message":"memory is gone","fp":"mem-alpha"}' \
-    '{"id":"b8","ts":"2036-09-20T10:05:00+00:00","kind":"update","ref":"b7","to":"root","from":"bundle-orch","message":"still gone"}' \
-    '{"id":"b9","ts":"2036-09-20T10:09:00+00:00","kind":"resolution","ref":"b7","to":"root","by":"steward","message":"resolved by steward"}' \
+    "{\"id\":\"b7\",\"ts\":\"$(_console_ago 600)\",\"kind\":\"blocked\",\"from\":\"bundle-orch\",\"to\":\"root\",\"message\":\"memory is gone\",\"fp\":\"mem-alpha\"}" \
+    "{\"id\":\"b8\",\"ts\":\"$(_console_ago 300)\",\"kind\":\"update\",\"ref\":\"b7\",\"to\":\"root\",\"from\":\"bundle-orch\",\"message\":\"still gone\"}" \
+    "{\"id\":\"b9\",\"ts\":\"$(_console_ago 60)\",\"kind\":\"resolution\",\"ref\":\"b7\",\"to\":\"root\",\"by\":\"steward\",\"message\":\"resolved by steward\"}" \
     >"$T/inbox/alpha.jsonl"
   cat >"$T/tail.mjs" <<'EOF'
 import assert from 'node:assert/strict';
@@ -1622,4 +1637,33 @@ EOF
     || { printf '%s\n' "$out"; _console_teardown; return 1; }
   assert_contains "$out" 'actions: all good'
   _console_teardown
+}
+
+# --- CEL-57: a suite that goes red because a day passed ---------------------
+#
+# On 2026-09-21T09:00Z three console tests turned red on a `main` whose every
+# PR had landed green. No commit did it: the console's tail, digest and
+# timeline are WINDOWS ON NOW (24 hours by default), and the fixtures pinned
+# absolute timestamps - 2026-09-20T09:00Z mail, a 2026-09-20T11:47Z merge.
+# Every gate run before 09:00Z the next day sat inside the window and passed;
+# the first one after it did not, on unchanged code. A test that passes
+# because of the date it was run on is a test that proves nothing, and the
+# seven PRs that landed behind it are what that costs.
+#
+# So: no fixture that feeds a relative window may carry a frozen timestamp.
+# The fields that feed one are `ts` (the mailbox tail, the digest, the
+# timeline) and `mergedAt` (what landed since the cursor); a frozen
+# `resets_at` or a frozen linear `updatedAt` is not windowed and nothing
+# asserts on its age, so the lint says what it means rather than every date.
+# This is a lint over this file, because the failure it pins is not a
+# behaviour of the console - it is a property of its fixtures, and by the time
+# it shows up as behaviour the suite is already red for everybody.
+test_console_time_windowed_fixtures_carry_no_frozen_dates() {
+  local pat='"(ts|mergedAt)":"[0-9]{4}-[0-9]{2}-[0-9]{2}'  # frozen-date-lint-self
+  local hits
+  hits="$(grep -nE "$pat" "$CEL_ROOT/tests/console.test.sh" | grep -v 'frozen-date-lint-self' || true)"
+  [ -z "$hits" ] || {
+    printf 'frozen timestamps in console fixtures (use _console_ago):\n%s\n' "$hits"
+    return 1
+  }
 }
