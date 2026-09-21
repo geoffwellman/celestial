@@ -77,6 +77,11 @@ cel - the celestial plane
   cel ws list                   registered workspaces
   cel ws push <name>            create the workspace repo on GitHub and push
   cel ws env [name]             print workspace env exports; eval after a cd
+                                (a workspace's secrets live in ONE place:
+                                <workspace>/env.local, gitignored - that is
+                                what this exports and what cel doctor reads.
+                                ~/.zshenv is for a box-wide credential no
+                                workspace owns, nothing else)
   cel ws up <name> [--dry-run]  put a workspace back to its declared shape:
                                 the herdr workspace, the panes it declares and
                                 an orchestrator for every product that wants
