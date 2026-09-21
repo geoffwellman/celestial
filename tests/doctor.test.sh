@@ -108,3 +108,45 @@ test_doctor_workspace_envs_do_not_leak_into_each_other() {
   assert_eq "${WIDGET_KEY:-}" ""
   _doctor_teardown
 }
+
+# A CHECKOUT NOBODY TOLD YOU WAS STALE. The orchestrator's `$ws/repos/<repo>`
+# sat 18 commits behind origin/main for a whole day on 2026-09-21 and every
+# conclusion drawn from it - a benchmark, two reviews - was wrong about the
+# wrong tree. This is the cheap half of that: one line, the count, the cure.
+_doctor_repo_fixture() { # -> $T/clone, behind origin/main by $1 commits
+  T="$(mktemp -d)"
+  local g=(git -c user.email=t@t -c user.name=t) i
+  git -C "$T" init -q -b main "$T/origin" >/dev/null 2>&1 || { mkdir -p "$T/origin"; git -C "$T/origin" init -q -b main; }
+  "${g[@]}" -C "$T/origin" commit -q --allow-empty -m base
+  git clone -q "$T/origin" "$T/clone"
+  for i in $(seq 1 "${1:-0}"); do
+    "${g[@]}" -C "$T/origin" commit -q --allow-empty -m "ahead $i"
+  done
+}
+
+test_doctor_says_how_far_behind_a_checkout_is() {
+  _doctor_repo_fixture 3
+  local out; out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)"
+  assert_contains "$out" "3 commits behind"
+  assert_contains "$out" "alpha/widget"
+  assert_contains "$out" "git -C $T/clone pull --ff-only"
+  rm -rf "$T"
+}
+
+test_doctor_says_nothing_about_a_current_checkout() {
+  _doctor_repo_fixture 0
+  local out
+  out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)" \
+    || { echo "the check itself failed on a healthy checkout"; return 1; }
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+# A checkout that cannot be asked is UNKNOWN and says so. Silence here would
+# read as "up to date", which is the failure this whole check exists for.
+test_doctor_calls_an_unaskable_checkout_unknown() {
+  _doctor_repo_fixture 0
+  git -C "$T/clone" remote remove origin
+  assert_contains "$(doctor_checkout_behind_line "$T/clone" alpha/widget)" "UNKNOWN"
+  rm -rf "$T"
+}
