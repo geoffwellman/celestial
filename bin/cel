@@ -129,6 +129,8 @@ cel - the celestial plane
   cel inbox send|read|count|watch   agent messages that never type into a pane
   cel inbox open|resolve|whoami     decisions stay OPEN until resolved - reading
                                 one does not answer it; whoami = your role by cwd
+                                read/count name the reader and workspace they
+                                answered for, and refuse a cwd that names none
   cel learn add|list|reinforce|stow   durable facts this workspace has established,
                                 tiered (pinned / aging 30d / perishable 7d) and
                                 budgeted into every agent's policy block
