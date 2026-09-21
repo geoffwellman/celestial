@@ -865,3 +865,52 @@ HERDR
   assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "gone"
   _fleet_teardown
 }
+
+# AND SHAPE-VALID IS NOT ANSWERED.
+#
+# Parsing the roster with `fromjson?` covers the document that is not JSON,
+# and nothing else: `{}`, `[]`, and a document about something other than
+# agents all parse, and all of them read as a roster that knows about nobody
+# - which is `gone` for every worker on the box. A pane manager answering
+# `{}` is a MUTE OBSERVER, not evidence of sixteen dead workers, and the two
+# readings send an operator to opposite places. Only a document whose
+# `.result.agents` is an array has said anything about who is alive.
+_fleet_roster_says_nothing() { # <stdout-of-herdr-agent-list>
+  cat >"$T/bin/herdr" <<HERDR
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent list") printf '%s\n' '$1' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+HERDR
+  chmod +x "$T/bin/herdr"
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "0"
+}
+
+test_fleet_an_empty_object_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '{}'
+  _fleet_teardown
+}
+
+test_fleet_an_array_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '[]'
+  _fleet_teardown
+}
+
+# Plausible, well-formed, and about the wrong thing: a result with no agents
+# key at all, and an `agents` that is an object rather than a list. Neither
+# can be searched for a pane, so neither may answer for one.
+test_fleet_a_plausible_but_wrong_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '{"result":{"windows":[{"pane_id":"wA:p2"}]}}'
+  _fleet_roster_says_nothing '{"result":{"agents":{"wA:p2":"idle"}}}'
+  _fleet_roster_says_nothing '{"error":"no server"}'
+  _fleet_teardown
+}
