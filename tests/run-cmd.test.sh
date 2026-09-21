@@ -463,3 +463,86 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
   assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
   rm -rf "$T"
 }
+
+# ------------------------------------------- the reviewer reads the PR's tree
+# THREE WRONG CONCLUSIONS IN ONE DAY, ONE CAUSE. A reviewer pane used to open
+# in the ORCHESTRATOR'S OWN CHECKOUT, which on 2026-09-21 sat 18 commits behind
+# `main` all day: a reviewer of #75 reported that code which had landed hours
+# earlier "does not exist on this branch", and the orchestrator measured a
+# branch as 3x slower than a `main` that predated lib/orphans.sh. Nothing
+# guaranteed that directory had any relationship to the pull request. A
+# reviewer now gets a detached checkout AT THE PR'S HEAD, of its own.
+_ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $HEAD_SHA
+  _ws_review
+  export CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REVIEW_DIR="$T/reviews"
+  export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log"
+  : > "$HERDR_LOG"
+  local g=(git -c user.email=t@t -c user.name=t)
+  ORIGIN="$T/origin"; mkdir -p "$ORIGIN"
+  git -C "$ORIGIN" init -q -b main
+  "${g[@]}" -C "$ORIGIN" commit -q --allow-empty -m base
+  BASE_SHA="$(git -C "$ORIGIN" rev-parse HEAD)"
+  git -C "$ORIGIN" checkout -q -b pr-head
+  "${g[@]}" -C "$ORIGIN" commit -q --allow-empty -m 'the change under review'
+  HEAD_SHA="$(git -C "$ORIGIN" rev-parse HEAD)"
+  git -C "$ORIGIN" update-ref refs/pull/12/head "$HEAD_SHA"
+  git -C "$ORIGIN" checkout -q main
+  rm -rf "$T/repos/widget"
+  git clone -q "$ORIGIN" "$T/repos/widget"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      *) : ;;
+    esac
+  }
+  gh() {
+    case "$*" in
+      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{headRefOid:$h, baseRefName:"main"}' ;;
+      *) return 1 ;;
+    esac
+  }
+}
+
+test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
+  _ws_pr_fixture
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
+  [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
+  [ "$cwd" != "$T/repos/widget" ] || { echo "reviewer opened in the orchestrator's checkout"; return 1; }
+  assert_eq "$(git -C "$cwd" rev-parse HEAD)" "$HEAD_SHA"
+  # ...and it is detached, so nothing in it is a branch anyone could push.
+  assert_fails git -C "$cwd" symbolic-ref -q HEAD
+  assert_eq "$(reviewers_find widget 12 | jq -r .checkout)" "$cwd"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
+# A claim about "main" anchored to a directory is not a claim. The brief names
+# the head it is reading and the base it compares against, and says how to tell
+# that the head has moved since the pane started.
+test_reviewer_brief_names_the_head_sha_and_the_base() {
+  _ws_pr_fixture
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  local body; body="$(cat "$T/.cel/reviews/pr-12/role-reviewer.md")"
+  assert_contains "$body" "$HEAD_SHA"
+  assert_contains "$body" "origin/main"
+  assert_contains "$body" "headRefOid"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
+# CEL-52 made a reviewer's pane close when its PR closes; a checkout that
+# outlives the pane is the same litter in a new form.
+test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {
+  _ws_pr_fixture
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  local cwd; cwd="$(reviewers_find widget 12 | jq -r .checkout)"
+  [ -d "$cwd" ] || { echo "no reviewer checkout was made"; return 1; }
+  reviewer_checkout_release widget 12
+  [ ! -e "$cwd" ] || { echo "the reviewer's checkout outlived it"; return 1; }
+  git -C "$T/repos/widget" worktree list | grep -q "$cwd" \
+    && { echo "a worktree registration was left behind"; return 1; }
+  rm -rf "$T"
+}
