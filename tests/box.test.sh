@@ -311,3 +311,16 @@ test_box_space_counts_an_unrecorded_reviewer_pane_too() {
   unset -f herdr
   rm -rf "$T"
 }
+
+# NEVER TOUCH THE LIVE BOX. box_reviewers_json asks the roster which panes
+# are reviewers, so every test that reaches cmd_box space or box_doctor_line
+# reads the live herdr unless the fixture itself stubs it - and most of the
+# tests above predate that call and never stubbed anything. The stub belongs
+# in the fixture, not in the three tests that happened to notice.
+test_box_fixture_stubs_the_roster_so_no_test_reads_the_live_one() {
+  _box_fixture
+  assert_eq "$(type -t herdr)" function
+  assert_eq "$(herdr agent list | jq -r '.result.agents | length')" 0
+  assert_eq "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json | jq -r '.reviewers.count')" 0
+  rm -rf "$T"
+}

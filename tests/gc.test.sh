@@ -697,3 +697,23 @@ test_gc_counts_a_recorded_and_discovered_pane_once() {
   assert_eq "$reviewers_closed" 1
   rm -rf "$T"
 }
+
+# LAST WRITE WINS IS A LOST ROW. The sweep reads the registry once, then
+# spends seconds in `gh` per reviewer; a `cel run reviewer` that records a
+# brand-new row in that window was silently erased by the sweep's final
+# write, and the next call for that PR split a duplicate pane - defeating
+# the one-reviewer-per-PR guarantee this very pass exists to give. The write
+# back merges under a lock instead of overwriting from a stale snapshot.
+test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
+  _gc_reviewer_fixture
+  gh() {
+    # `cel run reviewer --pr 99` lands while this sweep is mid-flight.
+    reviewers_record gadget 99 w1:p9 gadget-pr-99-review
+    jq -n --arg s "$GC_PR_STATE" '{state:$s}'
+  }
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$(reviewers_find gadget 99 | jq -r .pane)" w1:p9
+  assert_fails reviewers_find widget 71
+  rm -rf "$T"
+}

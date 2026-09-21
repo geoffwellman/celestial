@@ -449,3 +449,17 @@ test_second_reviewer_for_the_same_pr_reuses_the_pane_and_adds_no_row() {
   assert_eq "$(reviewers_rows | jq -r length)" 1
   rm -rf "$T"
 }
+
+# A read-modify-write with no lock is two reviewers overwriting each other.
+# The whole update is held under a lock on the registry, and a registry
+# somebody else is holding is REFUSED rather than clobbered.
+test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
+  _ws; _reviewers_fixture
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  local fd; exec {fd}>"$CEL_REVIEWERS_STATE.lock"; flock "$fd"
+  ( CEL_REVIEWERS_LOCK_WAIT=1 assert_fails reviewers_record gadget 99 w1:p9 gadget-pr-99-review )
+  exec {fd}>&-
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  rm -rf "$T"
+}
