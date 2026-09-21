@@ -25,8 +25,55 @@ _ask() { # <question> <default>
   printf '%s' "${a:-$2}"
 }
 
+# A REFUSAL THAT NOBODY EVER SAW. `registry_require` ends in `die`, and every
+# caller wrote `wsdir="$(registry_require "$n")"` - so the process that died
+# was the command substitution's subshell, its message went into the captured
+# stdout that the caller then threw away, and the caller carried on with an
+# empty path and exited 1 with an empty terminal. The owner's teammate met
+# that on their FIRST command on 2026-09-21: `cel ws sync <name>` for a
+# workspace nobody had registered, exit 1, no stdout, no stderr. Being
+# onboarded is exactly the moment you cannot tell "I did it wrong" from "it is
+# broken", and there is nobody to ask.
+#
+# So the check happens in the CALLER's process, never inside `$( )`, and the
+# message rides stderr - the refusal is not the command's output, and a
+# caller redirecting stdout must still see why it stopped.
+_ws_die() { c_err "$*" >&2; exit 1; }
+
+# Resolves a workspace name into $_WS_DIR, or refuses out loud. Call it as a
+# statement - `_ws_require "$n"; d="$_WS_DIR"` - never as `$(_ws_require ...)`,
+# which is the bug this exists to end.
+_ws_require() { # <name>
+  local p; p="$(registry_path "$1" 2>/dev/null || true)"
+  [ -n "$p" ] || _ws_die "workspace '$1' is not registered - register it with: cel ws add <git-url> ('cel ws list' shows the ones that are)"
+  [ -d "$p" ] || _ws_die "workspace '$1' is registered at $p but nothing is there - re-register it with: cel ws add <git-url>, or restore that path"
+  _WS_DIR="$p"
+}
+
+# The name a verb was given, ignoring its flags. Only used for the verbs whose
+# flags take no values (--dry-run, --force, --json), so the first bare word is
+# the workspace.
+_ws_name_arg() {
+  local a
+  for a in "$@"; do
+    case "$a" in -*) ;; *) printf '%s' "$a"; return 0 ;; esac
+  done
+  return 0
+}
+
 cmd_ws() {
   local sub="${1:-list}"; shift || true
+  # One gate for every verb that takes a workspace name, in this process, before
+  # dispatch - including the lifecycle verbs, whose own `registry_require` calls
+  # sit inside `$( )` in lib/wslife.sh. A name that cannot be resolved is
+  # refused here, by name, with the command that would fix it. One silent verb
+  # is enough to lose the next newcomer.
+  case "$sub" in
+    sync|push|env|up|down|reset|status)
+      local _n; _n="$(_ws_name_arg "$@")"
+      [ -z "$_n" ] || _ws_require "$_n"
+      ;;
+  esac
   case "$sub" in
     list) _ws_list;;
     new) _ws_new "$@";;
@@ -102,7 +149,7 @@ tickets: { system: none, adhoc: "AH-<yymmdd>" }
 policy: { merge: $merge, pr: required, workers: 4, reviewer: null }
 runtime: { root: claude, orchestrator: claude, worker: omp }
 tools: []
-env: {}                       # exported into every shell that starts in this workspace; secrets go in env.local (gitignored)
+env: {}                       # exported into every shell that starts in this workspace. SECRETS GO IN env.local (gitignored, never committed) - that is the one place this workspace's keys live, and the only one cel doctor and cel ws env read
 repos: []
 YAML
 
@@ -164,7 +211,7 @@ _ws_sync() {
 
 _ws_sync_one() {
   local n="$1" wsdir line r url t
-  wsdir="$(registry_require "$n")"
+  _ws_require "$n"; wsdir="$_WS_DIR"
 
   while IFS= read -r line; do
     grep -qxF "$line" "$wsdir/.gitignore" 2>/dev/null \
@@ -214,7 +261,7 @@ _ws_sync_one() {
 _ws_env() {
   local wsdir
   if [ $# -gt 0 ]; then
-    wsdir="$(registry_require "$1")"
+    _ws_require "$1"; wsdir="$_WS_DIR"
   else
     wsdir="$(ws_current)" || return 0
   fi
@@ -227,7 +274,7 @@ _ws_push() {
   local name="$1" path org remote
   have gh || die "cel ws push: gh is required"
   gh auth status >/dev/null 2>&1 || die "cel ws push: gh is not authenticated"
-  path="$(registry_require "$name")"
+  _ws_require "$name"; path="$_WS_DIR"
   remote="$(registry_remote "$name")"
   [ -z "$remote" ] || die "workspace '$name' already has a remote: $remote"
   org="$(ws_org "$path")"

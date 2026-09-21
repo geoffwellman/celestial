@@ -46,8 +46,8 @@ test_doctor_says_the_gateway_is_not_supervised() {
 # which is the worst thing doctor can teach on day one.
 _setup_ws() { # <dir> <yaml-setup-block>
   mkdir -p "$1"
-  cat > "$1/workspace.yaml" <<YAML
-name: $(basename "$1")
+  cat > "$1/workspace.yaml" <<'YAML'
+name: fixture
 kind: personal
 setup:
   - name: widget key

@@ -303,5 +303,11 @@ cmd_setup() {
   c_hd "Next"
   echo "    gh auth login && claude setup-token   # human-only steps"
   echo "    eval \"\$(cel shellenv)\"                 # add to your shell rc"
+  # ONE PLACE SECRETS LIVE. This used to be three (workspace.yaml's hint said
+  # env.local, the setup skill said ~/.zshenv, the checker read whatever the
+  # shell happened to hold), and three answers to "where do I put my key" is
+  # zero answers - the newcomer puts it somewhere and nothing agrees.
+  echo "    <workspace>/env.local                 # per-workspace secrets (gitignored);"
+  echo "                                          # ~/.zshenv only for a box-wide credential"
   echo "    cel doctor                            # verify"
 }
