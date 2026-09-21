@@ -1145,7 +1145,7 @@ SH
   local roster
   roster='{"result":{"agents":[{"name":"widget-WG-44-x","agent_status":"idle","pane_id":"w:p2","cwd":"'"$HOME"'/.herdr/worktrees/widget/WG-44-x"},{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
   PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
-  local msg; msg="$(cat "$T/prompts")"
+  local msg; msg="$(grep 'on widget' "$T/prompts" || true)"
   assert_contains "$msg" 'throttled'
   case "$msg" in
     *"get a worker on it"*|*"nobody on"*) echo "the steward asked for another worker: $msg"; return 1 ;;

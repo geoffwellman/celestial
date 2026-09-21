@@ -34,6 +34,9 @@
 _CEL_LIVENESS=1
 # shellcheck source=lib/config.sh
 . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+# shellcheck source=lib/quota.sh
+. "$(dirname "${BASH_SOURCE[0]}")/quota.sh"  # the reset time a throttled pane
+                                            # cannot tell you itself
 
 # The wait before a pause counts as news: a person asked a question takes a
 # few minutes to come back, and reporting an approval prompt the moment it
@@ -324,6 +327,141 @@ liveness_classify() { # <pane-text> <runtime-status> <secs> <ledger-state>
   verdict="$(liveness_verdict "$act" "$conf" "${3:-0}" "$4")"
   [ -n "$verdict" ] || return 0
   printf '%s\t%s\t%s' "$verdict" "$act" "$conf"
+}
+
+# --- THE THREE SILENCES (CEL-50) --------------------------------------------
+#
+# Everything above asks a model what a pane is DOING. These three ask nothing:
+# they are recognised from the pane text alone, with no router, no key and no
+# request, because none of them needs judgement. Each cost this box real work
+# in one day and each renders exactly like an agent thinking:
+#
+#   - a dispatch left TYPED BUT UNSUBMITTED in the composer. Two workers sat
+#     two hours at +0 commits, the full prompt below the divider, `ctx 0.0%`,
+#     and the ledger reading `running`. Re-prompting started both instantly;
+#     the pane and the agent were healthy, only the submit was lost. A
+#     reviewer pane did the same thing three days later, so this is about
+#     PANES, not workers;
+#   - a session that accepts input and fails every turn. Two pi sessions took
+#     four prompts and a steward nudge and errored on all five while herdr
+#     reported `done`;
+#   - an account whose window is spent. Four workers stopped on HTTP 429 and
+#     read as idle, and the steward escalated "nobody is on this" while a
+#     blocked worker sat right there.
+#
+# They REPORT, like everything else here.
+
+# Text a pane prints about itself rather than about the work: the status line
+# is below the composer divider and would otherwise count as "the operator
+# typed something".
+_liveness_is_chrome() { # <line>
+  printf '%s' "$1" | grep -qiE '(^|[[:space:]])(ctx|context)[[:space:]:]*[0-9]+(\.[0-9]+)?%|^[[:space:]]*[─━═_-]{6,}[[:space:]]*$|^[[:space:]]*$'
+}
+
+# A turn the AGENT took. pi and claude both mark one with a bullet; the word
+# form is here for runtimes that print a role instead. Matching the MARK
+# rather than any particular wording is deliberate - the composer's own echo
+# of what a human typed is not a turn.
+_liveness_has_turn() { # <pane-text>
+  printf '%s' "$1" | grep -qE '^[[:space:]]*([⏺●✳✻✶]|(assistant|Assistant)[[:space:]:>])'
+}
+
+# Context at zero means the session has never sent anything: a pane that has
+# taken one turn is already above zero, so this is the cheapest possible
+# "nothing has happened here".
+_liveness_context_zero() { # <pane-text>
+  printf '%s' "$1" | grep -qiE '(ctx|context)[[:space:]:]*0(\.0+)?%'
+}
+
+# Something a person or a dispatcher put in the composer and left there. The
+# divider is the composer's top edge; anything below it that is not the pane's
+# own chrome is unsent text.
+_liveness_pending_text() { # <pane-text>
+  local below line
+  below="$(printf '%s\n' "$1" | awk '/^[[:space:]]*[─━═]{6,}[[:space:]]*$/ { seen = 1; out = ""; next } seen { out = out $0 "\n" } END { printf "%s", out }')"
+  [ -n "$below" ] || return 1
+  while IFS= read -r line; do
+    _liveness_is_chrome "$line" || return 0
+  done <<< "$below"
+  return 1
+}
+
+# The error CLASS, not the message. The transport bug that produced this wrote
+# one sentence and the next one will write another, so what is matched is
+# "a terminal error line, repeated, with no turn between the prompts".
+_liveness_repeated_error() { # <pane-text>
+  local n
+  n="$(printf '%s\n' "$1" \
+    | grep -iE '(^|[^a-z])(error|exception|failed|refused|diverged)([^a-z]|$)' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[0-9]+/N/g' \
+    | sort | uniq -c | sort -rn | awk 'NR == 1 { print $1 }')"
+  [ -n "$n" ] && [ "$n" -ge 2 ]
+}
+
+# A provider limit, in the words every provider on this box uses for one.
+_liveness_is_throttled() { # <pane-text>
+  printf '%s' "$1" | grep -qiE 'rate[_ ]limit|429|too many requests|quota exceeded'
+}
+
+# WHEN, not just "blocked". A wait whose end nobody can name is the same
+# report the steward was already making; the reset is the half an operator
+# acts on, and it comes from the windows lib/quota.sh already reads.
+liveness_reset_at() { # <cel-provider> -> a human time, or nothing
+  [ -n "${1:-}" ] || return 0
+  local sub p a t r
+  sub="$(_sub_provider_for "$1" 2>/dev/null || true)"
+  [ -n "$sub" ] || return 0
+  while IFS=$'\t' read -r p a t; do
+    [ "$p" = "$sub" ] || continue
+    r="$(subscription_usage "$p" "$t" "$a" 2>/dev/null \
+         | jq -r '((.windows[]? | select(.name == "5h") | .resets_at) // "") | tostring' 2>/dev/null | head -1)"
+    case "$r" in ''|null) continue ;; esac
+    sub_reset_human "$r"
+    return 0
+  done < <(_subscription_accounts 2>/dev/null || true)
+  return 0
+}
+
+# "unstarted" | "erroring" | "throttled[\t<reset>]" | nothing.
+#
+# Order matters: a 429 is also an error line, and "throttled" is the report
+# with a remedy in it. Nothing here is mutually exclusive with the model's own
+# verdict - these are facts about the pane, and the model is an opinion about
+# the work.
+liveness_pane_silence() { # <pane-text> [provider]
+  local text="${1:-}" provider="${2:-}" reset
+  [ -n "$text" ] || return 0
+  if _liveness_is_throttled "$text"; then
+    reset="$(liveness_reset_at "$provider")"
+    [ -n "$reset" ] && printf 'throttled\t%s' "$reset" || printf 'throttled'
+    return 0
+  fi
+  # Both of the remaining two require that the agent has taken no turn: a pane
+  # with work on it after the error recovered, and a false report on a
+  # recovered worker is worse than the silence it replaces.
+  if ! _liveness_has_turn "$text"; then
+    if _liveness_context_zero "$text" && _liveness_pending_text "$text"; then
+      printf 'unstarted'; return 0
+    fi
+    if _liveness_repeated_error "$text"; then printf 'erroring'; return 0; fi
+  fi
+  return 0
+}
+
+# It says it in words, like every other verdict here.
+liveness_silence_sentence() { # <silence> [reset]
+  local s="${1:-}" reset="${2:-}"
+  [ -n "$s" ] || return 0
+  case "$s" in
+    unstarted) printf 'unstarted - the prompt is sitting in the composer, never submitted; re-prompt it (the worktree and the agent are fine)' ;;
+    erroring)  printf 'erroring - the session accepts prompts and fails on every turn; it needs a restart, not another prompt' ;;
+    throttled)
+      printf 'throttled - the provider is refusing on a rate limit'
+      [ -n "$reset" ] && printf ', it resets at %s' "$reset"
+      printf '; waiting is the remedy, another worker is not' ;;
+    *) printf '%s' "$s" ;;
+  esac
+  return 0
 }
 
 # The quiet rule's own threshold, read once so the sentence can say how much
