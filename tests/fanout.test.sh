@@ -1564,6 +1564,79 @@ test_gate_from_ci_refuses_protection_with_no_required_contexts() {
   assert_contains "$out" "requires no check"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+# ---- and a gate that produced NO VERDICT is not a red gate either ------------
+# On 2026-09-21 an approved, CI-green branch was refused with "the repo's gate
+# did not pass (verdict: unknown)": the gate process had been killed by a
+# signal, so it never timed out and never reported a status, and land had only
+# two shapes to put that in - timed out, or failed. It is neither. The refusal
+# must name what happened, and CI may stand in for it on exactly the terms it
+# stands in for a timeout: every protected check green on that head.
+_fanout_verify_no_verdict_stub() { # [reason]
+  VSTUB="$T/verify-no-verdict-stub.sh"
+  local reason="${1:-the gate process was killed by SIGTERM before it reported a status}"
+  cat > "$VSTUB" <<EOF
+#!/usr/bin/env bash
+wt="\$1"; mkdir -p "\$wt/.agent"
+printf '{"at":"x","gate":{"configured":true,"passed":null,"code":null,"outcome":"no_verdict","no_verdict_reason":"$reason","timed_out":false,"timeout_secs":600,"output_empty":true,"tail":"(the gate produced no output at all)"},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:NO-VERDICT"
+exit 3
+EOF
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_land_refuses_a_no_verdict_gate_and_names_it_as_such() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_no_verdict_stub
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a gate that said nothing"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  assert_contains "$out" "SIGTERM"
+  assert_contains "$out" "--gate-from-ci"
+  case "$out" in *"did not pass"*) echo "a no-verdict gate read as a red gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1;; esac
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_lands_a_no_verdict_gate_on_the_required_check() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_no_verdict_stub
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) > /dev/null
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge with CI evidence"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "Gate: CI (suite) on deadbeefcafe" "$GH_LOG" || { echo "merge body does not name the required check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# The substitution rule is not relaxed for this outcome: a docs build going
+# green still says nothing about the suite.
+test_gate_from_ci_refuses_a_no_verdict_gate_without_every_required_check() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_no_verdict_stub
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" && { echo "landed on an unrelated green check"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_collect_warns_a_no_verdict_gate_without_calling_it_a_failure() {
+  _fanout_setup; _fanout_verify_no_verdict_stub
+  (cd "$T" && "$BIN" delegate widget WG-NV "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  local out; out="$( (cd "$T" && "$BIN" collect WG-NV) 2>&1 )"
+  assert_contains "$out" "no verdict"
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
+  assert_eq "$(jq -r '.[0].verdict.gate_outcome' "$T/.cel/delegations.json")" no_verdict
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_status_renders_a_no_verdict_gate_as_NV() {
+  _fanout_setup; _fanout_verify_no_verdict_stub
+  (cd "$T" && "$BIN" delegate widget WG-QUIET "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-QUIET) > /dev/null 2>&1
+  local row; row="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status | grep WG-QUIET || true)"
+  assert_contains "$row" "NV"
+  case "$row" in *FAIL*) echo "a no-verdict gate rendered as FAIL in status"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1;; esac
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_status_renders_a_timed_out_gate_as_TO() {
   _fanout_setup; _fanout_verify_timeout_stub 600
   (cd "$T" && "$BIN" delegate widget WG-TOS "$T/spec.md") > /dev/null
