@@ -488,3 +488,34 @@ test_the_silence_sentence_names_the_block_and_the_reset() {
   assert_eq "$(liveness_silence_sentence '')" ""
   rm -rf "$T"
 }
+
+# A WORKER WHOSE WORK IS ABOUT RATE LIMITS IS NOT RATE LIMITED (PR #81 review).
+# `throttled` was recognised from the words appearing anywhere in the pane, so
+# a worker running the quota suite, grepping lib/quota.sh, or showing a diff
+# with `429` in it was reported as blocked on a provider - while it was
+# working, with turns on the pane and the context moving. That report sends an
+# orchestrator to wait for a window that was never spent, which is the exact
+# false positive the ticket calls worse than the silence it replaces.
+test_a_busy_pane_whose_own_output_mentions_rate_limits_is_not_throttled() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '⏺ running bash tests/run.sh quota' \
+    '  ok   test_quota_reports_a_rate_limit_error' \
+    '⏺ editing lib/quota.sh' \
+    '  +  429 Too Many Requests is a wait, not a failure' \
+    ' ctx 44.7%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" ""
+  rm -rf "$T"
+}
+
+# ...and the real thing is still the real thing: the refusal is the last word
+# on the pane, in the shape a provider writes one.
+test_a_provider_refusal_after_the_last_turn_is_still_throttled() {
+  _silence_setup
+  local pane; pane="$(printf '%s\n' \
+    '⏺ editing lib/widget.sh' \
+    'API Error: 429 Too Many Requests {"type":"rate_limit_error"}' \
+    ' ctx 61.0%/1.0m')"
+  assert_eq "$(liveness_pane_silence "$pane")" throttled
+  rm -rf "$T"
+}
