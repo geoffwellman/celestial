@@ -1116,3 +1116,39 @@ test_steward_says_manual_plainly_rather_than_will_not_start() {
   assert_eq "$(grep -c lone "$T/launched" || true)" "0"
   rm -rf "$T"
 }
+
+# --- CEL-50: blocked is not absent -----------------------------------------
+#
+# "Nobody on ABC-44, get a worker on it" was said while a worker sat on the
+# branch, throttled on a spent 5h window. The remedy the steward asked for -
+# spawn another - spends the window it is waiting on, so a worker the box can
+# see is named as BLOCKED and no re-dispatch is requested.
+test_a_red_gate_with_a_blocked_worker_names_the_block_not_a_missing_worker() {
+  _orch_fixture
+  mkdir -p "$T/bin"
+  : > "$T/prompts"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":11,"headRefName":"WG-44-x","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"}]'
+SH
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent get")    [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
+  "agent prompt") printf '%s\n' "\$3 \$4" >> "$T/prompts" ;;
+  "agent read")   printf 'API Error: 429 Too Many Requests {"type":"rate_limit_error"}\n ctx 61.0%%/1.0m\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  _STEWARD_HERDR="$T/bin/herdr"
+  local roster
+  roster='{"result":{"agents":[{"name":"widget-WG-44-x","agent_status":"idle","pane_id":"w:p2","cwd":"'"$HOME"'/.herdr/worktrees/widget/WG-44-x"},{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
+  PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
+  local msg; msg="$(cat "$T/prompts")"
+  assert_contains "$msg" 'throttled'
+  case "$msg" in
+    *"get a worker on it"*|*"nobody on"*) echo "the steward asked for another worker: $msg"; return 1 ;;
+  esac
+  rm -rf "$T"
+}
