@@ -18,3 +18,9 @@
   setup skill, `cel help`, `cel setup`'s closing hints and the doctor checker
   now all name and read exactly that one location; `~/.zshenv` is documented
   only for a box-wide credential no workspace owns, and says why.
+- **`cel doctor` now evaluates each registered workspace's `env.local`** - it
+  is sourced, i.e. executed, in a subshell, to judge that workspace's `setup:`
+  checks. Previously only `cel ws env` / `cel shellenv` did that, so a
+  diagnostic command now runs user-authored shell from every workspace on the
+  box. The subshell contains it and nothing leaks back into doctor or into the
+  next workspace.
