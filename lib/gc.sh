@@ -508,8 +508,10 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       | jq -r '[.repo, .pr, .pane, .agent, .status, .cwd] | @tsv')
     if [ "$status" = gone ]; then
       # A recorded pane that is no longer on the roster has gone by other
-      # means. Dropping the row is bookkeeping, not a closure.
-      [ "$dry" -eq 1 ] || drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+      # means. Dropping the row is bookkeeping, not a closure - but its
+      # checkout is now owned by nobody, so it goes too.
+      [ "$dry" -eq 1 ] || { reviewer_checkout_release "$repo" "$pr"
+        drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"; }
       continue
     fi
     state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd")"
@@ -534,6 +536,11 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       continue
     fi
     drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+    # The pane is gone; its checkout goes with it. CEL-52 closed the pane and
+    # CEL-55 gave the reviewer a worktree of its own - a checkout that
+    # outlives the reviewer is the same litter in a new form. Released before
+    # the row is dropped, because the row is where the path is written down.
+    reviewer_checkout_release "$repo" "$pr"
     c_ok "closed the reviewer for $repo#$pr (PR $state, pane $pane)"
     reviewers_closed=$((reviewers_closed + 1))
   done < <(_gc_reviewer_candidates "$rows" "$agents")

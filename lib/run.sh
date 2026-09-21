@@ -211,6 +211,97 @@ _run_reviewer_pane() { # <cwd> -> pane id
   printf '%s' "$pane"
 }
 
+# THE TREE A REVIEWER READS. Until CEL-55 a reviewer pane opened in the
+# ORCHESTRATOR'S OWN CHECKOUT ($ws/repos/<repo>) and was then told a PR
+# number: nothing guaranteed that directory had any relationship to the pull
+# request, and nothing kept it current. On 2026-09-21 it sat at d2da692 while
+# main was at 81022b5 - eighteen commits and a whole day behind - and produced
+# three wrong conclusions before lunch: a branch measured as 3x slower than a
+# "main" that predated lib/orphans.sh, and a reviewer of #75 reporting that
+# lib/wslife.sh "does not exist on this branch" hours after it landed. Both
+# answers were truthful about the wrong tree.
+#
+# So a reviewer gets a checkout of its own, DETACHED at the PR's head, in the
+# manner scouts already get a worktree: a linked git worktree of the
+# orchestrator's clone, which costs a fetch rather than a clone and which the
+# orchestrator cannot move underneath it. Detached on purpose - nothing in it
+# is a branch, so there is nothing there to push.
+_run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-$HOME/.local/state/cel/reviews}"; }
+
+reviewer_checkout_path() { # <repo> <pr>
+  printf '%s/%s-pr-%s' "$(_run_review_dir)" "$1" "$2"
+}
+
+# What GitHub says this PR is, asked once at launch: the head we are about to
+# check out and the base branch the diff is against. Both travel into the
+# brief, because a review whose "main" is a directory is not a review.
+_run_reviewer_pr_facts() { # <repodir> <repo> <pr> -> head<TAB>base
+  local out
+  out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -re '[.headRefOid, .baseRefName] | @tsv' 2>/dev/null
+}
+
+# The PR head reaches a fork's commits too, which is why this fetches
+# `pull/<n>/head` rather than the branch name: a contributor's branch does not
+# exist in origin at all.
+reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
+  local repodir="$1" repo="$2" pr="$3" head="$4" path
+  path="$(reviewer_checkout_path "$repo" "$pr")"
+  mkdir -p "$(dirname "$path")" || return 1
+  # A leftover from a previous round is removed rather than reused: it is at
+  # the head the PR had then, which is the staleness this ticket is about.
+  _reviewer_worktree_drop "$repodir" "$path"
+  git -C "$repodir" fetch -q origin "pull/$pr/head" 2>/dev/null || true
+  git -C "$repodir" worktree add -q --detach "$path" "$head" 2>/dev/null || return 1
+  printf '%s' "$path"
+}
+
+_reviewer_worktree_drop() { # <repodir> <path>
+  [ -n "${2:-}" ] || return 0
+  [ -e "$2" ] || [ -n "$1" ] || return 0
+  git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf -- "$2"
+  git -C "$1" worktree prune >/dev/null 2>&1 || true
+  return 0
+}
+
+# CEL-52 made a reviewer's pane close when its PR closes. A checkout that
+# outlives the pane is the same litter in a new form, so whatever closes the
+# reviewer calls this - `cel gc` does, right after the pane goes.
+reviewer_checkout_release() { # <repo> <pr>
+  local row path repodir
+  row="$(reviewers_find "$1" "$2")" || return 0
+  path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
+  repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
+  [ -n "$path" ] || return 0
+  _reviewer_worktree_drop "$repodir" "$path"
+  rm -rf -- "$path"
+  return 0
+}
+
+# WHAT THE REVIEWER IS TOLD IT IS READING. Appended to the role body so the
+# facts arrive with the agent rather than in whatever an orchestrator happens
+# to type: the head SHA, the base it compares against, and the command that
+# tells it the head has moved since this pane started - reviewing an older
+# head is fine, reviewing one silently is how #75 happened.
+_run_reviewer_brief() { # <repo> <pr> <head> <base> <path>
+  cat <<EOF
+
+## This review
+You are reading a checkout of your own, detached at this pull request's head.
+It is not the orchestrator's working copy and nothing moves it under you.
+
+- repo: \`$1\`, pull request: #$2
+- head you are reading: \`$3\` (in \`$5\`)
+- base you compare against: \`origin/$4\` - say "origin/$4", never "main" as a
+  directory, and anchor every claim about the base to that ref.
+
+Before you conclude anything, check the head has not moved:
+\`gh pr view $2 --repo $1 --json headRefOid\`. If it differs from \`$3\`, say so
+in your verdict - you are reviewing an older head, which is a fact about the
+review, not a detail. Nothing here is a branch, so there is nothing to push.
+EOF
+}
+
 # THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
 # worktree, a `release` verb and a gc pass, because something recorded that it
 # exists. A reviewer was started by `cel run reviewer --repo r --pr n` and
@@ -293,11 +384,17 @@ reviewers_find() { # <repo> <pr> -> the row, or fail
 # Replaces any row for the same repo+PR rather than appending: one pull
 # request has one reviewer, and two rows for it are two panes nobody can tell
 # apart.
-reviewers_record() { # <repo> <pr> <pane> <agent>
+#
+# The checkout, the clone it was cut from and the head it was cut at are
+# carried with the row because the sweep that closes the reviewer is the only
+# thing left that can remove the worktree, and it knows nothing else about it.
+reviewers_record() { # <repo> <pr> <pane> <agent> [checkout] [repodir] [head]
   reviewers_update --arg r "$1" --arg p "$2" --arg pane "$3" --arg a "$4" \
+    --arg co "${5:-}" --arg rd "${6:-}" --arg head "${7:-}" \
     --argjson t "$(date +%s)" \
     'map(select(.repo != $r or ((.pr | tostring) != $p)))
-     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]'
+     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t,
+         checkout:$co, repodir:$rd, head:$head}]'
 }
 
 reviewers_drop() { # <repo> <pr>
@@ -552,6 +649,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
 
   local tag="${role:-direct}" alias_name cwd runtime rolefile="" bind="$repo"
+  local review_head="" review_base="" review_path="" repodir=""
   case "$role" in
     "")
       alias_name="$repo/direct"
@@ -596,6 +694,24 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       if existing="$(reviewers_find "$repo" "$pr")"; then
         c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $(printf '%s' "$existing" | jq -r .pane) - reusing it"
         return 0
+      fi
+      # AND THE TREE IT READS IS THE PR'S, not this directory's. A dry run
+      # asks GitHub nothing and creates nothing: it is a preview of a launch,
+      # and a preview that fetches is a side effect.
+      repodir="$cwd"
+      review_path="$(reviewer_checkout_path "$repo" "$pr")"
+      if [ "$dry_run" -eq 0 ]; then
+        have gh || die "cel run reviewer: gh is not on PATH - the PR's head cannot be resolved"
+        have jq || die "cel run reviewer: jq is not on PATH"
+        local facts
+        facts="$(_run_reviewer_pr_facts "$repodir" "$repo" "$pr")" \
+          || die "cel run reviewer: cannot read $repo#$pr from GitHub - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
+        IFS=$'\t' read -r review_head review_base <<< "$facts"
+        [ -n "$review_head" ] \
+          || die "cel run reviewer: GitHub returned no head SHA for $repo#$pr"
+        review_path="$(reviewer_checkout_make "$repodir" "$repo" "$pr" "$review_head")" \
+          || die "cel run reviewer: could not check out $repo#$pr at $review_head (is $repodir a clone of $repo?)"
+        cwd="$review_path"
       fi
       ;;
   esac
@@ -657,10 +773,22 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
+  # The facts about THIS pull request ride with the role body rather than
+  # waiting for an orchestrator to type them.
+  if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
+    RUN_BODY="$RUN_BODY
+$(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path")"
+  fi
 
-  local AGENT_ARGS=() AGENT_ROLE_FILE=""
-  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" \
-    "$(_run_role_file "$wsdir" "$tag" "${product:-}")"
+  local AGENT_ARGS=() AGENT_ROLE_FILE="" bodyfile
+  bodyfile="$(_run_role_file "$wsdir" "$tag" "${product:-}")"
+  # ONE ROLE FILE PER PULL REQUEST. The body now carries a head SHA, so a
+  # shared $ws/.cel/role-reviewer.md would have two reviewers overwriting each
+  # other's brief and one of them reading a SHA from the other's PR. The name
+  # still ENDS in role-reviewer.md: lib/gc.sh tells a long-lived agent from a
+  # stray one by that substring.
+  [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
+  _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" "$bodyfile"
 
   # Model and thinking flags ride ahead of the role injection, spelled the way
   # THIS runtime spells them (agents.yaml model_flag / thinking) rather than
@@ -719,6 +847,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   # Reviewer panes join the caller's own view instead of creating one.
   if [ "$role" = "reviewer" ]; then
     if [ "$dry_run" -eq 1 ]; then
+      printf 'git worktree add --detach %s <head of %s#%s>\n' "$review_path" "$repo" "$pr"
       printf 'herdr tab "PR reviewer": split its largest pane, or a new tab per %s panes\n' "$_RUN_REVIEW_TAB_CAP"
       printf 'herdr pane send-text <pane> %s\n' "$envprefix"
       printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
@@ -733,8 +862,8 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
     # failure - the reviewer is alive and reviewing either way.
-    reviewers_record "$repo" "$pr" "$pane_id" "$agent_name" \
-      || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it"
+    reviewers_record "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" \
+      || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it, and its checkout at $review_path will outlive it"
     return 0
   fi
 
