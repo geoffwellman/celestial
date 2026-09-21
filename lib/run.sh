@@ -272,6 +272,31 @@ reviewers_drop() { # <repo> <pr>
   reviewers_write "$rows"
 }
 
+# THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. Every reviewer
+# that predates the registry - and on the box that produced this rule that
+# was all seven of them - has no row and would be invisible to anything that
+# only read the file. What it does have is the NAME `cel run reviewer` gave
+# it (_run_agent_name of "<repo>/pr-<n>-review"), so the roster itself says
+# which panes are reviewers and which pull request each is for.
+#
+# The repo comes from the pane's cwd when there is one: the agent name has
+# been through the herdr name sanitiser (lowercased, truncated to 32) and is
+# not reliably the repo's real name, while a reviewer's cwd is its checkout.
+reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>status
+  local name pane cwd status pr repo
+  while IFS=$'\t' read -r name pane cwd status; do
+    [ -n "$name" ] && [ -n "$pane" ] || continue
+    pr="${name##*-pr-}"; pr="${pr%-review}"
+    case "$pr" in ''|*[!0-9]*) continue;; esac
+    repo="${cwd##*/}"
+    [ -n "$repo" ] || repo="${name%-pr-*}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status"
+  done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
+    | select(((.name // "") | test("^.+-pr-[0-9]+-review$")) and ((.pane_id // "") != ""))
+    | [(.name // ""), .pane_id, (.cwd // ""), (.agent_status // "unknown")] | @tsv' 2>/dev/null)
+  return 0
+}
+
 # herdr agent names must match [a-z][a-z0-9_-]{0,31} - no slash, no uppercase.
 # The readable `repo/role` form survives as the herdr workspace label; this is
 # only what the agent answers to.

@@ -358,8 +358,15 @@ box_summary_fragment() { # the per-class bytes cel gc appends to its own line
 # vanishing from the count: how many there are is knowable from the registry
 # alone, and a reader who sees the count knows the sweep has something to do.
 box_reviewers_json() { # -> {count, bytes}
-  local rows n=0 total=0 pane info pid rss
+  local rows panes n=0 total=0 pane info pid rss
   rows="$(reviewers_rows 2>/dev/null)" || rows='[]'
+  panes="$(printf '%s' "$rows" | jq -r '.[].pane // empty' 2>/dev/null)"
+  # The panes that are THERE, not the ones that were written down. Every
+  # reviewer older than the registry has no row, and those were the seven
+  # that made this row worth measuring.
+  if have herdr && have jq; then
+    panes="$panes"$'\n'"$(reviewers_discover "$(herdr agent list 2>/dev/null)" | cut -f3)"
+  fi
   while IFS= read -r pane; do
     [ -n "$pane" ] || continue
     n=$(( n + 1 ))
@@ -370,7 +377,7 @@ box_reviewers_json() { # -> {count, bytes}
     rss="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)" || rss=""
     case "$rss" in ''|*[!0-9]*) continue;; esac
     total=$(( total + rss * 1024 ))
-  done < <(printf '%s' "$rows" | jq -r '.[].pane // empty' 2>/dev/null)
+  done < <(printf '%s\n' "$panes" | sed '/^$/d' | sort -u)
   printf '{"count":%d,"bytes":%d}' "$n" "$total"
 }
 

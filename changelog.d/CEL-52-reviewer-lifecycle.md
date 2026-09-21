@@ -8,3 +8,7 @@
   summary counts reviewers closed beside worktrees removed.
 - `cel box space` reports the reviewer panes and the RSS they hold, and `cel
   doctor` names them when they are the largest reclaimable thing on the box.
+- The gc pass and the report both DISCOVER reviewer panes by the name
+  `cel run reviewer` gives them, so reviewers that predate the registry are
+  swept and measured too; a surviving unrecorded reviewer is adopted into the
+  registry. The registry is an index, not the definition of existence.

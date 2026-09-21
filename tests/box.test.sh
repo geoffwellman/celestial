@@ -256,7 +256,14 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
 _box_reviewer_rows() {
   export CEL_REVIEWERS_STATE="$T/reviewers.json"
   reviewers_record widget 71 w1:p3 widget-pr-71-review
-  herdr() { jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}'; }
+  # Both calls this makes are stubbed: an empty roster so discovery cannot
+  # reach the live box, and one readable process for the recorded pane.
+  herdr() {
+    case "$1 $2" in
+      "agent list") jq -n '{result:{agents:[]}}';;
+      *) jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}';;
+    esac
+  }
 }
 
 test_box_space_reports_reviewer_panes_and_their_rss() {
@@ -276,10 +283,15 @@ test_box_space_reports_reviewer_panes_and_their_rss() {
 test_box_space_reports_zero_reviewers_cleanly() {
   _box_fixture
   export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  # An empty roster, deliberately: without this stub the discovery below
+  # reads the LIVE box's reviewer panes and the fixture's "none" is whatever
+  # the machine happens to be running (it found seven the first time).
+  herdr() { jq -n '{result:{agents:[]}}'; }
   local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
   assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 0
   assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" 0
   assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" "0 reviewer panes"
+  unset -f herdr
   rm -rf "$T"
 }
 
