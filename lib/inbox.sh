@@ -133,7 +133,24 @@ _inbox_file()   { printf '%s/%s.jsonl' "$(_inbox_dir)" "$1"; }
 # to the name, or a cursor left by a past read. `root` and `console` exist by
 # definition: they are addresses, not agents, and are correct before their
 # first message.
+# Is <ws> a workspace this box knows at all? A typo in --workspace is the same
+# fault as a typo in --for, one argument to the left: it names a mailbox that
+# cannot exist. Registered in the registry, or already holding a mailbox file
+# (a workspace can take mail before it is registered, and a fixture has no
+# registry at all) - anything else is a name nobody has ever used here.
+_inbox_ws_known() { # <ws>
+  [ -f "$(_inbox_file "$1")" ] && return 0
+  _inbox_all_ws | grep -qxF "$1"
+}
+
 _inbox_known() { # <ws> <who>
+  # THE WORKSPACE IS CHECKED BEFORE THE READER. root, console and all exist by
+  # definition - but only somewhere that exists. Short-circuiting on the reader
+  # first meant `--workspace ghost-ws` for the commonest reader of all (root is
+  # what the steward, fleet and every orchestrator escalate to) answered "no
+  # unread mail in ghost-ws" and exited 0: exactly the calm silence this was
+  # written to end, moved one argument to the left.
+  _inbox_ws_known "$1" || return 1
   case "$2" in root|console|all) return 0 ;; esac
   local c; for c in "$(_inbox_dir)/$1.$2.cursor" "$(_inbox_dir)/$1.$2."*.cursor; do
     [ -f "$c" ] && return 0
@@ -161,18 +178,31 @@ _inbox_elsewhere() { # <ws> <who>
 # stdout is the drain hook's and the console's channel and carries MESSAGES,
 # so a no-mail sentence there would be injected into every turn as if someone
 # had said it. --json is asked for deliberately, so its state object is stdout.
-_inbox_empty_report() { # <ws> <who> <json>
+#
+# Returns 2 for a workspace that does not exist, so that the two ways of
+# naming one - a cwd that derives nothing, and an explicit --workspace nobody
+# has registered - are one class of answer to a caller reading $?. They are
+# the same fault (you asked about a mailbox that cannot exist) and a script
+# that saw one as a refusal and the other as a clean empty read is exactly the
+# confusion this ticket exists to end; --json could tell them apart and a
+# shell caller could not.
+_inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
   local ws="$1" who="$2" json="$3" state=empty lines="" where="" n c
-  _inbox_known "$ws" "$who" || state=no_mailbox
+  if ! _inbox_ws_known "$ws"; then state=no_workspace
+  elif ! _inbox_known "$ws" "$who"; then state=no_mailbox
+  fi
   lines="$(_inbox_elsewhere "$ws" "$who")"
   if [ "$json" -eq 1 ]; then
     jq -nc --arg state "$state" --arg reader "$who" --arg ws "$ws" \
       --argjson elsewhere "$(printf '%s' "$lines" | jq -R -s 'split("\n") | map(select(length > 0))
         | map(split(":") | {workspace: .[0], unread: (.[1] | tonumber)})')" \
       '{state: $state, reader: $reader, workspace: $ws, unread: 0, elsewhere: $elsewhere}'
+    [ "$state" = no_workspace ] && return 2
     return 0
   fi
-  if [ "$state" = no_mailbox ]; then
+  if [ "$state" = no_workspace ]; then
+    c_warn "$who: no workspace named '$ws' is registered here, so there is no mailbox to be empty (cel ws list)" >&2
+  elif [ "$state" = no_mailbox ]; then
     c_warn "$who: no mailbox by that name in $ws - nothing has ever been addressed to it (a --for typo reads empty forever)" >&2
   else
     c_ok "$who: no unread mail in $ws" >&2
@@ -184,6 +214,8 @@ _inbox_empty_report() { # <ws> <who> <json>
     done <<< "$lines"
     c_warn "  but $who has unread mail elsewhere: $where (cel inbox read --all-workspaces)" >&2
   fi
+  [ "$state" = no_workspace ] && return 2
+  return 0
 }
 
 # --- WHO IS ALIVE TO READ THIS MAILBOX -------------------------------------
@@ -597,9 +629,10 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   local f c last items
   f="$(_inbox_file "$ws")"; c="$(_inbox_cursor "$ws" "$who")"
   # Nothing here is not nothing anywhere, and an absent file is not an empty
-  # one: both go through the report so the reader learns which it was. The
-  # per-workspace sweep stays quiet - it has already looked everywhere.
-  [ -f "$f" ] || { [ -n "$quiet" ] || _inbox_empty_report "$ws" "$who" "$json"; return 0; }
+  # one: both go through the report so the reader learns which it was, and
+  # inherit its status so an unknown workspace is non-zero. The per-workspace
+  # sweep stays quiet - it has already looked everywhere.
+  [ -f "$f" ] || { [ -n "$quiet" ] && return 0; _inbox_empty_report "$ws" "$who" "$json"; return $?; }
   last=""; [ "$all" -eq 0 ] && [ -f "$c" ] && last="$(cat "$c")"
   # An update is ONE new line, rendered as the repeat it is rather than as a
   # second full item: the reader needs to know the condition is still true,
@@ -614,7 +647,7 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
                 | . + {count: (1 + ([$all[] | select(.kind == "update" and .ref == $r and .id <= $i)] | length))})
           else . end)
     | .[]' "$f" 2>/dev/null)"
-  [ -n "$items" ] || { [ -n "$quiet" ] || _inbox_empty_report "$ws" "$who" "$json"; return 0; }
+  [ -n "$items" ] || { [ -n "$quiet" ] && return 0; _inbox_empty_report "$ws" "$who" "$json"; return $?; }
   if [ "$json" -eq 1 ]; then
     printf '%s\n' "$items"
   else
@@ -655,8 +688,8 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
   # to stderr beside it rather than into the sum.
   local n; n="$(_inbox_count_one "$wsname" "$who")"
   printf '%s\n' "$n"
-  [ "$n" -eq 0 ] && _inbox_empty_report "$wsname" "$who" 0
-  return 0
+  [ "$n" -eq 0 ] || return 0
+  _inbox_empty_report "$wsname" "$who" 0
 }
 
 _inbox_count_one() { # <ws> <who>
