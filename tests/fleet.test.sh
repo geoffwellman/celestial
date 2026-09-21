@@ -606,19 +606,20 @@ _fleet_add_rows() { # <n>
 
 # THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
 #
-# Measured on this fixture against main e545cff (CEL-51), with the box walk
+# Measured on this fixture against main 81022b5 (CEL-52), with the box walk
 # stubbed and PATH REPLACED by the shim so nothing can run uncounted:
 #
 #                3 rows                        12 rows
-#   before       177 total (64 jq, 12 git)       231 total (109 jq, 12 git)
-#   after        150 total (47 jq,  4 git)       168 total ( 56 jq,  4 git)
+#   before       185 total (64 jq, 12 git)       239 total (109 jq, 12 git)
+#   after        158 total (47 jq,  4 git)       176 total ( 56 jq,  4 git)
 #
 # Five processes per extra row became one. The remainder is fixed cost that
 # belongs to other libraries reading their own documents - `cksum` and `stat`
 # per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
 # accessors run - and it MOVES: CEL-43's mail triple added 26 to both sides
-# between one measurement and the next, and CEL-49 and CEL-51 added an awk per
-# row to both. That is why this number is taken against the main the branch
+# between one measurement and the next, CEL-49 and CEL-51 added an awk per
+# row to both, and CEL-52 added eight more to the fixed cost on both sides.
+# That is why this number is taken against the main the branch
 # actually sits on and re-taken after every rebase; a ceiling measured against
 # a different main is how a branch gets called three times slower than a
 # checkout that predates two other tickets. What the ceiling asserts is the
@@ -628,15 +629,15 @@ _fleet_add_rows() { # <n>
 # passed a change that traded a per-row jq for a per-row awk, which is the
 # same fan-out wearing different clothes; a budget that watches only the tools
 # its author was thinking about rots the moment somebody reaches for a third.
-# The ceiling below is the TOTAL, and main fails it at both sizes (177 > 160,
-# 231 > 178), which is the only way to know it is measuring anything. The
-# branch measures 150 and 168 on consecutive runs, so the headroom is real
+# The ceiling below is the TOTAL, and main fails it at both sizes (185 > 168,
+# 239 > 186), which is the only way to know it is measuring anything. The
+# branch measures 158 and 176 on consecutive runs, so the headroom is real
 # slack and not a repeat of the measurement. One of those jq is the roster
 # being validated once per render rather than being allowed to fail inside
 # whichever program touched it first, which is a process well spent.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
-  local max=$(( 154 + 2 * rows ))
+  local max=$(( 162 + 2 * rows ))
   if [ "$total" -gt "$max" ]; then
     printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
       "$total" "$max" "$rows" >&2
