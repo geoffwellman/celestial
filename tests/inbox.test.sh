@@ -786,3 +786,28 @@ test_inbox_read_json_distinguishes_the_three_states_by_field() {
   assert_eq "$(printf '%s' "$out" | jq -r '.state')" "no_workspace"
   rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
 }
+
+# A TYPO IN --workspace IS THE SAME FAULT ONE ARGUMENT TO THE LEFT. root,
+# console and all are addresses rather than agents and exist before their
+# first message - but only somewhere that exists. Checking the reader first
+# meant `--workspace ghost-ws --for root` answered "no unread mail in
+# ghost-ws" and exited 0, and root is what the steward, fleet and every
+# orchestrator escalate to: the commonest reader of all went back to calm
+# silence on a stale or mistyped workspace.
+test_inbox_read_does_not_call_an_unregistered_workspace_empty_for_root() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace alpha ) >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1
+  local real ghost
+  real="$( CEL_INBOX_ME=root _inbox_read --for root --workspace alpha 2>&1 1>/dev/null )"
+  ghost="$( CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws 2>&1 1>/dev/null )"
+  assert_contains "$real" "no unread mail"
+  case "$ghost" in *"no unread mail"*) echo "an unregistered workspace read as an empty mailbox"; return 1;; esac
+  assert_contains "$ghost" "ghost-ws"
+  # every reader identity, not just the ones that are not special-cased
+  local who
+  for who in root console all someagent; do
+    assert_eq "$(CEL_INBOX_ME=$who _inbox_read --for "$who" --workspace ghost-ws --json 2>/dev/null | jq -r '.state')" "no_workspace"
+  done
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
