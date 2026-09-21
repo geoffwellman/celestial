@@ -538,3 +538,182 @@ test_gc_rejects_unknown_arguments_and_names_box() {
   local out; out="$(cmd_gc --nope 2>&1 || true)"
   assert_contains "$out" "--box"
 }
+
+# ------------------------------------------------------- the reviewer pass
+# A reviewer exists to review one pull request, and when that pull request
+# closes the reviewer is done. Not idle-for-a-while, not probably-finished -
+# done, by a fact about the world. Cleanup never looked at them because a
+# reviewer runs in the orchestrator's own checkout, not under ~/.herdr/worktrees.
+_gc_reviewer_fixture() {
+  T="$(mktemp -d)"
+  export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json"
+  mkdir -p "$HOME"
+  GC_SINK="$T/sink"; : > "$GC_SINK"
+  GC_PR_STATE=MERGED
+  GC_REVIEW_STATUS=idle
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  herdr() {
+    case "$1 $2" in
+      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
+      *) return 1;;
+    esac
+  }
+  gh() {
+    [ "$GC_PR_STATE" != UNKNOWN ] || return 1
+    jq -n --arg s "$GC_PR_STATE" '{state:$s}'
+  }
+}
+
+_gc_reviewer_agents() { # the herdr roster this reviewer's pane appears in
+  jq -n --arg s "$GC_REVIEW_STATUS" \
+    '{result:{agents:[{pane_id:"w1:p3",name:"widget-pr-71-review",cwd:"/w/repos/widget",agent_status:$s}]}}'
+}
+
+test_gc_closes_a_reviewer_whose_pr_is_merged_or_closed() {
+  local state
+  for state in MERGED CLOSED; do
+    _gc_reviewer_fixture
+    GC_PR_STATE="$state"
+    _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+    assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+    assert_eq "$(reviewers_rows | jq -r length)" 0
+    rm -rf "$T"
+  done
+}
+
+# A reviewer waiting a day for a worker to push is doing its job.
+test_gc_leaves_an_open_prs_reviewer_alone_however_old_the_row() {
+  _gc_reviewer_fixture
+  GC_PR_STATE=OPEN
+  reviewers_write "$(reviewers_rows | jq -c '[.[] | .started_at = 1]')"
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  rm -rf "$T"
+}
+
+# This file's whole history is bugs where "could not tell" was read as
+# "nothing there".
+test_gc_keeps_a_reviewer_whose_pr_state_cannot_be_read_and_names_it() {
+  _gc_reviewer_fixture
+  GC_PR_STATE=UNKNOWN
+  local out; out="$(_gc_reviewers 0 "$(_gc_reviewer_agents)" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  assert_contains "$out" "widget#71"
+  rm -rf "$T"
+}
+
+# A reviewer mid-sentence on a PR that merged a second ago keeps its pane.
+test_gc_never_closes_a_working_reviewer_even_on_a_merged_pr() {
+  _gc_reviewer_fixture
+  GC_REVIEW_STATUS=working
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  rm -rf "$T"
+}
+
+test_gc_reviewer_dry_run_closes_nothing_and_says_what_it_would_close() {
+  _gc_reviewer_fixture
+  local out; out="$(_gc_reviewers 1 "$(_gc_reviewer_agents)")"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  assert_contains "$out" "widget#71"
+  assert_contains "$out" MERGED
+  rm -rf "$T"
+}
+
+# A pane that has gone by other means leaves a row behind; a stale row must
+# not make `cel gc` fail, and must not survive the sweep either.
+test_gc_drops_a_reviewer_row_whose_pane_is_already_gone() {
+  _gc_reviewer_fixture
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# The summary counts reviewers beside worktrees, and says so when there were
+# none: a sweep that reports nothing is indistinguishable from one that never
+# looked.
+test_gc_summary_counts_reviewers_closed_even_when_there_were_none() {
+  _gc_managed_fixture
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  local out; out="$(cmd_gc)"
+  assert_contains "$out" "0 reviewers closed"
+  rm -rf "$T"
+}
+
+# THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. The first cut of
+# this pass read only the rows `cel run reviewer` writes, so on the box that
+# produced this ticket it reported "0 reviewers closed" with seven idle
+# reviewer panes sitting in front of it: every one of them predated the
+# registry. A reviewer pane is recognisable by the name cel run gives it
+# (<repo>-pr-<n>-review), and an unrecorded one gets exactly the same rules.
+test_gc_closes_an_unrecorded_reviewer_pane_found_by_its_name() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# An unrecorded reviewer that is still needed is ADOPTED rather than left
+# unknown: the index catches up, so the next `cel run reviewer` for that PR
+# reuses the pane instead of splitting another.
+test_gc_adopts_an_unrecorded_reviewer_whose_pr_is_still_open() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  GC_PR_STATE=OPEN
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  rm -rf "$T"
+}
+
+# The vetoes are not weaker for a pane nobody recorded.
+test_gc_never_closes_a_working_or_unreadable_unrecorded_reviewer() {
+  _gc_reviewer_fixture
+  reviewers_write '[]'
+  GC_REVIEW_STATUS=working
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  GC_REVIEW_STATUS=idle GC_PR_STATE=UNKNOWN
+  reviewers_write '[]'
+  local out; out="$(_gc_reviewers 0 "$(_gc_reviewer_agents)" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "widget#71"
+  rm -rf "$T"
+}
+
+# A recorded reviewer and the same pane on the roster are ONE reviewer: the
+# pane must not be closed twice or counted twice.
+test_gc_counts_a_recorded_and_discovered_pane_once() {
+  _gc_reviewer_fixture
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$reviewers_closed" 1
+  rm -rf "$T"
+}
+
+# LAST WRITE WINS IS A LOST ROW. The sweep reads the registry once, then
+# spends seconds in `gh` per reviewer; a `cel run reviewer` that records a
+# brand-new row in that window was silently erased by the sweep's final
+# write, and the next call for that PR split a duplicate pane - defeating
+# the one-reviewer-per-PR guarantee this very pass exists to give. The write
+# back merges under a lock instead of overwriting from a stale snapshot.
+test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
+  _gc_reviewer_fixture
+  gh() {
+    # `cel run reviewer --pr 99` lands while this sweep is mid-flight.
+    reviewers_record gadget 99 w1:p9 gadget-pr-99-review
+    jq -n --arg s "$GC_PR_STATE" '{state:$s}'
+  }
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_eq "$(reviewers_find gadget 99 | jq -r .pane)" w1:p9
+  assert_fails reviewers_find widget 71
+  rm -rf "$T"
+}

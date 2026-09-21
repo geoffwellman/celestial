@@ -28,6 +28,13 @@ _box_fixture() {
   mkdir -p "$BOX_STUB_BIN"
   DOCKER_LOG="$T/docker.argv"
   : > "$DOCKER_LOG"
+  # AND THE ROSTER, for every test in this file rather than the few that
+  # think about it. `cel box space` and `box_doctor_line` ask herdr which
+  # panes are reviewers; without this stub each of them reads the LIVE box's
+  # agents, which is the convention this suite exists to keep. A test that
+  # wants a roster with something in it overrides this after the fixture.
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  herdr() { jq -n '{result:{agents:[]}}'; }
 }
 
 _box_age_file() { # <path> <days-old>
@@ -246,5 +253,73 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
   line="$(CEL_BOX_FREE_FLOOR_GB=999999 box_doctor_line)"
   assert_contains "$line" "cel gc --box"
   assert_eq "$(CEL_BOX_FREE_FLOOR_GB=0 box_doctor_line)" ""
+  rm -rf "$T"
+}
+
+# ------------------------------------------------------------- the reviewers
+# 3 GB of idle reviewer panes was a bigger number than most of the disk rows
+# above it, and it was invisible: the report measured the floor and never the
+# agents standing on it.
+_box_reviewer_rows() {
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  # An empty roster still (discovery must not reach the live box), plus one
+  # readable process for the recorded pane.
+  herdr() {
+    case "$1 $2" in
+      "agent list") jq -n '{result:{agents:[]}}';;
+      *) jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}';;
+    esac
+  }
+}
+
+test_box_space_reports_reviewer_panes_and_their_rss() {
+  _box_fixture
+  _box_reviewer_rows
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 1
+  [ "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" -gt 0 ] \
+    || { printf 'a live reviewer pane measured as zero RSS\n' >&2; return 1; }
+  assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" reviewers
+  unset -f herdr
+  rm -rf "$T"
+}
+
+# None is a number, not an absent row: "did it look?" must never be a question
+# the report leaves open.
+test_box_space_reports_zero_reviewers_cleanly() {
+  _box_fixture
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 0
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" 0
+  assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" "0 reviewer panes"
+  rm -rf "$T"
+}
+
+# The report counts the panes that are THERE, not the ones that were written
+# down: the seven that produced this ticket predated the registry entirely.
+test_box_space_counts_an_unrecorded_reviewer_pane_too() {
+  _box_fixture
+  herdr() {
+    case "$1 $2" in
+      "agent list") jq -n '{result:{agents:[{name:"widget-pr-71-review",pane_id:"w1:p3",cwd:"/w/repos/widget",agent_status:"idle"}]}}';;
+      *) jq -n --argjson pid "$$" '{result:{process_info:{foreground_processes:[{pid:$pid}]}}}';;
+    esac
+  }
+  local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
+  assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 1
+  unset -f herdr
+  rm -rf "$T"
+}
+
+# NEVER TOUCH THE LIVE BOX. box_reviewers_json asks the roster which panes
+# are reviewers, so every test that reaches cmd_box space or box_doctor_line
+# reads the live herdr unless the fixture itself stubs it - and most of the
+# tests above predate that call and never stubbed anything. The stub belongs
+# in the fixture, not in the three tests that happened to notice.
+test_box_fixture_stubs_the_roster_so_no_test_reads_the_live_one() {
+  _box_fixture
+  assert_eq "$(type -t herdr)" function
+  assert_eq "$(herdr agent list | jq -r '.result.agents | length')" 0
+  assert_eq "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json | jq -r '.reviewers.count')" 0
   rm -rf "$T"
 }

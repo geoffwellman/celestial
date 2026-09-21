@@ -27,6 +27,8 @@
 _CEL_BOX=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck source=lib/run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry, for the report
 
 # FOURTEEN DAYS on images and build cache. The working set on a real box is
 # three to six days old and the superseded build tags are two weeks and older;
@@ -343,6 +345,42 @@ box_summary_fragment() { # the per-class bytes cel gc appends to its own line
     "$(box_human "${BOX_FREED_CACHES:-0}")" "$(box_human "${BOX_FREED_OURS:-0}")"
 }
 
+# ------------------------------------------------------------ the reviewers
+
+# 3 GB of idle reviewer panes is a bigger number than most of the disk rows
+# above, and it was invisible: this report measured the floor and never the
+# agents standing on it. `box memory low: 1.4G of 23G available` went into
+# root's mailbox all day on 2026-09-21 and nothing anywhere could name the
+# seven reviewer panes that were most of it.
+#
+# Bytes, not kB, so the number adds up with every other one here. A pane
+# whose process cannot be read counts in the total as zero rather than
+# vanishing from the count: how many there are is knowable from the registry
+# alone, and a reader who sees the count knows the sweep has something to do.
+box_reviewers_json() { # -> {count, bytes}
+  local rows panes n=0 total=0 pane info pid rss
+  rows="$(reviewers_rows 2>/dev/null)" || rows='[]'
+  panes="$(printf '%s' "$rows" | jq -r '.[].pane // empty' 2>/dev/null)"
+  # The panes that are THERE, not the ones that were written down. Every
+  # reviewer older than the registry has no row, and those were the seven
+  # that made this row worth measuring.
+  if have herdr && have jq; then
+    panes="$panes"$'\n'"$(reviewers_discover "$(herdr agent list 2>/dev/null)" | cut -f3)"
+  fi
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    n=$(( n + 1 ))
+    have herdr && have jq || continue
+    info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || continue
+    pid="$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[0].pid // empty' 2>/dev/null)" || continue
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    rss="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)" || rss=""
+    case "$rss" in ''|*[!0-9]*) continue;; esac
+    total=$(( total + rss * 1024 ))
+  done < <(printf '%s\n' "$panes" | sed '/^$/d' | sort -u)
+  printf '{"count":%d,"bytes":%d}' "$n" "$total"
+}
+
 # -------------------------------------------------------------- the report
 
 # EVERY NUMBER IS MEASURED, NEVER REMEMBERED. There is no cache file: a stale
@@ -365,15 +403,16 @@ _box_space_rows() { # class<TAB>path<TAB>bytes<TAB>reclaimable<TAB>age_days
 # interesting than 8.7G of build cache, and a table sorted by size buries the
 # only rows anybody can act on.
 box_space_json() {
-  local rows docker
+  local rows docker reviewers
   rows="$(_box_space_rows)"
   docker="$(box_docker_json 2>/dev/null)" || docker=null
-  printf '%s\n' "$rows" | jq -R -s --argjson docker "${docker:-null}" '
+  reviewers="$(box_reviewers_json)"
+  printf '%s\n' "$rows" | jq -R -s --argjson docker "${docker:-null}" --argjson reviewers "$reviewers" '
     [ split("\n")[] | select(length > 0) | split("\t")
       | {path: .[1], class: .[0], bytes: (.[2]|tonumber),
          reclaimable: (.[3]|tonumber), age_days: (.[4]|tonumber)} ]
     | sort_by(-.reclaimable)
-    | {paths: ., docker: $docker}'
+    | {paths: ., docker: $docker, reviewers: $reviewers}'
 }
 
 _box_space_table() {
@@ -394,6 +433,14 @@ _box_space_table() {
     done < <(printf '%s' "$json" | jq -r '.docker | to_entries[] | [.key, .value.size, .value.reclaimable] | @tsv' \
       | sort -t$'\t' -k3 -nr)
   fi
+  # The agents standing on the floor, always - zero is a measurement and an
+  # absent row is not. The remedy is `cel gc`, which closes exactly the ones
+  # whose pull request is finished and leaves the working ones alone.
+  local rcount rbytes
+  IFS=$'\t' read -r rcount rbytes < <(printf '%s' "$json" | jq -r '[.reviewers.count, .reviewers.bytes] | @tsv')
+  printf '  %-12s %12s %12s %6s  %s\n' \
+    reviewers "$(box_human "$rbytes")" "$(box_human "$rbytes")" "-" \
+    "$rcount reviewer panes - cel gc closes the ones whose PR is merged or closed"
   # And the part the janitor may not touch, said in words rather than left as
   # a row somebody might read as a to-do list.
   local untouchable
@@ -428,7 +475,7 @@ cmd_box() { # space [--json]
 # command that clears it - a diagnosis whose remedy the reader has to go and
 # look up is half a diagnosis.
 box_doctor_line() {
-  local floor free json largest
+  local floor free json largest remedy
   floor="${CEL_BOX_FREE_FLOOR_GB:-20}"
   case "$floor" in ''|*[!0-9]*) return 0;; esac
   free="$(_box_free_bytes)" || return 0
@@ -436,10 +483,19 @@ box_doctor_line() {
   json="$(box_space_json 2>/dev/null)" || return 0
   largest="$(printf '%s' "$json" | jq -r '
     ((.paths | map({name: .class, bytes: .reclaimable}))
-      + (if .docker == null then [] else (.docker | to_entries | map({name: ("docker " + .key), bytes: .value.reclaimable})) end))
+      + (if .docker == null then [] else (.docker | to_entries | map({name: ("docker " + .key), bytes: .value.reclaimable})) end)
+      + [{name: "reviewer panes", bytes: (.reviewers.bytes // 0)}])
     | sort_by(-.bytes) | .[0] // {name:"nothing", bytes:0}
     | "\(.name) \(.bytes)"')"
-  printf 'box: %s free (floor %sG) - largest reclaimable is %s; cel gc --box clears it, cel box space shows the rest' \
+  # THE REMEDY BELONGS IN THE FINDING. When the largest reclaimable thing is
+  # a pile of finished reviewers, `cel gc --box` is the wrong instruction:
+  # the plain sweep is what closes them, and sending a reader to the docker
+  # flag for a memory problem is how three gigabytes stayed put for a day.
+  remedy="cel gc --box clears it, cel box space shows the rest"
+  case "${largest% *}" in
+    "reviewer panes") remedy="cel gc closes every reviewer whose PR is merged or closed; cel box space shows the rest" ;;
+  esac
+  printf 'box: %s free (floor %sG) - largest reclaimable is %s; %s' \
     "$(box_human "$free")" "$floor" \
-    "$(printf '%s' "${largest% *}") $(box_human "${largest##* }")"
+    "$(printf '%s' "${largest% *}") $(box_human "${largest##* }")" "$remedy"
 }
