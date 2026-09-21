@@ -254,6 +254,21 @@ _steward_reconcile() {
   return 0
 }
 
+# BLOCKED IS NOT ABSENT (CEL-50). "Nobody on ABC-44, get a worker on it" was
+# said while a worker sat on the branch, throttled on a spent 5h window - and
+# the remedy it asked for, another worker, spends the window it is waiting on.
+# So before the sweep says a branch has nobody, it asks what the pane on that
+# branch is actually doing. "<silence>\t<reset>" or nothing.
+_steward_branch_silence() { # <agents-json> <repo> <branch>
+  local agents="$1" alias text
+  alias="$(printf '%s' "$agents" | jq -r --arg d "$HOME/.herdr/worktrees/$2/$3" \
+    '[.result.agents[]? | select(.cwd == $d)][0] | (.name // .agent_id // "")' 2>/dev/null || true)"
+  [ -n "$alias" ] && [ "$alias" != null ] || return 0
+  text="$("$_STEWARD_HERDR" agent read "$alias" --source recent-unwrapped --lines 40 2>/dev/null || true)"
+  [ -n "$text" ] || return 0
+  liveness_pane_silence "$text"
+}
+
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj
   for ws in $(registry_names); do
@@ -330,11 +345,27 @@ _steward_review_sweep() { # <agents-json>
           _steward_nudge "$orch" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
         elif [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
-          _steward_nudge "$orch" "$slug#$num-changes" \
-            "steward: PR #$num on $repo has changes requested and nobody working on $branch - restart the review loop (worker fixes, then reviewer re-reviews)."
+          local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
+          if [ -n "$sil" ]; then
+            _steward_nudge "$orch" "$slug#$num-blocked" \
+              "steward: PR #$num on $repo has changes requested and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
+          else
+            _steward_nudge "$orch" "$slug#$num-changes" \
+              "steward: PR #$num on $repo has changes requested and nobody working on $branch - restart the review loop (worker fixes, then reviewer re-reviews)."
+          fi
         elif [ "$failing" -gt 0 ] && [ "$working" = "0" ]; then
-          _steward_nudge "$orch" "$slug#$num-red" \
-            "steward: PR #$num on $repo has FAILING checks and nobody on $branch - a red gate is a finding, get a worker on it."
+          # A worker reading `idle` on a red branch is the case this whole
+          # ticket is about: it may be throttled, wedged on a transport error,
+          # or holding a prompt it never took. Every one of those is a report,
+          # and none of them is answered by spawning a fifth worker.
+          local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
+          if [ -n "$sil" ]; then
+            _steward_nudge "$orch" "$slug#$num-blocked" \
+              "steward: PR #$num on $repo has FAILING checks and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
+          else
+            _steward_nudge "$orch" "$slug#$num-red" \
+              "steward: PR #$num on $repo has FAILING checks and nobody on $branch - a red gate is a finding, get a worker on it."
+          fi
         fi
       done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) |
         [.number, .headRefName,
@@ -421,6 +452,23 @@ _steward_stalled_workers() { # <agents-json>
         fi
       fi
       verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote" "$lv")"
+      # THE THREE SILENCES (CEL-50), read from the pane rather than asked of
+      # anyone: they cost nothing, need no router, and each one renders as a
+      # worker thinking. A throttled worker is reported ONCE as a warning and
+      # never raised as a repeating blocked item - the remedy is waiting, and
+      # a nudge every tick spends the window it is waiting on.
+      local sil="" silv="" silr=""
+      sil="$(liveness_pane_silence "${ltext:-$text}" \
+             "$(printf '%s' "$row" | jq -r '.provider // ""')")"
+      if [ -n "$sil" ]; then
+        silv="$(printf '%s' "$sil" | cut -f1)"
+        silr="$(printf '%s' "$sil" | cut -f2 -s)"
+      fi
+      if [ -z "$verdict" ] && [ -n "$silv" ]; then
+        _steward_due "stall-$ws-$id" \
+          && c_warn "$ws/$id: ${ticket:-$branch} - $(liveness_silence_sentence "$silv" "$silr")"
+        continue
+      fi
       # Working again: the sweep has already computed that, so it is also the
       # moment to resolve what it raised.
       if [ -z "$verdict" ]; then
@@ -435,6 +483,10 @@ _steward_stalled_workers() { # <agents-json>
       # The model's own sentence, appended rather than substituted: the four
       # facts root used to gather by hand still lead, and the reason follows.
       [ -n "$lv" ] && msg="$msg | $(liveness_sentence "$lv" "$lact" "$lconf" "${still:-0}")"
+      # ...and the block itself, where the pane shows one: "stalled" plus
+      # "throttled until 19:00" is an instruction; "stalled" alone sent an
+      # orchestrator to spawn a worker against an exhausted account.
+      [ -n "$silv" ] && msg="$msg | $(liveness_silence_sentence "$silv" "$silr")"
 
       # Loud means the work itself is at stake, so it goes to root's mailbox as
       # a BLOCKED item - the kind the inbox refuses to let anyone bury - and it

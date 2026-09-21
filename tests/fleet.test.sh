@@ -512,3 +512,20 @@ test_fleet_mail_doctor_line_names_the_mailbox_nobody_reads() {
   assert_eq "$(fleet_mail_doctor_line alpha)" ""
   _fleet_teardown
 }
+
+# --- CEL-50: mail to a pane that is not there -------------------------------
+#
+# `alpha-ABC-48` was sent a finding by inbox; the ledger showed `live: -` and
+# nothing received it. The message was accepted and went nowhere, which is the
+# worst of both: the sender believes it was delivered. An alias with no live
+# pane is a fact the box can see, so it says so.
+test_mail_to_an_alias_with_no_live_pane_is_reported() {
+  local roster='{"result":{"agents":[{"pane_id":"wA:p1","name":"widget-ABC-1","agent_status":"working"}]}}'
+  assert_eq "$(fleet_alias_undeliverable "$roster" widget-ABC-1)" ""
+  local out; out="$(fleet_alias_undeliverable "$roster" widget-ABC-48 || true)"
+  assert_contains "$out" 'widget-ABC-48'
+  assert_contains "$out" 'no live pane'
+  # A roster nobody could read is not evidence that anyone died - the lesson
+  # lib/stall.sh already paid for.
+  assert_eq "$(fleet_alias_undeliverable '' widget-ABC-48)" ""
+}

@@ -412,6 +412,42 @@ _fanout_pr_phrase() {
   esac
 }
 
+# A PANE IS NOT A WORKER (CEL-50). `herdr agent prompt` returning success means
+# the text reached the pane, not that the agent took it. On 2026-09-18 a
+# delegate left the whole dispatch TYPED BUT UNSUBMITTED in two worker panes:
+# both sat two hours at +0 commits with `ctx 0.0%`, the ledger read `running`,
+# and re-prompting started them instantly - the run was otherwise fine. A
+# reviewer pane did exactly the same three days later.
+#
+# So the dispatch is confirmed from the pane itself before the row claims to
+# be running: a first turn, or context off zero. An unreadable pane is NOT
+# evidence of failure - herdr being unable to answer says nothing about the
+# agent, and treating silence as a fault is how this file would start
+# reporting healthy workers as broken.
+_fanout_prompt_accepted() { # <alias> <tries>
+  local alias="$1" tries="${2:-5}" i text
+  for (( i = 0; i < tries; i++ )); do
+    [ "$i" -eq 0 ] || sleep "${CEL_FANOUT_CONFIRM_SLEEP:-2}"
+    text="$("$HERDR" agent read "$alias" --source recent-unwrapped --lines 40 2>/dev/null || true)"
+    [ -n "$text" ] || return 0
+    [ "$(liveness_pane_silence "$text")" = unstarted ] || return 0
+  done
+  return 1
+}
+
+# Prompt, confirm, and re-submit ONCE. Two attempts, never three: a dispatch
+# that needs a third try is a fault to report rather than paper over, and the
+# state it leaves behind (`unconfirmed`, worktree intact) is recoverable by
+# anyone - human or steward - with one more prompt.
+_fanout_dispatch() { # <alias> <prompt-text> -> 0 accepted, 1 unconfirmed
+  local alias="$1" prompt="$2" tries="${CEL_FANOUT_CONFIRM_TRIES:-5}"
+  "$HERDR" agent prompt "$alias" "$prompt" > /dev/null
+  _fanout_prompt_accepted "$alias" "$tries" && return 0
+  c_warn "$alias did not take the dispatch (pane at zero context) - re-submitting once"
+  "$HERDR" agent prompt "$alias" "$prompt" > /dev/null
+  _fanout_prompt_accepted "$alias" "$tries"
+}
+
 # A WORKER DOES NOT RUN THE FACTORY. On 2026-09-18 a worker ran `cel-fanout
 # land <its own id>` from its worktree the moment its reviewer approved: the
 # ledger lock was held for three minutes while the gate ran, the orchestrator's
@@ -785,24 +821,22 @@ cmd_delegate() {
   # Quote the workspace selector for the same reason as the environment line.
   local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
 
+  local dstate=running prompt_text
   if [ "$shape" = spike ]; then
-    "$HERDR" agent prompt "$alias" \
-      "Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
+    prompt_text="Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
 
 FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop." > /dev/null
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
   elif [ "$shape" = scout ]; then
-    "$HERDR" agent prompt "$alias" \
-      "Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
+    prompt_text="Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
 
 FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop." > /dev/null
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
   else
     local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
-    "$HERDR" agent prompt "$alias" \
-      "Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+    prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
 
 When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
 
@@ -810,14 +844,23 @@ If your spec says the deliverable is research, a document, or explicitly says no
 
 FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop." > /dev/null
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+  fi
+
+  # UNCONFIRMED IS NOT A FAILURE, and it must not cost the worktree: the pane
+  # and the agent are healthy, only the submit was lost. The row carries the
+  # state so a human or the steward can re-prompt exactly the alias that needs
+  # it, instead of discovering it two hours later by reading panes by hand.
+  if ! _fanout_dispatch "$alias" "$prompt_text"; then
+    dstate=unconfirmed
+    c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' and the worktree is intact. Re-prompt with: herdr agent prompt $alias \"<the spec>\""
   fi
 
   local entry
   entry="$(jq -n \
     --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
     --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
-    --arg spec "$abs_spec" --arg state running --arg created "$(_now_iso)" \
+    --arg spec "$abs_spec" --arg state "$dstate" --arg created "$(_now_iso)" \
     --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
     --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
     --arg shape "$shape" --arg because "$because" \
@@ -828,7 +871,7 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   _ledger_append "$wsdir" "$entry"
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
-  if [ "$shape" = ship ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
+  if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
   printf '%s\n' "$branch"
 }
 
@@ -1012,7 +1055,7 @@ cmd_status() {
   # answer, and a gate that never answered is not a wrong one: `TO` (ran out of
   # time) and `NV` (died without reporting anything) read differently from
   # `FAIL` on purpose, the same way `+?` reads differently from `+0`.
-  [ "$json" -eq 1 ] || printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
+  [ "$json" -eq 1 ] || printf '%-14s %-10s %-20s %-10s %-18s %-6s %-9s %-6s %-5s %-6s %s\n' ID REPO BRANCH STATE LIVE AHEAD TICKET REVIEW GATE TRY MODEL
   local e id repo branch state pane live model ticket review gatecol trycol
   while IFS= read -r e; do
     [ -n "$e" ] || continue
@@ -1083,6 +1126,19 @@ cmd_status() {
     # hanging at the sidebar's top level, which is the fact the operator has to
     # act on. There is no re-parent verb in herdr 0.9, so this is a report.
     if _ws_detached "$wslist" "$(printf '%s' "$e" | jq -r '.herdr_ws // ""')"; then live=detached; fi
+    # A ROW THAT READS LIKE PROGRESS AND IS NOT (CEL-50). `running`, `+0` and a
+    # pane at zero context was the rendering two workers sat behind for two
+    # hours. The silence is appended to the live column - the disagreement is
+    # the signal, exactly as the console's live column shows it.
+    if [ "$state" = running ] || [ "$state" = unconfirmed ]; then
+      local sil=""
+      if [ -n "$pane" ] && [ "$live" != "-" ] && [ "$live" != detached ]; then
+        sil="$(liveness_pane_silence \
+          "$("$HERDR" pane read "$pane" --source detection --lines 40 2>/dev/null || true)" \
+          "$(printf '%s' "$e" | jq -r '.provider // ""')" | cut -f1)"
+      fi
+      [ -n "$sil" ] && live="$live!$sil"
+    fi
     model="$(printf '%s' "$e" | jq -r '.profile // "" | if . == "" then "" else . + ":" end')$(printf '%s' "$e" | jq -r '.model // ""')"    ticket="$(printf '%s' "$e" | jq -r '.ticket // ""')"
     case "$(printf '%s' "$e" | jq -r '.shape // "ship"')" in
       scout) ticket=scout ;;
@@ -1103,7 +1159,7 @@ cmd_status() {
       esac
     fi
     trycol="$(printf '%s' "$e" | jq -r '.try.port // "-"')"
-    printf '%-14s %-10s %-20s %-10s %-9s %-6s %-9s %-6s %-5s %-6s %s\n' \
+    printf '%-14s %-10s %-20s %-10s %-18s %-6s %-9s %-6s %-5s %-6s %s\n' \
       "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "$gatecol" "$trycol" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
 

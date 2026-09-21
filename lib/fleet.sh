@@ -67,7 +67,7 @@ _fleet_unit_rows() { # <wsdir> <repo>
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
   jq -c --arg r "$2" \
-    '.[]? | select(.repo == $r and ((.state // "") | IN("running", "finished", "collected", "blocked")))' \
+    '.[]? | select(.repo == $r and ((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked")))' \
     "$led" 2>/dev/null || true
 }
 
@@ -134,7 +134,19 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
     activity="$(printf '%s' "$cached" | cut -f1)"
     aconf="$(printf '%s' "$cached" | cut -f2)"
   fi
+  # ...AND WHAT THE PANE IS, which needs nobody asked at all (CEL-50). A pane
+  # holding an unsubmitted prompt, erroring on every turn, or refused by its
+  # provider all render as a worker thinking, and all three are visible in the
+  # text. Carried as its own field so a view can show `running` and the reason
+  # it is not moving in the same row.
+  local silence="" sreset=""
+  if [ "$state" = running ] || [ "$state" = unconfirmed ]; then
+    silence="$(liveness_pane_silence "$text" "$(printf '%s' "$e" | jq -r '.provider // ""')")"
+    sreset="$(printf '%s' "$silence" | cut -f2 -s)"
+    silence="$(printf '%s' "$silence" | cut -f1)"
+  fi
   printf '%s' "$e" | jq -c \
+    --arg silence "$silence" --arg silence_reset "$sreset" \
     --arg live "$live" --argjson quiet "$quiet" \
     --arg activity "$activity" --arg aconf "$aconf" \
     --arg verdict "$verdict" --arg severity "$severity" \
@@ -148,7 +160,28 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
       profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
       activity: $activity, activity_confidence: $aconf,
+      silence: $silence, silence_reset: $silence_reset,
       harness: $harness}'
+}
+
+# MAIL TO A PANE THAT IS NOT THERE (CEL-50). A worker was sent a finding by
+# inbox; the ledger showed `live: -` and nothing received it. The message was
+# accepted and went nowhere, which is worse than a refusal - the sender
+# believes it was delivered. Prints the sentence and returns 0 when the alias
+# has no live pane.
+#
+# A roster nobody could read is NOT evidence that anyone died: an empty
+# agents document says nothing at all, the lesson lib/stall.sh already paid
+# for once.
+fleet_alias_undeliverable() { # <agents-json> <alias>
+  local agents="${1:-}" alias="${2:-}"
+  [ -n "$agents" ] && [ -n "$alias" ] || return 1
+  printf '%s' "$agents" | jq -e '.result.agents? | length > 0' >/dev/null 2>&1 || return 1
+  printf '%s' "$agents" | jq -e --arg a "$alias" \
+    '[.result.agents[]? | select((.name // .agent_id // "") == $a)] | length > 0' >/dev/null 2>&1 \
+    && return 1
+  printf '%s has no live pane - anything sent to it is filed, not delivered; start the agent before writing to it' "$alias"
+  return 0
 }
 
 # The unit line. The unit is the PRODUCT: the thing one orchestrator stands
