@@ -8,3 +8,8 @@
   told where and how many (without moving that mailbox's cursor). `--json`
   carries the three states as `state: empty|no_mailbox|no_workspace` plus an
   `elsewhere` array.
+- Naming a workspace that does not exist is non-zero however it was named: a
+  cwd that derives none and an unregistered `--workspace` are one class of
+  answer (`state: no_workspace`, exit 2), including for the `root`, `console`
+  and `all` addresses, which previously read as an empty mailbox anywhere.
+  `cel inbox count` still prints its number on stdout first.
