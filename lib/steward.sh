@@ -190,7 +190,7 @@ _steward_launch_orch() { # <product> <workspace>
 }
 
 _steward_orchestrators() { # <agents-json>
-  local agents_json="$1" ws wsdir p want live
+  local agents_json="$1" ws wsdir p want live mode src
   # An empty roster means herdr did not answer, not that every orchestrator
   # died - launching one per product on a transport failure is how you get a
   # box full of duplicates, which is the incident this whole function is for.
@@ -199,10 +199,24 @@ _steward_orchestrators() { # <agents-json>
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
     for p in $(ws_product_names "$wsdir"); do
-      # Only `auto`. A product whose orchestrator is started deliberately
-      # (or not at all) must never be started behind the operator's back.
-      [ "$(ws_product_get "$wsdir" "$p" orchestrator)" = "auto" ] || continue
+      # THE SAME RESOLVED VALUE `up` ACTS ON. 2026-09-21: this loop read the
+      # product's `orchestrator:` key alone while `cel ws up` read a workspace
+      # mode a string `layout:` had invented, so `up` printed "already right"
+      # while the steward said the same orchestrator would not start - 24
+      # times, the factory arguing with itself in front of the operator. Both
+      # now ask ws_orchestrator_mode, and only `auto` is ever started: a
+      # product started deliberately, or not at all, must never be started
+      # behind the operator's back.
+      IFS=$'\t' read -r mode src <<< "$(ws_orchestrator_mode "$wsdir" "$p")"
       want="$(_run_agent_name "$p-orch")"
+      if [ "$mode" != auto ]; then
+        # Nobody asked for this one to be started, so its absence is not a
+        # fault - and a fault raised while the two readers disagreed comes
+        # down with a sentence that says what is actually true.
+        _steward_clear "$ws" "orch-ensure-$p" \
+          "$ws/$p is set to manual; nothing will start it automatically ($mode via $src)"
+        continue
+      fi
       live="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
         '[.result.agents[]? | select(.name == $n)] | length')"
       # It came back: whatever the steward raised about it is no longer true.
@@ -211,12 +225,12 @@ _steward_orchestrators() { # <agents-json>
       # tick, which is a fork bomb at five-minute cadence. Half an hour.
       _STEWARD_WINDOW=1800 _steward_due "orch-ensure-$ws-$p" || continue
       if _steward_launch_orch "$p" "$ws"; then
-        c_ok "started $want - $ws/$p declares orchestrator: auto and had no live pane (retried at most every 30m)"
+        c_ok "started $want - $ws/$p resolves orchestrator: auto (via $src) and had no live pane (retried at most every 30m)"
         _steward_clear "$ws" "orch-ensure-$p" "$want was started again"
       else
         c_err "could not start $want for $ws/$p - cel run orchestrator --product $p --workspace $ws (retried at most every 30m)"
         _steward_raise "$ws" "orch-ensure-$p" blocked \
-          "steward: $ws/$p declares orchestrator: auto and $want will not start - cel run orchestrator --product $p --workspace $ws"
+          "steward: $ws/$p resolves orchestrator: auto (via $src) and $want will not start - cel run orchestrator --product $p --workspace $ws"
       fi
     done
   done
