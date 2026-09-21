@@ -62,11 +62,23 @@ fleet_orphans_json() { # -> {count, rss_mb}
 # an answer nobody got, which this file already has a word for: empty, every
 # orchestrator `-`, and nobody convicted. The validation costs one jq per
 # render, against a read that starts a hundred and forty.
+#
+# AND SHAPE-VALID IS NOT ANSWERED. Checking only that the bytes PARSE admits
+# `{}`, `[]`, an error envelope, and any document about something other than
+# agents - each of which then reads as a roster that knows about nobody, and
+# so as `gone` for every worker on the box. Measured with a stub printing
+# `{}`: 16 of 16 workers rendered `gone` against a healthy roster's 5 done /
+# 8 gone / 1 idle / 2 working. A mute observer convicted the whole fleet.
+# Only a document with `.result.agents` as an ARRAY has said anything about
+# who is alive; anything else is the no-roster path, and `-`.
 _fleet_roster() {
   local out
   out="$(herdr agent list 2>/dev/null)" || { printf '%s' ''; return 0; }
   [ -n "$out" ] || { printf '%s' ''; return 0; }
-  printf '%s' "$out" | jq -e . >/dev/null 2>&1 || { printf '%s' ''; return 0; }
+  printf '%s' "$out" | jq -e '
+    type == "object" and (.result | type) == "object"
+      and (.result.agents | type) == "array"' >/dev/null 2>&1 \
+    || { printf '%s' ''; return 0; }
   printf '%s' "$out"
 }
 
@@ -103,8 +115,19 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
   # worker row missing - a box that looks idle because the pane manager
   # stuttered. `fromjson?` yields nothing rather than raising, so an
   # unreadable roster degrades to the no-roster path instead of to silence.
+  #
+  # PARSING IS NOT ENOUGH, and this is the second half of the same lesson:
+  # `{}` and `[]` parse. A document without `.result.agents` as an array
+  # cannot be searched for a pane, so it must not answer for one - it is the
+  # no-roster path, `-`, a fact about the OBSERVER. (`[]` is worse than wrong:
+  # `.result` on an array raises, and the `|| true` below turns that into a
+  # fleet with no rows at all.) _fleet_roster screens the same shape one level
+  # up; this program is called with a roster string by callers of its own and
+  # does not get to assume that happened.
   jq -r --arg r "$2" --arg roster "${3:-}" --arg us "$_FLEET_US" '
-    (($roster | fromjson?) // null) as $roster
+    (($roster | fromjson?) // null
+      | if (type == "object" and (.result | type) == "object"
+             and (.result.agents | type) == "array") then . else null end) as $roster
     | def agent($p): if $roster == null then null
                    else ((($roster.result.agents? // []) | map(select(.pane_id == $p)))[0] // {}) end;
     .[]?
