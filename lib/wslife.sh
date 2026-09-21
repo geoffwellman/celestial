@@ -61,18 +61,16 @@ _wslife_tab_labels() { # <ws_id>
 # making a second one beside it.
 _wslife_label() { printf '%s' "$1"; }
 
-# WHICH PRODUCTS WANT AN ORCHESTRATOR. `layout.orchestrators` is the
-# workspace-wide switch (auto | manual | none) and `products[].orchestrator`
-# decides per product underneath it. A workspace with no layout block reads as
-# `manual`, which starts nothing - exactly today's behaviour, so nothing on
-# this box changes until a workspace opts in.
+# WHICH PRODUCTS WANT AN ORCHESTRATOR. One resolver answers, per product:
+# `layout.orchestrators` is the workspace-wide switch (auto | manual | none),
+# `products[].orchestrator` overrides it in EITHER direction, and silence -
+# in any of its three shapes - means manual, which starts nothing. See
+# ws_orchestrator_mode in lib/workspace.sh for the incident behind that.
 wslife_orchestrators() { # <wsdir>
-  local mode p own
-  mode="$(ws_layout_get "$1" orchestrators)"
-  [ "$mode" = auto ] || return 0
+  local p mode
   for p in $(ws_product_names "$1"); do
-    own="$(ws_product_get "$1" "$p" orchestrator)"
-    case "$own" in manual|none) continue ;; esac
+    IFS=$'\t' read -r mode _ <<< "$(ws_orchestrator_mode "$1" "$p")"
+    [ "$mode" = auto ] || continue
     printf '%s\n' "$p"
   done
 }
@@ -176,13 +174,17 @@ cmd_ws_up() { # <name> [--dry-run]
   # the plane does not START them; it does not say a live one should stay
   # invisible. A workspace that launches its orchestrators by hand is exactly
   # the workspace where herdr losing a name goes unnoticed longest.
-  local p alias dir occupant oname opane wanted
+  local p alias dir occupant oname opane wanted mode src
   wanted="$(wslife_orchestrators "$wsdir")"
   for p in $(ws_product_names "$wsdir"); do
     alias="$(_run_agent_name "$p-orch")"
     dir="$(ws_product_dir "$wsdir" "$p")"
+    IFS=$'\t' read -r mode src <<< "$(ws_orchestrator_mode "$wsdir" "$p")"
     occupant="$(_run_live_agent_in_cwd "$dir")"
     if [ -z "$occupant" ] && ! printf '%s\n' "$wanted" | grep -qxF "$p"; then
+      # A dry run is where the operator goes to ask why nothing starts, so it
+      # says the mode AND where the mode came from rather than saying nothing.
+      [ "$dry" -eq 0 ] || _wslife_say "orchestrator $alias" "$mode via $src - nothing starts it"
       continue
     fi
     if [ -n "$occupant" ]; then
@@ -199,12 +201,12 @@ cmd_ws_up() { # <name> [--dry-run]
       continue
     fi
     if [ "$dry" -eq 1 ]; then
-      _wslife_say "orchestrator $alias" "would start (cwd $dir)"
+      _wslife_say "orchestrator $alias" "would start ($mode via $src, cwd $dir)"
       continue
     fi
     cmd_run orchestrator --product "$p" --workspace "$name" >/dev/null \
       || { c_warn "orchestrator $alias did not start"; continue; }
-    _wslife_say "orchestrator $alias" "started"
+    _wslife_say "orchestrator $alias" "started ($mode via $src)"
   done
 }
 
@@ -297,11 +299,11 @@ cmd_ws_reset() { # <name> [--force]
 # ----------------------------------------------------------------- status
 # `up --dry-run` in table form, and the two are one computation on purpose: a
 # status that disagreed with what `up` would do is worse than no status.
-_wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction
+_wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction\tsource
   local wsdir="$1" name="$2" list ws_id labels
   list="$(_wslife_ws_json)"
   ws_id="$(_wslife_ws_id "$list" "$(_wslife_label "$name")")"
-  printf 'workspace\t%s\tyes\t%s\t%s\n' "$name" \
+  printf 'workspace\t%s\tyes\t%s\t%s\t-\n' "$name" \
     "$([ -n "$ws_id" ] && printf yes || printf no)" \
     "$([ -n "$ws_id" ] && printf '-' || printf 'would create')"
 
@@ -310,18 +312,19 @@ _wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction
   while IFS=$'\t' read -r pane_label pane_cwd pane_cmd; do
     [ -n "$pane_label" ] || continue
     if printf '%s\n' "$labels" | grep -qxF "$pane_label"; then live=yes; else live=no; fi
-    printf 'pane\t%s\tyes\t%s\t%s\n' "$pane_label" "$live" \
+    printf 'pane\t%s\tyes\t%s\t%s\t-\n' "$pane_label" "$live" \
       "$([ "$live" = yes ] && printf '-' || printf 'would open')"
   done < <(ws_layout_panes "$wsdir")
 
-  local mode p own alias dir occupant oname
-  mode="$(ws_layout_get "$wsdir" orchestrators)"
+  local p alias dir occupant oname
   for p in $(ws_product_names "$wsdir"); do
-    own="$(ws_product_get "$wsdir" "$p" orchestrator)"
     alias="$(_run_agent_name "$p-orch")"
     dir="$(ws_product_dir "$wsdir" "$p")"
-    local declared="$mode"
-    case "$own" in manual|none) declared="$own" ;; esac
+    # ONE RESOLVER, AND IT SAYS WHERE THE ANSWER CAME FROM. This table used to
+    # merge the layout mode with the product's own value by a rule of its own,
+    # which is how `status` and the steward came to disagree in public.
+    local declared source
+    IFS=$'\t' read -r declared source <<< "$(ws_orchestrator_mode "$wsdir" "$p")"
     occupant="$(_run_live_agent_in_cwd "$dir")"
     oname=""; [ -z "$occupant" ] || IFS=$'\t' read -r oname _ <<< "$occupant"
     if [ -z "$occupant" ]; then
@@ -338,7 +341,7 @@ _wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction
       unnamed) action='would rename' ;;
       no) [ "$declared" = auto ] && action='would start' ;;
     esac
-    printf 'orchestrator\t%s\t%s\t%s\t%s\n' "$alias" "$declared" "$live" "$action"
+    printf 'orchestrator\t%s\t%s\t%s\t%s\t%s\n' "$alias" "$declared" "$live" "$action" "$source"
   done
 }
 
@@ -354,23 +357,27 @@ cmd_ws_status() { # [<name>] [--json]
   have jq || die "cel ws status: jq is not on PATH"
   local names; if [ -n "$name" ]; then names="$name"; else names="$(registry_names)"; fi
 
-  local n wsdir rows kind mname declared live action blocks=""
+  local n wsdir rows kind mname declared live action source blocks=""
   for n in $names; do
     wsdir="$(registry_require "$n")"
     rows="$(_wslife_members "$wsdir" "$n")"
     if [ "$json" -eq 1 ]; then
       blocks="$blocks$(printf '%s\n' "$rows" | jq -R -s --arg name "$n" \
         'split("\n") | map(select(length > 0) | split("\t"))
-         | map({kind: .[0], name: .[1], declared: .[2], live: .[3], action: .[4]})
+         | map({kind: .[0], name: .[1], declared: .[2], live: .[3], action: .[4], source: .[5]})
          | {name: $name, members: .}')
 "
       continue
     fi
     printf '%s\n' "$n"
-    while IFS=$'\t' read -r kind mname declared live action; do
+    while IFS=$'\t' read -r kind mname declared live action source; do
       [ -n "$kind" ] || continue
-      printf '  %-12s %-22s declared %-7s live %-8s %s\n' \
-        "$kind" "$mname" "$declared" "$live" \
+      # The SOURCE rides beside the mode, in the same column: "declared
+      # manual" told the owner nothing about which of three files said so.
+      local shown="$declared"
+      [ "$source" = '-' ] || shown="$declared via $source"
+      printf '  %-12s %-22s declared %-18s live %-8s %s\n' \
+        "$kind" "$mname" "$shown" "$live" \
         "$([ "$action" = '-' ] && printf '' || printf '(%s)' "$action")"
     done <<< "$rows"
   done
