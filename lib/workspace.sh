@@ -48,15 +48,34 @@ ws_layout() { # <wsdir> - the workspace-manager layout id, or ""
        else "" end) | tostring' "$1/workspace.yaml"
 }
 
-# A workspace with no `layout:` block behaves as `orchestrators: manual` and no
-# extra panes - which is exactly what every workspace did before CEL-44. The
-# default lives here so `up`, `status` and the doctor line cannot each invent
-# their own idea of what silence means.
+# WHAT SILENCE MEANS, IN ONE PLACE. A workspace with no `layout:` block behaves
+# as `orchestrators: manual` and no extra panes - exactly what every workspace
+# did before CEL-44. The default lives here so `up`, `status`, the steward and
+# the doctor line cannot each invent their own idea of what silence means.
+#
+# THE DEFAULT IS THE SAME FOR ALL THREE SHAPES OF SILENCE. 2026-09-21: a
+# workspace declaring `layout: <string>` - a herdr layout id, which says
+# nothing whatever about orchestrators - fell through this function's key read
+# and landed on a hardcoded `manual` nobody had written anywhere, and the
+# product's own `orchestrator: auto` could not overrule it. The operator ran
+# `cel ws up` and was told "already right" while the steward said the same
+# orchestrator would not start, 24 times. A string layout, an object layout
+# with the key absent, and no layout at all now answer identically, and the
+# one word they answer is written once, here.
+ws_orchestrators_default() { printf 'manual'; }
+
+# The DECLARED value of a layout key, or "" when the block is absent, is a
+# scalar layout id, or simply does not say. No default: a caller that needs to
+# tell "declared manual" from "said nothing" has to be able to see the silence.
+ws_layout_declared() { # <wsdir> <key>
+  _yqr -r --arg k "$2" '.layout as $l
+    | (if ($l | type) == "object" then ($l[$k] // "") else "" end) | tostring' "$1/workspace.yaml"
+}
+
 ws_layout_get() { # <wsdir> <key>
   local v
-  v="$(_yqr -r --arg k "$2" '.layout as $l
-    | (if ($l | type) == "object" then ($l[$k] // "") else "" end) | tostring' "$1/workspace.yaml")"
-  if [ -z "$v" ] && [ "$2" = orchestrators ]; then printf 'manual'; return 0; fi
+  v="$(ws_layout_declared "$1" "$2")"
+  if [ -z "$v" ] && [ "$2" = orchestrators ]; then ws_orchestrators_default; return 0; fi
   printf '%s' "$v"
 }
 
@@ -268,6 +287,29 @@ ws_product_get() { # <wsdir> <product> <key>
   _yqr -r --arg p "$2" --arg k "$3" \
     '.products // [] | map(select(.name == $p))[0][$k] // "" | tostring' \
     "$1/workspace.yaml"
+}
+
+# THE EFFECTIVE ORCHESTRATOR MODE FOR ONE PRODUCT, AND WHERE IT CAME FROM.
+# `up`, `status`, the dry run and the steward all ask this and nothing else:
+# two components deriving one fact by different routes, neither saying which
+# route it used, is the 2026-09-21 incident in full.
+#
+# A PRODUCT MAY OPT IN, NOT ONLY OUT. The old merge rule let
+# `products[].orchestrator` override the workspace mode only when it said
+# `manual` or `none`, so `auto` under a workspace that was not auto was
+# unreachable config - it read as a declaration and behaved as nothing. All
+# three values now win, because a per-product declaration that cannot turn
+# something ON is a trap.
+#
+# The source is returned beside the mode because the owner could not tell
+# where `manual` had come from, and neither could anyone reading three files.
+ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default>"
+  local own lay
+  own="$(ws_product_get "$1" "$2" orchestrator)"
+  case "$own" in auto|manual|none) printf '%s\tproduct' "$own"; return 0 ;; esac
+  lay="$(ws_layout_declared "$1" orchestrators)"
+  case "$lay" in auto|manual|none) printf '%s\tlayout' "$lay"; return 0 ;; esac
+  printf '%s\tdefault' "$(ws_orchestrators_default)"
 }
 
 # Where that product's orchestrator stands. A declared product has no checkout

@@ -379,3 +379,94 @@ test_doctor_names_the_unnamed_agent_and_says_nothing_otherwise() {
   assert_eq "$(wslife_doctor_lines)" ""
   _wslife_teardown
 }
+
+# --- ONE FACT, ONE READER ---------------------------------------------------
+# The owner, 2026-09-21: he shut an orchestrator down, ran `cel ws up` as the
+# tool told him to, and was told `already right` while the steward said the
+# opposite twenty-four times. Both were reading real config, and different
+# config: the workspace declared `layout: <string>` (a herdr layout id), which
+# `ws_layout_get` could not read keys out of, so it fell through to a
+# hardcoded `manual` nobody had written - and the product's own
+# `orchestrator: auto` could not overrule it, because the merge rule only let
+# a product turn something OFF. Unreachable config reads as a declaration and
+# behaves as nothing.
+
+_wslife_string_layout_yaml() { # a herdr layout id, plus a product opting IN
+  cat <<'YAML'
+name: alpha
+kind: personal
+org: someone
+layout: dev
+products:
+  - name: bundle
+    repos: [widget]
+    orchestrator: auto
+  - name: gadget
+    repos: [gizmo]
+    orchestrator: manual
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+  - name: gizmo
+    url: git@github.com:someone/gizmo.git
+    prefix: GZ
+YAML
+}
+
+# The three shapes of silence must resolve the SAME mode. Today the string one
+# differs by accident, and it is the only one anybody hit.
+test_orchestrator_mode_has_one_default_whatever_shape_the_layout_has() {
+  _wslife_setup
+  local a="$T/none" b="$T/str" c="$T/obj" d
+  mkdir -p "$a" "$b" "$c"
+  printf 'name: none\n'                    >"$a/workspace.yaml"
+  printf 'name: str\nlayout: dev\n'        >"$b/workspace.yaml"
+  printf 'name: obj\nlayout:\n  panes: []\n' >"$c/workspace.yaml"
+  for d in "$a" "$b" "$c"; do
+    assert_eq "$(ws_orchestrator_mode "$d" bundle)" "$(printf 'manual\tdefault')"
+  done
+  _wslife_teardown
+}
+
+# A per-product declaration that cannot turn something ON is a trap.
+test_a_product_may_opt_in_to_auto_and_not_only_out() {
+  _wslife_setup
+  _wslife_string_layout_yaml >"$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'auto\tproduct')"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" gadget)" "$(printf 'manual\tproduct')"
+  assert_eq "$(wslife_orchestrators "$T/alpha")" "bundle"
+  # ...and the other direction still holds: manual and none beat a
+  # workspace-wide auto, and an undeclared product inherits the layout.
+  _wslife_ws_yaml | sed 's/    orchestrator: manual/    orchestrator: none/' \
+    >"$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" gadget)" "$(printf 'none\tproduct')"
+  assert_eq "$(wslife_orchestrators "$T/alpha")" "bundle"
+  _wslife_ws_yaml | grep -v 'orchestrator: auto$' >"$T/alpha/workspace.yaml"
+  assert_eq "$(ws_orchestrator_mode "$T/alpha" bundle)" "$(printf 'auto\tlayout')"
+  _wslife_teardown
+}
+
+# THE REGRESSION, as reported: `layout: <string>` plus a product declaring
+# `orchestrator: auto`. `up` starts it, and every surface says where the mode
+# came from - the owner could not tell, and neither could the steward.
+test_up_and_status_name_the_source_of_the_effective_mode() {
+  _wslife_setup
+  _wslife_string_layout_yaml >"$T/alpha/workspace.yaml"
+  local dry st; dry="$(cmd_ws_up alpha --dry-run)"
+  assert_contains "$dry" "would start"
+  assert_contains "$dry" "auto via product"
+  assert_eq "$(cat "$STUB_DIR/calls.log")" ""
+
+  st="$(cmd_ws_status alpha)"
+  assert_contains "$st" "declared auto via product"
+  assert_contains "$st" "declared manual via product"
+  assert_eq "$(printf '%s' "$(cmd_ws_status alpha --json)" | jq -r \
+    '.workspaces[0].members[] | select(.name=="bundle-orch") | .source')" "product"
+
+  cmd_ws_up alpha >/dev/null
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "agent start bundle-orch"
+  ! grep -q 'agent start gadget-orch' "$STUB_DIR/calls.log" \
+    || { echo "a manual product was started"; _wslife_teardown; return 1; }
+  _wslife_teardown
+}

@@ -1076,3 +1076,43 @@ test_steward_clears_the_root_mail_blocker_once_the_mail_is_read() {
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
   rm -rf "$T"
 }
+
+# --- the steward and `up` must agree ---------------------------------------
+# 2026-09-21: `cel ws up` printed `already right` while the steward said, 24
+# times, that the same orchestrator "will not start". The steward read the
+# product's `orchestrator: auto`; `up` read a workspace mode of `manual` that
+# a string `layout:` had invented. Both now ask ws_orchestrator_mode.
+
+test_steward_starts_a_product_the_layout_declares_auto() {
+  _orch_fixture
+  # The workspace-wide switch, with a product that declares nothing: `up`
+  # starts this one, so the steward must reach the same verdict.
+  cat > "$T/alpha/workspace.yaml" <<YAML
+name: alpha
+tickets: {system: linear, trigger_state: Ready}
+layout: {orchestrators: auto}
+products:
+  - {name: bundle, repos: [widget]}
+repos:
+  - {name: widget, url: "git@github.com:someone/widget.git", prefix: WG}
+YAML
+  _steward_orchestrators "$ROSTER" >/dev/null
+  assert_eq "$(cat "$T/launched")" "bundle alpha"
+  rm -rf "$T"
+}
+
+# A message about failing to start something nobody asked to be started is the
+# factory arguing with itself in front of the operator. When the resolved mode
+# is manual the steward says that plainly and takes the stale fault down.
+test_steward_says_manual_plainly_rather_than_will_not_start() {
+  _orch_fixture
+  # the fault as it was raised while the two readers disagreed
+  _steward_raise alpha "orch-ensure-lone" blocked \
+    "steward: alpha/lone declares orchestrator: auto and lone-orch will not start"
+  local out; out="$(STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER")"
+  assert_contains "$out" "alpha/lone is set to manual; nothing will start it automatically"
+  ! printf '%s' "$out" | grep -q 'lone-orch will not start' \
+    || { echo "the steward still reports a failure to start a manual product: $out"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c lone "$T/launched" || true)" "0"
+  rm -rf "$T"
+}
