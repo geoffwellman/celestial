@@ -693,3 +693,150 @@ test_open_ranked_shows_the_top_three_and_then_how_many_more() {
   assert_eq "$(_inbox_lines)" "$n"
   rm -rf "$TB" "$CEL_INBOX_DIR"
 }
+
+# ---- an empty answer is not the same as an answer that could not be given --
+# Measured from a herdr worktree: `cel inbox read --for celestial-orch` printed
+# nothing and exited 0 with 127 messages waiting, because a cwd outside every
+# registered workspace derives no workspace and the reader went looking in a
+# mailbox that does not exist. Three states shared one output - no mail, mail
+# somewhere else, and no mailbox at all - and a 40-hour-old escalation sat in
+# the third of them all morning.
+
+test_inbox_read_outside_any_workspace_refuses_rather_than_reading_empty() {
+  _inbox_sandbox; export CEL_INBOX_DIR
+  local d rc=0 err; d="$(mktemp -d)"
+  err="$( cd "$d" && CEL_INBOX_ME=root _inbox_read 2>&1 1>/dev/null )" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a cwd that names no workspace exited 0"; return 1; }
+  assert_contains "$err" "no workspace"
+  assert_contains "$err" "--workspace"
+  assert_contains "$err" "--all-workspaces"
+  rc=0
+  err="$( cd "$d" && CEL_INBOX_ME=root _inbox_count 2>&1 1>/dev/null )" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "count exited 0 outside every workspace"; return 1; }
+  assert_contains "$err" "--all-workspaces"
+  rm -rf "$d" "$CEL_INBOX_DIR"
+}
+
+test_inbox_read_with_no_mail_names_the_reader_and_the_workspace() {
+  _inbox_sandbox
+  ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace demo ) >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace demo >/dev/null 2>&1
+  local rc=0 err
+  err="$( CEL_INBOX_ME=root _inbox_read --for root --workspace demo 2>&1 1>/dev/null )" || rc=$?
+  assert_eq "$rc" "0"
+  assert_contains "$err" "root"
+  assert_contains "$err" "no unread mail"
+  assert_contains "$err" "demo"
+  # count says the same thing while keeping stdout a number for its callers
+  assert_eq "$(CEL_INBOX_ME=root _inbox_count --for root --workspace demo 2>/dev/null)" "0"
+  err="$( CEL_INBOX_ME=root _inbox_count --for root --workspace demo 2>&1 1>/dev/null )"
+  assert_contains "$err" "no unread mail"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# Mail you have, elsewhere: today the only way to learn this is to guess
+# --all-workspaces. Saying it must not read the other mailbox - the cursor is
+# per reader and must not move for a workspace nobody asked about.
+test_inbox_read_says_where_the_mail_is_when_it_is_in_another_workspace() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send widget-orch "over here" --workspace beta ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send widget-orch "read me" --workspace alpha ) >/dev/null 2>&1
+  CEL_INBOX_ME=widget-orch _inbox_read --for widget-orch --workspace alpha >/dev/null 2>&1
+  local err
+  err="$( CEL_INBOX_ME=widget-orch _inbox_read --for widget-orch --workspace alpha 2>&1 1>/dev/null )"
+  assert_contains "$err" "no unread mail"
+  assert_contains "$err" "beta"
+  assert_contains "$err" "1"
+  # and beta's cursor did not move under a reader who never asked for it
+  assert_eq "$(_inbox_count --for widget-orch --workspace beta 2>/dev/null)" "1"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+
+# Inventing a recipient by typo must not read as calm.
+test_inbox_read_for_a_name_no_mailbox_ever_had_is_a_distinct_message() {
+  _inbox_sandbox
+  ( CEL_INBOX_ME=t _inbox_send widget-orch "hello" --workspace demo ) >/dev/null 2>&1
+  _inbox_read --for widget-orch --workspace demo >/dev/null 2>&1
+  local empty typo
+  empty="$( _inbox_read --for widget-orch --workspace demo 2>&1 1>/dev/null )"
+  typo="$( _inbox_read --for widgte-orch --workspace demo 2>&1 1>/dev/null )"
+  assert_contains "$empty" "no unread mail"
+  assert_contains "$typo" "no mailbox"
+  [ "$empty" != "$typo" ] || { echo "a typo reads the same as an empty mailbox"; return 1; }
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# The console and the steward must be able to tell the three states apart too.
+test_inbox_read_json_distinguishes_the_three_states_by_field() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send widget-orch "over here" --workspace beta ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send widget-orch "read me" --workspace alpha ) >/dev/null 2>&1
+  _inbox_read --for widget-orch --workspace alpha >/dev/null 2>&1
+  local out
+  out="$(_inbox_read --for widget-orch --workspace alpha --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r '.state')" "empty"
+  assert_eq "$(printf '%s' "$out" | jq -r '.reader')" "widget-orch"
+  assert_eq "$(printf '%s' "$out" | jq -r '.workspace')" "alpha"
+  assert_eq "$(printf '%s' "$out" | jq -r '.elsewhere[0].workspace')" "beta"
+  assert_eq "$(printf '%s' "$out" | jq -r '.elsewhere[0].unread')" "1"
+  out="$(_inbox_read --for widgte-orch --workspace alpha --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r '.state')" "no_mailbox"
+  local d; d="$(mktemp -d)"
+  out="$( cd "$d" && CEL_INBOX_ME=widget-orch _inbox_read --json 2>/dev/null )" || true
+  assert_eq "$(printf '%s' "$out" | jq -r '.state')" "no_workspace"
+  rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
+}
+
+# A TYPO IN --workspace IS THE SAME FAULT ONE ARGUMENT TO THE LEFT. root,
+# console and all are addresses rather than agents and exist before their
+# first message - but only somewhere that exists. Checking the reader first
+# meant `--workspace ghost-ws --for root` answered "no unread mail in
+# ghost-ws" and exited 0, and root is what the steward, fleet and every
+# orchestrator escalate to: the commonest reader of all went back to calm
+# silence on a stale or mistyped workspace.
+test_inbox_read_does_not_call_an_unregistered_workspace_empty_for_root() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace alpha ) >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1
+  local real ghost
+  real="$( CEL_INBOX_ME=root _inbox_read --for root --workspace alpha 2>&1 1>/dev/null )"
+  # naming a workspace nobody has registered is non-zero: see the exit-code
+  # test below. Captured here for the text, so the status is deliberately let go.
+  ghost="$( CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws 2>&1 1>/dev/null || true )"
+  assert_contains "$real" "no unread mail"
+  case "$ghost" in *"no unread mail"*) echo "an unregistered workspace read as an empty mailbox"; return 1;; esac
+  assert_contains "$ghost" "ghost-ws"
+  # every reader identity, not just the ones that are not special-cased
+  local who
+  for who in root console all someagent; do
+    assert_eq "$(CEL_INBOX_ME=$who _inbox_read --for "$who" --workspace ghost-ws --json 2>/dev/null | jq -r '.state' || true)" "no_workspace"
+  done
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+
+# THE SAME CLASS OF ANSWER EXITS THE SAME WAY. "standing here names no
+# workspace" and "--workspace names one nothing knows" are one fault - the
+# question could not be asked - and a caller that branches on status saw one
+# of them as a refusal and the other as a clean, empty, successful read.
+test_inbox_a_workspace_that_does_not_exist_exits_non_zero_either_way() {
+  _inbox_registry_fixture
+  local d rc=0; d="$(mktemp -d)"
+  ( cd "$d" && CEL_INBOX_ME=root _inbox_read ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; ( cd "$d" && CEL_INBOX_ME=root _inbox_count ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; CEL_INBOX_ME=root _inbox_count --for root --workspace ghost-ws >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  # a real workspace with nothing unread is still a successful, empty answer
+  ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace alpha ) >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1
+  rc=0; CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0"
+  rc=0; CEL_INBOX_ME=root _inbox_count --for root --workspace alpha >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0"
+  # and the count still puts a number on stdout for the steward's arithmetic
+  assert_eq "$(CEL_INBOX_ME=root _inbox_count --for root --workspace ghost-ws 2>/dev/null || true)" "0"
+  rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
+}
