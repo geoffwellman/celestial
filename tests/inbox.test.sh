@@ -800,14 +800,43 @@ test_inbox_read_does_not_call_an_unregistered_workspace_empty_for_root() {
   CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1
   local real ghost
   real="$( CEL_INBOX_ME=root _inbox_read --for root --workspace alpha 2>&1 1>/dev/null )"
-  ghost="$( CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws 2>&1 1>/dev/null )"
+  # naming a workspace nobody has registered is non-zero: see the exit-code
+  # test below. Captured here for the text, so the status is deliberately let go.
+  ghost="$( CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws 2>&1 1>/dev/null || true )"
   assert_contains "$real" "no unread mail"
   case "$ghost" in *"no unread mail"*) echo "an unregistered workspace read as an empty mailbox"; return 1;; esac
   assert_contains "$ghost" "ghost-ws"
   # every reader identity, not just the ones that are not special-cased
   local who
   for who in root console all someagent; do
-    assert_eq "$(CEL_INBOX_ME=$who _inbox_read --for "$who" --workspace ghost-ws --json 2>/dev/null | jq -r '.state')" "no_workspace"
+    assert_eq "$(CEL_INBOX_ME=$who _inbox_read --for "$who" --workspace ghost-ws --json 2>/dev/null | jq -r '.state' || true)" "no_workspace"
   done
   rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+
+# THE SAME CLASS OF ANSWER EXITS THE SAME WAY. "standing here names no
+# workspace" and "--workspace names one nothing knows" are one fault - the
+# question could not be asked - and a caller that branches on status saw one
+# of them as a refusal and the other as a clean, empty, successful read.
+test_inbox_a_workspace_that_does_not_exist_exits_non_zero_either_way() {
+  _inbox_registry_fixture
+  local d rc=0; d="$(mktemp -d)"
+  ( cd "$d" && CEL_INBOX_ME=root _inbox_read ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; ( cd "$d" && CEL_INBOX_ME=root _inbox_count ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; CEL_INBOX_ME=root _inbox_read --for root --workspace ghost-ws >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  rc=0; CEL_INBOX_ME=root _inbox_count --for root --workspace ghost-ws >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2"
+  # a real workspace with nothing unread is still a successful, empty answer
+  ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace alpha ) >/dev/null 2>&1
+  CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1
+  rc=0; CEL_INBOX_ME=root _inbox_read --for root --workspace alpha >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0"
+  rc=0; CEL_INBOX_ME=root _inbox_count --for root --workspace alpha >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0"
+  # and the count still puts a number on stdout for the steward's arithmetic
+  assert_eq "$(CEL_INBOX_ME=root _inbox_count --for root --workspace ghost-ws 2>/dev/null || true)" "0"
+  rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
 }
