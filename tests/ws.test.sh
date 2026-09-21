@@ -148,3 +148,18 @@ test_the_secret_location_is_named_identically_everywhere() {
     esac
   done < <(grep -n 'zshenv' "$skill" || true)
 }
+
+# AND IT MUST NOT WRITE ANYTHING ON THE WAY OUT. The swallowed refusal did not
+# only go unseen - the caller carried on with the refusal TEXT as the
+# workspace path, so `_ws_sync_one` ran `mkdir -p "$wsdir/repos"` and appended
+# to `"$wsdir/.gitignore"`, creating a directory in the current working
+# directory whose name was the colourised error message. One such directory
+# was committed to this branch by a red test run before the fix, which is how
+# it was found. A refusal creates nothing.
+test_a_refused_verb_writes_nothing_into_the_working_directory() {
+  _sandbox
+  local cwd="$T/cwd"; mkdir -p "$cwd"
+  ( cd "$cwd" && cmd_ws sync ghost ) >/dev/null 2>&1 || true
+  assert_eq "$(find "$cwd" -mindepth 1 | wc -l)" "0"
+  rm -rf "$T"
+}
