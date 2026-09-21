@@ -138,6 +138,53 @@ doctor_worker_containers() { # <wsdir>
   return 0
 }
 
+# DOCTOR USED TO JUDGE A WORKSPACE WITHOUT READING IT. Every `setup:` check ran
+# in a bare login shell, so a step like `test -n "$WIDGET_KEY"` failed on a box
+# that was configured correctly: the value lives in the workspace's gitignored
+# env.local, and nothing had sourced it. A newcomer saw red lines against work
+# they had just done properly and learned that the tool cannot be trusted -
+# the worst possible lesson on day one, and the hardest to unlearn.
+#
+# The env is loaded the way the rest of the tree loads it (ws_env_exports),
+# inside a subshell, so one workspace's values cannot reach the next workspace
+# or leak back into doctor itself.
+#
+# A MISSING VALUE AND AN UNREADABLE ENV ARE DIFFERENT FINDINGS. Reporting the
+# second as the first sends somebody off to add a key they already added.
+doctor_setup_step_status() { # <wsdir> <check> -> ok | unmet | unreadable
+  local wsdir="$1" check="$2" exports
+  exports="$(ws_env_exports "$wsdir" 2>/dev/null)" || { printf 'unreadable'; return 0; }
+  # Loadable at all? env.local is SOURCED, so an unreadable file or a syntax
+  # error in it aborts under `set -e` - which is the distinction we need.
+  if ! ( set -e; eval "$exports" ) >/dev/null 2>&1; then printf 'unreadable'; return 0; fi
+  # bash -l so a check that looks for a BINARY still sees the login-shell PATH;
+  # the workspace's exports are inherited through the environment.
+  if ( eval "$exports" >/dev/null 2>&1; bash -lc "$check" ) >/dev/null 2>&1; then
+    printf 'ok'
+  else
+    printf 'unmet'
+  fi
+}
+
+# Zero or more warning lines for one workspace's declared human setup steps.
+# Warn only: the walkthrough is /celestial:setup's job, doctor just surfaces
+# the drift.
+doctor_setup_lines() { # <wsdir> <name>
+  local wsdir="$1" n="$2" s_name s_check
+  [ -f "$wsdir/workspace.yaml" ] || return 0
+  while IFS=$'\t' read -r s_name s_check; do
+    [ -n "$s_name" ] && [ -n "$s_check" ] || continue
+    case "$(doctor_setup_step_status "$wsdir" "$s_check")" in
+      ok) ;;
+      unreadable)
+        printf "%s: setup step '%s' NOT CHECKED - this workspace's env could not be read (%s/env.local is unreadable or does not parse), so the step may well be done; fix that file and re-run\n" "$n" "$s_name" "$wsdir" ;;
+      *)
+        printf "%s: setup step '%s' unmet - the value it checks is missing; it belongs in %s/env.local (/celestial:setup walks through it)\n" "$n" "$s_name" "$wsdir" ;;
+    esac
+  done < <(yq -r '.setup[]? | [.name, .check] | @tsv' "$wsdir/workspace.yaml" 2>/dev/null)
+  return 0
+}
+
 check_workspaces() {
   local fail=0 n path remote r url gate first role rt bin_
   local ledger agents id pane
@@ -217,15 +264,12 @@ check_workspaces() {
       fi
     fi
 
-    # Declared human setup steps (workspace.yaml `setup:` - tokens, logins).
-    # Warn only: the walkthrough is /celestial:setup's job, doctor just
-    # surfaces the drift. bash -l so ~/.zshenv-style exports are visible.
-    local s_name s_check
-    while IFS=$'\t' read -r s_name s_check; do
-      [ -n "$s_name" ] && [ -n "$s_check" ] || continue
-      bash -lc "$s_check" >/dev/null 2>&1 \
-        || c_warn "$n: setup step '$s_name' unmet - /celestial:setup walks through it"
-    done < <(yq -r '.setup[]? | [.name, .check] | @tsv' "$path/workspace.yaml" 2>/dev/null)
+    # Declared human setup steps (workspace.yaml `setup:` - tokens, logins),
+    # each judged with that workspace's own env loaded. See doctor_setup_lines.
+    local setupline
+    while IFS= read -r setupline; do
+      [ -z "$setupline" ] || c_warn "$setupline"
+    done < <(doctor_setup_lines "$path" "$n")
 
     for role in root orchestrator worker; do
       rt="$(ws_runtime "$path" "$role")"
