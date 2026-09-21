@@ -361,8 +361,8 @@ _silence_setup() {
   export CEL_LIVENESS_STATE="$T/liveness-state"
 }
 
-# The standout-orch incident, as a pane: the whole dispatch sitting below the
-# divider, the context at zero, and two hours of nothing.
+# The 2026-09-18 dispatch incident, as a pane: the whole prompt sitting below
+# the divider, the context at zero, and two hours of nothing.
 _pane_unstarted() {
   cat <<'PANE'
   pi - alpha/ABC-7

@@ -398,9 +398,24 @@ _liveness_repeated_error() { # <pane-text>
   [ -n "$n" ] && [ "$n" -ge 2 ]
 }
 
-# A provider limit, in the words every provider on this box uses for one.
+# A provider limit, in the words every provider on this box uses for one -
+# and ONLY when the pane is actually stopped on it.
+#
+# Recognising the words anywhere in the text reported a worker running the
+# quota suite, grepping lib/quota.sh or showing a diff with `429` in it as
+# blocked on a provider (PR #81 review). Two conditions keep that out, and
+# both are about position rather than wording: the limit must be on a line
+# SHAPED like a provider refusal - one that begins with the error, not one
+# that merely contains the phrase - and no turn may follow it, because an
+# agent that took a turn after the refusal is not stopped on it. A false
+# `throttled` sends an orchestrator to wait out a window that was never
+# spent, which is worse than the silence this replaces.
 _liveness_is_throttled() { # <pane-text>
-  printf '%s' "$1" | grep -qiE 'rate[_ ]limit|429|too many requests|quota exceeded'
+  printf '%s\n' "$1" | awk '
+    tolower($0) ~ /^[[:space:]]*[^[:alnum:][:space:]]{0,3}[[:space:]]*(api[ _-]?error|http[ \/][0-9]|error|err|request failed|rate[ _]limit)/ &&
+    tolower($0) ~ /(rate[_ ]limit|429|too many requests|quota exceeded)/ { lim = NR }
+    /^[[:space:]]*([⏺●✳✻✶]|(assistant|Assistant)[[:space:]:>])/ { turn = NR }
+    END { exit !(lim > 0 && lim > turn) }'
 }
 
 # WHEN, not just "blocked". A wait whose end nobody can name is the same
