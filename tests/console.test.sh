@@ -1623,3 +1623,32 @@ EOF
   assert_contains "$out" 'actions: all good'
   _console_teardown
 }
+
+# --- CEL-57: a suite that goes red because a day passed ---------------------
+#
+# On 2026-09-21T09:00Z three console tests turned red on a `main` whose every
+# PR had landed green. No commit did it: the console's tail, digest and
+# timeline are WINDOWS ON NOW (24 hours by default), and the fixtures pinned
+# absolute timestamps - 2026-09-20T09:00Z mail, a 2026-09-20T11:47Z merge.
+# Every gate run before 09:00Z the next day sat inside the window and passed;
+# the first one after it did not, on unchanged code. A test that passes
+# because of the date it was run on is a test that proves nothing, and the
+# seven PRs that landed behind it are what that costs.
+#
+# So: no fixture that feeds a relative window may carry a frozen timestamp.
+# The fields that feed one are `ts` (the mailbox tail, the digest, the
+# timeline) and `mergedAt` (what landed since the cursor); a frozen
+# `resets_at` or a frozen linear `updatedAt` is not windowed and nothing
+# asserts on its age, so the lint says what it means rather than every date.
+# This is a lint over this file, because the failure it pins is not a
+# behaviour of the console - it is a property of its fixtures, and by the time
+# it shows up as behaviour the suite is already red for everybody.
+test_console_time_windowed_fixtures_carry_no_frozen_dates() {
+  local pat='"(ts|mergedAt)":"[0-9]{4}-[0-9]{2}-[0-9]{2}'  # frozen-date-lint-self
+  local hits
+  hits="$(grep -nE "$pat" "$CEL_ROOT/tests/console.test.sh" | grep -v 'frozen-date-lint-self' || true)"
+  [ -z "$hits" ] || {
+    printf 'frozen timestamps in console fixtures (use _console_ago):\n%s\n' "$hits"
+    return 1
+  }
+}
