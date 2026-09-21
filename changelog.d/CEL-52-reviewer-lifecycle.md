@@ -12,3 +12,7 @@
   `cel run reviewer` gives them, so reviewers that predate the registry are
   swept and measured too; a surviving unrecorded reviewer is adopted into the
   registry. The registry is an index, not the definition of existence.
+- Every read-modify-write of the reviewer registry is held under a lock on
+  the file, and `cel gc` writes back a MERGE of what it established (panes
+  closed or gone, live panes it adopted) rather than a stale snapshot - a
+  `cel run reviewer` landing mid-sweep is no longer erased.

@@ -490,8 +490,16 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # A reviewer that survives is WRITTEN BACK, recorded or not: the index
 # catches up with the box, so the next `cel run reviewer` for that PR reuses
 # the pane instead of splitting another one beside it.
+#
+# THE WRITE BACK IS A MERGE, NOT A SNAPSHOT. This sweep reads the rows once
+# and then spends seconds in `gh` per reviewer; a `cel run reviewer` landing
+# in that window used to be erased by the final write, and the next call for
+# its PR split a duplicate pane. So the sweep carries only the two facts it
+# actually established - which panes it closed or found gone, and which live
+# panes had no row - and applies them under the registry lock to whatever
+# the file says by then. A row this sweep never saw is never touched.
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
-  local dry="$1" agents="$2" rows cand keep='[]' repo pr pane agent status cwd state
+  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state
   reviewers_closed=0
   rows="$(reviewers_rows)"
   while IFS= read -r cand; do
@@ -499,50 +507,58 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     IFS=$'\t' read -r repo pr pane agent status cwd < <(printf '%s' "$cand" \
       | jq -r '[.repo, .pr, .pane, .agent, .status, .cwd] | @tsv')
     if [ "$status" = gone ]; then
-      [ "$dry" -eq 0 ] || keep="$(_gc_reviewers_keep "$keep" "$rows" "$cand")"
+      # A recorded pane that is no longer on the roster has gone by other
+      # means. Dropping the row is bookkeeping, not a closure.
+      [ "$dry" -eq 1 ] || drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
       continue
     fi
     state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd")"
-    keep="$(_gc_reviewers_keep "$keep" "$rows" "$cand")"
     case "$state" in
-      OPEN) continue ;;
-      UNKNOWN) c_warn "UNKNOWN: cannot read the state of $repo#$pr - its reviewer is kept"; continue ;;
+      OPEN) _gc_reviewers_adopt; continue ;;
+      UNKNOWN)
+        _gc_reviewers_adopt
+        c_warn "UNKNOWN: cannot read the state of $repo#$pr - its reviewer is kept"; continue ;;
     esac
     case "$status" in
       idle|done|none) ;;
-      *) c_warn "reviewer for $repo#$pr is $status on a $state PR - kept until it is idle"; continue ;;
+      *) _gc_reviewers_adopt
+         c_warn "reviewer for $repo#$pr is $status on a $state PR - kept until it is idle"; continue ;;
     esac
     if [ "$dry" -eq 1 ]; then
       c_ok "would close the reviewer for $repo#$pr (PR $state, pane $pane)"
       continue
     fi
     if ! lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+      _gc_reviewers_adopt
       c_warn "could not close pane $pane for $repo#$pr - kept"
       continue
     fi
-    keep="$(printf '%s' "$keep" | jq -c --arg p "$pane" 'map(select(.pane != $p))')"
+    drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
     c_ok "closed the reviewer for $repo#$pr (PR $state, pane $pane)"
     reviewers_closed=$((reviewers_closed + 1))
   done < <(_gc_reviewer_candidates "$rows" "$agents")
-  # The file is rewritten once, from the reviewers that survived. A dry run
-  # never reaches here having dropped anything: it keeps every row it looked
-  # at, and adopts nothing.
-  [ "$dry" -eq 1 ] || reviewers_write "$keep" \
-    || c_warn "could not rewrite the reviewer registry - stale rows remain"
+  # A dry run establishes nothing to write: it closes no pane, drops no
+  # stale row and adopts nothing.
+  [ "$dry" -eq 1 ] && return 0
+  printf '%s' "$drop$adopt" | grep -q '[^][]' || return 0
+  reviewers_update --argjson drop "$drop" --argjson adopt "$adopt" \
+    'map(select((.pane as $p | $drop | index($p)) == null))
+     | . as $cur
+     | $cur + [$adopt[] | select((.pane as $p | $cur | map(.pane) | index($p)) == null)]' \
+    || c_warn "could not update the reviewer registry - stale rows remain"
   return 0
 }
 
-# A surviving reviewer keeps its recorded row verbatim - its started-at is
-# when it started, not when a sweep noticed it - and an unrecorded one is
-# adopted with the facts the roster gave us.
-_gc_reviewers_keep() { # <keep> <rows> <candidate> -> keep with that reviewer in it
-  printf '%s' "$2" | jq -c --argjson keep "$1" --argjson c "$3" --argjson now "$(date +%s)" \
-    '($keep | map(.pane)) as $have
-     | if ($have | index($c.pane)) != null then $keep
-       else $keep + ([.[] | select(.pane == $c.pane)]
-                     | if length > 0 then .
-                       else [{repo:$c.repo, pr:$c.pr, pane:$c.pane, agent:$c.agent, started_at:$now}] end)
-       end'
+# A reviewer that is staying and has no row gets one, with the facts the
+# roster gave us. A recorded one is left exactly as it is: its started-at is
+# when it started, not when a sweep noticed it.
+_gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
+  printf '%s' "$cand" | jq -e '.recorded' >/dev/null 2>&1 && return 0
+  [ "$dry" -eq 0 ] || return 0
+  adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
+    --arg a "$agent" --argjson t "$(date +%s)" \
+    '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]')"
+  return 0
 }
 
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors

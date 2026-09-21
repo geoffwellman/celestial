@@ -28,6 +28,13 @@ _box_fixture() {
   mkdir -p "$BOX_STUB_BIN"
   DOCKER_LOG="$T/docker.argv"
   : > "$DOCKER_LOG"
+  # AND THE ROSTER, for every test in this file rather than the few that
+  # think about it. `cel box space` and `box_doctor_line` ask herdr which
+  # panes are reviewers; without this stub each of them reads the LIVE box's
+  # agents, which is the convention this suite exists to keep. A test that
+  # wants a roster with something in it overrides this after the fixture.
+  export CEL_REVIEWERS_STATE="$T/reviewers.json"
+  herdr() { jq -n '{result:{agents:[]}}'; }
 }
 
 _box_age_file() { # <path> <days-old>
@@ -254,10 +261,9 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
 # above it, and it was invisible: the report measured the floor and never the
 # agents standing on it.
 _box_reviewer_rows() {
-  export CEL_REVIEWERS_STATE="$T/reviewers.json"
   reviewers_record widget 71 w1:p3 widget-pr-71-review
-  # Both calls this makes are stubbed: an empty roster so discovery cannot
-  # reach the live box, and one readable process for the recorded pane.
+  # An empty roster still (discovery must not reach the live box), plus one
+  # readable process for the recorded pane.
   herdr() {
     case "$1 $2" in
       "agent list") jq -n '{result:{agents:[]}}';;
@@ -282,16 +288,10 @@ test_box_space_reports_reviewer_panes_and_their_rss() {
 # the report leaves open.
 test_box_space_reports_zero_reviewers_cleanly() {
   _box_fixture
-  export CEL_REVIEWERS_STATE="$T/reviewers.json"
-  # An empty roster, deliberately: without this stub the discovery below
-  # reads the LIVE box's reviewer panes and the fixture's "none" is whatever
-  # the machine happens to be running (it found seven the first time).
-  herdr() { jq -n '{result:{agents:[]}}'; }
   local json; json="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json)"
   assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.count')" 0
   assert_eq "$(printf '%s' "$json" | jq -r '.reviewers.bytes')" 0
   assert_contains "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space)" "0 reviewer panes"
-  unset -f herdr
   rm -rf "$T"
 }
 
@@ -299,7 +299,6 @@ test_box_space_reports_zero_reviewers_cleanly() {
 # down: the seven that produced this ticket predated the registry entirely.
 test_box_space_counts_an_unrecorded_reviewer_pane_too() {
   _box_fixture
-  export CEL_REVIEWERS_STATE="$T/reviewers.json"
   herdr() {
     case "$1 $2" in
       "agent list") jq -n '{result:{agents:[{name:"widget-pr-71-review",pane_id:"w1:p3",cwd:"/w/repos/widget",agent_status:"idle"}]}}';;

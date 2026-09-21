@@ -237,12 +237,49 @@ reviewers_rows() { # -> JSON array
   printf '%s' "$rows"
 }
 
-reviewers_write() { # <json-array>
+reviewers_write() { # <json-array> - the whole file, under the lock
+  reviewers_update --argjson rows "$1" '$rows'
+}
+
+_reviewers_write_raw() { # <json-array> - the write itself; callers hold the lock
   local f tmp
   f="$(_reviewers_state)"
   mkdir -p "$(dirname "$f")" || return 1
   tmp="$(mktemp "$f.tmp.XXXXXX")" || return 1
   printf '%s\n' "$1" > "$tmp" && mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; return 1; }
+}
+
+# EVERY READ-MODIFY-WRITE OF THE REGISTRY HAPPENS HERE, UNDER A LOCK. The
+# rename at the end is atomic, but the read before it is not: `cel gc` reads
+# the rows, spends seconds in `gh` per reviewer and writes back, and a
+# `cel run reviewer` that recorded a row in that window was simply gone -
+# last write wins, so the next call for that PR split a duplicate pane and
+# the one-reviewer-per-PR guarantee this file exists to give was lost.
+#
+# A registry somebody else is holding is REFUSED, never clobbered: the
+# caller is told, and the worst case is a reviewer that is not indexed,
+# which the gc pass discovers and adopts anyway.
+reviewers_update() { # [jq-args...] <filter>
+  local f lock fd="" rows next rc=0
+  f="$(_reviewers_state)"; lock="$f.lock"
+  mkdir -p "$(dirname "$f")" || return 1
+  if have flock && exec {fd}>"$lock" 2>/dev/null; then
+    if ! flock -w "${CEL_REVIEWERS_LOCK_WAIT:-10}" "$fd"; then
+      exec {fd}>&-
+      c_warn "the reviewer registry is held by another writer - not updated"
+      return 1
+    fi
+  else
+    fd=""
+  fi
+  rows="$(reviewers_rows)"
+  if next="$(printf '%s' "$rows" | jq -c "$@")"; then
+    _reviewers_write_raw "$next" || rc=1
+  else
+    rc=1
+  fi
+  if [ -n "$fd" ]; then flock -u "$fd"; exec {fd}>&-; fi
+  return "$rc"
 }
 
 reviewers_find() { # <repo> <pr> -> the row, or fail
@@ -257,19 +294,15 @@ reviewers_find() { # <repo> <pr> -> the row, or fail
 # request has one reviewer, and two rows for it are two panes nobody can tell
 # apart.
 reviewers_record() { # <repo> <pr> <pane> <agent>
-  local rows
-  rows="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" --arg pane "$3" --arg a "$4" \
+  reviewers_update --arg r "$1" --arg p "$2" --arg pane "$3" --arg a "$4" \
     --argjson t "$(date +%s)" \
     'map(select(.repo != $r or ((.pr | tostring) != $p)))
-     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]')" || return 1
-  reviewers_write "$rows"
+     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]'
 }
 
 reviewers_drop() { # <repo> <pr>
-  local rows
-  rows="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" \
-    'map(select(.repo != $r or ((.pr | tostring) != $p)))')" || return 1
-  reviewers_write "$rows"
+  reviewers_update --arg r "$1" --arg p "$2" \
+    'map(select(.repo != $r or ((.pr | tostring) != $p)))'
 }
 
 # THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. Every reviewer
