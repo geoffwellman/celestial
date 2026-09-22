@@ -138,6 +138,16 @@ cel - the celestial plane
   cel fleet [--json] [--workspace w]  the whole box in one read: per repo,
                                 orchestrator liveness, workers n/cap, stalled
                                 and unlanded work, plus root's mail
+  cel afk on|off|status|log     away from keyboard: while it is on, the factory
+                                may resolve a verified bot-review thread, land
+                                a PR that is approved + green + gate-verified,
+                                rebase one pushed behind by another merge, and
+                                dispatch a follow-up a reviewer or scout wrote
+                                down - and NOTHING else. AFK changes who
+                                decides, never what is required. `--until
+                                <when>` expires on its own; `log` is the one
+                                answer to "what did you do while I was asleep"
+
   cel steward                   one proactive tick: gc, review + ticket sweeps,
                                 stall nudges, blocked agents, server liveness
   cel steward --install         run it every 5 min via a systemd user timer -
@@ -190,6 +200,7 @@ case "${1:-help}" in
               "$(cel_build_sha)" "$(cel_build_branch)";;
   fleet)    shift; . "$CEL_ROOT/lib/fleet.sh";   cmd_fleet "$@";;
   steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
+  afk)      shift; . "$CEL_ROOT/lib/afk.sh";     cmd_afk "$@";;
   dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;
   pages)    shift; . "$CEL_ROOT/lib/pages.sh"
             if [ "${1:-}" = "tunnel" ]; then shift; cmd_pages_tunnel "$@"; else cmd_pages "$@"; fi;;

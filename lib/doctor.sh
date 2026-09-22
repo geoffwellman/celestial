@@ -411,6 +411,25 @@ doctor_suite_lock_line() { # -> one line when the box's suite lock has leaked
   printf 'suite lock leaked (pid %s, %s) - kill it or run cel gc --orphans\n' "$pid" "${cmd% }"
 }
 
+# AWAY FROM KEYBOARD, AND FOR HOW MUCH LONGER. An AFK mode that stays on
+# because nobody turned it off is how a fortnight of unattended merges happens,
+# so the one state doctor must never leave unsaid is "on, past the hour you
+# gave it". Silent when AFK was never armed: a permanent "AFK off" row is a row
+# that teaches an operator to stop reading the section.
+doctor_afk_line() { # -> one line about AFK, or nothing
+  # shellcheck source=lib/afk.sh
+  . "$CEL_ROOT/lib/afk.sh"
+  local s; s="$(afk_state_json)"
+  [ "$(printf '%s' "$s" | jq -r '.on')" = true ] || return 0
+  local until_t; until_t="$(printf '%s' "$s" | jq -r '(.until // "") | if . == "" then "no declared hour" else . end')"
+  if [ "$(printf '%s' "$s" | jq -r '.expired')" = true ]; then
+    printf 'AFK expired at %s and is still on - the factory reads it as off, so nothing is acting, but say so: cel afk off\n' "$until_t"
+    return 0
+  fi
+  printf 'AFK on until %s%s - the factory may land, rebase, dispatch and resolve bot threads on its own (cel afk log)\n' \
+    "$until_t" "$(printf '%s' "$s" | jq -r 'if (.reason // "") == "" then "" else " (" + .reason + ")" end')"
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -534,6 +553,13 @@ cmd_doctor() {
   # the line names it rather than describing the problem.
   local orphline; orphline="$(orphans_doctor_line)"
   [ -z "$orphline" ] || c_warn "$orphline"
+
+  # Who is deciding right now. An operator who thinks they are driving must not
+  # be surprised by an agent acting, and one returning must not have to ask.
+  local afkline; afkline="$(doctor_afk_line)"
+  if [ -n "$afkline" ]; then
+    case "$afkline" in *expired*) c_warn "$afkline" ;; *) c_ok "$afkline" ;; esac
+  fi
 
   # AND THE FLOOR SPACE. The factory measured its machines and never the box
   # they stand on, so the first symptom of a full disk was a build failing.

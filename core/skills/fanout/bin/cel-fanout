@@ -21,6 +21,11 @@ export CEL_ROOT
 # shellcheck source=lib/services.sh
 . "$CEL_ROOT/lib/services.sh"  # svc_reach - `try` prints the URL that reaches
                                # the preview from the laptop, not from this box
+# shellcheck source=lib/afk.sh
+. "$CEL_ROOT/lib/afk.sh"  # away-from-keyboard: land and delegate are two of the
+                          # four acts the owner pre-authorised, and EVERY one
+                          # taken while nobody is watching is recorded here, so
+                          # the morning has one answer to read
 # shellcheck source=lib/fleet.sh
 . "$CEL_ROOT/lib/fleet.sh" # fleet_worker_row - ONE definition of what a worker
                           # looks like as data, so `cel fleet --json` and
@@ -872,6 +877,14 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
+  # Work started overnight is work the operator did not watch begin. The
+  # decision to dispatch is still the orchestrator's, made against a finding a
+  # reviewer or a scout wrote down (pre-authorisation 4); what is recorded here
+  # is that it happened, and under what.
+  if afk_active; then
+    afk_record dispatch "$(afk_authorisation dispatch)" \
+      "$repo/$branch on $profile ($shape) - ${because:-no reason recorded}"
+  fi
   printf '%s\n' "$branch"
 }
 
@@ -2087,6 +2100,14 @@ cmd_land() { # <id>
   "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"
+  # A MERGE THAT HAPPENED WHILE NOBODY WAS WATCHING IS A MERGE THAT HAS TO BE
+  # READABLE IN THE MORNING. The checks above are the same checks awake or
+  # asleep - AFK removes the pause, not a check - so this records what was
+  # already allowed rather than deciding anything.
+  if afk_active; then
+    afk_record land "$(afk_authorisation land)" \
+      "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified"
+  fi
   _fanout_ticket_state "$ticket" "Done"
   _ledger_update_state "$wsdir" "$id" landed
 }

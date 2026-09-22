@@ -71,6 +71,39 @@ export const orphansEdge = (box) => {
   return `${n} orphans ${memHuman(box?.orphans?.rss_mb) || '0M'} - cel gc --orphans`;
 };
 
+// WHO IS DECIDING, on the row an operator reads without asking for it. AFK
+// changes who decides, never what is required - and both directions of that
+// surprise are expensive: an operator returning must see that the factory has
+// been acting, and an operator who thinks they are driving must not be
+// surprised by an agent that still is. SILENT WHEN OFF: a permanent "AFK off"
+// is a row that teaches the eye to skip the row.
+//
+// An expired AFK is NOT shown as on. Everything downstream reads a past
+// `--until` as off, so an edge that still said "AFK until 02:00" at 09:00
+// would be the one surface claiming authorisation that no longer exists.
+export const afkEdge = (afk) => {
+  if (!afk || afk.on !== true) return '';
+  const until = String(afk.until || afk.until_text || '');
+  if (afk.expired === true) return `AFK EXPIRED ${until || 'past its hour'} - cel afk off`;
+  return until ? `AFK until ${until}` : 'AFK on, no declared hour';
+};
+
+// "What did you do while I was asleep" has ONE answer to read, not four
+// surfaces to reconstruct - so the acts come with the pre-authorisation each
+// one was covered by, in the order they happened.
+export const afkLogView = (afk, entries = []) => {
+  if (!afk || afk.on !== true) return [];
+  const out = ['', 'AFK LOG'];
+  if (!entries.length) {
+    out.push('  nothing autonomous yet');
+    return out;
+  }
+  for (const e of entries.slice(-8)) {
+    out.push(`  ${String(e.at || '').slice(0, 16)} ${e.act} ${e.detail || ''} [${e.authorisation || 'unrecorded'}]`);
+  }
+  return out;
+};
+
 // How alarmed to be. Under 15% available the box is about to start refusing
 // things; under 8% the kernel is minutes from choosing what dies, and what it
 // picks is never what anyone would have chosen.
