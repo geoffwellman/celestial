@@ -1,37 +1,38 @@
 # shellcheck shell=bash
-# `cel gateway` - several subscriptions behind one loopback door.
+# `cel gateway` - several subscriptions behind one loopback door, served by
+# CLIProxyAPI.
 #
-# Nothing here touches the box's real broker, its real gateway or the owner's
-# ~/.pi/agent/models.json: `omp` is a stub on a prepended PATH that prints
-# canned JSON and logs its argv, the config file is a fixture, and the one
-# test that proves the HTTP path runs a throwaway python server on a port the
-# kernel chose. The fixture token is asserted AGAINST: a bearer that grants
-# every subscription on the box must never reach stdout, a config file or a
-# launch line.
+# Nothing here starts a proxy, contacts an account or touches the owner's
+# ~/.pi/agent/models.json: `cli-proxy-api`, `herdr`, `omp` and `curl` are stubs
+# on a prepended PATH that log their argv and print canned JSON, the config
+# file and the auth-dir are fixtures under mktemp, and the fixture token is
+# asserted AGAINST - one api-key unlocks every subscription in the vault, so it
+# must never reach stdout, a service file or models.json.
+#
+# THE OMP STUB IS A TRIPWIRE. CEL-60 removed omp's broker and gateway; if any
+# `cel gateway` verb still shells out to omp, the argv log it writes fails the
+# last test in this file rather than being discovered on a live box.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/gateway.sh"
 
-GW_FIXTURE_TOKEN='gw-fixture-token-do-not-print'
+GW_FIXTURE_SECRET='gw-fixture-secret-do-not-print'
 
-# The account table as `omp auth-gateway check --json` really shapes it
-# (verified against omp 18.1.17): credentials[], each with a report.limits[]
-# carrying a window and an amount. Two codex accounts, one exhausted and one
-# with room, plus an api_key credential the balancer never uses.
-_gw_check_json() {
-  cat <<'EOF'
-{"broker":"http://127.0.0.1:47311","strict":false,"credentials":[
- {"id":1,"provider":"openai-codex","type":"oauth","ok":true,
-  "email":"someone@example.invalid","accountId":"aaaaaaaa-1111-2222-3333-444444444444",
-  "report":{"provider":"openai-codex","limits":[
-    {"label":"7 days","window":{"id":"7d","resetsAt":1789994511000},
-     "amount":{"used":100,"limit":100,"usedFraction":1,"unit":"percent"},"status":"exhausted"}]}},
- {"id":7,"provider":"openai-codex","type":"oauth","ok":true,
-  "email":"other@example.invalid","accountId":"bbbbbbbb-1111-2222-3333-444444444444",
-  "report":{"provider":"openai-codex","limits":[
-    {"label":"7 days","window":{"id":"7d","resetsAt":1789994511000},
-     "amount":{"used":12,"limit":100,"usedFraction":0.12,"unit":"percent"},"status":"ok"}]}},
- {"id":3,"provider":"opencode-go","type":"api_key","ok":true,"report":{"provider":"opencode-go","limits":[]}}]}
+# The auth-dir as CLIProxyAPI really writes it (SPIKE-cliproxy.report.md):
+# one OAuth JSON per account, `claude-<hash>-<email>.json` and
+# `codex-<hash>-<email>-<plan>.json`. The plan rides in the codex filename and
+# nowhere else, which is why status reads the NAME and not only the contents.
+_gw_auth_fixture() { # <dir>
+  local d="$1"
+  mkdir -p "$d"; chmod 700 "$d"
+  cat >"$d/claude-a1b2c3d4-someone@example.invalid.json" <<EOF
+{"access_token":"$GW_FIXTURE_SECRET","refresh_token":"$GW_FIXTURE_SECRET",
+ "account":{"email_address":"someone@example.invalid","uuid":"aaaaaaaa-1111"}}
 EOF
+  cat >"$d/codex-9f8e7d6c-other@example.invalid-plus.json" <<EOF
+{"access_token":"$GW_FIXTURE_SECRET",
+ "account":{"email_address":"other@example.invalid"}}
+EOF
+  chmod 600 "$d"/*.json
 }
 
 _gw_setup() {
@@ -39,293 +40,325 @@ _gw_setup() {
   mkdir -p "$T/bin" "$T/pi"
   export CEL_CONFIG_FILE="$T/config.yaml"
   export CEL_GATEWAY_STATE="$T/state"
-  # services.d is a FIXTURE, always: `cel gateway install` writes two box
-  # services, and a test that let it write to the real ~/.config/cel/services.d
+  # services.d is a FIXTURE, always: `cel gateway install` registers a box
+  # service, and a test that let it write to the real ~/.config/cel/services.d
   # left the live steward sweeping services this suite invented.
   export CEL_SERVICES_D="$T/services.d"
   export CEL_SERVICES_STATE="$T/services-state"
   export PI_CODING_AGENT_DIR="$T/pi"
+  unset CEL_GATEWAY_STUB
+  cat >"$T/bin/cli-proxy-api" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/cpa.argv"
+exit 0
+EOF
+  # THE TRIPWIRE. Any omp invocation from a gateway verb lands here.
   cat >"$T/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/omp.argv"
-case "\$1 \$2" in
-  "auth-broker token")    printf '%s\n' '$GW_FIXTURE_TOKEN' ;;
-  "auth-gateway token")   printf '%s\n' '$GW_FIXTURE_TOKEN' ;;
-  "auth-broker status")   printf '%s\n' '{"url":"http://127.0.0.1:47311","ok":true,"version":"18.1.17"}' ;;
-  "auth-gateway status")  printf '%s\n' '{"ready":true,"reason":null,"credentialCount":5}' ;;
-  "auth-gateway check")   cat "$T/check.json" ;;
-  *) : ;;
-esac
+exit 0
 EOF
-  chmod +x "$T/bin/omp"
-  _gw_check_json > "$T/check.json"
-  PATH="$T/bin:$PATH"
-  # No live gateway in a test: the HTTP reads answer from this stub unless a
-  # test replaces it. `ready` decides whether the door is open at all.
-  cat >"$T/gwstub" <<'EOF'
+  cat >"$T/bin/herdr" <<EOF
 #!/usr/bin/env bash
-case "$1" in
-  ready)  exit "${GW_STUB_DOWN:-0}" ;;
-  models) printf '%s\n' '{"data":[{"id":"openai-codex/gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"opencode-go/qwen3.8-flash","context_length":128000,"max_output_tokens":4096}]}' ;;
+printf '%s\n' "\$*" >> "$T/herdr.argv"
+exit 0
+EOF
+  # The only HTTP this feature does: an unauthenticated GET /healthz and a
+  # bearer-authenticated GET /v1/models. The stub records the whole argv so a
+  # test can prove what was and was not sent.
+  cat >"$T/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/curl.argv"
+url=""
+for a in "\$@"; do case "\$a" in http://*|https://*) url="\$a" ;; esac; done
+case "\$url" in
+  */healthz)   exit "\${GW_DOWN:-0}" ;;
+  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000}]}' ;;
+  *) exit 7 ;;
 esac
 EOF
-  chmod +x "$T/gwstub"
-  export CEL_GATEWAY_STUB="$T/gwstub"
+  chmod +x "$T/bin/cli-proxy-api" "$T/bin/omp" "$T/bin/herdr" "$T/bin/curl"
+  PATH="$T/bin:$PATH"
 }
-_gw_teardown() { rm -rf "$T"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE PI_CODING_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE; }
+_gw_teardown() {
+  rm -rf "$T"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE PI_CODING_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
+}
 
-# --- install --------------------------------------------------------------
+# --- the config file ------------------------------------------------------
 
-test_gateway_install_writes_the_ports_and_both_services() {
+# CLIProxyAPI HAS NO FLAG-ONLY MODE: the settings below exist only in the file
+# `cel gateway install` writes, so each one is asserted BY KEY - an edit that
+# drops a line goes red here rather than on a box that quietly serves the LAN.
+test_gateway_config_binds_loopback_only() {
   _gw_setup
-  local out; out="$(cmd_gateway install --no-start)"
-  assert_eq "$(cel_config_get gateway broker_port)" 47311
-  assert_eq "$(cel_config_get gateway gateway_port)" 47411
-  local specs; specs="$(gateway_service_specs)"
-  assert_contains "$specs" "auth-broker serve --bind 127.0.0.1:47311"
-  assert_contains "$specs" "auth-gateway serve --bind 127.0.0.1:47411"
-  # health is a real read of the gateway, not a port knock: the door can be
-  # listening with no usable credential behind it.
-  assert_contains "$specs" "/v1/models"
-  assert_contains "$out" "gateway"
+  cmd_gateway install --no-start >/dev/null
+  local f; f="$(gateway_config_file)"
+  assert_eq "$(yq -r '.host' "$f")" "127.0.0.1"
+  assert_eq "$(yq -r '.port' "$f")" "$(gateway_port)"
   _gw_teardown
 }
 
-# LOOPBACK ONLY. The bearer grants every subscription in the vault to whatever
-# can reach the port; a bind that answered the LAN would hand the box's
-# accounts to the network.
-test_gateway_binds_loopback_only() {
+# THE DEFAULT IS false, AND false MEANS A WORKER SWITCHES ACCOUNT MID-TASK.
+# One account for the length of a conversation is the entire point; without
+# this the gateway is a worse single account than no gateway at all.
+test_gateway_config_turns_session_affinity_on() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
-  local specs; specs="$(gateway_service_specs)"
-  ! printf '%s' "$specs" | grep -q '0\.0\.0\.0' || { echo "gateway bound to every interface"; _gw_teardown; return 1; }
+  assert_eq "$(yq -r '.routing["session-affinity"]' "$(gateway_config_file)")" "true"
   _gw_teardown
 }
 
-# The gateway service is useless without the broker's address and bearer, so
-# install puts both in its environment - by NAME here, never by value.
-test_gateway_service_env_names_the_broker_without_printing_its_token() {
+# ONE API-KEY UNLOCKS EVERY SUBSCRIPTION IN THE VAULT. The management API is
+# left out of the file entirely, so nothing can be reached from off this box.
+test_gateway_config_never_enables_remote_management() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
-  local specs; specs="$(gateway_service_specs)"
-  assert_contains "$specs" "OMP_AUTH_BROKER_URL"
-  assert_contains "$specs" "OMP_AUTH_BROKER_TOKEN"
-  ! printf '%s' "$specs" | grep -q "$GW_FIXTURE_TOKEN" || { echo "the broker token is in the service spec"; _gw_teardown; return 1; }
+  ! grep -Eq '^[[:space:]]*allow-remote:' "$(gateway_config_file)" \
+    || { echo "the written config enables remote management"; _gw_teardown; return 1; }
   _gw_teardown
 }
 
-# --- status ---------------------------------------------------------------
-
-test_gateway_status_renders_the_account_table() {
+# The vault is not a repository file and never becomes one: a worktree gets
+# committed, pushed and read by a reviewer.
+test_gateway_auth_dir_is_private_and_outside_every_repo() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
+  local d; d="$(gateway_auth_dir)"
+  assert_eq "$(yq -r '.["auth-dir"]' "$(gateway_config_file)")" "$d"
+  assert_eq "$(stat -c %a "$d")" 700
+  case "$d" in "$CEL_ROOT"/*) echo "the auth-dir is inside the repo"; _gw_teardown; return 1 ;; esac
+  # 0600 on the config, because the api-key list lives in it.
+  assert_eq "$(stat -c %a "$(gateway_config_file)")" 600
+  _gw_teardown
+}
+
+# --- the box service ------------------------------------------------------
+
+# ONE SERVICE, not two. omp needed a broker AND a gateway; CLIProxyAPI is one
+# process, and a second declaration would be a second thing to be down.
+test_gateway_registers_exactly_one_box_service() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  assert_eq "$(ls "$T/services.d" | wc -l)" 1
+  local f="$T/services.d/cel-auth-gateway.json"
+  assert_contains "$(jq -r '.cmd' "$f")" "cli-proxy-api"
+  assert_eq "$(jq -r '.restart' "$f")" auto
+  _gw_teardown
+}
+
+# /healthz IS UNAUTHENTICATED, which is the health probe this gateway never
+# had: omp's only readable route was /v1/models behind a bearer, so the check
+# had to carry the key that unlocks every subscription just to say "up".
+test_gateway_service_health_is_unauthenticated_healthz() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local f="$T/services.d/cel-auth-gateway.json"
+  assert_contains "$(jq -r '.health' "$f")" "/healthz"
+  assert_eq "$(jq -r '.health_auth // ""' "$f")" ""
+  ! grep -q "$GW_FIXTURE_SECRET" "$f" \
+    || { echo "the api-key is in the service file"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+test_gateway_install_is_idempotent() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local key1 out
+  key1="$(cat "$(gateway_state_dir)/api-key")"
+  out="$(cmd_gateway install --no-start)"
+  assert_eq "$(ls "$T/services.d" | wc -l)" 1
+  # The api-key is minted ONCE: a second install that rolled it would log out
+  # every pi worker already launched against this gateway.
+  assert_eq "$(cat "$(gateway_state_dir)/api-key")" "$key1"
+  assert_contains "$out" "supervised"
+  _gw_teardown
+}
+
+# --- health ---------------------------------------------------------------
+
+test_gateway_ready_reads_healthz_without_a_bearer() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  gateway_ready || { echo "a gateway answering /healthz was reported down"; _gw_teardown; return 1; }
+  assert_contains "$(cat "$T/curl.argv")" "/healthz"
+  ! grep -q "Authorization" "$T/curl.argv" \
+    || { echo "the health probe presented a bearer"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+test_gateway_not_ready_when_healthz_does_not_answer() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  GW_DOWN=1 assert_fails gateway_ready
+  _gw_teardown
+}
+
+# --- the account table ----------------------------------------------------
+
+# THE AUTH-DIR IS THE ACCOUNT LIST. The management API is off, so the files
+# are the only evidence there is - and reading them costs no quota, which
+# `omp auth-gateway check --strict` did once per status.
+test_gateway_status_lists_accounts_from_the_auth_dir() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_auth_fixture "$(gateway_auth_dir)"
   local out; out="$(cmd_gateway status)"
-  assert_contains "$out" "broker"
-  assert_contains "$out" "openai-codex"
-  assert_contains "$out" "exhausted"
-  assert_contains "$out" "7 days"
+  assert_contains "$out" "claude"
+  assert_contains "$out" "codex"
+  assert_contains "$out" "someone@example.invalid"
+  assert_contains "$out" "other@example.invalid"
+  # the plan only exists in the codex filename
+  assert_contains "$out" "plus"
   _gw_teardown
 }
 
-# The QUOTA view lists gateway accounts beside the direct ones, so the JSON is
-# the same row shape a subscription is - with `source: gateway` to say where
-# it came from.
 test_gateway_status_json_is_a_subscription_row_per_account() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
+  _gw_auth_fixture "$(gateway_auth_dir)"
   local js; js="$(cmd_gateway status --json)"
-  assert_eq "$(printf '%s' "$js" | jq -r '.accounts | length')" 3
+  assert_eq "$(printf '%s' "$js" | jq -r '.accounts | length')" 2
   assert_eq "$(printf '%s' "$js" | jq -r '.accounts[0].source')" gateway
-  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[0].provider')" openai-codex
-  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[0].windows[0].state')" exhausted
-  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[0].windows[0].used_pct')" 100
+  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[0].provider')" claude
+  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[1].provider')" codex
+  assert_eq "$(printf '%s' "$js" | jq -r '.accounts[1].plan')" plus
   assert_eq "$(printf '%s' "$js" | jq -r '.ready')" true
-  _gw_teardown
-}
-
-# SHORT IDS ONLY. The account table is read over someone's shoulder and pasted
-# into tickets; the email on a subscription is personal data that no operator
-# decision needs.
-test_gateway_status_shows_short_ids_and_no_email() {
-  _gw_setup
-  cmd_gateway install --no-start >/dev/null
-  local out; out="$(cmd_gateway status; cmd_gateway status --json)"
-  ! printf '%s' "$out" | grep -q "example.invalid" || { echo "an account email reached the status output"; _gw_teardown; return 1; }
-  assert_contains "$out" "aaaaaa"
-  ! printf '%s' "$out" | grep -q "aaaaaaaa-1111-2222-3333-444444444444" || { echo "the full account id is noise"; _gw_teardown; return 1; }
-  _gw_teardown
-}
-
-# The one rule the whole feature rests on: the bearer is never printed.
-test_gateway_never_prints_the_token() {
-  _gw_setup
-  local out; out="$(cmd_gateway install --no-start; cmd_gateway status; cmd_gateway status --json; gateway_doctor_line)"
-  ! printf '%s' "$out" | grep -q "$GW_FIXTURE_TOKEN" || { echo "the gateway token reached stdout"; _gw_teardown; return 1; }
-  ! grep -rq "$GW_FIXTURE_TOKEN" "$CEL_CONFIG_FILE" || { echo "the gateway token was written to the config"; _gw_teardown; return 1; }
   _gw_teardown
 }
 
 test_gateway_usable_count_is_per_provider() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
-  assert_eq "$(gateway_usable_count)" 3
-  assert_eq "$(gateway_usable_count openai-codex)" 2
+  _gw_auth_fixture "$(gateway_auth_dir)"
+  assert_eq "$(gateway_usable_count)" 2
+  assert_eq "$(gateway_usable_count codex)" 1
   assert_eq "$(gateway_usable_count anthropic)" 0
+  _gw_teardown
+}
+
+# THE RULE THE WHOLE FEATURE RESTS ON. The auth files hold live OAuth tokens
+# and the config holds the api-key; a status command reads both and must print
+# neither.
+test_gateway_never_prints_a_secret() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_auth_fixture "$(gateway_auth_dir)"
+  local out
+  out="$(cmd_gateway install --no-start; cmd_gateway status; cmd_gateway status --json; gateway_doctor_line)"
+  ! printf '%s' "$out" | grep -q "$GW_FIXTURE_SECRET" \
+    || { echo "a token or api-key reached stdout"; _gw_teardown; return 1; }
+  ! grep -q "$GW_FIXTURE_SECRET" "$CEL_CONFIG_FILE" \
+    || { echo "a token was written into cel.yaml"; _gw_teardown; return 1; }
+  local key; key="$(cat "$(gateway_state_dir)/api-key")"
+  ! printf '%s' "$out" | grep -q "$key" \
+    || { echo "the gateway api-key reached stdout"; _gw_teardown; return 1; }
   _gw_teardown
 }
 
 # --- login ----------------------------------------------------------------
 
-# A login is an interactive OAuth dance. Off a TTY - a steward tick, a worker,
-# a script - the answer is the instruction, not a hung process holding a
-# terminal nobody is looking at.
+# A login is an interactive OAuth dance with a browser on the other end. Off a
+# TTY - a steward tick, a worker, a script - the answer is the instruction,
+# not a process hanging on a terminal nobody is looking at.
 test_gateway_login_off_a_tty_prints_the_instruction() {
   _gw_setup
-  local out; out="$(cmd_gateway login anthropic < /dev/null)"
-  assert_contains "$out" "omp auth-broker login anthropic"
-  ! grep -q "auth-broker login" "$T/omp.argv" 2>/dev/null || { echo "a non-interactive login was actually run"; _gw_teardown; return 1; }
+  cmd_gateway install --no-start >/dev/null
+  local out; out="$(cmd_gateway login claude < /dev/null)"
+  assert_contains "$out" "-claude-login"
+  [ ! -f "$T/cpa.argv" ] || { echo "a non-interactive login was actually run"; _gw_teardown; return 1; }
   _gw_teardown
 }
-test_gateway_logout_names_the_credential() {
+
+# A headless box has no browser to hand the callback to, so codex gets the
+# device flow instead.
+test_gateway_login_codex_names_the_device_flow_without_a_browser() {
   _gw_setup
-  cmd_gateway logout anthropic 5 >/dev/null
-  assert_contains "$(cat "$T/omp.argv")" "auth-broker logout anthropic"
+  cmd_gateway install --no-start >/dev/null
+  local out; out="$(cmd_gateway login codex --no-browser < /dev/null)"
+  assert_contains "$out" "-codex-device-login"
+  assert_contains "$out" "-no-browser"
   _gw_teardown
 }
 
 # --- doctor ---------------------------------------------------------------
 
-# A provider with nothing usable is the whole failure mode: on this box every
-# anthropic credential is disabled, so `ompgw/anthropic/...` fails with
-# "Unknown model" rather than "auth expired". Doctor says the verb instead.
+test_gateway_doctor_line_says_not_installed_when_it_is_not() {
+  _gw_setup
+  assert_contains "$(gateway_doctor_line)" "not installed"
+  _gw_teardown
+}
+
 test_gateway_doctor_line_names_the_verb_for_a_provider_with_nothing_usable() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
+  _gw_auth_fixture "$(gateway_auth_dir)"
   local out; out="$(CEL_GATEWAY_WATCH=anthropic gateway_doctor_line)"
   assert_contains "$out" "cel gateway login anthropic"
-  assert_contains "$out" "gateway"
-  _gw_teardown
-}
-test_gateway_doctor_line_says_not_installed_when_it_is_not() {
-  _gw_setup
-  local out; out="$(gateway_doctor_line)"
-  assert_contains "$out" "not installed"
   _gw_teardown
 }
 
 # --- the pi provider ------------------------------------------------------
 
-# models.json is the OWNER's file. Merging must add `ompgw` and leave every
-# other provider exactly as it was - the first draft of this rewrote the
-# document from the gateway's model list and would have dropped a hand-written
-# provider block.
-test_pi_models_merge_adds_ompgw_without_clobbering_a_provider() {
+# models.json is the OWNER's file: a writer that rebuilt the document from the
+# gateway's model list would silently delete providers they added by hand.
+test_pi_models_merge_keeps_the_owners_providers() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
   cat >"$T/pi/models.json" <<'EOF'
 {"providers":{"mine":{"name":"my own","baseUrl":"https://example.invalid/v1","models":[{"id":"m1"}]}}}
 EOF
   gateway_pi_models_write "$T/pi/models.json"
-  local f="$T/pi/models.json"
-  assert_eq "$(jq -r '.providers.mine.baseUrl' "$f")" "https://example.invalid/v1"
-  assert_eq "$(jq -r '.providers.ompgw.baseUrl' "$f")" "http://127.0.0.1:47411/v1"
-  assert_eq "$(jq -r '.providers.ompgw.apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
-  assert_eq "$(jq -r '.providers.ompgw.headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
-  assert_eq "$(jq -r '.providers.ompgw.api' "$f")" openai-completions
-  # models come from GET /v1/models, never hand-written: pi replaces the
-  # provider's list wholesale and an invented context window is silently wrong.
-  assert_eq "$(jq -r '.providers.ompgw.models | length' "$f")" 2
-  assert_eq "$(jq -r '.providers.ompgw.models[0].contextWindow' "$f")" 272000
-  ! grep -q "$GW_FIXTURE_TOKEN" "$f" || { echo "the gateway token was written into models.json"; _gw_teardown; return 1; }
+  assert_eq "$(jq -r '.providers.mine.baseUrl' "$T/pi/models.json")" "https://example.invalid/v1"
   _gw_teardown
 }
-test_pi_models_merge_creates_the_file_when_there_is_none() {
+
+# PLAIN MODEL IDS AND THE SESSION HEADER. The ids carry no provider prefix
+# (`force-model-prefix` stays false), so nothing in the plane has to cope with
+# a three-segment model id; and the per-worker `x-session-id` is the ONLY
+# thing affinity can pin an account by, because pi sends no session identity
+# of its own.
+test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
   gateway_pi_models_write "$T/pi/models.json"
-  assert_eq "$(jq -r '.providers.ompgw.api' "$T/pi/models.json")" openai-completions
+  local f="$T/pi/models.json"
+  assert_eq "$(jq -r '.providers.ompgw.baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)/v1"
+  assert_eq "$(jq -r '.providers.ompgw.headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
+  assert_eq "$(jq -r '.providers.ompgw.api' "$f")" openai-completions
+  assert_eq "$(jq -r '.providers.ompgw.models[0].id' "$f")" "gpt-5.5"
+  assert_eq "$(jq -r '.providers.ompgw.models[0].contextWindow' "$f")" 272000
+  # Claude models get pi's Anthropic surface, which the gateway serves at
+  # /v1/messages - the same accounts, the richer protocol.
+  assert_eq "$(jq -r '.providers["ompgw-claude"].api' "$f")" anthropic-messages
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[0].id' "$f")" "claude-sonnet-4-6"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
+  # The api-key is a VARIABLE NAME: pi expands it in the pane, so no secret
+  # is ever in this file.
+  assert_eq "$(jq -r '.providers.ompgw.apiKey' "$f")" '$CEL_GATEWAY_API_KEY'
+  local key; key="$(cat "$(gateway_state_dir)/api-key")"
+  ! grep -q "$key" "$f" || { echo "the api-key was written into models.json"; _gw_teardown; return 1; }
   _gw_teardown
 }
 
-# --- the real HTTP path ---------------------------------------------------
+# --- omp is gone ----------------------------------------------------------
 
-# Everything above rides the stub seam. This one proves the curl that the seam
-# stands in for: a throwaway server on a kernel-chosen port, answering
-# /v1/models exactly as the gateway does.
-test_gateway_reads_models_over_http() {
-  _gw_setup
-  unset CEL_GATEWAY_STUB
-  mkdir -p "$T/srv/v1"
-  printf '%s' '{"data":[{"id":"opencode-go/qwen3.8-flash","context_length":128000,"max_output_tokens":4096}]}' > "$T/srv/v1/models"
-  local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
-  python3 -m http.server "$port" --bind 127.0.0.1 --directory "$T/srv" >/dev/null 2>&1 &
-  local srv=$!
-  local i=0; while [ "$i" -lt 50 ] && ! curl -sf -m1 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; do sleep 0.1; i=$((i+1)); done
-  cmd_gateway install --no-start >/dev/null
-  cel_config_set gateway gateway_port "$port"
-  local id ready=0
-  id="$(gateway_models_json | jq -r '.data[0].id')"
-  gateway_ready && ready=1
-  # The port goes back to the kernel HERE, not whenever this process group is
-  # reaped: an ephemeral port held across the rest of the suite is a port some
-  # other test wanted, and that failure reads as that test's bug.
-  kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null || true
-  assert_eq "$id" "opencode-go/qwen3.8-flash"
-  [ "$ready" -eq 1 ] || { echo "a gateway answering /v1/models was reported down"; _gw_teardown; return 1; }
-  _gw_teardown
-}
-
-# --- the two box services -------------------------------------------------
-
-# CEL-28 wrote its two specs to a private file and printed "NOT supervised".
-# They belong in `services.d`, where the steward sweep and `cel services` both
-# already look - that is the whole of CEL-34.
-test_gateway_install_writes_two_box_service_files() {
+# CEL-60 replaced omp's broker and gateway with one CLIProxyAPI service. omp
+# stays on the box as an AGENT RUNTIME, but nothing under `cel gateway` may
+# call it any more - two credential vaults is the failure this ticket exists
+# to end.
+test_no_gateway_verb_invokes_omp() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
-  assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-broker.json")" cel-auth-broker
-  assert_eq "$(jq -r '.name' "$T/services.d/cel-auth-gateway.json")" cel-auth-gateway
-  assert_contains "$(jq -r '.cmd' "$T/services.d/cel-auth-broker.json")" "auth-broker serve --bind 127.0.0.1:47311"
-  assert_contains "$(jq -r '.health' "$T/services.d/cel-auth-gateway.json")" "/v1/models"
-  assert_eq "$(jq -r '.restart' "$T/services.d/cel-auth-gateway.json")" auto
-  assert_eq "$(jq -r '.env.OMP_AUTH_BROKER_URL' "$T/services.d/cel-auth-gateway.json")" "http://127.0.0.1:47311"
-  # 0600, because `env` may carry a bearer; 0700 on the directory.
-  assert_eq "$(stat -c %a "$T/services.d/cel-auth-gateway.json")" 600
-  assert_eq "$(stat -c %a "$T/services.d")" 700
-  _gw_teardown
-}
-
-# A second install is a no-op that rewrites the files: the operator runs it
-# after a port change and must not end up with two brokers.
-test_gateway_install_is_idempotent() {
-  _gw_setup
-  cmd_gateway install --no-start >/dev/null
-  local out; out="$(cmd_gateway install --no-start)"
-  assert_eq "$(ls "$T/services.d" | wc -l)" 2
-  assert_contains "$out" "supervised"
-  ! printf '%s' "$out" | grep -q "NOT supervised" \
-    || { echo "install still says its services are unsupervised"; _gw_teardown; return 1; }
-  _gw_teardown
-}
-
-# Whether the steward knows about the gateway is the first thing status must
-# say: an unsupervised gateway is one lid-close away from being down with
-# nobody to notice.
-test_gateway_status_says_whether_the_box_watches_it() {
-  _gw_setup
-  cel_config_set gateway gateway_port 47411
-  assert_contains "$(cmd_gateway status)" "(unsupervised)"
-  cmd_gateway install --no-start >/dev/null
-  assert_contains "$(cmd_gateway status)" "(box service, steward-watched)"
-  _gw_teardown
-}
-
-# The bearer rule again, over the new seam: the files are 0600 but the token
-# still never reaches stdout.
-test_gateway_install_prints_no_token() {
-  _gw_setup
-  local out; out="$(cmd_gateway install --no-start; cmd_gateway status)"
-  ! printf '%s' "$out" | grep -q "$GW_FIXTURE_TOKEN" \
-    || { echo "the gateway token reached stdout through the services.d path"; _gw_teardown; return 1; }
+  _gw_auth_fixture "$(gateway_auth_dir)"
+  cmd_gateway status >/dev/null
+  cmd_gateway status --json >/dev/null
+  cmd_gateway login claude </dev/null >/dev/null
+  gateway_doctor_line >/dev/null
+  gateway_pi_models_write "$T/pi/models.json" >/dev/null
+  [ ! -f "$T/omp.argv" ] \
+    || { echo "a gateway verb still called omp: $(cat "$T/omp.argv")"; _gw_teardown; return 1; }
+  ! grep -rn "omp " "$CEL_ROOT/lib/gateway.sh" | grep -vE '^\s*[0-9]+:\s*#' | grep -q . \
+    || { echo "lib/gateway.sh still runs omp"; _gw_teardown; return 1; }
   _gw_teardown
 }
