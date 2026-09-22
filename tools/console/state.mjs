@@ -14,12 +14,14 @@ import { legend } from './legend.mjs';
 import {
   unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
   memFree, orphansEdge, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
+  afkEdge, afkLogView,
 } from './views.mjs';
 import { boardFor, prsFor, digestFor, rankedMail, timelineFor } from './board.mjs';
 
 export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
 
 export { unitLabel, openLine, tailLine } from './views.mjs';
+export { afkEdge, afkLogView } from './views.mjs';
 export { servicesView, serviceLine, serviceCounts, svcUptime } from './views.mjs';
 export { renderOutput } from './views.mjs';
 
@@ -55,10 +57,29 @@ export const roster = async () => {
   } catch { return []; }
 };
 
+// AFK rides on the fleet document rather than on a sixth argument to
+// `statusRow`. CEL-51's bug was a renderer that forgot to pass one of the
+// arguments the edge declared, and the edge the owner asked for twice was
+// absent from four views out of five; a fact carried BY THE DOCUMENT cannot be
+// forgotten by a call site. Empty on any failure - a console that cannot read
+// the AFK state says nothing about it, which is the honest outcome.
+export const afkState = async () => {
+  const r = await run(CEL_BIN, ['afk', 'status', '--json'], 10000);
+  if (!r.ok) return null;
+  try { return JSON.parse(r.out); } catch { return null; }
+};
+
+export const afkLog = async () => {
+  const r = await run(CEL_BIN, ['afk', 'log', '--json'], 10000);
+  if (!r.ok) return [];
+  return r.out.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+};
+
 export const fleet = async () => {
   const r = await run(CEL_BIN, ['fleet', '--json']);
-  if (!r.ok) return { workspaces: [], error: r.err.trim() || 'cel fleet failed' };
-  try { return JSON.parse(r.out); } catch { return { workspaces: [], error: 'cel fleet returned no JSON' }; }
+  const afk = await afkState();
+  if (!r.ok) return { workspaces: [], afk, error: r.err.trim() || 'cel fleet failed' };
+  try { return { ...JSON.parse(r.out), afk }; } catch { return { workspaces: [], afk, error: 'cel fleet returned no JSON' }; }
 };
 
 // `cel inbox open` is per workspace by design (lib/inbox.sh), so the console
@@ -278,7 +299,9 @@ export const statusRow = (status, box, doc, width) => {
   const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
   const mem = memFree(box);
   const subs = subsEdge(doc, renderWidth(width));
-  return [left, subs, mem, orphansEdge(box)].filter(Boolean).join('   ');
+  // AFK first after the status: it is the one figure that changes what the
+  // rest of the screen means.
+  return [left, afkEdge(doc.afk), subs, mem, orphansEdge(box)].filter(Boolean).join('   ');
 };
 
 // WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out
@@ -334,6 +357,8 @@ export const renderOnce = async ({ status = '', pane = 'fleet' } = {}) => {
   const tail = inboxTail(doc, 8);
   if (!tail.length) out.push('  quiet');
   for (const m of tail) out.push(`  ${tailLine(m)}`);
+
+  for (const line of afkLogView(doc.afk, doc.afk && doc.afk.on === true ? await afkLog() : [])) out.push(line);
 
   out.push('');
   out.push(statusRow(status, doc.box, doc));

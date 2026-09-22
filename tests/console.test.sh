@@ -41,6 +41,11 @@ case "\$1" in
     ws=""
     for a in "\$@"; do [ "\$prev" = --workspace ] && ws="\$a"; prev="\$a"; done
     cat "$T/open.\$ws.json" 2>/dev/null || true ;;
+  afk)
+    case "\$2" in
+      status) cat "$T/afk.status.json" 2>/dev/null || printf '{"on":false}' ;;
+      log)    cat "$T/afk.log.json" 2>/dev/null || true ;;
+    esac ;;
   *) printf 'ran: %s\n' "\$*" ;;
 esac
 EOF
@@ -1666,4 +1671,55 @@ test_console_time_windowed_fixtures_carry_no_frozen_dates() {
     printf 'frozen timestamps in console fixtures (use _console_ago):\n%s\n' "$hits"
     return 1
   }
+}
+
+# ---------------------------------------------------------------- CEL-59
+# AN OPERATOR RETURNING MUST SEE IT WITHOUT ASKING. AFK changes who decides,
+# so the status edge carries it: on, and until when. And the morning question
+# - "what did you do while I was asleep" - is answered on the same screen,
+# each act with the pre-authorisation that covered it.
+_console_afk_on() { # <until-iso> [expired]
+  printf '{"on":true,"until":"%s","until_text":"%s","reason":"asleep","expired":%s}\n' \
+    "$1" "$1" "${2:-false}" > "$T/afk.status.json"
+  printf '%s\n' \
+    '{"at":"2026-09-22T02:10:00Z","act":"land","authorisation":"pre-authorisation 2 (approved, green, gate-verified, mergeable)","detail":"widget#71"}' \
+    > "$T/afk.log.json"
+}
+
+test_console_status_edge_shows_afk_and_its_expiry() {
+  _console_setup
+  _console_afk_on "2026-09-22T08:00:00Z"
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" "AFK until 2026-09-22T08:00:00Z"
+  _console_teardown
+}
+
+test_console_shows_the_afk_log_with_its_authorisation() {
+  _console_setup
+  _console_afk_on "2026-09-22T08:00:00Z"
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" "AFK LOG"
+  assert_contains "$out" "land"
+  assert_contains "$out" "pre-authorisation 2"
+  assert_contains "$out" "widget#71"
+  _console_teardown
+}
+
+# AFK off is SILENT. A permanent "AFK off" row is a row that teaches an
+# operator to stop reading the edge.
+test_console_says_nothing_about_afk_when_it_is_off() {
+  _console_setup
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  case "$out" in *AFK*) echo "the console named AFK while it was off"; _console_teardown; return 1;; esac
+  _console_teardown
+}
+
+# An AFK past its hour is not a mode, it is a finding - and the edge must not
+# read like the factory is still authorised.
+test_console_marks_an_expired_afk_rather_than_showing_it_as_on() {
+  _console_setup
+  _console_afk_on "2020-01-01T00:00:00Z" true
+  local out; out="$(node "$CONSOLE_MJS" --render-once)"
+  assert_contains "$out" "AFK EXPIRED"
+  _console_teardown
 }
