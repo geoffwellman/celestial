@@ -284,3 +284,235 @@ test_cel_dispatches_afk() {
   assert_contains "$("$CEL_ROOT/bin/cel" help)" "cel afk"
   _afk_teardown
 }
+
+# =========================================================== round 1 review
+# THE DOOR HAS TO BE REACHED FROM A REAL ACT. Everything above proves
+# `afk_authorise` refuses when it is called; PR #82's review found that the two
+# mutating call sites recorded the act AFTER doing it and never went through the
+# door at all, and that two of the four pre-authorisations had no caller
+# anywhere outside this file. A refusal that only exists in a unit test is the
+# gap this ticket is about. So: the fanout binary is driven end to end against
+# stubs, and the assertion is on what the stub was NOT asked to do.
+BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
+
+_afk_fanout_setup() {
+  T="$(mktemp -d)"
+  export CEL_AFK_STATE="$T/afk"
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+  yq -y '.policy.merge = "self"' "$T/workspace.yaml" > "$T/ws.tmp" && mv "$T/ws.tmp" "$T/workspace.yaml"
+  mkdir -p "$T/repos/widget"; git -C "$T/repos/widget" init -q
+  STUB_WT="$T/widget-worker"; mkdir -p "$STUB_WT"
+  git -C "$STUB_WT" init -q
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
+  git -C "$STUB_WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  STUB_REPO="$(git -C "$T/repos/widget" rev-parse --show-toplevel)"
+  STUB_LOG="$T/stub.log"; : > "$STUB_LOG"
+  cat > "$T/herdr-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$STUB_LOG"
+case "$1 $2" in
+  "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
+  "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
+  "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
+  "agent list")      echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"idle"}]}}';;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$T/herdr-stub.sh"
+  export CEL_FANOUT_HERDR="$T/herdr-stub.sh" STUB_LOG STUB_WT STUB_REPO
+  GH_LOG="$T/gh.log"; : > "$GH_LOG"
+  cat > "$T/gh-stub.sh" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+case "\$1 \$2" in
+  "api user") echo fleetbot;;
+  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr merge") exit 0;;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$T/gh-stub.sh"; export CEL_FANOUT_GH="$T/gh-stub.sh" CEL_AFK_GH="$T/gh-stub.sh" GH_LOG
+  cat > "$T/verify-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+wt="$1"; mkdir -p "$wt/.agent"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF
+  chmod +x "$T/verify-stub.sh"; export CEL_FANOUT_VERIFY="$T/verify-stub.sh"
+  # A spec that says where its finding came from, which is what
+  # pre-authorisation 4 is about.
+  printf 'Finding-from: reviewer widget-pr-7-review\n\n> the retry path has no test\n\ndo the thing\n' > "$T/spec.md"
+  printf 'do the thing\n' > "$T/bare-spec.md"
+}
+_afk_fanout_teardown() {
+  rm -rf "$T"
+  unset CEL_AFK_STATE CEL_FANOUT_HERDR CEL_FANOUT_GH CEL_FANOUT_VERIFY CEL_AFK_GH
+}
+
+# THE LANDING GOES THROUGH THE DOOR BEFORE IT MERGES. AFK armed over another
+# workspace is AFK that authorises nothing here - and the proof is that `gh pr
+# merge` was never called, not that a message was printed afterwards.
+test_land_while_afk_is_scoped_elsewhere_refuses_before_merging() {
+  _afk_fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
+  cmd_afk on --until '+8h' --scope beta >/dev/null
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
+    echo "landed under an AFK armed over another workspace"; _afk_fanout_teardown; return 1; }
+  assert_contains "$out" "another orchestrator's workspace"
+  ! grep -q "^pr merge" "$GH_LOG" || {
+    echo "it merged and refused afterwards - the door is downstream of the act"; _afk_fanout_teardown; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  _afk_fanout_teardown
+}
+
+# ...and when it does authorise, the act is recorded with the pre-authorisation
+# that covered it, from the real landing rather than from a hand-built object.
+test_land_while_afk_is_on_passes_the_door_and_is_recorded() {
+  _afk_fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
+  cmd_afk on --until '+8h' --scope alpha >/dev/null
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null || { _afk_fanout_teardown; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; _afk_fanout_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 1
+  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 2"
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "#7"
+  _afk_fanout_teardown
+}
+
+# A SPEC THAT NAMES NO FINDING IS NOT DISPATCHED OVERNIGHT. Pre-authorisation 4
+# is "a follow-up a reviewer or scout documented", and the refusal has to land
+# before a worktree, a pane or an agent exists - a worker spawned at 04:00 and
+# then disowned is worse than one never started.
+test_dispatch_while_afk_is_on_refuses_a_spec_with_no_written_finding() {
+  _afk_fanout_setup
+  cmd_afk on --until '+8h' --scope alpha >/dev/null
+  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-NEW "$T/bare-spec.md") 2>&1 )" && {
+    echo "dispatched a spec with no finding behind it"; _afk_fanout_teardown; return 1; }
+  assert_contains "$out" "no reviewer or scout finding"
+  ! grep -q "^worktree create" "$STUB_LOG" || {
+    echo "a worktree was created before the door was asked"; _afk_fanout_teardown; return 1; }
+  [ ! -s "$T/.cel/delegations.json" ] || assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 0
+  _afk_fanout_teardown
+}
+
+test_dispatch_while_afk_is_on_proceeds_from_a_documented_finding() {
+  _afk_fanout_setup
+  cmd_afk on --until '+8h' --scope alpha >/dev/null
+  (cd "$T" && "$BIN" delegate widget WG-NEW "$T/spec.md") > /dev/null || { _afk_fanout_teardown; return 1; }
+  grep -q "^worktree create" "$STUB_LOG" || { echo "nothing was dispatched"; _afk_fanout_teardown; return 1; }
+  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 4"
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "widget/WG-NEW"
+  _afk_fanout_teardown
+}
+
+# AND AFK OFF CHANGES NOTHING ABOUT ORDINARY WORK. The convention this adds to
+# specs is read only while AFK is on; an operator at the keyboard delegates the
+# same specs they always did.
+test_afk_off_leaves_an_ordinary_dispatch_and_landing_alone() {
+  _afk_fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/bare-spec.md") > /dev/null \
+    || { echo "AFK off blocked an ordinary dispatch"; _afk_fanout_teardown; return 1; }
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null || { _afk_fanout_teardown; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "AFK off blocked an ordinary landing"; _afk_fanout_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr 'length')" 0
+  _afk_fanout_teardown
+}
+
+# ------------------------------------------- pre-authorisation 1's entry point
+test_cel_afk_resolve_thread_refuses_without_evidence_and_posts_nothing() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  assert_fails cmd_afk resolve-thread alpha/widget 71 THREAD_1 --summary 'x' --verdict-at '2026-09-22T02:00:00Z'
+  assert_eq "$(cat "$T/gh.log")" ""
+  _afk_teardown
+}
+
+test_cel_afk_resolve_thread_replies_with_the_commit_and_resolves() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  cmd_afk resolve-thread alpha/widget 71 THREAD_1 \
+    --commit abc1234 --summary 'the unguarded grep now appends || true' \
+    --fixed-at '2026-09-22T01:00:00Z' --verdict-at '2026-09-22T02:00:00Z' >/dev/null \
+    || { cat "$T/gh.log"; _afk_teardown; return 1; }
+  local log; log="$(cat "$T/gh.log")"
+  assert_contains "$log" "THREAD_1"
+  assert_contains "$log" "abc1234"
+  assert_contains "$log" "resolveReviewThread"
+  _afk_teardown
+}
+
+# ------------------------------------------- pre-authorisation 3's entry point
+# A REAL REBASE, ON A REAL BRANCH, AGAINST A REAL REMOTE. The evidence is
+# derived from git here rather than passed in: whoever calls this cannot tell it
+# that a conflicting branch is clean.
+_afk_git_fixture() { # <conflicting 0|1> <unpushed 0|1>
+  _afk_setup
+  local g="git -c user.email=t@t -c user.name=t"
+  git init -q --bare "$T/remote.git"
+  git -C "$T/remote.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$T/remote.git" "$T/wt" 2>/dev/null
+  # shellcheck disable=SC2086
+  (cd "$T/wt" && printf 'base\n' > f.txt && $g add -A && $g commit -qm base && git push -q origin HEAD:main)
+  (cd "$T/wt" && git checkout -q -b WG-1)
+  # shellcheck disable=SC2086
+  (cd "$T/wt" && printf 'branch\n' > b.txt && $g add -A && $g commit -qm branch && git push -q origin WG-1)
+  # another merge lands on main while this branch waits
+  git clone -q "$T/remote.git" "$T/other" 2>/dev/null
+  (cd "$T/other" && git checkout -q -B main origin/main)
+  # shellcheck disable=SC2086
+  if [ "$1" -eq 1 ]; then
+    (cd "$T/other" && printf 'theirs\n' > b.txt && $g add -A && $g commit -qm theirs && git push -q origin HEAD:main)
+  else
+    (cd "$T/other" && printf 'other\n' > o.txt && $g add -A && $g commit -qm other && git push -q origin HEAD:main)
+  fi
+  # shellcheck disable=SC2086
+  [ "$2" -eq 1 ] && (cd "$T/wt" && printf 'more\n' >> b.txt && $g add -A && $g commit -qm unpushed)
+  (cd "$T/wt" && git fetch -q origin && git remote set-head origin -a >/dev/null 2>&1)
+  cat > "$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/gh.log"
+printf '{"mergeable":"MERGEABLE","state":"OPEN"}'
+EOF
+  chmod +x "$T/bin/gh"
+}
+
+test_afk_rebase_retry_rebases_a_branch_pushed_behind_and_pushes_it() {
+  _afk_git_fixture 0 0
+  cmd_afk on --until '+8h' >/dev/null
+  cmd_afk rebase-retry "$T/wt" --base origin/main >/dev/null || { _afk_teardown; return 1; }
+  # the branch now sits on top of the merge that pushed it behind...
+  assert_eq "$(git -C "$T/wt" rev-list --count 'HEAD..origin/main')" 0
+  # ...and the remote has it, which is what makes the retry a retry
+  assert_eq "$(git -C "$T/wt" rev-parse HEAD)" "$(git -C "$T/wt" rev-parse origin/WG-1)"
+  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 3"
+  _afk_teardown
+}
+
+test_afk_rebase_retry_refuses_a_conflict_and_leaves_the_branch_alone() {
+  _afk_git_fixture 1 0
+  cmd_afk on --until '+8h' >/dev/null
+  local before; before="$(git -C "$T/wt" rev-parse HEAD)"
+  local out; out="$(cmd_afk rebase-retry "$T/wt" --base origin/main 2>&1)" && { _afk_teardown; return 1; }
+  assert_contains "$out" "the rebase conflicts"
+  assert_eq "$(git -C "$T/wt" rev-parse HEAD)" "$before"
+  assert_eq "$(git -C "$T/wt" rev-parse origin/WG-1)" "$before"
+  assert_eq "$(afk_log_json | jq -sr 'length')" 0
+  _afk_teardown
+}
+
+test_afk_rebase_retry_refuses_a_branch_carrying_unpushed_work() {
+  _afk_git_fixture 0 1
+  cmd_afk on --until '+8h' >/dev/null
+  local out; out="$(cmd_afk rebase-retry "$T/wt" --base origin/main 2>&1)" && { _afk_teardown; return 1; }
+  assert_contains "$out" "new work"
+  assert_eq "$(afk_log_json | jq -sr 'length')" 0
+  _afk_teardown
+}
+
+test_afk_rebase_retry_refuses_while_afk_is_off() {
+  _afk_git_fixture 0 0
+  local out; out="$(cmd_afk rebase-retry "$T/wt" --base origin/main 2>&1)" && { _afk_teardown; return 1; }
+  assert_contains "$out" "AFK is off"
+  _afk_teardown
+}

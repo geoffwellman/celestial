@@ -572,6 +572,44 @@ cmd_delegate() {
   Raise policy.workers in workspace.yaml if the cap itself is wrong."
   fi
 
+  # AND THE SAME QUESTION THROUGH AFK'S DOOR, BEFORE ANYTHING IS CREATED.
+  # Pre-authorisation 4 is narrow on purpose: overnight the factory dispatches
+  # work a reviewer or a scout WROTE DOWN, quoted in the spec, and nothing else
+  # - so a spec that names no such finding is refused here rather than turned
+  # into a worker at 04:00. The evidence is read from the spec file and from the
+  # counts this function has just taken; asking the door after the spawn would
+  # be a log line, not a gate.
+  #
+  # A SPEC SAYS WHERE ITS FINDING CAME FROM in one line, `Finding-from: reviewer
+  # <alias>` or `Finding-from: scout <id>`, and quotes it as a `> ` line. That
+  # convention exists for this check: while the operator is awake nothing about
+  # it changes, and while they are asleep it is the difference between
+  # dispatching a finding and dispatching an idea.
+  if afk_active; then
+    local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
+    afk_src="$(sed -n 's/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/p' "$abs_spec" | head -1)"
+    afk_quote="$(sed -n 's/^>[[:space:]]*//p' "$abs_spec" | head -1)"
+    afk_prov="$( ( local_profile="$profile"
+                   [ -n "$local_profile" ] || local_profile="$(role_profile_for "$wsdir" worker "$repo" 2>/dev/null || true)"
+                   PROFILE_MODEL=""
+                   [ -z "$local_profile" ] || profile_resolve "$wsdir" "$local_profile" "$(ws_runtime "$wsdir" worker)" >/dev/null 2>&1 || true
+                   profile_provider "${PROFILE_MODEL:-}" 2>/dev/null || true ) || true)"
+    afk_rem=-1; afk_floor=0
+    if [ -n "$afk_prov" ] && command -v quota_remaining >/dev/null 2>&1; then
+      afk_rem="$(quota_remaining "$afk_prov" "$wsdir" 2>/dev/null || printf -- -1)"
+      afk_floor="$(provider_balance "$afk_prov" floor 2>/dev/null || printf 0)"
+      case "$afk_rem" in ''|*[!0-9.]*) afk_rem=-1 ;; esac
+      case "$afk_floor" in ''|*[!0-9.]*) afk_floor=0 ;; esac
+    fi
+    afk_ev="$(jq -n --arg src "${afk_src:-none}" --arg q "$afk_quote" \
+      --argjson w "$wused" --argjson c "$wcap" --argjson pct "$afk_rem" --argjson fl "$afk_floor" \
+      --arg ws "$(ws_name "$wsdir" 2>/dev/null || basename "$wsdir")" --arg repo "$repo" --arg br "$branch" \
+      '{source:$src, quote:$q, workers:$w, cap:$c, quota_pct:$pct, quota_floor:$fl,
+        workspace:$ws, repo:$repo, branch:$br}')"
+    afk_authorise dispatch "$afk_ev" "$repo/$branch from $abs_spec (${afk_src:-no source}) - $wused/$wcap workers" >/dev/null \
+      || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
+  fi
+
   # WHERE THE WORKER NESTS. herdr shows a worktree under the workspace it was
   # created from - and it will only create a worktree of the repo that
   # workspace OWNS. Measured live on 2026-09-16: asked to create under a
@@ -877,14 +915,6 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
-  # Work started overnight is work the operator did not watch begin. The
-  # decision to dispatch is still the orchestrator's, made against a finding a
-  # reviewer or a scout wrote down (pre-authorisation 4); what is recorded here
-  # is that it happened, and under what.
-  if afk_active; then
-    afk_record dispatch "$(afk_authorisation dispatch)" \
-      "$repo/$branch on $profile ($shape) - ${because:-no reason recorded}"
-  fi
   printf '%s\n' "$branch"
 }
 
@@ -2083,6 +2113,24 @@ cmd_land() { # <id>
       [ "$gp" = true ] || die "land: the repo's gate (\`$gate\`) did not pass on $branch (verdict: $gp) - a worker fixes it, then land again. A red gate is a finding, not a formality."
     fi
   fi
+  # AND THE SAME FACTS THROUGH AFK'S DOOR, BEFORE ANYTHING MERGES. Every check
+  # above is the check this fleet makes awake; pre-authorisation 2 is the
+  # statement that a human's nod is not a further one. It is asked with the
+  # evidence THIS function just proved - not with anything a caller supplied -
+  # so a landing that happens while nobody is watching is a landing that passed
+  # both, in that order, and is recorded as such. Asking afterwards would have
+  # been a log line, not a gate; PR #82's review said so, correctly.
+  if afk_active; then
+    local afk_ev
+    afk_ev="$(jq -n --arg r approved --arg c green --arg g "$([ -n "$gate" ] && { [ -n "$ci_gate_body" ] && printf ci || printf pass; } || printf pass)" \
+      --arg ws "$(ws_name "$wsdir" 2>/dev/null || basename "$wsdir")" \
+      --arg slug "$slug" --arg num "$num" --arg via "$approved_via" \
+      '{review:$r, checks:$c, gate:$g, mergeable:true, author:"fleet",
+        workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
+    afk_authorise land "$afk_ev" "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified" >/dev/null \
+      || die "land: AFK did not authorise this merge - see the refusal above. Nothing was merged."
+  fi
+
   # The verdict travels into the permanent log rather than a comment thread:
   # on a solo repo the squash body is the only place a public record of who
   # reviewed this, and what they said, can actually live.
@@ -2100,14 +2148,6 @@ cmd_land() { # <id>
   "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"
-  # A MERGE THAT HAPPENED WHILE NOBODY WAS WATCHING IS A MERGE THAT HAS TO BE
-  # READABLE IN THE MORNING. The checks above are the same checks awake or
-  # asleep - AFK removes the pause, not a check - so this records what was
-  # already allowed rather than deciding anything.
-  if afk_active; then
-    afk_record land "$(afk_authorisation land)" \
-      "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified"
-  fi
   _fanout_ticket_state "$ticket" "Done"
   _ledger_update_state "$wsdir" "$id" landed
 }

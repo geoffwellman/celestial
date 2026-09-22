@@ -20,6 +20,17 @@
   within the worker cap and above the quota floor. Everything else waits, and
   the refusal is named rather than silent.
 
+  The two mutating call sites go **through** that door before they act, with
+  evidence they proved themselves: `cel-fanout land` asks it after its own
+  checks and before `gh pr merge`, and `cel-fanout delegate` asks it before a
+  worktree, a pane or an agent exists. While AFK is on, a spec is dispatched
+  only if it names where its finding came from - a `Finding-from: reviewer
+  <alias>` (or `scout`) line and the finding quoted as a `> ` line - and
+  `cel afk resolve-thread` and `cel afk rebase-retry` are the entry points for
+  the other two, the latter deriving its evidence from git and the PR rather
+  than from whoever called it. `cel afk on --scope <workspace>` confines an AFK
+  to the workspace it was armed in.
+
   AFK will not merge anything red, unreviewed, or whose gate produced no
   verdict; will not resolve a finding that is not fixed or not confirmed; posts
   nothing to GitHub beyond that one named thread-resolution case; will not act

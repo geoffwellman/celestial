@@ -1154,28 +1154,59 @@ SH
 }
 
 # ---------------------------------------------------------------- CEL-59
-# The steward is what runs while nobody is watching, so it is also what
-# notices that the mode authorising it has run out. An expired AFK still on is
-# raised ONCE per condition (the fingerprint), not once per tick.
-test_steward_raises_an_expired_afk_still_on() {
-  local T; T="$(mktemp -d)"
+# The steward is what runs while nobody is watching, so it is also what notices
+# that the mode authorising it has run out. It raises into EVERY registered
+# workspace's mailbox, because an expired AFK is a property of the box and not
+# of one product - which is exactly what the first cut of this test failed to
+# pin: it stubbed the raise but left CEL_REGISTRY pointing at the real box, so
+# it passed on a developer's machine (workspaces registered, loop runs) and
+# failed in CI (no registry, loop body never entered, nothing captured). The
+# fixture registry is the fix; the assertions are on the raises themselves, so
+# a steward that stops raising still fails here.
+_afk_sweep_fixture() { # <until>
+  T="$(mktemp -d)"
   export CEL_AFK_STATE="$T/afk"
+  export CEL_REGISTRY="$T/registry.yaml"
+  mkdir -p "$T/alpha" "$T/beta"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  assert_eq "$(registry_names | sort | paste -sd, -)" "alpha,beta" || return 1
   source "$CEL_ROOT/lib/afk.sh"
-  cmd_afk on --until '2020-01-01T00:00:00Z' --reason 'asleep' >/dev/null
-  _steward_raise() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$T/raised"; }
-  _steward_afk_sweep
-  assert_contains "$(cat "$T/raised")" "afk-expired"
-  assert_contains "$(cat "$T/raised")" "cel afk off"
-  rm -rf "$T"; unset CEL_AFK_STATE
+  cmd_afk on --until "$1" --reason 'asleep' >/dev/null
+  RAISED="$T/raised"; : > "$RAISED"
+  _steward_raise() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$RAISED"; }
+}
+_afk_sweep_teardown() { rm -rf "$T"; unset CEL_AFK_STATE CEL_REGISTRY; }
+
+test_steward_raises_an_expired_afk_still_on() {
+  _afk_sweep_fixture '2020-01-01T00:00:00Z' || return 1
+  _steward_afk_sweep >/dev/null
+  # One raise per registered mailbox, under the condition key that rolls a
+  # repeat up onto the item already open rather than posting a fresh one.
+  assert_eq "$(wc -l < "$RAISED")" 2 || { cat "$RAISED"; _afk_sweep_teardown; return 1; }
+  assert_eq "$(cut -d'|' -f1 "$RAISED" | sort | paste -sd, -)" "alpha,beta"
+  assert_eq "$(cut -d'|' -f2 "$RAISED" | sort -u)" "afk-expired"
+  assert_contains "$(cat "$RAISED")" "cel afk off"
+  assert_contains "$(cat "$RAISED")" "2020-01-01T00:00:00Z"
+  _afk_sweep_teardown
 }
 
 test_steward_says_nothing_about_a_live_afk() {
-  local T; T="$(mktemp -d)"
-  export CEL_AFK_STATE="$T/afk"
-  source "$CEL_ROOT/lib/afk.sh"
-  cmd_afk on --until '+8h' >/dev/null
-  _steward_raise() { printf '%s\n' "$4" >> "$T/raised"; }
-  _steward_afk_sweep
-  assert_eq "$(cat "$T/raised" 2>/dev/null || true)" ""
-  rm -rf "$T"; unset CEL_AFK_STATE
+  _afk_sweep_fixture '+8h' || return 1
+  _steward_afk_sweep >/dev/null
+  assert_eq "$(cat "$RAISED")" ""
+  _afk_sweep_teardown
+}
+
+# AND IT DOES NOT DEPEND ON THIS BOX. The bug this pins is not the steward's -
+# it is a fixture that read the real registry, so the test asserted nothing
+# wherever no workspace happened to be registered. With an EMPTY registry the
+# sweep still says it out loud in the steward's own output; there is simply no
+# mailbox to put it in.
+test_steward_afk_sweep_still_speaks_with_an_empty_registry() {
+  _afk_sweep_fixture '2020-01-01T00:00:00Z' || return 1
+  printf 'workspaces: {}\n' > "$CEL_REGISTRY"
+  local out; out="$(_steward_afk_sweep)"
+  assert_contains "$out" "AFK expired at 2020-01-01T00:00:00Z"
+  assert_eq "$(cat "$RAISED")" ""
+  _afk_sweep_teardown
 }

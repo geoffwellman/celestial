@@ -144,9 +144,21 @@ cel - the celestial plane
                                 rebase one pushed behind by another merge, and
                                 dispatch a follow-up a reviewer or scout wrote
                                 down - and NOTHING else. AFK changes who
-                                decides, never what is required. `--until
-                                <when>` expires on its own; `log` is the one
+                                decides, never what is required. `on --until
+                                <when>` expires on its own, `--scope <ws>`
+                                confines it to one workspace; `log` is the one
                                 answer to "what did you do while I was asleep"
+  cel afk resolve-thread <owner/repo> <pr> <thread-id> --commit <sha>
+      --summary <text> --fixed-at <iso> --verdict-at <iso>
+                                the ONE named GitHub exception: reply citing the
+                                commit that fixed the finding, then resolve -
+                                only for a bot thread a reviewer confirmed
+                                fixed AFTER that commit
+  cel afk rebase-retry <worktree> [--base <ref>]
+                                a PR another merge pushed behind: rebase and
+                                push, refusing a conflict or any new work. The
+                                evidence is read from git and the PR, never
+                                passed in
 
   cel steward                   one proactive tick: gc, review + ticket sweeps,
                                 stall nudges, blocked agents, server liveness
