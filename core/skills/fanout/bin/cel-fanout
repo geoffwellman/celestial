@@ -2120,12 +2120,24 @@ cmd_land() { # <id>
   # so a landing that happens while nobody is watching is a landing that passed
   # both, in that order, and is recorded as such. Asking afterwards would have
   # been a log line, not a gate; PR #82's review said so, correctly.
+  #
+  # AND `author` IS DERIVED, NOT ASSERTED. It is the one field of the five that
+  # this block could have claimed without proving: review, checks, gate and
+  # mergeable are each proved by a refusal a few lines above - and so is the
+  # author, by the `[ "$author" = "$me" ] || die` guard that runs on EVERY path
+  # before the GitHub-approval and ledger-verdict branches split, so a
+  # colleague's PR never reaches this line at all. Round 2 of #82's review read
+  # that comparison as living only inside the ledger-verdict `elif`; it does
+  # not. The literal goes anyway: a constant that is true because of a check
+  # somewhere else is a constant that stays behind when that check moves, and
+  # this evidence exists precisely so that nobody has to take a caller's word.
   if afk_active; then
     local afk_ev
     afk_ev="$(jq -n --arg r approved --arg c green --arg g "$([ -n "$gate" ] && { [ -n "$ci_gate_body" ] && printf ci || printf pass; } || printf pass)" \
       --arg ws "$(ws_name "$wsdir" 2>/dev/null || basename "$wsdir")" \
       --arg slug "$slug" --arg num "$num" --arg via "$approved_via" \
-      '{review:$r, checks:$c, gate:$g, mergeable:true, author:"fleet",
+      --arg author "$([ -n "$me" ] && [ "$author" = "$me" ] && printf fleet || printf '%s' "${author:-unknown}")" \
+      '{review:$r, checks:$c, gate:$g, mergeable:true, author:$author,
         workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
     afk_authorise land "$afk_ev" "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified" >/dev/null \
       || die "land: AFK did not authorise this merge - see the refusal above. Nothing was merged."

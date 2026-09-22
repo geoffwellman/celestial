@@ -380,6 +380,60 @@ test_land_while_afk_is_on_passes_the_door_and_is_recorded() {
   _afk_fanout_teardown
 }
 
+# ---------------------------------------------------------- round 2 review
+# WHOSE PR IS THIS. `land` proves the author against the fleet's own GitHub
+# identity on every path - the guard sits above the split between a GitHub
+# approval and the ledger verdict - so a colleague's PR never reaches the AFK
+# door at all. That is asserted here rather than argued: AFK on, an approved
+# green PR opened by someone else, and NOTHING merges and nothing is recorded
+# as an autonomous act. The evidence object derives `author` from the same two
+# values that guard rather than stating it, so the two cannot drift apart.
+_afk_fanout_foreign_author() {
+  cat > "$T/gh-stub.sh" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+case "\$1 \$2" in
+  "api user") echo fleetbot;;
+  "pr view")  echo '{"number":7,"author":{"login":"someone-else"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr merge") exit 0;;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$T/gh-stub.sh"
+}
+
+test_land_while_afk_is_on_never_merges_a_colleagues_pr() {
+  _afk_fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
+  cmd_afk on --until '+8h' --scope alpha >/dev/null
+  _afk_fanout_foreign_author
+  : > "$GH_LOG"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
+    echo "landed a PR this fleet did not open"; _afk_fanout_teardown; return 1; }
+  assert_contains "$out" "theirs to land"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "it merged a colleague's PR"; _afk_fanout_teardown; return 1; }
+  # ...and no autonomous act is recorded for something that never happened.
+  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 0
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  _afk_fanout_teardown
+}
+
+# AND THE DOOR ITSELF STILL REFUSES IT. The guard above is the first wall; this
+# is the second, and it is the one that would still be standing if the first
+# ever moved - which is the only reason the evidence carries an author field at
+# all. `unknown` is what the derivation yields when the fleet's identity cannot
+# be read: an account this process could not name is not this fleet.
+test_the_door_refuses_a_landing_whose_author_is_not_the_fleet() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  assert_contains "$(afk_authorise land "$(_ev_land '{"author":"someone-else"}')" 2>&1)" \
+    "not this fleet's PR"
+  assert_contains "$(afk_authorise land "$(_ev_land '{"author":"unknown"}')" 2>&1)" \
+    "not this fleet's PR"
+  assert_eq "$(afk_log_json | jq -sr 'length')" 0
+  _afk_teardown
+}
+
 # A SPEC THAT NAMES NO FINDING IS NOT DISPATCHED OVERNIGHT. Pre-authorisation 4
 # is "a follow-up a reviewer or scout documented", and the refusal has to land
 # before a worktree, a pane or an agent exists - a worker spawned at 04:00 and
