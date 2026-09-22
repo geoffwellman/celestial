@@ -767,6 +767,24 @@ _steward_suite_lock() {
   for ws in $(registry_names); do _steward_raise "$ws" suite-lock status "$msg"; done
 }
 
+# AFK IS A MODE WITH AN HOUR ON IT, and the steward is the thing still running
+# when that hour passes. A `--until` in the past means the factory has ALREADY
+# stopped acting on its own - nothing here is an emergency - but an AFK left on
+# reads to every surface like authorisation that is still live, and the person
+# who could turn it off is the one who is not looking. So it is raised, once per
+# condition through the fingerprint rather than once per tick.
+_steward_afk_sweep() {
+  # shellcheck source=lib/afk.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/afk.sh"
+  afk_expired || return 0
+  local s msg
+  s="$(afk_state_json)"
+  msg="steward: AFK expired at $(printf '%s' "$s" | jq -r '(.until // .until_text)') and is still on. Nothing autonomous is happening any more - an expired AFK reads as off - but the switch is still up: cel afk off (cel afk log for what was done while it was on)."
+  c_warn "$msg"
+  local ws
+  for ws in $(registry_names); do _steward_raise "$ws" afk-expired status "$msg"; done
+}
+
 _steward_servers() {
   local ws wsdir port
   for ws in $(registry_names); do
@@ -1267,6 +1285,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_clear_dead_panes
   # And the mailbox itself: unread escalations with nobody alive to read them.
   _steward_root_unread
+  # ...and whether the mode that authorised any of tonight's autonomy has run out.
+  _steward_afk_sweep
 
   # blocked agents are the human's queue - name them every tick, no dedup
   printf '%s' "$agents_json" | jq -r \
