@@ -150,3 +150,37 @@ test_doctor_calls_an_unaskable_checkout_unknown() {
   assert_contains "$(doctor_checkout_behind_line "$T/clone" alpha/widget)" "UNKNOWN"
   rm -rf "$T"
 }
+
+# ---------------------------------------------------------------- CEL-59
+# AN AFK MODE THAT STAYS ON BECAUSE NOBODY TURNED IT OFF is how a fortnight of
+# unattended merges happens. `--until` expires on its own, and doctor is where
+# an AFK left on past that hour is said out loud - the operator who thinks
+# they are driving must not be surprised by an agent acting.
+_doctor_afk_fixture() { T="$(mktemp -d)"; export CEL_AFK_STATE="$T/afk"; }
+_doctor_afk_teardown() { rm -rf "$T"; unset CEL_AFK_STATE; }
+
+test_doctor_says_nothing_about_a_live_afk() {
+  _doctor_afk_fixture
+  source "$CEL_ROOT/lib/afk.sh"
+  cmd_afk on --until '+8h' --reason 'asleep' >/dev/null
+  assert_contains "$(doctor_afk_line)" "AFK on until"
+  case "$(doctor_afk_line)" in *expired*) echo "doctor calls a live AFK expired"; _doctor_afk_teardown; return 1;; esac
+  _doctor_afk_teardown
+}
+
+test_doctor_reports_an_afk_left_on_past_its_until() {
+  _doctor_afk_fixture
+  source "$CEL_ROOT/lib/afk.sh"
+  cmd_afk on --until '2020-01-01T00:00:00Z' >/dev/null
+  local out; out="$(doctor_afk_line)"
+  assert_contains "$out" "expired"
+  assert_contains "$out" "cel afk off"
+  _doctor_afk_teardown
+}
+
+test_doctor_is_silent_when_afk_was_never_armed() {
+  _doctor_afk_fixture
+  source "$CEL_ROOT/lib/afk.sh"
+  assert_eq "$(doctor_afk_line)" ""
+  _doctor_afk_teardown
+}
