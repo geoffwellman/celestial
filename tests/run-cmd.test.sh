@@ -161,6 +161,20 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   rm -rf "$T"
 }
 
+# OMP prewalk swaps to the smol model after the first edit; orchestrators
+# must stay on their configured model, so root/orchestrator get --no-prewalk.
+test_run_disables_prewalk_for_omp_orchestrators_only() {
+  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--no-prewalk"
+  out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
+  assert_contains "$out" "--no-prewalk"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "worker got --no-prewalk"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # --- products -------------------------------------------------------------
 # An orchestrator owns a PRODUCT: one or more repos. `bundle` is declared over
 # widget+gadget, `lone` is undeclared and therefore implicit - and an implicit
