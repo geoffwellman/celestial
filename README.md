@@ -649,10 +649,10 @@ a tailnet neighbour cannot browse this box's loopback. `cel-fanout try` prints
 that URL as its last line when the dashboard is up.
 
 **Box-level material is drawn on one dashboard, not on every one.** There is
-one broker and one gateway on this box, registered once in `services.d` — but
+one gateway on this box, registered once in `services.d` — but
 four per-workspace dashboards each rendered them inside their own services
 panel and each rendered the whole subscriptions panel, so flipping between
-tabs read as several brokers. A workspace's services panel now lists only its
+tabs read as several gateways. A workspace's services panel now lists only its
 own services; anything tagged `box` (and the subscriptions, which are
 box-level in their entirety) appears in a separate **Box** panel on exactly
 one dashboard — the workspace whose `dash:` block says `box: true`, defaulting
@@ -666,7 +666,7 @@ and the last line of its pane; back up clears it. `restart: auto` restarts it
 once first, and says so in the blocker.
 
 Some services belong to the **box** rather than to any workspace — the auth
-broker and gateway are used by every workspace and owned by none. They are
+gateway is used by every workspace and owned by none. They are
 declared one JSON file per service in `~/.config/cel/services.d/` (`CEL_SERVICES_D`),
 in exactly the shape of a `services:` row plus a bare `port:` shorthand, `0600`
 in a `0700` directory because `env` may carry a bearer. They appear in
@@ -675,7 +675,7 @@ when you run it from outside every workspace — carry `workspace: "box"` in
 `--json`, start and stop by name, are probed by the same steward sweep, and
 keep their state in `~/.local/share/cel/services/<name>.json` rather than in
 any workspace. `env` values whose key looks like a credential are rendered
-`***` everywhere. `cel gateway install` writes its two, and `cel doctor` says
+`***` everywhere. `cel gateway install` writes the gateway's, and `cel doctor` says
 how many the box declares and how many are healthy.
 
 In the console, `S` opens the SERVICES view — one row per service and preview,
@@ -791,42 +791,55 @@ behind one loopback door and spreads workers across them, and shows what each
 one has left.
 
 ```bash
-cel gateway install          # broker + gateway as box services, loopback only
-cel gateway status           # one row per account: provider, id, ok, windows
-cel gateway login anthropic  # sign another subscription in
+cel gateway install          # CLIProxyAPI as one box service, loopback only
+cel gateway status           # one row per account: provider, id, plan, email
+cel gateway login claude     # sign another subscription in (--no-browser: device flow)
 ```
 
-Under it are omp's two processes: `auth-broker` is the credential vault (several
-OAuth accounts per provider) and `auth-gateway` is an OpenAI/Anthropic surface
-on `127.0.0.1` that mints the OAuth itself, drops the accounts that are
-unavailable and picks one of the rest **by session key**. A profile reaches it
-with one field:
+Under it is **one** process, `cli-proxy-api`: it is both the credential vault —
+one OAuth JSON per account in a `0700` auth-dir under the box state directory,
+never inside a repo — and an OpenAI/Anthropic-shaped surface on `127.0.0.1`
+that mints the OAuth itself and picks an account **by session key**. It
+replaced omp's broker + gateway pair, which on this box had never run: every
+worker queued on one account, and on 2026-09-20 one of them hit its five-hour
+limit and stalled four workers while another sat at 16%. omp is still
+installed — it is an agent runtime — but nothing under `cel gateway` calls it.
+
+`cel gateway install` writes the proxy's `config.yaml` (it has no flag-only
+mode) with four settings that are not negotiable: `host: 127.0.0.1`, because
+one api-key unlocks every subscription in the vault; `routing.session-affinity:
+true`, because it defaults to **false** and false means a worker switches
+account mid-conversation; no management block at all, so there is no remote
+control surface to get wrong; and an auth-dir in the box state dir. Health is
+`GET /healthz`, unauthenticated — the real probe the old gateway never had.
+
+A profile reaches it with one field:
 
 ```yaml
 worker_profiles:
-  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 ```
 
-`cel run worker --profile gw` then writes an `ompgw` provider into
+`cel run worker --profile gw` writes the gateway's providers into
 `~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
-and the model list comes from the gateway's own `/v1/models`), launches pi at
-`ompgw/openai-codex/gpt-5.5`, and sets two variables in the pane:
-`OMP_GATEWAY_TOKEN`, read there by omp so no bearer ever passes through the
-plane, and `CEL_SESSION_ID`, which is the **only** thing the balancer can pin an
-account by — pi sends no session identity of its own, so without the injected
-`x-session-id` header every worker on the box is the same anonymous session.
+and the model list comes from the gateway's own `/v1/models`, with plain ids:
+Claude models go through pi's `anthropic-messages` surface, everything else
+through `openai-completions`), and sets `CEL_SESSION_ID` in the pane, which is
+the **only** thing affinity can pin an account by — pi sends no session
+identity of its own, so without the injected `x-session-id` header every worker
+on the box is the same anonymous session.
 
 Three things are worth knowing before you rely on it:
 
-- **Availability filtering comes first, session choice second.** With one
-  usable account per provider the spreading is a no-op; the feature is worth
-  exactly as many subscriptions as are signed in and not rate-blocked.
-- **A disabled credential vanishes**, it does not error. It disappears from
-  `/v1/models`, so a worker sent at it dies with "Unknown model" rather than
-  "auth expired" — which is why `cel doctor` and the profile preflight both
-  say which providers have nothing usable, and veto the launch.
-- **The bearer grants every subscription in the vault** to anything that can
-  reach the port. The services bind loopback only; nothing writes the token.
+- **Affinity defaults off upstream.** The config this writes turns it on; a
+  hand-edited config that loses the line gives every worker a different account
+  from turn to turn, which is worse than one account.
+- **The proxy reports no usage.** Built-in usage accounting was removed
+  upstream, so an account row carries no windows until the usage reader lands;
+  "no usage probe" is not "0% used".
+- **One api-key grants every subscription in the vault** to anything that can
+  reach the port. The service binds loopback only, the config is `0600`, and
+  nothing prints the key.
 
 Its accounts land in the same places the signed-in subscriptions above do: the
 QUOTA view's `via gateway` section, the dashboard's Subscriptions card, and

@@ -111,9 +111,10 @@ cel - the celestial plane
                                 spent 5h window is vetoed before a pane spawns
                                 (unknown never vetoes)
   cel gateway install|status    several subscriptions behind one loopback door:
-                                omp's broker + gateway as box services, one
-                                row per account; --json for the QUOTA view
-  cel gateway login <provider>  sign another subscription in (logout <p> <id>)
+                                CLIProxyAPI as one box service, one row per
+                                account; --json for the QUOTA view
+  cel gateway login <provider>  sign another subscription in (claude or codex;
+                                --no-browser for a headless box)
   cel publish <file> [name]     host an HTML doc on this box; prints its URL
                                 --public: internet-reachable tier, own root
   cel pages [--public]          serve published docs (tailnet 7780; public 7781)

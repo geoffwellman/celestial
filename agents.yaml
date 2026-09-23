@@ -321,6 +321,17 @@ base_tools:
     assets:
       x64: { url: "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64", sha256: 4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f }
       arm64: { url: "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-aarch64", sha256: 9c8db20fb7e7427b138d5367113f1621ffd319f2f65d6f009e2594029115f0d2 }
+  cli-proxy-api:
+    version: 7.3.14
+    install: "install_pinned_binary base_tools cli-proxy-api"
+    # THE BOX GATEWAY (CEL-60). One process that is both the credential vault
+    # and the OpenAI/Anthropic-shaped surface on loopback, replacing omp's
+    # broker+gateway pair - omp stays above as an agent RUNTIME, which this is
+    # not. Digests from the release's own checksums.txt; the binary is one
+    # member of the tarball, which install_pinned_binary extracts by name.
+    assets:
+      x64: { url: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.14/CLIProxyAPI_7.3.14_linux_amd64.tar.gz", sha256: a93cdfb2e8b673eb362dedb0f0317ad3baf4d5eb2256da297239badb73c1d23d, member: cli-proxy-api }
+      arm64: { url: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.14/CLIProxyAPI_7.3.14_linux_aarch64.tar.gz", sha256: 741eb9296410e7b67df76aa8d33bd06297dd694c822983a1a72ee54b06e7f64d, member: cli-proxy-api }
   cargo:
     version: 1.98.1
     install: 'install_pinned_binary base_tools cargo rustup-init && "$HOME/.local/bin/rustup-init" -y --profile minimal --default-toolchain "$CEL_INSTALL_VERSION" --no-modify-path'
