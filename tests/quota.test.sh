@@ -756,45 +756,77 @@ test_the_cliproxy_vault_is_the_source_and_every_account_is_its_own_row() {
   _quota_teardown
 }
 
-# CEL-49 again, from the other side: the old Codex path read a raw token, never
-# refreshed it, and showed "unreadable" for sixteen days before anyone noticed.
-test_an_expired_access_token_is_refreshed_and_the_usage_call_succeeds() {
+# THE VAULT'S OWNER IS THE ONLY REFRESHER. CLIProxyAPI runs a 15-minute
+# auto-refresh loop over every credential it holds
+# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialised per auth id
+# (`sdk/cliproxy/auth/conductor.go:196-201`), and persists what comes back. Both
+# providers can ROTATE the refresh token on use - Anthropic's own client keeps
+# the old one only `if tokenResp.RefreshToken == ""`
+# (`internal/auth/claude/anthropic_auth.go:579-580`), and CPA's Codex path has a
+# `refresh_token_reused` branch (`internal/auth/codex/openai_auth.go:336`)
+# precisely because auth.openai.com enforces rotation - so a second refresher
+# that discards the rotated token leaves the vault's stored one DEAD on the
+# server: valid JSON in the file, and CLIProxyAPI failing at its next refresh.
+# A status read may not do that, so celestial does not refresh at all. It
+# presents what the vault holds and says so when that is stale.
+test_the_usage_reader_never_calls_a_token_endpoint() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
   _cpa_vault --expired
   . "$CEL_ROOT/lib/quota.sh"
-  local out; out="$(subscription_list)"
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "enabled")] | length')" 4
-  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.account == "ant-one") | .windows | length')" 3
-  [ -s "$T/refreshes" ] || { printf 'no refresh was attempted for an expired token\n' >&2; return 1; }
+  subscription_list >/dev/null 2>&1
+  [ -s "$T/refreshes" ] && {
+    printf 'the usage reader posted to a token endpoint and can burn the vault refresh token:\n%s\n' \
+      "$(cat "$T/refreshes")" >&2; return 1; }
+  case "$(cat "$T/hits" 2>/dev/null)" in *oauth/token*)
+    printf 'the usage reader hit a token endpoint\n' >&2; return 1;; esac
   _quota_stub_stop
   _quota_teardown
 }
 
-# A token that cannot be refreshed is its own state with the command that fixes
-# it, never "unreadable" and never silence.
-test_a_refresh_that_cannot_succeed_reads_as_needs_login() {
+# An access token CLIProxyAPI has not refreshed is a row that says what to do
+# about it. The old Codex path read a raw token, never noticed it had gone
+# stale, and printed `unreadable` for sixteen days - a word that reads like a
+# transient fault and gets waited out.
+test_a_stale_vault_token_reads_as_needs_login_not_unreadable() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
   _cpa_vault --expired
-  printf 'fail' > "$T/refresh-mode"
   . "$CEL_ROOT/lib/quota.sh"
   local out; out="$(subscription_list)"
   assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 4
   assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "unreadable")] | length')" 0
+  # the reason names the refresher AND the command, because "stale" with no
+  # next action is the same silence in a longer word
   assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'cel gateway login'
+  assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'gateway'
   assert_contains "$(cmd_quota 2>/dev/null)" 'needs login'
   _quota_stub_stop
   _quota_teardown
 }
 
-# TWO WRITERS OF ONE VAULT CANNOT BOTH BE RIGHT. CLIProxyAPI serves live
-# traffic from these files and rotates refresh tokens itself; a second writer
-# racing it can leave a half-written file or an invalidated refresh token, and
-# the blast radius is every worker on the box. celestial refreshes IN MEMORY
-# and never writes to the auth-dir, so two of its readers at once leave the
-# vault exactly as CLIProxyAPI last wrote it.
-test_two_refreshers_leave_the_cliproxy_vault_valid_and_usable() {
+# A token the vault calls live and the provider rejects anyway is the same
+# news: the credential needs a human, not a retry and not a refresh.
+test_a_rejected_vault_token_reads_as_needs_login() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  : > "$T/fresh"   # every token in the vault is rejected by the provider
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 4
+  [ -s "$T/refreshes" ] && { printf 'a rejected token was met with a refresh\n' >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# TWO WRITERS OF ONE VAULT CANNOT BOTH BE RIGHT, AND NEITHER MAY BE celestial.
+# CLIProxyAPI serves live traffic from these files, refreshes them on its own
+# loop, and persists the result under a per-auth lock celestial cannot join.
+# Two of its readers at once must therefore leave the vault EXACTLY as
+# CLIProxyAPI last wrote it - same bytes, same refresh token, and no refresh
+# posted anywhere that could have invalidated that token server-side.
+test_two_readers_leave_the_cliproxy_vault_byte_identical() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
   _cpa_vault --expired
@@ -808,10 +840,15 @@ test_two_refreshers_leave_the_cliproxy_vault_valid_and_usable() {
   ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-b" subscription_list >/dev/null 2>&1 ) &
   wait
   jq -e . "$f" >/dev/null 2>&1 || {
-    printf 'the vault file is no longer valid JSON after two refreshers:\n%s\n' "$(cat "$f")" >&2
+    printf 'the vault file is no longer valid JSON after two readers:\n%s\n' "$(cat "$f")" >&2
     return 1; }
   assert_eq "$(jq -r '.refresh_token' "$f")" fixture-cpa-refresh-one
   assert_eq "$(cat "$f")" "$before"
+  # and that stored refresh token is still LIVE on the provider, because nobody
+  # spent it: a rotating endpoint invalidates the old one on use.
+  [ -s "$T/refreshes" ] && {
+    printf 'a reader spent the vault refresh token; a rotating provider would now reject it\n' >&2
+    return 1; }
   _quota_stub_stop
   _quota_teardown
 }
