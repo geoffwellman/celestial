@@ -20,6 +20,8 @@ _CEL_QUOTA=1
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=lib/manifest.sh
 . "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+# shellcheck source=lib/config.sh
+. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 # shellcheck source=lib/workspace.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
 
@@ -156,13 +158,10 @@ _SUB_ANTHROPIC_URL="${CEL_SUB_ANTHROPIC_URL:-https://api.anthropic.com/api/oauth
 # nothing, so no inference has to be bought to read it.
 _SUB_CODEX_URL="${CEL_SUB_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}"
 
-# THE BROKER KNOWS MORE ACCOUNTS THAN THE FILE DOES. ~/.codex/auth.json holds
-# whichever ChatGPT account the Codex CLI logged in as last; omp's auth-broker
-# holds every credential the fleet actually routes through, and its gateway
-# reports usage per account. So the gateway is preferred WHEN IT IS UP, and
-# the Codex endpoint above is the fallback - a box with no broker configured
-# is the normal case, not an error.
-_SUB_GATEWAY_URL="${CEL_SUB_GATEWAY_URL:-}"
+# opencode's own usage endpoint. CLIProxyAPI does not hold this credential and
+# omp's usage path is on its way out, so the row the owner has today survives
+# only if celestial reads the source directly.
+_SUB_OPENCODE_URL="${CEL_SUB_OPENCODE_URL:-https://opencode.ai/zen/go/v1/usage}"
 
 # THE BOX ALREADY KNOWS. CEL-49: every symptom the owner reported on
 # 2026-09-20 - Codex reading `unreadable`, Fable missing, one Anthropic
@@ -261,16 +260,310 @@ _sub_omp_rows() {
   return 0
 }
 
-# The gateway's base, or nothing at all. `status --json` is the only thing
-# asked of omp here: it is local, it does not spend a token, and `ready:false`
-# is the answer on a box where the broker was never set up.
-_sub_gateway_base() {
-  [ -z "$_SUB_GATEWAY_URL" ] || { printf '%s' "$_SUB_GATEWAY_URL"; return 0; }
-  command -v omp >/dev/null 2>&1 || return 0
-  local st; st="$(omp auth-gateway status --json 2>/dev/null || true)"
-  [ -n "$st" ] || return 0
-  [ "$(printf '%s' "$st" | jq -r '.ready // false' 2>/dev/null || echo false)" = true ] || return 0
-  printf '%s' "$(printf '%s' "$st" | jq -r '.url // .bind // empty' 2>/dev/null || true)"
+# --- THE ONE VAULT (CEL-61) -------------------------------------------------
+#
+# CLIProxyAPI is the only credential store on this box, and it cannot report
+# usage: it removed usage statistics in v6.10.0 and keeps only a snapshot of
+# the LAST response's rate-limit headers - empty for an idle account,
+# overwritten rather than accumulated, and only for three providers. What it
+# does keep is each account's OAuth token, one file per account, and celestial
+# already knows how to turn a live token into windows. So the vault is the
+# account list and the provider is the source of truth for the numbers, which
+# is what omp was doing internally all along.
+#
+# The auth-dir is CEL-60's decision AND CEL-60's helper: `gateway_auth_dir`
+# (lib/gateway.sh) is the one place that knows where the vault lives. Two
+# answers to "where are the credentials" is the two-lists failure this ticket
+# exists to end, in miniature and inside one process, so this asks rather than
+# knows. gateway.sh is sourced HERE rather than at the top of the file because
+# it pulls in the service registry, and every caller of quota.sh does not need
+# it. This reads the vault and never writes to it.
+#
+# `CEL_CPA_AUTH_DIR` is the test seam; the last line is CEL-60's own default,
+# for a caller that has quota.sh without gateway.sh beside it.
+_cpa_auth_dir() {
+  local d="${CEL_CPA_AUTH_DIR:-}"
+  if [ -z "$d" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/gateway.sh" ]; then
+    # shellcheck source=lib/gateway.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+    d="$(gateway_auth_dir 2>/dev/null || true)"
+  fi
+  [ -n "$d" ] || d="${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}/auth"
+  expand "$d"
+}
+
+# provider<TAB>account<TAB>label<TAB>file, one line per credential file in the
+# vault. The identity comes out of the FILE (`account.uuid`,
+# `account.email_address`), never the filename: CLIProxyAPI names the file
+# `claude-<hash>-<email>.json` and the hash is not an account.
+_cpa_accounts() {
+  local d; d="$(_cpa_auth_dir)"
+  [ -d "$d" ] || return 0
+  local f base p acct label
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    p="$(jq -r '.type // .provider // empty' "$f" 2>/dev/null || true)"
+    if [ -z "$p" ]; then
+      case "$base" in claude-*) p=claude ;; codex-*) p=codex ;; *) p="" ;; esac
+    fi
+    case "$p" in
+      claude|anthropic) p=claude ;;
+      codex|openai-codex|chatgpt) p=codex ;;
+      # gemini and the rest live in the same vault and have no usage endpoint
+      # celestial can ask; they are not rows, and saying nothing about them is
+      # correct - `cel gateway status` is where the whole vault is listed.
+      *) continue ;;
+    esac
+    acct="$(jq -r '.account.uuid // .account_id // .tokens.account_id // .account.email_address // .email // empty' "$f" 2>/dev/null || true)"
+    label="$(jq -r '.account.email_address // .email // .tokens.email // .account.uuid // empty' "$f" 2>/dev/null || true)"
+    [ -n "$acct" ] || acct="$(_sub_fp "$base")"
+    [ -n "$label" ] || label="$acct"
+    printf '%s\t%s\t%s\t%s\n' "$p" "$acct" "$label" "$f"
+  done
+  return 0
+}
+
+_cpa_field() { # <file> <jq-path>
+  jq -r "$2 // empty" "$1" 2>/dev/null || true
+}
+
+# Has the token in this file already expired? An unparseable or absent expiry
+# is NOT an expiry - it means "ask and find out", and a 401 from the endpoint
+# is the other half of the answer.
+_cpa_expired() { # <file>
+  local e; e="$(_cpa_field "$1" '.expire // .expired // .expires_at // .expire_at // .tokens.expire')"
+  [ -n "$e" ] || return 1
+  local t; t="$(date -d "$e" +%s 2>/dev/null || true)"
+  [ -n "$t" ] || return 1
+  [ "$t" -le "$(( $(date +%s) + 60 ))" ]
+}
+
+# CELESTIAL DOES NOT REFRESH THESE CREDENTIALS. NOTHING HERE POSTS TO A TOKEN
+# ENDPOINT, AND NOTHING HERE WRITES TO THE AUTH-DIR.
+#
+# The first cut of this reader refreshed in memory and wrote nothing, on the
+# theory that a reader which never writes cannot corrupt the vault. The #84
+# review found the hole: the DAMAGE IS DONE AT THE PROVIDER, NOT ON DISK. Both
+# providers rotate the refresh token when it is used - Anthropic's own client
+# keeps the stored one only `if tokenResp.RefreshToken == ""`
+# (`internal/auth/claude/anthropic_auth.go:579-580`), and CLIProxyAPI's Codex
+# path carries a `refresh_token_reused` branch
+# (`internal/auth/codex/openai_auth.go:336`) precisely because auth.openai.com
+# enforces rotation. Spend the vault's refresh token to draw a usage bar,
+# discard the replacement, and the file is still perfect JSON holding a token
+# the provider has already retired: CLIProxyAPI fails at its NEXT refresh and
+# the owner is sent to a browser to log in again. A status read that silently
+# de-authorises the box is worse than no status read.
+#
+# Writing the rotation back instead does not fix it either. CLIProxyAPI
+# refreshes these credentials itself on a fifteen-minute loop
+# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialising per auth id and
+# guarding against out-of-order persistence with locks that live INSIDE its
+# process (`sdk/cliproxy/auth/conductor.go:196-201`) - locks celestial cannot
+# take. A second writer can only race it, and the loser of that race writes
+# back a refresh token the provider has retired, which is the same failure by
+# a longer route.
+#
+# CLIProxyAPI DOES expose a local way to make it refresh one credential -
+# `POST /v0/management/auth-files/refresh?name=<file>`
+# (`internal/api/server_management.go:187`) - and it would be the right door if
+# it were open. It is not: management routes are registered only when a
+# management secret or a local password is configured
+# (`internal/api/server.go:241-245`), and CEL-60 leaves the management API off.
+# Turning it on to draw a bar would add a second credential surface to the box
+# for a status read, which is a worse trade than a stale row.
+#
+# So the vault's owner is the only refresher, which is what it is built to be.
+# celestial presents whatever token the file currently holds. CLIProxyAPI
+# refreshes every credential it holds on a fifteen-minute loop while it runs,
+# so a token that is stale ANYWAY is news in itself - the gateway is not
+# running, or that account is signed out - and a stale row that says so is
+# honest where a broken login is not.
+_cpa_access_token() { # <file>
+  _cpa_field "$1" '.access_token // .tokens.access_token'
+}
+
+# The window mapping, shared by every provider read here so one account's
+# windows cannot be shaped differently from another's. It is the shape
+# `_sub_omp_rows` produces - `{name, scope, used_pct, resets_at}` - because the
+# console's QUOTA view and the dash card render that and this ticket changes
+# neither.
+#
+# A SCOPE IS READ, NEVER NAMED. `seven_day_fable` is one scoped window among
+# however many the provider invents next; the duration prefix gives the name
+# and whatever is left is the scope, so the next one appears without a code
+# change. Naming Fable here is how CEL-49's bug comes back.
+_CPA_WINDOW_JQ='
+def iso: if . == null then null
+         elif type == "number"
+         then ((if . > 100000000000 then . / 1000 else . end) | floor | todate)
+         else . end;
+def titlecase: [splits("[_ ]+")] | map(select(. != "") | (.[0:1] | ascii_upcase) + .[1:]) | join(" ");
+def wname($k): if ($k | test("^five_hour|^5h")) then "5h"
+               elif ($k | test("^seven_day|^7d")) then "7d"
+               elif ($k | test("^one_day|^daily|^1d")) then "1d"
+               else $k end;
+def wscope($k): ($k | sub("^(five_hour|seven_day|one_day|daily|5h|7d|1d)_?"; ""))
+                | if . == "" then null else titlecase end;
+def keywindows: to_entries
+  | map(select((.value | type) == "object" and (.value.utilization // .value.used_percent) != null)
+        | {name: wname(.key), scope: wscope(.key),
+           used_pct: (.value.utilization // .value.used_percent),
+           resets_at: ((.value.resets_at // .value.resetsAt) | iso)});
+def limitwindows: (.limits // [])
+  | map(select(type == "object")
+        | . as $w
+        | (($w.amount.usedFraction // $w.amount.used_fraction
+            // (if (($w.amount.limit // 0) > 0) and ($w.amount.used != null)
+                then ($w.amount.used / $w.amount.limit) else null end))) as $f
+        | select($f != null)
+        | {name: (($w.window.id // $w.scope.windowId // "window") | tostring | wname(.)),
+           scope: ((($w.label // "") | capture("\\((?<s>[^)]+)\\)") | .s)?
+                   // $w.scope.tier // $w.scope.modelId // null),
+           used_pct: ($f * 100),
+           resets_at: (($w.window.resetsAt // $w.window.resets_at // $w.resetsAt) | iso)});
+'
+
+_cpa_usage_fetch() { # <provider> <token> <account>
+  case "$1" in
+    claude)
+      printf 'authorization: Bearer %s\n' "$2" |
+        curl -sf -m 10 "$_SUB_ANTHROPIC_URL" -H @- \
+          -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null || true ;;
+    codex)
+      printf 'authorization: Bearer %s\n' "$2" |
+        curl -sf -m 10 "$_SUB_CODEX_URL" -H @- \
+          -H "chatgpt-account-id: $3" -H 'originator: codex_cli_rs' 2>/dev/null || true ;;
+    opencode)
+      printf 'authorization: Bearer %s\n' "$2" |
+        curl -sf -m 10 "$_SUB_OPENCODE_URL" -H @- 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
+_cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
+  case "$1" in
+    codex)
+      jq -c --arg a "$2" --arg l "$3" --arg s "$4" "$_CPA_WINDOW_JQ"'
+        ((.rate_limits // .) as $r
+         | {provider: "codex", account: $a, label: $l, source: $s,
+            windows: ([$r | to_entries[]
+                       | select((.value | type) == "object" and .value.used_percent != null)
+                       | {name: (if (.value.window_minutes // 0) >= 10080 then "7d"
+                                 elif (.value.window_minutes // 0) >= 1440 then "1d"
+                                 else "5h" end),
+                          # primary and secondary are Codex own words for
+                          # "the short one" and "the long one", not scopes -
+                          # anything else it names IS one.
+                          scope: (if (.key | test("^(primary|secondary)$")) then null
+                                  else (.key | titlecase) end),
+                          used_pct: .value.used_percent,
+                          resets_at: (.value.resets_at
+                                      // (if .value.resets_in_seconds
+                                          then (now + .value.resets_in_seconds | todate)
+                                          else null end))}]),
+            extra: {state: (if ($r.credits.has_credits // true) then "enabled" else "disabled" end),
+                    reason: ($r.rate_limit_reached_type // "")}})' 2>/dev/null || true ;;
+    *)
+      jq -c --arg p "$1" --arg a "$2" --arg l "$3" --arg s "$4" "$_CPA_WINDOW_JQ"'
+        {provider: $p, account: $a, label: $l, source: $s,
+         windows: ((keywindows + limitwindows) | map(select(.used_pct != null))),
+         extra: ((.extra_usage.disabled_reason // null) as $dr
+                 | if $dr == null then {state: "enabled", reason: ""}
+                   # `out_of_credits` with `spend.enabled: false` means TOP-UP
+                   # IS SWITCHED OFF, not "this account is spent" (CEL-49).
+                   else {state: "disabled",
+                         reason: (if ((.spend.enabled // false) == false)
+                                  then "top-up is off" else ($dr | gsub("_"; " ")) end)} end)}' \
+        2>/dev/null || true ;;
+  esac
+  return 0
+}
+
+# THREE DIFFERENT PIECES OF NEWS, THREE STATES. The old Codex path printed
+# `unreadable` for all of them and read `unreadable` for sixteen days before
+# anyone noticed - one word for a transient fault, an expired token and a
+# signed-out account, and it is acted on as the first.
+#
+#   stale        the vault's token has expired and CLIProxyAPI - the only
+#                thing that may refresh it - has not. Nothing is broken: it
+#                refreshes when the gateway next runs this account.
+#   needs_login  the provider REJECTED a token the vault calls live. That
+#                credential is finished and only a human can replace it.
+#   unreadable   the endpoint itself could not be read.
+_cpa_needs_login_row() { # <provider> <account> <label>
+  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+    '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
+      extra: {state: "needs_login",
+              reason: ("needs login: cel gateway login " + $p)}}'
+}
+
+# NOT A FAULT, AND NOT A LOGIN. An idle account whose access token has aged out
+# is waiting for the refresher that owns it, and telling the owner to log in
+# again would send them to a browser to fix nothing - while breaking the
+# credential is exactly what this reader refuses to do.
+_cpa_stale_row() { # <provider> <account> <label>
+  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+    '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
+      extra: {state: "stale",
+              reason: "token stale - refreshed next time this account serves traffic"}}'
+}
+
+_cpa_unreadable_row() { # <provider> <account> <label>
+  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+    '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
+      extra: {state: "unreadable",
+              reason: "the usage endpoint could not be read - it may be down"}}'
+}
+
+# One row per account in the vault, and NOTHING HERE REFRESHES ANYTHING.
+# CLIProxyAPI is the only refresher on this box - both providers rotate the
+# refresh token when it is used, so a second refresher retires the one the
+# gateway has stored (see the note above _cpa_access_token, which carries the
+# file:line evidence). A 401 is the second place an expiry shows up, because a
+# file can claim a live token and be wrong; the answer to that is a
+# `needs_login` row, never a retry through a token endpoint.
+_sub_cliproxy_rows() {
+  local p a label f tok resp doc
+  while IFS=$'\t' read -r p a label f; do
+    [ -n "$p" ] || continue
+    tok="$(_cpa_access_token "$f")"
+    # A file that says its token has already expired is not worth a call: the
+    # only thing that could refresh it is CLIProxyAPI, and it has not.
+    if [ -z "$tok" ] || _cpa_expired "$f"; then
+      _cpa_stale_row "$p" "$a" "$label"; continue
+    fi
+    resp="$(_cpa_usage_fetch "$p" "$tok" "$a")"
+    # A REJECTED TOKEN IS NOT MET WITH A REFRESH: see the note above
+    # _cpa_access_token. The vault called this token live and the provider
+    # disagreed, which is a credential only a human can replace - and the one
+    # thing that must not happen on the way to saying so is a token endpoint
+    # call that retires the vault's refresh token.
+    if [ -z "$resp" ]; then _cpa_needs_login_row "$p" "$a" "$label"; continue; fi
+    doc="$(printf '%s' "$resp" | _cpa_map_usage "$p" "$a" "$label" cliproxy)"
+    if [ -n "$doc" ]; then printf '%s\n' "$doc"
+    else _cpa_unreadable_row "$p" "$a" "$label"; fi
+  done < <(_cpa_accounts)
+  return 0
+}
+
+# OPENCODE IS NOT IN THE VAULT AND MUST NOT FALL OUT OF THE LIST. omp reported
+# it and omp is going; CLIProxyAPI has never held it. The credential is
+# opencode's own auth file, read exactly where opencode keeps it.
+_sub_opencode_rows() {
+  local f="${CEL_OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
+  [ -f "$f" ] || return 0
+  local tok; tok="$(jq -r '.opencode.access // .opencode.key // .opencode.token
+                           // .access // .key // empty' "$f" 2>/dev/null || true)"
+  [ -n "$tok" ] || return 0
+  local resp doc
+  resp="$(_cpa_usage_fetch opencode "$tok" opencode)"
+  if [ -z "$resp" ]; then _cpa_needs_login_row opencode opencode opencode; return 0; fi
+  doc="$(printf '%s' "$resp" | _cpa_map_usage opencode opencode opencode cliproxy)"
+  if [ -n "$doc" ]; then printf '%s\n' "$doc"
+  else _cpa_unreadable_row opencode opencode opencode; fi
+  return 0
 }
 
 _sub_fp() { printf '%s' "$1" | sha256sum | cut -c1-6; }
@@ -315,49 +608,6 @@ _sub_direct_accounts() {
 # provider<TAB>account<TAB>token. FROZEN: lib/steward.sh reads exactly this.
 _subscription_accounts() {
   _sub_direct_accounts | cut -f1,2,3
-}
-
-# The gateway's accounts, as subscription rows, or nothing at all when there
-# is no gateway or the door is shut. CEL-28 put these behind `cel gateway
-# status` alone, so the dashboard (which called it) listed them and the
-# console (which reads the fleet document) did not: two surfaces, two answers
-# to one question. They belong in the list with everything else, and `source`
-# says which door they came through.
-#
-# `check --json` is asked, never `check --strict`: strict probes each
-# credential against its provider and SPENDS QUOTA, which is not a thing a
-# status read may do behind someone's back.
-_sub_gateway_rows() {
-  command -v omp >/dev/null 2>&1 || return 0
-  # sourced here rather than at the top: lib/gateway.sh pulls in the config and
-  # the service registry, and every caller of quota.sh does not need them.
-  # shellcheck source=lib/gateway.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
-  gateway_installed || return 0
-  gateway_ready || return 0
-  local raw; raw="$(gateway_accounts_json 2>/dev/null || true)"
-  [ -n "$raw" ] || return 0
-  printf '%s' "$raw" | jq -c '.[]? | {
-    provider: (.provider // "gateway"),
-    account: (.id // "?"),
-    label: (.id // "?"),
-    source: "gateway",
-    windows: [ (.windows // [])[] | select(.used_pct != null) | {
-      name: (.label // "window"),
-      used_pct: .used_pct,
-      # omp reports a reset as epoch MILLISECONDS; every other window on this
-      # display is an ISO string, and a bare 1789994511000 on the console was
-      # read as a percentage more than once.
-      resets_at: (if (.resets_at | type) == "number"
-                  then (.resets_at / 1000 | floor | todate)
-                  else .resets_at end) } ],
-    extra: {state: (if .ok == false then "unreadable"
-                    elif ((.windows // []) | map(select(.used_pct != null)) | length) == 0
-                    then "unreadable" else "enabled" end),
-            reason: (if .ok == false then "the gateway reports this credential as failing"
-                     elif ((.windows // []) | map(select(.used_pct != null)) | length) == 0
-                     then "no usage probe for this provider" else "" end)} }' 2>/dev/null || true
-  return 0
 }
 
 # {provider, account, label, source, windows: [{name, used_pct, resets_at}],
@@ -406,19 +656,7 @@ subscription_usage() { # <provider> <token> [account] [label]
                                   else ($dr | gsub("_"; " ")) end)} end)}' 2>/dev/null || true)"
       ;;
     codex)
-      local gw; gw="$(_sub_gateway_base)"
-      if [ -n "$gw" ]; then
-        resp="$(printf 'authorization: Bearer %s\n' "$(omp auth-gateway token 2>/dev/null || true)" |
-          curl -sf -m 10 "${gw%/}/v1/usage" -H @- 2>/dev/null || true)"
-        # The gateway answers for EVERY account the broker holds, so the one
-        # this call is about has to be picked out of the list; anything else
-        # would report a neighbouring account's window as this one's.
-        [ -n "$resp" ] && resp="$(printf '%s' "$resp" | jq -c --arg a "$acct" '
-          ((.accounts // .usage // .) | if type == "array" then . else [.] end)
-          | (map(select((.account_id // .account // "") == $a)) | first) // empty' \
-          2>/dev/null || true)"
-      fi
-      [ -n "$resp" ] || resp="$(printf 'authorization: Bearer %s\n' "$tok" |
+      resp="$(printf 'authorization: Bearer %s\n' "$tok" |
         curl -sf -m 10 "$_SUB_CODEX_URL" -H @- \
           -H "chatgpt-account-id: $acct" -H 'originator: codex_cli_rs' 2>/dev/null || true)"
       # `window_minutes` names the window, not the order of the fields: Codex
@@ -492,6 +730,36 @@ subscription_list() { # [--cached]
 
   local p a t label rows="" keep=""
 
+  # THE VAULT FIRST, WHEN IT HAS ACCOUNTS IN IT. CEL-61, the owner's decision
+  # of 2026-09-23: CLIProxyAPI is the one credential store on this box and
+  # celestial reads usage out of those credentials itself. The alternative -
+  # CPA serving the traffic while omp reports the usage - is two lists of
+  # accounts with nothing keeping them the same, so an account logged into one
+  # and forgotten in the other makes `cel quota` quietly stop describing the
+  # accounts the workers actually run on.
+  #
+  # omp's path stays underneath until the new reader has proved itself on the
+  # live box (tools/quota-compare.sh is how that is checked); an empty or
+  # absent vault is today's behaviour, exactly.
+  local vrow vp va cpa_seen=0
+  if [ -n "$(_cpa_accounts)" ]; then
+    while IFS= read -r vrow; do
+      [ -n "$vrow" ] || continue
+      cpa_seen=1
+      vp="$(printf '%s' "$vrow" | jq -r '.provider')"
+      va="$(printf '%s' "$vrow" | jq -r '.account')"
+      mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+      printf '%s' "$vrow" > "$dir/subscription-$vp-$va.json"
+      chmod 600 "$dir/subscription-$vp-$va.json" 2>/dev/null || true
+      rows="$rows$vrow
+"
+      keep="$keep subscription-$vp-$va.json"
+      # opencode rides along because CLIProxyAPI does not hold it and the
+      # owner has that row today: dropping it would be the regression.
+    done < <( _sub_cliproxy_rows; _sub_opencode_rows )
+  fi
+
+  if [ "$cpa_seen" -eq 0 ]; then
   # OMP FIRST, WHEN IT IS THERE. It holds its own refreshed OAuth per account
   # and covers every provider it knows in one call, so for those providers the
   # per-file token reads below are not a second opinion - they are a worse one,
@@ -537,21 +805,7 @@ subscription_list() { # [--cached]
 "
     keep="$keep subscription-$p-$a.json"
   done < <(_sub_direct_accounts)
-
-  local row gp ga
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    gp="$(printf '%s' "$row" | jq -r '.provider')"
-    ga="$(printf '%s' "$row" | jq -r '.account')"
-    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
-    printf '%s' "$row" > "$dir/subscription-gateway-$gp-$ga.json"
-    chmod 600 "$dir/subscription-gateway-$gp-$ga.json" 2>/dev/null || true
-    rows="$rows$row
-"
-    keep="$keep subscription-gateway-$gp-$ga.json"
-    # the gateway is the older door onto the same broker: when `omp usage`
-    # answered, its rows are that answer already, at one account each.
-  done < <(if [ "$omp_seen" -eq 1 ]; then :; else _sub_gateway_rows; fi)
+  fi
 
   # THE SWEEP. Every file that is not one of this run's identities is a token
   # hash from before CEL-35 or an account that has been signed out, and both
@@ -707,6 +961,11 @@ _sub_line() { # <usage-json> [bar-width]
   IFS=$'\t' read -r state reason <<< "$(printf '%s' "$1" | jq -r '[(.extra.state // ""), (.extra.reason // "")] | @tsv')"
   [ "$state" = disabled ] && out="${out}extra: ${reason//_/ }"
   [ "$state" = unreadable ] && out="${out}unreadable: ${reason}"
+  # A credential that needs a human carries the command that fixes it, and it
+  # says so where the windows would be - the row with nothing in it is the one
+  # nobody acts on (CEL-61).
+  [ "$state" = needs_login ] && out="${out}${reason}"
+  [ "$state" = stale ] && out="${out}${reason}"
   printf '%s' "$out"
 }
 

@@ -55,6 +55,13 @@ _quota_stub_server() { # <claude-json> <codex-json> [claude-code-json]
 import { createServer } from 'node:http';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const dir = process.env.STUB_DIR;
+// A DEAD MAN'S SWITCH, BECAUSE A TRAP IS NOT ENOUGH. On 2026-09-23 a stub
+// outlived the test that started it and the suite sat on the box-wide lock for
+// 54 minutes with another worker retrying flock behind it. A test that fails
+// its assertion never reaches its cleanup line, and a runner killed with -9
+// never runs its EXIT trap either - so the server also ends itself, and no
+// leak can outlive one test by more than a minute.
+setTimeout(() => process.exit(0), 60000);
 const s = createServer((req, res) => {
   appendFileSync(`${dir}/hits`, `${req.url}\n`);
   appendFileSync(`${dir}/headers`, `${JSON.stringify(req.headers)}\n`);
@@ -321,74 +328,6 @@ test_cmd_quota_json_carries_subscriptions() {
   local out; out="$(cmd_quota --json 2>/dev/null)"
   assert_eq "$(printf '%s' "$out" | jq -r '.subscriptions | length >= 2')" true
   assert_eq "$(printf '%s' "$out" | jq -r '[.subscriptions[].provider] | sort | unique | join(",")')" 'claude,codex'
-  _quota_stub_stop
-  _quota_teardown
-}
-
-# --- CEL-35: the gateway's accounts are subscriptions too -------------------
-#
-# CEL-28 put them behind `cel gateway status` alone, so the dashboard (which
-# called it) showed them and the console (which reads the fleet document) did
-# not. One list, or two surfaces answer the same question differently.
-_quota_gateway_stub() { # [--down]
-  mkdir -p "$T/bin"
-  export CEL_CONFIG_FILE="$T/config.yaml"
-  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
-  # CEL-60 replaced omp's broker+gateway with CLIProxyAPI, whose account list
-  # IS its auth-dir: one OAuth JSON per account, named
-  # `<provider>-<hash>-<email>[-<plan>].json`. No usage rides along - the
-  # proxy dropped built-in usage accounting in v6.10.0 - so a gateway row
-  # arrives with no windows until CEL-61's reader fills them in.
-  export CEL_GATEWAY_STATE="$T/gwstate"
-  mkdir -p "$T/gwstate/auth"
-  printf '{}' > "$T/gwstate/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
-  # AND AN OMP ON PATH, WHICH IS A FIXTURE FOR A LEFTOVER, NOT FOR THE FEATURE.
-  # `_sub_gateway_rows` (lib/quota.sh:331) still opens with `command -v omp`
-  # even though everything it then calls - gateway_installed, gateway_ready,
-  # gateway_accounts_json - stopped touching omp in CEL-60. Without this stub
-  # the test passes only on a box that happens to have omp installed, which is
-  # exactly how it went red on CI and green here. lib/quota.sh is CEL-61's to
-  # edit; when that gate goes, this stub goes with it.
-  cat >"$T/bin/omp" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$T/bin/omp"
-  PATH="$T/bin:$PATH"
-  cat >"$T/gwstub" <<'EOF'
-#!/usr/bin/env bash
-case "$1" in ready) exit "${GW_STUB_DOWN:-0}" ;; esac
-EOF
-  chmod +x "$T/gwstub"
-  export CEL_GATEWAY_STUB="$T/gwstub"
-  [ "${1:-}" = --down ] && export GW_STUB_DOWN=1
-  return 0
-}
-
-test_gateway_accounts_join_the_subscription_list() {
-  _quota_setup
-  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
-  _quota_gateway_stub
-  . "$CEL_ROOT/lib/quota.sh"
-  local out; out="$(subscription_list)"
-  local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.source == "gateway")')"
-  [ -n "$row" ] || { printf 'no gateway row in the subscription list\n' >&2; return 1; }
-  assert_eq "$(printf '%s' "$row" | jq -r '.provider')" codex
-  # No windows, and the reason says so rather than reading as 0% used.
-  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 0
-  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
-  _quota_stub_stop
-  _quota_teardown
-}
-
-test_a_gateway_that_is_down_adds_no_rows_and_no_error() {
-  _quota_setup
-  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
-  _quota_gateway_stub --down
-  . "$CEL_ROOT/lib/quota.sh"
-  local out; out="$(subscription_list)"
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.source == "gateway")] | length')" 0
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length >= 1')" true
   _quota_stub_stop
   _quota_teardown
 }
@@ -662,4 +601,353 @@ test_the_cached_path_never_warns_about_omp() {
   local err; err="$(subscription_list --cached 2>&1 >/dev/null)"
   [ -z "$err" ] || {
     printf 'the cached path warned about a tool it never ran:\n%s\n' "$err" >&2; return 1; }
+}
+
+# --- CEL-61: the usage reader owns the vault --------------------------------
+#
+# The owner's decision, 2026-09-23 (option C): CLIProxyAPI becomes the ONE
+# credential store on the box and celestial reads usage from those credentials
+# itself, because the alternative - CPA serving traffic while omp reports usage
+# - leaves two lists of accounts with nothing keeping them the same, and an
+# account logged into one and forgotten in the other stops `cel quota` matching
+# the accounts the workers actually run on.
+#
+# NOTHING HERE CALLS A PROVIDER AND NOTHING HERE TOUCHES THE REAL VAULT: the
+# fixture auth-dir is built under mktemp in CLIProxyAPI's own filename and JSON
+# shapes (`claude-<hash>-<email>.json`, `codex-<hash>-<email>-<plan>.json`,
+# access/refresh token plus `account.email_address` / `account.uuid` /
+# `organization.uuid`), and every endpoint is a stub on 127.0.0.1.
+
+# One stub for usage - claude, codex and opencode - AND A TOKEN ENDPOINT THAT
+# EXISTS ONLY AS A TRAP. celestial never refreshes: CLIProxyAPI is the only
+# refresher on this box, because both providers rotate the refresh token when
+# it is used and a second refresher retires the one the gateway has stored. The
+# stub answers `/oauth/token` and records every hit so a test can fail the
+# moment that call reappears; nothing in lib/quota.sh knows the address.
+#
+# It answers 401 to any bearer that is not in its `fresh` list, which is what
+# an expired access token looks like from here - the CEL-49 symptom
+# ("unreadable" for sixteen days) was exactly this answer going unrecognised.
+_cpa_stub_server() { # <claude-json> <codex-json> <opencode-json>
+  printf '%s' "$1" > "$T/claude.json"
+  printf '%s' "$2" > "$T/codex.json"
+  printf '%s' "$3" > "$T/opencode.json"
+  cat >"$T/cpastub.mjs" <<'EOF'
+import { createServer } from 'node:http';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+const dir = process.env.STUB_DIR;
+// See the note on the other stub: the server ends itself after a minute so a
+// failed assertion that skips the cleanup line cannot hold the suite lock.
+setTimeout(() => process.exit(0), 60000);
+const read = (n) => (existsSync(`${dir}/${n}`) ? readFileSync(`${dir}/${n}`, 'utf8') : '');
+const fresh = () => read('fresh').split('\n').map((x) => x.trim()).filter(Boolean);
+const s = createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    appendFileSync(`${dir}/hits`, `${req.method} ${req.url}\n`);
+    const auth = String(req.headers.authorization || '').replace(/^Bearer /i, '');
+    const json = (code, o) => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(typeof o === 'string' ? o : JSON.stringify(o));
+    };
+    if (req.url.includes('/oauth/token')) {
+      // Recorded, and answered generously ON PURPOSE: a trap that refused
+      // would let a reader that called it still look correct.
+      appendFileSync(`${dir}/refreshes`, `${body}\n`);
+      const t = `refreshed-access-${fresh().length}`;
+      writeFileSync(`${dir}/fresh`, fresh().concat([t]).join('\n') + '\n');
+      return json(200, { access_token: t, refresh_token: 'fixture-refresh-rotated', expires_in: 3600 });
+    }
+    if (!fresh().includes(auth)) return json(401, { error: 'token_expired' });
+    if (req.url.includes('codex')) return json(200, read('codex.json'));
+    if (req.url.includes('zen')) return json(200, read('opencode.json'));
+    return json(200, read('claude.json'));
+  });
+});
+s.listen(0, '127.0.0.1', () => { writeFileSync(`${dir}/port`, String(s.address().port)); });
+EOF
+  export STUB_DIR="$T"
+  rm -f "$T/port" "$T/hits" "$T/refreshes"
+  node "$T/cpastub.mjs" >"$T/cpastub.log" 2>&1 </dev/null & STUB_PID=$!
+  # shellcheck disable=SC2064
+  trap "kill $STUB_PID 2>/dev/null || true" EXIT INT TERM
+  local i=0
+  while [ ! -s "$T/port" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$T/port" ] || {
+    printf 'cpa stub never listened after 20s; its log:\n%s\n' "$(cat "$T/cpastub.log" 2>/dev/null)"
+    return 1
+  }
+  local base="http://127.0.0.1:$(cat "$T/port")"
+  export CEL_SUB_ANTHROPIC_URL="$base/api/oauth/usage"
+  export CEL_SUB_CODEX_URL="$base/backend-api/codex-wham/usage"
+  export CEL_SUB_OPENCODE_URL="$base/zen/go/v1/usage"
+}
+
+# The Anthropic OAuth usage answer, with a SCOPED weekly window beside the
+# account-wide one. Fable is not named anywhere in the reader: the scope is
+# read off the key, so the next scoped window appears without a code change.
+_cpa_claude_body() {
+  jq -nc '{five_hour: {utilization: 16, resets_at: "2026-09-18T09:00:00Z"},
+           seven_day: {utilization: 41, resets_at: "2026-09-19T19:00:00Z"},
+           seven_day_fable: {utilization: 31, resets_at: "2026-09-19T19:00:00Z"}}'
+}
+
+_cpa_opencode_body() {
+  jq -nc '{limits: [
+    {label: "5 hours", window: {id: "5h", durationMs: 18000000, resetsAt: "2026-09-18T09:00:00Z"},
+     amount: {used: 1, limit: 10, usedFraction: 0.1}},
+    {label: "7 days", window: {id: "7d", durationMs: 604800000, resetsAt: "2026-09-19T19:00:00Z"},
+     amount: {used: 5, limit: 10, usedFraction: 0.5}},
+    {label: "7 days (gadget)", window: {id: "7d", durationMs: 604800000, resetsAt: "2026-09-19T19:00:00Z"},
+     amount: {used: 2, limit: 10, usedFraction: 0.2}}]}'
+}
+
+# CLIProxyAPI's vault: one OAuth JSON per account, named
+# `claude-<hash>-<email>.json` / `codex-<hash>-<email>-<plan>.json`.
+_cpa_vault() { # [--expired]
+  local exp="2099-01-01T00:00:00Z"
+  [ "${1:-}" = --expired ] && exp="2020-01-01T00:00:00Z"
+  export CEL_CPA_AUTH_DIR="$T/cpa-auth"
+  mkdir -p "$CEL_CPA_AUTH_DIR"; chmod 700 "$CEL_CPA_AUTH_DIR"
+  jq -nc --arg e "$exp" '{type: "claude", access_token: "fixture-cpa-claude-one",
+    refresh_token: "fixture-cpa-refresh-one", expire: $e,
+    account: {email_address: "one@example.invalid", uuid: "ant-one"},
+    organization: {uuid: "org-one"}}' > "$CEL_CPA_AUTH_DIR/claude-aaaa1111-one@example.invalid.json"
+  jq -nc --arg e "$exp" '{type: "claude", access_token: "fixture-cpa-claude-two",
+    refresh_token: "fixture-cpa-refresh-two", expire: $e,
+    account: {email_address: "two@example.invalid", uuid: "ant-two"},
+    organization: {uuid: "org-two"}}' > "$CEL_CPA_AUTH_DIR/claude-bbbb2222-two@example.invalid.json"
+  jq -nc --arg e "$exp" '{type: "codex", access_token: "fixture-cpa-codex-three",
+    refresh_token: "fixture-cpa-refresh-three", expire: $e, email: "three@example.invalid",
+    account: {email_address: "three@example.invalid", uuid: "cx-three"}}' \
+    > "$CEL_CPA_AUTH_DIR/codex-cccc3333-three@example.invalid-plus.json"
+  jq -nc --arg e "$exp" '{type: "codex", access_token: "fixture-cpa-codex-four",
+    refresh_token: "fixture-cpa-refresh-four", expire: $e, email: "four@example.invalid",
+    account: {email_address: "four@example.invalid", uuid: "cx-four"}}' \
+    > "$CEL_CPA_AUTH_DIR/codex-dddd4444-four@example.invalid-pro.json"
+  # every access token in the vault is live unless a test says otherwise
+  printf '%s\n' fixture-cpa-claude-one fixture-cpa-claude-two \
+    fixture-cpa-codex-three fixture-cpa-codex-four > "$T/fresh"
+}
+
+_cpa_opencode_auth() {
+  mkdir -p "$HOME/.local/share/opencode"
+  jq -nc '{opencode: {type: "oauth", access: "fixture-opencode-token"}}' \
+    > "$HOME/.local/share/opencode/auth.json"
+  printf 'fixture-opencode-token\n' >> "$T/fresh"
+}
+
+test_the_cliproxy_vault_is_the_source_and_every_account_is_its_own_row() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude")] | length')" 2
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "codex")] | length')" 2
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | .label] | sort | join(",")')" \
+    'four@example.invalid,one@example.invalid,three@example.invalid,two@example.invalid'
+  # each account carries its OWN windows, and a scoped one nobody named in code
+  local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.account == "ant-one")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 3
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows[] | select(.scope == "Fable") | .used_pct')" 31
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | select(.name == "7d")] | length')" 2
+  case "$out" in *fixture-cpa-claude-one*|*fixture-cpa-refresh-one*)
+    printf 'the vault reader printed a token\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# THE VAULT'S OWNER IS THE ONLY REFRESHER. CLIProxyAPI runs a 15-minute
+# auto-refresh loop over every credential it holds
+# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialised per auth id
+# (`sdk/cliproxy/auth/conductor.go:196-201`), and persists what comes back. Both
+# providers can ROTATE the refresh token on use - Anthropic's own client keeps
+# the old one only `if tokenResp.RefreshToken == ""`
+# (`internal/auth/claude/anthropic_auth.go:579-580`), and CPA's Codex path has a
+# `refresh_token_reused` branch (`internal/auth/codex/openai_auth.go:336`)
+# precisely because auth.openai.com enforces rotation - so a second refresher
+# that discards the rotated token leaves the vault's stored one DEAD on the
+# server: valid JSON in the file, and CLIProxyAPI failing at its next refresh.
+# A status read may not do that, so celestial does not refresh at all. It
+# presents what the vault holds and says so when that is stale.
+test_the_usage_reader_never_calls_a_token_endpoint() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  . "$CEL_ROOT/lib/quota.sh"
+  subscription_list >/dev/null 2>&1
+  [ -s "$T/refreshes" ] && {
+    printf 'the usage reader posted to a token endpoint and can burn the vault refresh token:\n%s\n' \
+      "$(cat "$T/refreshes")" >&2; return 1; }
+  case "$(cat "$T/hits" 2>/dev/null)" in *oauth/token*)
+    printf 'the usage reader hit a token endpoint\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# An access token CLIProxyAPI has not refreshed is a row that says what to do
+# about it. The old Codex path read a raw token, never noticed it had gone
+# stale, and printed `unreadable` for sixteen days - a word that reads like a
+# transient fault and gets waited out.
+test_a_stale_vault_token_reads_as_stale_not_unreadable() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  # STALE IS ITS OWN STATE. Nothing is broken: CLIProxyAPI - the only thing
+  # that may refresh this - simply has not yet. Calling that a login sends the
+  # owner to a browser to fix nothing; calling it unreadable gets it waited out.
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "stale")] | length')" 4
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "unreadable")] | length')" 0
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 0
+  assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'serves traffic'
+  assert_contains "$(cmd_quota 2>/dev/null)" 'token stale'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# A token the vault calls LIVE and the provider rejects anyway is the other
+# news: that credential is finished and only a human can replace it. Still not
+# a refresh - the one call that must never happen is the one that would retire
+# the vault's refresh token on the way to saying so.
+test_a_rejected_vault_token_reads_as_needs_login() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  : > "$T/fresh"   # every token in the vault is rejected by the provider
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 4
+  [ -s "$T/refreshes" ] && { printf 'a rejected token was met with a refresh\n' >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# TWO WRITERS OF ONE VAULT CANNOT BOTH BE RIGHT, AND NEITHER MAY BE celestial.
+# CLIProxyAPI serves live traffic from these files, refreshes them on its own
+# loop, and persists the result under a per-auth lock celestial cannot join.
+# Two of its readers at once must therefore leave the vault EXACTLY as
+# CLIProxyAPI last wrote it - same bytes, same refresh token, and no refresh
+# posted anywhere that could have invalidated that token server-side.
+test_two_readers_leave_the_cliproxy_vault_byte_identical() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault --expired
+  . "$CEL_ROOT/lib/quota.sh"
+  local f="$CEL_CPA_AUTH_DIR/claude-aaaa1111-one@example.invalid.json"
+  local before; before="$(cat "$f")"
+  # `trap - EXIT` inside each subshell: the EXIT trap that kills the stub is
+  # inherited by a background subshell, and the first one to finish would
+  # otherwise shoot the server out from under the second.
+  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-a" subscription_list >/dev/null 2>&1 ) &
+  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-b" subscription_list >/dev/null 2>&1 ) &
+  wait
+  jq -e . "$f" >/dev/null 2>&1 || {
+    printf 'the vault file is no longer valid JSON after two readers:\n%s\n' "$(cat "$f")" >&2
+    return 1; }
+  assert_eq "$(jq -r '.refresh_token' "$f")" fixture-cpa-refresh-one
+  assert_eq "$(cat "$f")" "$before"
+  # and that stored refresh token is still LIVE on the provider, because nobody
+  # spent it: a rotating endpoint invalidates the old one on use.
+  [ -s "$T/refreshes" ] && {
+    printf 'a reader spent the vault refresh token; a rotating provider would now reject it\n' >&2
+    return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# omp's path is the fallback until the new reader has proved itself on the live
+# box: an empty or absent vault must degrade to exactly today's output.
+test_an_absent_cliproxy_vault_falls_back_to_omp_unchanged() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  _omp_stub
+  export CEL_CPA_AUTH_DIR="$T/no-vault-here"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  local expected; expected="$(_sub_omp_rows | _sub_fold)"
+  assert_eq "$out" "$expected"
+  mkdir -p "$CEL_CPA_AUTH_DIR"
+  assert_eq "$(subscription_list)" "$expected"
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# CLIProxyAPI does not hold opencode, and the owner has that row today.
+test_opencode_still_reports_beside_the_vault_accounts() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  _cpa_opencode_auth
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "opencode")] | length')" 1
+  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.provider == "opencode") | .windows | length')" 3
+  assert_contains "$(cmd_quota 2>/dev/null)" 'opencode'
+  case "$out" in *fixture-opencode-token*)
+    printf 'the opencode read printed a token\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# THE RENDERERS DO NOT CHANGE. The console's QUOTA view and the dash card read
+# the row shape `_sub_omp_rows` produced; a new source that answers a different
+# shape is a silent regression on three surfaces at once.
+test_the_vault_rows_have_the_same_shape_as_the_omp_rows() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local omp_keys cpa_keys omp_wkeys cpa_wkeys
+  omp_keys="$(_sub_omp_rows | jq -s -r '[.[] | keys[]] | sort | unique | join(",")')"
+  omp_wkeys="$(_sub_omp_rows | jq -s -r '[.[].windows[] | keys[]] | sort | unique | join(",")')"
+  local rows; rows="$(subscription_list)"
+  cpa_keys="$(printf '%s' "$rows" | jq -r '[.[] | keys[]] | sort | unique | join(",")')"
+  cpa_wkeys="$(printf '%s' "$rows" | jq -r '[.[].windows[] | keys[]] | sort | unique | join(",")')"
+  assert_eq "$cpa_keys" "$omp_keys"
+  assert_eq "$cpa_wkeys" "$omp_wkeys"
+  assert_eq "$(printf '%s' "$rows" | jq -r '[.[].extra | keys[]] | sort | unique | join(",")')" 'reason,state'
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The parity tool is what the owner runs on the live box before omp's path is
+# removed in a later ticket: both readers, per account and per window.
+test_the_parity_tool_prints_both_readers_side_by_side() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  _omp_stub
+  local out; out="$(bash "$CEL_ROOT/tools/quota-compare.sh" 2>/dev/null)"
+  assert_contains "$out" 'cliproxy'
+  assert_contains "$out" 'omp'
+  assert_contains "$out" 'one@example.invalid'
+  case "$out" in *fixture-cpa-claude-one*)
+    printf 'the parity tool printed a token\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# ONE ANSWER TO "WHERE ARE THE CREDENTIALS". CEL-60 owns the vault's location
+# and publishes `gateway_auth_dir`; a second opinion here would be the
+# two-lists failure this ticket exists to end, rebuilt inside one process. With
+# no test seam set, the reader must find the accounts `cel gateway status`
+# lists.
+test_the_vault_is_found_where_cel_gateway_says_it_is() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  export CEL_GATEWAY_STATE="$T/gwstate"
+  _cpa_vault
+  mkdir -p "$CEL_GATEWAY_STATE"
+  mv "$CEL_CPA_AUTH_DIR" "$CEL_GATEWAY_STATE/auth"
+  unset CEL_CPA_AUTH_DIR
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(_cpa_auth_dir)" "$CEL_GATEWAY_STATE/auth"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.source == "cliproxy")] | length')" 4
+  _quota_stub_stop
+  _quota_teardown
 }
