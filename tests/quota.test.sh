@@ -333,21 +333,25 @@ test_cmd_quota_json_carries_subscriptions() {
 _quota_gateway_stub() { # [--down]
   mkdir -p "$T/bin"
   export CEL_CONFIG_FILE="$T/config.yaml"
-  printf 'gateway:\n  gateway_port: 47411\n  broker_port: 47311\n' > "$CEL_CONFIG_FILE"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  # CEL-60 replaced omp's broker+gateway with CLIProxyAPI, whose account list
+  # IS its auth-dir: one OAuth JSON per account, named
+  # `<provider>-<hash>-<email>[-<plan>].json`. No usage rides along - the
+  # proxy dropped built-in usage accounting in v6.10.0 - so a gateway row
+  # arrives with no windows until CEL-61's reader fills them in.
+  export CEL_GATEWAY_STATE="$T/gwstate"
+  mkdir -p "$T/gwstate/auth"
+  printf '{}' > "$T/gwstate/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
+  # AND AN OMP ON PATH, WHICH IS A FIXTURE FOR A LEFTOVER, NOT FOR THE FEATURE.
+  # `_sub_gateway_rows` (lib/quota.sh:331) still opens with `command -v omp`
+  # even though everything it then calls - gateway_installed, gateway_ready,
+  # gateway_accounts_json - stopped touching omp in CEL-60. Without this stub
+  # the test passes only on a box that happens to have omp installed, which is
+  # exactly how it went red on CI and green here. lib/quota.sh is CEL-61's to
+  # edit; when that gate goes, this stub goes with it.
   cat >"$T/bin/omp" <<'EOF'
 #!/usr/bin/env bash
-case "$1 $2" in
-  "auth-broker token"|"auth-gateway token") printf 'gw-fixture-token\n' ;;
-  "auth-gateway status") printf '%s\n' '{"ready":true,"reason":null,"credentialCount":2}' ;;
-  "auth-gateway check") cat <<'JSON'
-{"credentials":[
- {"id":1,"provider":"openai-codex","type":"oauth","ok":true,
-  "accountId":"aaaaaaaa-1111-2222-3333-444444444444",
-  "report":{"limits":[{"label":"7 days","window":{"id":"7d","resetsAt":1789994511000},
-    "amount":{"used":12,"limit":100,"usedFraction":0.12},"status":"ok"}]}}]}
-JSON
-  ;;
-esac
+exit 0
 EOF
   chmod +x "$T/bin/omp"
   PATH="$T/bin:$PATH"
@@ -369,8 +373,10 @@ test_gateway_accounts_join_the_subscription_list() {
   local out; out="$(subscription_list)"
   local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.source == "gateway")')"
   [ -n "$row" ] || { printf 'no gateway row in the subscription list\n' >&2; return 1; }
-  assert_eq "$(printf '%s' "$row" | jq -r '.provider')" openai-codex
-  assert_eq "$(printf '%s' "$row" | jq -r '.windows[0].used_pct')" 12
+  assert_eq "$(printf '%s' "$row" | jq -r '.provider')" codex
+  # No windows, and the reason says so rather than reading as 0% used.
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 0
+  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" unreadable
   _quota_stub_stop
   _quota_teardown
 }

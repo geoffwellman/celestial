@@ -285,34 +285,31 @@ _ws_gateway() {
   _ws
   cat >>"$T/workspace.yaml" <<'YAML'
 worker_profiles:
-  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
-  printf 'gateway:\n  broker_port: 47311\n  gateway_port: 47411\n' > "$CEL_CONFIG_FILE"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
+  export CEL_GATEWAY_STATE="$GWT/state"
+  mkdir -p "$GWT/state/auth"
+  printf '{}' > "$GWT/state/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
   cat >"$GWT/gwstub" <<'EOS'
 #!/usr/bin/env bash
 case "$1" in
   ready)  exit "${GW_STUB_DOWN:-0}" ;;
-  models) printf '%s\n' '{"data":[{"id":"openai-codex/gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
+  models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
 esac
 EOS
   chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
-  cat >"$GWT/bin/omp" <<'EOS'
-#!/usr/bin/env bash
-case "$1 $2" in
-  "auth-gateway check") printf '%s\n' '{"credentials":[{"id":1,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"aaaaaaaa-1111","report":{"limits":[]}}]}' ;;
-  *) printf '%s\n' 'gw-fixture-token-do-not-print' ;;
-esac
-EOS
-  chmod +x "$GWT/bin/omp"; PATH="$GWT/bin:$PATH"
+  PATH="$GWT/bin:$PATH"
 }
-_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB; }
+_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
 
 test_run_worker_via_gateway_uses_the_ompgw_model_and_masks_the_env() {
   _ws_gateway
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
-  assert_contains "$out" "--model ompgw/openai-codex/gpt-5.5"
+  assert_contains "$out" "--model ompgw/codex/gpt-5.5"
   assert_contains "$out" "OMP_GATEWAY_TOKEN"
   assert_contains "$out" "CEL_SESSION_ID"
   ! printf '%s' "$out" | grep -q "gw-fixture-token" || { echo "the gateway token reached the launch line"; _ws_gateway_clean; return 1; }
