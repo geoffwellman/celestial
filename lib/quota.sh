@@ -517,9 +517,13 @@ _cpa_unreadable_row() { # <provider> <account> <label>
               reason: "the usage endpoint could not be read - it may be down"}}'
 }
 
-# One row per account in the vault. A 401 is the SECOND place an expiry shows
-# up (a file can claim a live token and be wrong), so a rejected token is
-# refreshed once and retried before anything is concluded about it.
+# One row per account in the vault, and NOTHING HERE REFRESHES ANYTHING.
+# CLIProxyAPI is the only refresher on this box - both providers rotate the
+# refresh token when it is used, so a second refresher retires the one the
+# gateway has stored (see the note above _cpa_access_token, which carries the
+# file:line evidence). A 401 is the second place an expiry shows up, because a
+# file can claim a live token and be wrong; the answer to that is a
+# `needs_login` row, never a retry through a token endpoint.
 _sub_cliproxy_rows() {
   local p a label f tok resp doc
   while IFS=$'\t' read -r p a label f; do

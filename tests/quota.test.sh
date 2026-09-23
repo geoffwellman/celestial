@@ -618,16 +618,20 @@ test_the_cached_path_never_warns_about_omp() {
 # access/refresh token plus `account.email_address` / `account.uuid` /
 # `organization.uuid`), and every endpoint is a stub on 127.0.0.1.
 
-# One stub for all four doors: usage for claude, codex and opencode, plus the
-# OAuth refresh endpoint. It answers 401 to any bearer that is not in its
-# `fresh` list, which is what an expired access token looks like from here -
-# the CEL-49 symptom ("unreadable" for sixteen days) was exactly this answer
-# going unrecognised.
+# One stub for usage - claude, codex and opencode - AND A TOKEN ENDPOINT THAT
+# EXISTS ONLY AS A TRAP. celestial never refreshes: CLIProxyAPI is the only
+# refresher on this box, because both providers rotate the refresh token when
+# it is used and a second refresher retires the one the gateway has stored. The
+# stub answers `/oauth/token` and records every hit so a test can fail the
+# moment that call reappears; nothing in lib/quota.sh knows the address.
+#
+# It answers 401 to any bearer that is not in its `fresh` list, which is what
+# an expired access token looks like from here - the CEL-49 symptom
+# ("unreadable" for sixteen days) was exactly this answer going unrecognised.
 _cpa_stub_server() { # <claude-json> <codex-json> <opencode-json>
   printf '%s' "$1" > "$T/claude.json"
   printf '%s' "$2" > "$T/codex.json"
   printf '%s' "$3" > "$T/opencode.json"
-  printf 'ok' > "$T/refresh-mode"
   cat >"$T/cpastub.mjs" <<'EOF'
 import { createServer } from 'node:http';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -648,8 +652,9 @@ const s = createServer((req, res) => {
       res.end(typeof o === 'string' ? o : JSON.stringify(o));
     };
     if (req.url.includes('/oauth/token')) {
+      // Recorded, and answered generously ON PURPOSE: a trap that refused
+      // would let a reader that called it still look correct.
       appendFileSync(`${dir}/refreshes`, `${body}\n`);
-      if (read('refresh-mode').trim() === 'fail') return json(400, { error: 'invalid_grant' });
       const t = `refreshed-access-${fresh().length}`;
       writeFileSync(`${dir}/fresh`, fresh().concat([t]).join('\n') + '\n');
       return json(200, { access_token: t, refresh_token: 'fixture-refresh-rotated', expires_in: 3600 });
@@ -677,8 +682,6 @@ EOF
   export CEL_SUB_ANTHROPIC_URL="$base/api/oauth/usage"
   export CEL_SUB_CODEX_URL="$base/backend-api/codex-wham/usage"
   export CEL_SUB_OPENCODE_URL="$base/zen/go/v1/usage"
-  export CEL_CPA_CLAUDE_REFRESH_URL="$base/claude/oauth/token"
-  export CEL_CPA_CODEX_REFRESH_URL="$base/codex/oauth/token"
 }
 
 # The Anthropic OAuth usage answer, with a SCOPED weekly window beside the
