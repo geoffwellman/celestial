@@ -817,7 +817,10 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       gflag="$(agent_inbox_hook "$runtime" flag)"; gfile="$(agent_inbox_hook "$runtime" file)"
       if [ -n "$gflag" ] && [ -n "$gfile" ]; then
         AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
-      fi ;;
+      fi
+      # OMP prewalk switches to the smol model after the first edit/write;
+      # a long-lived orchestrator must stay on its configured model.
+      [ "$runtime" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}") ;;
   esac
 
   # Runtime-wide launch flags (agents.yaml launch_args) go ahead of the

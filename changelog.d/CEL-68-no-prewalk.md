@@ -1,0 +1,1 @@
+- OMP root/orchestrator launches pass `--no-prewalk` so they stay on their configured model (CEL-68).
