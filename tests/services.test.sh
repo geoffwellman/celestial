@@ -304,3 +304,126 @@ test_box_service_in_home_reports_no_process_tree_memory() {
   assert_eq "$(printf '%s' "$js" | jq -r '.[0].rss_mb')" 0
   _svc_teardown
 }
+
+# --- starting a service is a pane split, and a split needs a direction -------
+#
+# 2026-09-23: `cel gateway install` ended with "cel-auth-gateway: herdr pane
+# split returned no pane id - nothing was started". herdr's CLI had grown a
+# requirement - a split names a DIRECTION and a TARGET pane - and the
+# box-level branch here passed neither, so herdr printed its usage and every
+# box service on this box was unstartable. The sentence above is the second
+# half of the bug: it described the symptom and hid herdr's own message.
+#
+# This stub is the real CLI's contract: refuse a split without a direction and
+# a target, exactly as herdr does, and log argv so a test can read what was
+# asked for.
+_svc_strict_herdr() {
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split')
+    dir=""; target=""
+    shift 2
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --direction) dir="\$2"; shift 2 ;;
+        --pane) target="\$2"; shift 2 ;;
+        --current) target=current; shift ;;
+        --cwd|--ratio|--env) shift 2 ;;
+        --no-focus|--focus) shift ;;
+        -*) shift ;;
+        *) target="\$1"; shift ;;
+      esac
+    done
+    if [ -z "\$dir" ] || [ -z "\$target" ]; then
+      printf 'usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [...]\n' >&2
+      exit 2
+    fi
+    printf '{"result":{"pane":{"pane_id":"w1:p9"},"pane_id":"w1:p9"}}' ;;
+  'tab list')   cat "$T/tabs.json" 2>/dev/null || printf '{"result":{"tabs":[]}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  'pane list')  cat "$T/panes.json" 2>/dev/null || printf '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
+  'pane read')  printf 'last line of the pane\n' ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+}
+
+_svc_split_args() { # the argv of the last `pane split`
+  grep '^pane split' "$T/calls" | tail -1 || true
+}
+
+# A box service has no workspace pane to sit under, so it needs a home of its
+# own: `cel` finds or creates a tab and splits from a pane in it. The split
+# must carry a direction and a target or herdr refuses it.
+test_box_service_split_names_a_direction_and_a_target() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf '{"name":"cel-auth-gateway","port":47411,"cmd":"omp auth-gateway serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  ( cd "$T" && "$CEL" services start cel-auth-gateway )
+  assert_eq "$(jq -r '.pane' "$CEL_SERVICES_STATE/cel-auth-gateway.json")" "w1:p9"
+  local args; args="$(_svc_split_args)"
+  assert_contains "$args" "--direction"
+  assert_contains "$args" "--pane"
+  _svc_teardown
+}
+
+# The steward runs from a systemd timer with no current pane and no workspace,
+# and it restarts box services. Its split still has a target, because the tab
+# is found or created rather than inherited from wherever someone was standing.
+test_box_service_split_has_a_target_without_a_current_pane() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf '{"result":{"tabs":[{"label":"cel services","tab_id":"w1:t7"}]}}' > "$T/tabs.json"
+  printf '{"result":{"panes":[{"pane_id":"w1:p5","tab_id":"w1:t7"}]}}' > "$T/panes.json"
+  printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker )
+  local args; args="$(_svc_split_args)"
+  assert_contains "$args" "--pane w1:p5"
+  assert_contains "$args" "--direction down"
+  # an existing services tab is reused, not created again
+  [ -z "$(grep '^tab create' "$T/calls" || true)" ] \
+    || { echo "a second services tab was created over an existing one"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# A workspace's own service still lands under that workspace's pane.
+test_workspace_service_split_still_targets_the_workspace_pane() {
+  _svc_setup
+  _svc_strict_herdr
+  printf '{"result":{"agents":[{"cwd":"%s/alpha","pane_id":"w2:p3"}]}}' "$T" > "$T/agents.json"
+  printf 'name: alpha\nservices:\n  - {name: builder, cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+  "$CEL" services start builder --workspace alpha
+  local args; args="$(_svc_split_args)"
+  assert_contains "$args" "--pane w2:p3"
+  assert_contains "$args" "--direction down"
+  _svc_teardown
+}
+
+# When herdr refuses, say what herdr said. "returned no pane id" hid a CLI
+# change for a day.
+test_a_refused_split_reports_herdrs_own_message() {
+  _svc_box_setup
+  _svc_strict_herdr
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split') printf 'error: pane w1:p1 is too small to split\n' >&2; exit 2 ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  printf '{"name":"cel-auth-gateway","port":47411,"cmd":"omp auth-gateway serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "too small to split"
+  _svc_teardown
+}
