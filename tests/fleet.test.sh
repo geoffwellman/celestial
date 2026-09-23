@@ -629,15 +629,18 @@ _fleet_add_rows() { # <n>
 # passed a change that traded a per-row jq for a per-row awk, which is the
 # same fan-out wearing different clothes; a budget that watches only the tools
 # its author was thinking about rots the moment somebody reaches for a third.
-# The ceiling below is the TOTAL, and main fails it at both sizes (185 > 168,
-# 239 > 186), which is the only way to know it is measuring anything. The
-# branch measures 158 and 176 on consecutive runs, so the headroom is real
-# slack and not a repeat of the measurement. One of those jq is the roster
+# The ceiling below is the TOTAL, and main fails it at both sizes (213 > 187,
+# 267 > 232), which is the only way to know it is measuring anything. Measured
+# here against main dcf17c0, whose pane-silence read (CEL-50) costs a jq on
+# every running row on BOTH sides: main 213 at 3 rows and 267 at 12, the
+# branch 181 and 226, repeatable across three runs. The saving is now mostly
+# fixed cost rather than slope, and the ceiling is set to the branch plus six,
+# so the headroom is real slack and not a repeat of the measurement. One of those jq is the roster
 # being validated once per render rather than being allowed to fail inside
 # whichever program touched it first, which is a process well spent.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
-  local max=$(( 162 + 2 * rows ))
+  local max=$(( 172 + 5 * rows ))
   if [ "$total" -gt "$max" ]; then
     printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
       "$total" "$max" "$rows" >&2
@@ -687,8 +690,8 @@ test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
 # worktree path, the age of the newest file and the age of the oldest unread
 # are normalised for the same reason. RE-CAPTURED after each rebase, from the
 # main the branch sits on: it landed first against 9f7cf2d and is taken here
-# against 931954c, which added the `mail` triple to every workspace.
-_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
+# against dcf17c0, which added the pane-silence fields to every worker row.
+_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
 
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
   jq -c --arg t "$T" --arg wt "$WT" '
