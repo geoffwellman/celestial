@@ -357,6 +357,44 @@ _svc_ws_pane() { # <wsdir>
     | jq -r --arg d "$1" '[.result.agents[]? | select(.cwd == $d)][0].pane_id // empty' 2>/dev/null || true
 }
 
+# WHERE A BOX SERVICE LIVES. A service with no workspace has no pane to sit
+# under, and herdr's `pane split` requires both a direction AND a target: the
+# old box-level call passed neither, herdr printed its usage, and every box
+# service on this box was unstartable (2026-09-23, `cel gateway install`).
+# `--current` is not the answer either - the steward runs from a systemd timer
+# where there is no current pane - so box services get a tab of their own,
+# found by label and created if absent. That tab is a stable target from any
+# context, and it puts the broker, the gateway and anything else the box runs
+# side by side where an operator can read them.
+_SVC_BOX_TAB_LABEL="cel services"
+
+# _svc_box_tab_pane answers through globals rather than stdout: when it fails
+# the caller wants herdr's own words, and a message printed from a command
+# substitution is a message lost.
+_SVC_TAB_PANE=""
+_SVC_TAB_ERR=""
+
+_svc_box_tab_pane() { # <cwd> -> 0 and _SVC_TAB_PANE, or 1 and _SVC_TAB_ERR
+  local cwd="$1" tab pane resp
+  _SVC_TAB_PANE=""; _SVC_TAB_ERR=""
+  tab="$("$_SERVICES_HERDR" tab list 2>/dev/null \
+    | jq -r --arg l "$_SVC_BOX_TAB_LABEL" '[.result.tabs[]? | select(.label == $l)][0].tab_id // empty' 2>/dev/null || true)"
+  if [ -n "$tab" ]; then
+    # The last pane in the tab: services stack down the tab in the order they
+    # were started, so the newest one is the one with room beneath it.
+    pane="$("$_SERVICES_HERDR" pane list 2>/dev/null \
+      | jq -r --arg t "$tab" '[.result.panes[]? | select(.tab_id == $t)] | last | .pane_id // empty' 2>/dev/null || true)"
+    [ -n "$pane" ] && { _SVC_TAB_PANE="$pane"; return 0; }
+  fi
+  resp="$("$_SERVICES_HERDR" tab create --label "$_SVC_BOX_TAB_LABEL" --cwd "$cwd" --no-focus 2>&1 || true)"
+  pane="$(printf '%s' "$resp" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)"
+  if [ -z "$pane" ]; then
+    _SVC_TAB_ERR="$(printf '%s' "$resp" | tr '\n' ' ')"
+    return 1
+  fi
+  _SVC_TAB_PANE="$pane"
+}
+
 svc_start() { # [wsdir] <name>
   local d="${1:-}" name="$2" e cmd cwd kind store
   e="$(svc_entry "$d" "$name")"
@@ -398,14 +436,28 @@ svc_start() { # [wsdir] <name>
     fi
   done < <(printf '%s' "$e" | jq -r '.env // {} | keys[]' 2>/dev/null || true)
 
-  local -a split=(pane split --cwd "$cwd" --no-focus)
-  local wspane=""
-  [ -n "$d" ] && wspane="$(_svc_ws_pane "$d")"
-  [ -n "$wspane" ] && split=(pane split --pane "$wspane" --direction down --cwd "$cwd" --no-focus)
+  # EVERY split names a direction and a target. A workspace service sits under
+  # its workspace's pane; everything else goes to the box's services tab.
+  local target=""
+  [ -n "$d" ] && target="$(_svc_ws_pane "$d")"
+  if [ -z "$target" ]; then
+    _svc_box_tab_pane "$cwd" || true
+    target="$_SVC_TAB_PANE"
+  fi
+  [ -n "$target" ] || {
+    c_err "$name: no pane to split from - herdr said: ${_SVC_TAB_ERR:-nothing at all}"
+    return 1
+  }
   local resp pane
-  resp="$("$_SERVICES_HERDR" "${split[@]}" 2>/dev/null || true)"
-  pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' 2>/dev/null | head -1)"
-  [ -n "$pane" ] || { c_err "$name: herdr pane split returned no pane id - nothing was started"; return 1; }
+  # stderr is CAPTURED, not discarded: herdr's usage line was the whole answer
+  # to this bug and the old code threw it away.
+  resp="$("$_SERVICES_HERDR" pane split --pane "$target" --direction down \
+    --cwd "$cwd" --no-focus 2>&1 || true)"
+  pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' 2>/dev/null | head -1 || true)"
+  [ -n "$pane" ] || {
+    c_err "$name: herdr refused the pane split - herdr said: $(printf '%s' "$resp" | tr '\n' ' ')"
+    return 1
+  }
   local runline="$cmd"
   [ "${#envs[@]}" -eq 0 ] || runline="env ${envs[*]} $cmd"
   "$_SERVICES_HERDR" pane run "$pane" "$runline" >/dev/null 2>&1 \

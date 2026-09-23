@@ -32,6 +32,10 @@ _svc_setup() { # [service-yaml]
 printf '%s\n' "\$*" >> "$T/calls"
 case "\$1 \$2" in
   'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
+  # A service with no workspace pane is split from the box's own services
+  # tab, so the stub has to be able to hand one back (CEL-62).
+  'tab list')   printf '{"result":{"tabs":[]}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
   'agent list') printf '{"result":{"agents":[]}}' ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;

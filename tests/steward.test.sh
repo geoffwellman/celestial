@@ -735,6 +735,10 @@ _svc_steward_fixture() { # [restart-policy]
 printf '%s\n' "\$*" >> "$T/calls"
 case "\$1 \$2" in
   'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
+  # The steward has no current pane, so a service it restarts is split from
+  # the box's `cel services` tab, created on demand (CEL-62).
+  'tab list')   printf '{"result":{"tabs":[]}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
   'pane read')  printf 'EADDRINUSE 4322\n' ;;
   *) printf '{}' ;;
 esac
