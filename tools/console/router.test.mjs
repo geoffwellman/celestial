@@ -113,11 +113,10 @@ t('focus takes a product to its orchestrator and a worker to itself', () => {
 });
 
 t('message splits the addressee from the text, quoted or not', () => {
-  // bundle-orch's pane is LIVE in this document, so the plan is the mail AND
-  // the tap on the shoulder (CEL-36); the send is always the first line.
+  // bundle-orch's pane is LIVE here, and still the plan is mail alone: a
+  // prompt types into the composer (CEL-65).
   assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', F), [
     "cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha",
-    "herdr agent prompt bundle-orch 'inbox: pick up ABC-49 next - run cel inbox read'",
   ]);
   assert.equal(plan('message', 'tell bundle "stop and push what you have"', F)[0],
     "cel inbox send bundle-orch 'stop and push what you have' --workspace alpha");
@@ -405,13 +404,14 @@ t('a workspace with two products asks which one instead of guessing', () => {
   assert.equal(plan('message', 'tell beta "hi"', SF), null);
 });
 
-t('message to a LIVE orchestrator is the mail AND the tap on the shoulder', () => {
-  assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', SF), [
-    "cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha",
-    "herdr agent prompt bundle-orch 'inbox: pick up ABC-49 next - run cel inbox read'",
-  ]);
+// CEL-65: a routine message never types into a live composer - the runtime's
+// inbox hook surfaces it out of band and drains it into the next turn.
+t('message to a LIVE orchestrator is mail alone - no herdr agent prompt', () => {
+  const cmds = plan('message', 'tell bundle-orch to pick up ABC-49 next', SF);
+  assert.deepEqual(cmds, ["cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha"]);
+  assert.equal(cmds.filter((c) => c.startsWith('herdr agent prompt')).length, 0);
   assert.equal(steerFor('message', 'tell bundle-orch to pick up ABC-49 next', SF).say,
-    'sent to bundle-orch (pane live, prompted)');
+    'sent to bundle-orch (pane live - its inbox hook delivers it)');
 });
 
 t('message to an orchestrator with no live pane is mail alone, and says so', () => {
@@ -426,14 +426,6 @@ t('message to an orchestrator with no live pane is mail alone, and says so', () 
 t('message to a worker is unchanged', () => {
   assert.deepEqual(plan('message', 'tell ABC-49-slug "push what you have"', SF),
     ["cel inbox send ABC-49-slug 'push what you have' --workspace alpha"]);
-});
-
-t('the prompt carries the first 80 characters of the message and no more', () => {
-  const long = 'x'.repeat(200);
-  const cmds = plan('message', `tell bundle-orch "${long}"`, SF);
-  const head = /'inbox: (x+) - run cel inbox read'/.exec(cmds[1]);
-  assert.ok(head, cmds[1]);
-  assert.equal(head[1].length, 80);
 });
 
 t('nudge reaches an orchestrator as well as a worker', () => {
