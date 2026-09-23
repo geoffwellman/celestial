@@ -281,14 +281,6 @@ _cpa_auth_dir() {
   expand "$d"
 }
 
-# The OAuth client ids are the CLIs' own public ones, which is what
-# CLIProxyAPI logs in with; they are public identifiers, not secrets, and a
-# refresh against the wrong one fails closed as needs-login.
-_CPA_CLAUDE_REFRESH_URL="${CEL_CPA_CLAUDE_REFRESH_URL:-https://console.anthropic.com/v1/oauth/token}"
-_CPA_CODEX_REFRESH_URL="${CEL_CPA_CODEX_REFRESH_URL:-https://auth.openai.com/oauth/token}"
-_CPA_CLAUDE_CLIENT_ID="${CEL_CPA_CLAUDE_CLIENT_ID:-9d1c250a-e61b-44d9-88ed-5944d1962f5e}"
-_CPA_CODEX_CLIENT_ID="${CEL_CPA_CODEX_CLIENT_ID:-app_EMoamEEZ73f0CkXaXp7hrann}"
-
 # provider<TAB>account<TAB>label<TAB>file, one line per credential file in the
 # vault. The identity comes out of the FILE (`account.uuid`,
 # `account.email_address`), never the filename: CLIProxyAPI names the file
@@ -325,9 +317,9 @@ _cpa_field() { # <file> <jq-path>
   jq -r "$2 // empty" "$1" 2>/dev/null || true
 }
 
-# Has this access token already expired? An unparseable or absent expiry is
-# NOT an expiry - it means "ask and find out", and a 401 from the endpoint is
-# the other half of this answer.
+# Has the token in this file already expired? An unparseable or absent expiry
+# is NOT an expiry - it means "ask and find out", and a 401 from the endpoint
+# is the other half of the answer.
 _cpa_expired() { # <file>
   local e; e="$(_cpa_field "$1" '.expire // .expired // .expires_at // .expire_at // .tokens.expire')"
   [ -n "$e" ] || return 1
@@ -336,73 +328,49 @@ _cpa_expired() { # <file>
   [ "$t" -le "$(( $(date +%s) + 60 ))" ]
 }
 
-# WHERE A REFRESHED TOKEN IS WRITTEN IS THE WHOLE RISK, so it is written
-# NOWHERE NEAR THE VAULT. CLIProxyAPI serves live traffic out of these files
-# and refreshes them itself; a second writer racing it can publish a rotated
-# refresh token the proxy does not know about, or leave a half-written file,
-# and the blast radius is every worker on the box - a status read may not put
-# the fleet's credentials at risk to draw a bar. celestial refreshes IN
-# MEMORY, caches the short-lived ACCESS token under its own cache directory at
-# 0600, and lets CLIProxyAPI own the file. Worst case we mint one extra access
-# token; the vault is untouched.
-_cpa_token_cache() { # <file>
-  printf '%s/cpa-access-%s.json' "$(_sub_cache_dir)" "$(_sub_fp "$1")"
-}
-
-_cpa_cached_access() { # <file>
-  local c; c="$(_cpa_token_cache "$1")"
-  [ -f "$c" ] || return 0
-  local exp; exp="$(jq -r '.expires_at // 0' "$c" 2>/dev/null || echo 0)"
-  case "$exp" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$exp" -gt "$(( $(date +%s) + 60 ))" ] || return 0
-  jq -r '.access_token // empty' "$c" 2>/dev/null || true
-}
-
-# A new access token from the refresh token, or nothing at all. The body goes
-# in on STDIN like every other credentialed call here: an argv is world
-# readable in /proc for as long as the process lives.
-_cpa_refresh() { # <provider> <file>
-  local p="$1" f="$2" url cid rt
-  rt="$(_cpa_field "$f" '.refresh_token // .tokens.refresh_token')"
-  [ -n "$rt" ] || return 0
-  case "$p" in
-    claude) url="$_CPA_CLAUDE_REFRESH_URL"; cid="$_CPA_CLAUDE_CLIENT_ID" ;;
-    codex)  url="$_CPA_CODEX_REFRESH_URL";  cid="$_CPA_CODEX_CLIENT_ID" ;;
-    *) return 0 ;;
-  esac
-  local resp
-  resp="$(jq -nc --arg r "$rt" --arg c "$cid" \
-    '{grant_type: "refresh_token", refresh_token: $r, client_id: $c}' |
-    curl -sf -m 15 -X POST "$url" -H 'content-type: application/json' --data-binary @- 2>/dev/null || true)"
-  [ -n "$resp" ] || return 0
-  local at; at="$(printf '%s' "$resp" | jq -r '.access_token // empty' 2>/dev/null || true)"
-  [ -n "$at" ] || return 0
-  local ttl; ttl="$(printf '%s' "$resp" | jq -r '.expires_in // 3600' 2>/dev/null || echo 3600)"
-  case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
-  local c; c="$(_cpa_token_cache "$f")"
-  mkdir -p "$(_sub_cache_dir)"; chmod 700 "$(_sub_cache_dir)" 2>/dev/null || true
-  # written to a temporary file and moved into place: two `cel quota` runs at
-  # once are normal on this box (the console polls while an operator types),
-  # and a reader must never see half a document.
-  local tmp; tmp="$(mktemp "$c.XXXXXX")"
-  jq -nc --arg a "$at" --argjson e "$(( $(date +%s) + ttl ))" \
-    '{access_token: $a, expires_at: $e}' > "$tmp"
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$c"
-  printf '%s' "$at"
-}
-
-# The access token to present for this account, refreshing first when the file
-# says it has already expired. Empty means the credential needs a human.
-_cpa_access_token() { # <provider> <file>
-  local p="$1" f="$2" t
-  t="$(_cpa_cached_access "$f")"
-  [ -n "$t" ] && { printf '%s' "$t"; return 0; }
-  if _cpa_expired "$f"; then
-    _cpa_refresh "$p" "$f"
-    return 0
-  fi
-  _cpa_field "$f" '.access_token // .tokens.access_token'
+# CELESTIAL DOES NOT REFRESH THESE CREDENTIALS. NOTHING HERE POSTS TO A TOKEN
+# ENDPOINT, AND NOTHING HERE WRITES TO THE AUTH-DIR.
+#
+# The first cut of this reader refreshed in memory and wrote nothing, on the
+# theory that a reader which never writes cannot corrupt the vault. The #84
+# review found the hole: the DAMAGE IS DONE AT THE PROVIDER, NOT ON DISK. Both
+# providers rotate the refresh token when it is used - Anthropic's own client
+# keeps the stored one only `if tokenResp.RefreshToken == ""`
+# (`internal/auth/claude/anthropic_auth.go:579-580`), and CLIProxyAPI's Codex
+# path carries a `refresh_token_reused` branch
+# (`internal/auth/codex/openai_auth.go:336`) precisely because auth.openai.com
+# enforces rotation. Spend the vault's refresh token to draw a usage bar,
+# discard the replacement, and the file is still perfect JSON holding a token
+# the provider has already retired: CLIProxyAPI fails at its NEXT refresh and
+# the owner is sent to a browser to log in again. A status read that silently
+# de-authorises the box is worse than no status read.
+#
+# Writing the rotation back instead does not fix it either. CLIProxyAPI
+# refreshes these credentials itself on a fifteen-minute loop
+# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialising per auth id and
+# guarding against out-of-order persistence with locks that live INSIDE its
+# process (`sdk/cliproxy/auth/conductor.go:196-201`) - locks celestial cannot
+# take. A second writer can only race it, and the loser of that race writes
+# back a refresh token the provider has retired, which is the same failure by
+# a longer route.
+#
+# CLIProxyAPI DOES expose a local way to make it refresh one credential -
+# `POST /v0/management/auth-files/refresh?name=<file>`
+# (`internal/api/server_management.go:187`) - and it would be the right door if
+# it were open. It is not: management routes are registered only when a
+# management secret or a local password is configured
+# (`internal/api/server.go:241-245`), and CEL-60 leaves the management API off.
+# Turning it on to draw a bar would add a second credential surface to the box
+# for a status read, which is a worse trade than a stale row.
+#
+# So the vault's owner is the only refresher, which is what it is built to be.
+# celestial presents whatever token the file currently holds. CLIProxyAPI
+# refreshes every credential it holds on a fifteen-minute loop while it runs,
+# so a token that is stale ANYWAY is news in itself - the gateway is not
+# running, or that account is signed out - and a stale row that says so is
+# honest where a broken login is not.
+_cpa_access_token() { # <file>
+  _cpa_field "$1" '.access_token // .tokens.access_token'
 }
 
 # The window mapping, shared by every provider read here so one account's
@@ -502,16 +470,33 @@ _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
   return 0
 }
 
-# A CREDENTIAL THAT NEEDS A HUMAN SAYS SO, AND SAYS WHAT TO TYPE. The old Codex
-# path read a raw token, never refreshed it, and printed `unreadable` for
-# sixteen days before anyone noticed - a word that reads like a transient fault
-# and is acted on like one. `needs_login` is its own state with the command
-# that fixes it, and it is never silence.
+# THREE DIFFERENT PIECES OF NEWS, THREE STATES. The old Codex path printed
+# `unreadable` for all of them and read `unreadable` for sixteen days before
+# anyone noticed - one word for a transient fault, an expired token and a
+# signed-out account, and it is acted on as the first.
+#
+#   stale        the vault's token has expired and CLIProxyAPI - the only
+#                thing that may refresh it - has not. Nothing is broken: it
+#                refreshes when the gateway next runs this account.
+#   needs_login  the provider REJECTED a token the vault calls live. That
+#                credential is finished and only a human can replace it.
+#   unreadable   the endpoint itself could not be read.
 _cpa_needs_login_row() { # <provider> <account> <label>
   jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
     '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
       extra: {state: "needs_login",
               reason: ("needs login: cel gateway login " + $p)}}'
+}
+
+# NOT A FAULT, AND NOT A LOGIN. An idle account whose access token has aged out
+# is waiting for the refresher that owns it, and telling the owner to log in
+# again would send them to a browser to fix nothing - while breaking the
+# credential is exactly what this reader refuses to do.
+_cpa_stale_row() { # <provider> <account> <label>
+  jq -nc --arg p "$1" --arg a "$2" --arg l "$3" \
+    '{provider: $p, account: $a, label: $l, source: "cliproxy", windows: [],
+      extra: {state: "stale",
+              reason: "token stale - refreshed next time this account serves traffic"}}'
 }
 
 _cpa_unreadable_row() { # <provider> <account> <label>
@@ -528,15 +513,19 @@ _sub_cliproxy_rows() {
   local p a label f tok resp doc
   while IFS=$'\t' read -r p a label f; do
     [ -n "$p" ] || continue
-    tok="$(_cpa_access_token "$p" "$f")"
-    if [ -z "$tok" ]; then _cpa_needs_login_row "$p" "$a" "$label"; continue; fi
-    resp="$(_cpa_usage_fetch "$p" "$tok" "$a")"
-    if [ -z "$resp" ]; then
-      tok="$(_cpa_refresh "$p" "$f")"
-      if [ -z "$tok" ]; then _cpa_needs_login_row "$p" "$a" "$label"; continue; fi
-      resp="$(_cpa_usage_fetch "$p" "$tok" "$a")"
+    tok="$(_cpa_access_token "$f")"
+    # A file that says its token has already expired is not worth a call: the
+    # only thing that could refresh it is CLIProxyAPI, and it has not.
+    if [ -z "$tok" ] || _cpa_expired "$f"; then
+      _cpa_stale_row "$p" "$a" "$label"; continue
     fi
-    if [ -z "$resp" ]; then _cpa_unreadable_row "$p" "$a" "$label"; continue; fi
+    resp="$(_cpa_usage_fetch "$p" "$tok" "$a")"
+    # A REJECTED TOKEN IS NOT MET WITH A REFRESH: see the note above
+    # _cpa_access_token. The vault called this token live and the provider
+    # disagreed, which is a credential only a human can replace - and the one
+    # thing that must not happen on the way to saying so is a token endpoint
+    # call that retires the vault's refresh token.
+    if [ -z "$resp" ]; then _cpa_needs_login_row "$p" "$a" "$label"; continue; fi
     doc="$(printf '%s' "$resp" | _cpa_map_usage "$p" "$a" "$label" cliproxy)"
     if [ -n "$doc" ]; then printf '%s\n' "$doc"
     else _cpa_unreadable_row "$p" "$a" "$label"; fi
@@ -961,6 +950,7 @@ _sub_line() { # <usage-json> [bar-width]
   # says so where the windows would be - the row with nothing in it is the one
   # nobody acts on (CEL-61).
   [ "$state" = needs_login ] && out="${out}${reason}"
+  [ "$state" = stale ] && out="${out}${reason}"
   printf '%s' "$out"
 }
 

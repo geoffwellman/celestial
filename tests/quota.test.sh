@@ -788,25 +788,28 @@ test_the_usage_reader_never_calls_a_token_endpoint() {
 # about it. The old Codex path read a raw token, never noticed it had gone
 # stale, and printed `unreadable` for sixteen days - a word that reads like a
 # transient fault and gets waited out.
-test_a_stale_vault_token_reads_as_needs_login_not_unreadable() {
+test_a_stale_vault_token_reads_as_stale_not_unreadable() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
   _cpa_vault --expired
   . "$CEL_ROOT/lib/quota.sh"
   local out; out="$(subscription_list)"
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 4
+  # STALE IS ITS OWN STATE. Nothing is broken: CLIProxyAPI - the only thing
+  # that may refresh this - simply has not yet. Calling that a login sends the
+  # owner to a browser to fix nothing; calling it unreadable gets it waited out.
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "stale")] | length')" 4
   assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "unreadable")] | length')" 0
-  # the reason names the refresher AND the command, because "stale" with no
-  # next action is the same silence in a longer word
-  assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'cel gateway login'
-  assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'gateway'
-  assert_contains "$(cmd_quota 2>/dev/null)" 'needs login'
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 0
+  assert_contains "$(printf '%s' "$out" | jq -r '.[0].extra.reason')" 'serves traffic'
+  assert_contains "$(cmd_quota 2>/dev/null)" 'token stale'
   _quota_stub_stop
   _quota_teardown
 }
 
-# A token the vault calls live and the provider rejects anyway is the same
-# news: the credential needs a human, not a retry and not a refresh.
+# A token the vault calls LIVE and the provider rejects anyway is the other
+# news: that credential is finished and only a human can replace it. Still not
+# a refresh - the one call that must never happen is the one that would retire
+# the vault's refresh token on the way to saying so.
 test_a_rejected_vault_token_reads_as_needs_login() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"

@@ -10,12 +10,16 @@
   The rows are the shape the console's QUOTA view and the dashboard card
   already render — every account, every window, scope labels read off the
   response rather than named in code, so a scoped weekly window appears
-  without a release. An expired access token is refreshed with its refresh
-  token; refreshes happen **in memory**, cached at 0600 under cel's own cache,
-  and the vault CLIProxyAPI serves traffic from is never written to. A
-  credential that cannot be refreshed reads `needs login: cel gateway login
-  <provider>` rather than `unreadable`. opencode keeps reporting from its own
-  auth file, which the vault has never held.
+  without a release. **celestial never refreshes a token and never calls a
+  provider's token endpoint**: CLIProxyAPI owns these credentials, refreshes
+  them on its own loop, and both providers rotate the refresh token on use —
+  spending it to draw a usage bar would retire the one the gateway has stored
+  and send the owner back to a browser. An account whose stored token has aged
+  out reads `token stale - refreshed next time this account serves traffic`; a
+  token the provider actually rejects reads `needs login: cel gateway login
+  <provider>`; neither reads `unreadable`, which is the word CEL-49's Codex row
+  wore for sixteen days. opencode keeps reporting from its own auth file, which
+  the vault has never held.
 - omp's `usage --json` path stays as the fallback until the new reader has
   proved itself: with no accounts in the vault, the output is exactly what it
   was. `tools/quota-compare.sh` prints both readers side by side, per account
