@@ -35,6 +35,8 @@ Your INBOX
   anyone typing into your pane:
   `Monitor(command: "cel inbox watch", persistent: true)`. A monitor dies
   with its session - restart it after a restart, resume or compaction.
+  (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
+  you of new mail and injects unread mail into your next turn - no action.)
 - Send with `cel inbox send <who> "<message>"`, not `herdr agent prompt`:
   prompting types into the target's composer and mangles whatever a human is
   half-way through writing. Recipient names are the same derivation:

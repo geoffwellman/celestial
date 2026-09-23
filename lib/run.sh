@@ -808,6 +808,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       gflag="$(agent_guard_hook "$runtime" flag)"; gfile="$(agent_guard_hook "$runtime" file)"
       if [ -n "$gflag" ] && [ -n "$gfile" ]; then
         AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
+      fi
+      # Out-of-band inbox delivery for runtimes without Monitor/UserPromptSubmit.
+      gflag="$(agent_inbox_hook "$runtime" flag)"; gfile="$(agent_inbox_hook "$runtime" file)"
+      if [ -n "$gflag" ] && [ -n "$gfile" ]; then
+        AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
       fi ;;
   esac
 
