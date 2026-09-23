@@ -342,6 +342,19 @@ _quota_gateway_stub() { # [--down]
   export CEL_GATEWAY_STATE="$T/gwstate"
   mkdir -p "$T/gwstate/auth"
   printf '{}' > "$T/gwstate/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
+  # AND AN OMP ON PATH, WHICH IS A FIXTURE FOR A LEFTOVER, NOT FOR THE FEATURE.
+  # `_sub_gateway_rows` (lib/quota.sh:331) still opens with `command -v omp`
+  # even though everything it then calls - gateway_installed, gateway_ready,
+  # gateway_accounts_json - stopped touching omp in CEL-60. Without this stub
+  # the test passes only on a box that happens to have omp installed, which is
+  # exactly how it went red on CI and green here. lib/quota.sh is CEL-61's to
+  # edit; when that gate goes, this stub goes with it.
+  cat >"$T/bin/omp" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$T/bin/omp"
+  PATH="$T/bin:$PATH"
   cat >"$T/gwstub" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in ready) exit "${GW_STUB_DOWN:-0}" ;; esac
