@@ -271,13 +271,24 @@ _sub_omp_rows() {
 # account list and the provider is the source of truth for the numbers, which
 # is what omp was doing internally all along.
 #
-# The auth-dir is CEL-60's decision (box state dir, 0700, never inside a repo);
-# this reads it and never writes to it. `~/.cli-proxy-api` is CLIProxyAPI's own
-# default and the last resort.
+# The auth-dir is CEL-60's decision AND CEL-60's helper: `gateway_auth_dir`
+# (lib/gateway.sh) is the one place that knows where the vault lives. Two
+# answers to "where are the credentials" is the two-lists failure this ticket
+# exists to end, in miniature and inside one process, so this asks rather than
+# knows. gateway.sh is sourced HERE rather than at the top of the file because
+# it pulls in the service registry, and every caller of quota.sh does not need
+# it. This reads the vault and never writes to it.
+#
+# `CEL_CPA_AUTH_DIR` is the test seam; the last line is CEL-60's own default,
+# for a caller that has quota.sh without gateway.sh beside it.
 _cpa_auth_dir() {
   local d="${CEL_CPA_AUTH_DIR:-}"
-  [ -n "$d" ] || d="$(cel_config_get gateway auth_dir 2>/dev/null || true)"
-  [ -n "$d" ] || d="$HOME/.cli-proxy-api"
+  if [ -z "$d" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/gateway.sh" ]; then
+    # shellcheck source=lib/gateway.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+    d="$(gateway_auth_dir 2>/dev/null || true)"
+  fi
+  [ -n "$d" ] || d="${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}/auth"
   expand "$d"
 }
 

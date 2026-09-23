@@ -928,3 +928,23 @@ test_the_parity_tool_prints_both_readers_side_by_side() {
   _quota_stub_stop
   _quota_teardown
 }
+
+# ONE ANSWER TO "WHERE ARE THE CREDENTIALS". CEL-60 owns the vault's location
+# and publishes `gateway_auth_dir`; a second opinion here would be the
+# two-lists failure this ticket exists to end, rebuilt inside one process. With
+# no test seam set, the reader must find the accounts `cel gateway status`
+# lists.
+test_the_vault_is_found_where_cel_gateway_says_it_is() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  export CEL_GATEWAY_STATE="$T/gwstate"
+  _cpa_vault
+  mkdir -p "$CEL_GATEWAY_STATE"
+  mv "$CEL_CPA_AUTH_DIR" "$CEL_GATEWAY_STATE/auth"
+  unset CEL_CPA_AUTH_DIR
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_eq "$(_cpa_auth_dir)" "$CEL_GATEWAY_STATE/auth"
+  assert_eq "$(subscription_list | jq -r '[.[] | select(.source == "cliproxy")] | length')" 4
+  _quota_stub_stop
+  _quota_teardown
+}
