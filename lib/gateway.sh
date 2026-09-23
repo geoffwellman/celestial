@@ -2,27 +2,33 @@
 # cel gateway - several subscriptions behind one loopback door.
 #
 # The owner has more than one Codex or Claude subscription signed in and wants
-# work spread across them so no single one maxes out. omp already holds the
-# accounts: `auth-broker` is the vault (several OAuth credentials per provider,
-# keyed by an identity hash per account) and `auth-gateway` is a LiteLLM-shaped
-# OpenAI/Anthropic surface on loopback that mints the OAuth itself, drops the
-# accounts that are unavailable and picks one of the rest by SESSION KEY. This
-# file is the plane's side of that: two supervised services, an account table,
-# and the one-line verb for logging another subscription in.
+# work spread across them so no single one maxes out. Until CEL-60 that door
+# was omp's `auth-broker` + `auth-gateway` pair, and on this box it had NEVER
+# run: `omp auth-gateway status --json` answered `ready:false,
+# brokerConfigured:false` with zero credentials, so every worker queued on one
+# account - on 2026-09-20 one Anthropic account hit its five-hour limit and
+# stalled four workers while another sat at 16%.
+#
+# The door is now CLIProxyAPI: ONE supervised process that is both the
+# credential vault (one OAuth JSON per account in its auth-dir) and the
+# OpenAI/Anthropic-shaped surface on loopback. omp stays on the box - it is an
+# agent runtime kind - but nothing here calls it any more, because two
+# credential vaults is the failure this replaced.
 #
 # THE SESSION KEY IS THE WHOLE BALANCING MECHANISM, AND PI DOES NOT SEND ONE.
-# The spike (.cel/specs/SPIKE-gateway.report.md) put a logging proxy in front
-# of the gateway and watched three pi runs with three distinct --session-id
-# values arrive with no session header at all - pi's --session-id is local
-# bookkeeping and never leaves the process. So the launcher injects one:
-# a provider `headers` entry bound to $CEL_SESSION_ID, set per worker. Without
-# it every worker on the box is the same anonymous session and the balancer
-# has nothing to balance on.
+# The first spike (.cel/specs/SPIKE-gateway.report.md) put a logging proxy in
+# front of the gateway and watched three pi runs with three distinct
+# --session-id values arrive with no session header at all - pi's --session-id
+# is local bookkeeping and never leaves the process. So the launcher injects
+# one: a provider `headers` entry bound to $CEL_SESSION_ID, set per worker.
+# CLIProxyAPI reads exactly that header, and `routing.session-affinity: true`
+# then pins one account for the length of the conversation.
 #
-# THE BEARER IS NEVER PRINTED AND NEVER WRITTEN. It grants every subscription
-# in the vault to anything that can reach the port. It lives in
-# ~/.omp/auth-gateway.token (0600, omp's own file); the plane passes the NAME
-# of the variable and lets the pane read the value itself at launch.
+# THE API-KEY IS NEVER PRINTED. One key unlocks every subscription in the
+# vault to anything that can reach the port, which is why the service binds
+# 127.0.0.1, the management API is left out of the config entirely, and pi's
+# provider block names the VARIABLE ($CEL_GATEWAY_API_KEY) rather than holding
+# the value.
 [ -n "${_CEL_GATEWAY:-}" ] && return 0
 _CEL_GATEWAY=1
 # shellcheck source=lib/common.sh
@@ -32,117 +38,126 @@ _CEL_GATEWAY=1
 # shellcheck source=lib/services.sh
 . "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # svc_box_write, svc_start
 
-_GATEWAY_DEFAULT_BROKER_PORT=47311
-_GATEWAY_DEFAULT_GATEWAY_PORT=47411
+# CLIProxyAPI's own default (config.example.yaml:7). Nothing on this box has
+# ever bound it, so there is no legacy port to keep.
+_GATEWAY_DEFAULT_PORT=8317
 
+# The box's gateway state: the config CLIProxyAPI reads, the api-key it
+# accepts, and the vault of OAuth files. NEVER inside a repo - a worktree gets
+# committed, pushed and read by a reviewer.
 gateway_state_dir() { printf '%s' "${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}"; }
+gateway_config_file() { printf '%s/config.yaml' "$(gateway_state_dir)"; }
+gateway_auth_dir()   { printf '%s/auth' "$(gateway_state_dir)"; }
+_gateway_key_file()  { printf '%s/api-key' "$(gateway_state_dir)"; }
 
-# The ports, from the box config, with the spike's defaults. Loopback is not
-# configurable: see the bearer note above.
-gateway_port() { # <broker|gateway>
-  local v
-  case "$1" in
-    broker)  v="$(cel_config_get gateway broker_port)";  printf '%s' "${v:-$_GATEWAY_DEFAULT_BROKER_PORT}" ;;
-    gateway) v="$(cel_config_get gateway gateway_port)"; printf '%s' "${v:-$_GATEWAY_DEFAULT_GATEWAY_PORT}" ;;
-    *) return 1 ;;
-  esac
+# The port, from the box config, with CLIProxyAPI's default. `gateway_port`
+# is the key CEL-60 writes; `gateway.gateway_port` is what CEL-28 wrote and is
+# still read so an existing box keeps answering on the port its workers know.
+# Loopback is not configurable: see the api-key note above.
+gateway_port() {
+  local v; v="$(cel_config_get gateway port)"
+  [ -n "$v" ] || v="$(cel_config_get gateway gateway_port)"
+  printf '%s' "${v:-$_GATEWAY_DEFAULT_PORT}"
 }
 
-gateway_url()        { printf 'http://127.0.0.1:%s' "$(gateway_port gateway)"; }
-gateway_broker_url() { printf 'http://127.0.0.1:%s' "$(gateway_port broker)"; }
+gateway_url()        { printf 'http://127.0.0.1:%s' "$(gateway_port)"; }
+gateway_health_url() { printf '%s/healthz' "$(gateway_url)"; }
 
 # Installed means the config says so, not that the port answers - a box whose
-# services are merely down is installed and broken, which is a different
+# service is merely down is installed and broken, which is a different
 # sentence from "there is no gateway here".
-gateway_installed() { [ -n "$(cel_config_get gateway gateway_port)" ]; }
-
-# The two tokens, read at the moment they are needed and never stored by us.
-# `omp auth-gateway token` CREATES the file on first call, which is why
-# install calls it once: a service that has to mint its own bearer races with
-# the health check that reads it.
-_gateway_token()        { omp auth-gateway token 2>/dev/null | tr -d '\r\n'; }
-_gateway_broker_token() { omp auth-broker token 2>/dev/null | tr -d '\r\n'; }
-
-# The broker's address and bearer are required by BOTH omp subcommands - they
-# error out without them, and that error is exactly the `not_configured` the
-# spike chased for an afternoon.
-_gateway_omp() { # <args...>
-  OMP_AUTH_BROKER_URL="$(gateway_broker_url)" \
-  OMP_AUTH_BROKER_TOKEN="$(_gateway_broker_token)" \
-  omp "$@"
+gateway_installed() {
+  [ -n "$(cel_config_get gateway port)" ] || [ -n "$(cel_config_get gateway gateway_port)" ]
 }
 
-# TEST SEAM. `$CEL_GATEWAY_STUB ready|models` stands in for the HTTP reads so
-# a suite never depends on which accounts this box is signed in to. Same shape
-# as lib/quota.sh's CEL_QUOTA_STUB.
+# The api-key, minted once and read from a 0600 file. MINTED ONCE MATTERS: a
+# second `install` that rolled it would 401 every pi worker already launched
+# against this gateway, and the failure reads as "the model is gone".
+_gateway_api_key() {
+  local f; f="$(_gateway_key_file)"
+  if [ ! -s "$f" ]; then
+    mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
+  fi
+  tr -d '\r\n' < "$f"
+}
+
+# TEST SEAM, kept from CEL-28 because lib/quota.sh and lib/profiles.sh have
+# suites that set it: `$CEL_GATEWAY_STUB ready|models` stands in for the HTTP
+# reads so no suite depends on which accounts this box is signed in to.
 _gateway_stub() { [ -n "${CEL_GATEWAY_STUB:-}" ]; }
 
-# Is the door open? A bearer-authenticated GET /v1/models, which is also the
-# health check the services carry: an unauthenticated read answers 401 and a
-# port knock answers nothing useful at all.
+# Is the door open? GET /healthz, UNAUTHENTICATED - the real health probe this
+# gateway never had. omp's only readable route was /v1/models behind a bearer,
+# so a health check had to carry the key that unlocks every subscription just
+# to say "up", and an unauthenticated read answered 401 and called a working
+# gateway down once a tick forever.
 gateway_ready() {
   _gateway_stub && { "$CEL_GATEWAY_STUB" ready; return $?; }
-  local tok; tok="$(_gateway_token)"
-  [ -n "$tok" ] || return 1
-  printf 'Authorization: Bearer %s\n' "$tok" \
-    | curl -sf -m 5 -o /dev/null "$(gateway_url)/v1/models" -H @- 2>/dev/null
+  curl -sf -m 5 -o /dev/null "$(gateway_health_url)" 2>/dev/null
 }
 
+# GET /v1/models, which every /v1 route requires the api-key for. The key
+# rides STDIN, never argv - a bearer in a command line is a bearer in `ps`.
 gateway_models_json() {
   _gateway_stub && { "$CEL_GATEWAY_STUB" models; return $?; }
-  local tok; tok="$(_gateway_token)"
-  [ -n "$tok" ] || return 1
-  printf 'Authorization: Bearer %s\n' "$tok" \
+  local key; key="$(_gateway_api_key)"
+  [ -n "$key" ] || return 1
+  printf 'Authorization: Bearer %s\n' "$key" \
     | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
 }
 
 # --- the account table ----------------------------------------------------
 
-# `auth-gateway check --json` without --strict: strict probes each credential
-# against its provider's chat endpoint and SPENDS QUOTA per credential, which
-# is not a thing a status command may do behind someone's back.
+# THE AUTH-DIR IS THE ACCOUNT LIST. CLIProxyAPI's management API is off on
+# this box (it is the remote-control surface, and one api-key already unlocks
+# everything), so the files ARE the evidence - and reading them costs no
+# quota, which omp's `auth-gateway check --strict` spent once per status.
 #
-# Normalised to one row per account, in the shape a subscription row has, so
-# the QUOTA view can list gateway accounts beside the direct ones:
-#   { source, provider, id, type, ok, windows: [{label, used, limit,
-#     used_pct, state, resets_at}] }
+# The filenames carry what the table needs (SPIKE-cliproxy.report.md):
+#   claude-<hash>-<email>.json          internal/auth/claude/filename.go:27,32
+#   codex-<hash>-<email>-<plan>.json    internal/auth/codex/filename.go:24-31
+# The PLAN exists only in the name, which is why the name is parsed at all
+# rather than only the JSON inside.
 #
-# THE ID IS SHORT AND THE EMAIL IS DROPPED. The table is read over shoulders
-# and pasted into tickets; the account email is personal data no operator
-# decision needs, and a 36-character UUID pushes every other column off the
-# edge.
+# Rows come out in the shape a subscription row has, so the QUOTA view can
+# list gateway accounts beside the direct ones:
+#   { source, provider, id, email, plan, type, ok, windows: [] }
+#
+# `windows` is EMPTY, always, and that is not a bug: CLIProxyAPI removed
+# built-in usage accounting in v6.10.0, and its per-credential quota snapshot
+# is the last upstream response's rate-limit headers - empty until an account
+# serves traffic, so "no usage probe" and not "0% used". CEL-61 builds the
+# usage reader over these same files.
 gateway_accounts_json() {
-  local raw
-  raw="$(_gateway_omp auth-gateway check --json 2>/dev/null || true)"
-  [ -n "$raw" ] || { printf '[]'; return 0; }
-  printf '%s' "$raw" | jq -c '
-    [ (.credentials // [])[] | {
-        source: "gateway",
-        provider: (.provider // "?"),
-        id: (if (.accountId // "") != "" then (.accountId | tostring | .[0:6])
-             else "cred-" + ((.id // "?") | tostring) end),
-        type: (.type // ""),
-        ok: .ok,
-        windows: [ ((.report.limits // [])[] | {
-          label: (.label // .window.label // .window.id // "window"),
-          used: (.amount.used // null),
-          limit: (.amount.limit // null),
-          used_pct: (if (.amount.usedFraction // null) != null
-                     then ((.amount.usedFraction * 100) | round)
-                     elif (.amount.limit // 0) > 0 then (((.amount.used // 0) * 100 / .amount.limit) | round)
-                     else null end),
-          state: (.status // "unknown"),
-          resets_at: (.window.resetsAt // null),
-        }) ]
-      } ]' 2>/dev/null || printf '[]'
+  local d; d="$(gateway_auth_dir)"
+  [ -d "$d" ] || { printf '[]'; return 0; }
+  local f base rest provider hash email plan rows=""
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f" .json)"
+    provider="${base%%-*}"
+    rest="${base#*-}"
+    [ "$rest" != "$base" ] || continue
+    hash="${rest%%-*}"
+    rest="${rest#*-}"
+    plan=""
+    email="$rest"
+    # A trailing segment that is not part of the address is the plan: emails
+    # may contain a hyphen, so the test is "the last segment has no @".
+    case "$rest" in
+      *-*) case "${rest##*-}" in *@*) ;; *) plan="${rest##*-}"; email="${rest%-*}" ;; esac ;;
+    esac
+    rows="$rows$(jq -nc --arg p "$provider" --arg i "${hash:0:6}" --arg e "$email" --arg pl "$plan" \
+      '{source:"gateway", provider:$p, id:$i, email:$e, plan:$pl, type:"oauth", ok:true, windows:[]}')
+"
+  done
+  printf '%s' "$rows" | jq -sc '.' 2>/dev/null || printf '[]'
 }
 
 # How many accounts the balancer could actually pick from, all providers or
-# one. `ok: null` means "no usage probe for this provider" - the credential is
-# there and works, it just cannot report a number - so it counts as usable;
-# only an explicit false does not. An api_key credential is listed but is NOT
-# part of the OAuth balancer (proved by `omp dry-balance`), which is a caveat
-# for the docs, not a reason to hide the row.
+# one. A credential file that exists is a credential the proxy will try; it
+# cannot be known to be spent without spending a request on finding out.
 gateway_usable_count() { # [provider]
   local js; js="$(gateway_accounts_json)"
   if [ -n "${1:-}" ]; then
@@ -153,126 +168,145 @@ gateway_usable_count() { # [provider]
 }
 
 gateway_status_json() {
-  local broker gwstat accounts ready=false
-  broker="$(_gateway_omp auth-broker status --json 2>/dev/null || true)"
-  gwstat="$(_gateway_omp auth-gateway status --json 2>/dev/null || true)"
+  local accounts ready=false
   accounts="$(gateway_accounts_json)"
   gateway_ready && ready=true
   jq -n --argjson accounts "$accounts" \
-        --argjson broker "${broker:-null}" \
-        --argjson gw "${gwstat:-null}" \
-        --arg port "$(gateway_port gateway)" \
-        --arg bport "$(gateway_port broker)" \
+        --arg port "$(gateway_port)" \
+        --arg url "$(gateway_url)" \
+        --arg authdir "$(gateway_auth_dir)" \
         --argjson installed "$(gateway_installed && echo true || echo false)" \
         --argjson ready "$ready" '{
     installed: $installed, ready: $ready,
-    port: ($port | tonumber), broker_port: ($bport | tonumber),
-    broker_ok: ($broker.ok // false),
-    credentials: ($gw.credentialCount // 0),
-    reason: ($gw.reason // null),
+    port: ($port | tonumber), url: $url, auth_dir: $authdir,
+    credentials: ($accounts | length),
     accounts: $accounts }'
 }
 
-# --- the services ---------------------------------------------------------
+# --- the config file ------------------------------------------------------
 
-# The two box services, as data. They belong to the BOX and not to any
-# workspace - every workspace's workers go through this one door - so CEL-34
-# gives them a home in `services.d`, where `cel services` and the steward
-# sweep already look.
+# CLIProxyAPI HAS NO FLAG-ONLY MODE (cmd/server/main.go): every setting below
+# exists only in this file, so install writes it and the suite asserts each
+# line by key. The comments say WHY, because the next person to edit this file
+# is deciding whether a line matters.
+_gateway_config_write() {
+  local f; f="$(gateway_config_file)"
+  local d; d="$(gateway_state_dir)"
+  mkdir -p "$d" "$(gateway_auth_dir)"
+  chmod 700 "$d" "$(gateway_auth_dir)"
+  local tmp; tmp="$(mktemp "$d/.config.XXXXXX")"
+  {
+    cat <<'EOS'
+# Written by `cel gateway install` - edit the box config (cel.yaml) and run it
+# again rather than hand-editing, or the next install overwrites you.
+EOS
+    cat <<EOS
+# ONE API-KEY BELOW UNLOCKS EVERY SUBSCRIPTION IN THE VAULT, so the listener
+# never leaves this machine. A LAN bind would hand the owner's accounts to
+# whatever else is on the network.
+host: "127.0.0.1"
+port: $(gateway_port)
+
+# The vault: one OAuth JSON per account, 0700, in the box state dir. Never
+# inside a repo - a worktree gets committed, pushed and read by a reviewer.
+auth-dir: "$(gateway_auth_dir)"
+
+# The static bearer every /v1 route requires. pi is handed the NAME of the
+# variable that holds it, never the value.
+api-keys:
+  - "$(_gateway_api_key)"
+
+# Provider prefixes stay off, so model ids reach pi plain (gpt-5.5, not
+# ompgw/openai-codex/gpt-5.5). The earlier gateway's three-segment ids broke
+# everything in the plane that splits a model id on the first slash.
+force-model-prefix: false
+
+routing:
+  # THE DEFAULT IS false AND false IS WORSE THAN ONE ACCOUNT: without affinity
+  # a worker switches account mid-conversation, so the second turn of a task
+  # is answered by a subscription that never saw the first. The key it pins on
+  # is the x-session-id header the launcher injects per worker.
+  session-affinity: true
+  session-affinity-ttl: 1h
+
+# There is deliberately no remote-management block. The management API is the
+# off-box control surface for exactly the vault this file protects; leaving it
+# out is the only setting that cannot be got wrong later.
+EOS
+  } > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$f"
+}
+
+# --- the service ----------------------------------------------------------
+
+# ONE box service, where omp needed two. It belongs to the BOX and not to any
+# workspace - every workspace's workers go through this one door - so CEL-34's
+# `services.d` is its home, where `cel services` and the steward sweep already
+# look.
 #
-# The gateway process is useless without the broker's URL and bearer, so both
-# ride in its environment - the bearer by a command that READS it, never by
-# value: a service definition is a file on disk, and a token in it is a token
-# on disk waiting to be backed up somewhere it should not be. The gateway's
-# health check names its bearer the same way, because /v1/models answers 401
-# unauthenticated and a check that could not present one would call a working
-# gateway down once a tick forever.
+# THE NAME IS UNCHANGED (`cel-auth-gateway`). lib/doctor.sh and lib/orphans.sh
+# both key off it, and they belong to other tickets; the process behind the
+# name changed, the handle the box holds it by did not.
 #
-# ONLY THE GATEWAY DECLARES A HEALTH PATH. The broker (omp 18.1.17) has no GET
-# route at all - `/`, `/status` and `/healthz` all answer 404, bearer or not -
-# so any path declared for it is a permanent false alarm, and the rule here is
-# that no health beats a health check that always fails. The gateway's
-# /v1/models is the read that proves both: the gateway mints its OAuth through
-# the broker and cannot answer without it.
+# The health check carries NO bearer: /healthz is unauthenticated
+# (internal/api/server_routes.go:44-52), so the probe no longer has to present
+# the key that unlocks every subscription just to say "up".
 gateway_service_specs() {
-  jq -n --arg b "$(gateway_port broker)" --arg g "$(gateway_port gateway)" '[
-    { name: "cel-auth-broker",
-      cmd: ("omp auth-broker serve --bind 127.0.0.1:" + $b),
-      restart: "auto",
-      env: {} },
+  jq -n --arg p "$(gateway_port)" --arg cfg "$(gateway_config_file)" '[
     { name: "cel-auth-gateway",
-      cmd: ("omp auth-gateway serve --bind 127.0.0.1:" + $g),
-      health: ("http://127.0.0.1:" + $g + "/v1/models"),
-      health_auth: "bearer $(omp auth-gateway token)",
+      cmd: ("cli-proxy-api --config " + $cfg),
+      url: ("http://127.0.0.1:" + $p),
+      health: ("http://127.0.0.1:" + $p + "/healthz"),
       restart: "auto",
-      env: { OMP_AUTH_BROKER_URL: ("http://127.0.0.1:" + $b),
-             OMP_AUTH_BROKER_TOKEN: "$(omp auth-broker token)" } }
+      env: {} }
   ]'
 }
 
-# Hand the two definitions to the box's service registry. Before CEL-34 this
-# wrote them to a private file under the gateway's state directory and printed
-# "NOT supervised", which was true and stayed true: the processes ran for a day
-# with nothing watching them. `services.d` is the seam - one 0600 file per
-# service in a 0700 directory, and the steward sweep finds them itself.
-#
-# A `port:` and a `url:` are both accepted there; these carry a full health URL
-# and the port is read out of it, so nothing here needs to agree twice about
-# which port the gateway is on.
 _gateway_register_services() {
-  local specs name spec
-  specs="$(gateway_service_specs)"
+  local spec name
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     name="$(printf '%s' "$spec" | jq -r '.name')"
-    # The declared url is the health url without its path when there is one,
-    # and the bind port otherwise: the port is the handle every service row
-    # keys off, and the broker declares no health check.
-    spec="$(printf '%s' "$spec" | jq -c --arg b "$(gateway_port broker)" \
-      '. + {url: (if (.health // "") != "" then (.health | capture("^(?<base>[a-z]+://[^/]+)").base)
-                  else "http://127.0.0.1:" + $b end)}')"
     svc_box_write "$name" "$spec"
-  done < <(printf '%s' "$specs" | jq -c '.[]')
-  c_ok "both services are in $(svc_box_dir) - supervised by the steward"
+  done < <(gateway_service_specs | jq -c '.[]')
+  c_ok "the gateway service is in $(svc_box_dir) - supervised by the steward"
   return 0
 }
 
-# Start whatever is not already answering, through the SAME path everything
-# else on this box is started by: a pane the steward can read and restart,
-# rather than the nohup-and-a-pid-file this used to do behind the plane's back.
-# Idempotent by construction - a service already listening is left alone.
+# Start it through the SAME path everything else on this box is started by: a
+# pane the steward can read and restart, rather than a nohup and a pid file.
+# Idempotent by construction - a port already listening is left alone.
 _gateway_start() {
-  local b g
-  b="$(gateway_port broker)"; g="$(gateway_port gateway)"
-  svc_listening "$b" || svc_start "" cel-auth-broker || true
-  if ! svc_listening "$g"; then
-    # The gateway mints OAuth against the broker at startup, so a gateway
-    # started in the same breath as its broker asks a door that is not open
-    # yet and exits. Two seconds is what the spike measured.
-    sleep 2
-    svc_start "" cel-auth-gateway || true
-  fi
+  local p; p="$(gateway_port)"
+  svc_listening "$p" || svc_start "" cel-auth-gateway || true
 }
 
 # --- the pi provider ------------------------------------------------------
 
 gateway_pi_dir() { printf '%s' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"; }
 
-# Write the `ompgw` provider into pi's models.json, MERGING.
+# Write the gateway's providers into pi's models.json, MERGING.
 #
 # models.json is the owner's file: it carries whatever providers they added by
 # hand, and a writer that rebuilt the document from the gateway's model list
-# would silently delete them. jq merges one key and leaves the rest byte-alike.
+# would silently delete them. jq merges the two keys and leaves the rest
+# byte-alike.
 #
-# The model list is GENERATED, never hand-written: pi replaces a provider's
-# list wholesale, so every context window and output cap in it is ours to fill
-# and would be wrong the moment the gateway's upstreams changed. The ids are
-# the gateway's own `<provider>/<model>`, so through pi they read
-# `ompgw/openai-codex/gpt-5.5` - three segments, which anything in the plane
-# that splits a model id on the first slash has to expect.
+# TWO BLOCKS, ONE GATEWAY. CLIProxyAPI serves both an OpenAI-shaped
+# /v1/chat/completions and an Anthropic-shaped /v1/messages over the same
+# accounts, and pi speaks both; Claude models go through `anthropic-messages`
+# because that is the protocol they were designed for, everything else through
+# `openai-completions`.
+#
+# THE PROVIDER KEY IS STILL `ompgw`. lib/profiles.sh prefixes a `via: gateway`
+# model with exactly that string and lib/run.sh names it in the launch
+# environment; both belong to other tickets, so renaming the key here would
+# break every gateway profile on the box for a cosmetic gain. The rename is
+# noted in .agent/result.md as a follow-up.
 #
 # apiKey and the session header are written as VARIABLE NAMES. pi expands them
-# from the pane's environment at launch, so no token and no session id is ever
+# from the pane's environment at launch, so no key and no session id is ever
 # in this file.
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
@@ -285,25 +319,31 @@ gateway_pi_models_write() { # [models.json path]
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   jq --argjson models "$models" --arg url "$(gateway_url)/v1" '
-    .providers = ((.providers // {}) + { ompgw: {
-      name: "omp auth-gateway",
-      baseUrl: $url,
-      apiKey: "$OMP_GATEWAY_TOKEN",
-      api: "openai-completions",
-      headers: { "x-session-id": "$CEL_SESSION_ID" },
-      models: $models } })' "$f" > "$tmp" && mv "$tmp" "$f"
+    ([$models[] | select(.id | test("^claude"))]) as $claude
+    | ([$models[] | select(.id | test("^claude") | not)]) as $rest
+    | .providers = ((.providers // {}) + {
+        ompgw: {
+          name: "cel gateway",
+          baseUrl: $url,
+          apiKey: "$CEL_GATEWAY_API_KEY",
+          api: "openai-completions",
+          headers: { "x-session-id": "$CEL_SESSION_ID" },
+          models: $rest },
+        "ompgw-claude": {
+          name: "cel gateway (anthropic)",
+          baseUrl: $url,
+          apiKey: "$CEL_GATEWAY_API_KEY",
+          api: "anthropic-messages",
+          headers: { "x-session-id": "$CEL_SESSION_ID" },
+          models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
 # --- doctor ---------------------------------------------------------------
 
 # One line, and the verb that fixes it. The failure this exists for is silent:
-# a credential the broker has disabled VANISHES from /v1/models entirely, so a
-# worker launched at `ompgw/anthropic/...` dies with "Unknown model" rather
-# than "auth expired", and nothing on the box said the account had lapsed.
-#
-# The broker does not expose its disabled rows over HTTP in omp 18.1.17, so
-# the count is only printed when it can be learned; the provider having
-# NOTHING usable is the part that is always knowable and always actionable.
+# a provider with no credential in the vault serves no model of that shape at
+# all, so a worker launched at it dies with "Unknown model" rather than "auth
+# expired", and nothing on the box said the account was never signed in.
 # CEL_GATEWAY_WATCH names the providers worth asserting about on this box.
 gateway_doctor_line() {
   if ! gateway_installed; then
@@ -317,18 +357,16 @@ gateway_doctor_line() {
   local accounts; accounts="$(gateway_accounts_json)"
   local per; per="$(printf '%s' "$accounts" \
     | jq -r 'group_by(.provider)[] | "\(.[0].provider) \([.[] | select(.ok != false)] | length)"')"
-  local summary=""
-  local p n
+  local summary="" p n
   while read -r p n; do
     [ -n "$p" ] || continue
     summary="${summary:+$summary, }$p $n"
   done <<< "$per"
-  printf '  gateway: ready on %s - accounts usable: %s\n' "$(gateway_url)" "${summary:-none}"
-  local watch; watch="${CEL_GATEWAY_WATCH:-}"
-  for p in $watch; do
+  printf '  gateway: ready on %s - accounts signed in: %s\n' "$(gateway_url)" "${summary:-none}"
+  for p in ${CEL_GATEWAY_WATCH:-}; do
     n="$(gateway_usable_count "$p")"
     [ "$n" -gt 0 ] 2>/dev/null && continue
-    printf '  gateway: no usable %s credential (a disabled one is not listed at all) - cel gateway login %s\n' "$p" "$p"
+    printf '  gateway: no %s account in the vault - cel gateway login %s\n' "$p" "$p"
   done
   return 0
 }
@@ -339,12 +377,23 @@ _gateway_usage() {
   cat <<'EOS'
 cel gateway - several subscriptions behind one loopback door
 
-  cel gateway install [--no-start]   write the ports, declare broker+gateway
-                                     as box services, mint the bearer
-  cel gateway status [--json]        broker, gateway, and one row per account
+  cel gateway install [--no-start]   write the proxy config, register the box
+                                     service, mint the api-key
+  cel gateway status [--json]        the door, and one row per account
   cel gateway login <provider>       sign another subscription in
-  cel gateway logout <provider> <id> drop one
+                                     --no-browser: device flow, headless box
+  cel gateway logout <provider> <id> drop one account from the vault
 EOS
+}
+
+# The login flags CLIProxyAPI itself takes, per provider. Claude and Codex are
+# what this box signs in; anything else is named rather than guessed at.
+_gateway_login_flags() { # <provider> <no-browser 0|1>
+  case "$1" in
+    claude|anthropic) printf -- '-claude-login%s' "$([ "$2" = 1 ] && printf ' -no-browser')" ;;
+    codex|openai)     [ "$2" = 1 ] && printf -- '-codex-device-login -no-browser' || printf -- '-codex-login' ;;
+    *) return 1 ;;
+  esac
 }
 
 _gateway_install() {
@@ -355,21 +404,18 @@ _gateway_install() {
       *) die "cel gateway install: unknown argument '$1'" ;;
     esac
   done
-  have omp || die "cel gateway install: omp is not on PATH - it owns the credential vault"
-  have jq  || die "cel gateway install: jq is not on PATH"
+  have jq || die "cel gateway install: jq is not on PATH"
+  have cli-proxy-api \
+    || c_warn "cli-proxy-api is not on PATH - cel setup installs it; the config below is written anyway"
 
-  cel_config_set gateway broker_port  "$(gateway_port broker)"
-  cel_config_set gateway gateway_port "$(gateway_port gateway)"
-  c_ok "gateway: loopback ports $(gateway_port broker) (broker) and $(gateway_port gateway) (gateway)"
-
-  # Mint the bearer once, here, rather than letting the service race its own
-  # health check for a file that does not exist yet. The value is not read.
-  _gateway_token >/dev/null 2>&1 || true
+  cel_config_set gateway port "$(gateway_port)"
+  _gateway_config_write
+  c_ok "gateway: $(gateway_url) - config $(gateway_config_file), vault $(gateway_auth_dir)"
 
   _gateway_register_services
   [ "$start" -eq 1 ] && _gateway_start
   if gateway_ready; then
-    c_ok "gateway ready on $(gateway_url) - $(gateway_usable_count) account(s) usable"
+    c_ok "gateway ready on $(gateway_url) - $(gateway_usable_count) account(s) signed in"
   else
     c_warn "gateway not answering yet on $(gateway_url) - cel gateway status"
   fi
@@ -389,23 +435,21 @@ _gateway_status_text() {
   else
     printf '  gateway on %s %s\n' "$(gateway_url)" "$watched"
   fi
-  printf '  broker   %s  %s\n' "$(gateway_broker_url)" \
-    "$([ "$(printf '%s' "$js" | jq -r '.broker_ok')" = true ] && echo ok || echo "NOT reachable")"
-  printf '  gateway  %s  %s  (%s credentials)\n' "$(gateway_url)" \
-    "$([ "$ready" = true ] && echo ready || echo "NOT ready")" \
-    "$(printf '%s' "$js" | jq -r '.credentials')"
-  printf '\n  %-14s %-9s %-4s %s\n' PROVIDER ACCOUNT OK WINDOWS
+  printf '  health   %s  %s\n' "$(gateway_health_url)" \
+    "$([ "$ready" = true ] && echo ready || echo "NOT ready")"
+  printf '  vault    %s\n' "$(gateway_auth_dir)"
+  printf '\n  %-10s %-8s %-8s %s\n' PROVIDER ACCOUNT PLAN EMAIL
   local line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf '  %s\n' "$line"
   done < <(printf '%s' "$js" | jq -r '.accounts[] |
-    "\(.provider | .[0:14] | . + (" " * (14 - length))) \(.id | .[0:9] | . + (" " * (9 - length))) " +
-    (if .ok == false then "no  " elif .ok == true then "yes " else "?   " end) +
-    (if (.windows | length) == 0 then "no usage probe"
-     else ([.windows[] | "\(.label) \(.used_pct // "?")% \(.state)"] | join(" | ")) end)')
+    "\(.provider | .[0:10] | . + (" " * (10 - length))) " +
+    "\(.id | .[0:8] | . + (" " * (8 - length))) " +
+    "\((if .plan == "" then "-" else .plan end) | .[0:8] | . + (" " * (8 - length))) " +
+    .email')
   [ "$(printf '%s' "$js" | jq -r '.accounts | length')" != 0 ] \
-    || printf '  no account is usable - cel gateway login <provider>\n'
+    || printf '  no account in the vault - cel gateway login <provider>\n'
   return 0
 }
 
@@ -416,21 +460,39 @@ cmd_gateway() {
     status)
       if [ "${1:-}" = "--json" ]; then gateway_status_json; else _gateway_status_text; fi ;;
     login)
-      local p="${1:-}"
-      [ -n "$p" ] || die "cel gateway login: name a provider (cel gateway status lists what is signed in)"
-      # An OAuth dance needs a human at a terminal. Off a TTY - a steward tick,
+      local p="" nb=0 a
+      for a in "$@"; do
+        case "$a" in
+          --no-browser) nb=1 ;;
+          -*) die "cel gateway login: unknown option '$a'" ;;
+          *) [ -n "$p" ] || p="$a" ;;
+        esac
+      done
+      [ -n "$p" ] || die "cel gateway login: name a provider (claude or codex)"
+      local flags; flags="$(_gateway_login_flags "$p" "$nb")" \
+        || die "cel gateway login: no login flow for '$p' (claude or codex)"
+      # An OAuth dance needs a human at a browser. Off a TTY - a steward tick,
       # a worker, a script - the instruction is the answer; a hung process
       # holding a terminal nobody is looking at is not.
       if [ -t 0 ] && [ -t 1 ]; then
-        _gateway_omp auth-broker login "$p"
+        cli-proxy-api --config "$(gateway_config_file)" $flags
       else
-        printf 'not a terminal - run this yourself, it opens a browser:\n\n  omp auth-broker login %s\n\n' "$p"
+        printf 'not a terminal - run this yourself, it opens a browser:\n\n  cli-proxy-api --config %s %s\n\n' \
+          "$(gateway_config_file)" "$flags"
         printf 'then: cel gateway status\n'
       fi ;;
     logout)
+      # Dropping an account is deleting its file: the vault has no other
+      # registry, and the proxy rereads the directory.
       local p="${1:-}" id="${2:-}"
-      [ -n "$p" ] || die "cel gateway logout: name a provider and a credential id (cel gateway status)"
-      _gateway_omp auth-broker logout "$p" ${id:+"$id"} ;;
+      [ -n "$p" ] && [ -n "$id" ] \
+        || die "cel gateway logout: name a provider and an account id (cel gateway status lists them)"
+      local f found=0
+      for f in "$(gateway_auth_dir)/$p"-*.json; do
+        [ -f "$f" ] || continue
+        case "$(basename "$f")" in "$p-$id"*) rm -f "$f"; found=1; c_ok "dropped $(basename "$f" .json)" ;; esac
+      done
+      [ "$found" = 1 ] || die "cel gateway logout: no $p account whose id starts '$id'" ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;
   esac

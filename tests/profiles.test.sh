@@ -487,42 +487,42 @@ _gws() {
   _aws
   cat >>"$T/workspace.yaml" <<'YAML'
 worker_profiles:
-  gw: { runtime: pi, model: openai-codex/gpt-5.5, via: gateway }
+  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
-  printf 'gateway:\n  broker_port: 47311\n  gateway_port: 47411\n' > "$CEL_CONFIG_FILE"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  # CEL-60: the account list is the proxy's auth-dir, one OAuth JSON per
+  # account, not an omp `check --json`. Two codex accounts is what makes the
+  # "2 accounts usable" line below mean anything.
+  export CEL_GATEWAY_STATE="$GWT/state"
+  mkdir -p "$GWT/state/auth"
+  printf '{}' > "$GWT/state/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
+  printf '{}' > "$GWT/state/auth/codex-bbbbbb22-other@example.invalid-plus.json"
   cat >"$GWT/gwstub" <<'EOS'
 #!/usr/bin/env bash
 case "$1" in
   ready)  exit "${GW_STUB_DOWN:-0}" ;;
-  models) printf '%s\n' '{"data":[{"id":"openai-codex/gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
+  models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192}]}' ;;
 esac
 EOS
   chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
-  cat >"$GWT/bin/omp" <<'EOS'
-#!/usr/bin/env bash
-case "$1 $2" in
-  "auth-gateway check") printf '%s\n' '{"credentials":[{"id":1,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"aaaaaaaa-1111","report":{"limits":[]}},{"id":7,"provider":"openai-codex","type":"oauth","ok":true,"accountId":"bbbbbbbb-2222","report":{"limits":[]}}]}' ;;
-  *) printf '%s\n' 'gw-fixture-token-do-not-print' ;;
-esac
-EOS
-  chmod +x "$GWT/bin/omp"; PATH="$GWT/bin:$PATH"
+  PATH="$GWT/bin:$PATH"
 }
-_gws_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB; }
+_gws_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
 
 test_profiles_marks_a_gateway_profile_with_its_usable_accounts() {
   _gws
   local out; out="$(cd "$T" && cmd_profiles gw 2>&1)"
   assert_contains "$out" "via gateway (2 accounts usable)"
-  assert_contains "$out" "ompgw/openai-codex/gpt-5.5"
+  assert_contains "$out" "ompgw/codex/gpt-5.5"
   _gws_clean
 }
 test_profile_via_gateway_resolves_to_the_ompgw_model() {
   _gws
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
   profile_resolve "$T" gw >/dev/null 2>&1
-  assert_eq "$PROFILE_MODEL" "ompgw/openai-codex/gpt-5.5"
+  assert_eq "$PROFILE_MODEL" "ompgw/codex/gpt-5.5"
   assert_eq "$PROFILE_VIA" gateway
   _gws_clean
 }
