@@ -193,4 +193,132 @@ test_status_row_refuses_a_missing_document() {
   assert_eq "$rc" 1 || { printf '%s\n' "$out"; return 1; }
   # and it says WHAT it could not read, not just that something was wrong
   assert_contains "$out" 'fleet document'
+  return 0
+}
+
+# --- CEL-48: the GATHERING, as opposed to the drawing ----------------------
+#
+# Everything above is about what the assembled view prints. What follows is
+# about how many CLI calls the console makes before a character is drawn,
+# which is not something a rendered string can be asked about. Two blocks,
+# one file, because both are tests of tools/console/state.mjs.
+#
+# The console's GATHERING, as opposed to its drawing. Everything here is about
+# how many CLI calls the console makes and in what order, which is not
+# something tools/console/views.mjs can be asked about: these are the reads
+# that happen before a single character is drawn.
+#
+# Measured on 2026-09-20: `cel console --render-once` took 7.1-7.4s on a box
+# with four workspaces, and ~1.0s of it was two `for … await` loops in
+# state.mjs making eight serial `cel` calls - four `cel inbox open` and four
+# `cel services` - that have nothing to do with each other. A stub that sleeps
+# a known amount turns "are they concurrent?" into an assertion, which is the
+# only way that stays true.
+source "$CEL_ROOT/lib/common.sh"
+
+STATE_MJS="$CEL_ROOT/tools/console/state.mjs"
+
+# Four workspaces, each call costing a fifth of a second, and `beta` failing
+# outright: one workspace whose inbox or services call fails must leave that
+# entry empty and the other three intact, which is what the serial loop did
+# with `continue` and what a batch must not lose.
+_cs_setup() {
+  T="$(mktemp -d)"
+  mkdir -p "$T/bin"
+  cat >"$T/bin/cel" <<'EOF'
+#!/usr/bin/env bash
+ws=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = --workspace ] && ws="$a"
+  prev="$a"
+done
+sleep "${STUB_CEL_DELAY:-0.2}"
+[ "$ws" = beta ] && exit 1
+# A distinct timestamp per workspace, ascending in the order the doc lists
+# them, so "oldest first" is a real assertion and not a coincidence.
+case "$ws" in alpha) n=1 ;; beta) n=2 ;; gamma) n=3 ;; *) n=4 ;; esac
+case "$1" in
+  inbox)    printf '{"id":"%s-1","ts":"2026-09-2%sT00:00:00Z","kind":"decision","from":"root","message":"m"}\n' "$ws" "$n" ;;
+  services) printf '[{"name":"svc-%s","status":"up"}]\n' "$ws" ;;
+esac
+EOF
+  chmod +x "$T/bin/cel"
+  export CEL_BIN="$T/bin/cel"
+}
+_cs_teardown() { rm -rf "$T"; }
+
+_cs_node() { # <script-body> -> stdout of the run
+  cat >"$T/t.mjs" <<EOF
+import assert from 'node:assert/strict';
+import { openItems, servicesByWorkspace, allServices } from '$STATE_MJS';
+const doc = { workspaces: ['alpha', 'beta', 'gamma', 'delta'].map((name) => ({ name })) };
+$1
+EOF
+  node "$T/t.mjs"
+}
+
+# THE FOUR CALLS RUN TOGETHER. Four workspaces at 0.2s each is 0.8s serial and
+# ~0.2s batched; the threshold is half of serial, which no amount of machine
+# noise crosses in the wrong direction.
+test_console_state_opens_every_inbox_at_once() {
+  _cs_setup
+  local rc=0
+  _cs_node '
+const t0 = Date.now();
+const items = await openItems(doc);
+const ms = Date.now() - t0;
+assert.ok(ms < 500, `openItems took ${ms}ms - the four calls are still serial`);
+' || rc=1
+  _cs_teardown
+  return "$rc"
+}
+
+test_console_state_probes_every_workspaces_services_at_once() {
+  _cs_setup
+  local rc=0
+  _cs_node '
+const t0 = Date.now();
+await servicesByWorkspace(doc);
+const ms = Date.now() - t0;
+assert.ok(ms < 500, `servicesByWorkspace took ${ms}ms - the four calls are still serial`);
+' || rc=1
+  _cs_teardown
+  return "$rc"
+}
+
+# One workspace failing is one workspace missing, not a blank console. This is
+# today's behaviour (`if (!r.ok) continue`) and the batch must keep it: a
+# rejected promise in a Promise.all would take the other three with it.
+test_console_state_survives_one_workspace_failing_its_calls() {
+  _cs_setup
+  local rc=0
+  _cs_node '
+const items = await openItems(doc);
+assert.deepEqual(items.map((i) => i.ws), ["alpha", "gamma", "delta"]);
+const by = await servicesByWorkspace(doc);
+assert.deepEqual(Object.keys(by), ["alpha", "beta", "gamma", "delta"]);
+assert.deepEqual(by.beta, []);
+assert.equal(by.alpha.length, 1);
+assert.equal(by.alpha[0].name, "svc-alpha");
+const all = await allServices(doc);
+assert.deepEqual(all.map((s) => s.ws), ["alpha", "gamma", "delta"]);
+' || rc=1
+  _cs_teardown
+  return "$rc"
+}
+
+# OLDEST FIRST, whatever order the answers came back in. The serial loop got
+# this for free by asking in workspace order and sorting after; a batch that
+# resolves out of order must still land on the same list.
+test_console_state_keeps_open_items_oldest_first() {
+  _cs_setup
+  local rc=0
+  _cs_node '
+const items = await openItems(doc);
+const ts = items.map((i) => i.ts);
+assert.deepEqual(ts, [...ts].sort());
+' || rc=1
+  _cs_teardown
+  return "$rc"
 }

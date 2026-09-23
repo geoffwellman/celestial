@@ -73,6 +73,9 @@ EOF
   cat >"$T/bin/herdr" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${STUB_HERDR_FAIL:-}" ] && exit 1
+# A roster that ANSWERS with a truncated document: herdr killed mid-write, or
+# a pane manager that died between the opening brace and the rest of it.
+[ -n "${STUB_HERDR_BAD:-}" ] && { printf '%s' '{"result":{"agents":[{"name":"widget-orch",'; exit 0; }
 case "$1 $2" in
   "agent list")
     # CEL-44: a live agent with NO herdr name, in a cwd the caller names. The
@@ -528,4 +531,390 @@ test_mail_to_an_alias_with_no_live_pane_is_reported() {
   # A roster nobody could read is not evidence that anyone died - the lesson
   # lib/stall.sh already paid for.
   assert_eq "$(fleet_alias_undeliverable '' widget-ABC-48)" ""
+}
+
+# --- CEL-48: the cost of the read is itself a fact the suite holds ----------
+#
+# Measured on 2026-09-20, before any of this: `cel console --render-once`
+# took 7.1-7.4s wall with 62% of it SYSTEM time, and `cel fleet --json` was
+# ~70% of that - 278 jq and 112 git processes on one render, 154 of the jq and
+# all of the git inside this file. Nothing on the path talks to a network; the
+# whole cost was fork and exec for crumbs of work. A performance fix with no
+# test rots in a month, so the budget is asserted: jq and git are shimmed onto
+# a prepended PATH, they log their argv, and the counts must stay under a
+# ceiling that GROWS WITH THE ROWS rather than multiplying by them.
+
+# The shim: a counter in front of EVERY binary the read can reach, not just
+# the two this ticket set out to reduce. The first version of this budget
+# counted jq and git alone and would have passed while the total tripled -
+# "a budget that only watches the two tools you were thinking about is a
+# budget that rots the moment someone reaches for a third". PATH is REPLACED
+# rather than prepended, so a tool nobody listed here cannot run at all and
+# the render fails loudly instead of slipping past uncounted.
+_FLEET_SHIMMED_TOOLS=(
+  awk sed grep cut tr head tail sort uniq wc find stat readlink dirname
+  basename date id ls cat rm mkdir mktemp touch flock xargs getent ps
+  bash sh env jq git yq node python3 cksum mv cp chmod ln sleep tee expr seq
+)
+_fleet_spawn_shim() { # -> $T/shim, the whole PATH; argv lands in CEL_SPAWN_LOG
+  local s="$T/shim" b real
+  mkdir -p "$s"
+  export CEL_SPAWN_LOG="$T/spawns.log"
+  : >"$CEL_SPAWN_LOG"
+  for b in "${_FLEET_SHIMMED_TOOLS[@]}"; do
+    real="$(command -v "$b" 2>/dev/null)" || continue
+    [ -n "$real" ] || continue
+    cat >"$s/$b" <<SHIM
+#!/bin/bash
+printf '%s\t%s\n' "$b" "\${*//$'\\n'/ }" >>"\$CEL_SPAWN_LOG"
+exec "$real" "\$@"
+SHIM
+    chmod +x "$s/$b"
+  done
+}
+
+# THE BOX'S PROCESS TABLE IS NOT THIS FIXTURE'S BUSINESS. `fleet_orphans_json`
+# walks every pid on the machine (lib/orphans.sh, CEL-47) and costs ~1050 awk,
+# 117 tr and 117 readlink on this box - three quarters of every process a real
+# `cel fleet` starts, identical on main and on this branch, and completely
+# outside anything a fixture can arrange. It is stubbed for the same reason
+# `_fleet_stub_memory` stubs the memory walk: what is being budgeted here is
+# what lib/fleet.sh does per row, and a number that moves with whatever else
+# is running on the box budgets nothing.
+_fleet_stub_box_walk() {
+  orphans_list() { :; }
+  orphans_totals() { printf '0 0\n'; }
+}
+
+_fleet_spawns() { # [binary] -> how many processes were started, in all or of one
+  if [ $# -eq 0 ]; then grep -c . "$CEL_SPAWN_LOG" || true; return 0; fi
+  grep -c "^$1	" "$CEL_SPAWN_LOG" || true
+}
+
+# n more RUNNING rows in widget, each with its own pane and no worktree: the
+# cheapest row there is, which is the right thing to scale with - it isolates
+# the per-row process cost from the work any one row implies.
+_fleet_add_rows() { # <n>
+  local n="$1" led="$T/alpha/.cel/delegations.json" i add="[]"
+  for ((i = 0; i < n; i++)); do
+    add="$(jq -c --arg i "$i" '. + [{"id": ("bulk" + $i), "repo": "widget",
+            "branch": ("widget-bulk-" + $i), "pane": ("wA:b" + $i),
+            "worktree": "", "state": "running", "ticket": ""}]' <<<"$add")"
+  done
+  jq -c --argjson add "$add" '. + $add' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+}
+
+# THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
+#
+# Measured on this fixture against main 81022b5 (CEL-52), with the box walk
+# stubbed and PATH REPLACED by the shim so nothing can run uncounted:
+#
+#                3 rows                        12 rows
+#   before       185 total (64 jq, 12 git)       239 total (109 jq, 12 git)
+#   after        158 total (47 jq,  4 git)       176 total ( 56 jq,  4 git)
+#
+# Five processes per extra row became one. The remainder is fixed cost that
+# belongs to other libraries reading their own documents - `cksum` and `stat`
+# per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
+# accessors run - and it MOVES: CEL-43's mail triple added 26 to both sides
+# between one measurement and the next, CEL-49 and CEL-51 added an awk per
+# row to both, and CEL-52 added eight more to the fixed cost on both sides.
+# That is why this number is taken against the main the branch
+# actually sits on and re-taken after every rebase; a ceiling measured against
+# a different main is how a branch gets called three times slower than a
+# checkout that predates two other tickets. What the ceiling asserts is the
+# SHAPE - a fixed cost plus a small constant per row - not a frozen count.
+#
+# The first version of this budget counted jq and git ALONE. It would have
+# passed a change that traded a per-row jq for a per-row awk, which is the
+# same fan-out wearing different clothes; a budget that watches only the tools
+# its author was thinking about rots the moment somebody reaches for a third.
+# The ceiling below is the TOTAL, and main fails it at both sizes (213 > 187,
+# 267 > 232), which is the only way to know it is measuring anything. Measured
+# here against main dcf17c0, whose pane-silence read (CEL-50) costs a jq on
+# every running row on BOTH sides: main 213 at 3 rows and 267 at 12, the
+# branch 181 and 226, repeatable across three runs. The saving is now mostly
+# fixed cost rather than slope, and the ceiling is set to the branch plus six,
+# so the headroom is real slack and not a repeat of the measurement. One of those jq is the roster
+# being validated once per render rather than being allowed to fail inside
+# whichever program touched it first, which is a process well spent.
+_fleet_assert_budget() { # <rows> <total-spawns>
+  local rows="$1" total="$2"
+  local max=$(( 172 + 5 * rows ))
+  if [ "$total" -gt "$max" ]; then
+    printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
+      "$total" "$max" "$rows" >&2
+    printf 'by tool:\n%s\n' "$(cut -f1 "$CEL_SPAWN_LOG" | sort | uniq -c | sort -rn | head -10)" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_fleet_stays_under_its_spawn_budget() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  local rc=0
+  _fleet_stub_box_walk
+  _fleet_spawn_shim
+  PATH="$T/shim:$T/bin" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 3 "$(_fleet_spawns)" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# ...and the shape of the growth, which is the whole point: four times the
+# rows must not be four times the processes plus a constant per row.
+test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  _fleet_add_rows 9
+  local rc=0
+  _fleet_stub_box_walk
+  _fleet_spawn_shim
+  PATH="$T/shim:$T/bin" cmd_fleet --json >/dev/null
+  _fleet_assert_budget 12 "$(_fleet_spawns)" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# THE DOCUMENT DID NOT MOVE. CEL-48 changed how every row is computed - one
+# jq over the ledger, one batched git per worktree - and the one thing it was
+# not allowed to change is the answer. This is `cel fleet --json` captured on
+# this fixture before the rewrite, compact and in order, so a field that
+# silently reorders or loses its type fails here. The box, subscriptions and
+# orphan fields are the live machine's and are not part of the capture; the
+# worktree path, the age of the newest file and the age of the oldest unread
+# are normalised for the same reason. RE-CAPTURED after each rebase, from the
+# main the branch sits on: it landed first against 9f7cf2d and is taken here
+# against dcf17c0, which added the pane-silence fields to every worker row.
+_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
+
+_fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
+  jq -c --arg t "$T" --arg wt "$WT" '
+    .workspaces
+    | walk(if type == "string"
+           then (sub("\\Q" + $wt + "\\E"; "WT") | sub("\\Q" + $t + "\\E"; "T"))
+           else . end)
+    | walk(if type == "object" and has("quiet_secs")
+           then .quiet_secs = (if .quiet_secs >= 0 then 0 else -1 end)
+           else . end)
+    # The oldest unread (CEL-43) is measured from a fixed timestamp in the
+    # fixture against the clock, so it grows by a second every second.
+    | walk(if type == "object" and has("oldest_secs")
+           then .oldest_secs = (if .oldest_secs > 0 then 1 else 0 end)
+           else . end)'
+}
+
+test_fleet_json_is_identical_to_the_document_captured_before_the_rewrite() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_declare_bundle
+  printf 'work\n' >"$WT/scratch.txt"
+  local got rc=0
+  got="$(cmd_fleet --json | _fleet_normalise)"
+  assert_eq "$got" "$_FLEET_GOLDEN_WORKSPACES" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# A REPO IN A STATE NOBODY PLANNED FOR. The per-row git calls were forgiving -
+# every one of them ended in `|| true` or a `?` - and a batched query that
+# asks one question for four repos is exactly the kind of change that turns
+# "could not ask" into an error. Detached HEAD, a branch with no remote twin,
+# a checkout with no origin at all and a dirty tree each produce the row they
+# produced before, `?` and all.
+_fleet_broken_worktrees() {
+  local d
+  for d in detached noupstream noorigin dirty; do
+    mkdir -p "$T/$d"
+    git -C "$T/$d" init -q -b main
+    git -C "$T/$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+    case "$d" in
+      noorigin) ;;
+      *) git -C "$T/$d" update-ref refs/remotes/origin/main HEAD
+         git -C "$T/$d" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main ;;
+    esac
+  done
+  git -C "$T/detached" -c user.email=t@t -c user.name=t commit -q --allow-empty -m extra
+  git -C "$T/detached" checkout -q --detach HEAD
+  git -C "$T/noupstream" checkout -q -b feature
+  git -C "$T/noupstream" -c user.email=t@t -c user.name=t commit -q --allow-empty -m w1
+  git -C "$T/noorigin" checkout -q -b feature
+  git -C "$T/dirty" checkout -q -b feature
+  git -C "$T/dirty" update-ref refs/remotes/origin/feature HEAD
+  printf 'x\n' >"$T/dirty/a.txt"
+  mkdir -p "$T/dirty/.agent"
+  printf 'y\n' >"$T/dirty/.agent/result.md"
+  local led="$T/beta/.cel/delegations.json" d2
+  printf '[]' >"$led"
+  for d2 in detached noupstream noorigin dirty; do
+    jq -c --arg d "$d2" --arg wt "$T/$d2"       '. + [{"id": $d, "repo": "gadget", "branch": "feature", "pane": "", "worktree": $wt,
+             "state": "running", "ticket": ""}]' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
+  done
+}
+
+test_fleet_rows_survive_a_repo_in_a_broken_state() {
+  _fleet_setup
+  _fleet_stub_memory
+  export CEL_CACHE="$T/nocache"
+  _fleet_broken_worktrees
+  local u rc=0
+  u="$(cmd_fleet --json --workspace beta | jq -c '.workspaces[0].units[0]')"
+  # a detached HEAD has no branch to count from, and says so rather than 0
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="detached") | .ahead' <<<"$u")" "?" || rc=1
+  # a branch the remote has never seen counts from origin/HEAD: one commit,
+  # and one commit of work that would be lost
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="noupstream") | .ahead' <<<"$u")" "1" || rc=1
+  # no origin at all is unknown, not zero
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="noorigin") | .ahead' <<<"$u")" "?" || rc=1
+  # dirty tree, pushed branch: nothing ahead, but work at risk - and
+  # `.agent/` is the worker's report, not work
+  assert_eq "$(jq -r '.workers_list[] | select(.id=="dirty") | .ahead' <<<"$u")" "0" || rc=1
+  # noupstream (1 unpushed) and dirty (1 dirty file) are the two at risk
+  assert_eq "$(jq -r '.unlanded' <<<"$u")" "2" || rc=1
+  assert_eq "$(jq -r '.workers_list | length' <<<"$u")" "4" || rc=1
+  _fleet_teardown
+  return "$rc"
+}
+
+# THE HELPERS ARE A CONTRACT WITH cel-fanout, NOT PRIVATE TO THE SWEEP.
+# `fleet_ahead` is what `cel-fanout status` prints in its AHEAD column, and
+# `fleet_worker_row` with three arguments is how that binary renders a row.
+# The sweep inside this file reaches the batched git query directly, so
+# nothing here exercised either entry point - and a duplicated definition of
+# `fleet_ahead` calling a function that does not exist shipped green, because
+# bash keeps only the LAST definition of a name and no test ever called it.
+test_fleet_ahead_answers_the_external_caller() {
+  _fleet_setup
+  assert_eq "$(fleet_ahead "$WT")" "0"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+  assert_eq "$(fleet_ahead "$WT")" "1"
+  # A worktree that cannot be read is unknown, not zero.
+  assert_eq "$(fleet_ahead "$T/nowhere")" "?"
+  _fleet_teardown
+}
+
+# The three-argument form cel-fanout calls, which has to derive the worktree,
+# the state and the id from the entry on its own.
+test_fleet_worker_row_renders_from_the_entry_alone() {
+  _fleet_setup
+  local row
+  row="$(fleet_worker_row "$(jq -c '.[0]' "$T/alpha/.cel/delegations.json")" idle "")"
+  assert_eq "$(printf '%s' "$row" | jq -r '.id')" "one"
+  assert_eq "$(printf '%s' "$row" | jq -r '.ahead')" "0"
+  assert_eq "$(printf '%s' "$row" | jq -r '.state')" "running"
+  _fleet_teardown
+}
+
+# AN UNREADABLE ROSTER MUST NOT BE ABLE TO EMPTY THE FLEET.
+#
+# `herdr agent list` answering with non-empty MALFORMED JSON made `--argjson
+# roster` fail before jq ever opened the ledger, and the `|| true` that keeps
+# this read from dying turned that into an empty row list - so `cel fleet
+# --json` rendered a box with no workers on it, which is indistinguishable
+# from a box with no workers on it. A failure path that degrades to silence is
+# the worst kind: the operator acts on the silence.
+#
+# The rows are the LEDGER's, and the ledger is readable whatever herdr is
+# doing. An unusable roster is the same statement as an absent one - `-`, a
+# fact about the observer - and never a statement about the worker.
+test_fleet_rows_survive_a_roster_that_is_not_json() {
+  _fleet_setup
+  local doc u
+  doc="$(STUB_HERDR_BAD=1 cmd_fleet --json --workspace alpha)"
+  u="$(printf '%s' "$doc" | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].id] | join(",")')" "one,two"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers')" "1"
+  # ...and nobody is convicted on the strength of a document nobody could read
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "0"
+  _fleet_teardown
+}
+
+# herdr exiting non-zero is the same statement, by a different route, and the
+# rows are just as present.
+test_fleet_rows_survive_herdr_exiting_non_zero() {
+  _fleet_setup
+  local u
+  u="$(STUB_HERDR_FAIL=1 cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  _fleet_teardown
+}
+
+# AND THE CASE THAT IS NOT A FAILURE AT ALL. A roster that answers properly
+# with an empty agent list is EVIDENCE: it knows about nobody, so the rows it
+# does not mention are `gone`, not `-`. If an unreadable roster and an empty
+# one produced the same row, neither word would mean anything.
+test_fleet_tells_an_empty_roster_from_an_unreadable_one() {
+  _fleet_setup
+  cat >"$T/bin/herdr" <<'HERDR'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[]}}' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+HERDR
+  chmod +x "$T/bin/herdr"
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "gone"
+  _fleet_teardown
+}
+
+# AND SHAPE-VALID IS NOT ANSWERED.
+#
+# Parsing the roster with `fromjson?` covers the document that is not JSON,
+# and nothing else: `{}`, `[]`, and a document about something other than
+# agents all parse, and all of them read as a roster that knows about nobody
+# - which is `gone` for every worker on the box. A pane manager answering
+# `{}` is a MUTE OBSERVER, not evidence of sixteen dead workers, and the two
+# readings send an operator to opposite places. Only a document whose
+# `.result.agents` is an array has said anything about who is alive.
+_fleet_roster_says_nothing() { # <stdout-of-herdr-agent-list>
+  cat >"$T/bin/herdr" <<HERDR
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent list") printf '%s\n' '$1' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+HERDR
+  chmod +x "$T/bin/herdr"
+  local u
+  u="$(cmd_fleet --json --workspace alpha | jq -c '.workspaces[0].units[] | select(.name=="widget")')"
+  assert_eq "$(printf '%s' "$u" | jq -r '.workers_list | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.workers_list[].live] | unique | join(",")')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.orch')" "-"
+  assert_eq "$(printf '%s' "$u" | jq -r '.stalled')" "0"
+}
+
+test_fleet_an_empty_object_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '{}'
+  _fleet_teardown
+}
+
+test_fleet_an_array_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '[]'
+  _fleet_teardown
+}
+
+# Plausible, well-formed, and about the wrong thing: a result with no agents
+# key at all, and an `agents` that is an object rather than a list. Neither
+# can be searched for a pane, so neither may answer for one.
+test_fleet_a_plausible_but_wrong_roster_convicts_nobody() {
+  _fleet_setup
+  _fleet_roster_says_nothing '{"result":{"windows":[{"pane_id":"wA:p2"}]}}'
+  _fleet_roster_says_nothing '{"result":{"agents":{"wA:p2":"idle"}}}'
+  _fleet_roster_says_nothing '{"error":"no server"}'
+  _fleet_teardown
 }
