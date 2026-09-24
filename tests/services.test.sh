@@ -468,6 +468,43 @@ test_workspace_service_split_still_targets_the_workspace_pane() {
   _svc_teardown
 }
 
+# A workspace service whose workspace pane cannot be resolved fails loudly,
+# naming the workspace. It never falls back to the box services home: a
+# transient \`agent list\` miss would otherwise start it in the wrong place.
+test_workspace_service_without_a_workspace_pane_fails_naming_it() {
+  _svc_setup
+  _svc_strict_herdr
+  printf '{"result":{"agents":[]}}' > "$T/agents.json"
+  printf 'name: alpha\nservices:\n  - {name: builder, cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+  local out rc=0
+  out="$("$CEL" services start builder --workspace alpha 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "start succeeded without a workspace pane"; _svc_teardown; return 1; }
+  assert_contains "$out" "$T/alpha"
+  [ -z "$(grep -E '^(workspace create|pane split)' "$T/calls" || true)" ] \
+    || { echo "fell back to the box services home"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# Two concurrent box-service starts produce ONE services home: the
+# lookup-then-create is serialised, so the second waits and finds the first's.
+test_concurrent_box_starts_create_one_services_home() {
+  _svc_box_setup
+  _svc_strict_herdr
+  # Slow the create so both starts would look before either creates.
+  sed -i "s|  'workspace create')|  'workspace create') sleep 1;|" "$T/bin/herdr"
+  local n
+  for n in cel-auth-broker cel-auth-gateway; do
+    printf '{"name":"%s","port":1,"cmd":"omp %s serve","cwd":"%s"}\n' "$n" "$n" "$T" \
+      > "$CEL_SERVICES_D/$n.json"
+  done
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker >/dev/null 2>&1 ) &
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-gateway >/dev/null 2>&1 ) &
+  wait
+  assert_eq "$(grep -c '^workspace create' "$T/calls")" 1
+  _svc_teardown
+}
+
 # When herdr refuses, say what herdr said. "returned no pane id" hid a CLI
 # change for a day.
 test_a_refused_split_reports_herdrs_own_message() {
