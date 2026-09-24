@@ -96,9 +96,13 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
 # variables go on as an `env K=V ...` PREFIX to the launch line it types. That
 # is deliberately scoped to the launch: an `export` in the pane would outlive
 # the agent and mark every later command in that shell as a plane worker.
-_run_launch_env() { # <role> <wsdir> [rolefile] -> `env K=V K=V K=V `
-  local role="$1" wsdir="$2" file="${3:-}" out
+_run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
+  local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" out
   printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
+  # WHOSE MAILBOX (CEL-65). `cel inbox` derives the reader from cwd, and an
+  # orchestrator that cd's to its workspace root read ROOT's mail for days.
+  # Root and orchestrators carry their identity from the launch instead.
+  [ -z "$me" ] || printf -v out '%s CEL_INBOX_ME=%q CEL_INBOX_WS=%q' "$out" "$me" "$(ws_name "$wsdir")"
   # A runtime whose role is injected as a prompt argument has no file to name;
   # the other two still say whose the process is.
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
@@ -823,7 +827,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
-  local envprefix; envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE")"
+  local envprefix; local inbox_me=""
+  case "$role" in root) inbox_me=root ;; orchestrator) inbox_me="$product-orch" ;; esac
+  envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
 
   # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
   # it reaches this box's auth-gateway, which holds several subscriptions per

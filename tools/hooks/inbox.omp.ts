@@ -25,7 +25,14 @@ function celRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 function celBin(): string { return path.join(celRoot(), "bin", "cel"); }
-function wsArgs(): string[] { return process.env.CEL_WORKSPACE ? ["--workspace", process.env.CEL_WORKSPACE] : []; }
+// CEL_INBOX_WS/CEL_INBOX_ME are exported by `cel run` for root and orchestrators;
+// CEL_WORKSPACE is a directory, so it is never passed as a mailbox name.
+function wsArgs(): string[] {
+  const a = [];
+  if (process.env.CEL_INBOX_WS) a.push("--workspace", process.env.CEL_INBOX_WS);
+  if (process.env.CEL_INBOX_ME) a.push("--for", process.env.CEL_INBOX_ME);
+  return a;
+}
 
 let watcher = null;
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }

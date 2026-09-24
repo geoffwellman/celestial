@@ -28,9 +28,11 @@ Flow
 7. Cross-repo work INSIDE your product is sequenced by you. A ticket in one of your repos that depends on a ticket in another of them is your call to order - land the dependency first, or spec the second to absorb it - not something to escalate. Escalation is for work that leaves your product.
 
 Your INBOX
-- `cel inbox read` at the START of every turn. No `--for`: it derives who you
-  are from where you are standing, so you drain YOUR mailbox and nobody
-  else's.
+- `cel inbox read --for <product>-orch --workspace <ws>` at the START of every
+  turn. Name yourself: a bare `cel inbox read` derives the reader from the
+  cwd, and from the workspace root it drains ROOT's mailbox, not yours.
+  (`cel run` exports `CEL_INBOX_ME`/`CEL_INBOX_WS`, so under it the bare
+  form is safe too.)
 - Start a background Monitor once per session so mail wakes you without
   anyone typing into your pane:
   `Monitor(command: "cel inbox watch", persistent: true)`. A monitor dies
