@@ -6,7 +6,7 @@
 HOOK="$CEL_ROOT/tools/hooks/inbox.omp.ts"
 
 _omp_inbox_harness() { # <inbox-dir> -> prints JSON report
-  CEL_INBOX_DIR="$1" CEL_INBOX_ME=widget-orch CEL_WORKSPACE=demo CEL_ROOT="$CEL_ROOT" \
+  CEL_INBOX_DIR="$1" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 HOOK="$HOOK" node --no-warnings - <<'JS'
 const { execFileSync } = require('node:child_process');
 (async () => {
