@@ -254,15 +254,26 @@ ws_gh() { # <wsdir> <gh args...>
   GH_TOKEN="$tok" "$bin" "$@"
 }
 
-# The line a pane evaluates for itself: a command substitution, typed, so the
+# What a pane evaluates for itself, in two halves: a GUARD typed at the head
+# of the launch line and the env WORD beside the other launch variables. The
 # token is produced by gh inside the pane and never passes through cel, a
 # launch line, a log or scrollback (the OMP_GATEWAY_TOKEN pattern in
-# lib/run.sh). If the pane's gh cannot produce it, the value is a marker gh
-# will reject - an empty GH_TOKEN would quietly mean "the active account".
-ws_github_env_word() { # <wsdir> -> `GH_TOKEN="$(...)"` or nothing
+# lib/run.sh). FAIL CLOSED IN THE PANE: cel's own readiness check and this
+# evaluation are separate moments, and auth can vanish between them - so the
+# agent's start is CHAINED on the token command succeeding with a non-empty
+# value. On failure the pane prints the fix and the agent never runs; an empty
+# or placeholder GH_TOKEN would mean "the active account" or a silent 401.
+# The value sits in an UNEXPORTED shell variable of the pane for the agent's
+# `env` to pass on; it is never in the text typed or shown.
+ws_github_launch_guard() { # <wsdir> -> `_cel_gh_tok=... || {fix; false;} && ` or nothing
   local user; user="$(ws_github_user "$1")"
   [ -n "$user" ] || return 0
-  printf 'GH_TOKEN="$(gh auth token --user %q || echo cel-refused-%q-not-logged-in)"' "$user" "$user"
+  printf '{ _cel_gh_tok="$(gh auth token --user %q)" && [ -n "$_cel_gh_tok" ]; } || { printf "%%s\\n" %q >&2; false; } && ' \
+    "$user" "cel: refusing to start: $(ws_github_fix "$user")"
+}
+ws_github_env_word() { # <wsdir> -> `GH_TOKEN="$_cel_gh_tok"` or nothing
+  [ -n "$(ws_github_user "$1")" ] || return 0
+  printf 'GH_TOKEN="$_cel_gh_tok"'
 }
 
 # Where git should reach a repo: the canonical url, rewritten onto the SSH

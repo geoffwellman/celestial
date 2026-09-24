@@ -117,9 +117,12 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
   # ...and, for a workspace with `github.user`, the account it acts as: the
   # token is a substitution the PANE evaluates (lib/workspace.sh), never a value.
-  local ghw=""
-  [ ! -f "$wsdir/workspace.yaml" ] || ghw="$(ws_github_env_word "$wsdir")"
-  [ -z "$ghw" ] || out="$out $ghw"
+  # The guard goes AHEAD of `env`, so the agent's start is chained on it.
+  local ghw="" ghg=""
+  if [ -f "$wsdir/workspace.yaml" ]; then
+    ghw="$(ws_github_env_word "$wsdir")"; ghg="$(ws_github_launch_guard "$wsdir")"
+  fi
+  [ -z "$ghw" ] || out="$ghg$out $ghw"
   printf '%s ' "$out"
 }
 
