@@ -12,6 +12,8 @@ set -uo pipefail
 
 CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 export CEL_ROOT
+# test-only seams (e.g. CEL_LIVENESS_NOW) are honoured only when this is set
+export CEL_TESTING=1
 FILTER="" NO_LOCK=0
 for arg in "$@"; do
   case "$arg" in
