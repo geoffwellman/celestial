@@ -136,6 +136,15 @@ cel - the celestial plane
                                 tiered (pinned / aging 30d / perishable 7d) and
                                 budgeted into every agent's policy block
   cel effects install|status    optional Canvas UI dashboard effects (Chrome)
+  cel work [<ws>] [<key>]       THE WORK ITEM: ticket + worktree + PR + mail
+                                as one thing, grouped by stage with the next
+                                action per row. No workspace = every one of
+                                them; a key renders that item and its events
+                                --stage S / --product P / --json / --fresh
+  cel history [<ws>] [--since 7d] [--key K] [--json]
+                                the vertical timeline: every event grouped by
+                                work item, newest group first, drawn with a
+                                spine - what actually happened to ABC-49
   cel fleet [--json] [--workspace w]  the whole box in one read: per repo,
                                 orchestrator liveness, workers n/cap, stalled
                                 and unlanded work, plus root's mail
@@ -212,6 +221,8 @@ case "${1:-help}" in
             printf 'celestial v%s (%s, %s)\n' "$(cel_build_version)" \
               "$(cel_build_sha)" "$(cel_build_branch)";;
   fleet)    shift; . "$CEL_ROOT/lib/fleet.sh";   cmd_fleet "$@";;
+  work)     shift; . "$CEL_ROOT/lib/work.sh";    cmd_work "$@";;
+  history)  shift; . "$CEL_ROOT/lib/work.sh";    cmd_history "$@";;
   steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
   afk)      shift; . "$CEL_ROOT/lib/afk.sh";     cmd_afk "$@";;
   dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;

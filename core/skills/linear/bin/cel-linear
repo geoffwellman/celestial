@@ -221,7 +221,7 @@ _board_raw() { # <team-key> -> the raw GraphQL response
         states(first: 50) { nodes { name position type } }
         issues(first: 100, filter: {or: [{state: {type: {nin: ["completed", "canceled"]}}},
                                          {completedAt: {gt: $since}}]}) {
-          nodes { identifier title url updatedAt state { name } assignee { name } } } } } }' \
+          nodes { identifier title url createdAt updatedAt state { name } assignee { name } } } } } }' \
     "$(jq -n --arg k "$team" --arg s "$since" '{k: $k, since: $s}')")" || return 1
   mkdir -p "$CEL_CACHE_DIR"
   printf '%s' "$resp" > "$f.$$" && mv -f "$f.$$" "$f"
@@ -237,7 +237,7 @@ _board_rows() { # <team-key> [state-filter]
     | . as $t
     | ([$t.states.nodes[] | {key: .name, value: .position}] | from_entries) as $ord
     | [$t.issues.nodes[]
-       | {identifier, title, url, updatedAt,
+       | {identifier, title, url, createdAt, updatedAt,
           state: (.state.name // ""), assignee: (.assignee.name // "")}]
     | map(select($only == "" or ((($only | ascii_downcase | split(",")) | index(.state | ascii_downcase)) != null)))
     | sort_by(($ord[.state] // 99), (.updatedAt | . // "") ) | reverse | sort_by($ord[.state] // 99)

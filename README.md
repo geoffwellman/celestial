@@ -504,6 +504,91 @@ are the code's. Below `triage.min_confidence` (0.6) a message keeps its kind's
 default rank, so an unreachable model degrades to the old ordering rather than
 losing messages.
 
+## Work items — the thing being made
+
+The factory used to track its **machines** and not its **products**: `cel
+fleet` showed workers, `cel-fanout status` delegations, `cel-linear board`
+tickets, `gh pr list` pull requests. Nothing represented THE THING BEING MADE
+as it moves from ticket to worktree to PR to merged to released, so "what
+happened to ABC-49" had no single answer.
+
+A **work item** is that noun. It is keyed by its ticket id when it has one and
+by its delegation id when it has none, and it joins whatever the four systems
+know — each part optional, because an item exists the moment any one of them
+has heard of it.
+
+- **`cel work [<workspace>] [--stage S] [--product P] [--json] [--fresh]`** —
+  the board: every item grouped by stage, newest activity first inside each
+  group, one line each with who or what holds it now, its age and the next
+  action a person would take. With no workspace, every registered workspace.
+- **`cel work <key> [--json]`** — one item: its four parts and its full event
+  list.
+- **`cel history [<workspace>] [--since 7d] [--key K] [--json]`** — the
+  vertical timeline: events grouped by work item, groups ordered by most
+  recent event, each group in time order, drawn with a spine so the eye
+  follows one item down the page.
+
+```
+alpha - work history            7 days, 41 events
+|
++- ABC-51  the console answers                       merged 2h
+|    09:12  ticket    In Progress
+|    10:31  worktree  worker started (pi/opus-pi)
+|    12:04  pr        #66 opened
+|    13:58  pr        approved by alpha-pr-66-review
+|    14:22  pr        merged
+|
+```
+
+**The stage is computed in code**, first match wins, and the order is the
+factory's own sequence: `released`, `merged`, `landing` (PR approved AND
+green - approved by GitHub or by the ledger verdict `cel-fanout review`
+records, green meaning no red check and a passed gate verdict, else passing
+checks: the same evidence `cel-fanout land` consumes), `review` (a PR is open), `building` (a worker holds it — including
+`unconfirmed`, a dispatch whose prompt was never accepted), `ready` (a
+start-able ticket nobody has started), `backlog`. A gate that timed out or
+produced no verdict is **not** a failure and never renders as one.
+
+**The JSON shape is frozen here.** The console and the dashboard render this
+document and add nothing to it; any field a view needs is added to the model,
+not to the view.
+
+```json
+{ "key": "ABC-49", "keyed_on": "ticket|delegation|pr",
+  "ws": "alpha", "product": "bundle", "title": "...",
+  "stage": "building", "next": "collect", "last": "2026-01-02T00:00:00Z",
+  "ticket":     { "id": "ABC-49", "state": "In Progress", "url": "...",
+                  "created": "...", "updated": "..." },
+  "delegation": { "id": "ABC-49-slug", "state": "collected", "branch": "...",
+                  "repo": "widget", "worker": "wFC:p1", "profile": "opus-pi",
+                  "worktree": "...", "verdict": {...}, "review": {...},
+                  "landed_at": "...", "released_at": "..." },
+  "pr":         { "number": 66, "state": "MERGED", "review": "APPROVED",
+                  "checks": "SUCCESS", "url": "...", "repo": "widget",
+                  "branch": "...", "opened": "...", "merged": "...", "updated": "..." },
+  "events": [ { "at": "...", "source": "ticket|worktree|pr|mail|afk|reviewer", "what": "..." } ] }
+```
+
+`landed_at` and `released_at` are **read** from the delegation's `history` and
+never stored twice. Every state transition a delegation makes appends
+`{state, at, by}` to that array — half the lifecycle used to be unrecorded, so
+no timeline could draw it. A row written before that (no `history`) has one
+synthesised at READ time from `created` and its verdict/review stamps, and the
+synthesised history is never written back to disk.
+
+Events merge the ledger history, the ticket's stamps, the PR's opened /
+reviewed / merged stamps, the reviewer registry (who reviewed it, and when),
+the AFK act log (what the box did on its own overnight, and under which
+pre-authorisation) and **all** of the workspace mailbox — the old console
+timeline windowed to 24 hours and so lost every message about anything that
+took longer than a day.
+
+One `gh pr list` per repo and one `cel-linear board` per workspace, cached
+together in `$CEL_CACHE/work-<ws>.json` for `work.cache_secs` (120 by default,
+in `~/.local/share/cel/config.yaml`); `--fresh` bypasses it. The ledger and
+the mailbox are local files and are never cached — with `gh` and `cel-linear`
+both failing the view still renders what the box itself knows.
+
 ## Watch and steer
 
 - **`cel fleet`** — the whole box in one deterministic read: every workspace,
@@ -902,6 +987,8 @@ policy block into every agent.
 |---|---|
 | `cel setup` / `cel doctor` | install everything / verify the box |
 | `cel fleet [--json]` | the whole box in one deterministic read: orchestrator liveness, workers n/cap, stalled and unlanded work per product, root's mail per workspace |
+| `cel work [<ws>] [<key>]` | the work item: ticket + worktree + PR + mail as one thing, grouped by stage with the next action per row; `<key>` renders one item and its events; `--stage` · `--product` · `--json` · `--fresh` |
+| `cel history [<ws>] [--since 7d] [--key K]` | the vertical timeline: every event grouped by work item, newest group first, drawn with a spine |
 | `cel update [--check·--rollback·--channel]` | move to the newest release tag (or to `origin/main` on the main channel), re-link and re-render, then verify; `--check` prints what you have not got yet and exits 1 when behind; `--rollback` undoes the last update; `--channel main·release` picks which stream this box follows |
 | `cel ws new · add · sync · list · push · env` | workspace setup |
 | `cel ws up · down · reset · status <name>` | a workspace has a declared shape and this puts it back: `up` reconciles (herdr workspace, declared panes, an orchestrator per product that wants one, and a rename for any live agent herdr has lost the name of) and is safe to run twice; `down` stops the agents it owns and closes its **panes**, refusing over work that is neither pushed nor landed; `reset` is down-then-up; `status` is `up --dry-run` as a table. It never removes a worktree or touches the ledger — letting work go is `cel-fanout release` |
