@@ -86,8 +86,11 @@ def assemble(handwritten, fragments_dir):
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
         head = lines[0].strip() if lines else ""
-        if head in CATEGORIES:
-            add(head, lines[1:])
+        sections = split_categories("\n".join(lines[1:]))
+        if head in CATEGORIES and all(h in CATEGORIES for h in sections if h):
+            add(head, sections.pop("", []))
+            for heading, body in sections.items():
+                add(heading, body)
         else:
             # A fragment without a category heading is a mistake worth naming:
             # silently filing it under Added would publish it in the wrong place.
