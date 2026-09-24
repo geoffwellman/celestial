@@ -12,6 +12,7 @@ source "$CEL_ROOT/lib/liveness.sh"
 
 _liveness_setup() { # [min_confidence]
   T="$(mktemp -d)"
+  export CEL_TESTING=1   # pinned-clock tests need it even outside tests/run.sh
   export CEL_CONFIG_FILE="$T/config.yaml"
   { printf 'console:\n  router:\n    provider: openrouter\n    model: alpha/decide-1\n'
     printf '    key_env: OPENROUTER_API_KEY\n'
