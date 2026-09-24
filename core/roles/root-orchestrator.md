@@ -33,6 +33,8 @@ Responsibilities
   typing into your pane:
   `Monitor(command: "cel inbox watch", persistent: true)`.
   Restart it after a restart or resume - a monitor dies with its session.
+  (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
+  you of new mail and injects unread mail into your next turn - no action.)
   `cel inbox open --for root --ranked` puts the most urgent unread first when
   there is a pile of it.
 - Poll project orchestrators via the herdr skill; treat blocked as highest priority.

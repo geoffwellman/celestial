@@ -148,10 +148,16 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   local out
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  # CEL-65: an orchestrator reads ITS mailbox wherever it cds to
+  assert_contains "$out" "CEL_INBOX_ME=widget-orch"
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "orchestrator-guard.omp.ts"
+  assert_contains "$out" "inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=root"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
   ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
+  ! printf '%s' "$out" | grep -q "inbox.omp.ts" || { echo "worker got the inbox hook"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

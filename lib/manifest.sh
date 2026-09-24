@@ -58,6 +58,10 @@ agent_guard_hook() { # <runtime> <flag|file>
   yq -r --arg a "$1" --arg k "$2" '.agents[$a].guard_hook[$k] // "" | tostring' "$CEL_MANIFEST"
 }
 
+agent_inbox_hook() { # <runtime> <flag|file>
+  yq -r --arg a "$1" --arg k "$2" '.agents[$a].inbox_hook[$k] // "" | tostring' "$CEL_MANIFEST"
+}
+
 provider_get() { # <provider> <key>
   yq -r --arg p "$1" --arg k "$2" '.providers[$p][$k] // "" | tostring' "$CEL_MANIFEST"
 }
