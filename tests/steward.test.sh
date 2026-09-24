@@ -1285,3 +1285,62 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   assert_eq "$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)" "$n"
   rm -rf "$T"
 }
+
+# ---------------------------------------------------------------- CEL-72
+# Herdr lowercases the worktree name (ABC-7-thing -> .../abc-7-thing), so a
+# guessed $HOME/.herdr/worktrees/<repo>/<branch> never matched an uppercase
+# ticket branch: three live workers, one `working`, were each reported as
+# "nobody on <branch>". The ledger records the real worktree; these pin that.
+_cel72_fixture() { # <agent-status|none> <ledger 0|1> <cwd>
+  _orch_fixture
+  mkdir -p "$T/bin" "$T/alpha/.cel"
+  if [ "$2" = 1 ]; then
+    printf '[{"id":"WG-72-x","repo":"widget","branch":"WG-72-x","state":"running","worktree":"%s/wt/widget-alpha/wg-72-x"}]' "$T" \
+      > "$T/alpha/.cel/delegations.json"
+  fi
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":12,"headRefName":"WG-72-x","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"}]'
+SH
+  cat > "$T/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent get")  [ "$3" = bundle-orch ] && exit 0 || exit 1 ;;
+  "agent read") printf 'API Error: 429 Too Many Requests {"type":"rate_limit_error"}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  _STEWARD_HERDR="$T/bin/herdr"
+  local agent=''
+  [ "$1" = none ] || agent='{"name":"widget-wg-72-x","agent_status":"'"$1"'","pane_id":"w:p2","cwd":"'"$T/$3"'"},'
+  local roster='{"result":{"agents":['"$agent"'{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
+  PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
+  MSG="$(cmd_inbox read --for bundle-orch --workspace alpha --all | grep 'on widget' || true)"
+}
+
+test_cel72_a_working_worker_at_the_ledger_worktree_is_not_nobody() {
+  _cel72_fixture working 1 'wt/widget-alpha/wg-72-x'
+  case "$MSG" in *"nobody on"*) echo "working worker reported as nobody: $MSG"; rm -rf "$T"; return 1 ;; esac
+  assert_eq "$MSG" ""
+  rm -rf "$T"
+}
+
+test_cel72_an_idle_worker_at_the_ledger_worktree_is_named_not_nobody() {
+  _cel72_fixture idle 1 'wt/widget-alpha/wg-72-x'
+  assert_contains "$MSG" "its worker on WG-72-x is"
+  case "$MSG" in *"nobody on"*) echo "idle worker reported as nobody: $MSG"; rm -rf "$T"; return 1 ;; esac
+  rm -rf "$T"
+}
+
+test_cel72_no_agent_at_the_ledger_worktree_is_still_nobody() {
+  _cel72_fixture none 1 ''
+  assert_contains "$MSG" "nobody on WG-72-x"
+  rm -rf "$T"
+}
+
+test_cel72_without_a_ledger_row_the_lowercased_guess_is_found() {
+  _cel72_fixture idle 0 'home/.herdr/worktrees/widget/wg-72-x'
+  assert_contains "$MSG" "its worker on WG-72-x is"
+  rm -rf "$T"
+}

@@ -44,12 +44,8 @@ _release_is_semver() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-
 # addresses the right repository; the workspace org is the fallback, not the
 # answer.
 _release_slug() { # <wsdir> <repo>
-  local url org
-  url="$(ws_repo_get "$1" "$2" url)"
-  case "$url" in
-    *github.com:*)  printf '%s' "${url#*github.com:}" | sed 's/\.git$//'; return 0 ;;
-    *github.com/*)  printf '%s' "${url#*github.com/}" | sed 's/\.git$//'; return 0 ;;
-  esac
+  local org
+  github_slug_from_url "$(ws_repo_get "$1" "$2" url)" && return 0
   org="$(ws_org "$1")"
   [ -n "$org" ] || _rrefuse "cel release: $2 declares no url and the workspace no org - cannot address the repository" || return 1
   printf '%s/%s' "$org" "$2"

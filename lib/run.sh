@@ -40,6 +40,15 @@ _run_role_file() { # <wsdir> <tag> [product]
 #
 # AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
 # launch environment below carries it, and `cel gc` proves ownership with it.
+# KEEP THE MODEL THE LAUNCH NAMED (CEL-68). OMP prewalk swaps to the box's
+# `smol` model after the first edit/write, so a profile's model would silently
+# become another one - and the ledger's provenance would lie. Every omp launch
+# (cel run of any role, cel-fanout delegate/scout) goes through here; other
+# runtimes get nothing. Prepends to AGENT_ARGS.
+_run_keep_model_args() { # <runtime>
+  [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
+}
+
 _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
   AGENT_ROLE_FILE=""
@@ -239,8 +248,9 @@ reviewer_checkout_path() { # <repo> <pr>
 # What GitHub says this PR is, asked once at launch: the head we are about to
 # check out and the base branch the diff is against. Both travel into the
 # brief, because a review whose "main" is a directory is not a review.
-_run_reviewer_pr_facts() { # <repodir> <repo> <pr> -> head<TAB>base
+_run_reviewer_pr_facts() { # <repodir> <slug> <pr> -> head<TAB>base
   local out
+  [ -n "$2" ] || return 1
   out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
   printf '%s' "$out" | jq -re '[.headRefOid, .baseRefName] | @tsv' 2>/dev/null
 }
@@ -563,6 +573,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   if [ -n "$gflag" ] && [ -n "$gfile" ]; then
     AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
   fi
+  _run_keep_model_args "$runtime"
 
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$runtime")
@@ -707,8 +718,9 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       if [ "$dry_run" -eq 0 ]; then
         have gh || die "cel run reviewer: gh is not on PATH - the PR's head cannot be resolved"
         have jq || die "cel run reviewer: jq is not on PATH"
-        local facts
-        facts="$(_run_reviewer_pr_facts "$repodir" "$repo" "$pr")" \
+        local facts slug
+        slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir")" || slug=""
+        facts="$(_run_reviewer_pr_facts "$repodir" "$slug" "$pr")" \
           || die "cel run reviewer: cannot read $repo#$pr from GitHub - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
         IFS=$'\t' read -r review_head review_base <<< "$facts"
         [ -n "$review_head" ] \
@@ -819,6 +831,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
         AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
       fi ;;
   esac
+  _run_keep_model_args "$runtime"
 
   # Runtime-wide launch flags (agents.yaml launch_args) go ahead of the
   # role-injection args on every launch of that runtime.

@@ -725,6 +725,16 @@ test_scout_uses_its_own_role_binding() {
   assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "scout-model"
   rm -rf "$T"
 }
+# CEL-68: an omp delegate/scout keeps its profile's model - prewalk off.
+test_omp_delegate_and_scout_launch_with_no_prewalk() {
+  _fanout_setup; _fanout_bind_profiles deep
+  (cd "$T" && "$BIN" delegate widget WG-NP "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "--no-prewalk"
+  : > "$STUB_LOG"; printf 'brief\n' > "$T/b.md"
+  (cd "$T" && "$BIN" scout widget "$T/b.md") > /dev/null
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "--no-prewalk"
+  rm -rf "$T"
+}
 test_scout_falls_back_to_the_worker_binding_when_unbound() {
   _fanout_setup; _fanout_bind_profiles
   printf 'brief\n' > "$T/b.md"
@@ -1351,6 +1361,17 @@ test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
   # the public record lives in the log, not in a comment nobody reads
   assert_contains "$(cat "$GH_LOG")" "Reviewed-by: widget-pr-7-review (approved)"
   assert_contains "$(cat "$GH_LOG")" "gate green"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# The note becomes the squash body on main, which the push-run hygiene scan
+# reads in full: a ticket-shaped token it rejects must never get that far.
+test_land_refuses_a_note_the_hygiene_scan_would_reject() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a note the scan rejects"; rm -rf "$T"; return 1; }
+  grep -q "^pr merge" "$GH_LOG" && { echo "merged anyway"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "ZZQ-$((6*2))"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 

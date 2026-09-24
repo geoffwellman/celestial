@@ -769,6 +769,7 @@ cmd_delegate() {
   local -a PROFILE_ARGS=()
   profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
+  _run_keep_model_args "$rt"   # same helper as cel run (CEL-68)
 
   # Runtime-wide launch flags, same as cel run. THESE WERE MISSING HERE: every
   # worker delegated through fanout started without its runtime's approval
@@ -2156,7 +2157,21 @@ cmd_land() { # <id>
     [ -z "$body" ] || body="$body"$'\n'
     body="$body$ci_gate_body"
   fi
-  [ -z "$body" ] || merge_args+=(--body "$body")
+  if [ -n "$body" ]; then
+    # The body lands on main, and the push-run hygiene scan reads all of
+    # history: refuse here, naming the token, rather than break every PR.
+    # Reuses the scanner's own regex and prefix sets, not a copy of them.
+    local bad
+    bad="$(printf '%s' "$body" | python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import hygiene as h
+ok = h.EXAMPLE_PREFIXES | h.STANDARD_PREFIXES
+for line in sys.stdin.read().splitlines():
+    for m in h.TICKET.finditer(line.replace("[A-Z0-9]", " " * 8)):
+        if m[1] not in ok: print(m[0])
+' "$CEL_ROOT/tools/release")" || die "land: could not run the hygiene check on the commit body - nothing was merged"
+    [ -z "$bad" ] || die "land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
+    merge_args+=(--body "$body")
+  fi
   "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"
