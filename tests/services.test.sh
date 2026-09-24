@@ -36,7 +36,7 @@ case "\$1 \$2" in
   # tab, so the stub has to be able to hand one back (CEL-62).
   'workspace list') printf '{"result":{"workspaces":[]}}' ;;
   'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
-  'agent list') printf '{"result":{"agents":[]}}' ;;
+  'agent list') printf '{"result":{"agents":[{"cwd":"%s/alpha","pane_id":"w1:p1"}]}}' "$T" ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;
 esac

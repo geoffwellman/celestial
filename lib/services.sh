@@ -407,6 +407,22 @@ _svc_box_home_pane() { # <cwd> -> 0 and _SVC_TAB_PANE, or 1 and _SVC_TAB_ERR
   _SVC_TAB_PANE="$pane"
 }
 
+# The lookup-then-create above is SERIALISED: two box starts at once (the
+# steward and an operator) would both see no home and both create one. The
+# lock is a flock on a file in the box state dir; without flock, unlocked.
+_svc_box_home_locked() { # <cwd>
+  local dir fd rc=0
+  dir="$(svc_box_state_dir)"
+  if ! have flock || ! mkdir -p "$dir" 2>/dev/null; then
+    _svc_box_home_pane "$1"; return
+  fi
+  exec {fd}>"$dir/.home.lock" || { _svc_box_home_pane "$1"; return; }
+  flock "$fd"
+  _svc_box_home_pane "$1" || rc=$?
+  exec {fd}>&-
+  return "$rc"
+}
+
 svc_start() { # [wsdir] <name>
   local d="${1:-}" name="$2" e cmd cwd kind store
   e="$(svc_entry "$d" "$name")"
@@ -450,10 +466,17 @@ svc_start() { # [wsdir] <name>
 
   # EVERY split names a direction and a target. A workspace service sits under
   # its workspace's pane; everything else goes to the box's `cel services` workspace.
+  # A WORKSPACE service never falls back to the box home: a transient
+  # \`agent list\` miss would start it in the wrong place, silently.
   local target=""
-  [ -n "$d" ] && target="$(_svc_ws_pane "$d")"
-  if [ -z "$target" ]; then
-    _svc_box_home_pane "$cwd" || true
+  if [ "$kind" != box ] && [ -n "$d" ]; then
+    target="$(_svc_ws_pane "$d")"
+    [ -n "$target" ] || {
+      c_err "$name: no herdr pane found for workspace $d - is its agent running? (not starting it in the box services home)"
+      return 1
+    }
+  else
+    _svc_box_home_locked "$cwd" || true
     target="$_SVC_TAB_PANE"
   fi
   [ -n "$target" ] || {
