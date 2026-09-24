@@ -635,6 +635,11 @@ test_console_output_rendering_is_proved() {
   node "$CEL_ROOT/tools/console/views.test.mjs"
 }
 
+# CEL-75: a fleet read that times out under load keeps the last good board.
+test_console_keeps_the_last_good_fleet_when_a_refresh_fails() {
+  node "$CEL_ROOT/tools/console/state.test.mjs"
+}
+
 # THE MODEL ANSWERS FROM STATE. "which workers are idle" is in the state the
 # console already sends; running three commands to re-learn it is the console
 # handing the operator homework.
