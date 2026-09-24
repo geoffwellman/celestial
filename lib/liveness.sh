@@ -163,9 +163,19 @@ _liveness_put() { # <key> <hash> <changed_at> <activity> <confidence> <answered_
     > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
-# The one clock every timestamp in this file reads. CEL_LIVENESS_NOW pins it
-# (tests only): separate `date +%s` reads race a second boundary.
-_liveness_now() { printf '%s' "${CEL_LIVENESS_NOW:-$(date +%s)}"; }
+# The one clock every timestamp in this file reads. CEL_LIVENESS_NOW pins it,
+# but only under the test harness (CEL_TESTING=1, set by tests/run.sh) and
+# only as an integer: a stray export in a real process must never freeze ages
+# or stop cached answers expiring.
+_liveness_now() {
+  if [ "${CEL_TESTING:-}" = 1 ]; then
+    case "${CEL_LIVENESS_NOW:-}" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s' "$CEL_LIVENESS_NOW"; return 0 ;;
+    esac
+  fi
+  date +%s
+}
 
 # Seconds since this worker's pane text last changed. First sighting is 0 -
 # "we have never seen it before" is not evidence of stillness.
