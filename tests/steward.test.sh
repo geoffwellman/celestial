@@ -1283,6 +1283,8 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   local n; n="$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)"
   PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
   assert_eq "$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)" "$n"
+  rm -rf "$T"
+}
 
 # ---- CEL-70: one tick, two workspaces, two identities ---------------------
 # alpha acts as acct-b; beta declares nothing and keeps the active account.

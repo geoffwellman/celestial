@@ -668,7 +668,7 @@ test_every_role_launch_carries_the_token_substitution_not_the_token() {
   for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
     # shellcheck disable=SC2086
     out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
-    assert_contains "$out" 'GH_TOKEN="$(gh auth token --user acct-b'
+    assert_contains "$out" 'gh auth token --user acct-b'
     case "$out" in *tok-b*) echo "token value leaked into $role dry run"; rm -rf "$T"; return 1;; esac
   done
   rm -rf "$T"
@@ -684,5 +684,23 @@ test_reviewer_pr_lookup_runs_as_the_workspace_account() {
   _ws_gh_acct acct-b
   _run_reviewer_pr_facts "$T/repos/widget" someone/widget 12 "$T" >/dev/null
   assert_contains "$(cat "$GH_LOG")" "pr view 12 --repo someone/widget --json headRefOid,baseRefName|GH_TOKEN=tok-b"
+  rm -rf "$T"
+}
+# The pane evaluates the token itself, so auth can vanish between cel's
+# readiness check and the typed line. Then the agent must NOT start, and the
+# pane must say how to fix it (Sourcery on #89).
+test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
+  _ws_gh_acct acct-b
+  local line; line="$(_run_launch_env worker "$T" /r.md)touch $T/agent-ran"
+  # auth disappears after the readiness check
+  printf '#!/usr/bin/env bash\necho "no oauth token" >&2; exit 1\n' > "$T/bin/gh"
+  local err; err="$(bash -c "$line" 2>&1)" || true
+  [ ! -e "$T/agent-ran" ] || { echo "agent started without its account's token"; rm -rf "$T"; return 1; }
+  assert_contains "$err" "gh auth login"
+  # and with auth present the same line starts it, the token in its env
+  printf '#!/usr/bin/env bash\necho tok-b\n' > "$T/bin/gh"
+  line="$(_run_launch_env worker "$T" /r.md)sh -c 'printf %s \"\$GH_TOKEN\" > $T/agent-ran'"
+  bash -c "$line"
+  assert_eq "$(cat "$T/agent-ran")" "tok-b"
   rm -rf "$T"
 }

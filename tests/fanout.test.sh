@@ -2369,7 +2369,7 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
   printf 'why slow\n' > "$T/why.md"
   (cd "$T" && PATH="$T/bin:$PATH" "$BIN" delegate widget WG-GH "$T/spec.md") > /dev/null
   (cd "$T" && PATH="$T/bin:$PATH" "$BIN" scout widget "$T/why.md") > /dev/null
-  assert_eq "$(grep '^pane send-text' "$STUB_LOG" | grep -c 'GH_TOKEN="$(gh auth token --user acct-b')" "2"
+  assert_eq "$(grep '^pane send-text' "$STUB_LOG" | grep -c 'gh auth token --user acct-b')" "2"
   if grep -q tok-b "$STUB_LOG"; then echo "token value reached herdr"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
