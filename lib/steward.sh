@@ -384,10 +384,39 @@ _steward_reconcile() {
 # the remedy it asked for, another worker, spends the window it is waiting on.
 # So before the sweep says a branch has nobody, it asks what the pane on that
 # branch is actually doing. "<silence>\t<reset>" or nothing.
-_steward_branch_silence() { # <agents-json> <repo> <branch>
+# WHERE A BRANCH'S WORKER STANDS (CEL-72). Both lookups below used to guess
+# $HOME/.herdr/worktrees/<repo>/<branch> and compare it byte-for-byte with each
+# agent's cwd - but herdr lowercases the worktree name, so an uppercase ticket
+# branch never matched: on 2026-09-24 three live workers, one `working`, were
+# each reported as "nobody on <branch>". The ledger records the real worktree,
+# so it answers first; a PR opened by hand has no row, and for that one the
+# guess is compared case-insensitively. Prints a jq filter argument pair:
+# "<exact-path>\t<guess>" - exact may be empty.
+_steward_branch_worktree() { # <wsdir> <repo> <branch>
+  local led="$1/.cel/delegations.json" wt=""
+  if [ -f "$led" ]; then
+    wt="$(jq -r --arg r "$2" --arg b "$3" \
+      '[(if type == "array" then .[] else .delegations[]? end)
+        | select(.repo == $r and .branch == $b and (.worktree // "") != "")][-1].worktree // ""' \
+      "$led" 2>/dev/null || true)"
+  fi
+  printf '%s\t%s' "$wt" "$HOME/.herdr/worktrees/$2/$3"
+}
+
+# The agents standing on a branch, as a JSON array, by _steward_branch_worktree.
+_steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
+  local wt guess
+  IFS=$'\t' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
+  printf '%s' "$1" | jq -c --arg w "$wt" --arg g "$guess" \
+    '[.result.agents[]? | select(.cwd != null and
+       ((.cwd == $w and $w != "") or ((.cwd | ascii_downcase) == ($g | ascii_downcase))))]' \
+    2>/dev/null || printf '[]'
+}
+
+_steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
   local agents="$1" alias text
-  alias="$(printf '%s' "$agents" | jq -r --arg d "$HOME/.herdr/worktrees/$2/$3" \
-    '[.result.agents[]? | select(.cwd == $d)][0] | (.name // .agent_id // "")' 2>/dev/null || true)"
+  alias="$(_steward_branch_agents "$agents" "$2" "$3" "$4" | jq -r \
+    '.[0] | (.name // .agent_id // "")' 2>/dev/null || true)"
   [ -n "$alias" ] && [ "$alias" != null ] || return 0
   text="$("$_STEWARD_HERDR" agent read "$alias" --source recent-unwrapped --lines 40 2>/dev/null || true)"
   [ -n "$text" ] || return 0
@@ -464,13 +493,13 @@ _steward_review_sweep() { # <agents-json>
         [ -n "$num" ] || continue
         failing="${failing:-0}"
         # a worker actively on the branch means the loop is moving - leave it
-        working="$(printf '%s' "$agents_json" | jq -r --arg d "$HOME/.herdr/worktrees/$repo/$branch" \
-          '[.result.agents[] | select(.cwd == $d and .agent_status == "working")] | length')"
+        working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
+          | jq -r '[.[] | select(.agent_status == "working")] | length')"
         if [ "$review" = "APPROVED" ]; then
           _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
         elif [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
-          local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
+          local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
           if [ -n "$sil" ]; then
             _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
               "steward: PR #$num on $repo has changes requested and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
@@ -483,7 +512,7 @@ _steward_review_sweep() { # <agents-json>
           # ticket is about: it may be throttled, wedged on a transport error,
           # or holding a prompt it never took. Every one of those is a report,
           # and none of them is answered by spawning a fifth worker.
-          local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
+          local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
           if [ -n "$sil" ]; then
             _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
               "steward: PR #$num on $repo has FAILING checks and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."

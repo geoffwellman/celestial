@@ -1,0 +1,1 @@
+- steward: a PR's worker is found at the worktree the delegation ledger records (herdr lowercases worktree names), so a live worker on an uppercase ticket branch is no longer reported as "nobody on <branch>".
