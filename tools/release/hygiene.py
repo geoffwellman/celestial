@@ -18,7 +18,9 @@ STANDARD_PREFIXES = {"UTF", "SHA", "ISO", "RFC", "TLS", "HTTP", "CWE", "CVE", "N
                      # npm lock file is the public domain dedication a
                      # transitive dependency ships under, not a ticket from
                      # someone's private tracker.
-                     "CC0", "CC", "BSD", "GPL", "LGPL", "AGPL", "EPL", "MPL", "CDDL", "APACHE"}
+                     "CC0", "CC", "BSD", "GPL", "LGPL", "AGPL", "EPL", "MPL", "CDDL", "APACHE",
+                     # FOLLOWUPS-<yymmdd> is a file-naming word, not a ticket.
+                     "FOLLOWUPS"}
 TICKET = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-[0-9]+\b")
 SECRET_RULES = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),

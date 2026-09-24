@@ -1354,6 +1354,17 @@ test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
+# The note becomes the squash body on main, which the push-run hygiene scan
+# reads in full: a ticket-shaped token it rejects must never get that far.
+test_land_refuses_a_note_the_hygiene_scan_would_reject() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a note the scan rejects"; rm -rf "$T"; return 1; }
+  grep -q "^pr merge" "$GH_LOG" && { echo "merged anyway"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "ZZQ-$((6*2))"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_land_says_which_path_approved_it() {
   _fanout_land_setup fleetbot APPROVED 0
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )"
