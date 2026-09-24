@@ -291,6 +291,17 @@ test_run_console_gets_the_guard_hook() {
   esac
   rm -rf "$CONS"
 }
+# CEL-68: an omp console keeps its model too; the shipped claude one gets nothing.
+test_run_console_on_omp_launches_with_no_prewalk() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude console got --no-prewalk"; rm -rf "$CONS"; return 1; }
+  _run_console_default() { case "$1" in runtime) echo omp ;; model) echo m/x ;; esac; }
+  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
+  assert_contains "$out" "agent start console --kind omp"
+  assert_contains "$out" "--no-prewalk"
+  rm -rf "$CONS"
+}
 test_run_console_body_carries_no_workspace_policy_block() {
   local body; body="$(_run_console_body)"
   assert_contains "$body" "You are the console"
