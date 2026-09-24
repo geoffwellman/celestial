@@ -561,3 +561,14 @@ test_release_fragment_with_an_unknown_heading_is_refused() {
   fi
   rm -rf "$T"
 }
+
+test_release_fragment_with_two_sections_files_each_under_its_own_heading() {
+  local T out; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"
+  mkdir -p "$T/changelog.d"
+  printf '### Added\n- new thing\n\n### Fixed\n- old bug\n' >"$T/changelog.d/a.md"
+  out="$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^### Fixed' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^### Added' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
