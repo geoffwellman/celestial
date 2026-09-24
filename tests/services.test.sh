@@ -32,7 +32,11 @@ _svc_setup() { # [service-yaml]
 printf '%s\n' "\$*" >> "$T/calls"
 case "\$1 \$2" in
   'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
-  'agent list') printf '{"result":{"agents":[]}}' ;;
+  # A service with no workspace pane is split from the box's own services
+  # tab, so the stub has to be able to hand one back (CEL-62).
+  'workspace list') printf '{"result":{"workspaces":[]}}' ;;
+  'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  'agent list') printf '{"result":{"agents":[{"cwd":"%s/alpha","pane_id":"w1:p1"}]}}' "$T" ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;
 esac
@@ -302,5 +306,223 @@ test_box_service_in_home_reports_no_process_tree_memory() {
   printf '{"name":"cel-auth-broker","port":47311}\n' > "$CEL_SERVICES_D/cel-auth-broker.json"
   local js; js="$(cd "$T" && "$CEL" services --json)"
   assert_eq "$(printf '%s' "$js" | jq -r '.[0].rss_mb')" 0
+  _svc_teardown
+}
+
+# --- starting a service is a pane split, and a split needs a direction -------
+#
+# 2026-09-23: `cel gateway install` ended with "cel-auth-gateway: herdr pane
+# split returned no pane id - nothing was started". herdr's CLI had grown a
+# requirement - a split names a DIRECTION and a TARGET pane - and the
+# box-level branch here passed neither, so herdr printed its usage and every
+# box service on this box was unstartable. The sentence above is the second
+# half of the bug: it described the symptom and hid herdr's own message.
+#
+# This stub is the real CLI's contract: refuse a split without a direction and
+# a target, exactly as herdr does, and log argv so a test can read what was
+# asked for.
+_svc_strict_herdr() {
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split')
+    dir=""; target=""
+    shift 2
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --direction) dir="\$2"; shift 2 ;;
+        --pane) target="\$2"; shift 2 ;;
+        --current) target=current; shift ;;
+        --cwd|--ratio|--env) shift 2 ;;
+        --no-focus|--focus) shift ;;
+        -*) shift ;;
+        *) target="\$1"; shift ;;
+      esac
+    done
+    if [ -z "\$dir" ] || [ -z "\$target" ]; then
+      printf 'usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [...]\n' >&2
+      exit 2
+    fi
+    printf '{"result":{"pane":{"pane_id":"w1:p9"},"pane_id":"w1:p9"}}' ;;
+  # Two unrelated product workspaces exist and one of them is FOCUSED. A
+  # bare \`tab create\` would land in the focused one - herdr's ambient
+  # behaviour - so the stub records it as a tab in wAA, where a
+  # \`cel ws reset\` of that product would take every box service with it.
+  'workspace list')
+    [ -f "$T/ws-list-err" ] && { cat "$T/ws-list-err" >&2; exit 1; }
+    svc=""
+    [ -f "$T/svc-ws" ] && svc=',{"workspace_id":"wSV","label":"cel services","focused":false}'
+    printf '{"result":{"workspaces":[{"workspace_id":"wAA","label":"bundle/orch","focused":true},{"workspace_id":"wBB","label":"widget/orch","focused":false}%s]}}' "\$svc" ;;
+  'workspace create')
+    [ -f "$T/ws-create-err" ] && { cat "$T/ws-create-err" >&2; exit 1; }
+    touch "$T/svc-ws"
+    printf '{"result":{"workspace":{"workspace_id":"wSV"},"tab":{"tab_id":"wSV:t1"},"root_pane":{"pane_id":"wSV:p1"}}}' ;;
+  'tab list')   cat "$T/tabs.json" 2>/dev/null || printf '{"result":{"tabs":[]}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"wAA:p8"}}}' ;;
+  'pane list')
+    case "\$*" in
+      *'--workspace wSV'*) [ -f "$T/svc-ws" ] && printf '{"result":{"panes":[{"pane_id":"wSV:p1","workspace_id":"wSV"}]}}' || printf '{"result":{"panes":[]}}' ;;
+      *'--workspace'*) printf '{"result":{"panes":[]}}' ;;
+      *) printf '{"result":{"panes":[{"pane_id":"wAA:p1","workspace_id":"wAA"},{"pane_id":"wBB:p1","workspace_id":"wBB"}]}}' ;;
+    esac ;;
+  'agent list') cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
+  'pane read')  printf 'last line of the pane\n' ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+}
+
+_svc_split_args() { # the argv of the last `pane split`
+  grep '^pane split' "$T/calls" | tail -1 || true
+}
+
+# A box service has no workspace pane to sit under, so it needs a home of its
+# own: `cel` finds or creates a tab and splits from a pane in it. The split
+# must carry a direction and a target or herdr refuses it.
+test_box_service_split_names_a_direction_and_a_target() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf '{"name":"cel-auth-gateway","port":47411,"cmd":"omp auth-gateway serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  ( cd "$T" && "$CEL" services start cel-auth-gateway )
+  assert_eq "$(jq -r '.pane' "$CEL_SERVICES_STATE/cel-auth-gateway.json")" "w1:p9"
+  local args; args="$(_svc_split_args)"
+  assert_contains "$args" "--direction"
+  assert_contains "$args" "--pane"
+  _svc_teardown
+}
+
+# A box service belongs to the box, not to whichever product workspace the
+# operator is focused on. The orchestrator's smoke test of the first fix
+# created `cel services` as a TAB inside the focused product workspace (wAA):
+# a `cel ws reset` of that product would have killed the gateway. The home is
+# a dedicated Herdr workspace found by its label and created if absent.
+test_box_service_lands_in_the_dedicated_services_workspace() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-broker.json"
+  ( cd "$T" && HERDR_PANE_ID=wAA:p1 HERDR_WORKSPACE_ID=wAA "$CEL" services start cel-auth-broker )
+  assert_contains "$(grep '^workspace create' "$T/calls" || true)" "--label cel services"
+  assert_contains "$(_svc_split_args)" "--pane wSV:p1"
+  assert_contains "$(_svc_split_args)" "--direction down"
+  [ -z "$(grep '^tab create' "$T/calls" || true)" ] \
+    || { echo "a tab was created in the ambient workspace"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# The second box service reuses that same workspace: no duplicate workspace,
+# no tab, and a split from the services workspace's own pane.
+test_second_box_service_reuses_the_services_workspace() {
+  _svc_box_setup
+  _svc_strict_herdr
+  local n
+  for n in cel-auth-broker cel-auth-gateway; do
+    printf '{"name":"%s","port":1,"cmd":"omp %s serve","cwd":"%s"}\n' "$n" "$n" "$T" \
+      > "$CEL_SERVICES_D/$n.json"
+  done
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker )
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-gateway )
+  assert_eq "$(grep -c '^workspace create' "$T/calls")" 1
+  assert_eq "$(grep -c '^tab create' "$T/calls" || true)" 0
+  assert_contains "$(_svc_split_args)" "--pane wSV:p1"
+  _svc_teardown
+}
+
+# Lookup and create refusals carry herdr's own stderr.
+test_services_workspace_lookup_refusal_reports_herdr() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf 'error: herdr socket not reachable\n' > "$T/ws-list-err"
+  printf '{"name":"cel-auth-gateway","port":1,"cmd":"x","cwd":"%s"}\n' "$T" > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "herdr socket not reachable"
+  [ -z "$(grep '^workspace create' "$T/calls" || true)" ] \
+    || { echo "created a workspace after a failed lookup"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+test_services_workspace_create_refusal_reports_herdr() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf 'error: workspace limit reached\n' > "$T/ws-create-err"
+  printf '{"name":"cel-auth-gateway","port":1,"cmd":"x","cwd":"%s"}\n' "$T" > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "workspace limit reached"
+  _svc_teardown
+}
+
+# A workspace's own service still lands under that workspace's pane.
+test_workspace_service_split_still_targets_the_workspace_pane() {
+  _svc_setup
+  _svc_strict_herdr
+  printf '{"result":{"agents":[{"cwd":"%s/alpha","pane_id":"w2:p3"}]}}' "$T" > "$T/agents.json"
+  printf 'name: alpha\nservices:\n  - {name: builder, cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+  "$CEL" services start builder --workspace alpha
+  local args; args="$(_svc_split_args)"
+  assert_contains "$args" "--pane w2:p3"
+  assert_contains "$args" "--direction down"
+  _svc_teardown
+}
+
+# A workspace service whose workspace pane cannot be resolved fails loudly,
+# naming the workspace. It never falls back to the box services home: a
+# transient \`agent list\` miss would otherwise start it in the wrong place.
+test_workspace_service_without_a_workspace_pane_fails_naming_it() {
+  _svc_setup
+  _svc_strict_herdr
+  printf '{"result":{"agents":[]}}' > "$T/agents.json"
+  printf 'name: alpha\nservices:\n  - {name: builder, cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+  local out rc=0
+  out="$("$CEL" services start builder --workspace alpha 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "start succeeded without a workspace pane"; _svc_teardown; return 1; }
+  assert_contains "$out" "$T/alpha"
+  [ -z "$(grep -E '^(workspace create|pane split)' "$T/calls" || true)" ] \
+    || { echo "fell back to the box services home"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# Two concurrent box-service starts produce ONE services home: the
+# lookup-then-create is serialised, so the second waits and finds the first's.
+test_concurrent_box_starts_create_one_services_home() {
+  _svc_box_setup
+  _svc_strict_herdr
+  # Slow the create so both starts would look before either creates.
+  sed -i "s|  'workspace create')|  'workspace create') sleep 1;|" "$T/bin/herdr"
+  local n
+  for n in cel-auth-broker cel-auth-gateway; do
+    printf '{"name":"%s","port":1,"cmd":"omp %s serve","cwd":"%s"}\n' "$n" "$n" "$T" \
+      > "$CEL_SERVICES_D/$n.json"
+  done
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker >/dev/null 2>&1 ) &
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-gateway >/dev/null 2>&1 ) &
+  wait
+  assert_eq "$(grep -c '^workspace create' "$T/calls")" 1
+  _svc_teardown
+}
+
+# When herdr refuses, say what herdr said. "returned no pane id" hid a CLI
+# change for a day.
+test_a_refused_split_reports_herdrs_own_message() {
+  _svc_box_setup
+  _svc_strict_herdr
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split') printf 'error: pane w1:p1 is too small to split\n' >&2; exit 2 ;;
+  'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  printf '{"name":"cel-auth-gateway","port":47411,"cmd":"omp auth-gateway serve","cwd":"%s"}\n' "$T" \
+    > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "too small to split"
   _svc_teardown
 }
