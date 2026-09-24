@@ -2373,3 +2373,36 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
   if grep -q tok-b "$STUB_LOG"; then echo "token value reached herdr"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
+
+# ---- the history stamp (CEL-45) -------------------------------------------
+# A row carried ONE timestamp - `created` - so half a work item's life was
+# unrecorded: nothing said when it was collected, landed or released, and no
+# timeline could draw what nobody wrote down. Every transition now appends
+# {state, at, by} to the row's `history`.
+
+test_the_ledger_stamps_the_state_it_was_created_in() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].history[0].at' "$T/.cel/delegations.json")" \
+            "$(jq -r '.[0].created' "$T/.cel/delegations.json")"
+  rm -rf "$T"
+}
+
+test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  mkdir -p "$STUB_WT/.agent"
+  printf '# Result\nall good\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-1-x >/dev/null)
+  (cd "$T" && "$BIN" release WG-1-x --discard >/dev/null)
+  assert_eq "$(jq -r '.[0].history | map(.state) | join(",")' "$T/.cel/delegations.json")" \
+            "running,collected,released"
+  # every entry says who moved it, and the stamps never go backwards
+  assert_eq "$(jq -r '.[0].history | map(.by != "" and .at != "") | all' "$T/.cel/delegations.json")" true
+  assert_eq "$(jq -r '.[0].history | map(.at) | (. == sort)' "$T/.cel/delegations.json")" true
+  # the row's other fields are untouched by the stamping
+  assert_eq "$(jq -r '.[0].branch' "$T/.cel/delegations.json")" "WG-1-x"
+  rm -rf "$T"
+}
