@@ -525,3 +525,39 @@ test_release_notes_unreleased_assembles_fragments_without_touching_the_tree() {
   assert_eq "$(ls "$T/changelog.d")" "z-added.md" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# Every tracked fragment must carry a category heading, or the cut refuses at
+# release time - days after the fragment merged. Checked through notes.py's own
+# assemble(), so there is one definition of "valid".
+test_release_every_tracked_fragment_has_a_category_heading() {
+  local out
+  out="$(cd "$_REL_REPO" && git ls-files 'changelog.d/*.md' | python3 -c '
+import sys
+sys.path.insert(0, "tools/release")
+from pathlib import Path
+import tempfile, shutil
+from notes import assemble
+bad = []
+for name in sys.stdin.read().split():
+    d = tempfile.mkdtemp()
+    shutil.copy(name, d)
+    try:
+        assemble("", d)
+    except SystemExit:
+        bad.append(name)
+    finally:
+        shutil.rmtree(d)
+print("\n".join(bad))
+')" || return 1
+  [[ -z "$out" ]] || { printf 'fragments without a category heading:\n%s\n' "$out" >&2; return 1; }
+}
+
+test_release_fragment_with_an_unknown_heading_is_refused() {
+  local T; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"
+  _rel_fragment "$T/changelog.d" "x.md" '### Misc' '- nope'
+  if _notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d" 2>/dev/null; then
+    rm -rf "$T"; return 1
+  fi
+  rm -rf "$T"
+}
