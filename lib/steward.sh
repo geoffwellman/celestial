@@ -450,7 +450,7 @@ _steward_review_sweep() { # <agents-json>
       # colleague's PR must never be nudged into "action it now".
       # Colleagues' PRs are theirs to land. This filter guards every check
       # below it, including reminders about our ticket naming convention.
-      prsj="$(gh pr list --repo "$slug" --author @me \
+      prsj="$(ws_gh "$wsdir" pr list --repo "$slug" --author @me \
               --json number,headRefName,reviewDecision,isDraft,statusCheckRollup,createdAt 2>/dev/null)" || continue
 
       # UNTICKETED PRs. Linear links a PR to its ticket purely from the branch

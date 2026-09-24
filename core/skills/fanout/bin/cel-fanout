@@ -103,6 +103,12 @@ _fanout_ticket_id() { # <wsdir> <repo> <branch>
 LINEAR="${CEL_FANOUT_LINEAR:-cel-linear}"
 # gh too: land merges real PRs, and a test suite must never merge one.
 GH="${CEL_FANOUT_GH:-gh}"
+# EVERY gh CALL HERE ACTS FOR ONE WORKSPACE, so each goes through ws_gh
+# (lib/workspace.sh), which gives it that workspace's `github.user` token for
+# that one call and refuses rather than fall back to the box's active account.
+_fgh() { # <wsdir> <gh args...>
+  CEL_WS_GH_BIN="$GH" ws_gh "$@"
+}
 # and the verifier, which runs a repo's real test gate
 VERIFY="${CEL_FANOUT_VERIFY:-$CEL_ROOT/core/skills/verify/bin/cel-verify}"
 
@@ -504,6 +510,10 @@ cmd_delegate() {
   done
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  # Refused BEFORE a worktree exists: a worker that would act as the wrong
+  # GitHub account is not worth a checkout to clean up (CEL-70).
+  ws_github_ready "$wsdir" "$GH" \
+    || die "delegate: refusing to launch for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
   local repodir="$wsdir/repos/$repo"
   [ -d "$repodir" ] || die "repo '$repo' not found under $wsdir/repos"
   [ -f "$spec" ] || die "spec file not found: $spec"
@@ -1024,7 +1034,7 @@ cmd_collect() {
   # actually sees in the timeline.
   if [ -n "$ticket" ]; then
     local prurl
-    prurl="$(gh pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
+    prurl="$(_fgh "$wsdir" pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
       | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')" \
       --json url --jq .url 2>/dev/null || true)"
     if [ -n "$prurl" ]; then
@@ -1338,7 +1348,7 @@ cmd_why() { # <id> [--workspace NAME]
   local prurl pr=""
   prurl="$(printf '%s' "$row" | jq -r '.pr')"
   if [ -n "$prurl" ]; then
-    pr="$("$GH" pr view "$prurl" --json state,reviewDecision,statusCheckRollup 2>/dev/null || true)"
+    pr="$(_fgh "$wsdir" pr view "$prurl" --json state,reviewDecision,statusCheckRollup 2>/dev/null || true)"
     if [ -n "$pr" ]; then
       printf 'pr: %s %s, review %s, checks %s\n' "$prurl" \
         "$(printf '%s' "$pr" | jq -r '.state // "?"')" \
@@ -1594,7 +1604,7 @@ _fanout_bulk() { # <verb> <default-states> [args...]
 _pr_index() { # <wsdir> <repo> -> JSON array of PRs
   local slug; slug="$(_repo_slug "$1" "$2")"
   [ -n "$slug" ] && [ "$slug" != null ] || { printf '[]'; return 0; }
-  "$GH" pr list --repo "$slug" --state all \
+  _fgh "$1" pr list --repo "$slug" --state all \
     --json number,headRefName,state,mergedAt,closedAt --limit 200 2>/dev/null \
     || printf '[]'
 }
@@ -1886,7 +1896,7 @@ cmd_release() {
   state="$(printf '%s' "$entry" | jq -r '.state // ""')"
   if [ -n "$ticket" ]; then
     local merged
-    merged="$(gh pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
+    merged="$(_fgh "$wsdir" pr view "$branch" --repo "$(ws_repo_get "$wsdir" "$repo" url \
       | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')" \
       --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
     if [ -n "$merged" ] && [ "$merged" != "null" ]; then
@@ -2024,13 +2034,15 @@ cmd_land() { # <id>
   ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
   slug="$(ws_repo_get "$wsdir" "$repo" url | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
 
+  ws_github_ready "$wsdir" "$GH" \
+    || die "land: refusing to act for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
   [ "$(ws_policy "$wsdir" merge)" = "self" ] \
     || die "land: this workspace's policy.merge is humans-only - surface the PR to a human; do not merge it"
 
-  local pr; pr="$("$GH" pr view "$branch" --repo "$slug" \
+  local pr; pr="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" \
     --json number,author,reviewDecision,statusCheckRollup,isDraft,mergeable,state,headRefOid,baseRefName 2>/dev/null)" \
     || die "land: no PR found for $branch on $slug"
-  local me; me="$("$GH" api user --jq .login 2>/dev/null)"
+  local me; me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null)"
   local author num; author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"; num="$(printf '%s' "$pr" | jq -r .number)"
   [ -n "$me" ] && [ "$author" = "$me" ] \
     || die "land: PR #$num was opened by '$author', not by this fleet ('$me') - colleagues' PRs are theirs to land"
@@ -2093,11 +2105,11 @@ cmd_land() { # <id>
         base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')"
         [ -n "$head" ] || die "land --gate-from-ci: the PR reports no head commit - nothing to check CI against"
         [ -n "$base" ] || die "land --gate-from-ci: the PR reports no base branch - nothing to read protection from"
-        prot="$("$GH" api "repos/$slug/branches/$base/protection" 2>/dev/null || true)"
+        prot="$(_fgh "$wsdir" api "repos/$slug/branches/$base/protection" 2>/dev/null || true)"
         [ -n "$prot" ] || die "land --gate-from-ci: cannot read branch protection for $base on $slug - with no readable protection there is no required check for CI to stand in with. Give the gate more time instead (CEL_VERIFY_GATE_TIMEOUT)."
         req="$(printf '%s' "$prot" | jq -r '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique | .[]' 2>/dev/null || true)"
         [ -n "$req" ] || die "land --gate-from-ci: $base on $slug requires no check - a branch nothing gates cannot lend its verdict to this one"
-        cr="$("$GH" api "repos/$slug/commits/$head/check-runs" 2>/dev/null || true)"
+        cr="$(_fgh "$wsdir" api "repos/$slug/commits/$head/check-runs" 2>/dev/null || true)"
         missing="$(printf '%s' "$cr" | jq -r --argjson want "$(printf '%s' "$req" | jq -R . | jq -sc .)" '
           [.check_runs[]? | select((.conclusion // "") == "success") | .name] as $green
           | [$want[] | select(. as $w | ($green | index($w)) | not)] | join(", ")' 2>/dev/null || true)"
@@ -2172,7 +2184,7 @@ for line in sys.stdin.read().splitlines():
     [ -z "$bad" ] || die "land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
     merge_args+=(--body "$body")
   fi
-  "$GH" "${merge_args[@]}" >/dev/null 2>&1 \
+  _fgh "$wsdir" "${merge_args[@]}" >/dev/null 2>&1 \
     || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"
   _fanout_ticket_state "$ticket" "Done"
