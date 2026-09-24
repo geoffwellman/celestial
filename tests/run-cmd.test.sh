@@ -82,7 +82,7 @@ test_run_launch_args_precede_role_injection() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" " -- --dangerously-skip-permissions --effort high --append-system-prompt-file"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" " -- --auto-approve --thinking high --append-system-prompt"
+  assert_contains "$out" " -- --auto-approve --no-prewalk --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
   rm -rf "$T"
 }
@@ -112,7 +112,7 @@ test_run_reviewer_targets_review_tab_with_model() {
   _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind omp"
-  assert_contains "$out" " -- --auto-approve --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" " -- --auto-approve --no-prewalk --model gpt-5.6-sol --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   rm -rf "$T"
 }
