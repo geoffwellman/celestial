@@ -170,14 +170,17 @@ ws_repo_get() {
 # ssh://git@github.com/o/r) or HTTPS. Fails on anything that is not GitHub,
 # so a caller that needs `gh --repo` refuses rather than guesses.
 github_slug_from_url() { # <url> -> owner/name
+  # The host is matched EXACTLY, anchored at the start: a substring match
+  # turned git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
   local s
   case "$1" in
-    *github.com:*) s="${1#*github.com:}" ;;
-    *github.com/*) s="${1#*github.com/}" ;;
+    git@github.com:*)         s="${1#git@github.com:}" ;;
+    ssh://git@github.com/*)   s="${1#ssh://git@github.com/}" ;;
+    https://github.com/*)     s="${1#https://github.com/}" ;;
     *) return 1 ;;
   esac
-  s="${s%/}"; s="${s%.git}"
-  [[ "$s" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || return 1
+  s="${s%.git}"
+  [[ "$s" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
   printf '%s' "$s"
 }
 
