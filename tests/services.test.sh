@@ -34,8 +34,8 @@ case "\$1 \$2" in
   'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
   # A service with no workspace pane is split from the box's own services
   # tab, so the stub has to be able to hand one back (CEL-62).
-  'tab list')   printf '{"result":{"tabs":[]}}' ;;
-  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  'workspace list') printf '{"result":{"workspaces":[]}}' ;;
+  'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
   'agent list') printf '{"result":{"agents":[]}}' ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;
@@ -345,9 +345,27 @@ case "\$1 \$2" in
       exit 2
     fi
     printf '{"result":{"pane":{"pane_id":"w1:p9"},"pane_id":"w1:p9"}}' ;;
+  # Two unrelated product workspaces exist and one of them is FOCUSED. A
+  # bare \`tab create\` would land in the focused one - herdr's ambient
+  # behaviour - so the stub records it as a tab in wHC, where a
+  # \`cel ws reset\` of that product would take every box service with it.
+  'workspace list')
+    [ -f "$T/ws-list-err" ] && { cat "$T/ws-list-err" >&2; exit 1; }
+    svc=""
+    [ -f "$T/svc-ws" ] && svc=',{"workspace_id":"wSV","label":"cel services","focused":false}'
+    printf '{"result":{"workspaces":[{"workspace_id":"wHC","label":"standout/orch","focused":true},{"workspace_id":"wFK","label":"framewright/orch","focused":false}%s]}}' "\$svc" ;;
+  'workspace create')
+    [ -f "$T/ws-create-err" ] && { cat "$T/ws-create-err" >&2; exit 1; }
+    touch "$T/svc-ws"
+    printf '{"result":{"workspace":{"workspace_id":"wSV"},"tab":{"tab_id":"wSV:t1"},"root_pane":{"pane_id":"wSV:p1"}}}' ;;
   'tab list')   cat "$T/tabs.json" 2>/dev/null || printf '{"result":{"tabs":[]}}' ;;
-  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
-  'pane list')  cat "$T/panes.json" 2>/dev/null || printf '{"result":{"panes":[]}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"wHC:p8"}}}' ;;
+  'pane list')
+    case "\$*" in
+      *'--workspace wSV'*) [ -f "$T/svc-ws" ] && printf '{"result":{"panes":[{"pane_id":"wSV:p1","workspace_id":"wSV"}]}}' || printf '{"result":{"panes":[]}}' ;;
+      *'--workspace'*) printf '{"result":{"panes":[]}}' ;;
+      *) printf '{"result":{"panes":[{"pane_id":"wHC:p1","workspace_id":"wHC"},{"pane_id":"wFK:p1","workspace_id":"wFK"}]}}' ;;
+    esac ;;
   'agent list') cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;
@@ -376,23 +394,63 @@ test_box_service_split_names_a_direction_and_a_target() {
   _svc_teardown
 }
 
-# The steward runs from a systemd timer with no current pane and no workspace,
-# and it restarts box services. Its split still has a target, because the tab
-# is found or created rather than inherited from wherever someone was standing.
-test_box_service_split_has_a_target_without_a_current_pane() {
+# A box service belongs to the box, not to whichever product workspace the
+# operator is focused on. The orchestrator's smoke test of the first fix
+# created `cel services` as a TAB inside the focused Standout workspace (wHC):
+# a `cel ws reset` of that product would have killed the gateway. The home is
+# a dedicated Herdr workspace found by its label and created if absent.
+test_box_service_lands_in_the_dedicated_services_workspace() {
   _svc_box_setup
   _svc_strict_herdr
-  printf '{"result":{"tabs":[{"label":"cel services","tab_id":"w1:t7"}]}}' > "$T/tabs.json"
-  printf '{"result":{"panes":[{"pane_id":"w1:p5","tab_id":"w1:t7"}]}}' > "$T/panes.json"
   printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s"}\n' "$T" \
     > "$CEL_SERVICES_D/cel-auth-broker.json"
-  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker )
-  local args; args="$(_svc_split_args)"
-  assert_contains "$args" "--pane w1:p5"
-  assert_contains "$args" "--direction down"
-  # an existing services tab is reused, not created again
+  ( cd "$T" && HERDR_PANE_ID=wHC:p1 HERDR_WORKSPACE_ID=wHC "$CEL" services start cel-auth-broker )
+  assert_contains "$(grep '^workspace create' "$T/calls" || true)" "--label cel services"
+  assert_contains "$(_svc_split_args)" "--pane wSV:p1"
+  assert_contains "$(_svc_split_args)" "--direction down"
   [ -z "$(grep '^tab create' "$T/calls" || true)" ] \
-    || { echo "a second services tab was created over an existing one"; _svc_teardown; return 1; }
+    || { echo "a tab was created in the ambient workspace"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+# The second box service reuses that same workspace: no duplicate workspace,
+# no tab, and a split from the services workspace's own pane.
+test_second_box_service_reuses_the_services_workspace() {
+  _svc_box_setup
+  _svc_strict_herdr
+  local n
+  for n in cel-auth-broker cel-auth-gateway; do
+    printf '{"name":"%s","port":1,"cmd":"omp %s serve","cwd":"%s"}\n' "$n" "$n" "$T" \
+      > "$CEL_SERVICES_D/$n.json"
+  done
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-broker )
+  ( cd "$T" && HERDR_PANE_ID= "$CEL" services start cel-auth-gateway )
+  assert_eq "$(grep -c '^workspace create' "$T/calls")" 1
+  assert_eq "$(grep -c '^tab create' "$T/calls" || true)" 0
+  assert_contains "$(_svc_split_args)" "--pane wSV:p1"
+  _svc_teardown
+}
+
+# Lookup and create refusals carry herdr's own stderr.
+test_services_workspace_lookup_refusal_reports_herdr() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf 'error: herdr socket not reachable\n' > "$T/ws-list-err"
+  printf '{"name":"cel-auth-gateway","port":1,"cmd":"x","cwd":"%s"}\n' "$T" > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "herdr socket not reachable"
+  [ -z "$(grep '^workspace create' "$T/calls" || true)" ] \
+    || { echo "created a workspace after a failed lookup"; _svc_teardown; return 1; }
+  _svc_teardown
+}
+
+test_services_workspace_create_refusal_reports_herdr() {
+  _svc_box_setup
+  _svc_strict_herdr
+  printf 'error: workspace limit reached\n' > "$T/ws-create-err"
+  printf '{"name":"cel-auth-gateway","port":1,"cmd":"x","cwd":"%s"}\n' "$T" > "$CEL_SERVICES_D/cel-auth-gateway.json"
+  local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
+  assert_contains "$out" "workspace limit reached"
   _svc_teardown
 }
 
@@ -420,7 +478,7 @@ test_a_refused_split_reports_herdrs_own_message() {
 printf '%s\n' "\$*" >> "$T/calls"
 case "\$1 \$2" in
   'pane split') printf 'error: pane w1:p1 is too small to split\n' >&2; exit 2 ;;
-  'tab create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
+  'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
   *) printf '{}' ;;
 esac
 EOF
