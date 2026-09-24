@@ -572,6 +572,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   if [ -n "$gflag" ] && [ -n "$gfile" ]; then
     AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
   fi
+  _run_keep_model_args "$runtime"
 
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$runtime")
