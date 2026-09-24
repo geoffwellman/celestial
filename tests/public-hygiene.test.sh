@@ -143,3 +143,15 @@ test_changelog_unreleased_is_empty_because_entries_are_fragments() {
             --changelog "$CEL_ROOT/CHANGELOG.md" --fragments /dev/null)" || return 1
   assert_eq "" "$body"
 }
+
+# FOLLOWUPS-<yymmdd> names a file, not a ticket; an unknown prefix still is one.
+test_hygiene_ignores_followups_file_names_but_not_unknown_prefixes() {
+  _hygiene_fixture
+  printf 'see FOLLOWUPS-260924 for the list\n' > "$T/repo/notes.txt"
+  git -C "$T/repo" add notes.txt
+  _hygiene_scan || { rm -rf "$T"; return 1; }
+  printf 'see ZZQ-%s for the list\n' 12 > "$T/repo/notes.txt"
+  git -C "$T/repo" add notes.txt
+  assert_fails _hygiene_scan
+  rm -rf "$T"
+}
