@@ -526,7 +526,10 @@ has heard of it.
 - **`cel history [<workspace>] [--since 7d] [--key K] [--json]`** — the
   vertical timeline: events grouped by work item, groups ordered by most
   recent event, each group in time order, drawn with a spine so the eye
-  follows one item down the page.
+  follows one item down the page. No workspace named means every registry
+  workspace. `--json` is always ONE array, whatever the number of workspaces:
+  `[{key, title, stage, next, ws, product, last, events: [...]}, ...]`,
+  newest group first across all of them, each item carrying its `ws`.
 
 ```
 alpha - work history            7 days, 41 events

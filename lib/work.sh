@@ -535,12 +535,12 @@ cmd_history() { # [<workspace>] [--since 7d] [--key K] [--json]
   esac; done
 
   local dirs=() d n
+  # NO WORKSPACE NAMED IS EVERY WORKSPACE, as for `cel work`.
   if [ -n "$ws_arg" ]; then dirs+=("$(work_wsdir "$ws_arg")")
-  elif d="$(ws_current 2>/dev/null)" && [ -n "$d" ]; then dirs+=("$d")
   else for n in $(registry_names); do dirs+=("$(registry_path "$n")"); done; fi
 
   local iso; iso="$(_work_since_iso "$since")"
-  local first=1 items
+  local first=1 items all=""
   for d in "${dirs[@]}"; do
     [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
     items="$(work_items "$d" ${iso:+--since "$iso"} ${key:+--key "$key"})"
@@ -551,12 +551,18 @@ cmd_history() { # [<workspace>] [--since 7d] [--key K] [--json]
         events: ($i.events | map(select($since == "" or ((.at | tsec) >= ($since | tsec)))))}
        | select((.events | length) > 0)' --arg since "$iso" 2>/dev/null || true)"
     if [ "$json" = 1 ]; then
-      printf '%s' "$items" | jq -sc '.'
+      [ -n "$items" ] && all="$all$items"$'\n'
     else
       [ "$first" = 1 ] || printf '\n'
       _work_history "$(ws_name "$d")" "$items" "$since"
     fi
     first=0
   done
+  # ONE DOCUMENT, however many workspaces: a single array, each item carrying
+  # its ws, newest group first across all of them. One array per workspace
+  # printed back to back is not JSON.
+  if [ "$json" = 1 ]; then
+    printf '%s' "$all" | jq -sc "$_WORK_JQ_DEFS"' sort_by(.last | tsec) | reverse'
+  fi
   return 0
 }
