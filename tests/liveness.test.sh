@@ -12,6 +12,7 @@ source "$CEL_ROOT/lib/liveness.sh"
 
 _liveness_setup() { # [min_confidence]
   T="$(mktemp -d)"
+  export CEL_TESTING=1   # pinned-clock tests need it even outside tests/run.sh
   export CEL_CONFIG_FILE="$T/config.yaml"
   { printf 'console:\n  router:\n    provider: openrouter\n    model: alpha/decide-1\n'
     printf '    key_env: OPENROUTER_API_KEY\n'
@@ -238,31 +239,61 @@ test_the_still_window_is_configurable() {
 # resets it. Without this, "working but nothing is moving" has no number.
 test_the_output_age_grows_while_the_text_is_unchanged_and_resets_when_it_moves() {
   _liveness_setup
+  # pin "now" and move it by hand: separate real clock reads race a second boundary
+  export CEL_LIVENESS_NOW=1000000
   assert_eq "$(liveness_output_age alpha/ABC-1 'line one')" 0
-  # backdate the recorded moment rather than sleeping
-  liveness_backdate alpha/ABC-1 120
+  CEL_LIVENESS_NOW=1000120
   assert_eq "$(liveness_output_age alpha/ABC-1 'line one')" 120
   assert_eq "$(liveness_output_age alpha/ABC-1 'line two')" 0
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
+# The CI failure, reproduced on purpose: a second ticks between recording and
+# backdating. The age must still be exactly backdate + elapsed, never a guess.
+test_a_second_passing_between_reads_is_counted_exactly() {
+  _liveness_setup
+  export CEL_LIVENESS_NOW=1000000
+  liveness_output_age alpha/ABC-1 'x' >/dev/null
+  CEL_LIVENESS_NOW=1000001
+  liveness_backdate alpha/ABC-1 120
+  assert_eq "$(liveness_output_age alpha/ABC-1 'x')" 121
+  unset CEL_LIVENESS_NOW
   rm -rf "$T"
 }
 test_two_workers_do_not_share_an_output_clock() {
   _liveness_setup
+  export CEL_LIVENESS_NOW=1000000
   liveness_output_age alpha/ABC-1 'x' >/dev/null
-  liveness_backdate alpha/ABC-1 300
+  CEL_LIVENESS_NOW=1000300
   assert_eq "$(liveness_output_age alpha/ABC-2 'x')" 0
   assert_eq "$(liveness_output_age alpha/ABC-1 'x')" 300
+  unset CEL_LIVENESS_NOW
   rm -rf "$T"
+}
+
+# A stray CEL_LIVENESS_NOW in a real process must not freeze the clock: the
+# override is honoured only inside the test harness, and only as an integer.
+test_the_clock_override_is_ignored_outside_the_test_harness() {
+  local real; real="$(date +%s)"
+  local got; got="$(env -u CEL_TESTING CEL_LIVENESS_NOW=5 bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")"
+  [ "$got" -ge "$real" ] || { echo "override honoured outside tests: $got"; return 1; }
+  got="$(CEL_TESTING=1 CEL_LIVENESS_NOW=junk bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")"
+  [ "$got" -ge "$real" ] || { echo "non-integer override honoured: $got"; return 1; }
+  assert_eq "$(CEL_TESTING=1 CEL_LIVENESS_NOW=5 bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")" 5
 }
 
 # --- the answer, remembered for the views -----------------------------------
 
 test_an_answer_is_remembered_for_the_fleet_and_expires() {
   _liveness_setup
+  export CEL_LIVENESS_NOW=1000000
   liveness_remember alpha/ABC-1 looping 0.81
+  CEL_LIVENESS_NOW=$(( 1000000 + CEL_LIVENESS_CACHE_SECS ))
   assert_eq "$(liveness_cached alpha/ABC-1)" "$(printf 'looping\t0.81')"
-  liveness_backdate alpha/ABC-1 99999
+  CEL_LIVENESS_NOW=$(( 1000001 + CEL_LIVENESS_CACHE_SECS ))
   assert_eq "$(liveness_cached alpha/ABC-1)" ""
   assert_eq "$(liveness_cached alpha/NOBODY)" ""
+  unset CEL_LIVENESS_NOW
   rm -rf "$T"
 }
 
