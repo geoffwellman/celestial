@@ -163,11 +163,25 @@ _liveness_put() { # <key> <hash> <changed_at> <activity> <confidence> <answered_
     > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
+# The one clock every timestamp in this file reads. CEL_LIVENESS_NOW pins it,
+# but only under the test harness (CEL_TESTING=1, set by tests/run.sh) and
+# only as an integer: a stray export in a real process must never freeze ages
+# or stop cached answers expiring.
+_liveness_now() {
+  if [ "${CEL_TESTING:-}" = 1 ]; then
+    case "${CEL_LIVENESS_NOW:-}" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s' "$CEL_LIVENESS_NOW"; return 0 ;;
+    esac
+  fi
+  date +%s
+}
+
 # Seconds since this worker's pane text last changed. First sighting is 0 -
 # "we have never seen it before" is not evidence of stillness.
 liveness_output_age() { # <key> <pane-text> -> seconds
   local key="$1" text="$2" hash now row ohash changed act conf ans
-  now="$(date +%s)"
+  now="$(_liveness_now)"
   hash="$(printf '%s' "$text" | cksum | tr -d ' ')"
   row="$(_liveness_row "$key")"
   # shellcheck disable=SC2086
@@ -202,8 +216,8 @@ liveness_remember() { # <key> <activity> <confidence>
   row="$(_liveness_row "$1")"
   # shellcheck disable=SC2086
   set -- $1 $2 $3 $row
-  hash="${5:-0}"; changed="${6:-$(date +%s)}"
-  _liveness_put "$1" "$hash" "$changed" "$2" "$3" "$(date +%s)"
+  hash="${5:-0}"; changed="${6:-$(_liveness_now)}"
+  _liveness_put "$1" "$hash" "$changed" "$2" "$3" "$(_liveness_now)"
 }
 
 # "<activity>\t<confidence>", or nothing when there is no answer or it has
@@ -215,7 +229,7 @@ liveness_cached() { # <key>
   # shellcheck disable=SC2086
   set -- $row
   [ -n "${4:-}" ] && [ "${4:-}" != "-" ] || return 0
-  now="$(date +%s)"
+  now="$(_liveness_now)"
   [ "${6:-0}" -gt 0 ] && [ $(( now - ${6:-0} )) -le "$CEL_LIVENESS_CACHE_SECS" ] || return 0
   printf '%s\t%s' "$4" "$5"
 }
