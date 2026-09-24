@@ -40,6 +40,15 @@ _run_role_file() { # <wsdir> <tag> [product]
 #
 # AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
 # launch environment below carries it, and `cel gc` proves ownership with it.
+# KEEP THE MODEL THE LAUNCH NAMED (CEL-68). OMP prewalk swaps to the box's
+# `smol` model after the first edit/write, so a profile's model would silently
+# become another one - and the ledger's provenance would lie. Every omp launch
+# (cel run of any role, cel-fanout delegate/scout) goes through here; other
+# runtimes get nothing. Prepends to AGENT_ARGS.
+_run_keep_model_args() { # <runtime>
+  [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
+}
+
 _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
   AGENT_ROLE_FILE=""
@@ -564,6 +573,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   if [ -n "$gflag" ] && [ -n "$gfile" ]; then
     AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
   fi
+  _run_keep_model_args "$runtime"
 
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$runtime")
@@ -821,6 +831,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
         AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
       fi ;;
   esac
+  _run_keep_model_args "$runtime"
 
   # Runtime-wide launch flags (agents.yaml launch_args) go ahead of the
   # role-injection args on every launch of that runtime.

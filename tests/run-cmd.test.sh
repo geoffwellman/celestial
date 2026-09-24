@@ -82,7 +82,7 @@ test_run_launch_args_precede_role_injection() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" " -- --dangerously-skip-permissions --effort high --append-system-prompt-file"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" " -- --auto-approve --thinking high --append-system-prompt"
+  assert_contains "$out" " -- --auto-approve --no-prewalk --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
   rm -rf "$T"
 }
@@ -112,7 +112,7 @@ test_run_reviewer_targets_review_tab_with_model() {
   _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind omp"
-  assert_contains "$out" " -- --auto-approve --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" " -- --auto-approve --no-prewalk --model gpt-5.6-sol --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   rm -rf "$T"
 }
@@ -158,6 +158,30 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
   ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
   ! printf '%s' "$out" | grep -q "inbox.omp.ts" || { echo "worker got the inbox hook"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# OMP prewalk swaps to the smol model after the first edit; a profile names a
+# model and the launch must keep it, so EVERY omp launch gets --no-prewalk and
+# no other runtime does.
+test_run_disables_prewalk_for_every_omp_launch() {
+  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--no-prewalk"
+  out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
+  assert_contains "$out" "--no-prewalk"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  assert_contains "$out" "--no-prewalk"
+  rm -rf "$T"
+}
+test_run_gives_no_prewalk_flag_to_other_runtimes() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "pi worker got --no-prewalk"; rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude got --no-prewalk"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -265,6 +289,17 @@ test_run_console_gets_the_guard_hook() {
             ! printf '%s' "$out" | grep -q -- '--hook' || { echo "claude got an omp hook flag"; rm -rf "$CONS"; return 1; } ;;
     *)      assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" ;;
   esac
+  rm -rf "$CONS"
+}
+# CEL-68: an omp console keeps its model too; the shipped claude one gets nothing.
+test_run_console_on_omp_launches_with_no_prewalk() {
+  _console
+  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude console got --no-prewalk"; rm -rf "$CONS"; return 1; }
+  _run_console_default() { case "$1" in runtime) echo omp ;; model) echo m/x ;; esac; }
+  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
+  assert_contains "$out" "agent start console --kind omp"
+  assert_contains "$out" "--no-prewalk"
   rm -rf "$CONS"
 }
 test_run_console_body_carries_no_workspace_policy_block() {
