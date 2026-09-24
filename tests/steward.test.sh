@@ -735,6 +735,13 @@ _svc_steward_fixture() { # [restart-policy]
 printf '%s\n' "\$*" >> "$T/calls"
 case "\$1 \$2" in
   'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
+  # A workspace service is split from its workspace's own agent pane; with
+  # no live agent it must refuse, never fall back to the box home (CEL-62).
+  'agent list') [ -f "$T/no-agent" ] && printf '{"result":{"agents":[]}}' \
+    || printf '{"result":{"agents":[{"cwd":"$T/alpha","pane_id":"w1:p1"}]}}' ;;
+  # Box services go to the dedicated \`cel services\` workspace (CEL-62).
+  'workspace list') printf '{"result":{"workspaces":[]}}' ;;
+  'workspace create') printf '{"result":{"root_pane":{"pane_id":"w1:p1"}}}' ;;
   'pane read')  printf 'EADDRINUSE 4322\n' ;;
   *) printf '{}' ;;
 esac
@@ -777,6 +784,20 @@ test_steward_restarts_an_auto_service_once_before_raising() {
   # and not again on the next tick: one restart per condition, not per tick
   _steward_services >/dev/null 2>&1
   assert_eq "$(grep -c 'pane split' "$T/calls")" 1
+  rm -rf "$T"
+}
+
+# With no live agent in its workspace, an auto restart refuses and names the
+# workspace - it never lands in the box services home instead.
+test_steward_restart_without_a_workspace_agent_refuses_naming_it() {
+  _svc_steward_fixture auto
+  touch "$T/no-agent"
+  local out rc=0
+  out="$(svc_start "$T/alpha" builder 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "started without a workspace pane"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$T/alpha"
+  [ -z "$(grep -E '^(pane split|workspace create)' "$T/calls" 2>/dev/null || true)" ] \
+    || { echo "fell back to the box services home"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
