@@ -1,3 +1,5 @@
+### Changed
+
 - `cel-fanout delegate` confirms the agent ACCEPTED the dispatch, not merely
   that a pane exists. A prompt that `herdr agent prompt` reported as sent but
   the agent never took is re-submitted once; if the pane is still at zero

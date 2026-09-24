@@ -86,7 +86,7 @@ def assemble(handwritten, fragments_dir):
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
         head = lines[0].strip() if lines else ""
-        if head.startswith("### "):
+        if head in CATEGORIES:
             add(head, lines[1:])
         else:
             # A fragment without a category heading is a mistake worth naming:
