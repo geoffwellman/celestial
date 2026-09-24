@@ -270,6 +270,17 @@ test_two_workers_do_not_share_an_output_clock() {
   rm -rf "$T"
 }
 
+# A stray CEL_LIVENESS_NOW in a real process must not freeze the clock: the
+# override is honoured only inside the test harness, and only as an integer.
+test_the_clock_override_is_ignored_outside_the_test_harness() {
+  local real; real="$(date +%s)"
+  local got; got="$(env -u CEL_TESTING CEL_LIVENESS_NOW=5 bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")"
+  [ "$got" -ge "$real" ] || { echo "override honoured outside tests: $got"; return 1; }
+  got="$(CEL_TESTING=1 CEL_LIVENESS_NOW=junk bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")"
+  [ "$got" -ge "$real" ] || { echo "non-integer override honoured: $got"; return 1; }
+  assert_eq "$(CEL_TESTING=1 CEL_LIVENESS_NOW=5 bash -c "source '$CEL_ROOT/lib/liveness.sh'; _liveness_now")" 5
+}
+
 # --- the answer, remembered for the views -----------------------------------
 
 test_an_answer_is_remembered_for_the_fleet_and_expires() {
