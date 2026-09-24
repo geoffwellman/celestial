@@ -125,12 +125,137 @@ _steward_clear_dead_panes() {
   done
 }
 
-_steward_nudge() { # <agent-name> <key> <message>
-  _steward_due "$2" || return 0
-  if herdr agent prompt "$1" "$3" >/dev/null 2>&1; then
-    c_ok "nudged $1: $3"
+# STALE MAIL AND OPEN DECISIONS. Mail unread for half an hour means the
+# recipient's delivery paths are dead, so the steward reminds it - by MAIL to
+# root/orchestrators (CEL-65: a prompt typed into the human's composer), and
+# by prompt only to other panes. Rate-limited per key by _steward_due.
+_steward_mail_sweep() { # <agents-json>
+  local agents_json="$1"
+  local ws wsdir who n oldest age pane
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    local f; f="$(_inbox_file "$ws")"
+    [ -s "$f" ] || continue
+    for who in $(jq -r '.to' "$f" 2>/dev/null | sort -u); do
+      case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
+      n="$(cmd_inbox count --for "$who" --workspace "$ws" 2>/dev/null || printf 0)"
+      [ "${n:-0}" -gt 0 ] || continue
+      # age of the OLDEST unread, not the newest: that is how long the
+      # recipient has actually been behind
+      local cur; cur="$(cat "$(_inbox_cursor "$ws" "$who")" 2>/dev/null || printf '')"
+      oldest="$(jq -r --arg w "$who" --arg last "$cur" \
+        'select(.to == $w) | select($last == "" or (.id > $last)) | .ts' "$f" 2>/dev/null | sed -n 1p)"
+      [ -n "$oldest" ] || continue
+      age=$(( $(date +%s) - $(date -d "$oldest" +%s 2>/dev/null || date +%s) ))
+      [ "$age" -ge 1800 ] || continue
+
+      # where does that recipient live? root is the workspace root, an orch is
+      # its repo checkout - the same derivation cel inbox uses in reverse
+      local target="" want=""
+      want="$(_steward_mailbox_want "$who" "$(ws_name "$wsdir")")"
+      if [ "$who" = root ]; then
+        target="$wsdir"
+      else
+        target="$(_steward_orch_dir "$wsdir" "$who")"
+        # A WORKER gets no `target`: splitting <repo>-<branch> back apart is
+        # guesswork the moment a repo name contains a hyphen, and this file
+        # already learned that nudging the wrong pane is worse than nudging
+        # none, because it reports success. Its name match is exact anyway.
+      fi
+      # NAME FIRST, cwd only as a fallback. Matching on cwd alone picks the
+      # first agent sitting in that directory, and a workspace root routinely
+      # holds more than one - a personal assistant pane, a scratch session -
+      # so root's nudges were landing on whichever happened to be first in the
+      # list. A watcher that nudges the wrong pane is worse than no watcher,
+      # because it reports success: observed with root 9 hours behind while
+      # every tick claimed it had been told.
+      pane=""
+      [ -n "$want" ] && pane="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
+        '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
+      [ -n "$pane" ] || { [ -n "$target" ] && pane="$(printf '%s' "$agents_json" \
+        | jq -r --arg d "$target" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
+
+      local readcmd="cel inbox read --for $who --workspace $ws"
+      local stale_msg="steward: $n unread in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch --for $who --workspace $ws' so the next one reaches you without this nudge."
+      if _steward_is_orch_mailbox "$who"; then
+        # CEL-65: never type into a root/orchestrator composer - mail it, and
+        # the runtime's inbox hook (Monitor/UserPromptSubmit, or omp's
+        # inbox.omp.ts) surfaces it out of band.
+        if _steward_due "inbox-stale-$ws-$who"; then
+          cmd_inbox send "$who" "$stale_msg" --from steward --workspace "$ws" --kind status >/dev/null 2>&1 \
+            && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
+        fi
+      elif [ -n "$pane" ] && _steward_due "inbox-stale-$ws-$who"; then
+        herdr agent prompt "$pane" "$stale_msg" >/dev/null 2>&1 \
+          && c_warn "$ws/$who: $n unread ($((age / 60))m) - nudged $pane to re-arm and drain"
+      else
+        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane to nudge)')"
+      fi
+    done
+  done
+
+  # OPEN DECISIONS are checked separately from unread mail, and NOT gated on
+  # it: a decision the recipient has already `read` and moved past has zero
+  # unread but is still unanswered - that is the buried-question case, and the
+  # unread check above cannot see it by construction. After an hour the
+  # recipient's pane is told the decision text itself; after two, root hears
+  # that a subordinate is sitting on one (root's own open decisions are the
+  # human's to notice, so those only warn here).
+  for ws in $(registry_names); do
+    local f2; f2="$(_inbox_file "$ws")"
+    [ -f "$f2" ] || continue
+    for who in $(jq -r 'select(.kind == "decision" or .kind == "blocked") | .to' "$f2" 2>/dev/null | sort -u); do
+      case "$who" in *:*|all) continue;; esac
+      local open oldest2 age2 n2
+      open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null || true)"
+      [ -n "$open" ] || continue
+      n2="$(printf '%s\n' "$open" | wc -l | tr -d ' ')"
+      oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | sed -n 1p)"
+      age2=$(( $(date +%s) - $(date -d "$oldest2" +%s 2>/dev/null || date +%s) ))
+      [ "$age2" -ge 3600 ] || continue
+      local text2; text2="$(printf '%s\n' "$open" | jq -r '"[\(.id)] \(.kind) from \(.from): \(.message)"' | head -3)"
+      local pane2="" want2 target2=""
+      if [ "$who" = root ]; then
+        want2="$(_steward_agent_name "$(registry_name_of_dir "$(registry_path "$ws")" 2>/dev/null || printf '%s' "$ws")/root")"; target2="$(registry_path "$ws")"
+      else
+        local repo2="${who%-orch}"
+        [ "$repo2" != "$who" ] && { want2="$(_steward_agent_name "$repo2/orch")"; target2="$(_steward_orch_dir "$(registry_path "$ws")" "$who")"; }
+      fi
+      [ -n "$want2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg n "$want2" '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
+      [ -n "$pane2" ] || { [ -n "$target2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg d "$target2" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
+      if _steward_due "decision-open-$ws-$who"; then
+        # mail, never a prompt (CEL-65): root and orchestrators are the only
+        # recipients of decisions/blockers, and their composers are the human's
+        cmd_inbox send "$who" "steward: you have $n2 UNRESOLVED decision(s)/blocker(s), oldest $((age2 / 60))m - reading them did not resolve them. Answer or act, then 'cel inbox resolve <id> --workspace $ws'. Open now:
+$text2" --from steward --workspace "$ws" --kind blocked >/dev/null 2>&1 \
+          && c_warn "$ws/$who: $n2 open decision(s) ($((age2 / 60))m) - mailed $who to resolve"
+      else
+        c_warn "$ws/$who: $n2 open decision(s), oldest $((age2 / 60))m$([ -z "$pane2" ] && printf ' (no pane)')"
+      fi
+      if [ "$who" != root ] && [ "$age2" -ge 7200 ] && _steward_due "decision-open-root-$ws-$who"; then
+        cmd_inbox send root "steward: $who has $n2 decision(s)/blocker(s) unresolved for $((age2 / 3600))h - it may be stuck on them. Oldest: ${text2%%$'\n'*}" \
+          --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
+      fi
+    done
+  done
+
+}
+
+_steward_is_orch_mailbox() { case "$1" in root|*-orch) return 0;; esac; return 1; }
+
+# A NUDGE IS MAIL (CEL-65). This used to be `herdr agent prompt` into the
+# orchestrator's pane, which typed into - and submitted - whatever the human
+# was half-way through writing there. Every recipient here is an orchestrator,
+# whose runtime inbox hook surfaces mail out of band; the rate-limit key is
+# unchanged, so nothing gets louder.
+_steward_nudge() { # <mailbox> <workspace> <key> <message>
+  _steward_due "$3" || return 0
+  local kind=status
+  case "$3" in *-blocked) kind=blocked ;; esac
+  if cmd_inbox send "$1" "$4" --from steward --workspace "$2" --kind "$kind" >/dev/null 2>&1; then
+    c_ok "mailed $1: $4"
   else
-    c_warn "wanted to nudge $1 (not reachable): $3"
+    c_warn "wanted to mail $1 (inbox send failed): $4"
   fi
 }
 
@@ -329,7 +454,7 @@ _steward_review_sweep() { # <agents-json>
           # count as ticketed.
           if printf '%s' "$ubranch" | grep -qiE "(${tprefix})-[0-9]+"; then continue; fi
           [ "$(( ( $(date +%s) - $(date -d "$uage" +%s 2>/dev/null || date +%s) ) / 86400 ))" -ge 1 ] || continue
-          _steward_nudge "$orch" "$slug#$unum-noticket" \
+          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$unum-noticket" \
             "steward: PR #$unum on $repo ($ubranch) has no $tcanon ticket in its branch name, so Linear cannot link it and it is invisible on the board. Find or create the ticket (cel-linear search / create), comment the PR link on it, and set its state. Name future branches ${tcanon}-<n>-<slug>."
         done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
@@ -342,15 +467,15 @@ _steward_review_sweep() { # <agents-json>
         working="$(printf '%s' "$agents_json" | jq -r --arg d "$HOME/.herdr/worktrees/$repo/$branch" \
           '[.result.agents[] | select(.cwd == $d and .agent_status == "working")] | length')"
         if [ "$review" = "APPROVED" ]; then
-          _steward_nudge "$orch" "$slug#$num-approved" \
+          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
         elif [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
           local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
           if [ -n "$sil" ]; then
-            _steward_nudge "$orch" "$slug#$num-blocked" \
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
               "steward: PR #$num on $repo has changes requested and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
           else
-            _steward_nudge "$orch" "$slug#$num-changes" \
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
               "steward: PR #$num on $repo has changes requested and nobody working on $branch - restart the review loop (worker fixes, then reviewer re-reviews)."
           fi
         elif [ "$failing" -gt 0 ] && [ "$working" = "0" ]; then
@@ -360,10 +485,10 @@ _steward_review_sweep() { # <agents-json>
           # and none of them is answered by spawning a fifth worker.
           local sil; sil="$(_steward_branch_silence "$agents_json" "$repo" "$branch")"
           if [ -n "$sil" ]; then
-            _steward_nudge "$orch" "$slug#$num-blocked" \
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
               "steward: PR #$num on $repo has FAILING checks and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
           else
-            _steward_nudge "$orch" "$slug#$num-red" \
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
               "steward: PR #$num on $repo has FAILING checks and nobody on $branch - a red gate is a finding, get a worker on it."
           fi
         fi
@@ -1301,104 +1426,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # own pane (which nobody reads either) is how root sat 68 messages behind
   # for six hours. So the steward nudges the recipient itself, once an hour,
   # naming what it is sitting on.
-  local ws wsdir who n oldest age pane
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    local f; f="$(_inbox_file "$ws")"
-    [ -s "$f" ] || continue
-    for who in $(jq -r '.to' "$f" 2>/dev/null | sort -u); do
-      case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
-      n="$(cmd_inbox count --for "$who" --workspace "$ws" 2>/dev/null || printf 0)"
-      [ "${n:-0}" -gt 0 ] || continue
-      # age of the OLDEST unread, not the newest: that is how long the
-      # recipient has actually been behind
-      local cur; cur="$(cat "$(_inbox_cursor "$ws" "$who")" 2>/dev/null || printf '')"
-      oldest="$(jq -r --arg w "$who" --arg last "$cur" \
-        'select(.to == $w) | select($last == "" or (.id > $last)) | .ts' "$f" 2>/dev/null | sed -n 1p)"
-      [ -n "$oldest" ] || continue
-      age=$(( $(date +%s) - $(date -d "$oldest" +%s 2>/dev/null || date +%s) ))
-      [ "$age" -ge 1800 ] || continue
-
-      # where does that recipient live? root is the workspace root, an orch is
-      # its repo checkout - the same derivation cel inbox uses in reverse
-      local target="" want=""
-      want="$(_steward_mailbox_want "$who" "$(ws_name "$wsdir")")"
-      if [ "$who" = root ]; then
-        target="$wsdir"
-      else
-        target="$(_steward_orch_dir "$wsdir" "$who")"
-        # A WORKER gets no `target`: splitting <repo>-<branch> back apart is
-        # guesswork the moment a repo name contains a hyphen, and this file
-        # already learned that nudging the wrong pane is worse than nudging
-        # none, because it reports success. Its name match is exact anyway.
-      fi
-      # NAME FIRST, cwd only as a fallback. Matching on cwd alone picks the
-      # first agent sitting in that directory, and a workspace root routinely
-      # holds more than one - a personal assistant pane, a scratch session -
-      # so root's nudges were landing on whichever happened to be first in the
-      # list. A watcher that nudges the wrong pane is worse than no watcher,
-      # because it reports success: observed with root 9 hours behind while
-      # every tick claimed it had been told.
-      pane=""
-      [ -n "$want" ] && pane="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
-        '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
-      [ -n "$pane" ] || { [ -n "$target" ] && pane="$(printf '%s' "$agents_json" \
-        | jq -r --arg d "$target" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
-
-      if [ -n "$pane" ] && _steward_due "inbox-stale-$ws-$who"; then
-        herdr agent prompt "$pane" \
-          "steward: $n unread in your celestial inbox, oldest untouched $((age / 60))m. Run 'cel inbox read' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch' so the next one reaches you without this nudge." \
-          >/dev/null 2>&1 \
-          && c_warn "$ws/$who: $n unread ($((age / 60))m) - nudged $pane to re-arm and drain"
-      else
-        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane to nudge)')"
-      fi
-    done
-  done
-
-  # OPEN DECISIONS are checked separately from unread mail, and NOT gated on
-  # it: a decision the recipient has already `read` and moved past has zero
-  # unread but is still unanswered - that is the buried-question case, and the
-  # unread check above cannot see it by construction. After an hour the
-  # recipient's pane is told the decision text itself; after two, root hears
-  # that a subordinate is sitting on one (root's own open decisions are the
-  # human's to notice, so those only warn here).
-  for ws in $(registry_names); do
-    local f2; f2="$(_inbox_file "$ws")"
-    [ -f "$f2" ] || continue
-    for who in $(jq -r 'select(.kind == "decision" or .kind == "blocked") | .to' "$f2" 2>/dev/null | sort -u); do
-      case "$who" in *:*|all) continue;; esac
-      local open oldest2 age2 n2
-      open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null || true)"
-      [ -n "$open" ] || continue
-      n2="$(printf '%s\n' "$open" | wc -l | tr -d ' ')"
-      oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | sed -n 1p)"
-      age2=$(( $(date +%s) - $(date -d "$oldest2" +%s 2>/dev/null || date +%s) ))
-      [ "$age2" -ge 3600 ] || continue
-      local text2; text2="$(printf '%s\n' "$open" | jq -r '"[\(.id)] \(.kind) from \(.from): \(.message)"' | head -3)"
-      local pane2="" want2 target2=""
-      if [ "$who" = root ]; then
-        want2="$(_steward_agent_name "$(registry_name_of_dir "$(registry_path "$ws")" 2>/dev/null || printf '%s' "$ws")/root")"; target2="$(registry_path "$ws")"
-      else
-        local repo2="${who%-orch}"
-        [ "$repo2" != "$who" ] && { want2="$(_steward_agent_name "$repo2/orch")"; target2="$(_steward_orch_dir "$(registry_path "$ws")" "$who")"; }
-      fi
-      [ -n "$want2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg n "$want2" '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
-      [ -n "$pane2" ] || { [ -n "$target2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg d "$target2" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
-      if [ -n "$pane2" ] && _steward_due "decision-open-$ws-$who"; then
-        herdr agent prompt "$pane2" \
-          "steward: you have $n2 UNRESOLVED decision(s)/blocker(s), oldest $((age2 / 60))m - reading them did not resolve them. Answer or act, then 'cel inbox resolve <id>'. Open now:
-$text2" >/dev/null 2>&1 \
-          && c_warn "$ws/$who: $n2 open decision(s) ($((age2 / 60))m) - nudged $pane2 to resolve"
-      else
-        c_warn "$ws/$who: $n2 open decision(s), oldest $((age2 / 60))m$([ -z "$pane2" ] && printf ' (no pane to nudge)')"
-      fi
-      if [ "$who" != root ] && [ "$age2" -ge 7200 ] && _steward_due "decision-open-root-$ws-$who"; then
-        cmd_inbox send root "steward: $who has $n2 decision(s)/blocker(s) unresolved for $((age2 / 3600))h - it may be stuck on them. Oldest: ${text2%%$'\n'*}" \
-          --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
-      fi
-    done
-  done
+  _steward_mail_sweep "$agents_json"
 
   # page feedback whose publishing pane is gone queues here; it stays a
   # warning every tick until someone drains the log

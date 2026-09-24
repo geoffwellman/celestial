@@ -105,6 +105,10 @@ agents:
     # one place. claude needs no entry: its guard is a global PreToolUse hook
     # that decides by the pane's cwd.
     guard_hook: { flag: --hook, file: tools/hooks/orchestrator-guard.omp.ts }
+    # Inbox delivery for root/orchestrator launches (CEL-65): omp has no
+    # Monitor or UserPromptSubmit, so this hook watches the mailbox, raises
+    # ui.notify for new mail and drains unread mail into the next turn.
+    inbox_hook: { flag: --hook, file: tools/hooks/inbox.omp.ts }
     # An isolated profile has no vault, so it falls back to the environment -
     # the way to make a workspace's env.local authoritative without touching
     # the personal credentials omp uses interactively.

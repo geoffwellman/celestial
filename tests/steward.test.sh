@@ -244,10 +244,9 @@ exit 0
 SH
   chmod +x "$T/bin/gh" "$T/bin/herdr"
   PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
-  assert_contains "$(cat "$T/prompts")" "bundle-orch"
-  # never the repo's own name: `widget` is a member of `bundle`, so a
-  # widget-orch pane does not exist and nudging it reports a success nobody got
-  assert_eq "$(grep -c widget-orch "$T/prompts" || true)" "0"
+  # CEL-65: mail to the PRODUCT's mailbox, never the member repo's
+  assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all)" "#7"
+  assert_eq "$(cmd_inbox count --for widget-orch --workspace alpha)" "0"
   rm -rf "$T"
 }
 
@@ -1145,7 +1144,8 @@ SH
   local roster
   roster='{"result":{"agents":[{"name":"widget-WG-44-x","agent_status":"idle","pane_id":"w:p2","cwd":"'"$HOME"'/.herdr/worktrees/widget/WG-44-x"},{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
   PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
-  local msg; msg="$(grep 'on widget' "$T/prompts" || true)"
+  # CEL-65: the nudge is mail to the product orchestrator, not a prompt
+  local msg; msg="$(cmd_inbox read --for bundle-orch --workspace alpha --all | grep 'on widget' || true)"
   assert_contains "$msg" 'throttled'
   case "$msg" in
     *"get a worker on it"*|*"nobody on"*) echo "the steward asked for another worker: $msg"; return 1 ;;
@@ -1209,4 +1209,58 @@ test_steward_afk_sweep_still_speaks_with_an_empty_registry() {
   assert_contains "$out" "AFK expired at 2020-01-01T00:00:00Z"
   assert_eq "$(cat "$RAISED")" ""
   _afk_sweep_teardown
+}
+
+# --- CEL-65 addendum: the steward never types into an orchestrator pane ------
+_nudge_herdr_stub() { # records every herdr argv to $T/herdr.argv
+  mkdir -p "$T/bin"; : > "$T/herdr.argv"
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/herdr.argv"
+case "\$1 \$2" in "agent get") [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;; esac
+exit 0
+SH
+  chmod +x "$T/bin/herdr"
+}
+
+test_review_sweep_nudges_are_mail_with_zero_prompts_and_stay_rate_limited() {
+  _orch_fixture; _nudge_herdr_stub
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
+             {"number":8,"headRefName":"WG-2-y","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
+             {"number":9,"headRefName":"WG-3-z","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"},
+             {"number":10,"headRefName":"noticket","reviewDecision":"","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
+SH
+  chmod +x "$T/bin/gh"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null 2>&1
+  assert_eq "$(grep -c '^agent prompt' "$T/herdr.argv" || true)" "0"
+  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
+  assert_contains "$mail" "#7"
+  assert_contains "$mail" "#8"
+  assert_contains "$mail" "#9"
+  assert_contains "$mail" "#10"
+  local n; n="$(cmd_inbox count --for bundle-orch --workspace alpha)"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null 2>&1
+  assert_eq "$(cmd_inbox count --for bundle-orch --workspace alpha)" "$n"
+  rm -rf "$T"
+}
+
+test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
+  _orch_fixture; _nudge_herdr_stub
+  local old="2020-01-01T00:00:00Z"
+  mkdir -p "$CEL_INBOX_DIR"
+  printf '{"id":"1","ts":"%s","from":"w","to":"bundle-orch","kind":"decision","message":"merge or wait?"}\n' "$old" > "$CEL_INBOX_DIR/alpha.jsonl"
+  printf '{"id":"2","ts":"%s","from":"w","to":"root","kind":"status","message":"fyi"}\n' "$old" >> "$CEL_INBOX_DIR/alpha.jsonl"
+  local roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"},{"name":"alpha-root","pane_id":"w:p1","cwd":"/y"}]}}'
+  PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
+  assert_eq "$(grep -c '^agent prompt' "$T/herdr.argv" || true)" "0"
+  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
+  assert_contains "$mail" "cel inbox read --for bundle-orch --workspace alpha"
+  assert_contains "$mail" "UNRESOLVED decision"
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cel inbox read --for root --workspace alpha"
+  local n; n="$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)"
+  PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)" "$n"
+  rm -rf "$T"
 }

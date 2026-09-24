@@ -370,16 +370,12 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
       const text = messageText(s, hit);
       if (!text) return null;
       const cmds = [`cel inbox send ${hit.who} ${shellQuote(text)} --workspace ${hit.workspace}`];
-      // TWO STEPS WHEN THERE IS A PANE TO TAP. Mail is the record and is read
-      // when the agent next looks - minutes to hours - which from the
-      // operator's seat looked exactly like nothing happening (owner,
-      // 2026-09-19: "so we can't actually steer the orchestrators from the
-      // TUI?"). The prompt is the tap on the shoulder, and it says to go and
-      // READ the mail rather than repeating it: the mailbox stays the record,
-      // and the pane never gets two versions of one instruction.
-      if (hit.orch && hit.live) {
-        cmds.push(`herdr agent prompt ${hit.who} ${shellQuote(`inbox: ${text.slice(0, 80)} - run cel inbox read`)}`);
-      }
+      // MAIL ALONE, EVEN TO A LIVE PANE (CEL-65). This used to add a
+      // `herdr agent prompt` tap on the shoulder, which typed into the
+      // orchestrator's composer and landed in the middle of the human's
+      // draft. Each runtime's inbox hook now surfaces new mail out of band and
+      // drains it into the next turn (claude: Monitor + UserPromptSubmit; omp:
+      // tools/hooks/inbox.omp.ts). A deliberate interrupt is `nudge`/`talk`.
       return cmds;
     }
 
@@ -578,7 +574,7 @@ export const steerFor = (intent, sentence, f) => {
     orch: !!hit.orch,
     live: !!(hit.orch && hit.live),
     say: hit.orch && hit.live
-      ? `sent to ${hit.who} (pane live, prompted)`
+      ? `sent to ${hit.who} (pane live - its inbox hook delivers it)`
       : hit.orch
         ? `sent to ${hit.who} (no live pane - it reads this when it next starts; run "start ${hit.who}" to wake it)`
         : `sent to ${hit.who}`,

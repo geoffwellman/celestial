@@ -431,10 +431,14 @@ are mid-sentence merges with your draft. Routine agent-to-agent traffic goes
 through `cel inbox` instead - a JSONL mailbox per workspace, with a read
 cursor per *reader* so a standing root pane and the console can both drain
 root's mail without stealing each other's place - and delivery is out-of-band:
-recipients run a `Monitor` background task (`cel inbox watch`, or `cel inbox
-watch --all-workspaces` for the console) so new mail arrives as a
+on claude, recipients run a `Monitor` background task (`cel inbox watch`, or
+`cel inbox watch --all-workspaces` for the console) so new mail arrives as a
 notification, and a `UserPromptSubmit` hook drains anything missed on your
-next turn. Escalations that truly cannot wait still prompt, deliberately.
+next turn. omp has neither, so `cel run` loads `tools/hooks/inbox.omp.ts` on
+root and orchestrator panes: it watches the mailbox and raises `ui.notify`,
+then injects unread mail into the next turn once - it never touches the
+composer. Console `tell` to a live orchestrator is mail alone; `nudge` and
+`talk` are the deliberate interrupts. Escalations that truly cannot wait still prompt, deliberately.
 
 **Mail to `root` is for a person: `escalation`, `decision`, `blocked`.**
 Ticket status is the ledger's job — `cel-fanout status` is the authority and
