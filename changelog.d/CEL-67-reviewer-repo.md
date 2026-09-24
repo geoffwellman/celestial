@@ -1,0 +1,1 @@
+- `cel run reviewer` resolves the PR via the repo's GitHub slug (declared url, else origin remote) instead of the workspace-local name (CEL-67).
