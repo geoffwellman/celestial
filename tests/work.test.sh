@@ -390,3 +390,24 @@ GH
   case "$g" in *'"reviewer"'*|*'"afk"'*) printf 'gadget #7 took widget #7 events: %s\n' "$g" >&2; return 1;; esac
   rm -rf "$T"
 }
+
+# --json IS ONE DOCUMENT: across workspaces it is one array, each item carrying
+# its ws - never one array per workspace, concatenated.
+test_history_json_across_workspaces_is_one_valid_document() {
+  _work_setup
+  local A="$T/wsa" B="$T/wsb"
+  mkdir -p "$A/.cel" "$B/.cel"
+  cp "$T/workspace.yaml" "$A/"; sed 's/^name: alpha/name: beta/' "$T/workspace.yaml" > "$B/workspace.yaml"
+  printf '[{"id":"WG-7-x","repo":"widget","branch":"WG-7-x","ticket":"WG-7","state":"running","created":"2026-01-01T00:00:00Z"}]' > "$A/.cel/delegations.json"
+  printf '[{"id":"WG-8-y","repo":"widget","branch":"WG-8-y","ticket":"WG-8","state":"running","created":"2026-01-02T00:00:00Z"}]' > "$B/.cel/delegations.json"
+  local oldreg="${CEL_REGISTRY:-}"
+  export CEL_REGISTRY="$T/registry.yaml"
+  printf 'workspaces:\n  alpha:\n    path: %s\n  beta:\n    path: %s\n' "$A" "$B" > "$CEL_REGISTRY"
+  local out; out="$(cd "$T" && cmd_history --since 99999d --json)"
+  CEL_REGISTRY="$oldreg"
+  assert_eq "$(printf '%s' "$out" | jq -s 'length')" 1
+  assert_eq "$(printf '%s' "$out" | jq -r 'type')" array
+  assert_eq "$(printf '%s' "$out" | jq -r 'map(.ws) | sort | join(",")')" alpha,beta
+  assert_eq "$(printf '%s' "$out" | jq -r 'map(.key) | join(",")')" WG-8,WG-7
+  rm -rf "$T"
+}
