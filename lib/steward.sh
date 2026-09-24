@@ -390,8 +390,9 @@ _steward_reconcile() {
 # branch never matched: on 2026-09-24 three live workers, one `working`, were
 # each reported as "nobody on <branch>". The ledger records the real worktree,
 # so it answers first; a PR opened by hand has no row, and for that one the
-# guess is compared case-insensitively. Prints a jq filter argument pair:
-# "<exact-path>\t<guess>" - exact may be empty.
+# guess is compared case-insensitively. Prints "<exact-path>|<guess>" - exact
+# may be empty, which is why the separator is not a tab: IFS whitespace folds
+# a leading empty field away and the guess would be read as the exact path.
 _steward_branch_worktree() { # <wsdir> <repo> <branch>
   local led="$1/.cel/delegations.json" wt=""
   if [ -f "$led" ]; then
@@ -400,13 +401,13 @@ _steward_branch_worktree() { # <wsdir> <repo> <branch>
         | select(.repo == $r and .branch == $b and (.worktree // "") != "")][-1].worktree // ""' \
       "$led" 2>/dev/null || true)"
   fi
-  printf '%s\t%s' "$wt" "$HOME/.herdr/worktrees/$2/$3"
+  printf '%s|%s' "$wt" "$HOME/.herdr/worktrees/$2/$3"
 }
 
 # The agents standing on a branch, as a JSON array, by _steward_branch_worktree.
 _steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
   local wt guess
-  IFS=$'\t' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
+  IFS='|' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
   printf '%s' "$1" | jq -c --arg w "$wt" --arg g "$guess" \
     '[.result.agents[]? | select(.cwd != null and
        ((.cwd == $w and $w != "") or ((.cwd | ascii_downcase) == ($g | ascii_downcase))))]' \
