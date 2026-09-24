@@ -161,9 +161,10 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   rm -rf "$T"
 }
 
-# OMP prewalk swaps to the smol model after the first edit; orchestrators
-# must stay on their configured model, so root/orchestrator get --no-prewalk.
-test_run_disables_prewalk_for_omp_orchestrators_only() {
+# OMP prewalk swaps to the smol model after the first edit; a profile names a
+# model and the launch must keep it, so EVERY omp launch gets --no-prewalk and
+# no other runtime does.
+test_run_disables_prewalk_for_every_omp_launch() {
   _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
@@ -171,7 +172,16 @@ test_run_disables_prewalk_for_omp_orchestrators_only() {
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "--no-prewalk"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "worker got --no-prewalk"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--no-prewalk"
+  rm -rf "$T"
+}
+test_run_gives_no_prewalk_flag_to_other_runtimes() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "pi worker got --no-prewalk"; rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude got --no-prewalk"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
