@@ -1283,6 +1283,29 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   local n; n="$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)"
   PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
   assert_eq "$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)" "$n"
+
+# ---- CEL-70: one tick, two workspaces, two identities ---------------------
+# alpha acts as acct-b; beta declares nothing and keeps the active account.
+# The token set for alpha's sweep must not bleed into beta's.
+test_review_sweep_uses_each_workspaces_own_account_without_bleed() {
+  _orch_fixture
+  printf 'github:\n  user: acct-b\n' >> "$T/alpha/workspace.yaml"
+  mkdir -p "$T/beta/repos/gizmo"
+  printf 'name: beta\nrepos:\n  - {name: gizmo, url: "git@github.com:other/gizmo.git", prefix: OT}\n' > "$T/beta/workspace.yaml"
+  printf '  beta: {path: "%s/beta"}\n' "$T" >> "$CEL_REGISTRY"
+  mkdir -p "$T/bin"; export GH_LOG="$T/gh.log"; : > "$GH_LOG"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|GH_TOKEN=%s\n' "$*" "${GH_TOKEN-<unset>}" >> "$GH_LOG"
+if [ "$1 $2" = "auth token" ]; then [ "$4" = acct-b ] && { echo tok-b; exit 0; }; exit 1; fi
+echo '[]'
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/herdr"
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
+  assert_contains "$(grep -- '--repo someone/widget' "$GH_LOG")" "GH_TOKEN=tok-b"
+  assert_contains "$(grep -- '--repo other/gizmo' "$GH_LOG")" "GH_TOKEN=<unset>"
+  assert_eq "$(grep -- '--repo other/gizmo' "$GH_LOG" | grep -c tok-b || true)" "0"
   rm -rf "$T"
 }
 

@@ -588,7 +588,9 @@ _fanout_land_setup() { # <author> <review> <failing> [<draft>] [<state>]
   cat > "$GH_STUB" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
+echo "\$*|GH_TOKEN=\${GH_TOKEN-<unset>}" >> "$GH_LOG.env"
 case "\$1 \$2" in
+  "auth token") case "\$4" in acct-b) echo tok-b;; *) exit 1;; esac;;
   "api user") echo fleetbot;;
   "pr view")  echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
   "pr merge") exit 0;;
@@ -2331,5 +2333,43 @@ test_status_shows_the_silence_instead_of_a_row_that_reads_like_progress() {
   local out
   out="$(cd "$T" && STUB_STATUS=idle STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" status)"
   assert_contains "$out" "unstarted"
+  rm -rf "$T"
+}
+
+# ---- CEL-70: the workspace's own GitHub account ---------------------------
+test_land_runs_every_gh_call_as_the_workspace_account() {
+  _fanout_land_setup fleetbot APPROVED 0
+  printf 'github:\n  user: acct-b\n' >> "$T/workspace.yaml"
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -v '^auth token' "$GH_LOG.env" | grep -vc 'GH_TOKEN=tok-b' || true)" "0"
+  rm -rf "$T"
+}
+test_land_without_a_github_block_keeps_the_active_account() {
+  _fanout_land_setup fleetbot APPROVED 0
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  assert_eq "$(grep -c 'GH_TOKEN=<unset>' "$GH_LOG.env")" "$(wc -l < "$GH_LOG.env" | tr -d ' ')"
+  if grep -q '^auth' "$GH_LOG"; then echo "asked gh for a token with no github block"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+test_land_refuses_when_the_workspace_account_is_not_logged_in() {
+  _fanout_land_setup fleetbot APPROVED 0
+  printf 'github:\n  user: acct-z\n' >> "$T/workspace.yaml"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed as the wrong account"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gh auth login"
+  if grep -q "^pr merge" "$GH_LOG"; then echo "merged anyway"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+test_scout_and_worker_launch_carry_the_token_substitution() {
+  _fanout_setup
+  printf 'github:\n  user: acct-b\n' >> "$T/workspace.yaml"
+  mkdir -p "$T/bin"
+  printf '#!/usr/bin/env bash\n[ "$1 $2" = "auth token" ] && [ "$4" = acct-b ] && { echo tok-b; exit 0; }\nexit 1\n' > "$T/bin/gh"
+  chmod +x "$T/bin/gh"
+  printf 'why slow\n' > "$T/why.md"
+  (cd "$T" && PATH="$T/bin:$PATH" "$BIN" delegate widget WG-GH "$T/spec.md") > /dev/null
+  (cd "$T" && PATH="$T/bin:$PATH" "$BIN" scout widget "$T/why.md") > /dev/null
+  assert_eq "$(grep '^pane send-text' "$STUB_LOG" | grep -c 'GH_TOKEN="$(gh auth token --user acct-b')" "2"
+  if grep -q tok-b "$STUB_LOG"; then echo "token value reached herdr"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
