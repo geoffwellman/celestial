@@ -234,6 +234,12 @@ _inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
 # not answer at all, which is NOT the same as "nobody is alive" - the same
 # rule prune, the steward and cel-fanout all learned the hard way.
 _inbox_roster() {
+  # CEL-75: `cel fleet` already holds the roster for its whole pass, and asking
+  # herdr again per workspace was seconds of each read under load.
+  if [ -n "${_INBOX_ROSTER_OK:-}" ]; then
+    [ "$_INBOX_ROSTER_OK" = 1 ] || return 1
+    printf '%s\n' "${_INBOX_ROSTER_HELD:-}"; return 0
+  fi
   have herdr || return 1
   have jq || return 1
   local out
@@ -248,12 +254,13 @@ _inbox_roster() {
 # runtime that rewrites its own argv (the reason lib/gc.sh reads environ too).
 # CEL_PROC_DIR is the seam a test drives this through; nothing else moves it.
 _inbox_console_live() {
-  local d="${CEL_PROC_DIR:-/proc}" p
-  for p in "$d"/[0-9]*; do
-    [ -r "$p/environ" ] || continue
-    if tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx 'CEL_ROLE=console'; then return 0; fi
-  done
-  return 1
+  # ONE grep OVER EVERY environ, not a tr and a grep per process: on a box
+  # running several hundred processes that was two forks each, and under load
+  # it was most of the several seconds inbox_reader_of cost a fleet read
+  # (CEL-75). -z makes NUL the record separator, so -x still matches a whole
+  # variable.
+  local d="${CEL_PROC_DIR:-/proc}"
+  grep -qszx 'CEL_ROLE=console' "$d"/[0-9]*/environ 2>/dev/null
 }
 
 # The herdr agent name that would be standing in a mailbox: the inverse of
