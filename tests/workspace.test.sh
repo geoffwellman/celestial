@@ -411,9 +411,23 @@ test_ws_gh_refuses_when_the_user_is_not_logged_in() {
   if grep -q '^pr list' "$GH_LOG"; then echo "fell back to the active account"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
-test_github_slug_from_url_maps_an_ssh_alias_host() {
-  assert_eq "$(github_slug_from_url git@github-acct-b:o/r.git)" "o/r"
-  assert_eq "$(github_slug_from_url git@github.com:o/r.git)" "o/r"
+# The declared alias is accepted as that EXACT host and nothing else: a
+# `github-*` pattern would let any lookalike alias name a GitHub slug.
+test_github_slug_from_url_maps_the_declared_ssh_alias_exactly() {
+  assert_eq "$(github_slug_from_url git@github-acct-b:o/r.git github-acct-b)" "o/r"
+  assert_eq "$(github_slug_from_url git@github.com:o/r.git github-acct-b)" "o/r"
+  assert_fails github_slug_from_url git@github-acct-b:o/r.git
+  assert_fails github_slug_from_url git@github-acct-bx:o/r.git github-acct-b
+  assert_fails github_slug_from_url git@xgithub-acct-b:o/r.git github-acct-b
+  assert_fails github_slug_from_url git@github-evil:o/r.git github-acct-b
+}
+test_repo_slug_uses_the_workspaces_declared_alias() {
+  _gh_acct_fixture $'github:\n  user: acct-b\n  ssh_host: github-acct-b'
+  mkdir -p "$T/repos/widget"; git -C "$T/repos/widget" init -q
+  git -C "$T/repos/widget" remote add origin git@github-acct-b:someone/widget.git
+  yq -y '.repos[0].url = null' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  assert_eq "$(ws_repo_github_slug "$T" widget "$T/repos/widget")" "someone/widget"
+  rm -rf "$T"
 }
 test_ws_github_clone_url_uses_the_alias() {
   _gh_acct_fixture $'github:\n  user: acct-b\n  ssh_host: github-acct-b'
