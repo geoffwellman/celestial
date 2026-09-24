@@ -580,6 +580,18 @@ test_github_slug_from_url_handles_ssh_and_https() {
   assert_fails github_slug_from_url /tmp/local/origin
 }
 
+# Sourcery on #88: the host must BE github.com, not contain it.
+test_github_slug_from_url_refuses_lookalike_hosts() {
+  assert_fails github_slug_from_url git@evilgithub.com:acme/repo.git
+  assert_fails github_slug_from_url https://evilgithub.com/acme/repo.git
+  assert_fails github_slug_from_url https://evil.github.com/o/r
+  assert_fails github_slug_from_url git@evil.github.com:o/r.git
+  assert_fails github_slug_from_url https://gitlab.com/github.com/o/r
+  assert_fails github_slug_from_url https://gitlab.com/x/github.com:o/r
+  assert_fails github_slug_from_url https://github.com.evil.com/o/r
+  assert_fails github_slug_from_url https://github.com/o/r/extra
+}
+
 # No declared url: the checkout's origin remote is the identity; a
 # non-GitHub origin fails closed with the existing error.
 test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
