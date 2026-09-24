@@ -364,7 +364,7 @@ _svc_ws_pane() { # <wsdir>
 # `--current` is not the answer either - the steward runs from a systemd timer
 # where there is no current pane. Nor is a bare `tab create`: herdr puts that
 # tab in whichever workspace is FOCUSED, and the first fix's smoke test put
-# `cel services` inside the Standout product workspace, where a `cel ws reset`
+# `cel services` inside the focused product workspace, where a `cel ws reset`
 # of that product would have killed the gateway. Box services get a dedicated
 # Herdr WORKSPACE labelled `cel services`, looked up by that label and created
 # (unfocused) only when absent. No product lifecycle touches it.

@@ -347,24 +347,24 @@ case "\$1 \$2" in
     printf '{"result":{"pane":{"pane_id":"w1:p9"},"pane_id":"w1:p9"}}' ;;
   # Two unrelated product workspaces exist and one of them is FOCUSED. A
   # bare \`tab create\` would land in the focused one - herdr's ambient
-  # behaviour - so the stub records it as a tab in wHC, where a
+  # behaviour - so the stub records it as a tab in wAA, where a
   # \`cel ws reset\` of that product would take every box service with it.
   'workspace list')
     [ -f "$T/ws-list-err" ] && { cat "$T/ws-list-err" >&2; exit 1; }
     svc=""
     [ -f "$T/svc-ws" ] && svc=',{"workspace_id":"wSV","label":"cel services","focused":false}'
-    printf '{"result":{"workspaces":[{"workspace_id":"wHC","label":"standout/orch","focused":true},{"workspace_id":"wFK","label":"framewright/orch","focused":false}%s]}}' "\$svc" ;;
+    printf '{"result":{"workspaces":[{"workspace_id":"wAA","label":"bundle/orch","focused":true},{"workspace_id":"wBB","label":"widget/orch","focused":false}%s]}}' "\$svc" ;;
   'workspace create')
     [ -f "$T/ws-create-err" ] && { cat "$T/ws-create-err" >&2; exit 1; }
     touch "$T/svc-ws"
     printf '{"result":{"workspace":{"workspace_id":"wSV"},"tab":{"tab_id":"wSV:t1"},"root_pane":{"pane_id":"wSV:p1"}}}' ;;
   'tab list')   cat "$T/tabs.json" 2>/dev/null || printf '{"result":{"tabs":[]}}' ;;
-  'tab create') printf '{"result":{"root_pane":{"pane_id":"wHC:p8"}}}' ;;
+  'tab create') printf '{"result":{"root_pane":{"pane_id":"wAA:p8"}}}' ;;
   'pane list')
     case "\$*" in
       *'--workspace wSV'*) [ -f "$T/svc-ws" ] && printf '{"result":{"panes":[{"pane_id":"wSV:p1","workspace_id":"wSV"}]}}' || printf '{"result":{"panes":[]}}' ;;
       *'--workspace'*) printf '{"result":{"panes":[]}}' ;;
-      *) printf '{"result":{"panes":[{"pane_id":"wHC:p1","workspace_id":"wHC"},{"pane_id":"wFK:p1","workspace_id":"wFK"}]}}' ;;
+      *) printf '{"result":{"panes":[{"pane_id":"wAA:p1","workspace_id":"wAA"},{"pane_id":"wBB:p1","workspace_id":"wBB"}]}}' ;;
     esac ;;
   'agent list') cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
   'pane read')  printf 'last line of the pane\n' ;;
@@ -396,7 +396,7 @@ test_box_service_split_names_a_direction_and_a_target() {
 
 # A box service belongs to the box, not to whichever product workspace the
 # operator is focused on. The orchestrator's smoke test of the first fix
-# created `cel services` as a TAB inside the focused Standout workspace (wHC):
+# created `cel services` as a TAB inside the focused product workspace (wAA):
 # a `cel ws reset` of that product would have killed the gateway. The home is
 # a dedicated Herdr workspace found by its label and created if absent.
 test_box_service_lands_in_the_dedicated_services_workspace() {
@@ -404,7 +404,7 @@ test_box_service_lands_in_the_dedicated_services_workspace() {
   _svc_strict_herdr
   printf '{"name":"cel-auth-broker","port":47311,"cmd":"omp auth-broker serve","cwd":"%s"}\n' "$T" \
     > "$CEL_SERVICES_D/cel-auth-broker.json"
-  ( cd "$T" && HERDR_PANE_ID=wHC:p1 HERDR_WORKSPACE_ID=wHC "$CEL" services start cel-auth-broker )
+  ( cd "$T" && HERDR_PANE_ID=wAA:p1 HERDR_WORKSPACE_ID=wAA "$CEL" services start cel-auth-broker )
   assert_contains "$(grep '^workspace create' "$T/calls" || true)" "--label cel services"
   assert_contains "$(_svc_split_args)" "--pane wSV:p1"
   assert_contains "$(_svc_split_args)" "--direction down"
