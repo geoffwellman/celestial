@@ -725,6 +725,16 @@ test_scout_uses_its_own_role_binding() {
   assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "scout-model"
   rm -rf "$T"
 }
+# CEL-68: an omp delegate/scout keeps its profile's model - prewalk off.
+test_omp_delegate_and_scout_launch_with_no_prewalk() {
+  _fanout_setup; _fanout_bind_profiles deep
+  (cd "$T" && "$BIN" delegate widget WG-NP "$T/spec.md") > /dev/null
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "--no-prewalk"
+  : > "$STUB_LOG"; printf 'brief\n' > "$T/b.md"
+  (cd "$T" && "$BIN" scout widget "$T/b.md") > /dev/null
+  assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "--no-prewalk"
+  rm -rf "$T"
+}
 test_scout_falls_back_to_the_worker_binding_when_unbound() {
   _fanout_setup; _fanout_bind_profiles
   printf 'brief\n' > "$T/b.md"

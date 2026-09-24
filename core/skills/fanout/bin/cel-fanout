@@ -769,6 +769,7 @@ cmd_delegate() {
   local -a PROFILE_ARGS=()
   profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
+  _run_keep_model_args "$rt"   # same helper as cel run (CEL-68)
 
   # Runtime-wide launch flags, same as cel run. THESE WERE MISSING HERE: every
   # worker delegated through fanout started without its runtime's approval
