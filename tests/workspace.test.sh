@@ -358,3 +358,87 @@ test_ws_repo_releasable_needs_a_workflow() {
   assert_fails ws_repo_releasable "$tmp" half || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 }
+
+# ---- CEL-70: a workspace acts as its own GitHub account -------------------
+# gh's ACTIVE account is box-global; a workspace naming `github.user` must get
+# that account per process (GH_TOKEN) and never move the global one.
+_gh_acct_fixture() { # [github-block-yaml]
+  T="$(mktemp -d)"
+  cp "$WSA/workspace.yaml" "$T/workspace.yaml"
+  [ -z "${1:-}" ] || printf '%s\n' "$1" >> "$T/workspace.yaml"
+  mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|GH_TOKEN=%s\n' "$*" "${GH_TOKEN-<unset>}" >> "$GH_LOG"
+if [ "$1 $2" = "auth token" ]; then
+  case "$4" in acct-a) echo tok-a ;; acct-b) echo tok-b ;;
+    *) echo "no oauth token found for github.com account $4" >&2; exit 1 ;; esac
+  exit 0
+fi
+echo '[]'
+SH
+  chmod +x "$T/bin/gh"
+}
+test_github_block_absent_resolves_empty() {
+  assert_eq "$(ws_github_user "$WSA")" ""
+  assert_eq "$(ws_github_ssh_host "$WSA")" ""
+}
+test_github_block_resolves_user_and_ssh_host() {
+  _gh_acct_fixture $'github:\n  user: acct-b\n  ssh_host: github-acct-b'
+  assert_eq "$(ws_github_user "$T")" "acct-b"
+  assert_eq "$(ws_github_ssh_host "$T")" "github-acct-b"
+  rm -rf "$T"
+}
+test_ws_gh_without_a_block_is_todays_call() {
+  _gh_acct_fixture
+  PATH="$T/bin:$PATH" ws_gh "$T" pr list --repo o/r >/dev/null
+  assert_eq "$(cat "$GH_LOG")" "pr list --repo o/r|GH_TOKEN=<unset>"
+  rm -rf "$T"
+}
+test_ws_gh_with_a_user_carries_that_token_for_that_call_only() {
+  _gh_acct_fixture $'github:\n  user: acct-b'
+  PATH="$T/bin:$PATH" ws_gh "$T" pr list --repo o/r >/dev/null
+  assert_contains "$(cat "$GH_LOG")" "pr list --repo o/r|GH_TOKEN=tok-b"
+  assert_eq "${GH_TOKEN-<unset>}" "<unset>"
+  rm -rf "$T"
+}
+test_ws_gh_refuses_when_the_user_is_not_logged_in() {
+  _gh_acct_fixture $'github:\n  user: acct-z'
+  local out; out="$(PATH="$T/bin:$PATH" ws_gh "$T" pr list --repo o/r 2>&1)" && {
+    echo "ws_gh ran for an account that is not logged in"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gh auth login"
+  assert_contains "$out" "gh auth status"
+  if grep -q '^pr list' "$GH_LOG"; then echo "fell back to the active account"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+# The declared alias is accepted as that EXACT host and nothing else: a
+# `github-*` pattern would let any lookalike alias name a GitHub slug.
+test_github_slug_from_url_maps_the_declared_ssh_alias_exactly() {
+  assert_eq "$(github_slug_from_url git@github-acct-b:o/r.git github-acct-b)" "o/r"
+  assert_eq "$(github_slug_from_url git@github.com:o/r.git github-acct-b)" "o/r"
+  assert_fails github_slug_from_url git@github-acct-b:o/r.git
+  assert_fails github_slug_from_url git@github-acct-bx:o/r.git github-acct-b
+  assert_fails github_slug_from_url git@xgithub-acct-b:o/r.git github-acct-b
+  assert_fails github_slug_from_url git@github-evil:o/r.git github-acct-b
+}
+test_repo_slug_uses_the_workspaces_declared_alias() {
+  _gh_acct_fixture $'github:\n  user: acct-b\n  ssh_host: github-acct-b'
+  mkdir -p "$T/repos/widget"; git -C "$T/repos/widget" init -q
+  git -C "$T/repos/widget" remote add origin git@github-acct-b:someone/widget.git
+  yq -y '.repos[0].url = null' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  assert_eq "$(ws_repo_github_slug "$T" widget "$T/repos/widget")" "someone/widget"
+  rm -rf "$T"
+}
+test_ws_github_clone_url_uses_the_alias() {
+  _gh_acct_fixture $'github:\n  user: acct-b\n  ssh_host: github-acct-b'
+  assert_eq "$(ws_github_clone_url "$T" git@github.com:someone/widget.git)" "git@github-acct-b:someone/widget.git"
+  rm -rf "$T"
+  assert_eq "$(ws_github_clone_url "$WSA" git@github.com:someone/widget.git)" "git@github.com:someone/widget.git"
+}
+# Nothing in the plane may move the box-global active account.
+test_nothing_calls_gh_auth_switch() {
+  local hits
+  hits="$(grep -rnE 'gh"? auth switch|GH"? auth switch' "$CEL_ROOT/lib" "$CEL_ROOT/bin" "$CEL_ROOT/core/skills" \
+          | grep -vE ':[0-9]+:\s*#' || true)"
+  assert_eq "$hits" ""
+}

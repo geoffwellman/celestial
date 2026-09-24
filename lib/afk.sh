@@ -19,6 +19,10 @@
 _CEL_AFK=1
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck source=lib/workspace.sh
+. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+# shellcheck source=lib/registry.sh
+. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 
 # SLEEPING IS A PROPERTY OF THE OPERATOR, not of one product: the state lives
 # in the box's own state dir, so every workspace on this box reads one answer
@@ -30,6 +34,24 @@ _afk_log()  { printf '%s/log.jsonl' "$(afk_dir)"; }
 # Overridable so the named GitHub exception can be watched in a test without
 # reaching a real review thread.
 _afk_gh()   { printf '%s' "${CEL_AFK_GH:-gh}"; }
+# A reply or a rebase acts for the workspace that owns the PR (CEL-70): as its
+# `github.user` when it declares one, refused if that account is not logged
+# in, and exactly today's call when nothing owns it or nothing is declared.
+_afk_ws_gh() { # <wsdir-or-empty> <gh args...>
+  local w="$1"; shift
+  if [ -n "$w" ]; then CEL_WS_GH_BIN="$(_afk_gh)" ws_gh "$w" "$@"; else "$(_afk_gh)" "$@"; fi
+}
+_afk_wsdir_for_slug() { # <owner/name> -> wsdir, or nothing
+  local n w r
+  for n in $(registry_names 2>/dev/null || true); do
+    w="$(registry_path "$n" 2>/dev/null)" || continue
+    [ -f "$w/workspace.yaml" ] || continue
+    for r in $(ws_repo_names "$w"); do
+      [ "$(ws_repo_github_slug "$w" "$r" 2>/dev/null || true)" = "$1" ] && { printf '%s' "$w"; return 0; }
+    done
+  done
+  return 0
+}
 
 # The four, and the words each one is recorded under. The authorisation is
 # written beside every act because "the agent merged something" and "the agent
@@ -228,15 +250,15 @@ afk_authorise() { # <act> <evidence-json> [detail]
 # BEFORE gh is reached - a reply posted and then withdrawn is a comment the
 # author has already been mailed.
 afk_resolve_thread() { # <slug> <pr-number> <thread-id> <evidence-json>
-  local slug="$1" pr="$2" thread="$3" e="$4" gh body
+  local slug="$1" pr="$2" thread="$3" e="$4" w body
   afk_post_allowed bot_thread_resolution >/dev/null || return 1
   afk_authorise resolve_thread "$e" "$slug#$pr thread $thread" >/dev/null || return 1
-  gh="$(_afk_gh)"
+  w="$(_afk_wsdir_for_slug "$slug")"
   body="$(jq -r '"Fixed in \(.fixed_commit): \(.fixed_summary). Resolved by the fleet while the operator is away (cel afk, pre-authorisation 1); a reviewer confirmed the fix after that commit."' <<<"$e")"
-  "$gh" api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){clientMutationId}}' \
+  _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){clientMutationId}}' \
     -f t="$thread" -f b="$body" >/dev/null \
     || { c_warn "afk: the reply to $thread did not post - the thread is left open"; return 1; }
-  "$gh" api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' \
+  _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' \
     -f t="$thread" >/dev/null \
     || { c_warn "afk: replied to $thread but could not resolve it"; return 1; }
   c_ok "resolved $slug#$pr thread $thread (fixed in $(jq -r .fixed_commit <<<"$e"))"
@@ -268,9 +290,8 @@ afk_rebase_retry() { # <worktree> [--base <ref>]
 
   # What GitHub thought of this PR before the rebase. No PR, or a PR that
   # already conflicts, is not "pushed behind by another merge".
-  local gh pr mergeable state
-  gh="$(_afk_gh)"
-  pr="$("$gh" pr view "$branch" --json mergeable,state 2>/dev/null || true)"
+  local pr mergeable state
+  pr="$(_afk_ws_gh "$(ws_of_checkout "$wt" || true)" pr view "$branch" --json mergeable,state 2>/dev/null || true)"
   mergeable="$(jq -r '.mergeable // ""' <<<"${pr:-{\}}" 2>/dev/null || true)"
   state="$(jq -r '.state // ""' <<<"${pr:-{\}}" 2>/dev/null || true)"
 

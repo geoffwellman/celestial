@@ -163,3 +163,18 @@ test_a_refused_verb_writes_nothing_into_the_working_directory() {
   assert_eq "$(find "$cwd" -mindepth 1 | wc -l)" "0"
   rm -rf "$T"
 }
+
+# CEL-70: a workspace with ssh_host clones over that alias, url unchanged.
+test_ws_sync_clones_over_the_declared_ssh_alias() {
+  _sandbox
+  printf '' | cmd_ws new t9 --kind hustle --org o --merge self --path "$T/t9" --no-remote >/dev/null
+  local tmpw; tmpw="$(mktemp)"
+  yq -y '.repos = [{name: "widget", url: "git@github.com:o/widget.git", prefix: "WG", gate: "true"}] | .github = {user: "acct-b", ssh_host: "github-acct-b"}' \
+    "$T/t9/workspace.yaml" > "$tmpw" && mv "$tmpw" "$T/t9/workspace.yaml"
+  git() { if [ "$1" = clone ]; then printf '%s\n' "$*" >> "$T/clones"; mkdir -p "${*: -1}"; return 0; fi; command git "$@"; }
+  cmd_ws sync t9 >/dev/null 2>&1 || true
+  unset -f git
+  assert_contains "$(cat "$T/clones")" "git@github-acct-b:o/widget.git"
+  assert_eq "$(ws_repo_get "$T/t9" widget url)" "git@github.com:o/widget.git"
+  rm -rf "$T"
+}

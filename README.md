@@ -139,6 +139,45 @@ Three layers on disk, and a factory floor of agents above them.
 ~/.local/share/cel         box state: registry, published pages (never in git)
 ```
 
+### A workspace with its own GitHub account
+
+`gh` keeps several accounts per host but only one is *active*, box-wide, so
+`gh auth switch` for one workspace would re-identify every other workspace.
+A workspace whose repos belong to a second account says so in
+`workspace.yaml`:
+
+```yaml
+github:
+  user: acct-b              # the gh account this workspace acts as
+  ssh_host: github-acct-b   # optional: an ~/.ssh/config Host alias with acct-b's key
+```
+
+Every pane `cel run` / `cel-fanout delegate|scout` starts for that workspace
+gets `GH_TOKEN="$(gh auth token --user acct-b)"`, evaluated in the pane (the
+value never passes through cel), and every `gh` call the plane makes for the
+workspace (steward sweeps, land/collect, reviewer PR lookup, `cel ws push`,
+`cel gc`, `cel release`) runs with that account's token for that call only.
+Nothing ever runs `gh auth switch`. If the account is not logged in, launches
+and calls for that workspace refuse rather than fall back to the active
+account. With `ssh_host`, `cel ws sync` clones over `git@github-acct-b:owner/repo.git`;
+the `url:` in `workspace.yaml` keeps the canonical `git@github.com:` form.
+Without a `github:` block nothing changes.
+
+Two human steps, once per box:
+
+1. `gh auth login` as acct-b (it is added beside the existing account; check with `gh auth status`).
+2. An SSH key for acct-b, added to acct-b on GitHub, and an alias in `~/.ssh/config`:
+
+   ```
+   Host github-acct-b
+     HostName github.com
+     User git
+     IdentityFile ~/.ssh/id_ed25519_acct_b
+     IdentitiesOnly yes
+   ```
+
+`cel doctor` checks both for every workspace that declares `github.user`.
+
 ```
 console                one per box - routes; reads cel fleet; never builds
    └── orchestrator        one per product (1..n repos) - plans, delegates, judges, lands

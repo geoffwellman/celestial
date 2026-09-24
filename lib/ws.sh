@@ -223,11 +223,21 @@ _ws_sync_one() {
     url="$(ws_repo_get "$wsdir" "$r" url)"
     if [ ! -d "$wsdir/repos/$r" ]; then
       if [ -n "$url" ]; then
-        git clone -q "$url" "$wsdir/repos/$r"
+        # Over the workspace's SSH alias when it declares one (CEL-70): the
+        # push key is whatever github.com resolves to, independent of gh.
+        # workspace.yaml keeps the canonical github.com url.
+        git clone -q "$(ws_github_clone_url "$wsdir" "$url")" "$wsdir/repos/$r"
       else
         c_warn "workspace '$n': repo '$r' has no url and no local clone; skipping"
         continue
       fi
+    fi
+    # A checkout cloned before `ssh_host` was declared still points at plain
+    # github.com, i.e. the default key; move exactly that origin onto the alias.
+    if [ -n "$url" ] && [ -n "$(ws_github_ssh_host "$wsdir")" ] \
+       && [ "$(git -C "$wsdir/repos/$r" remote get-url origin 2>/dev/null || true)" = "$url" ]; then
+      git -C "$wsdir/repos/$r" remote set-url origin "$(ws_github_clone_url "$wsdir" "$url")" \
+        || c_warn "workspace '$n': could not point $r's origin at $(ws_github_ssh_host "$wsdir")"
     fi
     ws_link_skills "$wsdir" "$wsdir/repos/$r"
     ws_render_claude_block "$wsdir" "$wsdir/repos/$r"
@@ -273,12 +283,18 @@ _ws_env() {
 _ws_push() {
   local name="$1" path org remote
   have gh || die "cel ws push: gh is required"
-  gh auth status >/dev/null 2>&1 || die "cel ws push: gh is not authenticated"
   _ws_require "$name"; path="$_WS_DIR"
+  # The workspace repo is created AS the workspace's own account when it
+  # declares one (CEL-70) - never the box's active account by default.
+  if [ -n "$(ws_github_user "$path")" ]; then
+    ws_github_ready "$path" || die "cel ws push: $(ws_github_fix "$(ws_github_user "$path")")"
+  else
+    gh auth status >/dev/null 2>&1 || die "cel ws push: gh is not authenticated"
+  fi
   remote="$(registry_remote "$name")"
   [ -z "$remote" ] || die "workspace '$name' already has a remote: $remote"
   org="$(ws_org "$path")"
   [ -n "$org" ] || die "workspace '$name' has no org set in workspace.yaml"
-  gh repo create "$org/ws-$name" --private --source="$path" --push
+  ws_gh "$path" repo create "$org/ws-$name" --private --source="$path" --push
   registry_set_remote "$name" "git@github.com:$org/ws-$name.git"
 }

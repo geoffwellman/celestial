@@ -17,6 +17,16 @@ _CEL_GC=1
 # shellcheck source=lib/run.sh
 . "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry cel run writes
 
+# WHOSE ACCOUNT ASKS ABOUT A CHECKOUT (CEL-70). ws_of_checkout names the
+# workspace a worktree belongs to, and a workspace with `github.user` must be asked about
+# as that account. A declared account that is not logged in makes the call
+# fail, which every caller here already reads as UNKNOWN: kept, never closed.
+_gc_gh() { # <dir> <gh args...> - run in <dir>, as its workspace's account
+  local d="$1" w; shift
+  w="$(ws_of_checkout "$d")" || w=""
+  if [ -n "$w" ]; then (cd "$d" && ws_gh "$w" "$@"); else (cd "$d" && gh "$@"); fi
+}
+
 _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
   local def status head pr
   def="$(repo_default_ref "$1")" || return 1
@@ -28,7 +38,7 @@ _gc_landed_clean() { # <dir> [MERGED|CLOSED|NONE]
   # Squash merges need not preserve ancestry. A successful GitHub lookup
   # must attest that this EXACT local head was merged; later commits keep it.
   head="$(git -C "$1" rev-parse --verify HEAD 2>/dev/null)" \
-    && pr="$(cd "$1" && gh pr view --json state,headRefOid 2>/dev/null)" || return 1
+    && pr="$(_gc_gh "$1" pr view --json state,headRefOid 2>/dev/null)" || return 1
   printf '%s' "$pr" | jq -e --arg h "$head" '.state == "MERGED" and .headRefOid == $h' >/dev/null 2>&1
 }
 
@@ -51,7 +61,7 @@ _gc_pr_state() { # <worktree-dir> -> MERGED|CLOSED|OPEN|NONE|UNKNOWN
     || { printf UNKNOWN; return 0; }
   # Unlike pr view, a successful empty list distinguishes no PR from an API
   # outage. A later PR on a reused branch takes precedence over an older one.
-  rows="$(cd "$1" && gh pr list --head "$branch" --state all --limit 100 --json state,updatedAt 2>/dev/null)" \
+  rows="$(_gc_gh "$1" pr list --head "$branch" --state all --limit 100 --json state,updatedAt 2>/dev/null)" \
     || { printf UNKNOWN; return 0; }
   printf '%s' "$rows" | jq -er '
     if type != "array" then "UNKNOWN"
@@ -441,7 +451,7 @@ _gc_reviewer_pr_state() { # <repo> <pr> [cwd] -> MERGED|CLOSED|OPEN|UNKNOWN
   # where gh can resolve the repository from its remote; `--repo <name>` is
   # the fallback for a row whose pane has no readable cwd.
   if [ -n "${3:-}" ] && [ -d "${3:-}" ]; then
-    out="$(cd "$3" && gh pr view "$2" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+    out="$(_gc_gh "$3" pr view "$2" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
   else
     out="$(gh pr view "$2" --repo "$1" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
   fi

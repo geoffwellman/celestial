@@ -640,3 +640,67 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
   assert_contains "$out" "cannot read widget#12 from GitHub"
   rm -rf "$T"
 }
+
+# ---- CEL-70: panes act as the workspace's GitHub account ------------------
+_ws_gh_acct() { # <user>
+  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\ngithub:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
+  mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|GH_TOKEN=%s\n' "$*" "${GH_TOKEN-<unset>}" >> "$GH_LOG"
+if [ "$1 $2" = "auth token" ]; then
+  case "$4" in acct-a) echo tok-a ;; acct-b) echo tok-b ;; *) echo "not logged in: $4" >&2; exit 1 ;; esac
+  exit 0
+fi
+[ "$1 $2" = "pr view" ] && echo '{"headRefOid":"abc123","baseRefName":"main"}'
+exit 0
+SH
+  chmod +x "$T/bin/gh"; export PATH="$T/bin:$PATH"
+}
+test_launch_env_without_github_block_is_unchanged() {
+  _ws
+  assert_eq "$(_run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md "
+  rm -rf "$T"
+}
+test_every_role_launch_carries_the_token_substitution_not_the_token() {
+  _ws_gh_acct acct-b
+  local out role
+  for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
+    # shellcheck disable=SC2086
+    out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
+    assert_contains "$out" 'gh auth token --user acct-b'
+    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; rm -rf "$T"; return 1;; esac
+  done
+  rm -rf "$T"
+}
+test_launch_refuses_when_the_declared_user_is_not_logged_in() {
+  _ws_gh_acct acct-z
+  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --dry-run 2>&1)" && {
+    echo "launched as an account that is not logged in"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gh auth login"
+  rm -rf "$T"
+}
+test_reviewer_pr_lookup_runs_as_the_workspace_account() {
+  _ws_gh_acct acct-b
+  _run_reviewer_pr_facts "$T/repos/widget" someone/widget 12 "$T" >/dev/null
+  assert_contains "$(cat "$GH_LOG")" "pr view 12 --repo someone/widget --json headRefOid,baseRefName|GH_TOKEN=tok-b"
+  rm -rf "$T"
+}
+# The pane evaluates the token itself, so auth can vanish between cel's
+# readiness check and the typed line. Then the agent must NOT start, and the
+# pane must say how to fix it (Sourcery on #89).
+test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
+  _ws_gh_acct acct-b
+  local line; line="$(_run_launch_env worker "$T" /r.md)touch $T/agent-ran"
+  # auth disappears after the readiness check
+  printf '#!/usr/bin/env bash\necho "no oauth token" >&2; exit 1\n' > "$T/bin/gh"
+  local err; err="$(bash -c "$line" 2>&1)" || true
+  [ ! -e "$T/agent-ran" ] || { echo "agent started without its account's token"; rm -rf "$T"; return 1; }
+  assert_contains "$err" "gh auth login"
+  # and with auth present the same line starts it, the token in its env
+  printf '#!/usr/bin/env bash\necho tok-b\n' > "$T/bin/gh"
+  line="$(_run_launch_env worker "$T" /r.md)sh -c 'printf %s \"\$GH_TOKEN\" > $T/agent-ran'"
+  bash -c "$line"
+  assert_eq "$(cat "$T/agent-ran")" "tok-b"
+  rm -rf "$T"
+}
