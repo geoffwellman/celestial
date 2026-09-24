@@ -166,6 +166,35 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
+# `owner/name` from a GitHub remote url - SSH (git@github.com:o/r.git,
+# ssh://git@github.com/o/r) or HTTPS. Fails on anything that is not GitHub,
+# so a caller that needs `gh --repo` refuses rather than guesses.
+github_slug_from_url() { # <url> -> owner/name
+  # The host is matched EXACTLY, anchored at the start: a substring match
+  # turned git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
+  local s
+  case "$1" in
+    git@github.com:*)         s="${1#git@github.com:}" ;;
+    ssh://git@github.com/*)   s="${1#ssh://git@github.com/}" ;;
+    https://github.com/*)     s="${1#https://github.com/}" ;;
+    *) return 1 ;;
+  esac
+  s="${s%.git}"
+  [[ "$s" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s' "$s"
+}
+
+# A repo's GitHub identity: its declared url, else the checkout's origin.
+# The workspace-local name is a nickname and is never used as a slug.
+ws_repo_github_slug() { # <wsdir> <repo> [repodir] -> owner/name
+  local url
+  url="$(ws_repo_get "$1" "$2" url)"
+  if [ -n "$url" ] && github_slug_from_url "$url"; then return 0; fi
+  [ -n "${3:-}" ] || return 1
+  url="$(git -C "$3" remote get-url origin 2>/dev/null)" || return 1
+  github_slug_from_url "$url"
+}
+
 # RELEASE: how this repo is released, if it is at all.
 #
 #   release:

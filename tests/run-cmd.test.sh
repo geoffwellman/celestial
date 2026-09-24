@@ -549,3 +549,59 @@ test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {
     && { echo "a worktree registration was left behind"; return 1; }
   rm -rf "$T"
 }
+
+# CEL-67: the workspace's name for a repo is a nickname, not a GitHub slug.
+# `gh pr view --repo celestial` failed every reviewer launch; the PR is read
+# from the repo's declared GitHub identity instead.
+test_reviewer_asks_github_by_slug_not_local_name() {
+  _ws_pr_fixture
+  sed -i 's#git@github.com:someone/widget.git#git@github.com:acme/widget-gh.git#' "$T/workspace.yaml"
+  GH_LOG="$T/gh.log"; : > "$GH_LOG"
+  gh() {
+    printf '%s\n' "$*" >> "$GH_LOG"
+    case "$*" in
+      *"pr view 12 --repo acme/widget-gh "*) jq -n --arg h "$HEAD_SHA" '{headRefOid:$h, baseRefName:"main"}' ;;
+      *) return 1 ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_contains "$(cat "$GH_LOG")" "--repo acme/widget-gh"
+  assert_eq "$(git -C "$(reviewers_find widget 12 | jq -r .checkout)" rev-parse HEAD)" "$HEAD_SHA"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
+test_github_slug_from_url_handles_ssh_and_https() {
+  assert_eq "$(github_slug_from_url git@github.com:o/r.git)" "o/r"
+  assert_eq "$(github_slug_from_url https://github.com/o/r.git)" "o/r"
+  assert_eq "$(github_slug_from_url https://github.com/o/r)" "o/r"
+  assert_eq "$(github_slug_from_url ssh://git@github.com/o/r.git)" "o/r"
+  assert_fails github_slug_from_url https://gitlab.com/o/r.git
+  assert_fails github_slug_from_url /tmp/local/origin
+}
+
+# Sourcery on #88: the host must BE github.com, not contain it.
+test_github_slug_from_url_refuses_lookalike_hosts() {
+  assert_fails github_slug_from_url git@evilgithub.com:acme/repo.git
+  assert_fails github_slug_from_url https://evilgithub.com/acme/repo.git
+  assert_fails github_slug_from_url https://evil.github.com/o/r
+  assert_fails github_slug_from_url git@evil.github.com:o/r.git
+  assert_fails github_slug_from_url https://gitlab.com/github.com/o/r
+  assert_fails github_slug_from_url https://gitlab.com/x/github.com:o/r
+  assert_fails github_slug_from_url https://github.com.evil.com/o/r
+  assert_fails github_slug_from_url https://github.com/o/r/extra
+}
+
+# No declared url: the checkout's origin remote is the identity; a
+# non-GitHub origin fails closed with the existing error.
+test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
+  _ws_pr_fixture
+  sed -i '/url: git@github.com/d' "$T/workspace.yaml"
+  git -C "$T/repos/widget" remote set-url origin https://github.com/acme/from-origin.git
+  assert_eq "$(ws_repo_github_slug "$T" widget "$T/repos/widget")" "acme/from-origin"
+  git -C "$T/repos/widget" remote set-url origin "$ORIGIN"
+  assert_fails ws_repo_github_slug "$T" widget "$T/repos/widget"
+  local out; out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" && { echo "launched without a slug"; return 1; }
+  assert_contains "$out" "cannot read widget#12 from GitHub"
+  rm -rf "$T"
+}

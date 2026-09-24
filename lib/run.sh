@@ -239,8 +239,9 @@ reviewer_checkout_path() { # <repo> <pr>
 # What GitHub says this PR is, asked once at launch: the head we are about to
 # check out and the base branch the diff is against. Both travel into the
 # brief, because a review whose "main" is a directory is not a review.
-_run_reviewer_pr_facts() { # <repodir> <repo> <pr> -> head<TAB>base
+_run_reviewer_pr_facts() { # <repodir> <slug> <pr> -> head<TAB>base
   local out
+  [ -n "$2" ] || return 1
   out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
   printf '%s' "$out" | jq -re '[.headRefOid, .baseRefName] | @tsv' 2>/dev/null
 }
@@ -707,8 +708,9 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       if [ "$dry_run" -eq 0 ]; then
         have gh || die "cel run reviewer: gh is not on PATH - the PR's head cannot be resolved"
         have jq || die "cel run reviewer: jq is not on PATH"
-        local facts
-        facts="$(_run_reviewer_pr_facts "$repodir" "$repo" "$pr")" \
+        local facts slug
+        slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir")" || slug=""
+        facts="$(_run_reviewer_pr_facts "$repodir" "$slug" "$pr")" \
           || die "cel run reviewer: cannot read $repo#$pr from GitHub - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
         IFS=$'\t' read -r review_head review_base <<< "$facts"
         [ -n "$review_head" ] \
