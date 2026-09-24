@@ -35,9 +35,40 @@ function wsArgs(): string[] {
 }
 
 let watcher = null;
+// CEL-76: wake an idle orchestrator (nobody at the keyboard) for new mail.
+// Coalesced: one timer per burst, and no second wake until agent_end.
+let api = null;
+let wakeTimer = null;
+let waking = false;
+
+function scheduleWake(ctx): void {
+  if (wakeTimer || waking || !api) return;
+  const ms = Number(process.env.CEL_INBOX_WAKE_MS ?? 3000);
+  wakeTimer = setTimeout(() => { wakeTimer = null; tryWake(ctx); }, ms);
+  try { wakeTimer.unref(); } catch {}
+}
+
+function tryWake(ctx): void {
+  if (waking || !api) return;
+  try {
+    if (!ctx || typeof ctx.isIdle !== "function" || !ctx.isIdle()) return;
+    const draft = ctx.ui && typeof ctx.ui.getEditorText === "function" ? ctx.ui.getEditorText() : null;
+    if (typeof draft !== "string" || draft.trim() !== "") return;
+    const mail = drain(ctx); // advances the cursor: before_agent_start won't see it again
+    if (!mail) return;
+    waking = true;
+    const r = api.sendMessage({
+      customType: "cel-inbox", display: true,
+      content: "New messages in your celestial inbox (delivered once, woke you while idle):\n" + mail +
+        "\nAct on them, or say why not.",
+    }, { triggerTurn: true });
+    if (r && typeof r.catch === "function") r.catch(() => { waking = false; });
+  } catch { /* fail open: notify already happened */ }
+}
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }
 
 function stopWatcher(): void {
+  if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
   const w = watcher; watcher = null;
   if (!w || !w.pid) return;
   try { process.kill(-w.pid, "SIGTERM"); } catch { try { w.kill("SIGTERM"); } catch {} }
@@ -64,6 +95,7 @@ function startWatcher(ctx): void {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
         if (!line) continue;
         try { ctx && ctx.ui && ctx.ui.notify(line, /INBOX (escalation|decision|blocked) /.test(line) ? "warning" : "info"); } catch {}
+        scheduleWake(ctx);
       }
     });
     watcher = w;
@@ -81,6 +113,8 @@ function drain(ctx): string {
 
 export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
+  api = pi;
+  pi.on("agent_end", () => { waking = false; });
   pi.on("session_start", (_e, ctx) => { startWatcher(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
     const mail = drain(ctx);
