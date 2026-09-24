@@ -169,10 +169,20 @@ ws_repo_get() {
 # `owner/name` from a GitHub remote url - SSH (git@github.com:o/r.git,
 # ssh://git@github.com/o/r) or HTTPS. Fails on anything that is not GitHub,
 # so a caller that needs `gh --repo` refuses rather than guesses.
-github_slug_from_url() { # <url> -> owner/name
+github_slug_from_url() { # <url> [ssh-alias-host] -> owner/name
   # The host is matched EXACTLY, anchored at the start: a substring match
   # turned git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
-  local s
+  # A workspace's declared `github.ssh_host` (CEL-70) is github.com under an
+  # ~/.ssh/config alias, so `git@<alias>:o/r` is accepted - that exact host
+  # only, passed by the caller that read the declaration. Never a pattern:
+  # `github-*` would let any lookalike alias name a GitHub slug.
+  local s alias="${2:-}"
+  if [ -n "$alias" ] && [ "${1#git@"$alias":}" != "$1" ]; then
+    s="${1#git@"$alias":}"
+    s="${s%.git}"
+    [[ "$s" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+    printf '%s' "$s"; return 0
+  fi
   case "$1" in
     git@github.com:*)         s="${1#git@github.com:}" ;;
     ssh://git@github.com/*)   s="${1#ssh://git@github.com/}" ;;
@@ -189,10 +199,88 @@ github_slug_from_url() { # <url> -> owner/name
 ws_repo_github_slug() { # <wsdir> <repo> [repodir] -> owner/name
   local url
   url="$(ws_repo_get "$1" "$2" url)"
-  if [ -n "$url" ] && github_slug_from_url "$url"; then return 0; fi
+  local alias; alias="$(ws_github_ssh_host "$1")"
+  if [ -n "$url" ] && github_slug_from_url "$url" "$alias"; then return 0; fi
   [ -n "${3:-}" ] || return 1
   url="$(git -C "$3" remote get-url origin 2>/dev/null)" || return 1
-  github_slug_from_url "$url"
+  github_slug_from_url "$url" "$alias"
+}
+
+# THE WORKSPACE'S GITHUB ACCOUNT (CEL-70).
+#
+#   github:
+#     user: acct-b              # the gh account this workspace acts as
+#     ssh_host: github-acct-b   # optional ~/.ssh/config Host alias with its key
+#
+# gh keeps several accounts per host but only ONE is active, box-wide, in
+# ~/.config/gh/hosts.yml. `gh auth switch` for one workspace would silently
+# re-identify every orchestrator, worker, steward sweep and land in every
+# other workspace, so nothing here ever switches: the override is GH_TOKEN,
+# which beats hosts.yml for one process only. Absent block = today exactly.
+ws_github_user()     { _wsy "$1" '.github.user'; }
+ws_github_ssh_host() { _wsy "$1" '.github.ssh_host'; }
+
+# The one fix text, so the refusal at launch, at a plane call and in doctor
+# all tell the human the same two commands.
+ws_github_fix() { # <user>
+  printf "gh account '%s' is not logged in on this box - run: gh auth login (as %s), then check with: gh auth status" "$1" "$1"
+}
+
+# Is the declared account usable? True with no block. The token goes to
+# /dev/null: this answers yes/no and never holds the value.
+ws_github_ready() { # <wsdir> [gh-binary]
+  local user; user="$(ws_github_user "$1")"
+  [ -n "$user" ] || return 0
+  "${2:-gh}" auth token --user "$user" >/dev/null 2>&1
+}
+
+# Every gh call the plane makes ON BEHALF OF a workspace goes through here.
+# GH_TOKEN is set for this one invocation - never exported, never written, so
+# the next workspace in the same steward tick starts clean. FAIL CLOSED: a
+# declared account that cannot produce a token refuses the call rather than
+# falling back to the active account, because acting as the wrong identity is
+# the whole bug. The binary is overridable (`CEL_WS_GH_BIN`) for callers that
+# already route gh through a stub, like cel-fanout's CEL_FANOUT_GH.
+ws_gh() { # <wsdir> <gh args...>
+  local wsdir="$1"; shift
+  local bin="${CEL_WS_GH_BIN:-gh}" user tok
+  user="$(ws_github_user "$wsdir")"
+  if [ -z "$user" ]; then "$bin" "$@"; return; fi
+  tok="$("$bin" auth token --user "$user" 2>/dev/null)" || tok=""
+  if [ -z "$tok" ]; then
+    printf '%s refused: %s\n' "gh $*" "$(ws_github_fix "$user")" >&2
+    return 1
+  fi
+  GH_TOKEN="$tok" "$bin" "$@"
+}
+
+# The line a pane evaluates for itself: a command substitution, typed, so the
+# token is produced by gh inside the pane and never passes through cel, a
+# launch line, a log or scrollback (the OMP_GATEWAY_TOKEN pattern in
+# lib/run.sh). If the pane's gh cannot produce it, the value is a marker gh
+# will reject - an empty GH_TOKEN would quietly mean "the active account".
+ws_github_env_word() { # <wsdir> -> `GH_TOKEN="$(...)"` or nothing
+  local user; user="$(ws_github_user "$1")"
+  [ -n "$user" ] || return 0
+  printf 'GH_TOKEN="$(gh auth token --user %q || echo cel-refused-%q-not-logged-in)"' "$user" "$user"
+}
+
+# Where git should reach a repo: the canonical url, rewritten onto the SSH
+# alias when the workspace declares one. workspace.yaml keeps github.com.
+ws_github_clone_url() { # <wsdir> <url>
+  local host url="$2"; host="$(ws_github_ssh_host "$1")"
+  case "$url" in
+    git@github.com:*) [ -z "$host" ] || url="git@$host:${url#git@github.com:}" ;;
+  esac
+  printf '%s' "$url"
+}
+
+# The workspace a checkout belongs to. A herdr worktree lives OUTSIDE its
+# workspace (~/.herdr/worktrees/...), so ws_current finds nothing from it - but
+# its common git dir is the workspace's repos/<r>/.git, which does.
+ws_of_checkout() { # <dir> -> wsdir, or fail
+  local c; c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  ws_current "$(dirname "$c")"
 }
 
 # RELEASE: how this repo is released, if it is at all.

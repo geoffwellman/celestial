@@ -115,6 +115,11 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   # A runtime whose role is injected as a prompt argument has no file to name;
   # the other two still say whose the process is.
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
+  # ...and, for a workspace with `github.user`, the account it acts as: the
+  # token is a substitution the PANE evaluates (lib/workspace.sh), never a value.
+  local ghw=""
+  [ ! -f "$wsdir/workspace.yaml" ] || ghw="$(ws_github_env_word "$wsdir")"
+  [ -z "$ghw" ] || out="$out $ghw"
   printf '%s ' "$out"
 }
 
@@ -248,10 +253,14 @@ reviewer_checkout_path() { # <repo> <pr>
 # What GitHub says this PR is, asked once at launch: the head we are about to
 # check out and the base branch the diff is against. Both travel into the
 # brief, because a review whose "main" is a directory is not a review.
-_run_reviewer_pr_facts() { # <repodir> <slug> <pr> -> head<TAB>base
+_run_reviewer_pr_facts() { # <repodir> <slug> <pr> [wsdir] -> head<TAB>base
   local out
   [ -n "$2" ] || return 1
-  out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
+  if [ -n "${4:-}" ]; then
+    out="$(ws_gh "$4" pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
+  else
+    out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
+  fi
   printf '%s' "$out" | jq -re '[.headRefOid, .baseRefName] | @tsv' 2>/dev/null
 }
 
@@ -642,6 +651,13 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     wsdir="$(ws_current)" || die "cel run: not inside a workspace (cd into one, or pass --workspace <name>)"
   fi
 
+  # FAIL CLOSED ON IDENTITY (CEL-70). A pane whose declared GitHub account
+  # cannot produce a token would act as whichever account is active - the
+  # exact mistake the github: block exists to prevent. Dry runs too: a
+  # preview of a launch that would refuse must not look like a success.
+  ws_github_ready "$wsdir" \
+    || die "cel run: refusing to launch for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+
   # --repo is required for every mode but root, unless there is exactly one
   # thing to default to. For an orchestrator that thing is a PRODUCT: a
   # workspace of two repos in one declared product has one orchestrator, and
@@ -720,7 +736,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
         have jq || die "cel run reviewer: jq is not on PATH"
         local facts slug
         slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir")" || slug=""
-        facts="$(_run_reviewer_pr_facts "$repodir" "$slug" "$pr")" \
+        facts="$(_run_reviewer_pr_facts "$repodir" "$slug" "$pr" "$wsdir")" \
           || die "cel run reviewer: cannot read $repo#$pr from GitHub - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
         IFS=$'\t' read -r review_head review_base <<< "$facts"
         [ -n "$review_head" ] \

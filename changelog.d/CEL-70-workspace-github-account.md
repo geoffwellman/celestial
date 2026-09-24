@@ -1,0 +1,1 @@
+- A workspace can act as its own GitHub account: `github: {user, ssh_host}` in workspace.yaml gives its panes and every workspace-scoped plane `gh` call that account via a per-process `GH_TOKEN` (never `gh auth switch`), refuses when the account is not logged in, clones over the SSH alias, and is checked by `cel doctor` (CEL-70).

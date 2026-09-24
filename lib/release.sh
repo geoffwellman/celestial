@@ -66,7 +66,7 @@ _release_current() { # <wsdir> <repo> <slug>
     return 0
   fi
   have gh || return 0
-  tag="$(gh api "repos/$3/tags" --jq '.[0].name' 2>/dev/null)" || tag=""
+  tag="$(ws_gh "$1" api "repos/$3/tags" --jq '.[0].name' 2>/dev/null)" || tag=""
   [ -n "$tag" ] || return 0
   # strip whatever the declared tag shape puts in front of the version, so
   # `v0.2.0` and `release-0.2.0` both compare as versions
@@ -101,12 +101,19 @@ _release_check_value() { # <wsdir> <repo> <slug> <value>
   die "cel release: $2 accepts $(printf '%s' "$accepts" | sed 's/ /, /g') - '$4' is none of them"
 }
 
+# Every release call acts for the workspace that owns the repo (CEL-70):
+# ws_gh gives it that workspace's `github.user`, or today's call without one.
+_release_gh() { # <wsdir-or-empty> <gh args...>
+  local w="$1"; shift
+  if [ -n "$w" ]; then ws_gh "$w" "$@"; else gh "$@"; fi
+}
+
 # THE REFUSAL THIS FILE EXISTS FOR. `gh` answers who you are on that repo, so
 # a 403 is never the way a user finds out they cannot release someone else's
 # product.
-_release_check_permission() { # <slug> <product>
+_release_check_permission() { # <slug> <product> [wsdir]
   local perm
-  perm="$(gh repo view "$1" --json viewerPermission --jq '.viewerPermission' 2>/dev/null)" || perm=""
+  perm="$(_release_gh "${3:-}" repo view "$1" --json viewerPermission --jq '.viewerPermission' 2>/dev/null)" || perm=""
   case "$perm" in
     WRITE|MAINTAIN|ADMIN) return 0 ;;
   esac
@@ -159,8 +166,8 @@ _release_dry_run() { # <wsdir> <repo> <slug> <product> <value>
 # Tail the run to its conclusion and say what came out of it, because "the run
 # is queued" is not an answer anybody can act on.
 _release_follow() { # <wsdir> <repo> <slug> <run-id>
-  gh run watch "$4" --repo "$3" --exit-status >/dev/null 2>&1 || c_warn "the run did not finish green"
-  local rel; rel="$(gh release list --repo "$3" --limit 1 --json tagName,url \
+  ws_gh "$1" run watch "$4" --repo "$3" --exit-status >/dev/null 2>&1 || c_warn "the run did not finish green"
+  local rel; rel="$(ws_gh "$1" release list --repo "$3" --limit 1 --json tagName,url \
     --jq '.[0] | "\(.tagName) \(.url)"' 2>/dev/null)" || rel=""
   if [ -n "$rel" ]; then printf '  released  %s\n' "$rel"; else printf '  no GitHub Release was published by that run\n'; fi
 }
@@ -168,10 +175,10 @@ _release_follow() { # <wsdir> <repo> <slug> <run-id>
 _release_dispatch() { # <wsdir> <repo> <slug> <product> <value> <follow>
   local wf input run id url
   wf="$(ws_repo_release "$1" "$2" workflow)"; input="$(ws_repo_release "$1" "$2" input)"
-  gh workflow run "$wf" --repo "$3" -f "$input=$5" \
+  ws_gh "$1" workflow run "$wf" --repo "$3" -f "$input=$5" \
     || die "cel release: could not dispatch $wf in $3"
   c_ok "dispatched $wf in $3 with $input=$5"
-  run="$(gh run list --workflow "$wf" --repo "$3" --limit 1 --json databaseId,url \
+  run="$(ws_gh "$1" run list --workflow "$wf" --repo "$3" --limit 1 --json databaseId,url \
     --jq '.[0] | "\(.databaseId) \(.url)"' 2>/dev/null)" || run=""
   id="${run%% *}"; url="${run#* }"
   if [ -n "$run" ]; then printf '  %s\n' "$url"; else
@@ -195,10 +202,10 @@ _release_status_rows() { # <wsdir> [product] -> one tab-separated row per repo
     slug="$(_release_slug "$wsdir" "$r")"
     cur="$(_release_current "$wsdir" "$r" "$slug")"
     tag="$(_release_tag_for "$wsdir" "$r" "${cur:-0.0.0}")"
-    ahead="$(gh api "repos/$slug/compare/$tag...HEAD" --jq '.ahead_by' 2>/dev/null)" || ahead=""
-    flight="$(gh run list --repo "$slug" --workflow "$(ws_repo_release "$wsdir" "$r" workflow)" \
+    ahead="$(ws_gh "$wsdir" api "repos/$slug/compare/$tag...HEAD" --jq '.ahead_by' 2>/dev/null)" || ahead=""
+    flight="$(ws_gh "$wsdir" run list --repo "$slug" --workflow "$(ws_repo_release "$wsdir" "$r" workflow)" \
       --status in_progress --limit 1 --json url --jq '.[0].url' 2>/dev/null)" || flight=""
-    newest="$(gh release list --repo "$slug" --limit 1 --json tagName,url \
+    newest="$(ws_gh "$wsdir" release list --repo "$slug" --limit 1 --json tagName,url \
       --jq '.[0] | "\(.tagName) \(.url)"' 2>/dev/null)" || newest=""
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(ws_name "$wsdir")" "$(ws_product_of_repo "$wsdir" "$r")" "$r" "$slug" \
@@ -316,7 +323,7 @@ cmd_release() { # <product> <value> [--repo r] [--dry-run] [--follow|--no-follow
   if [ "$dry" -eq 1 ]; then _release_dry_run "$wsdir" "$repo" "$slug" "$product" "$value"; return $?; fi
 
   have gh || die "cel release: gh is required to dispatch the workflow"
-  _release_check_permission "$slug" "$product"
+  _release_check_permission "$slug" "$product" "$wsdir"
   # Following is the useful default where someone is watching; in a script it
   # would just hold the pipeline open.
   [ "$follow" -eq -1 ] && { [ -t 1 ] && follow=1 || follow=0; }
