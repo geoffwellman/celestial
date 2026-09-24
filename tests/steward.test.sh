@@ -244,10 +244,9 @@ exit 0
 SH
   chmod +x "$T/bin/gh" "$T/bin/herdr"
   PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
-  assert_contains "$(cat "$T/prompts")" "bundle-orch"
-  # never the repo's own name: `widget` is a member of `bundle`, so a
-  # widget-orch pane does not exist and nudging it reports a success nobody got
-  assert_eq "$(grep -c widget-orch "$T/prompts" || true)" "0"
+  # CEL-65: mail to the PRODUCT's mailbox, never the member repo's
+  assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all)" "#7"
+  assert_eq "$(cmd_inbox count --for widget-orch --workspace alpha)" "0"
   rm -rf "$T"
 }
 
@@ -1145,7 +1144,8 @@ SH
   local roster
   roster='{"result":{"agents":[{"name":"widget-WG-44-x","agent_status":"idle","pane_id":"w:p2","cwd":"'"$HOME"'/.herdr/worktrees/widget/WG-44-x"},{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
   PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
-  local msg; msg="$(grep 'on widget' "$T/prompts" || true)"
+  # CEL-65: the nudge is mail to the product orchestrator, not a prompt
+  local msg; msg="$(cmd_inbox read --for bundle-orch --workspace alpha --all | grep 'on widget' || true)"
   assert_contains "$msg" 'throttled'
   case "$msg" in
     *"get a worker on it"*|*"nobody on"*) echo "the steward asked for another worker: $msg"; return 1 ;;
