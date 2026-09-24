@@ -362,34 +362,46 @@ _svc_ws_pane() { # <wsdir>
 # old box-level call passed neither, herdr printed its usage, and every box
 # service on this box was unstartable (2026-09-23, `cel gateway install`).
 # `--current` is not the answer either - the steward runs from a systemd timer
-# where there is no current pane - so box services get a tab of their own,
-# found by label and created if absent. That tab is a stable target from any
-# context, and it puts the broker, the gateway and anything else the box runs
-# side by side where an operator can read them.
-_SVC_BOX_TAB_LABEL="cel services"
+# where there is no current pane. Nor is a bare `tab create`: herdr puts that
+# tab in whichever workspace is FOCUSED, and the first fix's smoke test put
+# `cel services` inside the Standout product workspace, where a `cel ws reset`
+# of that product would have killed the gateway. Box services get a dedicated
+# Herdr WORKSPACE labelled `cel services`, looked up by that label and created
+# (unfocused) only when absent. No product lifecycle touches it.
+_SVC_BOX_WS_LABEL="cel services"
 
-# _svc_box_tab_pane answers through globals rather than stdout: when it fails
+# _svc_box_home_pane answers through globals rather than stdout: when it fails
 # the caller wants herdr's own words, and a message printed from a command
 # substitution is a message lost.
 _SVC_TAB_PANE=""
 _SVC_TAB_ERR=""
 
-_svc_box_tab_pane() { # <cwd> -> 0 and _SVC_TAB_PANE, or 1 and _SVC_TAB_ERR
-  local cwd="$1" tab pane resp
+_svc_box_home_pane() { # <cwd> -> 0 and _SVC_TAB_PANE, or 1 and _SVC_TAB_ERR
+  local cwd="$1" ws pane resp
   _SVC_TAB_PANE=""; _SVC_TAB_ERR=""
-  tab="$("$_SERVICES_HERDR" tab list 2>/dev/null \
-    | jq -r --arg l "$_SVC_BOX_TAB_LABEL" '[.result.tabs[]? | select(.label == $l)][0].tab_id // empty' 2>/dev/null || true)"
-  if [ -n "$tab" ]; then
-    # The last pane in the tab: services stack down the tab in the order they
-    # were started, so the newest one is the one with room beneath it.
-    pane="$("$_SERVICES_HERDR" pane list 2>/dev/null \
-      | jq -r --arg t "$tab" '[.result.panes[]? | select(.tab_id == $t)] | last | .pane_id // empty' 2>/dev/null || true)"
-    [ -n "$pane" ] && { _SVC_TAB_PANE="$pane"; return 0; }
+  if ! resp="$("$_SERVICES_HERDR" workspace list 2>&1)"; then
+    _SVC_TAB_ERR="workspace list failed: $(printf '%s' "$resp" | tr '\n' ' ')"
+    return 1
   fi
-  resp="$("$_SERVICES_HERDR" tab create --label "$_SVC_BOX_TAB_LABEL" --cwd "$cwd" --no-focus 2>&1 || true)"
+  ws="$(printf '%s' "$resp" | jq -r --arg l "$_SVC_BOX_WS_LABEL" \
+    '[.result.workspaces[]? | select(.label == $l)][0].workspace_id // empty' 2>/dev/null || true)"
+  if [ -n "$ws" ]; then
+    # The last pane in the workspace: services stack down in the order they
+    # were started, so the newest one is the one with room beneath it.
+    if ! resp="$("$_SERVICES_HERDR" pane list --workspace "$ws" 2>&1)"; then
+      _SVC_TAB_ERR="pane list --workspace $ws failed: $(printf '%s' "$resp" | tr '\n' ' ')"
+      return 1
+    fi
+    pane="$(printf '%s' "$resp" | jq -r --arg w "$ws" \
+      '[.result.panes[]? | select((.workspace_id // $w) == $w)] | last | .pane_id // empty' 2>/dev/null || true)"
+    [ -n "$pane" ] && { _SVC_TAB_PANE="$pane"; return 0; }
+    _SVC_TAB_ERR="workspace '$_SVC_BOX_WS_LABEL' ($ws) has no pane to split from"
+    return 1
+  fi
+  resp="$("$_SERVICES_HERDR" workspace create --label "$_SVC_BOX_WS_LABEL" --cwd "$cwd" --no-focus 2>&1 || true)"
   pane="$(printf '%s' "$resp" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)"
   if [ -z "$pane" ]; then
-    _SVC_TAB_ERR="$(printf '%s' "$resp" | tr '\n' ' ')"
+    _SVC_TAB_ERR="workspace create failed: $(printf '%s' "$resp" | tr '\n' ' ')"
     return 1
   fi
   _SVC_TAB_PANE="$pane"
@@ -437,11 +449,11 @@ svc_start() { # [wsdir] <name>
   done < <(printf '%s' "$e" | jq -r '.env // {} | keys[]' 2>/dev/null || true)
 
   # EVERY split names a direction and a target. A workspace service sits under
-  # its workspace's pane; everything else goes to the box's services tab.
+  # its workspace's pane; everything else goes to the box's `cel services` workspace.
   local target=""
   [ -n "$d" ] && target="$(_svc_ws_pane "$d")"
   if [ -z "$target" ]; then
-    _svc_box_tab_pane "$cwd" || true
+    _svc_box_home_pane "$cwd" || true
     target="$_SVC_TAB_PANE"
   fi
   [ -n "$target" ] || {
