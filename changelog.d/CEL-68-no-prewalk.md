@@ -1,1 +1,1 @@
-- OMP root/orchestrator launches pass `--no-prewalk` so they stay on their configured model (CEL-68).
+- Every OMP launch Celestial makes (root, orchestrator, worker, scout, reviewer, direct, and `cel-fanout delegate`/`scout`) passes `--no-prewalk`, so a pane stays on the model its profile named instead of switching to `smol` after its first edit (CEL-68).
