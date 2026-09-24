@@ -341,14 +341,45 @@ _ledger_write() ( # <wsdir> <json>
 # for 178 delegations.
 _ledger_append() { # <wsdir> <entry-json>
   local cur; cur="$(_ledger_read "$1")"
-  _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" \
-    'map(select(.id != $e.id)) + [$e]')"
+  # The row is born in a state, and that is a transition like any other: a
+  # history that began at the FIRST collect could not say when the work
+  # started, so the first entry is stamped here, at `created`, rather than
+  # left for the reader to synthesise.
+  _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" --arg by "$(_ledger_mover)" \
+    'map(select(.id != $e.id))
+     + [$e + {history: (($e.history // []) | if length > 0 then .
+         else [{state: ($e.state // ""), at: ($e.created // ""), by: $by}] end)}]')"
 }
 
+# WHO MOVED IT. `guard_role_of` answers from the cwd - orchestrator, worker,
+# console, root - and a worker also has a name, so the alias is carried beside
+# the role when the caller has one. "what happened to ABC-49" is only half an
+# answer if it does not say who did it.
+_ledger_mover() {
+  local role alias="" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}" rest repo branch
+  role="$(guard_role_of "$PWD")"
+  if [ "${PWD#"$wt/"}" != "$PWD" ]; then
+    rest="${PWD#"$wt/"}"; repo="${rest%%/*}"; rest="${rest#"$repo"}"; rest="${rest#/}"
+    branch="${rest%%/*}"
+    [ -n "$repo" ] && [ -n "$branch" ] && alias="$repo-$branch"
+  fi
+  [ -n "${CEL_LEDGER_BY:-}" ] && { printf '%s' "$CEL_LEDGER_BY"; return 0; }
+  if [ -n "$alias" ]; then printf '%s:%s' "$role" "$alias"; else printf '%s' "$role"; fi
+}
+
+# EVERY state transition goes through here, and nothing writes `.state`
+# directly: a writer that set the field itself left no trace, and half a work
+# item's life - collected, landed, released - was unrecorded, so no timeline
+# could draw it. `landed_at` and `released_at` are READ from this array and
+# never stored twice.
 _ledger_update_state() { # <wsdir> <id> <state>
   local cur; cur="$(_ledger_read "$1")"
   _ledger_write "$1" "$(printf '%s' "$cur" | jq --arg id "$2" --arg s "$3" \
-    'map(if .id == $id then .state = $s else . end)')"
+    --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" \
+    'map(if .id == $id
+         then .state = $s
+            | .history = ((.history // []) + [{state: $s, at: $at, by: $by}])
+         else . end)')"
 }
 
 # How many commits the worker carries beyond the verified remote default.

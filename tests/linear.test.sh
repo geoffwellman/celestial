@@ -84,7 +84,7 @@ cat <<'JSON'
   {"name":"In Progress","position":1,"type":"started"},
   {"name":"Done","position":2,"type":"completed"}]},
  "issues":{"nodes":[
-  {"identifier":"ABC-49","title":"ship the gadget bundle","url":"https://linear.invalid/ABC-49","updatedAt":"2026-09-20T10:00:00Z","state":{"name":"In Progress"},"assignee":{"name":"Sam"}},
+  {"identifier":"ABC-49","title":"ship the gadget bundle","url":"https://linear.invalid/ABC-49","createdAt":"2026-09-18T08:00:00Z","updatedAt":"2026-09-20T10:00:00Z","state":{"name":"In Progress"},"assignee":{"name":"Sam"}},
   {"identifier":"ABC-48","title":"the kerning is wrong","url":"https://linear.invalid/ABC-48","updatedAt":"2026-09-20T09:00:00Z","state":{"name":"Todo"},"assignee":null}]}}]}}}
 JSON
 EOF
@@ -116,6 +116,8 @@ test_linear_board_json_is_one_object_per_line() {
   assert_eq "$(printf '%s\n' "$out" | head -1 | jq -r '.identifier')" ABC-48
   assert_eq "$(printf '%s\n' "$out" | head -1 | jq -r '.state')" Todo
   assert_contains "$(printf '%s\n' "$out" | tail -1)" 'https://linear.invalid/ABC-49'
+  # the creation stamp rides along, so the work item can say when the ticket was made
+  assert_eq "$(printf '%s\n' "$out" | tail -1 | jq -r '.createdAt')" 2026-09-18T08:00:00Z
   rm -rf "$T"
 }
 
