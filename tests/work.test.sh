@@ -433,3 +433,17 @@ test_a_failed_first_read_is_not_cached_as_empty() {
   assert_contains "$(cat "$CEL_CACHE/work-alpha.json")" '"prs":[{'
   rm -rf "$T"
 }
+# CEL-79 review: a zero exit is not proof of a good read. gh answering with
+# no output or broken JSON is a failure too, and must not overwrite the cache.
+test_an_unusable_successful_read_keeps_the_previous_cache() {
+  _work_setup; _two_items
+  work_items "$T" >/dev/null
+  local before; before="$(cat "$CEL_CACHE/work-alpha.json")"
+  printf '[{"number":' > "$T/broken.json"
+  STUB_PRS="$T/broken.json" work_items "$T" --fresh >/dev/null
+  assert_eq "$(cat "$CEL_CACHE/work-alpha.json")" "$before"
+  : > "$T/empty.json"
+  STUB_PRS="$T/empty.json" work_items "$T" --fresh >/dev/null
+  assert_eq "$(cat "$CEL_CACHE/work-alpha.json")" "$before"
+  rm -rf "$T"
+}

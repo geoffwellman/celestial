@@ -215,3 +215,10 @@ test_doctor_ssh_alias_is_not_satisfied_by_a_wildcard_pattern() {
   assert_fails _doctor_ssh_run
   rm -rf "$T"
 }
+# ssh matches Host patterns case-insensitively, and so does this check.
+test_doctor_ssh_alias_matches_regardless_of_case() {
+  _doctor_ssh_fixture $'host GH.Acct-B\n  HostName github.com'
+  local rc=0; _doctor_ssh_run >/dev/null || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$T"
+}
