@@ -49,6 +49,7 @@ gateway_state_dir() { printf '%s' "${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/g
 gateway_config_file() { printf '%s/config.yaml' "$(gateway_state_dir)"; }
 gateway_auth_dir()   { printf '%s/auth' "$(gateway_state_dir)"; }
 _gateway_key_file()  { printf '%s/api-key' "$(gateway_state_dir)"; }
+_gateway_mgmt_key_file() { printf '%s/management-key' "$(gateway_state_dir)"; }
 
 # The port, from the box config, with CLIProxyAPI's default. `gateway_port`
 # is the key CEL-60 writes; `gateway.gateway_port` is what CEL-28 wrote and is
@@ -80,6 +81,28 @@ _gateway_api_key() {
     ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
   fi
   tr -d '\r\n' < "$f"
+}
+
+# The management secret, minted once like the api-key and for the same reason:
+# a panel already open in a browser holds it. 0600 in the gateway's own state
+# dir, never printed and never in a repo.
+_gateway_mgmt_key() {
+  local f; f="$(_gateway_mgmt_key_file)"
+  if [ ! -s "$f" ]; then
+    mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
+  fi
+  chmod 600 "$f" 2>/dev/null || true
+  tr -d '\r\n' < "$f"
+}
+
+# The web panel CLIProxyAPI serves, and how to reach it from somewhere that is
+# not this box. It is loopback only: the tunnel is the way in, never a
+# tailnet bind.
+gateway_panel_url() { printf '%s/management.html' "$(gateway_url)"; }
+gateway_panel_ssh() {
+  local p; p="$(gateway_port)"
+  printf 'ssh -L %s:127.0.0.1:%s %s' "$p" "$p" "$(hostname -s 2>/dev/null || hostname)"
 }
 
 # TEST SEAM, kept from CEL-28 because lib/quota.sh and lib/profiles.sh have
@@ -229,9 +252,16 @@ routing:
   session-affinity: true
   session-affinity-ttl: 1h
 
-# There is deliberately no remote-management block. The management API is the
-# off-box control surface for exactly the vault this file protects; leaving it
-# out is the only setting that cannot be got wrong later.
+# THE MANAGEMENT API, LOOPBACK ONLY (CEL-80). CEL-60 left this block out, and
+# the web panel at /management.html could then read and change nothing. Keys
+# checked against CLIProxyAPI 7.3.14's config struct. allow-remote: false is
+# what keeps it on this machine - the panel is reached over an ssh tunnel
+# (cel gateway panel), never on the tailnet. CLIProxyAPI hashes a plaintext
+# secret-key in place on load; the plaintext stays in the 0600 key file.
+remote-management:
+  allow-remote: false
+  secret-key: "$(_gateway_mgmt_key)"
+  disable-control-panel: false
 EOS
   } > "$tmp"
   chmod 600 "$tmp"
@@ -383,6 +413,8 @@ cel gateway - several subscriptions behind one loopback door
   cel gateway login <provider>       sign another subscription in
                                      --no-browser: device flow, headless box
   cel gateway logout <provider> <id> drop one account from the vault
+  cel gateway panel [--json]         the web panel's loopback URL, and the
+                                     ssh tunnel that reaches it from a laptop
 EOS
 }
 
@@ -493,6 +525,17 @@ cmd_gateway() {
         case "$(basename "$f")" in "$p-$id"*) rm -f "$f"; found=1; c_ok "dropped $(basename "$f" .json)" ;; esac
       done
       [ "$found" = 1 ] || die "cel gateway logout: no $p account whose id starts '$id'" ;;
+    panel)
+      # The URL and the tunnel, never the key: the key is typed into the
+      # panel from the 0600 file, by someone already on the box.
+      if [ "${1:-}" = --json ]; then
+        jq -nc --arg u "$(gateway_panel_url)" --arg s "$(gateway_panel_ssh)" \
+          --arg k "$(_gateway_mgmt_key_file)" '{url: $u, ssh: $s, key_file: $k}'
+      else
+        printf '  panel    %s\n' "$(gateway_panel_url)"
+        printf '  laptop   %s   then open the URL above\n' "$(gateway_panel_ssh)"
+        printf '  key      in %s (0600) - never on the tailnet\n' "$(_gateway_mgmt_key_file)"
+      fi ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;
   esac
