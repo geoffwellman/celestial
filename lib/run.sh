@@ -662,18 +662,37 @@ run_sessions_note_roster() { # <agents-json>
   return 0
 }
 
-# The live agent for a root/orchestrator: by herdr name, else by cwd and
-# runtime (herdr has cleared names on restart before). A missing session is
-# `-` so tab-splitting under `read` keeps its columns.
-_run_orch_agent() { # <name> <cwd> <runtime> -> name<TAB>pane<TAB>status<TAB>session
-  local roster
-  roster="$(herdr agent list 2>/dev/null)" || return 0
-  printf '%s' "$roster" | jq -r --arg n "$1" --arg c "$2" --arg r "$3" '
+# The live agent for a root/orchestrator, BY HERDR NAME. The owner's
+# hand-written restart script chose by cwd and took the FIRST omp in the
+# celestial checkout: that was another session in another pane, which it
+# relaunched as `celestial-orch` with the inbox hook while the real
+# orchestrator lost its name. So cwd+runtime is a fallback ONLY when exactly
+# one agent there matches; several is an ambiguity the operator settles with
+# --pane. A missing name or session is `-` so tab-splitting keeps columns.
+#
+# Status: 0 found (one row), 1 none, 3 ambiguous (every candidate row),
+# 4 the named --pane holds an agent under ANOTHER name (that row) - which is
+# never relaunched: that pane is not this orchestrator.
+_run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<TAB>session
+  local roster rows n
+  roster="$(herdr agent list 2>/dev/null)" || return 1
+  rows="$(printf '%s' "$roster" | jq -r --arg n "$1" --arg c "$2" --arg r "$3" --arg p "${4:-}" '
+    def row: [((.name // "") | if . == "" then "-" else . end), .pane_id,
+              (.agent_status // "unknown"),
+              ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv;
     [.result.agents[]? | select((.pane_id // "") != "")] as $a
-    | (([$a[] | select(.name == $n)] + [$a[] | select((.cwd // "") == $c and (.agent // "") == $r)])[0]) // empty
-    | [((.name // "") | if . == "" then "-" else . end), .pane_id,
-       (.agent_status // "unknown"),
-       ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null || true
+    | if $p != "" then ($a[] | select(.pane_id == $p) | row)
+      elif ([$a[] | select(.name == $n)] | length) > 0 then ([$a[] | select(.name == $n)][0] | row)
+      else ($a[] | select((.cwd // "") == $c and (.agent // "") == $r) | row) end' 2>/dev/null)" || rows=""
+  [ -n "$rows" ] || return 1
+  printf '%s\n' "$rows"
+  if [ -n "${4:-}" ]; then
+    n="$(printf '%s' "$rows" | cut -f1)"
+    [ "$n" = "-" ] || [ "$n" = "$1" ] || return 4
+    return 0
+  fi
+  [ "$(printf '%s\n' "$rows" | wc -l)" -eq 1 ] || return 3
+  return 0
 }
 
 _run_proc_root() { printf '%s' "${CEL_PROC_ROOT:-/proc}"; }
@@ -741,10 +760,11 @@ run_launch_missing() { # <expected-argv-file> <actual-argv-file>
   printf '%s' "$out"
 }
 
-_run_restart_wait() { # <name> <cwd> <runtime>: until no agent is live there
+_run_restart_wait() { # <pane>: until no agent is live in it
   local i=0
   while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
-    [ -n "$(_run_orch_agent "$1" "$2" "$3")" ] || return 0
+    herdr agent list 2>/dev/null | jq -e --arg p "$1" \
+      'any(.result.agents[]?; .pane_id == $p)' >/dev/null 2>&1 || return 0
     sleep "${CEL_RESTART_SLEEP:-1}"; i=$((i+1))
   done
   return 1
@@ -776,9 +796,9 @@ _run_restart_confirm() { # <inbox-me> <wsdir> <runtime> <name> <argv...>
   return 0
 }
 
-cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart] [--fresh] [--force]
+cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
-  local restart=0 fresh=0
+  local restart=0 fresh=0 pane_opt=""
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -803,6 +823,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --force)     force=1; shift ;;
       --restart)   restart=1; shift ;;
       --fresh)     fresh=1; shift ;;
+      --pane)      pane_opt="$2"; restart=1; shift 2 ;;
       --agent)     agent=1; shift ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
@@ -1042,7 +1063,25 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   local resume_session="" restart_pane=""
   if [ "$role" = root ] || [ "$role" = orchestrator ]; then
     local live="" lname lpane lstatus lsession
-    if have herdr && have jq; then live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime")"; fi
+    local lrc=1
+    if have herdr && have jq; then
+      live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime" "$pane_opt")" && lrc=0 || lrc=$?
+    fi
+    case "$lrc" in
+      0) ;;
+      3)
+        if [ "$restart" -eq 1 ]; then
+          c_err "cel run $role --restart: no agent is named $agent_name and $(printf '%s\n' "$live" | wc -l | tr -d ' ') $runtime agents share $cwd - refusing to guess which is the orchestrator:" >&2
+          printf '%s\n' "$live" | awk -F '\t' '{ printf "    pane %s  name %s  status %s  session %s\n", $2, $1, $3, $4 }' >&2
+          die "  pass the right one: cel run $role${product:+ --product $product} --workspace $(ws_name "$wsdir") --restart --pane <pane>"
+        fi
+        live="" ;;
+      4)
+        die "cel run $role --restart: pane $pane_opt runs $(printf '%s' "$live" | cut -f1), not $agent_name - it will not be renamed or relaunched" ;;
+      *)
+        [ -z "$pane_opt" ] || die "cel run $role --restart: no agent is live in pane $pane_opt"
+        live="" ;;
+    esac
     if [ -n "$live" ]; then
       IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
       [ "$lsession" != "-" ] || lsession=""
@@ -1138,7 +1177,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     fi
     herdr pane send-keys "$restart_pane" esc ctrl+c ctrl+c >/dev/null 2>&1 \
       || die "cel run $role --restart: could not send the exit keys to pane $restart_pane"
-    _run_restart_wait "$agent_name" "$cwd" "$runtime" \
+    _run_restart_wait "$restart_pane" \
       || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
     [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
     _run_mark_launch "$restart_pane" "$envprefix"
@@ -1230,7 +1269,11 @@ run_stale_orchestrators() {
       fi
       live="$(printf '%s' "$roster" | jq -r --arg n "$name" --arg c "$cwd" '
         [.result.agents[]? | select((.pane_id // "") != "")] as $a
-        | (([$a[] | select(.name == $n)] + [$a[] | select((.cwd // "") == $c)])[0]) // empty
+        | [$a[] | select(.name == $n)] as $byname
+        | [$a[] | select((.cwd // "") == $c)] as $bycwd
+        # by name; cwd only when exactly one agent stands there (CEL-63)
+        | (if ($byname | length) > 0 then $byname[0]
+           elif ($bycwd | length) == 1 then $bycwd[0] else empty end)
         | [((.name // "") | if . == "" then "-" else . end), .pane_id,
            (.agent_status // "unknown"), (.agent // ""),
            ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null)" || live=""
