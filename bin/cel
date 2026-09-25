@@ -57,6 +57,9 @@ cel - the celestial plane
   cel setup [--agents a,b|all]  install tools + agents, link core, install externals
   cel doctor                    diagnose this box (non-zero on problems)
   cel update                    move to the newest release, re-link, re-render
+                                and name orchestrators on an older launch
+                                line; --restart-orchestrators restarts the
+                                idle ones, resumed
                                 --check: what you have not got yet
                                 (exit 1 when behind); --rollback: undo it;
                                 --channel main|release: follow commits or tags
@@ -97,6 +100,12 @@ cel - the celestial plane
                                 inbox and a command line that also takes a
                                 sentence (--render-once to print it and exit)
   cel run [role] [--repo r]     start an agent pane; no role = Direct mode
+  cel run orchestrator|root --restart [--force]
+                                restart it in its own pane on the current
+                                launch line, resuming the session herdr
+                                recorded for it (refuses a working one
+                                unless --force); a plain run over a dead one
+                                resumes its last session, --fresh does not
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes

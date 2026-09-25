@@ -1393,6 +1393,29 @@ _steward_update_check() {
   return 0
 }
 
+# ORCHESTRATORS ON AN OLDER LAUNCH LINE (CEL-63), reported ONCE PER BUILD:
+# the finding only changes when the plane does, so a nudge per tick would be
+# the same sentence every five minutes. The marker holds the build the report
+# was made for; one inbox item per workspace that has a stale one.
+_steward_stale_orchestrators() {
+  # shellcheck source=lib/version.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+  local dir marker build rows ws msg
+  dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; marker="$dir/orch-stale-reported"
+  build="$(cel_build_sha)"
+  [ "$(cat "$marker" 2>/dev/null)" != "$build" ] || return 0
+  rows="$(run_stale_orchestrators)"
+  for ws in $(printf '%s\n' "$rows" | cut -f2 | sort -u); do
+    [ -n "$ws" ] || continue
+    msg="$(printf '%s\n' "$rows" | awk -F '\t' -v w="$ws" '$2 == w {
+      printf "%s%s runs an older launch line (missing: %s) - %s", (n++ ? "; " : ""), $1, $3, $4 }')"
+    c_warn "$msg"
+    _steward_raise "$ws" orch-stale status "steward: after the update to $build, $msg"
+  done
+  mkdir -p "$dir" 2>/dev/null && printf '%s\n' "$build" > "$marker"
+  return 0
+}
+
 # `| sed -n 1p`, NEVER `| head -1`, on anything that can be long. bin/cel runs
 # under `set -euo pipefail`: when `head` closes the pipe after one line the
 # producer takes SIGPIPE, the pipeline's status is 141, and `set -e` ends the
@@ -1493,6 +1516,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_servers
   _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"
+  run_sessions_note_roster "$agents_json"
+  _steward_stale_orchestrators
   c_ok "tick complete"
 }
 

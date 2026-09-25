@@ -611,8 +611,174 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   herdr agent start console --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
 
-cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run]
+# --- resuming root and the orchestrators (CEL-63) --------------------------
+# Restarting an orchestrator to pick up new launch flags used to throw its
+# conversation away: `cel run orchestrator` always started fresh, and the only
+# way to keep context was a hand-written script. And omp's --continue is not
+# a substitute - three omp sessions shared the celestial checkout's cwd and
+# --continue takes the newest, not the orchestrator's. So a resume always
+# names the exact session herdr recorded for the pane.
+
+# The last session seen for each root/orchestrator DIRECTORY - identity here
+# is a directory, not a name (see _run_live_agent_in_cwd) - so an
+# orchestrator that died can be brought back into its own conversation.
+_run_sessions_file() {
+  if [ -n "${CEL_ORCH_SESSIONS:-}" ]; then printf '%s' "$CEL_ORCH_SESSIONS"
+  elif [ -n "${CEL_TESTING:-}" ]; then printf '%s' "${TMPDIR:-/tmp}/cel-orch-sessions.json"
+  else printf '%s' "$HOME/.local/state/cel/orch-sessions.json"; fi
+}
+
+_run_sessions_record() { # <cwd> <session>
+  local f tmp cur
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 0
+  f="$(_run_sessions_file)"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  cur="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cur='{}'
+  [ -n "$cur" ] || cur='{}'
+  tmp="$(mktemp "$f.tmp.XXXXXX" 2>/dev/null)" || return 0
+  if printf '%s' "$cur" | jq -c --arg c "$1" --arg s "$2" '.[$c] = $s' > "$tmp"; then
+    mv -f -- "$tmp" "$f"
+  else
+    rm -f -- "$tmp"
+  fi
+  return 0
+}
+
+_run_sessions_last() { # <cwd> -> session, or nothing
+  jq -r --arg c "$1" '.[$c] // empty' "$(_run_sessions_file)" 2>/dev/null || true
+}
+
+# Remember the session of every live root/orchestrator in a roster. Cheap, so
+# the steward calls it every tick: the record is what makes "resume the last
+# session" possible after the agent is gone.
+run_sessions_note_roster() { # <agents-json>
+  local cwd sess
+  while IFS=$'\t' read -r cwd sess; do
+    [ -n "$cwd" ] && [ -n "$sess" ] && _run_sessions_record "$cwd" "$sess"
+  done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
+    | select((.name // "") | test("(-orch|-root)$"))
+    | select((.agent_session.value // "") != "")
+    | [(.cwd // ""), .agent_session.value] | @tsv' 2>/dev/null)
+  return 0
+}
+
+# The live agent for a root/orchestrator: by herdr name, else by cwd and
+# runtime (herdr has cleared names on restart before). A missing session is
+# `-` so tab-splitting under `read` keeps its columns.
+_run_orch_agent() { # <name> <cwd> <runtime> -> name<TAB>pane<TAB>status<TAB>session
+  local roster
+  roster="$(herdr agent list 2>/dev/null)" || return 0
+  printf '%s' "$roster" | jq -r --arg n "$1" --arg c "$2" --arg r "$3" '
+    [.result.agents[]? | select((.pane_id // "") != "")] as $a
+    | (([$a[] | select(.name == $n)] + [$a[] | select((.cwd // "") == $c and (.agent // "") == $r)])[0]) // empty
+    | [((.name // "") | if . == "" then "-" else . end), .pane_id,
+       (.agent_status // "unknown"),
+       ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null || true
+}
+
+_run_proc_root() { printf '%s' "${CEL_PROC_ROOT:-/proc}"; }
+
+# THE PROCESS BEHIND A ROOT/ORCHESTRATOR. herdr's roster carries no pid, but
+# the launch marks the process's environment with CEL_INBOX_ME and
+# CEL_WORKSPACE (_run_launch_env), which nothing rewrites. Its own tool
+# shells inherit that environment too, so the runtime binary must be argv[0].
+_run_orch_pid() { # <inbox-me> <wsdir> <runtime> -> newest pid, or fail
+  local d pid best="" env a0
+  for d in "$(_run_proc_root)"/[0-9]*; do
+    [ -r "$d/environ" ] || continue
+    env="$(tr '\0' '\n' < "$d/environ" 2>/dev/null)" || continue
+    printf '%s\n' "$env" | grep -qxF "CEL_INBOX_ME=$1" || continue
+    printf '%s\n' "$env" | grep -qxF "CEL_WORKSPACE=$2" || continue
+    a0="$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 1p)" || continue
+    [ "${a0##*/}" = "$3" ] || continue
+    pid="${d##*/}"
+    if [ -z "$best" ] || [ "$pid" -gt "$best" ]; then best="$pid"; fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
+}
+
+_run_cmdline() { # <pid> -> argv, one per line
+  tr '\0' '\n' < "$(_run_proc_root)/$1/cmdline" 2>/dev/null || true
+}
+
+# What a launch line is made of, for comparing two of them: each flag with the
+# value that follows it. The role prompt's PATH does not count (a product can
+# move its role file without its launch being stale), nor does a resume.
+run_launch_items() { # <argv, one per line on stdin> -> items, one per line
+  local -a v; mapfile -t v
+  local i=1 n="${#v[@]}" a b
+  while [ "$i" -lt "$n" ]; do
+    a="${v[$i]}"; b="${v[$((i+1))]:-}"
+    case "$a" in
+      --*)
+        if [ -n "$b" ] && [ "${b#--}" = "$b" ]; then i=$((i+2)); else b=""; i=$((i+1)); fi
+        case "$a" in --resume|--continue) continue ;; esac
+        case "$b" in *role-*.md|'<body:'*) continue ;; esac
+        if [ -n "$b" ]; then printf '%s %s\n' "$a" "$b"; else printf '%s\n' "$a"; fi ;;
+      *) i=$((i+1)) ;;
+    esac
+  done
+}
+
+_run_item_label() { # <item> -> how a human names it
+  case "$1" in
+    *inbox.omp.ts|*inbox*.ts) printf 'inbox hook' ;;
+    *orchestrator-guard*) printf 'guard hook' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Expected items the actual argv lacks, as a comma-separated human list.
+run_launch_missing() { # <expected-argv-file> <actual-argv-file>
+  local item out=""
+  local have_items; have_items="$(run_launch_items < "$2")"
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    printf '%s\n' "$have_items" | grep -qxF -- "$item" && continue
+    out="${out:+$out, }$(_run_item_label "$item")"
+  done < <(run_launch_items < "$1")
+  printf '%s' "$out"
+}
+
+_run_restart_wait() { # <name> <cwd> <runtime>: until no agent is live there
+  local i=0
+  while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
+    [ -n "$(_run_orch_agent "$1" "$2" "$3")" ] || return 0
+    sleep "${CEL_RESTART_SLEEP:-1}"; i=$((i+1))
+  done
+  return 1
+}
+
+# Did the new process come up with the hooks this launch asked for?
+_run_restart_confirm() { # <inbox-me> <wsdir> <runtime> <name> <argv...>
+  local me="$1" wsdir="$2" rt="$3" name="$4"; shift 4
+  local i=0 pid="" exp act missing
+  while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
+    pid="$(_run_orch_pid "$me" "$wsdir" "$rt")" && break
+    sleep "${CEL_RESTART_SLEEP:-1}"; i=$((i+1))
+  done
+  if [ -z "$pid" ]; then
+    c_warn "$name was started but its process could not be found - check the pane"
+    return 0
+  fi
+  exp="$(mktemp)"; act="$(mktemp)"
+  printf '%s\n' "$rt" "$@" > "$exp"; _run_cmdline "$pid" > "$act"
+  missing="$(run_launch_missing "$exp" "$act")"
+  rm -f -- "$exp" "$act"
+  if [ -n "$missing" ]; then
+    c_warn "$name restarted (pid $pid) but its process lacks: $missing"
+  else
+    local hooks="" a
+    for a in "$@"; do case "$a" in *.ts) hooks="${hooks:+$hooks, }$(_run_item_label "$a")" ;; esac; done
+    c_ok "$name restarted (pid $pid)${hooks:+ with $hooks}"
+  fi
+  return 0
+}
+
+cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
+  local restart=0 fresh=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -635,6 +801,8 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --thinking)  thinking_opt="$2"; shift 2 ;;
       --dry-run)   dry_run=1; shift ;;
       --force)     force=1; shift ;;
+      --restart)   restart=1; shift ;;
+      --fresh)     fresh=1; shift ;;
       --agent)     agent=1; shift ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
@@ -642,6 +810,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
 
   # The console resolves NO workspace - see _run_console. It has to return
   # before the resolution below, which would otherwise die for want of one.
+  case "$role" in
+    root|orchestrator) ;;
+    *) [ "$restart" -eq 0 ] && [ "$fresh" -eq 0 ] \
+         || die "cel run: --restart and --fresh are for root and orchestrator only - workers and reviewers never resume" ;;
+  esac
   if [ "$role" = console ]; then
     _run_console "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$agent"
     return $?
@@ -758,7 +931,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   # a fault with a cure (`cel ws up` renames it), never an absence. The check
   # runs on a dry run too: a preview of a launch that would be refused is a
   # preview of something that will not happen.
-  if [ "$role" = orchestrator ] && [ "$force" -eq 0 ]; then
+  if [ "$role" = orchestrator ] && [ "$force" -eq 0 ] && [ "$restart" -eq 0 ]; then
     local occupant oname opane
     occupant="$(_run_live_agent_in_cwd "$cwd")"
     if [ -n "$occupant" ]; then
@@ -863,6 +1036,49 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   case "$role" in root) inbox_me=root ;; orchestrator) inbox_me="$product-orch" ;; esac
   envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
 
+  # RESUME (CEL-63). Root and the orchestrators carry their conversation
+  # across a restart; workers and reviewers never do - each is one ticket or
+  # one PR, and a resumed one would carry the last job's context into this.
+  local resume_session="" restart_pane=""
+  if [ "$role" = root ] || [ "$role" = orchestrator ]; then
+    local live="" lname lpane lstatus lsession
+    if have herdr && have jq; then live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime")"; fi
+    if [ -n "$live" ]; then
+      IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
+      [ "$lsession" != "-" ] || lsession=""
+      _run_sessions_record "$cwd" "$lsession"
+    fi
+    if [ "$restart" -eq 1 ]; then
+      if [ -z "$live" ]; then
+        printf '  no live agent for %s in %s - launching it\n' "$agent_name" "$cwd" >&2
+      else
+        # Never kill a turn in progress by default: the owner may be mid-way
+        # through something the plane cannot see.
+        if [ "$lstatus" = working ] && [ "$force" -eq 0 ]; then
+          die "cel run $role --restart: $agent_name (pane $lpane) is working - a restart now would kill its turn. Wait for it to go idle, or pass --force"
+        fi
+        restart_pane="$lpane"
+        [ "$fresh" -eq 1 ] || resume_session="$lsession"
+      fi
+    fi
+    # Over a dead or absent agent, come back into the last recorded session.
+    if [ "$fresh" -eq 0 ] && [ -z "$resume_session" ] && [ -z "$live" ]; then
+      resume_session="$(_run_sessions_last "$cwd")"
+    fi
+    if [ -n "$resume_session" ]; then
+      local rflag; rflag="$(agent_resume "$runtime" flag)"
+      if [ -n "$rflag" ]; then
+        AGENT_ARGS+=("$rflag" "$resume_session")
+        printf '  resuming %s from %s\n' "$agent_name" "$resume_session" >&2
+      else
+        printf '  runtime %s cannot resume a session - %s is starting fresh\n' "$runtime" "$agent_name" >&2
+        resume_session=""
+      fi
+    elif [ "$fresh" -eq 0 ]; then
+      printf '  no previous session recorded for %s - starting fresh\n' "$agent_name" >&2
+    fi
+  fi
+
   # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
   # it reaches this box's auth-gateway, which holds several subscriptions per
   # provider and picks one BY SESSION KEY. pi sends no session identity of its
@@ -907,6 +1123,27 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # failure - the reviewer is alive and reviewing either way.
     reviewers_record "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" \
       || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it, and its checkout at $review_path will outlive it"
+    return 0
+  fi
+
+  # RESTART IN PLACE: exit the agent in its pane, leaving the pane and its
+  # shell, and start the current launch line there under the same name.
+  if [ -n "$restart_pane" ]; then
+    if [ "$dry_run" -eq 1 ]; then
+      printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$restart_pane"
+      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$envprefix"
+      printf 'herdr agent start %s --kind %s --pane %s -- %s\n' \
+        "$agent_name" "$runtime" "$restart_pane" "$(_run_dry_agent_args)"
+      return 0
+    fi
+    herdr pane send-keys "$restart_pane" esc ctrl+c ctrl+c >/dev/null 2>&1 \
+      || die "cel run $role --restart: could not send the exit keys to pane $restart_pane"
+    _run_restart_wait "$agent_name" "$cwd" "$runtime" \
+      || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
+    [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
+    _run_mark_launch "$restart_pane" "$envprefix"
+    herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null
+    _run_restart_confirm "$inbox_me" "$wsdir" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
     return 0
   fi
 
@@ -964,4 +1201,60 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # it must not outlive the command it marks.
   _run_mark_launch "$pane_id" "$envprefix"
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+}
+
+# STALE LAUNCH LINES. `cel update` changes hooks and launch flags, but a
+# running orchestrator keeps the command line it started with: the inbox hook
+# (CEL-65) and --no-prewalk (CEL-68) silently did not apply to any
+# orchestrator that was already up. So compare each live one's actual argv
+# (/proc/<pid>/cmdline) with what `cel run --dry-run` would launch now.
+#
+# One row per stale root/orchestrator:
+#   name<TAB>workspace<TAB>missing<TAB>restart-command<TAB>status
+run_stale_orchestrators() {
+  local roster ws wsdir p role me name cwd rt live pid line exp act missing cmd
+  local lname lpane lstatus lsession
+  have herdr && have jq || return 0
+  roster="$(herdr agent list 2>/dev/null)" || return 0
+  for ws in $(registry_names 2>/dev/null); do
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for p in "" $(ws_product_names "$wsdir" 2>/dev/null); do
+      if [ -z "$p" ]; then
+        role=root; me=root; name="$(_run_agent_name "$ws/root")"; cwd="$wsdir"
+        rt="$(ws_runtime "$wsdir" root)"; cmd="cel run root --workspace $ws --restart"
+      else
+        role=orchestrator; me="$p-orch"; name="$(_run_agent_name "$p/orch")"
+        cwd="$(ws_product_dir "$wsdir" "$p")"; rt="$(ws_runtime "$wsdir" orchestrator)"
+        cmd="cel run orchestrator --product $p --workspace $ws --restart"
+      fi
+      live="$(printf '%s' "$roster" | jq -r --arg n "$name" --arg c "$cwd" '
+        [.result.agents[]? | select((.pane_id // "") != "")] as $a
+        | (([$a[] | select(.name == $n)] + [$a[] | select((.cwd // "") == $c)])[0]) // empty
+        | [((.name // "") | if . == "" then "-" else . end), .pane_id,
+           (.agent_status // "unknown"), (.agent // ""),
+           ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null)" || live=""
+      [ -n "$live" ] || continue
+      IFS=$'\t' read -r lname lpane lstatus rt lsession <<< "$live"
+      [ "$lsession" = "-" ] || _run_sessions_record "$cwd" "$lsession"
+      pid="$(_run_orch_pid "$me" "$wsdir" "$rt")" || continue
+      if [ "$role" = root ]; then
+        line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || continue
+      else
+        line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || continue
+      fi
+      line="$(printf '%s\n' "$line" | sed -n 's/^herdr agent start [^ ]* --kind [^ ]* --pane <pane> -- //p')"
+      [ -n "$line" ] || continue
+      exp="$(mktemp)"; act="$(mktemp)"
+      # shellcheck disable=SC2086
+      printf '%s\n' "$rt" $line > "$exp"
+      _run_cmdline "$pid" > "$act"
+      missing="$(run_launch_missing "$exp" "$act")"
+      rm -f -- "$exp" "$act"
+      [ -n "$missing" ] || continue
+      [ "$lname" != "-" ] || lname="$name"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$missing" "$cmd" "$lstatus"
+    done
+  done
+  return 0
 }

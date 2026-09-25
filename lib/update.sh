@@ -21,6 +21,8 @@ _CEL_UPDATE=1
 . "$(dirname "${BASH_SOURCE[0]}")/link.sh"
 # shellcheck source=lib/registry.sh
 . "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+# shellcheck source=lib/run.sh
+. "$(dirname "${BASH_SOURCE[0]}")/run.sh"
 
 _update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
 
@@ -156,6 +158,29 @@ _update_stale_agents() {
   return 0
 }
 
+# Root and orchestrators on an older launch line (lib/run.sh). Report-only by
+# default: an automatic restart could drop a draft in the owner's composer,
+# which the plane cannot see. With 1, idle ones are restarted in place and
+# resumed; working ones are skipped with the reason.
+_update_stale_orchestrators() { # <restart 0|1>
+  local rows name ws missing cmd status shown=0
+  rows="$(run_stale_orchestrators)"
+  [ -n "$rows" ] || return 0
+  while IFS=$'\t' read -r name ws missing cmd status; do
+    [ -n "$name" ] || continue
+    if [ "$shown" -eq 0 ]; then c_hd "Orchestrators on an older launch line"; shown=1; fi
+    printf '  %s (%s) runs an older launch line (missing: %s) - %s\n' "$name" "$ws" "$missing" "$cmd"
+    [ "$1" -eq 1 ] || continue
+    if [ "$status" = working ]; then
+      c_warn "$name skipped: it is working - restart it when idle: $cmd"
+      continue
+    fi
+    # shellcheck disable=SC2086
+    ( cmd_run ${cmd#cel run } ) || c_warn "$name did not restart - $cmd"
+  done <<<"$rows"
+  return 0
+}
+
 _update_check() { # read-only; exit 1 when behind so scripts can test it
   local inst avail chan
   chan="$(_update_channel)"
@@ -206,14 +231,15 @@ _update_rollback() {
   return 0
 }
 
-cmd_update() { # [--check | --rollback | --channel main|release]
-  local mode=update chan=""
+cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orchestrators]
+  local mode=update chan="" restart_orch=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --check)    mode=check; shift ;;
       --rollback) mode=rollback; shift ;;
+      --restart-orchestrators) restart_orch=1; shift ;;
       --channel)  mode=channel; chan="${2:-}"; [ -n "$chan" ] || die "cel update --channel: want main or release"; shift 2 ;;
-      *) die "cel update: unknown argument '$1' (want --check, --rollback or --channel)" ;;
+      *) die "cel update: unknown argument '$1' (want --check, --rollback, --channel or --restart-orchestrators)" ;;
     esac
   done
   if [ "$mode" = check ]; then _update_check; return $?; fi
@@ -231,6 +257,7 @@ cmd_update() { # [--check | --rollback | --channel main|release]
     n="$(cel_commits_behind_main)"
     if [ "$n" -eq 0 ] 2>/dev/null; then
       c_ok "up to date with origin/main at $(cel_build_line)"
+      _update_stale_orchestrators "$restart_orch"
       return 0
     fi
     before_main="$(git -C "$CEL_ROOT" rev-parse HEAD)"
@@ -245,6 +272,7 @@ cmd_update() { # [--check | --rollback | --channel main|release]
       return 1
     fi
     _update_stale_agents
+    _update_stale_orchestrators "$restart_orch"
     return 0
   fi
 
@@ -255,6 +283,7 @@ cmd_update() { # [--check | --rollback | --channel main|release]
   if [ -z "$avail" ]; then die "no release tags reachable on origin - cannot tell what to update to"; fi
   if ! cel_version_lt "$inst" "$avail"; then
     c_ok "up to date at v$inst"
+    _update_stale_orchestrators "$restart_orch"
     return 0
   fi
 
@@ -273,5 +302,6 @@ cmd_update() { # [--check | --rollback | --channel main|release]
     return 1
   fi
   _update_stale_agents
+  _update_stale_orchestrators "$restart_orch"
   return 0
 }

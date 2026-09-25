@@ -52,3 +52,26 @@ test_restart_orchestrators_restarts_idle_and_skips_working() {
   assert_contains "$(tr '\0' ' ' < "$PROC/9999/cmdline")" "--resume $T/s.jsonl"
   orch_stub_teardown
 }
+
+test_doctor_lists_a_stale_orchestrator() {
+  source "$CEL_ROOT/lib/doctor.sh"
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  assert_contains "$(doctor_stale_orchestrator_lines)" "widget-orch (alpha) runs an older launch line"
+  orch_stub_teardown
+}
+
+test_steward_reports_stale_orchestrators_once_per_build() {
+  source "$CEL_ROOT/lib/steward.sh"
+  orch_stub_setup omp
+  export CEL_UPDATE_DIR="$T/upd"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  _steward_raise() { printf '%s|%s\n' "$1" "$4" >> "$T/raised"; }
+  _steward_stale_orchestrators >/dev/null
+  _steward_stale_orchestrators >/dev/null
+  assert_eq "$(wc -l < "$T/raised" | tr -d ' ')" "1"
+  assert_contains "$(cat "$T/raised")" "alpha|steward: after the update"
+  unset CEL_UPDATE_DIR; orch_stub_teardown
+}
