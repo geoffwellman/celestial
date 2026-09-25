@@ -1369,3 +1369,11 @@ test_cel72_without_a_ledger_row_the_lowercased_guess_is_found() {
   assert_contains "$MSG" "its worker on WG-72-x is"
   rm -rf "$T"
 }
+
+# CEL-79: when the ledger names the worktree, an agent standing at the GUESSED
+# path is someone else - the guess is only for a branch with no ledger row.
+test_cel79_a_ledger_row_excludes_an_agent_at_the_guessed_path() {
+  _cel72_fixture idle 1 'home/.herdr/worktrees/widget/wg-72-x'
+  assert_contains "$MSG" "nobody on WG-72-x"
+  rm -rf "$T"
+}
