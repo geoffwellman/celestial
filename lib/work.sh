@@ -115,7 +115,8 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
       --json number,title,headRefName,state,reviewDecision,statusCheckRollup,createdAt,updatedAt,mergedAt,closedAt,url \
       2>/dev/null)" || rc=$?
     [ "$rc" -eq 0 ] || failed=1
-    [ -n "$out" ] || continue
+    # A zero exit is not a good read: empty or broken JSON fails the pass too.
+    printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || { failed=1; continue; }
     all="$(printf '%s' "$all" | jq -c --argjson new "$(printf '%s' "$out" | jq -c '. // []' 2>/dev/null || echo '[]')" \
       --arg repo "$repo" --arg slug "$slug" '. + ($new | map(. + {repo: $repo, slug: $slug}))' 2>/dev/null || printf '%s' "$all")"
   done

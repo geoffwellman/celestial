@@ -160,8 +160,9 @@ doctor_github_account() { # <name> <wsdir>
   # A LITERAL, standalone Host token (CEL-79): the alias used to go into a
   # regex, so its dots matched anything, and a wildcard `Host gh.*` passed for
   # an entry that names no key for this account.
+  # Case-insensitive, as ssh itself matches Host patterns.
   if awk -v h="$host" 'tolower($1) == "host" {
-        for (i = 2; i <= NF; i++) if ($i == h) found = 1 }
+        for (i = 2; i <= NF; i++) if (tolower($i) == tolower(h)) found = 1 }
       END { exit !found }' "$HOME/.ssh/config" 2>/dev/null; then
     c_ok "$n: ssh alias $host is in ~/.ssh/config"
   else
