@@ -951,3 +951,103 @@ test_the_vault_is_found_where_cel_gateway_says_it_is() {
   _quota_stub_stop
   _quota_teardown
 }
+
+# --- CEL-80 (absorbs CEL-64): merge per account, not per source -------------
+#
+# #84 made the vault all-or-nothing: the moment CLIProxyAPI held one account,
+# omp was skipped entirely, and on 2026-09-23 both Codex accounts and opencode
+# fell off `cel quota` because the vault held only Claude. An account is
+# provider + email; whichever source can read it answers once.
+
+_cpa_vault_claude_only() {
+  export CEL_CPA_AUTH_DIR="$T/cpa-auth"
+  mkdir -p "$CEL_CPA_AUTH_DIR"; chmod 700 "$CEL_CPA_AUTH_DIR"
+  # CLIProxyAPI's real Claude file carries the email and NO uuid: the live
+  # vault on 2026-09-25 had `email` + `type` only, so the join is by email.
+  local n
+  for n in one two; do
+    jq -nc --arg n "$n" '{type: "claude", access_token: ("fixture-cpa-claude-" + $n),
+      refresh_token: "r", expire: "2099-01-01T00:00:00Z",
+      email: ($n + "@example.invalid")}' \
+      > "$CEL_CPA_AUTH_DIR/claude-$n@example.invalid.json"
+  done
+  printf '%s\n' fixture-cpa-claude-one fixture-cpa-claude-two > "$T/fresh"
+}
+
+test_every_account_from_either_source_appears_exactly_once() {
+  _quota_setup
+  _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" '{}'
+  _cpa_vault_claude_only
+  _omp_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list 2>/dev/null)"
+  # omp knows claude one/two/three, two codex and opencode; the vault knows
+  # claude one/two. Six accounts, each once.
+  assert_eq "$(printf '%s' "$out" | jq -r 'length')" 6
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | .provider + "|" + .label] | unique | length')" 6
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "codex")] | length')" 2
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "opencode")] | length')" 1
+  # the vault answers for the accounts it holds
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.provider == "claude" and .source == "cliproxy")] | length')" 2
+  assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.label == "three@example.invalid") | .source')" omp
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The live Anthropic answer, captured 2026-09-25 with the numbers changed: a
+# dozen codename keys, most null, one (`nimbus_quill`) a real object with a
+# null reset - and the authoritative `.limits[]` beside them. Reading the keys
+# printed `nimbus_quill 0% (resets Nimbus Quill)` and lost Fable.
+test_the_claude_reader_maps_limits_and_ignores_codename_keys() {
+  _quota_setup
+  _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" '{}'
+  _cpa_vault_claude_only
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(subscription_list 2>/dev/null | jq -c '.[] | select(.label == "one@example.invalid")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | .name + (if .scope then " " + .scope else "" end)] | join(",")')" \
+    '5h,7d,7d Fable'
+  assert_eq "$(printf '%s' "$row" | jq -r '.windows[] | select(.scope == "Fable") | .used_pct')" 31
+  case "$row" in *nimbus*|*Nimbus*) printf 'a codename key became a window: %s\n' "$row" >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# opencode's real auth file is keyed `opencode-go` and holds a `key`, and its
+# usage answer is `{usage: {rolling, weekly, monthly}}` - neither of which the
+# CEL-61 reader looked for, so the row silently vanished on the live box.
+test_opencode_reads_its_real_auth_and_usage_shapes_beside_the_vault() {
+  _quota_setup
+  _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" \
+    '{"usage":{"rolling":{"status":"ok","percent":4,"resetsAt":"2026-09-18T09:00:40.089Z"},"weekly":{"status":"ok","percent":17,"resetsAt":"2026-09-21T00:00:00.000Z"},"monthly":{"status":"ok","percent":97,"resetsAt":"2026-09-30T04:41:25.000Z"}}}'
+  _cpa_vault_claude_only
+  mkdir -p "$HOME/.local/share/opencode"
+  jq -nc '{"opencode-go": {type: "api", key: "fixture-opencode-go-key"}}' > "$HOME/.local/share/opencode/auth.json"
+  printf 'fixture-opencode-go-key\n' >> "$T/fresh"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list 2>/dev/null)"
+  local row; row="$(printf '%s' "$out" | jq -c '.[] | select(.provider == "opencode")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '[.windows[] | .name + "=" + (.used_pct | tostring)] | join(",")')" '5h=4,7d=17,monthly=97'
+  case "$out" in *fixture-opencode-go-key*) printf 'printed the opencode key\n' >&2; return 1;; esac
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# The check #84 should have passed before it became the default: every
+# account and window omp reports must be in the merged list.
+test_quota_compare_gate_fails_when_the_merge_loses_an_omp_window() {
+  _quota_setup
+  _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" '{}'
+  _cpa_vault_claude_only
+  _omp_stub
+  local out rc=0
+  out="$(bash "$CEL_ROOT/tools/quota-compare.sh" --gate 2>&1)" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" 'gate: ok'
+  # a merged list that drops an omp account fails the gate
+  rc=0
+  out="$(CEL_QUOTA_COMPARE_MERGED='[]' bash "$CEL_ROOT/tools/quota-compare.sh" --gate 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" 'missing'
+  _quota_stub_stop
+  _quota_teardown
+}
