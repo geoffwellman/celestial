@@ -324,6 +324,13 @@ cmd_release() { # <product> <value> [--repo r] [--dry-run] [--follow|--no-follow
 
   have gh || die "cel release: gh is required to dispatch the workflow"
   _release_check_permission "$slug" "$product" "$wsdir"
+  # UNDER AFK a release goes only where the owner named it first (CEL-78).
+  # shellcheck source=lib/afk.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/afk.sh"
+  if afk_active; then
+    afk_authorise release "$(jq -nc --arg p "$product" --arg v "$value" '{product:$p, version:$v}')" \
+      "$product@$value" >/dev/null || die "cel release: AFK did not authorise this release - see the refusal above. Nothing dispatched."
+  fi
   # Following is the useful default where someone is watching; in a script it
   # would just hold the pipeline open.
   [ "$follow" -eq -1 ] && { [ -t 1 ] && follow=1 || follow=0; }
