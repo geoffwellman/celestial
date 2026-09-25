@@ -74,6 +74,13 @@ t('gateway is the account table, box-level and slotless', () => {
   assert.deepEqual(plan('gateway', 'how much codex quota is left', F), ['cel gateway status']);
 });
 
+// CEL-80: the gateway's own web panel, one command away - the URL and the
+// ssh tunnel that reaches it from a laptop, never a tailnet link.
+t('gateway_panel is the panel URL and its tunnel, slotless', () => {
+  assert.deepEqual(plan('gateway_panel', 'open the gateway panel', F), ['cel gateway panel']);
+  assert.deepEqual(plan('gateway_panel', 'where is the cliproxy web interface', F), ['cel gateway panel']);
+});
+
 t('fleet is the whole box, plain', () => {
   assert.deepEqual(plan('fleet', "what's blocked", F), ['cel fleet']);
   assert.deepEqual(plan('fleet', 'what is running on the box', F), ['cel fleet']);

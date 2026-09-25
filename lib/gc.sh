@@ -287,6 +287,9 @@ _gc_keep() { # <reason> [dir]
   GC_KEPT["$r"]=$(( ${GC_KEPT["$r"]:-0} + 1 ))
   if [ "$r" = unidentified ] && [ -n "$d" ]; then GC_UNIDENTIFIED+=("$d"); fi
   kept=$(( ${kept:-0} + 1 ))
+  # A dry run says why, row by row (CEL-80): a total of 58 kept told the
+  # owner nothing about which worker was holding what.
+  if [ "${dry:-0}" -eq 1 ] && [ -n "${cwd:-}" ]; then printf '  kept %s: %s\n' "$cwd" "$r"; fi
   return 0
 }
 
@@ -578,6 +581,115 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   return 0
 }
 
+# THE FINISHED WORKERS (CEL-80). On 2026-09-25, 13 of 23 live worker panes
+# belonged to delegations already landed or finished - `done` for days and
+# never closed. Workers nest as tabs in their repo's herdr workspace, and the
+# worktree pass above only knows a workspace whose FIRST pane sits in a
+# worktree, so a finished worker's pane was never anyone's to close. The
+# ledger records the pane each delegation ran in; this pass starts there.
+#
+# A pane is closed only when every one of these is a fact: the delegation is
+# landed/released/abandoned (a `finished` row whose PR merged is reconciled to
+# landed first), the pane is still in that delegation's worktree (a pane id
+# herdr has reused is somebody else's), its agent is idle or done, its PR is
+# merged or closed, and its checkout holds nothing dirty or unpushed. Anything
+# that cannot be read keeps the pane. The worktree itself goes on the
+# worktree pass, as it always has, once nothing is running in it.
+# One kept pane, by reason; reads why/done_kept/dry/id/pane from its caller.
+_gc_done_kept() {
+  why[$1]=$(( ${why[$1]:-0} + 1 )); done_kept=$((done_kept + 1))
+  [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): %s\n' "$id" "$pane" "$1"
+  return 0
+}
+
+_gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
+  local dry="$1" agents="$2" names="$3" ws wsdir f row id state pane wt agent status pr n
+  local -A why=()
+  done_closed=0
+  local done_kept=0
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    f="$wsdir/.cel/delegations.json"
+    [ -f "$f" ] || continue
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      { IFS= read -r id; IFS= read -r state; IFS= read -r pane; IFS= read -r wt; } \
+        <<< "$(printf '%s' "$row" | jq -r '.id, .state, (.pane // ""), (.worktree // "")')"
+      [ -n "$pane" ] && [ -n "$wt" ] || continue
+      agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" \
+        '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
+      [ -n "$agent" ] || continue          # the pane is already gone
+      # Still in this delegation's checkout, or it is not this delegation's.
+      case "$(printf '%s' "$agent" | jq -r '.cwd // ""')" in
+        "$wt"|"$wt"/*) ;;
+        *) continue ;;
+      esac
+      status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
+      case "$status" in
+        idle|done) ;;
+        working|blocked) _gc_done_kept working; continue ;;
+        *) _gc_done_kept unknown; continue ;;
+      esac
+      if [ -d "$wt" ]; then
+        pr="$(_gc_pr_state "$wt")"
+      else
+        pr=NONE
+      fi
+      if [ "$state" = finished ]; then
+        [ "$pr" = MERGED ] || { _gc_done_kept unmerged; continue; }
+        if [ "$dry" -eq 1 ]; then
+          printf '  would reconcile %s: finished, PR merged -> landed\n' "$id"
+        else
+          # gc holds this ledger's writer lock for the whole sweep, so the
+          # write is the same guarded read-modify-write fanout itself does.
+          local tmp; tmp="$(mktemp "$f.XXXXXX")" || { _gc_done_kept unknown; continue; }
+          jq --arg id "$id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'map(if .id == $id then .state = "landed"
+                 | .history = ((.history // []) + [{state: "landed", at: $at, by: "gc"}]) else . end)' \
+            "$f" > "$tmp" && mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; _gc_done_kept unknown; continue; }
+          printf '  reconciled %s: finished, PR merged -> landed\n' "$id"
+        fi
+        state=landed
+      fi
+      case "$state" in landed|released|abandoned) ;; *) continue ;; esac
+      case "$pr" in
+        MERGED|CLOSED) ;;
+        NONE) [ ! -d "$wt" ] || { _gc_done_kept unknown; continue; } ;;
+        OPEN) _gc_done_kept open-pr; continue ;;
+        *) _gc_done_kept unknown; continue ;;
+      esac
+      if [ -d "$wt" ]; then
+        # Dirty or unpushed work keeps the pane: the pane is how somebody
+        # finds the checkout that holds it.
+        local st up
+        st="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null)" \
+          && up="$(git -C "$wt" rev-list HEAD --not --remotes 2>/dev/null | head -1)" \
+          || { _gc_done_kept unknown; continue; }
+        [ -z "$st" ] && [ -z "$up" ] || { _gc_done_kept dirty; continue; }
+      fi
+      if [ "$dry" -eq 1 ]; then
+        printf '  would close pane %s (%s, %s, agent %s)\n' "$pane" "$id" "$state" "$status"
+        done_closed=$((done_closed + 1))
+        continue
+      fi
+      if lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+        c_ok "closed pane $pane ($id, $state, agent $status)"
+        done_closed=$((done_closed + 1))
+      else
+        c_warn "could not close pane $pane for $id - kept"; _gc_done_kept refused
+      fi
+    done < <(jq -c '.[]? | select(.state == "finished" or .state == "landed" or .state == "released" or .state == "abandoned")' "$f" 2>/dev/null)
+  done <<< "$names"
+  local parts="" r
+  for r in working dirty open-pr unmerged unknown refused; do
+    n="${why[$r]:-0}"; [ "$n" -gt 0 ] && parts="${parts:+$parts, }$n $r"
+  done
+  printf 'gc: %s %d done panes, kept %d%s\n' "$([ "$dry" -eq 1 ] && printf 'would close' || printf closed)" \
+    "$done_closed" "$done_kept" "${parts:+: $parts}"
+  return 0
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -634,8 +746,15 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     && printf '%s' "$agents" | jq -e '.result.agents | type == "array" and all(.[]; (.cwd | type == "string") and (.pane_id | type == "string") and (.agent_status | type == "string"))' >/dev/null \
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
-  local removed=0 reaped=0 kept=0 reviewers_closed=0 managed=$'\n' candidates='[]'
+  local removed=0 reaped=0 kept=0 reviewers_closed=0 done_closed=0 managed=$'\n' candidates='[]'
   _gc_keep_reset
+  # NEVER SILENT (CEL-80): the sweep used to print one line at the very end,
+  # so a slow run was indistinguishable from a hung one.
+  printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \
+    "$([ "$dry" -eq 1 ] && printf ' (dry run)')" >&2
+  # Finished workers' panes first: a closed pane is one fewer live process
+  # holding its worktree on the next pass.
+  _gc_done_panes "$dry" "$agents" "$names"
   # Complete discovery BEFORE removing anything. A failed pane read must not
   # make its worktree look orphaned to a later pass.
   while IFS= read -r ws_id; do

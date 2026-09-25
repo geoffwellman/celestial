@@ -109,13 +109,41 @@ test_gateway_config_turns_session_affinity_on() {
   _gw_teardown
 }
 
-# ONE API-KEY UNLOCKS EVERY SUBSCRIPTION IN THE VAULT. The management API is
-# left out of the file entirely, so nothing can be reached from off this box.
-test_gateway_config_never_enables_remote_management() {
+# THE MANAGEMENT API IS ON FOR LOOPBACK ONLY (CEL-80). CEL-60 left it out,
+# which left the web panel CLIProxyAPI serves at /management.html unable to
+# read or change anything. Keys checked against CLIProxyAPI 7.3.14's own
+# config struct: `remote-management.{allow-remote, secret-key,
+# disable-control-panel}`.
+test_gateway_config_enables_management_for_loopback_only() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
-  ! grep -Eq '^[[:space:]]*allow-remote:' "$(gateway_config_file)" \
-    || { echo "the written config enables remote management"; _gw_teardown; return 1; }
+  local f; f="$(gateway_config_file)"
+  assert_eq "$(yq -r '.["remote-management"]["allow-remote"]' "$f")" false
+  assert_eq "$(yq -r '.["remote-management"]["disable-control-panel"]' "$f")" false
+  local k; k="$(gateway_state_dir)/management-key"
+  assert_eq "$(stat -c %a "$k")" 600
+  assert_eq "$(yq -r '.["remote-management"]["secret-key"]' "$f")" "$(cat "$k")"
+  # minted once: a second install keeps the key the panel was opened with
+  local before; before="$(cat "$k")"
+  cmd_gateway install --no-start >/dev/null
+  assert_eq "$(cat "$k")" "$before"
+  _gw_teardown
+}
+
+# The panel is a loopback page; the tunnel line is how a laptop reaches it,
+# because it must never be exposed on the tailnet.
+test_gateway_panel_prints_the_url_and_the_tunnel_never_the_key() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local p out; p="$(gateway_port)"
+  out="$(cmd_gateway panel)"
+  assert_contains "$out" "http://127.0.0.1:$p/management.html"
+  assert_contains "$out" "ssh -L $p:127.0.0.1:$p"
+  assert_eq "$(cmd_gateway panel --json | jq -r '.url')" "http://127.0.0.1:$p/management.html"
+  assert_contains "$(cmd_gateway panel --json | jq -r '.ssh')" "ssh -L $p:127.0.0.1:$p"
+  local key; key="$(cat "$(gateway_state_dir)/management-key")"
+  case "$out$(cmd_gateway install --no-start 2>&1)" in *"$key"*)
+    echo "the management key reached stdout"; _gw_teardown; return 1 ;; esac
   _gw_teardown
 }
 

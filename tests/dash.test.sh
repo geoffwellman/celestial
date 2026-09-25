@@ -198,6 +198,8 @@ _dash_box_boot() { # <this-workspace> [box-owner]
 #!/usr/bin/env bash
 case "$1" in
   services) printf '%s\n' '[{"name":"builder","port":5173,"state":"up","kind":"declared","workspace":"alpha"},{"name":"cel-auth-broker","port":47311,"state":"healthy","kind":"box","workspace":"box"}]' ;;
+  quota) printf '%s\n' '{"subscriptions":[{"provider":"claude","account":"acct-A","label":"acct-A","source":"cliproxy","windows":[{"name":"5h","scope":null,"used_pct":12,"resets_at":"2026-09-18T09:00:00Z"},{"name":"7d","scope":"Fable","used_pct":59,"resets_at":"2026-09-19T19:00:00Z"}],"extra":{"state":"enabled","reason":""}},{"provider":"codex","account":"acct-B","label":"acct-B","source":"omp","windows":[{"name":"7d","scope":null,"used_pct":3,"resets_at":null}],"extra":{"state":"enabled","reason":""}}],"balances":[]}' ;;
+  gateway) [ "$2" = panel ] && printf '%s\n' '{"url":"http://127.0.0.1:47411/management.html","ssh":"ssh -L 47411:127.0.0.1:47411 box"}' ;;
   *) printf '{}\n' ;;
 esac
 EOF
@@ -266,5 +268,41 @@ test_dash_box_flag_moves_the_panel_to_the_workspace_that_declares_it() {
   assert_eq "$(printf '%s' "$STATE" | jq -r '.box.mine')" "true"
   assert_eq "$(printf '%s' "$STATE" | jq -r '.box.owner')" "beta"
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.boxServices[].name] | join(",")')" "cel-auth-broker"
+  _dash_shutdown
+}
+
+# THE SUBSCRIPTIONS CARD IS `cel quota --json` (CEL-80): the owner asked
+# whether the quotas show on the dashboard, and the answer has to be the same
+# rows `cel quota` prints - one per account, every window.
+test_dash_box_card_carries_every_account_from_cel_quota() {
+  _dash_box_boot alpha
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.subscriptions[].account] | join(",")')" "acct-A,acct-B"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '[.subscriptions[0].windows[] | .name + (if .scope then " " + .scope else "" end)] | join(",")')" "5h,7d Fable"
+  local page; page="$(curl -sf "http://127.0.0.1:$DASH_PORT/")"
+  assert_contains "$page" 'id="subs"'
+  assert_contains "$page" 'renderSubs'
+  _dash_shutdown
+}
+
+# Every other dashboard: a compact line linking to the one that has the card.
+test_dash_without_the_box_flag_links_to_the_subscriptions() {
+  _dash_box_boot beta
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.subscriptions | length')" 0
+  assert_contains "$(curl -sf "http://127.0.0.1:$DASH_PORT/")" 'subscriptions: on the box dashboard'
+  _dash_shutdown
+}
+
+# The gateway panel is a loopback page. Viewed on loopback the card links it;
+# viewed from anywhere else it shows the tunnel instead, never a link that
+# would 404 off the box - or tempt someone to expose it.
+test_dash_gateway_panel_link_only_on_loopback() {
+  _dash_box_boot alpha
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.gatewayPanel.url')" "http://127.0.0.1:47411/management.html"
+  assert_eq "$(printf '%s' "$STATE" | jq -r '.gatewayPanel.loopback')" true
+  assert_contains "$(printf '%s' "$STATE" | jq -r '.gatewayPanel.ssh')" "ssh -L 47411:127.0.0.1:47411"
+  local off; off="$(curl -sf -H 'X-Forwarded-For: 100.64.0.9' "http://127.0.0.1:$DASH_PORT/api/state" | jq -r '.gatewayPanel.loopback')"
+  assert_eq "$off" true
+  local page; page="$(curl -sf "http://127.0.0.1:$DASH_PORT/")"
+  assert_contains "$page" 'Gateway panel'
   _dash_shutdown
 }

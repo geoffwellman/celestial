@@ -437,15 +437,39 @@ const boxDash = () => cached('boxdash', 60000, async () => {
   return { owner, mine: owner === cfg.name, url: `http://${cfg.host || '127.0.0.1'}:${ports[owner] || 7770}` };
 });
 
-const subscriptions = () => cached('subs', 60000, async () => {
+// CEL-80: THE CARD IS `cel quota --json`, the rows `cel quota` prints. The
+// fleet document is the cached copy of the same list and is only as fresh as
+// the last live read, so on a box where nobody had run `cel quota` lately the
+// card showed nothing or yesterday's accounts. Asked only by the one
+// dashboard that draws the card, a minute apart; the fleet cache is the
+// fallback when the live read fails.
+const subscriptions = (mine) => (!mine ? Promise.resolve([]) : cached('subs', 60000, async () => {
+  try {
+    const q = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['quota', '--json'], 45000) || '{}');
+    if (Array.isArray(q.subscriptions)) return q.subscriptions;
+  } catch { /* fall through to the cached copy */ }
   try {
     const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000) || '{}');
     return Array.isArray(doc.subscriptions) ? doc.subscriptions : [];
   } catch { return []; }
-});
+}));
 
-const state = async () => {
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, box] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(), services(), boxDash()]);
+// The gateway's own web panel (CEL-80). It listens on loopback only, so the
+// card links it only when this page is itself being viewed on loopback - over
+// the ssh tunnel, or on the box - and shows the tunnel line otherwise. A link
+// that works only on the box, shown on the tailnet, is an invitation to
+// expose the panel to make it work.
+const gatewayPanel = (mine) => (!mine ? Promise.resolve(null) : cached('gwpanel', 600000, async () => {
+  try {
+    const d = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['gateway', 'panel', '--json'], 8000) || 'null');
+    return d && d.url ? { url: String(d.url), ssh: String(d.ssh || '') } : null;
+  } catch { return null; }
+}));
+const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''));
+
+const state = async (req) => {
+  const box = await boxDash();
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(box.mine), services(), gatewayPanel(box.mine)]);
   // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
   // with the workspace that owns it since CEL-34, and `box` is the tag for
   // what belongs to nobody. A workspace's panel lists its own rows only.
@@ -502,6 +526,8 @@ const state = async () => {
     // Subscriptions are box-level in their entirety, so they move with the
     // box panel: four copies of one account list is the same complaint.
     subscriptions: box.mine ? subs : [],
+    // the socket, never X-Forwarded-For: a header is whatever the client says
+    gatewayPanel: gwp ? { ...gwp, loopback: isLoopback(req && req.socket && req.socket.remoteAddress) } : null,
   };
 };
 
@@ -1464,7 +1490,14 @@ function renderBox(s){
     return;
   }
   var rows=s.boxServices||[];
-  var note='<div class="empty" style="margin-bottom:8px">one broker, one gateway, one of each - the same on every dashboard, so it is drawn here only</div>';
+  var gp=s.gatewayPanel;
+  // Linked only on loopback - the page's own host AND the socket the server
+  // saw - because the panel listens nowhere else; the tunnel line otherwise.
+  var local=/^(127\.|localhost$|\[::1\]$)/.test(location.hostname);
+  var gpl=gp?(gp.loopback&&local
+    ?'<div style="margin-bottom:8px"><a href="'+esc(gp.url)+'" target="_blank">Gateway panel \u2197</a></div>'
+    :'<div class="empty" style="margin-bottom:8px">Gateway panel: '+esc(gp.ssh)+' then open '+esc(gp.url)+'</div>'):'';
+  var note=gpl+'<div class="empty" style="margin-bottom:8px">one broker, one gateway, one of each - the same on every dashboard, so it is drawn here only</div>';
   el.innerHTML=note+(rows.length?'<table><tbody>'+rows.map(function(x){
     var link=x.reach?'<a href="'+esc(x.reach)+'" target="_blank">'+esc(x.reach)+' \u2197</a>':'<span class="empty">not reachable</span>';
     return '<tr class="agrow"><td style="width:1%">'+chip(x.state,x.state==='healthy'?'ok':x.state==='up'?'w':'b')+
@@ -1476,7 +1509,9 @@ function renderBox(s){
 function renderSubs(s){
   var el=$('subs'); if(!el) return;
   // Box-level in their entirety, so they are drawn where the box panel is.
-  if(!(s.box||{mine:true}).mine){el.innerHTML='';return}
+  var bx=s.box||{mine:true};
+  if(!bx.mine){el.innerHTML='<span class="empty">subscriptions: on the box dashboard '+
+    (bx.url?'<a href="'+esc(bx.url)+'" target="_blank">'+esc(bx.url)+' \u2197</a>':esc(bx.owner||''))+'</span>';return}
   var subs=s.subscriptions||[];
   if(!subs.length){el.innerHTML='<span class="empty">no subscription readings cached yet - cel quota asks the providers</span>';return}
   var html='<table><tbody>';
@@ -1779,7 +1814,7 @@ const server = createServer(async (req, res) => {
         'cache-control': 'no-store, must-revalidate',
       }).end(req.method === 'HEAD' ? undefined : PAGE.replace('<!--UPDATE-CHIP-->', updateChip()));
     } else if (req.method === 'GET' && req.url === '/api/state') {
-      const body = JSON.stringify(await state());
+      const body = JSON.stringify(await state(req));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body);
     } else if (req.method === 'POST' && req.url === '/api/prompt') {
       const { target, message } = await readBody(req);

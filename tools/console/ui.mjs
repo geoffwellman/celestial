@@ -72,7 +72,7 @@ const completions = (doc) => {
     'cel fleet', 'cel fleet --json', 'cel inbox read --for root', 'cel inbox open --for root',
     'cel inbox send', 'cel inbox resolve', 'cel dash --ensure', 'cel run orchestrator',
     'cel-fanout status', 'cel-fanout collect', 'cel-fanout release', 'cel-linear',
-    'cel steward', 'cel gc', 'cel profiles', 'cel quota', 'cel services',
+    'cel steward', 'cel gc', 'cel profiles', 'cel quota', 'cel services', 'cel gateway panel',
     'cel services start', 'cel services stop', 'cel services restart', 'cel services logs', 'herdr agent focus', 'gh pr list',
     '--workspace', '--json', '--all-workspaces',
   ];
@@ -1736,6 +1736,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // bare `t` would eat the first letter of it. Shift+T on an EMPTY line, and
     // Ctrl+Y anywhere, which is the binding for someone who types capitals.
     if (input === 'T' && !value && view === 'main') { openTimeline(); return; }
+    // CEL-80: `G` on an empty line proposes `cel gateway panel` - the web
+    // panel's loopback URL and the ssh tunnel to it. A proposal like every
+    // other key: Enter runs it.
+    if (input === 'G' && !value && view === 'main' && !key.ctrl && !key.meta) { propose(['cel gateway panel']); return; }
     // `S` on the main screen with an empty command line opens the services
     // view. A bare letter is an action ONLY when there is nothing typed - the
     // first cut of this console ate the S of "status" out of a sentence.
