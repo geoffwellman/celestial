@@ -1051,3 +1051,35 @@ test_quota_compare_gate_fails_when_the_merge_loses_an_omp_window() {
   _quota_stub_stop
   _quota_teardown
 }
+
+# CREDIT IS READ WITH THE KEY OF THE WORKSPACE THAT OWNS IT (CEL-80). From
+# plane, `cel quota` printed "no key in this workspace" for OpenRouter and
+# DeepSeek while the workspaces holding those keys sat one directory away.
+# Every workspace that owns a key gets its own balance row.
+test_credit_is_shown_for_every_workspace_that_owns_a_key() {
+  _quota_setup
+  _quota_manifest_stub
+  unset CEL_TEST_PRESENT_KEY
+  mkdir -p "$T/ws-alpha" "$T/ws-beta"
+  printf 'name: alpha\nkind: personal\n' > "$T/ws-alpha/workspace.yaml"
+  printf 'name: beta\nkind: personal\n' > "$T/ws-beta/workspace.yaml"
+  printf 'CEL_TEST_ABSENT_KEY=fixture-beta-key\n' > "$T/ws-beta/env.local"
+  printf 'workspaces:\n  alpha: {path: "%s/ws-alpha"}\n  beta: {path: "%s/ws-beta"}\n' "$T" "$T" > "$T/registry.yaml"
+  export CEL_REGISTRY="$T/registry.yaml"
+  cat > "$T/qstub" <<'EOF2'
+#!/usr/bin/env bash
+printf 42
+EOF2
+  chmod +x "$T/qstub"; export CEL_QUOTA_STUB="$T/qstub"
+  . "$CEL_ROOT/lib/quota.sh"
+  cd "$T/ws-alpha"
+  local js; js="$(cmd_quota --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "nokeyhere") | .workspace')" beta
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[] | select(.provider == "nokeyhere") | .state')" ok
+  local out; out="$(cmd_quota 2>/dev/null)"
+  assert_contains "$out" beta
+  case "$out" in *'nokeyhere'*'no key in this workspace'*)
+    printf 'read the balance with the wrong workspace key:\n%s\n' "$out" >&2; return 1;; esac
+  case "$js$out" in *fixture-beta-key*) printf 'printed a key\n' >&2; return 1;; esac
+  _quota_teardown
+}
