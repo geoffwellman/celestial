@@ -1,3 +1,5 @@
+### Changed
+
 - `cel gateway` now runs on CLIProxyAPI instead of omp's broker and gateway:
   one supervised box service that is both the credential vault and the
   loopback OpenAI/Anthropic surface, with session affinity switched on (it

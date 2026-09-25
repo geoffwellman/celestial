@@ -1,3 +1,5 @@
+### Added
+
 - Console: steering an orchestrator from the TUI. `tell <who> "…"` now
   resolves past `<product>-orch` - a product, a workspace with one product, a
   repo inside one, or a name only the herdr roster carries - and a workspace

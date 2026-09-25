@@ -1,3 +1,5 @@
+### Changed
+
 - The console answers instead of transcribing. Ask about a stalled worker and
   you get three lines and a counted summary rather than forty rows: the
   decision model picks which rows matter and how urgent each is, the console

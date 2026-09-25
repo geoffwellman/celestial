@@ -1,1 +1,3 @@
+### Fixed
+
 - Hygiene scan no longer reads `FOLLOWUPS-<yymmdd>` as a ticket; `cel-fanout land` refuses a review note carrying a ticket-shaped token the scan would reject, naming it.
