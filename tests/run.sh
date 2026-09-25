@@ -14,6 +14,9 @@ CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 export CEL_ROOT
 # test-only seams (e.g. CEL_LIVENESS_NOW) are honoured only when this is set
 export CEL_TESTING=1
+# CEL-75: `cel fleet` caches its document; a suite that mutates a fixture and
+# re-reads must see the change, so the cache is off unless a test turns it on.
+export CEL_FLEET_CACHE_SECS=0
 FILTER="" NO_LOCK=0
 for arg in "$@"; do
   case "$arg" in

@@ -124,7 +124,7 @@ const FleetPanel = ({ doc, rows, sel, offset, height, innerRef, focused, loaded 
     title: 'FLEET',
     innerRef,
     focused,
-    right: doc.error ? doc.error : `${rows.filter((r) => r.kind === 'unit').length} units`,
+    right: doc.error ? doc.error : doc.stale ? doc.stale : `${rows.filter((r) => r.kind === 'unit').length} units`,
   },
   rows.length === 0 ? h(Text, { color: C.dim }, loaded ? '  no workspaces registered' : '  loading…') : null,
   h(More, { n: w.above, up: true }),
@@ -540,7 +540,16 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     return () => clearTimeout(t);
   }, [status, statusAt, statusSecs]);
 
+  // ONE REFRESH IN FLIGHT. A read that outlives the interval (CEL-75: 67-116 s
+  // under load) must not have a second started behind it every tick; the
+  // read runs in the background and input is never waiting on it.
+  const inFlight = useRef(false);
   const reload = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    try { await reloadOnce(); } finally { inFlight.current = false; }
+  }, []);
+  const reloadOnce = async () => {
     const d = await fleet();
     setDoc(d);
     setItems(await openItems(d));
@@ -551,7 +560,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     setAt(new Date().toTimeString().slice(0, 8));
     setLoaded(true);
     setRosterNames(await rosterOf());
-  }, []);
+  };
 
   useEffect(() => {
     reload();

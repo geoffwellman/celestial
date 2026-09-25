@@ -40,7 +40,10 @@ const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/sha
 export const run = (cmd, args, timeout = 20000) =>
   new Promise((resolve) => {
     execFile(cmd, args, { timeout, maxBuffer: 8 * 1024 * 1024 }, (err, out, errOut) =>
-      resolve({ ok: !err, out: String(out || ''), err: String(errOut || (err && err.message) || '') }));
+      resolve({
+        ok: !err, out: String(out || ''), err: String(errOut || (err && err.message) || ''),
+        timedOut: !!(err && err.killed), timeout,
+      }));
   });
 
 // THE ROSTER: the names herdr knows, which is not the same set as the fleet
@@ -75,11 +78,33 @@ export const afkLog = async () => {
   return r.out.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 };
 
-export const fleet = async () => {
-  const r = await run(CEL_BIN, ['fleet', '--json']);
-  const afk = await afkState();
-  if (!r.ok) return { workspaces: [], afk, error: r.err.trim() || 'cel fleet failed' };
-  try { return { ...JSON.parse(r.out), afk }; } catch { return { workspaces: [], afk, error: 'cel fleet returned no JSON' }; }
+// THE LAST GOOD READ, KEPT. On 2026-09-25, at a load average of 32 on a
+// 16-thread box, `cel fleet --json` took 67-116 s against the 20 s timeout
+// below, and the FLEET panel showed only `! Command failed` on every refresh:
+// the operator lost the whole board exactly when the box was busiest. A
+// console that has read the fleet once keeps drawing that read, says how old
+// it is and why, and keeps retrying on the normal cadence. The error alone is
+// shown only when there has never been a good read.
+let lastGood = null;
+const hhmm = (d) => d.toTimeString().slice(0, 5);
+export const fleet = async (runner = run) => {
+  const r = await runner(CEL_BIN, ['fleet', '--json']);
+  const afk = await (runner === run ? afkState() : runner(CEL_BIN, ['afk', 'status', '--json'])
+    .then((a) => { try { return a.ok ? JSON.parse(a.out) : null; } catch { return null; } }));
+  let error = '';
+  let reason = '';
+  if (!r.ok) {
+    error = r.err.trim() || 'cel fleet failed';
+    reason = r.timedOut ? `fleet refresh timed out after ${Math.round((r.timeout || 20000) / 1000)}s` : 'fleet refresh failed';
+  } else {
+    try {
+      const doc = JSON.parse(r.out);
+      lastGood = { doc, at: new Date() };
+      return { ...doc, afk };
+    } catch { error = 'cel fleet returned no JSON'; reason = 'fleet refresh returned no JSON'; }
+  }
+  if (lastGood) return { ...lastGood.doc, afk, stale: `stale, as of ${hhmm(lastGood.at)} (${reason})` };
+  return { workspaces: [], afk, error };
 };
 
 // `cel inbox open` is per workspace by design (lib/inbox.sh), so the console

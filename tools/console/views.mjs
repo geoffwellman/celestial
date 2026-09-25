@@ -657,6 +657,7 @@ export const servicesView = (rows = []) => {
 export const fleetTable = (doc, services = {}) => {
   const out = ['FLEET'];
   if (doc.error) out.push(`  ! ${doc.error}`);
+  if (doc.stale) out.push(`  ~ ${doc.stale}`);
   for (const ws of doc.workspaces || []) {
     const c = serviceCounts(services[ws.name]);
     out.push(`  ${ws.name}   (${(ws.units || []).length} products)   root mail: ${ws.root?.unread ?? 0} unread, ${ws.root?.open ?? 0} open`

@@ -609,23 +609,45 @@ _fleet_subscriptions() {
   subscription_list --cached
 }
 
-cmd_fleet() {
-  local json=0 only=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --json) json=1; shift ;;
-      --workspace) only="${2:-}"; shift 2 ;;
-      -h|--help) printf 'usage: cel fleet [--json] [--workspace <name>]\n'; return 0 ;;
-      *) die "cel fleet: unknown argument '$1'" ;;
-    esac
-  done
+# THE WHOLE DOCUMENT, CACHED (CEL-75). On 2026-09-25, at a load average of 32
+# on a 16-thread box, one read took 67-116 s (about 5 s idle), and a console
+# refreshing every few seconds started read after read behind the one still
+# running, which made the load that made the read slow. A copy younger than
+# `fleet.cache_secs` (default 30) is served as is; `--fresh` bypasses it.
+# Concurrent callers queue on one lock and take what the holder wrote rather
+# than each starting a read of its own. CEL_FLEET_CACHE_SECS overrides the
+# config; the suite sets it to 0 so a test that mutates a fixture sees it.
+_fleet_cache_secs() {
+  local v="${CEL_FLEET_CACHE_SECS:-}"
+  if [ -z "$v" ]; then
+    # shellcheck source=lib/config.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+    v="$(cel_config_get fleet cache_secs)"
+  fi
+  case "$v" in ''|*[!0-9]*) v=30 ;; esac
+  printf '%s' "$v"
+}
 
-  local roster names ws blocks=""
+_fleet_cache_young() { # <file> <secs>
+  [ -s "$1" ] || return 1
+  local now m
+  now="$(date +%s)"; m="$(stat -c %Y "$1" 2>/dev/null || printf 0)"
+  [ $(( now - m )) -lt "$2" ]
+}
+
+_fleet_doc() { # <only> -> the JSON document
+  local only="$1" roster names ws blocks=""
   roster="$(_fleet_roster)"
   # The batched git answers are remembered for the length of ONE read and no
   # longer: a console refreshing every few seconds must see a worktree that
   # has just been committed to, not the answer from the last draw.
   _FLEET_GIT_FACTS=()
+  # The mailbox reader is asked of the roster this pass already holds, not of
+  # a fresh `herdr agent list` per workspace (CEL-75).
+  _INBOX_ROSTER_HELD="$(printf '%s' "$roster" | jq -r '.result.agents[]?.name // empty' 2>/dev/null || true)"
+  [ -n "$roster" ] || _INBOX_ROSTER_HELD=""
+  _INBOX_ROSTER_OK=0; [ -n "$roster" ] && _INBOX_ROSTER_OK=1
+  export _INBOX_ROSTER_HELD _INBOX_ROSTER_OK
   # ONE /proc WALK FOR THE WHOLE READ. Every worker, every orchestrator and
   # the box's own total are answered from this one snapshot; a walk per
   # question made the cost of the view scale with the number of workers, which
@@ -637,17 +659,56 @@ cmd_fleet() {
     blocks="$blocks$(_fleet_workspace "$ws" "$roster")
 "
   done
+  unset _INBOX_ROSTER_HELD _INBOX_ROSTER_OK
 
-  local total avail used doc
+  local total avail used
   read -r total avail used <<<"$(mem_box)"
-  doc="$(printf '%s' "$blocks" | jq -sc \
+  printf '%s' "$blocks" | jq -sc \
     --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
     --argjson subs "$(_fleet_subscriptions)" \
     --argjson orphans "$(fleet_orphans_json)" \
     '{workspaces: ., subscriptions: $subs}
      | .box = {total_mb: $total, available_mb: $avail, used_pct: $used, orphans: $orphans,
-               agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}')"
+               agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}'
   mem_tree_snapshot_clear
+}
+
+cmd_fleet() {
+  local json=0 only="" fresh=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --fresh) fresh=1; shift ;;
+      --workspace) only="${2:-}"; shift 2 ;;
+      -h|--help) printf 'usage: cel fleet [--json] [--fresh] [--workspace <name>]\n'; return 0 ;;
+      *) die "cel fleet: unknown argument '$1'" ;;
+    esac
+  done
+
+  local secs doc="" dir file
+  secs="$(_fleet_cache_secs)"
+  if [ "$secs" -gt 0 ]; then
+    dir="${CEL_CACHE:-$HOME/.cache/cel}"
+    mkdir -p "$dir"
+    file="$dir/fleet${only:+.$only}.json"
+    if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
+      doc="$(cat "$file")"
+    else
+      # The lock is held on fd 9 for the read; a caller that waited on it
+      # re-checks the cache first, because the holder has just written it.
+      exec 9>"$file.lock"
+      flock 9
+      if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
+        doc="$(cat "$file")"
+      else
+        doc="$(_fleet_doc "$only")"
+        printf '%s\n' "$doc" >"$file.tmp.$$" && mv -f "$file.tmp.$$" "$file"
+      fi
+      exec 9>&-
+    fi
+  else
+    doc="$(_fleet_doc "$only")"
+  fi
   if [ "$json" -eq 1 ]; then printf '%s\n' "$doc"; else _fleet_render "$doc"; fi
   return 0
 }
