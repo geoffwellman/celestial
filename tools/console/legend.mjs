@@ -114,6 +114,7 @@ export const BINDINGS = {
   everywhere: [
     ['F1', 'this help'],
     ['q', 'the QUOTA view - the Claude and Codex windows, and when they reset'],
+    ['G', 'the gateway web panel - its URL, and the ssh tunnel from a laptop'],
     ['Ctrl+C', 'quit'],
   ],
 };
@@ -149,7 +150,7 @@ export const legend = (pane) => {
     case 'output':
       return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · Enter unit · S services · ^T panel · ^F focus · ^O dashboard · q quota · T timeline · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · S services · ^T panel · ^F focus · ^O dashboard · q quota · G gateway panel · T timeline · ^P/^N history · ? help';
   }
 };
 
