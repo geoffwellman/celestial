@@ -40,6 +40,15 @@ let watcher = null;
 let api = null;
 let wakeTimer = null;
 let waking = false;
+// Mail drained for a wake whose sendMessage failed: the cursor already moved,
+// so it is held here and handed to the next wake or before_agent_start.
+let pending = "";
+function takeMail(ctx): string {
+  const fresh = drain(ctx);
+  const all = [pending, fresh].filter(Boolean).join("\n");
+  pending = "";
+  return all;
+}
 
 function scheduleWake(ctx): void {
   if (wakeTimer || waking || !api) return;
@@ -54,15 +63,19 @@ function tryWake(ctx): void {
     if (!ctx || typeof ctx.isIdle !== "function" || !ctx.isIdle()) return;
     const draft = ctx.ui && typeof ctx.ui.getEditorText === "function" ? ctx.ui.getEditorText() : null;
     if (typeof draft !== "string" || draft.trim() !== "") return;
-    const mail = drain(ctx); // advances the cursor: before_agent_start won't see it again
+    const mail = takeMail(ctx); // advances the cursor: before_agent_start won't see it again
     if (!mail) return;
     waking = true;
-    const r = api.sendMessage({
-      customType: "cel-inbox", display: true,
-      content: "New messages in your celestial inbox (delivered once, woke you while idle):\n" + mail +
-        "\nAct on them, or say why not.",
-    }, { triggerTurn: true });
-    if (r && typeof r.catch === "function") r.catch(() => { waking = false; });
+    const fail = () => { pending = [mail, pending].filter(Boolean).join("\n"); waking = false; };
+    let r;
+    try {
+      r = api.sendMessage({
+        customType: "cel-inbox", display: true,
+        content: "New messages in your celestial inbox (delivered once, woke you while idle):\n" + mail +
+          "\nAct on them, or say why not.",
+      }, { triggerTurn: true });
+    } catch { fail(); return; }
+    if (r && typeof r.then === "function") r.then(undefined, fail);
   } catch { /* fail open: notify already happened */ }
 }
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }
@@ -117,7 +130,7 @@ export default function celestialInbox(pi): void {
   pi.on("agent_end", () => { waking = false; });
   pi.on("session_start", (_e, ctx) => { startWatcher(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
-    const mail = drain(ctx);
+    const mail = takeMail(ctx);
     if (!mail) return;
     return {
       message: {
