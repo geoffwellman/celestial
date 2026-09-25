@@ -5,7 +5,7 @@
 // was lost exactly when the box was busiest. A console that has read the fleet
 // once keeps drawing that read, and says how old it is.
 import assert from 'node:assert/strict';
-import { fleet } from './state.mjs';
+import { fleet, fleetSession } from './state.mjs';
 import { fleetTable } from './views.mjs';
 
 const t = async (name, fn) => { await fn(); process.stdout.write(`  ok ${name}\n`); };
@@ -30,4 +30,16 @@ await t('after one good read a failure still draws the good document, marked sta
   assert.match(out, /alpha/);
   assert.doesNotMatch(out, /! Command failed/);
   assert.match(out, /stale, as of \d\d:\d\d \(fleet refresh timed out after 20s\)/);
+});
+
+// CEL-79: the last good read belongs to ONE console session. It was module
+// global, so a second session in the same process drew the first one's board
+// as its own "stale" read - a board it had never seen.
+await t('a second session does not inherit another session\'s last good read', async () => {
+  const a = fleetSession();
+  const b = fleetSession();
+  await fleet(runner([{ ok: true, out: GOOD, err: '' }]), a);
+  const doc = await fleet(runner([TIMEOUT]), b);
+  assert.match(fleetTable(doc).join('\n'), /! Command failed/);
+  assert.equal(doc.stale, undefined);
 });

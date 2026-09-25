@@ -630,6 +630,9 @@ _fleet_cache_secs() {
 
 _fleet_cache_young() { # <file> <secs>
   [ -s "$1" ] || return 1
+  # A young file is served only if it is still a fleet document (CEL-79): a
+  # truncated or hand-edited cache printed an empty board with success.
+  jq -e '.workspaces | type == "array"' "$1" >/dev/null 2>&1 || return 1
   local now m
   now="$(date +%s)"; m="$(stat -c %Y "$1" 2>/dev/null || printf 0)"
   [ $(( now - m )) -lt "$2" ]
@@ -692,15 +695,20 @@ cmd_fleet() {
     mkdir -p "$dir"
     file="$dir/fleet${only:+.$only}.json"
     if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
-      doc="$(cat "$file")"
-    else
+      doc="$(cat "$file" 2>/dev/null || true)"
+    fi
+    # Re-validated after the read, too: the file can vanish between the age
+    # check and the cat, and an empty read is not a board.
+    if ! printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+      doc=""
       # The lock is held on fd 9 for the read; a caller that waited on it
       # re-checks the cache first, because the holder has just written it.
       exec 9>"$file.lock"
       flock 9
       if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
-        doc="$(cat "$file")"
-      else
+        doc="$(cat "$file" 2>/dev/null || true)"
+      fi
+      if ! printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
         doc="$(_fleet_doc "$only")"
         printf '%s\n' "$doc" >"$file.tmp.$$" && mv -f "$file.tmp.$$" "$file"
       fi

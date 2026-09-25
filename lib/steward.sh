@@ -408,9 +408,13 @@ _steward_branch_worktree() { # <wsdir> <repo> <branch>
 _steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
   local wt guess
   IFS='|' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
+  # The ledger row, when there is one, is the ONLY answer (CEL-79): an agent
+  # at the guessed path is then someone else's pane. The guess is for a PR
+  # opened by hand, with no row at all.
   printf '%s' "$1" | jq -c --arg w "$wt" --arg g "$guess" \
     '[.result.agents[]? | select(.cwd != null and
-       ((.cwd == $w and $w != "") or ((.cwd | ascii_downcase) == ($g | ascii_downcase))))]' \
+       (if $w != "" then .cwd == $w
+        else (.cwd | ascii_downcase) == ($g | ascii_downcase) end))]' \
     2>/dev/null || printf '[]'
 }
 

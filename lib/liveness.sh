@@ -159,7 +159,7 @@ _liveness_row() { # <key> -> the row, or ""
 _liveness_put() { # <key> <hash> <changed_at> <activity> <confidence> <answered_at>
   local f; f="$(_liveness_state_file)"
   mkdir -p "$(dirname "$f")"; touch "$f"
-  { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:-0}"; } \
+  { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:--}"; } \
     > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
@@ -171,7 +171,8 @@ _liveness_now() {
   if [ "${CEL_TESTING:-}" = 1 ]; then
     case "${CEL_LIVENESS_NOW:-}" in
       ''|*[!0-9]*) ;;
-      *) printf '%s' "$CEL_LIVENESS_NOW"; return 0 ;;
+      # base ten, always: bash reads `08` as a malformed octal literal
+      *) printf '%s' "$(( 10#$CEL_LIVENESS_NOW ))"; return 0 ;;
     esac
   fi
   date +%s
@@ -186,7 +187,7 @@ liveness_output_age() { # <key> <pane-text> -> seconds
   row="$(_liveness_row "$key")"
   # shellcheck disable=SC2086
   set -- $row
-  ohash="${2:-}"; changed="${3:-}"; act="${4:--}"; conf="${5:--}"; ans="${6:-0}"
+  ohash="${2:-}"; changed="${3:-}"; act="${4:--}"; conf="${5:--}"; ans="${6:--}"
   if [ "$ohash" != "$hash" ] || [ -z "$changed" ]; then
     _liveness_put "$key" "$hash" "$now" "$act" "$conf" "$ans"
     printf 0
@@ -203,8 +204,8 @@ liveness_backdate() { # <key> <seconds>
   [ -n "$row" ] || return 0
   # shellcheck disable=SC2086
   set -- $row
-  ans="${6:-0}"
-  [ "$ans" -gt 0 ] && ans=$(( ans - back ))
+  ans="${6:--}"
+  case "$ans" in ''|-|*[!0-9]*) ans=- ;; *) ans=$(( ans - back )) ;; esac
   _liveness_put "$key" "$2" "$(( $3 - back ))" "$4" "$5" "$ans"
 }
 
@@ -230,7 +231,11 @@ liveness_cached() { # <key>
   set -- $row
   [ -n "${4:-}" ] && [ "${4:-}" != "-" ] || return 0
   now="$(_liveness_now)"
-  [ "${6:-0}" -gt 0 ] && [ $(( now - ${6:-0} )) -le "$CEL_LIVENESS_CACHE_SECS" ] || return 0
+  # PRESENCE, not "> 0": an answer recorded at time 0 is still an answer
+  # (CEL-79). Rows written before this carry 0 for "never answered", and the
+  # activity check above already refuses those.
+  case "${6:-}" in ''|-|*[!0-9-]*) return 0 ;; esac
+  [ $(( now - ${6} )) -le "$CEL_LIVENESS_CACHE_SECS" ] || return 0
   printf '%s\t%s' "$4" "$5"
 }
 

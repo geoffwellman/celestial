@@ -550,3 +550,26 @@ test_a_provider_refusal_after_the_last_turn_is_still_throttled() {
   assert_eq "$(liveness_pane_silence "$pane")" throttled
   rm -rf "$T"
 }
+
+# CEL-79: a pinned clock with a leading zero is still base ten. Bash arithmetic
+# reads `08` as a malformed octal literal and the age read died with it.
+test_a_pinned_clock_with_a_leading_zero_is_decimal() {
+  _liveness_setup
+  export CEL_LIVENESS_NOW=08
+  liveness_output_age alpha/ABC-1 'x' >/dev/null
+  CEL_LIVENESS_NOW=09
+  assert_eq "$(liveness_output_age alpha/ABC-1 'x')" 1
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
+
+# CEL-79: an answer recorded at time 0 is still an answer. The cache used to
+# read answered_at > 0 as "there is one", so a clock pinned at 0 lost it.
+test_an_answer_recorded_at_time_zero_is_still_cached() {
+  _liveness_setup
+  export CEL_LIVENESS_NOW=0
+  liveness_remember alpha/ABC-1 working 0.9
+  assert_eq "$(liveness_cached alpha/ABC-1)" "working	0.9"
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}

@@ -1111,7 +1111,11 @@ EOF
   # since the operator last looked, so a frozen cursor decides which fixture
   # mail is in the count purely by what today is.
   export CEL_TEST_CURSOR_AGO=3600
-  _console_ago "$CEL_TEST_CURSOR_AGO" '%Y-%m-%dT%H:%M:%SZ' | tr -d '\n' > "$T/state/alpha.root.console.cursor"
+  # ONE clock read (CEL-79): the cursor and the "since HH:MM" the test expects
+  # both come from this epoch. Two reads flaked whenever a minute boundary fell
+  # between setup and the assertion.
+  CEL_TEST_CURSOR_AT=$(( $(date -u +%s) - CEL_TEST_CURSOR_AGO ))
+  date -u -d "@$CEL_TEST_CURSOR_AT" '+%Y-%m-%dT%H:%M:%SZ' | tr -d '\n' > "$T/state/alpha.root.console.cursor"
 }
 
 test_console_unit_view_shows_the_board_the_prs_and_the_digest() {
@@ -1126,7 +1130,7 @@ test_console_unit_view_shows_the_board_the_prs_and_the_digest() {
   assert_contains "$out" '#12'
   assert_contains "$out" 'review APPROVED'
   assert_contains "$out" 'ci '
-  assert_contains "$out" "since $(_console_ago "$CEL_TEST_CURSOR_AGO" '%H:%M')"
+  assert_contains "$out" "since $(date -u -d "@$CEL_TEST_CURSOR_AT" '+%H:%M')"
   # ONE gh call per repo, not one per row: the refresh loop runs every ten
   # seconds and a call per PR is a rate limit waiting to happen.
   assert_eq "$(grep -c 'pr list' "$GH_CALLS")" 2

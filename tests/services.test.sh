@@ -366,7 +366,9 @@ case "\$1 \$2" in
       *'--workspace'*) printf '{"result":{"panes":[]}}' ;;
       *) printf '{"result":{"panes":[{"pane_id":"wAA:p1","workspace_id":"wAA"},{"pane_id":"wBB:p1","workspace_id":"wBB"}]}}' ;;
     esac ;;
-  'agent list') cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
+  'agent list')
+    [ -f "$T/agent-list-err" ] && { cat "$T/agent-list-err" >&2; exit 1; }
+    cat "$T/agents.json" 2>/dev/null || printf '{"result":{"agents":[]}}' ;;
   'pane read')  printf 'last line of the pane\n' ;;
   *) printf '{}' ;;
 esac
@@ -524,5 +526,19 @@ EOF
     > "$CEL_SERVICES_D/cel-auth-gateway.json"
   local out; out="$(cd "$T" && "$CEL" services start cel-auth-gateway 2>&1 || true)"
   assert_contains "$out" "too small to split"
+  _svc_teardown
+}
+
+# CEL-79: when `herdr agent list` itself refuses, the operator is told what
+# herdr said - not "no herdr pane found", which sends them looking for an agent
+# that may be running fine.
+test_workspace_service_reports_herdrs_agent_list_refusal() {
+  _svc_setup
+  _svc_strict_herdr
+  printf 'error: herdr socket not reachable\n' > "$T/agent-list-err"
+  printf 'name: alpha\nservices:\n  - {name: builder, cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+  local out; out="$("$CEL" services start builder --workspace alpha 2>&1 || true)"
+  assert_contains "$out" "herdr socket not reachable"
   _svc_teardown
 }

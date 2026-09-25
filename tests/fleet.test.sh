@@ -939,3 +939,17 @@ test_fleet_serves_a_young_cache_and_fresh_rereads() {
   unset CEL_CACHE CEL_FLEET_CACHE_SECS
   _fleet_teardown
 }
+
+# CEL-79: a young cache file that is not a fleet document (truncated by a full
+# disk, or overwritten by hand) was served as is, and `cel fleet` printed an
+# empty board with success. A cached read is re-validated before it is used.
+test_fleet_rereads_when_the_young_cache_is_corrupt() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30
+  mkdir -p "$CEL_CACHE"
+  printf 'not json{\n' >"$CEL_CACHE/fleet.json"
+  local out; out="$(cmd_fleet --json)"
+  assert_eq "$(printf '%s' "$out" | jq -e '.workspaces | type' 2>/dev/null)" '"array"'
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS
+  _fleet_teardown
+}
