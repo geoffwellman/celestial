@@ -53,3 +53,10 @@ orch_stub_teardown() {
   rm -rf "$T"
   unset CEL_REGISTRY CEL_PROC_ROOT CEL_ORCH_SESSIONS CEL_RESTART_WAIT CEL_RESTART_SLEEP ORCH_STUB_T
 }
+
+orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two omp agents in one cwd
+  printf '{"result":{"agents":[
+    {"agent":"omp","name":"%s","cwd":"%s","pane_id":"w1:p1","agent_status":"idle","agent_session":{"value":"%s/first.jsonl"}},
+    {"agent":"omp","name":"%s","cwd":"%s","pane_id":"w2:p1","agent_status":"idle","agent_session":{"value":"%s/second.jsonl"}}]}}\n' \
+    "$2" "$1" "$T" "$3" "$1" "$T" > "$T/roster.json"
+}

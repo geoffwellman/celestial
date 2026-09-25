@@ -76,3 +76,41 @@ test_runtime_resume_args_come_from_the_manifest() {
   assert_eq "$(agent_resume claude flag)" "--resume"
   assert_eq "$(agent_resume opencode flag)" ""
 }
+
+# The incident: a restart chosen by cwd took the FIRST omp in the checkout -
+# another session in another pane - and relaunched it as the orchestrator.
+test_restart_chooses_the_named_agent_among_two_in_one_cwd() {
+  orch_stub_setup omp
+  orch_stub_roster_two "$T/ws/repos/widget" "" widget-orch
+  local out; out="$(_restart)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$(cat "$HLOG")" "pane send-keys w2:p1"
+  ! grep -q "w1:p1" "$HLOG" || { echo "touched the other pane"; orch_stub_teardown; return 1; }
+  assert_contains "$(_new_cmdline)" "--resume $T/second.jsonl"
+  orch_stub_teardown
+}
+
+test_restart_refuses_two_unnamed_agents_in_one_cwd_and_lists_them() {
+  orch_stub_setup omp
+  orch_stub_roster_two "$T/ws/repos/widget" "" ""
+  local out
+  if out="$(_restart)"; then echo "picked one"; orch_stub_teardown; return 1; fi
+  assert_contains "$out" "w1:p1"
+  assert_contains "$out" "w2:p1"
+  assert_contains "$out" "second.jsonl"
+  assert_contains "$out" "--pane"
+  ! grep -q "send-keys" "$HLOG" || { echo "sent keys"; orch_stub_teardown; return 1; }
+  # the operator names one
+  out="$(_restart --pane w2:p1)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$(cat "$HLOG")" "agent start widget-orch --kind omp --pane w2:p1"
+  orch_stub_teardown
+}
+
+test_restart_never_relaunches_a_pane_whose_agent_has_another_name() {
+  orch_stub_setup omp
+  orch_stub_roster_two "$T/ws/repos/widget" gadget-orch widget-orch
+  local out
+  if out="$(_restart --pane w1:p1)"; then echo "relaunched gadget-orch's pane"; orch_stub_teardown; return 1; fi
+  assert_contains "$out" "gadget-orch"
+  ! grep -q "send-keys" "$HLOG" || { echo "sent keys"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
