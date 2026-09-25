@@ -24,6 +24,8 @@ _CEL_QUOTA=1
 . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 # shellcheck source=lib/workspace.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+# shellcheck source=lib/registry.sh
+. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
 
 _quota_dir() { printf '%s' "${CEL_QUOTA_DIR:-$HOME/.local/share/cel/quota}"; }
 _QUOTA_TTL="${CEL_QUOTA_TTL:-300}"
@@ -407,12 +409,37 @@ def wname($k): if ($k | test("^five_hour|^5h")) then "5h"
 def wscope($k): ($k | sub("^(five_hour|seven_day|one_day|daily|5h|7d|1d)_?"; ""))
                 | if . == "" then null else titlecase end;
 def keywindows: to_entries
-  | map(select((.value | type) == "object" and (.value.utilization // .value.used_percent) != null)
+  | map(select((.key | test("^(five_hour|seven_day|one_day|daily|5h|7d|1d)"))
+               and (.value | type) == "object" and (.value.utilization // .value.used_percent) != null)
         | {name: wname(.key), scope: wscope(.key),
            used_pct: (.value.utilization // .value.used_percent),
            resets_at: ((.value.resets_at // .value.resetsAt) | iso)});
+# THE AUTHORITATIVE LIST, WHEN THE PROVIDER SENDS ONE. Anthropic answers a
+# dozen top-level codename keys (`nimbus_quill`, `amber_gauge`, ...) - most
+# null, some real objects with a null reset - AND `.limits[]` of {kind,
+# percent, resets_at, scope.model.display_name}. Reading the keys printed
+# `nimbus_quill 0% (resets Nimbus Quill)` and lost Fable (CEL-64, the CEL-49
+# bug back again), so when `.limits[]` carries kinds it is the only source.
+def kindname($k): if ($k | test("session|five_hour|5h")) then "5h"
+                  elif ($k | test("weekly|seven_day|7d")) then "7d"
+                  elif ($k | test("daily|one_day|1d")) then "1d"
+                  elif ($k | test("monthly")) then "monthly"
+                  else $k end;
+def haskinds: ((.limits // []) | type) == "array"
+              and ([(.limits // [])[] | select(type == "object" and .kind != null)] | length) > 0;
+def kindwindows: [(.limits // [])[]
+  | select(type == "object" and .kind != null and .percent != null)
+  | {name: kindname(.kind),
+     scope: (.scope.model.display_name // .scope.surface // null),
+     used_pct: .percent,
+     resets_at: (.resets_at | iso)}];
+# opencode Go: `{usage: {rolling, weekly, monthly: {status, percent, resetsAt}}}`.
+def usagewindows: [((.usage // {}) | if type == "object" then to_entries[] else empty end)
+  | select((.value | type) == "object" and .value.percent != null)
+  | {name: (if .key == "rolling" then "5h" else kindname(.key) end), scope: null,
+     used_pct: .value.percent, resets_at: ((.value.resetsAt // .value.resets_at) | iso)}];
 def limitwindows: (.limits // [])
-  | map(select(type == "object")
+  | map(select(type == "object" and .kind == null)
         | . as $w
         | (($w.amount.usedFraction // $w.amount.used_fraction
             // (if (($w.amount.limit // 0) > 0) and ($w.amount.used != null)
@@ -468,7 +495,8 @@ _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
     *)
       jq -c --arg p "$1" --arg a "$2" --arg l "$3" --arg s "$4" "$_CPA_WINDOW_JQ"'
         {provider: $p, account: $a, label: $l, source: $s,
-         windows: ((keywindows + limitwindows) | map(select(.used_pct != null))),
+         windows: ((if haskinds then kindwindows else (keywindows + limitwindows) end)
+                   + usagewindows | map(select(.used_pct != null))),
          extra: ((.extra_usage.disabled_reason // null) as $dr
                  | if $dr == null then {state: "enabled", reason: ""}
                    # `out_of_credits` with `spend.enabled: false` means TOP-UP
@@ -554,15 +582,20 @@ _sub_cliproxy_rows() {
 _sub_opencode_rows() {
   local f="${CEL_OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
   [ -f "$f" ] || return 0
-  local tok; tok="$(jq -r '.opencode.access // .opencode.key // .opencode.token
+  # THE LIVE FILE IS KEYED `opencode-go` AND HOLDS A `key` (2026-09-25), and
+  # the first cut read only `.opencode.*`: no token, no call, no row, and no
+  # word anywhere that anything was missing. The account and label are the
+  # ones omp gives this credential, so the two sources join on it.
+  local tok; tok="$(jq -r '."opencode-go".key // ."opencode-go".access
+                           // .opencode.access // .opencode.key // .opencode.token
                            // .access // .key // empty' "$f" 2>/dev/null || true)"
   [ -n "$tok" ] || return 0
-  local resp doc
-  resp="$(_cpa_usage_fetch opencode "$tok" opencode)"
-  if [ -z "$resp" ]; then _cpa_needs_login_row opencode opencode opencode; return 0; fi
-  doc="$(printf '%s' "$resp" | _cpa_map_usage opencode opencode opencode cliproxy)"
+  local resp doc a=opencode-go l="OpenCode Go"
+  resp="$(_cpa_usage_fetch opencode "$tok" "$a")"
+  if [ -z "$resp" ]; then _cpa_needs_login_row opencode "$a" "$l"; return 0; fi
+  doc="$(printf '%s' "$resp" | _cpa_map_usage opencode "$a" "$l" cliproxy)"
   if [ -n "$doc" ]; then printf '%s\n' "$doc"
-  else _cpa_unreadable_row opencode opencode opencode; fi
+  else _cpa_unreadable_row opencode "$a" "$l"; fi
   return 0
 }
 
@@ -741,25 +774,25 @@ subscription_list() { # [--cached]
   # omp's path stays underneath until the new reader has proved itself on the
   # live box (tools/quota-compare.sh is how that is checked); an empty or
   # absent vault is today's behaviour, exactly.
-  local vrow vp va cpa_seen=0
+  # PER ACCOUNT, NOT PER SOURCE (CEL-64/CEL-80). #84 skipped omp entirely the
+  # moment the vault held any account, and on 2026-09-23 both Codex accounts
+  # and opencode vanished from every surface because the vault held Claude
+  # only. An account is provider + email; the vault's row answers for it when
+  # the vault holds it and could read it, omp's row otherwise, and an account
+  # either source knows appears exactly once.
+  local vrow vk cpa_rows="" cpa_usable=" "
   if [ -n "$(_cpa_accounts)" ]; then
     while IFS= read -r vrow; do
       [ -n "$vrow" ] || continue
-      cpa_seen=1
-      vp="$(printf '%s' "$vrow" | jq -r '.provider')"
-      va="$(printf '%s' "$vrow" | jq -r '.account')"
-      mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
-      printf '%s' "$vrow" > "$dir/subscription-$vp-$va.json"
-      chmod 600 "$dir/subscription-$vp-$va.json" 2>/dev/null || true
-      rows="$rows$vrow
+      cpa_rows="$cpa_rows$vrow
 "
-      keep="$keep subscription-$vp-$va.json"
-      # opencode rides along because CLIProxyAPI does not hold it and the
-      # owner has that row today: dropping it would be the regression.
+      if [ "$(printf '%s' "$vrow" | jq -r '(.windows | length) > 0')" = true ]; then
+        cpa_usable="$cpa_usable$(_sub_key "$vrow") "
+      fi
     done < <( _sub_cliproxy_rows; _sub_opencode_rows )
   fi
-
-  if [ "$cpa_seen" -eq 0 ]; then
+  local omp_keys=" " cpa_providers
+  cpa_providers=" $(printf '%s' "$cpa_rows" | jq -r '.provider' 2>/dev/null | sort -u | tr '\n' ' ')"
   # OMP FIRST, WHEN IT IS THERE. It holds its own refreshed OAuth per account
   # and covers every provider it knows in one call, so for those providers the
   # per-file token reads below are not a second opinion - they are a worse one,
@@ -769,9 +802,12 @@ subscription_list() { # [--cached]
   while IFS= read -r orow; do
     [ -n "$orow" ] || continue
     omp_seen=1
+    vk="$(_sub_key "$orow")"
     op="$(printf '%s' "$orow" | jq -r '.provider')"
-    oa="$(printf '%s' "$orow" | jq -r '.account')"
     case " $omp_providers " in *" $op "*) ;; *) omp_providers="$omp_providers $op" ;; esac
+    case "$cpa_usable" in *" $vk "*) continue ;; esac
+    omp_keys="$omp_keys$vk "
+    oa="$(printf '%s' "$orow" | jq -r '.account')"
     mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
     printf '%s' "$orow" > "$dir/subscription-$op-$oa.json"
     chmod 600 "$dir/subscription-$op-$oa.json" 2>/dev/null || true
@@ -790,7 +826,7 @@ subscription_list() { # [--cached]
   # and every surface printed the old output with nothing anywhere saying so.
   # One line on stderr, and only in that case - stdout is a JSON document that
   # callers parse, and the fallback still produces the best answer available.
-  if [ "$omp_seen" -eq 0 ] && command -v omp >/dev/null 2>&1; then
+  if [ "$omp_seen" -eq 0 ] && [ -z "$cpa_rows" ] && command -v omp >/dev/null 2>&1; then
     printf 'cel quota: omp is on PATH but produced no usable subscription rows (%s); falling back to the per-provider reads, which may be stale\n' \
       "try: omp usage --json" >&2
   fi
@@ -801,11 +837,29 @@ subscription_list() { # [--cached]
     # own credential file, so a box where omp knows Claude and not Codex
     # still sees Codex.
     case " $omp_providers " in *" $p "*) continue ;; esac
+    # nor one the vault holds: its credential files are the fresher copy
+    case "$cpa_providers" in *" $p "*) continue ;; esac
     rows="$rows$(subscription_usage "$p" "$t" "$a" "$label")
 "
     keep="$keep subscription-$p-$a.json"
   done < <(_sub_direct_accounts)
-  fi
+
+  # The vault's rows: every usable one, and an unusable one only for an
+  # account omp could not answer for either - a stale row is still news.
+  local vp va
+  while IFS= read -r vrow; do
+    [ -n "$vrow" ] || continue
+    vk="$(_sub_key "$vrow")"
+    case "$omp_keys" in *" $vk "*) continue ;; esac
+    vp="$(printf '%s' "$vrow" | jq -r '.provider')"
+    va="$(printf '%s' "$vrow" | jq -r '.account')"
+    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+    printf '%s' "$vrow" > "$dir/subscription-$vp-$va.json"
+    chmod 600 "$dir/subscription-$vp-$va.json" 2>/dev/null || true
+    rows="$rows$vrow
+"
+    keep="$keep subscription-$vp-$va.json"
+  done <<< "$cpa_rows"
 
   # THE SWEEP. Every file that is not one of this run's identities is a token
   # hash from before CEL-35 or an account that has been signed out, and both
@@ -829,6 +883,14 @@ subscription_list() { # [--cached]
 #
 # Reads JSON objects on stdin, one per line; prints the array, ordered direct
 # before gateway so the cached path and the live path draw the same list.
+# provider|email - the identity both readers share. omp names a Claude
+# account by its uuid and the vault (whose files carry no uuid on this box)
+# by its email, so the email is the only field both have. No spaces, so the
+# key can live in a space-separated set.
+_sub_key() { # <row-json>
+  printf '%s' "$1" | jq -r '(.provider + "|" + ((.label // .account) | ascii_downcase)) | gsub("\\s"; "_")'
+}
+
 _sub_fold() {
   jq -sc '
     [.[] | select(type == "object")]
@@ -986,15 +1048,17 @@ cmd_quota() { # [provider] [--json]
   # thing before the expensive one is the wrong order for a decision.
   local subs; subs="$(subscription_list)"
   if [ "$json" -eq 1 ]; then
-    local bal="[]" p r
+    local bal="[]" p r wn wd
     for p in $(_quota_providers "$only"); do
-      r="$(quota_remaining "$p" "$wsdir")"
+      while IFS=$'\t' read -r wn wd; do
+      r="$(quota_remaining "$p" "$wd")"
       bal="$(printf '%s' "$bal" | jq -c --arg p "$p" \
-        --arg r "$r" \
-        --arg st "$(quota_state "$p" "$wsdir" "$r")" \
+        --arg r "$r" --arg w "$wn" \
+        --arg st "$(quota_state "$p" "$wd" "$r")" \
         --arg f "$(provider_balance "$p" floor)" \
         --arg u "$(provider_balance "$p" unit)" \
-        '. + [{provider: $p, remaining: $r, state: $st, floor: $f, unit: $u}]')"
+        '. + [{provider: $p, workspace: $w, remaining: $r, state: $st, floor: $f, unit: $u}]')"
+      done < <(_quota_owners "$p" "$wsdir")
     done
     jq -nc --argjson s "$subs" --argjson b "$bal" '{subscriptions: $s, balances: $b}'
     return 0
@@ -1033,24 +1097,55 @@ _quota_providers() { # [provider]
   yq -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST"
 }
 
+# name<TAB>wsdir for every registered workspace whose OWN env (workspace.yaml
+# `env:` or env.local) sets this provider's key - or, when none does, one line
+# for the workspace you are standing in, which is the old answer and still the
+# right one for a box with a single workspace.
+#
+# CEL-80: run from plane, `cel quota` said "no key in this workspace" for
+# OpenRouter and DeepSeek, whose keys live in the workspaces that pay for
+# them. A balance belongs to the workspace that owns the key.
+_quota_owners() { # <provider> [wsdir]
+  local p="$1" cur="${2:-}" keyenv n d found=0
+  keyenv="$(provider_get "$p" key_env)"
+  if [ -n "$keyenv" ]; then
+    for n in $(registry_names 2>/dev/null || true); do
+      d="$(registry_path "$n" 2>/dev/null || true)"
+      [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
+      # the caller's own environment is NOT this workspace's key: unset it
+      # first, so only what the workspace itself declares counts.
+      if [ -n "$( ( set +u; unset "$keyenv"
+                    eval "$(ws_env_exports "$d" 2>/dev/null)" >/dev/null 2>&1
+                    printf '%s' "${!keyenv:-}" ) )" ]; then
+        printf '%s\t%s\n' "$n" "$d"; found=1
+      fi
+    done
+  fi
+  [ "$found" -eq 1 ] && return 0
+  local cn=""; [ -n "$cur" ] && cn="$(ws_name "$cur" 2>/dev/null || true)"
+  printf '%s\t%s\n' "$cn" "$cur"
+}
+
 _quota_balances() { # [provider] [wsdir]
   local wsdir="${2:-}"
   local p list
   if [ -n "${1:-}" ]; then list="$1"; else
     list="$(yq -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST")"
   fi
-  printf '  %-12s %-14s %-8s %s\n' PROVIDER REMAINING FLOOR STATE
-  local r floor st
+  printf '  %-12s %-12s %-14s %-8s %s\n' PROVIDER WORKSPACE REMAINING FLOOR STATE
+  local r floor st wn wd
   for p in $list; do
-    r="$(quota_remaining "$p" "$wsdir")"; floor="$(provider_balance "$p" floor)"
+    while IFS=$'\t' read -r wn wd; do
+    r="$(quota_remaining "$p" "$wd")"; floor="$(provider_balance "$p" floor)"
     # TWO KINDS OF `unknown`, AND THEY ARE NOT THE SAME NEWS. No key in this
     # workspace is where you are standing - credit is workspace-scoped by
     # decision, and a workspace without the key is behaving correctly.
     # Asking and not being able to tell is a fault.
-    if [ "$r" = unknown ]; then st="$(quota_state_human "$(quota_state "$p" "$wsdir" "$r")")"
+    if [ "$r" = unknown ]; then st="$(quota_state_human "$(quota_state "$p" "$wd" "$r")")"
     elif quota_vetoed "$p" "$r"; then st="VETOED - below floor; workers will not be sent here"
     else st="ok"; fi
     [ "$r" = unknown ] || r="$(printf '%.2f' "$r")"
-    printf '  %-12s %-14s %-8s %s\n' "$p" "$r $(provider_balance "$p" unit)" "${floor:--}" "$st"
+    printf '  %-12s %-12s %-14s %-8s %s\n' "$p" "${wn:--}" "$r $(provider_balance "$p" unit)" "${floor:--}" "$st"
+    done < <(_quota_owners "$p" "$wsdir")
   done
 }
