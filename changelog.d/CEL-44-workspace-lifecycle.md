@@ -1,3 +1,5 @@
+### Added
+
 - `cel ws up|down|reset|status`: a workspace declares its shape in
   `workspace.yaml` (`layout.orchestrators`, `layout.panes`) and the plane can
   put it back. `up` reconciles - herdr workspace, declared panes in order, an

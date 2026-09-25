@@ -1,3 +1,5 @@
+### Added
+
 - Liveness: the steward asks what a pane is DOING, not only how long it has
   been quiet. A candidate - a worker herdr calls `working` whose pane text has
   not moved in five minutes, one it calls `idle`/`done` while the ledger says

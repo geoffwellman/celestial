@@ -1,1 +1,3 @@
+### Fixed
+
 - Liveness tests no longer race the wall clock: `lib/liveness.sh` reads time through one seam (`CEL_LIVENESS_NOW` pins it for tests), and the output-age and cache-expiry tests advance a pinned clock instead of real seconds.

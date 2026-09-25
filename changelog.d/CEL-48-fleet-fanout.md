@@ -1,4 +1,4 @@
-# CEL-48
+### Changed
 
 `cel fleet` is a batch, not a fan-out. The whole-box read computed every
 worker row with five `jq` and up to twelve `git` processes of its own, 278

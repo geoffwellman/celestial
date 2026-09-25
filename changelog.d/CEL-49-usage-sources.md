@@ -1,3 +1,5 @@
+### Changed
+
 - `cel quota` and every surface that draws it now read `omp usage --json` when
   omp is on PATH: it holds refreshed OAuth per account, so all three Anthropic
   logins, both ChatGPT ones and opencode are listed, each window comes from the

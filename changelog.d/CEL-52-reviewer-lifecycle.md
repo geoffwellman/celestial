@@ -1,3 +1,5 @@
+### Added
+
 - `cel run reviewer` now records the reviewer it starts (repo, PR, pane,
   agent) in box state, and a second call for the same PR reuses that pane
   instead of splitting another one.

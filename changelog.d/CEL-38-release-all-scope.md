@@ -1,3 +1,5 @@
+### Changed
+
 - `cel-fanout release --all` now takes only `landed` and `abandoned` rows;
   `--merged` adds GitHub's merged rows to the same pass. Every `--all` run
   prints its plan first, naming each skipped row with its state, and
