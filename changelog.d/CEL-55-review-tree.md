@@ -1,3 +1,5 @@
+### Changed
+
 - `cel run reviewer` now opens the pane in a checkout of its own, a detached
   git worktree at the pull request's head, instead of the orchestrator's
   working copy. The reviewer's role body names the head SHA it is reading, the
