@@ -50,7 +50,10 @@ test_cel_linear_guards() {
 }
 
 test_version_prints_semver() {
-  assert_contains "$("$CEL" version)" "celestial v$(tr -d '[:space:]' < "$CEL_ROOT/VERSION")"
+  # nearest tag (VERSION when untagged), not the VERSION file: on a release
+  # bump PR VERSION is already ahead of any tag (CEL-77)
+  source "$CEL_ROOT/lib/version.sh"
+  assert_contains "$("$CEL" version)" "celestial v$(cel_build_tag)"
 }
 
 # An unsupported platform must stop before a supervisor module can start work.
