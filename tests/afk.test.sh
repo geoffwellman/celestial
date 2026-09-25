@@ -570,3 +570,58 @@ test_afk_rebase_retry_refuses_while_afk_is_off() {
   assert_contains "$out" "AFK is off"
   _afk_teardown
 }
+
+# ============================================================ CEL-78
+# ORDERED WORK DOES NOT STOP WHEN THE OWNER STEPS AWAY. A spec already written
+# under .cel/specs/ before AFK went on is work somebody ordered awake.
+test_afk_ordered_spec_written_before_afk_is_authorised_and_logged() {
+  _afk_setup
+  mkdir -p "$T/ws/.cel/specs"; printf 'x\n' > "$T/ws/.cel/specs/CEL-1.md"
+  touch -d '-1 hour' "$T/ws/.cel/specs/CEL-1.md"
+  cmd_afk on --until '+8h' >/dev/null
+  afk_spec_ordered "$T/ws/.cel/specs/CEL-1.md" || { _afk_teardown; return 1; }
+  local out; out="$(afk_authorise ordered_work "$(afk_ordered_evidence "$T/ws/.cel/specs/CEL-1.md" 1 4)" 2>&1)" \
+    || { echo "$out"; _afk_teardown; return 1; }
+  assert_contains "$out" "pre-authorisation 5"
+  assert_contains "$(afk_log_json | jq -r .detail)" "CEL-1.md"
+  assert_contains "$(afk_log_json | jq -r .detail)" "mtime"
+  _afk_teardown
+}
+
+test_afk_spec_written_after_afk_with_no_finding_is_refused() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  mkdir -p "$T/ws/.cel/specs"; printf 'x\n' > "$T/ws/.cel/specs/CEL-2.md"
+  touch -d '+1 minute' "$T/ws/.cel/specs/CEL-2.md"
+  assert_fails afk_spec_ordered "$T/ws/.cel/specs/CEL-2.md"
+  assert_contains "$(afk_authorise ordered_work "$(afk_ordered_evidence "$T/ws/.cel/specs/CEL-2.md" 1 4)" 2>&1)" \
+    "written after AFK went on"
+  assert_contains "$(afk_authorise dispatch "$(_ev_dispatch '{"source":"none"}')" 2>&1)" \
+    "no reviewer or scout finding"
+  # Outside .cel/specs is not ordered work either.
+  printf 'x\n' > "$T/loose.md"; touch -d '-1 hour' "$T/loose.md"
+  assert_fails afk_spec_ordered "$T/loose.md"
+  _afk_teardown
+}
+
+test_afk_release_needs_a_recorded_allowance() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  assert_contains "$(afk_authorise release '{"product":"widget","version":"0.3.0"}' 2>&1)" \
+    "no owner instruction"
+  cmd_afk on --until '+8h' --allow release:widget@0.3.0 >/dev/null
+  afk_authorise release '{"product":"widget","version":"0.3.0"}' >/dev/null || { _afk_teardown; return 1; }
+  assert_contains "$(afk_authorise release '{"product":"widget","version":"0.4.0"}' 2>&1)" \
+    "no owner instruction"
+  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act=="release")] | length')" 1
+  _afk_teardown
+}
+
+test_afk_on_lists_what_keeps_moving() {
+  _afk_setup
+  local out; out="$(cmd_afk on --until '+8h' --allow release:widget@0.3.0 2>&1)"
+  assert_contains "$out" "pre-authorisation 1"
+  assert_contains "$out" "pre-authorisation 5"
+  assert_contains "$out" "release:widget@0.3.0"
+  _afk_teardown
+}

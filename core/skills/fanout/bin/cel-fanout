@@ -626,7 +626,12 @@ cmd_delegate() {
   # convention exists for this check: while the operator is awake nothing about
   # it changes, and while they are asleep it is the difference between
   # dispatching a finding and dispatching an idea.
-  if afk_active; then
+  # PRE-AUTHORISATION 5 (CEL-78): a spec already under .cel/specs/ before AFK
+  # went on is work somebody ordered awake - it keeps moving.
+  if afk_active && afk_spec_ordered "$abs_spec"; then
+    afk_authorise ordered_work "$(afk_ordered_evidence "$abs_spec" "$wused" "$wcap")" >/dev/null \
+      || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
+  elif afk_active; then
     local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
     afk_src="$(sed -n 's/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/p' "$abs_spec" | head -1)"
     afk_quote="$(sed -n 's/^>[[:space:]]*//p' "$abs_spec" | head -1)"

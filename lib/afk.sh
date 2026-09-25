@@ -62,6 +62,8 @@ afk_authorisation() { # <act> -> the pre-authorisation that covers it
     land)           printf 'pre-authorisation 2 (approved, green, gate-verified, mergeable)' ;;
     rebase_retry)   printf 'pre-authorisation 3 (pushed behind by another merge, no new work)' ;;
     dispatch)       printf 'pre-authorisation 4 (a follow-up a reviewer or scout wrote down)' ;;
+    ordered_work)   printf 'pre-authorisation 5 (work ordered before AFK went on: a spec already under .cel/specs/)' ;;
+    release)        printf 'pre-authorisation 5 (a release the owner named before AFK went on: --allow release:<product>@<version>)' ;;
     *) return 1 ;;
   esac
 }
@@ -212,6 +214,44 @@ _afk_check_dispatch() { # <evidence-json>
   fi
 }
 
+# PRE-AUTHORISATION 5: WORK ALREADY ORDERED (CEL-78). A spec the orchestrator
+# wrote under the workspace's .cel/specs/ BEFORE AFK went on is work the owner
+# asked for awake; turning AFK on must not stop it. A spec written after needs
+# a written-down finding (pre-authorisation 4), as before. The evidence is the
+# spec's path and mtime, recorded in the act log.
+_afk_since_epoch() { afk_state_json | jq -r '.since_epoch // ((.since // "") | if . == "" then 0 else (fromdateiso8601? // 0) end)'; }
+afk_spec_ordered() { # <spec-path>
+  local p="$1" m s
+  case "$p" in */.cel/specs/*) ;; *) return 1 ;; esac
+  [ -f "$p" ] || return 1
+  m="$(stat -c %Y "$p" 2>/dev/null)" || return 1
+  s="$(_afk_since_epoch)"
+  [ "${s:-0}" -gt 0 ] && [ "$m" -lt "$s" ]
+}
+afk_ordered_evidence() { # <spec-path> <workers> <cap> -> evidence json
+  local m; m="$(stat -c %Y "$1" 2>/dev/null || printf 0)"
+  jq -nc --arg s "$1" --argjson m "$m" --argjson w "${2:-0}" --argjson c "${3:-0}" \
+    '{spec:$s, spec_mtime:$m, workers:$w, cap:$c}'
+}
+_afk_check_ordered_work() { # <evidence-json>
+  local e="$1" p m s
+  p="$(jq -r '.spec // ""' <<<"$e")"; m="$(jq -r '.spec_mtime // 0' <<<"$e")"
+  case "$p" in */.cel/specs/*) ;; *) _afk_refuse ordered_work "the spec is not under the workspace's .cel/specs/ - it is not work anyone ordered"; return 1 ;; esac
+  s="$(_afk_since_epoch)"
+  [ "$m" -gt 0 ] && [ "${s:-0}" -gt 0 ] && [ "$m" -lt "$s" ] \
+    || { _afk_refuse ordered_work "the spec was written after AFK went on - that needs a reviewer or scout finding (pre-authorisation 4)"; return 1; }
+  [ "$(jq -r '(.workers // 0) < (.cap // 0)' <<<"$e")" = true ] \
+    || { _afk_refuse ordered_work "the worker cap is full ($(jq -r '.workers // 0' <<<"$e")/$(jq -r '.cap // 0' <<<"$e"))"; return 1; }
+}
+# A RELEASE IS NEVER INFERRED. It is allowed only when the owner named that
+# exact product@version with `cel afk on --allow release:<product>@<version>`.
+_afk_check_release() { # <evidence-json>
+  local e="$1" want
+  want="release:$(jq -r '.product // ""' <<<"$e")@$(jq -r '.version // ""' <<<"$e")"
+  afk_state_json | jq -e --arg w "$want" '(.allow // []) | index($w) != null' >/dev/null \
+    || { _afk_refuse release "no owner instruction recorded for $want before AFK went on (cel afk on --allow $want)"; return 1; }
+}
+
 # THE ONE DOOR. Every autonomous act while AFK comes through here: the mode has
 # to be on and unexpired, the act has to be one of the four, its own evidence
 # has to be present, and it has to be happening where this orchestrator lives.
@@ -219,7 +259,7 @@ _afk_check_dispatch() { # <evidence-json>
 afk_authorise() { # <act> <evidence-json> [detail]
   local act="$1" e="${2:-{\}}" detail="${3:-}" auth
   auth="$(afk_authorisation "$act")" \
-    || { _afk_refuse "$act" "that is not one of the four pre-authorised acts"; return 1; }
+    || { _afk_refuse "$act" "that is not one of the five pre-authorised acts"; return 1; }
   if ! afk_active; then
     if afk_expired; then
       _afk_refuse "$act" "AFK expired at $(afk_state_json | jq -r '.until_text // .until // "an hour that has passed"') - turn it on again, or do this awake"
@@ -240,6 +280,9 @@ afk_authorise() { # <act> <evidence-json> [detail]
     return 1
   fi
   "_afk_check_$act" "$e" || return 1
+  if [ "$act" = ordered_work ] && [ -z "$detail" ]; then
+    detail="$(jq -r '"spec \(.spec) (mtime \(.spec_mtime | todate))"' <<<"$e")"
+  fi
   [ -n "$detail" ] || detail="$(jq -rc '. | tostring' <<<"$e" 2>/dev/null || printf '%s' "$e")"
   afk_record "$act" "$auth" "$detail"
   printf '%s authorised: %s\n' "$act" "$auth"
@@ -357,7 +400,7 @@ cmd_afk() {
   local sub="${1:-status}"; shift || true
   case "$sub" in
     on)
-      local until_text="" reason="" scope=""
+      local until_text="" reason="" scope="" allow="[]"
       while [ $# -gt 0 ]; do
         case "$1" in
           --until)  until_text="$2"; shift 2 ;;
@@ -366,7 +409,11 @@ cmd_afk() {
           # not an orchestrator loose on the box, and without a scope there is
           # nothing for an act to be "outside".
           --scope)  scope="$2"; shift 2 ;;
-          *) die "cel afk on: unknown argument '$1' (want --until <when>, --reason <text> or --scope <workspace>)" ;;
+          # An owner instruction recorded BEFORE sleeping: release:<product>@<version>.
+          --allow)
+            case "$2" in release:?*@?*) ;; *) die "cel afk on: --allow wants release:<product>@<version>, got '$2'" ;; esac
+            allow="$(jq -c --arg a "$2" '. + [$a]' <<<"$allow")"; shift 2 ;;
+          *) die "cel afk on: unknown argument '$1' (want --until <when>, --reason <text>, --scope <workspace> or --allow release:<product>@<version>)" ;;
         esac
       done
       local epoch=0
@@ -377,7 +424,8 @@ cmd_afk() {
       mkdir -p "$(afk_dir)"
       jq -n --arg since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg reason "$reason" \
         --arg ut "$until_text" --argjson ue "$epoch" --arg scope "$scope" \
-        '{on:true, since:$since, reason:$reason, until_text:$ut, scope:$scope,
+        --argjson se "$(date +%s)" --argjson allow "$allow" \
+        '{on:true, since:$since, since_epoch:$se, allow:$allow, reason:$reason, until_text:$ut, scope:$scope,
           until:(if $ue > 0 then (($ue|todate)) else "" end), until_epoch:$ue}' \
         > "$(_afk_state)"
       if [ "$epoch" -gt 0 ]; then
@@ -386,6 +434,14 @@ cmd_afk() {
         # An AFK with no hour on it is the one that stays on because nobody
         # turned it off. It is allowed, and it is said out loud.
         c_warn "AFK is on with NO expiry${reason:+ ($reason)} - nothing will turn it off but you: cel afk off"
+      fi
+      # SAY WHAT KEEPS MOVING, so the owner sees it before walking away.
+      printf 'While AFK is on, these keep moving (each logged with its evidence):\n'
+      local a; for a in resolve_thread land rebase_retry dispatch ordered_work; do
+        printf '  - %s: %s\n' "$a" "$(afk_authorisation "$a")"
+      done
+      if [ "$(jq 'length' <<<"$allow")" -gt 0 ]; then
+        printf 'Pre-authorised with --allow:\n'; jq -r '.[] | "  - " + .' <<<"$allow"
       fi
       ;;
     off)
