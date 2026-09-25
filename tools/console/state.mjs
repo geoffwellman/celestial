@@ -85,9 +85,13 @@ export const afkLog = async () => {
 // console that has read the fleet once keeps drawing that read, says how old
 // it is and why, and keeps retrying on the normal cadence. The error alone is
 // shown only when there has never been a good read.
-let lastGood = null;
+// PER SESSION (CEL-79): a module-global lastGood let a second session in the
+// same process draw the first one's board as its own stale read. A caller
+// that holds a session passes it; the default is this process's own console.
+export const fleetSession = () => ({ lastGood: null });
+const defaultSession = fleetSession();
 const hhmm = (d) => d.toTimeString().slice(0, 5);
-export const fleet = async (runner = run) => {
+export const fleet = async (runner = run, session = defaultSession) => {
   const r = await runner(CEL_BIN, ['fleet', '--json']);
   const afk = await (runner === run ? afkState() : runner(CEL_BIN, ['afk', 'status', '--json'])
     .then((a) => { try { return a.ok ? JSON.parse(a.out) : null; } catch { return null; } }));
@@ -99,10 +103,11 @@ export const fleet = async (runner = run) => {
   } else {
     try {
       const doc = JSON.parse(r.out);
-      lastGood = { doc, at: new Date() };
+      session.lastGood = { doc, at: new Date() };
       return { ...doc, afk };
     } catch { error = 'cel fleet returned no JSON'; reason = 'fleet refresh returned no JSON'; }
   }
+  const { lastGood } = session;
   if (lastGood) return { ...lastGood.doc, afk, stale: `stale, as of ${hhmm(lastGood.at)} (${reason})` };
   return { workspaces: [], afk, error };
 };

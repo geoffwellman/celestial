@@ -157,7 +157,12 @@ doctor_github_account() { # <name> <wsdir>
   fi
   host="$(ws_github_ssh_host "$wsdir")"
   [ -n "$host" ] || return "$rc"
-  if grep -qiE "^[[:space:]]*Host([[:space:]]+[^[:space:]]+)*[[:space:]]+${host}([[:space:]]|\$)" "$HOME/.ssh/config" 2>/dev/null; then
+  # A LITERAL, standalone Host token (CEL-79): the alias used to go into a
+  # regex, so its dots matched anything, and a wildcard `Host gh.*` passed for
+  # an entry that names no key for this account.
+  if awk -v h="$host" 'tolower($1) == "host" {
+        for (i = 2; i <= NF; i++) if ($i == h) found = 1 }
+      END { exit !found }' "$HOME/.ssh/config" 2>/dev/null; then
     c_ok "$n: ssh alias $host is in ~/.ssh/config"
   else
     c_err "$n: ssh_host '$host' has no Host entry in ~/.ssh/config - add 'Host $host' with 'HostName github.com' and 'IdentityFile <$user's key>' (and add that key to $user on GitHub)"; rc=1

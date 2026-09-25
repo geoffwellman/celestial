@@ -352,9 +352,22 @@ _svc_pane_forget() { # <wsdir|box> <name>
 # The workspace's own pane, so a service appears beside the workspace it
 # belongs to rather than wherever the operator happened to be standing - the
 # same rule `cel-fanout try` follows for a preview under its worker.
-_svc_ws_pane() { # <wsdir>
-  "$_SERVICES_HERDR" agent list 2>/dev/null \
-    | jq -r --arg d "$1" '[.result.agents[]? | select(.cwd == $d)][0].pane_id // empty' 2>/dev/null || true
+# Answers through globals, like _svc_box_home_pane: a refused `agent list` is
+# herdr's own words in _SVC_WS_ERR, not a silent "no pane" (CEL-79).
+_SVC_WS_PANE=""
+_SVC_WS_ERR=""
+_svc_ws_pane() { # <wsdir> -> _SVC_WS_PANE, or "" and _SVC_WS_ERR
+  local resp rc=0 errf
+  _SVC_WS_PANE=""; _SVC_WS_ERR=""
+  errf="$(mktemp)"
+  resp="$("$_SERVICES_HERDR" agent list 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _SVC_WS_ERR="$(tr '\n' ' ' <"$errf")"
+    [ -n "$_SVC_WS_ERR" ] || _SVC_WS_ERR="herdr agent list exited $rc"
+  fi
+  rm -f "$errf"
+  _SVC_WS_PANE="$(printf '%s' "$resp" \
+    | jq -r --arg d "$1" '[.result.agents[]? | select(.cwd == $d)][0].pane_id // empty' 2>/dev/null || true)"
 }
 
 # WHERE A BOX SERVICE LIVES. A service with no workspace has no pane to sit
@@ -470,7 +483,12 @@ svc_start() { # [wsdir] <name>
   # \`agent list\` miss would start it in the wrong place, silently.
   local target=""
   if [ "$kind" != box ] && [ -n "$d" ]; then
-    target="$(_svc_ws_pane "$d")"
+    _svc_ws_pane "$d"
+    target="$_SVC_WS_PANE"
+    [ -n "$target" ] || [ -z "$_SVC_WS_ERR" ] || {
+      c_err "$name: herdr agent list refused - herdr said: $_SVC_WS_ERR"
+      return 1
+    }
     [ -n "$target" ] || {
       c_err "$name: no herdr pane found for workspace $d - is its agent running? (not starting it in the box services home)"
       return 1

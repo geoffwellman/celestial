@@ -94,9 +94,15 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
     age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
     if [ "$age" -lt "$ttl" ]; then cat "$f"; return 0; fi
   fi
-  local tix="[]" prs="[]" repo slug out
-  tix="$("$(_work_linear)" board --json --workspace "$ws" 2>/dev/null | jq -sc '.' 2>/dev/null || true)"
-  [ -n "$tix" ] || tix="[]"
+  # A FAILED READ IS NOT AN EMPTY ONE (CEL-79). Any refusal marks the pass
+  # failed: the document is still printed (the ledger and mail parts stand),
+  # but it is never cached - the previous cache is kept, and the next read
+  # asks again rather than serving "no PRs" for work.cache_secs.
+  local tix="[]" prs="[]" repo slug out failed=0 raw rc
+  rc=0; raw="$("$(_work_linear)" board --json --workspace "$ws" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || failed=1
+  tix="$(printf '%s' "$raw" | jq -sc '.' 2>/dev/null || true)"
+  [ -n "$tix" ] || { tix="[]"; failed=1; }
   local all="[]"
   for repo in $(ws_repo_names "$wsdir" 2>/dev/null || true); do
     slug="$(ws_repo_get "$wsdir" "$repo" url 2>/dev/null \
@@ -105,9 +111,10 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
     case "$slug" in */*) ;; *) continue;; esac
     # ONE CALL PER REPO, open and closed together: a PR stops being open at
     # exactly the moment it becomes the most interesting thing that happened.
-    out="$("$(_work_gh)" pr list --repo "$slug" --state all --limit "${CEL_WORK_PR_LIMIT:-50}" \
+    rc=0; out="$("$(_work_gh)" pr list --repo "$slug" --state all --limit "${CEL_WORK_PR_LIMIT:-50}" \
       --json number,title,headRefName,state,reviewDecision,statusCheckRollup,createdAt,updatedAt,mergedAt,closedAt,url \
-      2>/dev/null || true)"
+      2>/dev/null)" || rc=$?
+    [ "$rc" -eq 0 ] || failed=1
     [ -n "$out" ] || continue
     all="$(printf '%s' "$all" | jq -c --argjson new "$(printf '%s' "$out" | jq -c '. // []' 2>/dev/null || echo '[]')" \
       --arg repo "$repo" --arg slug "$slug" '. + ($new | map(. + {repo: $repo, slug: $slug}))' 2>/dev/null || printf '%s' "$all")"
@@ -115,8 +122,10 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
   prs="$all"
   local doc
   doc="$(jq -nc --argjson t "$tix" --argjson p "$prs" '{tickets: $t, prs: $p}')"
-  mkdir -p "$(_work_cache_dir)" 2>/dev/null || true
-  printf '%s' "$doc" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null || rm -f "$f.$$"
+  if [ "$failed" -eq 0 ]; then
+    mkdir -p "$(_work_cache_dir)" 2>/dev/null || true
+    printf '%s' "$doc" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null || rm -f "$f.$$"
+  fi
   printf '%s' "$doc"
 }
 
