@@ -588,7 +588,9 @@ _fanout_land_setup() { # <author> <review> <failing> [<draft>] [<state>]
   cat > "$GH_STUB" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
+echo "\$*|GH_TOKEN=\${GH_TOKEN-<unset>}" >> "$GH_LOG.env"
 case "\$1 \$2" in
+  "auth token") case "\$4" in acct-b) echo tok-b;; *) exit 1;; esac;;
   "api user") echo fleetbot;;
   "pr view")  echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
   "pr merge") exit 0;;
@@ -2331,5 +2333,76 @@ test_status_shows_the_silence_instead_of_a_row_that_reads_like_progress() {
   local out
   out="$(cd "$T" && STUB_STATUS=idle STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" status)"
   assert_contains "$out" "unstarted"
+  rm -rf "$T"
+}
+
+# ---- CEL-70: the workspace's own GitHub account ---------------------------
+test_land_runs_every_gh_call_as_the_workspace_account() {
+  _fanout_land_setup fleetbot APPROVED 0
+  printf 'github:\n  user: acct-b\n' >> "$T/workspace.yaml"
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -v '^auth token' "$GH_LOG.env" | grep -vc 'GH_TOKEN=tok-b' || true)" "0"
+  rm -rf "$T"
+}
+test_land_without_a_github_block_keeps_the_active_account() {
+  _fanout_land_setup fleetbot APPROVED 0
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null
+  assert_eq "$(grep -c 'GH_TOKEN=<unset>' "$GH_LOG.env")" "$(wc -l < "$GH_LOG.env" | tr -d ' ')"
+  if grep -q '^auth' "$GH_LOG"; then echo "asked gh for a token with no github block"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+test_land_refuses_when_the_workspace_account_is_not_logged_in() {
+  _fanout_land_setup fleetbot APPROVED 0
+  printf 'github:\n  user: acct-z\n' >> "$T/workspace.yaml"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed as the wrong account"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gh auth login"
+  if grep -q "^pr merge" "$GH_LOG"; then echo "merged anyway"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+test_scout_and_worker_launch_carry_the_token_substitution() {
+  _fanout_setup
+  printf 'github:\n  user: acct-b\n' >> "$T/workspace.yaml"
+  mkdir -p "$T/bin"
+  printf '#!/usr/bin/env bash\n[ "$1 $2" = "auth token" ] && [ "$4" = acct-b ] && { echo tok-b; exit 0; }\nexit 1\n' > "$T/bin/gh"
+  chmod +x "$T/bin/gh"
+  printf 'why slow\n' > "$T/why.md"
+  (cd "$T" && PATH="$T/bin:$PATH" "$BIN" delegate widget WG-GH "$T/spec.md") > /dev/null
+  (cd "$T" && PATH="$T/bin:$PATH" "$BIN" scout widget "$T/why.md") > /dev/null
+  assert_eq "$(grep '^pane send-text' "$STUB_LOG" | grep -c 'gh auth token --user acct-b')" "2"
+  if grep -q tok-b "$STUB_LOG"; then echo "token value reached herdr"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+
+# ---- the history stamp (CEL-45) -------------------------------------------
+# A row carried ONE timestamp - `created` - so half a work item's life was
+# unrecorded: nothing said when it was collected, landed or released, and no
+# timeline could draw what nobody wrote down. Every transition now appends
+# {state, at, by} to the row's `history`.
+
+test_the_ledger_stamps_the_state_it_was_created_in() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].history[0].at' "$T/.cel/delegations.json")" \
+            "$(jq -r '.[0].created' "$T/.cel/delegations.json")"
+  rm -rf "$T"
+}
+
+test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
+  mkdir -p "$STUB_WT/.agent"
+  printf '# Result\nall good\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-1-x >/dev/null)
+  (cd "$T" && "$BIN" release WG-1-x --discard >/dev/null)
+  assert_eq "$(jq -r '.[0].history | map(.state) | join(",")' "$T/.cel/delegations.json")" \
+            "running,collected,released"
+  # every entry says who moved it, and the stamps never go backwards
+  assert_eq "$(jq -r '.[0].history | map(.by != "" and .at != "") | all' "$T/.cel/delegations.json")" true
+  assert_eq "$(jq -r '.[0].history | map(.at) | (. == sort)' "$T/.cel/delegations.json")" true
+  # the row's other fields are untouched by the stamping
+  assert_eq "$(jq -r '.[0].branch' "$T/.cel/delegations.json")" "WG-1-x"
   rm -rf "$T"
 }

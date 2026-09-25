@@ -141,6 +141,30 @@ check_roles_and_runtimes() {
   return "$fail"
 }
 
+# THE WORKSPACE'S OWN GITHUB ACCOUNT (CEL-70). A declared `github.user` that
+# is not logged in makes every launch and every plane call for that workspace
+# refuse, so doctor says it first, with the fix. `gh auth status` lists every
+# logged-in account per host; only whether ours is among them is read here -
+# its output is never printed, so no token (masked or not) reaches the report.
+doctor_github_account() { # <name> <wsdir>
+  local n="$1" wsdir="$2" user host rc=0
+  user="$(ws_github_user "$wsdir")"
+  [ -n "$user" ] || return 0
+  if gh auth status 2>&1 | grep -qE "account ${user}([^A-Za-z0-9-]|\$)"; then
+    c_ok "$n: gh account $user logged in"
+  else
+    c_err "$n: $(ws_github_fix "$user")"; rc=1
+  fi
+  host="$(ws_github_ssh_host "$wsdir")"
+  [ -n "$host" ] || return "$rc"
+  if grep -qiE "^[[:space:]]*Host([[:space:]]+[^[:space:]]+)*[[:space:]]+${host}([[:space:]]|\$)" "$HOME/.ssh/config" 2>/dev/null; then
+    c_ok "$n: ssh alias $host is in ~/.ssh/config"
+  else
+    c_err "$n: ssh_host '$host' has no Host entry in ~/.ssh/config - add 'Host $host' with 'HostName github.com' and 'IdentityFile <$user's key>' (and add that key to $user on GitHub)"; rc=1
+  fi
+  return "$rc"
+}
+
 # Per-registered-workspace audit. Warnings (local-only, uncloned
 # repos, missing gate binaries, stale delegations) never fail the pass; only
 # c_err findings do. Herdr/ledger checks are guarded behind `have herdr` so
@@ -253,6 +277,8 @@ check_workspaces() {
     # listening - and a console that is not running listens to nothing.
     local mailline; mailline="$(fleet_mail_doctor_line "$n" 2>/dev/null || true)"
     [ -z "$mailline" ] || c_warn "${mailline#  }"
+
+    doctor_github_account "$n" "$path" || fail=1
 
     for r in $(ws_repo_names "$path"); do
       url="$(ws_repo_get "$path" "$r" url)"

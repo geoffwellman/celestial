@@ -56,7 +56,8 @@ cmd_promote() { # <name> [--no-remote] [--prefix P] [--gate G]
   else
     org="$(ws_org "$wsdir")"
     have gh || die "gh is required to create a remote (or pass --no-remote)"
-    gh repo create "$org/$name" --private --source "$dest" --push
+    # As the workspace's own account when it declares one (CEL-70).
+    ws_gh "$wsdir" repo create "$org/$name" --private --source "$dest" --push
     url="git@github.com:$org/$name.git"
   fi
 

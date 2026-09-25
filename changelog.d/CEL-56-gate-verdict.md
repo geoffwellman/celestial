@@ -1,3 +1,5 @@
+### Changed
+
 - `cel-verify` now has four outcomes, not three: pass, fail, timed out, and
   **produced no verdict**. A gate whose process was killed before it reported
   an exit status never said the code was wrong, and is no longer recorded as a

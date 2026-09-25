@@ -1,3 +1,5 @@
+### Changed
+
 - `cel ws`: the orchestrator mode for a product is resolved in one place
   (`ws_orchestrator_mode`), and `up`, `up --dry-run`, `status` and the steward
   all read it. A workspace declaring `layout: <string>` (a herdr layout id) no
