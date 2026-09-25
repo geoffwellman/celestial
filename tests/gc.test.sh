@@ -717,3 +717,107 @@ test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
   assert_fails reviewers_find widget 71
   rm -rf "$T"
 }
+
+# ------------------------------------------------- the finished-worker pass
+# CEL-80. On 2026-09-25, 13 of 23 live worker panes belonged to delegations
+# already landed or finished - panes `done` for days, never closed, because
+# workers nest as tabs in their repo's workspace and the worktree pass only
+# ever looked at workspaces whose first pane sat in a worktree. The ledger
+# knows which pane each delegation ran in; that is where this pass starts.
+_gc_done_fixture() { # <state> <agent-status>
+  T="$(mktemp -d)"
+  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml"
+  GC_WS="$T/workspace"; GC_WT="$HOME/.herdr/worktrees/widget/abc-1-task"
+  mkdir -p "$GC_WS/.cel" "$T/repo" "$(dirname "$GC_WT")"
+  git -C "$T/repo" init -q
+  git -C "$T/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repo" update-ref refs/remotes/origin/main HEAD
+  git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$T/repo" worktree add -q -b abc-1-task "$GC_WT"
+  registry_add demo "$GC_WS" ""
+  jq -n --arg w "$GC_WT" --arg s "$1" \
+    '[{id:"ABC-1-task",repo:"widget",branch:"abc-1-task",pane:"w9:p2",worktree:$w,state:$s,history:[]}]' \
+    > "$GC_WS/.cel/delegations.json"
+  GC_AGENTS="$(jq -nc --arg w "$GC_WT" --arg s "$2" \
+    '{result:{agents:[{pane_id:"w9:p2",name:"widget-abc-1-task",cwd:$w,agent_status:$s}]}}')"
+  GC_PR=MERGED
+  GC_SINK="$T/sink"; : > "$GC_SINK"
+  herdr() {
+    case "$1 $2" in
+      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
+      *) return 1;;
+    esac
+  }
+  gh() {
+    [ "$GC_PR" != UNKNOWN ] || return 1
+    case "$1 $2" in
+      "pr list") jq -n --arg s "$GC_PR" '[{state:$s,updatedAt:"2026-01-01T00:00:00Z"}]';;
+      *) return 1;;
+    esac
+  }
+}
+
+test_gc_closes_a_done_pane_whose_delegation_landed() {
+  _gc_done_fixture landed done
+  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  assert_contains "$out" 'closed 1 done panes'
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_working_pane_even_when_its_delegation_landed() {
+  _gc_done_fixture landed working
+  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" 'kept 1: 1 working'
+  rm -rf "$T"
+}
+
+# `finished` with its PR merged is `landed` that nobody wrote down yet: it is
+# reconciled first, and then it qualifies like any other landed row.
+test_gc_reconciles_finished_and_merged_to_landed_then_closes_it() {
+  _gc_done_fixture finished idle
+  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
+  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" landed
+  assert_eq "$(jq -r '.[0].history[-1].by' "$GC_WS/.cel/delegations.json")" gc
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_done_pane_over_dirty_work() {
+  _gc_done_fixture landed done
+  printf 'x' > "$GC_WT/uncommitted.txt"
+  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" '1 dirty'
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_done_pane_whose_pr_is_open_or_unreadable() {
+  local s
+  for s in OPEN UNKNOWN; do
+    _gc_done_fixture landed done
+    GC_PR="$s"
+    _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
+    assert_eq "$(cat "$GC_SINK")" ""
+    rm -rf "$T"
+  done
+}
+
+# A pane id herdr has reused for something else is not this delegation's.
+test_gc_never_closes_a_pane_now_somewhere_else() {
+  _gc_done_fixture landed done
+  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq -c '.result.agents[0].cwd = "/elsewhere"')"
+  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_done_pane_dry_run_says_what_it_would_close_and_closes_nothing() {
+  _gc_done_fixture finished done
+  local out; out="$(_gc_done_panes 1 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" 'would close'
+  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" finished
+  rm -rf "$T"
+}

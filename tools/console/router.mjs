@@ -56,6 +56,8 @@ export const INTENTS = [
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
   ['gateway', 'which accounts or subscriptions are signed in and usable behind the box\u2019s gateway'],
+  // CEL-80: the gateway's web panel, which the owner could not find.
+  ['gateway_panel', 'open the gateway\u2019s web panel or management interface - the cliproxy web page'],
   ['open_service', 'open or look at one named service or preview - give me its URL'],
   ['service_ctl', 'start, stop or restart one named service'],
   ['service_logs', 'what one named service is printing - its log or output'],
@@ -423,6 +425,11 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
     // runtime at all.
     case 'gateway':
       return ['cel gateway status'];
+
+    // The panel is loopback only, so the answer is its URL AND the ssh line
+    // that reaches it from a laptop - never a tailnet address.
+    case 'gateway_panel':
+      return ['cel gateway panel'];
 
     case 'try': {
       const w = workerIn(s, f);

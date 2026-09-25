@@ -46,3 +46,25 @@ jq -r --argjson a "$cpa" --argjson b "$omp" -n '
 
 printf '\n  accounts: cliproxy %s, omp %s\n' \
   "$(printf '%s' "$cpa" | jq -r 'length')" "$(printf '%s' "$omp" | jq -r 'length')"
+
+# THE GATE (CEL-64/CEL-80). `--gate` fails when any account or window omp
+# reports is missing from the MERGED list - `subscription_list`, which is what
+# every surface draws. #84 became the default without passing this, and the
+# owner lost both Codex rows, opencode and Fable the same afternoon.
+# CEL_QUOTA_COMPARE_MERGED is the test seam: a merged list to judge instead.
+if [ "${1:-}" = --gate ]; then
+  merged="${CEL_QUOTA_COMPARE_MERGED:-$(subscription_list 2>/dev/null || printf '[]')}"
+  missing="$(jq -r --argjson m "$merged" --argjson o "$omp" -n '
+    def k($r): ($r.provider + "|" + (($r.label // $r.account) | ascii_downcase));
+    def wk($r): [ ($r.windows // [])[] | k($r) + "|" + .name + (if .scope then " " + .scope else "" end) ];
+    ([ $m[] | k(.) ] ) as $MA | ([ $m[] | wk(.)[] ]) as $MW
+    | ([ $o[] | k(.) | select(. as $x | $MA | index($x) | not) | "account " + . ]
+       + [ $o[] | wk(.)[] | select(. as $x | $MW | index($x) | not) | "window " + . ])
+    | .[]' 2>/dev/null)"
+  if [ -n "$missing" ]; then
+    printf '\n  gate: FAILED - in omp, missing from the merged list:\n'
+    printf '%s\n' "$missing" | sed 's/^/    /'
+    exit 1
+  fi
+  printf '\n  gate: ok - every omp account and window is in the merged list\n'
+fi
