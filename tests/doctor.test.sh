@@ -184,3 +184,34 @@ test_doctor_is_silent_when_afk_was_never_armed() {
   assert_eq "$(doctor_afk_line)" ""
   _doctor_afk_teardown
 }
+
+# CEL-79: the ssh alias check matches the declared alias as a literal,
+# standalone Host token. It used to interpolate it into a regex, so a dot
+# matched any character, and a wildcard Host pattern was taken as the entry.
+_doctor_ssh_fixture() { # <ssh-config-body>
+  T="$(mktemp -d)"
+  mkdir -p "$T/home/.ssh" "$T/bin"
+  printf '%s\n' "$1" > "$T/home/.ssh/config"
+  printf 'name: alpha\ngithub:\n  user: acct-b\n  ssh_host: gh.acct-b\n' > "$T/workspace.yaml"
+  printf '#!/usr/bin/env bash\necho "Logged in to github.com account acct-b (keyring)"\n' > "$T/bin/gh"
+  chmod +x "$T/bin/gh"
+}
+_doctor_ssh_run() { HOME="$T/home" PATH="$T/bin:$PATH" doctor_github_account alpha "$T" 2>&1; }
+
+test_doctor_ssh_alias_accepts_the_literal_host_token() {
+  _doctor_ssh_fixture $'Host other gh.acct-b\n  HostName github.com'
+  local out rc=0; out="$(_doctor_ssh_run)" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" "ssh alias gh.acct-b"
+  rm -rf "$T"
+}
+test_doctor_ssh_alias_is_not_a_regex() {
+  _doctor_ssh_fixture $'Host ghXacct-b\n  HostName github.com'
+  assert_fails _doctor_ssh_run
+  rm -rf "$T"
+}
+test_doctor_ssh_alias_is_not_satisfied_by_a_wildcard_pattern() {
+  _doctor_ssh_fixture $'Host gh.*\n  HostName github.com'
+  assert_fails _doctor_ssh_run
+  rm -rf "$T"
+}

@@ -570,5 +570,11 @@ test_release_fragment_with_two_sections_files_each_under_its_own_heading() {
   out="$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^### Fixed' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^### Added' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
+  # Counting headings proves nothing about where the entries went (CEL-79):
+  # each entry must sit in the section of the heading it was written under.
+  local under
+  under="$(awk '/^### /{h=$0; next} /^- /{print h "|" $0}' <<<"$out")"
+  assert_contains "$under" "### Added|- new thing" || { rm -rf "$T"; return 1; }
+  assert_contains "$under" "### Fixed|- old bug" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
