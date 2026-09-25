@@ -31,6 +31,11 @@
 #                      clamped down the ladder rather than passed through and
 #                      rejected at launch. Absent means the runtime has no
 #                      command-line thinking control.
+#   resume             optional: how cel run resumes a root/orchestrator
+#                      session. `flag` precedes the session herdr recorded
+#                      for the pane (agent_session.value); `value` says what
+#                      that is (path or id). Absent: the runtime cannot
+#                      resume and a restart starts fresh, saying so.
 #   extensions_file    optional: newline-delimited manifest under tools/<agent>/
 #   required           setup fails without it
 #   notes              anything a human needs to know
@@ -54,6 +59,7 @@ agents:
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt-file }
     # Unattended plane-launched sessions skip permission prompts.
     launch_args: [--dangerously-skip-permissions]
+    resume: { flag: --resume, value: id }
     model_flag: --model
     # `claude --help`: "--effort <level>  Effort level for the current session
     # (low, medium, high, xhigh, max)". No `minimal` and no `off`.
@@ -109,6 +115,10 @@ agents:
     # Monitor or UserPromptSubmit, so this hook watches the mailbox, raises
     # ui.notify for new mail and drains unread mail into the next turn.
     inbox_hook: { flag: --hook, file: tools/hooks/inbox.omp.ts }
+    # By the exact session FILE herdr recorded for the pane, never
+    # --continue: several omp sessions share one cwd and --continue picks the
+    # newest, which need not be the orchestrator's (CEL-63).
+    resume: { flag: --resume, value: path }
     # An isolated profile has no vault, so it falls back to the environment -
     # the way to make a workspace's env.local authoritative without touching
     # the personal credentials omp uses interactively.

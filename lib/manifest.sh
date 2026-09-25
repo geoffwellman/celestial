@@ -58,6 +58,11 @@ agent_guard_hook() { # <runtime> <flag|file>
   yq -r --arg a "$1" --arg k "$2" '.agents[$a].guard_hook[$k] // "" | tostring' "$CEL_MANIFEST"
 }
 
+# How a runtime resumes a session (CEL-63): flag and value kind, or "".
+agent_resume() { # <runtime> <flag|value>
+  yq -r --arg a "$1" --arg k "$2" '.agents[$a].resume[$k] // "" | tostring' "$CEL_MANIFEST"
+}
+
 agent_inbox_hook() { # <runtime> <flag|file>
   yq -r --arg a "$1" --arg k "$2" '.agents[$a].inbox_hook[$k] // "" | tostring' "$CEL_MANIFEST"
 }

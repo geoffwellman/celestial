@@ -456,6 +456,19 @@ doctor_afk_line() { # -> one line about AFK, or nothing
     "$until_t" "$(printf '%s' "$s" | jq -r 'if (.reason // "") == "" then "" else " (" + .reason + ")" end')"
 }
 
+doctor_stale_orchestrator_lines() {
+  # shellcheck source=lib/run.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  local rows name ws missing cmd status
+  rows="$(run_stale_orchestrators)"
+  if [ -z "$rows" ]; then c_ok "every live root/orchestrator runs the current launch line"; return 0; fi
+  while IFS=$'\t' read -r name ws missing cmd status; do
+    [ -n "$name" ] || continue
+    c_warn "$name ($ws) runs an older launch line ($missing) - $cmd"
+  done <<<"$rows"
+  return 0
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -554,6 +567,10 @@ cmd_doctor() {
   fi
 
   check_console_deps || fail=1
+  # A warning, never a failure: the orchestrator works, it is just missing
+  # what the last update added (CEL-63).
+  c_hd "Orchestrators"
+  doctor_stale_orchestrator_lines
   # One line, never a failure: most boxes have no gateway, and a red doctor
   # for an optional door teaches people to ignore a red doctor.
   c_hd "Gateway"
