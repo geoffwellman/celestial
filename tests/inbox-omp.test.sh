@@ -84,7 +84,9 @@ const { execFileSync } = require('node:child_process');
   const mode = process.env.MODE;
   const handlers = {}; const notes = []; const sent = [];
   const pi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
-    sendMessage: (m, o) => { sent.push({ m, o }); } };
+    sendMessage: (m, o) => { sent.push({ m, o });
+      if (mode === 'sendthrows' && sent.length === 1) throw new Error('boom');
+      if (mode === 'sendrejects' && sent.length === 1) return Promise.reject(new Error('nope')); } };
   const ctx = { cwd: process.cwd(), hasUI: true,
     isIdle: () => { if (mode === 'throws') throw new Error('x'); return mode !== 'streaming'; },
     ui: { notify: (m, level) => notes.push({ m, level }),
@@ -100,6 +102,7 @@ const { execFileSync } = require('node:child_process');
   for (let i = 0; i < 50 && notes.length < n; i++) await new Promise((r) => setTimeout(r, 100));
   await new Promise((r) => setTimeout(r, 1500)); // past the coalesce window
   const sentBefore = sent.length;
+  if (mode === 'sendthrows' || mode === 'sendrejects') { send('msg-next'); await new Promise((r) => setTimeout(r, 2500)); }
   if (mode === 'burst') { send('msg-late'); await new Promise((r) => setTimeout(r, 2500)); } // turn still in flight
   const turn = await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] });
   await fire('session_shutdown', {});
@@ -152,3 +155,14 @@ test_omp_inbox_ctx_throwing_falls_back_to_notify() {
   assert_eq "$(jq -r '.sent|length' <<<"$out")" "0"
   assert_contains "$(jq -r '.turn.message.content' <<<"$out")" "msg-0"
 }
+
+# CEL-76 review: a failed wake must not lose mail or wedge later wakes.
+_assert_failed_send_keeps_mail() {
+  local out; out="$(_wake "$1")"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "2"          # a later wake still happens
+  assert_contains "$(jq -r '.sent[1].m.content' <<<"$out")" "msg-0" # and carries the lost mail
+  assert_contains "$(jq -r '.sent[1].m.content' <<<"$out")" "msg-next"
+}
+test_omp_inbox_throwing_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendthrows; }
+test_omp_inbox_rejecting_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendrejects; }
