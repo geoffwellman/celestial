@@ -918,3 +918,24 @@ test_fleet_a_plausible_but_wrong_roster_convicts_nobody() {
   _fleet_roster_says_nothing '{"error":"no server"}'
   _fleet_teardown
 }
+
+# CEL-75: THE WHOLE DOCUMENT IS CACHED. At a load average of 32 one read took
+# 67-116 s, and a console refreshing every few seconds stacked read upon read
+# behind it. A second call inside `fleet.cache_secs` is served from the cache
+# under $CEL_CACHE without re-reading a single workspace; `--fresh` re-reads.
+test_fleet_serves_a_young_cache_and_fresh_rereads() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30
+  eval "$(declare -f _fleet_workspace | sed '1s/_fleet_workspace/_fleet_workspace_real/')"
+  _fleet_workspace() { printf 'x\n' >>"$T/reads"; _fleet_workspace_real "$@"; }
+  local a b
+  a="$(cmd_fleet --json)"
+  assert_eq "$(wc -l <"$T/reads" | tr -d ' ')" "2"
+  b="$(cmd_fleet --json)"
+  assert_eq "$b" "$a"
+  assert_eq "$(wc -l <"$T/reads" | tr -d ' ')" "2"
+  cmd_fleet --json --fresh >/dev/null
+  assert_eq "$(wc -l <"$T/reads" | tr -d ' ')" "4"
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS
+  _fleet_teardown
+}
