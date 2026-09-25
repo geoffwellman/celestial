@@ -110,7 +110,8 @@ test_restart_orchestrators_passes_the_restart_as_an_argv() {
   orch_stub_setup omp
   orch_stub_proc 100 widget-orch "$T/ws" omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
-  cmd_run() { printf '%s|' "$@" > "$T/argv"; }
+  eval "_real_$(declare -f cmd_run)"
+  cmd_run() { case " $* " in *" --restart "*) printf '%s|' "$@" > "$T/argv" ;; *) _real_cmd_run "$@" ;; esac; }
   _update_stale_orchestrators 1 >/dev/null
   assert_eq "$(cat "$T/argv")" "orchestrator|--product|widget|--workspace|alpha|--restart|"
   orch_stub_teardown

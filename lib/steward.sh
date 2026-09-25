@@ -1393,26 +1393,41 @@ _steward_update_check() {
   return 0
 }
 
-# ORCHESTRATORS ON AN OLDER LAUNCH LINE (CEL-63), reported ONCE PER BUILD:
-# the finding only changes when the plane does, so a nudge per tick would be
-# the same sentence every five minutes. The marker holds the build the report
-# was made for; one inbox item per workspace that has a stale one.
+# ORCHESTRATORS ON AN OLDER LAUNCH LINE (CEL-63), reported ONCE PER
+# ORCHESTRATOR PER BUILD: the finding only changes when the plane or the
+# orchestrator does, so a nudge per tick would be the same sentence every five
+# minutes. The marker was once a single build sha written on every pass, even
+# a pass that found nothing - so an orchestrator that went stale later in the
+# same build was never reported (Sourcery on #98). It now keys each report by
+# build, orchestrator and the difference found.
 _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
   . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
-  local dir marker build rows ws msg
+  local dir marker build rows fresh ws msg key seen
   dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; marker="$dir/orch-stale-reported"
   build="$(cel_build_sha)"
-  [ "$(cat "$marker" 2>/dev/null)" != "$build" ] || return 0
   rows="$(run_stale_orchestrators)"
-  for ws in $(printf '%s\n' "$rows" | cut -f2 | sort -u); do
+  [ -n "$rows" ] || return 0
+  # Keys from an older build are history: drop them so the file stays small.
+  seen="$(awk -F '\t' -v b="$build" '$1 == b' "$marker" 2>/dev/null || true)"
+  fresh=""
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    printf '%s\n' "$seen" | grep -qxF -- "$build	$key" && continue
+    fresh="$fresh$key"$'\n'
+  done < <(printf '%s\n' "$rows" | cut -f1-3)
+  [ -n "$fresh" ] || return 0
+  for ws in $(printf '%s' "$fresh" | cut -f2 | sort -u); do
     [ -n "$ws" ] || continue
-    msg="$(printf '%s\n' "$rows" | awk -F '\t' -v w="$ws" '$2 == w {
-      printf "%s%s runs an older launch line (missing: %s) - %s", (n++ ? "; " : ""), $1, $3, $4 }')"
+    msg="$(printf '%s' "$fresh" | awk -F '\t' -v w="$ws" '$2 == w {
+      printf "%s%s runs an older launch line (%s)", (n++ ? "; " : ""), $1, $3 }')"
+    msg="$msg - $(printf '%s\n' "$rows" | awk -F '\t' -v w="$ws" '$2 == w { printf "%s%s", (n++ ? "; " : ""), $4 }')"
     c_warn "$msg"
     _steward_raise "$ws" orch-stale status "steward: after the update to $build, $msg"
   done
-  mkdir -p "$dir" 2>/dev/null && printf '%s\n' "$build" > "$marker"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  { [ -z "$seen" ] || printf '%s\n' "$seen"
+    printf '%s' "$fresh" | sed "s/^/$build	/"; } > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
   return 0
 }
 

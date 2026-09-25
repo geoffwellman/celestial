@@ -760,6 +760,18 @@ run_launch_missing() { # <expected-argv-file> <actual-argv-file>
   printf '%s' "$out"
 }
 
+# Both directions of the difference (Sourcery on #98): a flag the current
+# launch has DROPPED is as stale as one it added, so the old line carries
+# something the plane decided to stop passing. Empty when the lines agree.
+run_launch_diff() { # <expected-argv-file> <actual-argv-file> -> "missing: ...; extra: ..."
+  local missing extra out=""
+  missing="$(run_launch_missing "$1" "$2")"
+  extra="$(run_launch_missing "$2" "$1")"
+  [ -z "$missing" ] || out="missing: $missing"
+  [ -z "$extra" ] || out="${out:+$out; }extra: $extra"
+  printf '%s' "$out"
+}
+
 _run_restart_wait() { # <pane>: until no agent is live in it
   local i=0
   while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
@@ -1249,7 +1261,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
 # (/proc/<pid>/cmdline) with what `cel run --dry-run` would launch now.
 #
 # One row per stale root/orchestrator:
-#   name<TAB>workspace<TAB>missing<TAB>restart-command<TAB>status
+#   name<TAB>workspace<TAB>diff<TAB>restart-command<TAB>status<TAB>role<TAB>product
+# (product is `-` for root). The command is for humans to read; callers that
+# run it rebuild the argv from role/workspace/product, never by re-splitting.
 run_stale_orchestrators() {
   local roster ws wsdir p role me name cwd rt live pid line exp act missing cmd
   local lname lpane lstatus lsession
@@ -1292,11 +1306,11 @@ run_stale_orchestrators() {
       # shellcheck disable=SC2086
       printf '%s\n' "$rt" $line > "$exp"
       _run_cmdline "$pid" > "$act"
-      missing="$(run_launch_missing "$exp" "$act")"
+      missing="$(run_launch_diff "$exp" "$act")"
       rm -f -- "$exp" "$act"
       [ -n "$missing" ] || continue
       [ "$lname" != "-" ] || lname="$name"
-      printf '%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$missing" "$cmd" "$lstatus"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$missing" "$cmd" "$lstatus" "$role" "${p:--}"
     done
   done
   return 0

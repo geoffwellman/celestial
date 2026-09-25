@@ -464,7 +464,7 @@ doctor_stale_orchestrator_lines() {
   if [ -z "$rows" ]; then c_ok "every live root/orchestrator runs the current launch line"; return 0; fi
   while IFS=$'\t' read -r name ws missing cmd status; do
     [ -n "$name" ] || continue
-    c_warn "$name ($ws) runs an older launch line (missing: $missing) - $cmd"
+    c_warn "$name ($ws) runs an older launch line ($missing) - $cmd"
   done <<<"$rows"
   return 0
 }

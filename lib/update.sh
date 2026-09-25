@@ -163,20 +163,22 @@ _update_stale_agents() {
 # which the plane cannot see. With 1, idle ones are restarted in place and
 # resumed; working ones are skipped with the reason.
 _update_stale_orchestrators() { # <restart 0|1>
-  local rows name ws missing cmd status shown=0
+  local rows name ws missing cmd status role product shown=0
   rows="$(run_stale_orchestrators)"
   [ -n "$rows" ] || return 0
-  while IFS=$'\t' read -r name ws missing cmd status; do
+  while IFS=$'\t' read -r name ws missing cmd status role product; do
     [ -n "$name" ] || continue
     if [ "$shown" -eq 0 ]; then c_hd "Orchestrators on an older launch line"; shown=1; fi
-    printf '  %s (%s) runs an older launch line (missing: %s) - %s\n' "$name" "$ws" "$missing" "$cmd"
+    printf '  %s (%s) runs an older launch line (%s) - %s\n' "$name" "$ws" "$missing" "$cmd"
     [ "$1" -eq 1 ] || continue
     if [ "$status" = working ]; then
       c_warn "$name skipped: it is working - restart it when idle: $cmd"
       continue
     fi
-    # shellcheck disable=SC2086
-    ( cmd_run ${cmd#cel run } ) || c_warn "$name did not restart - $cmd"
+    local -a argv=("$role")
+    [ "$product" = "-" ] || argv+=(--product "$product")
+    argv+=(--workspace "$ws" --restart)
+    ( cmd_run "${argv[@]}" ) || c_warn "$name did not restart - $cmd"
   done <<<"$rows"
   return 0
 }
