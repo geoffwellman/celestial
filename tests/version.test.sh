@@ -47,6 +47,21 @@ test_version_build_counts_commits_since_the_tag() {
 
   # and the command people actually run says the same thing about this box
   local out; out="$("$CEL_ROOT/bin/cel" version)"
-  assert_contains "$out" "celestial v$(cel_version)+" || return 1
+  assert_contains "$out" "celestial v$(cel_build_tag)+" || return 1
   assert_contains "$out" ", $(cel_build_branch))" || return 1
+}
+
+# A release bump PR: VERSION already says 0.3.0, the tag lands on merge.
+# The build must report the tag it is actually on, not the VERSION claim.
+test_version_release_pr_reports_the_tag_not_version() {
+  local keep="$CEL_ROOT"
+  _ver_fixture
+  printf '0.3.0\n' >"$ROOT/VERSION"
+  git -C "$ROOT" commit -qam 'release 0.3.0'
+
+
+  local out; out="$(cel_build_line)"
+  CEL_ROOT="$keep"; rm -rf "$T"
+  assert_contains "$out" "v0.2.0+1 (" || return 1
+  case "$out" in *0.3.0*) echo "claims 0.3.0: $out"; return 1 ;; esac
 }
