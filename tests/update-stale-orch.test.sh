@@ -180,7 +180,6 @@ test_update_check_previews_the_stale_list() {
 test_stripped_orchestrator_is_found_from_the_pane_shell() {
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
-  orch_stub_pane_shell w1:p1 50 100
   orch_stub_bare_proc 100 omp "--resume=$T/s.jsonl"
   local out; out="$(run_stripped_orchestrators)"
   assert_contains "$out" "widget-orch	alpha	widget	w1:p1	idle	stripped	cel run orchestrator --product widget --workspace alpha --restart"
@@ -193,7 +192,6 @@ test_doctor_fails_a_stripped_orchestrator_and_names_the_command() {
   source "$CEL_ROOT/lib/doctor.sh"
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
-  orch_stub_pane_shell w1:p1 50 100
   orch_stub_bare_proc 100 omp "--resume=$T/s.jsonl"
   local out rc=0
   out="$(doctor_inbox_hook_lines)" || rc=$?

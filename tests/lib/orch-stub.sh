@@ -71,17 +71,13 @@ orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two om
     "$2" "$1" "$T" "$3" "$1" "$T" > "$T/roster.json"
 }
 
-# CEL-85: a process herdr brought back carries none of the launch env, so it
-# is found by walking down from the pane's shell. <pane> <shell-pid> <child-pid>
-orch_stub_pane_shell() {
-  mkdir -p "$PROC/$2" "$PROC/$3"
-  printf 'zsh\0' > "$PROC/$2/cmdline"; printf 'Name:\tzsh\nPPid:\t1\n' > "$PROC/$2/status"
-  printf 'Name:\tomp\nPPid:\t%s\n' "$2" > "$PROC/$3/status"
-  printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[{"pid":%s}]}}}\n' "$2" "$3" > "$T/procinfo-$1.json"
-}
-
-# A bare `omp --resume=<file>` as herdr relaunches it: no hooks, no env.
+# CEL-85: a bare `omp --resume=<file>` as herdr relaunches it after a server
+# restart - no hooks, no CEL_ env - still a child of the pane shell (pid 50).
 orch_stub_bare_proc() { # <pid> <argv...>
   local pid="$1"; shift
-  mkdir -p "$PROC/$pid"; printf '%s\0' "$@" > "$PROC/$pid/cmdline"; : > "$PROC/$pid/environ"
+  mkdir -p "$PROC/$pid" "$PROC/50"
+  printf 'Name:\tomp\nPPid:\t50\n' > "$PROC/$pid/status"
+  [ -f "$PROC/50/status" ] || printf 'Name:\tbash\nPPid:\t1\n' > "$PROC/50/status"
+  ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$PROC/$pid/cwd"
+  printf '%s\0' "$@" > "$PROC/$pid/cmdline"; : > "$PROC/$pid/environ"
 }
