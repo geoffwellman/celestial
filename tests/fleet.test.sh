@@ -639,15 +639,15 @@ _fleet_add_rows() { # <n>
 # being validated once per render rather than being allowed to fail inside
 # whichever program touched it first, which is a process well spent.
 #
-# CEL-81 added the orchestrator rows to every workspace block: one herdr
-# process-info, a /proc walk from the pane shell and two mailbox reads per
-# root/orchestrator, all FIXED cost (per orchestrator, not per worker row) -
-# measured +85 at both 3 and 12 rows (272 and 317), so the slope is unchanged
-# and the fixed part is raised to the branch plus six. The expensive part, a
-# `cel run --dry-run` per orchestrator, is remembered per pid and build.
+# CEL-81 added an orchestrator row per root/orchestrator to every workspace
+# block and was held to THIS ceiling rather than raising it: the candidates
+# come from one jq that also yields the product list (replacing a YAML read),
+# the mail counts are folded into the workspace's existing jq, and the /proc
+# walk is builtins. What is left is one `herdr pane process-info` per LIVE
+# orchestrator - 178 on main, 180 here at 3 rows.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
-  local max=$(( 263 + 5 * rows ))
+  local max=$(( 172 + 5 * rows ))
   if [ "$total" -gt "$max" ]; then
     printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
       "$total" "$max" "$rows" >&2

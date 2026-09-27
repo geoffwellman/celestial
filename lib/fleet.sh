@@ -530,39 +530,63 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   mail="$(inbox_mail_json "$ws" root 2>/dev/null)"
   [ -n "$mail" ] || mail='{"to_root_unread":0,"oldest_secs":0,"reader":""}'
 
+  # The orchestrator candidates are one jq over the workspace and the roster,
+  # and the product list is read off them rather than asked of the YAML a
+  # second time (CEL-81 kept the spawn budget by trading, not by raising it).
+  local cands
+  cands="$(run_orchestrator_candidates "$ws" "$wsdir" "$roster")"
   units=""
-  for product in $(ws_product_names "$wsdir" 2>/dev/null); do
+  for product in $(printf '%s\n' "$cands" | while IFS=$'\t' read -r r p _; do [ "$r" = orchestrator ] && printf '%s\n' "$p"; done); do
     units="$units$(_fleet_unit "$wsdir" "$product" "$roster")
 "
   done
 
+  # The orchestrator rows (CEL-81) are folded into THIS jq, mail included:
+  # the rows arrive as TSV with each mailbox's cursor, and the inbox file is
+  # read here once for all of them - no jq per orchestrator (the budget).
+  local orows ifile
+  orows="$(_fleet_orch_tsv "$ws" "$wsdir" "$roster" "$cands")"
+  ifile="$(_inbox_file "$ws")"
+  [ -f "$ifile" ] || ifile=/dev/null
   printf '%s' "$units" | jq -sc --arg name "$ws" \
     --argjson unread "$unread" --argjson open "$open" --argjson mail "$mail" \
-    --argjson orchs "$(_fleet_orchestrators "$ws" "$roster")" \
-    '{name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: ., orchestrators: $orchs}'
+    --arg orows "$orows" --rawfile inbox "$ifile" \
+    '([$inbox | split("\n")[] | select(length > 0) | (try fromjson catch empty)]) as $mails
+     | ([$mails[] | select(.kind == "resolution") | .ref]) as $done
+     | {name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: .,
+        orchestrators: [$orows | split("\n")[] | select(length > 0) | split("\t")
+          | (if .[9] == "root" then "root" else "\(.[10])-orch" end) as $who
+          | .[11] as $last
+          | {name: .[0], ws: .[1], pane: .[2], status: .[3], since: (.[4] | tonumber? // 0),
+             model: .[5], launch: .[6], detail: (if .[7] == "-" then "" else .[7] end), cmd: .[8],
+             role: .[9], product: .[10],
+             unread: ([$mails[] | select(.kind != "resolution") | select(.to == $who or .to == "all")
+                       | select($last == "" or (.id > $last))] | length),
+             open: ([$mails[] | select(.kind == "decision" or .kind == "blocked")
+                     | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length)}]}'
 }
 
 # EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE (CEL-81), from the same rows
 # `cel update` acts on, so the console shows what `--restart-orchestrators`
-# would do and never runs a probe of its own. Mail is counted per mailbox:
-# root reads `root`, an orchestrator `<product>-orch`.
-_fleet_orchestrators() { # <ws> <roster-json> -> JSON array
-  local name ws pane status since model launch detail cmd role product me unread open out=""
-  while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
-    [ -n "$name" ] || continue
-    if [ "$role" = root ]; then me=root; else me="$product-orch"; fi
-    unread="$(_inbox_count --for "$me" --workspace "$ws" 2>/dev/null || true)"
-    case "$unread" in ''|*[!0-9]*) unread=0 ;; esac
-    open="$(_inbox_open --for "$me" --workspace "$ws" 2>/dev/null | grep -c . || true)"
-    case "$open" in ''|*[!0-9]*) open=0 ;; esac
-    out="$out$name	$ws	$pane	$status	${since:-0}	$model	$launch	$detail	$cmd	$role	$product	$unread	$open
-"
-  done < <(run_orchestrator_rows "$1" "$2")
-  # one jq for the whole list, not one per row (the spawn budget above)
-  printf '%s' "$out" | jq -Rsc '[split("\n")[] | select(length > 0) | split("\t")
-    | {name: .[0], ws: .[1], pane: .[2], status: .[3], since: (.[4] | tonumber? // 0),
-       model: .[5], launch: .[6], detail: (if .[7] == "-" then "" else .[7] end), cmd: .[8],
-       role: .[9], product: .[10], unread: (.[11] | tonumber? // 0), open: (.[12] | tonumber? // 0)}]'
+# would do and never runs a probe of its own. Each row gains the mailbox's
+# furthest cursor, the same rule _inbox_count_one applies (the recipient's
+# own, and for root the console's too), read with builtins. Sessions are not
+# recorded from here: the fleet is a READ.
+_fleet_orch_tsv() { # <ws> <wsdir> <roster-json> <candidates>
+  [ -n "$3" ] || return 0
+  local row name ws pane status since model launch detail cmd role product who last c cand
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r name ws pane status since model launch detail cmd role product <<< "$row"
+    if [ "$role" = root ]; then who=root; else who="$product-orch"; fi
+    last=""
+    for cand in "$(_inbox_dir)/$1.$who.cursor" "$(_inbox_dir)/$1.$who.console.cursor"; do
+      [ -f "$cand" ] || continue
+      c=""; read -r c < "$cand" || true
+      [ "$c" \> "$last" ] && last="$c"
+    done
+    printf '%s\t%s\n' "$row" "$last"
+  done < <(run_orchestrator_rows "$1" "$3" 0 "$2" "$4")
 }
 
 # ONE LINE FOR A MAILBOX NOBODY READS, for `cel doctor`. It lives here rather
