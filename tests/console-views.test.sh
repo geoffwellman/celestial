@@ -131,3 +131,34 @@ process.stdout.write("edge: all good\n");
 ')" || { printf '%s\n' "$out"; return 1; }
   assert_contains "$out" 'edge: all good'
 }
+
+# CEL-81: the ORCHESTRATORS view - every orchestrator's launch line at a
+# glance, and a restart key that refuses on `working` as `--restart` does.
+test_the_orchestrators_view_renders_every_launch_state_and_refuses_working() {
+  local out
+  out="$(_views_node '
+import assert from "node:assert/strict";
+const { orchestratorsOf, orchestratorsView, orchRestart } = await import(process.env.VIEWS_MJS);
+const now = Date.parse("2026-09-27T12:00:00Z");
+const since = Math.floor(now / 1000) - 600;
+const doc = { workspaces: [{ name: "alpha", orchestrators: [
+  { name: "widget-orch", ws: "alpha", pane: "w1:p1", status: "idle", since, model: "m-one", launch: "current", detail: "", role: "orchestrator", product: "widget", unread: 2, open: 1 },
+  { name: "gadget-orch", ws: "alpha", pane: "w2:p1", status: "working", since, model: "-", launch: "stale", detail: "missing: inbox hook", role: "orchestrator", product: "gadget", unread: 0, open: 0 },
+  { name: "alpha-root", ws: "alpha", pane: "w3:p1", status: "idle", since, model: "-", launch: "unknown", detail: "pane w3:p1 reports no shell pid", role: "root", product: "-", unread: 0, open: 0 },
+  { name: "beta-orch", ws: "alpha", pane: "-", status: "gone", since: 0, model: "-", launch: "missing", detail: "mode auto, no live agent", role: "orchestrator", product: "beta", unread: 0, open: 0 },
+]}]};
+const rows = orchestratorsOf(doc);
+assert.equal(rows.length, 4);
+const text = orchestratorsView(rows, 0, now).join("\n");
+for (const s of ["widget-orch", "current", "stale (missing: inbox hook)", "unknown (pane w3:p1 reports no shell pid)", "missing", "10m", "m-one", "2/1"]) assert.ok(text.includes(s), `view lacks ${s}:\n${text}`);
+const ok = orchRestart(rows[0]);
+assert.equal(ok.cmd, "cel run orchestrator --product widget --workspace alpha --restart");
+const busy = orchRestart(rows[1]);
+assert.equal(busy.cmd, undefined);
+assert.ok(/working/.test(busy.why));
+assert.equal(orchRestart(rows[2]).cmd, "cel run root --workspace alpha --restart");
+assert.ok(orchRestart(rows[3]).cmd.startsWith("cel run orchestrator --product beta --workspace alpha"));
+process.stdout.write("orch: all good\n");
+')" || { printf '%s\n' "$out"; return 1; }
+  assert_contains "$out" 'orch: all good'
+}
