@@ -690,6 +690,87 @@ _gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
   return 0
 }
 
+# THE EMPTY PANES (CEL-84). CEL-80 closes a landed delegation's pane while
+# its agent sits idle, but the common case is a worker that already QUIT and
+# left its shell behind. On 2026-09-27 the owner's pane picker held 36 panes
+# with no agent, and 20 were closed by hand. The same scan found a proxy, a
+# script, an editor and the owner's own shells in agentless panes - so "no
+# agent" alone is never enough. A pane is empty only when herdr reports no
+# agent, its foreground is a bare interactive shell with no child, it sits in
+# a worker/scout/reviewer checkout under ~/.herdr/worktrees (or a directory
+# that no longer exists), that checkout holds nothing uncommitted or unpushed
+# beyond .pi/ and .agent/ scratch, and no layout declared it. Closing a pane
+# never removes its worktree; that stays the worktree pass's own decision.
+_gc_idle_kept() { # <reason>; reads why/idle_kept/dry/pane from its caller
+  why[$1]=$(( ${why[$1]:-0} + 1 )); idle_kept=$((idle_kept + 1))
+  [ "$dry" -eq 1 ] && printf '  kept pane %s (%s): %s\n' "$pane" "$cwd" "$1"
+  return 0
+}
+
+_gc_worktree_clean() { # <dir> -> 0 when nothing but .pi/.agent scratch is unsaved
+  local st up
+  st="$(git -C "$1" status --porcelain --untracked-files=all 2>/dev/null)" || return 1
+  st="$(printf '%s\n' "$st" | grep -Ev '^.. "?\.(pi|agent)/' | grep . || true)"
+  up="$(git -C "$1" rev-list HEAD --not --remotes 2>/dev/null)" || return 1
+  [ -z "$st" ] && [ -z "$up" ]
+}
+
+_gc_shell_children() { # <shell-pid> -> one command name per child process
+  [[ "$1" =~ ^[0-9]+$ ]] && [ -d "/proc/$1" ] || return 1
+  ps -o comm= --ppid "$1" 2>/dev/null || true
+}
+
+_gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
+  local dry="$1" panes="$2" row pane cwd label info name inwt n
+  local -A why=()
+  idle_closed=0
+  local idle_kept=0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\x1f' read -r pane cwd label \
+      <<< "$(printf '%s' "$row" | jq -r '[.pane_id, (.cwd // ""), (.label // "")] | join("\u001f")')" || true
+    [ -n "$pane" ] || continue
+    # A layout names the panes it owns (services, dash, pr-watch, notes);
+    # herdr carries that name as the label. A named pane was meant to stay.
+    if [ -n "$label" ]; then _gc_idle_kept declared; continue; fi
+    case "$cwd" in "$HOME"/.herdr/worktrees/*) inwt=1 ;; *) inwt=0 ;; esac
+    info="$(lock_spawn "${lock_fd:-}" herdr pane process-info --pane "$pane" 2>/dev/null)" \
+      && name="$(printf '%s' "$info" | jq -er '.result.process_info
+        | if (.foreground_processes | length) == 1
+             and .foreground_processes[0].pid == .shell_pid
+             and (.foreground_processes[0].name | IN("zsh", "bash", "sh", "fish"))
+          then "" else ([.foreground_processes[]?.name] | first // "unknown") end')" \
+      || { _gc_idle_kept unknown; continue; }
+    # The foreground group misses a background or stopped job ('sleep 100 &',
+    # a suspended editor): the shell is in front, but it is not idle.
+    if [ -z "$name" ]; then
+      name="$(_gc_shell_children "$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid')" | head -1)" \
+        || { _gc_idle_kept unknown; continue; }
+    fi
+    if [ -n "$name" ]; then
+      if [ "$inwt" -eq 1 ]; then _gc_idle_kept "running $name"; else _gc_idle_kept service; fi
+      continue
+    fi
+    [ "$inwt" -eq 1 ] || { _gc_idle_kept "owner shell"; continue; }
+    if [ -d "$cwd" ] && ! _gc_worktree_clean "$cwd"; then _gc_idle_kept dirty; continue; fi
+    if [ "$dry" -eq 1 ]; then
+      printf '  would close empty pane %s (%s)\n' "$pane" "$cwd"
+      idle_closed=$((idle_closed + 1)); continue
+    fi
+    if lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+      c_ok "closed empty pane $pane ($cwd)"
+      idle_closed=$((idle_closed + 1))
+    else
+      c_warn "could not close pane $pane - kept"; _gc_idle_kept refused
+    fi
+  done < <(printf '%s' "$panes" | jq -c '.result.panes[]? | select((.agent // "") == "")')
+  local parts="" r
+  for r in "${!why[@]}"; do parts="${parts:+$parts, }${why[$r]} $r"; done
+  printf 'gc: %s %d empty panes, kept %d%s\n' "$([ "$dry" -eq 1 ] && printf 'would close' || printf closed)" \
+    "$idle_closed" "$idle_kept" "${parts:+: $parts}"
+  return 0
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -755,6 +836,15 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   # Finished workers' panes first: a closed pane is one fewer live process
   # holding its worktree on the next pass.
   _gc_done_panes "$dry" "$agents" "$names"
+  # Then the panes whose agent is gone entirely. Its own roster read: the
+  # agent list omits exactly the panes this pass is for.
+  local all_panes idle_closed=0
+  if all_panes="$(lock_spawn "${lock_fd:-}" herdr pane list 2>/dev/null)" \
+    && printf '%s' "$all_panes" | jq -e '.result.panes | type == "array"' >/dev/null; then
+    _gc_idle_panes "$dry" "$all_panes"
+  else
+    c_warn "pane list unavailable - empty panes kept"
+  fi
   # Complete discovery BEFORE removing anything. A failed pane read must not
   # make its worktree look orphaned to a later pass.
   while IFS= read -r ws_id; do
