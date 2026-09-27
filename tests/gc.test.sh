@@ -821,3 +821,112 @@ test_gc_done_pane_dry_run_says_what_it_would_close_and_closes_nothing() {
   assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" finished
   rm -rf "$T"
 }
+
+# THE EMPTY PANES (CEL-84). A worker that quit leaves its shell behind; 36
+# such panes cluttered the owner's pane picker on 2026-09-27. Only a bare
+# shell in a clean worker checkout (or a deleted one) is empty - a service,
+# an editor, an owner's shell and a layout's pane are all kept.
+_gc_idle_fixture() {
+  T="$(mktemp -d)"
+  export HOME="$T/home"
+  mkdir -p "$T/repo" "$HOME/.herdr/worktrees/widget" "$HOME/ws/alpha"
+  git -C "$T/repo" init -q
+  git -C "$T/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repo" update-ref refs/remotes/origin/main HEAD
+  GC_WT="$HOME/.herdr/worktrees/widget/task"
+  git -C "$T/repo" worktree add -q -b task "$GC_WT"
+  git -C "$GC_WT" update-ref refs/remotes/origin/task HEAD
+  mkdir -p "$GC_WT/.pi" "$GC_WT/.agent"; : > "$GC_WT/.agent/result.md"
+  GC_SINK="$T/sink"; : > "$GC_SINK"
+  GC_PANES='{"result":{"panes":[]}}'
+  declare -gA GC_PROC=()
+  herdr() {
+    case "$1 $2" in
+      "pane process-info")
+        local p="$4" n="${GC_PROC[$4]:-zsh}"
+        if [ "$n" = zsh ]; then
+          jq -n --arg p "$p" '{result:{process_info:{pane_id:$p,shell_pid:10,foreground_process_group_id:10,foreground_processes:[{pid:10,name:"zsh",argv:["/usr/bin/zsh"]}]}}}'
+        else
+          jq -n --arg p "$p" --arg n "$n" '{result:{process_info:{pane_id:$p,shell_pid:10,foreground_process_group_id:20,foreground_processes:[{pid:20,name:$n,argv:[$n]}]}}}'
+        fi;;
+      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
+      *) return 1;;
+    esac
+  }
+}
+_gc_idle_pane() { # <id> <cwd> [label]
+  GC_PANES="$(printf '%s' "$GC_PANES" | jq -c --arg p "$1" --arg c "$2" --arg l "${3:-}" \
+    '.result.panes += [{pane_id:$p,cwd:$c,agent_status:"unknown"} + (if $l == "" then {} else {label:$l} end)]')"
+}
+
+test_gc_closes_an_idle_shell_in_a_clean_worktree() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT"
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" "close w1:p1"
+  rm -rf "$T"
+}
+test_gc_keeps_an_idle_shell_over_dirty_work() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT"; : > "$GC_WT/wip.txt"
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 dirty"
+  rm -rf "$T"
+}
+test_gc_keeps_an_idle_shell_over_unpushed_commits() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT"
+  git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m wip
+  _gc_idle_panes 0 "$GC_PANES" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+test_gc_keeps_a_service_running_in_a_worktree_pane() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT"; GC_PROC[w1:p1]=gadget-server
+  local out; out="$(_gc_idle_panes 1 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "running gadget-server"
+  rm -rf "$T"
+}
+test_gc_keeps_an_owner_shell_outside_the_worktrees() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$HOME/ws/alpha"
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 owner shell"
+  rm -rf "$T"
+}
+test_gc_keeps_a_service_outside_the_worktrees() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$HOME/ws/alpha"; GC_PROC[w1:p1]=widget-proxy
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 service"
+  rm -rf "$T"
+}
+test_gc_closes_an_idle_shell_in_a_deleted_directory() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$HOME/.herdr/worktrees/widget/gone"
+  _gc_idle_panes 0 "$GC_PANES" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" "close w1:p1"
+  rm -rf "$T"
+}
+test_gc_keeps_a_layout_declared_pane() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT" notes
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 declared"
+  rm -rf "$T"
+}
+test_gc_never_touches_a_pane_with_an_agent() {
+  _gc_idle_fixture; _gc_idle_pane w1:p1 "$GC_WT"
+  GC_PANES="$(printf '%s' "$GC_PANES" | jq -c '.result.panes[0].agent = "pi"')"
+  _gc_idle_panes 0 "$GC_PANES" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+test_gc_idle_pane_dry_run_lists_closes_and_keeps_with_reasons() {
+  _gc_idle_fixture
+  _gc_idle_pane w1:p1 "$GC_WT"; _gc_idle_pane w1:p2 "$HOME/ws/alpha"
+  local out; out="$(_gc_idle_panes 1 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "would close empty pane w1:p1"
+  assert_contains "$out" "kept pane w1:p2"
+  assert_contains "$out" "owner shell"
+  rm -rf "$T"
+}
