@@ -881,6 +881,7 @@ cmd_delegate() {
     *)           plabel="$(pane_label worker "$branch")" ;;
   esac
   pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
+  tab_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
 
   _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a

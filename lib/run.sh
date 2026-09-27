@@ -69,6 +69,19 @@ pane_label_set() { # <pane> <label> [herdr-command...]
   return 0
 }
 
+# TABS TOO (CEL-83 addendum): herdr names a tab with a bare number, so a tab
+# that holds one agent carries the same text as its pane. Not for a reviewer:
+# its tab is shared and keeps "PR reviewer". Same rule as the pane: warn, go on.
+tab_label_set() { # <pane> <label> [herdr-command...]
+  local pane="$1" label="$2" tab; shift 2
+  [ $# -gt 0 ] || set -- herdr
+  tab="$("$@" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null || true)"
+  if [ -z "$tab" ] || ! "$@" tab rename "$tab" "$label" >/dev/null 2>&1; then
+    c_warn "could not label the tab of pane $pane '$label' - it keeps its number"
+  fi
+  return 0
+}
+
 # Where a role's body is written for a runtime that injects it from a file.
 #
 # Every orchestrator launch used to overwrite $wsdir/.cel/role-orchestrator.md,
@@ -1256,6 +1269,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
     [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
     pane_label_set "$restart_pane" "$label"
+    tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null
     _run_restart_confirm "$inbox_me" "$wsdir" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
@@ -1313,6 +1327,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
 
   pane_label_set "$pane_id" "$label"
+  # A declared layout titles its own tabs; overwriting one would undo that.
+  [ -n "$layout" ] || tab_label_set "$pane_id" "$label"
 
   # ...and the role mark goes on the launch LINE, after any pane run above:
   # it must not outlive the command it marks.
