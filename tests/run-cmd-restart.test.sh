@@ -121,5 +121,6 @@ test_restart_relabels_the_pane() {
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
   _restart >/dev/null || true
   assert_contains "$(grep '^pane rename' "$HLOG")" "pane rename w1:p1 widget orchestrator"
+  assert_contains "$(grep '^tab rename' "$HLOG")" "tab rename w1:t1 widget orchestrator"
   orch_stub_teardown
 }

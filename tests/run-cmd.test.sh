@@ -728,7 +728,8 @@ _label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
       "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
-      "pane rename") [ -z "${FAIL_RENAME:-}" ] ;;
+      "pane rename"|"tab rename") [ -z "${FAIL_RENAME:-}" ] ;;
+      "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s:t1"}}}' "$3" "${3%%:*}" ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       *) : ;;
@@ -742,6 +743,14 @@ _label_check() { # <expected-label>
   local r s; r="$(grep -n '^pane rename' "$HERDR_LOG" | cut -d: -f1)"
   s="$(grep -n '^agent start' "$HERDR_LOG" | cut -d: -f1)"
   [ "$r" -lt "$s" ] || { echo "rename after agent start"; return 1; }
+  # ...and its tab carries the same text (CEL-83 addendum), except a reviewer's,
+  # which keeps "PR reviewer".
+  if [ -n "${2:-}" ]; then
+    assert_eq "$(grep -c '^tab rename' "$HERDR_LOG" || true)" 0
+  else
+    assert_eq "$(grep -c '^tab rename' "$HERDR_LOG" || true)" 1
+    assert_contains "$(grep '^tab rename' "$HERDR_LOG")" "tab rename w7:t1 $1"
+  fi
 }
 test_run_labels_root_orchestrator_and_worker_panes() {
   _ws; _label_herdr
@@ -755,7 +764,7 @@ test_run_labels_root_orchestrator_and_worker_panes() {
 test_run_labels_the_reviewer_pane() {
   _ws_pr_fixture; _label_herdr
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null 2>&1
-  _label_check "review · widget #12"
+  _label_check "review · widget #12" keep-tab
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }

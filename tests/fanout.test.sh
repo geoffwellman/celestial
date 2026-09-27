@@ -26,6 +26,7 @@ case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
+  "pane get")        echo '{"result":{"pane":{"pane_id":"'"$3"'","tab_id":"wZ:t1"}}}';;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
   "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
@@ -2414,6 +2415,8 @@ test_delegate_labels_worker_pane_before_agent_start() {
   (cd "$T" && "$BIN" delegate widget WG-1-fix-the-widget "$T/spec.md") > /dev/null
   assert_eq "$(grep -c '^pane rename' "$STUB_LOG")" 1
   assert_contains "$(grep '^pane rename' "$STUB_LOG")" "pane rename wZ:p1 WG-1 · fix the widget"
+  assert_eq "$(grep -c '^tab rename' "$STUB_LOG")" 1
+  assert_contains "$(grep '^tab rename' "$STUB_LOG")" "tab rename wZ:t1 WG-1 · fix the widget"
   local r s; r="$(grep -n '^pane rename' "$STUB_LOG" | cut -d: -f1)"
   s="$(grep -n '^agent start' "$STUB_LOG" | cut -d: -f1)"
   [ "$r" -lt "$s" ] || { echo "rename after agent start"; rm -rf "$T"; return 1; }
@@ -2424,11 +2427,12 @@ test_scout_pane_is_labelled_from_the_brief() {
   printf 'brief\n' > "$T/gadget-survey.md"
   (cd "$T" && "$BIN" scout widget "$T/gadget-survey.md") > /dev/null
   assert_contains "$(grep '^pane rename' "$STUB_LOG")" "scout · gadget survey"
+  assert_contains "$(grep '^tab rename' "$STUB_LOG")" "tab rename wZ:t1 scout · gadget survey"
   rm -rf "$T"
 }
 test_delegate_failed_rename_still_launches() {
   _fanout_setup
-  sed -i 's/^case "\$1 \$2" in/[ "$1 $2" = "pane rename" ] \&\& exit 1\ncase "$1 $2" in/' "$STUB"
+  sed -i 's/^case "\$1 \$2" in/case "$1 $2" in "pane rename"|"tab rename") exit 1;; esac\ncase "$1 $2" in/' "$STUB"
   (cd "$T" && "$BIN" delegate widget WG-2-x "$T/spec.md") > /dev/null 2>&1 \
     || { echo "delegate failed on a rename failure"; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$STUB_LOG")" "agent start widget-wg-2-x"

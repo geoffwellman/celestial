@@ -123,6 +123,15 @@ case "$1 $2" in
     printf '{}\n' ;;
   "pane run"|"pane send-text")
     shift 2; _log "pane $* "; printf '{}\n' ;;
+  "pane list")
+    shift 2
+    printf '{"result":{"panes":%s}}\n' \
+      "$(jq -c --arg ws "$(_arg --workspace "$@")" '[.[] | select(.workspace_id == $ws) | .tabs[] | {pane_id, tab_id, cwd, label: (.pane_label // null)}]' "$W")" ;;
+  "tab rename")
+    shift 2; _log "tab rename $*"
+    jq -c --arg t "$1" --arg l "$2" 'map(.tabs |= map(if .tab_id == $t then .label = $l else . end))' \
+      "$W" >"$W.tmp" && mv "$W.tmp" "$W"
+    printf '{}\n' ;;
   *) printf '{}\n' ;;
 esac
 EOF
@@ -468,5 +477,21 @@ test_up_and_status_name_the_source_of_the_effective_mode() {
   assert_contains "$(cat "$STUB_DIR/calls.log")" "agent start bundle-orch"
   ! grep -q 'agent start gadget-orch' "$STUB_DIR/calls.log" \
     || { echo "a manual product was started"; _wslife_teardown; return 1; }
+  _wslife_teardown
+}
+
+# CEL-83: herdr tabs default to a bare number. `up` names any numbered tab in
+# a workspace it owns from what is in it - here, the agent living there.
+test_up_names_a_numbered_tab_from_what_is_in_it() {
+  _wslife_setup
+  cmd_ws_up alpha >/dev/null
+  local id; id="$(jq -r '.[0].workspace_id' "$STUB_DIR/workspaces.json")"
+  jq -c --arg id "$id" 'map(if .workspace_id == $id then .tabs += [{tab_id: ($id + ":t9"), label: "3", pane_id: ($id + ":p9"), cwd: "/tmp"}] else . end)' \
+    "$STUB_DIR/workspaces.json" >"$STUB_DIR/w.tmp" && mv "$STUB_DIR/w.tmp" "$STUB_DIR/workspaces.json"
+  _wslife_put_agent widget-wg-1-x "$id:p9" /tmp
+  : >"$STUB_DIR/calls.log"
+  cmd_ws_up alpha >/dev/null
+  assert_eq "$(grep -c '^tab rename' "$STUB_DIR/calls.log")" 1
+  assert_contains "$(cat "$STUB_DIR/calls.log")" "tab rename $id:t9 widget-wg-1-x"
   _wslife_teardown
 }
