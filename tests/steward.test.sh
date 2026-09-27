@@ -1272,7 +1272,7 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   local old="2020-01-01T00:00:00Z"
   mkdir -p "$CEL_INBOX_DIR"
   printf '{"id":"1","ts":"%s","from":"w","to":"bundle-orch","kind":"decision","message":"merge or wait?"}\n' "$old" > "$CEL_INBOX_DIR/alpha.jsonl"
-  printf '{"id":"2","ts":"%s","from":"w","to":"root","kind":"status","message":"fyi"}\n' "$old" >> "$CEL_INBOX_DIR/alpha.jsonl"
+  printf '{"id":"2","ts":"%s","from":"w","to":"root","kind":"escalation","message":"stuck"}\n' "$old" >> "$CEL_INBOX_DIR/alpha.jsonl"
   local roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"},{"name":"alpha-root","pane_id":"w:p1","cwd":"/y"}]}}'
   PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
   assert_eq "$(grep -c '^agent prompt' "$T/herdr.argv" || true)" "0"
@@ -1375,5 +1375,89 @@ test_cel72_without_a_ledger_row_the_lowercased_guess_is_found() {
 test_cel79_a_ledger_row_excludes_an_agent_at_the_guessed_path() {
   _cel72_fixture idle 1 'home/.herdr/worktrees/widget/wg-72-x'
   assert_contains "$MSG" "nobody on WG-72-x"
+  rm -rf "$T"
+}
+
+# --- CEL-82: steward reminders stop piling up --------------------------------
+# One provider credit alert collected seven steward reminders in a root inbox
+# overnight: the open-decisions reminder was itself a `blocked` item, so the
+# next reminder counted it (1, 2, 3 ... 7), and none was ever superseded.
+test_cel82_one_blocker_and_many_ticks_leave_one_reminder_counting_one() {
+  _orch_fixture; _nudge_herdr_stub
+  mkdir -p "$CEL_INBOX_DIR"
+  printf '{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"blocked","message":"credit gone"}\n' \
+    > "$CEL_INBOX_DIR/alpha.jsonl"
+  local i roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
+  for i in 1 2 3 4; do
+    PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
+  done
+  local open; open="$(cmd_inbox open --for bundle-orch --workspace alpha --json | jq -c 'select(.from == "steward")')"
+  assert_eq "$(printf '%s\n' "$open" | grep -c . || true)" "1"
+  assert_contains "$open" "you have 1 UNRESOLVED"
+  local sup; sup="$(jq -c 'select(.kind == "resolution" and .by == "steward")' "$CEL_INBOX_DIR/alpha.jsonl" | tail -1)"
+  assert_contains "$sup" "superseded by"
+  # the "unresolved for Nh" second opinion to root is gone
+  assert_eq "$(jq -c 'select(.to == "root" and (.message | test("unresolved for")))' "$CEL_INBOX_DIR/alpha.jsonl")" ""
+  rm -rf "$T"
+}
+
+# Worker done-reports need no action, so they never earn an unread reminder.
+test_cel82_status_mail_alone_raises_no_unread_reminder() {
+  _orch_fixture; _nudge_herdr_stub
+  mkdir -p "$CEL_INBOX_DIR"
+  printf '{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"status","message":"done"}\n' \
+    > "$CEL_INBOX_DIR/alpha.jsonl"
+  local roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
+  PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
+  assert_eq "$(jq -c 'select(.from == "steward")' "$CEL_INBOX_DIR/alpha.jsonl")" ""
+  rm -rf "$T"
+}
+
+test_cel82_credit_alert_clears_once_credit_is_above_the_floor() {
+  _rollup_fixture
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "deepseek"
+  QUOTA_REMAINING="5.00"
+  _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}
+
+test_cel82_orchestrator_alert_clears_once_it_is_live() {
+  _orch_fixture
+  mkdir -p "$CEL_INBOX_DIR"
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "will not start"
+  _steward_orchestrators "$LIVE_ROSTER" >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}
+
+# Sourcery on #103: reminders from before CEL-82 have no fp and must be
+# superseded by the first new one, not left open beside it.
+test_cel82_a_legacy_reminder_without_fp_is_superseded() {
+  _orch_fixture
+  mkdir -p "$CEL_INBOX_DIR"
+  printf '{"id":"5","ts":"2020-01-01T00:00:00Z","from":"steward","to":"bundle-orch","kind":"blocked","message":"steward: you have 3 UNRESOLVED decision(s)/blocker(s)"}\n' \
+    > "$CEL_INBOX_DIR/alpha.jsonl"
+  _steward_remind alpha bundle-orch remind-open blocked "steward: you have 1 UNRESOLVED decision(s)/blocker(s)"
+  local open; open="$(cmd_inbox open --for bundle-orch --workspace alpha --json)"
+  assert_eq "$(printf '%s\n' "$open" | grep -c . || true)" "1"
+  assert_contains "$open" "you have 1 UNRESOLVED"
+  rm -rf "$T"
+}
+
+# ...and the old one is resolved BEFORE the new one is written, so an
+# interruption between the writes can never leave two live.
+test_cel82_old_reminder_is_resolved_before_the_new_one_is_written() {
+  _orch_fixture
+  mkdir -p "$CEL_INBOX_DIR"
+  _steward_remind alpha bundle-orch remind-open blocked "first"
+  # fail every write after the first: the resolution must be that write
+  local real; real="$(declare -f _inbox_append)"
+  _inbox_append() { [ -e "$T/wrote" ] && return 1; : > "$T/wrote"; printf '%s\n' "$2" >> "$1"; }
+  assert_fails _steward_remind alpha bundle-orch remind-open blocked "second"
+  eval "$real"
+  assert_eq "$(cmd_inbox open --for bundle-orch --workspace alpha --json | grep -c . || true)" "0"
   rm -rf "$T"
 }
