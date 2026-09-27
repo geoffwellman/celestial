@@ -114,3 +114,13 @@ test_restart_never_relaunches_a_pane_whose_agent_has_another_name() {
   ! grep -q "send-keys" "$HLOG" || { echo "sent keys"; orch_stub_teardown; return 1; }
   orch_stub_teardown
 }
+
+# CEL-83: a restart sets the pane label again.
+test_restart_relabels_the_pane() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  _restart >/dev/null || true
+  assert_contains "$(grep '^pane rename' "$HLOG")" "pane rename w1:p1 widget orchestrator"
+  assert_contains "$(grep '^tab rename' "$HLOG")" "tab rename w1:t1 widget orchestrator"
+  orch_stub_teardown
+}
