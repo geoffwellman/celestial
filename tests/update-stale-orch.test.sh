@@ -173,3 +173,33 @@ test_update_check_previews_the_stale_list() {
   [ ! -f "$T/started" ] || { echo "check restarted something"; orch_stub_teardown; return 1; }
   orch_stub_teardown
 }
+
+# CEL-85: herdr brings an orchestrator back as a bare `omp --resume=<file>` -
+# no inbox hook and no CEL_ env, so the env-keyed lookup above cannot even
+# see it. It is found from the pane's shell downward and reported stripped.
+test_stripped_orchestrator_is_found_from_the_pane_shell() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_pane_shell w1:p1 50 100
+  orch_stub_bare_proc 100 omp "--resume=$T/s.jsonl"
+  local out; out="$(run_stripped_orchestrators)"
+  assert_contains "$out" "widget-orch	alpha	widget	w1:p1	idle	stripped	cel run orchestrator --product widget --workspace alpha --restart"
+  orch_stub_bare_proc 100 omp --hook "$CEL_ROOT/tools/hooks/inbox.omp.ts" "--resume=$T/s.jsonl"
+  assert_contains "$(run_stripped_orchestrators)" "	ok	"
+  orch_stub_teardown
+}
+
+test_doctor_fails_a_stripped_orchestrator_and_names_the_command() {
+  source "$CEL_ROOT/lib/doctor.sh"
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_pane_shell w1:p1 50 100
+  orch_stub_bare_proc 100 omp "--resume=$T/s.jsonl"
+  local out rc=0
+  out="$(doctor_inbox_hook_lines)" || rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "✗"
+  assert_contains "$out" "widget-orch (alpha) is running without its inbox hook"
+  assert_contains "$out" "cel run orchestrator --product widget --workspace alpha --restart"
+  orch_stub_teardown
+}

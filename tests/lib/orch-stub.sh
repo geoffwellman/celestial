@@ -70,3 +70,18 @@ orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two om
     {"agent":"omp","name":"%s","cwd":"%s","pane_id":"w2:p1","agent_status":"idle","agent_session":{"value":"%s/second.jsonl"}}]}}\n' \
     "$2" "$1" "$T" "$3" "$1" "$T" > "$T/roster.json"
 }
+
+# CEL-85: a process herdr brought back carries none of the launch env, so it
+# is found by walking down from the pane's shell. <pane> <shell-pid> <child-pid>
+orch_stub_pane_shell() {
+  mkdir -p "$PROC/$2" "$PROC/$3"
+  printf 'zsh\0' > "$PROC/$2/cmdline"; printf 'Name:\tzsh\nPPid:\t1\n' > "$PROC/$2/status"
+  printf 'Name:\tomp\nPPid:\t%s\n' "$2" > "$PROC/$3/status"
+  printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[{"pid":%s}]}}}\n' "$2" "$3" > "$T/procinfo-$1.json"
+}
+
+# A bare `omp --resume=<file>` as herdr relaunches it: no hooks, no env.
+orch_stub_bare_proc() { # <pid> <argv...>
+  local pid="$1"; shift
+  mkdir -p "$PROC/$pid"; printf '%s\0' "$@" > "$PROC/$pid/cmdline"; : > "$PROC/$pid/environ"
+}
