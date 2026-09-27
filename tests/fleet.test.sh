@@ -638,6 +638,13 @@ _fleet_add_rows() { # <n>
 # so the headroom is real slack and not a repeat of the measurement. One of those jq is the roster
 # being validated once per render rather than being allowed to fail inside
 # whichever program touched it first, which is a process well spent.
+#
+# CEL-81 added an orchestrator row per root/orchestrator to every workspace
+# block and was held to THIS ceiling rather than raising it: the candidates
+# come from one jq that also yields the product list (replacing a YAML read),
+# the mail counts are folded into the workspace's existing jq, and the /proc
+# walk is builtins. What is left is one `herdr pane process-info` per LIVE
+# orchestrator - 178 on main, 180 here at 3 rows.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
   local max=$(( 172 + 5 * rows ))
@@ -696,6 +703,7 @@ _FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
   jq -c --arg t "$T" --arg wt "$WT" '
     .workspaces
+    | map(del(.orchestrators))
     | walk(if type == "string"
            then (sub("\\Q" + $wt + "\\E"; "WT") | sub("\\Q" + $t + "\\E"; "T"))
            else . end)
@@ -952,4 +960,32 @@ test_fleet_rereads_when_the_young_cache_is_corrupt() {
   assert_eq "$(printf '%s' "$out" | jq -e '.workspaces | type' 2>/dev/null)" '"array"'
   unset CEL_CACHE CEL_FLEET_CACHE_SECS
   _fleet_teardown
+}
+
+# CEL-81: one row per orchestrator in the fleet document, so the console reads
+# it rather than running probes of its own - live ones with their launch line,
+# and a product whose mode is auto but has no agent as `missing`.
+test_fleet_json_carries_an_orchestrator_row_per_product() {
+  source "$CEL_ROOT/tests/lib/orch-stub.sh"
+  orch_stub_setup omp
+  # a second product, inserted into the repos list (the stub appended runtime: after it)
+  sed -i 's/^    gate: bun test$/&\n  - name: gadget\n    url: git@github.com:someone\/gadget.git\n    prefix: WGT\n    gate: bun test/' "$T/ws/workspace.yaml"
+  printf 'layout: { orchestrators: auto }\n' >> "$T/ws/workspace.yaml"
+  mkdir -p "$T/ws/repos/gadget"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  local doc w g
+  doc="$(_fleet_doc alpha)"
+  w="$(printf '%s' "$doc" | jq -c '.workspaces[0].orchestrators[] | select(.name == "widget-orch")')"
+  g="$(printf '%s' "$doc" | jq -c '.workspaces[0].orchestrators[] | select(.name == "gadget-orch")')"
+  assert_eq "$(jq -r '.launch' <<<"$w")" "stale"
+  assert_eq "$(jq -r '.status' <<<"$w")" "idle"
+  assert_eq "$(jq -r '.pane' <<<"$w")" "w1:p1"
+  assert_eq "$(jq -r '.ws' <<<"$w")" "alpha"
+  assert_contains "$(jq -r '.detail' <<<"$w")" "missing:"
+  assert_eq "$(jq -r '.unread | type' <<<"$w")" "number"
+  assert_eq "$(jq -r '.open | type' <<<"$w")" "number"
+  assert_eq "$(jq -r '.launch' <<<"$g")" "missing"
+  assert_eq "$(jq -r '.status' <<<"$g")" "gone"
+  orch_stub_teardown
 }

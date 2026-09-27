@@ -654,6 +654,54 @@ export const servicesView = (rows = []) => {
   return out;
 };
 
+// THE ORCHESTRATORS VIEW (CEL-81). "How do we update all the orchestrators
+// again? Can we show their state?" - every root/orchestrator on the box, with
+// the launch-line verdict `cel update --restart-orchestrators` acts on. All of
+// it is read from the fleet document; the view runs no probe of its own.
+export const orchestratorsOf = (doc) => (doc && Array.isArray(doc.workspaces) ? doc.workspaces : [])
+  .flatMap((ws) => (Array.isArray(ws.orchestrators) ? ws.orchestrators : [])
+    .map((o) => ({ ...o, ws: o.ws || ws.name })));
+
+export const launchText = (o) => {
+  if (o.launch === 'stale') return `stale (${o.detail || '?'})`;
+  if (o.launch === 'unknown') return `unknown (${o.detail || 'no reason given'})`;
+  if (o.launch === 'missing') return 'missing - no live agent';
+  return o.launch || '-';
+};
+
+export const ORCH_COLS = { name: 18, ws: 8, pane: 8, status: 8, since: 6, model: 22, mail: 5 };
+
+export const orchLine = (o, now = Date.now()) => {
+  const since = Number(o.since) > 0 ? quiet(Math.floor(now / 1000) - Number(o.since)) : '-';
+  return [
+    cut(o.name, ORCH_COLS.name).padEnd(ORCH_COLS.name),
+    cut(o.ws, ORCH_COLS.ws).padEnd(ORCH_COLS.ws),
+    cut(o.pane || '-', ORCH_COLS.pane).padEnd(ORCH_COLS.pane),
+    cut(o.status || '-', ORCH_COLS.status).padEnd(ORCH_COLS.status),
+    since.padEnd(ORCH_COLS.since),
+    cut(o.model || '-', ORCH_COLS.model).padEnd(ORCH_COLS.model),
+    `${o.unread ?? 0}/${o.open ?? 0}`.padEnd(ORCH_COLS.mail),
+    launchText(o),
+  ].join(' ');
+};
+
+export const orchestratorsView = (rows = [], sel = -1, now = Date.now()) => {
+  const out = ['ORCHESTRATORS  (mail = unread/open)'];
+  if (!rows.length) return [...out, '  no orchestrators in any workspace'];
+  rows.forEach((o, i) => out.push(`${i === sel ? '▸' : ' '} ${orchLine(o, now)}`));
+  return out;
+};
+
+// The restart key. A PROPOSAL, and it refuses on `working` exactly as
+// `cel run ... --restart` does: an orchestrator mid-turn loses the turn.
+// A missing one is started rather than restarted.
+export const orchRestart = (o = {}) => {
+  if (o.status === 'working') return { why: `${o.name} is working - restart it when it is idle` };
+  if (o.launch === 'missing') return { cmd: `cel run orchestrator --product ${o.product} --workspace ${o.ws}` };
+  if (o.role === 'root') return { cmd: `cel run root --workspace ${o.ws} --restart` };
+  return { cmd: `cel run orchestrator --product ${o.product} --workspace ${o.ws} --restart` };
+};
+
 export const fleetTable = (doc, services = {}) => {
   const out = ['FLEET'];
   if (doc.error) out.push(`  ! ${doc.error}`);

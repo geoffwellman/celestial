@@ -23,6 +23,7 @@ export const BINDINGS = {
     ['Ctrl+F', 'focus the selected unit\u2019s orchestrator'],
     ['Ctrl+O', 'open the workspace dashboard'],
     ['T / Ctrl+Y', 'the TIMELINE - mail, delegations and merges in one column'],
+    ['O', 'the ORCHESTRATORS - every one on the box, its status and launch line'],
     ['click / double-click', 'select / open the unit view'],
     ['wheel', 'scroll the panel'],
   ],
@@ -131,6 +132,8 @@ export const legend = (pane) => {
       return 'r resolve · p reply · g go to · u unit · k worker · Esc back · ? help';
     case 'unit':
       return '↑/↓ worker · Enter why · ^T panel · f focus · n nudge · m message · t talk · c/C collect · x/X release · R restart · s mem · Esc back · ? help';
+    case 'orchestrators':
+      return '↑/↓ select · r restart (refused while working) · Esc back · ? help';
     case 'services':
       return '↑/↓ select · o open · S start/stop · r restart · L logs · x stop preview · Esc back · ? help';
     case 'board':
@@ -150,7 +153,7 @@ export const legend = (pane) => {
     case 'output':
       return 'PgUp/PgDn scroll · ^L collapse · ^T panel · r raw · ? help';
     default:
-      return '↑/↓ select · Enter unit · S services · ^T panel · ^F focus · ^O dashboard · q quota · G gateway panel · T timeline · ^P/^N history · ? help';
+      return '↑/↓ select · Enter unit · S services · O orchestrators · ^T panel · ^F focus · ^O dashboard · q quota · G gateway panel · T timeline · ^P/^N history · ? help';
   }
 };
 
