@@ -111,6 +111,32 @@ _wslife_held_work() { # <wsdir> -> lines; return 0 read ok, 3 cannot tell
   return 0
 }
 
+_wslife_name_tabs() { # <ws_id> <dry>
+  local ws="$1" dry="$2" tabs panes agents tab name
+  tabs="$(herdr tab list --workspace "$ws" 2>/dev/null \
+    | jq -r '.result.tabs[]? | select(((.label // "") == "") or ((.label // "") | test("^[0-9]+$"))) | .tab_id' 2>/dev/null || true)"
+  [ -n "$tabs" ] || return 0
+  panes="$(herdr pane list --workspace "$ws" 2>/dev/null || true)"
+  agents="$(herdr agent list 2>/dev/null || true)"
+  while read -r tab; do
+    [ -n "$tab" ] || continue
+    name="$(jq -rn --argjson p "${panes:-null}" --argjson a "${agents:-null}" --arg t "$tab" '
+      [($p.result.panes // [])[] | select(.tab_id == $t)] as $mine
+      | ([$mine[] | (.label // .pane_label) // empty | select(. != "")][0]
+         // ([($a.result.agents // [])[] | select(.pane_id as $x | $mine | any(.pane_id == $x)) | .name // empty][0])
+         // empty)' 2>/dev/null || true)"
+    [ -n "$name" ] || continue
+    name="$(_pane_label_cap "$name")"
+    if [ "$dry" -eq 1 ]; then
+      _wslife_say "tab $tab" "would name '$name'"
+    elif herdr tab rename "$tab" "$name" >/dev/null 2>&1; then
+      _wslife_say "tab $tab" "named '$name'"
+    else
+      c_warn "could not name tab $tab '$name'"
+    fi
+  done <<< "$tabs"
+}
+
 # --------------------------------------------------------------------- up
 cmd_ws_up() { # <name> [--dry-run]
   local name="" dry=0
@@ -166,6 +192,10 @@ cmd_ws_up() { # <name> [--dry-run]
       || c_warn "pane '$pane_label' opened but '$pane_cmd' could not be typed into it"
     _wslife_say "pane $pane_label" "created${pane_cmd:+ ($pane_cmd)}"
   done < <(ws_layout_panes "$wsdir")
+
+  # NUMBERED TABS (CEL-83 addendum). herdr names a tab with a bare number;
+  # name each from what is in it - a pane's label, else its agent's name.
+  [ -z "$ws_id" ] || _wslife_name_tabs "$ws_id" "$dry"
 
   # The orchestrators. A live agent in the product's own directory IS its
   # orchestrator, named or not - see _run_live_agent_in_cwd.

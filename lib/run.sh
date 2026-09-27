@@ -14,6 +14,74 @@ _CEL_RUN=1
 # shellcheck source=lib/gateway.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
 
+# PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
+# (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
+# every pane the plane starts also gets herdr's free-text label. herdr takes
+# 300+ characters without complaint; the cap is what reads well, not a limit.
+CEL_PANE_LABEL_MAX=40
+
+_pane_label_words() { # <slug> -> words separated by single spaces
+  printf '%s' "$1" | tr -s -- '-_.' '   ' | sed -E 's/^ +| +$//g'
+}
+
+_pane_label_cap() { # <label> -> label cut on a word boundary with an ellipsis
+  local LC_ALL=C.UTF-8 s="$1" max="$CEL_PANE_LABEL_MAX"
+  if [ "${#s}" -le "$max" ]; then printf '%s' "$s"; return 0; fi
+  local cut="${s:0:$((max - 1))}"
+  # Back off to the last whole word, unless that leaves nothing to read.
+  case "${s:$((max - 1)):1}" in
+    " ") ;;
+    *) [ "${cut% *}" = "$cut" ] || cut="${cut% *}" ;;
+  esac
+  cut="${cut%"${cut##*[! ]}"}"
+  printf '%s…' "${cut% ·}"
+}
+
+pane_label() { # <worker|scout|spike|reviewer|orchestrator|root|direct> <args...>
+  local kind="$1"; shift
+  local l
+  case "$kind" in
+    worker)
+      local b="${1##*/}" t rest
+      if [[ "$b" =~ ^([A-Za-z]+-[0-9]+)(-(.*))?$ ]]; then
+        t="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+        rest="$(_pane_label_words "${BASH_REMATCH[3]}")"
+        l="$t${rest:+ · $rest}"
+      else
+        l="$(_pane_label_words "$b")"
+      fi ;;
+    scout|spike) l="$kind · $(_pane_label_words "$1")" ;;
+    reviewer)    l="review · $1 #$2" ;;
+    orchestrator) l="$1 orchestrator" ;;
+    root)        l="$1 root" ;;
+    *)           l="$1 $kind" ;;
+  esac
+  _pane_label_cap "$l"
+}
+
+# After the pane exists and before the agent starts. A label is a nicety: a
+# failed rename warns and the launch goes on.
+pane_label_set() { # <pane> <label> [herdr-command...]
+  local pane="$1" label="$2"; shift 2
+  [ $# -gt 0 ] || set -- herdr
+  "$@" pane rename "$pane" "$label" >/dev/null 2>&1 \
+    || c_warn "could not label pane $pane '$label' - it starts unlabelled"
+  return 0
+}
+
+# TABS TOO (CEL-83 addendum): herdr names a tab with a bare number, so a tab
+# that holds one agent carries the same text as its pane. Not for a reviewer:
+# its tab is shared and keeps "PR reviewer". Same rule as the pane: warn, go on.
+tab_label_set() { # <pane> <label> [herdr-command...]
+  local pane="$1" label="$2" tab; shift 2
+  [ $# -gt 0 ] || set -- herdr
+  tab="$("$@" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null || true)"
+  if [ -z "$tab" ] || ! "$@" tab rename "$tab" "$label" >/dev/null 2>&1; then
+    c_warn "could not label the tab of pane $pane '$label' - it keeps its number"
+  fi
+  return 0
+}
+
 # Where a role's body is written for a runtime that injects it from a file.
 #
 # Every orchestrator launch used to overwrite $wsdir/.cel/role-orchestrator.md,
@@ -889,7 +957,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
 
   local tag="${role:-direct}" alias_name cwd runtime rolefile="" bind="$repo"
-  local review_head="" review_base="" review_path="" repodir=""
+  local review_head="" review_base="" review_path="" repodir="" label
   case "$role" in
     "")
       alias_name="$repo/direct"
@@ -955,6 +1023,13 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
         cwd="$review_path"
       fi
       ;;
+  esac
+  case "$role" in
+    "")           label="$(pane_label direct "$repo")" ;;
+    root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
+    orchestrator) label="$(pane_label orchestrator "$product")" ;;
+    worker)       label="$(pane_label worker "$branch")" ;;
+    reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
   esac
 
   # ONE ORCHESTRATOR PER PRODUCT, AND THE DUPLICATE IS REFUSED HERE. This is
@@ -1167,6 +1242,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     have herdr || die "cel run: herdr is not on PATH"
     have jq    || die "cel run: jq is not on PATH"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
+    pane_label_set "$pane_id" "$label"
     _run_mark_launch "$pane_id" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
     # Recorded AFTER the launch: a row for a pane that never started is a row
@@ -1192,6 +1268,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     _run_restart_wait "$restart_pane" \
       || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
     [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
+    pane_label_set "$restart_pane" "$label"
+    tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null
     _run_restart_confirm "$inbox_me" "$wsdir" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
@@ -1247,6 +1325,10 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # Typed into the pane's own shell, so the export survives into the agent the
   # next command starts - and the bearer is expanded there, by omp, never here.
   [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
+
+  pane_label_set "$pane_id" "$label"
+  # A declared layout titles its own tabs; overwriting one would undo that.
+  [ -n "$layout" ] || tab_label_set "$pane_id" "$label"
 
   # ...and the role mark goes on the launch LINE, after any pane run above:
   # it must not outlive the command it marks.
