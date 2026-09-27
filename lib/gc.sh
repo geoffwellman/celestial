@@ -715,6 +715,11 @@ _gc_worktree_clean() { # <dir> -> 0 when nothing but .pi/.agent scratch is unsav
   [ -z "$st" ] && [ -z "$up" ]
 }
 
+_gc_shell_children() { # <shell-pid> -> one command name per child process
+  [[ "$1" =~ ^[0-9]+$ ]] && [ -d "/proc/$1" ] || return 1
+  ps -o comm= --ppid "$1" 2>/dev/null || true
+}
+
 _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
   local dry="$1" panes="$2" row pane cwd label info name inwt n
   local -A why=()
@@ -729,7 +734,6 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
     # herdr carries that name as the label. A named pane was meant to stay.
     if [ -n "$label" ]; then _gc_idle_kept declared; continue; fi
     case "$cwd" in "$HOME"/.herdr/worktrees/*) inwt=1 ;; *) inwt=0 ;; esac
-    [ -d "$cwd" ] || inwt=1        # a deleted checkout counts as a worker's
     info="$(lock_spawn "${lock_fd:-}" herdr pane process-info --pane "$pane" 2>/dev/null)" \
       && name="$(printf '%s' "$info" | jq -er '.result.process_info
         | if (.foreground_processes | length) == 1
@@ -737,6 +741,12 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
              and (.foreground_processes[0].name | IN("zsh", "bash", "sh", "fish"))
           then "" else ([.foreground_processes[]?.name] | first // "unknown") end')" \
       || { _gc_idle_kept unknown; continue; }
+    # The foreground group misses a background or stopped job ('sleep 100 &',
+    # a suspended editor): the shell is in front, but it is not idle.
+    if [ -z "$name" ]; then
+      name="$(_gc_shell_children "$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid')" | head -1)" \
+        || { _gc_idle_kept unknown; continue; }
+    fi
     if [ -n "$name" ]; then
       if [ "$inwt" -eq 1 ]; then _gc_idle_kept "running $name"; else _gc_idle_kept service; fi
       continue
