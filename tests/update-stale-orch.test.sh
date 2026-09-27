@@ -116,3 +116,60 @@ test_restart_orchestrators_passes_the_restart_as_an_argv() {
   assert_eq "$(cat "$T/argv")" "orchestrator|--product|widget|--workspace|alpha|--restart|"
   orch_stub_teardown
 }
+
+# CEL-81: the resolver read /proc/1187 - systemd --user, an ANCESTOR of the
+# pane - and reported an orchestrator that had every flag as missing them all.
+# The process is found downward from the pane's shell, and an unreadable
+# ancestor is never consulted.
+test_stale_detection_finds_the_omp_process_below_an_unreadable_ancestor() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
+  # the shell's parent is a process this user cannot read, marked like ours
+  printf 'Name:\tbash\nPPid:\t7\n' > "$PROC/50/status"
+  mkdir -p "$PROC/7"; printf 'omp\0' > "$PROC/7/cmdline"
+  printf 'CEL_WORKSPACE=%s\0CEL_INBOX_ME=widget-orch\0' "$T/ws" > "$PROC/7/environ"
+  printf 'PPid:\t1\n' > "$PROC/7/status"; chmod 000 "$PROC/7/cmdline" "$PROC/7/environ"
+  local rows; rows="$(run_orchestrator_rows)"
+  assert_contains "$rows" "widget-orch	alpha	w1:p1	idle"
+  assert_contains "$rows" "	current	"
+  orch_stub_teardown
+}
+
+test_a_missing_model_on_both_sides_reads_as_current() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  printf '%s\n' "${argv[@]}" | grep -qx -- --model && { echo "fixture launch line has a model"; orch_stub_teardown; return 1; }
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+test_an_unresolvable_process_reads_unknown_not_missing() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  # the only omp is outside the pane's shell tree
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  printf 'PPid:\t1\n' > "$PROC/100/status"
+  local rows out
+  rows="$(run_orchestrator_rows)"
+  assert_contains "$rows" "	unknown	"
+  out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "widget-orch (alpha) launch line unknown"
+  ! printf '%s' "$out" | grep -q "missing:" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
+test_update_check_previews_the_stale_list() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  _update_check_version() { return 0; }
+  local out; out="$(_update_check)"
+  assert_contains "$out" "widget-orch (alpha) runs an older launch line"
+  assert_contains "$out" "--restart-orchestrators"
+  [ ! -f "$T/started" ] || { echo "check restarted something"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}

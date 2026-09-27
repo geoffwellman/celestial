@@ -11,7 +11,7 @@ orch_stub_setup() { # <orchestrator-runtime> -> T, PROC, HLOG
   printf 'runtime: { root: %s, orchestrator: %s, worker: omp }\n' "$1" "$1" >> "$T/ws/workspace.yaml"
   sed -i '/^runtime: { root: claude/d' "$T/ws/workspace.yaml"
   printf 'workspaces:\n  alpha: {path: "%s/ws"}\n' "$T" > "$T/registry.yaml"
-  export CEL_REGISTRY="$T/registry.yaml" CEL_PROC_ROOT="$PROC" \
+  export CEL_REGISTRY="$T/registry.yaml" CEL_PROC_ROOT="$PROC" CEL_CACHE="$T/cache" \
          CEL_ORCH_SESSIONS="$T/sessions.json" CEL_RESTART_WAIT=2 CEL_RESTART_SLEEP=0
   export ORCH_STUB_T="$T"
   cat > "$T/bin/herdr" <<'STUB'
@@ -23,6 +23,11 @@ case "$1 $2" in
     if [ -f "$T/gone" ]; then printf '{"result":{"agents":[]}}\n'; else cat "$T/roster.json"; fi ;;
   "pane send-keys") touch "$T/gone" ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t1"}}}\n' "$3" ;;
+  "pane process-info")
+    # the pane's own shell is pid 50; herdr's foreground list is left empty so
+    # the resolver has to walk the fixture /proc from that shell down
+    if [ -f "$T/no-pane-info" ]; then exit 1; fi
+    printf '{"result":{"process_info":{"shell_pid":50,"foreground_processes":[]}}}\n' ;;
   "pane send-text") printf '%s' "$4" > "$T/envprefix" ;;
   "agent start")
     shift 2; name="$1"; shift; kind=""; while [ "$1" != -- ]; do [ "$1" = --kind ] && kind="$2"; shift; done; shift
@@ -43,16 +48,20 @@ orch_stub_roster() { # <name> <cwd> <status> <session|""> [runtime]
     "${5:-omp}" "$1" "$2" "$3" "$sess" > "$T/roster.json"
 }
 
-orch_stub_proc() { # <pid> <me> <wsdir> <argv...>
+orch_stub_proc() { # <pid> <me> <wsdir> <argv...>  (child of the pane shell, pid 50)
   local pid="$1" me="$2" ws="$3"; shift 3
-  mkdir -p "$PROC/$pid"
+  mkdir -p "$PROC/$pid" "$PROC/50"
+  printf 'Name:\tomp\nPPid:\t50\n' > "$PROC/$pid/status"
+  [ -f "$PROC/50/status" ] || printf 'Name:\tbash\nPPid:\t1\n' > "$PROC/50/status"
+  ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$PROC/$pid/cwd"
   printf '%s\0' "$@" > "$PROC/$pid/cmdline"
   printf 'CEL_ROLE=orchestrator\0CEL_WORKSPACE=%s\0CEL_INBOX_ME=%s\0' "$ws" "$me" > "$PROC/$pid/environ"
 }
 
 orch_stub_teardown() {
+  chmod -R u+rwX "$T" 2>/dev/null || true
   rm -rf "$T"
-  unset CEL_REGISTRY CEL_PROC_ROOT CEL_ORCH_SESSIONS CEL_RESTART_WAIT CEL_RESTART_SLEEP ORCH_STUB_T
+  unset CEL_CACHE CEL_REGISTRY CEL_PROC_ROOT CEL_ORCH_SESSIONS CEL_RESTART_WAIT CEL_RESTART_SLEEP ORCH_STUB_T
 }
 
 orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two omp agents in one cwd

@@ -29,7 +29,7 @@ import {
   readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
   renderOutput, allServices, roster as rosterOf,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, triageFacts, triageView, parseJson, detailActions, detailButtons, resolveOutcome } from './views.mjs';
+import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, orchestratorsOf, orchestratorsView, orchRestart, triageFacts, triageView, parseJson, detailActions, detailButtons, resolveOutcome } from './views.mjs';
 import { boardFor, prsFor, digestFor, rankedMail, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, summarise, NoTranslator, translatorLabel } from './translate.mjs';
@@ -279,6 +279,16 @@ const ServicesPanel = ({ rows, sel, innerRef }) =>
     }, `${i === sel ? '▸' : ' '} ${serviceLine(r)}`))
     : [h(Text, { key: 'none', color: C.dim }, '  nothing declared and no previews running')]));
 
+// Rows are read from the fleet document on every draw, so the view follows a
+// refresh; the restart key proposes, and refuses on `working` (CEL-81).
+const OrchestratorsPanel = ({ rows, sel, innerRef }) =>
+  h(Panel, { title: 'ORCHESTRATORS', innerRef, focused: true, right: 'r restart · Esc back' },
+    ...orchestratorsView(rows, sel).slice(1).map((l, i) => h(Text, {
+      key: `o${i}`,
+      color: i === sel ? C.accent : /\b(stale|unknown|missing)\b/.test(l) ? C.warn : C.ink,
+      wrap: 'truncate-end',
+    }, l)));
+
 const OrchPanel = ({ unit, innerRef }) =>
   h(Panel, { title: `ORCHESTRATOR · ${unit.name}-orch`, innerRef, right: `workspace ${unit.ws}` },
     h(Text, null,
@@ -469,6 +479,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
   const [svcs, setSvcs] = useState(null);         // the SERVICES view: null = closed
   const [ssel, setSsel] = useState(0);
+  const [orchs, setOrchs] = useState(false);      // the ORCHESTRATORS view (CEL-81)
+  const [osel, setOsel] = useState(0);
   const [unit, setUnit] = useState(null);         // the unit view: one product, whole
   const [wsel, setWsel] = useState(0);            // which worker row the unit view has
   const [wsort, setWsort] = useState(false);      // `s`: the workers by memory, biggest first
@@ -510,7 +522,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     unitOrch: useRef(null), unitWorkers: useRef(null),
     unitWaiting: useRef(null), unitMail: useRef(null), worker: useRef(null),
     unitBoard: useRef(null), unitPrs: useRef(null), timeline: useRef(null), page: useRef(null),
-    services: useRef(null), talk: useRef(null),
+    services: useRef(null), talk: useRef(null), orchs: useRef(null),
   };
   const rows = fleetRows(doc);
   const rowsRef = useRef(rows); rowsRef.current = rows;
@@ -1442,6 +1454,19 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // answer without opening a pane. Every control is a PROPOSAL on the
     // command line: stopping a service someone else is looking at is not
     // something a single keypress should do.
+    if (orchs && !detail) {
+      const list = orchestratorsOf(doc);
+      const row = list[osel];
+      if (key.escape) { setOrchs(false); setPane('fleet'); say('back'); return; }
+      if (key.upArrow) { setOsel((i) => Math.max(0, i - 1)); return; }
+      if (key.downArrow) { setOsel((i) => Math.min(list.length - 1, i + 1)); return; }
+      if (!value && input === 'r' && row) {
+        const r = orchRestart(row);
+        if (r.cmd) propose([r.cmd]); else say(r.why);
+        return;
+      }
+    }
+
     if (svcs && !detail) {
       const row = svcs[ssel];
       if (key.escape) { setSvcs(null); setPane('fleet'); say('back'); return; }
@@ -1743,6 +1768,12 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // `S` on the main screen with an empty command line opens the services
     // view. A bare letter is an action ONLY when there is nothing typed - the
     // first cut of this console ate the S of "status" out of a sentence.
+    if (input === 'O' && !value && !unit && !worker && !detail && !svcs && !orchs && !talk) {
+      const list = orchestratorsOf(doc);
+      setOrchs(true); setOsel(0); setPane('orchestrators');
+      say(`${list.filter((o) => o.launch !== 'current').length}/${list.length} orchestrators need attention`);
+      return;
+    }
     if (input === 'S' && !value && !unit && !worker && !detail && !svcs && !talk) {
       setBusy(true);
       (async () => {
@@ -1857,7 +1888,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : page ? 'page'
     : timeline ? 'timeline' : detail ? 'detail'
       : talk ? 'talk'
-      : svcs ? 'services' : worker ? 'worker' : unit ? 'unit'
+      : orchs ? 'orchestrators' : svcs ? 'services' : worker ? 'worker' : unit ? 'unit'
       : (outView && output && !outCollapsed) ? 'output' : 'main';
   escapeRef.current = () => {
     if (help) { setHelp(false); return; }
@@ -1867,6 +1898,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     if (page) { setPage(null); say('back'); return; }
     if (timeline) { setTimeline(null); say('back'); return; }
     if (detail) { setDetail(null); setPane(unit ? 'unit' : 'waiting'); say('back'); return; }
+    if (orchs) { setOrchs(false); setPane('fleet'); say('back'); return; }
     if (svcs) { setSvcs(null); setPane('fleet'); say('back'); return; }
     if (worker) { setWorker(null); setPane(unit ? 'unit' : 'fleet'); say('back'); return; }
     if (unit) { setUnit(null); setPane('fleet'); say('back'); return; }
@@ -1887,6 +1919,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           ? pickerMatches.map((l, i) => `${i === picker.sel ? '▸' : ' '} ${l}`)
           : ['  nothing matches'],
       })]
+      : view === 'orchestrators'
+        ? [h(OrchestratorsPanel, { key: 'orchestrators', rows: orchestratorsOf(doc), sel: osel, innerRef: refs.orchs })]
       : view === 'services'
         ? [h(ServicesPanel, { key: 'services', rows: svcs, sel: ssel, innerRef: refs.services })]
       : view === 'talk'

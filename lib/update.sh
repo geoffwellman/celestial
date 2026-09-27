@@ -163,13 +163,21 @@ _update_stale_agents() {
 # which the plane cannot see. With 1, idle ones are restarted in place and
 # resumed; working ones are skipped with the reason.
 _update_stale_orchestrators() { # <restart 0|1>
-  local rows name ws missing cmd status role product shown=0
-  rows="$(run_stale_orchestrators)"
+  local rows name ws pane status since model launch detail cmd role product shown=0
+  rows="$(run_orchestrator_rows)"
   [ -n "$rows" ] || return 0
-  while IFS=$'\t' read -r name ws missing cmd status role product; do
+  while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
     [ -n "$name" ] || continue
+    case "$launch" in stale|unknown) ;; *) continue ;; esac
     if [ "$shown" -eq 0 ]; then c_hd "Orchestrators on an older launch line"; shown=1; fi
-    printf '  %s (%s) runs an older launch line (%s) - %s\n' "$name" "$ws" "$missing" "$cmd"
+    # An orchestrator whose process could not be read is UNKNOWN, with the
+    # reason - never "missing everything", which is what CEL-63 said about
+    # one that had every flag (CEL-81). It is not restarted on a guess.
+    if [ "$launch" = unknown ]; then
+      printf '  %s (%s) launch line unknown: %s\n' "$name" "$ws" "$detail"
+      continue
+    fi
+    printf '  %s (%s) runs an older launch line (%s) - %s\n' "$name" "$ws" "$detail" "$cmd"
     [ "$1" -eq 1 ] || continue
     if [ "$status" = working ]; then
       c_warn "$name skipped: it is working - restart it when idle: $cmd"
@@ -183,7 +191,20 @@ _update_stale_orchestrators() { # <restart 0|1>
   return 0
 }
 
-_update_check() { # read-only; exit 1 when behind so scripts can test it
+# `--check` shows what `--restart-orchestrators` would act on, too: the owner
+# could not see it before running the restart (CEL-81).
+_update_check() {
+  local rc=0
+  _update_check_version || rc=$?
+  local out; out="$(_update_stale_orchestrators 0)"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    printf '  cel update --restart-orchestrators restarts the idle stale ones in place.\n'
+  fi
+  return "$rc"
+}
+
+_update_check_version() { # read-only; exit 1 when behind so scripts can test it
   local inst avail chan
   chan="$(_update_channel)"
   git -C "$CEL_ROOT" fetch --tags -q 2>/dev/null || true
