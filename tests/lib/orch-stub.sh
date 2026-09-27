@@ -22,6 +22,7 @@ case "$1 $2" in
   "agent list")
     if [ -f "$T/gone" ]; then printf '{"result":{"agents":[]}}\n'; else cat "$T/roster.json"; fi ;;
   "pane send-keys") touch "$T/gone" ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t1"}}}\n' "$3" ;;
   "pane send-text") printf '%s' "$4" > "$T/envprefix" ;;
   "agent start")
     shift 2; name="$1"; shift; kind=""; while [ "$1" != -- ]; do [ "$1" = --kind ] && kind="$2"; shift; done; shift
