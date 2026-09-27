@@ -827,6 +827,7 @@ test_gc_done_pane_dry_run_says_what_it_would_close_and_closes_nothing() {
 # shell in a clean worker checkout (or a deleted one) is empty - a service,
 # an editor, an owner's shell and a layout's pane are all kept.
 _gc_empty_fixture() {
+  _gc_shell_children() { :; }   # the stub shell has no children
   T="$(mktemp -d)"
   export HOME="$T/home"
   mkdir -p "$T/repo" "$HOME/.herdr/worktrees/widget" "$HOME/ws/alpha"
@@ -928,5 +929,24 @@ test_gc_idle_pane_dry_run_lists_closes_and_keeps_with_reasons() {
   assert_contains "$out" "would close empty pane w1:p1"
   assert_contains "$out" "kept pane w1:p2"
   assert_contains "$out" "owner shell"
+  rm -rf "$T"
+}
+
+# A shell with a background or stopped job ('sleep 100 &', a ^Z'd editor)
+# looks bare from the foreground group alone; its children say otherwise.
+test_gc_keeps_a_shell_with_a_background_child() {
+  _gc_empty_fixture; _gc_empty_pane w1:p1 "$GC_WT"
+  _gc_shell_children() { printf 'sleep\n'; }
+  local out; out="$(_gc_idle_panes 1 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "running sleep"
+  rm -rf "$T"
+}
+# A deleted directory outside the worker checkouts was the owner's.
+test_gc_keeps_a_shell_in_a_deleted_directory_outside_the_worktrees() {
+  _gc_empty_fixture; _gc_empty_pane w1:p1 "$HOME/ws/alpha/gone"
+  local out; out="$(_gc_idle_panes 0 "$GC_PANES" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "1 owner shell"
   rm -rf "$T"
 }
