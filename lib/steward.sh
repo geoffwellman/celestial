@@ -138,13 +138,17 @@ _steward_mail_sweep() { # <agents-json>
     [ -s "$f" ] || continue
     for who in $(jq -r '.to' "$f" 2>/dev/null | sort -u); do
       case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
-      n="$(cmd_inbox count --for "$who" --workspace "$ws" 2>/dev/null || printf 0)"
+      # ONLY MAIL THAT NEEDS SOMEONE. Measured 2026-09-26: the unread
+      # reminder fired for piles of worker done-reports (`status`), which ask
+      # nothing of anyone, and for the steward's own earlier reminders. Count
+      # escalations, decisions and blockers from other senders, nothing else.
+      local waiting
+      waiting="$(_steward_unread_actionable "$ws" "$who")"
+      n="$(printf '%s\n' "$waiting" | grep -c . || true)"
       [ "${n:-0}" -gt 0 ] || continue
       # age of the OLDEST unread, not the newest: that is how long the
       # recipient has actually been behind
-      local cur; cur="$(cat "$(_inbox_cursor "$ws" "$who")" 2>/dev/null || printf '')"
-      oldest="$(jq -r --arg w "$who" --arg last "$cur" \
-        'select(.to == $w) | select($last == "" or (.id > $last)) | .ts' "$f" 2>/dev/null | sed -n 1p)"
+      oldest="$(printf '%s\n' "$waiting" | jq -r '.ts' 2>/dev/null | sort | sed -n 1p)"
       [ -n "$oldest" ] || continue
       age=$(( $(date +%s) - $(date -d "$oldest" +%s 2>/dev/null || date +%s) ))
       [ "$age" -ge 1800 ] || continue
@@ -176,13 +180,13 @@ _steward_mail_sweep() { # <agents-json>
         | jq -r --arg d "$target" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
 
       local readcmd="cel inbox read --for $who --workspace $ws"
-      local stale_msg="steward: $n unread in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch --for $who --workspace $ws' so the next one reaches you without this nudge."
+      local stale_msg="steward: $n unread escalation(s)/decision(s)/blocker(s) in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch --for $who --workspace $ws' so the next one reaches you without this nudge."
       if _steward_is_orch_mailbox "$who"; then
         # CEL-65: never type into a root/orchestrator composer - mail it, and
         # the runtime's inbox hook (Monitor/UserPromptSubmit, or omp's
         # inbox.omp.ts) surfaces it out of band.
         if _steward_due "inbox-stale-$ws-$who"; then
-          cmd_inbox send "$who" "$stale_msg" --from steward --workspace "$ws" --kind status >/dev/null 2>&1 \
+          _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
             && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
         fi
       elif [ -n "$pane" ] && _steward_due "inbox-stale-$ws-$who"; then
@@ -204,10 +208,14 @@ _steward_mail_sweep() { # <agents-json>
   for ws in $(registry_names); do
     local f2; f2="$(_inbox_file "$ws")"
     [ -f "$f2" ] || continue
-    for who in $(jq -r 'select(.kind == "decision" or .kind == "blocked") | .to' "$f2" 2>/dev/null | sort -u); do
+    for who in $(jq -r 'select(.kind == "decision" or .kind == "blocked") | select(.from != "steward") | .to' "$f2" 2>/dev/null | sort -u); do
       case "$who" in *:*|all) continue;; esac
       local open oldest2 age2 n2
-      open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null || true)"
+      # The steward's own reminders are not decisions. Counting them is how
+      # one real blocker became "you have 7 UNRESOLVED" overnight: each
+      # reminder was a `blocked` item, so the next one counted it.
+      open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null \
+        | jq -c 'select(.from != "steward")' 2>/dev/null || true)"
       [ -n "$open" ] || continue
       n2="$(printf '%s\n' "$open" | wc -l | tr -d ' ')"
       oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | sed -n 1p)"
@@ -226,19 +234,50 @@ _steward_mail_sweep() { # <agents-json>
       if _steward_due "decision-open-$ws-$who"; then
         # mail, never a prompt (CEL-65): root and orchestrators are the only
         # recipients of decisions/blockers, and their composers are the human's
-        cmd_inbox send "$who" "steward: you have $n2 UNRESOLVED decision(s)/blocker(s), oldest $((age2 / 60))m - reading them did not resolve them. Answer or act, then 'cel inbox resolve <id> --workspace $ws'. Open now:
-$text2" --from steward --workspace "$ws" --kind blocked >/dev/null 2>&1 \
+        _steward_remind "$ws" "$who" remind-open blocked "steward: you have $n2 UNRESOLVED decision(s)/blocker(s), oldest $((age2 / 60))m - reading them did not resolve them. Answer or act, then 'cel inbox resolve <id> --workspace $ws'. Open now:
+$text2" \
           && c_warn "$ws/$who: $n2 open decision(s) ($((age2 / 60))m) - mailed $who to resolve"
       else
         c_warn "$ws/$who: $n2 open decision(s), oldest $((age2 / 60))m$([ -z "$pane2" ] && printf ' (no pane)')"
       fi
-      if [ "$who" != root ] && [ "$age2" -ge 7200 ] && _steward_due "decision-open-root-$ws-$who"; then
-        cmd_inbox send root "steward: $who has $n2 decision(s)/blocker(s) unresolved for $((age2 / 3600))h - it may be stuck on them. Oldest: ${text2%%$'\n'*}" \
-          --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
-      fi
+      # The old third message ("X has N unresolved for Nh", to root) said the
+      # same thing a second time in a second mailbox; the one reminder above
+      # carries the count and the age, and it is the only one sent.
     done
   done
 
+}
+
+# Unread mail for <who> that someone must answer, decide or unblock - one JSON
+# object per line. Never `status`, never the steward's own reminders.
+_steward_unread_actionable() { # <ws> <who>
+  inbox_unread_json "$1" "$2" | jq -c '
+    select(.kind == "escalation" or .kind == "decision" or .kind == "blocked")
+    | select(.from != "steward")' 2>/dev/null || true
+}
+
+# ONE LIVE REMINDER PER RECIPIENT AND KIND. Each reminder used to be a fresh
+# item and none was ever taken down, so a mailbox showed seven where one was
+# true. Posting a new one resolves every earlier open one with the same key,
+# with a resolution line naming its replacement so nothing vanishes unexplained.
+_steward_remind() { # <ws> <who> <fp> <kind> <message>
+  local ws="$1" who="$2" fp="$3" kind="$4" msg="$5" f new prev id
+  f="$(_inbox_file "$ws")"
+  mkdir -p "$(dirname "$f")"
+  new="$(date +%s%N)"
+  prev="$(jq -r -s --arg fp "$fp" --arg to "$who" '
+    ([.[] | select(.kind == "resolution") | .ref]) as $done
+    | .[] | select(.from == "steward" and .to == $to and (.fp // "") == $fp)
+    | select([.id] | inside($done) | not) | .id' "$f" 2>/dev/null || true)"
+  _inbox_append "$f" "$(jq -nc --arg id "$new" --arg ts "$(date -Is)" --arg to "$who" \
+    --arg kind "$kind" --arg msg "$msg" --arg fp "$fp" \
+    '{id: $id, ts: $ts, to: $to, from: "steward", kind: $kind, message: $msg, fp: $fp}')" || return 1
+  for id in $prev; do
+    _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$id" \
+      --arg to "$who" --arg new "$new" \
+      '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: "steward", to: $to, message: ("superseded by " + $new)}')"
+  done
+  return 0
 }
 
 _steward_is_orch_mailbox() { case "$1" in root|*-orch) return 0;; esac; return 1; }
