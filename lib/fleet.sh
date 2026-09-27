@@ -538,7 +538,31 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 
   printf '%s' "$units" | jq -sc --arg name "$ws" \
     --argjson unread "$unread" --argjson open "$open" --argjson mail "$mail" \
-    '{name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: .}'
+    --argjson orchs "$(_fleet_orchestrators "$ws" "$roster")" \
+    '{name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: ., orchestrators: $orchs}'
+}
+
+# EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE (CEL-81), from the same rows
+# `cel update` acts on, so the console shows what `--restart-orchestrators`
+# would do and never runs a probe of its own. Mail is counted per mailbox:
+# root reads `root`, an orchestrator `<product>-orch`.
+_fleet_orchestrators() { # <ws> <roster-json> -> JSON array
+  local name ws pane status since model launch detail cmd role product me unread open out=""
+  while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
+    [ -n "$name" ] || continue
+    if [ "$role" = root ]; then me=root; else me="$product-orch"; fi
+    unread="$(_inbox_count --for "$me" --workspace "$ws" 2>/dev/null || true)"
+    case "$unread" in ''|*[!0-9]*) unread=0 ;; esac
+    open="$(_inbox_open --for "$me" --workspace "$ws" 2>/dev/null | grep -c . || true)"
+    case "$open" in ''|*[!0-9]*) open=0 ;; esac
+    out="$out$name	$ws	$pane	$status	${since:-0}	$model	$launch	$detail	$cmd	$role	$product	$unread	$open
+"
+  done < <(run_orchestrator_rows "$1" "$2")
+  # one jq for the whole list, not one per row (the spawn budget above)
+  printf '%s' "$out" | jq -Rsc '[split("\n")[] | select(length > 0) | split("\t")
+    | {name: .[0], ws: .[1], pane: .[2], status: .[3], since: (.[4] | tonumber? // 0),
+       model: .[5], launch: .[6], detail: (if .[7] == "-" then "" else .[7] end), cmd: .[8],
+       role: .[9], product: .[10], unread: (.[11] | tonumber? // 0), open: (.[12] | tonumber? // 0)}]'
 }
 
 # ONE LINE FOR A MAILBOX NOBODY READS, for `cel doctor`. It lives here rather

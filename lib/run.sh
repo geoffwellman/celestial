@@ -1336,22 +1336,83 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
 
-# STALE LAUNCH LINES. `cel update` changes hooks and launch flags, but a
-# running orchestrator keeps the command line it started with: the inbox hook
-# (CEL-65) and --no-prewalk (CEL-68) silently did not apply to any
-# orchestrator that was already up. So compare each live one's actual argv
-# (/proc/<pid>/cmdline) with what `cel run --dry-run` would launch now.
+# THE PROCESS IN A PANE (CEL-81). The first cut found an orchestrator by the
+# launch marks in /proc/*/environ, and on this box it read /proc/1187 -
+# `systemd --user`, an ANCESTOR of every pane, which the user cannot read - and
+# reported bundle-orch as missing every flag it had. So the process is found
+# DOWNWARD from the pane's own shell (herdr names its pid): the runtime binary
+# as argv[0], standing in the pane's cwd. Nothing above the shell is ever
+# consulted. Prints the pid, or the reason it could not, and fails.
+_run_ppid() { # <pid>
+  sed -n 's/^PPid:[[:space:]]*//p' "$(_run_proc_root)/$1/status" 2>/dev/null || true
+}
+
+_run_descends() { # <pid> <ancestor>
+  local p="$1" i=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$i" -lt 64 ]; do
+    [ "$p" = "$2" ] && return 0
+    p="$(_run_ppid "$p")"; i=$((i+1))
+  done
+  return 1
+}
+
+_run_pane_pid() { # <pane> <cwd> <runtime> -> pid | reason (rc 1)
+  local info shell d pid best="" a0 c
+  info="$(herdr pane process-info --pane "$1" 2>/dev/null)" || info=""
+  shell="$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null)" || shell=""
+  if [ -z "$shell" ]; then printf 'herdr gives no shell pid for pane %s' "$1"; return 1; fi
+  for d in "$(_run_proc_root)"/[0-9]*; do
+    pid="${d##*/}"
+    [ "$pid" != "$shell" ] || continue
+    [ -r "$d/cmdline" ] || continue
+    a0="$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 1p)" || continue
+    [ "${a0##*/}" = "$3" ] || continue
+    c="$(readlink "$d/cwd" 2>/dev/null)" || continue
+    [ "$c" = "$2" ] || continue
+    _run_descends "$pid" "$shell" || continue
+    if [ -z "$best" ] || [ "$pid" -gt "$best" ]; then best="$pid"; fi
+  done
+  if [ -z "$best" ]; then printf 'no readable %s process in %s under pane %s' "$3" "$2" "$1"; return 1; fi
+  printf '%s' "$best"
+}
+
+# How long an orchestrator has been in its status. herdr says what the status
+# is, not since when, so the first read that saw it is remembered.
+_run_status_since() { # <name> <ws> <status> -> epoch
+  local f now key hit
+  f="${CEL_CACHE:-$HOME/.cache/cel}/orch-status.tsv"; now="$(date +%s)"
+  key="$1	$2	$3	"
+  hit="$(grep -F -- "$key" "$f" 2>/dev/null | head -1 | cut -f4)" || hit=""
+  if [ -n "$hit" ]; then printf '%s' "$hit"; return 0; fi
+  mkdir -p "$(dirname "$f")" 2>/dev/null || { printf '%s' "$now"; return 0; }
+  { grep -vF -- "$1	$2	" "$f" 2>/dev/null || true; printf '%s%s\n' "$key" "$now"; } > "$f.tmp.$$" \
+    && mv -f "$f.tmp.$$" "$f" 2>/dev/null
+  printf '%s' "$now"
+}
+
+# EVERY ROOT/ORCHESTRATOR AND ITS LAUNCH LINE. `cel update` changes hooks and
+# launch flags, but a running orchestrator keeps the command line it started
+# with: the inbox hook (CEL-65) and --no-prewalk (CEL-68) silently did not
+# apply to any orchestrator that was already up. So each live one's actual
+# argv is compared with what `cel run --dry-run` would launch now.
 #
-# One row per stale root/orchestrator:
-#   name<TAB>workspace<TAB>diff<TAB>restart-command<TAB>status<TAB>role<TAB>product
-# (product is `-` for root). The command is for humans to read; callers that
-# run it rebuild the argv from role/workspace/product, never by re-splitting.
-run_stale_orchestrators() {
+# One row per root/orchestrator, live or (for an `auto` product) missing:
+#   name ws pane status since model launch detail cmd role product
+# launch is current | stale | unknown | missing; detail is the diff, the reason
+# it is unknown, or why it is missing. `-` stands for empty. The command is for
+# humans to read; callers that run it rebuild the argv from role/ws/product.
+run_orchestrator_rows() { # [only-ws] [roster-json]
   local roster ws wsdir p role me name cwd rt live pid line exp act missing cmd
-  local lname lpane lstatus lsession
+  local lname lpane lstatus lsession launch detail model since build vfile vkey hit
   have herdr && have jq || return 0
-  roster="$(herdr agent list 2>/dev/null)" || return 0
-  for ws in $(registry_names 2>/dev/null); do
+  # A verdict is remembered per process AND build: the console reads this on
+  # every refresh, and a `cel run --dry-run` per orchestrator per draw is the
+  # expensive part. A new pid or a new build compares afresh.
+  build="$(git -C "$CEL_ROOT" rev-parse HEAD 2>/dev/null || cat "$CEL_ROOT/VERSION" 2>/dev/null || true)"
+  vfile="${CEL_CACHE:-$HOME/.cache/cel}/orch-verdicts.tsv"
+  roster="${2:-}"
+  [ -n "$roster" ] || roster="$(herdr agent list 2>/dev/null)" || return 0
+  for ws in ${1:-$(registry_names 2>/dev/null)}; do
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
     for p in "" $(ws_product_names "$wsdir" 2>/dev/null); do
@@ -1372,28 +1433,76 @@ run_stale_orchestrators() {
            elif ($bycwd | length) == 1 then $bycwd[0] else empty end)
         | [((.name // "") | if . == "" then "-" else . end), .pane_id,
            (.agent_status // "unknown"), (.agent // ""),
-           ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null)" || live=""
-      [ -n "$live" ] || continue
-      IFS=$'\t' read -r lname lpane lstatus rt lsession <<< "$live"
-      [ "$lsession" = "-" ] || _run_sessions_record "$cwd" "$lsession"
-      pid="$(_run_orch_pid "$me" "$wsdir" "$rt")" || continue
-      if [ "$role" = root ]; then
-        line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || continue
-      else
-        line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || continue
+           ((.agent_session.value // "") | if . == "" then "-" else . end),
+           ((.cwd // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null)" || live=""
+      if [ -z "$live" ]; then
+        # A product that should have an orchestrator and has none is a row
+        # too: the view is for "which of mine are not right", and absent is
+        # the least right of all.
+        [ -n "$p" ] || continue
+        [ "$(ws_orchestrator_mode "$wsdir" "$p" 2>/dev/null | cut -f1)" = auto ] || continue
+        printf '%s\t%s\t-\tgone\t0\t-\tmissing\tmode auto, no live agent\t%s\t%s\t%s\n' \
+          "$name" "$ws" "cel run orchestrator --product $p --workspace $ws" "$role" "$p"
+        continue
       fi
-      line="$(printf '%s\n' "$line" | sed -n 's/^herdr agent start [^ ]* --kind [^ ]* --pane <pane> -- //p')"
-      [ -n "$line" ] || continue
-      exp="$(mktemp)"; act="$(mktemp)"
-      # shellcheck disable=SC2086
-      printf '%s\n' "$rt" $line > "$exp"
-      _run_cmdline "$pid" > "$act"
-      missing="$(run_launch_diff "$exp" "$act")"
-      rm -f -- "$exp" "$act"
-      [ -n "$missing" ] || continue
+      local lcwd
+      IFS=$'\t' read -r lname lpane lstatus rt lsession lcwd <<< "$live"
+      [ "$lsession" = "-" ] || _run_sessions_record "$cwd" "$lsession"
       [ "$lname" != "-" ] || lname="$name"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$missing" "$cmd" "$lstatus" "$role" "${p:--}"
+      [ "$lcwd" != "-" ] || lcwd="$cwd"
+      since="$(_run_status_since "$lname" "$ws" "$lstatus")"
+      launch=unknown; detail=""; model="-"
+      if ! pid="$(_run_pane_pid "$lpane" "$lcwd" "$rt")"; then
+        detail="$pid"
+      else
+        act="$(mktemp)"; _run_cmdline "$pid" > "$act"
+        model="$(grep -A1 -xF -- --model "$act" | sed -n 2p)" || model=""
+        [ -n "$model" ] || model="-"
+        vkey="$build	$ws	$lname	$pid	"
+        hit="$(grep -F -- "$vkey" "$vfile" 2>/dev/null | head -1)" || hit=""
+        if [ ! -s "$act" ]; then
+          detail="pid $pid has no readable command line"
+        elif [ -n "$hit" ]; then
+          IFS=$'\t' read -r _ _ _ _ launch detail <<< "$hit"
+        else
+          if [ "$role" = root ]; then
+            line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
+          else
+            line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
+          fi
+          line="$(printf '%s\n' "$line" | sed -n 's/^herdr agent start [^ ]* --kind [^ ]* --pane <pane> -- //p')"
+          if [ -z "$line" ]; then
+            detail="cel run --dry-run gave no launch line to compare with"
+          else
+            exp="$(mktemp)"
+            # shellcheck disable=SC2086
+            printf '%s\n' "$rt" $line > "$exp"
+            missing="$(run_launch_diff "$exp" "$act")"
+            rm -f -- "$exp"
+            if [ -n "$missing" ]; then launch=stale; detail="$missing"; else launch=current; fi
+            if mkdir -p "$(dirname "$vfile")" 2>/dev/null; then
+              { grep -vF -- "	$ws	$lname	" "$vfile" 2>/dev/null || true
+                printf '%s%s\t%s\n' "$vkey" "$launch" "${detail:--}"; } > "$vfile.tmp.$$" \
+                && mv -f "$vfile.tmp.$$" "$vfile" 2>/dev/null || true
+            fi
+          fi
+        fi
+        rm -f -- "$act"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$lpane" "$lstatus" \
+        "$since" "$model" "$launch" "${detail:--}" "$cmd" "$role" "${p:--}"
     done
   done
+  return 0
+}
+
+# One row per STALE root/orchestrator, for doctor and the steward:
+#   name<TAB>workspace<TAB>diff<TAB>restart-command<TAB>status<TAB>role<TAB>product
+run_stale_orchestrators() {
+  local name ws pane status since model launch detail cmd role product
+  while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
+    [ "$launch" = stale ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$ws" "$detail" "$cmd" "$status" "$role" "$product"
+  done < <(run_orchestrator_rows)
   return 0
 }

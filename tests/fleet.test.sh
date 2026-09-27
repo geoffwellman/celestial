@@ -638,9 +638,16 @@ _fleet_add_rows() { # <n>
 # so the headroom is real slack and not a repeat of the measurement. One of those jq is the roster
 # being validated once per render rather than being allowed to fail inside
 # whichever program touched it first, which is a process well spent.
+#
+# CEL-81 added the orchestrator rows to every workspace block: one herdr
+# process-info, a /proc walk from the pane shell and two mailbox reads per
+# root/orchestrator, all FIXED cost (per orchestrator, not per worker row) -
+# measured +85 at both 3 and 12 rows (272 and 317), so the slope is unchanged
+# and the fixed part is raised to the branch plus six. The expensive part, a
+# `cel run --dry-run` per orchestrator, is remembered per pid and build.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
-  local max=$(( 172 + 5 * rows ))
+  local max=$(( 263 + 5 * rows ))
   if [ "$total" -gt "$max" ]; then
     printf 'the read started %s processes, over the ceiling of %s for %s rows\n' \
       "$total" "$max" "$rows" >&2
@@ -696,6 +703,7 @@ _FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
   jq -c --arg t "$T" --arg wt "$WT" '
     .workspaces
+    | map(del(.orchestrators))
     | walk(if type == "string"
            then (sub("\\Q" + $wt + "\\E"; "WT") | sub("\\Q" + $t + "\\E"; "T"))
            else . end)
@@ -960,13 +968,9 @@ test_fleet_rereads_when_the_young_cache_is_corrupt() {
 test_fleet_json_carries_an_orchestrator_row_per_product() {
   source "$CEL_ROOT/tests/lib/orch-stub.sh"
   orch_stub_setup omp
+  # a second product, inserted into the repos list (the stub appended runtime: after it)
+  sed -i 's/^    gate: bun test$/&\n  - name: gadget\n    url: git@github.com:someone\/gadget.git\n    prefix: WGT\n    gate: bun test/' "$T/ws/workspace.yaml"
   printf 'layout: { orchestrators: auto }\n' >> "$T/ws/workspace.yaml"
-  cat >> "$T/ws/workspace.yaml" <<YAML
-  - name: gadget
-    url: git@github.com:someone/gadget.git
-    prefix: WGT
-    gate: bun test
-YAML
   mkdir -p "$T/ws/repos/gadget"
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
   orch_stub_proc 100 widget-orch "$T/ws" omp
