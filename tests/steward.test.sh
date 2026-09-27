@@ -1432,3 +1432,32 @@ test_cel82_orchestrator_alert_clears_once_it_is_live() {
   assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
   rm -rf "$T"
 }
+
+# Sourcery on #103: reminders from before CEL-82 have no fp and must be
+# superseded by the first new one, not left open beside it.
+test_cel82_a_legacy_reminder_without_fp_is_superseded() {
+  _orch_fixture
+  mkdir -p "$CEL_INBOX_DIR"
+  printf '{"id":"5","ts":"2020-01-01T00:00:00Z","from":"steward","to":"bundle-orch","kind":"blocked","message":"steward: you have 3 UNRESOLVED decision(s)/blocker(s)"}\n' \
+    > "$CEL_INBOX_DIR/alpha.jsonl"
+  _steward_remind alpha bundle-orch remind-open blocked "steward: you have 1 UNRESOLVED decision(s)/blocker(s)"
+  local open; open="$(cmd_inbox open --for bundle-orch --workspace alpha --json)"
+  assert_eq "$(printf '%s\n' "$open" | grep -c . || true)" "1"
+  assert_contains "$open" "you have 1 UNRESOLVED"
+  rm -rf "$T"
+}
+
+# ...and the old one is resolved BEFORE the new one is written, so an
+# interruption between the writes can never leave two live.
+test_cel82_old_reminder_is_resolved_before_the_new_one_is_written() {
+  _orch_fixture
+  mkdir -p "$CEL_INBOX_DIR"
+  _steward_remind alpha bundle-orch remind-open blocked "first"
+  # fail every write after the first: the resolution must be that write
+  local real; real="$(declare -f _inbox_append)"
+  _inbox_append() { [ -e "$T/wrote" ] && return 1; : > "$T/wrote"; printf '%s\n' "$2" >> "$1"; }
+  assert_fails _steward_remind alpha bundle-orch remind-open blocked "second"
+  eval "$real"
+  assert_eq "$(cmd_inbox open --for bundle-orch --workspace alpha --json | grep -c . || true)" "0"
+  rm -rf "$T"
+}

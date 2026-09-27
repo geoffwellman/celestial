@@ -261,22 +261,35 @@ _steward_unread_actionable() { # <ws> <who>
 # true. Posting a new one resolves every earlier open one with the same key,
 # with a resolution line naming its replacement so nothing vanishes unexplained.
 _steward_remind() { # <ws> <who> <fp> <kind> <message>
-  local ws="$1" who="$2" fp="$3" kind="$4" msg="$5" f new prev id
+  local ws="$1" who="$2" fp="$3" kind="$4" msg="$5" f new prev id legacy=""
   f="$(_inbox_file "$ws")"
   mkdir -p "$(dirname "$f")"
   new="$(date +%s%N)"
-  prev="$(jq -r -s --arg fp "$fp" --arg to "$who" '
+  # Reminders posted before CEL-82 carry no fp, so they are recognised by
+  # their sentence - otherwise the first reminder after an upgrade would
+  # leave every old one open beside it.
+  case "$fp" in
+    remind-open)   legacy="UNRESOLVED decision" ;;
+    remind-unread) legacy="in your celestial inbox" ;;
+  esac
+  prev="$(jq -r -s --arg fp "$fp" --arg to "$who" --arg legacy "$legacy" '
     ([.[] | select(.kind == "resolution") | .ref]) as $done
-    | .[] | select(.from == "steward" and .to == $to and (.fp // "") == $fp)
+    | .[] | select(.from == "steward" and .to == $to and .kind != "resolution" and .kind != "update")
+    | select((.fp // "") == $fp
+             or ((.fp // "") == "" and $legacy != "" and ((.message // "") | contains($legacy))))
     | select([.id] | inside($done) | not) | .id' "$f" 2>/dev/null || true)"
-  _inbox_append "$f" "$(jq -nc --arg id "$new" --arg ts "$(date -Is)" --arg to "$who" \
-    --arg kind "$kind" --arg msg "$msg" --arg fp "$fp" \
-    '{id: $id, ts: $ts, to: $to, from: "steward", kind: $kind, message: $msg, fp: $fp}')" || return 1
+  # RESOLUTIONS FIRST. Interrupted between the two writes, this order leaves
+  # at most the new reminder missing - never two live ones - and a failed
+  # resolution fails the call rather than posting a duplicate beside it.
   for id in $prev; do
     _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$id" \
       --arg to "$who" --arg new "$new" \
-      '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: "steward", to: $to, message: ("superseded by " + $new)}')"
+      '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: "steward", to: $to, message: ("superseded by " + $new)}')" \
+      || return 1
   done
+  _inbox_append "$f" "$(jq -nc --arg id "$new" --arg ts "$(date -Is)" --arg to "$who" \
+    --arg kind "$kind" --arg msg "$msg" --arg fp "$fp" \
+    '{id: $id, ts: $ts, to: $to, from: "steward", kind: $kind, message: $msg, fp: $fp}')" || return 1
   return 0
 }
 
