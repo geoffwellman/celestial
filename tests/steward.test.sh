@@ -1272,7 +1272,7 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   local old="2020-01-01T00:00:00Z"
   mkdir -p "$CEL_INBOX_DIR"
   printf '{"id":"1","ts":"%s","from":"w","to":"bundle-orch","kind":"decision","message":"merge or wait?"}\n' "$old" > "$CEL_INBOX_DIR/alpha.jsonl"
-  printf '{"id":"2","ts":"%s","from":"w","to":"root","kind":"status","message":"fyi"}\n' "$old" >> "$CEL_INBOX_DIR/alpha.jsonl"
+  printf '{"id":"2","ts":"%s","from":"w","to":"root","kind":"escalation","message":"stuck"}\n' "$old" >> "$CEL_INBOX_DIR/alpha.jsonl"
   local roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"},{"name":"alpha-root","pane_id":"w:p1","cwd":"/y"}]}}'
   PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
   assert_eq "$(grep -c '^agent prompt' "$T/herdr.argv" || true)" "0"
