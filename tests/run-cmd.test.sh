@@ -704,3 +704,64 @@ test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
   assert_eq "$(cat "$T/agent-ran")" "tok-b"
   rm -rf "$T"
 }
+
+# ------------------------------------------------------------ pane labels
+# CEL-83: the agent name is sanitised and cut to 32 characters, which reads
+# badly in the sidebar; every pane the plane starts also gets a free-text label.
+_label_len() { LC_ALL=C.UTF-8 awk '{print length($0)}' <<<"$1"; }
+test_pane_label_shapes() {
+  assert_eq "$(pane_label worker ABC-12-fix-the-widget)" "ABC-12 · fix the widget"
+  assert_eq "$(pane_label worker someone/abc-12-fix)" "ABC-12 · fix"
+  assert_eq "$(pane_label scout gadget-survey)" "scout · gadget survey"
+  assert_eq "$(pane_label reviewer widget 71)" "review · widget #71"
+  assert_eq "$(pane_label orchestrator widget)" "widget orchestrator"
+  assert_eq "$(pane_label root alpha)" "alpha root"
+}
+test_pane_label_cuts_long_slugs_on_a_word_boundary() {
+  local l; l="$(pane_label worker ABC-12-make-the-widget-and-the-gadget-agree-about-everything)"
+  [ "$(_label_len "$l")" -le "$CEL_PANE_LABEL_MAX" ] || { echo "too long: $l"; return 1; }
+  assert_eq "$l" "ABC-12 · make the widget and the gadget…"
+}
+_label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
+  export HERDR_LOG="$T/herdr.log"; : > "$HERDR_LOG"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
+      "pane rename") [ -z "${FAIL_RENAME:-}" ] ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      *) : ;;
+    esac
+  }
+}
+_label_check() { # <expected-label>
+  local n; n="$(grep -c '^pane rename' "$HERDR_LOG" || true)"
+  assert_eq "$n" 1
+  assert_contains "$(grep '^pane rename' "$HERDR_LOG")" "$1"
+  local r s; r="$(grep -n '^pane rename' "$HERDR_LOG" | cut -d: -f1)"
+  s="$(grep -n '^agent start' "$HERDR_LOG" | cut -d: -f1)"
+  [ "$r" -lt "$s" ] || { echo "rename after agent start"; return 1; }
+}
+test_run_labels_root_orchestrator_and_worker_panes() {
+  _ws; _label_herdr
+  ( cd "$T" && cmd_run root ) >/dev/null 2>&1; _label_check "alpha root"
+  : > "$HERDR_LOG"
+  ( cd "$T" && cmd_run orchestrator --repo widget ) >/dev/null 2>&1; _label_check "widget orchestrator"
+  : > "$HERDR_LOG"
+  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-fix-it ) >/dev/null 2>&1; _label_check "WG-1 · fix it"
+  rm -rf "$T"
+}
+test_run_labels_the_reviewer_pane() {
+  _ws_pr_fixture; _label_herdr
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null 2>&1
+  _label_check "review · widget #12"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+test_run_failed_rename_still_launches() {
+  _ws; _label_herdr
+  local out; out="$( cd "$T" && FAIL_RENAME=1 cmd_run root 2>&1 )" || { echo "launch failed: $out"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "agent start alpha-root"
+  rm -rf "$T"
+}
