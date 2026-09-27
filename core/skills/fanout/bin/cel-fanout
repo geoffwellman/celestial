@@ -873,6 +873,15 @@ cmd_delegate() {
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
   fi
 
+  # A readable label (CEL-83), set again on --reuse. A scout or spike is named
+  # for its brief; its generated branch is a scratch coordinate.
+  local plabel
+  case "$shape" in
+    scout|spike) plabel="$(pane_label "$shape" "$(basename "$spec" | sed -E 's/\.[^.]*$//')")" ;;
+    *)           plabel="$(pane_label worker "$branch")" ;;
+  esac
+  pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
+
   _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
