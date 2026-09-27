@@ -122,7 +122,7 @@ _wslife_name_tabs() { # <ws_id> <dry>
     [ -n "$tab" ] || continue
     name="$(jq -rn --argjson p "${panes:-null}" --argjson a "${agents:-null}" --arg t "$tab" '
       [($p.result.panes // [])[] | select(.tab_id == $t)] as $mine
-      | ([$mine[] | .label // empty | select(. != "")][0]
+      | ([$mine[] | (.label // .pane_label) // empty | select(. != "")][0]
          // ([($a.result.agents // [])[] | select(.pane_id as $x | $mine | any(.pane_id == $x)) | .name // empty][0])
          // empty)' 2>/dev/null || true)"
     [ -n "$name" ] || continue
