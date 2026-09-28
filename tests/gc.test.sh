@@ -964,18 +964,23 @@ _gc_docker_stub() {
 printf '%s\n' "$*" >> "$GC_DOCKER_LOG"
 case "$1 $2" in
   "system df")
-    printf '%s\n' '{"Type":"Images","Size":"4GB","Reclaimable":"3GB"}'
+    [ "$GC_DOCKER_FAIL" = df ] && exit 1
+    n="$(wc -l < "${GC_DOCKER_LOG%.argv}.rm" 2>/dev/null || echo 0)"
+    printf '{"Type":"Images","Size":"4GB","Reclaimable":"%sGB"}\n' "$(( 3 - n ))"
     printf '%s\n' '{"Type":"Build Cache","Size":"2GB","Reclaimable":"2GB"}' ;;
   "container ls")
+    [ "$GC_DOCKER_FAIL" = ls ] && { printf 'Error: daemon hiccup\n' >&2; exit 1; }
     printf '%s\n' 'widget:live' 'sha256:ssss11112222' ;;
   "image ls")
     printf '%s\n' '{"ID":"sha256:aaaa","Repository":"widget","Tag":"live","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:ssss11112222","Repository":"widget","Tag":"stopped","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
+    printf '%s\n' '{"ID":"sha256:aaaa","Repository":"widget","Tag":"old","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
+    printf '%s\n' '{"ID":"sha256:uuuu","Repository":"ghcr.io/example/gadget","Tag":"older","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:uuuu","Repository":"ghcr.io/example/gadget","Tag":"old","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}' ;;
   "image inspect") printf 'Error: template parsing error\n' >&2; exit 1 ;;
   "image rm")
     [ "$GC_DOCKER_FAIL" = rm ] && { printf 'Error: conflict: unable to remove\n' >&2; exit 1; }
-    printf 'Deleted: %s\n' "$3" ;;
+    printf '%s\n' "$3" >> "${GC_DOCKER_LOG%.argv}.rm"; printf 'Deleted: %s\n' "$3" ;;
   "builder prune")
     [ "$GC_DOCKER_FAIL" = builder ] && { printf 'Error: builder broke\n' >&2; exit 1; }
     printf 'Total reclaimed space: 2GB\n' ;;
@@ -988,14 +993,38 @@ EOS
 
 _gc_docker_line() { printf '%s\n' "$1" | grep -o 'box: docker [^,]*' | sed -n 1p | sed 's/ would be freed\| freed//'; }
 
-test_gc_box_docker_dry_run_and_real_run_plan_the_same_total() {
+test_gc_box_docker_dry_run_and_real_run_plan_the_same_selection() {
   _gc_docker_stub
   local dry real
   dry="$(cmd_gc --box --dry-run)"
   assert_eq "$(grep -cE 'image rm|prune' "$GC_DOCKER_LOG")" 0
+  # Summed virtual sizes overstate shared layers: an upper bound, said so.
+  assert_contains "$dry" "docker up to 3"
   real="$(cmd_gc --box)"
-  assert_eq "$(_gc_docker_line "$real")" "$(_gc_docker_line "$dry")"
+  # The real figure is docker's own: 1 GB of images by df delta + 2 GB cache.
+  assert_contains "$real" "box: docker 3"
   case "$real" in *"docker 0 B"*) printf 'real run freed nothing: %s\n' "$real" >&2; return 1;; esac
+  rm -rf "$T"
+}
+
+# A tag in use keeps its whole image ID; an ID with two unused tags is removed once.
+test_gc_box_docker_decides_keep_per_image_id_and_dedupes() {
+  _gc_docker_stub
+  cmd_gc --box >/dev/null
+  assert_eq "$(grep -c 'image rm' "$GC_DOCKER_LOG")" 1
+  assert_eq "$(grep 'image rm' "$GC_DOCKER_LOG")" "image rm sha256:uuuu"
+  rm -rf "$T"
+}
+
+# An unknown in-use list is not an empty one.
+test_gc_box_docker_aborts_when_container_listing_fails() {
+  _gc_docker_stub
+  GC_DOCKER_FAIL=ls
+  local out rc=0
+  out="$(cmd_gc --box 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'exit 0 with an unknown in-use list\n' >&2; return 1; }
+  assert_contains "$out" "daemon hiccup"
+  assert_eq "$(grep -cE 'image rm|prune' "$GC_DOCKER_LOG")" 0
   rm -rf "$T"
 }
 
