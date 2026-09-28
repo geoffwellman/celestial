@@ -226,8 +226,15 @@ _box_docker_keep() { # <repository> <tag> -> 0 keep, 1 removable
 
 # What any container, running OR stopped, references. `docker container ls
 # -a` prints a name (repo:tag, or bare repo meaning :latest) or an image id.
+# A failed listing is NOT an empty one: it returns 1 with docker's error on
+# stderr, and the sweep aborts rather than treating every image as unused.
 _box_docker_in_use() {
-  "$(_box_docker_bin)" container ls -a --format '{{.Image}}' 2>/dev/null || true
+  local out
+  if ! out="$("$(_box_docker_bin)" container ls -a --format '{{.Image}}' 2>&1)"; then
+    printf 'box: docker container ls failed: %s\n' "$out" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 _box_docker_used() { # <in-use list> <id> <repo> <tag> -> 0 when referenced
@@ -248,18 +255,31 @@ _box_docker_used() { # <in-use list> <id> <repo> <tag> -> 0 when referenced
 # no second path that can disagree - which is what CEL-88 was: the real path
 # kept every image whose `{{.Parent}}` was empty (every BuildKit or pulled
 # image), and freed nothing while the dry run promised 58 GB.
-_box_docker_plan() { # -> "image<TAB>id<TAB>bytes" lines, then "cache<TAB>-<TAB>bytes"
+_box_docker_plan() { # -> "image<TAB>id<TAB>bytes" lines, then "cache<TAB>-<TAB>bytes"; 1 when unknowable
   local used id repo tag size json
-  used="$(_box_docker_in_use)"
+  local -A keep=() bytes=() order=()
+  local -a ids=()
+  used="$(_box_docker_in_use)" || return 1
+  # Keep is decided per image ID: if ANY tag of an ID is keep-listed or in
+  # use, the whole ID is kept. Each removable ID appears once.
   while IFS=$'\t' read -r id repo tag size; do
     [ -n "$id" ] || continue
-    [ "$repo" != "<none>" ] && _box_docker_keep "$repo" "$tag" && continue
-    _box_docker_used "$used" "$id" "$repo" "$tag" && continue
-    printf 'image\t%s\t%s\n' "$id" "$(_box_human_bytes "$size")"
+    if [ -z "${order[$id]:-}" ]; then order[$id]=1; ids+=("$id"); bytes[$id]="$(_box_human_bytes "$size")"; fi
+    if [ "$repo" != "<none>" ] && _box_docker_keep "$repo" "$tag"; then keep[$id]=1; continue; fi
+    _box_docker_used "$used" "$id" "$repo" "$tag" && keep[$id]=1
   done < <("$(_box_docker_bin)" image ls --format json 2>/dev/null \
     | jq -r '[.ID, .Repository, .Tag, .Size] | @tsv' 2>/dev/null || true)
+  for id in "${ids[@]}"; do
+    [ -n "${keep[$id]:-}" ] && continue
+    printf 'image\t%s\t%s\n' "$id" "${bytes[$id]}"
+  done
   json="$(box_docker_json 2>/dev/null)" || json='{}'
   printf 'cache\t-\t%s\n' "$(printf '%s' "$json" | jq -r '(.build_cache.reclaimable // 0) | floor')"
+}
+
+_box_docker_images_reclaimable() { # -> bytes docker itself calls reclaimable
+  local json; json="$(box_docker_json 2>/dev/null)" || { printf 0; return 0; }
+  printf '%s' "$json" | jq -r '(.images.reclaimable // 0) | floor'
 }
 
 _box_reclaimed() { # <prune output> -> bytes, from docker's own summary line
@@ -273,20 +293,22 @@ _box_reclaimed() { # <prune output> -> bytes, from docker's own summary line
 # touched, and containers are not pruned: a stopped container's image stays.
 # A failed delete is a warning on stderr with docker's own error and exit 1,
 # never a quiet "0 B freed".
-_box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a failed delete
-  local dry="${1:-0}" total=0 failed=0 kind id bytes err
+_box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a failure
+  # Dry: an UPPER BOUND (summed per-image sizes double-count shared layers).
+  # Real: what docker says it freed - df delta for images, the prune's own
+  # "Total reclaimed space" for build cache.
+  local dry="${1:-0}" total=0 failed=0 kind id bytes err plan before after rmd=0
   have "$(_box_docker_bin)" || { printf 0; return 2; }
   "$(_box_docker_bin)" system df --format json >/dev/null 2>&1 || { printf 0; return 2; }
+  plan="$(_box_docker_plan)" || { printf 0; return 1; }
+  [ "$dry" -eq 1 ] || before="$(_box_docker_images_reclaimable)"
   while IFS=$'\t' read -r kind id bytes; do
     [ -n "$kind" ] || continue
     if [ "$dry" -eq 1 ]; then total=$(( total + bytes )); continue; fi
     case "$kind" in
       image)
-        if err="$("$(_box_docker_bin)" image rm "$id" 2>&1 >/dev/null)"; then
-          total=$(( total + bytes ))
-        else
-          failed=1; printf 'box: docker image rm %s failed: %s\n' "$id" "$err" >&2
-        fi ;;
+        if err="$("$(_box_docker_bin)" image rm "$id" 2>&1 >/dev/null)"; then rmd=1
+        else failed=1; printf 'box: docker image rm %s failed: %s\n' "$id" "$err" >&2; fi ;;
       cache)
         if err="$("$(_box_docker_bin)" builder prune --all --force 2>&1)"; then
           total=$(( total + $(_box_reclaimed "$err") ))
@@ -294,7 +316,11 @@ _box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a fai
           failed=1; printf 'box: docker builder prune failed: %s\n' "$err" >&2
         fi ;;
     esac
-  done < <(_box_docker_plan)
+  done <<< "$plan"
+  if [ "$rmd" -eq 1 ]; then
+    after="$(_box_docker_images_reclaimable)"
+    [ "$before" -gt "$after" ] && total=$(( total + before - after ))
+  fi
   printf '%s' "$total"
   [ "$failed" -eq 0 ] || return 1
 }
@@ -344,7 +370,7 @@ box_sweep() { # <dry> -> one line per class on stdout
   b="$(_box_sweep_docker "$dry")" && drc=0 || drc=$?
   if [ "$drc" -ne 2 ]; then
     BOX_FREED_DOCKER="${b:-0}"
-    c_ok "box: docker $(box_human "$BOX_FREED_DOCKER")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
+    c_ok "box: docker $([ "$dry" -eq 1 ] && printf 'up to ')$(box_human "$BOX_FREED_DOCKER")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
     if [ "$drc" -ne 0 ]; then
       BOX_DOCKER_FAILED=1 rc=1
       c_warn "box: docker delete failed - see the docker error above"
