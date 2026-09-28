@@ -744,8 +744,9 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
     # The foreground group misses a background or stopped job ('sleep 100 &',
     # a suspended editor): the shell is in front, but it is not idle.
     if [ -z "$name" ]; then
-      name="$(_gc_shell_children "$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid')" | head -1)" \
+      name="$(_gc_shell_children "$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid')")" \
         || { _gc_idle_kept unknown; continue; }
+      name="${name%%$'\n'*}"
     fi
     if [ -n "$name" ]; then
       if [ "$inwt" -eq 1 ]; then _gc_idle_kept "running $name"; else _gc_idle_kept service; fi

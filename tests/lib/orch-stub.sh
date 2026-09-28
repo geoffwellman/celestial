@@ -70,3 +70,14 @@ orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two om
     {"agent":"omp","name":"%s","cwd":"%s","pane_id":"w2:p1","agent_status":"idle","agent_session":{"value":"%s/second.jsonl"}}]}}\n' \
     "$2" "$1" "$T" "$3" "$1" "$T" > "$T/roster.json"
 }
+
+# CEL-85: a bare `omp --resume=<file>` as herdr relaunches it after a server
+# restart - no hooks, no CEL_ env - still a child of the pane shell (pid 50).
+orch_stub_bare_proc() { # <pid> <argv...>
+  local pid="$1"; shift
+  mkdir -p "$PROC/$pid" "$PROC/50"
+  printf 'Name:\tomp\nPPid:\t50\n' > "$PROC/$pid/status"
+  [ -f "$PROC/50/status" ] || printf 'Name:\tbash\nPPid:\t1\n' > "$PROC/50/status"
+  ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$PROC/$pid/cwd"
+  printf '%s\0' "$@" > "$PROC/$pid/cmdline"; : > "$PROC/$pid/environ"
+}

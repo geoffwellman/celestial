@@ -1456,7 +1456,15 @@ _run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
   else
     line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
   fi
-  line="$(printf '%s\n' "$line" | sed -n 's/^herdr agent start [^ ]* --kind [^ ]* --pane <pane> -- //p')"
+  line="${line##*$'\n'}"
+  case "$line" in
+    herdr\ agent\ start\ *\ --kind\ *\ --pane\ \<pane\>\ --\ *)
+      line="${line#herdr agent start }"
+      line="${line#* --kind }"
+      line="${line#* --pane <pane> -- }"
+      ;;
+    *) line="" ;;
+  esac
   if [ -z "$line" ]; then _RUN_DETAIL="cel run --dry-run gave no launch line to compare with"; return 0; fi
   exp="$(mktemp)"; act="$(mktemp)"
   # shellcheck disable=SC2086
@@ -1562,3 +1570,48 @@ run_stale_orchestrators() {
   done < <(run_orchestrator_rows)
   return 0
 }
+
+# CEL-85: herdr relaunches an orchestrator as a bare `omp --resume=<file>`
+# after a server restart - no hooks, no CEL_ env - so this uses the pane-shell
+# walk above, which needs neither.
+# Every live orchestrator whose runtime takes an inbox hook, and whether its
+# process actually carries it. One row each:
+#   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped<TAB>restart-command
+# A process that cannot be found yields no row: no evidence is not a fault.
+run_stripped_orchestrators() {
+  local roster ws wsdir p name cwd rt hookfile live lname lpane lstatus lcwd state
+  have herdr && have jq || return 0
+  roster="$(herdr agent list 2>/dev/null)" || return 0
+  for ws in $(registry_names 2>/dev/null); do
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for p in $(ws_product_names "$wsdir" 2>/dev/null); do
+      name="$(_run_agent_name "$p/orch")"; cwd="$(ws_product_dir "$wsdir" "$p")"
+      live="$(printf '%s' "$roster" | jq -r --arg n "$name" --arg c "$cwd" '
+        [.result.agents[]? | select((.pane_id // "") != "")] as $a
+        | [$a[] | select(.name == $n)] as $byname
+        | [$a[] | select((.cwd // "") == $c)] as $bycwd
+        | (if ($byname | length) > 0 then $byname[0]
+           elif ($bycwd | length) == 1 then $bycwd[0] else empty end)
+        | [((.name // "") | if . == "" then "-" else . end), .pane_id,
+           (.agent_status // "unknown"), (.agent // ""), (.cwd // "")] | @tsv' 2>/dev/null)" || live=""
+      [ -n "$live" ] || continue
+      IFS=$'\t' read -r lname lpane lstatus rt lcwd <<< "$live"
+      [ -z "$lcwd" ] || cwd="$lcwd"
+      [ -n "$rt" ] || rt="$(ws_runtime "$wsdir" orchestrator)"
+      hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
+      [ -n "$hookfile" ] || continue   # claude: Monitor, not a hook
+      _run_pane_pid "$lpane" "$cwd" "$rt" || continue
+      if _run_cmdline "$_RUN_PID" | grep -qF -- "${hookfile##*/}"; then state=ok; else state=stripped; fi
+      [ "$lname" != "-" ] || lname="$name"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$p" "$lpane" "$lstatus" "$state" \
+        "cel run orchestrator --product $p --workspace $ws --restart"
+    done
+  done
+  return 0
+}
+# STALE LAUNCH LINES. `cel update` changes hooks and launch flags, but a
+# running orchestrator keeps the command line it started with: the inbox hook
+# (CEL-65) and --no-prewalk (CEL-68) silently did not apply to any
+# orchestrator that was already up. So compare each live one's actual argv
+# (/proc/<pid>/cmdline) with what `cel run --dry-run` would launch now.
