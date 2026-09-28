@@ -765,26 +765,6 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
 
 _run_proc_root() { printf '%s' "${CEL_PROC_ROOT:-/proc}"; }
 
-# THE PROCESS BEHIND A ROOT/ORCHESTRATOR. herdr's roster carries no pid, but
-# the launch marks the process's environment with CEL_INBOX_ME and
-# CEL_WORKSPACE (_run_launch_env), which nothing rewrites. Its own tool
-# shells inherit that environment too, so the runtime binary must be argv[0].
-_run_orch_pid() { # <inbox-me> <wsdir> <runtime> -> newest pid, or fail
-  local d pid best="" env a0
-  for d in "$(_run_proc_root)"/[0-9]*; do
-    [ -r "$d/environ" ] || continue
-    env="$(tr '\0' '\n' < "$d/environ" 2>/dev/null)" || continue
-    printf '%s\n' "$env" | grep -qxF "CEL_INBOX_ME=$1" || continue
-    printf '%s\n' "$env" | grep -qxF "CEL_WORKSPACE=$2" || continue
-    a0="$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 1p)" || continue
-    [ "${a0##*/}" = "$3" ] || continue
-    pid="${d##*/}"
-    if [ -z "$best" ] || [ "$pid" -gt "$best" ]; then best="$pid"; fi
-  done
-  [ -n "$best" ] || return 1
-  printf '%s' "$best"
-}
-
 _run_cmdline() { # <pid> -> argv, one per line
   tr '\0' '\n' < "$(_run_proc_root)/$1/cmdline" 2>/dev/null || true
 }
@@ -851,11 +831,12 @@ _run_restart_wait() { # <pane>: until no agent is live in it
 }
 
 # Did the new process come up with the hooks this launch asked for?
-_run_restart_confirm() { # <inbox-me> <wsdir> <runtime> <name> <argv...>
-  local me="$1" wsdir="$2" rt="$3" name="$4"; shift 4
+# Found through _run_pane_pid, the same lookup every stale check uses.
+_run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
+  local pane="$1" cwd="$2" rt="$3" name="$4"; shift 4
   local i=0 pid="" exp act missing
   while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
-    pid="$(_run_orch_pid "$me" "$wsdir" "$rt")" && break
+    if _run_pane_pid "$pane" "$cwd" "$rt"; then pid="$_RUN_PID"; break; fi
     sleep "${CEL_RESTART_SLEEP:-1}"; i=$((i+1))
   done
   if [ -z "$pid" ]; then
@@ -1272,7 +1253,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null
-    _run_restart_confirm "$inbox_me" "$wsdir" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
+    _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
     return 0
   fi
 
@@ -1356,10 +1337,11 @@ _run_ppid() { # <pid> -> sets _RUN_PPID
   done < "$(_run_proc_root)/$1/status" 2>/dev/null || true
 }
 
-_run_descends() { # <pid> <ancestor>
+_run_descends() { # <pid> <ancestor> -> sets _RUN_DEPTH (hops up to it)
   local p="$1" i=0
+  _RUN_DEPTH=""
   while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$i" -lt 64 ]; do
-    [ "$p" = "$2" ] && return 0
+    if [ "$p" = "$2" ]; then _RUN_DEPTH="$i"; return 0; fi
     _run_ppid "$p"; p="$_RUN_PPID"; i=$((i+1))
   done
   return 1
@@ -1367,8 +1349,16 @@ _run_descends() { # <pid> <ancestor>
 
 # The pid, in _RUN_PID, or the reason it could not be found, in _RUN_WHY.
 # One `herdr pane process-info` is the only process this starts.
+#
+# THIS IS THE ONE ANSWER to "which process is this pane's orchestrator":
+# `cel update --check`, --restart-orchestrators, doctor, the steward's repair
+# and the console all ask it. It takes the runtime process NEAREST the pane's
+# shell, newest pid only between equals. It used to take the newest of all,
+# and omp's own helpers are omp too (a js-eval worker, a daemon broker, a
+# task it spawned) - so a freshly restarted alpha-orch with every flag was
+# reported missing all of them, and doctor called it stripped (CEL-87).
 _run_pane_pid() { # <pane> <cwd> <runtime>
-  local info shell d pid a0
+  local info shell d pid a0 best=""
   _RUN_PID=""; _RUN_WHY=""
   info="$(herdr pane process-info --pane "$1" 2>/dev/null)" || info=""
   if [[ "$info" =~ \"shell_pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then shell="${BASH_REMATCH[1]}"; else shell=""; fi
@@ -1381,7 +1371,10 @@ _run_pane_pid() { # <pane> <cwd> <runtime>
     [ "${a0##*/}" = "$3" ] || continue
     [ "$d/cwd" -ef "$2" ] || continue
     _run_descends "$pid" "$shell" || continue
-    if [ -z "$_RUN_PID" ] || [ "$pid" -gt "$_RUN_PID" ]; then _RUN_PID="$pid"; fi
+    if [ -z "$_RUN_PID" ] || [ "$_RUN_DEPTH" -lt "$best" ] \
+       || { [ "$_RUN_DEPTH" -eq "$best" ] && [ "$pid" -gt "$_RUN_PID" ]; }; then
+      _RUN_PID="$pid"; best="$_RUN_DEPTH"
+    fi
   done
   if [ -z "$_RUN_PID" ]; then _RUN_WHY="no readable $3 process in $2 under pane $1"; return 1; fi
   return 0
@@ -1456,15 +1449,19 @@ _run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
   else
     line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
   fi
-  line="${line##*$'\n'}"
-  case "$line" in
-    herdr\ agent\ start\ *\ --kind\ *\ --pane\ \<pane\>\ --\ *)
-      line="${line#herdr agent start }"
-      line="${line#* --kind }"
-      line="${line#* --pane <pane> -- }"
-      ;;
-    *) line="" ;;
-  esac
+  # The launch line wherever it stands in the output: taking only the last
+  # line blanked the comparison as soon as anything printed after it (CEL-87).
+  local out="$line" l
+  line=""
+  while IFS= read -r l; do
+    case "$l" in
+      herdr\ agent\ start\ *\ --kind\ *\ --pane\ \<pane\>\ --\ *)
+        l="${l#herdr agent start }"
+        l="${l#* --kind }"
+        line="${l#* --pane <pane> -- }"
+        break ;;
+    esac
+  done <<<"$out"
   if [ -z "$line" ]; then _RUN_DETAIL="cel run --dry-run gave no launch line to compare with"; return 0; fi
   exp="$(mktemp)"; act="$(mktemp)"
   # shellcheck disable=SC2086
