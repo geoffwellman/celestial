@@ -130,21 +130,16 @@ test_box_space_without_docker_exits_zero_with_no_docker_rows() {
 
 # --------------------------------------------------------------- the sweepers
 
-# 14 days on images and build cache, because the working set is 3-6 days old
-# and superseded build tags are two weeks and older. Nothing depends on a dead
-# container, so the container prune carries no age filter at all.
-test_docker_sweep_filters_images_and_builder_by_age_but_not_containers() {
+# CEL-88: every unused image and all build cache under --box, and never a
+# container or volume prune - a stopped container's image stays.
+test_docker_sweep_prunes_all_build_cache_and_never_containers_or_volumes() {
   _box_fixture
   _box_stub_docker
   _box_sweep_docker 0 >/dev/null
-  local calls; calls="$(cat "$DOCKER_LOG")"
-  assert_contains "$(grep 'image prune' "$DOCKER_LOG")" "until=336h"
-  assert_contains "$(grep 'builder prune' "$DOCKER_LOG")" "until=336h"
-  case "$(grep 'container prune' "$DOCKER_LOG")" in
-    *until=*) printf 'container prune carried an age filter\n' >&2; return 1;;
-    '') printf 'container prune never ran\n' >&2; return 1;;
+  assert_contains "$(grep 'builder prune' "$DOCKER_LOG")" "--all"
+  case "$(cat "$DOCKER_LOG")" in
+    *"container prune"*|*volume*) printf 'touched containers or volumes\n' >&2; return 1;;
   esac
-  assert_contains "$calls" prune
   rm -rf "$T"
 }
 
@@ -154,10 +149,13 @@ test_docker_sweep_keeps_base_images_regardless_of_age() {
   _box_stub_docker
   _box_sweep_docker 0 >/dev/null
   local removals; removals="$(_box_prune_calls)"
-  for keep in aaa bbb ccc; do
+  for keep in aaa bbb; do
     case "$removals" in *"$keep"*) printf 'keep-listed image %s was in a removal argv\n' "$keep" >&2; return 1;; esac
   done
   assert_contains "$removals" ddd
+  # CEL-88: an empty {{.Parent}} is no longer a reason to keep - BuildKit
+  # images all have one, and that rule kept everything.
+  assert_contains "$removals" ccc
   rm -rf "$T"
 }
 
