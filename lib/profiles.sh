@@ -44,7 +44,7 @@ _CEL_PROFILES=1
 # shellcheck source=lib/yaml.sh
 . "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
 
-profile_names() { _yqr -r '.worker_profiles // {} | keys_unsorted[]' "$1/workspace.yaml"; }
+profile_names() { _yqr_ws -r '.worker_profiles // {} | keys_unsorted[]' "$1"; }
 
 # Which profile a role launches on when nobody passes --profile.
 #
@@ -55,7 +55,7 @@ profile_names() { _yqr -r '.worker_profiles // {} | keys_unsorted[]' "$1/workspa
 # Keyed by the same role names cel run takes - root, orchestrator, worker,
 # reviewer, direct.
 role_profile() { # <wsdir> <role>
-  _yqr -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1/workspace.yaml"
+  _yqr_ws -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1"
 }
 
 # The same binding, narrowed to one product or repo. A workspace's products are
@@ -80,22 +80,22 @@ role_profile() { # <wsdir> <role>
 role_profile_for() { # <wsdir> <role> [name]
   if [ -n "${3:-}" ]; then
     local p
-    p="$(_yqr -r --arg n "$3" --arg r "$2" \
+    p="$(_yqr_ws -r --arg n "$3" --arg r "$2" \
       '((.products // [] | map(select(.name == $n))[0].role_profiles[$r])
         // (.repos // [] | map(select(.name == $n))[0].role_profiles[$r])
         // "") | tostring' \
-      "$1/workspace.yaml")"
+      "$1")"
     [ -n "$p" ] && { printf '%s' "$p"; return 0; }
   fi
   role_profile "$1" "$2"
 }
 
 profile_get() { # <wsdir> <name> <key>
-  _yqr -r --arg n "$2" --arg k "$3" '.worker_profiles[$n][$k] // "" | tostring' "$1/workspace.yaml"
+  _yqr_ws -r --arg n "$2" --arg k "$3" '.worker_profiles[$n][$k] // "" | tostring' "$1"
 }
 
 profile_exists() { # <wsdir> <name>
-  [ "$(_yqr -r --arg n "$2" '.worker_profiles // {} | has($n)' "$1/workspace.yaml")" = "true" ]
+  [ "$(_yqr_ws -r --arg n "$2" '.worker_profiles // {} | has($n)' "$1")" = "true" ]
 }
 
 # The workspace's default reasoning level, else the plane's (agents.yaml
@@ -411,7 +411,15 @@ EOS
       bal="$(quota_remaining "$bp" "$wsdir")"; [ "$bal" = unknown ] || bal="$(printf '%.2f' "$bal")"
       bal="  [$bp: $bal $(provider_balance "$bp" unit) left]"
     fi
-    printf '  %-12s %-9s %s%s\n' "$n" "$PROFILE_RUNTIME" "${PROFILE_MODEL:-<runtime default>}" "$bal"
+    # A name present in BOTH files takes its whole body from local (see the
+    # `+` merge in _ws_effective_json) - so "present in local" is the right
+    # test for provenance, not "absent from base".
+    local origin=""
+    if [ -f "$wsdir/workspace.local.yaml" ] \
+      && [ "$(_yqr -r --arg n "$n" '.worker_profiles // {} | has($n)' "$wsdir/workspace.local.yaml")" = "true" ]; then
+      origin="  (local)"
+    fi
+    printf '  %-12s %-9s %s%s%s\n' "$n" "$PROFILE_RUNTIME" "${PROFILE_MODEL:-<runtime default>}" "$bal" "$origin"
     local for_; for_="$(profile_get "$wsdir" "$n" for)"
     [ -z "$for_" ] || printf '  %-12s for: %s\n' "" "$for_"
     printf '  %-12s %s\n' "" "launch: ${PROFILE_ARGS[*]}"
@@ -425,7 +433,12 @@ EOS
     bound="$(role_profile "$wsdir" "$role")"
     [ -n "$bound" ] || continue
     [ "$any" -eq 1 ] || { printf '\nbound by role (no --profile needed):\n'; any=1; }
-    printf '  %-12s -> %s\n' "$role" "$bound"
+    local rorigin=""
+    if [ -f "$wsdir/workspace.local.yaml" ] \
+      && [ "$(_yqr -r --arg r "$role" '.role_profiles[$r] // "" | tostring' "$wsdir/workspace.local.yaml")" = "$bound" ]; then
+      rorigin="  (local)"
+    fi
+    printf '  %-12s -> %s%s\n' "$role" "$bound" "$rorigin"
   done
   [ "$any" -eq 1 ] || printf '\nNo role_profiles: bindings - every role uses runtime: + the default level.\n'
 

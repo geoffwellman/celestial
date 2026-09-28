@@ -490,13 +490,13 @@ ws_policy_block() { # <wsdir> [product]
   # Profiles are read straight from the file rather than through lib/profiles.sh:
   # that file sources THIS one, and a policy block is not worth a source cycle.
   local profs wbound
-  profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"
-  wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"
+  profs="$(_yqr_ws -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d")"
+  wbound="$(_yqr_ws -r '.role_profiles.worker // "" | tostring' "$d")"
   if [ -n "$profs" ]; then
     printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
       "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
-    _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true
-    local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"
+    _yqr_ws -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d" 2>/dev/null || true
+    local sbound; sbound="$(_yqr_ws -r '.role_profiles.scout // "" | tostring' "$d")"
     printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
       "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
   fi

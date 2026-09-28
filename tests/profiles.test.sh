@@ -535,3 +535,203 @@ test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {
   assert_contains "$out" "cel gateway"
   _gws_clean
 }
+
+# --- workspace.local.yaml: per-box override, WOOT-248 ---------------------
+#
+# A team box under one login per person, each on a different provider, needs
+# root and the orchestrators - launched by nobody, so never a --profile flag
+# - to route to a model THIS login can reach, without editing the workspace's
+# own committed file. workspace.local.yaml is gitignored and sits beside it.
+
+_pws_local() { # writes a workspace.local.yaml into the ws-profiles fixture
+  _pws
+  cat > "$T/workspace.local.yaml" <<'YAML'
+worker_profiles:
+  localonly: { runtime: claude, model: claude-sonnet-5 }
+role_profiles:
+  root: localonly
+YAML
+}
+
+test_local_file_overrides_the_workspace_role_binding() {
+  _pws_local
+  # base fixture binds root: swap; the local file must win
+  assert_eq "$(role_profile "$T" root)" localonly
+  rm -rf "$T"
+}
+test_local_file_leaves_an_unmentioned_role_alone() {
+  _pws_local
+  # base fixture binds worker: bare; local names nothing for it
+  assert_eq "$(role_profile "$T" worker)" bare
+  rm -rf "$T"
+}
+test_local_file_adds_a_worker_profile() {
+  _pws_local
+  profile_exists "$T" localonly || { echo "profile_exists: localonly missing" >&2; rm -rf "$T"; return 1; }
+  assert_eq "$(profile_get "$T" localonly model)" claude-sonnet-5
+  rm -rf "$T"
+}
+test_local_file_absent_changes_nothing() {
+  _pws
+  assert_eq "$(role_profile "$T" root)" swap
+  rm -rf "$T"
+}
+test_local_override_reaches_a_product_binding() {
+  _pws
+  cat >> "$T/workspace.yaml" <<'YAML'
+products:
+  - name: bundle
+    repos: [widget]
+    role_profiles: { orchestrator: bare }
+YAML
+  cat > "$T/workspace.local.yaml" <<'YAML'
+products:
+  - name: bundle
+    role_profiles: { orchestrator: swap }
+YAML
+  assert_eq "$(role_profile_for "$T" orchestrator bundle)" swap
+  rm -rf "$T"
+}
+test_local_override_does_not_reach_a_different_product() {
+  _pws
+  cat >> "$T/workspace.yaml" <<'YAML'
+products:
+  - name: bundle
+    repos: [widget]
+    role_profiles: { orchestrator: bare }
+  - name: other
+    repos: [widget]
+YAML
+  cat > "$T/workspace.local.yaml" <<'YAML'
+products:
+  - name: bundle
+    role_profiles: { orchestrator: swap }
+YAML
+  assert_eq "$(role_profile_for "$T" orchestrator other)" "$(role_profile "$T" orchestrator)"
+  rm -rf "$T"
+}
+test_cel_profiles_marks_a_local_binding() {
+  _pws_local
+  local out; out="$(cd "$T" && cmd_profiles 2>&1)"
+  assert_contains "$out" "root"
+  assert_contains "$out" "-> localonly"
+  assert_contains "$out" "(local)"
+  rm -rf "$T"
+}
+test_cel_profiles_marks_a_local_only_profile() {
+  _pws_local
+  local out; out="$(cd "$T" && cmd_profiles localonly 2>&1)"
+  assert_contains "$out" "(local)"
+  rm -rf "$T"
+}
+
+# --- multi-entry products[]/repos[]: WOOT-248 regression coverage --------
+#
+# The jq merge indexes local products[]/repos[] BY POSITION after a filtering
+# map, not by match - so only a local entry that happens to sit first in the
+# base list's iteration order was ever reachable. These fail against that
+# shape and pass against the match-indexed fix.
+
+_pws_products3() {
+  _pws
+  sed -i '/^repos:/,$d' "$T/workspace.yaml"
+  cat >> "$T/workspace.yaml" <<'YAML'
+products:
+  - name: alpha
+    repos: [widget]
+    role_profiles: { worker: bare }
+  - name: beta
+    repos: [widget]
+    role_profiles: { worker: bare }
+  - name: gamma
+    repos: [widget]
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test
+YAML
+}
+
+test_local_override_reaches_every_matched_product_not_only_the_first() {
+  _pws_products3
+  cat > "$T/workspace.local.yaml" <<'YAML'
+products:
+  - name: alpha
+    role_profiles: { worker: swap }
+  - name: beta
+    role_profiles: { worker: inherit }
+YAML
+  assert_eq "$(role_profile_for "$T" worker alpha)" swap
+  assert_eq "$(role_profile_for "$T" worker beta)" inherit
+  assert_eq "$(role_profile_for "$T" worker gamma)" "$(role_profile "$T" worker)"
+  rm -rf "$T"
+}
+
+_pws_repos2() {
+  _pws
+  sed -i '/^repos:/,$d' "$T/workspace.yaml"
+  cat >> "$T/workspace.yaml" <<'YAML'
+repos:
+  - name: widget
+    url: git@github.com:someone/widget.git
+    prefix: WG
+    gate: bun test
+    role_profiles: { worker: bare }
+  - name: gadget
+    url: git@github.com:someone/gadget.git
+    prefix: GD
+    role_profiles: { worker: bare }
+YAML
+}
+
+test_local_override_reaches_every_matched_repo_not_only_the_first() {
+  _pws_repos2
+  cat > "$T/workspace.local.yaml" <<'YAML'
+repos:
+  - name: widget
+    role_profiles: { worker: swap }
+  - name: gadget
+    role_profiles: { worker: inherit }
+YAML
+  assert_eq "$(role_profile_for "$T" worker widget)" swap
+  assert_eq "$(role_profile_for "$T" worker gadget)" inherit
+  rm -rf "$T"
+}
+
+# --- same-name worker_profiles: replace whole, never field-merge ---------
+#
+# `via:`, `fallback:` and `thinking:` are runtime-specific routing, not
+# defaults to inherit across a runtime switch - via especially, since it
+# points at the box's shared auth-gateway, the exact credential this file
+# exists to let a login avoid.
+
+test_local_worker_profile_replaces_the_whole_body_not_merges_it() {
+  T="$(mktemp -d)"
+  cat > "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: codex/gpt-5.5, via: gateway, fallback: openrouter/some/model, thinking: high, for: "base desc" }
+YAML
+  cat > "$T/workspace.local.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: claude, model: claude-sonnet-5 }
+YAML
+  assert_eq "$(profile_get "$T" gw runtime)" claude
+  assert_eq "$(profile_get "$T" gw model)" claude-sonnet-5
+  assert_eq "$(profile_get "$T" gw via)" ""
+  assert_eq "$(profile_get "$T" gw fallback)" ""
+  assert_eq "$(profile_get "$T" gw thinking)" ""
+  assert_eq "$(profile_get "$T" gw for)" ""
+  rm -rf "$T"
+}
+
+# --- a malformed local file must not take the base config down with it ---
+
+test_malformed_local_file_falls_back_to_the_base_workspace() {
+  _pws
+  printf 'role_profiles: [this is not a mapping\n' > "$T/workspace.local.yaml"
+  assert_eq "$(role_profile "$T" root)" swap
+  assert_eq "$(role_profile "$T" worker)" bare
+  assert_eq "$(profile_get "$T" swap model)" gpt-6-astra
+  rm -rf "$T"
+}

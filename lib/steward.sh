@@ -814,8 +814,8 @@ _steward_ready_tickets() { # [agents-json]
 # and the review profile are the routes; role_profiles only name them.
 _steward_provider_used() { # <wsdir> <provider> -> 0 yes, 1 no
   command -v profile_provider >/dev/null 2>&1 || . "$CEL_ROOT/lib/profiles.sh"
-  local m
-  for m in $(yq -r '[(.worker_profiles // {} | .[]? | .model // empty), (.review.model // empty)] | .[]' "$1/workspace.yaml" 2>/dev/null); do
+  local m j; j="$(_ws_effective_json "$1" 2>/dev/null)" || return 1
+  for m in $(jq -r '[(.worker_profiles // {} | .[]? | .model // empty), (.review.model // empty)] | .[]' "$j" 2>/dev/null); do
     [ "$(profile_provider "$m" 2>/dev/null)" = "$2" ] && return 0
   done
   return 1

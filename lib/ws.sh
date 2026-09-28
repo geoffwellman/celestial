@@ -8,13 +8,14 @@ _CEL_WS=1
 # shellcheck source=lib/wslife.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"
 
-# The three lines every workspace root ignores: cloned repos, disposable
-# spikes, and the fanout ledger - none of them belong in the workspace's own
-# git history.
+# What a workspace root ignores: cloned repos, disposable spikes, the fanout
+# ledger, and the two per-box files - secrets and the local role-routing
+# override - neither of which belongs in the workspace's own git history.
 _WS_GITIGNORE_LINES="repos/
 spikes/
 .cel/
-env.local"
+env.local
+workspace.local.yaml"
 
 # One question per unknown; Enter accepts the visible default. Reads stdin so
 # tests can feed answers; an empty read (EOF) also takes the default.
