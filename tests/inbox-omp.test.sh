@@ -166,3 +166,61 @@ _assert_failed_send_keeps_mail() {
 }
 test_omp_inbox_throwing_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendthrows; }
 test_omp_inbox_rejecting_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendrejects; }
+
+# CEL-85: mail that was ALREADY waiting when the session started never woke
+# anyone - the watcher only reacts to new lines, so an orchestrator restarted
+# onto an 85-message backlog sat on it until a human typed. session_start now
+# arms the same coalesced wake new mail uses.
+_omp_backlog_harness() { # <inbox-dir> <mode: idle|draft|none>
+  CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
+  CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=400 HOOK="$HOOK" node --no-warnings - <<'JS'
+const { execFileSync } = require('node:child_process');
+(async () => {
+  const mode = process.env.MODE;
+  const handlers = {}; const notes = []; const sent = [];
+  const pi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); }, sendMessage: (m, o) => { sent.push({ m, o }); } };
+  const ctx = { cwd: process.cwd(), hasUI: true, isIdle: () => true,
+    ui: { notify: (m, level) => notes.push({ m, level }),
+      getEditorText: () => (mode === 'draft' ? 'half a thought' : '') } };
+  const fire = async (ev, e) => { let r; for (const fn of handlers[ev] || []) { const x = await fn({ type: ev, ...e }, ctx); if (x) r = x; } return r; };
+  const send = (msg) => execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', 'widget-orch', msg, '--workspace', 'demo'], { stdio: 'ignore' });
+  if (mode !== 'none') { send('backlog-1'); send('backlog-2'); }
+  const mod = await import(process.env.HOOK);
+  mod.default(pi);
+  await fire('session_start', {});
+  await new Promise((r) => setTimeout(r, 2000));
+  const turn = await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] });
+  await fire('session_shutdown', {});
+  console.log(JSON.stringify({ notes, sent, turn: turn || null }));
+  process.exit(0);
+})().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); process.exit(0); });
+JS
+}
+_backlog() { local d; d="$(mktemp -d)"; _omp_backlog_harness "$d" "$1"; rm -rf "$d"; }
+
+test_omp_inbox_backlog_at_start_wakes_idle_session_once() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_backlog idle)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_eq "$(jq -r '.sent[0].o.triggerTurn' <<<"$out")" "true"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "backlog-1"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "backlog-2"
+  assert_eq "$(jq -r '.turn' <<<"$out")" "null"
+}
+
+test_omp_inbox_backlog_with_a_draft_only_notifies() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_backlog draft)"
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "0"
+  assert_contains "$(jq -r '[.notes[].m]|join(" ")' <<<"$out")" "unread"
+  assert_contains "$(jq -r '.turn.message.content' <<<"$out")" "backlog-1"
+}
+
+test_omp_inbox_no_backlog_no_wake() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_backlog none)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "0"
+  assert_eq "$(jq -r '.notes|length' <<<"$out")" "0"
+}

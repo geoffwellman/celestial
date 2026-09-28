@@ -1461,3 +1461,77 @@ test_cel82_old_reminder_is_resolved_before_the_new_one_is_written() {
   assert_eq "$(cmd_inbox open --for bundle-orch --workspace alpha --json | grep -c . || true)" "0"
   rm -rf "$T"
 }
+
+# --- CEL-85: an orchestrator herdr brought back without its inbox hook -----
+# After a herdr restart every orchestrator ran as a bare `omp --resume` with no
+# hook, and sat idle all night on 85 unread. The steward restarts one that is
+# safe to restart, and otherwise says so to root exactly once.
+_hook_fixture() { # <status> <composer: empty|draft>
+  _orch_fixture
+  printf 'bundle-orch\talpha\tbundle\tw:p2\t%s\tstripped\tcel run orchestrator --product bundle --workspace alpha --restart\n' "$1" > "$T/rows"
+  STUB_COMPOSER="$2"
+  : > "$T/restarted"
+  run_stripped_orchestrators() { cat "$T/rows"; }
+  _steward_orch_composer_empty() { [ "$STUB_COMPOSER" = empty ]; }
+  _steward_restart_orch() { printf '%s %s\n' "$1" "$2" >> "$T/restarted"; }
+}
+_root_mail() { cmd_inbox read --for root --workspace alpha --all 2>/dev/null; }
+_root_open() { cmd_inbox open --for root --workspace alpha --json 2>/dev/null | jq -s 'length'; }
+
+test_steward_restarts_a_stripped_idle_orchestrator_once_and_tells_root() {
+  _hook_fixture idle empty
+  local out; out="$(_steward_inbox_hooks)"
+  assert_eq "$(cat "$T/restarted")" "bundle alpha"
+  assert_contains "$out" "bundle-orch"
+  assert_contains "$(_root_mail)" "bundle-orch came back without its inbox hook (probably a herdr restart); restarted it with the full launch line"
+  rm -rf "$T"
+}
+
+test_steward_does_not_restart_a_working_stripped_orchestrator_and_says_so_once() {
+  _hook_fixture working empty
+  _steward_inbox_hooks >/dev/null
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ""
+  assert_eq "$(_root_open)" "1"
+  assert_eq "$(_root_mail | grep -c 'cannot receive mail' || true)" "1"
+  assert_contains "$(_root_mail)" "cel run orchestrator --product bundle --workspace alpha --restart"
+  rm -rf "$T"
+}
+
+test_steward_does_not_restart_over_a_draft() {
+  _hook_fixture idle draft
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ""
+  assert_contains "$(_root_mail)" "cannot receive mail"
+  rm -rf "$T"
+}
+
+test_steward_escalates_when_the_restart_comes_back_stripped() {
+  _hook_fixture idle empty
+  _steward_inbox_hooks >/dev/null
+  _steward_inbox_hooks >/dev/null   # still stripped on the next tick
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(wc -l < "$T/restarted")" "1"
+  assert_eq "$(_root_mail | grep -c 'still without its inbox hook' || true)" "1"
+  rm -rf "$T"
+}
+
+test_steward_leaves_an_orchestrator_with_its_hook_alone() {
+  _hook_fixture idle empty
+  sed -i 's/\tstripped\t/\tok\t/' "$T/rows"
+  local out; out="$(_steward_inbox_hooks)"
+  assert_eq "$(cat "$T/restarted")" ""
+  assert_eq "$(_root_mail)" ""
+  rm -rf "$T"
+}
+
+# The composer is empty only when the pane PROVES it: an editor box between
+# two dividers with nothing in it. Anything else - text, no box, no read - is
+# a draft the steward must not kill.
+test_steward_composer_is_empty_only_when_provably_so() {
+  local frame=$'● done\n────────────\n\n────────────\n~/alpha  ctx 12%'
+  _steward_composer_empty_text "$frame"
+  assert_fails _steward_composer_empty_text $'● done\n────────────\nhalf a thought\n────────────\nfooter'
+  assert_fails _steward_composer_empty_text $'● done\nno editor box here'
+  assert_fails _steward_composer_empty_text ""
+}

@@ -475,6 +475,21 @@ doctor_stale_orchestrator_lines() {
   return 0
 }
 
+# AN ORCHESTRATOR THAT CANNOT HEAR ITS MAIL. A FAILURE, unlike an older
+# launch line: after the herdr restart of 2026-09-28 every orchestrator ran
+# without its inbox hook, mail piled up all night and nothing woke anyone.
+doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
+  # shellcheck source=lib/run.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  local name ws p pane status state cmd bad=0
+  while IFS=$'\t' read -r name ws p pane status state cmd; do
+    [ "$state" = stripped ] || continue
+    c_err "$name ($ws) is running without its inbox hook - mail will not reach it (probably a herdr restart): $cmd"
+    bad=1
+  done < <(run_stripped_orchestrators)
+  return "$bad"
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -577,6 +592,7 @@ cmd_doctor() {
   # what the last update added (CEL-63).
   c_hd "Orchestrators"
   doctor_stale_orchestrator_lines
+  doctor_inbox_hook_lines || fail=1
   # One line, never a failure: most boxes have no gateway, and a red doctor
   # for an optional door teaches people to ignore a red doctor.
   c_hd "Gateway"
