@@ -450,6 +450,24 @@ _steward_orch_composer_empty() { # <pane>
   _steward_composer_empty_text "$text"
 }
 
+# CLAIM BEFORE RESTARTING. Two overlapping ticks (a timer tick beside a hand
+# run) could both read an old timestamp and both restart the same pane, so
+# the 30-minute check and its record happen under one lock (Sourcery on #107).
+# A tick that cannot take the lock leaves the restart to the one that did.
+_steward_claim_restart() { # <key>
+  local key="$1"
+  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  (
+    if have flock; then flock -n 9 || exit 1; fi
+    local now last
+    now="$(date +%s)"
+    last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
+    [ $((now - last)) -ge 1800 ] || exit 1
+    { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
+      > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+  ) 9>>"$_STEWARD_STATE.restart.lock"
+}
+
 _steward_inbox_hooks() {
   local name ws p pane status state cmd fp stuck key now last why
   while IFS=$'\t' read -r name ws p pane status state cmd; do
@@ -475,9 +493,7 @@ _steward_inbox_hooks() {
     elif ! _steward_orch_composer_empty "$pane"; then why="its composer may hold a draft"
     fi
     if [ -z "$why" ]; then
-      mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
-      { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
-        > "$_STEWARD_STATE.tmp" && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
+      _steward_claim_restart "$key" || continue
       if _steward_restart_orch "$p" "$ws"; then
         c_ok "$name came back without its inbox hook - restarted it ($cmd)"
         cmd_inbox send root "$name came back without its inbox hook (probably a herdr restart); restarted it with the full launch line" \
