@@ -893,6 +893,60 @@ Three things make this more than a flag:
 Keys live in the workspace's gitignored `env.local`; nothing but the model id
 ever reaches this repo.
 
+### Team workspaces
+
+A team workspace has three layers:
+
+| Layer | File | Committed | Holds |
+|---|---|---|---|
+| Team contract | `workspace.yaml` | yes | everything, including the default routing |
+| Personal routing | `workspace.local.yaml` | no | routing overrides only |
+| Secrets | `env.local` | no | keys |
+
+The local file may change `role_profiles` (workspace-level and per
+`products[]`/`repos[]` entry), add or replace `worker_profiles`, and override
+`env:` keys. It may not change `policy`, `tickets`, `repos`, `products`,
+gates, prefixes, merge or review settings, or `services` - and the policy
+block rendered into CLAUDE.md/AGENTS.md always comes from `workspace.yaml`
+alone. `cel doctor` fails if `workspace.yaml` is not committed.
+
+Joining a team workspace: clone it (`cel ws add <url>`), copy
+`workspace.local.example.yaml` to `workspace.local.yaml`, choose your
+profiles, run `cel doctor`.
+
+### Per-box routing
+
+A team box under one login per person, each on a different provider, has a
+problem `env.local` cannot solve: root and the orchestrators only ever get a
+model from `role_profiles`, which lives in the workspace's own committed
+file - one binding, shared by everyone who clones it. A login without the
+credential that binding names has no route for either, short of an
+uncommitted edit to a file everyone else also reads.
+
+`workspace.local.yaml`, gitignored, sits beside `workspace.yaml` and overrides
+`role_profiles` (workspace-level, and per `products[]`/`repos[]` entry,
+matched by name) and adds `worker_profiles` - or replaces one whole, by name,
+if it names one the committed file already has, so a local `sonnet` profile
+never inherits a base `sonnet` profile's `via:`, `fallback:` or `thinking:`.
+It is allowed to do only that: it cannot add a repo, change policy, or hide
+anything a teammate reading `workspace.yaml` needs to know. Local always wins
+over the committed file. `cel doctor` warns on anything else the file
+declares (an unrelated top-level key, or a `products[]`/`repos[]` name with
+no counterpart in the committed file) since the merge otherwise drops it
+with no error.
+
+```yaml
+# workspace.local.yaml, gitignored, this box only
+worker_profiles:
+  sonnet: { runtime: claude, model: claude-sonnet-5, thinking: low }
+role_profiles:
+  orchestrator: opus   # a base profile - resolves fine, no local worker_profiles entry needed
+  worker: sonnet        # a local profile - see worker_profiles above
+```
+
+`cel profiles` marks a binding or a profile that came from this file with
+`(local)`.
+
 ### Subscriptions
 
 The fleet does not run on API keys alone. It runs on two **signed-in
