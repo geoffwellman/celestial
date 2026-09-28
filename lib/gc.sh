@@ -913,8 +913,8 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   # AFTER the worktree pass, deliberately: a freed worktree may have been the
   # last reference to a cache entry, and sweeping first would leave that entry
   # behind for another fortnight. `cel gc` is unchanged without --box.
-  local box_line=""
-  if [ "$box" -eq 1 ]; then box_sweep "$dry"; box_line="$(box_summary_fragment)"; fi
+  local box_line="" box_rc=0
+  if [ "$box" -eq 1 ]; then box_sweep "$dry" || box_rc=$?; box_line="$(box_summary_fragment)"; fi
   printf 'gc: %d worktrees removed, %d reviewers closed, %d agents reaped, %d kept%s%s%s\n' \
     "$removed" "$reviewers_closed" "$reaped" "$kept" "$(_gc_kept_line summary)" "$box_line" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')"
@@ -924,4 +924,5 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     c_warn "unidentified agents kept: ${GC_UNIDENTIFIED[*]}"
   fi
   _gc_kept_save
+  return "$box_rc"
 )

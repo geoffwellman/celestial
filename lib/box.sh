@@ -36,7 +36,6 @@ _CEL_BOX=1
 # thirty frees almost nothing extra. Exited containers carry no age filter at
 # all: nothing depends on a dead container.
 _BOX_DOCKER_AGE_DAYS=14
-_BOX_DOCKER_UNTIL=336h   # the same 14 days in the units docker's filter wants
 
 # Overridable so the suite can drive the sweepers against a docker that is
 # deliberately not resolvable - the "docker absent is a normal box" case - and
@@ -216,38 +215,71 @@ box_docker_json() { # the docker half of the report, or nothing when absent
       build_cache:{size:$bs,reclaimable:$br}}'
 }
 
-_box_docker_keep() { # <repository> <tag> <id> -> 0 keep, 1 removable
-  local repo="$1" tag="$2" id="$3" pat parent
+_box_docker_keep() { # <repository> <tag> -> 0 keep, 1 removable
+  local repo="$1" tag="$2" pat
   while IFS= read -r pat; do
     # shellcheck disable=SC2053
     [[ "$repo:$tag" == $pat ]] && return 0
   done < <(_box_docker_keep_patterns)
-  case "$repo" in
-    */*)
-      # A registry-qualified name with no local parent layer was pulled, not
-      # built here: removing it buys a re-pull and nothing else.
-      parent="$("$(_box_docker_bin)" image inspect -f '{{.Parent}}' "$id" 2>/dev/null || true)"
-      [ -z "${parent//[[:space:]]/}" ] && return 0 ;;
-  esac
   return 1
 }
 
-# `docker image prune` without `-a` only ever takes dangling layers, so the
-# superseded build tags that are most of the 41G survive it. They are removed
-# by name here instead, which is also the only way the keep list can exist at
-# all: a prune filter cannot say "except the base images".
-_box_docker_aged_images() { # -> id<TAB>bytes
-  local cutoff line id repo tag created size when
-  cutoff="$(date -d "$_BOX_DOCKER_AGE_DAYS days ago" +%s 2>/dev/null)" || return 0
-  while IFS=$'\t' read -r id repo tag created size; do
+# What any container, running OR stopped, references. `docker container ls
+# -a` prints a name (repo:tag, or bare repo meaning :latest) or an image id.
+# A failed listing is NOT an empty one: it returns 1 with docker's error on
+# stderr, and the sweep aborts rather than treating every image as unused.
+_box_docker_in_use() {
+  local out
+  if ! out="$("$(_box_docker_bin)" container ls -a --format '{{.Image}}' 2>&1)"; then
+    printf 'box: docker container ls failed: %s\n' "$out" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+_box_docker_used() { # <in-use list> <id> <repo> <tag> -> 0 when referenced
+  local ref short="${2#sha256:}"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    case "$ref" in
+      "$3:$4"|"$2") return 0 ;;
+      sha256:*) [[ "$short" == "${ref#sha256:}"* || "${ref#sha256:}" == "$short"* ]] && return 0 ;;
+    esac
+    [ "$4" = latest ] && [ "$ref" = "$3" ] && return 0
+    [[ "$ref" =~ ^[0-9a-f]{12,64}$ ]] && [[ "$short" == "$ref"* || "$ref" == "$short"* ]] && return 0
+  done <<< "$1"
+  return 1
+}
+
+# THE ONE SELECTION. The dry run prints it; the real run deletes it. There is
+# no second path that can disagree - which is what CEL-88 was: the real path
+# kept every image whose `{{.Parent}}` was empty (every BuildKit or pulled
+# image), and freed nothing while the dry run promised 58 GB.
+_box_docker_plan() { # -> "image<TAB>id<TAB>bytes" lines, then "cache<TAB>-<TAB>bytes"; 1 when unknowable
+  local used id repo tag size json
+  local -A keep=() bytes=() order=()
+  local -a ids=()
+  used="$(_box_docker_in_use)" || return 1
+  # Keep is decided per image ID: if ANY tag of an ID is keep-listed or in
+  # use, the whole ID is kept. Each removable ID appears once.
+  while IFS=$'\t' read -r id repo tag size; do
     [ -n "$id" ] || continue
-    [ "$repo" = "<none>" ] && continue   # dangling; the prune above owns those
-    when="$(date -d "${created% UTC}" +%s 2>/dev/null)" || continue
-    [ "$when" -lt "$cutoff" ] || continue
-    _box_docker_keep "$repo" "$tag" "$id" && continue
-    printf '%s\t%s\n' "$id" "$(_box_human_bytes "$size")"
+    if [ -z "${order[$id]:-}" ]; then order[$id]=1; ids+=("$id"); bytes[$id]="$(_box_human_bytes "$size")"; fi
+    if [ "$repo" != "<none>" ] && _box_docker_keep "$repo" "$tag"; then keep[$id]=1; continue; fi
+    _box_docker_used "$used" "$id" "$repo" "$tag" && keep[$id]=1
   done < <("$(_box_docker_bin)" image ls --format json 2>/dev/null \
-    | jq -r '[.ID, .Repository, .Tag, .CreatedAt, .Size] | @tsv' 2>/dev/null || true)
+    | jq -r '[.ID, .Repository, .Tag, .Size] | @tsv' 2>/dev/null || true)
+  for id in "${ids[@]}"; do
+    [ -n "${keep[$id]:-}" ] && continue
+    printf 'image\t%s\t%s\n' "$id" "${bytes[$id]}"
+  done
+  json="$(box_docker_json 2>/dev/null)" || json='{}'
+  printf 'cache\t-\t%s\n' "$(printf '%s' "$json" | jq -r '(.build_cache.reclaimable // 0) | floor')"
+}
+
+_box_docker_images_reclaimable() { # -> bytes docker itself calls reclaimable
+  local json; json="$(box_docker_json 2>/dev/null)" || { printf 0; return 0; }
+  printf '%s' "$json" | jq -r '(.images.reclaimable // 0) | floor'
 }
 
 _box_reclaimed() { # <prune output> -> bytes, from docker's own summary line
@@ -257,30 +289,40 @@ _box_reclaimed() { # <prune output> -> bytes, from docker's own summary line
   _box_human_bytes "$line"
 }
 
-# THERE IS NO "PRUNE AND REPORT" PATH. A dry run asks `docker system df` what
-# is reclaimable and calls nothing that can remove anything, because a sweeper
-# that removes during a dry run is a sweeper whose dry run nobody trusts -
-# and the first time it matters is the time somebody was checking.
-_box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when docker is absent
-  local dry="${1:-0}" freed=0 out id bytes json
+# A dry run calls nothing that can remove anything. Volumes are never
+# touched, and containers are not pruned: a stopped container's image stays.
+# A failed delete is a warning on stderr with docker's own error and exit 1,
+# never a quiet "0 B freed".
+_box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a failure
+  # Dry: an UPPER BOUND (summed per-image sizes double-count shared layers).
+  # Real: what docker says it freed - df delta for images, the prune's own
+  # "Total reclaimed space" for build cache.
+  local dry="${1:-0}" total=0 failed=0 kind id bytes err plan before after rmd=0
   have "$(_box_docker_bin)" || { printf 0; return 2; }
-  if [ "$dry" -eq 1 ]; then
-    json="$(box_docker_json)" || { printf 0; return 2; }
-    printf '%s' "$json" | jq -r '.images.reclaimable + .containers.reclaimable + .build_cache.reclaimable | floor'
-    return 0
+  "$(_box_docker_bin)" system df --format json >/dev/null 2>&1 || { printf 0; return 2; }
+  plan="$(_box_docker_plan)" || { printf 0; return 1; }
+  [ "$dry" -eq 1 ] || before="$(_box_docker_images_reclaimable)"
+  while IFS=$'\t' read -r kind id bytes; do
+    [ -n "$kind" ] || continue
+    if [ "$dry" -eq 1 ]; then total=$(( total + bytes )); continue; fi
+    case "$kind" in
+      image)
+        if err="$("$(_box_docker_bin)" image rm "$id" 2>&1 >/dev/null)"; then rmd=1
+        else failed=1; printf 'box: docker image rm %s failed: %s\n' "$id" "$err" >&2; fi ;;
+      cache)
+        if err="$("$(_box_docker_bin)" builder prune --all --force 2>&1)"; then
+          total=$(( total + $(_box_reclaimed "$err") ))
+        else
+          failed=1; printf 'box: docker builder prune failed: %s\n' "$err" >&2
+        fi ;;
+    esac
+  done <<< "$plan"
+  if [ "$rmd" -eq 1 ]; then
+    after="$(_box_docker_images_reclaimable)"
+    [ "$before" -gt "$after" ] && total=$(( total + before - after ))
   fi
-  out="$("$(_box_docker_bin)" container prune --force 2>/dev/null || true)"
-  freed=$(( freed + $(_box_reclaimed "$out") ))
-  out="$("$(_box_docker_bin)" image prune --force --filter "until=$_BOX_DOCKER_UNTIL" 2>/dev/null || true)"
-  freed=$(( freed + $(_box_reclaimed "$out") ))
-  while IFS=$'\t' read -r id bytes; do
-    [ -n "$id" ] || continue
-    "$(_box_docker_bin)" image rm "$id" >/dev/null 2>&1 || continue
-    freed=$(( freed + bytes ))
-  done < <(_box_docker_aged_images)
-  out="$("$(_box_docker_bin)" builder prune --force --filter "until=$_BOX_DOCKER_UNTIL" 2>/dev/null || true)"
-  freed=$(( freed + $(_box_reclaimed "$out") ))
-  printf '%s' "$freed"
+  printf '%s' "$total"
+  [ "$failed" -eq 0 ] || return 1
 }
 
 # ----------------------------------------------------------- the path sweepers
@@ -323,11 +365,16 @@ _box_sweep_ours() { _box_sweep_class ours "${1:-0}"; }
 # is never a question the summary leaves open. Results also land in
 # BOX_FREED_* for a caller that wants to put them in its own summary line.
 box_sweep() { # <dry> -> one line per class on stdout
-  local dry="${1:-0}" b
-  BOX_FREED_DOCKER=0 BOX_FREED_CACHES=0 BOX_FREED_OURS=0 BOX_DOCKER_SKIPPED=0
-  if b="$(_box_sweep_docker "$dry")"; then
-    BOX_FREED_DOCKER="$b"
-    c_ok "box: docker $(box_human "$b")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
+  local dry="${1:-0}" b rc=0 drc
+  BOX_FREED_DOCKER=0 BOX_FREED_CACHES=0 BOX_FREED_OURS=0 BOX_DOCKER_SKIPPED=0 BOX_DOCKER_FAILED=0
+  b="$(_box_sweep_docker "$dry")" && drc=0 || drc=$?
+  if [ "$drc" -ne 2 ]; then
+    BOX_FREED_DOCKER="${b:-0}"
+    c_ok "box: docker $([ "$dry" -eq 1 ] && printf 'up to ')$(box_human "$BOX_FREED_DOCKER")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
+    if [ "$drc" -ne 0 ]; then
+      BOX_DOCKER_FAILED=1 rc=1
+      c_warn "box: docker delete failed - see the docker error above"
+    fi
   else
     BOX_DOCKER_SKIPPED=1
     c_warn "box: docker skipped - docker is not on PATH"
@@ -336,7 +383,7 @@ box_sweep() { # <dry> -> one line per class on stdout
   c_ok "box: caches $(box_human "$b")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
   b="$(_box_sweep_ours "$dry")"; BOX_FREED_OURS="$b"
   c_ok "box: ours $(box_human "$b")$([ "$dry" -eq 1 ] && printf ' would be freed' || printf ' freed')"
-  return 0
+  return "$rc"
 }
 
 box_summary_fragment() { # the per-class bytes cel gc appends to its own line
