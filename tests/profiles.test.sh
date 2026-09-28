@@ -536,7 +536,7 @@ test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {
   _gws_clean
 }
 
-# --- workspace.local.yaml: per-box override, WOOT-248 ---------------------
+# --- workspace.local.yaml: per-box override, AH-260928 ---------------------
 #
 # A team box under one login per person, each on a different provider, needs
 # root and the orchestrators - launched by nobody, so never a --profile flag
@@ -625,7 +625,7 @@ test_cel_profiles_marks_a_local_only_profile() {
   rm -rf "$T"
 }
 
-# --- multi-entry products[]/repos[]: WOOT-248 regression coverage --------
+# --- multi-entry products[]/repos[]: AH-260928 regression coverage --------
 #
 # The jq merge indexes local products[]/repos[] BY POSITION after a filtering
 # map, not by match - so only a local entry that happens to sit first in the

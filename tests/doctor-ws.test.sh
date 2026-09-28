@@ -72,7 +72,7 @@ test_check_workspaces_errs_on_missing_registered_path() {
   rm -rf "$T"
 }
 
-# --- doctor_ws_local_lines: workspace.local.yaml drift, WOOT-248 ----------
+# --- doctor_ws_local_lines: workspace.local.yaml drift, AH-260928 ----------
 #
 # workspace.local.yaml is allowed to override role_profiles/worker_profiles
 # and nothing else - the merge in _ws_effective_json silently drops anything
