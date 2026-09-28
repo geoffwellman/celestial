@@ -1456,7 +1456,15 @@ _run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
   else
     line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
   fi
-  line="$(printf '%s\n' "$line" | sed -n 's/^herdr agent start [^ ]* --kind [^ ]* --pane <pane> -- //p')"
+  line="${line##*$'\n'}"
+  case "$line" in
+    herdr\ agent\ start\ *\ --kind\ *\ --pane\ \<pane\>\ --\ *)
+      line="${line#herdr agent start }"
+      line="${line#* --kind }"
+      line="${line#* --pane <pane> -- }"
+      ;;
+    *) line="" ;;
+  esac
   if [ -z "$line" ]; then _RUN_DETAIL="cel run --dry-run gave no launch line to compare with"; return 0; fi
   exp="$(mktemp)"; act="$(mktemp)"
   # shellcheck disable=SC2086
