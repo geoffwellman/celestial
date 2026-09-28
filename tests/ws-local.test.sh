@@ -20,7 +20,8 @@ _wl_setup() {
 # A reader that asks workspace.yaml for role_profiles/worker_profiles directly
 # silently ignores the local override - the person whose login can't reach the
 # team's model gets it anyway. Code lines only (comments are prose); a read may
-# span a `\` continuation, so the window is the line plus the next three.
+# span a `\` continuation, so the window is the line plus the next three,
+# and it must name a reader (yq/jq/_yqr/readFile) - a message is not a read.
 test_no_code_reads_routing_straight_from_workspace_yaml() {
   local f hits=""
   while IFS= read -r f; do
@@ -35,7 +36,7 @@ test_no_code_reads_routing_straight_from_workspace_yaml() {
           if (l ~ /team-contract/) continue
           w = ""
           for (j = i; j <= i + 3 && j <= NR; j++) w = w line[j]
-          if (w ~ /workspace\.yaml/ && w !~ /workspace\.local\.yaml/) print F ":" i ": " line[i]
+          if (w ~ /(^|[^a-z_])(yq|_yqr|jq|readFile|YAML\.parse)[^a-z_]/ && w ~ /workspace\.yaml/ && w !~ /workspace\.local\.yaml/) print F ":" i ": " line[i]
         }
       }' "$CEL_ROOT/$f")"
   done < <(cd "$CEL_ROOT" && git ls-files lib bin core tools | grep -Ev '\.(md|json|css|html)$')
