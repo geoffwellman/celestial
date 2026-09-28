@@ -413,6 +413,108 @@ _steward_orchestrators() { # <agents-json>
   done
 }
 
+# AN ORCHESTRATOR HERDR BROUGHT BACK DEAF (CEL-85). herdr records a session
+# path for a pane, not a command, so a herdr server restart relaunches every
+# omp orchestrator as a bare `omp --resume=<file>`: no inbox hook, no guard,
+# no CEL_ env. On 2026-09-28 every one of them sat idle all night on its mail
+# (85 unread in one) until the owner typed. Restarting through `cel run
+# --restart` fixes it at once, so the steward does that - but only when it
+# can prove nobody is mid-sentence in the composer: losing a draft the owner
+# typed is worse than a missed wake. Otherwise root is told, once.
+#
+# Its own functions so tests can replace them: a real restart opens a pane.
+_steward_restart_orch() { # <product> <workspace>
+  cel run orchestrator --product "$1" --workspace "$2" --restart >/dev/null 2>&1
+}
+
+# EMPTY ONLY WHEN THE PANE PROVES IT. Neither herdr nor omp will tell another
+# process what is in a composer, so the only evidence is the screen: omp
+# draws its editor between two divider lines, and empty means nothing but
+# whitespace or a prompt mark between the last two. No box, no read, or
+# anything in it is treated as a draft.
+_steward_composer_empty_text() { # <pane-text>
+  [ -n "$1" ] || return 1
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*[─━═]{6,}[[:space:]]*$/ { n++; prev = cur; cur = ""; next }
+    { cur = cur $0 "\n" }
+    END {
+      if (n < 2) exit 1
+      gsub(/[[:space:]>❯›]/, "", prev)
+      exit (prev == "" ? 0 : 1)
+    }'
+}
+
+_steward_orch_composer_empty() { # <pane>
+  local text
+  text="$("$_STEWARD_HERDR" pane read "$1" --source detection --lines 40 2>/dev/null)" || return 1
+  _steward_composer_empty_text "$text"
+}
+
+# CLAIM BEFORE RESTARTING. Two overlapping ticks (a timer tick beside a hand
+# run) could both read an old timestamp and both restart the same pane, so
+# the 30-minute check and its record happen under one lock (Sourcery on #107).
+# A tick that cannot take the lock leaves the restart to the one that did.
+_steward_claim_restart() { # <key>
+  local key="$1"
+  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  (
+    if have flock; then flock -n 9 || exit 1; fi
+    local now last
+    now="$(date +%s)"
+    last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
+    [ $((now - last)) -ge 1800 ] || exit 1
+    { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
+      > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+  ) 9>>"$_STEWARD_STATE.restart.lock"
+}
+
+_steward_inbox_hooks() {
+  local name ws p pane status state cmd fp stuck key now last why
+  while IFS=$'\t' read -r name ws p pane status state cmd; do
+    [ -n "$name" ] || continue
+    fp="orch-nohook-$p"; stuck="orch-nohook-stuck-$p"; key="orch-hook-restart-$ws-$p"
+    if [ "$state" != stripped ]; then
+      _steward_clear "$ws" "$fp" "$name has its inbox hook again"
+      _steward_clear "$ws" "$stuck" "$name has its inbox hook again"
+      continue
+    fi
+    # Once escalated, a human owns it: never loop restarts behind their back.
+    [ -z "$(_inbox_open_fp "$ws" "$stuck" steward root)" ] || continue
+    now="$(date +%s)"
+    last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE" 2>/dev/null || printf 0)"
+    if [ "${last:-0}" -gt 0 ] && [ $((now - last)) -lt 1800 ]; then
+      c_err "$name was restarted and is still without its inbox hook - not restarting again: $cmd"
+      _steward_raise "$ws" "$stuck" blocked \
+        "steward: $name was restarted $(( (now - last) / 60 ))m ago and came back still without its inbox hook, so it cannot receive mail. Not restarting it again - look at its pane and run: $cmd"
+      continue
+    fi
+    why=""
+    if [ "$status" != idle ]; then why="it is $status"
+    elif ! _steward_orch_composer_empty "$pane"; then why="its composer may hold a draft"
+    fi
+    if [ -z "$why" ]; then
+      _steward_claim_restart "$key" || continue
+      if _steward_restart_orch "$p" "$ws"; then
+        c_ok "$name came back without its inbox hook - restarted it ($cmd)"
+        cmd_inbox send root "$name came back without its inbox hook (probably a herdr restart); restarted it with the full launch line" \
+          --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
+        _steward_clear "$ws" "$fp" "$name was restarted with its inbox hook"
+      else
+        c_err "$name has no inbox hook and the restart failed: $cmd"
+        _steward_raise "$ws" "$stuck" blocked \
+          "steward: $name has no inbox hook and 'cel run --restart' failed, so it cannot receive mail. Run: $cmd"
+      fi
+      continue
+    fi
+    c_warn "$name has no inbox hook and $why - not restarting it: $cmd"
+    # Said once: a stripped orchestrator stays stripped tick after tick.
+    [ -z "$(_inbox_open_fp "$ws" "$fp" steward root)" ] || continue
+    _steward_remind "$ws" root "$fp" blocked \
+      "steward: $name cannot receive mail - its process came back without the inbox hook (probably a herdr restart), and $why, so the steward will not restart it. When it is safe, run: $cmd" || true
+  done < <(run_stripped_orchestrators)
+  return 0
+}
+
 # THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. Twenty-two of the 37 rows the
 # owner found in finished/collected were PRs GitHub had merged days earlier:
 # merged through the web UI, checkouts removed by hand, so nothing ever ran
@@ -1587,6 +1689,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_servers
   _steward_orphan_servers "$agents_json"
   _steward_orchestrators "$agents_json"
+  _steward_inbox_hooks
   run_sessions_note_roster "$agents_json"
   _steward_stale_orchestrators
   c_ok "tick complete"

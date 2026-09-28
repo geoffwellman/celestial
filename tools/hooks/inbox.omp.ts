@@ -115,6 +115,28 @@ function startWatcher(ctx): void {
   } catch { watcher = null; }
 }
 
+// CEL-85: the watcher tails from the end, so mail already waiting when the
+// session starts never produced a line - an orchestrator restarted onto an
+// 85-message backlog sat on it until a human typed. Count it (the count does
+// not move the cursor), say so out of band, and arm the SAME coalesced wake
+// new mail uses: its idle/empty-composer rules decide, nothing else delivers.
+function unreadCount(ctx): number {
+  try {
+    const n = execFileSync("bash", [celBin(), "inbox", "count", ...wsArgs()], {
+      cwd: (ctx && ctx.cwd) || process.cwd(),
+      encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return Number(n) || 0;
+  } catch { return 0; }
+}
+
+function wakeForBacklog(ctx): void {
+  const n = unreadCount(ctx);
+  if (n <= 0) return;
+  try { ctx && ctx.ui && ctx.ui.notify(`INBOX ${n} unread message(s) waiting from before this session`, "info"); } catch {}
+  scheduleWake(ctx);
+}
+
 function drain(ctx): string {
   try {
     return execFileSync("bash", [celBin(), "inbox", "read", ...wsArgs()], {
@@ -128,7 +150,7 @@ export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
   pi.on("agent_end", () => { waking = false; });
-  pi.on("session_start", (_e, ctx) => { startWatcher(ctx); });
+  pi.on("session_start", (_e, ctx) => { startWatcher(ctx); wakeForBacklog(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
     const mail = takeMail(ctx);
     if (!mail) return;
