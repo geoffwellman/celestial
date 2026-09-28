@@ -1350,7 +1350,7 @@ _steward_box() {
   # because those always contain a '#'.
   local _STEWARD_WINDOW="${CEL_STEWARD_BOX_WINDOW:-21600}"
   _steward_due box-sweep || return 0
-  box_sweep 0 || return 0
+  box_sweep 0 || true   # a failed docker delete is already warned; still count what was freed
   local freed=$(( ${BOX_FREED_DOCKER:-0} + ${BOX_FREED_CACHES:-0} + ${BOX_FREED_OURS:-0} ))
   local total=0
   if [ -f "$_STEWARD_STATE" ]; then
