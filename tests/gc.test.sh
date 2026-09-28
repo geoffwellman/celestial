@@ -950,3 +950,73 @@ test_gc_keeps_a_shell_in_a_deleted_directory_outside_the_worktrees() {
   assert_contains "$out" "1 owner shell"
   rm -rf "$T"
 }
+
+# CEL-88. The dry run and the real run go through ONE selection; only the
+# final delete differs. A stub docker with an in-use image, an unused image
+# and a stopped container's image; build cache on the side.
+_gc_docker_stub() {
+  _gc_box_fixture
+  mkdir -p "$T/dbin"
+  export GC_DOCKER_LOG="$T/docker.argv" GC_DOCKER_FAIL=""
+  : > "$GC_DOCKER_LOG"
+  cat > "$T/dbin/docker" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GC_DOCKER_LOG"
+case "$1 $2" in
+  "system df")
+    printf '%s\n' '{"Type":"Images","Size":"4GB","Reclaimable":"3GB"}'
+    printf '%s\n' '{"Type":"Build Cache","Size":"2GB","Reclaimable":"2GB"}' ;;
+  "container ls")
+    printf '%s\n' 'widget:live' 'sha256:ssss11112222' ;;
+  "image ls")
+    printf '%s\n' '{"ID":"sha256:aaaa","Repository":"widget","Tag":"live","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
+    printf '%s\n' '{"ID":"sha256:ssss11112222","Repository":"widget","Tag":"stopped","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
+    printf '%s\n' '{"ID":"sha256:uuuu","Repository":"ghcr.io/example/gadget","Tag":"old","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}' ;;
+  "image inspect") printf 'Error: template parsing error\n' >&2; exit 1 ;;
+  "image rm")
+    [ "$GC_DOCKER_FAIL" = rm ] && { printf 'Error: conflict: unable to remove\n' >&2; exit 1; }
+    printf 'Deleted: %s\n' "$3" ;;
+  "builder prune")
+    [ "$GC_DOCKER_FAIL" = builder ] && { printf 'Error: builder broke\n' >&2; exit 1; }
+    printf 'Total reclaimed space: 2GB\n' ;;
+  *) printf 'Total reclaimed space: 0B\n' ;;
+esac
+EOS
+  chmod +x "$T/dbin/docker"
+  export CEL_BOX_DOCKER="$T/dbin/docker"
+}
+
+_gc_docker_line() { printf '%s\n' "$1" | grep -o 'box: docker [^,]*' | sed -n 1p | sed 's/ would be freed\| freed//'; }
+
+test_gc_box_docker_dry_run_and_real_run_plan_the_same_total() {
+  _gc_docker_stub
+  local dry real
+  dry="$(cmd_gc --box --dry-run)"
+  assert_eq "$(grep -cE 'image rm|prune' "$GC_DOCKER_LOG")" 0
+  real="$(cmd_gc --box)"
+  assert_eq "$(_gc_docker_line "$real")" "$(_gc_docker_line "$dry")"
+  case "$real" in *"docker 0 B"*) printf 'real run freed nothing: %s\n' "$real" >&2; return 1;; esac
+  rm -rf "$T"
+}
+
+test_gc_box_docker_real_run_prunes_unused_and_never_in_use() {
+  _gc_docker_stub
+  cmd_gc --box >/dev/null
+  assert_contains "$(grep 'image rm' "$GC_DOCKER_LOG")" uuuu
+  assert_contains "$(cat "$GC_DOCKER_LOG")" "builder prune"
+  case "$(grep 'image rm' "$GC_DOCKER_LOG")" in
+    *aaaa*|*ssss*) printf 'removed an in-use image\n' >&2; return 1;;
+  esac
+  case "$(cat "$GC_DOCKER_LOG")" in *volume*|*"container prune"*) printf 'touched volumes/containers\n' >&2; return 1;; esac
+  rm -rf "$T"
+}
+
+test_gc_box_docker_failure_warns_with_the_error_and_exits_nonzero() {
+  _gc_docker_stub
+  GC_DOCKER_FAIL=builder
+  local out rc=0
+  out="$(cmd_gc --box 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'exit 0 on a failed docker delete\n' >&2; return 1; }
+  assert_contains "$out" "builder broke"
+  rm -rf "$T"
+}
