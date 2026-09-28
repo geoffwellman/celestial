@@ -92,7 +92,13 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
       | .repos = (($b.repos // []) | map(
           . as $r | local_role_profiles($r.name; $lrepo) as $o |
           if ($o | length) > 0 then $r + {role_profiles: (($r.role_profiles // {}) * $o)} else $r end))
-    ' "$basej" "$localj" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || { rm -f "$out.tmp.$$"; return 1; }
+    ' "$basej" "$localj" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || {
+      # Valid YAML of the wrong shape (`role_profiles: []`) fails the merge;
+      # like a parse error, it costs the override, not the box's routing.
+      rm -f "$out.tmp.$$"
+      c_warn "$wsdir/workspace.local.yaml does not merge (a key has the wrong type) - ignoring it, using workspace.yaml alone" >&2
+      printf '%s' "$basej"; return 0
+    }
   fi
   printf '%s' "$out"
 }

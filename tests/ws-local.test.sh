@@ -142,3 +142,20 @@ test_doctor_fails_when_workspace_yaml_is_not_committed() {
   assert_eq "$rc" "0"
   rm -rf "$T"
 }
+
+# --- Sourcery follow-ups ----------------------------------------------------
+test_doctor_warns_on_a_team_key_inside_a_local_repo_entry() {
+  _wl_setup
+  printf 'repos:\n  - name: widget\n    gate: "true"\n' > "$T/alpha/workspace.local.yaml"
+  local out; out="$(doctor_ws_local_lines "$T/alpha" alpha 2>&1)" || true
+  assert_contains "$out" "'gate'"
+  rm -rf "$T"
+}
+
+test_a_wrongly_typed_local_key_falls_back_to_the_committed_routing() {
+  _wl_setup
+  yq -y '.role_profiles = {worker: "team"}' "$T/alpha/workspace.yaml" > "$T/w" && mv "$T/w" "$T/alpha/workspace.yaml"
+  printf 'role_profiles: []\n' > "$T/alpha/workspace.local.yaml"
+  assert_eq "$(role_profile "$T/alpha" worker 2>/dev/null)" "team"
+  rm -rf "$T"
+}

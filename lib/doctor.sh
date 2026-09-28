@@ -279,6 +279,13 @@ doctor_ws_local_lines() { # <wsdir> <name> -> warns/errs on stderr via c_warn/c_
         fail=1
       fi
     done < <(yq -r ".${kind}[]?.name // empty" "$localf" 2>/dev/null)
+    # Inside an entry only routing is personal; a local `policy:` or `gate:`
+    # on a product/repo is dropped by the merge, so say so.
+    while IFS=$'\t' read -r name k; do
+      [ -n "$k" ] || continue
+      c_warn "$n: workspace.local.yaml $kind '$name' declares '$k' - only role_profiles is read inside an entry, so this is silently ignored"
+      fail=1
+    done < <(yq -r ".${kind}[]? | .name as \$e | keys_unsorted[] | select(. != \"name\" and . != \"role_profiles\") | [\$e, .] | @tsv" "$localf" 2>/dev/null)
   done
   [ "$fail" -eq 0 ]
 }
