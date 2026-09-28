@@ -33,6 +33,8 @@ case "$1 $2" in
     shift 2; name="$1"; shift; kind=""; while [ "$1" != -- ]; do [ "$1" = --kind ] && kind="$2"; shift; done; shift
     d="$CEL_PROC_ROOT/9999"; mkdir -p "$d"
     printf '%s\0' "$kind" "$@" > "$d/cmdline"
+    printf 'Name:\t%s\nPPid:\t50\n' "$kind" > "$d/status"
+    ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$d/cwd"
     tr ' ' '\n' < "$T/envprefix" | grep '^CEL_' | tr '\n' '\0' > "$d/environ"
     printf '%s\n' "$name" > "$T/started" ;;
 esac
