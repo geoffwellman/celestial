@@ -201,3 +201,66 @@ test_doctor_fails_a_stripped_orchestrator_and_names_the_command() {
   assert_contains "$out" "cel run orchestrator --product widget --workspace alpha --restart"
   orch_stub_teardown
 }
+
+# CEL-87: alpha-orch was restarted with the full launch line and `cel update
+# --check` still called it stale, missing every item - the walk took the
+# NEWEST omp under the pane's shell, which was one the orchestrator had
+# spawned itself. The pane's orchestrator is the one nearest the shell.
+test_cel87_full_launch_line_is_not_listed_beside_an_unrelated_process() {
+  orch_stub_setup omp
+  orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  orch_stub_proc 100 alpha-orch "$T/ws" "${argv[@]}"
+  # an omp the orchestrator started, in its tree and its cwd, newer pid
+  orch_stub_bare_proc 200 omp --print "a task"
+  printf 'Name:\tomp\nPPid:\t100\n' > "$PROC/200/status"
+  # an omp in the same cwd outside the pane's tree
+  orch_stub_bare_proc 300 omp
+  printf 'Name:\tomp\nPPid:\t1\n' > "$PROC/300/status"
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_eq "$out" ""
+  orch_stub_teardown
+}
+
+test_cel87_missing_inbox_hook_is_named_exactly() {
+  orch_stub_setup omp
+  orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv keep=(); mapfile -t argv < <(_current_argv)
+  local i
+  for ((i = 0; i < ${#argv[@]}; i++)); do
+    if [ "${argv[$i]}" = --hook ] && [[ "${argv[$((i+1))]}" == *inbox.omp.ts ]]; then i=$((i+1)); continue; fi
+    keep+=("${argv[$i]}")
+  done
+  orch_stub_proc 100 alpha-orch "$T/ws" "${keep[@]}"
+  orch_stub_bare_proc 200 omp
+  printf 'Name:\tomp\nPPid:\t100\n' > "$PROC/200/status"
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "alpha-orch (alpha) runs an older launch line (missing: inbox hook) - "
+  orch_stub_teardown
+}
+
+test_cel87_trailing_dry_run_output_does_not_blank_the_verdict() {
+  orch_stub_setup omp
+  orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  orch_stub_proc 100 alpha-orch "$T/ws" "${argv[@]}"
+  eval "_real_$(declare -f cmd_run)"
+  cmd_run() { _real_cmd_run "$@"; local rc=$?; printf 'note: something after the launch line\n'; return "$rc"; }
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+# CEL-87: omp's own helpers are also named omp (a js-eval worker, a daemon
+# broker) and carry no inbox hook. doctor and the steward's repair read them
+# through the same lookup and called a healthy orchestrator stripped.
+test_cel87_omp_helper_children_do_not_read_as_stripped() {
+  orch_stub_setup omp
+  orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_bare_proc 100 omp --hook "$CEL_ROOT/tools/hooks/inbox.omp.ts" "--resume=$T/s.jsonl"
+  orch_stub_bare_proc 210 omp __omp_worker_js_eval_process
+  orch_stub_bare_proc 220 omp __omp_worker_daemon_broker
+  printf 'Name:\tomp\nPPid:\t100\n' > "$PROC/210/status"
+  printf 'Name:\tomp\nPPid:\t210\n' > "$PROC/220/status"
+  assert_contains "$(run_stripped_orchestrators)" "alpha-orch	alpha	widget	w1:p1	idle	ok	"
+  orch_stub_teardown
+}
