@@ -98,8 +98,9 @@ ws_runtime() {
   case "$2" in worker) printf 'omp';; *) printf 'claude';; esac
 }
 
-ws_env_names() { _yqr -r '.env // {} | keys[]' "$1/workspace.yaml"; }
-ws_env_get()   { _yqr -r --arg k "$2" '.env[$k] // "" | tostring' "$1/workspace.yaml"; }
+# Read through the merge: workspace.local.yaml may override env: per box.
+ws_env_names() { _yqr_ws -r '.env // {} | keys[]' "$1"; }
+ws_env_get()   { _yqr_ws -r --arg k "$2" '.env[$k] // "" | tostring' "$1"; }
 
 # Workspace env as eval-able shell: the committed `env:` map first, then a
 # source of the gitignored env.local so secrets and per-box overrides win.
@@ -489,14 +490,18 @@ ws_policy_block() { # <wsdir> [product]
     "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" orchestrator)"
   # Profiles are read straight from the file rather than through lib/profiles.sh:
   # that file sources THIS one, and a policy block is not worth a source cycle.
+  # team-contract: the block is rendered from the COMMITTED workspace.yaml
+  # alone, never through workspace.local.yaml (CEL-86). It lands in every
+  # agent's instructions; one person's local profiles must not rewrite what
+  # everyone's agents are told.
   local profs wbound
-  profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"
-  wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"
+  profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"  # team-contract
+  wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"  # team-contract
   if [ -n "$profs" ]; then
     printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
       "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
-    _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true
-    local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"
+    _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true  # team-contract
+    local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"  # team-contract
     printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
       "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
   fi
