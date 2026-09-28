@@ -9,13 +9,17 @@ _CEL_WS=1
 . "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"
 
 # What a workspace root ignores: cloned repos, disposable spikes, the fanout
-# ledger, and the two per-box files - secrets and the local role-routing
+# ledger, and the per-box files - secrets and the local role-routing
 # override - neither of which belongs in the workspace's own git history.
+# `*.local.*` catches the next per-box file too; its `.example.` twin is the
+# committed template, so it is let back in.
 _WS_GITIGNORE_LINES="repos/
 spikes/
 .cel/
 env.local
-workspace.local.yaml"
+workspace.local.yaml
+*.local.*
+!*.local.example.*"
 
 # One question per unknown; Enter accepts the visible default. Reads stdin so
 # tests can feed answers; an empty read (EOF) also takes the default.
@@ -107,6 +111,34 @@ _ws_list() {
   done
 }
 
+# The committed template for a person's workspace.local.yaml. Every line is
+# a comment, so copying it verbatim changes nothing until someone edits it -
+# joining a team workspace must never silently reroute anybody.
+_ws_local_example() {
+  cat <<'YAML'
+# workspace.local.yaml - YOUR routing for this workspace, on this box.
+# Copy this file to workspace.local.yaml (gitignored), uncomment what you need,
+# then run `cel doctor`. workspace.yaml stays the team contract: policy,
+# tickets, repos, gates, prefixes, merge and review settings cannot be changed
+# from here. Keys are merged over workspace.yaml; secrets go in env.local.
+#
+# role_profiles:                 # which profile each role launches on
+#   root: mine
+#   orchestrator: mine
+#   worker: mine
+#
+# worker_profiles:               # add a profile, or replace one whole by name
+#   mine: { runtime: omp, model: some-model, thinking: high, for: my login's model }
+#
+# products:                      # per-product / per-repo role_profiles, by name
+#   - name: bundle
+#     role_profiles: { orchestrator: mine }
+#
+# env:                           # per-box env, merged over workspace.yaml's env:
+#   TMPDIR: /tmp/mine
+YAML
+}
+
 # -------------------------------------------------------------------- new
 _ws_new() {
   local name="" kind="" org="" merge="" path="" remote_flag="" ans
@@ -155,6 +187,7 @@ repos: []
 YAML
 
   printf '%s\n' "$_WS_GITIGNORE_LINES" > "$wsdir/.gitignore"
+  _ws_local_example > "$wsdir/workspace.local.example.yaml"
 
   cat > "$wsdir/docs/conventions.md" <<DOC
 # Conventions

@@ -33,11 +33,14 @@ _yqr() { # <jq args...> <file>   - the shape every read call here already has
 # short of an uncommitted local edit that collides with every sync.
 #
 # workspace.local.yaml, gitignored, sits beside workspace.yaml and is allowed
-# to do two things and nothing else: override role_profiles (workspace-level,
-# and per products[]/repos[] entry, matched by name) and add worker_profiles.
+# to do three things and nothing else: override role_profiles (workspace-level,
+# and per products[]/repos[] entry, matched by name), add worker_profiles, and
+# override env: keys. The allowed top-level keys are _WS_LOCAL_KEYS below -
+# the merge, doctor and the docs all read that one list.
 # It cannot add a repo, change policy, or touch anything a teammate reading
 # workspace.yaml would need to know to understand what ships. Local wins,
 # nothing else is merged.
+_WS_LOCAL_KEYS="role_profiles worker_profiles env products repos"
 _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
   local wsdir="$1" base="$1/workspace.yaml" localf="$1/workspace.local.yaml"
   [ -f "$localf" ] || { _yaml_json "$base"; return; }
@@ -80,6 +83,9 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
       # exact shared-credential route this file exists to let a login avoid.
       # `+` replaces the whole profile body when the name collides.
       | .worker_profiles = (($b.worker_profiles // {}) + ($l.worker_profiles // {}))
+      # env: is per-box (a TMPDIR on this disk, a proxy on that network), so
+      # local keys win one by one. Secrets still belong in env.local.
+      | .env = (($b.env // {}) + ($l.env // {}))
       | .products = (($b.products // []) | map(
           . as $p | local_role_profiles($p.name; $lprod) as $o |
           if ($o | length) > 0 then $p + {role_profiles: (($p.role_profiles // {}) * $o)} else $p end))

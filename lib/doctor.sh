@@ -250,8 +250,9 @@ doctor_setup_lines() { # <wsdir> <name>
   return 0
 }
 
-# workspace.local.yaml is allowed to do exactly two things: override
-# role_profiles and add worker_profiles (see lib/yaml.sh:_ws_effective_json).
+# workspace.local.yaml is allowed to override role_profiles, add
+# worker_profiles and override env: keys (see lib/yaml.sh:_ws_effective_json;
+# the allowed keys are _WS_LOCAL_KEYS there).
 # Everything else it might contain is silently ignored by the merge, on
 # purpose - but silent is wrong for a hand-written, per-box, uncovered-by-CI
 # file, so doctor says out loud what the merge would otherwise just drop.
@@ -264,9 +265,9 @@ doctor_ws_local_lines() { # <wsdir> <name> -> warns/errs on stderr via c_warn/c_
   fi
   local k
   for k in $(yq -r 'keys_unsorted[]' "$localf" 2>/dev/null); do
-    case "$k" in
-      role_profiles|worker_profiles|products|repos) ;;
-      *) c_warn "$n: workspace.local.yaml declares '$k' - only role_profiles, worker_profiles, products and repos are read from this file, the rest is silently ignored"; fail=1 ;;
+    case " $_WS_LOCAL_KEYS " in
+      *" $k "*) ;;
+      *) c_warn "$n: workspace.local.yaml declares '$k' - only ${_WS_LOCAL_KEYS// /, } are read from this file (the rest is team-only, from workspace.yaml), so this is silently ignored"; fail=1 ;;
     esac
   done
   local kind name
@@ -280,6 +281,36 @@ doctor_ws_local_lines() { # <wsdir> <name> -> warns/errs on stderr via c_warn/c_
     done < <(yq -r ".${kind}[]?.name // empty" "$localf" 2>/dev/null)
   done
   [ "$fail" -eq 0 ]
+}
+
+# One line, always: is a personal override in effect here, and over what. A
+# teammate's agent that routes differently from yours is the first thing to
+# rule in or out, and "which file won" is not visible anywhere else.
+doctor_ws_local_summary() { # <wsdir> <name>
+  local localf="$1/workspace.local.yaml" keys
+  if [ ! -f "$localf" ]; then
+    c_ok "$2: no workspace.local.yaml - routing is workspace.yaml's alone"
+    return 0
+  fi
+  keys="$(yq -r 'keys_unsorted | join(", ")' "$localf" 2>/dev/null || true)"
+  c_ok "$2: workspace.local.yaml in effect - overrides: ${keys:-nothing}"
+}
+
+# workspace.yaml IS the team contract - policy, merge rules, review flow,
+# repos, gates - rendered into every agent's instructions. Left untracked or
+# gitignored (the "commit an example, copy it locally" pattern), every clone
+# drifts on its own copy and a policy change reaches nobody. So this fails.
+doctor_ws_contract_lines() { # <wsdir> <name> -> 1 if the contract is not committed
+  local d="$1" n="$2"
+  git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  if git -C "$d" check-ignore -q workspace.yaml 2>/dev/null; then
+    c_err "$n: workspace.yaml is gitignored - it is the team contract and has to be committed; put personal routing in workspace.local.yaml"
+    return 1
+  fi
+  if ! git -C "$d" ls-files --error-unmatch workspace.yaml >/dev/null 2>&1; then
+    c_err "$n: workspace.yaml is not tracked by git - it is the team contract and has to be committed; put personal routing in workspace.local.yaml"
+    return 1
+  fi
 }
 
 check_workspaces() {
@@ -375,7 +406,9 @@ check_workspaces() {
       [ -z "$setupline" ] || c_warn "$setupline"
     done < <(doctor_setup_lines "$path" "$n")
 
+    doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1
+    doctor_ws_contract_lines "$path" "$n" || fail=1
 
     for role in root orchestrator worker; do
       rt="$(ws_runtime "$path" "$role")"

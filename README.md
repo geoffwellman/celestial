@@ -893,6 +893,27 @@ Three things make this more than a flag:
 Keys live in the workspace's gitignored `env.local`; nothing but the model id
 ever reaches this repo.
 
+### Team workspaces
+
+A team workspace has three layers:
+
+| Layer | File | Committed | Holds |
+|---|---|---|---|
+| Team contract | `workspace.yaml` | yes | everything, including the default routing |
+| Personal routing | `workspace.local.yaml` | no | routing overrides only |
+| Secrets | `env.local` | no | keys |
+
+The local file may change `role_profiles` (workspace-level and per
+`products[]`/`repos[]` entry), add or replace `worker_profiles`, and override
+`env:` keys. It may not change `policy`, `tickets`, `repos`, `products`,
+gates, prefixes, merge or review settings, or `services` - and the policy
+block rendered into CLAUDE.md/AGENTS.md always comes from `workspace.yaml`
+alone. `cel doctor` fails if `workspace.yaml` is not committed.
+
+Joining a team workspace: clone it (`cel ws add <url>`), copy
+`workspace.local.example.yaml` to `workspace.local.yaml`, choose your
+profiles, run `cel doctor`.
+
 ### Per-box routing
 
 A team box under one login per person, each on a different provider, has a
