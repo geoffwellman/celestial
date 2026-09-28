@@ -250,6 +250,38 @@ doctor_setup_lines() { # <wsdir> <name>
   return 0
 }
 
+# workspace.local.yaml is allowed to do exactly two things: override
+# role_profiles and add worker_profiles (see lib/yaml.sh:_ws_effective_json).
+# Everything else it might contain is silently ignored by the merge, on
+# purpose - but silent is wrong for a hand-written, per-box, uncovered-by-CI
+# file, so doctor says out loud what the merge would otherwise just drop.
+doctor_ws_local_lines() { # <wsdir> <name> -> warns/errs on stderr via c_warn/c_err; 1 if any
+  local wsdir="$1" n="$2" localf="$1/workspace.local.yaml" fail=0
+  [ -f "$localf" ] || return 0
+  if ! yq . "$localf" >/dev/null 2>&1; then
+    c_err "$n: workspace.local.yaml does not parse - falling back to workspace.yaml alone"
+    return 1
+  fi
+  local k
+  for k in $(yq -r 'keys_unsorted[]' "$localf" 2>/dev/null); do
+    case "$k" in
+      role_profiles|worker_profiles|products|repos) ;;
+      *) c_warn "$n: workspace.local.yaml declares '$k' - only role_profiles, worker_profiles, products and repos are read from this file, the rest is silently ignored"; fail=1 ;;
+    esac
+  done
+  local kind name
+  for kind in products repos; do
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if ! yq -e --arg n "$name" ".${kind}[]? | select(.name == \$n)" "$wsdir/workspace.yaml" >/dev/null 2>&1; then
+        c_warn "$n: workspace.local.yaml names $kind '$name', which workspace.yaml does not declare - this override is silently ignored"
+        fail=1
+      fi
+    done < <(yq -r ".${kind}[]?.name // empty" "$localf" 2>/dev/null)
+  done
+  [ "$fail" -eq 0 ]
+}
+
 check_workspaces() {
   local fail=0 n path remote r url gate first role rt bin_
   local ledger agents id pane
@@ -342,6 +374,8 @@ check_workspaces() {
     while IFS= read -r setupline; do
       [ -z "$setupline" ] || c_warn "$setupline"
     done < <(doctor_setup_lines "$path" "$n")
+
+    doctor_ws_local_lines "$path" "$n" || fail=1
 
     for role in root orchestrator worker; do
       rt="$(ws_runtime "$path" "$role")"

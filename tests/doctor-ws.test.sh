@@ -71,3 +71,80 @@ test_check_workspaces_errs_on_missing_registered_path() {
   assert_fails check_workspaces
   rm -rf "$T"
 }
+
+# --- doctor_ws_local_lines: workspace.local.yaml drift, AH-260928 ----------
+#
+# workspace.local.yaml is allowed to override role_profiles/worker_profiles
+# and nothing else - the merge in _ws_effective_json silently drops anything
+# outside that. Silent-drop is the right enforcement for the merge itself,
+# but a hand-written per-box file needs a loud check somewhere, which is
+# what doctor_ws_local_lines is for.
+
+_dwl_setup() { # <wsdir var> - a bare wsdir, no registry needed
+  T="$(mktemp -d)"
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+}
+
+test_doctor_ws_local_lines_is_quiet_with_no_local_file() {
+  _dwl_setup
+  local out; out="$(doctor_ws_local_lines "$T" alpha)"
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+test_doctor_ws_local_lines_is_quiet_for_a_well_formed_override() {
+  _dwl_setup
+  cat > "$T/workspace.local.yaml" <<'YAML'
+role_profiles: { worker: bare }
+worker_profiles:
+  bare: { runtime: omp, model: some-model }
+YAML
+  local out; out="$(doctor_ws_local_lines "$T" alpha)"
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+test_doctor_ws_local_lines_warns_on_an_unrelated_top_level_key() {
+  _dwl_setup
+  cat > "$T/workspace.local.yaml" <<'YAML'
+policy: { workers: 8 }
+YAML
+  local out; out="$(doctor_ws_local_lines "$T" alpha)" || true
+  assert_contains "$out" "'policy'"
+  assert_contains "$out" "silently ignored"
+  rm -rf "$T"
+}
+
+test_doctor_ws_local_lines_warns_on_an_unmatched_repo_name() {
+  _dwl_setup
+  cat > "$T/workspace.local.yaml" <<'YAML'
+repos:
+  - name: gadget
+    role_profiles: { worker: bare }
+YAML
+  local out; out="$(doctor_ws_local_lines "$T" alpha)" || true
+  assert_contains "$out" "gadget"
+  assert_contains "$out" "workspace.yaml does not declare"
+  rm -rf "$T"
+}
+
+test_doctor_ws_local_lines_is_quiet_for_a_matched_repo_name() {
+  _dwl_setup
+  cat > "$T/workspace.local.yaml" <<'YAML'
+repos:
+  - name: widget
+    role_profiles: { worker: bare }
+YAML
+  local out; out="$(doctor_ws_local_lines "$T" alpha)"
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+test_doctor_ws_local_lines_errs_on_a_malformed_local_file() {
+  _dwl_setup
+  printf 'role_profiles: [this is not a mapping\n' > "$T/workspace.local.yaml"
+  local out rc=0; out="$(doctor_ws_local_lines "$T" alpha)" || rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "does not parse"
+  rm -rf "$T"
+}
