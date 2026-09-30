@@ -1049,3 +1049,85 @@ test_gc_box_docker_failure_warns_with_the_error_and_exits_nonzero() {
   assert_contains "$out" "builder broke"
   rm -rf "$T"
 }
+
+# THE FOLDER IS GONE, THE PR IS NOT (CEL-89). When a review checkout is
+# removed herdr reports the pane's cwd with a literal ` (deleted)` suffix, and
+# the parse that read the repo from that cwd produced `widget-pr-41 (deleted)`:
+# GitHub knew no such repo, the fail-safe kept the reviewer, and five
+# reviewers of merged PRs stacked up on the owner's box, warned about every tick.
+_gc_deleted_reviewer_fixture() {
+  T="$(mktemp -d)"
+  export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REGISTRY="$T/registry.yaml"
+  mkdir -p "$HOME" "$T/ws/repos/widget"
+  printf 'name: demo\n' > "$T/ws/workspace.yaml"
+  git -C "$T/ws/repos/widget" init -q
+  git -C "$T/ws/repos/widget" remote add origin git@github.com:acme/widget.git
+  registry_add demo "$T/ws" ""
+  reviewers_write '[]'
+  GC_SINK="$T/sink"; : > "$GC_SINK"; GC_GH="$T/gh"; : > "$GC_GH"; GC_MAIL="$T/mail"; : > "$GC_MAIL"
+  GC_PR_STATE=MERGED
+  herdr() {
+    case "$1 $2" in
+      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
+      *) return 1;;
+    esac
+  }
+  gh() {
+    printf '%s\n' "$*" >> "$GC_GH"
+    case "$*" in *"(deleted)"*|*"widget-pr-"*) return 1;; esac
+    [ "$GC_PR_STATE" != UNKNOWN ] || return 1
+    jq -n --arg s "$GC_PR_STATE" '{state:$s}'
+  }
+  cmd_inbox() { printf '%s\n' "$*" >> "$GC_MAIL"; }
+}
+
+_gc_deleted_reviewer_agents() {
+  jq -n --arg c "$HOME/.local/state/cel/reviews/widget-pr-41 (deleted)" \
+    '{result:{agents:[{pane_id:"w1:p5",name:"widget-pr-41-review",cwd:$c,agent_status:"idle"}]}}'
+}
+
+test_gc_closes_an_idle_reviewer_of_a_merged_pr_whose_folder_is_deleted() {
+  _gc_deleted_reviewer_fixture
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" "close w1:p5"
+  assert_contains "$(cat "$GC_GH")" "--repo acme/widget"
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_deleted_folder_reviewer_whose_pr_is_open() {
+  _gc_deleted_reviewer_fixture
+  GC_PR_STATE=OPEN
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_find widget 41 | jq -r .pane)" w1:p5
+  rm -rf "$T"
+}
+
+test_gc_keeps_an_unreadable_deleted_folder_reviewer_with_one_warning() {
+  _gc_deleted_reviewer_fixture
+  GC_PR_STATE=UNKNOWN
+  local out; out="$(_gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(printf '%s\n' "$out" | grep -c UNKNOWN)" 1
+  assert_contains "$out" "widget#41"
+  case "$out" in *"(deleted)"*) printf 'warning names the deleted suffix: %s\n' "$out"; return 1;; esac
+  assert_eq "$(cat "$GC_MAIL")" ""
+  rm -rf "$T"
+}
+
+# Kept as UNKNOWN for a day is a thing root should hear about - once, not on
+# every tick after it.
+test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
+  _gc_deleted_reviewer_fixture
+  GC_PR_STATE=UNKNOWN
+  mkdir -p "$HOME/.local/state/cel"
+  jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5":{since:$t}}' \
+    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(grep -c . "$GC_MAIL")" 1
+  assert_contains "$(cat "$GC_MAIL")" "--kind blocked"
+  assert_contains "$(cat "$GC_MAIL")" "w1:p5"
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
