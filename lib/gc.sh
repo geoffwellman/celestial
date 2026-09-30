@@ -448,19 +448,79 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
 # three states GitHub actually returns is UNKNOWN, and unknown is never
 # closed - this file's whole history is bugs where "could not tell" was
 # treated as "nothing there".
-_gc_reviewer_pr_state() { # <repo> <pr> [cwd] -> MERGED|CLOSED|OPEN|UNKNOWN
-  local out state
-  # Asked from the reviewer's own checkout when it has one, because that is
-  # where gh can resolve the repository from its remote; `--repo <name>` is
-  # the fallback for a row whose pane has no readable cwd.
-  if [ -n "${3:-}" ] && [ -d "${3:-}" ]; then
-    out="$(_gc_gh "$3" pr view "$2" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+_gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UNKNOWN
+  local out state cwd wsdir slug
+  cwd="$(pane_cwd "${3:-}")"
+  # Asked from the reviewer's own checkout when it still has one, because
+  # that is where gh can resolve the repository from its remote.
+  if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+    out="$(_gc_gh "$cwd" pr view "$2" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
   else
-    out="$(gh pr view "$2" --repo "$1" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+    # The folder is gone (CEL-89): resolve the GitHub repo the way `cel run
+    # reviewer` does (CEL-67) - declared url, else the clone's origin - never
+    # from the folder name. The bare name is the last resort.
+    IFS=$'\t' read -r wsdir slug < <(_gc_reviewer_slug "$1" "${4:-}") || true
+    if [ -n "${slug:-}" ] && [ -n "${wsdir:-}" ]; then
+      out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+    else
+      out="$(gh pr view "$2" --repo "$1" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+    fi
   fi
   state="$(printf '%s' "$out" | jq -r 'if (.state | type) == "string" then .state else "UNKNOWN" end' 2>/dev/null)" \
     || state=UNKNOWN
   case "$state" in MERGED|CLOSED|OPEN) printf '%s' "$state";; *) printf UNKNOWN;; esac
+}
+
+# Which workspace a reviewer's repo belongs to, and its GitHub slug: the row's
+# recorded clone first, else the first registered workspace with that repo.
+_gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
+  local repo="$1" repodir="${2:-}" wsdir="" ws slug
+  if [ -n "$repodir" ] && [ -d "$repodir" ]; then wsdir="$(ws_of_checkout "$repodir")" || wsdir=""; fi
+  if [ -z "$wsdir" ]; then
+    repodir=""
+    while IFS= read -r ws; do
+      [ -n "$ws" ] || continue
+      ws="$(registry_path "$ws" 2>/dev/null)" || continue
+      if [ -n "$ws" ] && [ -d "$ws/repos/$repo" ]; then wsdir="$ws"; repodir="$ws/repos/$repo"; break; fi
+    done < <(registry_names 2>/dev/null || true)
+  fi
+  [ -n "$wsdir" ] || return 1
+  slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir" 2>/dev/null)" || return 1
+  printf '%s\t%s\n' "$wsdir" "$slug"
+}
+
+# KEPT AS UNKNOWN FOR A DAY IS A BLOCKER (CEL-89). The fail-safe keeps a
+# reviewer whose PR cannot be read, and warned on every steward tick - which
+# is noise the owner learned to skip. Past 24h the pane is reported to root
+# once, keyed by a condition fp so a repeat supersedes rather than stacks
+# (CEL-82), and marked reported so later ticks stay quiet.
+_gc_unknown_file() { printf '%s' "${CEL_GC_UNKNOWN_STATE:-$HOME/.local/state/cel/gc-reviewer-unknown.json}"; }
+
+_gc_unknown_note() { # <pane> <repo> <pr> <wsdir-or-empty>
+  local f now cur since reported ws=""
+  f="$(_gc_unknown_file)"; now="$(date +%s)"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  cur="$(jq -c . "$f" 2>/dev/null)" || cur='{}'
+  [ -n "$cur" ] || cur='{}'
+  since="$(printf '%s' "$cur" | jq -r --arg p "$1" '.[$p].since // empty')"
+  reported="$(printf '%s' "$cur" | jq -r --arg p "$1" '.[$p].reported // false')"
+  [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+  if [ "$reported" != true ] && [ $((now - since)) -ge 86400 ]; then
+    [ -n "${4:-}" ] && ws="$(ws_name "$4" 2>/dev/null)" || true
+    cmd_inbox send root "reviewer pane $1 for $2#$3 has been kept as UNKNOWN for over 24h - its PR state cannot be read; close it by hand or fix the lookup" \
+      --from gc ${ws:+--workspace "$ws"} --kind blocked --fp "gc-reviewer-unknown-$1" >/dev/null 2>&1 || true
+    reported=true
+  fi
+  printf '%s' "$cur" | jq --arg p "$1" --argjson s "$since" --argjson r "$reported" \
+    '.[$p] = {since:$s, reported:$r}' > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
+  return 0
+}
+
+_gc_unknown_clear() { # <pane>
+  local f; f="$(_gc_unknown_file)"
+  [ -f "$f" ] || return 0
+  jq --arg p "$1" 'del(.[$p])' "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
+  return 0
 }
 
 # Everything this sweep can see, from both directions: the rows `cel run`
@@ -468,17 +528,17 @@ _gc_reviewer_pr_state() { # <repo> <pr> [cwd] -> MERGED|CLOSED|OPEN|UNKNOWN
 # in both is ONE reviewer - keyed by pane id, so it is never closed or
 # counted twice.
 _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
-  local out='[]' repo pr pane agent status
-  while IFS=$'\t' read -r repo pr pane agent; do
+  local out='[]' repo pr pane agent status rd
+  while IFS=$'\x1f' read -r repo pr pane agent rd; do
     [ -n "$repo" ] && [ -n "$pane" ] || continue
     # A recorded pane that is not on the roster has gone by other means.
     # `gone` is a stale row, dropped as bookkeeping rather than closed.
     status="$(printf '%s' "$2" | jq -r --arg p "$pane" \
       '[.result.agents[]? | select(.pane_id == $p)][0].agent_status // "gone"' 2>/dev/null)" || status=unknown
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" \
-      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, recorded:true}]')"
-  done < <(printf '%s' "$1" | jq -r '.[] | [.repo, (.pr | tostring), .pane, (.agent // "")] | @tsv')
+      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" \
+      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, recorded:true}]')"
+  done < <(printf '%s' "$1" | jq -r '.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // "")] | join("\u001f")')
   while IFS=$'\t' read -r repo pr pane agent status; do
     [ -n "$pane" ] || continue
     printf '%s' "$out" | jq -e --arg p "$pane" 'any(.[]; .pane == $p)' >/dev/null 2>&1 && continue
@@ -491,7 +551,7 @@ _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
 
 _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
   printf '%s' "$1" | jq -r --arg p "$2" \
-    '[.result.agents[]? | select(.pane_id == $p)][0].cwd // ""' 2>/dev/null || printf ''
+    '[.result.agents[]? | select(.pane_id == $p)][0].cwd // ""' 2>/dev/null | { IFS= read -r c || true; pane_cwd "${c:-}"; }
 }
 
 # A reviewer exists to review one pull request, and when that pull request
@@ -512,7 +572,7 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # panes had no row - and applies them under the registry lock to whatever
 # the file says by then. A row this sweep never saw is never touched.
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
-  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state
+  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state repodir
   reviewers_closed=0
   rows="$(reviewers_rows)"
   while IFS= read -r cand; do
@@ -527,7 +587,14 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"; }
       continue
     fi
-    state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd")"
+    repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
+    state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd" "$repodir")"
+    if [ "$state" = UNKNOWN ]; then
+      [ "$dry" -eq 1 ] || _gc_unknown_note "$pane" "$repo" "$pr" \
+        "$(_gc_reviewer_slug "$repo" "$repodir" | cut -f1)"
+    else
+      [ "$dry" -eq 1 ] || _gc_unknown_clear "$pane"
+    fi
     case "$state" in
       OPEN) _gc_reviewers_adopt; continue ;;
       UNKNOWN)
@@ -730,6 +797,7 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
     IFS=$'\x1f' read -r pane cwd label \
       <<< "$(printf '%s' "$row" | jq -r '[.pane_id, (.cwd // ""), (.label // "")] | join("\u001f")')" || true
     [ -n "$pane" ] || continue
+    cwd="$(pane_cwd "$cwd")"
     # A layout names the panes it owns (services, dash, pr-watch, notes);
     # herdr carries that name as the label. A named pane was meant to stay.
     if [ -n "$label" ]; then _gc_idle_kept declared; continue; fi

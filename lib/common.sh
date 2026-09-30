@@ -16,6 +16,16 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# A PANE'S CWD, AS A PATH (CEL-89). When the directory a pane stands in is
+# removed, herdr reports its cwd with the kernel's literal ` (deleted)` suffix.
+# Every parse of a pane cwd goes through here: on 2026-09-30 that suffix ended
+# up inside a repo name (`widget-pr-41 (deleted)`), GitHub knew no such repo,
+# and five reviewers of merged PRs were kept forever. The stripped path still
+# does not exist, so "is the directory gone" (CEL-84) reads the same.
+pane_cwd() { # <cwd> -> the path without a trailing " (deleted)"
+  printf '%s' "${1% (deleted)}"
+}
+
 # Expand a leading ~ only. Deliberately NOT `eval echo`: manifest paths are data
 # edited by humans, and eval would make them a command-injection surface and
 # mangle any path containing spaces or glob characters.
