@@ -1121,7 +1121,7 @@ test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
   _gc_deleted_reviewer_fixture
   GC_PR_STATE=UNKNOWN
   mkdir -p "$HOME/.local/state/cel"
-  jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5":{since:$t}}' \
+  jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 widget#41":{since:$t}}' \
     > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
@@ -1129,5 +1129,34 @@ test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
   assert_contains "$(cat "$GC_MAIL")" "--kind blocked"
   assert_contains "$(cat "$GC_MAIL")" "w1:p5"
   assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+# A pane id herdr has reused is somebody else's reviewer: its UNKNOWN clock
+# must not be inherited.
+test_gc_unknown_clock_is_keyed_by_pane_and_reviewer() {
+  _gc_deleted_reviewer_fixture
+  GC_PR_STATE=UNKNOWN
+  mkdir -p "$HOME/.local/state/cel"
+  jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 gadget#9":{since:$t}, "w1:p5":{since:$t}}' \
+    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_MAIL")" ""
+  rm -rf "$T"
+}
+
+# A report that did not go out was not made: the next tick tries again.
+test_gc_unknown_report_retries_when_the_send_fails() {
+  _gc_deleted_reviewer_fixture
+  GC_PR_STATE=UNKNOWN
+  mkdir -p "$HOME/.local/state/cel"
+  jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 widget#41":{since:$t}}' \
+    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+  cmd_inbox() { printf '%s\n' "$*" >> "$GC_MAIL"; return 1; }
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  cmd_inbox() { printf '%s\n' "$*" >> "$GC_MAIL"; }
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(grep -c . "$GC_MAIL")" 2
   rm -rf "$T"
 }
