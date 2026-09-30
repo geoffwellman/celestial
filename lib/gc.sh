@@ -496,30 +496,32 @@ _gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
 # (CEL-82), and marked reported so later ticks stay quiet.
 _gc_unknown_file() { printf '%s' "${CEL_GC_UNKNOWN_STATE:-$HOME/.local/state/cel/gc-reviewer-unknown.json}"; }
 
+# Keyed by pane AND reviewer: herdr reuses pane ids, and a reused pane is a
+# different reviewer whose clock starts fresh.
 _gc_unknown_note() { # <pane> <repo> <pr> <wsdir-or-empty>
-  local f now cur since reported ws=""
+  local f now cur since reported ws="" key="$1 $2#$3"
   f="$(_gc_unknown_file)"; now="$(date +%s)"
   mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
   cur="$(jq -c . "$f" 2>/dev/null)" || cur='{}'
   [ -n "$cur" ] || cur='{}'
-  since="$(printf '%s' "$cur" | jq -r --arg p "$1" '.[$p].since // empty')"
-  reported="$(printf '%s' "$cur" | jq -r --arg p "$1" '.[$p].reported // false')"
+  since="$(printf '%s' "$cur" | jq -r --arg p "$key" '.[$p].since // empty')"
+  reported="$(printf '%s' "$cur" | jq -r --arg p "$key" '.[$p].reported // false')"
   [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
   if [ "$reported" != true ] && [ $((now - since)) -ge 86400 ]; then
     [ -n "${4:-}" ] && ws="$(ws_name "$4" 2>/dev/null)" || true
     cmd_inbox send root "reviewer pane $1 for $2#$3 has been kept as UNKNOWN for over 24h - its PR state cannot be read; close it by hand or fix the lookup" \
-      --from gc ${ws:+--workspace "$ws"} --kind blocked --fp "gc-reviewer-unknown-$1" >/dev/null 2>&1 || true
-    reported=true
+      --from gc ${ws:+--workspace "$ws"} --kind blocked --fp "gc-reviewer-unknown-$1-$2-$3" >/dev/null 2>&1 \
+      && reported=true   # a send that failed was not a report; the next tick retries
   fi
-  printf '%s' "$cur" | jq --arg p "$1" --argjson s "$since" --argjson r "$reported" \
+  printf '%s' "$cur" | jq --arg p "$key" --argjson s "$since" --argjson r "$reported" \
     '.[$p] = {since:$s, reported:$r}' > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
   return 0
 }
 
-_gc_unknown_clear() { # <pane>
+_gc_unknown_clear() { # <pane> <repo> <pr>
   local f; f="$(_gc_unknown_file)"
   [ -f "$f" ] || return 0
-  jq --arg p "$1" 'del(.[$p])' "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
+  jq --arg p "$1 $2#$3" 'del(.[$p])' "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp"
   return 0
 }
 
@@ -593,7 +595,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       [ "$dry" -eq 1 ] || _gc_unknown_note "$pane" "$repo" "$pr" \
         "$(_gc_reviewer_slug "$repo" "$repodir" | cut -f1)"
     else
-      [ "$dry" -eq 1 ] || _gc_unknown_clear "$pane"
+      [ "$dry" -eq 1 ] || _gc_unknown_clear "$pane" "$repo" "$pr"
     fi
     case "$state" in
       OPEN) _gc_reviewers_adopt; continue ;;
