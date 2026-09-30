@@ -512,7 +512,11 @@ reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>sta
     [ -n "$name" ] && [ -n "$pane" ] || continue
     pr="${name##*-pr-}"; pr="${pr%-review}"
     case "$pr" in ''|*[!0-9]*) continue;; esac
+    cwd="$(pane_cwd "$cwd")"
     repo="${cwd##*/}"
+    # A reviewer's own checkout is <reviews>/<repo>-pr-<n> (CEL-55): the
+    # folder name carries the PR, and the repo is what precedes it.
+    case "$repo" in *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;; esac
     [ -n "$repo" ] || repo="${name%-pr-*}"
     printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
