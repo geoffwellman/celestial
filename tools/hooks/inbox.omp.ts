@@ -29,9 +29,9 @@ function celBin(): string { return path.join(celRoot(), "bin", "cel"); }
 // CEL_WORKSPACE is a directory, so it is never passed as a mailbox name.
 //
 // An EXPLICIT identity (CEL_INBOX_ME, which `cel run` sets only for root and
-// orchestrators) is reached in every registered workspace: mail to
-// celestial-orch from a vhs worker sat for days because this hook watched,
-// counted and drained plane alone. Still filtered to that one recipient, so
+// orchestrators) is reached in every registered workspace: mail to an
+// orchestrator sent from another workspace sat for days because this hook
+// watched, counted and drained its launch workspace alone. Still filtered to that one recipient, so
 // nobody else's mail - root's included - is read or has its cursor moved.
 // --workspace rides along so a launch workspace the registry lacks stays in
 // the sweep. CEL_INBOX_ALL_WS=0 restores single-workspace scope. Workers get
@@ -65,10 +65,10 @@ let wakeSince = 0;
 let stopped = false;
 let lastCtx = null;
 function takeMail(ctx): string {
-  const fresh = drain(ctx);
+  const fresh = drain(ctx); // null = the drain itself failed, not "no mail"
   const all = [pending, fresh].filter(Boolean).join("\n");
   pending = "";
-  owed = false;
+  if (fresh === null) { owed = true; if (!all) scheduleRetry(ctx); } else owed = false;
   return all;
 }
 
@@ -113,8 +113,8 @@ function tryWake(ctx): void {
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }
 
 // WATCHER RECOVERY. A watcher that dies (killed, OOM, a `cel` upgrade under
-// it) used to leave watcher=null for the rest of the session: standout-orch
-// sat on 4 unread with no watch process at all. The hook owns the lifecycle,
+// it) used to leave watcher=null for the rest of the session: an orchestrator
+// sat on unread mail with no watch process at all. The hook owns the lifecycle,
 // so it restarts it - one at a time, backoff doubling to 60s and reset once a
 // watcher has lived a minute, never after shutdown - and then counts what
 // arrived while nobody was tailing, through the same coalesced wake.
@@ -204,7 +204,7 @@ function drain(ctx): string {
       cwd: (ctx && ctx.cwd) || process.cwd(),
       encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-  } catch { return ""; }
+  } catch { return null; }
 }
 
 export default function celestialInbox(pi): void {
