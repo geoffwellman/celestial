@@ -91,6 +91,15 @@ export const afkLog = async () => {
 export const fleetSession = () => ({ lastGood: null });
 const defaultSession = fleetSession();
 const hhmm = (d) => d.toTimeString().slice(0, 5);
+const STALE_AFTER_S = 120;
+const builtAt = (g) => {
+  const t = Date.parse(g?.doc?.generated_at ?? '');
+  return Number.isFinite(t) ? new Date(t) : g.at;
+};
+const ageSecs = (doc) => {
+  const t = Date.parse(doc?.generated_at ?? '');
+  return Number.isFinite(t) ? (Date.now() - t) / 1000 : null;
+};
 export const fleet = async (runner = run, session = defaultSession) => {
   const r = await runner(CEL_BIN, ['fleet', '--json']);
   const afk = await (runner === run ? afkState() : runner(CEL_BIN, ['afk', 'status', '--json'])
@@ -104,12 +113,22 @@ export const fleet = async (runner = run, session = defaultSession) => {
     try {
       const doc = JSON.parse(r.out);
       session.lastGood = { doc, at: new Date() };
+      // A served-stale document (CEL-90) says so: `cel fleet` returns the
+      // old cache at once and refills it behind, so an old `generated_at`
+      // is shown as stale rather than passed off as a fresh read.
+      const age = ageSecs(doc);
+      if (age !== null && age > STALE_AFTER_S) {
+        return { ...doc, afk, stale: `stale, as of ${hhmm(builtAt(session.lastGood))} (refilling)` };
+      }
       return { ...doc, afk };
     } catch { error = 'cel fleet returned no JSON'; reason = 'fleet refresh returned no JSON'; }
   }
   const { lastGood } = session;
-  if (lastGood) return { ...lastGood.doc, afk, stale: `stale, as of ${hhmm(lastGood.at)} (${reason})` };
-  return { workspaces: [], afk, error };
+  // CEL-90: the time on the label is when the DOCUMENT was built
+  // (`generated_at`), not when this console last read it - a served-stale
+  // cache read moments ago is still as old as its build.
+  if (lastGood) return { ...lastGood.doc, afk, stale: `stale, as of ${hhmm(builtAt(lastGood))} (${reason})` };
+  return { workspaces: [], afk, error: reason ? `${error} (${reason})` : error };
 };
 
 // `cel inbox open` is per workspace by design (lib/inbox.sh), so the console
