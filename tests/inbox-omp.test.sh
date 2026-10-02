@@ -277,6 +277,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     r.sentWhileBlocked = sent.length;
     st.draft = ''; st.idle = true;
     await sleep(1500);
+  } else if (sc === 'idle-backlog') {
+    await sleep(2500);
   } else if (sc === 'no-agent-end') {
     send('widget-orch', 'first', 'alpha');
     await sleep(1200);           // woken; agent_end never arrives
@@ -364,4 +366,26 @@ test_inbox_all_workspaces_with_workspace_includes_an_unregistered_one() {
   local out; out="$(CEL_INBOX_DIR="$D" CEL_REGISTRY="$REG/registry.yaml" CEL_INBOX_ME=me "$c" inbox read --all-workspaces --workspace loose 2>/dev/null)"
   assert_contains "$out" "[loose]"; assert_contains "$out" "[alpha]"
   rm -rf "$D" "$REG"
+}
+
+# Review note on PR #113: a drain that FAILS (timeout, transient error) is not
+# a drain that found nothing. It must leave the mail owed so the retry timer
+# delivers it, rather than waiting for the next unrelated event.
+test_omp_inbox_failed_drain_keeps_mail_owed_and_retries() {
+  command -v node >/dev/null || return 0
+  local T; T="$(mktemp -d)"; mkdir -p "$T/root/bin"
+  cat > "$T/root/bin/cel" <<SH
+if [ "\$2" = read ] && [ -f "$T/fail" ]; then rm -f "$T/fail"; exit 1; fi
+exec bash "$CEL_ROOT/bin/cel" "\$@"
+SH
+  D="$T/inbox"; REG="$T/reg"; mkdir -p "$D" "$REG/alpha" "$REG/beta"
+  printf 'workspaces:\n  alpha:\n    path: %s\n  beta:\n    path: %s\n' "$REG/alpha" "$REG/beta" > "$REG/registry.yaml"
+  CEL_INBOX_DIR="$D" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=alpha bash "$CEL_ROOT/bin/cel" inbox send widget-orch flaky-msg --workspace alpha >/dev/null 2>&1
+  touch "$T/fail"
+  local out; out="$(CEL_ROOT="$T/root" _omp_delivery_harness idle-backlog)"
+  rm -rf "$T"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "flaky-msg"
+  assert_eq "$(jq -r '.turn' <<<"$out")" "null"
 }
