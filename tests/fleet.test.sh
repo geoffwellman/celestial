@@ -989,3 +989,82 @@ test_fleet_json_carries_an_orchestrator_row_per_product() {
   assert_eq "$(jq -r '.status' <<<"$g")" "gone"
   orch_stub_teardown
 }
+
+# CEL-90: SERVE STALE, REFILL IN THE BACKGROUND. At a load average of 25-30 a
+# full read took 32-45 s against the console's 20 s timeout, and the rebuild
+# ran inline in the caller: the console was killed at 20 s, the cache was
+# never written, and the next refresh found it expired and did the same. The
+# console sat on "stale" indefinitely while every killed rebuild added load.
+_fleet_seed_old_cache() { # -> $CEL_CACHE/fleet.json, a valid document 10 min old
+  mkdir -p "$CEL_CACHE"
+  printf '{"workspaces":[],"marker":"old"}\n' >"$CEL_CACHE/fleet.json"
+  touch -d '10 minutes ago' "$CEL_CACHE/fleet.json"
+}
+_fleet_wait_refilled() { # -> 0 once the cache is no longer the seeded one
+  local i
+  for ((i = 0; i < 300; i++)); do
+    if ! grep -q '"marker":"old"' "$CEL_CACHE/fleet.json" 2>/dev/null \
+       && jq -e '.workspaces | type == "array"' "$CEL_CACHE/fleet.json" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+test_fleet_serves_an_expired_cache_at_once_and_refills_it_behind() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_DELAY=2
+  _fleet_seed_old_cache
+  local out s e
+  s="$(date +%s%N)"
+  out="$(cmd_fleet --json)"
+  e="$(date +%s%N)"
+  assert_eq "$(jq -r '.marker' <<<"$out")" "old"
+  [ $(( (e - s) / 1000000 )) -lt 1500 ] || { echo "took $(( (e - s) / 1000000 )) ms" >&2; return 1; }
+  _fleet_wait_refilled || { echo "the refill never wrote the cache" >&2; return 1; }
+  assert_eq "$(jq -r '.generated_at | type' "$CEL_CACHE/fleet.json")" "string"
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY
+  _fleet_teardown
+}
+
+test_fleet_refill_survives_the_caller_being_killed() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_DELAY=2
+  _fleet_seed_old_cache
+  # The console's timeout, simulated: the caller's whole process group is
+  # killed while the refill is still sleeping.
+  setsid bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/fleet.sh"; cmd_fleet --json >/dev/null; sleep 30' &
+  local caller=$!
+  sleep 0.7
+  kill -KILL -- "-$caller" 2>/dev/null || kill -KILL "$caller" 2>/dev/null || true
+  wait "$caller" 2>/dev/null || true
+  _fleet_wait_refilled || { echo "killing the caller killed the refill" >&2; return 1; }
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY
+  _fleet_teardown
+}
+
+test_fleet_two_callers_on_an_expired_cache_start_one_refill() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_DELAY=2
+  export CEL_FLEET_REFILL_LOG="$T/refills.log"
+  _fleet_seed_old_cache
+  cmd_fleet --json >/dev/null
+  cmd_fleet --json >/dev/null
+  _fleet_wait_refilled || { echo "no refill" >&2; return 1; }
+  sleep 0.3
+  assert_eq "$(grep -c . "$CEL_FLEET_REFILL_LOG")" "1"
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY CEL_FLEET_REFILL_LOG
+  _fleet_teardown
+}
+
+test_fleet_with_no_cache_builds_inline() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30
+  local out; out="$(cmd_fleet --json)"
+  assert_eq "$(jq -r '.workspaces | length' <<<"$out")" "2"
+  assert_eq "$(jq -r '.generated_at | type' <<<"$out")" "string"
+  assert_eq "$(jq -c '.workspaces' "$CEL_CACHE/fleet.json")" "$(jq -c '.workspaces' <<<"$out")"
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS
+  _fleet_teardown
+}
