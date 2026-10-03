@@ -816,6 +816,9 @@ cmd_delegate() {
   profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
   _run_keep_model_args "$rt"   # same helper as cel run (CEL-68)
+  # Inbox delivery, same as cel run (CEL-95): reviewers reach a worker by
+  # inbox, and a pi worker without the hook never saw their CHANGES.
+  _run_inbox_hook_args "$rt"
 
   # Runtime-wide launch flags, same as cel run. THESE WERE MISSING HERE: every
   # worker delegated through fanout started without its runtime's approval
@@ -831,6 +834,9 @@ cmd_delegate() {
   # herdr agent names must be [a-z][a-z0-9_-]{0,31}; the readable repo/branch
   # form lives on as the worktree label only.
   local alias; alias="$(_run_agent_name "$repo/$branch")"
+  # The hook reads the mailbox named for this pane's alias (CEL-95).
+  local inbox_me=""
+  [ -z "$(agent_inbox_hook "$rt" file)" ] || inbox_me="$alias"
 
   # THE WORKER'S SHELL MUST CARRY THE WORKSPACE ENV, and nothing else gives it
   # one. A worktree lives at ~/.herdr/worktrees/<repo>/<branch> - OUTSIDE the
@@ -869,7 +875,7 @@ cmd_delegate() {
   # it, and its worktree is then kept for ever. Pass-through only - the text
   # is rendered there, typed here, so both paths mark a pane identically.
   if ! _ledger_spawn "$HERDR" pane send-text "$pane" \
-       "$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE")" > /dev/null 2>&1; then
+       "$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")" > /dev/null 2>&1; then
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
   fi
 

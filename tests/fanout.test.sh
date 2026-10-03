@@ -2287,6 +2287,22 @@ test_delegate_marks_the_worker_with_the_plane_launch_environment() {
   rm -rf "$T"
 }
 
+# CEL-95: a delegated pi worker is launched with the inbox extension and
+# its own mailbox identity, so a reviewer's CHANGES mail wakes it.
+test_delegate_pi_worker_gets_inbox_extension_and_identity() {
+  _fanout_setup
+  sed -i 's/worker: omp/worker: pi/' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-INBOX "$T/spec.md") > /dev/null
+  local marked start
+  marked="$(grep '^pane send-text' "$STUB_LOG" | head -1)"
+  assert_contains "$marked" "CEL_INBOX_ME=widget-wg-inbox"
+  assert_contains "$marked" "CEL_INBOX_WS=alpha"
+  start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$start" "--kind pi"
+  assert_contains "$start" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  rm -rf "$T"
+}
+
 # --- CEL-50: a pane is not a worker -----------------------------------------
 #
 # A delegate left the task prompt TYPED BUT UNSUBMITTED in the worker pane:
