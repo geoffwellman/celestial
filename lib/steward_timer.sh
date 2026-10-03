@@ -86,15 +86,19 @@ steward_timer_health() {
   local f; f="$(steward_timer_dir)/$STEWARD_TIMER_UNIT.timer"
   [ -e "$f" ] || return 0
   have systemctl || return 0
-  local mins out last next now le ne age repair
+  local mins out last next mono now le ne age repair
   mins="$(steward_timer_interval "$f")"
   repair="systemctl --user start $STEWARD_TIMER_UNIT.service && systemctl --user restart $STEWARD_TIMER_UNIT.timer"
-  out="$(systemctl --user show "$STEWARD_TIMER_UNIT.timer" -p LastTriggerUSec -p NextElapseUSecRealtime 2>/dev/null || true)"
+  out="$(systemctl --user show "$STEWARD_TIMER_UNIT.timer" -p LastTriggerUSec -p NextElapseUSecRealtime -p NextElapseUSecMonotonic 2>/dev/null || true)"
   last="$(printf '%s\n' "$out" | sed -n 's/^LastTriggerUSec=//p' | head -1)"
   next="$(printf '%s\n' "$out" | sed -n 's/^NextElapseUSecRealtime=//p' | head -1)"
   # test-only seam, honoured only under the suite
   now=""; [ -n "${CEL_TESTING:-}" ] && now="${CEL_STEWARD_NOW:-}"
   [ -n "$now" ] || now="$(date +%s)"
+  # A timer with only monotonic triggers (this one) reports its next elapse
+  # in NextElapseUSecMonotonic and leaves the realtime field empty; either
+  # being set means the timer will fire.
+  mono="$(printf '%s\n' "$out" | sed -n 's/^NextElapseUSecMonotonic=//p' | head -1)"
   le="$(_steward_timer_epoch "$last")"; ne="$(_steward_timer_epoch "$next")"
   if [ -z "$le" ]; then
     printf 'steward has never ticked in this systemd manager - repair: %s' "$repair"; return 1
@@ -105,8 +109,9 @@ steward_timer_health() {
       "$((age / 60))" "$mins" "$repair"
     return 1
   fi
-  if [ -z "$ne" ]; then
+  case "$mono" in ""|0|infinity|n/a) mono="" ;; esac
+  if [ -z "$ne" ] && [ -z "$mono" ]; then
     printf 'steward timer has no next trigger - repair: %s' "$repair"; return 1
   fi
-  printf 'steward last tick %sm ago, next in %sm' "$((age / 60))" "$(( (ne - now) / 60 ))"
+  printf 'steward last tick %sm ago, timer armed' "$((age / 60))"
 }

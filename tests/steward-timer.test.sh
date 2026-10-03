@@ -87,3 +87,14 @@ test_doctor_says_nothing_without_an_installed_timer() {
   assert_eq "$(steward_timer_health)" ""
   _st_teardown
 }
+
+# What the live box reports: an all-monotonic timer leaves the realtime field
+# empty and is armed all the same.
+test_doctor_reads_a_monotonic_next_elapse_as_armed() {
+  _st_setup
+  steward_timer_unit 5 > "$CEL_SYSTEMD_DIR/cel-steward.timer"
+  export CEL_STEWARD_NOW="$(TZ=UTC date -d '2026-10-03 09:00:00' +%s)"
+  printf 'LastTriggerUSec=Sat 2026-10-03 08:58:00 UTC\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=1d 10h 50min\n' > "$ST_SHOW"
+  assert_contains "$(TZ=UTC steward_timer_health)" "armed"
+  _st_teardown
+}
