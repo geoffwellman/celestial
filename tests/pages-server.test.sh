@@ -164,3 +164,21 @@ test_index_lists_documents_not_their_images() {
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/fig.svg")" "200"
   _pages_stop
 }
+
+# Matching is on parsed src/href/url() references, not substrings: a near-miss
+# filename or a prose mention must not hide an unrelated bare image, while
+# query strings, fragments, ./ and percent-encoding still resolve to the file.
+test_index_asset_matching_is_exact_reference_not_substring() {
+  _pages_boot 1 || return 1
+  printf '<img src="mychart.png"><a href="bar-chart.png">x</a> see chart.png in prose
+<img src="./a%%20b.png?v=1"><img src="c.png#frag"><div style="background:url('"'"'d.png'"'"')">' > "$PROOT/r.html"
+  local f; for f in chart.png mychart.png bar-chart.png 'a b.png' c.png d.png; do printf 'PNG' > "$PROOT/$f"; done
+  local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
+  assert_contains "$idx" 'href="/chart.png"'
+  local hidden
+  for hidden in mychart.png bar-chart.png a%20b.png c.png d.png; do
+    if printf '%s' "$idx" | grep -qF "href=\"/$hidden\""; then
+      echo "referenced $hidden still listed"; _pages_stop; return 1; fi
+  done
+  _pages_stop
+}
