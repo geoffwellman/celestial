@@ -145,3 +145,22 @@ test_index_carries_workspace_filter_and_pagination() {
   case "$ix" in *'`'*) echo "backtick reached the rendered index"; _pages_stop; return 1;; esac
   _pages_stop
 }
+
+# A page's images are published beside it and used to crowd the index as rows
+# of their own. An image a document references is an asset of that document:
+# it stays served at its URL but is not listed. A bare image nobody references
+# is still a publication in its own right (`cel publish` takes any file).
+test_index_lists_documents_not_their_images() {
+  _pages_boot 1 || return 1
+  printf '<img src="chart.png"><img src="./fig.svg">' > "$PROOT/report.html"
+  printf 'PNG' > "$PROOT/chart.png"; printf '<svg/>' > "$PROOT/fig.svg"
+  printf 'PNG' > "$PROOT/lonely.png"
+  local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
+  assert_contains "$idx" 'href="/report.html"'
+  assert_contains "$idx" 'href="/lonely.png"'
+  if printf '%s' "$idx" | grep -q 'href="/chart.png"\|href="/fig.svg"'; then
+    echo "referenced images listed as documents"; _pages_stop; return 1; fi
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/chart.png")" "200"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/fig.svg")" "200"
+  _pages_stop
+}
