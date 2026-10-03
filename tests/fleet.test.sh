@@ -1068,3 +1068,19 @@ test_fleet_with_no_cache_builds_inline() {
   unset CEL_CACHE CEL_FLEET_CACHE_SECS
   _fleet_teardown
 }
+
+test_fleet_write_keeps_the_old_cache_when_the_build_fails() {
+  _fleet_setup
+  mkdir -p "$T/c"
+  printf '%s\n' '{"workspaces":[{"name":"good"}]}' >"$T/c/fleet.json"
+  _fleet_doc() { printf ''; }
+  _fleet_write "$T/c/fleet.json" "" >/dev/null || true
+  assert_eq "$(jq -r '.workspaces[0].name' "$T/c/fleet.json")" "good"
+  _fleet_doc() { printf 'not json'; }
+  _fleet_write "$T/c/fleet.json" "" >/dev/null || true
+  assert_eq "$(jq -r '.workspaces[0].name' "$T/c/fleet.json")" "good"
+  assert_eq "$(ls "$T/c" | grep -c tmp)" "0"
+  unset -f _fleet_doc
+  source "$CEL_ROOT/lib/fleet.sh"
+  _fleet_teardown
+}

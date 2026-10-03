@@ -366,3 +366,13 @@ test_orphans_never_reaps_the_auth_broker_or_gateway_by_their_real_launch_line() 
   assert_eq "$(_class_of "$rows" 4051)" ""
   rm -rf "$T"
 }
+
+# A process that rewrites its title can leave the last argument without a
+# trailing NUL; dropping it would change protected/class matching (CEL-90 r1).
+test_orphans_list_keeps_a_final_argument_with_no_trailing_nul() {
+  _orphans_fixture
+  printf 'bash\0tests/run.sh' >"$P/4030/cmdline"
+  local rows; rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 4030)" "runner"
+  rm -rf "$T"
+}
