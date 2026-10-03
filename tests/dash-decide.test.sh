@@ -67,3 +67,30 @@ test_dash_decide_refuses_missing_csrf_and_alien_host() {
   assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null | jq -r .title)" "pick a style"
   _dd_down
 }
+
+# Review on #118: a button sends its 1-based index, so a numeric label is
+# recorded as clicked; free text from the box is free text even if digits.
+test_dash_option_buttons_answer_by_index() {
+  _dd_boot
+  local id2; id2="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha \
+    --title "how many?" --option "2::two" --option "1::one" 2>/dev/null)"
+  assert_eq "$(_dd_post "{\"id\":\"$id2\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "200"
+  assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"how many?": 2 '
+  assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"value\":\"1\"}" -H "x-cel-csrf: $TOKEN")" "200"
+  assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"pick a style": 1 '
+  # the page sends the index, not the label
+  assert_contains "$(curl -sf "http://127.0.0.1:$DASH_PORT/")" "go('answer',null,i+1)"
+  _dd_down
+}
+
+# Two tabs answering the same decision at once: one wins, the asker hears once.
+test_dash_concurrent_answers_resolve_once() {
+  _dd_boot
+  local i; for i in 1 2 3 4; do
+    _dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"option\":$(( (i % 2) + 1 ))}" -H "x-cel-csrf: $TOKEN" > "$T/code.$i" &
+  done; wait
+  assert_eq "$(cat "$T"/code.* | grep -o 200 | grep -c . || true)" "1"
+  assert_eq "$(jq -c 'select(.kind == "resolution")' "$T/inbox/alpha.jsonl" | grep -c . || true)" "1"
+  assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$T/inbox/alpha.jsonl" | grep -c . || true)" "1"
+  _dd_down
+}
