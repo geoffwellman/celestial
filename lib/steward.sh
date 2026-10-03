@@ -1681,6 +1681,10 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_inbox_hooks
   run_sessions_note_roster "$agents_json"
   _steward_stale_orchestrators
+  # CEL-90: keep the fleet cache warm so the first console read after an idle
+  # spell serves a recent board. One detached refill, only when stale; the
+  # tick never waits on it.
+  ( . "$(dirname "${BASH_SOURCE[0]}")/fleet.sh" && fleet_cache_warm ) || true
   c_ok "tick complete"
 }
 

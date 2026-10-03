@@ -173,52 +173,75 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
   now="$(date +%s)"
   ttys="$(_orphans_pane_ttys)" || ttys_known=0
 
-  # Every pid and its parent first: class c is "a shell with no children",
-  # and a child of an orphan is somebody's, not nobody's. The same map is
-  # what expands a box service's pid into its tree.
-  local parents=$'\n' pidmap="" ppid_
+  # NO SUBPROCESS PER PID (CEL-90). At a load of 25-30 this walk forked an
+  # awk, a tr, two readlinks and a stat for each of ~800 processes and took
+  # 28 s on its own - more than the console's whole 20 s budget, and growing
+  # with the very process count it was measuring. Every per-pid fact is now
+  # read with bash builtins, and the two symlinks bash cannot read are
+  # resolved for the few candidates in ONE batched `find` after the walk.
+  local -A st_name st_ppid st_uid st_rss
+  local -a order=()
+  local parents=$'\n' pidmap="" key val rest n p u r
   for d in "$proc"/[0-9]*; do
     [ -d "$d" ] || continue
-    ppid_="$(awk '/^PPid:/ { print $2; exit }' "$d/status" 2>/dev/null)"
-    parents="$parents$ppid_"$'\n'
-    pidmap="$pidmap${d##*/} $ppid_"$'\n'
+    pid="${d##*/}"; n="" p="" u="" r=0
+    while IFS=$'\t' read -r key val rest; do
+      case "$key" in
+        Name:) n="$val" ;;
+        PPid:) p="$val" ;;
+        Uid:) u="$val" ;;
+        VmRSS:) r="${val#"${val%%[! ]*}"}"; r="${r%% *}" ;;
+      esac
+    done <"$d/status" 2>/dev/null || true
+    [ -n "$p" ] || continue
+    order+=("$pid")
+    st_name[$pid]="$n"; st_ppid[$pid]="$p"; st_uid[$pid]="$u"; st_rss[$pid]="${r:-0}"
+    parents="$parents$p"$'\n'
+    pidmap="$pidmap$pid $p"$'\n'
   done
 
   # THE BOX'S OWN SERVICES, BY IDENTITY. Resolved once for the whole walk:
   # asking `ss` per candidate would be a subprocess per process on the box.
   local services; services=$'\n'"$(_orphans_service_tree "$pidmap")"$'\n'
 
-  for d in "$proc"/[0-9]*; do
-    [ -d "$d" ] || continue
-    pid="${d##*/}"
-    local name ppid uid rss
-    # One read of status for the four fields. A pid that vanishes between the
-    # glob and the open is normal - a gate run is dozens of short-lived
-    # processes - and simply drops out.
-    IFS=$'\t' read -r name ppid uid rss < <(awk '
-      /^Name:/  { n = $2 }
-      /^PPid:/  { p = $2 }
-      /^Uid:/   { u = $2 }
-      /^VmRSS:/ { r = $2 }
-      END { printf "%s\t%s\t%s\t%s\n", n, p, u, (r == "" ? 0 : r) }' "$d/status" 2>/dev/null) || continue
-    [ -n "${ppid:-}" ] || continue
-    # ANOTHER PERSON'S PROCESSES ARE NOT OURS TO REAP, and a process whose
-    # parent is still alive still has somebody to answer to.
-    [ "${uid:-}" = "$me" ] || continue
-    [ "$ppid" = 1 ] || continue
+  # The candidates: ours, reparented to init, not this shell, not a service,
+  # with an argv that is not protected. Classification is unchanged below.
+  local -a cands=() links=()
+  local -A st_args
+  local args part
+  for pid in "${order[@]}"; do
+    [ "${st_uid[$pid]}" = "$me" ] || continue
+    [ "${st_ppid[$pid]}" = 1 ] || continue
     [ "$pid" = "$$" ] && continue
-    # A DECLARED BOX SERVICE IS NEVER AN ORPHAN, whatever its cwd says and
-    # whatever its argv looks like. This is the test that was dead code
-    # before: the auth broker and gateway are `omp auth-… serve`, and only
-    # the port they are listening on or the pid their state file records
-    # ties that process back to the declaration that owns it.
     case "$services" in *$'\n'"$pid"$'\n'*) continue ;; esac
-
-    local args cwd
-    args="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"; args="${args% }"
+    args=""
+    while IFS= read -r -d '' part || [ -n "$part" ]; do args="$args$part "; done <"$proc/$pid/cmdline" 2>/dev/null || true
+    args="${args% }"
     [ -n "$args" ] || continue
     _orphans_protected "$args" && continue
-    cwd="$(readlink "$d/cwd" 2>/dev/null || true)"
+    st_args[$pid]="$args"
+    cands+=("$pid")
+    links+=("$proc/$pid/cwd")
+    if [ -L "$proc/$pid/fd/0" ]; then links+=("$proc/$pid/fd/0"); fi
+  done
+  [ "${#cands[@]}" -gt 0 ] || return 0
+
+  local -A link_of
+  local path target
+  while IFS=$'\t' read -r path target; do
+    link_of[$path]="$target"
+  done < <(find "${links[@]}" -maxdepth 0 -type l -printf '%p\t%l\n' 2>/dev/null || true)
+
+  local up="" upr
+  if [ -r "$proc/uptime" ]; then
+    read -r upr _ <"$proc/uptime" 2>/dev/null || upr=""
+    up="${upr%%.*}"
+  fi
+
+  for pid in "${cands[@]}"; do
+    d="$proc/$pid"
+    local name="${st_name[$pid]}" rss="${st_rss[$pid]}" args="${st_args[$pid]}"
+    local cwd="${link_of[$d/cwd]:-}"
 
     local class=""
     # a. the watcher a console armed and never killed.
@@ -256,7 +279,7 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
           case "$args" in
             *" "*) ;;
             *)
-              local tty; tty="$(readlink "$d/fd/0" 2>/dev/null || true)"
+              local tty="${link_of[$d/fd/0]:-}"
               case "$tty" in
                 /dev/pts/*)
                   case $'\n'"$ttys"$'\n' in
@@ -269,21 +292,22 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     fi
     [ -n "$class" ] || continue
 
-    local age started
+    local age started="" statl
     # THE START TIME, not the mtime of the directory: on this box every
     # /proc/<pid> reports the same mtime, so an age column built on it said
-    # "47289s" for a process started a minute ago and for one four days old -
-    # and the age is the one field that tells an operator which of those a row
-    # is. Field 22 of `stat` is the start time in clock ticks since boot, and
-    # /proc/uptime is how far since boot it is now. A fixture tree has
-    # neither, so the directory mtime remains the fallback.
-    started=""
-    if [ -r "$proc/uptime" ] && [ -r "$d/stat" ]; then
-      started="$(awk -v now="$now" -v up="$(awk '{print int($1)}' "$proc/uptime" 2>/dev/null)" '
-        { line = $0
-          sub(/^[0-9]+ \(.*\) /, "", line)
-          n = split(line, f, " ")
-          if (n >= 20) printf "%d\n", now - up + int(f[20] / 100) }' "$d/stat" 2>/dev/null)"
+    # "47289s" for a process started a minute ago and for one four days old.
+    # Field 22 of `stat` is the start time in clock ticks since boot, and
+    # /proc/uptime is how far since boot it is now. Read with builtins; a
+    # fixture tree has neither, so the directory mtime remains the fallback.
+    if [ -n "$up" ] && [ -r "$d/stat" ]; then
+      statl=""
+      IFS= read -r statl <"$d/stat" 2>/dev/null || true
+      statl="${statl##*) }"
+      local -a f=()
+      read -r -a f <<<"$statl"
+      if [ "${#f[@]}" -ge 20 ] && [[ "${f[19]}" =~ ^[0-9]+$ ]]; then
+        started=$(( now - up + f[19] / 100 ))
+      fi
     fi
     [ -n "$started" ] || started="$(stat -c %Y "$d" 2>/dev/null || printf '%s' "$now")"
     age=$(( now - started )); [ "$age" -ge 0 ] || age=0

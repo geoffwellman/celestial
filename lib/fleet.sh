@@ -718,10 +718,78 @@ _fleet_doc() { # <only> -> the JSON document
     --argjson total "${total:-0}" --argjson avail "${avail:-0}" --argjson used "${used:-0}" \
     --argjson subs "$(_fleet_subscriptions)" \
     --argjson orphans "$(fleet_orphans_json)" \
-    '{workspaces: ., subscriptions: $subs}
+    --arg gen "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{generated_at: $gen, workspaces: ., subscriptions: $subs}
      | .box = {total_mb: $total, available_mb: $avail, used_pct: $used, orphans: $orphans,
                agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}'
   mem_tree_snapshot_clear
+}
+
+# A cache document of any age that is still a fleet document.
+_fleet_cache_valid() { # <file>
+  [ -s "$1" ] && jq -e '.workspaces | type == "array"' "$1" >/dev/null 2>&1
+}
+
+# Build and write the cache, holding the lock on fd 9 in THIS shell only. The
+# build runs with fd 9 CLOSED: before CEL-90 every awk, jq and subshell under
+# the read inherited it, so a killed holder's reparented children kept the
+# lock - and every console behind it waited on a read nobody would collect.
+_fleet_write() { # <file> <only>
+  local doc
+  doc="$(_fleet_doc "$2" 9>&-)"
+  # Never let a failed build (empty/invalid) replace a good stale cache.
+  if printf '%s\n' "$doc" >"$1.tmp.$$" 9>&- &&
+    jq -e '.workspaces | type == "array"' "$1.tmp.$$" >/dev/null 2>&1 9>&-; then
+    mv -f "$1.tmp.$$" "$1" 9>&-
+  else
+    rm -f "$1.tmp.$$"
+  fi
+  printf '%s' "$doc"
+}
+
+# THE DETACHED REFILL (CEL-90). Before this, the rebuild ran in the caller:
+# at a load of 25-30 it took 32-82 s, the console killed it at 20 s, the
+# cache was never written, and the next refresh found it expired and did the
+# same - the console sat on "stale" for good while every killed rebuild added
+# load for nothing. Now the caller returns the old document at once and the
+# rebuild runs in its own session, where no caller's timeout or exit reaches
+# it. SINGLE-FLIGHT on the same lock, taken non-blocking: a second refill
+# that finds one running simply exits, and one that wins after a refill has
+# just finished sees a young cache and exits too.
+_fleet_refill() { # <file> <only> <secs>
+  exec 9>"$1.lock"
+  flock -n 9 || return 0
+  _fleet_cache_young "$1" "$3" && return 0
+  [ -n "${CEL_FLEET_REFILL_LOG:-}" ] && printf '%s\n' "$$" >>"$CEL_FLEET_REFILL_LOG"
+  # A seam for the suite: holds the refill open long enough to kill its caller.
+  [ -n "${CEL_FLEET_REFILL_DELAY:-}" ] && sleep "$CEL_FLEET_REFILL_DELAY" 9>&-
+  _fleet_write "$1" "$2" >/dev/null
+  exec 9>&-
+}
+
+fleet_refill_spawn() { # <file> <only> <secs>
+  local root; root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  setsid bash -c '. "$1/lib/common.sh"; . "$1/lib/fleet.sh"; _fleet_refill "$2" "$3" "$4"' \
+    _ "$root" "$1" "$2" "$3" </dev/null >/dev/null 2>&1 9>&- &
+  disown 2>/dev/null || true
+}
+
+# The cache file for a read, for the steward's warm-up as well as cmd_fleet.
+_fleet_cache_file() { # <only>
+  local dir="${CEL_CACHE:-$HOME/.cache/cel}"
+  mkdir -p "$dir"
+  printf '%s/fleet%s.json' "$dir" "${1:+.$1}"
+}
+
+# The steward's tick keeps the cache warm so the first console read after an
+# idle spell is not a cold build: one detached refill, and only when stale.
+fleet_cache_warm() {
+  local secs file
+  secs="$(_fleet_cache_secs)"
+  [ "$secs" -gt 0 ] || return 0
+  file="$(_fleet_cache_file "")"
+  _fleet_cache_young "$file" "$secs" && return 0
+  fleet_refill_spawn "$file" "" "$secs"
 }
 
 cmd_fleet() {
@@ -736,32 +804,43 @@ cmd_fleet() {
     esac
   done
 
-  local secs doc="" dir file
+  local secs doc="" file
   secs="$(_fleet_cache_secs)"
   if [ "$secs" -gt 0 ]; then
-    dir="${CEL_CACHE:-$HOME/.cache/cel}"
-    mkdir -p "$dir"
-    file="$dir/fleet${only:+.$only}.json"
-    if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
+    file="$(_fleet_cache_file "$only")"
+    # SERVE STALE (CEL-90): a valid document of ANY age is returned at once;
+    # one past `cache_secs` also starts the detached refill. The document
+    # carries `generated_at`, so a reader says honestly how old it is.
+    if [ "$fresh" -eq 0 ] && _fleet_cache_valid "$file"; then
       doc="$(cat "$file" 2>/dev/null || true)"
+      # Re-validated after the read: the file can be replaced between the
+      # check and the cat, and an empty read is not a board.
+      if printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+        _fleet_cache_young "$file" "$secs" || fleet_refill_spawn "$file" "$only" "$secs"
+        # A cache from before CEL-90 has no generated_at: its age is the
+        # file's mtime, or a reader would pass it off as fresh.
+        local m; m="$(stat -c %Y "$file" 2>/dev/null || printf 0)"
+        doc="$(printf '%s' "$doc" | jq -c --arg m "$(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)" \
+          '.generated_at //= $m')"
+      else
+        doc=""
+      fi
     fi
-    # Re-validated after the read, too: the file can vanish between the age
-    # check and the cat, and an empty read is not a board.
-    if ! printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
-      doc=""
-      # The lock is held on fd 9 for the read; a caller that waited on it
-      # re-checks the cache first, because the holder has just written it.
+    if [ -z "$doc" ]; then
+      # No cache at all, or --fresh: build inline, under the lock so callers
+      # queue behind one build and take what it wrote.
       exec 9>"$file.lock"
       flock 9
-      if [ "$fresh" -eq 0 ] && _fleet_cache_young "$file" "$secs"; then
+      if [ "$fresh" -eq 0 ] && _fleet_cache_valid "$file"; then
         doc="$(cat "$file" 2>/dev/null || true)"
       fi
       if ! printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
-        doc="$(_fleet_doc "$only")"
-        printf '%s\n' "$doc" >"$file.tmp.$$" && mv -f "$file.tmp.$$" "$file"
+        doc="$(_fleet_write "$file" "$only")"
       fi
       exec 9>&-
     fi
+    # The reader judges staleness by the same threshold that starts a refill.
+    doc="$(printf '%s' "$doc" | jq -c --argjson s "$secs" '.cache_secs = $s')"
   else
     doc="$(_fleet_doc "$only")"
   fi
