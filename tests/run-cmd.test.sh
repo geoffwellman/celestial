@@ -774,3 +774,28 @@ test_run_failed_rename_still_launches() {
   assert_contains "$(cat "$HERDR_LOG")" "agent start alpha-root"
   rm -rf "$T"
 }
+
+# CEL-94: a live reviewer whose registry row has gone (pruned, or dropped as
+# "gone" under a stale pane id) is still THE reviewer for that PR. Relaunching
+# used to drop its checkout from under it; it is found on the roster by the
+# directory it stands in, reused, and its row is written back.
+test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded() {
+  _ws_review; _reviewers_fixture
+  export CEL_REVIEW_DIR="$T/reviews"
+  local co="$T/reviews/widget-pr-12"; mkdir -p "$co"; : > "$co/keep"
+  RC_CO="$co"
+  herdr() {
+    case "$1 $2" in
+      "agent list") jq -nc --arg c "$RC_CO" \
+        '{result:{agents:[{pane_id:"w1:p7",name:"widget-pr-12-review",cwd:$c,agent_status:"working"}]}}';;
+      *) printf 'herdr %s\n' "$*" >> "$T/herdr.log"; return 1;;
+    esac
+  }
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)"
+  assert_contains "$out" "reusing"
+  assert_eq "$(reviewers_find widget 12 | jq -r .pane)" w1:p7
+  assert_eq "$(reviewers_find widget 12 | jq -r .checkout)" "$co"
+  [ -e "$co/keep" ] || { echo "the live checkout was deleted"; return 1; }
+  [ ! -s "$T/herdr.log" ] || { echo "a pane was started: $(cat "$T/herdr.log")"; return 1; }
+  unset -f herdr; rm -rf "$T"
+}
