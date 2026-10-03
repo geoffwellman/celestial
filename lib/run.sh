@@ -344,15 +344,48 @@ reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
   mkdir -p "$(dirname "$path")" || return 1
   # A leftover from a previous round is removed rather than reused: it is at
   # the head the PR had then, which is the staleness this ticket is about.
-  _reviewer_worktree_drop "$repodir" "$path"
+  # But only a LEFTOVER: if a live pane still stands in it the drop refuses
+  # and so does this launch (CEL-94). The caller has already looked for a
+  # live reviewer to reuse, so whatever is standing here is not one we can
+  # take over - and a second tree at another path would be a second reviewer
+  # for one PR, which is what reusing exists to prevent.
+  _reviewer_worktree_drop "$repodir" "$path" || return 1
   git -C "$repodir" fetch -q origin "pull/$pr/head" 2>/dev/null || true
   git -C "$repodir" worktree add -q --detach "$path" "$head" 2>/dev/null || return 1
   printf '%s' "$path"
 }
 
-_reviewer_worktree_drop() { # <repodir> <path>
+# WHO IS STANDING IN THIS CHECKOUT, asked of the herdr roster at the moment
+# it matters. CEL-94: on 2026-10-03 review checkouts were deleted under five
+# working reviewers, twice for two of the PRs - herdr showed their cwd as
+# "(deleted)" and they fell back to /tmp clones. Every delete decided from
+# the reviewer REGISTRY: a row whose pane id had gone released "its" path
+# while a newer pane for the same PR worked in that very directory, and a
+# relaunch whose row had been pruned dropped the path unconditionally. The
+# registry says who was recorded; only the roster says who is there.
+#
+# A roster that cannot be read is an occupied directory: deleting someone's
+# working tree is not a risk worth taking to save a few megabytes until the
+# next sweep. No herdr at all means no panes, so nothing can stand there.
+_reviewer_checkout_occupant() { # <path> -> pane<TAB>name of a pane in it; 0 = occupied
+  local path="${1%/}" roster
+  have herdr || return 1
+  roster="$(herdr agent list 2>/dev/null)" || { printf 'unknown\troster unreadable'; return 0; }
+  [ -n "$roster" ] || return 1
+  printf '%s' "$roster" | jq -er --arg c "$path" '
+      [.result.agents[]? | ((.cwd // "") | sub(" \\(deleted\\)$"; "")) as $d
+       | select($d == $c or ($d | startswith($c + "/")))][0] // empty
+      | [(.pane_id // "?"), ((.name // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null
+}
+
+_reviewer_worktree_drop() { # <repodir> <path>; fails, deleting nothing, while a pane stands in it
   [ -n "${2:-}" ] || return 0
   [ -e "$2" ] || [ -n "$1" ] || return 0
+  local who
+  if [ -e "$2" ] && who="$(_reviewer_checkout_occupant "$2")"; then
+    c_warn "kept $2: pane ${who%%$'\t'*} is standing in it"
+    return 1
+  fi
   git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf -- "$2"
   git -C "$1" worktree prune >/dev/null 2>&1 || true
   return 0
@@ -367,7 +400,11 @@ reviewer_checkout_release() { # <repo> <pr>
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
   [ -n "$path" ] || return 0
-  _reviewer_worktree_drop "$repodir" "$path"
+  # Kept while anything stands in it; the next sweep releases it once the
+  # pane has gone. The row may already be dropped by then - the gone-pane
+  # pass drops it - so a kept checkout's path is not lost: a live pane in it
+  # is a reviewer the next sweep adopts and records again.
+  _reviewer_worktree_drop "$repodir" "$path" || return 0
   rm -rf -- "$path"
   return 0
 }
@@ -986,6 +1023,22 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       local existing
       if existing="$(reviewers_find "$repo" "$pr")"; then
         c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $(printf '%s' "$existing" | jq -r .pane) - reusing it"
+        return 0
+      fi
+      # A LIVE REVIEWER WITH NO ROW IS STILL THE REVIEWER (CEL-94). Its row
+      # may have been pruned or dropped under a stale pane id; relaunching
+      # then dropped the checkout it was working in. The roster finds it by
+      # the directory it stands in, and the row is written back.
+      local live_path live
+      live_path="$(reviewer_checkout_path "$repo" "$pr")"
+      if [ -e "$live_path" ] && live="$(_reviewer_checkout_occupant "$live_path")" \
+         && [ "${live%%$'\t'*}" != unknown ]; then
+        local lpane="${live%%$'\t'*}" lname="${live#*$'\t'}"
+        if [ "$dry_run" -eq 0 ]; then
+          reviewers_record "$repo" "$pr" "$lpane" "$lname" "$live_path" "$cwd" "" \
+            || c_warn "could not record the reviewer for $repo#$pr"
+        fi
+        c_ok "reviewer for $repo#$pr is already running as $lname in pane $lpane (found by its checkout) - reusing it"
         return 0
       fi
       # AND THE TREE IT READS IS THE PR'S, not this directory's. A dry run
