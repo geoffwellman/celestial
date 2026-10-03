@@ -356,6 +356,16 @@ _inbox_cursor() { # <ws> <recipient>
 # prefixed [<ws>] because "a decision from games-orch" means nothing without
 # knowing which box it came from.
 _inbox_all_ws() { registry_names 2>/dev/null || true; }
+# The sweep --all-workspaces makes, plus the mailbox --workspace named beside it
+# when the registry does not list it. --workspace used to be ignored there; an
+# orchestrator launched for a workspace the registry has not caught up with
+# must still read its home mailbox while sweeping the rest.
+_inbox_every_ws() { # [extra-ws]
+  local all; all="$(_inbox_all_ws)"
+  [ -n "$all" ] && printf '%s\n' "$all"
+  [ -n "${1:-}" ] && ! printf '%s\n' "$all" | grep -qxF "$1" && printf '%s\n' "$1"
+  return 0
+}
 
 # Append is atomic enough for one line under O_APPEND, but two senders can
 # still interleave partial writes on some filesystems, so serialise on a lock
@@ -403,6 +413,8 @@ cel inbox - messages between agents that never type into a pane
       --all-workspaces reads every registered mailbox, each line prefixed
       [<ws>]. The cursor is per READER, so the console reading root's mail
       does not consume it from under a root pane.
+      --workspace beside --all-workspaces adds that mailbox to the sweep
+      when the registry does not list it (read, count, watch, open).
       NOTHING IS SAID OUT LOUD: with no unread mail the reader is told which
       identity and which workspace it just asked about, whether that mailbox
       has ever existed, and whether the same reader has mail in another
@@ -615,7 +627,7 @@ _inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
   [ -n "$who" ] || who="$(_inbox_me)"
   if [ "$every" -eq 1 ]; then
     local n out="" one
-    for n in $(_inbox_all_ws); do
+    for n in $(_inbox_every_ws "$ws"); do
       one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /")"
       [ -n "$one" ] || continue
       printf '%s\n' "$one"; out=1
@@ -683,7 +695,7 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
   if [ "$every" -eq 1 ]; then
     # a hook wants ONE number: the operator has one attention, not one per box
     local n total=0
-    for n in $(_inbox_all_ws); do
+    for n in $(_inbox_every_ws "$ws"); do
       total=$(( total + $(_inbox_count_one "$n" "$who") ))
     done
     printf '%s\n' "$total"; return 0
@@ -760,7 +772,7 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   # the way out: a console restarted a few times otherwise leaves a tail per
   # mailbox per restart, all writing to a pane that no longer exists.
   local n pids=""
-  for n in $(_inbox_all_ws); do
+  for n in $(_inbox_every_ws "$ws"); do
     _inbox_watch_one "$n" "$who" "[$n] " &
     pids="$pids $!"
   done
@@ -833,7 +845,7 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
     . "$(dirname "${BASH_SOURCE[0]}")/triage.sh"
     if [ "$every" -eq 1 ]; then
       local m
-      for m in $(_inbox_all_ws); do
+      for m in $(_inbox_every_ws "$ws"); do
         triage_render "$m" "$who" "$json" | sed "s/^/[$m] /"
       done
       return 0
@@ -846,7 +858,7 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   # waiting on me" is not a per-workspace question.
   if [ "$every" -eq 1 ]; then
     local n
-    for n in $(_inbox_all_ws); do
+    for n in $(_inbox_every_ws "$ws"); do
       _inbox_open_one "$n" "$who" "$json" | sed "s/^/[$n] /"
     done
     return 0
