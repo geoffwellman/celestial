@@ -467,8 +467,19 @@ const gatewayPanel = (mine) => (!mine ? Promise.resolve(null) : cached('gwpanel'
 }));
 const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''));
 
+// NEEDS YOU (CEL-93): the owner's decisions across every workspace, read from
+// `cel decide list --json` so the board and the CLI cannot disagree about
+// what is open. Answering goes back through `cel decide answer|drop` - one
+// writer path, so the asker is told through its inbox exactly as from a shell.
+const decisions = () => cached('decisions', 8000, async () => {
+  const out = await run(join(CEL_ROOT, 'bin/cel'), ['decide', 'list', '--json'], 10000);
+  if (!out) return [];
+  return out.split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+});
+
 const state = async (req) => {
   const box = await boxDash();
+  const needsYou = await decisions();
   const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(box.mine), services(), gatewayPanel(box.mine)]);
   // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
   // with the workspace that owns it since CEL-34, and `box` is the tag for
@@ -519,7 +530,7 @@ const state = async (req) => {
   return {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
-    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], linear: lin,
+    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
     // the same thing to whoever is reading the card - `source` says which, and
     // `cel fleet` decided both before this line ran.
@@ -874,6 +885,7 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   <div class="sechead"><h2>Inbox</h2>
     <div id="filters"><label><input type="checkbox" id="f-unread"> unread only</label>
     <span id="inbox-count"></span></div></div>
+  <div id="needsyou"></div>
   <div id="decisions"></div>
   <div class="card"><div id="inboxwho"></div><div id="inbox"></div></div>
 </div>
@@ -1093,7 +1105,7 @@ var TABS=[
   {id:'linear',   label:'my linear', badge:function(s){return s.linear&&s.linear.issues?s.linear.issues.length:null}},
   // the badge is UNRESOLVED decisions first: unread mail is a queue length,
   // an open decision is someone waiting on an answer
-  {id:'inbox',    label:'inbox',     badge:function(s){return (s.inboxOpen||[]).length+(s.inbox||[]).filter(function(m){return m.unread}).length},tone:'hot'},
+  {id:'inbox',    label:'inbox',     badge:function(s){return (s.needsYou||[]).length+(s.inboxOpen||[]).length+(s.inbox||[]).filter(function(m){return m.unread}).length},tone:'hot'},
   {id:'agents',   label:'agents',    badge:function(s){
       var b=s.agents.filter(function(a){return a.status==='blocked'}).length;
       return b?b:s.agents.length},
@@ -1285,8 +1297,38 @@ function renderLinear(){
     el.oncontextmenu=function(e){openMenu(e,el.dataset.id,ticketItems(el.dataset.id,el.dataset.url))};
   });
 }
+function renderNeedsYou(){
+  var ny=LAST.needsYou||[];
+  $('needsyou').innerHTML=ny.length?'<h2>needs you <span class="n">'+ny.length+'</span></h2>'+ny.map(function(d){
+    var s=d.age_secs||0,age=s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d';
+    var ctx=d.context?(/^https?:/.test(d.context)?'<a href="'+esc(d.context)+'" target="_blank" rel="noopener">'+esc(d.context)+'</a>':esc(d.context)):'';
+    return '<div class="decision ny" data-id="'+esc(d.id)+'">'+
+      '<span class="route">'+esc(d.workspace)+' \u00b7 '+esc(d.asker)+'</span><span class="age">'+age+'</span>'+
+      '<span class="body"><b>'+esc(d.title)+'</b>'+(d.blocks?' <i>blocks: '+esc(d.blocks)+'</i>':'')+(ctx?' \u00b7 '+ctx:'')+'</span>'+
+      '<div class="opts">'+(d.options||[]).map(function(o,i){
+        return '<button class="opt'+((d.recommended===i+1)?' rec':'')+'" data-v="'+esc(o.label)+'" title="'+esc(o.tradeoff||'')+'">'+
+          (i+1)+'. '+esc(o.label)+((d.recommended===i+1)?' \u2605':'')+'</button>'}).join('')+
+      '<input class="free" placeholder="free-text answer"><button class="send">answer</button>'+
+      '<input class="why" placeholder="reason to drop"><button class="drop">drop</button></div></div>';
+  }).join(''):'';
+  Array.prototype.forEach.call($('needsyou').querySelectorAll('.ny'),function(el){
+    var id=el.dataset.id,title=el.querySelector('b').textContent;
+    var go=async function(action,value){
+      if(!value){toast(action==='drop'?'give a reason':'type an answer',false);return}
+      // the exact text that will reach the asker, before it is sent
+      if(!confirm((action==='drop'?'DROP':'ANSWER')+' "'+title+'":\\n\\n'+value))return;
+      var r=await post('/api/decide',{id:id,action:action,value:value});
+      toast(r.ok?(action==='drop'?'dropped':'answered'):r.text,r.ok);
+      if(r.ok){el.remove();LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id})}
+    };
+    Array.prototype.forEach.call(el.querySelectorAll('button.opt'),function(b){b.onclick=function(){go('answer',b.dataset.v)}});
+    el.querySelector('button.send').onclick=function(){go('answer',el.querySelector('.free').value.trim())};
+    el.querySelector('button.drop').onclick=function(){go('drop',el.querySelector('.why').value.trim())};
+  });
+}
 function renderInbox(){
   if(!LAST)return;
+  renderNeedsYou();
   // OPEN DECISIONS sit above the mail, not in it. Reading moved the cursor
   // past them; that is exactly why they need their own strip - a question
   // that scrolled off the unread list is still a question.
@@ -1846,6 +1888,21 @@ const server = createServer(async (req, res) => {
         ['inbox', 'resolve', String(id), '--by', 'dashboard', '--workspace', cfg.name], 10000);
       if (out === null) { res.writeHead(502).end('could not resolve (already resolved, or not a decision?)'); return; }
       delete cache.inbox;
+      res.writeHead(200).end('ok');
+    } else if (req.method === 'POST' && req.url === '/api/decide') {
+      // POST only, behind the same Host and CSRF guard as every other control
+      // (security.allow above). The page confirms the exact text first.
+      const { id, action, value } = await readBody(req, 6000);
+      const v = String(value || '').trim();
+      if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
+      if (!['answer', 'drop'].includes(action)) { res.writeHead(400).end('action must be answer or drop'); return; }
+      if (!v || v.length > 2000) { res.writeHead(400).end(action === 'drop' ? 'a reason is required' : 'an answer is required'); return; }
+      const args = action === 'answer'
+        ? ['decide', 'answer', String(id), v, '--by', 'dashboard']
+        : ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard'];
+      const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
+      if (out === null) { res.writeHead(502).end('could not record it (already answered?)'); return; }
+      delete cache.decisions;
       res.writeHead(200).end('ok');
     } else if (req.method === 'POST' && req.url === '/api/ticket-state') {
       // Moving a ticket is how work is STARTED from the board: the trigger
