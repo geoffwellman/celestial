@@ -111,7 +111,7 @@ agents:
     # one place. claude needs no entry: its guard is a global PreToolUse hook
     # that decides by the pane's cwd.
     guard_hook: { flag: --hook, file: tools/hooks/orchestrator-guard.omp.ts }
-    # Inbox delivery for root/orchestrator launches (CEL-65): omp has no
+    # Inbox delivery for every launch (CEL-65, CEL-95 for workers): omp has no
     # Monitor or UserPromptSubmit, so this hook watches the mailbox, raises
     # ui.notify for new mail and drains unread mail into the next turn.
     inbox_hook: { flag: --hook, file: tools/hooks/inbox.omp.ts }
@@ -151,6 +151,12 @@ agents:
       levels: [off, minimal, low, medium, high, xhigh, max]
     # Same extension API as omp (pi-family), same adapter.
     guard_hook: { flag: --extension, file: tools/hooks/orchestrator-guard.omp.ts }
+    # Inbox delivery (CEL-95), loaded on every pi launch - workers and
+    # reviewers too: PR reviewers send CHANGES by inbox, and a pi worker with
+    # no hook sat on them for eight hours. Same adapter as omp; the APIs it
+    # uses (sendMessage triggerTurn, ctx.isIdle, ui.getEditorText,
+    # session_start/agent_end) were checked against the installed pi.
+    inbox_hook: { flag: --extension, file: tools/hooks/inbox.omp.ts }
     notes: >
       earendil-works/pi. Install ONLY the scoped package above - bare `pi` on npm
       is an unrelated maths library that also ships a `pi` binary and will shadow

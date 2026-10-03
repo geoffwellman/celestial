@@ -173,6 +173,17 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
 # variables go on as an `env K=V ...` PREFIX to the launch line it types. That
 # is deliberately scoped to the launch: an `export` in the pane would outlive
 # the agent and mark every later command in that shell as a plane worker.
+# Prepend the runtime's inbox hook (agents.yaml inbox_hook) to AGENT_ARGS, if
+# it has one. Shared by `cel run` and `cel-fanout delegate` so a worker gets
+# the same delivery whichever path launched it.
+_run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
+  local hflag hfile
+  hflag="$(agent_inbox_hook "$1" flag)"; hfile="$(agent_inbox_hook "$1" file)"
+  if [ -n "$hflag" ] && [ -n "$hfile" ]; then
+    AGENT_ARGS=("$hflag" "$CEL_ROOT/$hfile" "${AGENT_ARGS[@]}")
+  fi
+}
+
 _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" out
   printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
@@ -1169,12 +1180,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       if [ -n "$gflag" ] && [ -n "$gfile" ]; then
         AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
       fi
-      # Out-of-band inbox delivery for runtimes without Monitor/UserPromptSubmit.
-      gflag="$(agent_inbox_hook "$runtime" flag)"; gfile="$(agent_inbox_hook "$runtime" file)"
-      if [ -n "$gflag" ] && [ -n "$gfile" ]; then
-        AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
-      fi ;;
+      ;;
   esac
+  # Out-of-band inbox delivery for runtimes without Monitor/UserPromptSubmit -
+  # on EVERY role, not just the orchestrators (CEL-95): reviewers send a
+  # worker CHANGES by inbox, and a pi worker without the hook sat `done` on
+  # two unread reviews for eight hours.
+  _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
 
   # Runtime-wide launch flags (agents.yaml launch_args) go ahead of the
@@ -1185,7 +1197,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
 
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
   local envprefix; local inbox_me=""
-  case "$role" in root) inbox_me=root ;; orchestrator) inbox_me="$product-orch" ;; esac
+  case "$role" in
+    root) inbox_me=root ;;
+    orchestrator) inbox_me="$product-orch" ;;
+    # A worker or reviewer's mailbox IS its pane alias - the name reviewers and
+    # orchestrators address. Only where a hook will read it: claude reads by cwd.
+    worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
+  esac
   envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
 
   # RESUME (CEL-63). Root and the orchestrators carry their conversation
