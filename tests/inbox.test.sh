@@ -840,3 +840,15 @@ test_inbox_a_workspace_that_does_not_exist_exits_non_zero_either_way() {
   assert_eq "$(CEL_INBOX_ME=root _inbox_count --for root --workspace ghost-ws 2>/dev/null || true)" "0"
   rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
 }
+
+# CEL-96: a fingerprint rolls up whatever the kind. A `status` with an fp was
+# appended fresh every tick, because only decision/blocked were looked up.
+test_a_fingerprint_rolls_up_a_status_item_too() {
+  _inbox_sandbox
+  local a b
+  a="$(_inbox_send root "afk expired" --from steward --kind status --fp afk-expired --workspace demo 2>/dev/null)"
+  b="$(_inbox_send root "afk expired" --from steward --kind status --fp afk-expired --workspace demo 2>/dev/null)"
+  assert_eq "$b" "$a"
+  assert_eq "$(_inbox_open --for root --workspace demo --json | jq -r .count)" "2"
+  rm -rf "$CEL_INBOX_DIR"
+}
