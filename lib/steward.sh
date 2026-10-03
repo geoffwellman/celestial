@@ -1365,6 +1365,8 @@ _steward_box() {
 }
 
 _STEWARD_UNIT="cel-steward"
+# shellcheck source=lib/steward_timer.sh
+. "$(dirname "${BASH_SOURCE[0]}")/steward_timer.sh"   # steward_timer_unit
 # A MAILBOX NOBODY READS MUST NOT BE ABLE TO SWALLOW AN ESCALATION.
 #
 # Counted on this box on 2026-09-19: one workspace's `root` mailbox had taken
@@ -1470,20 +1472,7 @@ ExecStart=/bin/bash -lc 'export PATH=\"\$HOME/.local/share/mise/shims:\$HOME/.lo
 TimeoutStartSec=600
 " > "$d/$_STEWARD_UNIT.service"
 
-  printf '%s' "[Unit]
-Description=run the celestial steward every ${mins}m
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=${mins}min
-# A tick missed while the box was asleep runs on wake rather than being
-# skipped - a ticket moved to the trigger state overnight is still waiting.
-Persistent=true
-AccuracySec=30s
-
-[Install]
-WantedBy=timers.target
-" > "$d/$_STEWARD_UNIT.timer"
+  steward_timer_unit "$mins" > "$d/$_STEWARD_UNIT.timer"
 
   systemctl --user daemon-reload || die "cel steward --install: systemctl daemon-reload failed"
   systemctl --user enable --now "$_STEWARD_UNIT.timer" \

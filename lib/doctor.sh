@@ -676,6 +676,19 @@ cmd_doctor() {
   check_workspaces || fail=1
   check_externals || fail=1
 
+  # THE STEWARD IS WHAT RUNS GC. A timer that lost its next trigger after a
+  # user-manager restart left a box fourteen hours without a tick and walked
+  # it into OOM, while every other line here stayed green. An old unit is
+  # rewritten in place (this is also how `cel update` repairs it, since it
+  # ends in doctor); a stale tick is a failure carrying the repair command.
+  local stline
+  stline="$(steward_timer_upgrade)"; [ -z "$stline" ] || c_ok "$stline"
+  if stline="$(steward_timer_health)"; then
+    [ -z "$stline" ] || c_ok "$stline"
+  else
+    c_err "$stline"; fail=1
+  fi
+
   # A GC that can identify nothing is invisible otherwise: it prints the same
   # summary as one with nothing to do. This is the last sweep's reading, not a
   # sweep of its own - doctor must not take the registry lock to run.
