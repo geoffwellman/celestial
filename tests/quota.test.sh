@@ -842,9 +842,13 @@ test_two_readers_leave_the_cliproxy_vault_byte_identical() {
   # `trap - EXIT` inside each subshell: the EXIT trap that kills the stub is
   # inherited by a background subshell, and the first one to finish would
   # otherwise shoot the server out from under the second.
-  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-a" subscription_list >/dev/null 2>&1 ) &
-  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-b" subscription_list >/dev/null 2>&1 ) &
-  wait
+  # The two readers BY PID: a bare `wait` also waits for the stub server,
+  # which is this shell's child too and only leaves on its sixty-second dead
+  # man's switch - CEL-97 measured this one test at 60 s of CI's suite.
+  local ra rb
+  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-a" subscription_list >/dev/null 2>&1 ) & ra=$!
+  ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-b" subscription_list >/dev/null 2>&1 ) & rb=$!
+  wait "$ra" "$rb"
   jq -e . "$f" >/dev/null 2>&1 || {
     printf 'the vault file is no longer valid JSON after two readers:\n%s\n' "$(cat "$f")" >&2
     return 1; }
