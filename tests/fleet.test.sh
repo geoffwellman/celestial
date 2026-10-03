@@ -1084,3 +1084,18 @@ test_fleet_write_keeps_the_old_cache_when_the_build_fails() {
   source "$CEL_ROOT/lib/fleet.sh"
   _fleet_teardown
 }
+
+# CEL-90 r2: a cache written before CEL-90 has no generated_at; serving it
+# must still say how old it is (from the file's mtime) and carry cache_secs.
+test_fleet_serves_a_pre_cel90_cache_with_its_age_and_cache_secs() {
+  _fleet_setup
+  export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_DELAY=60
+  mkdir -p "$CEL_CACHE"
+  printf '%s\n' '{"workspaces":[]}' >"$CEL_CACHE/fleet.json"
+  touch -d '@1700000000' "$CEL_CACHE/fleet.json"
+  local out; out="$(cmd_fleet --json)"
+  assert_eq "$(jq -r '.generated_at' <<<"$out")" "2023-11-14T22:13:20Z"
+  assert_eq "$(jq -r '.cache_secs' <<<"$out")" "30"
+  unset CEL_CACHE CEL_FLEET_CACHE_SECS CEL_FLEET_REFILL_DELAY
+  _fleet_teardown
+}
