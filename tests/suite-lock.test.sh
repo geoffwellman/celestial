@@ -273,3 +273,45 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   unset CEL_SUITE_LOCK
   rm -rf "$T"
 }
+
+# ---- CEL-97: one test cannot hold the box ------------------------------------
+# On 2026-10-04 the suite lock was held for eighty minutes by one run stuck in
+# a single test whose server child never exited; two workers' suites and a land
+# queued behind it. Each test now has a wall limit, and its whole process group
+# - the servers it started included - goes when the limit does.
+test_a_test_past_its_wall_limit_is_a_timeout_and_its_children_go() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  cat > "$T/tests/hang.test.sh" <<EOF
+test_a_hangs() { sleep 300 & echo \$! > "$T/child.pid"; sleep 300; }
+test_b_runs_after() { :; }
+EOF
+  local out rc=0 t0; t0="$(date +%s)"
+  out="$(CEL_TEST_TIMEOUT=2 bash "$T/tests/run.sh" --no-lock 2>&1)" || rc=$?
+  [ "$(( $(date +%s) - t0 ))" -lt 30 ] || { echo "the limit did not bound the test"; rm -rf "$T"; return 1; }
+  [ "$rc" -ne 0 ] || { echo "a timed-out test passed the suite"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "test_a_hangs"
+  assert_contains "$out" "timed out after 2s"
+  assert_contains "$out" "test_b_runs_after"
+  assert_contains "$out" "1 passed, 1 failed"
+  local pid; pid="$(cat "$T/child.pid")"
+  sleep 0.5
+  ! kill -0 "$pid" 2>/dev/null || { echo "the hung test's child survived"; kill "$pid"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Files run in parallel must reach the same verdicts as one after another.
+test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  local n
+  for n in 1 2 3 4 5; do
+    printf 'test_f%s_passes() { sleep 0.2; }\ntest_f%s_fails() { false; }\n' "$n" "$n" > "$T/tests/f$n.test.sh"
+  done
+  local serial parallel
+  serial="$(CEL_TEST_JOBS=1 bash "$T/tests/run.sh" --no-lock 2>&1 | grep -E 'ok|FAIL|passed' | sort)"
+  parallel="$(CEL_TEST_JOBS=4 bash "$T/tests/run.sh" --no-lock 2>&1 | grep -E 'ok|FAIL|passed' | sort)"
+  assert_contains "$serial" "5 passed, 5 failed"
+  assert_eq "$parallel" "$serial"
+  rm -rf "$T"
+}
