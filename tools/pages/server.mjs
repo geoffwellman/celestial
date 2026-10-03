@@ -71,10 +71,25 @@ const docWorkspace = (f) => {
   } catch { return ''; }
 };
 
+// Images published beside a page (its charts and figures) used to crowd the
+// index as rows of their own. An image some document in the root references
+// is that document's asset: still served at its URL, just not listed. A bare
+// image nobody references stays listed - `cel publish` takes any file, so it
+// may be the publication itself.
+const IMAGE_RE = /\.(png|jpe?g|gif|svg|webp|ico)$/i;
+const referencedAssets = (files) => {
+  const text = files.filter((f) => /\.html?$/i.test(f))
+    .map((f) => { try { return readFileSync(join(ROOT, f), 'utf8'); } catch { return ''; } })
+    .join('\n');
+  return new Set(files.filter((f) => IMAGE_RE.test(f) && text.includes(f)));
+};
+
 // Same visual identity as cel dash: night ground, starlight ink, gold accent.
 const index = () => {
-  const rows = readdirSync(ROOT)
-    .filter((f) => !f.startsWith('.'))
+  const names = readdirSync(ROOT).filter((f) => !f.startsWith('.'));
+  const assets = referencedAssets(names);
+  const rows = names
+    .filter((f) => !assets.has(f))
     .map((f) => ({ f, st: statSync(join(ROOT, f)) }))
     .filter((x) => x.st.isFile())
     .sort((a, b) => b.st.mtimeMs - a.st.mtimeMs)
