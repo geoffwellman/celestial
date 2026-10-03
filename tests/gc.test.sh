@@ -1160,3 +1160,71 @@ test_gc_unknown_report_retries_when_the_send_fails() {
   assert_eq "$(grep -c . "$GC_MAIL")" 2
   rm -rf "$T"
 }
+
+# ------------------------------------- a live reviewer keeps its checkout
+# CEL-94: review checkouts were deleted while their reviewer was mid-review -
+# herdr showed the pane's cwd as "(deleted)" and the reviewer fell back to a
+# /tmp clone. Liveness is asked of the herdr roster AT THE MOMENT OF DELETION,
+# never of the reviewer registry: a row can name a pane id that is gone while
+# a newer pane for the same PR is working in the very same directory.
+_gc_live_checkout_fixture() { # roster comes from GC_ROSTER
+  _gc_reviewer_fixture
+  export CEL_REVIEW_DIR="$T/reviews"
+  CO="$T/reviews/widget-pr-71"; mkdir -p "$CO/src"; : > "$CO/src/file"
+  reviewers_record widget 71 w1:p3 widget-pr-71-review "$CO" "" ""
+  GC_ROSTER='{"result":{"agents":[]}}'
+  herdr() {
+    case "$1 $2" in
+      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
+      "agent list") printf '%s' "$GC_ROSTER";;
+      *) return 1;;
+    esac
+  }
+}
+
+test_gc_keeps_a_checkout_a_live_pane_is_standing_in_though_its_row_pane_is_gone() {
+  _gc_live_checkout_fixture
+  GC_ROSTER="$(jq -nc --arg c "$CO/src" \
+    '{result:{agents:[{pane_id:"w1:p9",name:"widget-pr-71-review",cwd:$c,agent_status:"working"}]}}')"
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ -e "$CO/src/file" ] || { echo "a live reviewer's checkout was deleted"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_gc_releases_the_checkout_once_no_pane_stands_in_it() {
+  _gc_live_checkout_fixture
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ ! -e "$CO" ] || { echo "an orphaned checkout survived gc"; rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+# A relaunch for the same PR used to drop the directory before re-creating it,
+# whatever was working in it.
+test_relaunch_never_deletes_a_checkout_a_live_pane_stands_in() {
+  _gc_live_checkout_fixture
+  GC_ROSTER="$(jq -nc --arg c "$CO (deleted)" \
+    '{result:{agents:[{pane_id:"w1:p9",name:"someone",cwd:$c,agent_status:"working"}]}}')"
+  assert_fails reviewer_checkout_make "$T/nope" widget 71 deadbeef
+  [ -e "$CO/src/file" ] || { echo "a relaunch deleted a live checkout"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Sourcery on #119: a roster reply that parses but is not a roster must not
+# read as "nobody here", and an adopted row (no checkout field) still has its
+# checkout released once its pane is gone.
+test_a_malformed_roster_keeps_the_checkout() {
+  _gc_live_checkout_fixture
+  GC_ROSTER='{"oops":true}'
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ -e "$CO/src/file" ] || { echo "deleted on an unreadable roster"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
+  _gc_live_checkout_fixture
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ ! -e "$CO" ] || { echo "an adopted reviewer's checkout outlived it"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
