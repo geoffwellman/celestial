@@ -98,3 +98,30 @@ test_doctor_reads_a_monotonic_next_elapse_as_armed() {
   assert_contains "$(TZ=UTC steward_timer_health)" "armed"
   _st_teardown
 }
+
+test_doctor_passes_an_armed_timer_that_has_not_ticked_yet() {
+  _st_setup
+  steward_timer_unit 5 > "$CEL_SYSTEMD_DIR/cel-steward.timer"
+  printf 'LastTriggerUSec=n/a\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=1d 2h\n' > "$ST_SHOW"
+  assert_contains "$(steward_timer_health)" "armed"
+  _st_teardown
+}
+
+test_upgrade_fails_when_systemd_does_not_reload() {
+  _st_setup
+  _st_old_timer "$CEL_SYSTEMD_DIR/cel-steward.timer"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/systemctl"
+  local out rc=0; out="$(steward_timer_upgrade)" || rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "daemon-reload"
+  _st_teardown
+}
+
+test_doctor_reads_a_tick_in_progress_as_armed() {
+  _st_setup
+  steward_timer_unit 5 > "$CEL_SYSTEMD_DIR/cel-steward.timer"
+  export CEL_STEWARD_NOW="$(TZ=UTC date -d '2026-10-03 09:00:00' +%s)"
+  printf 'LastTriggerUSec=Sat 2026-10-03 08:59:00 UTC\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=infinity\nSubState=running\n' > "$ST_SHOW"
+  TZ=UTC steward_timer_health >/dev/null
+  _st_teardown
+}

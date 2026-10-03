@@ -67,8 +67,13 @@ steward_timer_upgrade() {
   steward_timer_rearms "$f" && return 0
   steward_timer_unit "$(steward_timer_interval "$f")" > "$f"
   if have systemctl; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-    systemctl --user restart "$STEWARD_TIMER_UNIT.timer" >/dev/null 2>&1 || true
+    # A failed reload leaves the manager on the old unit, and a recent tick
+    # from it would let the health check pass over a repair never applied.
+    if ! systemctl --user daemon-reload >/dev/null 2>&1 \
+      || ! systemctl --user restart "$STEWARD_TIMER_UNIT.timer" >/dev/null 2>&1; then
+      printf 'rewrote %s but systemd did not reload it - run: systemctl --user daemon-reload && systemctl --user restart %s.timer' "$f" "$STEWARD_TIMER_UNIT"
+      return 1
+    fi
   fi
   printf 'rewrote %s so it rearms after a manager restart' "$f"
 }
@@ -89,7 +94,7 @@ steward_timer_health() {
   local mins out last next mono now le ne age repair
   mins="$(steward_timer_interval "$f")"
   repair="systemctl --user start $STEWARD_TIMER_UNIT.service && systemctl --user restart $STEWARD_TIMER_UNIT.timer"
-  out="$(systemctl --user show "$STEWARD_TIMER_UNIT.timer" -p LastTriggerUSec -p NextElapseUSecRealtime -p NextElapseUSecMonotonic 2>/dev/null || true)"
+  out="$(systemctl --user show "$STEWARD_TIMER_UNIT.timer" -p LastTriggerUSec -p NextElapseUSecRealtime -p NextElapseUSecMonotonic -p SubState 2>/dev/null || true)"
   last="$(printf '%s\n' "$out" | sed -n 's/^LastTriggerUSec=//p' | head -1)"
   next="$(printf '%s\n' "$out" | sed -n 's/^NextElapseUSecRealtime=//p' | head -1)"
   # test-only seam, honoured only under the suite
@@ -100,6 +105,15 @@ steward_timer_health() {
   # being set means the timer will fire.
   mono="$(printf '%s\n' "$out" | sed -n 's/^NextElapseUSecMonotonic=//p' | head -1)"
   le="$(_steward_timer_epoch "$last")"; ne="$(_steward_timer_epoch "$next")"
+  case "$mono" in ""|0|infinity|n/a) mono="" ;; esac
+  # While a tick is running systemd reports the next elapse as infinity; the
+  # timer rearms when the service finishes, so a running tick is armed.
+  printf '%s\n' "$out" | grep -qx 'SubState=running' && mono=running
+  # Never ticked in this manager but armed is a fresh install or a manager
+  # that just restarted with a unit that rearms - not a failure yet.
+  if [ -z "$le" ] && { [ -n "$ne" ] || [ -n "$mono" ]; }; then
+    printf 'steward timer armed, no tick yet in this systemd manager'; return 0
+  fi
   if [ -z "$le" ]; then
     printf 'steward has never ticked in this systemd manager - repair: %s' "$repair"; return 1
   fi
@@ -109,7 +123,6 @@ steward_timer_health() {
       "$((age / 60))" "$mins" "$repair"
     return 1
   fi
-  case "$mono" in ""|0|infinity|n/a) mono="" ;; esac
   if [ -z "$ne" ] && [ -z "$mono" ]; then
     printf 'steward timer has no next trigger - repair: %s' "$repair"; return 1
   fi

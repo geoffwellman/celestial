@@ -35,6 +35,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"   # wslife_doctor_lines, for the nameless agent
 # shellcheck source=lib/fleet.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fleet.sh"   # fleet_mail_doctor_line, for root's mailbox
+# shellcheck source=lib/steward_timer.sh
+. "$(dirname "${BASH_SOURCE[0]}")/steward_timer.sh"   # steward_timer_health, steward_timer_upgrade
 
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
@@ -682,7 +684,11 @@ cmd_doctor() {
   # rewritten in place (this is also how `cel update` repairs it, since it
   # ends in doctor); a stale tick is a failure carrying the repair command.
   local stline
-  stline="$(steward_timer_upgrade)"; [ -z "$stline" ] || c_ok "$stline"
+  if stline="$(steward_timer_upgrade)"; then
+    [ -z "$stline" ] || c_ok "$stline"
+  else
+    c_err "$stline"; fail=1
+  fi
   if stline="$(steward_timer_health)"; then
     [ -z "$stline" ] || c_ok "$stline"
   else
