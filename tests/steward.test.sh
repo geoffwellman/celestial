@@ -1535,3 +1535,21 @@ test_steward_composer_is_empty_only_when_provably_so() {
   assert_fails _steward_composer_empty_text $'● done\nno editor box here'
   assert_fails _steward_composer_empty_text ""
 }
+
+# --- CEL-93: one summary line per workspace per day, never a decision -------
+test_cel93_steward_summarises_owner_decisions_once_a_day() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "pick a style" >/dev/null 2>&1
+  printf '{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"blocked","message":"credit gone"}\n' \
+    >> "$CEL_INBOX_DIR/alpha.jsonl"
+  local i roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
+  for i in 1 2 3; do
+    PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
+  done
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  assert_eq "$(jq -c 'select(.from == "steward" and (.message | test("owner decision")))' "$f" | grep -c . || true)" "1"
+  assert_eq "$(jq -c 'select(.from == "steward" and .kind != "status" and .kind != "resolution")' "$f")" ""
+  assert_eq "$(jq -c 'select(.message | test("UNRESOLVED"))' "$f")" ""
+  rm -rf "$T"
+}
