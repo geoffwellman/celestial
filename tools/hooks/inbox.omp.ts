@@ -27,12 +27,24 @@ function celRoot(): string {
 function celBin(): string { return path.join(celRoot(), "bin", "cel"); }
 // CEL_INBOX_WS/CEL_INBOX_ME are exported by `cel run` for root and orchestrators;
 // CEL_WORKSPACE is a directory, so it is never passed as a mailbox name.
+//
+// An EXPLICIT identity (CEL_INBOX_ME, which `cel run` sets only for root and
+// orchestrators) is reached in every registered workspace: mail to an
+// orchestrator sent from another workspace sat for days because this hook
+// watched, counted and drained its launch workspace alone. Still filtered to that one recipient, so
+// nobody else's mail - root's included - is read or has its cursor moved.
+// --workspace rides along so a launch workspace the registry lacks stays in
+// the sweep. CEL_INBOX_ALL_WS=0 restores single-workspace scope. Workers get
+// no CEL_INBOX_ME and keep cwd-derived single-workspace scoping.
 function wsArgs(): string[] {
   const a = [];
+  const me = process.env.CEL_INBOX_ME;
+  if (me && process.env.CEL_INBOX_ALL_WS !== "0") a.push("--all-workspaces");
   if (process.env.CEL_INBOX_WS) a.push("--workspace", process.env.CEL_INBOX_WS);
-  if (process.env.CEL_INBOX_ME) a.push("--for", process.env.CEL_INBOX_ME);
+  if (me) a.push("--for", me);
   return a;
 }
+const envMs = (k, d) => { const n = Number(process.env[k]); return Number.isFinite(n) && n > 0 ? n : d; };
 
 let watcher = null;
 // CEL-76: wake an idle orchestrator (nobody at the keyboard) for new mail.
@@ -43,30 +55,50 @@ let waking = false;
 // Mail drained for a wake whose sendMessage failed: the cursor already moved,
 // so it is held here and handed to the next wake or before_agent_start.
 let pending = "";
+// Mail is OWED when a watcher line or a backlog count said something arrived
+// that no wake or turn has delivered yet. While owed, a wake withheld for an
+// active turn or a non-empty composer is retried on a slow timer - never typed
+// into the draft, never a busy loop - instead of waiting for a human to type.
+let owed = false;
+let retryTimer = null;
+let wakeSince = 0;
+let stopped = false;
+let lastCtx = null;
 function takeMail(ctx): string {
-  const fresh = drain(ctx);
+  const fresh = drain(ctx); // null = the drain itself failed, not "no mail"
   const all = [pending, fresh].filter(Boolean).join("\n");
   pending = "";
+  if (fresh === null) { owed = true; if (!all) scheduleRetry(ctx); } else owed = false;
   return all;
 }
 
 function scheduleWake(ctx): void {
-  if (wakeTimer || waking || !api) return;
-  const ms = Number(process.env.CEL_INBOX_WAKE_MS ?? 3000);
-  wakeTimer = setTimeout(() => { wakeTimer = null; tryWake(ctx); }, ms);
+  if (stopped || wakeTimer || !api) return;
+  if (waking && Date.now() - wakeSince < envMs("CEL_INBOX_WAKE_STUCK_MS", 120000)) { scheduleRetry(ctx); return; }
+  // A wake whose turn never reported agent_end (rejected, dropped, aborted)
+  // must not hold the gate shut forever: past the stuck window it reopens.
+  waking = false;
+  wakeTimer = setTimeout(() => { wakeTimer = null; tryWake(ctx); }, envMs("CEL_INBOX_WAKE_MS", 3000));
   try { wakeTimer.unref(); } catch {}
 }
 
+function scheduleRetry(ctx): void {
+  if (stopped || retryTimer || !owed) return;
+  retryTimer = setTimeout(() => { retryTimer = null; if (owed) scheduleWake(ctx); }, envMs("CEL_INBOX_RETRY_MS", 15000));
+  try { retryTimer.unref(); } catch {}
+}
+
 function tryWake(ctx): void {
-  if (waking || !api) return;
+  if (stopped || waking || !api) return;
   try {
-    if (!ctx || typeof ctx.isIdle !== "function" || !ctx.isIdle()) return;
+    if (!ctx || typeof ctx.isIdle !== "function" || !ctx.isIdle()) { scheduleRetry(ctx); return; }
     const draft = ctx.ui && typeof ctx.ui.getEditorText === "function" ? ctx.ui.getEditorText() : null;
-    if (typeof draft !== "string" || draft.trim() !== "") return;
+    if (typeof draft !== "string") return; // no way to see the composer: notify-only
+    if (draft.trim() !== "") { scheduleRetry(ctx); return; }
     const mail = takeMail(ctx); // advances the cursor: before_agent_start won't see it again
     if (!mail) return;
-    waking = true;
-    const fail = () => { pending = [mail, pending].filter(Boolean).join("\n"); waking = false; };
+    waking = true; wakeSince = Date.now();
+    const fail = () => { pending = [mail, pending].filter(Boolean).join("\n"); owed = true; waking = false; scheduleRetry(ctx); };
     let r;
     try {
       r = api.sendMessage({
@@ -80,15 +112,42 @@ function tryWake(ctx): void {
 }
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }
 
+// WATCHER RECOVERY. A watcher that dies (killed, OOM, a `cel` upgrade under
+// it) used to leave watcher=null for the rest of the session: an orchestrator
+// sat on unread mail with no watch process at all. The hook owns the lifecycle,
+// so it restarts it - one at a time, backoff doubling to 60s and reset once a
+// watcher has lived a minute, never after shutdown - and then counts what
+// arrived while nobody was tailing, through the same coalesced wake.
+let restartTimer = null;
+let restartDelay = 0;
+let watcherStarted = 0;
+function scheduleRestart(ctx): void {
+  if (stopped || restartTimer) return;
+  const base = envMs("CEL_INBOX_RESTART_MS", 2000);
+  if (Date.now() - watcherStarted > 60000) restartDelay = 0;
+  restartDelay = restartDelay ? Math.min(restartDelay * 2, 60000) : base;
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (stopped || watcher) return;
+    startWatcher(ctx);
+    wakeForBacklog(ctx);
+  }, restartDelay);
+  try { restartTimer.unref(); } catch {}
+}
+
 function stopWatcher(): void {
   if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   const w = watcher; watcher = null;
   if (!w || !w.pid) return;
   try { process.kill(-w.pid, "SIGTERM"); } catch { try { w.kill("SIGTERM"); } catch {} }
 }
 
 function startWatcher(ctx): void {
-  stopWatcher();
+  const w0 = watcher; watcher = null;
+  if (w0 && w0.pid) { try { process.kill(-w0.pid, "SIGTERM"); } catch {} }
+  if (stopped) return;
   try {
     const w = spawn("bash", [celBin(), "inbox", "watch", ...wsArgs(), "--parent", String(process.pid)], {
       cwd: (ctx && ctx.cwd) || process.cwd(),
@@ -98,7 +157,7 @@ function startWatcher(ctx): void {
     });
     w.unref();
     w.on("error", () => {});
-    w.on("exit", () => { if (watcher === w) watcher = null; });
+    w.on("exit", () => { if (watcher === w) { watcher = null; scheduleRestart(ctx); } });
     let buf = "";
     w.stdout.setEncoding("utf8");
     w.stdout.on("data", (chunk) => {
@@ -108,11 +167,12 @@ function startWatcher(ctx): void {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
         if (!line) continue;
         try { ctx && ctx.ui && ctx.ui.notify(line, /INBOX (escalation|decision|blocked) /.test(line) ? "warning" : "info"); } catch {}
+        owed = true;
         scheduleWake(ctx);
       }
     });
-    watcher = w;
-  } catch { watcher = null; }
+    watcher = w; watcherStarted = Date.now();
+  } catch { watcher = null; scheduleRestart(ctx); }
 }
 
 // CEL-85: the watcher tails from the end, so mail already waiting when the
@@ -124,7 +184,7 @@ function unreadCount(ctx): number {
   try {
     const n = execFileSync("bash", [celBin(), "inbox", "count", ...wsArgs()], {
       cwd: (ctx && ctx.cwd) || process.cwd(),
-      encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return Number(n) || 0;
   } catch { return 0; }
@@ -133,7 +193,8 @@ function unreadCount(ctx): number {
 function wakeForBacklog(ctx): void {
   const n = unreadCount(ctx);
   if (n <= 0) return;
-  try { ctx && ctx.ui && ctx.ui.notify(`INBOX ${n} unread message(s) waiting from before this session`, "info"); } catch {}
+  try { ctx && ctx.ui && ctx.ui.notify(`INBOX ${n} unread message(s) waiting`, "info"); } catch {}
+  owed = true;
   scheduleWake(ctx);
 }
 
@@ -141,16 +202,16 @@ function drain(ctx): string {
   try {
     return execFileSync("bash", [celBin(), "inbox", "read", ...wsArgs()], {
       cwd: (ctx && ctx.cwd) || process.cwd(),
-      encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-  } catch { return ""; }
+  } catch { return null; }
 }
 
 export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
-  pi.on("agent_end", () => { waking = false; });
-  pi.on("session_start", (_e, ctx) => { startWatcher(ctx); wakeForBacklog(ctx); });
+  pi.on("agent_end", () => { waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
+  pi.on("session_start", (_e, ctx) => { stopped = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
     const mail = takeMail(ctx);
     if (!mail) return;
@@ -163,6 +224,6 @@ export default function celestialInbox(pi): void {
       },
     };
   });
-  pi.on("session_shutdown", () => { stopWatcher(); });
-  process.once("exit", stopWatcher);
+  pi.on("session_shutdown", () => { stopped = true; stopWatcher(); });
+  process.once("exit", () => { stopped = true; stopWatcher(); });
 }
