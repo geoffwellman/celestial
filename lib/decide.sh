@@ -58,6 +58,18 @@ decide_all_json() {
     | jq -cs 'sort_by(.ts) | .[]' 2>/dev/null || true
 }
 
+# CHECK-THEN-APPEND UNDER ONE LOCK. Deduping a re-ask and refusing to answer
+# a closed question both read the mailbox and then write it; two processes
+# (two orchestrators, a double-click, two dashboard tabs) could each read
+# "open" before either wrote. One flock per mailbox, held across both steps -
+# a separate file from the one _inbox_append locks, so the nested append does
+# not deadlock against it.
+_decide_locked() { # <ws> <cmd...>
+  local lock; lock="$(_inbox_dir)/$1.decide.lock"; shift
+  mkdir -p "$(_inbox_dir)"
+  if have flock; then ( flock 8; "$@" ) 8>>"$lock"; else "$@"; fi
+}
+
 cmd_decide() {
   local sub="${1:-help}"; shift 2>/dev/null || true
   case "$sub" in
@@ -82,8 +94,8 @@ cel decide - the owner's one queue of decisions, across every workspace
       open record instead of adding a second one.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
-  cel decide answer <id> <option-number|"free text"> [--by who]
-      resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
+  cel decide answer <id> <option-number|"free text"|--text <text>> [--by who]
+      digits pick that option when it exists, else they are the answer; resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
   cel decide drop <id> --why <text> [--by who]
       resolve a question that no longer matters; the asker is told why.
   cel decide migrate [--apply]
@@ -117,13 +129,20 @@ _decide_ask() {
   fi
   local wsname
   wsname="$(_inbox_ws_here "$ws")" || die "cel decide ask: standing here names no workspace - pass --workspace"
+  # A typo here used to create a fresh mailbox no list would ever read.
+  _inbox_ws_known "$wsname" || die "cel decide ask: no workspace named '$wsname' is registered here (cel ws list)"
   local asker; asker="$(_inbox_me)"
-  local f; f="$(_inbox_file "$wsname")"
   local fields
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
     --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
       context: $context, blocks: $blocks, asker: $asker, message: $title}')"
+  _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields"
+}
+
+_decide_ask_write() { # <ws> <asker> <title> <fields-json>
+  local wsname="$1" asker="$2" title="$3" fields="$4"
+  local f; f="$(_inbox_file "$wsname")"
   # ONE RECORD PER QUESTION: same asker, same title, still open.
   local ref=""
   ref="$(decide_open_json "$wsname" | jq -r --arg a "$asker" --arg t "$title" \
@@ -179,9 +198,17 @@ _decide_find() { # <id> -> record json
 # Resolve the record and mail the asker. One function so answer and drop
 # cannot drift apart on what "closed" means.
 _decide_close() { # <record> <by> <field> <value> <message-to-asker>
+  local ws; ws="$(jq -r .workspace <<< "$1")"
+  _decide_locked "$ws" _decide_close_locked "$@"
+}
+
+_decide_close_locked() {
   local rec="$1" by="$2" field="$3" value="$4" msg="$5" ws id asker f
   ws="$(jq -r .workspace <<< "$rec")"; id="$(jq -r .id <<< "$rec")"; asker="$(jq -r .asker <<< "$rec")"
   f="$(_inbox_file "$ws")"
+  # still open NOW, under the lock: whoever got here first answered it
+  decide_open_json "$ws" | jq -e --arg id "$id" 'select(.id == $id)' >/dev/null 2>&1 \
+    || { c_err "cel decide: $id was already answered or dropped" >&2; return 1; }
   _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$id" \
     --arg by "$by" --arg k "$field" --arg v "$value" \
     '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: "owner", message: ("resolved by " + $by)} + {($k): $v}')"
@@ -191,8 +218,11 @@ _decide_close() { # <record> <by> <field> <value> <message-to-asker>
 }
 
 _decide_answer() {
-  [ $# -ge 2 ] || die "usage: cel decide answer <id> <option-number|\"free text\"> [--by who]"
-  local id="$1" ans="$2" by=""; shift 2
+  [ $# -ge 2 ] || die "usage: cel decide answer <id> <option-number|\"free text\"|--text <text>> [--by who]"
+  local id="$1" ans="" by="" free=0; shift
+  if [ "$1" = --text ]; then free=1; ans="${2:-}"; shift 2 || true
+  else ans="$1"; shift; fi
+  [ -n "$ans" ] || die "cel decide answer: an answer is required"
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) by="$2"; shift 2 ;;
@@ -202,12 +232,16 @@ _decide_answer() {
   [ -n "$by" ] || by="$(_inbox_me)"
   local rec; rec="$(_decide_find "$id")"
   [ -n "$rec" ] || die "cel decide answer: no open owner decision with id $id"
-  local text="$ans"
-  case "$ans" in
-    ''|*[!0-9]*) ;;
-    *) text="$(jq -r --argjson n "$ans" '.options[$n - 1].label // empty' <<< "$rec")"
-       [ -n "$text" ] || die "cel decide answer: option $ans does not exist" ;;
-  esac
+  # All digits is an option number only when that option exists; otherwise
+  # it is the answer itself ("2026"). --text says so outright.
+  local text="$ans" picked=""
+  if [ "$free" -eq 0 ]; then
+    case "$ans" in
+      *[!0-9]*) ;;
+      *) picked="$(jq -r --argjson n "$ans" 'if $n >= 1 then (.options[$n - 1].label // empty) else empty end' <<< "$rec")"
+         [ -n "$picked" ] && text="$picked" ;;
+    esac
+  fi
   local title; title="$(jq -r .title <<< "$rec")"
   _decide_close "$rec" "$by" answer "$text" "ANSWER to \"$title\": $text (decision $id, from $by)"
 }

@@ -112,7 +112,7 @@ test_migrate_dry_run_lists_only_reminders_and_apply_keeps_real_decisions() {
 # Review on #117: a mistyped --workspace must not invent a mailbox nobody lists.
 test_ask_refuses_an_unknown_workspace() {
   _decide_fixture
-  assert_fails _ask_as alpha-orch alhpa --title "x"
+  assert_fails eval '( _ask_as alpha-orch alhpa --title x )'
   [ ! -e "$CEL_INBOX_DIR/alhpa.jsonl" ] || { echo "created a mailbox for a typo"; return 1; }
   rm -rf "$T"
 }
