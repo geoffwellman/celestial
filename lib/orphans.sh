@@ -215,7 +215,7 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     [ "$pid" = "$$" ] && continue
     case "$services" in *$'\n'"$pid"$'\n'*) continue ;; esac
     args=""
-    while IFS= read -r -d '' part; do args="$args$part "; done <"$proc/$pid/cmdline" 2>/dev/null || true
+    while IFS= read -r -d '' part || [ -n "$part" ]; do args="$args$part "; done <"$proc/$pid/cmdline" 2>/dev/null || true
     args="${args% }"
     [ -n "$args" ] || continue
     _orphans_protected "$args" && continue

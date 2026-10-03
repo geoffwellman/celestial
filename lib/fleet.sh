@@ -737,7 +737,13 @@ _fleet_cache_valid() { # <file>
 _fleet_write() { # <file> <only>
   local doc
   doc="$(_fleet_doc "$2" 9>&-)"
-  printf '%s\n' "$doc" >"$1.tmp.$$" 9>&- && mv -f "$1.tmp.$$" "$1" 9>&-
+  # Never let a failed build (empty/invalid) replace a good stale cache.
+  if printf '%s\n' "$doc" >"$1.tmp.$$" 9>&- &&
+    jq -e '.workspaces | type == "array"' "$1.tmp.$$" >/dev/null 2>&1 9>&-; then
+    mv -f "$1.tmp.$$" "$1" 9>&-
+  else
+    rm -f "$1.tmp.$$"
+  fi
   printf '%s' "$doc"
 }
 
