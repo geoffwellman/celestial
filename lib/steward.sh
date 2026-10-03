@@ -138,6 +138,8 @@ _steward_mail_sweep() { # <agents-json>
     [ -s "$f" ] || continue
     for who in $(jq -r '.to' "$f" 2>/dev/null | sort -u); do
       case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
+      # the owner's queue is `cel decide`, summarised once a day below
+      [ "$who" = owner ] && continue
       # ONLY MAIL THAT NEEDS SOMEONE. Measured 2026-09-26: the unread
       # reminder fired for piles of worker done-reports (`status`), which ask
       # nothing of anyone, and for the steward's own earlier reminders. Count
@@ -198,54 +200,26 @@ _steward_mail_sweep() { # <agents-json>
     done
   done
 
-  # OPEN DECISIONS are checked separately from unread mail, and NOT gated on
-  # it: a decision the recipient has already `read` and moved past has zero
-  # unread but is still unanswered - that is the buried-question case, and the
-  # unread check above cannot see it by construction. After an hour the
-  # recipient's pane is told the decision text itself; after two, root hears
-  # that a subordinate is sitting on one (root's own open decisions are the
-  # human's to notice, so those only warn here).
+  # OWNER DECISIONS: ONE LINE A DAY, NEVER A DECISION ITSELF (CEL-93). This
+  # used to mail every recipient "you have N UNRESOLVED decision(s)" as a
+  # `blocked` item each hour; the reminders were then counted as open items in
+  # their own right, until one orchestrator told the owner "18 open decisions"
+  # where the real list was five. Questions for the owner now live in
+  # `cel decide`, and the steward's whole contribution is a status line per
+  # workspace per day saying how many are waiting and for how long.
+  # shellcheck source=lib/decide.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/decide.sh"
   for ws in $(registry_names); do
-    local f2; f2="$(_inbox_file "$ws")"
-    [ -f "$f2" ] || continue
-    for who in $(jq -r 'select(.kind == "decision" or .kind == "blocked") | select(.from != "steward") | .to' "$f2" 2>/dev/null | sort -u); do
-      case "$who" in *:*|all) continue;; esac
-      local open oldest2 age2 n2
-      # The steward's own reminders are not decisions. Counting them is how
-      # one real blocker became "you have 7 UNRESOLVED" overnight: each
-      # reminder was a `blocked` item, so the next one counted it.
-      open="$(cmd_inbox open --for "$who" --workspace "$ws" --json 2>/dev/null \
-        | jq -c 'select(.from != "steward")' 2>/dev/null || true)"
-      [ -n "$open" ] || continue
-      n2="$(printf '%s\n' "$open" | wc -l | tr -d ' ')"
-      oldest2="$(printf '%s\n' "$open" | jq -r '.ts' | sort | sed -n 1p)"
-      age2=$(( $(date +%s) - $(date -d "$oldest2" +%s 2>/dev/null || date +%s) ))
-      [ "$age2" -ge 3600 ] || continue
-      local text2; text2="$(printf '%s\n' "$open" | jq -r '"[\(.id)] \(.kind) from \(.from): \(.message)"' | head -3)"
-      local pane2="" want2 target2=""
-      if [ "$who" = root ]; then
-        want2="$(_steward_agent_name "$(registry_name_of_dir "$(registry_path "$ws")" 2>/dev/null || printf '%s' "$ws")/root")"; target2="$(registry_path "$ws")"
-      else
-        local repo2="${who%-orch}"
-        [ "$repo2" != "$who" ] && { want2="$(_steward_agent_name "$repo2/orch")"; target2="$(_steward_orch_dir "$(registry_path "$ws")" "$who")"; }
-      fi
-      [ -n "$want2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg n "$want2" '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
-      [ -n "$pane2" ] || { [ -n "$target2" ] && pane2="$(printf '%s' "$agents_json" | jq -r --arg d "$target2" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
-      if _steward_due "decision-open-$ws-$who"; then
-        # mail, never a prompt (CEL-65): root and orchestrators are the only
-        # recipients of decisions/blockers, and their composers are the human's
-        _steward_remind "$ws" "$who" remind-open blocked "steward: you have $n2 UNRESOLVED decision(s)/blocker(s), oldest $((age2 / 60))m - reading them did not resolve them. Answer or act, then 'cel inbox resolve <id> --workspace $ws'. Open now:
-$text2" \
-          && c_warn "$ws/$who: $n2 open decision(s) ($((age2 / 60))m) - mailed $who to resolve"
-      else
-        c_warn "$ws/$who: $n2 open decision(s), oldest $((age2 / 60))m$([ -z "$pane2" ] && printf ' (no pane)')"
-      fi
-      # The old third message ("X has N unresolved for Nh", to root) said the
-      # same thing a second time in a second mailbox; the one reminder above
-      # carries the count and the age, and it is the only one sent.
-    done
+    local open3 n3 age3
+    open3="$(decide_open_json "$ws")"
+    [ -n "$open3" ] || continue
+    n3="$(printf '%s\n' "$open3" | grep -c . || true)"
+    age3="$(printf '%s\n' "$open3" | jq -r '.age_secs' | sort -n | tail -1)"
+    _STEWARD_WINDOW=86400 _steward_due "decide-summary-$ws" || continue
+    cmd_inbox send root "steward: $n3 open owner decision(s) in $ws, oldest $(( ${age3:-0} / 3600 ))h - 'cel decide list'" \
+      --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
+    c_warn "$ws: $n3 open owner decision(s) - see cel decide list"
   done
-
 }
 
 # Unread mail for <who> that someone must answer, decide or unblock - one JSON
