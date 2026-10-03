@@ -20,28 +20,33 @@ _dd_boot() {
   CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]}" \
     PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
   DASH_PID=$!
+  # however the test ends - a failed assert included - the server goes too
+  trap '_dd_down' EXIT
   local i; for i in $(seq 1 30); do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
-_dd_down() { kill "$DASH_PID" 2>/dev/null; rm -rf "$T"; }
+_dd_down() {
+  if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
+  DASH_PID=""; if [ -n "${T:-}" ]; then rm -rf "$T"; fi; T=""; trap - EXIT
+}
 _dd_post() { # <body> [extra curl args...]
   local b="$1"; shift
-  curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' "$@" \
+  curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' "$@" \
     -d "$b" "http://127.0.0.1:$DASH_PORT/api/decide"
 }
 
 test_dash_needs_you_lists_and_answers_through_cel_decide() {
   _dd_boot
-  local st; st="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/state")"
+  local st; st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")"
   assert_eq "$(printf '%s' "$st" | jq -r '.needsYou[0].title')" "pick a style"
   assert_eq "$(printf '%s' "$st" | jq -r '.needsYou[0].recommended')" "2"
   assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"value\":\"glossy\"}" -H "x-cel-csrf: $TOKEN")" "200"
   assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null)" ""
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'ANSWER to "pick a style": glossy'
   # the page carries the panel and its client script parses
-  local page; page="$(curl -sf "http://127.0.0.1:$DASH_PORT/")"
+  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
   assert_contains "$page" 'id="needsyou"'
   printf '%s' "$page" | python3 -c 'import sys,re;print("\n".join(re.findall(r"<script>(.*?)</script>",sys.stdin.read(),re.S)))' > "$T/page.js"
   node --check "$T/page.js"
@@ -79,16 +84,21 @@ test_dash_option_buttons_answer_by_index() {
   assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"value\":\"1\"}" -H "x-cel-csrf: $TOKEN")" "200"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"pick a style": 1 '
   # the page sends the index, not the label
-  assert_contains "$(curl -sf "http://127.0.0.1:$DASH_PORT/")" "go('answer',null,i+1)"
+  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")" "go('answer',null,i+1)"
   _dd_down
 }
 
 # Two tabs answering the same decision at once: one wins, the asker hears once.
 test_dash_concurrent_answers_resolve_once() {
   _dd_boot
-  local i; for i in 1 2 3 4; do
-    _dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"option\":$(( (i % 2) + 1 ))}" -H "x-cel-csrf: $TOKEN" > "$T/code.$i" &
-  done; wait
+  # wait on THESE pids only: a bare `wait` also waits on the dash server
+  # itself, which never exits - that hung the suite (and its box-wide lock)
+  local i pids=""; for i in 1 2 3 4; do
+    _dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"option\":$(( (i % 2) + 1 ))}" -H "x-cel-csrf: $TOKEN" -m 20 > "$T/code.$i" &
+    pids="$pids $!"
+  done
+  # shellcheck disable=SC2086
+  wait $pids
   assert_eq "$(cat "$T"/code.* | grep -o 200 | grep -c . || true)" "1"
   assert_eq "$(jq -c 'select(.kind == "resolution")' "$T/inbox/alpha.jsonl" | grep -c . || true)" "1"
   assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$T/inbox/alpha.jsonl" | grep -c . || true)" "1"

@@ -1313,15 +1313,22 @@ function renderNeedsYou(){
   }).join(''):'';
   Array.prototype.forEach.call($('needsyou').querySelectorAll('.ny'),function(el){
     var id=el.dataset.id,title=el.querySelector('b').textContent;
-    var go=async function(action,value){
-      if(!value){toast(action==='drop'?'give a reason':'type an answer',false);return}
+    var ctl=el.querySelectorAll('button,input'),busy=false;
+    var go=async function(action,value,option){
+      if(busy)return;
+      var shown=option?el.querySelectorAll('button.opt')[option-1].dataset.v:value;
+      if(!shown){toast(action==='drop'?'give a reason':'type an answer',false);return}
       // the exact text that will reach the asker, before it is sent
-      if(!confirm((action==='drop'?'DROP':'ANSWER')+' "'+title+'":\\n\\n'+value))return;
-      var r=await post('/api/decide',{id:id,action:action,value:value});
+      if(!confirm((action==='drop'?'DROP':'ANSWER')+' "'+title+'":\\n\\n'+shown))return;
+      // one submission per item: a double click must not answer twice
+      busy=true;Array.prototype.forEach.call(ctl,function(c){c.disabled=true});
+      var body=option?{id:id,action:action,option:option}:{id:id,action:action,value:value};
+      var r=await post('/api/decide',body);
       toast(r.ok?(action==='drop'?'dropped':'answered'):r.text,r.ok);
       if(r.ok){el.remove();LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id})}
+      else{busy=false;Array.prototype.forEach.call(ctl,function(c){c.disabled=false})}
     };
-    Array.prototype.forEach.call(el.querySelectorAll('button.opt'),function(b){b.onclick=function(){go('answer',b.dataset.v)}});
+    Array.prototype.forEach.call(el.querySelectorAll('button.opt'),function(b,i){b.onclick=function(){go('answer',null,i+1)}});
     el.querySelector('button.send').onclick=function(){go('answer',el.querySelector('.free').value.trim())};
     el.querySelector('button.drop').onclick=function(){go('drop',el.querySelector('.why').value.trim())};
   });
@@ -1892,14 +1899,22 @@ const server = createServer(async (req, res) => {
     } else if (req.method === 'POST' && req.url === '/api/decide') {
       // POST only, behind the same Host and CSRF guard as every other control
       // (security.allow above). The page confirms the exact text first.
-      const { id, action, value } = await readBody(req, 6000);
+      // An option is sent by its 1-based INDEX, never its label: a label of
+      // "2" would otherwise read as option 2. Typed text goes as --text, so
+      // digits in the box are the answer itself. A second submission (double
+      // click, another tab) is refused by `cel decide`, which re-checks the
+      // record is still open under the mailbox lock.
+      const { id, action, value, option } = await readBody(req, 6000);
       const v = String(value || '').trim();
       if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
       if (!['answer', 'drop'].includes(action)) { res.writeHead(400).end('action must be answer or drop'); return; }
-      if (!v || v.length > 2000) { res.writeHead(400).end(action === 'drop' ? 'a reason is required' : 'an answer is required'); return; }
-      const args = action === 'answer'
-        ? ['decide', 'answer', String(id), v, '--by', 'dashboard']
-        : ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard'];
+      const byIndex = action === 'answer' && option !== undefined && option !== null;
+      if (byIndex && !(Number.isInteger(option) && option >= 1 && option <= 99)) { res.writeHead(400).end('bad option'); return; }
+      if (!byIndex && (!v || v.length > 2000)) { res.writeHead(400).end(action === 'drop' ? 'a reason is required' : 'an answer is required'); return; }
+      const args = action === 'drop'
+        ? ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard']
+        : byIndex ? ['decide', 'answer', String(id), String(option), '--by', 'dashboard']
+          : ['decide', 'answer', String(id), '--text', v, '--by', 'dashboard'];
       const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
       if (out === null) { res.writeHead(502).end('could not record it (already answered?)'); return; }
       delete cache.decisions;
