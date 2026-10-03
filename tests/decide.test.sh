@@ -108,3 +108,42 @@ test_migrate_dry_run_lists_only_reminders_and_apply_keeps_real_decisions() {
   if printf '%s' "$open" | grep -q 'UNRESOLVED\|REMINDER'; then echo "reminder still open"; return 1; fi
   rm -rf "$T"
 }
+
+# Review on #117: a mistyped --workspace must not invent a mailbox nobody lists.
+test_ask_refuses_an_unknown_workspace() {
+  _decide_fixture
+  assert_fails _ask_as alpha-orch alhpa --title "x"
+  [ ! -e "$CEL_INBOX_DIR/alhpa.jsonl" ] || { echo "created a mailbox for a typo"; return 1; }
+  rm -rf "$T"
+}
+
+# Two orchestrator processes re-asking at once still leave one record.
+test_concurrent_reasks_leave_one_record() {
+  _decide_fixture
+  local i; for i in 1 2 3 4 5 6; do _ask_as alpha-orch alpha --title "same q" >/dev/null & done; wait
+  assert_eq "$(cmd_decide list --json 2>/dev/null | grep -c . || true)" "1"
+  rm -rf "$T"
+}
+
+# All-digit text is an option number only when such an option exists, and
+# --text forces free text either way.
+test_numeric_free_text_is_an_answer() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "which year?" --option "now::fast")"
+  CEL_INBOX_ME=ana cmd_decide answer "$id" 2026 >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for alpha-orch --workspace alpha --all 2>/dev/null)" ': 2026'
+  id="$(_ask_as alpha-orch alpha --title "how many?" --option "one::x")"
+  CEL_INBOX_ME=ana cmd_decide answer "$id" --text 1 >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for alpha-orch --workspace alpha --all 2>/dev/null)" '"how many?": 1 '
+  rm -rf "$T"
+}
+
+# Two answers racing (double-click, two tabs) resolve once and tell the asker once.
+test_concurrent_answers_resolve_once() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "race" --option "a::x")"
+  local i; for i in 1 2 3 4 5; do ( CEL_INBOX_ME=ana cmd_decide answer "$id" 1 >/dev/null 2>&1 ) & done; wait
+  assert_eq "$(jq -c 'select(.kind == "resolution")' "$CEL_INBOX_DIR/alpha.jsonl" | grep -c . || true)" "1"
+  assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$CEL_INBOX_DIR/alpha.jsonl" | grep -c . || true)" "1"
+  rm -rf "$T"
+}
