@@ -232,7 +232,7 @@ test_omp_inbox_no_backlog_no_wake() {
 # active turn is retried until it lands. One scenario harness, real `cel inbox`.
 _omp_delivery_harness() { # <scenario> -> JSON report (env: D=inbox dir, REG=registry)
   CEL_INBOX_DIR="$D" CEL_REGISTRY="$REG/registry.yaml" SCENARIO="$1" \
-  CEL_INBOX_ME=widget-orch CEL_INBOX_WS=alpha CEL_ROOT="$CEL_ROOT" \
+  CEL_INBOX_ME="${CEL_INBOX_ME:-widget-orch}" CEL_INBOX_WS=alpha CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=300 CEL_INBOX_RETRY_MS=400 \
   CEL_INBOX_RESTART_MS=300 CEL_INBOX_WAKE_STUCK_MS=1500 HOOK="$HOOK" node --no-warnings - <<'JS'
 const { execFileSync } = require('node:child_process');
@@ -277,6 +277,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     r.sentWhileBlocked = sent.length;
     st.draft = ''; st.idle = true;
     await sleep(1500);
+  } else if (sc === 'worker') {
+    send('widget-wg-8-other', 'for-someone-else', 'alpha');
+    send('widget-orch', 'for-someone-else', 'alpha');
+    await sleep(2000);
+    r.sentOthers = sent.length;
+    send(process.env.CEL_INBOX_ME, 'changes-for-worker', 'alpha');
+    await sleep(2000);
   } else if (sc === 'idle-backlog') {
     await sleep(2500);
   } else if (sc === 'no-agent-end') {
@@ -388,4 +395,21 @@ SH
   assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
   assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "flaky-msg"
   assert_eq "$(jq -r '.turn' <<<"$out")" "null"
+}
+
+# CEL-95: a WORKER identity (not an orchestrator) is woken by mail addressed
+# to it and not by anyone else's - the pi worker launch sets CEL_INBOX_ME to
+# its own alias.
+test_inbox_hook_worker_identity_wakes_on_its_own_mail_only() {
+  command -v node >/dev/null || return 0
+  D="$(mktemp -d)"; REG="$(mktemp -d)"; mkdir -p "$REG/alpha" "$REG/beta"
+  printf 'workspaces:\n  alpha:\n    path: %s\n  beta:\n    path: %s\n' "$REG/alpha" "$REG/beta" > "$REG/registry.yaml"
+  local out; out="$(CEL_INBOX_ME=widget-wg-7-thing _omp_delivery_harness worker)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sentOthers' <<<"$out")" "0"
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_contains "$(_sent_text "$out")" "changes-for-worker"
+  ! grep -q "for-someone-else" <<<"$(_sent_text "$out")" || { echo "woke on someone else's mail"; rm -rf "$D" "$REG"; return 1; }
+  assert_eq "$(CEL_INBOX_DIR="$D" "$CEL_ROOT/bin/cel" inbox count --for widget-wg-8-other --workspace alpha)" "1"
+  rm -rf "$D" "$REG"
 }

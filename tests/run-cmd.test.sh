@@ -157,7 +157,26 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   assert_contains "$out" "CEL_INBOX_ME=root"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
   ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
-  ! printf '%s' "$out" | grep -q "inbox.omp.ts" || { echo "worker got the inbox hook"; rm -rf "$T"; return 1; }
+  # CEL-95: a worker DOES get the inbox hook - reviewers send it CHANGES by
+  # inbox, and without delivery a review round stalled for eight hours.
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-wg-1-x"
+  rm -rf "$T"
+}
+
+# CEL-95: pi workers and reviewers carry the inbox extension and their own
+# identity, so mail addressed to the pane's alias wakes it.
+test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
+  assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-wg-7-thing"
+  assert_contains "$out" "CEL_INBOX_WS=alpha"
+  ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
+  assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
   rm -rf "$T"
 }
 
