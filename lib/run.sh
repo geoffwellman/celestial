@@ -372,6 +372,9 @@ _reviewer_checkout_occupant() { # <path> -> pane<TAB>name of a pane in it; 0 = o
   have herdr || return 1
   roster="$(herdr agent list 2>/dev/null)" || { printf 'unknown\troster unreadable'; return 0; }
   [ -n "$roster" ] || return 1
+  # A reply that parses but is not a roster is as unreadable as no reply.
+  printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+    || { printf 'unknown\troster unreadable'; return 0; }
   printf '%s' "$roster" | jq -er --arg c "$path" '
       [.result.agents[]? | ((.cwd // "") | sub(" \\(deleted\\)$"; "")) as $d
        | select($d == $c or ($d | startswith($c + "/")))][0] // empty
@@ -399,7 +402,10 @@ reviewer_checkout_release() { # <repo> <pr>
   row="$(reviewers_find "$1" "$2")" || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
-  [ -n "$path" ] || return 0
+  # A row `cel gc` adopted carries no checkout, but the path is derived from
+  # repo and PR alone; without this an adopted reviewer's checkout outlived it.
+  [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2")"
+  [ -e "$path" ] || return 0
   # Kept while anything stands in it; the next sweep releases it once the
   # pane has gone. The row may already be dropped by then - the gone-pane
   # pass drops it - so a kept checkout's path is not lost: a live pane in it

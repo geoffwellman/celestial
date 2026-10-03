@@ -1209,3 +1209,22 @@ test_relaunch_never_deletes_a_checkout_a_live_pane_stands_in() {
   [ -e "$CO/src/file" ] || { echo "a relaunch deleted a live checkout"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# Sourcery on #119: a roster reply that parses but is not a roster must not
+# read as "nobody here", and an adopted row (no checkout field) still has its
+# checkout released once its pane is gone.
+test_a_malformed_roster_keeps_the_checkout() {
+  _gc_live_checkout_fixture
+  GC_ROSTER='{"oops":true}'
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ -e "$CO/src/file" ] || { echo "deleted on an unreadable roster"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
+  _gc_live_checkout_fixture
+  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  [ ! -e "$CO" ] || { echo "an adopted reviewer's checkout outlived it"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
