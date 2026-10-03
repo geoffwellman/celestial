@@ -112,8 +112,8 @@ _update_changelog_since() { # <installed> <available>
 # Everything the installation touched, in one place: the symlink layer and the
 # claude settings merge (link_all -> link_claude_prefs registers the hook block
 # in ~/.claude/settings.json), every workspace's scoped links, and the box
-# services whose running processes still carry the old code. The steward timer
-# needs nothing: its unit execs `cel`.
+# services whose running processes still carry the old code. An old steward
+# timer is rewritten by the doctor run in _update_verify (lib/steward_timer.sh).
 _update_reapply() {
   c_hd "Re-applying"
   link_all
