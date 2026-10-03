@@ -91,6 +91,7 @@ export const afkLog = async () => {
 export const fleetSession = () => ({ lastGood: null });
 const defaultSession = fleetSession();
 const hhmm = (d) => d.toTimeString().slice(0, 5);
+// Fallback only: `cel fleet` stamps the served document with its cache_secs.
 const STALE_AFTER_S = 120;
 const builtAt = (g) => {
   const t = Date.parse(g?.doc?.generated_at ?? '');
@@ -117,7 +118,8 @@ export const fleet = async (runner = run, session = defaultSession) => {
       // old cache at once and refills it behind, so an old `generated_at`
       // is shown as stale rather than passed off as a fresh read.
       const age = ageSecs(doc);
-      if (age !== null && age > STALE_AFTER_S) {
+      const after = Number.isFinite(doc?.cache_secs) && doc.cache_secs > 0 ? doc.cache_secs : STALE_AFTER_S;
+      if (age !== null && age > after) {
         return { ...doc, afk, stale: `stale, as of ${hhmm(builtAt(session.lastGood))} (refilling)` };
       }
       return { ...doc, afk };

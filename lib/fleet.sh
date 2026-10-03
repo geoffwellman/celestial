@@ -817,6 +817,11 @@ cmd_fleet() {
       # check and the cat, and an empty read is not a board.
       if printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
         _fleet_cache_young "$file" "$secs" || fleet_refill_spawn "$file" "$only" "$secs"
+        # A cache from before CEL-90 has no generated_at: its age is the
+        # file's mtime, or a reader would pass it off as fresh.
+        local m; m="$(stat -c %Y "$file" 2>/dev/null || printf 0)"
+        doc="$(printf '%s' "$doc" | jq -c --arg m "$(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)" \
+          '.generated_at //= $m')"
       else
         doc=""
       fi
@@ -834,6 +839,8 @@ cmd_fleet() {
       fi
       exec 9>&-
     fi
+    # The reader judges staleness by the same threshold that starts a refill.
+    doc="$(printf '%s' "$doc" | jq -c --argjson s "$secs" '.cache_secs = $s')"
   else
     doc="$(_fleet_doc "$only")"
   fi
