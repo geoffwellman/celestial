@@ -43,3 +43,18 @@ await t('a second session does not inherit another session\'s last good read', a
   assert.match(fleetTable(doc).join('\n'), /! Command failed/);
   assert.equal(doc.stale, undefined);
 });
+
+// CEL-90 r2: the stale threshold is the document's own `cache_secs`, not a
+// fixed 120 s - past it `cel fleet` has already started a refill.
+await t('a document older than its cache_secs is shown stale (refilling)', async () => {
+  const gen = new Date(Date.now() - 60_000).toISOString();
+  const out = JSON.stringify({ generated_at: gen, cache_secs: 30, workspaces: [] });
+  const doc = await fleet(runner([{ ok: true, out, err: '' }]), fleetSession());
+  assert.match(doc.stale ?? '', /refilling/);
+});
+await t('a document younger than its cache_secs is not stale', async () => {
+  const gen = new Date(Date.now() - 60_000).toISOString();
+  const out = JSON.stringify({ generated_at: gen, cache_secs: 300, workspaces: [] });
+  const doc = await fleet(runner([{ ok: true, out, err: '' }]), fleetSession());
+  assert.equal(doc.stale, undefined);
+});
