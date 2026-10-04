@@ -171,3 +171,12 @@ test_dash_bulk_accept_sends_only_listed_ids_and_keeps_refusals() {
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" -d '{"items":[]}' "$url")" "400"
   _dd_down
 }
+
+# Review on #125: jumping to the list from the factory floor is a tab pick;
+# with showTab the next refresh bounced the owner back to needs you.
+test_dash_factory_list_jump_counts_as_a_tab_pick() {
+  _dd_boot
+  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  assert_contains "$page" "list:function(){pickTab('inflight')}"
+  _dd_down
+}
