@@ -232,7 +232,7 @@ test_review_sweep_nudges_the_products_orchestrator() {
   : > "$T/prompts"
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h7"}}]}]'
 SH
   cat > "$T/bin/herdr" <<SH
 #!/usr/bin/env bash
@@ -1248,8 +1248,8 @@ test_review_sweep_nudges_are_mail_with_zero_prompts_and_stay_rate_limited() {
   _orch_fixture; _nudge_herdr_stub
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
-             {"number":8,"headRefName":"WG-2-y","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h7"}}]},
+             {"number":8,"headRefName":"WG-2-y","headRefOid":"h8","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h8"}}]},
              {"number":9,"headRefName":"WG-3-z","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"},
              {"number":10,"headRefName":"noticket","reviewDecision":"","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
 SH
