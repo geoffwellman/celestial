@@ -583,7 +583,14 @@ _steward_review_sweep() { # <agents-json>
       # Colleagues' PRs are theirs to land. This filter guards every check
       # below it, including reminders about our ticket naming convention.
       prsj="$(ws_gh "$wsdir" pr list --repo "$slug" --author @me \
-              --json number,headRefName,reviewDecision,isDraft,statusCheckRollup,createdAt 2>/dev/null)" || continue
+              --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" || continue
+      # "LEAVE IT" IS SAYABLE (CEL-96). An orchestrator was woken four times
+      # overnight to action an APPROVED PR whose code had already reached main
+      # through two others, with a written disposition on it - nothing could
+      # tell the steward not to merge it. A `superseded` or `hold` label is that
+      # sentence; such a PR is dropped before any check below sees it.
+      prsj="$(printf '%s' "$prsj" | jq -c '[.[] | select([.labels[]?.name | ascii_downcase]
+        | any(. == "superseded" or . == "hold") | not)]' 2>/dev/null)" || continue
 
       # UNTICKETED PRs. Linear links a PR to its ticket purely from the branch
       # name, so a branch with no identifier can never be tracked: no status to
@@ -656,7 +663,22 @@ _steward_review_sweep() { # <agents-json>
         fi
       done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) |
         [.number, .headRefName,
-         (if (.reviewDecision // "") == "" then "NONE" else .reviewDecision end),
+         # HEAD-AWARE (CEL-96). reviewDecision is sticky across pushes: an
+         # approval of a head that has since moved still reads APPROVED, and a
+         # change request already answered by a push still reads
+         # CHANGES_REQUESTED - 665 of one orchestrator'"'"'s 1,697 messages were
+         # nudges like these. Only a review of the CURRENT head counts, and a
+         # change request is over once a later approval exists.
+         (. as $pr | .headRefOid as $h | ([.reviews[]?] | sort_by(.submittedAt // "")) as $rs
+          | ([$rs[] | select(.state == "CHANGES_REQUESTED")] | last) as $cr
+          | if ($pr.reviewDecision // "") == "APPROVED" then
+              (if [$rs[] | select(.state == "APPROVED" and (.commit.oid // "") == $h)] | length > 0
+               then "APPROVED" else "NONE" end)
+            elif ($pr.reviewDecision // "") == "CHANGES_REQUESTED" then
+              (if $cr != null and ($cr.commit.oid // "") == $h
+                  and ([$rs[] | select(.state == "APPROVED" and (.submittedAt // "") > ($cr.submittedAt // ""))] | length == 0)
+               then "CHANGES_REQUESTED" else "NONE" end)
+            else "NONE" end),
          ([.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length)]
         | @tsv')
     done
@@ -834,8 +856,18 @@ _steward_ready_tickets() { # [agents-json]
       ids="$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
         curl -sf -m 15 -X POST https://api.linear.app/graphql \
         -H @- -H 'Content-Type: application/json' \
-        -d "$(jq -nc --arg k "$key" --arg st "$trigger" '{query: "query($k: String!, $st: String!) { issues(filter: {team: {key: {eq: $k}}, state: {name: {eq: $st}}}, first: 20) { nodes { identifier title } } }", variables: {k: $k, st: $st}}')" \
-        2>/dev/null | jq -r '.data.issues.nodes[]? | "\(.identifier)\t\(.title)"')" || continue
+        -d "$(jq -nc --arg k "$key" --arg st "$trigger" '{query: "query($k: String!, $st: String!) { issues(filter: {team: {key: {eq: $k}}, state: {name: {eq: $st}}}, first: 20) { nodes { identifier title assignee { isMe } state { name type } labels { nodes { name } } } } }", variables: {k: $k, st: $st}}')" \
+        2>/dev/null | jq -r '
+        # ONLY THE FLEET'"'"'S OWN OPEN WORK (CEL-96). The nag repeated for
+        # tickets assigned to colleagues, tickets already Done, and the owner'"'"'s
+        # deliberately blocked ticket. Unassigned stays in: the board trigger is
+        # how the owner hands the fleet new work, usually before anyone owns it.
+        .data.issues.nodes[]?
+        | select(.assignee == null or .assignee.isMe == true)
+        | select(((.state.type // "") | IN("completed", "canceled")) | not)
+        | select(((.state.name // "") | ascii_downcase | test("blocked")) | not)
+        | select([.labels.nodes[]?.name | ascii_downcase] | any(. == "blocked") | not)
+        | "\(.identifier)\t\(.title)"')" || continue
       [ -n "$ids" ] || continue
       while IFS=$'\t' read -r id title; do
         [ -n "$id" ] || continue
@@ -1063,12 +1095,16 @@ _steward_suite_lock() {
 _steward_afk_sweep() {
   # shellcheck source=lib/afk.sh
   . "$(dirname "${BASH_SOURCE[0]}")/afk.sh"
-  afk_expired || return 0
-  local s msg
+  local s msg ws
+  # ...and taken down when it stops being true, now that it is one open item
+  # rather than a line per tick (CEL-96).
+  if ! afk_expired; then
+    for ws in $(registry_names); do _steward_clear "$ws" afk-expired "AFK is no longer expired-and-on"; done
+    return 0
+  fi
   s="$(afk_state_json)"
   msg="steward: AFK expired at $(printf '%s' "$s" | jq -r '(.until // .until_text)') and is still on. Nothing autonomous is happening any more - an expired AFK reads as off - but the switch is still up: cel afk off (cel afk log for what was done while it was on)."
   c_warn "$msg"
-  local ws
   for ws in $(registry_names); do _steward_raise "$ws" afk-expired status "$msg"; done
 }
 

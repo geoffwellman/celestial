@@ -1629,15 +1629,19 @@ test_cel96_ticket_nags_skip_others_done_and_blocked_tickets() {
 # The AFK nag rolled up nowhere: 1,148 copies in a day and a half.
 test_cel96_afk_expired_is_one_item_counting_raises_and_resolves_when_cleared() {
   _afk_sweep_fixture '2020-01-01T00:00:00Z' || return 1
-  unset -f _steward_raise; source "$CEL_ROOT/lib/steward.sh"
+  # the fixture records raises; this test wants the real mailbox behind them
+  _steward_raise() { cmd_inbox send root "$4" --from steward --workspace "$1" --kind "$3" --fp "$2" >/dev/null 2>&1 || true; }
   export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
   local i; for i in $(seq 1 100); do _steward_afk_sweep >/dev/null 2>&1; done
-  local j; j="$(_inbox_open --for root --workspace alpha --json)"
-  assert_eq "$(printf '%s\n' "$j" | grep -c . )" "1"
-  assert_eq "$(printf '%s' "$j" | jq -r .count)" "100"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id
+  # one item, 99 updates on it: a count of 100 on one unresolved condition
+  assert_eq "$(jq -s '[.[] | select(.fp == "afk-expired" and .kind == "status")] | length' "$f")" "1"
+  id="$(_inbox_open_fp alpha afk-expired steward root)"
+  assert_eq "$(jq -s --arg i "$id" '1 + ([.[] | select(.kind == "update" and .ref == $i)] | length)' "$f")" "100"
   cmd_afk off >/dev/null 2>&1
   _steward_afk_sweep >/dev/null 2>&1
-  assert_eq "$(_inbox_open --for root --workspace alpha)" ""
-  assert_eq "$(_inbox_open --for root --workspace beta)" ""
+  assert_eq "$(_inbox_open_fp alpha afk-expired steward root)" ""
+  assert_eq "$(_inbox_open_fp beta afk-expired steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
   _afk_sweep_teardown; unset CEL_INBOX_DIR
 }

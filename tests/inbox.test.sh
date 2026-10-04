@@ -849,6 +849,6 @@ test_a_fingerprint_rolls_up_a_status_item_too() {
   a="$(_inbox_send root "afk expired" --from steward --kind status --fp afk-expired --workspace demo 2>/dev/null)"
   b="$(_inbox_send root "afk expired" --from steward --kind status --fp afk-expired --workspace demo 2>/dev/null)"
   assert_eq "$b" "$a"
-  assert_eq "$(_inbox_open --for root --workspace demo --json | jq -r .count)" "2"
+  assert_eq "$(jq -s '[.[] | select(.kind == "update" and .ref == "'"$a"'")] | length' "$CEL_INBOX_DIR/demo.jsonl")" "1"
   rm -rf "$CEL_INBOX_DIR"
 }

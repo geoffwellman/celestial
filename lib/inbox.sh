@@ -521,6 +521,10 @@ _inbox_prune() { # [--workspace w] [--dry-run]
 
 # The id of the OPEN item carrying this condition key, or nothing. Resolved
 # items do not count: a condition that came back is news again.
+# ANY KIND (CEL-96). Only decision/blocked used to be looked up, so a `status`
+# raised with an fp was appended fresh every tick - 1,148 "AFK expired" lines
+# in a day and a half. A status item still stays out of `cel inbox open` (it
+# asks nobody for anything); it is rolled up and resolved all the same.
 _inbox_open_fp() { # <ws> <fp> [from] [to]
   local f; f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
@@ -529,7 +533,7 @@ _inbox_open_fp() { # <ws> <fp> [from] [to]
     ([.[] | select(.kind == "resolution") | .ref]) as $done
     | [ .[]
         | select((.fp // "") == $fp)
-        | select(.kind == "decision" or .kind == "blocked")
+        | select(.kind != "update" and .kind != "resolution")
         | select($from == "" or .from == $from)
         | select($to == "" or .to == $to)
         | select([.id] | inside($done) | not) ]
@@ -960,7 +964,8 @@ _inbox_resolve() { # <id> [--by who] [--workspace w] | --all [filters]
   local f; f="$(_inbox_file "$ws")"
   [ -f "$f" ] || die "cel inbox resolve: no mailbox for $ws"
   local target
-  target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"))' "$f" 2>/dev/null | sed -n 1p || true)"
+  target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"
+           or ((.fp // "") != "" and .kind != "update" and .kind != "resolution")))' "$f" 2>/dev/null | sed -n 1p || true)"
   [ -n "$target" ] || die "cel inbox resolve: no open decision or blocker with id $id in $ws"
   local to; to="$(printf '%s' "$target" | jq -r .to)"
   _inbox_append_resolution "$f" "$id" "$to" "$by"
