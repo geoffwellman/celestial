@@ -142,6 +142,7 @@ cel - the celestial plane
                                 one does not answer it; whoami = your role by cwd
                                 read/count name the reader and workspace they
                                 answered for, and refuse a cwd that names none
+  cel decide ask|list|answer|drop   the owner's one queue of decisions, every workspace
   cel learn add|list|reinforce|stow   durable facts this workspace has established,
                                 tiered (pinned / aging 30d / perishable 7d) and
                                 budgeted into every agent's policy block
@@ -224,6 +225,7 @@ case "${1:-help}" in
   gc)       shift; . "$CEL_ROOT/lib/gc.sh";      cmd_gc "$@";;
   box)      shift; . "$CEL_ROOT/lib/box.sh";     cmd_box "$@";;
   inbox)    shift; . "$CEL_ROOT/lib/inbox.sh";   cmd_inbox "$@";;
+  decide)   shift; . "$CEL_ROOT/lib/decide.sh";  cmd_decide "$@";;
   services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
   version|--version|-v)

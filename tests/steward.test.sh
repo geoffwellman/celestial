@@ -1278,7 +1278,8 @@ test_stale_and_decision_nudges_to_orchestrators_are_mail_naming_the_reader() {
   assert_eq "$(grep -c '^agent prompt' "$T/herdr.argv" || true)" "0"
   local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
   assert_contains "$mail" "cel inbox read --for bundle-orch --workspace alpha"
-  assert_contains "$mail" "UNRESOLVED decision"
+  # CEL-93: an open decision earns no "UNRESOLVED" reminder any more
+  assert_eq "$(printf '%s' "$mail" | grep -c 'UNRESOLVED' || true)" "0"
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cel inbox read --for root --workspace alpha"
   local n; n="$(cmd_inbox read --for bundle-orch --workspace alpha --all | wc -l)"
   PATH="$T/bin:$PATH" _steward_mail_sweep "$roster" >/dev/null 2>&1
@@ -1391,11 +1392,9 @@ test_cel82_one_blocker_and_many_ticks_leave_one_reminder_counting_one() {
   for i in 1 2 3 4; do
     PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
   done
+  # CEL-93: and now none at all - reminders are never filed as open items
   local open; open="$(cmd_inbox open --for bundle-orch --workspace alpha --json | jq -c 'select(.from == "steward")')"
-  assert_eq "$(printf '%s\n' "$open" | grep -c . || true)" "1"
-  assert_contains "$open" "you have 1 UNRESOLVED"
-  local sup; sup="$(jq -c 'select(.kind == "resolution" and .by == "steward")' "$CEL_INBOX_DIR/alpha.jsonl" | tail -1)"
-  assert_contains "$sup" "superseded by"
+  assert_eq "$open" ""
   # the "unresolved for Nh" second opinion to root is gone
   assert_eq "$(jq -c 'select(.to == "root" and (.message | test("unresolved for")))' "$CEL_INBOX_DIR/alpha.jsonl")" ""
   rm -rf "$T"
@@ -1534,4 +1533,22 @@ test_steward_composer_is_empty_only_when_provably_so() {
   assert_fails _steward_composer_empty_text $'● done\n────────────\nhalf a thought\n────────────\nfooter'
   assert_fails _steward_composer_empty_text $'● done\nno editor box here'
   assert_fails _steward_composer_empty_text ""
+}
+
+# --- CEL-93: one summary line per workspace per day, never a decision -------
+test_cel93_steward_summarises_owner_decisions_once_a_day() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "pick a style" >/dev/null 2>&1
+  printf '{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"blocked","message":"credit gone"}\n' \
+    >> "$CEL_INBOX_DIR/alpha.jsonl"
+  local i roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
+  for i in 1 2 3; do
+    PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
+  done
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  assert_eq "$(jq -c 'select(.from == "steward" and (.message | test("owner decision")))' "$f" | grep -c . || true)" "1"
+  assert_eq "$(jq -c 'select(.from == "steward" and .kind != "status" and .kind != "resolution")' "$f")" ""
+  assert_eq "$(jq -c 'select(.message | test("UNRESOLVED"))' "$f")" ""
+  rm -rf "$T"
 }
