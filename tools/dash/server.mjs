@@ -1595,7 +1595,7 @@ async function refresh(){
   renderNeedsYou();
   renderInflight();
   CelFactory.render($('factory-floor'),s,{
-    list:function(){showTab('inflight')},
+    list:function(){pickTab('inflight')},
     focus:function(pane){return post('/api/focus',{pane:pane})}
   });
   renderInbox();

@@ -36,7 +36,7 @@ decide_open_json() { # <ws>
         | select([.id] | inside($done) | not)
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
-        | (if $u then . + ($u | {title, options, recommended, context, blocks, urgent}) + {updated: $u.ts} else . end)
+        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
         | . + {workspace: $ws, urgent: (.urgent == true),
                age_secs: (($now | tonumber) - (.ts | _epoch))} ]
     | sort_by(.ts) | .[]' "$f" 2>/dev/null || true
@@ -138,7 +138,9 @@ _decide_ask() {
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
     --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" --argjson urgent "$urgent" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
-      context: $context, blocks: $blocks, urgent: $urgent, asker: $asker, message: $title}')"
+      context: $context, blocks: $blocks, asker: $asker, message: $title}
+     # urgent only when asked: a re-ask that omits it must not clear it
+     + (if $urgent then {urgent: true} else {} end)')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields"
 }
 
