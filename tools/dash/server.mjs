@@ -477,9 +477,51 @@ const decisions = () => cached('decisions', 8000, async () => {
   return out.split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
 });
 
+// CEL-99: 53 decisions in one flat list, in whatever order the CLI read the
+// mailboxes, was a list nobody could work through. Grouped by workspace (the
+// owner thinks per project), and inside a group: urgent first, then what
+// blocks something, then oldest - the order an owner should answer in.
+const decisionRank = (d) => (d.urgent ? 0 : 2) + ((d.blocks || '') ? 0 : 1);
+const orderDecisions = (list) => [...list].sort((a, b) =>
+  decisionRank(a) - decisionRank(b) || (b.age_secs || 0) - (a.age_secs || 0));
+const groupDecisions = (list) => {
+  const by = new Map();
+  for (const d of orderDecisions(list)) {
+    const ws = d.workspace || '?';
+    if (!by.has(ws)) by.set(ws, []);
+    by.get(ws).push(d);
+  }
+  return [...by.entries()].map(([workspace, items]) => ({
+    workspace, count: items.length,
+    urgent: items.filter((d) => d.urgent).length,
+    recommended: items.filter((d) => d.recommended).length,
+    items,
+  })).sort((a, b) => b.urgent - a.urgent || a.workspace.localeCompare(b.workspace));
+};
+
+// One answer, one `cel decide` call: the single and the bulk endpoint share
+// it so "accept all" cannot take a path the guarded single answer does not.
+const decideOne = async ({ id, action, value, option }) => {
+  const v = String(value || '').trim();
+  if (!/^\d{10,25}$/.test(String(id || ''))) return { code: 400, error: 'bad decision id' };
+  if (!['answer', 'drop'].includes(action)) return { code: 400, error: 'action must be answer or drop' };
+  const byIndex = action === 'answer' && option !== undefined && option !== null;
+  if (byIndex && !(Number.isInteger(option) && option >= 1 && option <= 99)) return { code: 400, error: 'bad option' };
+  if (!byIndex && (!v || v.length > 2000)) return { code: 400, error: action === 'drop' ? 'a reason is required' : 'an answer is required' };
+  const args = action === 'drop'
+    ? ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard']
+    : byIndex ? ['decide', 'answer', String(id), '--option', String(option), '--by', 'dashboard']
+      : ['decide', 'answer', String(id), '--text', v, '--by', 'dashboard'];
+  const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
+  delete cache.decisions;
+  if (out === null) return { code: 409, error: 'not recorded: already answered, or no such option' };
+  return { code: 200 };
+};
+
 const state = async (req) => {
   const box = await boxDash();
-  const needsYou = await decisions();
+  const needsYou = orderDecisions(await decisions());
+  const needsYouGroups = groupDecisions(needsYou);
   const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(box.mine), services(), gatewayPanel(box.mine)]);
   // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
   // with the workspace that owns it since CEL-34, and `box` is the tag for
@@ -530,7 +572,7 @@ const state = async (req) => {
   return {
     workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
-    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, linear: lin,
+    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, needsYouGroups, linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
     // the same thing to whoever is reading the card - `source` says which, and
     // `cel fleet` decided both before this line ran.
@@ -770,6 +812,40 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   .decision .route,.decision .age{font:11.5px var(--mono);color:var(--dim);white-space:nowrap}
   .decision .body{flex:1 1 260px;min-width:0;word-break:break-word}
   .decision button.resolve{font:12px var(--mono);padding:3px 10px}
+  /* needs you (CEL-99): cards stack, buttons wrap, nothing scrolls sideways */
+  #needsyou h2 .n,.nygroup summary .n{color:var(--bad);margin-left:6px}
+  #needsyou{margin-bottom:16px}
+  .nychips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+  .chipbtn{font:12px var(--mono);border-radius:999px;padding:3px 11px}
+  .chipbtn.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+  .chipbtn .u{color:var(--bad);font-style:normal;font-weight:700}
+  .nygroup{margin-bottom:12px}
+  .nygroup>summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;
+    font:600 13px var(--mono);padding:6px 0}
+  .nygroup>summary .bulk{margin-left:auto;font:12px var(--mono)}
+  .nycard{background:color-mix(in srgb,var(--raise) 90%,transparent);backdrop-filter:blur(9px);
+    border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;
+    padding:10px 13px;margin:0 0 8px;min-width:0;overflow-wrap:anywhere}
+  .nycard.urgent{border-left-color:var(--bad)}
+  .nycard .tag{font:600 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;
+    padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent)}
+  .nycard .tag.urgent{background:var(--bad);color:#fff;margin-right:8px}
+  .nymeta{font:11.5px var(--mono);color:var(--dim);margin:3px 0 8px}
+  .nymeta .blocks{color:var(--warn)}
+  .nyopts{display:flex;flex-wrap:wrap;gap:8px}
+  .nyopts .opt{display:flex;flex-direction:column;align-items:flex-start;text-align:left;
+    flex:1 1 200px;max-width:100%;padding:7px 11px;white-space:normal}
+  .nyopts .opt .lbl{font-weight:600}
+  .nyopts .opt .trade{font-size:12px;color:var(--dim);margin-top:2px}
+  .nyopts .opt.rec{border:2px solid var(--accent);background:var(--accent-soft)}
+  .nycard button.armed,.nybulk .primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+  .nyact{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin-top:8px}
+  .nyact .other summary{cursor:pointer;font:12px var(--mono);color:var(--dim);padding:4px 0}
+  .otherrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .otherrow input{flex:1 1 180px;min-width:0}
+  .nyerr{margin-top:6px;color:var(--bad);font:12px var(--mono)}
+  .nybulk{border:1px dashed var(--accent);border-radius:10px;padding:8px 13px;margin-bottom:8px}
+  .nybulk ol{margin:4px 0 8px;padding-left:20px}
   .lin td{padding:7px 14px 7px 0}
   .lin .id{font:12.5px var(--mono)}
   /* priority reads as a rank: four bars you can compare down the column,
@@ -859,6 +935,8 @@ const PAGE = `<!doctype html><meta charset="utf-8">
 <div class="panel on" id="tab-factory" role="tabpanel"><section class="factory-shell" id="factory-floor"><p class="factory-unavailable">Reading factory signals…</p></section></div>
 
 <div class="panel" id="tab-attention" role="tabpanel">
+  <div id="needsyou"></div>
+  <h2 id="alerts-h">alerts</h2>
   <div id="attention"></div>
 </div>
 
@@ -885,7 +963,6 @@ const PAGE = `<!doctype html><meta charset="utf-8">
   <div class="sechead"><h2>Inbox</h2>
     <div id="filters"><label><input type="checkbox" id="f-unread"> unread only</label>
     <span id="inbox-count"></span></div></div>
-  <div id="needsyou"></div>
   <div id="decisions"></div>
   <div class="card"><div id="inboxwho"></div><div id="inbox"></div></div>
 </div>
@@ -1100,18 +1177,23 @@ function renderInflight(){
 // a count you can read without switching, hot when it wants you.
 var TABS=[
   {id:'factory',label:'factory floor',badge:function(s){return s.inflight.length}},
-  {id:'attention',label:'needs you',badge:function(s){return s.attention.length},tone:'hot'},
+  // CEL-99: open decisions ARE what needs you; the alerts ride along below
+  {id:'attention',label:'needs you',badge:function(s){return (s.needsYou||[]).length+s.attention.length},tone:'hot'},
   {id:'inflight', label:'in flight', badge:function(s){return s.inflight.length}},
   {id:'linear',   label:'my linear', badge:function(s){return s.linear&&s.linear.issues?s.linear.issues.length:null}},
   // the badge is UNRESOLVED decisions first: unread mail is a queue length,
   // an open decision is someone waiting on an answer
-  {id:'inbox',    label:'inbox',     badge:function(s){return (s.needsYou||[]).length+(s.inboxOpen||[]).length+(s.inbox||[]).filter(function(m){return m.unread}).length},tone:'hot'},
+  {id:'inbox',    label:'inbox',     badge:function(s){return (s.inboxOpen||[]).length+(s.inbox||[]).filter(function(m){return m.unread}).length},tone:'hot'},
   {id:'agents',   label:'agents',    badge:function(s){
       var b=s.agents.filter(function(a){return a.status==='blocked'}).length;
       return b?b:s.agents.length},
     tone:function(s){return s.agents.some(function(a){return a.status==='blocked'})?'bad':''}}
 ];
 var tab=localStorage.getItem('cel-tab')||'factory';
+// A remembered tab from last week must not hide 53 open questions: until the
+// owner picks a tab in THIS session, any open decision lands on needs you.
+var tabPicked=!!sessionStorage.getItem('cel-tab-picked');
+function pickTab(id){sessionStorage.setItem('cel-tab-picked','1');tabPicked=true;showTab(id)}
 function showTab(id){
   tab=id;localStorage.setItem('cel-tab',id);
   TABS.forEach(function(t){
@@ -1132,11 +1214,12 @@ function renderTabs(s){
   }).join('');
   if(host.dataset.sig!==html){host.innerHTML=html;host.dataset.sig=html;
     Array.prototype.forEach.call(host.querySelectorAll('.tab'),function(b){
-      b.onclick=function(){showTab(b.dataset.tab)};
+      b.onclick=function(){pickTab(b.dataset.tab)};
     });
   }
   // a tab that vanished (linear removed) must not leave a blank page
   if(!document.getElementById('tabbtn-'+tab))tab='factory';
+  if(!tabPicked&&(s.needsYou||[]).length)tab='attention';
   showTab(tab);
 }
 
@@ -1297,48 +1380,126 @@ function renderLinear(){
     el.oncontextmenu=function(e){openMenu(e,el.dataset.id,ticketItems(el.dataset.id,el.dataset.url))};
   });
 }
-function renderNeedsYou(){
-  var ny=LAST.needsYou||[];
-  $('needsyou').innerHTML=ny.length?'<h2>needs you <span class="n">'+ny.length+'</span></h2>'+ny.map(function(d){
-    var s=d.age_secs||0,age=s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d';
-    var ctx=d.context?(/^https?:/.test(d.context)?'<a href="'+esc(d.context)+'" target="_blank" rel="noopener">'+esc(d.context)+'</a>':esc(d.context)):'';
-    return '<div class="decision ny" data-id="'+esc(d.id)+'">'+
-      '<span class="route">'+esc(d.workspace)+' \u00b7 '+esc(d.asker)+'</span><span class="age">'+age+'</span>'+
-      '<span class="body"><b>'+esc(d.title)+'</b>'+(d.blocks?' <i>blocks: '+esc(d.blocks)+'</i>':'')+(ctx?' \u00b7 '+ctx:'')+'</span>'+
-      '<div class="opts">'+(d.options||[]).map(function(o,i){
-        return '<button class="opt'+((d.recommended===i+1)?' rec':'')+'" data-v="'+esc(o.label)+'" title="'+esc(o.tradeoff||'')+'">'+
-          (i+1)+'. '+esc(o.label)+((d.recommended===i+1)?' \u2605':'')+'</button>'}).join('')+
-      '<input class="free" placeholder="free-text answer"><button class="send">answer</button>'+
-      '<input class="why" placeholder="reason to drop"><button class="drop">drop</button></div></div>';
-  }).join(''):'';
-  Array.prototype.forEach.call($('needsyou').querySelectorAll('.ny'),function(el){
-    var id=el.dataset.id,title=el.querySelector('b').textContent;
-    var ctl=el.querySelectorAll('button,input'),busy=false;
-    var go=async function(action,value,option){
-      if(busy)return;
-      var shown=option?el.querySelectorAll('button.opt')[option-1].dataset.v:value;
-      if(!shown){toast(action==='drop'?'give a reason':'type an answer',false);return}
-      // the exact text that will reach the asker, before it is sent
-      if(!confirm((action==='drop'?'DROP':'ANSWER')+' "'+title+'":\\n\\n'+shown))return;
-      // one submission per item: a double click must not answer twice
-      busy=true;Array.prototype.forEach.call(ctl,function(c){c.disabled=true});
-      var body=option?{id:id,action:action,option:option}:{id:id,action:action,value:value};
-      // a fetch that rejects (server down, connection cut) must not leave the
-      // item disabled for good: controls come back on every failure path
-      var r;
-      try{r=await post('/api/decide',body)}catch(e){r={ok:false,text:'not sent: '+(e&&e.message||e)}}
-      toast(r.ok?(action==='drop'?'dropped':'answered'):r.text,r.ok);
-      if(r.ok){el.remove();LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id})}
-      else{busy=false;Array.prototype.forEach.call(ctl,function(c){c.disabled=false})}
-    };
-    Array.prototype.forEach.call(el.querySelectorAll('button.opt'),function(b,i){b.onclick=function(){go('answer',null,i+1)}});
-    el.querySelector('button.send').onclick=function(){go('answer',el.querySelector('.free').value.trim())};
-    el.querySelector('button.drop').onclick=function(){go('drop',el.querySelector('.why').value.trim())};
+// ---- needs you (CEL-99) -------------------------------------------------
+// The choice, not the chrome: each option is a button with its tradeoff
+// printed under it (a hover title is invisible on a phone), the recommended
+// one is primary, and free text / drop hide behind one "other…" per card.
+// No browser confirm dialog: a first click arms the button ("send: <label>?") for
+// a few seconds and a second click sends - one step, still deliberate.
+var NYF=localStorage.getItem('cel-ny-filter')||'';
+var NYC=JSON.parse(localStorage.getItem('cel-ny-collapsed')||'{}');
+var NYERR={};          // id -> reason the last send failed; stays on screen
+var NYBULK=null;       // workspace whose "accept all" list is open
+function nyAge(s){s=s||0;return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d'}
+function nyRec(d){var n=d.recommended;return n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
+function nyCard(d){
+  var ctx=d.context?(/^https?:/.test(d.context)?'<a href="'+esc(d.context)+'" target="_blank" rel="noopener">context ↗</a>':esc(d.context)):'';
+  var rec=nyRec(d);
+  return '<article class="nycard'+(d.urgent?' urgent':'')+'" data-id="'+esc(d.id)+'">'+
+    '<div class="nyhead">'+(d.urgent?'<span class="tag urgent">urgent</span>':'')+
+      '<b class="nytitle">'+esc(d.title)+'</b></div>'+
+    '<div class="nymeta">'+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
+      (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+(ctx?' \u00b7 '+ctx:'')+'</div>'+
+    '<div class="nyopts">'+(d.options||[]).map(function(o,i){
+      var r=d.recommended===i+1;
+      return '<button class="opt'+(r?' rec':'')+'" data-n="'+(i+1)+'" data-label="'+esc(o.label)+'">'+
+        '<span class="lbl">'+esc(o.label)+(r?' <span class="tag">recommended</span>':'')+'</span>'+
+        (o.tradeoff?'<span class="trade">'+esc(o.tradeoff)+'</span>':'')+'</button>'}).join('')+'</div>'+
+    '<div class="nyact">'+(rec?'<button class="accept" data-n="'+rec.n+'" data-label="'+esc(rec.label)+'">accept recommended</button>':'')+
+    '<details class="other"><summary>other\u2026</summary>'+
+      '<div class="otherrow"><input class="free" placeholder="free-text answer"><button class="send">answer</button></div>'+
+      '<div class="otherrow"><input class="why" placeholder="reason to drop"><button class="drop">drop</button></div></details></div>'+
+    (NYERR[d.id]?'<div class="nyerr">not sent: '+esc(NYERR[d.id])+'</div>':'')+
+    '</article>';
+}
+function nyBulkPanel(g){
+  var list=g.items.filter(nyRec);
+  return '<div class="nybulk"><p>Send these '+list.length+' answers?</p><ol>'+list.map(function(d){
+    return '<li><b>'+esc(nyRec(d).label)+'</b> \u2190 '+esc(d.title)+'</li>'}).join('')+'</ol>'+
+    '<button class="bulksend primary" data-ws="'+esc(g.workspace)+'">send '+list.length+'</button> '+
+    '<button class="bulkcancel">cancel</button></div>';
+}
+function arm(btn,label,fn){
+  if(btn.dataset.armed){clearTimeout(+btn.dataset.armed);delete btn.dataset.armed;btn.classList.remove('armed');fn();return}
+  var orig=btn.innerHTML;
+  btn.classList.add('armed');btn.textContent='send: '+label+'?';
+  btn.dataset.armed=String(setTimeout(function(){delete btn.dataset.armed;btn.classList.remove('armed');btn.innerHTML=orig},4000));
+}
+function nyDrop(id){
+  LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id});
+  (LAST.needsYouGroups||[]).forEach(function(g){g.items=g.items.filter(function(d){return d.id!==id});g.count=g.items.length});
+  delete NYERR[id];
+}
+async function nySend(card,body){
+  var ctl=card.querySelectorAll('button,input');
+  Array.prototype.forEach.call(ctl,function(c){c.disabled=true});
+  var r;
+  try{r=await post('/api/decide',body)}catch(e){r={ok:false,text:(e&&e.message)||String(e)}}
+  toast(r.ok?(body.action==='drop'?'dropped':'answered'):r.text,r.ok);
+  if(r.ok)nyDrop(body.id);else NYERR[body.id]=r.text;
+  renderNeedsYou(true);refreshTabs();
+}
+function refreshTabs(){if(LAST)renderTabs(LAST)}
+function renderNeedsYou(force){
+  if(!LAST)return;
+  var groups=(LAST.needsYouGroups||[]).filter(function(g){return g.items.length});
+  if(NYF&&!groups.some(function(g){return g.workspace===NYF}))NYF='';
+  var sig=JSON.stringify([NYF,NYBULK,NYC,NYERR,groups.map(function(g){return g.items.map(function(d){return [d.id,d.updated||'',d.urgent]})})]);
+  var host=$('needsyou');
+  // a refresh every few seconds must not close an open "other…" or disarm a
+  // button mid-confirm: repaint only when something actually changed
+  if(!force&&host.dataset.sig===sig)return;
+  host.dataset.sig=sig;
+  var total=groups.reduce(function(a,g){return a+g.items.length},0);
+  if(!total){host.innerHTML='';$('alerts-h').style.display='none';return}
+  $('alerts-h').style.display='';
+  var chips='<div class="nychips"><button class="chipbtn'+(NYF?'':' on')+'" data-ws="">all <b>'+total+'</b></button>'+
+    groups.map(function(g){return '<button class="chipbtn'+(NYF===g.workspace?' on':'')+'" data-ws="'+esc(g.workspace)+'">'+
+      esc(g.workspace)+' <b>'+g.items.length+'</b>'+(g.urgent?' <i class="u">!</i>':'')+'</button>'}).join('')+'</div>';
+  host.innerHTML='<h2>decisions <span class="n">'+total+'</span></h2>'+chips+groups.filter(function(g){return !NYF||g.workspace===NYF}).map(function(g){
+    var nrec=g.items.filter(nyRec).length;
+    return '<details class="nygroup" data-ws="'+esc(g.workspace)+'"'+(NYC[g.workspace]?'':' open')+'>'+
+      '<summary><span class="ws">'+esc(g.workspace)+'</span><span class="n">'+g.items.length+'</span>'+
+      (nrec?'<button class="bulk" data-ws="'+esc(g.workspace)+'">accept all recommended ('+nrec+')</button>':'')+'</summary>'+
+      (NYBULK===g.workspace?nyBulkPanel(g):'')+
+      g.items.map(nyCard).join('')+'</details>';
+  }).join('');
+  Array.prototype.forEach.call(host.querySelectorAll('.chipbtn'),function(b){
+    b.onclick=function(){NYF=b.dataset.ws;localStorage.setItem('cel-ny-filter',NYF);renderNeedsYou(true)}});
+  Array.prototype.forEach.call(host.querySelectorAll('details.nygroup'),function(dt){
+    dt.ontoggle=function(){if(dt.open)delete NYC[dt.dataset.ws];else NYC[dt.dataset.ws]=1;
+      localStorage.setItem('cel-ny-collapsed',JSON.stringify(NYC));host.dataset.sig=''}});
+  Array.prototype.forEach.call(host.querySelectorAll('button.bulk'),function(b){
+    b.onclick=function(e){e.preventDefault();e.stopPropagation();NYBULK=NYBULK===b.dataset.ws?null:b.dataset.ws;renderNeedsYou(true)}});
+  var cancel=host.querySelector('button.bulkcancel');
+  if(cancel)cancel.onclick=function(){NYBULK=null;renderNeedsYou(true)};
+  var bsend=host.querySelector('button.bulksend');
+  if(bsend)bsend.onclick=async function(){
+    var g=groups.filter(function(x){return x.workspace===bsend.dataset.ws})[0];
+    // the ids and options sent are exactly the ones the list above showed
+    var items=g.items.filter(nyRec).map(function(d){return {id:d.id,option:nyRec(d).n}});
+    bsend.disabled=true;bsend.textContent='sending\u2026';
+    var r,res=[];
+    try{r=await post('/api/decide-bulk',{items:items});res=r.ok?JSON.parse(r.text).results:[]}catch(e){r={ok:false,text:(e&&e.message)||String(e)}}
+    if(!r.ok)items.forEach(function(it){NYERR[it.id]=r.text});
+    var ok=0;res.forEach(function(x){if(x.ok){ok++;nyDrop(x.id)}else NYERR[x.id]=x.error||'refused'});
+    toast(ok+' of '+items.length+' answered',ok===items.length);
+    NYBULK=null;renderNeedsYou(true);refreshTabs();
+  };
+  Array.prototype.forEach.call(host.querySelectorAll('.nycard'),function(card){
+    var id=card.dataset.id;
+    Array.prototype.forEach.call(card.querySelectorAll('button.opt,button.accept'),function(b){
+      b.onclick=function(){arm(b,b.dataset.label,function(){nySend(card,{id:id,action:'answer',option:+b.dataset.n})})}});
+    card.querySelector('button.send').onclick=function(){
+      var v=card.querySelector('.free').value.trim();if(!v){toast('type an answer',false);return}
+      arm(this,v,function(){nySend(card,{id:id,action:'answer',value:v})})};
+    card.querySelector('button.drop').onclick=function(){
+      var v=card.querySelector('.why').value.trim();if(!v){toast('give a reason',false);return}
+      arm(this,'drop',function(){nySend(card,{id:id,action:'drop',value:v})})};
   });
 }
 function renderInbox(){
   if(!LAST)return;
-  renderNeedsYou();
   // OPEN DECISIONS sit above the mail, not in it. Reading moved the cursor
   // past them; that is exactly why they need their own strip - a question
   // that scrolled off the unread list is still a question.
@@ -1419,8 +1580,9 @@ async function refresh(){
     +s.inflight.filter(w=>w.status==='working').length;
   const blocked=s.agents.filter(a=>a.status==='blocked').length
     +s.inflight.filter(w=>w.status==='blocked').length;
-  heat=s.attention.length;
-  $('strip').innerHTML=stat(s.attention.length,'needs you',true)
+  const nyCount=(s.needsYou||[]).length+s.attention.length;
+  heat=nyCount;
+  $('strip').innerHTML=stat(nyCount,'needs you',true)
     +stat(s.inflight.length,'in flight')+stat(working,'working')
     +stat(blocked,'blocked',true)+stat(s.stale.length,'stale trees')
     +stat((s.inbox||[]).filter(function(m){return m.unread}).length,'unread mail',true)
@@ -1429,10 +1591,11 @@ async function refresh(){
     '<div class="attitem '+esc(a.kind)+'"><span class="why">'+esc(a.text)+'</span>'+
     '<span class="ttl">'+esc(a.title||'')+'</span>'+
     (a.url?'<a class="go" href="'+esc(a.url)+'" target="_blank">open ↗</a>':'')+'</div>').join('')
-    :'<div class="card"><span class="allclear">✦ nothing waiting on you</span></div>';
+    :((s.needsYou||[]).length?'<span class="empty">no alerts</span>':'<div class="card"><span class="allclear">✦ nothing waiting on you</span></div>');
+  renderNeedsYou();
   renderInflight();
   CelFactory.render($('factory-floor'),s,{
-    list:function(){showTab('inflight')},
+    list:function(){pickTab('inflight')},
     focus:function(pane){return post('/api/focus',{pane:pane})}
   });
   renderInbox();
@@ -1909,21 +2072,23 @@ const server = createServer(async (req, res) => {
       // record is still open under the mailbox lock.
       let parsed;
       try { parsed = await readBody(req, 6000); } catch { res.writeHead(400).end('invalid request body'); return; }
-      const { id, action, value, option } = parsed || {};
-      const v = String(value || '').trim();
-      if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
-      if (!['answer', 'drop'].includes(action)) { res.writeHead(400).end('action must be answer or drop'); return; }
-      const byIndex = action === 'answer' && option !== undefined && option !== null;
-      if (byIndex && !(Number.isInteger(option) && option >= 1 && option <= 99)) { res.writeHead(400).end('bad option'); return; }
-      if (!byIndex && (!v || v.length > 2000)) { res.writeHead(400).end(action === 'drop' ? 'a reason is required' : 'an answer is required'); return; }
-      const args = action === 'drop'
-        ? ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard']
-        : byIndex ? ['decide', 'answer', String(id), '--option', String(option), '--by', 'dashboard']
-          : ['decide', 'answer', String(id), '--text', v, '--by', 'dashboard'];
-      const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
-      if (out === null) { res.writeHead(409).end('not recorded: already answered, or no such option'); return; }
-      delete cache.decisions;
-      res.writeHead(200).end('ok');
+      const r = await decideOne(parsed || {});
+      res.writeHead(r.code).end(r.error || 'ok');
+    } else if (req.method === 'POST' && req.url === '/api/decide-bulk') {
+      // "accept all recommended": the page shows the exact list first, then
+      // sends ids WITH the option it showed - never "whatever is recommended
+      // now", which a re-ask could have changed in between. Each goes through
+      // decideOne in turn; a refused one stays open and is reported.
+      let parsed;
+      try { parsed = await readBody(req, 20000); } catch { res.writeHead(400).end('invalid request body'); return; }
+      const items = parsed && Array.isArray(parsed.items) ? parsed.items : null;
+      if (!items || !items.length || items.length > 100) { res.writeHead(400).end('items: 1..100 required'); return; }
+      const results = [];
+      for (const it of items) {
+        const r = await decideOne({ id: it && it.id, action: 'answer', option: it && it.option });
+        results.push({ id: String((it && it.id) || ''), ok: r.code === 200, ...(r.error ? { error: r.error } : {}) });
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ results }));
     } else if (req.method === 'POST' && req.url === '/api/ticket-state') {
       // Moving a ticket is how work is STARTED from the board: the trigger
       // state is what the steward watches for, so this endpoint is the
