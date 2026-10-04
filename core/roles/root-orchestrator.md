@@ -33,6 +33,11 @@ Responsibilities
   typing into your pane:
   `Monitor(command: "cel inbox watch", persistent: true)`.
   Restart it after a restart or resume - a monitor dies with its session.
+- ANY QUESTION FOR THE OWNER is filed with `cel decide ask --title ...
+  --option "<label>::<tradeoff>" --recommend <n> --blocks ...` as well as
+  said in chat - a question asked only in your pane is invisible everywhere
+  else. `cel decide list` is the owner's whole queue. When mail starting
+  `ANSWER to "<title>"` arrives, act on it; never re-ask in chat.
   (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
   you of new mail and injects unread mail into your next turn - no action.)
   `cel inbox open --for root --ranked` puts the most urgent unread first when
