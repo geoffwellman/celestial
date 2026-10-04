@@ -1051,13 +1051,16 @@ _steward_orch_pool() {
                | (.amount.usedFraction // 0) * 100] | max // 0)}] as $live
     | [(.disabledCredentials // [])[]? | select(anth) | (.email // .accountId // "?")] as $dead
     | ($live | length > 0 and all(.pct >= $warn)) as $hot
-    | if ($dead | length) == 0 and ($hot | not) then ""
+    | if ($dead | length) == 0 and ($hot | not) then "clear"
       else ([ (if $hot then "every live credential is at or above \($warn)% of its 5h or 7d window ("
                  + ($live | map("\(.who) \(.pct | floor)%") | join(", ")) + ")" else empty end),
               (if ($dead | length) > 0 then "disabled in omp: " + ($dead | join(", "))
                  + " - re-login with: omp login anthropic" else empty end) ] | join("; "))
       end' 2>/dev/null || true)"
-  if [ -n "$verdict" ]; then
+  # An unreadable answer is NO EVIDENCE, not headroom: clearing on it would
+  # take down a true warning the first time omp changed its document shape.
+  [ -n "$verdict" ] || return 0
+  if [ "$verdict" != clear ]; then
     c_warn "orchestrator pool: $verdict"
     _steward_due "orch-pool" && _steward_raise "$ws" orch-pool blocked \
       "steward: the orchestrators' Claude pool (omp's anthropic credentials) is nearly out - $verdict. When it is spent, orchestrator turns wait for the reset." || true

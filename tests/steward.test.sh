@@ -1710,3 +1710,13 @@ test_steward_is_silent_about_a_pool_with_headroom() {
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
   rm -rf "$T"
 }
+
+# An unreadable omp answer is no evidence: it must not clear a true warning.
+test_steward_keeps_the_pool_item_when_omp_answers_garbage() {
+  _pool_fixture "$_POOL_HOT"
+  _steward_orch_pool >/dev/null 2>&1
+  _sub_omp_usage() { printf 'not json'; }
+  _steward_orch_pool >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "orchestrator"
+  rm -rf "$T"
+}
