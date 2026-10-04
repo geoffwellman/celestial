@@ -145,3 +145,40 @@ test_index_carries_workspace_filter_and_pagination() {
   case "$ix" in *'`'*) echo "backtick reached the rendered index"; _pages_stop; return 1;; esac
   _pages_stop
 }
+
+# A page's images are published beside it and used to crowd the index as rows
+# of their own. An image a document references is an asset of that document:
+# it stays served at its URL but is not listed. A bare image nobody references
+# is still a publication in its own right (`cel publish` takes any file).
+test_index_lists_documents_not_their_images() {
+  _pages_boot 1 || return 1
+  printf '<img src="chart.png"><img src="./fig.svg">' > "$PROOT/report.html"
+  printf 'PNG' > "$PROOT/chart.png"; printf '<svg/>' > "$PROOT/fig.svg"
+  printf 'PNG' > "$PROOT/lonely.png"
+  local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
+  assert_contains "$idx" 'href="/report.html"'
+  assert_contains "$idx" 'href="/lonely.png"'
+  if printf '%s' "$idx" | grep -q 'href="/chart.png"\|href="/fig.svg"'; then
+    echo "referenced images listed as documents"; _pages_stop; return 1; fi
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/chart.png")" "200"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/fig.svg")" "200"
+  _pages_stop
+}
+
+# Matching is on parsed src/href/url() references, not substrings: a near-miss
+# filename or a prose mention must not hide an unrelated bare image, while
+# query strings, fragments, ./ and percent-encoding still resolve to the file.
+test_index_asset_matching_is_exact_reference_not_substring() {
+  _pages_boot 1 || return 1
+  printf '<img src="mychart.png"><a href="bar-chart.png">x</a> see chart.png in prose
+<img src="./a%%20b.png?v=1"><img src="c.png#frag"><div style="background:url('"'"'d.png'"'"')">' > "$PROOT/r.html"
+  local f; for f in chart.png mychart.png bar-chart.png 'a b.png' c.png d.png; do printf 'PNG' > "$PROOT/$f"; done
+  local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
+  assert_contains "$idx" 'href="/chart.png"'
+  local hidden
+  for hidden in mychart.png bar-chart.png a%20b.png c.png d.png; do
+    if printf '%s' "$idx" | grep -qF "href=\"/$hidden\""; then
+      echo "referenced $hidden still listed"; _pages_stop; return 1; fi
+  done
+  _pages_stop
+}
