@@ -86,7 +86,7 @@ test_dash_option_buttons_answer_by_index() {
   assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"value\":\"1\"}" -H "x-cel-csrf: $TOKEN")" "200"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"pick a style": 1 '
   # the page sends the index, not the label
-  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")" "go('answer',null,i+1)"
+  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")" "option:+b.dataset.n"
   _dd_down
 }
 
