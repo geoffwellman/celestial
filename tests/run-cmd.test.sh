@@ -818,3 +818,22 @@ test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded
   [ ! -s "$T/herdr.log" ] || { echo "a pane was started: $(cat "$T/herdr.log")"; return 1; }
   unset -f herdr; rm -rf "$T"
 }
+
+# CEL-98: a spent Claude budget answers 429 with retry-after-ms around 5.5M,
+# and omp's default retry.maxDelayMs (300000) refused the wait, so the
+# orchestrator's turn stopped until a human typed. Root and the orchestrators
+# on omp carry a --config overlay raising it past a 5h reset; workers do not -
+# a worker that sleeps for hours holds a slot better given to another.
+test_run_omp_orchestrators_wait_out_a_spent_budget() {
+  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out ov="$CEL_ROOT/core/omp-orchestrator.yml"
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--config=$ov"
+  out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
+  assert_contains "$out" "--config=$ov"
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--config=" || { echo "worker got the orchestrator retry overlay"; rm -rf "$T"; return 1; }
+  # and the overlay itself holds at least six hours
+  assert_eq "$(yq -r '.retry.maxDelayMs >= 21600000' "$ov")" true
+  rm -rf "$T"
+}
