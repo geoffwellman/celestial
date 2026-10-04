@@ -25,14 +25,17 @@ set -uo pipefail
 . "$CEL_ROOT/lib/common.sh"
 GH="${CEL_VERIFY_GH:-gh}"
 
-usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--gate-timeout <secs>] [--base <ref>] [--slug owner/repo] [--branch b] [--quiet]"; }
+usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--gate-timeout <secs>] [--base <ref>] [--slug owner/repo] [--branch b] [--lock-in-timeout] [--quiet]"; }
 [ $# -ge 1 ] || usage
 wt="$1"; shift
-gate="" base="" slug="" branch="" quiet=0 gate_timeout=""
+gate="" base="" slug="" branch="" quiet=0 gate_timeout="" lock_in_timeout=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --gate) gate="$2"; shift 2;; --base) base="$2"; shift 2;; --slug) slug="$2"; shift 2;;
     --gate-timeout) gate_timeout="$2"; shift 2;;
+    # CEL-97: the timeout covers the wait for the suite lock as well, so a
+    # caller with a person waiting (land) gets a bound on the whole thing.
+    --lock-in-timeout) lock_in_timeout=1; shift;;
     --branch) branch="$2"; shift 2;; --quiet) quiet=1; shift;; *) usage;;
   esac
 done
@@ -87,7 +90,7 @@ _verify_suite_lock_path() {
 # Four outcomes now, and the exit status of this file distinguishes them:
 # pass, fail, timed out, produced no verdict.
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
-g_code=null g_outcome=none g_nvr=null g_empty=false
+g_code=null g_outcome=none g_nvr=null g_empty=false lock_expired=0 run_timeout=""
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
   suite_lock_fd=""
@@ -105,12 +108,16 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
       if ! flock -n "$suite_lock_fd"; then
         lock_t0="$(date +%s)"
         [ "$quiet" -eq 1 ] || printf 'waiting for the suite lock \xe2\x80\xa6\n'
-        flock "$suite_lock_fd"
+        if [ "$lock_in_timeout" -eq 1 ]; then
+          flock -w "$gate_timeout" "$suite_lock_fd" || lock_expired=1
+        else
+          flock "$suite_lock_fd"
+        fi
         g_waited=$(( $(date +%s) - lock_t0 ))
       fi
       # pid, start time and cwd, in the same shape tests/run.sh writes: a
       # waiter (and `cel doctor`) can then name what is in front of it.
-      printf '%s %s %s\n' "$$" "$(date +%H:%M)" "$wt" > "$suite_lock"
+      [ "$lock_expired" -eq 1 ] || printf '%s %s %s\n' "$$" "$(date +%H:%M)" "$wt" > "$suite_lock"
       # Whatever this gate starts is inside the lock now - and this gate is
       # very often `bash tests/run.sh`, which would otherwise queue behind the
       # verifier that launched it.
@@ -130,102 +137,117 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   # mid-shutdown or ignoring TERM answers it by staying. The group is also
   # swept after a gate that finished, because a gate that passes can still
   # leave a server running, and that server holds the same descriptors.
-  gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
-  gate_killed="$gate_out.killed"
-  # THE ANSWER IS WRITTEN DOWN BEFORE THE PROCESS THAT HAS IT CAN BE KILLED.
-  # The two protections above and in tests/run.sh are both load-bearing and
-  # both stay; the 2026-09-21 bug was where they meet. The gate gets its own
-  # SESSION here, so under `bash tests/run.sh` the runner is the leader of that
-  # session's group - and that runner kills process groups of its own on the
-  # way out, precisely so a killed suite leaves no servers behind. A suite that
-  # has already printed "980 passed, 3 failed" has answered the question; if
-  # the only record of that answer is the exit status of a process that its own
-  # cleanup then signals, the answer is lost and the branch is recorded as a
-  # failure. So the gate's status is recorded by the gate itself, in a file, at
-  # the moment it has one. `wait` is corroboration after that, not the only
-  # witness - and an absent file is now a fact with a name rather than an
-  # exit code nobody can account for.
-  gate_rc="$gate_out.rc"
-  # The gate is inside the lock by ENVIRONMENT, not by descriptor: a gate that
-  # leaves a process behind (this file has seen seven at once) must not leave
-  # it holding the box's suite lock as well.
-  ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
-    # Traps, not a trailing command: a gate that ends in `exit` never reaches a
-    # line written after it. And a fatal signal is recorded AS a signal - a
-    # shell that is going down because something killed its process group has
-    # not reached a verdict, and must not leave behind the status of whatever
-    # ran last, which is how a suite that killed itself would read as a pass.
-    exec setsid bash -lc "trap 'printf %s \$? > \"$gate_rc\"' EXIT
+  # The time left after the queue is the time the gate gets, when the caller
+  # asked for the lock wait to count; otherwise the gate gets all of it.
+  run_timeout="$gate_timeout"
+  if [ "$lock_in_timeout" -eq 1 ]; then
+    run_timeout=$(( gate_timeout - g_waited )); [ "$run_timeout" -ge 1 ] || run_timeout=1
+  fi
+  if [ "$lock_expired" -eq 1 ]; then
+    # Spent the whole budget in the queue: no verdict, and no gate started -
+    # a timeout, named as the queue's rather than the suite's.
+    g_to=true g_pass=null g_outcome=timeout g_ran=false
+    g_tail="waited ${g_waited}s for the suite lock - the gate never started; killed after ${gate_timeout}s - no verdict"
+    [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-
+    suite_lock_fd=""
+  else
+    gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
+    gate_killed="$gate_out.killed"
+    # THE ANSWER IS WRITTEN DOWN BEFORE THE PROCESS THAT HAS IT CAN BE KILLED.
+    # The two protections above and in tests/run.sh are both load-bearing and
+    # both stay; the 2026-09-21 bug was where they meet. The gate gets its own
+    # SESSION here, so under `bash tests/run.sh` the runner is the leader of that
+    # session's group - and that runner kills process groups of its own on the
+    # way out, precisely so a killed suite leaves no servers behind. A suite that
+    # has already printed "980 passed, 3 failed" has answered the question; if
+    # the only record of that answer is the exit status of a process that its own
+    # cleanup then signals, the answer is lost and the branch is recorded as a
+    # failure. So the gate's status is recorded by the gate itself, in a file, at
+    # the moment it has one. `wait` is corroboration after that, not the only
+    # witness - and an absent file is now a fact with a name rather than an
+    # exit code nobody can account for.
+    gate_rc="$gate_out.rc"
+    # The gate is inside the lock by ENVIRONMENT, not by descriptor: a gate that
+    # leaves a process behind (this file has seen seven at once) must not leave
+    # it holding the box's suite lock as well.
+    ( cd "$wt" && { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; }
+      # Traps, not a trailing command: a gate that ends in `exit` never reaches a
+      # line written after it. And a fatal signal is recorded AS a signal - a
+      # shell that is going down because something killed its process group has
+      # not reached a verdict, and must not leave behind the status of whatever
+      # ran last, which is how a suite that killed itself would read as a pass.
+      exec setsid bash -lc "trap 'printf %s \$? > \"$gate_rc\"' EXIT
 trap 'printf %s 129 > \"$gate_rc\"; exit 129' HUP
 trap 'printf %s 130 > \"$gate_rc\"; exit 130' INT
 trap 'printf %s 143 > \"$gate_rc\"; exit 143' TERM
 $gate" ) > "$gate_out" 2>&1 &
-  gate_pid=$!
-  # AND NEITHER DOES THE WATCHDOG. On 2026-09-19 every gate on the box queued
-  # for eighteen minutes behind `sleep 1800`, ppid 1: this watchdog's sleep,
-  # orphaned when the gate finished early and the watchdog shell was killed,
-  # still holding the suite lock descriptor it had inherited. The gate's own
-  # children were already spawned with the descriptor closed; this one was not,
-  # and a lock held by a stray sleep looks exactly like a lock in use.
-  ( { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; } || true
-    sleep "$gate_timeout"
-    kill -0 "$gate_pid" 2>/dev/null || exit 0
-    : > "$gate_killed"
-    kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null
-  ) > /dev/null 2>&1 &
-  gate_watchdog=$!
-  rc=0; wait "$gate_pid" || rc=$?
-  kill "$gate_watchdog" 2>/dev/null || true
-  wait "$gate_watchdog" 2>/dev/null || true
-  if [ -e "$gate_killed" ]; then
-    rc=124
-    rm -f "$gate_killed"
-    # TERM has already been delivered and the time is up: nothing in the group
-    # gets to negotiate. This is `timeout --kill-after`, applied to the group.
-    kill -KILL -- -"$gate_pid" 2>/dev/null || true
-  else
-    kill -TERM -- -"$gate_pid" 2>/dev/null || true
+    gate_pid=$!
+    # AND NEITHER DOES THE WATCHDOG. On 2026-09-19 every gate on the box queued
+    # for eighteen minutes behind `sleep 1800`, ppid 1: this watchdog's sleep,
+    # orphaned when the gate finished early and the watchdog shell was killed,
+    # still holding the suite lock descriptor it had inherited. The gate's own
+    # children were already spawned with the descriptor closed; this one was not,
+    # and a lock held by a stray sleep looks exactly like a lock in use.
+    ( { [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-; } || true
+      sleep "$run_timeout"
+      kill -0 "$gate_pid" 2>/dev/null || exit 0
+      : > "$gate_killed"
+      kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null
+    ) > /dev/null 2>&1 &
+    gate_watchdog=$!
+    rc=0; wait "$gate_pid" || rc=$?
+    kill "$gate_watchdog" 2>/dev/null || true
+    wait "$gate_watchdog" 2>/dev/null || true
+    if [ -e "$gate_killed" ]; then
+      rc=124
+      rm -f "$gate_killed"
+      # TERM has already been delivered and the time is up: nothing in the group
+      # gets to negotiate. This is `timeout --kill-after`, applied to the group.
+      kill -KILL -- -"$gate_pid" 2>/dev/null || true
+    else
+      kill -TERM -- -"$gate_pid" 2>/dev/null || true
+    fi
+    # The gate's own record beats the wait status: the process may have been
+    # signalled after it had already answered.
+    reported=""
+    if [ -s "$gate_rc" ]; then reported="$(cat "$gate_rc")"; fi
+    case "$reported" in ''|*[!0-9]*) reported="";; esac
+    rm -f "$gate_rc"
+    out="$(cat "$gate_out")"; rm -f "$gate_out"
+    g_tail="$(printf '%s' "$out" | tail -n 12)"
+    # A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The 2026-09-21 verdicts
+    # stored `tail: ""` and moved on, so the one visible signature of the bug -
+    # no output and no exit code - was sitting in the record saying nothing to
+    # anybody reading it.
+    if [ -z "$out" ]; then g_empty=true; g_tail="(the gate produced no output at all)"; fi
+    if [ -e "$gate_killed" ] || [ "$rc" = 124 ] || [ "$rc" = 137 ]; then reported=""; fi
+    if [ -n "$reported" ]; then rc="$reported"; fi
+    case "$rc" in
+      0) g_pass=true; g_code=0; g_outcome=pass;;
+      124|137)
+        g_to=true; g_pass=null; g_outcome=timeout
+        # the LAST line is where it got to; the sentence after it is why there is
+        # nothing after that line.
+        # The shell that carried the gate reports its killed children on the way
+        # down ("Terminated   sleep 5"); that notice is not where the suite got
+        # to, and it is the one line the reader most needs here.
+        if [ "$g_empty" = true ]; then last="(the gate produced no output at all)"
+        else last="$(printf '%s' "$out" | grep -v -e '^Terminated' -e '^Killed' -e '^Hangup' -e '^Interrupt' | tail -n 1)"; fi
+        g_tail="$last"$'\n'"killed after ${gate_timeout}s - no verdict"
+        ;;
+      *)
+        if [ "$rc" -gt 128 ]; then
+          # 128+n: killed, and a killed process never reached a status. That is
+          # not a failure - it is the absence of an answer, and it gets said so.
+          sig=$((rc - 128)); signame="$(kill -l "$sig" 2>/dev/null || true)"
+          g_outcome=no_verdict; g_pass=null
+          g_nvr="the gate's process was killed by SIG${signame:-$sig} before it reported an exit status"
+        else
+          g_pass=false; g_code="$rc"; g_outcome=fail
+        fi
+        ;;
+    esac
   fi
-  # The gate's own record beats the wait status: the process may have been
-  # signalled after it had already answered.
-  reported=""
-  if [ -s "$gate_rc" ]; then reported="$(cat "$gate_rc")"; fi
-  case "$reported" in ''|*[!0-9]*) reported="";; esac
-  rm -f "$gate_rc"
-  out="$(cat "$gate_out")"; rm -f "$gate_out"
-  g_tail="$(printf '%s' "$out" | tail -n 12)"
-  # A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The 2026-09-21 verdicts
-  # stored `tail: ""` and moved on, so the one visible signature of the bug -
-  # no output and no exit code - was sitting in the record saying nothing to
-  # anybody reading it.
-  if [ -z "$out" ]; then g_empty=true; g_tail="(the gate produced no output at all)"; fi
-  if [ -e "$gate_killed" ] || [ "$rc" = 124 ] || [ "$rc" = 137 ]; then reported=""; fi
-  if [ -n "$reported" ]; then rc="$reported"; fi
-  case "$rc" in
-    0) g_pass=true; g_code=0; g_outcome=pass;;
-    124|137)
-      g_to=true; g_pass=null; g_outcome=timeout
-      # the LAST line is where it got to; the sentence after it is why there is
-      # nothing after that line.
-      # The shell that carried the gate reports its killed children on the way
-      # down ("Terminated   sleep 5"); that notice is not where the suite got
-      # to, and it is the one line the reader most needs here.
-      if [ "$g_empty" = true ]; then last="(the gate produced no output at all)"
-      else last="$(printf '%s' "$out" | grep -v -e '^Terminated' -e '^Killed' -e '^Hangup' -e '^Interrupt' | tail -n 1)"; fi
-      g_tail="$last"$'\n'"killed after ${gate_timeout}s - no verdict"
-      ;;
-    *)
-      if [ "$rc" -gt 128 ]; then
-        # 128+n: killed, and a killed process never reached a status. That is
-        # not a failure - it is the absence of an answer, and it gets said so.
-        sig=$((rc - 128)); signame="$(kill -l "$sig" 2>/dev/null || true)"
-        g_outcome=no_verdict; g_pass=null
-        g_nvr="the gate's process was killed by SIG${signame:-$sig} before it reported an exit status"
-      else
-        g_pass=false; g_code="$rc"; g_outcome=fail
-      fi
-      ;;
-  esac
   # Somebody else is waiting on this: hand it over as soon as the gate is
   # done, rather than at the end of the PR and GitHub work below.
   [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-

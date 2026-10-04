@@ -186,6 +186,27 @@ test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
   rm -rf "$T"
 }
 
+# CEL-97: land's --gate-timeout must bound the whole wait, lock included. With
+# --lock-in-timeout a lock held past the timeout is a timeout - no verdict -
+# and the gate never starts.
+test_lock_in_timeout_counts_the_lock_wait_against_the_gate() {
+  _vrepo; _vcommit impl src/a.ts
+  local lock="$T/suite.lock"
+  flock "$lock" -c 'sleep 4' &
+  local holder=$!
+  local i=0
+  while flock -n "$lock" -c true >/dev/null 2>&1; do sleep 0.1; i=$((i + 1)); [ "$i" -lt 50 ] || break; done
+  local rc=0
+  env -u CEL_SUITE_LOCK_HELD CEL_SUITE_LOCK="$lock" "$VERIFY" "$T" --gate "touch '$T/gate-ran'" \
+    --gate-timeout 1 --lock-in-timeout --quiet || rc=$?
+  wait "$holder" 2>/dev/null || true
+  assert_eq "$rc" 2
+  assert_eq "$(_v .gate.timed_out)" true
+  assert_contains "$(_v .gate.tail)" "suite lock"
+  [ ! -e "$T/gate-ran" ] || { echo "the gate ran after its time was spent waiting"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # Nobody holding it: no wait, and nothing about the verdict changes.
 test_an_unheld_suite_lock_costs_the_gate_nothing() {
   _vrepo; _vcommit impl src/a.ts

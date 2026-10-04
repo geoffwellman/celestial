@@ -1588,6 +1588,56 @@ test_gate_from_ci_refuses_protection_with_no_required_contexts() {
   assert_contains "$out" "requires no check"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+# ---- CEL-97: with --gate-from-ci, CI is asked FIRST -------------------------
+# On 2026-10-03 a land with --gate-from-ci waited sixteen, then twenty-nine,
+# then more than forty minutes for a local suite - queued behind every
+# worker's suite for the box lock - before it ever looked at the CI run that
+# had already passed on the same head. The flag says "CI's verdict is good
+# enough"; asking for it last made it the slowest route to the same merge.
+_fanout_verify_spy() { # records that the local gate ran, and what it was given
+  VSTUB="$T/verify-spy.sh"
+  cat > "$VSTUB" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$T/verify-ran"
+wt="\$1"; mkdir -p "\$wt/.agent"
+printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_gate_from_ci_with_ci_green_lands_without_running_the_local_gate() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_spy
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) 2>&1 )" || { echo "land failed: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  [ ! -e "$T/verify-ran" ] || { echo "the local gate ran although CI was green on the head"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "Gate: CI (suite) on deadbeefcafe" "$GH_LOG" || { echo "merge body does not name the CI evidence"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "local gate not run"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_gate_from_ci_with_ci_not_green_runs_the_local_gate_as_before() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_spy
+  _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
+    '{"check_runs":[{"name":"suite","status":"in_progress","conclusion":null}]}'
+  (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) > /dev/null 2>&1 || { echo "land refused a passing local gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  [ -e "$T/verify-ran" ] || { echo "the local gate did not run although CI was not green"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge on a passing local gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  ! grep -q "Gate: CI" "$GH_LOG" || { echo "claimed CI evidence it did not have"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# The gate timeout land passes covers the wait for the box's suite lock too:
+# --gate-timeout 30 that queued forty minutes for the lock was not a bound.
+test_land_asks_the_verifier_to_count_the_lock_wait_in_the_timeout() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_spy
+  (cd "$T" && "$BIN" land WG-LAND --gate-timeout 30) > /dev/null 2>&1 || true
+  assert_contains "$(cat "$T/verify-ran")" "--lock-in-timeout"
+  assert_contains "$(cat "$T/verify-ran")" "--gate-timeout 30"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
 # ---- and a gate that produced NO VERDICT is not a red gate either ------------
 # On 2026-09-21 an approved, CI-green branch was refused with "the repo's gate
 # did not pass (verdict: unknown)": the gate process had been killed by a
