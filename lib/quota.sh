@@ -259,6 +259,27 @@ _sub_omp_rows() {
                  then {state: "unreadable",
                        reason: ($a.error // "omp holds this credential but reported no usage for it")}
                  else {state: "enabled", reason: ""} end)}' 2>/dev/null || true
+  # A CREDENTIAL OMP DISABLED IS OMP'S TO RE-LOGIN (CEL-98). The orchestrators
+  # run on omp's own pool, so a refresh token it lost leaves them short an
+  # account while the gateway's copy of the same login is fine - and the old
+  # hint, `cel gateway login`, re-logged the copy that was not broken. An
+  # account omp still reports usage for is not dead, so it is not repeated.
+  printf '%s' "$raw" | jq -c '
+    ([(.reports // [])[]? | (.metadata.email // .metadata.accountId // empty)]) as $live
+    | (.disabledCredentials // [])[]?
+    | select(type == "object")
+    | ((.provider // "unknown") | ascii_downcase) as $p
+    | ((.email // .accountId // $p) | tostring) as $who
+    | select(($live | index($who)) == null)
+    | {provider: (if $p == "anthropic" or $p == "claude" then "claude"
+                  elif $p == "openai-codex" or $p == "codex" or $p == "chatgpt" then "codex"
+                  elif ($p | startswith("opencode")) then "opencode"
+                  else $p end),
+       account: ((.accountId // .email // $p) | tostring),
+       label: $who,
+       source: "omp",
+       windows: [],
+       extra: {state: "needs_login", reason: ("needs login: omp login " + $p)}}' 2>/dev/null || true
   return 0
 }
 
