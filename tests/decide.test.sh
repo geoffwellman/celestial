@@ -147,3 +147,14 @@ test_concurrent_answers_resolve_once() {
   assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$CEL_INBOX_DIR/alpha.jsonl" | grep -c . || true)" "1"
   rm -rf "$T"
 }
+
+# --option is strict: a number naming no option is refused, not taken as text.
+test_answer_option_flag_refuses_a_missing_option() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "q" --option "a::x")"
+  assert_fails eval "( CEL_INBOX_ME=ana cmd_decide answer $id --option 9 >/dev/null 2>&1 )"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "q"
+  CEL_INBOX_ME=ana cmd_decide answer "$id" --option 1 >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for alpha-orch --workspace alpha --all 2>/dev/null)" '"q": a '
+  rm -rf "$T"
+}
