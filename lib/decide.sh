@@ -36,8 +36,8 @@ decide_open_json() { # <ws>
         | select([.id] | inside($done) | not)
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
-        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + {updated: $u.ts} else . end)
-        | . + {workspace: $ws,
+        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
+        | . + {workspace: $ws, urgent: (.urgent == true),
                age_secs: (($now | tonumber) - (.ts | _epoch))} ]
     | sort_by(.ts) | .[]' "$f" 2>/dev/null || true
 }
@@ -88,10 +88,11 @@ _decide_usage() {
 cel decide - the owner's one queue of decisions, across every workspace
 
   cel decide ask --title <one line> [--option <label>::<tradeoff>]... [--recommend <n>]
-                 [--context <url-or-path>] [--blocks <what waits on it>] [--workspace w]
+                 [--context <url-or-path>] [--blocks <what waits on it>] [--urgent] [--workspace w]
       file a question for the owner; prints its id. The asker is who you are
       (cel inbox whoami), never a flag. Re-asking the same title updates the
-      open record instead of adding a second one.
+      open record instead of adding a second one. --urgent is for live risk,
+      money, or work that is blocked now: the dashboard sorts it first.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
@@ -105,7 +106,7 @@ EOS
 }
 
 _decide_ask() {
-  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade
+  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title="$2"; shift 2 ;;
@@ -117,6 +118,7 @@ _decide_ask() {
       --recommend) recommend="$2"; shift 2 ;;
       --context) context="$2"; shift 2 ;;
       --blocks) blocks="$2"; shift 2 ;;
+      --urgent) urgent=true; shift ;;
       --workspace) ws="$2"; shift 2 ;;
       *) die "cel decide ask: unknown argument '$1'" ;;
     esac
@@ -134,9 +136,11 @@ _decide_ask() {
   local asker; asker="$(_inbox_me)"
   local fields
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
-    --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" \
+    --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" --argjson urgent "$urgent" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
-      context: $context, blocks: $blocks, asker: $asker, message: $title}')"
+      context: $context, blocks: $blocks, asker: $asker, message: $title}
+     # urgent only when asked: a re-ask that omits it must not clear it
+     + (if $urgent then {urgent: true} else {} end)')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields"
 }
 
@@ -182,7 +186,7 @@ _decide_list() {
   while IFS= read -r line; do
     age="$(_decide_age "$(jq -r '.age_secs' <<< "$line")")"
     jq -r --arg age "$age" '
-      "[\(.id)] \(.workspace) \(.asker) \($age): \(.title)",
+      "[\(.id)] \(.workspace) \(.asker) \($age): \(if .urgent then "URGENT " else "" end)\(.title)",
       ((.recommended // 0) as $r | .options | to_entries[]
         | "    \(.key + 1). \(.value.label)\(if .value.tradeoff != "" then " - " + .value.tradeoff else "" end)\(if .key + 1 == $r then "  (recommended)" else "" end)"),
       (if (.blocks // "") != "" then "    blocks: \(.blocks)" else empty end),

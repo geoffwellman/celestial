@@ -158,3 +158,31 @@ test_answer_option_flag_refuses_a_missing_option() {
   assert_contains "$(cmd_inbox read --for alpha-orch --workspace alpha --all 2>/dev/null)" '"q": a '
   rm -rf "$T"
 }
+
+# CEL-99: an urgent question sorts first on the dashboard; the flag has to
+# survive the round trip through the mailbox, and a re-ask can raise it.
+test_urgent_flag_round_trips_and_defaults_off() {
+  _decide_fixture
+  _ask_as alpha-orch alpha --title "calm one" --option "a::x" >/dev/null
+  _ask_as alpha-orch alpha --title "hot one" --option "a::x" --urgent >/dev/null
+  local j; j="$(cmd_decide list --json 2>/dev/null)"
+  assert_eq "$(printf '%s\n' "$j" | jq -r 'select(.title == "calm one") | .urgent')" "false"
+  assert_eq "$(printf '%s\n' "$j" | jq -r 'select(.title == "hot one") | .urgent')" "true"
+  _ask_as alpha-orch alpha --title "calm one" --option "a::x" --urgent >/dev/null
+  j="$(cmd_decide list --json 2>/dev/null)"
+  assert_eq "$(printf '%s\n' "$j" | jq -r 'select(.title == "calm one") | .urgent')" "true"
+  assert_contains "$(cmd_decide list 2>/dev/null)" "URGENT"
+  rm -rf "$T"
+}
+
+# Review on #125: a re-ask that does not repeat --urgent is not a downgrade;
+# the flag stays until the question is answered.
+test_reask_without_urgent_keeps_it_urgent() {
+  _decide_fixture
+  _ask_as alpha-orch alpha --title "hot one" --option "a::x" --urgent >/dev/null
+  _ask_as alpha-orch alpha --title "hot one" --option "a::y" >/dev/null
+  local j; j="$(cmd_decide list --json 2>/dev/null)"
+  assert_eq "$(printf '%s\n' "$j" | jq -r '.urgent')" "true"
+  assert_eq "$(printf '%s\n' "$j" | jq -r '.options[0].tradeoff')" "y"
+  rm -rf "$T"
+}
