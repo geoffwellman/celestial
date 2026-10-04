@@ -83,16 +83,21 @@ test_a_lone_suite_says_nothing_about_the_lock() {
 # they are doing. It runs while somebody else holds it.
 test_no_lock_runs_while_the_lock_is_held() {
   _suite_fixture
-  ( flock 9; exec sleep 10 ) 9>>"$CEL_SUITE_LOCK" &
+  # The holder outlives the test and is killed by it. It was `sleep 10`, and
+  # on a box at load 37 the two runs below took longer than that: the holder
+  # was gone, the second run proved nothing, and the final `kill` of a dead pid
+  # failed under set -e - a silent FAIL with no message, on clean main (CEL-97).
+  ( flock 9; exec sleep 600 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
-  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  _await_held "$CEL_SUITE_LOCK" || { echo "the fixture holder never took the lock"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(bash "$T/tests/run.sh" --no-lock 2>&1)"
   assert_contains "$out" "1 passed, 0 failed"
   case "$out" in *"waiting for the suite lock"*) echo "--no-lock still queued"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1;; esac
   # and so does the environment spelling of the same thing
+  _await_held "$CEL_SUITE_LOCK" 1 || { echo "the lock was released before the second run - it would prove nothing"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   out="$(CEL_SUITE_LOCK=none bash "$T/tests/run.sh" 2>&1)"
   assert_contains "$out" "1 passed, 0 failed"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   rm -rf "$T"
 }
 
