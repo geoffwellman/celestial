@@ -676,7 +676,8 @@ _steward_review_sweep() { # <agents-json>
                then "APPROVED" else "NONE" end)
             elif ($pr.reviewDecision // "") == "CHANGES_REQUESTED" then
               (if $cr != null and ($cr.commit.oid // "") == $h
-                  and ([$rs[] | select(.state == "APPROVED" and (.submittedAt // "") > ($cr.submittedAt // ""))] | length == 0)
+                  and ([$rs[] | select(.state == "APPROVED" and (.commit.oid // "") == $h
+                    and (.submittedAt // "") > ($cr.submittedAt // ""))] | length == 0)
                then "CHANGES_REQUESTED" else "NONE" end)
             else "NONE" end),
          ([.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length)]
@@ -856,12 +857,13 @@ _steward_ready_tickets() { # [agents-json]
       ids="$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
         curl -sf -m 15 -X POST https://api.linear.app/graphql \
         -H @- -H 'Content-Type: application/json' \
-        -d "$(jq -nc --arg k "$key" --arg st "$trigger" '{query: "query($k: String!, $st: String!) { issues(filter: {team: {key: {eq: $k}}, state: {name: {eq: $st}}}, first: 20) { nodes { identifier title assignee { isMe } state { name type } labels { nodes { name } } } } }", variables: {k: $k, st: $st}}')" \
+        -d "$(jq -nc --arg k "$key" --arg st "$trigger" '{query: "query($k: String!, $st: String!) { issues(filter: {team: {key: {eq: $k}}, state: {name: {eq: $st}}}, first: 100) { nodes { identifier title assignee { isMe } state { name type } labels { nodes { name } } } } }", variables: {k: $k, st: $st}}')" \
         2>/dev/null | jq -r '
         # ONLY THE FLEET'"'"'S OWN OPEN WORK (CEL-96). The nag repeated for
         # tickets assigned to colleagues, tickets already Done, and the owner'"'"'s
         # deliberately blocked ticket. Unassigned stays in: the board trigger is
         # how the owner hands the fleet new work, usually before anyone owns it.
+        # The page is 100, not 20, because these filters run after the limit.
         .data.issues.nodes[]?
         | select(.assignee == null or .assignee.isMe == true)
         | select(((.state.type // "") | IN("completed", "canceled")) | not)

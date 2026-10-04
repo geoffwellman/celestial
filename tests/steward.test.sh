@@ -1598,6 +1598,10 @@ test_cel96_changes_requested_on_the_current_head_is_still_nagged() {
   _cel96_sweep '[{"number":41,"headRefName":"WG-1-x","headRefOid":"h1","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"APPROVED","submittedAt":"2020-01-01T00:00:00Z","commit":{"oid":"h0"}},{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h1"}}]}]'
   assert_contains "$CEL96_MAIL" "PR #41 on widget has changes requested"
   rm -rf "$T"
+  # an approval submitted later, but of an OLD head, answers nothing
+  _cel96_sweep '[{"number":42,"headRefName":"WG-2-y","headRefOid":"h2","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h2"}},{"state":"APPROVED","submittedAt":"2020-01-03T00:00:00Z","commit":{"oid":"h1"}}]}]'
+  assert_contains "$CEL96_MAIL" "PR #42 on widget has changes requested"
+  rm -rf "$T"
 }
 
 # Ticket nags are for the fleet's own open work: not ben's ticket, not a Done
