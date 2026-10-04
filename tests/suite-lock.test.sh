@@ -320,3 +320,21 @@ test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
   assert_eq "$parallel" "$serial"
   rm -rf "$T"
 }
+
+# ---- CEL-100: the watchdog does not outlive its test --------------------------
+# On 2026-10-04 one worker's suite left 385 `sleep 120` processes on PID 1: the
+# watchdog's bash was killed when its test finished, its sleep was not. A run
+# with a unique limit is the marker - after it, no sleep of that length remains.
+test_quick_tests_leave_no_watchdog_sleep_behind() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  printf 'test_q1() { :; }\ntest_q2() { :; }\ntest_q3() { :; }\ntest_q4() { :; }\n' > "$T/tests/quick.test.sh"
+  local limit=4917 out
+  out="$(CEL_TEST_TIMEOUT=$limit bash "$T/tests/run.sh" --no-lock 2>&1)" || true
+  assert_contains "$out" "test_q4"
+  sleep 0.3
+  local left; left="$(pgrep -fx "sleep $limit" | wc -l)"
+  pkill -fx "sleep $limit" 2>/dev/null || true
+  assert_eq "$left" "0"
+  rm -rf "$T"
+}
