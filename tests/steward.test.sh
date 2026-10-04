@@ -1649,3 +1649,74 @@ test_cel96_afk_expired_is_one_item_counting_raises_and_resolves_when_cleared() {
   assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
   _afk_sweep_teardown; unset CEL_INBOX_DIR
 }
+
+# --- CEL-98: the orchestrators' own pool, warned before it is spent ----------
+# The orchestrators run on omp's Anthropic credentials, not the gateway, and
+# when every one of them was spent the turn stopped with no word anywhere. The
+# steward reads `omp usage --json` (no model call) and says so ONCE, to root,
+# while there is still headroom to act on.
+_pool_fixture() { # <jq-filter applied to the omp fixture>
+  source "$CEL_ROOT/lib/quota.sh"
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  POOL_FILTER="$1"
+  _sub_omp_usage() { jq "$POOL_FILTER" "$CEL_ROOT/tests/fixtures/omp-usage.json"; }
+}
+# every anthropic credential at or above 85% on its unscoped 5h or 7d window
+_POOL_HOT='(.reports[] | select(.provider == "anthropic") | .limits[]
+            | select(.id == "anthropic:7d") | .amount.usedFraction) |= 0.9'
+_POOL_DEAD='.disabledCredentials = [{id: 10, provider: "anthropic", cause: "oauth refresh failed",
+            email: "ana@alpha.test", accountId: "ant-ana"}]'
+
+test_steward_raises_one_item_when_the_orchestrator_pool_is_nearly_spent() {
+  _pool_fixture "$_POOL_HOT"
+  local i
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_orch_pool >/dev/null 2>&1; done
+  local open; open="$(cmd_inbox open --for root --workspace alpha --json | jq -s '.')"
+  assert_eq "$(printf '%s' "$open" | jq 'length')" 1
+  assert_contains "$(printf '%s' "$open" | jq -r '.[0].fp // .[0].fingerprint // ""')" "orch-pool"
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "orchestrator"
+  rm -rf "$T"
+}
+
+test_steward_raises_the_pool_item_for_a_disabled_credential() {
+  _pool_fixture "$_POOL_DEAD"
+  _steward_orch_pool >/dev/null 2>&1
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_contains "$open" "ana@alpha.test"
+  assert_contains "$open" "omp login anthropic"
+  rm -rf "$T"
+}
+
+test_steward_resolves_the_pool_item_when_headroom_returns() {
+  _pool_fixture "$_POOL_HOT"
+  _steward_orch_pool >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "orchestrator"
+  POOL_FILTER='.'
+  _steward_orch_pool >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}
+
+# The fixture as recorded has one account at 100% and two with headroom:
+# that is a working pool, and the steward says nothing about it.
+test_steward_is_silent_about_a_pool_with_headroom() {
+  _pool_fixture '.'
+  _steward_orch_pool >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  rm -rf "$T"
+}
+
+# An unreadable omp answer is no evidence: it must not clear a true warning.
+test_steward_keeps_the_pool_item_when_omp_answers_garbage() {
+  _pool_fixture "$_POOL_HOT"
+  _steward_orch_pool >/dev/null 2>&1
+  _sub_omp_usage() { printf 'not json'; }
+  _steward_orch_pool >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "orchestrator"
+  rm -rf "$T"
+}

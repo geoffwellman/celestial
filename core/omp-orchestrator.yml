@@ -1,0 +1,7 @@
+# Loaded with `omp --config=<this file>` by `cel run root|orchestrator` when
+# the runtime is omp (CEL-98). A spent Claude 5h/7d budget answers 429 with a
+# retry-after around 5,500,000ms; omp's default retry.maxDelayMs (300000)
+# refused that wait and the turn stopped until a human typed. Six hours covers
+# a 5h reset with margin, so the turn waits in-process and keeps its context.
+retry:
+  maxDelayMs: 21600000

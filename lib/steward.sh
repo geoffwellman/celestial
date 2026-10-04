@@ -1023,6 +1023,52 @@ _steward_subscriptions() {
   done < <(_subscription_accounts)
 }
 
+# THE ORCHESTRATORS' OWN POOL (CEL-98). Root and the orchestrators run
+# `omp --model anthropic/...` on omp's OWN Anthropic credentials, not the
+# gateway, so the per-account sweep above - which reads whichever copy answers
+# best - can call an account healthy while omp's copy of it is dead. On
+# 2026-10-04 one of three was disabled (refresh token rejected) and the other
+# two were spent, and every orchestrator stopped with nothing anywhere saying
+# so. So the pool is judged as a pool: ONE item to root when every live
+# credential is at or above the threshold on its unscoped 5h or 7d window, or
+# when any credential is disabled; resolved when that stops being true. Read
+# from `omp usage --json` - no model call.
+_steward_orch_pool() {
+  # shellcheck source=lib/quota.sh
+  command -v _sub_omp_usage >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
+  local ws; ws="$(registry_names | head -n1)"
+  [ -n "$ws" ] || return 0
+  local raw; raw="$(_sub_omp_usage)"
+  [ -n "$raw" ] || return 0
+  local warn="${CEL_ORCH_POOL_WARN_PCT:-85}" verdict
+  verdict="$(printf '%s' "$raw" | jq -r --argjson warn "$warn" '
+    def anth: ((.provider // "") | ascii_downcase) as $p | $p == "anthropic" or $p == "claude";
+    [(.reports // [])[]? | select(anth)
+     | {who: (.metadata.email // .metadata.accountId // "?"),
+        pct: ([(.limits // [])[]? | select(type == "object")
+               | select((.scope.tier // null) == null and (.scope.modelId // null) == null)
+               | select((.window.id // .scope.windowId // "") as $w | $w == "5h" or $w == "7d")
+               | (.amount.usedFraction // 0) * 100] | max // 0)}] as $live
+    | [(.disabledCredentials // [])[]? | select(anth) | (.email // .accountId // "?")] as $dead
+    | ($live | length > 0 and all(.pct >= $warn)) as $hot
+    | if ($dead | length) == 0 and ($hot | not) then "clear"
+      else ([ (if $hot then "every live credential is at or above \($warn)% of its 5h or 7d window ("
+                 + ($live | map("\(.who) \(.pct | floor)%") | join(", ")) + ")" else empty end),
+              (if ($dead | length) > 0 then "disabled in omp: " + ($dead | join(", "))
+                 + " - re-login with: omp login anthropic" else empty end) ] | join("; "))
+      end' 2>/dev/null || true)"
+  # An unreadable answer is NO EVIDENCE, not headroom: clearing on it would
+  # take down a true warning the first time omp changed its document shape.
+  [ -n "$verdict" ] || return 0
+  if [ "$verdict" != clear ]; then
+    c_warn "orchestrator pool: $verdict"
+    _steward_due "orch-pool" && _steward_raise "$ws" orch-pool blocked \
+      "steward: the orchestrators' Claude pool (omp's anthropic credentials) is nearly out - $verdict. When it is spent, orchestrator turns wait for the reset." || true
+  else
+    _steward_clear "$ws" orch-pool "the orchestrators' Claude pool has headroom again"
+  fi
+}
+
 # THE QUEUE IS VISIBLE OR IT IS A HANG. Since 2026-09-18 the suite takes a
 # box-wide lock (tests/run.sh): six concurrent copies took the load to 190 and
 # three workers had to be interrupted by hand. A worker whose gate is queued
@@ -1674,6 +1720,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_ready_tickets "$agents_json"
   _steward_quota
   _steward_subscriptions
+  _steward_orch_pool
   # Before the server sweeps: a box at 5% available is why the next thing in
   # this tick fails to start, and reading that warning after three failures is
   # reading it in the wrong order.
