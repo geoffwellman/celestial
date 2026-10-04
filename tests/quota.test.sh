@@ -1087,3 +1087,33 @@ EOF2
   case "$js$out" in *fixture-beta-key*) printf 'printed a key\n' >&2; return 1;; esac
   _quota_teardown
 }
+
+# --- CEL-98: the login hint names the store that holds the dead credential ---
+# The orchestrators run on omp's OWN Anthropic pool, not the gateway. A
+# credential omp disabled (its refresh token rejected) printed
+# `cel gateway login claude`, which re-logs the gateway's copy - already fine -
+# and leaves the orchestrators' copy dead. The hint has to name omp's login.
+test_an_omp_disabled_credential_hints_the_omp_login() {
+  _quota_setup
+  _omp_stub
+  jq '.disabledCredentials = [{id: 10, provider: "anthropic", type: "oauth",
+        cause: "oauth refresh failed: invalid_grant", email: "ana@alpha.test",
+        accountId: "ant-ana", disabledAtMs: 1789975449000}]' \
+    "$(fixture omp-usage.json)" > "$T/omp-usage.json"
+  . "$CEL_ROOT/lib/quota.sh"
+  local row; row="$(_sub_omp_rows | jq -c 'select(.label == "ana@alpha.test")')"
+  assert_eq "$(printf '%s' "$row" | jq -r '.provider')" claude
+  assert_eq "$(printf '%s' "$row" | jq -r '.extra.state')" needs_login
+  assert_contains "$(printf '%s' "$row" | jq -r '.extra.reason')" "omp login anthropic"
+  ! printf '%s' "$row" | grep -q 'cel gateway login' || { echo "omp credential sent to the gateway login"; _quota_teardown; return 1; }
+  assert_contains "$(subscription_list | jq -r '.[] | select(.label == "ana@alpha.test") | .extra.reason')" "omp login anthropic"
+  _quota_teardown
+}
+
+# ...and a credential the GATEWAY holds still says the gateway login.
+test_a_gateway_disabled_credential_keeps_the_gateway_login() {
+  _quota_setup
+  . "$CEL_ROOT/lib/quota.sh"
+  assert_contains "$(_cpa_needs_login_row claude ant-ben ben@alpha.test | jq -r '.extra.reason')" "cel gateway login claude"
+  _quota_teardown
+}

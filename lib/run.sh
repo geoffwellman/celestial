@@ -117,6 +117,19 @@ _run_keep_model_args() { # <runtime>
   [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
 }
 
+# WAIT OUT A SPENT BUDGET (CEL-98). When every Claude credential in omp's pool
+# is spent, the server answers 429 with retry-after-ms around 5,500,000 and
+# omp's default retry.maxDelayMs (300000) refuses the wait: the orchestrator's
+# turn stopped until a human typed, and a timer screen-scraping panes was the
+# stopgap. omp 18 reads a --config overlay per launch, so root and the
+# orchestrators wait in-process and keep their context. Workers do not: a
+# worker asleep for hours holds a slot better given to another.
+_run_retry_overlay_args() { # <runtime> <role>
+  [ "$1" = omp ] || return 0
+  case "$2" in root|orchestrator) ;; *) return 0 ;; esac
+  AGENT_ARGS=("--config=$CEL_ROOT/core/omp-orchestrator.yml" "${AGENT_ARGS[@]}")
+}
+
 _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
   AGENT_ROLE_FILE=""
@@ -1188,6 +1201,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # two unread reviews for eight hours.
   _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
+  _run_retry_overlay_args "$runtime" "$role"
 
   # Runtime-wide launch flags (agents.yaml launch_args) go ahead of the
   # role-injection args on every launch of that runtime.
