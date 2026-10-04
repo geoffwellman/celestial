@@ -232,7 +232,7 @@ test_review_sweep_nudges_the_products_orchestrator() {
   : > "$T/prompts"
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h7"}}]}]'
 SH
   cat > "$T/bin/herdr" <<SH
 #!/usr/bin/env bash
@@ -1248,8 +1248,8 @@ test_review_sweep_nudges_are_mail_with_zero_prompts_and_stay_rate_limited() {
   _orch_fixture; _nudge_herdr_stub
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s' '[{"number":7,"headRefName":"WG-1-x","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
-             {"number":8,"headRefName":"WG-2-y","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"},
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h7"}}]},
+             {"number":8,"headRefName":"WG-2-y","headRefOid":"h8","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h8"}}]},
              {"number":9,"headRefName":"WG-3-z","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"},
              {"number":10,"headRefName":"noticket","reviewDecision":"","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z"}]'
 SH
@@ -1551,4 +1551,101 @@ test_cel93_steward_summarises_owner_decisions_once_a_day() {
   assert_eq "$(jq -c 'select(.from == "steward" and .kind != "status" and .kind != "resolution")' "$f")" ""
   assert_eq "$(jq -c 'select(.message | test("UNRESOLVED"))' "$f")" ""
   rm -rf "$T"
+}
+
+# --- CEL-96: the steward stays quiet about things that need no action -------
+# An orchestrator was woken four times overnight with "PR #41 is APPROVED -
+# action it now" for a PR whose code had already reached main another way;
+# another took 665 steward nudges in 1,697 messages. Each case below is a
+# false trigger from that mailbox.
+_cel96_sweep() { # <gh-json>
+  _orch_fixture; _nudge_herdr_stub
+  printf '%s' "$1" > "$T/prs.json"
+  cat > "$T/bin/gh" <<SH
+#!/usr/bin/env bash
+cat "$T/prs.json"
+SH
+  chmod +x "$T/bin/gh"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null 2>&1
+  CEL96_MAIL="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
+}
+
+test_cel96_a_superseded_or_held_pr_is_never_nudged() {
+  _cel96_sweep '[{"number":41,"headRefName":"WG-1-x","headRefOid":"h1","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[{"name":"superseded"}],"reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h1"}}]},
+                 {"number":42,"headRefName":"WG-2-y","headRefOid":"h2","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","labels":[{"name":"Hold"}],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h2"}}]},
+                 {"number":43,"headRefName":"WG-3-z","headRefOid":"h3","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h3"}}]}]'
+  assert_eq "$(printf '%s' "$CEL96_MAIL" | grep -c '#41' || true)" "0"
+  assert_eq "$(printf '%s' "$CEL96_MAIL" | grep -c '#42' || true)" "0"
+  assert_contains "$CEL96_MAIL" "PR #43 on widget is APPROVED"
+  rm -rf "$T"
+}
+
+test_cel96_an_approval_of_an_old_head_is_not_approved() {
+  _cel96_sweep '[{"number":41,"headRefName":"WG-1-x","headRefOid":"new","reviewDecision":"APPROVED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"APPROVED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"old"}}]}]'
+  assert_eq "$(printf '%s' "$CEL96_MAIL" | grep -c 'APPROVED' || true)" "0"
+  rm -rf "$T"
+}
+
+test_cel96_changes_requested_on_a_superseded_head_is_not_nagged() {
+  # ana asked for changes on `old`; ben pushed `new`. The fix is on the branch.
+  _cel96_sweep '[{"number":41,"headRefName":"WG-1-x","headRefOid":"new","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"old"}}]},
+                 {"number":42,"headRefName":"WG-2-y","headRefOid":"h2","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h2"}},{"state":"APPROVED","submittedAt":"2020-01-03T00:00:00Z","commit":{"oid":"h2"}}]}]'
+  assert_eq "$(printf '%s' "$CEL96_MAIL" | grep -c 'changes requested' || true)" "0"
+  rm -rf "$T"
+}
+
+test_cel96_changes_requested_on_the_current_head_is_still_nagged() {
+  _cel96_sweep '[{"number":41,"headRefName":"WG-1-x","headRefOid":"h1","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"APPROVED","submittedAt":"2020-01-01T00:00:00Z","commit":{"oid":"h0"}},{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h1"}}]}]'
+  assert_contains "$CEL96_MAIL" "PR #41 on widget has changes requested"
+  rm -rf "$T"
+  # an approval submitted later, but of an OLD head, answers nothing
+  _cel96_sweep '[{"number":42,"headRefName":"WG-2-y","headRefOid":"h2","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","labels":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h2"}},{"state":"APPROVED","submittedAt":"2020-01-03T00:00:00Z","commit":{"oid":"h1"}}]}]'
+  assert_contains "$CEL96_MAIL" "PR #42 on widget has changes requested"
+  rm -rf "$T"
+}
+
+# Ticket nags are for the fleet's own open work: not ben's ticket, not a Done
+# ticket, not one the owner has marked blocked.
+test_cel96_ticket_nags_skip_others_done_and_blocked_tickets() {
+  _orch_fixture
+  printf 'LINEAR_API_KEY=fixture-alpha\n' > "$T/alpha/env.local"
+  : > "$T/sent"
+  curl() {
+    printf '%s' '{"data":{"issues":{"nodes":[
+      {"identifier":"WG-1","title":"mine","assignee":{"isMe":true},"state":{"name":"Ready","type":"unstarted"},"labels":{"nodes":[]}},
+      {"identifier":"WG-2","title":"bens","assignee":{"isMe":false},"state":{"name":"Ready","type":"unstarted"},"labels":{"nodes":[]}},
+      {"identifier":"WG-3","title":"done","assignee":{"isMe":true},"state":{"name":"Done","type":"completed"},"labels":{"nodes":[]}},
+      {"identifier":"WG-4","title":"cancelled","assignee":null,"state":{"name":"Cancelled","type":"canceled"},"labels":{"nodes":[]}},
+      {"identifier":"WG-5","title":"held","assignee":{"isMe":true},"state":{"name":"Ready","type":"unstarted"},"labels":{"nodes":[{"name":"Blocked"}]}},
+      {"identifier":"WG-6","title":"stated","assignee":{"isMe":true},"state":{"name":"Blocked","type":"started"},"labels":{"nodes":[]}}]}}}'
+  }
+  local sent=""
+  cmd_inbox() { printf '%s\n' "$3" >> "$T/sent"; }
+  _steward_ready_tickets "$LIVE_ROSTER" >/dev/null
+  sent="$(cat "$T/sent")"
+  assert_contains "$sent" "WG-1 "
+  local id; for id in WG-2 WG-3 WG-4 WG-5 WG-6; do
+    assert_eq "$(printf '%s' "$sent" | grep -c "$id " || true)" "0"
+  done
+  rm -rf "$T"
+}
+
+# The AFK nag rolled up nowhere: 1,148 copies in a day and a half.
+test_cel96_afk_expired_is_one_item_counting_raises_and_resolves_when_cleared() {
+  _afk_sweep_fixture '2020-01-01T00:00:00Z' || return 1
+  # the fixture records raises; this test wants the real mailbox behind them
+  _steward_raise() { cmd_inbox send root "$4" --from steward --workspace "$1" --kind "$3" --fp "$2" >/dev/null 2>&1 || true; }
+  export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  local i; for i in $(seq 1 100); do _steward_afk_sweep >/dev/null 2>&1; done
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id
+  # one item, 99 updates on it: a count of 100 on one unresolved condition
+  assert_eq "$(jq -s '[.[] | select(.fp == "afk-expired" and .kind == "status")] | length' "$f")" "1"
+  id="$(_inbox_open_fp alpha afk-expired steward root)"
+  assert_eq "$(jq -s --arg i "$id" '1 + ([.[] | select(.kind == "update" and .ref == $i)] | length)' "$f")" "100"
+  cmd_afk off >/dev/null 2>&1
+  _steward_afk_sweep >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp alpha afk-expired steward root)" ""
+  assert_eq "$(_inbox_open_fp beta afk-expired steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
+  _afk_sweep_teardown; unset CEL_INBOX_DIR
 }
