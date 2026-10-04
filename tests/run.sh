@@ -75,7 +75,11 @@ _suite_spawn() ( # <fd> <cmd> [args...] - lock_spawn, inlined
 )
 _suite_lock_take() {
   local path; path="$(suite_lock_path)"
-  [ "$NO_LOCK" -eq 1 ] && return 0
+  # --no-lock means the whole run stays out of the queue, nested gates
+  # included: tests/fanout.test.sh runs collect, which runs cel-verify, which
+  # would otherwise queue on the box lock from inside a run that chose not to
+  # (CEL-97 measured four such tests sitting at the per-test limit).
+  if [ "$NO_LOCK" -eq 1 ]; then export CEL_SUITE_LOCK_HELD=1; return 0; fi
   [ "$path" = none ] && return 0
   # RE-ENTRANT BY INHERITANCE. tests/fanout.test.sh runs `cel-fanout collect`,
   # which runs cel-verify, which runs a gate - a whole second suite, started
@@ -168,32 +172,64 @@ _kill_tmpdir_strays() {
   done
   return 0
 }
-trap '_kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"' EXIT
-trap '_kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; exit 130' INT TERM
 PRELUDE="set -e; source '$CEL_ROOT/tests/lib/assert.sh'"
-pass=0; fail=0
 
-for f in "$CEL_ROOT"/tests/*.test.sh; do
-  [ -f "$f" ] || continue
+# A TEST CANNOT HOLD THE BOX. On 2026-10-04 the suite lock was held for eighty
+# minutes by one run stuck in a single new test whose `tools/dash/server.mjs`
+# child never exited; two workers' suites and a land queued behind it, and
+# nothing anywhere bounded a single test. Each test now has a wall limit
+# (CEL_TEST_TIMEOUT seconds, generous by default - the slowest honest test is
+# well under a minute) and on expiry its whole process group goes, servers
+# included, and it is reported as a timeout naming the test.
+TEST_TIMEOUT="${CEL_TEST_TIMEOUT:-120}"
+case "$TEST_TIMEOUT" in ''|*[!0-9]*|0) TEST_TIMEOUT=120 ;; esac
+
+# INDEPENDENT FILES RUN SIDE BY SIDE. CI's suite reached nineteen minutes
+# against a twenty-minute job limit and a rerun was cancelled at the limit,
+# blocking a merge. Every test already lives in its own process and its own
+# mktemp fixture, so most files share nothing and can run at once; the few that
+# do share something - a wall clock they measure, a box-wide process table
+# they sweep - are listed in SERIAL_FILES with the reason, and run alone after
+# the parallel pool has drained. CEL_TEST_JOBS=1 is the old serial runner.
+if [ -z "${CEL_TEST_JOBS:-}" ]; then
+  CEL_TEST_JOBS="$(nproc 2>/dev/null || echo 2)"
+  [ "$CEL_TEST_JOBS" -le 6 ] || CEL_TEST_JOBS=6
+fi
+case "$CEL_TEST_JOBS" in ''|*[!0-9]*|0) CEL_TEST_JOBS=1 ;; esac
+#   suite-lock.test.sh - asserts wall-clock overlap of two suites; load from
+#                        neighbours turns "did they queue" into noise
+#   orphans.test.sh    - sweeps and counts processes box-wide
+#   memory.test.sh     - measures process memory and trees box-wide
+SERIAL_FILES=" suite-lock.test.sh orphans.test.sh memory.test.sh "
+
+RESULTS="$TMPDIR/.results"; mkdir -p "$RESULTS"
+
+# One file, its tests one after another, its report written to
+# $RESULTS/<n>.out and its counts to <n>.count. The report is printed by the
+# main shell, in file order, so a parallel run reads exactly like a serial one.
+_run_file() { # <n> <file>
+  local n="$1" f="$2" base t tout out rc limit_hit wd p=0 fl=0
+  local rep="$RESULTS/$n.out"
   base="$(basename "$f")"
-
+  CURRENT_GROUP=""
+  trap '_kill_current_group; exit 143' TERM INT
+  : > "$rep"
   if ! err="$(_suite_spawn "$SUITE_LOCK_FD" bash -c "$PRELUDE; source '$f'" 2>&1)"; then
-    fail=$((fail+1))
     printf '  \033[31mFAIL\033[0m %s (could not be sourced)\n%s\n' \
-      "$base" "$(printf '%s' "$err" | sed 's/^/       /')"
-    continue
+      "$base" "$(printf '%s' "$err" | sed 's/^/       /')" >> "$rep"
+    printf '0 1\n' > "$RESULTS/$n.count"; return 0
   fi
-
+  local names
   names="$(_suite_spawn "$SUITE_LOCK_FD" bash -c "$PRELUDE; source '$f'; declare -F | awk '{print \$3}' | grep '^test_'")"
   if [ -z "$names" ]; then
-    fail=$((fail+1))
-    printf '  \033[31mFAIL\033[0m %s (defines no test_ functions)\n' "$base"
-    continue
+    printf '  \033[31mFAIL\033[0m %s (defines no test_ functions)\n' "$base" >> "$rep"
+    printf '0 1\n' > "$RESULTS/$n.count"; return 0
   fi
-
   for t in $names; do
     if [ -n "$FILTER" ]; then case "$t" in *"$FILTER"*) ;; *) continue;; esac; fi
-    tout="$TMPDIR/.test-output"
+    tout="$RESULTS/$n.test-output"
+    limit_hit="$RESULTS/$n.limit"; rm -f "$limit_hit"
+    local t0; t0="$(date +%s%N)"
     # THE LOCK DESCRIPTOR IS NOT THE TEST'S TO HOLD. Every child inherits it,
     # and this runner deliberately tolerates tests that leak a process (the
     # setsid servers the group-kill above exists for). A leaked process holding
@@ -203,17 +239,95 @@ for f in "$CEL_ROOT"/tests/*.test.sh; do
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
       exec setsid bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
     CURRENT_GROUP=$!
+    # The watchdog closes the lock descriptor too: a watchdog's orphaned sleep
+    # holding the lock is the 2026-09-19 outage cel-verify already answered.
+    ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
+      exec bash -c 'sleep "$1"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
+        kill -TERM -- "-$2" 2>/dev/null; sleep 1; kill -KILL -- "-$2" 2>/dev/null' \
+        _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" ) >/dev/null 2>&1 &
+    wd=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
+    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
     _kill_current_group
+    if [ -n "${CEL_TEST_TIMES:-}" ]; then
+      printf '%s %s %s\n' "$(( ($(date +%s%N) - t0) / 1000000 ))" "$base" "$t" >> "$CEL_TEST_TIMES"
+    fi
     out="$(cat "$tout")"; rm -f "$tout"
-    if [ "$rc" -eq 0 ]; then
-      pass=$((pass+1)); printf '  \033[32mok\033[0m   %s\n' "$t"
+    if [ -e "$limit_hit" ]; then
+      rm -f "$limit_hit"
+      fl=$((fl+1))
+      printf '  \033[31mFAIL\033[0m %s (timed out after %ss - its process group was killed; CEL_TEST_TIMEOUT)\n%s\n' \
+        "$t" "$TEST_TIMEOUT" "$(printf '%s' "$out" | sed 's/^/       /')" >> "$rep"
+    elif [ "$rc" -eq 0 ]; then
+      p=$((p+1)); printf '  \033[32mok\033[0m   %s\n' "$t" >> "$rep"
     else
-      fail=$((fail+1))
-      printf '  \033[31mFAIL\033[0m %s\n%s\n' "$t" "$(printf '%s' "$out" | sed 's/^/       /')"
+      fl=$((fl+1))
+      printf '  \033[31mFAIL\033[0m %s\n%s\n' "$t" "$(printf '%s' "$out" | sed 's/^/       /')" >> "$rep"
     fi
   done
+  printf '%s %s\n' "$p" "$fl" > "$RESULTS/$n.count"
+}
+
+RUNNERS=()
+_kill_runners() {
+  local r; for r in "${RUNNERS[@]:-}"; do [ -n "$r" ] && kill -TERM "$r" 2>/dev/null; done
+  return 0
+}
+trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"' EXIT
+trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; exit 130' INT TERM
+
+FILES=() ORDER=()
+for f in "$CEL_ROOT"/tests/*.test.sh; do [ -f "$f" ] && FILES+=("$f"); done
+# Parallel-safe files first (their pool starts at once), serial files after.
+for i in "${!FILES[@]}"; do
+  case "$SERIAL_FILES" in *" $(basename "${FILES[$i]}") "*) ;; *) ORDER+=("$i") ;; esac
 done
+for i in "${!FILES[@]}"; do
+  case "$SERIAL_FILES" in *" $(basename "${FILES[$i]}") "*) ORDER+=("$i") ;; esac
+done
+
+pass=0; fail=0
+_report() { # <n> - print a finished file's report and add up its counts
+  cat "$RESULTS/$1.out"
+  local c; c="$(cat "$RESULTS/$1.count" 2>/dev/null || echo "0 1")"
+  pass=$((pass + ${c%% *})); fail=$((fail + ${c##* }))
+}
+
+if [ "$CEL_TEST_JOBS" -le 1 ]; then
+  for i in "${ORDER[@]}"; do _run_file "$i" "${FILES[$i]}"; _report "$i"; done
+else
+  # Launch up to CEL_TEST_JOBS runners; report each file in launch order as
+  # soon as it and everything before it are done, so the log still streams.
+  next=0 printed=0
+  declare -A PID_OF=()
+  _in_flight() { # launched and not yet finished
+    local k c=0
+    for ((k=printed; k<next; k++)); do [ -e "$RESULTS/${ORDER[$k]}.count" ] || c=$((c+1)); done
+    printf '%s' "$c"
+  }
+  while [ "$printed" -lt "${#ORDER[@]}" ]; do
+    while [ "$next" -lt "${#ORDER[@]}" ] && [ "$(_in_flight)" -lt "$CEL_TEST_JOBS" ]; do
+      i="${ORDER[$next]}"
+      # a serial file starts only when nothing else is running, and nothing
+      # starts beside it
+      case "$SERIAL_FILES" in *" $(basename "${FILES[$i]}") "*)
+        [ "$(_in_flight)" -eq 0 ] || break
+        _run_file "$i" "${FILES[$i]}" &
+        PID_OF[$i]=$!; RUNNERS+=("$!"); next=$((next+1))
+        break ;;
+      esac
+      _run_file "$i" "${FILES[$i]}" &
+      PID_OF[$i]=$!; RUNNERS+=("$!"); next=$((next+1))
+    done
+    progressed=0
+    while [ "$printed" -lt "$next" ] && [ -e "$RESULTS/${ORDER[$printed]}.count" ]; do
+      i="${ORDER[$printed]}"
+      wait "${PID_OF[$i]}" 2>/dev/null
+      _report "$i"; printed=$((printed+1)); progressed=1
+    done
+    [ "$progressed" -eq 1 ] || sleep 0.2
+  done
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -83,16 +83,21 @@ test_a_lone_suite_says_nothing_about_the_lock() {
 # they are doing. It runs while somebody else holds it.
 test_no_lock_runs_while_the_lock_is_held() {
   _suite_fixture
-  ( flock 9; exec sleep 10 ) 9>>"$CEL_SUITE_LOCK" &
+  # The holder outlives the test and is killed by it. It was `sleep 10`, and
+  # on a box at load 37 the two runs below took longer than that: the holder
+  # was gone, the second run proved nothing, and the final `kill` of a dead pid
+  # failed under set -e - a silent FAIL with no message, on clean main (CEL-97).
+  ( flock 9; exec sleep 600 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
-  _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
+  _await_held "$CEL_SUITE_LOCK" || { echo "the fixture holder never took the lock"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(bash "$T/tests/run.sh" --no-lock 2>&1)"
   assert_contains "$out" "1 passed, 0 failed"
   case "$out" in *"waiting for the suite lock"*) echo "--no-lock still queued"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1;; esac
   # and so does the environment spelling of the same thing
+  _await_held "$CEL_SUITE_LOCK" 1 || { echo "the lock was released before the second run - it would prove nothing"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   out="$(CEL_SUITE_LOCK=none bash "$T/tests/run.sh" 2>&1)"
   assert_contains "$out" "1 passed, 0 failed"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   rm -rf "$T"
 }
 
@@ -271,5 +276,47 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   assert_eq "$(doctor_suite_lock_line)" ""
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   unset CEL_SUITE_LOCK
+  rm -rf "$T"
+}
+
+# ---- CEL-97: one test cannot hold the box ------------------------------------
+# On 2026-10-04 the suite lock was held for eighty minutes by one run stuck in
+# a single test whose server child never exited; two workers' suites and a land
+# queued behind it. Each test now has a wall limit, and its whole process group
+# - the servers it started included - goes when the limit does.
+test_a_test_past_its_wall_limit_is_a_timeout_and_its_children_go() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  cat > "$T/tests/hang.test.sh" <<EOF
+test_a_hangs() { sleep 300 & echo \$! > "$T/child.pid"; sleep 300; }
+test_b_runs_after() { :; }
+EOF
+  local out rc=0 t0; t0="$(date +%s)"
+  out="$(CEL_TEST_TIMEOUT=2 bash "$T/tests/run.sh" --no-lock 2>&1)" || rc=$?
+  [ "$(( $(date +%s) - t0 ))" -lt 30 ] || { echo "the limit did not bound the test"; rm -rf "$T"; return 1; }
+  [ "$rc" -ne 0 ] || { echo "a timed-out test passed the suite"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "test_a_hangs"
+  assert_contains "$out" "timed out after 2s"
+  assert_contains "$out" "test_b_runs_after"
+  assert_contains "$out" "1 passed, 1 failed"
+  local pid; pid="$(cat "$T/child.pid")"
+  sleep 0.5
+  ! kill -0 "$pid" 2>/dev/null || { echo "the hung test's child survived"; kill "$pid"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Files run in parallel must reach the same verdicts as one after another.
+test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  local n
+  for n in 1 2 3 4 5; do
+    printf 'test_f%s_passes() { sleep 0.2; }\ntest_f%s_fails() { false; }\n' "$n" "$n" > "$T/tests/f$n.test.sh"
+  done
+  local serial parallel
+  serial="$(CEL_TEST_JOBS=1 bash "$T/tests/run.sh" --no-lock 2>&1 | grep -E 'ok|FAIL|passed' | sort)"
+  parallel="$(CEL_TEST_JOBS=4 bash "$T/tests/run.sh" --no-lock 2>&1 | grep -E 'ok|FAIL|passed' | sort)"
+  assert_contains "$serial" "5 passed, 5 failed"
+  assert_eq "$parallel" "$serial"
   rm -rf "$T"
 }
