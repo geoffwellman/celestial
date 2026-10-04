@@ -68,7 +68,9 @@ test_mem_tree_rss_mb_counts_a_real_child_and_leaves_a_sibling_at_zero() {
   assert_eq "$(readlink "/proc/$pid/cwd")" "$T/mine/sub"
 
   local kb mb
-  kb="$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")"
+  # PSS where the kernel offers it (CEL-100), RSS otherwise.
+  kb="$(awk '/^Pss:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null)"
+  [ -n "$kb" ] || kb="$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")"
   mb="$(mem_tree_rss_mb "$T/mine")"
   # A NESTED cwd belongs to the tree above it: a gate run happens in a
   # subdirectory of the worktree and is still the worker's memory.

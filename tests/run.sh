@@ -242,7 +242,10 @@ _run_file() { # <n> <file>
     # The watchdog closes the lock descriptor too: a watchdog's orphaned sleep
     # holding the lock is the 2026-09-19 outage cel-verify already answered.
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
-      exec bash -c 'sleep "$1"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
+      # The sleep runs in the background and the watchdog waits on it, so the
+      # TERM sent when the test finishes first reaches the trap and takes the
+      # sleep with it (CEL-100: 385 orphaned `sleep 120`s from one suite run).
+      exec bash -c 'trap "kill \$s 2>/dev/null; exit 0" TERM; sleep "$1" & s=$!; wait "$s"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
         kill -TERM -- "-$2" 2>/dev/null; sleep 1; kill -KILL -- "-$2" 2>/dev/null' \
         _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" ) >/dev/null 2>&1 &
     wd=$!
