@@ -94,7 +94,7 @@ cel decide - the owner's one queue of decisions, across every workspace
       open record instead of adding a second one.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
-  cel decide answer <id> <option-number|"free text"|--text <text>> [--by who]
+  cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
       digits pick that option when it exists, else they are the answer; resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
   cel decide drop <id> --why <text> [--by who]
       resolve a question that no longer matters; the asker is told why.
@@ -220,7 +220,10 @@ _decide_close_locked() {
 _decide_answer() {
   [ $# -ge 2 ] || die "usage: cel decide answer <id> <option-number|\"free text\"|--text <text>> [--by who]"
   local id="$1" ans="" by="" free=0; shift
+  # --option <n> is strict (the dashboard's buttons): a number naming no
+  # option is refused rather than recorded as the text "9".
   if [ "$1" = --text ]; then free=1; ans="${2:-}"; shift 2 || true
+  elif [ "$1" = --option ]; then free=2; ans="${2:-}"; shift 2 || true
   else ans="$1"; shift; fi
   [ -n "$ans" ] || die "cel decide answer: an answer is required"
   while [ $# -gt 0 ]; do
@@ -235,7 +238,11 @@ _decide_answer() {
   # All digits is an option number only when that option exists; otherwise
   # it is the answer itself ("2026"). --text says so outright.
   local text="$ans" picked=""
-  if [ "$free" -eq 0 ]; then
+  if [ "$free" -eq 2 ]; then
+    case "$ans" in *[!0-9]*) die "cel decide answer: --option takes a number" ;; esac
+    text="$(jq -r --argjson n "$ans" 'if $n >= 1 then (.options[$n - 1].label // empty) else empty end' <<< "$rec")"
+    [ -n "$text" ] || die "cel decide answer: decision $id has no option $ans"
+  elif [ "$free" -eq 0 ]; then
     case "$ans" in
       *[!0-9]*) ;;
       *) picked="$(jq -r --argjson n "$ans" 'if $n >= 1 then (.options[$n - 1].label // empty) else empty end' <<< "$rec")"

@@ -1323,7 +1323,10 @@ function renderNeedsYou(){
       // one submission per item: a double click must not answer twice
       busy=true;Array.prototype.forEach.call(ctl,function(c){c.disabled=true});
       var body=option?{id:id,action:action,option:option}:{id:id,action:action,value:value};
-      var r=await post('/api/decide',body);
+      // a fetch that rejects (server down, connection cut) must not leave the
+      // item disabled for good: controls come back on every failure path
+      var r;
+      try{r=await post('/api/decide',body)}catch(e){r={ok:false,text:'not sent: '+(e&&e.message||e)}}
       toast(r.ok?(action==='drop'?'dropped':'answered'):r.text,r.ok);
       if(r.ok){el.remove();LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id})}
       else{busy=false;Array.prototype.forEach.call(ctl,function(c){c.disabled=false})}
@@ -1904,7 +1907,9 @@ const server = createServer(async (req, res) => {
       // digits in the box are the answer itself. A second submission (double
       // click, another tab) is refused by `cel decide`, which re-checks the
       // record is still open under the mailbox lock.
-      const { id, action, value, option } = await readBody(req, 6000);
+      let parsed;
+      try { parsed = await readBody(req, 6000); } catch { res.writeHead(400).end('invalid request body'); return; }
+      const { id, action, value, option } = parsed || {};
       const v = String(value || '').trim();
       if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
       if (!['answer', 'drop'].includes(action)) { res.writeHead(400).end('action must be answer or drop'); return; }
@@ -1913,10 +1918,10 @@ const server = createServer(async (req, res) => {
       if (!byIndex && (!v || v.length > 2000)) { res.writeHead(400).end(action === 'drop' ? 'a reason is required' : 'an answer is required'); return; }
       const args = action === 'drop'
         ? ['decide', 'drop', String(id), '--why', v, '--by', 'dashboard']
-        : byIndex ? ['decide', 'answer', String(id), String(option), '--by', 'dashboard']
+        : byIndex ? ['decide', 'answer', String(id), '--option', String(option), '--by', 'dashboard']
           : ['decide', 'answer', String(id), '--text', v, '--by', 'dashboard'];
       const out = await run(join(CEL_ROOT, 'bin/cel'), args, 15000);
-      if (out === null) { res.writeHead(502).end('could not record it (already answered?)'); return; }
+      if (out === null) { res.writeHead(409).end('not recorded: already answered, or no such option'); return; }
       delete cache.decisions;
       res.writeHead(200).end('ok');
     } else if (req.method === 'POST' && req.url === '/api/ticket-state') {
