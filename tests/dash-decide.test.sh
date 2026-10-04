@@ -104,3 +104,21 @@ test_dash_concurrent_answers_resolve_once() {
   assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$T/inbox/alpha.jsonl" | grep -c . || true)" "1"
   _dd_down
 }
+
+# Sourcery on #122: an option the decision does not have is refused, never
+# recorded as the free-text answer "9".
+test_dash_refuses_an_option_the_decision_does_not_have() {
+  _dd_boot
+  local code; code="$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"option\":9}" -H "x-cel-csrf: $TOKEN")"
+  [ "$code" = 400 ] || [ "$code" = 502 ] || { echo "option 9 accepted: $code"; return 1; }
+  assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null | jq -r .title)" "pick a style"
+  assert_eq "$(jq -c 'select(.to == "alpha-orch")' "$T/inbox/alpha.jsonl")" ""
+  _dd_down
+}
+
+# ...and malformed JSON is the client's error (400), not a server 500.
+test_dash_decide_malformed_json_is_a_400() {
+  _dd_boot
+  assert_eq "$(_dd_post '{not json' -H "x-cel-csrf: $TOKEN")" "400"
+  _dd_down
+}
