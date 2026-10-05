@@ -19,7 +19,7 @@ _dd_boot() {
   ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha \
     --title "pick a style" --option "flat::quick" --option "glossy::pretty" --recommend 2 2>/dev/null)"
   DASH_PORT="$(_dd_port)"
-  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]}" \
+  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
     PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
   DASH_PID=$!
   # however the test ends - a failed assert included - the server goes too
@@ -207,9 +207,9 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   local gone; gone="$(_dd_ask alpha --title "settled elsewhere" --option "a::x")"
   mkdir -p "$T/shots"
   local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
-  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/" "$ID" "$gone" "$mutate" 2600 "$T/shots")"
+  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
   if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then echo "SKIP: $(printf '%s' "$out" | jq -r .skip)" >&2; _dd_down; return 0; fi
-  [ -n "${CEL_DASH_SHOTS:-}" ] && cp "$T/shots/"*.png "$CEL_DASH_SHOTS/" 2>/dev/null
+  if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T/shots/"*.png "$CEL_DASH_SHOTS/" 2>/dev/null || true; fi
   assert_eq "$(printf '%s' "$out" | jq -r .keepOpen)" "true"
   assert_eq "$(printf '%s' "$out" | jq -r .keepText)" "half a thought"
   assert_eq "$(printf '%s' "$out" | jq -r .focused)" "true"

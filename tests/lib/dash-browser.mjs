@@ -8,11 +8,12 @@
 //
 //   node dash-browser.mjs <url> <keep-id> <gone-id> <mutate-cmd> <wait-ms> <shot-dir>
 //
-// Opens both cards' "other…", types into each, arms <keep-id>'s accept button,
-// opens the bulk preview, runs <mutate-cmd> (which files a new decision and
-// answers <gone-id> elsewhere), waits <wait-ms>, and prints what survived as
-// JSON. Screenshots before.png / after.png land in <shot-dir>.
-import { spawn, execSync } from 'node:child_process';
+// Opens both cards' "other…", types into each, opens the bulk preview, arms
+// <keep-id>'s accept button, runs <mutate-cmd> (which files a new decision and
+// answers <gone-id> elsewhere), waits for the repaint and two more refreshes
+// plus <wait-ms>, and prints what survived as JSON. Screenshots before.png /
+// after.png land in <shot-dir>.
+import { spawn, exec, execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -81,12 +82,32 @@ const main = async () => {
       document.querySelector('button.bulk').click();
       k=${sel(keepId)};
       k.querySelector('details.other').open=true;
-      k.querySelector('button.accept').click();
       var ki=k.querySelector('.free');ki.focus();ki.value='half a thought';ki.dispatchEvent(new Event('input',{bubbles:true}));
       ki.setSelectionRange(4,4);
       return true})()`);
     await shot('before.png');
-    execSync(mutate, { stdio: 'ignore', shell: '/bin/bash' });
+    // armed just before the data changes: it lasts 4 s by design
+    await evaluate(`(function(){var a=document.activeElement;${sel(keepId)}.querySelector('button.accept').click();a.focus();a.setSelectionRange(4,4);return 1})()`);
+    const sig0 = await evaluate(`document.getElementById('needsyou').dataset.sig`);
+    const upd = () => evaluate(`document.getElementById('updated').textContent`);
+    const done = new Promise((r) => exec(mutate, { shell: '/bin/bash' }, r));
+    // the repaint the bug lived in: the panel's data changed and it redrew
+    let armedAfterRepaint = false, repaintMs = -1;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000) {
+      if (await evaluate(`document.getElementById('needsyou').dataset.sig`) !== sig0) {
+        repaintMs = Date.now() - t0;
+        armedAfterRepaint = await evaluate(`!!document.querySelector('.nycard[data-id="${keepId}"] button.accept.armed')`);
+        break;
+      }
+      await sleep(50);
+    }
+    // then past two more refreshes, however slow this box makes them
+    for (let n = 0, last = await upd(); n < 2 && Date.now() - t0 < 40000;) {
+      await sleep(100);
+      const u = await upd(); if (u !== last) { n++; last = u; }
+    }
+    await done;
     await sleep(Number(waitMs));
     await shot('after.png');
     const out = await evaluate(`(function(){
@@ -96,12 +117,13 @@ const main = async () => {
         keepText: k ? k.querySelector('.free').value : null,
         focused: !!(k && a === k.querySelector('.free')),
         caret: a && a.selectionStart,
-        armed: !!(k && k.querySelector('button.accept.armed')),
+        armed: ${armedAfterRepaint}, repaintMs: ${repaintMs},
         bulkOpen: !!document.querySelector('.nybulk'),
         cards: document.querySelectorAll('.nycard').length,
         goneShown: !!g,
         goneText: g ? g.querySelector('.free').value : null,
-        goneClosed: !!(g && /closed elsewhere/.test(g.textContent))
+        goneClosed: !!(g && /closed elsewhere/.test(g.textContent)),
+        updated: document.getElementById('updated').textContent
       }})()`);
     console.log(JSON.stringify(out));
     ws.close();

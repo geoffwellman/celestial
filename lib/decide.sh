@@ -77,6 +77,7 @@ cmd_decide() {
     list)    _decide_list "$@" ;;
     answer)  _decide_answer "$@" ;;
     drop)    _decide_drop "$@" ;;
+    withdraw) _decide_withdraw "$@" ;;
     migrate) _decide_migrate "$@" ;;
     help|--help|-h) _decide_usage ;;
     *) c_err "cel decide: unknown subcommand '$sub'"; _decide_usage; return 2 ;;
@@ -89,16 +90,22 @@ cel decide - the owner's one queue of decisions, across every workspace
 
   cel decide ask --title <one line> [--option <label>::<tradeoff>]... [--recommend <n>]
                  [--context <url-or-path>] [--blocks <what waits on it>] [--urgent] [--workspace w]
+                 [--supersedes <id>]
       file a question for the owner; prints its id. The asker is who you are
       (cel inbox whoami), never a flag. Re-asking the same title updates the
       open record instead of adding a second one. --urgent is for live risk,
       money, or work that is blocked now: the dashboard sorts it first.
+      --supersedes closes your own older question <id> as replaced by this
+      one, in the same write.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
       digits pick that option when it exists, else they are the answer; resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
   cel decide drop <id> --why <text> [--by who]
       resolve a question that no longer matters; the asker is told why.
+  cel decide withdraw <id> --why <text>
+      the ASKER closes its own question (settled in chat, moot after a merge).
+      Who you are is derived (cel inbox whoami); nobody else may withdraw it.
   cel decide migrate [--apply]
       resolve open steward REMINDER items (never real decisions). A dry run
       unless --apply is given.
@@ -106,7 +113,7 @@ EOS
 }
 
 _decide_ask() {
-  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false
+  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false supersedes=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title="$2"; shift 2 ;;
@@ -120,6 +127,7 @@ _decide_ask() {
       --blocks) blocks="$2"; shift 2 ;;
       --urgent) urgent=true; shift ;;
       --workspace) ws="$2"; shift 2 ;;
+      --supersedes) supersedes="$2"; shift 2 ;;
       *) die "cel decide ask: unknown argument '$1'" ;;
     esac
   done
@@ -137,16 +145,26 @@ _decide_ask() {
   local fields
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
     --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" --argjson urgent "$urgent" \
+    --arg sup "$supersedes" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
       context: $context, blocks: $blocks, asker: $asker, message: $title}
      # urgent only when asked: a re-ask that omits it must not clear it
-     + (if $urgent then {urgent: true} else {} end)')"
-  _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields"
+     + (if $urgent then {urgent: true} else {} end)
+     + (if $sup != "" then {supersedes: $sup} else {} end)')"
+  _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields" "$supersedes"
 }
 
-_decide_ask_write() { # <ws> <asker> <title> <fields-json>
-  local wsname="$1" asker="$2" title="$3" fields="$4"
+_decide_ask_write() { # <ws> <asker> <title> <fields-json> [supersedes-id]
+  local wsname="$1" asker="$2" title="$3" fields="$4" sup="${5:-}"
   local f; f="$(_inbox_file "$wsname")"
+  # SUPERSEDING IS CHECKED BEFORE ANYTHING IS WRITTEN, under the same lock: a
+  # refused --supersedes must not leave the new question filed beside the old.
+  # Only the asker's own open question in this mailbox can be replaced.
+  if [ -n "$sup" ]; then
+    decide_open_json "$wsname" | jq -e --arg id "$sup" --arg a "$asker" \
+      'select(.id == $id and .asker == $a)' >/dev/null 2>&1 \
+      || { c_err "cel decide ask: --supersedes $sup names no open question of yours in $wsname" >&2; return 1; }
+  fi
   # ONE RECORD PER QUESTION: same asker, same title, still open.
   local ref=""
   ref="$(decide_open_json "$wsname" | jq -r --arg a "$asker" --arg t "$title" \
@@ -158,9 +176,19 @@ _decide_ask_write() { # <ws> <asker> <title> <fields-json>
     c_ok "updated open decision $ref in $wsname" >&2
     printf '%s\n' "$ref"; return 0
   fi
-  _inbox_append "$f" "$(jq -c --arg id "$id" --arg ts "$(date -Is)" --arg from "$asker" --arg cwd "$PWD" \
+  local rec
+  rec="$(jq -c --arg id "$id" --arg ts "$(date -Is)" --arg from "$asker" --arg cwd "$PWD" \
     '. + {id: $id, ts: $ts, to: "owner", from: $from, kind: "decision", fp: ("decide:" + .title), cwd: $cwd}' <<< "$fields")"
-  c_ok "filed decision for the owner in $wsname" >&2
+  if [ -n "$sup" ]; then
+    # ONE WRITE: the new question and the old one's resolution land together,
+    # so no reader ever sees both open or neither.
+    rec="$rec"$'\n'"$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$sup" \
+      --arg by "$asker" --arg new "$id" \
+      '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: "owner",
+        superseded_by: $new, message: ("superseded by " + $new)}')"
+  fi
+  _inbox_append "$f" "$rec"
+  c_ok "filed decision for the owner in $wsname$([ -n "$sup" ] && printf ' (supersedes %s)' "$sup")" >&2
   printf '%s\n' "$id"
 }
 
@@ -273,6 +301,42 @@ _decide_drop() {
   [ -n "$rec" ] || die "cel decide drop: no open owner decision with id $id"
   local title; title="$(jq -r .title <<< "$rec")"
   _decide_close "$rec" "$by" dropped "$why" "DROPPED \"$title\": $why (decision $id, by $by)"
+}
+
+# THE ASKER CAN CLOSE ITS OWN QUESTION (CEL-101). Questions settled in an
+# orchestrator's chat or made moot by a merge sat in the owner's panel until
+# the owner typed a reason to drop them; the one party that knew they were
+# stale had no way to say so. Identity is derived, never a flag: --by here
+# would let anyone close anyone's question.
+_decide_withdraw() {
+  [ $# -ge 1 ] || die "usage: cel decide withdraw <id> --why <text>"
+  local id="$1" why=""; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --why) why="$2"; shift 2 ;;
+      *) die "cel decide withdraw: unknown argument '$1'" ;;
+    esac
+  done
+  [ -n "$why" ] || die "cel decide withdraw: --why is required"
+  local me; me="$(_inbox_me)"
+  local rec; rec="$(_decide_find "$id")"
+  [ -n "$rec" ] || die "cel decide withdraw: no open owner decision with id $id"
+  [ "$(jq -r .asker <<< "$rec")" = "$me" ] \
+    || die "cel decide withdraw: $id was asked by $(jq -r .asker <<< "$rec"), not $me - only the asker may withdraw it"
+  local ws; ws="$(jq -r .workspace <<< "$rec")"
+  _decide_locked "$ws" _decide_withdraw_locked "$ws" "$id" "$me" "$why"
+}
+
+_decide_withdraw_locked() { # <ws> <id> <asker> <why>
+  local f; f="$(_inbox_file "$1")"
+  decide_open_json "$1" | jq -e --arg id "$2" 'select(.id == $id)' >/dev/null 2>&1 \
+    || { c_err "cel decide: $2 was already answered or dropped" >&2; return 1; }
+  # no mail: the asker is the one closing it
+  _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$2" \
+    --arg by "$3" --arg why "$4" \
+    '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: "owner",
+      withdrawn: $why, message: ("withdrawn by " + $by)}')"
+  c_ok "$2 withdrawn" >&2
 }
 
 # REMINDERS ARE NOT DECISIONS. The steward used to file its nags as open
