@@ -186,3 +186,44 @@ test_reask_without_urgent_keeps_it_urgent() {
   assert_eq "$(printf '%s\n' "$j" | jq -r '.options[0].tradeoff')" "y"
   rm -rf "$T"
 }
+
+# --- CEL-101: the asker closes its own question ------------------------------
+# Some open questions were settled in an orchestrator's chat, made moot by a
+# merge, or replaced by a newer one; only the owner could close them.
+test_withdraw_by_the_asker_resolves_it() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "still needed?")"
+  CEL_INBOX_ME=alpha-orch cmd_decide withdraw "$id" --why "settled in chat" >/dev/null 2>&1
+  assert_eq "$(cmd_decide list --json 2>/dev/null)" ""
+  local r; r="$(jq -c --arg id "$id" 'select(.kind == "resolution" and .ref == $id)' "$CEL_INBOX_DIR/alpha.jsonl")"
+  assert_contains "$r" '"withdrawn":"settled in chat"'
+  assert_contains "$r" '"by":"alpha-orch"'
+  rm -rf "$T"
+}
+
+test_withdraw_by_anyone_else_is_refused() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "mine to close")"
+  assert_fails eval "( CEL_INBOX_ME=bundle-orch cmd_decide withdraw '$id' --why nope >/dev/null 2>&1 )"
+  # identity is derived, never a parameter
+  assert_fails eval "( CEL_INBOX_ME=bundle-orch cmd_decide withdraw '$id' --why nope --by alpha-orch >/dev/null 2>&1 )"
+  assert_fails eval "( CEL_INBOX_ME=alpha-orch cmd_decide withdraw '$id' >/dev/null 2>&1 )"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "mine to close"
+  rm -rf "$T"
+}
+
+test_ask_supersedes_closes_the_old_one_and_links_it() {
+  _decide_fixture
+  local old new; old="$(_ask_as alpha-orch alpha --title "old shape")"
+  new="$(_ask_as alpha-orch alpha --title "new shape" --supersedes "$old")"
+  [ -n "$new" ] && [ "$new" != "$old" ] || { echo "no new id"; return 1; }
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "new shape"
+  local r; r="$(jq -c --arg id "$old" 'select(.kind == "resolution" and .ref == $id)' "$CEL_INBOX_DIR/alpha.jsonl")"
+  assert_eq "$(printf '%s' "$r" | jq -r .superseded_by)" "$new"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .supersedes)" "$old"
+  # another asker's question cannot be superseded
+  local theirs; theirs="$(_ask_as bundle-orch alpha --title "theirs")"
+  assert_fails eval "( _ask_as alpha-orch alpha --title 'grab' --supersedes '$theirs' )"
+  assert_contains "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "theirs"
+  rm -rf "$T"
+}

@@ -180,3 +180,45 @@ test_dash_factory_list_jump_counts_as_a_tab_pick() {
   assert_contains "$page" "list:function(){pickTab('inflight')}"
   _dd_down
 }
+
+# --- CEL-101 ------------------------------------------------------------------
+# One click closes a stale decision with a fixed reason, through the same
+# guarded path a typed drop takes.
+test_dash_one_click_close_sends_the_fixed_reason() {
+  _dd_boot
+  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  assert_contains "$page" 'data-why="already done"'
+  assert_contains "$page" 'data-why="no longer needed"'
+  assert_contains "$page" "action:'drop',value:b.dataset.why"
+  # the guard still stands in front of it
+  assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"drop\",\"value\":\"already done\"}")" "403"
+  assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"drop\",\"value\":\"already done\"}" -H "x-cel-csrf: $TOKEN")" "200"
+  assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'DROPPED "pick a style": already done'
+  _dd_down
+}
+
+# The owner typed into "other…" and a refresh threw the text away. In a real
+# browser: type, arm, open the bulk preview, let a new decision arrive and
+# another be answered elsewhere, wait past two refreshes - nothing is lost.
+test_dash_refresh_keeps_what_the_owner_is_typing() {
+  # found under the real HOME, before the fixture replaces it
+  local chrome; chrome="${CEL_TEST_CHROME:-$(node --input-type=module -e "import {findChrome} from '$CEL_ROOT/tests/lib/dash-browser.mjs'; console.log(findChrome())")}"
+  DD_CFG_EXTRA=',"refreshMs":1000' _dd_boot
+  local gone; gone="$(_dd_ask alpha --title "settled elsewhere" --option "a::x")"
+  mkdir -p "$T/shots"
+  local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
+  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/" "$ID" "$gone" "$mutate" 2600 "$T/shots")"
+  if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then echo "SKIP: $(printf '%s' "$out" | jq -r .skip)" >&2; _dd_down; return 0; fi
+  [ -n "${CEL_DASH_SHOTS:-}" ] && cp "$T/shots/"*.png "$CEL_DASH_SHOTS/" 2>/dev/null
+  assert_eq "$(printf '%s' "$out" | jq -r .keepOpen)" "true"
+  assert_eq "$(printf '%s' "$out" | jq -r .keepText)" "half a thought"
+  assert_eq "$(printf '%s' "$out" | jq -r .focused)" "true"
+  assert_eq "$(printf '%s' "$out" | jq -r .caret)" "4"
+  assert_eq "$(printf '%s' "$out" | jq -r .armed)" "true"
+  assert_eq "$(printf '%s' "$out" | jq -r .bulkOpen)" "true"
+  # the new one arrived beside them (pick a style, settled, arrived)
+  assert_eq "$(printf '%s' "$out" | jq -r .cards)" "3"
+  assert_eq "$(printf '%s' "$out" | jq -r .goneClosed)" "true"
+  assert_eq "$(printf '%s' "$out" | jq -r .goneText)" "typing on two"
+  _dd_down
+}
