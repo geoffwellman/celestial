@@ -1,0 +1,3 @@
+### Fixed
+- Dashboard decisions panel no longer throws away what the owner is typing: a refresh keeps an open "other…", typed text, focus and caret, an armed confirm button and an open bulk preview, and a decision closed elsewhere while being worked on stays on screen marked "closed elsewhere".
+- Stale decisions have exits: `cel decide withdraw <id> --why` lets the asker close its own question, `cel decide ask --supersedes <id>` replaces an older one in the same write, each card offers one-click "already done" / "no longer needed", and the steward asks each asker once a day to confirm or withdraw decisions older than 3 days.

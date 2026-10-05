@@ -220,6 +220,52 @@ _steward_mail_sweep() { # <agents-json>
       --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
     c_warn "$ws: $n3 open owner decision(s) - see cel decide list"
   done
+  _steward_decide_stale_sweep
+}
+
+# STALE QUESTIONS GO BACK TO WHOEVER ASKED (CEL-101). Open decisions sat for
+# days that had been settled in an orchestrator's chat or made moot by a merge;
+# only the asker knows, so once a day each asker gets ONE message listing its
+# questions older than three days and is asked to confirm or withdraw them.
+# The day window stops repeats; the fp rolls a next-day nudge into the one
+# still open instead of stacking a second item beside it (CEL-96).
+_steward_decide_stale_sweep() {
+  local ws open asker
+  for ws in $(registry_names); do
+    # idle, not age: a question the asker re-asked yesterday is not stale
+    open="$(decide_open_json "$ws" | jq -c 'select((.idle_secs // .age_secs) >= 259200)' 2>/dev/null || true)"
+    [ -n "$open" ] || continue
+    for asker in $(printf '%s\n' "$open" | jq -r '.asker // empty' | sort -u); do
+      case "$asker" in owner|steward|dashboard|'') continue ;; esac
+      _steward_stale_nudge_once "$ws" "$asker" "$open" || true
+    done
+  done
+}
+
+# CHECK, SEND, RECORD - UNDER ONE LOCK (Sourcery on #127). Recording the day
+# key before sending meant a failed send silenced the asker for a day, and
+# two sweeps at once could both pass the check and both send. So the window
+# is only read first, the key is written only after the mail landed, and a
+# lock spans all three.
+_steward_stale_nudge_once() { # <ws> <asker> <open-json-lines>
+  local ws="$1" asker="$2" open="$3" lock key last list
+  key="decide-stale-$ws-$asker"
+  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  lock="$_STEWARD_STATE.decide-stale.lock"
+  (
+    if have flock; then flock 7; fi
+    last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
+    [ $(( $(date +%s) - last )) -ge 86400 ] || exit 0
+    list="$(printf '%s\n' "$open" | jq -r --arg a "$asker" \
+      'select(.asker == $a) | "  [\(.id)] \(.title) (\((.age_secs / 86400) | floor)d)"')"
+    if ! cmd_inbox send "$asker" "steward: your open owner decision(s) in $ws older than 3 days - confirm each still needs the owner, or withdraw it with 'cel decide withdraw <id> --why <text>' if it was settled or is moot:"$'\n'"$list" \
+        --from steward --workspace "$ws" --kind status --fp decide-stale >/dev/null 2>&1; then
+      c_warn "$ws: could not mail $asker about stale decision(s); will retry next sweep"
+      exit 1
+    fi
+    _STEWARD_WINDOW=0 _steward_due "$key" || true
+    c_warn "$ws: asked $asker to confirm or withdraw stale decision(s)"
+  ) 7>>"$lock"
 }
 
 # Unread mail for <who> that someone must answer, decide or unblock - one JSON
