@@ -45,7 +45,7 @@ _FLEET_US=$'\x1f'
 # gigabyte of reparented watchers, fixtures and dead pane shells sat under a
 # headline that said `celestial-orch 1.7G`. Zeroes rather than an absent key:
 # a console that has to ask whether the field exists gets it wrong once.
-fleet_orphans_json() { # -> {count, rss_mb}
+fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are PSS, RSS fallback - CEL-100)
   local n mb
   read -r n mb <<<"$(orphans_list 2>/dev/null | orphans_totals)"
   printf '{"count":%d,"rss_mb":%d}' "${n:-0}" "${mb:-0}"

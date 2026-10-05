@@ -242,15 +242,17 @@ _run_file() { # <n> <file>
     # The watchdog closes the lock descriptor too: a watchdog's orphaned sleep
     # holding the lock is the 2026-09-19 outage cel-verify already answered.
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
-      # The sleep runs in the background and the watchdog waits on it, so the
-      # TERM sent when the test finishes first reaches the trap and takes the
-      # sleep with it (CEL-100: 385 orphaned `sleep 120`s from one suite run).
-      exec bash -c 'trap "kill \$s 2>/dev/null; exit 0" TERM; sleep "$1" & s=$!; wait "$s"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
+      # The watchdog is its own process group (setsid execs in place: this
+      # subshell is not a group leader, so $! stays its pid) and the runner
+      # kills the GROUP, so its sleep goes with it at any instant - no window
+      # between fork and a trap knowing the pid (CEL-100: 385 orphaned
+      # `sleep 120`s from one suite run).
+      exec setsid bash -c 'sleep "$1"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
         kill -TERM -- "-$2" 2>/dev/null; sleep 1; kill -KILL -- "-$2" 2>/dev/null' \
         _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" ) >/dev/null 2>&1 &
     wd=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
-    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    kill -- "-$wd" 2>/dev/null; wait "$wd" 2>/dev/null
     _kill_current_group
     if [ -n "${CEL_TEST_TIMES:-}" ]; then
       printf '%s %s %s\n' "$(( ($(date +%s%N) - t0) / 1000000 ))" "$base" "$t" >> "$CEL_TEST_TIMES"

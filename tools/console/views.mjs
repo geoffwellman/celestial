@@ -43,6 +43,8 @@ export const prNumber = (url) => {
 // per row.
 //
 // ABSENT IS NOT ZERO. An older `cel` on PATH carries no `box` block and no
+// (rss_mb is PSS since CEL-100 - shared pages split among their users - with
+// RSS as fallback; the field name is kept for compatibility.)
 // `rss_mb`, and `mem 0M` claims a measurement nobody made - so the empty
 // string is the answer and the caller leaves the column out.
 export const memHuman = (mb) => {
@@ -540,7 +542,7 @@ export const timelineView = (events, sel = -1) => {
 // --- section 2: the worker view, which is the answer to "why" ---------------
 
 export const workerFacts = (w) => `${w.id} (${w.ticket}, ${w.repo}) - ${w.state}, agent ${w.live}`
-  + `${memHuman(w.rss_mb) ? `, ${memHuman(w.rss_mb)} resident` : ''}`
+  + `${memHuman(w.rss_mb) ? `, ${memHuman(w.rss_mb)} in memory (PSS)` : ''}`
   + `, ${w.verdict ? `${w.verdict}${w.severity ? ` (${w.severity})` : ''}` : 'no stall'}`;
 
 // `[try]` only where a preview exists: a button that always fails is a button

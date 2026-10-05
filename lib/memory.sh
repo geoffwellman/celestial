@@ -90,7 +90,10 @@ mem_tree_sum() { # <dir> < snapshot -> mb
     END { printf "%d", kb / 1024 }'
 }
 
-mem_tree_rss_mb() { # <dir> -> mb
+# The NAME says rss and every published field (rss_mb, orch_rss_mb,
+# agents_rss_mb) keeps it for compatibility with the console and JSON readers,
+# but since CEL-100 the value is PSS where readable, RSS only as fallback.
+mem_tree_rss_mb() { # <dir> -> mb (PSS, RSS fallback)
   local dir="${1:-}"
   [ -n "$dir" ] || { printf 0; return 0; }
   if [ -n "$MEM_SNAPSHOT" ]; then
