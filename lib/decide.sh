@@ -170,6 +170,12 @@ _decide_ask_write() { # <ws> <asker> <title> <fields-json> [supersedes-id]
   ref="$(decide_open_json "$wsname" | jq -r --arg a "$asker" --arg t "$title" \
     'select(.asker == $a and .title == $t) | .id' | sed -n 1p)"
   local id; id="$(date +%s%N)"
+  # A same-title re-ask updates in place and files no new question, so there
+  # is nothing to supersede WITH: refuse rather than leave the old one open.
+  if [ -n "$ref" ] && [ -n "$sup" ]; then
+    c_err "cel decide ask: '$title' is already open as $ref - a re-ask updates it in place and cannot supersede $sup; withdraw $sup instead" >&2
+    return 1
+  fi
   if [ -n "$ref" ]; then
     _inbox_append "$f" "$(jq -c --arg id "$id" --arg ts "$(date -Is)" --arg ref "$ref" --arg from "$asker" \
       '. + {id: $id, ts: $ts, to: "owner", from: $from, kind: "update", ref: $ref}' <<< "$fields")"
