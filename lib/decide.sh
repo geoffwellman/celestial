@@ -38,7 +38,9 @@ decide_open_json() { # <ws>
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
         | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
         | . + {workspace: $ws, urgent: (.urgent == true),
-               age_secs: (($now | tonumber) - (.ts | _epoch))} ]
+               age_secs: (($now | tonumber) - (.ts | _epoch)),
+               # since the asker last touched it: a re-ask is not stale
+               idle_secs: (($now | tonumber) - ((.updated // .ts) | _epoch))} ]
     | sort_by(.ts) | .[]' "$f" 2>/dev/null || true
 }
 
@@ -341,7 +343,7 @@ _decide_withdraw_locked() { # <ws> <id> <asker> <why>
   _inbox_append "$f" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$2" \
     --arg by "$3" --arg why "$4" \
     '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: "owner",
-      withdrawn: $why, message: ("withdrawn by " + $by)}')"
+      withdrawn: $why, message: ("withdrawn by " + $by + ": " + $why)}')"
   c_ok "$2 withdrawn" >&2
 }
 

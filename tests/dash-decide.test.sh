@@ -222,10 +222,15 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   assert_eq "$(printf '%s' "$out" | jq -r .focused)" "true"
   assert_eq "$(printf '%s' "$out" | jq -r .caret)" "4"
   assert_eq "$(printf '%s' "$out" | jq -r .armed)" "true"
+  assert_eq "$(printf '%s' "$out" | jq -r .refreshes)" "2"
+  [ "$(printf '%s' "$out" | jq -r .armedChecks)" -ge 1 ] || { echo "armed state never checked after a later refresh: $out"; return 1; }
   assert_eq "$(printf '%s' "$out" | jq -r .bulkOpen)" "true"
   # the new one arrived beside them (pick a style, settled, arrived)
   assert_eq "$(printf '%s' "$out" | jq -r .cards)" "3"
   assert_eq "$(printf '%s' "$out" | jq -r .goneClosed)" "true"
   assert_eq "$(printf '%s' "$out" | jq -r .goneText)" "typing on two"
+  # the browser clicked "already done" twice; it went through cel decide
+  assert_eq "$(printf '%s' "$out" | jq -r .closeClicked)" "true"
+  assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'DROPPED "pick a style": already done'
   _dd_down
 }

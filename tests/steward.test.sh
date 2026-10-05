@@ -1744,3 +1744,22 @@ test_cel101_steward_asks_each_asker_about_stale_decisions_once_a_day() {
   assert_eq "$(jq -c 'select(.from == "steward" and .to == "gadget-orch" and (.message | test("withdraw")))' "$f" | grep -c . || true)" "1"
   rm -rf "$T"
 }
+
+# Review on #127: a re-asked question is not stale; concurrent sweeps send once.
+test_cel101_stale_nudge_counts_from_the_last_reask_and_sends_once_concurrently() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  printf '%s\n' \
+    '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"reasked","asker":"bundle-orch","options":[]}' \
+    '{"id":"1000000002","ts":"2020-01-01T00:00:00Z","from":"gadget-orch","to":"owner","kind":"decision","title":"left alone","asker":"gadget-orch","options":[]}' >> "$f"
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "reasked" >/dev/null 2>&1
+  local i pids=""; for i in 1 2 3 4; do
+    ( PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1 ) & pids="$pids $!"
+  done
+  # shellcheck disable=SC2086
+  wait $pids
+  assert_eq "$(jq -c 'select(.from == "steward" and .to == "bundle-orch")' "$f")" ""
+  assert_eq "$(jq -c 'select(.from == "steward" and .to == "gadget-orch")' "$f" | grep -c . || true)" "1"
+  rm -rf "$T"
+}

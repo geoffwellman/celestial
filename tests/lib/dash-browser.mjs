@@ -96,19 +96,28 @@ const main = async () => {
     const done = new Promise((r) => exec(mutate, { shell: '/bin/bash' }, r));
     // the repaint the bug lived in: the panel's data changed and it redrew
     let armedAfterRepaint = false, repaintMs = -1;
+    const armedAt = Date.now();
+    const isArmed = () => evaluate(`!!document.querySelector('.nycard[data-id="${keepId}"] button.accept.armed')`);
     const t0 = Date.now();
     while (Date.now() - t0 < 20000) {
       if (await evaluate(`document.getElementById('needsyou').dataset.sig`) !== sig0) {
         repaintMs = Date.now() - t0;
-        armedAfterRepaint = await evaluate(`!!document.querySelector('.nycard[data-id="${keepId}"] button.accept.armed')`);
+        armedAfterRepaint = await isArmed();
         break;
       }
       await sleep(50);
     }
-    // then past two more refreshes, however slow this box makes them
-    for (let n = 0, last = await upd(); n < 2 && Date.now() - t0 < 40000;) {
-      await sleep(100);
-      const u = await upd(); if (u !== last) { n++; last = u; }
+    // then past two more refreshes, however slow this box makes them. The
+    // armed button is checked at each one while its 4 s window is still open:
+    // a later refresh that disarmed it must fail, not hide behind the first.
+    let refreshes = 0, armedChecks = 0;
+    for (let last = await upd(); refreshes < 2 && Date.now() - t0 < 40000;) {
+      await sleep(50);
+      const u = await upd();
+      if (u !== last) {
+        refreshes++; last = u;
+        if (Date.now() - armedAt < 3500) { armedChecks++; if (!(await isArmed())) armedAfterRepaint = false; }
+      }
     }
     await done;
     await sleep(Number(waitMs));
@@ -120,7 +129,7 @@ const main = async () => {
         keepText: k ? k.querySelector('.free').value : null,
         focused: !!(k && a === k.querySelector('.free')),
         caret: a && a.selectionStart,
-        armed: ${armedAfterRepaint}, repaintMs: ${repaintMs},
+        armed: ${armedAfterRepaint}, repaintMs: ${repaintMs}, refreshes: ${refreshes}, armedChecks: ${armedChecks},
         bulkOpen: !!document.querySelector('.nybulk'),
         cards: document.querySelectorAll('.nycard').length,
         goneShown: !!g,
@@ -128,6 +137,13 @@ const main = async () => {
         goneClosed: !!(g && /closed elsewhere/.test(g.textContent)),
         updated: document.getElementById('updated').textContent
       }})()`);
+    // and the quick close is wired: two clicks on "already done" send it
+    out.closeClicked = await evaluate(`(async function(){
+      var c=${sel(keepId)};c.querySelector('details.other').open=true;
+      var b=c.querySelector('button.close[data-why="already done"]');b.click();
+      b=${sel(keepId)}.querySelector('button.close[data-why="already done"]');b.click();
+      for(var i=0;i<100&&${sel(keepId)};i++)await new Promise(function(r){setTimeout(r,100)});
+      return !${sel(keepId)}})()`);
     console.log(JSON.stringify(out));
     ws.close();
   } finally {

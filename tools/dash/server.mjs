@@ -1444,7 +1444,9 @@ function nyBulkPanel(g){
 // A button's identity across a rebuild: its card and what it is.
 function nyKey(btn){
   var card=btn.closest('.nycard');
-  return (card?card.dataset.id:'')+'|'+btn.className.replace(' armed','')+'|'+(btn.dataset.n||btn.dataset.why||'');
+  // the label is part of the identity: an option renamed while armed must
+  // disarm, never confirm one text and send another
+  return (card?card.dataset.id:'')+'|'+btn.className.replace(' armed','')+'|'+(btn.dataset.n||'')+'|'+(btn.dataset.label||btn.dataset.why||'');
 }
 function nyFind(key){
   var host=$('needsyou'),all=host.querySelectorAll('.nycard button');
@@ -1470,7 +1472,10 @@ function nySnap(host){
     var o=card.querySelector('details.other'),fr=card.querySelector('.free'),wh=card.querySelector('.why');
     var x={open:!!(o&&o.open),free:fr?fr.value:'',why:wh?wh.value:'',focus:null,s:0,e:0};
     [['free',fr],['why',wh]].forEach(function(p){if(p[1]&&a===p[1]){x.focus=p[0];x.s=p[1].selectionStart;x.e=p[1].selectionEnd}});
-    x.busy=x.open||!!x.free||!!x.why||!!x.focus||Object.keys(NYARM).some(function(k){return k.indexOf(card.dataset.id+'|')===0});
+    var grp=card.closest('details.nygroup');
+    x.busy=x.open||!!x.free||!!x.why||!!x.focus||Object.keys(NYARM).some(function(k){return k.indexOf(card.dataset.id+'|')===0})
+      // listed in an open bulk preview is being worked on too
+      ||!!(NYBULK&&grp&&grp.dataset.ws===NYBULK&&card.querySelector('button.accept'));
     snap[card.dataset.id]=x;
   });
   return snap;
@@ -1484,7 +1489,8 @@ function nyRestore(host,snap){
     var f=x.focus==='free'?fr:x.focus==='why'?wh:null;
     if(f){f.focus();try{f.setSelectionRange(x.s,x.e)}catch(e){}}
   });
-  Object.keys(NYARM).forEach(function(k){var b=nyFind(k);if(b)nyShowArmed(b,NYARM[k].label)});
+  Object.keys(NYARM).forEach(function(k){var b=nyFind(k);
+    if(b)nyShowArmed(b,NYARM[k].label);else{clearTimeout(NYARM[k].timer);delete NYARM[k]}});
 }
 function nyDrop(id){
   LAST.needsYou=(LAST.needsYou||[]).filter(function(d){return d.id!==id});
@@ -1653,10 +1659,19 @@ function initFilters(){
   $('f-unread').onchange=function(){F.unread=this.checked;saveF();renderInbox()};
 }
 initFilters();
+// A slow poll answering after a newer one must not put back decisions that
+// have since closed (Sourcery on #127): only the newest response is applied,
+// and ids closed from this page stay closed whatever a poll says.
+var POLLSEQ=0,POLLDONE=0;
 async function refresh(){
+  const seq=++POLLSEQ;
   const response=await fetch('/api/state');
   if(!response.ok)throw new Error('dashboard state unavailable');
   const s=await response.json();
+  if(seq<POLLDONE)return;
+  POLLDONE=seq;
+  s.needsYou=(s.needsYou||[]).filter(function(d){return !NYDONE[d.id]});
+  (s.needsYouGroups||[]).forEach(function(g){g.items=g.items.filter(function(d){return !NYDONE[d.id]});g.count=g.items.length});
   LAST=s;
   const repos=[...new Set(s.inflight.map(w=>w.repo))].sort();
   const sel=$('f-repo');

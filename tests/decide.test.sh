@@ -241,3 +241,12 @@ test_supersedes_with_a_same_title_reask_is_refused() {
   assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title | sort | tr '\n' ,)" "first,second,"
   rm -rf "$T"
 }
+
+# Review on #127: the owner's history shows why a question went away.
+test_withdraw_reason_is_in_the_resolution_message() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "why gone?")"
+  CEL_INBOX_ME=alpha-orch cmd_decide withdraw "$id" --why "merged in another PR" >/dev/null 2>&1
+  assert_contains "$(jq -r 'select(.kind == "resolution") | .message' "$CEL_INBOX_DIR/alpha.jsonl")" "merged in another PR"
+  rm -rf "$T"
+}
