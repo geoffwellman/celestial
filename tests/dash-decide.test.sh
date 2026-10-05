@@ -208,7 +208,14 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   mkdir -p "$T/shots"
   local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
   local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
-  if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then echo "SKIP: $(printf '%s' "$out" | jq -r .skip)" >&2; _dd_down; return 0; fi
+  # A skip that reads as a pass is how this test went unrun in review. In CI
+  # a missing browser is a failure; on a box without one it says so loudly.
+  if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then
+    echo "SKIP: $(printf '%s' "$out" | jq -r .skip) - set CEL_TEST_CHROME" >&2; _dd_down
+    if [ -n "${CI:-}" ]; then return 1; fi
+    return 0
+  fi
+  echo "browser: $chrome" >&2
   if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T/shots/"*.png "$CEL_DASH_SHOTS/" 2>/dev/null || true; fi
   assert_eq "$(printf '%s' "$out" | jq -r .keepOpen)" "true"
   assert_eq "$(printf '%s' "$out" | jq -r .keepText)" "half a thought"

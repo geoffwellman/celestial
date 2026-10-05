@@ -22,6 +22,9 @@ const [url, keepId, goneId, mutate, waitMs, shotDir] = process.argv.slice(2);
 
 export const findChrome = () => {
   const c = [process.env.CEL_TEST_CHROME];
+  // puppeteer's own download (omp keeps one), newest first
+  const pp = join(homedir(), '.omp/puppeteer/chrome');
+  if (existsSync(pp)) for (const d of readdirSync(pp).sort().reverse()) c.push(join(pp, d, 'chrome-linux64/chrome'));
   const pw = join(homedir(), '.cache/ms-playwright');
   if (existsSync(pw)) {
     for (const d of readdirSync(pw).sort().reverse()) {
