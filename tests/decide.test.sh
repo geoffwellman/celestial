@@ -227,3 +227,17 @@ test_ask_supersedes_closes_the_old_one_and_links_it() {
   assert_contains "$(cmd_decide list --json 2>/dev/null | jq -r .title)" "theirs"
   rm -rf "$T"
 }
+
+# Review on #127: a same-title re-ask updates in place and would have
+# silently left the superseded question open. Refused, nothing written.
+test_supersedes_with_a_same_title_reask_is_refused() {
+  _decide_fixture
+  local a b; a="$(_ask_as alpha-orch alpha --title "first")"
+  b="$(_ask_as alpha-orch alpha --title "second")"
+  local before; before="$(wc -l < "$CEL_INBOX_DIR/alpha.jsonl")"
+  assert_fails eval "( _ask_as alpha-orch alpha --title second --supersedes '$a' )"
+  assert_fails eval "( _ask_as alpha-orch alpha --title first --supersedes '$a' )"
+  assert_eq "$(wc -l < "$CEL_INBOX_DIR/alpha.jsonl")" "$before"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r .title | sort | tr '\n' ,)" "first,second,"
+  rm -rf "$T"
+}
