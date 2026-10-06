@@ -29,7 +29,11 @@ _suite_clear_caller_env() {
   local v
   for v in $(compgen -e); do
     case "$v" in
-      CEL_ROOT|CEL_TESTING|CEL_FLEET_CACHE_SECS|CEL_SUITE_LOCK|CEL_SUITE_LOCK_HELD|CEL_SUITE_WAIT_WARN|CEL_TEST_JOBS|CEL_TEST_TIMEOUT|CEL_TEST_TIMES) ;;
+      CEL_ROOT|CEL_TESTING|CEL_FLEET_CACHE_SECS|CEL_SUITE_LOCK|CEL_SUITE_LOCK_HELD|CEL_SUITE_WAIT_WARN) ;;
+      # test knobs the caller sets on purpose: CEL_TEST_JOBS/TIMEOUT/TIMES for
+      # the runner, CEL_TEST_CHROME(_WAIT_MS) and CEL_DASH_SHOTS for the dash
+      # browser tests - they say how to test, not who is testing
+      CEL_TEST_*|CEL_DASH_SHOTS) ;;
       CEL_*|HERDR_*|OMP_GATEWAY_TOKEN) unset "$v" ;;
     esac
   done

@@ -19,12 +19,17 @@ test_probe_sees_no_identity() {
   done
   [ -z "$leaked" ] || { echo "leaked:$leaked"; return 1; }
   [ "${CEL_TESTING:-}" = 1 ] || { echo "CEL_TESTING lost"; return 1; }
+  # knobs that say HOW to test survive (dash-decide, dash-browser.mjs)
+  [ "${CEL_TEST_CHROME:-}" = /opt/widget/chrome ] || { echo "CEL_TEST_CHROME lost"; return 1; }
+  [ "${CEL_TEST_CHROME_WAIT_MS:-}" = 900 ] || { echo "CEL_TEST_CHROME_WAIT_MS lost"; return 1; }
+  [ "${CEL_DASH_SHOTS:-}" = /srv/shots ] || { echo "CEL_DASH_SHOTS lost"; return 1; }
 }
 PROBE
   local out rc=0
   out="$(CEL_INBOX_ME=alpha-orch CEL_INBOX_WS=alpha CEL_ROLE=worker CEL_WORKSPACE=/srv/alpha \
          CEL_ROLE_FILE=/srv/role.md HERDR_PANE_ID=w9:p9 CEL_SESSION_ID=beta \
          CEL_INBOX_DIR=/srv/inbox CEL_REGISTRY=/srv/registry.yaml HERDR_SOCKET_PATH=/srv/sock \
+         CEL_TEST_CHROME=/opt/widget/chrome CEL_TEST_CHROME_WAIT_MS=900 CEL_DASH_SHOTS=/srv/shots \
          bash "$T/tests/run.sh" --no-lock 2>&1)" || rc=$?
   rm -rf "$T"
   [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return 1; }
