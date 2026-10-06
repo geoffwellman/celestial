@@ -70,3 +70,16 @@ test_dash_ensure_fails_clearly_when_the_port_stays_held() {
   assert_contains "$out" "port $PORT still in use"
   _dr_down
 }
+
+# Sourcery on #128: an old dashboard that ignores SIGTERM kept answering, and
+# ensure then reported it as the healthy new server. Stop escalates to KILL.
+test_dash_stop_kills_a_server_that_ignores_term() {
+  _dr_setup
+  CEL_DASH_CONFIG="{\"port\":$PORT}" bash -c 'trap "" TERM; exec -a "node tools/dash/server.mjs" sleep 60' &
+  local pid=$!
+  sleep 0.3
+  CEL_DASH_PORT_WAIT_S=1 _dash_stop "$PORT" >/dev/null 2>&1
+  sleep 0.2
+  if kill -0 "$pid" 2>/dev/null; then echo "old dashboard survived the stop"; kill -9 "$pid"; _dr_down; return 1; fi
+  _dr_down
+}

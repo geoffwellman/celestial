@@ -186,3 +186,43 @@ test_doctor_flags_two_live_processes_on_one_session() {
   ! printf '%s' "$out" | grep -q two.jsonl || { echo "flagged a single resumer"; orch_stub_teardown; return 1; }
   orch_stub_teardown
 }
+
+# Sourcery on #128: a runtime that cannot resume starts fresh - it is no
+# second resumer, so a live process on the recorded session must not block it.
+test_run_orchestrator_without_resume_support_is_not_refused() {
+  orch_stub_setup opencode
+  printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
+  _run_sessions_record "$T/ws/repos/widget" "$T/old.jsonl"
+  _resumer 4250 w7:p4 "$T/old.jsonl"
+  local out
+  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)" \
+    || { echo "refused a fresh launch: $out"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "starting fresh"
+  orch_stub_teardown
+}
+
+# Sourcery on #128: something that merely mentions --resume (a grep, an
+# editor) is not an agent resuming the session.
+test_session_resumers_ignore_processes_that_are_not_agents() {
+  orch_stub_setup omp
+  mkdir -p "$PROC/4251"
+  printf '%s\0' grep -- --resume "$T/old.jsonl" > "$PROC/4251/cmdline"
+  printf 'HERDR_PANE_ID=w7:p4\0' > "$PROC/4251/environ"
+  _resumer 4252 w8:p1 "$T/old.jsonl"
+  local out; out="$(run_session_resumers)"
+  ! printf '%s' "$out" | grep -q 4251 || { echo "counted grep: $out"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "4252"
+  orch_stub_teardown
+}
+
+# Sourcery on #128: two launches racing before either agent is in /proc. The
+# first claims the session; the second, inside the claim window, is refused.
+test_session_claim_refuses_a_second_launch_inside_the_window() {
+  orch_stub_setup omp
+  export CEL_ORCH_SESSIONS="$T/sessions.json"
+  _run_session_claim "$T/old.jsonl" || { echo "first claim refused"; orch_stub_teardown; return 1; }
+  if _run_session_claim "$T/old.jsonl" 2>/dev/null; then echo "second claim granted"; orch_stub_teardown; return 1; fi
+  _run_session_claim "$T/other.jsonl" || { echo "unrelated session refused"; orch_stub_teardown; return 1; }
+  CEL_SESSION_CLAIM_SECS=0 _run_session_claim "$T/old.jsonl" || { echo "expired claim still held"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
