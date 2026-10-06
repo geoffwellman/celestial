@@ -840,6 +840,73 @@ _run_cmdline() { # <pid> -> argv, one per line
   tr '\0' '\n' < "$(_run_proc_root)/$1/cmdline" 2>/dev/null || true
 }
 
+# WHO IS RESUMING WHICH SESSION FILE (CEL-102). Two omp processes resumed one
+# session file for two days - an old pane that had lost its herdr name, and a
+# fresh orchestrator - and each answered mail on its own. herdr's roster
+# cannot see a nameless pane's session, but /proc can: every live process
+# whose argv says `--resume <file>` (or `--resume=<file>`), with the pane it
+# stands in (HERDR_PANE_ID from its environ; `-` when it has none).
+# The runtimes that resume a session, by the basename of argv[0] or (for a
+# script run by node/bun) argv[1].
+_run_is_agent_argv() { # <cmdline-file>
+  local -a v=() ; local a n
+  mapfile -d '' -t v < "$1" 2>/dev/null || return 1
+  for a in "${v[0]:-}" "${v[1]:-}"; do
+    n="${a##*/}"; n="${n%% *}"
+    case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*|cli.js|cli.mjs) return 0 ;; esac
+  done
+  return 1
+}
+
+run_session_resumers() { # -> session<TAB>pid<TAB>pane, one per live resumer
+  local d pid prev a sess pane item
+  for d in "$(_run_proc_root)"/[0-9]*; do
+    pid="${d##*/}"
+    [ -r "$d/cmdline" ] || continue
+    sess="" prev=""
+    while IFS= read -r -d '' a; do
+      case "$a" in
+        --resume=*) sess="${a#--resume=}" ;;
+        *) [ "$prev" = --resume ] && sess="$a" ;;
+      esac
+      [ -n "$sess" ] && break
+      prev="$a"
+    done < "$d/cmdline" 2>/dev/null
+    [ -n "$sess" ] || continue
+    # an AGENT resuming it, owned by this user - not a grep or an editor that
+    # merely has the path in its argv
+    [ -O "$d/cmdline" ] || continue
+    _run_is_agent_argv "$d/cmdline" || continue
+    pane="-"
+    while IFS= read -r -d '' item; do
+      case "$item" in HERDR_PANE_ID=*) pane="${item#*=}"; break ;; esac
+    done < "$d/environ" 2>/dev/null
+    printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
+  done
+  return 0
+}
+
+# CLAIMING A SESSION (CEL-102). Two launches that overlap both see an empty
+# /proc - neither agent has started yet. The check and a short-lived claim are
+# taken under one flock, so the second launch inside the window
+# (CEL_SESSION_CLAIM_SECS, default 60) sees the first one's claim.
+_run_session_claim() { # <session> -> 0 claimed, 1 claimed by another launch
+  local dir key f lock fd="" now held rc=0
+  dir="$(dirname "$(_run_sessions_file)")/session-claims"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  key="$(printf '%s' "$1" | sha1sum | cut -c1-16)"; f="$dir/$key"; lock="$dir/.lock"
+  if have flock && exec {fd}>"$lock" 2>/dev/null; then flock -w 10 "$fd" || true; fi
+  now="$(date +%s)"
+  held="$(cat "$f" 2>/dev/null || true)"
+  if [ -n "$held" ] && [ $((now - held)) -lt "${CEL_SESSION_CLAIM_SECS:-60}" ]; then
+    rc=1
+  else
+    printf '%s\n' "$now" > "$f"
+  fi
+  if [ -n "$fd" ]; then flock -u "$fd"; exec {fd}>&-; fi
+  return "$rc"
+}
+
 # What a launch line is made of, for comparing two of them: each flag with the
 # value that follows it. The role prompt's PATH does not count (a product can
 # move its role file without its launch being stale), nor does a resume.
@@ -1266,6 +1333,30 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # Over a dead or absent agent, come back into the last recorded session.
     if [ "$fresh" -eq 0 ] && [ -z "$resume_session" ] && [ -z "$live" ]; then
       resume_session="$(_run_sessions_last "$cwd")"
+    fi
+    # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
+    # herdr still has a name for the pane already resuming it. The pane being
+    # restarted is the one expected resumer - it is about to be replaced.
+    # Only when this runtime CAN resume: one that cannot starts fresh and is
+    # no second resumer.
+    if [ "$role" = orchestrator ] && [ -n "$resume_session" ] && [ "$force" -eq 0 ] \
+       && [ -n "$(agent_resume "$runtime" flag)" ]; then
+      local rs rpid rpane others=""
+      while IFS=$'\t' read -r rs rpid rpane; do
+        [ "$rs" = "$resume_session" ] || continue
+        [ -n "$restart_pane" ] && [ "$rpane" = "$restart_pane" ] && continue
+        others+="    pane $rpane  pid $rpid"$'\n'
+      done < <(run_session_resumers)
+      if [ -n "$others" ]; then
+        c_err "cel run $role: another live process is already resuming $resume_session:" >&2
+        printf '%s' "$others" >&2
+        die "  two processes on one session answer mail twice. Close that pane (or name and adopt it: cel ws up $(ws_name "$wsdir")), or pass --force"
+      fi
+      # and claim it, so a launch racing this one before either agent is in
+      # /proc is refused too. A preview claims nothing.
+      if [ "$dry_run" -eq 0 ] && ! _run_session_claim "$resume_session"; then
+        die "cel run $role: another launch claimed $resume_session in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
+      fi
     fi
     if [ -n "$resume_session" ]; then
       local rflag; rflag="$(agent_resume "$runtime" flag)"
