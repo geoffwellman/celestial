@@ -328,11 +328,17 @@ test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
 test_quick_tests_leave_no_watchdog_sleep_behind() {
   _suite_fixture
   rm -f "$T/tests/slow.test.sh"
-  printf 'test_q1() { :; }\ntest_q2() { :; }\ntest_q3() { :; }\ntest_q4() { :; }\n' > "$T/tests/quick.test.sh"
+  # Many instant tests across parallel files: a test that ends before its
+  # watchdog has even started is the race CI hit on a3f687d.
+  local f i
+  for f in 1 2 3 4; do
+    for i in $(seq 1 15); do printf 'test_q%s_%s() { :; }\n' "$f" "$i"; done > "$T/tests/quick$f.test.sh"
+  done
   local limit=4917 out
-  out="$(CEL_TEST_TIMEOUT=$limit bash "$T/tests/run.sh" --no-lock 2>&1)" || true
-  assert_contains "$out" "test_q4"
-  sleep 0.3
+  out="$(CEL_TEST_JOBS=4 CEL_TEST_TIMEOUT=$limit bash "$T/tests/run.sh" --no-lock 2>&1)" || true
+  assert_contains "$out" "60 passed"
+  # Bounded: a group already signalled may take a moment to be reaped.
+  i=0; while pgrep -fx "sleep $limit" >/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
   local left; left="$(pgrep -fx "sleep $limit" | wc -l)"
   pkill -fx "sleep $limit" 2>/dev/null || true
   assert_eq "$left" "0"
