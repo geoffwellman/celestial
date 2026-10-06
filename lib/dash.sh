@@ -100,15 +100,21 @@ _dash_stop() { # <port>
   done
   # and wait for them to be gone (bounded): a killed node can hold its
   # listener for a moment, and the next start would hit EADDRINUSE
-  local t0=$SECONDS
+  # A server that outlives TERM past the bound is KILLed: otherwise ensure
+  # would find the OLD one still answering and call the restart a success.
+  local t0=$SECONDS left=0
   for pid in $pids; do
     while kill -0 "$pid" 2>/dev/null && [ $((SECONDS - t0)) -lt "${CEL_DASH_PORT_WAIT_S:-15}" ]; do sleep 0.2; done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null; sleep 0.3
+      kill -0 "$pid" 2>/dev/null && { c_err "dash on $port (pid $pid) survived SIGKILL"; left=1; }
+    fi
   done
-  return 0
+  return "$left"
 }
 
 _dash_restart() { # <workspace> <port> <host>
-  _dash_stop "$2"
+  _dash_stop "$2" || { c_err "dash $1: the old server would not stop - not restarting"; return 1; }
   _dash_ensure "$1" "$2" "$3"
 }
 
