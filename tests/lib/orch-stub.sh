@@ -30,6 +30,7 @@ case "$1 $2" in
     printf '{"result":{"process_info":{"shell_pid":50,"foreground_processes":[]}}}\n' ;;
   "pane send-text") printf '%s' "$4" > "$T/envprefix" ;;
   "agent start")
+    [ -f "$T/fail-start" ] && exit 1
     shift 2; name="$1"; shift; kind=""; while [ "$1" != -- ]; do [ "$1" = --kind ] && kind="$2"; shift; done; shift
     d="$CEL_PROC_ROOT/9999"; mkdir -p "$d"
     printf '%s\0' "$kind" "$@" > "$d/cmdline"

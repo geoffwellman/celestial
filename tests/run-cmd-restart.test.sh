@@ -226,3 +226,31 @@ test_session_claim_refuses_a_second_launch_inside_the_window() {
   CEL_SESSION_CLAIM_SECS=0 _run_session_claim "$T/old.jsonl" || { echo "expired claim still held"; orch_stub_teardown; return 1; }
   orch_stub_teardown
 }
+
+# CEL-103: a launch that fails after claiming its session gives the claim
+# back, so a retry a few seconds later is not refused for sixty of them.
+test_failed_restart_releases_its_session_claim() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  touch "$T/fail-start"
+  local out
+  if out="$(_restart)"; then echo "a failed start succeeded"; orch_stub_teardown; return 1; fi
+  rm -f "$T/fail-start" "$T/gone"
+  out="$(_restart)" || { echo "retry refused: $out"; orch_stub_teardown; return 1; }
+  assert_contains "$(_new_cmdline)" "--resume $T/s.jsonl"
+  orch_stub_teardown
+}
+
+# CEL-103: restarting the same pane twice in a minute is the pane replacing
+# itself, not a second resumer; its own claim must not refuse it.
+test_restart_of_the_same_pane_is_not_refused_by_its_own_claim() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local out
+  out="$(_restart)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  # the agent it started runs in that pane, as herdr's would
+  printf 'HERDR_PANE_ID=w1:p1\0' >> "$PROC/9999/environ"
+  rm -f "$T/gone"
+  out="$(_restart)" || { echo "second restart refused: $out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
