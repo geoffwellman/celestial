@@ -334,15 +334,15 @@ test_quick_tests_leave_no_watchdog_sleep_behind() {
   for f in 1 2 3 4; do
     for i in $(seq 1 15); do printf 'test_q%s_%s() { :; }\n' "$f" "$i"; done > "$T/tests/quick$f.test.sh"
   done
-  local limit=4917 out
+  # Unique per run, so concurrent suites cannot see each other's tests in flight.
+  local limit=$(( 40000 + $$ % 20000 )) out
   out="$(CEL_TEST_JOBS=4 CEL_TEST_TIMEOUT=$limit bash "$T/tests/run.sh" --no-lock 2>&1)" || true
   assert_contains "$out" "60 passed"
   # Bounded: a group already signalled may take a moment to be reaped.
-  # The watchdog is matched by its limit among its arguments as well as by
-  # a sleep of that length: neither may outlive the run.
-  i=0; while pgrep -f "(^sleep $limit\$)|( $limit [0-9]+ )" >/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
-  local left; left="$(pgrep -f "(^sleep $limit\$)|( $limit [0-9]+ )" | wc -l)"
-  pkill -f "(^sleep $limit\$)|( $limit [0-9]+ )" 2>/dev/null || true
+  # Neither a sleep of that length nor a timeout carrying it may outlive the run.
+  i=0; while pgrep -f "(^sleep $limit\$)|(timeout -k 1 $limit )" >/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+  local left; left="$(pgrep -f "(^sleep $limit\$)|(timeout -k 1 $limit )" | wc -l)"
+  pkill -f "(^sleep $limit\$)|(timeout -k 1 $limit )" 2>/dev/null || true
   assert_eq "$left" "0"
   rm -rf "$T"
 }

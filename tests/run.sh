@@ -208,7 +208,7 @@ RESULTS="$TMPDIR/.results"; mkdir -p "$RESULTS"
 # $RESULTS/<n>.out and its counts to <n>.count. The report is printed by the
 # main shell, in file order, so a parallel run reads exactly like a serial one.
 _run_file() { # <n> <file>
-  local n="$1" f="$2" base t tout out rc limit_hit wd p=0 fl=0
+  local n="$1" f="$2" base t tout out rc limit_hit p=0 fl=0
   local rep="$RESULTS/$n.out"
   base="$(basename "$f")"
   CURRENT_GROUP=""
@@ -236,26 +236,21 @@ _run_file() { # <n> <file>
     # the suite lock is worse than a leaked process: it blocks every gate on
     # the box until it dies, long after the run that produced it finished. So
     # the descriptor is closed on the way into each test.
-    ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
-      exec setsid bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
-    CURRENT_GROUP=$!
-    # The watchdog closes the lock descriptor too: a watchdog's orphaned sleep
-    # holding the lock is the 2026-09-19 outage cel-verify already answered.
     #
-    # THE WATCHDOG HAS NO CHILD TO ORPHAN (CEL-100). It used to `sleep`, and
-    # killing the watchdog left the sleep on PID 1 - 385 `sleep 120`s from one
-    # suite run. Process-group kills still lost one in CI: a quick test can end
-    # in the fork/exec instant before the group exists. So it waits with the
-    # builtin `read -t` on a FIFO nobody writes (opened read-write, so it never
-    # sees EOF): one process, and killing it is the whole cleanup.
-    wdf="$RESULTS/$n.wd"; rm -f "$wdf"; mkfifo "$wdf"
+    # THE WALL LIMIT IS `timeout`, INSIDE THE TEST'S OWN SESSION (CEL-100).
+    # A separate watchdog process slept beside every test and, killed when the
+    # test finished first, left its `sleep` on PID 1 - 385 `sleep 120`s from
+    # one run; group kills and a FIFO wait each left a race. GNU timeout puts
+    # itself in its own process group (here: the setsid group, already its
+    # own) and on expiry signals that whole group, servers included, then
+    # KILLs it a second later. When the test ends first, timeout exits with
+    # it: nothing is left behind because nothing else was started.
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
-      exec bash -c 'read -r -t "$1" _ <>"$4"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
-        kill -TERM -- "-$2" 2>/dev/null; read -r -t 1 _ <>"$4"; kill -KILL -- "-$2" 2>/dev/null' \
-        _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" "$wdf" ) >/dev/null 2>&1 &
-    wd=$!
+      exec setsid timeout -k 1 "$TEST_TIMEOUT" bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
+    CURRENT_GROUP=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
-    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null; rm -f "$wdf"
+    # 124: timed out on TERM; 137 from timeout itself: needed the KILL.
+    case "$rc" in 124|137) : > "$limit_hit" ;; esac
     _kill_current_group
     if [ -n "${CEL_TEST_TIMES:-}" ]; then
       printf '%s %s %s\n' "$(( ($(date +%s%N) - t0) / 1000000 ))" "$base" "$t" >> "$CEL_TEST_TIMES"
