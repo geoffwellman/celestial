@@ -124,3 +124,65 @@ test_restart_relabels_the_pane() {
   assert_contains "$(grep '^tab rename' "$HLOG")" "tab rename w1:t1 widget orchestrator"
   orch_stub_teardown
 }
+
+# CEL-102: two omp processes resumed ONE session file for two days - an old
+# pane that had lost its herdr name, and a fresh `cel run orchestrator`. Each
+# answered mail and the owner got contradicting replies. A process already
+# resuming the file is refused by pane, whatever herdr thinks its name is.
+_resumer() { # <pid> <pane> <session>
+  mkdir -p "$PROC/$1"
+  printf '%s\0' omp --resume "$3" > "$PROC/$1/cmdline"
+  printf 'HERDR_PANE_ID=%s\0' "$2" > "$PROC/$1/environ"
+}
+
+test_run_orchestrator_refuses_a_session_another_pane_is_resuming() {
+  orch_stub_setup omp
+  printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
+  _run_sessions_record "$T/ws/repos/widget" "$T/old.jsonl"
+  _resumer 4242 w7:p4 "$T/old.jsonl"
+  local out
+  if out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)"; then
+    echo "launched over a live resumer: $out"; orch_stub_teardown; return 1
+  fi
+  assert_contains "$out" "w7:p4"
+  assert_contains "$out" "$T/old.jsonl"
+  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run --force) 2>&1)" \
+    || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "--resume $T/old.jsonl"
+  orch_stub_teardown
+}
+
+test_restart_refuses_when_a_second_pane_resumes_the_same_session() {
+  orch_stub_setup omp
+  local sess="$T/sessions/abc.jsonl" out
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$sess"
+  _resumer 4243 w9:p2 "$sess"
+  if out="$(_restart)"; then echo "restarted beside a live resumer"; orch_stub_teardown; return 1; fi
+  assert_contains "$out" "w9:p2"
+  orch_stub_teardown
+}
+
+test_restart_ignores_its_own_pane_resuming_the_session() {
+  orch_stub_setup omp
+  local sess="$T/sessions/abc.jsonl" out
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$sess"
+  _resumer 4244 w1:p1 "$sess"
+  out="$(_restart)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$(_new_cmdline)" "--resume $sess"
+  orch_stub_teardown
+}
+
+test_doctor_flags_two_live_processes_on_one_session() {
+  orch_stub_setup omp
+  source "$CEL_ROOT/lib/doctor.sh"
+  _resumer 4245 w7:p4 "$T/one.jsonl"
+  _resumer 4246 w8:p1 "$T/one.jsonl"
+  _resumer 4247 w8:p2 "$T/two.jsonl"
+  local out rc=0; out="$(doctor_shared_session_lines 2>&1)" || rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "$T/one.jsonl"
+  assert_contains "$out" "w7:p4"
+  assert_contains "$out" "w8:p1"
+  ! printf '%s' "$out" | grep -q two.jsonl || { echo "flagged a single resumer"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
