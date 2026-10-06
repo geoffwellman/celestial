@@ -37,6 +37,28 @@ _dash_config() { # <wsdir> <port> <host> -> JSON on stdout
 # about a dead dashboard achieved nothing - it stayed dead.
 _dash_log_dir() { printf '%s' "${CEL_DASH_LOG_DIR:-$HOME/.local/share/cel/logs}"; }
 
+# Is anything listening on host:port? A bash /dev/tcp connect, so a server
+# mid-shutdown that still holds the port but no longer answers http counts.
+# A connect that HANGS (a full backlog nobody accepts) is held too: only a
+# refused connection means free.
+_dash_port_free() { # <host> <port> -> 0 when nothing accepts a connection
+  local rc=0
+  timeout 2 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]
+}
+
+# CEL-102: wait (bounded, CEL_DASH_PORT_WAIT_S, default 15 s) for the port to
+# come free. A restart that starts the new server while the old one still
+# holds it dies with EADDRINUSE and nothing retries.
+_dash_wait_port_free() { # <host> <port>
+  local host="$1" port="$2" bound="${CEL_DASH_PORT_WAIT_S:-15}" t0=$SECONDS
+  while ! _dash_port_free "$host" "$port"; do
+    [ $((SECONDS - t0)) -lt "$bound" ] || return 1
+    sleep 0.25
+  done
+  return 0
+}
+
 _dash_ensure() { # <workspace> <port> <host>
   local ws="$1" port="$2" host="$3" log
   log="$(_dash_log_dir)/dash-$ws.log"
@@ -44,15 +66,20 @@ _dash_ensure() { # <workspace> <port> <host>
     c_ok "dash $ws already serving on $port"
     return 0
   fi
+  if ! _dash_wait_port_free "$host" "$port"; then
+    c_err "dash $ws: port $port still in use after ${CEL_DASH_PORT_WAIT_S:-15}s and not answering as a dashboard - not starting (what holds it: ss -ltnp | grep :$port)"
+    return 1
+  fi
   mkdir -p "$(_dash_log_dir)"
   # setsid: outlives the pane or agent that ensured it
   setsid nohup "$CEL_ROOT/bin/cel" dash --workspace "$ws" --port "$port" --host "$host" \
     >>"$log" 2>&1 &
-  local i
-  for i in 1 2 3 4 5 6 7 8; do
+  local pid=$! i
+  for i in $(seq 1 20); do
     sleep 0.5
     curl -sf -m 3 -o /dev/null "http://$host:$port/api/state" \
       && { c_ok "dash $ws started on $port (log: $log)"; return 0; }
+    kill -0 "$pid" 2>/dev/null || break
   done
   c_err "dash $ws did not come up on $port - see $log"
   return 1
@@ -64,10 +91,18 @@ _dash_ensure() { # <workspace> <port> <host>
 # port in its own CEL_DASH_CONFIG, never by a bare pkill that would take every
 # other workspace's dashboard down with it - and then ensures as usual.
 _dash_stop() { # <port>
-  local port="$1" pid env
+  local port="$1" pid env pids=""
   for pid in $(pgrep -f 'tools/dash/server\.mjs' 2>/dev/null); do
     env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep '^CEL_DASH_CONFIG=' || true)"
-    case "$env" in *'"port":'"$port"*) kill "$pid" 2>/dev/null && c_ok "stopped dash on $port (pid $pid)" ;; esac
+    case "$env" in *'"port":'"$port"[,}]*)
+      kill "$pid" 2>/dev/null && { c_ok "stopped dash on $port (pid $pid)"; pids+=" $pid"; } ;;
+    esac
+  done
+  # and wait for them to be gone (bounded): a killed node can hold its
+  # listener for a moment, and the next start would hit EADDRINUSE
+  local t0=$SECONDS
+  for pid in $pids; do
+    while kill -0 "$pid" 2>/dev/null && [ $((SECONDS - t0)) -lt "${CEL_DASH_PORT_WAIT_S:-15}" ]; do sleep 0.2; done
   done
   return 0
 }

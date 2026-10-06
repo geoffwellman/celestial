@@ -840,6 +840,36 @@ _run_cmdline() { # <pid> -> argv, one per line
   tr '\0' '\n' < "$(_run_proc_root)/$1/cmdline" 2>/dev/null || true
 }
 
+# WHO IS RESUMING WHICH SESSION FILE (CEL-102). Two omp processes resumed one
+# session file for two days - an old pane that had lost its herdr name, and a
+# fresh orchestrator - and each answered mail on its own. herdr's roster
+# cannot see a nameless pane's session, but /proc can: every live process
+# whose argv says `--resume <file>` (or `--resume=<file>`), with the pane it
+# stands in (HERDR_PANE_ID from its environ; `-` when it has none).
+run_session_resumers() { # -> session<TAB>pid<TAB>pane, one per live resumer
+  local d pid prev a sess pane item
+  for d in "$(_run_proc_root)"/[0-9]*; do
+    pid="${d##*/}"
+    [ -r "$d/cmdline" ] || continue
+    sess="" prev=""
+    while IFS= read -r -d '' a; do
+      case "$a" in
+        --resume=*) sess="${a#--resume=}" ;;
+        *) [ "$prev" = --resume ] && sess="$a" ;;
+      esac
+      [ -n "$sess" ] && break
+      prev="$a"
+    done < "$d/cmdline" 2>/dev/null
+    [ -n "$sess" ] || continue
+    pane="-"
+    while IFS= read -r -d '' item; do
+      case "$item" in HERDR_PANE_ID=*) pane="${item#*=}"; break ;; esac
+    done < "$d/environ" 2>/dev/null
+    printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
+  done
+  return 0
+}
+
 # What a launch line is made of, for comparing two of them: each flag with the
 # value that follows it. The role prompt's PATH does not count (a product can
 # move its role file without its launch being stale), nor does a resume.
@@ -1266,6 +1296,22 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # Over a dead or absent agent, come back into the last recorded session.
     if [ "$fresh" -eq 0 ] && [ -z "$resume_session" ] && [ -z "$live" ]; then
       resume_session="$(_run_sessions_last "$cwd")"
+    fi
+    # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
+    # herdr still has a name for the pane already resuming it. The pane being
+    # restarted is the one expected resumer - it is about to be replaced.
+    if [ "$role" = orchestrator ] && [ -n "$resume_session" ] && [ "$force" -eq 0 ]; then
+      local rs rpid rpane others=""
+      while IFS=$'\t' read -r rs rpid rpane; do
+        [ "$rs" = "$resume_session" ] || continue
+        [ -n "$restart_pane" ] && [ "$rpane" = "$restart_pane" ] && continue
+        others+="    pane $rpane  pid $rpid"$'\n'
+      done < <(run_session_resumers)
+      if [ -n "$others" ]; then
+        c_err "cel run $role: another live process is already resuming $resume_session:" >&2
+        printf '%s' "$others" >&2
+        die "  two processes on one session answer mail twice. Close that pane (or name and adopt it: cel ws up $(ws_name "$wsdir")), or pass --force"
+      fi
     fi
     if [ -n "$resume_session" ]; then
       local rflag; rflag="$(agent_resume "$runtime" flag)"
