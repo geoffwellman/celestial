@@ -17,6 +17,24 @@ export CEL_TESTING=1
 # CEL-75: `cel fleet` caches its document; a suite that mutates a fixture and
 # re-reads must see the change, so the cache is off unless a test turns it on.
 export CEL_FLEET_CACHE_SECS=0
+# NO TEST INHERITS WHO IS RUNNING IT (CEL-103). Every worker pane exports its
+# inbox identity - CEL_INBOX_ME and CEL_INBOX_WS since CEL-95 - and its role,
+# workspace and herdr pane. They leaked into every fixture: eight inbox tests
+# failed on every worker's box for a week, reported each time as "pre-existing,
+# also on main", while CI, which has no such environment, stayed green. So
+# every CEL_* and HERDR_* variable is dropped here except the ones this runner
+# (or the suite lock that a nested run inherits) sets on purpose; a test that
+# needs one sets it itself.
+_suite_clear_caller_env() {
+  local v
+  for v in $(compgen -e); do
+    case "$v" in
+      CEL_ROOT|CEL_TESTING|CEL_FLEET_CACHE_SECS|CEL_SUITE_LOCK|CEL_SUITE_LOCK_HELD|CEL_SUITE_WAIT_WARN|CEL_TEST_JOBS|CEL_TEST_TIMEOUT|CEL_TEST_TIMES) ;;
+      CEL_*|HERDR_*|OMP_GATEWAY_TOKEN) unset "$v" ;;
+    esac
+  done
+}
+_suite_clear_caller_env
 FILTER="" NO_LOCK=0
 for arg in "$@"; do
   case "$arg" in

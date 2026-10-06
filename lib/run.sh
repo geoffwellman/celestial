@@ -890,21 +890,50 @@ run_session_resumers() { # -> session<TAB>pid<TAB>pane, one per live resumer
 # /proc - neither agent has started yet. The check and a short-lived claim are
 # taken under one flock, so the second launch inside the window
 # (CEL_SESSION_CLAIM_SECS, default 60) sees the first one's claim.
-_run_session_claim() { # <session> -> 0 claimed, 1 claimed by another launch
-  local dir key f lock fd="" now held rc=0
+#
+# The claim names the pane it was taken for (CEL-103): `--restart` of that same
+# pane a few seconds later is the pane replacing itself, not a second resumer,
+# and was being refused by its own claim.
+_run_session_claim_file() { # <session> -> path of its claim file
+  local dir key
   dir="$(dirname "$(_run_sessions_file)")/session-claims"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  key="$(printf '%s' "$1" | sha1sum | cut -c1-16)"; f="$dir/$key"; lock="$dir/.lock"
+  key="$(printf '%s' "$1" | sha1sum | cut -c1-16)"
+  printf '%s/%s' "$dir" "$key"
+}
+
+_run_session_claim() { # <session> [pane] -> 0 claimed, 1 claimed by another launch
+  local f lock fd="" now held hpane rc=0 pane="${2:-}"
+  f="$(_run_session_claim_file "$1")"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  lock="$(dirname "$f")/.lock"
   if have flock && exec {fd}>"$lock" 2>/dev/null; then flock -w 10 "$fd" || true; fi
   now="$(date +%s)"
-  held="$(cat "$f" 2>/dev/null || true)"
-  if [ -n "$held" ] && [ $((now - held)) -lt "${CEL_SESSION_CLAIM_SECS:-60}" ]; then
+  read -r held hpane < "$f" 2>/dev/null || true
+  case "${held:-}" in ''|*[!0-9]*) held="" ;; esac
+  if [ -n "$held" ] && [ $((now - held)) -lt "${CEL_SESSION_CLAIM_SECS:-60}" ] \
+     && ! { [ -n "$pane" ] && [ "${hpane:-}" = "$pane" ]; }; then
     rc=1
   else
-    printf '%s\n' "$now" > "$f"
+    printf '%s %s\n' "$now" "$pane" > "$f"
   fi
   if [ -n "$fd" ]; then flock -u "$fd"; exec {fd}>&-; fi
   return "$rc"
+}
+
+# A LAUNCH THAT FAILS GIVES ITS CLAIM BACK (CEL-103). A refused or crashed
+# launch kept the claim for its full minute, so the obvious retry was refused
+# too unless the operator reached for --force - the flag that also skips the
+# check the claim exists for.
+_run_session_release() { # <session>
+  rm -f "$(_run_session_claim_file "$1")" 2>/dev/null || true
+}
+
+# Called from the EXIT trap cmd_run sets after claiming: a non-zero exit -
+# any die after the claim - releases it; a launch that succeeded keeps it.
+_RUN_CLAIMED_SESSION=""
+_run_session_release_on_failure() { # <exit status>
+  [ "$1" -eq 0 ] || [ -z "$_RUN_CLAIMED_SESSION" ] || _run_session_release "$_RUN_CLAIMED_SESSION"
+  return 0
 }
 
 # What a launch line is made of, for comparing two of them: each flag with the
@@ -1354,8 +1383,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       fi
       # and claim it, so a launch racing this one before either agent is in
       # /proc is refused too. A preview claims nothing.
-      if [ "$dry_run" -eq 0 ] && ! _run_session_claim "$resume_session"; then
-        die "cel run $role: another launch claimed $resume_session in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
+      if [ "$dry_run" -eq 0 ]; then
+        _run_session_claim "$resume_session" "$restart_pane" \
+          || die "cel run $role: another launch claimed $resume_session in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
+        _RUN_CLAIMED_SESSION="$resume_session"
+        trap '_run_session_release_on_failure $?' EXIT
       fi
     fi
     if [ -n "$resume_session" ]; then
@@ -1438,7 +1470,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     pane_label_set "$restart_pane" "$label"
     tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix"
-    herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null
+    herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null \
+      || die "cel run $role --restart: herdr could not start $agent_name in $restart_pane"
     _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
     return 0
   fi
