@@ -252,7 +252,12 @@ _run_file() { # <n> <file>
         _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" ) >/dev/null 2>&1 &
     wd=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
-    kill -- "-$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    # The group may not exist yet - a quick test can end before the watchdog
+    # subshell reaches its setsid - so the pid itself is the fallback, and
+    # once it is reaped the group is swept again: a sleep forked in the
+    # instant between those two kills would otherwise outlive the run.
+    kill -- "-$wd" 2>/dev/null || kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    kill -- "-$wd" 2>/dev/null
     _kill_current_group
     if [ -n "${CEL_TEST_TIMES:-}" ]; then
       printf '%s %s %s\n' "$(( ($(date +%s%N) - t0) / 1000000 ))" "$base" "$t" >> "$CEL_TEST_TIMES"
