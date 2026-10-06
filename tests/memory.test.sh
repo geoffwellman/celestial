@@ -68,7 +68,9 @@ test_mem_tree_rss_mb_counts_a_real_child_and_leaves_a_sibling_at_zero() {
   assert_eq "$(readlink "/proc/$pid/cwd")" "$T/mine/sub"
 
   local kb mb
-  kb="$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")"
+  # PSS where the kernel offers it (CEL-100), RSS otherwise.
+  kb="$(awk '/^Pss:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null)"
+  [ -n "$kb" ] || kb="$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")"
   mb="$(mem_tree_rss_mb "$T/mine")"
   # A NESTED cwd belongs to the tree above it: a gate run happens in a
   # subdirectory of the worktree and is still the worker's memory.
@@ -116,4 +118,39 @@ test_mem_tree_snapshot_is_reused_by_every_later_read() {
   mem_tree_snapshot_clear
   assert_eq "$MEM_SNAPSHOT" ""
   assert_eq "$(mem_tree_rss_mb /w/snap)" "0"
+}
+
+# ---- CEL-100: one process, counted once ----------------------------------------
+# The steward reported a worker at 4.4G whose agent measured ~300 MB: summing
+# VmRSS over every process in a tree counts each shared page (the node binary,
+# libc, bash) once per process that maps it. PSS splits shared pages between
+# their users, so a tree's sum is what it actually costs. A fixture /proc
+# (CEL_PROC) holds a multi-threaded process - its task/ entries each repeat
+# the whole process's RSS - and a shared-page process whose PSS is under RSS.
+_mem_fixture_proc() { # <root> <pid> <cwd> <rss-kb> <pss-kb|''> [threads]
+  local d="$1/$2"; mkdir -p "$d"
+  ln -s "$3" "$d/cwd"
+  printf 'Name:\tnode\nVmRSS:\t   %s kB\n' "$4" > "$d/status"
+  [ -z "$5" ] || printf 'Rss:   %s kB\nPss:   %s kB\n' "$4" "$5" > "$d/smaps_rollup"
+  local t
+  for t in $(seq 1 "${6:-0}"); do
+    mkdir -p "$d/task/$((${2} + t))"
+    printf 'VmRSS:\t   %s kB\n' "$4" > "$d/task/$((${2} + t))/status"
+    ln -s "$3" "$d/task/$((${2} + t))/cwd"
+  done
+}
+
+test_a_multi_threaded_process_is_counted_once() {
+  local T; T="$(mktemp -d)"; mkdir -p "$T/w/one" "$T/proc"
+  _mem_fixture_proc "$T/proc" 4100 "$T/w/one" 307200 "" 12
+  assert_eq "$(CEL_PROC="$T/proc" mem_tree_rss_mb "$T/w/one")" "300"
+  rm -rf "$T"
+}
+
+test_shared_pages_are_counted_by_pss_when_it_is_readable() {
+  local T; T="$(mktemp -d)"; mkdir -p "$T/w/one" "$T/proc"
+  _mem_fixture_proc "$T/proc" 4200 "$T/w/one" 204800 102400 4
+  _mem_fixture_proc "$T/proc" 4300 "$T/w/one" 4096 1024
+  assert_eq "$(CEL_PROC="$T/proc" mem_tree_rss_mb "$T/w/one")" "101"
+  rm -rf "$T"
 }

@@ -320,3 +320,29 @@ test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
   assert_eq "$parallel" "$serial"
   rm -rf "$T"
 }
+
+# ---- CEL-100: the watchdog does not outlive its test --------------------------
+# On 2026-10-04 one worker's suite left 385 `sleep 120` processes on PID 1: the
+# watchdog's bash was killed when its test finished, its sleep was not. A run
+# with a unique limit is the marker - after it, no sleep of that length remains.
+test_quick_tests_leave_no_watchdog_sleep_behind() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  # Many instant tests across parallel files: a test that ends before its
+  # watchdog has even started is the race CI hit on a3f687d.
+  local f i
+  for f in 1 2 3 4; do
+    for i in $(seq 1 15); do printf 'test_q%s_%s() { :; }\n' "$f" "$i"; done > "$T/tests/quick$f.test.sh"
+  done
+  # Unique per run, so concurrent suites cannot see each other's tests in flight.
+  local limit=$(( 40000 + $$ % 20000 )) out
+  out="$(CEL_TEST_JOBS=4 CEL_TEST_TIMEOUT=$limit bash "$T/tests/run.sh" --no-lock 2>&1)" || true
+  assert_contains "$out" "60 passed"
+  # Bounded: a group already signalled may take a moment to be reaped.
+  # Neither a sleep of that length nor a timeout carrying it may outlive the run.
+  i=0; while pgrep -f "(^sleep $limit\$)|(timeout -k 1 $limit )" >/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+  local left; left="$(pgrep -f "(^sleep $limit\$)|(timeout -k 1 $limit )" | wc -l)"
+  pkill -f "(^sleep $limit\$)|(timeout -k 1 $limit )" 2>/dev/null || true
+  assert_eq "$left" "0"
+  rm -rf "$T"
+}
