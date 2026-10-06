@@ -40,19 +40,41 @@ export const findChrome = () => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const main = async () => {
-  const bin = findChrome();
-  if (!bin) { console.log(JSON.stringify({ skip: 'no headless chrome on this box' })); return; }
-  const prof = mkdtempSync(join(tmpdir(), 'cel-chrome-'));
-  const chrome = spawn(bin, ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0',
-    `--user-data-dir=${prof}`, '--window-size=1200,1400', 'about:blank'], { stdio: 'ignore' });
-  try {
+// CEL-102: under the parallel runner Chrome can take well over 10 s to write
+// DevToolsActivePort. Wait a generous, bounded time (CEL_TEST_CHROME_WAIT_MS,
+// default 60 s), retry the launch once, and on failure show Chrome's stderr.
+export const chromeWaitMs = () => Number(process.env.CEL_TEST_CHROME_WAIT_MS) || 60000;
+
+export const launchChrome = async (bin, extra = [], { waitMs = chromeWaitMs(), tries = 2 } = {}) => {
+  const tails = [];
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    const prof = mkdtempSync(join(tmpdir(), 'cel-chrome-'));
+    const chrome = spawn(bin, ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0',
+      `--user-data-dir=${prof}`, ...extra, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    chrome.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
+    let exited = false;
+    chrome.on('exit', () => { exited = true; });
+    chrome.on('error', (e) => { err += String(e); exited = true; });
     let port = '';
-    for (let i = 0; i < 100 && !port; i++) {
+    const t0 = Date.now();
+    while (!port && !exited && Date.now() - t0 < waitMs) {
       await sleep(100);
       try { port = readFileSync(join(prof, 'DevToolsActivePort'), 'utf8').split('\n')[0]; } catch { /* not yet */ }
     }
-    if (!port) throw new Error('chrome never opened its debugging port');
+    if (port) return { chrome, prof, port };
+    chrome.kill('SIGKILL');
+    rmSync(prof, { recursive: true, force: true });
+    tails.push(`attempt ${attempt} (${Date.now() - t0} ms):\n${err.split('\n').slice(-20).join('\n')}`);
+  }
+  throw new Error(`chrome never opened its debugging port (waited ${waitMs} ms x${tries})\n--- chrome stderr tail ---\n${tails.join('\n')}`);
+};
+
+const main = async () => {
+  const bin = findChrome();
+  if (!bin) { console.log(JSON.stringify({ skip: 'no headless chrome on this box' })); return; }
+  const { chrome, prof, port } = await launchChrome(bin, ['--window-size=1200,1400']);
+  try {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     const page = targets.find((t) => t.type === 'page');
     const ws = new WebSocket(page.webSocketDebuggerUrl);

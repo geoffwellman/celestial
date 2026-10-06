@@ -566,6 +566,22 @@ doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
   return "$bad"
 }
 
+# TWO LIVE PROCESSES ON ONE SESSION FILE (CEL-102). Each answers the same
+# mail separately and the owner gets contradicting replies. A failure.
+doctor_shared_session_lines() { # -> 1 when any session file has two resumers
+  # shellcheck source=lib/run.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  local rows dup bad=0
+  rows="$(run_session_resumers)"
+  [ -n "$rows" ] || return 0
+  while IFS= read -r dup; do
+    [ -n "$dup" ] || continue
+    c_err "two live processes resume $dup: $(printf '%s\n' "$rows" | awk -F '\t' -v s="$dup" '$1 == s { printf "pane %s (pid %s)  ", $3, $2 }')- close one"
+    bad=1
+  done < <(printf '%s\n' "$rows" | cut -f1 | sort | uniq -d)
+  return "$bad"
+}
+
 cmd_doctor() {
   local fail=0
   c_hd "celestial"
@@ -669,6 +685,7 @@ cmd_doctor() {
   c_hd "Orchestrators"
   doctor_stale_orchestrator_lines
   doctor_inbox_hook_lines || fail=1
+  doctor_shared_session_lines || fail=1
   # One line, never a failure: most boxes have no gateway, and a red doctor
   # for an optional door teaches people to ignore a red doctor.
   c_hd "Gateway"
