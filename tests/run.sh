@@ -241,23 +241,21 @@ _run_file() { # <n> <file>
     CURRENT_GROUP=$!
     # The watchdog closes the lock descriptor too: a watchdog's orphaned sleep
     # holding the lock is the 2026-09-19 outage cel-verify already answered.
+    #
+    # THE WATCHDOG HAS NO CHILD TO ORPHAN (CEL-100). It used to `sleep`, and
+    # killing the watchdog left the sleep on PID 1 - 385 `sleep 120`s from one
+    # suite run. Process-group kills still lost one in CI: a quick test can end
+    # in the fork/exec instant before the group exists. So it waits with the
+    # builtin `read -t` on a FIFO nobody writes (opened read-write, so it never
+    # sees EOF): one process, and killing it is the whole cleanup.
+    wdf="$RESULTS/$n.wd"; rm -f "$wdf"; mkfifo "$wdf"
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
-      # The watchdog is its own process group (setsid execs in place: this
-      # subshell is not a group leader, so $! stays its pid) and the runner
-      # kills the GROUP, so its sleep goes with it at any instant - no window
-      # between fork and a trap knowing the pid (CEL-100: 385 orphaned
-      # `sleep 120`s from one suite run).
-      exec setsid bash -c 'sleep "$1"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
-        kill -TERM -- "-$2" 2>/dev/null; sleep 1; kill -KILL -- "-$2" 2>/dev/null' \
-        _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" ) >/dev/null 2>&1 &
+      exec bash -c 'read -r -t "$1" _ <>"$4"; kill -0 "$2" 2>/dev/null || exit 0; : > "$3"
+        kill -TERM -- "-$2" 2>/dev/null; read -r -t 1 _ <>"$4"; kill -KILL -- "-$2" 2>/dev/null' \
+        _ "$TEST_TIMEOUT" "$CURRENT_GROUP" "$limit_hit" "$wdf" ) >/dev/null 2>&1 &
     wd=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?
-    # The group may not exist yet - a quick test can end before the watchdog
-    # subshell reaches its setsid - so the pid itself is the fallback, and
-    # once it is reaped the group is swept again: a sleep forked in the
-    # instant between those two kills would otherwise outlive the run.
-    kill -- "-$wd" 2>/dev/null || kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
-    kill -- "-$wd" 2>/dev/null
+    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null; rm -f "$wdf"
     _kill_current_group
     if [ -n "${CEL_TEST_TIMES:-}" ]; then
       printf '%s %s %s\n' "$(( ($(date +%s%N) - t0) / 1000000 ))" "$base" "$t" >> "$CEL_TEST_TIMES"
