@@ -10,7 +10,7 @@
 // and same-origin keeps select-to-comment working from the parent frame.
 // The public tier serves documents raw: the internet gets no controls.
 import { createServer } from 'node:http';
-import { readFileSync, readdirSync, statSync, existsSync, appendFileSync, mkdirSync, copyFileSync, unlinkSync, rmSync, writeFileSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync, appendFileSync, mkdirSync, copyFileSync, unlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { join, normalize, extname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -71,58 +71,16 @@ const docWorkspace = (f) => {
   } catch { return ''; }
 };
 
-// Images published beside a page (its charts and figures) used to crowd the
-// index as rows of their own. An image some document in the root references
-// is that document's asset: still served at its URL, just not listed. A bare
-// image nobody references stays listed - `cel publish` takes any file, so it
-// may be the publication itself.
+// The index lists documents only: every image (png/jpg/gif/svg/webp/ico) is
+// left out of the rows and the workspace counts, referenced or not. Images
+// still serve at their URLs - they are just never listed.
 const IMAGE_RE = /\.(png|jpe?g|gif|svg|webp|ico)$/i;
-// Matching is on parsed src/href/url() values, never substrings: a substring
-// test let `mychart.png` (or a prose mention) hide an unrelated bare chart.png.
-const REF_RE = /(?:\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))|url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
-const REF_READ_CAP = 512 * 1024;
-const normRef = (v) => {
-  let r = String(v).trim().split(/[?#]/)[0];
-  try { r = decodeURIComponent(r); } catch { /* keep raw */ }
-  while (r.startsWith('./')) r = r.slice(2);
-  if (r.startsWith('/')) r = r.slice(1);
-  return r;
-};
-// The index is rendered per request; re-reading every page each time is the
-// cost Sourcery flagged. Refs are cached per document by mtime+size.
-const refCache = new Map();   // name -> { key, refs:Set }
-const docRefs = (f) => {
-  let st; try { st = statSync(join(ROOT, f)); } catch { refCache.delete(f); return new Set(); }
-  const key = `${st.mtimeMs}:${st.size}`;
-  const hit = refCache.get(f);
-  if (hit && hit.key === key) return hit.refs;
-  const refs = new Set();
-  try {
-    const fd = openSync(join(ROOT, f), 'r');
-    const buf = Buffer.alloc(Math.min(st.size, REF_READ_CAP));
-    try { readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); }
-    for (const m of buf.toString('utf8').matchAll(REF_RE)) {
-      const v = m.slice(1).find((x) => x !== undefined);
-      if (v) refs.add(normRef(v));
-    }
-  } catch { /* unreadable: no refs */ }
-  refCache.set(f, { key, refs });
-  return refs;
-};
-const referencedAssets = (files) => {
-  const images = files.filter((f) => IMAGE_RE.test(f));
-  if (!images.length) return new Set();
-  const all = new Set();
-  for (const f of files) if (/\.html?$/i.test(f)) for (const r of docRefs(f)) all.add(r);
-  return new Set(images.filter((f) => all.has(f)));
-};
 
 // Same visual identity as cel dash: night ground, starlight ink, gold accent.
 const index = () => {
   const names = readdirSync(ROOT).filter((f) => !f.startsWith('.'));
-  const assets = referencedAssets(names);
   const rows = names
-    .filter((f) => !assets.has(f))
+    .filter((f) => !IMAGE_RE.test(f))
     .map((f) => ({ f, st: statSync(join(ROOT, f)) }))
     .filter((x) => x.st.isFile())
     .sort((a, b) => b.st.mtimeMs - a.st.mtimeMs)

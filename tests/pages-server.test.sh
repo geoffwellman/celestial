@@ -146,39 +146,28 @@ test_index_carries_workspace_filter_and_pagination() {
   _pages_stop
 }
 
-# A page's images are published beside it and used to crowd the index as rows
-# of their own. An image a document references is an asset of that document:
-# it stays served at its URL but is not listed. A bare image nobody references
-# is still a publication in its own right (`cel publish` takes any file).
-test_index_lists_documents_not_their_images() {
+# The index lists documents only. Every image - referenced by a page or
+# standalone - is left out of the rows and the workspace counts, yet each
+# keeps serving at its URL.
+test_index_lists_documents_never_images() {
   _pages_boot 1 || return 1
+  mkdir -p "$PROOT/.meta"
   printf '<img src="chart.png"><img src="./fig.svg">' > "$PROOT/report.html"
+  printf '<p>notes</p>' > "$PROOT/notes.html"
+  printf '{"workspace":"orion"}' > "$PROOT/.meta/report.html.json"
+  printf '{"workspace":"orion"}' > "$PROOT/.meta/notes.html.json"
   printf 'PNG' > "$PROOT/chart.png"; printf '<svg/>' > "$PROOT/fig.svg"
-  printf 'PNG' > "$PROOT/lonely.png"
+  local f
+  for f in lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico; do printf 'X' > "$PROOT/$f"; done
+  printf '{"workspace":"orion"}' > "$PROOT/.meta/lonely.png.json"
   local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
   assert_contains "$idx" 'href="/report.html"'
-  assert_contains "$idx" 'href="/lonely.png"'
-  if printf '%s' "$idx" | grep -q 'href="/chart.png"\|href="/fig.svg"'; then
-    echo "referenced images listed as documents"; _pages_stop; return 1; fi
-  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/chart.png")" "200"
-  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/fig.svg")" "200"
-  _pages_stop
-}
-
-# Matching is on parsed src/href/url() references, not substrings: a near-miss
-# filename or a prose mention must not hide an unrelated bare image, while
-# query strings, fragments, ./ and percent-encoding still resolve to the file.
-test_index_asset_matching_is_exact_reference_not_substring() {
-  _pages_boot 1 || return 1
-  printf '<img src="mychart.png"><a href="bar-chart.png">x</a> see chart.png in prose
-<img src="./a%%20b.png?v=1"><img src="c.png#frag"><div style="background:url('"'"'d.png'"'"')">' > "$PROOT/r.html"
-  local f; for f in chart.png mychart.png bar-chart.png 'a b.png' c.png d.png; do printf 'PNG' > "$PROOT/$f"; done
-  local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
-  assert_contains "$idx" 'href="/chart.png"'
-  local hidden
-  for hidden in mychart.png bar-chart.png a%20b.png c.png d.png; do
-    if printf '%s' "$idx" | grep -qF "href=\"/$hidden\""; then
-      echo "referenced $hidden still listed"; _pages_stop; return 1; fi
+  assert_contains "$idx" 'href="/notes.html"'
+  assert_contains "$idx" 'orion (2)'
+  for f in chart.png fig.svg lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico; do
+    if printf '%s' "$idx" | grep -qF "href=\"/$f\""; then
+      echo "image $f listed"; _pages_stop; return 1; fi
+    assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/$f")" "200"
   done
   _pages_stop
 }
