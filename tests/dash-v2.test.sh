@@ -27,6 +27,7 @@ EOF
   cat >"$T/bin/cel" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/cel.log"
+if [ "\$1" = quota ] && [ -f "$T/quota.json" ]; then cat "$T/quota.json"; exit 0; fi
 if [ "\$1" = quota ]; then printf '%s' '{"subscriptions":[{"provider":"claude","label":"alpha@example.invalid","windows":[{"name":"5h","scope":null,"used_pct":40,"resets_at":"$(date -u -d '@'$(( $(date +%s) + 9000 )) +%Y-%m-%dT%H:%M:%SZ)"}]}]}'; exit 0; fi
 exec "$CEL_ROOT/bin/cel" "\$@"
 EOF
@@ -392,5 +393,82 @@ test_v2_services_two_simultaneous_requests_run_cel_services_once() {
   assert_eq "$(grep -c '^services --workspace alpha' "$T/cel.log")" "1"
   assert_eq "$(jq -r '[.items[].name] | index("pages") != null' "$T/a.json")" "true"
   assert_eq "$(jq -r '[.items[].name] | index("pages") != null' "$T/b.json")" "true"
+  _v2_down
+}
+
+# --- CEL-108: the usage card's feed ------------------------------------------
+# One feed for the one card: subscriptions grouped by provider with every
+# window projected to its reset, who runs on each account (omp's pool for the
+# orchestrators, the gateway's vault for workers), and the pay-as-you-go
+# balances with two workspaces on one key merged into one row.
+_v2_quota_fixture() {
+  local r2 r5
+  r2="$(date -u -d "@$(( $(date +%s) + 172800 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  r5="$(date -u -d "@$(( $(date +%s) + 9000 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg r2 "$r2" --arg r5 "$r5" '{
+    subscriptions: [
+      {provider: "claude", account: "ant-ana", label: "ana@alpha.test", source: "omp",
+       windows: [{name: "5h", scope: null, used_pct: 6, resets_at: $r5},
+                 {name: "7d", scope: null, used_pct: 80, resets_at: $r2},
+                 {name: "7d", scope: "Fable", used_pct: 0, resets_at: $r2}]},
+      {provider: "claude", account: "ant-ben", label: "ben@alpha.test", source: "omp",
+       windows: [{name: "7d", scope: null, used_pct: 20, resets_at: $r2}]},
+      {provider: "codex", account: "cx-ana", label: "ana@alpha.test", source: "omp",
+       windows: [{name: "7d", scope: null, used_pct: 10, resets_at: $r2}]}],
+    balances: [
+      {provider: "openrouter", workspace: "alpha", remaining: "-0.11", state: "ok", floor: "2", unit: "usd", account: "aaaaaaaaaaaa", vetoed: true},
+      {provider: "openrouter", workspace: "bundle", remaining: "-0.11", state: "ok", floor: "2", unit: "usd", account: "aaaaaaaaaaaa", vetoed: true},
+      {provider: "deepseek", workspace: "alpha", remaining: "22.54", state: "ok", floor: "1", unit: "usd", account: "bbbbbbbbbbbb", vetoed: false}],
+    orch_pool: {live: ["ana@alpha.test"], disabled: ["ben@alpha.test"]},
+    gateway: ["claude|ana@alpha.test", "claude|ben@alpha.test"]}' > "$T/quota.json"
+  # one worker this week on a codex model, so that account can say who used it
+  jq '.[0].profile = "luna" | .[0].model = "gpt-6"' "$T/alpha/.cel/delegations.json" > "$T/d.json" \
+    && mv "$T/d.json" "$T/alpha/.cel/delegations.json"
+}
+
+test_v2_usage_groups_by_provider_and_tags_who_runs_on_each_account() {
+  _v2_boot; _v2_quota_fixture
+  local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.groups[].provider] | join(",")')" "claude,codex"
+  assert_eq "$(printf '%s' "$u" | jq -r '.groups[0].accounts | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq -r '.groups[0].accounts[] | select(.who == "ana@alpha.test") | .tags | join(",")')" "orch,workers"
+  assert_eq "$(printf '%s' "$u" | jq -r '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .tags | join(",")')" "workers,not orch"
+  assert_eq "$(printf '%s' "$u" | jq -r '.summary.orch.serving, .summary.orch.of' | paste -sd/)" "1/2"
+  # a scoped window is its own bar, labelled by its scope
+  assert_contains "$(printf '%s' "$u" | jq -r '[.groups[0].accounts[0].windows[].label] | join(",")')" "Fable week"
+  _v2_down
+}
+
+test_v2_usage_projects_each_window_and_flags_the_account_at_risk() {
+  _v2_boot; _v2_quota_fixture
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  # 80% with 5 of 7 days gone is ~112% at reset
+  assert_eq "$(printf '%s' "$u" | jq '.groups[0].accounts[0].windows[] | select(.label == "Week") | .projected_pct >= 100')" "true"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test"
+  assert_eq "$(printf '%s' "$u" | jq -r '.groups[0].accounts[0].windows[] | select(.label == "Week") | .level')" "warn"
+  _v2_down
+}
+
+test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
+  _v2_boot; _v2_quota_fixture
+  local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
+  assert_eq "$(printf '%s' "$u" | jq -r '.balances[] | select(.provider == "openrouter") | .workspaces | join(",")')" "alpha,bundle"
+  assert_eq "$(printf '%s' "$u" | jq '.balances | length')" "2"
+  assert_eq "$(printf '%s' "$u" | jq '.summary.below_floor')" "1"
+  assert_eq "$(printf '%s' "$u" | jq '.summary.funded')" "22.54"
+  # the filter narrows balances; subscriptions are the box's and always shown
+  u="$(_v2_get "$(_v2_url 'usage?ws=bundle')")"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.balances[].provider] | join(",")')" "openrouter"
+  assert_eq "$(printf '%s' "$u" | jq '.groups | length')" "2"
+  _v2_down
+}
+
+test_v2_usage_says_who_used_an_account_only_when_it_can_tell() {
+  _v2_boot; _v2_quota_fixture
+  local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
+  # one codex account: the ledger's codex-model work is that account's
+  assert_eq "$(printf '%s' "$u" | jq -c '.groups[1].accounts[0].used_by')" '[{"ws":"alpha","profile":"luna","n":1}]'
+  # two claude accounts behind one gateway: no way to split it, so no offer
+  assert_eq "$(printf '%s' "$u" | jq -c '[.groups[0].accounts[].used_by]')" '[null,null]'
   _v2_down
 }
