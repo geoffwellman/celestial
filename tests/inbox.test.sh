@@ -892,7 +892,7 @@ test_inbox_watch_is_single_per_parent_and_reader() {
   local g1; g1="$(_inbox_watch_bg "$parent" "$o1")"
   sleep 1
   local g2; g2="$(_inbox_watch_bg "$parent" "$o2")"
-  sleep 1.5
+  sleep 2.5
   assert_eq "$(_inbox_group_size "$g2")" "0"
   [ "$(_inbox_group_size "$g1")" -ge 1 ] || { echo "first watcher died"; return 1; }
   kill -- "-$g1" "$parent" 2>/dev/null

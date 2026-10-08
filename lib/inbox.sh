@@ -767,38 +767,70 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   # survives the path nobody thought of - the watcher follows the pid it was
   # told owns it, and goes when that pid goes. Signalling our own process
   # group, not just this pid, because the work is a `tail | jq` pipeline.
+  # ONE WATCH PER PARENT AND READER, ENFORCED (CEL-111). A hook that restarts
+  # its watcher, or a console started twice, must never leave two tailing the
+  # same mailbox for the same pane. A short wait covers the old watcher still
+  # exiting after a restart; anything still holding it after that is a live
+  # duplicate, and this one goes quietly.
+  if [ -n "$parent" ] && have flock; then
+    local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-watch"
+    mkdir -p "$lkd" 2>/dev/null || true
+    local lkfd
+    if exec {lkfd}>>"$lkd/$(_inbox_sanitise "$who").$parent.lock" 2>/dev/null; then
+      flock -w "${CEL_INBOX_WATCH_LOCK_WAIT:-1}" "$lkfd" || return 0
+    fi
+  fi
+  local poller=""
   if [ -n "$parent" ]; then
     ( while kill -0 "$parent" 2>/dev/null; do sleep "${CEL_WATCH_PARENT_POLL:-5}"; done
       kill -TERM -- "-$$" 2>/dev/null || kill -TERM "$$" 2>/dev/null ) &
+    poller=$!
   fi
-  if [ "$every" -eq 0 ]; then _inbox_watch_one "$(_inbox_ws "$ws")" "$who" ""; return 0; fi
-  # One tail per workspace, merged onto this stdout. The children are killed on
-  # the way out: a console restarted a few times otherwise leaves a tail per
-  # mailbox per restart, all writing to a pane that no longer exists.
-  local n pids=""
-  for n in $(_inbox_every_ws "$ws"); do
-    _inbox_watch_one "$n" "$who" "[$n] " &
-    pids="$pids $!"
+  # ONE TAIL FOR EVERY MAILBOX (CEL-111). --all-workspaces used to fork a
+  # `tail | jq | while` pipeline per workspace, each under its own wrapper
+  # subshell - ten processes per watcher on a five-workspace box, and every
+  # orchestrator, worker and reviewer hook runs one: 200 on the box. tail
+  # follows all the files at once and names each on a `==> file <==` header;
+  # one jq carries the current workspace across lines.
+  local names n f files=() single=""
+  if [ "$every" -eq 0 ]; then single="$(_inbox_ws "$ws")"; names="$single"
+  else names="$(_inbox_every_ws "$ws")"; fi
+  for n in $names; do
+    f="$(_inbox_file "$n")"; mkdir -p "$(dirname "$f")"; touch "$f"; files+=("$f")
   done
-  [ -n "$pids" ] || return 0
+  [ "${#files[@]}" -gt 0 ] || { [ -n "$poller" ] && kill "$poller" 2>/dev/null; return 0; }
+  local tfd tpid
+  exec {tfd}< <(exec tail -n 0 -F "${files[@]}" 2>/dev/null)
+  tpid=$!
+  # Two processes, not three: jq and the line loop are the pipeline's own
+  # elements, with no wrapper subshell around them.
+  jq -nRr --unbuffered --arg who "$who" --arg dir "$(_inbox_dir)/" "$_INBOX_WATCH_JQ" <&"$tfd" \
+    | _inbox_watch_lines "$who" "$single" &
+  local fmt=$!
+  exec {tfd}<&-
   # shellcheck disable=SC2064
-  trap "kill $pids 2>/dev/null; trap - EXIT; exit 130" INT TERM
+  trap "kill $tpid $poller 2>/dev/null; trap - EXIT; exit 130" INT TERM
   # shellcheck disable=SC2064
-  trap "kill $pids 2>/dev/null" EXIT
-  wait
+  trap "kill $tpid $poller 2>/dev/null" EXIT
+  wait "$fmt"
 }
 
-_inbox_watch_one() { # <ws> <who> <prefix>
-  local ws="$1" who="$2" prefix="$3"
-  local f; f="$(_inbox_file "$ws")"
-  mkdir -p "$(dirname "$f")"; touch "$f"
-  # Fields first, formatting in the shell: the notification needs the kind and
-  # the sender, and re-parsing a rendered line to get them back is how a
-  # message containing a colon becomes a notification from nobody.
-  tail -n 0 -F "$f" 2>/dev/null | jq -r --unbuffered --arg who "$who" \
-    'select(.kind != "resolution") | select(.to == $who or .to == "all")
-     | [.kind, .from, (.message | gsub("\n"; " "))] | @tsv' \
-  | while IFS=$'\t' read -r kind from msg; do
+# Fields first, formatting in the shell: the notification needs the kind and
+# the sender, and re-parsing a rendered line to get them back is how a
+# message containing a colon becomes a notification from nobody.
+_INBOX_WATCH_JQ='
+    foreach inputs as $l ({ws: "", m: null};
+      if ($l | startswith("==> ")) then
+        {ws: ($l | ltrimstr("==> ") | rtrimstr(" <==") | ltrimstr($dir) | rtrimstr(".jsonl")), m: null}
+      else .m = (($l | fromjson?) // null) end;
+      select(.m | type == "object") | .ws as $ws | .m
+      | select(.kind != "resolution") | select(.to == $who or .to == "all")
+      | [$ws, .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
+_inbox_watch_lines() { # <who> <single-ws|""> < ws\tkind\tfrom\tmsg
+  local who="$1" single="$2" ws kind from msg prefix
+  while IFS=$'\t' read -r ws kind from msg; do
+      prefix=""
+      if [ -n "$single" ]; then ws="$single"; else prefix="[$ws] "; fi
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
       # An ESCALATION is by definition the kind that cannot wait, and it was
       # the one kind that raised nothing: 72 of them landed in root's mailbox
