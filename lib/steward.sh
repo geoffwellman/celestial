@@ -1689,6 +1689,29 @@ _steward_stale_orchestrators() {
 # the product workspace's mailbox passed a pipe buffer in size: 55 failed
 # ticks in a day, "Main process exited, status=2", no message. sed reads to
 # the end and exits 0.
+# CEL-105: THE DASHBOARD'S MEMORY OF THE BOX. The v2 page draws load over a
+# day and which worker was running, waiting or idle when - and nothing on the
+# box remembered either: herdr answers "now" and the ledger records only
+# state changes a person made. So each tick appends one line (load, memory,
+# swap, every pane's status) to a small ring, trimmed to the newest
+# CEL_SAMPLES_KEEP lines. Cheap by design: /proc and the agent list the tick
+# already fetched.
+_steward_sample() { # <agents-json>
+  local f="${CEL_SAMPLES_FILE:-$HOME/.local/share/cel/samples.jsonl}" keep="${CEL_SAMPLES_KEEP:-2000}"
+  local load mem swap
+  load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || printf 0)"
+  mem="$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{if(t>0) printf "%.1f", (t-a)*100/t; else print 0}' /proc/meminfo 2>/dev/null || printf 0)"
+  swap="$(awk '/^SwapTotal/{t=$2} /^SwapFree/{f=$2} END{if(t>0) printf "%.1f", (t-f)*100/t; else print 0}' /proc/meminfo 2>/dev/null || printf 0)"
+  mkdir -p "$(dirname "$f")"
+  printf '%s' "$1" | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson load "${load:-0}" --argjson mem "${mem:-0}" --argjson swap "${swap:-0}" \
+    '{ts: $ts, load: $load, mem_pct: $mem, swap_pct: $swap,
+      panes: [(.result.agents // [])[] | {cwd: .cwd, status: .agent_status}]}' >> "$f" 2>/dev/null || return 0
+  if [ "$(wc -l < "$f")" -gt "$keep" ]; then
+    tail -n "$keep" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  fi
+}
+
 cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   local do_gc=1
   if [ "${1:-}" = "--install" ]; then shift; _steward_install "$@"; return $?; fi
@@ -1716,6 +1739,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
 
   local agents_json
   agents_json="$(herdr agent list 2>/dev/null || printf '{"result":{"agents":[]}}')"
+  _steward_sample "$agents_json"
 
   _steward_review_sweep "$agents_json"
   # And then the ledger closes what the world already closed - after the

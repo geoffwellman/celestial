@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { controlSecurity, internalError } from '../http-security.mjs';
+import { createV2 } from './v2.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
 // The plane's own directory name is the reader's choice, so resolve it from
 // this file (tools/dash/server.mjs -> two levels up) the way bin/cel does.
@@ -2041,6 +2042,10 @@ const logReq = (req, code) => {
   console.error(`${new Date().toISOString()} ${req.method} ${safeUrl(req.url)} ${code} ${req.headers.host || '-'} "${ua}"`);
 };
 
+// CEL-105: the v2 page's feeds and its one named-action door, in their own
+// module so this file does not grow another thousand lines.
+const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents });
+
 const server = createServer(async (req, res) => {
   res.on('finish', () => logReq(req, res.statusCode));
   try {
@@ -2088,6 +2093,7 @@ const server = createServer(async (req, res) => {
       req.pipe(upstream);
       return;
     }
+    if (await v2.handle(req, res, readBody)) return;
     if (req.method === 'GET' && req.url === '/api/session') {
       security.session(req, res);
       return;
