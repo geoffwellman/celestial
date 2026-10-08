@@ -90,3 +90,25 @@ test_dash_doctor_names_the_unit_state() {
   assert_contains "$out" "cel-dash.service: active, enabled"
   _du_down
 }
+
+# The pages servers were started the same `setsid ... &` way from the same
+# steward tick, so they died the same death. Under a user manager they run as
+# transient units with their own cgroup.
+test_pages_ensure_runs_in_its_own_unit_not_a_fork() {
+  _du_setup
+  source "$CEL_ROOT/lib/pages.sh"
+  cat >"$T/bin/systemd-run" <<'S'
+#!/usr/bin/env bash
+printf 'systemd-run %s\n' "$*" >>"$DU_LOG"
+python3 -m http.server --bind 127.0.0.1 "$DU_PORT" >/dev/null 2>&1 &
+echo $! >"$DU_PID"
+S
+  chmod +x "$T/bin/systemd-run"
+  local out rc=0
+  out="$(CEL_PAGES_PORT="$PORT" CEL_PAGES_HOST=127.0.0.1 CEL_PAGES_LOG_DIR="$T/logs" _pages_ensure 0 2>&1)" || rc=$?
+  assert_eq "$rc" "0"
+  assert_contains "$(cat "$DU_LOG")" "--user --unit=cel-pages"
+  assert_contains "$(cat "$DU_LOG")" "Restart=on-failure"
+  [ ! -e "$T/forked" ] || { echo "pages forked a server"; _du_down; return 1; }
+  _du_down
+}
