@@ -357,3 +357,25 @@ test_v2_services_lists_box_and_workspace_services() {
   assert_eq "$(printf '%s' "$s" | jq -r '[.items[] | select(.ws == "alpha")] | length')" "0"
   _v2_down
 }
+
+# The box's servers bind the tailnet address, not loopback; a probe of
+# 127.0.0.1 called every one of them down. Each is probed on its own host:
+# a dashboard's dash.host, the pages server's CEL_PAGES_HOST.
+test_v2_services_probe_each_service_on_its_own_host() {
+  _v2_boot
+  local p1 p2; p1="$(_v2_port)"; p2="$(_v2_port)"
+  python3 -c "import socket,time;s=socket.socket();s.bind(('127.0.0.2',$p1));s.listen();t=socket.socket();t.bind(('127.0.0.3',$p2));t.listen();time.sleep(60)" &
+  local lp=$!
+  printf 'name: bundle\ndash:\n  port: %s\n  host: 127.0.0.2\n' "$p1" > "$T/bundle/workspace.yaml"
+  sleep 0.5
+  kill "$DASH_PID"; wait "$DASH_PID" 2>/dev/null || true
+  CEL_PAGES_PORT="$p2" CEL_PAGES_HOST=127.0.0.3 CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
+    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
+  DASH_PID=$!
+  local i; for i in $(seq 1 30); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3; done
+  local s; s="$(_v2_get "$(_v2_url 'services?ws=all')")"
+  kill "$lp" 2>/dev/null || true
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "dashboard bundle") | .state')" "up"
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "pages") | .state')" "up"
+  _v2_down
+}

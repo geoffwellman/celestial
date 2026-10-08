@@ -170,3 +170,10 @@ test_dash_v2page_a_failing_feed_is_unavailable_and_the_rest_still_draw() {
   assert_contains "$(_vpj .activity)" "widget#11 merged"
   _vp_down
 }
+
+test_dash_v2page_working_now_lists_only_working_and_blocked() {
+  _vp_boot
+  local rc=0; _vp_run working || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .working)" "widget-abc-12-colour,gadget-wg-7-beta"
+  _vp_down
+}

@@ -41,6 +41,26 @@
    "id": "WG-7",
    "model": "anthropic/opus",
    "pr": 7
+  },
+  {
+   "name": "widget-abc-9-old",
+   "ws": "alpha",
+   "status": "idle",
+   "pane": "w3:p1",
+   "repo": "widget",
+   "branch": "ABC-9-old",
+   "id": "ABC-9",
+   "model": ""
+  },
+  {
+   "name": "gadget-wg-3-done",
+   "ws": "bundle",
+   "status": "done",
+   "pane": "w4:p1",
+   "repo": "gadget",
+   "branch": "WG-3-done",
+   "id": "WG-3",
+   "model": ""
   }
  ],
  "prs": [

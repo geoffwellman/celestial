@@ -247,6 +247,11 @@ const main = async () => {
       await key('Escape');
     }
 
+    if (scenario === 'working') {
+      // Working now is for panes that need watching: working or blocked
+      out.working = await evaluate(`[].slice.call(document.querySelectorAll('#grid .w[data-id=working] [data-agent]')).map(function(e){return e.dataset.agent}).join(',')`);
+    }
+
     if (scenario === 'missing') {
       // one feed answers 404: its card says so and the others still draw
       const body = (id) => evaluate(`(document.querySelector('#grid .w[data-id=${id}] .body')||{}).textContent||''`);
