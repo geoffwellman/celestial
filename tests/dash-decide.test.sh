@@ -29,6 +29,11 @@ _dd_boot() {
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
+# the classic page and the decisions panel it loads (CEL-106 moved the panel
+# into /decisions.js so v2 shares it)
+_dd_page() {
+  curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/classic" && curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js"
+}
 _dd_down() {
   if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
   DASH_PID=""; if [ -n "${T:-}" ]; then rm -rf "$T"; fi; T=""; trap - EXIT
@@ -48,10 +53,12 @@ test_dash_needs_you_lists_and_answers_through_cel_decide() {
   assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null)" ""
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'ANSWER to "pick a style": glossy'
   # the page carries the panel and its client script parses
-  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  local page; page="$(_dd_page)"
   assert_contains "$page" 'id="needsyou"'
   printf '%s' "$page" | python3 -c 'import sys,re;print("\n".join(re.findall(r"<script>(.*?)</script>",sys.stdin.read(),re.S)))' > "$T/page.js"
   node --check "$T/page.js"
+  curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js" > "$T/decisions.js"
+  node --check "$T/decisions.js"
   _dd_down
 }
 
@@ -86,7 +93,7 @@ test_dash_option_buttons_answer_by_index() {
   assert_eq "$(_dd_post "{\"id\":\"$ID\",\"action\":\"answer\",\"value\":\"1\"}" -H "x-cel-csrf: $TOKEN")" "200"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"pick a style": 1 '
   # the page sends the index, not the label
-  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")" "option:+b.dataset.n"
+  assert_contains "$(_dd_page)" "option:+b.dataset.n"
   _dd_down
 }
 
@@ -144,7 +151,7 @@ test_dash_groups_and_orders_decisions() {
   assert_eq "$(printf '%s' "$st" | jq -r '.needsYouGroups[0].recommended')" "2"
   assert_eq "$(printf '%s' "$st" | jq -r '.needsYou | length')" "4"
   # the page lands on needs you, and no browser confirm() remains
-  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  local page; page="$(_dd_page)"
   assert_contains "$page" "accept all recommended"
   if printf '%s' "$page" | grep -q 'confirm('; then echo "page still uses confirm()"; return 1; fi
   _dd_down
@@ -176,7 +183,7 @@ test_dash_bulk_accept_sends_only_listed_ids_and_keeps_refusals() {
 # with showTab the next refresh bounced the owner back to needs you.
 test_dash_factory_list_jump_counts_as_a_tab_pick() {
   _dd_boot
-  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  local page; page="$(_dd_page)"
   assert_contains "$page" "list:function(){pickTab('inflight')}"
   _dd_down
 }
@@ -186,7 +193,7 @@ test_dash_factory_list_jump_counts_as_a_tab_pick() {
 # guarded path a typed drop takes.
 test_dash_one_click_close_sends_the_fixed_reason() {
   _dd_boot
-  local page; page="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  local page; page="$(_dd_page)"
   assert_contains "$page" 'data-why="already done"'
   assert_contains "$page" 'data-why="no longer needed"'
   assert_contains "$page" "action:'drop',value:b.dataset.why"
@@ -207,7 +214,7 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   local gone; gone="$(_dd_ask alpha --title "settled elsewhere" --option "a::x")"
   mkdir -p "$T/shots"
   local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
-  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
+  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/classic" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
   # A skip that reads as a pass is how this test went unrun in review. In CI
   # a missing browser is a failure; on a box without one it says so loudly.
   if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then

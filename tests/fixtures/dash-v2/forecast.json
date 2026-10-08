@@ -1,0 +1,12 @@
+{
+ "accounts": [
+  {
+   "who": "acct-A",
+   "pool": "orchestrators",
+   "window": "7d",
+   "used_pct": 43,
+   "resets": "2026-10-10T06:00:00Z",
+   "projected_pct": 75
+  }
+ ]
+}

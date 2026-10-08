@@ -293,3 +293,104 @@ test_v2_activity_log_is_bounded() {
   assert_contains "$(tail -1 "$T/state/dash-activity.jsonl")" "message to root"
   _v2_down
 }
+
+# --- CEL-106, real-data round ------------------------------------------------
+# With "All workspaces" the page showed no orchestrators, no workers and no
+# PRs: it read them from the per-workspace /api/state. The fleet feed covers
+# every workspace in scope.
+test_v2_fleet_lists_orchestrators_workers_and_prs_across_workspaces() {
+  _v2_boot
+  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"alpha-orch\",\"agent\":\"omp\",\"agent_status\":\"working\",\"cwd\":\"$T/alpha\",\"pane_id\":\"w0:p1\"},{\"name\":\"bundle-orch\",\"agent\":\"omp\",\"agent_status\":\"idle\",\"cwd\":\"$T/bundle\",\"pane_id\":\"w0:p2\"},{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"blocked\",\"cwd\":\"$T/wt/widget-ok\",\"pane_id\":\"w1:p1\"},{\"name\":\"stranger\",\"agent\":\"pi\",\"agent_status\":\"idle\",\"cwd\":\"/elsewhere\",\"pane_id\":\"w9:p1\"}],\"workspaces\":[]}}'" > "$T/bin/herdr"
+  local f; f="$(_v2_get "$(_v2_url 'fleet?ws=all')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | .name + "@" + .ws + ":" + .status] | sort | join(",")')" "alpha-orch@alpha:working,bundle-orch@bundle:idle"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.workers[] | .name + "@" + .ws + ":" + .status + ":" + .id] | join(",")')" "widget-abc-1@alpha:blocked:ABC-1-widget"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.prs[] | .repo + "#" + (.number|tostring) + "@" + .ws] | sort | join(",")')" "widget#10@alpha,widget#9@alpha"
+  assert_eq "$(printf '%s' "$f" | jq -r '.prs[] | select(.number == 10) | .review')" "CHANGES_REQUESTED"
+  # one workspace: only its own
+  f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[].name] | join(",")')" "bundle-orch"
+  assert_eq "$(printf '%s' "$f" | jq '.prs | length')" "0"
+  _v2_down
+}
+
+# Lanes were amber all day: stale ledger rows (a "running" nobody has touched
+# in weeks, finished work) each drew one segment over the whole window, and
+# every non-running state read as "waiting". Only work active in the range
+# shows; finished is not waiting; an open-ended "running" with no live pane
+# is not running now.
+test_v2_lanes_show_only_live_work_and_never_call_finished_waiting() {
+  _v2_boot
+  local l; l="$(_v2_get "$(_v2_url 'lanes?range=3d')")"
+  local refs; refs="$(printf '%s' "$l" | jq -r '[.workspaces[].lanes[].ref] | join(",")')"
+  assert_eq "$refs" "widget/ABC-1-widget"
+  assert_eq "$(printf '%s' "$l" | jq '[.workspaces[].lanes[].segments[] | select(.state == "waiting")] | length')" "0"
+  _v2_down
+}
+
+# A box whose steward has not sampled yet: the feed says since when it is
+# collecting, and carries the box's current CPU, memory and swap regardless.
+test_v2_load_without_samples_says_collecting_and_has_current() {
+  _v2_boot
+  rm -f "$T/state/samples.jsonl"
+  local l; l="$(_v2_get "$(_v2_url 'load?hours=24')")"
+  assert_eq "$(printf '%s' "$l" | jq '.points | length')" "0"
+  assert_eq "$(printf '%s' "$l" | jq '.collecting_since | type')" '"string"'
+  assert_eq "$(printf '%s' "$l" | jq '(.current.load|type) == "number" and (.current.mem_pct|type) == "number" and (.current.swap_pct|type) == "number"')" "true"
+  _v2_down
+}
+
+# Running services: the box's own (pages, gateway, each workspace dashboard)
+# beside every workspace's declared services.
+test_v2_services_lists_box_and_workspace_services() {
+  _v2_boot
+  printf 'name: bundle\ndash:\n  port: 1\nservices:\n  - name: gadget-preview\n    url: http://127.0.0.1:2\n' > "$T/bundle/workspace.yaml"
+  local s; s="$(_v2_get "$(_v2_url 'services?ws=all')")"
+  local names; names="$(printf '%s' "$s" | jq -r '[.items[] | .name + "@" + .ws] | join(",")')"
+  assert_contains "$names" "pages@box"
+  assert_contains "$names" "dashboard alpha@alpha"
+  assert_contains "$names" "dashboard bundle@bundle"
+  assert_contains "$names" "gadget-preview@bundle"
+  # this dashboard answers, the bundle one on port 1 does not
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "dashboard alpha") | .state')" "up"
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "dashboard bundle") | .state')" "down"
+  s="$(_v2_get "$(_v2_url 'services?ws=bundle')")"
+  assert_eq "$(printf '%s' "$s" | jq -r '[.items[] | select(.ws == "alpha")] | length')" "0"
+  _v2_down
+}
+
+# The box's servers bind the tailnet address, not loopback; a probe of
+# 127.0.0.1 called every one of them down. Each is probed on its own host:
+# a dashboard's dash.host, the pages server's CEL_PAGES_HOST.
+test_v2_services_probe_each_service_on_its_own_host() {
+  _v2_boot
+  local p1 p2; p1="$(_v2_port)"; p2="$(_v2_port)"
+  python3 -c "import socket,time;s=socket.socket();s.bind(('127.0.0.2',$p1));s.listen();t=socket.socket();t.bind(('127.0.0.3',$p2));t.listen();time.sleep(60)" &
+  local lp=$!
+  printf 'name: bundle\ndash:\n  port: %s\n  host: 127.0.0.2\n' "$p1" > "$T/bundle/workspace.yaml"
+  sleep 0.5
+  kill "$DASH_PID"; wait "$DASH_PID" 2>/dev/null || true
+  CEL_PAGES_PORT="$p2" CEL_PAGES_HOST=127.0.0.3 CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
+    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
+  DASH_PID=$!
+  local i; for i in $(seq 1 30); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3; done
+  local s; s="$(_v2_get "$(_v2_url 'services?ws=all')")"
+  kill "$lp" 2>/dev/null || true
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "dashboard bundle") | .state')" "up"
+  assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "pages") | .state')" "up"
+  _v2_down
+}
+
+# Review on #132: the services feed ran `cel services` per workspace on every
+# poll of every tab. Two requests at once share one run.
+test_v2_services_two_simultaneous_requests_run_cel_services_once() {
+  _v2_boot
+  : > "$T/cel.log"
+  _v2_get "$(_v2_url 'services?ws=alpha')" > "$T/a.json" &
+  local a=$!
+  _v2_get "$(_v2_url 'services?ws=alpha')" > "$T/b.json" &
+  wait "$a" $!
+  assert_eq "$(grep -c '^services --workspace alpha' "$T/cel.log")" "1"
+  assert_eq "$(jq -r '.items[0].name' "$T/a.json")" "pages"
+  assert_eq "$(jq -r '.items[0].name' "$T/b.json")" "pages"
+  _v2_down
+}

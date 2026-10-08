@@ -1,0 +1,24 @@
+{
+ "at": "2026-10-06T18:10:00Z",
+ "counts": {
+  "merged": 5,
+  "decisions_closed": 2,
+  "decisions_new": 3,
+  "incidents": 1,
+  "stuck": 2
+ },
+ "items": [
+  {
+   "ts": "2026-10-07T09:00:00Z",
+   "ws": "alpha",
+   "kind": "merge",
+   "text": "widget#11 merged"
+  },
+  {
+   "ts": "2026-10-07T09:30:00Z",
+   "ws": "bundle",
+   "kind": "incident",
+   "text": "gadget preview restarted"
+  }
+ ]
+}
