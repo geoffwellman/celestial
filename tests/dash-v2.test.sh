@@ -141,7 +141,7 @@ test_v2_since_counts_and_seen_is_per_browser_cookie() {
   # no ?at: the server remembers when THIS cookie last looked
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   assert_eq "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -c "$T/jar" -b "$T/jar" -X POST \
-    -H "x-cel-csrf: $TOKEN" "$(_v2_url seen)")" "200"
+    -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" "$(_v2_url seen)")" "200"
   s="$(curl -sf -m 20 -b "$T/jar" "$(_v2_url since)")"
   assert_eq "$(printf '%s' "$s" | jq '.counts.merged')" "0"
   [ "$(printf '%s' "$s" | jq -r .at)" \> "$(_v2_ago 120)" ] || { echo "seen not stored: $s" >&2; return 1; }
