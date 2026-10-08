@@ -1,0 +1,32 @@
+{
+ "items": [
+  {
+   "name": "pages",
+   "ws": "box",
+   "port": 7780,
+   "state": "up",
+   "url": "http://127.0.0.1:7780"
+  },
+  {
+   "name": "dashboard alpha",
+   "ws": "alpha",
+   "port": 7770,
+   "state": "up",
+   "url": "http://127.0.0.1:7770"
+  },
+  {
+   "name": "widget-preview",
+   "ws": "alpha",
+   "port": 8100,
+   "state": "up",
+   "url": ""
+  },
+  {
+   "name": "gadget-preview",
+   "ws": "bundle",
+   "port": 8101,
+   "state": "down",
+   "url": ""
+  }
+ ]
+}

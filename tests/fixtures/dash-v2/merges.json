@@ -1,0 +1,53 @@
+{
+ "days": [
+  {
+   "day": "2026-10-01",
+   "counts": {
+    "widget": 1,
+    "gadget": 2
+   }
+  },
+  {
+   "day": "2026-10-02",
+   "counts": {
+    "widget": 2,
+    "gadget": 0
+   }
+  },
+  {
+   "day": "2026-10-03",
+   "counts": {
+    "widget": 3,
+    "gadget": 1
+   }
+  },
+  {
+   "day": "2026-10-04",
+   "counts": {
+    "widget": 0,
+    "gadget": 2
+   }
+  },
+  {
+   "day": "2026-10-05",
+   "counts": {
+    "widget": 1,
+    "gadget": 0
+   }
+  },
+  {
+   "day": "2026-10-06",
+   "counts": {
+    "widget": 2,
+    "gadget": 1
+   }
+  },
+  {
+   "day": "2026-10-07",
+   "counts": {
+    "widget": 3,
+    "gadget": 2
+   }
+  }
+ ]
+}

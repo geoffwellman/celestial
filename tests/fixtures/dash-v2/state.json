@@ -1,0 +1,162 @@
+{
+ "workspace": "alpha",
+ "updated": "2026-10-07T12:00:00Z",
+ "viewer": "owner",
+ "needsYou": [
+  {
+   "id": "1759800000000000001",
+   "workspace": "alpha",
+   "asker": "alpha-orch",
+   "title": "pick a widget colour",
+   "urgent": true,
+   "age_secs": 7200,
+   "blocks": "the widget release",
+   "options": [
+    {
+     "label": "blue",
+     "tradeoff": "calm, matches the docs"
+    },
+    {
+     "label": "red",
+     "tradeoff": "loud"
+    }
+   ],
+   "recommended": 1,
+   "updated": "a"
+  },
+  {
+   "id": "1759800000000000003",
+   "workspace": "alpha",
+   "asker": "alpha-orch",
+   "title": "rename the sprocket module",
+   "urgent": false,
+   "age_secs": 3600,
+   "options": [
+    {
+     "label": "keep",
+     "tradeoff": "no churn"
+    },
+    {
+     "label": "rename",
+     "tradeoff": "clearer"
+    }
+   ],
+   "recommended": 1,
+   "updated": "c"
+  },
+  {
+   "id": "1759800000000000002",
+   "workspace": "bundle",
+   "asker": "bundle-orch",
+   "title": "ship the gadget beta now?",
+   "urgent": false,
+   "age_secs": 90000,
+   "options": [
+    {
+     "label": "ship it",
+     "tradeoff": "users get it today"
+    },
+    {
+     "label": "hold",
+     "tradeoff": "one more review"
+    }
+   ],
+   "recommended": 2,
+   "updated": "b"
+  }
+ ],
+ "needsYouGroups": [
+  {
+   "workspace": "alpha",
+   "urgent": 1,
+   "count": 2,
+   "recommended": 2,
+   "items": [
+    {
+     "id": "1759800000000000001",
+     "workspace": "alpha",
+     "asker": "alpha-orch",
+     "title": "pick a widget colour",
+     "urgent": true,
+     "age_secs": 7200,
+     "blocks": "the widget release",
+     "options": [
+      {
+       "label": "blue",
+       "tradeoff": "calm, matches the docs"
+      },
+      {
+       "label": "red",
+       "tradeoff": "loud"
+      }
+     ],
+     "recommended": 1,
+     "updated": "a"
+    },
+    {
+     "id": "1759800000000000003",
+     "workspace": "alpha",
+     "asker": "alpha-orch",
+     "title": "rename the sprocket module",
+     "urgent": false,
+     "age_secs": 3600,
+     "options": [
+      {
+       "label": "keep",
+       "tradeoff": "no churn"
+      },
+      {
+       "label": "rename",
+       "tradeoff": "clearer"
+      }
+     ],
+     "recommended": 1,
+     "updated": "c"
+    }
+   ]
+  },
+  {
+   "workspace": "bundle",
+   "urgent": 0,
+   "count": 1,
+   "recommended": 1,
+   "items": [
+    {
+     "id": "1759800000000000002",
+     "workspace": "bundle",
+     "asker": "bundle-orch",
+     "title": "ship the gadget beta now?",
+     "urgent": false,
+     "age_secs": 90000,
+     "options": [
+      {
+       "label": "ship it",
+       "tradeoff": "users get it today"
+      },
+      {
+       "label": "hold",
+       "tradeoff": "one more review"
+      }
+     ],
+     "recommended": 2,
+     "updated": "b"
+    }
+   ]
+  }
+ ],
+ "box": {
+  "mine": true,
+  "owner": "alpha",
+  "url": ""
+ },
+ "inbox": [
+  {
+   "id": "1759840000000000001",
+   "ts": "2026-10-07T11:00:00Z",
+   "from": "alpha-orch",
+   "to": "owner",
+   "message": "widget ABC-12 is approved"
+  }
+ ],
+ "inboxOpen": []
+}
