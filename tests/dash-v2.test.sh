@@ -87,13 +87,13 @@ test_v2_one_gh_pass_serves_merges_cycle_and_heat() {
   m="$(_v2_get "$(_v2_url 'merges?days=14')")"
   c="$(_v2_get "$(_v2_url cycle)")"
   h="$(_v2_get "$(_v2_url heat)")"
-  assert_eq "$(printf '%s' "$m" | jq '[.days[].repos.widget // 0] | add')" "2"
+  assert_eq "$(printf '%s' "$m" | jq '[.days[].counts.widget // 0] | add')" "2"
   assert_eq "$(printf '%s' "$m" | jq '.days | length')" "14"
-  assert_eq "$(printf '%s' "$c" | jq '.repos.widget.n')" "2"
+  assert_eq "$(printf '%s' "$c" | jq '.repos[0].prs')" "2"
   # open-to-merge: 10h and ~2.8h -> median of the two
-  assert_eq "$(printf '%s' "$c" | jq '.repos.widget.median_hours | floor')" "6"
-  assert_eq "$(printf '%s' "$h" | jq '[.grid[][]] | add')" "2"
-  assert_eq "$(printf '%s' "$h" | jq '.grid | length')" "7"
+  assert_eq "$(printf '%s' "$c" | jq '.repos[0].median_hours | floor')" "6"
+  assert_eq "$(printf '%s' "$h" | jq '[.cells[][]] | add')" "2"
+  assert_eq "$(printf '%s' "$h" | jq '.cells | length')" "7"
   assert_eq "$(grep -c -- '--state merged' "$T/gh.log")" "1"
   _v2_down
 }
@@ -173,10 +173,10 @@ test_v2_load_reads_the_sample_ring() {
 test_v2_forecast_projects_quota_to_reset() {
   _v2_boot
   local f; f="$(_v2_get "$(_v2_url forecast)")"
-  assert_eq "$(printf '%s' "$f" | jq -r '.items[0].who')" "alpha@example.invalid"
-  assert_eq "$(printf '%s' "$f" | jq -r '.items[0].window')" "5h"
+  assert_eq "$(printf '%s' "$f" | jq -r '.accounts[0].who')" "alpha@example.invalid"
+  assert_eq "$(printf '%s' "$f" | jq -r '.accounts[0].window')" "5h"
   # 40% used with half the window gone projects to ~80%
-  assert_eq "$(printf '%s' "$f" | jq '.items[0].projected_pct | . >= 75 and . <= 85')" "true"
+  assert_eq "$(printf '%s' "$f" | jq '.accounts[0].projected_pct | . >= 75 and . <= 85')" "true"
   _v2_down
 }
 
@@ -192,8 +192,9 @@ test_v2_act_message_goes_to_the_inbox_never_a_pane() {
   _v2_boot
   : > "$T/herdr.argv"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %s/herdr.argv\nprintf "{}"\n' "$T" > "$T/bin/herdr"
-  assert_eq "$(_v2_act '{"action":"message","target":"widget-abc-1","args":{"ws":"alpha","text":"hello widget"}}' -H "x-cel-csrf: $TOKEN")" "200"
-  assert_contains "$(jq -r 'select(.to == "widget-abc-1") | .message' "$T/inbox/alpha.jsonl")" "hello widget"
+  assert_eq "$(_v2_act '{"action":"message","target":"widget-abc-1","args":{"ws":"alpha","text":"hello widget","urgent":true,"kind":"ask"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_contains "$(jq -r 'select(.to == "widget-abc-1") | .message' "$T/inbox/alpha.jsonl")" "[ask] hello widget"
+  assert_eq "$(jq -r 'select(.to == "widget-abc-1" and .from == "dashboard") | .kind' "$T/inbox/alpha.jsonl")" "escalation"
   if grep -q 'prompt\|send-keys\|input' "$T/herdr.argv"; then echo "pane input used" >&2; return 1; fi
   # and the act is in the activity feed
   assert_contains "$(_v2_get "$(_v2_url 'activity?limit=5')" | jq -r '.items[].text')" "message to widget-abc-1"

@@ -307,11 +307,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const list = await merged(wss);
     const out = [];
     const today = new Date(); today.setHours(12, 0, 0, 0);
-    for (let i = days - 1; i >= 0; i--) out.push({ day: localDay(today.getTime() - i * DAY), repos: {} });
+    for (let i = days - 1; i >= 0; i--) out.push({ day: localDay(today.getTime() - i * DAY), counts: {} });
     const byDay = Object.fromEntries(out.map((d) => [d.day, d]));
     for (const p of list) {
       const d = byDay[localDay(p.mergedAt)];
-      if (d) d.repos[p.repo] = (d.repos[p.repo] || 0) + 1;
+      if (d) d.counts[p.repo] = (d.counts[p.repo] || 0) + 1;
     }
     return { days: out };
   };
@@ -322,10 +322,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     for (const p of await merged(wss)) {
       const m = new Date(p.mergedAt).getTime(); const c = new Date(p.createdAt).getTime();
       if (!m || !c || m < from) continue;
-      (by[p.repo] || (by[p.repo] = [])).push((m - c) / 3600e3);
+      const k = `${p.ws}\t${p.repo}`;
+      (by[k] || (by[k] = [])).push((m - c) / 3600e3);
     }
-    const repos = {};
-    for (const [k, v] of Object.entries(by)) repos[k] = { median_hours: Math.round(median(v) * 10) / 10, n: v.length };
+    const repos = Object.entries(by).map(([k, v]) => {
+      const [ws, repo] = k.split('\t');
+      return { repo, ws, prs: v.length, median_hours: Math.round(median(v) * 10) / 10 };
+    });
     return { days, repos };
   };
   const heat = async (url, wss) => {
@@ -335,9 +338,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     for (const p of await merged(wss)) {
       const t = new Date(p.mergedAt);
       if (t.getTime() < from) continue;
-      grid[t.getDay()][t.getHours()] += 1;
+      grid[(t.getDay() + 6) % 7][t.getHours()] += 1;
     }
-    return { days, rows: 'day of week, 0 = Sunday (local)', grid };
+    // CEL-106's page: Monday first, local time
+    return { days, cells: grid };
   };
 
   // ---- forecast -----------------------------------------------------------
@@ -366,7 +370,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
           window: w.name, used_pct: used, resets: iso(w.resets_at), projected_pct: projected });
       }
     }
-    return { items };
+    return { accounts: items };
   });
 
   // ---- act ----------------------------------------------------------------
@@ -382,7 +386,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (action === 'message') {
       const text = String(args.text || '').trim();
       if (!NAME.test(String(target || '')) || !text || text.length > 4000) return [400, 'message needs a target and text'];
-      if (await cel(['inbox', 'send', String(target), text, '--from', 'dashboard', '--workspace', wsName]) === null) return [502, 'inbox send failed'];
+      // urgent goes as an escalation so it notifies; an ask is labelled so
+      // the recipient knows a reply is wanted
+      const kind = args.urgent ? 'escalation' : 'status';
+      const body = args.kind === 'ask' ? `[ask] ${text}` : text;
+      if (await cel(['inbox', 'send', String(target), body, '--from', 'dashboard', '--workspace', wsName, '--kind', kind]) === null) return [502, 'inbox send failed'];
       logAct(wsName, `dashboard: message to ${target}`);
       return [200, 'ok'];
     }
