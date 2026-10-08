@@ -379,3 +379,18 @@ test_v2_services_probe_each_service_on_its_own_host() {
   assert_eq "$(printf '%s' "$s" | jq -r '.items[] | select(.name == "pages") | .state')" "up"
   _v2_down
 }
+
+# Review on #132: the services feed ran `cel services` per workspace on every
+# poll of every tab. Two requests at once share one run.
+test_v2_services_two_simultaneous_requests_run_cel_services_once() {
+  _v2_boot
+  : > "$T/cel.log"
+  _v2_get "$(_v2_url 'services?ws=alpha')" > "$T/a.json" &
+  local a=$!
+  _v2_get "$(_v2_url 'services?ws=alpha')" > "$T/b.json" &
+  wait "$a" $!
+  assert_eq "$(grep -c '^services --workspace alpha' "$T/cel.log")" "1"
+  assert_eq "$(jq -r '.items[0].name' "$T/a.json")" "pages"
+  assert_eq "$(jq -r '.items[0].name' "$T/b.json")" "pages"
+  _v2_down
+}
