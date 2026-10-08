@@ -52,7 +52,10 @@ test_dash_unit_runs_cel_dash_with_path_workdir_restart_and_log() {
   assert_contains "$u" "ExecStart=$CEL_ROOT/bin/cel dash --port 7770 --host 100.64.0.9"
   assert_contains "$u" "Restart=on-failure"
   assert_contains "$u" "WorkingDirectory=/srv/alpha"
-  assert_contains "$u" "Environment=\"PATH=$PATH\""
+  assert_contains "$u" "Environment=\"PATH=$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\""
+  # fixed, not the caller's: the steward and a shell must write the same file
+  local u2; u2="$(PATH="/elsewhere:$PATH" dash_unit_text 7770 100.64.0.9 /srv/alpha "$T/logs/dash.log")"
+  assert_eq "$u2" "$u"
   assert_contains "$u" "StandardOutput=append:$T/logs/dash.log"
   assert_contains "$u" "WantedBy=default.target"
   _du_down
@@ -110,5 +113,18 @@ S
   assert_contains "$(cat "$DU_LOG")" "--user --unit=cel-pages"
   assert_contains "$(cat "$DU_LOG")" "Restart=on-failure"
   [ ! -e "$T/forked" ] || { echo "pages forked a server"; _du_down; return 1; }
+  _du_down
+}
+
+# A changed unit (dash.port moved) on an ACTIVE service: `start` is a no-op,
+# so the old server kept the old port and every tick said "did not come up".
+test_dash_ensure_restarts_an_active_unit_whose_file_changed() {
+  _du_setup
+  echo active >"$DU_ACTIVE"
+  printf 'old unit\n' >"$T/units/cel-dash.service"
+  local rc=0
+  _dash_ensure "$PORT" 127.0.0.1 >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "0"
+  assert_contains "$(cat "$DU_LOG")" "--user restart cel-dash.service"
   _du_down
 }
