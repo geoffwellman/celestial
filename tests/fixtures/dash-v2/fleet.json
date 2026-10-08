@@ -1,0 +1,81 @@
+{
+ "orchestrators": [
+  {
+   "name": "alpha-orch",
+   "ws": "alpha",
+   "status": "working",
+   "pane": "w0:p1"
+  },
+  {
+   "name": "bundle-orch",
+   "ws": "bundle",
+   "status": "idle",
+   "pane": "w0:p2"
+  },
+  {
+   "name": "celestial-orch",
+   "ws": "plane",
+   "status": "idle",
+   "pane": "w0:p3"
+  }
+ ],
+ "workers": [
+  {
+   "name": "widget-abc-12-colour",
+   "ws": "alpha",
+   "status": "working",
+   "pane": "w1:p1",
+   "repo": "widget",
+   "branch": "ABC-12-widget-colour",
+   "id": "ABC-12",
+   "model": "anthropic/opus",
+   "pr": 12
+  },
+  {
+   "name": "gadget-wg-7-beta",
+   "ws": "bundle",
+   "status": "blocked",
+   "pane": "w2:p1",
+   "repo": "gadget",
+   "branch": "WG-7-gadget-beta",
+   "id": "WG-7",
+   "model": "anthropic/opus",
+   "pr": 7
+  }
+ ],
+ "prs": [
+  {
+   "ws": "alpha",
+   "repo": "widget",
+   "number": 12,
+   "title": "ABC-12: widget colour picker",
+   "url": "https://example.invalid/widget/pull/12",
+   "branch": "ABC-12-widget-colour",
+   "review": "APPROVED",
+   "mergeable": "MERGEABLE",
+   "draft": false
+  },
+  {
+   "ws": "bundle",
+   "repo": "gadget",
+   "number": 7,
+   "title": "WG-7: gadget beta flag",
+   "url": "https://example.invalid/gadget/pull/7",
+   "branch": "WG-7-gadget-beta",
+   "review": "REVIEW_REQUIRED",
+   "mergeable": "MERGEABLE",
+   "draft": false
+  },
+  {
+   "ws": "alpha",
+   "repo": "widget",
+   "number": 13,
+   "title": "ABC-13: sprocket cleanup",
+   "url": "https://example.invalid/widget/pull/13",
+   "branch": "ABC-13-sprocket",
+   "review": "CHANGES_REQUESTED",
+   "mergeable": "CONFLICTING",
+   "draft": false
+  }
+ ]
+}
