@@ -149,6 +149,9 @@ EOF
 # up, and nothing invented when it is not.
 test_services_reach_is_the_dash_proxy_url() {
   _svc_setup
+  # the one dashboard's port (CEL-107) comes from the box config first;
+  # this fixture has none, so it is the workspace's own
+  export CEL_CONFIG_FILE="$T/config.yaml"
   local dash; dash="$(_svc_free_port)"
   ( cd "$T/alpha/run" && exec python3 -m http.server "$dash" --bind 127.0.0.1 >/dev/null 2>&1 ) &
   SVC_PID=$!

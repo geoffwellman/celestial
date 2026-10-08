@@ -98,7 +98,9 @@ only a live token/document pair; no directory listing, session or control API
 is available there. Public links are bearer capabilities: anyone holding one
 can read it until expiry/revocation, and revocation cannot retract saved copies.
 
-`tools/dash/server.mjs` renders one workspace and invokes existing CLIs for
+`tools/dash/server.mjs` is one server for the box: it renders every
+registered workspace (the classic page one at a time, `?ws=<name>`), answers
+the old per-workspace ports with a redirect, and invokes existing CLIs for
 state and control. An absent inbox produces a complete empty state. Fallible
 response construction finishes before headers; late failures are contained
 without trying to send a second status line.

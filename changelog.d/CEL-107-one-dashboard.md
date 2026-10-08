@@ -1,0 +1,2 @@
+### Changed
+- `cel dash` runs one dashboard server for the whole box instead of one per workspace. Its port is `dash: port:` in the box config, else the first workspace's old `dash.port`; every other workspace's old port redirects to it for one release. `/classic?ws=<name>` shows one workspace. The steward, `cel update`, `cel services` reach URLs and `cel doctor` all use the single dashboard; `dash.box` is gone.

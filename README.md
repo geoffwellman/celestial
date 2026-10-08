@@ -638,9 +638,10 @@ both failing the view still renders what the box itself knows.
   one worker passes `CEL_MEM_WORKER_WARN_MB` (2 GB) - it never kills anything,
   because a sweep that reaped a worker mid-gate would destroy the work it was
   measuring.
-- **`cel dash`** — per-workspace dashboard: an attention queue ("needs you"),
-  every in-flight branch joined with its agent + PR + CI state, sticky
-  filters, and a prompt box that drives any agent in the workspace.
+- **`cel dash`** — one dashboard for the whole box: an attention queue ("needs
+  you"), every in-flight branch joined with its agent + PR + CI state across
+  every workspace, sticky filters, and a prompt box that drives any agent.
+  `/classic?ws=<name>` keeps the old one-workspace page for this release.
 - **`cel publish <file>`** — self-hosted pages server (tailnet-private by
   default, per-document promotion to a public tier). Published pages carry a
   feedback widget that routes straight back to the agent that published them —
@@ -702,7 +703,7 @@ Each tick, in order:
 | **stale mailboxes** | a recipient with unread mail older than 30 minutes has probably lost its inbox monitor, so its pane is told to re-arm and drain |
 | **page feedback** | feedback whose publishing pane is gone stays a warning until someone drains it |
 | **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to the product's orchestrator, else root — this is what makes "move it to Todo" start work |
-| **servers** | `cel dash --ensure` for every workspace declaring a port; expired public shares are deleted, not merely refused |
+| **servers** | `cel dash --ensure` - the one dashboard, never one per workspace; expired public shares are deleted, not merely refused |
 | **ensure orchestrators** | every product declaring `orchestrator: auto` with no live pane is started with `cel run orchestrator`, at most once every 30 minutes so a crash-looping one is not relaunched every tick |
 | **updates** | once a day, whether this plane is behind — the newest release tag on the `release` channel, the commits on `origin/main` on the `main` channel, rolled up into one root item naming how many and which build you are on |
 
@@ -717,7 +718,7 @@ logs to `~/.local/share/cel/logs/`.
 
 | Service | Where | Kept alive by |
 |---|---|---|
-| `cel dash` | per workspace, port from `dash.port`; `dash.box: true` names the one that draws box services and subscriptions | the steward, every tick |
+| `cel dash` | one for the box: `dash: port:` in `~/.local/share/cel/config.yaml`, else the first workspace's `dash.port`, else `:7770`; every other workspace's old `dash.port` redirects to it for one release | the steward, every tick |
 | `cel pages` | tailnet tier, `:7780` | `cel pages --ensure` |
 | `cel pages --public` | internet-reachable tier, `:7781` | `cel pages --ensure` |
 | `cel pages tunnel` | cloudflared/ngrok, for sharing without Tailscale | started by hand |
@@ -779,17 +780,14 @@ known service or preview only, and only with the dashboard's own control token �
 a tailnet neighbour cannot browse this box's loopback. `cel-fanout try` prints
 that URL as its last line when the dashboard is up.
 
-**Box-level material is drawn on one dashboard, not on every one.** There is
-one gateway on this box, registered once in `services.d` — but
-four per-workspace dashboards each rendered them inside their own services
-panel and each rendered the whole subscriptions panel, so flipping between
-tabs read as several gateways. A workspace's services panel now lists only its
-own services; anything tagged `box` (and the subscriptions, which are
-box-level in their entirety) appears in a separate **Box** panel on exactly
-one dashboard — the workspace whose `dash:` block says `box: true`, defaulting
-to the registry's first — and every other dashboard shows one line pointing at
-it. There is still no box-wide dashboard: `cel fleet` and the console are the
-box-wide views.
+**One dashboard for the box.** There used to be one server per workspace,
+each polling the same herdr and gh and each drawing the same box-level rows,
+so one gateway read as several. Now `cel dash` runs one server covering every
+registered workspace; a workspace's services panel lists only its own
+services, and anything tagged `box` (and the subscriptions) appears once in
+the **Box** panel. The old per-workspace ports answer with a redirect to it
+for one release; `cel doctor` names the dashboard and any leftover
+per-workspace server (`cel dash --restart` stops them).
 
 The steward probes every service that declares `health:` once per tick. Two
 consecutive down ticks raise one rolled-up blocker to root naming the service
@@ -1061,7 +1059,7 @@ policy block into every agent.
 | `cel-fanout spike <repo> <brief>` | a trial: throwaway code in a disposable worktree, a report as the deliverable, never shipped |
 | `cel-fanout land <id>` | the one merge path — fleet-authored, approved, green, gate passed, `policy.merge` allows |
 | `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
-| `cel dash` | workspace dashboard |
+| `cel dash` | the box's one dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h] [--orphans] [--box]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
 | `cel box space [--json]` | what is large on this box, what is reclaimable, and what is nobody's to delete |

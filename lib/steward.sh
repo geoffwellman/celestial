@@ -1203,21 +1203,17 @@ _steward_afk_sweep() {
 }
 
 _steward_servers() {
-  local ws wsdir port
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    port="$(_wsy "$wsdir" '.dash.port')"
-    [ -n "$port" ] || continue
-    # SUBSHELL, not a bare call. cmd_dash reports missing prerequisites with
+  # ONE dashboard for the box (CEL-107), ensured once - never one per
+  # workspace; the old per-workspace ports are its redirects, not servers.
+  # SUBSHELL, not a bare call. cmd_dash reports missing prerequisites with
     # die(), and die() is `exit 1` - which `||` cannot catch, because an exit
     # is not a non-zero return. A single missing tool therefore terminated the
     # whole tick here, silently skipping everything after it: ready tickets,
     # the share sweep, the update check. Observed under systemd, where node is
     # absent from PATH - the tick looked like it ran, printed most of its
     # output, and simply never reached the part that picks up work.
-    ( cmd_dash --workspace "$ws" --ensure ) >/dev/null 2>&1 \
-      || c_err "dash for $ws (port $port) is down and would not start - cel dash --workspace $ws --ensure"
-  done
+  ( cmd_dash --ensure ) >/dev/null 2>&1 \
+    || c_err "dash (port $(dash_port)) is down and would not start - cel dash --ensure"
   # Expired public shares are swept, not merely refused: a token dir left on
   # disk is a document sitting in an internet-reachable root.
   local pubroot; pubroot="$(_pages_public_root)"

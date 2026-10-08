@@ -131,8 +131,9 @@ cel - the celestial plane
                                 --ensure: start it only if it is not already up
   cel pages tunnel              expose the public tier without tailscale
                                 (cloudflared quick tunnel needs no account)
-  cel dash [--port n] [--ensure]  workspace dashboard: worktrees, PRs, services,
-                                backlog, agent prompt box (localhost by default)
+  cel dash [--port n] [--ensure|--restart]  THE dashboard, one for the box:
+                                every workspace's worktrees, PRs, services,
+                                backlog; /classic?ws=<name> for one workspace
   cel services [--json]         what this box is running on a port: declared
                                 services and every `try` preview - state,
                                 health, memory, and the URL that reaches it
