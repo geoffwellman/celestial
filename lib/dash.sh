@@ -111,9 +111,92 @@ _dash_wait_port_free() { # <host> <port>
   return 0
 }
 
+# THE DASHBOARD IS A SYSTEMD USER SERVICE (CEL-109). It was started with
+# `setsid nohup ... &`, and setsid leaves the session but NOT the cgroup: run
+# from the steward's oneshot unit (or any systemd-run context), the dashboard
+# sat in that unit's cgroup and systemd killed it when the tick finished - it
+# went down twice in minutes with nothing in its log. An installed unit has its
+# own cgroup, restarts on failure, and carries the PATH it was installed with
+# (without it node is not found under systemd and it exits 1 silently).
+# overridable only so an on-box check can run beside the live unit
+DASH_UNIT="${CEL_DASH_UNIT:-cel-dash}"
+_dash_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
+
+# Is there a user manager to hand the dashboard to? Under the suite only a
+# fixture unit dir (with a stub systemctl) counts - never the live manager.
+_dash_have_unit() {
+  if [ -n "${CEL_TESTING:-}" ] && [ -z "${CEL_SYSTEMD_DIR:-}" ]; then return 1; fi
+  have systemctl || return 1
+  systemctl --user show-environment >/dev/null 2>&1
+}
+
+# PATH is FIXED, like the steward unit's, never the caller's: the steward and
+# a shell carry different PATHs, and baking in whichever ran last made the
+# file differ every tick and the unit rewrite (and restart) every time.
+dash_unit_text() { # <port> <host> <workdir> <log>
+  printf '%s' "[Unit]
+Description=celestial dashboard (one for the box)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$3
+Environment=\"PATH=$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\"
+ExecStart=$CEL_ROOT/bin/cel dash --port $1 --host $2
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:$4
+StandardError=append:$4
+
+[Install]
+WantedBy=default.target
+"
+}
+
+# Write the unit (only when it changed) and reload the manager. Port and host
+# are baked into ExecStart, so a changed `dash.port` rewrites it. Sets
+# _DASH_UNIT_CHANGED=1 when it wrote, so ensure restarts a running unit -
+# `start` on an active unit is a no-op and would keep the old port.
+_DASH_UNIT_CHANGED=0
+_dash_unit_install() { # <port> <host> <log>
+  local dir f wd new
+  dir="$(_dash_unit_dir)"; f="$dir/$DASH_UNIT.service"
+  wd="$(registry_path "$(registry_names | head -n1)" 2>/dev/null || true)"
+  [ -n "$wd" ] && [ -d "$wd" ] || wd="$HOME"
+  new="$(dash_unit_text "$1" "$2" "$wd" "$3")"
+  if [ ! -f "$f" ] || [ "$(cat "$f")" != "$new" ]; then
+    mkdir -p "$dir"
+    printf '%s\n' "$new" >"$f"
+    _DASH_UNIT_CHANGED=1
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  systemctl --user enable "$DASH_UNIT.service" >/dev/null 2>&1 || true
+}
+
 _dash_ensure() { # <port> <host>
-  local port="$1" host="$2" log
+  local port="$1" host="$2" log unit=0
   log="$(_dash_log_dir)/dash.log"
+  mkdir -p "$(_dash_log_dir)"
+  _dash_have_unit && unit=1
+  _DASH_UNIT_CHANGED=0
+  [ "$unit" -eq 0 ] || _dash_unit_install "$port" "$host" "$log"
+  if [ "$_DASH_UNIT_CHANGED" -eq 1 ] \
+    && [ "$(systemctl --user is-active "$DASH_UNIT.service" 2>/dev/null || true)" = active ]; then
+    systemctl --user stop "$DASH_UNIT.service" >/dev/null 2>&1 || true
+    if ! _dash_wait_port_free "$host" "$port"; then
+      c_err "dash: port $port still in use after ${CEL_DASH_PORT_WAIT_S:-15}s - not restarting $DASH_UNIT.service"
+      return 1
+    fi
+    systemctl --user restart "$DASH_UNIT.service" >/dev/null 2>&1 \
+      || { c_err "dash: systemctl --user restart $DASH_UNIT.service failed - see $log"; return 1; }
+    local j; for j in $(seq 1 20); do
+      sleep 0.5
+      curl -sf -m 3 -o /dev/null "http://$host:$port/api/state" \
+        && { c_ok "dash restarted on $port as $DASH_UNIT.service (unit changed)"; return 0; }
+    done
+    c_err "dash did not come up on $port after the unit changed - see $log"
+    return 1
+  fi
   if curl -sf -m 3 -o /dev/null "http://$host:$port/api/state"; then
     c_ok "dash already serving on $port"
     return 0
@@ -122,16 +205,21 @@ _dash_ensure() { # <port> <host>
     c_err "dash: port $port still in use after ${CEL_DASH_PORT_WAIT_S:-15}s and not answering as a dashboard - not starting (what holds it: ss -ltnp | grep :$port)"
     return 1
   fi
-  mkdir -p "$(_dash_log_dir)"
-  # setsid: outlives the pane or agent that ensured it
-  setsid nohup "$CEL_ROOT/bin/cel" dash --port "$port" --host "$host" \
-    >>"$log" 2>&1 &
-  local pid=$! i
+  local pid="" i
+  if [ "$unit" -eq 1 ]; then
+    systemctl --user start "$DASH_UNIT.service" >/dev/null 2>&1 \
+      || { c_err "dash: systemctl --user start $DASH_UNIT.service failed - see $log and journalctl --user -u $DASH_UNIT"; return 1; }
+  else
+    # No user manager (a container, a plain laptop session): fork, as before.
+    setsid nohup "$CEL_ROOT/bin/cel" dash --port "$port" --host "$host" \
+      >>"$log" 2>&1 &
+    pid=$!
+  fi
   for i in $(seq 1 20); do
     sleep 0.5
     curl -sf -m 3 -o /dev/null "http://$host:$port/api/state" \
-      && { c_ok "dash started on $port (log: $log)"; return 0; }
-    kill -0 "$pid" 2>/dev/null || break
+      && { c_ok "dash started on $port$([ "$unit" -eq 1 ] && printf ' as %s.service' "$DASH_UNIT") (log: $log)"; return 0; }
+    [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || break
   done
   c_err "dash did not come up on $port - see $log"
   return 1
@@ -171,6 +259,12 @@ _dash_stop() { # <port>...
 }
 
 _dash_restart() { # <port> <host>
+  # The unit first (a stop is the switch from a transient or forked server to
+  # the installed one), then anything forked outside it; the port-free wait
+  # in ensure still covers a listener that lingers.
+  if _dash_have_unit; then
+    systemctl --user stop "$DASH_UNIT.service" >/dev/null 2>&1 || true
+  fi
   # shellcheck disable=SC2046
   _dash_stop "$1" $(dash_legacy_ports) || { c_err "dash: the old server would not stop - not restarting"; return 1; }
   _dash_ensure "$1" "$2"
@@ -227,6 +321,13 @@ dash_doctor_line() {
     printf '  dashboard: one for the box, http://%s:%s - up\n' "$host" "$port"
   else
     printf '  dashboard: one for the box, http://%s:%s - DOWN (cel dash --ensure)\n' "$host" "$port"
+  fi
+  if _dash_have_unit; then
+    local act en
+    act="$(systemctl --user is-active "$DASH_UNIT.service" 2>/dev/null || true)"
+    en="$(systemctl --user is-enabled "$DASH_UNIT.service" 2>/dev/null || true)"
+    printf '  %s.service: %s, %s%s\n' "$DASH_UNIT" "${act:-unknown}" "${en:-not installed}" \
+      "$([ "$act" = active ] || printf ' (cel dash --ensure)')"
   fi
   n="$(pgrep -u "$(id -u)" -f "$CEL_ROOT/tools/dash/server\\.mjs" 2>/dev/null | grep -c . || true)"
   if [ "${n:-0}" -gt 1 ]; then

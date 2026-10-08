@@ -132,6 +132,16 @@ _pages_host() {
 # tick, which is what makes a dead server come back without a human noticing.
 _pages_log_dir() { printf '%s' "${CEL_PAGES_LOG_DIR:-$HOME/.local/share/cel/logs}"; }
 
+_pages_unit() { if [ "$1" = 1 ]; then printf cel-pages-public; else printf cel-pages; fi; }
+
+# A user manager to run the servers under; under the suite only a fixture
+# (CEL_SYSTEMD_DIR, stub systemctl) counts, never the live one.
+_pages_have_unit() {
+  if [ -n "${CEL_TESTING:-}" ] && [ -z "${CEL_SYSTEMD_DIR:-}" ]; then return 1; fi
+  have systemd-run && have systemctl || return 1
+  systemctl --user show-environment >/dev/null 2>&1
+}
+
 _pages_ensure() { # <public 0|1>
   local public="$1" port host log url tier
   # NOT ${public:+...}: "0" is a non-empty string, so that expansion fires on
@@ -151,8 +161,28 @@ _pages_ensure() { # <public 0|1>
     return 0
   fi
   mkdir -p "$(_pages_log_dir)"
-  # setsid, so the server outlives the pane or agent that ensured it
-  setsid nohup "$CEL_ROOT/bin/cel" pages "${flag[@]}" >>"$log" 2>&1 &
+  if _pages_have_unit; then
+    # CEL-109: setsid leaves the session but not the cgroup, so a server
+    # forked from the steward's oneshot tick died when the tick ended. A
+    # transient user unit has its own cgroup; PATH is passed because node is
+    # not on systemd's.
+    local unit v; unit="$(_pages_unit "$public")"
+    local -a envs=(--setenv="PATH=$PATH")
+    for v in $(compgen -e); do
+      case "$v" in CEL_PAGES_*) envs+=(--setenv="$v=${!v}") ;; esac
+    done
+    systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "$unit.service" >/dev/null 2>&1 || true
+    systemd-run --user --unit="$unit" --collect --quiet \
+      --property=Restart=on-failure --property=RestartSec=3 \
+      --property=StandardOutput="append:$log" --property=StandardError="append:$log" \
+      --working-directory="$HOME" "${envs[@]}" \
+      "$CEL_ROOT/bin/cel" pages "${flag[@]}" >/dev/null 2>&1 \
+      || c_warn "pages$tier: systemd-run --user --unit=$unit refused - see journalctl --user -u $unit"
+  else
+    # no user manager: setsid, so the server outlives the pane that ensured it
+    setsid nohup "$CEL_ROOT/bin/cel" pages "${flag[@]}" >>"$log" 2>&1 &
+  fi
   local i
   for i in 1 2 3 4 5 6 7 8; do
     sleep 0.5
@@ -194,6 +224,7 @@ _pages_reindex() { # <root>
 _pages_stop() { # <public 0|1>
   local port pid env
   if [ "$1" = 1 ]; then port="$(_pages_public_port)"; else port="$(_pages_port)"; fi
+  if _pages_have_unit; then systemctl --user stop "$(_pages_unit "$1").service" >/dev/null 2>&1 || true; fi
   for pid in $(pgrep -f 'tools/pages/server\.mjs' 2>/dev/null); do
     env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep '^CEL_PAGES_PORT=' || true)"
     [ "$env" = "CEL_PAGES_PORT=$port" ] && { kill "$pid" 2>/dev/null && c_ok "stopped pages on $port (pid $pid)"; }
