@@ -135,7 +135,9 @@ var BODY={
  stuck:function(){var it=feedItems('stuck');if(!F.stuck)return none('waiting for the stuck feed');
   return it.map(function(r){return '<div class="row" data-ws="'+esc(r.ws)+'" data-ref="'+esc(r.ref)+'"><span class="dot '+(/conflict/i.test(r.reason)?'bad':'warn')+'"></span><span class="t"><b>'+esc(r.ref)+'</b> '+wsTag(r.ws)+'<br><span class="sub">'+esc(r.reason)+(r.since?' · '+ago(r.since):'')+'</span></span>'+
    (r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck')},
- working:function(){var it=workers().filter(function(w){return inWs(w.ws)});
+ working:function(){
+  // only panes that need watching; idle and finished ones show in lanes
+  var it=workers().filter(function(w){return inWs(w.ws)&&(w.status==='working'||w.status==='blocked')});
   return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
  activity:function(){var it=feedItems('activity');if(!F.activity)return none('waiting for the activity feed');
   return '<div class="feed">'+it.slice(0,12).map(actRow).join('')+'</div>'||none('quiet')},

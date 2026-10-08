@@ -7,7 +7,7 @@
 // a pane: a dashboard that could would be a remote shell behind a cookie.
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir, cpus, loadavg, totalmem, freemem } from 'node:os';
+import { homedir, cpus, loadavg, totalmem, freemem, networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
@@ -62,12 +62,15 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       else {
         try { repos = JSON.parse(await run('yq', ['-c', slugExpr, join(path, 'workspace.yaml')], 8000) || '[]'); } catch { repos = []; }
       }
-      let dashPort = null;
-      if (w.name === cfg.name) dashPort = cfg.port || null;
-      else { const v = Number(String(await run('yq', ['.dash.port // ""', join(path, 'workspace.yaml')], 8000) || '').trim()); dashPort = v > 0 ? v : null; }
-      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], dashPort });
+      let dashPort = null; let dashHost = null;
+      if (w.name === cfg.name) { dashPort = cfg.port || null; dashHost = cfg.host || null; }
+      else {
+        const [p, h] = String(await run('yq', ['-r', '((.dash.port // "") | tostring) + " " + (.dash.host // "")', join(path, 'workspace.yaml')], 8000) || '').trim().split(/\s+/);
+        dashPort = Number(p) > 0 ? Number(p) : null; dashHost = h || null;
+      }
+      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], dashPort, dashHost });
     }
-    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], dashPort: cfg.port || null });
+    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], dashPort: cfg.port || null, dashHost: cfg.host || null });
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
@@ -374,7 +377,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
 
   // ---- services: the box's own and each workspace's ---------------------
   // the box's servers bind the tailnet address, not loopback: try both
-  const answers = async (port) => (await answersOn(port, cfg.host || '127.0.0.1')) || (cfg.host && cfg.host !== '127.0.0.1' && answersOn(port, '127.0.0.1'));
+  // Each server is probed on the host IT binds - a dashboard's dash.host,
+  // the pages server's CEL_PAGES_HOST - then on this box's own addresses
+  // (the default bind is the tailnet IP, not loopback: probing 127.0.0.1
+  // alone called every one of them down).
+  const localAddrs = () => Object.values(networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4').map((a) => a.address);
+  const answers = async (port, host) => {
+    const hosts = [...new Set([host, cfg.host, '127.0.0.1', ...localAddrs()].filter(Boolean))];
+    for (const h of hosts) if (await answersOn(port, h)) return true;
+    return false;
+  };
   const answersOn = (port, host) => new Promise((resolve) => {
     if (!port) { resolve(false); return; }
     const s = connect(Number(port), host);
@@ -387,9 +399,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const seen = new Set();
     const add = (it) => { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } };
     const pagesPort = Number(process.env.CEL_PAGES_PORT) || 7780;
-    add({ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort)) ? 'up' : 'down', url: '' });
+    add({ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort, process.env.CEL_PAGES_HOST)) ? 'up' : 'down', url: '' });
     for (const ws of wss) {
-      if (ws.dashPort) add({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: (await answers(ws.dashPort)) ? 'up' : 'down', url: '' });
+      if (ws.dashPort) add({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: (await answers(ws.dashPort, ws.dashHost)) ? 'up' : 'down', url: '' });
       let rows = [];
       try { rows = JSON.parse(await run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000) || '[]'); } catch { rows = []; }
       for (const r of Array.isArray(rows) ? rows : []) {
