@@ -7,8 +7,8 @@
    "ws": "alpha",
    "lanes": [
     {
-     "ref": "ABC-12",
-     "pr": "widget#12",
+     "ref": "widget/ABC-12-widget-colour",
+     "pr": 12,
      "label": "ABC-12 colour",
      "segments": [
       {
@@ -24,8 +24,8 @@
    "ws": "bundle",
    "lanes": [
     {
-     "ref": "WG-7",
-     "pr": "gadget#7",
+     "ref": "gadget/WG-7-gadget-beta",
+     "pr": 7,
      "label": "WG-7 beta",
      "segments": [
       {

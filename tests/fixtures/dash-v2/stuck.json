@@ -2,7 +2,7 @@
  "items": [
   {
    "ws": "alpha",
-   "ref": "widget#13",
+   "ref": "widget/ABC-13-sprocket",
    "reason": "changes requested, no worker on the branch",
    "since": "2026-10-05T10:00:00Z",
    "fix": {
@@ -12,7 +12,7 @@
   },
   {
    "ws": "bundle",
-   "ref": "gadget#5",
+   "ref": "gadget/WG-5-gadget-sync",
    "reason": "conflicts with main",
    "since": "2026-10-04T10:00:00Z",
    "fix": {

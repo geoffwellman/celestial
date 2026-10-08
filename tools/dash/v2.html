@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="cel-csrf-token" content="__CEL_CSRF__">
+<title>celestial</title>
+<link rel="stylesheet" href="/decisions.css">
+<link rel="stylesheet" href="/v2.css">
+</head><body class="v2">
+<div class="top">
+ <span class="brand">✦ celestial <b id="wsname"></b></span>
+ <select class="pill" id="wsf" title="Workspace filter - drives every card, the composer and the palette"><option value="all">All workspaces</option></select>
+ <button class="pill" id="nyjump" title="Needs you">Needs you <span class="badge" id="nyc">0</span></button>
+ <span class="spacer"></span>
+ <span class="sub" id="updated"></span><span class="sub" id="build" title="the plane build this dashboard is running">__CEL_BUILD__</span><!--UPDATE-CHIP-->
+ <button class="pill search" id="search" title="Ctrl-K / ⌘K">Search <kbd>⌘K</kbd></button>
+ <button class="pill" id="cust">⊞ Customize</button>
+ <a class="pill" href="/classic" title="the previous dashboard, kept for one release">classic</a>
+</div>
+
+<div class="hero"><div class="stars"></div><div class="stars s2"></div><div class="horizon"></div>
+ <h1>What should your agents work on?</h1>
+ <div class="tag" id="tagline"></div>
+</div>
+
+<div class="composer">
+ <div class="ctabs"><span class="on" data-k="task">Give work</span><span data-k="ask">Ask a question</span></div>
+ <div class="to" id="to"></div>
+ <textarea id="task" placeholder="Tell an orchestrator what you want - it writes the spec, picks the worker and reports back…"></textarea>
+ <div class="crow">
+  <label class="sub urg"><input type="checkbox" id="curg"> urgent</label>
+  <span class="sub" id="chint">→ goes to the orchestrator's inbox; it decides how to do it</span>
+  <button class="go" id="go">Send ↑</button>
+ </div>
+ <div id="thread"></div>
+</div>
+
+<div class="wrap">
+ <div class="bar" id="bar">Drag a card by ⠿ to move it · Customize to hide, restore or resize cards · layout is saved in this browser</div>
+ <div class="grid" id="grid"></div>
+</div>
+<div class="toast" id="toast"></div>
+<div class="ov" id="ov"><div class="ovbox"><div class="ovh"><b id="ovt"></b><span class="sub" id="ovs"></span><span class="spacer"></span><button class="btn" id="ovx">close ✕ (Esc)</button></div><div id="ovb"></div></div></div>
+<div class="drawer" id="drawer"><div class="dh"><b id="dname"></b><span class="spacer"></span><button class="btn" id="dclose">close ✕</button></div>
+ <div id="dinfo"></div>
+ <h4>Message it</h4><textarea class="msg" id="dmsg" placeholder="Goes through its inbox - never typed into its pane"></textarea>
+ <div class="drow"><button class="btn rec" id="dsend">send</button><button class="btn" id="dpane">open pane</button></div>
+</div>
+<div class="pal" id="pal"><div class="pbox"><input id="pq" placeholder="Jump to a decision, PR, agent - or type an action…" autocomplete="off"><div id="pres"></div><div class="sub" style="padding:6px 12px" id="phint">↑↓ to move · Enter to open · Esc to close</div></div></div>
+<script src="/decisions.js"></script>
+<script src="/v2.js"></script>
+</body></html>

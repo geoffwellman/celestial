@@ -1,0 +1,37 @@
+/* The decisions panel (CEL-99/#125, CEL-101/#127), shared by the classic
+   dashboard and v2 (CEL-106) so there is one copy of the code that decides. */
+/* needs you (CEL-99): cards stack, buttons wrap, nothing scrolls sideways */
+#needsyou h2 .n,.nygroup summary .n{color:var(--bad);margin-left:6px}
+#needsyou{margin-bottom:16px}
+.nychips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.chipbtn{font:12px var(--mono);border-radius:999px;padding:3px 11px}
+.chipbtn.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.chipbtn .u{color:var(--bad);font-style:normal;font-weight:700}
+.nygroup{margin-bottom:12px}
+.nygroup>summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;
+  font:600 13px var(--mono);padding:6px 0}
+.nygroup>summary .bulk{margin-left:auto;font:12px var(--mono)}
+.nycard{background:color-mix(in srgb,var(--raise) 90%,transparent);backdrop-filter:blur(9px);
+  border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;
+  padding:10px 13px;margin:0 0 8px;min-width:0;overflow-wrap:anywhere}
+.nycard.urgent{border-left-color:var(--bad)}
+.nycard .tag{font:600 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;
+  padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent)}
+.nycard .tag.urgent{background:var(--bad);color:#fff;margin-right:8px}
+.nymeta{font:11.5px var(--mono);color:var(--dim);margin:3px 0 8px}
+.nymeta .blocks{color:var(--warn)}
+.nyopts{display:flex;flex-wrap:wrap;gap:8px}
+.nyopts .opt{display:flex;flex-direction:column;align-items:flex-start;text-align:left;
+  flex:1 1 200px;max-width:100%;padding:7px 11px;white-space:normal}
+.nyopts .opt .lbl{font-weight:600}
+.nyopts .opt .trade{font-size:12px;color:var(--dim);margin-top:2px}
+.nyopts .opt.rec{border:2px solid var(--accent);background:var(--accent-soft)}
+.nycard button.armed,.nybulk .primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.nyact{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin-top:8px}
+.nyact .other summary{cursor:pointer;font:12px var(--mono);color:var(--dim);padding:4px 0}
+.otherrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.otherrow input{flex:1 1 180px;min-width:0}
+.nyerr{margin-top:6px;color:var(--bad);font:12px var(--mono)}
+.nycard.gone{opacity:.7}.nygone{font:12px var(--mono);color:var(--bad);margin-bottom:4px}
+.nybulk{border:1px dashed var(--accent);border-radius:10px;padding:8px 13px;margin-bottom:8px}
+.nybulk ol{margin:4px 0 8px;padding-left:20px}

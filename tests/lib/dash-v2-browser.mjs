@@ -229,7 +229,7 @@ const main = async () => {
       out.open = await evaluate(`document.getElementById('ov').classList.contains('open')`);
       out.title = await evaluate(`document.getElementById('ovt').textContent`);
       out.search = await evaluate(`!!document.querySelector('#ovb input.actq')`);
-      await evaluate(`(function(){var q=document.querySelector('#ovb input.actq');q.value='gadget';q.dispatchEvent(new Event('input'));return 1})()`);
+      await evaluate(`(function(){var q=document.querySelector('#ovb input.actq');q.value='widget';q.dispatchEvent(new Event('input'));return 1})()`);
       out.matches = await evaluate(`document.querySelectorAll('#ovb .feed .row').length`);
       await key('Escape');
       await sleep(200);
