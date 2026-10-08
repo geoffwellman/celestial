@@ -382,36 +382,66 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // (the default bind is the tailnet IP, not loopback: probing 127.0.0.1
   // alone called every one of them down).
   const localAddrs = () => Object.values(networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4').map((a) => a.address);
-  const answers = async (port, host) => {
-    const hosts = [...new Set([host, cfg.host, '127.0.0.1', ...localAddrs()].filter(Boolean))];
-    for (const h of hosts) if (await answersOn(port, h)) return true;
-    return false;
-  };
   const answersOn = (port, host) => new Promise((resolve) => {
-    if (!port) { resolve(false); return; }
-    const s = connect(Number(port), host);
-    const done = (v) => { s.destroy(); resolve(v); };
-    s.setTimeout(800, () => done(false));
-    s.on('connect', () => done(true)); s.on('error', () => done(false));
+    const sock = connect(Number(port), host);
+    const done = (v) => { sock.destroy(); resolve(v); };
+    sock.setTimeout(1000, () => done(false));
+    sock.on('connect', () => done(true)); sock.on('error', () => done(false));
+  });
+  // all candidate hosts at once, first connect wins, never past ~1 s
+  const answers = (port, host) => {
+    const hosts = [...new Set([host, cfg.host, '127.0.0.1', ...localAddrs()].filter(Boolean))];
+    return new Promise((resolve) => {
+      let left = hosts.length;
+      if (!port || !left) { resolve(false); return; }
+      const timer = setTimeout(() => resolve(false), 1000);
+      for (const h of hosts) answersOn(port, h).then((ok) => {
+        if (ok) { clearTimeout(timer); resolve(true); }
+        else if (--left === 0) { clearTimeout(timer); resolve(false); }
+      });
+    });
+  };
+  // Review on #132: every tab polls this every 8 s, and it spawns `cel
+  // services` per workspace and probes ports. One run in flight, shared by
+  // every request (the promise is cached, not just the value), ~8 s fresh;
+  // workspaces and probes run side by side.
+  // the promise is cached per workspace (and for pages), so a scope of "all"
+  // and a scope of one share the same runs
+  const svcFlights = {};
+  const once = (key, fn) => {
+    const f = svcFlights[key];
+    if (f && Date.now() - f.t < 8000) return f.p;
+    const p = Promise.resolve().then(fn).catch(() => []);
+    svcFlights[key] = { t: Date.now(), p };
+    return p;
+  };
+  const pagesRow = () => once('pages', async () => {
+    const pagesPort = Number(process.env.CEL_PAGES_PORT) || 7780;
+    return [{ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort, process.env.CEL_PAGES_HOST)) ? 'up' : 'down', url: '' }];
+  });
+  const wsRows = (ws) => once(`ws:${ws.name}`, async () => {
+    const [dash, out] = await Promise.all([
+      ws.dashPort ? answers(ws.dashPort, ws.dashHost) : Promise.resolve(null),
+      run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000),
+    ]);
+    const rows = [];
+    if (ws.dashPort) rows.push({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: dash ? 'up' : 'down', url: '' });
+    let list = [];
+    try { list = JSON.parse(out || '[]'); } catch { list = []; }
+    for (const r of Array.isArray(list) ? list : []) {
+      const st = String(r.state || '');
+      rows.push({ name: r.name, ws: r.workspace === 'box' ? 'box' : ws.name, port: r.port || null,
+        state: /healthy|up|running/.test(st) ? 'up' : st || 'unknown', url: r.reach || '' });
+    }
+    return rows;
   });
   const services = async (wss) => {
-    const items = [];
-    const seen = new Set();
-    const add = (it) => { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } };
-    const pagesPort = Number(process.env.CEL_PAGES_PORT) || 7780;
-    add({ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort, process.env.CEL_PAGES_HOST)) ? 'up' : 'down', url: '' });
-    for (const ws of wss) {
-      if (ws.dashPort) add({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: (await answers(ws.dashPort, ws.dashHost)) ? 'up' : 'down', url: '' });
-      let rows = [];
-      try { rows = JSON.parse(await run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000) || '[]'); } catch { rows = []; }
-      for (const r of Array.isArray(rows) ? rows : []) {
-        const owner = r.workspace === 'box' ? 'box' : ws.name;
-        const st = String(r.state || '');
-        add({ name: r.name, ws: owner, port: r.port || null, state: /healthy|up|running/.test(st) ? 'up' : st || 'unknown', url: r.reach || '' });
-      }
-    }
+    const parts = await Promise.all([pagesRow(), ...wss.map(wsRows)]);
+    const seen = new Set(); const items = [];
+    for (const it of parts.flat()) { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } }
     return { items };
   };
+
 
   // ---- load ---------------------------------------------------------------
   const load = (url) => {
@@ -619,7 +649,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const warm = async () => {
     try {
       const wss = await workspaces();
-      await Promise.all([merged(wss), open(wss), quota()]);
+      await Promise.all([merged(wss), open(wss), quota(), services(wss)]);
     } catch { /* a failed warm-up is retried next interval */ }
   };
   // Started by the first v2 request, not at boot: a dashboard nobody opens
