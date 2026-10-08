@@ -477,6 +477,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // true when the request was ours
   const handle = async (req, res, readBody) => {
     if (!String(req.url || '').startsWith('/api/v2/')) return false;
+    startWarm();
     const url = new URL(req.url, 'http://localhost');
     const feed = url.pathname.slice('/api/v2/'.length);
     if (req.method === 'POST') {
@@ -521,8 +522,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       await Promise.all([merged(wss), open(wss), quota()]);
     } catch { /* a failed warm-up is retried next interval */ }
   };
-  setTimeout(warm, 50).unref();
-  setInterval(warm, Number(process.env.CEL_DASH_WARM_MS) || 300000).unref();
+  // Started by the first v2 request, not at boot: a dashboard nobody opens
+  // the v2 page on has no reason to spend gh rate limit or run `cel quota`
+  // (and the v1 suite's fixtures were torn down under a boot-time quota run).
+  let warming = false;
+  const startWarm = () => {
+    if (warming) return;
+    warming = true;
+    setTimeout(warm, 0).unref();
+    setInterval(warm, Number(process.env.CEL_DASH_WARM_MS) || 300000).unref();
+  };
   // test seam: drop the slow caches so a test can watch a cold start
   if (process.env.CEL_TESTING) process.on('SIGUSR2', () => { for (const k of Object.keys(flights)) delete flights[k]; });
   return { handle };
