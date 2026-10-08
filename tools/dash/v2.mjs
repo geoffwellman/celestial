@@ -85,11 +85,40 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     try { return readFileSync(join(INBOX_DIR, `${ws.name}.${who}.cursor`), 'utf8').trim(); } catch { return ''; }
   };
 
-  // ---- gh: ONE cached pass per repo, shared by every card that counts merges
-  const ghList = (slug, st, fields) => cached(`v2gh:${st}:${slug}`, 600000, async () => {
-    const out = await run('gh', ['pr', 'list', '--repo', slug, '--state', st, '--json', fields, '--limit', '200'], 30000);
-    try { const v = JSON.parse(out || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
-  });
+  // ---- slow upstreams: gh and `cel quota` -------------------------------
+  // Review on #131, three rules. ONE FETCH IN FLIGHT: the page asks merges,
+  // cycle and heat at the same moment, and a plain TTL cache let all three
+  // miss together and run gh three times. NEVER CACHE A FAILURE: a rate-limit
+  // or a network blip cached for ten minutes is ten minutes of a card that
+  // says "no merges" with full confidence. NEVER BLOCK ON A WARM VALUE: past
+  // its TTL a value is still served while a refresh runs behind it, and a
+  // timer keeps the passes warm so a request only waits on a cold box.
+  const flights = {};
+  const slow = (key, ttlMs, fn) => {
+    const f = flights[key] || (flights[key] = { v: undefined, t: 0, p: null });
+    const refresh = () => {
+      if (!f.p) {
+        f.p = Promise.resolve().then(fn).then((v) => {
+          if (v !== null && v !== undefined) { f.v = v; f.t = Date.now(); }
+          return v;
+        }, () => null).finally(() => { f.p = null; });
+      }
+      return f.p;
+    };
+    if (f.v !== undefined) {
+      if (Date.now() - f.t >= ttlMs) refresh();
+      return Promise.resolve(f.v);
+    }
+    return refresh();
+  };
+  const ghList = async (slug, st, fields) => {
+    const v = await slow(`gh:${st}:${slug}`, 600000, async () => {
+      const out = await run('gh', ['pr', 'list', '--repo', slug, '--state', st, '--json', fields, '--limit', '200'], 30000);
+      if (out === null) return null;
+      try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; }
+    });
+    return v || [];
+  };
   const merged = async (wss) => {
     const out = [];
     for (const ws of wss) for (const r of ws.repos) {
@@ -147,10 +176,15 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
     return items;
   };
+  // a ring, newest CEL_DASH_ACTIVITY_KEEP lines (review on #131): the feed
+  // only ever shows the recent past, and a log nobody trims is a disk leak
   const logAct = (ws, text) => {
     try {
+      const keep = Math.max(1, Number(process.env.CEL_DASH_ACTIVITY_KEEP) || 1000);
       mkdirSync(dirname(ACTIVITY()), { recursive: true });
       appendFileSync(ACTIVITY(), JSON.stringify({ ts: new Date().toISOString(), ws, kind: 'orchestrator', text }) + '\n');
+      const lines = readFileSync(ACTIVITY(), 'utf8').split('\n').filter(Boolean);
+      if (lines.length > keep) writeFileSync(ACTIVITY(), lines.slice(-keep).join('\n') + '\n');
     } catch { /* the act happened; a lost log line must not undo it */ }
   };
 
@@ -351,9 +385,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const m = /^(\d+)([hd])$/.exec(String(name || ''));
     return m ? Number(m[1]) * (m[2] === 'h' ? 3600e3 : DAY) : null;
   };
-  const forecast = () => cached('v2forecast', 60000, async () => {
-    let q = {};
-    try { q = JSON.parse(await run(CEL(), ['quota', '--json'], 45000) || '{}'); } catch { q = {}; }
+  const quota = () => slow('quota', 60000, async () => {
+    const out = await run(CEL(), ['quota', '--json'], 45000);
+    if (out === null) return null;
+    try { const q = JSON.parse(out); return Array.isArray(q.subscriptions) ? q : null; } catch { return null; }
+  });
+  const forecast = async () => {
+    const q = (await quota()) || {};
     const items = [];
     const now = Date.now();
     for (const s of Array.isArray(q.subscriptions) ? q.subscriptions : []) {
@@ -371,7 +409,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       }
     }
     return { accounts: items };
-  });
+  };
 
   // ---- act ----------------------------------------------------------------
   const NAME = /^[A-Za-z0-9._:-]{1,80}$/;
@@ -383,9 +421,18 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const wsName = String(args.ws || cfg.name);
     if (!all.some((w) => w.name === wsName)) return [400, 'unknown workspace'];
     const cel = (argv) => run(CEL(), argv, 30000);
+    // Review on #131: a mailbox is only one somebody reads. `cel inbox send`
+    // will write to any name, so the dashboard checks first: a ledger alias,
+    // the workspace's own orchestrator or a repo orchestrator it declares,
+    // or root. A typo here would otherwise be a message nobody ever sees.
+    const ws = all.find((w) => w.name === wsName);
+    const repos = new Set(ws.repos.map((r) => r.name));
+    const known = new Set(['root', `${ws.name}-orch`, ...[...repos].map((r) => `${r}-orch`),
+      ...ledgerOf(ws).map((r) => r.alias).filter(Boolean)]);
     if (action === 'message') {
       const text = String(args.text || '').trim();
       if (!NAME.test(String(target || '')) || !text || text.length > 4000) return [400, 'message needs a target and text'];
+      if (!known.has(String(target))) return [400, 'unknown recipient'];
       // urgent goes as an escalation so it notifies; an ask is labelled so
       // the recipient knows a reply is wanted
       const kind = args.urgent ? 'escalation' : 'status';
@@ -416,6 +463,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (sm && STUCK[sm[1]]) {
       if (!REF.test(String(target || ''))) return [400, 'stuck fix needs a repo/branch target'];
       const repo = String(target).split('/')[0];
+      if (!repos.has(repo)) return [400, 'unknown repo'];
       const msg = `stuck: ${target} ${STUCK[sm[1]]} (from the dashboard)`;
       if (await cel(['inbox', 'send', `${repo}-orch`, msg, '--from', 'dashboard', '--workspace', wsName, '--kind', 'status']) === null) return [502, 'inbox send failed'];
       logAct(wsName, `dashboard: ${sm[1]} on ${target} sent to ${repo}-orch`);
@@ -437,7 +485,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         let body;
         try { body = await readBody(req, 8000); } catch { res.writeHead(400).end('invalid request body'); return true; }
         const [code, text] = await act(req, res, body);
-        delete cache.v2forecast;
         res.writeHead(code, { 'content-type': 'text/plain' }).end(text);
         return true;
       }
@@ -467,5 +514,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       default: res.writeHead(404).end('not found'); return true;
     }
   };
+  // keep the slow passes warm so a request never waits on gh or quota
+  const warm = async () => {
+    try {
+      const wss = await workspaces();
+      await Promise.all([merged(wss), open(wss), quota()]);
+    } catch { /* a failed warm-up is retried next interval */ }
+  };
+  setTimeout(warm, 50).unref();
+  setInterval(warm, Number(process.env.CEL_DASH_WARM_MS) || 300000).unref();
+  // test seam: drop the slow caches so a test can watch a cold start
+  if (process.env.CEL_TESTING) process.on('SIGUSR2', () => { for (const k of Object.keys(flights)) delete flights[k]; });
   return { handle };
 };
