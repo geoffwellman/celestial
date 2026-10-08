@@ -890,13 +890,13 @@ _steward_ready_tickets() { # [agents-json]
     wsdir="$(registry_path "$ws")" || continue
     [ "$(ws_ticket "$wsdir" system)" = "linear" ] || continue
     (
-    trigger="$(yq -r '.tickets.trigger_state // "Ready"' "$wsdir/workspace.yaml" 2>/dev/null)"
+    trigger="$(_yqr -r '.tickets.trigger_state // "Ready"' "$wsdir/workspace.yaml" 2>/dev/null)"
     # Each workspace starts from the caller's environment, never the previous
     # workspace's overrides. Scope the full credential-dependent sweep so
     # env.local cannot change subsequent workspaces or the parent shell.
     eval "$(ws_env_exports "$wsdir" 2>/dev/null)" >/dev/null 2>&1 || true
     [ -n "${LINEAR_API_KEY:-}" ] || exit 0
-    teams="$(yq -r '[.repos[].linear_team // empty] | unique | .[]' "$wsdir/workspace.yaml" 2>/dev/null)"
+    teams="$(_yqr -r '[.repos[].linear_team // empty] | unique | .[]' "$wsdir/workspace.yaml" 2>/dev/null)"
     [ -n "$teams" ] || exit 0
     for key in $teams; do
       # curl reads sensitive headers from stdin, not the process argument list.
@@ -983,7 +983,7 @@ _steward_quota() {
   local ws wsdir p r floor seen=""
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
-    for p in $(yq -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST" 2>/dev/null); do
+    for p in $(_yqr -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST" 2>/dev/null); do
       r="$(quota_remaining "$p" "$wsdir" 2>/dev/null || printf unknown)"
       [ "$r" = unknown ] && continue
       # A dry account nobody routes to vetoes nothing. Measured 2026-09-17:

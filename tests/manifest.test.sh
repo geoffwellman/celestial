@@ -72,7 +72,7 @@ test_manifest_runs_yq_once_per_process() {
   local real; real="$(command -v yq)"
   printf '#!/usr/bin/env bash\necho x >> "%s/count"\nexec "%s" "$@"\n' "$B" "$real" > "$B/yq"
   chmod +x "$B/yq"
-  PATH="$B:$PATH"
+  PATH="$B:$PATH"; export CEL_MANIFEST_CACHE="$B/cache"
   agent_get claude command >/dev/null
   agent_injection claude strategy >/dev/null
   agent_launch_args claude >/dev/null
