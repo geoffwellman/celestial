@@ -1117,3 +1117,39 @@ test_a_gateway_disabled_credential_keeps_the_gateway_login() {
   assert_contains "$(_cpa_needs_login_row claude ant-ben ben@alpha.test | jq -r '.extra.reason')" "cel gateway login claude"
   _quota_teardown
 }
+
+# --- CEL-108: what the usage card needs from `cel quota --json` ---------------
+# The card tags each Claude account by who runs on it and merges two
+# workspaces that share one paid key into one row. Both are facts celestial
+# already holds - omp's pool (the CEL-98 source) and the key fingerprint the
+# balance cache is keyed on - so the JSON carries them rather than the
+# dashboard guessing.
+test_cel108_quota_json_names_the_orchestrator_pool_and_disabled_credentials() {
+  _quota_setup
+  _omp_stub
+  jq '.disabledCredentials = [{provider: "anthropic", email: "ben@alpha.test", accountId: "ant-ben"}]' \
+    "$T/omp-usage.json" > "$T/omp2.json" && mv "$T/omp2.json" "$T/omp-usage.json"
+  _quota_manifest_stub
+  . "$CEL_ROOT/lib/quota.sh"
+  local js; js="$(cmd_quota --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.orch_pool.live | sort | join(",")')" \
+    'one@example.invalid,three@example.invalid,two@example.invalid'
+  assert_eq "$(printf '%s' "$js" | jq -r '.orch_pool.disabled | join(",")')" 'ben@alpha.test'
+  assert_eq "$(printf '%s' "$js" | jq -r '.gateway | type')" 'array'
+  _quota_teardown
+}
+
+test_cel108_quota_json_balances_carry_their_account_and_veto() {
+  _quota_setup
+  _quota_manifest_stub
+  printf '#!/usr/bin/env bash\nprintf -- "-0.24"\n' > "$T/qstub"; chmod +x "$T/qstub"
+  export CEL_QUOTA_STUB="$T/qstub"
+  . "$CEL_ROOT/lib/quota.sh"
+  local js; js="$(cmd_quota deadend --json 2>/dev/null)"
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[0].vetoed')" true
+  # the key's fingerprint, never the key
+  assert_eq "$(printf '%s' "$js" | jq -r '.balances[0].account | length')" 12
+  case "$js" in *fixture-not-a-real-key*) echo "the key leaked"; return 1;; esac
+  unset CEL_QUOTA_STUB
+  _quota_teardown
+}

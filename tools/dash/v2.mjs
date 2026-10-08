@@ -509,8 +509,158 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const quota = () => slow('quota', 60000, async () => {
     const out = await run(CEL(), ['quota', '--json'], 45000);
     if (out === null) return null;
-    try { const q = JSON.parse(out); return Array.isArray(q.subscriptions) ? q : null; } catch { return null; }
+    let q; try { q = JSON.parse(out); } catch { return null; }
+    if (!Array.isArray(q.subscriptions)) return null;
+    recordUsage(q);
+    return q;
   });
+  // ---- usage (CEL-108) ----------------------------------------------------
+  // THE ONE USAGE CARD. "Usage forecast" and "Claude accounts" were the same
+  // windows drawn twice as flat rows, and neither said the things the owner
+  // asks: which account runs out before it resets, which ones the
+  // orchestrators are on, and which paid balances have vetoed their workers.
+  // Everything here is read, not decided: windows from `cel quota --json`,
+  // the orchestrators' pool from omp (the CEL-98 source, via the same JSON),
+  // the floor veto from quota_vetoed, and who used an account from the
+  // delegation ledgers.
+  //
+  // History: no sampler records quota, so the dashboard keeps its own short
+  // ring of each `cel quota` read it makes (at most one a minute, a week
+  // kept) - the expanded card's per-window lines come from there and say so
+  // when there is nothing yet.
+  const USAGE_RING = () => join(STATE_DIR, 'dash-usage.jsonl');
+  const winKey = (s, w) => `${s.provider}|${String(s.label || s.account || '').toLowerCase()}|${w.name}|${w.scope || ''}`;
+  let lastRecord = 0;
+  const recordUsage = (q) => {
+    const now = Date.now();
+    if (now - lastRecord < 55000) return;
+    lastRecord = now;
+    const u = {};
+    for (const s of q.subscriptions) for (const w of s.windows || []) u[winKey(s, w)] = Math.round((Number(w.used_pct) || 0) * 10) / 10;
+    try {
+      mkdirSync(STATE_DIR, { recursive: true });
+      appendFileSync(USAGE_RING(), JSON.stringify({ ts: new Date(now).toISOString(), u }) + '\n');
+      const rows = readJsonl(USAGE_RING());
+      if (rows.length > 2400) writeFileSync(USAGE_RING(), rows.slice(-2000).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    } catch { /* history is a nicety; the card still draws without it */ }
+  };
+  const PROVIDER_TITLE = { claude: 'Claude', codex: 'ChatGPT (codex)', opencode: 'OpenCode' };
+  const PROVIDER_ORDER = ['claude', 'codex', 'opencode'];
+  // a ledger model to the subscription it spends; anything else is an API key
+  const modelProvider = (m) => {
+    const x = String(m || '').toLowerCase();
+    if (/claude|anthropic|opus|sonnet|haiku/.test(x)) return 'claude';
+    if (/gpt|codex|openai/.test(x)) return 'codex';
+    if (/opencode/.test(x)) return 'opencode';
+    return null;
+  };
+  const winLabel = (w) => {
+    const len = winLen(w.name);
+    const base = len === 5 * 3600e3 ? '5 hours' : len === DAY ? 'Day' : len === 7 * DAY ? 'Week' : len === 30 * DAY ? 'Month' : String(w.name || 'window');
+    return w.scope ? `${w.scope} ${base === 'Week' ? 'week' : base.toLowerCase()}` : base;
+  };
+  // used / fraction of the window gone; quota_at_risk in lib/quota.sh is the
+  // steward's copy of this rule and the two must agree
+  const project = (used, len, resets, now) => {
+    if (!len || !resets) return used;
+    const frac = (len - (resets - now)) / len;
+    return frac > 0.05 && frac <= 1 ? Math.min(999, Math.round(used / frac)) : Math.round(used);
+  };
+  const level = (pct) => (pct >= 95 ? 'bad' : pct >= 75 ? 'warn' : 'ok');
+  const usage = async (wss) => {
+    const q = (await quota()) || {};
+    const now = Date.now();
+    const pool = q.orch_pool || {};
+    const live = new Set((pool.live || []).map((x) => String(x).toLowerCase()));
+    const dead = new Set((pool.disabled || []).map((x) => String(x).toLowerCase()));
+    const gw = new Set((q.gateway || []).map((x) => String(x).toLowerCase()));
+    // who used each subscription this week, by workspace and profile - from
+    // every ledger on the box, since a subscription is the box's
+    const weekAgo = now - 7 * DAY;
+    const usedBy = {};
+    for (const ws of await workspaces()) {
+      for (const r of ledgerOf(ws)) {
+        const p = modelProvider(r.model || r.profile);
+        const at = new Date(((r.history || [])[0] || {}).at || 0).getTime();
+        if (!p || !(at >= weekAgo)) continue;
+        const k = `${ws.name}\t${r.profile || r.model || '?'}`;
+        (usedBy[p] = usedBy[p] || {})[k] = ((usedBy[p] || {})[k] || 0) + 1;
+      }
+    }
+    const usedList = (p) => Object.entries(usedBy[p] || {}).map(([k, n]) => { const [ws, profile] = k.split('\t'); return { ws, profile, n }; })
+      .sort((a, b) => b.n - a.n || a.ws.localeCompare(b.ws));
+    const ring = readJsonl(USAGE_RING()).filter((r) => new Date(r.ts).getTime() >= weekAgo);
+    const atRisk = [];
+    const groups = {};
+    for (const s of Array.isArray(q.subscriptions) ? q.subscriptions : []) {
+      const who = String(s.label || s.account || s.provider);
+      const lw = who.toLowerCase();
+      const tags = [];
+      if (s.provider === 'claude') {
+        if (live.has(lw) && !dead.has(lw)) tags.push('orch');
+        if (gw.has(`claude|${lw}`)) tags.push('workers');
+        if (dead.has(lw)) tags.push('not orch');
+      } else if (gw.has(`${s.provider}|${lw}`)) tags.push('workers');
+      const windows = (s.windows || []).map((w) => {
+        const used = Math.round(Number(w.used_pct) || 0);
+        const len = winLen(w.name);
+        const resets = new Date(w.resets_at).getTime() || null;
+        const projected = project(used, len, resets, now);
+        const key = winKey(s, w);
+        const history = ring.filter((r) => r.u && r.u[key] !== undefined).map((r) => [r.ts, r.u[key]]);
+        return { label: winLabel(w), name: w.name, scope: w.scope || null, used_pct: used, resets: iso(w.resets_at),
+          projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
+          at_risk: projected >= 100 || used >= 95, len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
+      }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));
+      for (const w of windows) {
+        if (w.at_risk) atRisk.push({ who, provider: s.provider, window: w.label, used_pct: w.used_pct, projected_pct: w.projected_pct, resets: w.resets });
+      }
+      const g = groups[s.provider] || (groups[s.provider] = { provider: s.provider, title: PROVIDER_TITLE[s.provider] || s.provider, accounts: [] });
+      g.accounts.push({ who, account: s.account || who, tags, state: (s.extra || {}).state || '', reason: (s.extra || {}).reason || '',
+        at_risk: windows.some((w) => w.at_risk), windows: windows.map(({ len, ...w }) => w), used_by: null });
+    }
+    const glist = Object.values(groups).sort((a, b) => {
+      const ia = PROVIDER_ORDER.indexOf(a.provider); const ib = PROVIDER_ORDER.indexOf(b.provider);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.provider.localeCompare(b.provider);
+    });
+    for (const g of glist) {
+      g.used_by = usedList(g.provider);
+      g.who = { orch: g.accounts.some((a) => a.tags.includes('orch')), workers: g.accounts.some((a) => a.tags.includes('workers')),
+        profiles: [...new Set(g.used_by.map((u) => u.profile))] };
+      // A gateway round-robins one provider's accounts and the ledger does not
+      // record which one served a worker, so the split is only knowable when
+      // there is one account; otherwise the row does not pretend.
+      if (g.accounts.length === 1 && g.used_by.length) g.accounts[0].used_by = g.used_by;
+    }
+    // pay-as-you-go: one row per account (key fingerprint), workspaces merged
+    const names = new Set(wss.map((w) => w.name));
+    const bal = {};
+    for (const b of Array.isArray(q.balances) ? q.balances : []) {
+      const k = `${b.provider}|${b.account || `ws:${b.workspace}`}`;
+      const r = bal[k] || (bal[k] = { provider: b.provider, workspaces: [], remaining: b.remaining, floor: b.floor, unit: b.unit,
+        state: b.state, vetoed: !!b.vetoed });
+      if (b.workspace && !r.workspaces.includes(b.workspace)) r.workspaces.push(b.workspace);
+    }
+    const balances = Object.values(bal)
+      .filter((b) => !b.workspaces.length || b.workspaces.some((w) => names.has(w)))
+      .map((b) => ({ ...b, workspaces: b.workspaces.sort(), remaining: Number.isFinite(Number(b.remaining)) && b.remaining !== '' ? Number(b.remaining) : null }))
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.workspaces.join().localeCompare(b.workspaces.join()));
+    const claude = (groups.claude || { accounts: [] }).accounts;
+    const funded = balances.filter((b) => b.remaining !== null && b.remaining > 0 && !b.vetoed);
+    return {
+      at: new Date(now).toISOString(),
+      summary: {
+        at_risk: atRisk,
+        orch: { serving: claude.filter((a) => a.tags.includes('orch')).length, of: claude.length },
+        below_floor: balances.filter((b) => b.vetoed).length,
+        funded: Math.round(funded.reduce((n, b) => n + b.remaining, 0) * 100) / 100,
+        funded_by: funded.map((b) => `${b.provider} · ${b.workspaces.join(', ')}`),
+      },
+      groups: glist,
+      balances,
+      history: ring.length > 1,
+    };
+  };
   const forecast = async () => {
     const q = (await quota()) || {};
     const items = [];
@@ -633,6 +783,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       case 'cycle': json(res, 200, await cycle(url, wss)); return true;
       case 'heat': json(res, 200, await heat(url, wss)); return true;
       case 'forecast': json(res, 200, await forecast()); return true;
+      case 'usage': json(res, 200, await usage(wss)); return true;
       case 'fleet': json(res, 200, await fleet(wss)); return true;
       case 'services': json(res, 200, await services(wss)); return true;
       default: res.writeHead(404).end('not found'); return true;

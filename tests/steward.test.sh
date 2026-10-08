@@ -1763,3 +1763,67 @@ test_cel101_stale_nudge_counts_from_the_last_reask_and_sends_once_concurrently()
   assert_eq "$(jq -c 'select(.from == "steward" and .to == "gadget-orch")' "$f" | grep -c . || true)" "1"
   rm -rf "$T"
 }
+
+# --- CEL-108: an account on pace to hit its cap before it resets -------------
+# The usage card draws the projection; the steward says it ONCE, to root, while
+# there is still time to move work off the account, and takes it down when the
+# pace no longer gets there. The read is the cached subscription list - no
+# provider call per tick.
+_pace_fixture() { # <used-pct> <seconds-to-reset>
+  source "$CEL_ROOT/lib/quota.sh"
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+  _pace_set "$1" "$2"
+  subscription_list() { cat "$T/subs.json"; }
+}
+_pace_set() { # <used-pct> <seconds-to-reset>
+  jq -nc --argjson u "$1" --arg r "$(date -u -d "@$(( $(date +%s) + $2 ))" +%Y-%m-%dT%H:%M:%SZ)" \
+    '[{provider: "claude", account: "ant-ana", label: "ana@alpha.test", source: "omp",
+       windows: [{name: "7d", scope: null, used_pct: $u, resets_at: $r},
+                 {name: "5h", scope: null, used_pct: 3, resets_at: $r}]},
+      {provider: "claude", account: "ant-ben", label: "ben@alpha.test", source: "omp",
+       windows: [{name: "7d", scope: null, used_pct: 10, resets_at: $r}]}]' > "$T/subs.json"
+}
+
+test_quota_at_risk_projects_to_the_reset_and_flags_ninety_five() {
+  _pace_fixture 80 86400
+  # 80% with a day of seven left projects to ~93%: not at risk
+  assert_eq "$(subscription_list | quota_at_risk | jq 'length')" "0"
+  # 80% with two days left: 5/7 gone -> 112% before reset
+  _pace_set 80 172800
+  assert_eq "$(subscription_list | quota_at_risk | jq -r '.[0].who')" "ana@alpha.test"
+  assert_eq "$(subscription_list | quota_at_risk | jq '.[0].projected_pct >= 100')" "true"
+  # 96% now is at risk whatever the pace
+  _pace_set 96 600
+  assert_eq "$(subscription_list | quota_at_risk | jq 'length')" "1"
+  rm -rf "$T"
+}
+
+test_steward_warns_once_about_an_account_on_pace_for_its_cap() {
+  _pace_fixture 80 172800
+  local i; for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1; done
+  # a warning, not a blocker: one status item, the repeats roll up onto it
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id
+  assert_eq "$(jq -s '[.[] | select(.fp == "usage-pace")] | length' "$f")" "1"
+  id="$(_inbox_open_fp alpha usage-pace steward root)"
+  [ -n "$id" ] || { echo "no open usage-pace item"; return 1; }
+  assert_contains "$(jq -r 'select(.fp == "usage-pace") | .message' "$f")" "ana@alpha.test"
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i)] | length' "$f")" "2"
+  # off pace again: the steward takes its own item down
+  _pace_set 20 172800
+  _steward_usage_pace >/dev/null 2>&1
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
+  rm -rf "$T"
+}
+
+test_steward_says_nothing_about_usage_with_headroom() {
+  _pace_fixture 20 172800
+  _steward_usage_pace >/dev/null 2>&1
+  assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  rm -rf "$T"
+}

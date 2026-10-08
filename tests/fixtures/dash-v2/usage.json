@@ -1,0 +1,40 @@
+{
+ "at": "2026-10-08T08:40:00Z",
+ "summary": {
+  "at_risk": [{"who": "ana@alpha.test", "provider": "claude", "window": "Week", "used_pct": 80, "projected_pct": 112, "resets": "2030-10-10T18:59:00Z"}],
+  "orch": {"serving": 1, "of": 2},
+  "below_floor": 2,
+  "funded": 22.54,
+  "funded_by": ["openrouter · bundle"]
+ },
+ "groups": [
+  {"provider": "claude", "title": "Claude",
+   "who": {"orch": true, "workers": true, "profiles": ["opus-pi"]},
+   "used_by": [{"ws": "alpha", "profile": "opus-pi", "n": 4}],
+   "accounts": [
+    {"who": "ana@alpha.test", "account": "ant-ana", "tags": ["orch", "workers"], "state": "enabled", "reason": "", "at_risk": true, "used_by": null,
+     "windows": [
+      {"label": "5 hours", "name": "5h", "scope": null, "used_pct": 6, "resets": "2030-10-08T10:29:00Z", "projected_pct": 7, "level": "ok", "at_risk": false,
+       "history": [["2026-10-08T06:00:00Z", 2], ["2026-10-08T07:00:00Z", 4], ["2026-10-08T08:00:00Z", 6]]},
+      {"label": "Week", "name": "7d", "scope": null, "used_pct": 80, "resets": "2030-10-10T18:59:00Z", "projected_pct": 112, "level": "warn", "at_risk": true,
+       "history": [["2026-10-05T06:00:00Z", 30], ["2026-10-06T06:00:00Z", 45], ["2026-10-07T06:00:00Z", 62], ["2026-10-08T08:00:00Z", 80]]},
+      {"label": "Fable week", "name": "7d", "scope": "Fable", "used_pct": 0, "resets": "2030-10-10T18:59:00Z", "projected_pct": 0, "level": "ok", "at_risk": false, "history": []}]},
+    {"who": "ben@alpha.test", "account": "ant-ben", "tags": ["workers", "not orch"], "state": "enabled", "reason": "", "at_risk": false, "used_by": null,
+     "windows": [
+      {"label": "5 hours", "name": "5h", "scope": null, "used_pct": 0, "resets": null, "projected_pct": 0, "level": "ok", "at_risk": false, "history": []},
+      {"label": "Week", "name": "7d", "scope": null, "used_pct": 17, "resets": "2030-10-11T19:00:00Z", "projected_pct": 45, "level": "ok", "at_risk": false, "history": []}]}]},
+  {"provider": "codex", "title": "ChatGPT (codex)",
+   "who": {"orch": false, "workers": false, "profiles": ["luna"]},
+   "used_by": [{"ws": "bundle", "profile": "luna", "n": 2}],
+   "accounts": [
+    {"who": "ben@alpha.test", "account": "cx-ben", "tags": [], "state": "enabled", "reason": "", "at_risk": false,
+     "used_by": [{"ws": "bundle", "profile": "luna", "n": 2}],
+     "windows": [
+      {"label": "Week", "name": "7d", "scope": null, "used_pct": 10, "resets": "2030-10-12T05:21:00Z", "projected_pct": 14, "level": "ok", "at_risk": false, "history": []},
+      {"label": "gpt-reserve week", "name": "7d", "scope": "gpt-reserve", "used_pct": 0, "resets": null, "projected_pct": 0, "level": "ok", "at_risk": false, "history": []}]}]}],
+ "balances": [
+  {"provider": "deepseek", "workspaces": ["alpha", "bundle"], "remaining": -0.24, "floor": "1", "unit": "usd", "state": "ok", "vetoed": true},
+  {"provider": "openrouter", "workspaces": ["bundle"], "remaining": 22.54, "floor": "2", "unit": "usd", "state": "ok", "vetoed": false},
+  {"provider": "openrouter", "workspaces": ["gadget"], "remaining": -0.11, "floor": "2", "unit": "usd", "state": "ok", "vetoed": true}],
+ "history": true
+}
