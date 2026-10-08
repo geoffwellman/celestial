@@ -53,7 +53,7 @@ test_dash_ensure_waits_for_a_held_port_then_starts() {
   _dr_setup
   _dr_hold 6
   local out rc=0 t0=$SECONDS
-  out="$(CEL_DASH_PORT_WAIT_S=10 _dash_ensure alpha "$PORT" 127.0.0.1 2>&1)" || rc=$?
+  out="$(CEL_DASH_PORT_WAIT_S=10 _dash_ensure "$PORT" 127.0.0.1 2>&1)" || rc=$?
   [ $((SECONDS - t0)) -ge 1 ] || { echo "did not wait for the held port: $out"; _dr_down; return 1; }
   assert_eq "$rc" "0"
   assert_contains "$out" "started on $PORT"
@@ -65,7 +65,7 @@ test_dash_ensure_fails_clearly_when_the_port_stays_held() {
   _dr_setup
   _dr_hold 30
   local out rc=0
-  out="$(CEL_DASH_PORT_WAIT_S=1 _dash_ensure alpha "$PORT" 127.0.0.1 2>&1)" || rc=$?
+  out="$(CEL_DASH_PORT_WAIT_S=1 _dash_ensure "$PORT" 127.0.0.1 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "expected non-zero, got 0: $out"; _dr_down; return 1; }
   assert_contains "$out" "port $PORT still in use"
   _dr_down

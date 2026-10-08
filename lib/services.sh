@@ -195,14 +195,16 @@ svc_uptime_secs() { # <pid>
 # dashboard already binds the tailnet IP, so the address that actually works
 # from there is the dash's proxy path - and only when the dash is up, because
 # a URL that 404s is worse than the loopback one an operator can tunnel.
+# One dashboard for the box (CEL-107), so every workspace's services reach
+# through the same port; <wsdir> stays in the signature for its callers.
 svc_reach() { # <wsdir> <port>
-  local d="$1" port="${2:-0}" dport host
+  local port="${2:-0}" dport host
   [ "$port" -gt 0 ] 2>/dev/null || return 0
-  dport="$(_wsy "$d" '.dash.port')"
-  [ -n "$dport" ] || return 0
+  # shellcheck source=lib/dash.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/dash.sh"
+  dport="$(dash_port)"
   svc_listening "$dport" || return 0
-  host="${CEL_DASH_HOST:-$(tailscale ip -4 2>/dev/null | head -1 || true)}"
-  [ -n "$host" ] || host=127.0.0.1
+  host="${CEL_DASH_HOST:-$(dash_host)}"
   printf 'http://%s:%s/svc/%s/' "$host" "$dport" "$port"
 }
 

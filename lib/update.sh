@@ -117,16 +117,13 @@ _update_changelog_since() { # <installed> <available>
 _update_reapply() {
   c_hd "Re-applying"
   link_all
-  local ws port
+  local ws
   for ws in $(registry_names 2>/dev/null); do
     "$CEL_ROOT/bin/cel" ws sync "$ws" || c_warn "ws sync $ws failed"
   done
-  for ws in $(registry_names 2>/dev/null); do
-    port="$(yq -r '.dash.port // ""' "$(registry_path "$ws")/workspace.yaml" 2>/dev/null)"
-    if [ -n "$port" ] && [ "$port" != null ]; then
-      "$CEL_ROOT/bin/cel" dash --workspace "$ws" --restart || c_warn "dash $ws did not restart"
-    fi
-  done
+  # One dashboard for the box (CEL-107); its restart also stops any server a
+  # workspace still runs from before, so the old ports can redirect.
+  "$CEL_ROOT/bin/cel" dash --restart || c_warn "dash did not restart"
   "$CEL_ROOT/bin/cel" pages --restart || c_warn "pages did not restart"
   "$CEL_ROOT/bin/cel" pages --public --restart || c_warn "public pages did not restart"
 }

@@ -1,6 +1,8 @@
-// cel dash server - one per workspace, zero dependencies. Launched by
-// lib/dash.sh with CEL_DASH_CONFIG (JSON: name, wsdir, port, host, repos
-// [{name, slug}], services [{name, url}]).
+// cel dash server - ONE for the box, zero dependencies (CEL-107). Launched by
+// lib/dash.sh with CEL_DASH_CONFIG (JSON: port, host, redirectPorts, and
+// workspaces [{name, wsdir, repos [{name, slug}], services, linearTeams,
+// triggerState}]; name/wsdir/repos at the top level are the first workspace,
+// the default for every page that still shows one at a time).
 //
 // Reads live state by shelling out to the same CLIs the roles use (herdr,
 // gh, yq) - no daemons, no state of its own. The CLI launcher defaults to the
@@ -18,6 +20,17 @@ import { fileURLToPath } from 'node:url';
 import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
+// CEL-107: there used to be one server per workspace, each polling the same
+// herdr and gh as the others, and the per-workspace restart race took one of
+// them down. Now one server carries every workspace; a config without the
+// list (an old launcher, a test fixture) is a list of one.
+const WORKSPACES = Array.isArray(cfg.workspaces) && cfg.workspaces.length ? cfg.workspaces
+  : [{ name: cfg.name, wsdir: cfg.wsdir, repos: cfg.repos, services: cfg.services, linearTeams: cfg.linearTeams, triggerState: cfg.triggerState }];
+if (!cfg.name) Object.assign(cfg, { name: WORKSPACES[0].name, wsdir: WORKSPACES[0].wsdir, repos: WORKSPACES[0].repos || [] });
+// ?ws=<name> picks the workspace a classic page shows; absent means the
+// first. Unknown is null, so the caller can say so rather than show another.
+const wsOf = (name) => (name ? WORKSPACES.find((w) => w.name === name) || null : WORKSPACES[0]);
+const wsParam = (req) => new URL(req.url || '/', 'http://x').searchParams.get('ws') || '';
 // The plane's own directory name is the reader's choice, so resolve it from
 // this file (tools/dash/server.mjs -> two levels up) the way bin/cel does.
 // A hardcoded fallback meant anyone who cloned under a different name got a
@@ -81,10 +94,10 @@ const wsLabels = () => cached('wslabels', 30000, async () => {
   return m;
 });
 
-const prs = () => cached('prs', 60000, async () => {
+const prs = (w) => cached(`prs:${w.name}`, 60000, async () => {
   const fields = 'number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,author';
   const all = [];
-  await Promise.all((cfg.repos || []).map(async (r) => {
+  await Promise.all((w.repos || []).map(async (r) => {
     if (!r.slug) return;
     const out = await run('gh', ['pr', 'list', '--repo', r.slug, '--json', fields, '--limit', '30'], 20000);
     let list = [];
@@ -108,8 +121,8 @@ const prs = () => cached('prs', 60000, async () => {
 // built it, what shape it is, and the VERDICT collect recorded - gate result,
 // red-then-green, CI, review. The table used to show only what herdr and gh
 // knew; this is what the plane itself knows.
-const ledger = () => cached('ledger', 5000, async () => {
-  const f = join(cfg.wsdir, '.cel', 'delegations.json');
+const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
+  const f = join(w.wsdir, '.cel', 'delegations.json');
   if (!existsSync(f)) return {};
   try {
     const rows = JSON.parse(readFileSync(f, 'utf8'));
@@ -121,12 +134,12 @@ const ledger = () => cached('ledger', 5000, async () => {
   } catch { return {}; }
 });
 
-const worktreeRows = async () => {
+const worktreeRows = async (w) => {
   const ag = await agents();
   const labels = await wsLabels();
-  const led = await ledger();
+  const led = await ledger(w);
   const rows = [];
-  for (const r of cfg.repos || []) {
+  for (const r of w.repos || []) {
     const dir = join(WORKTREES, r.name);
     if (!existsSync(dir)) continue;
     for (const branch of readdirSync(dir)) {
@@ -151,11 +164,11 @@ const worktreeRows = async () => {
 
 // Orchestrator-ish agents in this workspace's own dirs (root pane, repo
 // orchestrators, reviewers) - anything promptable that is not a worktree.
-const wsAgents = async () => {
+const wsAgents = async (w) => {
   const ag = await agents();
   const labels = await wsLabels();
   return ag
-    .filter((a) => a.cwd && (a.cwd === cfg.wsdir || a.cwd.startsWith(cfg.wsdir + '/')))
+    .filter((a) => a.cwd && (a.cwd === w.wsdir || a.cwd.startsWith(w.wsdir + '/')))
     .map((a) => ({
       agent: a.agent, status: a.agent_status, cwd: a.cwd, pane: a.pane_id,
       label: labels[a.workspace_id] || a.pane_id,
@@ -185,15 +198,15 @@ const triageRanks = () => {
   }
   return out;
 };
-const inbox = () => cached('inbox', 8000, async () => {
-  const f = join(INBOX_DIR, `${cfg.name}.jsonl`);
+const inbox = (w) => cached(`inbox:${w.name}`, 8000, async () => {
+  const f = join(INBOX_DIR, `${w.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
   const items = readFileSync(f, 'utf8').split('\n').filter(Boolean)
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
     .filter(Boolean);
   // unread = after each recipient's cursor, so the dash agrees with cel inbox
   const cursor = (who) => {
-    const c = join(INBOX_DIR, `${cfg.name}.${who}.cursor`);
+    const c = join(INBOX_DIR, `${w.name}.${who}.cursor`);
     try { return readFileSync(c, 'utf8').trim(); } catch { return ''; }
   };
   const cursors = {};
@@ -238,9 +251,9 @@ const inbox = () => cached('inbox', 8000, async () => {
 // workspace is that it bounds what you are looking at. No teams declared =
 // no scoping possible = no card, rather than a misleading everything-list.
 // Only when the key is in the environment; no key, no card, never an error.
-const linear = () => cached('linear', 120000, async () => {
+const linear = (w) => cached(`linear:${w.name}`, 120000, async () => {
   if (!process.env.LINEAR_API_KEY) return null;
-  const teams = cfg.linearTeams || [];
+  const teams = w.linearTeams || [];
   if (!teams.length) return null;
   // TWO issue sets, deliberately. Active work is fetched unfiltered by state
   // so a busy board can never starve it, and finished work is fetched
@@ -293,7 +306,7 @@ const linear = () => cached('linear', 120000, async () => {
       me: v.name,
       urlKey: j.data.organization?.urlKey || '',
       teams,
-      trigger: cfg.triggerState || '',
+      trigger: w.triggerState || '',
       states: states.map((s) => ({ name: s.name, type: s.type, color: s.color })),
       issues: nodes.filter((i) => teams.includes(i.team?.key)).map((i) => ({
         id: i.identifier, title: i.title, url: i.url, team: i.team?.key || '',
@@ -313,8 +326,8 @@ const linear = () => cached('linear', 120000, async () => {
 // `cel services --json` already joins the declared services to the previews
 // `try` started and answers state, health, memory and reach; a second
 // implementation in JavaScript would be a second answer to one question.
-const services = () => cached('services', 5000, async () => {
-  const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', cfg.name, '--json'], 10000);
+const services = (w) => cached(`services:${w.name}`, 5000, async () => {
+  const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', w.name, '--json'], 10000);
   // ALWAYS A LIST. A `cel` that answers something else - an old build, a
   // wrapper, an error document - used to flow straight into the card; since
   // CEL-43 partitions these rows, a non-array reached `.filter` and took the
@@ -326,7 +339,7 @@ const services = () => cached('services', 5000, async () => {
 // can reach the dashboard must not be able to browse this box's loopback by
 // walking port numbers - so the allowed set is exactly the ports of the
 // services and previews above, and everything else is 404.
-const proxyPorts = async () => new Set((await services())
+const proxyPorts = async () => new Set((await Promise.all(WORKSPACES.map(services))).flat()
   .map((s) => Number(s.port)).filter((p) => Number.isInteger(p) && p > 0 && p < 65536));
 
 // ...and only with the dash's own control token, the one its control
@@ -353,8 +366,8 @@ const proxyToken = (req, url) => {
 
 const SVC_RE = /^\/svc\/(\d{1,5})(\/[^?]*)?(\?.*)?$/;
 
-const backlog = () => cached('backlog', 15000, async () => {
-  const f = join(cfg.wsdir, 'backlog.yaml');
+const backlog = (w) => cached(`backlog:${w.name}`, 15000, async () => {
+  const f = join(w.wsdir, 'backlog.yaml');
   if (!existsSync(f)) return null;
   const out = await run('yq', ['.', f]);
   try { return JSON.parse(out); } catch { return null; }
@@ -399,46 +412,12 @@ const paneNames = async () => {
 //
 // Cached a minute, like the windows it reports: they move in hours, and the
 // fleet read walks /proc once for the whole box.
-// --- CEL-43 section 4: box material belongs to ONE dashboard ---------------
-//
-// The owner, 2026-09-19: "why are there multiple cel broker and gateway
-// services?" There is exactly one of each - one broker, one gateway,
-// registered once in services.d and printed once by `cel services`. What
-// multiplied was the DISPLAY: four per-workspace dashboards run on this box,
-// each rendered the box-level rows inside its own services panel, and each
-// rendered the whole subscriptions panel, which is box-level in its entirety.
-// Flipping between tabs reads as several brokers.
-//
-// So box material renders on exactly ONE dashboard - the workspace whose
-// `dash:` block says `box: true`, defaulting to the registry's first - and
-// every other dashboard shows a line pointing at it. This is NOT a box-wide
-// dashboard, which the plane deliberately does not have (`cel fleet` and the
-// console are the box-wide views); it only stops four surfaces from repeating
-// one panel.
+// Box material - box services, subscriptions, the gateway panel - used to be
+// drawn by whichever of four per-workspace dashboards the `dash.box` flag
+// named (CEL-43), because four copies of one broker read as four brokers.
+// With one dashboard for the box (CEL-107) there is nothing to choose: it is
+// drawn here, once.
 const REGISTRY = () => process.env.CEL_REGISTRY || join(homedir(), '.local/share/cel/registry.yaml');
-const boxDash = () => cached('boxdash', 60000, async () => {
-  let list = [];
-  try {
-    list = JSON.parse(await run('yq', ['-c',
-      '[.workspaces // {} | to_entries[] | {name: .key, path: (.value.path // .value)}]',
-      REGISTRY()], 8000) || '[]');
-  } catch { list = []; }
-  if (!Array.isArray(list) || !list.length) return { owner: cfg.name, mine: true, url: '' };
-  let owner = null;
-  const ports = {};
-  for (const w of list) {
-    const row = String(await run('yq', ['-r', '[(.dash.box // false), (.dash.port // 7770)] | @tsv',
-      join(String(w.path || ''), 'workspace.yaml')], 8000) || '').trim();
-    const [flag, port] = row.split('\t');
-    ports[w.name] = Number(port) || 7770;
-    if (!owner && String(flag) === 'true') owner = w.name;
-  }
-  // No declaration anywhere: the registry's first workspace, so the panel has
-  // a home on a box nobody has configured rather than appearing everywhere
-  // again by default.
-  if (!owner) owner = list[0].name;
-  return { owner, mine: owner === cfg.name, url: `http://${cfg.host || '127.0.0.1'}:${ports[owner] || 7770}` };
-});
 
 // CEL-80: THE CARD IS `cel quota --json`, the rows `cel quota` prints. The
 // fleet document is the cached copy of the same list and is only as fresh as
@@ -446,7 +425,7 @@ const boxDash = () => cached('boxdash', 60000, async () => {
 // card showed nothing or yesterday's accounts. Asked only by the one
 // dashboard that draws the card, a minute apart; the fleet cache is the
 // fallback when the live read fails.
-const subscriptions = (mine) => (!mine ? Promise.resolve([]) : cached('subs', 60000, async () => {
+const subscriptions = () => cached('subs', 60000, async () => {
   try {
     const q = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['quota', '--json'], 45000) || '{}');
     if (Array.isArray(q.subscriptions)) return q.subscriptions;
@@ -455,19 +434,19 @@ const subscriptions = (mine) => (!mine ? Promise.resolve([]) : cached('subs', 60
     const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000) || '{}');
     return Array.isArray(doc.subscriptions) ? doc.subscriptions : [];
   } catch { return []; }
-}));
+});
 
 // The gateway's own web panel (CEL-80). It listens on loopback only, so the
 // card links it only when this page is itself being viewed on loopback - over
 // the ssh tunnel, or on the box - and shows the tunnel line otherwise. A link
 // that works only on the box, shown on the tailnet, is an invitation to
 // expose the panel to make it work.
-const gatewayPanel = (mine) => (!mine ? Promise.resolve(null) : cached('gwpanel', 600000, async () => {
+const gatewayPanel = () => cached('gwpanel', 600000, async () => {
   try {
     const d = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['gateway', 'panel', '--json'], 8000) || 'null');
     return d && d.url ? { url: String(d.url), ssh: String(d.ssh || '') } : null;
   } catch { return null; }
-}));
+});
 const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''));
 
 // NEEDS YOU (CEL-93): the owner's decisions across every workspace, read from
@@ -523,16 +502,15 @@ const decideOne = async ({ id, action, value, option }) => {
   return { code: 200 };
 };
 
-const state = async (req) => {
-  const box = await boxDash();
+const state = async (req, w) => {
   const needsYou = orderDecisions(await decisions());
   const needsYouGroups = groupDecisions(needsYou);
-  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(), prs(), wsAgents(), backlog(), viewer(), inbox(), linear(), paneNames(), subscriptions(box.mine), services(), gatewayPanel(box.mine)]);
+  const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(w), prs(w), wsAgents(w), backlog(w), viewer(), inbox(w), linear(w), paneNames(), subscriptions(), services(w), gatewayPanel()]);
   // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
   // with the workspace that owns it since CEL-34, and `box` is the tag for
   // what belongs to nobody. A workspace's panel lists its own rows only.
-  const wsServices = svcs.filter((x) => (x.workspace || cfg.name) !== 'box');
-  const boxServices = box.mine ? svcs.filter((x) => (x.workspace || '') === 'box') : [];
+  const wsServices = svcs.filter((x) => (x.workspace || w.name) !== 'box');
+  const boxServices = svcs.filter((x) => (x.workspace || '') === 'box');
   // an inbox line addressed to or from a pane shows that pane's name
   for (const m2 of mail.items) {
     m2.fromName = /^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(m2.from) ? (pnames[m2.from] || m2.from) : m2.from;
@@ -575,15 +553,13 @@ const state = async (req) => {
       title: stuck[0].message.slice(0, 90), url: null });
 
   return {
-    workspace: cfg.name, updated: new Date().toISOString(), viewer: me,
+    workspace: w.name, workspaces: WORKSPACES.map((x) => x.name), updated: new Date().toISOString(), viewer: me,
     attention, inflight, stale: stale.map((w) => `${w.repo}/${w.branch}`),
-    agents: ags, services: wsServices, boxServices, box, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, needsYouGroups, linear: lin,
+    agents: ags, services: wsServices, boxServices, backlog: bl, inbox: mail.items, inboxBy: mail.byWho, inboxOpen: mail.open || [], needsYou, needsYouGroups, linear: lin,
     // One list, two doors: a signed-in subscription and a gateway account are
     // the same thing to whoever is reading the card - `source` says which, and
     // `cel fleet` decided both before this line ran.
-    // Subscriptions are box-level in their entirety, so they move with the
-    // box panel: four copies of one account list is the same complaint.
-    subscriptions: box.mine ? subs : [],
+    subscriptions: subs,
     // the socket, never X-Forwarded-For: a header is whatever the client says
     gatewayPanel: gwp ? { ...gwp, loopback: isLoopback(req && req.socket && req.socket.remoteAddress) } : null,
   };
@@ -592,10 +568,10 @@ const state = async (req) => {
 const htmlText = (value) => String(value ?? '').replace(/[&<>"]/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-const PAGE = `<!doctype html><meta charset="utf-8">
+const page = (w) => `<!doctype html><meta charset="utf-8">
 <meta name="cel-csrf-token" content="${security.token}">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${htmlText(cfg.name)} · Celestial AI software factory</title>
+<title>${htmlText(w.name)} · Celestial AI software factory</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23c8952a' d='M12 1l2.4 8.6L23 12l-8.6 2.4L12 23l-2.4-8.6L1 12l8.6-2.4z'/%3E%3C/svg%3E">
 <style>
   /* ONE ramp plus one accent, defined twice. Every colour below is a token:
@@ -1371,7 +1347,7 @@ function renderInbox(){
   }).join(''):'';
   Array.prototype.forEach.call($('decisions').querySelectorAll('button.resolve'),function(b){
     b.onclick=async function(){
-      var r=await post('/api/inbox-resolve',{id:b.dataset.id});
+      var r=await post('/api/inbox-resolve',{id:b.dataset.id,ws:new URLSearchParams(location.search).get('ws')||''});
       toast(r.ok?'resolved':('could not resolve: '+r.text),r.ok);
       if(r.ok)refresh();
     };
@@ -1427,7 +1403,9 @@ initFilters();
 var POLLSEQ=0,POLLDONE=0;
 async function refresh(){
   const seq=++POLLSEQ;
-  const response=await fetch('/api/state');
+  // the one dashboard carries every workspace; /classic?ws=<name> asks for
+  // that one's state, and no ?ws is the first
+  const response=await fetch('/api/state'+location.search);
   if(!response.ok)throw new Error('dashboard state unavailable');
   const s=await response.json();
   if(seq<POLLDONE)return;
@@ -1557,18 +1535,10 @@ function usageBar(pct){
   return '<span class="bar" title="'+esc(String(Math.round(p))+'%')+'">'+
     '<span class="'+cls+'" style="width:'+w.toFixed(1)+'%"></span></span>';
 }
-// The Box panel: what this box runs on nobody's behalf in particular, drawn
-// on the one dashboard that owns it and replaced by a single pointer line on
-// every other. Four dashboards each drawing this is how one broker read as
-// several.
+// The Box panel: what this box runs on nobody's behalf in particular. One
+// dashboard for the box, so it is drawn once whichever workspace is shown.
 function renderBox(s){
   var el=$('box'); if(!el) return;
-  var b=s.box||{mine:true,owner:'',url:''};
-  if(!b.mine){
-    el.innerHTML='<span class="empty">box services and subscriptions: '+
-      (b.url?'<a href="'+esc(b.url)+'" target="_blank">'+esc(b.url)+' \u2197</a>':esc(b.owner))+'</span>';
-    return;
-  }
   var rows=s.boxServices||[];
   var gp=s.gatewayPanel;
   // Linked only on loopback - the page's own host AND the socket the server
@@ -1589,9 +1559,6 @@ function renderBox(s){
 function renderSubs(s){
   var el=$('subs'); if(!el) return;
   // Box-level in their entirety, so they are drawn where the box panel is.
-  var bx=s.box||{mine:true};
-  if(!bx.mine){el.innerHTML='<span class="empty">subscriptions: on the box dashboard '+
-    (bx.url?'<a href="'+esc(bx.url)+'" target="_blank">'+esc(bx.url)+' \u2197</a>':esc(bx.owner||''))+'</span>';return}
   var subs=s.subscriptions||[];
   if(!subs.length){el.innerHTML='<span class="empty">no subscription readings cached yet - cel quota asks the providers</span>';return}
   var html='<table><tbody>';
@@ -1866,7 +1833,7 @@ const server = createServer(async (req, res) => {
         .end(req.method === 'HEAD' ? undefined : body);
       return;
     }
-    if (req.method === 'HEAD' && req.url === '/api/state') {
+    if (req.method === 'HEAD' && (req.url === '/api/state' || req.url.startsWith('/api/state?'))) {
       res.writeHead(200, { 'content-type': 'application/json' }).end();
       return;
     }
@@ -1898,16 +1865,22 @@ const server = createServer(async (req, res) => {
         .replace('__CEL_CSRF__', security.token).replace('__CEL_BUILD__', htmlText(cfg.build)).replace('<!--UPDATE-CHIP-->', updateChip());
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' })
         .end(req.method === 'HEAD' ? undefined : body);
-    } else if ((req.method === 'GET' || req.method === 'HEAD') && req.url === '/classic') {
+    } else if ((req.method === 'GET' || req.method === 'HEAD') && (req.url === '/classic' || req.url.startsWith('/classic?'))) {
+      // CEL-107: no per-workspace server any more, so the classic page names
+      // its workspace in the query - ?ws=<name>, the first when absent.
+      const w = wsOf(wsParam(req));
+      if (!w) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('no such workspace'); return; }
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         // no-store, not no-cache: the dashboard changes under you as the
         // plane is developed, and a browser holding yesterday's shell is
         // indistinguishable from a broken deploy
         'cache-control': 'no-store, must-revalidate',
-      }).end(req.method === 'HEAD' ? undefined : PAGE.replace('<!--UPDATE-CHIP-->', updateChip()));
-    } else if (req.method === 'GET' && req.url === '/api/state') {
-      const body = JSON.stringify(await state(req));
+      }).end(req.method === 'HEAD' ? undefined : page(w).replace('<!--UPDATE-CHIP-->', updateChip()));
+    } else if (req.method === 'GET' && (req.url === '/api/state' || req.url.startsWith('/api/state?'))) {
+      const w = wsOf(wsParam(req));
+      if (!w) { res.writeHead(404).end('no such workspace'); return; }
+      const body = JSON.stringify(await state(req, w));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body);
     } else if (req.method === 'POST' && req.url === '/api/prompt') {
       const { target, message } = await readBody(req);
@@ -1933,12 +1906,14 @@ const server = createServer(async (req, res) => {
       // Closing a decision from the board. Appends a resolution record via
       // the same command an agent would use, so the ledger has one writer
       // path and the dash never invents its own format.
-      const { id } = await readBody(req, 2000);
+      const { id, ws } = await readBody(req, 2000);
       if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
+      const w = wsOf(String(ws || ''));
+      if (!w) { res.writeHead(400).end('no such workspace'); return; }
       const out = await run(join(CEL_ROOT, 'bin/cel'),
-        ['inbox', 'resolve', String(id), '--by', 'dashboard', '--workspace', cfg.name], 10000);
+        ['inbox', 'resolve', String(id), '--by', 'dashboard', '--workspace', w.name], 10000);
       if (out === null) { res.writeHead(502).end('could not resolve (already resolved, or not a decision?)'); return; }
-      delete cache.inbox;
+      delete cache[`inbox:${w.name}`];
       res.writeHead(200).end('ok');
     } else if (req.method === 'POST' && req.url === '/api/decide') {
       // POST only, behind the same Host and CSRF guard as every other control
@@ -1977,7 +1952,8 @@ const server = createServer(async (req, res) => {
       const out = await run(join(CEL_ROOT, 'core/skills/linear/bin/cel-linear'),
         ['state', String(id), String(st)], 20000);
       if (out === null) { res.writeHead(502).end('cel-linear could not move it (key? state name?)'); return; }
-      delete cache.linear;   // the card must reflect the move immediately
+      // the card must reflect the move immediately, whichever workspace shows it
+      for (const k of Object.keys(cache)) if (k.startsWith('linear:')) delete cache[k];
       res.writeHead(200).end(out.trim() || 'ok');
     } else {
       res.writeHead(404).end('not found');
@@ -2018,5 +1994,20 @@ server.on('upgrade', async (req, socket, head) => {
 
 server.listen(cfg.port || 7770, cfg.host || '127.0.0.1', () => {
   const a = server.address();
-  console.log(`cel dash: ${cfg.name} on http://${a.address}:${a.port}`);
+  console.log(`cel dash: ${WORKSPACES.map((w) => w.name).join(', ')} on http://${a.address}:${a.port}`);
 });
+
+// CEL-107: THE OLD PORTS STILL ANSWER, FOR ONE RELEASE. Every workspace used
+// to have its own dashboard port and the owner has them bookmarked; each now
+// redirects to the one dashboard, path and query kept, and serves nothing
+// else. A port that cannot be bound (an old server still on it) is logged and
+// skipped - the dashboard itself must not die for a convenience listener.
+const MAIN_ORIGIN = `http://${String(cfg.host || '127.0.0.1').includes(':') ? `[${cfg.host}]` : cfg.host || '127.0.0.1'}:${cfg.port || 7770}`;
+for (const p of [...new Set((cfg.redirectPorts || []).map(Number))]) {
+  if (!Number.isInteger(p) || p <= 0 || p >= 65536 || p === Number(cfg.port || 7770)) continue;
+  const r = createServer((req, res) => {
+    res.writeHead(302, { location: MAIN_ORIGIN + (String(req.url || '/').startsWith('/') ? req.url : '/'), 'cache-control': 'no-store' }).end();
+  });
+  r.on('error', (e) => console.error(`cel dash: old port ${p} not redirecting (${e.code || e.message})`));
+  r.listen(p, cfg.host || '127.0.0.1', () => console.log(`cel dash: old port ${p} redirects to ${MAIN_ORIGIN}`));
+}
