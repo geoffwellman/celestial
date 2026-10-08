@@ -29,7 +29,7 @@ var S=null;            // /api/state as fetched
 var F={};              // /api/v2/<feed> by name
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
-var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','forecast'];
+var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
 function inWs(w){return WSF==='all'||!w||w===WSF}
 function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
 // the 8 s refresh; ?refreshMs in the dash config drives the classic page, the
@@ -94,9 +94,9 @@ function needsHost(){
 var W=[
  {id:'since',t:'Since you last looked',size:'full'},{id:'needs',t:'Needs you',size:'full'},
  {id:'stuck',t:'Stuck - and why'},{id:'working',t:'Working now'},{id:'activity',t:'Activity'},{id:'prs',t:'Pull requests'},
- {id:'orchs',t:'Orchestrators'},{id:'merges',t:'Merged PRs · 14 days'},{id:'forecast',t:'Usage forecast'},{id:'afk',t:'Away mode'},
+ {id:'orchs',t:'Orchestrators'},{id:'merges',t:'Merged PRs · 14 days'},{id:'usage',t:'Usage',size:'full'},{id:'afk',t:'Away mode'},
  {id:'lanes',t:'Today by workspace',size:'full'},{id:'heat',t:'When work lands'},{id:'cycle',t:'Time to merge'},{id:'funnel',t:'PR flow'},
- {id:'load',t:'Box load · 24h'},{id:'box',t:'Box'},{id:'accounts',t:'Claude accounts'},{id:'services',t:'Running services'}];
+ {id:'load',t:'Box load · 24h'},{id:'box',t:'Box'},{id:'services',t:'Running services'}];
 var LAYOUT_KEY='cel-v2-layout';
 var L=recall(LAYOUT_KEY,null)||{};
 L.order=(L.order||[]).filter(function(id){return W.some(function(w){return w.id===id})});
@@ -150,8 +150,7 @@ var BODY={
   var vals=days.map(function(d){var n=0;Object.keys(d.counts||{}).forEach(function(r){if(WSF==='all'||rw[r]===WSF)n+=d.counts[r]});return [d.day,n]});
   var mx=Math.max.apply(null,[1].concat(vals.map(function(v){return v[1]})));var tot=vals.reduce(function(a,v){return a+v[1]},0);
   return '<div><span class="big">'+tot+'</span> <span class="sub">PRs merged'+(WSF==='all'?' across all repos':' in '+esc(WSF))+'</span></div><div class="chart">'+vals.map(function(v){return '<div title="'+esc(v[0])+': '+v[1]+' merged" style="height:'+Math.max(3,v[1]/mx*100)+'%"></div>'}).join('')+'</div><div class="days">'+vals.map(function(v){return '<span>'+esc(String(v[0]).slice(8))+'</span>'}).join('')+'</div>'},
- forecast:function(){var a=((F.forecast||{}).accounts)||[];if(!F.forecast)return none('waiting for the forecast feed');
-  return a.map(function(x){var p=x.projected_pct;return '<div class="row"><span class="dot '+(p>=100?'bad':p>=85?'warn':'ok')+'"></span><span class="t"><b>'+esc(x.who)+'</b> <span class="sub">'+esc(x.pool||'')+'</span><br><span class="sub">'+esc(x.window)+' '+esc(x.used_pct)+'% used · resets '+esc(x.resets?new Date(x.resets).toLocaleString():'?')+'</span></span><span class="sub">~'+esc(p)+'% at reset</span></div>'}).join('')||none('no accounts')},
+ usage:function(big){return usageHtml(F.usage,!!big)},
  afk:function(){return '<div class="row"><span class="t"><b>Away mode</b><br><span class="sub">While away the fleet lands approved green PRs and restarts stalled orchestrators; everything else waits and shows up in Since you last looked.</span></span></div><div class="row"><button class="btn rec" data-act="afk.on" data-label="go away">Go away</button><button class="btn" data-act="afk.off" data-label="I\'m back">I\'m back</button></div>'},
  lanes:function(){return lanesHtml(F.lanes,false)},
  heat:function(){var c=((F.heat||{}).cells)||[];if(!F.heat)return none('waiting for the heat feed');var dn=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -173,21 +172,77 @@ var BODY={
   function m(label,pct,txt){return '<div class="row"><span class="sub" style="width:60px">'+label+'</span><span class="meter"><i style="width:'+Math.min(100,pct)+'%;background:'+(pct>85?'var(--bad)':pct>60?'var(--warn)':'var(--ok)')+'"></i></span><span class="sub">'+txt+'</span></div>'}
   return '<div class="row"><span class="dot ok"></span><span class="t"><b>box</b> <span class="sub">'+esc(d.threads)+' threads</span></span></div>'+
    m('CPU',p.load/(d.threads||1)*100,'load '+p.load)+m('Memory',p.mem_pct,Math.round(p.mem_pct)+'%')+m('Swap',p.swap_pct,Math.round(p.swap_pct)+'%')},
- accounts:function(){var a=((F.forecast||{}).accounts)||[];
-  return a.map(function(x){var u=Math.round(Number(x.used_pct)||0);return '<div class="row"><span class="dot '+(u>=100?'bad':u>=80?'warn':'ok')+'"></span><span class="t">'+esc(x.who)+' <span class="sub">'+esc(x.pool||'')+'</span></span><span class="sub">'+esc(x.window)+' '+u+'%</span><span class="meter"><i style="width:'+Math.min(100,u)+'%"></i></span></div>'}).join('')||none('no readings cached yet - cel quota')},
  services:function(){var s=(((F.services||{}).items)||[]).filter(function(x){return x.ws==='box'||inWs(x.ws)});
   return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
 };
 // what each card is drawn from; a card waits for, or reports, its sources
-var NEEDS={since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],forecast:['forecast'],lanes:['lanes'],
+var NEEDS={since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
   heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
-  accounts:['forecast'],services:['services'],funnel:['fleet','merges'],afk:[]};
+  services:['services'],funnel:['fleet','merges'],afk:[]};
 function cardStatus(id){
   var src=NEEDS[id]||[];
   for(var i=0;i<src.length;i++){var n=src[i];if(ERR[n]!==undefined)return n+' unavailable ('+ERR[n]+') - retrying'}
   for(var j=0;j<src.length;j++){var m=src[j];if(m==='state'?!S:F[m]===undefined)return 'loading '+m+'…'}
   return '';
 }
+// ---- usage (CEL-108) --------------------------------------------------------
+// One card from the approved mockup: a summary strip, then each provider's
+// accounts with one bar per window (used now, a tick at the projected % at
+// reset), then the pay-as-you-go balances. A row opens to who used it this
+// week only when the feed could tell; the expanded view adds each window's
+// line over the week when the dashboard has recorded one.
+var UX=recall('cel-v2-usage-open',{});
+function money(v,u){if(v==null)return '?';var n=Number(v);return (n<0?'-':'')+(u==='usd'||!u?'$':'')+Math.abs(n).toFixed(2)+(u&&u!=='usd'?' '+esc(u):'')}
+function whenShort(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d))return '';
+  var h=(d-Date.now())/3600e3;return h<20?hhmm(iso):d.toLocaleDateString([], {weekday:'short'})+' '+hhmm(iso)}
+function uTag(t){return '<span class="utag '+(t==='orch'?'o':t==='workers'?'k':t==='not orch'?'x':'')+'">'+esc(t)+'</span>'}
+function uSpark(h){if(!h||h.length<2)return '';var t0=new Date(h[0][0]).getTime(),t1=new Date(h[h.length-1][0]).getTime(),sp=Math.max(1,t1-t0);
+  var pts=h.map(function(p){return ((new Date(p[0]).getTime()-t0)/sp*100).toFixed(1)+','+(100-Math.min(100,p[1])).toFixed(1)}).join(' ');
+  return '<svg class="uspark" viewBox="0 0 100 100" preserveAspectRatio="none"><polyline points="'+pts+'"/></svg>'}
+function uWin(w,big){
+  var pace=w.projected_pct!==w.used_pct&&w.projected_pct>w.used_pct;
+  var head=w.at_risk?'<b class="'+(w.used_pct>=95?'neg':'amb')+'">'+esc(w.label)+' · '+w.used_pct+'%</b>':esc(w.label)+' · '+w.used_pct+'%';
+  return '<div class="uwin"><div class="ulab">'+head+(w.resets?' · resets '+esc(whenShort(w.resets)):'')+'</div>'+
+   '<div class="ubar"><i class="'+w.level+'" style="width:'+Math.min(100,w.used_pct)+'%"></i>'+(pace?'<s style="left:'+Math.min(99,w.projected_pct)+'%" title="~'+w.projected_pct+'% at reset at this pace"></s>':'')+'</div>'+
+   (pace&&w.projected_pct>=50?'<div class="sub">'+(w.projected_pct>=100?'on pace for '+Math.min(999,w.projected_pct)+'% - hits the cap before it resets':'on pace for ~'+w.projected_pct+'%')+'</div>':'')+
+   (big?(uSpark(w.history)||'<div class="sub">no history yet</div>'):'')+'</div>'}
+function usageHtml(d,big){
+  if(!d)return none('waiting for the usage feed');
+  var sm=d.summary||{},risk=sm.at_risk||[],o=sm.orch||{};
+  var h='<div class="usum">'+
+   '<div><div class="big" style="color:var('+(risk.length?'--warn':'--ok')+')">'+risk.length+' at risk</div><div class="sub">'+
+     (risk.length?risk.slice(0,3).map(function(r){return esc(r.who)+' '+esc(r.window)+' on pace for '+esc(Math.min(999,r.projected_pct))+'%'+(r.resets?' before '+esc(whenShort(r.resets)):'')}).join('; '):'nothing on pace to hit a cap before it resets')+'</div></div>'+
+   '<div><div class="big">'+esc(o.serving||0)+' of '+esc(o.of||0)+'</div><div class="sub">Claude accounts serving orchestrators</div></div>'+
+   '<div><div class="big'+(sm.below_floor?' neg':'')+'">'+esc(sm.below_floor||0)+' dry</div><div class="sub">pay-as-you-go balances below their floor - those workers are vetoed</div></div>'+
+   '<div><div class="big pos">'+money(sm.funded,'usd')+'</div><div class="sub">funded balance'+((sm.funded_by||[]).length?': '+esc(sm.funded_by.join('; ')):'')+'</div></div></div>';
+  (d.groups||[]).forEach(function(g){
+    var who=[];if(g.who&&g.who.orch)who.push(uTag('orch')+'<span class="sub">orchestrators</span>');if(g.who&&g.who.workers)who.push(uTag('workers')+'<span class="sub">workers via gateway</span>');
+    if(g.who&&(g.who.profiles||[]).length)who.push('<span class="sub">'+esc(g.who.profiles.join(' / '))+' profiles</span>');
+    h+='<div class="ugrp" data-provider="'+esc(g.provider)+'"><h4>'+esc(g.title)+' · subscription'+(g.accounts.length>1?'s':'')+(who.length?' <span class="uwho">who uses it: '+who.join(' ')+'</span>':'')+'</h4>';
+    g.accounts.forEach(function(a){
+      var k=g.provider+'|'+a.account,can=!!(a.used_by&&a.used_by.length),open=can&&UX[k];
+      h+='<div class="uacct'+(can?' can':'')+'" data-uk="'+esc(k)+'"><div class="un"><b>'+(can?(open?'▾ ':'▸ '):'')+esc(a.who)+'</b>'+(a.tags||[]).map(uTag).join('')+
+        (a.state&&a.state!=='enabled'&&a.state!=='disabled'?'<div class="sub neg">'+esc(a.reason||a.state)+'</div>':'')+'</div>'+
+        '<div class="uws">'+(a.windows||[]).map(function(w){return uWin(w,big)}).join('')+'</div></div>';
+      if(open)h+='<div class="uused">this week: '+a.used_by.map(function(u){return esc(u.ws)+' · '+esc(u.profile)+' ×'+esc(u.n)}).join(', ')+'</div>';
+    });
+    h+='</div>';
+  });
+  // balances follow the workspace filter (the feed already narrows them; this
+  // keeps a stale answer from showing the last filter's rows); subscriptions
+  // are the box's and always shown
+  var b=(d.balances||[]).filter(function(x){return WSF==='all'||!x.workspaces.length||x.workspaces.indexOf(WSF)>=0});
+  if(b.length){
+    h+='<div class="ugrp"><h4>Pay-as-you-go balances</h4>'+b.map(function(x){
+      var st=x.remaining==null?'unknown':x.vetoed?'vetoed - below '+money(x.floor,x.unit)+' floor':'ok - floor '+money(x.floor,x.unit);
+      return '<div class="umoney" data-ws="'+esc(x.workspaces.join(' '))+'"><div><b>'+esc(x.provider)+' · '+esc(x.workspaces.join(', ')||'-')+'</b>'+(x.workspaces.length>1?' <span class="sub">one account</span>':'')+'</div><div class="'+(x.vetoed?'neg':x.remaining>0?'pos':'')+'">'+money(x.remaining,x.unit)+'</div><div class="sub">'+st+'</div></div>'}).join('')+'</div>';
+  }
+  if(!(d.groups||[]).length&&!b.length)h+=none('no readings yet - cel quota');
+  h+='<div class="ulegend sub"><span><i class="ubar ulg"><i class="ok" style="width:60%"></i></i> used now</span><span>│ projected at reset, at this week\'s pace</span><span>amber ≥ 75% · red ≥ 95% or below floor</span>'+(d.at?'<span>as of '+esc(hhmm(d.at))+'</span>':'')+'</div>';
+  return h;
+}
+function usageToggle(e){var r=e.target.closest('.uacct.can');if(!r)return false;var k=r.dataset.uk;if(UX[k])delete UX[k];else UX[k]=1;store('cel-v2-usage-open',UX);renderAll();return true}
+
 function actRow(r){return '<div class="row" data-ws="'+esc(r.ws)+'"><time>'+hhmm(r.ts)+'</time>'+wsTag(r.ws)+'<span class="sub" style="width:64px">'+esc(r.kind)+'</span><span class="t">'+(r.url?'<a href="'+esc(r.url)+'" target="_blank" rel="noopener">'+esc(r.text)+'</a>':esc(r.text))+'</span></div>'}
 
 // Today by workspace: one row per workspace, a half-hour strip (count, amber =
@@ -310,6 +365,7 @@ $('grid').addEventListener('click',function(e){
   var x=e.target.closest('.w h3 .x');if(x){var id=x.closest('.w').dataset.id;
     L.hidden=L.hidden.indexOf(id)>=0?L.hidden.filter(function(h){return h!==id}):L.hidden.concat([id]);saveLayout();renderAll();return}
   var ex=e.target.closest('.w h3 .ex');if(ex){expand(ex.closest('.w').dataset.id);return}
+  if(usageToggle(e))return;
   var lane=e.target.closest('.wsrow');if(lane&&!lane.closest('#ov')){var ws=lane.dataset.lane,el=lane.closest('.body');
     var waiting=!!lane.querySelector('.w8');var cur=LX[ws]!==undefined?LX[ws]:waiting;LX[ws]=!cur;store('cel-v2-lanes',LX);renderAll();return}
   var ag=e.target.closest('[data-agent]');if(ag){openDrawer(ag.dataset.agent);return}
@@ -442,7 +498,7 @@ async function loadLanes(){
 }
 function renderOverlay(){
   if(!OV||OV==='needs'||OV==='activity'||OV==='lanes')return;
-  var html='<div class="w ovcard" data-id="'+OV+'">'+BODY[OV]()+'</div>';
+  var html='<div class="w ovcard" data-id="'+OV+'">'+BODY[OV](true)+'</div>';
   var b=$('ovb');if(b._html!==html){b._html=html;b.innerHTML=html;restoreArmed(b)}
 }
 function closeOverlay(){
@@ -452,6 +508,7 @@ function closeOverlay(){
 }
 $('ovx').onclick=closeOverlay;
 $('ov').addEventListener('click',function(e){if(e.target.id==='ov')closeOverlay();
+  if(usageToggle(e))return;
   var ag=e.target.closest('[data-agent]');if(ag)openDrawer(ag.dataset.agent)});
 
 // ---- ⌘K palette ----------------------------------------------------------

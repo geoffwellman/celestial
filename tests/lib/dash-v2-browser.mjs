@@ -260,6 +260,40 @@ const main = async () => {
       out.activity = await body('activity');
     }
 
+    if (scenario === 'usage') {
+      // CEL-108: the one usage card, drawn from the mockup's structure
+      const q = (sel) => `#grid .w[data-id=usage] ${sel}`;
+      out.oldCards = await evaluate(`document.querySelectorAll('#grid .w[data-id=forecast],#grid .w[data-id=accounts]').length`);
+      out.summary = await evaluate(`[].slice.call(document.querySelectorAll('${q('.usum .big')}')).map(function(e){return e.textContent}).join('|')`);
+      out.groups = await evaluate(`[].slice.call(document.querySelectorAll('${q('.ugrp[data-provider]')}')).map(function(e){return e.dataset.provider}).join(',')`);
+      out.bars = await evaluate(`document.querySelectorAll('${q('.ubar:not(.ulg)')}').length`);
+      out.ticks = await evaluate(`document.querySelectorAll('${q('.ubar s')}').length`);
+      out.amber = await evaluate(`document.querySelectorAll('${q('.ubar i.warn')}').length`);
+      out.tags = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uacct .utag')}')).map(function(e){return e.textContent}).join(',')`);
+      out.money = await evaluate(`[].slice.call(document.querySelectorAll('${q('.umoney b')}')).map(function(e){return e.textContent}).join('|')`);
+      out.offers = await evaluate(`document.querySelectorAll('${q('.uacct.can')}').length`);
+      await evaluate(`(function(){var b=document.querySelector('${q('.uacct.can .un b')}');if(b)b.click();return 1})()`);
+      await sleep(300);
+      out.usedBy = await evaluate(`(document.querySelector('${q('.uused')}')||{}).textContent||''`);
+      await evaluate(`document.querySelector('#grid .w[data-id=usage] .ex').click()`);
+      await sleep(300);
+      out.overlaySparks = await evaluate(`document.querySelectorAll('#ovb .uspark').length`);
+      if (shotDir) {
+        const clip = async (name, width) => {
+          await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: width < 600 });
+          await sleep(600);
+          const r0 = await evaluate(`(function(){var e=document.querySelector('#ov.open .ovbox')||document.querySelector('#grid .w[data-id=usage]');e.scrollIntoView();scrollBy(0,-70);var r=e.getBoundingClientRect();return {x:r.left+scrollX,y:r.top+scrollY,w:r.width,h:r.height,sw:document.documentElement.scrollWidth}})()`);
+          const r = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: r0.x, y: r0.y, width: r0.w, height: Math.min(r0.h, 4000), scale: 1 } });
+          writeFileSync(join(shotDir, name), Buffer.from(r.result.data, 'base64'));
+          out['width' + width] = [r0.w, r0.sw];
+        };
+        await key('Escape'); await sleep(200);
+        await clip('usage-1400.png', 1400);
+        await clip('usage-390.png', 390);
+        await send('Emulation.clearDeviceMetricsOverride');
+      }
+    }
+
     if (scenario === 'shots') {
       await shot('v2-1400.png', 1400);
       await shot('v2-390.png', 390);

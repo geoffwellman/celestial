@@ -1073,15 +1073,27 @@ cmd_quota() { # [provider] [--json]
     for p in $(_quota_providers "$only"); do
       while IFS=$'\t' read -r wn wd; do
       r="$(quota_remaining "$p" "$wd")"
+      # CEL-108: the key's fingerprint (the one the balance cache is keyed
+      # on), so the usage card can say "one account, both workspaces"
+      # rather than draw the same dry key twice; and the veto as
+      # quota_vetoed decides it, so the card never re-derives the floor rule.
+      local acct="" vet=false k
+      k="$(_quota_key "$p" "$wd")"
+      [ -n "$k" ] && acct="$(printf '%s' "$k" | sha256sum | cut -c1-12)"
+      if quota_vetoed "$p" "$r"; then vet=true; fi
       bal="$(printf '%s' "$bal" | jq -c --arg p "$p" \
-        --arg r "$r" --arg w "$wn" \
+        --arg r "$r" --arg w "$wn" --arg a "$acct" --argjson v "$vet" \
         --arg st "$(quota_state "$p" "$wd" "$r")" \
         --arg f "$(provider_balance "$p" floor)" \
         --arg u "$(provider_balance "$p" unit)" \
-        '. + [{provider: $p, workspace: $w, remaining: $r, state: $st, floor: $f, unit: $u}]')"
+        '. + [{provider: $p, workspace: $w, remaining: $r, state: $st, floor: $f, unit: $u, account: $a, vetoed: $v}]')"
       done < <(_quota_owners "$p" "$wsdir")
     done
-    jq -nc --argjson s "$subs" --argjson b "$bal" '{subscriptions: $s, balances: $b}'
+    local pool gw
+    pool="$(quota_orch_pool)"
+    gw="$(_cpa_accounts | awk -F'\t' '{print tolower($1 "|" $3)}' | jq -Rsc 'split("\n") | map(select(length > 0))')"
+    jq -nc --argjson s "$subs" --argjson b "$bal" --argjson o "$pool" --argjson g "$gw" \
+      '{subscriptions: $s, balances: $b, orch_pool: $o, gateway: $g}'
     return 0
   fi
 
@@ -1109,6 +1121,46 @@ cmd_quota() { # [provider] [--json]
   printf '\n'
 
   _quota_balances "$only" "$wsdir"
+}
+
+# WHO THE ORCHESTRATORS RUN ON (CEL-108). Root and every orchestrator use omp's
+# own Anthropic credentials (CEL-98), so the usage card tags an account `orch`
+# from the same document the steward's pool check reads, and `not orch` for one
+# omp has disabled - a Claude account can be healthy in the gateway's vault
+# and still be out of the orchestrators' pool. {live, disabled}, emails
+# lowercased; both empty when omp is absent or answers nothing usable.
+quota_orch_pool() {
+  local raw; raw="$(_sub_omp_usage)"
+  printf '%s' "${raw:-null}" | jq -c '
+    def anth: ((.provider // "") | ascii_downcase) as $p | $p == "anthropic" or $p == "claude";
+    def who: ((.email // .metadata.email // .accountId // .metadata.accountId // "") | tostring | ascii_downcase);
+    {live: [(.reports // [])[]? | select(type == "object") | select(anth) | who | select(. != "")],
+     disabled: [(.disabledCredentials // [])[]? | select(type == "object") | select(anth) | who | select(. != "")]}' \
+    2>/dev/null || printf '{"live":[],"disabled":[]}'
+}
+
+# ON PACE FOR THE CAP (CEL-108). Reads a subscription list (the JSON array
+# subscription_list prints) on stdin and prints the windows at risk: projected
+# to reach 100% before they reset at the pace so far, or already at 95%. The
+# projection is used / fraction-of-window-elapsed, and only once 5% of the
+# window has passed - earlier than that it is a guess about one burst. The
+# dashboard's usage card draws the same rule (tools/dash/v2.mjs).
+quota_at_risk() {
+  jq -c '
+    def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
+             elif . == "7d" or . == "weekly" then 604800 elif . == "monthly" or . == "30d" then 2592000
+             else (capture("^(?<n>[0-9]+)(?<u>[hd])$") | (.n | tonumber) * (if .u == "h" then 3600 else 86400 end))? // null end;
+    now as $now
+    | [ .[]? | select(type == "object") | . as $s
+        | (.windows // [])[] | select(type == "object")
+        | (.used_pct // 0) as $u
+        | ((.name // "") | len) as $l
+        | ((.resets_at // null) | if . == null then null else (sub("\\.[0-9]+"; "") | fromdateiso8601? // null) end) as $r
+        | (if $l != null and $r != null then (($l - ($r - $now)) / $l) else null end) as $f
+        | (if $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
+        | select($p >= 100 or $u >= 95)
+        | {provider: $s.provider, who: ($s.label // $s.account), window: .name, scope: .scope,
+           used_pct: ($u | round), projected_pct: $p, resets: .resets_at} ]' 2>/dev/null || printf '[]'
 }
 
 # The providers `cel quota` reports a balance for: one named, or every
