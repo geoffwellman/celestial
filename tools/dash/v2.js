@@ -29,7 +29,7 @@ var S=null;            // /api/state as fetched
 var F={};              // /api/v2/<feed> by name
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
-var FEEDS=['since','activity','stuck','lanes','load','merges','cycle','heat','forecast'];
+var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','forecast'];
 function inWs(w){return WSF==='all'||!w||w===WSF}
 function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
 // the 8 s refresh; ?refreshMs in the dash config drives the classic page, the
@@ -110,14 +110,18 @@ function hhmm(iso){var d=new Date(iso);return isNaN(d)?'':d.toLocaleTimeString([
 function ago(iso){var s=(Date.now()-new Date(iso).getTime())/1000;if(!(s>=0))return '';return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d'}
 function wsTag(w){return '<span class="ws">'+esc(w)+'</span>'}
 function none(t){return '<div class="sub">'+esc(t)+'</div>'}
-function orchs(){
-  var a=((S&&S.agents)||[]).filter(function(x){return /-orch$/.test(x.label||'')}).map(function(x){
-    return {name:x.label,ws:x.workspace||(S&&S.workspace)||'',status:x.status||'idle',pane:x.pane}});
-  return a;
-}
-function workers(){return ((S&&S.inflight)||[]).filter(function(w){return w.agent})}
-function prRows(){return ((S&&S.inflight)||[]).filter(function(w){return w.pr}).map(function(w){var p=w.pr;
-  return {ws:p.ws||wsOf(w),repo:p.repo,number:p.number,title:p.title,url:p.url,review:p.review,checks:p.checks,agent:w.label||w.agent}})}
+// Who is running and what is open come from the fleet feed, which spans
+// every workspace in the filter; /api/state is one workspace's view and left
+// "All workspaces" with no orchestrators, workers or PRs (#132 on real data).
+function orchs(){return ((F.fleet||{}).orchestrators)||[]}
+// working and blocked first: a pane that finished hours ago is still listed,
+// below the ones that need watching
+var WRANK={working:0,blocked:1,idle:2,done:3};
+function workers(){return (((F.fleet||{}).workers)||[]).slice().sort(function(a,b){return (WRANK[a.status]==null?4:WRANK[a.status])-(WRANK[b.status]==null?4:WRANK[b.status])})}
+function prRows(){var w={};workers().forEach(function(x){if(x.pr)w[x.repo+'#'+x.pr]=x.name});
+  return (((F.fleet||{}).prs)||[]).map(function(p){return {ws:p.ws,repo:p.repo,number:p.number,title:p.title,url:p.url,review:p.review,
+    checks:p.mergeable==='CONFLICTING'?'failing':'',draft:p.draft,agent:w[p.repo+'#'+p.number]||''}})}
+function prOf(w){return w.pr?prRows().filter(function(p){return p.repo===w.repo&&p.number===w.pr})[0]||null:null}
 function repoWs(){var m={};(((F.cycle||{}).repos)||[]).forEach(function(r){m[r.repo]=r.ws});return m}
 function feedItems(f,key){return (((F[f]||{})[key||'items'])||[]).filter(function(x){return inWs(x.ws)})}
 
@@ -131,8 +135,8 @@ var BODY={
  stuck:function(){var it=feedItems('stuck');if(!F.stuck)return none('waiting for the stuck feed');
   return it.map(function(r){return '<div class="row" data-ws="'+esc(r.ws)+'" data-ref="'+esc(r.ref)+'"><span class="dot '+(/conflict/i.test(r.reason)?'bad':'warn')+'"></span><span class="t"><b>'+esc(r.ref)+'</b> '+wsTag(r.ws)+'<br><span class="sub">'+esc(r.reason)+(r.since?' · '+ago(r.since):'')+'</span></span>'+
    (r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck')},
- working:function(){var it=workers().filter(function(w){return inWs(wsOf(w))});
-  return it.map(function(w){return '<div class="row" data-ws="'+esc(wsOf(w))+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.label||w.branch)+'">'+esc(w.label||w.branch)+'</b> '+wsTag(wsOf(w))+'<br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
+ working:function(){var it=workers().filter(function(w){return inWs(w.ws)});
+  return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
  activity:function(){var it=feedItems('activity');if(!F.activity)return none('waiting for the activity feed');
   return '<div class="feed">'+it.slice(0,12).map(actRow).join('')+'</div>'||none('quiet')},
  prs:function(){var it=prRows().filter(function(p){return inWs(p.ws)});
@@ -159,25 +163,23 @@ var BODY={
   var st=[['open',p.length],['in review',p.filter(function(x){return x.review!=='APPROVED'&&x.review!=='CHANGES_REQUESTED'}).length],['changes',p.filter(function(x){return x.review==='CHANGES_REQUESTED'}).length],['approved',p.filter(function(x){return x.review==='APPROVED'}).length],['merged 14d',merged]];
   var mx=Math.max.apply(null,[1].concat(st.map(function(s){return s[1]})));
   return st.map(function(s){return '<div class="row"><span class="sub" style="width:80px">'+s[0]+'</span><span class="cb"><i style="width:'+(s[1]/mx*100)+'%"></i></span><span style="width:40px;text-align:right">'+s[1]+'</span></div>'}).join('')},
- load:function(){var d=F.load;if(!d||!(d.points||[]).length)return none('waiting for the load feed');var pts=d.points;
+ load:function(){var d=F.load;if(!d||!(d.points||[]).length)return none('collecting since '+(d&&d.collecting_since?new Date(d.collecting_since).toLocaleString():'now')+' - the steward samples the box every few minutes');var pts=d.points;
   var mx=Math.max.apply(null,[d.threads||1].concat(pts.map(function(p){return p.load})));var n=Math.max(1,pts.length-1);
   var line=pts.map(function(p,i){return (i/n*100)+','+(100-p.load/mx*92)}).join(' ');var cap=100-(d.threads||0)/mx*92;
   return '<svg viewBox="0 0 100 100" preserveAspectRatio="none" class="spark"><line x1="0" x2="100" y1="'+cap+'" y2="'+cap+'" class="cap"/><polyline points="0,100 '+line+' 100,100" class="area"/><polyline points="'+line+'" class="ln2"/></svg><div class="hx"><span>'+hhmm(pts[0].ts)+'</span><span>now</span></div><div class="sub">Load average; dashed line = '+esc(d.threads)+' threads, above it work is queuing.</div>'},
- box:function(){var d=F.load;var p=d&&d.points&&d.points[d.points.length-1];if(!p)return none('waiting for the load feed');
+ box:function(){var d=F.load,p=d&&(d.current||(d.points||[])[(d.points||[]).length-1]);if(!p)return none('no reading yet');
   function m(label,pct,txt){return '<div class="row"><span class="sub" style="width:60px">'+label+'</span><span class="meter"><i style="width:'+Math.min(100,pct)+'%;background:'+(pct>85?'var(--bad)':pct>60?'var(--warn)':'var(--ok)')+'"></i></span><span class="sub">'+txt+'</span></div>'}
   return '<div class="row"><span class="dot ok"></span><span class="t"><b>box</b> <span class="sub">'+esc(d.threads)+' threads</span></span></div>'+
    m('CPU',p.load/(d.threads||1)*100,'load '+p.load)+m('Memory',p.mem_pct,Math.round(p.mem_pct)+'%')+m('Swap',p.swap_pct,Math.round(p.swap_pct)+'%')},
- accounts:function(){var s=(S&&S.subscriptions)||[];if(S&&S.box&&!S.box.mine)return none('accounts are on the box dashboard '+(S.box.url||S.box.owner||''));
-  return s.map(function(a){var w=(a.windows||[]).filter(function(x){return x.used_pct!=null});
-   return '<div class="row"><span class="dot '+(w.length?'ok':'bad')+'"></span><span class="t">'+esc(a.label||a.account)+' <span class="sub">'+esc(a.provider||'')+'</span></span>'+
-   (w.length?w.map(function(x){return '<span class="sub">'+esc(x.name)+(x.scope?' '+esc(x.scope):'')+' '+Math.round(x.used_pct)+'%</span><span class="meter"><i style="width:'+Math.min(100,x.used_pct)+'%"></i></span>'}).join(''):'<span class="sub">unreadable</span>')+'</div>'}).join('')||none('no readings cached yet - cel quota')},
- services:function(){var s=((S&&S.services)||[]).concat((S&&S.boxServices)||[]).filter(function(x){return x.workspace==='box'||inWs(x.workspace)});
-  return s.map(function(x){var up=/healthy|up/.test(x.state||'');return '<div class="row" data-ws="'+esc(x.workspace||'')+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">:'+esc(x.port)+'</span><span class="t">'+(x.reach?'<a href="'+esc(x.reach)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span>'+wsTag(x.workspace||'')+'</div>'}).join('')||none('no services declared')},
+ accounts:function(){var a=((F.forecast||{}).accounts)||[];
+  return a.map(function(x){var u=Math.round(Number(x.used_pct)||0);return '<div class="row"><span class="dot '+(u>=100?'bad':u>=80?'warn':'ok')+'"></span><span class="t">'+esc(x.who)+' <span class="sub">'+esc(x.pool||'')+'</span></span><span class="sub">'+esc(x.window)+' '+u+'%</span><span class="meter"><i style="width:'+Math.min(100,u)+'%"></i></span></div>'}).join('')||none('no readings cached yet - cel quota')},
+ services:function(){var s=(((F.services||{}).items)||[]).filter(function(x){return x.ws==='box'||inWs(x.ws)});
+  return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
 };
 // what each card is drawn from; a card waits for, or reports, its sources
 var NEEDS={since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],forecast:['forecast'],lanes:['lanes'],
-  heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['state'],prs:['state'],orchs:['state'],
-  accounts:['state'],services:['state'],funnel:['state','merges'],afk:[]};
+  heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
+  accounts:['forecast'],services:['services'],funnel:['fleet','merges'],afk:[]};
 function cardStatus(id){
   var src=NEEDS[id]||[];
   for(var i=0;i<src.length;i++){var n=src[i];if(ERR[n]!==undefined)return n+' unavailable ('+ERR[n]+') - retrying'}
@@ -247,7 +249,7 @@ function renderAll(){
   if(S){buildLast();if(needsHost().isConnected)renderNeedsYou();refreshTabs()}
   renderComposer();renderThread();renderDrawer();renderOverlay();
   var o=orchs(),wsn={};o.forEach(function(x){wsn[x.ws]=1});((S&&S.needsYouGroups)||[]).forEach(function(x){wsn[x.workspace]=1});
-  var p=F.load&&F.load.points&&F.load.points[F.load.points.length-1];
+  var p=F.load&&F.load.current;
   $('tagline').textContent=o.length+' orchestrators · '+Object.keys(wsn).length+' workspaces'+(p?' · box at '+Math.round(p.mem_pct)+'% memory':'');
   if(S){$('wsname').textContent=S.workspace||'';document.title='celestial · '+(S.workspace||'')}
   fillWsFilter(Object.keys(wsn));
@@ -358,8 +360,8 @@ function renderThread(){
 // ---- agent drawer ----------------------------------------------------------
 var DRAWER=null;
 function findAgent(name){
-  var w=((S&&S.inflight)||[]).filter(function(x){return (x.label||x.branch)===name})[0];
-  if(w)return {name:name,ws:wsOf(w),status:w.status,pane:w.pane,pr:w.pr,model:w.model,now:w.repo+'/'+w.branch};
+  var w=workers().filter(function(x){return x.name===name})[0];
+  if(w)return {name:name,ws:w.ws,status:w.status,pane:w.pane,pr:prOf(w),model:w.model,now:w.repo+'/'+w.branch};
   var o=orchs().filter(function(x){return x.name===name})[0];
   if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:null,model:'',now:o.status};
   return {name:name,ws:'',status:'unknown',pane:null,pr:null,model:'',now:''};
@@ -457,7 +459,7 @@ function palItems(){
   var it=[];
   ((S&&S.needsYou)||[]).forEach(function(d){if(!NYDONE[d.id])it.push({k:'decision',ws:d.workspace,text:d.title,key:d.id})});
   prRows().forEach(function(p){it.push({k:'PR',ws:p.ws,text:p.repo+'#'+p.number+' '+p.title,key:p.repo+'#'+p.number,url:p.url})});
-  workers().forEach(function(w){it.push({k:'agent',ws:wsOf(w),text:w.label||w.branch,key:w.label||w.branch})});
+  workers().forEach(function(w){it.push({k:'agent',ws:w.ws,text:w.name,key:w.name})});
   orchs().forEach(function(o){it.push({k:'agent',ws:o.ws,text:o.name,key:o.name})});
   ((F.stuck||{}).items||[]).forEach(function(s){it.push({k:'stuck',ws:s.ws,text:s.ref+' - '+s.reason,key:s.ref})});
   it.push({k:'action',ws:'',text:'Give work…',key:'compose'});

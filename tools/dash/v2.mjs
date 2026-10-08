@@ -7,7 +7,8 @@
 // a pane: a dashboard that could would be a remote shell behind a cookie.
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir, cpus } from 'node:os';
+import { homedir, cpus, loadavg, totalmem, freemem } from 'node:os';
+import { connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 const DAY = 86400e3;
@@ -44,6 +45,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const CEL = () => process.env.CEL_DASH_CEL || join(CEL_ROOT, 'bin/cel');
 
   // ---- where to look ------------------------------------------------------
+  const BOOT = new Date().toISOString();
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
   const workspaces = () => cached('v2ws', 30000, async () => {
     let list = [];
@@ -60,9 +62,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       else {
         try { repos = JSON.parse(await run('yq', ['-c', slugExpr, join(path, 'workspace.yaml')], 8000) || '[]'); } catch { repos = []; }
       }
-      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [] });
+      let dashPort = null;
+      if (w.name === cfg.name) dashPort = cfg.port || null;
+      else { const v = Number(String(await run('yq', ['.dash.port // ""', join(path, 'workspace.yaml')], 8000) || '').trim()); dashPort = v > 0 ? v : null; }
+      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], dashPort });
     }
-    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [] });
+    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], dashPort: cfg.port || null });
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
@@ -133,7 +138,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const out = [];
     for (const ws of wss) for (const r of ws.repos) {
       if (!r.slug) continue;
-      for (const p of await ghList(r.slug, 'open', 'number,title,url,headRefName,mergeable,reviewDecision,updatedAt')) {
+      for (const p of await ghList(r.slug, 'open', 'number,title,url,headRefName,mergeable,reviewDecision,updatedAt,isDraft')) {
         out.push({ ...p, ws: ws.name, repo: r.name });
       }
     }
@@ -272,6 +277,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- lanes --------------------------------------------------------------
+  // Review of #132 on real data: every lane was amber all day. Stale rows
+  // (a "running" nobody touched in weeks, finished or orphaned work) each drew
+  // one segment across the whole window, and every state that was not
+  // "running" read as "waiting". Now: the ledger contributes only its running
+  // spans; an open-ended "running" counts up to now only while a pane is live
+  // in that worktree (and takes the pane's state); waiting means a pane that
+  // said "blocked" - a person is needed - and nothing else.
   const PANE_STATE = { working: 'running', blocked: 'waiting', idle: 'idle', done: 'idle' };
   const lanes = async (url, wss) => {
     const range = url.searchParams.get('range') || 'today';
@@ -280,6 +292,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (range === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime(); end = start + DAY; }
     else { start = now - (range === '3d' ? 3 : 7) * DAY; end = now; }
     const samples = readJsonl(SAMPLES()).map((s) => ({ ...s, t: new Date(s.ts).getTime() })).filter((s) => s.t).sort((a, b) => a.t - b.t);
+    const ag = await agents();
     let prs = [];
     try { prs = [...await open(wss), ...await merged(wss)]; } catch { prs = []; }
     const clipTo = Math.min(end, now);
@@ -288,41 +301,104 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const lanesOut = [];
       for (const r of ledgerOf(ws)) {
         const hist = (r.history || []).map((h) => ({ state: h.state, t: new Date(h.at).getTime() })).filter((h) => h.t).sort((a, b) => a.t - b.t);
+        const live = r.worktree ? ag.find((a) => a.cwd === r.worktree) : null;
         const segs = [];
         for (let i = 0; i < hist.length; i++) {
-          if (TERMINAL.has(hist[i].state)) continue;
-          const to = i + 1 < hist.length ? hist[i + 1].t : now;
-          segs.push({ from: hist[i].t, to, state: hist[i].state === 'running' ? 'running' : 'waiting' });
+          if (hist[i].state !== 'running') continue;
+          if (i + 1 < hist.length) segs.push({ from: hist[i].t, to: hist[i + 1].t, state: 'running' });
+          else if (live) segs.push({ from: hist[i].t, to: now, state: PANE_STATE[live.agent_status] || 'idle', open: true });
         }
-        // the samples say what the pane was actually doing; from the first
-        // one on, they replace the ledger's coarser "running"
+        // the samples say what the pane was actually doing, inside the
+        // ledger's running spans only
         const mine = r.worktree ? samples.map((s) => {
           const p = (s.panes || []).find((x) => x.cwd === r.worktree);
-          return p ? { t: s.t, state: PANE_STATE[p.status] || 'waiting' } : null;
+          return p ? { t: s.t, state: PANE_STATE[p.status] || 'idle' } : null;
         }).filter(Boolean) : [];
-        let final = segs;
-        if (mine.length) {
-          const cut = mine[0].t;
-          const alive = segs.length ? segs[segs.length - 1].to : now;
-          final = segs.filter((s) => s.from < cut).map((s) => ({ ...s, to: Math.min(s.to, cut) }));
-          mine.forEach((m, i) => final.push({ from: m.t, to: Math.min(i + 1 < mine.length ? mine[i + 1].t : now, Math.max(alive, m.t)), state: m.state }));
+        let final = [];
+        for (const sg of segs) {
+          const inside = mine.filter((m) => m.t >= sg.from && m.t < sg.to);
+          if (!inside.length) { final.push({ from: sg.from, to: sg.to, state: sg.open ? sg.state : 'running' }); continue; }
+          if (inside[0].t > sg.from) final.push({ from: sg.from, to: inside[0].t, state: 'running' });
+          inside.forEach((m, i) => final.push({ from: m.t, to: i + 1 < inside.length ? inside[i + 1].t : sg.to,
+            // the live pane has the last word on the open span
+            state: (sg.open && i === inside.length - 1) ? sg.state : m.state }));
         }
         const clipped = [];
-        for (const s of final) {
-          const from = Math.max(s.from, start); const to = Math.min(s.to, clipTo);
+        for (const s2 of final) {
+          const from = Math.max(s2.from, start); const to = Math.min(s2.to, clipTo);
           if (to <= from) continue;
           const prev = clipped[clipped.length - 1];
-          if (prev && prev.state === s.state && prev.to >= from) prev.to = Math.max(prev.to, to);
-          else clipped.push({ from, to, state: s.state });
+          if (prev && prev.state === s2.state && prev.to >= from) prev.to = Math.max(prev.to, to);
+          else clipped.push({ from, to, state: s2.state });
         }
         if (!clipped.length) continue;
         const pr = prs.find((p) => p.repo === r.repo && String(p.headRefName).toLowerCase() === String(r.branch).toLowerCase());
         lanesOut.push({ ref: `${r.repo}/${r.branch}`, ...(pr ? { pr: pr.number } : {}), label: r.id || r.branch,
-          segments: clipped.map((s) => ({ from: iso(s.from), to: iso(s.to), state: s.state })) });
+          segments: clipped.map((x) => ({ from: iso(x.from), to: iso(x.to), state: x.state })) });
       }
       out.push({ ws: ws.name, lanes: lanesOut });
     }
     return { start: iso(start), end: iso(end), now: iso(now), workspaces: out };
+  };
+
+  // ---- fleet: who is running and what is open, across workspaces ----------
+  const WORKTREES = () => join(homedir(), '.herdr', 'worktrees');
+  const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
+  const fleet = async (wss) => {
+    const ag = await agents();
+    const pulls = await open(wss);
+    const orchestrators = []; const workers = [];
+    for (const a of ag) {
+      const cwd = a.cwd || '';
+      let ws = null; let row = null;
+      for (const w of wss) {
+        row = ledgerOf(w).find((r) => r.worktree && r.worktree === cwd) || null;
+        if (row || w.repos.some((r) => under(cwd, join(WORKTREES(), r.name)))) { ws = w; break; }
+      }
+      if (ws) {
+        const pr = row ? pulls.find((p) => p.repo === row.repo && String(p.headRefName).toLowerCase() === String(row.branch).toLowerCase()) : null;
+        workers.push({ name: a.name || (row && row.alias) || a.pane_id, ws: ws.name, status: a.agent_status || 'unknown', pane: a.pane_id || null,
+          repo: row ? row.repo : cwd.split('/').slice(-2)[0], branch: row ? row.branch : cwd.split('/').pop(),
+          id: row ? row.id || row.branch : '', model: row ? row.model || '' : '', ...(pr ? { pr: pr.number } : {}) });
+        continue;
+      }
+      const home = wss.find((w) => under(cwd, w.path));
+      if (home && /-orch$/.test(String(a.name || ''))) {
+        orchestrators.push({ name: a.name, ws: home.name, status: a.agent_status || 'unknown', pane: a.pane_id || null });
+      }
+    }
+    const prs = pulls.map((p) => ({ ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,
+      review: p.reviewDecision || 'REVIEW_REQUIRED', mergeable: p.mergeable || '', draft: !!p.isDraft }));
+    return { orchestrators, workers, prs };
+  };
+
+  // ---- services: the box's own and each workspace's ---------------------
+  // the box's servers bind the tailnet address, not loopback: try both
+  const answers = async (port) => (await answersOn(port, cfg.host || '127.0.0.1')) || (cfg.host && cfg.host !== '127.0.0.1' && answersOn(port, '127.0.0.1'));
+  const answersOn = (port, host) => new Promise((resolve) => {
+    if (!port) { resolve(false); return; }
+    const s = connect(Number(port), host);
+    const done = (v) => { s.destroy(); resolve(v); };
+    s.setTimeout(800, () => done(false));
+    s.on('connect', () => done(true)); s.on('error', () => done(false));
+  });
+  const services = async (wss) => {
+    const items = [];
+    const seen = new Set();
+    const add = (it) => { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } };
+    const pagesPort = Number(process.env.CEL_PAGES_PORT) || 7780;
+    add({ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort)) ? 'up' : 'down', url: '' });
+    for (const ws of wss) {
+      if (ws.dashPort) add({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: (await answers(ws.dashPort)) ? 'up' : 'down', url: '' });
+      let rows = [];
+      try { rows = JSON.parse(await run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000) || '[]'); } catch { rows = []; }
+      for (const r of Array.isArray(rows) ? rows : []) {
+        const owner = r.workspace === 'box' ? 'box' : ws.name;
+        const st = String(r.state || '');
+        add({ name: r.name, ws: owner, port: r.port || null, state: /healthy|up|running/.test(st) ? 'up' : st || 'unknown', url: r.reach || '' });
+      }
+    }
+    return { items };
   };
 
   // ---- load ---------------------------------------------------------------
@@ -331,7 +407,17 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const from = Date.now() - hours * 3600e3;
     const points = readJsonl(SAMPLES()).filter((s) => new Date(s.ts).getTime() >= from)
       .map((s) => ({ ts: iso(s.ts), load: s.load, mem_pct: s.mem_pct, swap_pct: s.swap_pct }));
-    return { threads: cpus().length, points };
+    // what the box is doing right now, without the ring: the steward may not
+    // have sampled yet, and the Box card should not wait for it
+    let swap = 0; let avail = freemem();
+    try {
+      const mi = Object.fromEntries(readFileSync('/proc/meminfo', 'utf8').split('\n').map((l) => /^(\w+):\s+(\d+)/.exec(l)).filter(Boolean).map((m) => [m[1], Number(m[2]) * 1024]));
+      if (mi.MemAvailable) avail = mi.MemAvailable;
+      if (mi.SwapTotal) swap = Math.round((1 - (mi.SwapFree || 0) / mi.SwapTotal) * 1000) / 10;
+    } catch { /* not linux: no swap figure */ }
+    const current = { load: Math.round(loadavg()[0] * 100) / 100, mem_pct: Math.round((1 - avail / totalmem()) * 1000) / 10, swap_pct: swap };
+    const first = readJsonl(SAMPLES())[0];
+    return { threads: cpus().length, points, current, collecting_since: iso(first && first.ts) || BOOT };
   };
 
   // ---- merges / cycle / heat ---------------------------------------------
@@ -512,6 +598,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       case 'cycle': json(res, 200, await cycle(url, wss)); return true;
       case 'heat': json(res, 200, await heat(url, wss)); return true;
       case 'forecast': json(res, 200, await forecast()); return true;
+      case 'fleet': json(res, 200, await fleet(wss)); return true;
+      case 'services': json(res, 200, await services(wss)); return true;
       default: res.writeHead(404).end('not found'); return true;
     }
   };
