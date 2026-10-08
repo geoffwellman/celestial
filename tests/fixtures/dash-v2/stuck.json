@@ -1,0 +1,24 @@
+{
+ "items": [
+  {
+   "ws": "alpha",
+   "ref": "widget#13",
+   "reason": "changes requested, no worker on the branch",
+   "since": "2026-10-05T10:00:00Z",
+   "fix": {
+    "label": "ask alpha-orch to pick it up",
+    "action": "stuck.changes_requested"
+   }
+  },
+  {
+   "ws": "bundle",
+   "ref": "gadget#5",
+   "reason": "conflicts with main",
+   "since": "2026-10-04T10:00:00Z",
+   "fix": {
+    "label": "ask for a rebase",
+    "action": "stuck.conflict"
+   }
+  }
+ ]
+}

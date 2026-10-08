@@ -1,0 +1,290 @@
+{
+ "workspace": "alpha",
+ "updated": "2026-10-07T12:00:00Z",
+ "viewer": "owner",
+ "needsYou": [
+  {
+   "id": "1759800000000000001",
+   "workspace": "alpha",
+   "asker": "alpha-orch",
+   "title": "pick a widget colour",
+   "urgent": true,
+   "age_secs": 7200,
+   "blocks": "the widget release",
+   "options": [
+    {
+     "label": "blue",
+     "tradeoff": "calm, matches the docs"
+    },
+    {
+     "label": "red",
+     "tradeoff": "loud"
+    }
+   ],
+   "recommended": 1,
+   "updated": "a"
+  },
+  {
+   "id": "1759800000000000003",
+   "workspace": "alpha",
+   "asker": "alpha-orch",
+   "title": "rename the sprocket module",
+   "urgent": false,
+   "age_secs": 3600,
+   "options": [
+    {
+     "label": "keep",
+     "tradeoff": "no churn"
+    },
+    {
+     "label": "rename",
+     "tradeoff": "clearer"
+    }
+   ],
+   "recommended": 1,
+   "updated": "c"
+  },
+  {
+   "id": "1759800000000000002",
+   "workspace": "bundle",
+   "asker": "bundle-orch",
+   "title": "ship the gadget beta now?",
+   "urgent": false,
+   "age_secs": 90000,
+   "options": [
+    {
+     "label": "ship it",
+     "tradeoff": "users get it today"
+    },
+    {
+     "label": "hold",
+     "tradeoff": "one more review"
+    }
+   ],
+   "recommended": 2,
+   "updated": "b"
+  }
+ ],
+ "needsYouGroups": [
+  {
+   "workspace": "alpha",
+   "urgent": 1,
+   "count": 2,
+   "recommended": 2,
+   "items": [
+    {
+     "id": "1759800000000000001",
+     "workspace": "alpha",
+     "asker": "alpha-orch",
+     "title": "pick a widget colour",
+     "urgent": true,
+     "age_secs": 7200,
+     "blocks": "the widget release",
+     "options": [
+      {
+       "label": "blue",
+       "tradeoff": "calm, matches the docs"
+      },
+      {
+       "label": "red",
+       "tradeoff": "loud"
+      }
+     ],
+     "recommended": 1,
+     "updated": "a"
+    },
+    {
+     "id": "1759800000000000003",
+     "workspace": "alpha",
+     "asker": "alpha-orch",
+     "title": "rename the sprocket module",
+     "urgent": false,
+     "age_secs": 3600,
+     "options": [
+      {
+       "label": "keep",
+       "tradeoff": "no churn"
+      },
+      {
+       "label": "rename",
+       "tradeoff": "clearer"
+      }
+     ],
+     "recommended": 1,
+     "updated": "c"
+    }
+   ]
+  },
+  {
+   "workspace": "bundle",
+   "urgent": 0,
+   "count": 1,
+   "recommended": 1,
+   "items": [
+    {
+     "id": "1759800000000000002",
+     "workspace": "bundle",
+     "asker": "bundle-orch",
+     "title": "ship the gadget beta now?",
+     "urgent": false,
+     "age_secs": 90000,
+     "options": [
+      {
+       "label": "ship it",
+       "tradeoff": "users get it today"
+      },
+      {
+       "label": "hold",
+       "tradeoff": "one more review"
+      }
+     ],
+     "recommended": 2,
+     "updated": "b"
+    }
+   ]
+  }
+ ],
+ "inflight": [
+  {
+   "repo": "widget",
+   "branch": "ABC-12-widget-colour",
+   "agent": "pi",
+   "pane": "w1:p1",
+   "status": "working",
+   "label": "widget-abc-12-colour",
+   "model": "anthropic/opus",
+   "ws": "alpha",
+   "pr": {
+    "repo": "widget",
+    "number": 12,
+    "title": "ABC-12: widget colour picker",
+    "url": "https://example.invalid/widget/pull/12",
+    "review": "APPROVED",
+    "checks": "green",
+    "draft": false,
+    "branch": "ABC-12-x",
+    "ws": "alpha"
+   }
+  },
+  {
+   "repo": "gadget",
+   "branch": "WG-7-gadget-beta",
+   "agent": "pi",
+   "pane": "w2:p1",
+   "status": "blocked",
+   "label": "gadget-wg-7-beta",
+   "model": "anthropic/opus",
+   "ws": "bundle",
+   "pr": {
+    "repo": "gadget",
+    "number": 7,
+    "title": "WG-7: gadget beta flag",
+    "url": "https://example.invalid/gadget/pull/7",
+    "review": "REVIEW_REQUIRED",
+    "checks": "green",
+    "draft": false,
+    "branch": "ABC-7-x",
+    "ws": "bundle"
+   }
+  },
+  {
+   "repo": "widget",
+   "branch": "ABC-13-sprocket",
+   "agent": null,
+   "pane": null,
+   "status": null,
+   "ws": "alpha",
+   "pr": {
+    "repo": "widget",
+    "number": 13,
+    "title": "ABC-13: sprocket cleanup",
+    "url": "https://example.invalid/widget/pull/13",
+    "review": "CHANGES_REQUESTED",
+    "checks": "green",
+    "draft": false,
+    "branch": "ABC-13-x",
+    "ws": "alpha"
+   }
+  }
+ ],
+ "agents": [
+  {
+   "agent": "omp",
+   "status": "working",
+   "label": "alpha-orch",
+   "pane": "w0:p1",
+   "workspace": "alpha"
+  },
+  {
+   "agent": "omp",
+   "status": "idle",
+   "label": "bundle-orch",
+   "pane": "w0:p2",
+   "workspace": "bundle"
+  },
+  {
+   "agent": "omp",
+   "status": "idle",
+   "label": "celestial-orch",
+   "pane": "w0:p3",
+   "workspace": "plane"
+  }
+ ],
+ "services": [
+  {
+   "name": "widget-preview",
+   "state": "healthy",
+   "port": 8100,
+   "reach": "",
+   "workspace": "alpha"
+  },
+  {
+   "name": "gadget-preview",
+   "state": "down",
+   "port": 8101,
+   "reach": "",
+   "workspace": "bundle"
+  }
+ ],
+ "boxServices": [
+  {
+   "name": "auth broker",
+   "state": "healthy",
+   "port": 47411,
+   "workspace": "box"
+  }
+ ],
+ "box": {
+  "mine": true,
+  "owner": "alpha",
+  "url": ""
+ },
+ "subscriptions": [
+  {
+   "provider": "claude",
+   "account": "acct-A",
+   "windows": [
+    {
+     "name": "5h",
+     "used_pct": 12,
+     "resets_at": null
+    },
+    {
+     "name": "7d",
+     "used_pct": 43,
+     "resets_at": null
+    }
+   ]
+  }
+ ],
+ "inbox": [
+  {
+   "id": "1759840000000000001",
+   "ts": "2026-10-07T11:00:00Z",
+   "from": "alpha-orch",
+   "to": "owner",
+   "message": "widget ABC-12 is approved"
+  }
+ ],
+ "inboxOpen": []
+}

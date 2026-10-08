@@ -1,0 +1,46 @@
+{
+ "start": "2026-10-07T00:00:00Z",
+ "end": "2026-10-07T13:00:00Z",
+ "now": "2026-10-07T12:00:00Z",
+ "workspaces": [
+  {
+   "ws": "alpha",
+   "lanes": [
+    {
+     "ref": "ABC-12",
+     "pr": "widget#12",
+     "label": "ABC-12 colour",
+     "segments": [
+      {
+       "from": "2026-10-07T08:00:00Z",
+       "to": "2026-10-07T12:00:00Z",
+       "state": "running"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "ws": "bundle",
+   "lanes": [
+    {
+     "ref": "WG-7",
+     "pr": "gadget#7",
+     "label": "WG-7 beta",
+     "segments": [
+      {
+       "from": "2026-10-07T09:00:00Z",
+       "to": "2026-10-07T10:30:00Z",
+       "state": "running"
+      },
+      {
+       "from": "2026-10-07T10:30:00Z",
+       "to": "2026-10-07T12:00:00Z",
+       "state": "waiting"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

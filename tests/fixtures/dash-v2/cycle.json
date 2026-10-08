@@ -1,0 +1,16 @@
+{
+ "repos": [
+  {
+   "repo": "widget",
+   "ws": "alpha",
+   "prs": 12,
+   "median_hours": 3.5
+  },
+  {
+   "repo": "gadget",
+   "ws": "bundle",
+   "prs": 5,
+   "median_hours": 60
+  }
+ ]
+}

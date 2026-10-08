@@ -17,6 +17,7 @@ import { spawn, exec, execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const [url, keepId, goneId, mutate, waitMs, shotDir] = process.argv.slice(2);
 
@@ -174,4 +175,5 @@ const main = async () => {
   }
 };
 
-if (url) main().catch((e) => { console.error(e.stack || String(e)); process.exit(1); });
+// only as a script: tests/lib/dash-v2-browser.mjs imports the launcher
+if (url && import.meta.url === pathToFileURL(process.argv[1] || '').href) main().catch((e) => { console.error(e.stack || String(e)); process.exit(1); });
