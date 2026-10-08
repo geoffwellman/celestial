@@ -27,6 +27,8 @@ _CEL_DOCTOR=1
 . "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # box_doctor_line, for the floor check
 # shellcheck source=lib/orphans.sh
 . "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # orphans_doctor_line
+# shellcheck source=lib/dash.sh
+. "$(dirname "${BASH_SOURCE[0]}")/dash.sh"   # dash_doctor_line
 # shellcheck source=lib/gateway.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
 # shellcheck source=lib/services.sh
@@ -691,6 +693,7 @@ cmd_doctor() {
   c_hd "Gateway"
   gateway_doctor_line
   doctor_box_services_line
+  dash_doctor_line
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1
   check_externals || fail=1

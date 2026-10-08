@@ -62,15 +62,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       else {
         try { repos = JSON.parse(await run('yq', ['-c', slugExpr, join(path, 'workspace.yaml')], 8000) || '[]'); } catch { repos = []; }
       }
-      let dashPort = null; let dashHost = null;
-      if (w.name === cfg.name) { dashPort = cfg.port || null; dashHost = cfg.host || null; }
-      else {
-        const [p, h] = String(await run('yq', ['-r', '((.dash.port // "") | tostring) + " " + (.dash.host // "")', join(path, 'workspace.yaml')], 8000) || '').trim().split(/\s+/);
-        dashPort = Number(p) > 0 ? Number(p) : null; dashHost = h || null;
-      }
-      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], dashPort, dashHost });
+      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [] });
     }
-    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], dashPort: cfg.port || null, dashHost: cfg.host || null });
+    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [] });
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
@@ -420,12 +414,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return [{ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort, process.env.CEL_PAGES_HOST)) ? 'up' : 'down', url: '' }];
   });
   const wsRows = (ws) => once(`ws:${ws.name}`, async () => {
-    const [dash, out] = await Promise.all([
-      ws.dashPort ? answers(ws.dashPort, ws.dashHost) : Promise.resolve(null),
-      run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000),
-    ]);
+    const out = await run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000);
     const rows = [];
-    if (ws.dashPort) rows.push({ name: `dashboard ${ws.name}`, ws: ws.name, port: ws.dashPort, state: dash ? 'up' : 'down', url: '' });
     let list = [];
     try { list = JSON.parse(out || '[]'); } catch { list = []; }
     for (const r of Array.isArray(list) ? list : []) {
@@ -436,7 +426,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return rows;
   });
   const services = async (wss) => {
-    const parts = await Promise.all([pagesRow(), ...wss.map(wsRows)]);
+    // CEL-107: one dashboard for the box, and it is the server answering this
+    // request - up by construction, so it is a row and not a probe
+    const dash = [{ name: 'dashboard', ws: 'box', port: cfg.port || null, state: 'up', url: '' }];
+    const parts = await Promise.all([dash, pagesRow(), ...wss.map(wsRows)]);
     const seen = new Set(); const items = [];
     for (const it of parts.flat()) { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } }
     return { items };
