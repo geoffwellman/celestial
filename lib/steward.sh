@@ -1115,6 +1115,34 @@ _steward_orch_pool() {
   fi
 }
 
+# ON PACE FOR THE CAP (CEL-108). The per-account sweep above speaks at 80% of a
+# window; by then a weekly window can already be a day from empty, and the
+# question the owner asks is earlier - "at this week's pace, does anything run
+# out before it resets?". So ONE item to root, keyed `usage-pace`, naming every
+# account that will (quota_at_risk: projected >= 100% before the reset, or a
+# window at 95%), updated in place while it stays true and resolved when the
+# pace no longer gets there. Read from the cached list - the steward never
+# asks a provider for this.
+_steward_usage_pace() {
+  # shellcheck source=lib/quota.sh
+  command -v quota_at_risk >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
+  local ws; ws="$(registry_names | head -n1)"
+  [ -n "$ws" ] || return 0
+  local subs; subs="$(subscription_list --cached 2>/dev/null || true)"
+  # no cached reading is no evidence: leave whatever is open alone
+  [ -n "$subs" ] && [ "$subs" != "[]" ] || return 0
+  local risk; risk="$(printf '%s' "$subs" | quota_at_risk | jq -r '
+    map("\(.who) (\(.provider) \(.window)\(if .scope then " " + .scope else "" end): \(.used_pct)% now, ~\(.projected_pct)% at reset\(if .resets then " " + .resets else "" end))")
+    | join("; ")' 2>/dev/null || true)"
+  if [ -n "$risk" ]; then
+    c_warn "usage on pace for a cap: $risk"
+    _steward_due "usage-pace" && _steward_raise "$ws" usage-pace status \
+      "steward: on this week's pace an account hits its cap before it resets - $risk. Move work off it or expect refusals." || true
+  else
+    _steward_clear "$ws" usage-pace "no account is on pace to hit its cap before it resets"
+  fi
+}
+
 # THE QUEUE IS VISIBLE OR IT IS A HANG. Since 2026-09-18 the suite takes a
 # box-wide lock (tests/run.sh): six concurrent copies took the load to 190 and
 # three workers had to be interrupted by hand. A worker whose gate is queued
@@ -1787,6 +1815,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_quota
   _steward_subscriptions
   _steward_orch_pool
+  _steward_usage_pace
   # Before the server sweeps: a box at 5% available is why the next thing in
   # this tick fails to start, and reading that warning after three failures is
   # reading it in the wrong order.

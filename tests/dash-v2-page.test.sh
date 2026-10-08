@@ -177,3 +177,25 @@ test_dash_v2page_working_now_lists_only_working_and_blocked() {
   assert_eq "$(_vpj .working)" "widget-abc-12-colour,gadget-wg-7-beta"
   _vp_down
 }
+
+# CEL-108: one Usage card replaces "Usage forecast" and "Claude accounts" -
+# summary strip, a group per provider with a bar per window and a pace tick,
+# who-uses-it tags, merged pay-as-you-go rows, a row that opens to who used it
+# only when the feed could tell, and per-window history when expanded.
+test_dash_v2page_usage_card_is_structured_from_the_mockup() {
+  _vp_boot
+  local rc=0; _vp_run usage || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .oldCards)" "0"
+  assert_eq "$(_vpj .summary)" '1 at risk|1 of 2|2 dry|$22.54'
+  assert_eq "$(_vpj .groups)" "claude,codex"
+  assert_eq "$(_vpj .bars)" "7"
+  assert_eq "$(_vpj .ticks)" "4"
+  assert_eq "$(_vpj .amber)" "1"
+  assert_eq "$(_vpj .tags)" "orch,workers,workers,not orch"
+  assert_eq "$(_vpj .money)" "deepseek · alpha, bundle|openrouter · bundle|openrouter · gadget"
+  assert_eq "$(_vpj .offers)" "1"
+  assert_contains "$(_vpj .usedBy)" "bundle · luna ×2"
+  assert_eq "$(_vpj .overlaySparks)" "2"
+  if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T"/shots/usage-*.png "$CEL_DASH_SHOTS"/ 2>/dev/null || true; fi
+  _vp_down
+}

@@ -1806,15 +1806,18 @@ test_quota_at_risk_projects_to_the_reset_and_flags_ninety_five() {
 test_steward_warns_once_about_an_account_on_pace_for_its_cap() {
   _pace_fixture 80 172800
   local i; for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1; done
-  local open; open="$(cmd_inbox open --for root --workspace alpha --json | jq -s '.')"
-  assert_eq "$(printf '%s' "$open" | jq 'length')" 1
-  assert_eq "$(printf '%s' "$open" | jq -r '.[0].fp // ""')" "usage-pace"
-  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "ana@alpha.test"
-  assert_eq "$(jq -s '[.[] | select(.fp == "usage-pace" and .kind != "update")] | length' "$CEL_INBOX_DIR/alpha.jsonl")" "1"
+  # a warning, not a blocker: one status item, the repeats roll up onto it
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id
+  assert_eq "$(jq -s '[.[] | select(.fp == "usage-pace")] | length' "$f")" "1"
+  id="$(_inbox_open_fp alpha usage-pace steward root)"
+  [ -n "$id" ] || { echo "no open usage-pace item"; return 1; }
+  assert_contains "$(jq -r 'select(.fp == "usage-pace") | .message' "$f")" "ana@alpha.test"
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i)] | length' "$f")" "2"
   # off pace again: the steward takes its own item down
   _pace_set 20 172800
   _steward_usage_pace >/dev/null 2>&1
-  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "resolution" and .ref == $i)] | length' "$f")" "1"
   rm -rf "$T"
 }
 
