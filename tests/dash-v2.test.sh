@@ -58,6 +58,8 @@ EOF
     printf '{"ts":"%s","load":2.5,"mem_pct":50,"swap_pct":3,"panes":[{"cwd":"%s/wt/widget-ok","status":"idle"}]}\n' "$(_v2_ago 600)" "$T"
   } > "$T/state/samples.jsonl"
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
+  if [ -n "${_V2_FAIL_GH:-}" ]; then cp "$T/bin/gh" "$T/bin/gh.ok"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"; fi
+  export CEL_DASH_ACTIVITY_KEEP=5
   export CEL_SAMPLES_FILE="$T/state/samples.jsonl" CEL_DASH_STATE_DIR="$T/state" CEL_DASH_CEL="$T/bin/cel"
   DASH_PORT="$(_v2_port)"
   CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
@@ -69,6 +71,7 @@ EOF
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
+_v2_boot_failing_gh() { _V2_FAIL_GH=1 _v2_boot; }
 _v2_down() {
   if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
   DASH_PID=""; if [ -n "${T:-}" ]; then rm -rf "$T"; fi; T=""; trap - EXIT
@@ -241,4 +244,52 @@ test_steward_sample_appends_and_trims_the_ring() {
   assert_eq "$(tail -1 "$t/s.jsonl" | jq -r '.panes[0].status')" "working"
   assert_eq "$(tail -1 "$t/s.jsonl" | jq '(.load|type) == "number" and (.mem_pct|type) == "number"')" "true"
   rm -rf "$t"
+}
+
+# Review on #131: a target is a mailbox somebody reads - a ledger alias, an
+# orchestrator the workspace has, or root - and a stuck fix's repo is one the
+# workspace declares. Anything else would mint a phantom mailbox.
+test_v2_act_refuses_phantom_targets_and_repos() {
+  _v2_boot
+  assert_eq "$(_v2_act '{"action":"message","target":"nobody-here","args":{"ws":"alpha","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  assert_eq "$(_v2_act '{"action":"stuck.merge_conflict","target":"gadget/ABC-9-x","args":{"ws":"alpha"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  if jq -e 'select(.to == "nobody-here" or .to == "gadget-orch")' "$T/inbox/alpha.jsonl" >/dev/null; then
+    echo "phantom mailbox written" >&2; return 1
+  fi
+  assert_eq "$(_v2_act '{"action":"message","target":"widget-orch","args":{"ws":"alpha","text":"hi orch"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_eq "$(_v2_act '{"action":"message","target":"root","args":{"ws":"alpha","text":"hi root"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  _v2_down
+}
+
+# Review on #131: parallel cold requests share ONE gh fetch, and a failed gh
+# call is not cached - the next request tries again.
+test_v2_gh_pass_is_shared_in_flight_and_failures_are_not_cached() {
+  _v2_boot
+  # slow the stub so the four requests overlap while it runs
+  sed -i 's|^esac$|esac; sleep 1|' "$T/bin/gh"
+  # the boot-time warm-up may already be in flight; let it land, then go cold
+  sleep 2; : > "$T/gh.log"; kill -USR2 "$DASH_PID"; sleep 0.3
+  local pids=() f
+  for f in merges cycle heat merges; do curl -s -m 20 -o /dev/null "$(_v2_url "$f")" & pids+=($!); done
+  wait "${pids[@]}"
+  assert_eq "$(grep -c -- '--state merged' "$T/gh.log")" "1"
+  _v2_down
+  # boot with a failing gh (the warm-up fails too), then heal it and ask again
+  _v2_boot_failing_gh
+  assert_eq "$(curl -sf -m 20 "$(_v2_url merges)" | jq '[.days[].counts.widget // 0] | add')" "0"
+  cp "$T/bin/gh.ok" "$T/bin/gh"
+  assert_eq "$(curl -sf -m 20 "$(_v2_url merges)" | jq '[.days[].counts.widget // 0] | add')" "2"
+  _v2_down
+}
+
+# Review on #131: the dashboard's own action log is a ring, not a growing file.
+test_v2_activity_log_is_bounded() {
+  _v2_boot
+  local i
+  for i in $(seq 1 8); do
+    _v2_act '{"action":"message","target":"root","args":{"ws":"alpha","text":"n'"$i"'"}}' -H "x-cel-csrf: $TOKEN" >/dev/null
+  done
+  [ "$(wc -l < "$T/state/dash-activity.jsonl")" -le 5 ] || { echo "activity log unbounded: $(wc -l < "$T/state/dash-activity.jsonl")" >&2; return 1; }
+  assert_contains "$(tail -1 "$T/state/dash-activity.jsonl")" "message to root"
+  _v2_down
 }
