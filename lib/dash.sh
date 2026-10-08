@@ -118,7 +118,8 @@ _dash_wait_port_free() { # <host> <port>
 # went down twice in minutes with nothing in its log. An installed unit has its
 # own cgroup, restarts on failure, and carries the PATH it was installed with
 # (without it node is not found under systemd and it exits 1 silently).
-DASH_UNIT="cel-dash"
+# overridable only so an on-box check can run beside the live unit
+DASH_UNIT="${CEL_DASH_UNIT:-cel-dash}"
 _dash_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 
 # Is there a user manager to hand the dashboard to? Under the suite only a
