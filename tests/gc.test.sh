@@ -1260,3 +1260,20 @@ test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
   [ ! -e "$CO" ] || { echo "an adopted reviewer's checkout outlived it"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# CEL-111: one /proc pass per gc run, not one per worktree - the per-worktree
+# readlink of every pid on the box was 666 execs in 15 seconds.
+test_gc_has_process_reads_proc_once_per_run() {
+  local B; B="$(mktemp -d)"
+  printf '#!/bin/sh\necho x >> "%s/count"\nexec /usr/bin/readlink "$@"\n' "$B" > "$B/readlink"
+  chmod +x "$B/readlink"
+  _gc_cwd_reset
+  local here; here="$(pwd -P)"
+  PATH="$B:$PATH"
+  _gc_has_process "$here" || { echo "missed own cwd"; return 1; }
+  local first; first="$(wc -l < "$B/count")"
+  _gc_has_process "/nonexistent/one" && { echo "phantom process"; return 1; }
+  _gc_has_process "/nonexistent/two"
+  assert_eq "$(wc -l < "$B/count")" "$first"
+  rm -rf "$B"
+}

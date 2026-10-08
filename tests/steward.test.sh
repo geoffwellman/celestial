@@ -1827,3 +1827,20 @@ test_steward_says_nothing_about_usage_with_headroom() {
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
   rm -rf "$T"
 }
+
+# CEL-111: ticks never overlap. A tick that finds one running exits at once,
+# before it touches herdr, gc or anything else.
+test_steward_tick_exits_when_another_holds_the_lock() {
+  have flock || return 0
+  local T; T="$(mktemp -d)"
+  export CEL_STEWARD_LOCK="$T/tick.lock"
+  herdr() { echo "herdr called" >> "$T/calls"; }
+  have() { return 0; }
+  ( flock 9; sleep 3 ) 9>"$CEL_STEWARD_LOCK" &
+  sleep 0.3
+  local out; out="$(cmd_steward --no-gc 2>&1)"; local rc=$?
+  assert_eq "$rc" "0"
+  assert_contains "$out" "already running"
+  [ ! -e "$T/calls" ] || { echo "a locked-out tick still ran"; return 1; }
+  wait; rm -rf "$T"
+}

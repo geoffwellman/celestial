@@ -852,3 +852,62 @@ test_a_fingerprint_rolls_up_a_status_item_too() {
   assert_eq "$(jq -s '[.[] | select(.kind == "update" and .ref == "'"$a"'")] | length' "$CEL_INBOX_DIR/demo.jsonl")" "1"
   rm -rf "$CEL_INBOX_DIR"
 }
+
+# CEL-111: ONE WATCH IS ONE SMALL PROCESS GROUP, NOT A TREE PER WORKSPACE.
+# --all-workspaces used to fork a `tail | jq | while` pipeline per mailbox plus
+# a wrapper subshell each; with twenty agents on a five-workspace box that was
+# ~200 watcher processes. A single merged tail is bounded regardless of how
+# many workspaces are registered.
+_inbox_watch_bg() { # <parent-pid> <outfile> -> prints the watcher's pgid
+  CEL_INBOX_ME=console CEL_INBOX_NOTIFY=0 CEL_WATCH_PARENT_POLL=1 \
+    setsid bash -c 'source "$1/lib/inbox.sh"; _inbox_watch --for root --all-workspaces --parent "$2"' _ "$CEL_ROOT" "$1" > "$2" 2>/dev/null &
+  printf '%s' "$!"
+}
+_inbox_group_size() { ps -o pid= -g "$1" 2>/dev/null | grep -c . || true; }
+
+test_inbox_watch_all_workspaces_is_a_bounded_process_group() {
+  _inbox_registry_fixture
+  mkdir -p "$REG/gamma" "$REG/delta"
+  printf '  gamma:\n    path: %s\n  delta:\n    path: %s\n' "$REG/gamma" "$REG/delta" >> "$CEL_REGISTRY"
+  sleep 60 & local parent=$!
+  local out; out="$(mktemp)"
+  local g; g="$(_inbox_watch_bg "$parent" "$out")"
+  sleep 1.5
+  local n; n="$(_inbox_group_size "$g")"
+  [ "$n" -ge 1 ] && [ "$n" -le 6 ] || { echo "watch group has $n processes for 4 workspaces"; kill -- "-$g" "$parent" 2>/dev/null; return 1; }
+  ( CEL_INBOX_ME=t _inbox_send root "delta news" --workspace delta ) >/dev/null 2>&1
+  sleep 1.5
+  assert_contains "$(cat "$out")" "[delta] INBOX"
+  kill -- "-$g" "$parent" 2>/dev/null
+  rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+
+# A second watch for the same parent and reader is a duplicate, refused by a
+# lock rather than by convention, and the first keeps running.
+test_inbox_watch_is_single_per_parent_and_reader() {
+  _inbox_registry_fixture
+  export XDG_RUNTIME_DIR; XDG_RUNTIME_DIR="$(mktemp -d)"
+  sleep 60 & local parent=$!
+  local o1 o2; o1="$(mktemp)"; o2="$(mktemp)"
+  local g1; g1="$(_inbox_watch_bg "$parent" "$o1")"
+  sleep 1
+  local g2; g2="$(_inbox_watch_bg "$parent" "$o2")"
+  sleep 1.5
+  assert_eq "$(_inbox_group_size "$g2")" "0"
+  [ "$(_inbox_group_size "$g1")" -ge 1 ] || { echo "first watcher died"; return 1; }
+  kill -- "-$g1" "$parent" 2>/dev/null
+  rm -f "$o1" "$o2"; rm -rf "$CEL_INBOX_DIR" "$REG" "$XDG_RUNTIME_DIR"
+}
+
+# The watcher goes when its parent goes - the whole group, not just the top.
+test_inbox_watch_group_exits_when_its_parent_dies() {
+  _inbox_registry_fixture
+  sleep 60 & local parent=$!
+  local out; out="$(mktemp)"
+  local g; g="$(_inbox_watch_bg "$parent" "$out")"
+  sleep 1
+  kill "$parent"; wait "$parent" 2>/dev/null || true
+  local i; for i in 1 2 3 4 5 6; do [ "$(_inbox_group_size "$g")" = 0 ] && break; sleep 0.5; done
+  assert_eq "$(_inbox_group_size "$g")" "0"
+  rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
+}
