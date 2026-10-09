@@ -36,7 +36,7 @@ decide_open_json() { # <ws>
         | select([.id] | inside($done) | not)
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
-        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.prs then {prs: $u.prs} else {} end) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
+        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if ($u | has("prs")) then {prs: $u.prs} else {} end) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
         | . + {workspace: $ws, urgent: (.urgent == true),
                age_secs: (($now | tonumber) - (.ts | _epoch)),
                # since the asker last touched it: a re-ask is not stale
@@ -163,13 +163,19 @@ _decide_ask() {
   local asker; asker="$(_inbox_me)"
   # CEL-115: each --pr gets the PR's URL when the workspace knows the repo, so
   # the dashboard card can link straight to it.
+  # The workspace helpers are loaded here, not at the top: `cel decide` runs
+  # without them, and the URL was then silently never resolved.
   if [ "$prs" != "[]" ]; then
+    # shellcheck source=lib/registry.sh
+    . "${BASH_SOURCE[0]%/*}/registry.sh"
+    # shellcheck source=lib/workspace.sh
+    . "${BASH_SOURCE[0]%/*}/workspace.sh"
     local wsd; wsd="$(registry_path "$wsname" 2>/dev/null || true)"
-    if [ -n "$wsd" ] && [ -f "$wsd/workspace.yaml" ] && declare -F ws_repo_get >/dev/null; then
+    if [ -n "$wsd" ] && [ -f "$wsd/workspace.yaml" ]; then
       local r slug out="[]"
       while IFS= read -r r; do
         slug="$(ws_repo_get "$wsd" "${r%%#*}" url 2>/dev/null \
-          | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)"
+          | sed -E 's#^git@[^:]+:##; s#^(https?|ssh)://[^/]+/##; s#\.git$##; s#/$##' || true)"
         out="$(jq -c --arg r "$r" --arg s "$slug" '. + [{ref: $r} + (if $s != "" then
           {url: ("https://github.com/" + $s + "/pull/" + ($r | split("#") | last))} else {} end)]' <<< "$out")"
       done < <(jq -r '.[].ref' <<< "$prs")
@@ -185,7 +191,9 @@ _decide_ask() {
      # urgent only when asked: a re-ask that omits it must not clear it
      + (if $urgent then {urgent: true} else {} end)
      + (if $sup != "" then {supersedes: $sup} else {} end)
-     + (if ($prs | length) > 0 then {prs: $prs} else {} end)')"
+     # always present, even empty: a re-ask is the current word from the asker on
+     # which PRs wait, so one that drops --pr must unlink them (CEL-115)
+     + {prs: $prs}')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields" "$supersedes"
 }
 

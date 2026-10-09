@@ -295,3 +295,15 @@ test_ask_pr_links_are_stored_on_the_record() {
   if (_ask_as alpha-orch alpha --title "bad" --pr >/dev/null); then echo "missing --pr value accepted"; return 1; fi
   rm -rf "$T"
 }
+
+# CEL-115 review: a re-ask is the current word on which PRs wait - dropping
+# --pr unlinks them - and every repo URL form resolves to a PR link.
+test_reask_without_pr_unlinks_and_ssh_urls_resolve() {
+  _decide_fixture
+  printf 'name: alpha\nrepos:\n  - {name: widget, url: "ssh://git@github.com/someone/widget.git"}\n' > "$T/alpha/workspace.yaml"
+  _ask_as alpha-orch alpha --title "top up" --pr "widget#7" >/dev/null
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r '.prs[0].url')" "https://github.com/someone/widget/pull/7"
+  _ask_as alpha-orch alpha --title "top up" >/dev/null
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -c '.prs')" "[]"
+  rm -rf "$T"
+}
