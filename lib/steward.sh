@@ -9,31 +9,31 @@
 [ -n "${_CEL_STEWARD:-}" ] && return 0
 _CEL_STEWARD=1
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/gc.sh
-. "$(dirname "${BASH_SOURCE[0]}")/gc.sh"
+. "${BASH_SOURCE[0]%/*}/gc.sh"
 # shellcheck source=lib/box.sh
-. "$(dirname "${BASH_SOURCE[0]}")/box.sh"
+. "${BASH_SOURCE[0]%/*}/box.sh"
 # shellcheck source=lib/pages.sh
-. "$(dirname "${BASH_SOURCE[0]}")/pages.sh"
+. "${BASH_SOURCE[0]%/*}/pages.sh"
 # shellcheck source=lib/dash.sh
-. "$(dirname "${BASH_SOURCE[0]}")/dash.sh"
+. "${BASH_SOURCE[0]%/*}/dash.sh"
 # shellcheck source=lib/inbox.sh
-. "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
+. "${BASH_SOURCE[0]%/*}/inbox.sh"
 # shellcheck source=lib/stall.sh
-. "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
+. "${BASH_SOURCE[0]%/*}/stall.sh"
 # shellcheck source=lib/liveness.sh
-. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"
+. "${BASH_SOURCE[0]%/*}/liveness.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+. "${BASH_SOURCE[0]%/*}/run.sh"
 # shellcheck source=lib/memory.sh
-. "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+. "${BASH_SOURCE[0]%/*}/memory.sh"
 # shellcheck source=lib/orphans.sh
-. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"
+. "${BASH_SOURCE[0]%/*}/orphans.sh"
 # shellcheck source=lib/services.sh
-. "$(dirname "${BASH_SOURCE[0]}")/services.sh"
+. "${BASH_SOURCE[0]%/*}/services.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
 # the failure this sweep exists for is a specific string in a specific pane,
@@ -51,7 +51,7 @@ _STEWARD_WINDOW="${CEL_STEWARD_WINDOW:-14400}"   # repeat-nudge window, seconds
 _steward_due() { # <key>
   local key="$1" now last
   now="$(date +%s)"
-  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
   last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
   [ $((now - last)) -ge "$_STEWARD_WINDOW" ] || return 1
   { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
@@ -208,7 +208,7 @@ _steward_mail_sweep() { # <agents-json>
   # `cel decide`, and the steward's whole contribution is a status line per
   # workspace per day saying how many are waiting and for how long.
   # shellcheck source=lib/decide.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/decide.sh"
+  . "${BASH_SOURCE[0]%/*}/decide.sh"
   for ws in $(registry_names); do
     local open3 n3 age3
     open3="$(decide_open_json "$ws")"
@@ -250,7 +250,7 @@ _steward_decide_stale_sweep() {
 _steward_stale_nudge_once() { # <ws> <asker> <open-json-lines>
   local ws="$1" asker="$2" open="$3" lock key last list
   key="decide-stale-$ws-$asker"
-  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
   lock="$_STEWARD_STATE.decide-stale.lock"
   (
     if have flock; then flock 7; fi
@@ -476,7 +476,7 @@ _steward_orch_composer_empty() { # <pane>
 # A tick that cannot take the lock leaves the restart to the one that did.
 _steward_claim_restart() { # <key>
   local key="$1"
-  mkdir -p "$(dirname "$_STEWARD_STATE")"; touch "$_STEWARD_STATE"
+  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
   (
     if have flock; then flock -n 9 || exit 1; fi
     local now last
@@ -1216,7 +1216,7 @@ _steward_suite_lock() {
 # condition through the fingerprint rather than once per tick.
 _steward_afk_sweep() {
   # shellcheck source=lib/afk.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/afk.sh"
+  . "${BASH_SOURCE[0]%/*}/afk.sh"
   local s msg ws
   # ...and taken down when it stops being true, now that it is one open item
   # rather than a line per tick (CEL-96).
@@ -1494,7 +1494,7 @@ _steward_box() {
 
 _STEWARD_UNIT="cel-steward"
 # shellcheck source=lib/steward_timer.sh
-. "$(dirname "${BASH_SOURCE[0]}")/steward_timer.sh"   # steward_timer_unit
+. "${BASH_SOURCE[0]%/*}/steward_timer.sh"   # steward_timer_unit
 # A MAILBOX NOBODY READS MUST NOT BE ABLE TO SWALLOW AN ESCALATION.
 #
 # Counted on this box on 2026-09-19: one workspace's `root` mailbox had taken
@@ -1620,9 +1620,9 @@ TimeoutStartSec=600
 # writing it - a stale chip would nag about an update that already landed.
 _steward_update_check() {
   # shellcheck source=lib/version.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+  . "${BASH_SOURCE[0]%/*}/version.sh"
   # shellcheck source=lib/config.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+  . "${BASH_SOURCE[0]%/*}/config.sh"
   local v latest dir chan
   dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"
   chan="$(cel_config_get update channel)"
@@ -1677,7 +1677,7 @@ _steward_update_check() {
 # build, orchestrator and the difference found.
 _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+  . "${BASH_SOURCE[0]%/*}/version.sh"
   local dir marker build rows fresh ws msg key seen
   dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; marker="$dir/orch-stale-reported"
   build="$(cel_build_sha)"
@@ -1736,6 +1736,31 @@ _steward_sample() { # <agents-json>
   fi
 }
 
+# The claim is a pidfile, checked and written under a flock that is held for
+# that instant only. Holding the flock for the whole tick would hand the
+# descriptor to everything the tick starts - one long-lived child and no tick
+# would ever run again. A recorded pid that is gone, or is no longer a
+# steward, is stale and is taken over.
+_steward_tick_claim() {
+  local f="${CEL_STEWARD_LOCK:-$_STEWARD_STATE.tick.lock}" fd pid cmd rc=0
+  mkdir -p "${f%/*}" 2>/dev/null || true
+  exec {fd}>>"$f" || return 0
+  have flock && flock -w 5 "$fd"
+  pid="$(head -c 32 "$f" 2>/dev/null | tr -dc 0-9)"
+  if [ -n "$pid" ] && [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null; then
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+    case "$cmd" in *steward*) rc=1;; esac
+  fi
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$$" > "$f"
+    trap '[ "$(head -c 32 "'"$f"'" 2>/dev/null | tr -dc 0-9)" = "'"$$"'" ] && : > "'"$f"'"' EXIT
+  else
+    printf 'steward: a tick is already running (pid %s) - this one exits\n' "$pid"
+  fi
+  exec {fd}>&-
+  return "$rc"
+}
+
 cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   local do_gc=1
   if [ "${1:-}" = "--install" ]; then shift; _steward_install "$@"; return $?; fi
@@ -1745,6 +1770,10 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
       *) die "cel steward: unknown argument '$1' (want --no-gc or --install)" ;;
     esac
   done
+  # TICKS NEVER OVERLAP (CEL-111). The timer fires every five minutes and a
+  # slow tick outlived it: five stewards ran at once, each walking /proc and
+  # every worktree. A tick that finds one running says so and goes.
+  _steward_tick_claim || return 0
   have herdr || die "cel steward: herdr is not on PATH"
   have jq    || die "cel steward: jq is not on PATH"
   have gh    || die "cel steward: gh is not on PATH"
@@ -1838,7 +1867,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # CEL-90: keep the fleet cache warm so the first console read after an idle
   # spell serves a recent board. One detached refill, only when stale; the
   # tick never waits on it.
-  ( . "$(dirname "${BASH_SOURCE[0]}")/fleet.sh" && fleet_cache_warm ) || true
+  ( . "${BASH_SOURCE[0]%/*}/fleet.sh" && fleet_cache_warm ) || true
   c_ok "tick complete"
 }
 

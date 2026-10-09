@@ -5,10 +5,10 @@
 [ -n "${_CEL_WORKSPACE:-}" ] && return 0
 _CEL_WORKSPACE=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # shellcheck source=lib/yaml.sh
-. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+. "${BASH_SOURCE[0]%/*}/yaml.sh"
 
 
 _wsy() { # _wsy <wsdir> <program>  - yq over the workspace file, "" for absent

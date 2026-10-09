@@ -15,11 +15,11 @@
 [ -n "${_CEL_INBOX:-}" ] && return 0
 _CEL_INBOX=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 
 _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
 
@@ -878,7 +878,7 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   # look - the cursor does not move.
   if [ "$ranked" -eq 1 ]; then
     # shellcheck source=lib/triage.sh
-    . "$(dirname "${BASH_SOURCE[0]}")/triage.sh"
+    . "${BASH_SOURCE[0]%/*}/triage.sh"
     if [ "$every" -eq 1 ]; then
       local m
       for m in $(_inbox_every_ws "$ws"); do

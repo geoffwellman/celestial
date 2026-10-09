@@ -19,17 +19,17 @@
 [ -n "${_CEL_WORK:-}" ] && return 0
 _CEL_WORK=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"      # reviewers_rows - who reviewed, and when
+. "${BASH_SOURCE[0]%/*}/run.sh"      # reviewers_rows - who reviewed, and when
 # shellcheck source=lib/afk.sh
-. "$(dirname "${BASH_SOURCE[0]}")/afk.sh"      # afk_log_json - what the box did while nobody watched
+. "${BASH_SOURCE[0]%/*}/afk.sh"      # afk_log_json - what the box did while nobody watched
 
 _work_gh()     { printf '%s' "${CEL_WORK_GH:-gh}"; }
 _work_linear() {

@@ -13,11 +13,11 @@
 [ -n "${_CEL_DASH:-}" ] && return 0
 _CEL_DASH=1
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 
 # Every registered workspace's own `dash.port`, in registry order - the ports
 # the per-workspace servers used to hold, and now redirect from.

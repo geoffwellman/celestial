@@ -27,13 +27,13 @@
 [ -n "${_CEL_WSLIFE:-}" ] && return 0
 _CEL_WSLIFE=1
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"      # cmd_run, _run_agent_name, _run_live_agent_in_cwd
+. "${BASH_SOURCE[0]%/*}/run.sh"      # cmd_run, _run_agent_name, _run_live_agent_in_cwd
 # shellcheck source=lib/stall.sh
-. "$(dirname "${BASH_SOURCE[0]}")/stall.sh"    # stall_work_at_risk
+. "${BASH_SOURCE[0]%/*}/stall.sh"    # stall_work_at_risk
 
 # One line per action taken AND per thing already right. A reconcile that only
 # printed what it changed would look like it had done nothing on the run that

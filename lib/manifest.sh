@@ -4,7 +4,7 @@
 [ -n "${_CEL_MANIFEST_LIB:-}" ] && return 0
 _CEL_MANIFEST_LIB=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # Overridable so tests can point at a fixture.
 CEL_MANIFEST="${CEL_MANIFEST:-$CEL_ROOT/agents.yaml}"

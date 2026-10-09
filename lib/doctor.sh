@@ -4,41 +4,41 @@
 [ -n "${_CEL_DOCTOR:-}" ] && return 0
 _CEL_DOCTOR=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/externals.sh
-. "$(dirname "${BASH_SOURCE[0]}")/externals.sh"
+. "${BASH_SOURCE[0]%/*}/externals.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/install.sh
-. "$(dirname "${BASH_SOURCE[0]}")/install.sh"   # extensions_missing
+. "${BASH_SOURCE[0]%/*}/install.sh"   # extensions_missing
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # _run_wsm_bin, for the layout check
+. "${BASH_SOURCE[0]%/*}/run.sh"   # _run_wsm_bin, for the layout check
 # shellcheck source=lib/console.sh
-. "$(dirname "${BASH_SOURCE[0]}")/console.sh"   # console_deps_ok, for the console check
+. "${BASH_SOURCE[0]%/*}/console.sh"   # console_deps_ok, for the console check
 # shellcheck source=lib/liveness.sh
-. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"  # liveness_doctor_line
+. "${BASH_SOURCE[0]%/*}/liveness.sh"  # liveness_doctor_line
 # shellcheck source=lib/gc.sh
-. "$(dirname "${BASH_SOURCE[0]}")/gc.sh"   # gc_doctor_line, for the blind-GC line
+. "${BASH_SOURCE[0]%/*}/gc.sh"   # gc_doctor_line, for the blind-GC line
 # shellcheck source=lib/box.sh
-. "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # box_doctor_line, for the floor check
+. "${BASH_SOURCE[0]%/*}/box.sh"   # box_doctor_line, for the floor check
 # shellcheck source=lib/orphans.sh
-. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # orphans_doctor_line
+. "${BASH_SOURCE[0]%/*}/orphans.sh"   # orphans_doctor_line
 # shellcheck source=lib/dash.sh
-. "$(dirname "${BASH_SOURCE[0]}")/dash.sh"   # dash_doctor_line
+. "${BASH_SOURCE[0]%/*}/dash.sh"   # dash_doctor_line
 # shellcheck source=lib/gateway.sh
-. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"   # gateway_doctor_line
+. "${BASH_SOURCE[0]%/*}/gateway.sh"   # gateway_doctor_line
 # shellcheck source=lib/services.sh
-. "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # _svc_box, for the box services line
+. "${BASH_SOURCE[0]%/*}/services.sh"   # _svc_box, for the box services line
 # shellcheck source=lib/wslife.sh
-. "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"   # wslife_doctor_lines, for the nameless agent
+. "${BASH_SOURCE[0]%/*}/wslife.sh"   # wslife_doctor_lines, for the nameless agent
 # shellcheck source=lib/fleet.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fleet.sh"   # fleet_mail_doctor_line, for root's mailbox
+. "${BASH_SOURCE[0]%/*}/fleet.sh"   # fleet_mail_doctor_line, for root's mailbox
 # shellcheck source=lib/steward_timer.sh
-. "$(dirname "${BASH_SOURCE[0]}")/steward_timer.sh"   # steward_timer_health, steward_timer_upgrade
+. "${BASH_SOURCE[0]%/*}/steward_timer.sh"   # steward_timer_health, steward_timer_upgrade
 
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
@@ -500,6 +500,23 @@ _doctor_suite_lock_path() {
   printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
 }
 
+# THE BOX'S EXEC RATE, COUNTED (CEL-111). 182 `cel inbox watch` processes and
+# a 600/sec fork rate went unnoticed for a week because nothing counted them.
+_doctor_watch_count() { pgrep -cf 'cel inbox watch' 2>/dev/null || printf 0; }
+_doctor_fork_rate() { # processes created per second over a short sample
+  local a b s="${CEL_DOCTOR_FORK_SECS:-2}"
+  a="$(awk '/^processes/{print $2}' /proc/stat 2>/dev/null)" || { printf 0; return; }
+  sleep "$s"
+  b="$(awk '/^processes/{print $2}' /proc/stat 2>/dev/null)" || { printf 0; return; }
+  printf '%s' $(( (b - a) / s ))
+}
+doctor_exec_load_line() { # -> one line; 1 when over a bound
+  local w r wmax="${CEL_DOCTOR_WATCH_MAX:-60}" rmax="${CEL_DOCTOR_FORK_MAX:-200}"
+  w="$(_doctor_watch_count)"; r="$(_doctor_fork_rate)"
+  printf 'inbox watchers: %s (bound %s), box fork rate: %s/sec (bound %s)\n' "$w" "$wmax" "$r" "$rmax"
+  [ "$w" -le "$wmax" ] && [ "$r" -le "$rmax" ]
+}
+
 doctor_suite_lock_line() { # -> one line when the box's suite lock has leaked
   local path pid cwd cmd
   path="$(_doctor_suite_lock_path)"
@@ -542,7 +559,7 @@ doctor_afk_line() { # -> one line about AFK, or nothing
 
 doctor_stale_orchestrator_lines() {
   # shellcheck source=lib/run.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  . "${BASH_SOURCE[0]%/*}/run.sh"
   local rows name ws missing cmd status
   rows="$(run_stale_orchestrators)"
   if [ -z "$rows" ]; then c_ok "every live root/orchestrator runs the current launch line"; return 0; fi
@@ -558,7 +575,7 @@ doctor_stale_orchestrator_lines() {
 # without its inbox hook, mail piled up all night and nothing woke anyone.
 doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
   # shellcheck source=lib/run.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  . "${BASH_SOURCE[0]%/*}/run.sh"
   local name ws p pane status state cmd bad=0
   while IFS=$'\t' read -r name ws p pane status state cmd; do
     [ "$state" = stripped ] || continue
@@ -572,7 +589,7 @@ doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
 # mail separately and the owner gets contradicting replies. A failure.
 doctor_shared_session_lines() { # -> 1 when any session file has two resumers
   # shellcheck source=lib/run.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+  . "${BASH_SOURCE[0]%/*}/run.sh"
   local rows dup bad=0
   rows="$(run_session_resumers)"
   [ -n "$rows" ] || return 0
@@ -723,6 +740,8 @@ cmd_doctor() {
 
   # One line, and only when the box-wide suite lock is held by something that
   # is not running tests - which blocks every gate on the box until it dies.
+  local execline
+  if execline="$(doctor_exec_load_line)"; then c_ok "$execline"; else c_err "$execline"; fail=1; fi
   local lockline; lockline="$(doctor_suite_lock_line)"
   [ -z "$lockline" ] || c_warn "$lockline"
 

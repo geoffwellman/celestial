@@ -5,17 +5,17 @@
 [ -n "${_CEL_GC:-}" ] && return 0
 _CEL_GC=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/orphans.sh
-. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # cel gc --orphans
+. "${BASH_SOURCE[0]%/*}/orphans.sh"   # cel gc --orphans
 # shellcheck source=lib/box.sh
-. "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # cel gc --box
+. "${BASH_SOURCE[0]%/*}/box.sh"   # cel gc --box
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry cel run writes
+. "${BASH_SOURCE[0]%/*}/run.sh"   # the reviewer registry cel run writes
 
 # WHOSE ACCOUNT ASKS ABOUT A CHECKOUT (CEL-70). ws_of_checkout names the
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
@@ -147,18 +147,41 @@ _gc_panes_settled() { # <pane-list-json>
 
 # An unregistered worktree can still host a hand-started process. Unknown
 # /proc visibility is a veto, not an empty process list.
-_gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
-  local pids pid cwd rc
+# ONE /proc PASS PER RUN (CEL-111). This used to readlink every pid on the box
+# once per worktree: ~1,300 pids x 274 worktrees, 666 readlink execs in 15s on
+# its own. The cwd table is read once and every worktree is matched against
+# it. A table that could not be read is still a veto, exactly as before. It is
+# reset at the top of each run and re-read once it is CEL_GC_CWD_TTL seconds
+# old (default 30), so a process started mid-sweep in a worktree is still seen
+# before that worktree is judged.
+_GC_CWDS="" _GC_CWDS_STATE="" _GC_CWDS_AT=0
+_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWDS_AT=0; }
+_gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknown
+  local pids pid cwd rc out=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
-    rc=$?; [ "$rc" -eq 1 ] && return 1; return 0
+    rc=$?; [ "$rc" -eq 1 ] && { _GC_CWDS_STATE=none; return 0; }
+    _GC_CWDS_STATE=unknown; return 0
   fi
   for pid in $pids; do
-    if ! cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"; then
-      [ ! -d "/proc/$pid" ] && continue
-      return 0
+    if cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"; then
+      out="$out$pid"$'\t'"$cwd"$'\n'
+    elif [ -d "/proc/$pid" ]; then
+      _GC_CWDS_STATE=unknown; return 0
     fi
-    case "$cwd" in "$1"|"$1"/*) return 0;; esac
   done
+  _GC_CWDS="$out" _GC_CWDS_STATE=ok
+}
+_gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
+  if [ -z "$_GC_CWDS_STATE" ] || [ $((SECONDS - _GC_CWDS_AT)) -ge "${CEL_GC_CWD_TTL:-30}" ]; then
+    _gc_cwd_load; _GC_CWDS_AT=$SECONDS
+  fi
+  case "$_GC_CWDS_STATE" in none) return 1;; unknown) return 0;; esac
+  local line cwd
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cwd="${line#*$'\t'}"
+    case "$cwd" in "$1"|"$1"/*) return 0;; esac
+  done <<< "$_GC_CWDS"
   return 1
 }
 
@@ -899,7 +922,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
   local removed=0 reaped=0 kept=0 reviewers_closed=0 done_closed=0 managed=$'\n' candidates='[]'
-  _gc_keep_reset
+  _gc_keep_reset; _gc_cwd_reset
   # NEVER SILENT (CEL-80): the sweep used to print one line at the very end,
   # so a slow run was indistinguishable from a hung one.
   printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \

@@ -33,16 +33,16 @@
 [ -n "${_CEL_PROFILES:-}" ] && return 0
 _CEL_PROFILES=1
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/quota.sh
-. "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
+. "${BASH_SOURCE[0]%/*}/quota.sh"
 # shellcheck source=lib/gateway.sh
-. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+. "${BASH_SOURCE[0]%/*}/gateway.sh"
 
 # shellcheck source=lib/yaml.sh
-. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+. "${BASH_SOURCE[0]%/*}/yaml.sh"
 
 profile_names() { _yqr_ws -r '.worker_profiles // {} | keys_unsorted[]' "$1"; }
 

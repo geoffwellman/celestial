@@ -9,10 +9,10 @@
 [ -n "${_CEL_REGISTRY:-}" ] && return 0
 _CEL_REGISTRY=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # shellcheck source=lib/yaml.sh
-. "$(dirname "${BASH_SOURCE[0]}")/yaml.sh"
+. "${BASH_SOURCE[0]%/*}/yaml.sh"
 
 _CEL_REGISTRY_DEFAULT="$HOME/.local/share/cel/registry.yaml"
 

@@ -7,11 +7,11 @@
 [ -n "${_CEL_PAGES:-}" ] && return 0
 _CEL_PAGES=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 
 _pages_root() { printf '%s' "${CEL_PAGES_ROOT:-$HOME/.local/share/cel/pages}"; }
 

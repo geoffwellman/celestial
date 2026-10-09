@@ -12,17 +12,17 @@
 [ -n "${_CEL_UPDATE:-}" ] && return 0
 _CEL_UPDATE=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/version.sh
-. "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+. "${BASH_SOURCE[0]%/*}/version.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/link.sh
-. "$(dirname "${BASH_SOURCE[0]}")/link.sh"
+. "${BASH_SOURCE[0]%/*}/link.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+. "${BASH_SOURCE[0]%/*}/run.sh"
 
 _update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
 
