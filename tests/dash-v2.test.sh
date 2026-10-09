@@ -567,7 +567,7 @@ test_v2_merges_counts_a_busy_repo_in_full() {
 test_v2_merges_buckets_by_local_midnight() {
   local tz=Pacific/Auckland y d2 a b
   y="$(TZ=$tz date -d 'yesterday' +%F)"; d2="$(TZ=$tz date -d '2 days ago' +%F)"
-  a="$(TZ=$tz date -u -d "$y 00:30" +%Y-%m-%dT%H:%M:%SZ)"; b="$(TZ=$tz date -u -d "$d2 23:30" +%Y-%m-%dT%H:%M:%SZ)"
+  a="$(date -u -d "TZ=\"$tz\" $y 00:30" +%Y-%m-%dT%H:%M:%SZ)"; b="$(date -u -d "TZ=\"$tz\" $d2 23:30" +%Y-%m-%dT%H:%M:%SZ)"
   TZ=$tz _v2_boot
   printf '#!/usr/bin/env bash\ncase "$*" in *--state\\ merged*) printf %%s %s ;; *) printf %%s "[]" ;; esac\n' \
     "'[{\"number\":1,\"title\":\"a\",\"url\":\"u\",\"headRefName\":\"x\",\"createdAt\":\"$b\",\"mergedAt\":\"$a\"},{\"number\":2,\"title\":\"b\",\"url\":\"u\",\"headRefName\":\"y\",\"createdAt\":\"$b\",\"mergedAt\":\"$b\"}]'" > "$T/bin/gh"
