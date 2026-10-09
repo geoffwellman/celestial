@@ -156,6 +156,22 @@ _gc_panes_settled() { # <pane-list-json>
 # any removal, so a process started mid-sweep is still seen.
 _GC_CWDS="" _GC_CWDS_STATE=""
 _gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
+# AN UNREADABLE cwd IS A VETO - EXCEPT FOR A FIXED SET OF SYSTEM PROCESSES.
+# Our own uid runs privilege-separated or non-dumpable processes whose cwd the
+# kernel will not show us: the user systemd manager and its (sd-pam),
+# ssh-agent, sshd-session, sftp-server. Each one vetoed EVERY worktree, so gc
+# kept all 232 as "live" and removed nothing, for weeks. These are matched by
+# exact comm and none of them is an agent, a runtime or a tool that could sit
+# in a worktree. Anything else unreadable, an agent included, still vetoes.
+# Chosen over an environ PWD fallback: environ is unreadable for exactly the
+# same processes, and PWD is only where the process started, not where it is now.
+_gc_unreadable_is_system() { # <comm>
+  case "$1" in systemd|'(sd-pam)'|ssh-agent|sshd-session|sftp-server) return 0;; esac
+  return 1
+}
+_gc_cwd_of() { readlink "/proc/$1/cwd" 2>/dev/null; }
+_gc_pid_exists() { [ -d "/proc/$1" ]; }
+_gc_comm_of() { local c=""; read -r c < "/proc/$1/comm" 2>/dev/null; printf '%s' "$c"; }
 _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknown
   local pids pid cwd rc out=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
@@ -163,9 +179,10 @@ _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknow
     _GC_CWDS_STATE=unknown; return 0
   fi
   for pid in $pids; do
-    if cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"; then
+    if cwd="$(_gc_cwd_of "$pid")"; then
       out="$out$pid"$'\t'"$cwd"$'\n'
-    elif [ -d "/proc/$pid" ]; then
+    elif _gc_pid_exists "$pid"; then
+      _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
       _GC_CWDS_STATE=unknown; return 0
     fi
   done
