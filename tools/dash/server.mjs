@@ -1791,36 +1791,55 @@ const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, ag
 const states = new Map();
 const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
 const stateSig = () => WORKSPACES.map((x) => `${fileSig(join(INBOX_DIR, `${x.name}.jsonl`))}/${fileSig(join(x.wsdir, '.cel', 'delegations.json'))}`).join('|');
-const warmState = (w) => {
+const warmState = (w, warmer = false) => {
   let f = states.get(w.name);
-  if (!f) { f = { v: undefined, at: 0, p: null }; states.set(w.name, f); }
-  f.asked = Date.now();
+  if (!f) { f = { v: undefined, at: 0, p: null, gen: 0, have: 0 }; states.set(w.name, f); }
+  if (!warmer) f.asked = Date.now();
   const sig = stateSig();
+  // Every computation resolves to ITS OWN answer, and is kept only if no
+  // later-started one has landed first. Review on #141: a request waiting on
+  // a computation that a newer file change superseded used to wake to an
+  // emptied entry and answer 500 - the classic page's refresh failed right
+  // after every mutation, which is exactly when the owner is mid-thought.
   const refresh = () => {
     if (f.p && f.psig === sig) return f.p;
-    const p = state(null, w).then((v) => { if (f.p === p) { f.v = v; f.at = Date.now(); f.sig = sig; } return f; })
-      .finally(() => { if (f.p === p) f.p = null; });
+    const gen = ++f.gen;
+    const p = state(null, w).then((v) => {
+      const r = { v, at: Date.now() };
+      if (gen > f.have) { f.have = gen; f.v = v; f.at = r.at; f.sig = sig; }
+      return r;
+    }).finally(() => { if (f.p === p) f.p = null; });
     f.p = p; f.psig = sig;
     return p;
   };
   if (f.v !== undefined && f.sig !== sig) {
-    f.v = undefined;
+    // the files moved: this ask waits for an answer read after the change,
+    // as it always did, and the caches that would hide the change go first
     delete cache.decisions;
     for (const x of WORKSPACES) { delete cache[`inbox:${x.name}`]; delete cache[`ledger:${x.name}`]; }
+    return refresh();
   }
-  if (f.v === undefined) return refresh();
-  if (Date.now() - f.at >= (Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS))) refresh().catch(() => {});
-  return Promise.resolve(f);
+  if (f.v === undefined || warmer) return refresh();
+  if (Date.now() - f.at >= STATE_TTL()) refresh().catch(() => {});
+  return Promise.resolve({ v: f.v, at: f.at });
 };
+// The warm read runs AHEAD of the page's poll, once per state TTL: the
+// classic page prints the answer's own `updated` time, and polls every
+// REFRESH_MS - served from a value refreshed only when an ask found it stale,
+// every other poll repeated the last answer and the page fell a refresh
+// behind (review on #141). Ahead of the poll, each poll gets a read at most
+// one TTL old, as fresh as the per-request read it replaces, and every open
+// tab shares it.
+const STATE_TTL = () => Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS);
 setInterval(() => {
   for (const [k, f] of states) {
     if (Date.now() - f.asked > 60000) { states.delete(k); continue; }
-    if (!f.p && Date.now() - f.at >= (Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS))) {
+    if (!f.p && Date.now() - f.at >= STATE_TTL() / 2) {
       const w = wsOf(k);
-      if (w) f.p = state(null, w).then((v) => { f.v = v; f.at = Date.now(); }, () => {}).finally(() => { f.p = null; });
+      if (w) warmState(w, true).catch(() => {});
     }
   }
-}, Number(process.env.CEL_DASH_FEED_WARM_MS) || 5000).unref();
+}, STATE_TTL()).unref();
 
 const server = createServer(async (req, res) => {
   if (req.method === 'POST') states.clear();
