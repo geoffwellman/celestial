@@ -793,8 +793,13 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   # follows all the files at once and names each on a `==> file <==` header;
   # one jq carries the current workspace across lines.
   local names n f files=() single=""
+  local only=""
   if [ "$every" -eq 0 ]; then single="$(_inbox_ws "$ws")"; names="$single"
-  else names="$(_inbox_every_ws "$ws")"; fi
+  else
+    names="$(_inbox_every_ws "$ws")"
+    # tail prints no `==>` header for a single file: name it here instead
+    [ "$(printf '%s\n' "$names" | grep -c .)" -eq 1 ] && only="$names"
+  fi
   for n in $names; do
     f="$(_inbox_file "$n")"; mkdir -p "$(dirname "$f")"; touch "$f"; files+=("$f")
   done
@@ -805,7 +810,7 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   # Two processes, not three: jq and the line loop are the pipeline's own
   # elements, with no wrapper subshell around them.
   jq -nRr --unbuffered --arg who "$who" --arg dir "$(_inbox_dir)/" "$_INBOX_WATCH_JQ" <&"$tfd" \
-    | _inbox_watch_lines "$who" "$single" &
+    | _inbox_watch_lines "$who" "$single" "$only" &
   local fmt=$!
   exec {tfd}<&-
   # shellcheck disable=SC2064
@@ -826,11 +831,12 @@ _INBOX_WATCH_JQ='
       select(.m | type == "object") | .ws as $ws | .m
       | select(.kind != "resolution") | select(.to == $who or .to == "all")
       | [("w:" + $ws), .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
-_inbox_watch_lines() { # <who> <single-ws|""> < ws\tkind\tfrom\tmsg
-  local who="$1" single="$2" ws kind from msg prefix
+_inbox_watch_lines() { # <who> <single-ws|""> <only-ws|""> < ws\tkind\tfrom\tmsg
+  local who="$1" single="$2" only="$3" ws kind from msg prefix
   while IFS=$'\t' read -r ws kind from msg; do
       prefix=""; ws="${ws#w:}"  # never an empty first field: tab is IFS whitespace
-      if [ -n "$single" ]; then ws="$single"; else prefix="[$ws] "; fi
+      if [ -n "$single" ]; then ws="$single"
+      else [ -n "$ws" ] || ws="$only"; prefix="[$ws] "; fi
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
       # An ESCALATION is by definition the kind that cannot wait, and it was
       # the one kind that raised nothing: 72 of them landed in root's mailbox

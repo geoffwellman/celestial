@@ -149,13 +149,13 @@ _gc_panes_settled() { # <pane-list-json>
 # /proc visibility is a veto, not an empty process list.
 # ONE /proc PASS PER RUN (CEL-111). This used to readlink every pid on the box
 # once per worktree: ~1,300 pids x 274 worktrees, 666 readlink execs in 15s on
-# its own. The cwd table is read once and every worktree is matched against
-# it. A table that could not be read is still a veto, exactly as before. It is
-# reset at the top of each run and re-read once it is CEL_GC_CWD_TTL seconds
-# old (default 30), so a process started mid-sweep in a worktree is still seen
-# before that worktree is judged.
-_GC_CWDS="" _GC_CWDS_STATE="" _GC_CWDS_AT=0
-_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE="" _GC_CWDS_AT=0; }
+# its own. The cwd table is read once per run and every worktree is matched
+# against it - the fast path, which can only KEEP. A table that could not be
+# read is still a veto. Nothing is removed on the snapshot's word alone:
+# _gc_has_process_live re-walks /proc for that one worktree immediately before
+# any removal, so a process started mid-sweep is still seen.
+_GC_CWDS="" _GC_CWDS_STATE=""
+_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
 _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknown
   local pids pid cwd rc out=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
@@ -172,9 +172,7 @@ _gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknow
   _GC_CWDS="$out" _GC_CWDS_STATE=ok
 }
 _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
-  if [ -z "$_GC_CWDS_STATE" ] || [ $((SECONDS - _GC_CWDS_AT)) -ge "${CEL_GC_CWD_TTL:-30}" ]; then
-    _gc_cwd_load; _GC_CWDS_AT=$SECONDS
-  fi
+  [ -n "$_GC_CWDS_STATE" ] || _gc_cwd_load
   case "$_GC_CWDS_STATE" in none) return 1;; unknown) return 0;; esac
   local line cwd
   while IFS= read -r line; do
@@ -183,6 +181,12 @@ _gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
     case "$cwd" in "$1"|"$1"/*) return 0;; esac
   done <<< "$_GC_CWDS"
   return 1
+}
+
+# The live check, run only right before a removal: a fresh /proc walk.
+_gc_has_process_live() { # <worktree-dir> -> 0 present/unknown, 1 absent
+  local _GC_CWDS="" _GC_CWDS_STATE=""
+  _gc_has_process "$1"
 }
 
 # The three variables `cel run` and fanout put in every agent's environment
@@ -984,6 +988,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
       && _gc_agents_removable "$agents" "$cwd" "$names" \
       || { _gc_keep unidentified "$cwd"; continue; }
+    if [ -z "$ws_id" ] && _gc_has_process_live "$cwd"; then _gc_keep live; continue; fi
     if [ "$dry" -eq 1 ]; then
       c_ok "would remove ${ws_id:-orphan} ($cwd, PR $state, settled and landed clean)"
     elif [ -n "$ws_id" ]; then
