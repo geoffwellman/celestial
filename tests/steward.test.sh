@@ -1849,3 +1849,49 @@ test_steward_tick_exits_when_another_holds_the_lock() {
   assert_eq "$(cat "$CEL_STEWARD_LOCK")" "$$"
   rm -rf "$T"
 }
+
+# ---- a PR waiting on the owner is not a worker finding (CEL-115) -------------
+# A PR whose only red check was an external review bot out of credit was nudged
+# "get a worker on it" three times in a day while the real blocker - billing -
+# sat in an open `cel decide` question no worker could answer.
+_decision_pr_fixture() { # <decision-json-or-empty>
+  _orch_fixture
+  mkdir -p "$T/bin"
+  : > "$T/prompts"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","reviews":[]},
+             {"number":8,"headRefName":"WG-2-y","headRefOid":"h8","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","reviews":[]}]'
+SH
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent get")    [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
+  "agent prompt") printf '%s\n' "\$3" >> "$T/prompts" ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  source "$CEL_ROOT/lib/inbox.sh"
+  printf '%s\n' '{"id":"d1","ts":"2020-01-01T00:00:00+00:00","to":"owner","from":"bundle-orch","asker":"bundle-orch","kind":"decision","title":"top up the review bot account","options":[],"context":"x","blocks":"","prs":[{"ref":"widget#7"}]}' \
+    > "$(_inbox_file alpha)"
+}
+
+test_red_pr_with_open_linked_decision_gets_no_nudge() {
+  _decision_pr_fixture
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
+  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'PR #7 ' || true)" "0"
+  # an unlinked red PR is still a finding
+  assert_contains "$mail" "PR #8 on widget has FAILING checks"
+  rm -rf "$T"
+}
+
+test_red_pr_is_nudged_again_once_its_decision_is_withdrawn() {
+  _decision_pr_fixture
+  printf '%s\n' '{"id":"r1","ts":"2020-01-02T00:00:00+00:00","kind":"resolution","ref":"d1","by":"bundle-orch","to":"owner","message":"withdrawn"}' \
+    >> "$(_inbox_file alpha)"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
+  assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)" "PR #7 on widget has FAILING checks"
+  rm -rf "$T"
+}
