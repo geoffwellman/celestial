@@ -911,3 +911,18 @@ test_inbox_watch_group_exits_when_its_parent_dies() {
   assert_eq "$(_inbox_group_size "$g")" "0"
   rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
 }
+
+# Review on #136: --all-workspaces over exactly one mailbox - tail prints no
+# `==>` header for a single file - still names the workspace.
+test_inbox_watch_all_workspaces_with_one_workspace_names_it() {
+  _inbox_sandbox; export CEL_INBOX_DIR
+  REG="$(mktemp -d)"; export CEL_REGISTRY="$REG/registry.yaml"
+  mkdir -p "$REG/alpha"; printf 'workspaces:\n  alpha:\n    path: %s\n' "$REG/alpha" > "$CEL_REGISTRY"
+  local out; out="$(mktemp)"
+  ( CEL_INBOX_ME=console CEL_INBOX_NOTIFY=0 timeout 5 bash -c 'source "$1/lib/inbox.sh"; _inbox_watch --for root --all-workspaces' _ "$CEL_ROOT" > "$out" 2>/dev/null & )
+  sleep 1.5
+  ( CEL_INBOX_ME=t _inbox_send root "solo" --workspace alpha ) >/dev/null 2>&1
+  sleep 2
+  assert_contains "$(cat "$out")" "[alpha] INBOX"
+  rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
+}

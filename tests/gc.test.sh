@@ -1277,3 +1277,17 @@ test_gc_has_process_reads_proc_once_per_run() {
   assert_eq "$(wc -l < "$B/count")" "$first"
   rm -rf "$B"
 }
+
+# Review on #136: the snapshot is the fast path, never the last word. A
+# process that starts in a worktree after the table was read is still seen by
+# the live check that runs right before any removal.
+test_gc_live_recheck_sees_a_process_the_snapshot_missed() {
+  local d; d="$(mktemp -d)"
+  _gc_cwd_reset
+  _gc_has_process "$d" || true          # snapshot taken: nothing in $d yet
+  ( cd "$d" && exec sleep 20 ) & local p=$!
+  sleep 0.3
+  _gc_has_process_live "$d" || { echo "live recheck missed a process"; kill "$p"; return 1; }
+  kill "$p"; wait "$p" 2>/dev/null || true
+  rm -rf "$d"
+}
