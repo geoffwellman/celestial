@@ -825,11 +825,11 @@ _INBOX_WATCH_JQ='
       else .m = (($l | fromjson?) // null) end;
       select(.m | type == "object") | .ws as $ws | .m
       | select(.kind != "resolution") | select(.to == $who or .to == "all")
-      | [$ws, .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
+      | [("w:" + $ws), .kind, .from, ((.message // "") | tostring | gsub("\n"; " "))] | @tsv)'
 _inbox_watch_lines() { # <who> <single-ws|""> < ws\tkind\tfrom\tmsg
   local who="$1" single="$2" ws kind from msg prefix
   while IFS=$'\t' read -r ws kind from msg; do
-      prefix=""
+      prefix=""; ws="${ws#w:}"  # never an empty first field: tab is IFS whitespace
       if [ -n "$single" ]; then ws="$single"; else prefix="[$ws] "; fi
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
       # An ESCALATION is by definition the kind that cannot wait, and it was
