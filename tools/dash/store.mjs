@@ -24,7 +24,11 @@ export const createStore = () => {
   const jl = new Map();
   const js = new Map();
   const same = (e, s) => e && e.ino === s.ino && e.size === s.size && e.mtime === s.mtime;
-  // rows of a JSONL file; the returned array is shared - callers must not mutate it
+  // rows of a JSONL file; the returned array is shared - callers must not
+  // mutate it. Missing is empty; any other read failure (a directory where
+  // the file should be, a permission) throws, as readFileSync did, so the
+  // caller answers 500 rather than an empty inbox that reads as calm.
+  const NL = 0x0a;
   const jsonl = (f) => {
     const s = sig(f);
     if (!s) { jl.delete(f); return []; }
@@ -32,21 +36,22 @@ export const createStore = () => {
     if (same(e, s)) return e.rows;
     try {
       if (e && e.ino === s.ino && s.size > e.size && e.head.equals(readRange(f, 0, Math.min(HEAD, e.size)))) {
-        // the tail only; a line still being written waits in `partial`
-        const text = e.partial + readRange(f, e.size, s.size - e.size).toString('utf8');
-        const cut = text.lastIndexOf('\n') + 1;
-        const rows = e.rows.concat(parseLines(text.slice(0, cut)));
-        jl.set(f, { ...s, head: e.head.length >= HEAD ? e.head : readRange(f, 0, Math.min(HEAD, s.size)), rows, partial: text.slice(cut) });
+        // the tail only; an unfinished line waits in `partial` as BYTES -
+        // a multibyte character split across two appends must not be
+        // decoded half at a time (review on #141)
+        const buf = Buffer.concat([e.partial, readRange(f, e.size, s.size - e.size)]);
+        const cut = buf.lastIndexOf(NL) + 1;
+        const rows = e.rows.concat(parseLines(buf.subarray(0, cut).toString('utf8')));
+        jl.set(f, { ...s, head: e.head.length >= HEAD ? e.head : readRange(f, 0, Math.min(HEAD, s.size)), rows, partial: Buffer.from(buf.subarray(cut)) });
         return rows;
       }
       const buf = readFileSync(f);
-      const text = buf.toString('utf8');
-      const cut = text.lastIndexOf('\n') + 1;
+      const cut = buf.lastIndexOf(NL) + 1;
       // a final line with no newline yet is one still being written
-      const rows = parseLines(text.slice(0, cut));
-      jl.set(f, { ...s, size: buf.length, head: buf.subarray(0, Math.min(HEAD, buf.length)), rows, partial: text.slice(cut) });
+      const rows = parseLines(buf.subarray(0, cut).toString('utf8'));
+      jl.set(f, { ...s, size: buf.length, head: Buffer.from(buf.subarray(0, Math.min(HEAD, buf.length))), rows, partial: Buffer.from(buf.subarray(cut)) });
       return rows;
-    } catch { jl.delete(f); return []; }
+    } catch (err) { jl.delete(f); throw err; }
   };
   // a whole-JSON file (a ledger); null when missing or unparsable
   const json = (f) => {

@@ -15,7 +15,7 @@ import { store } from './store.mjs';
 const DAY = 86400e3;
 const iso = (v) => { if (v === null || v === undefined || v === "") return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
 // CEL-116: parsed once and kept (store.mjs); the rows are shared, never mutate them
-const readJsonl = (f) => store.jsonl(f);
+const readJsonl = (f) => { try { return store.jsonl(f); } catch { return []; } };
 const median = (xs) => {
   if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -118,52 +118,59 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // computation that throws is not kept. Each answer carries when it was
   // computed, so a card can say how old it is.
   const feeds = new Map();
-  // a feed computed while gh failed is answered but not kept: t=0 makes the
-  // next ask compute again, so a gh failure is never cached one level up
+  // Review on #141: a feed computed while gh failed is served but never kept
+  // as fresh (t=0) - yet a repo gh cannot resolve fails EVERY time (two did on
+  // the live box), and retrying it on every ask and every warm pass was a gh
+  // spawn every few seconds forever. So a degraded feed is retried at most
+  // once per CEL_DASH_DEGRADED_RETRY_MS (default 60 s); in between its last
+  // answer is served, and it says how old it is.
   let upstreamFailures = 0;
   const compute = (f) => {
     const before = upstreamFailures;
+    f.tried = Date.now();
     return Promise.resolve().then(f.fn).then((v) => { f.v = v; f.t = upstreamFailures === before ? Date.now() : 0; f.at = Date.now(); return f; });
   };
-  const FEED_TTL = () => Number(process.env.CEL_DASH_FEED_TTL_MS) || 5000;
+  const DEGRADED_RETRY = () => Number(process.env.CEL_DASH_DEGRADED_RETRY_MS) || 60000;
+  // the cheap feeds follow the page; the ones that spawn (services: `cel
+  // services` per workspace, usage: `cel quota`) or chew the sample ring
+  // (lanes) are kept longer
+  const SLOW_FEEDS = /^(services|usage|lanes):/;
+  const FEED_TTL = (key) => (key && SLOW_FEEDS.test(key) ? Number(process.env.CEL_DASH_SLOW_FEED_TTL_MS) || 30000 : Number(process.env.CEL_DASH_FEED_TTL_MS) || 5000);
+  const due = (k, f) => (f.t ? Date.now() - f.t >= FEED_TTL(k) : Date.now() - (f.tried || 0) >= DEGRADED_RETRY());
   // peek: any last value at once, however degraded (the snapshot's contract)
   const feed = (key, fn, peek = false) => {
     let f = feeds.get(key);
     if (!f) { f = { v: undefined, t: 0, p: null, fn }; feeds.set(key, f); }
     f.fn = fn; f.asked = Date.now();
     const refresh = () => {
-      if (!f.p) {
-        f.p = compute(f)
-          .finally(() => { f.p = null; });
-      }
+      if (!f.p) f.p = compute(f).finally(() => { f.p = null; });
       return f.p;
     };
-    if (f.v !== undefined && (f.t || peek)) {
-      if (Date.now() - f.t >= FEED_TTL()) refresh().catch(() => {});
-      return Promise.resolve(f);
+    if (f.v === undefined) return refresh();
+    if (due(key, f)) {
+      const p = refresh();
+      // a degraded feed past its back-off waits at most
+      // CEL_DASH_DEGRADED_WAIT_MS (default 0) for the retry
+      if (!f.t && !peek) {
+        const wait = Number(process.env.CEL_DASH_DEGRADED_WAIT_MS) || 0;
+        return Promise.race([p, new Promise((r) => setTimeout(() => r(f), wait))]);
+      }
+      p.catch(() => {});
     }
-    // Computed while gh failed: every ask computes again (gh is retried, its
-    // failure never kept), but a repo gh cannot resolve fails EVERY time - on
-    // the live box two did - and waiting on it made every refresh slow
-    // forever. So the retry starts at once and waits at most
-    // CEL_DASH_DEGRADED_WAIT_MS (default 0); past that the last answer is
-    // served and the retry lands behind it, for the next ask.
-    if (f.v !== undefined) {
-      const wait = Number(process.env.CEL_DASH_DEGRADED_WAIT_MS) || 0;
-      return Promise.race([refresh(), new Promise((r) => setTimeout(() => r(f), wait))]);
-    }
-    return refresh();
+    return Promise.resolve(f);
   };
-  // one feed at a time, so a warm pass never holds the event loop for all
-  // of them at once while a page is waiting on a cached answer
+  // one feed at a time, so a warm pass never holds the event loop for all of
+  // them at once; only feeds a page asked for in the last minute are kept warm
+  // (review on #141), and one nobody asked for in ten minutes is forgotten
   let feedWarming = false;
   const feedWarm = async () => {
     if (feedWarming) return;
     feedWarming = true;
     try {
       for (const [k, f] of [...feeds]) {
-        if (Date.now() - f.asked > 600000) { feeds.delete(k); continue; }
-        if (f.p || Date.now() - f.t < FEED_TTL()) continue;
+        const idle = Date.now() - f.asked;
+        if (idle > 600000) { feeds.delete(k); continue; }
+        if (idle > (Number(process.env.CEL_DASH_FEED_KEEP_WARM_MS) || 60000) || f.p || !due(k, f)) continue;
         f.p = compute(f).catch(() => {}).finally(() => { f.p = null; });
         await f.p;
         await new Promise((r) => setImmediate(r));
@@ -845,12 +852,24 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'forecast', 'usage', 'fleet', 'services']);
   const answer = async (name, req, url, wss, peek = false) => {
     if (name === 'since') return { v: await since(req, url, wss), at: Date.now() };
-    const q = new URLSearchParams(url.searchParams); q.delete('ws'); q.sort();
+    // Review on #141: the cache key is built only from the parameters the
+    // feed reads, each clamped as the feed clamps it, and the feed computes
+    // from that same normalised query - so the map is bounded by workspaces
+    // x a handful of values, whatever a client sends
+    const n = (k, d, lo, hi) => Math.min(hi, Math.max(lo, Math.floor(Number(url.searchParams.get(k)) || d)));
+    const q = new URLSearchParams();
+    if (name === 'lanes') { const r = url.searchParams.get('range'); q.set('range', !r || r === 'today' ? 'today' : r === '3d' ? '3d' : '7d'); }
+    if (name === 'load') q.set('hours', n('hours', 24, 1, 24 * 14));
+    if (name === 'merges') q.set('days', n('days', 14, 1, 90));
+    if (name === 'cycle') q.set('days', n('days', 30, 1, 365));
+    if (name === 'heat') q.set('days', n('days', 28, 1, 365));
     const key = `${name}:${wsKey(wss)}?${q}`;
+    const raw = url;
+    url = new URL(`http://localhost/?${q}`);
     switch (name) {
       case 'activity': {
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));
-        const before = iso(url.searchParams.get('before'));
+        const limit = Math.min(500, Math.max(1, Number(raw.searchParams.get('limit')) || 50));
+        const before = iso(raw.searchParams.get('before'));
         const a = await feed(`activity:${wsKey(wss)}`, () => activity(wss), peek);
         let items = a.v;
         if (before) items = items.filter((i) => i.ts < before);
