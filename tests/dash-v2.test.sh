@@ -517,6 +517,6 @@ test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
   assert_contains "$a" "x-cel-computed-at"
   assert_eq "$b" "$a"
   local html; html="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
-  assert_not_contains "$html" 'id="nyc">0<'
+  assert_eq "$(printf '%s' "$html" | grep -c 'id="nyc">0<' || true)" "0"
   _v2_down
 }
