@@ -1291,3 +1291,26 @@ test_gc_live_recheck_sees_a_process_the_snapshot_missed() {
   kill "$p"; wait "$p" 2>/dev/null || true
   rm -rf "$d"
 }
+
+# A process of our own uid whose cwd cannot be read (the user systemd
+# manager, ssh-agent, sshd-session...) vetoed EVERY worktree: gc kept 232
+# "live" and removed nothing. A fixed set of system processes that can never
+# be an agent in a worktree no longer vetoes; any other unreadable cwd does.
+_gc_fake_proc() { # <comm> - one fake pid with an unreadable cwd beside our own
+  pgrep() { printf '%s\n' 999001; }
+  _gc_cwd_of() { return 1; }
+  eval "_gc_comm_of() { printf '%s' '$1'; }"
+  _gc_pid_exists() { return 0; }
+}
+test_gc_unreadable_cwd_of_a_system_process_does_not_veto() {
+  local c
+  for c in systemd '(sd-pam)' ssh-agent sshd-session sftp-server; do
+    _gc_fake_proc "$c"; _gc_cwd_reset
+    _gc_has_process "/nonexistent/wt" && { echo "$c vetoed"; return 1; }
+  done
+  return 0
+}
+test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
+  _gc_fake_proc pi; _gc_cwd_reset
+  _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
+}
