@@ -2,6 +2,8 @@
 # CEL-93: the dashboard's Needs-you panel answers owner decisions through the
 # real `cel decide`, behind the dashboard's Host and CSRF guard.
 source "$CEL_ROOT/lib/common.sh"
+# CEL-113: every question needs real context
+DD_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 
 _dd_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
@@ -16,7 +18,7 @@ _dd_boot() {
   printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
   printf 'name: bundle\n' > "$T/bundle/workspace.yaml"
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
-  ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha \
+  ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
     --title "pick a style" --option "flat::quick" --option "glossy::pretty" --recommend 2 2>/dev/null)"
   DASH_PORT="$(_dd_port)"
   CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
@@ -86,7 +88,7 @@ test_dash_decide_refuses_missing_csrf_and_alien_host() {
 # recorded as clicked; free text from the box is free text even if digits.
 test_dash_option_buttons_answer_by_index() {
   _dd_boot
-  local id2; id2="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha \
+  local id2; id2="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
     --title "how many?" --option "2::two" --option "1::one" 2>/dev/null)"
   assert_eq "$(_dd_post "{\"id\":\"$id2\",\"action\":\"answer\",\"option\":1}" -H "x-cel-csrf: $TOKEN")" "200"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"how many?": 2 '
@@ -134,7 +136,7 @@ test_dash_decide_malformed_json_is_a_400() {
 
 _dd_ask() { # <ws> args...
   local ws="$1"; shift
-  CEL_INBOX_ME="$ws-orch" "$CEL_ROOT/bin/cel" decide ask --workspace "$ws" "$@" 2>/dev/null
+  CEL_INBOX_ME="$ws-orch" "$CEL_ROOT/bin/cel" decide ask --workspace "$ws" --context "$DD_CTX" "$@" 2>/dev/null
 }
 
 # CEL-99: decisions are grouped by workspace; inside a group urgent first,
@@ -213,7 +215,7 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   DD_CFG_EXTRA=',"refreshMs":1000' _dd_boot
   local gone; gone="$(_dd_ask alpha --title "settled elsewhere" --option "a::x")"
   mkdir -p "$T/shots"
-  local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
+  local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --context \"$DD_CTX\" --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
   local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/classic" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
   # A skip that reads as a pass is how this test went unrun in review. In CI
   # a missing browser is a failure; on a box without one it says so loudly.
@@ -240,4 +242,23 @@ test_dash_refresh_keeps_what_the_owner_is_typing() {
   assert_eq "$(printf '%s' "$out" | jq -r .closeClicked)" "true"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'DROPPED "pick a style": already done'
   _dd_down
+}
+
+# CEL-113: the card shows the context text itself, links clickable, plus
+# blocks and age - the owner decides from the card, not from a click away.
+test_cel113_card_renders_context_blocks_and_age() {
+  local out; out="$(node -e '
+    const fs=require("fs"),vm=require("vm");
+    const ls={getItem:()=>null,setItem(){}};
+    const esc=s=>String(s==null?"":s).replace(/[&<>"\x27]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\x27":"&#39;"}[c]));
+    const ctx={localStorage:ls,esc};vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),ctx);
+    console.log(ctx.nyCard({id:"1",title:"pick",asker:"alpha-orch",age_secs:7200,blocks:"the beta release",
+      context:"The widget build broke <b>. See https://example.com/widget/pull/7 for the diff.",options:[{label:"a",tradeoff:"x"}]}));
+  ' "$CEL_ROOT/tools/dash/decisions.js")"
+  assert_contains "$out" "nyctx"
+  assert_contains "$out" "The widget build broke &lt;b&gt;."
+  assert_contains "$out" '<a href="https://example.com/widget/pull/7" target="_blank" rel="noopener">'
+  assert_contains "$out" "blocks: the beta release"
+  assert_contains "$out" "2h"
 }
