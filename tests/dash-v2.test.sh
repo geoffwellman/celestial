@@ -505,3 +505,18 @@ test_v2_feed_cache_serves_warm_and_sees_new_mail() {
   assert_contains "$a" "gadget wedged"
   _v2_down
 }
+
+# CEL-116 live check: the Needs-you card comes from /api/state, which must be
+# warm like the feeds, and before its first answer the page says loading -
+# never a count of 0 that reads as "nothing needs you"
+test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
+  _v2_boot
+  local a b
+  a="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  b="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  assert_contains "$a" "x-cel-computed-at"
+  assert_eq "$b" "$a"
+  local html; html="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  assert_not_contains "$html" 'id="nyc">0<'
+  _v2_down
+}
