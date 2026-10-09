@@ -520,3 +520,22 @@ test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
   assert_eq "$(printf '%s' "$html" | grep -c 'id="nyc">0<' || true)" "0"
   _v2_down
 }
+
+# review on #141: a /api/state ask waiting on a read that a newer inbox
+# change superseded woke to an emptied entry and answered 500 - the classic
+# page's refresh failed right after every mutation. Asks racing appends all
+# answer 200, and the last answer shows the last line.
+test_v2_state_asks_racing_inbox_changes_never_fail() {
+  _v2_boot
+  curl -sf -m 20 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state"
+  local i codes=""
+  for i in 1 2 3 4 5 6; do
+    printf '{"id":"100000000000000010%s","ts":"%s","to":"root","from":"steward","kind":"status","message":"widget %s"}\n' "$i" "$(_v2_ago 5)" "$i" >> "$T/inbox/alpha.jsonl"
+    curl -s -m 20 -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$DASH_PORT/api/state" >> "$T/codes" &
+    sleep 0.05
+  done
+  wait
+  assert_eq "$(sort -u "$T/codes" | tr -d '\n')" "200"
+  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" "widget 6"
+  _v2_down
+}
