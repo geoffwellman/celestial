@@ -91,14 +91,17 @@ _decide_usage() {
 cel decide - the owner's one queue of decisions, across every workspace
 
   cel decide ask --title <one line> [--option <label>::<tradeoff>]... [--recommend <n>]
-                 [--context <url-or-path>] [--blocks <what waits on it>] [--urgent] [--workspace w]
+                 --context <what/why, options, recommendation, if unanswered> [--blocks <what waits on it>] [--urgent] [--workspace w]
                  [--supersedes <id>]
       file a question for the owner; prints its id. The asker is who you are
       (cel inbox whoami), never a flag. Re-asking the same title updates the
       open record instead of adding a second one. --urgent is for live risk,
       money, or work that is blocked now: the dashboard sorts it first.
       --supersedes closes your own older question <id> as replaced by this
-      one, in the same write.
+      one, in the same write. --context is required: at least 120 characters
+      of plain prose (URLs do not count) saying what happened and why it needs
+      the owner now, what each option does in practice, what you recommend
+      and why, and what happens if nobody answers.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
@@ -134,6 +137,15 @@ _decide_ask() {
     esac
   done
   [ -n "$title" ] || die "cel decide ask: --title is required"
+  # CEL-113: THE OWNER DECIDES FROM THE CARD. Most open questions once carried
+  # a title, two option labels and at best a bare URL, and the owner had to go
+  # digging before answering. So a question without real prose is refused: a
+  # URL may ride along, but it does not count toward the minimum.
+  local prose
+  prose="$(printf '%s' "$context" | sed -E 's#[a-z]+://[^[:space:]]+##g' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
+  if [ "${#prose}" -lt 120 ]; then
+    die "cel decide ask: --context needs real substance (at least 120 characters of prose; a bare URL does not count). Say, in plain English: what happened and why it needs the owner now; what each option does in practice (cost, risk, what breaks or waits); what you recommend and why; what happens if nobody answers. A URL may be added on top."
+  fi
   if [ -n "$recommend" ]; then
     case "$recommend" in *[!0-9]*) die "cel decide ask: --recommend takes an option number" ;; esac
     [ "$recommend" -ge 1 ] && [ "$recommend" -le "$(jq length <<< "$opts")" ] \

@@ -34,7 +34,8 @@ Responsibilities
   `Monitor(command: "cel inbox watch", persistent: true)`.
   Restart it after a restart or resume - a monitor dies with its session.
 - ANY QUESTION FOR THE OWNER is filed with `cel decide ask --title ...
-  --option "<label>::<tradeoff>" --recommend <n> --blocks ...` (plus `--urgent` for live risk, money or
+  --option "<label>::<tradeoff>" --recommend <n> --blocks ... --context ...`.
+  `--context` is required (120+ characters of plain prose; a URL may ride along but does not count): what happened and why it needs the owner now; what each option does in practice (cost, risk, what breaks or waits); what you recommend and why; what happens if nobody answers. The owner decides from the card - write it so they need not go digging. (plus `--urgent` for live risk, money or
   blocked work) as well as
   said in chat - a question asked only in your pane is invisible everywhere
   else. `cel decide list` is the owner's whole queue. When mail starting
