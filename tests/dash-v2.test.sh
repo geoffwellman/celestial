@@ -72,7 +72,9 @@ EOF
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
-_v2_boot_failing_gh() { _V2_FAIL_GH=1 _v2_boot; }
+# the healed ask must see gh's answer, not the degraded one served while a
+# slow retry runs (CEL-116): give the retry all the time it needs
+_v2_boot_failing_gh() { _V2_FAIL_GH=1 CEL_DASH_DEGRADED_WAIT_MS=20000 _v2_boot; }
 _v2_down() {
   if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
   # a CLI the server spawned can outlive it by a moment and still be writing

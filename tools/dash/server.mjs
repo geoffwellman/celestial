@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
+import { store } from './store.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
 // CEL-107: there used to be one server per workspace, each polling the same
 // herdr and gh as the others, and the per-workspace restart race took one of
@@ -125,7 +126,9 @@ const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
   const f = join(w.wsdir, '.cel', 'delegations.json');
   if (!existsSync(f)) return {};
   try {
-    const rows = JSON.parse(readFileSync(f, 'utf8'));
+    // CEL-116: parsed once per change, shared with the v2 feeds
+    const rows = store.json(f);
+    if (!Array.isArray(rows)) return {};
     const by = {};
     // herdr lowercases worktree directory names; the ledger keeps the branch
     // as written. Join case-insensitively or nothing ever matches.
@@ -201,9 +204,8 @@ const triageRanks = () => {
 const inbox = (w) => cached(`inbox:${w.name}`, 8000, async () => {
   const f = join(INBOX_DIR, `${w.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
-  const items = readFileSync(f, 'utf8').split('\n').filter(Boolean)
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
+  // CEL-116: the shared, append-aware parse; never mutated below
+  const items = store.jsonl(f);
   // unread = after each recipient's cursor, so the dash agrees with cel inbox
   const cursor = (who) => {
     const c = join(INBOX_DIR, `${w.name}.${who}.cursor`);

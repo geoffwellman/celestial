@@ -27,6 +27,7 @@ function recall(k,d){try{var v=JSON.parse(localStorage.getItem(k)||'null');retur
 // ---- data ------------------------------------------------------------------
 var S=null;            // /api/state as fetched
 var F={};              // /api/v2/<feed> by name
+var FAT={};            // when the server computed each F[name], ms (CEL-116)
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
 var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
@@ -43,12 +44,30 @@ async function getJSON(u){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var 
 // ('state' for /api/state) and clears on the next success.
 var ERR={};
 function failed(name){return function(e){ERR[name]=(e&&e.status)||'network'}}
+// CEL-116: the server's x-cel-computed-at, so a card drawn from an old value says so
+async function getFeed(u,name){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}
+  var at=Date.parse(r.headers.get('x-cel-computed-at')||'');FAT[name]=isNaN(at)?Date.now():at;return r.json()}
+// FIRST PAINT WITHOUT WAITING: one request for the last value of every card's
+// feed, drawn at once; the live refresh then replaces it feed by feed. A feed
+// the live refresh already answered is never overwritten by the snapshot.
+async function snapshot(){
+  try{var d=await getJSON('/api/v2/snapshot?ws='+encodeURIComponent(WSF));
+    Object.keys(d.feeds||{}).forEach(function(f){if(F[f]===undefined){F[f]=d.feeds[f].v;FAT[f]=Date.parse(d.feeds[f].at)||Date.now()}});
+    renderAll()}catch(e){/* the live refresh draws, or reports, every card */}
+}
+function ageNote(id){
+  var src=NEEDS[id]||[],old=Infinity;
+  src.forEach(function(n){if(FAT[n]!==undefined)old=Math.min(old,FAT[n])});
+  if(old===Infinity)return '';var s=Math.round((Date.now()-old)/1000);
+  if(s*1000<=REFRESH_MS*3)return '';
+  return '<div class="sub age" title="this card is showing the last value the server computed">as of '+(s<120?s+'s':Math.round(s/60)+'m')+' ago</div>';
+}
 async function refresh(){
   var q='ws='+encodeURIComponent(WSF);
   var jobs=[getJSON('/api/state').then(function(s){S=s;delete ERR.state}).catch(failed('state'))];
   FEEDS.forEach(function(f){
     var extra=f==='activity'?'&limit=30':f==='merges'?'&days=14':f==='load'?'&hours=24':f==='lanes'?'&range=today':'';
-    jobs.push(getJSON('/api/v2/'+f+'?'+q+extra).then(function(d){F[f]=d;delete ERR[f]}).catch(failed(f)));
+    jobs.push(getFeed('/api/v2/'+f+'?'+q+extra,f).then(function(d){F[f]=d;delete ERR[f]}).catch(failed(f)));
   });
   await Promise.all(jobs);
   window.V2REFRESHES++;
@@ -299,7 +318,7 @@ function renderAll(){
     el.querySelector('.scope').textContent=WSF==='all'?'':' · '+WSF;
     if(id==='needs')return;
     var html,why=cardStatus(id);
-    if(why)html=none(why);else try{html=BODY[id]()}catch(e){html=none('could not draw: '+e.message);window.V2ERRORS.push(id+': '+e.message)}
+    if(why)html=none(why);else try{html=BODY[id]()+ageNote(id)}catch(e){html=none('could not draw: '+e.message);window.V2ERRORS.push(id+': '+e.message)}
     var b=el.querySelector('.body');
     if(b._html!==html){b._html=html;b.innerHTML=html;restoreArmed(b)}
   });
@@ -577,5 +596,6 @@ document.addEventListener('keydown',function(e){
 
 // ---- boot --------------------------------------------------------------------
 renderAll();
+snapshot();
 refresh();
 setInterval(function(){if(!document.hidden)refresh()},REFRESH_MS);
