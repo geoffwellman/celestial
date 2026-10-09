@@ -12,7 +12,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readdirSync, existsSync, readFileSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1776,7 +1776,54 @@ const logReq = (req, code) => {
 // module so this file does not grow another thousand lines.
 const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents });
 
+// CEL-116 (live check of #141): /api/state is what the Needs-you card and
+// the header count are drawn from, and it was the one thing a refresh still
+// waited 3-4 s for - the feeds painted, Needs-you said 0, then jumped to 14.
+// It is served warm now, like the v2 feeds: the last answer at once, a
+// refresh behind it past CEL_DASH_STATE_TTL_MS (default the page refresh, at most 5 s), kept warm for a
+// minute after a page last asked. A failed read is never kept: cold, it
+// answers 500 as before; warm, the last good answer stands. Any POST may have
+// changed it (a resolve, a decision), so a POST forgets every answer.
+// A warm answer is only served while the files it was read from are as they
+// were: a new inbox line (a decision asked, a resolution) or a ledger write
+// is the very thing the owner is waiting to see, so it drops the warm answer
+// and the upstream caches that would hide it, and the ask computes fresh.
+const states = new Map();
+const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
+const stateSig = () => WORKSPACES.map((x) => `${fileSig(join(INBOX_DIR, `${x.name}.jsonl`))}/${fileSig(join(x.wsdir, '.cel', 'delegations.json'))}`).join('|');
+const warmState = (w) => {
+  let f = states.get(w.name);
+  if (!f) { f = { v: undefined, at: 0, p: null }; states.set(w.name, f); }
+  f.asked = Date.now();
+  const sig = stateSig();
+  const refresh = () => {
+    if (f.p && f.psig === sig) return f.p;
+    const p = state(null, w).then((v) => { if (f.p === p) { f.v = v; f.at = Date.now(); f.sig = sig; } return f; })
+      .finally(() => { if (f.p === p) f.p = null; });
+    f.p = p; f.psig = sig;
+    return p;
+  };
+  if (f.v !== undefined && f.sig !== sig) {
+    f.v = undefined;
+    delete cache.decisions;
+    for (const x of WORKSPACES) { delete cache[`inbox:${x.name}`]; delete cache[`ledger:${x.name}`]; }
+  }
+  if (f.v === undefined) return refresh();
+  if (Date.now() - f.at >= (Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS))) refresh().catch(() => {});
+  return Promise.resolve(f);
+};
+setInterval(() => {
+  for (const [k, f] of states) {
+    if (Date.now() - f.asked > 60000) { states.delete(k); continue; }
+    if (!f.p && Date.now() - f.at >= (Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS))) {
+      const w = wsOf(k);
+      if (w) f.p = state(null, w).then((v) => { f.v = v; f.at = Date.now(); }, () => {}).finally(() => { f.p = null; });
+    }
+  }
+}, Number(process.env.CEL_DASH_FEED_WARM_MS) || 5000).unref();
+
 const server = createServer(async (req, res) => {
+  if (req.method === 'POST') states.clear();
   res.on('finish', () => logReq(req, res.statusCode));
   try {
     if (!security.allow(req, res)) return;
@@ -1882,8 +1929,11 @@ const server = createServer(async (req, res) => {
     } else if (req.method === 'GET' && (req.url === '/api/state' || req.url.startsWith('/api/state?'))) {
       const w = wsOf(wsParam(req));
       if (!w) { res.writeHead(404).end('no such workspace'); return; }
-      const body = JSON.stringify(await state(req, w));
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body);
+      const r = await warmState(w);
+      // the one per-request field: whether THIS caller is on loopback
+      const v = r.v.gatewayPanel ? { ...r.v, gatewayPanel: { ...r.v.gatewayPanel, loopback: isLoopback(req.socket && req.socket.remoteAddress) } } : r.v;
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cel-computed-at': new Date(r.at).toISOString() })
+        .end(JSON.stringify(v));
     } else if (req.method === 'POST' && req.url === '/api/prompt') {
       const { target, message } = await readBody(req);
       if (!target || !message) { res.writeHead(400).end('target and message required'); return; }

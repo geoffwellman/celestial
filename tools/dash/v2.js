@@ -195,7 +195,7 @@ var BODY={
   return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
 };
 // what each card is drawn from; a card waits for, or reports, its sources
-var NEEDS={since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
+var NEEDS={needs:['state'],since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
   heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
   services:['services'],funnel:['fleet','merges'],afk:[]};
 function cardStatus(id){
@@ -299,7 +299,9 @@ function cardEl(w){
   el.innerHTML='<h3><span class="ttl">'+esc(w.t)+'</span>'+(w.id==='needs'?' <span class="n" id="alerts-h"></span>':'')+'<span class="scope"></span>'+
     '<select class="size" title="card size"><option value="half">half</option><option value="full">full width</option><option value="tall">tall</option></select>'+
     '<span class="x"></span><span class="ex" title="expand">⤢</span><span class="grip" title="drag to move">⠿</span></h3><div class="body"></div>';
-  if(w.id==='needs')el.querySelector('.body').appendChild(needsHost());
+  // CEL-116: until /api/state first answers, Needs-you says loading - an
+  // empty card or a 0 would read as "nothing needs you"
+  if(w.id==='needs'){var nb=el.querySelector('.body');nb.insertAdjacentHTML('beforeend','<div class="nyload">'+none(cardStatus('needs')||'loading needs you…')+'</div>');nb.appendChild(needsHost())}
   return el;
 }
 function renderAll(){
@@ -322,6 +324,8 @@ function renderAll(){
     var b=el.querySelector('.body');
     if(b._html!==html){b._html=html;b.innerHTML=html;restoreArmed(b)}
   });
+  var nyl=document.querySelector('#grid .w[data-id="needs"] .nyload');
+  if(nyl){var nw=S?'':(cardStatus('needs')||'loading needs you…');if(nyl._w!==nw){nyl._w=nw;nyl.innerHTML=nw?none(nw):''}}
   if(S){buildLast();if(needsHost().isConnected)renderNeedsYou();refreshTabs()}
   renderComposer();renderThread();renderDrawer();renderOverlay();
   var o=orchs(),wsn={};o.forEach(function(x){wsn[x.ws]=1});((S&&S.needsYouGroups)||[]).forEach(function(x){wsn[x.workspace]=1});
