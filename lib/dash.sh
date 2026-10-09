@@ -99,6 +99,15 @@ _dash_port_free() { # <host> <port> -> 0 when nothing accepts a connection
   [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]
 }
 
+# Does a dashboard answer on host:port? CEL-116: the probe asked the classic state feed,
+# the heaviest thing the server computes, with 3 s to do it - on a box at load
+# 30 a running dashboard was reported DOWN and --ensure tried to start a
+# second one. /api/session is a constant answer; 10 s is a busy box, not a
+# dead one.
+_dash_answers() { # <host> <port>
+  curl -sf -m "${CEL_DASH_PROBE_S:-10}" -o /dev/null "http://$1:$2/api/session"
+}
+
 # CEL-102: wait (bounded, CEL_DASH_PORT_WAIT_S, default 15 s) for the port to
 # come free. A restart that starts the new server while the old one still
 # holds it dies with EADDRINUSE and nothing retries.
@@ -191,13 +200,13 @@ _dash_ensure() { # <port> <host>
       || { c_err "dash: systemctl --user restart $DASH_UNIT.service failed - see $log"; return 1; }
     local j; for j in $(seq 1 20); do
       sleep 0.5
-      curl -sf -m 3 -o /dev/null "http://$host:$port/api/state" \
+      _dash_answers "$host" "$port" \
         && { c_ok "dash restarted on $port as $DASH_UNIT.service (unit changed)"; return 0; }
     done
     c_err "dash did not come up on $port after the unit changed - see $log"
     return 1
   fi
-  if curl -sf -m 3 -o /dev/null "http://$host:$port/api/state"; then
+  if _dash_answers "$host" "$port"; then
     c_ok "dash already serving on $port"
     return 0
   fi
@@ -217,7 +226,7 @@ _dash_ensure() { # <port> <host>
   fi
   for i in $(seq 1 20); do
     sleep 0.5
-    curl -sf -m 3 -o /dev/null "http://$host:$port/api/state" \
+    _dash_answers "$host" "$port" \
       && { c_ok "dash started on $port$([ "$unit" -eq 1 ] && printf ' as %s.service' "$DASH_UNIT") (log: $log)"; return 0; }
     [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || break
   done
@@ -325,7 +334,7 @@ cmd_dash() { # [--port n] [--host h] [--ensure] [--restart]
 dash_doctor_line() {
   local port host n
   port="$(dash_port)"; host="$(dash_host)"
-  if curl -sf -m 3 -o /dev/null "http://$host:$port/api/state"; then
+  if _dash_answers "$host" "$port"; then
     printf '  dashboard: one for the box, http://%s:%s - up\n' "$host" "$port"
   else
     printf '  dashboard: one for the box, http://%s:%s - DOWN (cel dash --ensure)\n' "$host" "$port"

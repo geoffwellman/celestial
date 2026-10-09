@@ -72,7 +72,9 @@ EOF
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
-_v2_boot_failing_gh() { _V2_FAIL_GH=1 _v2_boot; }
+# the healed ask must see gh's answer, not the degraded one served while a
+# slow retry runs (CEL-116): give the retry all the time it needs
+_v2_boot_failing_gh() { _V2_FAIL_GH=1 CEL_DASH_DEGRADED_WAIT_MS=20000 CEL_DASH_DEGRADED_RETRY_MS=1 _v2_boot; }
 _v2_down() {
   if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
   # a CLI the server spawned can outlive it by a moment and still be writing
@@ -470,5 +472,70 @@ test_v2_usage_says_who_used_an_account_only_when_it_can_tell() {
   assert_eq "$(printf '%s' "$u" | jq -c '.groups[1].accounts[0].used_by')" '[{"ws":"alpha","profile":"luna","n":1}]'
   # two claude accounts behind one gateway: no way to split it, so no offer
   assert_eq "$(printf '%s' "$u" | jq -c '[.groups[0].accounts[].used_by]')" '[null,null]'
+  _v2_down
+}
+
+# CEL-116: a refresh paints from one snapshot of every card's feed, and a
+# feed answered from the warm cache says when it was computed
+test_v2_snapshot_carries_every_card_feed_with_its_age() {
+  _v2_boot
+  local s; s="$(_v2_get "$(_v2_url 'snapshot?ws=all')")"
+  local f
+  for f in fleet services since activity stuck lanes load merges cycle heat usage; do
+    assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].v != null')" "true"
+    assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].at | test("^[0-9]{4}-")')" "true"
+  done
+  # the snapshot is what the feed itself answers, shape for shape
+  assert_eq "$(printf '%s' "$s" | jq '.feeds.merges.v.days | length')" "14"
+  local h; h="$(curl -sf -m 20 -D - -o /dev/null "$(_v2_url 'heat?ws=all')" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  assert_contains "$h" "x-cel-computed-at"
+  _v2_down
+}
+
+# a second request for a computed feed is served from the cache - the inbox
+# is not re-parsed per request - yet a new inbox line still shows up
+test_v2_feed_cache_serves_warm_and_sees_new_mail() {
+  _v2_boot
+  _v2_get "$(_v2_url 'activity?limit=50')" >/dev/null
+  printf '{"id":"1000000000000000009","ts":"%s","to":"root","from":"steward","kind":"blocked","message":"gadget wedged"}\n' "$(_v2_ago 10)" >> "$T/inbox/alpha.jsonl"
+  local i a=""; for i in $(seq 1 20); do
+    a="$(_v2_get "$(_v2_url 'activity?limit=50')")"
+    printf '%s' "$a" | grep -q 'gadget wedged' && break; sleep 0.3
+  done
+  assert_contains "$a" "gadget wedged"
+  _v2_down
+}
+
+# CEL-116 live check: the Needs-you card comes from /api/state, which must be
+# warm like the feeds, and before its first answer the page says loading -
+# never a count of 0 that reads as "nothing needs you"
+test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
+  _v2_boot
+  local a b
+  a="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  b="$(curl -sf -m 20 -D - -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  assert_contains "$a" "x-cel-computed-at"
+  assert_eq "$b" "$a"
+  local html; html="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
+  assert_eq "$(printf '%s' "$html" | grep -c 'id="nyc">0<' || true)" "0"
+  _v2_down
+}
+
+# review on #141: a /api/state ask waiting on a read that a newer inbox
+# change superseded woke to an emptied entry and answered 500 - the classic
+# page's refresh failed right after every mutation. Asks racing appends all
+# answer 200, and the last answer shows the last line.
+test_v2_state_asks_racing_inbox_changes_never_fail() {
+  _v2_boot
+  curl -sf -m 20 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state"
+  local i pids=()
+  for i in 1 2 3 4 5 6; do
+    printf '{"id":"100000000000000010%s","ts":"%s","to":"root","from":"steward","kind":"status","message":"widget %s"}\n' "$i" "$(_v2_ago 5)" "$i" >> "$T/inbox/alpha.jsonl"
+    curl -s -m 20 -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$DASH_PORT/api/state" >> "$T/codes" & pids+=($!)
+    sleep 0.05
+  done
+  wait "${pids[@]}"
+  assert_eq "$(sort -u "$T/codes" | tr -d '\n')" "200"
+  assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" "widget 6"
   _v2_down
 }

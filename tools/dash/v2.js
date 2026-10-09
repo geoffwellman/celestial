@@ -27,6 +27,7 @@ function recall(k,d){try{var v=JSON.parse(localStorage.getItem(k)||'null');retur
 // ---- data ------------------------------------------------------------------
 var S=null;            // /api/state as fetched
 var F={};              // /api/v2/<feed> by name
+var FAT={};            // when the server computed each F[name], ms (CEL-116)
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
 var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
@@ -43,12 +44,30 @@ async function getJSON(u){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var 
 // ('state' for /api/state) and clears on the next success.
 var ERR={};
 function failed(name){return function(e){ERR[name]=(e&&e.status)||'network'}}
+// CEL-116: the server's x-cel-computed-at, so a card drawn from an old value says so
+async function getFeed(u,name){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}
+  var at=Date.parse(r.headers.get('x-cel-computed-at')||'');FAT[name]=isNaN(at)?Date.now():at;return r.json()}
+// FIRST PAINT WITHOUT WAITING: one request for the last value of every card's
+// feed, drawn at once; the live refresh then replaces it feed by feed. A feed
+// the live refresh already answered is never overwritten by the snapshot.
+async function snapshot(){
+  try{var d=await getJSON('/api/v2/snapshot?ws='+encodeURIComponent(WSF));
+    Object.keys(d.feeds||{}).forEach(function(f){if(F[f]===undefined){F[f]=d.feeds[f].v;FAT[f]=Date.parse(d.feeds[f].at)||Date.now()}});
+    renderAll()}catch(e){/* the live refresh draws, or reports, every card */}
+}
+function ageNote(id){
+  var src=NEEDS[id]||[],old=Infinity;
+  src.forEach(function(n){if(FAT[n]!==undefined)old=Math.min(old,FAT[n])});
+  if(old===Infinity)return '';var s=Math.round((Date.now()-old)/1000);
+  if(s*1000<=REFRESH_MS*3)return '';
+  return '<div class="sub age" title="this card is showing the last value the server computed">as of '+(s<120?s+'s':Math.round(s/60)+'m')+' ago</div>';
+}
 async function refresh(){
   var q='ws='+encodeURIComponent(WSF);
   var jobs=[getJSON('/api/state').then(function(s){S=s;delete ERR.state}).catch(failed('state'))];
   FEEDS.forEach(function(f){
     var extra=f==='activity'?'&limit=30':f==='merges'?'&days=14':f==='load'?'&hours=24':f==='lanes'?'&range=today':'';
-    jobs.push(getJSON('/api/v2/'+f+'?'+q+extra).then(function(d){F[f]=d;delete ERR[f]}).catch(failed(f)));
+    jobs.push(getFeed('/api/v2/'+f+'?'+q+extra,f).then(function(d){F[f]=d;delete ERR[f]}).catch(failed(f)));
   });
   await Promise.all(jobs);
   window.V2REFRESHES++;
@@ -176,7 +195,7 @@ var BODY={
   return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
 };
 // what each card is drawn from; a card waits for, or reports, its sources
-var NEEDS={since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
+var NEEDS={needs:['state'],since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
   heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
   services:['services'],funnel:['fleet','merges'],afk:[]};
 function cardStatus(id){
@@ -280,7 +299,9 @@ function cardEl(w){
   el.innerHTML='<h3><span class="ttl">'+esc(w.t)+'</span>'+(w.id==='needs'?' <span class="n" id="alerts-h"></span>':'')+'<span class="scope"></span>'+
     '<select class="size" title="card size"><option value="half">half</option><option value="full">full width</option><option value="tall">tall</option></select>'+
     '<span class="x"></span><span class="ex" title="expand">⤢</span><span class="grip" title="drag to move">⠿</span></h3><div class="body"></div>';
-  if(w.id==='needs')el.querySelector('.body').appendChild(needsHost());
+  // CEL-116: until /api/state first answers, Needs-you says loading - an
+  // empty card or a 0 would read as "nothing needs you"
+  if(w.id==='needs'){var nb=el.querySelector('.body');nb.insertAdjacentHTML('beforeend','<div class="nyload">'+none(cardStatus('needs')||'loading needs you…')+'</div>');nb.appendChild(needsHost())}
   return el;
 }
 function renderAll(){
@@ -299,10 +320,12 @@ function renderAll(){
     el.querySelector('.scope').textContent=WSF==='all'?'':' · '+WSF;
     if(id==='needs')return;
     var html,why=cardStatus(id);
-    if(why)html=none(why);else try{html=BODY[id]()}catch(e){html=none('could not draw: '+e.message);window.V2ERRORS.push(id+': '+e.message)}
+    if(why)html=none(why);else try{html=BODY[id]()+ageNote(id)}catch(e){html=none('could not draw: '+e.message);window.V2ERRORS.push(id+': '+e.message)}
     var b=el.querySelector('.body');
     if(b._html!==html){b._html=html;b.innerHTML=html;restoreArmed(b)}
   });
+  var nyl=document.querySelector('#grid .w[data-id="needs"] .nyload');
+  if(nyl){var nw=S?'':(cardStatus('needs')||'loading needs you…');if(nyl._w!==nw){nyl._w=nw;nyl.innerHTML=nw?none(nw):''}}
   if(S){buildLast();if(needsHost().isConnected)renderNeedsYou();refreshTabs()}
   renderComposer();renderThread();renderDrawer();renderOverlay();
   var o=orchs(),wsn={};o.forEach(function(x){wsn[x.ws]=1});((S&&S.needsYouGroups)||[]).forEach(function(x){wsn[x.workspace]=1});
@@ -577,5 +600,6 @@ document.addEventListener('keydown',function(e){
 
 // ---- boot --------------------------------------------------------------------
 renderAll();
+snapshot();
 refresh();
 setInterval(function(){if(!document.hidden)refresh()},REFRESH_MS);

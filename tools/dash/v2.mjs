@@ -10,15 +10,12 @@ import { join, dirname } from 'node:path';
 import { homedir, cpus, loadavg, totalmem, freemem, networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { store } from './store.mjs';
 
 const DAY = 86400e3;
 const iso = (v) => { if (v === null || v === undefined || v === "") return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
-const readJsonl = (f) => {
-  try {
-    return readFileSync(f, 'utf8').split('\n').filter(Boolean)
-      .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  } catch { return []; }
-};
+// CEL-116: parsed once and kept (store.mjs); the rows are shared, never mutate them
+const readJsonl = (f) => { try { return store.jsonl(f); } catch { return []; } };
 const median = (xs) => {
   if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -37,7 +34,7 @@ const STUCK = {
   no_activity: 'no activity in 14 days - finish or abandon it',
 };
 
-export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents }) => {
+export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents: agentsCold }) => {
   const STATE_DIR = process.env.CEL_DASH_STATE_DIR || join(homedir(), '.local/share/cel');
   const SAMPLES = () => process.env.CEL_SAMPLES_FILE || join(homedir(), '.local/share/cel/samples.jsonl');
   const ACTIVITY = () => join(STATE_DIR, 'dash-activity.jsonl');
@@ -47,7 +44,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // ---- where to look ------------------------------------------------------
   const BOOT = new Date().toISOString();
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
-  const workspaces = () => cached('v2ws', 30000, async () => {
+  // CEL-116: served warm like `slow` - a plain TTL cache made every request
+  // in the 30th second wait on five yq spawns, and every 8th on herdr
+  const workspaces = () => slow('v2ws', 30000, async () => {
     let list = [];
     try {
       list = JSON.parse(await run('yq', ['-c',
@@ -77,10 +76,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   const ledgerOf = (ws) => {
-    try {
-      const rows = JSON.parse(readFileSync(join(ws.path, '.cel', 'delegations.json'), 'utf8'));
-      return Array.isArray(rows) ? rows.filter((r) => r && r.branch) : [];
-    } catch { return []; }
+    const rows = store.json(join(ws.path, '.cel', 'delegations.json'));
+    return Array.isArray(rows) ? rows.filter((r) => r && r.branch) : [];
   };
   const inboxOf = (ws) => readJsonl(join(INBOX_DIR, `${ws.name}.jsonl`));
   const cursorOf = (ws, who) => {
@@ -113,12 +110,85 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     }
     return refresh();
   };
+  // ---- computed feeds, kept warm (CEL-116) --------------------------------
+  // The same three rules as `slow`, one level up: a feed's computed answer is
+  // kept per (feed, query) and served at once; past CEL_DASH_FEED_TTL_MS a
+  // refresh runs behind it, and a timer refreshes every feed a page asked for
+  // in the last ten minutes, so a refresh only waits on a cold server. A
+  // computation that throws is not kept. Each answer carries when it was
+  // computed, so a card can say how old it is.
+  const feeds = new Map();
+  // Review on #141: a feed computed while gh failed is served but never kept
+  // as fresh (t=0) - yet a repo gh cannot resolve fails EVERY time (two did on
+  // the live box), and retrying it on every ask and every warm pass was a gh
+  // spawn every few seconds forever. So a degraded feed is retried at most
+  // once per CEL_DASH_DEGRADED_RETRY_MS (default 60 s); in between its last
+  // answer is served, and it says how old it is.
+  let upstreamFailures = 0;
+  const compute = (f) => {
+    const before = upstreamFailures;
+    f.tried = Date.now();
+    return Promise.resolve().then(f.fn).then((v) => { f.v = v; f.t = upstreamFailures === before ? Date.now() : 0; f.at = Date.now(); return f; });
+  };
+  const DEGRADED_RETRY = () => Number(process.env.CEL_DASH_DEGRADED_RETRY_MS) || 60000;
+  // the cheap feeds follow the page; the ones that spawn (services: `cel
+  // services` per workspace, usage: `cel quota`) or chew the sample ring
+  // (lanes) are kept longer
+  const SLOW_FEEDS = /^(services|usage|lanes):/;
+  const FEED_TTL = (key) => (key && SLOW_FEEDS.test(key) ? Number(process.env.CEL_DASH_SLOW_FEED_TTL_MS) || 30000 : Number(process.env.CEL_DASH_FEED_TTL_MS) || 5000);
+  const due = (k, f) => (f.t ? Date.now() - f.t >= FEED_TTL(k) : Date.now() - (f.tried || 0) >= DEGRADED_RETRY());
+  // peek: any last value at once, however degraded (the snapshot's contract)
+  const feed = (key, fn, peek = false) => {
+    let f = feeds.get(key);
+    if (!f) { f = { v: undefined, t: 0, p: null, fn }; feeds.set(key, f); }
+    f.fn = fn; f.asked = Date.now();
+    const refresh = () => {
+      if (!f.p) f.p = compute(f).finally(() => { f.p = null; });
+      return f.p;
+    };
+    if (f.v === undefined) return refresh();
+    if (due(key, f)) {
+      const p = refresh();
+      // a degraded feed past its back-off waits at most
+      // CEL_DASH_DEGRADED_WAIT_MS (default 0) for the retry
+      if (!f.t && !peek) {
+        const wait = Number(process.env.CEL_DASH_DEGRADED_WAIT_MS) || 0;
+        return Promise.race([p, new Promise((r) => setTimeout(() => r(f), wait))]);
+      }
+      p.catch(() => {});
+    }
+    return Promise.resolve(f);
+  };
+  // one feed at a time, so a warm pass never holds the event loop for all of
+  // them at once; only feeds a page asked for in the last minute are kept warm
+  // (review on #141), and one nobody asked for in ten minutes is forgotten
+  let feedWarming = false;
+  const feedWarm = async () => {
+    if (feedWarming) return;
+    feedWarming = true;
+    try {
+      for (const [k, f] of [...feeds]) {
+        const idle = Date.now() - f.asked;
+        if (idle > 600000) { feeds.delete(k); continue; }
+        if (idle > (Number(process.env.CEL_DASH_FEED_KEEP_WARM_MS) || 60000) || f.p || !due(k, f)) continue;
+        f.p = compute(f).catch(() => {}).finally(() => { f.p = null; });
+        await f.p;
+        await new Promise((r) => setImmediate(r));
+      }
+    } finally { feedWarming = false; }
+  };
+  // something changed by our own hand (an act): the next ask recomputes
+  const feedDrop = () => feeds.clear();
+  const wsKey = (wss) => wss.map((w) => w.name).join(',');
+
+  const agents = async () => (await slow('agents', 8000, agentsCold)) || [];
   const ghList = async (slug, st, fields) => {
     const v = await slow(`gh:${st}:${slug}`, 600000, async () => {
       const out = await run('gh', ['pr', 'list', '--repo', slug, '--state', st, '--json', fields, '--limit', '200'], 30000);
       if (out === null) return null;
       try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; }
     });
+    if (!v) upstreamFailures++;
     return v || [];
   };
   const merged = async (wss) => {
@@ -149,8 +219,23 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     for (const p of await merged(wss)) {
       items.push({ ts: iso(p.mergedAt), ws: p.ws, kind: 'merge', text: `${p.repo}#${p.number} merged: ${p.title}`, url: p.url });
     }
-    for (const ws of wss) {
-      const mail = inboxOf(ws);
+    for (const ws of wss) items.push(...wsActivity(ws));
+    for (const a of readJsonl(ACTIVITY())) if (names.has(a.ws) && iso(a.ts)) items.push({ ...a, ts: iso(a.ts) });
+    items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+    return items;
+  };
+  // CEL-116: one workspace's inbox and ledger items, rebuilt only when the
+  // store hands back a new parse (a grown inbox, a rewritten ledger) - the
+  // largest inbox is tens of thousands of lines, and every row was re-dated
+  // on every request. The items are shared: never mutate them.
+  const actMemo = new Map();
+  const wsActivity = (ws) => {
+    const mail = inboxOf(ws);
+    const led = store.json(join(ws.path, '.cel', 'delegations.json'));
+    const m0 = actMemo.get(ws.name);
+    if (m0 && m0.mail === mail && m0.led === led) return m0.items;
+    const items = [];
+    {
       const decisions = new Map(mail.filter((m) => m.kind === 'decision' || m.kind === 'blocked').map((m) => [m.id, m]));
       for (const m of mail) {
         const ts = iso(m.ts);
@@ -174,8 +259,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         }
       }
     }
-    for (const a of readJsonl(ACTIVITY())) if (names.has(a.ws) && iso(a.ts)) items.push({ ...a, ts: iso(a.ts) });
-    items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+    actMemo.set(ws.name, { mail, led, items });
     return items;
   };
   // a ring, newest CEL_DASH_ACTIVITY_KEEP lines (review on #131): the feed
@@ -258,8 +342,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const since = async (req, url, wss) => {
     const tok = cookieToken(req);
     const at = iso(url.searchParams.get('at')) || (tok && iso(seenStore()[tok])) || new Date(Date.now() - DAY).toISOString();
-    const items = (await activity(wss)).filter((i) => i.ts > at);
-    const st = await stuck(wss);
+    const items = (await feed(`activity:${wsKey(wss)}`, () => activity(wss))).v.filter((i) => i.ts > at);
+    const st = (await feed(`stuck:${wsKey(wss)}`, () => stuck(wss))).v;
     return {
       at,
       counts: {
@@ -282,13 +366,35 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // in that worktree (and takes the pane's state); waiting means a pane that
   // said "blocked" - a person is needed - and nothing else.
   const PANE_STATE = { working: 'running', blocked: 'waiting', idle: 'idle', done: 'idle' };
+  // CEL-116: the sample ring indexed once per change, worktree -> what its
+  // pane said, oldest first. Every ledger row used to scan the whole ring
+  // (hundreds of rows x thousands of samples) on every request.
+  let paneMemo = { rows: null, idx: new Map() };
+  const paneIndex = () => {
+    const rows = readJsonl(SAMPLES());
+    if (paneMemo.rows === rows) return paneMemo.idx;
+    const samples = rows.map((s) => ({ panes: s.panes, t: new Date(s.ts).getTime() })).filter((s) => s.t).sort((a, b) => a.t - b.t);
+    const idx = new Map();
+    for (const s of samples) {
+      const seen = new Set();
+      for (const p of s.panes || []) {
+        // the first pane in a sample for a cwd is the one that counts, as before
+        if (!p || !p.cwd || seen.has(p.cwd)) continue;
+        seen.add(p.cwd);
+        let l = idx.get(p.cwd); if (!l) { l = []; idx.set(p.cwd, l); }
+        l.push({ t: s.t, state: PANE_STATE[p.status] || 'idle' });
+      }
+    }
+    paneMemo = { rows, idx };
+    return idx;
+  };
   const lanes = async (url, wss) => {
     const range = url.searchParams.get('range') || 'today';
     const now = Date.now();
     let start; let end;
     if (range === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime(); end = start + DAY; }
     else { start = now - (range === '3d' ? 3 : 7) * DAY; end = now; }
-    const samples = readJsonl(SAMPLES()).map((s) => ({ ...s, t: new Date(s.ts).getTime() })).filter((s) => s.t).sort((a, b) => a.t - b.t);
+    const byCwd = paneIndex();
     const ag = await agents();
     let prs = [];
     try { prs = [...await open(wss), ...await merged(wss)]; } catch { prs = []; }
@@ -307,10 +413,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         }
         // the samples say what the pane was actually doing, inside the
         // ledger's running spans only
-        const mine = r.worktree ? samples.map((s) => {
-          const p = (s.panes || []).find((x) => x.cwd === r.worktree);
-          return p ? { t: s.t, state: PANE_STATE[p.status] || 'idle' } : null;
-        }).filter(Boolean) : [];
+        const mine = (r.worktree && byCwd.get(r.worktree)) || [];
         let final = [];
         for (const sg of segs) {
           const inside = mine.filter((m) => m.t >= sg.from && m.t < sg.to);
@@ -743,6 +846,62 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return [400, 'unknown action'];
   };
 
+  // one feed's answer as { v, t }: `since` is per browser (its cookie and
+  // ?at), so it is built fresh from the cached activity and stuck lists; every
+  // other feed is cached whole per (feed, query)
+  const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'forecast', 'usage', 'fleet', 'services']);
+  const answer = async (name, req, url, wss, peek = false) => {
+    if (name === 'since') return { v: await since(req, url, wss), at: Date.now() };
+    // Review on #141: the cache key is built only from the parameters the
+    // feed reads, each clamped as the feed clamps it, and the feed computes
+    // from that same normalised query - so the map is bounded by workspaces
+    // x a handful of values, whatever a client sends
+    const n = (k, d, lo, hi) => Math.min(hi, Math.max(lo, Math.floor(Number(url.searchParams.get(k)) || d)));
+    const q = new URLSearchParams();
+    if (name === 'lanes') { const r = url.searchParams.get('range'); q.set('range', !r || r === 'today' ? 'today' : r === '3d' ? '3d' : '7d'); }
+    if (name === 'load') q.set('hours', n('hours', 24, 1, 24 * 14));
+    if (name === 'merges') q.set('days', n('days', 14, 1, 90));
+    if (name === 'cycle') q.set('days', n('days', 30, 1, 365));
+    if (name === 'heat') q.set('days', n('days', 28, 1, 365));
+    const key = `${name}:${wsKey(wss)}?${q}`;
+    const raw = url;
+    url = new URL(`http://localhost/?${q}`);
+    switch (name) {
+      case 'activity': {
+        const limit = Math.min(500, Math.max(1, Number(raw.searchParams.get('limit')) || 50));
+        const before = iso(raw.searchParams.get('before'));
+        const a = await feed(`activity:${wsKey(wss)}`, () => activity(wss), peek);
+        let items = a.v;
+        if (before) items = items.filter((i) => i.ts < before);
+        return { v: { items: items.slice(0, limit).map(({ sub, ...i }) => i) }, at: a.at };
+      }
+      case 'stuck': { const st = await feed(`stuck:${wsKey(wss)}`, () => stuck(wss), peek); return { v: { items: st.v }, at: st.at }; }
+      case 'lanes': return feed(key, () => lanes(url, wss), peek);
+      case 'load': return feed(key, () => load(url), peek);
+      case 'merges': return feed(key, () => merges(url, wss), peek);
+      case 'cycle': return feed(key, () => cycle(url, wss), peek);
+      case 'heat': return feed(key, () => heat(url, wss), peek);
+      case 'forecast': return feed(key, () => forecast(), peek);
+      case 'usage': return feed(key, () => usage(wss), peek);
+      case 'fleet': return feed(key, () => fleet(wss), peek);
+      default: return feed(key, () => services(wss), peek);
+    }
+  };
+  // FIRST PAINT WITHOUT WAITING: every card's feed, with the query the page
+  // asks it with, in one answer - warm values as they are, so a reload draws
+  // at once and the live refresh updates it
+  const PAGE_QUERY = { activity: 'limit=30', merges: 'days=14', load: 'hours=24', lanes: 'range=today' };
+  const snapshot = async (req, url, wss) => {
+    const names = ['fleet', 'services', 'since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage'];
+    const out = {};
+    await Promise.all(names.map(async (n) => {
+      const u = new URL(`http://localhost/api/v2/${n}?${PAGE_QUERY[n] || ''}`);
+      if (url.searchParams.get('ws')) u.searchParams.set('ws', url.searchParams.get('ws'));
+      try { const r = await answer(n, req, u, wss, true); out[n] = { v: r.v, at: new Date(r.at).toISOString() }; } catch { /* the live refresh reports it */ }
+    }));
+    return { at: new Date().toISOString(), feeds: out };
+  };
+
   const json = (res, code, v) => res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(v));
 
   // true when the request was ours
@@ -750,13 +909,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (!String(req.url || '').startsWith('/api/v2/')) return false;
     startWarm();
     const url = new URL(req.url, 'http://localhost');
-    const feed = url.pathname.slice('/api/v2/'.length);
+    const name = url.pathname.slice('/api/v2/'.length);
     if (req.method === 'POST') {
-      if (feed === 'seen') { const at = markSeen(req, res); json(res, 200, { at }); return true; }
-      if (feed === 'act') {
+      if (name === 'seen') { const at = markSeen(req, res); json(res, 200, { at }); return true; }
+      if (name === 'act') {
         let body;
         try { body = await readBody(req, 8000); } catch { res.writeHead(400).end('invalid request body'); return true; }
         const [code, text] = await act(req, res, body);
+        if (code === 200) feedDrop();
         res.writeHead(code, { 'content-type': 'text/plain' }).end(text);
         return true;
       }
@@ -766,28 +926,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (req.method !== 'GET') { res.writeHead(404).end('not found'); return true; }
     const wss = await scope(url);
     if (!wss) { res.writeHead(400).end('unknown workspace'); return true; }
-    switch (feed) {
-      case 'since': json(res, 200, await since(req, url, wss)); return true;
-      case 'activity': {
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));
-        const before = iso(url.searchParams.get('before'));
-        let items = await activity(wss);
-        if (before) items = items.filter((i) => i.ts < before);
-        json(res, 200, { items: items.slice(0, limit).map(({ sub, ...i }) => i) });
-        return true;
-      }
-      case 'stuck': json(res, 200, { items: await stuck(wss) }); return true;
-      case 'lanes': json(res, 200, await lanes(url, wss)); return true;
-      case 'load': json(res, 200, load(url)); return true;
-      case 'merges': json(res, 200, await merges(url, wss)); return true;
-      case 'cycle': json(res, 200, await cycle(url, wss)); return true;
-      case 'heat': json(res, 200, await heat(url, wss)); return true;
-      case 'forecast': json(res, 200, await forecast()); return true;
-      case 'usage': json(res, 200, await usage(wss)); return true;
-      case 'fleet': json(res, 200, await fleet(wss)); return true;
-      case 'services': json(res, 200, await services(wss)); return true;
-      default: res.writeHead(404).end('not found'); return true;
-    }
+    if (name === 'snapshot') { json(res, 200, await snapshot(req, url, wss)); return true; }
+    if (!FEED_NAMES.has(name)) { res.writeHead(404).end('not found'); return true; }
+    const r = await answer(name, req, url, wss);
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cel-computed-at': new Date(r.at).toISOString() })
+      .end(JSON.stringify(r.v));
+    return true;
   };
   // keep the slow passes warm so a request never waits on gh or quota
   const warm = async () => {
@@ -805,8 +949,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     warming = true;
     setTimeout(warm, 0).unref();
     setInterval(warm, Number(process.env.CEL_DASH_WARM_MS) || 300000).unref();
+    setInterval(feedWarm, Number(process.env.CEL_DASH_FEED_WARM_MS) || 5000).unref();
   };
   // test seam: drop the slow caches so a test can watch a cold start
-  if (process.env.CEL_TESTING) process.on('SIGUSR2', () => { for (const k of Object.keys(flights)) delete flights[k]; });
+  if (process.env.CEL_TESTING) process.on('SIGUSR2', () => { for (const k of Object.keys(flights)) delete flights[k]; feedDrop(); });
   return { handle };
 };

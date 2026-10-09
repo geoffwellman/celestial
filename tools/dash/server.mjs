@@ -12,13 +12,14 @@ import { createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readdirSync, existsSync, readFileSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
+import { store } from './store.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
 // CEL-107: there used to be one server per workspace, each polling the same
 // herdr and gh as the others, and the per-workspace restart race took one of
@@ -125,7 +126,9 @@ const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
   const f = join(w.wsdir, '.cel', 'delegations.json');
   if (!existsSync(f)) return {};
   try {
-    const rows = JSON.parse(readFileSync(f, 'utf8'));
+    // CEL-116: parsed once per change, shared with the v2 feeds
+    const rows = store.json(f);
+    if (!Array.isArray(rows)) return {};
     const by = {};
     // herdr lowercases worktree directory names; the ledger keeps the branch
     // as written. Join case-insensitively or nothing ever matches.
@@ -201,9 +204,8 @@ const triageRanks = () => {
 const inbox = (w) => cached(`inbox:${w.name}`, 8000, async () => {
   const f = join(INBOX_DIR, `${w.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
-  const items = readFileSync(f, 'utf8').split('\n').filter(Boolean)
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
+  // CEL-116: the shared, append-aware parse; never mutated below
+  const items = store.jsonl(f);
   // unread = after each recipient's cursor, so the dash agrees with cel inbox
   const cursor = (who) => {
     const c = join(INBOX_DIR, `${w.name}.${who}.cursor`);
@@ -1774,7 +1776,73 @@ const logReq = (req, code) => {
 // module so this file does not grow another thousand lines.
 const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents });
 
+// CEL-116 (live check of #141): /api/state is what the Needs-you card and
+// the header count are drawn from, and it was the one thing a refresh still
+// waited 3-4 s for - the feeds painted, Needs-you said 0, then jumped to 14.
+// It is served warm now, like the v2 feeds: the last answer at once, a
+// refresh behind it past CEL_DASH_STATE_TTL_MS (default the page refresh, at most 5 s), kept warm for a
+// minute after a page last asked. A failed read is never kept: cold, it
+// answers 500 as before; warm, the last good answer stands. Any POST may have
+// changed it (a resolve, a decision), so a POST forgets every answer.
+// A warm answer is only served while the files it was read from are as they
+// were: a new inbox line (a decision asked, a resolution) or a ledger write
+// is the very thing the owner is waiting to see, so it drops the warm answer
+// and the upstream caches that would hide it, and the ask computes fresh.
+const states = new Map();
+const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
+const stateSig = () => WORKSPACES.map((x) => `${fileSig(join(INBOX_DIR, `${x.name}.jsonl`))}/${fileSig(join(x.wsdir, '.cel', 'delegations.json'))}`).join('|');
+const warmState = (w, warmer = false) => {
+  let f = states.get(w.name);
+  if (!f) { f = { v: undefined, at: 0, p: null, gen: 0, have: 0 }; states.set(w.name, f); }
+  if (!warmer) f.asked = Date.now();
+  const sig = stateSig();
+  // Every computation resolves to ITS OWN answer, and is kept only if no
+  // later-started one has landed first. Review on #141: a request waiting on
+  // a computation that a newer file change superseded used to wake to an
+  // emptied entry and answer 500 - the classic page's refresh failed right
+  // after every mutation, which is exactly when the owner is mid-thought.
+  const refresh = () => {
+    if (f.p && f.psig === sig) return f.p;
+    const gen = ++f.gen;
+    const p = state(null, w).then((v) => {
+      const r = { v, at: Date.now() };
+      if (gen > f.have) { f.have = gen; f.v = v; f.at = r.at; f.sig = sig; }
+      return r;
+    }).finally(() => { if (f.p === p) f.p = null; });
+    f.p = p; f.psig = sig;
+    return p;
+  };
+  if (f.v !== undefined && f.sig !== sig) {
+    // the files moved: this ask waits for an answer read after the change,
+    // as it always did, and the caches that would hide the change go first
+    delete cache.decisions;
+    for (const x of WORKSPACES) { delete cache[`inbox:${x.name}`]; delete cache[`ledger:${x.name}`]; }
+    return refresh();
+  }
+  if (f.v === undefined || warmer) return refresh();
+  if (Date.now() - f.at >= STATE_TTL()) refresh().catch(() => {});
+  return Promise.resolve({ v: f.v, at: f.at });
+};
+// The warm read runs AHEAD of the page's poll, once per state TTL: the
+// classic page prints the answer's own `updated` time, and polls every
+// REFRESH_MS - served from a value refreshed only when an ask found it stale,
+// every other poll repeated the last answer and the page fell a refresh
+// behind (review on #141). Ahead of the poll, each poll gets a read at most
+// one TTL old, as fresh as the per-request read it replaces, and every open
+// tab shares it.
+const STATE_TTL = () => Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS);
+setInterval(() => {
+  for (const [k, f] of states) {
+    if (Date.now() - f.asked > 60000) { states.delete(k); continue; }
+    if (!f.p && Date.now() - f.at >= STATE_TTL() / 2) {
+      const w = wsOf(k);
+      if (w) warmState(w, true).catch(() => {});
+    }
+  }
+}, STATE_TTL()).unref();
+
 const server = createServer(async (req, res) => {
+  if (req.method === 'POST') states.clear();
   res.on('finish', () => logReq(req, res.statusCode));
   try {
     if (!security.allow(req, res)) return;
@@ -1880,8 +1948,11 @@ const server = createServer(async (req, res) => {
     } else if (req.method === 'GET' && (req.url === '/api/state' || req.url.startsWith('/api/state?'))) {
       const w = wsOf(wsParam(req));
       if (!w) { res.writeHead(404).end('no such workspace'); return; }
-      const body = JSON.stringify(await state(req, w));
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body);
+      const r = await warmState(w);
+      // the one per-request field: whether THIS caller is on loopback
+      const v = r.v.gatewayPanel ? { ...r.v, gatewayPanel: { ...r.v.gatewayPanel, loopback: isLoopback(req.socket && req.socket.remoteAddress) } } : r.v;
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cel-computed-at': new Date(r.at).toISOString() })
+        .end(JSON.stringify(v));
     } else if (req.method === 'POST' && req.url === '/api/prompt') {
       const { target, message } = await readBody(req);
       if (!target || !message) { res.writeHead(400).end('target and message required'); return; }
