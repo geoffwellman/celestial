@@ -290,6 +290,6 @@ test_ask_pr_links_are_stored_on_the_record() {
   _ask_as alpha-orch alpha --title "top up" --pr "widget#7" --pr "gadget#3" >/dev/null
   local j; j="$(cmd_decide list --json 2>/dev/null)"
   assert_eq "$(printf '%s\n' "$j" | jq -r '[.prs[].ref] | join(",")')" "widget#7,gadget#3"
-  assert_fails _ask_as alpha-orch alpha --title "bad" --pr "widget7"
+  if (_ask_as alpha-orch alpha --title "bad" --pr "widget7" >/dev/null); then echo "bad --pr accepted"; return 1; fi
   rm -rf "$T"
 }

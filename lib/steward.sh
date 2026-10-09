@@ -674,10 +674,25 @@ _steward_review_sweep() { # <agents-json>
         done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
 
+      # WAITING ON THE OWNER IS NOT A WORKER FINDING (CEL-115). A PR whose
+      # only red check was an external review bot out of credit was nudged
+      # "get a worker on it" three times in a day; no worker can pay a bill.
+      # An open decision linking the PR (`cel decide ask --pr <repo>#<n>`, or
+      # naming the repo and #<n> in its title/blocks/context) silences the
+      # red, changes-requested and no-worker nudges until it is closed. The
+      # daily decide summary still lists the decision itself.
+      # shellcheck source=lib/decide.sh
+      . "${BASH_SOURCE[0]%/*}/decide.sh"
+      local owner_prs
+      owner_prs="$(decide_open_json "$(ws_name "$wsdir")" 2>/dev/null | jq -r --arg repo "$repo" '
+        ([.prs[]?.ref | select(startswith($repo + "#")) | ltrimstr($repo + "#")]
+         + (((.title // "") + " " + (.blocks // "") + " " + (.context // "")) as $t
+            | if ($t | contains($repo)) then [$t | scan("#([0-9]+)\\b")[0]] else [] end))[]' 2>/dev/null || true)"
       local num branch review failing working
       while IFS=$'\t' read -r num branch review failing; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
+        if [ "$review" != "APPROVED" ] && printf '%s\n' "$owner_prs" | grep -qx "$num"; then continue; fi
         # a worker actively on the branch means the loop is moving - leave it
         working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
           | jq -r '[.[] | select(.agent_status == "working")] | length')"

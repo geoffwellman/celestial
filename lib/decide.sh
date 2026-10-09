@@ -36,7 +36,7 @@ decide_open_json() { # <ws>
         | select([.id] | inside($done) | not)
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
-        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
+        | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if $u.prs then {prs: $u.prs} else {} end) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
         | . + {workspace: $ws, urgent: (.urgent == true),
                age_secs: (($now | tonumber) - (.ts | _epoch)),
                # since the asker last touched it: a re-ask is not stale
@@ -92,7 +92,7 @@ cel decide - the owner's one queue of decisions, across every workspace
 
   cel decide ask --title <one line> [--option <label>::<tradeoff>]... [--recommend <n>]
                  --context <what/why, options, recommendation, if unanswered> [--blocks <what waits on it>] [--urgent] [--workspace w]
-                 [--supersedes <id>]
+                 [--supersedes <id>] [--pr <repo>#<num>]...
       file a question for the owner; prints its id. The asker is who you are
       (cel inbox whoami), never a flag. Re-asking the same title updates the
       open record instead of adding a second one. --urgent is for live risk,
@@ -101,7 +101,9 @@ cel decide - the owner's one queue of decisions, across every workspace
       one, in the same write. --context is required: at least 120 characters
       of plain prose (URLs do not count) saying what happened and why it needs
       the owner now, what each option does in practice, what you recommend
-      and why, and what happens if nobody answers.
+      and why, and what happens if nobody answers. --pr links a PR the
+      question blocks (repeatable): while it is open the steward does not
+      nudge that PR as a worker finding.
   cel decide list [--json]
       every open owner decision in every workspace, oldest first.
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
@@ -118,7 +120,7 @@ EOS
 }
 
 _decide_ask() {
-  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false supersedes=""
+  local title="" recommend="" context="" blocks="" ws="" opts="[]" o label trade urgent=false supersedes="" prs="[]"
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title="$2"; shift 2 ;;
@@ -133,6 +135,10 @@ _decide_ask() {
       --urgent) urgent=true; shift ;;
       --workspace) ws="$2"; shift 2 ;;
       --supersedes) supersedes="$2"; shift 2 ;;
+      --pr)
+        case "$2" in *?#[0-9]*) ;; *) die "cel decide ask: --pr takes <repo>#<num>, got '$2'" ;; esac
+        case "${2##*#}" in *[!0-9]*) die "cel decide ask: --pr takes <repo>#<num>, got '$2'" ;; esac
+        prs="$(jq -c --arg r "$2" '. + [{ref: $r}]' <<< "$prs")"; shift 2 ;;
       *) die "cel decide ask: unknown argument '$1'" ;;
     esac
   done
@@ -156,15 +162,31 @@ _decide_ask() {
   # A typo here used to create a fresh mailbox no list would ever read.
   _inbox_ws_known "$wsname" || die "cel decide ask: no workspace named '$wsname' is registered here (cel ws list)"
   local asker; asker="$(_inbox_me)"
+  # CEL-115: each --pr gets the PR's URL when the workspace knows the repo, so
+  # the dashboard card can link straight to it.
+  if [ "$prs" != "[]" ]; then
+    local wsd; wsd="$(registry_path "$wsname" 2>/dev/null || true)"
+    if [ -n "$wsd" ] && [ -f "$wsd/workspace.yaml" ] && declare -F ws_repo_get >/dev/null; then
+      local r slug out="[]"
+      while IFS= read -r r; do
+        slug="$(ws_repo_get "$wsd" "${r%%#*}" url 2>/dev/null \
+          | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)"
+        out="$(jq -c --arg r "$r" --arg s "$slug" '. + [{ref: $r} + (if $s != "" then
+          {url: ("https://github.com/" + $s + "/pull/" + ($r | split("#") | last))} else {} end)]' <<< "$out")"
+      done < <(jq -r '.[].ref' <<< "$prs")
+      prs="$out"
+    fi
+  fi
   local fields
   fields="$(jq -nc --arg title "$title" --argjson options "$opts" --arg rec "$recommend" \
     --arg context "$context" --arg blocks "$blocks" --arg asker "$asker" --argjson urgent "$urgent" \
-    --arg sup "$supersedes" \
+    --arg sup "$supersedes" --argjson prs "$prs" \
     '{title: $title, options: $options, recommended: (if $rec == "" then null else ($rec | tonumber) end),
       context: $context, blocks: $blocks, asker: $asker, message: $title}
      # urgent only when asked: a re-ask that omits it must not clear it
      + (if $urgent then {urgent: true} else {} end)
-     + (if $sup != "" then {supersedes: $sup} else {} end)')"
+     + (if $sup != "" then {supersedes: $sup} else {} end)
+     + (if ($prs | length) > 0 then {prs: $prs} else {} end)')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields" "$supersedes"
 }
 
