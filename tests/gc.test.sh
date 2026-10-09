@@ -374,6 +374,38 @@ test_gc_identity_rejects_a_runtime_carrying_neither_marker() {
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
 }
 
+# The environment is evidence only when it MATCHES: a role file outside the
+# registered workspace, a root/orchestrator role, or a workspace the registry
+# does not know proves nothing, and the argv fallback finds nothing either.
+_gc_spawn_pi_env() { # <role-file> <workspace>
+  env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
+      CEL_ROLE_FILE="$1" CEL_WORKSPACE="$2" \
+      "$T/bin/pi" "$T/agent.sh" < "$T/input" &
+  GC_PID=$!
+  trap 'builtin kill -9 "$GC_PID" 2>/dev/null || true; rm -rf "$T"' EXIT
+  local i
+  for ((i=0;i<200;i++)); do
+    [ "$(cat "/proc/$GC_PID/comm" 2>/dev/null)" = pi ] && return 0
+    sleep 0.01
+  done
+  echo "test process did not start"; return 1
+}
+
+test_gc_identity_rejects_a_mismatched_launch_environment() {
+  _gc_env_fixture
+  mkdir -p "$T/elsewhere/.cel"
+  printf 'worker role\n' > "$T/elsewhere/.cel/role-worker.md"
+  printf 'root role\n' > "$GC_WS/.cel/role-root.md"
+  _gc_spawn_pi_env "$T/elsewhere/.cel/role-worker.md" "$GC_WS" || return 1
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo || return 1
+  builtin kill -9 "$GC_PID" 2>/dev/null || true
+  _gc_spawn_pi_env "$GC_WS/.cel/role-worker.md" "$T/elsewhere" || return 1
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo || return 1
+  builtin kill -9 "$GC_PID" 2>/dev/null || true
+  _gc_spawn_pi_env "$GC_WS/.cel/role-root.md" "$GC_WS" || return 1
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
+}
+
 # Older omp and claude panes were launched before the variables existed and
 # must keep working until they restart, so the argv scan stays as a fallback.
 test_gc_identity_still_accepts_the_legacy_argv_stamp() {
