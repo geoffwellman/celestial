@@ -472,3 +472,34 @@ test_v2_usage_says_who_used_an_account_only_when_it_can_tell() {
   assert_eq "$(printf '%s' "$u" | jq -c '[.groups[0].accounts[].used_by]')" '[null,null]'
   _v2_down
 }
+
+# CEL-116: a refresh paints from one snapshot of every card's feed, and a
+# feed answered from the warm cache says when it was computed
+test_v2_snapshot_carries_every_card_feed_with_its_age() {
+  _v2_boot
+  local s; s="$(_v2_get "$(_v2_url 'snapshot?ws=all')")"
+  local f
+  for f in fleet services since activity stuck lanes load merges cycle heat usage; do
+    assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].v != null')" "true"
+    assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].at | test("^[0-9]{4}-")')" "true"
+  done
+  # the snapshot is what the feed itself answers, shape for shape
+  assert_eq "$(printf '%s' "$s" | jq '.feeds.merges.v.days | length')" "14"
+  local h; h="$(curl -sf -m 20 -D - -o /dev/null "$(_v2_url 'heat?ws=all')" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
+  assert_contains "$h" "x-cel-computed-at"
+  _v2_down
+}
+
+# a second request for a computed feed is served from the cache - the inbox
+# is not re-parsed per request - yet a new inbox line still shows up
+test_v2_feed_cache_serves_warm_and_sees_new_mail() {
+  _v2_boot
+  _v2_get "$(_v2_url 'activity?limit=50')" >/dev/null
+  printf '{"id":"1000000000000000009","ts":"%s","to":"root","from":"steward","kind":"blocked","message":"gadget wedged"}\n' "$(_v2_ago 10)" >> "$T/inbox/alpha.jsonl"
+  local i a=""; for i in $(seq 1 20); do
+    a="$(_v2_get "$(_v2_url 'activity?limit=50')")"
+    printf '%s' "$a" | grep -q 'gadget wedged' && break; sleep 0.3
+  done
+  assert_contains "$a" "gadget wedged"
+  _v2_down
+}
