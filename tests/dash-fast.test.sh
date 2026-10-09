@@ -65,3 +65,26 @@ http.server.ThreadingHTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever(
   assert_eq "$(grep -c 'api/state' "$CEL_ROOT/lib/dash.sh" || true)" "0"
   rm -rf "$T"
 }
+
+# review on #141: an append that splits a multibyte character between two
+# writes is decoded whole, and an unreadable inbox is an error, not calm
+test_dash_store_keeps_a_split_multibyte_line_whole_and_throws_on_unreadable() {
+  local T; T="$(mktemp -d)"
+  local out; out="$(_df_node "
+import { createStore } from '$CEL_ROOT/tools/dash/store.mjs';
+import { appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+const f = '$T/alpha.jsonl'; const s = createStore();
+writeFileSync(f, '{\"m\":\"a\"}\n');
+s.jsonl(f);
+const line = Buffer.from('{\"m\":\"\u00e9t\u00e9\"}\n');
+appendFileSync(f, line.subarray(0, 8));
+s.jsonl(f);
+appendFileSync(f, line.subarray(8));
+const got = s.jsonl(f).map((r) => r.m).join(',');
+mkdirSync('$T/beta.jsonl');
+let threw = false; try { s.jsonl('$T/beta.jsonl'); } catch { threw = true; }
+console.log(got + '|' + threw);
+")"
+  assert_eq "$out" "a,été|true"
+  rm -rf "$T"
+}
