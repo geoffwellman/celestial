@@ -539,3 +539,49 @@ test_v2_state_asks_racing_inbox_changes_never_fail() {
   assert_contains "$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" "widget 6"
   _v2_down
 }
+
+# CEL-117: the merged-PR list is fetched by date, not by count. The old
+# `--limit 200` silently dropped the oldest merges of a busy repo (the live
+# box showed 200 where GitHub had 220).
+_v2_gh_merges() { # <count>: a gh that answers <count> merges only to a dated search, 200 otherwise
+  local m; m="$(_v2_ago 7200)"
+  cat >"$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$*" in *--state\ merged*) ;; *) printf '[]'; exit 0 ;; esac
+n=$1; case "\$*" in *merged:\>=*) ;; *) n=200 ;; esac
+printf '['; for i in \$(seq 1 \$n); do [ \$i -gt 1 ] && printf ','; printf '{"number":%d,"title":"t","url":"u","headRefName":"b","createdAt":"$m","mergedAt":"$m"}' \$i; done; printf ']'
+EOF
+  chmod +x "$T/bin/gh"
+}
+test_v2_merges_counts_a_busy_repo_in_full() {
+  _v2_boot
+  _v2_gh_merges 250
+  sleep 1; : > "$T/gh.log"; kill -USR2 "$DASH_PID"; sleep 0.3
+  assert_eq "$(_v2_get "$(_v2_url 'merges?days=14')" | jq '[.days[].counts.widget // 0] | add')" "250"
+  assert_contains "$(cat "$T/gh.log")" "merged:>="
+  _v2_down
+}
+
+# CEL-117: the day boundary is the box's local midnight, in every feed.
+test_v2_merges_buckets_by_local_midnight() {
+  local tz=Pacific/Auckland y d2 a b
+  y="$(TZ=$tz date -d 'yesterday' +%F)"; d2="$(TZ=$tz date -d '2 days ago' +%F)"
+  a="$(TZ=$tz date -u -d "$y 00:30" +%Y-%m-%dT%H:%M:%SZ)"; b="$(TZ=$tz date -u -d "$d2 23:30" +%Y-%m-%dT%H:%M:%SZ)"
+  TZ=$tz _v2_boot
+  printf '#!/usr/bin/env bash\ncase "$*" in *--state\\ merged*) printf %%s %s ;; *) printf %%s "[]" ;; esac\n' \
+    "'[{\"number\":1,\"title\":\"a\",\"url\":\"u\",\"headRefName\":\"x\",\"createdAt\":\"$b\",\"mergedAt\":\"$a\"},{\"number\":2,\"title\":\"b\",\"url\":\"u\",\"headRefName\":\"y\",\"createdAt\":\"$b\",\"mergedAt\":\"$b\"}]'" > "$T/bin/gh"
+  sleep 1; kill -USR2 "$DASH_PID"; sleep 0.3
+  local m; m="$(_v2_get "$(_v2_url 'merges?days=14')")"
+  assert_eq "$(printf '%s' "$m" | jq --arg d "$y" '.days[] | select(.day==$d) | .counts.widget')" "1"
+  assert_eq "$(printf '%s' "$m" | jq --arg d "$d2" '.days[] | select(.day==$d) | .counts.widget')" "1"
+  assert_eq "$(printf '%s' "$m" | jq -r '.timezone')" "$tz"
+  _v2_down
+}
+
+# CEL-117: a repo the box cannot read is flagged, not counted as 0 merges.
+test_v2_merges_flags_an_unreadable_repo() {
+  _v2_boot_failing_gh
+  assert_eq "$(_v2_get "$(_v2_url 'merges?days=14')" | jq -c '.no_access')" '["widget"]'
+  _v2_down
+}
