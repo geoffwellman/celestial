@@ -4,7 +4,7 @@
 [ -n "${_CEL_EXTERNALS:-}" ] && return 0
 _CEL_EXTERNALS=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # externals_merge FILE... -> kind \t name \t ref \t source \t origin-file
 # Buffer all rows: malformed later overlays must not emit a partial install plan.

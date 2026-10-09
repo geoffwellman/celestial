@@ -5,17 +5,17 @@
 [ -n "${_CEL_GC:-}" ] && return 0
 _CEL_GC=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/orphans.sh
-. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"   # cel gc --orphans
+. "${BASH_SOURCE[0]%/*}/orphans.sh"   # cel gc --orphans
 # shellcheck source=lib/box.sh
-. "$(dirname "${BASH_SOURCE[0]}")/box.sh"   # cel gc --box
+. "${BASH_SOURCE[0]%/*}/box.sh"   # cel gc --box
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry cel run writes
+. "${BASH_SOURCE[0]%/*}/run.sh"   # the reviewer registry cel run writes
 
 # WHOSE ACCOUNT ASKS ABOUT A CHECKOUT (CEL-70). ws_of_checkout names the
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
@@ -147,19 +147,63 @@ _gc_panes_settled() { # <pane-list-json>
 
 # An unregistered worktree can still host a hand-started process. Unknown
 # /proc visibility is a veto, not an empty process list.
-_gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
-  local pids pid cwd rc
+# ONE /proc PASS PER RUN (CEL-111). This used to readlink every pid on the box
+# once per worktree: ~1,300 pids x 274 worktrees, 666 readlink execs in 15s on
+# its own. The cwd table is read once per run and every worktree is matched
+# against it - the fast path, which can only KEEP. A table that could not be
+# read is still a veto. Nothing is removed on the snapshot's word alone:
+# _gc_has_process_live re-walks /proc for that one worktree immediately before
+# any removal, so a process started mid-sweep is still seen.
+_GC_CWDS="" _GC_CWDS_STATE=""
+_gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
+# AN UNREADABLE cwd IS A VETO - EXCEPT FOR A FIXED SET OF SYSTEM PROCESSES.
+# Our own uid runs privilege-separated or non-dumpable processes whose cwd the
+# kernel will not show us: the user systemd manager and its (sd-pam),
+# ssh-agent, sshd-session, sftp-server. Each one vetoed EVERY worktree, so gc
+# kept all 232 as "live" and removed nothing, for weeks. These are matched by
+# exact comm and none of them is an agent, a runtime or a tool that could sit
+# in a worktree. Anything else unreadable, an agent included, still vetoes.
+# Chosen over an environ PWD fallback: environ is unreadable for exactly the
+# same processes, and PWD is only where the process started, not where it is now.
+_gc_unreadable_is_system() { # <comm>
+  case "$1" in systemd|'(sd-pam)'|ssh-agent|sshd-session|sftp-server) return 0;; esac
+  return 1
+}
+_gc_cwd_of() { readlink "/proc/$1/cwd" 2>/dev/null; }
+_gc_pid_exists() { [ -d "/proc/$1" ]; }
+_gc_comm_of() { local c=""; read -r c < "/proc/$1/comm" 2>/dev/null; printf '%s' "$c"; }
+_gc_cwd_load() { # fills _GC_CWDS with "pid<TAB>cwd" lines; state ok|none|unknown
+  local pids pid cwd rc out=""
   if pids="$(pgrep -u "$(id -u)" 2>/dev/null)"; then :; else
-    rc=$?; [ "$rc" -eq 1 ] && return 1; return 0
+    rc=$?; [ "$rc" -eq 1 ] && { _GC_CWDS_STATE=none; return 0; }
+    _GC_CWDS_STATE=unknown; return 0
   fi
   for pid in $pids; do
-    if ! cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)"; then
-      [ ! -d "/proc/$pid" ] && continue
-      return 0
+    if cwd="$(_gc_cwd_of "$pid")"; then
+      out="$out$pid"$'\t'"$cwd"$'\n'
+    elif _gc_pid_exists "$pid"; then
+      _gc_unreadable_is_system "$(_gc_comm_of "$pid")" && continue
+      _GC_CWDS_STATE=unknown; return 0
     fi
-    case "$cwd" in "$1"|"$1"/*) return 0;; esac
   done
+  _GC_CWDS="$out" _GC_CWDS_STATE=ok
+}
+_gc_has_process() { # <worktree-dir> -> 0 present/unknown, 1 absent
+  [ -n "$_GC_CWDS_STATE" ] || _gc_cwd_load
+  case "$_GC_CWDS_STATE" in none) return 1;; unknown) return 0;; esac
+  local line cwd
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cwd="${line#*$'\t'}"
+    case "$cwd" in "$1"|"$1"/*) return 0;; esac
+  done <<< "$_GC_CWDS"
   return 1
+}
+
+# The live check, run only right before a removal: a fresh /proc walk.
+_gc_has_process_live() { # <worktree-dir> -> 0 present/unknown, 1 absent
+  local _GC_CWDS="" _GC_CWDS_STATE=""
+  _gc_has_process "$1"
 }
 
 # The three variables `cel run` and fanout put in every agent's environment
@@ -899,7 +943,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
   local removed=0 reaped=0 kept=0 reviewers_closed=0 done_closed=0 managed=$'\n' candidates='[]'
-  _gc_keep_reset
+  _gc_keep_reset; _gc_cwd_reset
   # NEVER SILENT (CEL-80): the sweep used to print one line at the very end,
   # so a slow run was indistinguishable from a hung one.
   printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \
@@ -961,6 +1005,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
       && _gc_agents_removable "$agents" "$cwd" "$names" \
       || { _gc_keep unidentified "$cwd"; continue; }
+    if [ -z "$ws_id" ] && _gc_has_process_live "$cwd"; then _gc_keep live; continue; fi
     if [ "$dry" -eq 1 ]; then
       c_ok "would remove ${ws_id:-orphan} ($cwd, PR $state, settled and landed clean)"
     elif [ -n "$ws_id" ]; then

@@ -77,6 +77,8 @@ test_dash_ensure_starts_the_unit_not_a_fork() {
 
 test_dash_restart_restarts_the_unit_and_keeps_the_port_wait() {
   _du_setup
+  # never the live registry: its legacy dash ports are the box's real servers
+  export CEL_REGISTRY="$T/registry.yaml"; printf 'workspaces: {}\n' >"$CEL_REGISTRY"
   local out rc=0
   out="$(CEL_DASH_PORT_WAIT_S=2 _dash_restart "$PORT" 127.0.0.1 2>&1)" || rc=$?
   assert_eq "$rc" "0"

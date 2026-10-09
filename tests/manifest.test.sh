@@ -64,3 +64,19 @@ test_generated_skill_names() {
 test_generated_skill_get() {
   assert_eq "$(generated_skill_get herdr command)" "herdr --skill"
 }
+
+# CEL-111: yq is the pipx Python wrapper - an interpreter start per call. The
+# manifest is converted ONCE per process and every field is a jq query on it.
+test_manifest_runs_yq_once_per_process() {
+  local B; B="$(mktemp -d)"
+  local real; real="$(command -v yq)"
+  printf '#!/usr/bin/env bash\necho x >> "%s/count"\nexec "%s" "$@"\n' "$B" "$real" > "$B/yq"
+  chmod +x "$B/yq"
+  PATH="$B:$PATH"; export CEL_MANIFEST_CACHE="$B/cache"
+  agent_get claude command >/dev/null
+  agent_injection claude strategy >/dev/null
+  agent_launch_args claude >/dev/null
+  agent_names >/dev/null
+  assert_eq "$(wc -l < "$B/count" | tr -d ' ')" "1"
+  rm -rf "$B"
+}

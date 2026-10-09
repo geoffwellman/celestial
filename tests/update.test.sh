@@ -393,6 +393,8 @@ test_dash_restart_is_idempotent_when_nothing_is_running() {
   local log
   log="$(mktemp -d)"
   _dash_ensure() { printf 'ensure %s %s\n' "$1" "$2" >>"$log/calls"; }
+  # never the live registry: its legacy dash ports are the box's real servers
+  export CEL_REGISTRY="$log/registry.yaml"; printf 'workspaces: {}\n' >"$CEL_REGISTRY"
   _dash_restart alpha 17999 127.0.0.1
   assert_contains "$(cat "$log/calls")" 'ensure alpha 17999'
   local rc=$?

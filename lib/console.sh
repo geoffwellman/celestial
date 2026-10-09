@@ -12,7 +12,7 @@
 [ -n "${_CEL_CONSOLE:-}" ] && return 0
 _CEL_CONSOLE=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 console_tool_dir() { printf '%s' "${CEL_CONSOLE_TOOL_DIR:-$CEL_ROOT/tools/console}"; }
 

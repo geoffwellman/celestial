@@ -83,3 +83,16 @@ test_dash_stop_kills_a_server_that_ignores_term() {
   if kill -0 "$pid" 2>/dev/null; then echo "old dashboard survived the stop"; kill -9 "$pid"; _dr_down; return 1; fi
   _dr_down
 }
+
+# CEL-111: the live dashboard was stopped cleanly from under the box - a test's
+# restart read the live registry's legacy port 7770. Under the suite, stop
+# never signals a server that was not started under the suite.
+test_dash_stop_under_the_suite_spares_a_server_it_did_not_start() {
+  _dr_setup
+  env -u CEL_TESTING CEL_DASH_CONFIG="{\"port\":$PORT}" bash -c 'exec -a "node tools/dash/server.mjs" sleep 30' &
+  local pid=$!
+  sleep 0.3
+  CEL_DASH_PORT_WAIT_S=1 _dash_stop "$PORT" >/dev/null 2>&1
+  if ! kill -0 "$pid" 2>/dev/null; then echo "a test stopped a server it did not start"; _dr_down; return 1; fi
+  kill "$pid"; _dr_down
+}

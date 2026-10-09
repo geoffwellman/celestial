@@ -18,11 +18,11 @@
 [ -n "${_CEL_AFK:-}" ] && return 0
 _CEL_AFK=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 
 # SLEEPING IS A PROPERTY OF THE OPERATOR, not of one product: the state lives
 # in the box's own state dir, so every workspace on this box reads one answer

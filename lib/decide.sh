@@ -16,7 +16,7 @@
 [ -n "${_CEL_DECIDE:-}" ] && return 0
 _CEL_DECIDE=1
 # shellcheck source=lib/inbox.sh
-. "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
+. "${BASH_SOURCE[0]%/*}/inbox.sh"
 
 # The open owner decisions in one workspace, one JSON object per line, oldest
 # first. A re-ask is an `update` naming the record; its fields win, so the

@@ -20,7 +20,7 @@
 [ -n "${_CEL_EFFECTS:-}" ] && return 0
 _CEL_EFFECTS=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 _fx_dir()      { printf '%s' "${CEL_EFFECTS_DIR:-$HOME/.local/share/cel/vendor/canvasui}"; }
 _fx_registry() { printf '%s' "${CEL_EFFECTS_REGISTRY:-https://canvasui.dev/r}"; }

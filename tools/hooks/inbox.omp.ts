@@ -10,7 +10,8 @@
 //   - before_agent_start: `cel inbox read` (advances this reader's cursor) and
 //     inject what it returns as a context message - delivered exactly once,
 //     like tools/hooks/inbox-drain.sh.
-//   - session_shutdown: kill the watcher's whole group (tail | jq | while),
+//   - session_shutdown: kill the watcher's whole group (one tail | jq | while
+//     over every mailbox, CEL-111 - and at most one per pid and reader),
 //     so no tail outlives the session; --parent is the backstop.
 // Recipient and workspace come from the launch context: `cel` derives the
 // reader from cwd/CEL_ROLE, and CEL_WORKSPACE names the mailbox when set.

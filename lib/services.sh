@@ -17,13 +17,13 @@
 [ -n "${_CEL_SERVICES:-}" ] && return 0
 _CEL_SERVICES=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/memory.sh
-. "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+. "${BASH_SOURCE[0]%/*}/memory.sh"
 
 # Overridable so the suite can drive every pane operation against a stub that
 # logs its argv: a service is a pane, and a test that cannot see the pane call
@@ -201,7 +201,7 @@ svc_reach() { # <wsdir> <port>
   local port="${2:-0}" dport host
   [ "$port" -gt 0 ] 2>/dev/null || return 0
   # shellcheck source=lib/dash.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/dash.sh"
+  . "${BASH_SOURCE[0]%/*}/dash.sh"
   dport="$(dash_port)"
   svc_listening "$dport" || return 0
   host="${CEL_DASH_HOST:-$(dash_host)}"

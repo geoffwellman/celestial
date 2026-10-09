@@ -22,7 +22,7 @@
 [ -n "${_CEL_ORPHANS:-}" ] && return 0
 _CEL_ORPHANS=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # The kernel's, unless a test points it at a fixture tree. A real /proc cannot
 # be arranged into "a watcher whose console exited nine days ago" without

@@ -26,9 +26,9 @@
 [ -n "${_CEL_LEARN:-}" ] && return 0
 _CEL_LEARN=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 
 _LEARN_BUDGET="${CEL_LEARN_BUDGET:-2500}"
 _LEARN_AGING_DAYS=30

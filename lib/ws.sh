@@ -3,10 +3,10 @@
 # wiring lives in bin/cel (Task 8); this file is command logic only.
 [ -n "${_CEL_WS:-}" ] && return 0
 _CEL_WS=1
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/wslife.sh
-. "$(dirname "${BASH_SOURCE[0]}")/wslife.sh"
+. "${BASH_SOURCE[0]%/*}/wslife.sh"
 
 # What a workspace root ignores: cloned repos, disposable spikes, the fanout
 # ledger, and the per-box files - secrets and the local role-routing
