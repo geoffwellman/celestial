@@ -13,9 +13,12 @@ _decide_fixture() {
   printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
   printf 'name: bundle\n' > "$T/bundle/workspace.yaml"
 }
+# CEL-113: ask refuses a question with no real context; every fixture gives one
+# (a later --context in "$@" wins).
+DECIDE_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 _ask_as() { # <asker> <ws> args...
   local who="$1" ws="$2"; shift 2
-  CEL_INBOX_ME="$who" cmd_decide ask --workspace "$ws" "$@" 2>/dev/null
+  CEL_INBOX_ME="$who" cmd_decide ask --workspace "$ws" --context "$DECIDE_CTX" "$@" 2>/dev/null
 }
 
 test_ask_then_list_shows_it_once_with_the_recommendation() {
@@ -23,7 +26,7 @@ test_ask_then_list_shows_it_once_with_the_recommendation() {
   local id
   id="$(_ask_as alpha-orch alpha --title "pick a style" \
     --option "flat::quick, plain" --option "glossy::slower, prettier" \
-    --recommend 2 --blocks "the landing page" --context "docs/style.md")"
+    --recommend 2 --blocks "the landing page" --context "docs/style.md - $DECIDE_CTX")"
   [ -n "$id" ] || { echo "ask printed no id"; return 1; }
   local out; out="$(cmd_decide list 2>/dev/null)"
   assert_eq "$(printf '%s\n' "$out" | grep -c 'pick a style' || true)" "1"
@@ -248,5 +251,34 @@ test_withdraw_reason_is_in_the_resolution_message() {
   local id; id="$(_ask_as alpha-orch alpha --title "why gone?")"
   CEL_INBOX_ME=alpha-orch cmd_decide withdraw "$id" --why "merged in another PR" >/dev/null 2>&1
   assert_contains "$(jq -r 'select(.kind == "resolution") | .message' "$CEL_INBOX_DIR/alpha.jsonl")" "merged in another PR"
+  rm -rf "$T"
+}
+
+# --- CEL-113: a decision carries enough context to decide from the card ------
+test_cel113_ask_refuses_without_context() {
+  _decide_fixture
+  local out
+  out="$(CEL_INBOX_ME=alpha-orch cmd_decide ask --workspace alpha --title "no ctx" --option "a::x" 2>&1)" \
+    && { echo "ask with no context was accepted"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "--context"
+  assert_contains "$out" "recommend"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | grep -c 'no ctx' || true)" "0"
+  rm -rf "$T"
+}
+test_cel113_ask_refuses_thin_or_bare_url_context() {
+  _decide_fixture
+  assert_fails env CEL_INBOX_ME=alpha-orch bash -c 'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/decide.sh"; cmd_decide ask --workspace alpha --title "thin" --context "see the PR"' 
+  assert_fails env CEL_INBOX_ME=alpha-orch bash -c 'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/decide.sh"; cmd_decide ask --workspace alpha --title "url" --context "https://example.com/widget/pull/12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"'
+  assert_eq "$(cmd_decide list --json 2>/dev/null | wc -l | tr -d ' ')" "0"
+  rm -rf "$T"
+}
+test_cel113_ask_accepts_real_context_with_a_url_on_top() {
+  _decide_fixture
+  local id; id="$(_ask_as alpha-orch alpha --title "ctx ok" --context "$DECIDE_CTX https://example.com/widget/pull/7")"
+  [ -n "$id" ] || { echo "real context was refused"; rm -rf "$T"; return 1; }
+  # re-asking the same title still updates the one record in place
+  local id2; id2="$(_ask_as alpha-orch alpha --title "ctx ok" --context "$DECIDE_CTX and more")"
+  assert_eq "$id2" "$id"
+  assert_eq "$(cmd_decide list --json 2>/dev/null | jq -r 'select(.title=="ctx ok") | .context')" "$DECIDE_CTX and more"
   rm -rf "$T"
 }

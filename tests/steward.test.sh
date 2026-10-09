@@ -1539,7 +1539,7 @@ test_steward_composer_is_empty_only_when_provably_so() {
 test_cel93_steward_summarises_owner_decisions_once_a_day() {
   _orch_fixture; _nudge_herdr_stub
   source "$CEL_ROOT/lib/decide.sh"
-  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "pick a style" >/dev/null 2>&1
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "pick a style" --context "The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips." >/dev/null 2>&1
   printf '{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"blocked","message":"credit gone"}\n' \
     >> "$CEL_INBOX_DIR/alpha.jsonl"
   local i roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
@@ -1730,7 +1730,7 @@ test_cel101_steward_asks_each_asker_about_stale_decisions_once_a_day() {
     '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"old one","asker":"bundle-orch","options":[]}' \
     '{"id":"1000000002","ts":"2020-01-02T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"old two","asker":"bundle-orch","options":[]}' \
     '{"id":"1000000003","ts":"2020-01-02T00:00:00Z","from":"gadget-orch","to":"owner","kind":"decision","title":"old three","asker":"gadget-orch","options":[]}' >> "$f"
-  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "fresh one" >/dev/null 2>&1
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "fresh one" --context "The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips." >/dev/null 2>&1
   local i roster='{"result":{"agents":[]}}'
   for i in 1 2 3; do
     PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" >/dev/null 2>&1
@@ -1753,7 +1753,7 @@ test_cel101_stale_nudge_counts_from_the_last_reask_and_sends_once_concurrently()
   printf '%s\n' \
     '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"reasked","asker":"bundle-orch","options":[]}' \
     '{"id":"1000000002","ts":"2020-01-01T00:00:00Z","from":"gadget-orch","to":"owner","kind":"decision","title":"left alone","asker":"gadget-orch","options":[]}' >> "$f"
-  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "reasked" >/dev/null 2>&1
+  CEL_INBOX_ME=bundle-orch cmd_decide ask --workspace alpha --title "reasked" --context "The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips." >/dev/null 2>&1
   local i pids=""; for i in 1 2 3 4; do
     ( PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1 ) & pids="$pids $!"
   done
