@@ -31,14 +31,19 @@ function nyAge(s){s=s||0;return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s
 function nyRec(d){var n=d.recommended;return n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
 function nyCard(d){
   var gone=!!NYGONE[d.id];
-  var ctx=d.context?(/^https?:/.test(d.context)?'<a href="'+esc(d.context)+'" target="_blank" rel="noopener">context ↗</a>':esc(d.context)):'';
+  // CEL-113: the context is the card's body, not a link away - the owner
+  // decides from it. Escaped first, then URLs inside it made clickable.
+  var ctx=d.context?esc(d.context).replace(/https?:\/\/[^\s<>"']+/g,function(u){
+    var t=u.replace(/[.,;:)]+$/,''),tail=u.slice(t.length);
+    return '<a href="'+t+'" target="_blank" rel="noopener">'+t+'</a>'+tail}):'';
   var rec=nyRec(d);
   return '<article class="nycard'+(d.urgent?' urgent':'')+(gone?' gone':'')+'" data-id="'+esc(d.id)+'">'+
     (gone?'<div class="nygone">closed elsewhere \u2014 nothing here will be sent <button class="dismiss">dismiss</button></div>':'')+
     '<div class="nyhead">'+(d.urgent?'<span class="tag urgent">urgent</span>':'')+
       '<b class="nytitle">'+esc(d.title)+'</b></div>'+
     '<div class="nymeta">'+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
-      (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+(ctx?' \u00b7 '+ctx:'')+'</div>'+
+      (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+'</div>'+
+    (ctx?'<div class="nyctx">'+ctx+'</div>':'')+
     '<div class="nyopts">'+(d.options||[]).map(function(o,i){
       var r=d.recommended===i+1;
       return '<button class="opt'+(r?' rec':'')+'" data-n="'+(i+1)+'" data-label="'+esc(o.label)+'">'+

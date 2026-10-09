@@ -20,6 +20,9 @@
 .nycard .tag.urgent{background:var(--bad);color:#fff;margin-right:8px}
 .nymeta{font:11.5px var(--mono);color:var(--dim);margin:3px 0 8px}
 .nymeta .blocks{color:var(--warn)}
+/* CEL-113: the context is what the owner decides from - readable, not dim */
+.nyctx{font-size:13.5px;line-height:1.45;margin:0 0 10px;white-space:pre-wrap}
+.nyctx a{color:var(--accent)}
 .nyopts{display:flex;flex-wrap:wrap;gap:8px}
 .nyopts .opt{display:flex;flex-direction:column;align-items:flex-start;text-align:left;
   flex:1 1 200px;max-width:100%;padding:7px 11px;white-space:normal}
