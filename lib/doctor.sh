@@ -11,6 +11,8 @@ _CEL_DOCTOR=1
 . "${BASH_SOURCE[0]%/*}/externals.sh"
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
+# shellcheck source=lib/ledger_states.sh
+. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/install.sh
@@ -187,6 +189,22 @@ doctor_github_account() { # <name> <wsdir>
 # nothing saying so. `release` puts the container straight back; this is what
 # notices when something else took it away. herdr is read through the same
 # override the fanout tests stub, so this check is testable without a server.
+# A ROW IN A STATE NOBODY KNOWS is vetoed by gc for its own worktree forever;
+# naming it here is how anyone finds out (CEL-114: an `abandoned` row once
+# vetoed the whole box, and the orchestrator that owned it never knew).
+doctor_ledger_states() { # <wsdir> <ws-name>
+  local f="$1/.cel/delegations.json" bad
+  [ -f "$f" ] || return 0
+  bad="$(jq -r --arg ok " $CEL_LEDGER_STATES " \
+    '.[]? | select((" " + ((.state // "") | tostring) + " ") as $s | $ok | contains($s) | not)
+     | "\(.id // "?") (state: \(.state // "none"))"' "$f" 2>/dev/null)" || bad=""
+  [ -z "$bad" ] && return 0
+  local l
+  while IFS= read -r l; do
+    c_warn "$2: ledger row $l is not a ledger state - gc keeps its worktree as unknown"
+  done <<< "$bad"
+}
+
 doctor_worker_containers() { # <wsdir>
   local wsdir="$1" r top h ledger
   ledger="$wsdir/.cel/delegations.json"
@@ -442,6 +460,7 @@ check_workspaces() {
         fi
       done < <(jq -r '.[] | select(.state == "running") | .id' "$ledger" 2>/dev/null)
     fi
+    doctor_ledger_states "$path" "$n"
     doctor_worker_containers "$path"
   done
 

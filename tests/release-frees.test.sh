@@ -22,7 +22,7 @@ _rf_setup() {
   git -C "$r" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
   STUB_WT="$T/wt/widget-worker"
   mkdir -p "$T/wt"
-  git -C "$r" worktree add -q -b WG-9-x "$STUB_WT" main
+  git -C "$r" worktree add -q -b wt-base "$STUB_WT" main
   STUB_REPO="$(git -C "$r" rev-parse --show-toplevel)"
   STUB_LOG="$T/stub.log"; : > "$STUB_LOG"
   STUB="$T/herdr-stub.sh"
@@ -81,14 +81,17 @@ test_release_records_worktree_left_when_not_linked() {
 # merged at their head - they are landed, not unpushed.
 _rf_squash() {
   _rf_setup
-  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m work
+  printf 'a\n' > "$STUB_WT/a.txt"; git -C "$STUB_WT" add a.txt
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q -m work
   HEAD_OID="$(git -C "$STUB_WT" rev-parse HEAD)"
-  git -C "$STUB_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "squashed"
+  printf 'a\nsquash\n' > "$STUB_REPO/a.txt"; git -C "$STUB_REPO" add a.txt
+  git -C "$STUB_REPO" -c user.email=t@t -c user.name=t commit -q -m "squashed"
   git -C "$STUB_REPO" update-ref refs/remotes/origin/main main
   local gh="$T/gh-stub.sh"
   cat > "$gh" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
+  "auth token"*) echo tok;;
   *headRefOid*) echo '{"state":"MERGED","headRefOid":"$HEAD_OID","mergedAt":"2026-10-09T00:00:00Z"}';;
   *) echo '';;
 esac
@@ -103,7 +106,8 @@ test_release_treats_squash_merged_commits_as_landed() {
 }
 test_release_counts_commits_after_the_merged_head() {
   _rf_squash
-  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m later
+  printf 'b\n' > "$STUB_WT/b.txt"; git -C "$STUB_WT" add b.txt
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q -m later
   local out; out="$( (cd "$T" && "$BIN" release WG-9-x) 2>&1 )" && {
     echo "released a commit made after the merge"; rm -rf "$T"; return 1; }
   assert_contains "$out" "unpushed=1"
