@@ -42,7 +42,8 @@ function nyCard(d){
     '<div class="nyhead">'+(d.urgent?'<span class="tag urgent">urgent</span>':'')+
       '<b class="nytitle">'+esc(d.title)+'</b></div>'+
     '<div class="nymeta">'+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
-      (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+'</div>'+
+      (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+
+      (d.prs||[]).map(function(p){return ' \u00b7 '+(p.url?'<a class="pr" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.ref)+'</a>':'<span class="pr">'+esc(p.ref)+'</span>')}).join('')+'</div>'+
     (ctx?'<div class="nyctx">'+ctx+'</div>':'')+
     '<div class="nyopts">'+(d.options||[]).map(function(o,i){
       var r=d.recommended===i+1;
