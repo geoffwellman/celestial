@@ -18,6 +18,8 @@ export CEL_ROOT
 . "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
 # shellcheck source=lib/guard.sh
 . "$CEL_ROOT/lib/guard.sh" # guard_role_of - pure, reads nothing but its argument
+# shellcheck source=lib/ledger_states.sh
+. "$CEL_ROOT/lib/ledger_states.sh" # the one list of states gc and doctor read too
 # shellcheck source=lib/services.sh
 . "$CEL_ROOT/lib/services.sh"  # svc_reach - `try` prints the URL that reaches
                                # the preview from the laptop, not from this box
@@ -347,6 +349,8 @@ _ledger_write() ( # <wsdir> <json>
 # then disagreed about work that had already been redone. Observed as 190 rows
 # for 178 delegations.
 _ledger_append() { # <wsdir> <entry-json>
+  local st; st="$(printf '%s' "$2" | jq -r '.state // ""')"
+  ledger_state_valid "$st" || die "ledger: refusing to write state '$st' (allowed: $CEL_LEDGER_STATES)"
   local cur; cur="$(_ledger_read "$1")"
   # The row is born in a state, and that is a transition like any other: a
   # history that began at the FIRST collect could not say when the work
@@ -380,6 +384,9 @@ _ledger_mover() {
 # could draw it. `landed_at` and `released_at` are READ from this array and
 # never stored twice.
 _ledger_update_state() { # <wsdir> <id> <state>
+  # A state outside the shared list makes gc keep that worktree as unknown
+  # forever, so it is refused here, at the only writer.
+  ledger_state_valid "$3" || die "ledger: refusing to write state '$3' for $2 (allowed: $CEL_LEDGER_STATES)"
   local cur; cur="$(_ledger_read "$1")"
   _ledger_write "$1" "$(printf '%s' "$cur" | jq --arg id "$2" --arg s "$3" \
     --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" \
@@ -403,8 +410,8 @@ _wt_ahead() { # <worktree> -> count | ?
 
 # Empty means verified safe to remove. Unknown is held work, never zero.
 # Scouts may omit ONLY their generated report, not arbitrary dirty files.
-_wt_unlanded() { # <worktree> [ship|scout] -> "" | reason
-  local wt="$1" br status dirty unpushed base
+_wt_unlanded() { # <worktree> [ship|scout] [merged-head-oid] -> "" | reason
+  local wt="$1" br status dirty unpushed base merged="${3:-}"
   [ -d "$wt" ] || { printf 'unknown=worktree'; return 0; }
   local -a paths=(.)
   [ "${2:-ship}" != scout ] || paths+=(':(exclude).agent/report.md')
@@ -424,10 +431,39 @@ _wt_unlanded() { # <worktree> [ship|scout] -> "" | reason
   unpushed="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null)" \
     && [[ "$unpushed" =~ ^[0-9]+$ ]] \
     || { printf 'unknown=commits dirty=%s' "$dirty"; return 0; }
+  if [ "$unpushed" -gt 0 ] && [ -n "$merged" ]; then
+    unpushed="$(_wt_unmerged_after "$wt" "$merged")" && [[ "$unpushed" =~ ^[0-9]+$ ]] \
+      || { printf 'unknown=commits dirty=%s' "$dirty"; return 0; }
+  fi
   if [ "$dirty" -gt 0 ] || [ "$unpushed" -gt 0 ]; then
     printf 'unpushed=%s dirty=%s' "$unpushed" "$dirty"
   fi
   return 0
+}
+
+# Set (or, with an empty value, drop) one non-state field on a row.
+_ledger_set_field() { # <wsdir> <id> <field> <value>
+  local cur; cur="$(_ledger_read "$1")"
+  _ledger_write "$1" "$(printf '%s' "$cur" | jq --arg id "$2" --arg k "$3" --arg v "$4" \
+    'map(if .id == $id then (if $v == "" then del(.[$k]) else .[$k] = $v end) else . end)')"
+}
+
+# SQUASH MERGES MAKE LANDED WORK LOOK UNPUSHED. The branch's commits are never
+# ancestors of main after a squash, so every landed row read "unpushed" and
+# orchestrators fell back to --discard by reflex (2026-10-09, ~135 rows).
+# With the PR's merged head known, a commit is landed when it precedes that
+# head or its patch is already in main (git cherry); only the rest count.
+_wt_unmerged_after() { # <worktree> <merged-head-oid> -> count | fail
+  local wt="$1" head="$2" base line sha n=0
+  base="$(repo_default_ref "$wt")" || return 1
+  git -C "$wt" cat-file -e "$head^{commit}" 2>/dev/null || head=""
+  line="$(git -C "$wt" cherry "$base" HEAD 2>/dev/null)" || return 1
+  while IFS=' ' read -r mark sha; do
+    [ "$mark" = + ] || continue
+    if [ -n "$head" ] && git -C "$wt" merge-base --is-ancestor "$sha" "$head" 2>/dev/null; then continue; fi
+    n=$((n + 1))
+  done <<< "$line"
+  printf '%s' "$n"
 }
 
 _ledger_entry() { # <wsdir> <id> -> json object, empty if unknown
@@ -1855,6 +1891,35 @@ _reconcile_raise() { # <ws> <fp> <to> <message>
     >/dev/null 2>&1 || true
 }
 
+# NO SILENT HANG. One release sat 90s on herdr with nothing on screen; every
+# external call here is bounded and says what it is waiting on first.
+_with_timeout() { # <label> <cmd...>
+  local label="$1" t="${CEL_RELEASE_TIMEOUT:-30}"; shift
+  printf '  … waiting on %s (up to %ss)\n' "$label" "$t" >&2
+  local rc=0
+  timeout --kill-after=5 "$t" "$@" || rc=$?
+  [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] || c_warn "$label: no answer after ${t}s - moving on" >&2
+  return "$rc"
+}
+
+# Remove a linked worktree from its repo's common dir. Prints a reason and
+# fails when the directory has to stay. A main checkout is never deleted, and
+# tracked changes need --discard: untracked droppings (.agent/result.md) do not.
+_release_remove_dir() { # <worktree> <discard 0|1>
+  local wt="$1" gd cd force=()
+  gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" \
+    && cd="$(cd "$wt" && cd "$(git rev-parse --git-common-dir)" && pwd -P)" \
+    || { printf 'not a git worktree; not removed'; return 1; }
+  [ "$gd" != "$cd" ] || { printf 'not a linked worktree (a main checkout); not removed'; return 1; }
+  if [ "$2" -eq 1 ]; then force=(--force --force)
+  elif [ -n "$(git -C "$wt" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    printf 'tracked changes and no --discard; not removed'; return 1
+  else force=(--force); fi
+  _with_timeout "git worktree remove $wt" git --git-dir="$cd" worktree remove "${force[@]}" "$wt" >/dev/null 2>&1 \
+    || { printf 'git worktree remove failed'; return 1; }
+  [ ! -d "$wt" ] || { printf 'directory survived git worktree remove'; return 1; }
+}
+
 cmd_release() {
   _fanout_refuse_worker release "${1:-}" "$(_fanout_ws_arg "$@")"
   [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--dry-run] [--state landed,abandoned] [--keep-worktree] [--discard] [--workspace NAME]"
@@ -1985,7 +2050,13 @@ cmd_release() {
   # answers it, and is logged so the loss is on record rather than silent.
   local wt held shape; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
   shape="$(printf '%s' "$entry" | jq -r '.shape // "ship"')"
-  held="$(_wt_unlanded "$wt" "$shape")"
+  # The PR's own word on whether it merged, and at which head - what lets a
+  # squash-merged branch read as landed rather than unpushed.
+  local pr_merged_head=""
+  pr_merged_head="$(_fgh "$wsdir" pr view "$branch" \
+    --repo "$(_repo_slug "$wsdir" "$repo")" --json state,headRefOid 2>/dev/null \
+    | jq -r 'if .state == "MERGED" then .headRefOid // "" else "" end' 2>/dev/null || true)"
+  held="$(_wt_unlanded "$wt" "$shape" "$pr_merged_head")"
   # A WORKTREE THAT IS ALREADY GONE HOLDS NOTHING. Twenty-two rows on this box
   # sat in finished/collected for a week with merged PRs and no directory:
   # the old orchestrators removed the checkouts through herdr by hand and
@@ -2023,8 +2094,19 @@ cmd_release() {
   # Reaching this line means either nothing is held or --discard was said.
   # herdr may have nothing left to remove (the checkout went by hand, or the
   # workspace with it); that is not a reason to leave the row open.
-  [ "$keep" -eq 1 ] || "$HERDR" worktree remove --workspace "$herdr_ws" --force \
-    || c_warn "$id: herdr had no worktree to remove for $herdr_ws - the row is released anyway"
+  [ "$keep" -eq 1 ] || _with_timeout "herdr worktree remove --workspace $herdr_ws" \
+    "$HERDR" worktree remove --workspace "$herdr_ws" --force \
+    || c_warn "$id: herdr had no worktree to remove for $herdr_ws - removing $wt directly"
+  # THE DIRECTORY IS THE POINT. "herdr had no worktree to remove" was the
+  # common path, and the row closed while the checkout stayed: ~135 released
+  # rows still on disk in one cleanup (2026-10-09). So release removes the
+  # linked worktree itself, and a row whose directory survives says why.
+  local left=""
+  if [ "$keep" -eq 0 ] && [ -d "$wt" ]; then
+    left="$(_release_remove_dir "$wt" "$discard")" || true
+  fi
+  _ledger_set_field "$wsdir" "$id" worktree_left "$left"
+  [ -z "$left" ] || c_warn "$id: worktree left on disk at $wt - $left"
   # THE CONTAINER OUTLIVES ITS CHILDREN. Removing the last worktree under a
   # `<repo>/workers` container closed the container with it, and the surviving
   # workers - linked worktrees with nothing left to nest under - were detached
