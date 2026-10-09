@@ -603,10 +603,24 @@ _steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
 }
 
 _steward_review_sweep() { # <agents-json>
-  local agents_json="$1" ws wsdir repo slug orch prsj
+  local agents_json="$1" ws wsdir repo slug orch prsj ref
+  # WAITING ON THE OWNER IS NOT A WORKER FINDING (CEL-115). A PR whose only
+  # red check was an external review bot out of credit was nudged "get a
+  # worker on it" three times in a day; no worker can pay a bill. An open
+  # decision filed with `cel decide ask --pr <repo>#<n>` silences the red,
+  # changes-requested and no-worker nudges for exactly that PR until it is
+  # closed. Only the explicit link counts: free text naming "#7" somewhere is
+  # too loose and once silenced the wrong PR. Read once per workspace.
+  # shellcheck source=lib/decide.sh
+  . "${BASH_SOURCE[0]%/*}/decide.sh"
+  local -A owner_prs
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
+    owner_prs=()
+    while IFS= read -r ref; do
+      [ -n "$ref" ] && owner_prs["$ref"]=1
+    done < <(decide_open_json "$ws" 2>/dev/null | jq -r '.prs[]?.ref // empty' 2>/dev/null || true)
     for repo in $(ws_repo_names "$wsdir"); do
       slug="$(ws_repo_get "$wsdir" "$repo" url \
               | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
@@ -674,25 +688,11 @@ _steward_review_sweep() { # <agents-json>
         done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
 
-      # WAITING ON THE OWNER IS NOT A WORKER FINDING (CEL-115). A PR whose
-      # only red check was an external review bot out of credit was nudged
-      # "get a worker on it" three times in a day; no worker can pay a bill.
-      # An open decision linking the PR (`cel decide ask --pr <repo>#<n>`, or
-      # naming the repo and #<n> in its title/blocks/context) silences the
-      # red, changes-requested and no-worker nudges until it is closed. The
-      # daily decide summary still lists the decision itself.
-      # shellcheck source=lib/decide.sh
-      . "${BASH_SOURCE[0]%/*}/decide.sh"
-      local owner_prs
-      owner_prs="$(decide_open_json "$(ws_name "$wsdir")" 2>/dev/null | jq -r --arg repo "$repo" '
-        ([.prs[]?.ref | select(startswith($repo + "#")) | ltrimstr($repo + "#")]
-         + (((.title // "") + " " + (.blocks // "") + " " + (.context // "")) as $t
-            | if ($t | contains($repo)) then [$t | scan("#([0-9]+)\\b")[0]] else [] end))[]' 2>/dev/null || true)"
       local num branch review failing working
       while IFS=$'\t' read -r num branch review failing; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
-        if [ "$review" != "APPROVED" ] && printf '%s\n' "$owner_prs" | grep -qx "$num"; then continue; fi
+        if [ "$review" != "APPROVED" ] && [ -n "${owner_prs["$repo#$num"]:-}" ]; then continue; fi
         # a worker actively on the branch means the loop is moving - leave it
         working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
           | jq -r '[.[] | select(.agent_status == "working")] | length')"

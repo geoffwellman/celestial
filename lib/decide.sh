@@ -136,8 +136,7 @@ _decide_ask() {
       --workspace) ws="$2"; shift 2 ;;
       --supersedes) supersedes="$2"; shift 2 ;;
       --pr)
-        case "$2" in *?#[0-9]*) ;; *) die "cel decide ask: --pr takes <repo>#<num>, got '$2'" ;; esac
-        case "${2##*#}" in *[!0-9]*) die "cel decide ask: --pr takes <repo>#<num>, got '$2'" ;; esac
+        [[ "${2:-}" =~ ^[^#[:space:]]+#[0-9]+$ ]] || die "cel decide ask: --pr takes <repo>#<num>, got '${2:-}'"
         prs="$(jq -c --arg r "$2" '. + [{ref: $r}]' <<< "$prs")"; shift 2 ;;
       *) die "cel decide ask: unknown argument '$1'" ;;
     esac

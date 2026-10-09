@@ -291,5 +291,7 @@ test_ask_pr_links_are_stored_on_the_record() {
   local j; j="$(cmd_decide list --json 2>/dev/null)"
   assert_eq "$(printf '%s\n' "$j" | jq -r '[.prs[].ref] | join(",")')" "widget#7,gadget#3"
   if (_ask_as alpha-orch alpha --title "bad" --pr "widget7" >/dev/null); then echo "bad --pr accepted"; return 1; fi
+  if (_ask_as alpha-orch alpha --title "bad" --pr "a#1#2" >/dev/null); then echo "a#1#2 accepted"; return 1; fi
+  if (_ask_as alpha-orch alpha --title "bad" --pr >/dev/null); then echo "missing --pr value accepted"; return 1; fi
   rm -rf "$T"
 }

@@ -262,3 +262,18 @@ test_cel113_card_renders_context_blocks_and_age() {
   assert_contains "$out" "blocks: the beta release"
   assert_contains "$out" "2h"
 }
+
+# CEL-115: a decision's --pr links show on the card, as links when known.
+test_cel115_card_links_the_prs_a_decision_blocks() {
+  local out; out="$(node -e '
+    const fs=require("fs"),vm=require("vm");
+    const ls={getItem:()=>null,setItem(){}};
+    const esc=s=>String(s==null?"":s).replace(/[&<>"\x27]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\x27":"&#39;"}[c]));
+    const ctx={localStorage:ls,esc};vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),ctx);
+    console.log(ctx.nyCard({id:"1",title:"pick",asker:"alpha-orch",age_secs:60,options:[],
+      prs:[{ref:"widget#7",url:"https://github.com/someone/widget/pull/7"},{ref:"gadget#3"}]}));
+  ' "$CEL_ROOT/tools/dash/decisions.js")"
+  assert_contains "$out" '<a class="pr" href="https://github.com/someone/widget/pull/7" target="_blank" rel="noopener">widget#7</a>'
+  assert_contains "$out" '<span class="pr">gadget#3</span>'
+}
