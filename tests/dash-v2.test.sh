@@ -580,8 +580,46 @@ test_v2_merges_buckets_by_local_midnight() {
 }
 
 # CEL-117: a repo the box cannot read is flagged, not counted as 0 merges.
+# GitHub's search answers an unreadable repo with an empty list and exit 0, so
+# "no merges" has to be checked against the repo itself.
 test_v2_merges_flags_an_unreadable_repo() {
-  _v2_boot_failing_gh
+  _v2_boot
+  cat >"$T/bin/gh" <<'EOF2'
+#!/usr/bin/env bash
+case "$*" in
+  *--search*) printf '[]' ;;
+  *) echo "GraphQL: Could not resolve to a Repository with the name 'alpha/widget'. (repository)" >&2; exit 1 ;;
+esac
+EOF2
+  sleep 1; kill -USR2 "$DASH_PID"; sleep 0.3
   assert_eq "$(_v2_get "$(_v2_url 'merges?days=14')" | jq -c '.no_access')" '["widget"]'
+  _v2_down
+}
+
+# review on #142: a rate limit or a network blip is not "no access"
+test_v2_merges_does_not_call_a_transient_failure_no_access() {
+  _v2_boot
+  printf '#!/usr/bin/env bash\necho "API rate limit exceeded" >&2\nexit 1\n' > "$T/bin/gh"
+  sleep 1; kill -USR2 "$DASH_PID"; sleep 0.3
+  local m; m="$(_v2_get "$(_v2_url 'merges?days=14')")"
+  assert_eq "$(printf '%s' "$m" | jq -c '.no_access')" '[]'
+  assert_eq "$(printf '%s' "$m" | jq -c '.unavailable')" '["widget"]'
+  _v2_down
+}
+
+# review on #142: one long ask fetches its own window; it does not widen the
+# shared fetch every card uses
+test_v2_a_long_window_ask_does_not_widen_the_shared_fetch() {
+  _v2_boot
+  sleep 1; : > "$T/gh.log"; kill -USR2 "$DASH_PID"; sleep 0.3
+  _v2_get "$(_v2_url 'heat?days=365')" >/dev/null
+  _v2_get "$(_v2_url 'merges?days=14')" >/dev/null
+  local d365 d90
+  d365="$(date -u -d '365 days ago' +%F)"; d90="$(date -u -d '90 days ago' +%F)"
+  assert_contains "$(cat "$T/gh.log")" "merged:>=$d365"
+  assert_contains "$(cat "$T/gh.log")" "merged:>=$d90"
+  : > "$T/gh.log"; kill -USR2 "$DASH_PID"; sleep 0.3
+  _v2_get "$(_v2_url 'merges?days=14')" >/dev/null
+  assert_eq "$(grep -c -- "merged:>=$d365" "$T/gh.log")" "0"
   _v2_down
 }
