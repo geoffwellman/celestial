@@ -1260,3 +1260,57 @@ test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
   [ ! -e "$CO" ] || { echo "an adopted reviewer's checkout outlived it"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+
+# CEL-111: one /proc pass per gc run, not one per worktree - the per-worktree
+# readlink of every pid on the box was 666 execs in 15 seconds.
+test_gc_has_process_reads_proc_once_per_run() {
+  local B; B="$(mktemp -d)"
+  printf '#!/bin/sh\necho x >> "%s/count"\nexec /usr/bin/readlink "$@"\n' "$B" > "$B/readlink"
+  chmod +x "$B/readlink"
+  _gc_cwd_reset
+  local here; here="$(pwd -P)"
+  PATH="$B:$PATH"
+  _gc_has_process "$here" || { echo "missed own cwd"; return 1; }
+  local first; first="$(wc -l < "$B/count")"
+  _gc_has_process "/nonexistent/one" || true
+  _gc_has_process "/nonexistent/two" || true
+  assert_eq "$(wc -l < "$B/count")" "$first"
+  rm -rf "$B"
+}
+
+# Review on #136: the snapshot is the fast path, never the last word. A
+# process that starts in a worktree after the table was read is still seen by
+# the live check that runs right before any removal.
+test_gc_live_recheck_sees_a_process_the_snapshot_missed() {
+  local d; d="$(mktemp -d)"
+  _gc_cwd_reset
+  _gc_has_process "$d" || true          # snapshot taken: nothing in $d yet
+  ( cd "$d" && exec sleep 20 ) & local p=$!
+  sleep 0.3
+  _gc_has_process_live "$d" || { echo "live recheck missed a process"; kill "$p"; return 1; }
+  kill "$p"; wait "$p" 2>/dev/null || true
+  rm -rf "$d"
+}
+
+# A process of our own uid whose cwd cannot be read (the user systemd
+# manager, ssh-agent, sshd-session...) vetoed EVERY worktree: gc kept 232
+# "live" and removed nothing. A fixed set of system processes that can never
+# be an agent in a worktree no longer vetoes; any other unreadable cwd does.
+_gc_fake_proc() { # <comm> - one fake pid with an unreadable cwd beside our own
+  pgrep() { printf '%s\n' 999001; }
+  _gc_cwd_of() { return 1; }
+  eval "_gc_comm_of() { printf '%s' '$1'; }"
+  _gc_pid_exists() { return 0; }
+}
+test_gc_unreadable_cwd_of_a_system_process_does_not_veto() {
+  local c
+  for c in systemd '(sd-pam)' ssh-agent sshd-session sftp-server; do
+    _gc_fake_proc "$c"; _gc_cwd_reset
+    _gc_has_process "/nonexistent/wt" && { echo "$c vetoed"; return 1; }
+  done
+  return 0
+}
+test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
+  _gc_fake_proc pi; _gc_cwd_reset
+  _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
+}

@@ -26,9 +26,9 @@
 [ -n "${_CEL_BOX:-}" ] && return 0
 _CEL_BOX=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"   # the reviewer registry, for the report
+. "${BASH_SOURCE[0]%/*}/run.sh"   # the reviewer registry, for the report
 
 # FOURTEEN DAYS on images and build cache. The working set on a real box is
 # three to six days old and the superseded build tags are two weeks and older;

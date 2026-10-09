@@ -4,15 +4,15 @@
 [ -n "${_CEL_RUN:-}" ] && return 0
 _CEL_RUN=1
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/profiles.sh
-. "$(dirname "${BASH_SOURCE[0]}")/profiles.sh"
+. "${BASH_SOURCE[0]%/*}/profiles.sh"
 # shellcheck source=lib/gateway.sh
-. "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+. "${BASH_SOURCE[0]%/*}/gateway.sh"
 
 # PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
 # (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so

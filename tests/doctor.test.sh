@@ -222,3 +222,23 @@ test_doctor_ssh_alias_matches_regardless_of_case() {
   assert_eq "$rc" 0
   rm -rf "$T"
 }
+
+# CEL-111: the inbox-watch leak was invisible for a week because nothing
+# counted. Doctor counts watchers and samples the box's fork rate, and says so
+# in red over a bound.
+test_doctor_exec_load_is_quiet_green_under_the_bound() {
+  _doctor_watch_count() { printf 4; }
+  _doctor_fork_rate() { printf 30; }
+  local out; out="$(doctor_exec_load_line)"; local rc=$?
+  assert_eq "$rc" "0"
+  assert_contains "$out" "inbox watchers: 4"
+  assert_contains "$out" "30/sec"
+}
+test_doctor_exec_load_is_red_over_the_bound() {
+  _doctor_watch_count() { printf 182; }
+  _doctor_fork_rate() { printf 30; }
+  assert_fails doctor_exec_load_line
+  _doctor_watch_count() { printf 4; }
+  _doctor_fork_rate() { printf 600; }
+  assert_fails doctor_exec_load_line
+}

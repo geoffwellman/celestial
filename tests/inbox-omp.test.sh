@@ -39,11 +39,13 @@ const { execFileSync } = require('node:child_process');
   const turn1 = await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] });
   const turn2 = await fire('before_agent_start', { prompt: 'again', systemPrompt: [] });
   const pid = mod.__watcherPid && mod.__watcherPid();
+  let group = -1;
+  try { group = execFileSync('ps', ['-o', 'pid=', '-g', String(pid)], { encoding: 'utf8' }).split('\n').filter(Boolean).length; } catch {}
   await fire('session_shutdown', {});
   await new Promise((r) => setTimeout(r, 500));
   let alive = false;
   if (pid) { try { process.kill(-pid, 0); alive = true; } catch {} }
-  console.log(JSON.stringify({ notes, composer, turn1, turn2, pid, alive }));
+  console.log(JSON.stringify({ notes, composer, turn1, turn2, pid, alive, group }));
   process.exit(0);
 })().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); process.exit(0); });
 JS
@@ -66,6 +68,9 @@ test_omp_inbox_hook_notifies_drains_once_and_cleans_up() {
   # shutdown took the whole watcher group with it
   [ "$(jq -r '.pid // ""' <<<"$out")" != "" ] || { echo "no watcher pid"; rm -rf "$d"; return 1; }
   assert_eq "$(jq -r '.alive' <<<"$out")" "false"
+  # CEL-111: a launched hook's watcher is a bounded group, not a tree
+  local g; g="$(jq -r '.group' <<<"$out")"
+  [ "$g" -ge 1 ] && [ "$g" -le 6 ] || { echo "hook watcher group has $g processes"; rm -rf "$d"; return 1; }
   rm -rf "$d"
 }
 

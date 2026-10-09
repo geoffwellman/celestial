@@ -7,7 +7,7 @@
 [ -n "${_CEL_STEWARD_TIMER:-}" ] && return 0
 _CEL_STEWARD_TIMER=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 STEWARD_TIMER_UNIT="cel-steward"
 

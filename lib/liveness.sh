@@ -33,9 +33,9 @@
 [ -n "${_CEL_LIVENESS:-}" ] && return 0
 _CEL_LIVENESS=1
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/quota.sh
-. "$(dirname "${BASH_SOURCE[0]}")/quota.sh"  # the reset time a throttled pane
+. "${BASH_SOURCE[0]%/*}/quota.sh"  # the reset time a throttled pane
                                             # cannot tell you itself
 
 # The wait before a pause counts as news: a person asked a question takes a

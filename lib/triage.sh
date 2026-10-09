@@ -22,13 +22,13 @@
 [ -n "${_CEL_TRIAGE:-}" ] && return 0
 _CEL_TRIAGE=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/inbox.sh
-. "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
+. "${BASH_SOURCE[0]%/*}/inbox.sh"
 
 # The levels, concrete and in order. Vague levels ("high", "medium") make a
 # classifier guess at the rubric; these say what a person would DO.

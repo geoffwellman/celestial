@@ -17,15 +17,15 @@
 [ -n "${_CEL_QUOTA:-}" ] && return 0
 _CEL_QUOTA=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 
 _quota_dir() { printf '%s' "${CEL_QUOTA_DIR:-$HOME/.local/share/cel/quota}"; }
 _QUOTA_TTL="${CEL_QUOTA_TTL:-300}"
@@ -306,9 +306,9 @@ _sub_omp_rows() {
 # for a caller that has quota.sh without gateway.sh beside it.
 _cpa_auth_dir() {
   local d="${CEL_CPA_AUTH_DIR:-}"
-  if [ -z "$d" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/gateway.sh" ]; then
+  if [ -z "$d" ] && [ -f "${BASH_SOURCE[0]%/*}/gateway.sh" ]; then
     # shellcheck source=lib/gateway.sh
-    . "$(dirname "${BASH_SOURCE[0]}")/gateway.sh"
+    . "${BASH_SOURCE[0]%/*}/gateway.sh"
     d="$(gateway_auth_dir 2>/dev/null || true)"
   fi
   [ -n "$d" ] || d="${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}/auth"

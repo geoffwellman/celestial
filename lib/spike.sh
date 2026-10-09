@@ -5,7 +5,7 @@
 [ -n "${_CEL_SPIKE:-}" ] && return 0
 _CEL_SPIKE=1
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 
 # One question per unknown; Enter accepts the visible default. Reads stdin so
 # tests can feed answers; an empty read (EOF) also takes the default. A

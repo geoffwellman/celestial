@@ -13,11 +13,11 @@
 [ -n "${_CEL_DASH:-}" ] && return 0
 _CEL_DASH=1
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 
 # Every registered workspace's own `dash.port`, in registry order - the ports
 # the per-workspace servers used to hold, and now redirect from.
@@ -235,7 +235,15 @@ _dash_ensure() { # <port> <host>
 _dash_stop() { # <port>...
   local port pid env pids=""
   for pid in $(pgrep -f 'tools/dash/server\.mjs' 2>/dev/null); do
-    env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep '^CEL_DASH_CONFIG=' || true)"
+    env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(CEL_DASH_CONFIG|CEL_TESTING)=' || true)"
+    # A TEST NEVER STOPS A SERVER IT DID NOT START (CEL-111). _dash_restart
+    # also stops every workspace's legacy dash port, read from the registry -
+    # and a test without a fixture registry read the live one, matched the
+    # box's real dashboard on 7770 and stopped it cleanly, nothing in the
+    # journal. Under the suite only a server started under the suite counts.
+    if [ -n "${CEL_TESTING:-}" ]; then
+      case "$env" in *CEL_TESTING=*) ;; *) continue ;; esac
+    fi
     for port in "$@"; do
       case "$env" in *'"port":'"$port"[,}]*)
         kill "$pid" 2>/dev/null && { c_ok "stopped dash on $port (pid $pid)"; pids+=" $pid"; }

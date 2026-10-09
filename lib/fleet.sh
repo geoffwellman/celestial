@@ -22,21 +22,21 @@ _CEL_FLEET=1
 # nothing git, jq or herdr can hand us.
 _FLEET_US=$'\x1f'
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/inbox.sh
-. "$(dirname "${BASH_SOURCE[0]}")/inbox.sh"
+. "${BASH_SOURCE[0]%/*}/inbox.sh"
 # shellcheck source=lib/stall.sh
-. "$(dirname "${BASH_SOURCE[0]}")/stall.sh"
+. "${BASH_SOURCE[0]%/*}/stall.sh"
 # shellcheck source=lib/liveness.sh
-. "$(dirname "${BASH_SOURCE[0]}")/liveness.sh"
+. "${BASH_SOURCE[0]%/*}/liveness.sh"
 # shellcheck source=lib/run.sh
-. "$(dirname "${BASH_SOURCE[0]}")/run.sh"
+. "${BASH_SOURCE[0]%/*}/run.sh"
 # shellcheck source=lib/memory.sh
-. "$(dirname "${BASH_SOURCE[0]}")/memory.sh"
+. "${BASH_SOURCE[0]%/*}/memory.sh"
 # shellcheck source=lib/orphans.sh
-. "$(dirname "${BASH_SOURCE[0]}")/orphans.sh"
+. "${BASH_SOURCE[0]%/*}/orphans.sh"
 
 # The processes with no owner at all, as one field of the box.
 #
@@ -653,7 +653,7 @@ _fleet_render() { # <doc>
 # which surface was lying.
 _fleet_subscriptions() {
   # shellcheck source=lib/quota.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/quota.sh"
+  . "${BASH_SOURCE[0]%/*}/quota.sh"
   subscription_list --cached
 }
 
@@ -669,7 +669,7 @@ _fleet_cache_secs() {
   local v="${CEL_FLEET_CACHE_SECS:-}"
   if [ -z "$v" ]; then
     # shellcheck source=lib/config.sh
-    . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+    . "${BASH_SOURCE[0]%/*}/config.sh"
     v="$(cel_config_get fleet cache_secs)"
   fi
   case "$v" in ''|*[!0-9]*) v=30 ;; esac
@@ -768,7 +768,7 @@ _fleet_refill() { # <file> <only> <secs>
 }
 
 fleet_refill_spawn() { # <file> <only> <secs>
-  local root; root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  local root; root="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
   setsid bash -c '. "$1/lib/common.sh"; . "$1/lib/fleet.sh"; _fleet_refill "$2" "$3" "$4"' \
     _ "$root" "$1" "$2" "$3" </dev/null >/dev/null 2>&1 9>&- &
   disown 2>/dev/null || true

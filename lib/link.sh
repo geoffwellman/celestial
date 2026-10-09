@@ -7,7 +7,7 @@
 [ -n "${_CEL_LINK:-}" ] && return 0
 _CEL_LINK=1
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 
 link_core_skills() {
   local a sd s

@@ -4,9 +4,9 @@
 [ -n "${_CEL_INSTALL:-}" ] && return 0
 _CEL_INSTALL=1
 # shellcheck source=lib/manifest.sh
-. "$(dirname "${BASH_SOURCE[0]}")/manifest.sh"
+. "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/externals.sh
-. "$(dirname "${BASH_SOURCE[0]}")/externals.sh"
+. "${BASH_SOURCE[0]%/*}/externals.sh"
 
 # Verify a complete download before anything can execute it. A failing curl must
 # not be hidden by a successful shell on the other side of a pipeline.

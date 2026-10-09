@@ -22,13 +22,13 @@
 [ -n "${_CEL_RELEASE:-}" ] && return 0
 _CEL_RELEASE=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/version.sh
-. "$(dirname "${BASH_SOURCE[0]}")/version.sh"
+. "${BASH_SOURCE[0]%/*}/version.sh"
 # shellcheck source=lib/workspace.sh
-. "$(dirname "${BASH_SOURCE[0]}")/workspace.sh"
+. "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/registry.sh
-. "$(dirname "${BASH_SOURCE[0]}")/registry.sh"
+. "${BASH_SOURCE[0]%/*}/registry.sh"
 
 # `die` exits the process it runs in - and a helper whose answer is captured
 # with $(...) runs in a SUBSHELL, so a die there kills only the substitution
@@ -326,7 +326,7 @@ cmd_release() { # <product> <value> [--repo r] [--dry-run] [--follow|--no-follow
   _release_check_permission "$slug" "$product" "$wsdir"
   # UNDER AFK a release goes only where the owner named it first (CEL-78).
   # shellcheck source=lib/afk.sh
-  . "$(dirname "${BASH_SOURCE[0]}")/afk.sh"
+  . "${BASH_SOURCE[0]%/*}/afk.sh"
   if afk_active; then
     afk_authorise release "$(jq -nc --arg p "$product" --arg v "$value" '{product:$p, version:$v}')" \
       "$product@$value" >/dev/null || die "cel release: AFK did not authorise this release - see the refusal above. Nothing dispatched."

@@ -32,11 +32,11 @@
 [ -n "${_CEL_GATEWAY:-}" ] && return 0
 _CEL_GATEWAY=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+. "${BASH_SOURCE[0]%/*}/config.sh"
 # shellcheck source=lib/services.sh
-. "$(dirname "${BASH_SOURCE[0]}")/services.sh"   # svc_box_write, svc_start
+. "${BASH_SOURCE[0]%/*}/services.sh"   # svc_box_write, svc_start
 
 # CLIProxyAPI's own default (config.example.yaml:7). Nothing on this box has
 # ever bound it, so there is no legacy port to keep.

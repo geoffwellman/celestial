@@ -26,7 +26,7 @@
 [ -n "${_CEL_STALL:-}" ] && return 0
 _CEL_STALL=1
 # shellcheck source=lib/common.sh
-. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+. "${BASH_SOURCE[0]%/*}/common.sh"
 
 # Markers that mean THIS TURN IS OVER AND WENT NOWHERE. Matched against the
 # tail of a pane, case-insensitively.
