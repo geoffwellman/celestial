@@ -8,6 +8,8 @@ _CEL_GC=1
 . "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
+# shellcheck source=lib/ledger_states.sh
+. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/orphans.sh
@@ -89,7 +91,7 @@ _gc_delegated_live() { # <worktree-dir> [allow-unlisted] -> 0 veto, 1 safe
     # /proc reports a canonical cwd, possibly below the checkout root.
     # Resolve ledger aliases too; missing/unresolvable running paths are
     # unknown, never permission to bypass the live-delegation veto.
-    match="$(python3 - "$1" "$f" <<'PY'
+    match="$(python3 - "$1" "$f" "$CEL_LEDGER_STATES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -97,11 +99,13 @@ from pathlib import Path
 try:
     with open(sys.argv[2]) as source:
         rows = json.load(source)
-    states = {"running", "finished", "orphaned", "collected", "salvaged", "reported", "released", "landed"}
+    # One shared list (lib/ledger_states.sh). A row in a state outside it is
+    # UNKNOWN for its own worktree - vetoed - and nobody else's: one odd row
+    # used to veto every worktree on the box.
+    states = set(sys.argv[3].split())
     if not isinstance(rows, list) or not all(
         isinstance(row, dict) and isinstance(row.get("worktree"), str)
-        and row["worktree"] and isinstance(row.get("state"), str)
-        and row["state"] in states for row in rows
+        and row["worktree"] and isinstance(row.get("state"), str) for row in rows
     ):
         raise ValueError("invalid delegation ledger")
     target = Path(sys.argv[1]).resolve(strict=True)
@@ -110,9 +114,11 @@ try:
         worktree = Path(row["worktree"])
         if not worktree.is_absolute():
             raise ValueError("unanchored worktree")
-        worktree = worktree.resolve(strict=row["state"] == "running")
+        unknown = row["state"] not in states
+        worktree = worktree.resolve(strict=row["state"] in ("running", "unconfirmed"))
         if target == worktree or worktree in target.parents:
-            if row["state"] == "running":
+            # unconfirmed: a worker whose prompt may yet be accepted.
+            if row["state"] in ("running", "unconfirmed") or unknown:
                 print("live")
                 break
             found = True
