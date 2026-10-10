@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } fr
 import { join, dirname } from 'node:path';
 import { homedir, cpus, loadavg, totalmem, freemem, networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { store } from './store.mjs';
 
@@ -193,25 +194,35 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
   // CEL-117: merged PRs are fetched BY DATE, not by count. `--limit 200` was
   // the newest 200 merges whatever their date, so a repo with 220 merges in a
-  // fortnight showed 200 and its oldest days quietly emptied. The window is
-  // the widest any feed has asked for (at least 90 days, the merges cap), so
-  // merges, cycle and heat still share one gh pass. GitHub's search answers at
-  // most 1000 per query: a full page is followed by another ending at the
-  // oldest day seen, and PRs are de-duplicated by number.
-  let mergeWindow = 90;
+  // fortnight showed 200 and its oldest days quietly emptied. Every card the
+  // page shows asks 90 days or less, so they share ONE 90-day fetch per repo;
+  // a longer ask (heat?days=365) fetches its own window on demand and never
+  // widens the shared one (review on #142). GitHub's search answers at most
+  // 1000 per query: a full page is followed by another ending at the oldest
+  // day seen, and PRs are de-duplicated by number.
+  const SHARED_WINDOW = 90;
   const MERGE_PAGE = 1000;
   const ymdUtc = (t) => new Date(t).toISOString().slice(0, 10);
-  const mergedList = async (slug) => {
-    const days = mergeWindow;
+  // gh with its stderr, so a refusal can be told from a blip
+  const ghTry = (args, timeout) => new Promise((resolve) => {
+    execFile('gh', args, { timeout, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
+      resolve(err ? { ok: false, err: String(errOut || err.message || '') } : { ok: true, out }));
+  });
+  // Only GitHub saying the repo does not exist or is not ours to read is "no
+  // access"; a rate limit, a timeout or a network blip is not (review on #142)
+  // - that is a failure, never cached, and the last good answer stands.
+  const DENIED = /Could not resolve to a Repository|cannot be searched|Resource not accessible|HTTP 404|Not Found/i;
+  const mergedList = async (slug, days) => {
     const v = await slow(`gh:merged:${slug}:${days}`, 600000, async () => {
       const start = ymdUtc(Date.now() - days * DAY);
       const seen = new Map();
       let end = null;
       for (let page = 0; page < 50; page++) {
         const q = end ? `merged:${start}..${end}` : `merged:>=${start}`;
-        const out = await run('gh', ['pr', 'list', '--repo', slug, '--state', 'merged', '--search', q,
+        const r = await ghTry(['pr', 'list', '--repo', slug, '--state', 'merged', '--search', q,
           '--json', 'number,title,url,headRefName,createdAt,mergedAt', '--limit', String(MERGE_PAGE)], 60000);
-        const rows = out === null ? null : ghParse(out);
+        if (!r.ok) return DENIED.test(r.err) ? { denied: true } : null;
+        const rows = ghParse(r.out);
         if (!rows) return null;
         const before = seen.size;
         for (const p of rows) seen.set(p.number, p);
@@ -220,23 +231,31 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         if (!oldest) break;
         end = ymdUtc(oldest);
       }
-      return [...seen.values()];
+      // GitHub's search answers a repo we cannot read with an empty list and
+      // exit 0 - the live box showed two such repos as a calm 0. An empty
+      // answer is checked against the repo itself.
+      if (!seen.size) {
+        const r = await ghTry(['repo', 'view', slug, '--json', 'name'], 30000);
+        if (!r.ok) return DENIED.test(r.err) ? { denied: true } : null;
+      }
+      return { rows: [...seen.values()] };
     });
     if (!v) upstreamFailures++;
     return v;
   };
-  // a repo gh cannot read (no access, gone, rate-limited) is reported as such,
-  // never as a repo with no merges
+  // per repo: merges, "no access" (GitHub refused), or "unavailable" (gh
+  // failed and there is no earlier answer to stand on)
   const mergedInfo = async (wss, days = 0) => {
-    if (days > mergeWindow) mergeWindow = Math.min(365, days);
-    const list = []; const noAccess = [];
+    const window = days > SHARED_WINDOW ? Math.min(365, days) : SHARED_WINDOW;
+    const list = []; const noAccess = []; const unavailable = [];
     for (const ws of wss) for (const r of ws.repos) {
       if (!r.slug) continue;
-      const rows = await mergedList(r.slug);
-      if (!rows) { noAccess.push(r.name); continue; }
-      for (const p of rows) if (p.mergedAt) list.push({ ...p, ws: ws.name, repo: r.name });
+      const v = await mergedList(r.slug, window);
+      if (!v) { unavailable.push(r.name); continue; }
+      if (v.denied) { noAccess.push(r.name); continue; }
+      for (const p of v.rows) if (p.mergedAt) list.push({ ...p, ws: ws.name, repo: r.name });
     }
-    return { list, noAccess };
+    return { list, noAccess, unavailable };
   };
   const merged = async (wss, days) => (await mergedInfo(wss, days)).list;
   const open = async (wss) => {
@@ -601,7 +620,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const localDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const merges = async (url, wss) => {
     const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days')) || 14));
-    const { list, noAccess } = await mergedInfo(wss, days);
+    const { list, noAccess, unavailable } = await mergedInfo(wss, days);
     const out = [];
     const today = new Date(); today.setHours(12, 0, 0, 0);
     for (let i = days - 1; i >= 0; i--) out.push({ day: localDay(today.getTime() - i * DAY), counts: {} });
@@ -613,7 +632,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     // CEL-117: days are the box's local calendar days (the owner reads the
     // chart in local time); GitHub's own search buckets by UTC, so a merge
     // near midnight can sit one day apart from github.com - by design
-    return { days: out, timezone: TZ_NAME, no_access: noAccess };
+    return { days: out, timezone: TZ_NAME, no_access: noAccess, unavailable };
   };
   const cycle = async (url, wss) => {
     const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 30));
