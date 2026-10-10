@@ -1,2 +1,0 @@
-### Added
-- Dashboard v2 at `/`: night-sky hero, a composer that talks to an orchestrator (or "Any" via celestial-orch) with replies threaded under your message, a workspace filter that drives every card, the composer and the palette, cards you can drag, hide and resize (saved per browser), ⌘K/Ctrl-K palette, ⤢ expanded views for Needs you, Activity and Today by workspace, and an agent drawer. The decisions panel is the classic one, now shared as `decisions.js`. The classic dashboard stays at `/classic` for one release, linked both ways.
