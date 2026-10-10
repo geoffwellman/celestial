@@ -1,3 +1,0 @@
-### Changed
-- The dashboard refreshes instantly: inbox, ledger and sample files are parsed once and re-read only when they change (inboxes by their appended tail), every v2 feed's computed answer is kept warm and served at once while a refresh runs behind it, and the page paints from one `/api/v2/snapshot` request before the live feeds land; a card drawn from an old value says how old. On the live box at load ~25 a warm refresh went from 5-8.5 s to 0.3-0.5 s until every card was painted.
-- `cel doctor` and `cel dash --ensure` probe the dashboard on `/api/session` with a 10 s budget (`CEL_DASH_PROBE_S`), so a busy box no longer reports a running dashboard as DOWN.

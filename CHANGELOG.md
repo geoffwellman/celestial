@@ -7,6 +7,118 @@ watch the repo (Watch → Custom → Releases) to be notified.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
+### Added
+- Dashboard v2 data feeds on the dash server: `GET /api/v2/{since,activity,stuck,lanes,load,merges,cycle,heat,forecast}` (each with `?ws=<name>|all`), a per-browser "last looked" mark (`POST /api/v2/seen`), and `POST /api/v2/act`, which maps named actions (message, orch.restart, afk.on/off, seen, stuck fixes) to existing commands and never types into a pane.
+- The steward tick appends load, memory, swap and pane status to a small sample ring (`~/.local/share/cel/samples.jsonl`) that the load and lanes feeds read.
+- Dashboard v2 at `/`: night-sky hero, a composer that talks to an orchestrator (or "Any" via celestial-orch) with replies threaded under your message, a workspace filter that drives every card, the composer and the palette, cards you can drag, hide and resize (saved per browser), ⌘K/Ctrl-K palette, ⤢ expanded views for Needs you, Activity and Today by workspace, and an agent drawer. The decisions panel is the classic one, now shared as `decisions.js`. The classic dashboard stays at `/classic` for one release, linked both ways.
+- `cel run orchestrator|root --restart` restarts a live orchestrator in its own pane on the current launch line and resumes the exact session herdr recorded for it (never `--continue`), choosing the agent by herdr name - by cwd only when exactly one agent stands there, otherwise it refuses and lists them for `--pane`; it refuses a `working` one unless `--force` and never relaunches a pane whose agent has another name. A plain `cel run` over a dead orchestrator resumes its last recorded session; `--fresh` starts clean. Resume is declared per runtime in `agents.yaml` (`resume:`); workers and reviewers never resume.
+- `cel update` names every root/orchestrator still running an older launch line, with what it lacks and the exact restart command; `cel update --restart-orchestrators` restarts the idle ones. `cel doctor` lists them, and the steward reports them once per build.
+- `cel gateway panel [--json]` prints CLIProxyAPI's web panel URL (`http://127.0.0.1:<port>/management.html`) and the `ssh -L` line that reaches it from a laptop. The console proposes it on `G` (and routes "open the gateway panel"); the box dashboard's Box card links it when viewed on loopback and shows the tunnel line otherwise.
+- `cel gateway install` turns CLIProxyAPI's management API on for loopback only (`remote-management.allow-remote: false`, a `secret-key` minted once into the gateway's 0600 `management-key`, `disable-control-panel: false`), so the panel can read and change the gateway.
+- `cel gc` closes the panes of finished workers: a pane still in its delegation's worktree, agent `idle`/`done`, delegation `landed`/`released`/`abandoned` with its PR merged or closed and nothing dirty or unpushed. A `finished` delegation whose PR merged is reconciled to `landed` first. It reports `closed N done panes, kept M: <reasons>`, and a dry run names every kept pane and worktree with its reason.
+- `tools/quota-compare.sh --gate` fails when any account or window omp reports is missing from the merged `cel quota` list.
+- The console has an ORCHESTRATORS view (`O`): one row per root/orchestrator in every workspace with pane, status and how long in it, model, launch line (`current` / `stale (missing: …)` / `unknown (why)`), unread/open mail, and `r` to propose `cel run … --restart` (refused while `working`). Products whose mode is `auto` but have no live agent show as `missing`. The same rows are in `cel fleet --json` as `workspaces[].orchestrators`.
+- `cel update --check` previews the stale orchestrators `--restart-orchestrators` would act on.
+- Every pane the plane starts (worker, scout, reviewer, orchestrator, root) now gets a readable herdr label such as `ABC-12 · fix the widget`, capped at 40 characters; `--reuse` and `--restart` set it again.
+- Its tab gets the same name (a reviewer tab keeps `PR reviewer`, layout tabs keep their titles), and `cel ws up` names any numbered tab from the pane or agent in it.
+- `workspace.local.yaml`, gitignored, overrides `role_profiles` and adds (or,
+  by name, wholly replaces) a `worker_profiles` entry, per box, without
+  touching the shared `workspace.yaml`. Local always wins; `cel profiles`
+  marks a binding or profile sourced from it with `(local)`; `cel doctor`
+  warns on anything else the file declares, since the merge otherwise drops
+  it silently (external contribution).
+- Team workspaces (CEL-86): `workspace.local.yaml` may also override `env:`
+  keys per box; everything else (policy, tickets, repos, gates, merge and
+  review settings) stays team-only, and the rendered policy block always comes
+  from the committed `workspace.yaml`. `cel ws new` writes a commented
+  `workspace.local.example.yaml` and ignores `*.local.*`; `cel ws sync` adds a
+  missing ignore rule. `cel doctor` says whether a local file is in effect and
+  what it overrides, and fails when `workspace.yaml` is untracked or
+  gitignored. A test fails if any code reads `role_profiles`/`worker_profiles`
+  from `workspace.yaml` around the merge.
+- `cel decide ask|list|answer|drop|migrate`: one queue for every decision an orchestrator needs from the owner. A decision is a structured inbox record (title, options with tradeoffs, recommendation, context, what it blocks, asker from the caller's identity); a re-ask of the same title updates it. `list` covers every workspace, oldest first; `answer` and `drop` resolve it and mail `ANSWER to "<title>": ...` / `DROPPED` to the asker's inbox. `migrate` (dry run unless `--apply`) resolves old steward reminder items and leaves real decisions open.
+- Dashboard "Needs you" panel: answer or drop owner decisions (options, free text, drop with reason) after a confirm step, through `cel decide` behind the dashboard Host/CSRF guard.
+
+### Changed
+- Pages index lists documents only: every image is left out of the rows and workspace counts, referenced or not; images still serve at their URLs.
+- `cel dash` runs one dashboard server for the whole box instead of one per workspace. Its port is `dash: port:` in the box config, else the first workspace's old `dash.port`; every other workspace's old port redirects to it for one release. `/classic?ws=<name>` shows one workspace. The steward, `cel update`, `cel services` reach URLs and `cel doctor` all use the single dashboard; `dash.box` is gone.
+- Dashboard v2: one **Usage** card replaces "Usage forecast" and "Claude accounts" - a summary strip (accounts at risk, Claude accounts serving orchestrators, dry pay-as-you-go balances, funded total), each provider's accounts with a bar per window and a tick at the projected % at reset, who-uses-it tags derived from omp's pool and the gateway vault, pay-as-you-go rows merged by shared key, and per-window history in the expanded view. Fed by the new `/api/v2/usage`.
+- `cel quota --json` carries `orch_pool`, `gateway`, and each balance's key fingerprint (`account`) and floor veto (`vetoed`).
+- The steward sends one rolled-up inbox item (`usage-pace`) when an account is on pace to hit its cap before it resets, and resolves it when it no longer is.
+- `cel decide ask` now requires `--context` with at least 120 characters of prose (URLs do not count) and says what to write; the orchestrator roles spell out what good context is; the dashboard Needs-you card shows the context text itself, with clickable links, beside blocks and age.
+- The dashboard refreshes instantly: inbox, ledger and sample files are parsed once and re-read only when they change (inboxes by their appended tail), every v2 feed's computed answer is kept warm and served at once while a refresh runs behind it, and the page paints from one `/api/v2/snapshot` request before the live feeds land; a card drawn from an old value says how old. On the live box at load ~25 a warm refresh went from 5-8.5 s to 0.3-0.5 s until every card was painted.
+- `cel doctor` and `cel dash --ensure` probe the dashboard on `/api/session` with a 10 s budget (`CEL_DASH_PROBE_S`), so a busy box no longer reports a running dashboard as DOWN.
+- The steward no longer files "N UNRESOLVED decision(s)" reminders; it sends at most one status line per workspace per day summarising open owner decisions. Orchestrator roles now require `cel decide ask` for any question to the owner.
+- Dashboard: open decisions are now the "needs you" tab (and its headline count), grouped by workspace with filter chips, urgent and blocking ones first. Each option shows its tradeoff under the label, the recommended one is primary, answers confirm inline instead of a browser dialog, and "accept recommended" / "accept all recommended (N)" clear a queue in a few clicks. Free text and drop sit behind "other…". Works at phone width.
+- `cel decide ask --urgent` flags live risk, money or blocked work; `list` and `list --json` carry it.
+- `cel inbox read|count|watch|open --all-workspaces --workspace <w>` includes `<w>` in the sweep when the registry does not list it (previously `--workspace` was ignored there).
+
+### Fixed
+- The per-test watchdog in `tests/run.sh` no longer leaves its `sleep` orphaned on PID 1 when a test finishes first.
+- Worker memory is summed by PSS (RSS as fallback), so shared pages are no longer counted once per process; the steward's 2 GB threshold now compares against a real figure.
+- Dashboard decisions panel no longer throws away what the owner is typing: a refresh keeps an open "other…", typed text, focus and caret, an armed confirm button and an open bulk preview, and a decision closed elsewhere while being worked on stays on screen marked "closed elsewhere".
+- Stale decisions have exits: `cel decide withdraw <id> --why` lets the asker close its own question, `cel decide ask --supersedes <id>` replaces an older one in the same write, each card offers one-click "already done" / "no longer needed", and the steward asks each asker once a day to confirm or withdraw decisions older than 3 days.
+- The dashboard browser test waits up to 60 s for Chrome's debugging port (`CEL_TEST_CHROME_WAIT_MS`), retries the launch once, and shows Chrome's stderr when it still fails.
+- `cel dash --restart` / `--ensure` wait for the old server to exit and the port to come free (`CEL_DASH_PORT_WAIT_S`, default 15 s) before starting, and fail loudly if the port stays held or the new server never answers.
+- `cel run orchestrator` refuses to resume a session file another live process (in any pane, named or not) is already resuming, naming the pane, unless `--force`; `cel doctor` flags two live processes on one session file.
+- `tests/run.sh` drops the caller's `CEL_*`/`HERDR_*` identity (inbox, role, workspace, pane) before running tests, so the suite passes from a worker pane exactly as on CI - the eight "pre-existing" inbox failures are gone.
+- A `cel run orchestrator` launch that fails after claiming its session releases the claim, so an immediate retry is not refused; `--restart` of the same pane is no longer refused by its own claim, and a failed `herdr agent start` on restart is reported as a failure.
+- The dashboard runs as an installed systemd user service (`cel-dash.service`, own cgroup, `Restart=on-failure`, explicit PATH and working directory, logging to `dash.log`). `cel dash --ensure/--restart`, `cel update` and the steward drive the unit instead of forking, so it no longer dies when the steward tick that started it ends. `cel doctor` reports the unit's state.
+- The pages servers, forked the same way from the same tick, now run as transient user units (`cel-pages`, `cel-pages-public`) for the same reason.
+- celestial no longer floods its own box with execs: `cel gc` reads every process's cwd once per run instead of once per pid per worktree; `cel steward` ticks never overlap (a pidfile claim, stale claims taken over); `cel inbox watch --all-workspaces` is one `tail` over every mailbox instead of a pipeline per workspace, and only one watch per parent and reader can run; `agents.yaml` is converted from YAML once and then queried with jq; library sourcing no longer forks a `dirname` per file. `cel doctor` reports the box's `cel inbox watch` count and fork rate, red over a bound. (CEL-111)
+- gc identity: a launch environment that does not match the registry (foreign role file, unknown workspace, root role) is now pinned by a test as refused; environ-first proof itself landed in CEL-32.
+- `cel-fanout release` now removes the worktree directory itself when herdr has none to remove (`git worktree remove` from the repo's common dir; tracked changes still need `--discard`), and a row whose directory has to stay records `worktree_left` with the reason.
+- A squash-merged PR no longer makes its branch read as unpushed: commits at or before the PR's merged head, or whose patch is already in main, are landed.
+- Release's herdr and git calls are time-bound (`CEL_RELEASE_TIMEOUT`, default 30s) and say what they are waiting on.
+- Ledger states come from one shared list (`lib/ledger_states.sh`, now including `abandoned` and `unconfirmed`); writes outside it are refused, `cel doctor` names such rows, and gc keeps only that row's worktree as unknown instead of vetoing every worktree on the box.
+- The steward no longer nudges "get a worker on it" for a PR that is waiting on an open owner decision: `cel decide ask --pr <repo>#<num>` (repeatable) links the question to the PR, shown as a link on the dashboard card; nudges resume once it is answered or withdrawn.
+- `cel console` keeps drawing the last good fleet document, marked stale with its time and the reason, when a refresh fails or times out under load; `cel fleet` caches its whole document for `fleet.cache_secs` (default 30, `--fresh` bypasses), and a fleet pass no longer re-asks herdr for the roster per workspace or forks twice per process to find the console.
+- omp inbox hook: an idle orchestrator with an empty composer now wakes itself for new mail (`pi.sendMessage` with `triggerTurn`), coalesced per burst; drafts and streaming stay notify-only (CEL-76).
+- Version tests no longer fail on release bump PRs: they assert the nearest tag, not the VERSION file (CEL-77).
+- `cel afk on` no longer stops work already ordered: a delegate/scout whose spec sat under `.cel/specs/` before AFK went on is authorised (pre-authorisation 5, logged with spec path and mtime), and `cel release` under AFK is allowed for a version named with `cel afk on --allow release:<product>@<version>`. `cel afk on` now prints what keeps moving.
+- Liveness: a pinned clock with a leading zero (`08`) is read as base ten, and an answer recorded at time 0 is still cached.
+- `cel services start` for a workspace service reports herdr's own error when `herdr agent list` refuses, instead of "no herdr pane found".
+- `cel doctor` matches `github.ssh_host` as a literal, standalone `Host` token; regex characters and wildcard patterns no longer pass.
+- Steward: when the ledger names a worker's worktree, only an agent there counts; the guessed path is used only for branches with no ledger row.
+- `cel work`: a failed `gh` / `cel-linear` read is no longer cached as empty; the previous cache is kept.
+- `cel fleet` re-validates a cached document and re-reads when it is missing or corrupt; the console keeps its last good fleet read per session.
+- `cel quota` shows every account again: rows merge per account (provider + email) across CLIProxyAPI's vault and omp, instead of dropping omp - and with it both Codex accounts and opencode - as soon as the vault held any account.
+- Claude windows are read from the usage answer's `.limits[]` (with `7d Fable` scoped windows) instead of its top-level codename keys, so no more `nimbus_quill 0% (resets Nimbus Quill)`.
+- opencode reads its real auth file (`opencode-go.key`) and usage shape (`usage.rolling/weekly/monthly`) and reports beside the vault accounts.
+- Provider credit (OpenRouter, DeepSeek) is read with the key of each workspace that owns it, one row per workspace, instead of "no key in this workspace" for wherever `cel quota` ran.
+- The box dashboard's subscriptions card reads `cel quota --json` (falling back to the fleet cache), and other dashboards show a line linking to it.
+- Stale-orchestrator detection finds the agent process downward from its herdr pane's shell (runtime binary in the pane's cwd) instead of by environment marks, which read an unreadable ancestor (`systemd --user`) and reported an up-to-date orchestrator as missing every flag. An unresolvable process now reads `unknown` with the reason and is never restarted on a guess.
+- Steward reminders no longer pile up: they never count the steward's own reminders, a new reminder supersedes the previous one for the same recipient and kind, the unread reminder ignores `status` mail, and the duplicate "unresolved for Nh" message to root is gone.
+- `cel gc` now closes empty worker panes - a bare shell left in a clean checkout under `~/.herdr/worktrees/` (or a deleted one) after its agent quit - so the pane picker lists only panes in use. Services, running programs, owner shells, dirty checkouts and layout-declared panes are kept and counted by reason; `--dry-run` lists both.
+- An orchestrator herdr brings back as a bare `omp --resume` (no inbox hook) is now caught: the steward restarts it with the full launch line when it is idle with a provably empty composer, and otherwise tells root once with the exact command; `cel doctor` fails on it. The omp inbox hook also wakes an idle session for mail that was already waiting when it started (CEL-85).
+- `cel update --check`, `--restart-orchestrators`, `cel doctor` and the steward repair no longer call a healthy orchestrator stale or stripped: the one pane lookup now takes the runtime process nearest the pane shell, not omp helper children, and the dry-run launch line is found wherever it appears.
+- `cel gc --box` now frees the docker space its dry run promises: dry run and real run share one selection (every image no container uses, minus the base keep list, plus all build cache); a failed docker delete warns with docker's error and exits non-zero instead of reporting "0 B freed".
+- `cel gc` now closes an idle reviewer of a merged or closed PR even after its review folder was deleted: the pane cwd's ` (deleted)` suffix is stripped in one place (`pane_cwd`), and the PR's GitHub repo is resolved from the workspace (declared url, else origin) rather than the folder name. A reviewer kept as UNKNOWN for over 24h is reported to root once as `blocked`.
+- `cel fleet` now returns a valid cached document straight away, whatever its age. If the document is older than `fleet.cache_secs`, one detached, single-flight refill rebuilds it in its own session, so a caller's timeout can no longer kill the rebuild. Before this, a console under load sat on "stale" for good.
+- The fleet lock is no longer inherited by the rebuild's child processes, so a killed holder cannot leave orphans that keep the lock.
+- `orphans_list` reads `/proc` with bash builtins and one batched `find`, with no subprocess per process; it took 12.6 s on the box and now takes 1.7 s.
+- The document carries `generated_at`. The console's "stale as of" label uses it, and a cold console's error now names the timeout.
+- The steward tick warms the fleet cache.
+- The steward timer now carries `OnActiveSec=1min`, so it always has a next trigger after the user systemd manager restarts (it previously showed NEXT `-` and the steward and gc stopped silently). `cel doctor` (and so `cel update`) rewrites an installed timer that lacks it, and fails when the steward's last tick is older than three intervals, naming the repair command.
+- The pages index no longer lists images that a published document references as separate rows; they are still served at their URLs, and unreferenced images stay listed.
+- A review checkout is no longer deleted while a live herdr pane stands in it. `cel gc` and `cel run reviewer` now ask the herdr roster at the moment of deletion (an unreadable roster counts as occupied), and `cel run reviewer` reuses a live reviewer found by its checkout directory even when its registry row is missing, writing the row back.
+- pi and omp workers and reviewers now launch with the inbox hook and their own mailbox identity (`CEL_INBOX_ME` = pane alias), through both `cel run` and `cel-fanout delegate`, so a reviewer's CHANGES mail wakes an idle worker instead of sitting unread for hours.
+- The steward no longer nudges a PR labelled `superseded` or `hold`, an approval of an old head, or a change request already answered by a push or a later approval.
+- Ready-ticket nags skip tickets assigned to someone else, done/cancelled tickets, and blocked tickets.
+- An inbox fingerprint rolls up repeats of any kind, so "AFK expired" is one item per workspace, resolved when AFK is no longer expired-and-on.
+- The PR-reviewer role now arms `cel inbox watch` as a background Monitor.
+- `cel-fanout land --gate-from-ci` checks CI first: when every protected required check is green on the PR head it lands on that evidence without running the local gate, and says so in the merge body. Otherwise the local gate runs as before, and land's `--gate-timeout` now includes the wait for the box's suite lock (`cel-verify --lock-in-timeout`).
+- `tests/run.sh` gives each test a wall limit (`CEL_TEST_TIMEOUT`, default 120 s); a test past it is reported as a timeout and its whole process group, servers included, is killed.
+- `tests/run.sh` runs independent test files in parallel (`CEL_TEST_JOBS`, default min(nproc, 6); files sharing box-wide state run alone); `--no-lock` now also keeps nested gates out of the lock queue.
+- A quota test no longer waits 60 s on its stub server's dead man's switch; `test_no_lock_runs_while_the_lock_is_held` no longer races a loaded box.
+- Orchestrators on omp no longer stop on a spent Claude budget: `cel run root|orchestrator` passes `--config=core/omp-orchestrator.yml`, raising `retry.maxDelayMs` to 6h so the turn waits out a 5h reset in-process.
+- The steward raises one root item when the orchestrators' omp Anthropic pool is at or above 85% on every live credential's 5h/7d window, or a credential is disabled, and resolves it when headroom returns.
+- `cel quota` names `omp login anthropic` for a credential disabled in omp's pool instead of the gateway login.
+- The omp/pi inbox hook now reaches an orchestrator or root with an explicit identity (`CEL_INBOX_ME`) in every registered workspace - watch, unread count and drain - still filtered to that one recipient, so mail sent to an orchestrator from another workspace no longer sits unread for days. Workers keep single-workspace scoping; `CEL_INBOX_ALL_WS=0` opts out.
+- A dead inbox watcher is restarted by the hook (backoff, never after shutdown, no orphans) and the mail that arrived while it was down wakes the session once. A wake withheld for an active turn or a non-empty composer is retried until the session is idle with an empty composer, and a wake whose turn never reports `agent_end` no longer blocks later wakes.
+
 ## [0.3.0] - 2026-09-25
 
 ### Added
