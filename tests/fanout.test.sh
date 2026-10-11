@@ -2527,10 +2527,12 @@ test_collect_lands_pr_none_work_already_on_main() {
   (cd "$T" && "$BIN" delegate widget WG-SPK2 "$T/spec.md") > /dev/null
   git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m work
   git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
+  # a real repo ignores .agent/ (this one does); the fixture must too
+  printf '.agent/\n' >> "$STUB_WT/.git/info/exclude"
   mkdir -p "$STUB_WT/.agent" && printf 'pushed\n' > "$STUB_WT/.agent/result.md"
   (cd "$T" && "$BIN" collect WG-SPK2) > /dev/null 2>&1
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "landed"
-  (cd "$T" && "$BIN" release WG-SPK2) > /dev/null 2>&1
+  (cd "$T" && "$BIN" release WG-SPK2) >"$T/rel.out" 2>&1 || cat "$T/rel.out"
   assert_contains "$(cat "$STUB_LOG")" "worktree remove"
   rm -rf "$T"
 }

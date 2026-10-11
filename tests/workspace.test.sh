@@ -456,6 +456,6 @@ test_ws_repo_pr_overrides_workspace_policy_per_repo() {
   assert_contains "$(printf '%s\n' "$b" | grep -- '- repo gadget')" "fast-forward only, never force"
   case "$(printf '%s\n' "$b" | grep -- '- repo widget')" in *"pr: none"*) fail "widget inherited gadget's pr: none";; esac
   yq -y -i '(.repos[] | select(.name=="gadget") | .pr) = "sometimes"' "$tmp/workspace.yaml"
-  assert_fails ws_repo_pr "$tmp" gadget
+  if (ws_repo_pr "$tmp" gadget) >/dev/null 2>&1; then fail "invalid pr value accepted"; fi
   rm -rf "$tmp"
 }

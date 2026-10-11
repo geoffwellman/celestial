@@ -469,6 +469,16 @@ _wt_unmerged_after() { # <worktree> <merged-head-oid> -> count | fail
   printf '%s' "$n"
 }
 
+# True when the worktree's branch has commits and every one is already in
+# origin's default branch by patch (git cherry), i.e. it was pushed to main.
+_wt_on_main() { # <worktree>
+  local base out
+  base="$(repo_default_ref "$1")" || return 1
+  git -C "$1" fetch -q origin 2>/dev/null || true
+  out="$(git -C "$1" cherry "$base" HEAD 2>/dev/null)" || return 1
+  ! printf '%s\n' "$out" | grep -q '^+'
+}
+
 _ledger_entry() { # <wsdir> <id> -> json object, empty if unknown
   _ledger_read "$1" | jq -c --arg id "$2" '.[] | select(.id == $id)' | head -1
 }
@@ -988,6 +998,17 @@ FINALLY, once .agent/report.md is written, announce yourself - going quiet is no
 Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
   else
     local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
+    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
+      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
+      # main IS the landing, so the kickoff says how to do it safely.
+      prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it on your branch, then rebase onto origin/main and push to main (fast-forward only, never force: git push origin HEAD:main). This repo takes no PRs - do not open a pull request. BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover first. If the push is rejected, fetch, rebase and retry; never force. Write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: none (pushed to main). Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    else
     prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
 
 When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
@@ -997,6 +1018,7 @@ If your spec says the deliverable is research, a document, or explicitly says no
 FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
   cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
 Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    fi
   fi
 
   # UNCONFIRMED IS NOT A FAILURE, and it must not cost the worktree: the pane
@@ -1163,6 +1185,13 @@ cmd_collect() {
   if [ -f "$worktree/.agent/result.md" ]; then
     cat "$worktree/.agent/result.md"
     _ledger_update_state "$wsdir" "$id" collected
+    # CEL-119: a `pr: none` repo lands by pushing to main, so there is no
+    # merged PR for land/release to find. Once every commit on the branch is
+    # in origin/main (by patch, so a rebase still counts) the row is landed.
+    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ] && _wt_on_main "$worktree"; then
+      _ledger_update_state "$wsdir" "$id" landed
+      c_ok "$id: pr: none and its commits are on main - landed"
+    fi
   else
     local salvage; salvage="$wsdir/.cel/salvage-$id.txt"
     mkdir -p "$(dirname "$salvage")"
