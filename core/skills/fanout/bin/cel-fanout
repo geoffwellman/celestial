@@ -471,8 +471,14 @@ _wt_unmerged_after() { # <worktree> <merged-head-oid> -> count | fail
 
 # True when the worktree's branch has commits and every one is already in
 # origin's default branch by patch (git cherry), i.e. it was pushed to main.
-_wt_on_main() { # <worktree>
-  local base out
+# A branch with NOTHING ahead of main also prints nothing from cherry, and a
+# worker that blocked without committing must never read as landed (PR #145
+# review) - so it needs at least one commit past where it started.
+_wt_on_main() { # <worktree> <start-sha>
+  local base out n
+  [ -n "${2:-}" ] || return 1
+  n="$(git -C "$1" rev-list --count "$2..HEAD" 2>/dev/null)" || return 1
+  [ "${n:-0}" -gt 0 ] || return 1
   base="$(repo_default_ref "$1")" || return 1
   git -C "$1" fetch -q origin 2>/dev/null || true
   out="$(git -C "$1" cherry "$base" HEAD 2>/dev/null)" || return 1
@@ -1043,6 +1049,10 @@ Your orchestrator is not watching your pane; that message is how it learns you a
       profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
       provider:$provider, shape:$shape, profile_reason:$because}')"
   _ledger_append "$wsdir" "$entry"
+  # Where the branch started, so a `pr: none` collect can tell "pushed to
+  # main" from "never committed" - both leave nothing ahead of origin/main.
+  local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
@@ -1188,7 +1198,7 @@ cmd_collect() {
     # CEL-119: a `pr: none` repo lands by pushing to main, so there is no
     # merged PR for land/release to find. Once every commit on the branch is
     # in origin/main (by patch, so a rebase still counts) the row is landed.
-    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ] && _wt_on_main "$worktree"; then
+    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ] && _wt_on_main "$worktree" "$(printf '%s' "$entry" | jq -r '.start_sha // ""')"; then
       _ledger_update_state "$wsdir" "$id" landed
       c_ok "$id: pr: none and its commits are on main - landed"
     fi

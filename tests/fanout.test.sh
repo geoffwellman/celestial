@@ -2548,3 +2548,16 @@ test_collect_keeps_pr_none_work_not_on_main_collected() {
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
   rm -rf "$T"
 }
+
+# PR #145 review: a pr: none worker that wrote result.md WITHOUT committing has
+# nothing ahead of main either - that is not landed work.
+test_collect_does_not_land_pr_none_branch_with_zero_commits() {
+  _fanout_setup
+  yq -y -i '.repos[0].pr = "none"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-SPK4 "$T/spec.md") > /dev/null
+  printf '.agent/\n' >> "$STUB_WT/.git/info/exclude"
+  mkdir -p "$STUB_WT/.agent" && printf 'blocked\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-SPK4) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  rm -rf "$T"
+}
