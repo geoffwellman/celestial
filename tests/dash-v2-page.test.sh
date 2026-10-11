@@ -234,3 +234,20 @@ test_dash_v2page_room_opens_from_the_grid_with_transcript_composer_and_status() 
   assert_eq "$(_vpj .hashAfter)" ""
   _vp_down
 }
+
+# review of #147 on live data: a repo orchestrator's room showed its
+# neighbours' PRs, markdown came out raw, and the grid's decisions chrome
+# was repeated in the side panel
+test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions_plainly() {
+  _vp_boot
+  local rc=0; _vp_run room || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj '.repoScope | map(tostring) | join(",")')" "true,false,false"
+  assert_eq "$(_vpj .md.strong)" "1"
+  assert_eq "$(_vpj .md.code)" "1"
+  assert_eq "$(_vpj .md.li)" "2"
+  assert_eq "$(_vpj .md.ol)" "2"
+  assert_eq "$(_vpj .md.a)" "https://example.invalid/d"
+  assert_eq "$(_vpj .md.rawB)" "0"
+  assert_eq "$(_vpj .decHeading)" "false"
+  _vp_down
+}

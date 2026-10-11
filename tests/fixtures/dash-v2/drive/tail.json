@@ -57,7 +57,7 @@
    "parentId": "e4",
    "ts": "2026-01-01T10:02:20Z",
    "kind": "assistant",
-   "text": "ABC-12 has a PR open; reviewing.",
+   "text": "ABC-12 has a **PR open**; reviewing `widget#12`.\n\n- first <b>x</b>\n- second\n\n1. one\n2. [docs](https://example.invalid/d)",
    "fold": false
   }
  ]
