@@ -418,3 +418,54 @@ test_inbox_hook_worker_identity_wakes_on_its_own_mail_only() {
   assert_eq "$(CEL_INBOX_DIR="$D" "$CEL_ROOT/bin/cel" inbox count --for widget-wg-8-other --workspace alpha)" "1"
   rm -rf "$D" "$REG"
 }
+
+# CEL-120: owner mail to a BUSY orchestrator stays queued (no wake, cursor
+# untouched) until the turn ends, then arrives at agent_end - carrying its
+# `[<id>]` so `cel drive receipt` can find it in the conversation. A
+# non-empty composer is never written to on the way.
+_omp_busy_harness() { # <inbox-dir>
+  CEL_INBOX_DIR="$1" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
+  CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=300 CEL_INBOX_RETRY_MS=300 HOOK="$HOOK" node --no-warnings - <<'JS'
+const { execFileSync } = require('node:child_process');
+(async () => {
+  const handlers = {}; const sent = []; let idle = false; let draft = 'my draft'; let writes = 0;
+  const pi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); }, sendMessage: (m, o) => { sent.push({ m, o }); } };
+  const ctx = { cwd: process.cwd(), hasUI: true, isIdle: () => idle,
+    ui: { notify: () => {}, getEditorText: () => draft, setEditorText: () => { writes++; }, pasteToEditor: () => { writes++; } } };
+  const fire = async (ev) => { for (const fn of handlers[ev] || []) await fn({ type: ev }, ctx); };
+  const mod = await import(process.env.HOOK);
+  mod.default(pi);
+  await fire('session_start');
+  await new Promise((r) => setTimeout(r, 1200));
+  const id = execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', 'widget-orch', 'owner says hi',
+    '--workspace', 'demo', '--from', 'owner', '--kind', 'owner'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  await new Promise((r) => setTimeout(r, 1500));
+  const busySent = sent.length;
+  idle = true; // turn ended, but a draft is in the composer
+  await fire('agent_end');
+  await new Promise((r) => setTimeout(r, 1200));
+  const draftSent = sent.length;
+  draft = '';
+  await fire('agent_end');
+  await new Promise((r) => setTimeout(r, 1200));
+  await fire('session_shutdown');
+  console.log(JSON.stringify({ id, busySent, draftSent, writes, sent }));
+  process.exit(0);
+})().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); process.exit(0); });
+JS
+}
+
+test_omp_inbox_busy_owner_mail_waits_for_agent_end_and_carries_id() {
+  command -v node >/dev/null || return 0
+  local d; d="$(mktemp -d)"
+  local out; out="$(_omp_busy_harness "$d")"
+  rm -rf "$d"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.busySent' <<<"$out")" "0"
+  assert_eq "$(jq -r '.draftSent' <<<"$out")" "0"
+  assert_eq "$(jq -r '.writes' <<<"$out")" "0"
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  local id; id="$(jq -r .id <<<"$out")"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "[$id]"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "owner says hi"
+}
