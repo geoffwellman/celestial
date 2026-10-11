@@ -33,6 +33,22 @@
  <div id="thread"></div>
 </div>
 
+<div class="room" id="room">
+ <div class="rhead"><a class="pill" href="#" id="rback" title="back to the grid (Esc)">← grid</a><span class="dot idle" id="rdot"></span><b id="rname"></b><span class="sub" id="rstat"></span></div>
+ <div class="rbody">
+  <div class="rchat">
+   <div class="rconv" id="rconv"></div>
+   <button class="pill rjump" id="rjump">↓ newest</button>
+   <div class="rcomp">
+    <textarea id="rmsg" placeholder="Message this orchestrator - goes through its inbox, never typed into its pane"></textarea>
+    <div class="crow"><span class="sub" id="rhint"></span><button class="go" id="rsend">Send ↑</button></div>
+    <div class="sub rreceipt" id="rreceipt"></div>
+   </div>
+  </div>
+  <div class="rside"><div id="rside"></div><h4>Decisions</h4><div id="rdechost"></div></div>
+ </div>
+</div>
+
 <div class="wrap">
  <div class="bar" id="bar">Drag a card by ⠿ to move it · Customize to hide, restore or resize cards · layout is saved in this browser</div>
  <div class="grid" id="grid"></div>

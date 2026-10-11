@@ -846,12 +846,93 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return { accounts: items };
   };
 
+  // ---- drive: an orchestrator's room (CEL-121) -----------------------------
+  // The room reads the conversation itself, through the drive core (CEL-120):
+  // who is running from `cel drive list` (herdr, never `cel fleet` - its cold
+  // read was 20 s under load), the transcript from a per-file offset tailer
+  // kept in this process. A poll reads only the bytes written since the last
+  // one; a 13 MB session is never reparsed. A room nobody has looked at for
+  // ten minutes is forgotten, so this costs nothing while nobody watches.
+  const driveList = () => slow('drive:list', 4000, async () => {
+    const out = await run(CEL(), ['drive', 'list', '--json'], 10000);
+    if (out === null) return null;
+    try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; }
+  });
+  // loaded on the first room asked for: the dashboard runs without the drive
+  // core beside it (tests copy tools/dash alone), and a page nobody opens a
+  // room on never needs it
+  let core = null;
+  const rooms = new Map();
+  const ROOM_KEEP = 2000;
+  const ROOM_IDLE_MS = 600000;
+  const MODEL = /"model"\s*:\s*"([^"]{1,120})"/g;
+  const roomPush = (r, lines, events) => {
+    for (const l of lines) for (const m of l.matchAll(MODEL)) r.model = m[1];
+    r.events.push(...events);
+    if (r.events.length > ROOM_KEEP) r.events.splice(0, r.events.length - ROOM_KEEP);
+  };
+  const roomOpen = (o) => {
+    const { Tailer, Normaliser, parseLines } = core;
+    const r = { session: o.session, runtime: o.runtime || 'omp', tailer: new Tailer(o.session), events: [], model: null, asked: Date.now() };
+    const lines = r.tailer.poll();
+    const first = parseLines(lines, r.runtime);
+    r.norm = new Normaliser(r.runtime);
+    for (const e of first) if (e.kind === 'tool') r.norm.calls.set(e.id, e);
+    roomPush(r, lines, first);
+    return r;
+  };
+  const driveTail = async (name, since) => {
+    const now = Date.now();
+    for (const [k, r] of rooms) if (now - r.asked > ROOM_IDLE_MS) rooms.delete(k);
+    const o = ((await driveList()) || []).find((x) => x.name === name);
+    if (!o) return null;
+    if (!core) core = await import('../drive/transcript.mjs');
+    let r = rooms.get(name);
+    let reset = false;
+    if (!o.session) return { orch: name, status: o.status, runtime: o.runtime, workspace: o.workspace, model: null, events: [], last: null, reset: true };
+    if (!r || r.session !== o.session) { r = roomOpen(o); rooms.set(name, r); reset = true; }
+    else {
+      const lines = r.tailer.poll();
+      if (r.tailer.reset) { r = roomOpen(o); rooms.set(name, r); reset = true; }
+      else roomPush(r, lines, r.norm.push(lines));
+    }
+    r.asked = now;
+    let start = Math.max(0, r.events.length - 400);
+    if (since && !reset) {
+      let i = -1;
+      for (let k = r.events.length - 1; k >= 0; k--) if (r.events[k].id === since) { i = k; break; }
+      if (i >= 0) start = i + 1; else reset = true;
+    } else if (since) reset = true;
+    if (!since) reset = true;
+    const last = r.events.length ? r.events[r.events.length - 1].id : null;
+    return { orch: name, status: o.status, runtime: o.runtime, workspace: o.workspace, model: r.model,
+      events: r.events.slice(start), last, reset };
+  };
+  const driveReceipt = async (id) => {
+    const out = await run(CEL(), ['drive', 'receipt', id, '--json'], 15000);
+    if (out === null) return null;
+    try { return JSON.parse(out); } catch { return null; }
+  };
+
   // ---- act ----------------------------------------------------------------
   const NAME = /^[A-Za-z0-9._:-]{1,80}$/;
   const REF = /^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._\/-]{1,160}$/;
   const act = async (req, res, body) => {
     const { action, target } = body || {};
     const args = (body && typeof body.args === 'object' && body.args) || {};
+    // CEL-121: mail to a live orchestrator through `cel drive send` - kind
+    // owner, from owner, delivered by its inbox hook when the turn ends.
+    // Never typed into its pane.
+    if (action === 'drive.send') {
+      const text = String(args.text || '').trim();
+      if (!NAME.test(String(target || '')) || !text || text.length > 4000) return [400, 'drive.send needs an orchestrator and text'];
+      const live = ((await driveList()) || []).some((o) => o.name === target);
+      if (!live) return [400, 'not a running orchestrator'];
+      const out = await run(CEL(), ['drive', 'send', String(target), text, '--json'], 30000);
+      if (out === null) return [502, 'send failed'];
+      logAct(String(args.ws || cfg.name), `dashboard: message to ${target} (drive)`);
+      return [200, out.trim()];
+    }
     const all = await workspaces();
     const wsName = String(args.ws || cfg.name);
     if (!all.some((w) => w.name === wsName)) return [400, 'unknown workspace'];
@@ -985,6 +1066,22 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       return true;
     }
     if (req.method !== 'GET') { res.writeHead(404).end('not found'); return true; }
+    if (name === 'drive/list') { const l = await driveList(); if (!l) { res.writeHead(502).end('herdr did not answer'); return true; } json(res, 200, l); return true; }
+    if (name === 'drive/tail') {
+      const orch = url.searchParams.get('orch') || '';
+      if (!NAME.test(orch)) { res.writeHead(400).end('bad orch'); return true; }
+      const since = url.searchParams.get('since');
+      const t = await driveTail(orch, since && since.length <= 200 ? since : null);
+      if (!t) { res.writeHead(404, { 'cache-control': 'no-store' }).end('no such orchestrator'); return true; }
+      json(res, 200, t); return true;
+    }
+    if (name === 'drive/receipt') {
+      const id = url.searchParams.get('id') || '';
+      if (!/^\d{1,30}$/.test(id)) { res.writeHead(400).end('bad id'); return true; }
+      const r = await driveReceipt(id);
+      if (!r) { res.writeHead(404, { 'cache-control': 'no-store' }).end('no such message'); return true; }
+      json(res, 200, r); return true;
+    }
     const wss = await scope(url);
     if (!wss) { res.writeHead(400).end('unknown workspace'); return true; }
     if (name === 'snapshot') { json(res, 200, await snapshot(req, url, wss)); return true; }

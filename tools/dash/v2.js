@@ -80,10 +80,11 @@ window.v2refresh=function(){return refresh()};
 var NYSORT=recall('cel-v2-nysort','urgent');
 function buildLast(){
   var groups=((S&&S.needsYouGroups)||[]).filter(function(g){return inWs(g.workspace)}).map(function(g){
-    var items=g.items.filter(function(d){return !NYDONE[d.id]});
+    // in a room, only what that orchestrator asked (CEL-121)
+    var items=g.items.filter(function(d){return !NYDONE[d.id]&&(!ROOM||d.asker===ROOM)});
     if(NYSORT==='newest')items.sort(function(a,b){return (a.age_secs||0)-(b.age_secs||0)});
     else if(NYSORT==='oldest')items.sort(function(a,b){return (b.age_secs||0)-(a.age_secs||0)});
-    return {workspace:g.workspace,urgent:g.urgent,count:items.length,recommended:g.recommended,items:items}});
+    return {workspace:g.workspace,urgent:g.urgent,count:items.length,recommended:g.recommended,items:items}}).filter(function(g){return !ROOM||g.items.length});
   var all=[];groups.forEach(function(g){all=all.concat(g.items)});
   LAST={needsYou:all,needsYouGroups:groups};
 }
@@ -150,8 +151,8 @@ var BODY={
  prs:function(){var it=prRows().filter(function(p){return inWs(p.ws)});
   return it.map(function(p){var ok=p.review==='APPROVED';return '<div class="row" data-ws="'+esc(p.ws)+'" data-pr="'+esc(p.repo+'#'+p.number)+'"><span class="dot '+(p.checks==='failing'?'bad':ok?'ok':'warn')+'"></span><span class="t">'+esc(p.title)+'</span>'+wsTag(p.ws)+'<a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub">'+(ok?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review')+'</span></div>'}).join('')||none('no open PRs')},
  orchs:function(){var it=orchs().filter(function(o){return inWs(o.ws)});
-  return it.map(function(o){return '<div class="row" data-ws="'+esc(o.ws)+'"><span class="dot '+(o.status==='working'?'ok':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(o.name)+'">'+esc(o.name)+'</b> <span class="sub">'+esc(o.status)+'</span></span>'+wsTag(o.ws)+
-   '<button class="btn" data-agent="'+esc(o.name)+'">message</button><button class="btn" data-act="orch.restart" data-target="'+esc(o.name)+'" data-ws="'+esc(o.ws)+'" data-label="restart '+esc(o.name)+'">restart</button></div>'}).join('')||none('no orchestrators here')},
+  return it.map(function(o){return '<div class="row" data-ws="'+esc(o.ws)+'"><span class="dot '+(o.status==='working'?'ok':'idle')+'"></span><span class="t"><b class="link" data-room="'+esc(o.name)+'" title="open its room">'+esc(o.name)+'</b> <span class="sub">'+esc(o.status)+'</span></span>'+wsTag(o.ws)+
+   '<button class="btn" data-room="'+esc(o.name)+'">open room</button><button class="btn" data-act="orch.restart" data-target="'+esc(o.name)+'" data-ws="'+esc(o.ws)+'" data-label="restart '+esc(o.name)+'">restart</button></div>'}).join('')||none('no orchestrators here')},
  merges:function(){var days=((F.merges||{}).days)||[];if(!F.merges)return none('waiting for the merges feed');var rw=repoWs();
   var vals=days.map(function(d){var n=0;Object.keys(d.counts||{}).forEach(function(r){if(WSF==='all'||rw[r]===WSF)n+=d.counts[r]});return [d.day,n]});
   var mx=Math.max.apply(null,[1].concat(vals.map(function(v){return v[1]})));var tot=vals.reduce(function(a,v){return a+v[1]},0);
@@ -314,7 +315,7 @@ function renderAll(){
   var nyl=document.querySelector('#grid .w[data-id="needs"] .nyload');
   if(nyl){var nw=S?'':(cardStatus('needs')||'loading needs you…');if(nyl._w!==nw){nyl._w=nw;nyl.innerHTML=nw?none(nw):''}}
   if(S){buildLast();if(needsHost().isConnected)renderNeedsYou();refreshTabs()}
-  renderComposer();renderThread();renderDrawer();renderOverlay();
+  renderComposer();renderThread();renderDrawer();renderOverlay();if(ROOM)renderRoomSide();
   var o=orchs(),wsn={};o.forEach(function(x){wsn[x.ws]=1});((S&&S.needsYouGroups)||[]).forEach(function(x){wsn[x.workspace]=1});
   var p=F.load&&F.load.current;
   $('tagline').textContent=o.length+' orchestrators · '+Object.keys(wsn).length+' workspaces'+(p?' · box at '+Math.round(p.mem_pct)+'% memory':'');
@@ -434,7 +435,10 @@ function findAgent(name){
   if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:null,model:'',now:o.status};
   return {name:name,ws:'',status:'unknown',pane:null,pr:null,model:'',now:''};
 }
-function openDrawer(name){DRAWER=name;$('drawer').classList.add('open');renderDrawer();remember('agent',name)}
+function openDrawer(name){
+  // an orchestrator is opened as its room, wherever it is named (CEL-121)
+  if(orchs().some(function(o){return o.name===name})){openRoom(name);return}
+  DRAWER=name;$('drawer').classList.add('open');renderDrawer();remember('agent',name)}
 function renderDrawer(){
   if(!DRAWER)return;var a=findAgent(DRAWER);
   var mail=((S&&S.inbox)||[]).filter(function(x){return x.to===a.name||x.toName===a.name});
@@ -582,10 +586,148 @@ document.addEventListener('keydown',function(e){
     if(e.key==='Enter'){e.preventDefault();palOpen(PR[palIdx])}
     return;
   }
-  if(e.key==='Escape'){if(OV)closeOverlay();else if(DRAWER)$('dclose').onclick()}
+  if(e.key==='Escape'){if(OV)closeOverlay();else if(ROOM&&!DRAWER)closeRoom();else if(DRAWER)$('dclose').onclick()}
 });
 
+// ---- an orchestrator's room (CEL-121) ----------------------------------------
+// The one place an orchestrator is seen and driven from: its own conversation
+// (read from its session file by the drive core, redacted there), a composer
+// that MAILS it (delivered by its inbox hook when it is idle - never typed
+// into its pane), and beside it what it owns: workers, PRs, stuck items and
+// its open decisions, answerable with the same card as Needs you. The grid
+// stays the front page; #room=<orch> is the URL, so a bookmark or the phone's
+// back button does what it says.
+var ROOM=null,RT=null,RBYCLICK=false,RRCPT=null;
+function roomFromHash(){var m=/^#room=([A-Za-z0-9._:%-]+)$/.exec(location.hash);try{return m?decodeURIComponent(m[1]):null}catch(e){return null}}
+function openRoom(name){if(DRAWER)$('dclose').onclick();RBYCLICK=true;location.hash='room='+encodeURIComponent(name)}
+function closeRoom(){if(RBYCLICK){RBYCLICK=false;history.back()}else{history.replaceState(null,'',location.pathname+location.search);syncRoom()}}
+function syncRoom(){var r=roomFromHash();if(r===ROOM)return;if(ROOM)leaveRoom();if(r)enterRoom(r)}
+window.addEventListener('hashchange',syncRoom);
+function enterRoom(name){
+  ROOM=name;RT={last:null,status:null,model:null,lastTs:null,err:null,timer:null,t0:Date.now(),firstAt:null};
+  if(!RRCPT||RRCPT.to!==name)RRCPT=null;
+  document.body.classList.add('inroom');$('room').classList.add('open');
+  $('rname').textContent=name;$('rconv').innerHTML='';$('rside')._html=null;
+  $('rdechost').appendChild(needsHost());
+  if(S){buildLast();renderNeedsYou(true);refreshTabs()}
+  renderRoomSide();renderReceipt();window.scrollTo(0,0);remember('agent',name);
+  pollRoom();
+}
+function leaveRoom(){
+  if(RT&&RT.timer)clearTimeout(RT.timer);ROOM=null;RT=null;
+  document.body.classList.remove('inroom');$('room').classList.remove('open');
+  var c=document.querySelector('#grid .w[data-id=needs] .body');if(c)c.appendChild(needsHost());
+  if(S){buildLast();renderNeedsYou(true);refreshTabs()}
+}
+$('rback').onclick=function(e){e.preventDefault();closeRoom()};
+// ---- the conversation: incremental, newest at the bottom, follows unless the
+// owner scrolled up to read
+function nearBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<60}
+function mailFrom(t){var m,who=[],re=/from ([^\]\s]+)\]/g;while((m=re.exec(t))){if(who.indexOf(m[1])<0)who.push(m[1])}return who}
+function evEl(e){
+  var tm=e.ts?'<time>'+hhmm(e.ts)+'</time>':'',el;
+  if(e.kind==='tool'||e.kind==='thinking'){
+    el=document.createElement('details');el.className='ev'+(e.tool&&e.tool.isError?' err':'');
+    var sum=e.kind==='tool'?(e.tool.isError?'✗ ':'· ')+(e.tool.summary||e.tool.name||'tool'):'… thinking';
+    el.innerHTML='<summary>'+esc(sum)+'</summary>'+(e.kind==='thinking'&&e.text?'<div class="body">'+esc(e.text)+'</div>':'<div class="body sub">'+(e.ts?hhmm(e.ts):'')+' '+esc(e.tool?e.tool.name:'')+'</div>');
+    if(e.tool)el.dataset.sum=e.tool.summary||'';
+  }else{
+    el=document.createElement('div');
+    var mail=e.kind==='system'&&/inbox/.test(e.source||'');
+    el.className='ev '+(mail?'mail':e.kind);
+    if(mail){var who=mailFrom(e.text||'');
+      el.innerHTML=tm+'<div class="from">✉ mail from '+esc(who.length?who.join(', '):(e.source||'inbox'))+'</div>'+esc(e.text||'')}
+    else if(e.kind==='compaction')el.innerHTML=tm+'──── compacted ────\n'+esc(e.text||'');
+    else el.innerHTML=tm+esc(e.text||'');
+  }
+  el.dataset.kind=e.kind;el.dataset.id=e.id||'';
+  return el;
+}
+function appendEvents(evs){
+  var c=$('rconv'),follow=nearBottom(c);
+  evs.forEach(function(e){
+    if(e.update){var d=[].slice.call(c.querySelectorAll('details.ev[data-id="'+(e.id||'')+'"]')).filter(function(x){return x.dataset.sum===(e.tool&&e.tool.summary)})[0];
+      if(d){d.classList.toggle('err',!!e.tool.isError);var s=d.querySelector('summary');s.textContent=(e.tool.isError?'✗ ':'· ')+e.tool.summary}return}
+    c.appendChild(evEl(e));if(e.ts)RT.lastTs=e.ts;
+  });
+  // the DOM stays bounded however long the owner watches
+  while(c.children.length>1500)c.removeChild(c.firstChild);
+  if(follow)c.scrollTop=c.scrollHeight;
+  $('rjump').classList.toggle('on',!follow&&evs.length>0||!nearBottom(c));
+}
+$('rconv').addEventListener('scroll',function(){if(nearBottom($('rconv')))$('rjump').classList.remove('on')});
+$('rjump').onclick=function(){var c=$('rconv');c.scrollTop=c.scrollHeight;$('rjump').classList.remove('on')};
+var ROOM_POLL_MS=1000;
+async function pollRoom(){
+  if(!ROOM)return;var name=ROOM,rt=RT;
+  try{
+    var d=await getJSON('/api/v2/drive/tail?orch='+encodeURIComponent(name)+(rt.last?'&since='+encodeURIComponent(rt.last):''));
+    if(RT!==rt)return;
+    rt.status=d.status;rt.model=d.model||rt.model;rt.err=null;
+    if(d.reset){$('rconv').innerHTML=''}
+    appendEvents(d.events||[]);rt.last=d.last||rt.last;
+    if(!rt.firstAt){rt.firstAt=Date.now();window.V2ROOMOPENMS=rt.firstAt-rt.t0}
+  }catch(e){if(RT!==rt)return;rt.err=e.status===404?'not running':(e.status||'network')}
+  renderRoomSide();
+  rt.timer=setTimeout(pollRoom,document.hidden?5000:ROOM_POLL_MS);
+}
+// ---- beside it: status, workers, PRs, stuck ---------------------------------
+// A workspace orchestrator owns its workspace's work; a repo orchestrator
+// (<repo>-orch) owns its repo's.
+function roomOwns(name,o){
+  var repo=name.replace(/-orch$/,''),ws=o?o.ws:null;
+  var byRepo=workers().some(function(w){return w.repo===repo})||prRows().some(function(p){return p.repo===repo});
+  return function(x,r){return byRepo?r===repo:(!!ws&&x.ws===ws)};
+}
+function renderRoomSide(){
+  if(!ROOM||!RT)return;
+  var o=orchs().filter(function(x){return x.name===ROOM})[0]||null;
+  var st=(RT.status||(o&&o.status)||'unknown');
+  RT.busy=st==='working';
+  $('rdot').className='dot '+(st==='working'?'ok':st==='blocked'?'warn':'idle');
+  $('rstat').textContent=st+(RT.err?' · transcript '+RT.err:'');
+  var owns=roomOwns(ROOM,o);
+  var ws=workers().filter(function(w){return owns(w,w.repo)});
+  var ps=prRows().filter(function(p){return owns(p,p.repo)});
+  var sk=((F.stuck||{}).items||[]).filter(function(s){return owns(s,String(s.ref).split('/')[0])});
+  var html='<h4>Status</h4><div class="row"><span class="dot '+(st==='working'?'ok':'idle')+'"></span><span class="t"><b>'+esc(st)+'</b>'+(o?' '+wsTag(o.ws):'')+'</span></div>'+
+    '<div class="sub">model '+esc(RT.model||'unknown')+(RT.lastTs?' · last turn '+esc(ago(RT.lastTs))+' ago':'')+'</div>'+
+    '<h4>Workers ('+ws.length+')</h4>'+(ws.map(function(w){return '<div class="row"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b><br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status)+'</span></span></div>'}).join('')||none('no workers'))+
+    '<h4>Open PRs ('+ps.length+')</h4>'+(ps.map(function(p){return '<div class="row"><span class="t">'+esc(p.title)+'</span><a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub">'+(p.review==='APPROVED'?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review')+'</span></div>'}).join('')||none('no open PRs'))+
+    '<h4>Stuck ('+sk.length+')</h4>'+(sk.map(function(r){return '<div class="row"><span class="dot warn"></span><span class="t"><b>'+esc(r.ref)+'</b><br><span class="sub">'+esc(r.reason)+'</span></span>'+(r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck'));
+  var el=$('rside');if(el._html!==html){el._html=html;el.innerHTML=html;restoreArmed(el)}
+  $('rhint').textContent=RT.busy?'it is mid-turn - this will be delivered when the current turn ends':'→ its inbox; delivered at its next idle moment, never typed into its pane';
+}
+$('rside').addEventListener('click',function(e){var ag=e.target.closest('[data-agent]');if(ag)openDrawer(ag.dataset.agent)});
+// ---- composer + receipt: queued -> delivered -> in conversation ---------------
+var RSTATE={queued:'queued - waiting in its inbox',delivered:'delivered - the hook handed it over','in-conversation':'in conversation ✓'};
+function renderReceipt(){
+  var el=$('rreceipt');
+  if(!RRCPT||RRCPT.to!==ROOM){el.textContent='';return}
+  var s=RRCPT.state==='in-conversation'?'in conversation':RRCPT.state;
+  el.innerHTML='sent '+hhmm(RRCPT.at)+' · <b>'+esc(s)+'</b>'+(RRCPT.state==='queued'&&RT&&RT.busy?' <span class="sub">(will be delivered when the current turn ends)</span>':'');
+}
+async function pollReceipt(r){
+  if(RRCPT!==r||r.state==='in-conversation'||Date.now()-new Date(r.at).getTime()>3600e3)return;
+  try{var d=await getJSON('/api/v2/drive/receipt?id='+encodeURIComponent(r.id));if(d&&d.state)r.state=d.state}catch(e){}
+  renderReceipt();
+  if(r.state!=='in-conversation')setTimeout(function(){pollReceipt(r)},1500);
+}
+$('rsend').onclick=async function(){
+  var text=$('rmsg').value.trim();if(!text){toast('type a message first',false);return}
+  if(!ROOM)return;
+  var b=$('rsend');b.disabled=true;
+  var r=await act('drive.send',ROOM,{text:text});
+  b.disabled=false;if(!r.ok)return;
+  var id=null;try{id=JSON.parse(r.text).id}catch(e){}
+  $('rmsg').value='';
+  RRCPT={id:id,to:ROOM,state:'queued',at:new Date().toISOString()};renderReceipt();
+  if(id)pollReceipt(RRCPT);
+};
+document.addEventListener('click',function(e){var b=e.target.closest('[data-room]');if(b){e.preventDefault();openRoom(b.dataset.room)}});
+
 // ---- boot --------------------------------------------------------------------
+syncRoom();
 renderAll();
 snapshot();
 refresh();

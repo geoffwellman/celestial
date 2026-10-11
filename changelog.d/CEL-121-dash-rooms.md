@@ -1,0 +1,2 @@
+### Added
+- Dashboard: a room per orchestrator, opened from the grid (`#room=<orch>`, bookmarkable, back button closes it). Its live conversation with folded tool calls and mail bubbles, a composer that mails it through `cel drive send` with a queued -> delivered -> in conversation receipt, and beside it its status, model, workers, open PRs, stuck items and its decisions, answerable in place. New routes `/api/v2/drive/list|tail|receipt` and act `drive.send`; the tail is incremental and kept only while someone is looking.
