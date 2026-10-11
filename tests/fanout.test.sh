@@ -2504,3 +2504,45 @@ test_delegate_failed_rename_still_launches() {
   assert_contains "$(cat "$STUB_LOG")" "agent start widget-wg-2-x"
   rm -rf "$T"
 }
+
+# CEL-119: a `pr: none` repo's worker pushes to main itself - fast-forward
+# only, no PR - and a repo without the key keeps the PR instruction.
+test_delegate_prompt_pushes_to_main_for_pr_none_repo() {
+  _fanout_setup
+  yq -y -i '.repos[0].pr = "none"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-SPK "$T/spec.md") > /dev/null
+  local pr; pr="$(cat "$STUB_LOG")"
+  assert_contains "$pr" "rebase onto origin/main and push to main"
+  assert_contains "$pr" "fast-forward only, never force"
+  assert_contains "$pr" "do not open a pull request"
+  if printf '%s' "$pr" | grep -q "DRAFT pull request\|READY FOR REVIEW"; then fail "pr: none still asked for a PR"; fi
+  rm -rf "$T"
+}
+
+# ...and once its commits are on main, collect records the row as landed and
+# release takes the worktree without --discard: there is no PR to wait on.
+test_collect_lands_pr_none_work_already_on_main() {
+  _fanout_setup
+  yq -y -i '.repos[0].pr = "none"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-SPK2 "$T/spec.md") > /dev/null
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m work
+  git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
+  mkdir -p "$STUB_WT/.agent" && printf 'pushed\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-SPK2) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "landed"
+  (cd "$T" && "$BIN" release WG-SPK2) > /dev/null 2>&1
+  assert_contains "$(cat "$STUB_LOG")" "worktree remove"
+  rm -rf "$T"
+}
+
+# Not yet on main is not landed: collect leaves it collected.
+test_collect_keeps_pr_none_work_not_on_main_collected() {
+  _fanout_setup
+  yq -y -i '.repos[0].pr = "none"' "$T/workspace.yaml"
+  (cd "$T" && "$BIN" delegate widget WG-SPK3 "$T/spec.md") > /dev/null
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m work
+  mkdir -p "$STUB_WT/.agent" && printf 'not pushed\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-SPK3) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  rm -rf "$T"
+}
