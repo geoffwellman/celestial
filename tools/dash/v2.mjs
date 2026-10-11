@@ -863,6 +863,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // room on never needs it
   let core = null;
   const rooms = new Map();
+  // a room nobody asked for in ten minutes is dropped by a timer too, so an
+  // abandoned tab's tailer and events do not wait for the next ask
+  let sweeping = false;
+  const roomSweep = (now) => { for (const [k, r] of rooms) if (now - r.asked > ROOM_IDLE_MS) rooms.delete(k); };
   const ROOM_KEEP = 2000;
   const ROOM_IDLE_MS = 600000;
   const MODEL = /"model"\s*:\s*"([^"]{1,120})"/g;
@@ -883,7 +887,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
   const driveTail = async (name, since) => {
     const now = Date.now();
-    for (const [k, r] of rooms) if (now - r.asked > ROOM_IDLE_MS) rooms.delete(k);
+    roomSweep(now);
+    if (!sweeping) { sweeping = true; setInterval(() => roomSweep(Date.now()), 60000).unref(); }
     const o = ((await driveList()) || []).find((x) => x.name === name);
     if (!o) return null;
     if (!core) core = await import('../drive/transcript.mjs');
@@ -930,7 +935,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       if (!live) return [400, 'not a running orchestrator'];
       const out = await run(CEL(), ['drive', 'send', String(target), text, '--json'], 30000);
       if (out === null) return [502, 'send failed'];
-      logAct(String(args.ws || cfg.name), `dashboard: message to ${target} (drive)`);
+      // log under a workspace we know, never a name the request made up
+      let sent = {}; try { sent = JSON.parse(out); } catch { /* plain id */ }
+      const known = (await workspaces()).map((w) => w.name);
+      const logWs = [args.ws, sent.workspace].map(String).find((w) => known.includes(w)) || cfg.name;
+      logAct(logWs, `dashboard: message to ${target} (drive)`);
       return [200, out.trim()];
     }
     const all = await workspaces();

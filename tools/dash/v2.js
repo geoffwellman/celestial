@@ -597,7 +597,7 @@ document.addEventListener('keydown',function(e){
 // its open decisions, answerable with the same card as Needs you. The grid
 // stays the front page; #room=<orch> is the URL, so a bookmark or the phone's
 // back button does what it says.
-var ROOM=null,RT=null,RBYCLICK=false,RRCPT=null;
+var RNYF=null,ROOM=null,RT=null,RBYCLICK=false,RRCPT=null;
 function roomFromHash(){var m=/^#room=([A-Za-z0-9._:%-]+)$/.exec(location.hash);try{return m?decodeURIComponent(m[1]):null}catch(e){return null}}
 function openRoom(name){if(DRAWER)$('dclose').onclick();RBYCLICK=true;location.hash='room='+encodeURIComponent(name)}
 function closeRoom(){if(RBYCLICK){RBYCLICK=false;history.back()}else{history.replaceState(null,'',location.pathname+location.search);syncRoom()}}
@@ -608,6 +608,8 @@ function enterRoom(name){
   if(!RRCPT||RRCPT.to!==name)RRCPT=null;
   document.body.classList.add('inroom');$('room').classList.add('open');
   $('rname').textContent=name;$('rconv').innerHTML='';$('rside')._html=null;
+  // the grid's workspace chip must not hide this orchestrator's decisions
+  RNYF=NYF;NYF='';
   $('rdechost').appendChild(needsHost());
   if(S){buildLast();renderNeedsYou(true);refreshTabs()}
   renderRoomSide();renderReceipt();window.scrollTo(0,0);remember('agent',name);
@@ -616,6 +618,7 @@ function enterRoom(name){
 function leaveRoom(){
   if(RT&&RT.timer)clearTimeout(RT.timer);ROOM=null;RT=null;
   document.body.classList.remove('inroom');$('room').classList.remove('open');
+  if(RNYF!==null){NYF=RNYF;RNYF=null}
   var c=document.querySelector('#grid .w[data-id=needs] .body');if(c)c.appendChild(needsHost());
   if(S){buildLast();renderNeedsYou(true);refreshTabs()}
 }
@@ -638,15 +641,41 @@ function evEl(e){
     if(mail){var who=mailFrom(e.text||'');
       el.innerHTML=tm+'<div class="from">✉ mail from '+esc(who.length?who.join(', '):(e.source||'inbox'))+'</div>'+esc(e.text||'')}
     else if(e.kind==='compaction')el.innerHTML=tm+'──── compacted ────\n'+esc(e.text||'');
+    else if(e.kind==='assistant'||e.kind==='user'){el.innerHTML=tm+'<div class="md">'+md(e.text||'')+'</div>'}
     else el.innerHTML=tm+esc(e.text||'');
   }
   el.dataset.kind=e.kind;el.dataset.id=e.id||'';
   return el;
 }
+// A safe markdown subset for the transcript: the text is ESCAPED FIRST, then
+// bold, italics, inline code, lists and http(s) links are drawn from the
+// escaped text - so nothing the agent wrote can become HTML of its own.
+function mdInline(t){
+  var codes=[];t=t.replace(/`([^`\n]+)`/g,function(_m,c){codes.push(c);return '\u0000'+(codes.length-1)+'\u0000'});
+  t=t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,function(_m,l,u){return '<a href="'+u+'" target="_blank" rel="noopener">'+l+'</a>'});
+  t=t.replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>').replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<em>$2</em>').replace(/(^|\W)_([^_\n]+)_(?!\w)/g,'$1<em>$2</em>');
+  return t.replace(/\u0000(\d+)\u0000/g,function(_m,i){return '<code>'+codes[+i]+'</code>'});
+}
+function md(src){
+  var lines=esc(src).split('\n'),out=[],list=null,fence=false,buf=[];
+  function close(){if(list){out.push('</'+list+'>');list=null}}
+  lines.forEach(function(l){
+    if(/^```/.test(l)){if(fence){out.push('<pre class="mono">'+buf.join('\n')+'</pre>');buf=[];fence=false}else{close();fence=true}return}
+    if(fence){buf.push(l);return}
+    var m=/^\s*[-*]\s+(.*)$/.exec(l),n=/^\s*\d+[.)]\s+(.*)$/.exec(l);
+    if(m||n){var k=m?'ul':'ol';if(list!==k){close();out.push('<'+k+'>');list=k}out.push('<li>'+mdInline((m||n)[1])+'</li>');return}
+    close();
+    var h=/^#{1,6}\s+(.*)$/.exec(l);
+    out.push(h?'<strong>'+mdInline(h[1])+'</strong><br>':l.trim()?mdInline(l)+'<br>':'<br>');
+  });
+  if(fence)out.push('<pre class="mono">'+buf.join('\n')+'</pre>');
+  close();
+  return out.join('');
+}
 function appendEvents(evs){
   var c=$('rconv'),follow=nearBottom(c);
   evs.forEach(function(e){
-    if(e.update){var d=[].slice.call(c.querySelectorAll('details.ev[data-id="'+(e.id||'')+'"]')).filter(function(x){return x.dataset.sum===(e.tool&&e.tool.summary)})[0];
+    if(e.update){var d=[].slice.call(c.querySelectorAll('details.ev[data-id="'+CSS.escape(e.id||'')+'"]')).filter(function(x){return x.dataset.sum===(e.tool&&e.tool.summary)})[0];
       if(d){d.classList.toggle('err',!!e.tool.isError);var s=d.querySelector('summary');s.textContent=(e.tool.isError?'✗ ':'· ')+e.tool.summary}return}
     c.appendChild(evEl(e));if(e.ts)RT.lastTs=e.ts;
   });
@@ -669,15 +698,21 @@ async function pollRoom(){
     if(!rt.firstAt){rt.firstAt=Date.now();window.V2ROOMOPENMS=rt.firstAt-rt.t0}
   }catch(e){if(RT!==rt)return;rt.err=e.status===404?'not running':(e.status||'network')}
   renderRoomSide();
-  rt.timer=setTimeout(pollRoom,document.hidden?5000:ROOM_POLL_MS);
+  // a hidden tab does not poll at all; it picks up where it left off on return
+  if(document.hidden)rt.paused=true;else rt.timer=setTimeout(pollRoom,ROOM_POLL_MS);
 }
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&RT&&RT.paused){RT.paused=false;pollRoom()}});
 // ---- beside it: status, workers, PRs, stuck ---------------------------------
 // A workspace orchestrator owns its workspace's work; a repo orchestrator
 // (<repo>-orch) owns its repo's.
+// Review of #147 on live data: guessing from whether the repo had work today
+// fell back to the whole workspace, and one repo's orchestrator showed
+// a sibling repo's PRs. Only the workspace's own orchestrator (<ws>-orch)
+// sees the workspace; every other one sees exactly its repo.
 function roomOwns(name,o){
   var repo=name.replace(/-orch$/,''),ws=o?o.ws:null;
-  var byRepo=workers().some(function(w){return w.repo===repo})||prRows().some(function(p){return p.repo===repo});
-  return function(x,r){return byRepo?r===repo:(!!ws&&x.ws===ws)};
+  if(ws&&repo===ws)return function(x){return x.ws===ws};
+  return function(x,r){return r===repo&&(!ws||!x.ws||x.ws===ws)};
 }
 function renderRoomSide(){
   if(!ROOM||!RT)return;
