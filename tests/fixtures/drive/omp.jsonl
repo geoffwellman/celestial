@@ -1,0 +1,12 @@
+{"type":"title","v":1,"title":"Widget work","pad":"          "}
+{"type":"session","version":3,"id":"s1","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/alpha"}
+{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"build the widget"}]}}
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"on it"},{"type":"toolCall","id":"t1","name":"bash","arguments":{"command":"ls -la /tmp/alpha"}}]}}
+{"type":"custom","id":"c1","parentId":"a2","customType":"tool_execution_start","data":{}}
+{"type":"message","id":"a3","parentId":"c1","timestamp":"2026-01-01T00:00:03Z","message":{"role":"toolResult","toolCallId":"t1","toolName":"bash","isError":true,"content":[{"type":"text","text":"boom"}]}}
+{"type":"model_usage","id":"m1","parentId":"a3"}
+{"type":"message","id":"b1","parentId":"m1","timestamp":"2026-01-01T00:00:04Z","message":{"role":"assistant","content":[{"type":"text","text":"abandoned branch"}]}}
+{"type":"compaction","id":"k1","parentId":"m1","summary":"we built half a widget","firstKeptEntryId":"a3","tokensBefore":900}
+{"type":"custom_message","id":"x1","parentId":"k1","customType":"cel-inbox","display":true,"content":"[1700000000000000001] mail for you"}
+{"type":"credential_pin","id":"p1","parentId":"x1"}
+{"type":"message","id":"a4","parentId":"p1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"key is @SK@ and @GHP@\nWIDGET_API_KEY=hunter2hunter2\nAuthorization: Bearer abc.def-ghi_jkl123\nurl?token=@HEX@"}]}}
