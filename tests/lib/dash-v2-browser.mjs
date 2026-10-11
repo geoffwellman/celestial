@@ -46,7 +46,7 @@ const main = async () => {
       if (request.method === 'POST') {
         let pb = null; try { pb = JSON.parse(request.postData || 'null'); } catch { /* raw */ }
         sent.push({ path: u.pathname, body: pb, csrf: !!(request.headers['x-cel-csrf'] || request.headers['X-Cel-Csrf']) });
-        body = u.pathname === '/api/decide' ? 'ok' : '{"ok":true}';
+        body = u.pathname === '/api/decide' ? 'ok' : pb && pb.action === 'drive.send' ? '{"id":"1000000000000000077","state":"queued"}' : '{"ok":true}';
       } else {
         sent.push({ path: u.pathname, query: u.search });
         const name = u.pathname === '/api/state' ? 'state' : u.pathname.replace(/^\/api\/v2\//, '');
@@ -299,6 +299,31 @@ const main = async () => {
         await clip('usage-390.png', 390);
         await send('Emulation.clearDeviceMetricsOverride');
       }
+    }
+
+    if (scenario === 'room') {
+      // CEL-121: the Orchestrators card opens a room; the URL says which
+      await evaluate(`document.querySelector('#grid .w[data-id=orchs] [data-room="alpha-orch"]').click()`);
+      out.opened = await until(`document.getElementById('room').classList.contains('open') && document.querySelectorAll('#rconv .ev').length`, 8000);
+      out.hash = await evaluate('location.hash');
+      out.gridHidden = await evaluate(`getComputedStyle(document.querySelector('.wrap')).display==='none'`);
+      out.kinds = await evaluate(`[].slice.call(document.querySelectorAll('#rconv .ev')).map(function(e){return e.dataset.kind})`);
+      out.toolFolded = await evaluate(`(function(){var t=document.querySelector('#rconv .ev[data-kind=tool]');return !!t&&t.tagName==='DETAILS'&&!t.open})()`);
+      out.mail = await evaluate(`(document.querySelector('#rconv .ev.mail .from')||{}).textContent||''`);
+      out.side = await evaluate(`document.getElementById('rside').textContent`);
+      out.decisions = await evaluate(`document.querySelectorAll('#room #needsyou .nycard').length`);
+      out.busyHint = await evaluate(`document.getElementById('rhint').textContent`);
+      await evaluate(`(function(){var t=document.getElementById('rmsg');t.value='test: hello alpha';t.dispatchEvent(new Event('input'));return 1})()`);
+      await evaluate(`document.getElementById('rsend').click()`);
+      out.receipt = (await until(`/in conversation/.test(document.getElementById('rreceipt').textContent)`, 8000)) ? await evaluate(`document.getElementById('rreceipt').textContent`) : await evaluate(`document.getElementById('rreceipt').textContent`);
+      out.acts = posts('/api/v2/act').map((s) => s.body);
+      out.csrf = posts('/api/v2/act').every((s) => s.csrf);
+      out.tailAsked = sent.filter((s) => s.path === '/api/v2/drive/tail').length;
+      await shot('room-1400.png', 1400);
+      await shot('room-390.png', 390);
+      await evaluate('history.back()');
+      out.closed = await until(`!document.getElementById('room').classList.contains('open')`, 4000);
+      out.hashAfter = await evaluate('location.hash');
     }
 
     if (scenario === 'shots') {
