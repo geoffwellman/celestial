@@ -570,8 +570,10 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
       *) die "cel inbox send: unknown argument '$1'" ;;
     esac
   done
-  case "$kind" in status|escalation|decision|blocked) ;;
-    *) die "cel inbox send: --kind must be status, escalation, decision or blocked (got '$kind')";; esac
+  # `owner` (CEL-120) is mail the owner typed himself via `cel drive send`:
+  # the orchestrator should know a person is waiting, not automation.
+  case "$kind" in status|escalation|decision|blocked|owner) ;;
+    *) die "cel inbox send: --kind must be status, escalation, decision, blocked or owner (got '$kind')";; esac
   # STATUS TO ROOT IS WRITE-ONLY TELEMETRY. Of the 553 messages root's mailbox
   # took on one box between 10 and 19 September, 466 were `status` - one
   # instruction in core/roles/project-orchestrator.md told every orchestrator

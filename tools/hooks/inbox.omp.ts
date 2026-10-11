@@ -199,12 +199,26 @@ function wakeForBacklog(ctx): void {
   scheduleWake(ctx);
 }
 
+// CEL-120: every delivered item carries `[<id>]` so `cel drive receipt` can
+// prove the message reached the conversation by matching the session file
+// exactly, not fuzzily. Read as --json and rendered here; a line that is not
+// an item (a sweep prefix aside) is passed through as text.
+function renderItem(line: string): string {
+  const m = /^(\[[^\]]+\] )?(\{.*\})$/.exec(line);
+  if (!m) return line;
+  let o; try { o = JSON.parse(m[2]); } catch { return line; }
+  if (!o || !o.id) return ""; // an empty-mailbox report, not mail
+  const ws = m[1] || "";
+  if (o.kind === "update") return `[${o.id}] ${ws}\u21bb ${o.from} (\u00d7${o.count || 2}): ${o.message}`;
+  return `[${o.id}] ${ws}[${String(o.ts || "").slice(11, 16)} ${o.kind} from ${o.from}] ${o.message}`;
+}
 function drain(ctx): string {
   try {
-    return execFileSync("bash", [celBin(), "inbox", "read", ...wsArgs()], {
+    const out = execFileSync("bash", [celBin(), "inbox", "read", "--json", ...wsArgs()], {
       cwd: (ctx && ctx.cwd) || process.cwd(),
       encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    });
+    return out.split("\n").map((l) => l.trim()).filter(Boolean).map(renderItem).filter(Boolean).join("\n");
   } catch { return null; }
 }
 

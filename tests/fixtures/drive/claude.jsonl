@@ -1,0 +1,6 @@
+{"type":"permission-mode","mode":"default"}
+{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"fix the gadget"}}
+{"type":"assistant","uuid":"u2","parentUuid":"u1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"looking"}]}}
+{"type":"assistant","uuid":"u3","parentUuid":"u2","timestamp":"2026-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/tmp/gadget.txt"}}]}}
+{"type":"user","uuid":"u4","parentUuid":"u3","timestamp":"2026-01-01T00:00:04Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","is_error":false,"content":"ok"}]}}
+{"type":"attachment","uuid":"u5","parentUuid":"u4"}

@@ -203,6 +203,10 @@ cel - the celestial plane
                                 delete - ours, regenerable, or someone's
                                 (someone's is reported, never swept), plus
                                 the reviewer panes and the RSS they hold
+  cel drive list|tail|send|receipt
+                                see an orchestrator's conversation (from its
+                                session file) and mail it as owner, with a
+                                receipt; never types into a pane
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS
@@ -226,6 +230,7 @@ case "${1:-help}" in
   gc)       shift; . "$CEL_ROOT/lib/gc.sh";      cmd_gc "$@";;
   box)      shift; . "$CEL_ROOT/lib/box.sh";     cmd_box "$@";;
   inbox)    shift; . "$CEL_ROOT/lib/inbox.sh";   cmd_inbox "$@";;
+  drive)    shift; . "$CEL_ROOT/lib/drive.sh";   cmd_drive "$@";;
   decide)   shift; . "$CEL_ROOT/lib/decide.sh";  cmd_decide "$@";;
   services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
