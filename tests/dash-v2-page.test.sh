@@ -101,6 +101,17 @@ test_dash_v2page_needs_you_answers_once_with_two_clicks() {
   _vp_down
 }
 
+test_dash_v2page_needs_you_shows_every_option_without_a_click() {
+  _vp_boot
+  local rc=0; _vp_run unopened || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj '[.cards[]|select(.open)]|length')" "0"
+  assert_eq "$(_vpj '.cards|length>0')" "true"
+  local want; want="$(jq -c '[.. | objects | select(has("options") and has("id")) | {id:(.id|tostring), labels:[.options[].label]}] | unique_by(.id) | sort_by(.id)' "$CEL_ROOT/tests/fixtures/dash-v2/state.json")"
+  assert_eq "$(_vpj '[.cards[]|{id,labels}]|sort_by(.id)|tostring')" "$want"
+  assert_eq "$(_vpj '[.cards[]|.other and .controls]|all')" "true"
+  _vp_down
+}
+
 test_dash_v2page_composer_sends_one_message_act_and_any_goes_to_celestial() {
   _vp_boot
   local rc=0; _vp_run composer || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1

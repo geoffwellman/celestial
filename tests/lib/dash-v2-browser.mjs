@@ -161,6 +161,17 @@ const main = async () => {
       out.gone = await evaluate(`!${card}`);
     }
 
+    // CEL-118: nothing clicked - every card already shows each option and the
+    // "other…" row, because a hidden choice reads as "accept is the only one"
+    if (scenario === 'unopened') {
+      out.cards = await evaluate(`(function(){var vis=function(e){return !!e&&e.offsetParent!==null};
+        return Array.prototype.map.call(document.querySelectorAll('#grid #needsyou .nycard'),function(c){
+          return {id:c.dataset.id,open:c.classList.contains('open'),
+            labels:Array.prototype.filter.call(c.querySelectorAll('.nyopts button.opt'),vis).map(function(b){return b.dataset.label}),
+            other:vis(c.querySelector('details.other>summary')),
+            controls:['.free','.send','.why','.drop','.close'].every(function(q){return !!c.querySelector(q)})}})})()`);
+    }
+
     if (scenario === 'composer') {
       await evaluate(`document.querySelector('#to .chip[data-o="bundle-orch"]').click()`);
       await evaluate(`(function(){var t=document.getElementById('task');t.value='add a gadget beta toggle';t.dispatchEvent(new Event('input'));return 1})()`);
