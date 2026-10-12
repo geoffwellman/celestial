@@ -1321,6 +1321,8 @@ test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
 # sat N minutes with nothing unsaved has its pane closed; ledger untouched.
 _gc_idle_stop_run() { # <minutes> -> output; observes once at t0, then at t0+mins*60
   export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
+  # the strict identity proof is its own suite; here it passes unless a test says not
+  _gc_agents_removable() { [ -z "${GC_UNPROVEN:-}" ]; }
   CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo "$1" >/dev/null 2>&1
   CEL_GC_NOW=$((1000 + $1 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo "$1" 2>&1
 }
@@ -1382,5 +1384,25 @@ test_gc_idle_stop_minutes_drop_under_memory_pressure() {
   assert_eq "$(CEL_MEMINFO="$T/ok" gc_idle_stop_minutes)" 60
   assert_eq "$(CEL_MEMINFO="$T/low" gc_idle_stop_minutes)" 10
   assert_eq "$(CEL_MEMINFO="$T/ok" CEL_GC_IDLE_STOP_MIN=30 gc_idle_stop_minutes)" 30
+  rm -rf "$T"
+}
+
+# Review of #148: a clean, pushed worker idle while its PR awaits review is
+# the reviewer's to prompt - closing it breaks the revision round.
+test_gc_idle_stop_keeps_a_worker_whose_pr_is_open() {
+  _gc_done_fixture running done
+  GC_PR=OPEN
+  local out; out="$(_gc_idle_stop_run 60)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "kept 1"
+  rm -rf "$T"
+}
+
+# ...and only a process proven to be this plane's agent is stopped.
+test_gc_idle_stop_keeps_an_agent_whose_identity_is_unproven() {
+  _gc_done_fixture running done
+  GC_UNPROVEN=1
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }

@@ -92,7 +92,10 @@ test_watchdog_print_and_status() {
   export CEL_WATCHDOG_UNIT_DIR="$T/sys"
   local out; out="$(cmd_watchdog print)"
   assert_contains "$out" "sudo tee $T/sys/cel-manager-watchdog.service"
-  assert_contains "$out" "tools/watchdog/cel-manager-watchdog.sh"
+  # run as root: nothing a user can write may be executed - only system binaries
+  assert_contains "$out" "ExecStart=/usr/bin/systemctl start user@$(id -u).service"
+  assert_contains "$out" "/usr/sbin/runuser -u $(id -un) --"
+  case "$out" in *"ExecStart=$CEL_ROOT"*|*"ExecStart=$HOME"*|*.sh\ *) echo "root unit runs a user-writable path: $out"; return 1;; esac
   assert_contains "$out" "OnUnitActiveSec=1min"
   assert_contains "$out" "enable --now cel-manager-watchdog.timer"
   boxguard_wd_installed && { echo "installed in an empty dir"; return 1; }
@@ -106,5 +109,17 @@ test_doctor_memory_line_names_free_swap_and_top() {
   local out; out="$(CEL_BOXGUARD_TOP="$(printf '900\t/w/widget/b1')" boxguard_doctor_line)"
   assert_contains "$out" "memory: 4.0 GB free, swap 50% used"
   assert_eq "$(CEL_BOXGUARD_TOP="$(printf '900\t/w/widget/b1')" boxguard_top_trees 1)" "$(printf '900\t/w/widget/b1')"
+  rm -rf "$T"
+}
+
+# A heavy command that itself calls build-slot (a make target wrapping cargo)
+# must not wait forever on the slot its own caller holds.
+test_build_slot_is_reentrant_for_its_holder() {
+  T="$(mktemp -d)"
+  export CEL_BUILD_SLOT_DIR="$T/slots" CEL_CONFIG_FILE="$T/none.yaml"
+  local out
+  out="$(timeout 5 bash -c 'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/boxguard.sh"
+    cmd_build_slot -- bash -c "source \"\$CEL_ROOT/lib/common.sh\"; source \"\$CEL_ROOT/lib/boxguard.sh\"; cmd_build_slot -- echo inner"')"
+  assert_eq "$out" inner
   rm -rf "$T"
 }

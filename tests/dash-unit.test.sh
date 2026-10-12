@@ -123,6 +123,12 @@ S
   assert_contains "$u" "Restart=on-failure"
   assert_contains "$u" "Environment=\"CEL_PAGES_PORT=$PORT\""
   assert_contains "$u" "WantedBy=default.target"
+  # a live TRANSIENT cel-pages (pre-CEL-122) would shadow the new file: stopped
+  # before the first install
+  local stop_line en_line
+  stop_line="$(grep -n -- '--user stop cel-pages.service' "$DU_LOG" | head -1 | cut -d: -f1)"
+  en_line="$(grep -n -- '--user enable cel-pages.service' "$DU_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$stop_line" ] && [ "$stop_line" -lt "$en_line" ] || { echo "transient unit not stopped first"; cat "$DU_LOG"; _du_down; return 1; }
   _du_down
 }
 
