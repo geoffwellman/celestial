@@ -94,6 +94,10 @@ _boxguard_slot_dir() { printf '%s' "${CEL_BUILD_SLOT_DIR:-$HOME/.local/share/cel
 cmd_build_slot() { # [--] <cmd...>
   [ "${1:-}" = "--" ] && shift
   [ $# -gt 0 ] || die "usage: cel build-slot -- <command...>   (one heavy build at a time across the box)"
+  # RE-ENTRANT: a heavy command that itself calls build-slot (a make target
+  # wrapping cargo) already holds a slot through its caller; waiting for
+  # another would deadlock at one slot.
+  if [ -n "${CEL_BUILD_SLOT_HELD:-}" ]; then "$@"; return; fi
   local dir slots i fd="" said=0
   dir="$(_boxguard_slot_dir)"; mkdir -p "$dir" || die "build-slot: cannot create $dir"
   slots="$(boxguard_build_slots)"; [ "$slots" -ge 1 ] || slots=1
@@ -104,7 +108,7 @@ cmd_build_slot() { # [--] <cmd...>
         [ -n "${CARGO_BUILD_JOBS:-}" ] || export CARGO_BUILD_JOBS="$(boxguard_cargo_jobs)"
         # The command inherits the descriptor, so the slot is held exactly as
         # long as the build (and anything it forked) runs.
-        local rc=0; "$@" || rc=$?
+        local rc=0; CEL_BUILD_SLOT_HELD=1 "$@" || rc=$?
         exec {fd}>&-
         return "$rc"
       fi
@@ -128,13 +132,21 @@ BOXGUARD_WD_UNIT=cel-manager-watchdog
 
 boxguard_wd_installed() { [ -f "$(_boxguard_wd_dir)/$BOXGUARD_WD_UNIT.timer" ]; }
 
+# RUN AS ROOT, so it executes nothing a user can write: every command is a
+# root-owned system binary and the unit file itself is written by root. The
+# user's own `cel` runs only after runuser has dropped to that user.
 boxguard_wd_service_text() { # <user> <uid>
+  local env="XDG_RUNTIME_DIR=/run/user/$2"
   printf '%s' "[Unit]
 Description=celestial: restart the user manager for $1 if it died, then its services
 
 [Service]
 Type=oneshot
-ExecStart=$CEL_ROOT/tools/watchdog/cel-manager-watchdog.sh $1 $2
+ExecCondition=/usr/bin/sh -c '! /usr/bin/systemctl is-active -q user@$2.service'
+ExecStart=/usr/bin/systemctl start user@$2.service
+ExecStartPost=/usr/bin/sleep 5
+ExecStartPost=-/usr/sbin/runuser -u $1 -- /usr/bin/env $env $CEL_ROOT/bin/cel dash --ensure
+ExecStartPost=-/usr/sbin/runuser -u $1 -- /usr/bin/env $env $CEL_ROOT/bin/cel pages --ensure
 "
 }
 

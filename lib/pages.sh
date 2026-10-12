@@ -176,6 +176,9 @@ _pages_unit_install() { # <unit> <log> [--public]
   dir="$(_pages_unit_dir)"; f="$dir/$unit.service"
   new="$(pages_unit_text "$@")"
   _PAGES_UNIT_CHANGED=0
+  # First install over a pre-CEL-122 box: a live TRANSIENT unit of the same
+  # name shadows the new file until the manager restarts - stop it once.
+  [ -f "$f" ] || systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
   if [ ! -f "$f" ] || [ "$(cat "$f")" != "$new" ]; then
     mkdir -p "$dir"; printf '%s\n' "$new" >"$f"; _PAGES_UNIT_CHANGED=1
     systemctl --user daemon-reload >/dev/null 2>&1 || true

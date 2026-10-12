@@ -945,6 +945,19 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
         kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): uncommitted or unpushed work\n' "$id" "$pane"
         next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
       fi
+      # An OPEN PR means a reviewer or orchestrator will prompt this agent for
+      # a revision round: closing it breaks that hand-off. Unknown is kept too.
+      case "$(_gc_pr_state "$wt")" in
+        MERGED|CLOSED|NONE) ;;
+        *) kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
+           next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue ;;
+      esac
+      # And the same strict proof the worktree pass demands before touching
+      # anything: every agent in this checkout is a process this plane launched.
+      if ! _gc_agents_removable "$agents" "$wt" "$names"; then
+        kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): identity unproven\n' "$id" "$pane"
+        continue
+      fi
       mb="$(mem_tree_rss_mb "$wt" 2>/dev/null || printf 0)"; [[ "$mb" =~ ^[0-9]+$ ]] || mb=0
       if [ "$dry" -eq 1 ]; then
         printf '  would stop %s (pane %s, %s %dm, ~%sM)\n' "$id" "$pane" "$status" $(( (now - since) / 60 )) "$mb"
