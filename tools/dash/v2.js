@@ -78,7 +78,6 @@ window.v2refresh=function(){return refresh()};
 
 // ---- the decisions panel's host contract (decisions.js) --------------------
 var NYSORT=recall('cel-v2-nysort','urgent');
-var V2OPEN={};         // decision id -> opened in place
 function buildLast(){
   var groups=((S&&S.needsYouGroups)||[]).filter(function(g){return inWs(g.workspace)}).map(function(g){
     var items=g.items.filter(function(d){return !NYDONE[d.id]});
@@ -89,23 +88,11 @@ function buildLast(){
   LAST={needsYou:all,needsYouGroups:groups};
 }
 function refreshTabs(){var n=LAST?LAST.needsYou.length:0;$('nyc').textContent=n;var c=$('alerts-h');if(c)c.textContent=n}
-function nyAfterRender(host){
-  var ov=$('ov').classList.contains('open')&&host.closest('#ov');
-  Array.prototype.forEach.call(host.querySelectorAll('.nycard'),function(c){
-    if(V2OPEN[c.dataset.id]||ov)c.classList.add('open')});
-}
 var NYHOST=null;       // the one #needsyou, moved between its card and the overlay
 function needsHost(){
   var h=NYHOST;
-  if(!h){h=NYHOST=document.createElement('div');h.id='needsyou';
-    // a card folds to its title; a click on the title opens it in place
-    h.addEventListener('click',function(e){
-      var hd=e.target.closest('.nyhead');if(!hd)return;
-      var c=hd.closest('.nycard'),id=c.dataset.id;
-      if(V2OPEN[id])delete V2OPEN[id];else V2OPEN[id]=1;
-      c.classList.toggle('open',!!V2OPEN[id]);
-    });
-  }
+  // CEL-118: a card no longer folds, so there is nothing for a title click to open
+  if(!h){h=NYHOST=document.createElement('div');h.id='needsyou'}
   return h;
 }
 
@@ -572,9 +559,9 @@ function palOpen(p){
   pal(false);remember(p.k,p.key);
   if(p.k==='decision'){
     if(OV)closeOverlay();
-    V2OPEN[p.key]=1;renderNeedsYou(true);
+    renderNeedsYou(true);
     var c=document.querySelector('#needsyou .nycard[data-id="'+p.key+'"]');
-    if(c){c.classList.add('open','flash');c.scrollIntoView({block:'center'});setTimeout(function(){c.classList.remove('flash')},1600);
+    if(c){c.classList.add('flash');c.scrollIntoView({block:'center'});setTimeout(function(){c.classList.remove('flash')},1600);
       var o=c.querySelector('button.opt');if(o)o.focus({preventScroll:true})}
   }else if(p.k==='agent')openDrawer(p.key);
   else if(p.k==='PR'){var row=document.querySelector('#grid [data-pr="'+p.key+'"]');if(row){row.scrollIntoView({block:'center'});row.classList.add('flash')}
