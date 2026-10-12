@@ -623,3 +623,68 @@ test_v2_a_long_window_ask_does_not_widen_the_shared_fetch() {
   assert_eq "$(grep -c -- "merged:>=$d365" "$T/gh.log")" "0"
   _v2_down
 }
+
+# ---- CEL-121: the drive routes behind an orchestrator's room ---------------
+# A live orchestrator (alpha-orch) whose session file is a fixture: herdr is
+# re-stubbed to name it, so `cel drive` (the real one) resolves it.
+_v2_drive_fixture() {
+  mkdir -p "$T/sess"
+  SESS="$T/sess/alpha-orch.jsonl"
+  cat >"$T/bin/herdr" <<EOF2
+#!/usr/bin/env bash
+case "\$*" in
+  "agent list") printf '%s\n' '{"result":{"agents":[{"name":"alpha-orch","agent":"omp","agent_status":"working","cwd":"$T/alpha","pane_id":"w1:p9","agent_session":{"kind":"path","value":"$SESS"}}]}}' ;;
+  "pane list") printf '%s\n' '{"result":{"panes":[]}}' ;;
+  *) printf '%s\n' '{"result":{"agents":[],"workspaces":[],"panes":[]}}' ;;
+esac
+EOF2
+  chmod +x "$T/bin/herdr"
+  # a credential-shaped string, assembled here so no literal is ever committed
+  FAKE_SECRET="sk-$(printf 'q%.0s' $(seq 1 24))"
+  {
+    printf '{"type":"session","id":"s0"}\n'
+    printf '{"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T10:00:00Z","message":{"role":"user","content":"hello widget"}}\n'
+    printf '{"type":"message","id":"e2","parentId":"e1","timestamp":"2026-01-01T10:00:05Z","message":{"role":"assistant","model":"gadget-1","content":[{"type":"text","text":"key is %s"},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}}\n' "$FAKE_SECRET"
+  } > "$SESS"
+}
+
+test_v2_drive_list_and_tail_are_incremental_no_store_and_redacted() {
+  _v2_boot; _v2_drive_fixture
+  assert_eq "$(_v2_get "$(_v2_url drive/list)" | jq -r '.[0].name')" "alpha-orch"
+  curl -s -m 20 -D "$T/h1" -o "$T/t1" "$(_v2_url 'drive/tail?orch=alpha-orch')"
+  assert_contains "$(tr -d '\r' < "$T/h1")" "cache-control: no-store"
+  assert_eq "$(jq -r '[.events[].kind] | join(",")' "$T/t1")" "user,assistant,tool"
+  if grep -q "$FAKE_SECRET" "$T/t1"; then echo "secret leaked into the tail"; return 1; fi
+  assert_eq "$(jq -r .last "$T/t1")" "e2"
+  assert_eq "$(jq -r .status "$T/t1")" "working"
+  assert_eq "$(jq -r .model "$T/t1")" "gadget-1"
+  printf '{"type":"message","id":"e3","parentId":"e2","timestamp":"2026-01-01T10:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"done with beta"}]}}\n' >> "$SESS"
+  local t2; t2="$(_v2_get "$(_v2_url 'drive/tail?orch=alpha-orch&since=e2')")"
+  assert_eq "$(printf '%s' "$t2" | jq -r '[.events[].text] | join("|")')" "done with beta"
+  assert_eq "$(printf '%s' "$t2" | jq -r .reset)" "false"
+  # nothing new: nothing sent
+  assert_eq "$(_v2_get "$(_v2_url 'drive/tail?orch=alpha-orch&since=e3')" | jq '.events | length')" "0"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "$(_v2_url 'drive/tail?orch=nobody-orch')")" "404"
+  _v2_down
+}
+
+test_v2_drive_send_needs_csrf_mails_owner_and_has_a_receipt() {
+  _v2_boot; _v2_drive_fixture
+  local body='{"action":"drive.send","target":"alpha-orch","args":{"text":"test: hello from the room"}}'
+  assert_eq "$(_v2_act "$body")" "403"
+  assert_eq "$(_v2_act '{"action":"drive.send","target":"nobody-orch","args":{"text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  assert_eq "$(_v2_act "$body" -H "x-cel-csrf: $TOKEN")" "200"
+  local id; id="$(jq -r .id "$T/act.out")"
+  [ -n "$id" ] && [ "$id" != null ] || { echo "no id: $(cat "$T/act.out")"; return 1; }
+  local row; row="$(grep "\"$id\"" "$T/inbox/alpha.jsonl")"
+  assert_eq "$(printf '%s' "$row" | jq -r '.to + " " + .from + " " + .kind')" "alpha-orch owner owner"
+  assert_eq "$(_v2_get "$(_v2_url "drive/receipt?id=$id")" | jq -r .state)" "queued"
+  printf '%s' "$id" > "$T/inbox/alpha.alpha-orch.cursor"
+  assert_eq "$(_v2_get "$(_v2_url "drive/receipt?id=$id")" | jq -r .state)" "delivered"
+  printf '{"type":"custom_message","id":"e9","parentId":"e2","customType":"cel-inbox","display":true,"content":"[%s] owner: test"}\n' "$id" >> "$SESS"
+  assert_eq "$(_v2_get "$(_v2_url "drive/receipt?id=$id")" | jq -r .state)" "in-conversation"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "$(_v2_url 'drive/receipt?id=abc')")" "400"
+  # never a pane: nothing typed
+  if grep -q 'agent prompt' "$T/cel.log" 2>/dev/null; then echo "typed into a pane"; return 1; fi
+  _v2_down
+}

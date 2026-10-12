@@ -1,0 +1,2 @@
+[{"name":"alpha-orch","pane":"w0:p1","runtime":"omp","status":"working","workspace":"alpha","session":"/tmp/alpha-orch.jsonl"},
+ {"name":"bundle-orch","pane":"w0:p2","runtime":"omp","status":"idle","workspace":"bundle","session":"/tmp/bundle-orch.jsonl"}]
