@@ -926,3 +926,16 @@ test_inbox_watch_all_workspaces_with_one_workspace_names_it() {
   assert_contains "$(cat "$out")" "[alpha] INBOX"
   rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
 }
+
+# CEL-122: a worker launched with CEL_INBOX_WS but standing outside every
+# workspace sent to `default`, and its report never reached its orchestrator.
+test_inbox_send_outside_any_workspace_honours_cel_inbox_ws() {
+  _inbox_sandbox
+  local d; d="$(mktemp -d)"
+  ( cd "$d" && CEL_INBOX_WS=xenon _inbox_send xenon-orch "report" --from w1:p1 >/dev/null 2>&1 )
+  assert_contains "$(cat "$CEL_INBOX_DIR/xenon.jsonl" 2>/dev/null)" "report"
+  [ ! -e "$CEL_INBOX_DIR/default.jsonl" ] || { echo "sent to default"; return 1; }
+  # an explicit --workspace still wins over the launch
+  assert_eq "$(CEL_INBOX_WS=xenon _inbox_ws argon)" argon
+  rm -rf "$CEL_INBOX_DIR" "$d"
+}

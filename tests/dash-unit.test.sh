@@ -97,24 +97,32 @@ test_dash_doctor_names_the_unit_state() {
 }
 
 # The pages servers were started the same `setsid ... &` way from the same
-# steward tick, so they died the same death. Under a user manager they run as
-# transient units with their own cgroup.
-test_pages_ensure_runs_in_its_own_unit_not_a_fork() {
+# steward tick, so they died the same death. CEL-109 made them transient
+# units; CEL-122: transient units died with the user manager, so pages is now
+# an installed, enabled user unit like cel-dash.
+test_pages_ensure_installs_an_enabled_unit_not_a_transient_one() {
   _du_setup
   source "$CEL_ROOT/lib/pages.sh"
-  cat >"$T/bin/systemd-run" <<'S'
+  cat >"$T/bin/systemctl" <<'S'
 #!/usr/bin/env bash
-printf 'systemd-run %s\n' "$*" >>"$DU_LOG"
-python3 -m http.server --bind 127.0.0.1 "$DU_PORT" >/dev/null 2>&1 &
-echo $! >"$DU_PID"
+printf '%s\n' "$*" >>"$DU_LOG"
+case "$*" in
+  *start\ cel-pages.service*)
+    python3 -m http.server --bind 127.0.0.1 "$DU_PORT" >/dev/null 2>&1 &
+    echo $! >"$DU_PID" ;;
+esac
+exit 0
 S
-  chmod +x "$T/bin/systemd-run"
+  chmod +x "$T/bin/systemctl"
   local out rc=0
   out="$(CEL_PAGES_PORT="$PORT" CEL_PAGES_HOST=127.0.0.1 CEL_PAGES_LOG_DIR="$T/logs" _pages_ensure 0 2>&1)" || rc=$?
   assert_eq "$rc" "0"
-  assert_contains "$(cat "$DU_LOG")" "--user --unit=cel-pages"
-  assert_contains "$(cat "$DU_LOG")" "Restart=on-failure"
-  [ ! -e "$T/forked" ] || { echo "pages forked a server"; _du_down; return 1; }
+  assert_contains "$(cat "$DU_LOG")" "--user enable cel-pages.service"
+  local u; u="$(cat "$T/units/cel-pages.service")"
+  assert_contains "$u" "ExecStart=$CEL_ROOT/bin/cel pages"
+  assert_contains "$u" "Restart=on-failure"
+  assert_contains "$u" "Environment=\"CEL_PAGES_PORT=$PORT\""
+  assert_contains "$u" "WantedBy=default.target"
   _du_down
 }
 
