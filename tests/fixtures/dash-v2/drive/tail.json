@@ -1,0 +1,64 @@
+{
+ "orch": "alpha-orch",
+ "status": "working",
+ "runtime": "omp",
+ "workspace": "alpha",
+ "model": "gadget-1",
+ "last": "e5",
+ "reset": true,
+ "events": [
+  {
+   "id": "e1",
+   "parentId": null,
+   "ts": "2026-01-01T10:00:00Z",
+   "kind": "user",
+   "text": "ship the widget colour picker",
+   "fold": false
+  },
+  {
+   "id": "e2",
+   "parentId": "e1",
+   "ts": "2026-01-01T10:00:05Z",
+   "kind": "assistant",
+   "text": "Delegating ABC-12 to a worker.",
+   "fold": false
+  },
+  {
+   "id": "e2",
+   "parentId": "e1",
+   "ts": "2026-01-01T10:00:05Z",
+   "kind": "tool",
+   "fold": true,
+   "tool": {
+    "name": "bash",
+    "summary": "bash: cel-fanout delegate widget ABC-12",
+    "isError": false
+   }
+  },
+  {
+   "id": "e3",
+   "parentId": "e2",
+   "ts": "2026-01-01T10:02:00Z",
+   "kind": "system",
+   "source": "cel-inbox",
+   "text": "New messages in your celestial inbox (delivered once, woke you while idle):\n[1000000000000000042] [10:02 status from widget-abc-12-colour] PR open",
+   "fold": false
+  },
+  {
+   "id": "e4",
+   "parentId": "e3",
+   "ts": "2026-01-01T10:02:10Z",
+   "kind": "thinking",
+   "text": "check the PR",
+   "fold": true
+  },
+  {
+   "id": "e5",
+   "parentId": "e4",
+   "ts": "2026-01-01T10:02:20Z",
+   "kind": "assistant",
+   "text": "ABC-12 has a **PR open**; reviewing `widget#12`.\n\n- first <b>x</b>\n- second\n\n1. one\n2. [docs](https://example.invalid/d)",
+   "fold": false
+  }
+ ]
+}

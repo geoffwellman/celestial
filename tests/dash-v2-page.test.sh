@@ -207,3 +207,47 @@ test_dash_v2page_usage_card_is_structured_from_the_mockup() {
   if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T"/shots/usage-*.png "$CEL_DASH_SHOTS"/ 2>/dev/null || true; fi
   _vp_down
 }
+
+test_dash_v2page_room_opens_from_the_grid_with_transcript_composer_and_status() {
+  _vp_boot
+  local rc=0; _vp_run room || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .opened)" "true"
+  assert_eq "$(_vpj .hash)" "#room=alpha-orch"
+  assert_eq "$(_vpj .gridHidden)" "true"
+  assert_eq "$(_vpj '.kinds | join(",")')" "user,assistant,tool,system,thinking,assistant"
+  assert_eq "$(_vpj .toolFolded)" "true"
+  assert_contains "$(_vpj .mail)" "widget-abc-12-colour"
+  assert_contains "$(_vpj .side)" "working"
+  assert_contains "$(_vpj .side)" "gadget-1"
+  assert_contains "$(_vpj .side)" "widget-abc-12-colour"
+  assert_contains "$(_vpj .side)" "widget#12"
+  assert_contains "$(_vpj .side)" "ABC-13-sprocket"
+  assert_eq "$(_vpj .decisions)" "2"
+  assert_contains "$(_vpj .busyHint)" "when the current turn ends"
+  assert_eq "$(_vpj '.acts | length')" "1"
+  assert_eq "$(_vpj '.acts[0].action')" "drive.send"
+  assert_eq "$(_vpj '.acts[0].target')" "alpha-orch"
+  assert_eq "$(_vpj '.acts[0].args.text')" "test: hello alpha"
+  assert_eq "$(_vpj .csrf)" "true"
+  assert_contains "$(_vpj .receipt)" "in conversation"
+  assert_eq "$(_vpj .closed)" "true"
+  assert_eq "$(_vpj .hashAfter)" ""
+  _vp_down
+}
+
+# review of #147 on live data: a repo orchestrator's room showed its
+# neighbours' PRs, markdown came out raw, and the grid's decisions chrome
+# was repeated in the side panel
+test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions_plainly() {
+  _vp_boot
+  local rc=0; _vp_run room || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj '.repoScope | map(tostring) | join(",")')" "true,false,false"
+  assert_eq "$(_vpj .md.strong)" "1"
+  assert_eq "$(_vpj .md.code)" "1"
+  assert_eq "$(_vpj .md.li)" "2"
+  assert_eq "$(_vpj .md.ol)" "2"
+  assert_eq "$(_vpj .md.a)" "https://example.invalid/d"
+  assert_eq "$(_vpj .md.rawB)" "0"
+  assert_eq "$(_vpj .decHeading)" "false"
+  _vp_down
+}
