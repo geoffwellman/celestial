@@ -138,8 +138,49 @@ _pages_unit() { if [ "$1" = 1 ]; then printf cel-pages-public; else printf cel-p
 # (CEL_SYSTEMD_DIR, stub systemctl) counts, never the live one.
 _pages_have_unit() {
   if [ -n "${CEL_TESTING:-}" ] && [ -z "${CEL_SYSTEMD_DIR:-}" ]; then return 1; fi
-  have systemd-run && have systemctl || return 1
+  have systemctl || return 1
   systemctl --user show-environment >/dev/null 2>&1
+}
+
+_pages_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
+
+# The unit text: PATH fixed (node is not on systemd's), CEL_PAGES_* carried
+# from whoever ensured it, so a configured port survives a restart.
+pages_unit_text() { # <log> [--public]
+  local log="$1" v env=""; shift
+  for v in $(compgen -e); do
+    case "$v" in CEL_PAGES_*) env="$env"$'\n'"Environment=\"$v=${!v}\"" ;; esac
+  done
+  printf '%s' "[Unit]
+Description=celestial pages server$([ "${1:-}" = --public ] && printf ' (public)')
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$HOME
+Environment=\"PATH=$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\"$env
+ExecStart=$CEL_ROOT/bin/cel pages${1:+ $1}
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:$log
+StandardError=append:$log
+
+[Install]
+WantedBy=default.target
+"
+}
+
+_PAGES_UNIT_CHANGED=0
+_pages_unit_install() { # <unit> <log> [--public]
+  local unit="$1" dir f new; shift
+  dir="$(_pages_unit_dir)"; f="$dir/$unit.service"
+  new="$(pages_unit_text "$@")"
+  _PAGES_UNIT_CHANGED=0
+  if [ ! -f "$f" ] || [ "$(cat "$f")" != "$new" ]; then
+    mkdir -p "$dir"; printf '%s\n' "$new" >"$f"; _PAGES_UNIT_CHANGED=1
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  systemctl --user enable "$unit.service" >/dev/null 2>&1 || true
 }
 
 _pages_ensure() { # <public 0|1>
@@ -162,23 +203,17 @@ _pages_ensure() { # <public 0|1>
   fi
   mkdir -p "$(_pages_log_dir)"
   if _pages_have_unit; then
-    # CEL-109: setsid leaves the session but not the cgroup, so a server
-    # forked from the steward's oneshot tick died when the tick ended. A
-    # transient user unit has its own cgroup; PATH is passed because node is
-    # not on systemd's.
-    local unit v; unit="$(_pages_unit "$public")"
-    local -a envs=(--setenv="PATH=$PATH")
-    for v in $(compgen -e); do
-      case "$v" in CEL_PAGES_*) envs+=(--setenv="$v=${!v}") ;; esac
-    done
-    systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
+    # CEL-109 gave pages its own cgroup as a TRANSIENT unit; CEL-122 found
+    # transient units do not survive the user manager going down. An
+    # installed, enabled unit (like cel-dash) comes back with the manager.
+    local unit; unit="$(_pages_unit "$public")"
+    _pages_unit_install "$unit" "$log" "${flag[@]}"
     systemctl --user reset-failed "$unit.service" >/dev/null 2>&1 || true
-    systemd-run --user --unit="$unit" --collect --quiet \
-      --property=Restart=on-failure --property=RestartSec=3 \
-      --property=StandardOutput="append:$log" --property=StandardError="append:$log" \
-      --working-directory="$HOME" "${envs[@]}" \
-      "$CEL_ROOT/bin/cel" pages "${flag[@]}" >/dev/null 2>&1 \
-      || c_warn "pages$tier: systemd-run --user --unit=$unit refused - see journalctl --user -u $unit"
+    if [ "$_PAGES_UNIT_CHANGED" = 1 ]; then
+      systemctl --user restart "$unit.service" >/dev/null 2>&1
+    else
+      systemctl --user start "$unit.service" >/dev/null 2>&1
+    fi || c_warn "pages$tier: systemctl --user start $unit.service refused - see journalctl --user -u $unit"
   else
     # no user manager: setsid, so the server outlives the pane that ensured it
     setsid nohup "$CEL_ROOT/bin/cel" pages "${flag[@]}" >>"$log" 2>&1 &

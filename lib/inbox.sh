@@ -27,6 +27,10 @@ _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
 # content, so it lives beside the registry rather than in the workspace repo.
 _inbox_ws() { # [name]
   if [ -n "${1:-}" ]; then printf '%s' "$1"; return 0; fi
+  # The launch says whose workspace this is (run.sh exports it): a worker
+  # standing outside every workspace sent to `default` and its report never
+  # reached its orchestrator (CEL-122).
+  if [ -n "${CEL_INBOX_WS:-}" ]; then printf '%s' "$CEL_INBOX_WS"; return 0; fi
   local d; d="$(ws_current 2>/dev/null)" || { printf 'default'; return 0; }
   local n; n="$(ws_name "$d")"; printf '%s' "${n:-default}"
 }
