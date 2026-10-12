@@ -149,8 +149,6 @@ const main = async () => {
     if (scenario === 'decide') {
       const id = '1759800000000000002';
       const card = `document.querySelector('#needsyou .nycard[data-id="${id}"]')`;
-      await evaluate(`${card}.querySelector('.nyhead').click()`);
-      out.opened = await evaluate(`${card}.classList.contains('open')`);
       await evaluate(`${card}.querySelector('button.opt[data-n="1"]').click()`);
       out.afterOne = posts('/api/decide').length;
       out.armed = await evaluate(`!!${card}.querySelector('button.opt.armed')`);
@@ -166,7 +164,7 @@ const main = async () => {
     if (scenario === 'unopened') {
       out.cards = await evaluate(`(function(){var vis=function(e){return !!e&&e.offsetParent!==null};
         return Array.prototype.map.call(document.querySelectorAll('#grid #needsyou .nycard'),function(c){
-          return {id:c.dataset.id,open:c.classList.contains('open'),
+          return {id:c.dataset.id,
             labels:Array.prototype.filter.call(c.querySelectorAll('.nyopts button.opt'),vis).map(function(b){return b.dataset.label}),
             other:vis(c.querySelector('details.other>summary')),
             controls:['.free','.send','.why','.drop','.close'].every(function(q){return !!c.querySelector(q)})}})})()`);
@@ -194,8 +192,6 @@ const main = async () => {
       await evaluate(`(function(){
         var t=document.getElementById('task');t.focus();t.value='half a thought';t.setSelectionRange(4,4);
         var c=document.querySelector('#needsyou .nycard[data-id="1759800000000000003"]');
-        c.querySelector('.nyhead').click();
-        c=document.querySelector('#needsyou .nycard[data-id="1759800000000000003"]');
         c.querySelector('details.other').open=true;
         var f=c.querySelector('.free');f.value='keep it as is';
         c.querySelector('button.accept').click();
@@ -209,7 +205,7 @@ const main = async () => {
       out.state = await evaluate(`(function(){
         var c=document.querySelector('#needsyou .nycard[data-id="1759800000000000003"]'),t=document.getElementById('task');
         return {task:t.value,focused:document.activeElement===t,caret:t.selectionStart,
-          open:!!(c&&c.classList.contains('open')),other:!!(c&&c.querySelector('details.other').open),
+          other:!!(c&&c.querySelector('details.other').open),
           free:c?c.querySelector('.free').value:null,armed:!!(c&&c.querySelector('button.accept.armed')),
           drawer:document.getElementById('drawer').classList.contains('open'),dmsg:document.getElementById('dmsg').value}})()`);
     }
@@ -222,7 +218,7 @@ const main = async () => {
       await key('Enter');
       await sleep(400);
       out.paletteClosed = !(await evaluate(`document.getElementById('pal').classList.contains('open')`));
-      out.decisionOpen = await evaluate(`!!document.querySelector('#needsyou .nycard.open[data-id="1759800000000000002"]')`);
+      out.decisionOpen = await evaluate(`!!document.querySelector('#needsyou .nycard.flash[data-id="1759800000000000002"]')`);
       out.optionsShown = await evaluate(`(function(){var o=document.querySelector('#needsyou .nycard[data-id="1759800000000000002"] .nyopts');return !!o&&o.offsetParent!==null})()`);
       // an action asks twice before it runs
       await key('k', 2);

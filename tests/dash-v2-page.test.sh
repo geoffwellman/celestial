@@ -92,7 +92,6 @@ test_dash_v2page_drag_and_resize_survive_a_reload() {
 test_dash_v2page_needs_you_answers_once_with_two_clicks() {
   _vp_boot
   local rc=0; _vp_run decide || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
-  assert_eq "$(_vpj .opened)" "true"
   assert_eq "$(_vpj .afterOne)" "0"
   assert_eq "$(_vpj .armed)" "true"
   assert_eq "$(printf "%s" "$OUT" | jq -c .decides)" '[{"id":"1759800000000000002","action":"answer","option":1}]'
@@ -104,7 +103,6 @@ test_dash_v2page_needs_you_answers_once_with_two_clicks() {
 test_dash_v2page_needs_you_shows_every_option_without_a_click() {
   _vp_boot
   local rc=0; _vp_run unopened || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
-  assert_eq "$(_vpj '[.cards[]|select(.open)]|length')" "0"
   assert_eq "$(_vpj '.cards|length>0')" "true"
   local want; want="$(jq -c '[.. | objects | select(has("options") and has("id")) | {id:(.id|tostring), labels:[.options[].label]}] | unique_by(.id) | sort_by(.id)' "$CEL_ROOT/tests/fixtures/dash-v2/state.json")"
   assert_eq "$(_vpj '[.cards[]|{id,labels}]|sort_by(.id)|tostring')" "$want"
@@ -134,7 +132,6 @@ test_dash_v2page_refresh_keeps_what_the_owner_is_doing() {
   assert_eq "$(_vpj .state.task)" "half a thought"
   assert_eq "$(_vpj .state.focused)" "true"
   assert_eq "$(_vpj .state.caret)" "4"
-  assert_eq "$(_vpj .state.open)" "true"
   assert_eq "$(_vpj .state.other)" "true"
   assert_eq "$(_vpj .state.free)" "keep it as is"
   assert_eq "$(_vpj .state.armed)" "true"
