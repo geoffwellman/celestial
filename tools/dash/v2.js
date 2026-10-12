@@ -113,7 +113,7 @@ function needsHost(){
 var W=[
  {id:'since',t:'Since you last looked',size:'full'},{id:'needs',t:'Needs you',size:'full'},
  {id:'stuck',t:'Stuck - and why'},{id:'working',t:'Working now'},{id:'activity',t:'Activity'},{id:'prs',t:'Pull requests'},
- {id:'orchs',t:'Orchestrators'},{id:'merges',t:'Merged PRs · 14 days'},{id:'usage',t:'Usage',size:'full'},{id:'afk',t:'Away mode'},
+ {id:'orchs',t:'Orchestrators'},{id:'merges',t:'Merged PRs in your workspaces · 14 days'},{id:'usage',t:'Usage',size:'full'},{id:'afk',t:'Away mode'},
  {id:'lanes',t:'Today by workspace',size:'full'},{id:'heat',t:'When work lands'},{id:'cycle',t:'Time to merge'},{id:'funnel',t:'PR flow'},
  {id:'load',t:'Box load · 24h'},{id:'box',t:'Box'},{id:'services',t:'Running services'}];
 var LAYOUT_KEY='cel-v2-layout';
@@ -168,7 +168,7 @@ var BODY={
  merges:function(){var days=((F.merges||{}).days)||[];if(!F.merges)return none('waiting for the merges feed');var rw=repoWs();
   var vals=days.map(function(d){var n=0;Object.keys(d.counts||{}).forEach(function(r){if(WSF==='all'||rw[r]===WSF)n+=d.counts[r]});return [d.day,n]});
   var mx=Math.max.apply(null,[1].concat(vals.map(function(v){return v[1]})));var tot=vals.reduce(function(a,v){return a+v[1]},0);
-  return '<div><span class="big">'+tot+'</span> <span class="sub">PRs merged'+(WSF==='all'?' across all repos':' in '+esc(WSF))+'</span></div><div class="chart">'+vals.map(function(v){return '<div title="'+esc(v[0])+': '+v[1]+' merged" style="height:'+Math.max(3,v[1]/mx*100)+'%"></div>'}).join('')+'</div><div class="days">'+vals.map(function(v){return '<span>'+esc(String(v[0]).slice(8))+'</span>'}).join('')+'</div>'},
+  return '<div><span class="big">'+tot+'</span> <span class="sub">PRs merged'+(WSF==='all'?' across all repos':' in '+esc(WSF))+'</span></div>'+(function(){var na=(F.merges.no_access||[]).filter(function(r){return WSF==='all'||rw[r]===WSF});var un=(F.merges.unavailable||[]).filter(function(r){return WSF==='all'||rw[r]===WSF});return (na.length?'<div class="sub">no access: '+na.map(esc).join(', ')+'</div>':'')+(un.length?'<div class="sub">gh unavailable, retrying: '+un.map(esc).join(', ')+'</div>':'')})()+'<div class="chart">'+vals.map(function(v){return '<div title="'+esc(v[0])+' ('+esc(F.merges.timezone||'local')+' day): '+v[1]+' merged" style="height:'+Math.max(3,v[1]/mx*100)+'%"></div>'}).join('')+'</div><div class="days">'+vals.map(function(v){return '<span>'+esc(String(v[0]).slice(8))+'</span>'}).join('')+'</div>'},
  usage:function(big){return usageHtml(F.usage,!!big)},
  afk:function(){return '<div class="row"><span class="t"><b>Away mode</b><br><span class="sub">While away the fleet lands approved green PRs and restarts stalled orchestrators; everything else waits and shows up in Since you last looked.</span></span></div><div class="row"><button class="btn rec" data-act="afk.on" data-label="go away">Go away</button><button class="btn" data-act="afk.off" data-label="I\'m back">I\'m back</button></div>'},
  lanes:function(){return lanesHtml(F.lanes,false)},

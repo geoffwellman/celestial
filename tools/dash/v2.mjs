@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } fr
 import { join, dirname } from 'node:path';
 import { homedir, cpus, loadavg, totalmem, freemem, networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { store } from './store.mjs';
 
@@ -182,30 +183,86 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const wsKey = (wss) => wss.map((w) => w.name).join(',');
 
   const agents = async () => (await slow('agents', 8000, agentsCold)) || [];
+  const ghParse = (out) => { try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; } };
   const ghList = async (slug, st, fields) => {
     const v = await slow(`gh:${st}:${slug}`, 600000, async () => {
       const out = await run('gh', ['pr', 'list', '--repo', slug, '--state', st, '--json', fields, '--limit', '200'], 30000);
-      if (out === null) return null;
-      try { const j = JSON.parse(out); return Array.isArray(j) ? j : null; } catch { return null; }
+      return out === null ? null : ghParse(out);
     });
     if (!v) upstreamFailures++;
-    return v || [];
+    return v;
   };
-  const merged = async (wss) => {
-    const out = [];
+  // CEL-117: merged PRs are fetched BY DATE, not by count. `--limit 200` was
+  // the newest 200 merges whatever their date, so a repo with 220 merges in a
+  // fortnight showed 200 and its oldest days quietly emptied. Every card the
+  // page shows asks 90 days or less, so they share ONE 90-day fetch per repo;
+  // a longer ask (heat?days=365) fetches its own window on demand and never
+  // widens the shared one (review on #142). GitHub's search answers at most
+  // 1000 per query: a full page is followed by another ending at the oldest
+  // day seen, and PRs are de-duplicated by number.
+  const SHARED_WINDOW = 90;
+  const MERGE_PAGE = 1000;
+  const ymdUtc = (t) => new Date(t).toISOString().slice(0, 10);
+  // gh with its stderr, so a refusal can be told from a blip
+  const ghTry = (args, timeout) => new Promise((resolve) => {
+    execFile('gh', args, { timeout, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
+      resolve(err ? { ok: false, err: String(errOut || err.message || '') } : { ok: true, out }));
+  });
+  // Only GitHub saying the repo does not exist or is not ours to read is "no
+  // access"; a rate limit, a timeout or a network blip is not (review on #142)
+  // - that is a failure, never cached, and the last good answer stands.
+  const DENIED = /Could not resolve to a Repository|cannot be searched|Resource not accessible|HTTP 404|Not Found/i;
+  const mergedList = async (slug, days) => {
+    const v = await slow(`gh:merged:${slug}:${days}`, 600000, async () => {
+      const start = ymdUtc(Date.now() - days * DAY);
+      const seen = new Map();
+      let end = null;
+      for (let page = 0; page < 50; page++) {
+        const q = end ? `merged:${start}..${end}` : `merged:>=${start}`;
+        const r = await ghTry(['pr', 'list', '--repo', slug, '--state', 'merged', '--search', q,
+          '--json', 'number,title,url,headRefName,createdAt,mergedAt', '--limit', String(MERGE_PAGE)], 60000);
+        if (!r.ok) return DENIED.test(r.err) ? { denied: true } : null;
+        const rows = ghParse(r.out);
+        if (!rows) return null;
+        const before = seen.size;
+        for (const p of rows) seen.set(p.number, p);
+        if (rows.length < MERGE_PAGE || seen.size === before) break;
+        const oldest = rows.reduce((m, p) => (p.mergedAt && p.mergedAt < m ? p.mergedAt : m), rows[0].mergedAt || '');
+        if (!oldest) break;
+        end = ymdUtc(oldest);
+      }
+      // GitHub's search answers a repo we cannot read with an empty list and
+      // exit 0 - the live box showed two such repos as a calm 0. An empty
+      // answer is checked against the repo itself.
+      if (!seen.size) {
+        const r = await ghTry(['repo', 'view', slug, '--json', 'name'], 30000);
+        if (!r.ok) return DENIED.test(r.err) ? { denied: true } : null;
+      }
+      return { rows: [...seen.values()] };
+    });
+    if (!v) upstreamFailures++;
+    return v;
+  };
+  // per repo: merges, "no access" (GitHub refused), or "unavailable" (gh
+  // failed and there is no earlier answer to stand on)
+  const mergedInfo = async (wss, days = 0) => {
+    const window = days > SHARED_WINDOW ? Math.min(365, days) : SHARED_WINDOW;
+    const list = []; const noAccess = []; const unavailable = [];
     for (const ws of wss) for (const r of ws.repos) {
       if (!r.slug) continue;
-      for (const p of await ghList(r.slug, 'merged', 'number,title,url,headRefName,createdAt,mergedAt')) {
-        if (p.mergedAt) out.push({ ...p, ws: ws.name, repo: r.name });
-      }
+      const v = await mergedList(r.slug, window);
+      if (!v) { unavailable.push(r.name); continue; }
+      if (v.denied) { noAccess.push(r.name); continue; }
+      for (const p of v.rows) if (p.mergedAt) list.push({ ...p, ws: ws.name, repo: r.name });
     }
-    return out;
+    return { list, noAccess, unavailable };
   };
+  const merged = async (wss, days) => (await mergedInfo(wss, days)).list;
   const open = async (wss) => {
     const out = [];
     for (const ws of wss) for (const r of ws.repos) {
       if (!r.slug) continue;
-      for (const p of await ghList(r.slug, 'open', 'number,title,url,headRefName,mergeable,reviewDecision,updatedAt,isDraft')) {
+      for (const p of (await ghList(r.slug, 'open', 'number,title,url,headRefName,mergeable,reviewDecision,updatedAt,isDraft')) || []) {
         out.push({ ...p, ws: ws.name, repo: r.name });
       }
     }
@@ -559,10 +616,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- merges / cycle / heat ---------------------------------------------
+  const TZ_NAME = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
   const localDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const merges = async (url, wss) => {
     const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days')) || 14));
-    const list = await merged(wss);
+    const { list, noAccess, unavailable } = await mergedInfo(wss, days);
     const out = [];
     const today = new Date(); today.setHours(12, 0, 0, 0);
     for (let i = days - 1; i >= 0; i--) out.push({ day: localDay(today.getTime() - i * DAY), counts: {} });
@@ -571,13 +629,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const d = byDay[localDay(p.mergedAt)];
       if (d) d.counts[p.repo] = (d.counts[p.repo] || 0) + 1;
     }
-    return { days: out };
+    // CEL-117: days are the box's local calendar days (the owner reads the
+    // chart in local time); GitHub's own search buckets by UTC, so a merge
+    // near midnight can sit one day apart from github.com - by design
+    return { days: out, timezone: TZ_NAME, no_access: noAccess, unavailable };
   };
   const cycle = async (url, wss) => {
     const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 30));
     const from = Date.now() - days * DAY;
     const by = {};
-    for (const p of await merged(wss)) {
+    for (const p of await merged(wss, days)) {
       const m = new Date(p.mergedAt).getTime(); const c = new Date(p.createdAt).getTime();
       if (!m || !c || m < from) continue;
       const k = `${p.ws}\t${p.repo}`;
@@ -593,7 +654,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 28));
     const from = Date.now() - days * DAY;
     const grid = Array.from({ length: 7 }, () => Array(24).fill(0));
-    for (const p of await merged(wss)) {
+    for (const p of await merged(wss, days)) {
       const t = new Date(p.mergedAt);
       if (t.getTime() < from) continue;
       grid[(t.getDay() + 6) % 7][t.getHours()] += 1;
