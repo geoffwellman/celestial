@@ -579,6 +579,32 @@ test_v2_merges_buckets_by_local_midnight() {
   _v2_down
 }
 
+# CEL-125: a free port picked by bind-and-close is free only until another
+# parallel test takes it. When two dashboards raced for one port, the loser
+# died with EADDRINUSE and its test talked to the WINNER's server - another
+# fixture, another gh stub - and failed as a "flake". A boot must end talking
+# to its own server or not at all.
+test_v2_boot_never_talks_to_a_server_it_did_not_start() {
+  local decoy port
+  port="$(_v2_port)"
+  python3 -c 'import http.server,sys
+class H(http.server.BaseHTTPRequestHandler):
+  def do_GET(s): s.send_response(200); s.send_header("content-type","application/json"); s.end_headers(); s.wfile.write(b"{\"csrfToken\":\"decoy\"}")
+  def log_message(s,*a): pass
+http.server.HTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever()' "$port" &
+  decoy=$!
+  local i; for i in $(seq 1 30); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.1; done
+  # the first pick is the decoy's port, as a parallel test's would be
+  local first; first="$(mktemp)"
+  _v2_port() { if [ ! -s "$first" ]; then echo 1 > "$first"; echo "$port"; else python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; fi; }
+  _v2_boot; rm -f "$first"
+  kill "$decoy" 2>/dev/null || true; wait "$decoy" 2>/dev/null || true
+  if [ "$DASH_PORT" = "$port" ]; then echo "boot kept the decoy's port"; _v2_down; return 1; fi
+  if [ "$TOKEN" = decoy ]; then echo "boot took the decoy's token"; _v2_down; return 1; fi
+  assert_eq "$(_v2_get "$(_v2_url 'merges?days=14')" | jq '[.days[].counts.widget // 0] | add')" "2"
+  _v2_down
+}
+
 # CEL-117: a repo the box cannot read is flagged, not counted as 0 merges.
 # GitHub's search answers an unreadable repo with an empty list and exit 0, so
 # "no merges" has to be checked against the repo itself.
