@@ -24,6 +24,8 @@ _CEL_DOCTOR=1
 # shellcheck source=lib/liveness.sh
 . "${BASH_SOURCE[0]%/*}/liveness.sh"  # liveness_doctor_line
 # shellcheck source=lib/gc.sh
+# shellcheck source=lib/boxguard.sh
+. "${BASH_SOURCE[0]%/*}/boxguard.sh"
 . "${BASH_SOURCE[0]%/*}/gc.sh"   # gc_doctor_line, for the blind-GC line
 # shellcheck source=lib/box.sh
 . "${BASH_SOURCE[0]%/*}/box.sh"   # box_doctor_line, for the floor check
@@ -784,6 +786,18 @@ cmd_doctor() {
   # months and nothing anywhere diagnosed it.
   local boxline; boxline="$(box_doctor_line)"
   [ -z "$boxline" ] || c_warn "$boxline"
+
+  # MEMORY AND WHO HOLDS IT (CEL-122), and whether anything will restart the
+  # user manager if the OOM-killer takes it. Warnings: neither is a defect.
+  local memline top="" mb dir
+  memline="$(boxguard_doctor_line)"
+  while IFS=$'\t' read -r mb dir; do
+    [ -n "$dir" ] && top="$top${top:+, }${dir##*/} ${mb}M"
+  done < <(boxguard_top_trees 3 2>/dev/null || true)
+  memline="$memline${top:+ - top: $top}"
+  if boxguard_pressure; then c_warn "$memline"; else c_ok "$memline"; fi
+  if boxguard_wd_installed; then c_ok "manager watchdog: installed"
+  else c_warn "manager watchdog: not installed - cel watchdog print (one-time owner command)"; fi
 
   # A LIVE AGENT WITH NO HERDR NAME. Not a failure - the agent is working -
   # but it is invisible to everything that resolves an orchestrator by its

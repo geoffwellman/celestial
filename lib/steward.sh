@@ -1385,6 +1385,30 @@ _steward_mem_owner() { # <wsdir> <repo>
   printf '%s-orch' "$(ws_product_of_repo "$1" "$2")"
 }
 
+# THE WARNING LINE (CEL-122). Below it the orchestrators - the ones who can
+# stop delegating and collect - hear about it once per condition, rolled up
+# (one fp per workspace, re-sent at most once per _steward_due window), naming
+# the biggest consumers grouped by worktree. Admission (lib/boxguard.sh)
+# refuses new workers lower down; this is the earlier word.
+_steward_mem_pressure_warn() { # <avail-mb>
+  boxguard_pressure || return 0
+  local avail swap top="" mb dir ws wsdir p
+  read -r avail swap <<<"$(boxguard_read)"
+  while IFS=$'\t' read -r mb dir; do
+    [ -n "$dir" ] && top="$top${top:+, }${dir#"$HOME"/.herdr/worktrees/} $(mem_human "$mb")"
+  done < <(boxguard_top_trees 5 2>/dev/null || true)
+  local msg="steward: box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - biggest worktrees: ${top:-none attributable}. Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB); idle done workers are being stopped sooner."
+  c_warn "$msg"
+  _steward_due "mem-pressure" || return 0
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    for p in $(ws_product_names "$wsdir" 2>/dev/null); do
+      cmd_inbox send "$p-orch" "$msg" --from steward --workspace "$ws" --kind status \
+        --fp mem-pressure >/dev/null 2>&1 || true
+    done
+  done
+}
+
 _steward_memory() {
   local total avail used
   read -r total avail used <<<"$(mem_box)"
@@ -1418,6 +1442,8 @@ _steward_memory() {
       _steward_clear "$ws" mem-box "box memory is back to $(mem_human "$avail") of $(mem_human "$total") available"
     done
   fi
+
+  _steward_mem_pressure_warn "$avail"
 
   # AND ONE WORKER THAT IS THE PROBLEM ON ITS OWN. A pi worker is ~340 MB
   # resident; a tree over 2 GB is a test server nobody stopped or a run that

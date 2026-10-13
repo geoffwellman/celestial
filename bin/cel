@@ -207,6 +207,11 @@ cel - the celestial plane
                                 see an orchestrator's conversation (from its
                                 session file) and mail it as owner, with a
                                 receipt; never types into a pane
+  cel build-slot -- <cmd>       run a heavy build (cargo build/test...) in the
+                                box-wide build slot: one at a time by default
+                                (build.slots), CARGO_BUILD_JOBS = half the cores
+  cel watchdog [status|print]   is the system-level user-manager watchdog
+                                installed; print shows the one-time owner command
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS
@@ -248,6 +253,8 @@ case "${1:-help}" in
             if [ "${1:-}" = "tunnel" ]; then shift; cmd_pages_tunnel "$@"; else cmd_pages "$@"; fi;;
   publish)  shift; . "$CEL_ROOT/lib/pages.sh";   cmd_publish "$@";;
   spike)    shift; . "$CEL_ROOT/lib/spike.sh";   cmd_spike "$@";;
+  build-slot) shift; . "$CEL_ROOT/lib/boxguard.sh"; cmd_build_slot "$@";;
+  watchdog) shift; . "$CEL_ROOT/lib/boxguard.sh"; cmd_watchdog "$@";;
   promote)  shift; . "$CEL_ROOT/lib/spike.sh";   cmd_promote "$@";;
   help|-h|--help) usage;;
   *)        c_err "unknown command: $1"; echo; usage; exit 2;;

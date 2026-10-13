@@ -17,6 +17,9 @@ export CEL_ROOT
 # shellcheck source=lib/run.sh
 . "$CEL_ROOT/lib/run.sh"   # _run_agent_args + _run_agent_name, shared with cel run
 # shellcheck source=lib/guard.sh
+# shellcheck source=lib/boxguard.sh
+. "$CEL_ROOT/lib/boxguard.sh" # boxguard_admit - no worker on a box out of memory
+# shellcheck source=lib/guard.sh
 . "$CEL_ROOT/lib/guard.sh" # guard_role_of - pure, reads nothing but its argument
 # shellcheck source=lib/ledger_states.sh
 . "$CEL_ROOT/lib/ledger_states.sh" # the one list of states gc and doctor read too
@@ -2367,6 +2370,14 @@ case "${1:-}" in
   delegate|scout|spike|reconcile)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
+esac
+
+# ADMISSION BY MEMORY (CEL-122): a worker is ~400 MB before it compiles
+# anything, and the 2026-10-12 OOM took the user manager down with it. Every
+# workspace, every shape, and before the ledger lock or a worktree exists.
+case "${1:-}" in
+  delegate|scout|spike)
+    _bg_msg="$(boxguard_admit)" || die "$1: $_bg_msg" ;;
 esac
 
 case "${1:-}" in

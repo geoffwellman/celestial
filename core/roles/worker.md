@@ -16,6 +16,11 @@ Do
   the suite lock`, wait - do not start a second copy and do not kill the
   holder. Follow the ticket and branch naming in your injected policy;
   where `tickets.system` is `none`, do not invent a ticket reference.
+- Heavy compiles go through the box-wide build slot: `cel build-slot -- cargo
+  build ...`, `cel build-slot -- cargo test ...` (and the same for any other
+  big compile). One heavy build runs at a time across the box; if it prints
+  `waiting for a build slot`, wait. Six parallel cargo builds took the box
+  down on 2026-10-12.
 - A change worth a CHANGELOG line goes in `changelog.d/<your-branch>.md`, never
   in CHANGELOG.md itself.
 - On completion write `.agent/result.md`: summary, files changed, tests run, open questions. Then stop.
