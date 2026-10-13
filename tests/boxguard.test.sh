@@ -28,12 +28,27 @@ test_boxguard_refuses_below_the_free_floor_and_says_so() {
   rm -rf "$T"
 }
 
-test_boxguard_refuses_when_swap_is_mostly_used() {
-  _bg_meminfo 8388608 8388608 838860    # 90% swap used
+test_boxguard_high_swap_with_plenty_available_admits_and_does_not_warn() {
+  _bg_meminfo 11534336 8388608 838860   # 11 GB free, 90% swap used
+  boxguard_admit >/dev/null || { echo "refused on swap alone"; return 1; }
+  boxguard_pressure && { echo "warned on swap alone"; return 1; }
+  rm -rf "$T"
+}
+
+test_boxguard_lowish_available_with_high_swap_refuses() {
+  _bg_meminfo 4194304 8388608 838860    # 4 GB free (< 2x 3 GB floor), 90% swap
   local out rc=0; out="$(boxguard_admit)" || rc=$?
   assert_eq "$rc" 1
   assert_contains "$out" "swap 90%"
   CEL_BOX_MAX_SWAP_PCT=95 boxguard_admit >/dev/null || { echo "swap override ignored"; return 1; }
+  rm -rf "$T"
+}
+
+test_boxguard_psi_stall_is_pressure() {
+  _bg_meminfo 11534336 0 0
+  printf 'some avg10=30.00 avg60=25.00 avg300=5.00 total=1\nfull avg10=20.00 avg60=15.00 avg300=3.00 total=1\n' > "$T/psi"
+  CEL_PSI_MEMORY="$T/psi" boxguard_pressure || { echo "PSI stall not pressure"; return 1; }
+  CEL_PSI_MEMORY="$T/psi" boxguard_admit >/dev/null || { echo "PSI refused admission"; return 1; }
   rm -rf "$T"
 }
 
