@@ -4,6 +4,7 @@
 # ring and a stub gh that logs its argv - so "one gh pass serves three cards"
 # is a line count, not a hope.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/tests/lib/dash-boot.sh"
 
 _v2_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 _v2_ago() { date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
@@ -62,11 +63,10 @@ EOF
   if [ -n "${_V2_FAIL_GH:-}" ]; then cp "$T/bin/gh" "$T/bin/gh.ok"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"; fi
   export CEL_DASH_ACTIVITY_KEEP=5
   export CEL_SAMPLES_FILE="$T/state/samples.jsonl" CEL_DASH_STATE_DIR="$T/state" CEL_DASH_CEL="$T/bin/cel"
-  DASH_PORT="$(_v2_port)"
-  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
-    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
-  DASH_PID=$!
   trap '_v2_down' EXIT
+  _dash_launch _v2_port "$T/dash.log" \
+    "{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":@PORT@,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
+    "$T/bin:$PATH" || return 1
   local i; for i in $(seq 1 30); do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3
   done
@@ -576,6 +576,32 @@ test_v2_merges_buckets_by_local_midnight() {
   assert_eq "$(printf '%s' "$m" | jq --arg d "$y" '.days[] | select(.day==$d) | .counts.widget')" "1"
   assert_eq "$(printf '%s' "$m" | jq --arg d "$d2" '.days[] | select(.day==$d) | .counts.widget')" "1"
   assert_eq "$(printf '%s' "$m" | jq -r '.timezone')" "$tz"
+  _v2_down
+}
+
+# CEL-125: a free port picked by bind-and-close is free only until another
+# parallel test takes it. When two dashboards raced for one port, the loser
+# died with EADDRINUSE and its test talked to the WINNER's server - another
+# fixture, another gh stub - and failed as a "flake". A boot must end talking
+# to its own server or not at all.
+test_v2_boot_never_talks_to_a_server_it_did_not_start() {
+  local decoy port
+  port="$(_v2_port)"
+  python3 -c 'import http.server,sys
+class H(http.server.BaseHTTPRequestHandler):
+  def do_GET(s): s.send_response(200); s.send_header("content-type","application/json"); s.end_headers(); s.wfile.write(b"{\"csrfToken\":\"decoy\"}")
+  def log_message(s,*a): pass
+http.server.HTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever()' "$port" &
+  decoy=$!
+  local i; for i in $(seq 1 30); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.1; done
+  # the first pick is the decoy's port, as a parallel test's would be
+  local first; first="$(mktemp)"
+  _v2_port() { if [ ! -s "$first" ]; then echo 1 > "$first"; echo "$port"; else python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; fi; }
+  _v2_boot; rm -f "$first"
+  kill "$decoy" 2>/dev/null || true; wait "$decoy" 2>/dev/null || true
+  if [ "$DASH_PORT" = "$port" ]; then echo "boot kept the decoy's port"; _v2_down; return 1; fi
+  if [ "$TOKEN" = decoy ]; then echo "boot took the decoy's token"; _v2_down; return 1; fi
+  assert_eq "$(_v2_get "$(_v2_url 'merges?days=14')" | jq '[.days[].counts.widget // 0] | add')" "2"
   _v2_down
 }
 

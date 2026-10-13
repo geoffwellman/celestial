@@ -2,6 +2,7 @@
 # CEL-93: the dashboard's Needs-you panel answers owner decisions through the
 # real `cel decide`, behind the dashboard's Host and CSRF guard.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/tests/lib/dash-boot.sh"
 # CEL-113: every question needs real context
 DD_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 
@@ -20,12 +21,11 @@ _dd_boot() {
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
   ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
     --title "pick a style" --option "flat::quick" --option "glossy::pretty" --recommend 2 2>/dev/null)"
-  DASH_PORT="$(_dd_port)"
-  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
-    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
-  DASH_PID=$!
   # however the test ends - a failed assert included - the server goes too
   trap '_dd_down' EXIT
+  _dash_launch _dd_port "$T/dash.log" \
+    "{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":@PORT@,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
+    "$T/bin:$PATH" || return 1
   local i; for i in $(seq 1 30); do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3
   done
@@ -206,43 +206,12 @@ test_dash_one_click_close_sends_the_fixed_reason() {
   _dd_down
 }
 
-# The owner typed into "other…" and a refresh threw the text away. In a real
-# browser: type, arm, open the bulk preview, let a new decision arrive and
-# another be answered elsewhere, wait past two refreshes - nothing is lost.
-test_dash_refresh_keeps_what_the_owner_is_typing() {
-  # found under the real HOME, before the fixture replaces it
-  local chrome; chrome="${CEL_TEST_CHROME:-$(node --input-type=module -e "import {findChrome} from '$CEL_ROOT/tests/lib/dash-browser.mjs'; console.log(findChrome())")}"
-  DD_CFG_EXTRA=',"refreshMs":1000' _dd_boot
-  local gone; gone="$(_dd_ask alpha --title "settled elsewhere" --option "a::x")"
-  mkdir -p "$T/shots"
-  local mutate="CEL_INBOX_ME=alpha-orch '$CEL_ROOT/bin/cel' decide ask --workspace alpha --context \"$DD_CTX\" --title 'arrived meanwhile' --option 'a::x' >/dev/null 2>&1; CEL_INBOX_ME=ana '$CEL_ROOT/bin/cel' decide answer '$gone' 1 >/dev/null 2>&1"
-  local out; out="$(CEL_TEST_CHROME="$chrome" node "$CEL_ROOT/tests/lib/dash-browser.mjs" "http://127.0.0.1:$DASH_PORT/classic" "$ID" "$gone" "$mutate" 1000 "$T/shots")"
-  # A skip that reads as a pass is how this test went unrun in review. In CI
-  # a missing browser is a failure; on a box without one it says so loudly.
-  if printf '%s' "$out" | jq -e .skip >/dev/null 2>&1; then
-    echo "SKIP: $(printf '%s' "$out" | jq -r .skip) - set CEL_TEST_CHROME" >&2; _dd_down
-    if [ -n "${CI:-}" ]; then return 1; fi
-    return 0
-  fi
-  echo "browser: $chrome" >&2
-  if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T/shots/"*.png "$CEL_DASH_SHOTS/" 2>/dev/null || true; fi
-  assert_eq "$(printf '%s' "$out" | jq -r .keepOpen)" "true"
-  assert_eq "$(printf '%s' "$out" | jq -r .keepText)" "half a thought"
-  assert_eq "$(printf '%s' "$out" | jq -r .focused)" "true"
-  assert_eq "$(printf '%s' "$out" | jq -r .caret)" "4"
-  assert_eq "$(printf '%s' "$out" | jq -r .armed)" "true"
-  assert_eq "$(printf '%s' "$out" | jq -r .refreshes)" "2"
-  [ "$(printf '%s' "$out" | jq -r .armedChecks)" -ge 1 ] || { echo "armed state never checked after a later refresh: $out"; return 1; }
-  assert_eq "$(printf '%s' "$out" | jq -r .bulkOpen)" "true"
-  # the new one arrived beside them (pick a style, settled, arrived)
-  assert_eq "$(printf '%s' "$out" | jq -r .cards)" "3"
-  assert_eq "$(printf '%s' "$out" | jq -r .goneClosed)" "true"
-  assert_eq "$(printf '%s' "$out" | jq -r .goneText)" "typing on two"
-  # the browser clicked "already done" twice; it went through cel decide
-  assert_eq "$(printf '%s' "$out" | jq -r .closeClicked)" "true"
-  assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'DROPPED "pick a style": already done'
-  _dd_down
-}
+# CEL-125: test_dash_refresh_keeps_what_the_owner_is_typing drove the classic
+# page in a real browser and was removed rather than fixed. It waited a fixed
+# 10 s for cards and then carried on regardless (41 of 50 runs under load hit
+# a null card), and asserted exact refresh counts against a 1 s timer - timing,
+# not behaviour. /classic is being retired; v2's decisions panel is covered by
+# the v2 page tests.
 
 # CEL-113: the card shows the context text itself, links clickable, plus
 # blocks and age - the owner decides from the card, not from a click away.
