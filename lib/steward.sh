@@ -1391,15 +1391,21 @@ _steward_mem_owner() { # <wsdir> <repo>
 # the biggest consumers grouped by worktree. Admission (lib/boxguard.sh)
 # refuses new workers lower down; this is the earlier word.
 _steward_mem_pressure_warn() { # <avail-mb>
-  boxguard_pressure || return 0
-  local avail swap top="" mb dir ws wsdir p
+  # ONCE PER CONDITION (CEL-126): the orchestrators hear it on entering
+  # pressure and not again until the box has recovered and fallen back in.
+  local flag="${_STEWARD_STATE%/*}/mem-pressure.on"
+  if ! boxguard_pressure; then rm -f "$flag" 2>/dev/null; return 0; fi
+  local avail swap top="" mb dir ws wsdir p acted
   read -r avail swap <<<"$(boxguard_read)"
   while IFS=$'\t' read -r mb dir; do
     [ -n "$dir" ] && top="$top${top:+, }${dir#"$HOME"/.herdr/worktrees/} $(mem_human "$mb")"
   done < <(boxguard_top_trees 5 2>/dev/null || true)
-  local msg="steward: box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - biggest worktrees: ${top:-none attributable}. Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB); idle done workers are being stopped sooner."
+  acted="$(head -n1 "$(_gc_idle_stop_last)" 2>/dev/null || true)"
+  acted="${acted:+gc stopped idle workers: $acted}"
+  local msg="steward: box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - ${acted:-no idle worker was stoppable}. Biggest worktrees: ${top:-none attributable}. Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB)."
   c_warn "$msg"
-  _steward_due "mem-pressure" || return 0
+  [ -f "$flag" ] && return 0
+  mkdir -p "${flag%/*}" 2>/dev/null; : > "$flag" 2>/dev/null || true
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     for p in $(ws_product_names "$wsdir" 2>/dev/null); do
