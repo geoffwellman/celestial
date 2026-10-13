@@ -904,6 +904,9 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
 # and the ledger row and worktree are untouched. Only delegated rows are
 # considered - orchestrators and reviewers are never in the ledger - and a
 # working, blocked or unknown agent is never touched.
+# The last pass's stops, one line, read by the steward's pressure warning so
+# it can name what was done rather than promise it (CEL-126).
+_gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-$HOME/.local/state/cel/gc-idle-stop-last.txt}"; }
 _gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-$HOME/.local/state/cel/gc-idle-stop.json}"; }
 
 gc_idle_stop_minutes() {
@@ -921,7 +924,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
   local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb
   [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
   now="${CEL_GC_NOW:-$(date +%s)}"
-  local file prev='{}' next='{}' freed=0 kept=0
+  local file prev='{}' next='{}' freed=0 kept=0 what=""
   file="$(_gc_idle_stop_state)"
   [ -f "$file" ] && prev="$(jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}')"
   idle_stopped=0
@@ -966,12 +969,17 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       else
         c_warn "could not stop $id (pane $pane) - kept"; kept=$((kept + 1)); continue
       fi
-      idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb))
+      idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
     done < <(jq -r '.[]? | select((.state // "") as $s | ["running","finished"] | index($s))
                     | [(.id // ""), (.pane // ""), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
   done <<< "$names"
   if [ "$dry" -eq 0 ]; then
     mkdir -p "$(dirname "$file")" 2>/dev/null && printf '%s\n' "$next" > "$file" 2>/dev/null || true
+    if [ "$idle_stopped" -gt 0 ]; then
+      printf '%s (~%sM freed)\n' "$what" "$freed" > "$(_gc_idle_stop_last)" 2>/dev/null || true
+    else
+      : > "$(_gc_idle_stop_last)" 2>/dev/null || true
+    fi
   fi
   printf 'gc: %s %d idle agents (idle > %dm, ~%sM freed), kept %d\n' \
     "$([ "$dry" -eq 1 ] && printf 'would stop' || printf stopped)" "$idle_stopped" "$mins" "$freed" "$kept"
