@@ -202,6 +202,11 @@ which cuts worktrees from origin's real default branch, refuses diverged refs,
 and makes every worker land its work as a PR — finished work is never
 invisible. `policy.pr_open: draft | ready` decides whether that PR opens as a
 draft (default) or ready for review with the workspace reviewer requested.
+`pr: none` on a repo entry (overriding `policy.pr` for that repo only) skips the
+PR: its workers rebase onto origin/main and push to main, fast-forward only,
+and `cel-fanout collect` records the row landed once its commits are on main.
+Set as the workspace-level `policy.pr: none`, it applies to every repo that does
+not declare its own `pr:`.
 
 ## Factory vocabulary
 

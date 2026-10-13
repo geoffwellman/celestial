@@ -167,6 +167,21 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
+# Whether this repo's work goes through a PR (CEL-119). A repo entry's `pr:`
+# overrides `policy.pr` for that repo alone: the owner wanted a spikes repo
+# pushed straight to main while every sibling kept its PRs, and a
+# workspace-wide switch could only say yes or no for all of them. A value
+# outside required|none is a config error - guessing would either open PRs
+# nobody reviews or push unreviewed work to a repo that wanted review.
+ws_repo_pr() { # <wsdir> <repo> -> required|none
+  local v; v="$(ws_repo_get "$1" "$2" pr)"
+  [ -n "$v" ] || v="$(ws_policy "$1" pr)"
+  case "${v:-required}" in
+    required|none) printf '%s' "${v:-required}" ;;
+    *) die "workspace.yaml pr for repo $2 must be required or none (got: $v)" ;;
+  esac
+}
+
 # `owner/name` from a GitHub remote url - SSH (git@github.com:o/r.git,
 # ssh://git@github.com/o/r) or HTTPS. Fails on anything that is not GitHub,
 # so a caller that needs `gh --repo` refuses rather than guesses.
@@ -521,12 +536,16 @@ ws_policy_block() { # <wsdir> [product]
       printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
     fi
   fi
-  local lt
+  local lt rpr
   for r in $(ws_repo_names "$d"); do
     lt="$(ws_repo_get "$d" "$r" linear_team)"
-    printf -- '- repo %s: branch prefix %s, gate `%s`%s\n' \
+    rpr=""
+    if [ "$(ws_repo_pr "$d" "$r")" = none ]; then
+      rpr='; pr: none - workers commit on their branch, then rebase onto origin/main and push to main (fast-forward only, never force); no PR and no `cel-fanout land` - the row goes to landed when its commits are on main (collect records it, release takes the worktree)'
+    fi
+    printf -- '- repo %s: branch prefix %s, gate `%s`%s%s\n' \
       "$r" "$(ws_repo_get "$d" "$r" prefix)" "$(ws_repo_get "$d" "$r" gate)" \
-      "${lt:+, linear team $lt}"
+      "${lt:+, linear team $lt}" "$rpr"
   done
   # What this workspace has learned, budgeted (lib/learn.sh). Rendered by a
   # CHILD `cel learn render` rather than by sourcing learn.sh here: learn.sh

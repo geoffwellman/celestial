@@ -179,7 +179,7 @@ name: $name
 kind: $kind
 org: $org
 tickets: { system: none, adhoc: "AH-<yymmdd>" }
-policy: { merge: $merge, pr: required, workers: 4, reviewer: null }
+policy: { merge: $merge, pr: required, workers: 4, reviewer: null }   # pr: required | none. A repo entry may set its own pr: (it wins for that repo). none = workers push straight to main, fast-forward only, no PR; set here it applies to EVERY repo without its own pr:
 runtime: { root: claude, orchestrator: claude, worker: omp }
 tools: []
 env: {}                       # exported into every shell that starts in this workspace. SECRETS GO IN env.local (gitignored, never committed) - that is the one place this workspace's keys live, and the only one cel doctor and cel ws env read
