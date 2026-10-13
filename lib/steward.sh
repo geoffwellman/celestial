@@ -1402,7 +1402,7 @@ _steward_mem_pressure_warn() { # <avail-mb>
   done < <(boxguard_top_trees 5 2>/dev/null || true)
   acted="$(head -n1 "$(_gc_idle_stop_last)" 2>/dev/null || true)"
   acted="${acted:+gc stopped idle workers: $acted}"
-  local msg="steward: box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - ${acted:-no idle worker was stoppable}. Biggest worktrees: ${top:-none attributable}. Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB)."
+  local msg; msg="steward: $(boxguard_warning_text "$acted") Biggest worktrees: ${top:-none attributable}."
   c_warn "$msg"
   [ -f "$flag" ] && return 0
   mkdir -p "${flag%/*}" 2>/dev/null; : > "$flag" 2>/dev/null || true
