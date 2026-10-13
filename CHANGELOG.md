@@ -7,6 +7,20 @@ watch the repo (Watch → Custom → Releases) to be notified.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-13
+
+### Added
+- Per-repo `pr: none` in workspace.yaml (overrides `policy.pr` for that repo; `required|none`, validated). Workers on such a repo rebase onto origin/main and push to main fast-forward only, never force, with no PR; the policy block says so, and `cel-fanout collect` records the row as `landed` once its commits are on main so `release` takes the worktree without `--discard`.
+- `cel drive list|tail|send|receipt`: see every orchestrator's live conversation, normalised and redacted from its session file (omp, pi, claude; offset tailing, never a full reparse), and mail it as `owner` with a receipt that goes queued -> delivered -> in-conversation. Delivery stays in the omp inbox hook, which now tags each message with its `[id]`; nothing types into a pane.
+- Dashboard: a room per orchestrator, opened from the grid (`#room=<orch>`, bookmarkable, back button closes it). Its live conversation with folded tool calls and mail bubbles, a composer that mails it through `cel drive send` with a queued -> delivered -> in conversation receipt, and beside it its status, model, workers, open PRs, stuck items and its decisions, answerable in place. New routes `/api/v2/drive/list|tail|receipt` and act `drive.send`; the tail is incremental and kept only while someone is looking.
+
+### Fixed
+- Dashboard Merged PRs card counts every merge in the window (fetched by date, not the newest 200), buckets days by the box's local time zone, flags repos the box cannot read as "no access", and is titled "Merged PRs in your workspaces · 14 days".
+- v2 Needs-you cards show every option with its tradeoff and the "other…" row without a click, not just "accept recommended".
+- The box survives memory pressure: `cel-fanout delegate`/`scout`/`spike` refuse to start a worker when free memory is under a floor (`box.min_available_mb`, default 3 GB) or swap is over 80% used; the steward warns orchestrators below the warning line naming the biggest worktrees; `cel build-slot -- <cmd>` runs one heavy build at a time box-wide (`build.slots`) and workers launch with `CARGO_BUILD_JOBS` at half the cores; gc stops `done`/`idle` workers with nothing unsaved after 60 minutes (10 under pressure), keeping ledger, worktree and session; a system-level user-manager watchdog (`cel watchdog print`) and pages as an installed user unit survive the manager dying; `cel doctor` shows memory and the watchdog; `cel inbox send` honours `CEL_INBOX_WS` outside a workspace.
+- `cel watchdog print` emitted a script whose service heredoc never closed (missing newline before `EOF`); it now runs as-is. New `cel watchdog install`/`uninstall` write the units via non-interactive sudo and verify the timer is active; `cel doctor` names `cel watchdog install`.
+- Dashboard tests boot a server they own: they wait for its own "listening" line with no time cap and pick another port on EADDRINUSE. Under load the old 9 s probe let a test send SIGUSR2 before the handler was installed, which killed the server, and the next request hit a parallel test's server; that was the unreadable-repo flake. The /classic browser typing test (a fixed 10 s wait and exact refresh counts) is removed ahead of retiring /classic.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added
