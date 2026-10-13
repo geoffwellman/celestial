@@ -65,6 +65,31 @@ test_boxguard_pressure_is_the_warning_line() {
   rm -rf "$T"
 }
 
+# CEL-127: swap widens the warning only up to 2x the REFUSE floor, never 2x the warning line.
+test_boxguard_warning_ignores_cold_swap_above_twice_the_floor() {
+  _bg_meminfo 9961472 8388608 1090519   # 9.5 GB free, 87% swap
+  printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n' > "$T/psi"
+  CEL_PSI_MEMORY="$T/psi" boxguard_pressure && { echo "warned on 9.5 GB free + cold swap"; return 1; }
+  _bg_meminfo 4194304 0 0               # 4 GB free
+  boxguard_pressure || { echo "no warning at 4 GB"; return 1; }
+  _bg_meminfo 5767168 8388608 838860    # 5.5 GB free, 90% swap
+  boxguard_pressure || { echo "no warning at 5.5 GB + 90% swap"; return 1; }
+  _bg_meminfo 11534336 0 0
+  printf 'full avg10=20.00 avg60=15.00 avg300=3.00 total=1\n' > "$T/psi"
+  CEL_PSI_MEMORY="$T/psi" boxguard_pressure || { echo "PSI 15% not a warning"; return 1; }
+  rm -rf "$T"
+}
+
+test_boxguard_warning_text_says_stop_only_when_admission_refuses() {
+  _bg_meminfo 4194304 0 0               # 4 GB: warned, still admitted
+  local out; out="$(boxguard_warning_text)"
+  case "$out" in *"top delegating"*) echo "said stop above the floor: $out"; return 1;; esac
+  _bg_meminfo 1048576 0 0               # 1 GB: refused
+  out="$(boxguard_warning_text)"
+  assert_contains "$out" "Stop delegating"
+  rm -rf "$T"
+}
+
 test_fanout_delegate_refuses_on_a_full_box() {
   _bg_meminfo 524288 0 0
   local out rc=0
