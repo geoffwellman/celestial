@@ -1,2 +1,2 @@
 ### Fixed
-- Dashboard tests no longer pick a port by bind-and-close and probe whatever answers on it: a boot waits for its own server and re-picks on EADDRINUSE, ending the "flaky" unreadable-repo and classic typing tests that talked to a parallel test's server.
+- Dashboard tests boot a server they own: they wait for its own "listening" line with no time cap and pick another port on EADDRINUSE. Under load the old 9 s probe let a test send SIGUSR2 before the handler was installed, which killed the server, and the next request hit a parallel test's server; that was the unreadable-repo flake. The /classic browser typing test (a fixed 10 s wait and exact refresh counts) is removed ahead of retiring /classic.

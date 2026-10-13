@@ -13,18 +13,21 @@
 #   _dash_launch <port-fn> <log> <config-template> <path>
 #     <config-template> holds the literal @PORT@; sets DASH_PORT and DASH_PID.
 _dash_launch() {
-  local port_fn="$1" log="$2" tmpl="$3" path="$4" try i
+  local port_fn="$1" log="$2" tmpl="$3" path="$4" try
   for try in 1 2 3 4 5 6 7 8; do
     DASH_PORT="$("$port_fn")"
     CEL_DASH_CONFIG="${tmpl//@PORT@/$DASH_PORT}" PATH="$path" \
       node "$CEL_ROOT/tools/dash/server.mjs" >"$log" 2>&1 &
     DASH_PID=$!
-    for i in $(seq 1 100); do
+    # No time cap: "alive after N seconds" is not "ready". Under load node
+    # took longer than the old 9 s probe to load, the test sent SIGUSR2
+    # before the handler was installed, and the default action killed the
+    # server (49 of 50 runs under a CPU hog). The suite's per-test timeout
+    # bounds a server that never comes up.
+    while kill -0 "$DASH_PID" 2>/dev/null; do
       if grep -q "on http://[^ ]*:$DASH_PORT\$" "$log" 2>/dev/null; then return 0; fi
-      kill -0 "$DASH_PID" 2>/dev/null || break
       sleep 0.1
     done
-    if kill -0 "$DASH_PID" 2>/dev/null; then return 0; fi   # slow, but ours
     wait "$DASH_PID" 2>/dev/null || true
     if ! grep -q EADDRINUSE "$log" 2>/dev/null; then
       echo "dashboard died at boot: $(cat "$log")" >&2; DASH_PID=""; return 1
