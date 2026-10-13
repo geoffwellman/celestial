@@ -123,3 +123,64 @@ test_build_slot_is_reentrant_for_its_holder() {
   assert_eq "$out" inner
   rm -rf "$T"
 }
+
+# Stubs on a prepended PATH: sudo runs its argv (or refuses -n when a password
+# would be needed), systemctl logs and reports the timer active once enabled.
+_wd_stubs() {
+  T="$(mktemp -d)"; mkdir -p "$T/bin" "$T/sys"
+  export CEL_WATCHDOG_UNIT_DIR="$T/sys" STUB_LOG="$T/log" STUB_T="$T"
+  cat > "$T/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "sudo $*" >> "$STUB_LOG"
+if [ "${1:-}" = -n ]; then shift; [ -n "${STUB_SUDO_PW:-}" ] && { echo "sudo: a password is required" >&2; exit 1; }; fi
+exec "$@"
+EOF
+  cat > "$T/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "$STUB_LOG"
+case "$*" in
+  *"enable --now"*) : > "$STUB_T/active";;
+  *"disable --now"*) rm -f "$STUB_T/active";;
+  *is-active*) [ -f "$STUB_T/active" ];;
+esac
+EOF
+  chmod +x "$T/bin/"*
+  export PATH="$T/bin:$PATH"
+}
+
+test_watchdog_printed_script_runs_and_writes_units_byte_for_byte() {
+  _wd_stubs
+  cmd_watchdog print > "$T/script.sh"
+  bash "$T/script.sh" || { echo "printed script failed"; return 1; }
+  boxguard_wd_service_text "$(id -un)" "$(id -u)" > "$T/want.service"
+  boxguard_wd_timer_text > "$T/want.timer"
+  cmp "$T/want.service" "$T/sys/cel-manager-watchdog.service" || { echo "service differs"; return 1; }
+  cmp "$T/want.timer" "$T/sys/cel-manager-watchdog.timer" || { echo "timer differs"; return 1; }
+  assert_contains "$(cat "$STUB_LOG")" "systemctl enable --now cel-manager-watchdog.timer"
+  rm -rf "$T"
+}
+
+test_watchdog_install_and_uninstall_are_idempotent() {
+  _wd_stubs
+  cmd_watchdog install >/dev/null || { echo "install failed"; return 1; }
+  cmd_watchdog install >/dev/null || { echo "second install failed"; return 1; }
+  boxguard_wd_service_text "$(id -un)" "$(id -u)" > "$T/want.service"
+  cmp "$T/want.service" "$T/sys/cel-manager-watchdog.service" || { echo "service differs"; return 1; }
+  local log; log="$(cat "$STUB_LOG")"
+  assert_contains "$log" "sudo -n systemctl daemon-reload"
+  assert_contains "$log" "systemctl is-active cel-manager-watchdog.timer"
+  cmd_watchdog uninstall >/dev/null || { echo "uninstall failed"; return 1; }
+  cmd_watchdog uninstall >/dev/null || { echo "second uninstall failed"; return 1; }
+  [ -e "$T/sys/cel-manager-watchdog.timer" ] && { echo "timer left behind"; return 1; }
+  [ -e "$T/sys/cel-manager-watchdog.service" ] && { echo "service left behind"; return 1; }
+  rm -rf "$T"
+}
+
+test_watchdog_install_refuses_when_sudo_needs_a_password() {
+  _wd_stubs
+  local out rc=0; out="$(STUB_SUDO_PW=1 cmd_watchdog install 2>&1)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "cel watchdog print"
+  [ -e "$T/sys/cel-manager-watchdog.timer" ] && { echo "wrote without sudo"; return 1; }
+  rm -rf "$T"
+}
