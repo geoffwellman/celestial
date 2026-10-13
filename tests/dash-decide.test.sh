@@ -2,6 +2,7 @@
 # CEL-93: the dashboard's Needs-you panel answers owner decisions through the
 # real `cel decide`, behind the dashboard's Host and CSRF guard.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/tests/lib/dash-boot.sh"
 # CEL-113: every question needs real context
 DD_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 
@@ -20,12 +21,11 @@ _dd_boot() {
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
   ID="$(CEL_INBOX_ME=alpha-orch "$CEL_ROOT/bin/cel" decide ask --workspace alpha --context "$DD_CTX" \
     --title "pick a style" --option "flat::quick" --option "glossy::pretty" --recommend 2 2>/dev/null)"
-  DASH_PORT="$(_dd_port)"
-  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
-    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
-  DASH_PID=$!
   # however the test ends - a failed assert included - the server goes too
   trap '_dd_down' EXIT
+  _dash_launch _dd_port "$T/dash.log" \
+    "{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":@PORT@,\"repos\":[],\"services\":[]${DD_CFG_EXTRA:-}}" \
+    "$T/bin:$PATH" || return 1
   local i; for i in $(seq 1 30); do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3
   done

@@ -4,6 +4,7 @@
 # ring and a stub gh that logs its argv - so "one gh pass serves three cards"
 # is a line count, not a hope.
 source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/tests/lib/dash-boot.sh"
 
 _v2_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 _v2_ago() { date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
@@ -62,11 +63,10 @@ EOF
   if [ -n "${_V2_FAIL_GH:-}" ]; then cp "$T/bin/gh" "$T/bin/gh.ok"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"; fi
   export CEL_DASH_ACTIVITY_KEEP=5
   export CEL_SAMPLES_FILE="$T/state/samples.jsonl" CEL_DASH_STATE_DIR="$T/state" CEL_DASH_CEL="$T/bin/cel"
-  DASH_PORT="$(_v2_port)"
-  CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
-    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
-  DASH_PID=$!
   trap '_v2_down' EXIT
+  _dash_launch _v2_port "$T/dash.log" \
+    "{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":@PORT@,\"repos\":[{\"name\":\"widget\",\"slug\":\"alpha/widget\"}],\"services\":[]}" \
+    "$T/bin:$PATH" || return 1
   local i; for i in $(seq 1 30); do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/session" && break; sleep 0.3
   done
