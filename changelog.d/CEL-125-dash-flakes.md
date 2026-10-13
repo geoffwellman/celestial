@@ -1,2 +1,0 @@
-### Fixed
-- Dashboard tests boot a server they own: they wait for its own "listening" line with no time cap and pick another port on EADDRINUSE. Under load the old 9 s probe let a test send SIGUSR2 before the handler was installed, which killed the server, and the next request hit a parallel test's server; that was the unreadable-repo flake. The /classic browser typing test (a fixed 10 s wait and exact refresh counts) is removed ahead of retiring /classic.
