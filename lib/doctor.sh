@@ -797,7 +797,7 @@ cmd_doctor() {
   memline="$memline${top:+ - top: $top}"
   if boxguard_pressure; then c_warn "$memline"; else c_ok "$memline"; fi
   if boxguard_wd_installed; then c_ok "manager watchdog: installed"
-  else c_warn "manager watchdog: not installed - cel watchdog print (one-time owner command)"; fi
+  else c_warn "manager watchdog: not installed - run cel watchdog install (one-time owner command)"; fi
 
   # A LIVE AGENT WITH NO HERDR NAME. Not a failure - the agent is working -
   # but it is invisible to everything that resolves an orchestrator by its

@@ -210,7 +210,7 @@ cel - the celestial plane
   cel build-slot -- <cmd>       run a heavy build (cargo build/test...) in the
                                 box-wide build slot: one at a time by default
                                 (build.slots), CARGO_BUILD_JOBS = half the cores
-  cel watchdog [status|print]   is the system-level user-manager watchdog
+  cel watchdog [status|print|install|uninstall] is the system-level user-manager watchdog
                                 installed; print shows the one-time owner command
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry

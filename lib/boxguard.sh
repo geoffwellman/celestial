@@ -126,7 +126,7 @@ cmd_build_slot() { # [--] <cmd...>
 # The user manager is not restarted by anything when the OOM-killer takes it:
 # it needed `sudo systemctl start user@<uid>.service` by hand. A user unit can
 # not watch its own manager, so this is a SYSTEM timer, installed once by the
-# owner (the command is printed; cel never runs sudo itself).
+# owner: `cel watchdog install` via non-interactive sudo, or `print` to paste.
 _boxguard_wd_dir() { printf '%s' "${CEL_WATCHDOG_UNIT_DIR:-/etc/systemd/system}"; }
 BOXGUARD_WD_UNIT=cel-manager-watchdog
 
@@ -163,21 +163,63 @@ WantedBy=timers.target
 "
 }
 
-cmd_watchdog() { # [status|print]
+# `install` writes the same two files `print` shows, through `sudo -n`: cel
+# never prompts for a password, and an owner without passwordless sudo gets
+# `print` instead. Units are written via tee from files - the printed script
+# once lost the newline before its EOF (command substitution strips it), the
+# heredoc never closed and pasting it swallowed the timer.
+_boxguard_wd_install() { # <user> <uid> <dir>
+  local tmp u=$BOXGUARD_WD_UNIT
+  if ! sudo -n true 2>/dev/null; then
+    c_warn "cel watchdog install needs passwordless sudo - run the script from cel watchdog print instead"
+    return 1
+  fi
+  tmp="$(mktemp -d)"
+  boxguard_wd_service_text "$1" "$2" > "$tmp/$u.service"
+  boxguard_wd_timer_text > "$tmp/$u.timer"
+  sudo -n tee "$3/$u.service" < "$tmp/$u.service" >/dev/null \
+    && sudo -n tee "$3/$u.timer" < "$tmp/$u.timer" >/dev/null \
+    || { rm -rf "$tmp"; die "cel watchdog install: could not write the units in $3"; }
+  rm -rf "$tmp"
+  sudo -n systemctl daemon-reload || die "cel watchdog install: daemon-reload failed"
+  sudo -n systemctl enable --now "$u.timer" || die "cel watchdog install: enable --now $u.timer failed"
+  if systemctl is-active "$u.timer" >/dev/null 2>&1; then
+    c_ok "manager watchdog installed and active ($3/$u.timer)"
+  else
+    c_warn "manager watchdog written but $u.timer is not active"; return 1
+  fi
+}
+
+_boxguard_wd_uninstall() { # <dir>
+  local u=$BOXGUARD_WD_UNIT
+  if ! sudo -n true 2>/dev/null; then
+    c_warn "cel watchdog uninstall needs passwordless sudo"; return 1
+  fi
+  sudo -n systemctl disable --now "$u.timer" >/dev/null 2>&1 || true
+  sudo -n rm -f "$1/$u.timer" "$1/$u.service" || die "cel watchdog uninstall: could not remove the units in $1"
+  sudo -n systemctl daemon-reload || true
+  c_ok "manager watchdog removed"
+}
+
+cmd_watchdog() { # [status|print|install|uninstall]
   local user uid d
   user="$(id -un)"; uid="$(id -u)"; d="$(_boxguard_wd_dir)"
   case "${1:-status}" in
     print)
       printf '# one-time, as the owner (root needed: the watchdog must outlive the user manager)\n'
-      printf "sudo tee %s/%s.service >/dev/null <<'EOF'\n%sEOF\n" "$d" "$BOXGUARD_WD_UNIT" "$(boxguard_wd_service_text "$user" "$uid")"
-      printf "sudo tee %s/%s.timer >/dev/null <<'EOF'\n%sEOF\n" "$d" "$BOXGUARD_WD_UNIT" "$(boxguard_wd_timer_text)"
+      printf "sudo tee %s/%s.service >/dev/null <<'EOF'\n" "$d" "$BOXGUARD_WD_UNIT"
+      boxguard_wd_service_text "$user" "$uid"; printf 'EOF\n'
+      printf "sudo tee %s/%s.timer >/dev/null <<'EOF'\n" "$d" "$BOXGUARD_WD_UNIT"
+      boxguard_wd_timer_text; printf 'EOF\n'
       printf 'sudo systemctl daemon-reload && sudo systemctl enable --now %s.timer\n' "$BOXGUARD_WD_UNIT"
       ;;
+    install) _boxguard_wd_install "$user" "$uid" "$d" ;;
+    uninstall) _boxguard_wd_uninstall "$d" ;;
     status)
       if boxguard_wd_installed; then c_ok "manager watchdog installed ($d/$BOXGUARD_WD_UNIT.timer)"
-      else c_warn "manager watchdog not installed - cel watchdog print shows the one-time owner command"; return 1; fi
+      else c_warn "manager watchdog not installed - run cel watchdog install (or cel watchdog print without sudo)"; return 1; fi
       ;;
-    *) die "cel watchdog: want status or print" ;;
+    *) die "cel watchdog: want status, print, install or uninstall" ;;
   esac
 }
 
