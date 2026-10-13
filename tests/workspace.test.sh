@@ -442,3 +442,20 @@ test_nothing_calls_gh_auth_switch() {
           | grep -vE ':[0-9]+:\s*#' || true)"
   assert_eq "$hits" ""
 }
+
+# CEL-119: a repo entry's `pr:` overrides policy.pr for that repo only, so a
+# spikes repo can push straight to main while its siblings keep their PRs.
+test_ws_repo_pr_overrides_workspace_policy_per_repo() {
+  local tmp; tmp="$(mktemp -d)"
+  cp "$WSA/workspace.yaml" "$tmp/"
+  yq -y -i '.repos += [{"name":"gadget","prefix":"GD","gate":"true","pr":"none"}]' "$tmp/workspace.yaml"
+  assert_eq "$(ws_repo_pr "$tmp" widget)" "required"
+  assert_eq "$(ws_repo_pr "$tmp" gadget)" "none"
+  local b; b="$(ws_policy_block "$tmp")"
+  assert_contains "$(printf '%s\n' "$b" | grep -- '- repo gadget')" "pr: none"
+  assert_contains "$(printf '%s\n' "$b" | grep -- '- repo gadget')" "fast-forward only, never force"
+  case "$(printf '%s\n' "$b" | grep -- '- repo widget')" in *"pr: none"*) fail "widget inherited gadget's pr: none";; esac
+  yq -y -i '(.repos[] | select(.name=="gadget") | .pr) = "sometimes"' "$tmp/workspace.yaml"
+  if (ws_repo_pr "$tmp" gadget) >/dev/null 2>&1; then fail "invalid pr value accepted"; fi
+  rm -rf "$tmp"
+}
