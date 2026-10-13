@@ -9,8 +9,8 @@
 # afford another worker or another build before starting one.
 #
 # Four guards live here, all small and all overridable by env for the suite:
-#   - admission: no new worker while MemAvailable is under a floor or swap is
-#     mostly used (boxguard_admit, called by cel-fanout delegate/scout);
+#   - admission: no new worker while MemAvailable is under a floor, or under
+#     twice it with swap mostly used (boxguard_admit, cel-fanout delegate/scout);
 #   - the warning line: below it the steward warns orchestrators and gc stops
 #     idle agents sooner (boxguard_pressure);
 #   - one heavy build at a time across the box (cel build-slot -- <cmd>);
@@ -57,26 +57,55 @@ boxguard_read() {
 
 _boxguard_gb() { awk -v mb="$1" 'BEGIN { printf "%.1f", mb / 1024 }'; }
 
+# PRESSURE IS LOW MemAvailable, NOT SWAP (CEL-126). 2026-10-13: 11 GB
+# available, load 2, and swap refilled to 70-88% within 90 minutes of a
+# swapoff/swapon - cold pages of long-idle processes, which is the kernel
+# doing its job at swappiness 10. The 12 Oct OOM had MemAvailable near 0 AND
+# swap full. So swap counts only together with MemAvailable already low:
+#   pressured below <line>  =  avail < line, or avail < 2*line and swap > max.
+# High swap with plenty available is shown by doctor as info, never a warning.
+_boxguard_under() { # <avail> <swap> <line-mb>
+  [ "$1" -lt "$3" ] && return 0
+  [ "$1" -lt $(( $3 * 2 )) ] && [ "$2" -gt "$(boxguard_max_swap_pct)" ]
+}
+
+# PSI, when the kernel has it: /proc/pressure/memory `full avg60` is the share
+# of time every runnable task stalled on memory - stalls actually happening,
+# which no MemAvailable reading can show. It is used as an EXTRA signal for the
+# warning line only (box.psi_full_pct, default 10); admission stays on
+# MemAvailable so a brief stall never refuses work on a box with room.
+# Unreadable PSI is no signal. The suite reads only the CEL_PSI_MEMORY fixture.
+boxguard_psi_full() {
+  local f="${CEL_PSI_MEMORY:-}"
+  if [ -z "$f" ]; then [ -n "${CEL_TESTING:-}" ] && return 1; f=/proc/pressure/memory; fi
+  awk '/^full/ { for (i = 1; i <= NF; i++) if ($i ~ /^avg60=/) { sub(/avg60=/, "", $i); printf "%d\n", $i; found = 1 } }
+       END { exit !found }' "$f" 2>/dev/null
+}
+
 # 0 = admit. 1 = refuse, with the plain sentence on stdout.
 boxguard_admit() {
-  local avail swap min maxs
+  local avail swap min
   read -r avail swap <<<"$(boxguard_read)"
   [ "${avail:--1}" -ge 0 ] || return 0
-  min="$(boxguard_min_avail_mb)"; maxs="$(boxguard_max_swap_pct)"
-  if [ "$avail" -lt "$min" ] || [ "$swap" -gt "$maxs" ]; then
-    printf 'box memory low: %s GB free, swap %s%% - not starting (floor %s GB free, swap at most %s%%; cel doctor names what is holding it)\n' \
-      "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$min")" "$maxs"
+  min="$(boxguard_min_avail_mb)"
+  if _boxguard_under "$avail" "$swap" "$min"; then
+    printf 'box memory low: %s GB free, swap %s%% - not starting (floor %s GB free, or %s GB with swap over %s%%; cel doctor names what is holding it)\n' \
+      "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$min")" "$(_boxguard_gb $(( min * 2 )))" "$(boxguard_max_swap_pct)"
     return 1
   fi
   return 0
 }
 
-# 0 = the box is below the warning line (or swap is past its ceiling).
+# 0 = the box is below the warning line (same rule, at the warning line), or
+# PSI says tasks are stalling on memory.
 boxguard_pressure() {
-  local avail swap
+  local avail swap psi
   read -r avail swap <<<"$(boxguard_read)"
+  if psi="$(boxguard_psi_full)" && [ "$psi" -ge "$(_boxguard_cfg "${CEL_BOX_PSI_FULL_PCT:-}" box psi_full_pct 10)" ]; then
+    return 0
+  fi
   [ "${avail:--1}" -ge 0 ] || return 1
-  [ "$avail" -lt "$(boxguard_warn_avail_mb)" ] || [ "$swap" -gt "$(boxguard_max_swap_pct)" ]
+  _boxguard_under "$avail" "$swap" "$(boxguard_warn_avail_mb)"
 }
 
 # Half the cores, at least one: four workers each running cargo at full
@@ -228,8 +257,8 @@ boxguard_doctor_line() {
   local avail swap
   read -r avail swap <<<"$(boxguard_read)"
   if [ "${avail:--1}" -lt 0 ]; then printf 'memory: unknown (meminfo unreadable)'; return 0; fi
-  printf 'memory: %s GB free, swap %s%% used (admission floor %s GB, swap %s%%)' \
-    "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$(boxguard_min_avail_mb)")" "$(boxguard_max_swap_pct)"
+  printf 'memory: %s GB free, swap %s%% used (admission floor %s GB; swap counts only under %s GB)' \
+    "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$(boxguard_min_avail_mb)")" "$(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 )))"
 }
 
 # Largest consumers grouped by worktree: `mb<TAB>dir` biggest first.
