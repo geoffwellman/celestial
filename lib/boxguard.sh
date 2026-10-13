@@ -105,7 +105,22 @@ boxguard_pressure() {
     return 0
   fi
   [ "${avail:--1}" -ge 0 ] || return 1
-  _boxguard_under "$avail" "$swap" "$(boxguard_warn_avail_mb)"
+  # CEL-127: swap widens the band only up to 2x the REFUSE floor, never 2x the
+  # warning line - 9.5 GB free with cold swap warned every orchestrator.
+  [ "$avail" -lt "$(boxguard_warn_avail_mb)" ] && return 0
+  _boxguard_under "$avail" "$swap" "$(boxguard_min_avail_mb)"
+}
+
+# The sentence the steward sends. "Stop delegating" only when admission would
+# actually refuse; above the floor it says what is happening, nothing more.
+boxguard_warning_text() { # [what-gc-did]
+  local avail swap
+  read -r avail swap <<<"$(boxguard_read)"
+  local msg="box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - ${1:-no idle worker was stoppable}."
+  if ! boxguard_admit >/dev/null; then
+    msg="$msg Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB, or $(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 ))) GB with swap over $(boxguard_max_swap_pct)%)."
+  fi
+  printf '%s\n' "$msg"
 }
 
 # Half the cores, at least one: four workers each running cargo at full
@@ -257,8 +272,8 @@ boxguard_doctor_line() {
   local avail swap
   read -r avail swap <<<"$(boxguard_read)"
   if [ "${avail:--1}" -lt 0 ]; then printf 'memory: unknown (meminfo unreadable)'; return 0; fi
-  printf 'memory: %s GB free, swap %s%% used (admission floor %s GB; swap counts only under %s GB)' \
-    "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$(boxguard_min_avail_mb)")" "$(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 )))"
+  printf 'memory: %s GB free, swap %s%% used (warning under %s GB; admission floor %s GB; swap counts only under %s GB)' \
+    "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$(boxguard_warn_avail_mb)")" "$(_boxguard_gb "$(boxguard_min_avail_mb)")" "$(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 )))"
 }
 
 # Largest consumers grouped by worktree: `mb<TAB>dir` biggest first.
