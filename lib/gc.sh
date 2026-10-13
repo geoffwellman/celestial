@@ -18,6 +18,8 @@ _CEL_GC=1
 . "${BASH_SOURCE[0]%/*}/box.sh"   # cel gc --box
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"   # the reviewer registry cel run writes
+# shellcheck source=lib/memory.sh
+. "${BASH_SOURCE[0]%/*}/memory.sh"   # what an idle agent was holding
 
 # WHOSE ACCOUNT ASKS ABOUT A CHECKOUT (CEL-70). ws_of_checkout names the
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
@@ -892,6 +894,90 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
   return 0
 }
 
+# IDLE AGENTS ARE STOPPED BY TIME AND MEMORY, NOT ONLY BY LEDGER (CEL-122).
+# At the 2026-10-12 OOM, seven workers were `done` and one `idle` - 400-550 MB
+# each - and gc reaped none of them, because every pass here waits for the
+# ledger row to close. A `done`/`idle` worker that has sat for N minutes
+# (gc.idle_stop_minutes, default 60; ~10 below the box warning line) with
+# nothing uncommitted and nothing unpushed has its PANE closed: the process
+# goes, the session file stays (resume with `cel-fanout delegate --reuse`),
+# and the ledger row and worktree are untouched. Only delegated rows are
+# considered - orchestrators and reviewers are never in the ledger - and a
+# working, blocked or unknown agent is never touched.
+_gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-$HOME/.local/state/cel/gc-idle-stop.json}"; }
+
+gc_idle_stop_minutes() {
+  local n="${CEL_GC_IDLE_STOP_MIN:-}"
+  [[ "$n" =~ ^[0-9]+$ ]] || n="$(cel_config_get gc idle_stop_minutes 2>/dev/null || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=60
+  if boxguard_pressure; then
+    local p="${CEL_GC_IDLE_STOP_PRESSURE_MIN:-10}"
+    [ "$p" -lt "$n" ] && n="$p"
+  fi
+  printf '%s' "$n"
+}
+
+_gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
+  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb
+  [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
+  now="${CEL_GC_NOW:-$(date +%s)}"
+  local file prev='{}' next='{}' freed=0 kept=0
+  file="$(_gc_idle_stop_state)"
+  [ -f "$file" ] && prev="$(jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}')"
+  idle_stopped=0
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
+    while IFS=$'\t' read -r id pane wt; do
+      [ -n "$pane" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
+      agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
+      [ -n "$agent" ] || continue
+      case "$(printf '%s' "$agent" | jq -r '.cwd // ""')" in "$wt"|"$wt"/*) ;; *) continue ;; esac
+      status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
+      case "$status" in idle|done) ;; *) continue ;; esac
+      since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
+      [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
+      if [ $(( now - since )) -lt $(( mins * 60 )) ]; then
+        next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
+      fi
+      if ! _gc_worktree_clean "$wt"; then
+        kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): uncommitted or unpushed work\n' "$id" "$pane"
+        next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
+      fi
+      # An OPEN PR means a reviewer or orchestrator will prompt this agent for
+      # a revision round: closing it breaks that hand-off. Unknown is kept too.
+      case "$(_gc_pr_state "$wt")" in
+        MERGED|CLOSED|NONE) ;;
+        *) kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
+           next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue ;;
+      esac
+      # And the same strict proof the worktree pass demands before touching
+      # anything: every agent in this checkout is a process this plane launched.
+      if ! _gc_agents_removable "$agents" "$wt" "$names"; then
+        kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): identity unproven\n' "$id" "$pane"
+        continue
+      fi
+      mb="$(mem_tree_rss_mb "$wt" 2>/dev/null || printf 0)"; [[ "$mb" =~ ^[0-9]+$ ]] || mb=0
+      if [ "$dry" -eq 1 ]; then
+        printf '  would stop %s (pane %s, %s %dm, ~%sM)\n' "$id" "$pane" "$status" $(( (now - since) / 60 )) "$mb"
+      elif lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+        c_ok "stopped $id (pane $pane, $status $(( (now - since) / 60 ))m, freed ~${mb}M; resume with cel-fanout delegate --reuse)"
+      else
+        c_warn "could not stop $id (pane $pane) - kept"; kept=$((kept + 1)); continue
+      fi
+      idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb))
+    done < <(jq -r '.[]? | select((.state // "") as $s | ["running","finished"] | index($s))
+                    | [(.id // ""), (.pane // ""), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
+  done <<< "$names"
+  if [ "$dry" -eq 0 ]; then
+    mkdir -p "$(dirname "$file")" 2>/dev/null && printf '%s\n' "$next" > "$file" 2>/dev/null || true
+  fi
+  printf 'gc: %s %d idle agents (idle > %dm, ~%sM freed), kept %d\n' \
+    "$([ "$dry" -eq 1 ] && printf 'would stop' || printf stopped)" "$idle_stopped" "$mins" "$freed" "$kept"
+  return 0
+}
+
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
   while [ $# -gt 0 ]; do
@@ -957,6 +1043,8 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   # Finished workers' panes first: a closed pane is one fewer live process
   # holding its worktree on the next pass.
   _gc_done_panes "$dry" "$agents" "$names"
+  local idle_stopped=0
+  _gc_idle_stop "$dry" "$agents" "$names"
   # Then the panes whose agent is gone entirely. Its own roster read: the
   # agent list omits exactly the panes this pass is for.
   local all_panes idle_closed=0

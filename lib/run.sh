@@ -13,6 +13,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/profiles.sh"
 # shellcheck source=lib/gateway.sh
 . "${BASH_SOURCE[0]%/*}/gateway.sh"
+# shellcheck source=lib/boxguard.sh
+. "${BASH_SOURCE[0]%/*}/boxguard.sh"
 
 # PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
 # (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
@@ -207,6 +209,10 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   # A runtime whose role is injected as a prompt argument has no file to name;
   # the other two still say whose the process is.
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
+  # Workers compile; half the cores each, not all of them (CEL-122).
+  case "$role" in worker|scout|spike)
+    printf -v out '%s CARGO_BUILD_JOBS=%q' "$out" "$(boxguard_cargo_jobs)" ;;
+  esac
   # ...and, for a workspace with `github.user`, the account it acts as: the
   # token is a substitution the PANE evaluates (lib/workspace.sh), never a value.
   # The guard goes AHEAD of `env`, so the agent's start is chained on it.

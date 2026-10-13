@@ -678,7 +678,7 @@ SH
 }
 test_launch_env_without_github_block_is_unchanged() {
   _ws
-  assert_eq "$(_run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md "
+  assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md CARGO_BUILD_JOBS=3 "
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {

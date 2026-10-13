@@ -1314,3 +1314,95 @@ test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
   _gc_fake_proc pi; _gc_cwd_reset
   _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
 }
+
+# ------------------------------------------------- the idle-stop pass (CEL-122)
+# At the OOM, seven `done` workers held 400-550 MB each and gc reaped none:
+# every pass waited for the ledger row to close. A done/idle worker that has
+# sat N minutes with nothing unsaved has its pane closed; ledger untouched.
+_gc_idle_stop_run() { # <minutes> -> output; observes once at t0, then at t0+mins*60
+  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
+  # the strict identity proof is its own suite; here it passes unless a test says not
+  _gc_agents_removable() { [ -z "${GC_UNPROVEN:-}" ]; }
+  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo "$1" >/dev/null 2>&1
+  CEL_GC_NOW=$((1000 + $1 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo "$1" 2>&1
+}
+
+test_gc_idle_stop_stops_a_done_clean_old_worker_and_keeps_its_ledger_row() {
+  _gc_done_fixture running done
+  local out; out="$(_gc_idle_stop_run 60)"
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  assert_contains "$out" "stopped 1 idle agents"
+  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" running
+  [ -d "$GC_WT" ] || { echo "worktree removed"; return 1; }
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_waits_out_the_window() {
+  _gc_done_fixture running idle
+  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
+  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo 60 >/dev/null 2>&1
+  CEL_GC_NOW=$((1000 + 59 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo 60 >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_never_stops_a_working_agent() {
+  _gc_done_fixture running working
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_never_stops_over_dirty_or_unpushed_work() {
+  _gc_done_fixture running done
+  printf 'x' > "$GC_WT/uncommitted.txt"
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -f "$GC_WT/uncommitted.txt"
+  git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local
+  rm -f "$T/idle-stop.json"
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+# Orchestrators and reviewers are never in the delegation ledger, so a done
+# agent that no row names is never this pass's to stop.
+test_gc_idle_stop_never_stops_an_agent_the_ledger_does_not_name() {
+  _gc_done_fixture running done
+  GC_AGENTS="$(jq -nc --arg w "$GC_WS" '{result:{agents:[{pane_id:"w1:p1",name:"widget-orch",cwd:$w,agent_status:"done"}]}}')"
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_minutes_drop_under_memory_pressure() {
+  T="$(mktemp -d)"
+  export CEL_TESTING=1 CEL_CONFIG_FILE="$T/none.yaml"
+  printf 'MemTotal: 25165824 kB\nMemAvailable: 8388608 kB\n' > "$T/ok"
+  printf 'MemTotal: 25165824 kB\nMemAvailable: 1048576 kB\n' > "$T/low"
+  assert_eq "$(CEL_MEMINFO="$T/ok" gc_idle_stop_minutes)" 60
+  assert_eq "$(CEL_MEMINFO="$T/low" gc_idle_stop_minutes)" 10
+  assert_eq "$(CEL_MEMINFO="$T/ok" CEL_GC_IDLE_STOP_MIN=30 gc_idle_stop_minutes)" 30
+  rm -rf "$T"
+}
+
+# Review of #148: a clean, pushed worker idle while its PR awaits review is
+# the reviewer's to prompt - closing it breaks the revision round.
+test_gc_idle_stop_keeps_a_worker_whose_pr_is_open() {
+  _gc_done_fixture running done
+  GC_PR=OPEN
+  local out; out="$(_gc_idle_stop_run 60)"
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_contains "$out" "kept 1"
+  rm -rf "$T"
+}
+
+# ...and only a process proven to be this plane's agent is stopped.
+test_gc_idle_stop_keeps_an_agent_whose_identity_is_unproven() {
+  _gc_done_fixture running done
+  GC_UNPROVEN=1
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
