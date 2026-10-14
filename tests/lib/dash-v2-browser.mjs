@@ -301,6 +301,15 @@ const main = async () => {
       }
     }
 
+    if (scenario === 'roomdirect') {
+      // CEL-129: a room opened straight from its URL (a bookmark, a reload)
+      // lost its decisions - the grid's first render took the panel back
+      await evaluate(`location.hash='room=alpha-orch';location.reload();1`);
+      await sleep(500);
+      out.loaded = await until(`typeof ROOM!=='undefined' && ROOM==='alpha-orch' && !!S`, 8000);
+      await until(`document.querySelectorAll('#room #needsyou .nycard').length>0`, 4000);
+      out.decisions = await evaluate(`document.querySelectorAll('#room #needsyou .nycard').length`);
+    }
     if (scenario === 'room') {
       // CEL-121: the Orchestrators card opens a room; the URL says which
       await evaluate(`document.querySelector('#grid .w[data-id=orchs] [data-room="alpha-orch"]').click()`);

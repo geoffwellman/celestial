@@ -249,3 +249,12 @@ test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions
   assert_eq "$(_vpj '.chipRoom | join(",")')" "bundle-orch"
   _vp_down
 }
+
+# CEL-129: live, a product orchestrator's room listed none of its 13 decisions; a
+# room loaded from its URL must hold the decisions panel, not the grid
+test_dash_v2page_room_opened_from_its_url_lists_its_decisions() {
+  _vp_boot
+  local rc=0; _vp_run roomdirect || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .decisions)" "2"
+  _vp_down
+}
