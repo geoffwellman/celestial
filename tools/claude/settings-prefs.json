@@ -1,3 +1,16 @@
 {
-  "outputStyle": "Concise"
+  "outputStyle": "Concise",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CEL_ROOT/tools/hooks/inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }

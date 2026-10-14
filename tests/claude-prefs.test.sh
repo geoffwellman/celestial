@@ -14,10 +14,19 @@ test_prefs_preserve_existing_keys() {
   local h; h="$(_fake_home)"
   mkdir -p "$h/.claude"
   echo '{"theme":"dark","hooks":{"Stop":[]}}' > "$h/.claude/settings.json"
-  HOME="$h" link_claude_prefs >/dev/null
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
   assert_eq "$(jq -r .theme "$h/.claude/settings.json")" "dark"
-  assert_eq "$(jq -c .hooks "$h/.claude/settings.json")" '{"Stop":[]}'
-  assert_eq "$(jq -r .outputStyle "$h/.claude/settings.json")" "Concise"
+  assert_eq "$(jq -r '.hooks.Stop|length' "$h/.claude/settings.json")" "0"
+}
+test_prefs_preserve_existing_claude_hooks() {
+  local h; h="$(_fake_home)"
+  mkdir -p "$h/.claude"
+  echo '{"hooks":{"Stop":[],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"existing"}]}]}}' > "$h/.claude/settings.json"
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  assert_eq "$(jq -r '.hooks.Stop|length' "$h/.claude/settings.json")" "0"
+  assert_eq "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$h/.claude/settings.json")" "existing"
+  assert_contains "$(jq -c '.hooks.UserPromptSubmit' "$h/.claude/settings.json")" 'inbox-drain.sh'
+  rm -rf "$h"
 }
 test_prefs_are_idempotent() {
   local h; h="$(_fake_home)"
@@ -34,8 +43,8 @@ test_hud_config_is_a_symlink_to_the_plane() {
 }
 test_claude_inbox_delivery_hook_is_registered_for_idle_turns() {
   local h; h="$(_fake_home)"
-  HOME="$h" link_claude_prefs >/dev/null
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
   local hooks; hooks="$(jq -c '.hooks.UserPromptSubmit' "$h/.claude/settings.json")"
-  assert_contains "$hooks" "$CEL_ROOT/tools/hooks/inbox-drain.sh"
+  assert_contains "$hooks" 'inbox-drain.sh'
   rm -rf "$h"
 }

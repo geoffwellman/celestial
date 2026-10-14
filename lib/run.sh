@@ -1326,9 +1326,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   case "$role" in
     root) inbox_me=root ;;
     orchestrator) inbox_me="$product-orch" ;;
-    # A worker or reviewer's mailbox IS its pane alias - the name reviewers and
-    # orchestrators address. Only where a hook will read it: claude reads by cwd.
-    worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
+    # Pane alias is the reader identity. Claude's hook needs it explicitly
+    # because reviewers share a tab cwd rather than standing in a worktree.
+    worker|reviewer) inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
 

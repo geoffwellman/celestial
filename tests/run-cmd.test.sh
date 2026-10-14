@@ -80,7 +80,9 @@ test_append_flag_file_writes_the_body_and_no_arg_holds_a_newline() {
 # it), the launch args are per-runtime, and the role body always goes last.
 test_run_launch_args_precede_role_injection() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
-  assert_contains "$out" " -- --dangerously-skip-permissions --effort high --append-system-prompt-file"
+  assert_contains "$out" " -- --dangerously-skip-permissions --settings"
+  assert_contains "$out" "inbox-drain.sh"
+  assert_contains "$out" "--effort high --append-system-prompt-file"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
   assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
