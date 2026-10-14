@@ -368,6 +368,15 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   ! grep -q "$key" "$f" || { echo "the api-key was written into models.json"; _gw_teardown; return 1; }
   _gw_teardown
 }
+test_pi_models_claude_provider_uses_profile_provider_and_pane_token_name() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  gateway_pi_models_write "$T/pi/models.json"
+  local f="$T/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[0].id' "$f")" "claude-sonnet-4-6"
+  _gw_teardown
+}
 
 # --- omp is gone ----------------------------------------------------------
 

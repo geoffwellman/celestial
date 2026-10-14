@@ -242,3 +242,39 @@ test_doctor_exec_load_is_red_over_the_bound() {
   _doctor_fork_rate() { printf 600; }
   assert_fails doctor_exec_load_line
 }
+_doctor_pi_fixture() {
+  _doctor_setup
+  export CEL_REGISTRY="$T/registry.yaml"
+  export PI_CODING_AGENT_DIR="$T/pi"
+  mkdir -p "$T/ws" "$T/pi"
+  cat >"$T/registry.yaml" <<EOF
+workspaces:
+  alpha:
+    path: $T/ws
+    remote: null
+EOF
+  cat >"$T/ws/workspace.yaml" <<'EOF'
+name: alpha
+runtime: { worker: pi }
+worker_profiles:
+  default: { runtime: pi, model: claude-opus-4, provider: anthropic }
+EOF
+}
+
+test_doctor_reports_expired_pi_anthropic_credential_with_relogin_fix() {
+  _doctor_pi_fixture
+  mkdir -p "$T/pi"
+  printf '{"anthropic":{"expires":1}}\n' >"$T/pi/auth.json"
+  local out; out="$(doctor_pi_anthropic_lines "$T/ws" alpha)"
+  assert_contains "$out" "expired"
+  assert_contains "$out" "pi /login"
+  assert_contains "$out" "via: gateway"
+  _doctor_teardown
+}
+
+test_doctor_reports_valid_pi_anthropic_credential() {
+  _doctor_pi_fixture
+  printf '{"anthropic":{"expires":4102444800}}\n' >"$T/pi/auth.json"
+  assert_contains "$(doctor_pi_anthropic_lines "$T/ws" alpha)" "valid"
+  _doctor_teardown
+}
