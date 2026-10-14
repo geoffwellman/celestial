@@ -242,3 +242,69 @@ test_doctor_exec_load_is_red_over_the_bound() {
   _doctor_fork_rate() { printf 600; }
   assert_fails doctor_exec_load_line
 }
+_doctor_pi_fixture() {
+  _doctor_setup
+  export CEL_REGISTRY="$T/registry.yaml"
+  export PI_CODING_AGENT_DIR="$T/pi"
+  mkdir -p "$T/ws" "$T/pi"
+  cat >"$T/registry.yaml" <<EOF
+workspaces:
+  alpha:
+    path: $T/ws
+    remote: null
+EOF
+  cat >"$T/ws/workspace.yaml" <<'EOF'
+name: alpha
+runtime: { worker: pi }
+worker_profiles:
+  default: { runtime: pi, model: claude-opus-4 }
+EOF
+}
+
+test_doctor_reports_expired_pi_anthropic_credential_with_relogin_fix() {
+  _doctor_pi_fixture
+  printf '{"anthropic":{"access":"fixture-token","expires":1}}\n' >"$T/pi/auth.json"
+  local out; out="$(doctor_pi_anthropic_lines "$T/ws" alpha)"
+  assert_contains "$out" "expired"
+  assert_contains "$out" "pi /login"
+  assert_contains "$out" "via: gateway"
+  _doctor_teardown
+}
+
+test_doctor_reports_valid_pi_anthropic_credential() {
+  _doctor_pi_fixture
+  printf '{"anthropic":{"access":"fixture-token","expires":4102444800000}}\n' >"$T/pi/auth.json"
+  assert_contains "$(doctor_pi_anthropic_lines "$T/ws" alpha)" "valid"
+  _doctor_teardown
+}
+
+test_doctor_check_workspaces_runs_github_account_check() {
+  _doctor_setup
+  mkdir -p "$T/ws"
+  printf 'name: alpha\ngithub: { user: fixture-account }\n' >"$T/ws/workspace.yaml"
+  printf 'repos/\nspikes/\n.cel/\n' >"$T/ws/.gitignore"
+  local out
+  out="$(
+    (
+      registry_names() { printf 'alpha\n'; }
+      registry_path() { printf '%s' "$T/ws"; }
+      registry_remote() { printf 'https://example.invalid/alpha'; }
+      fleet_mail_doctor_line() { return 0; }
+      doctor_pi_anthropic_lines() { return 0; }
+      doctor_github_account() { printf 'github-account-check %s\n' "$1"; }
+      ws_repo_names() { return 0; }
+      ws_layout() { return 0; }
+      doctor_setup_lines() { return 0; }
+      doctor_ws_local_summary() { return 0; }
+      doctor_ws_local_lines() { return 0; }
+      doctor_ws_contract_lines() { return 0; }
+      ws_runtime() { printf 'bash'; }
+      agent_get() { printf 'bash'; }
+      doctor_ledger_states() { return 0; }
+      doctor_worker_containers() { return 0; }
+      check_workspaces
+    ) 2>&1
+  )"
+  assert_contains "$out" "github-account-check alpha"
+  _doctor_teardown
+}
