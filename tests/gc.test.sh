@@ -1416,8 +1416,8 @@ _gc_rv_fixture() { # <review-head> <pr-head>
   export CEL_REGISTRY="$T/registry.yaml" CEL_GC_REVIEWER_STOP_STATE="$T/rv-stop.json" CEL_TESTING=1
   GC_WS="$T/workspace"; mkdir -p "$GC_WS/.cel"
   registry_add demo "$GC_WS" ""
-  jq -n --arg h "$1" '[{id:"ABC-7-thing",repo:"widget",branch:"abc-7-thing",state:"finished",
-    review:{verdict:"changes",by:"widget-pr-71-review",head:$h}}]' > "$GC_WS/.cel/delegations.json"
+  jq -n --arg h "$1" --arg v "${GC_VERDICT:-approved}" '[{id:"ABC-7-thing",repo:"widget",branch:"abc-7-thing",state:"finished",
+    review:{verdict:$v,by:"widget-pr-71-review",head:$h}}]' > "$GC_WS/.cel/delegations.json"
   GC_PR_HEAD="$2"
   gh() {
     [ "$GC_PR_STATE" != UNKNOWN ] || return 1

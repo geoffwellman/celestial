@@ -761,7 +761,10 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
   return 0
 }
 
-# A verdict `cel-fanout review` wrote for exactly this head, in any ledger.
+# An APPROVED verdict `cel-fanout review` wrote for exactly this head, in any
+# ledger. A CHANGES verdict is a reviewer waiting on the worker's re-push:
+# closing it would leave "pushed - re-review" with nobody to read it, and a
+# stalled review loop has cost days (review of #157).
 _gc_verdict_recorded() { # <repo> <branch> <head>
   local ws wsdir f
   while IFS= read -r ws; do
@@ -769,7 +772,7 @@ _gc_verdict_recorded() { # <repo> <branch> <head>
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
     f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
     jq -e --arg r "$1" --arg b "$2" --arg h "$3" \
-      'any(.[]?; .repo == $r and .branch == $b and ((.review.verdict // "") != "") and .review.head == $h)' \
+      'any(.[]?; .repo == $r and .branch == $b and .review.verdict == "approved" and .review.head == $h)' \
       "$f" >/dev/null 2>&1 && return 0
   done < <(registry_names 2>/dev/null || true)
   return 1
