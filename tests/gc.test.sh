@@ -1526,3 +1526,13 @@ test_gc_idle_stop_restarts_the_clock_when_the_head_moves() {
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }
+
+# Review of #157: a CHANGES verdict means the reviewer is waiting on the
+# worker's re-push - closing it would leave "pushed - re-review" with nobody.
+test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
+  GC_VERDICT=changes _gc_rv_fixture aaa111 aaa111
+  _gc_rv_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  rm -rf "$T"
+}
