@@ -1764,6 +1764,66 @@ test_cel101_stale_nudge_counts_from_the_last_reask_and_sends_once_concurrently()
   rm -rf "$T"
 }
 
+# --- CEL-128: "still needed" is remembered for a week unless it changes ----
+_cel128_sweep_msgs() { # <f> -> count of stale nudges to bundle-orch
+  jq -c 'select(.from == "steward" and .to == "bundle-orch")' "$1" | grep -c . || true
+}
+test_cel128_confirmed_decision_is_skipped_until_a_week_passes_or_it_changes() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" now; now="$(date -Is)"
+  printf '%s\n' \
+    '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"confirmed","asker":"bundle-orch","options":[]}' \
+    '{"id":"1000000002","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"unconfirmed","asker":"bundle-orch","options":[]}' >> "$f"
+  CEL_INBOX_ME=bundle-orch cmd_decide confirm 1000000001 --why "still blocks the release" >/dev/null 2>&1
+  assert_eq "$(jq -c 'select(.kind == "confirm" and .ref == "1000000001")' "$f" | grep -c .)" "1"
+  local st="$_STEWARD_STATE"
+  # unconfirmed is listed; confirmed is not
+  PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1
+  local m; m="$(jq -r 'select(.from == "steward" and .to == "bundle-orch") | .message' "$f")"
+  assert_contains "$m" "unconfirmed"
+  assert_contains "$m" "cel decide confirm"
+  if printf '%s' "$m" | grep -q '\[1000000001\]'; then echo "confirmed decision re-listed"; return 1; fi
+  # unconfirmed still listed the next day; confirmed alone stays quiet
+  : > "$st"
+  PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1
+  assert_eq "$(_cel128_sweep_msgs "$f")" "2"
+  CEL_INBOX_ME=bundle-orch cmd_decide withdraw 1000000002 --why done >/dev/null 2>&1
+  : > "$st"
+  PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1
+  assert_eq "$(_cel128_sweep_msgs "$f")" "2"
+  # after the week it is listed again
+  : > "$st"
+  CEL_DECIDE_CONFIRM_SECS=0 PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1
+  assert_eq "$(_cel128_sweep_msgs "$f")" "3"
+  rm -rf "$T"
+}
+test_cel128_a_change_after_the_confirm_relists_it_at_once() {
+  _orch_fixture; _nudge_herdr_stub
+  source "$CEL_ROOT/lib/decide.sh"
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  printf '%s\n' \
+    '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"edited","asker":"bundle-orch","options":[]}' \
+    '{"id":"c1","ts":"2020-01-02T00:00:00Z","kind":"confirm","ref":"1000000001","by":"bundle-orch","to":"owner"}' \
+    '{"id":"u1","ts":"2020-01-03T00:00:00Z","kind":"update","ref":"1000000001","from":"bundle-orch","to":"owner","title":"edited","context":"new"}' >> "$f"
+  # the confirm is days old but the edit came after it: listed now (week not over)
+  CEL_DECIDE_CONFIRM_SECS=999999999 PATH="$T/bin:$PATH" _steward_decide_stale_sweep >/dev/null 2>&1
+  assert_eq "$(_cel128_sweep_msgs "$f")" "1"
+  rm -rf "$T"
+}
+test_cel128_confirm_takes_several_ids_and_refuses_strangers() {
+  _orch_fixture
+  source "$CEL_ROOT/lib/decide.sh"
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  printf '%s\n' \
+    '{"id":"1000000001","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"a","asker":"bundle-orch","options":[]}' \
+    '{"id":"1000000002","ts":"2020-01-01T00:00:00Z","from":"bundle-orch","to":"owner","kind":"decision","title":"b","asker":"bundle-orch","options":[]}' >> "$f"
+  CEL_INBOX_ME=bundle-orch cmd_decide confirm 1000000001 1000000002 >/dev/null 2>&1
+  assert_eq "$(jq -c 'select(.kind == "confirm")' "$f" | grep -c .)" "2"
+  assert_fails eval "( CEL_INBOX_ME=some-worker cmd_decide confirm 1000000001 >/dev/null 2>&1 )"
+  rm -rf "$T"
+}
+
 # --- CEL-108: an account on pace to hit its cap before it resets -------------
 # The usage card draws the projection; the steward says it ONCE, to root, while
 # there is still time to move work off the account, and takes it down when the

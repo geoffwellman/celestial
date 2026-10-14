@@ -37,6 +37,12 @@ decide_open_json() { # <ws>
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
         | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if ($u | has("prs")) then {prs: $u.prs} else {} end) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
+        # CEL-128: the latest confirm (still needs the owner), counted only
+        # when it is newer than the last change to the question
+        | ([$all[] | select(.kind == "confirm" and .ref == $i)] | last) as $c
+        | (if $c and (($c.ts | _epoch) >= ((.updated // .ts) | _epoch))
+           then {confirmed: $c.ts, confirmed_secs: (($now | tonumber) - ($c.ts | _epoch))} else {} end) as $cf
+        | . + $cf
         | . + {workspace: $ws, urgent: (.urgent == true),
                age_secs: (($now | tonumber) - (.ts | _epoch)),
                # since the asker last touched it: a re-ask is not stale
@@ -80,6 +86,7 @@ cmd_decide() {
     answer)  _decide_answer "$@" ;;
     drop)    _decide_drop "$@" ;;
     withdraw) _decide_withdraw "$@" ;;
+    confirm) _decide_confirm "$@" ;;
     migrate) _decide_migrate "$@" ;;
     help|--help|-h) _decide_usage ;;
     *) c_err "cel decide: unknown subcommand '$sub'"; _decide_usage; return 2 ;;
@@ -113,6 +120,9 @@ cel decide - the owner's one queue of decisions, across every workspace
   cel decide withdraw <id> --why <text>
       the ASKER closes its own question (settled in chat, moot after a merge).
       Who you are is derived (cel inbox whoami); nobody else may withdraw it.
+  cel decide confirm <id>... [--why <text>]
+      the asker (or an orchestrator) says the question still needs the owner;
+      the steward's stale reminder skips it for 7 days unless it changes.
   cel decide migrate [--apply]
       resolve open steward REMINDER items (never real decisions). A dry run
       unless --apply is given.
@@ -386,6 +396,40 @@ _decide_withdraw_locked() { # <ws> <id> <asker> <why>
     '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: "owner",
       withdrawn: $why, message: ("withdrawn by " + $by + ": " + $why)}')"
   c_ok "$2 withdrawn" >&2
+}
+
+# "STILL NEEDED" IS REMEMBERED (CEL-128). The stale sweep re-listed the same
+# unchanged questions every day because a confirmation recorded nothing. A
+# `confirm` record names the decision; the sweep skips it for a week unless
+# the question changes after it.
+_decide_confirm() {
+  local ids=() why=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --why) why="${2:-}"; shift 2 ;;
+      -*) die "cel decide confirm: unknown argument '$1'" ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ "${#ids[@]}" -ge 1 ] || die "usage: cel decide confirm <id>... [--why <text>]"
+  local me; me="$(_inbox_me)"
+  local id rec asker ws rc=0
+  for id in "${ids[@]}"; do
+    rec="$(_decide_find "$id")"
+    if [ -z "$rec" ]; then c_err "cel decide confirm: no open owner decision with id $id" >&2; rc=1; continue; fi
+    asker="$(jq -r .asker <<< "$rec")"
+    case "$me" in
+      "$asker"|root|*-orch) ;;
+      *) c_err "cel decide confirm: $id was asked by $asker, not $me" >&2; rc=1; continue ;;
+    esac
+    ws="$(jq -r .workspace <<< "$rec")"
+    _inbox_append "$(_inbox_file "$ws")" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" \
+      --arg ref "$id" --arg by "$me" --arg why "$why" \
+      '{id: $id, ts: $ts, kind: "confirm", ref: $ref, by: $by, to: "owner", message: ("still needed, per " + $by)}
+       + (if $why != "" then {why: $why} else {} end)')" || { rc=1; continue; }
+    c_ok "$id confirmed as still needing the owner" >&2
+  done
+  return "$rc"
 }
 
 # REMINDERS ARE NOT DECISIONS. The steward used to file its nags as open

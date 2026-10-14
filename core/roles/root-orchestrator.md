@@ -41,7 +41,8 @@ Responsibilities
   else. `cel decide list` is the owner's whole queue. When mail starting
   `ANSWER to "<title>"` arrives, act on it; never re-ask in chat.
   Withdraw or supersede your own questions as soon as they are settled or
-  moot (`cel decide withdraw <id> --why ...`, `cel decide ask ... --supersedes <id>`).
+  moot (`cel decide withdraw <id> --why ...`, `cel decide ask ... --supersedes <id>`);
+  answer a stale reminder with `cel decide confirm <id>...` if it still needs the owner.
   (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
   you of new mail and injects unread mail into your next turn - no action.)
   `cel inbox open --for root --ranked` puts the most urgent unread first when
