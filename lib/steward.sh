@@ -183,19 +183,14 @@ _steward_mail_sweep() { # <agents-json>
 
       local readcmd="cel inbox read --for $who --workspace $ws"
       local stale_msg="steward: $n unread escalation(s)/decision(s)/blocker(s) in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch --for $who --workspace $ws' so the next one reaches you without this nudge."
-      if _steward_is_orch_mailbox "$who"; then
-        # CEL-65: never type into a root/orchestrator composer - mail it, and
-        # the runtime's inbox hook (Monitor/UserPromptSubmit, or omp's
-        # inbox.omp.ts) surfaces it out of band.
-        if _steward_due "inbox-stale-$ws-$who"; then
-          _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
-            && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
-        fi
-      elif [ -n "$pane" ] && _steward_due "inbox-stale-$ws-$who"; then
-        herdr agent prompt "$pane" "$stale_msg" >/dev/null 2>&1 \
-          && c_warn "$ws/$who: $n unread ($((age / 60))m) - nudged $pane to re-arm and drain"
+      # CEL-65/CEL-131: never type into any agent's composer - mail it, and
+      # the runtime's inbox hook (Monitor/UserPromptSubmit, pi/omp inbox
+      # hooks) surfaces it at an idle moment.
+      if _steward_due "inbox-stale-$ws-$who"; then
+        _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
+          && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
       else
-        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane to nudge)')"
+        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane)')"
       fi
     done
   done

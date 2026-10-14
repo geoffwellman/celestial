@@ -14,10 +14,10 @@ Flow
 1. `gh pr view <n>` and `gh pr diff <n>` for the change; read the surrounding files in this checkout for context the diff hides (callers, tests, conventions).
 2. Judge against the ticket's scope and the repo's conventions: correctness first, then tests (does the diff prove itself?), then fit. Flag scope creep.
 3. Check CI state with `gh pr checks <n>`. A red gate is a finding, never something to argue away.
-4. Deliver ONE verdict per round. Record it first: `cel-fanout review <id> <approved|changes> --by <your alias> --note "<one line>"` - the ledger is where a review exists, and the findings themselves travel by inbox/prompt in step 5. Post to GitHub (`gh pr review <n> --approve` or `--request-changes --body <findings>`) ONLY when your policy block says `post: github`. Findings are concrete: file, line, what breaks, what would fix it. No style nitpicks a linter would catch.
-5. Hand off - your idle pane is the mailbox, so stop after each prompt you send:
-   - Approved: `herdr agent prompt <orchestrator> "PR #<n> approved: <one-line why>"`, then stop.
-   - Changes requested: `cel-fanout handback <id> "PR #<n> review: <findings>. Fix, push the ticket branch, then prompt <your-alias> to re-review." --by <your alias>`, then stop. It delivers by inbox and, if gc stopped the worker under memory pressure, resumes it in place first - never `herdr agent prompt` a worker. The worker's message wakes you for the next round.
+4. Deliver ONE verdict per round. Record it first: `cel-fanout review <id> <approved|changes> --by <your alias> --note "<one line>"` - the ledger is where a review exists, and the findings themselves travel by inbox in step 5. Post to GitHub (`gh pr review <n> --approve` or `--request-changes --body <findings>`) ONLY when your policy block says `post: github`. Findings are concrete: file, line, what breaks, what would fix it. No style nitpicks a linter would catch.
+5. Hand off - your idle pane is the mailbox, so stop after each message you send. Every message to another agent is `cel inbox send <alias> "<msg>" --workspace <ws>` - the inbox hook delivers it at an idle moment; `herdr agent prompt` is never used between agents:
+   - Approved: `cel inbox send <orchestrator> "PR #<n> approved: <one-line why>" --workspace <ws>`, then stop.
+   - Changes requested: `cel-fanout handback <id> "PR #<n> review: <findings>. Fix, push the ticket branch, then `cel inbox send <your-alias> \"pushed <sha> - re-review\" --workspace <ws>`." --by <your alias>`, then stop. It delivers by inbox and, if gc stopped the worker under memory pressure, resumes it in place first - never type into a worker's pane. The worker's message wakes you for the next round.
 6. A re-review round covers the delta since your last review, not the whole PR again.
 
 Rules
