@@ -451,7 +451,11 @@ Declare a reviewer in `workspace.yaml`:
 review: { runtime: omp, model: gpt-5.6-sol }
 ```
 
-and orchestrators start one reviewer pane per PR. A reviewer delivers one
+and orchestrators start one reviewer pane per PR on pi. Its inbox extension
+wakes the idle reviewer when new mail arrives, so request-changes and
+re-review round trips do not wait for someone to type. `review.runtime` stays
+in the workspace schema for compatibility but no longer selects the reviewer
+runtime; `review.model` still selects its model. A reviewer delivers one
 verdict per round and **records it in the delegation ledger** — `cel-fanout
 review <id> approved|changes --by <alias>` — which is where a review exists;
 `cel-fanout land` accepts that verdict on repos where the PR author and the
@@ -1167,6 +1171,8 @@ commits in [`externals.yaml`](externals.yaml), and Pi extension versions in
 [`tools/pi/extensions.txt`](tools/pi/extensions.txt). External overlays must
 declare `source` and a full 40-character Git `ref`; legacy version-only
 declarations are rejected.
+
+The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
 
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow

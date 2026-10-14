@@ -1152,8 +1152,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
-      runtime="$(ws_review "$wsdir" runtime)"
-      [ -n "$runtime" ] || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
+      # Reviewers use pi because its inbox extension wakes an idle session on
+      # incoming mail; the workspace review block continues to own the model.
+      runtime=pi
+      [ -n "$(ws_review "$wsdir" runtime)" ] \
+        || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
       alias_name="$repo/pr-$pr-review"
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
@@ -1260,6 +1263,9 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     # the `review:` block's model.
     [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
   fi
+  # Profiles can change runtime for other roles; reviewer delivery depends on
+  # pi's idle inbox extension, so keep the review model but force pi execution.
+  [ "$role" != "reviewer" ] || runtime=pi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
 
