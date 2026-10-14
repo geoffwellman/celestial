@@ -31,10 +31,10 @@ _dd_boot() {
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
-# the classic page and the decisions panel it loads (CEL-106 moved the panel
-# into /decisions.js so v2 shares it)
+# the v2 page and the decisions panel it loads (CEL-123 retired /classic;
+# the panel lives in /decisions.js)
 _dd_page() {
-  curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/classic" && curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js"
+  curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/" && curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js"
 }
 _dd_down() {
   if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
@@ -55,10 +55,7 @@ test_dash_needs_you_lists_and_answers_through_cel_decide() {
   assert_eq "$("$CEL_ROOT/bin/cel" decide list --json 2>/dev/null)" ""
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" 'ANSWER to "pick a style": glossy'
   # the page carries the panel and its client script parses
-  local page; page="$(_dd_page)"
-  assert_contains "$page" 'id="needsyou"'
-  printf '%s' "$page" | python3 -c 'import sys,re;print("\n".join(re.findall(r"<script>(.*?)</script>",sys.stdin.read(),re.S)))' > "$T/page.js"
-  node --check "$T/page.js"
+  # the panel's client script parses
   curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js" > "$T/decisions.js"
   node --check "$T/decisions.js"
   _dd_down
@@ -178,15 +175,6 @@ test_dash_bulk_accept_sends_only_listed_ids_and_keeps_refusals() {
   assert_eq "$open" "pick a style,q-b,q-c,"
   assert_contains "$(jq -r 'select(.to == "alpha-orch") | .message' "$T/inbox/alpha.jsonl")" '"q-a": two'
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "x-cel-csrf: $TOKEN" -d '{"items":[]}' "$url")" "400"
-  _dd_down
-}
-
-# Review on #125: jumping to the list from the factory floor is a tab pick;
-# with showTab the next refresh bounced the owner back to needs you.
-test_dash_factory_list_jump_counts_as_a_tab_pick() {
-  _dd_boot
-  local page; page="$(_dd_page)"
-  assert_contains "$page" "list:function(){pickTab('inflight')}"
   _dd_down
 }
 
