@@ -24,7 +24,7 @@ _fanout_setup() {
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
+  "workspace list")  if [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "pane get")        echo '{"result":{"pane":{"pane_id":"'"$3"'","tab_id":"wZ:t1"}}}';;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
@@ -1225,7 +1225,7 @@ _fanout_products_setup() {
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  if [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[
+  "workspace list")  if [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[
       {"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}},
       {"workspace_id":"wG","worktree":{"repo_root":"'"$STUB_REPO_GADGET"'","is_linked_worktree":false}},
       {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}'; fi;;
@@ -2559,5 +2559,51 @@ test_collect_does_not_land_pr_none_branch_with_zero_commits() {
   mkdir -p "$STUB_WT/.agent" && printf 'blocked\n' > "$STUB_WT/.agent/result.md"
   (cd "$T" && "$BIN" collect WG-SPK4) > /dev/null 2>&1
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" "collected"
+  rm -rf "$T"
+}
+
+# ------------------------------------------------ review hand-back (CEL-130)
+# Under pressure gc may stop a worker that is only waiting on review, so the
+# reviewer's hand-back can no longer assume a pane to type into: the findings
+# travel by inbox, and a stopped worker is resumed in place to read them.
+test_review_records_the_head_it_reviewed() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-RH "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-RH changes --by widget-pr-7-review) > /dev/null
+  assert_eq "$(jq -r '.[0].review.head' "$T/.cel/delegations.json")" "$(git -C "$STUB_WT" rev-parse HEAD)"
+  rm -rf "$T"
+}
+
+test_handback_to_a_live_worker_goes_by_inbox_never_by_typing() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-HB "$T/spec.md") > /dev/null
+  local alias; alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  : > "$STUB_LOG"
+  local out; out="$(cd "$T" && CEL_INBOX_DIR="$T/inbox" STUB_LIVE_ALIAS="$alias" \
+    "$BIN" handback WG-HB "fix line 3" --by widget-pr-7-review 2>&1)"
+  assert_contains "$(cat "$T"/inbox/*/* 2>/dev/null; find "$T/inbox" -type f -exec cat {} + 2>/dev/null)" "fix line 3"
+  if grep -q "agent prompt" "$STUB_LOG"; then echo "typed into a pane"; rm -rf "$T"; return 1; fi
+  if grep -q "agent start" "$STUB_LOG"; then echo "restarted a live worker"; rm -rf "$T"; return 1; fi
+  assert_contains "$out" "inbox"
+  rm -rf "$T"
+}
+
+test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-HB2 "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-HB2 changes --by widget-pr-7-review) > /dev/null
+  local spec; spec="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" worktree add -q -b WG-HB2 "$T/wt-hb2" 2>/dev/null || true
+  : > "$STUB_LOG"
+  local out; out="$(cd "$T" && CEL_INBOX_DIR="$T/inbox" \
+    STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-hb2\"}}]}}" \
+    "$BIN" handback WG-HB2 "fix line 3" --by widget-pr-7-review 2>&1)"
+  assert_contains "$(cat "$STUB_LOG")" "agent start"
+  assert_contains "$out" "resumed"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].spec' "$T/.cel/delegations.json")" "$spec"
+  assert_contains "$(find "$T/inbox" -type f -exec cat {} + 2>/dev/null)" "fix line 3"
   rm -rf "$T"
 }
