@@ -348,7 +348,8 @@ gateway_pi_models_write() { # [models.json path]
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" '
+  local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" '
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
     | .providers = ((.providers // {}) + {
@@ -359,7 +360,7 @@ gateway_pi_models_write() { # [models.json path]
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $rest },
-        "ompgw-claude": {
+        ($claude_provider): {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
           apiKey: "$OMP_GATEWAY_TOKEN",
