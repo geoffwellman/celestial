@@ -1,5 +1,5 @@
 // The decisions panel (CEL-99/#125, CEL-101/#127), shared by the classic
-// dashboard and v2 (CEL-106). It used to live inline in the classic page; v2
+// dashboard and v2 (CEL-106). It used to live inline in the classic page (retired in CEL-123); v2
 // needed the same two-click confirm, refresh-safe typing and "closed
 // elsewhere", and a second copy is how one of them would quietly regress. So
 // both pages load this file and supply the same small host contract:
