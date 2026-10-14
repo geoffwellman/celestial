@@ -246,5 +246,6 @@ test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions
   assert_eq "$(_vpj .md.a)" "https://example.invalid/d"
   assert_eq "$(_vpj .md.rawB)" "0"
   assert_eq "$(_vpj .decHeading)" "false"
+  assert_eq "$(_vpj '.chipRoom | join(",")')" "bundle-orch"
   _vp_down
 }

@@ -314,6 +314,9 @@ const main = async () => {
       out.decisions = await evaluate(`document.querySelectorAll('#room #needsyou .nycard').length`);
       out.md = await evaluate(`(function(){var e=[].slice.call(document.querySelectorAll('#rconv .ev.assistant')).pop();return {strong:e.querySelectorAll('strong').length,code:e.querySelectorAll('code').length,li:e.querySelectorAll('ul li').length,ol:e.querySelectorAll('ol li').length,a:(e.querySelector('a')||{}).href||'',rawB:e.querySelectorAll('b').length}})()`);
       out.repoScope = await evaluate(`(function(){var f=roomOwns('widget-orch',{ws:'alpha'});return [f({ws:'alpha'},'widget'),f({ws:'alpha'},'gadget'),f({ws:'bundle'},'widget')]})()`);
+      // CEL-129: a product orchestrator's decisions live in another workspace's
+      // group; the grid's workspace chip must not hide them in its room
+      out.chipRoom = await evaluate(`(function(){var w=WSF,r=ROOM;WSF='alpha';ROOM='bundle-orch';buildLast();var n=LAST.needsYou.map(function(d){return d.asker});WSF=w;ROOM=r;buildLast();return n})()`);
       out.decHeading = await evaluate(`(function(){var h=document.querySelector('#room #needsyou h2'),c=document.querySelector('#room #needsyou .nychips');return (!!h&&h.offsetParent!==null)||(!!c&&c.offsetParent!==null)})()`);
       out.busyHint = await evaluate(`document.getElementById('rhint').textContent`);
       await evaluate(`(function(){var t=document.getElementById('rmsg');t.value='test: hello alpha';t.dispatchEvent(new Event('input'));return 1})()`);
