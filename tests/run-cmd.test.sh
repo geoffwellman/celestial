@@ -180,6 +180,17 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   rm -rf "$T"
 }
 
+test_run_pi_reviewer_uses_pi_and_preserves_workspace_model() {
+  _ws; printf 'review:\n  runtime: claude\n  model: claude-sonnet-4-5\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
+  assert_contains "$out" "--kind pi"
+  assert_contains "$out" "--model claude-sonnet-4-5"
+  assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  rm -rf "$T"
+}
+
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
 # model and the launch must keep it, so EVERY omp launch gets --no-prewalk and
 # no other runtime does.
