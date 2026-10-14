@@ -179,6 +179,19 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
   rm -rf "$T"
 }
+# Claude's UserPromptSubmit hook must run on workers and reviewers, and their
+# mailbox identity must be explicit because the review tab cwd is not a mailbox.
+test_run_claude_worker_and_reviewer_get_inbox_delivery_identity() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: claude }\nreview:\n  runtime: claude\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_INBOX_ME=widget-wg-7-thing"
+  assert_contains "$out" "CEL_INBOX_WS=alpha"
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$out" "CEL_INBOX_WS=alpha"
+  rm -rf "$T"
+}
 
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
 # model and the launch must keep it, so EVERY omp launch gets --no-prewalk and

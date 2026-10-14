@@ -32,3 +32,10 @@ test_hud_config_is_a_symlink_to_the_plane() {
   assert_eq "$(readlink "$h/.claude/plugins/claude-hud/config.json")" \
     "$CEL_ROOT/tools/claude/claude-hud.json"
 }
+test_claude_inbox_delivery_hook_is_registered_for_idle_turns() {
+  local h; h="$(_fake_home)"
+  HOME="$h" link_claude_prefs >/dev/null
+  local hooks; hooks="$(jq -c '.hooks.UserPromptSubmit' "$h/.claude/settings.json")"
+  assert_contains "$hooks" "$CEL_ROOT/tools/hooks/inbox-drain.sh"
+  rm -rf "$h"
+}
