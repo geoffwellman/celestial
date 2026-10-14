@@ -448,7 +448,7 @@ the original Claude pane for people who would rather talk to a full agent.
 Declare a reviewer in `workspace.yaml`:
 
 ```yaml
-review: { runtime: omp, model: gpt-5.6-sol }
+review: { runtime: pi, model: gpt-5.6-sol }
 ```
 
 and orchestrators start one reviewer pane per PR on pi. Its inbox extension
