@@ -233,7 +233,10 @@ _steward_decide_stale_sweep() {
   local ws open asker
   for ws in $(registry_names); do
     # idle, not age: a question the asker re-asked yesterday is not stale
-    open="$(decide_open_json "$ws" | jq -c 'select((.idle_secs // .age_secs) >= 259200)' 2>/dev/null || true)"
+    # CEL-128: a recent "still needed" (newer than any change) silences it
+    open="$(decide_open_json "$ws" | jq -c --argjson cw "${CEL_DECIDE_CONFIRM_SECS:-604800}" \
+      'select((.idle_secs // .age_secs) >= 259200)
+       | select((.confirmed_secs // null) == null or .confirmed_secs >= $cw)' 2>/dev/null || true)"
     [ -n "$open" ] || continue
     for asker in $(printf '%s\n' "$open" | jq -r '.asker // empty' | sort -u); do
       case "$asker" in owner|steward|dashboard|'') continue ;; esac
@@ -258,7 +261,7 @@ _steward_stale_nudge_once() { # <ws> <asker> <open-json-lines>
     [ $(( $(date +%s) - last )) -ge 86400 ] || exit 0
     list="$(printf '%s\n' "$open" | jq -r --arg a "$asker" \
       'select(.asker == $a) | "  [\(.id)] \(.title) (\((.age_secs / 86400) | floor)d)"')"
-    if ! cmd_inbox send "$asker" "steward: your open owner decision(s) in $ws older than 3 days - confirm each still needs the owner, or withdraw it with 'cel decide withdraw <id> --why <text>' if it was settled or is moot:"$'\n'"$list" \
+    if ! cmd_inbox send "$asker" "steward: your open owner decision(s) in $ws older than 3 days - if one still needs the owner say so with 'cel decide confirm <id>' (quiet for 7 days unless it changes), or withdraw it with 'cel decide withdraw <id> --why <text>' if it was settled or is moot:"$'\n'"$list" \
         --from steward --workspace "$ws" --kind status --fp decide-stale >/dev/null 2>&1; then
       c_warn "$ws: could not mail $asker about stale decision(s); will retry next sweep"
       exit 1
