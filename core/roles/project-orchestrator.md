@@ -34,12 +34,10 @@ Your INBOX
   cwd, and from the workspace root it drains ROOT's mailbox, not yours.
   (`cel run` exports `CEL_INBOX_ME`/`CEL_INBOX_WS`, so under it the bare
   form is safe too.)
-- Start a background Monitor once per session so mail wakes you without
-  anyone typing into your pane:
-  `Monitor(command: "cel inbox watch", persistent: true)`. A monitor dies
-  with its session - restart it after a restart, resume or compaction.
-  (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
-  you of new mail and injects unread mail into your next turn - no action.)
+- If your runtime exposes a persistent Monitor tool, start it once per session to receive inbox mail while idle:
+  `Monitor(command: "cel inbox watch", persistent: true)`. Restart it after a session restart or compaction.
+- Claude Code does not expose Monitor: UserPromptSubmit drains mail on a submitted turn and Stop blocks for mail arriving during a turn; neither wakes an idle session.
+- Pi/OMP inbox extensions wake idle agents and inject new mail into the next turn.
 - Send with `cel inbox send <who> "<message>"` - `herdr agent prompt` is never used between agents:
   prompting types into the target's composer and mangles whatever a human is
   half-way through writing. Recipient names are the same derivation:

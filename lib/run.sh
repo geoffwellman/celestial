@@ -469,15 +469,6 @@ review, not a detail. Nothing here is a branch, so there is nothing to push.
 EOF
 }
 
-# Claude's UserPromptSubmit hook covers mail present before a turn. This
-# Monitor command wakes a session that is already idle; Stop covers mail that
-# arrives during a turn. Omp/pi have their own idle-aware inbox extensions.
-_run_claude_inbox_monitor() { # <runtime> <role> <alias> <workspace>
-  [ "$1" = claude ] || return 0
-  case "$2" in worker|reviewer) ;; *) return 0 ;; esac
-  printf 'Monitor(command: "cel inbox watch --for %s --workspace %s", persistent: true)' \
-    "$3" "$4"
-}
 
 # THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
 # worktree, a `release` verb and a gc pass, because something recorded that it
@@ -1280,16 +1271,6 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
-  local monitor_instruction
-  monitor_instruction="$(_run_claude_inbox_monitor "$runtime" "$role" "$agent_name" "$(ws_name "$wsdir")")"
-  if [ -n "$monitor_instruction" ]; then
-    RUN_BODY="$RUN_BODY
-
-Before doing other work, start the inbox Monitor for this pane:
-$monitor_instruction
-It must remain running while you are idle; restart it after a new session.
-"
-  fi
   # The facts about THIS pull request ride with the role body rather than
   # waiting for an orchestrator to type them.
   if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
@@ -1850,7 +1831,7 @@ run_stripped_orchestrators() {
       [ -z "$lcwd" ] || cwd="$lcwd"
       [ -n "$rt" ] || rt="$(ws_runtime "$wsdir" orchestrator)"
       hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
-      [ -n "$hookfile" ] || continue   # claude: Monitor, not a hook
+      [ -n "$hookfile" ] || continue   # Claude uses launch-time UserPromptSubmit/Stop hooks, not this extension file
       _run_pane_pid "$lpane" "$cwd" "$rt" || continue
       if _run_cmdline "$_RUN_PID" | grep -qF -- "${hookfile##*/}"; then state=ok; else state=stripped; fi
       [ "$lname" != "-" ] || lname="$name"
