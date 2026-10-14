@@ -78,10 +78,10 @@ test_append_flag_file_writes_the_body_and_no_arg_holds_a_newline() {
 # omp declares --auto-approve, so nothing plane-launched stops on prompts.
 # The thinking flag sits between them: it is per-launch (a profile can change
 # it), the launch args are per-runtime, and the role body always goes last.
-test_run_launch_args_precede_role_injection() {
+test_run_launch_args_precede_role_injection_and_no_prompt_submit_duplicate() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" " -- --dangerously-skip-permissions --settings"
-  assert_contains "$out" "inbox-drain.sh"
+  ! printf '%s' "$out" | grep -q "inbox-drain.sh" || { echo "Claude UserPromptSubmit hook is duplicated in launch settings"; return 1; }
   assert_contains "$out" "inbox-stop.sh"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
   assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --thinking high --append-system-prompt"

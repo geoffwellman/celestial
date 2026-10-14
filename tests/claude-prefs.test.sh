@@ -41,11 +41,46 @@ test_hud_config_is_a_symlink_to_the_plane() {
   assert_eq "$(readlink "$h/.claude/plugins/claude-hud/config.json")" \
     "$CEL_ROOT/tools/claude/claude-hud.json"
 }
-test_claude_inbox_delivery_hook_is_registered_for_idle_turns() {
+test_claude_prompt_submit_hook_is_registered_in_global_settings() {
   local h; h="$(_fake_home)"
   HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
   local hooks; hooks="$(jq -c '.hooks.UserPromptSubmit' "$h/.claude/settings.json")"
   assert_contains "$hooks" 'inbox-drain.sh'
+  rm -rf "$h"
+}
+test_prefs_preserve_existing_user_prompt_submit_hooks() {
+  local h; h="$(_fake_home)"
+  mkdir -p "$h/.claude"
+  printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"user-hook"}]}]}}' > "$h/.claude/settings.json"
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  local hooks; hooks="$(jq -c '.hooks.UserPromptSubmit' "$h/.claude/settings.json")"
+  assert_eq "$(jq -r 'length' <<<"$hooks")" "2"
+  assert_eq "$(jq -r '.[0].hooks[0].command' <<<"$hooks")" "user-hook"
+  assert_contains "$(jq -r '.[1].hooks[0].command' <<<"$hooks")" 'inbox-drain.sh'
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  assert_eq "$(jq -r '.hooks.UserPromptSubmit|length' "$h/.claude/settings.json")" "2"
+  rm -rf "$h"
+}
+test_global_claude_prompt_submit_hook_works_without_cel_root() {
+  local h root calls command out
+  h="$(_fake_home)"
+  root="$h/celestial plane"
+  calls="$h/cel calls"
+  mkdir -p "$root/tools/hooks" "$root/tools/claude" "$root/bin" "$h/home"
+  cp "$CEL_ROOT/tools/claude/settings-prefs.json" "$root/tools/claude/settings-prefs.json"
+  cp "$CEL_ROOT/tools/hooks/inbox-drain.sh" "$root/tools/hooks/inbox-drain.sh"
+  : > "$root/tools/claude/claude-hud.json"
+  cat > "$root/bin/cel" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$INBOX_CALLS"
+printf 'test inbox message\n'
+EOF
+  chmod +x "$root/bin/cel"
+  CEL_ROOT="$root" HOME="$h/home" link_claude_prefs >/dev/null
+  command="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$h/home/.claude/settings.json")"
+  out="$(env -u CEL_ROOT INBOX_CALLS="$calls" CEL_INBOX_ME=worker CEL_INBOX_WS=plane bash -c "$command")"
+  assert_contains "$out" "test inbox message"
+  assert_eq "$(cat "$calls")" "inbox read --for worker --workspace plane"
   rm -rf "$h"
 }
 
