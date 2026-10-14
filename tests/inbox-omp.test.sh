@@ -130,7 +130,7 @@ test_omp_inbox_idle_empty_composer_wakes_once() {
   assert_eq "$(jq -r '.turn' <<<"$out")" "null"
 }
 
-# CEL-134: idle reviewer mail wakes by the alias set by cel run reviewer.
+# Idle reviewer mail wakes by the alias set by cel run reviewer.
 test_pi_reviewer_inbox_mail_wakes_without_user_input() {
   command -v node >/dev/null || return 0
   local d out
