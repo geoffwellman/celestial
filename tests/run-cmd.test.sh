@@ -391,22 +391,49 @@ EOS
 test_run_gateway_env_reads_api_key_for_pi() {
   T="$(mktemp -d)"
   export CEL_GATEWAY_STATE="$T/gateway"
-  PROFILE_VIA=gateway
+  mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
+  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  cat >"$T/bin/omp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' 'omp-test-value' >> "$T/omp.log"
+printf '%s\n' 'omp-test-value'
+EOF
+  chmod +x "$T/bin/omp"
+  local old_path="$PATH" output omp_calls=""
+  export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env pi pi-worker
-  assert_eq "${GATEWAY_ENV[1]}" "OMP_GATEWAY_TOKEN=\$(cat '$T/gateway/api-key')"
-  assert_eq "${GATEWAY_ENV[2]}" "CEL_SESSION_ID=pi-worker"
+  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
+  PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
   rm -rf "$T"
+  assert_eq "$output" "pi-test-value"
+  assert_eq "$omp_calls" ""
 }
 
 test_run_gateway_env_preserves_omp_auth_gateway_token_source() {
-  PROFILE_VIA=gateway
+  T="$(mktemp -d)"
+  export CEL_GATEWAY_STATE="$T/gateway"
+  mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
+  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  cat >"$T/bin/omp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/omp.log"
+printf '%s\n' 'omp-test-value'
+EOF
+  chmod +x "$T/bin/omp"
+  local old_path="$PATH" output omp_calls
+  export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env omp omp-worker
-  assert_eq "${GATEWAY_ENV[1]}" 'OMP_GATEWAY_TOKEN=$(omp auth-gateway token)'
-  assert_eq "${GATEWAY_ENV[2]}" "CEL_SESSION_ID=omp-worker"
-  unset PROFILE_VIA
+  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  omp_calls="$(cat "$T/omp.log")"
+  PATH="$old_path"
+  unset PROFILE_VIA CEL_GATEWAY_STATE
+  rm -rf "$T"
+  assert_eq "$output" "omp-test-value"
+  assert_eq "$omp_calls" "auth-gateway token"
 }
 
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a
