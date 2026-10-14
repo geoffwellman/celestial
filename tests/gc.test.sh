@@ -1406,3 +1406,123 @@ test_gc_idle_stop_keeps_an_agent_whose_identity_is_unproven() {
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }
+
+# ------------------------------------- review waiters under pressure (CEL-130)
+# At 12:22 on 2026-10-14, 15 agents were `done` on a box with full swap and
+# gc stopped none: 4 reviewers had recorded their verdicts and 5 workers sat
+# behind open PRs waiting on them. Both are now stoppable - on facts.
+_gc_rv_fixture() { # <review-head> <pr-head>
+  _gc_reviewer_fixture
+  export CEL_REGISTRY="$T/registry.yaml" CEL_GC_REVIEWER_STOP_STATE="$T/rv-stop.json" CEL_TESTING=1
+  GC_WS="$T/workspace"; mkdir -p "$GC_WS/.cel"
+  registry_add demo "$GC_WS" ""
+  jq -n --arg h "$1" '[{id:"ABC-7-thing",repo:"widget",branch:"abc-7-thing",state:"finished",
+    review:{verdict:"changes",by:"widget-pr-71-review",head:$h}}]' > "$GC_WS/.cel/delegations.json"
+  GC_PR_HEAD="$2"
+  gh() {
+    [ "$GC_PR_STATE" != UNKNOWN ] || return 1
+    jq -n --arg s "$GC_PR_STATE" --arg h "$GC_PR_HEAD" '{state:$s,headRefOid:$h,headRefName:"abc-7-thing"}'
+  }
+  GC_PR_STATE=OPEN; GC_REVIEW_STATUS=done
+}
+_gc_rv_run() { # <minutes> -> observes at t0, then t0+minutes
+  CEL_GC_NOW=1000 CEL_GC_REVIEWER_STOP_MIN=30 _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  CEL_GC_NOW=$((1000 + $1 * 60)) CEL_GC_REVIEWER_STOP_MIN=30 _gc_reviewers 0 "$(_gc_reviewer_agents)" 2>&1
+}
+
+test_gc_closes_a_finished_reviewer_whose_verdict_is_for_the_current_head() {
+  _gc_rv_fixture aaa111 aaa111
+  reviewer_checkout_release() { printf 'release %s\n' "$2" >> "$GC_SINK"; }
+  local out; out="$(_gc_rv_run 30)"
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3"
+  assert_contains "$out" "verdict recorded"
+  assert_eq "$(reviewers_rows | jq -r length)" 0
+  rm -rf "$T"
+}
+
+test_gc_waits_out_the_reviewer_window() {
+  _gc_rv_fixture aaa111 aaa111
+  _gc_rv_run 29 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_reviewer_whose_verdict_is_for_an_older_head() {
+  _gc_rv_fixture aaa111 bbb222
+  _gc_rv_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  assert_eq "$(reviewers_rows | jq -r length)" 1
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_working_reviewer_with_a_recorded_verdict() {
+  _gc_rv_fixture aaa111 aaa111
+  GC_REVIEW_STATUS=working
+  _gc_rv_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_reviewer_minutes_drop_under_pressure() {
+  export CEL_CONFIG_FILE=/nonexistent
+  boxguard_pressure() { return 1; }
+  assert_eq "$(gc_reviewer_stop_minutes)" 30
+  boxguard_pressure() { return 0; }
+  assert_eq "$(gc_reviewer_stop_minutes)" 5
+}
+
+_gc_waiter_fixture() {
+  _gc_done_fixture running done
+  git -C "$GC_WT" update-ref "refs/remotes/origin/abc-1-task" HEAD
+  GC_PR=OPEN; GC_PR_HEAD="$(git -C "$GC_WT" rev-parse HEAD)"
+  gh() {
+    case "$1 $2" in
+      "pr list") jq -n --arg s "$GC_PR" '[{state:$s,updatedAt:"2026-01-01T00:00:00Z"}]';;
+      "pr view") jq -n --arg h "$GC_PR_HEAD" '{headRefOid:$h}';;
+      *) return 1;;
+    esac
+  }
+  GC_INBOX="$T/inbox"; : > "$GC_INBOX"
+  cmd_inbox() { printf '%s\n' "$*" >> "$GC_INBOX"; }
+}
+
+test_gc_idle_stop_stops_a_review_waiter_under_pressure_and_tells_the_orchestrator() {
+  _gc_waiter_fixture
+  boxguard_pressure() { return 0; }
+  local out; out="$(_gc_idle_stop_run 10)"
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  assert_contains "$(cat "$GC_INBOX")" "send widget-orch"
+  assert_contains "$(cat "$GC_INBOX")" "ABC-1-task"
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_keeps_a_review_waiter_without_pressure() {
+  _gc_waiter_fixture
+  boxguard_pressure() { return 1; }
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_keeps_a_review_waiter_whose_pr_head_is_not_its_head() {
+  _gc_waiter_fixture
+  boxguard_pressure() { return 0; }
+  GC_PR_HEAD=0000000000000000000000000000000000000000
+  _gc_idle_stop_run 10 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+test_gc_idle_stop_restarts_the_clock_when_the_head_moves() {
+  _gc_waiter_fixture
+  boxguard_pressure() { return 0; }
+  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
+  _gc_agents_removable() { return 0; }
+  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo 10 >/dev/null 2>&1
+  git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m more
+  git -C "$GC_WT" update-ref "refs/remotes/origin/abc-1-task" HEAD
+  GC_PR_HEAD="$(git -C "$GC_WT" rev-parse HEAD)"
+  CEL_GC_NOW=$((1000 + 600)) _gc_idle_stop 0 "$GC_AGENTS" demo 10 >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
