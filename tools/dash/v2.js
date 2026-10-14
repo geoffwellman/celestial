@@ -79,7 +79,9 @@ window.v2refresh=function(){return refresh()};
 // ---- the decisions panel's host contract (decisions.js) --------------------
 var NYSORT=recall('cel-v2-nysort','urgent');
 function buildLast(){
-  var groups=((S&&S.needsYouGroups)||[]).filter(function(g){return inWs(g.workspace)}).map(function(g){
+  var groups=((S&&S.needsYouGroups)||[]).filter(function(g){return ROOM||inWs(g.workspace)}).map(function(g){
+    // CEL-129: a room is scoped by asker alone - the grid chip (WSF) hid a
+    // product orchestrator whose decisions sit in another workspace group
     // in a room, only what that orchestrator asked (CEL-121)
     var items=g.items.filter(function(d){return !NYDONE[d.id]&&(!ROOM||d.asker===ROOM)});
     if(NYSORT==='newest')items.sort(function(a,b){return (a.age_secs||0)-(b.age_secs||0)});
@@ -289,7 +291,9 @@ function cardEl(w){
     '<span class="x"></span><span class="ex" title="expand">⤢</span><span class="grip" title="drag to move">⠿</span></h3><div class="body"></div>';
   // CEL-116: until /api/state first answers, Needs-you says loading - an
   // empty card or a 0 would read as "nothing needs you"
-  if(w.id==='needs'){var nb=el.querySelector('.body');nb.insertAdjacentHTML('beforeend','<div class="nyload">'+none(cardStatus('needs')||'loading needs you…')+'</div>');nb.appendChild(needsHost())}
+  // CEL-129: in a room the panel belongs to the room; a grid render (the first
+  // one, when the page loads on #room=) must not take it back
+  if(w.id==='needs'){var nb=el.querySelector('.body');nb.insertAdjacentHTML('beforeend','<div class="nyload">'+none(cardStatus('needs')||'loading needs you…')+'</div>');if(ROOM)$('rdechost').appendChild(needsHost());else nb.appendChild(needsHost())}
   return el;
 }
 function renderAll(){
