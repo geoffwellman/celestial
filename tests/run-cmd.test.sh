@@ -104,17 +104,17 @@ test_run_without_layout_skips_apply() {
   ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "layout applied with none declared"; return 1; }
   rm -rf "$T"
 }
-# Reviewer mode joins the caller's herdr view (tab "PR reviewer") instead of
-# creating a workspace, injects the pr-reviewer role, and keeps the workspace's
-# review model while using pi regardless of its declared reviewer runtime.
-_ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
+# Reviewer mode joins the caller's herdr view (tab "PR reviewer"), injects the
+# reviewer role, and resolves a Claude model through the configured gateway.
+_ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"; }
 test_run_reviewer_targets_review_tab_with_model() {
-  _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
+  _reviewer_gateway_fixture; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind pi"
-  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_run_reviewer_requires_pr_and_review_block() {
   _ws_review; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --dry-run )
@@ -180,14 +180,28 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   rm -rf "$T"
 }
 
-test_run_pi_reviewer_uses_pi_and_preserves_workspace_model() {
-  _ws; printf 'review:\n  runtime: claude\n  model: claude-sonnet-4-5\n' >> "$T/workspace.yaml"
+test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
   local out
-  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model claude-opus-5-5 --dry-run 2>&1)"
   assert_contains "$out" "--kind pi"
-  assert_contains "$out" "--model claude-sonnet-4-5"
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  _ws_gateway_clean
+}
+# A bare Claude alias such as `sonnet` is runtime-dependent. Pi must not
+# silently resolve it through an ambient, unconfigured provider.
+test_run_pi_reviewer_refuses_an_unresolved_model_alias() {
+  _ws; printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    echo "reviewer accepted an unresolved model alias"; rm -rf "$T"; return 1
+  fi
+  assert_contains "$out" "reviewer model 'sonnet' is not a routable pi model"
+  assert_contains "$out" "ompgw-claude/<model>"
   rm -rf "$T"
 }
 
@@ -377,6 +391,19 @@ EOS
 }
 _ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
 
+_reviewer_gateway_fixture() {
+  _ws_gateway
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
+}
+
 test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
   cat >>"$T/workspace.yaml" <<'YAML'
@@ -398,6 +425,7 @@ EOS
   assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
+
 
 test_run_gateway_env_reads_api_key_for_pi() {
   T="$(mktemp -d)"
