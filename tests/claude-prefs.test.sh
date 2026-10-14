@@ -48,3 +48,23 @@ test_claude_inbox_delivery_hook_is_registered_for_idle_turns() {
   assert_contains "$hooks" 'inbox-drain.sh'
   rm -rf "$h"
 }
+test_claude_stop_hook_is_registered_for_end_of_turn_mail_delivery() {
+  local h; h="$(_fake_home)"
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  local hooks; hooks="$(jq -c '.hooks.Stop' "$h/.claude/settings.json")"
+  assert_contains "$hooks" 'inbox-stop.sh'
+  rm -rf "$h"
+}
+
+test_claude_stop_hook_blocks_with_new_mail_as_reason() {
+  local t; t="$(mktemp -d)"
+  mkdir -p "$t/inbox"
+  export CEL_INBOX_DIR="$t/inbox" CEL_INBOX_ME=widget-pr-12-review CEL_INBOX_WS=alpha
+  printf '%s\n' '{"id":"item-1","ts":"2026-10-15T12:00:00Z","from":"widget-orch","to":"widget-pr-12-review","kind":"message","message":"review the new commit"}' > "$t/inbox/alpha.jsonl"
+  local out; out="$(CEL_ROOT="$CEL_ROOT" bash "$CEL_ROOT/tools/hooks/inbox-stop.sh" <<< '{}')"
+  assert_eq "$(jq -r .decision <<<"$out")" "block"
+  assert_contains "$(jq -r .reason <<<"$out")" "review the new commit"
+  out="$(CEL_ROOT="$CEL_ROOT" bash "$CEL_ROOT/tools/hooks/inbox-stop.sh" <<< '{}')"
+  assert_eq "$out" ""
+  rm -rf "$t"
+}

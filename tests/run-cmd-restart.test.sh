@@ -74,6 +74,7 @@ test_workers_and_reviewers_never_resume() {
 test_runtime_resume_args_come_from_the_manifest() {
   assert_eq "$(agent_resume omp flag)" "--resume"
   assert_eq "$(agent_resume claude flag)" "--resume"
+  assert_eq "$(agent_resume claude value)" "id"
   assert_eq "$(agent_resume opencode flag)" ""
 }
 

@@ -194,6 +194,13 @@ test_run_claude_worker_and_reviewer_get_inbox_delivery_identity() {
   assert_contains "$out" "CEL_INBOX_WS=alpha"
   rm -rf "$T"
 }
+# Claude workers/reviewers need a persistent inbox Monitor; UserPromptSubmit
+# alone cannot wake a session that has gone idle.
+test_claude_inbox_monitor_uses_explicit_launch_identity() {
+  assert_eq "$(_run_claude_inbox_monitor claude reviewer celestial-pr-12-review plane)" \
+    'Monitor(command: "cel inbox watch --for celestial-pr-12-review --workspace plane", persistent: true)'
+  assert_eq "$(_run_claude_inbox_monitor omp reviewer celestial-pr-12-review plane)" ""
+}
 
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
 # model and the launch must keep it, so EVERY omp launch gets --no-prewalk and
