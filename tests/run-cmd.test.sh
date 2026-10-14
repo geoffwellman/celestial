@@ -388,6 +388,27 @@ EOS
   _ws_gateway_clean
 }
 
+test_run_gateway_env_reads_api_key_for_pi() {
+  T="$(mktemp -d)"
+  export CEL_GATEWAY_STATE="$T/gateway"
+  PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_gateway_env pi pi-worker
+  assert_eq "${GATEWAY_ENV[1]}" "OMP_GATEWAY_TOKEN=\$(cat '$T/gateway/api-key')"
+  assert_eq "${GATEWAY_ENV[2]}" "CEL_SESSION_ID=pi-worker"
+  unset PROFILE_VIA CEL_GATEWAY_STATE
+  rm -rf "$T"
+}
+
+test_run_gateway_env_preserves_omp_auth_gateway_token_source() {
+  PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_gateway_env omp omp-worker
+  assert_eq "${GATEWAY_ENV[1]}" 'OMP_GATEWAY_TOKEN=$(omp auth-gateway token)'
+  assert_eq "${GATEWAY_ENV[2]}" "CEL_SESSION_ID=omp-worker"
+  unset PROFILE_VIA
+}
+
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a
 # launch that never happened is a side effect nobody asked for.
 test_run_worker_via_gateway_writes_no_models_json_on_a_dry_run() {
