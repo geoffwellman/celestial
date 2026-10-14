@@ -105,14 +105,14 @@ test_run_without_layout_skips_apply() {
   rm -rf "$T"
 }
 # Reviewer mode joins the caller's herdr view (tab "PR reviewer") instead of
-# creating a workspace, injects the pr-reviewer role, and puts the workspace's
-# review model ahead of the role args.
-_ws_review() { _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
+# creating a workspace, injects the pr-reviewer role, and keeps the workspace's
+# review model while using pi regardless of its declared reviewer runtime.
+_ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
 test_run_reviewer_targets_review_tab_with_model() {
   _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
   assert_contains "$out" 'tab "PR reviewer"'
-  assert_contains "$out" "agent start widget-pr-12-review --kind omp"
-  assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" "agent start widget-pr-12-review --kind pi"
+  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model gpt-5.6-sol --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   rm -rf "$T"
 }
