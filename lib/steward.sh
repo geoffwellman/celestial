@@ -1403,8 +1403,10 @@ _steward_mem_pressure_warn() { # <avail-mb>
   while IFS=$'\t' read -r mb dir; do
     [ -n "$dir" ] && top="$top${top:+, }${dir#"$HOME"/.herdr/worktrees/} $(mem_human "$mb")"
   done < <(boxguard_top_trees 5 2>/dev/null || true)
-  acted="$(head -n1 "$(_gc_idle_stop_last)" 2>/dev/null || true)"
-  acted="${acted:+gc stopped idle workers: $acted}"
+  # CEL-130: line 1 is the idle-stop pass (workers, ~M freed), any further
+  # lines the finished reviewers closed - all of it is what was stopped.
+  acted="$(grep . "$(_gc_idle_stop_last)" 2>/dev/null | paste -sd';' - || true)"
+  acted="${acted:+gc stopped idle workers and finished reviewers: $acted}"
   local msg; msg="steward: $(boxguard_warning_text "$acted") Biggest worktrees: ${top:-none attributable}."
   c_warn "$msg"
   [ -f "$flag" ] && return 0

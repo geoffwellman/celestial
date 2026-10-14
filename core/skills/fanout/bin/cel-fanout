@@ -2183,11 +2183,59 @@ cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   [ -n "$(_ledger_entry "$wsdir" "$id")" ] || die "review: no delegation with id '$id'"
+  # THE HEAD IT COVERS (CEL-130): gc closes a finished reviewer only when its
+  # verdict is for the PR's current head - a push since is a new round.
+  local head wt
+  wt="$(_ledger_entry "$wsdir" "$id" | jq -r '.worktree // ""')"
+  head="$( [ -n "$wt" ] && git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
   local cur; cur="$(_ledger_read "$wsdir")"
   _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg v "$verdict" \
-    --arg by "$by" --arg note "$note" --arg at "$(_now_iso)" \
-    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at} else . end)')"
+    --arg by "$by" --arg note "$note" --arg at "$(_now_iso)" --arg head "$head" \
+    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at, head:$head} else . end)')"
   c_ok "$id reviewed: $verdict by $by"
+}
+
+# THE HAND-BACK (CEL-130). Under memory pressure gc may stop a worker that is
+# idle, pushed and waiting only on review - its pane goes, its session file
+# and worktree stay. A reviewer typing findings into that pane would type
+# into nothing, so the findings travel by INBOX, always, and a worker whose
+# pane is gone is resumed IN PLACE (delegate --reuse) to read them. The row
+# keeps everything it had - spec, review, history - except where it now runs.
+cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
+  [ $# -ge 2 ] || die "usage: cel-fanout handback <id> <message> --by <reviewer-alias> [--workspace NAME]"
+  local id="$1" msg="$2"; shift 2
+  local by="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by)        by="$2"; shift 2 ;;
+      --workspace) ws_opt="$2"; shift 2 ;;
+      *) die "handback: unknown argument: $1" ;;
+    esac
+  done
+  [ -n "$by" ] || die "handback: --by <reviewer-alias> is required"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "handback: no delegation with id '$id'"
+  local alias repo branch ws
+  alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
+  repo="$(printf '%s' "$row" | jq -r '.repo // ""')"
+  branch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+  ws="$(ws_name "$wsdir")"
+  [ -n "$alias" ] || die "handback: $id has no worker alias"
+  cmd_inbox send "$alias" "$msg" --from "$by" --workspace "$ws" --kind status >/dev/null \
+    || die "handback: could not deliver to $alias's inbox"
+  if "$HERDR" agent get "$alias" >/dev/null 2>&1; then
+    c_ok "$id: findings delivered to $alias by inbox"
+    return 0
+  fi
+  local tmp; tmp="$(mktemp -d)/revision-$id.md"
+  printf '%s\n' "This is a review revision round for $id on branch $branch, resumed in place after gc stopped you under memory pressure. Run \`cel inbox read --workspace $ws\` - the findings from $by are there. Fix them on this branch, run the gate, commit, push THIS branch only, then \`cel inbox send $by \"pushed <sha> - re-review\" --workspace $ws\` and stop. Your original spec: $(printf '%s' "$row" | jq -r '.spec // ""')" > "$tmp"
+  ( cmd_delegate "$repo" "$branch" "$tmp" --reuse ${ws_opt:+--workspace "$ws_opt"} ) >/dev/null \
+    || die "handback: $alias is stopped and could not be resumed - the findings are in its inbox; resume it with: cel-fanout delegate $repo $branch <spec> --reuse"
+  local now cur; now="$(_ledger_entry "$wsdir" "$branch")"; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson old "$row" --argjson now "${now:-null}" \
+    'map(if .id == $id then ($old + (if $now then {pane:$now.pane, herdr_ws:$now.herdr_ws, alias:$now.alias, state:$now.state} else {} end)) else . end)')"
+  c_ok "$id: $alias was stopped - resumed in place; findings delivered by inbox"
 }
 
 # THE ONE MERGE PATH. Orchestrators are read-only over repositories (see
@@ -2430,6 +2478,7 @@ esac
 
 case "${1:-}" in
   delegate) shift; cmd_delegate "$@" ;;
+  handback) shift; cmd_handback "$@" ;;
   scout)    shift; cmd_scout "$@" ;;
   spike)    shift; cmd_spike "$@" ;;
   wait)     shift; cmd_wait "$@" ;;
@@ -2441,5 +2490,5 @@ case "${1:-}" in
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|handback|land|reconcile ..." ;;
 esac

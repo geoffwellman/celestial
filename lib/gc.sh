@@ -501,26 +501,32 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
 # closed - this file's whole history is bugs where "could not tell" was
 # treated as "nothing there".
 _gc_reviewer_pr_state() { # <repo> <pr> [cwd] [repodir] -> MERGED|CLOSED|OPEN|UNKNOWN
-  local out state cwd wsdir slug
+  local out state
+  out="$(_gc_reviewer_pr_json "$1" "$2" "${3:-}" "${4:-}" state)" || { printf UNKNOWN; return 0; }
+  state="$(printf '%s' "$out" | jq -r 'if (.state | type) == "string" then .state else "UNKNOWN" end' 2>/dev/null)" \
+    || state=UNKNOWN
+  case "$state" in MERGED|CLOSED|OPEN) printf '%s' "$state";; *) printf UNKNOWN;; esac
+}
+
+_gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JSON, or fail
+  local out cwd wsdir slug f="$5"
   cwd="$(pane_cwd "${3:-}")"
   # Asked from the reviewer's own checkout when it still has one, because
   # that is where gh can resolve the repository from its remote.
   if [ -n "$cwd" ] && [ -d "$cwd" ]; then
-    out="$(_gc_gh "$cwd" pr view "$2" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+    out="$(_gc_gh "$cwd" pr view "$2" --json "$f" 2>/dev/null)" || return 1
   else
     # The folder is gone (CEL-89): resolve the GitHub repo the way `cel run
     # reviewer` does (CEL-67) - declared url, else the clone's origin - never
     # from the folder name. The bare name is the last resort.
     IFS=$'\t' read -r wsdir slug < <(_gc_reviewer_slug "$1" "${4:-}") || true
     if [ -n "${slug:-}" ] && [ -n "${wsdir:-}" ]; then
-      out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+      out="$(ws_gh "$wsdir" pr view "$2" --repo "$slug" --json "$f" 2>/dev/null)" || return 1
     else
-      out="$(gh pr view "$2" --repo "$1" --json state 2>/dev/null)" || { printf UNKNOWN; return 0; }
+      out="$(gh pr view "$2" --repo "$1" --json "$f" 2>/dev/null)" || return 1
     fi
   fi
-  state="$(printf '%s' "$out" | jq -r 'if (.state | type) == "string" then .state else "UNKNOWN" end' 2>/dev/null)" \
-    || state=UNKNOWN
-  case "$state" in MERGED|CLOSED|OPEN) printf '%s' "$state";; *) printf UNKNOWN;; esac
+  printf '%s' "$out"
 }
 
 # Which workspace a reviewer's repo belongs to, and its GitHub slug: the row's
@@ -628,6 +634,9 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state repodir
   reviewers_closed=0
+  local rv_what="" rv_prev='{}' rv_next='{}' rv_file
+  rv_file="$(_gc_reviewer_stop_state)"
+  [ -f "$rv_file" ] && rv_prev="$(jq -c 'if type == "object" then . else {} end' "$rv_file" 2>/dev/null || printf '{}')"
   rows="$(reviewers_rows)"
   while IFS= read -r cand; do
     [ -n "$cand" ] || continue
@@ -650,7 +659,25 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       [ "$dry" -eq 1 ] || _gc_unknown_clear "$pane" "$repo" "$pr"
     fi
     case "$state" in
-      OPEN) _gc_reviewers_adopt; continue ;;
+      OPEN)
+        # FINISHED IS A FACT TOO (CEL-130): idle, verdict in the ledger for
+        # the head GitHub shows now, and quiet for the window. Its checkout is
+        # kept - `cel run reviewer --repo --pr` brings the reviewer back.
+        if _gc_reviewer_finished "$repo" "$pr" "$cwd" "$repodir" "$pane" "$status"; then
+          if [ "$dry" -eq 1 ]; then
+            c_ok "would close the finished reviewer for $repo#$pr (verdict recorded, pane $pane)"
+          elif lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
+            drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+            local mbr; mbr="$(mem_tree_rss_mb "$cwd" 2>/dev/null || printf 0)"; [[ "$mbr" =~ ^[0-9]+$ ]] || mbr=0
+            c_ok "closed the reviewer for $repo#$pr (verdict recorded for the current head, pane $pane, freed ~${mbr}M; checkout kept)"
+            reviewers_closed=$((reviewers_closed + 1))
+            rv_what="$rv_what${rv_what:+, }$repo#$pr reviewer ~${mbr}M"
+            continue
+          else
+            c_warn "could not close pane $pane for $repo#$pr - kept"
+          fi
+        fi
+        _gc_reviewers_adopt; continue ;;
       UNKNOWN)
         _gc_reviewers_adopt
         c_warn "UNKNOWN: cannot read the state of $repo#$pr - its reviewer is kept"; continue ;;
@@ -681,6 +708,9 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   # A dry run establishes nothing to write: it closes no pane, drops no
   # stale row and adopts nothing.
   [ "$dry" -eq 1 ] && return 0
+  mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
+  # The steward's pressure warning names what was stopped (CEL-126/130).
+  [ -z "$rv_what" ] || printf '%s\n' "$rv_what" >> "$(_gc_idle_stop_last)" 2>/dev/null || true
   printf '%s' "$drop$adopt" | grep -q '[^][]' || return 0
   reviewers_update --argjson drop "$drop" --argjson adopt "$adopt" \
     'map(select((.pane as $p | $drop | index($p)) == null))
@@ -688,6 +718,61 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
      | $cur + [$adopt[] | select((.pane as $p | $cur | map(.pane) | index($p)) == null)]' \
     || c_warn "could not update the reviewer registry - stale rows remain"
   return 0
+}
+
+# THE FINISHED REVIEWER (CEL-130). On 2026-10-14 four reviewer panes sat
+# `done` with their verdicts recorded, on a box with full swap, and nothing
+# would stop them because their PRs were still open. A reviewer whose verdict
+# is in the ledger for the PR's CURRENT head has nothing left to do until the
+# worker pushes again - and a push is a new head, which its recorded verdict
+# no longer covers. N minutes quiet (gc.reviewer_stop_minutes, default 30;
+# ~5 under memory pressure) and its pane goes.
+_gc_reviewer_stop_state() { printf '%s' "${CEL_GC_REVIEWER_STOP_STATE:-$HOME/.local/state/cel/gc-reviewer-stop.json}"; }
+
+gc_reviewer_stop_minutes() {
+  local n="${CEL_GC_REVIEWER_STOP_MIN:-}"
+  [[ "$n" =~ ^[0-9]+$ ]] || n="$(cel_config_get gc reviewer_stop_minutes 2>/dev/null || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=30
+  if boxguard_pressure; then
+    local p="${CEL_GC_REVIEWER_STOP_PRESSURE_MIN:-5}"
+    [ "$p" -lt "$n" ] && n="$p"
+  fi
+  printf '%s' "$n"
+}
+
+# Reads/writes rv_prev/rv_next from _gc_reviewers. The clock is keyed by pane
+# AND head, so a push restarts it.
+_gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
+  local repo="$1" pr="$2" cwd="$3" repodir="$4" pane="$5" now since key out head branch mins
+  case "$6" in idle|done) ;; *) return 1 ;; esac
+  out="$(_gc_reviewer_pr_json "$repo" "$pr" "$cwd" "$repodir" headRefOid,headRefName)" || return 1
+  head="$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null)"
+  branch="$(printf '%s' "$out" | jq -r '.headRefName // empty' 2>/dev/null)"
+  [ -n "$head" ] && [ -n "$branch" ] || return 1
+  _gc_verdict_recorded "$repo" "$branch" "$head" || return 1
+  now="${CEL_GC_NOW:-$(date +%s)}"; key="$pane@$head"
+  since="$(printf '%s' "$rv_prev" | jq -r --arg k "$key" '.[$k] // empty')"
+  [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
+  mins="$(gc_reviewer_stop_minutes)"
+  if [ $(( now - since )) -lt $(( mins * 60 )) ]; then
+    rv_next="$(printf '%s' "$rv_next" | jq -c --arg k "$key" --argjson n "$since" '.[$k] = $n')"
+    return 1
+  fi
+  return 0
+}
+
+# A verdict `cel-fanout review` wrote for exactly this head, in any ledger.
+_gc_verdict_recorded() { # <repo> <branch> <head>
+  local ws wsdir f
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
+    jq -e --arg r "$1" --arg b "$2" --arg h "$3" \
+      'any(.[]?; .repo == $r and .branch == $b and ((.review.verdict // "") != "") and .review.head == $h)' \
+      "$f" >/dev/null 2>&1 && return 0
+  done < <(registry_names 2>/dev/null || true)
+  return 1
 }
 
 # A reviewer that is staying and has no row gets one, with the facts the
@@ -920,8 +1005,21 @@ gc_idle_stop_minutes() {
   printf '%s' "$n"
 }
 
+# The orchestrator hears which review-waiting workers went, because the
+# next thing that happens to each is a reviewer's hand-back resuming it.
+_gc_tell_waiter_stopped() { # <wsdir> <ws> <ledger> <id> <mb>
+  local repo product
+  repo="$(jq -r --arg id "$4" '[.[]? | select(.id == $id)][0].repo // ""' "$3" 2>/dev/null || true)"
+  product="$(ws_product_of_repo "$1" "$repo" 2>/dev/null || true)"
+  [ -n "$product" ] && [ "$product" != null ] || product="$repo"
+  [ -n "$product" ] || return 0
+  cmd_inbox send "$(_run_agent_name "$product-orch")" \
+    "gc: stopped $4 (~$5M) under memory pressure - idle, pushed, waiting only on review. Session kept; \`cel-fanout handback $4 ...\` resumes it for the next round." \
+    --from gc --workspace "$2" --kind status >/dev/null 2>&1 || true
+}
+
 _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
-  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb
+  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb head waiter prst
   [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
   now="${CEL_GC_NOW:-$(date +%s)}"
   local file prev='{}' next='{}' freed=0 kept=0 what=""
@@ -941,6 +1039,12 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       case "$status" in idle|done) ;; *) continue ;; esac
       since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
       [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
+      # The clock belongs to a HEAD as well as a pane (CEL-130): a worker that
+      # committed since it was first seen idle has been working, whatever its
+      # status says now, and "unchanged since it reported" starts over.
+      head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+      [ "$(printf '%s' "$prev" | jq -r --arg k "$pane#head" '.[$k] // empty')" = "$head" ] || since="$now"
+      next="$(printf '%s' "$next" | jq -c --arg k "$pane#head" --arg h "$head" '.[$k] = $h')"
       if [ $(( now - since )) -lt $(( mins * 60 )) ]; then
         next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
       fi
@@ -950,8 +1054,21 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       fi
       # An OPEN PR means a reviewer or orchestrator will prompt this agent for
       # a revision round: closing it breaks that hand-off. Unknown is kept too.
-      case "$(_gc_pr_state "$wt")" in
+      # CEL-130: under memory pressure a worker waiting ONLY on review may go -
+      # clean, pushed, and its PR's head is the head it has sat on for the
+      # whole window. `cel-fanout handback` resumes it in place for the next
+      # round and delivers the findings by inbox, so nothing types into a
+      # pane that is no longer there. Its orchestrator is told.
+      waiter=0
+      prst="$(_gc_pr_state "$wt")"
+      if [ "$prst" = OPEN ] && boxguard_pressure \
+         && [ -n "$head" ] && [ "$(_gc_gh "$wt" pr view --json headRefOid 2>/dev/null | jq -r '.headRefOid // empty' 2>/dev/null)" = "$head" ]; then
+        waiter=1
+      fi
+      case "$prst" in
         MERGED|CLOSED|NONE) ;;
+        OPEN) [ "$waiter" -eq 1 ] || { kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
+           next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue; } ;;
         *) kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
            next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue ;;
       esac
@@ -969,6 +1086,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       else
         c_warn "could not stop $id (pane $pane) - kept"; kept=$((kept + 1)); continue
       fi
+      [ "$dry" -eq 1 ] || [ "$waiter" -eq 0 ] || _gc_tell_waiter_stopped "$wsdir" "$ws" "$f" "$id" "$mb"
       idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
     done < <(jq -r '.[]? | select((.state // "") as $s | ["running","finished"] | index($s))
                     | [(.id // ""), (.pane // ""), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
