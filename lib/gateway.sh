@@ -207,11 +207,21 @@ gateway_status_json() {
 }
 
 # --- the config file ------------------------------------------------------
+_gateway_claude_cli_version() {
+  local output
+  output="$(claude --version 2>/dev/null)" || return 1
+  if [[ "$output" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+}
 
 # CLIProxyAPI HAS NO FLAG-ONLY MODE (cmd/server/main.go): every setting below
 # exists only in this file, so install writes it and the suite asserts each
 # line by key. The comments say WHY, because the next person to edit this file
 # is deciding whether a line matters.
+
 _gateway_config_write() {
   local f; f="$(gateway_config_file)"
   local d; d="$(gateway_state_dir)"
@@ -264,6 +274,15 @@ remote-management:
   disable-control-panel: false
 EOS
   } > "$tmp"
+  local claude_version; claude_version="$(_gateway_claude_cli_version || true)"
+  if [ -n "$claude_version" ]; then
+    cat >> "$tmp" <<EOF
+
+# Match the installed Claude Code version for Opus model routing.
+claude-header-defaults:
+  user-agent: "claude-cli/$claude_version (external, cli)"
+EOF
+  fi
   chmod 600 "$tmp"
   mv "$tmp" "$f"
 }
