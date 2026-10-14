@@ -47,6 +47,11 @@ _gw_setup() {
   export CEL_SERVICES_STATE="$T/services-state"
   export PI_CODING_AGENT_DIR="$T/pi"
   unset CEL_GATEWAY_STUB
+  cat >"$T/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'Claude Code 2.1.299'
+EOF
+  chmod +x "$T/bin/claude"
   cat >"$T/bin/cli-proxy-api" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/cpa.argv"
@@ -127,6 +132,14 @@ test_gateway_config_enables_management_for_loopback_only() {
   local before; before="$(cat "$k")"
   cmd_gateway install --no-start >/dev/null
   assert_eq "$(cat "$k")" "$before"
+  _gw_teardown
+
+}
+test_gateway_config_derives_claude_user_agent_from_installed_version() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  assert_eq "$(yq -r '.["claude-header-defaults"]["user-agent"]' "$(gateway_config_file)")" \
+    "claude-cli/2.1.299 (external, cli)"
   _gw_teardown
 }
 
