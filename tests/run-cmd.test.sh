@@ -370,7 +370,7 @@ test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() 
   _ws_gateway
   cat >>"$T/workspace.yaml" <<'YAML'
 worker_profiles:
-  gw: { runtime: pi, model: claude-sonnet-4-6, via: gateway }
+  gw: { runtime: pi, model: claude/claude-sonnet-4-6, via: gateway }
 YAML
   cat >"$GWT/gwstub" <<'EOS'
 #!/usr/bin/env bash

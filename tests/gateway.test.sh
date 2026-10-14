@@ -380,6 +380,9 @@ test_pi_models_claude_provider_key_matches_profile_model_id() {
   assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
   _gw_teardown
 }
+test_pi_models_provider_helper_recognises_claude_slash_model() {
+  assert_eq "$(gateway_pi_provider_for_model "claude/claude-sonnet-4-6")" ompgw-claude
+}
 
 # --- omp is gone ----------------------------------------------------------
 

@@ -234,8 +234,16 @@ _profile_gateway_route() { # <profile name>
   PROFILE_ISOLATE=""
   PROFILE_GATEWAY_ACCOUNTS=0
   case "$PROFILE_MODEL" in
-    ompgw/*) ;;
-    *) PROFILE_MODEL="$(gateway_pi_provider_for_model "$PROFILE_MODEL")/$PROFILE_MODEL" ;;
+    ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${PROFILE_MODEL#ompgw/claude/}" ;;
+    ompgw/*|ompgw-claude/*) ;;
+    *)
+      local provider; provider="$(gateway_pi_provider_for_model "$PROFILE_MODEL")"
+      if [ "$provider" = ompgw-claude ]; then
+        PROFILE_MODEL="$provider/${PROFILE_MODEL#claude/}"
+      else
+        PROFILE_MODEL="$provider/$PROFILE_MODEL"
+      fi
+      ;;
   esac
   if ! gateway_installed; then
     PROFILE_VETO="no gateway on this box - cel gateway install"
