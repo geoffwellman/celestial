@@ -13,11 +13,12 @@ set -uo pipefail
 CEL_ROOT="${CEL_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)}"
 [ -x "$CEL_ROOT/bin/cel" ] || exit 0
 
-# The hook runs in the agent's cwd, so `cel inbox read` derives BOTH the
-# workspace and the recipient from where this pane is standing. It must not
-# name a recipient: assuming "root" here meant every pane drained root's
-# queue and advanced root's cursor, so root lost mail it had never seen.
-mail="$("$CEL_ROOT/bin/cel" inbox read 2>/dev/null)" || exit 0
+# Launches provide explicit mailbox identity because reviewers share a tab
+# cwd outside their workspace. Standalone sessions retain cwd-derived routing.
+args=(inbox read)
+[ -z "${CEL_INBOX_ME:-}" ] || args+=(--for "$CEL_INBOX_ME")
+[ -z "${CEL_INBOX_WS:-}" ] || args+=(--workspace "$CEL_INBOX_WS")
+mail="$("$CEL_ROOT/bin/cel" "${args[@]}" 2>/dev/null)" || exit 0
 [ -n "$mail" ] || exit 0
 
 jq -nc --arg m "$mail" '{
