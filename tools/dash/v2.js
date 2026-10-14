@@ -1,5 +1,5 @@
 // Dashboard v2 (CEL-106). Built from the approved mockup; data from
-// /api/state (what the classic page reads) and the /api/v2/* feeds (CEL-105).
+// /api/state and the /api/v2/* feeds (CEL-105).
 //
 // THE #127 RULE, PAGE-WIDE. A refresh every few seconds must never destroy
 // what the owner is doing: open details, typed text, an armed button, an open
@@ -33,7 +33,7 @@ var WSF=recall('cel-v2-ws','all');
 var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
 function inWs(w){return WSF==='all'||!w||w===WSF}
 function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
-// the 8 s refresh; ?refreshMs in the dash config drives the classic page, the
+// the 8 s refresh; ?refreshMs in the dash config is the server-side
 // same knob a test uses here is window.v2refresh()
 var REFRESH_MS=8000;
 window.V2REFRESHES=0;

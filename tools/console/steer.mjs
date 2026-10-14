@@ -71,7 +71,7 @@ export const noReplyLine = (who) => `${who} is working; its reply will land in t
 //
 // `talk <orch>`: the command line becomes a wire to one pane. It is the ONE
 // place the console relays a conversation, and the surface it needs is exactly
-// two verbs wide - both already on the console's allowlist, so nothing about
+// two verbs wide (`cel drive send`, `herdr agent read`) - both on the console's allowlist, so nothing about
 // the guard changes for it. A long design discussion still belongs in the pane
 // itself; the vocabulary says so and `focus` is how you get there.
 export const TALK_LINES = 40;
@@ -80,7 +80,10 @@ export const TALK_REFRESH_MS = 2000;
 // Single quotes, for the same reason as every other place an operator's own
 // words reach a command line (router.mjs): inside double quotes bash still
 // expands `$(...)`, and this line is handed to `bash -c`.
-export const talkPrompt = (who, text) => `herdr agent prompt ${who} ${shellQuote(text)}`;
+// CEL-123: a talk line is MAIL, not keystrokes. It used to be `herdr agent
+// prompt`, typing into the orchestrator's pane mid-turn; `cel drive send`
+// queues it and the inbox hook delivers it when the agent is idle.
+export const talkPrompt = (who, text) => `cel drive send ${who} ${shellQuote(text)}`;
 
 // `recent-unwrapped` rather than the wrapped form: the console draws its own
 // panel with its own width, and text already wrapped to somebody else's

@@ -1162,7 +1162,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       const who = talkRef.current.who;
       setLine('');
       const r = await runCommand(talkPrompt(who, text));
-      say(r.allow ? `sent to ${who} - ${talkLegend(who)}` : `refused: ${r.reason}`);
+      say(r.allow ? `mailed ${who} - ${talkLegend(who)}` : `refused: ${r.reason}`);
       talkRefresh(who);
       return;
     }

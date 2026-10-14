@@ -47,17 +47,14 @@ _vp_run() { # <scenario>
 }
 _vpj() { printf '%s' "$OUT" | jq -r "$1"; }
 
-test_dash_v2page_is_the_front_door_and_classic_stays() {
+test_dash_v2page_is_the_front_door_and_classic_redirects() {
   _vp_boot
-  local v2 classic
+  local v2
   v2="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/")"
-  classic="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/classic")"
   assert_contains "$v2" 'src="/v2.js"'
   assert_contains "$v2" 'src="/decisions.js"'
-  assert_contains "$v2" 'href="/classic"'
-  assert_contains "$classic" 'id="needsyou"'
-  assert_contains "$classic" 'href="/" title="the new dashboard'
-  assert_contains "$classic" 'src="/decisions.js"'
+  if printf '%s' "$v2" | grep -q 'href="/classic"'; then echo "v2 still links /classic"; return 1; fi
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "http://127.0.0.1:$DASH_PORT/classic")" "302 http://127.0.0.1:$DASH_PORT/"
   # the token is spliced in, never the placeholder
   if printf '%s' "$v2" | grep -q '__CEL_CSRF__'; then echo "csrf placeholder left in the page"; return 1; fi
   curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/v2.js" > "$T/v2.js"

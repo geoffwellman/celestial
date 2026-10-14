@@ -65,18 +65,18 @@ export const BINDINGS = {
   unit: [
     ['↑/↓', 'select a worker'],
     ['Ctrl+T', 'cycle the focus: workers → board → PRs → waiting → mail'],
-    ['n nudge', 'herdr agent prompt the selected worker, on the command line'],
+    ['n nudge', 'TYPES INTO the worker\u2019s pane (herdr agent prompt), on the command line'],
     ['R restart', 'start the orchestrator again, when it is not live'],
     ['a answer', 'reply to the selected waiting item and close it'],
     ['Enter', 'the worker view - the answer to \u201cwhy\u201d'],
     ['f focus', 'focus the orchestrator pane'],
     ['m message', 'cel inbox send to the orchestrator, on the command line'],
-    ['t talk', 'relay the command line to the orchestrator\u2019s pane until Esc'],
+    ['t talk', 'mail the orchestrator each line (cel drive send) until Esc'],
     ['s mem', 'sort the workers by memory, biggest first (again for the default order)'],
     ['Esc', 'back to the fleet'],
   ],
   worker: [
-    ['p prompt', 'herdr agent prompt, on the command line'],
+    ['p prompt', 'TYPES INTO the worker\u2019s pane (herdr agent prompt), on the command line'],
     ['f focus', 'focus the worker pane'],
     ['c collect', 'cel-fanout collect, proposed - Enter runs it'],
     ['x release', 'cel-fanout release, proposed - Enter runs it'],
@@ -88,7 +88,7 @@ export const BINDINGS = {
   // it does is a command; this is a wire to a pane, and the way out of it has
   // to be on the screen or an operator force-quits the console to get out.
   talk: [
-    ['Enter', 'send the line to the pane (herdr agent prompt)'],
+    ['Enter', 'mail the line to the orchestrator (cel drive send) - delivered when it is idle'],
     ['', 'the pane\u2019s last 40 lines refresh every 2 s while it is working'],
     ['Esc', 'stop relaying and come back to the panels'],
     ['', 'a long design discussion belongs in the pane itself - use focus'],

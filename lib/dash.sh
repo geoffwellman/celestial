@@ -19,27 +19,30 @@ _CEL_DASH=1
 # shellcheck source=lib/config.sh
 . "${BASH_SOURCE[0]%/*}/config.sh"
 
-# Every registered workspace's own `dash.port`, in registry order - the ports
-# the per-workspace servers used to hold, and now redirect from.
-dash_legacy_ports() {
-  local ws d p
+# The one port: `dash: port:` in the box config, else 7770. CEL-123 retired
+# the per-workspace `dash.port` (and the redirect listeners it drove); a
+# workspace.yaml still carrying one is named by doctor, never obeyed.
+dash_port() {
+  local p
+  p="$(cel_config_get dash port)"
+  [[ "$p" =~ ^[0-9]+$ ]] || p=""
+  printf '%s' "${p:-7770}"
+}
+
+# Doctor's one warning for workspaces whose workspace.yaml still sets
+# `dash.port` - harmless, but it reads as if it still did something.
+dash_workspace_port_warning() {
+  local ws d p names=""
   for ws in $(registry_names); do
     d="$(registry_path "$ws")" || continue
     [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
     p="$(_wsy "$d" '.dash.port')"
-    [[ "$p" =~ ^[0-9]+$ ]] && printf '%s\n' "$p"
+    if [ -n "$p" ] && [ "$p" != null ]; then names+="${names:+, }$ws"; fi
   done
+  if [ -n "$names" ]; then
+    printf '  dashboard: dash.port in workspace.yaml is ignored since CEL-123 (%s) - remove it; the box config dash.port is the one port\n' "$names"
+  fi
   return 0
-}
-
-# The one port: `dash: port:` in the box config, else the first workspace's
-# old port - so a bookmark of the first dashboard keeps working without a
-# redirect hop - else 7770.
-dash_port() {
-  local p
-  p="$(cel_config_get dash port)"
-  [[ "$p" =~ ^[0-9]+$ ]] || p="$(dash_legacy_ports | head -n1)"
-  printf '%s' "${p:-7770}"
 }
 
 dash_host() {
@@ -65,20 +68,17 @@ _dash_ws_config() { # <wsdir> -> one workspace's JSON
 }
 
 _dash_config() { # <port> <host> -> JSON on stdout
-  local port="$1" host="$2" ws d build list="" legacy
+  local port="$1" host="$2" ws d build list=""
   build="v$(tr -d '[:space:]' < "$CEL_ROOT/VERSION" 2>/dev/null || printf '?') $(git -C "$CEL_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'nogit')"
   for ws in $(registry_names); do
     d="$(registry_path "$ws")" || continue
     [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
     list+="$(_dash_ws_config "$d")"$'\n'
   done
-  legacy="$(dash_legacy_ports | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')"
-  printf '%s' "$list" | jq -sc --argjson port "$port" --arg host "$host" --arg build "$build" \
-    --argjson legacy "$legacy" '{
+  printf '%s' "$list" | jq -sc --argjson port "$port" --arg host "$host" --arg build "$build" '{
       # the first workspace is the default wherever a page shows one
       name: (.[0].name // ""), wsdir: (.[0].wsdir // ""), repos: (.[0].repos // []),
       port: $port, host: $host, build: $build,
-      redirectPorts: [$legacy[] | select(. != $port)],
       workspaces: .
     }'
 }
@@ -238,15 +238,13 @@ _dash_ensure() { # <port> <host>
 # update: the old code keeps serving until someone notices. `--restart` stops
 # the dashboard - matched by the server.mjs path plus a port in its own
 # CEL_DASH_CONFIG, never by a bare pkill that would also take a worktree's
-# test server down - and then ensures as usual. The ports given are the
-# dashboard's AND the old per-workspace ones: a box upgrading from one server
-# per workspace still runs those, and they hold the ports the redirects need.
+# test server down - and then ensures as usual.
 _dash_stop() { # <port>...
   local port pid env pids=""
   for pid in $(pgrep -f 'tools/dash/server\.mjs' 2>/dev/null); do
     env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(CEL_DASH_CONFIG|CEL_TESTING)=' || true)"
     # A TEST NEVER STOPS A SERVER IT DID NOT START (CEL-111). _dash_restart
-    # also stops every workspace's legacy dash port, read from the registry -
+    # used to stop every workspace's legacy dash port, read from the registry -
     # and a test without a fixture registry read the live one, matched the
     # box's real dashboard on 7770 and stopped it cleanly, nothing in the
     # journal. Under the suite only a server started under the suite counts.
@@ -282,8 +280,7 @@ _dash_restart() { # <port> <host>
   if _dash_have_unit; then
     systemctl --user stop "$DASH_UNIT.service" >/dev/null 2>&1 || true
   fi
-  # shellcheck disable=SC2046
-  _dash_stop "$1" $(dash_legacy_ports) || { c_err "dash: the old server would not stop - not restarting"; return 1; }
+  _dash_stop "$1" || { c_err "dash: the old server would not stop - not restarting"; return 1; }
   _dash_ensure "$1" "$2"
 }
 
@@ -295,7 +292,7 @@ cmd_dash() { # [--port n] [--host h] [--ensure] [--restart]
       --host)      host="$2"; shift 2 ;;
       --ensure)    ensure=1; shift ;;
       --restart)   restart=1; shift ;;
-      --workspace) die "cel dash: there is one dashboard for the box now - drop --workspace (open /classic?ws=${2:-<name>} for the old per-workspace page)" ;;
+      --workspace) die "cel dash: there is one dashboard for the box now - drop --workspace (the page's workspace filter picks one)" ;;
       *) die "cel dash: unknown argument '$1' (want --port, --host, --ensure, --restart)" ;;
     esac
   done
@@ -350,5 +347,6 @@ dash_doctor_line() {
   if [ "${n:-0}" -gt 1 ]; then
     printf '  %s dashboard servers running, want one - cel dash --restart stops the old per-workspace ones\n' "$n"
   fi
+  dash_workspace_port_warning
   return 0
 }

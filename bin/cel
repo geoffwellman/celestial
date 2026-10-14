@@ -133,7 +133,7 @@ cel - the celestial plane
                                 (cloudflared quick tunnel needs no account)
   cel dash [--port n] [--ensure|--restart]  THE dashboard, one for the box:
                                 every workspace's worktrees, PRs, services,
-                                backlog; /classic?ws=<name> for one workspace
+                                backlog; /api/state?ws=<name> for one workspace
   cel services [--json]         what this box is running on a port: declared
                                 services and every `try` preview - state,
                                 health, memory, and the URL that reaches it

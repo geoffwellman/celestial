@@ -150,14 +150,15 @@ EOF
 test_services_reach_is_the_dash_proxy_url() {
   _svc_setup
   # the one dashboard's port (CEL-107) comes from the box config first;
-  # this fixture has none, so it is the workspace's own
+  # (a workspace's own dash.port is ignored since CEL-123)
   export CEL_CONFIG_FILE="$T/config.yaml"
   local dash; dash="$(_svc_free_port)"
+  printf 'dash:\n  port: %s\n' "$dash" >"$CEL_CONFIG_FILE"
   ( cd "$T/alpha/run" && exec python3 -m http.server "$dash" --bind 127.0.0.1 >/dev/null 2>&1 ) &
   SVC_PID=$!
   local i; for i in 1 2 3 4 5 6 7 8 9 10; do
     curl -sf -m 1 -o /dev/null "http://127.0.0.1:$dash/" && break; sleep 0.3; done
-  printf 'name: alpha\ndash: {port: %s}\nservices:\n  - {name: docs, url: "http://127.0.0.1:4322/"}\n' "$dash" \
+  printf 'name: alpha\nservices:\n  - {name: docs, url: "http://127.0.0.1:4322/"}\n' \
     > "$T/alpha/workspace.yaml"
   CEL_DASH_HOST=127.0.0.1 assert_contains \
     "$(CEL_DASH_HOST=127.0.0.1 "$CEL" services --workspace alpha --json | jq -r '.[0].reach')" \

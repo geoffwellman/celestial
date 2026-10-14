@@ -241,7 +241,6 @@ test_dash_box_panel_is_drawn_once_apart_from_workspace_services() {
   _dash_box_boot alpha
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.boxServices[].name] | join(",")')" "cel-auth-broker"
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.services[].name] | join(",")')" "builder"
-  assert_contains "$(curl -sf "http://127.0.0.1:$DASH_PORT/classic")" 'id="box"'
   _dash_shutdown
 }
 
@@ -254,9 +253,6 @@ test_dash_box_card_carries_every_account_from_cel_quota() {
   _dash_box_boot alpha
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.subscriptions[].account] | join(",")')" "acct-A,acct-B"
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.subscriptions[0].windows[] | .name + (if .scope then " " + .scope else "" end)] | join(",")')" "5h,7d Fable"
-  local page; page="$(curl -sf "http://127.0.0.1:$DASH_PORT/classic")"
-  assert_contains "$page" 'id="subs"'
-  assert_contains "$page" 'renderSubs'
   _dash_shutdown
 }
 
@@ -271,7 +267,5 @@ test_dash_gateway_panel_link_only_on_loopback() {
   assert_contains "$(printf '%s' "$STATE" | jq -r '.gatewayPanel.ssh')" "ssh -L 47411:127.0.0.1:47411"
   local off; off="$(curl -sf -H 'X-Forwarded-For: 100.64.0.9' "http://127.0.0.1:$DASH_PORT/api/state" | jq -r '.gatewayPanel.loopback')"
   assert_eq "$off" true
-  local page; page="$(curl -sf "http://127.0.0.1:$DASH_PORT/classic")"
-  assert_contains "$page" 'Gateway panel'
   _dash_shutdown
 }

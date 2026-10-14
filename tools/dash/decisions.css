@@ -1,5 +1,5 @@
-/* The decisions panel (CEL-99/#125, CEL-101/#127), shared by the classic
-   dashboard and v2 (CEL-106) so there is one copy of the code that decides. */
+/* The decisions panel (CEL-99/#125, CEL-101/#127), used by
+   v2 (CEL-106; the classic page that shared it is gone) so there is one copy of the code that decides. */
 /* needs you (CEL-99): cards stack, buttons wrap, nothing scrolls sideways */
 #needsyou h2 .n,.nygroup summary .n{color:var(--bad);margin-left:6px}
 #needsyou{margin-bottom:16px}

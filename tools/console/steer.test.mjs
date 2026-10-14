@@ -72,11 +72,11 @@ t('the wait is 90 s unless the config says otherwise', () => {
 // THE RELAY. Two commands, both already on the console's allowlist, and
 // nothing else: `talk` is the one place the console passes a conversation
 // through, so the surface it needs is exactly two verbs wide.
-t('a talk line is a herdr prompt, single-quoted like every other', () => {
+t('a talk line is mailbox mail (cel drive send), single-quoted like every other', () => {
   assert.equal(talkPrompt('bundle-orch', 'what is left on ABC-49?'),
-    "herdr agent prompt bundle-orch 'what is left on ABC-49?'");
+    "cel drive send bundle-orch 'what is left on ABC-49?'");
   assert.equal(talkPrompt('bundle-orch', "don't $(rm -rf ~)"),
-    "herdr agent prompt bundle-orch 'don'\\''t $(rm -rf ~)'");
+    "cel drive send bundle-orch 'don'\\''t $(rm -rf ~)'");
   assert.equal(talkRead('bundle-orch'), 'herdr agent read bundle-orch --source recent-unwrapped');
 });
 
