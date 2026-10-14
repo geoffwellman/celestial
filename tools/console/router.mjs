@@ -41,7 +41,7 @@ export const INTENTS = [
   ['start_ticket', 'get work started on a named ticket - pick it up, begin it, put someone on it'],
   ['answer', 'reply to a decision or question waiting on the operator, and close it'],
   ['land', 'land, merge or ship a finished pull request or ticket'],
-  ['nudge', 'prompt a worker or an orchestrator directly, right now - poke it, remind it, tell it to push'],
+  ['nudge', 'type into a worker\u2019s or orchestrator\u2019s pane directly, right now (herdr agent prompt) - poke it, remind it, tell it to push'],
   // CEL-36: the one place the console relays a conversation. `message` is
   // mail with a tap on the shoulder; `talk` is the operator's command line
   // wired to a pane until they press Esc.
@@ -383,7 +383,7 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
 
     // `talk to bundle-orch`. Not a command the guard runs: it is the console's
     // own relay mode, and this line is what the command line carries into it.
-    // Every line typed once it is open becomes `herdr agent prompt`.
+    // Every line typed once it is open becomes `cel drive send` (CEL-123).
     case 'talk': {
       const hit = addresseeIn(s, f);
       if (!hit || hit.ask || !hit.orch) return null;

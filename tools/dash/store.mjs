@@ -67,5 +67,5 @@ export const createStore = () => {
   return { jsonl, json };
 };
 
-// one per process: the classic page and v2 read the same files
+// one per process: /api/state and the v2 feeds read the same files
 export const store = createStore();

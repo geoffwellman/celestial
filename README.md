@@ -645,8 +645,8 @@ both failing the view still renders what the box itself knows.
   measuring.
 - **`cel dash`** — one dashboard for the whole box: an attention queue ("needs
   you"), every in-flight branch joined with its agent + PR + CI state across
-  every workspace, sticky filters, and a prompt box that drives any agent.
-  `/classic?ws=<name>` keeps the old one-workspace page for this release.
+  every workspace, sticky filters, and a composer that mails an orchestrator.
+  The old `/classic` page is retired and redirects to `/`.
 - **`cel publish <file>`** — self-hosted pages server (tailnet-private by
   default, per-document promotion to a public tier). Published pages carry a
   feedback widget that routes straight back to the agent that published them —
@@ -723,7 +723,7 @@ logs to `~/.local/share/cel/logs/`.
 
 | Service | Where | Kept alive by |
 |---|---|---|
-| `cel dash` | one for the box: `dash: port:` in `~/.local/share/cel/config.yaml`, else the first workspace's `dash.port`, else `:7770`; every other workspace's old `dash.port` redirects to it for one release | the steward, every tick |
+| `cel dash` | one for the box: `dash: port:` in `~/.local/share/cel/config.yaml`, else `:7770`; a workspace's own `dash.port` is ignored (doctor names it) | the steward, every tick |
 | `cel pages` | tailnet tier, `:7780` | `cel pages --ensure` |
 | `cel pages --public` | internet-reachable tier, `:7781` | `cel pages --ensure` |
 | `cel pages tunnel` | cloudflared/ngrok, for sharing without Tailscale | started by hand |
