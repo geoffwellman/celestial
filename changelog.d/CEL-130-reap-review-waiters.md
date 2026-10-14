@@ -1,0 +1,2 @@
+### Changed
+- `cel gc` closes a finished reviewer pane (idle, verdict recorded for the PR's current head) after `gc.reviewer_stop_minutes` (30; 5 under memory pressure), keeping its checkout; under pressure it also stops idle, pushed workers waiting only on review and tells their orchestrator. `cel-fanout review` records the head it covers; new `cel-fanout handback` delivers review findings by inbox and resumes a stopped worker in place. The steward's pressure warning lists everything stopped and the memory freed.

@@ -17,7 +17,7 @@ Flow
 4. Deliver ONE verdict per round. Record it first: `cel-fanout review <id> <approved|changes> --by <your alias> --note "<one line>"` - the ledger is where a review exists, and the findings themselves travel by inbox/prompt in step 5. Post to GitHub (`gh pr review <n> --approve` or `--request-changes --body <findings>`) ONLY when your policy block says `post: github`. Findings are concrete: file, line, what breaks, what would fix it. No style nitpicks a linter would catch.
 5. Hand off - your idle pane is the mailbox, so stop after each prompt you send:
    - Approved: `herdr agent prompt <orchestrator> "PR #<n> approved: <one-line why>"`, then stop.
-   - Changes requested: `herdr agent prompt <worker> "PR #<n> review: <findings>. Fix, push the ticket branch, then prompt <your-alias> to re-review."`, then stop. The worker's prompt wakes you for the next round.
+   - Changes requested: `cel-fanout handback <id> "PR #<n> review: <findings>. Fix, push the ticket branch, then prompt <your-alias> to re-review." --by <your alias>`, then stop. It delivers by inbox and, if gc stopped the worker under memory pressure, resumes it in place first - never `herdr agent prompt` a worker. The worker's message wakes you for the next round.
 6. A re-review round covers the delta since your last review, not the whole PR again.
 
 Rules
