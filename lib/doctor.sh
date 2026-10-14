@@ -274,6 +274,40 @@ doctor_setup_lines() { # <wsdir> <name>
   return 0
 }
 
+# pi's auth file stores the Anthropic OAuth expiry alongside its access token.
+# Do not inspect or print the token: an absent expiry is unknown, not valid.
+doctor_pi_anthropic_lines() { # <wsdir> <workspace name> -> one status line or nothing
+  local wsdir="$1" name="$2" profile authfile expires now
+  profile="$(_yqr_ws -r '
+    ([.worker_profiles // {} | to_entries[] | select(.value.runtime == "pi")
+      | select((.value.model // "") | test("^claude"))
+      | select(.value.via != "gateway")] | length) > 0
+    ' "$wsdir")" || return 0
+  [ "$profile" = true ] || return 0
+  authfile="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"
+  [ -r "$authfile" ] || {
+    printf '%s: pi Anthropic credential unknown (auth.json unavailable) - run pi /login, or switch the worker profile to via: gateway\n' "$name"
+    return 0
+  }
+  if [ "$(jq -r '(.anthropic.access // "") != ""' "$authfile" 2>/dev/null || printf false)" != true ]; then
+    printf '%s: pi Anthropic credential unknown (access token unavailable) - run pi /login, or switch the worker profile to via: gateway\n' "$name"
+    return 0
+  fi
+  expires="$(jq -r '.anthropic.expires // empty' "$authfile" 2>/dev/null || true)"
+  if ! [[ "$expires" =~ ^[0-9]+$ ]]; then
+    printf '%s: pi Anthropic credential unknown (expiry unavailable) - run pi /login, or switch the worker profile to via: gateway\n' "$name"
+    return 0
+  fi
+  # pi stores expires in milliseconds since epoch.
+  [ "${#expires}" -gt 10 ] && expires="${expires:0:${#expires}-3}"
+  now="$(date +%s)"
+  if [ "$expires" -le "$now" ]; then
+    printf '%s: pi Anthropic credential expired - run pi /login, or switch the worker profile to via: gateway\n' "$name"
+  else
+    printf '%s: pi Anthropic credential valid until %s\n' "$name" "$(date -d "@$expires" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || printf 'timestamp %s' "$expires")"
+  fi
+}
+
 # workspace.local.yaml is allowed to override role_profiles, add
 # worker_profiles and override env: keys (see lib/yaml.sh:_ws_effective_json;
 # the allowed keys are _WS_LOCAL_KEYS there).
@@ -371,6 +405,7 @@ check_workspaces() {
 
     remote="$(registry_remote "$n")"
     [ -n "$remote" ] || c_warn "$n is local-only (cel ws push $n to publish)"
+    doctor_github_account "$n" "$path" || fail=1
 
     # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` survived the
     # retirement of standing root agents as a name - the top, whoever is
@@ -378,7 +413,9 @@ check_workspaces() {
     local mailline; mailline="$(fleet_mail_doctor_line "$n" 2>/dev/null || true)"
     [ -z "$mailline" ] || c_warn "${mailline#  }"
 
-    doctor_github_account "$n" "$path" || fail=1
+    local pi_authline
+    pi_authline="$(doctor_pi_anthropic_lines "$path" "$n")"
+    [ -z "$pi_authline" ] || c_warn "$pi_authline"
 
     for r in $(ws_repo_names "$path"); do
       url="$(ws_repo_get "$path" "$r" url)"

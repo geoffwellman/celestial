@@ -366,14 +366,74 @@ EOS
 }
 _ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
 
-test_run_worker_via_gateway_uses_the_ompgw_model_and_masks_the_env() {
+test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: claude/claude-sonnet-4-6, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  export PI_CODING_AGENT_DIR="$GWT/pi"
+  printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
-  assert_contains "$out" "--model ompgw/codex/gpt-5.5"
-  assert_contains "$out" "OMP_GATEWAY_TOKEN"
-  assert_contains "$out" "CEL_SESSION_ID"
-  ! printf '%s' "$out" | grep -q "gw-fixture-token" || { echo "the gateway token reached the launch line"; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
+}
+
+test_run_gateway_env_reads_api_key_for_pi() {
+  T="$(mktemp -d)"
+  export CEL_GATEWAY_STATE="$T/gateway"
+  mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
+  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  cat >"$T/bin/omp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' 'omp-test-value' >> "$T/omp.log"
+printf '%s\n' 'omp-test-value'
+EOF
+  chmod +x "$T/bin/omp"
+  local old_path="$PATH" output omp_calls=""
+  export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_gateway_env pi pi-worker
+  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
+  PATH="$old_path"
+  unset PROFILE_VIA CEL_GATEWAY_STATE
+  rm -rf "$T"
+  assert_eq "$output" "pi-test-value"
+  assert_eq "$omp_calls" ""
+}
+
+test_run_gateway_env_preserves_omp_auth_gateway_token_source() {
+  T="$(mktemp -d)"
+  export CEL_GATEWAY_STATE="$T/gateway"
+  mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
+  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  cat >"$T/bin/omp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/omp.log"
+printf '%s\n' 'omp-test-value'
+EOF
+  chmod +x "$T/bin/omp"
+  local old_path="$PATH" output omp_calls
+  export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_gateway_env omp omp-worker
+  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  omp_calls="$(cat "$T/omp.log")"
+  PATH="$old_path"
+  unset PROFILE_VIA CEL_GATEWAY_STATE
+  rm -rf "$T"
+  assert_eq "$output" "omp-test-value"
+  assert_eq "$omp_calls" "auth-gateway token"
 }
 
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a

@@ -207,11 +207,21 @@ gateway_status_json() {
 }
 
 # --- the config file ------------------------------------------------------
+_gateway_claude_cli_version() {
+  local output
+  output="$(claude --version 2>/dev/null)" || return 1
+  if [[ "$output" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+}
 
 # CLIProxyAPI HAS NO FLAG-ONLY MODE (cmd/server/main.go): every setting below
 # exists only in this file, so install writes it and the suite asserts each
 # line by key. The comments say WHY, because the next person to edit this file
 # is deciding whether a line matters.
+
 _gateway_config_write() {
   local f; f="$(gateway_config_file)"
   local d; d="$(gateway_state_dir)"
@@ -264,6 +274,15 @@ remote-management:
   disable-control-panel: false
 EOS
   } > "$tmp"
+  local claude_version; claude_version="$(_gateway_claude_cli_version || true)"
+  if [ -n "$claude_version" ]; then
+    cat >> "$tmp" <<EOF
+
+# Match the installed Claude Code version for Opus model routing.
+claude-header-defaults:
+  user-agent: "claude-cli/$claude_version (external, cli)"
+EOF
+  fi
   chmod 600 "$tmp"
   mv "$tmp" "$f"
 }
@@ -328,16 +347,16 @@ gateway_pi_dir() { printf '%s' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"; }
 # accounts, and pi speaks both; Claude models go through `anthropic-messages`
 # because that is the protocol they were designed for, everything else through
 # `openai-completions`.
-#
-# THE PROVIDER KEY IS STILL `ompgw`. lib/profiles.sh prefixes a `via: gateway`
-# model with exactly that string and lib/run.sh names it in the launch
-# environment; both belong to other tickets, so renaming the key here would
-# break every gateway profile on the box for a cosmetic gain. The rename is
-# noted in .agent/result.md as a follow-up.
-#
+# The profile prefix and models.json provider keys are derived from the same
+# helper; Claude's Anthropic endpoint is a distinct pi provider.
+gateway_pi_provider_for_model() { # <model id>
+  case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude' ;; *) printf 'ompgw' ;; esac
+}
+
 # apiKey and the session header are written as VARIABLE NAMES. pi expands them
 # from the pane's environment at launch, so no key and no session id is ever
 # in this file.
+
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
   models="$(gateway_models_json | jq -c '[ (.data // [])[] | {
@@ -348,21 +367,22 @@ gateway_pi_models_write() { # [models.json path]
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" '
+  local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" '
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
     | .providers = ((.providers // {}) + {
         ompgw: {
           name: "cel gateway",
           baseUrl: $url,
-          apiKey: "$CEL_GATEWAY_API_KEY",
+          apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $rest },
-        "ompgw-claude": {
+        ($claude_provider): {
           name: "cel gateway (anthropic)",
-          baseUrl: $url,
-          apiKey: "$CEL_GATEWAY_API_KEY",
+          baseUrl: $root,
+          apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
