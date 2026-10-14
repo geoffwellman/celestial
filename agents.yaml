@@ -57,9 +57,9 @@ agents:
     # command-line argument (invalid_agent_argument), so the role travels as
     # a file path.
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt-file }
-    # UserPromptSubmit drains mail when a turn starts; Stop presents mail that
-    # arrived during the turn and blocks completion until the agent acts.
-    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-drain.sh","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
+    # The box-wide prefs install UserPromptSubmit once. Stop handles mail that
+    # arrives during this turn; neither hook wakes an idle Claude session.
+    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
     resume: { flag: --resume, value: id }
     model_flag: --model
     # `claude --help`: "--effort <level>  Effort level for the current session

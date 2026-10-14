@@ -474,15 +474,16 @@ work, not evidence that it is safe to delete.
 are mid-sentence merges with your draft. Routine agent-to-agent traffic goes
 through `cel inbox` instead - a JSONL mailbox per workspace, with a read
 cursor per *reader* so a standing root pane and the console can both drain
-root's mail without stealing each other's place - and delivery is out-of-band:
-on claude, recipients run a `Monitor` background task (`cel inbox watch`, or
-`cel inbox watch --all-workspaces` for the console) so new mail arrives as a
-notification, and a `UserPromptSubmit` hook drains anything missed on your
-next turn. omp has neither, so `cel run` loads `tools/hooks/inbox.omp.ts` on
-root and orchestrator panes: it watches the mailbox and raises `ui.notify`,
-then injects unread mail into the next turn once - it never touches the
-composer. Console `tell` to a live orchestrator is mail alone; `nudge` and
-`talk` are the deliberate interrupts. Escalations that truly cannot wait still prompt, deliberately.
+root's mail without stealing each other's place. Delivery is inbox-only, but
+idle wake depends on runtime. Claude Code's global `UserPromptSubmit` hook
+drains mail when the next turn is submitted; its launch-time `Stop` hook blocks
+once for mail arriving during an active turn. Neither wakes an idle Claude
+session. The Pi/OMP inbox extension watches mail, raises `ui.notify`, and
+injects unread items into a turn; a runtime with a persistent `Monitor` may
+also run `cel inbox watch`, but Claude Code does not expose `Monitor`.
+Console `tell` is mail alone. `nudge` and `talk` are the owner's deliberate
+interrupts; direct `herdr agent prompt` is otherwise limited to one-time
+launch kickoffs. Escalations remain inbox items, not pane prompts.
 
 **Mail to `root` is for a person: `escalation`, `decision`, `blocked`.**
 Ticket status is the ledger's job — `cel-fanout status` is the authority and
@@ -705,7 +706,7 @@ Each tick, in order:
 | **untracked PRs** | a PR older than a day whose branch carries no ticket id — invisible on the board, so it is surfaced |
 | **blocked agents** | any agent waiting on input is named every tick, deliberately without dedup; that is your queue |
 | **stalled workers** | the one failure no inbox watcher can see: a worker whose provider stream died sends no mail and reads as `idle`. A fatal pane marker (`server_error`, `F5 to Retry`) quiet for 15 minutes, or an agent gone from the roster, escalates to root naming the ticket, pane, stall age, whether the branch is pushed and what is uncommitted — louder when the work is unlanded, because that is when delay costs the work itself |
-| **stale mailboxes** | a recipient with unread mail older than 30 minutes has probably lost its inbox monitor, so its pane is told to re-arm and drain |
+| **stale mailboxes** | unread mail older than 30 minutes is surfaced to the owning orchestrator for follow-up; it may simply be waiting for a submitted turn in a runtime without idle wake, and the steward never types into the recipient's pane |
 | **page feedback** | feedback whose publishing pane is gone stays a warning until someone drains it |
 | **ready tickets** | tickets in the workspace's `trigger_state` with no branch anywhere are handed to the product's orchestrator, else root — this is what makes "move it to Todo" start work |
 | **servers** | `cel dash --ensure` - the one dashboard, never one per workspace; expired public shares are deleted, not merely refused |
@@ -731,26 +732,29 @@ logs to `~/.local/share/cel/logs/`.
 `--ensure` is idempotent: it starts the service only if it is not already
 answering, so it is safe on a loop.
 
-### The hooks — the only things that touch a live session
+### Hooks — session-bound actions
 
-Four hooks, all registered in the agent's settings by `cel setup`, all failing
-open on their own errors so housekeeping can never take an agent down:
+Claude's global preferences install the submit hook; `cel run` adds the
+active-turn Stop hook. Other hooks are configured where their runtime uses
+them. Hook programs fail open on their own errors:
 
 | Hook | Event | What it does |
 |---|---|---|
-| `inbox-drain.sh` | `UserPromptSubmit` | drains the pane's own mailbox at the start of a turn, so mail is never typed over what you were writing |
-| `inbox-guard.sh` | `Stop` | if the pane has **unresolved decisions**, blocks the turn's end once with the count and the re-arm instruction — a dead monitor can no longer go unnoticed |
+| `inbox-drain.sh` | Claude `UserPromptSubmit` | drains the pane's mailbox when a turn is submitted; it does not wake an idle session |
+| `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
+| `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
 | `orchestrator-guard.sh` | `PreToolUse` | **read-only orchestrators**: from a root or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools). Workers are untouched. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
 
-Identity for all of them comes from the pane's working directory — a workspace
-root is `root`, `<ws>/repos/<repo>` is that repo's orchestrator, a worktree is
-a worker — so nothing needs env plumbing through herdr.
+Inbox hooks use explicit `CEL_INBOX_ME`/`CEL_INBOX_WS` when the launcher
+provides them; otherwise the inbox command derives identity from the working
+directory.
 
-`cel inbox watch` is the other half of the inbox — a `Monitor` an agent arms
-inside its own session to notice mail arriving while it is idle. It is not a
-daemon; when it dies, the Stop hook and the steward's stale-mailbox check are
-what catch it.
+`cel inbox watch` streams one line per new item for a runtime task that can
+monitor its output. Claude Code has no persistent `Monitor`: its hooks only
+run at turn boundaries. Pi/OMP's inbox extension supplies idle wake. The
+steward's stale-mailbox signal asks the owning orchestrator to check; it does
+not imply a Claude hook failed.
 
 ### Services
 

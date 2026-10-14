@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CEL_ROOT/tools/hooks/inbox-drain.sh\"",
+            "command": "__CEL_INBOX_DRAIN_COMMAND__",
             "timeout": 10
           }
         ]

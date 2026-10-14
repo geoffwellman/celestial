@@ -1309,10 +1309,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       fi
       ;;
   esac
-  # Out-of-band inbox delivery for runtimes without Monitor/UserPromptSubmit -
-  # on EVERY role, not just the orchestrators (CEL-95): reviewers send a
-  # worker CHANGES by inbox, and a pi worker without the hook sat `done` on
-  # two unread reviews for eight hours.
+  # Add runtime-specific inbox extension args to every role, not just
+  # orchestrators: reviewers send worker revisions through mail too. Claude's
+  # global UserPromptSubmit and launch-time Stop hooks are configured elsewhere.
   _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
   _run_retry_overlay_args "$runtime" "$role"

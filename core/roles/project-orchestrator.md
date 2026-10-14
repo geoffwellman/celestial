@@ -50,7 +50,9 @@ Your INBOX
 Review traffic - a message from a reviewer is highest priority after blocked workers
 - "PR approved": act on it now - merge if policy allows, otherwise surface it in your status and move the next ticket.
 - Escalation (rounds exhausted, findings not converging): decide or relay to root immediately. Never leave a reviewer's report unanswered - a review pipeline that waits for you to be nudged is a failed pipeline.
-- Reviewer and worker hand off to each other directly during rounds; you do not relay their messages. If either pane has been idle over an hour mid-review, `cel inbox send` it a nudge to continue instead of waiting.
+- Reviewer and worker hand off directly during rounds. If either pane is idle
+  over an hour, send an inbox nudge; Pi/OMP can wake through their extension,
+  while Claude sees it on a later submitted turn, not while idle.
 
 Rules
 - Workers are external agents in herdr worktree panes (`cel-fanout delegate`),

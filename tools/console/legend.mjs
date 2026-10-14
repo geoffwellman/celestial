@@ -88,7 +88,7 @@ export const BINDINGS = {
   // it does is a command; this is a wire to a pane, and the way out of it has
   // to be on the screen or an operator force-quits the console to get out.
   talk: [
-    ['Enter', 'mail the line to the orchestrator (cel drive send) - delivered when it is idle'],
+    ['Enter', 'mail the line to the orchestrator (cel drive send); delivery follows its runtime (Claude at turn boundaries, Pi/OMP can wake idle)'],
     ['', 'the pane\u2019s last 40 lines refresh every 2 s while it is working'],
     ['Esc', 'stop relaying and come back to the panels'],
     ['', 'a long design discussion belongs in the pane itself - use focus'],
