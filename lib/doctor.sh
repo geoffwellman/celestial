@@ -405,6 +405,7 @@ check_workspaces() {
 
     remote="$(registry_remote "$n")"
     [ -n "$remote" ] || c_warn "$n is local-only (cel ws push $n to publish)"
+    doctor_github_account "$n" "$path" || fail=1
 
     # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` survived the
     # retirement of standing root agents as a name - the top, whoever is
