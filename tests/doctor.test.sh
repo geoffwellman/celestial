@@ -257,14 +257,13 @@ EOF
 name: alpha
 runtime: { worker: pi }
 worker_profiles:
-  default: { runtime: pi, model: claude-opus-4, provider: anthropic }
+  default: { runtime: pi, model: claude-opus-4 }
 EOF
 }
 
 test_doctor_reports_expired_pi_anthropic_credential_with_relogin_fix() {
   _doctor_pi_fixture
-  mkdir -p "$T/pi"
-  printf '{"anthropic":{"expires":1}}\n' >"$T/pi/auth.json"
+  printf '{"anthropic":{"access":"fixture-token","expires":1}}\n' >"$T/pi/auth.json"
   local out; out="$(doctor_pi_anthropic_lines "$T/ws" alpha)"
   assert_contains "$out" "expired"
   assert_contains "$out" "pi /login"
@@ -274,7 +273,7 @@ test_doctor_reports_expired_pi_anthropic_credential_with_relogin_fix() {
 
 test_doctor_reports_valid_pi_anthropic_credential() {
   _doctor_pi_fixture
-  printf '{"anthropic":{"expires":4102444800}}\n' >"$T/pi/auth.json"
+  printf '{"anthropic":{"access":"fixture-token","expires":4102444800000}}\n' >"$T/pi/auth.json"
   assert_contains "$(doctor_pi_anthropic_lines "$T/ws" alpha)" "valid"
   _doctor_teardown
 }

@@ -526,27 +526,6 @@ test_profile_via_gateway_resolves_to_the_ompgw_model() {
   assert_eq "$PROFILE_VIA" gateway
   _gws_clean
 }
-test_profile_via_gateway_claude_model_uses_the_claude_provider_key() {
-  _gws
-  cat >>"$T/workspace.yaml" <<'YAML'
-worker_profiles:
-  gw: { runtime: pi, model: claude-sonnet-4-6, via: gateway }
-YAML
-  cat >"$GWT/gwstub" <<'EOS'
-#!/usr/bin/env bash
-case "$1" in
-  ready) exit 0 ;;
-  models) printf '%s\n' '{"data":[{"id":"claude-sonnet-4-6"}]}' ;;
-esac
-EOS
-  chmod +x "$GWT/gwstub"
-  gateway_pi_models_write "$GWT/models.json"
-  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
-  profile_resolve "$T" gw >/dev/null 2>&1
-  local provider="${PROFILE_MODEL#*/}"; provider="${provider%%/*}"
-  assert_eq "$provider" "$(jq -r '.providers | keys[] | select(. == "ompgw-claude")' "$GWT/models.json")"
-  _gws_clean
-}
 # A dead gateway is a veto, not a warning: the account list behind it is
 # unreachable and the pane would idle on an auth error nobody is watching.
 test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {

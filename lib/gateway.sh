@@ -328,16 +328,16 @@ gateway_pi_dir() { printf '%s' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"; }
 # accounts, and pi speaks both; Claude models go through `anthropic-messages`
 # because that is the protocol they were designed for, everything else through
 # `openai-completions`.
-#
-# THE PROVIDER KEY IS STILL `ompgw`. lib/profiles.sh prefixes a `via: gateway`
-# model with exactly that string and lib/run.sh names it in the launch
-# environment; both belong to other tickets, so renaming the key here would
-# break every gateway profile on the box for a cosmetic gain. The rename is
-# noted in .agent/result.md as a follow-up.
-#
+# The profile prefix and models.json provider keys are derived from the same
+# helper; Claude's Anthropic endpoint is a distinct pi provider.
+gateway_pi_provider_for_model() { # <model id>
+  case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude' ;; *) printf 'ompgw' ;; esac
+}
+
 # apiKey and the session header are written as VARIABLE NAMES. pi expands them
 # from the pane's environment at launch, so no key and no session id is ever
 # in this file.
+
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
   models="$(gateway_models_json | jq -c '[ (.data // [])[] | {
@@ -348,21 +348,21 @@ gateway_pi_models_write() { # [models.json path]
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" '
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" '
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
     | .providers = ((.providers // {}) + {
         ompgw: {
           name: "cel gateway",
           baseUrl: $url,
-          apiKey: "$CEL_GATEWAY_API_KEY",
+          apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $rest },
         "ompgw-claude": {
           name: "cel gateway (anthropic)",
-          baseUrl: $url,
-          apiKey: "$CEL_GATEWAY_API_KEY",
+          baseUrl: $root,
+          apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"

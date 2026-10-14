@@ -1418,14 +1418,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # the pane needs two variables set before the agent starts:
   #
   #   OMP_GATEWAY_TOKEN  the bearer, READ IN THE PANE by omp itself. The plane
-  #                      never handles the value: it types a line containing a
-  #                      command substitution, so no token reaches a launch
-  #                      line, a log, a pane's scrollback or this process.
+  #                      never handles the value: it types a command
+  #                      substitution, so no token reaches any launch log.
   #   CEL_SESSION_ID     the balancer's key. One worker, one key, one account
   #                      for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
   if [ "${PROFILE_VIA:-}" = gateway ]; then
-    GATEWAY_ENV=(export 'OMP_GATEWAY_TOKEN=$(omp auth-gateway token)' "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
+    GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=\$(cat '$(gateway_state_dir)/api-key')" "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
     # models.json is the owner's file, so a dry run must not touch it.
     if [ "$dry_run" -eq 0 ]; then
       gateway_pi_models_write \

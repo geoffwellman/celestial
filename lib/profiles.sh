@@ -233,7 +233,10 @@ _profile_gateway_route() { # <profile name>
   [ -n "$PROFILE_THINKING" ] || PROFILE_THINKING="$(ws_thinking "$PROFILE_WSDIR")"
   PROFILE_ISOLATE=""
   PROFILE_GATEWAY_ACCOUNTS=0
-  case "$PROFILE_MODEL" in ompgw/*) ;; *) PROFILE_MODEL="ompgw/$PROFILE_MODEL" ;; esac
+  case "$PROFILE_MODEL" in
+    ompgw/*) ;;
+    *) PROFILE_MODEL="$(gateway_pi_provider_for_model "$PROFILE_MODEL")/$PROFILE_MODEL" ;;
+  esac
   if ! gateway_installed; then
     PROFILE_VETO="no gateway on this box - cel gateway install"
   elif ! gateway_ready; then
@@ -241,7 +244,12 @@ _profile_gateway_route() { # <profile name>
   else
     # The provider as the GATEWAY spells it: ompgw/openai-codex/gpt-5.5 is
     # three segments, and the account list is keyed by the middle one.
-    local prov="${PROFILE_MODEL#ompgw/}"; prov="${prov%%/*}"
+    local prov
+    case "$PROFILE_MODEL" in
+      ompgw-claude/*) prov=claude ;;
+      ompgw/*) prov="${PROFILE_MODEL#ompgw/}"; prov="${prov%%/*}" ;;
+      *) prov="${PROFILE_MODEL%%/*}" ;;
+    esac
     PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count "$prov" 2>/dev/null || printf 0)"
     [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null \
       || PROFILE_VETO="the gateway has no usable $prov account (a disabled credential is not listed at all) - cel gateway login $prov"

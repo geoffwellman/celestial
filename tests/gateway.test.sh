@@ -358,23 +358,26 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   assert_eq "$(jq -r '.providers.ompgw.models[0].contextWindow' "$f")" 272000
   # Claude models get pi's Anthropic surface, which the gateway serves at
   # /v1/messages - the same accounts, the richer protocol.
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)"
   assert_eq "$(jq -r '.providers["ompgw-claude"].api' "$f")" anthropic-messages
   assert_eq "$(jq -r '.providers["ompgw-claude"].models[0].id' "$f")" "claude-sonnet-4-6"
   assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
   # The api-key is a VARIABLE NAME: pi expands it in the pane, so no secret
   # is ever in this file.
-  assert_eq "$(jq -r '.providers.ompgw.apiKey' "$f")" '$CEL_GATEWAY_API_KEY'
+  assert_eq "$(jq -r '.providers.ompgw.apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
   local key; key="$(cat "$(gateway_state_dir)/api-key")"
   ! grep -q "$key" "$f" || { echo "the api-key was written into models.json"; _gw_teardown; return 1; }
   _gw_teardown
 }
-test_pi_models_claude_provider_uses_profile_provider_and_pane_token_name() {
+test_pi_models_claude_provider_key_matches_profile_model_id() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
   gateway_pi_models_write "$T/pi/models.json"
-  local f="$T/pi/models.json"
+  local f="$T/pi/models.json" model_id provider_id
+  model_id="ompgw-claude/$(jq -r '.providers["ompgw-claude"].models[0].id' "$f")"
+  provider_id="$(gateway_pi_provider_for_model "claude-sonnet-4-6")/claude-sonnet-4-6"
+  assert_eq "$provider_id" "$model_id"
   assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
-  assert_eq "$(jq -r '.providers["ompgw-claude"].models[0].id' "$f")" "claude-sonnet-4-6"
   _gw_teardown
 }
 

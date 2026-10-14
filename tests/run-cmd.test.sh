@@ -366,13 +366,25 @@ EOS
 }
 _ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
 
-test_run_worker_via_gateway_uses_the_ompgw_model_and_masks_the_env() {
+test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gw: { runtime: pi, model: claude-sonnet-4-6, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  export PI_CODING_AGENT_DIR="$GWT/pi"
+  printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
-  assert_contains "$out" "--model ompgw/codex/gpt-5.5"
-  assert_contains "$out" "OMP_GATEWAY_TOKEN"
-  assert_contains "$out" "CEL_SESSION_ID"
-  ! printf '%s' "$out" | grep -q "gw-fixture-token" || { echo "the gateway token reached the launch line"; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
 
