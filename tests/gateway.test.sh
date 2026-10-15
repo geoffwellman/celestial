@@ -78,7 +78,7 @@ url=""
 for a in "\$@"; do case "\$a" in http://*|https://*) url="\$a" ;; esac; done
 case "\$url" in
   */healthz)   exit "\${GW_DOWN:-0}" ;;
-  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-5-20251101","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-4-20250514","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-4-1-20250805","context_length":200000,"max_output_tokens":64000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}' ;;
+  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}' ;;
   *) exit 7 ;;
 esac
 EOF
@@ -400,20 +400,18 @@ test_pi_models_use_canonical_opus_thinking_capabilities_only() {
   gateway_pi_models_write "$T/pi/models.json"
   local f="$T/pi/models.json"
   local opus55='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5")'
-  local opus48='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-8")'
-  local opus45='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-5-20251101")'
-  local opus4='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-20250514")'
+  local other_opus='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-8")'
   local unknown='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
   assert_eq "$(jq -r "$opus55 | .reasoning" "$f")" true
   assert_eq "$(jq -c "$opus55 | .thinkingLevelMap" "$f")" \
     '{"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"}'
   assert_eq "$(jq -r "$opus55 | .compat.forceAdaptiveThinking" "$f")" true
   assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoEffort" "$f")" true
-  assert_eq "$(jq -c "$opus48 | .thinkingLevelMap" "$f")" '{"xhigh":"xhigh","max":"max"}'
-  assert_eq "$(jq -r "$opus48 | .compat.forceAdaptiveThinking" "$f")" true
-  assert_eq "$(jq -r "$opus45 | .reasoning" "$f")" true
-  assert_eq "$(jq -r "$opus45 | has(\"thinkingLevelMap\")" "$f")" false
-  assert_eq "$(jq -r "$opus4 | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoSystemMessages" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoToolChanges" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsTemperature" "$f")" false
+  assert_eq "$(jq -r "$opus55 | .compat.supportsStrictTools" "$f")" true
+  assert_eq "$(jq -r "$other_opus | has(\"reasoning\")" "$f")" false
   assert_eq "$(jq -r "$unknown | has(\"reasoning\")" "$f")" false
   assert_eq "$(jq -r '.providers.ompgw.models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
   _gw_teardown
