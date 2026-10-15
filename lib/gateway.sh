@@ -377,9 +377,13 @@ gateway_pi_provider_for_model() { # <model id>
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
   models="$(gateway_models_json | jq -c '
+    # Native Claude 5.5 capabilities. The gateway publishes bare ids, so
+    # without this the generic 128000/8192 fallback would cap the window and
+    # output and drop adaptive thinking.
     def configured_opus_metadata:
-      if .id == "claude-opus-5-5" then
-        . + { reasoning: true,
+      if .id == "claude-opus-5-5" or .id == "claude-sonnet-5-5" then
+        . + { contextWindow: 1000000, maxTokens: 128000, input: ["text", "image"],
+              reasoning: true,
               thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium",
                                   high: "high", xhigh: "xhigh", max: "max" },
               compat: { supportsMidConvoEffort: true, supportsMidConvoSystemMessages: true,
