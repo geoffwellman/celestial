@@ -454,9 +454,17 @@ _gateway_omp_exclusions() {
 # An account is excluded when an excluded address is in its filename OR
 # anywhere in its JSON, so a renamed file cannot slip in. FAILS CLOSED with no
 # exclusion configured: the pool would then be every claude account.
+#
+# Owner opt-in: `gateway.omp_include_all: true` (the literal word, nothing
+# else) permits an EMPTY exclusion list, so every claude account - personal
+# included - joins the omp pool. Precedence: configured exclusions ALWAYS win;
+# the opt-in only lifts the empty-list refusal. Absent or any other value
+# (yes, 1, on, typos) keeps the fail-closed refusal.
+_gateway_omp_include_all() { [ "$(cel_config_get gateway omp_include_all)" = true ]; }
+
 gateway_omp_scope_plan() {
   local ex; ex="$(_gateway_omp_exclusions)"
-  if [ -z "$ex" ]; then
+  if [ -z "$ex" ] && ! _gateway_omp_include_all; then
     c_err "no gateway.omp_exclude in $(cel_config_file) - the omp-scoped pool would include every claude account; set it to the personal address(es) first"
     return 1
   fi
@@ -473,9 +481,11 @@ gateway_omp_scope_plan() {
     lc="$(printf '%s ' "$base"; jq -c . "$f" 2>/dev/null)"
     lc="$(printf '%s' "$lc" | tr 'A-Z' 'a-z')"
     excluded=false
-    while IFS= read -r e; do
-      case "$lc" in *"$e"*) excluded=true ;; esac
-    done <<<"$ex"
+    if [ -n "$ex" ]; then
+      while IFS= read -r e; do
+        case "$lc" in *"$e"*) excluded=true ;; esac
+      done <<<"$ex"
+    fi
     rows="$rows$(jq -c --arg file "$base" --argjson ex "$excluded" --arg want "$GATEWAY_OMP_PREFIX" '
       (.prefix // "") as $p
       | ($file | sub("^claude-"; "") | .[0:6]) as $id
@@ -493,7 +503,8 @@ gateway_omp_scoped_count() {
   jq '[.[] | select(.action == "keep")] | length' <<<"$plan"
 }
 
-# Pass: an exclusion is configured and no excluded account carries the prefix.
+# Pass: an exclusion is configured (or the owner opted in with
+# gateway.omp_include_all: true) and no excluded account carries the prefix.
 gateway_omp_scope_check() {
   local plan; plan="$(gateway_omp_scope_plan)" || return 1
   local bad; bad="$(jq -r '[.[] | select(.action == "remove") | .id] | join(" ")' <<<"$plan")"
@@ -634,7 +645,9 @@ cel gateway - several subscriptions behind one loopback door
   cel gateway omp-scope [--check|--apply|--json]
                                      omp's scoped claude pool: prefix every
                                      account but gateway.omp_exclude, via the
-                                     running gateway's management API
+                                     running gateway's management API; an
+                                     empty exclusion list is refused unless
+                                     gateway.omp_include_all: true
 EOS
 }
 
