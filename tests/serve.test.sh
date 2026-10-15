@@ -86,6 +86,27 @@ test_serve_explicitly_adopts_then_stops_exact_pid() {
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
   rm -rf "$t"
 }
+test_serve_does_not_reap_adopted_unit_with_unknown_worktree() {
+  local t remained=0 stopped=0
+  t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl" CEL_SERVE_PROC_DATA=''
+  export CEL_SERVE_ADOPT_DATA='[{"unit":"demo","memory_mb":10,"age_seconds":1,"worktree":"","command":"server"}]'
+  export CEL_SERVE_NOW=100 CEL_SERVE_IDLE_SECONDS=3600 CEL_SERVE_PRESSURE_IDLE_SECONDS=3600
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '#!/usr/bin/env bash\ncase "$*" in *" stop "*) printf "%s\\n" "$*" >> "$CEL_SERVE_STATE/calls";; esac\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  boxguard_pressure() { return 1; }
+  cmd_inbox() { return 0; }
+  serve_adopt demo worker alpha 3600 0
+  serve_sweep
+  [ -f "$CEL_SERVE_STATE/demo.json" ] && remained=1
+  [ -f "$CEL_SERVE_STATE/calls" ] && stopped=1
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA CEL_SERVE_NOW CEL_SERVE_IDLE_SECONDS CEL_SERVE_PRESSURE_IDLE_SECONDS
+  rm -rf "$t"
+  [ "$remained" = 1 ] || { echo 'unknown worktree was treated as gone'; return 1; }
+  [ "$stopped" = 0 ] || { echo 'unknown worktree unit was stopped'; return 1; }
+}
+
 
 test_serve_reaps_a_ledgered_unit_past_its_ttl() {
   local t
