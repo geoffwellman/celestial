@@ -789,6 +789,12 @@ test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
   }
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
   assert_eq "$(cat "$T/agent-env")" "reviewer-test-api-key|widget-pr-12-review"
+  local models="$GWT/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$models")" '$OMP_GATEWAY_TOKEN'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].api' "$models")" "anthropic-messages"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$models")" "http://127.0.0.1:8317"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$models")" '$CEL_SESSION_ID'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5") | .id' "$models")" "claude-opus-5-5"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
