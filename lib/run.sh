@@ -224,16 +224,16 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   printf '%s ' "$out"
 }
 
-# The prefix is TYPED, not run: `herdr pane run` would execute it as its own
-# command and the variables would be gone before the agent started. send-text
-# leaves it on the shell's input line for `herdr agent start` to complete.
-# A pane that refuses the text still gets its agent - an unmarked worker is a
-# kept worktree, which is the safe direction.
-_run_mark_launch() { # <pane> <env-prefix>
-  local pane="$1" prefix="$2"
+# Gateway credentials and role markers share one typed shell prefix; `pane run`
+# executes in a child context, so its exports disappear before agent start.
+# Ordinary role marks are best effort; gateway credentials are required.
+_run_mark_launch() { # <pane> <env-prefix> [required]
+  local pane="$1" prefix="$2" required="${3:-0}"
   [ -n "$pane" ] && [ -n "$prefix" ] || return 0
-  herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1 \
-    || c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  if ! herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
+    [ "$required" != 1 ] || die "cel run: could not stage gateway credentials in pane $pane"
+    c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  fi
   return 0
 }
 
@@ -1030,15 +1030,53 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
   return 0
 }
 
-_run_gateway_env() { # <runtime> <agent-name> mutates caller's GATEWAY_ENV
-  local runtime="$1" agent_name="$2" token
+_run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates GATEWAY_ENV
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" session_id="${4:-${CEL_SESSION_ID:-$agent_name}}" token session_var
   if [ "$runtime" = pi ]; then
-    token="\$(cat '$(gateway_state_dir)/api-key')"
+    local key_file; key_file="$(_gateway_key_file)"
+    if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
+      die "gateway API key file is missing, empty, or unreadable - cel gateway install"
+    fi
+    token="\$(cat '$key_file')"
   else
     token="\$(omp auth-gateway token)"
   fi
-  GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
+  printf -v session_var 'CEL_SESSION_ID=%q' "$session_id"
+  GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "$session_var")
 }
+
+_run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-models] [session-id]
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" write_models="${4:-1}" session_id="${5:-}"
+  GATEWAY_ENV=()
+  [ "${PROFILE_VIA:-}" = gateway ] || return 0
+  _run_gateway_env "$runtime" "$agent_name" "$require_key" "$session_id"
+  if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
+    gateway_pi_models_write \
+      || die "gateway launch: could not read the model list - cel gateway status"
+  fi
+}
+
+_run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
+  case "$1" in
+    opus) printf 'claude-opus-5-5' ;;
+    sonnet)
+      jq -r '
+        [
+          .data[]?.id? // empty
+          | select(test("^claude-sonnet-[0-9]+(-[0-9]+)?(-[0-9]{8})?$"))
+          | . as $id
+          | capture("^claude-sonnet-(?<major>[0-9]+)(-(?<minor>[0-9]+))?(-(?<date>[0-9]{8}))?$") as $v
+          | {id: $id, major: ($v.major | tonumber),
+             minor: (($v.minor // "0") | tonumber), date: ($v.date // "")}
+        ]
+        | sort_by([.major, .minor, .date])
+        | last.id // empty
+      ' <<< "$2"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
@@ -1152,8 +1190,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
-      runtime="$(ws_review "$wsdir" runtime)"
-      [ -n "$runtime" ] || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
+      # Reviewers use pi because its inbox extension wakes an idle session on
+      # incoming mail; the workspace review block continues to own the model.
+      runtime=pi
+      [ -n "$(ws_review "$wsdir" runtime)" ] \
+        || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
       alias_name="$repo/pr-$pr-review"
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
@@ -1260,8 +1301,50 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     # the `review:` block's model.
     [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
   fi
+  # Profiles can change runtime for other roles; reviewer delivery depends on
+  # pi's idle inbox extension, so keep pi execution and honor explicit flags.
+  [ "$role" != reviewer ] || runtime=pi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+  # Reviewers never let pi infer a provider: aliases resolve from the current
+  # gateway catalog, and explicit Claude IDs are routed through that gateway.
+  [ "$role" != reviewer ] || {
+    local reviewer_model_id reviewer_models=""
+    case "$model" in
+      sonnet|opus)
+        gateway_installed || die "cel run reviewer: no gateway on this box - cel gateway install"
+        gateway_ready || die "cel run reviewer: the gateway is not answering on $(gateway_url) - cel gateway status"
+        reviewer_models="$(gateway_models_json)" \
+          || die "cel run reviewer: cannot read model ids from the configured gateway"
+        reviewer_model_id="$(_run_reviewer_catalog_model "$model" "$reviewer_models")"
+        [ -n "$reviewer_model_id" ] \
+          || die "cel run reviewer: gateway catalog advertises no Claude Sonnet model"
+        PROFILE_MODEL="ompgw-claude/$reviewer_model_id"
+        ;;
+      ompgw-claude/*) PROFILE_MODEL="$model" ;;
+      ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${model#ompgw/claude/}" ;;
+      claude/*) PROFILE_MODEL="${model#claude/}" ;;
+      claude-*) PROFILE_MODEL="$model" ;;
+      *) die "cel run reviewer: model '$model' is unsupported; use sonnet, opus, or an advertised Claude model id" ;;
+    esac
+    PROFILE_WSDIR="$wsdir"
+    PROFILE_VIA=gateway
+    _profile_gateway_route reviewer
+    [ -z "$PROFILE_VETO" ] || die "cel run reviewer: $PROFILE_VETO"
+    reviewer_model_id="${PROFILE_MODEL#ompgw-claude/}"
+    [ -n "$reviewer_model_id" ] \
+      || die "cel run reviewer: model '$model' has no Claude model id"
+    if [ -z "$reviewer_models" ]; then
+      reviewer_models="$(gateway_models_json)" \
+        || die "cel run reviewer: cannot read model ids from the configured gateway"
+    fi
+    if ! jq -e --arg id "$reviewer_model_id" \
+      '[.data[]? | select(.id == $id)] | length > 0' \
+      <<< "$reviewer_models" >/dev/null; then
+      die "cel run reviewer: configured gateway does not advertise Claude model '$reviewer_model_id'"
+    fi
+    model="$PROFILE_MODEL"
+  }
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
@@ -1331,6 +1414,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
+  local dry_envprefix="$envprefix" prefix_required=0
 
   # RESUME (CEL-63). Root and the orchestrators carry their conversation
   # across a restart; workers and reviewers never do - each is one ticket or
@@ -1432,13 +1516,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
-  if [ "${PROFILE_VIA:-}" = gateway ]; then
-    _run_gateway_env "$runtime" "$agent_name"
-    # models.json is the owner's file, so a dry run must not touch it.
-    if [ "$dry_run" -eq 0 ]; then
-      gateway_pi_models_write \
-        || die "cel run: could not read the gateway's model list - cel gateway status"
-    fi
+  _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))"
+  if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
+    prefix_required=1
+    envprefix="${GATEWAY_ENV[*]}; $envprefix"
+    dry_envprefix="export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****; $dry_envprefix"
   fi
 
 
@@ -1447,7 +1529,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     if [ "$dry_run" -eq 1 ]; then
       printf 'git worktree add --detach %s <head of %s#%s>\n' "$review_path" "$repo" "$pr"
       printf 'herdr tab "PR reviewer": split its largest pane, or a new tab per %s panes\n' "$_RUN_REVIEW_TAB_CAP"
-      printf 'herdr pane send-text <pane> %s\n' "$envprefix"
+      printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
       printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
         "$agent_name" "$runtime" "$(_run_dry_agent_args)"
       return 0
@@ -1456,7 +1538,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     have jq    || die "cel run: jq is not on PATH"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
     pane_label_set "$pane_id" "$label"
-    _run_mark_launch "$pane_id" "$envprefix"
+    _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
@@ -1471,7 +1553,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   if [ -n "$restart_pane" ]; then
     if [ "$dry_run" -eq 1 ]; then
       printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$restart_pane"
-      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$envprefix"
+      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$dry_envprefix"
       printf 'herdr agent start %s --kind %s --pane %s -- %s\n' \
         "$agent_name" "$runtime" "$restart_pane" "$(_run_dry_agent_args)"
       return 0
@@ -1480,10 +1562,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       || die "cel run $role --restart: could not send the exit keys to pane $restart_pane"
     _run_restart_wait "$restart_pane" \
       || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
-    [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
     pane_label_set "$restart_pane" "$label"
     tab_label_set "$restart_pane" "$label"
-    _run_mark_launch "$restart_pane" "$envprefix"
+    _run_mark_launch "$restart_pane" "$envprefix" "$prefix_required"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null \
       || die "cel run $role --restart: herdr could not start $agent_name in $restart_pane"
     _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
@@ -1515,9 +1596,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     [ -n "$layout" ] && printf 'herdr-workspace-manager apply %s\n' "$layout"
     # Values MASKED: the session id is not a secret but the bearer beside it
     # is, and a preview that prints one teaches people to paste both.
-    [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
-      || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
-    printf 'herdr pane send-text <pane> %s\n' "$envprefix"
+    printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
     printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
       "$agent_name" "$runtime" "$(_run_dry_agent_args)"
     return 0
@@ -1536,17 +1615,14 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     pane_id="$(_run_apply_layout "$layout" "$ws_id" "$wsdir" "$pane_id")"
   fi
 
-  # Typed into the pane's own shell, so the export survives into the agent the
-  # next command starts - and the bearer is expanded there, by omp, never here.
-  [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
 
   pane_label_set "$pane_id" "$label"
   # A declared layout titles its own tabs; overwriting one would undo that.
   [ -n "$layout" ] || tab_label_set "$pane_id" "$label"
 
-  # ...and the role mark goes on the launch LINE, after any pane run above:
-  # it must not outlive the command it marks.
-  _run_mark_launch "$pane_id" "$envprefix"
+  # Role and gateway environment are typed on the launch line before Herdr
+  # starts the agent, so exports live in the shell that execs the runtime.
+  _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
 

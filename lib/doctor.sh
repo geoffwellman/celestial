@@ -276,12 +276,25 @@ doctor_setup_lines() { # <wsdir> <name>
 
 # pi's auth file stores the Anthropic OAuth expiry alongside its access token.
 # Do not inspect or print the token: an absent expiry is unknown, not valid.
+# Review-only profiles are excluded: cel run reviewer always routes them
+# through the gateway, so their availability does not depend on pi's login.
 doctor_pi_anthropic_lines() { # <wsdir> <workspace name> -> one status line or nothing
   local wsdir="$1" name="$2" profile authfile expires now
   profile="$(_yqr_ws -r '
-    ([.worker_profiles // {} | to_entries[] | select(.value.runtime == "pi")
-      | select((.value.model // "") | test("^claude"))
-      | select(.value.via != "gateway")] | length) > 0
+    . as $ws
+    | [
+        ($ws.worker_profiles // {} | to_entries[]) as $p
+        | select($p.value.runtime == "pi")
+        | select(($p.value.model // "") | test("^claude"))
+        | select($p.value.via != "gateway")
+        | ([
+            ($ws.role_profiles // {} | to_entries[]?),
+            ($ws.repos // [] | .[]? | .role_profiles // {} | to_entries[]?),
+            ($ws.products // [] | .[]? | .role_profiles // {} | to_entries[]?)
+          ] | map(select(.value == $p.key)) | map(.key)) as $roles
+        | select(($roles | length) == 0 or any($roles[]; . != "reviewer"))
+      ]
+    | length > 0
     ' "$wsdir")" || return 0
   [ "$profile" = true ] || return 0
   authfile="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"

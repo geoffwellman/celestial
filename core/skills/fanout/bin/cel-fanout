@@ -856,7 +856,7 @@ cmd_delegate() {
     profile="$(role_profile_for "$wsdir" scout "$repo")"
   fi
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"
-  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO="" PROFILE_VIA=""
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$rt"
     [ -z "$PROFILE_VETO" ] || die "delegate: profile '$profile' is vetoed - $PROFILE_VETO"
@@ -899,6 +899,14 @@ cmd_delegate() {
   # The hook reads the mailbox named for this pane's alias (CEL-95).
   local inbox_me=""
   [ -z "$(agent_inbox_hook "$rt" file)" ] || inbox_me="$alias"
+  local -a GATEWAY_ENV=()
+  _run_profile_gateway_setup "$rt" "$alias" 1 1 "$alias"
+  local launch_prefix; launch_prefix="$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
+  local gateway_required=0
+  if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
+    launch_prefix="${GATEWAY_ENV[*]}; $launch_prefix"
+    gateway_required=1
+  fi
 
   # THE WORKER'S SHELL MUST CARRY THE WORKSPACE ENV, and nothing else gives it
   # one. A worktree lives at ~/.herdr/worktrees/<repo>/<branch> - OUTSIDE the
@@ -936,8 +944,8 @@ cmd_delegate() {
   # worker whose runtime rewrites its argv is invisible to `cel gc` without
   # it, and its worktree is then kept for ever. Pass-through only - the text
   # is rendered there, typed here, so both paths mark a pane identically.
-  if ! _ledger_spawn "$HERDR" pane send-text "$pane" \
-       "$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")" > /dev/null 2>&1; then
+  if ! _ledger_spawn "$HERDR" pane send-text "$pane" "$launch_prefix" > /dev/null 2>&1; then
+    [ "$gateway_required" != 1 ] || die "delegate: could not stage gateway credentials in pane $pane"
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
   fi
 

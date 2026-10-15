@@ -445,14 +445,27 @@ the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
 
-Declare a reviewer in `workspace.yaml`:
+Declare a reviewer in `workspace.yaml` with a gateway-backed Claude model:
 
 ```yaml
-review: { runtime: omp, model: gpt-5.6-sol }
+review: { runtime: pi, model: sonnet }
 ```
 
-and orchestrators start one reviewer pane per PR. A reviewer delivers one
-verdict per round and **records it in the delegation ledger** — `cel-fanout
+`sonnet` resolves to the highest versioned Claude Sonnet ID in the live gateway
+catalog; `opus` maps to `claude-opus-5-5`. Explicit advertised Claude IDs and
+`ompgw-claude/<model>` IDs are preserved. `cel run reviewer` checks that the
+gateway is installed, ready, has a Claude account, and advertises the selected
+model before opening a pane. Missing gateway/model data refuses launch; pi's
+ambient provider and Anthropic login are never used. Configure a reachable
+Claude account with `cel gateway` before starting reviewers.
+
+
+Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
+the idle reviewer when new mail arrives, so request-changes and re-review
+round trips do not wait for someone to type. `review.runtime` stays in the
+workspace schema for compatibility but no longer selects the reviewer
+runtime; `review.model` selects the requested Claude model. A reviewer delivers
+one verdict per round and **records it in the delegation ledger** — `cel-fanout
 review <id> approved|changes --by <alias>` — which is where a review exists;
 `cel-fanout land` accepts that verdict on repos where the PR author and the
 reviewer share one GitHub account, and GitHub approval remains the authority
@@ -1008,14 +1021,15 @@ worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 ```
 
-`cel run worker --profile gw` writes the gateway's providers into
+For Pi profiles, `cel run worker --profile gw` and `cel-fanout delegate|scout`
+when bound to a gateway profile write the gateway's providers into
 `~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
 and the model list comes from the gateway's own `/v1/models`, with plain ids:
 Claude models go through pi's `anthropic-messages` surface, everything else
-through `openai-completions`), and sets `CEL_SESSION_ID` in the pane, which is
-the **only** thing affinity can pin an account by — pi sends no session
-identity of its own, so without the injected `x-session-id` header every worker
-on the box is the same anonymous session.
+through `openai-completions`). Every gateway launch stages `OMP_GATEWAY_TOKEN`
+and `CEL_SESSION_ID` in the actual target pane's launch shell; Pi resolves its
+key there and the generated provider stores only the variable name. Delegated
+workers and scouts use their own alias as the session affinity key.
 
 Three things are worth knowing before you rely on it:
 
@@ -1167,6 +1181,15 @@ commits in [`externals.yaml`](externals.yaml), and Pi extension versions in
 [`tools/pi/extensions.txt`](tools/pi/extensions.txt). External overlays must
 declare `source` and a full 40-character Git `ref`; legacy version-only
 declarations are rejected.
+
+The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
+Updating Pi on an already-configured box is explicit because `cel setup` keeps
+installed runtime versions. Apply the pin in [`agents.yaml`](agents.yaml) with
+its scoped npm installer (currently `npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@1.2.0"`), then restart existing Pi panes and verify `pi --version`. Do not install the unrelated bare `pi` npm package.
+Gateway-backed Pi upgrades are a matched rollout: `gateway_pi_models_write`
+must emit the provider key, protocol, URL, and model list consumed by the same
+revision's `cel run`, whose shell launch line exports that key. Update them
+together and keep the generated-config/launch regression green.
 
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow

@@ -36,6 +36,13 @@ case "$1 $2" in
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
                      else echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"'"${STUB_STATUS:-idle}"'"}]}}'; fi;;
+  "pane send-text")
+    if [ -n "${STUB_PREFIX_FILE:-}" ]; then printf '%s' "$4" > "$STUB_PREFIX_FILE"; fi;;
+  "agent start")
+    if [ -n "${STUB_AGENT_ENV_FILE:-}" ]; then
+      prefix="$(cat "$STUB_PREFIX_FILE")"
+      bash -c "$prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$STUB_AGENT_ENV_FILE"
+    fi;;
   *) echo '{}';;
 esac
 EOF
@@ -727,6 +734,75 @@ test_scout_uses_its_own_role_binding() {
   assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" scout-model
   assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "scout-model"
   rm -rf "$T"
+}
+
+# Gateway credentials must be staged in the actual pane shell before a worker
+# or scout starts. `pane run` creates a child context and cannot establish the
+# variables consumed by Pi's generated provider configuration.
+test_gateway_worker_and_scout_processes_receive_token_and_session() {
+  _fanout_setup
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gateway-opus: { runtime: pi, model: claude/claude-opus-5-5, via: gateway, thinking: high }
+role_profiles:
+  worker: gateway-opus
+  scout: gateway-opus
+YAML
+  local gwt previous_pi_set previous_pi previous_no_quota previous_session_set previous_session
+  previous_pi_set="${PI_CODING_AGENT_DIR+x}"
+  previous_pi="${PI_CODING_AGENT_DIR:-}"
+  previous_no_quota="${CEL_NO_QUOTA_PROBE:-}"
+  previous_session_set="${CEL_SESSION_ID+x}"
+  previous_session="${CEL_SESSION_ID:-}"
+  gwt="$(mktemp -d)"
+  export CEL_CONFIG_FILE="$gwt/config.yaml" CEL_GATEWAY_STATE="$gwt/state"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  mkdir -p "$CEL_GATEWAY_STATE/auth" "$gwt/pi"
+  printf '{}' > "$CEL_GATEWAY_STATE/auth/claude-aaaaaa11-someone@example.invalid.json"
+  printf 'scout-test-api-key\n' > "$CEL_GATEWAY_STATE/api-key"
+  export PI_CODING_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
+  cat > "$gwt/gateway-stub" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5","context_length":200000,"max_output_tokens":8192}]}' ;;
+esac
+EOF
+  chmod +x "$gwt/gateway-stub"
+  export CEL_GATEWAY_STUB="$gwt/gateway-stub"
+  export STUB_PREFIX_FILE="$gwt/prefix" STUB_AGENT_ENV_FILE="$gwt/agent-env"
+  printf 'scout brief\n' > "$T/brief.md"
+  local out
+  if ! out="$(cd "$T" && "$BIN" scout widget "$T/brief.md" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    rm -rf "$T" "$gwt"
+    return 1
+  fi
+  local scout_alias; scout_alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  local scout_env; scout_env="$(cat "$STUB_AGENT_ENV_FILE")"
+  local scout_start; scout_start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+
+  : > "$STUB_LOG"
+  if ! out="$(cd "$T" && "$BIN" delegate widget WG-GW "$T/spec.md" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    rm -rf "$T" "$gwt"
+    return 1
+  fi
+  local worker_alias; worker_alias="$(jq -r '.[] | select(.shape == "ship") | .alias' "$T/.cel/delegations.json")"
+  local worker_env; worker_env="$(cat "$STUB_AGENT_ENV_FILE")"
+  local worker_start; worker_start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  local model_key; model_key="$(jq -r '.providers["ompgw-claude"].apiKey' "$gwt/pi/models.json" 2>/dev/null || true)"
+  assert_eq "$scout_env" "scout-test-api-key|$scout_alias"
+  assert_contains "$scout_start" "--model ompgw-claude/claude-opus-5-5"
+  assert_eq "$worker_env" "scout-test-api-key|$worker_alias"
+  assert_contains "$worker_start" "--model ompgw-claude/claude-opus-5-5"
+  assert_eq "$model_key" '$OMP_GATEWAY_TOKEN'
+  rm -rf "$T" "$gwt"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_NO_QUOTA_PROBE
+  unset STUB_PREFIX_FILE STUB_AGENT_ENV_FILE
+  if [ -n "$previous_pi_set" ]; then export PI_CODING_AGENT_DIR="$previous_pi"; else unset PI_CODING_AGENT_DIR; fi
+  if [ -n "$previous_session_set" ]; then export CEL_SESSION_ID="$previous_session"; else unset CEL_SESSION_ID; fi
+  [ -z "$previous_no_quota" ] || export CEL_NO_QUOTA_PROBE="$previous_no_quota"
 }
 # CEL-68: an omp delegate/scout keeps its profile's model - prewalk off.
 test_omp_delegate_and_scout_launch_with_no_prewalk() {

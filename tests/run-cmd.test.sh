@@ -104,17 +104,19 @@ test_run_without_layout_skips_apply() {
   ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "layout applied with none declared"; return 1; }
   rm -rf "$T"
 }
-# Reviewer mode joins the caller's herdr view (tab "PR reviewer") instead of
-# creating a workspace, injects the pr-reviewer role, and puts the workspace's
-# review model ahead of the role args.
-_ws_review() { _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
+# Reviewer mode joins the caller's herdr view (tab "PR reviewer"), injects the
+# reviewer role, and resolves a Claude model through the configured gateway.
+_ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"; }
 test_run_reviewer_targets_review_tab_with_model() {
-  _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
   assert_contains "$out" 'tab "PR reviewer"'
-  assert_contains "$out" "agent start widget-pr-12-review --kind omp"
-  assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" "agent start widget-pr-12-review --kind pi"
+  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_run_reviewer_requires_pr_and_review_block() {
   _ws_review; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --dry-run )
@@ -167,7 +169,8 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
 # CEL-95: pi workers and reviewers carry the inbox extension and their own
 # identity, so mail addressed to the pane's alias wakes it.
 test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
-  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n' >> "$T/workspace.yaml"
+  _reviewer_gateway_fixture
+  printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
@@ -177,7 +180,80 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
-  rm -rf "$T"
+  _ws_gateway_clean
+}
+
+test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model claude-opus-5-5 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--kind pi"
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
+  assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  _ws_gateway_clean
+}
+# Workspace aliases are intentional: resolve them from the configured
+# gateway catalog instead of letting pi choose an ambient provider.
+test_run_pi_reviewer_resolves_sonnet_from_gateway_catalog() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_resolves_opus_alias_to_gateway_model() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: opus\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_preserves_explicit_gateway_model_id() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model ompgw-claude/claude-sonnet-4-6 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_refuses_sonnet_when_catalog_has_no_candidate() {
+  _reviewer_gateway_fixture
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    echo "reviewer accepted sonnet without a gateway catalog model"; _ws_gateway_clean; return 1
+  fi
+  assert_contains "$out" "gateway catalog advertises no Claude Sonnet model"
+  _ws_gateway_clean
 }
 
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
@@ -347,7 +423,10 @@ _ws_gateway() {
 worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
+  GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET="${PI_CODING_AGENT_DIR+x}"
+  GWT_PREVIOUS_PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-}"
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
+  export PI_CODING_AGENT_DIR="$GWT/pi"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
   # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
@@ -364,7 +443,30 @@ EOS
   chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
   PATH="$GWT/bin:$PATH"
 }
-_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
+_ws_gateway_clean() {
+  rm -rf "$T" "$GWT"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
+  if [ -n "${GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET:-}" ]; then
+    export PI_CODING_AGENT_DIR="$GWT_PREVIOUS_PI_CODING_AGENT_DIR"
+  else
+    unset PI_CODING_AGENT_DIR
+  fi
+  unset GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET GWT_PREVIOUS_PI_CODING_AGENT_DIR
+}
+
+_reviewer_gateway_fixture() {
+  _ws_gateway
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-4-5-20250929"},{"id":"claude-sonnet-5-5"},{"id":"claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'reviewer-test-api-key\n' >"$GWT/state/api-key"
+  printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
+}
 
 test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
@@ -387,6 +489,7 @@ EOS
   assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
+
 
 test_run_gateway_env_reads_api_key_for_pi() {
   T="$(mktemp -d)"
@@ -590,7 +693,8 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
 # guaranteed that directory had any relationship to the pull request. A
 # reviewer now gets a detached checkout AT THE PR'S HEAD, of its own.
 _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $HEAD_SHA
-  _ws_review
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   export CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REVIEW_DIR="$T/reviews"
   export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log"
   : > "$HERDR_LOG"
@@ -625,6 +729,8 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_contains "$(cat "$HERDR_LOG")" "pane send-text w1:p9 export OMP_GATEWAY_TOKEN="
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_SESSION_ID=widget-pr-12-review"
   local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
   [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
   [ "$cwd" != "$T/repos/widget" ] || { echo "reviewer opened in the orchestrator's checkout"; return 1; }
@@ -635,6 +741,64 @@ test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
+
+test_reviewer_refuses_to_start_without_gateway_api_key() {
+  _ws_pr_fixture
+  rm -f "$CEL_GATEWAY_STATE/api-key"
+  local out
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" \
+    && { echo "reviewer started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gateway API key" \
+    || { reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" \
+    || { echo "reviewer process started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+test_reviewer_test_fixture_does_not_mutate_callers_pi_models() {
+  local caller_pi; caller_pi="$(mktemp -d)"
+  printf '%s\n' '{"providers":{"personal":{"baseUrl":"https://example.invalid"}}}' >"$caller_pi/models.json"
+  export PI_CODING_AGENT_DIR="$caller_pi"
+  _ws_pr_fixture
+  local before; before="$(cat "$caller_pi/models.json")"
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$caller_pi/models.json")" "$before"
+  reviewer_checkout_release widget 12
+  _ws_gateway_clean
+  rm -rf "$caller_pi"
+}
+
+test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
+  _ws_pr_fixture
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane run")
+        shift 3
+        bash -c "$*" >/dev/null
+        ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start")
+        bash -c "$typed_prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$T/agent-env"
+        ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$T/agent-env")" "reviewer-test-api-key|widget-pr-12-review"
+  local models="$GWT/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$models")" '$OMP_GATEWAY_TOKEN'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].api' "$models")" "anthropic-messages"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$models")" "http://127.0.0.1:8317"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$models")" '$CEL_SESSION_ID'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5") | .id' "$models")" "claude-opus-5-5"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
 
 # A claim about "main" anchored to a directory is not a claim. The brief names
 # the head it is reading and the base it compares against, and says how to tell
@@ -721,8 +885,8 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
 }
 
 # ---- CEL-70: panes act as the workspace's GitHub account ------------------
-_ws_gh_acct() { # <user>
-  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\ngithub:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
+_gh_acct_setup() { # <user> adds GitHub auth to existing T
+  printf 'github:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
   mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -736,21 +900,27 @@ exit 0
 SH
   chmod +x "$T/bin/gh"; export PATH="$T/bin:$PATH"
 }
+_ws_gh_acct() { # <user>
+  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"
+  _gh_acct_setup "$1"
+}
 test_launch_env_without_github_block_is_unchanged() {
   _ws
   assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md CARGO_BUILD_JOBS=3 "
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
-  _ws_gh_acct acct-b
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  _gh_acct_setup acct-b
   local out role
   for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
     # shellcheck disable=SC2086
     out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
     assert_contains "$out" 'gh auth token --user acct-b'
-    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; rm -rf "$T"; return 1;; esac
+    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; _ws_gateway_clean; return 1;; esac
   done
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_launch_refuses_when_the_declared_user_is_not_logged_in() {
   _ws_gh_acct acct-z

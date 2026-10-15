@@ -81,8 +81,8 @@ test_omp_guard_is_still_a_separate_fail_open_adapter() {
 
 # CEL-76: an idle orchestrator with an empty composer wakes itself for mail
 # via pi.sendMessage({..}, {triggerTurn:true}); drafts/streaming stay notify-only.
-_omp_wake_harness() { # <inbox-dir> <mode: idle|draft|streaming|burst|throws>
-  CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
+_omp_wake_harness() { # <inbox-dir> <mode: idle|draft|streaming|burst|throws> [reader]
+  CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME="${3:-widget-orch}" CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=800 HOOK="$HOOK" node --no-warnings - <<'JS'
 const { execFileSync } = require('node:child_process');
 (async () => {
@@ -100,7 +100,7 @@ const { execFileSync } = require('node:child_process');
   const mod = await import(process.env.HOOK);
   mod.default(pi);
   await fire('session_start', {});
-  const send = (msg) => execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', 'widget-orch', msg, '--workspace', 'demo'], { stdio: 'ignore' });
+  const send = (msg) => execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', process.env.CEL_INBOX_ME, msg, '--workspace', 'demo'], { stdio: 'ignore' });
   await new Promise((r) => setTimeout(r, 1200));
   const n = mode === 'burst' ? 3 : 1;
   for (let i = 0; i < n; i++) send('msg-' + i);
@@ -128,6 +128,19 @@ test_omp_inbox_idle_empty_composer_wakes_once() {
   assert_eq "$(jq -r '.sent[0].m.customType' <<<"$out")" "cel-inbox"
   assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "msg-0"
   assert_eq "$(jq -r '.turn' <<<"$out")" "null"
+}
+
+# Idle reviewer mail wakes by the alias set by cel run reviewer.
+test_pi_reviewer_inbox_mail_wakes_without_user_input() {
+  command -v node >/dev/null || return 0
+  local d out
+  d="$(mktemp -d)"
+  out="$(_omp_wake_harness "$d" idle widget-pr-12-review)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_eq "$(jq -r '.sent[0].o.triggerTurn' <<<"$out")" "true"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "msg-0"
+  rm -rf "$d"
 }
 
 test_omp_inbox_draft_is_notify_only() {
