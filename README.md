@@ -445,18 +445,20 @@ the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
 
-Declare a reviewer in `workspace.yaml` with an explicit Claude model reached
-through the box's gateway:
+Declare a reviewer in `workspace.yaml` with a gateway-backed Claude model:
 
 ```yaml
-review: { runtime: pi, model: ompgw-claude/claude-opus-5-5 }
+review: { runtime: pi, model: sonnet }
 ```
 
-`cel run reviewer` validates that the gateway is installed, ready, has a Claude
-account, and advertises the requested model before opening a pane. Runtime-
-dependent aliases such as `sonnet` are refused rather than delegated to pi's
-ambient provider configuration. Configure a reachable Claude account with
-`cel gateway` before starting reviewers.
+`sonnet` resolves to the highest versioned Claude Sonnet ID in the live gateway
+catalog; `opus` maps to `claude-opus-5-5`. Explicit advertised Claude IDs and
+`ompgw-claude/<model>` IDs are preserved. `cel run reviewer` checks that the
+gateway is installed, ready, has a Claude account, and advertises the selected
+model before opening a pane. Missing gateway/model data refuses launch; pi's
+ambient provider and Anthropic login are never used. Configure a reachable
+Claude account with `cel gateway` before starting reviewers.
+
 
 Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
 the idle reviewer when new mail arrives, so request-changes and re-review

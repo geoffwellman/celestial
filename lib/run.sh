@@ -1040,6 +1040,28 @@ _run_gateway_env() { # <runtime> <agent-name> mutates caller's GATEWAY_ENV
   GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
 }
 
+_run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
+  case "$1" in
+    opus) printf 'claude-opus-5-5' ;;
+    sonnet)
+      jq -r '
+        [
+          .data[]?.id? // empty
+          | select(test("^claude-sonnet-[0-9]+(-[0-9]+)?(-[0-9]{8})?$"))
+          | . as $id
+          | capture("^claude-sonnet-(?<major>[0-9]+)(-(?<minor>[0-9]+))?(-(?<date>[0-9]{8}))?$") as $v
+          | {id: $id, major: ($v.major | tonumber),
+             minor: (($v.minor // "0") | tonumber), date: ($v.date // "")}
+        ]
+        | sort_by([.major, .minor, .date])
+        | last.id // empty
+      ' <<< "$2"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
   local restart=0 fresh=0 pane_opt=""
@@ -1268,27 +1290,38 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   [ "$role" != reviewer ] || runtime=pi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
-  # Reviewers run on pi, whose ambient provider selection is not a reliable
-  # contract (e.g. `sonnet` may select an unconfigured Bedrock provider). Route
-  # explicit Claude model ids through the configured gateway and reject
-  # runtime-dependent aliases before a pane can start.
+  # Reviewers never let pi infer a provider: aliases resolve from the current
+  # gateway catalog, and explicit Claude IDs are routed through that gateway.
   [ "$role" != reviewer ] || {
+    local reviewer_model_id reviewer_models=""
     case "$model" in
+      sonnet|opus)
+        gateway_installed || die "cel run reviewer: no gateway on this box - cel gateway install"
+        gateway_ready || die "cel run reviewer: the gateway is not answering on $(gateway_url) - cel gateway status"
+        reviewer_models="$(gateway_models_json)" \
+          || die "cel run reviewer: cannot read model ids from the configured gateway"
+        reviewer_model_id="$(_run_reviewer_catalog_model "$model" "$reviewer_models")"
+        [ -n "$reviewer_model_id" ] \
+          || die "cel run reviewer: gateway catalog advertises no Claude Sonnet model"
+        PROFILE_MODEL="ompgw-claude/$reviewer_model_id"
+        ;;
       ompgw-claude/*) PROFILE_MODEL="$model" ;;
       ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${model#ompgw/claude/}" ;;
       claude/*) PROFILE_MODEL="${model#claude/}" ;;
       claude-*) PROFILE_MODEL="$model" ;;
-      *) die "cel run reviewer: model '$model' is not a routable pi model; use a Claude model id (claude-...) or ompgw-claude/<model> via the configured gateway" ;;
+      *) die "cel run reviewer: model '$model' is unsupported; use sonnet, opus, or an advertised Claude model id" ;;
     esac
     PROFILE_WSDIR="$wsdir"
     PROFILE_VIA=gateway
     _profile_gateway_route reviewer
     [ -z "$PROFILE_VETO" ] || die "cel run reviewer: $PROFILE_VETO"
-    local reviewer_model_id="${PROFILE_MODEL#ompgw-claude/}" reviewer_models
+    reviewer_model_id="${PROFILE_MODEL#ompgw-claude/}"
     [ -n "$reviewer_model_id" ] \
       || die "cel run reviewer: model '$model' has no Claude model id"
-    reviewer_models="$(gateway_models_json)" \
-      || die "cel run reviewer: cannot read model ids from the configured gateway"
+    if [ -z "$reviewer_models" ]; then
+      reviewer_models="$(gateway_models_json)" \
+        || die "cel run reviewer: cannot read model ids from the configured gateway"
+    fi
     if ! jq -e --arg id "$reviewer_model_id" \
       '[.data[]? | select(.id == $id)] | length > 0' \
       <<< "$reviewer_models" >/dev/null; then
