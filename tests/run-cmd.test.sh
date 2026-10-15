@@ -515,28 +515,113 @@ EOF
   assert_eq "$omp_calls" ""
 }
 
-test_run_gateway_env_preserves_omp_auth_gateway_token_source() {
+# CEL-136: omp reads the SAME file-backed CLIProxyAPI key as pi. The old
+# `omp auth-gateway token` is the retired broker's token (CEL-60); the
+# gateway answers it with 401, so the omp route could never have worked.
+test_run_gateway_env_reads_api_key_for_omp_and_never_calls_omp() {
   T="$(mktemp -d)"
   export CEL_GATEWAY_STATE="$T/gateway"
   mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
-  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  printf 'omp-gw-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
   cat >"$T/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/omp.log"
-printf '%s\n' 'omp-test-value'
+printf '%s\n' 'broker-token'
 EOF
   chmod +x "$T/bin/omp"
-  local old_path="$PATH" output omp_calls
+  local old_path="$PATH" output omp_calls=""
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env omp omp-worker
-  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
-  omp_calls="$(cat "$T/omp.log")"
+  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s|%s' \"\$OMP_GATEWAY_TOKEN\" \"\$CEL_SESSION_ID\"")"
+  [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
   rm -rf "$T"
-  assert_eq "$output" "omp-test-value"
-  assert_eq "$omp_calls" "auth-gateway token"
+  assert_eq "$output" "omp-gw-test-value|omp-worker"
+  assert_eq "$omp_calls" ""
+}
+
+# The omp orchestrator through the gateway (CEL-136). The model is the
+# gateway's per-account-PREFIXED id behind omp's `celgw` provider, the profile's
+# thinking level rides unchanged, and the pane's agent dir is pinned to omp's
+# own so a pi PI_CODING_AGENT_DIR in the pane cannot redirect omp's models.yml.
+_ws_omp_gateway() { # [omp_exclude]
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  ompgw: { runtime: omp, model: anthropic/claude-opus-5-5, thinking: low, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'omp-gw-test-value\n' >"$GWT/state/api-key"
+  printf '{"type":"claude","email":"me@personal.invalid"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  printf '{"type":"claude","email":"pool@example.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-22222222-pool@example.invalid.json"
+  [ -z "${1:-}" ] || printf '  omp_exclude: %s\n' "$1" >>"$CEL_CONFIG_FILE"
+  export CEL_OMP_AGENT_DIR="$GWT/omp"
+}
+_ws_omp_gateway_clean() { unset CEL_OMP_AGENT_DIR; _ws_gateway_clean; }
+
+test_run_omp_worker_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
+  _ws_omp_gateway "me@personal.invalid"
+  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)"
+  assert_contains "$out" "--model celgw/omp/claude-opus-5-5"
+  assert_contains "$out" "--thinking low"
+  assert_contains "$out" "export OMP_GATEWAY_TOKEN=****"
+  ! printf '%s' "$out" | grep -q 'auth-gateway' || { echo "omp launch still uses the broker token"; _ws_omp_gateway_clean; return 1; }
+  ! printf '%s' "$out" | grep -q 'ompgw-claude' || { echo "omp launch still rewrites to ompgw-claude"; _ws_omp_gateway_clean; return 1; }
+  # A dry run is a preview: no models.yml for a launch that never happened.
+  [ ! -e "$GWT/omp/models.yml" ] || { echo "dry run wrote models.yml"; _ws_omp_gateway_clean; return 1; }
+  _ws_omp_gateway_clean
+}
+
+# The pane exports omp's own agent dir and the real key-file read.
+test_run_omp_gateway_env_pins_the_omp_agent_dir() {
+  _ws_omp_gateway "me@personal.invalid"
+  export PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_profile_gateway_setup omp omp-worker 1 0
+  local out; out="$(PI_CODING_AGENT_DIR=/elsewhere/pi bash -c "${GATEWAY_ENV[*]}; printf '%s|%s' \"\$PI_CODING_AGENT_DIR\" \"\$OMP_GATEWAY_TOKEN\"")"
+  unset PROFILE_VIA
+  assert_eq "$out" "$GWT/omp|omp-gw-test-value"
+  _ws_omp_gateway_clean
+}
+
+# No configured exclusion is a VETO, not a widened pool.
+test_run_omp_worker_via_gateway_is_vetoed_without_an_exclusion() {
+  _ws_omp_gateway
+  ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run )
+  _ws_omp_gateway_clean
+}
+
+# An excluded account carrying the omp prefix is in omp's pool right now.
+test_run_omp_worker_via_gateway_is_vetoed_when_personal_is_prefixed() {
+  _ws_omp_gateway "me@personal.invalid"
+  printf '{"type":"claude","email":"me@personal.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched with personal in the pool"; _ws_omp_gateway_clean; return 1; }
+  assert_contains "$out" "cel gateway omp-scope"
+  _ws_omp_gateway_clean
+}
+
+# A model the gateway does not publish under the omp prefix is refused by
+# name - never swapped for another model.
+test_run_omp_worker_via_gateway_is_vetoed_when_the_prefixed_model_is_missing() {
+  _ws_omp_gateway "me@personal.invalid"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched without the model"; _ws_omp_gateway_clean; return 1; }
+  assert_contains "$out" "omp/claude-opus-5-5"
+  _ws_omp_gateway_clean
 }
 
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a
