@@ -224,16 +224,16 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   printf '%s ' "$out"
 }
 
-# The prefix is TYPED, not run: `herdr pane run` would execute it as its own
-# command and the variables would be gone before the agent started. send-text
-# leaves it on the shell's input line for `herdr agent start` to complete.
-# A pane that refuses the text still gets its agent - an unmarked worker is a
-# kept worktree, which is the safe direction.
-_run_mark_launch() { # <pane> <env-prefix>
-  local pane="$1" prefix="$2"
+# Gateway credentials and role markers share one typed shell prefix; `pane run`
+# executes in a child context, so its exports disappear before agent start.
+# Ordinary role marks are best effort; gateway credentials are required.
+_run_mark_launch() { # <pane> <env-prefix> [required]
+  local pane="$1" prefix="$2" required="${3:-0}"
   [ -n "$pane" ] && [ -n "$prefix" ] || return 0
-  herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1 \
-    || c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  if ! herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
+    [ "$required" != 1 ] || die "cel run: could not stage gateway credentials in pane $pane"
+    c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  fi
   return 0
 }
 
@@ -1030,12 +1030,13 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
   return 0
 }
 
-_run_gateway_env() { # <runtime> <agent-name> mutates caller's GATEWAY_ENV
-  local runtime="$1" agent_name="$2" token
+_run_gateway_env() { # <runtime> <agent-name> [require-key] mutates GATEWAY_ENV
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" token
   if [ "$runtime" = pi ]; then
     local key_file; key_file="$(_gateway_key_file)"
-    [ -r "$key_file" ] && [ -s "$key_file" ] \
-      || die "cel run: gateway API key file is missing, empty, or unreadable - cel gateway install"
+    if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
+      die "cel run: gateway API key file is missing, empty, or unreadable - cel gateway install"
+    fi
     token="\$(cat '$key_file')"
   else
     token="\$(omp auth-gateway token)"
@@ -1401,6 +1402,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
+  local dry_envprefix="$envprefix" prefix_required=0
 
   # RESUME (CEL-63). Root and the orchestrators carry their conversation
   # across a restart; workers and reviewers never do - each is one ticket or
@@ -1503,12 +1505,17 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
   if [ "${PROFILE_VIA:-}" = gateway ]; then
-    _run_gateway_env "$runtime" "$agent_name"
+    _run_gateway_env "$runtime" "$agent_name" "$((1 - dry_run))"
     # models.json is the owner's file, so a dry run must not touch it.
     if [ "$dry_run" -eq 0 ]; then
       gateway_pi_models_write \
         || die "cel run: could not read the gateway's model list - cel gateway status"
     fi
+  fi
+  if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
+    prefix_required=1
+    envprefix="${GATEWAY_ENV[*]}; $envprefix"
+    dry_envprefix="export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****; $dry_envprefix"
   fi
 
 
@@ -1517,9 +1524,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     if [ "$dry_run" -eq 1 ]; then
       printf 'git worktree add --detach %s <head of %s#%s>\n' "$review_path" "$repo" "$pr"
       printf 'herdr tab "PR reviewer": split its largest pane, or a new tab per %s panes\n' "$_RUN_REVIEW_TAB_CAP"
-      [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
-        || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
-      printf 'herdr pane send-text <pane> %s\n' "$envprefix"
+      printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
       printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
         "$agent_name" "$runtime" "$(_run_dry_agent_args)"
       return 0
@@ -1527,11 +1532,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     have herdr || die "cel run: herdr is not on PATH"
     have jq    || die "cel run: jq is not on PATH"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
-    [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
-      || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}" \
-         || die "cel run reviewer: could not configure gateway credentials in pane $pane_id"
     pane_label_set "$pane_id" "$label"
-    _run_mark_launch "$pane_id" "$envprefix"
+    _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
@@ -1546,7 +1548,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   if [ -n "$restart_pane" ]; then
     if [ "$dry_run" -eq 1 ]; then
       printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$restart_pane"
-      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$envprefix"
+      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$dry_envprefix"
       printf 'herdr agent start %s --kind %s --pane %s -- %s\n' \
         "$agent_name" "$runtime" "$restart_pane" "$(_run_dry_agent_args)"
       return 0
@@ -1555,10 +1557,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       || die "cel run $role --restart: could not send the exit keys to pane $restart_pane"
     _run_restart_wait "$restart_pane" \
       || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
-    [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$restart_pane" "${GATEWAY_ENV[@]}"
     pane_label_set "$restart_pane" "$label"
     tab_label_set "$restart_pane" "$label"
-    _run_mark_launch "$restart_pane" "$envprefix"
+    _run_mark_launch "$restart_pane" "$envprefix" "$prefix_required"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null \
       || die "cel run $role --restart: herdr could not start $agent_name in $restart_pane"
     _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
@@ -1590,9 +1591,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     [ -n "$layout" ] && printf 'herdr-workspace-manager apply %s\n' "$layout"
     # Values MASKED: the session id is not a secret but the bearer beside it
     # is, and a preview that prints one teaches people to paste both.
-    [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
-      || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
-    printf 'herdr pane send-text <pane> %s\n' "$envprefix"
+    printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
     printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
       "$agent_name" "$runtime" "$(_run_dry_agent_args)"
     return 0
@@ -1611,17 +1610,14 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     pane_id="$(_run_apply_layout "$layout" "$ws_id" "$wsdir" "$pane_id")"
   fi
 
-  # Typed into the pane's own shell, so the export survives into the agent the
-  # next command starts - and the bearer is expanded there, by omp, never here.
-  [ "${#GATEWAY_ENV[@]}" -eq 0 ] || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}"
 
   pane_label_set "$pane_id" "$label"
   # A declared layout titles its own tabs; overwriting one would undo that.
   [ -n "$layout" ] || tab_label_set "$pane_id" "$label"
 
-  # ...and the role mark goes on the launch LINE, after any pane run above:
-  # it must not outlive the command it marks.
-  _run_mark_launch "$pane_id" "$envprefix"
+  # Role and gateway environment are typed on the launch line before Herdr
+  # starts the agent, so exports live in the shell that execs the runtime.
+  _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
   herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
 }
 
