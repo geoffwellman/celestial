@@ -1031,18 +1031,27 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
 }
 
 _run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates GATEWAY_ENV
-  local runtime="$1" agent_name="$2" require_key="${3:-1}" session_id="${4:-${CEL_SESSION_ID:-$agent_name}}" token session_var
-  if [ "$runtime" = pi ]; then
-    local key_file; key_file="$(_gateway_key_file)"
-    if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
-      die "gateway API key file is missing, empty, or unreadable - cel gateway install"
-    fi
-    token="\$(cat '$key_file')"
-  else
-    token="\$(omp auth-gateway token)"
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" token session_var
+  # Its own statement: bash expands every word of one `local` before assigning
+  # any, so a default naming $agent_name on the line above read it EMPTY and
+  # the pane exported CEL_SESSION_ID='' - one affinity key for every worker.
+  local session_id="${4:-${CEL_SESSION_ID:-$agent_name}}"
+  # Both runtimes read the CLIProxyAPI api-key file. omp's own
+  # `auth-gateway token` is the retired broker's (CEL-60) and the gateway
+  # answers it with 401 (CEL-136).
+  local key_file; key_file="$(_gateway_key_file)"
+  if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
+    die "gateway API key file is missing, empty, or unreadable - cel gateway install"
   fi
+  token="\$(cat '$key_file')"
   printf -v session_var 'CEL_SESSION_ID=%q' "$session_id"
   GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "$session_var")
+  # omp reads PI_CODING_AGENT_DIR as its agent dir, exactly as pi does: pin
+  # it to omp's own so the celgw models.yml written there is the one it loads.
+  if [ "$runtime" = omp ]; then
+    local omp_dir_var; printf -v omp_dir_var 'PI_CODING_AGENT_DIR=%q' "$(gateway_omp_dir)"
+    GATEWAY_ENV+=("$omp_dir_var")
+  fi
 }
 
 _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-models] [session-id]
@@ -1053,6 +1062,10 @@ _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-mod
   if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
     gateway_pi_models_write \
       || die "gateway launch: could not read the model list - cel gateway status"
+  fi
+  if [ "$runtime" = omp ] && [ "$write_models" = 1 ]; then
+    gateway_omp_models_write \
+      || die "gateway launch: could not write omp's celgw provider - cel gateway omp-scope --check"
   fi
 }
 
@@ -1511,8 +1524,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # provider `headers` entry bound to an environment variable - which means
   # the pane needs two variables set before the agent starts:
   #
-  # OMP_GATEWAY_TOKEN is resolved in the pane: pi reads the file-backed
-  # CLIProxyAPI key, while omp keeps its auth-gateway token command.
+  # OMP_GATEWAY_TOKEN is resolved in the pane from the file-backed CLIProxyAPI
+  # key, for pi and omp alike (omp: the celgw provider in models.yml, CEL-136).
   # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
