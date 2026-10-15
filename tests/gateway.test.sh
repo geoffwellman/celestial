@@ -78,7 +78,7 @@ url=""
 for a in "\$@"; do case "\$a" in http://*|https://*) url="\$a" ;; esac; done
 case "\$url" in
   */healthz)   exit "\${GW_DOWN:-0}" ;;
-  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000}]}' ;;
+  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}' ;;
   *) exit 7 ;;
 esac
 EOF
@@ -393,6 +393,30 @@ test_pi_models_claude_provider_key_matches_profile_model_id() {
   assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
   _gw_teardown
 }
+
+test_pi_models_use_canonical_opus_thinking_capabilities_only() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  gateway_pi_models_write "$T/pi/models.json"
+  local f="$T/pi/models.json"
+  local opus55='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5")'
+  local other_opus='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-8")'
+  local unknown='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
+  assert_eq "$(jq -r "$opus55 | .reasoning" "$f")" true
+  assert_eq "$(jq -c "$opus55 | .thinkingLevelMap" "$f")" \
+    '{"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"}'
+  assert_eq "$(jq -r "$opus55 | .compat.forceAdaptiveThinking" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoEffort" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoSystemMessages" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoToolChanges" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsTemperature" "$f")" false
+  assert_eq "$(jq -r "$opus55 | .compat.supportsStrictTools" "$f")" true
+  assert_eq "$(jq -r "$other_opus | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r "$unknown | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r '.providers.ompgw.models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
+  _gw_teardown
+}
+
 test_pi_models_provider_helper_recognises_claude_slash_model() {
   assert_eq "$(gateway_pi_provider_for_model "claude/claude-sonnet-4-6")" ompgw-claude
 }
