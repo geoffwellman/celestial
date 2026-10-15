@@ -187,7 +187,11 @@ test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
   _reviewer_gateway_fixture
   printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
   local out
-  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model claude-opus-5-5 --dry-run 2>&1)"
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model claude-opus-5-5 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
   assert_contains "$out" "--kind pi"
   assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
