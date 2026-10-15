@@ -108,7 +108,9 @@ test_run_without_layout_skips_apply() {
 # reviewer role, and resolves a Claude model through the configured gateway.
 _ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"; }
 test_run_reviewer_targets_review_tab_with_model() {
-  _reviewer_gateway_fixture; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind pi"
   assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
@@ -167,7 +169,8 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
 # CEL-95: pi workers and reviewers carry the inbox extension and their own
 # identity, so mail addressed to the pane's alias wakes it.
 test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
-  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n' >> "$T/workspace.yaml"
+  _reviewer_gateway_fixture
+  printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
@@ -177,7 +180,7 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 
 test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
@@ -200,7 +203,7 @@ test_run_pi_reviewer_refuses_an_unresolved_model_alias() {
   if out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
     echo "reviewer accepted an unresolved model alias"; rm -rf "$T"; return 1
   fi
-  assert_contains "$out" "reviewer model 'sonnet' is not a routable pi model"
+  assert_contains "$out" "model 'sonnet' is not a routable pi model"
   assert_contains "$out" "ompgw-claude/<model>"
   rm -rf "$T"
 }

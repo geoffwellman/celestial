@@ -208,11 +208,27 @@ test_explicit_profile_beats_the_role_binding() {
 # already resolved from the `review:` block.
 test_a_profile_without_a_model_keeps_the_reviewers_model() {
   _pws
-  printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"
+  GWT="$(mktemp -d)"
+  export CEL_CONFIG_FILE="$GWT/config.yaml"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  export CEL_GATEWAY_STATE="$GWT/state"
+  mkdir -p "$GWT/state/auth"
+  printf '{}' > "$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  export CEL_GATEWAY_STUB="$GWT/gwstub"
+  printf 'review:\n  runtime: omp\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 3 --profile effortonly --dry-run 2>/dev/null)"
-  assert_contains "$out" "--model gpt-5.6-sol"
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
   assert_contains "$out" "--thinking low"
-  rm -rf "$T"
+  rm -rf "$T" "$GWT"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
 }
 test_bindings_are_listed_by_cel_profiles() {
   _pws; local out; out="$(cd "$T" && cmd_profiles 2>/dev/null)"
