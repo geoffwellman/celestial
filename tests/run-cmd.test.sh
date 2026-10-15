@@ -78,9 +78,11 @@ test_append_flag_file_writes_the_body_and_no_arg_holds_a_newline() {
 # omp declares --auto-approve, so nothing plane-launched stops on prompts.
 # The thinking flag sits between them: it is per-launch (a profile can change
 # it), the launch args are per-runtime, and the role body always goes last.
-test_run_launch_args_precede_role_injection() {
+test_run_launch_args_precede_role_injection_and_no_prompt_submit_duplicate() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
-  assert_contains "$out" " -- --dangerously-skip-permissions --effort high --append-system-prompt-file"
+  assert_contains "$out" " -- --dangerously-skip-permissions --settings"
+  ! printf '%s' "$out" | grep -q "inbox-drain.sh" || { echo "Claude UserPromptSubmit hook is duplicated in launch settings"; return 1; }
+  assert_contains "$out" "inbox-stop.sh"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
   assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
@@ -177,6 +179,19 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  rm -rf "$T"
+}
+# Claude's UserPromptSubmit hook must run on workers and reviewers, and their
+# mailbox identity must be explicit because the review tab cwd is not a mailbox.
+test_run_claude_worker_and_reviewer_get_inbox_delivery_identity() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: claude }\nreview:\n  runtime: claude\n' >> "$T/workspace.yaml"
+  local out
+  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_INBOX_ME=widget-wg-7-thing"
+  assert_contains "$out" "CEL_INBOX_WS=alpha"
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$out" "CEL_INBOX_WS=alpha"
   rm -rf "$T"
 }
 
@@ -621,6 +636,7 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
     esac
   }
 }
+
 
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture

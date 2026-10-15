@@ -126,9 +126,8 @@ _steward_clear_dead_panes() {
 }
 
 # STALE MAIL AND OPEN DECISIONS. Mail unread for half an hour means the
-# recipient's delivery paths are dead, so the steward reminds it - by MAIL to
-# root/orchestrators (CEL-65: a prompt typed into the human's composer), and
-# by prompt only to other panes. Rate-limited per key by _steward_due.
+# recipient may not have seen it. Remind every mailbox by inbox, never by
+# typing into a pane; delivery behavior remains runtime-specific.
 _steward_mail_sweep() { # <agents-json>
   local agents_json="$1"
   local ws wsdir who n oldest age pane
@@ -155,26 +154,17 @@ _steward_mail_sweep() { # <agents-json>
       age=$(( $(date +%s) - $(date -d "$oldest" +%s 2>/dev/null || date +%s) ))
       [ "$age" -ge 1800 ] || continue
 
-      # where does that recipient live? root is the workspace root, an orch is
-      # its repo checkout - the same derivation cel inbox uses in reverse
+      # Resolve the mailbox's pane for status text only. Every reminder below
+      # still goes to the inbox, regardless of whether a pane is live.
       local target="" want=""
       want="$(_steward_mailbox_want "$who" "$(ws_name "$wsdir")")"
       if [ "$who" = root ]; then
         target="$wsdir"
       else
         target="$(_steward_orch_dir "$wsdir" "$who")"
-        # A WORKER gets no `target`: splitting <repo>-<branch> back apart is
-        # guesswork the moment a repo name contains a hyphen, and this file
-        # already learned that nudging the wrong pane is worse than nudging
-        # none, because it reports success. Its name match is exact anyway.
       fi
-      # NAME FIRST, cwd only as a fallback. Matching on cwd alone picks the
-      # first agent sitting in that directory, and a workspace root routinely
-      # holds more than one - a personal assistant pane, a scratch session -
-      # so root's nudges were landing on whichever happened to be first in the
-      # list. A watcher that nudges the wrong pane is worse than no watcher,
-      # because it reports success: observed with root 9 hours behind while
-      # every tick claimed it had been told.
+      # Match the exact alias first; cwd is a fallback only for root/orch
+      # mailboxes. This lookup never chooses a delivery route.
       pane=""
       [ -n "$want" ] && pane="$(printf '%s' "$agents_json" | jq -r --arg n "$want" \
         '[.result.agents[] | select(.name == $n)][0].pane_id // empty')"
@@ -182,20 +172,15 @@ _steward_mail_sweep() { # <agents-json>
         | jq -r --arg d "$target" '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"; }
 
       local readcmd="cel inbox read --for $who --workspace $ws"
-      local stale_msg="steward: $n unread escalation(s)/decision(s)/blocker(s) in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first. If your runtime has a background-task tool (claude: Monitor), also re-arm 'cel inbox watch --for $who --workspace $ws' so the next one reaches you without this nudge."
-      if _steward_is_orch_mailbox "$who"; then
-        # CEL-65: never type into a root/orchestrator composer - mail it, and
-        # the runtime's inbox hook (Monitor/UserPromptSubmit, or omp's
-        # inbox.omp.ts) surfaces it out of band.
-        if _steward_due "inbox-stale-$ws-$who"; then
-          _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
-            && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
-        fi
-      elif [ -n "$pane" ] && _steward_due "inbox-stale-$ws-$who"; then
-        herdr agent prompt "$pane" "$stale_msg" >/dev/null 2>&1 \
-          && c_warn "$ws/$who: $n unread ($((age / 60))m) - nudged $pane to re-arm and drain"
+      local stale_msg="steward: $n unread escalation(s)/decision(s)/blocker(s) in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first."
+      # CEL-65/CEL-131: never type into any agent's composer. Runtime delivery
+      # differs: Pi/OMP can wake idle agents; Claude hooks run only on a
+      # submitted turn or while a turn is active.
+      if _steward_due "inbox-stale-$ws-$who"; then
+        _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
+          && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
       else
-        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane to nudge)')"
+        c_warn "$ws/$who: $n unread, oldest $((age / 60))m$([ -z "$pane" ] && printf ' (no pane)')"
       fi
     done
   done
@@ -316,13 +301,8 @@ _steward_remind() { # <ws> <who> <fp> <kind> <message>
   return 0
 }
 
-_steward_is_orch_mailbox() { case "$1" in root|*-orch) return 0;; esac; return 1; }
-
-# A NUDGE IS MAIL (CEL-65). This used to be `herdr agent prompt` into the
-# orchestrator's pane, which typed into - and submitted - whatever the human
-# was half-way through writing there. Every recipient here is an orchestrator,
-# whose runtime inbox hook surfaces mail out of band; the rate-limit key is
-# unchanged, so nothing gets louder.
+# A NUDGE IS MAIL (CEL-65/CEL-131). Every recipient gets a rate-limited inbox
+# message; the runtime controls when it can be delivered to an agent turn.
 _steward_nudge() { # <mailbox> <workspace> <key> <message>
   _steward_due "$3" || return 0
   local kind=status
@@ -1866,14 +1846,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
     '.result.agents[] | select(.agent_status == "blocked") | "\(.pane_id) \(.cwd)"' \
     | while read -r pane cwd; do c_warn "BLOCKED agent in $pane ($cwd) - needs input"; done
 
-  # STALE INBOX MAIL IS THE ONE CASE THAT JUSTIFIES TYPING AT A PANE.
-  # Fresh mail is delivered by the recipient's monitor or the prompt hook, so
-  # early warnings would be noise. But mail unread for half an hour means
-  # BOTH paths are dead - a monitor that died with its session, and a human
-  # who has not spoken to that pane - and warning about it in the steward's
-  # own pane (which nobody reads either) is how root sat 68 messages behind
-  # for six hours. So the steward nudges the recipient itself, once an hour,
-  # naming what it is sitting on.
+  # STALE ACTIONABLE MAIL GETS A RATE-LIMITED INBOX REMINDER. It never types into
+  # the recipient's pane; delivery still depends on the runtime's idle support.
   _steward_mail_sweep "$agents_json"
 
   # page feedback whose publishing pane is gone queues here; it stays a
