@@ -42,6 +42,8 @@ _CEL_DOCTOR=1
 # shellcheck source=lib/fleet.sh
 . "${BASH_SOURCE[0]%/*}/fleet.sh"   # fleet_mail_doctor_line, for root's mailbox
 # shellcheck source=lib/steward_timer.sh
+# shellcheck source=lib/serve.sh
+. "${BASH_SOURCE[0]%/*}/serve.sh"
 . "${BASH_SOURCE[0]%/*}/steward_timer.sh"   # steward_timer_health, steward_timer_upgrade
 
 # One line for the services this box runs on nobody's behalf in particular:
@@ -70,6 +72,17 @@ doctor_box_services_line() {
     printf '  gateway not supervised - cel gateway install\n'
   fi
   return 0
+}
+
+doctor_serve_line() {
+  local tracked untracked_rows managed untracked rows
+  tracked="$(serve_list_json 2>/dev/null || printf '[]')"
+  untracked_rows="$(serve_adopt_json 2>/dev/null || printf '[]')"
+  managed="$(printf '%s' "$tracked" | jq 'length')"
+  untracked="$(printf '%s' "$untracked_rows" | jq 'length')"
+  printf '  preview servers: %s ledgered, %s unledgered; see cel serve list/adopt\n' "$managed" "$untracked"
+  rows="$(jq -cn --argjson tracked "$tracked" --argjson unledgered "$untracked_rows" '$tracked + $unledgered')"
+  printf '%s\n' "$rows" | jq -r 'sort_by(-.memory_mb)[] | "    \(.name // .unit // ("pid:"+(.pid|tostring))) \(.memory_mb)M \(.age_seconds)s \(.owner // "unledgered") \(.worktree // "")"'
 }
 
 # HOW FAR BEHIND THE TREE YOU ARE READING IS. On 2026-09-21 the orchestrator's
@@ -768,6 +781,7 @@ cmd_doctor() {
   c_hd "Gateway"
   gateway_doctor_line
   doctor_box_services_line
+  doctor_serve_line
   dash_doctor_line
   check_roles_and_runtimes || fail=1
   check_workspaces || fail=1

@@ -573,6 +573,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const pagesPort = Number(process.env.CEL_PAGES_PORT) || 7780;
     return [{ name: 'pages', ws: 'box', port: pagesPort, state: (await answers(pagesPort, process.env.CEL_PAGES_HOST)) ? 'up' : 'down', url: '' }];
   });
+  const dash = [{ name: 'dashboard', ws: 'box', port: cfg.port || 7770, state: 'up', url: '' }];
+
   const wsRows = (ws) => once(`ws:${ws.name}`, async () => {
     const out = await run(CEL(), ['services', '--workspace', ws.name, '--json'], 15000);
     const rows = [];
@@ -588,8 +590,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const services = async (wss) => {
     // CEL-107: one dashboard for the box, and it is the server answering this
     // request - up by construction, so it is a row and not a probe
-    const dash = [{ name: 'dashboard', ws: 'box', port: cfg.port || null, state: 'up', url: '' }];
-    const parts = await Promise.all([dash, pagesRow(), ...wss.map(wsRows)]);
+    const served = await run(CEL(), ['serve', 'list', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
+    const unknown = await run(CEL(), ['serve', 'adopt', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
+    const serverItems = [
+      ...served.map((x) => ({ name: x.name, ws: 'box', port: x.port || null, state: 'up', url: '', kind: 'preview', memory_mb: x.memory_mb, age_seconds: x.age_seconds, owner: x.owner })),
+      ...unknown.map((x) => ({ name: x.unit || `pid:${x.pid}`, ws: 'box', port: x.port || null, state: 'unledgered', url: '', kind: 'unledgered', memory_mb: x.memory_mb, age_seconds: x.age_seconds }))
+    ];
+    const parts = await Promise.all([dash, pagesRow(), serverItems, ...wss.map(wsRows)]);
     const seen = new Set(); const items = [];
     for (const it of parts.flat()) { const k = `${it.ws}/${it.name}`; if (!seen.has(k)) { seen.add(k); items.push(it); } }
     return { items };

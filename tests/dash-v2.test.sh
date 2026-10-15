@@ -28,6 +28,17 @@ EOF
   cat >"$T/bin/cel" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/cel.log"
+if [ "\$1" = serve ]; then
+  case "\$2 \$3" in
+    "list --json") printf '[{"name":"widget-preview","owner":"alpha-orch","workspace":"alpha","port":5173,"memory_mb":81,"age_seconds":120,"managed":true}]'; exit 0;;
+    "adopt --json") printf '[{"unit":"vite-old","pid":21,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'; exit 0;;
+  esac
+fi
+if [ "\$1" = services ]; then
+  if [ "\$3" = bundle ]; then printf '[{"name":"gadget-preview","workspace":"bundle","port":8101,"state":"down"}]'
+  else printf '[]'; fi
+  exit 0
+fi
 if [ "\$1" = quota ] && [ -f "$T/quota.json" ]; then cat "$T/quota.json"; exit 0; fi
 if [ "\$1" = quota ]; then printf '%s' '{"subscriptions":[{"provider":"claude","label":"alpha@example.invalid","windows":[{"name":"5h","scope":null,"used_pct":40,"resets_at":"$(date -u -d '@'$(( $(date +%s) + 9000 )) +%Y-%m-%dT%H:%M:%SZ)"}]}]}'; exit 0; fi
 exec "$CEL_ROOT/bin/cel" "\$@"
@@ -88,6 +99,17 @@ _v2_act() { # <body> [extra curl args...]
   local b="$1"; shift
   curl -s -m 20 -o "$T/act.out" -w '%{http_code}' -X POST -H 'content-type: application/json' "$@" \
     -d "$b" "$(_v2_url act)"
+}
+
+test_v2_services_feed_includes_ledgered_and_unledgered_preview_memory() {
+  _v2_boot
+  local rows
+  rows="$(_v2_get "$(_v2_url services)")"
+  assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="widget-preview") | [.kind,.memory_mb,.owner] | @tsv')" "$(printf 'preview\t81\talpha-orch')"
+  assert_eq "$(printf '%s' "$rows" | jq -r '.items[] | select(.name=="vite-old") | [.kind,.memory_mb,.state] | @tsv')" "$(printf 'unledgered\t240\tunledgered')"
+  assert_contains "$(cat "$T/cel.log")" "serve list --json"
+  assert_contains "$(cat "$T/cel.log")" "serve adopt --json"
+  _v2_down
 }
 
 test_v2_one_gh_pass_serves_merges_cycle_and_heat() {
