@@ -117,7 +117,7 @@ test_gateway_config_turns_session_affinity_on() {
 # THE MANAGEMENT API IS ON FOR LOOPBACK ONLY (CEL-80). CEL-60 left it out,
 # which left the web panel CLIProxyAPI serves at /management.html unable to
 # read or change anything. Keys checked against CLIProxyAPI 7.3.14's own
-# config struct: `remote-management.{allow-remote, secret-key,
+# config struct, and again against 8.0.29's (CEL-135): `remote-management.{allow-remote, secret-key,
 # disable-control-panel}`.
 test_gateway_config_enables_management_for_loopback_only() {
   _gw_setup

@@ -1029,6 +1029,27 @@ Three things are worth knowing before you rely on it:
   reach the port. The service binds loopback only, the config is `0600`, and
   nothing prints the key.
 
+**The pinned release has a floor: 8.0.22.** `agents.yaml` pins CLIProxyAPI
+8.0.29. Releases before 8.0.22 can bench a Claude account until the monthly
+billing reset after a single 429 that carries an overage claim (upstream
+#6465), so on a box with several accounts the pool shrinks for weeks. A
+scratch run confirmed it: 7.3.14 never went back to the account inside 60s,
+while 8.0.29 went back after the 3s Retry-After plus jitter. The config this
+writes is unchanged. v8 reads the legacy layout as it is and does not rewrite
+it on load, and the account files keep their names. Bumping the pin does
+**not** upgrade a box that already has the gateway: setup keeps any base tool
+already on `PATH`. Moving a box over is a deliberate step:
+
+```bash
+CEL_ROOT=<checkout> bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/install.sh"; install_pinned_binary base_tools cli-proxy-api'
+cel services restart cel-auth-gateway
+```
+
+To roll back, copy the 7.3.14 binary back over `~/.local/bin/cli-proxy-api`
+and restart the service. Restore the vault only if it is damaged, because
+OAuth refresh tokens rotate and an old copy of a file holds tokens that are
+already retired.
+
 Its accounts land in the same places the signed-in subscriptions above do: the
 QUOTA view's `via gateway` section, the dashboard's Subscriptions card, and
 `cel gateway status --json` - one row per account, carrying `source: gateway`.
