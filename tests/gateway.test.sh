@@ -472,6 +472,55 @@ test_gateway_omp_scope_refuses_without_an_exclusion() {
   _gw_teardown
 }
 
+# The owner can include the personal account deliberately: only the literal
+# `gateway.omp_include_all: true` lifts the empty-exclusion refusal. Absent or
+# malformed values (yes, 1, True-ish typos) stay closed.
+test_gateway_omp_scope_opt_in_must_be_explicit_true() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  local v
+  for v in yes 1 on '""' maybe; do
+    cel_config_set gateway omp_include_all "$v"
+    assert_fails gateway_omp_scope_plan
+    assert_fails gateway_omp_scope_check
+  done
+  _gw_teardown
+}
+
+test_gateway_omp_scope_opt_in_includes_every_claude_account() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_include_all true
+  local plan; plan="$(gateway_omp_scope_plan)"
+  assert_eq "$(jq -r '[.[] | select(.excluded)] | length' <<<"$plan")" 0
+  assert_eq "$(jq -r '[.[] | select(.action == "add")] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-11111111-me@personal.invalid.json,claude-22222222-pool-a@example.invalid.json,claude-33333333-renamed.json"
+  ! jq -e '.[] | select(.file | startswith("codex"))' <<<"$plan" >/dev/null \
+    || { echo "codex reached the omp plan"; _gw_teardown; return 1; }
+  gateway_omp_scope_check >/dev/null || { echo "opt-in check failed"; _gw_teardown; return 1; }
+  gateway_omp_scope_apply >/dev/null || { echo "opt-in apply failed"; _gw_teardown; return 1; }
+  assert_eq "$(grep -c 'auth-files/fields' "$T/curl.argv")" 3
+  _gw_teardown
+}
+
+# Exclusions still win over the opt-in: it only permits an EMPTY list.
+test_gateway_omp_scope_opt_in_keeps_configured_exclusions() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_include_all true
+  cel_config_set gateway omp_exclude "pool-a@example.invalid"
+  local plan; plan="$(gateway_omp_scope_plan)"
+  assert_eq "$(jq -r '[.[] | select(.excluded)] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-22222222-pool-a@example.invalid.json"
+  local f; f="$(gateway_auth_dir)/claude-22222222-pool-a@example.invalid.json"
+  jq '.prefix = "omp"' "$f" >"$f.t" && mv "$f.t" "$f"
+  assert_fails gateway_omp_scope_check
+  _gw_teardown
+}
+
 # The plan names pool accounts only: personal-by-filename and
 # personal-by-JSON-only are both out, and codex is not in the omp pool at all.
 test_gateway_omp_scope_plan_excludes_the_personal_account_by_name_and_by_content() {
