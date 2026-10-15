@@ -264,7 +264,10 @@ routing:
 
 # THE MANAGEMENT API, LOOPBACK ONLY (CEL-80). CEL-60 left this block out, and
 # the web panel at /management.html could then read and change nothing. Keys
-# checked against CLIProxyAPI 7.3.14's config struct. allow-remote: false is
+# checked against CLIProxyAPI 7.3.14's config struct, and again against
+# 8.0.29's (CEL-135): v8 still reads this legacy layout as written and does
+# not rewrite it on load - only a v8 management-API config write migrates the
+# file to the v8 layout. allow-remote: false is
 # what keeps it on this machine - the panel is reached over an ssh tunnel
 # (cel gateway panel), never on the tailnet. CLIProxyAPI hashes a plaintext
 # secret-key in place on load; the plaintext stays in the 0600 key file.

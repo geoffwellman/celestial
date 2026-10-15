@@ -1,0 +1,2 @@
+### Changed
+- The box gateway's pinned CLIProxyAPI moves from 7.3.14 to 8.0.29; both assets are checked against the release's `checksums.txt`. This brings upstream fixes for Claude credential cooldowns: an overage-claim 429 no longer benches an account until the billing reset (#6465), a credential-quota cooldown no longer hides that account's other models from `/v1/models` (#6545), and a refresh no longer clears a quota cooldown (#6415). `config.yaml` and the vault are unchanged. A test now fails if the pin drops below 8.0.22.
