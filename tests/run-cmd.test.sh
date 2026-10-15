@@ -743,6 +743,18 @@ test_reviewer_refuses_to_start_without_gateway_api_key() {
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
+test_reviewer_test_fixture_does_not_mutate_callers_pi_models() {
+  local caller_pi; caller_pi="$(mktemp -d)"
+  printf '%s\n' '{"providers":{"personal":{"baseUrl":"https://example.invalid"}}}' >"$caller_pi/models.json"
+  export PI_CODING_AGENT_DIR="$caller_pi"
+  _ws_pr_fixture
+  local before; before="$(cat "$caller_pi/models.json")"
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$caller_pi/models.json")" "$before"
+  reviewer_checkout_release widget 12
+  _ws_gateway_clean
+  rm -rf "$caller_pi"
+}
 
 test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
   _ws_pr_fixture
