@@ -423,7 +423,10 @@ _ws_gateway() {
 worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
+  GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET="${PI_CODING_AGENT_DIR+x}"
+  GWT_PREVIOUS_PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-}"
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
+  export PI_CODING_AGENT_DIR="$GWT/pi"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
   # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
@@ -440,7 +443,16 @@ EOS
   chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
   PATH="$GWT/bin:$PATH"
 }
-_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
+_ws_gateway_clean() {
+  rm -rf "$T" "$GWT"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
+  if [ -n "${GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET:-}" ]; then
+    export PI_CODING_AGENT_DIR="$GWT_PREVIOUS_PI_CODING_AGENT_DIR"
+  else
+    unset PI_CODING_AGENT_DIR
+  fi
+  unset GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET GWT_PREVIOUS_PI_CODING_AGENT_DIR
+}
 
 _reviewer_gateway_fixture() {
   _ws_gateway
