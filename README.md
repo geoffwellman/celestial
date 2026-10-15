@@ -1185,6 +1185,10 @@ The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
 Updating Pi on an already-configured box is explicit because `cel setup` keeps
 installed runtime versions. Apply the pin in [`agents.yaml`](agents.yaml) with
 its scoped npm installer (currently `npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@1.2.0"`), then restart existing Pi panes and verify `pi --version`. Do not install the unrelated bare `pi` npm package.
+Gateway-backed Pi upgrades are a matched rollout: `gateway_pi_models_write`
+must emit the provider key, protocol, URL, and model list consumed by the same
+revision's `cel run`, whose shell launch line exports that key. Update them
+together and keep the generated-config/launch regression green.
 
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow
