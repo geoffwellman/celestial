@@ -814,8 +814,8 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
 }
 
 # ---- CEL-70: panes act as the workspace's GitHub account ------------------
-_ws_gh_acct() { # <user>
-  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\ngithub:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
+_gh_acct_setup() { # <user> adds GitHub auth to existing T
+  printf 'github:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
   mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -829,21 +829,27 @@ exit 0
 SH
   chmod +x "$T/bin/gh"; export PATH="$T/bin:$PATH"
 }
+_ws_gh_acct() { # <user>
+  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"
+  _gh_acct_setup "$1"
+}
 test_launch_env_without_github_block_is_unchanged() {
   _ws
   assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md CARGO_BUILD_JOBS=3 "
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
-  _ws_gh_acct acct-b
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  _gh_acct_setup acct-b
   local out role
   for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
     # shellcheck disable=SC2086
     out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
     assert_contains "$out" 'gh auth token --user acct-b'
-    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; rm -rf "$T"; return 1;; esac
+    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; _ws_gateway_clean; return 1;; esac
   done
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_launch_refuses_when_the_declared_user_is_not_logged_in() {
   _ws_gh_acct acct-z
