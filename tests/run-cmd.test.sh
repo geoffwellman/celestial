@@ -717,7 +717,7 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
-  assert_contains "$(cat "$HERDR_LOG")" "pane run w1:p9 export OMP_GATEWAY_TOKEN="
+  assert_contains "$(cat "$HERDR_LOG")" "pane send-text w1:p9 export OMP_GATEWAY_TOKEN="
   assert_contains "$(cat "$HERDR_LOG")" "CEL_SESSION_ID=widget-pr-12-review"
   local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
   [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
@@ -740,6 +740,31 @@ test_reviewer_refuses_to_start_without_gateway_api_key() {
     || { reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
   ! grep -q "agent start" "$HERDR_LOG" \
     || { echo "reviewer process started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
+test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
+  _ws_pr_fixture
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane run")
+        shift 3
+        bash -c "$*" >/dev/null
+        ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start")
+        bash -c "$typed_prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$T/agent-env"
+        ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$T/agent-env")" "reviewer-test-api-key|widget-pr-12-review"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
