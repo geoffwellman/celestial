@@ -418,3 +418,31 @@ test_no_gateway_verb_invokes_omp() {
     || { echo "lib/gateway.sh still runs omp"; _gw_teardown; return 1; }
   _gw_teardown
 }
+
+# --- the pinned release ---------------------------------------------------
+
+# THE PIN HAS A FLOOR (CEL-135). 7.3.14 benches a Claude credential until the
+# MONTHLY BILLING RESET when one 429 carries an overage claim (upstream
+# #6465, fixed in 8.0.22) - on a scratch copy of this box's config, a fake
+# upstream sending one such 429 with Retry-After: 3 was never chosen again in
+# 60s under 7.3.14 and served again after 20s under 8.0.29. 8.0.17/8.0.25
+# fix two more cooldown faults of the same family (#6415, #6545). A pin
+# rolled back below 8.0.22 brings that back, so it goes red here.
+test_gateway_pinned_release_is_at_least_8_0_22() {
+  local v; v="$(yq -r '.base_tools["cli-proxy-api"].version' "$CEL_ROOT/agents.yaml")"
+  assert_eq "$(printf '%s\n8.0.22\n' "$v" | sort -V | head -1)" "8.0.22"
+}
+
+# Both assets are the same release as the version, and every digest is a
+# sha256 - a bumped version over a stale URL would install the old binary.
+test_gateway_pinned_assets_match_the_version() {
+  local e; e="$(yq -c '.base_tools["cli-proxy-api"]' "$CEL_ROOT/agents.yaml")"
+  local v; v="$(jq -r '.version' <<<"$e")"
+  local arch
+  for arch in x64 arm64; do
+    assert_contains "$(jq -r ".assets.$arch.url" <<<"$e")" "/download/v$v/CLIProxyAPI_${v}_linux_"
+    assert_eq "$(jq -r ".assets.$arch.member" <<<"$e")" cli-proxy-api
+    [[ "$(jq -r ".assets.$arch.sha256" <<<"$e")" =~ ^[0-9a-f]{64}$ ]] \
+      || { echo "$arch sha256 is not a digest"; return 1; }
+  done
+}
