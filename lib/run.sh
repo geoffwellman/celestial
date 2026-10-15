@@ -1064,7 +1064,7 @@ _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-mod
       || die "gateway launch: could not read the model list - cel gateway status"
   fi
   if [ "$runtime" = omp ] && [ "$write_models" = 1 ]; then
-    gateway_omp_models_write \
+    gateway_omp_models_write "" "" "${PROFILE_GATEWAY_POOL:-omp}" \
       || die "gateway launch: could not write omp's celgw provider - cel gateway omp-scope --check"
   fi
 }
@@ -1304,7 +1304,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
-  local PROFILE_VIA="" PROFILE_WSDIR="" PROFILE_GATEWAY_ACCOUNTS=0
+  local PROFILE_VIA="" PROFILE_WSDIR="" PROFILE_GATEWAY_ACCOUNTS=0 PROFILE_GATEWAY_POOL=""
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$runtime"
     [ -z "$PROFILE_VETO" ] || die "cel run: profile '$profile' is vetoed - $PROFILE_VETO"

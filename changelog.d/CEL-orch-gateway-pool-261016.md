@@ -1,0 +1,2 @@
+### Added
+- An omp profile with `via: gateway` can set `gateway_pool: all` to route through the gateway's unprefixed claude ids, under a separate `celgw-all` provider in omp's `models.yml`, so every usable claude account can serve it. It is meant for the orchestrator role, chosen through `role_profiles`, possibly in `workspace.local.yaml`. Profiles without the key, or with `gateway_pool: omp`, keep the scoped `omp/` pool and its fail-closed exclusion checks unchanged. Any other value is a veto. No account prefix is changed.
