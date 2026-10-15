@@ -122,7 +122,19 @@ gateway_ready() {
 
 # GET /v1/models, which every /v1 route requires the api-key for. The key
 # rides STDIN, never argv - a bearer in a command line is a bearer in `ps`.
+#
+# The catalog every client but omp sees: ids published only because an
+# account carries the omp prefix (CEL-136, `omp/<model>`) are omp's and are
+# dropped here, so pi's models.json, the reviewer catalog and doctor read
+# exactly the catalog they read before any account was prefixed.
 gateway_models_json() {
+  local js; js="$(_gateway_models_json_raw)" || return 1
+  [ -n "$js" ] || return 1
+  jq -c --arg p "$GATEWAY_OMP_PREFIX/" \
+    'if (.data | type) == "array" then .data |= map(select((.id // "") | startswith($p) | not)) else . end' \
+    <<<"$js" 2>/dev/null
+}
+_gateway_models_json_raw() {
   _gateway_stub && { "$CEL_GATEWAY_STUB" models; return $?; }
   local key; key="$(_gateway_api_key)"
   [ -n "$key" ] || return 1
@@ -405,6 +417,173 @@ gateway_pi_models_write() { # [models.json path]
           models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
+# --- the omp provider (CEL-136) -------------------------------------------
+#
+# omp's orchestrator reaches the gateway through ONE scoped pool: the claude
+# accounts that carry CLIProxyAPI's per-credential `prefix: omp`. A prefixed
+# account publishes `omp/<model>` beside its plain ids, a request for
+# `omp/<model>` is served ONLY by prefixed accounts, and plain ids keep the
+# whole vault - so other clients' pool is unchanged and `force-model-prefix`
+# stays false. The personal account never carries the prefix, so omp can
+# never be routed to it: an exhausted pool answers 429, it does not widen.
+#
+# The prefix is set THROUGH THE RUNNING GATEWAY (management PATCH
+# /v0/management/auth-files/fields). CLIProxyAPI rewrites these files itself
+# on every token refresh and keeps metadata it does not own across the
+# rewrite; its PATCH serialises with that. A second writer on the vault is
+# how a refresh would quietly drop the prefix or a token.
+GATEWAY_OMP_PREFIX=omp
+GATEWAY_OMP_PROVIDER=celgw
+
+# omp's agent dir. omp reads PI_CODING_AGENT_DIR exactly as pi does, so an omp
+# pane is pinned to this dir explicitly - otherwise a pi-oriented export would
+# hand omp pi's directory and its models.yml would be written where omp never
+# looks.
+gateway_omp_dir() { printf '%s' "${CEL_OMP_AGENT_DIR:-$HOME/.omp/agent}"; }
+
+# The identities omp must never be served by: `gateway.omp_exclude` in the box
+# config, comma- or space-separated. Lowercased; never printed.
+_gateway_omp_exclusions() {
+  cel_config_get gateway omp_exclude | tr 'A-Z,' 'a-z ' | tr -s ' ' '\n' | sed '/^$/d'
+}
+
+# One row per claude credential: { file, id, excluded, prefix, action }.
+# action: add (pool account, unprefixed), keep (pool, prefixed), remove
+# (EXCLUDED but prefixed - in omp's pool right now), none (excluded,
+# unprefixed) or foreign (some other prefix - not ours, left alone).
+# An account is excluded when an excluded address is in its filename OR
+# anywhere in its JSON, so a renamed file cannot slip in. FAILS CLOSED with no
+# exclusion configured: the pool would then be every claude account.
+gateway_omp_scope_plan() {
+  local ex; ex="$(_gateway_omp_exclusions)"
+  if [ -z "$ex" ]; then
+    c_err "no gateway.omp_exclude in $(cel_config_file) - the omp-scoped pool would include every claude account; set it to the personal address(es) first"
+    return 1
+  fi
+  local d f base rows="" excluded e lc
+  d="$(gateway_auth_dir)"
+  for f in "$d"/*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    case "$(jq -r '.type // empty' "$f" 2>/dev/null)" in
+      claude) ;;
+      "") case "$base" in claude-*) ;; *) continue ;; esac ;;
+      *) continue ;;
+    esac
+    lc="$(printf '%s ' "$base"; jq -c . "$f" 2>/dev/null)"
+    lc="$(printf '%s' "$lc" | tr 'A-Z' 'a-z')"
+    excluded=false
+    while IFS= read -r e; do
+      case "$lc" in *"$e"*) excluded=true ;; esac
+    done <<<"$ex"
+    rows="$rows$(jq -c --arg file "$base" --argjson ex "$excluded" --arg want "$GATEWAY_OMP_PREFIX" '
+      (.prefix // "") as $p
+      | ($file | sub("^claude-"; "") | .[0:6]) as $id
+      | { file: $file, id: $id, excluded: $ex, prefix: $p,
+          action: (if $ex then (if $p == $want then "remove" else "none" end)
+                   elif $p == $want then "keep" elif $p == "" then "add" else "foreign" end) }' "$f")
+"
+  done
+  printf '%s' "$rows" | jq -sc '.'
+}
+
+# Prefixed pool accounts serving omp now.
+gateway_omp_scoped_count() {
+  local plan; plan="$(gateway_omp_scope_plan 2>/dev/null)" || { printf 0; return 1; }
+  jq '[.[] | select(.action == "keep")] | length' <<<"$plan"
+}
+
+# Pass: an exclusion is configured and no excluded account carries the prefix.
+gateway_omp_scope_check() {
+  local plan; plan="$(gateway_omp_scope_plan)" || return 1
+  local bad; bad="$(jq -r '[.[] | select(.action == "remove") | .id] | join(" ")' <<<"$plan")"
+  if [ -n "$bad" ]; then
+    c_err "excluded claude account(s) $bad carry the '$GATEWAY_OMP_PREFIX' prefix - cel gateway omp-scope --apply"
+    return 1
+  fi
+  return 0
+}
+
+# One management PATCH per change, key on stdin. Excluded accounts are only
+# ever UN-prefixed; nothing outside claude is touched.
+gateway_omp_scope_apply() {
+  local plan; plan="$(gateway_omp_scope_plan)" || return 1
+  local mk; mk="$(_gateway_mgmt_key)"
+  [ -n "$mk" ] || { c_err "no management key - cel gateway install"; return 1; }
+  local row file id action want body rc=0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    file="$(jq -r .file <<<"$row")"; id="$(jq -r .id <<<"$row")"; action="$(jq -r .action <<<"$row")"
+    case "$action" in add) want="$GATEWAY_OMP_PREFIX" ;; remove) want="" ;; *) continue ;; esac
+    body="$(jq -nc --arg n "$file" --arg p "$want" '{name: $n, prefix: $p}')"
+    if printf 'Authorization: Bearer %s\n' "$mk" \
+        | curl -sf -m 10 -X PATCH -H @- -H 'Content-Type: application/json' \
+            -d "$body" "$(gateway_url)/v0/management/auth-files/fields" >/dev/null 2>&1; then
+      c_ok "claude $id: $action prefix '$GATEWAY_OMP_PREFIX'"
+    else
+      c_err "claude $id: management PATCH failed (is the gateway up? cel gateway status)"; rc=1
+    fi
+  done < <(jq -c '.[]' <<<"$plan")
+  return "$rc"
+}
+
+# omp's own resolved anthropic catalog, read-only from its models.db. The
+# thinking MODE is only here (`omp models --json` flattens it to levels), and
+# copying it is what keeps the profile's thinking level meaning the same thing
+# through the gateway as it does direct.
+gateway_omp_catalog_json() {
+  local db; db="$(gateway_omp_dir)/models.db"
+  [ -f "$db" ] || return 1
+  python3 - "$db" <<'PY' 2>/dev/null
+import json, sqlite3, sys
+c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+r = c.execute("select models from model_cache where provider_id = 'anthropic'").fetchone()
+if not r:
+    sys.exit(1)
+print(json.dumps(json.loads(r[0])))
+PY
+}
+
+# Merge the `celgw` provider into omp's models.yml (omp 18.11 schema). One
+# model per `omp/<id>` the gateway publishes AND omp's catalog describes - an
+# id with no metadata is dropped, never given another model's. apiKey and the
+# session header are ENV NAMES, resolved by omp in the pane.
+gateway_omp_models_write() { # [models.yml] [catalog json file]
+  local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" raw catalog block tmp cur
+  raw="$(_gateway_models_json_raw)" || return 1
+  if [ -n "$cat_file" ]; then catalog="$(cat "$cat_file")"; else catalog="$(gateway_omp_catalog_json)"; fi
+  [ -n "$catalog" ] || { c_err "no anthropic catalog in $(gateway_omp_dir)/models.db - omp's catalog is built the first time it starts"; return 1; }
+  block="$(jq -c --argjson cat "$catalog" --arg p "$GATEWAY_OMP_PREFIX/" --arg url "$(gateway_url)" '
+    ($cat | map({key: .id, value: .}) | from_entries) as $byid
+    | [ (.data // [])[] | .id | select(startswith($p + "claude"))
+        | . as $full | ($full | ltrimstr($p)) as $id | $byid[$id] | select(. != null)
+        | { id: $full }
+          + (with_entries(select(.key | IN("name","reasoning","input","contextWindow","maxTokens","cost","tokenizer"))))
+          + (if .thinking then {thinking: (.thinking | with_entries(select(.key | IN("mode","efforts","supportsDisplay"))))} else {} end) ]
+    | { name: "cel gateway (omp-pool)", baseUrl: $url, api: "anthropic-messages",
+        apiKey: "OMP_GATEWAY_TOKEN", headers: { "x-session-id": "CEL_SESSION_ID" },
+        models: . }' <<<"$raw")" || return 1
+  [ "$(jq '.models | length' <<<"$block")" -gt 0 ] \
+    || { c_err "the gateway publishes no omp/claude model in omp's catalog - cel gateway omp-scope"; return 1; }
+  mkdir -p "$(dirname "$f")"
+  cur='{}'; [ -s "$f" ] && cur="$(yq -c '. // {}' "$f")"
+  tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
+  jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
+    | yq -y . >"$tmp" && mv "$tmp" "$f"
+}
+
+_gateway_omp_scope_cmd() { # [--check|--apply|--json]
+  case "${1:-}" in
+    --check) gateway_omp_scope_check && c_ok "omp-pool: $(gateway_omp_scoped_count) claude account(s), no excluded account prefixed" ;;
+    --apply) gateway_omp_scope_apply ;;
+    --json)  gateway_omp_scope_plan | jq -c 'map(del(.file))' ;;
+    "")
+      local plan; plan="$(gateway_omp_scope_plan)" || return 1
+      jq -r '.[] | "  claude \(.id)  \(if .excluded then "excluded" else "pool" end)  prefix=\(if .prefix == "" then "-" else .prefix end)  -> \(.action)"' <<<"$plan" ;;
+    *) die "cel gateway omp-scope: unknown option '$1' (--check, --apply, --json)" ;;
+  esac
+}
+
 # --- doctor ---------------------------------------------------------------
 
 # One line, and the verb that fixes it. The failure this exists for is silent:
@@ -452,6 +631,10 @@ cel gateway - several subscriptions behind one loopback door
   cel gateway logout <provider> <id> drop one account from the vault
   cel gateway panel [--json]         the web panel's loopback URL, and the
                                      ssh tunnel that reaches it from a laptop
+  cel gateway omp-scope [--check|--apply|--json]
+                                     omp's scoped claude pool: prefix every
+                                     account but gateway.omp_exclude, via the
+                                     running gateway's management API
 EOS
 }
 
@@ -573,6 +756,7 @@ cmd_gateway() {
         printf '  laptop   %s   then open the URL above\n' "$(gateway_panel_ssh)"
         printf '  key      in %s (0600) - never on the tailnet\n' "$(_gateway_mgmt_key_file)"
       fi ;;
+    omp-scope) _gateway_omp_scope_cmd "$@" ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;
   esac
