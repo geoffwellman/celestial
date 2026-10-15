@@ -55,6 +55,16 @@ test_drive_claude_runtime_normalises() {
   assert_eq "$(jq -r '.[2].tool.isError' <<<"$out")" "false"
 }
 
+test_drive_pi_1_2_session_parses_inbox_wake_event() {
+  command -v node >/dev/null || return 0
+  local out
+  out="$(_tr 'console.log(JSON.stringify(T.parseText(fs.readFileSync(process.env.FX + "/pi-1.2.0.jsonl","utf8"), "pi")));')"
+  assert_eq "$(jq -r 'map(.kind)|join(",")' <<<"$out")" "system"
+  assert_eq "$(jq -r '.[0].source' <<<"$out")" "cel-inbox"
+  assert_contains "$(jq -r '.[0].text' <<<"$out")" "PI 1.2.0 fixture inbox probe"
+}
+
+
 test_drive_tailer_partial_line_swap_and_shrink() {
   command -v node >/dev/null || return 0
   local d; d="$(mktemp -d)"

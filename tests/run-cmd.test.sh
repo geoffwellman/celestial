@@ -199,17 +199,61 @@ test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
   assert_contains "$out" "export OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
-# A bare Claude alias such as `sonnet` is runtime-dependent. Pi must not
-# silently resolve it through an ambient, unconfigured provider.
-test_run_pi_reviewer_refuses_an_unresolved_model_alias() {
-  _ws; printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
+# Workspace aliases are intentional: resolve them from the configured
+# gateway catalog instead of letting pi choose an ambient provider.
+test_run_pi_reviewer_resolves_sonnet_from_gateway_catalog() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_resolves_opus_alias_to_gateway_model() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: opus\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_preserves_explicit_gateway_model_id() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model ompgw-claude/claude-sonnet-4-6 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_refuses_sonnet_when_catalog_has_no_candidate() {
+  _reviewer_gateway_fixture
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
   local out
   if out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
-    echo "reviewer accepted an unresolved model alias"; rm -rf "$T"; return 1
+    echo "reviewer accepted sonnet without a gateway catalog model"; _ws_gateway_clean; return 1
   fi
-  assert_contains "$out" "model 'sonnet' is not a routable pi model"
-  assert_contains "$out" "ompgw-claude/<model>"
-  rm -rf "$T"
+  assert_contains "$out" "gateway catalog advertises no Claude Sonnet model"
+  _ws_gateway_clean
 }
 
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
@@ -404,7 +448,7 @@ _reviewer_gateway_fixture() {
 #!/usr/bin/env bash
 case "$1" in
   ready) exit 0 ;;
-  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-4-5-20250929"},{"id":"claude-sonnet-5-5"},{"id":"claude-sonnet-4-6"}]}' ;;
 esac
 EOS
   chmod +x "$GWT/gwstub"

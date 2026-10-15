@@ -278,6 +278,40 @@ test_doctor_reports_valid_pi_anthropic_credential() {
   _doctor_teardown
 }
 
+test_doctor_ignores_pi_login_for_reviewer_only_profile_routed_via_gateway() {
+  _doctor_pi_fixture
+  cat >"$T/ws/workspace.yaml" <<'EOF'
+name: alpha
+runtime: { worker: pi }
+review: { runtime: pi, model: sonnet }
+role_profiles: { reviewer: review-pi }
+worker_profiles:
+  review-pi: { runtime: pi, model: claude-opus-5-5 }
+EOF
+  printf '{"anthropic":{"access":"fixture-token","expires":1}}\n' >"$T/pi/auth.json"
+  local out; out="$(doctor_pi_anthropic_lines "$T/ws" alpha)"
+  case "$out" in
+    *"pi Anthropic credential"*) echo "doctor incorrectly requires pi login for gateway-routed reviewer"; _doctor_teardown; return 1 ;;
+  esac
+  _doctor_teardown
+}
+
+test_doctor_keeps_pi_login_warning_when_reviewer_profile_is_shared_with_worker() {
+  _doctor_pi_fixture
+  cat >"$T/ws/workspace.yaml" <<'EOF'
+name: alpha
+runtime: { worker: pi }
+review: { runtime: pi, model: sonnet }
+role_profiles: { reviewer: review-pi, worker: review-pi }
+worker_profiles:
+  review-pi: { runtime: pi, model: claude-opus-5-5 }
+EOF
+  printf '{"anthropic":{"access":"fixture-token","expires":1}}\n' >"$T/pi/auth.json"
+  local out; out="$(doctor_pi_anthropic_lines "$T/ws" alpha)"
+  assert_contains "$out" "pi Anthropic credential expired"
+  _doctor_teardown
+}
+
 test_doctor_check_workspaces_runs_github_account_check() {
   _doctor_setup
   mkdir -p "$T/ws"
