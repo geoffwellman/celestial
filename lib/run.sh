@@ -1030,18 +1030,30 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
   return 0
 }
 
-_run_gateway_env() { # <runtime> <agent-name> [require-key] mutates GATEWAY_ENV
-  local runtime="$1" agent_name="$2" require_key="${3:-1}" token
+_run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates GATEWAY_ENV
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" session_id="${4:-${CEL_SESSION_ID:-$agent_name}}" token session_var
   if [ "$runtime" = pi ]; then
     local key_file; key_file="$(_gateway_key_file)"
     if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
-      die "cel run: gateway API key file is missing, empty, or unreadable - cel gateway install"
+      die "gateway API key file is missing, empty, or unreadable - cel gateway install"
     fi
     token="\$(cat '$key_file')"
   else
     token="\$(omp auth-gateway token)"
   fi
-  GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "CEL_SESSION_ID=${CEL_SESSION_ID:-$agent_name}")
+  printf -v session_var 'CEL_SESSION_ID=%q' "$session_id"
+  GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "$session_var")
+}
+
+_run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-models] [session-id]
+  local runtime="$1" agent_name="$2" require_key="${3:-1}" write_models="${4:-1}" session_id="${5:-}"
+  GATEWAY_ENV=()
+  [ "${PROFILE_VIA:-}" = gateway ] || return 0
+  _run_gateway_env "$runtime" "$agent_name" "$require_key" "$session_id"
+  if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
+    gateway_pi_models_write \
+      || die "gateway launch: could not read the model list - cel gateway status"
+  fi
 }
 
 _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
@@ -1504,14 +1516,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
-  if [ "${PROFILE_VIA:-}" = gateway ]; then
-    _run_gateway_env "$runtime" "$agent_name" "$((1 - dry_run))"
-    # models.json is the owner's file, so a dry run must not touch it.
-    if [ "$dry_run" -eq 0 ]; then
-      gateway_pi_models_write \
-        || die "cel run: could not read the gateway's model list - cel gateway status"
-    fi
-  fi
+  _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))"
   if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
     prefix_required=1
     envprefix="${GATEWAY_ENV[*]}; $envprefix"

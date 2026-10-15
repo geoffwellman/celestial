@@ -1021,14 +1021,15 @@ worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 ```
 
-`cel run worker --profile gw` writes the gateway's providers into
+For Pi profiles, `cel run worker --profile gw` and `cel-fanout delegate|scout`
+when bound to a gateway profile write the gateway's providers into
 `~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
 and the model list comes from the gateway's own `/v1/models`, with plain ids:
 Claude models go through pi's `anthropic-messages` surface, everything else
-through `openai-completions`), and sets `CEL_SESSION_ID` in the pane, which is
-the **only** thing affinity can pin an account by — pi sends no session
-identity of its own, so without the injected `x-session-id` header every worker
-on the box is the same anonymous session.
+through `openai-completions`). Every gateway launch stages `OMP_GATEWAY_TOKEN`
+and `CEL_SESSION_ID` in the actual target pane's launch shell; Pi resolves its
+key there and the generated provider stores only the variable name. Delegated
+workers and scouts use their own alias as the session affinity key.
 
 Three things are worth knowing before you rely on it:
 
