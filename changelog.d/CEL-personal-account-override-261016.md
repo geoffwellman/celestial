@@ -1,0 +1,2 @@
+### Added
+- `gateway.omp_include_all: true` in the box config is an explicit owner opt-in that lets `cel gateway omp-scope` (plan, `--check`, `--apply`) run with an empty `gateway.omp_exclude`, so every claude account - the personal one included - joins the omp pool. Precedence: any identity still listed in `gateway.omp_exclude` stays excluded; the opt-in only lifts the empty-list refusal. Absent or any value other than the literal `true` keeps the fail-closed default.
