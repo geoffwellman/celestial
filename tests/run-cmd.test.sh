@@ -452,6 +452,7 @@ case "$1" in
 esac
 EOS
   chmod +x "$GWT/gwstub"
+  printf 'reviewer-test-api-key\n' >"$GWT/state/api-key"
   printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
 }
 
@@ -728,6 +729,21 @@ test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
+
+test_reviewer_refuses_to_start_without_gateway_api_key() {
+  _ws_pr_fixture
+  rm -f "$CEL_GATEWAY_STATE/api-key"
+  local out
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" \
+    && { echo "reviewer started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gateway API key" \
+    || { reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" \
+    || { echo "reviewer process started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
 
 # A claim about "main" anchored to a directory is not a claim. The brief names
 # the head it is reading and the base it compares against, and says how to tell
