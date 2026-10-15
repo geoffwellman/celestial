@@ -1191,6 +1191,13 @@ must emit the provider key, protocol, URL, and model list consumed by the same
 revision's `cel run`, whose shell launch line exports that key. Update them
 together and keep the generated-config/launch regression green.
 
+For Pi 1.2.0's Anthropic provider, `gateway_pi_models_write` mirrors the
+canonical reasoning metadata for the configured exact ID `claude-opus-5-5`:
+reasoning, its supported thinking levels, and adaptive/mid-conversation
+compatibility. Other gateway IDs remain unmarked; capabilities do not follow a
+`claude-opus-` prefix. Recheck the pinned Pi catalog before changing the
+mapping or runtime version.
+
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow
 your package sources, and npm transitive dependencies, plugin build

@@ -360,12 +360,26 @@ gateway_pi_provider_for_model() { # <model id>
 # from the pane's environment at launch, so no key and no session id is ever
 # in this file.
 
+# This exact configured ID mirrors Pi 1.2.0's canonical Anthropic entry.
+# Unknown IDs never inherit its capabilities by prefix.
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
-  models="$(gateway_models_json | jq -c '[ (.data // [])[] | {
-      id: .id,
-      contextWindow: (.context_length // 128000),
-      maxTokens: (.max_output_tokens // 8192) } ]' 2>/dev/null || true)"
+  models="$(gateway_models_json | jq -c '
+    def configured_opus_metadata:
+      if .id == "claude-opus-5-5" then
+        . + { reasoning: true,
+              thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium",
+                                  high: "high", xhigh: "xhigh", max: "max" },
+              compat: { supportsMidConvoEffort: true, supportsMidConvoSystemMessages: true,
+                        supportsMidConvoToolChanges: true, forceAdaptiveThinking: true,
+                        supportsTemperature: false, supportsStrictTools: true } }
+      else .
+      end;
+    [ (.data // [])[] | {
+        id: .id,
+        contextWindow: (.context_length // 128000),
+        maxTokens: (.max_output_tokens // 8192) } | configured_opus_metadata
+    ]' 2>/dev/null || true)"
   [ -n "$models" ] || return 1
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
