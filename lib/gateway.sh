@@ -434,6 +434,11 @@ gateway_pi_models_write() { # [models.json path]
 # how a refresh would quietly drop the prefix or a token.
 GATEWAY_OMP_PREFIX=omp
 GATEWAY_OMP_PROVIDER=celgw
+# `gateway_pool: all` on an omp profile (meant for the orchestrator role, bound
+# through role_profiles): a SEPARATE provider key carrying the gateway's
+# UNPREFIXED claude ids, which force-model-prefix:false serves from every
+# claude account. Worker profiles keep celgw + omp/; no account is touched.
+GATEWAY_OMP_ALL_PROVIDER=celgw-all
 
 # omp's agent dir. omp reads PI_CODING_AGENT_DIR exactly as pi does, so an omp
 # pane is pinned to this dir explicitly - otherwise a pi-oriented export would
@@ -559,27 +564,29 @@ PY
 # model per `omp/<id>` the gateway publishes AND omp's catalog describes - an
 # id with no metadata is dropped, never given another model's. apiKey and the
 # session header are ENV NAMES, resolved by omp in the pane.
-gateway_omp_models_write() { # [models.yml] [catalog json file]
-  local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" raw catalog block tmp cur
+gateway_omp_models_write() { # [models.yml] [catalog json file] [pool: omp|all]
+  local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" pool="${3:-omp}" raw catalog block tmp cur
+  local pfx="$GATEWAY_OMP_PREFIX/" key="$GATEWAY_OMP_PROVIDER" label="cel gateway (omp-pool)"
+  if [ "$pool" = all ]; then pfx=""; key="$GATEWAY_OMP_ALL_PROVIDER"; label="cel gateway (all claude accounts)"; fi
   raw="$(_gateway_models_json_raw)" || return 1
   if [ -n "$cat_file" ]; then catalog="$(cat "$cat_file")"; else catalog="$(gateway_omp_catalog_json)"; fi
   [ -n "$catalog" ] || { c_err "no anthropic catalog in $(gateway_omp_dir)/models.db - omp's catalog is built the first time it starts"; return 1; }
-  block="$(jq -c --argjson cat "$catalog" --arg p "$GATEWAY_OMP_PREFIX/" --arg url "$(gateway_url)" '
+  block="$(jq -c --argjson cat "$catalog" --arg p "$pfx" --arg url "$(gateway_url)" --arg label "$label" '
     ($cat | map({key: .id, value: .}) | from_entries) as $byid
     | [ (.data // [])[] | .id | select(startswith($p + "claude"))
         | . as $full | ($full | ltrimstr($p)) as $id | $byid[$id] | select(. != null)
         | { id: $full }
           + (with_entries(select(.key | IN("name","reasoning","input","contextWindow","maxTokens","cost","tokenizer"))))
           + (if .thinking then {thinking: (.thinking | with_entries(select(.key | IN("mode","efforts","supportsDisplay"))))} else {} end) ]
-    | { name: "cel gateway (omp-pool)", baseUrl: $url, api: "anthropic-messages",
+    | { name: $label, baseUrl: $url, api: "anthropic-messages",
         apiKey: "OMP_GATEWAY_TOKEN", headers: { "x-session-id": "CEL_SESSION_ID" },
         models: . }' <<<"$raw")" || return 1
   [ "$(jq '.models | length' <<<"$block")" -gt 0 ] \
-    || { c_err "the gateway publishes no omp/claude model in omp's catalog - cel gateway omp-scope"; return 1; }
+    || { c_err "the gateway publishes no ${pfx}claude model in omp's catalog - cel gateway omp-scope"; return 1; }
   mkdir -p "$(dirname "$f")"
   cur='{}'; [ -s "$f" ] && cur="$(yq -c '. // {}' "$f")"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
+  jq --argjson b "$block" --arg k "$key" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
     | yq -y . >"$tmp" && mv "$tmp" "$f"
 }
 
