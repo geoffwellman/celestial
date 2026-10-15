@@ -632,7 +632,8 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
 # guaranteed that directory had any relationship to the pull request. A
 # reviewer now gets a detached checkout AT THE PR'S HEAD, of its own.
 _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $HEAD_SHA
-  _ws_review
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   export CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REVIEW_DIR="$T/reviews"
   export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log"
   : > "$HERDR_LOG"
@@ -667,6 +668,8 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_contains "$(cat "$HERDR_LOG")" "pane run w1:p9 export OMP_GATEWAY_TOKEN="
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_SESSION_ID=widget-pr-12-review"
   local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
   [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
   [ "$cwd" != "$T/repos/widget" ] || { echo "reviewer opened in the orchestrator's checkout"; return 1; }
