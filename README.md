@@ -445,18 +445,25 @@ the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
 
-Declare a reviewer in `workspace.yaml`:
+Declare a reviewer in `workspace.yaml` with an explicit Claude model reached
+through the box's gateway:
 
 ```yaml
-review: { runtime: pi, model: gpt-5.6-sol }
+review: { runtime: pi, model: ompgw-claude/claude-opus-5-5 }
 ```
 
-and orchestrators start one reviewer pane per PR on pi. Its inbox extension
-wakes the idle reviewer when new mail arrives, so request-changes and
-re-review round trips do not wait for someone to type. `review.runtime` stays
-in the workspace schema for compatibility but no longer selects the reviewer
-runtime; `review.model` still selects its model. A reviewer delivers one
-verdict per round and **records it in the delegation ledger** — `cel-fanout
+`cel run reviewer` validates that the gateway is installed, ready, has a Claude
+account, and advertises the requested model before opening a pane. Runtime-
+dependent aliases such as `sonnet` are refused rather than delegated to pi's
+ambient provider configuration. Configure a reachable Claude account with
+`cel gateway` before starting reviewers.
+
+Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
+the idle reviewer when new mail arrives, so request-changes and re-review
+round trips do not wait for someone to type. `review.runtime` stays in the
+workspace schema for compatibility but no longer selects the reviewer
+runtime; `review.model` selects the requested Claude model. A reviewer delivers
+one verdict per round and **records it in the delegation ledger** — `cel-fanout
 review <id> approved|changes --by <alias>` — which is where a review exists;
 `cel-fanout land` accepts that verdict on repos where the PR author and the
 reviewer share one GitHub account, and GitHub approval remains the authority

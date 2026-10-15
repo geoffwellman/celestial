@@ -1264,10 +1264,38 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
   fi
   # Profiles can change runtime for other roles; reviewer delivery depends on
-  # pi's idle inbox extension, so keep the review model but force pi execution.
-  [ "$role" != "reviewer" ] || runtime=pi
+  # pi's idle inbox extension, so keep pi execution and honor explicit flags.
+  [ "$role" != reviewer ] || runtime=pi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+  # Reviewers run on pi, whose ambient provider selection is not a reliable
+  # contract (e.g. `sonnet` may select an unconfigured Bedrock provider). Route
+  # explicit Claude model ids through the configured gateway and reject
+  # runtime-dependent aliases before a pane can start.
+  [ "$role" != reviewer ] || {
+    case "$model" in
+      ompgw-claude/*) PROFILE_MODEL="$model" ;;
+      ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${model#ompgw/claude/}" ;;
+      claude/*) PROFILE_MODEL="${model#claude/}" ;;
+      claude-*) PROFILE_MODEL="$model" ;;
+      *) die "cel run reviewer: model '$model' is not a routable pi model; use a Claude model id (claude-...) or ompgw-claude/<model> via the configured gateway" ;;
+    esac
+    PROFILE_WSDIR="$wsdir"
+    PROFILE_VIA=gateway
+    _profile_gateway_route reviewer
+    [ -z "$PROFILE_VETO" ] || die "cel run reviewer: $PROFILE_VETO"
+    local reviewer_model_id="${PROFILE_MODEL#ompgw-claude/}" reviewer_models
+    [ -n "$reviewer_model_id" ] \
+      || die "cel run reviewer: model '$model' has no Claude model id"
+    reviewer_models="$(gateway_models_json)" \
+      || die "cel run reviewer: cannot read model ids from the configured gateway"
+    if ! jq -e --arg id "$reviewer_model_id" \
+      '[.data[]? | select(.id == $id)] | length > 0' \
+      <<< "$reviewer_models" >/dev/null; then
+      die "cel run reviewer: configured gateway does not advertise Claude model '$reviewer_model_id'"
+    fi
+    model="$PROFILE_MODEL"
+  }
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
@@ -1453,6 +1481,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     if [ "$dry_run" -eq 1 ]; then
       printf 'git worktree add --detach %s <head of %s#%s>\n' "$review_path" "$repo" "$pr"
       printf 'herdr tab "PR reviewer": split its largest pane, or a new tab per %s panes\n' "$_RUN_REVIEW_TAB_CAP"
+      [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
+        || printf 'herdr pane run <pane> export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****\n'
       printf 'herdr pane send-text <pane> %s\n' "$envprefix"
       printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
         "$agent_name" "$runtime" "$(_run_dry_agent_args)"
@@ -1461,6 +1491,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     have herdr || die "cel run: herdr is not on PATH"
     have jq    || die "cel run: jq is not on PATH"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
+    [ "${#GATEWAY_ENV[@]}" -eq 0 ] \
+      || herdr pane run "$pane_id" "${GATEWAY_ENV[@]}" \
+         || die "cel run reviewer: could not configure gateway credentials in pane $pane_id"
     pane_label_set "$pane_id" "$label"
     _run_mark_launch "$pane_id" "$envprefix"
     herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
