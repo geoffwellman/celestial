@@ -1033,7 +1033,10 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
 _run_gateway_env() { # <runtime> <agent-name> mutates caller's GATEWAY_ENV
   local runtime="$1" agent_name="$2" token
   if [ "$runtime" = pi ]; then
-    token="\$(cat '$(gateway_state_dir)/api-key')"
+    local key_file; key_file="$(_gateway_key_file)"
+    [ -r "$key_file" ] && [ -s "$key_file" ] \
+      || die "cel run: gateway API key file is missing, empty, or unreadable - cel gateway install"
+    token="\$(cat '$key_file')"
   else
     token="\$(omp auth-gateway token)"
   fi
