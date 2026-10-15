@@ -308,7 +308,7 @@ serve_sweep() {
     owner="$(jq -r '.owner' <<<"$row")"; ws="$(jq -r '.workspace' <<<"$row")"
     worktree="$(jq -r '.worktree' <<<"$row")"; started="$(jq -r '.started_at' <<<"$row")"
     ttl="$(jq -r '.ttl_seconds' <<<"$row")"; last="$(jq -r '.last_request_at // .started_at' <<<"$row")"
-    if [ ! -d "$worktree" ]; then reason='worktree is gone'
+    if [ -n "$worktree" ] && [ ! -d "$worktree" ]; then reason='worktree is gone'
     elif [ "$((now-started))" -ge "$ttl" ]; then reason='TTL expired'
     elif [ "$((now-last))" -ge "$idle" ]; then reason="no request for $((idle/3600)) hours"
     else continue
