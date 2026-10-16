@@ -489,3 +489,62 @@ test_replace_gc_veto_follows_the_child_through_reserve_attach_collect_release() 
   if _gc_delegated_live "$T/wt"; then echo "released child still vetoes"; return 1; fi
   rm -rf "$T"
 }
+
+test_replace_the_replaced_original_is_frozen_for_every_acting_verb() {
+  _rp_setup; _reserve; _rp_publish; _attach
+  assert_eq "$RC" 0 || return 1
+  LEDGER_SUM="$(_rp_sum)"
+  : > "$G/merges.log"
+  _rp land WG-1;                              _rp_refused "frozen" || return 1
+  assert_eq "$(cat "$G/merges.log")" "" || return 1
+  _rp collect WG-1;                           _rp_refused "frozen" || return 1
+  _rp review WG-1 approved --head "$OH" --by r; _rp_refused "frozen" || return 1
+  _rp request-review WG-1 --head "$OH";       _rp_refused "frozen" || return 1
+  rm -rf "$T"
+}
+
+# a second original whose tree holds NON-ASCII names: git C-quotes them in
+# newline listings, which used to hide both a tampered file and a private one
+_rp_unicode_original() {
+  mkdir -p "$T/wt/src" "$T/wt/.agent"
+  printf 'cafe\n' > "$T/wt/src/café.ts"
+  printf 'private\n' > "$T/wt/.agent/é.md"
+  git -C "$T/wt" add -f -A && git -C "$T/wt" commit -q -m unicode
+  OH="$(git -C "$T/wt" rev-parse HEAD)"
+  _rp_pr WG-1 "$OH" 11; printf '%s' "$OH" > "$G/ref-WG-1"
+  TH="$(_rp_clean_commit "$OH" "unicode clean")"
+  LEDGER_SUM="$(_rp_sum)"
+}
+
+test_replace_non_ascii_paths_cannot_hide_a_tampered_file_or_a_private_artifact() {
+  _rp_setup; _rp_unicode_original
+  # artifact removal alone is still permitted with non-ASCII names in play
+  _reserve; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  rm -rf "$T"; _rp_setup; _rp_unicode_original
+  # a tampered non-ASCII implementation file
+  local idx="$T/i4" tree blob bad
+  GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" read-tree "$TH"
+  blob="$(printf 'tampered\n' | git -C "$T/repos/widget" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" update-index --cacheinfo "100644,$blob,src/café.ts"
+  tree="$(GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" write-tree)"
+  bad="$(git -C "$T/repos/widget" commit-tree "$tree" -p main -m tamper)"
+  _reserve WG-1-clean "$bad"; _rp_refused "café.ts" || return 1
+  # a private non-ASCII artifact left in the candidate tree
+  GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" read-tree "$TH"
+  GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" update-index --add --cacheinfo "100644,$(printf 'private\n' | git -C "$T/repos/widget" hash-object -w --stdin),.agent/é.md"
+  tree="$(GIT_INDEX_FILE="$idx" git -C "$T/repos/widget" write-tree)"
+  bad="$(git -C "$T/repos/widget" commit-tree "$tree" -p main -m leftover)"
+  _reserve WG-1-clean "$bad"; _rp_refused "private artifact" || return 1
+  rm -rf "$T"
+}
+
+test_replace_a_path_with_a_newline_is_refused_not_misread() {
+  _rp_setup
+  printf 'x\n' > "$T/wt/$(printf 'a\nb.ts')"
+  git -C "$T/wt" add -A && git -C "$T/wt" commit -q -m newline
+  OH="$(git -C "$T/wt" rev-parse HEAD)"
+  _rp_pr WG-1 "$OH" 11; printf '%s' "$OH" > "$G/ref-WG-1"
+  TH="$(_rp_clean_commit "$OH" "nl clean")"; LEDGER_SUM="$(_rp_sum)"
+  _reserve; _rp_refused "newline" || return 1
+  rm -rf "$T"
+}

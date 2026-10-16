@@ -1175,6 +1175,7 @@ cmd_collect() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  _replace_frozen collect "$id" "$entry"
   _replace_unattached collect "$id" "$entry"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
@@ -2233,6 +2234,7 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   [ -n "$entry" ] || die "review: no delegation with id '$id'"
 
   if [ "$verdict" = approved ]; then
+    _replace_frozen review "$id" "$entry"
     _replace_unattached review "$id" "$entry"
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
     # DELEGATION OWNS. The API read validates; it is never where the SHA comes
@@ -2371,6 +2373,7 @@ cmd_land() { # <id>
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
+  _replace_frozen land "$id" "$entry"
   _replace_unattached land "$id" "$entry"
   local repo branch slug ticket
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
@@ -2575,6 +2578,7 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "request-review: no delegation with id '$id'"
+  _replace_frozen request-review "$id" "$entry"
 
   # THE POLICY: the configured reviewer, and only it. --reviewer can pick that
   # identity out, never widen it.
@@ -2708,19 +2712,30 @@ _replace_fault() { # <stage> - a TEST seam, honoured only under CEL_TESTING
   die "replace: injected fault at $1"
 }
 
+# THE SOURCE IS FROZEN. Once a replacement is reserved the original row is
+# evidence only: landing, collecting or approving it would publish the very
+# branch that was replaced (with its old approval), so every acting verb
+# refuses it and names the child.
+_replace_frozen() { # <verb> <id> <entry-json>
+  [ "$(printf '%s' "$3" | jq -r '.replacement.role // ""')" = source ] || return 0
+  die "$1: $2 has been replaced by $(printf '%s' "$3" | jq -r '.replacement.child // "?"') and is frozen as evidence - act on the replacement. Nothing recorded."
+}
+
 # A child that is not attached yet is not a PR anyone can act on.
 _replace_unattached() { # <verb> <id> <entry-json>
   [ "$(printf '%s' "$3" | jq -r '.replacement.stage // ""')" = reserved ] || return 0
   die "$1: $2 is a replacement that is not attached - its clean PR has not been published and attached. Run: cel-fanout replace attach $2 --head $(printf '%s' "$3" | jq -r '.replacement.target_head') . Nothing recorded."
 }
 
-# The paths among stdin's (one per line) that the release hygiene scan itself
-# calls private - the same predicate, not a copy of its list.
+# The paths among stdin's (NUL-delimited) that the release hygiene scan itself
+# calls private - the same predicate, not a copy of its list. NUL in, NUL out:
+# git quotes non-ASCII and control characters in newline-delimited listings,
+# and a quoted name no longer looks like the path it names.
 _replace_sensitive() {
   python3 -c '
 import sys; sys.path.insert(0, sys.argv[1]); import hygiene as h
-for line in sys.stdin.read().split("\n"):
-    if line and h.sensitive_path(line): print(line)
+for name in sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0"):
+    if name and h.sensitive_path(name): sys.stdout.buffer.write(name.encode("utf-8", "surrogateescape") + b"\0")
 ' "$CEL_ROOT/tools/release"
 }
 
@@ -2731,35 +2746,46 @@ _replace_pr() { # <wsdir> <slug> <branch> -> JSON, fails when there is no PR
 
 # CLEAN CANDIDATE vs FROZEN ORIGINAL. Only the removal of private artifacts may
 # differ; everything else must be byte-identical (mode + blob) to the original.
+# Every path list is NUL-delimited (-z) and every pathspec literal, so no name
+# - non-ASCII, quoted, globby - can hide from the content or hygiene check.
 _replace_check_content() { # <repodir> <original-sha> <target-sha> -> reason on stdout, fails when refused
-  local dir="$1" oh="$2" th="$3" base obase tbase c bad paths p so st
+  local dir="$1" oh="$2" th="$3" base obase tbase c p so st
+  local -a G=(git --literal-pathspecs -C "$dir")
   base="$(repo_default_ref "$dir")" || { printf 'cannot resolve the default branch of the repository'; return 1; }
-  git -C "$dir" merge-base --is-ancestor "$oh" "$th" 2>/dev/null \
+  "${G[@]}" merge-base --is-ancestor "$oh" "$th" 2>/dev/null \
     && { printf 'ancestry is not clean: the original head %s is an ancestor of the candidate, so the published history would still carry it' "${oh:0:12}"; return 1; }
-  obase="$(git -C "$dir" merge-base "$base" "$oh" 2>/dev/null)" && tbase="$(git -C "$dir" merge-base "$base" "$th" 2>/dev/null)" \
+  obase="$("${G[@]}" merge-base "$base" "$oh" 2>/dev/null)" && tbase="$("${G[@]}" merge-base "$base" "$th" 2>/dev/null)" \
     || { printf 'the original and the candidate must both descend from %s' "$base"; return 1; }
-  [ "$(git -C "$dir" rev-list --count "$base..$th" 2>/dev/null)" -gt 0 ] \
+  [ "$("${G[@]}" rev-list --count "$base..$th" 2>/dev/null)" -gt 0 ] \
     || { printf 'the candidate carries no commit beyond %s' "$base"; return 1; }
   # every commit that would be published, not only the final tree
-  bad=""
+  local -a hist=()
   while read -r c; do
     [ -n "$c" ] || continue
-    paths="$(git -C "$dir" diff-tree -r -m --root --no-commit-id --name-only "$c" 2>/dev/null)" || { printf 'cannot read commit %s' "$c"; return 1; }
-    p="$(printf '%s\n' "$paths" | _replace_sensitive | head -1)"
-    [ -z "$p" ] || { bad="$p in ${c:0:12}"; break; }
-  done < <(git -C "$dir" rev-list "$base..$th")
-  [ -z "$bad" ] || { printf 'ancestry is not clean: private artifact %s is in the history that would be published' "$bad"; return 1; }
-  paths="$( { git -C "$dir" diff --name-only --no-renames "$obase" "$oh"; git -C "$dir" diff --name-only --no-renames "$tbase" "$th"; } | sort -u)"
-  local sens; sens="$(printf '%s\n' "$paths" | _replace_sensitive)"
-  while read -r p; do
+    p="$("${G[@]}" diff-tree -z -r -m --root --no-commit-id --name-only "$c" 2>/dev/null | _replace_sensitive | tr '\0' '\n')" \
+      || { printf 'cannot read commit %s' "$c"; return 1; }
+    [ -z "$p" ] || { printf 'ancestry is not clean: private artifact %s is in the history that would be published (commit %s)' "${p%%$'\n'*}" "${c:0:12}"; return 1; }
+  done < <("${G[@]}" rev-list "$base..$th")
+  local -a paths=() sens=() l1=() l2=()
+  mapfile -d '' -t l1 < <("${G[@]}" diff -z --name-only --no-renames "$obase" "$oh")
+  mapfile -d '' -t l2 < <("${G[@]}" diff -z --name-only --no-renames "$tbase" "$th")
+  local -A seen=()
+  for p in "${l1[@]}" "${l2[@]}"; do
+    case "$p" in *$'\n'*) printf 'a path contains a newline and cannot be compared safely'; return 1 ;; esac
+    [ -n "$p" ] && [ -z "${seen[$p]:-}" ] && { seen["$p"]=1; paths+=("$p"); }
+  done
+  local -A is_sens=()
+  mapfile -d '' -t sens < <(printf '%s\0' "${paths[@]}" | _replace_sensitive)
+  for p in "${sens[@]}"; do is_sens["$p"]=1; done
+  for p in "${paths[@]}"; do
     [ -n "$p" ] || continue
-    so="$(git -C "$dir" ls-tree "$oh" -- "$p" 2>/dev/null)"; st="$(git -C "$dir" ls-tree "$th" -- "$p" 2>/dev/null)"
-    if printf '%s\n' "$sens" | grep -qxF -- "$p"; then
+    so="$("${G[@]}" ls-tree -z "$oh" -- "$p" 2>/dev/null | tr '\0' '\n')"; st="$("${G[@]}" ls-tree -z "$th" -- "$p" 2>/dev/null | tr '\0' '\n')"
+    if [ -n "${is_sens[$p]:-}" ]; then
       [ -z "$st" ] || { printf 'private artifact %s is still in the candidate tree' "$p"; return 1; }
       continue
     fi
     [ "$so" = "$st" ] || { printf 'the candidate changes %s, which is not a private artifact - only artifact removal may differ from the frozen original %s' "$p" "${oh:0:12}"; return 1; }
-  done <<< "$paths"
+  done
   return 0
 }
 
