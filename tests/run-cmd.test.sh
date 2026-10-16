@@ -1164,7 +1164,7 @@ test_run_omp_orchestrators_wait_out_a_spent_budget() {
 
 # ---------------------------------------------------------------------------
 # AH-261017: A PANE IS TYPED INTO ONLY ONCE ITS SHELL OWNS THE FOREGROUND.
-# Standout's PR1839 reviewer launch twice died as agent_pane_busy about six
+# A downstream workspace's reviewer launch twice died as agent_pane_busy about six
 # seconds in, with the credential substitution and role env typed into a fresh
 # pane's terminal, never submitted, a shell warning interleaved with it. The
 # shell was still reading its rc files; nothing in cel waited for it. These
