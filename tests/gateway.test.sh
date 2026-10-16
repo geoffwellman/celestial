@@ -423,6 +423,32 @@ test_pi_models_use_canonical_opus_thinking_capabilities_only() {
   _gw_teardown
 }
 
+# The live gateway publishes bare ids (no context_length/max_output_tokens),
+# so the generic 128000/8192 fallback must never win for a 5.5 Claude model:
+# Opus and Sonnet 5.5 carry their native window, output, input and adaptive
+# thinking. Unknown claude ids stay on the generic fallback.
+test_pi_models_project_native_5_5_capabilities_from_bare_ids() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-5-5"},{"id":"claude-opus-5-5"},{"id":"claude-custom-unknown"}]}'
+  gateway_pi_models_write "$T/pi/models.json"
+  local f="$T/pi/models.json" m
+  for m in claude-sonnet-5-5 claude-opus-5-5; do
+    local q=".providers[\"ompgw-claude\"].models[] | select(.id == \"$m\")"
+    assert_eq "$(jq -r "$q | .contextWindow" "$f")" 1000000
+    assert_eq "$(jq -r "$q | .maxTokens" "$f")" 128000
+    assert_eq "$(jq -r "$q | .reasoning" "$f")" true
+    assert_eq "$(jq -c "$q | .input" "$f")" '["text","image"]'
+    assert_eq "$(jq -r "$q | .thinkingLevelMap.medium" "$f")" medium
+    assert_eq "$(jq -r "$q | .compat.forceAdaptiveThinking" "$f")" true
+  done
+  local u='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
+  assert_eq "$(jq -r "$u | .contextWindow" "$f")" 128000
+  assert_eq "$(jq -r "$u | has(\"reasoning\")" "$f")" false
+  unset GW_MODELS
+  _gw_teardown
+}
+
 test_pi_models_provider_helper_recognises_claude_slash_model() {
   assert_eq "$(gateway_pi_provider_for_model "claude/claude-sonnet-4-6")" ompgw-claude
 }
