@@ -236,22 +236,25 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
 # (shell_pid, foreground_processes) - and nothing is typed until, over
 # CEL_PANE_READY_STABLE consecutive probes inside the CEL_PANE_READY_MS
 # deadline, the pane has had no agent, the same terminal and shell, and a
-# foreground consisting of the shell alone. A terminal or shell that changes
+# foreground consisting of the shell alone (its process group, as herdr's own
+# prompt predicate requires, and no other process). A terminal or shell that changes
 # under us is somebody else's pane now: refuse, never wait it out.
 # Probe output is one line: "<terminal_id>:<shell_pid>\t<verdict>", verdict one of
 # ready | agent | busy | unavailable. Pane text is never read.
 _run_pane_probe() { # <pane>
   local pane="$1" g p
-  g="$(herdr pane get "$pane" 2>/dev/null)" && p="$(herdr pane process-info --pane "$pane" 2>/dev/null)" \
+  g="$("${_RUN_HERDR:-herdr}" pane get "$pane" 2>/dev/null)" && p="$("${_RUN_HERDR:-herdr}" pane process-info --pane "$pane" 2>/dev/null)" \
     || { printf ':\tunavailable\n'; return 0; }
   printf '%s\n%s\n' "$g" "$p" | jq -rs --arg pane "$pane" '
     (.[0].result.pane // {}) as $g | (.[1].result.process_info // {}) as $p
     | (($g.terminal_id // "") + ":" + (($p.shell_pid // "") | tostring)) as $id
     | (if ($g.pane_id // "") != $pane or ($p.pane_id // "") != $pane
           or ($g.terminal_id // "") == "" or ($p.shell_pid | type) != "number"
+          or ($p.foreground_process_group_id | type) != "number"
           or (($p.foreground_processes // []) | length) == 0 then "unavailable"
        elif ($g.agent // null) != null then "agent"
-       elif any($p.foreground_processes[]; .pid != $p.shell_pid) then "busy"
+       elif $p.foreground_process_group_id != $p.shell_pid
+            or any($p.foreground_processes[]; .pid != $p.shell_pid) then "busy"
        else "ready" end) as $v
     | $id + "\t" + $v' 2>/dev/null || printf ':\tunavailable\n'
 }
@@ -259,9 +262,9 @@ _run_pane_probe() { # <pane>
 _run_ms_sleep() { local ms="$1" s; printf -v s '%d.%03d' $((ms / 1000)) $((ms % 1000)); sleep "$s"; }
 
 _RUN_PANE_IDENT=""
-_run_pane_await_shell() { # <pane> <what>: returns only for a stable ready shell, else dies
-  local pane="$1" what="${2:-launch}" total="${CEL_PANE_READY_MS:-30000}" poll="${CEL_PANE_READY_POLL_MS:-250}"
-  local need="${CEL_PANE_READY_STABLE:-3}" t0 out ident verdict base="" streak=0 why=unavailable
+_run_pane_await_shell() { # <pane> [expected-ident]: returns only for a stable ready shell, else dies
+  local pane="$1" total="${CEL_PANE_READY_MS:-30000}" poll="${CEL_PANE_READY_POLL_MS:-250}"
+  local need="${CEL_PANE_READY_STABLE:-3}" t0 out ident verdict base="${2:-}" streak=0 why=unavailable
   t0=$((${EPOCHREALTIME/./} / 1000))
   while :; do
     out="$(_run_pane_probe "$pane")"; ident="${out%%$'\t'*}"; verdict="${out#*$'\t'}"
@@ -284,7 +287,7 @@ _run_pane_await_shell() { # <pane> <what>: returns only for a stable ready shell
         busy)  why="a command other than the shell holds its foreground" ;;
         *)     why="herdr did not report its terminal and process state" ;;
       esac
-      die "cel run: pane $pane is not at an available shell prompt after $((total / 1000))s ($why) - nothing was typed, no agent was started, no launch was recorded. Re-run once the pane is idle"
+      die "cel run: pane $pane shell does not own the foreground after $((total / 1000))s ($why) - nothing was typed, no agent was started, no launch was recorded. Re-run once the pane is idle"
     fi
     _run_ms_sleep "$poll"
   done
@@ -304,17 +307,18 @@ _run_mark_launch() { # <pane> <env-prefix> [required]
   [ -n "$pane" ] && [ -n "$prefix" ] || return 0
   _run_pane_await_shell "$pane"
   local ident="$_RUN_PANE_IDENT"
-  if ! herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
+  if ! "${_RUN_HERDR:-herdr}" pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
     [ "$required" != 1 ] || die "cel run: could not stage gateway credentials in pane $pane"
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
     return 0
   fi
   _RUN_STAGED=1
-  out="$(_run_pane_probe "$pane")"
-  if [ "$out" != "$ident"$'\t'ready ]; then
-    die "cel run: pane $pane changed after the launch line was typed into it - no agent was started and nothing was submitted or retried. The typed text (contents withheld) is still pending at that pane's prompt: close the pane, or clear its line yourself"
-  fi
-  return 0
+  _run_pane_recheck "$pane" "$ident"
+}
+
+_run_pane_recheck() { # <pane> <ident>: the pane is still the same ready shell after typing
+  [ "$(_run_pane_probe "$1")" = "$2"$'\t'ready ] && return 0
+  die "cel run: pane $1 changed after the launch line was typed into it - no agent was started and nothing was submitted or retried. The typed text (contents withheld) is still pending at that pane's prompt: close the pane, or clear its line yourself"
 }
 
 # One agent start, never retried. A failure after the prefix was staged must
@@ -322,8 +326,8 @@ _run_mark_launch() { # <pane> <env-prefix> [required]
 # no second attempt, no clearing of input that may by now be somebody else's.
 _run_agent_start() { # <pane> <name> <kind> <agent-args...>
   local pane="$1" name="$2" kind="$3" out; shift 3
-  if out="$(herdr agent start "$name" --kind "$kind" --pane "$pane" -- "$@" 2>&1)"; then
-    printf '%s\n' "$out"
+  if out="$(${_RUN_AGENT_SPAWN:-} "${_RUN_HERDR:-herdr}" agent start "$name" --kind "$kind" --pane "$pane" -- "$@" 2>&1)"; then
+    [ -n "${_RUN_AGENT_QUIET:-}" ] || printf '%s\n' "$out"
     return 0
   fi
   out="$(printf '%s' "$out" | head -1 | cut -c1-200 | sed -E 's/(OMP_GATEWAY_TOKEN|CEL_SESSION_ID)=[^ ]*/\1=****/g')"
@@ -1675,7 +1679,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     pane_label_set "$restart_pane" "$label"
     tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix" "$prefix_required"
-    _run_agent_start "$restart_pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}" >/dev/null
+    _RUN_AGENT_QUIET=1 _run_agent_start "$restart_pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
     _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
     return 0
   fi

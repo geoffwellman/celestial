@@ -28,7 +28,7 @@ case "$1 $2" in
     # the resolver has to walk the fixture /proc from that shell down. The
     # launch gate reads the same call: the shell alone in the foreground.
     if [ -f "$T/no-pane-info" ]; then exit 1; fi
-    printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":50,"foreground_processes":[{"pid":50,"name":"bash"}]}}}\n' "$4" ;;
+    printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":50,"foreground_process_group_id":50,"foreground_processes":[{"pid":50,"name":"bash"}]}}}\n' "$4" ;;
   "pane send-text") printf '%s' "$4" > "$T/envprefix" ;;
   "agent start")
     [ -f "$T/fail-start" ] && exit 1

@@ -1221,7 +1221,7 @@ test_launch_past_the_deadline_types_nothing_starts_nothing_records_nothing() {
   _ws_pr_fixture; export PF_ALWAYS=busy CEL_PANE_READY_MS=150
   _pf_reviewer
   [ "$rc" -ne 0 ] || { echo "launch succeeded on a pane whose shell never came up"; _pf_clean; return 1; }
-  assert_contains "$out" "not at an available shell prompt"
+  assert_contains "$out" "shell does not own the foreground"
   case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
   _pf_no_launch
   unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
@@ -1318,4 +1318,14 @@ test_cli_worker_start_refusal_is_reported_not_retried() {
   assert_eq "$(_pf_calls 'agent start')" 1
   assert_eq "$(_pf_calls 'pane send-keys')" 0
   unset PF_START_FAIL; rm -rf "$T"
+}
+
+# herdr's own prompt predicate also requires the foreground process GROUP to be
+# the shell's; a pane that does not report it cannot be proven ready.
+test_launch_refuses_a_pane_that_reports_no_foreground_process_group() {
+  _ws_pr_fixture; export PF_NO_PGID=1 CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead without a foreground group"; _pf_clean; return 1; }
+  _pf_no_launch
+  unset PF_NO_PGID; export CEL_PANE_READY_MS=3000; _pf_clean
 }

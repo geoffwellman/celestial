@@ -62,8 +62,12 @@ within `CEL_PANE_READY_MS` (30000). Past the deadline, or when herdr cannot
 describe the pane, or an agent occupies it, the launch dies before anything is
 typed: no prefix, no agent start, no reviewer record. A terminal or shell that
 changes while waiting, or after the text is typed, is refused as a change of
-owner. The same gate covers console, root, orchestrator, worker, reviewer and
-`--restart`. `herdr agent start` is attempted once and never retried; if it is
+owner. The same gate covers console, root, orchestrator, worker, reviewer,
+`--restart` and `cel-fanout delegate` (which has its own launch sequence).
+Limit: herdr 0.9.1 exposes no structured "prompt drawn" field, so the 3-probe
+stability is a mitigation, not proof the prompt is ready; a supported herdr
+field is the upstream prerequisite. The foreground process group must equal the
+shell pid, as herdr's own prompt predicate requires. `herdr agent start` is attempted once and never retried; if it is
 refused after the line was typed, the error names the pane, says the line (never
 printed) is pending and unsubmitted, and leaves clearing it to the owner - `cel`
 sends no Enter and no keys.
