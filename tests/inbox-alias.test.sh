@@ -87,7 +87,7 @@ test_reading_for_the_full_name_finds_the_canonical_mailbox() {
   assert_eq "$(_ia_cel inbox count --for "$FULL" --workspace demo 2>/dev/null)" "1"
   assert_contains "$(_ia_cel inbox read --for "$FULL" --workspace demo 2>/dev/null)" "hello"
   assert_eq "$(_ia_tos)" "$CANON " || return 1
-  ls "$CEL_INBOX_DIR" | grep -q "^demo.$PHANTOM" && { echo "phantom cursor created"; return 1; }
+  ls "$CEL_INBOX_DIR" | grep -q "^demo\.$PHANTOM\." && { echo "phantom cursor created"; return 1; }
   rm -rf "$IA"
 }
 
@@ -133,7 +133,7 @@ _ia_split_fixture() {
 }
 
 _ia_msgs() { # <reader>  -> the messages that reader receives, in order, space separated
-  CEL_INBOX_ME="$1" _ia_cel inbox read --for "$CANON" --workspace demo --json 2>/dev/null | jq -r .message | tr '\n' ' '
+  CEL_INBOX_ME="$1" _ia_cel inbox read --for "$CANON" --workspace demo --json 2>/dev/null | jq -r 'select(.message != null) | .message' | tr '\n' ' '
 }
 
 test_migrate_is_a_dry_run_unless_applied() {
@@ -188,7 +188,7 @@ test_migrate_survives_sends_and_reads_running_through_it() {
   printf '\n' >> "$CEL_INBOX_DIR/demo.jsonl"   # a torn tail would swallow the first live send
   # a reader polling the whole time, and a sender adding mail to the real name
   ( for i in $(seq 1 25); do
-      CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r .message >> "$got"
+      CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r 'select(.message != null) | .message' >> "$got"
       sleep 0.05
     done ) &
   local rpid=$!
@@ -200,7 +200,7 @@ test_migrate_survives_sends_and_reads_running_through_it() {
   sleep 0.3
   _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
   wait "$rpid" "$spid"
-  CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r .message >> "$got"
+  CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r 'select(.message != null) | .message' >> "$got"
   local want="p1 p2 c3 p3 b1 p4 live1 live2 live3 live4 live5 live6 live7 live8 live9 live10 live11 live12"
   assert_eq "$(sort "$got" | tr '\n' ' ')" "$(printf '%s\n' $want | sort | tr '\n' ' ')" \
     || { echo "a message was lost or delivered twice"; return 1; }
