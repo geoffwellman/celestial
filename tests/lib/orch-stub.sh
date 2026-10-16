@@ -22,12 +22,13 @@ case "$1 $2" in
   "agent list")
     if [ -f "$T/gone" ]; then printf '{"result":{"agents":[]}}\n'; else cat "$T/roster.json"; fi ;;
   "pane send-keys") touch "$T/gone" ;;
-  "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t1"}}}\n' "$3" ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t1","terminal_id":"term_stub"}}}\n' "$3" ;;
   "pane process-info")
     # the pane's own shell is pid 50; herdr's foreground list is left empty so
-    # the resolver has to walk the fixture /proc from that shell down
+    # the resolver has to walk the fixture /proc from that shell down. The
+    # launch gate reads the same call: the shell alone in the foreground.
     if [ -f "$T/no-pane-info" ]; then exit 1; fi
-    printf '{"result":{"process_info":{"shell_pid":50,"foreground_processes":[]}}}\n' ;;
+    printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":50,"foreground_processes":[{"pid":50,"name":"bash"}]}}}\n' "$4" ;;
   "pane send-text") printf '%s' "$4" > "$T/envprefix" ;;
   "agent start")
     [ -f "$T/fail-start" ] && exit 1

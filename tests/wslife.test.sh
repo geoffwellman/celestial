@@ -123,6 +123,10 @@ case "$1 $2" in
     printf '{}\n' ;;
   "pane run"|"pane send-text")
     shift 2; _log "pane $* "; printf '{}\n' ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term_%s"}}}\n' "$3" "$3" ;;
+  "pane process-info")
+    printf '{"result":{"process_info":{"pane_id":"%s","shell_pid":77,"foreground_processes":[{"pid":77,"name":"zsh"}]}}}\n' "$4" ;;
   "pane list")
     shift 2
     printf '{"result":{"panes":%s}}\n' \
