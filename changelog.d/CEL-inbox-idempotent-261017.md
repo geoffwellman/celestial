@@ -1,0 +1,5 @@
+### Fixed
+- Mailbox names are now idempotent. `cel inbox` normalised a name by stripping a trailing dash and then cutting to 32 characters, so a worker whose alias ends in a dash at the cut (`abc-`) was reachable by its full name but mail addressed to the alias itself was filed under a 31-character phantom (`abc`) that nobody read. `cel run`, the steward and every inbox sender, reader, counter, watcher and explicit `CEL_INBOX_ME` now share one rule (`cel_alias_norm`); a 32-character alias keeps its dash, so no established alias or mailbox is renamed.
+
+### Added
+- `cel inbox migrate --workspace <w> [--apply] [--only <name>]` repairs a mailbox already split that way. It keeps every message with its original id (the old recipient is kept as `legacy_to`) and carries each reader's unread position across, so mail older than a reader's cursor that it never saw is delivered once. It migrates only on identity evidence (live agent, worktree, sender or cursor) and reports `unsafe` for a genuine shorter recipient, an unproven pair, or an unreachable roster; dry run unless `--apply`, with a backup of the mailbox and cursors first.
