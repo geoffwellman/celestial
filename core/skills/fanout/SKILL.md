@@ -40,6 +40,36 @@ teardown: after merge, cel-fanout release <id>
   <role file>`), sends the task spec as its first prompt, and records the
   delegation in the workspace's ledger (`<wsdir>/.cel/delegations.json`).
 
+Recovering a worker whose launch was only partly recorded
+
+```
+cel-fanout recover inspect  <repo> <branch> --pane <pane>          # read-only
+cel-fanout recover register <repo> <branch> <spec> --profile P --pane <pane> \
+    --shell-pid N --agent-pid N --agent-start TICKS --evidence "<facts>" --attest-legacy
+cel-fanout recover continue <id>
+```
+
+- For a live agent in a pane with NO ledger row (the delegating process died
+  or timed out between `herdr agent start` and the ledger write). Orchestrator
+  only. It never starts an agent, types, presses Enter, edits herdr state or
+  falls back to another model.
+- `register` validates the exact pane, shell, agent process generation
+  (`/proc` start ticks - read them from `inspect`), environment, model, branch,
+  worktree and herdr's own `launch_pending`/idle report, refusing with zero
+  mutation on any mismatch, a live original delegate, a held ledger lock, or a
+  conflicting row. It writes one row in state `unconfirmed` with a `recovery`
+  record (`legacy-operator-attested`; what is NOT proven is listed in
+  `recovery.unproven`). Retrying it is idempotent.
+- `continue` sends the task prompt at most once, only to an agent herdr reports
+  interactive_ready and not launch_pending. herdr 0.9.1 has no call that
+  completes or clears a pending launch: while it is pending, `continue` refuses
+  and names that upstream prerequisite. A row moves to `running` (and the
+  ticket to In Progress) only after the agent's pane shows it took a turn; an
+  ambiguous or crashed submit is never resubmitted - the next `continue` only
+  looks.
+- `release` and `collect` refuse an unsettled recovered row; `gc` keeps its
+  worktree (it is `unconfirmed`).
+
 Running a worker on a different model or CLI
 
 ```

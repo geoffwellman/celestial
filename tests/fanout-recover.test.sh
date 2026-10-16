@@ -82,12 +82,12 @@ _rc_register() { # [shell=N agent=N start=N profile=P] -> runs register, output 
     case "$kv" in shell=*) shell="${kv#*=}";; agent=*) agent="${kv#*=}";; start=*) start="${kv#*=}";; profile=*) profile="${kv#*=}";; esac
   done
   RC_RC=0
-  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" --workspace profiled \
+  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" \
     --profile "$profile" --pane w1AN:p1 --shell-pid "$shell" --agent-pid "$agent" --agent-start "$start" \
     --evidence "W710-style: pi pid 5001 under shell 5000, row absent, session path missing (operator-attested)" \
     --attest-legacy 2>&1)" || RC_RC=$?
 }
-_rc_continue() { RC_RC=0; RC_OUT="$(cd "$T" && "$BIN" recover continue WG-1-recover --workspace profiled 2>&1)" || RC_RC=$?; }
+_rc_continue() { RC_RC=0; RC_OUT="$(cd "$T" && "$BIN" recover continue WG-1-recover 2>&1)" || RC_RC=$?; }
 _rc_ledger() { cat "$T/.cel/delegations.json" 2>/dev/null || printf 'absent'; }
 _rc_n() { local n; n="$(grep -c "$1" "$RS/log" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
 _rc_row() { jq -c '.[] | select(.id == "WG-1-recover")' "$T/.cel/delegations.json"; }
@@ -107,7 +107,7 @@ _rc_refused_untouched() { # <before-snapshot> <needle>
 # ---------------------------------------------------------------------------
 test_inspect_is_read_only_and_reports_the_launch_pending_worker() {
   _rc_setup
-  local out; out="$(cd "$T" && "$BIN" recover inspect widget WG-1-recover --workspace profiled --pane w1AN:p1)"
+  local out; out="$(cd "$T" && "$BIN" recover inspect widget WG-1-recover --pane w1AN:p1)"
   assert_eq "$(printf '%s' "$out" | jq -r '.agent.launch_pending')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.ledger_row')" absent
   assert_eq "$(printf '%s' "$out" | jq -r '.session_file_exists')" false
@@ -192,10 +192,10 @@ test_register_refuses_while_the_original_delegate_or_start_is_still_alive() {
 
 test_register_requires_the_explicit_legacy_attestation_and_every_coordinate() {
   _rc_setup
-  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" --workspace profiled --profile bare --pane w1AN:p1 \
+  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" --profile bare --pane w1AN:p1 \
     --shell-pid 5000 --agent-pid 5001 --agent-start 777777 --evidence x 2>&1)" && RC_RC=0 || RC_RC=$?
   _rc_refused_untouched absent "--attest-legacy" || { _rc_cleanup; return 1; }
-  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" --workspace profiled --profile bare --pane w1AN:p1 \
+  RC_OUT="$(cd "$T" && "$BIN" recover register widget WG-1-recover "$T/spec.md" --profile bare --pane w1AN:p1 \
     --attest-legacy --evidence x 2>&1)" && RC_RC=0 || RC_RC=$?
   _rc_refused_untouched absent "--shell-pid is required" || { _rc_cleanup; return 1; }
   _rc_cleanup
@@ -392,11 +392,10 @@ EOF
 test_recover_is_not_a_worker_verb() {
   _rc_setup
   local out rc=0
-  mkdir -p "$T/wtw"
-  out="$(cd "$T" && CEL_ROLE=worker "$BIN" recover inspect widget WG-1-recover --workspace profiled --pane w1AN:p1 2>&1)" || rc=$?
-  # guard_role_of reads the cwd, so stand in a worktree path
-  out="$(cd "$RC_WT" && HOME="$T/home" CEL_WORKTREES="$T/wt" "$BIN" recover register widget WG-1-recover "$T/spec.md" --workspace profiled 2>&1)" && rc=0 || rc=$?
+  # guard_role_of reads the cwd: stand in a worker worktree
+  out="$(cd "$RC_WT" && CEL_WORKTREES="$T/wt" "$BIN" recover register widget WG-1-recover "$T/spec.md" 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "a worker ran recover"; return 1; }
+  assert_contains "$out" "a worker does not recover"
   assert_eq "$(_rc_ledger)" absent
   _rc_cleanup
 }

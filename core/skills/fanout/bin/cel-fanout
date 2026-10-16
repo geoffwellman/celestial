@@ -26,6 +26,8 @@ export CEL_ROOT
 # shellcheck source=lib/services.sh
 . "$CEL_ROOT/lib/services.sh"  # svc_reach - `try` prints the URL that reaches
                                # the preview from the laptop, not from this box
+# shellcheck source=lib/fanout_recover.sh
+. "$CEL_ROOT/lib/fanout_recover.sh" # `recover`: register + continue a partly recorded launch
 # shellcheck source=lib/afk.sh
 . "$CEL_ROOT/lib/afk.sh"  # away-from-keyboard: land and delegate are two of the
                           # four acts the owner pre-authorised, and EVERY one
@@ -451,6 +453,16 @@ _ledger_set_field() { # <wsdir> <id> <field> <value>
     'map(if .id == $id then (if $v == "" then del(.[$k]) else .[$k] = $v end) else . end)')"
 }
 
+# Apply one jq filter to one row (extra args are jq --arg pairs). The writer for
+# structured fields (`launch`, `recovery`); `.state` still only moves through
+# _ledger_update_state.
+_ledger_patch() { # <wsdir> <id> <jq-filter> [jq args...]
+  local wsdir="$1" id="$2" filter="$3"; shift 3
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg __id "$id" "$@" \
+    "map(if .id == \$__id then ($filter) else . end)")"
+}
+
 # SQUASH MERGES MAKE LANDED WORK LOOK UNPUSHED. The branch's commits are never
 # ancestors of main after a squash, so every landed row read "unpushed" and
 # orchestrators fell back to --discard by reflex (2026-10-09, ~135 rows).
@@ -582,6 +594,50 @@ _fanout_refuse_worker() { # <verb> [id] [workspace]
   die "$verb: a worker does not $verb - report to $mailbox and the orchestrator lands it"
 }
 
+# THE WORKER'S KICKOFF PROMPT, one definition for `delegate` and for `recover
+# continue`: a recovered worker is told exactly what a freshly delegated one is.
+# Prints the text.
+_fanout_worker_prompt() { # <wsdir> <shape> <repo> <branch> <abs-spec> <seedline> <check-base> <orch-mailbox> <ws-sel>
+  local wsdir="$1" shape="$2" repo="$3" branch="$4" abs_spec="$5" seedline="$6" check_base="$7" orch_mailbox="$8" ws_sel="$9" prompt_text
+  if [ "$shape" = spike ]; then
+    prompt_text="Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
+  elif [ "$shape" = scout ]; then
+    prompt_text="Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
+  else
+    local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")" || exit 1
+    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
+      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
+      # main IS the landing, so the kickoff says how to do it safely.
+      prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it on your branch, then rebase onto origin/main and push to main (fast-forward only, never force: git push origin HEAD:main). This repo takes no PRs - do not open a pull request. BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover first. If the push is rejected, fetch, rebase and retry; never force. Write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: none (pushed to main). Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    else
+    prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
+
+If your spec says the deliverable is research, a document, or explicitly says not to open a PR, then do not push and do not open one - write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    fi
+  fi
+  printf '%s' "$prompt_text"
+}
+
 cmd_delegate() {
   _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
   [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
@@ -643,6 +699,9 @@ cmd_delegate() {
     fi
   fi
   local abs_spec; abs_spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")"
+  # A malformed pr_open policy is a config error: say so BEFORE a worktree or
+  # an agent exists (the prompt is built after the launch receipt).
+  [ "$shape" != ship ] || _fanout_pr_phrase "$wsdir" >/dev/null || exit 1
 
   # THE CAP IS ENFORCED HERE, not remembered by whoever is delegating.
   # `policy.workers` was a sentence in the injected policy block and nothing
@@ -974,7 +1033,38 @@ cmd_delegate() {
   pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
   tab_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
 
-  _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}"
+  # THE LAUNCH RECEIPT GOES DOWN BEFORE THE AGENT STARTS (AH-261017). Appending
+  # the row only after start and dispatch left a successful spawn untrackable
+  # when this process was interrupted, or herdr's own start timed out, in
+  # between: a live agent in a pane, no ledger row (the 2026-10-17 W710 case).
+  # The row is written first as `unconfirmed` - the one existing state that
+  # claims no task is running - with launch.phase saying how far the launch got.
+  # A failed or interrupted start is NOT rolled back: herdr can time out AFTER
+  # the agent exists, so the row stays, as launch.phase start-failed, and says
+  # so. A row that stays `unconfirmed` is recoverable, never silently dropped.
+  local entry
+  entry="$(jq -n \
+    --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
+    --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
+    --arg spec "$abs_spec" --arg created "$(_now_iso)" \
+    --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
+    --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
+    --arg shape "$shape" --arg because "$because" \
+    '{id:$id, repo:$repo, branch:$branch, alias:$alias, herdr_ws:$herdr_ws, pane:$pane,
+      worktree:$worktree, spec:$spec, state:"unconfirmed", created:$created,
+      profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
+      provider:$provider, shape:$shape, profile_reason:$because,
+      launch:{phase:"starting", at:$created}}')"
+  _ledger_append "$wsdir" "$entry"
+  local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  # Where the branch started, so a `pr: none` collect can tell "pushed to
+  # main" from "never committed" - both leave nothing ahead of origin/main.
+  [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  if ! ( _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}" ); then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"start-failed", at:$at, note:"herdr agent start failed or timed out - an agent may still exist in the pane; the row is kept, not rolled back"}' --arg at "$(_now_iso)"
+    die "delegate: $branch: herdr agent start did not complete - the ledger row is kept as 'unconfirmed' (launch.phase start-failed), the worktree and pane are untouched. An agent may exist in $pane: inspect it, never start a second one on top (cel-fanout recover)"
+  fi
+  _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
   # its rebase had eaten its own commit, and a branch that sat unlanded for two
@@ -1013,42 +1103,7 @@ cmd_delegate() {
   local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
 
   local dstate=running prompt_text
-  if [ "$shape" = spike ]; then
-    prompt_text="Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
-
-FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
-  elif [ "$shape" = scout ]; then
-    prompt_text="Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
-
-FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
-  else
-    local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
-    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
-      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
-      # main IS the landing, so the kickoff says how to do it safely.
-      prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
-
-When the work is code: commit it on your branch, then rebase onto origin/main and push to main (fast-forward only, never force: git push origin HEAD:main). This repo takes no PRs - do not open a pull request. BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover first. If the push is rejected, fetch, rebase and retry; never force. Write .agent/result.md and stop.
-
-FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: none (pushed to main). Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
-    else
-    prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
-
-When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
-
-If your spec says the deliverable is research, a document, or explicitly says not to open a PR, then do not push and do not open one - write .agent/result.md and stop.
-
-FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
-    fi
-  fi
+  prompt_text="$(_fanout_worker_prompt "$wsdir" "$shape" "$repo" "$branch" "$abs_spec" "$seedline" "$check_base" "$orch_mailbox" "$ws_sel")"
 
   # UNCONFIRMED IS NOT A FAILURE, and it must not cost the worktree: the pane
   # and the agent are healthy, only the submit was lost. The row carries the
@@ -1059,23 +1114,11 @@ Your orchestrator is not watching your pane; that message is how it learns you a
     c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' and the worktree is intact. Re-prompt with: herdr agent prompt $alias \"<the spec>\""
   fi
 
-  local entry
-  entry="$(jq -n \
-    --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
-    --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
-    --arg spec "$abs_spec" --arg state "$dstate" --arg created "$(_now_iso)" \
-    --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
-    --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
-    --arg shape "$shape" --arg because "$because" \
-    '{id:$id, repo:$repo, branch:$branch, alias:$alias, herdr_ws:$herdr_ws, pane:$pane,
-      worktree:$worktree, spec:$spec, state:$state, created:$created,
-      profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
-      provider:$provider, shape:$shape, profile_reason:$because}')"
-  _ledger_append "$wsdir" "$entry"
-  # Where the branch started, so a `pr: none` collect can tell "pushed to
-  # main" from "never committed" - both leave nothing ahead of origin/main.
-  local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
-  [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
+    --arg ok "$([ "$dstate" = running ] && echo 1 || echo 0)" --arg at "$(_now_iso)"
+  # In Progress only when the dispatch was accepted: the row moves
+  # unconfirmed -> running as a recorded transition.
+  [ "$dstate" != running ] || _ledger_update_state "$wsdir" "$branch" running
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
@@ -1172,6 +1215,8 @@ cmd_collect() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  local unres; unres="$(_rec_unresolved "$entry")"
+  [ -z "$unres" ] || die "collect: $id is a recovered launch whose dispatch is unresolved (phase $unres) - nothing to collect yet. Settle it with: cel-fanout recover continue $id"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
   alias="$(printf '%s' "$entry" | jq -r '.alias')"
@@ -2066,6 +2111,11 @@ cmd_release() {
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
   local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
+  # A RECOVERED LAUNCH WHOSE TASK IS NOT SETTLED holds a live idle agent: no
+  # release, not even --discard, until it is accepted (or the operator has
+  # resolved it by hand and the row says so).
+  local unres; unres="$(_rec_unresolved "$entry")"
+  [ -z "$unres" ] || die "release: $id is a recovered launch whose dispatch is unresolved (phase $unres) - its agent is preserved. Settle it with: cel-fanout recover continue $id"
 
   # A preview of this branch goes first: its pane is cwd'd into the worktree
   # about to be removed, and a dev server left running there holds ports for a
@@ -2672,7 +2722,7 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
 case "${1:-}" in
   land|release|collect|request-review)
     _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
-  delegate|scout|spike|reconcile)
+  delegate|scout|spike|reconcile|recover)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
 esac
@@ -2694,7 +2744,19 @@ case "${1:-}" in
     ;;
 esac
 
+# `recover register|continue` write the ledger, so they take the lock - but
+# WITHOUT waiting: a held lock means another delegate or ledger transition is
+# in flight, which is exactly what recovery must not race. `inspect` is read-only.
+case "${1:-}:${2:-}" in
+  recover:register|recover:continue)
+    lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
+    mkdir -p "$lock_ws/.cel"
+    exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
+    flock -n "$ledger_fd" || die "recover: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
+esac
+
 case "${1:-}" in
+  recover)  shift; cmd_recover "$@" ;;
   delegate) shift; cmd_delegate "$@" ;;
   handback) shift; cmd_handback "$@" ;;
   scout)    shift; cmd_scout "$@" ;;
@@ -2709,5 +2771,5 @@ case "${1:-}" in
   land)     shift; cmd_land "$@" ;;
   request-review) shift; cmd_request_review "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|request-review|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|recover|wait|collect|status|why|try|release|review|request-review|handback|land|reconcile ..." ;;
 esac

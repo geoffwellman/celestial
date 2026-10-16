@@ -215,7 +215,7 @@ test_delegate_refuses_unknown_pr_open() {
   _fanout_setup
   yq -y -i '.policy.pr_open = "sometimes"' "$T/workspace.yaml"
   if (cd "$T" && "$BIN" delegate widget WG-BAD "$T/spec.md") > /dev/null 2>&1; then
-    fail "unknown pr_open value was accepted"
+    echo "unknown pr_open value was accepted"; return 1
   fi
   rm -rf "$T"
 }
@@ -2668,8 +2668,10 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
 test_the_ledger_stamps_the_state_it_was_created_in() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
-  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 1
-  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" running
+  # AH-261017: born `unconfirmed` (the launch receipt), then running on acceptance
+  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 2
+  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].history[1].state' "$T/.cel/delegations.json")" running
   assert_eq "$(jq -r '.[0].history[0].at' "$T/.cel/delegations.json")" \
             "$(jq -r '.[0].created' "$T/.cel/delegations.json")"
   rm -rf "$T"
@@ -2683,7 +2685,7 @@ test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
   (cd "$T" && "$BIN" collect WG-1-x >/dev/null)
   (cd "$T" && "$BIN" release WG-1-x --discard >/dev/null)
   assert_eq "$(jq -r '.[0].history | map(.state) | join(",")' "$T/.cel/delegations.json")" \
-            "running,collected,released"
+            "unconfirmed,running,collected,released"
   # every entry says who moved it, and the stamps never go backwards
   assert_eq "$(jq -r '.[0].history | map(.by != "" and .at != "") | all' "$T/.cel/delegations.json")" true
   assert_eq "$(jq -r '.[0].history | map(.at) | (. == sort)' "$T/.cel/delegations.json")" true
@@ -2856,7 +2858,7 @@ test_delegate_does_not_retry_a_refused_agent_start() {
   assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 1
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
   assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
-  assert_contains "$out" "an agent may exist"
+  assert_contains "$out" "An agent may exist"
   assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
   rm -rf "$T"
 }
