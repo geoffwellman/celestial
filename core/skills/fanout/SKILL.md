@@ -55,13 +55,15 @@ cel-fanout recover abandon  <id> --reason "<what you found>"
   only. It never starts an agent, types, presses Enter, edits herdr state or
   falls back to another model.
 - **UPSTREAM BLOCKED for a worker herdr still reports `launch_pending`.**
-  herdr 0.9.1's API (agent.start/prompt/wait/explain/rename,
-  pane.report_agent/report_agent_session/clear_agent_authority/release_agent)
-  has no call that completes, adopts or re-attaches an in-flight agent start,
-  or says why it is pending; the only things that would change it
-  (report-agent, release-agent, Enter) are forbidden. The prerequisite is a
-  herdr method that completes or re-attaches an in-flight agent start, or
-  reports why it is pending. Until then `register` records the row and
+  No SUPPORTED completer was found in herdr 0.9.1's exposed surfaces
+  (agent.start/prompt/wait/explain/rename,
+  pane.report_agent/report_agent_session/clear_agent_authority/release_agent);
+  that is what the installed binary shows, not proof the capability cannot
+  exist, and the only things that would change a pending launch (report-agent,
+  release-agent, Enter) are forbidden. The prerequisite is (1) a diagnostic
+  reason why the launch is pending, (2) a supported way to complete it or mark
+  the agent ready with no keystrokes or metadata forgery, and (3) prompt-delivery
+  receipt semantics. Until then `register` records the row and
   `continue` refuses: such a worker is registered, not resumed.
 - `register` validates the exact pane, shell, agent process generation
   (`/proc` start ticks - read them from `inspect`), environment, the exact
@@ -80,7 +82,7 @@ cel-fanout recover abandon  <id> --reason "<what you found>"
   delegate receipt at launch.phase starting/start-failed/started) counts toward
   the worker cap and is fenced: `release`, `collect`, `land`, `review
   approved`, `request-review` and `handback` refuse it, `release --all` skips
-  it, `gc` keeps its worktree. `recover abandon` is the bounded way out: it
+  it, `gc` keeps its worktree. `recover abandon` is the bounded way out for a launch where NO task was ever submitted (an uncertain, possibly delivered dispatch is refused and stays fenced): it
   records the operator's reason, moves the row to `abandoned` and touches
   nothing else (agent, pane and worktree stay as found).
 - A delegate row is now written BEFORE `herdr agent start`. A failed start is

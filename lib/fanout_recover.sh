@@ -429,7 +429,7 @@ cmd_recover_continue() { # <id> [--workspace NAME]
   [ "$(printf '%s' "$j" | jq -r '.agent.agent_status // ""')" = idle ] \
     || die "recover continue: $id: herdr does not report the agent idle - refusing; nothing sent"
   if printf '%s' "$j" | jq -e '(.agent.launch_pending == true) or ((.agent.interactive_ready // false) != true)' >/dev/null; then
-    die "recover continue: $id: herdr 0.9.1 still reports this agent launch_pending / not interactive_ready. Its 104-method API (agent.start/prompt/wait/explain/rename, pane.report_agent/report_agent_session/clear_agent_authority/release_agent) has NO call that completes, adopts or re-attaches an in-flight agent start, or says why it is pending; the only things that would change pending (report-agent, release-agent, Enter) are forbidden. UPSTREAM PREREQUISITE: a herdr method that completes or re-attaches an in-flight agent start, or reports why it is pending. THIS WORKER IS NOT RESUMED: the row is registered and unchanged, nothing was sent, no task is claimed"
+    die "recover continue: $id: herdr 0.9.1 still reports this agent launch_pending / not interactive_ready. No SUPPORTED completer was found in its exposed surfaces (agent.start/prompt/wait/explain/rename, pane.report_agent/report_agent_session/clear_agent_authority/release_agent) - that is what the installed binary shows, not proof the capability cannot exist; the only things that would change pending (report-agent, release-agent, Enter) are forbidden. UPSTREAM PREREQUISITE: (1) a diagnostic reason why the launch is pending, (2) a supported way to complete it or mark the agent ready with no keystrokes or metadata forgery, (3) prompt-delivery receipt semantics. THIS WORKER IS NOT RESUMED: the row is registered and unchanged, nothing was sent, no task is claimed"
   fi
 
   _rec_pane_unstarted "$alias" || die "recover continue: $id: the pane is no longer provably unstarted (a turn or context is already on screen) - an execution there could not be told from ours; refusing, nothing sent"
@@ -517,6 +517,18 @@ cmd_recover_abandon() { # <id> --reason TEXT [--workspace NAME]
   [ -n "$row" ] || die "recover abandon: no delegation with id '$id'"
   [ "$(printf '%s' "$row" | jq -r '.state // ""')" = unconfirmed ] \
     || die "recover abandon: $id is '$(printf '%s' "$row" | jq -r '.state // "?"')', not an unconfirmed launch - nothing changed"
+  # UNCERTAIN DISPATCH DEBT IS NEVER ABANDONED AWAY. Only a row where nothing was
+  # ever submitted (recovery registered; launch starting/start-failed/started)
+  # is definitively "no task delivered". A submitted-but-unproven task
+  # (submitting, ambiguous, unconfirmed-acceptance, dispatch-unconfirmed) may
+  # be running and paid for: its evidence and fence stay until `recover
+  # continue` sees task evidence.
+  local ph lph
+  ph="$(printf '%s' "$row" | jq -r '.recovery.dispatch.phase // ""')"; lph="$(printf '%s' "$row" | jq -r '.launch.phase // ""')"
+  case "$ph:$lph" in
+    submitting:*|ambiguous:*|unconfirmed-acceptance:*|*:dispatch-unconfirmed)
+      die "recover abandon: $id has an UNCERTAIN dispatch (recovery phase '${ph:-none}', launch '${lph:-none}'): a task may have been delivered and be running. It is not abandoned - the row and its evidence stay fenced. Look at the pane and run: cel-fanout recover continue $id (it only looks, never resubmits)" ;;
+  esac
   _ledger_patch "$wsdir" "$id" '.abandon = {reason:$r, at:$at, prior_recovery_phase:(.recovery.dispatch.phase // null), prior_launch_phase:(.launch.phase // null)}
     | if .recovery != null then .recovery.dispatch = ((.recovery.dispatch // {}) + {phase:"abandoned", at:$at, note:$r}) else . end' \
     --arg r "$reason" --arg at "$(_now_iso)"

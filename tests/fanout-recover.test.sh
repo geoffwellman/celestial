@@ -510,7 +510,24 @@ test_continue_names_the_upstream_method_and_does_not_say_resumed() {
   _rc_setup
   _rc_register
   _rc_continue
-  assert_contains "$RC_OUT" "completes or re-attaches an in-flight agent start"
+  assert_contains "$RC_OUT" "diagnostic reason why the launch is pending"
   assert_contains "$RC_OUT" "NOT RESUMED"
+  _rc_cleanup
+}
+
+test_abandon_refuses_uncertain_dispatch_debt_and_keeps_it_fenced() {
+  _rc_setup
+  local ph
+  for ph in submitting ambiguous unconfirmed-acceptance; do
+    _rc_register >/dev/null
+    jq --arg p "$ph" '.[0].recovery.dispatch.phase = $p' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+    local before out rc=0; before="$(_rc_ledger)"
+    out="$(cd "$T" && "$BIN" recover abandon WG-1-recover --reason "gave up" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "abandoned uncertain debt ($ph)"; _rc_cleanup; return 1; }
+    assert_contains "$out" "UNCERTAIN dispatch" || { _rc_cleanup; return 1; }
+    assert_eq "$(_rc_ledger)" "$before" || { _rc_cleanup; return 1; }
+    out="$(cd "$T" && "$BIN" release WG-1-recover --discard 2>&1)" && { echo "released uncertain debt"; _rc_cleanup; return 1; }
+    rm -f "$T/.cel/delegations.json"
+  done
   _rc_cleanup
 }
