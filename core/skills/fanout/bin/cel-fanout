@@ -2468,7 +2468,14 @@ cmd_land() { # <id>
   # The verdict travels into the permanent log rather than a comment thread:
   # on a solo repo the squash body is the only place a public record of who
   # reviewed this, and what they said, can actually live.
-  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch)
+  # MERGE ONLY THE HEAD THAT WAS CHECKED. The approval, CI and gate above all
+  # read the PR head once at the top; a push during the (long) gate would
+  # otherwise merge a commit nothing covered. --match-head-commit makes GitHub
+  # refuse the merge if the head is no longer the one this land evaluated.
+  local approved_head; approved_head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+  [ -n "$approved_head" ] \
+    || die "land: the PR reports no head commit - cannot pin the merge to the reviewed head. Nothing merged."
+  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch --match-head-commit "$approved_head")
   local body=""
   if [ -n "$review_by" ]; then
     body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"

@@ -601,13 +601,16 @@ case "\$1 \$2" in
   "auth token") case "\$4" in acct-b) echo tok-b;; *) exit 1;; esac;;
   "api user") echo fleetbot;;
   "pr view")  [ -z "\${STUB_PRVIEW_HOOK:-}" ] || eval "\$STUB_PRVIEW_HOOK"
-              echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","headRefOid":"'"\${STUB_PR_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"'","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
-  "pr merge") exit 0;;
+              echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","headRefOid":"'"\${STUB_PR_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"'","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}'
+              [ -z "\${STUB_PRVIEW_AFTER:-}" ] || eval "\$STUB_PRVIEW_AFTER";;
+  "pr merge") # a merge pinned to a head that is no longer the remote head is refused, as GitHub does
+              if [ -f "$T/remote-head" ]; then case "\$*" in *"--match-head-commit \$(cat "$T/remote-head")"*) exit 0;; *) exit 1;; esac; fi
+              exit 0;;
   *) echo '{}';;
 esac
 EOF
   chmod +x "$GH_STUB"; export CEL_FANOUT_GH="$GH_STUB" GH_LOG
-  export STUB_PR_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; unset STUB_PRVIEW_HOOK
+  export STUB_PR_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; unset STUB_PRVIEW_HOOK STUB_PRVIEW_AFTER; rm -f "$T/remote-head"
   # the fixture repo declares a gate, and land now refuses an unverified one:
   # a passing verdict by default, so tests about OTHER refusals still merge
   _fanout_verify_stub true
@@ -1579,6 +1582,25 @@ test_land_refuses_an_explicit_approval_for_a_superseded_head() {
   assert_contains "$out" "head"
   ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_pins_the_merge_to_the_head_it_checked() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1
+  grep -q "^pr merge 7 .*--match-head-commit $HA" "$GH_LOG" || { echo "merge not pinned: $(grep '^pr merge' "$GH_LOG")"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_lands_nothing_when_the_head_moves_after_the_check() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  # a push lands between land's PR read and its merge call
+  export STUB_PRVIEW_AFTER="printf '%s' '$HC' > '$T/remote-head'"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a moved head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "merge of #7 failed"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  unset STUB_PRVIEW_AFTER CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
 test_status_marks_a_legacy_approval_apart_from_an_attested_one() {

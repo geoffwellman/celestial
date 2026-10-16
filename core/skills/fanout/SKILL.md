@@ -177,7 +177,7 @@ Products and the review verdict
   reviewer names in `--head` (never inferred from a worktree; an `approved`
   must equal the PR's current remote head on a PR this fleet owns, else nothing
   is recorded; `head_source: explicit` marks such records, and an older record
-  without it no longer satisfies `land`); `status` shows it in the REVIEW
+  without it no longer satisfies `land`; a `changes` verdict is also marked explicit but its SHA is the reviewer's unverified claim, and it never authorizes anything; `land` merges with `--match-head-commit` so a push after its checks lands nothing); `status` shows it in the REVIEW
   column. On a repo whose PR author and reviewer are one GitHub account,
   GitHub refuses approval outright, so `land` accepts an `approved` ledger
   verdict **only there** — everywhere else GitHub's decision remains the
