@@ -2850,6 +2850,42 @@ test_delegate_does_not_retry_a_refused_agent_start() {
   assert_contains "$out" "NOT retried"
   assert_eq "$(grep -c '^agent start' "$STUB_LOG" || true)" 1
   assert_eq "$(grep -c '^pane send-keys' "$STUB_LOG" || true)" 0
-  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json" 2>/dev/null || echo 0)" 0
+  # AH-261017: the launch receipt was written BEFORE the start, and a failed
+  # start is not rolled back - herdr can time out after the agent exists - so
+  # the row stays, `unconfirmed`, saying exactly that. No task was delivered.
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$out" "an agent may exist"
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
+  rm -rf "$T"
+}
+
+# AH-261017: the receipt precedes the spawn, so a delegate killed after herdr
+# started the agent leaves a trackable row, never a live agent with no row.
+test_delegate_writes_its_launch_receipt_before_the_agent_starts() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") cp "$STUB_LEDGER" "$STUB_LEDGER.at-start" 2>/dev/null \|\| echo absent > "$STUB_LEDGER.at-start";|' "$STUB"
+  (cd "$T" && STUB_LEDGER="$T/.cel/delegations.json" "$BIN" delegate widget WG-RCPT "$T/spec.md") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json.at-start")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json.at-start")" starting
+  # and the finished row is the normal running row, with the transition recorded
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" dispatched
+  assert_eq "$(jq -r '[.[0].history[].state] | join(",")' "$T/.cel/delegations.json")" "unconfirmed,running"
+  rm -rf "$T"
+}
+
+test_delegate_killed_during_agent_start_leaves_a_trackable_row() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  # the agent comes up, then the delegating process dies before it can record anything more
+  sed -i 's|^  "agent start")|  "agent start") pkill -9 -f "cel-fanout delegate widget WG-KILLED" ; sleep 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-KILLED "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" starting
+  assert_eq "$(jq -r '.[0].alias' "$T/.cel/delegations.json")" widget-wg-killed
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
   rm -rf "$T"
 }
