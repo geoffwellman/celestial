@@ -49,6 +49,25 @@ the verified default branch, or match the exact head of a GitHub-merged PR;
 additional local commits invalidate that proof. Fanout release reports unknown
 work as held, with explicit keep/discard decisions rather than a zero count.
 
+### Launch readiness (`cel run`)
+
+The launch line (role environment and, for gateway profiles, the credential
+substitution) is typed into a pane before `herdr agent start`, which itself
+requires the pane's shell to own the foreground. A fresh pane's shell is still
+reading its rc files, so `cel run` first waits, on herdr's structured state
+only (`pane get`: terminal id and agent; `pane process-info`: shell pid and
+foreground processes), for `CEL_PANE_READY_STABLE` (3) consecutive probes of
+the same terminal and shell with no agent and the shell alone in the foreground,
+within `CEL_PANE_READY_MS` (30000). Past the deadline, or when herdr cannot
+describe the pane, or an agent occupies it, the launch dies before anything is
+typed: no prefix, no agent start, no reviewer record. A terminal or shell that
+changes while waiting, or after the text is typed, is refused as a change of
+owner. The same gate covers console, root, orchestrator, worker, reviewer and
+`--restart`. `herdr agent start` is attempted once and never retried; if it is
+refused after the line was typed, the error names the pane, says the line (never
+printed) is pending and unsubmitted, and leaves clearing it to the owner - `cel`
+sends no Enter and no keys.
+
 Reaping is separate from worktree deletion. It requires a named plane-owned
 worker, proof of the role it was launched for, inherited pane identity,
 herdr's foreground-process attestation, and the same `/proc` PID/start time.

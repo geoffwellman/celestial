@@ -1172,7 +1172,7 @@ test_run_omp_orchestrators_wait_out_a_spent_budget() {
 # swapped, or absent, and read the outcome from what herdr was actually asked.
 _pf_calls() { grep -c "^$1" "$HERDR_LOG" || true; }
 _pf_reviewer() { # run the reviewer launch with fake knobs; leaves $out and $rc
-  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)"; rc=$?
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" && rc=0 || rc=$?
 }
 _pf_no_launch() { # nothing typed, nothing started, nothing recorded
   assert_eq "$(_pf_calls 'pane send-text')" 0
