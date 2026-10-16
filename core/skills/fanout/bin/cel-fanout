@@ -935,6 +935,14 @@ cmd_delegate() {
   local seedline=""
   [ -z "$SEEDED" ] || seedline=$'\n\n'"Seeded local config, not yours to commit: $SEEDED"
 
+  # THE SAME READINESS GATE AS `cel run` (AH-261017): nothing is typed - not the
+  # env eval, not the launch line - until the pane's shell owns the foreground,
+  # and the pane must still be that terminal and shell after each typing. It
+  # fails closed here, before any ledger row records a launch; nothing is
+  # retried or cleaned up.
+  _RUN_HERDR="$HERDR"
+  _run_pane_await_shell "$pane"
+  local pane_ident="$_RUN_PANE_IDENT"
   local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
   if ! _ledger_spawn "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
     c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
@@ -944,9 +952,16 @@ cmd_delegate() {
   # worker whose runtime rewrites its argv is invisible to `cel gc` without
   # it, and its worktree is then kept for ever. Pass-through only - the text
   # is rendered there, typed here, so both paths mark a pane identically.
+  # the env eval ran in the foreground for a moment: wait for the shell again
+  # (and refuse if it is no longer the same terminal and shell) before typing
+  _run_pane_await_shell "$pane" "$pane_ident"
+  _RUN_STAGED=0
   if ! _ledger_spawn "$HERDR" pane send-text "$pane" "$launch_prefix" > /dev/null 2>&1; then
     [ "$gateway_required" != 1 ] || die "delegate: could not stage gateway credentials in pane $pane"
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  else
+    _RUN_STAGED=1
+    _run_pane_recheck "$pane" "$pane_ident"
   fi
 
   # A readable label (CEL-83), set again on --reuse. A scout or spike is named
@@ -959,7 +974,7 @@ cmd_delegate() {
   pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
   tab_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
 
-  _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
+  _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}"
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
   # its rebase had eaten its own commit, and a branch that sat unlanded for two

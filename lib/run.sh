@@ -224,17 +224,117 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
   printf '%s ' "$out"
 }
 
-# Gateway credentials and role markers share one typed shell prefix; `pane run`
-# executes in a child context, so its exports disappear before agent start.
-# Ordinary role marks are best effort; gateway credentials are required.
+# WHEN IS A PANE SAFE TO TYPE INTO (AH-261017). `herdr agent start` only works
+# on an "available shell": herdr's own definition is that the pane's
+# interactive shell owns the foreground - no foreground command, editor or
+# agent. A fresh pane is NOT there yet: the shell is still reading its rc files
+# (oh-my-zsh's update check forks git, prints warnings) and text typed then is
+# interleaved with that output and never submitted, and the later `agent start`
+# is refused as agent_pane_busy with the credential prefix sitting in the
+# terminal. So readiness is read from the two structured herdr surfaces that
+# expose it - `pane get` (terminal_id, agent) and `pane process-info`
+# (shell_pid, foreground_processes) - and nothing is typed until, over
+# CEL_PANE_READY_STABLE consecutive probes inside the CEL_PANE_READY_MS
+# deadline, the pane has had no agent, the same terminal and shell, and a
+# foreground consisting of the shell alone (its process group, as herdr's own
+# prompt predicate requires, and no other process). A terminal or shell that changes
+# under us is somebody else's pane now: refuse, never wait it out.
+# Probe output is one line: "<terminal_id>:<shell_pid>\t<verdict>", verdict one of
+# ready | agent | busy | unavailable. Pane text is never read.
+_run_pane_probe() { # <pane>
+  local pane="$1" g p
+  g="$("${_RUN_HERDR:-herdr}" pane get "$pane" 2>/dev/null)" && p="$("${_RUN_HERDR:-herdr}" pane process-info --pane "$pane" 2>/dev/null)" \
+    || { printf ':\tunavailable\n'; return 0; }
+  printf '%s\n%s\n' "$g" "$p" | jq -rs --arg pane "$pane" '
+    (.[0].result.pane // {}) as $g | (.[1].result.process_info // {}) as $p
+    | (($g.terminal_id // "") + ":" + (($p.shell_pid // "") | tostring)) as $id
+    | (if ($g.pane_id // "") != $pane or ($p.pane_id // "") != $pane
+          or ($g.terminal_id // "") == "" or ($p.shell_pid | type) != "number"
+          or ($p.foreground_process_group_id | type) != "number"
+          or (($p.foreground_processes // []) | length) == 0 then "unavailable"
+       elif ($g.agent // null) != null then "agent"
+       elif $p.foreground_process_group_id != $p.shell_pid
+            or any($p.foreground_processes[]; .pid != $p.shell_pid) then "busy"
+       else "ready" end) as $v
+    | $id + "\t" + $v' 2>/dev/null || printf ':\tunavailable\n'
+}
+
+_run_ms_sleep() { local ms="$1" s; printf -v s '%d.%03d' $((ms / 1000)) $((ms % 1000)); sleep "$s"; }
+
+_RUN_PANE_IDENT=""
+_run_pane_await_shell() { # <pane> [expected-ident]: returns only for a stable ready shell, else dies
+  local pane="$1" total="${CEL_PANE_READY_MS:-30000}" poll="${CEL_PANE_READY_POLL_MS:-250}"
+  local need="${CEL_PANE_READY_STABLE:-3}" t0 out ident verdict base="${2:-}" streak=0 why=unavailable
+  t0=$((${EPOCHREALTIME/./} / 1000))
+  while :; do
+    out="$(_run_pane_probe "$pane")"; ident="${out%%$'\t'*}"; verdict="${out#*$'\t'}"
+    case "$verdict" in
+      ready|agent|busy)
+        if [ -z "$base" ]; then base="$ident"
+        elif [ "$ident" != "$base" ]; then
+          die "cel run: pane $pane changed owner while waiting for its shell (terminal or shell replaced) - nothing was typed and no agent was started; check the pane and re-run"
+        fi ;;
+    esac
+    if [ "$verdict" = ready ]; then
+      streak=$((streak + 1))
+      if [ "$streak" -ge "$need" ]; then _RUN_PANE_IDENT="$base"; return 0; fi
+    else
+      streak=0; why="$verdict"
+    fi
+    if [ $(( ${EPOCHREALTIME/./} / 1000 - t0 )) -ge "$total" ]; then
+      case "$why" in
+        agent) why="an agent already runs in it" ;;
+        busy)  why="a command other than the shell holds its foreground" ;;
+        *)     why="herdr did not report its terminal and process state" ;;
+      esac
+      die "cel run: pane $pane shell does not own the foreground after $((total / 1000))s ($why) - nothing was typed, no agent was started, no launch was recorded. Re-run once the pane is idle"
+    fi
+    _run_ms_sleep "$poll"
+  done
+}
+
+# Gateway credentials and role markers share one typed shell prefix;
+# `pane run` executes in a child context, so its exports disappear before
+# agent start. The prefix is staged only into a pane proven to be an available
+# shell, and the pane is re-checked afterwards: anything that moved while the
+# text was going in leaves it UNSUBMITTED and fails the launch. Ordinary role
+# marks stay best effort when herdr refuses the text itself; gateway
+# credentials are required.
+_RUN_STAGED=0
 _run_mark_launch() { # <pane> <env-prefix> [required]
-  local pane="$1" prefix="$2" required="${3:-0}"
+  local pane="$1" prefix="$2" required="${3:-0}" out
+  _RUN_STAGED=0
   [ -n "$pane" ] && [ -n "$prefix" ] || return 0
-  if ! herdr pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
+  _run_pane_await_shell "$pane"
+  local ident="$_RUN_PANE_IDENT"
+  if ! "${_RUN_HERDR:-herdr}" pane send-text "$pane" "$prefix" >/dev/null 2>&1; then
     [ "$required" != 1 ] || die "cel run: could not stage gateway credentials in pane $pane"
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+    return 0
   fi
-  return 0
+  _RUN_STAGED=1
+  _run_pane_recheck "$pane" "$ident"
+}
+
+_run_pane_recheck() { # <pane> <ident>: the pane is still the same ready shell after typing
+  [ "$(_run_pane_probe "$1")" = "$2"$'\t'ready ] && return 0
+  die "cel run: pane $1 changed after the launch line was typed into it - no agent was started and nothing was submitted or retried. The typed text (contents withheld) is still pending at that pane's prompt: close the pane, or clear its line yourself"
+}
+
+# One agent start, never retried. A failure after the prefix was staged must
+# not look like a launch: say where the unsubmitted text is and stop - no Enter,
+# no second attempt, no clearing of input that may by now be somebody else's.
+_run_agent_start() { # <pane> <name> <kind> <agent-args...>
+  local pane="$1" name="$2" kind="$3" out; shift 3
+  if out="$(${_RUN_AGENT_SPAWN:-} "${_RUN_HERDR:-herdr}" agent start "$name" --kind "$kind" --pane "$pane" -- "$@" 2>&1)"; then
+    [ -n "${_RUN_AGENT_QUIET:-}" ] || printf '%s\n' "$out"
+    return 0
+  fi
+  out="$(printf '%s' "$out" | head -1 | cut -c1-200 | sed -E 's/(OMP_GATEWAY_TOKEN|CEL_SESSION_ID)=[^ ]*/\1=****/g')"
+  if [ "$_RUN_STAGED" -eq 1 ]; then
+    die "cel run: herdr could not start $name in pane $pane (${out:-no detail}) - NOT retried, nothing recorded. The launch line (contents withheld) was typed into that pane but never submitted; it is still pending at the prompt. Close the pane or clear its line, then re-run"
+  fi
+  die "cel run: herdr could not start $name in pane $pane (${out:-no detail}) - not retried, nothing recorded"
 }
 
 # The herdr-workspace-manager CLI ships inside the plugin and is not put on
@@ -749,7 +849,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   pane_id="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
   [ -n "$pane_id" ] && [ "$pane_id" != "null" ] || pane_id="${ws_id}:p1"
   _run_mark_launch "$pane_id" "$envprefix"
-  herdr agent start console --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+  _run_agent_start "$pane_id" console "$runtime" "${AGENT_ARGS[@]}"
 }
 
 # --- resuming root and the orchestrators (CEL-63) --------------------------
@@ -1553,7 +1653,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
     pane_label_set "$pane_id" "$label"
     _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
-    herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+    _run_agent_start "$pane_id" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
     # failure - the reviewer is alive and reviewing either way.
@@ -1579,8 +1679,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     pane_label_set "$restart_pane" "$label"
     tab_label_set "$restart_pane" "$label"
     _run_mark_launch "$restart_pane" "$envprefix" "$prefix_required"
-    herdr agent start "$agent_name" --kind "$runtime" --pane "$restart_pane" -- "${AGENT_ARGS[@]}" >/dev/null \
-      || die "cel run $role --restart: herdr could not start $agent_name in $restart_pane"
+    _RUN_AGENT_QUIET=1 _run_agent_start "$restart_pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
     _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
     return 0
   fi
@@ -1637,7 +1736,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # Role and gateway environment are typed on the launch line before Herdr
   # starts the agent, so exports live in the shell that execs the runtime.
   _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
-  herdr agent start "$agent_name" --kind "$runtime" --pane "$pane_id" -- "${AGENT_ARGS[@]}"
+  _run_agent_start "$pane_id" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
 }
 
 # THE PROCESS IN A PANE (CEL-81). The first cut found an orchestrator by the

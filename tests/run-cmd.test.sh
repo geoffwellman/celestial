@@ -11,6 +11,12 @@ _ws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" 
 # exit status. Route through a subshell to contain it.
 _cmd_run_in_subshell() { ( cmd_run "$@" ); }
 
+# AH-261017: an in-process herdr stub delegates the pane probes (and a refused
+# start) to the isolated fake, which models a pane whose shell is slow to come
+# up. Fast knobs keep the deadline cases quick; the stable-probe count stays 3.
+_fake_pane() { PF_NOLOG=1 PF_DIR="${PF_DIR:-$T/pf}" "$CEL_ROOT/tests/lib/fake-herdr" "$@"; }
+export CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_MS=3000 CEL_PANE_READY_STABLE=3
+
 test_run_direct_defaults_single_repo_and_injects_no_role() {
   _ws; local out; out="$(cd "$T" && cmd_run --dry-run)"
   assert_contains "$out" "workspace create"
@@ -800,6 +806,8 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
     case "$1 $2" in
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "agent start") _fake_pane "$@" ;;
       *) : ;;
     esac
   }
@@ -861,6 +869,7 @@ test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
     case "$1 $2" in
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
       "pane run")
         shift 3
         bash -c "$*" >/dev/null
@@ -1063,7 +1072,7 @@ _label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
     case "$1 $2" in
       "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
       "pane rename"|"tab rename") [ -z "${FAIL_RENAME:-}" ] ;;
-      "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s:t1"}}}' "$3" "${3%%:*}" ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       *) : ;;
@@ -1151,4 +1160,172 @@ test_run_omp_orchestrators_wait_out_a_spent_budget() {
   # and the overlay itself holds at least six hours
   assert_eq "$(yq -r '.retry.maxDelayMs >= 21600000' "$ov")" true
   rm -rf "$T"
+}
+
+# ---------------------------------------------------------------------------
+# AH-261017: A PANE IS TYPED INTO ONLY ONCE ITS SHELL OWNS THE FOREGROUND.
+# A downstream workspace's reviewer launch twice died as agent_pane_busy about six
+# seconds in, with the credential substitution and role env typed into a fresh
+# pane's terminal, never submitted, a shell warning interleaved with it. The
+# shell was still reading its rc files; nothing in cel waited for it. These
+# cases drive the launcher against an isolated fake herdr whose shell is slow,
+# swapped, or absent, and read the outcome from what herdr was actually asked.
+_pf_calls() { grep -c "^$1" "$HERDR_LOG" || true; }
+_pf_reviewer() { # run the reviewer launch with fake knobs; leaves $out and $rc
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" && rc=0 || rc=$?
+}
+_pf_no_launch() { # nothing typed, nothing started, nothing recorded
+  assert_eq "$(_pf_calls 'pane send-text')" 0
+  assert_eq "$(_pf_calls 'agent start')" 0
+  assert_fails reviewers_find widget 12
+}
+_pf_clean() { reviewer_checkout_release widget 12 2>/dev/null; rm -rf "$T"; }
+
+test_launch_waits_for_a_slow_shell_then_types_the_prefix_exactly_once() {
+  _ws_pr_fixture; export PF_BUSY_GETS=6
+  _pf_reviewer
+  assert_eq "$rc" 0
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  # every probe before the text was typed, and at least BUSY + STABLE of them
+  local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
+  local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w1:p9 *$' || true)"
+  [ "$before" -ge 9 ] || { echo "typed after only $before readiness probes"; _pf_clean; return 1; }
+  assert_eq "$(reviewers_find widget 12 | jq -r .pane)" w1:p9
+  unset PF_BUSY_GETS; _pf_clean
+}
+
+test_launch_ready_pane_carries_role_and_inbox_environment() {
+  _ws_pr_fixture
+  local typed=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed="$4" ;;
+      "agent start") printf '%s' "$typed" > "$T/typed" ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  local t; t="$(cat "$T/typed")"
+  assert_contains "$t" "CEL_ROLE=reviewer"
+  assert_contains "$t" "CEL_WORKSPACE=$T"
+  assert_contains "$t" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$t" "OMP_GATEWAY_TOKEN="
+  _pf_clean
+}
+
+test_launch_past_the_deadline_types_nothing_starts_nothing_records_nothing() {
+  _ws_pr_fixture; export PF_ALWAYS=busy CEL_PANE_READY_MS=150
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch succeeded on a pane whose shell never came up"; _pf_clean; return 1; }
+  assert_contains "$out" "shell does not own the foreground"
+  case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_refuses_a_pane_an_agent_already_occupies() {
+  _ws_pr_fixture; export PF_ALWAYS=agent CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead over a live agent"; _pf_clean; return 1; }
+  assert_contains "$out" "an agent already runs in it"
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_fails_closed_when_herdr_cannot_describe_the_pane() {
+  _ws_pr_fixture; export PF_ALWAYS=blind CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead on a pane herdr could not describe"; _pf_clean; return 1; }
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_refuses_when_the_pane_changes_owner_while_waiting() {
+  _ws_pr_fixture; export PF_BUSY_GETS=50 PF_SWAP_TERMINAL_AT=3
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead after the terminal was replaced"; _pf_clean; return 1; }
+  assert_contains "$out" "changed owner"
+  _pf_no_launch
+  unset PF_BUSY_GETS PF_SWAP_TERMINAL_AT; _pf_clean
+}
+
+test_launch_refuses_to_start_when_the_shell_changes_after_the_prefix_is_typed() {
+  _ws_pr_fixture; export PF_SWAP_SHELL_ON_SEND=1
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch succeeded after the shell was replaced"; _pf_clean; return 1; }
+  assert_contains "$out" "changed after the launch line was typed"
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 0
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  assert_fails reviewers_find widget 12
+  case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
+  unset PF_SWAP_SHELL_ON_SEND; _pf_clean
+}
+
+test_a_start_refused_after_the_prefix_is_not_retried_and_is_not_a_launch() {
+  _ws_pr_fixture; export PF_START_FAIL=1
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "a refused agent start was reported as a launch"; _pf_clean; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_contains "$out" "never submitted"
+  assert_contains "$out" "agent_pane_busy"
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  assert_fails reviewers_find widget 12
+  case "$out" in *reviewer-test-api-key*|*OMP_GATEWAY_TOKEN=*) echo "the pending launch line leaked"; _pf_clean; return 1;; esac
+  unset PF_START_FAIL; _pf_clean
+}
+
+# The real CLI against the fake as an executable on PATH: the non-reviewer
+# roles share the one gate, and a restart re-enters the same shell.
+_pf_cli_fixture() {
+  _ws; mkdir -p "$T/bin"; cp "$CEL_ROOT/tests/lib/fake-herdr" "$T/bin/herdr"
+  export HERDR_LOG="$T/herdr.log" PF_DIR="$T/pf" PATH="$T/bin:$PATH"; : > "$HERDR_LOG"
+}
+test_cli_orchestrator_launch_waits_for_the_shell_then_starts_once() {
+  _pf_cli_fixture; export PF_BUSY_GETS=4
+  ( cd "$T" && "$CEL_ROOT/bin/cel" run orchestrator --repo widget ) >/dev/null 2>&1 \
+    || { echo "launch failed: $(cat "$HERDR_LOG")"; return 1; }
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_ROLE=orchestrator"
+  local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
+  local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w7:p1 *$' || true)"
+  [ "$before" -ge 7 ] || { echo "typed after only $before probes"; return 1; }
+  unset PF_BUSY_GETS; rm -rf "$T"
+}
+test_cli_root_and_console_never_type_into_a_pane_that_is_not_ready() {
+  _pf_cli_fixture; export PF_ALWAYS=busy CEL_PANE_READY_MS=120
+  local role
+  for role in root orchestrator; do
+    ( cd "$T" && "$CEL_ROOT/bin/cel" run $role --repo widget ) >/dev/null 2>&1 \
+      && { echo "$role launched into a busy pane"; return 1; }
+  done
+  assert_eq "$(_pf_calls 'pane send-text')" 0
+  assert_eq "$(_pf_calls 'agent start')" 0
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; rm -rf "$T"
+}
+test_cli_worker_start_refusal_is_reported_not_retried() {
+  _pf_cli_fixture; export PF_START_FAIL=1
+  local out; out="$(cd "$T" && "$CEL_ROOT/bin/cel" run worker --repo widget --branch WG-1-x 2>&1)" \
+    && { echo "a refused start was reported as a launch"; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  unset PF_START_FAIL; rm -rf "$T"
+}
+
+# herdr's own prompt predicate also requires the foreground process GROUP to be
+# the shell's; a pane that does not report it cannot be proven ready.
+test_launch_refuses_a_pane_that_reports_no_foreground_process_group() {
+  _ws_pr_fixture; export PF_NO_PGID=1 CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead without a foreground group"; _pf_clean; return 1; }
+  _pf_no_launch
+  unset PF_NO_PGID; export CEL_PANE_READY_MS=3000; _pf_clean
 }

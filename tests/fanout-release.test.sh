@@ -39,6 +39,7 @@ case "$1 $2" in
   "workspace list")  if [ -n "${STUB_NO_CONTAINER:-}" ]; then echo '{"result":{"workspaces":['"$_worker"']}}';
                      else echo '{"result":{"workspaces":['"$_container","$_worker"']}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "agent list")      echo '{"result":{"agents":[]}}';;
   *) echo '{}';;
 esac
