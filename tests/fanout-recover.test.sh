@@ -399,3 +399,118 @@ test_recover_is_not_a_worker_verb() {
   assert_eq "$(_rc_ledger)" absent
   _rc_cleanup
 }
+
+# ---- review round 1 -------------------------------------------------------
+_rc_sha() { printf '%040d' 1 | tr 0 a; }
+
+test_land_review_request_review_and_handback_refuse_an_unresolved_recovery() {
+  _rc_setup
+  _rc_register; assert_eq "$RC_RC" 0
+  local before v out rc; before="$(_rc_ledger)"
+  for v in "land WG-1-recover" "review WG-1-recover approved --head $(_rc_sha) --by widget-pr-1-review" \
+           "request-review WG-1-recover --head $(_rc_sha)" "handback WG-1-recover fix --by widget-pr-1-review"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on an unsettled recovery"; _rc_cleanup; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+  done
+  assert_eq "$(_rc_ledger)" "$before"
+  assert_eq "$(_rc_n '^agent prompt')" 0
+  _rc_cleanup
+}
+
+test_abandon_is_the_bounded_way_out_and_release_works_after_it() {
+  _rc_setup
+  _rc_register
+  local out rc=0
+  out="$(cd "$T" && "$BIN" recover abandon WG-1-recover 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  assert_contains "$out" "--reason"
+  (cd "$T" && "$BIN" recover abandon WG-1-recover --reason "operator inspected the pane; not resuming") >/dev/null
+  local row; row="$(_rc_row)"
+  assert_eq "$(printf '%s' "$row" | jq -r '.state')" abandoned
+  assert_eq "$(printf '%s' "$row" | jq -r '.recovery.dispatch.phase')" abandoned
+  assert_eq "$(printf '%s' "$row" | jq -r '.abandon.prior_recovery_phase')" registered
+  assert_eq "$(printf '%s' "$row" | jq -r '.recovery.id | length > 0')" true       # evidence kept
+  [ -d "$RC_WT" ] || { echo "abandon touched the worktree"; return 1; }
+  assert_eq "$(_rc_n '^agent prompt')" 0
+  _rc_no_forbidden
+  # a settled row is not abandoned twice, and release is no longer fenced
+  rc=0; out="$(cd "$T" && "$BIN" recover abandon WG-1-recover --reason again 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  (cd "$T" && "$BIN" release WG-1-recover --keep-worktree) >/dev/null
+  assert_eq "$(_rc_row | jq -r '.state')" released
+  _rc_cleanup
+}
+
+test_release_all_skips_an_unsettled_recovery_instead_of_failing() {
+  _rc_setup
+  _rc_register
+  local out; out="$(cd "$T" && "$BIN" release --all --state unconfirmed 2>&1)"
+  assert_contains "$out" "skipped"
+  assert_eq "$(_rc_row | jq -r '.state')" unconfirmed
+  _rc_cleanup
+}
+
+test_a_registered_recovery_holds_a_slot_in_the_cap() {
+  _rc_setup
+  _rc_register
+  assert_contains "$(cd "$T" && "$BIN" status 2>&1)" "1/4 used"
+  _rc_cleanup
+}
+
+test_register_refuses_a_pane_that_already_shows_a_turn() {
+  _rc_setup
+  printf '● I already read the spec and edited 3 files\nctx 4.1%%\n' > "$RS/read.txt"
+  _rc_register
+  _rc_refused_untouched absent "not provably unstarted" || { _rc_cleanup; return 1; }
+  _rc_cleanup
+}
+
+test_continue_refuses_when_the_pane_acquired_a_turn_after_registration() {
+  _rc_setup
+  _rc_register; _rc_ready
+  printf '● something ran\nctx 3.0%%\n' > "$RS/read.txt"
+  local before; before="$(_rc_ledger)"
+  _rc_continue
+  _rc_refused_untouched "$before" "not provably unstarted" || { _rc_cleanup; return 1; }
+  _rc_cleanup
+}
+
+test_the_model_must_match_exactly_not_as_a_substring() {
+  _rc_setup
+  # profile model is `some-model`; a process launched with `some-model-2` is another model
+  _rc_proc 5001 5000 777777 worker "$T" "$RC_ALIAS" "--model some-model-2 --thinking xhigh"
+  _rc_register
+  _rc_refused_untouched absent "wrong model/profile" || { _rc_cleanup; return 1; }
+  _rc_cleanup
+}
+
+test_a_worktree_path_with_spaces_registers() {
+  _rc_setup
+  local sp="$T/wt/with space"
+  git -C "$T/repos/widget" worktree move "$RC_WT" "$sp"
+  jq -n --arg w "$sp" '{result:{workspaces:[{workspace_id:"w1AN",worktree:{checkout_path:$w}}]}}' > "$RS/ws.json"
+  _rc_register
+  assert_eq "$RC_RC" 0 || { echo "$RC_OUT"; return 1; }
+  assert_eq "$(_rc_row | jq -r '.worktree')" "$sp"
+  _rc_cleanup
+}
+
+test_a_prompt_error_on_stdout_is_still_classified_as_a_refusal() {
+  _rc_setup
+  _rc_register; _rc_ready
+  sed -i "s|not_ready) echo '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"not ready\"}}' >&2; exit 1 ;;|not_ready) echo '{\"error\":{\"code\":\"agent_not_ready\"}}'; exit 1 ;;|" "$STUB"
+  printf 'not_ready' > "$RS/prompt_mode"
+  _rc_continue
+  assert_eq "$(_rc_row | jq -r '.recovery.dispatch.phase')" registered
+  _rc_cleanup
+}
+
+test_continue_names_the_upstream_method_and_does_not_say_resumed() {
+  _rc_setup
+  _rc_register
+  _rc_continue
+  assert_contains "$RC_OUT" "completes or re-attaches an in-flight agent start"
+  assert_contains "$RC_OUT" "NOT RESUMED"
+  _rc_cleanup
+}

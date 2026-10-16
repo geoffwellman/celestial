@@ -2891,3 +2891,50 @@ test_delegate_killed_during_agent_start_leaves_a_trackable_row() {
   assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
   rm -rf "$T"
 }
+
+# AH-261017 review round 1: a failed `delegate --reuse` start must not destroy
+# the prior row (handback resumes through --reuse; the verdict and PR live there).
+test_a_failed_reuse_start_keeps_the_prior_rows_verdict_and_pr() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  (cd "$T" && "$BIN" delegate widget WG-RU "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-RU changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  jq '.[0].state = "finished" | .[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" worktree add -q -b WG-RU "$T/wt-ru" 2>/dev/null || true
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  local out rc=0
+  out="$(cd "$T" && STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-ru\"}}]}}" \
+    "$BIN" delegate widget WG-RU "$T/spec.md" --reuse 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a refused start succeeded"; return 1; }
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].pr' "$T/.cel/delegations.json")" 7
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  rm -rf "$T"
+}
+
+# a start-failed receipt row may hold a live agent: it counts toward the cap
+# and fences collect/release/land until the operator records the outcome.
+test_a_start_failed_receipt_row_holds_a_slot_and_fences_consumers_until_abandoned() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-SF "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$(cd "$T" && "$BIN" status 2>&1)" "1/4 used"
+  local before out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-SF" "release WG-SF --discard" "land WG-SF"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on an unsettled launch"; return 1; }
+    assert_contains "$out" "UNSETTLED launch"
+  done
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  (cd "$T" && "$BIN" recover abandon WG-SF --reason "pane inspected: shell prompt only") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" abandoned
+  assert_eq "$(jq -r '.[0].abandon.prior_launch_phase' "$T/.cel/delegations.json")" start-failed
+  # settled: release is no longer fenced
+  (cd "$T" && "$BIN" release WG-SF --keep-worktree) >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
