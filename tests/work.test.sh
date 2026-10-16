@@ -120,24 +120,30 @@ test_stage_landing_needs_an_approved_green_pr() {
 # ledger verdict plus a passed gate, and so must the stage.
 test_stage_landing_reads_the_ledger_review_and_gate() {
   _work_setup
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS"},
-    "delegation":{"state":"collected","review":{"verdict":"approved"},"verdict":{"gate":true}}}')" landing
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":true}}}')" landing
   # no durable approval
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS"},
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
     "delegation":{"state":"collected","review":{"verdict":"changes"},"verdict":{"gate":true}}}')" review
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS"},
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
     "delegation":{"state":"collected","review":null,"verdict":{"gate":true}}}')" review
   # approved, but the gate did not pass
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS"},
-    "delegation":{"state":"collected","review":{"verdict":"approved"},"verdict":{"gate":false}}}')" review
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS"},
-    "delegation":{"state":"collected","review":{"verdict":"approved"},"verdict":{"gate":null,"gate_outcome":"no_verdict"}}}')" review
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":false}}}')" review
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":null,"gate_outcome":"no_verdict"}}}')" review
   # approved and gated, but a red check is still a refusal at land
-  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"FAILURE"},
-    "delegation":{"state":"collected","review":{"verdict":"approved"},"verdict":{"gate":true}}}')" review
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"FAILURE","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":true}}}')" review
+  # a historical approval (no head_source) and an approval of a superseded head
+  # are not what land accepts, so they are not "landing" either
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":true}}}')" review
+  assert_eq "$(_stage '{"pr":{"state":"OPEN","review":"","checks":"SUCCESS","head":"cccccccccccccccccccccccccccccccccccccccc"},
+    "delegation":{"state":"collected","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":true}}}')" review
   # merged precedence unchanged
   assert_eq "$(_stage '{"pr":{"state":"MERGED","review":""},
-    "delegation":{"state":"landed","review":{"verdict":"approved"},"verdict":{"gate":true}}}')" merged
+    "delegation":{"state":"landed","review":{"verdict":"approved","head_source":"explicit","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"verdict":{"gate":true}}}')" merged
   rm -rf "$T"
 }
 

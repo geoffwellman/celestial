@@ -98,6 +98,7 @@ test_ws_policy_block_review_line_follows_review_post() {
   printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$tmp/workspace.yaml"
   local b; b="$(ws_policy_block "$tmp")"
   assert_contains "$b" 'cel-fanout review <id>'
+  assert_contains "$b" '--head <reviewed-commit-sha>'
   assert_contains "$b" 'GitHub is **not** posted to'
   printf '  post: github\n' >> "$tmp/workspace.yaml"
   b="$(ws_policy_block "$tmp")"
@@ -115,6 +116,7 @@ test_pr_reviewer_role_does_not_post_to_github_unconditionally() {
   ! grep -qE '^[0-9]+\. Submit ONE review per round: `gh pr review' "$f" \
     || { echo "role posts a GitHub review unconditionally"; return 1; }
   assert_contains "$(cat "$f")" 'cel-fanout review <id>'
+  assert_contains "$(cat "$f")" '--head <reviewed-sha>'
   assert_contains "$(cat "$f")" 'post: github'
 }
 test_ws_render_role_appends_policy() {

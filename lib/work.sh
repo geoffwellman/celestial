@@ -112,7 +112,7 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
     # ONE CALL PER REPO, open and closed together: a PR stops being open at
     # exactly the moment it becomes the most interesting thing that happened.
     rc=0; out="$("$(_work_gh)" pr list --repo "$slug" --state all --limit "${CEL_WORK_PR_LIMIT:-50}" \
-      --json number,title,headRefName,state,reviewDecision,statusCheckRollup,createdAt,updatedAt,mergedAt,closedAt,url \
+      --json number,title,headRefName,state,headRefOid,reviewDecision,statusCheckRollup,createdAt,updatedAt,mergedAt,closedAt,url \
       2>/dev/null)" || rc=$?
     [ "$rc" -eq 0 ] || failed=1
     # A zero exit is not a good read: empty or broken JSON fails the pass too.
@@ -180,7 +180,12 @@ def stage_of:
   # APPROVED THE WAY `cel-fanout land` READS IT: GitHub'\''s decision, or the
   # ledger verdict `cel-fanout review` records - Celestial'\''s reviewer never
   # posts a GitHub review, so reviewDecision is often empty on a PR it passed.
-  | ($r == "APPROVED" or ((.delegation.review.verdict // "") == "approved")) as $approved
+  # ONLY an explicit-head verdict for this very PR head counts, as at land.
+  | ($r == "APPROVED" or (
+      ((.delegation.review.verdict // "") == "approved")
+      and ((.delegation.review.head_source // "") == "explicit")
+      and ((.delegation.review.head // "") != "")
+      and ((.delegation.review.head // "") == (.pr.head // "-")))) as $approved
   # GREEN: no red check, and the gate passed - the recorded gate verdict when
   # there is one (false or no_verdict is not passed), else the PR'\''s checks.
   | (.delegation.verdict // {}) as $v
@@ -309,7 +314,7 @@ work_items() { # <wsdir> [--since <iso>] [--fresh] [--stage S] [--product P] [--
                       landed_at:   ([$d.history[]? | select(.state == "landed")   | .at] | last // ""),
                       released_at: ([$d.history[]? | select(.state == "released") | .at] | last // "")} end),
            pr: (if $pr == null then null else
-                     {number: $pr.number, state: ($pr.state // ""), review: ($pr.reviewDecision // ""),
+                     {number: $pr.number, state: ($pr.state // ""), review: ($pr.reviewDecision // ""), head: ($pr.headRefOid // ""),
                       checks: $checks, url: ($pr.url // ""), repo: ($pr.repo // ""),
                       branch: ($pr.headRefName // ""), opened: ($pr.createdAt // ""),
                       merged: ($pr.mergedAt // ""), updated: ($pr.updatedAt // "")} end)}

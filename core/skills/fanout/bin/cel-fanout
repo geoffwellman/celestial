@@ -1344,7 +1344,7 @@ cmd_status() {
       spike) ticket=spike ;;
     esac
     case "$(printf '%s' "$e" | jq -r '.review.verdict // ""')" in
-      approved) review=ok ;;
+      approved) if [ "$(printf '%s' "$e" | jq -r '.review.head_source // ""')" = explicit ]; then review=ok; else review=old; fi ;;
       changes)  review=chg ;;
       *)        review=- ;;
     esac
@@ -2174,33 +2174,73 @@ cmd_release() {
 # read: `land` needs it, `status` shows it, and the merge commit carries it
 # into the permanent log. The inbox message a reviewer sends is the
 # notification; THIS is the record.
-cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
-  [ $# -ge 2 ] || die "usage: cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
+cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
+  local usage="usage: cel-fanout review <id> <approved|changes> --head <full-40-char-commit-sha> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
+  [ $# -ge 2 ] || die "$usage"
   local id="$1" verdict="$2"; shift 2
-  local by="" note="" ws_opt=""
+  local by="" note="" ws_opt="" head="" head_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --by)        by="$2"; shift 2 ;;
-      --note)      note="$2"; shift 2 ;;
-      --workspace) ws_opt="$2"; shift 2 ;;
+      --by)        [ $# -ge 2 ] || die "review: --by needs a value"; by="$2"; shift 2 ;;
+      --note)      [ $# -ge 2 ] || die "review: --note needs a value"; note="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "review: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --head)      [ $# -ge 2 ] || die "review: --head needs a value"; head="$2"; head_given=1; shift 2 ;;
       *) die "review: unknown argument: $1" ;;
     esac
   done
+  # ALL VALIDATION BEFORE ANY LEDGER ACCESS: a malformed request mutates nothing.
   case "$verdict" in approved|changes) ;; *) die "review: verdict must be approved or changes (got: $verdict)";; esac
   [ -n "$by" ] || die "review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
+  # THE COMMIT IT COVERS IS NAMED BY THE REVIEWER, NEVER INFERRED. A worker's
+  # local HEAD is not what was reviewed (an unpushed commit was once stamped
+  # as the reviewed head); neither is the remote head at the moment of
+  # recording. The reviewer reads the SHA off the diff it evaluated and says it.
+  [ "$head_given" -eq 1 ] || die "review: --head <full-40-char-commit-sha> is required - the verdict covers the commit you reviewed, and it is never inferred"
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "review: --head must be a full 40-character lowercase commit SHA (got: '$head') - not an abbreviation, a ref or HEAD"
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
-  [ -n "$(_ledger_entry "$wsdir" "$id")" ] || die "review: no delegation with id '$id'"
-  # THE HEAD IT COVERS (CEL-130): gc closes a finished reviewer only when its
-  # verdict is for the PR's current head - a push since is a new round.
-  local head wt
-  wt="$(_ledger_entry "$wsdir" "$id" | jq -r '.worktree // ""')"
-  head="$( [ -n "$wt" ] && git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "review: no delegation with id '$id'"
+
+  if [ "$verdict" = approved ]; then
+    # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
+    # DELEGATION OWNS. The API read validates; it is never where the SHA comes
+    # from. The ledger lock is dropped around the remote call (the same rule as
+    # a gate) and the row is re-read after: if its identity moved, nothing is
+    # recorded.
+    local repo branch worktree slug ident
+    repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"
+    branch="$(printf '%s' "$entry" | jq -r '.branch // ""')"
+    ident="$(printf '%s' "$entry" | jq -c '{repo, branch, worktree, alias}')"
+    slug="$(_repo_slug "$wsdir" "$repo")"
+    [ -n "$slug" ] && [ -n "$branch" ] || die "review: cannot resolve the PR for '$id' (repo '$repo', branch '$branch') - nothing recorded"
+    ws_github_ready "$wsdir" "$GH" \
+      || die "review: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")") - an approval is not recorded unverified"
+    _ledger_unlock
+    local pr me author rhead state
+    pr="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" --json number,author,state,headRefOid 2>/dev/null)" \
+      || { _ledger_relock; die "review: no PR found for $branch on $slug - an approval needs a pushed PR head to bind to; nothing recorded"; }
+    me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+    _ledger_relock
+    author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
+    rhead="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+    state="$(printf '%s' "$pr" | jq -r '.state // ""')"
+    [ -n "$me" ] && [ "$author" = "$me" ] \
+      || die "review: PR for $branch was opened by '${author:-?}', not by this fleet ('${me:-?}') - this delegation does not own it; nothing recorded"
+    [ "$state" = OPEN ] || die "review: the PR for $branch is $state, not OPEN - nothing recorded"
+    [ "$rhead" = "$head" ] \
+      || die "review: --head $head is not the PR's current head (${rhead:-unknown}) - an approval covers exactly the remote head you reviewed; re-review the current head. Nothing recorded"
+    # CAS: re-read after the unlocked window; the delegation must be the same one.
+    local entry2; entry2="$(_ledger_entry "$wsdir" "$id")"
+    [ -n "$entry2" ] && [ "$(printf '%s' "$entry2" | jq -c '{repo, branch, worktree, alias}')" = "$ident" ] \
+      || die "review: delegation '$id' changed while the PR was being checked - nothing recorded; run the review again"
+  fi
+
   local cur; cur="$(_ledger_read "$wsdir")"
   _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg v "$verdict" \
     --arg by "$by" --arg note "$note" --arg at "$(_now_iso)" --arg head "$head" \
-    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at, head:$head} else . end)')"
-  c_ok "$id reviewed: $verdict by $by"
+    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at, head:$head, head_source:"explicit"} else . end)')"
+  c_ok "$id reviewed: $verdict by $by (head ${head:0:12})"
 }
 
 # THE HAND-BACK (CEL-130). Under memory pressure gc may stop a worker that is
@@ -2331,6 +2371,13 @@ cmd_land() { # <id>
     approved_via="GitHub approval"
   elif [ "$author" = "$me" ] \
     && [ "$(printf '%s' "$entry" | jq -r '.review.verdict // ""')" = approved ]; then
+    # THE LEDGER VERDICT STANDS IN ONLY WHEN IT NAMES THE EXACT COMMIT BEING
+    # MERGED. A record without head_source "explicit" was stamped from a local
+    # HEAD nobody attested; one for another head covers code that has moved.
+    [ "$(printf '%s' "$entry" | jq -r '.review.head_source // ""')" = explicit ] \
+      || die "land: the ledger approval carries no explicit reviewed head (a historical record) - a reviewer must run 'cel-fanout review $id approved --head <sha>' again. Nothing merged."
+    [ "$(printf '%s' "$entry" | jq -r '.review.head // ""')" = "$(printf '%s' "$pr" | jq -r '.headRefOid // "none"')" ] \
+      || die "land: the ledger approval is for head $(printf '%s' "$entry" | jq -r '.review.head // "?"' | cut -c1-12), but PR #$num is at $(printf '%s' "$pr" | jq -r '.headRefOid // "?"' | cut -c1-12) - the PR head moved since the review; re-review it. Nothing merged."
     review_by="$(printf '%s' "$entry" | jq -r '.review.by // ""')"
     review_note="$(printf '%s' "$entry" | jq -r '.review.note // ""')"
     approved_via="ledger verdict by $review_by (GitHub cannot approve a PR its own author would review)"
@@ -2421,7 +2468,14 @@ cmd_land() { # <id>
   # The verdict travels into the permanent log rather than a comment thread:
   # on a solo repo the squash body is the only place a public record of who
   # reviewed this, and what they said, can actually live.
-  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch)
+  # MERGE ONLY THE HEAD THAT WAS CHECKED. The approval, CI and gate above all
+  # read the PR head once at the top; a push during the (long) gate would
+  # otherwise merge a commit nothing covered. --match-head-commit makes GitHub
+  # refuse the merge if the head is no longer the one this land evaluated.
+  local approved_head; approved_head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+  [ -n "$approved_head" ] \
+    || die "land: the PR reports no head commit - cannot pin the merge to the reviewed head. Nothing merged."
+  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch --match-head-commit "$approved_head")
   local body=""
   if [ -n "$review_by" ]; then
     body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"

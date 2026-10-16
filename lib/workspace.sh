@@ -531,9 +531,9 @@ ws_policy_block() { # <wsdir> [product]
     printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
       "$rrt" "${rmodel:+ model $rmodel}"
     if [ "$(ws_review_post "$d")" = "github" ]; then
-      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
     else
-      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
     fi
   fi
   local lt rpr
