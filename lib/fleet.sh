@@ -132,6 +132,7 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
                    else ((($roster.result.agents? // []) | map(select(.pane_id == $p)))[0] // {}) end;
     .[]?
     | select(.repo == $r and ((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked")))
+    | select((.replacement.role // "") != "source")   # its worker now belongs to the replacement row
     | . as $e
     | (.pane // "") as $p
     | agent($p) as $a
@@ -368,6 +369,8 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
       profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
       activity: $activity, activity_confidence: $aconf,
+      replaces: (.replacement.of // ""),
+      replaced_by: (if (.replacement.role // "") == "source" then (.replacement.child // "") else "" end),
       silence: $silence, silence_reset: $silence_reset,
       harness: $harness}'
 }

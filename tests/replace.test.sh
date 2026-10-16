@@ -350,10 +350,14 @@ test_replace_two_concurrent_replacements_yield_exactly_one() {
   local -a a b
   mapfile -t a < <(_reserve_args WG-1-clean "$TH")
   mapfile -t b < <(_reserve_args WG-1-other "$th2")
-  ( cd "$T" && "$BIN" "${a[@]}" >"$T/o1" 2>&1; echo $? >"$T/r1" ) &
-  ( cd "$T" && "$BIN" "${b[@]}" >"$T/o2" 2>&1; echo $? >"$T/r2" ) &
-  wait
-  local ok; ok=$(( $(cat "$T/r1") == 0 )); ok=$(( ok + ($(cat "$T/r2") == 0) ))
+  ( cd "$T" && { "$BIN" "${a[@]}" >"$T/o1" 2>&1 && echo 0 || echo 1; } >"$T/r1" ) &
+  local p1=$!
+  ( cd "$T" && { "$BIN" "${b[@]}" >"$T/o2" 2>&1 && echo 0 || echo 1; } >"$T/r2" ) &
+  local p2=$!
+  wait "$p1" "$p2" || true
+  local ok=0
+  [ "$(cat "$T/r1")" = 0 ] && ok=$((ok + 1))
+  [ "$(cat "$T/r2")" = 0 ] && ok=$((ok + 1))
   assert_eq "$ok" 1 || { cat "$T/o1" "$T/o2"; return 1; }
   assert_eq "$(_rp_count)" 2
   assert_eq "$(jq '[.[] | select(.replacement.role == "child")] | length' "$T/.cel/delegations.json")" 1
@@ -452,7 +456,7 @@ test_replace_a_shared_worker_is_one_fleet_row_and_one_slot() {
   _rp_setup; _reserve; _rp_publish; _attach
   # status --json carries the lineage on both rows
   local out; out="$(cd "$T" && CEL_FANOUT_HERDR=true "$BIN" status --json 2>/dev/null)"
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.replaced_by == "WG-1-clean")] | length')" 1 || { echo "$out"; return 1; }
-  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.replaces == "WG-1")] | length')" 1
+  assert_eq "$(printf '%s' "$out" | jq -s -r '[.[] | select(.replaced_by == "WG-1-clean")] | length')" 1 || { echo "$out"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -s -r '[.[] | select(.replaces == "WG-1")] | length')" 1
   rm -rf "$T"
 }
