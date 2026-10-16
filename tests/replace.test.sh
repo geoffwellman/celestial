@@ -460,3 +460,32 @@ test_replace_a_shared_worker_is_one_fleet_row() {
   assert_eq "$rows" "WG-1-clean" || return 1
   rm -rf "$T"
 }
+
+# gc's live-delegation veto over the ONE worktree the source and the child
+# share, through every transition, with no live operation: reserved and
+# attached (child running) veto; once the child is collected or landed the
+# veto lifts; releasing the original while the child is live is refused so the
+# veto never has to hold against the CLI; and a released child frees it.
+test_replace_gc_veto_follows_the_child_through_reserve_attach_collect_release() {
+  _rp_setup
+  source "$CEL_ROOT/lib/gc.sh"
+  export CEL_REGISTRY="$T/registry.yaml"
+  registry_add demo "$T" "" >/dev/null 2>&1 || true
+  _gc_delegated_live "$T/wt" && { echo "vetoed before any replacement (source collected)"; return 1; }
+  _reserve; assert_eq "$RC" 0 || return 1
+  _gc_delegated_live "$T/wt" || { echo "reserved child not vetoed"; return 1; }
+  _rp_publish; _attach; assert_eq "$RC" 0 || return 1
+  _gc_delegated_live "$T/wt" || { echo "attached child not vetoed"; return 1; }
+  # the original cannot be released out from under it, whatever its own state
+  jq 'map(if .id == "WG-1" then .state = "landed" else . end)' "$T/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$T/.cel/delegations.json"
+  _rp release WG-1; assert_eq "$RC" 1; [ -d "$T/wt" ] || { echo "worktree removed via the original"; return 1; }
+  _gc_delegated_live "$T/wt" || { echo "veto lost when the original went landed"; return 1; }
+  printf 'new handoff\n' > "$T/wt/.agent/result.md"
+  _rp collect WG-1-clean; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  if _gc_delegated_live "$T/wt"; then echo "collected child still vetoes"; return 1; fi
+  jq 'map(if .id == "WG-1-clean" then .state = "running" else . end)' "$T/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$T/.cel/delegations.json"
+  _gc_delegated_live "$T/wt" || { echo "re-running child not vetoed"; return 1; }
+  jq 'map(if .id == "WG-1-clean" then .state = "released" else . end)' "$T/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$T/.cel/delegations.json"
+  if _gc_delegated_live "$T/wt"; then echo "released child still vetoes"; return 1; fi
+  rm -rf "$T"
+}
