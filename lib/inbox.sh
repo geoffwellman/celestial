@@ -309,23 +309,31 @@ inbox_unread_json() { # <ws> <who>
 # A CURSOR IS A HIGH-WATER MARK PLUS HOLES. Ids are fixed-width digits, so a
 # reader has read everything at or below its mark - except the few messages
 # `cel inbox migrate` merged in from a split mailbox that sit BELOW the mark
-# and were never read by that reader. Those ids are listed one per line in
-# <cursor>.holes and stay unread until delivered. No migration, no holes file,
+# and were never read by that reader. The cursor FILE is one atomic unit:
+#   line 1      the mark (all a plain cursor ever held, no trailing newline)
+#   digit lines ids below the mark that are still unread (the holes)
+#   #merged X   migration bookkeeping: legacy name X is already folded in
+# so a mark and its holes can never be written apart. No migration, one line,
 # and this is the plain mark it always was.
 #
 # One JSON array of {k, h} for the cursor files that exist; empty array means
 # nothing was ever read. A message is unread when EVERY listed cursor says so
-# (the furthest-along reader wins, as before, now hole-aware).
+# (the furthest-along reader wins, as before, now hole-aware). Builtins only:
+# `cel fleet` counts the processes it starts.
 _inbox_cursors_json() { # <cursor-file>...
-  local c k h out="" sep=""
+  local c out="" sep="" lines l h
   for c in "$@"; do
     [ -f "$c" ] || continue
-    k=""; read -r k < "$c" || true            # builtin: fleet counts forks
-    if [ ! -s "$c.holes" ] && [ -z "${k//[0-9]/}" ]; then
-      out="$out$sep{\"k\":\"$k\",\"h\":[]}"       # ids are digits: nothing to escape
+    lines=(); mapfile -t lines < "$c"
+    h=""
+    for l in "${lines[@]:1}"; do
+      [[ "$l" =~ ^[0-9]+$ ]] && h="$h${h:+,}\"$l\""
+    done
+    # the mark is digits (ids); anything else is escaped by jq, never trusted
+    if [[ "${lines[0]:-}" =~ ^[0-9]*$ ]]; then
+      out="$out$sep{\"k\":\"${lines[0]:-}\",\"h\":[$h]}"
     else
-      h="[]"; [ -s "$c.holes" ] && h="$(jq -Rn '[inputs | select(length > 0)]' "$c.holes")"
-      out="$out$sep$(jq -nc --arg k "$k" --argjson h "$h" '{k: $k, h: $h}')"
+      out="$out$sep$(jq -nc --arg k "${lines[0]}" --argjson h "[$h]" '{k: $k, h: $h}')"
     fi
     sep=","
   done
@@ -401,9 +409,16 @@ _inbox_every_ws() { # [extra-ws]
 _inbox_append() { # <file> <json-line>
   local f="$1" line="$2"
   mkdir -p "$(dirname "$f")"
+  # A MIGRATION THAT WAS KILLED HALF WAY (cel inbox migrate) leaves a pending
+  # journal; whoever takes the lock next finishes it BEFORE touching the file,
+  # so nothing is ever appended to a half-rewritten mailbox.
+  local pend="${f%.jsonl}.migrate.pending"
   if have flock; then
-    ( flock 9; printf '%s\n' "$line" >&9 ) 9>>"$f"
+    ( flock 9
+      [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
+      printf '%s\n' "$line" >&9 ) 9>>"$f"
   else
+    [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
     printf '%s\n' "$line" >> "$f"
   fi
 }
@@ -701,6 +716,8 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   if [ "$all" -eq 0 ] && have flock && { exec {lkfd}>>"$f"; } 2>/dev/null; then
     flock "$lkfd" || true
   else lkfd=""; fi
+  # finish a migration that was killed half way before looking at anything
+  [ "$all" -eq 1 ] || [ ! -f "${f%.jsonl}.migrate.pending" ] || _inbox_migrate_resume "$ws"
   local cs="[]"; [ "$all" -eq 0 ] && cs="$(_inbox_cursors_json "$c")"
   # An update is ONE new line, rendered as the repeat it is rather than as a
   # second full item: the reader needs to know the condition is still true,
@@ -733,11 +750,11 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   mkdir -p "$(dirname "$c")"
   # The mark never moves back: a delivery made only of held-back (hole)
   # messages is older than the mark and must not rewind it.
-  local newk oldk=""; [ -f "$c" ] && oldk="$(cat "$c")"
+  local newk oldk=""; [ -f "$c" ] && { read -r oldk < "$c" || true; }
   newk="$(printf '%s\n' "$items" | jq -r '.id' | tail -1)"
   [ "$oldk" \> "$newk" ] && newk="$oldk"
   printf '%s' "$newk" > "$c"
-  rm -f "$c.holes"      # everything unread under this cursor was just delivered
+  # (one plain line: every hole this cursor had was just delivered)
   [ -z "$lkfd" ] || exec {lkfd}>&-
 }
 
