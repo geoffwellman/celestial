@@ -1051,6 +1051,11 @@ _run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates
   if [ "$runtime" = omp ]; then
     local omp_dir_var; printf -v omp_dir_var 'PI_CODING_AGENT_DIR=%q' "$(gateway_omp_dir)"
     GATEWAY_ENV+=("$omp_dir_var")
+  elif [ "$runtime" = pi ] && [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
+    # gateway_pi_models_write writes into the launcher's agent dir; the pane
+    # must load that same file, not its shell's default ~/.pi/agent.
+    local pi_dir_var; printf -v pi_dir_var 'PI_CODING_AGENT_DIR=%q' "$PI_CODING_AGENT_DIR"
+    GATEWAY_ENV+=("$pi_dir_var")
   fi
 }
 
