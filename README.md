@@ -1122,6 +1122,7 @@ policy block into every agent.
 | `cel-fanout scout <repo> <brief>` | an investigation: disposable worktree, a report as the deliverable, no ticket, no PR |
 | `cel-fanout spike <repo> <brief>` | a trial: throwaway code in a disposable worktree, a report as the deliverable, never shipped |
 | `cel-fanout land <id>` | the one merge path — fleet-authored, approved, green, gate passed, `policy.merge` allows |
+| `cel-fanout request-review <id> --head <sha40> [--reviewer <login>] [--dry-run]` | request the workspace's configured `policy.reviewer` on a fleet-owned PR — only for a head an explicit-head approved review covers; adds that one reviewer and nothing else, verified in `requested_reviewers` |
 | `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
 | `cel dash` | the box's one dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |

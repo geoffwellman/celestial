@@ -2507,6 +2507,147 @@ for line in sys.stdin.read().splitlines():
   _ledger_update_state "$wsdir" "$id" landed
 }
 
+# REQUESTING THE EXTERNAL REVIEWER (AH-261017). The workspace names a GitHub
+# reviewer in `policy.reviewer` (the one `pr_open: ready` asks for). A raw
+# `gh pr edit --add-reviewer` is refused to orchestrators by lib/guard.sh, on
+# purpose: it is the same door as labels, titles and bodies. This is the one
+# narrow door instead - it can ONLY add the configured reviewer to this
+# fleet's own open PR, and only for a head a recorded, explicit approval
+# covers. Every check runs before the single mutation; nothing else is written
+# (not the ledger, not a marker, not the branch or the base).
+#
+# THE REAL BOUNDARY: GitHub cannot compare-and-set a head into a reviewer
+# request. The head is checked (PR object AND the branch ref) immediately
+# before the request and again after it; if it moved in between, the request
+# stays attached - there is no atomic way to take it back - but this says so
+# and fails, and land/ledger consumers still compare heads themselves, so a
+# request made at head A can never read as an approval of head B. It is a
+# request to LOOK, never a verdict, and never permission to land.
+cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAME] [--dry-run]
+  [ $# -ge 1 ] || die "usage: cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <configured-login>] [--workspace NAME] [--dry-run]"
+  local id="$1"; shift
+  local head="" want="" ws_opt="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --head)      [ $# -ge 2 ] || die "request-review: --head needs a value"; head="$2"; shift 2 ;;
+      --reviewer)  [ $# -ge 2 ] || die "request-review: --reviewer needs a value"; want="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "request-review: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --dry-run)   dry=1; shift ;;
+      *) die "request-review: unknown argument: $1" ;;
+    esac
+  done
+  [ -n "$head" ] || die "request-review: --head <full 40-char sha> is required - a review request is for one exact commit, never 'whatever the branch is now'"
+  printf '%s' "$head" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "request-review: --head must be a full 40-character lowercase hex sha (got: $head) - abbreviations and names are not identity"
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "request-review: no delegation with id '$id'"
+
+  # THE POLICY: the configured reviewer, and only it. --reviewer can pick that
+  # identity out, never widen it.
+  local reviewer pr_open
+  reviewer="$(ws_policy "$wsdir" reviewer)"; pr_open="$(ws_policy "$wsdir" pr_open)"
+  { [ -n "$reviewer" ] && [ "$reviewer" != null ]; } \
+    || die "request-review: workspace '$(ws_name "$wsdir")' configures no policy.reviewer - there is nobody to request (--reviewer cannot add one)"
+  [ "$pr_open" = ready ] \
+    || die "request-review: policy.reviewer is set but policy.pr_open is '${pr_open:-draft}', not ready - the policy contradicts itself, so nothing is requested"
+  printf '%s' "$reviewer" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$' \
+    || die "request-review: policy.reviewer '$reviewer' is not a single GitHub login - this verb requests accounts, not teams or lists"
+  if [ -n "$want" ] && [ "$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$reviewer" | tr '[:upper:]' '[:lower:]')" ]; then
+    die "request-review: '$want' is not the configured reviewer ($reviewer) - --reviewer selects the configured identity, it does not expand policy"
+  fi
+
+  # THE RECORD: approved, attested at an explicit head, and that head is THE
+  # head asked about. A record without head_source=explicit was stamped with
+  # whatever the worker's local checkout held - not identity, never upgraded.
+  local rv rh rs rby
+  rv="$(printf '%s' "$entry" | jq -r '.review.verdict // ""')"
+  rh="$(printf '%s' "$entry" | jq -r '.review.head // ""')"
+  rs="$(printf '%s' "$entry" | jq -r '.review.head_source // ""')"
+  rby="$(printf '%s' "$entry" | jq -r '.review.by // ""')"
+  [ "$rv" = approved ] || die "request-review: $id has no approved review on record (verdict: ${rv:-none}) - nothing to request an external look at"
+  [ "$rs" = explicit ] || die "request-review: the review record for $id is not explicit-head provenance (head_source: ${rs:-absent}) - a historical record named a local checkout, not a reviewed commit; re-review with --head"
+  [ "$rh" = "$head" ] || die "request-review: the approved review on record covers ${rh:-no head}, not $head - a different head needs its own review"
+
+  local repo branch slug
+  repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"; branch="$(printf '%s' "$entry" | jq -r '.branch // ""')"
+  [ -n "$repo" ] && [ -n "$branch" ] || die "request-review: the ledger row for $id has no repo/branch"
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  [ -n "$slug" ] && [ "$slug" != null ] || die "request-review: repo '$repo' is not registered in this workspace"
+  ws_github_ready "$wsdir" "$GH" \
+    || die "request-review: refusing to act for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+
+  # THE PR, from the API itself (not gh pr view, which lags and is shaped for people)
+  local num pull me
+  num="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" --json number 2>/dev/null | jq -r '.number // empty' 2>/dev/null)" \
+    && [ -n "$num" ] || die "request-review: no PR found for $branch on $slug"
+  _fanout_rr_pull() { _fgh "$wsdir" api "repos/$slug/pulls/$num" 2>/dev/null; }
+  pull="$(_fanout_rr_pull)" && [ -n "$pull" ] || die "request-review: could not read PR #$num on $slug - nothing requested"
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  local p_author p_state p_draft p_merged p_ref p_repo p_sha
+  p_author="$(printf '%s' "$pull" | jq -r '.user.login // ""')"
+  p_state="$(printf '%s' "$pull" | jq -r '.state // ""')"
+  p_draft="$(printf '%s' "$pull" | jq -r '.draft // false')"
+  p_merged="$(printf '%s' "$pull" | jq -r '.merged // false')"
+  p_ref="$(printf '%s' "$pull" | jq -r '.head.ref // ""')"
+  p_repo="$(printf '%s' "$pull" | jq -r '.head.repo.full_name // ""')"
+  p_sha="$(printf '%s' "$pull" | jq -r '.head.sha // ""')"
+  [ -n "$me" ] && [ "$p_author" = "$me" ] \
+    || die "request-review: PR #$num was opened by '$p_author', not by this fleet ('${me:-unknown}') - colleagues' PRs are not ours to request reviewers on"
+  [ "$p_ref" = "$branch" ] || die "request-review: PR #$num is for branch '$p_ref', not $id's branch '$branch'"
+  [ "$p_repo" = "$slug" ] || die "request-review: PR #$num's head lives in '${p_repo:-unknown}', not $slug - only same-repo fleet PRs"
+  { [ "$p_state" = open ] && [ "$p_merged" = false ]; } || die "request-review: PR #$num is not open (state: $p_state, merged: $p_merged)"
+  [ "$p_draft" = false ] || die "request-review: PR #$num is still a draft - a draft is not ready for review"
+  [ "$p_sha" = "$head" ] || die "request-review: PR #$num head is $p_sha, not the reviewed $head - the branch moved; review the new head first"
+  local ref_sha
+  ref_sha="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$branch" 2>/dev/null | jq -r '.object.sha // empty' 2>/dev/null || true)"
+  [ -n "$ref_sha" ] || die "request-review: could not read the remote branch ref for $branch - nothing requested"
+  [ "$ref_sha" = "$head" ] || die "request-review: remote branch $branch is at $ref_sha, not the reviewed $head - nothing requested"
+
+  # ALREADY DONE is not done twice: a pending request is left alone, and a
+  # reviewer who already reviewed THIS head is not pinged again. An older
+  # review of an older head says nothing about this one.
+  local lc; lc="$(printf '%s' "$reviewer" | tr '[:upper:]' '[:lower:]')"
+  if printf '%s' "$pull" | jq -e --arg r "$lc" 'any(.requested_reviewers[]?; (.login | ascii_downcase) == $r)' >/dev/null 2>&1; then
+    c_ok "$id: $reviewer is already requested on PR #$num (requested_reviewers) - nothing to do"
+    return 0
+  fi
+  local reviews
+  reviews="$(_fgh "$wsdir" api "repos/$slug/pulls/$num/reviews" 2>/dev/null)" && [ -n "$reviews" ] \
+    || die "request-review: could not read the reviews on PR #$num - nothing requested"
+  if printf '%s' "$reviews" | jq -e --arg r "$lc" --arg h "$head" \
+      'any(.[]?; ((.user.login // "") | ascii_downcase) == $r and .commit_id == $h)' >/dev/null 2>&1; then
+    c_ok "$id: $reviewer already reviewed $head on PR #$num - not re-requested"
+    return 0
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    c_ok "dry run: would request $reviewer on $slug#$num for $head (preconditions all pass; nothing was requested or written)"
+    return 0
+  fi
+
+  # THE ONE MUTATION. Re-read the head immediately before it.
+  pull="$(_fanout_rr_pull)" && [ -n "$pull" ] || die "request-review: could not re-read PR #$num - nothing requested"
+  [ "$(printf '%s' "$pull" | jq -r '.head.sha // ""')" = "$head" ] \
+    || die "request-review: PR #$num head moved off $head while checking - nothing requested"
+  _fgh "$wsdir" api -X POST "repos/$slug/pulls/$num/requested_reviewers" -f "reviewers[]=$reviewer" >/dev/null 2>&1 \
+    || die "request-review: GitHub refused the request for $reviewer on $slug#$num - verify with: gh api repos/$slug/pulls/$num (requested_reviewers) before retrying"
+
+  # A SUCCESSFUL gh IS NOT PROOF. The authoritative list is requested_reviewers
+  # on the pull object, read back now.
+  local after
+  after="$(_fanout_rr_pull)" && [ -n "$after" ] \
+    || die "request-review: the request was sent but PR #$num could not be read back - NOT verified; check requested_reviewers by hand"
+  printf '%s' "$after" | jq -e --arg r "$lc" 'any(.requested_reviewers[]?; (.login | ascii_downcase) == $r)' >/dev/null 2>&1 \
+    || die "request-review: $reviewer is not attached to PR #$num in requested_reviewers after the request - treat it as NOT requested"
+  local now; now="$(printf '%s' "$after" | jq -r '.head.sha // ""')"
+  if [ "$now" != "$head" ]; then
+    die "request-review: $reviewer was requested on PR #$num, but the head moved from $head to $now meanwhile - the request is not a review of $now and no approval carries to it; GitHub cannot make this atomic, so review the new head before anything lands"
+  fi
+  c_ok "$id: requested $reviewer on $slug#$num for $head (verified in requested_reviewers; a request to look, not an approval and not permission to land)"
+}
+
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 # The role check comes FIRST: the cost of the incident this closes was three
@@ -2514,7 +2655,7 @@ for line in sys.stdin.read().splitlines():
 # `reconcile` is a factory verb like the rest: it rewrites the ledger from what
 # GitHub says, which is the orchestrator's read of the world, not a worker's.
 case "${1:-}" in
-  land|release|collect)
+  land|release|collect|request-review)
     _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
   delegate|scout|spike|reconcile)
     # No id to look a mailbox up by: the second argument here is a repo.
@@ -2530,7 +2671,7 @@ case "${1:-}" in
 esac
 
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review|try|reconcile)
+  delegate|scout|spike|collect|status|release|land|review|request-review|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
@@ -2551,6 +2692,7 @@ case "${1:-}" in
   release)  shift; cmd_release "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
+  request-review) shift; cmd_request_review "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|request-review|handback|land|reconcile ..." ;;
 esac
