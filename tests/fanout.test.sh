@@ -600,12 +600,14 @@ echo "\$*|GH_TOKEN=\${GH_TOKEN-<unset>}" >> "$GH_LOG.env"
 case "\$1 \$2" in
   "auth token") case "\$4" in acct-b) echo tok-b;; *) exit 1;; esac;;
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
+  "pr view")  [ -z "\${STUB_PRVIEW_HOOK:-}" ] || eval "\$STUB_PRVIEW_HOOK"
+              echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","headRefOid":"'"\${STUB_PR_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"'","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
   "pr merge") exit 0;;
   *) echo '{}';;
 esac
 EOF
   chmod +x "$GH_STUB"; export CEL_FANOUT_GH="$GH_STUB" GH_LOG
+  export STUB_PR_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; unset STUB_PRVIEW_HOOK
   # the fixture repo declares a gate, and land now refuses an unverified one:
   # a passing verdict by default, so tests about OTHER refusals still merge
   _fanout_verify_stub true
@@ -1408,14 +1410,17 @@ test_workspace_flag_resolves_the_ledger_from_an_unrelated_cwd() {
   rm -rf "$T"
 }
 
+HA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HB="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+HC="cccccccccccccccccccccccccccccccccccccccc"
 # ---- the review verdict as a ledger fact ------------------------------------
 # On a repo whose PR author and reviewer are one GitHub account, GitHub refuses
 # approval outright and a posted review reads as the owner talking to himself in
 # public. The verdict has to live somewhere; the ledger is where.
 test_review_records_the_verdict_on_the_row() {
-  _fanout_setup
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
   (cd "$T" && "$BIN" delegate widget WG-REV "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-REV approved --by widget-pr-7-review --note "gate green") > /dev/null
+  (cd "$T" && "$BIN" review WG-REV approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
   local r; r="$(jq -c '.[0].review' "$T/.cel/delegations.json")"
   assert_eq "$(printf '%s' "$r" | jq -r .verdict)" approved
   assert_eq "$(printf '%s' "$r" | jq -r .by)" widget-pr-7-review
@@ -1426,7 +1431,7 @@ test_review_records_the_verdict_on_the_row() {
 test_review_refuses_an_unknown_verdict() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-REV2 "$T/spec.md") > /dev/null
-  local out; out="$( (cd "$T" && "$BIN" review WG-REV2 maybe --by r) 2>&1 )" && {
+  local out; out="$( (cd "$T" && "$BIN" review WG-REV2 maybe --head "$HA" --by r) 2>&1 )" && {
     echo "an unknown verdict was recorded"; rm -rf "$T"; return 1; }
   assert_contains "$out" "approved"
   rm -rf "$T"
@@ -1437,7 +1442,7 @@ test_review_refuses_an_unknown_verdict() {
 # the authority.
 test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "gate green") > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )"
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge on a ledger verdict: $out"; rm -rf "$T"; return 1; }
   assert_contains "$out" "ledger"
@@ -1451,7 +1456,7 @@ test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
 # reads in full: a ticket-shaped token it rejects must never get that far.
 test_land_refuses_a_note_the_hygiene_scan_would_reject() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a note the scan rejects"; rm -rf "$T"; return 1; }
   grep -q "^pr merge" "$GH_LOG" && { echo "merged anyway"; rm -rf "$T"; return 1; }
   assert_contains "$out" "ZZQ-$((6*2))"
@@ -1467,20 +1472,131 @@ test_land_says_which_path_approved_it() {
 
 test_land_refuses_a_changes_verdict() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND changes --by widget-pr-7-review) > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by widget-pr-7-review) > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
     echo "landed on a changes-requested verdict"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   assert_contains "$out" "not approved"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
+# ---- AH-261017: the verdict binds to the commit the reviewer NAMED ----------
+# `review` used to stamp whatever the worker's local HEAD was - once an
+# unpushed commit the reviewer never saw. --head is now required, the SHA the
+# reviewer evaluated, and nothing infers it.
+_rev_row() { jq -c '.[0].review // null' "$T/.cel/delegations.json"; }
+
+test_review_records_the_named_head_never_the_local_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # the worker has an UNPUSHED local commit the reviewer never saw
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unpushed
+  local local_head; local_head="$(git -C "$STUB_WT" rev-parse HEAD)"
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r --note ok) > /dev/null
+  local r; r="$(_rev_row)"
+  assert_eq "$(printf '%s' "$r" | jq -r .head)" "$HA"
+  assert_eq "$(printf '%s' "$r" | jq -r .head_source)" explicit
+  [ "$(printf '%s' "$r" | jq -r .head)" != "$local_head" ] || { echo "stamped the local head"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_requires_a_full_commit_sha_and_mutates_nothing() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  local bad out
+  for bad in "" MISSING "${HA:0:7}" "${HA}a" "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" "HEAD" "origin/main"; do
+    for v in approved changes; do
+      if [ "$bad" = MISSING ]; then
+        out="$( (cd "$T" && "$BIN" review WG-LAND $v --by r) 2>&1 )" && { echo "recorded $v without --head"; rm -rf "$T"; return 1; }
+      else
+        out="$( (cd "$T" && "$BIN" review WG-LAND $v --head "$bad" --by r) 2>&1 )" && { echo "recorded $v with head '$bad'"; rm -rf "$T"; return 1; }
+      fi
+      assert_contains "$out" "head"
+      assert_eq "$(_rev_row)" null
+    done
+  done
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_approval_when_the_pr_head_is_not_the_named_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  export STUB_PR_HEAD="$HC"      # the remote advanced past what was reviewed
+  local out; out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r2) 2>&1 )" && {
+    echo "approved a commit that is not the PR head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "head"
+  # and a SHA that was never the PR head at all
+  out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HB" --by r3) 2>&1 )" && {
+    echo "approved an arbitrary sha"; rm -rf "$T"; return 1; }
+  # the earlier record is untouched by either refusal
+  assert_eq "$(_rev_row | jq -r .by)" r
+  assert_eq "$(_rev_row | jq -r .head)" "$HA"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_approval_of_a_pr_the_fleet_does_not_own() {
+  _fanout_land_setup someone-else REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null 2>&1 && {
+    echo "approved a colleague's PR"; rm -rf "$T"; return 1; }
+  assert_eq "$(_rev_row)" null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_when_the_delegation_changes_during_the_remote_check() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # the ledger lock is released around the remote read; a competing writer
+  # re-points the row, and the verdict must not land on the new identity
+  export STUB_PRVIEW_HOOK="jq -c 'map(.branch = \"WG-OTHER\")' '$T/.cel/delegations.json' > '$T/.cel/d.tmp' && mv '$T/.cel/d.tmp' '$T/.cel/delegations.json'"
+  local out; out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) 2>&1 )" && {
+    echo "recorded against a changed delegation"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "changed"
+  assert_eq "$(_rev_row)" null
+  unset STUB_PRVIEW_HOOK CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_changes_verdict_keeps_the_commit_it_names() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  export STUB_PR_HEAD="$HC"      # reviewed HA, remote has since moved: still a valid negative
+  (cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by r) > /dev/null
+  assert_eq "$(_rev_row | jq -r .verdict)" changes
+  assert_eq "$(_rev_row | jq -r .head)" "$HA"
+  assert_eq "$(_rev_row | jq -r .head_source)" explicit
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_refuses_a_legacy_ledger_approval_without_explicit_head() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # a historical record: head came from the local worktree, no head_source
+  jq -c --arg h "$HA" '.[0].review = {verdict:"approved", by:"old", note:"", at:"2026-01-01T00:00:00Z", head:$h}' \
+    "$T/.cel/delegations.json" > "$T/d.tmp" && mv "$T/d.tmp" "$T/.cel/delegations.json"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on a legacy approval"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "explicit"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_refuses_an_explicit_approval_for_a_superseded_head() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  export STUB_PR_HEAD="$HC"      # pushed after the review
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed an unreviewed head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "head"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_status_marks_a_legacy_approval_apart_from_an_attested_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  jq -c '.[0].review = {verdict:"approved", by:"old", head:"x"}' "$T/.cel/delegations.json" > "$T/d.tmp" \
+    && mv "$T/d.tmp" "$T/.cel/delegations.json"
+  assert_contains "$(cd "$T" && "$BIN" status)" " old "
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_status_shows_the_review_column() {
-  _fanout_setup
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
   (cd "$T" && "$BIN" delegate widget WG-RCOL "$T/spec.md") > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" "REVIEW"
-  (cd "$T" && "$BIN" review WG-RCOL approved --by r) > /dev/null
+  (cd "$T" && "$BIN" review WG-RCOL approved --head "$HA" --by r) > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" " ok "
-  (cd "$T" && "$BIN" review WG-RCOL changes --by r) > /dev/null
+  (cd "$T" && "$BIN" review WG-RCOL changes --head "$HA" --by r) > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" " chg "
   rm -rf "$T"
 }
@@ -2649,8 +2765,8 @@ test_collect_does_not_land_pr_none_branch_with_zero_commits() {
 test_review_records_the_head_it_reviewed() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-RH "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-RH changes --by widget-pr-7-review) > /dev/null
-  assert_eq "$(jq -r '.[0].review.head' "$T/.cel/delegations.json")" "$(git -C "$STUB_WT" rev-parse HEAD)"
+  (cd "$T" && "$BIN" review WG-RH changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  assert_eq "$(jq -r '.[0].review.head' "$T/.cel/delegations.json")" "$HA"
   rm -rf "$T"
 }
 
@@ -2671,7 +2787,7 @@ test_handback_to_a_live_worker_goes_by_inbox_never_by_typing() {
 test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-HB2 "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-HB2 changes --by widget-pr-7-review) > /dev/null
+  (cd "$T" && "$BIN" review WG-HB2 changes --head "$HA" --by widget-pr-7-review) > /dev/null
   local spec; spec="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
   git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
   git -C "$T/repos/widget" worktree add -q -b WG-HB2 "$T/wt-hb2" 2>/dev/null || true
