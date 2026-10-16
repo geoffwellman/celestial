@@ -180,6 +180,22 @@ Products and the review verdict
   authority — and writes `Reviewed-by: <by> (<verdict>)` into the squash-merge
   body so the record is public in the log.
 
+- `cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <login>] [--dry-run]`
+  is the one supported way to request the external GitHub reviewer named by
+  `policy.reviewer` (raw `gh pr edit --add-reviewer` stays guard-refused). It
+  acts as the workspace's `github.user` and refuses, before any write, unless:
+  `--head` is a full sha; the ledger review is `approved`, has
+  `head_source: explicit` and covers exactly that head; the PR is this fleet's
+  own open, non-draft, same-repo PR for the delegation's branch; and both the
+  PR head and the remote branch ref equal `--head`. `--reviewer` may only
+  restate the configured reviewer. It adds that one reviewer (nothing else is
+  written - not the ledger, labels, base or markers), then reads
+  `requested_reviewers` back; a pending request or a review of this exact head
+  is left alone. GitHub cannot head-compare-and-set a request, so a head that
+  moves during the call is reported as a failure and the request is *not* an
+  approval of the new head. It never grants permission to land. Orchestrator
+  verb: workers are refused. `--dry-run` runs every check and requests nothing.
+
 Rules
 - ≤ the product's worker cap concurrent delegations (`cel-fanout status` shows
   the running count per product).
