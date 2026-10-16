@@ -2758,34 +2758,48 @@ _replace_check_content() { # <repodir> <original-sha> <target-sha> -> reason on 
     || { printf 'the original and the candidate must both descend from %s' "$base"; return 1; }
   [ "$("${G[@]}" rev-list --count "$base..$th" 2>/dev/null)" -gt 0 ] \
     || { printf 'the candidate carries no commit beyond %s' "$base"; return 1; }
-  # every commit that would be published, not only the final tree
-  local -a hist=()
+  # EVERY git READ HERE MUST BE ABLE TO FAIL THE CHECK. A listing that errors
+  # inside a pipe or a process substitution reads as "no paths" and would pass
+  # an unchecked candidate, so each list goes to a file with its own status.
+  local tmp rc; tmp="$(mktemp -d)" || { printf 'cannot create a scratch directory'; return 1; }
+  local commits; commits="$("${G[@]}" rev-list "$base..$th" 2>/dev/null)" \
+    || { rm -rf "$tmp"; printf 'cannot list the commits that would be published'; return 1; }
   while read -r c; do
     [ -n "$c" ] || continue
-    p="$("${G[@]}" diff-tree -z -r -m --root --no-commit-id --name-only "$c" 2>/dev/null | _replace_sensitive | tr '\0' '\n')" \
-      || { printf 'cannot read commit %s' "$c"; return 1; }
-    [ -z "$p" ] || { printf 'ancestry is not clean: private artifact %s is in the history that would be published (commit %s)' "${p%%$'\n'*}" "${c:0:12}"; return 1; }
-  done < <("${G[@]}" rev-list "$base..$th")
+    "${G[@]}" diff-tree -z -r -m --root --no-commit-id --name-only "$c" > "$tmp/h" 2>/dev/null \
+      && _replace_sensitive < "$tmp/h" > "$tmp/hs" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read commit %s' "$c"; return 1; }
+    if [ -s "$tmp/hs" ]; then
+      p="$(tr '\0' '\n' < "$tmp/hs")"
+      rm -rf "$tmp"; printf 'ancestry is not clean: private artifact %s is in the history that would be published (commit %s)' "${p%%$'\n'*}" "${c:0:12}"; return 1
+    fi
+  done <<< "$commits"
   local -a paths=() sens=() l1=() l2=()
-  mapfile -d '' -t l1 < <("${G[@]}" diff -z --name-only --no-renames "$obase" "$oh")
-  mapfile -d '' -t l2 < <("${G[@]}" diff -z --name-only --no-renames "$tbase" "$th")
+  { "${G[@]}" diff -z --name-only --no-renames "$obase" "$oh" > "$tmp/l1" && "${G[@]}" diff -z --name-only --no-renames "$tbase" "$th" > "$tmp/l2"; } 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot list the changed paths'; return 1; }
+  mapfile -d '' -t l1 < "$tmp/l1"; mapfile -d '' -t l2 < "$tmp/l2"
   local -A seen=()
   for p in "${l1[@]}" "${l2[@]}"; do
-    case "$p" in *$'\n'*) printf 'a path contains a newline and cannot be compared safely'; return 1 ;; esac
+    case "$p" in *$'\n'*) rm -rf "$tmp"; printf 'a path contains a newline and cannot be compared safely'; return 1 ;; esac
     [ -n "$p" ] && [ -z "${seen[$p]:-}" ] && { seen["$p"]=1; paths+=("$p"); }
   done
   local -A is_sens=()
-  mapfile -d '' -t sens < <(printf '%s\0' "${paths[@]}" | _replace_sensitive)
+  printf '%s\0' "${paths[@]}" | _replace_sensitive > "$tmp/s" 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot classify the changed paths'; return 1; }
+  mapfile -d '' -t sens < "$tmp/s"
   for p in "${sens[@]}"; do is_sens["$p"]=1; done
   for p in "${paths[@]}"; do
     [ -n "$p" ] || continue
-    so="$("${G[@]}" ls-tree -z "$oh" -- "$p" 2>/dev/null | tr '\0' '\n')"; st="$("${G[@]}" ls-tree -z "$th" -- "$p" 2>/dev/null | tr '\0' '\n')"
+    "${G[@]}" ls-tree -z "$oh" -- "$p" > "$tmp/o" 2>/dev/null && "${G[@]}" ls-tree -z "$th" -- "$p" > "$tmp/t" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read %s from the trees' "$p"; return 1; }
+    so="$(tr '\0' '\n' < "$tmp/o")"; st="$(tr '\0' '\n' < "$tmp/t")"
     if [ -n "${is_sens[$p]:-}" ]; then
-      [ -z "$st" ] || { printf 'private artifact %s is still in the candidate tree' "$p"; return 1; }
+      [ -z "$st" ] || { rm -rf "$tmp"; printf 'private artifact %s is still in the candidate tree' "$p"; return 1; }
       continue
     fi
-    [ "$so" = "$st" ] || { printf 'the candidate changes %s, which is not a private artifact - only artifact removal may differ from the frozen original %s' "$p" "${oh:0:12}"; return 1; }
+    [ "$so" = "$st" ] || { rm -rf "$tmp"; printf 'the candidate changes %s, which is not a private artifact - only artifact removal may differ from the frozen original %s' "$p" "${oh:0:12}"; return 1; }
   done
+  rm -rf "$tmp"
   return 0
 }
 

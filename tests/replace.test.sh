@@ -548,3 +548,21 @@ test_replace_a_path_with_a_newline_is_refused_not_misread() {
   _reserve; _rp_refused "newline" || return 1
   rm -rf "$T"
 }
+
+# A git read that FAILS must refuse the replacement, never read as "no paths".
+# The shim fails exactly one subcommand of the content check; everything else
+# is the real git, so only that read is broken.
+test_replace_a_failing_git_read_in_the_content_check_refuses_instead_of_passing() {
+  _rp_setup
+  local real; real="$(command -v git)"; mkdir -p "$T/bin"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" ${SHIM_FAIL:-NONE} "*) exit 128;; esac\nexec %s "$@"\n' "$real" > "$T/bin/git"
+  chmod +x "$T/bin/git"
+  local sub
+  for sub in diff diff-tree ls-tree; do
+    RC=0; OUT="$(cd "$T" && PATH="$T/bin:$PATH" SHIM_FAIL="$sub" "$BIN" "$(_reserve_args | head -1)" $(_reserve_args | tail -n +2 | tr '\n' ' ') 2>&1)" || RC=$?
+    _rp_refused "cannot" || { echo "git $sub failure did not refuse"; return 1; }
+  done
+  # control: unbroken git still reserves
+  _reserve; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  rm -rf "$T"
+}
