@@ -26,7 +26,7 @@ case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  if [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
-  "pane get")        echo '{"result":{"pane":{"pane_id":"'"$3"'","tab_id":"wZ:t1"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
   "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
@@ -1315,6 +1315,7 @@ case "$1 $2" in
       {"workspace_id":"wG","worktree":{"repo_root":"'"$STUB_REPO_GADGET"'","is_linked_worktree":false}},
       {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "pane list")       printf '%s' "${STUB_PANES_JSON:-{\"result\":{\"panes\":[]}}}";;
   "agent list")      echo '{"result":{"agents":[]}}';;
   *) echo '{}';;
@@ -2822,5 +2823,33 @@ test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
   assert_eq "$(jq -r '.[0].spec' "$T/.cel/delegations.json")" "$spec"
   assert_contains "$(find "$T/inbox" -type f -exec cat {} + 2>/dev/null)" "fix line 3"
+  rm -rf "$T"
+}
+
+# AH-261017: delegate has its own launch (pane run, send-text, agent start); it
+# takes the same readiness gate as `cel run` and never retries a refused start.
+test_delegate_types_nothing_and_starts_nothing_in_a_pane_whose_shell_is_busy() {
+  _fanout_setup
+  export PF_ALWAYS=busy CEL_PANE_READY_MS=100 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  local out rc=0
+  out="$(cd "$T" && "$BIN" delegate widget WG-BUSY "$T/spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "delegate launched into a busy pane"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "shell does not own the foreground"
+  assert_eq "$(grep -c '^pane run\|^pane send-text\|^agent start' "$STUB_LOG" || true)" 0
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json" 2>/dev/null || echo 0)" 0
+  unset PF_ALWAYS; rm -rf "$T"
+}
+test_delegate_does_not_retry_a_refused_agent_start() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  local out rc=0
+  # the stub refuses the start like herdr's agent_pane_busy
+  sed -i 's|^  "agent start")|  "agent start") if [ -n "${STUB_START_FAIL:-}" ]; then echo "agent_pane_busy" >\&2; exit 1; fi|' "$STUB"
+  out="$(cd "$T" && STUB_START_FAIL=1 "$BIN" delegate widget WG-REFUSED "$T/spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a refused start was reported as a launch"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_eq "$(grep -c '^agent start' "$STUB_LOG" || true)" 1
+  assert_eq "$(grep -c '^pane send-keys' "$STUB_LOG" || true)" 0
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json" 2>/dev/null || echo 0)" 0
   rm -rf "$T"
 }
