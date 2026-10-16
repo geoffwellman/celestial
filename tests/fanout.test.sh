@@ -797,6 +797,10 @@ EOF
   assert_eq "$worker_env" "scout-test-api-key|$worker_alias"
   assert_contains "$worker_start" "--model ompgw-claude/claude-opus-5-5"
   assert_eq "$model_key" '$OMP_GATEWAY_TOKEN'
+  # The pane must load the models.json the launcher just wrote: the caller's
+  # PI_CODING_AGENT_DIR is carried into the target pane's launch prefix.
+  local pane_dir; pane_dir="$(env -u PI_CODING_AGENT_DIR bash -c "$(cat "$STUB_PREFIX_FILE") printf '%s' \"\${PI_CODING_AGENT_DIR:-}\"")"
+  assert_eq "$pane_dir" "$gwt/pi"
   rm -rf "$T" "$gwt"
   unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_NO_QUOTA_PROBE
   unset STUB_PREFIX_FILE STUB_AGENT_ENV_FILE
