@@ -466,8 +466,10 @@ round trips do not wait for someone to type. `review.runtime` stays in the
 workspace schema for compatibility but no longer selects the reviewer
 runtime; `review.model` selects the requested Claude model. A reviewer delivers
 one verdict per round and **records it in the delegation ledger** — `cel-fanout
-review <id> approved|changes --by <alias>` — which is where a review exists;
-`cel-fanout land` accepts that verdict on repos where the PR author and the
+review <id> approved|changes --head <sha> --by <alias>` — which is where a review exists,
+bound to the exact commit the reviewer names (`--head`, 40 characters, required);
+`cel-fanout land` accepts that verdict, only for the PR's current head and only
+when recorded with an explicit head, on repos where the PR author and the
 reviewer share one GitHub account, and GitHub approval remains the authority
 where they do not. `review.post: github` opts a repo into posting the review
 to GitHub as well, for reviewers that have an identity of their own; the
@@ -585,8 +587,8 @@ alpha - work history            7 days, 41 events
 
 **The stage is computed in code**, first match wins, and the order is the
 factory's own sequence: `released`, `merged`, `landing` (PR approved AND
-green - approved by GitHub or by the ledger verdict `cel-fanout review`
-records, green meaning no red check and a passed gate verdict, else passing
+green - approved by GitHub or by the explicit-head ledger verdict `cel-fanout review`
+records for the PR's current head, green meaning no red check and a passed gate verdict, else passing
 checks: the same evidence `cel-fanout land` consumes), `review` (a PR is open), `building` (a worker holds it — including
 `unconfirmed`, a dispatch whose prompt was never accepted), `ready` (a
 start-able ticket nobody has started), `backlog`. A gate that timed out or

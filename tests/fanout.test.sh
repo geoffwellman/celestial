@@ -1419,8 +1419,7 @@ HC="cccccccccccccccccccccccccccccccccccccccc"
 # public. The verdict has to live somewhere; the ledger is where.
 test_review_records_the_verdict_on_the_row() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" delegate widget WG-REV "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-REV approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
   local r; r="$(jq -c '.[0].review' "$T/.cel/delegations.json")"
   assert_eq "$(printf '%s' "$r" | jq -r .verdict)" approved
   assert_eq "$(printf '%s' "$r" | jq -r .by)" widget-pr-7-review

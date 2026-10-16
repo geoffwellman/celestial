@@ -172,8 +172,12 @@ Products and the review verdict
 - `--workspace <name>` on `delegate`, `scout`, `spike`, `status`, `collect`,
   `release`, `land` resolves the workspace from the registry instead of the
   cwd — for driving a fleet from outside its tree.
-- `cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note …]`
-  records the verdict on the ledger row; `status` shows it in the REVIEW
+- `cel-fanout review <id> <approved|changes> --head <full-sha> --by <reviewer-alias> [--note …]`
+  records the verdict on the ledger row, bound to the 40-character commit the
+  reviewer names in `--head` (never inferred from a worktree; an `approved`
+  must equal the PR's current remote head on a PR this fleet owns, else nothing
+  is recorded; `head_source: explicit` marks such records, and an older record
+  without it no longer satisfies `land`); `status` shows it in the REVIEW
   column. On a repo whose PR author and reviewer are one GitHub account,
   GitHub refuses approval outright, so `land` accepts an `approved` ledger
   verdict **only there** — everywhere else GitHub's decision remains the
