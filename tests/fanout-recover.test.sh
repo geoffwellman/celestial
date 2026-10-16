@@ -59,7 +59,7 @@ EOF
   printf 'ctx 0.0%%\n' > "$RS/read.txt"
   printf '● reading the spec now\n' > "$RS/turn.txt"
   : > "$RS/log"
-  _rc_proc 5001 5000 777777 worker "$T" "$RC_ALIAS" "--model some-model"
+  _rc_proc 5001 5000 777777 worker "$T" "$RC_ALIAS" "--model some-model --thinking xhigh"
 }
 
 # a fake /proc entry. The environment carries a fake credential on purpose:
@@ -160,10 +160,10 @@ test_register_refuses_every_changed_or_foreign_identity_with_zero_mutation() {
       shell)     _rc_register shell=4999; local needle="shell is not pid" ;;
       agentpid)  _rc_register agent=5002; local needle="not in the pane's foreground" ;;
       start)     _rc_register start=777778; local needle="different start generation" ;;
-      env_ws)    _rc_proc 5001 5000 777777 worker /somewhere/else "$RC_ALIAS" "--model some-model"; _rc_register; local needle="another workspace" ;;
-      env_role)  _rc_proc 5001 5000 777777 console "$T" "$RC_ALIAS" "--model some-model"; _rc_register; local needle="CEL_ROLE=worker" ;;
-      inbox)     _rc_proc 5001 5000 777777 worker "$T" "widget-wg-1-recov" "--model some-model"; _rc_register; local needle="canonical" ;;
-      model)     _rc_proc 5001 5000 777777 worker "$T" "$RC_ALIAS" "--model other-model"; _rc_register; local needle="wrong model/profile" ;;
+      env_ws)    _rc_proc 5001 5000 777777 worker /somewhere/else "$RC_ALIAS" "--model some-model --thinking xhigh"; _rc_register; local needle="another workspace" ;;
+      env_role)  _rc_proc 5001 5000 777777 console "$T" "$RC_ALIAS" "--model some-model --thinking xhigh"; _rc_register; local needle="CEL_ROLE=worker" ;;
+      inbox)     _rc_proc 5001 5000 777777 worker "$T" "widget-wg-1-recov" "--model some-model --thinking xhigh"; _rc_register; local needle="canonical" ;;
+      model)     _rc_proc 5001 5000 777777 worker "$T" "$RC_ALIAS" "--model other-model --thinking xhigh"; _rc_register; local needle="wrong model/profile" ;;
       profile)   _rc_register profile=swap; local needle="wrong profile" ;;
       status)    jq '.result.agents[0].agent_status = "working"' "$RS/agents.json" > "$RS/a2" && mv "$RS/a2" "$RS/agents.json"; _rc_register; local needle="not idle" ;;
       two_agents) jq '.result.agents += [.result.agents[0]]' "$RS/agents.json" > "$RS/a2" && mv "$RS/a2" "$RS/agents.json"; _rc_register; local needle="exactly one agent" ;;
@@ -370,7 +370,7 @@ test_status_collect_release_and_reconcile_leave_an_unresolved_recovery_alone() {
   local out rc=0
   out="$(cd "$T" && "$BIN" release WG-1-recover --discard 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "released an unresolved recovery"; return 1; }
-  assert_contains "$out" "recovered launch whose dispatch is unresolved"
+  assert_contains "$out" "UNSETTLED launch"
   rc=0; out="$(cd "$T" && "$BIN" collect WG-1-recover 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "collected an unresolved recovery"; return 1; }
   [ -d "$RC_WT" ] || { echo "the worktree went"; return 1; }
@@ -472,7 +472,7 @@ test_continue_refuses_when_the_pane_acquired_a_turn_after_registration() {
   printf '● something ran\nctx 3.0%%\n' > "$RS/read.txt"
   local before; before="$(_rc_ledger)"
   _rc_continue
-  _rc_refused_untouched "$before" "not provably unstarted" || { _rc_cleanup; return 1; }
+  _rc_refused_untouched "$before" "no longer provably unstarted" || { _rc_cleanup; return 1; }
   _rc_cleanup
 }
 

@@ -725,7 +725,7 @@ cmd_delegate() {
   wcap="${wcap:-4}"
   local prepos; prepos="$(ws_product_repos "$wsdir" "$product" | jq -R . | jq -sc .)"
   wused="$(_ledger_read "$wsdir" | jq --argjson rs "$prepos" \
-    '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+    '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))))] | length')"
   if [ "$wused" -ge "$wcap" ]; then
     die "delegate: $product already has $wused running worker(s), cap is $wcap.
   Free a slot first - a finished worker still holds one until it is collected:
@@ -1055,16 +1055,28 @@ cmd_delegate() {
       profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
       provider:$provider, shape:$shape, profile_reason:$because,
       launch:{phase:"starting", at:$created}}')"
-  _ledger_append "$wsdir" "$entry"
+  # --reuse of an EXISTING row (a stopped agent resumed in place, e.g. by
+  # `handback`) must not replace it before the start succeeds: the old row
+  # carries the review verdict and PR the revision round depends on. It is only
+  # marked, and replaced - as before - once the new agent actually exists.
+  local prior_row=""
+  [ "$reuse" -ne 1 ] || prior_row="$(_ledger_entry "$wsdir" "$branch")"
+  if [ -n "$prior_row" ]; then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"starting", at:$at}' --arg at "$(_now_iso)"
+  else
+    _ledger_append "$wsdir" "$entry"
+  fi
   local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   # Where the branch started, so a `pr: none` collect can tell "pushed to
   # main" from "never committed" - both leave nothing ahead of origin/main.
-  [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  [ -n "$prior_row" ] || [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
   if ! ( _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}" ); then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"start-failed", at:$at, note:"herdr agent start failed or timed out - an agent may still exist in the pane; the row is kept, not rolled back"}' --arg at "$(_now_iso)"
-    die "delegate: $branch: herdr agent start did not complete - the ledger row is kept as 'unconfirmed' (launch.phase start-failed), the worktree and pane are untouched. An agent may exist in $pane: inspect it, never start a second one on top (cel-fanout recover)"
+    die "delegate: $branch: herdr agent start did not complete - the ledger row is kept (launch.phase start-failed; $([ -n "$prior_row" ] && echo "its earlier verdict and PR are intact" || echo "state unconfirmed")), the worktree and pane are untouched. An agent may exist in $pane: inspect it and never start a second one on top. There is no automatic continuation for this row; once you have looked, cel-fanout recover abandon $branch --reason '<what you found>' records it"
   fi
-  _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
+  if [ -z "$prior_row" ]; then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
+  fi
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
   # its rebase had eaten its own commit, and a branch that sat unlanded for two
@@ -1114,11 +1126,19 @@ cmd_delegate() {
     c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' and the worktree is intact. Re-prompt with: herdr agent prompt $alias \"<the spec>\""
   fi
 
-  _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
-    --arg ok "$([ "$dstate" = running ] && echo 1 || echo 0)" --arg at "$(_now_iso)"
-  # In Progress only when the dispatch was accepted: the row moves
-  # unconfirmed -> running as a recorded transition.
-  [ "$dstate" != running ] || _ledger_update_state "$wsdir" "$branch" running
+  if [ -n "$prior_row" ]; then
+    # the resumed agent exists: the row is replaced exactly as it always was
+    entry="$(printf '%s' "$entry" | jq -c --arg s "$dstate" --arg at "$(_now_iso)" \
+      '.state = $s | .launch = {phase:(if $s == "running" then "dispatched" else "dispatch-unconfirmed" end), at:$at}')"
+    _ledger_append "$wsdir" "$entry"
+    [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  else
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
+      --arg ok "$([ "$dstate" = running ] && echo 1 || echo 0)" --arg at "$(_now_iso)"
+    # In Progress only when the dispatch was accepted: the row moves
+    # unconfirmed -> running as a recorded transition.
+    [ "$dstate" != running ] || _ledger_update_state "$wsdir" "$branch" running
+  fi
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
@@ -1215,8 +1235,7 @@ cmd_collect() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
-  local unres; unres="$(_rec_unresolved "$entry")"
-  [ -z "$unres" ] || die "collect: $id is a recovered launch whose dispatch is unresolved (phase $unres) - nothing to collect yet. Settle it with: cel-fanout recover continue $id"
+  _rec_guard collect "$id" "$entry"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
   alias="$(printf '%s' "$entry" | jq -r '.alias')"
@@ -1595,7 +1614,7 @@ _fanout_slots() { # <wsdir>
     label="$p"
     [ "$n" -le 1 ] || label="$p ($(ws_product_repos "$1" "$p" | paste -sd, - | sed 's/,/, /g'))"
     used="$(_ledger_read "$1" | jq --argjson rs "$repos" \
-      '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+      '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))))] | length')"
     printf 'slots %-28s %s/%s used' "$label" "$used" "$cap"
     if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
     else printf ' - %s free\n' "$(( cap - used ))"; fi
@@ -2089,6 +2108,9 @@ cmd_release() {
     local rid n=0 failed=0
     while IFS= read -r rid; do
       [ -n "$rid" ] || continue
+      if [ -n "$(_rec_unresolved "$(_ledger_entry "$wsdir" "$rid")")" ]; then
+        c_warn "release --all: $rid skipped - an unsettled launch holds a live agent (cel-fanout recover abandon $rid --reason ...)"; continue
+      fi
       if ( cmd_release "$rid" ${rest[@]+"${rest[@]}"} ); then n=$((n + 1))
       else failed=$((failed + 1)); c_warn "release --all: $rid failed - see above"; fi
     done <<< "$take"
@@ -2114,8 +2136,7 @@ cmd_release() {
   # A RECOVERED LAUNCH WHOSE TASK IS NOT SETTLED holds a live idle agent: no
   # release, not even --discard, until it is accepted (or the operator has
   # resolved it by hand and the row says so).
-  local unres; unres="$(_rec_unresolved "$entry")"
-  [ -z "$unres" ] || die "release: $id is a recovered launch whose dispatch is unresolved (phase $unres) - its agent is preserved. Settle it with: cel-fanout recover continue $id"
+  _rec_guard release "$id" "$entry"
 
   # A preview of this branch goes first: its pane is cwd'd into the worktree
   # about to be removed, and a dev server left running there holds ports for a
@@ -2266,6 +2287,7 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "review: no delegation with id '$id'"
+  [ "$verdict" != approved ] || _rec_guard review "$id" "$entry"
 
   if [ "$verdict" = approved ]; then
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
@@ -2329,6 +2351,7 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local row; row="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$row" ] || die "handback: no delegation with id '$id'"
+  _rec_guard handback "$id" "$row"
   local alias repo branch ws
   alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
   repo="$(printf '%s' "$row" | jq -r '.repo // ""')"
@@ -2405,6 +2428,7 @@ cmd_land() { # <id>
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
+  _rec_guard land "$id" "$entry"
   local repo branch slug ticket
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
   ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
@@ -2608,6 +2632,7 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "request-review: no delegation with id '$id'"
+  _rec_guard request-review "$id" "$entry"
 
   # THE POLICY: the configured reviewer, and only it. --reviewer can pick that
   # identity out, never widen it.
@@ -2748,7 +2773,7 @@ esac
 # WITHOUT waiting: a held lock means another delegate or ledger transition is
 # in flight, which is exactly what recovery must not race. `inspect` is read-only.
 case "${1:-}:${2:-}" in
-  recover:register|recover:continue)
+  recover:register|recover:continue|recover:abandon)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"

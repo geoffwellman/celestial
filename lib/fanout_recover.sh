@@ -64,10 +64,32 @@ _rec_env_get() { # <pid> <NAME>
   [ -r "$f" ] || return 0
   tr '\0' '\n' < "$f" 2>/dev/null | grep -m1 "^$2=" | cut -d= -f2- || true
 }
-_rec_cmdline_has() { # <pid> <substring>
-  local f; f="$(_rec_proc)/$1/cmdline"
+# EXACT argv elements, never a substring (gpt-5 must not match gpt-5.5):
+# `--model <id>` or `--model=<id>` as the launch line spells it.
+_rec_cmdline_model_is() { # <pid> <model>
+  local f prev="" a; f="$(_rec_proc)/$1/cmdline"
   [ -r "$f" ] || return 1
-  tr '\0' '\n' < "$f" 2>/dev/null | grep -Fq -- "$2"
+  while IFS= read -r -d '' a; do
+    if [ "$prev" = --model ] && [ "$a" = "$2" ]; then return 0; fi
+    [ "$a" != "--model=$2" ] || return 0
+    prev="$a"
+  done < "$f"
+  return 1
+}
+# Every argument the profile's launch contributes (model AND thinking level)
+# must be a whole argv element of the live process, in the same order.
+_rec_cmdline_has_args() { # <pid> <args...>
+  local f; f="$(_rec_proc)/$1/cmdline"; shift
+  [ -r "$f" ] || return 1
+  local -a argv=(); local a
+  while IFS= read -r -d '' a; do argv+=("$a"); done < "$f"
+  local want i=0
+  for want in "$@"; do
+    while [ "$i" -lt "${#argv[@]}" ] && [ "${argv[$i]}" != "$want" ]; do i=$((i + 1)); done
+    [ "$i" -lt "${#argv[@]}" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
 }
 
 # Is something that could still complete the ORIGINAL launch running? A live
@@ -239,6 +261,10 @@ cmd_recover_register() {
   printf '%s' "$j" | jq -e '.agent.launch_pending == true' >/dev/null \
     || die "recover register: herdr does not report a pending launch for $alias - this verb recovers only a worker whose launch herdr still shows as unconfirmed; a started worker of unknown history is not adopted"
 
+  # no task may already have run: the pane must be unstarted (a turn already on
+  # screen would later be mistaken for evidence of OUR task)
+  _rec_pane_unstarted "$alias" || die "recover register: the agent's pane is not provably unstarted (unreadable, a turn already on screen, or context above zero) - refusing; nothing changed"
+
   # the process: same generation, same parent, the workspace's own environment
   [ "$(_rec_stat_field "$agent_pid" start)" = "$agent_start" ] || die "recover register: pid $agent_pid has a different start generation than --agent-start $agent_start (pid reused or restarted) - refusing; nothing changed"
   [ "$(_rec_stat_field "$agent_pid" ppid)" = "$shell_pid" ] || die "recover register: pid $agent_pid is not a child of shell $shell_pid - refusing; nothing changed"
@@ -250,12 +276,18 @@ cmd_recover_register() {
     [ "$(_rec_env_get "$agent_pid" CEL_INBOX_ME)" = "$alias" ] \
       || die "recover register: the agent's inbox identity is not the canonical '$alias' - refusing; nothing changed"
   fi
-  _rec_cmdline_has "$agent_pid" "$model" || die "recover register: the agent was not launched with model '$model' (profile '$profile') - wrong model/profile; refusing, nothing changed"
+  _rec_cmdline_model_is "$agent_pid" "$model" || die "recover register: the agent was not launched with exactly model '$model' (profile '$profile') - wrong model/profile; refusing, nothing changed"
+  local -a PROFILE_ARGS=()
+  profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
+  if [ "${#PROFILE_ARGS[@]}" -gt 0 ]; then
+    _rec_cmdline_has_args "$agent_pid" "${PROFILE_ARGS[@]}" \
+      || die "recover register: the agent's launch arguments do not carry the profile's model and thinking level - wrong model/profile; refusing, nothing changed"
+  fi
 
   # the worktree: where, on which branch, at what head
   local wt
   wt="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
-    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
+    | awk -v b="refs/heads/$branch" '/^worktree /{p=substr($0,10)} /^branch /{if (substr($0,8)==b) {print p; exit}}')"
   [ -n "$wt" ] && [ -d "$wt" ] || die "recover register: no worktree for branch '$branch' in $repo - refusing; nothing changed"
   [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$branch" ] || die "recover register: $wt is not on branch '$branch' - refusing; nothing changed"
   local head; head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || die "recover register: cannot read the worktree head - refusing"
@@ -318,6 +350,14 @@ _rec_accepted() { # <alias> <tries>
   return 1
 }
 
+# Provably unstarted: readable text, context at zero, no assistant turn.
+_rec_pane_unstarted() { # <alias>
+  local text; text="$("$HERDR" agent read "$1" --source recent-unwrapped --lines 40 2>/dev/null || true)"
+  [ -n "$text" ] || return 1
+  _liveness_has_turn "$text" && return 1
+  _liveness_context_zero "$text"
+}
+
 _rec_set_phase() { # <wsdir> <id> <phase> [note]
   _ledger_patch "$1" "$2" '.recovery.dispatch = ((.recovery.dispatch // {}) + {phase:$ph, at:$at, note:$note})' \
     --arg ph "$3" --arg at "$(_now_iso)" --arg note "${4:-}"
@@ -357,7 +397,11 @@ cmd_recover_continue() { # <id> [--workspace NAME]
       c_ok "$id: the task was already accepted - nothing sent"; return 0 ;;
     submitting|ambiguous|unconfirmed-acceptance)
       # A prompt MAY have been delivered. Never resubmit: only look, once.
-      if _rec_accepted "$alias" "$tries"; then
+      local seen=0
+      _ledger_unlock                      # no lock across the bounded evidence wait
+      _rec_accepted "$alias" "$tries" && seen=1
+      _ledger_relock
+      if [ "$seen" -eq 1 ]; then
         _rec_mark_accepted "$wsdir" "$id" "$ticket" "$shape"
         c_ok "$id: task evidence seen - accepted and recorded running; nothing was sent now"
         return 0
@@ -385,8 +429,10 @@ cmd_recover_continue() { # <id> [--workspace NAME]
   [ "$(printf '%s' "$j" | jq -r '.agent.agent_status // ""')" = idle ] \
     || die "recover continue: $id: herdr does not report the agent idle - refusing; nothing sent"
   if printf '%s' "$j" | jq -e '(.agent.launch_pending == true) or ((.agent.interactive_ready // false) != true)' >/dev/null; then
-    die "recover continue: $id: herdr 0.9.1 still reports this agent launch_pending / not interactive_ready, and exposes no supported call that completes or clears a pending launch. Sending the task now would be a guess, and Enter / report-agent / a pending reset are forbidden. UPSTREAM PREREQUISITE: a herdr surface that confirms (or finishes) the pending launch. The row is registered and unchanged; nothing was sent, no task is claimed"
+    die "recover continue: $id: herdr 0.9.1 still reports this agent launch_pending / not interactive_ready. Its 104-method API (agent.start/prompt/wait/explain/rename, pane.report_agent/report_agent_session/clear_agent_authority/release_agent) has NO call that completes, adopts or re-attaches an in-flight agent start, or says why it is pending; the only things that would change pending (report-agent, release-agent, Enter) are forbidden. UPSTREAM PREREQUISITE: a herdr method that completes or re-attaches an in-flight agent start, or reports why it is pending. THIS WORKER IS NOT RESUMED: the row is registered and unchanged, nothing was sent, no task is claimed"
   fi
+
+  _rec_pane_unstarted "$alias" || die "recover continue: $id: the pane is no longer provably unstarted (a turn or context is already on screen) - an execution there could not be told from ours; refusing, nothing sent"
 
   local product orch_mailbox ws_sel check_base prompt
   product="$(ws_product_of_repo "$wsdir" "$repo")"
@@ -404,7 +450,7 @@ cmd_recover_continue() { # <id> [--workspace NAME]
   # no lock across the prompt and the wait for evidence
   _ledger_unlock
   local err rc=0
-  err="$("$HERDR" agent prompt "$alias" "$prompt" 2>&1 >/dev/null)" || rc=$?
+  err="$("$HERDR" agent prompt "$alias" "$prompt" 2>&1)" || rc=$?
   _rec_crash_point after-prompt
   if [ "$rc" -ne 0 ]; then
     _ledger_relock
@@ -433,13 +479,49 @@ cmd_recover_continue() { # <id> [--workspace NAME]
 
 # --- the consumers' view ----------------------------------------------------
 
-# A recovered launch whose dispatch is not settled must not be collected,
-# released or garbage-collected out from under a live agent. Prints the phase
-# when the row is unresolved, nothing otherwise.
+# A launch that may hold a LIVE agent and is not settled: a recovered row whose
+# dispatch is not accepted, or a delegate's receipt row still at starting /
+# start-failed / started. Only rows still `unconfirmed` (or `running`) count -
+# once an operator has abandoned or landed a row nothing here fences it, and
+# `recover abandon` is the way out. Prints why, nothing when settled.
 _rec_unresolved() { # <row-json>
-  printf '%s' "$1" | jq -r 'select(.recovery != null)
-    | (.recovery.dispatch.phase // "registered") as $p
-    | select($p != "accepted") | $p'
+  [ -n "$1" ] || return 0
+  printf '%s' "$1" | jq -r 'select((.state // "") | IN("unconfirmed","running"))
+    | if .recovery != null then ((.recovery.dispatch.phase // "registered") | select(. != "accepted"))
+      elif ((.launch.phase // "") | IN("starting","start-failed","started")) then ("launch " + .launch.phase)
+      else empty end'
+}
+_rec_guard() { # <verb> <id> <row-json>
+  local why; why="$(_rec_unresolved "$3")"
+  [ -z "$why" ] || die "$1: $2 holds an UNSETTLED launch ($why) - a live agent may be in its pane and no task is proven. Nothing was changed. cel-fanout recover continue $2 (a recovered row), or look at the pane and record the outcome with: cel-fanout recover abandon $2 --reason '<what you found>'"
+}
+
+# The bounded way out for a row that must not be continued: records the
+# operator's decision and the evidence, moves the row to `abandoned`, and
+# touches nothing else - the agent, pane and worktree are left exactly as found.
+cmd_recover_abandon() { # <id> --reason TEXT [--workspace NAME]
+  [ $# -ge 1 ] || die "usage: cel-fanout recover abandon <id> --reason TEXT [--workspace NAME]"
+  local id="$1"; shift
+  local ws_opt="" reason=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) ws_opt="$2"; shift 2 ;;
+      --reason)    reason="$2"; shift 2 ;;
+      *) die "recover abandon: unknown argument: $1" ;;
+    esac
+  done
+  [ -n "$reason" ] || die "recover abandon: --reason is required - say what you found"
+  [ "${#reason}" -le 400 ] || die "recover abandon: --reason is at most 400 characters"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "recover abandon: no delegation with id '$id'"
+  [ "$(printf '%s' "$row" | jq -r '.state // ""')" = unconfirmed ] \
+    || die "recover abandon: $id is '$(printf '%s' "$row" | jq -r '.state // "?"')', not an unconfirmed launch - nothing changed"
+  _ledger_patch "$wsdir" "$id" '.abandon = {reason:$r, at:$at, prior_recovery_phase:(.recovery.dispatch.phase // null), prior_launch_phase:(.launch.phase // null)}
+    | if .recovery != null then .recovery.dispatch = ((.recovery.dispatch // {}) + {phase:"abandoned", at:$at, note:$r}) else . end' \
+    --arg r "$reason" --arg at "$(_now_iso)"
+  _ledger_update_state "$wsdir" "$id" abandoned
+  c_ok "$id: recorded abandoned (evidence kept in .abandon / .recovery). The agent, pane and worktree were NOT touched - release them yourself when you have looked"
 }
 
 cmd_recover() {
@@ -448,6 +530,7 @@ cmd_recover() {
     inspect)  cmd_recover_inspect "$@" ;;
     register) cmd_recover_register "$@" ;;
     continue) cmd_recover_continue "$@" ;;
-    *) die "usage: cel-fanout recover inspect|register|continue ..." ;;
+    abandon)  cmd_recover_abandon "$@" ;;
+    *) die "usage: cel-fanout recover inspect|register|continue|abandon ..." ;;
   esac
 }
