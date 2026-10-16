@@ -320,9 +320,14 @@ _inbox_cursors_json() { # <cursor-file>...
   local c k h out="" sep=""
   for c in "$@"; do
     [ -f "$c" ] || continue
-    k="$(cat "$c")"
-    h="[]"; [ -s "$c.holes" ] && h="$(jq -Rn '[inputs | select(length > 0)]' "$c.holes")"
-    out="$out$sep$(jq -nc --arg k "$k" --argjson h "$h" '{k: $k, h: $h}')"; sep=","
+    k=""; read -r k < "$c" || true            # builtin: fleet counts forks
+    if [ ! -s "$c.holes" ] && [ -z "${k//[0-9]/}" ]; then
+      out="$out$sep{\"k\":\"$k\",\"h\":[]}"       # ids are digits: nothing to escape
+    else
+      h="[]"; [ -s "$c.holes" ] && h="$(jq -Rn '[inputs | select(length > 0)]' "$c.holes")"
+      out="$out$sep$(jq -nc --arg k "$k" --argjson h "$h" '{k: $k, h: $h}')"
+    fi
+    sep=","
   done
   printf '[%s]' "$out"
 }
@@ -693,7 +698,7 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   # cursor decided against one layout and written against another. (--all is a
   # look and takes nothing.)
   local lkfd=""
-  if [ "$all" -eq 0 ] && have flock && exec {lkfd}>>"$f" 2>/dev/null; then
+  if [ "$all" -eq 0 ] && have flock && { exec {lkfd}>>"$f"; } 2>/dev/null; then
     flock "$lkfd" || true
   else lkfd=""; fi
   local cs="[]"; [ "$all" -eq 0 ] && cs="$(_inbox_cursors_json "$c")"

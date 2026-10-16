@@ -30,9 +30,15 @@ die()    { c_err "$*"; exit 1; }
 # no established alias is renamed and no mailbox is orphaned. Every caller
 # (_inbox_sanitise, _run_agent_name, _steward_agent_name) is this function.
 cel_alias_norm() { # <string> -> alias
-  local n
-  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
-  n="${n#"${n%%[a-z]*}"}"
+  local n="$1"
+  # An already-clean name (the common case: an alias being re-normalised) is
+  # handled with builtins - `cel fleet` counts the processes it starts. tr -s
+  # also squeezes a literal `--`, so a name containing one takes the full path.
+  if [[ "$n" =~ ^[a-z][a-z0-9_-]*$ ]] && [[ "$n" != *--* ]]; then :
+  else
+    n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
+    n="${n#"${n%%[a-z]*}"}"
+  fi
   if [ "${#n}" -gt 32 ]; then
     n="${n:0:32}"
   else
