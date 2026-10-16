@@ -148,7 +148,7 @@ test_migrate_is_a_dry_run_unless_applied() {
 
 test_migrate_keeps_every_message_and_each_readers_unread_exactly_once() {
   _ia_split_fixture || return 1
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
   local f="$CEL_INBOX_DIR/demo.jsonl"
   # every message, same ids, same bodies; nobody addressed to the phantom any more
   assert_eq "$(jq -r .id "$f" | tr '\n' ' ')" "$(jq -r .id "$IA/before.jsonl" | tr '\n' ' ')" || { echo "ids changed"; return 1; }
@@ -165,14 +165,14 @@ test_migrate_keeps_every_message_and_each_readers_unread_exactly_once() {
   assert_eq "$(_ia_cel inbox count --for someone-else --workspace demo 2>/dev/null)" "0"
   # a second apply has nothing left to do
   local sum; sum="$(cksum < "$f")"
-  _ia_cel inbox migrate --workspace demo --apply >/dev/null 2>&1
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >/dev/null 2>&1
   assert_eq "$(cksum < "$f")" "$sum"
   rm -rf "$IA"
 }
 
 test_migrate_count_and_unread_views_agree_before_anyone_reads() {
   _ia_split_fixture || return 1
-  _ia_cel inbox migrate --workspace demo --apply >/dev/null 2>&1 || return 1
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >/dev/null 2>&1 || return 1
   assert_eq "$(CEL_INBOX_ME="$CANON" _ia_cel inbox count --workspace demo 2>/dev/null)" "6"
   assert_eq "$(CEL_INBOX_ME=rdr _ia_cel inbox count --for "$CANON" --workspace demo 2>/dev/null)" "5"
   # a look does not consume
@@ -198,7 +198,7 @@ test_migrate_survives_sends_and_reads_running_through_it() {
     done ) &
   local spid=$!
   sleep 0.3
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
   wait "$rpid" "$spid"
   CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r 'select(.message != null) | .message' >> "$got"
   local want="p1 p2 c3 p3 b1 p4 live1 live2 live3 live4 live5 live6 live7 live8 live9 live10 live11 live12"
@@ -214,7 +214,7 @@ test_migrate_refuses_when_the_shorter_name_is_a_live_identity_too() {
   _ia_split_fixture || return 1
   _ia_roster "$CANON" "$PHANTOM"          # a genuine 31-character agent exists as well
   local rc=0
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || rc=$?
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "applied an ambiguous migration"; return 1; }
   assert_contains "$(cat "$IA/mig.out")" "$PHANTOM"
   cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
@@ -233,7 +233,7 @@ test_migrate_refuses_when_the_shorter_name_has_sent_mail_as_itself() {
     >> "$CEL_INBOX_DIR/demo.jsonl"
   cp "$CEL_INBOX_DIR/demo.jsonl" "$IA/before.jsonl"
   local rc=0
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || rc=$?
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "applied despite a sender identity"; return 1; }
   cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
   assert_contains "$(cat "$IA/mig.out")" "unsafe" || return 1
@@ -246,7 +246,7 @@ test_migrate_refuses_when_neither_name_has_identity_evidence() {
   rm -f "$CEL_INBOX_DIR/demo.$CANON.cursor" "$CEL_INBOX_DIR/demo.$CANON.rdr.cursor"
   cp "$CEL_INBOX_DIR/demo.jsonl" "$IA/before.jsonl"
   local rc=0
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || rc=$?
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "guessed an association"; return 1; }
   cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
   assert_contains "$(cat "$IA/mig.out")" "unsafe" || return 1
@@ -257,9 +257,108 @@ test_migrate_refuses_without_a_roster() {
   _ia_split_fixture || return 1
   printf '#!/usr/bin/env bash\nexit 1\n' > "$IA/bin/herdr"; chmod +x "$IA/bin/herdr"
   local rc=0
-  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || rc=$?
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "applied with no way to check who is alive"; return 1; }
   cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
   assert_contains "$(cat "$IA/mig.out")" "unsafe" || return 1
   rm -rf "$IA"
+}
+
+# --- the data can disprove a phantom, never prove one ---------------------------
+
+test_migrate_does_not_guess_for_a_source_with_no_trace() {
+  _ia_split_fixture || return 1
+  # a live target, and a shorter name that has left no trace at all: this is
+  # also exactly what a genuine dead sibling worker looks like
+  local rc=0
+  _ia_cel inbox migrate --workspace demo --apply >"$IA/mig.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "migrated on absence of evidence"; return 1; }
+  assert_contains "$(cat "$IA/mig.out")" "unverified"
+  assert_contains "$(cat "$IA/mig.out")" "--only $PHANTOM"
+  case "$(cat "$IA/mig.out")" in *"[safe"*) echo "still calls it safe"; return 1;; esac
+  cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
+  assert_eq "$(cat "$CEL_INBOX_DIR/demo.$CANON.cursor")" "$(_ia_id 3)"
+  # the operator's explicit attestation is what lets it through
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
+  ! jq -e "select(.to == \"$PHANTOM\")" "$CEL_INBOX_DIR/demo.jsonl" >/dev/null 2>&1 || { echo "not migrated"; return 1; }
+  rm -rf "$IA"
+}
+
+test_migrate_target_must_be_a_live_agent_or_own_a_worktree() {
+  _ia_split_fixture || return 1
+  _ia_roster                                   # nobody alive; the target only has self-asserted traces
+  printf '\n' >> "$CEL_INBOX_DIR/demo.jsonl"   # finish the torn tail first
+  jq -nc --arg id "$(_ia_id 11)" --arg from "$CANON" \
+    '{id:$id, ts:"2026-10-17T00:00:00+00:00", to:"orch", from:$from, kind:"status", message:"I sent this"}' >> "$CEL_INBOX_DIR/demo.jsonl"
+  cp "$CEL_INBOX_DIR/demo.jsonl" "$IA/before.jsonl"
+  local rc=0
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a sender name and a cursor were taken as proof"; return 1; }
+  assert_contains "$(cat "$IA/mig.out")" "unsafe"
+  cmp -s "$IA/before.jsonl" "$CEL_INBOX_DIR/demo.jsonl" || { echo "file changed"; return 1; }
+  # a worktree that owns the alias IS proof
+  mkdir -p "$HOME/.herdr/worktrees/widget-platform/workstream-0042-chat-launch"
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
+  rm -rf "$IA"
+}
+
+# --- the rewrite itself ---------------------------------------------------------
+
+test_migrate_a_rewrite_that_shrinks_the_file_leaves_no_stale_tail() {
+  _ia_setup || return 1
+  local f="$CEL_INBOX_DIR/demo.jsonl" msg
+  msg="$(printf 'é%.0s' $(seq 1 40))"
+  jq -nac --arg id "$(_ia_id 1)" --arg to "$CANON" '{id:$id,to:$to,from:"orch",kind:"status",message:"c1"}' >> "$f"
+  jq -nac --arg id "$(_ia_id 2)" --arg to "$PHANTOM" --arg m "$msg" '{id:$id,to:$to,from:"orch",kind:"status",message:$m}' >> "$f"
+  jq -nac --arg id "$(_ia_id 3)" --arg to "$CANON" '{id:$id,to:$to,from:"orch",kind:"status",message:"after"}' >> "$f"
+  grep -c '\\u00e9' "$f" >/dev/null || { echo "fixture is not escaped"; return 1; }
+  printf '%s' "$(_ia_id 1)" > "$CEL_INBOX_DIR/demo.$CANON.cursor"
+  _ia_roster "$CANON"
+  local before; before="$(wc -c < "$f")"
+  _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || { cat "$IA/mig.out"; return 1; }
+  [ "$(wc -c < "$f")" -lt "$before" ] || { echo "fixture did not shrink ($before -> $(wc -c < "$f"))"; return 1; }
+  jq -c . "$f" >/dev/null || { echo "a stale tail left a line that is not JSON"; return 1; }
+  assert_eq "$(grep -c . "$f")" "3"
+  _ia_cel inbox send "$CANON" "later" --from orch --workspace demo >/dev/null 2>&1
+  assert_eq "$(CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo --json 2>/dev/null | jq -r 'select(.message != null) | .message | .[0:5]' | tr '\n' ' ')" "ééééé after later "
+  rm -rf "$IA"
+}
+
+# --- killed at any point: finished by the next lock holder, nobody re-reads ----
+
+# the extended fixture: reader rdr had ALSO read the phantom mailbox up to p2
+_ia_split_fixture_rdr_read() {
+  _ia_split_fixture || return 1
+  printf '%s' "$(_ia_id 4)" > "$CEL_INBOX_DIR/demo.$PHANTOM.rdr.cursor"
+  printf '\n' >> "$CEL_INBOX_DIR/demo.jsonl"         # finish the torn tail
+}
+
+_ia_kill_at() { # <step>
+  local rc=0
+  CEL_INBOX_MIGRATE_FAIL="$1" _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >"$IA/mig.out" 2>&1 || rc=$?
+  assert_eq "$rc" "99" || { echo "the migration was not killed at $1"; cat "$IA/mig.out"; return 1; }
+}
+
+test_migrate_killed_at_any_step_changes_no_readers_unread_set() {
+  local step via extra
+  for step in pending file-partial file cursor-1 cursors; do
+    for via in read apply send; do
+      _ia_split_fixture_rdr_read || return 1
+      _ia_kill_at "$step" || { echo "step $step"; return 1; }
+      extra=""
+      case "$via" in
+        apply) _ia_cel inbox migrate --workspace demo --apply --only "$PHANTOM" >/dev/null 2>&1 || true ;;
+        send)  _ia_cel inbox send "$CANON" live --from orch --workspace demo >/dev/null 2>&1; extra="live " ;;
+      esac
+      # rdr read p1,p2 through the phantom already and c3 through the real name
+      assert_eq "$(_ia_msgs rdr)" "p3 b1 p4 $extra" || { echo "rdr, killed at $step, resumed by $via"; return 1; }
+      assert_eq "$(_ia_msgs rdr)" "" || { echo "rdr redelivered ($step/$via)"; return 1; }
+      assert_eq "$(_ia_msgs "$CANON")" "p1 p2 c3 p3 b1 p4 $extra" || { echo "worker, killed at $step, resumed by $via"; return 1; }
+      assert_eq "$(_ia_msgs "$CANON")" "" || { echo "worker redelivered ($step/$via)"; return 1; }
+      jq -c . "$CEL_INBOX_DIR/demo.jsonl" >/dev/null || { echo "garbled mailbox ($step/$via)"; return 1; }
+      assert_eq "$(grep -c . "$CEL_INBOX_DIR/demo.jsonl")" "$(( 9 + ${#extra} / 5 ))" || { echo "lost or doubled mail ($step/$via)"; return 1; }
+      [ ! -e "$CEL_INBOX_DIR/demo.migrate.pending" ] || { echo "journal left behind ($step/$via)"; return 1; }
+      rm -rf "$IA"
+    done
+  done
 }
