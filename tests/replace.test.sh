@@ -452,11 +452,11 @@ test_replace_release_of_the_original_cannot_remove_the_live_replacements_worktre
   rm -rf "$T"
 }
 
-test_replace_a_shared_worker_is_one_fleet_row_and_one_slot() {
+test_replace_a_shared_worker_is_one_fleet_row() {
   _rp_setup; _reserve; _rp_publish; _attach
-  # status --json carries the lineage on both rows
-  local out; out="$(cd "$T" && CEL_FANOUT_HERDR=true "$BIN" status --json 2>/dev/null)"
-  assert_eq "$(printf '%s' "$out" | jq -s -r '[.[] | select(.replaced_by == "WG-1-clean")] | length')" 1 || { echo "$out"; return 1; }
-  assert_eq "$(printf '%s' "$out" | jq -s -r '[.[] | select(.replaces == "WG-1")] | length')" 1
+  # the fleet's per-repo worker list carries the child and not the original
+  # that handed its worker over: one worker, one row
+  local rows; rows="$(source "$CEL_ROOT/lib/fleet.sh"; _fleet_unit_rows "$T" widget "" | awk -F"$_FLEET_US" '{print $NF}')"
+  assert_eq "$rows" "WG-1-clean" || return 1
   rm -rf "$T"
 }

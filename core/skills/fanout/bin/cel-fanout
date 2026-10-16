@@ -3002,8 +3002,11 @@ _replace_attach() {
 # `reconcile` is a factory verb like the rest: it rewrites the ledger from what
 # GitHub says, which is the orchestrator's read of the world, not a worker's.
 case "${1:-}" in
-  land|release|collect|request-review|replace)
+  land|release|collect|request-review)
     _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
+  replace)
+    # the second argument is the sub-verb, not an id
+    _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
   delegate|scout|spike|reconcile)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;

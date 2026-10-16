@@ -369,8 +369,6 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
       profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
       activity: $activity, activity_confidence: $aconf,
-      replaces: (.replacement.of // ""),
-      replaced_by: (if (.replacement.role // "") == "source" then (.replacement.child // "") else "" end),
       silence: $silence, silence_reset: $silence_reset,
       harness: $harness}'
 }
