@@ -334,14 +334,9 @@ _steward_nudge() { # <mailbox> <workspace> <key> <message>
   fi
 }
 
-# Sanitiser copied from cel run's alias rules so the steward addresses
-# orchestrators by the same name cel run gave them.
-_steward_agent_name() {
-  local n
-  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
-  n="${n#"${n%%[a-z]*}"}"; n="${n%-}"
-  printf '%.32s' "$n"
-}
+# The steward addresses orchestrators by the name cel run gave them: the same
+# rule, not a copy of it (cel_alias_norm, lib/common.sh).
+_steward_agent_name() { cel_alias_norm "$1"; }
 
 # Which herdr agent owns a mailbox - the inverse of lib/inbox.sh's identity.
 #
@@ -351,8 +346,8 @@ _steward_agent_name() {
 #                      the *-orch case below already covers it)
 #   anything else   -> A WORKER, whose mailbox name IS its agent name: both
 #                      come from the same <repo>-<branch> string through the
-#                      same sanitiser (_inbox_sanitise and _run_agent_name are
-#                      character-for-character identical).
+#                      same rule (_inbox_sanitise, _run_agent_name and this file's
+#                      _steward_agent_name all call cel_alias_norm).
 #
 # Workers can wait on inbox instructions too; resolving only root and
 # orchestrator panes would silently leave their unread mail unattended.

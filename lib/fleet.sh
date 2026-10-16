@@ -542,7 +542,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   done
 
   # The orchestrator rows (CEL-81) are folded into THIS jq, mail included:
-  # the rows arrive as TSV with each mailbox's cursor, and the inbox file is
+  # the rows arrive as TSV with each mailbox's name and cursor state, and the inbox file is
   # read here once for all of them - no jq per orchestrator (the budget).
   local orows ifile
   orows="$(_fleet_orch_tsv "$ws" "$wsdir" "$roster" "$cands")"
@@ -551,17 +551,17 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   printf '%s' "$units" | jq -sc --arg name "$ws" \
     --argjson unread "$unread" --argjson open "$open" --argjson mail "$mail" \
     --arg orows "$orows" --rawfile inbox "$ifile" \
-    '([$inbox | split("\n")[] | select(length > 0) | (try fromjson catch empty)]) as $mails
+    "$_INBOX_UNREAD_DEF"'([$inbox | split("\n")[] | select(length > 0) | (try fromjson catch empty)]) as $mails
      | ([$mails[] | select(.kind == "resolution") | .ref]) as $done
      | {name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: .,
         orchestrators: [$orows | split("\n")[] | select(length > 0) | split("\t")
-          | (if .[9] == "root" then "root" else "\(.[10])-orch" end) as $who
-          | .[11] as $last
+          | .[11] as $who
+          | (.[12] | fromjson) as $cs
           | {name: .[0], ws: .[1], pane: .[2], status: .[3], since: (.[4] | tonumber? // 0),
              model: .[5], launch: .[6], detail: (if .[7] == "-" then "" else .[7] end), cmd: .[8],
              role: .[9], product: .[10],
              unread: ([$mails[] | select(.kind != "resolution") | select(.to == $who or .to == "all")
-                       | select($last == "" or (.id > $last))] | length),
+                       | select(unread($cs))] | length),
              open: ([$mails[] | select(.kind == "decision" or .kind == "blocked")
                      | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length)}]}'
 }
@@ -569,23 +569,22 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 # EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE (CEL-81), from the same rows
 # `cel update` acts on, so the console shows what `--restart-orchestrators`
 # would do and never runs a probe of its own. Each row gains the mailbox's
-# furthest cursor, the same rule _inbox_count_one applies (the recipient's
+# cursor state (mark and holes), the same rule _inbox_count_one applies (the recipient's
 # own, and for root the console's too), read with builtins. Sessions are not
 # recorded from here: the fleet is a READ.
 _fleet_orch_tsv() { # <ws> <wsdir> <roster-json> <candidates>
   [ -n "$3" ] || return 0
-  local row name ws pane status since model launch detail cmd role product who last c cand
+  local row name ws pane status since model launch detail cmd role product who cs
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     IFS=$'\t' read -r name ws pane status since model launch detail cmd role product <<< "$row"
-    if [ "$role" = root ]; then who=root; else who="$product-orch"; fi
-    last=""
-    for cand in "$(_inbox_dir)/$1.$who.cursor" "$(_inbox_dir)/$1.$who.console.cursor"; do
-      [ -f "$cand" ] || continue
-      c=""; read -r c < "$cand" || true
-      [ "$c" \> "$last" ] && last="$c"
-    done
-    printf '%s\t%s\n' "$row" "$last"
+    # THE MAILBOX NAME IS THE ALIAS RULE'S, not a bare "$product-orch": a long
+    # product's name is cut to 32 characters (and may then end in a dash), and
+    # the orchestrator reads - and the cursor is filed under - that name.
+    if [ "$role" = root ]; then who=root; else who="$(_run_agent_name "$product-orch")"; fi
+    # hole-aware, like every other unread view (_inbox_cursors_json)
+    cs="$(_inbox_cursors_json "$(_inbox_dir)/$1.$who.cursor" "$(_inbox_dir)/$1.$who.console.cursor")"
+    printf '%s\t%s\t%s\n' "$row" "$who" "$cs"
   done < <(run_orchestrator_rows "$1" "$3" 0 "$2" "$4")
 }
 

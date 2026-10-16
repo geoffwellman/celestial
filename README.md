@@ -497,6 +497,28 @@ then injects unread mail into the next turn once - it never touches the
 composer. Console `tell` to a live orchestrator is mail alone; `nudge` and
 `talk` are the deliberate interrupts. Escalations that truly cannot wait still prompt, deliberately.
 
+**One name per mailbox.** A mailbox is named by the same string as the herdr
+agent that reads it: `cel_alias_norm` (lowercase, `[a-z0-9_-]` only, starts
+with a letter, at most 32 characters) is the single rule behind `cel run`,
+the steward, every `cel inbox` sender, reader, counter and watcher, and an
+explicit `CEL_INBOX_ME`. It is idempotent - normalising a name twice is
+normalising it once - so mail to a worker's full `repo-branch` name and mail
+to its 32-character alias reach the same mailbox, even when the cut falls
+right after a dash (that dash is kept: it is the alias herdr already holds).
+Before this, such a name came out one character shorter the second time and
+the mail sat in a phantom mailbox nobody opened. `cel inbox migrate
+--workspace <w>` repairs mail already split that way. It is a dry run by
+default and it does not guess: the canonical name must be a live agent or own
+a worktree (a sender name or a cursor is typed by whoever runs a command, so
+it can disprove a phantom but never prove a target); a legacy name with any
+trace of its own is `unsafe` (two real recipients) and left alone; one with no
+trace is `unverified`, because a genuine dead recipient looks exactly the same,
+and is migrated only when the operator attests it with `--apply --only
+<legacy-name>`. Applying keeps every message and id and each reader's unread
+position, exactly once. It is journalled: the mailbox and cursors are saved
+under `<inbox>/migrate-backup/` first, and if the run is killed the next send,
+read or `migrate --apply` finishes it before touching the mailbox.
+
 **Mail to `root` is for a person: `escalation`, `decision`, `blocked`.**
 Ticket status is the ledger's job — `cel-fanout status` is the authority and
 `cel fleet`, the dashboard and the console all render it — so nothing reports

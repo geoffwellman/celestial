@@ -16,6 +16,37 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# THE ONE ALIAS RULE (AH-261017). A herdr agent name, a mailbox name and a
+# worker's cwd-derived identity are the same string, and they used to be made
+# by three copies of one sanitiser that cut to 32 characters AFTER stripping a
+# trailing dash. A name whose 32nd character is a dash therefore came out as
+# `abc-` the first time and `abc` the second, so the same worker had two
+# mailboxes depending on how many times its name had been through a sanitiser.
+#
+# Idempotent by construction: lowercase, squeeze anything outside
+# [a-z0-9_-] to one dash, start at the first letter, cut to 32. A dash is
+# stripped only when the result is SHORTER than 32 - the dash at position 32
+# is the truncation boundary of an alias that already exists and is kept, so
+# no established alias is renamed and no mailbox is orphaned. Every caller
+# (_inbox_sanitise, _run_agent_name, _steward_agent_name) is this function.
+cel_alias_norm() { # <string> -> alias
+  local n="$1"
+  # An already-clean name (the common case: an alias being re-normalised) is
+  # handled with builtins - `cel fleet` counts the processes it starts. tr -s
+  # also squeezes a literal `--`, so a name containing one takes the full path.
+  if [[ "$n" =~ ^[a-z][a-z0-9_-]*$ ]] && [[ "$n" != *--* ]]; then :
+  else
+    n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
+    n="${n#"${n%%[a-z]*}"}"
+  fi
+  if [ "${#n}" -gt 32 ]; then
+    n="${n:0:32}"
+  else
+    while [ "${#n}" -lt 32 ] && [ "${n%-}" != "$n" ]; do n="${n%-}"; done
+  fi
+  printf '%s' "$n"
+}
+
 # A PANE'S CWD, AS A PATH (CEL-89). When the directory a pane stands in is
 # removed, herdr reports its cwd with the kernel's literal ` (deleted)` suffix.
 # Every parse of a pane cwd goes through here: on 2026-09-30 that suffix ended

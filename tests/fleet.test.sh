@@ -990,6 +990,40 @@ test_fleet_json_carries_an_orchestrator_row_per_product() {
   orch_stub_teardown
 }
 
+# AH-261017: an orchestrator's mailbox is the alias rule's name for
+# "<product>-orch", not the bare string. A 31-character product makes the
+# 32-character cut end in a dash (the shape `cel inbox migrate` repairs), and a
+# longer one is cut mid-word; the row must read THAT mailbox and THAT cursor,
+# holes included - the old row read a cursor path that did not exist.
+test_fleet_orchestrator_row_reads_the_cut_mailbox_and_its_cursor_holes() {
+  source "$CEL_ROOT/tests/lib/orch-stub.sh"
+  orch_stub_setup omp
+  local p31="gadget-platform-engine-products" p40="gadget-platform-engine-products-extended" p
+  assert_eq "${#p31}" "31" || return 1
+  for p in "$p31" "$p40"; do mkdir -p "$T/ws/repos/$p"; done
+  sed -i "s/^    gate: bun test\$/&\n  - name: $p31\n    url: git@github.com:someone\/$p31.git\n    prefix: WGA\n    gate: bun test\n  - name: $p40\n    url: git@github.com:someone\/$p40.git\n    prefix: WGB\n    gate: bun test/" "$T/ws/workspace.yaml"
+  printf 'layout: { orchestrators: auto }\n' >> "$T/ws/workspace.yaml"
+  local box31 box40
+  box31="$(_run_agent_name "$p31-orch")"; box40="$(_run_agent_name "$p40-orch")"
+  assert_eq "${box31: -1}" "-" || return 1                  # the migratable shape
+  export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" i
+  for i in 1 2 3 4; do
+    jq -nc --arg id "17921580000000000$i" --arg to "$box31" '{id:$id,to:$to,from:"x",kind:"status",message:"m"}' >> "$f"
+    jq -nc --arg id "17921580000000001$i" --arg to "$box40" '{id:$id,to:$to,from:"x",kind:"status",message:"m"}' >> "$f"
+  done
+  # box31 read up to the 3rd with the 1st still unread (a hole); box40 read up to the 2nd
+  printf '179215800000000003\n179215800000000001\n' > "$CEL_INBOX_DIR/alpha.$box31.cursor"
+  printf '179215800000000012' > "$CEL_INBOX_DIR/alpha.$box40.cursor"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  local doc
+  doc="$(_fleet_doc alpha)"
+  assert_eq "$(jq -r --arg p "$p31" '.workspaces[0].orchestrators[] | select(.product == $p) | .unread' <<<"$doc")" "2"  # hole + 4th
+  assert_eq "$(jq -r --arg p "$p40" '.workspaces[0].orchestrators[] | select(.product == $p) | .unread' <<<"$doc")" "2"  # 3rd + 4th
+  orch_stub_teardown
+}
+
 # CEL-90: SERVE STALE, REFILL IN THE BACKGROUND. At a load average of 25-30 a
 # full read took 32-45 s against the console's 20 s timeout, and the rebuild
 # ran inline in the caller: the console was killed at 20 s, the cache was

@@ -602,11 +602,7 @@ reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>sta
 # The readable `repo/role` form survives as the herdr workspace label; this is
 # only what the agent answers to.
 _run_agent_name() { # <alias>
-  local n
-  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
-  n="${n#"${n%%[a-z]*}"}"   # must start with a letter
-  n="${n%-}"
-  printf '%.32s' "$n"
+  cel_alias_norm "$1"   # the one rule, lib/common.sh
 }
 
 # WHO IS ALREADY STANDING HERE. An orchestrator's identity in this plane is a
