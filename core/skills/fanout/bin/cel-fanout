@@ -1126,7 +1126,7 @@ cmd_delegate() {
   # it, instead of discovering it two hours later by reading panes by hand.
   if ! _fanout_dispatch "$alias" "$prompt_text"; then
     dstate=unconfirmed
-    c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' and the worktree is intact. Re-prompt with: herdr agent prompt $alias \"<the spec>\""
+    c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' (launch.phase dispatch-unconfirmed) and the worktree is intact. A prompt MAY have been delivered, so this is retained uncertain debt: look at the pane before sending anything (a blind re-prompt can pay for the work twice). collect, release, land, review and gc leave the row alone, and this tool has no supported exit for it"
   fi
 
   if [ -n "$prior_row" ]; then
