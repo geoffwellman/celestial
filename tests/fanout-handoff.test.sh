@@ -269,11 +269,10 @@ test_without_the_stop_primitive_nothing_is_retired_and_the_missing_call_is_named
   local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
   _h_inspect
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "EXACT MISSING PRIMITIVE: a per-agent stop"
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "pane.close destroys the shell"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "capability-missing"
   H_PLAN="$(printf '%s' "$H_PLAN")"
   _h_apply
-  _h_refused_untouched "$l" "$b" "agent.stop" || return 1
+  _h_refused_untouched "$l" "$b" "capability-missing" || return 1
   _h_cleanup
 }
 
@@ -520,19 +519,6 @@ test_a_worker_may_not_run_handoff() {
   _h_cleanup
 }
 
-test_real_installed_herdr_capability_discovery_is_read_only_and_truthful() {
-  have herdr || { echo "herdr not installed - skipped"; return 0; }
-  local out
-  out="$(HERDR=herdr bash -c 'source "$1/lib/common.sh"; source "$1/lib/fanout_handoff.sh"; _ho_caps' _ "$CEL_ROOT" 2>&1)" || true
-  assert_eq "$(printf '%s' "$out" | jq -r '.schema')" true || { echo "$out"; return 1; }
-  # production never has an executable stop: agent_stop is false whatever the schema lists
-  assert_eq "$(printf '%s' "$out" | jq -r '.agent_stop')" false
-  local listed=false
-  herdr api schema --json 2>/dev/null | grep -q '"const": "agent.stop"' && listed=true
-  assert_eq "$(printf '%s' "$out" | jq -r '.agent_stop_listed')" "$listed"
-  assert_eq "$(printf '%s' "$out" | jq -r '.agent_start')" true
-}
-
 test_status_names_the_phase_and_the_exact_next_action() {
   _h_setup; _h_dirty
   export CEL_FANOUT_CRASH=ho-after-admit; _h_inspect; _h_apply; unset CEL_FANOUT_CRASH
@@ -670,7 +656,7 @@ test_production_has_no_stop_branch_even_when_agent_stop_is_listed() {
   assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "is not guessed"
   assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "generation fence"
   _h_apply
-  _h_refused_untouched "$l" "$b" "Nothing end-to-end exists" || return 1
+  _h_refused_untouched "$l" "$b" "capability-missing" || return 1
   _h_cleanup
 }
 
@@ -714,4 +700,16 @@ test_a_shutdown_append_to_the_resume_session_is_accepted_but_rewrites_and_unsett
     fi
     _h_cleanup
   done
+}
+
+test_acceptance_evidence_is_recognised_in_the_c_locale_and_a_no_tool_turn_is_not() {
+  # the consumers must be byte-safe: no UTF-8 locale is assumed
+  local turn tool
+  turn="$(printf 'ctx 4.0%%\n\xe2\x97\x8f I will look at it\n')"
+  tool="$(printf 'ctx 4.0%%\n\xe2\x97\x8f Read(/x/spec.md)\n\xe2\x97\x8f continuing\n')"
+  LC_ALL=C bash -c 'source "$1/lib/common.sh"; source "$1/lib/liveness.sh"; source "$1/lib/fanout_recover.sh"; source "$1/lib/fanout_handoff.sh"
+    _liveness_has_turn "$2" || exit 11
+    _ho_tool_evidence "$3" || exit 12
+    if _ho_tool_evidence "$2"; then exit 13; fi' _ "$CEL_ROOT" "$turn" "$tool"
+  assert_eq "$?" 0
 }

@@ -559,7 +559,7 @@ _ho_brief() { # <wsdir> <opid> <row> <snap> <profile>
 # The assistant took a turn AND a tool call visibly ran without an error mark.
 # A turn alone is not enough here: the model's say-so is not execution.
 _ho_tool_evidence() { # <pane-text>
-  printf '%s' "$1" | grep -E '^[[:space:]]*[⏺●✳✻✶][[:space:]]*(Read|Bash|Write|Edit|Grep|Glob|Search|Fetch|Task|read|bash|write|edit|grep|find|ls)\b' \
+  printf '%s' "$1" | grep -E '^[[:space:]]*(⏺|●|✳|✻|✶)[[:space:]]*(Read|Bash|Write|Edit|Grep|Glob|Search|Fetch|Task|read|bash|write|edit|grep|find|ls)\b' \
     | grep -viE 'error|failed|denied|refused' | grep -q .
 }
 _ho_accepted() { # <alias> <tries>
@@ -1003,9 +1003,6 @@ cmd_handoff_apply() {
 }
 
 cmd_handoff() {
-  # the pane-evidence greps match multibyte turn/tool glyphs: pin a UTF-8 locale,
-  # or a C-locale caller would never see acceptance evidence (safe but stuck)
-  export LC_ALL=C.UTF-8
   local sub="${1:-}"; [ $# -eq 0 ] || shift
   case "$sub" in
     inspect) cmd_handoff_inspect "$@" ;;
