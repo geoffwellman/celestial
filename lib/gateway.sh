@@ -352,7 +352,7 @@ _gateway_start() {
 # omp exports that same variable for itself, so a pane that ever ran an omp
 # launch carries omp's root, and every later pi launched from it put its
 # sessions in omp's tree - where omp's startup then renamed them from under the
-# live process (2026-10-17, two Framewright workers). A custom pi-only root is
+# live process (2026-10-17, two live workers). A custom pi-only root is
 # an explicit choice, spelled CEL_PI_AGENT_DIR (the twin of CEL_OMP_AGENT_DIR).
 # Every consumer - the models writer, the child's environment, doctor - asks
 # this function, and the child is always handed the answer.
