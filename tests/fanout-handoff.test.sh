@@ -636,10 +636,13 @@ test_unknown_session_fails_closed_and_parallel_or_garbled_tails_are_unsettled() 
 }
 
 test_production_has_no_stop_branch_even_when_agent_stop_is_listed() {
-  _h_setup stop-nofence; _h_dirty
-  unset CEL_FANOUT_STOP_ADAPTER
+  _h_setup stop; _h_dirty                     # the schema LISTS agent.stop
+  unset CEL_FANOUT_STOP_ADAPTER               # ...and production has no executable stop branch
   local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
   _h_inspect
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.capabilities.agent_stop_listed')" true
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.capabilities.agent_stop')" false
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
   _h_apply
   _h_refused_untouched "$l" "$b" "capability-missing" || return 1
   _h_cleanup
