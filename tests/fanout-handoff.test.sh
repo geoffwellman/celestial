@@ -269,7 +269,7 @@ test_without_the_stop_primitive_nothing_is_retired_and_the_missing_call_is_named
   local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
   _h_inspect
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "EXACT MISSING PRIMITIVE: agent.stop"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "EXACT MISSING PRIMITIVE: a per-agent stop"
   assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "pane.close destroys the shell"
   H_PLAN="$(printf '%s' "$H_PLAN")"
   _h_apply
@@ -525,10 +525,11 @@ test_real_installed_herdr_capability_discovery_is_read_only_and_truthful() {
   local out
   out="$(HERDR=herdr bash -c 'source "$1/lib/common.sh"; source "$1/lib/fanout_handoff.sh"; _ho_caps' _ "$CEL_ROOT" 2>&1)" || true
   assert_eq "$(printf '%s' "$out" | jq -r '.schema')" true || { echo "$out"; return 1; }
-  # truthful: agent.stop is reported exactly when the installed schema lists it
+  # production never has an executable stop: agent_stop is false whatever the schema lists
+  assert_eq "$(printf '%s' "$out" | jq -r '.agent_stop')" false
   local listed=false
   herdr api schema --json 2>/dev/null | grep -q '"const": "agent.stop"' && listed=true
-  assert_eq "$(printf '%s' "$out" | jq -r '.agent_stop')" "$listed"
+  assert_eq "$(printf '%s' "$out" | jq -r '.agent_stop_listed')" "$listed"
   assert_eq "$(printf '%s' "$out" | jq -r '.agent_start')" true
 }
 

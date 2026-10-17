@@ -1003,6 +1003,9 @@ cmd_handoff_apply() {
 }
 
 cmd_handoff() {
+  # the pane-evidence greps match multibyte turn/tool glyphs: pin a UTF-8 locale,
+  # or a C-locale caller would never see acceptance evidence (safe but stuck)
+  export LC_ALL=C.UTF-8
   local sub="${1:-}"; [ $# -eq 0 ] || shift
   case "$sub" in
     inspect) cmd_handoff_inspect "$@" ;;
