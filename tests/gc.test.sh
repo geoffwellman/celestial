@@ -820,6 +820,24 @@ test_gc_closes_a_done_pane_whose_delegation_landed() {
   rm -rf "$T"
 }
 
+# AH-261017: a released/landed ORIGINAL whose worker was handed to a running
+# replacement shares its pane; the done-pane pass must not close that pane on
+# the original row's word. Control: the same row without a replacement closes.
+test_gc_does_not_close_the_pane_a_running_replacement_shares_with_a_released_original() {
+  _gc_done_fixture released done
+  jq '. + [(.[0] | .id = "ABC-1-clean" | .branch = "abc-1-clean" | .state = "running" | .replacement = {role:"child", of:"ABC-1-task", stage:"attached"})]
+      | .[0].replacement = {role:"source", child:"ABC-1-clean"}' \
+    "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" "" || { echo "$out"; return 1; }
+  assert_contains "$out" 'closed 0 done panes'
+  # control: drop the lineage and the very same pane closes
+  jq 'map(del(.replacement)) | map(select(.id != "ABC-1-clean"))' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  rm -rf "$T"
+}
+
 test_gc_keeps_a_working_pane_even_when_its_delegation_landed() {
   _gc_done_fixture landed working
   local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"

@@ -891,7 +891,8 @@ _gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
       else
         c_warn "could not close pane $pane for $id - kept"; _gc_done_kept refused
       fi
-    done < <(jq -c '.[]? | select(.state == "finished" or .state == "landed" or .state == "released" or .state == "abandoned")' "$f" 2>/dev/null)
+    done < <(jq -c '.[]? | select(.state == "finished" or .state == "landed" or .state == "released" or .state == "abandoned")
+                     | select((.replacement.role // "") != "source")' "$f" 2>/dev/null)
   done <<< "$names"
   local parts="" r
   for r in working dirty open-pr unmerged unknown refused; do
@@ -1095,6 +1096,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       [ "$dry" -eq 1 ] || [ "$waiter" -eq 0 ] || _gc_tell_waiter_stopped "$wsdir" "$ws" "$f" "$id" "$mb"
       idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
     done < <(jq -r '.[]? | select((.state // "") as $s | ["running","finished"] | index($s))
+                    | select((.replacement.role // "") != "source")
                     | [(.id // ""), (.pane // ""), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
   done <<< "$names"
   if [ "$dry" -eq 0 ]; then
