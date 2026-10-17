@@ -143,17 +143,54 @@ _ho_source_digest() { # <worktree> -> "<hex> <dirty-count>"
 
 # Does the installed herdr offer the lifecycle primitive? Read from its own
 # schema, not assumed. Prints a JSON object.
+# The REQUIRED contract (not just a method name): agent.stop must take the agent
+# name AND a generation fence (expected_pid + expected_start), so a replaced
+# agent between the final gather and the stop can never be retired by name.
+# herdr 0.9.1 has no agent.stop at all; the fence fields are this tool's stated
+# requirement of the upstream call, nothing is invented in herdr.
 _ho_caps() {
-  local sch methods
-  sch="$("$HERDR" api schema --json 2>/dev/null)" || { printf '{"schema":false,"agent_stop":false,"agent_start":false,"agent_prompt":false}'; return 0; }
-  methods="$(printf '%s' "$sch" | jq -r '[.. | objects | .const? // empty | strings] | join(" ")' 2>/dev/null || true)"
-  [ -n "$methods" ] || { printf '{"schema":false,"agent_stop":false,"agent_start":false,"agent_prompt":false}'; return 0; }
-  jq -n --arg m " $methods " '{schema:true,
-    agent_stop:($m | contains(" agent.stop ")), agent_start:($m | contains(" agent.start ")),
-    agent_prompt:($m | contains(" agent.prompt "))}'
+  local sch none='{"schema":false,"agent_stop":false,"agent_stop_listed":false,"agent_start":false,"agent_prompt":false,"launch_receipt":false}'
+  sch="$("$HERDR" api schema --json 2>/dev/null)" || { printf '%s' "$none"; return 0; }
+  printf '%s' "$sch" | jq -c '
+    . as $s
+    | ([.. | objects | .const? // empty | strings]) as $m
+    | def params($meth): ([.. | objects | select((.properties.method.const? // "") == $meth) | .properties.params["$ref"]? // empty | split("/") | last][0] // "") as $n
+        | ($s.schemas.request["$defs"][$n].properties // {} | keys);
+    (params("agent.stop")) as $k
+    | {schema:($m | length > 0), agent_stop_listed:($m | index("agent.stop") != null),
+       agent_stop:((($k | index("name")) != null or ($k | index("target")) != null) and ($k | index("expected_pid")) != null and ($k | index("expected_start")) != null),
+       agent_start:($m | index("agent.start") != null), agent_prompt:($m | index("agent.prompt") != null),
+       launch_receipt:(($m | map(select(test("^agent\\.(launch_status|launch\\.status|start_status)$"))) | length) > 0)}' 2>/dev/null \
+    || printf '%s' "$none"
 }
 
 _ho_agent_text() { "$HERDR" agent read "$1" --source recent-unwrapped --lines 60 2>/dev/null || true; }
+
+# Unsettled tool use in a persisted session. Prints why, nothing when settled.
+# Fails CLOSED: an unreadable or unparseable tail is "unsettled". The LAST
+# assistant message's tool-call ids must ALL have a matching result after it
+# (parallel calls: N calls need N results).
+_ho_session_unsettled() { # <file>
+  local f="$1" total win
+  total="$(wc -l < "$f" 2>/dev/null | tr -d ' ')"; total="${total:-0}"
+  win="$(tail -n 400 "$f" 2>/dev/null | sed '/^[[:space:]]*$/d')" || { printf 'the session file cannot be read'; return 0; }
+  [ -n "$win" ] || { printf 'the session file is empty'; return 0; }
+  [ "$total" -le 400 ] || win="$(printf '%s\n' "$win" | tail -n +2)"          # the cut first line may be partial
+  printf '%s\n' "$win" | tail -n 1 | jq -e . >/dev/null 2>&1 || { printf 'the last line of the session file is not valid JSON (a write may be in progress)'; return 0; }
+  printf '%s\n' "$win" | jq -s -r '
+    def calltypes: ["toolUse","tool_use","toolCall","tool_call"];
+    def msg: (.message // .);
+    def calls: [(msg | .content // [])[]? | select(type == "object" and ((.type // "") as $t | calltypes | index($t))) | (.id // "?")];
+    def results: [ (.message.toolCallId // .toolCallId // empty),
+                   ((msg | .content // [])[]? | select(type == "object") | (.tool_use_id // .toolCallId // empty)) ];
+    ([to_entries[] | select((.value | msg | .role? // "") == "assistant")] | last) as $a
+    | if $a == null then empty
+      else ($a.value | calls) as $c
+        | ([ .[($a.key + 1):][] | results[] ]) as $r
+        | ($c - $r) as $open
+        | if ($open | length) > 0 then "the last assistant message has " + ($open | length | tostring) + " tool call(s) without a result (" + ($open | join(",")) + ")" else empty end
+      end' 2>/dev/null || printf 'the session tail could not be analysed'
+}
 
 # --- the one gather used by inspect AND by apply's revalidation -------------
 
@@ -230,22 +267,16 @@ _ho_gather() {
       && _ho_no "launch-pending: herdr reports a pending launch for $alias - an unsettled launch is not retired or repeated"
     printf '%s' "$obs" | jq -e '(.agent.interactive_ready // false) == true' >/dev/null || _ho_no "not-ready: herdr does not report the agent interactive_ready"
     sess="$(printf '%s' "$obs" | jq -r '.agent.agent_session.value // ""')"
-    if [ -n "$sess" ] && [ -f "$sess" ]; then sess_exists=true; sess_sha="$(sha256sum "$sess" | cut -c1-64)"; fi
-    # A recorded session file that is not on disk means the runtime's newest
-    # entries may exist ONLY in its memory (the Pi ENOENT case). A named export
-    # (--preserved-export) is recorded as archive evidence but NEVER unlocks
-    # retirement: an archive is not proof of quiescence, of settled tool state
-    # or of the post-export tail.
-    if [ -n "$sess" ] && [ ! -f "$sess" ]; then
-      [ -z "${HO_EXPORT:-}" ] || [ ! -s "$HO_EXPORT" ] || sess_sha="export-not-a-proof:$(sha256sum "$HO_EXPORT" | cut -c1-64)"
+    if [ -z "$sess" ]; then
+      _ho_no "session-unknown: herdr reports no session for $alias, so the runtime's persisted history and any memory-only tail cannot be located - REFUSED (fails closed); nothing is retired"
+    elif [ ! -f "$sess" ]; then
+      # (the Pi ENOENT case) the newest entries may exist ONLY in memory. A named
+      # archive (--preserved-export) is evidence only and NEVER unlocks retirement.
       _ho_no "session-tail: herdr's recorded session file ($sess) is not on disk, so the runtime's newest entries may live only in memory. REFUSED even with a valid archive${HO_EXPORT:+ ($HO_EXPORT)}: an export does not prove quiescence, settled tool use or the post-export tail, and no supported herdr call proves them. Nothing is retired"
-    elif [ -n "$sess" ] && [ -f "$sess" ]; then
-      # unsettled tool use as the last persisted entry: the call may still be running
-      if tail -n 5 "$sess" 2>/dev/null | sed '/^$/d' | tail -n 1 | jq -e '
-           (.message.role // .role // "") as $r
-           | $r == "assistant" and ([.. | objects | .type? // empty] | any(. == "toolUse" or . == "tool_use" or . == "toolCall" or . == "tool_call"))' >/dev/null 2>&1; then
-        _ho_no "unsettled-tool: the last persisted entry of $sess is an assistant tool call with no result - a tool may still be running or its result lives only in memory; retirement would lose or orphan it"
-      fi
+    else
+      sess_exists=true; sess_sha="$(sha256sum "$sess" | cut -c1-64)"
+      local un; un="$(_ho_session_unsettled "$sess")"
+      [ -z "$un" ] || _ho_no "unsettled-tool: $un - retirement would lose or orphan it"
     fi
     if [ "$nfg" -eq 1 ]; then agent_pid="$(printf '%s' "$obs" | jq -r '.fg_pids[0]')"
     else _ho_no "busy: the pane's foreground holds $nfg processes, not exactly the agent - something else is running there"; fi
@@ -286,7 +317,7 @@ _ho_gather() {
   fi
 
   local caps; caps="$(_ho_caps)"
-  printf '%s' "$caps" | jq -e '.agent_stop' >/dev/null || _ho_no "capability-missing: the installed herdr ($("$HERDR" --version 2>/dev/null | head -1)) exposes no process-only retirement call. EXACT MISSING PRIMITIVE: agent.stop (herdr agent stop <name>) - end ONE agent process by identity, release its name, keep the pane, its shell, the worktree and every other process. pane.close destroys the shell and every child; pane.release_agent/clear_agent_authority only forget authority (the process keeps running and the name stays held); the alias cannot be renamed around uniqueness. Nothing was retired"
+  printf '%s' "$caps" | jq -e '.agent_stop' >/dev/null || _ho_no "capability-missing: the installed herdr ($("$HERDR" --version 2>/dev/null | head -1)) offers no process-only retirement CONTRACT$(printf '%s' "$caps" | jq -e '.agent_stop_listed' >/dev/null && echo ' (agent.stop is listed but its request lacks name + expected_pid + expected_start, so it would retire by name alone)'). EXACT MISSING PRIMITIVE: agent.stop (name, expected_pid, expected_start) - end ONE agent process by identity, refusing if the generation changed, release its name, keep the pane, its shell, the worktree and every other process. pane.close destroys the shell and every child; pane.release_agent/clear_agent_authority only forget authority (the process keeps running and the name stays held); the alias cannot be renamed around uniqueness. Nothing was retired"
   printf '%s' "$caps" | jq -e '.agent_start and .agent_prompt' >/dev/null || _ho_no "capability-missing: herdr lacks agent.start/agent.prompt"
 
   # target profile
@@ -308,15 +339,20 @@ _ho_gather() {
     local rpath="$HO_RESUME" rhdr rid rcwd
     if [ "$trt" != pi ]; then _ho_no "resume-unavailable: explicit --session selection is only known for the pi runtime (its --session <path> contract); the target is '${trt:-unresolved}'. UNAVAILABLE, nothing changed"
     elif [ "${rpath#/}" = "$rpath" ] || [ ! -f "$rpath" ] || [ ! -s "$rpath" ]; then _ho_no "resume-session: $rpath is not an existing absolute session file"
-    elif [ -n "${HO_EXPORT:-}" ] && [ "$rpath" -ef "$HO_EXPORT" ]; then _ho_no "resume-session: $rpath is the preserved archive - an archive stays immutable and is never the working session (a pi append would modify it); name a durable WORKING session file"
+    elif [ -z "$sess" ] || [ ! -f "$sess" ]; then _ho_no "resume-unavailable: the old runtime's recorded session file is unknown or missing, and the only resumable file is that exact one - a copy or archive cannot be certified as its continuation. UNAVAILABLE, nothing changed"
+    elif [ -L "$rpath" ] || [ "$rpath" != "$(readlink -f "$rpath")" ] || [ "$rpath" != "$(readlink -f "$sess")" ]; then
+      _ho_no "resume-session: $rpath is not the old runtime's own session file ($sess) by its real path - symlinks, hardlinks and copies/archives are refused (a copy cannot be proven to be its continuation, and a pi append would modify an archive)"
+    elif [ -n "${HO_EXPORT:-}" ] && [ "$rpath" -ef "$HO_EXPORT" ]; then _ho_no "resume-session: $rpath is the preserved archive - an archive stays immutable and is never the working session"
     else
+      local un2; un2="$(_ho_session_unsettled "$rpath")"
       rhdr="$(head -n 1 "$rpath" 2>/dev/null || true)"
       rid="$(printf '%s' "$rhdr" | jq -r 'select(.type == "session") | .id // empty' 2>/dev/null || true)"
       rcwd="$(printf '%s' "$rhdr" | jq -r 'select(.type == "session") | .cwd // empty' 2>/dev/null || true)"
       if [ -z "$rid" ]; then _ho_no "resume-session: $rpath has no session header with an id - not a verifiable pi session"
       elif [ "$rcwd" != "${wt:-}" ]; then _ho_no "resume-session: the session header cwd (${rcwd:-none}) is not the retained worktree (${wt:-?}) - no cwd guessing"
-      else resume_json="$(jq -n --arg p "$rpath" --arg id "$rid" --arg cwd "$rcwd" --arg sha "$(sha256sum "$rpath" | cut -c1-64)" --arg lines "$(wc -l < "$rpath" | tr -d ' ')" \
-          '{path:$p, uuid:$id, cwd:$cwd, sha256:$sha, lines:($lines|tonumber)}')"; fi
+      elif [ -n "$un2" ]; then _ho_no "resume-unsettled: the selected session cannot be resumed: $un2"
+      else resume_json="$(jq -n --arg p "$rpath" --arg id "$rid" --arg cwd "$rcwd" --arg sha "$(sha256sum "$rpath" | cut -c1-64)" --arg lines "$(wc -l < "$rpath" | tr -d ' ')" --arg ino "$(stat -c '%d:%i' "$rpath")" \
+          '{path:$p, uuid:$id, cwd:$cwd, sha256:$sha, lines:($lines|tonumber), inode:$ino, source:"the old runtime'"'"'s own recorded session file"}')"; fi
     fi
   fi
   if [ "$resume_json" != null ] && [ -n "$HO_RESUME_SHA" ] && [ "$(printf '%s' "$resume_json" | jq -r .sha256)" != "$HO_RESUME_SHA" ]; then
@@ -397,6 +433,7 @@ cmd_handoff_hold() { # <id> --kind launch-unknown --evidence TEXT
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local row; row="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$row" ] || die "handoff hold: no delegation with id '$id'"
+  case "$(printf '%s' "$row" | jq -r '.state // ""')" in abandoned|landed|released) die "handoff hold: $id is closed ($(printf '%s' "$row" | jq -r .state)) - nothing to hold" ;; esac
   if [ -n "$(printf '%s' "$row" | jq -r '.handoff_hold.kind // empty')" ]; then
     c_ok "$id: already held ($(printf '%s' "$row" | jq -r '.handoff_hold.kind')) - nothing changed"; return 0
   fi
@@ -405,11 +442,35 @@ cmd_handoff_hold() { # <id> --kind launch-unknown --evidence TEXT
   c_ok "$id: launch debt recorded ($kind). Retirement, restart, collect, release, land and handback now refuse it. There is no supported exit yet: it is settled only by a herdr launch receipt (outcome of agent.start by launch id) - this tool will not mark it cancelled or not-started from absence."
 }
 
+# --- settle -----------------------------------------------------------------
+
+# The ONLY exit from a hold: a launch receipt from herdr. It activates only when
+# the installed herdr's schema offers a launch-receipt query; none does in
+# 0.9.1, so this refuses with zero mutation and names the exact prerequisite.
+# Never settled by an absent process, null ledger fields, GC, or an operator note.
+cmd_handoff_settle() { # <id>
+  [ $# -ge 1 ] || die "usage: cel-fanout handoff settle <id> [--workspace NAME]"
+  local id="$1"; shift
+  local ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --workspace) ws_opt="$2"; shift 2 ;; *) die "handoff settle: unknown argument: $1" ;; esac
+  done
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "handoff settle: no delegation with id '$id'"
+  [ -n "$(printf '%s' "$row" | jq -r '.handoff_hold.kind // empty')" ] || die "handoff settle: $id carries no hold - nothing to settle"
+  local caps; caps="$(_ho_caps)"
+  printf '%s' "$caps" | jq -e '.launch_receipt' >/dev/null \
+    || die "handoff settle: UNAVAILABLE - the installed herdr ($("$HERDR" --version 2>/dev/null | head -1)) has no launch-receipt query (the outcome of an agent.start by launch id) and no supported cancel. The hold stays: an absent process, null ledger launch fields, GC or a note do not settle an unknown launch. Held rows keep occupying delegate worker slots. Nothing changed. UPSTREAM PREREQUISITE: agent.start returns a launch id; a query by id reports started|failed|cancelled|pending (+pane/pid); a supported cancel for pending ids"
+  die "handoff settle: herdr lists a launch-receipt method, but its request/response contract is not implemented by this tool yet - refusing to guess it. Nothing changed"
+}
+
 # --- status -----------------------------------------------------------------
 
 _ho_next() { # <phase> <opid> <id>
   case "$1" in
     done) printf 'nothing - the replacement owns the worktree' ;;
+    admitting) printf 're-run apply (same arguments): it re-marks the interrupted admission, nothing irreversible had happened' ;;
     admitted) printf 'cel-fanout handoff apply %s ... (same arguments) retires the old runtime' "$3" ;;
     retiring|retire-unconfirmed) printf 'the stop request may or may not have reached herdr. Re-run apply: it only OBSERVES; once the old agent is gone it continues. If the old agent is still present and unchanged, add --reissue-retire (re-validated identity, one more agent.stop)' ;;
     retired) printf 're-run apply (same arguments): it starts the replacement once' ;;
@@ -525,6 +586,16 @@ _ho_find_new() { # <op-json>
   return 0
 }
 
+_ho_cmdline_adjacent() { # <pid> <a> <b>: argv has a immediately followed by b
+  local f prev="" x; f="$(_rec_proc)/$1/cmdline"
+  [ -r "$f" ] || return 1
+  while IFS= read -r -d '' x; do
+    [ "$prev" = "$2" ] && [ "$x" = "$3" ] && return 0
+    prev="$x"
+  done < "$f"
+  return 1
+}
+
 # The replacement is the process the profile asked for: exact model and
 # thinking arguments, the workspace, the role and the canonical inbox identity.
 _ho_verify_new() { # <op-json> <wsdir>
@@ -546,7 +617,7 @@ _ho_verify_new() { # <op-json> <wsdir>
   fi
   if [ -z "$why" ]; then
     local rs; rs="$(printf '%s' "$op" | jq -r '.resume_session.path // empty')"
-    if [ -n "$rs" ]; then _rec_cmdline_has_args "$pid" --session "$rs" || why="the new agent was not launched with --session $rs"; fi
+    if [ -n "$rs" ]; then _ho_cmdline_adjacent "$pid" --session "$rs" || why="the new agent was not launched with --session $rs"; fi
   fi
   printf '%s' "$why"
 }
@@ -689,6 +760,15 @@ cmd_handoff_apply() {
   local op; op="$(_ho_read "$wsdir" "$opid")"
   local phase=""; [ -z "$op" ] || phase="$(printf '%s' "$op" | jq -r .phase)"
 
+  if [ "$phase" = admitting ]; then
+    # a crash between the operation record and the ledger mark: nothing
+    # irreversible happened yet, so re-mark idempotently (the retire step
+    # revalidates everything again before it stops anything)
+    _ledger_patch "$wsdir" "$id" '.handoff = {id:$op, phase:"admitted", at:$at}' --arg op "$opid" --arg at "$(_now_iso)"
+    _ledger_update_state "$wsdir" "$id" unconfirmed
+    _ho_phase "$wsdir" "$opid" "$id" admitted "re-marked after an interrupted admission"
+    op="$(_ho_read "$wsdir" "$opid")"; phase=admitted
+  fi
   if [ "$phase" = done ]; then c_ok "$id: handoff $opid is already complete - nothing changed"; return 0; fi
 
   # ---- REVALIDATE, immediately before the first mutation (fresh operation) ---
@@ -719,6 +799,7 @@ cmd_handoff_apply() {
           target:$snap.target, context:$snap.context, resume_session:$snap.resume_session, archive:$arch, prior_row:$prior,
           phase:"admitting", phases:[]}')"
     _ho_write "$wsdir" "$opid" "$op" || die "handoff apply: could not write the operation record - nothing changed"
+    _rec_crash_point ho-after-record
     _ledger_patch "$wsdir" "$id" '.handoff = {id:$op, phase:"admitted", at:$at}' --arg op "$opid" --arg at "$(_now_iso)"
     _ledger_update_state "$wsdir" "$id" unconfirmed
     _ho_phase "$wsdir" "$opid" "$id" admitted "bound to ${apid}@${astart}, HEAD ${head:0:12}, source ${digest:0:12}, profile $profile"
@@ -767,7 +848,7 @@ cmd_handoff_apply() {
         _rec_crash_point ho-before-stop
         _ledger_unlock
         local err rc=0
-        err="$("$HERDR" agent stop "$alias" 2>&1)" || rc=$?
+        err="$("$HERDR" agent stop "$alias" --expected-pid "$apid" --expected-start "$astart" 2>&1)" || rc=$?
         _rec_crash_point ho-after-stop
         local i gone=0
         for (( i = 0; i < tries; i++ )); do
@@ -889,6 +970,7 @@ cmd_handoff() {
     apply)   cmd_handoff_apply "$@" ;;
     status)  cmd_handoff_status "$@" ;;
     hold)    cmd_handoff_hold "$@" ;;
-    *) die "usage: cel-fanout handoff inspect|apply|status|hold ..." ;;
+    settle)  cmd_handoff_settle "$@" ;;
+    *) die "usage: cel-fanout handoff inspect|apply|status|hold|settle ..." ;;
   esac
 }

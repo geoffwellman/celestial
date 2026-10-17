@@ -97,7 +97,7 @@ EOF
   jq -n --arg w "$H_WT" '{result:{workspaces:[{workspace_id:"w1AN",worktree:{checkout_path:$w}}]}}' > "$RS/ws.json"
   printf 'ctx 3.0%%\n' > "$RS/read.txt"
   printf 'ctx 4.0%%\n● Read(%s)\n● continuing the task\n' "$T/spec.md" > "$RS/turn.txt"
-  printf 'old session bytes\n' > "$RS/session.jsonl"
+  printf '%s\n' "$(jq -nc --arg c "$H_WT" '{type:"session",version:3,id:"00000000-0000-0000-0000-000000000001",cwd:$c}')" '{"type":"message","message":{"role":"user","content":"old session bytes"}}' > "$RS/session.jsonl"
   : > "$RS/log"
   # the OLD omp agent: pid 5001 under shell 5000
   ( ALIAS="$H_ALIAS"; RS="$RS"
@@ -114,9 +114,16 @@ EOF
        review:{verdict:"approved", head:"oldhead", head_source:"explicit"},
        history:[{state:"running", at:"2026-10-17T00:00:00Z", by:"orchestrator"}]}]' > "$T/.cel/delegations.json"
 }
-_h_schema() { # stop | no-stop
-  local extra=',{"const":"agent.stop"}'; [ "$1" = stop ] || extra=""
-  printf '{"protocol":22,"schemas":{"req":{"oneOf":[{"const":"agent.start"},{"const":"agent.prompt"},{"const":"pane.close"}%s]}}}' "$extra" > "$RS/schema.json"
+_h_schema() { # stop | no-stop | stop-nofence
+  local req='{"properties":{"method":{"const":"agent.start"}}},{"properties":{"method":{"const":"agent.prompt"}}},{"properties":{"method":{"const":"pane.close"}}}'
+  local defs='{}'
+  case "$1" in
+    stop)         req="$req"',{"properties":{"method":{"const":"agent.stop"},"params":{"$ref":"#/schemas/request/$defs/AgentStopParams"}}}'
+                  defs='{"AgentStopParams":{"properties":{"name":{},"expected_pid":{},"expected_start":{}}}}' ;;
+    stop-nofence) req="$req"',{"properties":{"method":{"const":"agent.stop"},"params":{"$ref":"#/schemas/request/$defs/AgentStopParams"}}}'
+                  defs='{"AgentStopParams":{"properties":{"name":{}}}}' ;;
+  esac
+  printf '{"protocol":22,"schemas":{"request":{"oneOf":[%s],"$defs":%s}}}' "$req" "$defs" > "$RS/schema.json"
 }
 _h_proc() { # pid ppid start comm
   local d="$T/proc/$1" i z=""
@@ -229,14 +236,14 @@ test_a_crash_at_every_point_resumes_the_same_operation_without_doubles_or_keeps_
   # expected outcome per crash point: done = the replay completes; debt = the
   # honest answer is "unknown", so it stays unresolved and is NEVER repeated
   local spec point want i
-  for spec in ho-after-admit:done ho-before-stop:done ho-after-stop:done ho-before-start:debt ho-after-start:done ho-before-prompt:debt ho-after-prompt:done; do
+  for spec in ho-after-record:done ho-after-admit:done ho-before-stop:done ho-after-stop:done ho-before-start:debt ho-after-start:done ho-before-prompt:debt ho-after-prompt:done; do
     point="${spec%%:*}"; want="${spec##*:}"
     _h_setup; _h_dirty
     _h_inspect
     export CEL_FANOUT_CRASH="$point"; _h_apply; unset CEL_FANOUT_CRASH
     [ "$H_RC" -ne 0 ] || { echo "$point: the crash point did not fire"; return 1; }
     assert_eq "$(_h_row | jq -r '.handoff.phase != "done"')" true || { echo "$point"; return 1; }
-    local debt; debt="$(_h_row | jq -r '.handoff.id')"
+    local debt; debt="$(basename "$(ls "$T/.cel/handoffs"/*.json | head -1)" .json)"
     for i in 1 2; do _h_apply --reissue-retire; [ "$H_RC" -ne 0 ] || break; done
     assert_eq "$(_h_row | jq -r '.handoff.id')" "$debt" || return 1
     assert_eq "$(ls "$T/.cel/handoffs"/*.json | wc -l | tr -d ' ')" 1 || return 1
@@ -556,17 +563,16 @@ test_an_unsettled_last_tool_call_in_the_session_file_refuses_retirement() {
   _h_apply
   _h_refused_untouched "$l" "$b" "unsettled-tool" || return 1
   # a settled last entry (a tool RESULT) is not refused, and the proof level stays honest
-  printf '%s\n' '{"type":"session","id":"u1","cwd":"x"}' '{"type":"message","message":{"role":"toolResult","content":[]}}' > "$RS/session.jsonl"
+  printf '%s\n' '{"type":"session","id":"u1","cwd":"x"}' '{"type":"message","message":{"role":"toolResult","toolCallId":"32a954d9","content":[]}}' > "$RS/session.jsonl"
   _h_inspect
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.runtime.session.memory_tail_proof')" none
   _h_cleanup
 }
 
-_h_working_session() { # <uuid> [cwd] -> path
-  local f="$T/work-$1.jsonl"
-  printf '%s\n' "$(jq -nc --arg id "$1" --arg c "${2:-$H_WT}" '{type:"session",version:3,id:$id,cwd:$c}')" '{"type":"message","message":{"role":"user","content":"hi"}}' > "$f"
-  printf '%s' "$f"
+_h_working_session() { # <uuid> [cwd] -> the old runtime's OWN recorded session file, rewritten as a pi session
+  printf '%s\n' "$(jq -nc --arg id "$1" --arg c "${2:-$H_WT}" '{type:"session",version:3,id:$id,cwd:$c}')" '{"type":"message","message":{"role":"user","content":"hi"}}' > "$RS/session.jsonl"
+  printf '%s' "$RS/session.jsonl"
 }
 
 test_explicit_working_session_selection_is_bound_launched_and_verified() {
@@ -589,22 +595,27 @@ test_explicit_working_session_selection_is_bound_launched_and_verified() {
 
 test_working_session_selection_refuses_what_it_cannot_verify_with_zero_mutation() {
   local c needle
-  for c in wrong_cwd archive no_header relative not_pi changed; do
+  for c in wrong_cwd archive no_header relative not_pi changed copy hardlink symlink unsettled unparseable; do
     _h_setup; _h_dirty
     local ws prof=pitarget extra=""; ws="$(_h_working_session 11111111-2222-3333-4444-555555555555)"
     case "$c" in
       wrong_cwd) ws="$(_h_working_session 22222222-2222-3333-4444-555555555555 /somewhere/else)"; needle="no cwd guessing" ;;
-      archive)   printf 'x\n' > "$T/arch.jsonl"; extra="--preserved-export $T/arch.jsonl"; ws="$T/arch.jsonl"; needle="archive stays immutable" ;;
+      archive)   cp "$ws" "$T/arch.jsonl"; extra="--preserved-export $T/arch.jsonl"; ws="$T/arch.jsonl"; needle="not the old runtime's own session file" ;;
       no_header) printf 'not json\n' > "$ws"; needle="no session header" ;;
       relative)  ws="work.jsonl"; needle="existing absolute session file" ;;
       not_pi)    prof=bare; needle="only known for the pi runtime" ;;
+      copy)      cp "$ws" "$T/copy.jsonl"; ws="$T/copy.jsonl"; needle="not the old runtime's own session file" ;;
+      hardlink)  ln "$ws" "$T/hard.jsonl"; ws="$T/hard.jsonl"; needle="not the old runtime's own session file" ;;
+      symlink)   ln -s "$ws" "$T/sym.jsonl"; ws="$T/sym.jsonl"; needle="not the old runtime's own session file" ;;
+      unsettled) printf '%s\n' "$(head -n 1 "$ws")" '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1"},{"type":"toolCall","id":"c2"}]}}' '{"type":"message","message":{"role":"toolResult","toolCallId":"c1"}}' > "$ws"; needle="1 tool call(s) without a result" ;;
+      unparseable) printf '%s\n' "$(head -n 1 "$ws")" '{"type":"message","mess' > "$ws"; needle="not valid JSON" ;;
       changed)   needle="" ;;
     esac
     local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
     if [ "$c" = changed ]; then
       H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --resume-session "$ws")"
-      assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || return 1
-      echo "appended" >> "$ws"                      # edited after the plan: a different file than the one bound
+      assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
+      echo '{"type":"message","message":{"role":"user","content":"late"}}' >> "$ws"   # edited after the plan
       H_PROFILE=pitarget _h_apply --resume-session "$ws" --resume-sha "$(printf '%s' "$H_PLAN" | jq -r '.plan.resume_session.sha256')"
       [ "$H_RC" -ne 0 ] || { echo "changed session was launched"; return 1; }
       assert_contains "$H_OUT" "stale-session"
@@ -613,9 +624,70 @@ test_working_session_selection_refuses_what_it_cannot_verify_with_zero_mutation(
       H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile "$prof" --resume-session "$ws" $extra)"
       assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false || { echo "$c: $H_PLAN"; return 1; }
       assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "$needle" || { echo "$c"; return 1; }
+      l="$(_h_ledger)"; b="$(_h_bytes)"
       H_PROFILE="$prof" _h_apply --resume-session "$ws" --resume-sha deadbeef $extra
       _h_refused_untouched "$l" "$b" "$needle" || { echo "case $c"; return 1; }
     fi
     _h_cleanup
   done
+}
+
+test_unknown_session_fails_closed_and_parallel_or_garbled_tails_are_unsettled() {
+  _h_setup; _h_dirty
+  # herdr reports NO session for the agent
+  jq 'del(.result.agents[0].agent_session)' "$RS/agents.json" > "$RS/a2" && mv "$RS/a2" "$RS/agents.json"
+  local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+  _h_inspect
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "session-unknown"
+  _h_apply
+  _h_refused_untouched "$l" "$b" "session-unknown" || return 1
+  _h_cleanup
+  local tail
+  for tail in parallel garbled later_entry; do
+    _h_setup
+    case "$tail" in
+      parallel)    printf '%s\n' '{"type":"session","id":"u"}' '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"a"},{"type":"toolCall","id":"b"}]}}' '{"type":"message","message":{"role":"toolResult","toolCallId":"a"}}' > "$RS/session.jsonl" ;;
+      garbled)     printf '%s\n' '{"type":"session","id":"u"}' '{"type":"message","message":{"role":"assistant","conte' > "$RS/session.jsonl" ;;
+      later_entry) printf '%s\n' '{"type":"session","id":"u"}' '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"a"}]}}' '{"type":"model_change","model":"x"}' > "$RS/session.jsonl" ;;
+    esac
+    _h_inspect
+    assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false || { echo "$tail: $H_PLAN"; return 1; }
+    assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "unsettled-tool" || { echo "$tail"; return 1; }
+    _h_cleanup
+  done
+}
+
+test_the_capability_gate_requires_the_fenced_contract_not_a_method_name() {
+  _h_setup stop-nofence; _h_dirty
+  local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+  _h_inspect
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "agent.stop is listed"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "retire by name alone"
+  _h_apply
+  _h_refused_untouched "$l" "$b" "retire by name alone" || return 1
+  _h_cleanup
+}
+
+test_stop_is_fenced_by_the_bound_generation() {
+  _h_setup; _h_dirty
+  _h_inspect; _h_apply
+  assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
+  assert_contains "$(grep '^agent stop' "$RS/log")" "--expected-pid 5001 --expected-start 777777"
+  _h_cleanup
+}
+
+test_settle_is_unavailable_without_a_launch_receipt_and_changes_nothing() {
+  _h_setup
+  (cd "$T" && "$BIN" handoff hold WG-1-handoff --kind launch-unknown --evidence "unknown" >/dev/null)
+  local l; l="$(_h_ledger)"
+  local out rc=0; out="$(cd "$T" && "$BIN" handoff settle WG-1-handoff 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "settled"; return 1; }
+  assert_contains "$out" "UNAVAILABLE"
+  assert_contains "$out" "launch id"
+  assert_eq "$(_h_ledger)" "$l"
+  # closed rows cannot be held
+  jq '.[0].state = "released"' "$T/.cel/delegations.json" > "$T/l2" && mv "$T/l2" "$T/.cel/delegations.json"
+  rc=0; out="$(cd "$T" && "$BIN" handoff hold WG-1-handoff --kind launch-unknown --evidence "x" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$out" "is closed"
+  _h_cleanup
 }
