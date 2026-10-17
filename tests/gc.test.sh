@@ -112,6 +112,10 @@ test_gc_keeps_a_finished_row_with_launch_debt() {
   mv "$T/next" "$GC_WS/.cel/delegations.json"
   for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
   assert_eq "$(cat "$GC_SINK")" ""
+  jq '.[0].launch = {phase:"dispatch-unconfirmed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
+  mv "$T/next" "$GC_WS/.cel/delegations.json"
+  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
+  assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }
 

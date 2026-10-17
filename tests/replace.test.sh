@@ -596,7 +596,8 @@ _rp_set_source() { jq "$1" "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/
 
 test_replace_reserve_refuses_a_source_with_launch_or_recovery_debt() {
   local f
-  for f in '.[0].launch={phase:"start-failed"}' '.[0].launch={phase:"starting"}' '.[0].launch={phase:"started"}' \
+  for f in '.[0].launch={phase:"start-failed"}' '.[0].launch={phase:"starting"}' '.[0].launch={phase:"started"}' '.[0].launch={phase:"dispatch-unconfirmed"} | .[0].state="collected"' \
+           '.[0].recovery={id:"r",dispatch:{phase:"unconfirmed-acceptance"}}' \
            '.[0].recovery={id:"r",dispatch:{phase:"registered"}} | .[0].state="collected"' \
            '.[0].recovery={id:"r",dispatch:{phase:"submitting"}}' '.[0].recovery={id:"r",dispatch:{phase:"ambiguous"}}'; do
     _rp_setup

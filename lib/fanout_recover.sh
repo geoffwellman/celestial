@@ -479,6 +479,11 @@ cmd_recover_continue() { # <id> [--workspace NAME]
 
 # --- the consumers' view ----------------------------------------------------
 
+# CANONICAL DEBT CLASSIFICATION - every phase this code writes:
+#   launch.phase   starting | start-failed | started | dispatch-unconfirmed -> DEBT (agent may exist / prompt may have been delivered)
+#                  recovered | dispatched -> settled by themselves (recovery.dispatch decides)
+#   recovery.dispatch.phase  registered | submitting | ambiguous | unconfirmed-acceptance -> DEBT (while unconfirmed/running)
+#                  accepted | abandoned -> settled
 # A launch that may hold a LIVE agent and is not settled: a recovered row whose
 # dispatch is not accepted, or a delegate's receipt row still at starting /
 # start-failed / started. Only rows still `unconfirmed` (or `running`) count -
@@ -491,7 +496,7 @@ _rec_unresolved() { # <row-json>
   # with launch.phase start-failed, and that row must not bypass the fence.
   printf '%s' "$1" | jq -r '(.state // "") as $st
     | if ($st | IN("abandoned","landed","released")) then empty
-      elif ((.launch.phase // "") | IN("starting","start-failed","started")) then ("launch " + .launch.phase)
+      elif ((.launch.phase // "") | IN("starting","start-failed","started","dispatch-unconfirmed")) then ("launch " + .launch.phase)
       elif .recovery != null and ($st | IN("unconfirmed","running")) then ((.recovery.dispatch.phase // "registered") | select(. != "accepted"))
       else empty end'
 }

@@ -3008,3 +3008,21 @@ test_a_row_stuck_at_launch_starting_says_it_is_retained_debt_with_no_exit() {
   [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
   rm -rf "$T"
 }
+
+# round 4: a delegate whose dispatch was never confirmed (prompt MAY have been
+# delivered) is uncertain delivery debt: every destructive consumer refuses it.
+test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-DU "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "dispatch-unconfirmed"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-DU" "release WG-DU --discard" "release WG-DU --keep-worktree" "land WG-DU" \
+           "review WG-DU approved --head $HA --by r" "request-review WG-DU --head $HA" "handback WG-DU x --by r"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on dispatch-unconfirmed"; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+    assert_eq "$(cat "$T/.cel/delegations.json")" "$before" || return 1
+  done
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  rm -rf "$T"
+}

@@ -121,7 +121,7 @@ try:
         if target == worktree or worktree in target.parents:
             # unconfirmed: a worker whose prompt may yet be accepted.
             launch = row.get("launch") if isinstance(row.get("launch"), dict) else {}
-            debt = launch.get("phase") in ("starting", "start-failed", "started") \
+            debt = launch.get("phase") in ("starting", "start-failed", "started", "dispatch-unconfirmed") \
                 and row["state"] not in ("abandoned", "landed", "released")
             if row["state"] in ("running", "unconfirmed") or unknown or debt:
                 print("live")
