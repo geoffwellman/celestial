@@ -151,3 +151,13 @@ test_agent_roots_real_pi_survives_real_omp_start() {
   ! ls "$HOME/.omp/agent/sessions" 2>/dev/null | grep -q "^--" || { echo "pi-style dir in omp's root"; _ar_teardown; return 1; }
   _ar_teardown
 }
+
+test_agent_roots_doctor_fails_on_overlap_and_passes_when_disjoint() {
+  _ar_setup
+  source "$CEL_ROOT/lib/doctor.sh"
+  doctor_agent_roots_lines >/dev/null 2>&1 || { _ar_teardown; return 1; }
+  export CEL_PI_AGENT_DIR="$HOME/.omp/agent/pi"
+  local out; out="$(doctor_agent_roots_lines 2>&1)" && { echo "doctor passed an overlap"; _ar_teardown; return 1; }
+  assert_contains "$out" "overlap"
+  _ar_teardown
+}

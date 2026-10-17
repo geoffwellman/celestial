@@ -348,7 +348,15 @@ _gateway_start() {
 
 # --- the pi provider ------------------------------------------------------
 
-gateway_pi_dir() { printf '%s' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"; }
+# pi's agent dir. An AMBIENT PI_CODING_AGENT_DIR is deliberately not read here:
+# omp exports that same variable for itself, so a pane that ever ran an omp
+# launch carries omp's root, and every later pi launched from it put its
+# sessions in omp's tree - where omp's startup then renamed them from under the
+# live process (2026-10-17, two Framewright workers). A custom pi-only root is
+# an explicit choice, spelled CEL_PI_AGENT_DIR (the twin of CEL_OMP_AGENT_DIR).
+# Every consumer - the models writer, the child's environment, doctor - asks
+# this function, and the child is always handed the answer.
+gateway_pi_dir() { printf '%s' "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
 
 # Write the gateway's providers into pi's models.json, MERGING.
 #
@@ -444,6 +452,30 @@ GATEWAY_OMP_PROVIDER=celgw
 # hand omp pi's directory and its models.yml would be written where omp never
 # looks.
 gateway_omp_dir() { printf '%s' "${CEL_OMP_AGENT_DIR:-$HOME/.omp/agent}"; }
+
+# pi and omp must never share session storage. omp's startup migrates every
+# pi-style `--home-...--` directory under its root to a short name, with no
+# liveness check, and pi never re-creates a vanished directory. So the two
+# resolved roots, with symlinks and `..` resolved, must be disjoint: neither
+# equal to the other nor inside it. Refuses; never moves, copies or rewrites.
+_agent_root_real() { realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"; }
+agent_roots_check() { # [runtime]: 0 when disjoint, 1 with an actionable message
+  local pi omp
+  pi="$(_agent_root_real "$(gateway_pi_dir)")"; omp="$(_agent_root_real "$(gateway_omp_dir)")"
+  case "$pi/" in "$omp"/*) ;; *) case "$omp/" in "$pi"/*) ;; *) pi="" ;; esac ;; esac
+  if [ -z "$pi" ]; then
+    # an ambient value that is not the resolved one is ignored, not obeyed
+    if [ -n "${PI_CODING_AGENT_DIR:-}" ] && [ "${1:-}" = pi ] \
+       && [ "$(_agent_root_real "$PI_CODING_AGENT_DIR")" != "$(_agent_root_real "$(gateway_pi_dir)")" ]; then
+      printf 'note: ignoring inherited PI_CODING_AGENT_DIR (%s): pi uses %s. For a custom pi-only root set CEL_PI_AGENT_DIR.\n' \
+        "$PI_CODING_AGENT_DIR" "$(gateway_pi_dir)" >&2
+    fi
+    return 0
+  fi
+  printf 'agent roots overlap: pi would use %s and OMP uses %s (after resolving symlinks). OMP renames pi-style session directories under its root when it starts, which silently breaks a running pi. Give pi its own directory: unset CEL_PI_AGENT_DIR (default %s) or point it somewhere that is not inside OMP'"'"'s root. Nothing was moved or changed.\n' \
+    "$(_agent_root_real "$(gateway_pi_dir)")" "$(_agent_root_real "$(gateway_omp_dir)")" "$HOME/.pi/agent" >&2
+  return 1
+}
 
 # The identities omp must never be served by: `gateway.omp_exclude` in the box
 # config, comma- or space-separated. Lowercased; never printed.

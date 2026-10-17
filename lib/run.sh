@@ -199,9 +199,22 @@ _run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
   fi
 }
 
-_run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] -> `env K=V K=V K=V `
-  local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" out
+_run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V K=V K=V `
+  local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" runtime="${5:-}" out
   printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
+  # THE AGENT ROOT IS PINNED, never inherited. pi and omp both read
+  # PI_CODING_AGENT_DIR, so whichever value the pane's shell happens to carry
+  # would otherwise decide where a harness keeps its sessions, and omp renames
+  # pi's. The resolved root of THIS runtime is the only value either gets.
+  case "$runtime" in
+    pi)  printf -v out '%s PI_CODING_AGENT_DIR=%q' "$out" "$(gateway_pi_dir)" ;;
+    omp) printf -v out '%s PI_CODING_AGENT_DIR=%q' "$out" "$(gateway_omp_dir)" ;;
+  esac
+  # Gateway credentials and the per-agent session key (_run_profile_gateway_setup
+  # fills GATEWAY_ENV in the caller): the same launch-scoped K=V words, so they
+  # exist only in the launched process and never in the pane's shell.
+  local gw
+  for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"}; do out="$out $gw"; done
   # WHOSE MAILBOX (CEL-65). `cel inbox` derives the reader from cwd, and an
   # orchestrator that cd's to its workspace root read ROOT's mail for days.
   # Root and orchestrators carry their identity from the launch instead.
@@ -833,7 +846,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
   local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label celestial/console)
-  local envprefix; envprefix="$(_run_launch_env console "$cwd" "$AGENT_ROLE_FILE")"
+  local envprefix; envprefix="$(_run_launch_env console "$cwd" "$AGENT_ROLE_FILE" "" "$runtime")"
   if [ "$dry" -eq 1 ]; then
     printf 'herdr %s\n' "${CREATE_ARGS[*]}"
     printf 'herdr pane send-text <pane> %s\n' "$envprefix"
@@ -1139,25 +1152,20 @@ _run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates
   if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
     die "gateway API key file is missing, empty, or unreadable - cel gateway install"
   fi
-  token="\$(cat '$key_file')"
+  # K=V words for the launch's `env` prefix, NOT an `export`: the token is a
+  # substitution the pane evaluates, scoped to the launched process. The agent
+  # root is pinned by _run_launch_env from the same resolvers the models
+  # writers use, so the file written and the file loaded cannot disagree.
+  token="\"\$(cat '$key_file')\""
   printf -v session_var 'CEL_SESSION_ID=%q' "$session_id"
-  GATEWAY_ENV=(export "OMP_GATEWAY_TOKEN=$token" "$session_var")
-  # omp reads PI_CODING_AGENT_DIR as its agent dir, exactly as pi does: pin
-  # it to omp's own so the celgw models.yml written there is the one it loads.
-  if [ "$runtime" = omp ]; then
-    local omp_dir_var; printf -v omp_dir_var 'PI_CODING_AGENT_DIR=%q' "$(gateway_omp_dir)"
-    GATEWAY_ENV+=("$omp_dir_var")
-  elif [ "$runtime" = pi ] && [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
-    # gateway_pi_models_write writes into the launcher's agent dir; the pane
-    # must load that same file, not its shell's default ~/.pi/agent.
-    local pi_dir_var; printf -v pi_dir_var 'PI_CODING_AGENT_DIR=%q' "$PI_CODING_AGENT_DIR"
-    GATEWAY_ENV+=("$pi_dir_var")
-  fi
+  GATEWAY_ENV=("OMP_GATEWAY_TOKEN=$token" "$session_var")
 }
 
 _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-models] [session-id]
   local runtime="$1" agent_name="$2" require_key="${3:-1}" write_models="${4:-1}" session_id="${5:-}"
   GATEWAY_ENV=()
+  # Before anything is written: pi and omp roots that overlap refuse the launch.
+  case "$runtime" in pi|omp) agent_roots_check "$runtime" || die "launch refused: pi and omp agent roots overlap" ;; esac
   [ "${PROFILE_VIA:-}" = gateway ] || return 0
   _run_gateway_env "$runtime" "$agent_name" "$require_key" "$session_id"
   if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
@@ -1527,7 +1535,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # orchestrators address. Only where a hook will read it: claude reads by cwd.
     worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
   esac
-  envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
+  envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
 
   # RESUME (CEL-63). Root and the orchestrators carry their conversation
@@ -1633,8 +1641,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))"
   if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
     prefix_required=1
-    envprefix="${GATEWAY_ENV[*]}; $envprefix"
-    dry_envprefix="export OMP_GATEWAY_TOKEN=**** CEL_SESSION_ID=****; $dry_envprefix"
+    envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
+    dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   fi
 
 

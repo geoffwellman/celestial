@@ -297,7 +297,7 @@ doctor_pi_anthropic_lines() { # <wsdir> <workspace name> -> one status line or n
     | length > 0
     ' "$wsdir")" || return 0
   [ "$profile" = true ] || return 0
-  authfile="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"
+  authfile="$(gateway_pi_dir)/auth.json"
   [ -r "$authfile" ] || {
     printf '%s: pi Anthropic credential unknown (auth.json unavailable) - run pi /login, or switch the worker profile to via: gateway\n' "$name"
     return 0
@@ -656,6 +656,17 @@ doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
   return "$bad"
 }
 
+# PI AND OMP ON ONE AGENT ROOT. omp's startup renames pi's session directories
+# out from under live pi processes; a failure, read from the same resolvers the
+# launchers use (gateway_pi_dir / gateway_omp_dir).
+doctor_agent_roots_lines() { # -> 1 when the pi and omp roots overlap
+  # shellcheck source=lib/run.sh
+  . "${BASH_SOURCE[0]%/*}/run.sh"
+  agent_roots_check >/dev/null 2>&1 && return 0
+  c_err "pi and omp agent roots overlap (pi $(gateway_pi_dir), omp $(gateway_omp_dir)): omp renames pi's session directories when it starts. Unset CEL_PI_AGENT_DIR / CEL_OMP_AGENT_DIR or separate them"
+  return 1
+}
+
 # TWO LIVE PROCESSES ON ONE SESSION FILE (CEL-102). Each answers the same
 # mail separately and the owner gets contradicting replies. A failure.
 doctor_shared_session_lines() { # -> 1 when any session file has two resumers
@@ -776,6 +787,7 @@ cmd_doctor() {
   doctor_stale_orchestrator_lines
   doctor_inbox_hook_lines || fail=1
   doctor_shared_session_lines || fail=1
+  doctor_agent_roots_lines || fail=1
   # One line, never a failure: most boxes have no gateway, and a red doctor
   # for an optional door teaches people to ignore a red doctor.
   c_hd "Gateway"
