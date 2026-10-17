@@ -1385,11 +1385,11 @@ YAML
   printf 'omp-native-key\n' >"$GWT/state/api-key"
   _omp_native_auth_stub "$GWT"
   local out; out="$(_omp_native_launch_probe)"
-  kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
+  kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null || true
   unset CEL_OMP_AGENT_DIR
   _ws_gateway_clean
   assert_contains "$out" "200|"
-  assert_contains "$out" "|widget-"
+  assert_contains "$out" "|widget-wg-1-x|"
   assert_contains "$out" "/omp"
 }
 

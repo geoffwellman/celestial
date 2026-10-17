@@ -49,6 +49,19 @@ the verified default branch, or match the exact head of a GitHub-merged PR;
 additional local commits invalidate that proof. Fanout release reports unknown
 work as held, with explicit keep/discard decisions rather than a zero count.
 
+### Gateway credentials for an omp that starts native
+
+An omp session can switch models in flight, and its launch environment is the
+only place it reads the gateway client key (`OMP_GATEWAY_TOKEN`) and the
+per-agent `CEL_SESSION_ID`. So `cel run` exports them for every omp launch on a
+box with a configured gateway and a readable, non-empty key - even when the
+starting model is Codex or another direct provider. Nothing is written to
+models files, no gateway is required or started, and a box with no gateway (or
+an unreadable key) launches exactly as before. A `via: gateway` profile still
+refuses when the key is missing. Limitation: a session already running keeps
+the environment it was launched with; it gains the credential only on its next
+`cel run --restart`. pi is unchanged.
+
 ### Launch readiness (`cel run`)
 
 The launch line (role environment and, for gateway profiles, the credential
