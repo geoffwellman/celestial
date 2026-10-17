@@ -40,6 +40,66 @@ teardown: after merge, cel-fanout release <id>
   <role file>`), sends the task spec as its first prompt, and records the
   delegation in the workspace's ledger (`<wsdir>/.cel/delegations.json`).
 
+Moving a retained worktree to ONE replacement runtime (`handoff`, orchestrator only)
+
+```
+cel-fanout handoff inspect <id> --pane <pane> --profile P         # read-only plan + refusals + the exact apply line
+cel-fanout handoff apply   <id> --profile P --pane <pane> --shell-pid N --agent-pid N \
+    --agent-start TICKS --head SHA --source-digest HEX --evidence "<what you checked>" [--reissue-retire]
+cel-fanout handoff status  <id|opid>                               # phase, evidence, next action
+cel-fanout handoff hold    <id> --kind launch-unknown --evidence "<facts>"   # record launch debt you cannot settle
+```
+
+- For a delegation whose worktree is intact but whose runtime must change (an
+  old OMP to Pi Sonnet 5.5, say) and for which `delegate --reuse` refuses
+  (alias already held, local-ahead or diverged dirty work). `apply` is bound to
+  the inspected plan: pane, shell pid, agent pid + start generation, HEAD and a
+  digest over every dirty/untracked byte and the private `.agent/` files.
+  Anything stale, busy, changed or unsettled refuses with **zero mutation**.
+- It is an admitted, replayable operation: the record, ledger mark and a
+  per-target lock exist BEFORE the old runtime is retired; each later phase is
+  written BEFORE its call; a lost response or a rerun finds the same operation
+  (id from the bound coordinates) and continues from its phase - it never stops,
+  starts or prompts twice. `status` names the exact next action.
+- **Retirement needs a herdr per-agent stop (not available)** (process-only: end one agent by name,
+  keep the pane, shell and every other process). herdr 0.9.1 does not have it
+  (`herdr api schema --json`), so there `inspect`/`apply` refuse and name that
+  exact call. `pane close`, `release-agent`, keystrokes, raw kills, renaming the
+  alias and ledger edits are never used. Source-vs-installed: this verb exists
+  in the source checkout; an installed `cel-fanout` does not have it until it is deployed.
+- The source is never touched (no reset/stash/checkout/rebase/fetch/push);
+  ahead, behind and diverged are classified with git, local ahead/diverged
+  dirty work is supported. The replacement starts in the same worktree with
+  the profile's exact model and thinking, normal env/inbox/role, and is
+  verified (process model/args/env, one agent) before it is prompted ONCE. It
+  is `running` only after an assistant turn AND a successful tool call are
+  visible; an ack alone stays `unconfirmed`.
+- **Context transfer is truthful:** cross-harness (OMP to Pi) is NOT a lossless
+  session resume, and same-harness native resume is not performed either. The
+  replacement is told the spec, a handoff brief and a copy of the old pane text
+  (kept with the old session path/digest under `<wsdir>/.cel/handoffs/`). Prior
+  review/gate approval is NOT carried over (kept as `handoff.prior_review`).
+- **Session safety (fails closed):** an unknown or missing recorded session
+  refuses retirement even with a named `--preserved-export` archive (evidence
+  only); every tool call of the last assistant message must have a result
+  (parallel calls by id; an unparseable tail is unsettled). `--resume-session
+  FILE --resume-sha SHA` (pi only) is accepted only for the old runtime's OWN
+  recorded session file by real path - symlinks, hardlinks, copies and archives
+  are refused - with header uuid and cwd = the worktree, bound by bytes, started
+  as `pi --session FILE`. Only "launched on that file" is claimed. Else
+  UNAVAILABLE, zero mutation.
+- **Retirement is unavailable on herdr 0.9.1:** there is no documented, fenced
+  per-agent stop (identity + generation fence) and this tool does not guess one;
+  there is no executable stop branch in production, so `apply` refuses before
+  mutating anything. `handoff settle <id>` is the only exit from a hold and is
+  UNAVAILABLE until herdr has a launch-receipt query; held rows keep occupying
+  worker slots.
+- `hold` records launch debt you cannot settle (e.g. a `delegate --reuse` that
+  timed out UNKNOWN). It fences retirement, restart, collect, release, land,
+  handback and `recover abandon`, and is settled only by a herdr launch receipt
+  (an API reporting the outcome of `agent.start` by launch id, plus a supported
+  cancel) - never by a missing process or null ledger fields.
+
 Registering a worker whose launch was only partly recorded (NOT resuming it)
 
 ```
