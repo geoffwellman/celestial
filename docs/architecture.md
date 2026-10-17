@@ -95,6 +95,20 @@ rename, so readers do not see a partial replacement. This is not fsync-based
 power-loss durability, nor an atomic transaction with arbitrary external
 Git/herdr writers. Keep independent backups of important work.
 
+### Replacing a published PR (`cel-fanout replace`)
+
+A published branch is never rewritten; a PR opened outside the fleet has no
+delegation row. `replace reserve` / `replace attach` are the two durable,
+individually atomic stages that give a clean candidate a row of its own. The
+child row carries `replacement.{role:child, of, original_head, original_pr,
+target_head, stage}`; the original carries `replacement.{role:source, child}`.
+The `replacement` namespace is separate from any recovery metadata. Consumers
+treat a `source` row as history only: capacity, fleet rows, gc pane handling
+and the held-work refusal skip it, `release` refuses to remove the worktree
+the child now owns, and `_ledger_append` keeps lineage across a re-delegation.
+No new ledger state exists - the child is an ordinary `running` row whose
+collect/review/land are gated on `stage: attached`.
+
 ## Credentials
 
 Workspace `env:` and gitignored `env.local` layer over the caller's environment.

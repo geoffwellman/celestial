@@ -184,6 +184,29 @@ Products and the review verdict
   authority — and writes `Reviewed-by: <by> (<verdict>)` into the squash-merge
   body so the record is public in the log.
 
+- `cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40>`
+  then `cel-fanout replace attach <new-branch> --head <sha40>` (orchestrator
+  only) is the one audited way to publish a CLEAN replacement for a PR whose
+  branch carried what must not be published (e.g. private `.agent/` handoffs).
+  `reserve` refuses, with nothing written, unless the source is this fleet's
+  own finished/collected ship row (alias and worktree as stated), its open
+  same-repo PR is `--pr` at exactly `--original-head`, the new branch is
+  absent on the remote, and git agrees the candidate descends from the default
+  branch *without* the original head, no commit in it touches a path the
+  release hygiene scan calls private, and every other path is byte-identical
+  to the original. It then writes the child row (`replacement` metadata, no
+  review or gate evidence) and marks the original, in ONE ledger write, and
+  tells the worker by inbox to push exactly that head and open a READY PR.
+  The worker is handed to the child: the original keeps its state and history
+  but stops counting as a worker, and its worktree cannot be released through
+  it. `attach` re-reads GitHub (original head unchanged; candidate PR open,
+  ready, this fleet's, not a fork, head and remote ref == the reserved head)
+  and marks the child attached; until then collect, approval and land refuse
+  it. Then collect, `review --head`, `land` work on the child as on any row -
+  no approval carries over. Either stage may be replayed with the same
+  arguments after a lost response; a different replacement of the same
+  original is refused. It never writes to GitHub or touches the original PR.
+
 - `cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <login>] [--dry-run]`
   is the one supported way to request the external GitHub reviewer named by
   `policy.reviewer` (raw `gh pr edit --add-reviewer` stays guard-refused). It

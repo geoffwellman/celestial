@@ -132,6 +132,7 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
                    else ((($roster.result.agents? // []) | map(select(.pane_id == $p)))[0] // {}) end;
     .[]?
     | select(.repo == $r and ((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked")))
+    | select((.replacement.role // "") != "source")   # its worker now belongs to the replacement row
     | . as $e
     | (.pane // "") as $p
     | agent($p) as $a
