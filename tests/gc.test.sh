@@ -106,6 +106,15 @@ test_gc_never_erases_an_unresolved_recovered_launch() {
   rm -rf "$T"
 }
 
+test_gc_keeps_a_finished_row_with_launch_debt() {
+  _gc_managed_fixture
+  jq '.[0].state = "finished" | .[0].launch = {phase:"start-failed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
+  mv "$T/next" "$GC_WS/.cel/delegations.json"
+  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
 test_gc_vetoes_running_delegations_for_every_pr_state_and_orphans() {
   _gc_managed_fixture
   jq '.[0].state = "running"' "$GC_WS/.cel/delegations.json" > "$T/next"

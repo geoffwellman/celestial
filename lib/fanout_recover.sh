@@ -486,9 +486,13 @@ cmd_recover_continue() { # <id> [--workspace NAME]
 # `recover abandon` is the way out. Prints why, nothing when settled.
 _rec_unresolved() { # <row-json>
   [ -n "$1" ] || return 0
-  printf '%s' "$1" | jq -r 'select((.state // "") | IN("unconfirmed","running"))
-    | if .recovery != null then ((.recovery.dispatch.phase // "registered") | select(. != "accepted"))
+  # launch debt fences EVERY state except the ones an operator or the factory has
+  # already closed: a failed `delegate --reuse` leaves a finished/collected row
+  # with launch.phase start-failed, and that row must not bypass the fence.
+  printf '%s' "$1" | jq -r '(.state // "") as $st
+    | if ($st | IN("abandoned","landed","released")) then empty
       elif ((.launch.phase // "") | IN("starting","start-failed","started")) then ("launch " + .launch.phase)
+      elif .recovery != null and ($st | IN("unconfirmed","running")) then ((.recovery.dispatch.phase // "registered") | select(. != "accepted"))
       else empty end'
 }
 _rec_guard() { # <verb> <id> <row-json>
@@ -515,21 +519,27 @@ cmd_recover_abandon() { # <id> --reason TEXT [--workspace NAME]
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local row; row="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$row" ] || die "recover abandon: no delegation with id '$id'"
-  [ "$(printf '%s' "$row" | jq -r '.state // ""')" = unconfirmed ] \
-    || die "recover abandon: $id is '$(printf '%s' "$row" | jq -r '.state // "?"')', not an unconfirmed launch - nothing changed"
-  # UNCERTAIN DISPATCH DEBT IS NEVER ABANDONED AWAY. Only a row where nothing was
-  # ever submitted (recovery registered; launch starting/start-failed/started)
-  # is definitively "no task delivered". A submitted-but-unproven task
-  # (submitting, ambiguous, unconfirmed-acceptance, dispatch-unconfirmed) may
-  # be running and paid for: its evidence and fence stay until `recover
-  # continue` sees task evidence.
-  local ph lph
+  local st ph lph pane alias
+  st="$(printf '%s' "$row" | jq -r '.state // ""')"
   ph="$(printf '%s' "$row" | jq -r '.recovery.dispatch.phase // ""')"; lph="$(printf '%s' "$row" | jq -r '.launch.phase // ""')"
-  case "$ph:$lph" in
-    submitting:*|ambiguous:*|unconfirmed-acceptance:*|*:dispatch-unconfirmed)
-      die "recover abandon: $id has an UNCERTAIN dispatch (recovery phase '${ph:-none}', launch '${lph:-none}'): a task may have been delivered and be running. It is not abandoned - the row and its evidence stay fenced. Look at the pane and run: cel-fanout recover continue $id (it only looks, never resubmits)" ;;
-  esac
-  _ledger_patch "$wsdir" "$id" '.abandon = {reason:$r, at:$at, prior_recovery_phase:(.recovery.dispatch.phase // null), prior_launch_phase:(.launch.phase // null)}
+  pane="$(printf '%s' "$row" | jq -r '.pane // ""')"; alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
+  # ONLY A DEFINITIVE "NO TASK WAS EVER SUBMITTED" MAY BE ABANDONED, and even
+  # then only against fresh evidence. Definitive: a recovery row at `registered`
+  # (no prompt attempt recorded) or a delegate launch at `start-failed` (the
+  # start never completed, so no dispatch followed). NEVER definitive: launch
+  # starting/started (the agent may exist and the process died anywhere after),
+  # dispatch-unconfirmed, and recovery submitting/ambiguous/unconfirmed-acceptance
+  # (a prompt MAY have been delivered). Those stay fenced, unknown, until
+  # `recover continue` sees task evidence.
+  local definitive=0
+  if [ -n "$ph" ]; then [ "$ph" = registered ] && [ -z "$lph" -o "$lph" = recovered ] && definitive=1
+  else [ "$lph" = start-failed ] && definitive=1; fi
+  [ "$definitive" -eq 1 ] || die "recover abandon: $id is not DEFINITIVELY not-accepted (recovery phase '${ph:-none}', launch '${lph:-none}', state $st): a task may have been delivered or an agent may exist and be running. Not abandoned - the row and its evidence stay fenced and the outcome stays unknown. Look at the pane and run: cel-fanout recover continue $id (it only looks, never resubmits)"
+  # FRESH EVIDENCE, now: the pane must be readable and show no turn and context
+  # zero. The operator's --reason is a note, not evidence.
+  [ -n "$pane" ] && [ -n "$alias" ] || die "recover abandon: $id names no pane or alias to check - not abandoned"
+  _rec_pane_unstarted "$alias" || die "recover abandon: the agent's pane is not provably unstarted right now (unreadable, a turn on screen, or context above zero) - a task may be running. Not abandoned; the outcome stays unknown and the row stays fenced"
+  _ledger_patch "$wsdir" "$id" '.abandon = {reason:$r, at:$at, prior_state:.state, prior_recovery_phase:(.recovery.dispatch.phase // null), prior_launch_phase:(.launch.phase // null)}
     | if .recovery != null then .recovery.dispatch = ((.recovery.dispatch // {}) + {phase:"abandoned", at:$at, note:$r}) else . end' \
     --arg r "$reason" --arg at "$(_now_iso)"
   _ledger_update_state "$wsdir" "$id" abandoned

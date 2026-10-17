@@ -524,10 +524,27 @@ test_abandon_refuses_uncertain_dispatch_debt_and_keeps_it_fenced() {
     local before out rc=0; before="$(_rc_ledger)"
     out="$(cd "$T" && "$BIN" recover abandon WG-1-recover --reason "gave up" 2>&1)" || rc=$?
     [ "$rc" -ne 0 ] || { echo "abandoned uncertain debt ($ph)"; _rc_cleanup; return 1; }
-    assert_contains "$out" "UNCERTAIN dispatch" || { _rc_cleanup; return 1; }
+    assert_contains "$out" "DEFINITIVELY" || { _rc_cleanup; return 1; }
     assert_eq "$(_rc_ledger)" "$before" || { _rc_cleanup; return 1; }
     out="$(cd "$T" && "$BIN" release WG-1-recover --discard 2>&1)" && { echo "released uncertain debt"; _rc_cleanup; return 1; }
     rm -f "$T/.cel/delegations.json"
   done
+  _rc_cleanup
+}
+
+test_abandon_of_a_registered_row_needs_a_fresh_unstarted_pane() {
+  _rc_setup
+  _rc_register; assert_eq "$RC_RC" 0
+  printf '● work happened meanwhile\nctx 2.0%%\n' > "$RS/read.txt"
+  local before out rc=0; before="$(_rc_ledger)"
+  out="$(cd "$T" && "$BIN" recover abandon WG-1-recover --reason "idle" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandoned despite a turn on screen"; _rc_cleanup; return 1; }
+  assert_contains "$out" "not provably unstarted"
+  assert_eq "$(_rc_ledger)" "$before"
+  [ -d "$RC_WT" ] || { echo "worktree went"; return 1; }
+  : > "$RS/read.txt"                       # unreadable is not evidence either
+  rc=0; out="$(cd "$T" && "$BIN" recover abandon WG-1-recover --reason "idle" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandoned an unreadable pane"; _rc_cleanup; return 1; }
+  assert_eq "$(_rc_ledger)" "$before"
   _rc_cleanup
 }
