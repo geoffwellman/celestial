@@ -359,9 +359,12 @@ _ledger_append() { # <wsdir> <entry-json>
   # history that began at the FIRST collect could not say when the work
   # started, so the first entry is stamped here, at `created`, rather than
   # left for the reader to synthesise.
+  # A re-delegated row keeps its replacement lineage: it is the only record of
+  # which row superseded which, and a rewrite must not erase it.
   _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" --arg by "$(_ledger_mover)" \
-    'map(select(.id != $e.id))
-     + [$e + {history: (($e.history // []) | if length > 0 then .
+    '([.[] | select(.id == $e.id) | .replacement // empty] | first) as $rp
+     | map(select(.id != $e.id))
+     + [$e + (if $rp != null and ($e.replacement // null) == null then {replacement: $rp} else {} end) + {history: (($e.history // []) | if length > 0 then .
          else [{state: ($e.state // ""), at: ($e.created // ""), by: $by}] end)}]')"
 }
 
@@ -666,7 +669,7 @@ cmd_delegate() {
   wcap="${wcap:-4}"
   local prepos; prepos="$(ws_product_repos "$wsdir" "$product" | jq -R . | jq -sc .)"
   wused="$(_ledger_read "$wsdir" | jq --argjson rs "$prepos" \
-    '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+    '[.[] | select((.repo | IN($rs[])) and .state == "running" and ((.replacement.role // "") != "source"))] | length')"
   if [ "$wused" -ge "$wcap" ]; then
     die "delegate: $product already has $wused running worker(s), cap is $wcap.
   Free a slot first - a finished worker still holds one until it is collected:
@@ -1172,6 +1175,8 @@ cmd_collect() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  _replace_frozen collect "$id" "$entry"
+  _replace_unattached collect "$id" "$entry"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
   alias="$(printf '%s' "$entry" | jq -r '.alias')"
@@ -1550,7 +1555,7 @@ _fanout_slots() { # <wsdir>
     label="$p"
     [ "$n" -le 1 ] || label="$p ($(ws_product_repos "$1" "$p" | paste -sd, - | sed 's/,/, /g'))"
     used="$(_ledger_read "$1" | jq --argjson rs "$repos" \
-      '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+      '[.[] | select((.repo | IN($rs[])) and .state == "running" and ((.replacement.role // "") != "source"))] | length')"
     printf 'slots %-28s %s/%s used' "$label" "$used" "$cap"
     if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
     else printf ' - %s free\n' "$(( cap - used ))"; fi
@@ -2065,6 +2070,17 @@ cmd_release() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  # THE WORKTREE BELONGS TO THE LIVE REPLACEMENT. The original row only keeps
+  # the history; removing the checkout through it would take the replacement's
+  # worker with it (single owner - see cmd_replace).
+  if [ "$(printf '%s' "$entry" | jq -r '.replacement.role // ""')" = source ]; then
+    local rchild rcrow rwt
+    rchild="$(printf '%s' "$entry" | jq -r '.replacement.child // ""')"
+    rcrow="$(_ledger_entry "$wsdir" "$rchild")"; rwt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    if [ -n "$rcrow" ] && [ "$(printf '%s' "$rcrow" | jq -r '.state // ""')" != released ] && [ -d "$rwt" ]; then
+      die "release: the worktree of $id now belongs to its replacement $rchild ($(printf '%s' "$rcrow" | jq -r '.state // "?"')) - release $rchild instead; nothing removed"
+    fi
+  fi
   local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
 
   # A preview of this branch goes first: its pane is cwd'd into the worktree
@@ -2218,6 +2234,8 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   [ -n "$entry" ] || die "review: no delegation with id '$id'"
 
   if [ "$verdict" = approved ]; then
+    _replace_frozen review "$id" "$entry"
+    _replace_unattached review "$id" "$entry"
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
     # DELEGATION OWNS. The API read validates; it is never where the SHA comes
     # from. The ledger lock is dropped around the remote call (the same rule as
@@ -2355,6 +2373,8 @@ cmd_land() { # <id>
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
+  _replace_frozen land "$id" "$entry"
+  _replace_unattached land "$id" "$entry"
   local repo branch slug ticket
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
   ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
@@ -2558,6 +2578,7 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "request-review: no delegation with id '$id'"
+  _replace_frozen request-review "$id" "$entry"
 
   # THE POLICY: the configured reviewer, and only it. --reviewer can pick that
   # identity out, never widen it.
@@ -2663,6 +2684,357 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
   c_ok "$id: requested $reviewer on $slug#$num for $head (verified in requested_reviewers; a request to look, not an approval and not permission to land)"
 }
 
+# REPLACING A PR WHOSE BRANCH CARRIES WHAT MUST NOT BE PUBLISHED (AH-261017).
+#
+# A published branch cannot be cleaned: force-pushing it rewrites reviewed
+# history, and a fresh PR opened by hand has no delegation row, so collect,
+# review and land cannot see it. `replace` is the one audited way across, in
+# two durable stages, each ONE atomic ledger write under the ledger lock:
+#
+#   reserve  checks the original, the clean candidate and GitHub, then writes
+#            the child row (replacement.role=child, stage=reserved) AND marks
+#            the original (replacement.role=source) in the same write. Only
+#            after that does the worker hear that it may push the candidate.
+#   attach   after the worker pushed exactly the reserved head and opened a
+#            READY PR, re-reads GitHub and moves the child to stage=attached.
+#
+# The child is a new row with its own id, branch, review and gate state - an
+# approval or a verdict never carries over. The worker (alias, pane, worktree)
+# is handed to the child in the reserve write; the original keeps its state
+# and history as evidence and stops counting as a worker, so one worker is one
+# slot and the live worktree cannot be released or collected through the
+# original. Nothing here writes to GitHub, force-pushes, closes or edits the
+# original PR, or imports a row: an unattached child cannot be collected,
+# approved or landed, and a replay of either stage with the same identity is a
+# no-op, so a lost response is resumed, never duplicated.
+_replace_fault() { # <stage> - a TEST seam, honoured only under CEL_TESTING
+  [ "${CEL_TESTING:-}" = 1 ] && [ "${CEL_REPLACE_FAULT:-}" = "$1" ] || return 0
+  die "replace: injected fault at $1"
+}
+
+# THE SOURCE IS FROZEN. Once a replacement is reserved the original row is
+# evidence only: landing, collecting or approving it would publish the very
+# branch that was replaced (with its old approval), so every acting verb
+# refuses it and names the child.
+_replace_frozen() { # <verb> <id> <entry-json>
+  [ "$(printf '%s' "$3" | jq -r '.replacement.role // ""')" = source ] || return 0
+  die "$1: $2 has been replaced by $(printf '%s' "$3" | jq -r '.replacement.child // "?"') and is frozen as evidence - act on the replacement. Nothing recorded."
+}
+
+# A child that is not attached yet is not a PR anyone can act on.
+_replace_unattached() { # <verb> <id> <entry-json>
+  [ "$(printf '%s' "$3" | jq -r '.replacement.stage // ""')" = reserved ] || return 0
+  die "$1: $2 is a replacement that is not attached - its clean PR has not been published and attached. Run: cel-fanout replace attach $2 --head $(printf '%s' "$3" | jq -r '.replacement.target_head') . Nothing recorded."
+}
+
+# The paths among stdin's (NUL-delimited) that the release hygiene scan itself
+# calls private - the same predicate, not a copy of its list. NUL in, NUL out:
+# git quotes non-ASCII and control characters in newline-delimited listings,
+# and a quoted name no longer looks like the path it names.
+_replace_sensitive() {
+  python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import hygiene as h
+for name in sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0"):
+    if name and h.sensitive_path(name): sys.stdout.buffer.write(name.encode("utf-8", "surrogateescape") + b"\0")
+' "$CEL_ROOT/tools/release"
+}
+
+_replace_pr() { # <wsdir> <slug> <branch> -> JSON, fails when there is no PR
+  _fgh "$1" pr view "$3" --repo "$2" \
+    --json number,author,state,headRefOid,baseRefName,isDraft,isCrossRepository 2>/dev/null
+}
+
+# CLEAN CANDIDATE vs FROZEN ORIGINAL. Only the removal of private artifacts may
+# differ; everything else must be byte-identical (mode + blob) to the original.
+# Every path list is NUL-delimited (-z) and every pathspec literal, so no name
+# - non-ASCII, quoted, globby - can hide from the content or hygiene check.
+_replace_check_content() { # <repodir> <original-sha> <target-sha> -> reason on stdout, fails when refused
+  local dir="$1" oh="$2" th="$3" base obase tbase c p so st
+  local -a G=(git --literal-pathspecs -C "$dir")
+  base="$(repo_default_ref "$dir")" || { printf 'cannot resolve the default branch of the repository'; return 1; }
+  "${G[@]}" merge-base --is-ancestor "$oh" "$th" 2>/dev/null \
+    && { printf 'ancestry is not clean: the original head %s is an ancestor of the candidate, so the published history would still carry it' "${oh:0:12}"; return 1; }
+  obase="$("${G[@]}" merge-base "$base" "$oh" 2>/dev/null)" && tbase="$("${G[@]}" merge-base "$base" "$th" 2>/dev/null)" \
+    || { printf 'the original and the candidate must both descend from %s' "$base"; return 1; }
+  [ "$("${G[@]}" rev-list --count "$base..$th" 2>/dev/null)" -gt 0 ] \
+    || { printf 'the candidate carries no commit beyond %s' "$base"; return 1; }
+  # EVERY git READ HERE MUST BE ABLE TO FAIL THE CHECK. A listing that errors
+  # inside a pipe or a process substitution reads as "no paths" and would pass
+  # an unchecked candidate, so each list goes to a file with its own status.
+  local tmp rc; tmp="$(mktemp -d)" || { printf 'cannot create a scratch directory'; return 1; }
+  local commits; commits="$("${G[@]}" rev-list "$base..$th" 2>/dev/null)" \
+    || { rm -rf "$tmp"; printf 'cannot list the commits that would be published'; return 1; }
+  while read -r c; do
+    [ -n "$c" ] || continue
+    "${G[@]}" diff-tree -z -r -m --root --no-commit-id --name-only "$c" > "$tmp/h" 2>/dev/null \
+      && _replace_sensitive < "$tmp/h" > "$tmp/hs" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read commit %s' "$c"; return 1; }
+    if [ -s "$tmp/hs" ]; then
+      p="$(tr '\0' '\n' < "$tmp/hs")"
+      rm -rf "$tmp"; printf 'ancestry is not clean: private artifact %s is in the history that would be published (commit %s)' "${p%%$'\n'*}" "${c:0:12}"; return 1
+    fi
+  done <<< "$commits"
+  local -a paths=() sens=() l1=() l2=()
+  { "${G[@]}" diff -z --name-only --no-renames "$obase" "$oh" > "$tmp/l1" && "${G[@]}" diff -z --name-only --no-renames "$tbase" "$th" > "$tmp/l2"; } 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot list the changed paths'; return 1; }
+  mapfile -d '' -t l1 < "$tmp/l1"; mapfile -d '' -t l2 < "$tmp/l2"
+  local -A seen=()
+  for p in "${l1[@]}" "${l2[@]}"; do
+    case "$p" in *$'\n'*) rm -rf "$tmp"; printf 'a path contains a newline and cannot be compared safely'; return 1 ;; esac
+    [ -n "$p" ] && [ -z "${seen[$p]:-}" ] && { seen["$p"]=1; paths+=("$p"); }
+  done
+  local -A is_sens=()
+  printf '%s\0' "${paths[@]}" | _replace_sensitive > "$tmp/s" 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot classify the changed paths'; return 1; }
+  mapfile -d '' -t sens < "$tmp/s"
+  for p in "${sens[@]}"; do is_sens["$p"]=1; done
+  for p in "${paths[@]}"; do
+    [ -n "$p" ] || continue
+    "${G[@]}" ls-tree -z "$oh" -- "$p" > "$tmp/o" 2>/dev/null && "${G[@]}" ls-tree -z "$th" -- "$p" > "$tmp/t" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read %s from the trees' "$p"; return 1; }
+    so="$(tr '\0' '\n' < "$tmp/o")"; st="$(tr '\0' '\n' < "$tmp/t")"
+    if [ -n "${is_sens[$p]:-}" ]; then
+      [ -z "$st" ] || { rm -rf "$tmp"; printf 'private artifact %s is still in the candidate tree' "$p"; return 1; }
+      continue
+    fi
+    [ "$so" = "$st" ] || { rm -rf "$tmp"; printf 'the candidate changes %s, which is not a private artifact - only artifact removal may differ from the frozen original %s' "$p" "${oh:0:12}"; return 1; }
+  done
+  rm -rf "$tmp"
+  return 0
+}
+
+_replace_ident() { # <row-json> -> the identity a stage must find unchanged
+  printf '%s' "$1" | jq -c '{state, alias, worktree, branch, repo, replacement}'
+}
+
+cmd_replace() { # reserve|attach ...
+  local sub="${1:-}"; [ $# -ge 1 ] && shift
+  case "$sub" in
+    reserve) _replace_reserve "$@" ;;
+    attach)  _replace_attach "$@" ;;
+    *) die "usage: cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40> [--workspace NAME]
+       cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]" ;;
+  esac
+}
+
+_replace_reserve() {
+  local usage="usage: cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40> [--workspace NAME]"
+  [ $# -ge 1 ] || die "$usage"
+  local id="$1"; shift
+  local oh="" pr="" alias="" wtx="" nb="" th="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --original-head) [ $# -ge 2 ] || die "replace: --original-head needs a value"; oh="$2"; shift 2 ;;
+      --pr)       [ $# -ge 2 ] || die "replace: --pr needs a value"; pr="$2"; shift 2 ;;
+      --alias)    [ $# -ge 2 ] || die "replace: --alias needs a value"; alias="$2"; shift 2 ;;
+      --worktree) [ $# -ge 2 ] || die "replace: --worktree needs a value"; wtx="$2"; shift 2 ;;
+      --branch)   [ $# -ge 2 ] || die "replace: --branch needs a value"; nb="$2"; shift 2 ;;
+      --head)     [ $# -ge 2 ] || die "replace: --head needs a value"; th="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      *) die "replace reserve: unknown argument: $1" ;;
+    esac
+  done
+  # ALL VALIDATION BEFORE ANY LEDGER OR NETWORK ACCESS.
+  [ -n "$oh" ] && [ -n "$pr" ] && [ -n "$alias" ] && [ -n "$wtx" ] && [ -n "$nb" ] && [ -n "$th" ] \
+    || die "replace reserve: --original-head, --pr, --alias, --worktree, --branch and --head are all required - a request that does not name the identity it expects cannot be fenced against a stale one. $usage"
+  [[ "$oh" =~ ^[0-9a-f]{40}$ ]] || die "replace reserve: --original-head must be a full 40-character lowercase commit SHA (got: '$oh')"
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace reserve: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  [[ "$pr" =~ ^[0-9]+$ ]] || die "replace reserve: --pr must be the original PR number (got: '$pr')"
+  git check-ref-format --branch "$nb" >/dev/null 2>&1 || die "replace reserve: '$nb' is not a valid branch name"
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace reserve: no delegation with id '$id'"
+  local repo obranch state shape
+  repo="$(printf '%s' "$row" | jq -r '.repo // ""')"; obranch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+  state="$(printf '%s' "$row" | jq -r '.state // ""')"; shape="$(printf '%s' "$row" | jq -r '.shape // "ship"')"
+  [ "$nb" != "$obranch" ] || die "replace reserve: the replacement branch must be different from the original ($obranch) - a published branch is never rewritten"
+
+  # the source: a fleet worker's own ship row that the world has not finished with
+  [ "$shape" = ship ] || die "replace reserve: $id is a $shape - only a ship delegation has a PR to replace"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" != child ] \
+    || die "replace reserve: $id is itself a replacement - replace the original, not the copy"
+  # a replay of THIS replacement is a resume, whatever has happened since
+  local child_id; child_id="$(printf '%s' "$row" | jq -r '.replacement.child // ""')"
+  if [ -n "$child_id" ]; then
+    local crow; crow="$(_ledger_entry "$wsdir" "$child_id")"
+    if [ "$child_id" = "$nb" ] && [ -n "$crow" ] \
+       && [ "$(printf '%s' "$crow" | jq -c '.replacement | {of, original_head, original_pr, target_branch, target_head}')" = "$(jq -nc --arg of "$id" --arg oh "$oh" --argjson pr "$pr" --arg nb "$nb" --arg th "$th" '{of:$of, original_head:$oh, original_pr:$pr, target_branch:$nb, target_head:$th}')" ]; then
+      _replace_announce "$wsdir" "$crow"
+      c_ok "$id: replacement $nb is already reserved at ${th:0:12} (stage $(printf '%s' "$crow" | jq -r '.replacement.stage')) - nothing changed"
+      return 0
+    fi
+    die "replace reserve: $id already has a replacement ($child_id) - one original, one replacement; nothing recorded"
+  fi
+  case "$state" in
+    finished|collected) ;;
+    *) die "replace reserve: $id is $state - only a finished or collected delegation can be replaced (a running worker is not asked to switch mid-flight; a landed, released or abandoned one is done). Nothing recorded" ;;
+  esac
+  [ -z "$(_ledger_entry "$wsdir" "$nb")" ] || die "replace reserve: a delegation row '$nb' already exists - a replacement is a new row, never an adoption of an existing one"
+  [ "$(printf '%s' "$row" | jq -r '.alias // ""')" = "$alias" ] \
+    || die "replace reserve: the worker alias of $id is '$(printf '%s' "$row" | jq -r '.alias // "?"')', not '$alias' - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.worktree // ""')" = "$wtx" ] \
+    || die "replace reserve: the worktree of $id is '$(printf '%s' "$row" | jq -r '.worktree // "?"')', not '$wtx' - nothing recorded"
+  [ -d "$wtx" ] || die "replace reserve: the worktree $wtx is gone - the original worker cannot publish from it"
+  local repodir="$wsdir/repos/$repo" slug
+  [ -d "$repodir" ] || die "replace reserve: repo '$repo' not found under $wsdir/repos"
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  { [ -n "$slug" ] && [ "$slug" != null ]; } || die "replace reserve: repo '$repo' is not registered in this workspace"
+
+  # LOCAL GIT: both commits must exist, and the candidate must be the original
+  # minus private artifacts, in its history as well as its tree.
+  local sha
+  for sha in "$oh" "$th"; do
+    git -C "$repodir" cat-file -e "$sha^{commit}" 2>/dev/null || die "replace reserve: $sha is not a commit in $repo - nothing recorded"
+  done
+  local why
+  why="$(_replace_check_content "$repodir" "$oh" "$th")" || die "replace reserve: refused - $why. Nothing recorded"
+
+  # GITHUB, with the ledger lock dropped around it (the rule for any remote wait).
+  ws_github_ready "$wsdir" "$GH" \
+    || die "replace reserve: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+  local ident; ident="$(_replace_ident "$row")"
+  _ledger_unlock
+  local opr me author ostate ohead num ref rc=0 err
+  opr="$(_replace_pr "$wsdir" "$slug" "$obranch")" || { _ledger_relock; die "replace reserve: no PR found for $obranch on $slug - nothing recorded"; }
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  err="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$nb" 2>&1)" || rc=$?
+  _ledger_relock
+  num="$(printf '%s' "$opr" | jq -r '.number // ""')"; author="$(printf '%s' "$opr" | jq -r '.author.login // ""')"
+  ostate="$(printf '%s' "$opr" | jq -r '.state // ""')"; ohead="$(printf '%s' "$opr" | jq -r '.headRefOid // ""')"
+  [ "$num" = "$pr" ] || die "replace reserve: the PR for $obranch is #$num, not #$pr - nothing recorded"
+  [ "$(printf '%s' "$opr" | jq -r '.isCrossRepository // false')" = false ] \
+    || die "replace reserve: PR #$pr comes from a fork - this fleet does not own it; nothing recorded"
+  [ -n "$me" ] && [ "$author" = "$me" ] \
+    || die "replace reserve: PR #$pr was opened by '${author:-?}', not by this fleet ('${me:-?}') - nothing recorded"
+  [ "$ostate" = OPEN ] || die "replace reserve: PR #$pr is $ostate, not OPEN - nothing recorded"
+  [ "$ohead" = "$oh" ] \
+    || die "replace reserve: the original PR head moved: PR #$pr is at ${ohead:-unknown}, not the frozen original $oh - re-freeze and re-check; nothing recorded"
+  if [ "$rc" -eq 0 ]; then
+    die "replace reserve: the branch $nb already exists on $slug - a replacement is published only after it is reserved; nothing recorded"
+  fi
+  case "$err" in
+    *"Not Found"*|*"HTTP 404"*) ;;
+    *) die "replace reserve: could not read the remote branch $nb on $slug ($err) - an unreadable remote is not an absent one; nothing recorded" ;;
+  esac
+
+  # CAS: re-read after the unlocked window; the source must be exactly what was checked.
+  local row2; row2="$(_ledger_entry "$wsdir" "$id")"
+  if [ -n "$row2" ] && [ "$(printf '%s' "$row2" | jq -r '.replacement.child // ""')" != "" ]; then
+    die "replace reserve: $id already has a replacement ($(printf '%s' "$row2" | jq -r '.replacement.child')) - it was reserved while this request was checking GitHub; nothing recorded"
+  fi
+  [ -n "$row2" ] && [ "$(_replace_ident "$row2")" = "$ident" ] \
+    || die "replace reserve: $id changed while GitHub was being checked - nothing recorded; run it again"
+  [ -z "$(_ledger_entry "$wsdir" "$nb")" ] || die "replace reserve: a delegation row '$nb' appeared while checking - nothing recorded"
+  _replace_fault before-reserve
+
+  local at by; at="$(_now_iso)"; by="$(_ledger_mover)"
+  local child cur
+  child="$(printf '%s' "$row2" | jq -c --arg id "$nb" --arg of "$id" --arg oh "$oh" --argjson pr "$pr" \
+    --arg th "$th" --arg at "$at" --arg by "$by" --arg ob "$obranch" '
+    {id:$id, repo, branch:$id, alias, herdr_ws, pane, worktree, spec, state:"running", created:$at,
+     profile, runtime, model, thinking, ticket, provider, shape, profile_reason,
+     replacement:{role:"child", of:$of, original_branch:$ob, original_head:$oh, original_pr:$pr,
+                  target_branch:$id, target_head:$th, stage:"reserved", reserved_at:$at, reserved_by:$by},
+     history:[{state:"running", at:$at, by:$by}]}
+    | with_entries(select(.value != null))')"
+  cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson child "$child" --arg at "$at" --arg by "$by" \
+    'map(if .id == $id then .replacement = {role:"source", child:$child.id, at:$at, by:$by} else . end) + [$child]')" \
+    || die "replace reserve: could not write the ledger - nothing recorded"
+  _replace_fault after-reserve
+  _replace_announce "$wsdir" "$child"
+  c_ok "$id: reserved replacement $nb at ${th:0:12} (the worker $alias is handed to it; $id is kept as evidence). Next: the worker pushes exactly that head and opens a READY PR, then: cel-fanout replace attach $nb --head $th"
+}
+
+# Authorisation to publish goes to the worker AFTER the reservation is durable,
+# by inbox, and is best-effort: the reservation is the authority, this is the
+# notification - a replay resends it.
+_replace_announce() { # <wsdir> <child-row-json>
+  local wsdir="$1" c="$2" ws a nb th
+  ws="$(ws_name "$wsdir")"
+  a="$(printf '%s' "$c" | jq -r '.alias // ""')"; nb="$(printf '%s' "$c" | jq -r '.branch')"; th="$(printf '%s' "$c" | jq -r '.replacement.target_head')"
+  [ "$(printf '%s' "$c" | jq -r '.replacement.stage')" = reserved ] || return 0
+  [ -n "$a" ] || return 0
+  ( cmd_inbox send "$a" "replacement reserved for $(printf '%s' "$c" | jq -r '.replacement.of'): publish branch $nb at EXACTLY $th (git push origin $th:refs/heads/$nb - no force, no other commit), open a READY pull request for it, rewrite .agent/result.md for the new PR (keep it untracked), then tell your orchestrator. Do not touch the original branch or its PR." \
+      --from "$(_ledger_mover)" --workspace "$ws" --kind status ) >/dev/null 2>&1 \
+    || c_warn "could not message $a - the reservation stands; tell the worker by hand"
+}
+
+_replace_attach() {
+  [ $# -ge 1 ] || die "usage: cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]"
+  local id="$1"; shift
+  local th="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --head)      [ $# -ge 2 ] || die "replace: --head needs a value"; th="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      *) die "replace attach: unknown argument: $1" ;;
+    esac
+  done
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace attach: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace attach: no delegation with id '$id'"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" = child ] \
+    || die "replace attach: $id is not a reserved replacement - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.target_head')" = "$th" ] \
+    || die "replace attach: --head $th is not the head reserved for $id ($(printf '%s' "$row" | jq -r '.replacement.target_head')) - a replacement is the exact head that was validated; nothing recorded"
+  if [ "$(printf '%s' "$row" | jq -r '.replacement.stage')" = attached ]; then
+    c_ok "$id: already attached to PR #$(printf '%s' "$row" | jq -r '.replacement.pr') at ${th:0:12} - nothing changed"
+    return 0
+  fi
+  local of oh opr_n repo obranch slug
+  of="$(printf '%s' "$row" | jq -r '.replacement.of')"; oh="$(printf '%s' "$row" | jq -r '.replacement.original_head')"
+  opr_n="$(printf '%s' "$row" | jq -r '.replacement.original_pr')"; obranch="$(printf '%s' "$row" | jq -r '.replacement.original_branch')"
+  repo="$(printf '%s' "$row" | jq -r '.repo')"
+  local src; src="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$src" ] && [ "$(printf '%s' "$src" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace attach: the original $of no longer names $id as its replacement - nothing recorded"
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  { [ -n "$slug" ] && [ "$slug" != null ]; } || die "replace attach: repo '$repo' is not registered in this workspace"
+  ws_github_ready "$wsdir" "$GH" \
+    || die "replace attach: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+  local ident; ident="$(_replace_ident "$row")"
+  _ledger_unlock
+  local opr tpr me refj ref="" rc=0
+  opr="$(_replace_pr "$wsdir" "$slug" "$obranch")" || { _ledger_relock; die "replace attach: no PR found for the original $obranch on $slug - nothing recorded"; }
+  tpr="$(_replace_pr "$wsdir" "$slug" "$id")" || { _ledger_relock; die "replace attach: no PR found for $id on $slug - the worker has not published and opened the ready PR yet; nothing recorded"; }
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  refj="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$id" 2>/dev/null)" || rc=$?
+  _ledger_relock
+  [ "$rc" -ne 0 ] || ref="$(printf '%s' "$refj" | jq -r '.object.sha // ""' 2>/dev/null || true)"
+  [ "$(printf '%s' "$opr" | jq -r '.number // ""')" = "$opr_n" ] && [ "$(printf '%s' "$opr" | jq -r '.headRefOid // ""')" = "$oh" ] \
+    || die "replace attach: the original PR head moved (PR #$opr_n is at $(printf '%s' "$opr" | jq -r '.headRefOid // "?"'), not the frozen original $oh) - nothing recorded"
+  [ "$(printf '%s' "$opr" | jq -r '.state // ""')" != MERGED ] || die "replace attach: the original PR #$opr_n is MERGED - nothing to replace; nothing recorded"
+  local tn tstate thead tauthor
+  tn="$(printf '%s' "$tpr" | jq -r '.number // ""')"; tstate="$(printf '%s' "$tpr" | jq -r '.state // ""')"
+  thead="$(printf '%s' "$tpr" | jq -r '.headRefOid // ""')"; tauthor="$(printf '%s' "$tpr" | jq -r '.author.login // ""')"
+  [ "$tstate" = OPEN ] || die "replace attach: the PR for $id is $tstate, not OPEN - nothing recorded"
+  [ "$(printf '%s' "$tpr" | jq -r '.isCrossRepository // false')" = false ] \
+    || die "replace attach: the PR for $id comes from a fork - this fleet does not own it; nothing recorded"
+  [ -n "$me" ] && [ "$tauthor" = "$me" ] \
+    || die "replace attach: the PR for $id was opened by '${tauthor:-?}', not by this fleet ('${me:-?}') - nothing recorded"
+  [ "$(printf '%s' "$tpr" | jq -r '.isDraft // false')" = false ] \
+    || die "replace attach: the PR for $id is a draft - a draft is invisible to the reviewer; open it ready for review. Nothing recorded"
+  [ "$thead" = "$th" ] && [ "$rc" -eq 0 ] && [ "$ref" = "$th" ] \
+    || die "replace attach: the published head is not the reserved one: PR #$tn is at ${thead:-?}, the remote branch at ${ref:-unreadable}, but $th was reserved - the target moved or was never pushed as validated; nothing recorded"
+  local dbase; dbase="$(repo_default_ref "$wsdir/repos/$repo" 2>/dev/null || true)"; dbase="${dbase#origin/}"
+  { [ -z "$dbase" ] || [ "$(printf '%s' "$tpr" | jq -r '.baseRefName // ""')" = "$dbase" ]; } \
+    || die "replace attach: the PR for $id targets $(printf '%s' "$tpr" | jq -r '.baseRefName // "?"'), not $dbase - nothing recorded"
+  local row2 src2; row2="$(_ledger_entry "$wsdir" "$id")"
+  src2="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$row2" ] && [ "$(_replace_ident "$row2")" = "$ident" ] && [ "$(printf '%s' "$src2" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace attach: $id changed while GitHub was being checked - nothing recorded; run it again"
+  _replace_fault before-attach
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson n "$tn" --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" \
+    'map(if .id == $id then .replacement += {stage:"attached", pr:$n, attached_at:$at, attached_by:$by} else . end)')" \
+    || die "replace attach: could not write the ledger - nothing recorded"
+  _replace_fault after-attach
+  c_ok "$id: attached to PR #$tn at ${th:0:12} - collect, review (--head $th) and land now work on it. No approval was carried over from $of"
+}
+
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 # The role check comes FIRST: the cost of the incident this closes was three
@@ -2672,6 +3044,9 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
 case "${1:-}" in
   land|release|collect|request-review)
     _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
+  replace)
+    # the second argument is the sub-verb, not an id
+    _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
   delegate|scout|spike|reconcile)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
@@ -2686,7 +3061,7 @@ case "${1:-}" in
 esac
 
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review|request-review|try|reconcile)
+  delegate|scout|spike|collect|status|release|land|review|request-review|replace|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
@@ -2708,6 +3083,7 @@ case "${1:-}" in
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
   request-review) shift; cmd_request_review "$@" ;;
+  replace)  shift; cmd_replace "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|request-review|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|request-review|replace|handback|land|reconcile ..." ;;
 esac

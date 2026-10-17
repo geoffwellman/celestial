@@ -99,6 +99,7 @@ _wslife_held_work() { # <wsdir> -> lines; return 0 read ok, 3 cannot tell
   # Parse once, and treat a parse failure as "cannot tell", never as empty: a
   # jq that ends `|| true` swallows a malformed ledger into a silent yes.
   if ! rows="$(jq -r '.[]? | select(((.state // "") | IN("running","finished","collected","blocked")))
+                     | select((.replacement.role // "") != "source")
                      | [(.branch // ""), (.worktree // "")] | @tsv' "$led" 2>/dev/null)"; then
     printf 'the delegation ledger %s is not valid JSON\n' "$led"; return 3
   fi
