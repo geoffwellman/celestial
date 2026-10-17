@@ -497,6 +497,15 @@ _rec_unresolved() { # <row-json>
 }
 _rec_guard() { # <verb> <id> <row-json>
   local why; why="$(_rec_unresolved "$3")"
+  if [ -z "$why" ] && [ "$(printf '%s' "$3" | jq -r '.replacement.role // ""')" = child ] && [ -n "${wsdir:-}" ]; then
+    # a replacement child shares its source's worker and worktree: it cannot be
+    # collected, released or landed out from under the source's unsettled launch
+    local src_id src; src_id="$(printf '%s' "$3" | jq -r '.replacement.of // ""')"
+    src="$(_ledger_entry "$wsdir" "$src_id" 2>/dev/null || true)"
+    if [ -n "$src" ] && [ -n "$(_rec_unresolved "$src")" ]; then
+      die "$1: $2 is a replacement whose source $src_id holds an UNSETTLED launch ($(_rec_unresolved "$src")) - the same worker and worktree may still be live. Nothing was changed; the worktree is untouched. The source must be settled first (see cel-fanout recover continue/abandon $src_id)"
+    fi
+  fi
   [ -n "$why" ] || return 0
   # What the operator can honestly do depends on whether `recover abandon`
   # would accept this row (definitive not-accepted only), so say which.

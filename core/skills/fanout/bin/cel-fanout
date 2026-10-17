@@ -2941,6 +2941,11 @@ _replace_reserve() {
     fi
     die "replace reserve: $id already has a replacement ($child_id) - one original, one replacement; nothing recorded"
   fi
+  # THE SOURCE'S LAUNCH DEBT TRAVELS WITH ITS WORKER: a source row that may still
+  # hold a live agent (launch starting/start-failed/started, or an unsettled
+  # recovery) must not hand that alias and worktree to a child row that carries
+  # no such record. Refused here with nothing written.
+  _rec_guard replace-reserve "$id" "$row"
   case "$state" in
     finished|collected) ;;
     *) die "replace reserve: $id is $state - only a finished or collected delegation can be replaced (a running worker is not asked to switch mid-flight; a landed, released or abandoned one is done). Nothing recorded" ;;
@@ -3066,6 +3071,7 @@ _replace_attach() {
   local src; src="$(_ledger_entry "$wsdir" "$of")"
   [ -n "$src" ] && [ "$(printf '%s' "$src" | jq -r '.replacement.child // ""')" = "$id" ] \
     || die "replace attach: the original $of no longer names $id as its replacement - nothing recorded"
+  _rec_guard replace-attach "$of" "$src"   # the source may have acquired debt since reserve
   slug="$(_repo_slug "$wsdir" "$repo")"
   { [ -n "$slug" ] && [ "$slug" != null ]; } || die "replace attach: repo '$repo' is not registered in this workspace"
   ws_github_ready "$wsdir" "$GH" \

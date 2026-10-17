@@ -589,3 +589,48 @@ test_replace_an_unreadable_original_tree_is_refused() {
   assert_eq "$(_rp_sum)" "$LEDGER_SUM"
   rm -rf "$T"
 }
+
+# AH-261017 integration seam: a source that may still hold a live agent (launch
+# debt or an unsettled recovery) must not launder that debt into a child row.
+_rp_set_source() { jq "$1" "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"; }
+
+test_replace_reserve_refuses_a_source_with_launch_or_recovery_debt() {
+  local f
+  for f in '.[0].launch={phase:"start-failed"}' '.[0].launch={phase:"starting"}' '.[0].launch={phase:"started"}' \
+           '.[0].recovery={id:"r",dispatch:{phase:"registered"}} | .[0].state="collected"' \
+           '.[0].recovery={id:"r",dispatch:{phase:"submitting"}}' '.[0].recovery={id:"r",dispatch:{phase:"ambiguous"}}'; do
+    _rp_setup
+    # recovery rows are only fenced while unconfirmed/running; a finished row with a
+    # recovery record is already settled by definition of the fence, so pin the state
+    case "$f" in *recovery*) f="$f | .[0].state=\"unconfirmed\"" ;; esac
+    _rp_set_source "$f"
+    LEDGER_SUM="$(_rp_sum)"
+    _reserve
+    _rp_refused "UNSETTLED launch" || { echo "case: $f"; rm -rf "$T"; return 1; }
+    assert_eq "$(_rp_count)" 1 || { rm -rf "$T"; return 1; }
+    [ -d "$T/wt" ] || { echo "worktree went"; rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+}
+
+test_replace_child_cannot_be_released_or_collected_while_its_source_carries_debt() {
+  _rp_setup
+  _reserve; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  _rp_set_source '.[0].launch={phase:"start-failed"}'   # debt appears after the reserve
+  LEDGER_SUM="$(_rp_sum)"
+  local v
+  for v in "release WG-1-clean --discard" "release WG-1-clean --keep-worktree" "collect WG-1-clean" "land WG-1-clean"; do
+    # shellcheck disable=SC2086
+    _rp $v
+    [ "$RC" -ne 0 ] || { echo "$v ran with the source in debt"; rm -rf "$T"; return 1; }
+    assert_eq "$(_rp_sum)" "$LEDGER_SUM" || { echo "$v"; rm -rf "$T"; return 1; }
+  done
+  [ -d "$T/wt" ] || { echo "worktree went"; rm -rf "$T"; return 1; }
+  # attach re-checks the source too
+  _rp_publish
+  _attach
+  [ "$RC" -ne 0 ] || { echo "attach ignored the source debt"; rm -rf "$T"; return 1; }
+  assert_contains "$OUT" "UNSETTLED launch"
+  assert_eq "$(_rp_sum)" "$LEDGER_SUM"
+  rm -rf "$T"
+}
