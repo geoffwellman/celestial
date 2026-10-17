@@ -382,7 +382,7 @@ _liveness_is_chrome() { # <line>
 # rather than any particular wording is deliberate - the composer's own echo
 # of what a human typed is not a turn.
 _liveness_has_turn() { # <pane-text>
-  printf '%s' "$1" | grep -qE '^[[:space:]]*([⏺●✳✻✶]|(assistant|Assistant)[[:space:]:>])'
+  printf '%s' "$1" | grep -qE '^[[:space:]]*(⏺|●|✳|✻|✶|(assistant|Assistant)[[:space:]:>])'
 }
 
 # Context at zero means the session has never sent anything: a pane that has
@@ -433,7 +433,7 @@ _liveness_is_throttled() { # <pane-text>
   printf '%s\n' "$1" | awk '
     tolower($0) ~ /^[[:space:]]*[^[:alnum:][:space:]]{0,3}[[:space:]]*(api[ _-]?error|http[ \/][0-9]|error|err|request failed|rate[ _]limit)/ &&
     tolower($0) ~ /(rate[_ ]limit|429|too many requests|quota exceeded)/ { lim = NR }
-    /^[[:space:]]*([⏺●✳✻✶]|(assistant|Assistant)[[:space:]:>])/ { turn = NR }
+    /^[[:space:]]*(⏺|●|✳|✻|✶|(assistant|Assistant)[[:space:]:>])/ { turn = NR }
     END { exit !(lim > 0 && lim > turn) }'
 }
 
