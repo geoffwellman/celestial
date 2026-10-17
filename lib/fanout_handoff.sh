@@ -177,14 +177,14 @@ _ho_session_unsettled() { # <file>
   [ -n "$win" ] || { printf 'the session file is empty'; return 0; }
   [ "$total" -le 400 ] || win="$(printf '%s\n' "$win" | tail -n +2)"          # the cut first line may be partial
   printf '%s\n' "$win" | tail -n 1 | jq -e . >/dev/null 2>&1 || { printf 'the last line of the session file is not valid JSON (a write may be in progress)'; return 0; }
-  printf '%s\n' "$win" | jq -s -r '
+  printf '%s\n' "$win" | jq -s -r --argjson big "$([ "$total" -gt 400 ] && echo true || echo false)" '
     def calltypes: ["toolUse","tool_use","toolCall","tool_call"];
     def msg: (.message // .);
     def calls: [(msg | .content // [])[]? | select(type == "object" and ((.type // "") as $t | calltypes | index($t))) | (.id // "?")];
     def results: [ (.message.toolCallId // .toolCallId // empty),
                    ((msg | .content // [])[]? | select(type == "object") | (.tool_use_id // .toolCallId // empty)) ];
     ([to_entries[] | select((.value | msg | .role? // "") == "assistant")] | last) as $a
-    | if $a == null then empty
+    | if $a == null then (if $big then "no assistant message in the last 400 lines of a longer session - tool state cannot be told" else empty end)
       else ($a.value | calls) as $c
         | ([ .[($a.key + 1):][] | results[] ]) as $r
         | ($c - $r) as $open
@@ -351,8 +351,8 @@ _ho_gather() {
       if [ -z "$rid" ]; then _ho_no "resume-session: $rpath has no session header with an id - not a verifiable pi session"
       elif [ "$rcwd" != "${wt:-}" ]; then _ho_no "resume-session: the session header cwd (${rcwd:-none}) is not the retained worktree (${wt:-?}) - no cwd guessing"
       elif [ -n "$un2" ]; then _ho_no "resume-unsettled: the selected session cannot be resumed: $un2"
-      else resume_json="$(jq -n --arg p "$rpath" --arg id "$rid" --arg cwd "$rcwd" --arg sha "$(sha256sum "$rpath" | cut -c1-64)" --arg lines "$(wc -l < "$rpath" | tr -d ' ')" --arg ino "$(stat -c '%d:%i' "$rpath")" \
-          '{path:$p, uuid:$id, cwd:$cwd, sha256:$sha, lines:($lines|tonumber), inode:$ino, source:"the old runtime'"'"'s own recorded session file"}')"; fi
+      else resume_json="$(jq -n --arg p "$rpath" --arg id "$rid" --arg cwd "$rcwd" --arg sha "$(sha256sum "$rpath" | cut -c1-64)" --arg lines "$(wc -l < "$rpath" | tr -d ' ')" --arg ino "$(stat -c '%d:%i' "$rpath")" --arg bytes "$(stat -c %s "$rpath")" \
+          '{path:$p, uuid:$id, cwd:$cwd, sha256:$sha, lines:($lines|tonumber), inode:$ino, bytes:($bytes|tonumber), source:"the old runtime'"'"'s own recorded session file"}')"; fi
     fi
   fi
   if [ "$resume_json" != null ] && [ -n "$HO_RESUME_SHA" ] && [ "$(printf '%s' "$resume_json" | jq -r .sha256)" != "$HO_RESUME_SHA" ]; then
@@ -622,6 +622,21 @@ _ho_verify_new() { # <op-json> <wsdir>
   printf '%s' "$why"
 }
 
+# After the old runtime is gone its session may have grown (a shutdown flush).
+# Accept ONLY an append-only extension: the admitted bytes must be an exact
+# prefix, and the extended file must have no unsettled tool call. Prints why not.
+_ho_resume_recheck() { # <op-json>
+  local op="$1" rs wb wsha cur
+  rs="$(printf '%s' "$op" | jq -r '.resume_session.path // empty')"; [ -n "$rs" ] || return 0
+  wb="$(printf '%s' "$op" | jq -r '.resume_session.bytes')"; wsha="$(printf '%s' "$op" | jq -r '.resume_session.sha256')"
+  [ -f "$rs" ] || { printf 'the file %s is gone' "$rs"; return 0; }
+  cur="$(stat -c %s "$rs")"
+  [ "$cur" -ge "$wb" ] || { printf 'the file shrank (%s < %s admitted bytes)' "$cur" "$wb"; return 0; }
+  [ "$(head -c "$wb" "$rs" | sha256sum | cut -c1-64)" = "$wsha" ] || { printf 'the admitted bytes are no longer an exact prefix (the file was rewritten, not appended to)'; return 0; }
+  local un; un="$(_ho_session_unsettled "$rs")"
+  [ -z "$un" ] || printf 'after retirement it has unsettled tool use: %s' "$un"
+}
+
 _ho_start_runtime() { # <wsdir> <op-json>   (dies on failure; the caller records the phase)
   local wsdir="$1" op="$2" id alias pane profile shape rt model thinking
   id="$(printf '%s' "$op" | jq -r .row_id)"; alias="$(printf '%s' "$op" | jq -r .alias)"; pane="$(printf '%s' "$op" | jq -r .pane)"
@@ -644,9 +659,10 @@ _ho_start_runtime() { # <wsdir> <op-json>   (dies on failure; the caller records
   _run_inbox_hook_args "$rt"
   local rs rssha; rs="$(printf '%s' "$op" | jq -r '.resume_session.path // empty')"
   if [ -n "$rs" ]; then
-    # the bound working session must be byte-for-byte what was admitted
-    rssha="$(sha256sum "$rs" 2>/dev/null | cut -c1-64)"
-    [ "$rssha" = "$(printf '%s' "$op" | jq -r '.resume_session.sha256')" ] || die "handoff: the selected working session $rs changed since admission - NOT starting on it"
+    # the old runtime may flush on shutdown: only an append-only extension of the
+    # admitted bytes with settled tool calls is acceptable
+    rssha="$(_ho_resume_recheck "$op")"
+    [ -z "$rssha" ] || die "handoff: the selected working session cannot be resumed: $rssha"
     [ "$rt" = pi ] || die "handoff: explicit session selection is only known for pi"
     AGENT_ARGS=(--session "$rs" "${AGENT_ARGS[@]}")
   fi
@@ -875,6 +891,8 @@ cmd_handoff_apply() {
         || die "handoff apply: $opid: the worktree HEAD moved since admission - NOT starting a replacement on different source; operation stays retired (debt)"
       [ "$(_ho_source_digest "$wt" | cut -d' ' -f1)" = "$(printf '%s' "$op" | jq -r .binding.source_digest)" ] \
         || die "handoff apply: $opid: the dirty/untracked bytes changed since admission - NOT starting; operation stays retired (debt)"
+      local rr; rr="$(_ho_resume_recheck "$op")"
+      [ -z "$rr" ] || die "handoff apply: $opid: the old runtime is retired but the selected session cannot be resumed: $rr. NOT starting; the operation stays 'retired' (debt) and may be re-run once the file is an append-only extension with settled tool calls"
       _ho_phase "$wsdir" "$opid" "$id" starting "starting $(printf '%s' "$op" | jq -r .target.model) in the retained shell (never retried: a herdr start can time out after the agent exists)"
       _rec_crash_point ho-before-start
       local ok=1
