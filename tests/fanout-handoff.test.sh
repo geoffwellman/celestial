@@ -56,7 +56,7 @@ case "$1 $2" in
   "agent stop")
     echo "$3" >> "$RS/stops"
     case "$(mode stop_mode)" in
-      ok) rm -rf "$PROC/5001"; noagent; echo '{"result":{"stopped":true}}' ;;
+      ok) rm -rf "$PROC/5001"; noagent; [ ! -f "$RS/append_on_stop" ] || cat "$RS/append_on_stop" >> "$RS/session.jsonl"; [ ! -f "$RS/rewrite_on_stop" ] || cat "$RS/rewrite_on_stop" > "$RS/session.jsonl"; echo '{"result":{"stopped":true}}' ;;
       lost) echo '{"result":{"stopped":true}}' ;;           # reply claims success, nothing happened
       error) echo '{"error":{"code":"agent_stop_timeout","message":"timed out"}}' >&2; exit 1 ;;
     esac ;;
@@ -690,4 +690,30 @@ test_settle_is_unavailable_without_a_launch_receipt_and_changes_nothing() {
   rc=0; out="$(cd "$T" && "$BIN" handoff hold WG-1-handoff --kind launch-unknown --evidence "x" 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] && assert_contains "$out" "is closed"
   _h_cleanup
+}
+
+test_a_shutdown_append_to_the_resume_session_is_accepted_but_rewrites_and_unsettled_tails_are_not() {
+  local c
+  for c in append rewrite unsettled; do
+    _h_setup; _h_dirty
+    local ws sha; ws="$(_h_working_session 11111111-2222-3333-4444-555555555555)"; sha="$(sha256sum "$ws" | cut -c1-64)"
+    case "$c" in
+      append)    echo '{"type":"message","message":{"role":"assistant","content":"flushed on exit"}}' > "$RS/append_on_stop" ;;
+      rewrite)   printf '%s\n' '{"type":"session","version":3,"id":"11111111-2222-3333-4444-555555555555","cwd":"'"$H_WT"'"}' '{"type":"message","message":{"role":"user","content":"REWRITTEN"}}' > "$RS/rewrite_on_stop" ;;
+      unsettled) echo '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"z1"}]}}' > "$RS/append_on_stop" ;;
+    esac
+    H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --resume-session "$ws")"
+    _h_apply --resume-session "$ws" --resume-sha "$sha"
+    if [ "$c" = append ]; then
+      assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
+      assert_eq "$(_h_lines starts)" 1
+      assert_eq "$(_h_row | jq -r '.handoff.phase')" done
+    else
+      [ "$H_RC" -ne 0 ] || { echo "$c: started"; return 1; }
+      assert_contains "$H_OUT" "cannot be resumed"
+      assert_eq "$(_h_lines starts)" 0
+      assert_eq "$(_h_row | jq -r '.handoff.phase')" retired        # durable debt, replayable, not 'starting'
+    fi
+    _h_cleanup
+  done
 }
