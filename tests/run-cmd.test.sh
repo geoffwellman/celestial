@@ -1329,3 +1329,111 @@ test_launch_refuses_a_pane_that_reports_no_foreground_process_group() {
   _pf_no_launch
   unset PF_NO_PGID; export CEL_PANE_READY_MS=3000; _pf_clean
 }
+
+# An omp process that STARTS on a non-gateway provider (Codex) can later switch
+# to a configured celgw model. The pane therefore needs the gateway client key
+# and its own session identity at launch whatever the starting model is: the
+# launch environment is the only place omp reads them, and a running process
+# cannot be handed them afterwards. Stub boundary: a real loopback HTTP server
+# that answers 200 to the box's key and 401 to anything else, probed from the
+# environment the launch line actually produces.
+_omp_native_auth_stub() { # <state-dir> -> sets STUB_PORT, STUB_PID
+  local d="$1"
+  cat >"$d/stub.py" <<'PY'
+import http.server, sys
+key = open(sys.argv[1]).read().strip()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = self.headers.get("Authorization", "") == "Bearer " + key
+        self.send_response(200 if ok else 401); self.end_headers()
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[2], "w").write(str(s.server_port))
+s.serve_forever()
+PY
+  python3 "$d/stub.py" "$d/state/api-key" "$d/port" & STUB_PID=$!
+  local i=0; while [ ! -s "$d/port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  STUB_PORT="$(cat "$d/port")"
+}
+
+_omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # runs a native-omp worker launch; prints "<http>|<session>|<dir>"
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start")
+        bash -c "$typed_prefix curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \${OMP_GATEWAY_TOKEN:-}\" http://127.0.0.1:$STUB_PORT/v1/models; printf '|%s|%s' \"\${CEL_SESSION_ID:-}\" \"\${PI_CODING_AGENT_DIR:-}\"" > "$T/agent-env"
+        ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile codexomp ) >/dev/null 2>&1
+  cat "$T/agent-env" 2>/dev/null
+}
+
+test_run_native_omp_start_still_gets_gateway_credentials_for_later_switch() {
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  codexomp: { runtime: omp, model: openai-codex/gpt-6.1-sol, thinking: low }
+YAML
+  export CEL_OMP_AGENT_DIR="$GWT/omp"
+  printf 'omp-native-key\n' >"$GWT/state/api-key"
+  _omp_native_auth_stub "$GWT"
+  local out; out="$(_omp_native_launch_probe)"
+  kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null || true
+  unset CEL_OMP_AGENT_DIR
+  _ws_gateway_clean
+  assert_contains "$out" "200|"
+  assert_contains "$out" "|widget-wg-1-x|"
+  assert_contains "$out" "/omp"
+}
+
+test_run_native_omp_start_without_a_gateway_still_launches_without_credentials() {
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  codexomp: { runtime: omp, model: openai-codex/gpt-6.1-sol, thinking: low }
+YAML
+  : >"$CEL_CONFIG_FILE"   # no gateway configured on this box
+  rm -f "$GWT/state/api-key"
+  local -a GATEWAY_ENV=(stale)
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_native_omp_start_with_an_empty_key_file_launches_without_credentials() {
+  _ws_gateway
+  : >"$GWT/state/api-key"
+  local -a GATEWAY_ENV=()
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_native_pi_start_gets_no_gateway_credentials() {
+  _ws_gateway
+  printf 'k\n' >"$GWT/state/api-key"
+  local -a GATEWAY_ENV=()
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup pi pi-worker 1 1
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_required_gateway_with_missing_key_still_refuses() {
+  _ws_gateway
+  rm -f "$GWT/state/api-key"
+  local PROFILE_VIA=gateway
+  ( _run_profile_gateway_setup omp omp-worker 1 0 ) >/dev/null 2>&1 && { _ws_gateway_clean; echo "required gateway launched without a key"; return 1; }
+  _ws_gateway_clean
+}
