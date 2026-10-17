@@ -81,6 +81,31 @@ _ho_pending_other() { # <wsdir> <id> <own-opid> -> prints opid, returns 0 if one
   return 1
 }
 
+# THE PER-TARGET LOCK is a directory owned by pid + process start generation,
+# NOT a file descriptor: an fd would be inherited by every herdr child (and by
+# anything that daemonised), and a leaked inherited fd holds the lock for ever.
+# A holder that is dead, or whose pid was reused (different start generation),
+# is stale and is taken over; a live holder is never. Released at exit.
+HO_LOCK_DIR=""; HO_LOCK_HOLDER=""
+_ho_real_start() { sed -E 's/^.*\) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+_ho_lock_acquire() { # <wsdir> <id>
+  local d owner pid start cur
+  d="$(_ho_dir "$1")/$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_').lock.d"
+  mkdir -p "$(_ho_dir "$1")"
+  if mkdir "$d" 2>/dev/null; then :
+  else
+    owner="$(cat "$d/owner" 2>/dev/null || true)"; pid="${owner%% *}"; start="${owner#* }"
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    if [ -n "$pid" ] && [ "$(_ho_real_start "$pid")" = "$start" ] && [ -n "$start" ]; then HO_LOCK_HOLDER="$pid"; return 1; fi
+    rm -rf "$d"; mkdir "$d" 2>/dev/null || { HO_LOCK_HOLDER="unknown"; return 1; }
+  fi
+  printf '%s %s' "$$" "$(_ho_real_start "$$")" > "$d/owner"
+  HO_LOCK_DIR="$d"
+  trap '_ho_lock_release' EXIT
+  return 0
+}
+_ho_lock_release() { [ -z "$HO_LOCK_DIR" ] || { [ "$(cut -d' ' -f1 "$HO_LOCK_DIR/owner" 2>/dev/null)" != "$$" ] || rm -rf "$HO_LOCK_DIR"; }; }
+
 # --- observation helpers (read-only) ---------------------------------------
 
 # Everything under <pid> in the process table. /proc is a fixture root only
@@ -143,22 +168,20 @@ _ho_source_digest() { # <worktree> -> "<hex> <dirty-count>"
 
 # Does the installed herdr offer the lifecycle primitive? Read from its own
 # schema, not assumed. Prints a JSON object.
-# The REQUIRED contract (not just a method name): agent.stop must take the agent
-# name AND a generation fence (expected_pid + expected_start), so a replaced
-# agent between the final gather and the stop can never be retired by name.
-# herdr 0.9.1 has no agent.stop at all; the fence fields are this tool's stated
-# requirement of the upstream call, nothing is invented in herdr.
+# herdr 0.9.1 has NO documented fenced, process-only agent-retirement call and
+# this tool does not guess one. In production `agent_stop` is therefore always
+# false: apply refuses before it mutates anything and names the missing
+# primitive. The retire/start/prompt machinery after it is exercised only
+# through a TEST ADAPTER (CEL_TESTING + CEL_FANOUT_STOP_ADAPTER), a seam that
+# cannot exist in production, and proves this tool's logic - not herdr.
+_ho_stop_adapter() { [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_FANOUT_STOP_ADAPTER:-}" ] && printf '%s' "$CEL_FANOUT_STOP_ADAPTER"; }
 _ho_caps() {
-  local sch none='{"schema":false,"agent_stop":false,"agent_stop_listed":false,"agent_start":false,"agent_prompt":false,"launch_receipt":false}'
+  local sch none='{"schema":false,"agent_stop":false,"agent_stop_listed":false,"agent_start":false,"agent_prompt":false,"launch_receipt":false}' ad=false
+  _ho_stop_adapter >/dev/null && ad=true
   sch="$("$HERDR" api schema --json 2>/dev/null)" || { printf '%s' "$none"; return 0; }
-  printf '%s' "$sch" | jq -c '
-    . as $s
-    | ([.. | objects | .const? // empty | strings]) as $m
-    | def params($meth): ([.. | objects | select((.properties.method.const? // "") == $meth) | .properties.params["$ref"]? // empty | split("/") | last][0] // "") as $n
-        | ($s.schemas.request["$defs"][$n].properties // {} | keys);
-    (params("agent.stop")) as $k
-    | {schema:($m | length > 0), agent_stop_listed:($m | index("agent.stop") != null),
-       agent_stop:((($k | index("name")) != null or ($k | index("target")) != null) and ($k | index("expected_pid")) != null and ($k | index("expected_start")) != null),
+  printf '%s' "$sch" | jq -c --argjson ad "$ad" '
+    ([.. | objects | .const? // empty | strings]) as $m
+    | {schema:($m | length > 0), agent_stop_listed:($m | index("agent.stop") != null), agent_stop:$ad,
        agent_start:($m | index("agent.start") != null), agent_prompt:($m | index("agent.prompt") != null),
        launch_receipt:(($m | map(select(test("^agent\\.(launch_status|launch\\.status|start_status)$"))) | length) > 0)}' 2>/dev/null \
     || printf '%s' "$none"
@@ -317,7 +340,7 @@ _ho_gather() {
   fi
 
   local caps; caps="$(_ho_caps)"
-  printf '%s' "$caps" | jq -e '.agent_stop' >/dev/null || _ho_no "capability-missing: the installed herdr ($("$HERDR" --version 2>/dev/null | head -1)) offers no process-only retirement CONTRACT$(printf '%s' "$caps" | jq -e '.agent_stop_listed' >/dev/null && echo ' (agent.stop is listed but its request lacks name + expected_pid + expected_start, so it would retire by name alone)'). EXACT MISSING PRIMITIVE: agent.stop (name, expected_pid, expected_start) - end ONE agent process by identity, refusing if the generation changed, release its name, keep the pane, its shell, the worktree and every other process. pane.close destroys the shell and every child; pane.release_agent/clear_agent_authority only forget authority (the process keeps running and the name stays held); the alias cannot be renamed around uniqueness. Nothing was retired"
+  printf '%s' "$caps" | jq -e '.agent_stop' >/dev/null || _ho_no "capability-missing: the installed herdr ($("$HERDR" --version 2>/dev/null | head -1)) has no DOCUMENTED, fenced process-only retirement call$(printf '%s' "$caps" | jq -e '.agent_stop_listed' >/dev/null && echo ' (an agent.stop method is listed, but its contract is not documented to this tool and it is not guessed)'). Nothing end-to-end exists on this herdr. EXACT MISSING PRIMITIVE: a per-agent stop that takes the agent identity AND a generation fence (so a replaced agent is never retired by name) - end ONE agent process by identity, release its name, keep the pane, its shell, the worktree and every other process. pane.close destroys the shell and every child; pane.release_agent/clear_agent_authority only forget authority (the process keeps running and the name stays held); the alias cannot be renamed around uniqueness. Nothing was retired"
   printf '%s' "$caps" | jq -e '.agent_start and .agent_prompt' >/dev/null || _ho_no "capability-missing: herdr lacks agent.start/agent.prompt"
 
   # target profile
@@ -764,9 +787,7 @@ cmd_handoff_apply() {
   # attempt on the same target cannot interleave, even while the ledger lock is
   # let go for a bounded wait.
   mkdir -p "$(_ho_dir "$wsdir")"
-  local ho_fd
-  exec {ho_fd}>"$(_ho_dir "$wsdir")/$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_').lock"
-  flock -n "$ho_fd" || die "handoff apply: another handoff attempt for $id holds the target lock - refusing to interleave; nothing changed"
+  _ho_lock_acquire "$wsdir" "$id" || die "handoff apply: another handoff attempt for $id holds the target lock (live pid $HO_LOCK_HOLDER) - refusing to interleave; nothing changed"
 
   local abs_wt spec alias
   abs_wt="$(cd "$(printf '%s' "$row" | jq -r '.worktree')" 2>/dev/null && pwd -P || true)"
@@ -864,7 +885,7 @@ cmd_handoff_apply() {
         _rec_crash_point ho-before-stop
         _ledger_unlock
         local err rc=0
-        err="$("$HERDR" agent stop "$alias" --expected-pid "$apid" --expected-start "$astart" 2>&1)" || rc=$?
+        err="$("$(_ho_stop_adapter)" agent stop "$alias" 2>&1)" || rc=$?
         _rec_crash_point ho-after-stop
         local i gone=0
         for (( i = 0; i < tries; i++ )); do
