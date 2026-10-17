@@ -92,6 +92,33 @@ test_gc_removes_only_proven_settled_clean_worktrees() {
   rm -rf "$T"
 }
 
+# AH-261017: a recovered launch is `unconfirmed` with an idle live agent in its
+# pane. Neither a merged/closed/absent PR nor a gone-looking pane may let gc
+# take its worktree while the row is unsettled.
+test_gc_never_erases_an_unresolved_recovered_launch() {
+  _gc_managed_fixture
+  jq '.[0].state = "unconfirmed" | .[0].recovery = {id:"r1", dispatch:{phase:"registered"}}' \
+    "$GC_WS/.cel/delegations.json" > "$T/next"
+  mv "$T/next" "$GC_WS/.cel/delegations.json"
+  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
+  assert_eq "$(cat "$GC_SINK")" ""
+  [ -d "$GC_WT" ] || { echo "the recovered worktree was removed"; return 1; }
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_finished_row_with_launch_debt() {
+  _gc_managed_fixture
+  jq '.[0].state = "finished" | .[0].launch = {phase:"start-failed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
+  mv "$T/next" "$GC_WS/.cel/delegations.json"
+  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
+  assert_eq "$(cat "$GC_SINK")" ""
+  jq '.[0].launch = {phase:"dispatch-unconfirmed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
+  mv "$T/next" "$GC_WS/.cel/delegations.json"
+  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
 test_gc_vetoes_running_delegations_for_every_pr_state_and_orphans() {
   _gc_managed_fixture
   jq '.[0].state = "running"' "$GC_WS/.cel/delegations.json" > "$T/next"

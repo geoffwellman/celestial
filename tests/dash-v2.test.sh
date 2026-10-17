@@ -76,7 +76,9 @@ EOF
 # slow retry runs (CEL-116): give the retry all the time it needs
 _v2_boot_failing_gh() { _V2_FAIL_GH=1 CEL_DASH_DEGRADED_WAIT_MS=20000 CEL_DASH_DEGRADED_RETRY_MS=1 _v2_boot; }
 _v2_down() {
-  if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
+  _dash_stop_group "${DASH_PID:-}"
+  # (the server's CLI children are stopped and joined above, so nothing is left
+  # writing under $T; the retry is kept only for a slow filesystem)
   # a CLI the server spawned can outlive it by a moment and still be writing
   # under $T/home on a loaded box; retry the removal rather than flake
   local i; if [ -n "${T:-}" ]; then for i in 1 2 3 4 5; do rm -rf "$T" 2>/dev/null && break; sleep 0.3; done; rm -rf "$T"; fi
@@ -713,4 +715,30 @@ test_v2_drive_send_needs_csrf_mails_owner_and_has_a_receipt() {
   # never a pane: nothing typed
   if grep -q 'agent prompt' "$T/cel.log" 2>/dev/null; then echo "typed into a pane"; return 1; fi
   _v2_down
+}
+
+# CI 38995999512 (and 38968150598, 38993000322): teardown `rm` of the fixture
+# failed while something still wrote under it. The dashboard server runs CLIs
+# (cel quota, gh) as children; _v2_down killed only the server's own pid, so a
+# child that was mid-run kept creating files under $T/home after the server was
+# gone and raced the `rm -rf`. The producer must be stopped and joined first.
+test_v2_teardown_stops_and_joins_a_child_the_server_spawned() {
+  _v2_boot
+  cat >"$T/bin/cel" <<EOS
+#!/usr/bin/env bash
+if [ "\$1" = quota ]; then
+  echo \$\$ > "$T/child.pid"
+  sleep 30
+  mkdir -p "$T/home/.cache/late" && : > "$T/home/.cache/late/x"
+fi
+exit 0
+EOS
+  chmod +x "$T/bin/cel"
+  curl -s -m 5 "$(_v2_url 'usage?ws=all')" >/dev/null 2>&1 &
+  local i; for i in $(seq 1 50); do [ -s "$T/child.pid" ] && break; sleep 0.1; done
+  [ -s "$T/child.pid" ] || { echo "the server never ran the child"; _v2_down; return 1; }
+  local pid; pid="$(cat "$T/child.pid")"
+  _v2_down
+  wait 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; echo "teardown left the server's child ($pid) running"; return 1; fi
 }
