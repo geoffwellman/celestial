@@ -28,6 +28,8 @@ export CEL_ROOT
                                # the preview from the laptop, not from this box
 # shellcheck source=lib/fanout_recover.sh
 . "$CEL_ROOT/lib/fanout_recover.sh" # `recover`: register + continue a partly recorded launch
+# shellcheck source=lib/fanout_handoff.sh
+. "$CEL_ROOT/lib/fanout_handoff.sh" # `handoff`: retained-worktree runtime handoff
 # shellcheck source=lib/afk.sh
 . "$CEL_ROOT/lib/afk.sh"  # away-from-keyboard: land and delegate are two of the
                           # four acts the owner pre-authorised, and EVERY one
@@ -728,7 +730,7 @@ cmd_delegate() {
   wcap="${wcap:-4}"
   local prepos; prepos="$(ws_product_repos "$wsdir" "$product" | jq -R . | jq -sc .)"
   wused="$(_ledger_read "$wsdir" | jq --argjson rs "$prepos" \
-    '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))) and ((.replacement.role // "") != "source"))] | length')"
+    '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null or .handoff != null))) and ((.replacement.role // "") != "source"))] | length')"
   if [ "$wused" -ge "$wcap" ]; then
     die "delegate: $product already has $wused running worker(s), cap is $wcap.
   Free a slot first - a finished worker still holds one until it is collected:
@@ -1619,7 +1621,7 @@ _fanout_slots() { # <wsdir>
     label="$p"
     [ "$n" -le 1 ] || label="$p ($(ws_product_repos "$1" "$p" | paste -sd, - | sed 's/,/, /g'))"
     used="$(_ledger_read "$1" | jq --argjson rs "$repos" \
-      '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))) and ((.replacement.role // "") != "source"))] | length')"
+      '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null or .handoff != null))) and ((.replacement.role // "") != "source"))] | length')"
     printf 'slots %-28s %s/%s used' "$label" "$used" "$cap"
     if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
     else printf ' - %s free\n' "$(( cap - used ))"; fi
@@ -3128,7 +3130,7 @@ case "${1:-}" in
   replace)
     # the second argument is the sub-verb, not an id
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
-  delegate|scout|spike|reconcile|recover)
+  delegate|scout|spike|reconcile|recover|handoff)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
 esac
@@ -3154,15 +3156,16 @@ esac
 # WITHOUT waiting: a held lock means another delegate or ledger transition is
 # in flight, which is exactly what recovery must not race. `inspect` is read-only.
 case "${1:-}:${2:-}" in
-  recover:register|recover:continue|recover:abandon)
+  recover:register|recover:continue|recover:abandon|handoff:apply|handoff:hold)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
-    flock -n "$ledger_fd" || die "recover: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
+    flock -n "$ledger_fd" || die "${1}: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
 esac
 
 case "${1:-}" in
   recover)  shift; cmd_recover "$@" ;;
+  handoff)  shift; cmd_handoff "$@" ;;
   delegate) shift; cmd_delegate "$@" ;;
   handback) shift; cmd_handback "$@" ;;
   scout)    shift; cmd_scout "$@" ;;
@@ -3178,5 +3181,5 @@ case "${1:-}" in
   request-review) shift; cmd_request_review "$@" ;;
   replace)  shift; cmd_replace "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|recover|wait|collect|status|why|try|release|review|request-review|replace|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|recover|handoff|wait|collect|status|why|try|release|review|request-review|replace|handback|land|reconcile ..." ;;
 esac
