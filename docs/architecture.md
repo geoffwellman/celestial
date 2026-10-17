@@ -30,6 +30,19 @@ Git worktree for a delegated worker, starts the pane and records the resulting
 identity. Worker/reviewer roles use the same GitHub and ticket interfaces that
 an operator can invoke directly.
 
+Launch environment is scoped to the launched process: `_run_launch_env` is the
+single construction (used by `cel run` and `cel-fanout`) and renders role
+marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as
+one `env K=V ...` prefix - never an `export` into the pane shell, which outlives
+the agent. Pi and OMP agent roots are resolved once (`gateway_pi_dir`,
+`gateway_omp_dir`; custom roots via `CEL_PI_AGENT_DIR` / `CEL_OMP_AGENT_DIR`),
+shared by the models writers, the child and `cel doctor`, and pinned into the
+child as `PI_CODING_AGENT_DIR`; an inherited value is ignored. They must not
+overlap (`agent_roots_check`): OMP's startup renames Pi-style session
+directories under its root with no liveness check. This prevents new
+collisions only; it does not repair already-relocated sessions or running
+processes, which belong to the retained-runtime lifecycle.
+
 Prompt policy guides agents; it is not a sandbox. Agent commands run with the
 launching user's filesystem and account privileges. Several runtime launch
 strategies pre-approve tool permissions. Only use trusted workspace content,

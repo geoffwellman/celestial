@@ -963,12 +963,9 @@ cmd_delegate() {
   [ -z "$(agent_inbox_hook "$rt" file)" ] || inbox_me="$alias"
   local -a GATEWAY_ENV=()
   _run_profile_gateway_setup "$rt" "$alias" 1 1 "$alias"
-  local launch_prefix; launch_prefix="$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")"
+  local launch_prefix; launch_prefix="$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$rt")"
   local gateway_required=0
-  if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
-    launch_prefix="${GATEWAY_ENV[*]}; $launch_prefix"
-    gateway_required=1
-  fi
+  [ "${#GATEWAY_ENV[@]}" -eq 0 ] || gateway_required=1
 
   # THE WORKER'S SHELL MUST CARRY THE WORKSPACE ENV, and nothing else gives it
   # one. A worktree lives at ~/.herdr/worktrees/<repo>/<branch> - OUTSIDE the

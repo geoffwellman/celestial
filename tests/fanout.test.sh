@@ -41,7 +41,7 @@ case "$1 $2" in
   "agent start")
     if [ -n "${STUB_AGENT_ENV_FILE:-}" ]; then
       prefix="$(cat "$STUB_PREFIX_FILE")"
-      bash -c "$prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$STUB_AGENT_ENV_FILE"
+      bash -c "$prefix sh -c 'printf \"%s|%s\" \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"'" > "$STUB_AGENT_ENV_FILE"
     fi;;
   *) echo '{}';;
 esac
@@ -754,8 +754,8 @@ role_profiles:
   scout: gateway-opus
 YAML
   local gwt previous_pi_set previous_pi previous_no_quota previous_session_set previous_session
-  previous_pi_set="${PI_CODING_AGENT_DIR+x}"
-  previous_pi="${PI_CODING_AGENT_DIR:-}"
+  previous_pi_set="${CEL_PI_AGENT_DIR+x}"
+  previous_pi="${CEL_PI_AGENT_DIR:-}"
   previous_no_quota="${CEL_NO_QUOTA_PROBE:-}"
   previous_session_set="${CEL_SESSION_ID+x}"
   previous_session="${CEL_SESSION_ID:-}"
@@ -765,7 +765,7 @@ YAML
   mkdir -p "$CEL_GATEWAY_STATE/auth" "$gwt/pi"
   printf '{}' > "$CEL_GATEWAY_STATE/auth/claude-aaaaaa11-someone@example.invalid.json"
   printf 'scout-test-api-key\n' > "$CEL_GATEWAY_STATE/api-key"
-  export PI_CODING_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
+  export CEL_PI_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
   cat > "$gwt/gateway-stub" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -803,13 +803,18 @@ EOF
   assert_contains "$worker_start" "--model ompgw-claude/claude-opus-5-5"
   assert_eq "$model_key" '$OMP_GATEWAY_TOKEN'
   # The pane must load the models.json the launcher just wrote: the caller's
-  # PI_CODING_AGENT_DIR is carried into the target pane's launch prefix.
-  local pane_dir; pane_dir="$(env -u PI_CODING_AGENT_DIR bash -c "$(cat "$STUB_PREFIX_FILE") printf '%s' \"\${PI_CODING_AGENT_DIR:-}\"")"
+  # The launch prefix pins pi's resolved root (CEL_PI_AGENT_DIR here), and a
+  # leaked PI_CODING_AGENT_DIR in the pane cannot override it.
+  local pane_dir; pane_dir="$(PI_CODING_AGENT_DIR=/leaked/omp/root bash -c "$(cat "$STUB_PREFIX_FILE") printenv PI_CODING_AGENT_DIR")"
   assert_eq "$pane_dir" "$gwt/pi"
+  # ...and nothing launch-only was exported into the pane shell itself.
+  local after; after="$(env -u CEL_SESSION_ID -u OMP_GATEWAY_TOKEN bash -c "$(cat "$STUB_PREFIX_FILE") true
+printf '%s|%s' \"\${CEL_SESSION_ID-unset}\" \"\${OMP_GATEWAY_TOKEN-unset}\"")"
+  assert_eq "$after" "unset|unset"
   rm -rf "$T" "$gwt"
   unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_NO_QUOTA_PROBE
   unset STUB_PREFIX_FILE STUB_AGENT_ENV_FILE
-  if [ -n "$previous_pi_set" ]; then export PI_CODING_AGENT_DIR="$previous_pi"; else unset PI_CODING_AGENT_DIR; fi
+  if [ -n "$previous_pi_set" ]; then export CEL_PI_AGENT_DIR="$previous_pi"; else unset CEL_PI_AGENT_DIR; fi
   if [ -n "$previous_session_set" ]; then export CEL_SESSION_ID="$previous_session"; else unset CEL_SESSION_ID; fi
   [ -z "$previous_no_quota" ] || export CEL_NO_QUOTA_PROBE="$previous_no_quota"
 }
