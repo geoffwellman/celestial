@@ -16,8 +16,11 @@ _dash_launch() {
   local port_fn="$1" log="$2" tmpl="$3" path="$4" try
   for try in 1 2 3 4 5 6 7 8; do
     DASH_PORT="$("$port_fn")"
+    # Its own session/process group, so a teardown can stop the server AND the
+    # CLIs it spawned (cel, gh): killing only the server left a mid-run child
+    # writing under the fixture while it was being removed.
     CEL_DASH_CONFIG="${tmpl//@PORT@/$DASH_PORT}" PATH="$path" \
-      node "$CEL_ROOT/tools/dash/server.mjs" >"$log" 2>&1 &
+      setsid node "$CEL_ROOT/tools/dash/server.mjs" >"$log" 2>&1 &
     DASH_PID=$!
     # No time cap: "alive after N seconds" is not "ready". Under load node
     # took longer than the old 9 s probe to load, the test sent SIGUSR2
@@ -34,4 +37,15 @@ _dash_launch() {
     fi
   done
   echo "no free port after $try tries" >&2; DASH_PID=""; return 1
+}
+
+# Stop the server and everything it started, and return only when none is left.
+_dash_stop() { # <pid>   (the pid is also the process-group id: see _dash_launch)
+  local pid="${1:-}" i
+  [ -n "$pid" ] || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  for i in $(seq 1 50); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for i in $(seq 1 50); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 0.1; done
+  wait "$pid" 2>/dev/null || true
 }
