@@ -157,6 +157,7 @@ _ho_agent_text() { "$HERDR" agent read "$1" --source recent-unwrapped --lines 60
 
 # --- the one gather used by inspect AND by apply's revalidation -------------
 
+HO_EXPORT=""
 HO_WHY=()
 _ho_no() { HO_WHY+=("$1"); }
 
@@ -230,6 +231,14 @@ _ho_gather() {
     printf '%s' "$obs" | jq -e '(.agent.interactive_ready // false) == true' >/dev/null || _ho_no "not-ready: herdr does not report the agent interactive_ready"
     sess="$(printf '%s' "$obs" | jq -r '.agent.agent_session.value // ""')"
     if [ -n "$sess" ] && [ -f "$sess" ]; then sess_exists=true; sess_sha="$(sha256sum "$sess" | cut -c1-64)"; fi
+    # A recorded session file that is not on disk means the runtime's newest
+    # entries may exist ONLY in its memory (the Pi ENOENT case): retiring it
+    # would lose that tail. Only a durable, operator-named export of that tail
+    # (--preserved-export <abs file>) lets it proceed; the file is bound by sha.
+    if [ -n "$sess" ] && [ ! -f "$sess" ]; then
+      if [ -n "${HO_EXPORT:-}" ] && [ -s "${HO_EXPORT}" ]; then sess_sha="export:$(sha256sum "$HO_EXPORT" | cut -c1-64)"
+      else _ho_no "session-tail: herdr's recorded session file ($sess) is not on disk, so the runtime's newest entries may live only in memory and retirement would lose them. Preserve them first with a supported quiescent export and pass --preserved-export <absolute file> (a non-empty private copy; this tool does not create, move or symlink sessions). A file that exists does not prove the in-memory tail was persisted either - unsettled tool use must be checked by you"; fi
+    fi
     if [ "$nfg" -eq 1 ]; then agent_pid="$(printf '%s' "$obs" | jq -r '.fg_pids[0]')"
     else _ho_no "busy: the pane's foreground holds $nfg processes, not exactly the agent - something else is running there"; fi
   else
@@ -320,6 +329,7 @@ cmd_handoff_inspect() {
       --workspace) ws_opt="$2"; shift 2 ;;
       --pane)      pane="$2"; shift 2 ;;
       --profile)   profile="$2"; shift 2 ;;
+      --preserved-export) HO_EXPORT="$2"; shift 2 ;;
       *) die "handoff inspect: unknown argument: $1" ;;
     esac
   done
@@ -601,6 +611,7 @@ cmd_handoff_apply() {
       --source-digest) digest="$2"; shift 2 ;;
       --evidence)      evidence="$2"; shift 2 ;;
       --reissue-retire) reissue=1; shift ;;
+      --preserved-export) HO_EXPORT="$2"; shift 2 ;;
       *) die "handoff apply: unknown argument: $1" ;;
     esac
   done

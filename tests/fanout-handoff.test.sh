@@ -530,3 +530,20 @@ test_status_names_the_phase_and_the_exact_next_action() {
   assert_eq "$(printf '%s' "$s" | jq -r '.operation.binding.source_digest')" "$(printf '%s' "$H_PLAN" | jq -r '.plan.source.digest')"
   _h_cleanup
 }
+
+test_a_missing_session_file_refuses_retirement_unless_a_tail_export_is_named() {
+  _h_setup; _h_dirty
+  rm -f "$RS/session.jsonl"                      # the Pi ENOENT shape: tail may be memory-only
+  local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+  _h_inspect
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "may live only in memory"
+  _h_apply
+  _h_refused_untouched "$l" "$b" "session-tail" || return 1
+  printf 'exported tail\n' > "$T/export.jsonl"
+  H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --preserved-export "$T/export.jsonl")"
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
+  _h_apply --preserved-export "$T/export.jsonl"
+  assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
+  _h_cleanup
+}
