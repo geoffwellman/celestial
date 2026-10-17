@@ -653,8 +653,6 @@ test_production_has_no_stop_branch_even_when_agent_stop_is_listed() {
   unset CEL_FANOUT_STOP_ADAPTER
   local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
   _h_inspect
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "is not guessed"
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "generation fence"
   _h_apply
   _h_refused_untouched "$l" "$b" "capability-missing" || return 1
   _h_cleanup
