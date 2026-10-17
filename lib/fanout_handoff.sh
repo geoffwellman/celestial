@@ -157,7 +157,7 @@ _ho_agent_text() { "$HERDR" agent read "$1" --source recent-unwrapped --lines 60
 
 # --- the one gather used by inspect AND by apply's revalidation -------------
 
-HO_EXPORT=""
+HO_EXPORT=""; HO_RESUME=""; HO_RESUME_SHA=""
 HO_WHY=()
 _ho_no() { HO_WHY+=("$1"); }
 
@@ -232,12 +232,20 @@ _ho_gather() {
     sess="$(printf '%s' "$obs" | jq -r '.agent.agent_session.value // ""')"
     if [ -n "$sess" ] && [ -f "$sess" ]; then sess_exists=true; sess_sha="$(sha256sum "$sess" | cut -c1-64)"; fi
     # A recorded session file that is not on disk means the runtime's newest
-    # entries may exist ONLY in its memory (the Pi ENOENT case): retiring it
-    # would lose that tail. Only a durable, operator-named export of that tail
-    # (--preserved-export <abs file>) lets it proceed; the file is bound by sha.
+    # entries may exist ONLY in its memory (the Pi ENOENT case). A named export
+    # (--preserved-export) is recorded as archive evidence but NEVER unlocks
+    # retirement: an archive is not proof of quiescence, of settled tool state
+    # or of the post-export tail.
     if [ -n "$sess" ] && [ ! -f "$sess" ]; then
-      if [ -n "${HO_EXPORT:-}" ] && [ -s "${HO_EXPORT}" ]; then sess_sha="export:$(sha256sum "$HO_EXPORT" | cut -c1-64)"
-      else _ho_no "session-tail: herdr's recorded session file ($sess) is not on disk, so the runtime's newest entries may live only in memory and retirement would lose them. Preserve them first with a supported quiescent export and pass --preserved-export <absolute file> (a non-empty private copy; this tool does not create, move or symlink sessions). A file that exists does not prove the in-memory tail was persisted either - unsettled tool use must be checked by you"; fi
+      [ -z "${HO_EXPORT:-}" ] || [ ! -s "$HO_EXPORT" ] || sess_sha="export-not-a-proof:$(sha256sum "$HO_EXPORT" | cut -c1-64)"
+      _ho_no "session-tail: herdr's recorded session file ($sess) is not on disk, so the runtime's newest entries may live only in memory. REFUSED even with a valid archive${HO_EXPORT:+ ($HO_EXPORT)}: an export does not prove quiescence, settled tool use or the post-export tail, and no supported herdr call proves them. Nothing is retired"
+    elif [ -n "$sess" ] && [ -f "$sess" ]; then
+      # unsettled tool use as the last persisted entry: the call may still be running
+      if tail -n 5 "$sess" 2>/dev/null | sed '/^$/d' | tail -n 1 | jq -e '
+           (.message.role // .role // "") as $r
+           | $r == "assistant" and ([.. | objects | .type? // empty] | any(. == "toolUse" or . == "tool_use" or . == "toolCall" or . == "tool_call"))' >/dev/null 2>&1; then
+        _ho_no "unsettled-tool: the last persisted entry of $sess is an assistant tool call with no result - a tool may still be running or its result lives only in memory; retirement would lose or orphan it"
+      fi
     fi
     if [ "$nfg" -eq 1 ]; then agent_pid="$(printf '%s' "$obs" | jq -r '.fg_pids[0]')"
     else _ho_no "busy: the pane's foreground holds $nfg processes, not exactly the agent - something else is running there"; fi
@@ -295,23 +303,43 @@ _ho_gather() {
     fi
   fi
 
+  local resume_json="null"
+  if [ -n "${HO_RESUME:-}" ]; then
+    local rpath="$HO_RESUME" rhdr rid rcwd
+    if [ "$trt" != pi ]; then _ho_no "resume-unavailable: explicit --session selection is only known for the pi runtime (its --session <path> contract); the target is '${trt:-unresolved}'. UNAVAILABLE, nothing changed"
+    elif [ "${rpath#/}" = "$rpath" ] || [ ! -f "$rpath" ] || [ ! -s "$rpath" ]; then _ho_no "resume-session: $rpath is not an existing absolute session file"
+    elif [ -n "${HO_EXPORT:-}" ] && [ "$rpath" -ef "$HO_EXPORT" ]; then _ho_no "resume-session: $rpath is the preserved archive - an archive stays immutable and is never the working session (a pi append would modify it); name a durable WORKING session file"
+    else
+      rhdr="$(head -n 1 "$rpath" 2>/dev/null || true)"
+      rid="$(printf '%s' "$rhdr" | jq -r 'select(.type == "session") | .id // empty' 2>/dev/null || true)"
+      rcwd="$(printf '%s' "$rhdr" | jq -r 'select(.type == "session") | .cwd // empty' 2>/dev/null || true)"
+      if [ -z "$rid" ]; then _ho_no "resume-session: $rpath has no session header with an id - not a verifiable pi session"
+      elif [ "$rcwd" != "${wt:-}" ]; then _ho_no "resume-session: the session header cwd (${rcwd:-none}) is not the retained worktree (${wt:-?}) - no cwd guessing"
+      else resume_json="$(jq -n --arg p "$rpath" --arg id "$rid" --arg cwd "$rcwd" --arg sha "$(sha256sum "$rpath" | cut -c1-64)" --arg lines "$(wc -l < "$rpath" | tr -d ' ')" \
+          '{path:$p, uuid:$id, cwd:$cwd, sha256:$sha, lines:($lines|tonumber)}')"; fi
+    fi
+  fi
+  if [ "$resume_json" != null ] && [ -n "$HO_RESUME_SHA" ] && [ "$(printf '%s' "$resume_json" | jq -r .sha256)" != "$HO_RESUME_SHA" ]; then
+    _ho_no "stale-session: the selected working session's bytes differ from the plan (sha256 changed) - a different file than the one inspected"
+  fi
   local ctx=cross-harness
   [ "$okind" != "$trt" ] || ctx=same-harness
   HO_SNAP="$(jq -n --arg id "$id" --arg alias "$alias" --arg repo "$repo" --arg branch "$branch" --arg pane "$pane" \
     --arg wt "${wt:-}" --arg terminal "$terminal" --arg shell "$shell_pid" --arg apid "$agent_pid" --arg start "$start" \
     --arg okind "$okind" --arg ostatus "$ostatus" --arg head "$head" --arg class "$class" --arg ahead "$ahead" --arg behind "$behind" \
     --arg remote "$rsha" --arg digest "$digest" --argjson dirty "${dirty:-0}" --arg sess "$sess" --argjson sx "$sess_exists" --arg ssha "$sess_sha" \
-    --argjson caps "$caps" --arg profile "$profile" --arg trt "$trt" --arg tmodel "$tmodel" --arg tthinking "$tthinking" --arg tprov "$tprov" --arg ctx "$ctx" \
+    --argjson resume "$resume_json" --argjson caps "$caps" --arg profile "$profile" --arg trt "$trt" --arg tmodel "$tmodel" --arg tthinking "$tthinking" --arg tprov "$tprov" --arg ctx "$ctx" \
     '{row_id:$id, alias:$alias, repo:$repo, branch:$branch, pane:$pane, worktree:$wt,
       runtime:{terminal:$terminal, shell_pid:$shell, agent_pid:$apid, agent_start:$start, kind:$okind, herdr_status:$ostatus,
-               session:{path:$sess, exists:$sx, sha256:$ssha}},
+               session:{path:$sess, exists:$sx, sha256:$ssha, memory_tail_proof:"none"}},
       source:{head:$head, remote_ref:$remote, relation:$class, ahead:($ahead|tonumber? // 0), behind:($behind|tonumber? // 0),
               dirty_and_untracked:$dirty, digest:$digest},
-      capabilities:$caps,
+      capabilities:$caps, resume_session:$resume,
       target:{profile:$profile, runtime:$trt, model:$tmodel, thinking:$tthinking, provider:$tprov},
       context:{mode:(if $ctx == "same-harness" then "same-harness-fresh-session" else "cross-harness-context-transfer" end),
                lossless_native_resume:false,
-               note:"the replacement starts a fresh session; it gets the spec, a handoff brief and a copy of the old pane text. The old session path and digest are kept as evidence, not resumed."}}')"
+               session_selection:(if $resume == null then "fresh" else "explicit-working-session" end),
+               note:"unless an explicit working session is named (--resume-session, pi only, bound by sha/uuid/cwd), the replacement starts a fresh session; it gets the spec, a handoff brief and a copy of the old pane text. The old session path and digest are kept as evidence, not resumed."}}')"
 }
 
 _ho_opid() { # <ws> <id> <wt> <alias> <pane> <shell> <agent> <start> <head> <digest> <profile> <spec>
@@ -330,6 +358,8 @@ cmd_handoff_inspect() {
       --pane)      pane="$2"; shift 2 ;;
       --profile)   profile="$2"; shift 2 ;;
       --preserved-export) HO_EXPORT="$2"; shift 2 ;;
+      --resume-session) HO_RESUME="$2"; shift 2 ;;
+      --resume-sha)     HO_RESUME_SHA="$2"; shift 2 ;;
       *) die "handoff inspect: unknown argument: $1" ;;
     esac
   done
@@ -342,7 +372,7 @@ cmd_handoff_inspect() {
   local cmd=""
   if [ "${#HO_WHY[@]}" -eq 0 ] && [ -n "$profile" ]; then
     cmd="$(printf '%s' "$HO_SNAP" | jq -r --arg id "$id" --arg p "$profile" --arg ws "$ws" \
-      '"cel-fanout handoff apply \($id) --workspace \($ws) --profile \($p) --pane \(.pane) --shell-pid \(.runtime.shell_pid) --agent-pid \(.runtime.agent_pid) --agent-start \(.runtime.agent_start) --head \(.source.head) --source-digest \(.source.digest) --evidence \"<what you checked>\""')"
+      '"cel-fanout handoff apply \($id) --workspace \($ws) --profile \($p) --pane \(.pane) --shell-pid \(.runtime.shell_pid) --agent-pid \(.runtime.agent_pid) --agent-start \(.runtime.agent_start) --head \(.source.head) --source-digest \(.source.digest) --evidence \"<what you checked>\"\(if .resume_session then " --resume-session \(.resume_session.path) --resume-sha \(.resume_session.sha256)" else "" end)"')"
   fi
   printf '%s' "$HO_SNAP" | jq --argjson why "$why_json" --arg cmd "$cmd" --arg spec "$spec" \
     '{read_only:true, applicable:(($why|length) == 0), refusals:$why, spec:$spec, plan:., apply_command:(if $cmd == "" then null else $cmd end)}'
@@ -514,6 +544,10 @@ _ho_verify_new() { # <op-json> <wsdir>
       _rec_cmdline_has_args "$pid" "${PROFILE_ARGS[@]}" || why="the new agent's launch arguments do not carry the profile's model and thinking level"
     fi
   fi
+  if [ -z "$why" ]; then
+    local rs; rs="$(printf '%s' "$op" | jq -r '.resume_session.path // empty')"
+    if [ -n "$rs" ]; then _rec_cmdline_has_args "$pid" --session "$rs" || why="the new agent was not launched with --session $rs"; fi
+  fi
   printf '%s' "$why"
 }
 
@@ -537,6 +571,14 @@ _ho_start_runtime() { # <wsdir> <op-json>   (dies on failure; the caller records
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
   _run_keep_model_args "$rt"
   _run_inbox_hook_args "$rt"
+  local rs rssha; rs="$(printf '%s' "$op" | jq -r '.resume_session.path // empty')"
+  if [ -n "$rs" ]; then
+    # the bound working session must be byte-for-byte what was admitted
+    rssha="$(sha256sum "$rs" 2>/dev/null | cut -c1-64)"
+    [ "$rssha" = "$(printf '%s' "$op" | jq -r '.resume_session.sha256')" ] || die "handoff: the selected working session $rs changed since admission - NOT starting on it"
+    [ "$rt" = pi ] || die "handoff: explicit session selection is only known for pi"
+    AGENT_ARGS=(--session "$rs" "${AGENT_ARGS[@]}")
+  fi
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$rt")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
@@ -584,13 +626,14 @@ _ho_prompt_text() { # <wsdir> <row-json> <op-json>
 _ho_complete() { # <wsdir> <opid> <id>
   local wsdir="$1" opid="$2" id="$3" op; op="$(_ho_read "$wsdir" "$opid")"
   _ledger_patch "$wsdir" "$id" '
-      .handoff = ((.handoff // {}) + {prior:{runtime:.runtime, model:.model, thinking:.thinking, profile:.profile, provider:.provider}, prior_review:(.review // null), review_carried:false})
+      .handoff = ((.handoff // {}) + {session:$sess, prior:{runtime:.runtime, model:.model, thinking:.thinking, profile:.profile, provider:.provider}, prior_review:(.review // null), review_carried:false})
     | .profile = $p | .runtime = $rt | .model = $m | .thinking = $th | .provider = $pv
     | .profile_reason = ("handoff " + $op + ": retained-runtime handoff")
     | del(.review) | .launch = {phase:"dispatched", at:$at}' \
     --arg p "$(printf '%s' "$op" | jq -r .target.profile)" --arg rt "$(printf '%s' "$op" | jq -r .target.runtime)" \
     --arg m "$(printf '%s' "$op" | jq -r .target.model)" --arg th "$(printf '%s' "$op" | jq -r .target.thinking)" \
-    --arg pv "$(printf '%s' "$op" | jq -r .target.provider)" --arg op "$opid" --arg at "$(_now_iso)"
+    --arg pv "$(printf '%s' "$op" | jq -r .target.provider)" --arg op "$opid" --arg at "$(_now_iso)" \
+    --argjson sess "$(printf '%s' "$op" | jq -c 'if .resume_session then (.resume_session + {continuity:"process launched on this exact session file; model-side continuity is not claimed"}) else {selection:"fresh"} end')"
   _ledger_update_state "$wsdir" "$id" running
   _ho_phase "$wsdir" "$opid" "$id" done "replacement owns the worktree: assistant turn and tool activity seen"
 }
@@ -612,6 +655,8 @@ cmd_handoff_apply() {
       --evidence)      evidence="$2"; shift 2 ;;
       --reissue-retire) reissue=1; shift ;;
       --preserved-export) HO_EXPORT="$2"; shift 2 ;;
+      --resume-session) HO_RESUME="$2"; shift 2 ;;
+      --resume-sha)     HO_RESUME_SHA="$2"; shift 2 ;;
       *) die "handoff apply: unknown argument: $1" ;;
     esac
   done
@@ -620,6 +665,7 @@ cmd_handoff_apply() {
     local v="${m%%:*}"
     [ -n "${!v}" ] || die "handoff apply: --${m##*:} is required - apply is bound to an inspected plan (run: cel-fanout handoff inspect $id --pane <pane> --profile <profile>); nothing is guessed"
   done
+  if [ -n "$HO_RESUME" ] && [ -z "$HO_RESUME_SHA" ]; then die "handoff apply: --resume-session needs --resume-sha <sha256 from the inspected plan> - the working session is bound by content"; fi
   case "$shell$apid$astart" in *[!0-9]*) die "handoff apply: --shell-pid, --agent-pid and --agent-start must be numbers" ;; esac
   case "$pane" in *[!A-Za-z0-9:_-]*) die "handoff apply: --pane is not a herdr pane id" ;; esac
   [ "${#evidence}" -le 400 ] && case "$evidence" in *$'\n'*) false ;; esac || die "handoff apply: --evidence is one line of at most 400 characters"
@@ -639,7 +685,7 @@ cmd_handoff_apply() {
   abs_wt="$(cd "$(printf '%s' "$row" | jq -r '.worktree')" 2>/dev/null && pwd -P || true)"
   spec="$(printf '%s' "$row" | jq -r '.spec // ""')"; alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
   local opid
-  opid="$(_ho_opid "$(ws_name "$wsdir")" "$id" "$abs_wt" "$alias" "$pane" "$shell" "$apid" "$astart" "$head" "$digest" "$profile" "$spec")"
+  opid="$(_ho_opid "$(ws_name "$wsdir")" "$id" "$abs_wt" "$alias" "$pane" "$shell" "$apid" "$astart" "$head" "$digest" "$profile" "$spec" "${HO_RESUME:-}")"
   local op; op="$(_ho_read "$wsdir" "$opid")"
   local phase=""; [ -z "$op" ] || phase="$(printf '%s' "$op" | jq -r .phase)"
 
@@ -660,6 +706,7 @@ cmd_handoff_apply() {
     _ho_agent_text "$alias" > "$d/$opid.pane-before.txt"
     brief="$(_ho_brief "$wsdir" "$opid" "$row" "$snap" "$profile")"
     op="$(jq -n --arg opid "$opid" --arg id "$id" --argjson snap "$snap" --arg brief "$brief" --arg ev "$evidence" \
+        --argjson arch "$(if [ -n "${HO_EXPORT:-}" ] && [ -f "$HO_EXPORT" ]; then jq -n --arg p "$HO_EXPORT" --arg sha "$(sha256sum "$HO_EXPORT" | cut -c1-64)" '{path:$p, sha256:$sha, role:"immutable-archive-evidence", proves_quiescence:false}'; else echo null; fi)" \
         --arg shape "$shape" --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" --arg spec "$spec" --arg ws "$(ws_name "$wsdir")" \
         --argjson prior "$(printf '%s' "$row" | jq -c '{state, runtime, model, thinking, profile, review:(.review // null), launch:(.launch // null)}')" \
         '{opid:$opid, row_id:$id, workspace:$ws, alias:$snap.alias, pane:$snap.pane, worktree:$snap.worktree, spec:$spec, shape:$shape,
@@ -669,7 +716,7 @@ cmd_handoff_apply() {
                    head:$snap.source.head, remote_ref:$snap.source.remote_ref, relation:$snap.source.relation,
                    ahead:$snap.source.ahead, behind:$snap.source.behind, dirty_and_untracked:$snap.source.dirty_and_untracked,
                    source_digest:$snap.source.digest},
-          target:$snap.target, context:$snap.context, prior_row:$prior,
+          target:$snap.target, context:$snap.context, resume_session:$snap.resume_session, archive:$arch, prior_row:$prior,
           phase:"admitting", phases:[]}')"
     _ho_write "$wsdir" "$opid" "$op" || die "handoff apply: could not write the operation record - nothing changed"
     _ledger_patch "$wsdir" "$id" '.handoff = {id:$op, phase:"admitted", at:$at}' --arg op "$opid" --arg at "$(_now_iso)"
