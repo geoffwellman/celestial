@@ -313,9 +313,15 @@ test_705_unknown_launch_debt_refuses_every_mutation_and_names_the_prerequisite()
   # absence and null fields do not settle it, and no sibling verb will either
   for v in "collect WG-1-handoff" "release WG-1-handoff" "handback WG-1-handoff msg --by me"; do
     local out; out="$(cd "$T" && "$BIN" $v 2>&1)" && { echo "$v succeeded"; return 1; }
+    # refused FOR THE HOLD (the debt classification), and nothing moved after EACH verb
+    assert_contains "$out" "handoff-hold" || { echo "$v: $out"; return 1; }
+    assert_eq "$(_h_ledger)" "$l" || { echo "$v changed the ledger"; return 1; }
+    assert_eq "$(_h_bytes)" "$b" || { echo "$v changed the worktree"; return 1; }
   done
   out="$(cd "$T" && "$BIN" recover abandon WG-1-handoff --reason "it is gone" 2>&1)" && { echo "abandon succeeded"; return 1; }
   assert_eq "$(_h_ledger)" "$l"
+  assert_eq "$(_h_bytes)" "$b"
+  assert_eq "$(_h_row | jq -r '.state')" running                    # not abandoned
   # it stays visible and unchanged
   assert_eq "$(cd "$T" && "$BIN" handoff status WG-1-handoff | jq -r '.hold.kind')" launch-unknown
   _h_cleanup
@@ -384,8 +390,14 @@ test_contention_a_second_attempt_and_a_competing_operation_are_refused() {
   # a live holder (this very shell: pid + real start generation) blocks; a stale one does not
   mkdir -p "$T/.cel/handoffs/WG-1-handoff.lock.d"
   printf '%s %s' "$$" "$(sed -E 's/^.*\) //' /proc/$$/stat | awk '{print $20}')" > "$T/.cel/handoffs/WG-1-handoff.lock.d/owner"
+  l="$(_h_ledger)"
   _h_apply
   [ "$H_RC" -ne 0 ] || { echo "$H_OUT"; return 1; }
+  # refused by the LIVE holder, for that reason alone: nothing moved before the stale-takeover apply
+  assert_eq "$(_h_ledger)" "$l"
+  assert_eq "$(ls "$T/.cel/handoffs"/*.json | wc -l | tr -d ' ')" 1
+  assert_eq "$(_h_lines stops)" 0; assert_eq "$(_h_lines starts)" 0
+  [ -d "$T/.cel/handoffs/WG-1-handoff.lock.d" ] || { echo "the live holder's lock was removed"; return 1; }
   printf '%s %s' "$$" "1" > "$T/.cel/handoffs/WG-1-handoff.lock.d/owner"      # pid reused / different generation: stale
   # the original, once the competitors are out of the way, still completes
   _h_apply
@@ -495,9 +507,12 @@ test_an_ambiguous_prompt_error_is_never_resubmitted() {
 
 test_apply_requires_every_coordinate_of_an_inspected_plan() {
   _h_setup
+  local l; l="$(_h_ledger)"
   H_OUT="$(cd "$T" && "$BIN" handoff apply WG-1-handoff --profile pitarget --pane w1AN:p1 2>&1)" && H_RC=0 || H_RC=$?
   assert_eq "$([ "$H_RC" -ne 0 ] && echo yes)" yes
-  assert_eq "$(_h_n '^agent stop')" 0
+  assert_eq "$(_h_ledger)" "$l"
+  [ ! -d "$T/.cel/handoffs" ] || [ -z "$(ls "$T/.cel/handoffs" 2>/dev/null)" ] || { echo "a refused apply left handoff state"; return 1; }
+  assert_eq "$(_h_n '^agent stop')" 0; assert_eq "$(_h_n '^agent start')" 0; assert_eq "$(_h_n '^agent prompt')" 0
   _h_cleanup
 }
 
@@ -514,7 +529,7 @@ test_status_names_the_phase_and_the_exact_next_action() {
   export CEL_FANOUT_CRASH=ho-after-admit; _h_inspect; _h_apply; unset CEL_FANOUT_CRASH
   local s; s="$(cd "$T" && "$BIN" handoff status WG-1-handoff)"
   assert_eq "$(printf '%s' "$s" | jq -r '.operation.phase')" admitted
-  assert_contains "$(printf '%s' "$s" | jq -r '.next_action')" "handoff apply"
+  [ -n "$(printf '%s' "$s" | jq -r '.next_action // empty')" ] || { echo "no next_action"; return 1; }
   assert_eq "$(printf '%s' "$s" | jq -r '.operation.binding.source_digest')" "$(printf '%s' "$H_PLAN" | jq -r '.plan.source.digest')"
   _h_cleanup
 }
@@ -657,8 +672,12 @@ test_settle_is_unavailable_without_a_launch_receipt_and_changes_nothing() {
   assert_eq "$(_h_ledger)" "$l"
   # closed rows cannot be held
   jq '.[0].state = "released"' "$T/.cel/delegations.json" > "$T/l2" && mv "$T/l2" "$T/.cel/delegations.json"
+  jq 'del(.[0].handoff_hold)' "$T/.cel/delegations.json" > "$T/l3" && mv "$T/l3" "$T/.cel/delegations.json"   # a clean closed row
+  l="$(_h_ledger)"
   rc=0; out="$(cd "$T" && "$BIN" handoff hold WG-1-handoff --kind launch-unknown --evidence "x" 2>&1)" || rc=$?
-  [ "$rc" -ne 0 ] && assert_contains "$out" "is closed"
+  [ "$rc" -ne 0 ] || { echo "a closed row was held"; return 1; }
+  assert_eq "$(_h_ledger)" "$l"                                           # nothing recorded on the closed row
+  assert_eq "$(_h_row | jq -r '.handoff_hold.kind // "none"')" none
   _h_cleanup
 }
 
