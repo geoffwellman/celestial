@@ -94,6 +94,8 @@ EOF
   export H_RS="$RS" CEL_FANOUT_HERDR="$STUB" CEL_FANOUT_PROC="$T/proc" CEL_FANOUT_PS="$T/ps.txt" CEL_FANOUT_SS="$T/ss.txt"
   export CEL_FANOUT_CONFIRM_SLEEP=0 CEL_FANOUT_CONFIRM_TRIES=2 CEL_FANOUT_QUIET_SECS=0 CEL_PANE_READY_POLL_MS=1 CEL_PANE_READY_MS=2000
   _h_schema "${1:-stop}"
+  # production has NO executable stop branch; the retire/start logic is driven through the test-only adapter
+  if [ "${1:-stop}" = stop ]; then export CEL_FANOUT_STOP_ADAPTER="$STUB"; else unset CEL_FANOUT_STOP_ADAPTER; fi
   jq -n --arg w "$H_WT" '{result:{workspaces:[{workspace_id:"w1AN",worktree:{checkout_path:$w}}]}}' > "$RS/ws.json"
   printf 'ctx 3.0%%\n' > "$RS/read.txt"
   printf 'ctx 4.0%%\n● Read(%s)\n● continuing the task\n' "$T/spec.md" > "$RS/turn.txt"
@@ -134,7 +136,7 @@ _h_proc() { # pid ppid start comm
                    printf '%s\0' omp --model some-model --thinking xhigh > "$d/cmdline" ;;
                *) : > "$d/environ"; printf '%s\0' "$4" > "$d/cmdline" ;; esac
 }
-_h_cleanup() { unset H_RS CEL_FANOUT_HERDR CEL_FANOUT_PROC CEL_FANOUT_PS CEL_FANOUT_SS CEL_FANOUT_CRASH; rm -rf "$T"; }
+_h_cleanup() { unset CEL_FANOUT_STOP_ADAPTER H_RS CEL_FANOUT_HERDR CEL_FANOUT_PROC CEL_FANOUT_PS CEL_FANOUT_SS CEL_FANOUT_CRASH; rm -rf "$T"; }
 
 _h_ledger() { cat "$T/.cel/delegations.json" 2>/dev/null; }
 _h_row() { jq -c '.[] | select(.id == "WG-1-handoff")' "$T/.cel/delegations.json"; }
@@ -385,10 +387,12 @@ test_contention_a_second_attempt_and_a_competing_operation_are_refused() {
   assert_eq "$(ls "$T/.cel/handoffs"/*.json | wc -l | tr -d ' ')" 1
   [ ! -s "$RS/stops" ] && [ ! -s "$RS/starts" ] || return 1
   # per-target lock: a live attempt blocks a second one
-  exec 8>"$T/.cel/handoffs/WG-1-handoff.lock"; flock -n 8
+  # a live holder (this very shell: pid + real start generation) blocks; a stale one does not
+  mkdir -p "$T/.cel/handoffs/WG-1-handoff.lock.d"
+  printf '%s %s' "$$" "$(sed -E 's/^.*\) //' /proc/$$/stat | awk '{print $20}')" > "$T/.cel/handoffs/WG-1-handoff.lock.d/owner"
   _h_apply
-  exec 8>&-
   [ "$H_RC" -ne 0 ] && assert_contains "$H_OUT" "holds the target lock" || { echo "$H_OUT"; return 1; }
+  printf '%s %s' "$$" "1" > "$T/.cel/handoffs/WG-1-handoff.lock.d/owner"      # pid reused / different generation: stale
   # the original, once the competitors are out of the way, still completes
   _h_apply
   assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
@@ -657,22 +661,15 @@ test_unknown_session_fails_closed_and_parallel_or_garbled_tails_are_unsettled() 
   done
 }
 
-test_the_capability_gate_requires_the_fenced_contract_not_a_method_name() {
+test_production_has_no_stop_branch_even_when_agent_stop_is_listed() {
   _h_setup stop-nofence; _h_dirty
+  unset CEL_FANOUT_STOP_ADAPTER
   local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
   _h_inspect
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "agent.stop is listed"
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "retire by name alone"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "is not guessed"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "generation fence"
   _h_apply
-  _h_refused_untouched "$l" "$b" "retire by name alone" || return 1
-  _h_cleanup
-}
-
-test_stop_is_fenced_by_the_bound_generation() {
-  _h_setup; _h_dirty
-  _h_inspect; _h_apply
-  assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
-  assert_contains "$(grep '^agent stop' "$RS/log")" "--expected-pid 5001 --expected-start 777777"
+  _h_refused_untouched "$l" "$b" "Nothing end-to-end exists" || return 1
   _h_cleanup
 }
 

@@ -61,7 +61,7 @@ cel-fanout handoff hold    <id> --kind launch-unknown --evidence "<facts>"   # r
   written BEFORE its call; a lost response or a rerun finds the same operation
   (id from the bound coordinates) and continues from its phase - it never stops,
   starts or prompts twice. `status` names the exact next action.
-- **Retirement needs herdr `agent.stop`** (process-only: end one agent by name,
+- **Retirement needs a herdr per-agent stop (not available)** (process-only: end one agent by name,
   keep the pane, shell and every other process). herdr 0.9.1 does not have it
   (`herdr api schema --json`), so there `inspect`/`apply` refuse and name that
   exact call. `pane close`, `release-agent`, keystrokes, raw kills, renaming the
@@ -88,10 +88,12 @@ cel-fanout handoff hold    <id> --kind launch-unknown --evidence "<facts>"   # r
   are refused - with header uuid and cwd = the worktree, bound by bytes, started
   as `pi --session FILE`. Only "launched on that file" is claimed. Else
   UNAVAILABLE, zero mutation.
-- **Capability = contract:** `agent.stop` must take the name plus
-  `expected_pid` + `expected_start`; the call passes them. `handoff settle <id>`
-  is the only exit from a hold and is UNAVAILABLE until herdr has a launch
-  receipt query; held rows keep occupying worker slots.
+- **Retirement is unavailable on herdr 0.9.1:** there is no documented, fenced
+  per-agent stop (identity + generation fence) and this tool does not guess one;
+  there is no executable stop branch in production, so `apply` refuses before
+  mutating anything. `handoff settle <id>` is the only exit from a hold and is
+  UNAVAILABLE until herdr has a launch-receipt query; held rows keep occupying
+  worker slots.
 - `hold` records launch debt you cannot settle (e.g. a `delegate --reuse` that
   timed out UNKNOWN). It fences retirement, restart, collect, release, land,
   handback and `recover abandon`, and is settled only by a herdr launch receipt
