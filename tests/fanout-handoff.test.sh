@@ -531,19 +531,91 @@ test_status_names_the_phase_and_the_exact_next_action() {
   _h_cleanup
 }
 
-test_a_missing_session_file_refuses_retirement_unless_a_tail_export_is_named() {
+test_a_missing_session_file_refuses_retirement_even_with_a_valid_archive() {
   _h_setup; _h_dirty
   rm -f "$RS/session.jsonl"                      # the Pi ENOENT shape: tail may be memory-only
-  local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+  printf 'exported tail\n' > "$T/export.jsonl"
+  local l b; l="$(_ho_l=$(_h_ledger); printf '%s' "$_ho_l")"; b="$(_h_bytes)"
   _h_inspect
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
   assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "may live only in memory"
-  _h_apply
-  _h_refused_untouched "$l" "$b" "session-tail" || return 1
-  printf 'exported tail\n' > "$T/export.jsonl"
   H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --preserved-export "$T/export.jsonl")"
-  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "REFUSED even with a valid archive"
   _h_apply --preserved-export "$T/export.jsonl"
-  assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
+  _h_refused_untouched "$l" "$b" "session-tail" || return 1
   _h_cleanup
+}
+
+test_an_unsettled_last_tool_call_in_the_session_file_refuses_retirement() {
+  _h_setup; _h_dirty
+  printf '%s\n' '{"type":"session","id":"u1","cwd":"x"}' '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"32a954d9","name":"bash"}]}}' > "$RS/session.jsonl"
+  local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+  _h_inspect
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "unsettled-tool"
+  _h_apply
+  _h_refused_untouched "$l" "$b" "unsettled-tool" || return 1
+  # a settled last entry (a tool RESULT) is not refused, and the proof level stays honest
+  printf '%s\n' '{"type":"session","id":"u1","cwd":"x"}' '{"type":"message","message":{"role":"toolResult","content":[]}}' > "$RS/session.jsonl"
+  _h_inspect
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.runtime.session.memory_tail_proof')" none
+  _h_cleanup
+}
+
+_h_working_session() { # <uuid> [cwd] -> path
+  local f="$T/work-$1.jsonl"
+  printf '%s\n' "$(jq -nc --arg id "$1" --arg c "${2:-$H_WT}" '{type:"session",version:3,id:$id,cwd:$c}')" '{"type":"message","message":{"role":"user","content":"hi"}}' > "$f"
+  printf '%s' "$f"
+}
+
+test_explicit_working_session_selection_is_bound_launched_and_verified() {
+  _h_setup; _h_dirty
+  local ws sha; ws="$(_h_working_session 11111111-2222-3333-4444-555555555555)"; sha="$(sha256sum "$ws" | cut -c1-64)"
+  H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --resume-session "$ws")"
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || { echo "$H_PLAN"; return 1; }
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.resume_session.uuid')" 11111111-2222-3333-4444-555555555555
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.resume_session.sha256')" "$sha"
+  assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.plan.context.session_selection')" explicit-working-session
+  _h_apply --resume-session "$ws" --resume-sha "$sha"
+  assert_eq "$H_RC" 0 || { echo "$H_OUT"; return 1; }
+  # the real argv carries --session <that exact file>; nothing was copied or renamed
+  tr '\0' ' ' < "$T/proc/6001/cmdline" | grep -q -- "--session $ws " || { tr '\0' ' ' < "$T/proc/6001/cmdline"; return 1; }
+  assert_eq "$(_h_row | jq -r '.handoff.session.uuid')" 11111111-2222-3333-4444-555555555555
+  assert_contains "$(_h_row | jq -r '.handoff.session.continuity')" "model-side continuity is not claimed"
+  assert_eq "$(sha256sum "$ws" | cut -c1-64)" "$sha"
+  _h_cleanup
+}
+
+test_working_session_selection_refuses_what_it_cannot_verify_with_zero_mutation() {
+  local c needle
+  for c in wrong_cwd archive no_header relative not_pi changed; do
+    _h_setup; _h_dirty
+    local ws prof=pitarget extra=""; ws="$(_h_working_session 11111111-2222-3333-4444-555555555555)"
+    case "$c" in
+      wrong_cwd) ws="$(_h_working_session 22222222-2222-3333-4444-555555555555 /somewhere/else)"; needle="no cwd guessing" ;;
+      archive)   printf 'x\n' > "$T/arch.jsonl"; extra="--preserved-export $T/arch.jsonl"; ws="$T/arch.jsonl"; needle="archive stays immutable" ;;
+      no_header) printf 'not json\n' > "$ws"; needle="no session header" ;;
+      relative)  ws="work.jsonl"; needle="existing absolute session file" ;;
+      not_pi)    prof=bare; needle="only known for the pi runtime" ;;
+      changed)   needle="" ;;
+    esac
+    local l b; l="$(_h_ledger)"; b="$(_h_bytes)"
+    if [ "$c" = changed ]; then
+      H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile pitarget --resume-session "$ws")"
+      assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" true || return 1
+      echo "appended" >> "$ws"                      # edited after the plan: a different file than the one bound
+      H_PROFILE=pitarget _h_apply --resume-session "$ws" --resume-sha "$(printf '%s' "$H_PLAN" | jq -r '.plan.resume_session.sha256')"
+      [ "$H_RC" -ne 0 ] || { echo "changed session was launched"; return 1; }
+      assert_contains "$H_OUT" "stale-session"
+      assert_eq "$(_h_lines starts)" 0
+    else
+      H_PLAN="$(cd "$T" && "$BIN" handoff inspect WG-1-handoff --pane w1AN:p1 --profile "$prof" --resume-session "$ws" $extra)"
+      assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false || { echo "$c: $H_PLAN"; return 1; }
+      assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "$needle" || { echo "$c"; return 1; }
+      H_PROFILE="$prof" _h_apply --resume-session "$ws" --resume-sha deadbeef $extra
+      _h_refused_untouched "$l" "$b" "$needle" || { echo "case $c"; return 1; }
+    fi
+    _h_cleanup
+  done
 }

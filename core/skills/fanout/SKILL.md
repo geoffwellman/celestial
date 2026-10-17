@@ -79,6 +79,14 @@ cel-fanout handoff hold    <id> --kind launch-unknown --evidence "<facts>"   # r
   replacement is told the spec, a handoff brief and a copy of the old pane text
   (kept with the old session path/digest under `<wsdir>/.cel/handoffs/`). Prior
   review/gate approval is NOT carried over (kept as `handoff.prior_review`).
+- **Session safety:** a missing recorded session file refuses retirement even
+  with a named `--preserved-export` archive (evidence only, never proof of
+  quiescence, settled tool use or the post-export tail); a last persisted
+  assistant tool call with no result refuses too. `--resume-session FILE
+  --resume-sha SHA` (pi only; inspect prints it) selects an explicit durable
+  WORKING session bound by uuid, cwd (= the worktree) and bytes, never the
+  archive, started as `pi --session FILE` and verified by argv; only "launched
+  on that file" is claimed, never model-side continuity or the in-memory tail.
 - `hold` records launch debt you cannot settle (e.g. a `delegate --reuse` that
   timed out UNKNOWN). It fences retirement, restart, collect, release, land,
   handback and `recover abandon`, and is settled only by a herdr launch receipt
