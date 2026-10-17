@@ -45,7 +45,7 @@ _gw_setup() {
   # left the live steward sweeping services this suite invented.
   export CEL_SERVICES_D="$T/services.d"
   export CEL_SERVICES_STATE="$T/services-state"
-  export PI_CODING_AGENT_DIR="$T/pi"
+  export CEL_PI_AGENT_DIR="$T/pi"
   unset CEL_GATEWAY_STUB
   cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -93,7 +93,7 @@ EOF
 }
 _gw_teardown() {
   rm -rf "$T"
-  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE PI_CODING_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_PI_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
 }
 
 # --- the config file ------------------------------------------------------
