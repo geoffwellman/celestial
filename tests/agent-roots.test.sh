@@ -161,6 +161,7 @@ test_agent_roots_real_pi_survives_real_omp_start() {
   if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; echo "pi lost its session write after omp started"; _ar_teardown; return 1; fi
   assert_contains "$out" '"second":true'
   assert_contains "$out" '"first":true'
+  assert_contains "$out" '"prefixKept":true'   # byte-for-byte prefix preserved
   local file; file="$(printf '%s' "$out" | jq -r .file)"
   # the exact file pi made is still where pi made it, under pi's root, intact
   case "$file" in "$HOME/.pi/agent/sessions/"*) ;; *) echo "pi session not under pi's root: $file"; _ar_teardown; return 1 ;; esac
