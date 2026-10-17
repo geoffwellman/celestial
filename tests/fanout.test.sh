@@ -2988,3 +2988,23 @@ test_abandon_refuses_launch_starting_and_started_with_zero_mutation() {
   done
   rm -rf "$T"
 }
+
+# a delegate killed mid-start leaves launch.phase starting: honest refusal, no
+# circular pointer at the abandon that refuses it, debt and worktree unchanged.
+test_a_row_stuck_at_launch_starting_says_it_is_retained_debt_with_no_exit() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-KS "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "starting"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-KS" "release WG-KS --discard"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran"; return 1; }
+    assert_contains "$out" "RETAINED UNCERTAIN DEBT with NO supported exit" || return 1
+    case "$out" in *"recover abandon WG-KS --reason"*) echo "circular pointer to abandon: $out"; return 1 ;; esac
+  done
+  rc=0; out="$(cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-KS --reason x 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandon accepted starting"; return 1; }
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  rm -rf "$T"
+}

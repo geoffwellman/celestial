@@ -497,7 +497,19 @@ _rec_unresolved() { # <row-json>
 }
 _rec_guard() { # <verb> <id> <row-json>
   local why; why="$(_rec_unresolved "$3")"
-  [ -z "$why" ] || die "$1: $2 holds an UNSETTLED launch ($why) - a live agent may be in its pane and no task is proven. Nothing was changed. cel-fanout recover continue $2 (a recovered row), or look at the pane and record the outcome with: cel-fanout recover abandon $2 --reason '<what you found>'"
+  [ -n "$why" ] || return 0
+  # What the operator can honestly do depends on whether `recover abandon`
+  # would accept this row (definitive not-accepted only), so say which.
+  local ph lph hint
+  ph="$(printf '%s' "$3" | jq -r '.recovery.dispatch.phase // ""')"; lph="$(printf '%s' "$3" | jq -r '.launch.phase // ""')"
+  if { [ -n "$ph" ] && [ "$ph" = registered ]; } || { [ -z "$ph" ] && [ "$lph" = start-failed ]; }; then
+    hint="No task was ever submitted for it, so after you have looked at the pane: cel-fanout recover abandon $2 --reason '<what you found>' (it re-reads the pane and refuses unless it is provably unstarted)"
+  elif [ -n "$ph" ]; then
+    hint="A task may have been delivered. cel-fanout recover continue $2 only LOOKS for task evidence (never resubmits); abandon is refused for this phase"
+  else
+    hint="This is RETAINED UNCERTAIN DEBT with NO supported exit: the launch was interrupted at '$lph', so an agent may exist and a task may have been queued, and neither the absence of an agent nor an operator note proves otherwise (recover abandon refuses it, recover continue only handles registered recoveries). It stays until herdr provides a supported receipt for the start/dispatch, or the owner decides it by hand outside this tool"
+  fi
+  die "$1: $2 holds an UNSETTLED launch ($why) - a live agent may be in its pane and no task is proven. Nothing was changed; the worktree is untouched. $hint"
 }
 
 # The bounded way out for a row that must not be continued: records the
