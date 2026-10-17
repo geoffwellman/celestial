@@ -1055,6 +1055,14 @@ and `CEL_SESSION_ID` in the actual target pane's launch shell; Pi resolves its
 key there and the generated provider stores only the variable name. Delegated
 workers and scouts use their own alias as the session affinity key.
 
+An omp profile via the gateway uses the scoped pool by default: omp's `celgw`
+provider and `omp/<model>` ids, served only by accounts tagged by
+`cel gateway omp-scope`. Add `gateway_pool: all` to route that profile through
+the unprefixed ids instead (a separate `celgw-all` provider), served by every
+usable claude account. Bind it to the orchestrator role with `role_profiles`
+(per box in `workspace.local.yaml`). Worker profiles without it stay on the
+scoped pool, and any other value is a veto.
+
 Three things are worth knowing before you rely on it:
 
 - **Affinity defaults off upstream.** The config this writes turns it on; a

@@ -170,7 +170,7 @@ profile_clamp() { # <runtime> <level>
 profile_resolve() { # <wsdir> <name> [<default-runtime>]
   local d="$1" name="$2" rt_default="${3:-}"
   PROFILE_WSDIR="$d"
-  PROFILE_RUNTIME=""; PROFILE_MODEL=""; PROFILE_THINKING=""; PROFILE_NOTE=""; PROFILE_VETO=""; PROFILE_VIA=""
+  PROFILE_RUNTIME=""; PROFILE_MODEL=""; PROFILE_THINKING=""; PROFILE_NOTE=""; PROFILE_VETO=""; PROFILE_VIA=""; PROFILE_GATEWAY_POOL=""
   profile_exists "$d" "$name" \
     || die "no worker profile '$name' in $(ws_name "$d")/workspace.yaml (have: $(profile_names "$d" | tr '\n' ' '))"
 
@@ -284,8 +284,16 @@ _profile_gateway_route() { # <profile name> [runtime]
 # only claude accounts are scoped.
 _profile_gateway_route_omp() { # <profile name>
   local name="$1" id="$PROFILE_MODEL"
+  id="${id#"$GATEWAY_OMP_ALL_PROVIDER"/}"
   id="${id#"$GATEWAY_OMP_PROVIDER"/}"; id="${id#"$GATEWAY_OMP_PREFIX"/}"
   id="${id#anthropic/}"; id="${id#claude/}"
+  PROFILE_GATEWAY_POOL="$(profile_get "$PROFILE_WSDIR" "$name" gateway_pool)"
+  case "$PROFILE_GATEWAY_POOL" in
+    ""|omp) PROFILE_GATEWAY_POOL=omp ;;
+    all) _profile_gateway_route_omp_all "$name" "$id"; return 0 ;;
+    *) PROFILE_VETO="gateway_pool must be omp or all (got '$PROFILE_GATEWAY_POOL')"
+       PROFILE_NOTE="VETOED: $PROFILE_VETO"; c_err "profile $name: $PROFILE_VETO"; return 0 ;;
+  esac
   PROFILE_MODEL="$GATEWAY_OMP_PROVIDER/$GATEWAY_OMP_PREFIX/$id"
   local models
   case "$id" in
@@ -315,6 +323,41 @@ _profile_gateway_route_omp() { # <profile name>
     c_err "profile $name: $PROFILE_VETO"
   else
     PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts in the omp pool)"
+  fi
+  return 0
+}
+
+# `gateway_pool: all`: the gateway's UNPREFIXED id under omp's celgw-all
+# provider, served by every usable claude account (force-model-prefix is off).
+# For the orchestrator role only, by choosing it in role_profiles. Needs no
+# omp_exclude and never touches account prefixes, so the scoped omp/ pool
+# worker profiles use is unchanged.
+_profile_gateway_route_omp_all() { # <profile name> <claude id>
+  local name="$1" id="$2" models
+  PROFILE_MODEL="$GATEWAY_OMP_ALL_PROVIDER/$id"
+  case "$id" in
+    claude-*) ;;
+    *) PROFILE_VETO="omp via gateway serves claude models only (got '$id')" ;;
+  esac
+  if [ -n "$PROFILE_VETO" ]; then :
+  elif ! gateway_installed; then
+    PROFILE_VETO="no gateway on this box - cel gateway install"
+  elif ! gateway_ready; then
+    PROFILE_VETO="the gateway is not answering on $(gateway_url) - cel gateway status"
+  else
+    PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count claude 2>/dev/null || printf 0)"
+    if ! [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null; then
+      PROFILE_VETO="the gateway has no usable claude account - cel gateway login claude"
+    elif ! models="$(_gateway_models_json_raw)" \
+        || ! jq -e --arg m "$id" '[.data[]? | select(.id == $m)] | length > 0' <<<"$models" >/dev/null 2>&1; then
+      PROFILE_VETO="the gateway does not publish $id"
+    fi
+  fi
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $name: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS claude accounts, unscoped pool)"
   fi
   return 0
 }

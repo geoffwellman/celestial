@@ -581,6 +581,51 @@ EOS
   _gws_clean
 }
 
+# An omp profile with `gateway_pool: all` (an orchestrator profile, bound via
+# role_profiles) asks for the UNPREFIXED gateway id under its own provider key,
+# so it is served by every claude account while worker profiles keep the
+# scoped omp/ pool. It needs no omp_exclude and never touches account prefixes.
+_gws_pool_all() { # <pool value>
+  _gws
+  cat >>"$T/workspace.yaml" <<YAML
+  orch: { runtime: omp, model: anthropic/claude-opus-5-5, thinking: high, via: gateway, gateway_pool: $1 }
+  og: { runtime: omp, model: anthropic/claude-opus-5-5, thinking: low, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+  accounts) printf '%s\n' '[{"provider":"claude"},{"provider":"claude"},{"provider":"claude"}]' ;;
+esac
+EOS
+  printf '{"type":"claude","email":"me@personal.invalid"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  printf '{"type":"claude","email":"a@example.invalid"}' >"$GWT/state/auth/claude-22222222-a@example.invalid.json"
+}
+
+test_profile_omp_gateway_pool_all_resolves_to_the_unprefixed_id() {
+  _gws_pool_all all
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
+  profile_resolve "$T" orch >/dev/null 2>&1
+  assert_eq "$PROFILE_MODEL" "celgw-all/claude-opus-5-5"
+  assert_eq "$PROFILE_THINKING" high
+  assert_eq "$PROFILE_VETO" ""
+  assert_eq "$PROFILE_GATEWAY_POOL" all
+  # the worker profile beside it is unchanged: still the scoped pool, and with
+  # no omp_exclude configured it still fails closed
+  profile_resolve "$T" og >/dev/null 2>&1
+  assert_contains "$PROFILE_VETO" "omp_exclude"
+  _gws_clean
+}
+
+test_profile_omp_gateway_pool_rejects_an_unknown_value() {
+  _gws_pool_all everything
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
+  profile_resolve "$T" orch >/dev/null 2>&1
+  assert_contains "$PROFILE_VETO" "gateway_pool"
+  _gws_clean
+}
+
 # --- workspace.local.yaml: per-box override, AH-260928 ---------------------
 #
 # A team box under one login per person, each on a different provider, needs

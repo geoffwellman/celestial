@@ -632,6 +632,27 @@ test_gateway_omp_models_yml_carries_prefixed_ids_and_no_secret() {
   _gw_teardown
 }
 
+# `gateway_pool: all` profiles get their own provider key with the PLAIN
+# claude ids; the scoped celgw block is left exactly as it was.
+test_gateway_omp_models_yml_pool_all_writes_a_separate_unprefixed_provider() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"},{"id":"gpt-5.5"}]}'
+  _gw_omp_catalog "$T/cat.json"
+  mkdir -p "$T/omp"
+  gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json" || { echo "scoped write failed"; _gw_teardown; return 1; }
+  local f="$T/omp/models.yml" before; before="$(yq -c '.providers.celgw' "$f")"
+  gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json" all || { echo "all write failed"; _gw_teardown; return 1; }
+  assert_eq "$(yq -c '.providers.celgw' "$f")" "$before"
+  assert_eq "$(yq -r '[.providers["celgw-all"].models[].id] | join(",")' "$f")" "claude-sonnet-4-6"
+  assert_eq "$(yq -r '.providers["celgw-all"].apiKey' "$f")" OMP_GATEWAY_TOKEN
+  assert_eq "$(yq -r '.providers["celgw-all"].models[0].thinking.mode' "$f")" anthropic-adaptive
+  local key; key="$(cat "$(gateway_state_dir)/api-key")"
+  ! grep -qF "$key" "$f" || { echo "the api-key was written into models.yml"; _gw_teardown; return 1; }
+  unset GW_MODELS
+  _gw_teardown
+}
+
 # The pi contract is unchanged: omp-scoped ids are omp's, and must not leak
 # into pi's openai-completions block as `omp/claude-*` models.
 test_pi_models_skip_the_omp_scoped_ids() {
