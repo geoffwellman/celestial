@@ -323,7 +323,7 @@ test_a_row_with_a_delegate_launch_debt_is_refused_not_retired() {
   jq '.[0].launch = {phase:"starting", at:"2026-10-18T00:00:00Z"} | .[0].state = "unconfirmed"' "$T/.cel/delegations.json" > "$T/l2" && mv "$T/l2" "$T/.cel/delegations.json"
   _h_inspect
   assert_eq "$(printf '%s' "$H_PLAN" | jq -r '.applicable')" false
-  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "unsettled launch (launch starting)"
+  assert_contains "$(printf '%s' "$H_PLAN" | jq -r '.refusals | join(" ")')" "unsettled launch or operation (launch starting)"
   _h_cleanup
 }
 

@@ -496,6 +496,8 @@ _rec_unresolved() { # <row-json>
   # with launch.phase start-failed, and that row must not bypass the fence.
   printf '%s' "$1" | jq -r '(.state // "") as $st
     | if ($st | IN("abandoned","landed","released")) then empty
+      elif (.handoff_hold != null) then ("handoff-hold " + (.handoff_hold.kind // "unknown"))
+      elif (.handoff != null and ((.handoff.phase // "") != "done")) then ("handoff " + (.handoff.phase // "admitted"))
       elif ((.launch.phase // "") | IN("starting","start-failed","started","dispatch-unconfirmed")) then ("launch " + .launch.phase)
       elif .recovery != null and ($st | IN("unconfirmed","running")) then ((.recovery.dispatch.phase // "registered") | select(. != "accepted"))
       else empty end'
@@ -516,7 +518,11 @@ _rec_guard() { # <verb> <id> <row-json>
   # would accept this row (definitive not-accepted only), so say which.
   local ph lph hint
   ph="$(printf '%s' "$3" | jq -r '.recovery.dispatch.phase // ""')"; lph="$(printf '%s' "$3" | jq -r '.launch.phase // ""')"
-  if { [ -n "$ph" ] && [ "$ph" = registered ]; } || { [ -z "$ph" ] && [ "$lph" = start-failed ]; }; then
+  if [ -n "$(printf '%s' "$3" | jq -r '.handoff_hold.kind // empty')" ]; then
+    hint="This is a held launch whose outcome is UNKNOWN (cel-fanout handoff hold). It has no supported exit: it is settled only by a herdr launch receipt - an API reporting the outcome of agent.start by launch id and a supported cancel. cel-fanout handoff status $2 shows the evidence"
+  elif [ -n "$(printf '%s' "$3" | jq -r '.handoff.phase // empty')" ]; then
+    hint="A retained-runtime handoff is unfinished. cel-fanout handoff status $2 names its phase and the exact next action; re-running cel-fanout handoff apply with the same arguments continues the SAME operation"
+  elif { [ -n "$ph" ] && [ "$ph" = registered ]; } || { [ -z "$ph" ] && [ "$lph" = start-failed ]; }; then
     hint="No task was ever submitted for it, so after you have looked at the pane: cel-fanout recover abandon $2 --reason '<what you found>' (it re-reads the pane and refuses unless it is provably unstarted)"
   elif [ -n "$ph" ]; then
     hint="A task may have been delivered. cel-fanout recover continue $2 only LOOKS for task evidence (never resubmits); abandon is refused for this phase"
@@ -557,6 +563,9 @@ cmd_recover_abandon() { # <id> --reason TEXT [--workspace NAME]
   # dispatch-unconfirmed, and recovery submitting/ambiguous/unconfirmed-acceptance
   # (a prompt MAY have been delivered). Those stay fenced, unknown, until
   # `recover continue` sees task evidence.
+  if [ -n "$(printf '%s' "$row" | jq -r '(.handoff_hold.kind // empty), (select((.handoff.phase // "done") != "done") | .handoff.phase)')" ]; then
+    die "recover abandon: $id carries a retained-runtime handoff operation or hold - it is settled by cel-fanout handoff (status shows the phase and next action), never abandoned: its replacement agent may exist. Nothing changed"
+  fi
   local definitive=0
   if [ -n "$ph" ]; then [ "$ph" = registered ] && [ -z "$lph" -o "$lph" = recovered ] && definitive=1
   else [ "$lph" = start-failed ] && definitive=1; fi
