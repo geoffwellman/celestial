@@ -1158,7 +1158,21 @@ _run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates
 _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-models] [session-id]
   local runtime="$1" agent_name="$2" require_key="${3:-1}" write_models="${4:-1}" session_id="${5:-}"
   GATEWAY_ENV=()
-  [ "${PROFILE_VIA:-}" = gateway ] || return 0
+  if [ "${PROFILE_VIA:-}" != gateway ]; then
+    # NATIVE START, GATEWAY LATER. An omp session can switch models in flight,
+    # and the launch environment is the only place it reads the gateway client
+    # key and session identity - a running process cannot be handed them. So an
+    # omp that starts on Codex still gets them, when this box has a configured
+    # gateway with a readable key. Quietly nothing otherwise: direct-only boxes
+    # stay usable, and no models.yml is written or gateway required here.
+    # pi is unchanged (its provider list is written per gateway launch).
+    [ "$runtime" = omp ] || return 0
+    gateway_installed || return 0
+    local kf; kf="$(_gateway_key_file)"
+    [ -r "$kf" ] && [ -s "$kf" ] || return 0
+    _run_gateway_env "$runtime" "$agent_name" 0 "$session_id"
+    return 0
+  fi
   _run_gateway_env "$runtime" "$agent_name" "$require_key" "$session_id"
   if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
     gateway_pi_models_write \
