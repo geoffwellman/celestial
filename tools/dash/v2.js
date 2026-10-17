@@ -179,8 +179,10 @@ var BODY={
   return '<svg viewBox="0 0 100 100" preserveAspectRatio="none" class="spark"><line x1="0" x2="100" y1="'+cap+'" y2="'+cap+'" class="cap"/><polyline points="0,100 '+line+' 100,100" class="area"/><polyline points="'+line+'" class="ln2"/></svg><div class="hx"><span>'+hhmm(pts[0].ts)+'</span><span>now</span></div><div class="sub">Load average; dashed line = '+esc(d.threads)+' threads, above it work is queuing.</div>'},
  box:function(){var d=F.load,p=d&&(d.current||(d.points||[])[(d.points||[]).length-1]);if(!p)return none('no reading yet');
   function m(label,pct,txt){return '<div class="row"><span class="sub" style="width:60px">'+label+'</span><span class="meter"><i style="width:'+Math.min(100,pct)+'%;background:'+(pct>85?'var(--bad)':pct>60?'var(--warn)':'var(--ok)')+'"></i></span><span class="sub">'+txt+'</span></div>'}
-  return '<div class="row"><span class="dot ok"></span><span class="t"><b>box</b> <span class="sub">'+esc(d.threads)+' threads</span></span></div>'+
-   m('CPU',p.load/(d.threads||1)*100,'load '+p.load)+m('Memory',p.mem_pct,Math.round(p.mem_pct)+'%')+m('Swap',p.swap_pct,Math.round(p.swap_pct)+'%')},
+  return '<div class=\"row\"><span class=\"dot ok\"></span><span class=\"t\"><b>box</b> <span class=\"sub\">'+esc(d.threads)+' threads</span></span></div>'+
+   m('CPU',p.load/(d.threads||1)*100,'load '+p.load)+m('Memory',p.mem_pct,Math.round(p.mem_pct)+'%')+m('Swap',p.swap_pct,Math.round(p.swap_pct)+'%')+
+   (function(){var s=(((F.services||{}).items)||[]).filter(function(x){return x.kind==='preview'||x.kind==='unledgered'}).sort(function(a,b){return (b.memory_mb||0)-(a.memory_mb||0)});
+    return '<h4>Preview/dev servers</h4>'+(s.length?s.map(function(x){return '<div class=\"row\"><span class=\"t\">'+esc(x.name)+'</span><span class=\"sub\">'+esc(x.kind==='unledgered'?'unledgered':x.owner)+' · '+esc(x.memory_mb||0)+'M · '+esc(x.age_seconds||0)+'s'+(x.port?' · :'+esc(x.port):'')+'</span></div>'}).join(''):none('no preview servers'))})()},
  services:function(){var s=(((F.services||{}).items)||[]).filter(function(x){return x.ws==='box'||inWs(x.ws)});
   return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
 };
