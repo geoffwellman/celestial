@@ -566,3 +566,26 @@ test_replace_a_failing_git_read_in_the_content_check_refuses_instead_of_passing(
   _reserve; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
   rm -rf "$T"
 }
+
+# the all-deletion candidate (an empty tree) and an unreadable original tree
+# are refused by the real CLI, not passed as "no differences"
+test_replace_an_all_deletion_candidate_is_refused() {
+  _rp_setup
+  local empty bad
+  empty="$(git -C "$T/repos/widget" hash-object -t tree /dev/null)"
+  bad="$(git -C "$T/repos/widget" commit-tree "$empty" -p main -m wipe)"
+  _reserve WG-1-clean "$bad"; _rp_refused "which is not a private artifact" || return 1
+  rm -rf "$T"
+}
+
+test_replace_an_unreadable_original_tree_is_refused() {
+  _rp_setup
+  local otree; otree="$(git -C "$T/repos/widget" rev-parse "$OH^{tree}")"
+  rm -f "$T/repos/widget/.git/objects/${otree:0:2}/${otree:2}"
+  git -C "$T/repos/widget" repack -q -a -d 2>/dev/null || true
+  [ -f "$T/repos/widget/.git/objects/${otree:0:2}/${otree:2}" ] && { echo "fixture could not hide the tree"; return 1; }
+  _reserve; [ "$RC" -ne 0 ] || { echo "reserve succeeded with the original tree unreadable: $OUT"; return 1; }
+  assert_eq "$(cat "$G/mutations.log")" "" || return 1
+  assert_eq "$(_rp_sum)" "$LEDGER_SUM"
+  rm -rf "$T"
+}
