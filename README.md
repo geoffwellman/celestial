@@ -590,7 +590,7 @@ factory's own sequence: `released`, `merged`, `landing` (PR approved AND
 green - approved by GitHub or by the explicit-head ledger verdict `cel-fanout review`
 records for the PR's current head, green meaning no red check and a passed gate verdict, else passing
 checks: the same evidence `cel-fanout land` consumes), `review` (a PR is open), `building` (a worker holds it — including
-`unconfirmed`, a dispatch whose prompt was never accepted), `ready` (a
+`unconfirmed`, a dispatch whose prompt was never accepted, or a launch recorded by `cel-fanout recover`), `ready` (a
 start-able ticket nobody has started), `backlog`. A gate that timed out or
 produced no verdict is **not** a failure and never renders as one.
 

@@ -37,7 +37,9 @@ _dd_page() {
   curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/" && curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js"
 }
 _dd_down() {
-  if [ -n "${DASH_PID:-}" ]; then kill "$DASH_PID" 2>/dev/null || true; wait "$DASH_PID" 2>/dev/null || true; fi
+  # the server runs under its own process group (_dash_launch): stop and join it,
+  # CLI children included, BEFORE the fixture is removed
+  _dash_stop_group "${DASH_PID:-}"
   DASH_PID=""; if [ -n "${T:-}" ]; then rm -rf "$T"; fi; T=""; trap - EXIT
 }
 _dd_post() { # <body> [extra curl args...]

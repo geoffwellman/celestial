@@ -40,6 +40,56 @@ teardown: after merge, cel-fanout release <id>
   <role file>`), sends the task spec as its first prompt, and records the
   delegation in the workspace's ledger (`<wsdir>/.cel/delegations.json`).
 
+Registering a worker whose launch was only partly recorded (NOT resuming it)
+
+```
+cel-fanout recover inspect  <repo> <branch> --pane <pane>          # read-only
+cel-fanout recover register <repo> <branch> <spec> --profile P --pane <pane> \
+    --shell-pid N --agent-pid N --agent-start TICKS --evidence "<facts>" --attest-legacy
+cel-fanout recover continue <id>
+cel-fanout recover abandon  <id> --reason "<what you found>"
+```
+
+- For a live agent in a pane with NO ledger row (the delegating process died
+  or timed out between `herdr agent start` and the ledger write). Orchestrator
+  only. It never starts an agent, types, presses Enter, edits herdr state or
+  falls back to another model.
+- **UPSTREAM BLOCKED for a worker herdr still reports `launch_pending`.**
+  No SUPPORTED completer was found in herdr 0.9.1's exposed surfaces
+  (agent.start/prompt/wait/explain/rename,
+  pane.report_agent/report_agent_session/clear_agent_authority/release_agent);
+  that is what the installed binary shows, not proof the capability cannot
+  exist, and the only things that would change a pending launch (report-agent,
+  release-agent, Enter) are forbidden. The prerequisite is (1) a diagnostic
+  reason why the launch is pending, (2) a supported way to complete it or mark
+  the agent ready with no keystrokes or metadata forgery, and (3) prompt-delivery
+  receipt semantics. Until then `register` records the row and
+  `continue` refuses: such a worker is registered, not resumed.
+- `register` validates the exact pane, shell, agent process generation
+  (`/proc` start ticks - read them from `inspect`), environment, the exact
+  model and thinking-level launch arguments, branch, worktree, an unstarted
+  pane (context zero, no turn) and herdr's own `launch_pending`/idle report,
+  refusing with zero mutation on any mismatch, a live original delegate, a held
+  ledger lock, or a conflicting row. It writes one row in state `unconfirmed`
+  with a `recovery` record (`legacy-operator-attested`; what is NOT proven is
+  in `recovery.unproven`). Retrying it is idempotent.
+- `continue` sends the task prompt at most once, only to an agent herdr reports
+  interactive_ready and not launch_pending and whose pane is still unstarted.
+  A row moves to `running` (and the ticket to In Progress) only after the
+  pane shows the agent took a turn; an ambiguous or crashed submit is never
+  resubmitted - the next `continue` only looks.
+- An `unconfirmed` row that may hold a live agent (a recovery row, or a
+  delegate receipt at launch.phase starting/start-failed/started) counts toward
+  the worker cap and is fenced: `release`, `collect`, `land`, `review
+  approved`, `request-review` and `handback` refuse it, `release --all` skips
+  it, `gc` keeps its worktree. `recover abandon` is the bounded way out for a launch where NO task was ever submitted (an uncertain, possibly delivered dispatch is refused and stays fenced): it
+  records the operator's reason, moves the row to `abandoned` and touches
+  nothing else (agent, pane and worktree stay as found).
+- A delegate row is now written BEFORE `herdr agent start`. A failed start is
+  kept as launch.phase `start-failed` (no automatic continuation: look at the
+  pane, then `recover abandon`). `delegate --reuse` over an existing row marks
+  it instead of replacing it, so a failed start keeps its verdict and PR.
+
 Running a worker on a different model or CLI
 
 ```

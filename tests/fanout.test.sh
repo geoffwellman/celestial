@@ -215,7 +215,7 @@ test_delegate_refuses_unknown_pr_open() {
   _fanout_setup
   yq -y -i '.policy.pr_open = "sometimes"' "$T/workspace.yaml"
   if (cd "$T" && "$BIN" delegate widget WG-BAD "$T/spec.md") > /dev/null 2>&1; then
-    fail "unknown pr_open value was accepted"
+    echo "unknown pr_open value was accepted"; return 1
   fi
   rm -rf "$T"
 }
@@ -2668,8 +2668,10 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
 test_the_ledger_stamps_the_state_it_was_created_in() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
-  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 1
-  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" running
+  # AH-261017: born `unconfirmed` (the launch receipt), then running on acceptance
+  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 2
+  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].history[1].state' "$T/.cel/delegations.json")" running
   assert_eq "$(jq -r '.[0].history[0].at' "$T/.cel/delegations.json")" \
             "$(jq -r '.[0].created' "$T/.cel/delegations.json")"
   rm -rf "$T"
@@ -2683,7 +2685,7 @@ test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
   (cd "$T" && "$BIN" collect WG-1-x >/dev/null)
   (cd "$T" && "$BIN" release WG-1-x --discard >/dev/null)
   assert_eq "$(jq -r '.[0].history | map(.state) | join(",")' "$T/.cel/delegations.json")" \
-            "running,collected,released"
+            "unconfirmed,running,collected,released"
   # every entry says who moved it, and the stamps never go backwards
   assert_eq "$(jq -r '.[0].history | map(.by != "" and .at != "") | all' "$T/.cel/delegations.json")" true
   assert_eq "$(jq -r '.[0].history | map(.at) | (. == sort)' "$T/.cel/delegations.json")" true
@@ -2850,6 +2852,177 @@ test_delegate_does_not_retry_a_refused_agent_start() {
   assert_contains "$out" "NOT retried"
   assert_eq "$(grep -c '^agent start' "$STUB_LOG" || true)" 1
   assert_eq "$(grep -c '^pane send-keys' "$STUB_LOG" || true)" 0
-  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json" 2>/dev/null || echo 0)" 0
+  # AH-261017: the launch receipt was written BEFORE the start, and a failed
+  # start is not rolled back - herdr can time out after the agent exists - so
+  # the row stays, `unconfirmed`, saying exactly that. No task was delivered.
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$out" "An agent may exist"
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
+  rm -rf "$T"
+}
+
+# AH-261017: the receipt precedes the spawn, so a delegate killed after herdr
+# started the agent leaves a trackable row, never a live agent with no row.
+test_delegate_writes_its_launch_receipt_before_the_agent_starts() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") cp "$STUB_LEDGER" "$STUB_LEDGER.at-start" 2>/dev/null \|\| echo absent > "$STUB_LEDGER.at-start";|' "$STUB"
+  (cd "$T" && STUB_LEDGER="$T/.cel/delegations.json" "$BIN" delegate widget WG-RCPT "$T/spec.md") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json.at-start")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json.at-start")" starting
+  # and the finished row is the normal running row, with the transition recorded
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" dispatched
+  assert_eq "$(jq -r '[.[0].history[].state] | join(",")' "$T/.cel/delegations.json")" "unconfirmed,running"
+  rm -rf "$T"
+}
+
+test_delegate_killed_during_agent_start_leaves_a_trackable_row() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  # the agent comes up, then the delegating process dies before it can record anything more
+  sed -i 's|^  "agent start")|  "agent start") pkill -9 -f "cel-fanout delegate widget WG-KILLED" ; sleep 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-KILLED "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" starting
+  assert_eq "$(jq -r '.[0].alias' "$T/.cel/delegations.json")" widget-wg-killed
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
+  rm -rf "$T"
+}
+
+# AH-261017 review round 1: a failed `delegate --reuse` start must not destroy
+# the prior row (handback resumes through --reuse; the verdict and PR live there).
+test_a_failed_reuse_start_keeps_the_prior_rows_verdict_and_pr() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  (cd "$T" && "$BIN" delegate widget WG-RU "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-RU changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  jq '.[0].state = "finished" | .[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" worktree add -q -b WG-RU "$T/wt-ru" 2>/dev/null || true
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  local out rc=0
+  out="$(cd "$T" && STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-ru\"}}]}}" \
+    "$BIN" delegate widget WG-RU "$T/spec.md" --reuse 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a refused start succeeded"; return 1; }
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].pr' "$T/.cel/delegations.json")" 7
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  rm -rf "$T"
+}
+
+# a start-failed receipt row may hold a live agent: it counts toward the cap
+# and fences collect/release/land until the operator records the outcome.
+test_a_start_failed_receipt_row_holds_a_slot_and_fences_consumers_until_abandoned() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-SF "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$(cd "$T" && "$BIN" status 2>&1)" "1/4 used"
+  local before out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-SF" "release WG-SF --discard" "land WG-SF"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on an unsettled launch"; return 1; }
+    assert_contains "$out" "UNSETTLED launch"
+  done
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  # fresh evidence is required: a pane showing work is refused, unknown retained
+  rc=0; out="$(cd "$T" && STUB_PANE_TEXT='● editing files
+ ctx 5.0%/1.0m' "$BIN" recover abandon WG-SF --reason "looked fine" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandoned a pane that shows work"; return 1; }
+  assert_contains "$out" "not provably unstarted"
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  (cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-SF --reason "pane inspected: shell prompt only") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" abandoned
+  assert_eq "$(jq -r '.[0].abandon.prior_launch_phase' "$T/.cel/delegations.json")" start-failed
+  # settled: release is no longer fenced
+  (cd "$T" && "$BIN" release WG-SF --keep-worktree) >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
+
+# round 3: launch debt fences EVERY state. A failed --reuse start leaves a
+# finished row (verdict+PR kept) with launch.phase start-failed; no destructive
+# consumer may touch it, the worktree survives, and abandon needs fresh evidence.
+test_a_failed_reuse_over_a_finished_row_fences_every_destructive_consumer() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  (cd "$T" && "$BIN" delegate widget WG-RF "$T/spec.md") > /dev/null
+  jq '.[0].state = "finished" | .[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$T/repos/widget" worktree add -q -b WG-RF "$T/wt-rf" 2>/dev/null || true
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  (cd "$T" && STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-rf\"}}]}}" \
+    "$BIN" delegate widget WG-RF "$T/spec.md" --reuse) >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-RF" "release WG-RF --discard" "release WG-RF --keep-worktree" "land WG-RF" \
+           "review WG-RF approved --head $HA --by widget-pr-7-review" "request-review WG-RF --head $HA" "handback WG-RF x --by r"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on a start-failed finished row"; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+  done
+  (cd "$T" && "$BIN" release --all --state finished >/dev/null 2>&1) || true
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  [ -d "$T/wt-rf" ] || { echo "the worktree went"; return 1; }
+  rm -rf "$T"
+}
+
+test_abandon_refuses_launch_starting_and_started_with_zero_mutation() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ST "$T/spec.md") > /dev/null
+  local ph out rc before
+  for ph in starting started dispatch-unconfirmed; do
+    jq --arg p "$ph" '.[0].state = "unconfirmed" | .[0].launch.phase = $p' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+    before="$(cat "$T/.cel/delegations.json")"; rc=0
+    out="$(cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-ST --reason "looks idle" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "abandoned launch $ph"; return 1; }
+    assert_contains "$out" "DEFINITIVELY"
+    assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+    [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  done
+  rm -rf "$T"
+}
+
+# a delegate killed mid-start leaves launch.phase starting: honest refusal, no
+# circular pointer at the abandon that refuses it, debt and worktree unchanged.
+test_a_row_stuck_at_launch_starting_says_it_is_retained_debt_with_no_exit() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-KS "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "starting"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-KS" "release WG-KS --discard"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran"; return 1; }
+    assert_contains "$out" "RETAINED UNCERTAIN DEBT with NO supported exit" || return 1
+    case "$out" in *"recover abandon WG-KS --reason"*) echo "circular pointer to abandon: $out"; return 1 ;; esac
+  done
+  rc=0; out="$(cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-KS --reason x 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandon accepted starting"; return 1; }
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  rm -rf "$T"
+}
+
+# round 4: a delegate whose dispatch was never confirmed (prompt MAY have been
+# delivered) is uncertain delivery debt: every destructive consumer refuses it.
+test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-DU "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "dispatch-unconfirmed"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-DU" "release WG-DU --discard" "release WG-DU --keep-worktree" "land WG-DU" \
+           "review WG-DU approved --head $HA --by r" "request-review WG-DU --head $HA" "handback WG-DU x --by r"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on dispatch-unconfirmed"; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+    assert_eq "$(cat "$T/.cel/delegations.json")" "$before" || return 1
+  done
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
   rm -rf "$T"
 }
