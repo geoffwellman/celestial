@@ -119,36 +119,101 @@ test_agent_roots_launch_exports_do_not_survive_in_the_pane_shell() {
 }
 
 # THE INCIDENT, end to end, with the real Pi SessionManager and the real OMP
-# binary in a network-less sandbox over a fixture HOME.
-test_agent_roots_real_pi_survives_real_omp_start() {
-  _ar_setup
-  local pi_bin omp_bin pkg
-  pi_bin="$(command -v pi)" && omp_bin="$(command -v omp)" || { echo "skip: pi/omp not installed"; _ar_teardown; return 0; }
+# binary in a network-less sandbox over a fixture HOME. Missing prerequisites
+# are a loud SKIP, and a FAILURE under CEL_TEST_REQUIRE_REAL_RUNTIME=1 (the
+# gate on a box that has them must set it): a skip is not proof.
+_ar_real_prereq() { # sets _AR_PKG; returns 0 when runnable
+  local pi_bin pkg
+  pi_bin="$(command -v pi)" && command -v omp >/dev/null && have bwrap \
+    && bwrap --ro-bind / / --unshare-net true 2>/dev/null || return 1
   pkg="$(dirname "$(readlink -f "$pi_bin")")"
   while [ "$pkg" != / ] && [ ! -f "$pkg/package.json" ]; do pkg="$(dirname "$pkg")"; done
-  [ -f "$pkg/dist/index.js" ] || { echo "skip: pi package not found"; _ar_teardown; return 0; }
-  have bwrap && bwrap --ro-bind / / --unshare-net true 2>/dev/null \
-    || { echo "skip: no network-denied sandbox available"; _ar_teardown; return 0; }
+  [ -f "$pkg/dist/index.js" ] || return 1
+  _AR_PKG="$pkg"
+}
+# <pi-launch-prefix-or-empty> <PI_CODING_AGENT_DIR for the pi child if no prefix> -> JSON on stdout
+_ar_real_run() {
+  local pi_line="$1" pidir="$2" omp_line; omp_line="$(_run_launch_env worker "$T" /r.md "" omp)"
   local cwd="$HOME/work/proj-a"; mkdir -p "$cwd" "$cwd-other"
-  # the contaminated launcher: its ambient root is OMP's
-  export PI_CODING_AGENT_DIR="$HOME/.omp/agent"
-  local pi_line omp_line
-  pi_line="$(_run_launch_env worker "$T" /r.md "" pi)"
-  omp_line="$(_run_launch_env worker "$T" /r.md "" omp)"
-  local out rc=0
-  out="$(cd "$cwd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$T" PI_CODING_AGENT_DIR="$HOME/.omp/agent" \
+  cd "$cwd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$T" PI_CODING_AGENT_DIR="$pidir" \
     OTHER="${omp_line}omp -p noop" \
     bwrap --ro-bind / / --dev /dev --proc /proc --bind "$T" "$T" --unshare-net --unshare-pid \
-      bash -c "$pi_line node '$CEL_ROOT/tests/fixtures/pi-session-writer.mjs' '$pkg' '$cwd' \"\$OTHER\"" \
-    2>&1)" || rc=$?
+      bash -c "$pi_line node '$CEL_ROOT/tests/fixtures/pi-session-writer.mjs' '$_AR_PKG' '$cwd' \"\$OTHER\"" 2>&1
+}
+test_agent_roots_real_pi_survives_real_omp_start() {
+  _ar_setup
+  if ! _ar_real_prereq; then
+    if [ "${CEL_TEST_REQUIRE_REAL_RUNTIME:-}" = 1 ]; then echo "real pi/omp/bwrap required but unavailable"; _ar_teardown; return 1; fi
+    echo "SKIP (not proof): pi, omp or a network-denied sandbox is unavailable"; _ar_teardown; return 0
+  fi
+  # NEGATIVE CONTROL: the harness with pi handed omp's root (what the old
+  # forwarding did) must reproduce the incident - omp ran and pi's append died.
+  local ctl rc=0
+  ctl="$(_ar_real_run "env " "$HOME/.omp/agent")" || rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$ctl" '"err":"ENOENT' \
+    || { printf '%s\n' "$ctl" >&2; echo "negative control did not reproduce the collision - the harness proves nothing"; _ar_teardown; return 1; }
+  assert_contains "$ctl" '"other":' >/dev/null
+  rm -rf "$HOME/.omp" "$HOME/.pi" "$HOME/work"
+  # THE FIX: the canonical launch construction, under the same contaminated parent
+  export PI_CODING_AGENT_DIR="$HOME/.omp/agent"
+  local out; rc=0
+  out="$(_ar_real_run "$(_run_launch_env worker "$T" /r.md "" pi)" "$HOME/.omp/agent")" || rc=$?
   if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; echo "pi lost its session write after omp started"; _ar_teardown; return 1; fi
   assert_contains "$out" '"second":true'
-  # Pi's directory is where Pi made it: not relocated, still the long form
-  local d; d="$(ls "$HOME/.pi/agent/sessions")"
-  assert_contains "$d" "--home-" || { _ar_teardown; return 1; }
-  # omp lives wholly in its own root
-  [ -d "$HOME/.omp/agent" ] || { echo "omp did not use its own root"; _ar_teardown; return 1; }
-  ! ls "$HOME/.omp/agent/sessions" 2>/dev/null | grep -q "^--" || { echo "pi-style dir in omp's root"; _ar_teardown; return 1; }
+  assert_contains "$out" '"first":true'
+  local file; file="$(printf '%s' "$out" | jq -r .file)"
+  # the exact file pi made is still where pi made it, under pi's root, intact
+  case "$file" in "$HOME/.pi/agent/sessions/"*) ;; *) echo "pi session not under pi's root: $file"; _ar_teardown; return 1 ;; esac
+  [ -f "$file" ] || { echo "pi session file vanished: $file"; _ar_teardown; return 1; }
+  assert_eq "$(jq -r 'select(.type=="session") | .id' "$file" | head -1)" "$(printf '%s' "$out" | jq -r .id)"
+  assert_eq "$(wc -l <"$file" | tr -d ' ')" 3
+  # omp demonstrably ran and used only its own root
+  [ -d "$HOME/.omp/agent/sessions" ] && [ -n "$(ls "$HOME/.omp/agent/sessions")" ] \
+    || { echo "omp did not start in its own root - the run exercised nothing"; _ar_teardown; return 1; }
+  ! ls "$HOME/.omp/agent/sessions" | grep -q "^--" || { echo "pi-style dir in omp's root"; _ar_teardown; return 1; }
+  _ar_teardown
+}
+
+test_agent_roots_console_launch_refuses_overlap() {
+  _ar_setup
+  export CEL_PI_AGENT_DIR="$HOME/.omp/agent/pi"
+  _run_console_default() { case "$1" in runtime) echo pi ;; *) echo "" ;; esac; }
+  _run_console_dir() { echo "$T/console"; }
+  local out; out="$( ( _run_console "" "" "" 1 1 ) 2>&1 )" && { echo "console accepted overlap"; _ar_teardown; return 1; }
+  assert_contains "$out" "overlap"
+  _ar_teardown
+}
+
+test_agent_roots_relative_and_odd_paths_are_made_absolute_and_checked() {
+  _ar_setup
+  mkdir -p "$T/cwd" "$HOME/.omp/agent" "$T/real"; ln -s "$T/real" "$T/link"
+  cd "$T/cwd"
+  # relative root: absolute in the pin, whatever cwd the child has
+  export CEL_PI_AGENT_DIR="rel/pi"
+  assert_eq "$(gateway_pi_dir)" "$T/cwd/rel/pi"
+  local rel_line; rel_line="$(_ar_line pi)"
+  assert_eq "$(cd / && bash -c "$rel_line printenv PI_CODING_AGENT_DIR")" "$T/cwd/rel/pi"
+  # relative overlap with omp's root is still refused
+  export CEL_PI_AGENT_DIR="../home/.omp/agent/x"
+  agent_roots_check pi 2>/dev/null && { echo "relative overlap accepted"; _ar_teardown; return 1; }
+  # whitespace survives the pin
+  export CEL_PI_AGENT_DIR="$T/my pi dir"
+  assert_eq "$(bash -c "$(_ar_line pi) printenv PI_CODING_AGENT_DIR")" "$T/my pi dir"
+  # nonexistent path beneath a symlink ancestor resolves through the link
+  ln -s "$HOME/.omp/agent" "$T/omplink"
+  export CEL_PI_AGENT_DIR="$T/omplink/does/not/exist"
+  agent_roots_check pi 2>/dev/null && { echo "overlap hidden behind symlink ancestor accepted"; _ar_teardown; return 1; }
+  export CEL_PI_AGENT_DIR="$T/link/new"
+  agent_roots_check pi || { _ar_teardown; return 1; }
+  _ar_teardown
+}
+
+test_agent_roots_doctor_warns_on_an_ambient_pi_root() {
+  _ar_setup
+  source "$CEL_ROOT/lib/doctor.sh"
+  export PI_CODING_AGENT_DIR="$HOME/.omp/agent"
+  local out; out="$(doctor_agent_roots_lines 2>&1)" || { echo "an ambient value alone must warn, not fail"; _ar_teardown; return 1; }
+  assert_contains "$out" "PI_CODING_AGENT_DIR"
   _ar_teardown
 }
 

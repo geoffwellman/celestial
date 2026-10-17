@@ -662,6 +662,10 @@ doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
 doctor_agent_roots_lines() { # -> 1 when the pi and omp roots overlap
   # shellcheck source=lib/run.sh
   . "${BASH_SOURCE[0]%/*}/run.sh"
+  if [ -n "${PI_CODING_AGENT_DIR:-}" ] \
+     && [ "$(_agent_root_real "$PI_CODING_AGENT_DIR")" != "$(_agent_root_real "$(gateway_pi_dir)")" ]; then
+    c_warn "this shell exports PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR: launches ignore it and pin pi to $(gateway_pi_dir). For a custom pi-only root set CEL_PI_AGENT_DIR; unset the export so it cannot mislead a manual pi/omp start"
+  fi
   agent_roots_check >/dev/null 2>&1 && return 0
   c_err "pi and omp agent roots overlap (pi $(gateway_pi_dir), omp $(gateway_omp_dir)): omp renames pi's session directories when it starts. Unset CEL_PI_AGENT_DIR / CEL_OMP_AGENT_DIR or separate them"
   return 1

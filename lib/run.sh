@@ -845,6 +845,7 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   mapfile -t launch_args < <(agent_launch_args "$runtime")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
+  case "$runtime" in pi|omp) agent_roots_check "$runtime" || die "launch refused: pi and omp agent roots overlap" ;; esac
   local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label celestial/console)
   local envprefix; envprefix="$(_run_launch_env console "$cwd" "$AGENT_ROLE_FILE" "" "$runtime")"
   if [ "$dry" -eq 1 ]; then
