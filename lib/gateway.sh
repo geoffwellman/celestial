@@ -356,7 +356,7 @@ _gateway_start() {
 # an explicit choice, spelled CEL_PI_AGENT_DIR (the twin of CEL_OMP_AGENT_DIR).
 # Every consumer - the models writer, the child's environment, doctor - asks
 # this function, and the child is always handed the answer.
-gateway_pi_dir() { printf '%s' "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
+gateway_pi_dir() { _agent_root_abs "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
 
 # Write the gateway's providers into pi's models.json, MERGING.
 #
@@ -451,7 +451,15 @@ GATEWAY_OMP_PROVIDER=celgw
 # pane is pinned to this dir explicitly - otherwise a pi-oriented export would
 # hand omp pi's directory and its models.yml would be written where omp never
 # looks.
-gateway_omp_dir() { printf '%s' "${CEL_OMP_AGENT_DIR:-$HOME/.omp/agent}"; }
+gateway_omp_dir() { _agent_root_abs "${CEL_OMP_AGENT_DIR:-$HOME/.omp/agent}"; }
+
+# A root is pinned into the child by value, and the child runs in another cwd
+# (a worktree): a relative root would mean a different directory there. Make it
+# absolute against the launcher's cwd here, lexically (symlinks are resolved
+# only by the overlap check, so the pinned path stays what the owner wrote).
+_agent_root_abs() {
+  case "$1" in /*) printf '%s' "$1" ;; *) realpath -m -s -- "$1" 2>/dev/null || printf '%s/%s' "$PWD" "$1" ;; esac
+}
 
 # pi and omp must never share session storage. omp's startup migrates every
 # pi-style `--home-...--` directory under its root to a short name, with no
