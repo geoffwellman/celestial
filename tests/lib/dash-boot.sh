@@ -40,7 +40,7 @@ _dash_launch() {
 }
 
 # Stop the server and everything it started, and return only when none is left.
-_dash_stop() { # <pid>   (the pid is also the process-group id: see _dash_launch)
+_dash_stop_group() { # <pid>   (the pid is also the process-group id: see _dash_launch)
   local pid="${1:-}" i
   [ -n "$pid" ] || return 0
   kill -TERM -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true

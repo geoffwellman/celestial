@@ -76,7 +76,7 @@ EOF
 # slow retry runs (CEL-116): give the retry all the time it needs
 _v2_boot_failing_gh() { _V2_FAIL_GH=1 CEL_DASH_DEGRADED_WAIT_MS=20000 CEL_DASH_DEGRADED_RETRY_MS=1 _v2_boot; }
 _v2_down() {
-  _dash_stop "${DASH_PID:-}"
+  _dash_stop_group "${DASH_PID:-}"
   # (the server's CLI children are stopped and joined above, so nothing is left
   # writing under $T; the retry is kept only for a slow filesystem)
   # a CLI the server spawned can outlive it by a moment and still be writing
