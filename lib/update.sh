@@ -249,9 +249,108 @@ _update_agents() { # returns 1 when any component failed or is still behind
     c_hd "Pinned exceptions"
     for a in $held; do printf '  %s held by update.hold - remove it from the box config to update\n' "$a"; done
     if have pi && [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ]; then
-      printf '  pi extensions pinned by %s (%s) - not updated here; bump the pin in the repo\n' \
+      printf '  pi extensions pinned by %s (%s) - raised to the pin, never downgraded, in the Pi extensions step; bump the pin in the repo\n' \
         "$f" "$(extension_names pi 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
     fi
+  fi
+  return "$rc"
+}
+
+# --- pi extensions and built-in MCP (AH-261018) ----------------------------
+# Pi's startup warnings had two causes, both fixed by SUPPORTED means rather
+# than patching node_modules or hiding the output:
+#  1. an extension release that carries its own `typebox` dependency (older
+#     pi-subagents, rpiv-todo) - fixed by upgrading to the pinned release that
+#     declares it a peer, through `pi install`;
+#  2. pi-mcp-adapter registering /mcp over pi's built-in MCP - fixed by moving
+#     the adapter-effective server definitions into pi's own mcp.json and then
+#     removing the adapter with `pi remove`.
+# Upgrade-only (never downgrades an extension that is ahead of its pin),
+# idempotent, and a failure leaves the previous state in place and is
+# reported, not hidden.
+
+_update_pi_dir() { gateway_pi_dir; }
+
+_update_pkg_version() { # <npm name> -> installed version or empty
+  jq -r '.version // empty' "$(_update_pi_dir)/npm/node_modules/$1/package.json" 2>/dev/null || true
+}
+
+_update_pi_extensions() {
+  have pi || return 0
+  local f line name want have_v spec rc=0 shown=0 settings old
+  f="$(agent_get pi extensions_file)"
+  [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ] || return 0
+  settings="$(_update_pi_dir)/settings.json"
+  c_hd "Pi extensions"
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    name="${line%@*}"; want="${line##*@}"
+    [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    have_v="$(_update_pkg_version "$name")"
+    if [ -n "$have_v" ] && ! cel_version_lt "$have_v" "$want"; then
+      printf '  %s %s (pin %s: current)\n' "$name" "$have_v" "$want"; continue
+    fi
+    shown=1
+    old="$(jq -r --arg n "npm:$name" '[.packages[]? | strings | select(. == $n or startswith($n + "@"))] | .[0] // empty' "$settings" 2>/dev/null || true)"
+    if ! pi install "npm:$line" >/dev/null 2>&1; then
+      c_err "$name ${have_v:-missing}: pi install npm:$line FAILED - previous version left in place"; rc=1; continue
+    fi
+    # the installer adds the new spec; drop the superseded one, if it differs
+    if [ -n "$old" ] && [ "$old" != "npm:$line" ]; then pi remove "$old" >/dev/null 2>&1 || true; fi
+    have_v="${have_v:-missing}"
+    printf '  %s %s -> %s\n' "$name" "$have_v" "$(_update_pkg_version "$name")"
+  done < "$CEL_ROOT/$f"
+  [ "$shown" -eq 1 ] || true
+  return "$rc"
+}
+
+# Servers the legacy adapter serves on this box, from the host config it
+# imports (~/.claude.json user scope). Definitions are copied VERBATIM (command,
+# args, env, headers, type, url): values are never printed, only names.
+_update_pi_mcp_sources() { # -> JSON object name -> definition
+  local c="$HOME/.claude.json"
+  [ -r "$c" ] || { printf '{}'; return 0; }
+  jq -c '(.mcpServers // {}) | with_entries(select(.value | type == "object"))' "$c" 2>/dev/null || printf '{}'
+}
+
+_update_pi_mcp() {
+  have pi || return 0
+  local pkgs adapter settings mcp src cur merged tmp name missing="" pending="" rc=0
+  settings="$(_update_pi_dir)/settings.json"
+  adapter="$(jq -r '[.packages[]? | strings | select(startswith("npm:pi-mcp-adapter"))] | .[0] // empty' "$settings" 2>/dev/null || true)"
+  [ -n "$adapter" ] || return 0
+  c_hd "Pi MCP (built-in replaces pi-mcp-adapter)"
+  mcp="$(_update_pi_dir)/mcp.json"
+  src="$(_update_pi_mcp_sources)"
+  cur='{}'; [ -s "$mcp" ] && cur="$(jq -c '.' "$mcp" 2>/dev/null)" || true
+  [ -n "$cur" ] || { c_err "$mcp is not valid JSON - left untouched; adapter kept"; return 1; }
+  # existing built-in entries win; only missing names are added
+  merged="$(jq -c --argjson src "$src" '.mcpServers = (($src) + (.mcpServers // {}))' <<<"$cur")" || { c_err "could not merge MCP definitions - adapter kept"; return 1; }
+  if [ "$merged" != "$cur" ]; then
+    mkdir -p "$(dirname "$mcp")"
+    tmp="$(mktemp "$(dirname "$mcp")/.mcp.XXXXXX")"
+    ( umask 077; printf '%s\n' "$(jq . <<<"$merged")" >"$tmp" ) && chmod 600 "$tmp" && mv "$tmp" "$mcp" \
+      || { rm -f "$tmp"; c_err "could not write $mcp - adapter kept"; return 1; }
+  fi
+  # every adapter-served name must now be a built-in server that pi can list
+  local listed; listed="$(pi mcp list --json 2>/dev/null)" || listed=""
+  for name in $(jq -r 'keys[]' <<<"$src"); do
+    jq -e --arg n "$name" '.mcpServers[$n] != null' "$mcp" >/dev/null 2>&1 || { missing="$missing $name"; continue; }
+    # an HTTP server may need its own sign-in with the built-in client
+    if [ "$(jq -r --arg n "$name" '.[$n].url // empty' <<<"$src")" != "" ] \
+       && ! jq -e --arg n "$name" '[.. | objects | select((.name? // .server? // "") == $n) | select((.state? // .status? // "") | test("connected|ok|ready"; "i"))] | length > 0' <<<"${listed:-null}" >/dev/null 2>&1; then
+      pending="$pending $name"
+    fi
+  done
+  if [ -n "$missing" ]; then c_err "MCP servers not migrated:$missing - adapter kept"; return 1; fi
+  if [ -n "$pending" ]; then
+    c_err "MCP server(s)$pending need the built-in client signed in (pi mcp login <server>) - adapter kept so nothing loses access; rerun cel update afterwards"
+    return 1
+  fi
+  if pi remove "$adapter" >/dev/null 2>&1; then
+    printf '  migrated: %s; removed %s\n' "$(jq -r 'keys | join(", ")' <<<"$src")" "$adapter"
+  else
+    c_err "pi remove $adapter FAILED - definitions are migrated, adapter still installed"; rc=1
   fi
   return "$rc"
 }
@@ -288,6 +387,8 @@ _update_agents_rollback() {
 _update_components() {
   local rc=0
   _update_agents || rc=1
+  _update_pi_extensions || rc=1
+  _update_pi_mcp || rc=1
   c_hd "Gateway"
   if ! gateway_refresh; then
     c_err "gateway registration refresh FAILED - cel gateway status, then rerun cel update"

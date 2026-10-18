@@ -446,32 +446,50 @@ gateway_pi_models_write() { # [models.json path]
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" '
+  # NON-DESTRUCTIVE BY DEFAULT (AH-261018). This writer runs at every gateway
+  # launch, workers and reviewers alike, against ONE shared models.json that
+  # live sessions have already read. Replacing a provider's model list rewrote
+  # capability metadata under running sessions (thinking maps, windows the
+  # owner or a repair tuned). So a launch ADDS ids that are missing and leaves
+  # every model entry that already exists exactly as it is (existing fields
+  # win); ids no longer published are kept, not deleted. Only an explicit
+  # refresh (cel gateway refresh / cel update, GATEWAY_PI_WRITE=refresh) lets the
+  # catalog's fields win - and even then nothing is removed. A write that would
+  # change nothing is skipped entirely: no temp file, no rename, no mtime churn.
+  local refresh=false; [ "${GATEWAY_PI_WRITE:-launch}" = refresh ] && refresh=true
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" --argjson refresh "$refresh" '
+    def mm($old; $new):
+      [ $new[] | . as $x | (($old // []) | map(select(.id == $x.id)) | .[0]) as $e
+        | if $e == null then $x elif $refresh then $e + $x else $x + $e end ]
+      + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
     ([$models[] | select(.codex == true) | del(.codex)]) as $codex
     | ([$models[] | select(.codex != true) | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.codex != true) | select(.id | test("^claude") | not)]) as $rest
-    | .providers = ((.providers // {}) + {
+    | (.providers // {}) as $cur
+    | .providers = ($cur + {
         ompgw: {
           name: "cel gateway",
           baseUrl: $url,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: $rest },
+          models: mm($cur.ompgw.models; $rest) },
         "ompgw-codex": {
           name: "cel gateway (codex, responses)",
           baseUrl: $url,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-responses",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: $codex },
+          models: mm($cur["ompgw-codex"].models; $codex) },
         ($claude_provider): {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
+          models: mm($cur[$claude_provider].models; $claude) } })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ "$(jq -cS . "$tmp")" = "$(jq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  mv "$tmp" "$f"
 }
 
 # Is <provider>/<id> (the spelling a launch line carries) in pi's models.json?
@@ -724,7 +742,10 @@ gateway_omp_models_write() { # [models.yml] [catalog json file] [codex catalog j
       .providers = ((.providers // {})
         + (if $nc > 0 then {($k): $c} else {} end)
         + (if $nx > 0 then {($k + "-codex"): $x} else {} end))' <<<"$cur" \
-    | yq -y . >"$tmp" && mv "$tmp" "$f"
+    | yq -y . >"$tmp" || { rm -f "$tmp"; return 1; }
+  # unchanged => no write (the file is shared with live sessions)
+  if [ -s "$f" ] && [ "$(yq -cS . "$tmp")" = "$(yq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  mv "$tmp" "$f"
 }
 
 # Is <provider>/<id> (the launch spelling) registered in omp's models.yml?
@@ -774,7 +795,7 @@ gateway_refresh() {
     return 1
   fi
   if have pi || [ -d "$(gateway_pi_dir)" ]; then
-    if gateway_pi_models_write; then c_ok "gateway: pi models registered ($(gateway_pi_dir)/models.json)"
+    if GATEWAY_PI_WRITE=refresh gateway_pi_models_write; then c_ok "gateway: pi models registered ($(gateway_pi_dir)/models.json)"
     else c_err "gateway: pi models could not be registered - cel gateway status"; rc=1; fi
   fi
   if have omp || [ -d "$(gateway_omp_dir)" ]; then
