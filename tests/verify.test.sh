@@ -394,3 +394,66 @@ test_a_process_the_gate_leaves_behind_does_not_hold_the_suite_lock() {
   rm -rf "$T"
   assert_eq "$held" 0
 }
+
+# ------------------------------------------------ AH-261018: full gate evidence
+# PR237's canonical verification failed (exit 1) and the verifier kept only the
+# last 12 lines and DELETED the rest: the failing test's identity was
+# irretrievable. The complete output is now a private durable artifact bound to
+# the attempt and the head, recorded in the verdict next to the exact exit.
+_vev() { # a repo plus an isolated artifact root
+  _vrepo; _vcommit impl src/a.ts
+  export CEL_VERIFY_ARTIFACT_DIR="$T/artifacts"
+}
+_vev_gate_fail() { printf 'echo "start"; echo "MARKER-FAIL: test_the_one_that_broke"; for i in $(seq 1 40); do echo "ok line $i"; done; echo "1 failed"; exit 3'; }
+
+test_a_failed_gate_keeps_its_full_output_and_records_exit_and_artifact() {
+  _vev
+  local rc=0; "$VERIFY" "$T" --gate "$(_vev_gate_fail)" --quiet || rc=$?
+  assert_eq "$rc" 1
+  assert_eq "$(_v .gate.passed)" false; assert_eq "$(_v .gate.code)" 3; assert_eq "$(_v .gate.outcome)" fail
+  local art; art="$(_v .gate.artifact)"
+  [ -f "$art" ] || { echo "no artifact at [$art]"; rm -rf "$T"; return 1; }
+  grep -q "MARKER-FAIL: test_the_one_that_broke" "$art" || { echo "the failure marker is not in the artifact"; rm -rf "$T"; return 1; }
+  # the marker is NOT in the 12-line display tail - that is the whole point
+  case "$(_v .gate.tail)" in *MARKER-FAIL*) echo "fixture too short"; rm -rf "$T"; return 1;; esac
+  assert_eq "$(stat -c %a "$art")" 600
+  assert_eq "$(_v .gate.head)" "$(git -C "$T" rev-parse HEAD)"
+  assert_eq "$(_v .gate.output_sha256)" "$(sha256sum "$art" | cut -d' ' -f1)"
+  rm -rf "$T"
+}
+
+test_passing_timeout_and_no_gate_stay_distinct_and_keep_evidence() {
+  _vev
+  "$VERIFY" "$T" --gate 'echo all-good' --quiet
+  assert_eq "$(_v .gate.outcome)" pass
+  grep -q all-good "$(_v .gate.artifact)" || { echo "pass lost its output"; rm -rf "$T"; return 1; }
+  local rc=0; "$VERIFY" "$T" --gate 'echo got-this-far; sleep 30' --gate-timeout 1 --quiet || rc=$?
+  assert_eq "$rc" 2; assert_eq "$(_v .gate.outcome)" timeout
+  grep -q got-this-far "$(_v .gate.artifact)" || { echo "a timed-out gate lost its partial output"; rm -rf "$T"; return 1; }
+  "$VERIFY" "$T" --quiet
+  assert_eq "$(_v .gate.outcome)" none; assert_eq "$(_v .gate.artifact)" null
+  rm -rf "$T"
+}
+
+test_repeated_attempts_never_overwrite_earlier_evidence() {
+  _vev
+  "$VERIFY" "$T" --gate 'echo first-attempt; exit 1' --quiet || true
+  local a1; a1="$(_v .gate.artifact)"
+  "$VERIFY" "$T" --gate 'echo second-attempt; exit 2' --quiet || true
+  local a2; a2="$(_v .gate.artifact)"
+  [ "$a1" != "$a2" ] || { echo "two attempts share an artifact"; rm -rf "$T"; return 1; }
+  grep -q first-attempt "$a1" && grep -q second-attempt "$a2" || { echo "an attempt's evidence was lost"; rm -rf "$T"; return 1; }
+  assert_eq "$(_v .gate.attempt | grep -c .)" 1
+  assert_eq "$(wc -l < "$T/artifacts/attempts.jsonl" | tr -d ' ')" 2
+  rm -rf "$T"
+}
+
+# the artifact directory is private: a worktree is committed, pushed and read by a reviewer
+test_the_artifact_directory_is_private_and_outside_the_worktree() {
+  _vev
+  "$VERIFY" "$T" --gate 'echo x' --quiet
+  local art; art="$(_v .gate.artifact)"
+  case "$art" in "$T/artifacts/"*) ;; *) echo "artifact outside the configured root: $art"; rm -rf "$T"; return 1;; esac
+  assert_eq "$(stat -c %a "$(dirname "$art")")" 700
+  rm -rf "$T"
+}
