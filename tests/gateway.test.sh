@@ -693,3 +693,31 @@ test_gateway_pinned_assets_match_the_version() {
       || { echo "$arch sha256 is not a digest"; return 1; }
   done
 }
+
+# AH-261018: the pi models.json writer runs at EVERY gateway launch (workers and
+# reviewers) against one file live sessions already read. A launch must add
+# missing ids only, never rewrite an existing model entry, never delete one,
+# and must not touch the file at all when nothing would change.
+test_pi_models_launch_write_never_rewrites_existing_entries_and_skips_a_noop() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  local f="$T/pi/models.json"
+  gateway_pi_models_write "$f"
+  jq '.providers["ompgw-claude"].models[0].contextWindow = 555
+      | .providers["ompgw-claude"].models += [{"id":"claude-retired-1","contextWindow":7}]' "$f" >"$T/x" && mv "$T/x" "$f"
+  local stamp; stamp="$(stat -c %i%Y "$f")"; sleep 1.1
+  gateway_pi_models_write "$f"
+  assert_eq "$(jq '.providers["ompgw-claude"].models[0].contextWindow' "$f")" 555
+  assert_eq "$(jq -r '[.providers["ompgw-claude"].models[].id] | index("claude-retired-1") != null' "$f")" true
+  assert_eq "$(stat -c %i%Y "$f")" "$stamp"
+  # a newly published id is ADDED, existing entries untouched
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6","context_length":200000},{"id":"claude-new-9","context_length":9}]}'
+  gateway_pi_models_write "$f"
+  assert_eq "$(jq -r '[.providers["ompgw-claude"].models[].id] | index("claude-new-9") != null' "$f")" true
+  assert_eq "$(jq '.providers["ompgw-claude"].models[] | select(.id=="claude-sonnet-4-6") | .contextWindow' "$f")" 200000
+  # an explicit refresh lets the catalog win
+  GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$f"
+  assert_eq "$(jq '.providers["ompgw-claude"].models[] | select(.id=="claude-sonnet-4-6") | .contextWindow' "$f")" 200000
+  unset GW_MODELS
+  _gw_teardown
+}
