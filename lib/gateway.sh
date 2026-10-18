@@ -441,24 +441,30 @@ _gateway_pi_publish() { # <real path> <models json>
       [ $new[] | . as $x | (($old // []) | map(select(.id == $x.id)) | .[0]) as $e
         | if $e == null then $x elif $refresh then $e + $x else $x + $e end ]
       + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
+    # Provider-level fields follow the same rule as models: a launch keeps what is
+    # already there (headers, compat, extra keys an owner or repair set) and only
+    # fills in what is missing; a refresh lets the plane values win.
+    def pblk($old; $new):
+      (if $refresh then ($old // {}) + ($new | del(.models)) else ($new | del(.models)) + ($old // {}) end)
+      + { models: $new.models };
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
     | (.providers // {}) as $cur
     | .providers = ($cur + {
-        ompgw: {
+        ompgw: pblk($cur.ompgw; {
           name: "cel gateway",
           baseUrl: $url,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: mm($cur.ompgw.models; $rest) },
-        ($claude_provider): {
+          models: mm($cur.ompgw.models; $rest) }),
+        ($claude_provider): pblk($cur[$claude_provider]; {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: mm($cur[$claude_provider].models; $claude) } })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+          models: mm($cur[$claude_provider].models; $claude) }) })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
   if [ "$(jq -cS . "$tmp")" = "$(jq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
   chmod --reference="$f" "$tmp" 2>/dev/null || true
   mv "$tmp" "$f"
@@ -672,7 +678,8 @@ _gateway_omp_publish() { # <real path> <block json>
           | if $e == null then $e0 elif $refresh then $e + $e0 else $e0 + $e end ]
         + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
       (.providers[$k] // {}) as $o
-      | .providers = ((.providers // {}) + {($k): ($o + ($b | del(.models)) + { models: mm($o.models; $b.models) })})' <<<"$cur" \
+      | (if $refresh then ($o + ($b | del(.models))) else (($b | del(.models)) + $o) end) as $p
+      | .providers = ((.providers // {}) + {($k): ($p + { models: mm($o.models; $b.models) })})' <<<"$cur" \
     | yq -y . >"$tmp" || { rm -f "$tmp"; return 1; }
   # unchanged => no write (the file is shared with live sessions)
   if [ -s "$f" ] && [ "$(yq -cS . "$tmp")" = "$(yq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi

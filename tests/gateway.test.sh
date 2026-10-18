@@ -780,3 +780,24 @@ test_concurrent_publication_loses_no_update_and_keeps_link_and_mode() {
   jq -e . "$T/real/models.json" >/dev/null || { echo "torn models.json"; _gw_teardown; return 1; }
   _gw_teardown
 }
+
+# review: provider-level owner fields survive a launch in both files; refresh restores plane values.
+test_launch_write_keeps_owner_provider_fields_and_refresh_restores_them() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_catalog "$T/cat.json"; mkdir -p "$T/omp"
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"}]}'
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json"
+  jq '.providers["ompgw-claude"].headers["x-extra"] = "owner" | .providers["ompgw-claude"].compat = {"k":1} | .providers["ompgw-claude"].baseUrl = "http://owner.invalid"' "$T/pi/models.json" >"$T/x" && mv "$T/x" "$T/pi/models.json"
+  yq -y '.providers.celgw.headers["x-extra"] = "owner" | .providers.celgw.compat = {"k":1}' "$T/omp/models.yml" >"$T/x" && mv "$T/x" "$T/omp/models.yml"
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-extra"]' "$T/pi/models.json")" owner
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$T/pi/models.json")" "http://owner.invalid"
+  assert_eq "$(yq -r '.providers.celgw.headers["x-extra"]' "$T/omp/models.yml")" owner
+  assert_eq "$(yq -r '.providers.celgw.compat.k' "$T/omp/models.yml")" 1
+  GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$T/pi/models.json")" "http://127.0.0.1:$(gateway_port)"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].compat.k' "$T/pi/models.json")" 1
+  unset GW_MODELS
+  _gw_teardown
+}
