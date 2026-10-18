@@ -721,3 +721,62 @@ test_pi_models_launch_write_never_rewrites_existing_entries_and_skips_a_noop() {
   unset GW_MODELS
   _gw_teardown
 }
+
+# AH-261018 review F2/F3: the omp writer is as non-destructive as the pi one,
+# and concurrent publication into the shared files loses no update and keeps the
+# symlink and mode of an existing file.
+test_omp_launch_write_keeps_existing_entries_and_unpublished_ids() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"}]}'
+  _gw_omp_catalog "$T/cat.json"; mkdir -p "$T/omp"
+  local f="$T/omp/models.yml"
+  gateway_omp_models_write "$f" "$T/cat.json" || { _gw_teardown; return 1; }
+  yq -y '.providers.celgw.models |= map(.contextWindow = 555) | .providers.celgw.models += [{"id":"omp/claude-retired","contextWindow":7}]
+         | .providers.mine = {"apiKey":"MINE"}' "$f" >"$T/x" && mv "$T/x" "$f"
+  local stamp; stamp="$(stat -c %i%Y "$f")"; sleep 1.1
+  gateway_omp_models_write "$f" "$T/cat.json"
+  assert_eq "$(yq -r '.providers.celgw.models[] | select(.id=="omp/claude-sonnet-4-6") | .contextWindow' "$f")" 555
+  assert_eq "$(yq -r '[.providers.celgw.models[].id] | index("omp/claude-retired") != null' "$f")" true
+  assert_eq "$(yq -r '.providers.mine.apiKey' "$f")" MINE
+  assert_eq "$(stat -c %i%Y "$f")" "$stamp"
+  GATEWAY_PI_WRITE=refresh gateway_omp_models_write "$f" "$T/cat.json"
+  assert_eq "$(yq -r '.providers.celgw.models[] | select(.id=="omp/claude-sonnet-4-6") | .contextWindow' "$f")" 1000000
+  unset GW_MODELS
+  _gw_teardown
+}
+
+test_concurrent_publication_loses_no_update_and_keeps_link_and_mode() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  mkdir -p "$T/real" "$T/omp"
+  printf '{"providers":{}}' >"$T/real/models.json"; chmod 640 "$T/real/models.json"
+  rm -f "$T/pi/models.json"; ln -s "$T/real/models.json" "$T/pi/models.json"
+  printf 'providers: {}\n' >"$T/real/models.yml"; chmod 640 "$T/real/models.yml"
+  ln -s "$T/real/models.yml" "$T/omp/models.yml"
+  printf '[{"id":"claude-sonnet-4-6","name":"S","contextWindow":1,"maxTokens":1}' >"$T/cat.json"
+  local n; for n in 1 2 3 4 5 6; do printf ',{"id":"claude-w%s","name":"S","contextWindow":1,"maxTokens":1}' "$n" >>"$T/cat.json"; done; printf ']' >>"$T/cat.json"
+  local pids="" p rc=0
+  for n in 1 2 3 4 5 6; do
+    ( export GW_MODELS="{\"data\":[{\"id\":\"claude-w$n\"},{\"id\":\"omp/claude-w$n\"}]}"
+      gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json" ) &
+    pids="$pids $!"
+  done
+  ( export GW_MODELS='{"data":[{"id":"claude-w7"}]}'; GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json" ) &
+  pids="$pids $!"
+  for p in $pids; do wait "$p" || rc=1; done
+  assert_eq "$rc" 0
+  for n in 1 2 3 4 5 6 7; do
+    jq -e --arg id "claude-w$n" '[.providers["ompgw-claude"].models[].id] | index($id) != null' "$T/real/models.json" >/dev/null \
+      || { echo "pi lost claude-w$n"; _gw_teardown; return 1; }
+  done
+  for n in 1 2 3 4 5 6; do
+    yq -e --arg id "omp/claude-w$n" '[.providers.celgw.models[].id] | index($id) != null' "$T/real/models.yml" >/dev/null \
+      || { echo "omp lost claude-w$n"; _gw_teardown; return 1; }
+  done
+  [ -L "$T/pi/models.json" ] && [ -L "$T/omp/models.yml" ] || { echo "a symlink was replaced"; _gw_teardown; return 1; }
+  assert_eq "$(stat -c %a "$T/real/models.json")" 640
+  assert_eq "$(stat -c %a "$T/real/models.yml")" 640
+  jq -e . "$T/real/models.json" >/dev/null || { echo "torn models.json"; _gw_teardown; return 1; }
+  _gw_teardown
+}
