@@ -49,6 +49,7 @@ EOF
   chmod +x "$STUB"
   export CEL_FANOUT_HERDR="$STUB"
   export STUB_LOG STUB_WT STUB_REPO
+  export CEL_AFK_STATE="$T/afk-state"
   printf 'do the thing\n' > "$T/spec.md"
 }
 
@@ -3260,7 +3261,7 @@ _fanout_refused() { # <label> <out> <rc> <before> <expect-text>
   [ "$3" -ne 0 ] || { echo "$1: resume was accepted"; return 1; }
   assert_contains "$2" "$5" || return 1
   assert_eq "$(cat "$T/.cel/delegations.json")" "$4" || return 1
-  if grep -q '^agent start\|^pane run\|^pane send-text' "$STUB_LOG"; then echo "$1: launched"; return 1; fi
+  if grep -q '^agent start\|^pane run\|^pane send-text\|^worktree create\|^workspace create' "$STUB_LOG"; then echo "$1: launched or created something before refusing"; return 1; fi
 }
 _fanout_resume_refusal_setup() {
   _fanout_setup; _fanout_resume_profiles
@@ -3350,4 +3351,92 @@ test_reuse_accepts_an_explicit_session_path_outside_the_default_root_only_when_i
   assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
   assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
   rm -rf "$T"
+}
+
+# F1: the proof precedes EVERY mutation - a row whose branch has no live
+# worktree is refused before `herdr worktree create` (or a container) exists.
+test_reuse_over_a_row_with_no_live_worktree_creates_nothing() {
+  _fanout_resume_refusal_setup
+  git -C "$T/repos/widget" worktree remove --force "$RET_WT"
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused noworktree "$out" "$rc" "$before" "no live worktree" || return 1
+  rm -rf "$T"
+}
+
+# F4: the session's LATEST native model/thinking must agree with the row; a
+# disagreement is refused, never resolved by picking the row. A recovered
+# runtime is re-pinned only by an explicit, verified receipt + a profile that
+# matches the session tail, recorded as a transition on the SAME row.
+_fanout_repin_setup() {
+  _fanout_setup
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  ds:  { runtime: pi, model: ds-model, thinking: low }
+  son: { runtime: pi, model: gw/claude-son, thinking: medium }
+role_profiles:
+  worker: ds
+YAML
+  (cd "$T" && "$BIN" delegate widget WG-X3 "$T/spec.md" --profile ds) > /dev/null
+  NOSESS=1 _fanout_retain WG-X3 wt-x3 finished
+  : > "$STUB_LOG"
+  # the recovered working session: deepseek/low first, sonnet/medium last
+  RP_SESS="$T/private/2026-10-18T09-00-00-000Z_01cccccc-0000-7000-8000-000000000001.jsonl"
+  mkdir -p "$T/private"
+  printf '{"type":"session","version":3,"id":"01cccccc-0000-7000-8000-000000000001","cwd":"%s"}\n{"type":"model_change","provider":"or","modelId":"ds-model"}\n{"type":"thinking_level_change","thinkingLevel":"low"}\n{"type":"model_change","provider":"gw","modelId":"claude-son"}\n{"type":"thinking_level_change","thinkingLevel":"medium"}\n' "$RET_WT" > "$RP_SESS"
+  RP_ORIG="$T/private/original-native.jsonl"; printf 'orig\n' > "$RP_ORIG"
+  RP_RCPT="$T/private/restoration.json"
+  jq -n --arg cwd "$RET_WT" --arg w "$RP_SESS" --arg o "$RP_ORIG" --arg sha "$(sha256sum "$RP_ORIG" | cut -d' ' -f1)" \
+    --arg alias "$(jq -r '.[0].alias' "$T/.cel/delegations.json")" \
+    '{alias:$alias, cwd:$cwd, uuid:"01cccccc-0000-7000-8000-000000000001", workingSession:$w, originalSession:$o, originalSha256:$sha, requestedModel:"gw/claude-son", requestedThinking:"medium"}' > "$RP_RCPT"
+}
+test_reuse_refuses_when_the_session_tail_disagrees_with_the_row() {
+  _fanout_repin_setup
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X3 --session "$RP_SESS")" || rc=$?
+  _fanout_refused tail "$out" "$rc" "$before" "disagrees" || return 1
+  rm -rf "$T"
+}
+test_reuse_repins_a_recovered_runtime_only_through_a_verified_receipt_and_matching_profile() {
+  _fanout_repin_setup
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT")" || rc=$?
+  _fanout_refused noprofile "$out" "$rc" "$before" "disagrees" || return 1
+  rc=0; out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT" --profile ds)" || rc=$?
+  _fanout_refused wrongprofile "$out" "$rc" "$before" "disagrees" || return 1
+  jq '.originalSha256 = "00"' "$RP_RCPT" > "$RP_RCPT.bad"
+  rc=0; out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT.bad" --profile son)" || rc=$?
+  _fanout_refused sha "$out" "$rc" "$before" "receipt" || return 1
+  rc=0; out="$(_fanout_reuse WG-X3 --receipt "$RP_RCPT" --profile son)" || rc=$?
+  _fanout_refused nosess "$out" "$rc" "$before" "receipt" || return 1
+  out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT" --profile son)" || { echo "$out"; return 1; }
+  local start; start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$start" "--session $RP_SESS"
+  assert_contains "$start" "gw/claude-son"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" son
+  assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" gw/claude-son
+  assert_eq "$(jq -r '.[0].thinking' "$T/.cel/delegations.json")" medium
+  assert_eq "$(jq -r '.[0].repin.from.model' "$T/.cel/delegations.json")" ds-model
+  assert_eq "$(jq -r '.[0].repin.from.profile' "$T/.cel/delegations.json")" ds
+  assert_eq "$(jq -r '.[0].repin.receipt' "$T/.cel/delegations.json")" "$RP_RCPT"
+  assert_eq "$(jq -r '[.[0].history[] | select(.note != null)] | length' "$T/.cel/delegations.json")" 1
+  rm -rf "$T"
+}
+
+# F2: native, credential-free evidence that `pi --session <file>` really
+# reopens the exact session: rpc get_state on a TEMP COPY, no model call.
+test_pi_native_session_flag_reopens_the_exact_session_without_a_model_call() {
+  command -v pi >/dev/null 2>&1 || { echo "pi not installed - skipped"; return 0; }
+  local d; d="$(mktemp -d)"
+  printf '{"type":"session","version":3,"id":"01a14e99-0000-7000-8000-000000000009","timestamp":"2026-10-18T10:00:00.000Z","cwd":"%s"}\n{"type":"model_change","id":"aa000001","parentId":null,"timestamp":"2026-10-18T10:00:01.000Z","provider":"anthropic","modelId":"claude-opus-4-8"}\n{"type":"thinking_level_change","id":"aa000002","parentId":"aa000001","timestamp":"2026-10-18T10:00:01.001Z","thinkingLevel":"medium"}\n' "$d" > "$d/src.jsonl"
+  cp "$d/src.jsonl" "$d/copy.jsonl"
+  local sha; sha="$(sha256sum "$d/src.jsonl")"
+  local out; out="$(cd "$d" && ( printf '{"type":"get_state"}\n'; sleep 4 ) | timeout 30 env PI_CODING_AGENT_DIR="$d/root" pi --mode rpc --session "$d/copy.jsonl" --no-extensions --no-mcp 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.sessionId')" 01a14e99-0000-7000-8000-000000000009
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.thinkingLevel')" medium
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.messageCount')" 0
+  assert_eq "$(sha256sum "$d/src.jsonl")" "$sha"
+  if pgrep -af "pi --mode rpc --session $d/copy.jsonl" >/dev/null; then echo "rpc child still running"; return 1; fi
+  rm -rf "$d"
 }
