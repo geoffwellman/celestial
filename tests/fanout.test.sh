@@ -52,6 +52,23 @@ EOF
   printf 'do the thing\n' > "$T/spec.md"
 }
 
+# A GC-retained row (AH-261018): its worktree exists as a real checkout the
+# row owns, its pane is gone, and its native session file is on disk. The
+# session is recorded on the row (explicit provenance) unless NOSESS=1.
+_fanout_retain() { # <id> <wt-dir-name> [state]
+  local id="$1" wt="$T/$2" st="${3:-collected}"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base 2>/dev/null || true
+  git -C "$T/repos/widget" worktree add -q -b "$id" "$wt" 2>/dev/null || true
+  RET_WT="$(cd "$wt" && pwd -P)"
+  RET_SESS="$T/sessions/orig-$id.jsonl"
+  mkdir -p "$T/sessions"
+  printf '{"type":"session","version":3,"id":"orig-%s","cwd":"%s"}\n' "$id" "$RET_WT" > "$RET_SESS"
+  jq --arg w "$RET_WT" --arg s "$RET_SESS" --arg st "$st" \
+    '.[0].worktree = $w | .[0].state = $st | (if env.NOSESS == "1" then . else .[0].session = $s end)' \
+    "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  RET_WS="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$RET_WT\"}}]}}"
+}
+
 # A dead agent must not leave its row reading `running` forever: finished work
 # would sit invisible and abandoned work would look healthy. Both were observed.
 test_status_marks_finished_when_agent_gone_and_result_exists() {
@@ -2818,11 +2835,10 @@ test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   (cd "$T" && "$BIN" delegate widget WG-HB2 "$T/spec.md") > /dev/null
   (cd "$T" && "$BIN" review WG-HB2 changes --head "$HA" --by widget-pr-7-review) > /dev/null
   local spec; spec="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
-  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$T/repos/widget" worktree add -q -b WG-HB2 "$T/wt-hb2" 2>/dev/null || true
+  _fanout_retain WG-HB2 wt-hb2 finished
   : > "$STUB_LOG"
   local out; out="$(cd "$T" && CEL_INBOX_DIR="$T/inbox" \
-    STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-hb2\"}}]}}" \
+    STUB_WS_JSON="$RET_WS" \
     "$BIN" handback WG-HB2 "fix line 3" --by widget-pr-7-review 2>&1)"
   assert_contains "$(cat "$STUB_LOG")" "agent start"
   assert_contains "$out" "resumed"
@@ -2904,12 +2920,11 @@ test_a_failed_reuse_start_keeps_the_prior_rows_verdict_and_pr() {
   export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
   (cd "$T" && "$BIN" delegate widget WG-RU "$T/spec.md") > /dev/null
   (cd "$T" && "$BIN" review WG-RU changes --head "$HA" --by widget-pr-7-review) > /dev/null
-  jq '.[0].state = "finished" | .[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
-  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$T/repos/widget" worktree add -q -b WG-RU "$T/wt-ru" 2>/dev/null || true
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  _fanout_retain WG-RU wt-ru finished
   sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
   local out rc=0
-  out="$(cd "$T" && STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-ru\"}}]}}" \
+  out="$(cd "$T" && STUB_WS_JSON="$RET_WS" \
     "$BIN" delegate widget WG-RU "$T/spec.md" --reuse 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "a refused start succeeded"; return 1; }
   assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
@@ -2957,11 +2972,10 @@ test_a_failed_reuse_over_a_finished_row_fences_every_destructive_consumer() {
   _fanout_setup
   export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
   (cd "$T" && "$BIN" delegate widget WG-RF "$T/spec.md") > /dev/null
-  jq '.[0].state = "finished" | .[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
-  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$T/repos/widget" worktree add -q -b WG-RF "$T/wt-rf" 2>/dev/null || true
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  _fanout_retain WG-RF wt-rf finished
   sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
-  (cd "$T" && STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-rf\"}}]}}" \
+  (cd "$T" && STUB_WS_JSON="$RET_WS" \
     "$BIN" delegate widget WG-RF "$T/spec.md" --reuse) >/dev/null 2>&1 || true
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
   assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
@@ -3182,4 +3196,123 @@ test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
   assert_contains "$out" "could not record a no-verdict stub"
   ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# ---- retained-session resume (AH-261018) ---------------------------------------
+# `delegate --reuse` over a GC-stopped row resumes the ORIGINAL native session
+# under the row's recorded runtime/model/thinking/profile - never the workspace's
+# current role default - and keeps the row (verdict, history, spec) intact.
+_fanout_resume_profiles() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  cheap: { runtime: omp, model: worker-model, thinking: low }
+  orig:  { runtime: pi, model: orig-model, thinking: medium }
+role_profiles:
+  worker: orig
+YAML
+}
+_fanout_reuse() { # <id> [extra args] - run delegate --reuse against the retained worktree
+  local id="$1"; shift
+  (cd "$T" && STUB_WS_JSON="$RET_WS" CEL_PI_AGENT_DIR="$T/pi" "$BIN" delegate widget "$id" "$T/spec.md" --reuse "$@" 2>&1)
+}
+_fanout_pi_session() { # <id> <uuid> - a pi session file for the retained worktree
+  local d="$T/pi/sessions/--$(printf '%s' "$RET_WT" | sed 's|^/||; s|/|-|g')--"
+  mkdir -p "$d"
+  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$2" "$RET_WT" > "$d/2026-10-18T10-00-00-000Z_$2.jsonl"
+  printf '%s' "$d/2026-10-18T10-00-00-000Z_$2.jsonl"
+}
+
+test_reuse_resumes_the_exact_session_with_the_rows_profile_not_the_new_default() {
+  _fanout_setup; _fanout_resume_profiles
+  (cd "$T" && "$BIN" delegate widget WG-X1 "$T/spec.md" --profile orig --because "deliberate") > /dev/null
+  (cd "$T" && "$BIN" review WG-X1 changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  NOSESS=1 _fanout_retain WG-X1 wt-x1 collected
+  local sess; sess="$(_fanout_pi_session WG-X1 01aaaaaa-0000-7000-8000-000000000001)"
+  # the workspace default moved on after the original launch
+  sed -i 's/^  worker: orig/  worker: cheap/' "$T/workspace.yaml"
+  local spec_before; spec_before="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
+  : > "$STUB_LOG"
+  local out; out="$(_fanout_reuse WG-X1)" || { echo "$out"; return 1; }
+  local start; start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$start" "--kind pi"
+  assert_contains "$start" "--session $sess"
+  assert_contains "$start" "orig-model"
+  if printf '%s' "$start" | grep -q "worker-model"; then echo "substituted the new default model: $start"; return 1; fi
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  assert_eq "$(jq -r '.[0].runtime' "$T/.cel/delegations.json")" pi
+  assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" orig-model
+  assert_eq "$(jq -r '.[0].thinking' "$T/.cel/delegations.json")" medium
+  assert_eq "$(jq -r '.[0].profile_reason' "$T/.cel/delegations.json")" deliberate
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].pr' "$T/.cel/delegations.json")" 7
+  assert_eq "$(jq -r '.[0].spec' "$T/.cel/delegations.json")" "$spec_before"
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$sess"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  # history keeps what happened before and records the resume on top of it
+  assert_eq "$(jq -r '[.[0].history[].state] | join(",")' "$T/.cel/delegations.json")" "unconfirmed,running,collected,running"
+  rm -rf "$T"
+}
+
+# nothing is mutated or launched when the proof fails
+_fanout_refused() { # <label> <out> <rc> <before> <expect-text>
+  [ "$3" -ne 0 ] || { echo "$1: resume was accepted"; return 1; }
+  assert_contains "$2" "$5" || return 1
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$4" || return 1
+  if grep -q '^agent start\|^pane run\|^pane send-text' "$STUB_LOG"; then echo "$1: launched"; return 1; fi
+}
+_fanout_resume_refusal_setup() {
+  _fanout_setup; _fanout_resume_profiles
+  (cd "$T" && "$BIN" delegate widget WG-X2 "$T/spec.md" --profile orig) > /dev/null
+  NOSESS=1 _fanout_retain WG-X2 wt-x2 collected
+  : > "$STUB_LOG"
+}
+test_reuse_refuses_an_ambiguous_session_and_a_missing_one() {
+  _fanout_resume_refusal_setup
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused none "$out" "$rc" "$before" "no native session" || return 1
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000a >/dev/null
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000b >/dev/null
+  rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused ambiguous "$out" "$rc" "$before" "ambiguous" || return 1
+  # an explicit pick must be one of the candidates, then it resumes exactly it
+  rc=0; out="$(_fanout_reuse WG-X2 --session 01aaaaaa-0000-7000-8000-0000000000ff)" || rc=$?
+  _fanout_refused unknown "$out" "$rc" "$before" "not a session" || return 1
+  out="$(_fanout_reuse WG-X2 --session 01aaaaaa-0000-7000-8000-00000000000b)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "00000000000b.jsonl"
+  rm -rf "$T"
+}
+test_reuse_refuses_a_live_duplicate() {
+  _fanout_resume_refusal_setup
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-000000000001 >/dev/null
+  local before out rc=0 alias; before="$(cat "$T/.cel/delegations.json")"
+  alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  out="$(STUB_LIVE_ALIAS="$alias" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live-alias "$out" "$rc" "$before" "live" || return 1
+  rc=0
+  out="$(STUB_AGENTS_JSON="{\"result\":{\"agents\":[{\"pane_id\":\"wR:p1\",\"name\":\"someone\",\"cwd\":\"$RET_WT/sub\",\"agent_status\":\"idle\"}]}}" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live-cwd "$out" "$rc" "$before" "live" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_an_ownership_mismatch_and_a_changed_profile() {
+  _fanout_resume_refusal_setup
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-000000000001 >/dev/null
+  local before out rc=0 good; good="$(cat "$T/.cel/delegations.json")"; before="$good"
+  out="$(_fanout_reuse WG-X2 --profile cheap)" || rc=$?
+  _fanout_refused profile "$out" "$rc" "$before" "recorded profile" || return 1
+  rc=0; out="$(_fanout_reuse WG-X2 --model other-model)" || rc=$?
+  _fanout_refused model "$out" "$rc" "$before" "recorded" || return 1
+  # the row's worktree is some other checkout than the one herdr holds for the branch
+  jq '.[0].worktree = "/elsewhere/wt"' <<< "$good" > "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused owner "$out" "$rc" "$before" "does not own" || return 1
+  # the profile's definition drifted from what the row recorded: no substitution
+  jq '.[0].model = "ghost-model"' <<< "$good" > "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused drift "$out" "$rc" "$before" "drifted" || return 1
+  rm -rf "$T"
 }
