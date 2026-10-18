@@ -382,6 +382,19 @@ gateway_pi_provider_for_model() { # <model id>
 
 # This exact configured ID mirrors Pi 1.2.0's canonical Anthropic entry.
 # Unknown IDs never inherit its capabilities by prefix.
+# CONCURRENT LAUNCHES AND A REFRESH PUBLISH INTO ONE FILE. read -> merge -> rename
+# without a lock loses one writer's update. Every models writer therefore runs
+# its whole read-merge-rename under an exclusive flock on a sibling `<file>.lock`,
+# on the SYMLINK-RESOLVED path (the rename must replace the target, not the
+# link) and keeps the existing file's mode.
+_gateway_locked_publish() { # <file> <function> <args...> - function gets <real path> first
+  local f="$1" fn="$2" real; shift 2
+  real="$(readlink -f "$f" 2>/dev/null)" || real="$f"
+  [ -n "$real" ] || real="$f"
+  mkdir -p "$(dirname "$real")" || return 1
+  ( flock -x 9 || exit 1; "$fn" "$real" "$@" ) 9>"$real.lock"
+}
+
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
   models="$(gateway_models_json | jq -c '
@@ -405,8 +418,14 @@ gateway_pi_models_write() { # [models.json path]
         maxTokens: (.max_output_tokens // 8192) } | configured_opus_metadata
     ]' 2>/dev/null || true)"
   [ -n "$models" ] || return 1
-  mkdir -p "$(dirname "$f")"
-  [ -f "$f" ] || printf '{"providers":{}}' > "$f"
+  _gateway_locked_publish "$f" _gateway_pi_publish "$models"
+}
+
+# The read-merge-rename of the shared models.json, run UNDER the file lock on
+# the symlink-resolved path (see _gateway_locked_publish).
+_gateway_pi_publish() { # <real path> <models json>
+  local f="$1" models="$2" tmp
+  [ -f "$f" ] || ( umask 077; printf '{"providers":{}}' > "$f" )
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
   # NON-DESTRUCTIVE ON LAUNCH. This runs at every gateway launch (workers,
@@ -441,6 +460,7 @@ gateway_pi_models_write() { # [models.json path]
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: mm($cur[$claude_provider].models; $claude) } })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
   if [ "$(jq -cS . "$tmp")" = "$(jq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  chmod --reference="$f" "$tmp" 2>/dev/null || true
   mv "$tmp" "$f"
 }
 
@@ -635,13 +655,28 @@ gateway_omp_models_write() { # [models.yml] [catalog json file]
         models: . }' <<<"$raw")" || return 1
   [ "$(jq '.models | length' <<<"$block")" -gt 0 ] \
     || { c_err "the gateway publishes no omp/claude model in omp's catalog - cel gateway omp-scope"; return 1; }
-  mkdir -p "$(dirname "$f")"
+  _gateway_locked_publish "$f" _gateway_omp_publish "$block"
+}
+
+# omp's read-merge-rename, under the file lock. Non-destructive like pi's writer:
+# existing model entries keep their fields, ids no longer published are kept,
+# only GATEWAY_PI_WRITE=refresh lets the catalog's fields win (nothing removed).
+_gateway_omp_publish() { # <real path> <block json>
+  local f="$1" block="$2" cur tmp refresh=false
+  [ "${GATEWAY_PI_WRITE:-launch}" = refresh ] && refresh=true
   cur='{}'; [ -s "$f" ] && cur="$(yq -c '. // {}' "$f")"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
+  jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" --argjson refresh "$refresh" '
+      def mm($old; $new):
+        [ $new[] | . as $e0 | (($old // []) | map(select(.id == $e0.id)) | .[0]) as $e
+          | if $e == null then $e0 elif $refresh then $e + $e0 else $e0 + $e end ]
+        + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
+      (.providers[$k] // {}) as $o
+      | .providers = ((.providers // {}) + {($k): ($o + ($b | del(.models)) + { models: mm($o.models; $b.models) })})' <<<"$cur" \
     | yq -y . >"$tmp" || { rm -f "$tmp"; return 1; }
   # unchanged => no write (the file is shared with live sessions)
   if [ -s "$f" ] && [ "$(yq -cS . "$tmp")" = "$(yq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  chmod --reference="$f" "$tmp" 2>/dev/null || true
   mv "$tmp" "$f"
 }
 
