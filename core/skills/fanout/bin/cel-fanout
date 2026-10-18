@@ -256,21 +256,28 @@ _repo_slug() { # <wsdir> <repo>
 # runs, and whatever this invocation leaves behind is accepted only if it is a
 # completed verdict written at or after the invocation started; anything else
 # becomes an explicit no-verdict stub carrying the verifier's own words.
-_fanout_verdict_stub() { # <worktree> <reason>
-  local wt="$1" tmp
+_fanout_verdict_stub() { # <worktree> <reason> <snapshot-file> - publishes AND records the stub; non-zero if it cannot
+  local wt="$1" tmp stub snap="$3"
   tmp="$wt/.agent/.verdict.stub.$$"
-  mkdir -p "$wt/.agent"
+  mkdir -p "$wt/.agent" || { c_err "cannot create $wt/.agent - no verdict can be recorded" >&2; return 1; }
+  command -v flock >/dev/null 2>&1 || { c_err "flock is not available - cannot publish a no-verdict stub safely" >&2; return 1; }
+  stub="$(jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg why "$2" \
+    '{at:$at, state:"no_verdict_stub", gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
+      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0}, checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}')" \
+    || { c_err "cannot build the no-verdict stub" >&2; return 1; }
+  # what the CALLER uses is this copy, never a re-read of the file on disk
+  printf '%s\n' "$stub" > "$snap" || { c_err "cannot write the verdict snapshot $snap" >&2; return 1; }
   # under the same lock cel-verify publishes with, so a stub can never interleave
   # with (or be clobbered by) another attempt's publication
-  ( flock -x 8 2>/dev/null || true
-  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg why "$2" \
-    '{at:$at, state:"no_verdict_stub", gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
-      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0}, checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}' > "$tmp" \
-    && mv -f "$tmp" "$wt/.agent/verdict.json" ) 8>"$wt/.agent/verdict.lock"
+  ( exec 8>"$wt/.agent/verdict.lock" || exit 1
+    flock -x 8 || exit 1
+    printf '%s\n' "$stub" > "$tmp" && mv -f "$tmp" "$wt/.agent/verdict.json" ) 2>/dev/null \
+    || { c_err "cannot publish the no-verdict stub in $wt/.agent (lock or write failed)" >&2; return 1; }
 }
 _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   local wsdir="$1" id="$2" entry="$3"
   local wt repo branch gate slug
+  FANOUT_VERDICT_SNAPSHOT=""
   local gate_timeout="${4:-}" verb="${5:-collect}"
   wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
@@ -319,14 +326,20 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   vrc="$(cat "$v_rc" 2>/dev/null || echo 99)"
   vwhy="$(head -c 400 "$v_err" 2>/dev/null | tr '\n' ' ')"
   rm -f "$v_err" "$v_rc"
+  # ONE READ, THEN ONLY THE COPY. The verdict file is mutable (another attempt, or
+  # anyone, can replace it between a check and a later use), so it is read exactly
+  # once into a private snapshot; validation, the ledger write, the warnings and
+  # land's decision all use THAT copy - never a second read of the path.
+  local snap bad=""
+  snap="$(mktemp "${TMPDIR:-/tmp}/cel-verdict-snap.XXXXXX")" || die "$verb: cannot create a verdict snapshot - refusing to continue"
+  chmod 600 "$snap"
   case "$vrc" in
     0|1|2|3) ;;
-    *) c_warn "$id: the verifier produced no verdict (exit $vrc)${vwhy:+: $vwhy}"
-       _fanout_verdict_stub "$wt" "the verifier exited $vrc without a verdict${vwhy:+: $vwhy}" ;;
+    *) bad="the verifier exited $vrc without a verdict${vwhy:+: $vwhy}" ;;
   esac
-  if [ ! -f "$wt/.agent/verdict.json" ]; then
-    _fanout_verdict_stub "$wt" "the verifier left no verdict this run"
-  else
+  cp -- "$wt/.agent/verdict.json" "$snap" 2>/dev/null || : > "$snap"
+  if [ -z "$bad" ] && [ ! -s "$snap" ]; then bad="the verifier left no verdict this run"; fi
+  if [ -z "$bad" ]; then
     # ACCEPT ONLY THIS INVOCATION'S OWN VERDICT: attempt == the id handed over, a
     # completed verdict (or this attempt's own no-verdict stub), and - when a gate
     # ran - gate evidence taken on the head the worktree is on NOW. Another
@@ -334,22 +347,31 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
     # before a push) never authorises this caller. A verdict with NO attempt field
     # is accepted only through the CEL_FANOUT_VERIFY test seam, and then only if it
     # is not older than the invocation.
-    local vj="$wt/.agent/verdict.json" v_att v_state v_ran v_ghead v_cur v_at
-    v_att="$(jq -r '.attempt // ""' "$vj" 2>/dev/null)"; v_state="$(jq -r '.state // ""' "$vj" 2>/dev/null)"
-    v_ran="$(jq -r '.gate.ran // false' "$vj" 2>/dev/null)"; v_ghead="$(jq -r '.gate.head // .head // ""' "$vj" 2>/dev/null)"
-    v_at="$(jq -r '.at // ""' "$vj" 2>/dev/null)"; v_cur="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local v_att v_state v_ran v_ghead v_cur v_at
+    v_att="$(jq -r '.attempt // ""' "$snap" 2>/dev/null)"; v_state="$(jq -r '.state // ""' "$snap" 2>/dev/null)"
+    v_ran="$(jq -r '.gate.ran // false' "$snap" 2>/dev/null)"; v_ghead="$(jq -r '.gate.head // .head // ""' "$snap" 2>/dev/null)"
+    v_at="$(jq -r '.at // ""' "$snap" 2>/dev/null)"; v_cur="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
     if [ -n "$v_att" ]; then
       if [ "$v_att" != "$v_id" ]; then
-        _fanout_verdict_stub "$wt" "the verdict on disk belongs to attempt $v_att, not this invocation ($v_id) - another verification overlapped on this worktree"
+        bad="the verdict on disk belongs to attempt $v_att, not this invocation ($v_id) - another verification overlapped on this worktree"
       elif [ "$v_state" != completed ] && [ "$v_state" != no_verdict_stub ]; then
-        _fanout_verdict_stub "$wt" "this invocation's verdict never completed (state: ${v_state:-none})"
+        bad="this invocation's verdict never completed (state: ${v_state:-none})"
       elif [ "$v_state" = completed ] && [ "$v_ran" = true ] && [ -n "$v_ghead" ] && [ "$v_ghead" != "$v_cur" ]; then
-        _fanout_verdict_stub "$wt" "the gate ran on $v_ghead but the worktree is on $v_cur now - that evidence is for another head"
+        bad="the gate ran on $v_ghead but the worktree is on $v_cur now - that evidence is for another head"
       fi
     elif [ -z "${CEL_FANOUT_VERIFY:-}" ] || [ "$v_state" = running ] || [ "$v_at" \< "$v_t0" ]; then
-      _fanout_verdict_stub "$wt" "the verdict on disk carries no attempt identity or predates this verification"
+      bad="the verdict on disk carries no attempt identity or predates this verification"
     fi
   fi
+  if [ -n "$bad" ]; then
+    # stderr, not stdout: land runs this with stdout discarded, and a refusal must be seen
+    [ "$vrc" -le 3 ] 2>/dev/null || c_warn "$id: the verifier produced no verdict (exit $vrc)${vwhy:+: $vwhy}" >&2
+    _fanout_verdict_stub "$wt" "$bad" "$snap" || { c_err "$verb: could not record a no-verdict stub - refusing to continue on an unvalidated verdict ($bad)" >&2; exit 1; }
+  fi
+  FANOUT_VERDICT_SNAPSHOT="$snap"
+  # TEST SEAM (CEL_TESTING only): runs right after validation, to prove that nothing
+  # after this point re-reads the mutable verdict file.
+  [ -z "${CEL_TESTING:-}" ] || [ -z "${CEL_FANOUT_TEST_AFTER_VALIDATE:-}" ] || eval "$CEL_FANOUT_TEST_AFTER_VALIDATE" || true
   # WHAT WAS READ BEFORE THE GATE IS RE-READ AFTER IT. Minutes passed with the
   # ledger unlocked, so the row may have been released, re-delegated or landed
   # by somebody else in the meantime; writing this verdict onto it would
@@ -358,8 +380,8 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   [ "$state_now" = "$state_before" ] \
     || die "$verb: $id changed state to ${state_now:-gone} while the gate ran - re-run $verb"
   [ -n "$line" ] && printf '%s\n' "$line"
-  if [ -f "$wt/.agent/verdict.json" ]; then
-    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), gate_outcome: (.gate.outcome // (if .gate.timed_out then "timeout" elif .gate.passed == true then "pass" elif .gate.passed == false then "fail" else "none" end)), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+  if [ -s "$snap" ]; then
+    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), gate_outcome: (.gate.outcome // (if .gate.timed_out then "timeout" elif .gate.passed == true then "pass" elif .gate.passed == false then "fail" else "none" end)), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$snap" 2>/dev/null || true)"
     if [ -n "$v" ]; then
       local cur; cur="$(_ledger_read "$wsdir")"
       _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson v "$v" 'map(if .id == $id then .verdict = $v else . end)')"
@@ -367,13 +389,13 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
     # A killed gate reached no verdict at all, and the reader's next move is to
     # give it more time - not to send a worker after code that may be fine. Say
     # both knobs by name so nobody has to go read the verifier to find them.
-    if [ "$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)" = true ]; then
-      c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$wt/.agent/verdict.json")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
-    elif [ "$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)" = no_verdict ]; then
+    if [ "$(jq -r '.gate.timed_out // false' "$snap" 2>/dev/null || echo false)" = true ]; then
+      c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$snap")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
+    elif [ "$(jq -r '.gate.outcome // ""' "$snap" 2>/dev/null || true)" = no_verdict ]; then
       # AND A GATE THAT DIED SAYING NOTHING IS NOT A FAILURE EITHER. It did not
       # run out of time, so more time is the wrong answer; something killed it,
       # and the reader's next move is to find out what.
-      c_warn "$id: the gate produced no verdict - $(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json"). Nothing here says the code is wrong; re-run collect and see what is killing it."
+      c_warn "$id: the gate produced no verdict - $(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$snap"). Nothing here says the code is wrong; re-run collect and see what is killing it."
     fi
   fi
 }
@@ -1348,6 +1370,7 @@ cmd_collect() {
   # diff size, CI and review. Printed first so the reader meets the facts
   # before the account of them.
   _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout"
+  [ -z "${FANOUT_VERDICT_SNAPSHOT:-}" ] || rm -f "$FANOUT_VERDICT_SNAPSHOT"; FANOUT_VERDICT_SNAPSHOT=""
 
   if [ -f "$worktree/.agent/result.md" ]; then
     cat "$worktree/.agent/result.md"
@@ -2586,10 +2609,15 @@ cmd_land() { # <id>
     # NOT `// "unknown"`: jq's alternative operator treats an explicit false as
     # absent, so a gate that FAILED was reported as "unknown". null is unknown;
     # false is false.
-    gp="$(jq -r 'if .gate.passed == null then "unknown" else (.gate.passed | tostring) end' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
-    gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"
-    gout="$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)"
-    gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    # THE VALIDATED SNAPSHOT, never the path: _fanout_verify read the verdict once,
+    # validated that copy, and handed it over. A second read of verdict.json here
+    # could see another attempt's file swapped in after validation.
+    local vsnap="${FANOUT_VERDICT_SNAPSHOT:-/dev/null}"
+    gp="$(jq -r 'if .gate.passed == null then "unknown" else (.gate.passed | tostring) end' "$vsnap" 2>/dev/null || echo unknown)"; gp="${gp:-unknown}"
+    gto="$(jq -r '.gate.timed_out // false' "$vsnap" 2>/dev/null || echo false)"
+    gout="$(jq -r '.gate.outcome // ""' "$vsnap" 2>/dev/null || true)"
+    gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$vsnap" 2>/dev/null || true)"
+    [ -z "${FANOUT_VERDICT_SNAPSHOT:-}" ] || rm -f "$FANOUT_VERDICT_SNAPSHOT"; FANOUT_VERDICT_SNAPSHOT=""
     # UNKNOWN IS NOT FAILED, AND THERE ARE TWO WAYS TO BE UNKNOWN. A gate the
     # timeout killed produced no verdict, so there is nothing here to call a
     # finding; refusing it as a red gate sent a worker to fix code that was

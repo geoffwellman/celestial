@@ -3137,3 +3137,49 @@ test_land_accepts_its_own_attempt_with_gate_evidence_for_the_current_head() {
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+
+# review R1: validation and use are on ONE immutable snapshot - swapping the verdict file
+# between them (another attempt, anyone) can neither authorise nor veto this call.
+_fanout_snapshot_stub() { # <own-gate-passed true|false>
+  VSTUB="$T/verify-snap.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:$1, code:0, outcome:"$([ "$1" = true ] && echo pass || echo fail)", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+_fanout_swap_hook() { # <passed true|false> - replaces the verdict on disk with ANOTHER attempt's
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  export CEL_FANOUT_TEST_AFTER_VALIDATE="printf '%s' '{\"at\":\"2099-01-01T00:00:00Z\",\"attempt\":\"intruder\",\"state\":\"completed\",\"gate\":{\"configured\":true,\"ran\":true,\"passed\":$1,\"outcome\":\"x\"}}' > '$wt/.agent/verdict.json'"
+}
+test_a_verdict_swapped_in_after_validation_cannot_authorise_land() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub false; _fanout_swap_hook true       # own attempt FAILED; the file is then swapped for another attempt's PASS
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on a swapped-in pass: $out"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  assert_contains "$out" "did not pass"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+test_land_uses_its_own_validated_snapshot_not_the_file_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub true; _fanout_swap_hook false       # own attempt PASSED; the file is then swapped for a FAIL - the snapshot rules
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "land did not use its validated snapshot"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+# review R2: a stub that cannot be recorded is an explicit failure, never a silent continue
+test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
+  _fanout_land_setup fleetbot APPROVED 0
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"; chmod 500 "$wt/.agent"
+  VSTUB="$T/verify-refuse3.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "land continued without a recorded stub: $out"; chmod 700 "$wt/.agent"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  chmod 700 "$wt/.agent"
+  assert_contains "$out" "could not record a no-verdict stub"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}

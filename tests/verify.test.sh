@@ -569,3 +569,14 @@ test_a_completed_verdict_records_its_attempt_and_the_head_it_gated() {
   assert_eq "$(_v .attempt)" HEAD1; assert_eq "$(_v .gate.attempt)" HEAD1
   rm -rf "$T" "$ART"
 }
+
+# review R2: no fence, no gate - an unwritable .agent is exit 5 BEFORE the gate runs
+test_cel_verify_refuses_to_run_a_gate_it_cannot_fence() {
+  _vev
+  mkdir -p "$T/.agent"; chmod 500 "$T/.agent"
+  local rc=0; "$VERIFY" "$T" --gate "touch $T/ran" --quiet 2>/dev/null || rc=$?
+  chmod 700 "$T/.agent"
+  assert_eq "$rc" 5
+  [ ! -e "$T/ran" ] || { echo "the gate ran without a fence"; rm -rf "$T" "$ART"; return 1; }
+  rm -rf "$T" "$ART"
+}
