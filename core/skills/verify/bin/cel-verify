@@ -76,7 +76,13 @@ mkdir -p "$wt/.agent"
 # attempt on disk is this one's own stub; a slower, older attempt therefore
 # cannot overwrite a newer attempt's stub or verdict - it files its own result
 # under verdict-history/<attempt>.final.json and exits no-verdict (superseded).
-_verify_locked() { ( flock -x 8 || exit 1; "$@" ) 8>"$wt/.agent/verdict.lock"; }
+# Exit status: the function's own (7 = superseded, see below), or 75 when the lock
+# itself cannot be opened/taken - with a diagnostic on stderr, never silently.
+_verify_locked() {
+  ( exec 8>"$wt/.agent/verdict.lock" 2>/dev/null || { printf 'cel-verify: cannot open the verdict lock %s/.agent/verdict.lock (is .agent writable?)\n' "$wt" >&2; exit 75; }
+    flock -x 8 || { printf 'cel-verify: cannot take the verdict lock\n' >&2; exit 75; }
+    "$@" )
+}
 _verify_stub_write() { # <reason>
   local tmp="$wt/.agent/.verdict.$$.tmp"
   jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg att "$v_attempt" --arg head "$v_head" --arg branch "$branch" --arg why "$1" \
@@ -464,7 +470,14 @@ _verify_publish_final() {
     return 7
   fi
 }
-_verify_locked _verify_publish_final || { rm -f "$wt/.agent/.verdict.$$.tmp"; superseded=1; }
+_verify_locked _verify_publish_final; pub_rc=$?
+case "$pub_rc" in
+  0) ;;
+  7) rm -f "$wt/.agent/.verdict.$$.tmp"; superseded=1 ;;   # a newer attempt owns the verdict now
+  *) rm -f "$wt/.agent/.verdict.$$.tmp"
+     printf 'cel-verify: could not publish the verdict for attempt %s (status %s) - the previous verdict was already fenced, so none is current; this is no verdict\n' "$v_attempt" "$pub_rc" >&2
+     exit 5 ;;
+esac
 [ "$superseded" -eq 0 ] || printf 'cel-verify: attempt %s was superseded by a newer attempt on this worktree - its result is in .agent/verdict-history/%s.final.json and is NOT the current verdict\n' "$v_attempt" "$v_attempt" >&2
 
 if [ "$quiet" -eq 0 ]; then

@@ -580,3 +580,15 @@ test_cel_verify_refuses_to_run_a_gate_it_cannot_fence() {
   [ ! -e "$T/ran" ] || { echo "the gate ran without a fence"; rm -rf "$T" "$ART"; return 1; }
   rm -rf "$T" "$ART"
 }
+
+# review R2b: 'superseded' and 'could not lock/write' are different outcomes
+test_a_verdict_that_cannot_be_published_is_an_error_not_a_supersession() {
+  _vev
+  local rc=0; "$VERIFY" "$T" --attempt-id PUB1 --gate "chmod 500 $T/.agent; echo done" --quiet 2>"$T/err" || rc=$?
+  chmod 700 "$T/.agent"
+  assert_eq "$rc" 5
+  assert_contains "$(cat "$T/err")" "could not"
+  case "$(cat "$T/err")" in *superseded*) echo "an I/O failure was reported as a supersession"; rm -rf "$T" "$ART"; return 1;; esac
+  assert_eq "$(_v .gate.passed)" null          # the fenced stub is still what is on disk: no pass is current
+  rm -rf "$T" "$ART"
+}
