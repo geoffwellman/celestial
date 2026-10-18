@@ -3031,3 +3031,24 @@ test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
   [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
   rm -rf "$T"
 }
+
+# AH-261018: an explicit `false` must not collapse into "unknown" (jq `//` treats
+# false as absent). A red gate is a red gate in land's refusal AND in status.
+test_land_names_a_failed_gate_as_false_not_unknown() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_stub false
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed with a failed gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "(verdict: false)"
+  case "$out" in *"verdict: unknown"*) echo "false collapsed to unknown"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1;; esac
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_status_renders_a_failed_gate_as_FAIL() {
+  _fanout_setup; _fanout_verify_stub false
+  (cd "$T" && "$BIN" delegate widget WG-RED "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-RED) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" false
+  local row; row="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status | grep WG-RED || true)"
+  assert_contains "$row" "FAIL"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}

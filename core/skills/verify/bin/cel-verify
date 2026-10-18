@@ -91,6 +91,18 @@ _verify_suite_lock_path() {
 # pass, fail, timed out, produced no verdict.
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
 g_code=null g_outcome=none g_nvr=null g_empty=false lock_expired=0 run_timeout=""
+# THE FULL OUTPUT OF A GATE IS EVIDENCE, NOT SCRATCH. Framewright PR237's
+# canonical verification failed (exit 1, one failing test among ~5900) and this
+# file kept the last twelve lines and deleted the rest, so WHICH test failed
+# was irretrievable and a later green diagnostic could not stand in for it. The
+# complete output now survives every outcome (pass, fail, timeout, killed) as a
+# private artifact bound to this attempt and this head:
+#   $CEL_VERIFY_ARTIFACT_DIR (default ~/.local/state/cel/verify)/<branch>/<head12>-<utc>-<pid>/gate.log
+# 0700 directories, 0600 file, never inside the worktree (a worktree is
+# committed, pushed and read by a reviewer), never overwritten (the name carries
+# the attempt), indexed in attempts.jsonl. The verdict records its path, size and
+# sha256 - the PATH is recorded, the content is never printed or sent anywhere.
+g_art=null g_attempt=null g_head=null g_sha=null g_bytes=null g_arterr=null
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
   suite_lock_fd=""
@@ -213,6 +225,19 @@ $gate" ) > "$gate_out" 2>&1 &
     if [ -s "$gate_rc" ]; then reported="$(cat "$gate_rc")"; fi
     case "$reported" in ''|*[!0-9]*) reported="";; esac
     rm -f "$gate_rc"
+    # PRESERVE BEFORE ANYTHING ELSE TOUCHES IT - the artifact is written whatever
+    # the outcome is, before the display tail is cut from it.
+    g_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+    g_attempt="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    art_root="${CEL_VERIFY_ARTIFACT_DIR:-$HOME/.local/state/cel/verify}"
+    art_dir="$art_root/$(printf '%s' "${branch:-detached}" | tr -c 'A-Za-z0-9._-' '_')/${g_head:0:12}-$g_attempt"
+    if ( umask 077; mkdir -p "$art_dir" ) && cp "$gate_out" "$art_dir/gate.log" 2>/dev/null && chmod 600 "$art_dir/gate.log"; then
+      g_art="$(jq -Rn --arg p "$art_dir/gate.log" '$p')"
+      g_sha="$(sha256sum "$art_dir/gate.log" | cut -d' ' -f1)"; g_sha="$(jq -Rn --arg s "$g_sha" '$s')"
+      g_bytes="$(wc -c < "$art_dir/gate.log" | tr -d ' ')"
+    else
+      g_arterr="$(jq -Rn --arg s "could not preserve the gate output under $art_root - the display tail is all that is left" '$s')"
+    fi
     out="$(cat "$gate_out")"; rm -f "$gate_out"
     g_tail="$(printf '%s' "$out" | tail -n 12)"
     # A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The 2026-09-21 verdicts
@@ -247,6 +272,13 @@ $gate" ) > "$gate_out" 2>&1 &
         fi
         ;;
     esac
+  fi
+  # the attempt index: what ran, on which head, how it ended, where its output is
+  if [ "$g_art" != null ]; then
+    ( umask 077; mkdir -p "$art_root"
+      jq -nc --argjson art "$g_art" --arg att "$g_attempt" --arg head "$g_head" --arg branch "$branch" \
+        --arg out "$g_outcome" --argjson code "$g_code" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{at:$at, attempt:$att, head:$head, branch:$branch, outcome:$out, code:$code, artifact:$art}' >> "$art_root/attempts.jsonl" ) 2>/dev/null || true
   fi
   # Somebody else is waiting on this: hand it over as soon as the gate is
   # done, rather than at the end of the PR and GitHub work below.
@@ -311,6 +343,8 @@ jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg bas
   --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
   --argjson gto "$g_to" --argjson gtos "$gate_timeout" --argjson gwait "$g_waited" \
   --argjson gcode "$g_code" --arg gout "$g_outcome" --arg gnvr "$g_nvr" --argjson gempty "$g_empty" \
+  --argjson gart "$g_art" --argjson gsha "$g_sha" --argjson gbytes "$g_bytes" --argjson garterr "$g_arterr" \
+  --arg gattempt "$([ "$g_art" = null ] && echo "" || echo "$g_attempt")" --arg ghead "$([ "$g_art" = null ] && echo "" || echo "$g_head")" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
   --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
@@ -318,6 +352,8 @@ jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg bas
     gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, code: $gcode,
               outcome: $gout, no_verdict_reason: (if $gnvr == "null" then null else $gnvr end),
               tail: $gtail, output_empty: $gempty,
+              artifact: $gart, output_sha256: $gsha, output_bytes: $gbytes, artifact_error: $garterr,
+              attempt: (if $gattempt == "" then null else $gattempt end), head: (if $ghead == "" then null else $ghead end),
               timed_out: $gto, timeout_secs: $gtos, waited_secs: $gwait },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
