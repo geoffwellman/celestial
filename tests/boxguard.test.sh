@@ -224,3 +224,18 @@ test_watchdog_install_refuses_when_sudo_needs_a_password() {
   [ -e "$T/sys/cel-manager-watchdog.timer" ] && { echo "wrote without sudo"; return 1; }
   rm -rf "$T"
 }
+
+# AH-261018: with box.max_swap_pct at 100 the doubled band cannot fire, so the
+# refusal and the doctor sentence must not name one; the floor itself is kept.
+test_boxguard_text_names_no_swap_band_when_it_is_disabled() {
+  _bg_meminfo 1048576 8388608 838860    # 1 GB free, below any floor
+  local out
+  out="$(CEL_BOX_MAX_SWAP_PCT=100 boxguard_admit)" && { echo "admitted below the floor"; return 1; }
+  ! printf '%s' "$out" | grep -q "swap over" || { echo "named a band that cannot fire: $out"; return 1; }
+  assert_contains "$out" "floor"
+  out="$(boxguard_admit)" || true
+  assert_contains "$out" "swap over"
+  _bg_meminfo 3500000 8388608 838860
+  CEL_BOX_MAX_SWAP_PCT=100 boxguard_admit >/dev/null || { echo "100% still doubled the floor"; return 1; }
+  rm -rf "$T"
+}
