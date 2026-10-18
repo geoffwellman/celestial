@@ -187,6 +187,11 @@ agents:
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
     # pi ignores SIGTERM; Ctrl-C is what stops it. See `signal` above.
     signal: int
+    # NATIVE ORIGINAL-SESSION CONTINUITY (AH-261018): `pi --session <path|id>`
+    # reopens the exact session file, so a restart keeps the UUID, the heap and
+    # pending-tool lineage instead of starting a fresh session (no `resume:`
+    # here meant `cel run --restart` could only start pi fresh).
+    resume: { flag: --session, value: path }
     model_flag: --model
     # pi also understands the `provider/id:<thinking>` shorthand, but the plane
     # always spells the level as its own flag so one profile field renders the

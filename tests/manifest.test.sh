@@ -80,3 +80,26 @@ test_manifest_runs_yq_once_per_process() {
   assert_eq "$(wc -l < "$B/count" | tr -d ' ')" "1"
   rm -rf "$B"
 }
+
+# AH-261018: pi resumes through its own native `--session`, so a restart keeps
+# the original session file instead of starting fresh; omp keeps `--resume`.
+test_manifest_declares_native_session_resume_for_pi_and_omp() {
+  CEL_MANIFEST="$CEL_ROOT/agents.yaml"
+  assert_eq "$(agent_resume pi flag)" "--session"
+  assert_eq "$(agent_resume omp flag)" "--resume"
+}
+
+# AH-261018: every installed agent has a declared native updater, and the one
+# helper child gc may accept is named by exact argv, not by a pattern.
+test_manifest_declares_an_update_command_for_every_agent() {
+  CEL_MANIFEST="$CEL_ROOT/agents.yaml"
+  local a
+  for a in $(agent_names); do
+    [ -n "$(agent_update_get "$a" command)" ] || { echo "no update command for $a"; return 1; }
+  done
+}
+test_manifest_owned_children_are_exact_argv_pairs() {
+  CEL_MANIFEST="$CEL_ROOT/agents.yaml"
+  assert_eq "$(agent_owned_children claude)" "$(printf 'node\t/.hindsight/coding-agents/dist/mcp-server.js')"
+  assert_eq "$(agent_owned_children codex)" ""
+}

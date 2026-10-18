@@ -135,6 +135,13 @@ the child now owns, and `_ledger_append` keeps lineage across a re-delegation.
 No new ledger state exists - the child is an ordinary `running` row whose
 collect/review/land are gated on `stage: attached`.
 
+### Gateway transports, agent updates and runtime retirement (AH-261018)
+
+- **Codex over Responses.** The gateway serves Chat Completions, Anthropic Messages and OpenAI Responses (`/v1/responses`, `/v1/responses/compact`, and the Responses websocket upgrade on the same path) over one vault. Claude uses `anthropic-messages`; Codex-family ids use `openai-responses` (pi provider `ompgw-codex`, omp provider `celgw-codex`) so compaction and reasoning items are not dropped by a chat-completions substitution. Which transport a live turn actually negotiates (SSE or websocket) is a property of the runtime and is proven with an authenticated turn, not asserted by the writer.
+- **Native start, gateway later.** An omp launched on a native model still receives the gateway client environment and the registered gateway providers; a running process's environment is fixed, so a session started earlier is recovered through its own native session resume (`cel run <role> --restart`, which passes `--resume` for omp and `--session` for pi), never by pretending new variables reach it.
+- **`cel update`** runs the agent and gateway components on every update (agents.yaml `update:`), each through the agent's own installer, with an honest per-component report. A component that fails, or that is still behind the published latest after its updater ran, makes the update a non-success; rerun is the recovery.
+- **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch, session file and the delegation row are untouched.
+
 ## Credentials
 
 Workspace `env:` and gitignored `env.local` layer over the caller's environment.
