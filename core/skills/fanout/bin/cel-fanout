@@ -804,13 +804,35 @@ _fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
     [ "$(printf '%s' "$hdr" | jq -r '.cwd // ""')" = "$wt" ] || continue
     ok+=("$f"); ids+=("$(printf '%s' "$hdr" | jq -r '.id // ""')")
   done
-  [ "${#ok[@]}" -gt 0 ] || die "delegate --reuse: no native session found for $wt - nothing was changed"
+  [ "${#ok[@]}" -gt 0 ] || [ -n "$opt" ] || die "delegate --reuse: no native session found for $wt - nothing was changed"
   if [ -n "$opt" ]; then
     local i
     for i in "${!ok[@]}"; do
       if [ "${ok[$i]}" = "$opt" ] || [ "${ids[$i]}" = "$opt" ]; then RS_SESSION="${ok[$i]}"; return 0; fi
     done
-    die "delegate --reuse: '$opt' is not a session of $wt (have: ${ids[*]}) - nothing was changed"
+    # A recovered session can live OUTSIDE the default root (a private or
+    # native-export root), where no scan finds it: an explicit existing PATH is
+    # accepted only on proof it is this row's - header cwd, UUID equal to the
+    # file's own name, and the LATEST native model event (an initial one proves
+    # nothing) agreeing with the row's model - and no process holding it now.
+    if [ -f "$opt" ]; then
+      local ehdr eid em
+      ehdr="$(head -n 1 "$opt" 2>/dev/null | jq -c 'select(.type == "session")' 2>/dev/null)" || ehdr=""
+      eid="$(printf '%s' "$ehdr" | jq -r '.id // ""' 2>/dev/null)"
+      if [ -n "$ehdr" ] && [ -n "$eid" ] && [ "$(printf '%s' "$ehdr" | jq -r '.cwd // ""')" = "$wt" ] \
+         && [ "${opt##*_}" = "$eid.jsonl" ]; then
+        em="$(jq -r 'select(.type == "model_change") | .modelId // empty' "$opt" 2>/dev/null | tail -n 1)"
+        if [ -n "$RS_MODEL" ] && [ -n "$em" ] && [ "$em" != "$RS_MODEL" ] \
+           && [ "${RS_MODEL##*/}" != "${em##*/}" ]; then
+          die "delegate --reuse: the latest model in $opt is '$em' but the row recorded '$RS_MODEL' - refusing to resume a different model. Nothing was changed"
+        fi
+        if pgrep -af -- "$opt" 2>/dev/null | grep -v 'cel-fanout\|delegate' | grep -q .; then
+          die "delegate --reuse: a live process already holds $opt - nothing was changed"
+        fi
+        RS_SESSION="$opt"; return 0
+      fi
+    fi
+    die "delegate --reuse: '$opt' is not a session of $wt (have: ${ids[*]}; an explicit path must be a session file whose header names this worktree and whose UUID is its file name) - nothing was changed"
   fi
   [ "${#ok[@]}" -eq 1 ] \
     || die "delegate --reuse: ambiguous - ${#ok[@]} native sessions belong to $wt (${ids[*]}); name the original with --session <uuid>. Nothing was changed"
