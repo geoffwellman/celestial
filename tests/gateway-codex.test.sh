@@ -161,9 +161,8 @@ test_omp_models_write_keeps_unrelated_providers() {
 # ---------------------------------------------------------------- the router
 
 _gwc_profile() { # <runtime> <model> -> resolves a gateway profile in $T
-  cat >"$T/workspace.yaml" <<YAML
-name: gwc
-repos: [widget]
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/workspace.yaml"
+  cat >>"$T/workspace.yaml" <<YAML
 worker_profiles:
   p: { runtime: $1, model: $2, via: gateway, thinking: high }
 YAML

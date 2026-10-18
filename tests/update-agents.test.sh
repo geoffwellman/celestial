@@ -67,6 +67,7 @@ EOS
   _update_verify() { printf 'verify\n' >>"$LOG"; return 0; }
   _update_stale_agents() { :; }
   _update_stale_orchestrators() { :; }
+  _update_stale_gateway_env() { :; }
   gateway_refresh() { printf 'gateway_refresh\n' >>"$LOG"; return "${GW_REFRESH_RC:-0}"; }
   herdr() { printf 'HERDR %s\n' "$*" >>"$LOG"; return 1; }
   kill() { printf 'KILL %s\n' "$*" >>"$LOG"; }
@@ -155,6 +156,7 @@ test_update_reports_a_held_agent_and_does_not_run_its_updater() {
 test_update_names_pi_extensions_as_a_pin_exception() {
   _uag_fixture
   mkdir -p "$ROOT/tools/pi"; printf '@scope/ext@1.2.3\n' >"$ROOT/tools/pi/extensions.txt"
+  git -C "$ROOT" add -A; git -C "$ROOT" commit -qm 'pin an extension'
   local out; out="$(cmd_update 2>&1)"
   assert_contains "$out" "pi extensions"
   assert_contains "$out" "pinned"
@@ -184,7 +186,7 @@ test_update_never_restarts_or_signals_a_live_session() {
 test_update_check_reports_installed_and_latest_without_changing_anything() {
   _uag_fixture
   local out rc=0
-  out="$(cmd_update --check 2>&1)" || rc=$?
+  out="$(cmd_update --check --agents 2>&1)" || rc=$?
   assert_contains "$out" "alpha 1.0.0 (latest 1.1.0)"
   ! grep -q ' update$' "$LOG" || { echo "--check ran an updater"; _uag_cleanup; return 1; }
   assert_eq "$(cat "$T/alpha.ver")" 1.0.0

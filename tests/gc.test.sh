@@ -1589,7 +1589,7 @@ test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
 # still proven by exact pid/birth/pane/role; the only widening is a declared
 # helper (agents.yaml `owned_children`) that is a DIRECT child of that root,
 # born after it, in the same pane, with the exact declared argv.
-_gc_claude_fixture() { # <child-kind: mcp|other|grandchild|none>
+_gc_claude_fixture() { # <child-kind: mcp|other|wrongscript|grandchild|none>
   _gc_managed_fixture
   GC_UPTIME=10000
   CEL_MANIFEST="$T/agents.yaml"
@@ -1598,44 +1598,53 @@ agents:
   claude:
     role_injection: {strategy: append_flag_file, flag: --append-system-prompt-file}
     owned_children:
-      - {comm: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js}
+      - {argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js}
 YML
   printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
   mkdir -p "$T/bin" "$HOME/.hindsight/coding-agents/dist"
   cp "$(command -v bash)" "$T/bin/claude"
   cp "$(command -v bash)" "$T/bin/node"
   cp "$(command -v bash)" "$T/bin/vite"
-  printf 'sleep 60\n' > "$HOME/.hindsight/coding-agents/dist/mcp-server.js"
-  printf 'sleep 60\n' > "$T/preview.js"
+  printf 'read -r x <> "$T_BLK"\n' > "$HOME/.hindsight/coding-agents/dist/mcp-server.js"
+  printf 'read -r x <> "$T_BLK"\n' > "$T/preview.js"
+  mkfifo "$T/blk"
+  # The runtime blocks in `wait` (no stray child of its own): the only
+  # children are the ones a case creates on purpose.
   case "$1" in
-    mcp)        printf '"$T_BIN/node" "$T_MCP" &\nsleep 60\n' > "$T/agent.sh" ;;
-    other)      printf '"$T_BIN/vite" "$T_PREVIEW" &\nsleep 60\n' > "$T/agent.sh" ;;
-    grandchild) printf '( "$T_BIN/node" "$T_MCP" & wait ) &\nsleep 60\n' > "$T/agent.sh" ;;
-    none)       printf 'sleep 60\n' > "$T/agent.sh" ;;
+    mcp)         printf '"$T_BIN/node" "$T_MCP" &\nwait\n' > "$T/agent.sh" ;;
+    other)       printf '"$T_BIN/vite" "$T_PREVIEW" &\nwait\n' > "$T/agent.sh" ;;
+    wrongscript) printf '"$T_BIN/node" "$T_PREVIEW" &\nwait\n' > "$T/agent.sh" ;;
+    grandchild)  printf '( "$T_BIN/node" "$T_MCP" & wait ) &\nwait\n' > "$T/agent.sh" ;;
+    none)        printf 'exec 3<>"$T_BLK"; read -r -u 3 x\n' > "$T/agent.sh" ;;
   esac
   env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
       CEL_ROLE_FILE="$GC_WS/.cel/role-worker.md" CEL_WORKSPACE="$GC_WS" \
-      T_BIN="$T/bin" T_MCP="$HOME/.hindsight/coding-agents/dist/mcp-server.js" T_PREVIEW="$T/preview.js" \
+      T_BIN="$T/bin" T_BLK="$T/blk" T_MCP="$HOME/.hindsight/coding-agents/dist/mcp-server.js" T_PREVIEW="$T/preview.js" \
       "$T/bin/claude" "$T/agent.sh" </dev/null &
   GC_PID=$!
-  trap 'builtin kill -9 "$GC_PID" $(pgrep -P "$GC_PID" 2>/dev/null) 2>/dev/null || true; pkill -9 -f "$T/" 2>/dev/null || true; rm -rf "$T"' EXIT
+  trap 'builtin kill -9 "$GC_PID" 2>/dev/null || true; pkill -9 -f "$T/" 2>/dev/null || true; rm -rf "$T"' EXIT
   local i
   for ((i=0;i<300;i++)); do
-    [ "$(cat "/proc/$GC_PID/comm" 2>/dev/null)" = claude ] && { [ "$1" = none ] || [ -n "$(pgrep -P "$GC_PID" -x 'node|vite|bash' 2>/dev/null)" ]; } && break
+    [ "$(cat "/proc/$GC_PID/comm" 2>/dev/null)" = claude ] || { sleep 0.01; continue; }
+    [ "$1" = none ] && break
+    pgrep -f "$T/bin/(node|vite) " >/dev/null 2>&1 && break
     sleep 0.01
   done
-  sleep 0.2
+  sleep 0.3
+  # the foreground group herdr would report for the pane
+  GC_FG="$GC_PID"
+  case "$1" in
+    grandchild) GC_FG="$GC_PID $(pgrep -f "$T/bin/node " | head -1)" ;;
+    none) ;;
+    *) GC_FG="$GC_PID $(pgrep -P "$GC_PID" | tr '\n' ' ')" ;;
+  esac
   GC_AGENTS="$(jq -n --arg d "$PWD" '{result:{agents:[{pane_id:"w1:p1",name:"widget-task",agent:"claude",cwd:$d,agent_status:"idle",terminal_id:"term-1",state_change_seq:4,agent_session:{value:"session-1"}}]}}')"
-  # herdr reports what the foreground group holds: the root and every
-  # descendant that is in it.
   herdr() {
     case "$1 $2" in
       "pane process-info")
-        local fg='' p
-        for p in "$GC_PID" $(pgrep -P "$GC_PID" 2>/dev/null) $(pgrep -P "$(pgrep -P "$GC_PID" -x bash | head -1)" 2>/dev/null); do
-          [ -n "$p" ] || continue; fg="$fg{\"pid\":$p},"
-        done
-        printf '{"result":{"process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[%s]}}}' "$$" "$GC_PID" "${fg%,}";;
+        jq -nc --arg fg "$GC_FG" --argjson shell "$$" --argjson pg "$GC_PID" \
+          '{result:{process_info:{pane_id:"w1:p1",shell_pid:$shell,foreground_process_group_id:$pg,
+            foreground_processes:[$fg | split(" ")[] | select(length > 0) | {pid: tonumber}]}}}';;
       *) return 1;;
     esac
   }
@@ -1672,22 +1681,10 @@ test_gc_identity_refuses_a_declared_helper_that_is_not_a_direct_child() {
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
 }
 
-# A declared name with the wrong argv (same comm, other script) is refused.
+# A declared name with the wrong argv (same argv0, other script) is refused.
 test_gc_identity_refuses_a_helper_with_the_right_name_and_the_wrong_script() {
-  _gc_claude_fixture mcp
-  printf '#!/bin/sh\n' > "$T/other.js"
-  builtin kill -9 $(pgrep -P "$GC_PID" -x node) 2>/dev/null || true
-  "$T/bin/node" "$T/preview.js" &
-  local imposter=$!
-  herdr() {
-    case "$1 $2" in
-      "pane process-info")
-        printf '{"result":{"process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s},{"pid":%s}]}}}' "$$" "$GC_PID" "$GC_PID" "$imposter";;
-      *) return 1;;
-    esac
-  }
+  _gc_claude_fixture wrongscript
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
-  builtin kill -9 "$imposter" 2>/dev/null || true
 }
 
 # Retirement releases the RUNTIME and nothing else: ledger row, worktree,
