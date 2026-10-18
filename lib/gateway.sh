@@ -446,7 +446,8 @@ _gateway_pi_publish() { # <real path> <models json>
     # fills in what is missing; a refresh lets the plane values win.
     def pblk($old; $new):
       (if $refresh then ($old // {}) + ($new | del(.models)) else ($new | del(.models)) + ($old // {}) end)
-      + { models: $new.models };
+      + { headers: (if $refresh then (($old.headers // {}) + $new.headers) else ($new.headers + ($old.headers // {})) end),
+          models: $new.models };
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
     | (.providers // {}) as $cur
@@ -678,7 +679,8 @@ _gateway_omp_publish() { # <real path> <block json>
           | if $e == null then $e0 elif $refresh then $e + $e0 else $e0 + $e end ]
         + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
       (.providers[$k] // {}) as $o
-      | (if $refresh then ($o + ($b | del(.models))) else (($b | del(.models)) + $o) end) as $p
+      | ((if $refresh then ($o + ($b | del(.models))) else (($b | del(.models)) + $o) end)
+          + { headers: (if $refresh then (($o.headers // {}) + $b.headers) else ($b.headers + ($o.headers // {})) end) }) as $p
       | .providers = ((.providers // {}) + {($k): ($p + { models: mm($o.models; $b.models) })})' <<<"$cur" \
     | yq -y . >"$tmp" || { rm -f "$tmp"; return 1; }
   # unchanged => no write (the file is shared with live sessions)

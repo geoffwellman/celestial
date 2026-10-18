@@ -801,3 +801,27 @@ test_launch_write_keeps_owner_provider_fields_and_refresh_restores_them() {
   unset GW_MODELS
   _gw_teardown
 }
+
+# review contract: plane owns name/baseUrl/apiKey/api and x-session-id; other provider
+# keys and headers survive launch AND refresh, in both files.
+test_provider_contract_keeps_foreign_keys_and_always_carries_the_session_header() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_catalog "$T/cat.json"; mkdir -p "$T/omp"
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"}]}'
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json"
+  jq '.providers["ompgw-claude"].headers = {"x-owner":"1"} | .providers["ompgw-claude"].extraKey = {"deep":{"n":2}}' "$T/pi/models.json" >"$T/x" && mv "$T/x" "$T/pi/models.json"
+  yq -y '.providers.celgw.headers = {"x-owner":"1"} | .providers.celgw.extraKey = {"deep":{"n":2}}' "$T/omp/models.yml" >"$T/x" && mv "$T/x" "$T/omp/models.yml"
+  local mode
+  for mode in launch refresh; do
+    GATEWAY_PI_WRITE=$mode gateway_pi_models_write "$T/pi/models.json"; GATEWAY_PI_WRITE=$mode gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json"
+    assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-owner"]' "$T/pi/models.json")" 1 || { echo "pi $mode"; return 1; }
+    assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$T/pi/models.json")" '$CEL_SESSION_ID' || { echo "pi $mode"; return 1; }
+    assert_eq "$(jq -r '.providers["ompgw-claude"].extraKey.deep.n' "$T/pi/models.json")" 2 || { echo "pi $mode"; return 1; }
+    assert_eq "$(yq -r '.providers.celgw.headers["x-owner"]' "$T/omp/models.yml")" 1 || { echo "omp $mode"; return 1; }
+    assert_eq "$(yq -r '.providers.celgw.headers["x-session-id"]' "$T/omp/models.yml")" CEL_SESSION_ID || { echo "omp $mode"; return 1; }
+    assert_eq "$(yq -r '.providers.celgw.extraKey.deep.n' "$T/omp/models.yml")" 2 || { echo "omp $mode"; return 1; }
+  done
+  unset GW_MODELS
+  _gw_teardown
+}
