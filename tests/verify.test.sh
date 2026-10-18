@@ -495,7 +495,10 @@ test_a_sigkilled_verifier_still_leaves_the_output_and_an_unfinished_attempt_reco
   kill -9 "$vp"; wait "$vp" 2>/dev/null || true
   grep -q bytes-before-kill "${art}gate.log" || { echo "SIGKILL erased evidence"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
   assert_eq "$(jq -r .state "${art}attempt.json")" running
-  [ ! -f "$T/.agent/verdict.json" ] || { echo "a SIGKILLed verifier produced a verdict"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  # the verdict on disk is the no-verdict STUB for this attempt - never absent-and-stale, never a pass
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_eq "$(_v .gate.passed)" null
+  assert_eq "$(_v .state)" no_verdict_stub
   _vev_gate_cleanup
   rm -rf "$T" "$ART"
 }
@@ -514,4 +517,32 @@ test_an_unsafe_artifact_root_is_refused_before_the_gate_runs() {
   chmod 700 "$ART"; "$VERIFY" "$T" --gate true --quiet
   assert_eq "$(_v .gate.outcome)" pass
   rm -rf "$T" "$ART"
+}
+
+
+# ---------------- a refused / killed attempt can NEVER leave the previous pass usable
+_vev_seed_pass() { # an old, passing verdict from an older head
+  mkdir -p "$T/.agent"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"code":0,"outcome":"pass"}}' > "$T/.agent/verdict.json"
+}
+test_a_refused_attempt_replaces_an_old_pass_with_no_verdict_and_keeps_the_old_one_in_history() {
+  _vev; _vev_seed_pass
+  local rc=0; CEL_VERIFY_ARTIFACT_DIR="$T/inside" "$VERIFY" "$T" --gate true --quiet 2>/dev/null || rc=$?
+  assert_eq "$rc" 4
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_eq "$(_v .gate.passed)" null
+  assert_contains "$(_v .gate.no_verdict_reason)" "refused to run"
+  local h; h="$(ls "$T"/.agent/verdict-history/*.json | head -1)"
+  assert_eq "$(jq -r .gate.passed "$h")" true     # the old evidence is preserved, separately
+  rm -rf "$T" "$ART"
+}
+test_a_sigkilled_attempt_after_an_old_pass_leaves_no_verdict_not_the_old_pass() {
+  _vev; _vev_seed_pass
+  "$VERIFY" "$T" --gate "$(_vev_gate sk-after-pass)" --quiet & local vp=$!
+  local art; art="$(_vev_art_dir)" || { kill -9 $vp; rm -rf "$T" "$ART"; return 1; }
+  _vev_wait_for "${art}gate.log" sk-after-pass || { kill -9 $vp; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  kill -9 "$vp"; wait "$vp" 2>/dev/null || true
+  assert_eq "$(_v .gate.passed)" null
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  _vev_gate_cleanup; rm -rf "$T" "$ART"
 }

@@ -247,6 +247,24 @@ _repo_slug() { # <wsdir> <repo>
 # Run the verifier for a delegation and fold its verdict into the ledger row.
 # Prints the verdict's one-line summary. Never fails the caller: a verifier
 # that cannot run is a verdict of "unknown", which land treats as not passed.
+# A VERDICT THIS INVOCATION DID NOT PRODUCE IS NOT THIS INVOCATION'S VERDICT. The
+# verifier runs with its stderr discarded and its status ignored, then the file
+# it should have written is read - so a refused, aborted or SIGKILLed verifier
+# left the PREVIOUS attempt's verdict.json in place, possibly gate.passed:true on
+# an older head, and land/collect read it as current. The prior verdict is now
+# preserved (never overwritten) under .agent/verdict-history/ BEFORE the verifier
+# runs, and whatever this invocation leaves behind is accepted only if it is a
+# completed verdict written at or after the invocation started; anything else
+# becomes an explicit no-verdict stub carrying the verifier's own words.
+_fanout_verdict_stub() { # <worktree> <reason>
+  local wt="$1" tmp
+  tmp="$wt/.agent/.verdict.stub.$$"
+  mkdir -p "$wt/.agent"
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg why "$2" \
+    '{at:$at, state:"no_verdict_stub", gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
+      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0}, checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}' > "$tmp" \
+    && mv -f "$tmp" "$wt/.agent/verdict.json"
+}
 _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   local wsdir="$1" id="$2" entry="$3"
   local wt repo branch gate slug
@@ -275,13 +293,38 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   # about the suite outgrowing it); land is a human waiting, so for land the
   # queue counts.
   local lock_flag=""; [ "$verb" = land ] && lock_flag=--lock-in-timeout
+  local v_t0 v_err v_rc
+  v_t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  v_err="$(mktemp "${TMPDIR:-/tmp}/cel-verify-err.XXXXXX")"; v_rc="$v_err.rc"
+  if [ -f "$wt/.agent/verdict.json" ]; then
+    mkdir -p "$wt/.agent/verdict-history"
+    mv -n "$wt/.agent/verdict.json" "$wt/.agent/verdict-history/fanout-$(date -u +%Y%m%dT%H%M%SZ)-$$.json" 2>/dev/null || true
+  fi
   _ledger_unlock
   line="$( set +u
            eval "$(ws_env_exports "$wsdir" 2>/dev/null)" >/dev/null 2>&1 || true
            _ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} \
              ${gate_timeout:+--gate-timeout "$gate_timeout"} ${lock_flag:+"$lock_flag"} \
-             --branch "$branch" 2>/dev/null || true )"
+             --branch "$branch" 2>"$v_err"; printf '%s' "$?" > "$v_rc" )"
   _ledger_relock
+  # exit codes 0/1/2/3 are verdicts the verifier chose (pass, fail, timeout,
+  # no-verdict); anything else - 4 (refused), a signal, a crash - produced none.
+  local vrc vwhy
+  vrc="$(cat "$v_rc" 2>/dev/null || echo 99)"
+  vwhy="$(head -c 400 "$v_err" 2>/dev/null | tr '\n' ' ')"
+  rm -f "$v_err" "$v_rc"
+  case "$vrc" in
+    0|1|2|3) ;;
+    *) c_warn "$id: the verifier produced no verdict (exit $vrc)${vwhy:+: $vwhy}"
+       _fanout_verdict_stub "$wt" "the verifier exited $vrc without a verdict${vwhy:+: $vwhy}" ;;
+  esac
+  if [ ! -f "$wt/.agent/verdict.json" ]; then
+    _fanout_verdict_stub "$wt" "the verifier left no verdict this run"
+  elif [ "$(jq -r '.state // ""' "$wt/.agent/verdict.json" 2>/dev/null)" = running ] \
+      || [ "$(jq -r '.at // ""' "$wt/.agent/verdict.json" 2>/dev/null)" \< "$v_t0" ]; then
+    # not completed, or older than this invocation: not this run's answer
+    _fanout_verdict_stub "$wt" "the verdict on disk predates this verification or never completed"
+  fi
   # WHAT WAS READ BEFORE THE GATE IS RE-READ AFTER IT. Minutes passed with the
   # ledger unlocked, so the row may have been released, re-delegated or landed
   # by somebody else in the meantime; writing this verdict onto it would
