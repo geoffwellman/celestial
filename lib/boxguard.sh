@@ -82,6 +82,16 @@ boxguard_psi_full() {
        END { exit !found }' "$f" 2>/dev/null
 }
 
+# THE SWAP BAND IS OFF AT box.max_swap_pct >= 100 (swap can never exceed 100%, and
+# _boxguard_under needs it strictly above), so a box configured that way has the
+# plain floor and nothing else. Every sentence below says so instead of naming a
+# band that cannot fire. The thresholds themselves are policy and not changed here.
+_boxguard_band_text() { # "<or X GB with swap over N%>" or nothing
+  local pct; pct="$(boxguard_max_swap_pct)"
+  [ "$pct" -ge 100 ] 2>/dev/null && return 0
+  printf ', or %s GB with swap over %s%%' "$(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 )))" "$pct"
+}
+
 # 0 = admit. 1 = refuse, with the plain sentence on stdout.
 boxguard_admit() {
   local avail swap min
@@ -89,8 +99,8 @@ boxguard_admit() {
   [ "${avail:--1}" -ge 0 ] || return 0
   min="$(boxguard_min_avail_mb)"
   if _boxguard_under "$avail" "$swap" "$min"; then
-    printf 'box memory low: %s GB free, swap %s%% - not starting (floor %s GB free, or %s GB with swap over %s%%; cel doctor names what is holding it)\n' \
-      "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$min")" "$(_boxguard_gb $(( min * 2 )))" "$(boxguard_max_swap_pct)"
+    printf 'box memory low: %s GB free, swap %s%% - not starting (floor %s GB free%s; cel doctor names what is holding it)\n' \
+      "$(_boxguard_gb "$avail")" "$swap" "$(_boxguard_gb "$min")" "$(_boxguard_band_text)"
     return 1
   fi
   return 0
@@ -118,7 +128,7 @@ boxguard_warning_text() { # [what-gc-did]
   read -r avail swap <<<"$(boxguard_read)"
   local msg="box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% - ${1:-no idle worker was stoppable}."
   if ! boxguard_admit >/dev/null; then
-    msg="$msg Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB, or $(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 ))) GB with swap over $(boxguard_max_swap_pct)%)."
+    msg="$msg Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB$(_boxguard_band_text))."
   fi
   printf '%s\n' "$msg"
 }

@@ -41,7 +41,7 @@ case "$1 $2" in
   "agent start")
     if [ -n "${STUB_AGENT_ENV_FILE:-}" ]; then
       prefix="$(cat "$STUB_PREFIX_FILE")"
-      bash -c "$prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$STUB_AGENT_ENV_FILE"
+      bash -c "$prefix sh -c 'printf \"%s|%s\" \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"'" > "$STUB_AGENT_ENV_FILE"
     fi;;
   *) echo '{}';;
 esac
@@ -754,8 +754,8 @@ role_profiles:
   scout: gateway-opus
 YAML
   local gwt previous_pi_set previous_pi previous_no_quota previous_session_set previous_session
-  previous_pi_set="${PI_CODING_AGENT_DIR+x}"
-  previous_pi="${PI_CODING_AGENT_DIR:-}"
+  previous_pi_set="${CEL_PI_AGENT_DIR+x}"
+  previous_pi="${CEL_PI_AGENT_DIR:-}"
   previous_no_quota="${CEL_NO_QUOTA_PROBE:-}"
   previous_session_set="${CEL_SESSION_ID+x}"
   previous_session="${CEL_SESSION_ID:-}"
@@ -765,7 +765,7 @@ YAML
   mkdir -p "$CEL_GATEWAY_STATE/auth" "$gwt/pi"
   printf '{}' > "$CEL_GATEWAY_STATE/auth/claude-aaaaaa11-someone@example.invalid.json"
   printf 'scout-test-api-key\n' > "$CEL_GATEWAY_STATE/api-key"
-  export PI_CODING_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
+  export CEL_PI_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
   cat > "$gwt/gateway-stub" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -803,13 +803,18 @@ EOF
   assert_contains "$worker_start" "--model ompgw-claude/claude-opus-5-5"
   assert_eq "$model_key" '$OMP_GATEWAY_TOKEN'
   # The pane must load the models.json the launcher just wrote: the caller's
-  # PI_CODING_AGENT_DIR is carried into the target pane's launch prefix.
-  local pane_dir; pane_dir="$(env -u PI_CODING_AGENT_DIR bash -c "$(cat "$STUB_PREFIX_FILE") printf '%s' \"\${PI_CODING_AGENT_DIR:-}\"")"
+  # The launch prefix pins pi's resolved root (CEL_PI_AGENT_DIR here), and a
+  # leaked PI_CODING_AGENT_DIR in the pane cannot override it.
+  local pane_dir; pane_dir="$(PI_CODING_AGENT_DIR=/leaked/omp/root bash -c "$(cat "$STUB_PREFIX_FILE") printenv PI_CODING_AGENT_DIR")"
   assert_eq "$pane_dir" "$gwt/pi"
+  # ...and nothing launch-only was exported into the pane shell itself.
+  local after; after="$(env -u CEL_SESSION_ID -u OMP_GATEWAY_TOKEN bash -c "$(cat "$STUB_PREFIX_FILE") true
+printf '%s|%s' \"\${CEL_SESSION_ID-unset}\" \"\${OMP_GATEWAY_TOKEN-unset}\"")"
+  assert_eq "$after" "unset|unset"
   rm -rf "$T" "$gwt"
   unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_NO_QUOTA_PROBE
   unset STUB_PREFIX_FILE STUB_AGENT_ENV_FILE
-  if [ -n "$previous_pi_set" ]; then export PI_CODING_AGENT_DIR="$previous_pi"; else unset PI_CODING_AGENT_DIR; fi
+  if [ -n "$previous_pi_set" ]; then export CEL_PI_AGENT_DIR="$previous_pi"; else unset CEL_PI_AGENT_DIR; fi
   if [ -n "$previous_session_set" ]; then export CEL_SESSION_ID="$previous_session"; else unset CEL_SESSION_ID; fi
   [ -z "$previous_no_quota" ] || export CEL_NO_QUOTA_PROBE="$previous_no_quota"
 }
@@ -3025,4 +3030,156 @@ test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
   done
   [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
   rm -rf "$T"
+}
+
+# AH-261018: an explicit `false` must not collapse into "unknown" (jq `//` treats
+# false as absent). A red gate is a red gate in land's refusal AND in status.
+test_land_names_a_failed_gate_as_false_not_unknown() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_stub false
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed with a failed gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "(verdict: false)"
+  case "$out" in *"verdict: unknown"*) echo "false collapsed to unknown"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1;; esac
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_status_renders_a_failed_gate_as_FAIL() {
+  _fanout_setup; _fanout_verify_stub false
+  (cd "$T" && "$BIN" delegate widget WG-RED "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-RED) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" false
+  local row; row="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status | grep WG-RED || true)"
+  assert_contains "$row" "FAIL"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+
+# AH-261018 review: a verifier that REFUSES (exit 4) or is SIGKILLed leaves the previous
+# attempt's verdict on disk; land/collect must not read that as this run's answer.
+_fanout_seed_old_pass() { # writes a passing verdict from an older run into the row's worktree
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+  FOLD_WT="$wt"
+}
+test_land_refuses_when_the_verifier_refuses_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-refuse.sh"
+  printf '#!/usr/bin/env bash\necho "cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR /x - inside a git work tree" >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a refused verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  assert_contains "$out" "refusing CEL_VERIFY_ARTIFACT_DIR"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  ls "$FOLD_WT"/.agent/verdict-history/*.json >/dev/null 2>&1 || { echo "the old verdict was not preserved"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_refuses_when_the_verifier_is_sigkilled_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-kill.sh"
+  printf '#!/usr/bin/env bash\nkill -9 $$\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a SIGKILLed verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# collect records the stub, not the old pass, in the ledger
+test_collect_after_a_refused_verifier_records_no_verdict_not_the_old_pass() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-OLD "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"}}' > "$STUB_WT/.agent/verdict.json"
+  VSTUB="$T/verify-refuse2.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  (cd "$T" && "$BIN" collect WG-OLD) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate_outcome' "$T/.cel/delegations.json")" no_verdict
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# review G1: land/collect accept ONLY the verdict of their own invocation - another
+# attempt's completion (even a pass) on the same worktree never authorises them, and
+# gate evidence taken on another head never counts.
+_fanout_id_stub() { # <attempt-mode own|other> <gate-head real|bogus>
+  VSTUB="$T/verify-id.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+[ "$1" = own ] || id="someone-elses-attempt"
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"; [ "$2" = real ] || head="0000000000000000000000000000000000000bad"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:true, code:0, outcome:"pass", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_land_never_takes_another_attempts_passing_verdict() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub other real
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on another attempt's pass: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_never_takes_gate_evidence_from_another_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own bogus
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on gate evidence for another head: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "another head"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_accepts_its_own_attempt_with_gate_evidence_for_the_current_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own real
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "the positive control did not land"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# review R1: validation and use are on ONE immutable snapshot - swapping the verdict file
+# between them (another attempt, anyone) can neither authorise nor veto this call.
+_fanout_snapshot_stub() { # <own-gate-passed true|false>
+  VSTUB="$T/verify-snap.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:$1, code:0, outcome:"$([ "$1" = true ] && echo pass || echo fail)", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+_fanout_swap_hook() { # <passed true|false> - replaces the verdict on disk with ANOTHER attempt's
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  export CEL_FANOUT_TEST_AFTER_VALIDATE="printf '%s' '{\"at\":\"2099-01-01T00:00:00Z\",\"attempt\":\"intruder\",\"state\":\"completed\",\"gate\":{\"configured\":true,\"ran\":true,\"passed\":$1,\"outcome\":\"x\"}}' > '$wt/.agent/verdict.json'"
+}
+test_a_verdict_swapped_in_after_validation_cannot_authorise_land() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub false; _fanout_swap_hook true       # own attempt FAILED; the file is then swapped for another attempt's PASS
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on a swapped-in pass: $out"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  assert_contains "$out" "did not pass"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+test_land_uses_its_own_validated_snapshot_not_the_file_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub true; _fanout_swap_hook false       # own attempt PASSED; the file is then swapped for a FAIL - the snapshot rules
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "land did not use its validated snapshot"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+# review R2: a stub that cannot be recorded is an explicit failure, never a silent continue
+test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
+  _fanout_land_setup fleetbot APPROVED 0
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"; chmod 500 "$wt/.agent"
+  VSTUB="$T/verify-refuse3.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "land continued without a recorded stub: $out"; chmod 700 "$wt/.agent"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  chmod 700 "$wt/.agent"
+  assert_contains "$out" "could not record a no-verdict stub"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }

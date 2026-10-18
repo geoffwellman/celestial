@@ -37,12 +37,40 @@
 #                      that is (path or id). Absent: the runtime cannot
 #                      resume and a restart starts fresh, saying so.
 #   extensions_file    optional: newline-delimited manifest under tools/<agent>/
+#   update             how `cel update` keeps an INSTALLED agent current,
+#                      through the agent's own installer (never a second
+#                      package manager over it):
+#                        command   the agent's native updater
+#                        latest    optional: prints the latest stable
+#                                  published version, so an updater that exits
+#                                  0 but leaves the agent behind is reported
+#                                  as a blocker instead of "current"
+#                        rollback  optional: reinstall $CEL_OLD_VERSION; an
+#                                  agent without one is named, never guessed
+#                      `update.hold` in the box config pins an agent by name.
+#   version_cmd        optional: prints the installed version (default
+#                      `<bin> --version`)
+#   owned_children    optional: helper processes the agent keeps as DIRECT
+#                      children of itself (an MCP server it launched), by
+#                      argv[0] basename and an argv[1] suffix. `cel gc` accepts
+#                      a verified runtime with exactly these in its pane's
+#                      foreground group and nothing else.
 #   required           setup fails without it
 #   notes              anything a human needs to know
 
 agents:
   claude:
     bin: claude
+    # `claude update` follows the box's own channel; the target is the
+    # `latest` channel file (the one the installed 2.1.x line tracks).
+    # The Hindsight memory MCP server every plane-launched session keeps as a
+    # direct child (`node <home>/.hindsight/coding-agents/dist/mcp-server.js`).
+    owned_children:
+      - { argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js }
+    update:
+      command: 'claude update'
+      latest: 'curl -fsSL -m 20 https://downloads.claude.ai/claude-code-releases/latest'
+      rollback: 'claude install "$CEL_OLD_VERSION"'
     version: 2.1.300
     install: 'install_pinned_binary agents claude && claude install "$CEL_INSTALL_VERSION"'
     # Published manifest: https://downloads.claude.ai/claude-code-releases/2.1.300/manifest.json
@@ -73,6 +101,14 @@ agents:
 
   omp:
     bin: omp
+    # omp's own updater (keeps the box's chosen channel); `--check` names a newer release.
+    # The Hindsight memory MCP server every plane-launched session keeps as a
+    # direct child (`node <home>/.hindsight/coding-agents/dist/mcp-server.js`).
+    owned_children:
+      - { argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js }
+    update:
+      command: 'omp update'
+      latest: "omp update --check 2>&1 | sed -n 's/^\\(New version available\\|Current version\\): //p' | tail -1"
     version: 18.10.4
     install: "install_pinned_binary agents omp"
     # Digests: https://github.com/can1357/oh-my-pi/releases/download/v18.10.4/SHA256SUMS.txt
@@ -131,6 +167,16 @@ agents:
 
   pi:
     bin: pi
+    # `--self` updates pi only. Its extensions are pinned by
+    # tools/pi/extensions.txt and reported as a pin, never bumped here.
+    # The Hindsight memory MCP server every plane-launched session keeps as a
+    # direct child (`node <home>/.hindsight/coding-agents/dist/mcp-server.js`).
+    owned_children:
+      - { argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js }
+    update:
+      command: 'pi update --self'
+      latest: 'npm view @earendil-works/pi-coding-agent version'
+      rollback: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_OLD_VERSION"'
     version: 1.2.0
     install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
     skills_dir: ~/.pi/skills
@@ -141,6 +187,11 @@ agents:
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
     # pi ignores SIGTERM; Ctrl-C is what stops it. See `signal` above.
     signal: int
+    # NATIVE ORIGINAL-SESSION CONTINUITY (AH-261018): `pi --session <path|id>`
+    # reopens the exact session file, so a restart keeps the UUID, the heap and
+    # pending-tool lineage instead of starting a fresh session (no `resume:`
+    # here meant `cel run --restart` could only start pi fresh).
+    resume: { flag: --session, value: path }
     model_flag: --model
     # pi also understands the `provider/id:<thinking>` shorthand, but the plane
     # always spells the level as its own flag so one profile field renders the
@@ -164,6 +215,9 @@ agents:
 
   codex:
     bin: codex
+    update:
+      command: 'codex update'
+      latest: "curl -fsSL -m 20 https://api.github.com/repos/openai/codex/releases/latest | jq -r '.tag_name | ltrimstr(\"rust-v\")'"
     version: 0.154.0
     install: 'CODEX_NON_INTERACTIVE=1 install_script https://github.com/openai/codex/releases/download/rust-v0.154.0/install.sh ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a sh --release "$CEL_INSTALL_VERSION"'
     skills_dir: ~/.codex/skills
@@ -199,6 +253,9 @@ agents:
 
   opencode:
     bin: opencode
+    update:
+      command: 'opencode upgrade'
+      latest: "curl -fsSL -m 20 https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.tag_name | ltrimstr(\"v\")'"
     version: 1.18.31
     install: "install_pinned_binary agents opencode"
     # Baseline x64 runs without AVX2. Digests are from the release assets API.

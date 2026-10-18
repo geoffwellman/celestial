@@ -25,10 +25,10 @@ set -uo pipefail
 . "$CEL_ROOT/lib/common.sh"
 GH="${CEL_VERIFY_GH:-gh}"
 
-usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--gate-timeout <secs>] [--base <ref>] [--slug owner/repo] [--branch b] [--lock-in-timeout] [--quiet]"; }
+usage() { die "usage: cel-verify <worktree> [--gate '<cmd>'] [--gate-timeout <secs>] [--base <ref>] [--slug owner/repo] [--branch b] [--attempt-id <id>] [--lock-in-timeout] [--quiet]"; }
 [ $# -ge 1 ] || usage
 wt="$1"; shift
-gate="" base="" slug="" branch="" quiet=0 gate_timeout="" lock_in_timeout=0
+gate="" base="" slug="" branch="" quiet=0 gate_timeout="" lock_in_timeout=0 attempt_id="${CEL_VERIFY_ATTEMPT_ID:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --gate) gate="$2"; shift 2;; --base) base="$2"; shift 2;; --slug) slug="$2"; shift 2;;
@@ -36,6 +36,9 @@ while [ $# -gt 0 ]; do
     # CEL-97: the timeout covers the wait for the suite lock as well, so a
     # caller with a person waiting (land) gets a bound on the whole thing.
     --lock-in-timeout) lock_in_timeout=1; shift;;
+    # The CALLER mints the attempt id (cel-fanout does, one per invocation) so it can
+    # recognise its own verdict on disk; a bare run mints its own.
+    --attempt-id) attempt_id="$2"; shift 2;;
     --branch) branch="$2"; shift 2;; --quiet) quiet=1; shift;; *) usage;;
   esac
 done
@@ -53,7 +56,77 @@ if [ -z "$base" ]; then
 fi
 git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 
+# --- the previous verdict is FENCED before anything can abort ----------------------
+# A verifier that refuses (exit 4), dies, or is SIGKILLed before it writes its
+# verdict used to leave the PREVIOUS attempt's verdict.json in place - possibly
+# gate.passed:true on an older head - and the consumers (collect, land) read it
+# as this run's answer. So, first thing: the old verdict is preserved under
+# .agent/verdict-history/ (never overwritten, named by attempt) and a NO-VERDICT
+# stub, bound to this attempt, takes its place. Only a completed run replaces the
+# stub, atomically. An aborted, refused or killed attempt therefore leaves
+# `no_verdict` - never an old pass.
+v_attempt="${attempt_id:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+case "$v_attempt" in *[!A-Za-z0-9._-]*|'') die "cel-verify: --attempt-id must be [A-Za-z0-9._-]+ (got: $v_attempt)";; esac
+v_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+mkdir -p "$wt/.agent"
+# ONE WRITER AT A TIME, AND ONLY THE OWNER OF THE CURRENT ATTEMPT PUBLISHES. Two
+# verifiers can overlap on one worktree (collect during land; cel-fanout drops
+# its ledger lock around the gate). Stub and final writes are serialised on
+# .agent/verdict.lock, and the final write replaces verdict.json ONLY if the
+# attempt on disk is this one's own stub; a slower, older attempt therefore
+# cannot overwrite a newer attempt's stub or verdict - it files its own result
+# under verdict-history/<attempt>.final.json and exits no-verdict (superseded).
+# Exit status: the function's own (7 = superseded, see below), or 75 when the lock
+# itself cannot be opened/taken - with a diagnostic on stderr, never silently.
+_verify_locked() {
+  ( exec 8>"$wt/.agent/verdict.lock" 2>/dev/null || { printf 'cel-verify: cannot open the verdict lock %s/.agent/verdict.lock (is .agent writable?)\n' "$wt" >&2; exit 75; }
+    flock -x 8 || { printf 'cel-verify: cannot take the verdict lock\n' >&2; exit 75; }
+    "$@" )
+}
+_verify_stub_write() { # <reason>
+  local tmp="$wt/.agent/.verdict.$$.tmp"
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg att "$v_attempt" --arg head "$v_head" --arg branch "$branch" --arg why "$1" \
+    '{at:$at, attempt:$att, head:$head, state:"no_verdict_stub", branch:$branch,
+      gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
+      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0},
+      checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}' > "$tmp" && mv -f "$tmp" "$wt/.agent/verdict.json"
+}
+_verify_stub() { _verify_locked _verify_stub_write "$1"; }
+_verify_fence_and_stub() { # preserve whatever is there, then publish THIS attempt's stub
+  local cur
+  if [ -f "$wt/.agent/verdict.json" ]; then
+    cur="$(jq -r '.attempt // empty' "$wt/.agent/verdict.json" 2>/dev/null)"
+    mkdir -p "$wt/.agent/verdict-history"
+    mv -n "$wt/.agent/verdict.json" "$wt/.agent/verdict-history/${cur:-prior}-$(date -u +%Y%m%dT%H%M%SZ)-$$.json" 2>/dev/null || rm -f "$wt/.agent/verdict.json"
+  fi
+  _verify_stub_write "verification attempt $v_attempt started and has not completed - it was refused, aborted or killed; this is no verdict"
+}
+command -v flock >/dev/null 2>&1 || { printf 'cel-verify: flock is not available - it cannot fence the previous verdict, so it refuses to run a gate\n' >&2; exit 5; }
+_verify_locked _verify_fence_and_stub || { printf 'cel-verify: cannot publish the no-verdict stub in %s/.agent (lock or write failed) - refusing to run a gate without a fence\n' "$wt" >&2; exit 5; }
+
 # --- gate ------------------------------------------------------------------
+# The artifact root must be private and OUTSIDE any git work tree: raw gate
+# output can carry anything a test printed, and a worktree is committed, pushed
+# and read by a reviewer. An override that points inside the verified worktree
+# (or any repository), or at a directory other users can read or write, is
+# refused BEFORE the gate runs - no gate, no verdict, exit 4.
+_verify_art_root_check() { # <root> <worktree>
+  local root="$1" wt_real real mode owner
+  # the DEFAULT root is ours to tighten; an explicit override is only validated
+  if [ -z "${CEL_VERIFY_ARTIFACT_DIR:-}" ] && [ -d "$root" ] && [ "$(stat -c %u "$root" 2>/dev/null)" = "$(id -u)" ]; then chmod 700 "$root" 2>/dev/null || true; fi
+  ( umask 077; mkdir -p "$root" ) 2>/dev/null || { printf 'cel-verify: cannot create the artifact root %s\n' "$root" >&2; return 1; }
+  real="$(readlink -f "$root")"; wt_real="$(readlink -f "$2")"
+  case "$real/" in "$wt_real"/*) printf 'cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR %s - it is inside the worktree being verified; raw gate output must never be committable\n' "$root" >&2; return 1;; esac
+  if git -C "$real" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR %s - it is inside a git work tree\n' "$root" >&2; return 1
+  fi
+  mode="$(stat -c %a "$real" 2>/dev/null)"; owner="$(stat -c %u "$real" 2>/dev/null)"
+  if [ "$owner" != "$(id -u)" ] || [ $(( 8#${mode:-777} & 8#077 )) -ne 0 ]; then
+    printf 'cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR %s - mode %s owner %s; it must be owned by you and 0700 (chmod 700 it)\n' "$root" "${mode:-?}" "${owner:-?}" >&2; return 1
+  fi
+  return 0
+}
+
 # A GATE THAT WAITED ITS TURN IS NOT A GATE THAT RAN SLOWLY. The suite takes a
 # box-wide lock (tests/run.sh, after six concurrent suites drove this box to a
 # load of 190 on 2026-09-18), and the gate this verifier runs is usually that
@@ -91,6 +164,18 @@ _verify_suite_lock_path() {
 # pass, fail, timed out, produced no verdict.
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
 g_code=null g_outcome=none g_nvr=null g_empty=false lock_expired=0 run_timeout=""
+# THE FULL OUTPUT OF A GATE IS EVIDENCE, NOT SCRATCH. A downstream repository's
+# canonical verification failed (exit 1, one failing test among ~5900) and this
+# file kept the last twelve lines and deleted the rest, so WHICH test failed
+# was irretrievable and a later green diagnostic could not stand in for it. The
+# complete output now survives every outcome (pass, fail, timeout, killed) as a
+# private artifact bound to this attempt and this head:
+#   $CEL_VERIFY_ARTIFACT_DIR (default ~/.local/state/cel/verify)/<branch>/<head12>-<utc>-<pid>/gate.log
+# 0700 directories, 0600 file, never inside the worktree (a worktree is
+# committed, pushed and read by a reviewer), never overwritten (the name carries
+# the attempt), indexed in attempts.jsonl. The verdict records its path, size and
+# sha256 - the PATH is recorded, the content is never printed or sent anywhere.
+g_art=null g_attempt=null g_head=null g_sha=null g_bytes=null g_arterr=null
 if [ -n "$gate" ] && [ "$gate" != "null" ]; then
   g_conf=true; g_ran=true
   suite_lock_fd=""
@@ -151,7 +236,23 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
     [ -n "$suite_lock_fd" ] && exec {suite_lock_fd}>&-
     suite_lock_fd=""
   else
-    gate_out="$(mktemp "${TMPDIR:-/tmp}/cel-verify-gate.XXXXXX")"
+    # THE EVIDENCE FILE EXISTS BEFORE THE GATE DOES, and the gate writes into it
+    # directly: a verifier that is killed (SIGKILL included) cannot erase bytes
+    # that are already on disk, and nothing is copied at the end. A SIGKILLed
+    # verifier cannot write the final index entry or the verdict - what survives
+    # is the artifact directory with its `attempt.json` still saying
+    # state:"running" - and that is the documented limit, never a faked verdict.
+    g_head="$v_head"
+    g_attempt="$v_attempt"
+    art_root="${CEL_VERIFY_ARTIFACT_DIR:-$HOME/.local/state/cel/verify}"
+    _verify_art_root_check "$art_root" "$wt" || { _verify_stub "cel-verify refused to run: the artifact root $art_root is unsafe (inside a git work tree, or not owned by you with mode 0700) - the gate did not run; this is no verdict"; exit 4; }
+    art_dir="$art_root/$(printf '%s' "${branch:-detached}" | tr -c 'A-Za-z0-9._-' '_')/${g_head:0:12}-$g_attempt"
+    ( umask 077; mkdir -p "$art_dir" ) || die "cel-verify: cannot create the artifact directory $art_dir"
+    gate_out="$art_dir/gate.log"
+    ( umask 077; : > "$gate_out" ) && chmod 600 "$gate_out" || die "cel-verify: cannot create $gate_out"
+    jq -nc --arg a "$g_attempt" --arg h "$g_head" --arg b "$branch" --arg c "$gate" --argjson pid "$$" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{state:"running", attempt:$a, head:$h, branch:$b, cmd:$c, verifier_pid:$pid, started:$at}' > "$art_dir/attempt.json" 2>/dev/null || true
+    chmod 600 "$art_dir/attempt.json" 2>/dev/null || true
     gate_killed="$gate_out.killed"
     # THE ANSWER IS WRITTEN DOWN BEFORE THE PROCESS THAT HAS IT CAN BE KILLED.
     # The two protections above and in tests/run.sh are both load-bearing and
@@ -195,7 +296,22 @@ $gate" ) > "$gate_out" 2>&1 &
       kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null
     ) > /dev/null 2>&1 &
     gate_watchdog=$!
+    # A CATCHABLE TERMINATION OF THE VERIFIER (TERM, INT, HUP) stops the gate's
+    # whole group and then falls through to the normal path, so the verdict
+    # (no_verdict: the verifier itself was terminated), the attempt index and the
+    # artifact are written - the output is already in the artifact.
+    verify_sig=""
+    _verify_on_signal() { verify_sig="$1"; kill -TERM -- -"$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null || true; }
+    trap '_verify_on_signal TERM' TERM; trap '_verify_on_signal INT' INT; trap '_verify_on_signal HUP' HUP
     rc=0; wait "$gate_pid" || rc=$?
+    if [ -n "$verify_sig" ]; then
+      # reap the gate (bounded), escalate to KILL for a group that ignores TERM
+      for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 "$gate_pid" 2>/dev/null || break; sleep 0.2; done
+      kill -KILL -- -"$gate_pid" 2>/dev/null || true
+      wait "$gate_pid" 2>/dev/null || true
+      case "$verify_sig" in TERM) rc=143;; INT) rc=130;; HUP) rc=129;; esac
+    fi
+    trap - TERM INT HUP
     kill "$gate_watchdog" 2>/dev/null || true
     wait "$gate_watchdog" 2>/dev/null || true
     if [ -e "$gate_killed" ]; then
@@ -213,7 +329,11 @@ $gate" ) > "$gate_out" 2>&1 &
     if [ -s "$gate_rc" ]; then reported="$(cat "$gate_rc")"; fi
     case "$reported" in ''|*[!0-9]*) reported="";; esac
     rm -f "$gate_rc"
-    out="$(cat "$gate_out")"; rm -f "$gate_out"
+    # The artifact IS the output file (streamed there from the start); record it.
+    g_art="$(jq -Rn --arg p "$gate_out" '$p')"
+    g_sha="$(sha256sum "$gate_out" | cut -d' ' -f1)"; g_sha="$(jq -Rn --arg s "$g_sha" '$s')"
+    g_bytes="$(wc -c < "$gate_out" | tr -d ' ')"
+    out="$(cat "$gate_out")"
     g_tail="$(printf '%s' "$out" | tail -n 12)"
     # A GATE THAT PRINTED NOTHING IS ITSELF A FINDING. The 2026-09-21 verdicts
     # stored `tail: ""` and moved on, so the one visible signature of the bug -
@@ -236,7 +356,10 @@ $gate" ) > "$gate_out" 2>&1 &
         g_tail="$last"$'\n'"killed after ${gate_timeout}s - no verdict"
         ;;
       *)
-        if [ "$rc" -gt 128 ]; then
+        if [ -n "${verify_sig:-}" ]; then
+          g_outcome=no_verdict; g_pass=null
+          g_nvr="cel-verify itself was terminated by SIG${verify_sig} - the gate was stopped, its partial output is kept in the artifact; this is no verdict"
+        elif [ "$rc" -gt 128 ]; then
           # 128+n: killed, and a killed process never reached a status. That is
           # not a failure - it is the absence of an answer, and it gets said so.
           sig=$((rc - 128)); signame="$(kill -l "$sig" 2>/dev/null || true)"
@@ -247,6 +370,16 @@ $gate" ) > "$gate_out" 2>&1 &
         fi
         ;;
     esac
+  fi
+  # the attempt index: what ran, on which head, how it ended, where its output is
+  if [ "$g_art" != null ]; then
+    ( umask 077; mkdir -p "$art_root"
+      jq -nc --arg a "$g_attempt" --arg h "$g_head" --arg b "$branch" --arg c "$gate" --arg out "$g_outcome" --argjson code "$g_code" \
+        --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{state:"completed", attempt:$a, head:$h, branch:$b, cmd:$c, outcome:$out, code:$code, finished:$at}' > "$(dirname "$(jq -r . <<<"$g_art")")/attempt.json" 2>/dev/null || true
+      jq -nc --argjson art "$g_art" --arg att "$g_attempt" --arg head "$g_head" --arg branch "$branch" \
+        --arg out "$g_outcome" --argjson code "$g_code" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{at:$at, attempt:$att, head:$head, branch:$branch, outcome:$out, code:$code, artifact:$art}' >> "$art_root/attempts.jsonl" ) 2>/dev/null || true
   fi
   # Somebody else is waiting on this: hand it over as soon as the gate is
   # done, rather than at the end of the PR and GitHub work below.
@@ -292,7 +425,7 @@ fi
 
 # --- PR: checks + review -------------------------------------------------------
 c_state=unknown r_dec=unknown pr_num=null
-if [ -n "$slug" ] && [ -n "$branch" ] && command -v "$GH" >/dev/null 2>&1; then
+if [ -n "$slug" ] && [ -n "$branch" ] && [ -z "${verify_sig:-}" ] && command -v "$GH" >/dev/null 2>&1; then
   prj="$("$GH" pr view "$branch" --repo "$slug" --json number,reviewDecision,statusCheckRollup 2>/dev/null || true)"
   if [ -n "$prj" ]; then
     pr_num="$(printf '%s' "$prj" | jq -r '.number // null')"
@@ -311,17 +444,41 @@ jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg bas
   --argjson gconf "$g_conf" --arg gcmd "$gate" --argjson gran "$g_ran" --argjson gpass "$g_pass" --arg gtail "$g_tail" \
   --argjson gto "$g_to" --argjson gtos "$gate_timeout" --argjson gwait "$g_waited" \
   --argjson gcode "$g_code" --arg gout "$g_outcome" --arg gnvr "$g_nvr" --argjson gempty "$g_empty" \
+  --argjson gart "$g_art" --argjson gsha "$g_sha" --argjson gbytes "$g_bytes" --argjson garterr "$g_arterr" \
+  --arg gattempt "$([ "$g_art" = null ] && echo "" || echo "$g_attempt")" --arg ghead "$([ "$g_art" = null ] && echo "" || echo "$g_head")" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
-  --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
-  { at: $at, branch: $branch, base: $base,
+  --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" --arg vatt "$v_attempt" --arg vhead "$v_head" '
+  { at: $at, attempt: $vatt, head: $vhead, state: "completed", branch: $branch, base: $base,
     gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, code: $gcode,
               outcome: $gout, no_verdict_reason: (if $gnvr == "null" then null else $gnvr end),
               tail: $gtail, output_empty: $gempty,
+              artifact: $gart, output_sha256: $gsha, output_bytes: $gbytes, artifact_error: $garterr,
+              attempt: (if $gattempt == "" then null else $gattempt end), head: (if $ghead == "" then null else $ghead end),
               timed_out: $gto, timeout_secs: $gtos, waited_secs: $gwait },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
-    checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
+    checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/.verdict.$$.tmp"
+superseded=0
+_verify_publish_final() {
+  local cur; cur="$(jq -r '.attempt // empty' "$wt/.agent/verdict.json" 2>/dev/null)"
+  if [ "$cur" = "$v_attempt" ]; then
+    mv -f "$wt/.agent/.verdict.$$.tmp" "$wt/.agent/verdict.json"
+  else
+    mkdir -p "$wt/.agent/verdict-history"
+    mv -f "$wt/.agent/.verdict.$$.tmp" "$wt/.agent/verdict-history/$v_attempt.final.json"
+    return 7
+  fi
+}
+_verify_locked _verify_publish_final; pub_rc=$?
+case "$pub_rc" in
+  0) ;;
+  7) rm -f "$wt/.agent/.verdict.$$.tmp"; superseded=1 ;;   # a newer attempt owns the verdict now
+  *) rm -f "$wt/.agent/.verdict.$$.tmp"
+     printf 'cel-verify: could not publish the verdict for attempt %s (status %s) - the previous verdict was already fenced, so none is current; this is no verdict\n' "$v_attempt" "$pub_rc" >&2
+     exit 5 ;;
+esac
+[ "$superseded" -eq 0 ] || printf 'cel-verify: attempt %s was superseded by a newer attempt on this worktree - its result is in .agent/verdict-history/%s.final.json and is NOT the current verdict\n' "$v_attempt" "$v_attempt" >&2
 
 if [ "$quiet" -eq 0 ]; then
   case "$g_outcome" in
@@ -335,6 +492,7 @@ if [ "$quiet" -eq 0 ]; then
   rs="red-green:$(case "$rg" in true) echo yes;; false) echo no;; *) echo n/a;; esac)"
   printf 'verdict %s  %s  diff:%s files +%s/-%s  checks:%s  review:%s\n' "$gs" "$rs" "$d_files" "$d_ins" "$d_del" "$c_state" "$r_dec"
 fi
+[ "$superseded" -eq 0 ] || exit 3
 # exit reflects the gate only: that is the one dimension with a right answer.
 # Four outcomes, four codes, so a caller does not have to parse prose: 0 the
 # gate passed (or was never configured), 1 it genuinely failed, 2 it ran out of

@@ -1,11 +1,14 @@
 # pi extensions, installed by `cel setup` (agents.yaml extensions_file).
+# pi-mcp-adapter is NOT here: pi >= 1 has built-in MCP (`pi mcp`, ~/.pi/agent/mcp.json)
+# and the adapter shadows it; `cel update` migrates the servers and removes it.
+# pi-subagents and rpiv-todo are pinned at releases that declare typebox as a
+# peer dependency (older ones carried their own copy and warned at startup).
 # pi is deliberately minimal; these fill in the capabilities the plane expects.
 # Direct versions verified at registry.npmjs.org on 2026-09-15. npm verifies
 # registry integrity, but transitive dependencies are not locked by this list.
 @ollama/pi-web-search@0.0.5
 @gotgenes/pi-anthropic-auth@2.0.9
-pi-mcp-adapter@2.34.0
-pi-subagents@0.68.0
+pi-subagents@0.79.0
 # pi-lens is NOT here on purpose. It reformats files after a tool call and
 # rewrites the tool-result message to match, so the conversation is no longer
 # append-only - and pi-background-tasks, which pins Anthropic prompt-cache
@@ -15,6 +18,6 @@ pi-subagents@0.68.0
 # 2026-09-16. The thrower is right; the mutator goes.
 pi-background-tasks@2.5.0
 @plannotator/pi-extension@0.27.14
-@juicesharp/rpiv-todo@2.10.1
+@juicesharp/rpiv-todo@2.13.9
 @narumitw/pi-statusline@0.50.0
 pi-memory@0.4.2

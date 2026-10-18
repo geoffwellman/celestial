@@ -30,6 +30,19 @@ Git worktree for a delegated worker, starts the pane and records the resulting
 identity. Worker/reviewer roles use the same GitHub and ticket interfaces that
 an operator can invoke directly.
 
+Launch environment is scoped to the launched process: `_run_launch_env` is the
+single construction (used by `cel run` and `cel-fanout`) and renders role
+marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as
+one `env K=V ...` prefix - never an `export` into the pane shell, which outlives
+the agent. Pi and OMP agent roots are resolved once (`gateway_pi_dir`,
+`gateway_omp_dir`; custom roots via `CEL_PI_AGENT_DIR` / `CEL_OMP_AGENT_DIR`),
+shared by the models writers, the child and `cel doctor`, and pinned into the
+child as `PI_CODING_AGENT_DIR`; an inherited value is ignored. They must not
+overlap (`agent_roots_check`): OMP's startup renames Pi-style session
+directories under its root with no liveness check. This prevents new
+collisions only; it does not repair already-relocated sessions or running
+processes, which belong to the retained-runtime lifecycle.
+
 Prompt policy guides agents; it is not a sandbox. Agent commands run with the
 launching user's filesystem and account privileges. Several runtime launch
 strategies pre-approve tool permissions. Only use trusted workspace content,
@@ -48,6 +61,19 @@ comparisons are retained. An attached clean HEAD must be proven contained in
 the verified default branch, or match the exact head of a GitHub-merged PR;
 additional local commits invalidate that proof. Fanout release reports unknown
 work as held, with explicit keep/discard decisions rather than a zero count.
+
+### Gateway credentials for an omp that starts native
+
+An omp session can switch models in flight, and its launch environment is the
+only place it reads the gateway client key (`OMP_GATEWAY_TOKEN`) and the
+per-agent `CEL_SESSION_ID`. So `cel run` exports them for every omp launch on a
+box with a configured gateway and a readable, non-empty key - even when the
+starting model is Codex or another direct provider. Nothing is written to
+models files, no gateway is required or started, and a box with no gateway (or
+an unreadable key) launches exactly as before. A `via: gateway` profile still
+refuses when the key is missing. Limitation: a session already running keeps
+the environment it was launched with; it gains the credential only on its next
+`cel run --restart`. pi is unchanged.
 
 ### Launch readiness (`cel run`)
 
@@ -108,6 +134,13 @@ and the held-work refusal skip it, `release` refuses to remove the worktree
 the child now owns, and `_ledger_append` keeps lineage across a re-delegation.
 No new ledger state exists - the child is an ordinary `running` row whose
 collect/review/land are gated on `stage: attached`.
+
+### Gateway transports, agent updates and runtime retirement (AH-261018)
+
+- **Codex over Responses.** The gateway serves Chat Completions, Anthropic Messages and OpenAI Responses (`/v1/responses`, `/v1/responses/compact`, and the Responses websocket upgrade on the same path) over one vault. Claude uses `anthropic-messages`; Codex-family ids use `openai-responses` (pi provider `ompgw-codex`, omp provider `celgw-codex`) so compaction and reasoning items are not dropped by a chat-completions substitution. Which transport a live turn actually negotiates (SSE or websocket) is a property of the runtime and is proven with an authenticated turn, not asserted by the writer.
+- **Native start, gateway later.** An omp launched on a native model still receives the gateway client environment and the registered gateway providers; a running process's environment is fixed, so a session started earlier is recovered through its own native session resume (`cel run <role> --restart`, which passes `--resume` for omp and `--session` for pi), never by pretending new variables reach it.
+- **`cel update`** runs the agent and gateway components on every update (agents.yaml `update:`), each through the agent's own installer, with an honest per-component report. A component that fails, or that is still behind the published latest after its updater ran, makes the update a non-success; rerun is the recovery.
+- **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch, session file and the delegation row are untouched.
 
 ## Credentials
 

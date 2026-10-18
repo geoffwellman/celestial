@@ -245,7 +245,7 @@ test_doctor_exec_load_is_red_over_the_bound() {
 _doctor_pi_fixture() {
   _doctor_setup
   export CEL_REGISTRY="$T/registry.yaml"
-  export PI_CODING_AGENT_DIR="$T/pi"
+  export CEL_PI_AGENT_DIR="$T/pi"
   mkdir -p "$T/ws" "$T/pi"
   cat >"$T/registry.yaml" <<EOF
 workspaces:
