@@ -789,7 +789,7 @@ gateway_refresh() {
   if have cli-proxy-api; then
     c_ok "gateway: $(cli-proxy-api -h 2>&1 | sed -n 's/^CLIProxyAPI Version: \([^,]*\),.*/cli-proxy-api \1/p' | head -1) (pinned by agents.yaml base_tools; cel setup owns it)"
   fi
-  agent_roots_check >/dev/null 2>&1 || { c_err "gateway: pi and omp agent roots overlap - $(agent_roots_check 2>&1 >/dev/null | head -1)"; rc=1; }
+  agent_roots_check >/dev/null 2>&1 || { c_err "gateway: pi and OMP agent roots overlap - $(agent_roots_check 2>&1 >/dev/null | head -1)"; rc=1; }
   if ! gateway_ready; then
     c_err "gateway: installed but not answering on $(gateway_url) - models were NOT re-registered (cel gateway status)"
     return 1
@@ -798,9 +798,9 @@ gateway_refresh() {
     if GATEWAY_PI_WRITE=refresh gateway_pi_models_write; then c_ok "gateway: pi models registered ($(gateway_pi_dir)/models.json)"
     else c_err "gateway: pi models could not be registered - cel gateway status"; rc=1; fi
   fi
-  if have omp || [ -d "$(gateway_omp_dir)" ]; then
-    if gateway_omp_models_write; then c_ok "gateway: omp models registered ($(gateway_omp_dir)/models.yml)"
-    else c_warn "gateway: omp models not registered - omp builds its catalog the first time it starts, or the gateway publishes nothing for it (cel gateway omp-scope --check)"; fi
+  if have "omp" || [ -d "$(gateway_omp_dir)" ]; then
+    if gateway_omp_models_write; then c_ok "gateway: OMP models registered ($(gateway_omp_dir)/models.yml)"
+    else c_warn "gateway: OMP models not registered - OMP builds its catalog the first time it starts, or the gateway publishes nothing for it (cel gateway omp-scope --check)"; fi
   fi
   return "$rc"
 }
@@ -846,7 +846,7 @@ cel gateway - several subscriptions behind one loopback door
 
   cel gateway install [--no-start]   write the proxy config, register the box
                                      service, mint the api-key
-  cel gateway refresh                re-apply config, service and pi/omp model
+  cel gateway refresh                re-apply config, service and pi/OMP model
                                      registrations (cel update runs this)
   cel gateway status [--json]        the door, and one row per account
   cel gateway login <provider>       sign another subscription in

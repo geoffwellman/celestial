@@ -1369,7 +1369,7 @@ _omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # 
       "pane get"|"pane process-info") _fake_pane "$@" ;;
       "pane send-text") typed_prefix="$4" ;;
       "agent start")
-        bash -c "$typed_prefix curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \${OMP_GATEWAY_TOKEN:-}\" http://127.0.0.1:$STUB_PORT/v1/models; printf '|%s|%s' \"\${CEL_SESSION_ID:-}\" \"\${PI_CODING_AGENT_DIR:-}\"" > "$T/agent-env"
+        bash -c "$typed_prefix sh -c 'curl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer \${OMP_GATEWAY_TOKEN:-}\" http://127.0.0.1:$STUB_PORT/v1/models; printf \"|%s|%s\" \"\${CEL_SESSION_ID:-}\" \"\${PI_CODING_AGENT_DIR:-}\"'" > "$T/agent-env"
         ;;
       *) : ;;
     esac
