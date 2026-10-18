@@ -714,7 +714,7 @@ test_pi_models_launch_write_never_rewrites_existing_entries_and_skips_a_noop() {
   export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6","context_length":200000},{"id":"claude-new-9","context_length":9}]}'
   gateway_pi_models_write "$f"
   assert_eq "$(jq -r '[.providers["ompgw-claude"].models[].id] | index("claude-new-9") != null' "$f")" true
-  assert_eq "$(jq '.providers["ompgw-claude"].models[] | select(.id=="claude-sonnet-4-6") | .contextWindow' "$f")" 200000
+  assert_eq "$(jq '.providers["ompgw-claude"].models[] | select(.id=="claude-sonnet-4-6") | .contextWindow' "$f")" 555
   # an explicit refresh lets the catalog win
   GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$f"
   assert_eq "$(jq '.providers["ompgw-claude"].models[] | select(.id=="claude-sonnet-4-6") | .contextWindow' "$f")" 200000
