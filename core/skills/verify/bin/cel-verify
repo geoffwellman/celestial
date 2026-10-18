@@ -53,6 +53,31 @@ if [ -z "$base" ]; then
 fi
 git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 || base=""
 
+# --- the previous verdict is FENCED before anything can abort ----------------------
+# A verifier that refuses (exit 4), dies, or is SIGKILLed before it writes its
+# verdict used to leave the PREVIOUS attempt's verdict.json in place - possibly
+# gate.passed:true on an older head - and the consumers (collect, land) read it
+# as this run's answer. So, first thing: the old verdict is preserved under
+# .agent/verdict-history/ (never overwritten, named by attempt) and a NO-VERDICT
+# stub, bound to this attempt, takes its place. Only a completed run replaces the
+# stub, atomically. An aborted, refused or killed attempt therefore leaves
+# `no_verdict` - never an old pass.
+v_attempt="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$wt/.agent"
+_verify_stub() { # <reason>
+  local tmp="$wt/.agent/.verdict.$$.tmp"
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg att "$v_attempt" --arg branch "$branch" --arg why "$1" \
+    '{at:$at, attempt:$att, state:"no_verdict_stub", branch:$branch,
+      gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
+      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0},
+      checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}' > "$tmp" && mv -f "$tmp" "$wt/.agent/verdict.json"
+}
+if [ -f "$wt/.agent/verdict.json" ]; then
+  mkdir -p "$wt/.agent/verdict-history"
+  mv -n "$wt/.agent/verdict.json" "$wt/.agent/verdict-history/$v_attempt.json" 2>/dev/null || rm -f "$wt/.agent/verdict.json"
+fi
+_verify_stub "verification attempt $v_attempt started and has not completed - it was refused, aborted or killed; this is no verdict"
+
 # --- gate ------------------------------------------------------------------
 # The artifact root must be private and OUTSIDE any git work tree: raw gate
 # output can carry anything a test printed, and a worktree is committed, pushed
@@ -194,7 +219,7 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
     g_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
     g_attempt="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     art_root="${CEL_VERIFY_ARTIFACT_DIR:-$HOME/.local/state/cel/verify}"
-    _verify_art_root_check "$art_root" "$wt" || exit 4
+    _verify_art_root_check "$art_root" "$wt" || { _verify_stub "cel-verify refused to run: the artifact root $art_root is unsafe (inside a git work tree, or not owned by you with mode 0700) - the gate did not run; this is no verdict"; exit 4; }
     art_dir="$art_root/$(printf '%s' "${branch:-detached}" | tr -c 'A-Za-z0-9._-' '_')/${g_head:0:12}-$g_attempt"
     ( umask 077; mkdir -p "$art_dir" ) || die "cel-verify: cannot create the artifact directory $art_dir"
     gate_out="$art_dir/gate.log"
@@ -374,7 +399,7 @@ fi
 
 # --- PR: checks + review -------------------------------------------------------
 c_state=unknown r_dec=unknown pr_num=null
-if [ -n "$slug" ] && [ -n "$branch" ] && command -v "$GH" >/dev/null 2>&1; then
+if [ -n "$slug" ] && [ -n "$branch" ] && [ -z "${verify_sig:-}" ] && command -v "$GH" >/dev/null 2>&1; then
   prj="$("$GH" pr view "$branch" --repo "$slug" --json number,reviewDecision,statusCheckRollup 2>/dev/null || true)"
   if [ -n "$prj" ]; then
     pr_num="$(printf '%s' "$prj" | jq -r '.number // null')"
@@ -397,8 +422,8 @@ jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg bas
   --arg gattempt "$([ "$g_art" = null ] && echo "" || echo "$g_attempt")" --arg ghead "$([ "$g_art" = null ] && echo "" || echo "$g_head")" \
   --argjson tfiles "$t_files" --argjson rg "$rg" --arg rgd "$rg_detail" \
   --argjson df "$d_files" --argjson di "$d_ins" --argjson dd "$d_del" \
-  --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" '
-  { at: $at, branch: $branch, base: $base,
+  --arg cs "$c_state" --arg rd "$r_dec" --argjson prn "$pr_num" --arg vatt "$v_attempt" '
+  { at: $at, attempt: $vatt, state: "completed", branch: $branch, base: $base,
     gate:   { configured: $gconf, cmd: $gcmd, ran: $gran, passed: $gpass, code: $gcode,
               outcome: $gout, no_verdict_reason: (if $gnvr == "null" then null else $gnvr end),
               tail: $gtail, output_empty: $gempty,
@@ -407,7 +432,8 @@ jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg branch "$branch" --arg bas
               timed_out: $gto, timeout_secs: $gtos, waited_secs: $gwait },
     tests:  { files_touched: $tfiles, red_then_green: $rg, detail: $rgd },
     diff:   { files: $df, insertions: $di, deletions: $dd },
-    checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/verdict.json"
+    checks: { state: $cs }, review: { decision: $rd }, pr: $prn }' > "$wt/.agent/.verdict.$$.tmp" \
+  && mv -f "$wt/.agent/.verdict.$$.tmp" "$wt/.agent/verdict.json"
 
 if [ "$quiet" -eq 0 ]; then
   case "$g_outcome" in

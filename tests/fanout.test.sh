@@ -3047,3 +3047,47 @@ test_status_renders_a_failed_gate_as_FAIL() {
   assert_contains "$row" "FAIL"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+
+
+# AH-261018 review: a verifier that REFUSES (exit 4) or is SIGKILLed leaves the previous
+# attempt's verdict on disk; land/collect must not read that as this run's answer.
+_fanout_seed_old_pass() { # writes a passing verdict from an older run into the row's worktree
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+  FOLD_WT="$wt"
+}
+test_land_refuses_when_the_verifier_refuses_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-refuse.sh"
+  printf '#!/usr/bin/env bash\necho "cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR /x - inside a git work tree" >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a refused verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  assert_contains "$out" "refusing CEL_VERIFY_ARTIFACT_DIR"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  ls "$FOLD_WT"/.agent/verdict-history/*.json >/dev/null 2>&1 || { echo "the old verdict was not preserved"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_refuses_when_the_verifier_is_sigkilled_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-kill.sh"
+  printf '#!/usr/bin/env bash\nkill -9 $$\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a SIGKILLed verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# collect records the stub, not the old pass, in the ledger
+test_collect_after_a_refused_verifier_records_no_verdict_not_the_old_pass() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-OLD "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"}}' > "$STUB_WT/.agent/verdict.json"
+  VSTUB="$T/verify-refuse2.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  (cd "$T" && "$BIN" collect WG-OLD) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate_outcome' "$T/.cel/delegations.json")" no_verdict
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
