@@ -3316,3 +3316,38 @@ test_reuse_refuses_an_ownership_mismatch_and_a_changed_profile() {
   _fanout_refused drift "$out" "$rc" "$before" "drifted" || return 1
   rm -rf "$T"
 }
+
+# An explicit --session PATH outside the default root (a recovered session in a
+# private/native-export root) is accepted only after cwd, UUID and native
+# history ownership are validated against the row; nothing is substituted.
+_fanout_ext_session() { # <name> <cwd> <model> -> path
+  local f="$T/private/2026-10-18T09-00-00-000Z_$1.jsonl"
+  mkdir -p "$T/private"
+  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n{"type":"model_change","modelId":"deepseek/old"}\n{"type":"model_change","modelId":"%s"}\n' "$1" "$2" "$3" > "$f"
+  printf '%s' "$f"
+}
+test_reuse_accepts_an_explicit_session_path_outside_the_default_root_only_when_it_validates() {
+  _fanout_resume_refusal_setup
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000a >/dev/null
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000b >/dev/null
+  local before out rc=0 f; before="$(cat "$T/.cel/delegations.json")"
+  # another worktree's session
+  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000001 /somewhere/else orig-model)"
+  out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
+  _fanout_refused cwd "$out" "$rc" "$before" "not a session" || return 1
+  # UUID does not match the file name
+  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000002 "$RET_WT" orig-model)"
+  mv "$f" "$T/private/2026-10-18T09-00-00-000Z_01bbbbbb-0000-7000-8000-0000000000ff.jsonl"
+  rc=0; out="$(_fanout_reuse WG-X2 --session "$T/private/2026-10-18T09-00-00-000Z_01bbbbbb-0000-7000-8000-0000000000ff.jsonl")" || rc=$?
+  _fanout_refused uuid "$out" "$rc" "$before" "not a session" || return 1
+  # the LATEST native model differs from the row's (an initial event is not enough)
+  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000003 "$RET_WT" some/other-model)"
+  rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
+  _fanout_refused model "$out" "$rc" "$before" "latest model" || return 1
+  # the validated recovered session resumes, exactly
+  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000004 "$RET_WT" orig-model)"
+  out="$(_fanout_reuse WG-X2 --session "$f")" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  rm -rf "$T"
+}
