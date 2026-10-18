@@ -396,7 +396,7 @@ test_a_process_the_gate_leaves_behind_does_not_hold_the_suite_lock() {
 }
 
 # ------------------------------------------------ AH-261018: full gate evidence
-# PR237's canonical verification failed (exit 1) and the verifier kept only the
+# A downstream repository's canonical verification failed (exit 1) and the verifier kept only the
 # last 12 lines and DELETED the rest: the failing test's identity was
 # irretrievable. The complete output is now a private durable artifact bound to
 # the attempt and the head, recorded in the verdict next to the exact exit.

@@ -113,7 +113,7 @@ _verify_suite_lock_path() {
 # pass, fail, timed out, produced no verdict.
 g_conf=false g_ran=false g_pass=null g_tail="" g_to=false g_waited=0
 g_code=null g_outcome=none g_nvr=null g_empty=false lock_expired=0 run_timeout=""
-# THE FULL OUTPUT OF A GATE IS EVIDENCE, NOT SCRATCH. Framewright PR237's
+# THE FULL OUTPUT OF A GATE IS EVIDENCE, NOT SCRATCH. A downstream repository's
 # canonical verification failed (exit 1, one failing test among ~5900) and this
 # file kept the last twelve lines and deleted the rest, so WHICH test failed
 # was irretrievable and a later green diagnostic could not stand in for it. The
