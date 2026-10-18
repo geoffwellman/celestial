@@ -87,7 +87,14 @@ test_no_lock_runs_while_the_lock_is_held() {
   # on a box at load 37 the two runs below took longer than that: the holder
   # was gone, the second run proved nothing, and the final `kill` of a dead pid
   # failed under set -e - a silent FAIL with no message, on clean main (CEL-97).
-  ( flock 9; exec sleep 600 ) 9>>"$CEL_SUITE_LOCK" &
+  # AH-261018: the holder inherits every descriptor of this test, including the
+  # box build-slot lock the suite runs under (`cel build-slot -- bash tests/run.sh`).
+  # When the test is killed (a suite cancelled by timeout), this `sleep 600`
+  # outlives it - and with the slot descriptor still open it STRANDED THE BOX'S
+  # ONE BUILD SLOT for ten minutes. The holder closes every descriptor but its
+  # own lock (9) before it execs, so an orphan can strand nothing but a fixture.
+  ( for _fd in /proc/self/fd/*; do _n="${_fd##*/}"; { [ "$_n" -ge 3 ] && [ "$_n" -ne 9 ] && [ "$_n" -ne 255 ]; } 2>/dev/null && eval "exec $_n>&-" 2>/dev/null; done
+    flock 9; exec sleep 600 ) 9>>"$CEL_SUITE_LOCK" &
   local holder=$!
   _await_held "$CEL_SUITE_LOCK" || { echo "the fixture holder never took the lock"; kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
   local out; out="$(bash "$T/tests/run.sh" --no-lock 2>&1)"
@@ -272,7 +279,11 @@ test_doctor_names_a_leaked_suite_lock_and_nothing_else() {
   ( cd "$CEL_ROOT" && flock 9 && printf '%s 03:04 %s\n' "$BASHPID" "$CEL_ROOT" > "$CEL_SUITE_LOCK" && exec sleep 5 ) 9>>"$CEL_SUITE_LOCK" &
   holder=$!
   _await_held "$CEL_SUITE_LOCK" || { kill "$holder" 2>/dev/null; rm -rf "$T"; return 1; }
-  sleep 0.2
+  # The holder takes the lock FIRST and only then writes its pid into the file,
+  # so "held" can be observed while the file is still empty - doctor then says
+  # "no holder recorded", which is exactly what failed on a loaded CI runner
+  # (run 39088203828) with a fixed `sleep 0.2`. Wait for the record itself.
+  local _i; for _i in $(seq 1 100); do [ -s "$CEL_SUITE_LOCK" ] && break; sleep 0.1; done
   assert_eq "$(doctor_suite_lock_line)" ""
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   unset CEL_SUITE_LOCK

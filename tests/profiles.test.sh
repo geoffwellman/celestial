@@ -531,14 +531,14 @@ test_profiles_marks_a_gateway_profile_with_its_usable_accounts() {
   _gws
   local out; out="$(cd "$T" && cmd_profiles gw 2>&1)"
   assert_contains "$out" "via gateway (2 accounts usable)"
-  assert_contains "$out" "ompgw/codex/gpt-5.5"
+  assert_contains "$out" "ompgw-codex/gpt-5.5"
   _gws_clean
 }
 test_profile_via_gateway_resolves_to_the_ompgw_model() {
   _gws
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
   profile_resolve "$T" gw >/dev/null 2>&1
-  assert_eq "$PROFILE_MODEL" "ompgw/codex/gpt-5.5"
+  assert_eq "$PROFILE_MODEL" "ompgw-codex/gpt-5.5"
   assert_eq "$PROFILE_VIA" gateway
   _gws_clean
 }

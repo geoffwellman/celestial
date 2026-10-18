@@ -104,3 +104,16 @@ generated_skill_names() { _mq -r '.generated_skills // {} | keys_unsorted[]'; }
 generated_skill_get() {
   _mq -r --arg n "$1" --arg k "$2" '.generated_skills[$n][$k] // "" | tostring'
 }
+
+# One field of an agent's `update:` block (command, latest, rollback), or "".
+agent_update_get() { # <agent> <command|latest|rollback>
+  _mq -r --arg a "$1" --arg k "$2" '.agents[$a].update[$k] // "" | tostring'
+}
+
+# The helper processes an agent legitimately keeps as DIRECT children of its
+# own process (an MCP server it launched), one per line as
+# `<argv0 basename><TAB><argv[1] suffix>`. Lets `cel gc` recognise a verified
+# runtime that has such a child; any other child still vetoes. Empty when none.
+agent_owned_children() { # <agent>
+  _mq -r --arg a "$1" '.agents[$a].owned_children // [] | .[] | [(.argv0 // ""), (.argv_suffix // "")] | @tsv'
+}
