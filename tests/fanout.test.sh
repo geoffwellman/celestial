@@ -3096,3 +3096,44 @@ test_collect_after_a_refused_verifier_records_no_verdict_not_the_old_pass() {
   assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
+
+# review G1: land/collect accept ONLY the verdict of their own invocation - another
+# attempt's completion (even a pass) on the same worktree never authorises them, and
+# gate evidence taken on another head never counts.
+_fanout_id_stub() { # <attempt-mode own|other> <gate-head real|bogus>
+  VSTUB="$T/verify-id.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+[ "$1" = own ] || id="someone-elses-attempt"
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"; [ "$2" = real ] || head="0000000000000000000000000000000000000bad"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:true, code:0, outcome:"pass", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_land_never_takes_another_attempts_passing_verdict() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub other real
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on another attempt's pass: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_never_takes_gate_evidence_from_another_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own bogus
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on gate evidence for another head: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "another head"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_accepts_its_own_attempt_with_gate_evidence_for_the_current_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own real
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "the positive control did not land"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
