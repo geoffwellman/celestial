@@ -1171,25 +1171,49 @@ _run_profile_gateway_setup() { # <runtime> <agent-name> [require-key] [write-mod
     # NATIVE START, GATEWAY LATER. An omp session can switch models in flight,
     # and the launch environment is the only place it reads the gateway client
     # key and session identity - a running process cannot be handed them. So an
-    # omp that starts on Codex still gets them, when this box has a configured
-    # gateway with a readable key. Quietly nothing otherwise: direct-only boxes
-    # stay usable, and no models.yml is written or gateway required here.
-    # pi is unchanged (its provider list is written per gateway launch).
+    # omp that starts on Codex (or on a direct Anthropic model) still gets
+    # them, AND the gateway's providers registered in its models.yml, when this
+    # box has a configured gateway with a readable key: a switch to a gateway
+    # model is only possible if the model exists in the file omp read at start.
+    # Optional, never fatal: a direct-only box (no gateway, no key) is left
+    # alone with nothing written, and a gateway that is merely down warns and
+    # launches without models - a gateway that is REQUIRED (PROFILE_VIA) takes
+    # the branch below and fails closed. pi is unchanged (its provider list is
+    # written per gateway launch).
     [ "$runtime" = omp ] || return 0
     gateway_installed || return 0
     local kf; kf="$(_gateway_key_file)"
     [ -r "$kf" ] && [ -s "$kf" ] || return 0
     _run_gateway_env "$runtime" "$agent_name" 0 "$session_id"
+    [ "$write_models" = 1 ] || return 0
+    if ! gateway_ready; then
+      c_warn "the gateway is not answering on $(gateway_url): $agent_name starts without gateway models (cel gateway status; restart it to switch to one)"
+    elif ! gateway_omp_models_write; then
+      c_warn "the gateway registered no model for $agent_name's omp - it starts on its own provider (cel gateway omp-scope --check)"
+    fi
     return 0
   fi
   _run_gateway_env "$runtime" "$agent_name" "$require_key" "$session_id"
   if [ "$runtime" = pi ] && [ "$write_models" = 1 ]; then
     gateway_pi_models_write \
       || die "gateway launch: could not read the model list - cel gateway status"
+    # FAIL CLOSED: the launch line names <provider>/<id>; a writer that
+    # succeeded without registering that model would start a pane that dies
+    # with "Unknown model".
+    case "${PROFILE_MODEL:-}" in
+      ompgw/*|ompgw-claude/*|ompgw-codex/*)
+        gateway_pi_registered "$PROFILE_MODEL" \
+          || die "gateway launch: pi's models.json does not list ${PROFILE_MODEL} - cel gateway status" ;;
+    esac
   fi
   if [ "$runtime" = omp ] && [ "$write_models" = 1 ]; then
     gateway_omp_models_write \
-      || die "gateway launch: could not write omp's celgw provider - cel gateway omp-scope --check"
+      || die "gateway launch: could not write omp's gateway providers - cel gateway omp-scope --check"
+    case "${PROFILE_MODEL:-}" in
+      "$GATEWAY_OMP_PROVIDER"/*|"$GATEWAY_OMP_PROVIDER"-codex/*)
+        gateway_omp_registered "$PROFILE_MODEL" \
+          || die "gateway launch: omp's models.yml does not list ${PROFILE_MODEL} - cel gateway omp-scope --check" ;;
+    esac
   fi
 }
 

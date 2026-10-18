@@ -23,6 +23,10 @@ _CEL_UPDATE=1
 . "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"
+# shellcheck source=lib/install.sh
+. "${BASH_SOURCE[0]%/*}/install.sh"   # extension_names
+# shellcheck source=lib/gateway.sh
+. "${BASH_SOURCE[0]%/*}/gateway.sh"   # gateway_refresh
 
 _update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
 
@@ -126,6 +130,201 @@ _update_reapply() {
   "$CEL_ROOT/bin/cel" dash --restart || c_warn "dash did not restart"
   "$CEL_ROOT/bin/cel" pages --restart || c_warn "pages did not restart"
   "$CEL_ROOT/bin/cel" pages --public --restart || c_warn "public pages did not restart"
+}
+
+# --- agents and gateway (AH-261018) ---------------------------------------
+# `cel update` used to stop at "Celestial is current" and never touched the
+# coding agents it launches, so a box could sit on stale claude/omp/pi/codex
+# for weeks while every surface said "up to date". The components below run on
+# EVERY update, whether or not the plane's own git moved, each through the
+# agent's OWN installer (agents.yaml `update:`), and report what actually
+# happened per component: old version, new version, and - because an updater
+# that exits 0 can still leave an agent behind - the published latest. A
+# failed or still-behind component is a non-success exit with the way forward;
+# the command is idempotent, so the way forward is "fix the cause, rerun".
+# No live session is signalled or restarted by any of it.
+
+_update_semver() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true; }
+
+_update_agent_version() { # <agent> -> X.Y.Z, or fails when not installed/readable
+  local bin cmd out
+  bin="$(agent_get "$1" bin)"
+  [ -n "$bin" ] && have "$bin" || return 1
+  cmd="$(agent_get "$1" version_cmd)"; [ -n "$cmd" ] || cmd="$bin --version"
+  out="$(bash -c "$cmd" 2>/dev/null)" || return 1
+  out="$(printf '%s' "$out" | _update_semver)"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# The latest STABLE published version, or empty when none is declared or the
+# lookup failed (never treated as "current" - the line says "latest unknown").
+_update_agent_latest() { # <agent>
+  local c out
+  c="$(agent_update_get "$1" latest)"
+  [ -n "$c" ] || return 0
+  out="$(_update_timeout 60 bash -c "$c" 2>/dev/null)" || return 0
+  printf '%s' "$out" | _update_semver
+}
+
+_update_timeout() { # <secs> <cmd...>
+  local secs="$1"; shift
+  if have timeout; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+# A pin by name: `update.hold` in the box config (comma or space separated) or
+# CEL_UPDATE_HOLD. Reported, never silently called current.
+_update_held() { # <agent>
+  local h; h="$(cel_config_get update hold) ${CEL_UPDATE_HOLD:-}"; h="${h//,/ }"
+  case " $h " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+_update_agents_check() { # read-only: installed vs latest per installed agent; 1 when any is behind
+  local a inst latest rc=0 shown=0
+  for a in $(agent_names); do
+    [ -n "$(agent_update_get "$a" command)" ] || continue
+    inst="$(_update_agent_version "$a")" || continue
+    [ "$shown" -eq 1 ] || { c_hd "Agents"; shown=1; }
+    latest="$(_update_agent_latest "$a")"
+    if [ -z "$latest" ]; then
+      printf '  %s %s (latest unknown)\n' "$a" "$inst"
+    elif cel_version_lt "$inst" "$latest"; then
+      printf '  %s %s (latest %s)\n' "$a" "$inst" "$latest"; rc=1
+    else
+      printf '  %s %s (current)\n' "$a" "$inst"
+    fi
+  done
+  return "$rc"
+}
+
+_update_agents() { # returns 1 when any component failed or is still behind
+  local a bin cmd old new latest out rc=0 shown=0 changed='{}' prev_file held="" f
+  prev_file="$(_update_dir)/agents-previous.json"
+  c_hd "Agents"
+  for a in $(agent_names); do
+    cmd="$(agent_update_get "$a" command)"
+    [ -n "$cmd" ] || continue
+    bin="$(agent_get "$a" bin)"
+    if ! have "$bin"; then
+      printf '  %s not installed - cel setup installs it\n' "$a"; continue
+    fi
+    shown=1
+    old="$(_update_agent_version "$a")" || old="?"
+    if _update_held "$a"; then
+      printf '  %s %s held (update.hold) - not updated\n' "$a" "$old"
+      held="$held $a"; continue
+    fi
+    if ! out="$(_update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" 2>&1)"; then
+      c_err "$a $old: update FAILED - $(printf '%s' "$out" | tail -1 | cut -c1-160)"
+      rc=1; continue
+    fi
+    new="$(_update_agent_version "$a")" || new="?"
+    if [ "$new" = "?" ]; then
+      c_err "$a: the updater succeeded but the installed version cannot be read ($bin --version)"; rc=1; continue
+    fi
+    latest="$(_update_agent_latest "$a")"
+    if [ -n "$latest" ] && cel_version_lt "$new" "$latest"; then
+      c_err "$a still $new after its updater ran, latest $latest - NOT current (an updater that exits 0 is not proof)"
+      rc=1
+    elif [ "$old" != "$new" ]; then
+      printf '  %s %s -> %s%s\n' "$a" "$old" "$new" "${latest:+ (latest $latest)}"
+      changed="$(jq -c --arg a "$a" --arg v "$old" '.[$a] = $v' <<<"$changed")"
+    else
+      if [ -n "$latest" ]; then printf '  %s %s (current)\n' "$a" "$new"
+      else printf '  %s %s (updater reports nothing newer; published latest unknown)\n' "$a" "$new"; fi
+    fi
+  done
+  [ "$shown" -eq 1 ] || printf '  no coding agent with an update command is installed\n'
+  # What to go back to: only versions that CHANGED are recorded, merged over
+  # the previous record, so a no-op rerun never erases the way back.
+  if [ "$changed" != '{}' ]; then
+    mkdir -p "$(_update_dir)"
+    if [ -s "$prev_file" ]; then jq -c --argjson c "$changed" '. + $c' "$prev_file" >"$prev_file.tmp" && mv "$prev_file.tmp" "$prev_file"
+    else printf '%s\n' "$changed" >"$prev_file"; fi
+  fi
+  # Pins are reported by name, never folded into "current".
+  f="$(agent_get pi extensions_file)"
+  if [ -n "$held" ] || { have pi && [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ]; }; then
+    c_hd "Pinned exceptions"
+    for a in $held; do printf '  %s held by update.hold - remove it from the box config to update\n' "$a"; done
+    if have pi && [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ]; then
+      printf '  pi extensions pinned by %s (%s) - not updated here; bump the pin in the repo\n' \
+        "$f" "$(extension_names pi 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    fi
+  fi
+  return "$rc"
+}
+
+# Restore what an update changed, where the agent DECLARES a way (agents.yaml
+# update.rollback); one that does not is named with its old version, never
+# guessed at. Entries are dropped as they succeed, so a rerun resumes.
+_update_agents_rollback() {
+  local f a old cmd now rc=0 left
+  f="$(_update_dir)/agents-previous.json"
+  [ -s "$f" ] || return 0
+  c_hd "Rolling agents back"
+  left="$(cat "$f")"
+  for a in $(jq -r 'keys[]' "$f"); do
+    old="$(jq -r --arg a "$a" '.[$a]' "$f")"
+    cmd="$(agent_update_get "$a" rollback)"
+    if [ -z "$cmd" ]; then
+      printf '  %s was %s - no declared rollback; reinstall it with its own installer\n' "$a" "$old"; continue
+    fi
+    if CEL_OLD_VERSION="$old" _update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" >/dev/null 2>&1 \
+        && now="$(_update_agent_version "$a")" && [ "$now" = "$old" ]; then
+      printf '  %s -> %s\n' "$a" "$old"
+      left="$(jq -c --arg a "$a" 'del(.[$a])' <<<"$left")"
+    else
+      c_err "$a: rollback to $old FAILED - rerun cel update --rollback"; rc=1
+    fi
+  done
+  printf '%s\n' "$left" >"$f"
+  return "$rc"
+}
+
+# Everything the update owns beyond Celestial's own git. Never short-circuited
+# by "already current".
+_update_components() {
+  local rc=0
+  _update_agents || rc=1
+  c_hd "Gateway"
+  if ! gateway_refresh; then
+    c_err "gateway registration refresh FAILED - cel gateway status, then rerun cel update"
+    rc=1
+  fi
+  return "$rc"
+}
+
+# A running omp/pi launched before the gateway launch environment existed has
+# no gateway client key or session identity, and a process environment is
+# fixed at exec: nothing here can hand it one. Reported with the supported
+# recovery - the native session resume `cel run <role> --restart` performs
+# when the session is idle - and never acted on.
+_update_stale_gateway_env() {
+  gateway_installed || return 0
+  local pid comm env_ has_role has_tok item shown=0 cwd
+  for pid in $(pgrep -u "$(id -u)" -x 'omp|pi' 2>/dev/null); do
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null)" || continue
+    has_role=0; has_tok=0
+    while IFS= read -r -d '' item; do
+      case "$item" in CEL_ROLE=*) has_role=1 ;; OMP_GATEWAY_TOKEN=*) has_tok=1 ;; esac
+    done < <({ cat "/proc/$pid/environ"; } 2>/dev/null)
+    [ "$has_role" -eq 1 ] && [ "$has_tok" -eq 0 ] || continue
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || printf '?')"
+    if [ "$shown" -eq 0 ]; then c_hd "Sessions launched without the gateway environment"; shown=1; fi
+    printf '  %s (pid %s) %s\n' "$comm" "$pid" "$cwd"
+  done
+  [ "$shown" -eq 0 ] || printf '  their environment is fixed at launch: the new gateway key/session cannot reach them. Nothing was restarted; when one is idle, `cel run <role> --restart` resumes its own native session with the new launch.\n'
+  return 0
+}
+
+_update_finish() { # <components-rc> -> the exit code of the whole update
+  if [ "$1" -ne 0 ]; then
+    c_err "update incomplete: a component above did not complete. cel update is idempotent - fix the cause and rerun it, or cel update --rollback"
+    return 1
+  fi
+  return 0
 }
 
 _update_verify() {
@@ -243,28 +442,57 @@ _update_check_version() { # read-only; exit 1 when behind so scripts can test it
 _update_rollback() {
   local prev
   prev="$(tr -d '[:space:]' <"$(_update_dir)/previous" 2>/dev/null)" || true
-  if [ -z "$prev" ]; then die "no previous build recorded in $(_update_dir)/previous - nothing to roll back to"; fi
-  _update_require_pristine
-  git -C "$CEL_ROOT" reset --hard "$prev" -q || die "could not reset the plane to $prev"
-  _update_reapply
-  c_ok "rolled back to $(git -C "$CEL_ROOT" rev-parse --short HEAD) (v$(cel_version))"
+  if [ -z "$prev" ] && [ ! -s "$(_update_dir)/agents-previous.json" ]; then die "no previous build recorded in $(_update_dir)/previous - nothing to roll back to"; fi
+  if [ -n "$prev" ]; then
+    _update_require_pristine
+    git -C "$CEL_ROOT" reset --hard "$prev" -q || die "could not reset the plane to $prev"
+    _update_reapply
+    c_ok "rolled back to $(git -C "$CEL_ROOT" rev-parse --short HEAD) (v$(cel_version))"
+  fi
+  _update_agents_rollback || return 1
   return 0
 }
 
-cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orchestrators]
-  local mode=update chan="" restart_orch=0
+# The components run by the code that was JUST installed when the plane moved:
+# the process running this function holds the OLD code, and an update that
+# brought a new component list would otherwise only take effect on the next
+# run. A child `cel update --components` loads the new lib/.
+_update_components_fresh() {
+  if [ -x "$CEL_ROOT/bin/cel" ] && [ -z "${CEL_UPDATE_INPROC:-}" ]; then
+    "$CEL_ROOT/bin/cel" update --components
+  else
+    _update_components
+  fi
+}
+
+cmd_update() { # [--check [--agents] | --rollback | --components | --channel main|release] [--skip-agents] [--restart-orchestrators]
+  local mode=update chan="" restart_orch=0 check_agents=0 skip_components=0 crc=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --check)    mode=check; shift ;;
+      --agents)   check_agents=1; shift ;;
+      --components) mode=components; shift ;;
+      --skip-agents) skip_components=1; shift ;;
       --rollback) mode=rollback; shift ;;
       --restart-orchestrators) restart_orch=1; shift ;;
       --channel)  mode=channel; chan="${2:-}"; [ -n "$chan" ] || die "cel update --channel: want main or release"; shift 2 ;;
-      *) die "cel update: unknown argument '$1' (want --check, --rollback, --channel or --restart-orchestrators)" ;;
+      *) die "cel update: unknown argument '$1' (want --check [--agents], --components, --skip-agents, --rollback, --channel or --restart-orchestrators)" ;;
     esac
   done
-  if [ "$mode" = check ]; then _update_check; return $?; fi
+  if [ "$mode" = check ]; then
+    local crc=0
+    _update_check || crc=$?
+    if [ "$check_agents" -eq 1 ]; then _update_agents_check || crc=1; fi
+    return "$crc"
+  fi
   if [ "$mode" = rollback ]; then _update_rollback; return $?; fi
   if [ "$mode" = channel ]; then _update_set_channel "$chan"; return $?; fi
+  if [ "$mode" = components ]; then
+    _update_components || crc=$?
+    _update_stale_agents
+    _update_stale_gateway_env
+    _update_finish "$crc"; return $?
+  fi
 
   _update_require_pristine
 
@@ -277,8 +505,12 @@ cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orch
     n="$(cel_commits_behind_main)"
     if [ "$n" -eq 0 ] 2>/dev/null; then
       c_ok "up to date with origin/main at $(cel_build_line)"
+      # CURRENT GIT IS NOT A CURRENT BOX: agents and gateway registrations
+      # are still brought up to date.
+      [ "$skip_components" -eq 1 ] || _update_components || crc=$?
+      _update_stale_gateway_env
       _update_stale_orchestrators "$restart_orch"
-      return 0
+      _update_finish "$crc"; return $?
     fi
     before_main="$(git -C "$CEL_ROOT" rev-parse HEAD)"
     mkdir -p "$(_update_dir)"
@@ -287,13 +519,15 @@ cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orch
       || die "could not fast-forward to origin/main from $before_main - this checkout has diverged from main"
     c_ok "$n commits applied - now $(cel_build_line)"
     _update_reapply
+    [ "$skip_components" -eq 1 ] || _update_components_fresh || crc=$?
     if ! _update_verify; then
       c_err "update landed but doctor is red - inspect above, or: cel update --rollback"
       return 1
     fi
     _update_stale_agents
+    _update_stale_gateway_env
     _update_stale_orchestrators "$restart_orch"
-    return 0
+    _update_finish "$crc"; return $?
   fi
 
   git -C "$CEL_ROOT" fetch --tags -q 2>/dev/null || true
@@ -302,9 +536,11 @@ cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orch
   avail="$(cel_latest_remote_version)"
   if [ -z "$avail" ]; then die "no release tags reachable on origin - cannot tell what to update to"; fi
   if ! cel_version_lt "$inst" "$avail"; then
-    c_ok "up to date at v$inst"
+    c_ok "Celestial is current at v$inst"
+    [ "$skip_components" -eq 1 ] || _update_components || crc=$?
+    _update_stale_gateway_env
     _update_stale_orchestrators "$restart_orch"
-    return 0
+    _update_finish "$crc"; return $?
   fi
 
   before="$(git -C "$CEL_ROOT" rev-parse HEAD)"
@@ -317,11 +553,13 @@ cmd_update() { # [--check | --rollback | --channel main|release] [--restart-orch
   c_ok "v$inst -> v$avail ($(git -C "$CEL_ROOT" rev-parse --short HEAD))"
 
   _update_reapply
+  [ "$skip_components" -eq 1 ] || _update_components_fresh || crc=$?
   if ! _update_verify; then
     c_err "update landed but doctor is red - inspect above, or: cel update --rollback"
     return 1
   fi
   _update_stale_agents
+  _update_stale_gateway_env
   _update_stale_orchestrators "$restart_orch"
-  return 0
+  _update_finish "$crc"; return $?
 }

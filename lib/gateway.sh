@@ -372,8 +372,31 @@ gateway_pi_dir() { _agent_root_abs "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
 # `openai-completions`.
 # The profile prefix and models.json provider keys are derived from the same
 # helper; Claude's Anthropic endpoint is a distinct pi provider.
+#
+# CODEX IS A THIRD BLOCK (AH-261018). Chat Completions is not Codex's protocol:
+# its models are served by the gateway's OpenAI RESPONSES surface (POST
+# /v1/responses, /v1/responses/compact for compaction, and the Responses
+# websocket upgrade on the same path - CLIProxyAPI 8.0.29), and pi and omp
+# both speak `openai-responses`. Sending them through `openai-completions`
+# silently dropped compaction, reasoning items and the websocket transport,
+# and the launch id the profile produced (`ompgw/codex/gpt-5.5`) was not even
+# a model models.json listed. The family test is on the BARE id so versioned
+# ids (`gpt-5.5-codex`, `gpt-5.6-2026-10-01`, `codex-mini-latest`) are found by
+# discovery, never by a hand-kept list.
+GATEWAY_CODEX_ID_RE='^(gpt-|codex-|o[0-9])'
+gateway_codex_bare_id() { # <any spelling of a codex model id> -> the id the gateway publishes
+  local id="$1"
+  id="${id#ompgw/}"; id="${id#ompgw-codex/}"; id="${id#celgw-codex/}"
+  id="${id#openai-codex/}"; id="${id#codex/}"; id="${id#openai/}"
+  printf '%s' "$id"
+}
+gateway_codex_model_p() { # <model id> - 0 when it names a Codex-family model
+  case "$(gateway_codex_bare_id "$1")" in gpt-*|codex-*|o[0-9]*) return 0 ;; esac
+  return 1
+}
 gateway_pi_provider_for_model() { # <model id>
-  case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude' ;; *) printf 'ompgw' ;; esac
+  case "${1#ompgw/}" in claude/*|claude-*) printf 'ompgw-claude'; return 0 ;; esac
+  if gateway_codex_model_p "$1"; then printf 'ompgw-codex'; else printf 'ompgw'; fi
 }
 
 # apiKey and the session header are written as VARIABLE NAMES. pi expands them
@@ -384,7 +407,7 @@ gateway_pi_provider_for_model() { # <model id>
 # Unknown IDs never inherit its capabilities by prefix.
 gateway_pi_models_write() { # [models.json path]
   local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
-  models="$(gateway_models_json | jq -c '
+  models="$(gateway_models_json | jq -c --arg re "$GATEWAY_CODEX_ID_RE" '
     # Native Claude 5.5 capabilities. The gateway publishes bare ids, so
     # without this the generic 128000/8192 fallback would cap the window and
     # output and drop adaptive thinking.
@@ -399,10 +422,24 @@ gateway_pi_models_write() { # [models.json path]
                         supportsTemperature: false, supportsStrictTools: true } }
       else .
       end;
-    [ (.data // [])[] | {
-        id: .id,
-        contextWindow: (.context_length // 128000),
-        maxTokens: (.max_output_tokens // 8192) } | configured_opus_metadata
+    # HONEST CODEX METADATA: a field is written only when the gateway
+    # catalog states it. No invented window, no assumed reasoning support, no
+    # level map for levels the catalog did not advertise.
+    def codex_metadata:
+      { id: .id }
+      + (if .context_length then { contextWindow: .context_length } else {} end)
+      + (if .max_output_tokens then { maxTokens: .max_output_tokens } else {} end)
+      + (if ((.thinking.levels // []) | length) > 0
+         then { reasoning: true,
+                thinkingLevelMap: ([.thinking.levels[] | { key: ., value: . }] | from_entries) }
+         else {} end);
+    [ (.data // [])[]
+      | if (.id | test($re)) then (codex_metadata | . + { codex: true })
+        else ({
+          id: .id,
+          contextWindow: (.context_length // 128000),
+          maxTokens: (.max_output_tokens // 8192) } | configured_opus_metadata)
+        end
     ]' 2>/dev/null || true)"
   [ -n "$models" ] || return 1
   mkdir -p "$(dirname "$f")"
@@ -410,8 +447,9 @@ gateway_pi_models_write() { # [models.json path]
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
   jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" '
-    ([$models[] | select(.id | test("^claude"))]) as $claude
-    | ([$models[] | select(.id | test("^claude") | not)]) as $rest
+    ([$models[] | select(.codex == true) | del(.codex)]) as $codex
+    | ([$models[] | select(.codex != true) | select(.id | test("^claude"))]) as $claude
+    | ([$models[] | select(.codex != true) | select(.id | test("^claude") | not)]) as $rest
     | .providers = ((.providers // {}) + {
         ompgw: {
           name: "cel gateway",
@@ -420,6 +458,13 @@ gateway_pi_models_write() { # [models.json path]
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $rest },
+        "ompgw-codex": {
+          name: "cel gateway (codex, responses)",
+          baseUrl: $url,
+          apiKey: "$OMP_GATEWAY_TOKEN",
+          api: "openai-responses",
+          headers: { "x-session-id": "$CEL_SESSION_ID" },
+          models: $codex },
         ($claude_provider): {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
@@ -427,6 +472,14 @@ gateway_pi_models_write() { # [models.json path]
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
           models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# Is <provider>/<id> (the spelling a launch line carries) in pi's models.json?
+gateway_pi_registered() { # <provider/id> [models.json]
+  local m="$1" f="${2:-$(gateway_pi_dir)/models.json}"
+  [ -s "$f" ] || return 1
+  jq -e --arg p "${m%%/*}" --arg id "${m#*/}" \
+    '[.providers[$p].models[]? | select(.id == $id)] | length > 0' "$f" >/dev/null 2>&1
 }
 
 # --- the omp provider (CEL-136) -------------------------------------------
@@ -582,49 +635,104 @@ gateway_omp_scope_apply() {
   return "$rc"
 }
 
-# omp's own resolved anthropic catalog, read-only from its models.db. The
-# thinking MODE is only here (`omp models --json` flattens it to levels), and
-# copying it is what keeps the profile's thinking level meaning the same thing
-# through the gateway as it does direct.
-gateway_omp_catalog_json() {
+# omp's own resolved catalog for one provider, read-only from its models.db.
+# The thinking MODE is only here (`omp models --json` flattens it to levels),
+# and copying it is what keeps the profile's thinking level meaning the same
+# thing through the gateway as it does direct. `anthropic` for the Claude
+# block, `openai-codex` for the Codex block.
+# CEL_OMP_CATALOG_FILE / CEL_OMP_CODEX_CATALOG_FILE are TEST SEAMS (the file
+# stands in for the database), honoured only under CEL_TESTING.
+gateway_omp_catalog_json() { # [provider-id: anthropic|openai-codex]
+  local prov="${1:-anthropic}" seam=""
+  if [ -n "${CEL_TESTING:-}" ]; then
+    case "$prov" in
+      anthropic) seam="${CEL_OMP_CATALOG_FILE:-}" ;;
+      openai-codex) seam="${CEL_OMP_CODEX_CATALOG_FILE:-}" ;;
+    esac
+    [ -z "$seam" ] || { cat "$seam"; return; }
+  fi
   local db; db="$(gateway_omp_dir)/models.db"
   [ -f "$db" ] || return 1
-  python3 - "$db" <<'PY' 2>/dev/null
+  python3 - "$db" "$prov" <<'PY' 2>/dev/null
 import json, sqlite3, sys
 c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
-r = c.execute("select models from model_cache where provider_id = 'anthropic'").fetchone()
+r = c.execute("select models from model_cache where provider_id = ?", (sys.argv[2],)).fetchone()
 if not r:
     sys.exit(1)
 print(json.dumps(json.loads(r[0])))
 PY
 }
 
-# Merge the `celgw` provider into omp's models.yml (omp 18.11 schema). One
-# model per `omp/<id>` the gateway publishes AND omp's catalog describes - an
-# id with no metadata is dropped, never given another model's. apiKey and the
-# session header are ENV NAMES, resolved by omp in the pane.
-gateway_omp_models_write() { # [models.yml] [catalog json file]
-  local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" raw catalog block tmp cur
+# Merge the gateway's providers into omp's models.yml (omp 18.11 schema):
+#   celgw        Claude, one model per `omp/<id>` the gateway publishes AND
+#                omp's catalog describes - an id with no metadata is dropped,
+#                never given another model's (the omp-scoped pool).
+#   celgw-codex  Codex over `openai-responses` (AH-261018), every Codex-family
+#                id the gateway publishes, versioned ids included. Metadata is
+#                omp's own catalog entry when it has one for the EXACT id, else
+#                only what the gateway catalog states - nothing is borrowed
+#                from a neighbouring model.
+# apiKey and the session header are ENV NAMES, resolved by omp in the pane.
+# A block with no models is not written; the call fails only when NOTHING could
+# be registered, so a gateway that has Codex and no Claude pool yet still
+# registers Codex.
+gateway_omp_models_write() { # [models.yml] [catalog json file] [codex catalog json file]
+  local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" codex_file="${3:-}"
+  local raw catalog codex_catalog claude_block codex_block tmp cur n_claude n_codex
   raw="$(_gateway_models_json_raw)" || return 1
-  if [ -n "$cat_file" ]; then catalog="$(cat "$cat_file")"; else catalog="$(gateway_omp_catalog_json)"; fi
-  [ -n "$catalog" ] || { c_err "no anthropic catalog in $(gateway_omp_dir)/models.db - omp's catalog is built the first time it starts"; return 1; }
-  block="$(jq -c --argjson cat "$catalog" --arg p "$GATEWAY_OMP_PREFIX/" --arg url "$(gateway_url)" '
+  if [ -n "$cat_file" ]; then catalog="$(cat "$cat_file")"; else catalog="$(gateway_omp_catalog_json anthropic || true)"; fi
+  if [ -n "$codex_file" ]; then codex_catalog="$(cat "$codex_file")"; else codex_catalog="$(gateway_omp_catalog_json openai-codex || true)"; fi
+  [ -n "$codex_catalog" ] || codex_catalog='[]'
+  claude_block='{"models":[]}'
+  if [ -n "$catalog" ]; then
+    claude_block="$(jq -c --argjson cat "$catalog" --arg p "$GATEWAY_OMP_PREFIX/" --arg url "$(gateway_url)" '
+      ($cat | map({key: .id, value: .}) | from_entries) as $byid
+      | [ (.data // [])[] | .id | select(startswith($p + "claude"))
+          | . as $full | ($full | ltrimstr($p)) as $id | $byid[$id] | select(. != null)
+          | { id: $full }
+            + (with_entries(select(.key | IN("name","reasoning","input","contextWindow","maxTokens","cost","tokenizer"))))
+            + (if .thinking then {thinking: (.thinking | with_entries(select(.key | IN("mode","efforts","supportsDisplay"))))} else {} end) ]
+      | { name: "cel gateway (omp-pool)", baseUrl: $url, api: "anthropic-messages",
+          apiKey: "OMP_GATEWAY_TOKEN", headers: { "x-session-id": "CEL_SESSION_ID" },
+          models: . }' <<<"$raw")" || return 1
+  fi
+  codex_block="$(jq -c --argjson cat "$codex_catalog" --arg re "$GATEWAY_CODEX_ID_RE" --arg url "$(gateway_url)/v1" '
     ($cat | map({key: .id, value: .}) | from_entries) as $byid
-    | [ (.data // [])[] | .id | select(startswith($p + "claude"))
-        | . as $full | ($full | ltrimstr($p)) as $id | $byid[$id] | select(. != null)
-        | { id: $full }
-          + (with_entries(select(.key | IN("name","reasoning","input","contextWindow","maxTokens","cost","tokenizer"))))
-          + (if .thinking then {thinking: (.thinking | with_entries(select(.key | IN("mode","efforts","supportsDisplay"))))} else {} end) ]
-    | { name: "cel gateway (omp-pool)", baseUrl: $url, api: "anthropic-messages",
+    | [ (.data // [])[] | select(.id | test($re)) | . as $g
+        | { id: $g.id }
+          + (if $byid[$g.id] then ($byid[$g.id] | with_entries(select(.key | IN("name","reasoning","input","contextWindow","maxTokens","cost","thinking"))))
+             else ((if $g.context_length then { contextWindow: $g.context_length } else {} end)
+                   + (if $g.max_output_tokens then { maxTokens: $g.max_output_tokens } else {} end)
+                   + (if (($g.thinking.levels // []) | length) > 0 then { reasoning: true } else {} end)) end) ]
+    | { name: "cel gateway (codex, responses)", baseUrl: $url, api: "openai-responses",
         apiKey: "OMP_GATEWAY_TOKEN", headers: { "x-session-id": "CEL_SESSION_ID" },
         models: . }' <<<"$raw")" || return 1
-  [ "$(jq '.models | length' <<<"$block")" -gt 0 ] \
-    || { c_err "the gateway publishes no omp/claude model in omp's catalog - cel gateway omp-scope"; return 1; }
+  n_claude="$(jq '.models | length' <<<"$claude_block")"
+  n_codex="$(jq '.models | length' <<<"$codex_block")"
+  if [ "$n_claude" -eq 0 ] && [ "$n_codex" -eq 0 ]; then
+    if [ -z "$catalog" ]; then
+      c_err "no anthropic catalog in $(gateway_omp_dir)/models.db - omp's catalog is built the first time it starts"
+    else
+      c_err "the gateway publishes no omp/claude model in omp's catalog and no Codex model - cel gateway omp-scope"
+    fi
+    return 1
+  fi
   mkdir -p "$(dirname "$f")"
   cur='{}'; [ -s "$f" ] && cur="$(yq -c '. // {}' "$f")"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
-  jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
+  jq --argjson c "$claude_block" --argjson x "$codex_block" --arg k "$GATEWAY_OMP_PROVIDER" --argjson nc "$n_claude" --argjson nx "$n_codex" '
+      .providers = ((.providers // {})
+        + (if $nc > 0 then {($k): $c} else {} end)
+        + (if $nx > 0 then {($k + "-codex"): $x} else {} end))' <<<"$cur" \
     | yq -y . >"$tmp" && mv "$tmp" "$f"
+}
+
+# Is <provider>/<id> (the launch spelling) registered in omp's models.yml?
+gateway_omp_registered() { # <provider/id> [models.yml]
+  local m="$1" f="${2:-$(gateway_omp_dir)/models.yml}"
+  [ -s "$f" ] || return 1
+  yq -e --arg p "${m%%/*}" --arg id "${m#*/}" \
+    '[.providers[$p].models[]? | select(.id == $id)] | length > 0' "$f" >/dev/null 2>&1
 }
 
 _gateway_omp_scope_cmd() { # [--check|--apply|--json]
@@ -637,6 +745,43 @@ _gateway_omp_scope_cmd() { # [--check|--apply|--json]
       jq -r '.[] | "  claude \(.id)  \(if .excluded then "excluded" else "pool" end)  prefix=\(if .prefix == "" then "-" else .prefix end)  -> \(.action)"' <<<"$plan" ;;
     *) die "cel gateway omp-scope: unknown option '$1' (--check, --apply, --json)" ;;
   esac
+}
+
+# --- refresh after `cel update` (AH-261018) -------------------------------
+#
+# Re-applies everything the plane writes for the gateway, whether or not
+# Celestial's own git moved: the proxy config (it carries the installed Claude
+# Code version for header matching, which an agent update changes), the box
+# service entry, pi's models.json and omp's models.yml (so a gateway catalog
+# that gained a versioned Codex id is registered), and the agent-root
+# invariant. Idempotent: the api-key and management key are minted once and
+# never rolled, unrelated providers in the owner's files are preserved, no
+# credential is read or written, nothing is restarted - CLIProxyAPI reloads
+# its config file on change. Returns non-zero when anything that SHOULD have
+# been registered was not, and says which.
+gateway_refresh() {
+  gateway_installed || { c_ok "gateway: not installed on this box - nothing to refresh"; return 0; }
+  local rc=0
+  if _gateway_config_write; then c_ok "gateway: config rewritten ($(gateway_config_file))"
+  else c_err "gateway: could not rewrite $(gateway_config_file)"; rc=1; fi
+  _gateway_register_services || rc=1
+  if have cli-proxy-api; then
+    c_ok "gateway: $(cli-proxy-api -h 2>&1 | sed -n 's/^CLIProxyAPI Version: \([^,]*\),.*/cli-proxy-api \1/p' | head -1) (pinned by agents.yaml base_tools; cel setup owns it)"
+  fi
+  agent_roots_check >/dev/null 2>&1 || { c_err "gateway: pi and omp agent roots overlap - $(agent_roots_check 2>&1 >/dev/null | head -1)"; rc=1; }
+  if ! gateway_ready; then
+    c_err "gateway: installed but not answering on $(gateway_url) - models were NOT re-registered (cel gateway status)"
+    return 1
+  fi
+  if have pi || [ -d "$(gateway_pi_dir)" ]; then
+    if gateway_pi_models_write; then c_ok "gateway: pi models registered ($(gateway_pi_dir)/models.json)"
+    else c_err "gateway: pi models could not be registered - cel gateway status"; rc=1; fi
+  fi
+  if have omp || [ -d "$(gateway_omp_dir)" ]; then
+    if gateway_omp_models_write; then c_ok "gateway: omp models registered ($(gateway_omp_dir)/models.yml)"
+    else c_warn "gateway: omp models not registered - omp builds its catalog the first time it starts, or the gateway publishes nothing for it (cel gateway omp-scope --check)"; fi
+  fi
+  return "$rc"
 }
 
 # --- doctor ---------------------------------------------------------------
@@ -680,6 +825,8 @@ cel gateway - several subscriptions behind one loopback door
 
   cel gateway install [--no-start]   write the proxy config, register the box
                                      service, mint the api-key
+  cel gateway refresh                re-apply config, service and pi/omp model
+                                     registrations (cel update runs this)
   cel gateway status [--json]        the door, and one row per account
   cel gateway login <provider>       sign another subscription in
                                      --no-browser: device flow, headless box
@@ -814,6 +961,7 @@ cmd_gateway() {
         printf '  key      in %s (0600) - never on the tailnet\n' "$(_gateway_mgmt_key_file)"
       fi ;;
     omp-scope) _gateway_omp_scope_cmd "$@" ;;
+    refresh) gateway_refresh ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;
   esac

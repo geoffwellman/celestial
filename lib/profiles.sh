@@ -235,6 +235,10 @@ _profile_gateway_route() { # <profile name> [runtime]
   PROFILE_GATEWAY_ACCOUNTS=0
   # The runtime is passed, not read from PROFILE_RUNTIME: the reviewer path
   # routes a pi reviewer while PROFILE_RUNTIME still names the profile's own.
+  if gateway_codex_model_p "$PROFILE_MODEL"; then
+    _profile_gateway_route_codex "$name" "${2:-pi}"
+    return 0
+  fi
   if [ "${2:-}" = omp ]; then
     _profile_gateway_route_omp "$name"
     return 0
@@ -267,6 +271,39 @@ _profile_gateway_route() { # <profile name> [runtime]
     PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count "$prov" 2>/dev/null || printf 0)"
     [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null \
       || PROFILE_VETO="the gateway has no usable $prov account (a disabled credential is not listed at all) - cel gateway login $prov"
+  fi
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $name: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
+  fi
+  return 0
+}
+
+# Codex through the gateway (AH-261018), for pi AND omp. The model is the
+# profile's own, spelled the way the runtime's provider block lists it
+# (`ompgw-codex/<id>` for pi, `celgw-codex/<id>` for omp) - the id the profile
+# names is never swapped for a neighbour: an id the gateway does not publish is
+# a veto BY NAME, and so is a vault with no Codex account. Codex accounts are
+# not scoped or prefixed (that is the Claude pool's business), so no exclusion
+# is consulted and no account is touched.
+_profile_gateway_route_codex() { # <profile name> <pi|omp>
+  local name="$1" rt="$2" id models
+  id="$(gateway_codex_bare_id "$PROFILE_MODEL")"
+  if [ "$rt" = omp ]; then PROFILE_MODEL="$GATEWAY_OMP_PROVIDER-codex/$id"; else PROFILE_MODEL="ompgw-codex/$id"; fi
+  if ! gateway_installed; then
+    PROFILE_VETO="no gateway on this box - cel gateway install"
+  elif ! gateway_ready; then
+    PROFILE_VETO="the gateway is not answering on $(gateway_url) - cel gateway status"
+  else
+    PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count codex 2>/dev/null || printf 0)"
+    if ! [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null; then
+      PROFILE_VETO="the gateway has no usable codex account (a disabled credential is not listed at all) - cel gateway login codex"
+    elif ! models="$(gateway_models_json)" \
+        || ! jq -e --arg m "$id" '[.data[]? | select(.id == $m)] | length > 0' <<<"$models" >/dev/null 2>&1; then
+      PROFILE_VETO="the gateway does not publish $id (its Codex catalog: cel gateway status; ids are never substituted)"
+    fi
   fi
   if [ -n "$PROFILE_VETO" ]; then
     PROFILE_NOTE="VETOED: $PROFILE_VETO"

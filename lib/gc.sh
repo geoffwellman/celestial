@@ -256,6 +256,78 @@ _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
   return 1
 }
 
+# --- foreground group ownership (AH-261018) --------------------------------
+# Installed gc demanded EXACTLY ONE foreground process, so a verified Claude
+# carrying the Hindsight MCP server it launched (its direct child, in the same
+# foreground group) was refused before identity was even computed: six idle
+# runtimes could not be retired. The root is still proven by the exact checks
+# in _gc_process_identity (pid, birth, pane, role, session, comm); what is
+# widened is ONLY this: every OTHER foreground process must be a declared
+# helper (agents.yaml `owned_children`) that is
+#   - a DIRECT child of the verified root pid (a grandchild is not owned),
+#   - born after the root (its start tick is not earlier),
+#   - in the same herdr pane (HERDR_PANE_ID inherited),
+#   - exactly `<argv0 basename> <argv[1] ending in the declared suffix>`.
+# Anything else - a preview server, a test run, a tool child, an unreadable
+# process - is a veto. Never "any child".
+_gc_ppid_of() { # <pid> -> parent pid
+  local line; line="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  local -a f; read -r -a f <<< "${line##*) }"
+  [[ "${f[1]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${f[1]}"
+}
+_gc_start_of() { # <pid> -> start tick
+  local line; line="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  local -a f; read -r -a f <<< "${line##*) }"
+  [[ "${f[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${f[19]}"
+}
+# The root of a pane's foreground group: the one member whose parent is not
+# another member. More than one such member (two unrelated groups' worth of
+# processes) is no root at all.
+_gc_fg_root() { # <process-info json> -> root pid
+  local info="$1" pids pid par root="" member
+  pids="$(printf '%s' "$info" | jq -er '[.result.process_info.foreground_processes[]?.pid | select(type == "number")] | if length > 0 then join(" ") else empty end')" || return 1
+  for pid in $pids; do
+    par="$(_gc_ppid_of "$pid")" || return 1
+    member=0
+    case " $pids " in *" $par "*) member=1 ;; esac
+    [ "$member" -eq 1 ] && continue
+    [ -z "$root" ] || return 1
+    root="$pid"
+  done
+  [ -n "$root" ] || return 1
+  printf '%s' "$root"
+}
+_gc_fg_helpers_owned() { # <root-pid> <runtime> <process-info json> <pane>
+  local root="$1" rt="$2" info="$3" pane="$4" pids pid par rstart cstart item envpane matched comm_ argv0 suffix
+  local -a args
+  pids="$(printf '%s' "$info" | jq -er '[.result.process_info.foreground_processes[]?.pid] | map(tostring) | join(" ")')" || return 1
+  rstart="$(_gc_start_of "$root")" || return 1
+  for pid in $pids; do
+    [ "$pid" != "$root" ] || continue
+    par="$(_gc_ppid_of "$pid")" || return 1
+    [ "$par" = "$root" ] || return 1
+    cstart="$(_gc_start_of "$pid")" || return 1
+    [ "$cstart" -ge "$rstart" ] || return 1
+    envpane=""
+    while IFS= read -r -d '' item; do
+      case "$item" in HERDR_PANE_ID=*) envpane="${item#*=}";; esac
+    done < <(_gc_environ_lines "$pid")
+    [ "$envpane" = "$pane" ] || return 1
+    args=(); mapfile -d '' -t args < "/proc/$pid/cmdline" 2>/dev/null || return 1
+    [ "${#args[@]}" -eq 2 ] || return 1
+    matched=0
+    while IFS=$'\t' read -r argv0 suffix; do
+      [ -n "$argv0" ] && [ -n "$suffix" ] || continue
+      [ "${args[0]##*/}" = "$argv0" ] || continue
+      case "${args[1]}" in *"$suffix") matched=1; break ;; esac
+    done < <(agent_owned_children "$rt")
+    [ "$matched" -eq 1 ] || return 1
+  done
+  return 0
+}
+
 # Exact binding supported for runtimes launched with a plane role-file flag.
 # cwd/comm alone never establishes ownership. Root/orchestrator roles and
 # runtimes without that verifiable launch stamp are deliberately retained.
@@ -287,9 +359,13 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
       .result.process_info | .pane_id == $p and
       (.shell_pid | type == "number") and .shell_pid != $pid and
       (.foreground_process_group_id | type == "number") and
-      (.foreground_processes | type == "array" and length == 1 and .[0].pid == $pid)' >/dev/null || return 1
+      (.foreground_processes | type == "array" and length >= 1 and any(.[]; .pid == $pid))' >/dev/null || return 1
   rt="$(printf '%s' "$row" | jq -r .agent)"
   [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$rt" ] || return 1
+  # The foreground group is this pid ALONE or this pid plus declared helpers
+  # that are its own direct children. The pid must also be the group's root.
+  [ "$(_gc_fg_root "$info")" = "$pid" ] || return 1
+  _gc_fg_helpers_owned "$pid" "$rt" "$info" "$pane" || return 1
   local -a fields=()
   # ONLY when the launcher left no variables: an omp or claude pane started by
   # an older build carries the role path in argv and nothing else, and must
@@ -434,7 +510,7 @@ _gc_agents_removable() { # <agents-json> <dir> <registry-names>
   while IFS= read -r row; do
     pane="$(printf '%s' "$row" | jq -r .pane_id)"
     info="$(lock_spawn "${lock_fd:-} ${fd:-}" herdr pane process-info --pane "$pane" 2>/dev/null)" \
-      && pid="$(printf '%s' "$info" | jq -er '.result.process_info.foreground_processes | if length == 1 then .[0].pid else empty end')" \
+      && pid="$(_gc_fg_root "$info")" \
       && _gc_process_identity "$pid" "$agents" "$3" >/dev/null || return 1
   done < <(printf '%s' "$rows" | jq -c '.[]')
   return 0
@@ -1025,6 +1101,16 @@ _gc_tell_waiter_stopped() { # <wsdir> <ws> <ledger> <id> <mb>
     --from gc --workspace "$2" --kind status >/dev/null 2>&1 || true
 }
 
+# RUNTIME RETIREMENT IS NOT WORKTREE DELETION. This pass closes a pane - the
+# process goes - and nothing else: the worktree, its branch, dirty or unpushed
+# work (which VETOES the stop), the native session file, the delegation row and
+# every artifact stay exactly as they were, and `cel-fanout delegate --reuse`
+# resumes it. The states it considers are every state in which a live agent
+# may still sit behind a retained row: `collected`, `reported` and `salvaged`
+# hold a runtime exactly like `running`/`finished` do, and installed gc looked
+# only at the latter two, so six collected runtimes were never even candidates.
+# `landed`, `released`, `abandoned` rows belong to the done/worktree passes.
+_GC_RETIRE_STATES="running finished collected reported salvaged"
 _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
   local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb head waiter prst
   [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
@@ -1040,8 +1126,21 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
     while IFS=$'\t' read -r id pane wt; do
       [ -n "$pane" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
       agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
-      [ -n "$agent" ] || continue
-      case "$(printf '%s' "$agent" | jq -r '.cwd // ""')" in "$wt"|"$wt"/*) ;; *) continue ;; esac
+      # A STALE PANE BINDING (AH-261018): the row names a pane that no longer
+      # hosts this worktree's agent (renumbered, closed and re-created, or
+      # re-bound by a recovery). The worktree's own agent is then found by
+      # its cwd - and only when EXACTLY ONE live agent sits in it. Two or
+      # none is ambiguity, and ambiguity retires nothing.
+      case "$(printf '%s' "${agent:-}" | jq -r '.cwd // ""' 2>/dev/null)" in
+        "$wt"|"$wt"/*) ;;
+        *)
+          agent="$(printf '%s' "$agents" | jq -c --arg w "$wt" '
+            [.result.agents[]? | select((.cwd // "") as $c | $c == $w or ($c | startswith($w + "/")))]
+            | if length == 1 then .[0] else empty end')"
+          [ -n "$agent" ] || continue
+          pane="$(printf '%s' "$agent" | jq -r '.pane_id // ""')"
+          [ -n "$pane" ] || continue ;;
+      esac
       status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
       case "$status" in idle|done) ;; *) continue ;; esac
       since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
@@ -1095,9 +1194,9 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       fi
       [ "$dry" -eq 1 ] || [ "$waiter" -eq 0 ] || _gc_tell_waiter_stopped "$wsdir" "$ws" "$f" "$id" "$mb"
       idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
-    done < <(jq -r '.[]? | select((.state // "") as $s | ["running","finished"] | index($s))
+    done < <(jq -r --arg states "$_GC_RETIRE_STATES" '.[]? | select((.state // "") as $s | ($states | split(" ")) | index($s))
                     | select((.replacement.role // "") != "source")
-                    | [(.id // ""), (.pane // ""), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
+                    | [(.id // ""), ((.pane // "") | if . == "" then "-" else . end), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
   done <<< "$names"
   if [ "$dry" -eq 0 ]; then
     mkdir -p "$(dirname "$file")" 2>/dev/null && printf '%s\n' "$next" > "$file" 2>/dev/null || true
