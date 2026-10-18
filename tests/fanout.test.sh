@@ -64,7 +64,7 @@ _fanout_retain() { # <id> <wt-dir-name> [state]
   mkdir -p "$T/sessions"
   printf '{"type":"session","version":3,"id":"orig-%s","cwd":"%s"}\n' "$id" "$RET_WT" > "$RET_SESS"
   jq --arg w "$RET_WT" --arg s "$RET_SESS" --arg st "$st" \
-    '.[0].worktree = $w | .[0].state = $st | (if env.NOSESS == "1" then . else .[0].session = $s end)' \
+    '.[0].worktree = $w | .[0].state = $st | .[0].history += [{state:$st, at:"t", by:"gc"}] | (if env.NOSESS == "1" then . else .[0].session = $s end)' \
     "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
   RET_WS="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$RET_WT\"}}]}}"
 }

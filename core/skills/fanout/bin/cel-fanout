@@ -733,11 +733,95 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   printf '%s' "$prompt_text"
 }
 
+# THE PROOF A RETAINED ROW MAY BE RESUMED (AH-261018). Sets RS_PROFILE, RS_RT,
+# RS_MODEL, RS_THINKING and RS_SESSION from the ROW - never from the workspace
+# default - or dies having changed nothing: an unsettled launch, a row that is
+# not retained, a worktree the row does not own, a live agent for it (by alias
+# or by working directory), an explicit option that contradicts what the row
+# recorded, a runtime with no native resume, or a session that is missing or
+# ambiguous. No stop API is invented: a live runtime is refused, not retired.
+_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt>
+  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9"
+  _rec_guard "delegate --reuse" "$branch" "$row"
+  local st; st="$(printf '%s' "$row" | jq -r '.state // ""')"
+  case " running finished collected reported salvaged " in
+    *" $st "*) ;;
+    *) die "delegate --reuse: $branch is '$st' - only a retained row (running, finished, collected, reported, salvaged) is resumed. Nothing was changed" ;;
+  esac
+  local f_repo f_branch f_wt f_alias; RS_SESSION=""
+  f_repo="$(printf '%s' "$row" | jq -r '.repo // ""')"; f_branch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+  f_wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"; f_alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
+  { [ "$f_repo" = "$repo" ] && [ "$f_branch" = "$branch" ] && [ -n "$f_wt" ] \
+    && [ "$(readlink -f "$f_wt" 2>/dev/null)" = "$(readlink -f "$wt")" ]; } \
+    || die "delegate --reuse: the row for $branch does not own $wt (it records repo '$f_repo' branch '$f_branch' worktree '${f_wt:-none}') - refusing to resume into a checkout it does not own. Nothing was changed"
+  RS_PROFILE="$(printf '%s' "$row" | jq -r '.profile // ""')"
+  RS_RT="$(printf '%s' "$row" | jq -r '.runtime // ""')"
+  RS_MODEL="$(printf '%s' "$row" | jq -r '.model // ""')"
+  RS_THINKING="$(printf '%s' "$row" | jq -r '.thinking // ""')"
+  [ -n "$RS_RT" ] || die "delegate --reuse: $branch records no runtime, so its original runtime cannot be reproduced - nothing was changed"
+  [ -z "$popt" ] || [ "$popt" = "$RS_PROFILE" ] \
+    || die "delegate --reuse: --profile '$popt' contradicts the recorded profile '${RS_PROFILE:-none}' - a resume keeps the original; nothing was changed"
+  [ -z "$mopt" ] || [ "$mopt" = "$RS_MODEL" ] \
+    || die "delegate --reuse: --model '$mopt' contradicts the recorded model '$RS_MODEL' - nothing was changed"
+  [ -z "$topt" ] || [ "$topt" = "$RS_THINKING" ] \
+    || die "delegate --reuse: --thinking '$topt' contradicts the recorded thinking '$RS_THINKING' - nothing was changed"
+  # NO LIVE DUPLICATE: two processes on one session answer mail twice
+  if [ -n "$f_alias" ] && "$HERDR" agent get "$f_alias" >/dev/null 2>&1; then
+    die "delegate --reuse: $f_alias is live - a retained session is resumed only after its runtime is gone (this tool does not stop one). Nothing was changed"
+  fi
+  local occupants
+  occupants="$("$HERDR" agent list 2>/dev/null | jq -r --arg w "$(readlink -f "$wt")" \
+    '[.result.agents[]? | select((.cwd // "") as $c | $c == $w or ($c | startswith($w + "/")))] | length' 2>/dev/null || printf 0)"
+  [ "${occupants:-0}" = 0 ] \
+    || die "delegate --reuse: $occupants live agent(s) already sit in $wt - refusing to start a second on top. Nothing was changed"
+  [ -n "$(agent_resume "$RS_RT" flag)" ] \
+    || die "delegate --reuse: runtime '$RS_RT' has no native session resume - nothing was changed"
+  _fanout_resume_session "$RS_RT" "$(readlink -f "$wt")" "$(printf '%s' "$row" | jq -r '.session // ""')" "$sopt"
+}
+
+# The ONE native session to resume: the row's recorded `session`, else - for
+# pi, whose layout is verified - the session files whose header names this
+# worktree. A header cwd that is not the worktree, zero files, or several with
+# no explicit --session pick is a refusal; the newest-file guess is never made.
+# Sets RS_SESSION (not a substitution: a die inside $( ) would be swallowed).
+_fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
+  local rt="$1" wt="$2" rowsess="$3" opt="$4" f
+  local -a cands=()
+  if [ -n "$rowsess" ]; then
+    [ -f "$rowsess" ] || die "delegate --reuse: the session recorded on the row is gone: $rowsess - nothing was changed"
+    cands=("$rowsess")
+  elif [ "$rt" = pi ]; then
+    local dir; dir="$(gateway_pi_dir)/sessions/--$(printf '%s' "$wt" | sed 's|^/||; s|/|-|g')--"
+    for f in "$dir"/*.jsonl; do [ -f "$f" ] && cands+=("$f"); done
+  else
+    die "delegate --reuse: no session is recorded on the row and the session layout of runtime '$rt' is not verified - nothing was changed"
+  fi
+  local -a ok=() ids=()
+  local hdr
+  for f in "${cands[@]}"; do
+    hdr="$(head -n 1 "$f" 2>/dev/null | jq -c 'select(.type == "session")' 2>/dev/null)" || hdr=""
+    [ -n "$hdr" ] || continue
+    [ "$(printf '%s' "$hdr" | jq -r '.cwd // ""')" = "$wt" ] || continue
+    ok+=("$f"); ids+=("$(printf '%s' "$hdr" | jq -r '.id // ""')")
+  done
+  [ "${#ok[@]}" -gt 0 ] || die "delegate --reuse: no native session found for $wt - nothing was changed"
+  if [ -n "$opt" ]; then
+    local i
+    for i in "${!ok[@]}"; do
+      if [ "${ok[$i]}" = "$opt" ] || [ "${ids[$i]}" = "$opt" ]; then RS_SESSION="${ok[$i]}"; return 0; fi
+    done
+    die "delegate --reuse: '$opt' is not a session of $wt (have: ${ids[*]}) - nothing was changed"
+  fi
+  [ "${#ok[@]}" -eq 1 ] \
+    || die "delegate --reuse: ambiguous - ${#ok[@]} native sessions belong to $wt (${ids[*]}); name the original with --session <uuid>. Nothing was changed"
+  RS_SESSION="${ok[0]}"
+}
+
 cmd_delegate() {
   _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
+  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID]]"
   local repo="$1" branch="$2" spec="$3"; shift 3
-  local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
+  local session_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
@@ -748,6 +832,7 @@ cmd_delegate() {
       --thinking) thinking_opt="$2"; shift 2 ;;
       --adhoc)    adhoc=1; shift ;;
       --reuse)    reuse=1; shift ;;
+      --session)  session_opt="$2"; shift 2 ;;
       --shape)    shape="$2"; shift 2 ;;
       *) die "delegate: unknown argument: $1" ;;
     esac
@@ -997,6 +1082,21 @@ cmd_delegate() {
   [ -n "$check_base" ] || check_base="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || true)"
   [ -n "$check_base" ] || check_base="origin/main"
 
+  # RESUMING A RETAINED ROW (AH-261018). `--reuse` over an existing row is the
+  # canonical recovery for a runtime gc retired: the SAME worker comes back -
+  # the row's recorded runtime, model, thinking and profile and its original
+  # native session - not whatever the workspace's role default is today.
+  # Everything is proved BEFORE the first pane command or ledger write; any
+  # refusal leaves the row, the pane and the worktree exactly as found.
+  local prior_row="" resume_session="" RS_PROFILE="" RS_RT="" RS_MODEL="" RS_THINKING=""
+  if [ "$reuse" -eq 1 ]; then
+    prior_row="$(_ledger_entry "$wsdir" "$branch")"
+    [ -z "$prior_row" ] || _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$worktree" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
+    resume_session="$RS_SESSION"
+  elif [ -n "$session_opt" ]; then
+    die "delegate: --session only applies to --reuse"
+  fi
+
   # A profile may swap the RUNTIME, not just the model, so it resolves before
   # the role body is injected - the runtime decides the injection shape.
   local rt; rt="$(ws_runtime "$wsdir" worker)"
@@ -1009,13 +1109,22 @@ cmd_delegate() {
   if [ -z "$profile" ] && [ "$shape" = scout ]; then
     profile="$(role_profile_for "$wsdir" scout "$repo")"
   fi
-  [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"
+  if [ -n "$prior_row" ]; then profile="$RS_PROFILE"
+  else [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"; fi
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO="" PROFILE_VIA=""
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$rt"
     [ -z "$PROFILE_VETO" ] || die "delegate: profile '$profile' is vetoed - $PROFILE_VETO"
     rt="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
     [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
+  fi
+  if [ -n "$prior_row" ]; then
+    # the profile may have been edited since the row launched: a different
+    # runtime/model/thinking is a substitution, never a resume
+    if [ -n "$profile" ] && { [ "$rt" != "$RS_RT" ] || [ "$model" != "$RS_MODEL" ] || [ "$thinking" != "$RS_THINKING" ]; }; then
+      die "delegate --reuse: profile '$profile' has drifted since $branch launched (row: $RS_RT $RS_MODEL $RS_THINKING; profile now: $rt $model $thinking) - refusing to resume under a different model. Nothing was changed"
+    fi
+    rt="$RS_RT"; model="$RS_MODEL"; thinking="$RS_THINKING"
   fi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
@@ -1046,6 +1155,8 @@ cmd_delegate() {
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$rt")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
+  # the exact native session, by the runtime's own resume flag
+  [ -z "$resume_session" ] || AGENT_ARGS+=("$(agent_resume "$rt" flag)" "$resume_session")
 
   # herdr agent names must be [a-z][a-z0-9_-]{0,31}; the readable repo/branch
   # form lives on as the worktree label only.
@@ -1151,8 +1262,6 @@ cmd_delegate() {
   # `handback`) must not replace it before the start succeeds: the old row
   # carries the review verdict and PR the revision round depends on. It is only
   # marked, and replaced - as before - once the new agent actually exists.
-  local prior_row=""
-  [ "$reuse" -ne 1 ] || prior_row="$(_ledger_entry "$wsdir" "$branch")"
   if [ -n "$prior_row" ]; then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"starting", at:$at}' --arg at "$(_now_iso)"
   else
@@ -1219,11 +1328,15 @@ cmd_delegate() {
   fi
 
   if [ -n "$prior_row" ]; then
-    # the resumed agent exists: the row is replaced exactly as it always was
-    entry="$(printf '%s' "$entry" | jq -c --arg s "$dstate" --arg at "$(_now_iso)" \
-      '.state = $s | .launch = {phase:(if $s == "running" then "dispatched" else "dispatch-unconfirmed" end), at:$at}')"
-    _ledger_append "$wsdir" "$entry"
-    [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+    # the resumed agent exists. The SAME row carries on: only where it runs
+    # (pane, workspace, alias) and the session it resumed change; spec, review,
+    # head, PR, profile and history stay, and the state move is one more
+    # recorded transition on top of them.
+    _ledger_patch "$wsdir" "$branch" '.pane = $pane | .herdr_ws = $ws | .alias = $alias | .session = $sess
+      | .launch = {phase:(if $s == "running" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
+      --arg pane "$pane" --arg ws "$child_ws" --arg alias "$alias" --arg sess "$resume_session" \
+      --arg s "$dstate" --arg at "$(_now_iso)"
+    _ledger_update_state "$wsdir" "$branch" "$dstate"
   else
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
       --arg ok "$([ "$dstate" = running ] && echo 1 || echo 0)" --arg at "$(_now_iso)"
@@ -2484,9 +2597,7 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
   printf '%s\n' "This is a review revision round for $id on branch $branch, resumed in place after gc stopped you under memory pressure. Run \`cel inbox read --workspace $ws\` - the findings from $by are there. Fix them on this branch, run the gate, commit, push THIS branch only, then \`cel inbox send $by \"pushed <sha> - re-review\" --workspace $ws\` and stop. Your original spec: $(printf '%s' "$row" | jq -r '.spec // ""')" > "$tmp"
   ( cmd_delegate "$repo" "$branch" "$tmp" --reuse ${ws_opt:+--workspace "$ws_opt"} ) >/dev/null \
     || die "handback: $alias is stopped and could not be resumed - the findings are in its inbox; resume it with: cel-fanout delegate $repo $branch <spec> --reuse"
-  local now cur; now="$(_ledger_entry "$wsdir" "$branch")"; cur="$(_ledger_read "$wsdir")"
-  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson old "$row" --argjson now "${now:-null}" \
-    'map(if .id == $id then ($old + (if $now then {pane:$now.pane, herdr_ws:$now.herdr_ws, alias:$now.alias, state:$now.state} else {} end)) else . end)')"
+  # delegate --reuse resumed the SAME row in place (history and all)
   c_ok "$id: $alias was stopped - resumed in place; findings delivered by inbox"
 }
 
