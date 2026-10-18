@@ -1589,7 +1589,7 @@ test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
 # still proven by exact pid/birth/pane/role; the only widening is a declared
 # helper (agents.yaml `owned_children`) that is a DIRECT child of that root,
 # born after it, in the same pane, with the exact declared argv.
-_gc_claude_fixture() { # <child-kind: mcp|other|wrongscript|grandchild|none>
+_gc_claude_fixture() { # <child-kind: mcp|other|wrongscript|elsewhere|grandchild|none>
   _gc_managed_fixture
   GC_UPTIME=10000
   CEL_MANIFEST="$T/agents.yaml"
@@ -1614,12 +1614,15 @@ YML
     mcp)         printf '"$T_BIN/node" "$T_MCP" &\nwait\n' > "$T/agent.sh" ;;
     other)       printf '"$T_BIN/vite" "$T_PREVIEW" &\nwait\n' > "$T/agent.sh" ;;
     wrongscript) printf '"$T_BIN/node" "$T_PREVIEW" &\nwait\n' > "$T/agent.sh" ;;
+    elsewhere)   mkdir -p "$T/.hindsight/coding-agents/dist"
+                 printf 'read -r x <> "$T_BLK"\n' > "$T/.hindsight/coding-agents/dist/mcp-server.js"
+                 printf '"$T_BIN/node" "$T/.hindsight/coding-agents/dist/mcp-server.js" &\nwait\n' > "$T/agent.sh" ;;
     grandchild)  printf '( "$T_BIN/node" "$T_MCP" & wait ) &\nwait\n' > "$T/agent.sh" ;;
     none)        printf 'exec 3<>"$T_BLK"; read -r -u 3 x\n' > "$T/agent.sh" ;;
   esac
   env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
       CEL_ROLE_FILE="$GC_WS/.cel/role-worker.md" CEL_WORKSPACE="$GC_WS" \
-      T_BIN="$T/bin" T_BLK="$T/blk" T_MCP="$HOME/.hindsight/coding-agents/dist/mcp-server.js" T_PREVIEW="$T/preview.js" \
+      T="$T" T_BIN="$T/bin" T_BLK="$T/blk" T_MCP="$HOME/.hindsight/coding-agents/dist/mcp-server.js" T_PREVIEW="$T/preview.js" \
       "$T/bin/claude" "$T/agent.sh" </dev/null &
   GC_PID=$!
   trap 'builtin kill -9 "$GC_PID" 2>/dev/null || true; pkill -9 -f "$T/" 2>/dev/null || true; rm -rf "$T"' EXIT
@@ -1694,7 +1697,7 @@ test_gc_identity_refuses_a_helper_with_the_right_name_and_the_wrong_script() {
 # worktree) are both retired.
 test_gc_idle_stop_retires_a_collected_row_whose_pane_binding_is_stale() {
   _gc_done_fixture collected done
-  jq '.[0].pane = "w1:gone"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  jq '.[0].pane = "w1:gone" | .[0].alias = "widget-abc-1-task"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
   local before; before="$(cat "$GC_WS/.cel/delegations.json")"
   local out; out="$(_gc_idle_stop_run 60)"
   assert_eq "$(cat "$GC_SINK")" "close w9:p2" || { echo "$out"; return 1; }
@@ -1723,6 +1726,40 @@ test_gc_idle_stop_keeps_dirty_work_on_a_collected_row() {
   _gc_done_fixture collected done
   printf 'x' > "$GC_WT/uncommitted.txt"
   _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
+
+# F4: the helper is the declared path under THIS user's home, not anything that
+# ends with the same suffix. `node <elsewhere>/.hindsight/.../mcp-server.js` is
+# another program with the same tail and is a veto.
+test_gc_identity_refuses_a_look_alike_helper_outside_home() {
+  _gc_claude_fixture elsewhere
+  assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo || return 1
+  assert_fails _gc_agents_removable "$GC_AGENTS" "$PWD" demo
+}
+
+# the control: the same shape under $HOME passes (see the accepts-a-verified-
+# runtime test above), so the veto above is about provenance and nothing else.
+
+# F5: rebinding by cwd is tied to the delegation row. The sole agent in the
+# worktree is retired only when herdr's name for it IS the row's alias.
+test_gc_idle_stop_rebinds_a_stale_pane_only_to_the_agent_the_row_names() {
+  _gc_done_fixture collected done
+  jq '.[0].pane = "w1:gone" | .[0].alias = "widget-abc-1-task"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
+  rm -rf "$T"
+}
+test_gc_idle_stop_keeps_a_stranger_in_the_worktree_when_the_pane_is_stale() {
+  _gc_done_fixture collected done
+  jq '.[0].pane = "w1:gone" | .[0].alias = "someone-elses-worker"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ""
+  # and a row with no alias at all binds nothing
+  jq 'del(.[0].alias)' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
+  rm -f "$T/idle-stop.json"; _gc_idle_stop_run 60 >/dev/null
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }

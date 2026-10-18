@@ -198,9 +198,28 @@ _update_agents_check() { # read-only: installed vs latest per installed agent; 1
   return "$rc"
 }
 
+# The way back is recorded THE MOMENT a version moved - success, failure and
+# still-behind alike (an updater can move the version and then fail) - and
+# durably: merged under a lock, written to a unique temp file and renamed, so a
+# kill mid-write leaves the previous record intact, never a torn file.
+_update_record_previous() { # <agent> <old version>
+  local a="$1" old="$2" f tmp
+  f="$(_update_dir)/agents-previous.json"
+  mkdir -p "$(_update_dir)" || return 1
+  (
+    flock -x 9 || exit 1
+    tmp="$(mktemp "$f.XXXXXX")" || exit 1
+    if [ -s "$f" ] && jq -e . "$f" >/dev/null 2>&1; then
+      jq -c --arg a "$a" --arg v "$old" '.[$a] = (.[$a] // $v)' "$f" >"$tmp" || { rm -f "$tmp"; exit 1; }
+    else
+      jq -nc --arg a "$a" --arg v "$old" '{($a): $v}' >"$tmp" || { rm -f "$tmp"; exit 1; }
+    fi
+    mv -f "$tmp" "$f"
+  ) 9>"$f.lock"
+}
+
 _update_agents() { # returns 1 when any component failed or is still behind
-  local a bin cmd old new latest out rc=0 shown=0 changed='{}' prev_file held="" f
-  prev_file="$(_update_dir)/agents-previous.json"
+  local a bin cmd old new latest out rc=0 shown=0 held="" f
   c_hd "Agents"
   for a in $(agent_names); do
     cmd="$(agent_update_get "$a" command)"
@@ -215,11 +234,17 @@ _update_agents() { # returns 1 when any component failed or is still behind
       printf '  %s %s held (update.hold) - not updated\n' "$a" "$old"
       held="$held $a"; continue
     fi
-    if ! out="$(_update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" 2>&1)"; then
-      c_err "$a $old: update FAILED - $(printf '%s' "$out" | tail -1 | cut -c1-160)"
+    local ok=1
+    out="$(_update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" 2>&1)" || ok=0
+    new="$(_update_agent_version "$a")" || new="?"
+    # a version that moved is recorded BEFORE any failure branch (F1)
+    if [ "$old" != "?" ] && [ "$new" != "?" ] && [ "$old" != "$new" ]; then
+      _update_record_previous "$a" "$old" || { c_err "$a: could not record previous version $old in $(_update_dir)"; rc=1; }
+    fi
+    if [ "$ok" -eq 0 ]; then
+      c_err "$a $old: update FAILED${new:+ (now $new)} - $(printf '%s' "$out" | tail -1 | cut -c1-160)"
       rc=1; continue
     fi
-    new="$(_update_agent_version "$a")" || new="?"
     if [ "$new" = "?" ]; then
       c_err "$a: the updater succeeded but the installed version cannot be read ($bin --version)"; rc=1; continue
     fi
@@ -229,20 +254,12 @@ _update_agents() { # returns 1 when any component failed or is still behind
       rc=1
     elif [ "$old" != "$new" ]; then
       printf '  %s %s -> %s%s\n' "$a" "$old" "$new" "${latest:+ (latest $latest)}"
-      changed="$(jq -c --arg a "$a" --arg v "$old" '.[$a] = $v' <<<"$changed")"
     else
       if [ -n "$latest" ]; then printf '  %s %s (current)\n' "$a" "$new"
       else printf '  %s %s (updater reports nothing newer; published latest unknown)\n' "$a" "$new"; fi
     fi
   done
   [ "$shown" -eq 1 ] || printf '  no coding agent with an update command is installed\n'
-  # What to go back to: only versions that CHANGED are recorded, merged over
-  # the previous record, so a no-op rerun never erases the way back.
-  if [ "$changed" != '{}' ]; then
-    mkdir -p "$(_update_dir)"
-    if [ -s "$prev_file" ]; then jq -c --argjson c "$changed" '. + $c' "$prev_file" >"$prev_file.tmp" && mv "$prev_file.tmp" "$prev_file"
-    else printf '%s\n' "$changed" >"$prev_file"; fi
-  fi
   # Pins are reported by name, never folded into "current".
   f="$(agent_get pi extensions_file)"
   if [ -n "$held" ] || { have pi && [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ]; }; then
@@ -309,10 +326,51 @@ _update_pi_extensions() {
 # Servers the legacy adapter serves on this box, from the host config it
 # imports (~/.claude.json user scope). Definitions are copied VERBATIM (command,
 # args, env, headers, type, url): values are never printed, only names.
-_update_pi_mcp_sources() { # -> JSON object name -> definition
-  local c="$HOME/.claude.json"
-  [ -r "$c" ] || { printf '{}'; return 0; }
-  jq -c '(.mcpServers // {}) | with_entries(select(.value | type == "object"))' "$c" 2>/dev/null || printf '{}'
+# Every user-level host config the adapter imports from (its IMPORT_PATHS and
+# shared-global file, read from the installed adapter's config.ts for 2.34.0).
+# Merged here; conflicting definitions of one name, an unreadable file, or a
+# source we cannot convert (codex/opencode) are BLOCKERS, collected in
+# UPD_MCP_BLOCK so the adapter is kept with the reason instead of losing a server.
+_update_pi_mcp_files() {
+  printf '%s\n' "$HOME/.config/mcp/mcp.json" "$HOME/.cursor/mcp.json" "$HOME/.claude/mcp.json" \
+    "$HOME/.claude.json" "$HOME/.claude/claude_desktop_config.json" "$HOME/.windsurf/mcp.json"
+}
+
+_update_pi_mcp_sources() { # sets UPD_MCP_SRC (JSON object name -> definition) and UPD_MCP_BLOCK; NOT run in a subshell
+  local f js out='{}' name a b
+  for f in $(_update_pi_mcp_files); do
+    [ -e "$f" ] || continue
+    js="$(jq -c '(.mcpServers // {}) | with_entries(select(.value | type == "object"))' "$f" 2>/dev/null)" \
+      || { UPD_MCP_BLOCK="$UPD_MCP_BLOCK; $f exists but is not readable JSON"; continue; }
+    for name in $(jq -r 'keys[]' <<<"$js"); do
+      a="$(jq -c --arg n "$name" '.[$n]' <<<"$out")"; b="$(jq -c --arg n "$name" '.[$n]' <<<"$js")"
+      if [ "$a" != null ] && [ "$a" != "$b" ]; then
+        UPD_MCP_BLOCK="$UPD_MCP_BLOCK; server $name is defined differently in two host configs ($f)"
+      fi
+    done
+    out="$(jq -c --argjson js "$js" '$js + .' <<<"$out")"
+  done
+  # sources the adapter reads that this migration does not convert
+  for f in "$HOME/.codex/config.toml" "$HOME/.codex/config.json"; do
+    [ -e "$f" ] && grep -q 'mcp' "$f" 2>/dev/null && UPD_MCP_BLOCK="$UPD_MCP_BLOCK; $f carries MCP definitions that are not migrated"
+  done
+  f="$HOME/.config/opencode/opencode.json"
+  if [ -e "$f" ] && jq -e '(.mcp // {}) | length > 0' "$f" >/dev/null 2>&1; then
+    UPD_MCP_BLOCK="$UPD_MCP_BLOCK; $f carries MCP definitions that are not migrated"
+  fi
+  UPD_MCP_SRC="$out"
+}
+
+# The built-in client's server schema (pi 1.2.0 docs/mcp.md). Anything outside it
+# (the adapter's directTools/toolPrefix/include/excludeTools/approveTools/lifecycle,
+# top-level settings/imports/claudePlugins) has no proven built-in equivalent.
+_update_pi_mcp_foreign_keys() { # <mcp.json content> -> JSON list of offending paths
+  jq -c '
+    ((keys - ["mcpServers", "autoEnableCodemode"]) | map("top-level " + .)) as $top
+    | ([ (.mcpServers // {}) | to_entries[] | .key as $n
+        | (.value | keys - ["command","args","env","cwd","url","headers","oauth","type","timeout","enabled","exposure","toolExposure","description"])[]
+        | "server " + $n + " key " + . ]) as $srv
+    | $top + $srv' <<<"$1"
 }
 
 _update_pi_mcp() {
@@ -323,11 +381,25 @@ _update_pi_mcp() {
   [ -n "$adapter" ] || return 0
   c_hd "Pi MCP (built-in replaces pi-mcp-adapter)"
   mcp="$(_update_pi_dir)/mcp.json"
-  src="$(_update_pi_mcp_sources)"
+  UPD_MCP_BLOCK=""; UPD_MCP_SRC="{}"
+  _update_pi_mcp_sources
+  src="$UPD_MCP_SRC"
   cur='{}'; [ -s "$mcp" ] && cur="$(jq -c '.' "$mcp" 2>/dev/null)" || true
   [ -n "$cur" ] || { c_err "$mcp is not valid JSON - left untouched; adapter kept"; return 1; }
-  # existing built-in entries win; only missing names are added
-  merged="$(jq -c --argjson src "$src" '.mcpServers = (($src) + (.mcpServers // {}))' <<<"$cur")" || { c_err "could not merge MCP definitions - adapter kept"; return 1; }
+  # existing built-in entries win; only missing names are added. A migrated
+  # entry without an `exposure` gets the built-in default stated explicitly
+  # (codemode: reachable on demand, not declared to the model) - the closest
+  # match to the adapter's single proxy tool, which also declared no per-server
+  # tools.
+  merged="$(jq -c --argjson src "$src" '.mcpServers = (($src | map_values(. + (if has("exposure") then {} else {exposure: "codemode"} end))) + (.mcpServers // {}))' <<<"$cur")" || { c_err "could not merge MCP definitions - adapter kept"; return 1; }
+  local foreign; foreign="$(_update_pi_mcp_foreign_keys "$merged")"
+  if [ "$foreign" != "[]" ]; then
+    UPD_MCP_BLOCK="$UPD_MCP_BLOCK; settings with no proven built-in equivalent: $(jq -r 'join(", ")' <<<"$foreign")"
+  fi
+  if [ -n "$UPD_MCP_BLOCK" ]; then
+    c_err "MCP migration blocked (nothing written, adapter kept):${UPD_MCP_BLOCK#;}"
+    return 1
+  fi
   if [ "$merged" != "$cur" ]; then
     mkdir -p "$(dirname "$mcp")"
     tmp="$(mktemp "$(dirname "$mcp")/.mcp.XXXXXX")"
@@ -359,6 +431,7 @@ _update_pi_mcp() {
   fi
   if _update_pi remove "$adapter" >/dev/null 2>&1; then
     printf '  migrated: %s; removed %s\n' "$(jq -r 'keys | join(", ")' <<<"$src")" "$adapter"
+    printf '  tool access changes path, not names: the adapter exposed one `mcp` proxy tool; the built-in client registers mcp__<server>__<tool> (exposure codemode) - project-level .mcp.json/.pi/mcp.json are not touched.\n'
   else
     c_err "pi remove $adapter FAILED - definitions are migrated, adapter still installed"; rc=1
   fi

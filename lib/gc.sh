@@ -264,6 +264,8 @@ _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
 # in _gc_process_identity (pid, birth, pane, role, session, comm); what is
 # widened is ONLY this: every OTHER foreground process must be a declared
 # helper (agents.yaml `owned_children`) that is
+#   - exactly the declared path under $HOME (no suffix trust),
+#   - exactly the declared path under $HOME (no suffix trust),
 #   - a DIRECT child of the verified root pid (a grandchild is not owned),
 #   - born after the root (its start tick is not earlier),
 #   - in the same herdr pane (HERDR_PANE_ID inherited),
@@ -321,7 +323,13 @@ _gc_fg_helpers_owned() { # <root-pid> <runtime> <process-info json> <pane>
     while IFS=$'\t' read -r argv0 suffix; do
       [ -n "$argv0" ] && [ -n "$suffix" ] || continue
       [ "${args[0]##*/}" = "$argv0" ] || continue
-      case "${args[1]}" in *"$suffix") matched=1; break ;; esac
+      # EXACT PROVENANCE, not a suffix: the declared path anchored at this
+      # user's home (or its realpath). `node /tmp/.hindsight/.../mcp-server.js`
+      # ends with the same suffix and is some other program.
+      if [ "${args[1]}" = "$HOME$suffix" ] \
+         || { [ -e "${args[1]}" ] && [ "$(readlink -f "${args[1]}")" = "$(readlink -f "$HOME$suffix" 2>/dev/null)" ]; }; then
+        matched=1; break
+      fi
     done < <(agent_owned_children "$rt")
     [ "$matched" -eq 1 ] || return 1
   done
@@ -1112,7 +1120,7 @@ _gc_tell_waiter_stopped() { # <wsdir> <ws> <ledger> <id> <mb>
 # `landed`, `released`, `abandoned` rows belong to the done/worktree passes.
 _GC_RETIRE_STATES="running finished collected reported salvaged"
 _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
-  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt agent status now since mb head waiter prst
+  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt alias agent status now since mb head waiter prst
   [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
   now="${CEL_GC_NOW:-$(date +%s)}"
   local file prev='{}' next='{}' freed=0 kept=0 what=""
@@ -1123,7 +1131,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
     [ -n "$ws" ] || continue
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
     f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
-    while IFS=$'\t' read -r id pane wt; do
+    while IFS=$'\t' read -r id pane wt alias; do
       [ -n "$pane" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
       agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
       # A STALE PANE BINDING (AH-261018): the row names a pane that no longer
@@ -1139,7 +1147,12 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
             | if length == 1 then .[0] else empty end')"
           [ -n "$agent" ] || continue
           pane="$(printf '%s' "$agent" | jq -r '.pane_id // ""')"
-          [ -n "$pane" ] || continue ;;
+          [ -n "$pane" ] || continue
+          # BOUND TO THE ROW: the sole agent in the worktree is this row's only
+          # if herdr's name for it IS the row's alias. A different (or any
+          # unnamed) occupant is somebody else's runtime and is kept.
+          { [ "$alias" != "-" ] && [ -n "$alias" ] \
+            && [ "$(printf '%s' "$agent" | jq -r '.name // ""')" = "$alias" ]; } || continue ;;
       esac
       status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
       case "$status" in idle|done) ;; *) continue ;; esac
@@ -1196,7 +1209,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
     done < <(jq -r --arg states "$_GC_RETIRE_STATES" '.[]? | select((.state // "") as $s | ($states | split(" ")) | index($s))
                     | select((.replacement.role // "") != "source")
-                    | [(.id // ""), ((.pane // "") | if . == "" then "-" else . end), (.worktree // "")] | @tsv' "$f" 2>/dev/null)
+                    | [(.id // ""), ((.pane // "") | if . == "" then "-" else . end), (.worktree // ""), ((.alias // "") | if . == "" then "-" else . end)] | @tsv' "$f" 2>/dev/null)
   done <<< "$names"
   if [ "$dry" -eq 0 ]; then
     mkdir -p "$(dirname "$file")" 2>/dev/null && printf '%s\n' "$next" > "$file" 2>/dev/null || true

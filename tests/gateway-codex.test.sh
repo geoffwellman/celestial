@@ -291,3 +291,70 @@ test_native_registration_never_touches_the_vault_or_prefixes() {
   assert_eq "$(find "$T/state/auth" -type f -exec sha256sum {} + | sort)" "$before"
   _gwc_teardown
 }
+
+# ------------------------------------------------ F2: omp writer is non-destructive
+test_omp_launch_write_never_rewrites_existing_entries_or_deletes_unpublished_ids() {
+  _gwc_setup
+  local f="$T/omp/models.yml"
+  gateway_omp_models_write "$f" "$T/catalog.json" || { _gwc_teardown; return 1; }
+  # owner-tuned entry, a retired id, an unrelated provider
+  yq -y '.providers["celgw-codex"].models |= map(if .id == "gpt-5.5" then .contextWindow = 555 else . end)
+         | .providers["celgw-codex"].models += [{"id":"gpt-retired-1","contextWindow":7}]
+         | .providers.mine = {"baseUrl":"https://example.invalid","apiKey":"MINE"}' "$f" >"$T/x" && mv "$T/x" "$f"
+  local stamp; stamp="$(stat -c %i%Y "$f")"; sleep 1.1
+  gateway_omp_models_write "$f" "$T/catalog.json" || { _gwc_teardown; return 1; }
+  assert_eq "$(yq -r '.providers["celgw-codex"].models[] | select(.id=="gpt-5.5") | .contextWindow' "$f")" 555
+  assert_eq "$(yq -r '[.providers["celgw-codex"].models[].id] | index("gpt-retired-1") != null' "$f")" true
+  assert_eq "$(yq -r '.providers.mine.apiKey' "$f")" MINE
+  assert_eq "$(stat -c %i%Y "$f")" "$stamp"       # an unchanged publish touches nothing
+  # an explicit refresh lets the catalog win, still deleting nothing
+  GATEWAY_PI_WRITE=refresh gateway_omp_models_write "$f" "$T/catalog.json"
+  assert_eq "$(yq -r '.providers["celgw-codex"].models[] | select(.id=="gpt-5.5") | .contextWindow' "$f")" 272000
+  assert_eq "$(yq -r '[.providers["celgw-codex"].models[].id] | index("gpt-retired-1") != null' "$f")" true
+  _gwc_teardown
+}
+
+# ------------------------------------------------ F3: concurrent publication
+# N parallel launch-writers (each publishing one unique id) plus a refresh, pi
+# AND omp: no lost update, and the symlink and file mode of an existing file are
+# kept.
+test_concurrent_pi_and_omp_publication_loses_no_update_and_keeps_link_and_mode() {
+  _gwc_setup
+  mkdir -p "$T/real"
+  printf '{"providers":{}}' >"$T/real/models.json"; chmod 640 "$T/real/models.json"
+  rm -f "$T/pi/models.json"; ln -s "$T/real/models.json" "$T/pi/models.json"
+  printf 'providers: {}\n' >"$T/real/models.yml"; chmod 640 "$T/real/models.yml"
+  ln -s "$T/real/models.yml" "$T/omp/models.yml"
+  cat >"$T/gwstub-n" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '{"data":[{"id":"claude-w%s"},{"id":"omp/claude-w%s"},{"id":"gpt-w%s"}]}' "$GWC_N" "$GWC_N" "$GWC_N" ;;
+esac
+EOS
+  chmod +x "$T/gwstub-n"; export CEL_GATEWAY_STUB="$T/gwstub-n"
+  local n pids=""
+  printf '[{"id":"claude-w1"},{"id":"claude-w2"},{"id":"claude-w3"},{"id":"claude-w4"},{"id":"claude-w5"},{"id":"claude-w6"}]' >"$T/cat6.json"
+  for n in 1 2 3 4 5 6; do
+    ( export GWC_N=$n; gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat6.json" ) &
+    pids="$pids $!"
+  done
+  ( export GWC_N=7; GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json"; GATEWAY_PI_WRITE=refresh gateway_omp_models_write "$T/omp/models.yml" "$T/cat6.json" ) &
+  pids="$pids $!"
+  local p rc=0; for p in $pids; do wait "$p" || rc=1; done
+  assert_eq "$rc" 0
+  for n in 1 2 3 4 5 6 7; do
+    jq -e --arg id "claude-w$n" '[.providers["ompgw-claude"].models[].id] | index($id) != null' "$T/real/models.json" >/dev/null \
+      || { echo "pi lost claude-w$n"; _gwc_teardown; return 1; }
+    jq -e --arg id "gpt-w$n" '[.providers["ompgw-codex"].models[].id] | index($id) != null' "$T/real/models.json" >/dev/null \
+      || { echo "pi lost gpt-w$n"; _gwc_teardown; return 1; }
+    yq -e --arg id "gpt-w$n" '[.providers["celgw-codex"].models[].id] | index($id) != null' "$T/real/models.yml" >/dev/null \
+      || { echo "omp lost gpt-w$n"; _gwc_teardown; return 1; }
+  done
+  [ -L "$T/pi/models.json" ] && [ -L "$T/omp/models.yml" ] || { echo "a symlink was replaced by a regular file"; _gwc_teardown; return 1; }
+  assert_eq "$(stat -c %a "$T/real/models.json")" 640
+  assert_eq "$(stat -c %a "$T/real/models.yml")" 640
+  jq -e . "$T/real/models.json" >/dev/null || { echo "torn models.json"; _gwc_teardown; return 1; }
+  unset CEL_GATEWAY_STUB
+  _gwc_teardown
+}

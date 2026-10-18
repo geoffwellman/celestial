@@ -54,8 +54,12 @@ YML
 case "\$1" in
   --version) printf '$a %s\n' "\$(cat "$T/$a.ver")" ;;
   update) printf '$a update\n' >>"$LOG"
-          [ ! -e "$T/$a.fail" ] || { echo "registry unreachable" >&2; exit 1; }
-          [ -e "$T/$a.stuck" ] || cp "$T/$a.latest" "$T/$a.ver" ;;
+          if [ -e "$T/$a.fail" ]; then
+            # an updater that MOVES the version and then fails (or stops short)
+            [ ! -e "$T/$a.movefail" ] || cp "$T/$a.latest" "$T/$a.ver"
+            echo "registry unreachable" >&2; exit 1
+          fi
+          [ -e "$T/$a.stuck" ] || { if [ -e "$T/$a.short" ]; then printf '1.0.5\n' >"$T/$a.ver"; else cp "$T/$a.latest" "$T/$a.ver"; fi; } ;;
   install) printf '$a install %s\n' "\$2" >>"$LOG"; printf '%s\n' "\$2" >"$T/$a.ver" ;;
 esac
 EOS
@@ -315,4 +319,94 @@ test_launch_writer_never_rewrites_existing_model_metadata_or_touches_an_unchange
   assert_eq "$(jq '.providers["ompgw-claude"].models[0].contextWindow' "$T/pi/models.json")" 1000000
   unset CEL_GATEWAY_STUB CEL_PI_AGENT_DIR
   rm -rf "$T"
+}
+
+
+# ----------------------------------------------- F1: the way back is durable
+# A version that moved and then FAILED (or stopped short of latest) must still
+# have its old version recorded; the record survives a torn temp file and
+# parallel writers.
+test_update_records_the_old_version_when_the_updater_moves_it_and_then_fails() {
+  _uag_fixture
+  : >"$T/alpha.fail"; : >"$T/alpha.movefail"
+  local rc=0; cmd_update >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "failed update exited 0"; _uag_cleanup; return 1; }
+  assert_eq "$(cat "$T/alpha.ver")" 1.1.0
+  assert_eq "$(jq -r '.alpha' "$CEL_UPDATE_DIR/agents-previous.json")" 1.0.0 || { _uag_cleanup; return 1; }
+  # and the rollback actually restores it
+  : >"$LOG"; _update_agents_rollback >/dev/null 2>&1
+  assert_eq "$(cat "$T/alpha.ver")" 1.0.0
+  _uag_cleanup
+}
+
+test_update_records_the_old_version_when_the_updater_stops_short_of_latest() {
+  _uag_fixture
+  : >"$T/alpha.short"
+  local rc=0; cmd_update >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "behind exited 0"; _uag_cleanup; return 1; }
+  assert_eq "$(cat "$T/alpha.ver")" 1.0.5
+  assert_eq "$(jq -r '.alpha' "$CEL_UPDATE_DIR/agents-previous.json")" 1.0.0
+  _uag_cleanup
+}
+
+test_update_previous_record_survives_a_torn_temp_file_and_parallel_writers() {
+  _uag_fixture
+  mkdir -p "$CEL_UPDATE_DIR"
+  printf '{"seed":"0.9.0"}\n' >"$CEL_UPDATE_DIR/agents-previous.json"
+  printf '{"torn' >"$CEL_UPDATE_DIR/agents-previous.json.tmp"   # a writer killed mid-write
+  local i
+  for i in 1 2 3 4 5 6 7 8; do _update_record_previous "agent$i" "1.$i.0" & done
+  wait
+  jq -e . "$CEL_UPDATE_DIR/agents-previous.json" >/dev/null || { echo "record is not valid JSON"; _uag_cleanup; return 1; }
+  assert_eq "$(jq -r 'keys | length' "$CEL_UPDATE_DIR/agents-previous.json")" 9
+  assert_eq "$(jq -r '.seed' "$CEL_UPDATE_DIR/agents-previous.json")" 0.9.0
+  _uag_cleanup
+}
+
+# --------------------------------------------- F6: MCP migration continuity
+test_update_keeps_the_adapter_when_two_host_configs_define_one_server_differently() {
+  _uag_pi_fixture
+  mkdir -p "$HOME/.cursor"
+  printf '{"mcpServers":{"hindsight":{"command":"other"}}}' >"$HOME/.cursor/mcp.json"
+  local out rc=0; out="$(_update_pi_mcp 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "conflict migrated"; _uag_cleanup; return 1; }
+  assert_contains "$out" "defined differently"
+  ! grep -q 'pi remove' "$LOG" || { echo "adapter removed over a conflict"; _uag_cleanup; return 1; }
+  [ ! -e "$T/piagent/mcp.json" ] || { echo "wrote mcp.json while blocked"; _uag_cleanup; return 1; }
+  _uag_cleanup
+}
+
+test_update_merges_every_host_config_the_adapter_imports() {
+  _uag_pi_fixture
+  mkdir -p "$HOME/.cursor"
+  printf '{"mcpServers":{"extra":{"command":"node","args":["/e.js"]}}}' >"$HOME/.cursor/mcp.json"
+  _update_pi_mcp >/dev/null 2>&1
+  assert_eq "$(jq -r '.mcpServers | keys | join(",")' "$T/piagent/mcp.json")" "extra,hindsight"
+  assert_eq "$(jq -r '.mcpServers.extra.exposure' "$T/piagent/mcp.json")" codemode
+  _uag_cleanup
+}
+
+test_update_keeps_the_adapter_for_sources_it_cannot_convert_or_settings_with_no_equivalent() {
+  _uag_pi_fixture
+  mkdir -p "$HOME/.codex"; printf '[mcp_servers.x]\ncommand="x"\n' >"$HOME/.codex/config.toml"
+  local out rc=0; out="$(_update_pi_mcp 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "codex source ignored"; _uag_cleanup; return 1; }
+  assert_contains "$out" "config.toml"
+  rm -rf "$HOME/.codex"
+  printf '{"mcpServers":{"hindsight":{"command":"node","directTools":true}},"settings":{"toolPrefix":"short"}}' >"$T/piagent/mcp.json"
+  out="$(_update_pi_mcp 2>&1)" && { echo "adapter-only settings migrated"; _uag_cleanup; return 1; }
+  assert_contains "$out" "directTools"; assert_contains "$out" "settings"
+  ! grep -q 'pi remove' "$LOG" || { echo "adapter removed"; _uag_cleanup; return 1; }
+  _uag_cleanup
+}
+
+# a stdio server that is configured but does not connect with tools is a gap
+test_update_keeps_the_adapter_when_a_stdio_server_discovers_no_tools() {
+  _uag_pi_fixture
+  sed -i 's/"tools":\[[^]]*\]/"tools":[]/' "$T/bin/pi"
+  sed -i 's/(if .value.url then \[\] else \["hindsight_diagnose"\] end)/[]/' "$T/bin/pi"
+  local out rc=0; out="$(_update_pi_mcp 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "toolless stdio server accepted"; _uag_cleanup; return 1; }
+  ! grep -q 'pi remove' "$LOG" || { echo "adapter removed"; _uag_cleanup; return 1; }
+  _uag_cleanup
 }
