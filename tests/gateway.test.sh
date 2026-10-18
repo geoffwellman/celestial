@@ -373,8 +373,10 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   assert_eq "$(jq -r '.providers.ompgw.baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)/v1"
   assert_eq "$(jq -r '.providers.ompgw.headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
   assert_eq "$(jq -r '.providers.ompgw.api' "$f")" openai-completions
-  assert_eq "$(jq -r '.providers.ompgw.models[0].id' "$f")" "gpt-5.5"
-  assert_eq "$(jq -r '.providers.ompgw.models[0].contextWindow' "$f")" 272000
+  # AH-261018: Codex ids ride the Responses provider, never chat completions.
+  assert_eq "$(jq -r '.providers["ompgw-codex"].api' "$f")" openai-responses
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].id' "$f")" "gpt-5.5"
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].contextWindow' "$f")" 272000
   # Claude models get pi's Anthropic surface, which the gateway serves at
   # /v1/messages - the same accounts, the richer protocol.
   assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)"
@@ -419,7 +421,7 @@ test_pi_models_use_canonical_opus_thinking_capabilities_only() {
   assert_eq "$(jq -r "$opus55 | .compat.supportsStrictTools" "$f")" true
   assert_eq "$(jq -r "$other_opus | has(\"reasoning\")" "$f")" false
   assert_eq "$(jq -r "$unknown | has(\"reasoning\")" "$f")" false
-  assert_eq "$(jq -r '.providers.ompgw.models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
   _gw_teardown
 }
 
@@ -639,7 +641,7 @@ test_pi_models_skip_the_omp_scoped_ids() {
   cmd_gateway install --no-start >/dev/null
   export GW_MODELS='{"data":[{"id":"gpt-5.5"},{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"}]}'
   gateway_pi_models_write "$T/pi/models.json"
-  assert_eq "$(jq -r '[.providers[].models[].id] | join(",")' "$T/pi/models.json")" "gpt-5.5,claude-sonnet-4-6"
+  assert_eq "$(jq -r '[.providers[].models[].id] | sort | join(",")' "$T/pi/models.json")" "claude-sonnet-4-6,gpt-5.5"
   unset GW_MODELS
   _gw_teardown
 }
