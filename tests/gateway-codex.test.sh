@@ -377,3 +377,25 @@ test_launch_write_keeps_owner_provider_fields_and_refresh_restores_them() {
   assert_eq "$(jq -r '.providers["ompgw-codex"].compat.k' "$T/pi/models.json")" 1   # refresh never deletes unknown keys
   _gwc_teardown
 }
+
+
+# review contract: the plane owns name/baseUrl/apiKey/api and the x-session-id
+# header; every other provider key and every other header survives launch AND
+# refresh; x-session-id is present even when an owner header block lacks it.
+test_provider_contract_keeps_foreign_keys_and_always_carries_the_session_header() {
+  _gwc_setup
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/catalog.json"
+  jq '.providers["ompgw-codex"].headers = {"x-owner":"1"} | .providers["ompgw-codex"].extraKey = {"deep":{"n":2}}' "$T/pi/models.json" >"$T/x" && mv "$T/x" "$T/pi/models.json"
+  yq -y '.providers["celgw-codex"].headers = {"x-owner":"1"} | .providers["celgw-codex"].extraKey = {"deep":{"n":2}}' "$T/omp/models.yml" >"$T/x" && mv "$T/x" "$T/omp/models.yml"
+  local mode
+  for mode in launch refresh; do
+    GATEWAY_PI_WRITE=$mode gateway_pi_models_write "$T/pi/models.json"; GATEWAY_PI_WRITE=$mode gateway_omp_models_write "$T/omp/models.yml" "$T/catalog.json"
+    assert_eq "$(jq -r '.providers["ompgw-codex"].headers["x-owner"]' "$T/pi/models.json")" 1 || { echo "pi $mode"; return 1; }
+    assert_eq "$(jq -r '.providers["ompgw-codex"].headers["x-session-id"]' "$T/pi/models.json")" '$CEL_SESSION_ID' || { echo "pi $mode"; return 1; }
+    assert_eq "$(jq -r '.providers["ompgw-codex"].extraKey.deep.n' "$T/pi/models.json")" 2 || { echo "pi $mode"; return 1; }
+    assert_eq "$(yq -r '.providers["celgw-codex"].headers["x-owner"]' "$T/omp/models.yml")" 1 || { echo "omp $mode"; return 1; }
+    assert_eq "$(yq -r '.providers["celgw-codex"].headers["x-session-id"]' "$T/omp/models.yml")" CEL_SESSION_ID || { echo "omp $mode"; return 1; }
+    assert_eq "$(yq -r '.providers["celgw-codex"].extraKey.deep.n' "$T/omp/models.yml")" 2 || { echo "omp $mode"; return 1; }
+  done
+  _gwc_teardown
+}

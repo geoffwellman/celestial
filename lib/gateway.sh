@@ -486,7 +486,8 @@ _gateway_pi_publish() { # <real path> <models json>
     # fills in what is missing; a refresh lets the plane values win.
     def pblk($old; $new):
       (if $refresh then ($old // {}) + ($new | del(.models)) else ($new | del(.models)) + ($old // {}) end)
-      + { models: $new.models };
+      + { headers: (if $refresh then (($old.headers // {}) + $new.headers) else ($new.headers + ($old.headers // {})) end),
+          models: $new.models };
     ([$models[] | select(.codex == true) | del(.codex)]) as $codex
     | ([$models[] | select(.codex != true) | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.codex != true) | select(.id | test("^claude") | not)]) as $rest
@@ -780,7 +781,9 @@ _gateway_omp_publish() { # <real path> <claude block> <codex block> <n claude> <
           | if $e == null then $e0 elif $refresh then $e + $e0 else $e0 + $e end ]
         + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
       def blk($key; $b): (.providers[$key] // {}) as $o
-        | (if $refresh then ($o + ($b | del(.models))) else (($b | del(.models)) + $o) end) + { models: mm($o.models; $b.models) };
+        | (if $refresh then ($o + ($b | del(.models))) else (($b | del(.models)) + $o) end)
+          + { headers: (if $refresh then (($o.headers // {}) + $b.headers) else ($b.headers + ($o.headers // {})) end),
+              models: mm($o.models; $b.models) };
       .providers = ((.providers // {})
         + (if $nc > 0 then {($k): blk($k; $c)} else {} end)
         + (if $nx > 0 then {($k + "-codex"): blk($k + "-codex"; $x)} else {} end))' <<<"$cur" \
