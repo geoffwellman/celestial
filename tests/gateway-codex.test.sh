@@ -358,3 +358,22 @@ EOS
   unset CEL_GATEWAY_STUB
   _gwc_teardown
 }
+
+# F2/review: PROVIDER-level fields an owner or repair set (headers, compat, extra
+# keys) survive a launch in BOTH files; a refresh lets the plane values win.
+test_launch_write_keeps_owner_provider_fields_and_refresh_restores_them() {
+  _gwc_setup
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/catalog.json"
+  jq '.providers["ompgw-codex"].headers["x-extra"] = "owner" | .providers["ompgw-codex"].compat = {"k":1} | .providers["ompgw-codex"].baseUrl = "http://owner.invalid/v1"' "$T/pi/models.json" >"$T/x" && mv "$T/x" "$T/pi/models.json"
+  yq -y '.providers["celgw-codex"].headers["x-extra"] = "owner" | .providers["celgw-codex"].compat = {"k":1}' "$T/omp/models.yml" >"$T/x" && mv "$T/x" "$T/omp/models.yml"
+  gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/catalog.json"
+  assert_eq "$(jq -r '.providers["ompgw-codex"].headers["x-extra"]' "$T/pi/models.json")" owner
+  assert_eq "$(jq -r '.providers["ompgw-codex"].compat.k' "$T/pi/models.json")" 1
+  assert_eq "$(jq -r '.providers["ompgw-codex"].baseUrl' "$T/pi/models.json")" "http://owner.invalid/v1"
+  assert_eq "$(yq -r '.providers["celgw-codex"].headers["x-extra"]' "$T/omp/models.yml")" owner
+  assert_eq "$(yq -r '.providers["celgw-codex"].compat.k' "$T/omp/models.yml")" 1
+  GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-codex"].baseUrl' "$T/pi/models.json")" "http://127.0.0.1:8317/v1"
+  assert_eq "$(jq -r '.providers["ompgw-codex"].compat.k' "$T/pi/models.json")" 1   # refresh never deletes unknown keys
+  _gwc_teardown
+}
