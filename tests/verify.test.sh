@@ -24,7 +24,7 @@ test_gate_passes_and_fails_by_exit_code() {
   _vrepo; _vcommit impl src/a.ts
   "$VERIFY" "$T" --gate 'true' --quiet
   assert_eq "$(_v .gate.configured)" true; assert_eq "$(_v .gate.passed)" true
-  "$VERIFY" "$T" --gate 'echo boom; false' --quiet && { echo "failing gate exited 0"; rm -rf "$T"; return 1; }
+  "$VERIFY" "$T" --gate 'echo boom; false' --quiet && { echo "failing gate exited 0"; rm -rf "$T" "$ART"; return 1; }
   assert_eq "$(_v .gate.passed)" false
   assert_contains "$(_v .gate.tail)" "boom"
   rm -rf "$T"
@@ -91,7 +91,7 @@ test_a_gate_killed_by_the_timeout_has_no_verdict() {
   assert_contains "$(_v .gate.tail)" "working"
   assert_contains "$(_v .gate.tail)" "killed after 1s - no verdict"
   assert_contains "$out" "gate:TIMEOUT(1s)"
-  case "$out" in *gate:FAIL*) echo "a timeout rendered as FAIL"; rm -rf "$T"; return 1;; esac
+  case "$out" in *gate:FAIL*) echo "a timeout rendered as FAIL"; rm -rf "$T" "$ART"; return 1;; esac
   rm -rf "$T"
 }
 test_a_genuinely_failing_gate_still_exits_one() {
@@ -178,10 +178,10 @@ test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
   assert_eq "$(_v .gate.passed)" true
   local waited; waited="$(_v .gate.waited_secs)"
   case "$waited" in
-    ''|*[!0-9]*) printf 'the wait for the suite lock was not recorded: [%s]\n' "$waited"; rm -rf "$T"; return 1;;
+    ''|*[!0-9]*) printf 'the wait for the suite lock was not recorded: [%s]\n' "$waited"; rm -rf "$T" "$ART"; return 1;;
   esac
   if [ "$waited" -lt 1 ]; then
-    printf 'the wait for the suite lock was not recorded: [%s]s\n' "$waited"; rm -rf "$T"; return 1
+    printf 'the wait for the suite lock was not recorded: [%s]s\n' "$waited"; rm -rf "$T" "$ART"; return 1
   fi
   rm -rf "$T"
 }
@@ -203,7 +203,7 @@ test_lock_in_timeout_counts_the_lock_wait_against_the_gate() {
   assert_eq "$rc" 2
   assert_eq "$(_v .gate.timed_out)" true
   assert_contains "$(_v .gate.tail)" "suite lock"
-  [ ! -e "$T/gate-ran" ] || { echo "the gate ran after its time was spent waiting"; rm -rf "$T"; return 1; }
+  [ ! -e "$T/gate-ran" ] || { echo "the gate ran after its time was spent waiting"; rm -rf "$T" "$ART"; return 1; }
   rm -rf "$T"
 }
 
@@ -249,7 +249,7 @@ test_the_gate_timeout_watchdog_does_not_keep_the_suite_lock() {
   local i=0
   while ! flock -n "$lock" -c true >/dev/null 2>&1; do
     sleep 0.1; i=$((i + 1))
-    [ "$i" -lt 20 ] || { echo "the suite lock outlived the verifier that took it"; rm -rf "$T"; return 1; }
+    [ "$i" -lt 20 ] || { echo "the suite lock outlived the verifier that took it"; rm -rf "$T" "$ART"; return 1; }
   done
   rm -rf "$T"
 }
@@ -280,7 +280,7 @@ test_a_gate_killed_by_a_signal_has_no_verdict_rather_than_failing() {
   assert_eq "$(_v .gate.timed_out)" false
   assert_contains "$(_v .gate.no_verdict_reason)" "SIGTERM"
   assert_contains "$out" "gate:NO-VERDICT"
-  case "$out" in *gate:FAIL*) echo "a gate that said nothing rendered as FAIL"; rm -rf "$T"; return 1;; esac
+  case "$out" in *gate:FAIL*) echo "a gate that said nothing rendered as FAIL"; rm -rf "$T" "$ART"; return 1;; esac
   rm -rf "$T"
 }
 
@@ -402,7 +402,8 @@ test_a_process_the_gate_leaves_behind_does_not_hold_the_suite_lock() {
 # the attempt and the head, recorded in the verdict next to the exact exit.
 _vev() { # a repo plus an isolated artifact root
   _vrepo; _vcommit impl src/a.ts
-  export CEL_VERIFY_ARTIFACT_DIR="$T/artifacts"
+  # OUTSIDE the repo: an artifact root inside a git work tree is refused
+  ART="$(mktemp -d)"; chmod 700 "$ART"; export CEL_VERIFY_ARTIFACT_DIR="$ART"
 }
 _vev_gate_fail() { printf 'echo "start"; echo "MARKER-FAIL: test_the_one_that_broke"; for i in $(seq 1 40); do echo "ok line $i"; done; echo "1 failed"; exit 3'; }
 
@@ -412,10 +413,10 @@ test_a_failed_gate_keeps_its_full_output_and_records_exit_and_artifact() {
   assert_eq "$rc" 1
   assert_eq "$(_v .gate.passed)" false; assert_eq "$(_v .gate.code)" 3; assert_eq "$(_v .gate.outcome)" fail
   local art; art="$(_v .gate.artifact)"
-  [ -f "$art" ] || { echo "no artifact at [$art]"; rm -rf "$T"; return 1; }
-  grep -q "MARKER-FAIL: test_the_one_that_broke" "$art" || { echo "the failure marker is not in the artifact"; rm -rf "$T"; return 1; }
+  [ -f "$art" ] || { echo "no artifact at [$art]"; rm -rf "$T" "$ART"; return 1; }
+  grep -q "MARKER-FAIL: test_the_one_that_broke" "$art" || { echo "the failure marker is not in the artifact"; rm -rf "$T" "$ART"; return 1; }
   # the marker is NOT in the 12-line display tail - that is the whole point
-  case "$(_v .gate.tail)" in *MARKER-FAIL*) echo "fixture too short"; rm -rf "$T"; return 1;; esac
+  case "$(_v .gate.tail)" in *MARKER-FAIL*) echo "fixture too short"; rm -rf "$T" "$ART"; return 1;; esac
   assert_eq "$(stat -c %a "$art")" 600
   assert_eq "$(_v .gate.head)" "$(git -C "$T" rev-parse HEAD)"
   assert_eq "$(_v .gate.output_sha256)" "$(sha256sum "$art" | cut -d' ' -f1)"
@@ -426,10 +427,10 @@ test_passing_timeout_and_no_gate_stay_distinct_and_keep_evidence() {
   _vev
   "$VERIFY" "$T" --gate 'echo all-good' --quiet
   assert_eq "$(_v .gate.outcome)" pass
-  grep -q all-good "$(_v .gate.artifact)" || { echo "pass lost its output"; rm -rf "$T"; return 1; }
+  grep -q all-good "$(_v .gate.artifact)" || { echo "pass lost its output"; rm -rf "$T" "$ART"; return 1; }
   local rc=0; "$VERIFY" "$T" --gate 'echo got-this-far; sleep 30' --gate-timeout 1 --quiet || rc=$?
   assert_eq "$rc" 2; assert_eq "$(_v .gate.outcome)" timeout
-  grep -q got-this-far "$(_v .gate.artifact)" || { echo "a timed-out gate lost its partial output"; rm -rf "$T"; return 1; }
+  grep -q got-this-far "$(_v .gate.artifact)" || { echo "a timed-out gate lost its partial output"; rm -rf "$T" "$ART"; return 1; }
   "$VERIFY" "$T" --quiet
   assert_eq "$(_v .gate.outcome)" none; assert_eq "$(_v .gate.artifact)" null
   rm -rf "$T"
@@ -441,10 +442,10 @@ test_repeated_attempts_never_overwrite_earlier_evidence() {
   local a1; a1="$(_v .gate.artifact)"
   "$VERIFY" "$T" --gate 'echo second-attempt; exit 2' --quiet || true
   local a2; a2="$(_v .gate.artifact)"
-  [ "$a1" != "$a2" ] || { echo "two attempts share an artifact"; rm -rf "$T"; return 1; }
-  grep -q first-attempt "$a1" && grep -q second-attempt "$a2" || { echo "an attempt's evidence was lost"; rm -rf "$T"; return 1; }
+  [ "$a1" != "$a2" ] || { echo "two attempts share an artifact"; rm -rf "$T" "$ART"; return 1; }
+  grep -q first-attempt "$a1" && grep -q second-attempt "$a2" || { echo "an attempt's evidence was lost"; rm -rf "$T" "$ART"; return 1; }
   assert_eq "$(_v .gate.attempt | grep -c .)" 1
-  assert_eq "$(wc -l < "$T/artifacts/attempts.jsonl" | tr -d ' ')" 2
+  assert_eq "$(wc -l < "$ART/attempts.jsonl" | tr -d ' ')" 2
   rm -rf "$T"
 }
 
@@ -453,7 +454,64 @@ test_the_artifact_directory_is_private_and_outside_the_worktree() {
   _vev
   "$VERIFY" "$T" --gate 'echo x' --quiet
   local art; art="$(_v .gate.artifact)"
-  case "$art" in "$T/artifacts/"*) ;; *) echo "artifact outside the configured root: $art"; rm -rf "$T"; return 1;; esac
+  case "$art" in "$ART/"*) ;; *) echo "artifact outside the configured root: $art"; rm -rf "$T" "$ART"; return 1;; esac
   assert_eq "$(stat -c %a "$(dirname "$art")")" 700
   rm -rf "$T"
+}
+
+
+# ----------------------------- termination of the VERIFIER itself (review limit b)
+_vev_wait_for() { # <file> <text>
+  local i; for i in $(seq 1 100); do grep -q "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1
+}
+_vev_art_dir() { local i d; for i in $(seq 1 100); do d="$(ls -d "$ART"/*/*/ 2>/dev/null | head -1)"; [ -n "$d" ] && { printf '%s' "$d"; return 0; }; sleep 0.1; done; return 1; }
+_vev_gate_cleanup() { [ -s "$T/gate.pid" ] && kill -9 -- "-$(cat "$T/gate.pid")" 2>/dev/null || true; }
+_vev_gate() { printf 'echo $$ > "%s/gate.pid"; echo %s; sleep 61' "$T" "$1"; }
+
+test_a_terminated_verifier_keeps_the_partial_output_and_records_no_verdict() {
+  _vev
+  "$VERIFY" "$T" --gate "$(_vev_gate partial-before-term)" --quiet & local vp=$!
+  local art; art="$(_vev_art_dir)" || { echo "no artifact dir"; kill -9 $vp; rm -rf "$T" "$ART"; return 1; }
+  _vev_wait_for "${art}gate.log" partial-before-term || { echo "gate output never reached the artifact"; kill -9 $vp; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  kill -TERM "$vp"; local rc=0; wait "$vp" || rc=$?
+  assert_eq "$rc" 3
+  assert_eq "$(_v .gate.outcome)" no_verdict
+  assert_contains "$(_v .gate.no_verdict_reason)" "terminated by SIGTERM"
+  grep -q partial-before-term "$(_v .gate.artifact)" || { echo "partial output lost"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  assert_eq "$(jq -r .state "$(dirname "$(_v .gate.artifact)")/attempt.json")" completed
+  assert_eq "$(wc -l < "$ART/attempts.jsonl" | tr -d ' ')" 1
+  ! kill -0 -- "-$(cat "$T/gate.pid")" 2>/dev/null || { echo "the gate group survived its verifier"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  rm -rf "$T" "$ART"
+}
+
+# SIGKILL cannot be handled: no verdict and no final index can be written. What
+# MUST survive is every byte the gate had already printed, and an attempt record
+# that still says it never finished - never a completed-looking verdict.
+test_a_sigkilled_verifier_still_leaves_the_output_and_an_unfinished_attempt_record() {
+  _vev
+  "$VERIFY" "$T" --gate "$(_vev_gate bytes-before-kill)" --quiet & local vp=$!
+  local art; art="$(_vev_art_dir)" || { echo "no artifact dir"; kill -9 $vp; rm -rf "$T" "$ART"; return 1; }
+  _vev_wait_for "${art}gate.log" bytes-before-kill || { echo "gate output never reached the artifact"; kill -9 $vp; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  kill -9 "$vp"; wait "$vp" 2>/dev/null || true
+  grep -q bytes-before-kill "${art}gate.log" || { echo "SIGKILL erased evidence"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  assert_eq "$(jq -r .state "${art}attempt.json")" running
+  [ ! -f "$T/.agent/verdict.json" ] || { echo "a SIGKILLed verifier produced a verdict"; _vev_gate_cleanup; rm -rf "$T" "$ART"; return 1; }
+  _vev_gate_cleanup
+  rm -rf "$T" "$ART"
+}
+
+# raw gate output must never be committable or readable by others
+test_an_unsafe_artifact_root_is_refused_before_the_gate_runs() {
+  _vev
+  local rc=0
+  CEL_VERIFY_ARTIFACT_DIR="$T/inside" "$VERIFY" "$T" --gate "touch $T/ran" --quiet 2>/dev/null || rc=$?
+  assert_eq "$rc" 4
+  [ ! -e "$T/ran" ] || { echo "the gate ran despite an unsafe artifact root"; rm -rf "$T" "$ART"; return 1; }
+  chmod 755 "$ART"; rc=0
+  "$VERIFY" "$T" --gate "touch $T/ran2" --quiet 2>/dev/null || rc=$?
+  assert_eq "$rc" 4
+  [ ! -e "$T/ran2" ] || { echo "the gate ran with a world-readable root"; rm -rf "$T" "$ART"; return 1; }
+  chmod 700 "$ART"; "$VERIFY" "$T" --gate true --quiet
+  assert_eq "$(_v .gate.outcome)" pass
+  rm -rf "$T" "$ART"
 }
