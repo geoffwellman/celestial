@@ -260,10 +260,13 @@ _fanout_verdict_stub() { # <worktree> <reason>
   local wt="$1" tmp
   tmp="$wt/.agent/.verdict.stub.$$"
   mkdir -p "$wt/.agent"
+  # under the same lock cel-verify publishes with, so a stub can never interleave
+  # with (or be clobbered by) another attempt's publication
+  ( flock -x 8 2>/dev/null || true
   jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg why "$2" \
     '{at:$at, state:"no_verdict_stub", gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
       tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0}, checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}' > "$tmp" \
-    && mv -f "$tmp" "$wt/.agent/verdict.json"
+    && mv -f "$tmp" "$wt/.agent/verdict.json" ) 8>"$wt/.agent/verdict.lock"
 }
 _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   local wsdir="$1" id="$2" entry="$3"
@@ -293,8 +296,11 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   # about the suite outgrowing it); land is a human waiting, so for land the
   # queue counts.
   local lock_flag=""; [ "$verb" = land ] && lock_flag=--lock-in-timeout
-  local v_t0 v_err v_rc
+  local v_t0 v_err v_rc v_id
   v_t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # THE INVOCATION'S IDENTITY, not its start time: minted here, handed to the
+  # verifier, and the only verdict this call will accept is the one carrying it.
+  v_id="fo-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
   v_err="$(mktemp "${TMPDIR:-/tmp}/cel-verify-err.XXXXXX")"; v_rc="$v_err.rc"
   if [ -f "$wt/.agent/verdict.json" ]; then
     mkdir -p "$wt/.agent/verdict-history"
@@ -305,7 +311,7 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
            eval "$(ws_env_exports "$wsdir" 2>/dev/null)" >/dev/null 2>&1 || true
            _ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} \
              ${gate_timeout:+--gate-timeout "$gate_timeout"} ${lock_flag:+"$lock_flag"} \
-             --branch "$branch" 2>"$v_err"; printf '%s' "$?" > "$v_rc" )"
+             --branch "$branch" --attempt-id "$v_id" 2>"$v_err"; printf '%s' "$?" > "$v_rc" )"
   _ledger_relock
   # exit codes 0/1/2/3 are verdicts the verifier chose (pass, fail, timeout,
   # no-verdict); anything else - 4 (refused), a signal, a crash - produced none.
@@ -320,10 +326,29 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   esac
   if [ ! -f "$wt/.agent/verdict.json" ]; then
     _fanout_verdict_stub "$wt" "the verifier left no verdict this run"
-  elif [ "$(jq -r '.state // ""' "$wt/.agent/verdict.json" 2>/dev/null)" = running ] \
-      || [ "$(jq -r '.at // ""' "$wt/.agent/verdict.json" 2>/dev/null)" \< "$v_t0" ]; then
-    # not completed, or older than this invocation: not this run's answer
-    _fanout_verdict_stub "$wt" "the verdict on disk predates this verification or never completed"
+  else
+    # ACCEPT ONLY THIS INVOCATION'S OWN VERDICT: attempt == the id handed over, a
+    # completed verdict (or this attempt's own no-verdict stub), and - when a gate
+    # ran - gate evidence taken on the head the worktree is on NOW. Another
+    # attempt's completion on this worktree (collect during land, an older head
+    # before a push) never authorises this caller. A verdict with NO attempt field
+    # is accepted only through the CEL_FANOUT_VERIFY test seam, and then only if it
+    # is not older than the invocation.
+    local vj="$wt/.agent/verdict.json" v_att v_state v_ran v_ghead v_cur v_at
+    v_att="$(jq -r '.attempt // ""' "$vj" 2>/dev/null)"; v_state="$(jq -r '.state // ""' "$vj" 2>/dev/null)"
+    v_ran="$(jq -r '.gate.ran // false' "$vj" 2>/dev/null)"; v_ghead="$(jq -r '.gate.head // .head // ""' "$vj" 2>/dev/null)"
+    v_at="$(jq -r '.at // ""' "$vj" 2>/dev/null)"; v_cur="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$v_att" ]; then
+      if [ "$v_att" != "$v_id" ]; then
+        _fanout_verdict_stub "$wt" "the verdict on disk belongs to attempt $v_att, not this invocation ($v_id) - another verification overlapped on this worktree"
+      elif [ "$v_state" != completed ] && [ "$v_state" != no_verdict_stub ]; then
+        _fanout_verdict_stub "$wt" "this invocation's verdict never completed (state: ${v_state:-none})"
+      elif [ "$v_state" = completed ] && [ "$v_ran" = true ] && [ -n "$v_ghead" ] && [ "$v_ghead" != "$v_cur" ]; then
+        _fanout_verdict_stub "$wt" "the gate ran on $v_ghead but the worktree is on $v_cur now - that evidence is for another head"
+      fi
+    elif [ -z "${CEL_FANOUT_VERIFY:-}" ] || [ "$v_state" = running ] || [ "$v_at" \< "$v_t0" ]; then
+      _fanout_verdict_stub "$wt" "the verdict on disk carries no attempt identity or predates this verification"
+    fi
   fi
   # WHAT WAS READ BEFORE THE GATE IS RE-READ AFTER IT. Minutes passed with the
   # ledger unlocked, so the row may have been released, re-delegated or landed

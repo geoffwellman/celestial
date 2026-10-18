@@ -546,3 +546,26 @@ test_a_sigkilled_attempt_after_an_old_pass_leaves_no_verdict_not_the_old_pass() 
   assert_eq "$(_v .gate.outcome)" no_verdict
   _vev_gate_cleanup; rm -rf "$T" "$ART"
 }
+
+# ------------------------------------------- invocation identity (review G1)
+test_an_older_slower_attempt_never_overwrites_a_newer_attempts_verdict() {
+  _vev
+  "$VERIFY" "$T" --attempt-id OLD1 --gate 'sleep 3; echo old-gate' --quiet & local op=$!
+  local i; for i in $(seq 1 100); do [ "$(jq -r .attempt "$T/.agent/verdict.json" 2>/dev/null)" = OLD1 ] && break; sleep 0.1; done
+  "$VERIFY" "$T" --attempt-id NEW1 --gate 'echo new-gate' --quiet
+  assert_eq "$(_v .attempt)" NEW1; assert_eq "$(_v .state)" completed; assert_eq "$(_v .gate.outcome)" pass
+  local rc=0; wait "$op" || rc=$?
+  assert_eq "$rc" 3                                   # the older attempt reports it was superseded
+  assert_eq "$(_v .attempt)" NEW1                      # ...and did NOT overwrite the newer verdict
+  assert_eq "$(_v .gate.outcome)" pass
+  assert_eq "$(jq -r .attempt "$T/.agent/verdict-history/OLD1.final.json")" OLD1   # its own result is kept, aside
+  rm -rf "$T" "$ART"
+}
+test_a_completed_verdict_records_its_attempt_and_the_head_it_gated() {
+  _vev
+  "$VERIFY" "$T" --attempt-id HEAD1 --gate true --quiet
+  assert_eq "$(_v .head)" "$(git -C "$T" rev-parse HEAD)"
+  assert_eq "$(_v .gate.head)" "$(git -C "$T" rev-parse HEAD)"
+  assert_eq "$(_v .attempt)" HEAD1; assert_eq "$(_v .gate.attempt)" HEAD1
+  rm -rf "$T" "$ART"
+}
