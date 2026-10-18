@@ -229,10 +229,10 @@ case "\$1" in
   install) printf 'pi install %s\n' "\$2" >>"$LOG"; [ ! -e "$T/install.fail" ] || exit 1
            n="\${2#npm:}"; n="\${n%@*}"; v="\${2##*@}"; mkdir -p "$T/piagent/npm/node_modules/\$n"
            printf '{"version":"%s"}' "\$v" >"$T/piagent/npm/node_modules/\$n/package.json"
-           jq --arg s "\$2" '.packages += [\$s]' "$T/piagent/settings.json" >"$T/s.tmp" && mv "$T/s.tmp" "$T/piagent/settings.json" ;;
+           jq --arg s "\$2" --arg n "npm:\$n" '.packages = ([.packages[] | select(. != \$n and (startswith(\$n + "@") | not))] + [\$s])' "$T/piagent/settings.json" >"$T/s.tmp" && mv "$T/s.tmp" "$T/piagent/settings.json" ;;
   remove) printf 'pi remove %s\n' "\$2" >>"$LOG"
           jq --arg s "\$2" '.packages -= [\$s]' "$T/piagent/settings.json" >"$T/s.tmp" && mv "$T/s.tmp" "$T/piagent/settings.json" ;;
-  mcp) [ "\$2" = list ] && printf '{"servers":[{"name":"hindsight","state":"connected"}]}' ;;
+  mcp) [ "\$2" = list ] && jq -c '{servers: [ (.mcpServers // {}) | to_entries[] | {name: .key, state: (if .value.url then "needs-auth" else "connected" end), tools: (if .value.url then [] else ["hindsight_diagnose"] end)} ], errors: []}' "$T/piagent/mcp.json" ;;
 esac
 EOS
   chmod +x "$T/bin/pi"
@@ -247,7 +247,7 @@ test_update_upgrades_a_pi_extension_below_its_pin_and_never_downgrades() {
   assert_contains "$out" "@scope/ext 9.0.0 (pin 1.0.0: current)"
   grep -q '^pi install npm:pi-subagents@0.79.0$' "$LOG" || { cat "$LOG"; _uag_cleanup; return 1; }
   ! grep -q 'npm:@scope/ext' "$LOG" || { echo "downgraded/reinstalled an ahead extension"; _uag_cleanup; return 1; }
-  # the superseded spec is dropped, so settings carries one pi-subagents entry
+  # pi install replaces the same package's spec: one pi-subagents entry
   assert_eq "$(jq -r '[.packages[] | select(startswith("npm:pi-subagents"))] | join(",")' "$T/piagent/settings.json")" "npm:pi-subagents@0.79.0"
   # idempotent
   : >"$LOG"; _update_pi_extensions >/dev/null 2>&1

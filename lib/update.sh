@@ -270,6 +270,10 @@ _update_agents() { # returns 1 when any component failed or is still behind
 # reported, not hidden.
 
 _update_pi_dir() { gateway_pi_dir; }
+# pi reads PI_CODING_AGENT_DIR; cel resolves the root it manages (PR177). Every
+# pi call here pins the former to the latter so the directory written is the
+# directory pi reads, whatever the caller's environment carries.
+_update_pi() { PI_CODING_AGENT_DIR="$(_update_pi_dir)" pi "$@"; }
 
 _update_pkg_version() { # <npm name> -> installed version or empty
   jq -r '.version // empty' "$(_update_pi_dir)/npm/node_modules/$1/package.json" 2>/dev/null || true
@@ -277,10 +281,9 @@ _update_pkg_version() { # <npm name> -> installed version or empty
 
 _update_pi_extensions() {
   have pi || return 0
-  local f line name want have_v spec rc=0 shown=0 settings old
+  local f line name want have_v rc=0 shown=0
   f="$(agent_get pi extensions_file)"
   [ -n "$f" ] && [ -s "$CEL_ROOT/$f" ] || return 0
-  settings="$(_update_pi_dir)/settings.json"
   c_hd "Pi extensions"
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
@@ -291,12 +294,11 @@ _update_pi_extensions() {
       printf '  %s %s (pin %s: current)\n' "$name" "$have_v" "$want"; continue
     fi
     shown=1
-    old="$(jq -r --arg n "npm:$name" '[.packages[]? | strings | select(. == $n or startswith($n + "@"))] | .[0] // empty' "$settings" 2>/dev/null || true)"
-    if ! pi install "npm:$line" >/dev/null 2>&1; then
+    if ! _update_pi install "npm:$line" >/dev/null 2>&1; then
       c_err "$name ${have_v:-missing}: pi install npm:$line FAILED - previous version left in place"; rc=1; continue
     fi
-    # the installer adds the new spec; drop the superseded one, if it differs
-    if [ -n "$old" ] && [ "$old" != "npm:$line" ]; then pi remove "$old" >/dev/null 2>&1 || true; fi
+    # (`pi install` replaces the existing spec of the same package: verified on pi
+    # 1.2.0. A `pi remove` of the old spec would remove the NEW install too.)
     have_v="${have_v:-missing}"
     printf '  %s %s -> %s\n' "$name" "$have_v" "$(_update_pkg_version "$name")"
   done < "$CEL_ROOT/$f"
@@ -332,22 +334,30 @@ _update_pi_mcp() {
     ( umask 077; printf '%s\n' "$(jq . <<<"$merged")" >"$tmp" ) && chmod 600 "$tmp" && mv "$tmp" "$mcp" \
       || { rm -f "$tmp"; c_err "could not write $mcp - adapter kept"; return 1; }
   fi
-  # every adapter-served name must now be a built-in server that pi can list
-  local listed; listed="$(pi mcp list --json 2>/dev/null)" || listed=""
+  # Proof against the OBSERVED contract (pi 1.2.0): `pi mcp list --json` prints
+  # {servers:[{name,scope,source,enabled,exposure,transport,state,tools[]}],errors[]}
+  # with state "connected" | "needs-auth" | ... and exits 1 when any server is
+  # not connected. Presence in mcp.json is not proof: a stdio server must be
+  # connected AND have discovered tools; an HTTP server that is "needs-auth" is
+  # a pending sign-in (`pi mcp login <server>`), never assumed fine.
+  local listed st nt; listed="$(_update_pi mcp list --json 2>/dev/null)" || true
+  [ -n "$listed" ] && jq -e '.servers | type == "array"' <<<"$listed" >/dev/null 2>&1 || listed='{"servers":[]}'
   for name in $(jq -r 'keys[]' <<<"$src"); do
     jq -e --arg n "$name" '.mcpServers[$n] != null' "$mcp" >/dev/null 2>&1 || { missing="$missing $name"; continue; }
-    # an HTTP server may need its own sign-in with the built-in client
-    if [ "$(jq -r --arg n "$name" '.[$n].url // empty' <<<"$src")" != "" ] \
-       && ! jq -e --arg n "$name" '[.. | objects | select((.name? // .server? // "") == $n) | select((.state? // .status? // "") | test("connected|ok|ready"; "i"))] | length > 0' <<<"${listed:-null}" >/dev/null 2>&1; then
-      pending="$pending $name"
+    st="$(jq -r --arg n "$name" '[.servers[] | select(.name == $n)][0].state // "absent"' <<<"$listed")"
+    nt="$(jq -r --arg n "$name" '[.servers[] | select(.name == $n)][0].tools // [] | length' <<<"$listed")"
+    if [ "$(jq -r --arg n "$name" '.[$n].url // empty' <<<"$src")" != "" ]; then
+      [ "$st" = connected ] && [ "$nt" -gt 0 ] || pending="$pending $name($st)"
+    else
+      [ "$st" = connected ] && [ "$nt" -gt 0 ] || missing="$missing $name($st,$nt tools)"
     fi
   done
   if [ -n "$missing" ]; then c_err "MCP servers not migrated:$missing - adapter kept"; return 1; fi
   if [ -n "$pending" ]; then
-    c_err "MCP server(s)$pending need the built-in client signed in (pi mcp login <server>) - adapter kept so nothing loses access; rerun cel update afterwards"
+    c_err "MCP server(s)$pending need the built-in client signed in (PI_CODING_AGENT_DIR=<root> pi mcp login <server>) - adapter kept so nothing loses access; rerun cel update afterwards"
     return 1
   fi
-  if pi remove "$adapter" >/dev/null 2>&1; then
+  if _update_pi remove "$adapter" >/dev/null 2>&1; then
     printf '  migrated: %s; removed %s\n' "$(jq -r 'keys | join(", ")' <<<"$src")" "$adapter"
   else
     c_err "pi remove $adapter FAILED - definitions are migrated, adapter still installed"; rc=1
