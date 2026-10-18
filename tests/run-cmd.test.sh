@@ -120,7 +120,7 @@ test_run_reviewer_targets_review_tab_with_model() {
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind pi"
   assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
-  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   _ws_gateway_clean
 }
@@ -202,7 +202,7 @@ test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
   assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
-  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
 # Workspace aliases are intentional: resolve them from the configured
@@ -429,10 +429,10 @@ _ws_gateway() {
 worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
-  GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET="${PI_CODING_AGENT_DIR+x}"
-  GWT_PREVIOUS_PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-}"
+  GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET="${CEL_PI_AGENT_DIR+x}"
+  GWT_PREVIOUS_CEL_PI_AGENT_DIR="${CEL_PI_AGENT_DIR:-}"
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
-  export PI_CODING_AGENT_DIR="$GWT/pi"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
   # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
@@ -452,12 +452,12 @@ EOS
 _ws_gateway_clean() {
   rm -rf "$T" "$GWT"
   unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
-  if [ -n "${GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET:-}" ]; then
-    export PI_CODING_AGENT_DIR="$GWT_PREVIOUS_PI_CODING_AGENT_DIR"
+  if [ -n "${GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET:-}" ]; then
+    export CEL_PI_AGENT_DIR="$GWT_PREVIOUS_CEL_PI_AGENT_DIR"
   else
-    unset PI_CODING_AGENT_DIR
+    unset CEL_PI_AGENT_DIR
   fi
-  unset GWT_PREVIOUS_PI_CODING_AGENT_DIR_SET GWT_PREVIOUS_PI_CODING_AGENT_DIR
+  unset GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET GWT_PREVIOUS_CEL_PI_AGENT_DIR
 }
 
 _reviewer_gateway_fixture() {
@@ -488,11 +488,11 @@ case "$1" in
 esac
 EOS
   chmod +x "$GWT/gwstub"
-  export PI_CODING_AGENT_DIR="$GWT/pi"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
-  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
 
@@ -512,7 +512,7 @@ EOF
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env pi pi-worker
-  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  output="$(bash -c "env ${GATEWAY_ENV[*]} printenv OMP_GATEWAY_TOKEN")"
   [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
@@ -539,7 +539,7 @@ EOF
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env omp omp-worker
-  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s|%s' \"\$OMP_GATEWAY_TOKEN\" \"\$CEL_SESSION_ID\"")"
+  output="$(bash -c "env ${GATEWAY_ENV[*]} sh -c 'printf \"%s|%s\" \"\$OMP_GATEWAY_TOKEN\" \"\$CEL_SESSION_ID\"'")"
   [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
@@ -578,7 +578,7 @@ test_run_omp_worker_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)"
   assert_contains "$out" "--model celgw/omp/claude-opus-5-5"
   assert_contains "$out" "--thinking low"
-  assert_contains "$out" "export OMP_GATEWAY_TOKEN=****"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN=****"
   ! printf '%s' "$out" | grep -q 'auth-gateway' || { echo "omp launch still uses the broker token"; _ws_omp_gateway_clean; return 1; }
   ! printf '%s' "$out" | grep -q 'ompgw-claude' || { echo "omp launch still rewrites to ompgw-claude"; _ws_omp_gateway_clean; return 1; }
   # A dry run is a preview: no models.yml for a launch that never happened.
@@ -586,13 +586,15 @@ test_run_omp_worker_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
   _ws_omp_gateway_clean
 }
 
-# The pane exports omp's own agent dir and the real key-file read.
+# The omp launch pins omp's own agent dir whatever the pane carries, and
+# reads the real key file.
 test_run_omp_gateway_env_pins_the_omp_agent_dir() {
   _ws_omp_gateway "me@personal.invalid"
   export PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_profile_gateway_setup omp omp-worker 1 0
-  local out; out="$(PI_CODING_AGENT_DIR=/elsewhere/pi bash -c "${GATEWAY_ENV[*]}; printf '%s|%s' \"\$PI_CODING_AGENT_DIR\" \"\$OMP_GATEWAY_TOKEN\"")"
+  local line; line="$(_run_launch_env worker "$T" /r.md "" omp)"
+  local out; out="$(PI_CODING_AGENT_DIR=/elsewhere/pi CEL_PI_AGENT_DIR=/elsewhere/pi bash -c "$line sh -c 'printf \"%s|%s\" \"\$PI_CODING_AGENT_DIR\" \"\$OMP_GATEWAY_TOKEN\"'")"
   unset PROFILE_VIA
   assert_eq "$out" "$GWT/omp|omp-gw-test-value"
   _ws_omp_gateway_clean
@@ -634,10 +636,10 @@ EOS
 # launch that never happened is a side effect nobody asked for.
 test_run_worker_via_gateway_writes_no_models_json_on_a_dry_run() {
   _ws_gateway
-  export PI_CODING_AGENT_DIR="$GWT/pi"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run >/dev/null 2>&1 )
-  [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset PI_CODING_AGENT_DIR; _ws_gateway_clean; return 1; }
-  unset PI_CODING_AGENT_DIR
+  [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset CEL_PI_AGENT_DIR; _ws_gateway_clean; return 1; }
+  unset CEL_PI_AGENT_DIR
   _ws_gateway_clean
 }
 
@@ -822,7 +824,7 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
-  assert_contains "$(cat "$HERDR_LOG")" "pane send-text w1:p9 export OMP_GATEWAY_TOKEN="
+  assert_contains "$(cat "$HERDR_LOG")" "pane send-text w1:p9 env "
   assert_contains "$(cat "$HERDR_LOG")" "CEL_SESSION_ID=widget-pr-12-review"
   local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
   [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
@@ -851,7 +853,7 @@ test_reviewer_refuses_to_start_without_gateway_api_key() {
 test_reviewer_test_fixture_does_not_mutate_callers_pi_models() {
   local caller_pi; caller_pi="$(mktemp -d)"
   printf '%s\n' '{"providers":{"personal":{"baseUrl":"https://example.invalid"}}}' >"$caller_pi/models.json"
-  export PI_CODING_AGENT_DIR="$caller_pi"
+  export CEL_PI_AGENT_DIR="$caller_pi"
   _ws_pr_fixture
   local before; before="$(cat "$caller_pi/models.json")"
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
@@ -876,7 +878,7 @@ test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
         ;;
       "pane send-text") typed_prefix="$4" ;;
       "agent start")
-        bash -c "$typed_prefix printf '%s|%s' \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"" > "$T/agent-env"
+        bash -c "$typed_prefix sh -c 'printf \"%s|%s\" \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"'" > "$T/agent-env"
         ;;
       *) : ;;
     esac

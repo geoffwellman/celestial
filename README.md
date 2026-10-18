@@ -1047,13 +1047,32 @@ worker_profiles:
 
 For Pi profiles, `cel run worker --profile gw` and `cel-fanout delegate|scout`
 when bound to a gateway profile write the gateway's providers into
-`~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
+pi's own agent dir, `~/.pi/agent/models.json` by default (merged — the owner's other providers are untouched,
 and the model list comes from the gateway's own `/v1/models`, with plain ids:
 Claude models go through pi's `anthropic-messages` surface, everything else
-through `openai-completions`). Every gateway launch stages `OMP_GATEWAY_TOKEN`
-and `CEL_SESSION_ID` in the actual target pane's launch shell; Pi resolves its
-key there and the generated provider stores only the variable name. Delegated
-workers and scouts use their own alias as the session affinity key.
+through `openai-completions`). Every gateway launch passes `OMP_GATEWAY_TOKEN`
+and `CEL_SESSION_ID` as `env K=V` words on the launch line, scoped to the
+launched process - nothing is exported into the pane's shell, so a later command
+in that pane never inherits one agent's session key. Pi resolves its key there
+and the generated provider stores only the variable name. Delegated workers and
+scouts use their own alias as the session affinity key.
+
+**Pi and OMP never share an agent root.** Both read `PI_CODING_AGENT_DIR`, and
+OMP's startup renames every Pi-style `--home-...--` session directory under its
+root, with no check that a Pi process is live; Pi never re-creates a vanished
+directory, so its later session writes fail (this lost the unsaved tail of two
+live workers on 2026-10-17). Every launch therefore *pins*
+`PI_CODING_AGENT_DIR` to the launched runtime's own resolved root - Pi
+`~/.pi/agent`, OMP `~/.omp/agent` - and an inherited `PI_CODING_AGENT_DIR` is
+ignored, never forwarded. Deliberate custom roots are explicit:
+`CEL_PI_AGENT_DIR` (Pi) and `CEL_OMP_AGENT_DIR` (OMP). The same resolution feeds
+the models writers, the child's environment and `cel doctor`. If the two roots
+overlap - equal, aliased by symlink, or one inside the other - the launch is
+refused (and `cel doctor` fails) with the roots named; nothing is moved.
+This is prevention only: it does not repair a session already relocated, and a
+running process keeps its old environment. Never start OMP against a root that
+holds a live Pi's sessions; recovery of an already-affected worker belongs to the
+retained-runtime lifecycle (explicit session file selection), not to a launch fix.
 
 Three things are worth knowing before you rely on it:
 
