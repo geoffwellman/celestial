@@ -95,7 +95,8 @@ _verify_fence_and_stub() { # preserve whatever is there, then publish THIS attem
   fi
   _verify_stub_write "verification attempt $v_attempt started and has not completed - it was refused, aborted or killed; this is no verdict"
 }
-_verify_locked _verify_fence_and_stub
+command -v flock >/dev/null 2>&1 || { printf 'cel-verify: flock is not available - it cannot fence the previous verdict, so it refuses to run a gate\n' >&2; exit 5; }
+_verify_locked _verify_fence_and_stub || { printf 'cel-verify: cannot publish the no-verdict stub in %s/.agent (lock or write failed) - refusing to run a gate without a fence\n' "$wt" >&2; exit 5; }
 
 # --- gate ------------------------------------------------------------------
 # The artifact root must be private and OUTSIDE any git work tree: raw gate
