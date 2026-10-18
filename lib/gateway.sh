@@ -409,24 +409,39 @@ gateway_pi_models_write() { # [models.json path]
   [ -f "$f" ] || printf '{"providers":{}}' > "$f"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" '
+  # NON-DESTRUCTIVE ON LAUNCH. This runs at every gateway launch (workers,
+  # reviewers) against ONE models.json that live sessions already read.
+  # Replacing a provider's model list rewrote capability metadata under them.
+  # A launch ADDS ids that are missing and leaves existing model entries exactly
+  # as they are (existing fields win); ids no longer published are kept. Only an
+  # explicit GATEWAY_PI_WRITE=refresh lets the catalog's fields win - and even
+  # then nothing is removed. A write that changes nothing is skipped entirely.
+  local refresh=false; [ "${GATEWAY_PI_WRITE:-launch}" = refresh ] && refresh=true
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" --argjson refresh "$refresh" '
+    def mm($old; $new):
+      [ $new[] | . as $x | (($old // []) | map(select(.id == $x.id)) | .[0]) as $e
+        | if $e == null then $x elif $refresh then $e + $x else $x + $e end ]
+      + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
     ([$models[] | select(.id | test("^claude"))]) as $claude
     | ([$models[] | select(.id | test("^claude") | not)]) as $rest
-    | .providers = ((.providers // {}) + {
+    | (.providers // {}) as $cur
+    | .providers = ($cur + {
         ompgw: {
           name: "cel gateway",
           baseUrl: $url,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-completions",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: $rest },
+          models: mm($cur.ompgw.models; $rest) },
         ($claude_provider): {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: $claude } })' "$f" > "$tmp" && mv "$tmp" "$f"
+          models: mm($cur[$claude_provider].models; $claude) } })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ "$(jq -cS . "$tmp")" = "$(jq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  mv "$tmp" "$f"
 }
 
 # --- the omp provider (CEL-136) -------------------------------------------
@@ -624,7 +639,10 @@ gateway_omp_models_write() { # [models.yml] [catalog json file]
   cur='{}'; [ -s "$f" ] && cur="$(yq -c '. // {}' "$f")"
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   jq --argjson b "$block" --arg k "$GATEWAY_OMP_PROVIDER" '.providers = ((.providers // {}) + {($k): $b})' <<<"$cur" \
-    | yq -y . >"$tmp" && mv "$tmp" "$f"
+    | yq -y . >"$tmp" || { rm -f "$tmp"; return 1; }
+  # unchanged => no write (the file is shared with live sessions)
+  if [ -s "$f" ] && [ "$(yq -cS . "$tmp")" = "$(yq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
+  mv "$tmp" "$f"
 }
 
 _gateway_omp_scope_cmd() { # [--check|--apply|--json]
