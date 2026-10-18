@@ -1435,7 +1435,7 @@ cmd_status() {
     if [ "$(printf '%s' "$e" | jq -r '.verdict.gate_timed_out // false')" = true ]; then gatecol=TO
     elif [ "$(printf '%s' "$e" | jq -r '.verdict.gate_outcome // ""')" = no_verdict ]; then gatecol=NV
     else
-      case "$(printf '%s' "$e" | jq -r '.verdict.gate // ""')" in
+      case "$(printf '%s' "$e" | jq -r 'if .verdict.gate == null then "" else (.verdict.gate | tostring) end')" in
         true)  gatecol=ok ;;
         false) gatecol=FAIL ;;
         *)     gatecol=- ;;
@@ -2518,7 +2518,10 @@ cmd_land() { # <id>
   if [ -n "$gate" ] && [ -z "$ci_gate_body" ]; then
     _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout" land >/dev/null || true
     local wt gp gto gout gnvr; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
-    gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
+    # NOT `// "unknown"`: jq's alternative operator treats an explicit false as
+    # absent, so a gate that FAILED was reported as "unknown". null is unknown;
+    # false is false.
+    gp="$(jq -r 'if .gate.passed == null then "unknown" else (.gate.passed | tostring) end' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
     gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"
     gout="$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)"
     gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json" 2>/dev/null || true)"

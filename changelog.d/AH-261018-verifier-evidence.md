@@ -1,0 +1,3 @@
+### Fixed
+- `cel-verify` no longer deletes the full gate output. Every attempt (pass, fail, timeout, killed) keeps the complete output as a private artifact (`~/.local/state/cel/verify/<branch>/<head12>-<utc>-<pid>/gate.log`, 0700/0600, outside the worktree, never overwritten, indexed in `attempts.jsonl`); the verdict records `gate.artifact`, `output_sha256`, `output_bytes`, `attempt` and `head` next to the exact exit code. The 12-line tail remains the display text.
+- `cel-fanout land` and `status` no longer collapse an explicit `gate: false` into "unknown": land says `verdict: false`, and status shows `FAIL` for a failed gate (jq `//` treats false as absent).
