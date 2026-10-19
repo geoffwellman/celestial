@@ -3398,7 +3398,7 @@ test_reuse_refuses_a_session_a_live_process_holds() {
   sh -c 'sleep 30' holder "$f" & local hp=$!
   local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
   out="$(_fanout_reuse WG-X2)" || rc=$?
-  kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
+  kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true
   _fanout_refused holder "$out" "$rc" "$before" "holds" || return 1
   rm -rf "$T"
 }

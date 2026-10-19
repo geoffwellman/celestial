@@ -740,9 +740,9 @@ Your orchestrator is not watching your pane; that message is how it learns you a
 # or by working directory), an explicit option that contradicts what the row
 # recorded, a runtime with no native resume, or a session that is missing or
 # ambiguous. No stop API is invented: a live runtime is refused, not retired.
-_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt> <receipt-opt>
-  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9" ropt="${10}"
-  RS_SESSION=""; RS_REPIN=0; RS_FROM=""; RS_RECEIPT_SHA=""
+_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt>
+  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9"
+  RS_SESSION=""
   _rec_guard "delegate --reuse" "$branch" "$row"
   local st; st="$(printf '%s' "$row" | jq -r '.state // ""')"
   case " running finished collected reported salvaged " in
@@ -770,31 +770,8 @@ _fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> 
   [ "${occupants:-0}" = 0 ] \
     || die "delegate --reuse: $occupants live agent(s) already sit in $wt - refusing to start a second on top. Nothing was changed"
 
-  # THE RE-PIN. A recovered runtime may legitimately differ from the row (the
-  # row still says DeepSeek while the continued session is Sonnet). That is
-  # never inferred from old events or restored silently: it needs an explicit
-  # --receipt, a --profile that names the recovered runtime, and a session whose
-  # LATEST native model/thinking equal the receipt and that profile. It is then
-  # recorded as a transition on the same row. The receipt is PROVENANCE, never a
-  # launch grant: its expiry is not consulted - the live-agent probes above are
-  # the current quiescence check.
-  if [ -n "$ropt" ] && [ -n "$popt" ] && [ "$popt" != "$RS_PROFILE" ]; then
-    [ -n "$sopt" ] || die "delegate --reuse: a re-pin from a receipt needs --session <the recovered session file> - nothing was changed"
-    local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO="" PROFILE_VIA=""
-    profile_resolve "$wsdir" "$popt" "$(ws_runtime "$wsdir" worker)"
-    [ -z "$PROFILE_VETO" ] || die "delegate --reuse: profile '$popt' is vetoed - $PROFILE_VETO"
-    RS_FROM="$(jq -nc --arg p "$RS_PROFILE" --arg r "$RS_RT" --arg m "$RS_MODEL" --arg t "$RS_THINKING" '{profile:$p, runtime:$r, model:$m, thinking:$t}')"
-    RS_PROFILE="$popt"; RS_RT="$PROFILE_RUNTIME"; RS_MODEL="$PROFILE_MODEL"; RS_THINKING="$PROFILE_THINKING"
-    [ -z "$mopt" ] || [ "$mopt" = "$RS_MODEL" ] || die "delegate --reuse: --model '$mopt' contradicts profile '$popt' - nothing was changed"
-    [ -z "$topt" ] || [ "$topt" = "$RS_THINKING" ] || die "delegate --reuse: --thinking '$topt' contradicts profile '$popt' - nothing was changed"
-    RS_REPIN=1
-    _fanout_verify_receipt "$ropt" "$sopt" "$(readlink -f "$wt")" "$f_alias"
-    [ -n "$(agent_resume "$RS_RT" flag)" ] || die "delegate --reuse: runtime '$RS_RT' has no native session resume - nothing was changed"
-    _fanout_resume_session "$RS_RT" "$(readlink -f "$wt")" "" "$sopt"
-    return 0
-  fi
   [ -z "$popt" ] || [ "$popt" = "$RS_PROFILE" ] \
-    || die "delegate --reuse: --profile '$popt' contradicts the recorded profile '${RS_PROFILE:-none}' - a resume keeps the original (a recovered runtime needs --receipt); nothing was changed"
+    || die "delegate --reuse: --profile '$popt' contradicts the recorded profile '${RS_PROFILE:-none}' - a resume keeps the original; nothing was changed"
   [ -z "$mopt" ] || [ "$mopt" = "$RS_MODEL" ] \
     || die "delegate --reuse: --model '$mopt' contradicts the recorded model '$RS_MODEL' - nothing was changed"
   [ -z "$topt" ] || [ "$topt" = "$RS_THINKING" ] \
@@ -814,37 +791,6 @@ _fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> 
   _fanout_resume_session "$RS_RT" "$(readlink -f "$wt")" "$(printf '%s' "$row" | jq -r '.session // ""')" "$sopt"
 }
 
-# A recovery receipt (restoration.json) is verified by what it CLAIMS against
-# what is on disk: it must name this worktree, this row's alias and the session
-# file given, whose header UUID it repeats; the original session it names must
-# still hash to its originalSha256; and what it says was requested must be what
-# the session's own latest native entries (and the chosen profile) say. Only
-# non-secret fields are read.
-_fanout_verify_receipt() { # <receipt> <session-path> <worktree> <alias>
-  local rc="$1" sess="$2" wt="$3" alias="$4"
-  [ -f "$rc" ] && jq -e . "$rc" >/dev/null 2>&1 || die "delegate --reuse: receipt '$rc' is not a readable JSON file - nothing was changed"
-  [ -f "$sess" ] || die "delegate --reuse: receipt re-pin needs --session to be the recovered session FILE ('$sess' is not one) - nothing was changed"
-  local rcwd ralias ruuid rwork rorig rsha rmodel rthink
-  { read -r rcwd; read -r ralias; read -r ruuid; read -r rwork; read -r rorig; read -r rsha; read -r rmodel; read -r rthink; } < <(
-    jq -r '(.cwd // ""), (.alias // ""), (.uuid // ""), (.workingSession // ""), (.originalSession // ""), (.originalSha256 // ""), (.requestedModel // ""), (.requestedThinking // "")' "$rc")
-  [ "$(readlink -f "$rcwd" 2>/dev/null)" = "$wt" ] || die "delegate --reuse: receipt cwd '$rcwd' is not $wt - nothing was changed"
-  [ "$ralias" = "$alias" ] || die "delegate --reuse: receipt alias '$ralias' is not the row's '$alias' - nothing was changed"
-  [ "$(readlink -f "$rwork" 2>/dev/null)" = "$(readlink -f "$sess")" ] \
-    || die "delegate --reuse: receipt workingSession is not the --session file - nothing was changed"
-  local hid; hid="$(head -n 1 "$sess" | jq -r 'select(.type == "session") | .id // ""' 2>/dev/null)"
-  [ -n "$ruuid" ] && [ "$ruuid" = "$hid" ] || die "delegate --reuse: receipt uuid '$ruuid' is not the session's own id '$hid' - nothing was changed"
-  [ -f "$rorig" ] && [ -n "$rsha" ] && [ "$(sha256sum "$rorig" | cut -d' ' -f1)" = "$rsha" ] \
-    || die "delegate --reuse: the receipt's original session is missing or no longer hashes to its originalSha256 - nothing was changed"
-  local tm tt
-  tm="$(jq -r 'select(.type == "model_change") | .modelId // empty' "$sess" 2>/dev/null | tail -n 1)"
-  tt="$(jq -r 'select(.type == "thinking_level_change") | .thinkingLevel // empty' "$sess" 2>/dev/null | tail -n 1)"
-  { [ -n "$rmodel" ] && [ "${rmodel##*/}" = "$tm" ] && [ "$rthink" = "$tt" ]; } \
-    || die "delegate --reuse: the receipt requested '$rmodel'/'$rthink' but the session's latest native entries are '$tm'/'$tt' - nothing was changed"
-  { [ "${RS_MODEL##*/}" = "$tm" ] && [ "$RS_THINKING" = "$tt" ]; } \
-    || die "delegate --reuse: profile '$RS_PROFILE' ($RS_MODEL/$RS_THINKING) disagrees with the receipt and session tail '$tm'/'$tt' - nothing was changed"
-  RS_RECEIPT_SHA="$(sha256sum "$rc" | cut -d' ' -f1)"
-}
-
 # The ONE native session to resume: the row's recorded `session`, else - for
 # pi, whose layout is verified - the session files whose header names this
 # worktree. A header cwd that is not the worktree, zero files, or several with
@@ -856,14 +802,24 @@ _fanout_verify_receipt() { # <receipt> <session-path> <worktree> <alias>
 _fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
   local rt="$1" wt="$2" rowsess="$3" opt="$4" f
   _fanout_resume_session_pick "$@"
+  # THE LATEST native model is whichever is LATER in the file: the last
+  # model_change or the last assistant message's own model (a session switches
+  # model without a model_change - the W705 file has one DeepSeek model_change
+  # and 273 Sonnet assistant turns). Compared on the model id; a provider is
+  # never inferred or invented. Thinking is the last thinking_level_change.
   local tm tt
-  tm="$(jq -r 'select(.type == "model_change") | .modelId // empty' "$RS_SESSION" 2>/dev/null | tail -n 1)"
+  tm="$(jq -r 'if .type == "model_change" then (.modelId // empty)
+               elif .type == "message" and .message.role == "assistant" then (.message.model // empty)
+               else empty end' "$RS_SESSION" 2>/dev/null | tail -n 1)"
   tt="$(jq -r 'select(.type == "thinking_level_change") | .thinkingLevel // empty' "$RS_SESSION" 2>/dev/null | tail -n 1)"
   if [ -n "$tm" ] && [ -n "$RS_MODEL" ] && [ "$tm" != "$RS_MODEL" ] && [ "${RS_MODEL##*/}" != "${tm##*/}" ]; then
-    die "delegate --reuse: the latest model in $RS_SESSION is '$tm' but the row recorded '$RS_MODEL' - the session disagrees with the row, refusing to pick one (a recovered runtime needs --receipt with a matching --profile). Nothing was changed"
+    die "delegate --reuse: the latest model in $RS_SESSION is '$tm' but the row recorded '$RS_MODEL' - the session disagrees with the row, refusing to pick one. A recovered runtime is unsupported here. Nothing was changed"
   fi
   if [ -n "$tt" ] && [ -n "$RS_THINKING" ] && [ "$tt" != "$RS_THINKING" ]; then
     die "delegate --reuse: the latest thinking level in $RS_SESSION is '$tt' but the row recorded '$RS_THINKING' - the session disagrees with the row, refusing to pick one. Nothing was changed"
+  fi
+  if pgrep -af -- "$RS_SESSION" 2>/dev/null | grep -v 'cel-fanout\|delegate' | grep -q .; then
+    die "delegate --reuse: a live process already holds $RS_SESSION - nothing was changed"
   fi
 }
 _fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
@@ -892,22 +848,11 @@ _fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
     for i in "${!ok[@]}"; do
       if [ "${ok[$i]}" = "$opt" ] || [ "${ids[$i]}" = "$opt" ]; then RS_SESSION="${ok[$i]}"; return 0; fi
     done
-    # A recovered session can live OUTSIDE the default root (a private or
-    # native-export root), where no scan finds it: an explicit existing PATH is
-    # accepted only on proof it is this row's - header cwd, UUID equal to the
-    # file's own name, and the LATEST native model event (an initial one proves
-    # nothing) agreeing with the row's model - and no process holding it now.
-    if [ -f "$opt" ]; then
-      local ehdr eid
-      ehdr="$(head -n 1 "$opt" 2>/dev/null | jq -c 'select(.type == "session")' 2>/dev/null)" || ehdr=""
-      eid="$(printf '%s' "$ehdr" | jq -r '.id // ""' 2>/dev/null)"
-      if [ -n "$ehdr" ] && [ -n "$eid" ] && [ "$(printf '%s' "$ehdr" | jq -r '.cwd // ""')" = "$wt" ] \
-         && [ "${opt##*_}" = "$eid.jsonl" ]; then
-        if pgrep -af -- "$opt" 2>/dev/null | grep -v 'cel-fanout\|delegate' | grep -q .; then
-          die "delegate --reuse: a live process already holds $opt - nothing was changed"
-        fi
-        RS_SESSION="$opt"; return 0
-      fi
+    # A session file OUTSIDE the default root is a recovered / private-root
+    # session. Resuming it under the default root would silently change the
+    # runtime's root, and preserving a private root is not implemented: refuse.
+    if [ -f "$opt" ] && [ "${opt#"$(gateway_pi_dir)/sessions/"}" = "$opt" ]; then
+      die "delegate --reuse: '$opt' is outside the default session root - resuming a RECOVERED or PRIVATE-ROOT session is unsupported (no default-root, fresh-conversation or path fallback is substituted). Nothing was changed"
     fi
     die "delegate --reuse: '$opt' is not a session of $wt (have: ${ids[*]}; an explicit path must be a session file whose header names this worktree and whose UUID is its file name) - nothing was changed"
   fi
@@ -918,9 +863,9 @@ _fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
 
 cmd_delegate() {
   _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID|PATH] [--receipt FILE]]"
+  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID|FILE]]"
   local repo="$1" branch="$2" spec="$3"; shift 3
-  local session_opt="" receipt_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
+  local session_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
@@ -932,7 +877,7 @@ cmd_delegate() {
       --adhoc)    adhoc=1; shift ;;
       --reuse)    reuse=1; shift ;;
       --session)  session_opt="$2"; shift 2 ;;
-      --receipt)  receipt_opt="$2"; shift 2 ;;
+      --receipt)  die "delegate --reuse --receipt: re-pinning a RECOVERED or PRIVATE-ROOT session is unsupported (no default root, fresh conversation or path fallback is substituted) - nothing was changed" ;;
       --shape)    shape="$2"; shift 2 ;;
       *) die "delegate: unknown argument: $1" ;;
     esac
@@ -1078,7 +1023,6 @@ cmd_delegate() {
   # pane command or a ledger write; any refusal leaves the row, the pane and the
   # worktree exactly as found.
   local existing="" prior_row="" resume_session="" RS_PROFILE="" RS_RT="" RS_MODEL="" RS_THINKING="" RS_SESSION=""
-  local RS_REPIN=0 RS_FROM="" RS_RECEIPT_SHA=""
   if [ "$reuse" -eq 1 ]; then
     prior_row="$(_ledger_entry "$wsdir" "$branch")"
     if [ -n "$prior_row" ]; then
@@ -1088,11 +1032,11 @@ cmd_delegate() {
       "$HERDR" workspace list | jq -e --arg p "$existing" '[.result.workspaces[] | select(.worktree.checkout_path == $p)] | length > 0' >/dev/null \
         || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it.
   Remove the stale checkout first: git -C '$repodir' worktree remove --force '$existing'"
-      _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt" "$receipt_opt"
+      _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
       resume_session="$RS_SESSION"
     fi
-  elif [ -n "$session_opt$receipt_opt" ]; then
-    die "delegate: --session and --receipt only apply to --reuse"
+  elif [ -n "$session_opt" ]; then
+    die "delegate: --session only applies to --reuse"
   fi
 
   if [ -z "$herdr_ws" ]; then
@@ -1440,13 +1384,6 @@ cmd_delegate() {
       | .launch = {phase:(if $s == "running" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
       --arg pane "$pane" --arg ws "$child_ws" --arg alias "$alias" --arg sess "$resume_session" \
       --arg s "$dstate" --arg at "$(_now_iso)"
-    if [ "$RS_REPIN" -eq 1 ]; then
-      _ledger_patch "$wsdir" "$branch" '.repin = {from: $from, receipt: $rc, receipt_sha256: $rsha, at: $at}
-        | .profile = $np | .runtime = $nrt | .model = $nm | .thinking = $nt | .provider = $npv
-        | .history = ((.history // []) + [{state: .state, at: $at, by: $by, note: ("re-pinned from a verified recovery receipt: " + $rc)}])' \
-        --argjson from "$RS_FROM" --arg rc "$receipt_opt" --arg rsha "$RS_RECEIPT_SHA" --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" \
-        --arg np "$profile" --arg nrt "$rt" --arg nm "$model" --arg nt "$thinking" --arg npv "$(profile_provider "$model")"
-    fi
     _ledger_update_state "$wsdir" "$branch" "$dstate"
   else
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
