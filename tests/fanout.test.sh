@@ -3356,10 +3356,10 @@ test_pi_native_session_flag_reopens_the_exact_session_without_a_model_call() {
   rm -rf "$d"
 }
 
-# ---- real-shape regressions (AMPDGC / W705 shapes), fail-closed scope ----------
+# ---- real-shape regressions (closed-workspace / recovered-session shapes), fail-closed scope ----------
 # A pi session as it really is: header, ONE initial model_change, a thinking
 # level, then assistant messages carrying message.model. The file name need not
-# end in the UUID (a recovered copy is w705-working.jsonl).
+# end in the UUID (a recovered copy is recovered-working.jsonl).
 _fanout_real_session() { # <name.jsonl> <uuid> <first-model> <assistant-model> [thinking]
   local d="$T/pi/sessions/--$(printf '%s' "$RET_WT" | sed 's|^/||; s|/|-|g')--"
   mkdir -p "$d"
@@ -3367,9 +3367,9 @@ _fanout_real_session() { # <name.jsonl> <uuid> <first-model> <assistant-model> [
     "$2" "$RET_WT" "$3" "${5:-medium}" "$4" "$4" > "$d/$1"
   printf '%s' "$d/$1"
 }
-test_reuse_resumes_an_ampd_shaped_session_by_header_uuid_whatever_the_file_name() {
+test_reuse_resumes_a_real_shaped_session_by_header_uuid_whatever_the_file_name() {
   _fanout_resume_refusal_setup
-  local f; f="$(_fanout_real_session w705-working.jsonl 01dddddd-0000-7000-8000-000000000001 orig-model orig-model medium)"
+  local f; f="$(_fanout_real_session recovered-working.jsonl 01dddddd-0000-7000-8000-000000000001 orig-model orig-model medium)"
   local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
   assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
   assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
@@ -3385,8 +3385,8 @@ test_reuse_names_a_session_by_its_header_uuid_not_its_file_name() {
 }
 test_reuse_refuses_when_the_assistant_tail_disagrees_with_the_row_even_if_the_only_model_change_agrees() {
   _fanout_resume_refusal_setup
-  # W705's shape: the initial model_change is the row's model, the real tail is another model
-  _fanout_real_session w705-working.jsonl 01dddddd-0000-7000-8000-000000000002 orig-model some/other-sonnet medium >/dev/null
+  # recovered-session's shape: the initial model_change is the row's model, the real tail is another model
+  _fanout_real_session recovered-working.jsonl 01dddddd-0000-7000-8000-000000000002 orig-model some/other-sonnet medium >/dev/null
   local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
   out="$(_fanout_reuse WG-X2)" || rc=$?
   _fanout_refused assistant-tail "$out" "$rc" "$before" "disagrees" || return 1
@@ -3419,14 +3419,14 @@ test_reuse_fails_closed_on_recovered_and_private_root_inputs() {
   out="$(_fanout_reuse WG-X2 --receipt "$T/restoration.json")" || rc=$?
   _fanout_refused receipt "$out" "$rc" "$before" "unsupported" || return 1
   # a session file OUTSIDE the default root (a recovered/private-root copy)
-  mkdir -p "$T/private"; f="$T/private/w705-working.jsonl"
+  mkdir -p "$T/private"; f="$T/private/recovered-working.jsonl"
   printf '{"type":"session","version":3,"id":"01dddddd-0000-7000-8000-000000000006","cwd":"%s"}\n' "$RET_WT" > "$f"
   rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
   _fanout_refused outside-root "$out" "$rc" "$before" "unsupported" || return 1
   rm -rf "$T"
 }
 
-# AMPDGC's real shape: the checkout exists, the row is retained, and NO herdr
+# closed-workspace's real shape: the checkout exists, the row is retained, and NO herdr
 # workspace holds the checkout (its pane/workspace was closed). The resume
 # proves everything first, then opens the EXISTING checkout (never remove,
 # never create) and resumes in it. A refusal opens nothing.
@@ -3494,12 +3494,12 @@ test_reuse_in_the_absent_workspace_shape_opens_nothing_on_any_refusal() {
   [ ! -e "$STUB_OPEN_GATE" ] || { echo "opened a workspace on a refusal"; return 1; }
   unset STUB_OPEN_GATE; rm -rf "$T"
 }
-# the actual AMPDGC row: state running, session null, default-root file, no workspace
+# the actual closed-workspace row: state running, session null, default-root file, no workspace
 test_reuse_of_a_running_row_with_no_session_field_and_no_workspace_resumes() {
   _fanout_resume_refusal_setup
   export STUB_OPEN_GATE="$T/opened"
   jq '.[0].state = "running" | .[0].session = null' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
-  local f; f="$(_fanout_real_session ampd.jsonl 01eeeeee-0000-7000-8000-000000000011 orig-model orig-model)"
+  local f; f="$(_fanout_real_session real.jsonl 01eeeeee-0000-7000-8000-000000000011 orig-model orig-model)"
   local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
   assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
   assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
@@ -3540,7 +3540,7 @@ test_afk_dispatch_gate_survives_a_spec_that_quotes_more_than_a_pipe_buffer() {
   printf '{"on":true,"since":"2026-10-19T00:00:00Z","since_epoch":1,"allow":[]}\n' > "$T/afk-state/state.json"
   python3 - "$T/huge-spec.md" <<'PY'
 import sys
-open(sys.argv[1],"w").write("Finding-from: reviewer hermes-vhs\n"+"".join("> finding line %d %s\n"%(i,"x"*80) for i in range(1500)))
+open(sys.argv[1],"w").write("Finding-from: reviewer reviewer-example\n"+"".join("> finding line %d %s\n"%(i,"x"*80) for i in range(1500)))
 PY
   [ "$(wc -c < "$T/huge-spec.md")" -gt 100000 ] || return 1
   local out rc=0
@@ -3549,7 +3549,7 @@ PY
   rm -rf "$T"
 }
 
-# exit 141 on the real W715 argv (VHS): `git worktree list --porcelain | awk ... {print p; exit}`
+# exit 141 on the real failing argv (a large repo): `git worktree list --porcelain | awk ... {print p; exit}`
 # - awk quits at the match while git is still writing the other worktrees, git
 # is SIGPIPEd and `set -o pipefail` makes the substitution fail: the delegate
 # died silently (no output, no herdr call). A repo with many worktrees triggers it.
