@@ -113,6 +113,18 @@ try:
     target = Path(sys.argv[1]).resolve(strict=True)
     found = False
     for row in rows:
+        # A bound replacement retains the checkout it was moved off (private
+        # evidence, dirty by design): that path is vetoed whatever the state.
+        binding = row.get("binding") if isinstance(row.get("binding"), dict) else {}
+        retained = (binding.get("old_tree") or {}).get("path") if binding else None
+        if isinstance(retained, str) and retained:
+            try:
+                kept = Path(retained).resolve(strict=True)
+            except OSError:
+                kept = None
+            if kept is not None and (target == kept or kept in target.parents):
+                print("live")
+                break
         worktree = Path(row["worktree"])
         if not worktree.is_absolute():
             raise ValueError("unanchored worktree")
