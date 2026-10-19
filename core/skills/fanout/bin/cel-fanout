@@ -1036,8 +1036,12 @@ cmd_delegate() {
       # through herdr's own `worktree open`: never removed, never recreated.
       # The workspace is then found by checkout path like any other reuse.
       if ! "$HERDR" workspace list | jq -e --arg p "$existing" '[.result.workspaces[] | select(.worktree.checkout_path == $p)] | length > 0' >/dev/null 2>&1; then
+        # herdr requires --workspace ID or --cwd PATH: an explicit herdr workspace
+        # when one was chosen, otherwise the repo checkout that owns the worktree
+        local -a open_scope=(--cwd "$repodir")
+        [ -z "$herdr_ws" ] || open_scope=(--workspace "$herdr_ws")
         "$HERDR" worktree open --path "$existing" --branch "$branch" --label "$branch" --no-focus \
-          ${herdr_ws:+--workspace "$herdr_ws"} >/dev/null \
+          "${open_scope[@]}" >/dev/null \
           || die "delegate --reuse: every proof passed but herdr could not open the existing checkout $existing - the row is untouched and nothing was removed or recreated (open it yourself with: herdr worktree open --path '$existing' --branch '$branch')"
         opened_ws=1
       fi
