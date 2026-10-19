@@ -287,7 +287,7 @@ cmd_recover_register() {
   # the worktree: where, on which branch, at what head
   local wt
   wt="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
-    | awk -v b="refs/heads/$branch" '/^worktree /{p=substr($0,10)} /^branch /{if (substr($0,8)==b) {print p; exit}}')"
+    | awk -v b="refs/heads/$branch" '/^worktree /{p=substr($0,10)} /^branch /{if (substr($0,8)==b && !f) {print p; f=1}}')"
   [ -n "$wt" ] && [ -d "$wt" ] || die "recover register: no worktree for branch '$branch' in $repo - refusing; nothing changed"
   [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$branch" ] || die "recover register: $wt is not on branch '$branch' - refusing; nothing changed"
   local head; head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || die "recover register: cannot read the worktree head - refusing"

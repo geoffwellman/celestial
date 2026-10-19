@@ -1033,7 +1033,7 @@ cmd_delegate() {
     prior_row="$(_ledger_entry "$wsdir" "$branch")"
     if [ -n "$prior_row" ]; then
       existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
-        | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
+        | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b && !f {print p; f=1}')"
       [ -n "$existing" ] || die "delegate --reuse: $branch has no live worktree to resume in - nothing was changed (a missing checkout is not recreated by a resume)"
       _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
       resume_session="$RS_SESSION"
@@ -1122,7 +1122,7 @@ cmd_delegate() {
   # later `release` then removes nothing and the real worktree is stranded.
   # Re-delegating after an orphaned worker is routine, so this compounded.
   existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
-    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
+    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b && !f {print p; f=1}')"
   if [ -n "$existing" ]; then
     # Find the workspace by CHECKOUT PATH, never by label: labels are not
     # unique, and matching on one is how the ledger got bound to the bare
