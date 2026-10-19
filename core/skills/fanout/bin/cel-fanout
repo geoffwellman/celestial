@@ -455,8 +455,10 @@ _ledger_append() { # <wsdir> <entry-json>
   # which row superseded which, and a rewrite must not erase it.
   _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" --arg by "$(_ledger_mover)" \
     '([.[] | select(.id == $e.id) | .replacement // empty] | first) as $rp
+     | ([.[] | select(.id == $e.id) | .binding // empty] | first) as $bd
      | map(select(.id != $e.id))
-     + [$e + (if $rp != null and ($e.replacement // null) == null then {replacement: $rp} else {} end) + {history: (($e.history // []) | if length > 0 then .
+     + [$e + (if $rp != null and ($e.replacement // null) == null then {replacement: $rp} else {} end)
+          + (if $bd != null and ($e.binding // null) == null then {binding: $bd} else {} end) + {history: (($e.history // []) | if length > 0 then .
          else [{state: ($e.state // ""), at: ($e.created // ""), by: $by}] end)}]')"
 }
 
@@ -1327,6 +1329,7 @@ cmd_collect() {
   [ -n "$entry" ] || die "no delegation with id '$id'"
   _replace_frozen collect "$id" "$entry"
   _replace_unattached collect "$id" "$entry"
+  _replace_bound_guard collect "$id" "$entry"
   _rec_guard collect "$id" "$entry"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
@@ -2396,6 +2399,7 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   if [ "$verdict" = approved ]; then
     _replace_frozen review "$id" "$entry"
     _replace_unattached review "$id" "$entry"
+    _replace_bound_guard review "$id" "$entry"
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
     # DELEGATION OWNS. The API read validates; it is never where the SHA comes
     # from. The ledger lock is dropped around the remote call (the same rule as
@@ -2536,6 +2540,7 @@ cmd_land() { # <id>
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
   _replace_frozen land "$id" "$entry"
   _replace_unattached land "$id" "$entry"
+  _replace_bound_guard land "$id" "$entry"
   _rec_guard land "$id" "$entry"
   local repo branch slug ticket
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
@@ -2983,8 +2988,10 @@ cmd_replace() { # reserve|attach ...
   case "$sub" in
     reserve) _replace_reserve "$@" ;;
     attach)  _replace_attach "$@" ;;
+    bind)    _replace_bind "$@" ;;
     *) die "usage: cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40> [--workspace NAME]
-       cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]" ;;
+       cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]
+       cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run] [--workspace NAME]" ;;
   esac
 }
 
@@ -3212,6 +3219,235 @@ _replace_attach() {
   c_ok "$id: attached to PR #$tn at ${th:0:12} - collect, review (--head $th) and land now work on it. No approval was carried over from $of"
 }
 
+# BINDING A CLEAN REPLACEMENT CHECKOUT (AH-261019).
+#
+# After `replace attach` the child row still names the ORIGINAL worker's
+# worktree, whose symbolic HEAD is the old branch and which may hold a large
+# private dirty tree. collect, cel-verify and every later worker prompt read
+# row.worktree, so they would bind and gate the wrong source.
+#
+# THE NATIVE CONTRACT this rests on (verified against herdr, not assumed):
+#   - herdr has no API that changes a running agent's working directory: `agent`
+#     and `pane` expose list/get/read/prompt/start/... and no chdir. An actor
+#     could only be moved by restarting it, which forfeits its native session,
+#     and a restart is exactly what this operation must not do.
+#   - herdr DOES report, per agent, name, pane_id, native session identity
+#     (agent_session.value) and cwd. That is the independent identity record.
+# So the actor's process cwd stays the old tree, by design, and what changes is
+# the EXPLICIT CHECKOUT BINDING: the one place the factory resolves "where is
+# this row's source" (row.worktree, read by collect, the verifier, land, review
+# and the revision prompt). The actor is told the exact clean path by inbox and
+# works there by absolute path; its identity (alias, pane, native session) is
+# recorded and re-checked by every acting verb, so a different or restarted
+# actor can never inherit the binding. Nothing is trusted from a path alone:
+# the clean checkout must be a linked worktree of the SAME repository, on the
+# child branch, at exactly the reserved head, with a clean status.
+#
+# One ledger write, under a non-waiting lock, after every check. Review and
+# gate evidence gathered on the old checkout is moved to binding.superseded and
+# removed from the row: it cannot approve a different source. The old tree is
+# only ever READ (GIT_OPTIONAL_LOCKS=0: not even an index refresh) and stays
+# registered to the frozen source row; gc vetoes binding.retained_worktree.
+_replace_real() { realpath -e -- "$1" 2>/dev/null; }
+
+_replace_actor() { # <alias> <pane> <herdr_ws> -> one-line JSON {name,pane_id,session,kind,cwd}, or fails with a reason on stdout
+  local alias="$1" pane="$2" hws="$3" l n
+  l="$("$HERDR" agent list 2>/dev/null)" || { printf 'herdr cannot list agents'; return 1; }
+  n="$(printf '%s' "$l" | jq -c --arg a "$alias" --arg p "$pane" --arg q "$hws:$pane" '
+    (.result.agents // []) as $all
+    | {named: [$all[] | select(.name == $a)], inpane: [$all[] | select(.pane_id == $p or .pane_id == $q)]}' 2>/dev/null)" \
+    || { printf 'herdr answered with an unreadable agent list'; return 1; }
+  [ "$(printf '%s' "$n" | jq '.named | length')" = 1 ] \
+    || { printf 'herdr reports %s agents named %s - the actor must be exactly one live agent' "$(printf '%s' "$n" | jq '.named | length')" "$alias"; return 1; }
+  [ "$(printf '%s' "$n" | jq '.inpane | length')" = 1 ] \
+    || { printf 'pane %s holds %s agents - ambiguous ownership' "$pane" "$(printf '%s' "$n" | jq '.inpane | length')"; return 1; }
+  printf '%s' "$n" | jq -e '.named[0].pane_id == .inpane[0].pane_id' >/dev/null \
+    || { printf 'the agent named %s is not the agent in pane %s' "$alias" "$pane"; return 1; }
+  printf '%s' "$n" | jq -c '.named[0] | {name, pane_id, kind: (.agent // ""), session: (.agent_session.value // ""), cwd: (.cwd // "")}'
+}
+
+_replace_tree_facts() { # <path> -> JSON {ref, head, dirty_entries, status_sha256}; read-only
+  local t="$1" ref head n sha
+  export GIT_OPTIONAL_LOCKS=0
+  ref="$(git -C "$t" symbolic-ref -q HEAD 2>/dev/null || true)"
+  head="$(git -C "$t" rev-parse HEAD 2>/dev/null)" || return 1
+  n="$(git -C "$t" status --porcelain=v1 --untracked-files=all 2>/dev/null | wc -l)"
+  sha="$(git -C "$t" status --porcelain=v1 -z --untracked-files=all 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  jq -nc --arg ref "$ref" --arg head "$head" --argjson n "$n" --arg sha "$sha" '{ref:$ref, head:$head, dirty_entries:$n, status_sha256:$sha}'
+}
+
+_replace_bind() {
+  local usage="usage: cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run] [--workspace NAME]"
+  [ $# -ge 1 ] || die "$usage"
+  local id="$1"; shift
+  local from="" clean="" th="" alias="" pane="" ws_opt="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from-worktree) [ $# -ge 2 ] || die "replace bind: --from-worktree needs a value"; from="$2"; shift 2 ;;
+      --worktree)  [ $# -ge 2 ] || die "replace bind: --worktree needs a value"; clean="$2"; shift 2 ;;
+      --head)      [ $# -ge 2 ] || die "replace bind: --head needs a value"; th="$2"; shift 2 ;;
+      --alias)     [ $# -ge 2 ] || die "replace bind: --alias needs a value"; alias="$2"; shift 2 ;;
+      --pane)      [ $# -ge 2 ] || die "replace bind: --pane needs a value"; pane="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace bind: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --dry-run)   dry=1; shift ;;
+      *) die "replace bind: unknown argument: $1" ;;
+    esac
+  done
+  # ALL VALIDATION BEFORE ANY LEDGER WRITE. Every identity is named by the caller
+  # so that a stale request cannot bind whatever the ledger happens to hold now.
+  [ -n "$from" ] && [ -n "$clean" ] && [ -n "$th" ] && [ -n "$alias" ] && [ -n "$pane" ] \
+    || die "replace bind: --from-worktree, --worktree, --head, --alias and --pane are all required - a request that does not name the identity it expects cannot be fenced against a stale one. $usage"
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace bind: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  case "$from" in /*) ;; *) die "replace bind: --from-worktree must be an absolute path" ;; esac
+  case "$clean" in /*) ;; *) die "replace bind: --worktree must be an absolute path" ;; esac
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace bind: no delegation with id '$id'"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" = child ] \
+    || die "replace bind: $id is not a replacement child - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.stage // ""')" = attached ] \
+    || die "replace bind: $id is not attached to its published clean PR yet (run: cel-fanout replace attach $id --head $th) - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.target_head')" = "$th" ] \
+    || die "replace bind: --head $th is not the head reserved for $id ($(printf '%s' "$row" | jq -r '.replacement.target_head')) - the binding is for the exact validated head; nothing recorded"
+  _rec_guard replace-bind "$id" "$row"
+  local state; state="$(printf '%s' "$row" | jq -r '.state // ""')"
+  case "$state" in running|finished|collected) ;; *) die "replace bind: $id is $state - only a live or finished replacement can be bound. Nothing recorded" ;; esac
+
+  local oreal creal
+  oreal="$(_replace_real "$from")" || die "replace bind: the old checkout $from does not exist - nothing recorded"
+  creal="$(_replace_real "$clean")" || die "replace bind: the clean checkout $clean does not exist - nothing recorded"
+
+  # A replay of THIS binding is a no-op; any other binding of a bound row is refused.
+  local b; b="$(printf '%s' "$row" | jq -c '.binding // empty')"
+  if [ -n "$b" ]; then
+    if [ "$(printf '%s' "$b" | jq -r '.worktree')" = "$creal" ] && [ "$(printf '%s' "$b" | jq -r '.from_worktree')" = "$oreal" ] \
+       && [ "$(printf '%s' "$b" | jq -r '.head')" = "$th" ] && [ "$(printf '%s' "$b" | jq -r '.actor.alias')" = "$alias" ] \
+       && [ "$(printf '%s' "$b" | jq -r '.actor.pane')" = "$pane" ]; then
+      c_ok "$id: already bound to $creal at ${th:0:12} - nothing changed"
+      return 0
+    fi
+    die "replace bind: $id is already bound to $(printf '%s' "$b" | jq -r '.worktree') - one binding per replacement; nothing recorded"
+  fi
+
+  # THE SOURCE OF THE ROW, as the ledger has it, must be what the caller says.
+  [ "$(printf '%s' "$row" | jq -r '.alias // ""')" = "$alias" ] \
+    || die "replace bind: the worker alias of $id is '$(printf '%s' "$row" | jq -r '.alias // "?"')', not '$alias' - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.pane // ""')" = "$pane" ] \
+    || die "replace bind: the pane of $id is '$(printf '%s' "$row" | jq -r '.pane // "?"')', not '$pane' - nothing recorded"
+  [ "$(_replace_real "$(printf '%s' "$row" | jq -r '.worktree // ""')")" = "$oreal" ] \
+    || die "replace bind: the checkout of $id is '$(printf '%s' "$row" | jq -r '.worktree // "?"')', not '$from' - the source moved or the request is stale; nothing recorded"
+  local of src; of="$(printf '%s' "$row" | jq -r '.replacement.of')"; src="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$src" ] && [ "$(printf '%s' "$src" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace bind: the original $of no longer names $id as its replacement - nothing recorded"
+  _rec_guard replace-bind "$of" "$src"
+
+  # THE TWO CHECKOUTS: distinct, disjoint, the same repository.
+  [ "$creal" != "$oreal" ] || die "replace bind: the clean checkout is the old checkout ($creal) - nothing to bind"
+  case "$creal/" in "$oreal/"*) die "replace bind: the clean checkout is inside the old one - nothing recorded" ;; esac
+  case "$oreal/" in "$creal/"*) die "replace bind: the old checkout is inside the clean one - nothing recorded" ;; esac
+  local repo repodir; repo="$(printf '%s' "$row" | jq -r '.repo')"; repodir="$wsdir/repos/$repo"
+  [ -d "$repodir" ] || die "replace bind: repo '$repo' not found under $wsdir/repos"
+  local ctop ccommon ocommon rcommon
+  ctop="$(git -C "$creal" rev-parse --show-toplevel 2>/dev/null)" && [ "$(_replace_real "$ctop")" = "$creal" ] \
+    || die "replace bind: $creal is not the root of a git checkout - nothing recorded"
+  ccommon="$(_replace_real "$(git -C "$creal" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || ccommon=""
+  ocommon="$(_replace_real "$(git -C "$oreal" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || ocommon=""
+  rcommon="$(_replace_real "$(git -C "$repodir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || rcommon=""
+  { [ -n "$ccommon" ] && [ "$ccommon" = "$ocommon" ] && [ "$ccommon" = "$rcommon" ]; } \
+    || die "replace bind: the clean checkout is not a worktree of the same repository as the old one and $repo - an arbitrary path is never trusted; nothing recorded"
+  local cfacts
+  cfacts="$(_replace_tree_facts "$creal")" || die "replace bind: cannot read the clean checkout - nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .ref)" = "refs/heads/$id" ] \
+    || die "replace bind: the clean checkout is on '$(printf '%s' "$cfacts" | jq -r '.ref | if . == "" then "a detached HEAD" else . end')', not refs/heads/$id - nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .head)" = "$th" ] \
+    || die "replace bind: the clean checkout is at $(printf '%s' "$cfacts" | jq -r .head | cut -c1-12), not the reserved head ${th:0:12} - a mismatched head is never bound; nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .dirty_entries)" = 0 ] \
+    || die "replace bind: the clean checkout has $(printf '%s' "$cfacts" | jq -r .dirty_entries) uncommitted entries - it must be clean; nothing recorded"
+  local other
+  other="$(jq -r --arg id "$id" --arg c "$creal" '.[] | select(.id != $id and (.worktree // "") == $c and ((.state // "") | IN("landed","released","abandoned") | not)) | .id' "$(_ledger_file "$wsdir")" | head -1)"
+  [ -z "$other" ] || die "replace bind: the clean checkout is already the worktree of delegation $other - ambiguous ownership; nothing recorded"
+  local ofacts; ofacts="$(_replace_tree_facts "$oreal")" || die "replace bind: cannot read the old checkout - nothing recorded"
+
+  # THE ACTOR: independently identified through herdr, executing in the OLD tree.
+  local actor
+  actor="$(_replace_actor "$alias" "$pane" "$(printf '%s' "$row" | jq -r '.herdr_ws // ""')")" || die "replace bind: actor identity not proven: $actor - nothing recorded"
+  [ -n "$(printf '%s' "$actor" | jq -r .session)" ] \
+    || die "replace bind: herdr reports no native session identity for $alias - without one the actor cannot be told from a restarted copy; nothing recorded"
+  local acwd; acwd="$(_replace_real "$(printf '%s' "$actor" | jq -r .cwd)" || true)"
+  case "$acwd/" in
+    "$oreal/"*) ;;
+    "$creal/"*) die "replace bind: the actor already executes in the clean checkout - nothing to bind" ;;
+    *) die "replace bind: the actor executes in '${acwd:-unknown}', which is not the old checkout $oreal - identity mismatch; nothing recorded" ;;
+  esac
+
+  if [ "$dry" -eq 1 ]; then
+    c_ok "$id: bind would move the source from $oreal (HEAD $(printf '%s' "$ofacts" | jq -r '.head[0:12]'), $(printf '%s' "$ofacts" | jq -r .dirty_entries) dirty entries, preserved untouched) to $creal at ${th:0:12}; actor $alias ($(printf '%s' "$actor" | jq -r '.session | .[-40:]')) keeps its session; review/gate evidence would be superseded. Dry run: nothing recorded"
+    return 0
+  fi
+
+  # COMMIT: re-read everything that was checked, immediately before the one write.
+  [ -z "${CEL_TESTING:-}" ] || [ -z "${CEL_BIND_TEST_BEFORE_COMMIT:-}" ] || eval "$CEL_BIND_TEST_BEFORE_COMMIT" || true
+  local row2 actor2 cfacts2 ofacts2
+  row2="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row2" ] && [ "$(printf '%s' "$row2" | jq -c '{state, alias, pane, worktree, branch, repo, replacement, review, verdict, binding}')" = "$(printf '%s' "$row" | jq -c '{state, alias, pane, worktree, branch, repo, replacement, review, verdict, binding}')" ] \
+    || die "replace bind: $id changed while it was being checked - nothing recorded; run it again"
+  actor2="$(_replace_actor "$alias" "$pane" "$(printf '%s' "$row" | jq -r '.herdr_ws // ""')")" && [ "$actor2" = "$actor" ] \
+    || die "replace bind: the actor identity changed while it was being checked - nothing recorded; run it again"
+  cfacts2="$(_replace_tree_facts "$creal")" && [ "$cfacts2" = "$cfacts" ] \
+    || die "replace bind: the clean checkout changed while it was being checked - nothing recorded; run it again"
+  ofacts2="$(_replace_tree_facts "$oreal")" \
+    && [ "$(printf '%s' "$ofacts2" | jq -c '{ref, head}')" = "$(printf '%s' "$ofacts" | jq -c '{ref, head}')" ] \
+    || die "replace bind: the old checkout moved (branch or HEAD) while it was being checked - nothing recorded; run it again"
+  _replace_fault before-bind
+
+  local at by; at="$(_now_iso)"; by="$(_ledger_mover)"
+  local bdir="$wsdir/.cel/bindings" pre
+  pre="$bdir/$id-$(date -u +%Y%m%dT%H%M%SZ)-$$.pre.json"
+  mkdir -p "$bdir" && printf '%s\n' "$row2" > "$pre" || die "replace bind: cannot write the recovery record - nothing recorded"
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg clean "$creal" --arg old "$oreal" --arg th "$th" \
+    --arg alias "$alias" --arg pane "$pane" --argjson actor "$actor" --argjson of "$ofacts" --arg at "$at" --arg by "$by" --arg pre "$pre" '
+    map(if .id == $id then
+      (.binding = {version:1, mode:"explicit-checkout-binding", at:$at, by:$by, worktree:$clean, from_worktree:$old,
+                   head:$th, branch:$id, recovery_record:$pre,
+                   actor:{alias:$alias, pane:$pane, session:$actor.session, kind:$actor.kind, native_cwd:$actor.cwd},
+                   old_tree:($of + {path:$old, retained:true}),
+                   superseded:{review:(.review // null), verdict:(.verdict // null)}})
+      | .worktree = $clean
+      | del(.review, .verdict)
+      | .history = ((.history // []) + [{state:.state, at:$at, by:$by, event:"checkout-bound"}])
+      else . end)')" \
+    || { rm -f "$pre"; die "replace bind: could not write the ledger - nothing recorded"; }
+  _replace_fault after-bind
+  ( cmd_inbox send "$alias" "checkout bound for $id: your source of truth is now $creal (branch $id at exactly $th, clean). Your process working directory is still $oreal and CANNOT be moved without restarting you - do not restart. Do all work for this PR by absolute path in $creal (cd there, or git -C $creal ...); never edit, stage, reset, stash, clean or commit in $oreal - it holds private evidence that is preserved byte-for-byte. Earlier review and gate evidence no longer applies: run the gate in $creal and commit there. Do not touch the original branch or its PR." \
+      --from "$by" --workspace "$(ws_name "$wsdir")" --kind status ) >/dev/null 2>&1 \
+    || c_warn "could not message $alias - the binding stands; tell the worker by hand"
+  c_ok "$id: bound to $creal at ${th:0:12}. collect, the verifier, review and land now act on that checkout; $oreal (HEAD $(printf '%s' "$ofacts" | jq -r '.head[0:12]'), $(printf '%s' "$ofacts" | jq -r .dirty_entries) dirty entries) was only read and stays retained; actor $alias keeps its native session. Review and gate evidence from the old checkout was superseded - re-review at $th. Recovery record: $pre"
+}
+
+# A bound row is only ever acted on while the binding still describes reality:
+# the checkout is still the clean branch, and the live actor (if there is one)
+# is still the one that was identified - a restarted or substituted agent never
+# inherits a binding.
+_replace_bound_guard() { # <verb> <id> <entry-json>
+  local b; b="$(printf '%s' "$3" | jq -c '.binding // empty')"
+  [ -n "$b" ] || return 0
+  local wt branch; wt="$(printf '%s' "$3" | jq -r '.worktree // ""')"; branch="$(printf '%s' "$3" | jq -r '.branch')"
+  [ "$(_replace_real "$wt")" = "$(printf '%s' "$b" | jq -r .worktree)" ] \
+    || die "$1: $2 is bound to $(printf '%s' "$b" | jq -r .worktree) but its row now names '$wt' - the binding no longer describes the row. Nothing recorded."
+  [ "$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || true)" = "refs/heads/$branch" ] \
+    || die "$1: the bound checkout $wt is no longer on refs/heads/$branch - nothing recorded."
+  local l n
+  l="$("$HERDR" agent list 2>/dev/null)" || die "$1: $2 is bound to an actor and herdr cannot list agents to confirm it - nothing recorded."
+  n="$(printf '%s' "$l" | jq -c --arg a "$(printf '%s' "$b" | jq -r .actor.alias)" '[(.result.agents // [])[] | select(.name == $a)]' 2>/dev/null)" \
+    || die "$1: herdr answered with an unreadable agent list - nothing recorded."
+  [ "$(printf '%s' "$n" | jq length)" -gt 0 ] || return 0   # the actor has finished and left: that is normal
+  [ "$(printf '%s' "$n" | jq length)" = 1 ] \
+    && [ "$(printf '%s' "$n" | jq -r '.[0].agent_session.value // ""')" = "$(printf '%s' "$b" | jq -r .actor.session)" ] \
+    || die "$1: the agent now named $(printf '%s' "$b" | jq -r .actor.alias) is not the actor $2 was bound for (native session differs or is ambiguous) - the binding does not transfer to a different actor. Nothing recorded."
+}
+
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 # The role check comes FIRST: the cost of the incident this closes was three
@@ -3237,6 +3473,9 @@ case "${1:-}" in
     _bg_msg="$(boxguard_admit)" || die "$1: $_bg_msg" ;;
 esac
 
+case "${1:-}:${2:-}" in
+  replace:bind) ;;   # takes the lock WITHOUT waiting, below
+  *)
 case "${1:-}" in
   delegate|scout|spike|collect|status|release|land|review|request-review|replace|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
@@ -3245,16 +3484,18 @@ case "${1:-}" in
     flock "$ledger_fd" || die "cannot lock delegation ledger"
     ;;
 esac
+  ;;
+esac
 
 # `recover register|continue` write the ledger, so they take the lock - but
 # WITHOUT waiting: a held lock means another delegate or ledger transition is
 # in flight, which is exactly what recovery must not race. `inspect` is read-only.
 case "${1:-}:${2:-}" in
-  recover:register|recover:continue|recover:abandon)
+  recover:register|recover:continue|recover:abandon|replace:bind)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
-    flock -n "$ledger_fd" || die "recover: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
+    flock -n "$ledger_fd" || die "$1: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
 esac
 
 case "${1:-}" in

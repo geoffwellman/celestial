@@ -256,6 +256,26 @@ Products and the review verdict
   no approval carries over. Either stage may be replayed with the same
   arguments after a lost response; a different replacement of the same
   original is refused. It never writes to GitHub or touches the original PR.
+- `cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run]`
+  (orchestrator only, after `attach`) binds the replacement's SOURCE CHECKOUT
+  to the clean candidate's worktree while the SAME worker keeps its native
+  session. herdr cannot change a running agent's working directory (no chdir;
+  a restart would forfeit the session), so the actor's process cwd stays the
+  old tree and the binding is explicit: `row.worktree` (read by collect, the
+  verifier, review, land and revision prompts) becomes the clean checkout, the
+  actor is told the path by inbox, and its identity (alias, pane, native
+  session from `herdr agent list`) is recorded and re-checked by every acting
+  verb - a restarted or substituted agent inherits nothing. Refused with no
+  mutation unless the clean path is the root of a linked worktree of the same
+  repository, on `refs/heads/<new-branch>`, at exactly the attached head, with
+  a clean status, owned by no other delegation, and the old tree, actor and
+  ledger rows still match every named identity. Review and gate evidence from
+  the old checkout is moved to `binding.superseded` and removed (re-review at
+  the head). The old tree is only read (no index refresh), stays registered to
+  the frozen source row and gc-vetoed through `binding.old_tree`. The lock is
+  taken without waiting; one atomic write; a replay with the same arguments is
+  a no-op; `.cel/bindings/<id>-*.pre.json` keeps the pre-image. `--dry-run`
+  prints the plan and writes nothing.
 
 - `cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <login>] [--dry-run]`
   is the one supported way to request the external GitHub reviewer named by

@@ -90,7 +90,7 @@ _rb_old_sum() {
   { (cd "$T/wt" && find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 sha256sum)
     cat "$T/wt/.git"
     (cd "$T/repos/widget/.git/worktrees/wt" && for f in HEAD index gitdir commondir; do printf '%s ' "$f"; sha256sum < "$f"; done)
-    _rb_git for-each-ref
+    _rb_git for-each-ref refs/heads/WG-1
     GIT_OPTIONAL_LOCKS=0 git -C "$T/wt" status --porcelain=v1 -uall; } | sha256sum | cut -d' ' -f1
 }
 _rb_row() { jq -c --arg id "$1" '.[] | select(.id == $id)' "$T/.cel/delegations.json"; }
@@ -249,7 +249,7 @@ test_bind_refuses_an_unproven_or_wrong_actor() {
   _rb_agents widget-WG-1 wC:p1 "" "$T/wt";             _rb_bind; _rb_refused "no native session identity" || return 1
   _rb_agents widget-WG-1 wC:p1 "$OLDSESS" "$T";        _rb_bind; _rb_refused "not the old checkout" || return 1
   _rb_agents widget-WG-1 wC:p1 "$OLDSESS" "$T/wtc";    _rb_bind; _rb_refused "already executes in the clean checkout" || return 1
-  _rb_agents widget-WG-1 wC:p7 "$OLDSESS" "$T/wt";     _rb_bind; _rb_refused "ambiguous ownership\|exactly one" || return 1
+  _rb_agents widget-WG-1 wC:p7 "$OLDSESS" "$T/wt";     _rb_bind; _rb_refused "holds 0 agents" || return 1
   _rb_agents someone-else wC:p1 "$OLDSESS" "$T/wt";    _rb_bind; _rb_refused "agents named" || return 1
   echo '{"result":{"agents":[]}}' > "$T/agents.json";  _rb_bind; _rb_refused "agents named" || return 1
   jq '.result.agents += [.result.agents[0]]' "$T/agents.json" > "$T/n" && mv "$T/n" "$T/agents.json"
@@ -301,7 +301,7 @@ test_bind_state_that_changes_during_the_check_yields_zero_partial_mutation() {
   for case_ in ledger actor clean old; do
     _rb_setup
     case "$case_" in
-      ledger) export CEL_BIND_TEST_BEFORE_COMMIT="jq '(.[1].spec)=\"/changed\"' '$T/.cel/delegations.json' > '$T/n' && mv '$T/n' '$T/.cel/delegations.json'" ;;
+      ledger) export CEL_BIND_TEST_BEFORE_COMMIT="jq '(.[1].review.note)=\"changed\"' '$T/.cel/delegations.json' > '$T/n' && mv '$T/n' '$T/.cel/delegations.json'" ;;
       actor)  export CEL_BIND_TEST_BEFORE_COMMIT="sed -i s#native-1#native-2# '$T/agents.json'" ;;
       clean)  export CEL_BIND_TEST_BEFORE_COMMIT="printf u > '$T/wtc/late.txt'" ;;
       old)    export CEL_BIND_TEST_BEFORE_COMMIT="git -C '$T/wt' checkout -q -b late-branch" ;;
