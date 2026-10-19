@@ -23,7 +23,9 @@ _fanout_setup() {
 #!/usr/bin/env bash
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
-  "worktree open")   touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
+  "worktree open")   # mirrors herdr's usage error: one of --workspace / --cwd is required
+                     case " $* " in *" --workspace "*|*" --cwd "*) ;; *) echo "error: the following required arguments were not provided: --workspace <ID> | --cwd <PATH>" >&2; exit 2;; esac
+                     touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  if [ -n "${STUB_OPEN_GATE:-}" ] && [ ! -f "$STUB_OPEN_GATE" ]; then echo '{"result":{"workspaces":[]}}'; elif [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
@@ -3442,6 +3444,8 @@ test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_
   assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--path $RET_WT"
   assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--branch WG-X2"
   assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--cwd $T/repos/widget"
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--workspace"; then echo "passed a herdr workspace nobody chose"; return 1; fi
   if grep -q '^worktree create\|worktree remove' "$STUB_LOG"; then echo "created/removed a worktree"; return 1; fi
   assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
   assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
@@ -3496,5 +3500,15 @@ test_reuse_start_failure_after_open_names_the_opened_workspace_and_keeps_the_row
   assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
   assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
   assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+
+test_reuse_passes_an_explicit_herdr_workspace_to_worktree_open_instead_of_cwd() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000020 orig-model orig-model >/dev/null
+  local out; out="$(_fanout_reuse WG-X2 --herdr-workspace wExplicit)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--workspace wExplicit"
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--cwd"; then echo "passed --cwd beside --workspace"; return 1; fi
   unset STUB_OPEN_GATE; rm -rf "$T"
 }
