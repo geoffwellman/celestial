@@ -221,8 +221,8 @@ _container_ensure() { # <repodir> <repo> -> workspace id, empty if impossible
 # The workspace that OWNS this checkout: not a linked worktree, same repo root.
 _container_id() { # <repo-toplevel> -> workspace id or empty
   "$HERDR" workspace list 2>/dev/null | jq -r --arg t "$1" \
-    '.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
-     | select(.worktree.repo_root == $t) | .workspace_id' | head -1
+    'first(.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
+     | select(.worktree.repo_root == $t) | .workspace_id)'
 }
 
 # A LINKED WORKTREE WHOSE CONTAINER IS GONE IS DETACHED: it still exists, it
@@ -593,7 +593,8 @@ _wt_on_main() { # <worktree> <start-sha>
 }
 
 _ledger_entry() { # <wsdir> <id> -> json object, empty if unknown
-  _ledger_read "$1" | jq -c --arg id "$2" '.[] | select(.id == $id)' | head -1
+  # first() ends the producer itself: no `| head -1` SIGPIPE under pipefail
+  _ledger_read "$1" | jq -c --arg id "$2" 'first(.[] | select(.id == $id))'
 }
 
 _ledger_field() { # <wsdir> <id> <field>
@@ -818,7 +819,8 @@ _fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
   if [ -n "$tt" ] && [ -n "$RS_THINKING" ] && [ "$tt" != "$RS_THINKING" ]; then
     die "delegate --reuse: the latest thinking level in $RS_SESSION is '$tt' but the row recorded '$RS_THINKING' - the session disagrees with the row, refusing to pick one. Nothing was changed"
   fi
-  if pgrep -af -- "$RS_SESSION" 2>/dev/null | grep -v 'cel-fanout\|delegate' | grep -q .; then
+  local holders; holders="$(pgrep -af -- "$RS_SESSION" 2>/dev/null | grep -v 'cel-fanout\|delegate' || true)"
+  if [ -n "$holders" ]; then
     die "delegate --reuse: a live process already holds $RS_SESSION - nothing was changed"
   fi
 }
@@ -979,8 +981,12 @@ cmd_delegate() {
       || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
   elif afk_active; then
     local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
-    afk_src="$(sed -n 's/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/p' "$abs_spec" | head -1)"
-    afk_quote="$(sed -n 's/^>[[:space:]]*//p' "$abs_spec" | head -1)"
+    # The FIRST match is taken by sed itself (`q`), never by `| head -1`: under
+    # `set -o pipefail` a consumer that exits early SIGPIPEs the producer once
+    # it has written more than a pipe buffer, and the whole delegate died with
+    # exit 141 and no message on a spec that quotes a long finding.
+    afk_src="$(sed -n '/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b/{s/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/;p;q}' "$abs_spec")"
+    afk_quote="$(sed -n '/^>/{s/^>[[:space:]]*//;p;q}' "$abs_spec")"
     afk_prov="$( ( local_profile="$profile"
                    [ -n "$local_profile" ] || local_profile="$(role_profile_for "$wsdir" worker "$repo" 2>/dev/null || true)"
                    PROFILE_MODEL=""
