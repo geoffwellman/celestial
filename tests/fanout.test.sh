@@ -24,7 +24,12 @@ _fanout_setup() {
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
   "worktree open")   # mirrors herdr's usage error: one of --workspace / --cwd is required
-                     case " $* " in *" --workspace "*|*" --cwd "*) ;; *) echo "error: the following required arguments were not provided: --workspace <ID> | --cwd <PATH>" >&2; exit 2;; esac
+                     # the real parser (herdr worktree open, installed binary):
+                     #   [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label] [--focus] [--no-focus] [--trust-repository]
+                     _w=0; _p=0; _usage="usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]"
+                     case " $* " in *" --workspace "*) _w=$((_w+1));; esac; case " $* " in *" --cwd "*) _w=$((_w+1));; esac
+                     case " $* " in *" --path "*) _p=$((_p+1));; esac; case " $* " in *" --branch "*) _p=$((_p+1));; esac
+                     if [ "$_w" -ne 1 ] || [ "$_p" -ne 1 ]; then echo "$_usage" >&2; exit 1; fi
                      touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  if [ -n "${STUB_OPEN_GATE:-}" ] && [ ! -f "$STUB_OPEN_GATE" ]; then echo '{"result":{"workspaces":[]}}'; elif [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
@@ -3442,7 +3447,7 @@ test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_
   local f; f="$(_fanout_real_session w.jsonl 01eeeeee-0000-7000-8000-000000000001 orig-model orig-model)"
   local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
   assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--path $RET_WT"
-  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--branch WG-X2"
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--branch"; then echo "passed --branch beside --path (mutually exclusive in herdr)"; return 1; fi
   assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
   assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--cwd $T/repos/widget"
   if grep '^worktree open' "$STUB_LOG" | grep -q -- "--workspace"; then echo "passed a herdr workspace nobody chose"; return 1; fi
