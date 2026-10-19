@@ -3450,6 +3450,18 @@ test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_
   if grep '^worktree open' "$STUB_LOG" | grep -q -- "--branch"; then echo "passed --branch beside --path (mutually exclusive in herdr)"; return 1; fi
   assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
   assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--cwd $T/repos/widget"
+  # the logged argv is replayed against the REAL installed parser with every path
+  # replaced by a nonexistent one: it must get past usage parsing (a semantic
+  # not_git_worktree error, no mutation), never the usage line
+  if command -v herdr >/dev/null 2>&1; then
+    local -a ra=(); local tok prev=""
+    for tok in $(grep '^worktree open' "$STUB_LOG" | sed 's/^worktree open //'); do
+      case "$prev" in --cwd|--path) ra+=("/nonexistent-cel-test-$prev");; --label|--workspace|--branch) ra+=("x");; *) ra+=("$tok");; esac
+      prev="$tok"
+    done
+    local real; real="$(herdr worktree open "${ra[@]}" 2>&1 || true)"
+    if printf '%s' "$real" | grep -q '^usage:'; then echo "REAL herdr rejects this argv: ${ra[*]} -> $real"; return 1; fi
+  fi
   if grep '^worktree open' "$STUB_LOG" | grep -q -- "--workspace"; then echo "passed a herdr workspace nobody chose"; return 1; fi
   if grep -q '^worktree create\|worktree remove' "$STUB_LOG"; then echo "created/removed a worktree"; return 1; fi
   assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
