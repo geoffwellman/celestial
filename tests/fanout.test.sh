@@ -3548,3 +3548,19 @@ PY
   [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
   rm -rf "$T"
 }
+
+# exit 141 on the real W715 argv (VHS): `git worktree list --porcelain | awk ... {print p; exit}`
+# - awk quits at the match while git is still writing the other worktrees, git
+# is SIGPIPEd and `set -o pipefail` makes the substitution fail: the delegate
+# died silently (no output, no herdr call). A repo with many worktrees triggers it.
+test_reuse_in_a_repo_with_many_worktrees_does_not_exit_141() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000030 orig-model orig-model >/dev/null
+  local i
+  for i in $(seq 1 120); do git -C "$T/repos/widget" worktree add -q -b "zpad$i" "$T/zpad$i" 2>/dev/null; done
+  local out rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
+  [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
