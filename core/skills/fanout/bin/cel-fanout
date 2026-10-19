@@ -1029,11 +1029,17 @@ cmd_delegate() {
       existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
         | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
       [ -n "$existing" ] || die "delegate --reuse: $branch has no live worktree to resume in - nothing was changed (a missing checkout is not recreated by a resume)"
-      "$HERDR" workspace list | jq -e --arg p "$existing" '[.result.workspaces[] | select(.worktree.checkout_path == $p)] | length > 0' >/dev/null \
-        || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it.
-  Remove the stale checkout first: git -C '$repodir' worktree remove --force '$existing'"
       _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
       resume_session="$RS_SESSION"
+      # ONLY NOW - every proof passed, so a refusal above opened nothing - a
+      # checkout no herdr workspace holds (its workspace was closed) is OPENED
+      # through herdr's own `worktree open`: never removed, never recreated.
+      # The workspace is then found by checkout path like any other reuse.
+      if ! "$HERDR" workspace list | jq -e --arg p "$existing" '[.result.workspaces[] | select(.worktree.checkout_path == $p)] | length > 0' >/dev/null 2>&1; then
+        "$HERDR" worktree open --path "$existing" --branch "$branch" --label "$branch" --no-focus \
+          ${herdr_ws:+--workspace "$herdr_ws"} >/dev/null \
+          || die "delegate --reuse: every proof passed but herdr could not open the existing checkout $existing - the row is untouched and nothing was removed or recreated (open it yourself with: herdr worktree open --path '$existing' --branch '$branch')"
+      fi
     fi
   elif [ -n "$session_opt" ]; then
     die "delegate: --session only applies to --reuse"
@@ -1120,8 +1126,7 @@ cmd_delegate() {
     cel-fanout release $branch      # discard it, then delegate afresh
     cel-fanout delegate ... --reuse # continue IN that worktree, keeping its work"
     fi
-    [ -n "$ews" ] || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it.
-  Remove the stale checkout first: git -C '$repodir' worktree remove --force '$existing'"
+    [ -n "$ews" ] || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it, and opening it did not produce one - nothing was removed or recreated; open it with: herdr worktree open --path '$existing' --branch '$branch'"
     child_ws="$ews"
     worktree="$existing"
     pane="$("$HERDR" pane list --workspace "$ews" 2>/dev/null \
