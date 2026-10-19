@@ -3529,3 +3529,22 @@ test_reuse_passes_an_explicit_herdr_workspace_to_worktree_open_instead_of_cwd() 
   if grep '^worktree open' "$STUB_LOG" | grep -q -- "--cwd"; then echo "passed --cwd beside --workspace"; return 1; fi
   unset STUB_OPEN_GATE; rm -rf "$T"
 }
+
+# exit 141 (SIGPIPE under pipefail): `sed ... | head -1` over a spec that quotes
+# more than a pipe buffer (64 KiB) of finding made the AFK dispatch gate die
+# silently - no message, nothing launched. The first match must be taken by sed
+# itself, never by a consumer that exits early.
+test_afk_dispatch_gate_survives_a_spec_that_quotes_more_than_a_pipe_buffer() {
+  _fanout_setup
+  mkdir -p "$T/afk-state"
+  printf '{"on":true,"since":"2026-10-19T00:00:00Z","since_epoch":1,"allow":[]}\n' > "$T/afk-state/state.json"
+  python3 - "$T/huge-spec.md" <<'PY'
+import sys
+open(sys.argv[1],"w").write("Finding-from: reviewer hermes-vhs\n"+"".join("> finding line %d %s\n"%(i,"x"*80) for i in range(1500)))
+PY
+  [ "$(wc -c < "$T/huge-spec.md")" -gt 100000 ] || return 1
+  local out rc=0
+  out="$(cd "$T" && "$BIN" delegate widget WG-HUGE "$T/huge-spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
+  rm -rf "$T"
+}
