@@ -3318,40 +3318,6 @@ test_reuse_refuses_an_ownership_mismatch_and_a_changed_profile() {
   rm -rf "$T"
 }
 
-# An explicit --session PATH outside the default root (a recovered session in a
-# private/native-export root) is accepted only after cwd, UUID and native
-# history ownership are validated against the row; nothing is substituted.
-_fanout_ext_session() { # <name> <cwd> <model> -> path
-  local f="$T/private/2026-10-18T09-00-00-000Z_$1.jsonl"
-  mkdir -p "$T/private"
-  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n{"type":"model_change","modelId":"deepseek/old"}\n{"type":"model_change","modelId":"%s"}\n' "$1" "$2" "$3" > "$f"
-  printf '%s' "$f"
-}
-test_reuse_accepts_an_explicit_session_path_outside_the_default_root_only_when_it_validates() {
-  _fanout_resume_refusal_setup
-  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000a >/dev/null
-  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000b >/dev/null
-  local before out rc=0 f; before="$(cat "$T/.cel/delegations.json")"
-  # another worktree's session
-  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000001 /somewhere/else orig-model)"
-  out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
-  _fanout_refused cwd "$out" "$rc" "$before" "not a session" || return 1
-  # UUID does not match the file name
-  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000002 "$RET_WT" orig-model)"
-  mv "$f" "$T/private/2026-10-18T09-00-00-000Z_01bbbbbb-0000-7000-8000-0000000000ff.jsonl"
-  rc=0; out="$(_fanout_reuse WG-X2 --session "$T/private/2026-10-18T09-00-00-000Z_01bbbbbb-0000-7000-8000-0000000000ff.jsonl")" || rc=$?
-  _fanout_refused uuid "$out" "$rc" "$before" "not a session" || return 1
-  # the LATEST native model differs from the row's (an initial event is not enough)
-  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000003 "$RET_WT" some/other-model)"
-  rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
-  _fanout_refused model "$out" "$rc" "$before" "latest model" || return 1
-  # the validated recovered session resumes, exactly
-  f="$(_fanout_ext_session 01bbbbbb-0000-7000-8000-000000000004 "$RET_WT" orig-model)"
-  out="$(_fanout_reuse WG-X2 --session "$f")" || { echo "$out"; return 1; }
-  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
-  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
-  rm -rf "$T"
-}
 
 # F1: the proof precedes EVERY mutation - a row whose branch has no live
 # worktree is refused before `herdr worktree create` (or a container) exists.
@@ -3364,65 +3330,6 @@ test_reuse_over_a_row_with_no_live_worktree_creates_nothing() {
   rm -rf "$T"
 }
 
-# F4: the session's LATEST native model/thinking must agree with the row; a
-# disagreement is refused, never resolved by picking the row. A recovered
-# runtime is re-pinned only by an explicit, verified receipt + a profile that
-# matches the session tail, recorded as a transition on the SAME row.
-_fanout_repin_setup() {
-  _fanout_setup
-  cat >> "$T/workspace.yaml" <<'YAML'
-worker_profiles:
-  ds:  { runtime: pi, model: ds-model, thinking: low }
-  son: { runtime: pi, model: gw/claude-son, thinking: medium }
-role_profiles:
-  worker: ds
-YAML
-  (cd "$T" && "$BIN" delegate widget WG-X3 "$T/spec.md" --profile ds) > /dev/null
-  NOSESS=1 _fanout_retain WG-X3 wt-x3 finished
-  : > "$STUB_LOG"
-  # the recovered working session: deepseek/low first, sonnet/medium last
-  RP_SESS="$T/private/2026-10-18T09-00-00-000Z_01cccccc-0000-7000-8000-000000000001.jsonl"
-  mkdir -p "$T/private"
-  printf '{"type":"session","version":3,"id":"01cccccc-0000-7000-8000-000000000001","cwd":"%s"}\n{"type":"model_change","provider":"or","modelId":"ds-model"}\n{"type":"thinking_level_change","thinkingLevel":"low"}\n{"type":"model_change","provider":"gw","modelId":"claude-son"}\n{"type":"thinking_level_change","thinkingLevel":"medium"}\n' "$RET_WT" > "$RP_SESS"
-  RP_ORIG="$T/private/original-native.jsonl"; printf 'orig\n' > "$RP_ORIG"
-  RP_RCPT="$T/private/restoration.json"
-  jq -n --arg cwd "$RET_WT" --arg w "$RP_SESS" --arg o "$RP_ORIG" --arg sha "$(sha256sum "$RP_ORIG" | cut -d' ' -f1)" \
-    --arg alias "$(jq -r '.[0].alias' "$T/.cel/delegations.json")" \
-    '{alias:$alias, cwd:$cwd, uuid:"01cccccc-0000-7000-8000-000000000001", workingSession:$w, originalSession:$o, originalSha256:$sha, requestedModel:"gw/claude-son", requestedThinking:"medium"}' > "$RP_RCPT"
-}
-test_reuse_refuses_when_the_session_tail_disagrees_with_the_row() {
-  _fanout_repin_setup
-  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
-  out="$(_fanout_reuse WG-X3 --session "$RP_SESS")" || rc=$?
-  _fanout_refused tail "$out" "$rc" "$before" "disagrees" || return 1
-  rm -rf "$T"
-}
-test_reuse_repins_a_recovered_runtime_only_through_a_verified_receipt_and_matching_profile() {
-  _fanout_repin_setup
-  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
-  out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT")" || rc=$?
-  _fanout_refused noprofile "$out" "$rc" "$before" "disagrees" || return 1
-  rc=0; out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT" --profile ds)" || rc=$?
-  _fanout_refused wrongprofile "$out" "$rc" "$before" "disagrees" || return 1
-  jq '.originalSha256 = "00"' "$RP_RCPT" > "$RP_RCPT.bad"
-  rc=0; out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT.bad" --profile son)" || rc=$?
-  _fanout_refused sha "$out" "$rc" "$before" "receipt" || return 1
-  rc=0; out="$(_fanout_reuse WG-X3 --receipt "$RP_RCPT" --profile son)" || rc=$?
-  _fanout_refused nosess "$out" "$rc" "$before" "receipt" || return 1
-  out="$(_fanout_reuse WG-X3 --session "$RP_SESS" --receipt "$RP_RCPT" --profile son)" || { echo "$out"; return 1; }
-  local start; start="$(grep '^agent start' "$STUB_LOG" | head -1)"
-  assert_contains "$start" "--session $RP_SESS"
-  assert_contains "$start" "gw/claude-son"
-  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
-  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" son
-  assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" gw/claude-son
-  assert_eq "$(jq -r '.[0].thinking' "$T/.cel/delegations.json")" medium
-  assert_eq "$(jq -r '.[0].repin.from.model' "$T/.cel/delegations.json")" ds-model
-  assert_eq "$(jq -r '.[0].repin.from.profile' "$T/.cel/delegations.json")" ds
-  assert_eq "$(jq -r '.[0].repin.receipt' "$T/.cel/delegations.json")" "$RP_RCPT"
-  assert_eq "$(jq -r '[.[0].history[] | select(.note != null)] | length' "$T/.cel/delegations.json")" 1
-  rm -rf "$T"
-}
 
 # F2: native, credential-free evidence that `pi --session <file>` really
 # reopens the exact session: rpc get_state on a TEMP COPY, no model call.
@@ -3439,4 +3346,74 @@ test_pi_native_session_flag_reopens_the_exact_session_without_a_model_call() {
   assert_eq "$(sha256sum "$d/src.jsonl")" "$sha"
   if pgrep -af "pi --mode rpc --session $d/copy.jsonl" >/dev/null; then echo "rpc child still running"; return 1; fi
   rm -rf "$d"
+}
+
+# ---- real-shape regressions (AMPDGC / W705 shapes), fail-closed scope ----------
+# A pi session as it really is: header, ONE initial model_change, a thinking
+# level, then assistant messages carrying message.model. The file name need not
+# end in the UUID (a recovered copy is w705-working.jsonl).
+_fanout_real_session() { # <name.jsonl> <uuid> <first-model> <assistant-model> [thinking]
+  local d="$T/pi/sessions/--$(printf '%s' "$RET_WT" | sed 's|^/||; s|/|-|g')--"
+  mkdir -p "$d"
+  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n{"type":"model_change","provider":"p","modelId":"%s"}\n{"type":"thinking_level_change","thinkingLevel":"%s"}\n{"type":"message","message":{"role":"user","content":"x"}}\n{"type":"message","message":{"role":"assistant","model":"%s","content":"y"}}\n{"type":"message","message":{"role":"assistant","model":"%s","content":"z"}}\n' \
+    "$2" "$RET_WT" "$3" "${5:-medium}" "$4" "$4" > "$d/$1"
+  printf '%s' "$d/$1"
+}
+test_reuse_resumes_an_ampd_shaped_session_by_header_uuid_whatever_the_file_name() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session w705-working.jsonl 01dddddd-0000-7000-8000-000000000001 orig-model orig-model medium)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  rm -rf "$T"
+}
+test_reuse_names_a_session_by_its_header_uuid_not_its_file_name() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session a.jsonl 01dddddd-0000-7000-8000-00000000000a orig-model orig-model >/dev/null
+  local f; f="$(_fanout_real_session b.jsonl 01dddddd-0000-7000-8000-00000000000b orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2 --session 01dddddd-0000-7000-8000-00000000000b)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  rm -rf "$T"
+}
+test_reuse_refuses_when_the_assistant_tail_disagrees_with_the_row_even_if_the_only_model_change_agrees() {
+  _fanout_resume_refusal_setup
+  # W705's shape: the initial model_change is the row's model, the real tail is another model
+  _fanout_real_session w705-working.jsonl 01dddddd-0000-7000-8000-000000000002 orig-model some/other-sonnet medium >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused assistant-tail "$out" "$rc" "$before" "disagrees" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_a_thinking_level_that_disagrees_with_the_row() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000003 orig-model orig-model high >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused thinking "$out" "$rc" "$before" "disagrees" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_a_session_a_live_process_holds() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000004 orig-model orig-model)"
+  sh -c 'sleep 30' holder "$f" & local hp=$!
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
+  _fanout_refused holder "$out" "$rc" "$before" "holds" || return 1
+  rm -rf "$T"
+}
+# recovered / private-root inputs are UNSUPPORTED and fail closed, with a reason,
+# before anything is created: no default root, fresh conversation or path fallback
+test_reuse_fails_closed_on_recovered_and_private_root_inputs() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000005 orig-model orig-model >/dev/null
+  local before out rc=0 f; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2 --receipt "$T/restoration.json")" || rc=$?
+  _fanout_refused receipt "$out" "$rc" "$before" "unsupported" || return 1
+  # a session file OUTSIDE the default root (a recovered/private-root copy)
+  mkdir -p "$T/private"; f="$T/private/w705-working.jsonl"
+  printf '{"type":"session","version":3,"id":"01dddddd-0000-7000-8000-000000000006","cwd":"%s"}\n' "$RET_WT" > "$f"
+  rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
+  _fanout_refused outside-root "$out" "$rc" "$before" "unsupported" || return 1
+  rm -rf "$T"
 }
