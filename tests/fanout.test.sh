@@ -23,8 +23,9 @@ _fanout_setup() {
 #!/usr/bin/env bash
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
+  "worktree open")   touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  if [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
+  "workspace list")  if [ -n "${STUB_OPEN_GATE:-}" ] && [ ! -f "$STUB_OPEN_GATE" ]; then echo '{"result":{"workspaces":[]}}'; elif [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
@@ -3261,7 +3262,7 @@ _fanout_refused() { # <label> <out> <rc> <before> <expect-text>
   [ "$3" -ne 0 ] || { echo "$1: resume was accepted"; return 1; }
   assert_contains "$2" "$5" || return 1
   assert_eq "$(cat "$T/.cel/delegations.json")" "$4" || return 1
-  if grep -q '^agent start\|^pane run\|^pane send-text\|^worktree create\|^workspace create' "$STUB_LOG"; then echo "$1: launched or created something before refusing"; return 1; fi
+  if grep -q '^agent start\|^pane run\|^pane send-text\|^worktree create\|^worktree open\|^workspace create' "$STUB_LOG"; then echo "$1: launched or created something before refusing"; return 1; fi
 }
 _fanout_resume_refusal_setup() {
   _fanout_setup; _fanout_resume_profiles
@@ -3416,4 +3417,36 @@ test_reuse_fails_closed_on_recovered_and_private_root_inputs() {
   rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
   _fanout_refused outside-root "$out" "$rc" "$before" "unsupported" || return 1
   rm -rf "$T"
+}
+
+# AMPDGC's real shape: the checkout exists, the row is retained, and NO herdr
+# workspace holds the checkout (its pane/workspace was closed). The resume
+# proves everything first, then opens the EXISTING checkout (never remove,
+# never create) and resumes in it. A refusal opens nothing.
+test_reuse_with_no_herdr_workspace_refuses_without_opening_anything() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session a.jsonl 01eeeeee-0000-7000-8000-00000000000a orig-model orig-model >/dev/null
+  _fanout_real_session b.jsonl 01eeeeee-0000-7000-8000-00000000000b orig-model orig-model >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused absent-ws "$out" "$rc" "$before" "ambiguous" || return 1
+  [ ! -e "$STUB_OPEN_GATE" ] || { echo "opened a workspace on a refusal"; return 1; }
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_same_row() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  local f; f="$(_fanout_real_session w.jsonl 01eeeeee-0000-7000-8000-000000000001 orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--path $RET_WT"
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--branch WG-X2"
+  assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
+  if grep -q '^worktree create\|worktree remove' "$STUB_LOG"; then echo "created/removed a worktree"; return 1; fi
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  unset STUB_OPEN_GATE; rm -rf "$T"
 }
