@@ -3450,3 +3450,51 @@ test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_
   assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
   unset STUB_OPEN_GATE; rm -rf "$T"
 }
+
+# review of the open delta: every refusal in the absent-workspace shape opens nothing
+test_reuse_in_the_absent_workspace_shape_opens_nothing_on_any_refusal() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000010 orig-model orig-model >/dev/null
+  local before out rc alias; before="$(cat "$T/.cel/delegations.json")"
+  alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  rc=0; out="$(STUB_LIVE_ALIAS="$alias" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live "$out" "$rc" "$before" "live" || return 1
+  rc=0; out="$(_fanout_reuse WG-X2 --profile cheap)" || rc=$?
+  _fanout_refused profile "$out" "$rc" "$before" "recorded profile" || return 1
+  jq '.[0].worktree = "/elsewhere/wt"' <<< "$before" > "$T/.cel/delegations.json"
+  local b2; b2="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused owner "$out" "$rc" "$b2" "does not own" || return 1
+  jq '.[0].model = "ghost-model"' <<< "$before" > "$T/.cel/delegations.json"
+  b2="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused drift "$out" "$rc" "$b2" "drifted" || return 1
+  [ ! -e "$STUB_OPEN_GATE" ] || { echo "opened a workspace on a refusal"; return 1; }
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+# the actual AMPDGC row: state running, session null, default-root file, no workspace
+test_reuse_of_a_running_row_with_no_session_field_and_no_workspace_resumes() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  jq '.[0].state = "running" | .[0].session = null' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local f; f="$(_fanout_real_session ampd.jsonl 01eeeeee-0000-7000-8000-000000000011 orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+# a start that fails after the open reports the opened workspace and keeps the row
+test_reuse_start_failure_after_open_names_the_opened_workspace_and_keeps_the_row() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened" CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000012 orig-model orig-model >/dev/null
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  local out rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "failed start succeeded"; return 1; }
+  assert_contains "$out" "OPENED the herdr workspace"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
