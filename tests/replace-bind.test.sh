@@ -145,6 +145,7 @@ test_bind_moves_the_source_to_the_clean_checkout_and_preserves_the_dirty_old_tre
   assert_eq "$(cat "$T/herdr-bad.log")" ""
   [ "$(grep -c -v '^agent list$' "$T/herdr.log")" -eq 0 ] || { cat "$T/herdr.log"; return 1; }
   grep -rq "$(realpath "$T/wtc")" "$T/inbox"
+  grep -rq "ABSOLUTE path $(realpath "$T/wtc")/.agent/result.md" "$T/inbox"
   ls "$T/.cel/bindings"/WG-1-clean-*.pre.json >/dev/null
   rm -rf "$T"
 }
@@ -369,5 +370,20 @@ test_bind_old_checkout_stays_vetoed_for_gc_and_the_clean_one_follows_the_row() {
   jq 'map(.state = "landed")' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
   _gc_delegated_live "$T/wt" || { echo "retained old checkout lost its veto"; return 1; }
   if _gc_delegated_live "$T/wtc"; then echo "landed clean checkout still vetoes"; return 1; fi
+  rm -rf "$T"
+}
+
+test_bound_row_handback_delivers_but_never_resumes_a_new_session() {
+  _rb_setup
+  _rb_bind; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  local sum; sum="$(_rb_sum)"; rm -rf "$T/inbox"; mkdir "$T/inbox"
+  # live actor: delivered by inbox
+  _rb handback WG-1-clean "fix it" --by rev-1; assert_eq "$RC" 0 || { echo "$OUT"; return 1; }
+  # stopped actor: findings delivered, no delegate --reuse, ledger and old tree untouched
+  sed -i 's#^  "agent get")  exit 0 ;;#  "agent get")  exit 1 ;;#' "$T/herdr-stub.sh"
+  _rb handback WG-1-clean "fix it again" --by rev-1
+  assert_eq "$RC" 1; assert_contains "$OUT" "different native session"
+  assert_eq "$(_rb_sum)" "$sum"; assert_eq "$(_rb_old_sum)" "$OLD_SUM"
+  assert_eq "$(cat "$T/herdr-bad.log")" ""
   rm -rf "$T"
 }

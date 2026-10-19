@@ -2474,6 +2474,12 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
     c_ok "$id: findings delivered to $alias by inbox"
     return 0
   fi
+  # A BOUND ROW IS NEVER RESUMED INTO A NEW NATIVE SESSION: `delegate --reuse`
+  # starts a different actor, and the binding (and every acting verb) belongs to
+  # the one that was identified. The findings are already in its inbox.
+  if [ -n "$(printf '%s' "$row" | jq -r '.binding // empty')" ]; then
+    die "handback: $id is bound to the actor session recorded in its checkout binding and $alias is not running - resuming would start a different native session that the binding refuses. The findings were delivered to $alias's inbox; the orchestrator must decide how to continue (nothing was restarted)"
+  fi
   local tmp; tmp="$(mktemp -d)/revision-$id.md"
   printf '%s\n' "This is a review revision round for $id on branch $branch, resumed in place after gc stopped you under memory pressure. Run \`cel inbox read --workspace $ws\` - the findings from $by are there. Fix them on this branch, run the gate, commit, push THIS branch only, then \`cel inbox send $by \"pushed <sha> - re-review\" --workspace $ws\` and stop. Your original spec: $(printf '%s' "$row" | jq -r '.spec // ""')" > "$tmp"
   ( cmd_delegate "$repo" "$branch" "$tmp" --reuse ${ws_opt:+--workspace "$ws_opt"} ) >/dev/null \
@@ -3420,7 +3426,7 @@ _replace_bind() {
       else . end)')" \
     || { rm -f "$pre"; die "replace bind: could not write the ledger - nothing recorded"; }
   _replace_fault after-bind
-  ( cmd_inbox send "$alias" "checkout bound for $id: your source of truth is now $creal (branch $id at exactly $th, clean). Your process working directory is still $oreal and CANNOT be moved without restarting you - do not restart. Do all work for this PR by absolute path in $creal (cd there, or git -C $creal ...); never edit, stage, reset, stash, clean or commit in $oreal - it holds private evidence that is preserved byte-for-byte. Earlier review and gate evidence no longer applies: run the gate in $creal and commit there. Do not touch the original branch or its PR." \
+  ( cmd_inbox send "$alias" "checkout bound for $id: your source of truth is now $creal (branch $id at exactly $th, clean). Your process working directory is still $oreal and CANNOT be moved without restarting you - do not restart. Do all work for this PR by absolute path in $creal (cd there, or git -C $creal ...). Write your handoff to the ABSOLUTE path $creal/.agent/result.md (and every other .agent/ file under $creal/.agent/) - a relative .agent/ path resolves into $oreal, which is never settled from and must stay untouched. Never edit, stage, reset, stash, clean or commit in $oreal - it holds private evidence that is preserved byte-for-byte. Earlier review and gate evidence no longer applies: run the gate in $creal and commit there. Do not touch the original branch or its PR." \
       --from "$by" --workspace "$(ws_name "$wsdir")" --kind status ) >/dev/null 2>&1 \
     || c_warn "could not message $alias - the binding stands; tell the worker by hand"
   c_ok "$id: bound to $creal at ${th:0:12}. collect, the verifier, review and land now act on that checkout; $oreal (HEAD $(printf '%s' "$ofacts" | jq -r '.head[0:12]'), $(printf '%s' "$ofacts" | jq -r .dirty_entries) dirty entries) was only read and stays retained; actor $alias keeps its native session. Review and gate evidence from the old checkout was superseded - re-review at $th. Recovery record: $pre"
