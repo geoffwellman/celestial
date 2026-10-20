@@ -3405,7 +3405,7 @@ test_reuse_refuses_a_thinking_level_that_disagrees_with_the_row() {
 test_reuse_refuses_a_session_a_live_process_holds() {
   _fanout_resume_refusal_setup
   local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000004 orig-model orig-model)"
-  sh -c 'sleep 30' holder "$f" & local hp=$!
+  bash -c 'sleep 30; :' holder --session "$f" & local hp=$!
   local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
   out="$(_fanout_reuse WG-X2)" || rc=$?
   kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true
@@ -3592,7 +3592,7 @@ test_reuse_refuses_a_row_recorded_session_outside_the_pi_root() {
 test_reuse_holder_probe_is_not_fooled_by_the_word_delegate() {
   _fanout_resume_refusal_setup
   local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000040 orig-model orig-model)"
-  bash -c 'sleep 30 # delegate cel-fanout' pi --session "$f" & local hp=$!
+  bash -c 'sleep 30; : delegate cel-fanout' pi --session "$f" & local hp=$!
   local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
   out="$(_fanout_reuse WG-X2)" || rc=$?
   kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true

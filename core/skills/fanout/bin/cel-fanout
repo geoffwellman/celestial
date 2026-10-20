@@ -819,7 +819,21 @@ _fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
   if [ -n "$tt" ] && [ -n "$RS_THINKING" ] && [ "$tt" != "$RS_THINKING" ]; then
     die "delegate --reuse: the latest thinking level in $RS_SESSION is '$tt' but the row recorded '$RS_THINKING' - the session disagrees with the row, refusing to pick one. Nothing was changed"
   fi
-  local holders; holders="$(pgrep -af -- "$RS_SESSION" 2>/dev/null | grep -v 'cel-fanout\|delegate' || true)"
+  # A pi session must resolve UNDER the pi session root, whether it came from
+  # the row or from --session: another runtime's root or a private root is
+  # unsupported (a symlink out of the root counts as out).
+  if [ "$rt" = pi ]; then
+    local proot; proot="$(readlink -f "$(gateway_pi_dir)/sessions" 2>/dev/null || true)"
+    case "$(readlink -f "$RS_SESSION" 2>/dev/null || true)" in
+      "$proot"/*) [ -n "$proot" ] || RS_SESSION="" ;;
+      *) RS_SESSION=""; ;;
+    esac
+    [ -n "$RS_SESSION" ] || die "delegate --reuse: the session is outside the default pi session root - resuming a RECOVERED, other-runtime or PRIVATE-ROOT session is unsupported (no fallback is substituted). Nothing was changed"
+  fi
+  # the holder is matched on the exact `--session <path>` argument (a command
+  # line that merely says "delegate" is still a holder); this tool's own
+  # processes never carry that argument
+  local holders; holders="$(pgrep -af -- "--session $RS_SESSION" 2>/dev/null || true)"
   if [ -n "$holders" ]; then
     die "delegate --reuse: a live process already holds $RS_SESSION - nothing was changed"
   fi
