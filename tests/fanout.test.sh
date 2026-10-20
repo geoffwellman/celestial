@@ -69,8 +69,10 @@ _fanout_retain() { # <id> <wt-dir-name> [state]
   git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base 2>/dev/null || true
   git -C "$T/repos/widget" worktree add -q -b "$id" "$wt" 2>/dev/null || true
   RET_WT="$(cd "$wt" && pwd -P)"
-  RET_SESS="$T/sessions/orig-$id.jsonl"
-  mkdir -p "$T/sessions"
+  # the row's session lives under the pi root the launch will use
+  export CEL_PI_AGENT_DIR="$T/pi"
+  RET_SESS="$T/pi/sessions/--retained-$id--/orig-$id.jsonl"
+  mkdir -p "$(dirname "$RET_SESS")"
   printf '{"type":"session","version":3,"id":"orig-%s","cwd":"%s"}\n' "$id" "$RET_WT" > "$RET_SESS"
   jq --arg w "$RET_WT" --arg s "$RET_SESS" --arg st "$st" \
     '.[0].worktree = $w | .[0].state = $st | .[0].history += [{state:$st, at:"t", by:"gc"}] | (if env.NOSESS == "1" then . else .[0].session = $s end)' \
@@ -3562,5 +3564,38 @@ test_reuse_in_a_repo_with_many_worktrees_does_not_exit_141() {
   [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
   [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
+
+# A session RECORDED ON THE ROW is held to the same rule as --session: a pi row
+# never resumes a session outside the pi session root (another runtime's root or
+# a private root), whatever its header says.
+test_reuse_refuses_a_row_recorded_session_outside_the_pi_root() {
+  _fanout_resume_refusal_setup
+  mkdir -p "$T/other-root/sessions"
+  local f="$T/other-root/sessions/foreign.jsonl"
+  printf '{"type":"session","version":3,"id":"01ffffff-0000-7000-8000-000000000001","cwd":"%s"}\n{"type":"model_change","modelId":"orig-model"}\n{"type":"thinking_level_change","thinkingLevel":"medium"}\n' "$RET_WT" > "$f"
+  jq --arg s "$f" '.[0].session = $s' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused rowsess "$out" "$rc" "$before" "unsupported" || return 1
+  # a symlink inside the root that points outside it is outside too
+  mkdir -p "$T/pi/sessions/--link--"; ln -s "$f" "$T/pi/sessions/--link--/l.jsonl"
+  jq --arg s "$T/pi/sessions/--link--/l.jsonl" '.[0].session = $s' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused symlink "$out" "$rc" "$before" "unsupported" || return 1
+  rm -rf "$T"
+}
+# the holder probe matches the exact --session argument: a holder whose command
+# line also says "delegate" is still a holder
+test_reuse_holder_probe_is_not_fooled_by_the_word_delegate() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000040 orig-model orig-model)"
+  bash -c 'sleep 30 # delegate cel-fanout' pi --session "$f" & local hp=$!
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true
+  _fanout_refused holder2 "$out" "$rc" "$before" "holds" || return 1
   rm -rf "$T"
 }
