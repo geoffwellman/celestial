@@ -64,10 +64,11 @@ _boxguard_gb() { awk -v mb="$1" 'BEGIN { printf "%.1f", mb / 1024 }'; }
 # every runnable task) - stalls actually happening, which no MemAvailable or
 # swap reading can show. Unreadable PSI is no signal. The suite reads only the
 # CEL_PSI_MEMORY fixture.
+# avg60 is rounded to the nearest whole percent (9.9 reads as 10), not truncated.
 boxguard_psi_field() { # some|full -> integer avg60, or return 1 when unreadable
   local f="${CEL_PSI_MEMORY:-}"
   if [ -z "$f" ]; then [ -n "${CEL_TESTING:-}" ] && return 1; f=/proc/pressure/memory; fi
-  awk -v k="$1" '$1 == k { for (i = 1; i <= NF; i++) if ($i ~ /^avg60=/) { sub(/avg60=/, "", $i); printf "%d\n", $i; found = 1 } }
+  awk -v k="$1" '$1 == k { for (i = 1; i <= NF; i++) if ($i ~ /^avg60=/) { sub(/avg60=/, "", $i); printf "%d\n", $i + 0.5; found = 1 } }
        END { exit !found }' "$f" 2>/dev/null
 }
 boxguard_psi_full() { boxguard_psi_field full; }
@@ -119,7 +120,8 @@ _boxguard_driver() { # <avail> <swap> <line-mb>
   if [ "$1" -lt "$3" ]; then printf 'free memory is below the floor'; return 0; fi
   st="$(_boxguard_stalls)" || rc=$?
   if [ "$rc" -eq 0 ]; then printf '%s with under %s GB free' "$st" "$(_boxguard_gb $(( $3 * 2 )))"
-  else printf 'swap over %s%% with no PSI and under %s GB free' "$(boxguard_max_swap_pct)" "$(_boxguard_gb $(( $3 * 2 )))"; fi
+  elif [ "$rc" -eq 2 ]; then printf 'swap over %s%% with no PSI and under %s GB free' "$(boxguard_max_swap_pct)" "$(_boxguard_gb $(( $3 * 2 )))"
+  else printf 'no stall or swap driver'; fi
 }
 
 # THE DOUBLED BAND: PSI readable -> it applies only while memory stalls reach
@@ -171,9 +173,12 @@ boxguard_pressure() {
 boxguard_warning_text() { # [what-gc-did]
   local avail swap
   read -r avail swap <<<"$(boxguard_read)"
-  local why
+  local why psi
   if [ "$avail" -lt "$(boxguard_warn_avail_mb)" ]; then
     why="free memory is below the $(_boxguard_gb "$(boxguard_warn_avail_mb)") GB warning line"
+  elif psi="$(boxguard_psi_full)" && [ "$psi" -ge "$(boxguard_psi_full_pct)" ] \
+      && ! _boxguard_under "$avail" "$swap" "$(boxguard_min_avail_mb)"; then
+    why="memory stalls at full ${psi}%"
   else
     why="$(_boxguard_driver "$avail" "$swap" "$(boxguard_min_avail_mb)")"
   fi
@@ -337,7 +342,7 @@ boxguard_doctor_line() {
   st="$(_boxguard_stalls)" || rc=$?
   case "$rc" in
     0) note="$st - floors doubled" ;;
-    1) note="no memory stalls (PSI some $(boxguard_psi_some)% / full $(boxguard_psi_full)%); swap is info only" ;;
+    1) note="no memory stalls (PSI some $(boxguard_psi_some || echo n/a)% / full $(boxguard_psi_full || echo n/a)%); swap is info only" ;;
     *) note="PSI unreadable: swap counts only under $(_boxguard_gb $(( $(boxguard_min_avail_mb) * 2 ))) GB" ;;
   esac
   printf 'memory: %s GB free, swap %s%% used (warning under %s GB; admission floor %s GB; %s)' \

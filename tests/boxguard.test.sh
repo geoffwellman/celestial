@@ -300,3 +300,27 @@ test_boxguard_doctor_line_names_what_drives_the_verdict() {
   assert_contains "$out" "memory stalls at some 15%"
   unset CEL_PSI_MEMORY; rm -rf "$T"
 }
+
+test_boxguard_warning_text_names_the_real_driver() {
+  local out
+  _bg_meminfo 4194304 0 0               # 4 GB: under the 5 GB warning line
+  _bg_psi 0 0
+  out="$(boxguard_warning_text)"; assert_contains "$out" "below the 5.0 GB warning line"
+  _bg_meminfo 5767168 8388608 83886     # 5.5 GB, 99% swap: stall-doubled band
+  _bg_psi 12 0
+  out="$(boxguard_warning_text)"; assert_contains "$out" "memory stalls at some 12% / full 0% with under 6.0 GB free"
+  _bg_meminfo 20971520 8388608 83886    # 20 GB free: full stalls only, no GB claim
+  _bg_psi 0 15
+  out="$(boxguard_warning_text)"; assert_contains "$out" "memory stalls at full 15%"
+  case "$out" in *"GB free)"*"under"*) echo "claimed a GB band at 20 GB: $out"; unset CEL_PSI_MEMORY; return 1;; esac
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_psi_rounds_instead_of_truncating() {
+  _bg_meminfo 5767168 8388608 83886
+  _bg_psi 9.90 0
+  boxguard_admit >/dev/null && { echo "9.9 read as under 10"; unset CEL_PSI_MEMORY; return 1; }
+  _bg_psi 9.40 0
+  boxguard_admit >/dev/null || { echo "9.4 read as 10"; unset CEL_PSI_MEMORY; return 1; }
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
