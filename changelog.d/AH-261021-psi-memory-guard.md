@@ -1,0 +1,2 @@
+### Fixed
+- Memory guard: swap fullness alone never doubles the admission floor or the warning line any more. The doubled band applies only while the kernel shows real memory stalls (PSI `some` or `full` avg60 at `box.psi_some_pct` / `box.psi_full_pct`, default 10 each); where PSI is unreadable the old swap rule still applies. The plain floor is unchanged. Refusals, steward warnings and `cel doctor` now say what drove the verdict, and report high swap with no stalls as info.
