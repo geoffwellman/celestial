@@ -401,6 +401,11 @@ _fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded> <mem>
   printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s   mem %s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 }
+# A solo product has no workers to count: its one agent, and the git
+# worktrees it keeps for its own parallel branches.
+_fleet_solo_line() { # <label> <agent> <worktrees> <mem>
+  printf '  %-12s solo %-5s worktrees %s   mem %s\n' "$1" "$2" "$3" "$4"
+}
 
 # WHERE THE ORCHESTRATOR PANE STANDS, which is the directory its memory is
 # attributed to. A declared product has its own directory under products/; an
@@ -424,6 +429,9 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     [ -n "$repo" ] && repos+=("$repo")
   done < <(ws_product_repos "$wsdir" "$product")
   ws_product_declared "$wsdir" "$product" && declared=true
+  local mode solo_wt=0
+  mode="$(ws_build_mode "$wsdir" "$product")"
+  [ "$mode" != solo ] || solo_wt="$(ws_solo_worktrees "$wsdir" "$product" | grep -c . || true)"
 
   # THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO - the same precedence
   # `cel-fanout delegate` uses when it refuses a worker. A view that counted
@@ -507,9 +515,9 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   printf '%s' "$rows" | jq -sc --arg name "$product" --arg orch "$orch" \
     --argjson workers "$workers" --argjson cap "$cap" \
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
-    --argjson declared "$declared" \
+    --argjson declared "$declared" --arg mode "$mode" --argjson solo_wt "${solo_wt:-0}" \
     --argjson rss "$rss" --argjson orch_rss "$orch_rss" \
-    '{name: $name, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, workers_list: .}' \
+    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt, workers_list: .}' \
     --args "${repos[@]}"
 }
 
@@ -623,13 +631,19 @@ _fleet_render() { # <doc>
       as $head
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
-        | "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)\t\(.rss_mb // 0)"]
+        | if .mode == "solo"
+          then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\((.rss_mb // 0) + (.orch_rss_mb // 0))"
+          else "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)\t\(.rss_mb // 0)" end]
     | .[]' \
   | while IFS= read -r line; do
       case "$line" in
         UNIT*)
           IFS=$'\t' read -r _ n o w c s u m <<<"$line"
           _fleet_unit_line "$n" "$o" "$w" "$c" "$s" "$u" "$(mem_human "$m")"
+          ;;
+        SOLO*)
+          IFS=$'\t' read -r _ n o t m <<<"$line"
+          _fleet_solo_line "$n" "$o" "$t" "$(mem_human "$m")"
           ;;
         *) printf '%s\n' "$line" ;;
       esac

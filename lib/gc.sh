@@ -424,7 +424,7 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
 # kept worktree meant a GC that could identify NOTHING printed the same line
 # as one with nothing to do - which is how the pi blindness above went
 # unnoticed for weeks.
-_GC_KEPT_REASONS=(busy symlink live unlanded open-pr unidentified refused stubborn)
+_GC_KEPT_REASONS=(busy symlink live unlanded open-pr no-pr unidentified refused stubborn)
 
 _gc_keep_reset() {
   unset GC_KEPT GC_UNIDENTIFIED
@@ -1330,13 +1330,28 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     case "$managed" in *$'\n'"$d"$'\n'*) continue;; esac
     candidates="$(printf '%s' "$candidates" | jq --arg d "$d" '. + [{workspace:"", dir:$d}]')"
   done
+  # A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>). No
+  # ledger row will ever name them, so the unlisted veto below is waived for
+  # exactly these - and in exchange they must show a MERGED or CLOSED PR: a
+  # clean worktree with no PR yet may be one the agent has only just made.
+  local sp sd
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
+    for sp in $(ws_product_names "$wsdir" 2>/dev/null); do
+      while IFS= read -r sd; do
+        [ -n "$sd" ] && candidates="$(printf '%s' "$candidates" | jq --arg d "$sd" '. + [{workspace:"", dir:$d, solo:true}]')"
+      done < <(ws_solo_worktrees "$wsdir" "$sp")
+    done
+  done <<< "$names"
 
   while IFS= read -r row; do
     cwd="$(printf '%s' "$row" | jq -r .dir)"
     ws_id="$(printf '%s' "$row" | jq -r .workspace)"
+    local solo_wt; solo_wt="$(printf '%s' "$row" | jq -r '.solo // false')"
     [ "$(readlink -f "$cwd" 2>/dev/null)" = "$cwd" ] || { _gc_keep symlink; continue; }
     if [ -z "$ws_id" ] && _gc_has_process "$cwd"; then _gc_keep live; continue; fi
-    if _gc_delegated_live "$cwd"; then _gc_keep live; continue; fi
+    if _gc_delegated_live "$cwd" "$([ "$solo_wt" = true ] && printf allow-unlisted)"; then _gc_keep live; continue; fi
     # No force removal: Git/herdr must still refuse newly dirty work. Only
     # linked Git worktrees qualify, never an ordinary repository in this dir.
     local gitdir common
@@ -1345,6 +1360,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
       && [ "$gitdir" != "$common" ] || { _gc_keep unlanded; continue; }
     state="$(_gc_pr_state "$cwd")"
     case "$state" in MERGED|CLOSED|NONE) ;; *) _gc_keep open-pr; continue;; esac
+    [ "$solo_wt" != true ] || [ "$state" != NONE ] || { _gc_keep no-pr; continue; }
     _gc_landed_clean "$cwd" "$state" || { _gc_flag_unlanded "$cwd"; _gc_keep unlanded; continue; }
     # Re-read the exact managed workspace; an orphan must have NO live agent
     # at its path. Unknown/blocked/working never age out of either veto.

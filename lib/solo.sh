@@ -57,6 +57,31 @@ solo_review_get() { # <wsdir> <repo> <pr> -> the verdict object, or nothing
   jq -c --arg k "$2#$3" '.[$k] // empty' "$(_solo_reviews "$1")" 2>/dev/null || true
 }
 
+# A solo product's PRs that `cel solo land` would merge right now: opened by
+# this workspace's account, open, not a draft, not conflicting, every check
+# concluded and none red, and approved at the current head (GitHub's review or
+# the recorded verdict). One `<repo><TAB><pr><TAB><head>` line each. The
+# steward nudges the product's agent with these; it never lands them itself.
+# A gh failure yields nothing - silence, never a guess.
+solo_ready_prs() { # <wsdir> <product>
+  local wsdir="$1" product="$2" repo slug rows
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    slug="$(ws_repo_github_slug "$wsdir" "$repo")" || continue
+    rows="$(_land_gh "$wsdir" pr list --repo "$slug" --author @me --state open --limit 50 \
+      --json number,headRefOid,isDraft,mergeable,reviewDecision,statusCheckRollup 2>/dev/null)" || continue
+    printf '%s' "$rows" | jq -r --arg repo "$repo" --slurpfile v <(jq -c . "$(_solo_reviews "$wsdir")" 2>/dev/null || printf '{}') '
+      ($v[0] // {}) as $verdicts
+      | .[]? | select(.isDraft == false and .mergeable != "CONFLICTING")
+      | select((.statusCheckRollup // []) | length > 0)
+      | select(all(.statusCheckRollup[]; ((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "SKIPPED" or $s == "NEUTRAL")))
+      | .headRefOid as $head
+      | select(.reviewDecision == "APPROVED"
+               or (($verdicts["\($repo)#\(.number)"] // {}) | .verdict == "approved" and .head == $head))
+      | "\($repo)\t\(.number)\t\(.headRefOid)"' 2>/dev/null || true
+  done < <(ws_product_repos "$wsdir" "$product")
+}
+
 # `<repo>#<n>` or a bare `<n>` when the product has exactly one repo. Sets
 # SOLO_WSDIR, SOLO_PRODUCT, SOLO_REPO, SOLO_PR; refuses a repo that is not in
 # a solo product, because a fleet PR has a delegation and its own door.

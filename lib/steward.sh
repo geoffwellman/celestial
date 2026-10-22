@@ -745,6 +745,29 @@ _steward_review_sweep() { # <agents-json>
   done
 }
 
+# A SOLO PRODUCT'S READY PRS. It has no delegations, so the review sweep above
+# (ledger rows, worker nudges) finds nothing to say about them. What can still
+# stall is the last step: a PR approved at its head with every check green,
+# waiting on its own agent to land it. That agent is told once per head (the
+# key carries it, so a new push is a new fact); the steward never lands it.
+_steward_solo_sweep() {
+  local ws wsdir product repo pr head
+  # shellcheck source=lib/solo.sh
+  . "${BASH_SOURCE[0]%/*}/solo.sh"
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for product in $(ws_product_names "$wsdir"); do
+      [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
+      while IFS=$'\t' read -r repo pr head; do
+        [ -n "$pr" ] || continue
+        _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
+          "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
+      done < <(solo_ready_prs "$wsdir" "$product")
+    done
+  done
+}
+
 # TICKETS THAT ARE READY TO BUILD. Moving a ticket into the trigger state
 # (workspace.yaml `tickets.trigger_state`, default "Ready") is how a human
 # starts work from the board. The steward notices, and tells root through the
@@ -1842,6 +1865,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_sample "$agents_json"
 
   _steward_review_sweep "$agents_json"
+  _steward_solo_sweep
   # And then the ledger closes what the world already closed - after the
   # review sweep, because a PR it nudged about this tick may be the very one
   # that has just been merged.

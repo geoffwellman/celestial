@@ -92,6 +92,43 @@ test_gc_removes_only_proven_settled_clean_worktrees() {
   rm -rf "$T"
 }
 
+# A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>) have no
+# ledger row. They go when their PR merged or closed and nothing is unsaved;
+# a clean one with no PR yet is kept - it may have just been made.
+_gc_solo_fixture() {
+  _gc_managed_fixture
+  printf '[]' > "$GC_WS/.cel/delegations.json"   # the herdr worktree is now unlisted: vetoed
+  cp "$CEL_ROOT/tests/fixtures/ws-products/workspace.yaml" "$GC_WS/"
+  sed -i 's/^    workers: 2$/    workers: 2\n    mode: solo/' "$GC_WS/workspace.yaml"
+  GC_SOLO="$GC_WS/.cel/solo/bundle/feat"
+  mkdir -p "$(dirname "$GC_SOLO")"
+  command git -C "$T/repo" worktree add -q -b feat "$GC_SOLO"
+  herdr() {
+    case "$1 $2" in
+      "workspace list") printf '{"result":{"workspaces":[]}}';;
+      "pane list") printf '{"result":{"panes":[]}}';;
+      "agent list") printf '%s' "$GC_AGENTS";;
+      "worktree remove") printf 'herdr remove\n' >> "$GC_SINK";;
+      *) return 1;;
+    esac
+  }
+}
+test_gc_removes_a_merged_clean_solo_worktree() {
+  _gc_solo_fixture
+  GC_PR=MERGED cmd_gc >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" "git remove"
+  rm -rf "$T"
+}
+test_gc_keeps_a_solo_worktree_with_no_pr_open_pr_or_unsaved_work() {
+  _gc_solo_fixture
+  for GC_PR in NONE OPEN; do cmd_gc >/dev/null 2>&1; done
+  assert_eq "$(cat "$GC_SINK")" ""
+  printf 'x' > "$GC_SOLO/unsaved.txt"
+  GC_PR=MERGED cmd_gc >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+
 # AH-261017: a recovered launch is `unconfirmed` with an idle live agent in its
 # pane. Neither a merged/closed/absent PR nor a gone-looking pane may let gc
 # take its worktree while the row is unsettled.
