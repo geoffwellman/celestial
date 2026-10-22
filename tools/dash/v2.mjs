@@ -45,6 +45,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // ---- where to look ------------------------------------------------------
   const BOOT = new Date().toISOString();
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
+  const soloExpr = '[((.products // [])[] | select(.mode == "solo") | .name), ((.repos // [])[] | select(.mode == "solo") | .name)]';
+  // lib/common.sh cel_alias_norm, the one rule that names agents and mailboxes
+  const aliasNorm = (s) => {
+    let n = String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^[^a-z]+/, '');
+    return n.length > 32 ? n.slice(0, 32) : n.replace(/-+$/, '');
+  };
   // CEL-116: served warm like `slow` - a plain TTL cache made every request
   // in the 30th second wait on five yq spawns, and every 8th on herdr
   const workspaces = () => slow('v2ws', 30000, async () => {
@@ -62,9 +68,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       else {
         try { repos = JSON.parse(await run('yq', ['-c', slugExpr, join(path, 'workspace.yaml')], 8000) || '[]'); } catch { repos = []; }
       }
-      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [] });
+      // which products build solo: their `-orch` agent is then the one agent
+      // that builds and ships, and the fleet row says so
+      let solo = [];
+      try { solo = JSON.parse(await run('yq', ['-c', soloExpr, join(w.name === cfg.name ? cfg.wsdir : path, 'workspace.yaml')], 8000) || '[]'); } catch { solo = []; }
+      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], solo: Array.isArray(solo) ? solo : [] });
     }
-    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [] });
+    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], solo: [] });
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
@@ -521,7 +531,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       }
       const home = wss.find((w) => under(cwd, w.path));
       if (home && /-orch$/.test(String(a.name || ''))) {
-        orchestrators.push({ name: a.name, ws: home.name, status: a.agent_status || 'unknown', pane: a.pane_id || null });
+        const solo = (home.solo || []).some((p) => aliasNorm(`${p}-orch`) === a.name);
+        orchestrators.push({ name: a.name, ws: home.name, status: a.agent_status || 'unknown', pane: a.pane_id || null, mode: solo ? 'solo' : 'fleet' });
       }
     }
     const prs = pulls.map((p) => ({ ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,

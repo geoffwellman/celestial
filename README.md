@@ -259,6 +259,13 @@ the key instead of a delegation:
   repo gate before pushing, and CI on the head is the evidence the squash body
   cites.
 
+The rest of the box sees a solo product for what it is: `cel fleet` draws it as
+`solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the
+dashboard tags its agent row, the steward tells the agent - once per head - when
+a PR of its is approved and green but unmerged, and `cel gc` removes its
+worktrees under `<ws>/.cel/solo/<product>/` once their PR has merged or closed
+and nothing in them is unsaved (a worktree with no PR yet is kept).
+
 ## Factory vocabulary
 
 The floor has its own words. They are used in the prose below, and none of
