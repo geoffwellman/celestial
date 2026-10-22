@@ -529,6 +529,10 @@ EOF
 # blocked item, naming the trees big enough to be worth doing something about.
 test_steward_raises_one_blocker_when_the_box_runs_out_of_memory() {
   _mem_steward_fixture 25165824 1258291
+  export CEL_SERVE_STATE="$T/serve" CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '%s\n' '{"name":"preview-demo","unit":"cel-serve-preview-demo","owner":"bundle-orch","workspace":"alpha","started_at":100,"ttl_seconds":3600,"last_request_at":100,"port":8080}' > "$CEL_SERVE_STATE/preview-demo.json"
+  _serve_cgroup_memory() { printf 880; }
   local i
   for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1; done
   local open; open="$(cmd_inbox open --for root --workspace alpha)"
@@ -536,6 +540,7 @@ test_steward_raises_one_blocker_when_the_box_runs_out_of_memory() {
   assert_contains "$open" "1.2G of 24G available"
   assert_contains "$open" "ABC-49-slug 2.3G"
   assert_contains "$open" "bundle-orch 800M"
+  assert_contains "$open" "Top servers: preview-demo 880M"
   # a collected delegation is finished business and its worktree is gone: it is
   # not one of the trees anybody can act on
   case "$open" in *ABC-50-done*) echo 'a collected worker was named as a live tree'; rm -rf "$T"; return 1;; esac
@@ -1969,5 +1974,28 @@ test_red_pr_is_nudged_when_only_prose_or_another_workspace_names_it() {
     > "$(_inbox_file beta)"
   PATH="$T/bin:$PATH" _steward_review_sweep "$LIVE_ROSTER" >/dev/null
   assert_contains "$(cmd_inbox read --for bundle-orch --workspace alpha --all 2>/dev/null)" "PR #7 on widget has FAILING checks"
+  rm -rf "$T"
+}
+
+test_steward_reports_unledgered_servers_to_product_once_a_day() {
+  local T; T="$(mktemp -d)"
+  export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE" "$T/alpha"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  CEL_SERVE_ADOPT_DATA='[{"pid":1234,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'
+  export CEL_SERVE_ADOPT_DATA
+  registry_names() { printf 'alpha\n'; }
+  registry_path() { printf '%s/alpha' "$T"; }
+  ws_product_names() { printf 'widget\n'; }
+  cmd_inbox() { printf '%s\n' "$*" >> "$T/sent"; }
+  date() { [ "$*" = '-u +%F' ] && printf '2026-10-15\n' || command date "$@"; }
+  _serve_unledgered_report
+  _serve_unledgered_report
+  assert_eq "$(wc -l < "$T/sent" | tr -d ' ')" "1"
+  assert_contains "$(cat "$T/sent")" "widget-orch"
+  assert_contains "$(cat "$T/sent")" "240MB"
+  assert_contains "$(cat "$T/sent")" "nothing unledgered was stopped"
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
   rm -rf "$T"
 }

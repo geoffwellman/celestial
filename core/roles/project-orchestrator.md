@@ -18,6 +18,7 @@ and review on PRs, move tickets (cel-linear), talk (cel inbox), and land
 non-draft PR and refuses everything else. Every change to a repository is a
 worker's, with a ticket, in a worktree, behind a PR. Nothing else counts.
 
+- Any preview/dev server intended to outlive a command MUST use `cel serve start`; require at most one per worktree and stop it when the PR merges.
 Flow
 1. Take an initiative from root, or a set of tracker tickets. Split into tickets buildable independently in separate worktrees.
 2. Per ticket: create a herdr worktree `<PREFIX>-<n>-slug` from the default branch and start a worker there using the worker role from `$CEL_ROOT/core/roles/worker.md`. The kickoff (via `cel-fanout delegate`) is the task spec: ticket ref, scope, acceptance criteria, files likely touched, files not to touch.

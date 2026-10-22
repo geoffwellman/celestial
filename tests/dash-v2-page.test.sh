@@ -14,13 +14,20 @@ _vp_boot() {
   mkdir -p "$T/bin" "$T/alpha" "$T/inbox" "$T/home" "$T/shots"
   printf '#!/usr/bin/env bash\nprintf %s\n' "'{\"result\":{\"agents\":[],\"workspaces\":[],\"panes\":[]}}'" > "$T/bin/herdr"
   printf '#!/usr/bin/env bash\nprintf "[]"\n' > "$T/bin/gh"
-  chmod +x "$T/bin/herdr" "$T/bin/gh"
+  cat > "$T/bin/cel" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "quota --json") printf '{"subscriptions":[]}';;
+  *) printf '[]';;
+esac
+EOF
+  chmod +x "$T/bin/herdr" "$T/bin/gh" "$T/bin/cel"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$T/registry.yaml"
   printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
   DASH_PORT="$(_vp_port)"
   CEL_DASH_CONFIG="{\"name\":\"alpha\",\"wsdir\":\"$T/alpha\",\"host\":\"127.0.0.1\",\"port\":$DASH_PORT,\"repos\":[],\"services\":[]}" \
-    PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
+    CEL_DASH_CEL="$T/bin/cel" PATH="$T/bin:$PATH" node "$CEL_ROOT/tools/dash/server.mjs" >"$T/dash.log" 2>&1 &
   DASH_PID=$!
   trap '_vp_down' EXIT
   local i; for i in $(seq 1 30); do
@@ -62,6 +69,7 @@ test_dash_v2page_is_the_front_door_and_classic_redirects() {
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/server.mjs")" "404"
   _vp_down
 }
+
 
 test_dash_v2page_filter_changes_every_card() {
   _vp_boot
