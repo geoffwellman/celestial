@@ -394,6 +394,15 @@ test_run_solo_keeps_the_one_agent_per_product_refusal() {
   ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
   rm -rf "$T"
 }
+# Solo is the PRODUCT agent's role; a worker or reviewer launched on a solo
+# product's repo is still exactly a worker or reviewer.
+test_run_solo_does_not_leak_into_worker_launches() {
+  _ws_solo bundle
+  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=worker"
+  ! printf '%s' "$out" | grep -q 'CEL_ROLE=solo' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 
 # --- the console ----------------------------------------------------------
 # The console is BOX-LEVEL: it routes across every workspace and therefore

@@ -57,9 +57,11 @@ _mode_product() { # <wsdir> -> product, or nothing
 # flow-style item (`- { name: x }`) is refused rather than rewritten.
 #
 # The result must equal the original with exactly this one key set, compared
-# as plain data, or nothing is written.
+# as plain data, or nothing is written. The write replaces the file a symlink
+# points at, never the link, and keeps a missing final newline missing.
 _mode_write() { # <wsdir> <product> <mode>
-  local f="$1/workspace.yaml" tmp key
+  local f tmp key
+  f="$(readlink -f "$1/workspace.yaml")" || return 1
   if ws_product_declared "$1" "$2"; then key=products; else key=repos; fi
   tmp="$(mktemp "$f.cel-mode.XXXXXX")" || return 1
   if awk -v sect="$key" -v name="$2" -v mode="$3" '
@@ -73,7 +75,9 @@ _mode_write() { # <wsdir> <product> <mode>
       # 1. the `- name: <name>` line of the item, inside the top-level section
       insect = 0; s = 0
       for (i = 1; i <= NR; i++) {
-        if (!noise(L[i]) && ind(L[i]) == 0) insect = (L[i] ~ ("^" sect ":[ \t]*(#.*)?$"))
+        # a top-level key opens or closes the section; a `- ` at column 0 is an
+        # item of an unindented sequence (`products:\n- name: a`), not a key
+        if (!noise(L[i]) && ind(L[i]) == 0 && L[i] !~ /^-/) insect = (L[i] ~ ("^" sect ":[ \t]*(#.*)?$"))
         if (!insect) continue
         if (L[i] ~ /^[ \t]*-[ \t]*\{/ && L[i] ~ ("name:[ \t]*[\"\x27]?" name "[\"\x27]?[ \t]*[,}]")) exit 3
         if (L[i] ~ /^[ \t]*-[ \t]+name:/) {
@@ -98,6 +102,7 @@ _mode_write() { # <wsdir> <product> <mode>
         if (i == s && !m) print pad "mode: " mode
       }
     }' "$f" > "$tmp" \
+     && { [ -z "$(tail -c1 "$f")" ] || truncate -s -1 "$tmp"; } \
      && [ "$(yq -cS --arg k "$key" --arg n "$2" --arg m "$3" \
             '(.[$k][] | select(.name == $n)).mode = $m' "$f")" = "$(yq -cS . "$tmp")" ]; then
     chmod --reference="$f" "$tmp" 2>/dev/null || true
@@ -107,16 +112,39 @@ _mode_write() { # <wsdir> <product> <mode>
   fi
 }
 
+# THE PRODUCT'S OWN AGENT, by name AND directory. Any agent standing in the
+# product directory is not enough: for an implicit product that directory is
+# the repo checkout, where a human's own pane may stand too, and restarting it
+# would be restarting the wrong thing. Prints its status; returns 1 when no
+# such agent is live and 2 when herdr could not be asked - silence from the
+# observer is not evidence that the agent is gone.
+_mode_agent_status() { # <wsdir> <product>
+  local name cwd roster
+  name="$(_run_agent_name "$2/orch")"; cwd="$(ws_product_dir "$1" "$2")"
+  have herdr && have jq || return 2
+  roster="$(herdr agent list 2>/dev/null)" || return 2
+  printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 2
+  printf '%s' "$roster" | jq -er --arg n "$name" --arg c "$cwd" \
+    '[.result.agents[] | select(.name == $n and (.cwd // "") == $c)][0].agent_status // empty' 2>/dev/null \
+    || return 1
+}
+
 # The restart, detached from whoever asked: when the product's own agent runs
 # `cel mode`, it is mid-turn, and restarting it then would kill the turn that
 # asked. A transient user unit outlives the caller and has its own cgroup (a
 # plain `setsid` would die with a steward tick's unit - lib/dash.sh); without
-# systemd it falls back to setsid. Any earlier pending switch for the same
-# product is replaced, so the last word wins.
+# systemd it falls back to setsid.
+#
+# ONE PENDING RESTART PER PRODUCT, AND IT IS NEVER STOPPED. Stopping an earlier
+# waiter could kill a restart already half done (exit keys sent, relaunch not
+# yet), leaving the pane dead. A pending one is left alone instead: the
+# relaunch reads `mode:` when it fires, so a solo->fleet->solo flip lands on
+# the latest word anyway. The waiter also holds a per-product lock, so the
+# setsid fallback cannot double-restart either.
 _mode_unit() { # <ws> <product>
   printf 'cel-mode-%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '-'
 }
-_mode_schedule_restart() { # <wsdir> <product>
+_mode_schedule_restart() { # <wsdir> <product> -> 0 scheduled, 3 one already pending
   local ws; ws="$(ws_name "$1")"
   local -a cmd=("$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" --workspace "$ws")
   if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_MODE_LAUNCH:-}" ]; then
@@ -124,28 +152,36 @@ _mode_schedule_restart() { # <wsdir> <product>
   fi
   local unit; unit="$(_mode_unit "$ws" "$2")"
   if have systemd-run && systemctl --user show-environment >/dev/null 2>&1; then
-    systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
-    systemd-run --user --quiet --collect --unit "$unit" \
-      --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=CEL_ROOT="$CEL_ROOT" \
-      "${cmd[@]}" && return 0
+    systemctl --user is-active --quiet "$unit.service" 2>/dev/null && return 3
+    local -a envs=(--setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=CEL_ROOT="$CEL_ROOT")
+    [ -z "${HERDR_SOCKET_PATH:-}" ] || envs+=(--setenv=HERDR_SOCKET_PATH="$HERDR_SOCKET_PATH")
+    [ -z "${CEL_REGISTRY:-}" ] || envs+=(--setenv=CEL_REGISTRY="$CEL_REGISTRY")
+    systemd-run --user --quiet --collect --unit "$unit" "${envs[@]}" "${cmd[@]}" && return 0
   fi
   setsid nohup "${cmd[@]}" >/dev/null 2>&1 < /dev/null &
 }
 
-# The waiter itself. Polls the agent standing in the product directory and
-# restarts it once it has been out of `working` for two consecutive polls - a
-# turn has gaps between tool calls, and one idle sample in the middle of one
-# is not the end of it. Gives up after a bound and says so in the journal: a
-# waiter must never outlive the reason it was started.
+# The waiter itself. Restarts the product's agent once it has been `idle` or
+# `done` for two consecutive polls - a turn has gaps between tool calls, and
+# one quiet sample in the middle of one is not the end of it. Anything else is
+# not quiet: `working` is a turn, and `blocked` is a pending approval the owner
+# has not answered, which a restart would throw away. The relaunch never
+# passes --force, so `cel run --restart` itself still refuses a working agent.
+# Gives up after a bound and says so: a waiter must never outlive its reason.
 _mode_restart_when_idle() { # <wsdir> <product>
-  local wsdir="$1" product="$2" cwd occ status quiet=0 waited=0
+  local wsdir="$1" product="$2" status rc quiet=0 waited=0
   local poll="${CEL_MODE_POLL_SECS:-5}" limit="${CEL_MODE_WAIT_SECS:-7200}"
-  cwd="$(ws_product_dir "$wsdir" "$product")"
+  local lock="$wsdir/.cel/mode-restart-$product.lock"
+  mkdir -p "$wsdir/.cel"
+  exec 8>"$lock"
+  flock -n 8 || { c_warn "cel mode: a restart of $product is already pending"; return 0; }
   while [ "$waited" -lt "$limit" ]; do
-    occ="$(_run_live_agent_in_cwd "$cwd")"
-    [ -n "$occ" ] || { c_warn "cel mode: no agent is live for $product any more - the new mode applies at its next launch"; return 0; }
-    status="$(printf '%s' "$occ" | cut -f3)"
-    if [ "$status" = working ]; then quiet=0; else quiet=$((quiet + 1)); fi
+    rc=0; status="$(_mode_agent_status "$wsdir" "$product")" || rc=$?
+    case "$rc" in
+      1) c_warn "cel mode: $product-orch is not live any more - the new mode applies at its next launch"; return 0 ;;
+      2) quiet=0 ;;   # the observer stuttered: ask again, decide nothing
+      *) case "$status" in idle|done) quiet=$((quiet + 1)) ;; *) quiet=0 ;; esac ;;
+    esac
     if [ "$quiet" -ge 2 ]; then
       # From the workspace directory, so no registry lookup stands between the
       # waiter and the one launch path that picks the role from `mode:`.
@@ -154,7 +190,7 @@ _mode_restart_when_idle() { # <wsdir> <product>
     fi
     sleep "$poll"; waited=$((waited + poll))
   done
-  c_err "cel mode: $product was still working after ${limit}s - not restarted; the new mode applies at its next launch"
+  c_err "cel mode: $product was not idle within ${limit}s - not restarted; the new mode applies at its next launch"
   return 1
 }
 
@@ -212,19 +248,25 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
     fi
   fi
 
-  _mode_write "$wsdir" "$product" "$want" || die "cel mode: could not write $wsdir/workspace.yaml"
+  _mode_write "$wsdir" "$product" "$want" \
+    || die "cel mode: could not set mode on '$product' in $wsdir/workspace.yaml - the entry is in a layout this edits only by hand (a flow-style \`{ name: ... }\` item), or the edit would have changed more than that key. Nothing was written; add \`mode: $want\` to its entry yourself"
   [ "$(ws_build_mode "$wsdir" "$product")" = "$want" ] \
     || die "cel mode: wrote $wsdir/workspace.yaml but it still reads '$(ws_build_mode "$wsdir" "$product")' for $product"
   c_ok "$product: $have_mode -> $want (workspace.yaml)"
 
-  local occ; occ="$(_run_live_agent_in_cwd "$(ws_product_dir "$wsdir" "$product")")"
-  if [ -z "$occ" ]; then
-    printf '  no agent is live for %s - it starts as %s at its next launch\n' "$product" "$want"
+  local rc=0; _mode_agent_status "$wsdir" "$product" >/dev/null || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    printf '  %s-orch is not live - %s starts as %s at its next launch\n' "$product" "$product" "$want"
   elif [ "$restart" -eq 0 ]; then
-    printf '  %s is live and keeps its current role until it is restarted (--no-restart)\n' "$product"
+    printf '  %s-orch keeps its current role until it is restarted (--no-restart)\n' "$product"
   else
-    _mode_schedule_restart "$wsdir" "$product" \
-      || die "cel mode: could not schedule the restart - run: cel run orchestrator --product $product --restart"
-    printf '  %s restarts as %s on the same session once its current turn ends\n' "$product" "$want"
+    # rc 2 (herdr unreadable) still schedules: the waiter asks again, and it is
+    # the waiter, not this call, that decides whether anything is restarted.
+    rc=0; _mode_schedule_restart "$wsdir" "$product" || rc=$?
+    case "$rc" in
+      0) printf '  %s-orch restarts as %s on the same session once it is idle\n' "$product" "$want" ;;
+      3) printf '  a restart of %s-orch is already pending; it will start it as %s\n' "$product" "$want" ;;
+      *) die "cel mode: could not schedule the restart - run: cel run orchestrator --product $product --restart" ;;
+    esac
   fi
 }

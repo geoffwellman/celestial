@@ -11,7 +11,9 @@ because, for what is being built now, one capable agent with the whole picture
 is faster than an orchestrator handing tickets to workers. If the work outgrows
 you, say so: `cel mode <product> fleet` switches the product back to an
 orchestrator with workers, and you are restarted into that role on this same
-session once your turn ends.
+session once your turn ends. Change only YOUR product's mode, and only when
+the owner asked for it or the work plainly needs it - another product's mode
+(and its agent) is someone else's.
 
 Your tools are yours
 - Use everything your runtime gives you. Your own git worktrees for parallel

@@ -197,12 +197,38 @@ test_solo_may_not_fan_out_or_start_agents() {
   local c
   for c in 'cel-fanout delegate widget WG-1-x spec.md' 'bash /x/bin/cel-fanout scout widget b.md' \
            'cel-fanout land WG-1-x' 'cel-fanout release WG-1-x' \
-           'cel run worker --repo widget --branch WG-1-x' 'cel run orchestrator --product bundle'; do
+           'cel run worker --repo widget --branch WG-1-x' 'cel run orchestrator --product bundle' \
+           'herdr agent start foo --kind pi'; do
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
   done
 }
 test_solo_may_not_merge_by_hand() {
-  case "$(guard_classify solo 'gh pr merge 12 --squash')" in deny*) ;; *) return 1;; esac
+  local c
+  for c in 'gh pr merge 12 --squash' 'gh -R a/b pr merge 5' 'gh --repo=a/b pr merge 5' \
+           'gh api -X PUT repos/a/b/pulls/5/merge'; do
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+# The spellings that slipped past a substring match - spacing, tabs, quotes,
+# options before the verb, chains, wrappers - are the SAME command.
+test_factory_verbs_are_refused_however_they_are_spelled() {
+  local c
+  for c in 'cel-fanout  delegate x' "$(printf 'cel-fanout\tdelegate x')" '"cel-fanout" land x' \
+           'cel-fanout --workspace plane delegate x' 'cel -C /ws --workspace p run worker' \
+           'cel run "worker"' 'cd x && cel-fanout land y' 'bash -c "cel-fanout land y"' \
+           'FOO=1 timeout 30 /home/x/bin/cel-fanout delegate a b c' 'echo $(cel-fanout land y)'; do
+    case "$(guard_classify worker "$c")" in deny*) ;; *) echo "worker allowed: $c"; return 1;; esac
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+# ...and text that merely MENTIONS a verb is not running it.
+test_factory_verbs_in_arguments_are_not_commands() {
+  local c
+  for c in 'grep -n "cel-fanout land" lib/guard.sh' 'git commit -m "never cel-fanout land here"' \
+           'rg "gh pr merge" docs'; do
+    assert_eq "$(guard_classify solo "$c")" allow
+    assert_eq "$(guard_classify worker "$c")" allow
+  done
 }
 test_hook_lets_a_solo_pane_commit() {
   _gws
