@@ -336,6 +336,65 @@ test_run_role_file_is_per_declared_product() {
   rm -rf "$T"
 }
 
+# --- solo mode ---------------------------------------------------------------
+# A solo product's agent is still THE product's agent: same directory, alias,
+# mailbox and role-file name (gc keys on role-orchestrator.md), so everything
+# that finds "the product" still finds it. What changes is CEL_ROLE (the guard
+# reads it) and the role body.
+_ws_solo() { # <product> -> a products workspace with that product in solo mode
+  _ws_products; source "$CEL_ROOT/lib/mode.sh"
+  ( cd "$T" && cmd_mode "$1" solo --no-restart ) >/dev/null
+}
+test_run_orchestrator_on_a_solo_product_launches_the_solo_agent() {
+  _ws_solo bundle
+  printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run orchestrator --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_contains "$out" "--cwd $T/products/bundle"
+  assert_contains "$out" "agent start bundle-orch"
+  assert_contains "$out" "CEL_INBOX_ME=bundle-orch"
+  # the guard still rides along: it is what refuses fan-out to a solo agent
+  assert_contains "$out" "orchestrator-guard.omp.ts"
+  rm -rf "$T"
+}
+test_run_solo_body_drops_worker_instructions_and_says_solo() {
+  _ws_solo bundle
+  local body; body="$(ws_render_role "$T" "$CEL_ROOT/core/roles/solo.md" bundle)"
+  assert_contains "$body" "build mode: solo"
+  ! printf '%s' "$body" | grep -q -e 'worker runtime:' -e 'max concurrent workers' -e 'investigations are SCOUTS' \
+    || { echo "solo body still tells it to delegate"; rm -rf "$T"; return 1; }
+  # and a fleet product's body is untouched by any of this
+  body="$(ws_policy_block "$T" lone)"
+  assert_contains "$body" "worker runtime:"
+  ! printf '%s' "$body" | grep -q 'build mode:' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_run_solo_forces_solo_once_on_a_fleet_product() {
+  _ws_products
+  local out; out="$(cd "$T" && cmd_run solo --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_eq "$(ws_build_mode "$T" bundle)" fleet
+  rm -rf "$T"
+}
+test_run_solo_refuses_while_fleet_work_is_in_flight() {
+  _ws_products
+  mkdir -p "$T/.cel"
+  printf '[{"id":"WG-1-x","repo":"gadget","state":"running"}]' > "$T/.cel/delegations.json"
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --dry-run )
+  rm -rf "$T"
+}
+test_run_refuses_an_unknown_build_mode() {
+  _ws_products
+  sed -i 's/^    workers: 2$/    workers: 2\n    mode: sideways/' "$T/workspace.yaml"
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
+  rm -rf "$T"
+}
+test_run_solo_keeps_the_one_agent_per_product_refusal() {
+  _ws_solo bundle; _run_stub_roster "$T/products/bundle" bundle-orch
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
+  rm -rf "$T"
+}
+
 # --- the console ----------------------------------------------------------
 # The console is BOX-LEVEL: it routes across every workspace and therefore
 # stands in none. No --workspace is resolved, no policy block is rendered

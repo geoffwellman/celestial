@@ -46,10 +46,13 @@ _CEL_GUARD=1
 #
 # CEL_ROLE=console in the environment says so outright, because unlike every
 # other role the console's cwd is a plain directory a human could also be
-# standing in - path alone is not enough to be sure.
+# standing in - path alone is not enough to be sure. CEL_ROLE=solo does the
+# same for a solo agent: it stands exactly where an orchestrator stands (the
+# product's directory), so only the launch can say which of the two it is.
 guard_role_of() { # <cwd>
   local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
   [ "${CEL_ROLE:-}" = console ] && { printf console; return 0; }
+  [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
   local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
   case "$p" in "$cons"|"$cons"/*) printf console; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
@@ -212,12 +215,45 @@ _guard_worker() { # <command> -> allow | deny <reason>
   printf allow
 }
 
+# A SOLO AGENT IS THE BUILDER, so it gets the worker's freedom: it edits,
+# commits, pushes, opens PRs, makes its own git worktrees and runs its own
+# subagents. What it does NOT get is the factory: fan-out verbs and starting
+# other Celestial agents are refused (a reviewer for its own PR excepted),
+# because a solo product has no orchestrator to collect, review or land what
+# a delegated worker would produce. Merging is refused too until there is a
+# solo land path that checks review and CI the way `cel-fanout land` does;
+# until then a person merges.
+_guard_solo() { # <command> -> allow | deny <reason>
+  local c="$1"
+  c="${c#"${c%%[![:space:]]*}"}"
+  local n
+  n="$(printf '%s' "$c" \
+    | sed -E 's#(^|[[:space:]])(bash|sh|env)[[:space:]]+#\1#g' \
+    | sed -E 's#(^|[[:space:]])[^[:space:]]*/(cel-fanout|cel)([[:space:]])#\1\2\3#g' \
+    | sed -E 's#(^|[[:space:]])(cel-fanout|cel)([[:space:]]+-C[[:space:]]+[^[:space:]]+)+#\1\2#g')"
+  case "$n" in
+    *cel-fanout\ delegate*|*cel-fanout\ scout*|*cel-fanout\ spike*|*cel-fanout\ collect*|\
+    *cel-fanout\ release*|*cel-fanout\ reconcile*|*cel-fanout\ replace*|*cel-fanout\ recover*|\
+    *cel-fanout\ handback*|*cel-fanout\ land*)
+      printf 'deny this product is in solo mode: you build it yourself (your own worktrees and subagents are fine); Celestial fan-out is off - `cel mode <product> fleet` switches back to workers'
+      return 0;;
+    *cel\ run\ orchestrator*|*cel\ run\ root*|*cel\ run\ console*|*cel\ run\ worker*|*cel\ run\ solo*)
+      printf 'deny a solo agent starts no other Celestial agents (only `cel run reviewer` for its own PR)'
+      return 0;;
+    *gh\ pr\ merge*)
+      printf 'deny a solo agent does not merge by hand yet: stop at an approved, green PR and tell the owner (a checked solo land path is coming)'
+      return 0;;
+  esac
+  printf allow
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   case "$role" in console) _guard_console "$cmd"; return 0;; esac
   # `other` is not the plane's concern; a worker has exactly the refusals above
   # and is otherwise unrestricted, writing code being its whole job.
   case "$role" in worker) _guard_worker "$cmd"; return 0;; esac
+  case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in other) printf allow; return 0;; esac
 
   # The sanctioned write paths. These are the mechanism; refusing them would
@@ -321,7 +357,7 @@ guard_classify_path() { # <role> <file_path>
       *) printf 'deny the console routes; it does not build - a worker does that'; return 0;;
     esac
   fi
-  case "$role" in worker|other) printf allow; return 0;; esac
+  case "$role" in worker|solo|other) printf allow; return 0;; esac
   case "$path" in
     */repos/*) printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'; return 0;;
   esac

@@ -175,6 +175,42 @@ test_workers_are_unrestricted() {
   assert_eq "$(guard_classify_path worker /any/repos/x.ts)" allow
 }
 
+# --- solo: the builder, without the factory ----------------------------------
+# A solo agent stands where an orchestrator stands, so only CEL_ROLE can tell
+# the two apart - and it must, or the solo agent could not write a line.
+test_role_solo_from_the_launch_not_the_path() {
+  _gws
+  assert_eq "$(CEL_ROLE=solo guard_role_of "$T/repos/widget")" solo
+  assert_eq "$(guard_role_of "$T/repos/widget")" orchestrator
+  rm -rf "$T"
+}
+test_solo_may_build_and_ship() {
+  assert_eq "$(guard_classify solo 'git commit -m x')" allow
+  assert_eq "$(guard_classify solo 'git push -u origin WG-1-x')" allow
+  assert_eq "$(guard_classify solo 'git worktree add ../wt -b WG-2-y origin/main')" allow
+  assert_eq "$(guard_classify solo 'gh pr create --fill')" allow
+  assert_eq "$(guard_classify solo 'cel run reviewer --repo widget --pr 12')" allow
+  assert_eq "$(guard_classify solo 'cel mode bundle fleet')" allow
+  assert_eq "$(guard_classify_path solo /ws/repos/widget/src/x.ts)" allow
+}
+test_solo_may_not_fan_out_or_start_agents() {
+  local c
+  for c in 'cel-fanout delegate widget WG-1-x spec.md' 'bash /x/bin/cel-fanout scout widget b.md' \
+           'cel-fanout land WG-1-x' 'cel-fanout release WG-1-x' \
+           'cel run worker --repo widget --branch WG-1-x' 'cel run orchestrator --product bundle'; do
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+test_solo_may_not_merge_by_hand() {
+  case "$(guard_classify solo 'gh pr merge 12 --squash')" in deny*) ;; *) return 1;; esac
+}
+test_hook_lets_a_solo_pane_commit() {
+  _gws
+  CEL_ROLE=solo _hook "$T/repos/widget" Bash '{"command":"git commit -m x"}' \
+    || { echo "solo commit blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # --- the hook end to end ---------------------------------------------------
 _hook() { # <cwd> <tool> <input-json> -> exit code, stderr in $HOOK_ERR
   local out
