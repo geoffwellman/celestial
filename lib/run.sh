@@ -123,12 +123,12 @@ _run_keep_model_args() { # <runtime>
 # is spent, the server answers 429 with retry-after-ms around 5,500,000 and
 # omp's default retry.maxDelayMs (300000) refuses the wait: the orchestrator's
 # turn stopped until a human typed, and a timer screen-scraping panes was the
-# stopgap. omp 18 reads a --config overlay per launch, so root and the
+# stopgap. omp 18 reads a --config overlay per launch, so core, root and the
 # orchestrators wait in-process and keep their context. Workers do not: a
 # worker asleep for hours holds a slot better given to another.
 _run_retry_overlay_args() { # <runtime> <role>
   [ "$1" = omp ] || return 0
-  case "$2" in root|orchestrator) ;; *) return 0 ;; esac
+  case "$2" in core|root|orchestrator) ;; *) return 0 ;; esac
   AGENT_ARGS=("--config=$CEL_ROOT/core/omp-orchestrator.yml" "${AGENT_ARGS[@]}")
 }
 
@@ -779,101 +779,124 @@ _run_dry_agent_args() {
   printf '%s' "${out[*]}"
 }
 
-# --- the console ----------------------------------------------------------
-# The console is the one pane that is not IN a workspace. It routes across all
+# --- core: the box's coordinator ------------------------------------------
+# Core is the one agent that is not IN a workspace. It coordinates across all
 # of them, so resolving a workspace for it would be arbitrary: whichever
 # directory the operator happened to start it from would silently become the
 # default for every command that takes a --workspace. It gets a directory of
 # its own instead, outside every checkout, where its notes and its role file
-# live and where the guard lets it write.
-_run_console_dir() { printf '%s' "${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"; }
+# live and where the guard lets it write. `cel run console` (and `cel run
+# core`) start the same pane; its alias is `core` and its mailbox is `root`
+# in every workspace.
+_run_core_dir() { printf '%s' "${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"; }
 
 # No policy block. Every other role's body ends with the workspace's policy
-# because the workspace is the thing it is bound to; the console is bound to
-# the box, and a policy block from an arbitrary workspace would read as
-# authority it does not have.
-#
-# The vocabulary table is INCLUDED rather than carried: the TUI's translator
-# puts the same table in its system message (tools/console/translate.mjs), and
-# two copies of it would mean the two consoles disagreeing about what the
-# console may do the first time someone edited one of them.
-_run_console_body() {
-  local f="$CEL_ROOT/core/roles/console.md" vocab="$CEL_ROOT/tools/console/vocabulary.md"
-  local line
-  while IFS= read -r line; do
-    case "$line" in
-      '<!-- cel:include tools/console/vocabulary.md -->')
-        # Strip the file's own explanatory comment: it is addressed to whoever
-        # edits the table, not to the agent reading the prompt.
-        sed '/^<!--/,/-->$/d' "$vocab" | sed '/^$/{ /./!d }'
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$f"
+# because the workspace is the thing it is bound to; core is bound to the box,
+# and a policy block from an arbitrary workspace would read as authority it
+# does not have.
+_run_core_body() { cat "$CEL_ROOT/core/roles/core.md"; }
+
+# Core's launch settings come from agents.yaml `defaults.core`.
+_run_core_default() { # <runtime|model|thinking|via>
+  manifest_default core | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
 }
 
-# The console's launch settings come from agents.yaml `defaults.console`.
-_run_console_default() { # <runtime|model|thinking>
-  manifest_default console | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
-}
+_run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh> <force> <pane-opt>
+  local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4" restart="$5" fresh="$6" force="$7" pane_opt="$8"
+  [ -z "$profile" ] || die "cel core: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
+  have jq || die "cel core: jq is not on PATH"
 
-_run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
-  local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4" agent="${5:-1}"
-  # THE DEFAULT CONSOLE IS NOT AN AGENT ANY MORE. `cel console` is the plane's
-  # own interface (lib/console.sh): deterministic panels and a small model
-  # wired into one job. The Claude pane survives behind --agent for people who
-  # want to talk to a full agent, but a bare `cel run console` must not
-  # silently start the expensive thing when the cheap thing is what the README
-  # now leads with.
-  if [ "$agent" -ne 1 ]; then
-    printf 'cel run console now starts an AGENT pane; the console itself is `cel console`.\n' >&2
-    printf 'Use `cel console` for the TUI, or `cel run console --agent` for the agent pane.\n' >&2
-    return 2
-  fi
-  [ -z "$profile" ] || die "cel run console: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
-  have jq || die "cel run console: jq is not on PATH"
-
-  local cwd runtime model thinking
-  cwd="$(_run_console_dir)"
-  runtime="$(_run_console_default runtime)"
-  [ -n "$runtime" ] || die "cel run console: agents.yaml declares no defaults.console.runtime"
-  model="$(_run_console_default model)"; thinking="$(_run_console_default thinking)"
+  local cwd runtime model thinking via
+  cwd="$(_run_core_dir)"
+  runtime="$(_run_core_default runtime)"
+  [ -n "$runtime" ] || die "cel core: agents.yaml declares no defaults.core.runtime"
+  model="$(_run_core_default model)"; thinking="$(_run_core_default thinking)"; via="$(_run_core_default via)"
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
 
+  # ONE CORE PER BOX. Two would both drain root's mail and answer it twice.
+  # The same refusal as an orchestrator's, on a dry run too.
+  if [ "$force" -eq 0 ] && [ "$restart" -eq 0 ]; then
+    local occupant oname opane
+    occupant="$(_run_live_agent_in_cwd "$cwd")"
+    if [ -n "$occupant" ]; then
+      IFS=$'\t' read -r oname opane _ <<< "$occupant"
+      [ "$oname" != "-" ] || oname="<unnamed>"
+      die "cel core: core is already live (pane ${opane:-?}, name $oname) - there is one per box
+  Go to it:        herdr agent focus ${opane:-<pane>}
+  Restart it:      cel core --restart
+  Or say you mean it: cel core --force"
+    fi
+  fi
+
+  # THROUGH THE GATEWAY when defaults.core says so: the same omp route an
+  # orchestrator's `via: gateway` profile takes, fail-closed on a veto.
+  local PROFILE_MODEL="$model" PROFILE_VIA="" PROFILE_VETO="" PROFILE_NOTE=""
+  local PROFILE_GATEWAY_ACCOUNTS=0 PROFILE_ISOLATE="" PROFILE_THINKING="" PROFILE_WSDIR=""
+  if [ "$via" = gateway ]; then
+    [ "$runtime" = omp ] || die "cel core: defaults.core says via: gateway, which core supports on omp only (runtime is $runtime)"
+    PROFILE_VIA=gateway
+    _profile_gateway_route_omp core
+    [ -z "$PROFILE_VETO" ] || die "cel core: $PROFILE_VETO"
+    model="$PROFILE_MODEL"
+  fi
+
   [ "$dry" -eq 1 ] || mkdir -p "$cwd"
 
-  local RUN_BODY; RUN_BODY="$(_run_console_body)"
+  local RUN_BODY; RUN_BODY="$(_run_core_body)"
   local AGENT_ARGS=() AGENT_ROLE_FILE=""
   # The role file keeps the `role-*.md` shape on purpose: lib/gc.sh tells a
   # long-lived agent from a stray one by that substring in the cmdline, and
-  # the console is the longest-lived pane on the box.
-  _run_agent_args "$runtime" console "$RUN_BODY" "$dry" "$cwd" "$cwd/role-console.md"
+  # core is the longest-lived pane on the box.
+  _run_agent_args "$runtime" core "$RUN_BODY" "$dry" "$cwd" "$cwd/role-core.md"
 
   local -a PROFILE_ARGS=()
   profile_launch_args "$runtime" "$model" "$thinking"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
 
-  # Same guard hook as root and the orchestrators - for the console it carries
-  # an allowlist rather than a deny list (lib/guard.sh).
+  # The same guard hook as the orchestrators; lib/guard.sh holds core's rules.
   local gflag gfile
   gflag="$(agent_guard_hook "$runtime" flag)"; gfile="$(agent_guard_hook "$runtime" file)"
   if [ -n "$gflag" ] && [ -n "$gfile" ]; then
     AGENT_ARGS=("$gflag" "$CEL_ROOT/$gfile" "${AGENT_ARGS[@]}")
   fi
+  _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
+  _run_retry_overlay_args "$runtime" core
 
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$runtime")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
-  case "$runtime" in pi|omp) agent_roots_check "$runtime" || die "launch refused: pi and omp agent roots overlap" ;; esac
-  local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label celestial/console)
-  local envprefix; envprefix="$(_run_launch_env console "$cwd" "$AGENT_ROLE_FILE" "" "$runtime")"
+  # Core resumes its conversation across a restart, as root and the
+  # orchestrators do.
+  local RESUME_SESSION="" RESTART_PANE=""
+  _run_resume_resolve core core "$cwd" "$runtime" "$pane_opt" "$restart" "$fresh" "$force" "$dry" \
+    "cel core" "or restart it in place: cel core --restart"
+
+  # Mail: `root` in every workspace (the inbox hook sweeps them all when the
+  # identity is explicit).
+  local -a GATEWAY_ENV=()
+  _run_profile_gateway_setup "$runtime" core "$((1 - dry))" "$((1 - dry))"
+  local envprefix dry_envprefix prefix_required=0
+  envprefix="$(_run_launch_env core "$cwd" "$AGENT_ROLE_FILE" root "$runtime")"
+  dry_envprefix="$envprefix"
+  if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
+    prefix_required=1
+    dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env core "$cwd" "$AGENT_ROLE_FILE" root "$runtime")"
+  fi
+
+  local label=celestial/core
+  if [ -n "$RESTART_PANE" ]; then
+    _run_restart_in_place core "$RESTART_PANE" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" "$dry" core "$runtime" "$cwd"
+    return 0
+  fi
+
+  local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label "$label")
   if [ "$dry" -eq 1 ]; then
     printf 'herdr %s\n' "${CREATE_ARGS[*]}"
-    printf 'herdr pane send-text <pane> %s\n' "$envprefix"
-    printf 'herdr agent start console --kind %s --pane <pane> -- %s\n' \
+    printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
+    printf 'herdr agent start core --kind %s --pane <pane> -- %s\n' \
       "$runtime" "$(_run_dry_agent_args)"
     return 0
   fi
@@ -884,8 +907,8 @@ _run_console() { # <profile> <model-opt> <thinking-opt> <dry-run> <agent 0|1>
   ws_id="$(printf '%s' "$resp" | jq -r '.. | .workspace_id? // empty' | head -1)"
   pane_id="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
   [ -n "$pane_id" ] && [ "$pane_id" != "null" ] || pane_id="${ws_id}:p1"
-  _run_mark_launch "$pane_id" "$envprefix"
-  _run_agent_start "$pane_id" console "$runtime" "${AGENT_ARGS[@]}"
+  _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
+  _run_agent_start "$pane_id" core "$runtime" "${AGENT_ARGS[@]}"
 }
 
 # --- resuming root and the orchestrators (CEL-63) --------------------------
@@ -933,7 +956,7 @@ run_sessions_note_roster() { # <agents-json>
   while IFS=$'\t' read -r cwd sess; do
     [ -n "$cwd" ] && [ -n "$sess" ] && _run_sessions_record "$cwd" "$sess"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
-    | select((.name // "") | test("(-orch|-root)$"))
+    | select((.name // "") | test("(-orch|-root)$|^core$"))
     | select((.agent_session.value // "") != "")
     | [(.cwd // ""), .agent_session.value] | @tsv' 2>/dev/null)
   return 0
@@ -970,6 +993,121 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
   fi
   [ "$(printf '%s\n' "$rows" | wc -l)" -eq 1 ] || return 3
   return 0
+}
+
+# RESUME (CEL-63). Root, core and the orchestrators carry their conversation
+# across a restart; workers and reviewers never do - each is one ticket or
+# one PR, and a resumed one would carry the last job's context into this.
+# Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
+# flag to its AGENT_ARGS.
+_run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint>
+  local role="$1" agent_name="$2" cwd="$3" runtime="$4" pane_opt="$5"
+  local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}"
+  RESUME_SESSION=""; RESTART_PANE=""
+  local live="" lname lpane lstatus lsession lrc=1
+  if have herdr && have jq; then
+    live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime" "$pane_opt")" && lrc=0 || lrc=$?
+  fi
+  case "$lrc" in
+    0) ;;
+    3)
+      if [ "$restart" -eq 1 ]; then
+        c_err "cel run $role --restart: no agent is named $agent_name and $(printf '%s\n' "$live" | wc -l | tr -d ' ') $runtime agents share $cwd - refusing to guess which is the $role:" >&2
+        printf '%s\n' "$live" | awk -F '\t' '{ printf "    pane %s  name %s  status %s  session %s\n", $2, $1, $3, $4 }' >&2
+        die "  pass the right one: $relaunch --restart --pane <pane>"
+      fi
+      live="" ;;
+    4)
+      die "cel run $role --restart: pane $pane_opt runs $(printf '%s' "$live" | cut -f1), not $agent_name - it will not be renamed or relaunched" ;;
+    *)
+      [ -z "$pane_opt" ] || die "cel run $role --restart: no agent is live in pane $pane_opt"
+      live="" ;;
+  esac
+  if [ -n "$live" ]; then
+    IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
+    [ "$lsession" != "-" ] || lsession=""
+    _run_sessions_record "$cwd" "$lsession"
+  fi
+  if [ "$restart" -eq 1 ]; then
+    if [ -z "$live" ]; then
+      printf '  no live agent for %s in %s - launching it\n' "$agent_name" "$cwd" >&2
+    else
+      # Never kill a turn in progress by default: the owner may be mid-way
+      # through something the plane cannot see.
+      if [ "$lstatus" = working ] && [ "$force" -eq 0 ]; then
+        die "cel run $role --restart: $agent_name (pane $lpane) is working - a restart now would kill its turn. Wait for it to go idle, or pass --force"
+      fi
+      RESTART_PANE="$lpane"
+      [ "$fresh" -eq 1 ] || RESUME_SESSION="$lsession"
+    fi
+  fi
+  # Over a dead or absent agent, come back into the last recorded session.
+  if [ "$fresh" -eq 0 ] && [ -z "$RESUME_SESSION" ] && [ -z "$live" ]; then
+    RESUME_SESSION="$(_run_sessions_last "$cwd")"
+  fi
+  # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
+  # herdr still has a name for the pane already resuming it. The pane being
+  # restarted is the one expected resumer - it is about to be replaced.
+  # Only when this runtime CAN resume: one that cannot starts fresh and is
+  # no second resumer.
+  if [ "$role" != root ] && [ -n "$RESUME_SESSION" ] && [ "$force" -eq 0 ] \
+     && [ -n "$(agent_resume "$runtime" flag)" ]; then
+    local rs rpid rpane others=""
+    while IFS=$'\t' read -r rs rpid rpane; do
+      [ "$rs" = "$RESUME_SESSION" ] || continue
+      [ -n "$RESTART_PANE" ] && [ "$rpane" = "$RESTART_PANE" ] && continue
+      others+="    pane $rpane  pid $rpid"$'\n'
+    done < <(run_session_resumers)
+    if [ -n "$others" ]; then
+      c_err "cel run $role: another live process is already resuming $RESUME_SESSION:" >&2
+      printf '%s' "$others" >&2
+      die "  two processes on one session answer mail twice. Close that pane ($adopt), or pass --force"
+    fi
+    # and claim it, so a launch racing this one before either agent is in
+    # /proc is refused too. A preview claims nothing.
+    if [ "$dry_run" -eq 0 ]; then
+      _run_session_claim "$RESUME_SESSION" "$RESTART_PANE" \
+        || die "cel run $role: another launch claimed $RESUME_SESSION in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
+      _RUN_CLAIMED_SESSION="$RESUME_SESSION"
+      trap '_run_session_release_on_failure $?' EXIT
+    fi
+  fi
+  if [ -n "$RESUME_SESSION" ]; then
+    local rflag; rflag="$(agent_resume "$runtime" flag)"
+    if [ -n "$rflag" ]; then
+      AGENT_ARGS+=("$rflag" "$RESUME_SESSION")
+      printf '  resuming %s from %s\n' "$agent_name" "$RESUME_SESSION" >&2
+    else
+      printf '  runtime %s cannot resume a session - %s is starting fresh\n' "$runtime" "$agent_name" >&2
+      RESUME_SESSION=""
+    fi
+  elif [ "$fresh" -eq 0 ]; then
+    printf '  no previous session recorded for %s - starting fresh\n' "$agent_name" >&2
+  fi
+  return 0
+}
+
+# RESTART IN PLACE: exit the agent in its pane, leaving the pane and its
+# shell, and start the current launch line there under the same name.
+_run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <prefix-required> <dry-run> <agent-name> <runtime> <cwd>
+  local role="$1" pane="$2" label="$3" envprefix="$4" dry_envprefix="$5" prefix_required="$6"
+  local dry_run="$7" agent_name="$8" runtime="$9" cwd="${10}"
+  if [ "$dry_run" -eq 1 ]; then
+    printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$pane"
+    printf 'herdr pane send-text %s %s\n' "$pane" "$dry_envprefix"
+    printf 'herdr agent start %s --kind %s --pane %s -- %s\n' \
+      "$agent_name" "$runtime" "$pane" "$(_run_dry_agent_args)"
+    return 0
+  fi
+  herdr pane send-keys "$pane" esc ctrl+c ctrl+c >/dev/null 2>&1 \
+    || die "cel run $role --restart: could not send the exit keys to pane $pane"
+  _run_restart_wait "$pane" \
+    || die "cel run $role --restart: $agent_name is still running in $pane - exit it by hand and re-run"
+  pane_label_set "$pane" "$label"
+  tab_label_set "$pane" "$label"
+  _run_mark_launch "$pane" "$envprefix" "$prefix_required"
+  _RUN_AGENT_QUIET=1 _run_agent_start "$pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
+  _run_restart_confirm "$pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
 }
 
 _run_proc_root() { printf '%s' "${CEL_PROC_ROOT:-/proc}"; }
@@ -1262,13 +1400,15 @@ _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
 
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
-  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
+  local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 force=0
   local restart=0 fresh=0 pane_opt="" solo_forced=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
     case "$1" in
-      root|orchestrator|worker|reviewer|console) role="$1"; shift ;;
+      root|orchestrator|worker|reviewer) role="$1"; shift ;;
+      # `console` is core's old name and stays an alias of it.
+      core|console) role=core; shift ;;
       # SOLO IS THE PRODUCT'S AGENT IN ANOTHER ROLE, not a new kind of pane: same
       # directory, mailbox, alias, resume and one-per-product refusal as an
       # orchestrator, so every surface that finds "the product's agent" still
@@ -1276,7 +1416,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       # `mode:` picks it for `cel run orchestrator`; `cel run solo` forces it once.
       solo) role=orchestrator; solo_forced=1; shift ;;
       --*) : ;;
-      *) die "cel run: unknown role '$1' (want root, orchestrator, solo, worker, reviewer or console; omit for direct)" ;;
+      *) die "cel run: unknown role '$1' (want core, root, orchestrator, solo, worker or reviewer; omit for direct)" ;;
     esac
   fi
 
@@ -1295,20 +1435,21 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --restart)   restart=1; shift ;;
       --fresh)     fresh=1; shift ;;
       --pane)      pane_opt="$2"; restart=1; shift 2 ;;
-      --agent)     agent=1; shift ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
 
-  # The console resolves NO workspace - see _run_console. It has to return
-  # before the resolution below, which would otherwise die for want of one.
+  # Core resolves NO workspace - see _run_core. It has to return before the
+  # resolution below, which would otherwise die for want of one.
   case "$role" in
-    root|orchestrator) ;;
+    root|orchestrator|core) ;;
     *) [ "$restart" -eq 0 ] && [ "$fresh" -eq 0 ] \
-         || die "cel run: --restart and --fresh are for root and orchestrator only - workers and reviewers never resume" ;;
+         || die "cel run: --restart and --fresh are for core, root and orchestrators only - workers and reviewers never resume" ;;
   esac
-  if [ "$role" = console ]; then
-    _run_console "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$agent"
+  if [ "$role" = core ]; then
+    [ -z "$repo$product$workspace$branch$pr" ] \
+      || die "cel core: core stands in no workspace - --repo/--product/--workspace/--branch/--pr do not apply"
+    _run_core "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$restart" "$fresh" "$force" "$pane_opt"
     return $?
   fi
 
@@ -1635,92 +1776,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
 
-  # RESUME (CEL-63). Root and the orchestrators carry their conversation
-  # across a restart; workers and reviewers never do - each is one ticket or
-  # one PR, and a resumed one would carry the last job's context into this.
   local resume_session="" restart_pane=""
   if [ "$role" = root ] || [ "$role" = orchestrator ]; then
-    local live="" lname lpane lstatus lsession
-    local lrc=1
-    if have herdr && have jq; then
-      live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime" "$pane_opt")" && lrc=0 || lrc=$?
-    fi
-    case "$lrc" in
-      0) ;;
-      3)
-        if [ "$restart" -eq 1 ]; then
-          c_err "cel run $role --restart: no agent is named $agent_name and $(printf '%s\n' "$live" | wc -l | tr -d ' ') $runtime agents share $cwd - refusing to guess which is the orchestrator:" >&2
-          printf '%s\n' "$live" | awk -F '\t' '{ printf "    pane %s  name %s  status %s  session %s\n", $2, $1, $3, $4 }' >&2
-          die "  pass the right one: cel run $role${product:+ --product $product} --workspace $(ws_name "$wsdir") --restart --pane <pane>"
-        fi
-        live="" ;;
-      4)
-        die "cel run $role --restart: pane $pane_opt runs $(printf '%s' "$live" | cut -f1), not $agent_name - it will not be renamed or relaunched" ;;
-      *)
-        [ -z "$pane_opt" ] || die "cel run $role --restart: no agent is live in pane $pane_opt"
-        live="" ;;
-    esac
-    if [ -n "$live" ]; then
-      IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
-      [ "$lsession" != "-" ] || lsession=""
-      _run_sessions_record "$cwd" "$lsession"
-    fi
-    if [ "$restart" -eq 1 ]; then
-      if [ -z "$live" ]; then
-        printf '  no live agent for %s in %s - launching it\n' "$agent_name" "$cwd" >&2
-      else
-        # Never kill a turn in progress by default: the owner may be mid-way
-        # through something the plane cannot see.
-        if [ "$lstatus" = working ] && [ "$force" -eq 0 ]; then
-          die "cel run $role --restart: $agent_name (pane $lpane) is working - a restart now would kill its turn. Wait for it to go idle, or pass --force"
-        fi
-        restart_pane="$lpane"
-        [ "$fresh" -eq 1 ] || resume_session="$lsession"
-      fi
-    fi
-    # Over a dead or absent agent, come back into the last recorded session.
-    if [ "$fresh" -eq 0 ] && [ -z "$resume_session" ] && [ -z "$live" ]; then
-      resume_session="$(_run_sessions_last "$cwd")"
-    fi
-    # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
-    # herdr still has a name for the pane already resuming it. The pane being
-    # restarted is the one expected resumer - it is about to be replaced.
-    # Only when this runtime CAN resume: one that cannot starts fresh and is
-    # no second resumer.
-    if [ "$role" = orchestrator ] && [ -n "$resume_session" ] && [ "$force" -eq 0 ] \
-       && [ -n "$(agent_resume "$runtime" flag)" ]; then
-      local rs rpid rpane others=""
-      while IFS=$'\t' read -r rs rpid rpane; do
-        [ "$rs" = "$resume_session" ] || continue
-        [ -n "$restart_pane" ] && [ "$rpane" = "$restart_pane" ] && continue
-        others+="    pane $rpane  pid $rpid"$'\n'
-      done < <(run_session_resumers)
-      if [ -n "$others" ]; then
-        c_err "cel run $role: another live process is already resuming $resume_session:" >&2
-        printf '%s' "$others" >&2
-        die "  two processes on one session answer mail twice. Close that pane (or name and adopt it: cel ws up $(ws_name "$wsdir")), or pass --force"
-      fi
-      # and claim it, so a launch racing this one before either agent is in
-      # /proc is refused too. A preview claims nothing.
-      if [ "$dry_run" -eq 0 ]; then
-        _run_session_claim "$resume_session" "$restart_pane" \
-          || die "cel run $role: another launch claimed $resume_session in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
-        _RUN_CLAIMED_SESSION="$resume_session"
-        trap '_run_session_release_on_failure $?' EXIT
-      fi
-    fi
-    if [ -n "$resume_session" ]; then
-      local rflag; rflag="$(agent_resume "$runtime" flag)"
-      if [ -n "$rflag" ]; then
-        AGENT_ARGS+=("$rflag" "$resume_session")
-        printf '  resuming %s from %s\n' "$agent_name" "$resume_session" >&2
-      else
-        printf '  runtime %s cannot resume a session - %s is starting fresh\n' "$runtime" "$agent_name" >&2
-        resume_session=""
-      fi
-    elif [ "$fresh" -eq 0 ]; then
-      printf '  no previous session recorded for %s - starting fresh\n' "$agent_name" >&2
-    fi
+    local RESUME_SESSION="" RESTART_PANE=""
+    _run_resume_resolve "$role" "$agent_name" "$cwd" "$runtime" "$pane_opt" "$restart" "$fresh" "$force" "$dry_run" \
+      "cel run $role${product:+ --product $product} --workspace $(ws_name "$wsdir")" \
+      "or name and adopt it: cel ws up $(ws_name "$wsdir")"
+    resume_session="$RESUME_SESSION"; restart_pane="$RESTART_PANE"
   fi
 
   # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
@@ -1767,25 +1829,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     return 0
   fi
 
-  # RESTART IN PLACE: exit the agent in its pane, leaving the pane and its
-  # shell, and start the current launch line there under the same name.
   if [ -n "$restart_pane" ]; then
-    if [ "$dry_run" -eq 1 ]; then
-      printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$restart_pane"
-      printf 'herdr pane send-text %s %s\n' "$restart_pane" "$dry_envprefix"
-      printf 'herdr agent start %s --kind %s --pane %s -- %s\n' \
-        "$agent_name" "$runtime" "$restart_pane" "$(_run_dry_agent_args)"
-      return 0
-    fi
-    herdr pane send-keys "$restart_pane" esc ctrl+c ctrl+c >/dev/null 2>&1 \
-      || die "cel run $role --restart: could not send the exit keys to pane $restart_pane"
-    _run_restart_wait "$restart_pane" \
-      || die "cel run $role --restart: $agent_name is still running in $restart_pane - exit it by hand and re-run"
-    pane_label_set "$restart_pane" "$label"
-    tab_label_set "$restart_pane" "$label"
-    _run_mark_launch "$restart_pane" "$envprefix" "$prefix_required"
-    _RUN_AGENT_QUIET=1 _run_agent_start "$restart_pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
-    _run_restart_confirm "$restart_pane" "$cwd" "$runtime" "$agent_name" "${AGENT_ARGS[@]}"
+    _run_restart_in_place "$role" "$restart_pane" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" \
+      "$dry_run" "$agent_name" "$runtime" "$cwd"
     return 0
   fi
 

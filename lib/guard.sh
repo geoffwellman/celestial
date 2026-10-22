@@ -38,13 +38,15 @@ _CEL_GUARD=1
 # guard must not import inbox state to decide whether to block a command.
 #   ~/.herdr/worktrees/...        worker       (writes are its whole job)
 #   the console dir               console      (routes; allowlisted)
+#   the core dir                  core         (coordinates; orchestrator-class,
+#                                 minus the product agent's factory verbs)
 #   <ws>/repos/<repo>[/...]       orchestrator (reads, delegates, lands)
 #   <ws>/products/<p>[/...]       orchestrator (a product orchestrator: same
 #                                 powers, same refusals, different standpoint)
 #   <ws>[/...not under repos]     root
 #   anywhere else                 other        (not the plane's concern)
 #
-# CEL_ROLE=console in the environment says so outright, because unlike every
+# CEL_ROLE=console (and CEL_ROLE=core) in the environment says so outright, because unlike every
 # other role the console's cwd is a plain directory a human could also be
 # standing in - path alone is not enough to be sure. CEL_ROLE=solo does the
 # same for a solo agent: it stands exactly where an orchestrator stands (the
@@ -52,9 +54,12 @@ _CEL_GUARD=1
 guard_role_of() { # <cwd>
   local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
   [ "${CEL_ROLE:-}" = console ] && { printf console; return 0; }
+  [ "${CEL_ROLE:-}" = core ] && { printf core; return 0; }
   [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
   local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
   case "$p" in "$cons"|"$cons"/*) printf console; return 0;; esac
+  local core="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+  case "$p" in "$core"|"$core"/*) printf core; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
   local d="$p"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
@@ -237,7 +242,7 @@ _guard_worker() { # <command> -> allow | deny <reason>
     printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
     return 0
   fi
-  if _guard_starts "$1" 'cel run (orchestrator|root|console|worker|reviewer|solo)'; then
+  if _guard_starts "$1" 'cel run (orchestrator|root|console|core|worker|reviewer|solo)' 'cel core'; then
     printf 'deny a worker does not start agents'
     return 0
   fi
@@ -257,7 +262,7 @@ _guard_solo() { # <command> -> allow | deny <reason>
     printf 'deny this product is in solo mode: you build it yourself (your own worktrees and subagents are fine); Celestial fan-out is off - `cel mode <product> fleet` switches back to workers'
     return 0
   fi
-  if _guard_starts "$1" 'cel run (orchestrator|root|console|worker|solo)' 'herdr agent start' 'herdr worktree (create|open)'; then
+  if _guard_starts "$1" 'cel run (orchestrator|root|console|core|worker|solo)' 'cel core' 'herdr agent start' 'herdr worktree (create|open)'; then
     printf 'deny a solo agent starts no other Celestial agents or panes (only `cel run reviewer` for its own PR)'
     return 0
   fi
@@ -272,9 +277,36 @@ _guard_solo() { # <command> -> allow | deny <reason>
   printf allow
 }
 
+# CORE COORDINATES; IT DOES NOT RUN A FACTORY. It is orchestrator-class (every
+# repository and GitHub write an orchestrator is refused, it is refused too),
+# and on top of that the verbs that belong to a PRODUCT's agent are refused
+# here, before guard_classify's blanket allow of `cel`/`cel-fanout`: fan-out,
+# landing and review verdicts, starting workers or reviewers, and the box's
+# own configuration and release (`cel mode` is core's one config write, and it
+# is a `cel` command, so it passes).
+_guard_core() { # <command> -> deny <reason>, or nothing
+  if _guard_starts "$1" 'cel-fanout (delegate|scout|spike|collect|release|reconcile|replace|recover|handback|land|review)' \
+       'cel solo (land|review)' 'cel spike'; then
+    printf 'deny core coordinates; the product'"'"'s own agent delegates, reviews and lands - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
+    return 0
+  fi
+  if _guard_starts "$1" 'cel run (worker|reviewer|root)' 'herdr agent start' 'herdr worktree (create|open|remove)'; then
+    printf 'deny core starts product agents only (cel run orchestrator --product <p> --workspace <w>, add --restart to relaunch one); workers and reviewers are the product agent'"'"'s'
+    return 0
+  fi
+  if _guard_starts "$1" 'cel (learn|release|promote|update|setup)'; then
+    printf 'deny core'"'"'s only configuration write is cel mode; box configuration, learnings and releases are the owner'"'"'s (or the celestial product agent'"'"'s)'
+    return 0
+  fi
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   case "$role" in console) _guard_console "$cmd"; return 0;; esac
+  if [ "$role" = core ]; then
+    local cd; cd="$(_guard_core "$cmd")"
+    [ -z "$cd" ] || { printf '%s' "$cd"; return 0; }
+  fi
   # `other` is not the plane's concern; a worker has exactly the refusals above
   # and is otherwise unrestricted, writing code being its whole job.
   case "$role" in worker) _guard_worker "$cmd"; return 0;; esac
@@ -373,13 +405,21 @@ guard_classify() { # <role> <command>
 # file, scratch - is the orchestrator's to write.
 guard_classify_path() { # <role> <file_path>
   local role="$1" path="$2"
-  # The console writes its own notes and nothing else: it has no workspace, so
-  # every path outside its directory belongs to someone whose job it is not.
+  # The console and core write their own notes and nothing else: neither has
+  # a workspace, so every path outside its directory belongs to someone whose
+  # job it is not.
   if [ "$role" = console ]; then
     local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
     case "$path" in
       "$cons"/*) printf allow; return 0;;
       *) printf 'deny the console routes; it does not build - a worker does that'; return 0;;
+    esac
+  fi
+  if [ "$role" = core ]; then
+    local core="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+    case "$path" in
+      "$core"/*) printf allow; return 0;;
+      *) printf 'deny core writes only its own notes (%s) - a product agent changes everything else; send it the request' "$core"; return 0;;
     esac
   fi
   case "$role" in worker|solo|other) printf allow; return 0;; esac

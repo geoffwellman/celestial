@@ -179,7 +179,7 @@ Two human steps, once per box:
 `cel doctor` checks both for every workspace that declares `github.user`.
 
 ```
-console                one per box - routes; reads cel fleet; never builds
+core                   one per box - coordinates products, owns root's mail; never builds
    └── orchestrator        one per product (1..n repos) - plans, delegates, judges, lands
           ├── worker          one ticket, one worktree, one PR
           ├── scout           reads and reports; never writes code
@@ -196,7 +196,18 @@ together. A product that contains all of a workspace's repos is simply "the
 workspace orchestrator"; there is no third tier below it, and never was a need
 for one. `cel run root` is optional: a standing director for a workspace that
 wants one. `root` remains the mailbox name for "the top, whoever is listening",
-which is the console otherwise.
+which is `cel core` otherwise.
+
+`cel core` (also `cel run core`, and its old name `cel run console`) starts
+the box's coordinator: one agent pane, standing in no workspace, that reads
+`root`'s mail in every workspace, holds cross-product priorities and
+blockers, reads state and code read-only, directs product agents by inbox,
+starts and restarts them, and switches a product's mode with `cel mode`. It
+does not build, delegate workers or land PRs - the guard refuses those and
+names the product agent's route. It runs from agents.yaml `defaults.core`
+(omp on gateway Opus), resumes its last session, and refuses a second copy;
+`cel core --restart` relaunches it in its own pane, `--fresh` starts a new
+conversation. Mail sent to `core` lands in `root`.
 
 `cel run <role>` starts any station with its role injected and permissions
 pre-approved; workers are spawned by orchestrators through the `fanout` skill,
@@ -498,8 +509,8 @@ console --ask "<sentence>"` prints the chain one command per line, or the
 answer when the state holds one (exit 0), or the numbered options on a miss
 (exit 1). `--ask` also prints what the router chose and how long it took on
 stderr (`router: product_status 0.98 in 0.4s`). `--render-once --unit <product>` and `--render-once --worker <id>`
-print the two depth views the same way. `cel run console --agent` still starts
-the original Claude pane for people who would rather talk to a full agent.
+print the two depth views the same way. The agent pane that `cel run console
+--agent` used to start is now `cel core`.
 
 ## The review loop runs itself
 

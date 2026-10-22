@@ -96,6 +96,10 @@ cel - the celestial plane
                                 go is `cel-fanout release`
   cel ws reset <name>           down, then up, with the same refusals
   cel ws status [name] [--json] declared versus live, per member
+  cel core [--restart [--force] [--pane p]] [--fresh] [--model m] [--thinking l] [--dry-run]
+                                the box's coordinator: one agent pane over every
+                                workspace (alias core, mailbox root); resumes its
+                                last session. Same as cel run core / cel run console
   cel console                   the plane's own interface: fleet, decisions,
                                 inbox and a command line that also takes a
                                 sentence (--render-once to print it and exit)
@@ -250,6 +254,7 @@ case "${1:-help}" in
   ws)       shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"
             . "$CEL_ROOT/lib/ws.sh";    cmd_ws "$@";;
   run)      shift; . "$CEL_ROOT/lib/run.sh";     cmd_run "$@";;
+  core)     shift; . "$CEL_ROOT/lib/run.sh";     cmd_run core "$@";;
   mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
   solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
   console)  shift; . "$CEL_ROOT/lib/console.sh"; cmd_console "$@";;
