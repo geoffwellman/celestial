@@ -118,6 +118,12 @@ cel - the celestial plane
                                 the live agent into the new role on the same
                                 session once its turn ends; refuses solo while
                                 fleet work is still in flight
+  cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--note t]
+                                a reviewer's verdict on a solo product's PR,
+                                bound to the exact head it read
+  cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
+                                PR, approved at its current head, no red
+                                check, every protected check green there
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes
@@ -239,6 +245,7 @@ case "${1:-help}" in
             . "$CEL_ROOT/lib/ws.sh";    cmd_ws "$@";;
   run)      shift; . "$CEL_ROOT/lib/run.sh";     cmd_run "$@";;
   mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
+  solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
   console)  shift; . "$CEL_ROOT/lib/console.sh"; cmd_console "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
   quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;

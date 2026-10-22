@@ -209,6 +209,14 @@ test_solo_may_not_merge_by_hand() {
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
   done
 }
+# The solo agent lands through `cel solo land` but never records its own
+# verdict; a worker does neither.
+test_solo_lands_but_never_reviews_itself() {
+  assert_eq "$(guard_classify solo 'cel solo land widget#7')" allow
+  case "$(guard_classify solo 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
+  case "$(guard_classify worker 'cel solo land widget#7')" in deny*) ;; *) return 1;; esac
+  case "$(guard_classify worker 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
+}
 # The spellings that slipped past a substring match - spacing, tabs, quotes,
 # options before the verb, chains, wrappers - are the SAME command.
 test_factory_verbs_are_refused_however_they_are_spelled() {

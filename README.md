@@ -240,10 +240,24 @@ mailbox (`<product>-orch`) as an orchestrator, so mail, decisions, the
 steward and the dashboard reach it unchanged. It launches with `CEL_ROLE=solo`;
 the guard then lets it write code, commit, push, open PRs and start a
 reviewer for its own PR, and refuses fan-out verbs, starting other agents, and
-`gh pr merge`. Its PRs follow the workspace's PR and review policy; until a
-checked solo land path exists, an approved green PR is handed to the owner to
-merge. `role_profiles: { solo: <profile> }` binds its model; without one it
-uses the orchestrator's binding.
+`gh pr merge`. `role_profiles: { solo: <profile> }` binds its model; without
+one it uses the orchestrator's binding.
+
+Its PRs follow the workspace's PR and review policy, with the PR itself as
+the key instead of a delegation:
+
+- the reviewer records `cel solo review <repo>#<n> approved|changes --head
+  <sha> --by <alias>` (an approval must equal the PR's current head; verdicts
+  live in `<ws>/.cel/solo-reviews.json`) and sends findings to
+  `<product>-orch`. The solo agent itself can never record a verdict on its
+  own PR, and only it (or a person) lands one - not a reviewer or worker;
+- `cel solo land <repo>#<n>` merges with the same checks as `cel-fanout land`
+  (`lib/land.sh`): `merge: self`, the workspace account's own open non-draft
+  PR, an approval of the exact head, no red check, no conflict, and every
+  protected check green on that head. It merges only that head
+  (`--match-head-commit`). There is no local gate run: the solo agent runs the
+  repo gate before pushing, and CI on the head is the evidence the squash body
+  cites.
 
 ## Factory vocabulary
 

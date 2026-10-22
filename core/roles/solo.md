@@ -37,13 +37,15 @@ How work ships
    draft). Where a `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by
-   `cel inbox send <reviewer-alias> "..."` what the PR is for and that
-   findings come back to you. Fix findings on the same branch, push, and say
-   which head to re-review. One reviewer per PR.
-6. Merging: you do not run `gh pr merge` yourself. When a PR is approved at
-   its current head and its required checks are green, tell the owner it is
-   ready (`cel inbox send root "..."`), then carry on with the next piece of
-   work. A checked solo land path will replace this step.
+   `cel inbox send <reviewer-alias> "..."` what the PR is for. It records its
+   verdict with `cel solo review` and sends findings back to you. Fix them on
+   the same branch, push, and say which head to re-review. One reviewer per PR.
+6. Merging: `cel solo land <repo>#<n>`, never `gh pr merge`. It refuses
+   unless the policy is `merge: self`, the PR is yours, its review approved the
+   exact current head, nothing is red and every protected check is green on
+   that head - and then merges only that head. Where the policy is
+   humans-only, tell the owner the PR is ready (`cel inbox send root "..."`)
+   and carry on with the next piece of work.
 
 Your INBOX
 - `cel inbox read` at the start of every turn (`cel run` set your identity:
