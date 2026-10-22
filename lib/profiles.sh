@@ -181,7 +181,7 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
   PROFILE_MODEL="$(profile_get "$d" "$name" model)"
   PROFILE_VIA="$(profile_get "$d" "$name" via)"
   if [ "$PROFILE_VIA" = gateway ]; then
-    _profile_gateway_route "$name"
+    _profile_gateway_route "$name" "$PROFILE_RUNTIME"
     return 0
   fi
   local fb; fb="$(profile_get "$d" "$name" fallback)"
@@ -226,13 +226,23 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
 # has disabled vanishes from /v1/models entirely, so a worker sent there dies
 # with "Unknown model" and looks from the outside like a worker thinking hard.
 # Both are vetoes, decided here, before a pane spawns.
-_profile_gateway_route() { # <profile name>
+_profile_gateway_route() { # <profile name> [runtime]
   local name="$1"
   [ -n "$PROFILE_MODEL" ] || die "profile '$name' says via: gateway but names no model (gateway ids are <provider>/<model>)"
   PROFILE_THINKING="$(profile_get "$PROFILE_WSDIR" "$name" thinking)"
   [ -n "$PROFILE_THINKING" ] || PROFILE_THINKING="$(ws_thinking "$PROFILE_WSDIR")"
   PROFILE_ISOLATE=""
   PROFILE_GATEWAY_ACCOUNTS=0
+  # The runtime is passed, not read from PROFILE_RUNTIME: the reviewer path
+  # routes a pi reviewer while PROFILE_RUNTIME still names the profile's own.
+  if gateway_codex_model_p "$PROFILE_MODEL"; then
+    _profile_gateway_route_codex "$name" "${2:-pi}"
+    return 0
+  fi
+  if [ "${2:-}" = omp ]; then
+    _profile_gateway_route_omp "$name"
+    return 0
+  fi
   case "$PROFILE_MODEL" in
     ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${PROFILE_MODEL#ompgw/claude/}" ;;
     ompgw/*|ompgw-claude/*) ;;
@@ -267,6 +277,81 @@ _profile_gateway_route() { # <profile name>
     c_err "profile $name: $PROFILE_VETO"
   else
     PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
+  fi
+  return 0
+}
+
+# Codex through the gateway (AH-261018), for pi AND omp. The model is the
+# profile's own, spelled the way the runtime's provider block lists it
+# (`ompgw-codex/<id>` for pi, `celgw-codex/<id>` for omp) - the id the profile
+# names is never swapped for a neighbour: an id the gateway does not publish is
+# a veto BY NAME, and so is a vault with no Codex account. Codex accounts are
+# not scoped or prefixed (that is the Claude pool's business), so no exclusion
+# is consulted and no account is touched.
+_profile_gateway_route_codex() { # <profile name> <pi|omp>
+  local name="$1" rt="$2" id models
+  id="$(gateway_codex_bare_id "$PROFILE_MODEL")"
+  if [ "$rt" = omp ]; then PROFILE_MODEL="$GATEWAY_OMP_PROVIDER-codex/$id"; else PROFILE_MODEL="ompgw-codex/$id"; fi
+  if ! gateway_installed; then
+    PROFILE_VETO="no gateway on this box - cel gateway install"
+  elif ! gateway_ready; then
+    PROFILE_VETO="the gateway is not answering on $(gateway_url) - cel gateway status"
+  else
+    PROFILE_GATEWAY_ACCOUNTS="$(gateway_usable_count codex 2>/dev/null || printf 0)"
+    if ! [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null; then
+      PROFILE_VETO="the gateway has no usable codex account (a disabled credential is not listed at all) - cel gateway login codex"
+    elif ! models="$(gateway_models_json)" \
+        || ! jq -e --arg m "$id" '[.data[]? | select(.id == $m)] | length > 0' <<<"$models" >/dev/null 2>&1; then
+      PROFILE_VETO="the gateway does not publish $id (its Codex catalog: cel gateway status; ids are never substituted)"
+    fi
+  fi
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $name: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
+  fi
+  return 0
+}
+
+# omp through the gateway (CEL-136): omp's `celgw` provider (models.yml) and
+# the gateway's omp-PREFIXED id, served only by the scoped pool - see
+# lib/gateway.sh "the omp provider". The model is the profile's model, never
+# a substitute: no prefixed id for it is a veto by name. Claude only, because
+# only claude accounts are scoped.
+_profile_gateway_route_omp() { # <profile name>
+  local name="$1" id="$PROFILE_MODEL"
+  id="${id#"$GATEWAY_OMP_PROVIDER"/}"; id="${id#"$GATEWAY_OMP_PREFIX"/}"
+  id="${id#anthropic/}"; id="${id#claude/}"
+  PROFILE_MODEL="$GATEWAY_OMP_PROVIDER/$GATEWAY_OMP_PREFIX/$id"
+  local models
+  case "$id" in
+    claude-*) ;;
+    *) PROFILE_VETO="omp via gateway serves claude models only (got '$id')" ;;
+  esac
+  if [ -n "$PROFILE_VETO" ]; then :
+  elif ! gateway_installed; then
+    PROFILE_VETO="no gateway on this box - cel gateway install"
+  elif ! gateway_ready; then
+    PROFILE_VETO="the gateway is not answering on $(gateway_url) - cel gateway status"
+  elif ! gateway_omp_scope_plan >/dev/null 2>&1; then
+    PROFILE_VETO="no gateway.omp_exclude configured - the omp pool would include the personal account (set it, then cel gateway omp-scope --apply)"
+  elif ! gateway_omp_scope_check >/dev/null 2>&1; then
+    PROFILE_VETO="an excluded account carries the '$GATEWAY_OMP_PREFIX' prefix - cel gateway omp-scope --apply"
+  else
+    PROFILE_GATEWAY_ACCOUNTS="$(gateway_omp_scoped_count 2>/dev/null || printf 0)"
+    if ! [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null; then
+      PROFILE_VETO="no claude account carries the '$GATEWAY_OMP_PREFIX' prefix - cel gateway omp-scope --apply"
+    elif ! models="$(_gateway_models_json_raw)" \
+        || ! jq -e --arg m "$GATEWAY_OMP_PREFIX/$id" '[.data[]? | select(.id == $m)] | length > 0' <<<"$models" >/dev/null 2>&1; then
+      PROFILE_VETO="the gateway does not publish $GATEWAY_OMP_PREFIX/$id (cel gateway omp-scope --check)"
+    fi
+  fi
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $name: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts in the omp pool)"
   fi
   return 0
 }

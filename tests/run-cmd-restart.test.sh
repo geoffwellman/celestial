@@ -65,9 +65,24 @@ test_workers_and_reviewers_never_resume() {
   local out
   out="$( (cd "$T/ws" && cmd_run worker --repo widget --branch WG-1-x --dry-run) 2>&1)"
   ! printf '%s' "$out" | grep -q -- "--resume" || { echo "worker resumed"; orch_stub_teardown; return 1; }
-  printf 'review:\n  runtime: omp\n  model: m\n' >> "$T/ws/workspace.yaml"
+  export CEL_CONFIG_FILE="$T/gateway-config"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  export CEL_GATEWAY_STATE="$T/gateway"
+  mkdir -p "$T/gateway/auth"
+  printf '{}' > "$T/gateway/auth/claude-aaaaaa11-someone@example.invalid.json"
+  cat >"$T/gateway-stub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$T/gateway-stub"
+  export CEL_GATEWAY_STUB="$T/gateway-stub"
+  printf 'review:\n  runtime: omp\n  model: claude-opus-5-5\n' >> "$T/ws/workspace.yaml"
   out="$( (cd "$T/ws" && cmd_run reviewer --repo widget --pr 7 --dry-run) 2>&1)"
   ! printf '%s' "$out" | grep -q -- "--resume" || { echo "reviewer resumed"; orch_stub_teardown; return 1; }
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB
   orch_stub_teardown
 }
 

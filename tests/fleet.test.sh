@@ -698,7 +698,7 @@ test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
 # are normalised for the same reason. RE-CAPTURED after each rebase, from the
 # main the branch sits on: it landed first against 9f7cf2d and is taken here
 # against dcf17c0, which added the pane-silence fields to every worker row.
-_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"workers_list":[]}]}]'
+_FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","mode":"fleet","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"solo_worktrees":0,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","mode":"fleet","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"solo_worktrees":0,"workers_list":[]}]}]'
 
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
   jq -c --arg t "$T" --arg wt "$WT" '
@@ -987,6 +987,40 @@ test_fleet_json_carries_an_orchestrator_row_per_product() {
   assert_eq "$(jq -r '.open | type' <<<"$w")" "number"
   assert_eq "$(jq -r '.launch' <<<"$g")" "missing"
   assert_eq "$(jq -r '.status' <<<"$g")" "gone"
+  orch_stub_teardown
+}
+
+# AH-261017: an orchestrator's mailbox is the alias rule's name for
+# "<product>-orch", not the bare string. A 31-character product makes the
+# 32-character cut end in a dash (the shape `cel inbox migrate` repairs), and a
+# longer one is cut mid-word; the row must read THAT mailbox and THAT cursor,
+# holes included - the old row read a cursor path that did not exist.
+test_fleet_orchestrator_row_reads_the_cut_mailbox_and_its_cursor_holes() {
+  source "$CEL_ROOT/tests/lib/orch-stub.sh"
+  orch_stub_setup omp
+  local p31="gadget-platform-engine-products" p40="gadget-platform-engine-products-extended" p
+  assert_eq "${#p31}" "31" || return 1
+  for p in "$p31" "$p40"; do mkdir -p "$T/ws/repos/$p"; done
+  sed -i "s/^    gate: bun test\$/&\n  - name: $p31\n    url: git@github.com:someone\/$p31.git\n    prefix: WGA\n    gate: bun test\n  - name: $p40\n    url: git@github.com:someone\/$p40.git\n    prefix: WGB\n    gate: bun test/" "$T/ws/workspace.yaml"
+  printf 'layout: { orchestrators: auto }\n' >> "$T/ws/workspace.yaml"
+  local box31 box40
+  box31="$(_run_agent_name "$p31-orch")"; box40="$(_run_agent_name "$p40-orch")"
+  assert_eq "${box31: -1}" "-" || return 1                  # the migratable shape
+  export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" i
+  for i in 1 2 3 4; do
+    jq -nc --arg id "17921580000000000$i" --arg to "$box31" '{id:$id,to:$to,from:"x",kind:"status",message:"m"}' >> "$f"
+    jq -nc --arg id "17921580000000001$i" --arg to "$box40" '{id:$id,to:$to,from:"x",kind:"status",message:"m"}' >> "$f"
+  done
+  # box31 read up to the 3rd with the 1st still unread (a hole); box40 read up to the 2nd
+  printf '179215800000000003\n179215800000000001\n' > "$CEL_INBOX_DIR/alpha.$box31.cursor"
+  printf '179215800000000012' > "$CEL_INBOX_DIR/alpha.$box40.cursor"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp
+  local doc
+  doc="$(_fleet_doc alpha)"
+  assert_eq "$(jq -r --arg p "$p31" '.workspaces[0].orchestrators[] | select(.product == $p) | .unread' <<<"$doc")" "2"  # hole + 4th
+  assert_eq "$(jq -r --arg p "$p40" '.workspaces[0].orchestrators[] | select(.product == $p) | .unread' <<<"$doc")" "2"  # 3rd + 4th
   orch_stub_teardown
 }
 

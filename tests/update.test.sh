@@ -71,6 +71,10 @@ EOS
   # The two side effects are what the tests watch; the real ones re-link the
   # box and shell out to doctor, neither of which belongs in a unit test.
   _update_reapply() { printf 'reapply\n' >>"$LOG"; }
+  # AH-261018: agent updaters and gateway registration have their own suite
+  # (update-agents.test.sh); this one must never run a real `claude update`.
+  _update_components() { return 0; }
+  _update_stale_gateway_env() { :; }
   _update_verify() {
     printf 'verify\n' >>"$LOG"
     return "${VERIFY_RC:-0}"

@@ -53,7 +53,10 @@ _inbox_ws() { # [name]
 # and drained root's mailbox - exactly the loss the repos/ case was written
 # to stop. No workspace.yaml lookup here on purpose: the path IS the answer.
 _inbox_me() {
-  [ -n "${CEL_INBOX_ME:-}" ] && { printf '%s' "$CEL_INBOX_ME"; return 0; }
+  # An explicit identity goes through the same rule as every other name: a
+  # canonical alias is unchanged (the rule is idempotent), and one that was
+  # typed rather than derived still lands in the mailbox mail is sent to.
+  [ -n "${CEL_INBOX_ME:-}" ] && { _inbox_sanitise "$CEL_INBOX_ME"; return 0; }
   local p wt rest repo branch d c
   p="$PWD"
   [ "${CEL_ROLE:-}" = console ] && { printf 'console'; return 0; }
@@ -98,13 +101,9 @@ _inbox_pane_name() {
   _inbox_sanitise "$label"
 }
 
-# same rules as cel run's agent aliases, so a mailbox name matches the pane
-_inbox_sanitise() {
-  local n
-  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
-  n="${n#"${n%%[a-z]*}"}"; n="${n%-}"
-  printf '%.32s' "$n"
-}
+# The rule cel run names herdr agents by, so a mailbox name matches the pane:
+# one function (cel_alias_norm, lib/common.sh), idempotent.
+_inbox_sanitise() { cel_alias_norm "$1"; }
 
 # The same question as _inbox_ws, asked by a reader that must not guess: the
 # workspace named on the command line, or the one this cwd stands in, or rc 1
@@ -296,20 +295,53 @@ inbox_reader_of() { # <ws> <mailbox> -> reader name, or empty
 # the ranking - reads through here, so they cannot disagree about what unread
 # means.
 inbox_unread_json() { # <ws> <who>
-  local f c last cand
+  local f cs
   f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
-  last=""
-  for cand in "$(_inbox_dir)/$1.$2.cursor" \
-              $([ "$2" = root ] && printf '%s' "$(_inbox_dir)/$1.root.console.cursor"); do
-    [ -f "$cand" ] || continue
-    c="$(cat "$cand")"
-    [ "$c" \> "$last" ] && last="$c"
-  done
-  jq -c --arg who "$2" --arg last "$last" \
-    'select(.kind != "resolution") | select(.to == $who or .to == "all")
-     | select($last == "" or (.id > $last))' "$f" 2>/dev/null
+  cs="$(_inbox_cursors_json "$(_inbox_dir)/$1.$2.cursor" \
+          $([ "$2" = root ] && printf '%s' "$(_inbox_dir)/$1.root.console.cursor"))"
+  jq -c --arg who "$2" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
+    select(.kind != "resolution") | select(.to == $who or .to == "all")
+     | select(unread($cs))' "$f" 2>/dev/null
 }
+
+# A CURSOR IS A HIGH-WATER MARK PLUS HOLES. Ids are fixed-width digits, so a
+# reader has read everything at or below its mark - except the few messages
+# `cel inbox migrate` merged in from a split mailbox that sit BELOW the mark
+# and were never read by that reader. The cursor FILE is one atomic unit:
+#   line 1      the mark (all a plain cursor ever held, no trailing newline)
+#   digit lines ids below the mark that are still unread (the holes)
+#   #merged X   migration bookkeeping: legacy name X is already folded in
+# so a mark and its holes can never be written apart. No migration, one line,
+# and this is the plain mark it always was.
+#
+# One JSON array of {k, h} for the cursor files that exist; empty array means
+# nothing was ever read. A message is unread when EVERY listed cursor says so
+# (the furthest-along reader wins, as before, now hole-aware). Builtins only:
+# `cel fleet` counts the processes it starts.
+_inbox_cursors_json() { # <cursor-file>...
+  local c out="" sep="" lines l h
+  for c in "$@"; do
+    [ -f "$c" ] || continue
+    lines=(); mapfile -t lines < "$c"
+    h=""
+    for l in "${lines[@]:1}"; do
+      [[ "$l" =~ ^[0-9]+$ ]] && h="$h${h:+,}\"$l\""
+    done
+    # the mark is digits (ids); anything else is escaped by jq, never trusted
+    if [[ "${lines[0]:-}" =~ ^[0-9]*$ ]]; then
+      out="$out$sep{\"k\":\"${lines[0]:-}\",\"h\":[$h]}"
+    else
+      out="$out$sep$(jq -nc --arg k "${lines[0]}" --argjson h "[$h]" '{k: $k, h: $h}')"
+    fi
+    sep=","
+  done
+  printf '[%s]' "$out"
+}
+_INBOX_UNREAD_DEF='def unread($cs): . as $m
+  | ($cs | length) == 0
+    or ([$cs[] | (($m.id > .k) or (.h | index($m.id) != null))] | all);'
+
 
 # How long the OLDEST unread item has waited, in seconds; 0 when there is
 # none. The age of the newest says how busy the senders are; the age of the
@@ -376,9 +408,16 @@ _inbox_every_ws() { # [extra-ws]
 _inbox_append() { # <file> <json-line>
   local f="$1" line="$2"
   mkdir -p "$(dirname "$f")"
+  # A MIGRATION THAT WAS KILLED HALF WAY (cel inbox migrate) leaves a pending
+  # journal; whoever takes the lock next finishes it BEFORE touching the file,
+  # so nothing is ever appended to a half-rewritten mailbox.
+  local pend="${f%.jsonl}.migrate.pending"
   if have flock; then
-    ( flock 9; printf '%s\n' "$line" >&9 ) 9>>"$f"
+    ( flock 9
+      [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
+      printf '%s\n' "$line" >&9 ) 9>>"$f"
   else
+    [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
     printf '%s\n' "$line" >> "$f"
   fi
 }
@@ -393,6 +432,7 @@ cmd_inbox() {
     open)  _inbox_open "$@";;
     resolve) _inbox_resolve "$@";;
     prune) _inbox_prune "$@";;
+    migrate) _inbox_migrate "$@";;
     whoami) _inbox_me; printf '\n';;
     help|--help|-h) _inbox_usage;;
     *) c_err "cel inbox: unknown subcommand '$sub'"; _inbox_usage; return 2;;
@@ -447,6 +487,12 @@ cel inbox - messages between agents that never type into a pane
                     [--older-than <hours>] [--by <who>] [--workspace w]
       close every open item that matches every filter given. No filter means
       everything open for the reader; the count is printed either way.
+  cel inbox migrate --workspace w [--apply] [--only <legacy-name>]
+      repair a mailbox the old alias sanitiser split in two (a 31-character
+      name beside its 32-character alias): merges mail AND each reader's
+      unread position, only on identity evidence, dry run unless --apply.
+      Mail is addressed by the canonical alias or by the full repo-branch
+      name - both reach the same mailbox.
   cel inbox whoami                                    who this pane is, by cwd
 
   kinds: status (default) | escalation | decision | blocked. A decision or
@@ -625,7 +671,7 @@ _inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
   local who="" ws="" all=0 json=0 every=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --for) who="$2"; shift 2 ;;
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
       --all) all=1; shift ;;
@@ -661,21 +707,35 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   # inherit its status so an unknown workspace is non-zero. The per-workspace
   # sweep stays quiet - it has already looked everywhere.
   [ -f "$f" ] || { [ -n "$quiet" ] && return 0; _inbox_empty_report "$ws" "$who" "$json"; return $?; }
-  last=""; [ "$all" -eq 0 ] && [ -f "$c" ] && last="$(cat "$c")"
+  # THE WHOLE READ HOLDS THE MAILBOX LOCK that senders and `cel inbox migrate`
+  # take, so a read is entirely before or entirely after a migration - never a
+  # cursor decided against one layout and written against another. (--all is a
+  # look and takes nothing.)
+  local lkfd=""
+  if [ "$all" -eq 0 ] && have flock && { exec {lkfd}>>"$f"; } 2>/dev/null; then
+    flock "$lkfd" || true
+  else lkfd=""; fi
+  # finish a migration that was killed half way before looking at anything
+  [ "$all" -eq 1 ] || [ ! -f "${f%.jsonl}.migrate.pending" ] || _inbox_migrate_resume "$ws"
+  local cs="[]"; [ "$all" -eq 0 ] && cs="$(_inbox_cursors_json "$c")"
   # An update is ONE new line, rendered as the repeat it is rather than as a
   # second full item: the reader needs to know the condition is still true,
   # not to read the same paragraph again.
-  items="$(jq -cs --arg who "$who" --arg last "$last" '
+  items="$(jq -cs --arg who "$who" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
     . as $all
     | [ .[] | select(.kind != "resolution")
         | select(.to == $who or .to == "all")
-        | select($last == "" or (.id > $last)) ]
+        | select(unread($cs)) ]
     | map(if .kind == "update"
           then (.ref as $r | .id as $i
                 | . + {count: (1 + ([$all[] | select(.kind == "update" and .ref == $r and .id <= $i)] | length))})
           else . end)
     | .[]' "$f" 2>/dev/null)"
-  [ -n "$items" ] || { [ -n "$quiet" ] && return 0; _inbox_empty_report "$ws" "$who" "$json"; return $?; }
+  if [ -z "$items" ]; then
+    [ -z "$lkfd" ] || exec {lkfd}>&-
+    [ -n "$quiet" ] && return 0
+    _inbox_empty_report "$ws" "$who" "$json"; return $?
+  fi
   if [ "$json" -eq 1 ]; then
     printf '%s\n' "$items"
   else
@@ -687,14 +747,21 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
   # consume items the recipient has not seen. Only a real read advances.
   [ "$all" -eq 1 ] && return 0
   mkdir -p "$(dirname "$c")"
-  printf '%s' "$(printf '%s\n' "$items" | jq -r '.id' | tail -1)" > "$c"
+  # The mark never moves back: a delivery made only of held-back (hole)
+  # messages is older than the mark and must not rewind it.
+  local newk oldk=""; [ -f "$c" ] && { read -r oldk < "$c" || true; }
+  newk="$(printf '%s\n' "$items" | jq -r '.id' | tail -1)"
+  [ "$oldk" \> "$newk" ] && newk="$oldk"
+  printf '%s' "$newk" > "$c"
+  # (one plain line: every hole this cursor had was just delivered)
+  [ -z "$lkfd" ] || exec {lkfd}>&-
 }
 
 _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
   local who="" ws="" every=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --for) who="$2"; shift 2 ;;
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
       *) die "cel inbox count: unknown argument '$1'" ;;
@@ -722,7 +789,7 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
 
 _inbox_count_one() { # <ws> <who>
   local ws="$1" who="$2"
-  local f c last
+  local f cs
   f="$(_inbox_file "$ws")"
   [ -f "$f" ] || { printf '0\n'; return 0; }
   # THE RECIPIENT'S BACKLOG, NOT THE CALLER'S. A count asked from a shell or
@@ -735,16 +802,10 @@ _inbox_count_one() { # <ws> <who>
   # caller's per-reader one (a Monitor that read on the recipient's behalf),
   # and for root the console's. The furthest along wins - ids are fixed-width
   # digits, so string order is time order.
-  local cand
-  last=""
-  for cand in "$(_inbox_dir)/$ws.$who.cursor" "$(_inbox_cursor "$ws" "$who")" \
-              $([ "$who" = root ] && printf '%s' "$(_inbox_dir)/$ws.root.console.cursor"); do
-    [ -f "$cand" ] || continue
-    c="$(cat "$cand")"
-    [ "$c" \> "$last" ] && last="$c"
-  done
-  jq -c --arg who "$who" --arg last "$last" \
-    'select(.kind != "resolution") | select(.to == $who or .to == "all") | select($last == "" or (.id > $last))' "$f" 2>/dev/null \
+  cs="$(_inbox_cursors_json "$(_inbox_dir)/$ws.$who.cursor" "$(_inbox_cursor "$ws" "$who")" \
+          $([ "$who" = root ] && printf '%s' "$(_inbox_dir)/$ws.root.console.cursor"))"
+  jq -c --arg who "$who" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
+    select(.kind != "resolution") | select(.to == $who or .to == "all") | select(unread($cs))' "$f" 2>/dev/null \
     | wc -l | tr -d ' '
 }
 
@@ -757,7 +818,7 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
     case "$1" in
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
-      --for) who="$2"; shift 2 ;;
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
       --parent) parent="$2"; shift 2 ;;
       *) die "cel inbox watch: unknown argument '$1'" ;;
     esac
@@ -873,7 +934,7 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   local who="" ws="" json=0 every=0 ranked=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --for) who="$2"; shift 2 ;;
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       --all-workspaces) every=1; shift ;;
       --json) json=1; shift ;;
@@ -959,7 +1020,7 @@ _inbox_resolve_all() { # [--from w] [--matching s] [--kind k] [--older-than h] [
       --matching) matching="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
       --older-than) older="$2"; shift 2 ;;
-      --for) who="$2"; shift 2 ;;
+      --for) who="$(_inbox_sanitise "$2")"; shift 2 ;;
       --by) by="$2"; shift 2 ;;
       --workspace) ws="$2"; shift 2 ;;
       *) die "cel inbox resolve: unknown argument '$1'" ;;
@@ -1013,3 +1074,6 @@ _inbox_resolve() { # <id> [--by who] [--workspace w] | --all [filters]
   _inbox_append_resolution "$f" "$id" "$to" "$by"
   c_ok "resolved $id (by $by)" >&2
 }
+
+# shellcheck source=lib/inbox-migrate.sh
+. "${BASH_SOURCE[0]%/*}/inbox-migrate.sh"

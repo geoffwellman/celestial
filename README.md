@@ -185,6 +185,8 @@ console                one per box - routes; reads cel fleet; never builds
           ├── scout           reads and reports; never writes code
           ├── spike           tries and reports; throwaway code, never shipped
           └── reviewer        one PR, one review per round
+   └── solo                or, per product: one agent that plans, builds and ships itself
+          └── reviewer        one per PR it opens
 ```
 
 A **workspace** is not a tier. It is the scope that holds configuration and
@@ -207,6 +209,62 @@ PR: its workers rebase onto origin/main and push to main, fast-forward only,
 and `cel-fanout collect` records the row landed once its commits are on main.
 Set as the workspace-level `policy.pr: none`, it applies to every repo that does
 not declare its own `pr:`.
+
+### Solo mode
+
+Not every product wants a factory. A product can be built by **one agent** that
+plans, writes, tests and ships it itself, using everything its own runtime
+offers — its own git worktrees, its harness's subagents in parallel, several
+branches and PRs at once — with none of Celestial's fan-out (no delegated
+workers, no ledger rows):
+
+```yaml
+products:
+  - name: atlas
+    repos: [atlas-app]
+    mode: solo          # fleet (default) | solo
+```
+
+`cel mode [<product>] [solo|fleet]` reads or switches it. A switch edits that
+one line of `workspace.yaml` in place (comments and layout untouched) and
+restarts the product's live agent into the new role **on the same session**,
+once its current turn ends — so an agent can switch its own mode.
+`--no-restart` leaves the live agent alone until its next launch. Switching to
+solo is refused while the product still has fleet work in flight (running,
+finished, collected, blocked or orphaned delegations): land or release it
+first. `cel run solo` starts a solo agent for one launch without changing the
+setting.
+
+The solo agent is still *the product's agent*: same directory, pane name and
+mailbox (`<product>-orch`) as an orchestrator, so mail, decisions, the
+steward and the dashboard reach it unchanged. It launches with `CEL_ROLE=solo`;
+the guard then lets it write code, commit, push, open PRs and start a
+reviewer for its own PR, and refuses fan-out verbs, starting other agents, and
+`gh pr merge`. `role_profiles: { solo: <profile> }` binds its model; without
+one it uses the orchestrator's binding.
+
+Its PRs follow the workspace's PR and review policy, with the PR itself as
+the key instead of a delegation:
+
+- the reviewer records `cel solo review <repo>#<n> approved|changes --head
+  <sha> --by <alias>` (an approval must equal the PR's current head; verdicts
+  live in `<ws>/.cel/solo-reviews.json`) and sends findings to
+  `<product>-orch`. The solo agent itself can never record a verdict on its
+  own PR, and only it (or a person) lands one - not a reviewer or worker;
+- `cel solo land <repo>#<n>` merges with the same checks as `cel-fanout land`
+  (`lib/land.sh`): `merge: self`, the workspace account's own open non-draft
+  PR, an approval of the exact head, no red check, no conflict, and every
+  protected check green on that head. It merges only that head
+  (`--match-head-commit`). There is no local gate run: the solo agent runs the
+  repo gate before pushing, and CI on the head is the evidence the squash body
+  cites.
+
+The rest of the box sees a solo product for what it is: `cel fleet` draws it as
+`solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the
+dashboard tags its agent row, the steward tells the agent - once per head - when
+a PR of its is approved and green but unmerged, and `cel gc` removes its
+worktrees under `<ws>/.cel/solo/<product>/` once their PR has merged or closed
+and nothing in them is unsaved (a worktree with no PR yet is kept).
 
 ## Factory vocabulary
 
@@ -445,16 +503,31 @@ the original Claude pane for people who would rather talk to a full agent.
 
 ## The review loop runs itself
 
-Declare a reviewer in `workspace.yaml`:
+Declare a reviewer in `workspace.yaml` with a gateway-backed Claude model:
 
 ```yaml
-review: { runtime: omp, model: gpt-5.6-sol }
+review: { runtime: pi, model: sonnet }
 ```
 
-and orchestrators start one reviewer pane per PR. A reviewer delivers one
-verdict per round and **records it in the delegation ledger** — `cel-fanout
-review <id> approved|changes --by <alias>` — which is where a review exists;
-`cel-fanout land` accepts that verdict on repos where the PR author and the
+`sonnet` resolves to the highest versioned Claude Sonnet ID in the live gateway
+catalog; `opus` maps to `claude-opus-5-5`. Explicit advertised Claude IDs and
+`ompgw-claude/<model>` IDs are preserved. `cel run reviewer` checks that the
+gateway is installed, ready, has a Claude account, and advertises the selected
+model before opening a pane. Missing gateway/model data refuses launch; pi's
+ambient provider and Anthropic login are never used. Configure a reachable
+Claude account with `cel gateway` before starting reviewers.
+
+
+Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
+the idle reviewer when new mail arrives, so request-changes and re-review
+round trips do not wait for someone to type. `review.runtime` stays in the
+workspace schema for compatibility but no longer selects the reviewer
+runtime; `review.model` selects the requested Claude model. A reviewer delivers
+one verdict per round and **records it in the delegation ledger** — `cel-fanout
+review <id> approved|changes --head <sha> --by <alias>` — which is where a review exists,
+bound to the exact commit the reviewer names (`--head`, 40 characters, required);
+`cel-fanout land` accepts that verdict, only for the PR's current head and only
+when recorded with an explicit head, on repos where the PR author and the
 reviewer share one GitHub account, and GitHub approval remains the authority
 where they do not. `review.post: github` opts a repo into posting the review
 to GitHub as well, for reviewers that have an identity of their own; the
@@ -484,6 +557,28 @@ also run `cel inbox watch`, but Claude Code does not expose `Monitor`.
 Console `tell` is mail alone. `nudge` and `talk` are the owner's deliberate
 interrupts; direct `herdr agent prompt` is otherwise limited to one-time
 launch kickoffs. Escalations remain inbox items, not pane prompts.
+
+**One name per mailbox.** A mailbox is named by the same string as the herdr
+agent that reads it: `cel_alias_norm` (lowercase, `[a-z0-9_-]` only, starts
+with a letter, at most 32 characters) is the single rule behind `cel run`,
+the steward, every `cel inbox` sender, reader, counter and watcher, and an
+explicit `CEL_INBOX_ME`. It is idempotent - normalising a name twice is
+normalising it once - so mail to a worker's full `repo-branch` name and mail
+to its 32-character alias reach the same mailbox, even when the cut falls
+right after a dash (that dash is kept: it is the alias herdr already holds).
+Before this, such a name came out one character shorter the second time and
+the mail sat in a phantom mailbox nobody opened. `cel inbox migrate
+--workspace <w>` repairs mail already split that way. It is a dry run by
+default and it does not guess: the canonical name must be a live agent or own
+a worktree (a sender name or a cursor is typed by whoever runs a command, so
+it can disprove a phantom but never prove a target); a legacy name with any
+trace of its own is `unsafe` (two real recipients) and left alone; one with no
+trace is `unverified`, because a genuine dead recipient looks exactly the same,
+and is migrated only when the operator attests it with `--apply --only
+<legacy-name>`. Applying keeps every message and id and each reader's unread
+position, exactly once. It is journalled: the mailbox and cursors are saved
+under `<inbox>/migrate-backup/` first, and if the run is killed the next send,
+read or `migrate --apply` finishes it before touching the mailbox.
 
 **Mail to `root` is for a person: `escalation`, `decision`, `blocked`.**
 Ticket status is the ledger's job — `cel-fanout status` is the authority and
@@ -551,10 +646,10 @@ alpha - work history            7 days, 41 events
 
 **The stage is computed in code**, first match wins, and the order is the
 factory's own sequence: `released`, `merged`, `landing` (PR approved AND
-green - approved by GitHub or by the ledger verdict `cel-fanout review`
-records, green meaning no red check and a passed gate verdict, else passing
+green - approved by GitHub or by the explicit-head ledger verdict `cel-fanout review`
+records for the PR's current head, green meaning no red check and a passed gate verdict, else passing
 checks: the same evidence `cel-fanout land` consumes), `review` (a PR is open), `building` (a worker holds it — including
-`unconfirmed`, a dispatch whose prompt was never accepted), `ready` (a
+`unconfirmed`, a dispatch whose prompt was never accepted, or a launch recorded by `cel-fanout recover`), `ready` (a
 start-able ticket nobody has started), `backlog`. A gate that timed out or
 produced no verdict is **not** a failure and never renders as one.
 
@@ -1012,14 +1107,34 @@ worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 ```
 
-`cel run worker --profile gw` writes the gateway's providers into
-`~/.pi/agent/models.json` (merged — the owner's other providers are untouched,
+For Pi profiles, `cel run worker --profile gw` and `cel-fanout delegate|scout`
+when bound to a gateway profile write the gateway's providers into
+pi's own agent dir, `~/.pi/agent/models.json` by default (merged — the owner's other providers are untouched,
 and the model list comes from the gateway's own `/v1/models`, with plain ids:
 Claude models go through pi's `anthropic-messages` surface, everything else
-through `openai-completions`), and sets `CEL_SESSION_ID` in the pane, which is
-the **only** thing affinity can pin an account by — pi sends no session
-identity of its own, so without the injected `x-session-id` header every worker
-on the box is the same anonymous session.
+through `openai-completions`). Every gateway launch passes `OMP_GATEWAY_TOKEN`
+and `CEL_SESSION_ID` as `env K=V` words on the launch line, scoped to the
+launched process - nothing is exported into the pane's shell, so a later command
+in that pane never inherits one agent's session key. Pi resolves its key there
+and the generated provider stores only the variable name. Delegated workers and
+scouts use their own alias as the session affinity key.
+
+**Pi and OMP never share an agent root.** Both read `PI_CODING_AGENT_DIR`, and
+OMP's startup renames every Pi-style `--home-...--` session directory under its
+root, with no check that a Pi process is live; Pi never re-creates a vanished
+directory, so its later session writes fail (this lost the unsaved tail of two
+live workers on 2026-10-17). Every launch therefore *pins*
+`PI_CODING_AGENT_DIR` to the launched runtime's own resolved root - Pi
+`~/.pi/agent`, OMP `~/.omp/agent` - and an inherited `PI_CODING_AGENT_DIR` is
+ignored, never forwarded. Deliberate custom roots are explicit:
+`CEL_PI_AGENT_DIR` (Pi) and `CEL_OMP_AGENT_DIR` (OMP). The same resolution feeds
+the models writers, the child's environment and `cel doctor`. If the two roots
+overlap - equal, aliased by symlink, or one inside the other - the launch is
+refused (and `cel doctor` fails) with the roots named; nothing is moved.
+This is prevention only: it does not repair a session already relocated, and a
+running process keeps its old environment. Never start OMP against a root that
+holds a live Pi's sessions; recovery of an already-affected worker belongs to the
+retained-runtime lifecycle (explicit session file selection), not to a launch fix.
 
 Three things are worth knowing before you rely on it:
 
@@ -1032,6 +1147,27 @@ Three things are worth knowing before you rely on it:
 - **One api-key grants every subscription in the vault** to anything that can
   reach the port. The service binds loopback only, the config is `0600`, and
   nothing prints the key.
+
+**The pinned release has a floor: 8.0.22.** `agents.yaml` pins CLIProxyAPI
+8.0.29. Releases before 8.0.22 can bench a Claude account until the monthly
+billing reset after a single 429 that carries an overage claim (upstream
+#6465), so on a box with several accounts the pool shrinks for weeks. A
+scratch run confirmed it: 7.3.14 never went back to the account inside 60s,
+while 8.0.29 went back after the 3s Retry-After plus jitter. The config this
+writes is unchanged. v8 reads the legacy layout as it is and does not rewrite
+it on load, and the account files keep their names. Bumping the pin does
+**not** upgrade a box that already has the gateway: setup keeps any base tool
+already on `PATH`. Moving a box over is a deliberate step:
+
+```bash
+CEL_ROOT=<checkout> bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/install.sh"; install_pinned_binary base_tools cli-proxy-api'
+cel services restart cel-auth-gateway
+```
+
+To roll back, copy the 7.3.14 binary back over `~/.local/bin/cli-proxy-api`
+and restart the service. Restore the vault only if it is damaged, because
+OAuth refresh tokens rotate and an old copy of a file holds tokens that are
+already retired.
 
 Its accounts land in the same places the signed-in subscriptions above do: the
 QUOTA view's `via gateway` section, the dashboard's Subscriptions card, and
@@ -1067,7 +1203,9 @@ policy block into every agent.
 | `cel-fanout scout <repo> <brief>` | an investigation: disposable worktree, a report as the deliverable, no ticket, no PR |
 | `cel-fanout spike <repo> <brief>` | a trial: throwaway code in a disposable worktree, a report as the deliverable, never shipped |
 | `cel-fanout land <id>` | the one merge path — fleet-authored, approved, green, gate passed, `policy.merge` allows |
-| `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review |
+| `cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new> --head <sha40>` / `replace attach <new> --head <sha40>` | orchestrator-only, audited replacement of a fleet PR whose branch carried private artifacts: reserves a child row for a clean candidate (artifact removal only, history included), then attaches the worker's ready PR; original kept as evidence, no approval carried, replayable |
+| `cel-fanout request-review <id> --head <sha40> [--reviewer <login>] [--dry-run]` | request the workspace's configured `policy.reviewer` on a fleet-owned PR — only for a head an explicit-head approved review covers; adds that one reviewer and nothing else, verified in `requested_reviewers` |
+| `cel-verify <worktree>` | a structured verdict for a branch: gate result, red-then-green, diff, CI, review. The complete gate output of every attempt is kept as a private artifact (`$CEL_VERIFY_ARTIFACT_DIR`, default `~/.local/state/cel/verify`) and its path, size and sha256 are in `gate.artifact` beside the exact exit code. Output streams into the artifact from the start; a killed verifier (TERM/INT/HUP) records no_verdict, a SIGKILLed one leaves the artifact and an `attempt.json` still marked `running` (no verdict is ever faked); an artifact root inside any git work tree or not 0700/owned by you is refused (exit 4) |
 | `cel dash` | the box's one dashboard |
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h] [--orphans] [--box]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
@@ -1150,6 +1288,22 @@ commits in [`externals.yaml`](externals.yaml), and Pi extension versions in
 [`tools/pi/extensions.txt`](tools/pi/extensions.txt). External overlays must
 declare `source` and a full 40-character Git `ref`; legacy version-only
 declarations are rejected.
+
+The current pi, omp and Claude Code pins are 1.2.0, 18.10.4 and 2.1.300.
+Updating Pi on an already-configured box is explicit because `cel setup` keeps
+installed runtime versions. Apply the pin in [`agents.yaml`](agents.yaml) with
+its scoped npm installer (currently `npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@1.2.0"`), then restart existing Pi panes and verify `pi --version`. Do not install the unrelated bare `pi` npm package.
+Gateway-backed Pi upgrades are a matched rollout: `gateway_pi_models_write`
+must emit the provider key, protocol, URL, and model list consumed by the same
+revision's `cel run`, whose shell launch line exports that key. Update them
+together and keep the generated-config/launch regression green.
+
+For Pi 1.2.0's Anthropic provider, `gateway_pi_models_write` mirrors the
+canonical reasoning metadata for the configured exact ID `claude-opus-5-5`:
+reasoning, its supported thinking levels, and adaptive/mid-conversation
+compatibility. Other gateway IDs remain unmarked; capabilities do not follow a
+`claude-opus-` prefix. Recheck the pinned Pi catalog before changing the
+mapping or runtime version.
 
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow

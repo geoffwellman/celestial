@@ -315,6 +315,7 @@ case "$1 $2" in
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
   "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "agent list")      echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"idle"}]}}';;
   *) echo '{}';;
 esac
@@ -327,7 +328,7 @@ EOF
 echo "\$@" >> "$GH_LOG"
 case "\$1 \$2" in
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
   "pr merge") exit 0;;
   *) echo '{}';;
 esac

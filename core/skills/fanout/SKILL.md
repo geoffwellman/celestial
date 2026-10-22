@@ -40,6 +40,56 @@ teardown: after merge, cel-fanout release <id>
   <role file>`), sends the task spec as its first prompt, and records the
   delegation in the workspace's ledger (`<wsdir>/.cel/delegations.json`).
 
+Registering a worker whose launch was only partly recorded (NOT resuming it)
+
+```
+cel-fanout recover inspect  <repo> <branch> --pane <pane>          # read-only
+cel-fanout recover register <repo> <branch> <spec> --profile P --pane <pane> \
+    --shell-pid N --agent-pid N --agent-start TICKS --evidence "<facts>" --attest-legacy
+cel-fanout recover continue <id>
+cel-fanout recover abandon  <id> --reason "<what you found>"
+```
+
+- For a live agent in a pane with NO ledger row (the delegating process died
+  or timed out between `herdr agent start` and the ledger write). Orchestrator
+  only. It never starts an agent, types, presses Enter, edits herdr state or
+  falls back to another model.
+- **UPSTREAM BLOCKED for a worker herdr still reports `launch_pending`.**
+  No SUPPORTED completer was found in herdr 0.9.1's exposed surfaces
+  (agent.start/prompt/wait/explain/rename,
+  pane.report_agent/report_agent_session/clear_agent_authority/release_agent);
+  that is what the installed binary shows, not proof the capability cannot
+  exist, and the only things that would change a pending launch (report-agent,
+  release-agent, Enter) are forbidden. The prerequisite is (1) a diagnostic
+  reason why the launch is pending, (2) a supported way to complete it or mark
+  the agent ready with no keystrokes or metadata forgery, and (3) prompt-delivery
+  receipt semantics. Until then `register` records the row and
+  `continue` refuses: such a worker is registered, not resumed.
+- `register` validates the exact pane, shell, agent process generation
+  (`/proc` start ticks - read them from `inspect`), environment, the exact
+  model and thinking-level launch arguments, branch, worktree, an unstarted
+  pane (context zero, no turn) and herdr's own `launch_pending`/idle report,
+  refusing with zero mutation on any mismatch, a live original delegate, a held
+  ledger lock, or a conflicting row. It writes one row in state `unconfirmed`
+  with a `recovery` record (`legacy-operator-attested`; what is NOT proven is
+  in `recovery.unproven`). Retrying it is idempotent.
+- `continue` sends the task prompt at most once, only to an agent herdr reports
+  interactive_ready and not launch_pending and whose pane is still unstarted.
+  A row moves to `running` (and the ticket to In Progress) only after the
+  pane shows the agent took a turn; an ambiguous or crashed submit is never
+  resubmitted - the next `continue` only looks.
+- An `unconfirmed` row that may hold a live agent (a recovery row, or a
+  delegate receipt at launch.phase starting/start-failed/started) counts toward
+  the worker cap and is fenced: `release`, `collect`, `land`, `review
+  approved`, `request-review` and `handback` refuse it, `release --all` skips
+  it, `gc` keeps its worktree. `recover abandon` is the bounded way out for a launch where NO task was ever submitted (an uncertain, possibly delivered dispatch is refused and stays fenced): it
+  records the operator's reason, moves the row to `abandoned` and touches
+  nothing else (agent, pane and worktree stay as found).
+- A delegate row is now written BEFORE `herdr agent start`. A failed start is
+  kept as launch.phase `start-failed` (no automatic continuation: look at the
+  pane, then `recover abandon`). `delegate --reuse` over an existing row marks
+  it instead of replacing it, so a failed start keeps its verdict and PR.
+
 Running a worker on a different model or CLI
 
 ```
@@ -172,13 +222,76 @@ Products and the review verdict
 - `--workspace <name>` on `delegate`, `scout`, `spike`, `status`, `collect`,
   `release`, `land` resolves the workspace from the registry instead of the
   cwd — for driving a fleet from outside its tree.
-- `cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note …]`
-  records the verdict on the ledger row; `status` shows it in the REVIEW
+- `cel-fanout review <id> <approved|changes> --head <full-sha> --by <reviewer-alias> [--note …]`
+  records the verdict on the ledger row, bound to the 40-character commit the
+  reviewer names in `--head` (never inferred from a worktree; an `approved`
+  must equal the PR's current remote head on a PR this fleet owns, else nothing
+  is recorded; `head_source: explicit` marks such records, and an older record
+  without it no longer satisfies `land`; a `changes` verdict is also marked explicit but its SHA is the reviewer's unverified claim, and it never authorizes anything; `land` merges with `--match-head-commit` so a push after its checks lands nothing); `status` shows it in the REVIEW
   column. On a repo whose PR author and reviewer are one GitHub account,
   GitHub refuses approval outright, so `land` accepts an `approved` ledger
   verdict **only there** — everywhere else GitHub's decision remains the
   authority — and writes `Reviewed-by: <by> (<verdict>)` into the squash-merge
   body so the record is public in the log.
+
+- `cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40>`
+  then `cel-fanout replace attach <new-branch> --head <sha40>` (orchestrator
+  only) is the one audited way to publish a CLEAN replacement for a PR whose
+  branch carried what must not be published (e.g. private `.agent/` handoffs).
+  `reserve` refuses, with nothing written, unless the source is this fleet's
+  own finished/collected ship row (alias and worktree as stated), its open
+  same-repo PR is `--pr` at exactly `--original-head`, the new branch is
+  absent on the remote, and git agrees the candidate descends from the default
+  branch *without* the original head, no commit in it touches a path the
+  release hygiene scan calls private, and every other path is byte-identical
+  to the original. It then writes the child row (`replacement` metadata, no
+  review or gate evidence) and marks the original, in ONE ledger write, and
+  tells the worker by inbox to push exactly that head and open a READY PR.
+  The worker is handed to the child: the original keeps its state and history
+  but stops counting as a worker, and its worktree cannot be released through
+  it. `attach` re-reads GitHub (original head unchanged; candidate PR open,
+  ready, this fleet's, not a fork, head and remote ref == the reserved head)
+  and marks the child attached; until then collect, approval and land refuse
+  it. Then collect, `review --head`, `land` work on the child as on any row -
+  no approval carries over. Either stage may be replayed with the same
+  arguments after a lost response; a different replacement of the same
+  original is refused. It never writes to GitHub or touches the original PR.
+- `cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run]`
+  (orchestrator only, after `attach`) binds the replacement's SOURCE CHECKOUT
+  to the clean candidate's worktree while the SAME worker keeps its native
+  session. herdr cannot change a running agent's working directory (no chdir;
+  a restart would forfeit the session), so the actor's process cwd stays the
+  old tree and the binding is explicit: `row.worktree` (read by collect, the
+  verifier, review, land and revision prompts) becomes the clean checkout, the
+  actor is told the path by inbox, and its identity (alias, pane, native
+  session from `herdr agent list`) is recorded and re-checked by every acting
+  verb - a restarted or substituted agent inherits nothing. Refused with no
+  mutation unless the clean path is the root of a linked worktree of the same
+  repository, on `refs/heads/<new-branch>`, at exactly the attached head, with
+  a clean status, owned by no other delegation, and the old tree, actor and
+  ledger rows still match every named identity. Review and gate evidence from
+  the old checkout is moved to `binding.superseded` and removed (re-review at
+  the head). The old tree is only read (no index refresh), stays registered to
+  the frozen source row and gc-vetoed through `binding.old_tree`. The lock is
+  taken without waiting; one atomic write; a replay with the same arguments is
+  a no-op; `.cel/bindings/<id>-*.pre.json` keeps the pre-image. `--dry-run`
+  prints the plan and writes nothing.
+
+- `cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <login>] [--dry-run]`
+  is the one supported way to request the external GitHub reviewer named by
+  `policy.reviewer` (raw `gh pr edit --add-reviewer` stays guard-refused). It
+  acts as the workspace's `github.user` and refuses, before any write, unless:
+  `--head` is a full sha; the ledger review is `approved`, has
+  `head_source: explicit` and covers exactly that head; the PR is this fleet's
+  own open, non-draft, same-repo PR for the delegation's branch; and both the
+  PR head and the remote branch ref equal `--head`. `--reviewer` may only
+  restate the configured reviewer. It adds that one reviewer (nothing else is
+  written - not the ledger, labels, base or markers), then reads
+  `requested_reviewers` back; a pending request or a review of this exact head
+  is left alone. GitHub cannot head-compare-and-set a request, so a head that
+  moves during the call is reported as a failure and the request is *not* an
+  approval of the new head. It never grants permission to land. Orchestrator
+  verb: workers are refused. `--dry-run` runs every check and requests nothing.
 
 Rules
 - ≤ the product's worker cap concurrent delegations (`cel-fanout status` shows

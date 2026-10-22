@@ -26,11 +26,15 @@ export CEL_ROOT
 # shellcheck source=lib/services.sh
 . "$CEL_ROOT/lib/services.sh"  # svc_reach - `try` prints the URL that reaches
                                # the preview from the laptop, not from this box
+# shellcheck source=lib/fanout_recover.sh
+. "$CEL_ROOT/lib/fanout_recover.sh" # `recover`: register + continue a partly recorded launch
 # shellcheck source=lib/afk.sh
 . "$CEL_ROOT/lib/afk.sh"  # away-from-keyboard: land and delegate are two of the
                           # four acts the owner pre-authorised, and EVERY one
                           # taken while nobody is watching is recorded here, so
                           # the morning has one answer to read
+# shellcheck source=lib/land.sh
+. "$CEL_ROOT/lib/land.sh" # land_ci_gate, land_body_hygiene - shared with `cel solo land`
 # shellcheck source=lib/fleet.sh
 . "$CEL_ROOT/lib/fleet.sh" # fleet_worker_row - ONE definition of what a worker
                           # looks like as data, so `cel fleet --json` and
@@ -219,8 +223,8 @@ _container_ensure() { # <repodir> <repo> -> workspace id, empty if impossible
 # The workspace that OWNS this checkout: not a linked worktree, same repo root.
 _container_id() { # <repo-toplevel> -> workspace id or empty
   "$HERDR" workspace list 2>/dev/null | jq -r --arg t "$1" \
-    '.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
-     | select(.worktree.repo_root == $t) | .workspace_id' | head -1
+    'first(.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
+     | select(.worktree.repo_root == $t) | .workspace_id)'
 }
 
 # A LINKED WORKTREE WHOSE CONTAINER IS GONE IS DETACHED: it still exists, it
@@ -245,9 +249,37 @@ _repo_slug() { # <wsdir> <repo>
 # Run the verifier for a delegation and fold its verdict into the ledger row.
 # Prints the verdict's one-line summary. Never fails the caller: a verifier
 # that cannot run is a verdict of "unknown", which land treats as not passed.
+# A VERDICT THIS INVOCATION DID NOT PRODUCE IS NOT THIS INVOCATION'S VERDICT. The
+# verifier runs with its stderr discarded and its status ignored, then the file
+# it should have written is read - so a refused, aborted or SIGKILLed verifier
+# left the PREVIOUS attempt's verdict.json in place, possibly gate.passed:true on
+# an older head, and land/collect read it as current. The prior verdict is now
+# preserved (never overwritten) under .agent/verdict-history/ BEFORE the verifier
+# runs, and whatever this invocation leaves behind is accepted only if it is a
+# completed verdict written at or after the invocation started; anything else
+# becomes an explicit no-verdict stub carrying the verifier's own words.
+_fanout_verdict_stub() { # <worktree> <reason> <snapshot-file> - publishes AND records the stub; non-zero if it cannot
+  local wt="$1" tmp stub snap="$3"
+  tmp="$wt/.agent/.verdict.stub.$$"
+  mkdir -p "$wt/.agent" || { c_err "cannot create $wt/.agent - no verdict can be recorded" >&2; return 1; }
+  command -v flock >/dev/null 2>&1 || { c_err "flock is not available - cannot publish a no-verdict stub safely" >&2; return 1; }
+  stub="$(jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg why "$2" \
+    '{at:$at, state:"no_verdict_stub", gate:{configured:true, ran:false, passed:null, code:null, outcome:"no_verdict", no_verdict_reason:$why, timed_out:false, output_empty:false, tail:$why},
+      tests:{files_touched:0, red_then_green:null, detail:"not computed"}, diff:{files:0,insertions:0,deletions:0}, checks:{state:"unknown"}, review:{decision:"unknown"}, pr:null}')" \
+    || { c_err "cannot build the no-verdict stub" >&2; return 1; }
+  # what the CALLER uses is this copy, never a re-read of the file on disk
+  printf '%s\n' "$stub" > "$snap" || { c_err "cannot write the verdict snapshot $snap" >&2; return 1; }
+  # under the same lock cel-verify publishes with, so a stub can never interleave
+  # with (or be clobbered by) another attempt's publication
+  ( exec 8>"$wt/.agent/verdict.lock" || exit 1
+    flock -x 8 || exit 1
+    printf '%s\n' "$stub" > "$tmp" && mv -f "$tmp" "$wt/.agent/verdict.json" ) 2>/dev/null \
+    || { c_err "cannot publish the no-verdict stub in $wt/.agent (lock or write failed)" >&2; return 1; }
+}
 _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   local wsdir="$1" id="$2" entry="$3"
   local wt repo branch gate slug
+  FANOUT_VERDICT_SNAPSHOT=""
   local gate_timeout="${4:-}" verb="${5:-collect}"
   wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
@@ -273,13 +305,75 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   # about the suite outgrowing it); land is a human waiting, so for land the
   # queue counts.
   local lock_flag=""; [ "$verb" = land ] && lock_flag=--lock-in-timeout
+  local v_t0 v_err v_rc v_id
+  v_t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # THE INVOCATION'S IDENTITY, not its start time: minted here, handed to the
+  # verifier, and the only verdict this call will accept is the one carrying it.
+  v_id="fo-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  v_err="$(mktemp "${TMPDIR:-/tmp}/cel-verify-err.XXXXXX")"; v_rc="$v_err.rc"
+  if [ -f "$wt/.agent/verdict.json" ]; then
+    mkdir -p "$wt/.agent/verdict-history"
+    mv -n "$wt/.agent/verdict.json" "$wt/.agent/verdict-history/fanout-$(date -u +%Y%m%dT%H%M%SZ)-$$.json" 2>/dev/null || true
+  fi
   _ledger_unlock
   line="$( set +u
            eval "$(ws_env_exports "$wsdir" 2>/dev/null)" >/dev/null 2>&1 || true
            _ledger_spawn "$VERIFY" "$wt" ${gate:+--gate "$gate"} ${slug:+--slug "$slug"} \
              ${gate_timeout:+--gate-timeout "$gate_timeout"} ${lock_flag:+"$lock_flag"} \
-             --branch "$branch" 2>/dev/null || true )"
+             --branch "$branch" --attempt-id "$v_id" 2>"$v_err"; printf '%s' "$?" > "$v_rc" )"
   _ledger_relock
+  # exit codes 0/1/2/3 are verdicts the verifier chose (pass, fail, timeout,
+  # no-verdict); anything else - 4 (refused), a signal, a crash - produced none.
+  local vrc vwhy
+  vrc="$(cat "$v_rc" 2>/dev/null || echo 99)"
+  vwhy="$(head -c 400 "$v_err" 2>/dev/null | tr '\n' ' ')"
+  rm -f "$v_err" "$v_rc"
+  # ONE READ, THEN ONLY THE COPY. The verdict file is mutable (another attempt, or
+  # anyone, can replace it between a check and a later use), so it is read exactly
+  # once into a private snapshot; validation, the ledger write, the warnings and
+  # land's decision all use THAT copy - never a second read of the path.
+  local snap bad=""
+  snap="$(mktemp "${TMPDIR:-/tmp}/cel-verdict-snap.XXXXXX")" || die "$verb: cannot create a verdict snapshot - refusing to continue"
+  chmod 600 "$snap"
+  case "$vrc" in
+    0|1|2|3) ;;
+    *) bad="the verifier exited $vrc without a verdict${vwhy:+: $vwhy}" ;;
+  esac
+  cp -- "$wt/.agent/verdict.json" "$snap" 2>/dev/null || : > "$snap"
+  if [ -z "$bad" ] && [ ! -s "$snap" ]; then bad="the verifier left no verdict this run"; fi
+  if [ -z "$bad" ]; then
+    # ACCEPT ONLY THIS INVOCATION'S OWN VERDICT: attempt == the id handed over, a
+    # completed verdict (or this attempt's own no-verdict stub), and - when a gate
+    # ran - gate evidence taken on the head the worktree is on NOW. Another
+    # attempt's completion on this worktree (collect during land, an older head
+    # before a push) never authorises this caller. A verdict with NO attempt field
+    # is accepted only through the CEL_FANOUT_VERIFY test seam, and then only if it
+    # is not older than the invocation.
+    local v_att v_state v_ran v_ghead v_cur v_at
+    v_att="$(jq -r '.attempt // ""' "$snap" 2>/dev/null)"; v_state="$(jq -r '.state // ""' "$snap" 2>/dev/null)"
+    v_ran="$(jq -r '.gate.ran // false' "$snap" 2>/dev/null)"; v_ghead="$(jq -r '.gate.head // .head // ""' "$snap" 2>/dev/null)"
+    v_at="$(jq -r '.at // ""' "$snap" 2>/dev/null)"; v_cur="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$v_att" ]; then
+      if [ "$v_att" != "$v_id" ]; then
+        bad="the verdict on disk belongs to attempt $v_att, not this invocation ($v_id) - another verification overlapped on this worktree"
+      elif [ "$v_state" != completed ] && [ "$v_state" != no_verdict_stub ]; then
+        bad="this invocation's verdict never completed (state: ${v_state:-none})"
+      elif [ "$v_state" = completed ] && [ "$v_ran" = true ] && [ -n "$v_ghead" ] && [ "$v_ghead" != "$v_cur" ]; then
+        bad="the gate ran on $v_ghead but the worktree is on $v_cur now - that evidence is for another head"
+      fi
+    elif [ -z "${CEL_FANOUT_VERIFY:-}" ] || [ "$v_state" = running ] || [ "$v_at" \< "$v_t0" ]; then
+      bad="the verdict on disk carries no attempt identity or predates this verification"
+    fi
+  fi
+  if [ -n "$bad" ]; then
+    # stderr, not stdout: land runs this with stdout discarded, and a refusal must be seen
+    [ "$vrc" -le 3 ] 2>/dev/null || c_warn "$id: the verifier produced no verdict (exit $vrc)${vwhy:+: $vwhy}" >&2
+    _fanout_verdict_stub "$wt" "$bad" "$snap" || { c_err "$verb: could not record a no-verdict stub - refusing to continue on an unvalidated verdict ($bad)" >&2; exit 1; }
+  fi
+  FANOUT_VERDICT_SNAPSHOT="$snap"
+  # TEST SEAM (CEL_TESTING only): runs right after validation, to prove that nothing
+  # after this point re-reads the mutable verdict file.
+  [ -z "${CEL_TESTING:-}" ] || [ -z "${CEL_FANOUT_TEST_AFTER_VALIDATE:-}" ] || eval "$CEL_FANOUT_TEST_AFTER_VALIDATE" || true
   # WHAT WAS READ BEFORE THE GATE IS RE-READ AFTER IT. Minutes passed with the
   # ledger unlocked, so the row may have been released, re-delegated or landed
   # by somebody else in the meantime; writing this verdict onto it would
@@ -288,8 +382,8 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   [ "$state_now" = "$state_before" ] \
     || die "$verb: $id changed state to ${state_now:-gone} while the gate ran - re-run $verb"
   [ -n "$line" ] && printf '%s\n' "$line"
-  if [ -f "$wt/.agent/verdict.json" ]; then
-    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), gate_outcome: (.gate.outcome // (if .gate.timed_out then "timeout" elif .gate.passed == true then "pass" elif .gate.passed == false then "fail" else "none" end)), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+  if [ -s "$snap" ]; then
+    local v; v="$(jq -c '{gate: .gate.passed, gate_configured: .gate.configured, gate_timed_out: (.gate.timed_out // false), gate_outcome: (.gate.outcome // (if .gate.timed_out then "timeout" elif .gate.passed == true then "pass" elif .gate.passed == false then "fail" else "none" end)), red_then_green: .tests.red_then_green, diff_files: .diff.files, checks: .checks.state, review: .review.decision, at: .at}' "$snap" 2>/dev/null || true)"
     if [ -n "$v" ]; then
       local cur; cur="$(_ledger_read "$wsdir")"
       _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson v "$v" 'map(if .id == $id then .verdict = $v else . end)')"
@@ -297,13 +391,13 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
     # A killed gate reached no verdict at all, and the reader's next move is to
     # give it more time - not to send a worker after code that may be fine. Say
     # both knobs by name so nobody has to go read the verifier to find them.
-    if [ "$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)" = true ]; then
-      c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$wt/.agent/verdict.json")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
-    elif [ "$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)" = no_verdict ]; then
+    if [ "$(jq -r '.gate.timed_out // false' "$snap" 2>/dev/null || echo false)" = true ]; then
+      c_warn "$id: the gate ran out of time after $(jq -r '.gate.timeout_secs // "?"' "$snap")s - that is no verdict, not a failure. Re-run collect with a longer CEL_VERIFY_GATE_TIMEOUT (or cel-verify --gate-timeout <secs>)"
+    elif [ "$(jq -r '.gate.outcome // ""' "$snap" 2>/dev/null || true)" = no_verdict ]; then
       # AND A GATE THAT DIED SAYING NOTHING IS NOT A FAILURE EITHER. It did not
       # run out of time, so more time is the wrong answer; something killed it,
       # and the reader's next move is to find out what.
-      c_warn "$id: the gate produced no verdict - $(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json"). Nothing here says the code is wrong; re-run collect and see what is killing it."
+      c_warn "$id: the gate produced no verdict - $(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$snap"). Nothing here says the code is wrong; re-run collect and see what is killing it."
     fi
   fi
 }
@@ -359,9 +453,14 @@ _ledger_append() { # <wsdir> <entry-json>
   # history that began at the FIRST collect could not say when the work
   # started, so the first entry is stamped here, at `created`, rather than
   # left for the reader to synthesise.
+  # A re-delegated row keeps its replacement lineage: it is the only record of
+  # which row superseded which, and a rewrite must not erase it.
   _ledger_write "$1" "$(printf '%s' "$cur" | jq --argjson e "$2" --arg by "$(_ledger_mover)" \
-    'map(select(.id != $e.id))
-     + [$e + {history: (($e.history // []) | if length > 0 then .
+    '([.[] | select(.id == $e.id) | .replacement // empty] | first) as $rp
+     | ([.[] | select(.id == $e.id) | .binding // empty] | first) as $bd
+     | map(select(.id != $e.id))
+     + [$e + (if $rp != null and ($e.replacement // null) == null then {replacement: $rp} else {} end)
+          + (if $bd != null and ($e.binding // null) == null then {binding: $bd} else {} end) + {history: (($e.history // []) | if length > 0 then .
          else [{state: ($e.state // ""), at: ($e.created // ""), by: $by}] end)}]')"
 }
 
@@ -451,6 +550,16 @@ _ledger_set_field() { # <wsdir> <id> <field> <value>
     'map(if .id == $id then (if $v == "" then del(.[$k]) else .[$k] = $v end) else . end)')"
 }
 
+# Apply one jq filter to one row (extra args are jq --arg pairs). The writer for
+# structured fields (`launch`, `recovery`); `.state` still only moves through
+# _ledger_update_state.
+_ledger_patch() { # <wsdir> <id> <jq-filter> [jq args...]
+  local wsdir="$1" id="$2" filter="$3"; shift 3
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg __id "$id" "$@" \
+    "map(if .id == \$__id then ($filter) else . end)")"
+}
+
 # SQUASH MERGES MAKE LANDED WORK LOOK UNPUSHED. The branch's commits are never
 # ancestors of main after a squash, so every landed row read "unpushed" and
 # orchestrators fell back to --discard by reflex (2026-10-09, ~135 rows).
@@ -486,7 +595,8 @@ _wt_on_main() { # <worktree> <start-sha>
 }
 
 _ledger_entry() { # <wsdir> <id> -> json object, empty if unknown
-  _ledger_read "$1" | jq -c --arg id "$2" '.[] | select(.id == $id)' | head -1
+  # first() ends the producer itself: no `| head -1` SIGPIPE under pipefail
+  _ledger_read "$1" | jq -c --arg id "$2" 'first(.[] | select(.id == $id))'
 }
 
 _ledger_field() { # <wsdir> <id> <field>
@@ -582,11 +692,198 @@ _fanout_refuse_worker() { # <verb> [id] [workspace]
   die "$verb: a worker does not $verb - report to $mailbox and the orchestrator lands it"
 }
 
+# THE WORKER'S KICKOFF PROMPT, one definition for `delegate` and for `recover
+# continue`: a recovered worker is told exactly what a freshly delegated one is.
+# Prints the text.
+_fanout_worker_prompt() { # <wsdir> <shape> <repo> <branch> <abs-spec> <seedline> <check-base> <orch-mailbox> <ws-sel>
+  local wsdir="$1" shape="$2" repo="$3" branch="$4" abs_spec="$5" seedline="$6" check_base="$7" orch_mailbox="$8" ws_sel="$9" prompt_text
+  if [ "$shape" = spike ]; then
+    prompt_text="Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
+  elif [ "$shape" = scout ]; then
+    prompt_text="Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
+
+FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
+  else
+    local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")" || exit 1
+    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
+      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
+      # main IS the landing, so the kickoff says how to do it safely.
+      prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it on your branch, then rebase onto origin/main and push to main (fast-forward only, never force: git push origin HEAD:main). This repo takes no PRs - do not open a pull request. BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover first. If the push is rejected, fetch, rebase and retry; never force. Write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: none (pushed to main). Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    else
+    prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
+
+When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
+
+If your spec says the deliverable is research, a document, or explicitly says not to open a PR, then do not push and do not open one - write .agent/result.md and stop.
+
+FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
+  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
+Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
+    fi
+  fi
+  printf '%s' "$prompt_text"
+}
+
+# THE PROOF A RETAINED ROW MAY BE RESUMED (AH-261018). Sets RS_PROFILE, RS_RT,
+# RS_MODEL, RS_THINKING and RS_SESSION from the ROW - never from the workspace
+# default - or dies having changed nothing: an unsettled launch, a row that is
+# not retained, a worktree the row does not own, a live agent for it (by alias
+# or by working directory), an explicit option that contradicts what the row
+# recorded, a runtime with no native resume, or a session that is missing or
+# ambiguous. No stop API is invented: a live runtime is refused, not retired.
+_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt>
+  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9"
+  RS_SESSION=""
+  _rec_guard "delegate --reuse" "$branch" "$row"
+  local st; st="$(printf '%s' "$row" | jq -r '.state // ""')"
+  case " running finished collected reported salvaged " in
+    *" $st "*) ;;
+    *) die "delegate --reuse: $branch is '$st' - only a retained row (running, finished, collected, reported, salvaged) is resumed. Nothing was changed" ;;
+  esac
+  local f_repo f_branch f_wt f_alias
+  f_repo="$(printf '%s' "$row" | jq -r '.repo // ""')"; f_branch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+  f_wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"; f_alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
+  { [ "$f_repo" = "$repo" ] && [ "$f_branch" = "$branch" ] && [ -n "$f_wt" ] \
+    && [ "$(readlink -f "$f_wt" 2>/dev/null)" = "$(readlink -f "$wt")" ]; } \
+    || die "delegate --reuse: the row for $branch does not own $wt (it records repo '$f_repo' branch '$f_branch' worktree '${f_wt:-none}') - refusing to resume into a checkout it does not own. Nothing was changed"
+  RS_PROFILE="$(printf '%s' "$row" | jq -r '.profile // ""')"
+  RS_RT="$(printf '%s' "$row" | jq -r '.runtime // ""')"
+  RS_MODEL="$(printf '%s' "$row" | jq -r '.model // ""')"
+  RS_THINKING="$(printf '%s' "$row" | jq -r '.thinking // ""')"
+  [ -n "$RS_RT" ] || die "delegate --reuse: $branch records no runtime, so its original runtime cannot be reproduced - nothing was changed"
+  # NO LIVE DUPLICATE: two processes on one session answer mail twice
+  if [ -n "$f_alias" ] && "$HERDR" agent get "$f_alias" >/dev/null 2>&1; then
+    die "delegate --reuse: $f_alias is live - a retained session is resumed only after its runtime is gone (this tool does not stop one). Nothing was changed"
+  fi
+  local occupants
+  occupants="$("$HERDR" agent list 2>/dev/null | jq -r --arg w "$(readlink -f "$wt")" \
+    '[.result.agents[]? | select((.cwd // "") as $c | $c == $w or ($c | startswith($w + "/")))] | length' 2>/dev/null || printf 0)"
+  [ "${occupants:-0}" = 0 ] \
+    || die "delegate --reuse: $occupants live agent(s) already sit in $wt - refusing to start a second on top. Nothing was changed"
+
+  [ -z "$popt" ] || [ "$popt" = "$RS_PROFILE" ] \
+    || die "delegate --reuse: --profile '$popt' contradicts the recorded profile '${RS_PROFILE:-none}' - a resume keeps the original; nothing was changed"
+  [ -z "$mopt" ] || [ "$mopt" = "$RS_MODEL" ] \
+    || die "delegate --reuse: --model '$mopt' contradicts the recorded model '$RS_MODEL' - nothing was changed"
+  [ -z "$topt" ] || [ "$topt" = "$RS_THINKING" ] \
+    || die "delegate --reuse: --thinking '$topt' contradicts the recorded thinking '$RS_THINKING' - nothing was changed"
+  # the profile may have been edited since the row launched: a different
+  # runtime/model/thinking is a substitution, never a resume
+  if [ -n "$RS_PROFILE" ]; then
+    local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO="" PROFILE_VIA=""
+    profile_resolve "$wsdir" "$RS_PROFILE" "$(ws_runtime "$wsdir" worker)"
+    [ -z "$PROFILE_VETO" ] || die "delegate --reuse: profile '$RS_PROFILE' is vetoed - $PROFILE_VETO"
+    if [ "$PROFILE_RUNTIME" != "$RS_RT" ] || [ "$PROFILE_MODEL" != "$RS_MODEL" ] || [ "$PROFILE_THINKING" != "$RS_THINKING" ]; then
+      die "delegate --reuse: profile '$RS_PROFILE' has drifted since $branch launched (row: $RS_RT $RS_MODEL $RS_THINKING; profile now: $PROFILE_RUNTIME $PROFILE_MODEL $PROFILE_THINKING) - refusing to resume under a different model. Nothing was changed"
+    fi
+  fi
+  [ -n "$(agent_resume "$RS_RT" flag)" ] \
+    || die "delegate --reuse: runtime '$RS_RT' has no native session resume - nothing was changed"
+  _fanout_resume_session "$RS_RT" "$(readlink -f "$wt")" "$(printf '%s' "$row" | jq -r '.session // ""')" "$sopt"
+}
+
+# The ONE native session to resume: the row's recorded `session`, else - for
+# pi, whose layout is verified - the session files whose header names this
+# worktree. A header cwd that is not the worktree, zero files, or several with
+# no explicit --session pick is a refusal; the newest-file guess is never made.
+# Whatever is chosen must AGREE with the row: its LATEST native model and
+# thinking entries (an initial one proves nothing) must match what will be
+# launched, else the row and the session disagree and nothing is guessed.
+# Sets RS_SESSION (not a substitution: a die inside $( ) would be swallowed).
+_fanout_resume_session() { # <runtime> <worktree> <row-session> <opt>
+  local rt="$1" wt="$2" rowsess="$3" opt="$4" f
+  _fanout_resume_session_pick "$@"
+  # THE LATEST native model is whichever is LATER in the file: the last
+  # model_change or the last assistant message's own model (a session switches
+  # model without a model_change - the W705 file has one DeepSeek model_change
+  # and 273 Sonnet assistant turns). Compared on the model id; a provider is
+  # never inferred or invented. Thinking is the last thinking_level_change.
+  local tm tt
+  tm="$(jq -r 'if .type == "model_change" then (.modelId // empty)
+               elif .type == "message" and .message.role == "assistant" then (.message.model // empty)
+               else empty end' "$RS_SESSION" 2>/dev/null | tail -n 1)"
+  tt="$(jq -r 'select(.type == "thinking_level_change") | .thinkingLevel // empty' "$RS_SESSION" 2>/dev/null | tail -n 1)"
+  if [ -n "$tm" ] && [ -n "$RS_MODEL" ] && [ "$tm" != "$RS_MODEL" ] && [ "${RS_MODEL##*/}" != "${tm##*/}" ]; then
+    die "delegate --reuse: the latest model in $RS_SESSION is '$tm' but the row recorded '$RS_MODEL' - the session disagrees with the row, refusing to pick one. A recovered runtime is unsupported here. Nothing was changed"
+  fi
+  if [ -n "$tt" ] && [ -n "$RS_THINKING" ] && [ "$tt" != "$RS_THINKING" ]; then
+    die "delegate --reuse: the latest thinking level in $RS_SESSION is '$tt' but the row recorded '$RS_THINKING' - the session disagrees with the row, refusing to pick one. Nothing was changed"
+  fi
+  # A pi session must resolve UNDER the pi session root, whether it came from
+  # the row or from --session: another runtime's root or a private root is
+  # unsupported (a symlink out of the root counts as out).
+  if [ "$rt" = pi ]; then
+    local proot; proot="$(readlink -f "$(gateway_pi_dir)/sessions" 2>/dev/null || true)"
+    case "$(readlink -f "$RS_SESSION" 2>/dev/null || true)" in
+      "$proot"/*) [ -n "$proot" ] || RS_SESSION="" ;;
+      *) RS_SESSION=""; ;;
+    esac
+    [ -n "$RS_SESSION" ] || die "delegate --reuse: the session is outside the default pi session root - resuming a RECOVERED, other-runtime or PRIVATE-ROOT session is unsupported (no fallback is substituted). Nothing was changed"
+  fi
+  # the holder is matched on the exact `--session <path>` argument (a command
+  # line that merely says "delegate" is still a holder); this tool's own
+  # processes never carry that argument
+  local holders; holders="$(pgrep -af -- "--session $RS_SESSION" 2>/dev/null || true)"
+  if [ -n "$holders" ]; then
+    die "delegate --reuse: a live process already holds $RS_SESSION - nothing was changed"
+  fi
+}
+_fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
+  local rt="$1" wt="$2" rowsess="$3" opt="$4" f
+  local -a cands=()
+  if [ -n "$rowsess" ]; then
+    [ -f "$rowsess" ] || die "delegate --reuse: the session recorded on the row is gone: $rowsess - nothing was changed"
+    cands=("$rowsess")
+  elif [ "$rt" = pi ]; then
+    local dir; dir="$(gateway_pi_dir)/sessions/--$(printf '%s' "$wt" | sed 's|^/||; s|/|-|g')--"
+    for f in "$dir"/*.jsonl; do [ -f "$f" ] && cands+=("$f"); done
+  else
+    die "delegate --reuse: no session is recorded on the row and the session layout of runtime '$rt' is not verified - nothing was changed"
+  fi
+  local -a ok=() ids=()
+  local hdr
+  for f in "${cands[@]}"; do
+    hdr="$(head -n 1 "$f" 2>/dev/null | jq -c 'select(.type == "session")' 2>/dev/null)" || hdr=""
+    [ -n "$hdr" ] || continue
+    [ "$(printf '%s' "$hdr" | jq -r '.cwd // ""')" = "$wt" ] || continue
+    ok+=("$f"); ids+=("$(printf '%s' "$hdr" | jq -r '.id // ""')")
+  done
+  [ "${#ok[@]}" -gt 0 ] || [ -n "$opt" ] || die "delegate --reuse: no native session found for $wt - nothing was changed"
+  if [ -n "$opt" ]; then
+    local i
+    for i in "${!ok[@]}"; do
+      if [ "${ok[$i]}" = "$opt" ] || [ "${ids[$i]}" = "$opt" ]; then RS_SESSION="${ok[$i]}"; return 0; fi
+    done
+    # A session file OUTSIDE the default root is a recovered / private-root
+    # session. Resuming it under the default root would silently change the
+    # runtime's root, and preserving a private root is not implemented: refuse.
+    if [ -f "$opt" ] && [ "${opt#"$(gateway_pi_dir)/sessions/"}" = "$opt" ]; then
+      die "delegate --reuse: '$opt' is outside the default session root - resuming a RECOVERED or PRIVATE-ROOT session is unsupported (no default-root, fresh-conversation or path fallback is substituted). Nothing was changed"
+    fi
+    die "delegate --reuse: '$opt' is not a session of $wt (have: ${ids[*]}; an explicit path must be a session file whose header names this worktree and whose UUID is its file name) - nothing was changed"
+  fi
+  [ "${#ok[@]}" -eq 1 ] \
+    || die "delegate --reuse: ambiguous - ${#ok[@]} native sessions belong to $wt (${ids[*]}); name the original with --session <uuid>. Nothing was changed"
+  RS_SESSION="${ok[0]}"
+}
+
 cmd_delegate() {
   _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse]"
+  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID|FILE]]"
   local repo="$1" branch="$2" spec="$3"; shift 3
-  local herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
+  local session_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
@@ -597,6 +894,8 @@ cmd_delegate() {
       --thinking) thinking_opt="$2"; shift 2 ;;
       --adhoc)    adhoc=1; shift ;;
       --reuse)    reuse=1; shift ;;
+      --session)  session_opt="$2"; shift 2 ;;
+      --receipt)  die "delegate --reuse --receipt: re-pinning a RECOVERED or PRIVATE-ROOT session is unsupported (no default root, fresh conversation or path fallback is substituted) - nothing was changed" ;;
       --shape)    shape="$2"; shift 2 ;;
       *) die "delegate: unknown argument: $1" ;;
     esac
@@ -643,6 +942,9 @@ cmd_delegate() {
     fi
   fi
   local abs_spec; abs_spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")"
+  # A malformed pr_open policy is a config error: say so BEFORE a worktree or
+  # an agent exists (the prompt is built after the launch receipt).
+  [ "$shape" != ship ] || _fanout_pr_phrase "$wsdir" >/dev/null || exit 1
 
   # THE CAP IS ENFORCED HERE, not remembered by whoever is delegating.
   # `policy.workers` was a sentence in the injected policy block and nothing
@@ -666,7 +968,7 @@ cmd_delegate() {
   wcap="${wcap:-4}"
   local prepos; prepos="$(ws_product_repos "$wsdir" "$product" | jq -R . | jq -sc .)"
   wused="$(_ledger_read "$wsdir" | jq --argjson rs "$prepos" \
-    '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+    '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))) and ((.replacement.role // "") != "source"))] | length')"
   if [ "$wused" -ge "$wcap" ]; then
     die "delegate: $product already has $wused running worker(s), cap is $wcap.
   Free a slot first - a finished worker still holds one until it is collected:
@@ -695,8 +997,12 @@ cmd_delegate() {
       || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
   elif afk_active; then
     local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
-    afk_src="$(sed -n 's/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/p' "$abs_spec" | head -1)"
-    afk_quote="$(sed -n 's/^>[[:space:]]*//p' "$abs_spec" | head -1)"
+    # The FIRST match is taken by sed itself (`q`), never by `| head -1`: under
+    # `set -o pipefail` a consumer that exits early SIGPIPEs the producer once
+    # it has written more than a pipe buffer, and the whole delegate died with
+    # exit 141 and no message on a spec that quotes a long finding.
+    afk_src="$(sed -n '/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b/{s/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/;p;q}' "$abs_spec")"
+    afk_quote="$(sed -n '/^>/{s/^>[[:space:]]*//;p;q}' "$abs_spec")"
     afk_prov="$( ( local_profile="$profile"
                    [ -n "$local_profile" ] || local_profile="$(role_profile_for "$wsdir" worker "$repo" 2>/dev/null || true)"
                    PROFILE_MODEL=""
@@ -731,6 +1037,43 @@ cmd_delegate() {
   # labelled <repo>/workers - so workers still have a home in the sidebar
   # instead of appearing at the top level, homeless, which is how this file
   # once lost track of a whole batch.
+  # RESUMING A RETAINED ROW (AH-261018). `--reuse` over an existing row is the
+  # canonical recovery for a runtime gc retired: the SAME worker comes back -
+  # the row's recorded runtime, model, thinking and profile and its original
+  # native session - not whatever the workspace's role default is today.
+  # EVERYTHING is proved here, BEFORE the container, the fetch, a worktree, a
+  # pane command or a ledger write; any refusal leaves the row, the pane and the
+  # worktree exactly as found.
+  local opened_ws=0 existing="" prior_row="" resume_session="" RS_PROFILE="" RS_RT="" RS_MODEL="" RS_THINKING="" RS_SESSION=""
+  if [ "$reuse" -eq 1 ]; then
+    prior_row="$(_ledger_entry "$wsdir" "$branch")"
+    if [ -n "$prior_row" ]; then
+      existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
+        | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b && !f {print p; f=1}')"
+      [ -n "$existing" ] || die "delegate --reuse: $branch has no live worktree to resume in - nothing was changed (a missing checkout is not recreated by a resume)"
+      _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
+      resume_session="$RS_SESSION"
+      # ONLY NOW - every proof passed, so a refusal above opened nothing - a
+      # checkout no herdr workspace holds (its workspace was closed) is OPENED
+      # through herdr's own `worktree open`: never removed, never recreated.
+      # The workspace is then found by checkout path like any other reuse.
+      if ! "$HERDR" workspace list | jq -e --arg p "$existing" '[.result.workspaces[] | select(.worktree.checkout_path == $p)] | length > 0' >/dev/null 2>&1; then
+        # herdr's parser: [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) - exactly one of each
+        # (--path and --branch are mutually exclusive; the branch is already git-validated above).
+        # herdr requires --workspace ID or --cwd PATH: an explicit herdr workspace
+        # when one was chosen, otherwise the repo checkout that owns the worktree
+        local -a open_scope=(--cwd "$repodir")
+        [ -z "$herdr_ws" ] || open_scope=(--workspace "$herdr_ws")
+        "$HERDR" worktree open --path "$existing" --label "$branch" --no-focus \
+          "${open_scope[@]}" >/dev/null \
+          || die "delegate --reuse: every proof passed but herdr could not open the existing checkout $existing - the row is untouched and nothing was removed or recreated (open it yourself with: herdr worktree open --cwd '$repodir' --path '$existing')"
+        opened_ws=1
+      fi
+    fi
+  elif [ -n "$session_opt" ]; then
+    die "delegate: --session only applies to --reuse"
+  fi
+
   if [ -z "$herdr_ws" ]; then
     herdr_ws="$(_container_ensure "$repodir" "$repo")"
     [ -n "$herdr_ws" ] || die "no herdr workspace holds $repodir and one could not be created - pass --herdr-workspace"
@@ -794,9 +1137,8 @@ cmd_delegate() {
   # "homeless" - while the ledger records it as if it were the worktree. A
   # later `release` then removes nothing and the real worktree is stranded.
   # Re-delegating after an orphaned worker is routine, so this compounded.
-  local existing
   existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
-    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b {print p; exit}')"
+    | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b && !f {print p; f=1}')"
   if [ -n "$existing" ]; then
     # Find the workspace by CHECKOUT PATH, never by label: labels are not
     # unique, and matching on one is how the ledger got bound to the bare
@@ -813,8 +1155,7 @@ cmd_delegate() {
     cel-fanout release $branch      # discard it, then delegate afresh
     cel-fanout delegate ... --reuse # continue IN that worktree, keeping its work"
     fi
-    [ -n "$ews" ] || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it.
-  Remove the stale checkout first: git -C '$repodir' worktree remove --force '$existing'"
+    [ -n "$ews" ] || die "delegate --reuse: $existing exists on disk but no herdr workspace holds it, and opening it did not produce one - nothing was removed or recreated; open it with: herdr worktree open --cwd '$repodir' --path '$existing'"
     child_ws="$ews"
     worktree="$existing"
     pane="$("$HERDR" pane list --workspace "$ews" 2>/dev/null \
@@ -855,13 +1196,17 @@ cmd_delegate() {
   if [ -z "$profile" ] && [ "$shape" = scout ]; then
     profile="$(role_profile_for "$wsdir" scout "$repo")"
   fi
-  [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"
-  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
+  if [ -n "$prior_row" ]; then profile="$RS_PROFILE"
+  else [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" worker "$repo")"; fi
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO="" PROFILE_VIA=""
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$rt"
     [ -z "$PROFILE_VETO" ] || die "delegate: profile '$profile' is vetoed - $PROFILE_VETO"
     rt="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
     [ -z "$PROFILE_MODEL" ] || model="$PROFILE_MODEL"
+  fi
+  if [ -n "$prior_row" ]; then
+    rt="$RS_RT"; model="$RS_MODEL"; thinking="$RS_THINKING"
   fi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
@@ -892,6 +1237,8 @@ cmd_delegate() {
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$rt")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
+  # the exact native session, by the runtime's own resume flag
+  [ -z "$resume_session" ] || AGENT_ARGS+=("$(agent_resume "$rt" flag)" "$resume_session")
 
   # herdr agent names must be [a-z][a-z0-9_-]{0,31}; the readable repo/branch
   # form lives on as the worktree label only.
@@ -899,6 +1246,11 @@ cmd_delegate() {
   # The hook reads the mailbox named for this pane's alias (CEL-95).
   local inbox_me=""
   [ -z "$(agent_inbox_hook "$rt" file)" ] || inbox_me="$alias"
+  local -a GATEWAY_ENV=()
+  _run_profile_gateway_setup "$rt" "$alias" 1 1 "$alias"
+  local launch_prefix; launch_prefix="$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$rt")"
+  local gateway_required=0
+  [ "${#GATEWAY_ENV[@]}" -eq 0 ] || gateway_required=1
 
   # THE WORKER'S SHELL MUST CARRY THE WORKSPACE ENV, and nothing else gives it
   # one. A worktree lives at ~/.herdr/worktrees/<repo>/<branch> - OUTSIDE the
@@ -927,6 +1279,14 @@ cmd_delegate() {
   local seedline=""
   [ -z "$SEEDED" ] || seedline=$'\n\n'"Seeded local config, not yours to commit: $SEEDED"
 
+  # THE SAME READINESS GATE AS `cel run` (AH-261017): nothing is typed - not the
+  # env eval, not the launch line - until the pane's shell owns the foreground,
+  # and the pane must still be that terminal and shell after each typing. It
+  # fails closed here, before any ledger row records a launch; nothing is
+  # retried or cleaned up.
+  _RUN_HERDR="$HERDR"
+  _run_pane_await_shell "$pane"
+  local pane_ident="$_RUN_PANE_IDENT"
   local envline; envline="$(printf 'eval "$(%s ws env %q)"' "$CEL_ROOT/bin/cel" "$(ws_name "$wsdir")")"
   if ! _ledger_spawn "$HERDR" pane run "$pane" "$envline" > /dev/null 2>&1; then
     c_warn "could not load the workspace env into $pane - a profile needing a provider key will fail there"
@@ -936,9 +1296,16 @@ cmd_delegate() {
   # worker whose runtime rewrites its argv is invisible to `cel gc` without
   # it, and its worktree is then kept for ever. Pass-through only - the text
   # is rendered there, typed here, so both paths mark a pane identically.
-  if ! _ledger_spawn "$HERDR" pane send-text "$pane" \
-       "$(_run_launch_env "$roletag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me")" > /dev/null 2>&1; then
+  # the env eval ran in the foreground for a moment: wait for the shell again
+  # (and refuse if it is no longer the same terminal and shell) before typing
+  _run_pane_await_shell "$pane" "$pane_ident"
+  _RUN_STAGED=0
+  if ! _ledger_spawn "$HERDR" pane send-text "$pane" "$launch_prefix" > /dev/null 2>&1; then
+    [ "$gateway_required" != 1 ] || die "delegate: could not stage gateway credentials in pane $pane"
     c_warn "could not mark $pane with its role environment - cel gc will not recognise it"
+  else
+    _RUN_STAGED=1
+    _run_pane_recheck "$pane" "$pane_ident"
   fi
 
   # A readable label (CEL-83), set again on --reuse. A scout or spike is named
@@ -951,7 +1318,48 @@ cmd_delegate() {
   pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
   tab_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
 
-  _ledger_spawn "$HERDR" agent start "$alias" --kind "$rt" --pane "$pane" -- "${AGENT_ARGS[@]}" > /dev/null
+  # THE LAUNCH RECEIPT GOES DOWN BEFORE THE AGENT STARTS (AH-261017). Appending
+  # the row only after start and dispatch left a successful spawn untrackable
+  # when this process was interrupted, or herdr's own start timed out, in
+  # between: a live agent in a pane, no ledger row (the 2026-10-17 W710 case).
+  # The row is written first as `unconfirmed` - the one existing state that
+  # claims no task is running - with launch.phase saying how far the launch got.
+  # A failed or interrupted start is NOT rolled back: herdr can time out AFTER
+  # the agent exists, so the row stays, as launch.phase start-failed, and says
+  # so. A row that stays `unconfirmed` is recoverable, never silently dropped.
+  local entry
+  entry="$(jq -n \
+    --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
+    --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
+    --arg spec "$abs_spec" --arg created "$(_now_iso)" \
+    --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
+    --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
+    --arg shape "$shape" --arg because "$because" \
+    '{id:$id, repo:$repo, branch:$branch, alias:$alias, herdr_ws:$herdr_ws, pane:$pane,
+      worktree:$worktree, spec:$spec, state:"unconfirmed", created:$created,
+      profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
+      provider:$provider, shape:$shape, profile_reason:$because,
+      launch:{phase:"starting", at:$created}}')"
+  # --reuse of an EXISTING row (a stopped agent resumed in place, e.g. by
+  # `handback`) must not replace it before the start succeeds: the old row
+  # carries the review verdict and PR the revision round depends on. It is only
+  # marked, and replaced - as before - once the new agent actually exists.
+  if [ -n "$prior_row" ]; then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"starting", at:$at}' --arg at "$(_now_iso)"
+  else
+    _ledger_append "$wsdir" "$entry"
+  fi
+  local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  # Where the branch started, so a `pr: none` collect can tell "pushed to
+  # main" from "never committed" - both leave nothing ahead of origin/main.
+  [ -n "$prior_row" ] || [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  if ! ( _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}" ); then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"start-failed", at:$at, note:"herdr agent start failed or timed out - an agent may still exist in the pane; the row is kept, not rolled back"}' --arg at "$(_now_iso)"
+    die "delegate: $branch: herdr agent start did not complete - the ledger row is kept (launch.phase start-failed; $([ -n "$prior_row" ] && echo "its earlier verdict and PR are intact" || echo "state unconfirmed")), the worktree and pane are untouched. An agent may exist in $pane: inspect it and never start a second one on top.$([ "$opened_ws" = 1 ] && printf ' NOTE: this resume OPENED the herdr workspace for %s (via herdr worktree open) before the start failed - it is still open; close it yourself if you abandon the resume.' "$worktree") There is no automatic continuation for this row; once you have looked, cel-fanout recover abandon $branch --reason '<what you found>' records it"
+  fi
+  if [ -z "$prior_row" ]; then
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
+  fi
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
   # silent loss indistinguishable from success: a worker that reported done while
   # its rebase had eaten its own commit, and a branch that sat unlanded for two
@@ -990,42 +1398,7 @@ cmd_delegate() {
   local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
 
   local dstate=running prompt_text
-  if [ "$shape" = spike ]; then
-    prompt_text="Your spike brief is $abs_spec.$seedline Read it fully and answer exactly that question, in this worktree, by building whatever throwaway code answers it. Commit locally if that helps you work, but never push, never open a PR and never create a ticket - nothing here ships. Write .agent/report.md - the answer first, then the evidence for it (what you built, what you measured, command output), then what a real implementation would have to deal with - and stop.
-
-FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the answer>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
-  elif [ "$shape" = scout ]; then
-    prompt_text="Your investigation brief is $abs_spec.$seedline Read it fully and investigate exactly that, in this worktree. Do not commit, push, open a PR or edit anything outside .agent/. Write .agent/report.md - findings first with evidence (paths, line numbers, command output), then options and a recommendation - and stop.
-
-FINALLY, once .agent/report.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: report written - <one line on the headline finding>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the report exists, and then stop."
-  else
-    local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")"
-    if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
-      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
-      # main IS the landing, so the kickoff says how to do it safely.
-      prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
-
-When the work is code: commit it on your branch, then rebase onto origin/main and push to main (fast-forward only, never force: git push origin HEAD:main). This repo takes no PRs - do not open a pull request. BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover first. If the push is rejected, fetch, rebase and retry; never force. Write .agent/result.md and stop.
-
-FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: none (pushed to main). Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
-    else
-    prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
-
-When the work is code: commit it, and BEFORE pushing run 'git log --oneline ${check_base}..HEAD' and confirm your own commits are listed - an empty result means a rebase dropped them and you must recover before going further. Then push the branch and ${pr_phrase}. Write .agent/result.md and stop.
-
-If your spec says the deliverable is research, a document, or explicitly says not to open a PR, then do not push and do not open one - write .agent/result.md and stop.
-
-FINALLY, once .agent/result.md is written, announce yourself - going quiet is not reporting:
-  cel inbox send ${orch_mailbox} \"${branch}: <done|blocked|failed> - <one line on what landed>. PR: <url or none>. Gate: <passed|failed|none>.\" --workspace ${ws_sel} --kind status
-Your orchestrator is not watching your pane; that message is how it learns you are done. Send it last, after the result file exists, and then stop."
-    fi
-  fi
+  prompt_text="$(_fanout_worker_prompt "$wsdir" "$shape" "$repo" "$branch" "$abs_spec" "$seedline" "$check_base" "$orch_mailbox" "$ws_sel")"
 
   # UNCONFIRMED IS NOT A FAILURE, and it must not cost the worktree: the pane
   # and the agent are healthy, only the submit was lost. The row carries the
@@ -1033,26 +1406,26 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   # it, instead of discovering it two hours later by reading panes by hand.
   if ! _fanout_dispatch "$alias" "$prompt_text"; then
     dstate=unconfirmed
-    c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' and the worktree is intact. Re-prompt with: herdr agent prompt $alias \"<the spec>\""
+    c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' (launch.phase dispatch-unconfirmed) and the worktree is intact. A prompt MAY have been delivered, so this is retained uncertain debt: look at the pane before sending anything (a blind re-prompt can pay for the work twice). collect, release, land, review and gc leave the row alone, and this tool has no supported exit for it"
   fi
 
-  local entry
-  entry="$(jq -n \
-    --arg id "$branch" --arg repo "$repo" --arg branch "$branch" --arg alias "$alias" \
-    --arg herdr_ws "$child_ws" --arg pane "$pane" --arg worktree "$worktree" \
-    --arg spec "$abs_spec" --arg state "$dstate" --arg created "$(_now_iso)" \
-    --arg profile "$profile" --arg runtime "$rt" --arg model "$model" --arg thinking "$thinking" \
-    --arg ticket "$ticket" --arg provider "$(profile_provider "$model")" \
-    --arg shape "$shape" --arg because "$because" \
-    '{id:$id, repo:$repo, branch:$branch, alias:$alias, herdr_ws:$herdr_ws, pane:$pane,
-      worktree:$worktree, spec:$spec, state:$state, created:$created,
-      profile:$profile, runtime:$runtime, model:$model, thinking:$thinking, ticket:$ticket,
-      provider:$provider, shape:$shape, profile_reason:$because}')"
-  _ledger_append "$wsdir" "$entry"
-  # Where the branch started, so a `pr: none` collect can tell "pushed to
-  # main" from "never committed" - both leave nothing ahead of origin/main.
-  local start_sha; start_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
-  [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  if [ -n "$prior_row" ]; then
+    # the resumed agent exists. The SAME row carries on: only where it runs
+    # (pane, workspace, alias) and the session it resumed change; spec, review,
+    # head, PR, profile and history stay, and the state move is one more
+    # recorded transition on top of them.
+    _ledger_patch "$wsdir" "$branch" '.pane = $pane | .herdr_ws = $ws | .alias = $alias | .session = $sess
+      | .launch = {phase:(if $s == "running" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
+      --arg pane "$pane" --arg ws "$child_ws" --arg alias "$alias" --arg sess "$resume_session" \
+      --arg s "$dstate" --arg at "$(_now_iso)"
+    _ledger_update_state "$wsdir" "$branch" "$dstate"
+  else
+    _ledger_patch "$wsdir" "$branch" '.launch = {phase:(if $ok == "1" then "dispatched" else "dispatch-unconfirmed" end), at:$at}' \
+      --arg ok "$([ "$dstate" = running ] && echo 1 || echo 0)" --arg at "$(_now_iso)"
+    # In Progress only when the dispatch was accepted: the row moves
+    # unconfirmed -> running as a recorded transition.
+    [ "$dstate" != running ] || _ledger_update_state "$wsdir" "$branch" running
+  fi
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
@@ -1149,6 +1522,10 @@ cmd_collect() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  _replace_frozen collect "$id" "$entry"
+  _replace_unattached collect "$id" "$entry"
+  _replace_bound_guard collect "$id" "$entry"
+  _rec_guard collect "$id" "$entry"
   local worktree alias ticket repo branch
   worktree="$(printf '%s' "$entry" | jq -r '.worktree')"
   alias="$(printf '%s' "$entry" | jq -r '.alias')"
@@ -1191,6 +1568,7 @@ cmd_collect() {
   # diff size, CI and review. Printed first so the reader meets the facts
   # before the account of them.
   _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout"
+  [ -z "${FANOUT_VERDICT_SNAPSHOT:-}" ] || rm -f "$FANOUT_VERDICT_SNAPSHOT"; FANOUT_VERDICT_SNAPSHOT=""
 
   if [ -f "$worktree/.agent/result.md" ]; then
     cat "$worktree/.agent/result.md"
@@ -1336,14 +1714,14 @@ cmd_status() {
       spike) ticket=spike ;;
     esac
     case "$(printf '%s' "$e" | jq -r '.review.verdict // ""')" in
-      approved) review=ok ;;
+      approved) if [ "$(printf '%s' "$e" | jq -r '.review.head_source // ""')" = explicit ]; then review=ok; else review=old; fi ;;
       changes)  review=chg ;;
       *)        review=- ;;
     esac
     if [ "$(printf '%s' "$e" | jq -r '.verdict.gate_timed_out // false')" = true ]; then gatecol=TO
     elif [ "$(printf '%s' "$e" | jq -r '.verdict.gate_outcome // ""')" = no_verdict ]; then gatecol=NV
     else
-      case "$(printf '%s' "$e" | jq -r '.verdict.gate // ""')" in
+      case "$(printf '%s' "$e" | jq -r 'if .verdict.gate == null then "" else (.verdict.gate | tostring) end')" in
         true)  gatecol=ok ;;
         false) gatecol=FAIL ;;
         *)     gatecol=- ;;
@@ -1527,7 +1905,7 @@ _fanout_slots() { # <wsdir>
     label="$p"
     [ "$n" -le 1 ] || label="$p ($(ws_product_repos "$1" "$p" | paste -sd, - | sed 's/,/, /g'))"
     used="$(_ledger_read "$1" | jq --argjson rs "$repos" \
-      '[.[] | select((.repo | IN($rs[])) and .state == "running")] | length')"
+      '[.[] | select((.repo | IN($rs[])) and (.state == "running" or (.state == "unconfirmed" and (.launch != null or .recovery != null))) and ((.replacement.role // "") != "source"))] | length')"
     printf 'slots %-28s %s/%s used' "$label" "$used" "$cap"
     if [ "$used" -ge "$cap" ]; then printf ' - AT CAPACITY, collect or release before delegating\n'
     else printf ' - %s free\n' "$(( cap - used ))"; fi
@@ -2021,6 +2399,9 @@ cmd_release() {
     local rid n=0 failed=0
     while IFS= read -r rid; do
       [ -n "$rid" ] || continue
+      if [ -n "$(_rec_unresolved "$(_ledger_entry "$wsdir" "$rid")")" ]; then
+        c_warn "release --all: $rid skipped - an unsettled launch holds a live agent (cel-fanout recover abandon $rid --reason ...)"; continue
+      fi
       if ( cmd_release "$rid" ${rest[@]+"${rest[@]}"} ); then n=$((n + 1))
       else failed=$((failed + 1)); c_warn "release --all: $rid failed - see above"; fi
     done <<< "$take"
@@ -2042,7 +2423,22 @@ cmd_release() {
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "no delegation with id '$id'"
+  # THE WORKTREE BELONGS TO THE LIVE REPLACEMENT. The original row only keeps
+  # the history; removing the checkout through it would take the replacement's
+  # worker with it (single owner - see cmd_replace).
+  if [ "$(printf '%s' "$entry" | jq -r '.replacement.role // ""')" = source ]; then
+    local rchild rcrow rwt
+    rchild="$(printf '%s' "$entry" | jq -r '.replacement.child // ""')"
+    rcrow="$(_ledger_entry "$wsdir" "$rchild")"; rwt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    if [ -n "$rcrow" ] && [ "$(printf '%s' "$rcrow" | jq -r '.state // ""')" != released ] && [ -d "$rwt" ]; then
+      die "release: the worktree of $id now belongs to its replacement $rchild ($(printf '%s' "$rcrow" | jq -r '.state // "?"')) - release $rchild instead; nothing removed"
+    fi
+  fi
   local herdr_ws; herdr_ws="$(printf '%s' "$entry" | jq -r '.herdr_ws')"
+  # A RECOVERED LAUNCH WHOSE TASK IS NOT SETTLED holds a live idle agent: no
+  # release, not even --discard, until it is accepted (or the operator has
+  # resolved it by hand and the row says so).
+  _rec_guard release "$id" "$entry"
 
   # A preview of this branch goes first: its pane is cwd'd into the worktree
   # about to be removed, and a dev server left running there holds ports for a
@@ -2166,33 +2562,77 @@ cmd_release() {
 # read: `land` needs it, `status` shows it, and the merge commit carries it
 # into the permanent log. The inbox message a reviewer sends is the
 # notification; THIS is the record.
-cmd_review() { # <id> <approved|changes> --by <alias> [--note TEXT]
-  [ $# -ge 2 ] || die "usage: cel-fanout review <id> <approved|changes> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
+cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
+  local usage="usage: cel-fanout review <id> <approved|changes> --head <full-40-char-commit-sha> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
+  [ $# -ge 2 ] || die "$usage"
   local id="$1" verdict="$2"; shift 2
-  local by="" note="" ws_opt=""
+  local by="" note="" ws_opt="" head="" head_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --by)        by="$2"; shift 2 ;;
-      --note)      note="$2"; shift 2 ;;
-      --workspace) ws_opt="$2"; shift 2 ;;
+      --by)        [ $# -ge 2 ] || die "review: --by needs a value"; by="$2"; shift 2 ;;
+      --note)      [ $# -ge 2 ] || die "review: --note needs a value"; note="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "review: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --head)      [ $# -ge 2 ] || die "review: --head needs a value"; head="$2"; head_given=1; shift 2 ;;
       *) die "review: unknown argument: $1" ;;
     esac
   done
+  # ALL VALIDATION BEFORE ANY LEDGER ACCESS: a malformed request mutates nothing.
   case "$verdict" in approved|changes) ;; *) die "review: verdict must be approved or changes (got: $verdict)";; esac
   [ -n "$by" ] || die "review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
+  # THE COMMIT IT COVERS IS NAMED BY THE REVIEWER, NEVER INFERRED. A worker's
+  # local HEAD is not what was reviewed (an unpushed commit was once stamped
+  # as the reviewed head); neither is the remote head at the moment of
+  # recording. The reviewer reads the SHA off the diff it evaluated and says it.
+  [ "$head_given" -eq 1 ] || die "review: --head <full-40-char-commit-sha> is required - the verdict covers the commit you reviewed, and it is never inferred"
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "review: --head must be a full 40-character lowercase commit SHA (got: '$head') - not an abbreviation, a ref or HEAD"
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
-  [ -n "$(_ledger_entry "$wsdir" "$id")" ] || die "review: no delegation with id '$id'"
-  # THE HEAD IT COVERS (CEL-130): gc closes a finished reviewer only when its
-  # verdict is for the PR's current head - a push since is a new round.
-  local head wt
-  wt="$(_ledger_entry "$wsdir" "$id" | jq -r '.worktree // ""')"
-  head="$( [ -n "$wt" ] && git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "review: no delegation with id '$id'"
+  [ "$verdict" != approved ] || _rec_guard review "$id" "$entry"
+
+  if [ "$verdict" = approved ]; then
+    _replace_frozen review "$id" "$entry"
+    _replace_unattached review "$id" "$entry"
+    _replace_bound_guard review "$id" "$entry"
+    # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
+    # DELEGATION OWNS. The API read validates; it is never where the SHA comes
+    # from. The ledger lock is dropped around the remote call (the same rule as
+    # a gate) and the row is re-read after: if its identity moved, nothing is
+    # recorded.
+    local repo branch worktree slug ident
+    repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"
+    branch="$(printf '%s' "$entry" | jq -r '.branch // ""')"
+    ident="$(printf '%s' "$entry" | jq -c '{repo, branch, worktree, alias}')"
+    slug="$(_repo_slug "$wsdir" "$repo")"
+    [ -n "$slug" ] && [ -n "$branch" ] || die "review: cannot resolve the PR for '$id' (repo '$repo', branch '$branch') - nothing recorded"
+    ws_github_ready "$wsdir" "$GH" \
+      || die "review: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")") - an approval is not recorded unverified"
+    _ledger_unlock
+    local pr me author rhead state
+    pr="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" --json number,author,state,headRefOid 2>/dev/null)" \
+      || { _ledger_relock; die "review: no PR found for $branch on $slug - an approval needs a pushed PR head to bind to; nothing recorded"; }
+    me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+    _ledger_relock
+    author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
+    rhead="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+    state="$(printf '%s' "$pr" | jq -r '.state // ""')"
+    [ -n "$me" ] && [ "$author" = "$me" ] \
+      || die "review: PR for $branch was opened by '${author:-?}', not by this fleet ('${me:-?}') - this delegation does not own it; nothing recorded"
+    [ "$state" = OPEN ] || die "review: the PR for $branch is $state, not OPEN - nothing recorded"
+    [ "$rhead" = "$head" ] \
+      || die "review: --head $head is not the PR's current head (${rhead:-unknown}) - an approval covers exactly the remote head you reviewed; re-review the current head. Nothing recorded"
+    # CAS: re-read after the unlocked window; the delegation must be the same one.
+    local entry2; entry2="$(_ledger_entry "$wsdir" "$id")"
+    [ -n "$entry2" ] && [ "$(printf '%s' "$entry2" | jq -c '{repo, branch, worktree, alias}')" = "$ident" ] \
+      || die "review: delegation '$id' changed while the PR was being checked - nothing recorded; run the review again"
+  fi
+
   local cur; cur="$(_ledger_read "$wsdir")"
   _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg v "$verdict" \
     --arg by "$by" --arg note "$note" --arg at "$(_now_iso)" --arg head "$head" \
-    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at, head:$head} else . end)')"
-  c_ok "$id reviewed: $verdict by $by"
+    'map(if .id == $id then .review = {verdict:$v, by:$by, note:$note, at:$at, head:$head, head_source:"explicit"} else . end)')"
+  c_ok "$id reviewed: $verdict by $by (head ${head:0:12})"
 }
 
 # THE HAND-BACK (CEL-130). Under memory pressure gc may stop a worker that is
@@ -2216,6 +2656,7 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local row; row="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$row" ] || die "handback: no delegation with id '$id'"
+  _rec_guard handback "$id" "$row"
   local alias repo branch ws
   alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
   repo="$(printf '%s' "$row" | jq -r '.repo // ""')"
@@ -2228,13 +2669,17 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
     c_ok "$id: findings delivered to $alias by inbox"
     return 0
   fi
+  # A BOUND ROW IS NEVER RESUMED INTO A NEW NATIVE SESSION: `delegate --reuse`
+  # starts a different actor, and the binding (and every acting verb) belongs to
+  # the one that was identified. The findings are already in its inbox.
+  if [ -n "$(printf '%s' "$row" | jq -r '.binding // empty')" ]; then
+    die "handback: $id is bound to the actor session recorded in its checkout binding and $alias is not running - resuming would start a different native session that the binding refuses. The findings were delivered to $alias's inbox; the orchestrator must decide how to continue (nothing was restarted)"
+  fi
   local tmp; tmp="$(mktemp -d)/revision-$id.md"
   printf '%s\n' "This is a review revision round for $id on branch $branch, resumed in place after gc stopped you under memory pressure. Run \`cel inbox read --workspace $ws\` - the findings from $by are there. Fix them on this branch, run the gate, commit, push THIS branch only, then \`cel inbox send $by \"pushed <sha> - re-review\" --workspace $ws\` and stop. Your original spec: $(printf '%s' "$row" | jq -r '.spec // ""')" > "$tmp"
   ( cmd_delegate "$repo" "$branch" "$tmp" --reuse ${ws_opt:+--workspace "$ws_opt"} ) >/dev/null \
     || die "handback: $alias is stopped and could not be resumed - the findings are in its inbox; resume it with: cel-fanout delegate $repo $branch <spec> --reuse"
-  local now cur; now="$(_ledger_entry "$wsdir" "$branch")"; cur="$(_ledger_read "$wsdir")"
-  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson old "$row" --argjson now "${now:-null}" \
-    'map(if .id == $id then ($old + (if $now then {pane:$now.pane, herdr_ws:$now.herdr_ws, alias:$now.alias, state:$now.state} else {} end)) else . end)')"
+  # delegate --reuse resumed the SAME row in place (history and all)
   c_ok "$id: $alias was stopped - resumed in place; findings delivered by inbox"
 }
 
@@ -2244,37 +2689,9 @@ cmd_handback() { # <id> <message> --by <alias> [--workspace NAME]
 # what the workspace's merge policy says, whether review and checks actually
 # passed. The orchestrator DECIDES; the script PROVES it is allowed to.
 # Deterministic logic in scripts, judgement in agents - and never the reverse.
-# Prints "Gate: CI (<checks>) on <head>" when every check the PR's base branch
-# is protected by concluded success on the PR's exact head; otherwise prints why
-# not and returns 1. Never dies: land asks this BEFORE the local gate too, and a
-# "no" there means "run the gate as before", not "refuse".
-_fanout_ci_gate() { # <wsdir> <slug> <pr-json>
-  local wsdir="$1" slug="$2" pr="$3"
-  # WHAT MAY STAND IN FOR A GATE. The first cut of this accepted any
-  # successful check run on the head - a docs build or a lint job going
-  # green would have carried a merge while the suite was red, which is
-  # exactly the confusion this ticket exists to remove. CI substitutes
-  # for the gate only when EVERY check the base branch is PROTECTED by
-  # concluded success on this head, matched by name. No protection, or
-  # protection this token cannot read, is not permission: absence of
-  # evidence is not evidence.
-  local head base prot req cr missing
-  head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
-  base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')"
-  [ -n "$head" ] || { printf '%s' "the PR reports no head commit - nothing to check CI against"; return 1; }
-  [ -n "$base" ] || { printf '%s' "the PR reports no base branch - nothing to read protection from"; return 1; }
-  prot="$(_fgh "$wsdir" api "repos/$slug/branches/$base/protection" 2>/dev/null || true)"
-  [ -n "$prot" ] || { printf '%s' "cannot read branch protection for $base on $slug - with no readable protection there is no required check for CI to stand in with. Give the gate more time instead (CEL_VERIFY_GATE_TIMEOUT)."; return 1; }
-  req="$(printf '%s' "$prot" | jq -r '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique | .[]' 2>/dev/null || true)"
-  [ -n "$req" ] || { printf '%s' "$base on $slug requires no check - a branch nothing gates cannot lend its verdict to this one"; return 1; }
-  cr="$(_fgh "$wsdir" api "repos/$slug/commits/$head/check-runs" 2>/dev/null || true)"
-  missing="$(printf '%s' "$cr" | jq -r --argjson want "$(printf '%s' "$req" | jq -R . | jq -sc .)" '
-    [.check_runs[]? | select((.conclusion // "") == "success") | .name] as $green
-    | [$want[] | select(. as $w | ($green | index($w)) | not)] | join(", ")' 2>/dev/null || true)"
-  [ -z "$missing" ] || { printf '%s' "required check(s) not green on $head: $missing - CI cannot stand in for a gate it did not pass"; return 1; }
-  local names; names="$(printf '%s' "$req" | paste -sd, - | sed 's/,/, /g')"
-  printf 'Gate: CI (%s) on %s' "$names" "$head"
-}
+# What CI may stand in for, and the commit-body hygiene check, live in
+# lib/land.sh: `cel solo land` asks the same questions and must get the same
+# answers.
 
 cmd_land() { # <id>
   _fanout_refuse_worker land "${1:-}" "$(_fanout_ws_arg "$@")"
@@ -2292,6 +2709,10 @@ cmd_land() { # <id>
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   local entry; entry="$(_ledger_entry "$wsdir" "$id")"
   [ -n "$entry" ] || die "land: no delegation with id '$id'"
+  _replace_frozen land "$id" "$entry"
+  _replace_unattached land "$id" "$entry"
+  _replace_bound_guard land "$id" "$entry"
+  _rec_guard land "$id" "$entry"
   local repo branch slug ticket
   repo="$(printf '%s' "$entry" | jq -r .repo)"; branch="$(printf '%s' "$entry" | jq -r .branch)"
   ticket="$(printf '%s' "$entry" | jq -r '.ticket // ""')"
@@ -2323,6 +2744,13 @@ cmd_land() { # <id>
     approved_via="GitHub approval"
   elif [ "$author" = "$me" ] \
     && [ "$(printf '%s' "$entry" | jq -r '.review.verdict // ""')" = approved ]; then
+    # THE LEDGER VERDICT STANDS IN ONLY WHEN IT NAMES THE EXACT COMMIT BEING
+    # MERGED. A record without head_source "explicit" was stamped from a local
+    # HEAD nobody attested; one for another head covers code that has moved.
+    [ "$(printf '%s' "$entry" | jq -r '.review.head_source // ""')" = explicit ] \
+      || die "land: the ledger approval carries no explicit reviewed head (a historical record) - a reviewer must run 'cel-fanout review $id approved --head <sha>' again. Nothing merged."
+    [ "$(printf '%s' "$entry" | jq -r '.review.head // ""')" = "$(printf '%s' "$pr" | jq -r '.headRefOid // "none"')" ] \
+      || die "land: the ledger approval is for head $(printf '%s' "$entry" | jq -r '.review.head // "?"' | cut -c1-12), but PR #$num is at $(printf '%s' "$pr" | jq -r '.headRefOid // "?"' | cut -c1-12) - the PR head moved since the review; re-review it. Nothing merged."
     review_by="$(printf '%s' "$entry" | jq -r '.review.by // ""')"
     review_note="$(printf '%s' "$entry" | jq -r '.review.note // ""')"
     approved_via="ledger verdict by $review_by (GitHub cannot approve a PR its own author would review)"
@@ -2346,7 +2774,7 @@ cmd_land() { # <id>
   # not green, nothing is decided here and the local gate runs as it always did.
   if [ -n "$gate" ] && [ "$gate_from_ci" -eq 1 ]; then
     local ci_first
-    if ci_first="$(_fanout_ci_gate "$wsdir" "$slug" "$pr")"; then
+    if ci_first="$(land_ci_gate "$wsdir" "$slug" "$pr")"; then
       ci_gate_body="$ci_first (local gate not run)"
       c_warn "$id: every protected check is green on the PR head; landing on CI evidence, local gate not run - $ci_first"
     fi
@@ -2354,10 +2782,18 @@ cmd_land() { # <id>
   if [ -n "$gate" ] && [ -z "$ci_gate_body" ]; then
     _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout" land >/dev/null || true
     local wt gp gto gout gnvr; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
-    gp="$(jq -r '.gate.passed // "unknown"' "$wt/.agent/verdict.json" 2>/dev/null || echo unknown)"
-    gto="$(jq -r '.gate.timed_out // false' "$wt/.agent/verdict.json" 2>/dev/null || echo false)"
-    gout="$(jq -r '.gate.outcome // ""' "$wt/.agent/verdict.json" 2>/dev/null || true)"
-    gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$wt/.agent/verdict.json" 2>/dev/null || true)"
+    # NOT `// "unknown"`: jq's alternative operator treats an explicit false as
+    # absent, so a gate that FAILED was reported as "unknown". null is unknown;
+    # false is false.
+    # THE VALIDATED SNAPSHOT, never the path: _fanout_verify read the verdict once,
+    # validated that copy, and handed it over. A second read of verdict.json here
+    # could see another attempt's file swapped in after validation.
+    local vsnap="${FANOUT_VERDICT_SNAPSHOT:-/dev/null}"
+    gp="$(jq -r 'if .gate.passed == null then "unknown" else (.gate.passed | tostring) end' "$vsnap" 2>/dev/null || echo unknown)"; gp="${gp:-unknown}"
+    gto="$(jq -r '.gate.timed_out // false' "$vsnap" 2>/dev/null || echo false)"
+    gout="$(jq -r '.gate.outcome // ""' "$vsnap" 2>/dev/null || true)"
+    gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$vsnap" 2>/dev/null || true)"
+    [ -z "${FANOUT_VERDICT_SNAPSHOT:-}" ] || rm -f "$FANOUT_VERDICT_SNAPSHOT"; FANOUT_VERDICT_SNAPSHOT=""
     # UNKNOWN IS NOT FAILED, AND THERE ARE TWO WAYS TO BE UNKNOWN. A gate the
     # timeout killed produced no verdict, so there is nothing here to call a
     # finding; refusing it as a red gate sent a worker to fix code that was
@@ -2369,7 +2805,7 @@ cmd_land() { # <id>
     # record which check carried the branch.
     if [ "$gto" = true ] || [ "$gout" = no_verdict ]; then
       if [ "$gate_from_ci" -eq 1 ]; then
-        ci_gate_body="$(_fanout_ci_gate "$wsdir" "$slug" "$pr")" || die "land --gate-from-ci: $ci_gate_body"
+        ci_gate_body="$(land_ci_gate "$wsdir" "$slug" "$pr")" || die "land --gate-from-ci: $ci_gate_body"
         c_warn "$id: the local gate did not complete; landing on CI evidence - $ci_gate_body"
       elif [ "$gout" = no_verdict ]; then
         die "land: the gate produced no verdict on $branch - $gnvr. It did not fail and it did not run out of time, so there is nothing here to send a worker after: re-run \`cel-fanout collect $id\` and find out what is killing it, or rely on CI (every protected check green) and say so with --gate-from-ci"
@@ -2413,7 +2849,14 @@ cmd_land() { # <id>
   # The verdict travels into the permanent log rather than a comment thread:
   # on a solo repo the squash body is the only place a public record of who
   # reviewed this, and what they said, can actually live.
-  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch)
+  # MERGE ONLY THE HEAD THAT WAS CHECKED. The approval, CI and gate above all
+  # read the PR head once at the top; a push during the (long) gate would
+  # otherwise merge a commit nothing covered. --match-head-commit makes GitHub
+  # refuse the merge if the head is no longer the one this land evaluated.
+  local approved_head; approved_head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+  [ -n "$approved_head" ] \
+    || die "land: the PR reports no head commit - cannot pin the merge to the reviewed head. Nothing merged."
+  local -a merge_args=(pr merge "$num" --repo "$slug" --squash --delete-branch --match-head-commit "$approved_head")
   local body=""
   if [ -n "$review_by" ]; then
     body="Reviewed-by: $review_by ($(printf '%s' "$entry" | jq -r '.review.verdict'))"
@@ -2424,17 +2867,9 @@ cmd_land() { # <id>
     body="$body$ci_gate_body"
   fi
   if [ -n "$body" ]; then
-    # The body lands on main, and the push-run hygiene scan reads all of
-    # history: refuse here, naming the token, rather than break every PR.
-    # Reuses the scanner's own regex and prefix sets, not a copy of them.
+    # The body lands on main; lib/land.sh says why its tokens are checked.
     local bad
-    bad="$(printf '%s' "$body" | python3 -c '
-import sys; sys.path.insert(0, sys.argv[1]); import hygiene as h
-ok = h.EXAMPLE_PREFIXES | h.STANDARD_PREFIXES
-for line in sys.stdin.read().splitlines():
-    for m in h.TICKET.finditer(line.replace("[A-Z0-9]", " " * 8)):
-        if m[1] not in ok: print(m[0])
-' "$CEL_ROOT/tools/release")" || die "land: could not run the hygiene check on the commit body - nothing was merged"
+    bad="$(land_body_hygiene "$body")" || die "land: could not run the hygiene check on the commit body - nothing was merged"
     [ -z "$bad" ] || die "land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
     merge_args+=(--body "$body")
   fi
@@ -2445,6 +2880,737 @@ for line in sys.stdin.read().splitlines():
   _ledger_update_state "$wsdir" "$id" landed
 }
 
+# REQUESTING THE EXTERNAL REVIEWER (AH-261017). The workspace names a GitHub
+# reviewer in `policy.reviewer` (the one `pr_open: ready` asks for). A raw
+# `gh pr edit --add-reviewer` is refused to orchestrators by lib/guard.sh, on
+# purpose: it is the same door as labels, titles and bodies. This is the one
+# narrow door instead - it can ONLY add the configured reviewer to this
+# fleet's own open PR, and only for a head a recorded, explicit approval
+# covers. Every check runs before the single mutation; nothing else is written
+# (not the ledger, not a marker, not the branch or the base).
+#
+# THE REAL BOUNDARY: GitHub cannot compare-and-set a head into a reviewer
+# request. The head is checked (PR object AND the branch ref) immediately
+# before the request and again after it; if it moved in between, the request
+# stays attached - there is no atomic way to take it back - but this says so
+# and fails, and land/ledger consumers still compare heads themselves, so a
+# request made at head A can never read as an approval of head B. It is a
+# request to LOOK, never a verdict, and never permission to land.
+cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAME] [--dry-run]
+  [ $# -ge 1 ] || die "usage: cel-fanout request-review <id> --head <full-40-char-sha> [--reviewer <configured-login>] [--workspace NAME] [--dry-run]"
+  local id="$1"; shift
+  local head="" want="" ws_opt="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --head)      [ $# -ge 2 ] || die "request-review: --head needs a value"; head="$2"; shift 2 ;;
+      --reviewer)  [ $# -ge 2 ] || die "request-review: --reviewer needs a value"; want="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "request-review: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --dry-run)   dry=1; shift ;;
+      *) die "request-review: unknown argument: $1" ;;
+    esac
+  done
+  [ -n "$head" ] || die "request-review: --head <full 40-char sha> is required - a review request is for one exact commit, never 'whatever the branch is now'"
+  printf '%s' "$head" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "request-review: --head must be a full 40-character lowercase hex sha (got: $head) - abbreviations and names are not identity"
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local entry; entry="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$entry" ] || die "request-review: no delegation with id '$id'"
+  _replace_frozen request-review "$id" "$entry"
+  _rec_guard request-review "$id" "$entry"
+
+  # THE POLICY: the configured reviewer, and only it. --reviewer can pick that
+  # identity out, never widen it.
+  local reviewer pr_open
+  reviewer="$(ws_policy "$wsdir" reviewer)"; pr_open="$(ws_policy "$wsdir" pr_open)"
+  { [ -n "$reviewer" ] && [ "$reviewer" != null ]; } \
+    || die "request-review: workspace '$(ws_name "$wsdir")' configures no policy.reviewer - there is nobody to request (--reviewer cannot add one)"
+  [ "$pr_open" = ready ] \
+    || die "request-review: policy.reviewer is set but policy.pr_open is '${pr_open:-draft}', not ready - the policy contradicts itself, so nothing is requested"
+  printf '%s' "$reviewer" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$' \
+    || die "request-review: policy.reviewer '$reviewer' is not a single GitHub login - this verb requests accounts, not teams or lists"
+  if [ -n "$want" ] && [ "$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$reviewer" | tr '[:upper:]' '[:lower:]')" ]; then
+    die "request-review: '$want' is not the configured reviewer ($reviewer) - --reviewer selects the configured identity, it does not expand policy"
+  fi
+
+  # THE RECORD: approved, attested at an explicit head, and that head is THE
+  # head asked about. A record without head_source=explicit was stamped with
+  # whatever the worker's local checkout held - not identity, never upgraded.
+  local rv rh rs rby
+  rv="$(printf '%s' "$entry" | jq -r '.review.verdict // ""')"
+  rh="$(printf '%s' "$entry" | jq -r '.review.head // ""')"
+  rs="$(printf '%s' "$entry" | jq -r '.review.head_source // ""')"
+  rby="$(printf '%s' "$entry" | jq -r '.review.by // ""')"
+  [ "$rv" = approved ] || die "request-review: $id has no approved review on record (verdict: ${rv:-none}) - nothing to request an external look at"
+  [ "$rs" = explicit ] || die "request-review: the review record for $id is not explicit-head provenance (head_source: ${rs:-absent}) - a historical record named a local checkout, not a reviewed commit; re-review with --head"
+  [ "$rh" = "$head" ] || die "request-review: the approved review on record covers ${rh:-no head}, not $head - a different head needs its own review"
+
+  local repo branch slug
+  repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"; branch="$(printf '%s' "$entry" | jq -r '.branch // ""')"
+  [ -n "$repo" ] && [ -n "$branch" ] || die "request-review: the ledger row for $id has no repo/branch"
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  [ -n "$slug" ] && [ "$slug" != null ] || die "request-review: repo '$repo' is not registered in this workspace"
+  ws_github_ready "$wsdir" "$GH" \
+    || die "request-review: refusing to act for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+
+  # THE PR, from the API itself (not gh pr view, which lags and is shaped for people)
+  local num pull me
+  num="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" --json number 2>/dev/null | jq -r '.number // empty' 2>/dev/null)" \
+    && [ -n "$num" ] || die "request-review: no PR found for $branch on $slug"
+  _fanout_rr_pull() { _fgh "$wsdir" api "repos/$slug/pulls/$num" 2>/dev/null; }
+  pull="$(_fanout_rr_pull)" && [ -n "$pull" ] || die "request-review: could not read PR #$num on $slug - nothing requested"
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  local p_author p_state p_draft p_merged p_ref p_repo p_sha
+  p_author="$(printf '%s' "$pull" | jq -r '.user.login // ""')"
+  p_state="$(printf '%s' "$pull" | jq -r '.state // ""')"
+  p_draft="$(printf '%s' "$pull" | jq -r '.draft // false')"
+  p_merged="$(printf '%s' "$pull" | jq -r '.merged // false')"
+  p_ref="$(printf '%s' "$pull" | jq -r '.head.ref // ""')"
+  p_repo="$(printf '%s' "$pull" | jq -r '.head.repo.full_name // ""')"
+  p_sha="$(printf '%s' "$pull" | jq -r '.head.sha // ""')"
+  [ -n "$me" ] && [ "$p_author" = "$me" ] \
+    || die "request-review: PR #$num was opened by '$p_author', not by this fleet ('${me:-unknown}') - colleagues' PRs are not ours to request reviewers on"
+  [ "$p_ref" = "$branch" ] || die "request-review: PR #$num is for branch '$p_ref', not $id's branch '$branch'"
+  [ "$p_repo" = "$slug" ] || die "request-review: PR #$num's head lives in '${p_repo:-unknown}', not $slug - only same-repo fleet PRs"
+  { [ "$p_state" = open ] && [ "$p_merged" = false ]; } || die "request-review: PR #$num is not open (state: $p_state, merged: $p_merged)"
+  [ "$p_draft" = false ] || die "request-review: PR #$num is still a draft - a draft is not ready for review"
+  [ "$p_sha" = "$head" ] || die "request-review: PR #$num head is $p_sha, not the reviewed $head - the branch moved; review the new head first"
+  local ref_sha
+  ref_sha="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$branch" 2>/dev/null | jq -r '.object.sha // empty' 2>/dev/null || true)"
+  [ -n "$ref_sha" ] || die "request-review: could not read the remote branch ref for $branch - nothing requested"
+  [ "$ref_sha" = "$head" ] || die "request-review: remote branch $branch is at $ref_sha, not the reviewed $head - nothing requested"
+
+  # ALREADY DONE is not done twice: a pending request is left alone, and a
+  # reviewer who already reviewed THIS head is not pinged again. An older
+  # review of an older head says nothing about this one.
+  local lc; lc="$(printf '%s' "$reviewer" | tr '[:upper:]' '[:lower:]')"
+  if printf '%s' "$pull" | jq -e --arg r "$lc" 'any(.requested_reviewers[]?; (.login | ascii_downcase) == $r)' >/dev/null 2>&1; then
+    c_ok "$id: $reviewer is already requested on PR #$num (requested_reviewers) - nothing to do"
+    return 0
+  fi
+  local reviews
+  reviews="$(_fgh "$wsdir" api "repos/$slug/pulls/$num/reviews" 2>/dev/null)" && [ -n "$reviews" ] \
+    || die "request-review: could not read the reviews on PR #$num - nothing requested"
+  if printf '%s' "$reviews" | jq -e --arg r "$lc" --arg h "$head" \
+      'any(.[]?; ((.user.login // "") | ascii_downcase) == $r and .commit_id == $h)' >/dev/null 2>&1; then
+    c_ok "$id: $reviewer already reviewed $head on PR #$num - not re-requested"
+    return 0
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    c_ok "dry run: would request $reviewer on $slug#$num for $head (preconditions all pass; nothing was requested or written)"
+    return 0
+  fi
+
+  # THE ONE MUTATION. Re-read the head immediately before it.
+  pull="$(_fanout_rr_pull)" && [ -n "$pull" ] || die "request-review: could not re-read PR #$num - nothing requested"
+  [ "$(printf '%s' "$pull" | jq -r '.head.sha // ""')" = "$head" ] \
+    || die "request-review: PR #$num head moved off $head while checking - nothing requested"
+  _fgh "$wsdir" api -X POST "repos/$slug/pulls/$num/requested_reviewers" -f "reviewers[]=$reviewer" >/dev/null 2>&1 \
+    || die "request-review: GitHub refused the request for $reviewer on $slug#$num - verify with: gh api repos/$slug/pulls/$num (requested_reviewers) before retrying"
+
+  # A SUCCESSFUL gh IS NOT PROOF. The authoritative list is requested_reviewers
+  # on the pull object, read back now.
+  local after
+  after="$(_fanout_rr_pull)" && [ -n "$after" ] \
+    || die "request-review: the request was sent but PR #$num could not be read back - NOT verified; check requested_reviewers by hand"
+  printf '%s' "$after" | jq -e --arg r "$lc" 'any(.requested_reviewers[]?; (.login | ascii_downcase) == $r)' >/dev/null 2>&1 \
+    || die "request-review: $reviewer is not attached to PR #$num in requested_reviewers after the request - treat it as NOT requested"
+  local now; now="$(printf '%s' "$after" | jq -r '.head.sha // ""')"
+  if [ "$now" != "$head" ]; then
+    die "request-review: $reviewer was requested on PR #$num, but the head moved from $head to $now meanwhile - the request is not a review of $now and no approval carries to it; GitHub cannot make this atomic, so review the new head before anything lands"
+  fi
+  c_ok "$id: requested $reviewer on $slug#$num for $head (verified in requested_reviewers; a request to look, not an approval and not permission to land)"
+}
+
+# REPLACING A PR WHOSE BRANCH CARRIES WHAT MUST NOT BE PUBLISHED (AH-261017).
+#
+# A published branch cannot be cleaned: force-pushing it rewrites reviewed
+# history, and a fresh PR opened by hand has no delegation row, so collect,
+# review and land cannot see it. `replace` is the one audited way across, in
+# two durable stages, each ONE atomic ledger write under the ledger lock:
+#
+#   reserve  checks the original, the clean candidate and GitHub, then writes
+#            the child row (replacement.role=child, stage=reserved) AND marks
+#            the original (replacement.role=source) in the same write. Only
+#            after that does the worker hear that it may push the candidate.
+#   attach   after the worker pushed exactly the reserved head and opened a
+#            READY PR, re-reads GitHub and moves the child to stage=attached.
+#
+# The child is a new row with its own id, branch, review and gate state - an
+# approval or a verdict never carries over. The worker (alias, pane, worktree)
+# is handed to the child in the reserve write; the original keeps its state
+# and history as evidence and stops counting as a worker, so one worker is one
+# slot and the live worktree cannot be released or collected through the
+# original. Nothing here writes to GitHub, force-pushes, closes or edits the
+# original PR, or imports a row: an unattached child cannot be collected,
+# approved or landed, and a replay of either stage with the same identity is a
+# no-op, so a lost response is resumed, never duplicated.
+_replace_fault() { # <stage> - a TEST seam, honoured only under CEL_TESTING
+  [ "${CEL_TESTING:-}" = 1 ] && [ "${CEL_REPLACE_FAULT:-}" = "$1" ] || return 0
+  die "replace: injected fault at $1"
+}
+
+# THE SOURCE IS FROZEN. Once a replacement is reserved the original row is
+# evidence only: landing, collecting or approving it would publish the very
+# branch that was replaced (with its old approval), so every acting verb
+# refuses it and names the child.
+_replace_frozen() { # <verb> <id> <entry-json>
+  [ "$(printf '%s' "$3" | jq -r '.replacement.role // ""')" = source ] || return 0
+  die "$1: $2 has been replaced by $(printf '%s' "$3" | jq -r '.replacement.child // "?"') and is frozen as evidence - act on the replacement. Nothing recorded."
+}
+
+# A child that is not attached yet is not a PR anyone can act on.
+_replace_unattached() { # <verb> <id> <entry-json>
+  [ "$(printf '%s' "$3" | jq -r '.replacement.stage // ""')" = reserved ] || return 0
+  die "$1: $2 is a replacement that is not attached - its clean PR has not been published and attached. Run: cel-fanout replace attach $2 --head $(printf '%s' "$3" | jq -r '.replacement.target_head') . Nothing recorded."
+}
+
+# The paths among stdin's (NUL-delimited) that the release hygiene scan itself
+# calls private - the same predicate, not a copy of its list. NUL in, NUL out:
+# git quotes non-ASCII and control characters in newline-delimited listings,
+# and a quoted name no longer looks like the path it names.
+_replace_sensitive() {
+  python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import hygiene as h
+for name in sys.stdin.buffer.read().decode("utf-8", "surrogateescape").split("\0"):
+    if name and h.sensitive_path(name): sys.stdout.buffer.write(name.encode("utf-8", "surrogateescape") + b"\0")
+' "$CEL_ROOT/tools/release"
+}
+
+_replace_pr() { # <wsdir> <slug> <branch> -> JSON, fails when there is no PR
+  _fgh "$1" pr view "$3" --repo "$2" \
+    --json number,author,state,headRefOid,baseRefName,isDraft,isCrossRepository 2>/dev/null
+}
+
+# CLEAN CANDIDATE vs FROZEN ORIGINAL. Only the removal of private artifacts may
+# differ; everything else must be byte-identical (mode + blob) to the original.
+# Every path list is NUL-delimited (-z) and every pathspec literal, so no name
+# - non-ASCII, quoted, globby - can hide from the content or hygiene check.
+_replace_check_content() { # <repodir> <original-sha> <target-sha> -> reason on stdout, fails when refused
+  local dir="$1" oh="$2" th="$3" base obase tbase c p so st
+  local -a G=(git --literal-pathspecs -C "$dir")
+  base="$(repo_default_ref "$dir")" || { printf 'cannot resolve the default branch of the repository'; return 1; }
+  "${G[@]}" merge-base --is-ancestor "$oh" "$th" 2>/dev/null \
+    && { printf 'ancestry is not clean: the original head %s is an ancestor of the candidate, so the published history would still carry it' "${oh:0:12}"; return 1; }
+  obase="$("${G[@]}" merge-base "$base" "$oh" 2>/dev/null)" && tbase="$("${G[@]}" merge-base "$base" "$th" 2>/dev/null)" \
+    || { printf 'the original and the candidate must both descend from %s' "$base"; return 1; }
+  [ "$("${G[@]}" rev-list --count "$base..$th" 2>/dev/null)" -gt 0 ] \
+    || { printf 'the candidate carries no commit beyond %s' "$base"; return 1; }
+  # EVERY git READ HERE MUST BE ABLE TO FAIL THE CHECK. A listing that errors
+  # inside a pipe or a process substitution reads as "no paths" and would pass
+  # an unchecked candidate, so each list goes to a file with its own status.
+  local tmp rc; tmp="$(mktemp -d)" || { printf 'cannot create a scratch directory'; return 1; }
+  local commits; commits="$("${G[@]}" rev-list "$base..$th" 2>/dev/null)" \
+    || { rm -rf "$tmp"; printf 'cannot list the commits that would be published'; return 1; }
+  while read -r c; do
+    [ -n "$c" ] || continue
+    "${G[@]}" diff-tree -z -r -m --root --no-commit-id --name-only "$c" > "$tmp/h" 2>/dev/null \
+      && _replace_sensitive < "$tmp/h" > "$tmp/hs" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read commit %s' "$c"; return 1; }
+    if [ -s "$tmp/hs" ]; then
+      p="$(tr '\0' '\n' < "$tmp/hs")"
+      rm -rf "$tmp"; printf 'ancestry is not clean: private artifact %s is in the history that would be published (commit %s)' "${p%%$'\n'*}" "${c:0:12}"; return 1
+    fi
+  done <<< "$commits"
+  local -a paths=() sens=() l1=() l2=()
+  { "${G[@]}" diff -z --name-only --no-renames "$obase" "$oh" > "$tmp/l1" && "${G[@]}" diff -z --name-only --no-renames "$tbase" "$th" > "$tmp/l2"; } 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot list the changed paths'; return 1; }
+  mapfile -d '' -t l1 < "$tmp/l1"; mapfile -d '' -t l2 < "$tmp/l2"
+  local -A seen=()
+  for p in "${l1[@]}" "${l2[@]}"; do
+    case "$p" in *$'\n'*) rm -rf "$tmp"; printf 'a path contains a newline and cannot be compared safely'; return 1 ;; esac
+    [ -n "$p" ] && [ -z "${seen[$p]:-}" ] && { seen["$p"]=1; paths+=("$p"); }
+  done
+  local -A is_sens=()
+  printf '%s\0' "${paths[@]}" | _replace_sensitive > "$tmp/s" 2>/dev/null \
+    || { rm -rf "$tmp"; printf 'cannot classify the changed paths'; return 1; }
+  mapfile -d '' -t sens < "$tmp/s"
+  for p in "${sens[@]}"; do is_sens["$p"]=1; done
+  for p in "${paths[@]}"; do
+    [ -n "$p" ] || continue
+    "${G[@]}" ls-tree -z "$oh" -- "$p" > "$tmp/o" 2>/dev/null && "${G[@]}" ls-tree -z "$th" -- "$p" > "$tmp/t" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'cannot read %s from the trees' "$p"; return 1; }
+    so="$(tr '\0' '\n' < "$tmp/o")"; st="$(tr '\0' '\n' < "$tmp/t")"
+    if [ -n "${is_sens[$p]:-}" ]; then
+      [ -z "$st" ] || { rm -rf "$tmp"; printf 'private artifact %s is still in the candidate tree' "$p"; return 1; }
+      continue
+    fi
+    [ "$so" = "$st" ] || { rm -rf "$tmp"; printf 'the candidate changes %s, which is not a private artifact - only artifact removal may differ from the frozen original %s' "$p" "${oh:0:12}"; return 1; }
+  done
+  rm -rf "$tmp"
+  return 0
+}
+
+_replace_ident() { # <row-json> -> the identity a stage must find unchanged
+  printf '%s' "$1" | jq -c '{state, alias, worktree, branch, repo, replacement}'
+}
+
+cmd_replace() { # reserve|attach ...
+  local sub="${1:-}"; [ $# -ge 1 ] && shift
+  case "$sub" in
+    reserve) _replace_reserve "$@" ;;
+    attach)  _replace_attach "$@" ;;
+    bind)    _replace_bind "$@" ;;
+    *) die "usage: cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40> [--workspace NAME]
+       cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]
+       cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run] [--workspace NAME]" ;;
+  esac
+}
+
+_replace_reserve() {
+  local usage="usage: cel-fanout replace reserve <id> --original-head <sha40> --pr <n> --alias <worker> --worktree <path> --branch <new-branch> --head <sha40> [--workspace NAME]"
+  [ $# -ge 1 ] || die "$usage"
+  local id="$1"; shift
+  local oh="" pr="" alias="" wtx="" nb="" th="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --original-head) [ $# -ge 2 ] || die "replace: --original-head needs a value"; oh="$2"; shift 2 ;;
+      --pr)       [ $# -ge 2 ] || die "replace: --pr needs a value"; pr="$2"; shift 2 ;;
+      --alias)    [ $# -ge 2 ] || die "replace: --alias needs a value"; alias="$2"; shift 2 ;;
+      --worktree) [ $# -ge 2 ] || die "replace: --worktree needs a value"; wtx="$2"; shift 2 ;;
+      --branch)   [ $# -ge 2 ] || die "replace: --branch needs a value"; nb="$2"; shift 2 ;;
+      --head)     [ $# -ge 2 ] || die "replace: --head needs a value"; th="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      *) die "replace reserve: unknown argument: $1" ;;
+    esac
+  done
+  # ALL VALIDATION BEFORE ANY LEDGER OR NETWORK ACCESS.
+  [ -n "$oh" ] && [ -n "$pr" ] && [ -n "$alias" ] && [ -n "$wtx" ] && [ -n "$nb" ] && [ -n "$th" ] \
+    || die "replace reserve: --original-head, --pr, --alias, --worktree, --branch and --head are all required - a request that does not name the identity it expects cannot be fenced against a stale one. $usage"
+  [[ "$oh" =~ ^[0-9a-f]{40}$ ]] || die "replace reserve: --original-head must be a full 40-character lowercase commit SHA (got: '$oh')"
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace reserve: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  [[ "$pr" =~ ^[0-9]+$ ]] || die "replace reserve: --pr must be the original PR number (got: '$pr')"
+  git check-ref-format --branch "$nb" >/dev/null 2>&1 || die "replace reserve: '$nb' is not a valid branch name"
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace reserve: no delegation with id '$id'"
+  local repo obranch state shape
+  repo="$(printf '%s' "$row" | jq -r '.repo // ""')"; obranch="$(printf '%s' "$row" | jq -r '.branch // ""')"
+  state="$(printf '%s' "$row" | jq -r '.state // ""')"; shape="$(printf '%s' "$row" | jq -r '.shape // "ship"')"
+  [ "$nb" != "$obranch" ] || die "replace reserve: the replacement branch must be different from the original ($obranch) - a published branch is never rewritten"
+
+  # the source: a fleet worker's own ship row that the world has not finished with
+  [ "$shape" = ship ] || die "replace reserve: $id is a $shape - only a ship delegation has a PR to replace"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" != child ] \
+    || die "replace reserve: $id is itself a replacement - replace the original, not the copy"
+  # a replay of THIS replacement is a resume, whatever has happened since
+  local child_id; child_id="$(printf '%s' "$row" | jq -r '.replacement.child // ""')"
+  if [ -n "$child_id" ]; then
+    local crow; crow="$(_ledger_entry "$wsdir" "$child_id")"
+    if [ "$child_id" = "$nb" ] && [ -n "$crow" ] \
+       && [ "$(printf '%s' "$crow" | jq -c '.replacement | {of, original_head, original_pr, target_branch, target_head}')" = "$(jq -nc --arg of "$id" --arg oh "$oh" --argjson pr "$pr" --arg nb "$nb" --arg th "$th" '{of:$of, original_head:$oh, original_pr:$pr, target_branch:$nb, target_head:$th}')" ]; then
+      _replace_announce "$wsdir" "$crow"
+      c_ok "$id: replacement $nb is already reserved at ${th:0:12} (stage $(printf '%s' "$crow" | jq -r '.replacement.stage')) - nothing changed"
+      return 0
+    fi
+    die "replace reserve: $id already has a replacement ($child_id) - one original, one replacement; nothing recorded"
+  fi
+  # THE SOURCE'S LAUNCH DEBT TRAVELS WITH ITS WORKER: a source row that may still
+  # hold a live agent (launch starting/start-failed/started, or an unsettled
+  # recovery) must not hand that alias and worktree to a child row that carries
+  # no such record. Refused here with nothing written.
+  _rec_guard replace-reserve "$id" "$row"
+  case "$state" in
+    finished|collected) ;;
+    *) die "replace reserve: $id is $state - only a finished or collected delegation can be replaced (a running worker is not asked to switch mid-flight; a landed, released or abandoned one is done). Nothing recorded" ;;
+  esac
+  [ -z "$(_ledger_entry "$wsdir" "$nb")" ] || die "replace reserve: a delegation row '$nb' already exists - a replacement is a new row, never an adoption of an existing one"
+  [ "$(printf '%s' "$row" | jq -r '.alias // ""')" = "$alias" ] \
+    || die "replace reserve: the worker alias of $id is '$(printf '%s' "$row" | jq -r '.alias // "?"')', not '$alias' - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.worktree // ""')" = "$wtx" ] \
+    || die "replace reserve: the worktree of $id is '$(printf '%s' "$row" | jq -r '.worktree // "?"')', not '$wtx' - nothing recorded"
+  [ -d "$wtx" ] || die "replace reserve: the worktree $wtx is gone - the original worker cannot publish from it"
+  local repodir="$wsdir/repos/$repo" slug
+  [ -d "$repodir" ] || die "replace reserve: repo '$repo' not found under $wsdir/repos"
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  { [ -n "$slug" ] && [ "$slug" != null ]; } || die "replace reserve: repo '$repo' is not registered in this workspace"
+
+  # LOCAL GIT: both commits must exist, and the candidate must be the original
+  # minus private artifacts, in its history as well as its tree.
+  local sha
+  for sha in "$oh" "$th"; do
+    git -C "$repodir" cat-file -e "$sha^{commit}" 2>/dev/null || die "replace reserve: $sha is not a commit in $repo - nothing recorded"
+  done
+  local why
+  why="$(_replace_check_content "$repodir" "$oh" "$th")" || die "replace reserve: refused - $why. Nothing recorded"
+
+  # GITHUB, with the ledger lock dropped around it (the rule for any remote wait).
+  ws_github_ready "$wsdir" "$GH" \
+    || die "replace reserve: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+  local ident; ident="$(_replace_ident "$row")"
+  _ledger_unlock
+  local opr me author ostate ohead num ref rc=0 err
+  opr="$(_replace_pr "$wsdir" "$slug" "$obranch")" || { _ledger_relock; die "replace reserve: no PR found for $obranch on $slug - nothing recorded"; }
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  err="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$nb" 2>&1)" || rc=$?
+  _ledger_relock
+  num="$(printf '%s' "$opr" | jq -r '.number // ""')"; author="$(printf '%s' "$opr" | jq -r '.author.login // ""')"
+  ostate="$(printf '%s' "$opr" | jq -r '.state // ""')"; ohead="$(printf '%s' "$opr" | jq -r '.headRefOid // ""')"
+  [ "$num" = "$pr" ] || die "replace reserve: the PR for $obranch is #$num, not #$pr - nothing recorded"
+  [ "$(printf '%s' "$opr" | jq -r '.isCrossRepository // false')" = false ] \
+    || die "replace reserve: PR #$pr comes from a fork - this fleet does not own it; nothing recorded"
+  [ -n "$me" ] && [ "$author" = "$me" ] \
+    || die "replace reserve: PR #$pr was opened by '${author:-?}', not by this fleet ('${me:-?}') - nothing recorded"
+  [ "$ostate" = OPEN ] || die "replace reserve: PR #$pr is $ostate, not OPEN - nothing recorded"
+  [ "$ohead" = "$oh" ] \
+    || die "replace reserve: the original PR head moved: PR #$pr is at ${ohead:-unknown}, not the frozen original $oh - re-freeze and re-check; nothing recorded"
+  if [ "$rc" -eq 0 ]; then
+    die "replace reserve: the branch $nb already exists on $slug - a replacement is published only after it is reserved; nothing recorded"
+  fi
+  case "$err" in
+    *"Not Found"*|*"HTTP 404"*) ;;
+    *) die "replace reserve: could not read the remote branch $nb on $slug ($err) - an unreadable remote is not an absent one; nothing recorded" ;;
+  esac
+
+  # CAS: re-read after the unlocked window; the source must be exactly what was checked.
+  local row2; row2="$(_ledger_entry "$wsdir" "$id")"
+  if [ -n "$row2" ] && [ "$(printf '%s' "$row2" | jq -r '.replacement.child // ""')" != "" ]; then
+    die "replace reserve: $id already has a replacement ($(printf '%s' "$row2" | jq -r '.replacement.child')) - it was reserved while this request was checking GitHub; nothing recorded"
+  fi
+  [ -n "$row2" ] && [ "$(_replace_ident "$row2")" = "$ident" ] \
+    || die "replace reserve: $id changed while GitHub was being checked - nothing recorded; run it again"
+  [ -z "$(_ledger_entry "$wsdir" "$nb")" ] || die "replace reserve: a delegation row '$nb' appeared while checking - nothing recorded"
+  _replace_fault before-reserve
+
+  local at by; at="$(_now_iso)"; by="$(_ledger_mover)"
+  local child cur
+  child="$(printf '%s' "$row2" | jq -c --arg id "$nb" --arg of "$id" --arg oh "$oh" --argjson pr "$pr" \
+    --arg th "$th" --arg at "$at" --arg by "$by" --arg ob "$obranch" '
+    {id:$id, repo, branch:$id, alias, herdr_ws, pane, worktree, spec, state:"running", created:$at,
+     profile, runtime, model, thinking, ticket, provider, shape, profile_reason,
+     replacement:{role:"child", of:$of, original_branch:$ob, original_head:$oh, original_pr:$pr,
+                  target_branch:$id, target_head:$th, stage:"reserved", reserved_at:$at, reserved_by:$by},
+     history:[{state:"running", at:$at, by:$by}]}
+    | with_entries(select(.value != null))')"
+  cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson child "$child" --arg at "$at" --arg by "$by" \
+    'map(if .id == $id then .replacement = {role:"source", child:$child.id, at:$at, by:$by} else . end) + [$child]')" \
+    || die "replace reserve: could not write the ledger - nothing recorded"
+  _replace_fault after-reserve
+  _replace_announce "$wsdir" "$child"
+  c_ok "$id: reserved replacement $nb at ${th:0:12} (the worker $alias is handed to it; $id is kept as evidence). Next: the worker pushes exactly that head and opens a READY PR, then: cel-fanout replace attach $nb --head $th"
+}
+
+# Authorisation to publish goes to the worker AFTER the reservation is durable,
+# by inbox, and is best-effort: the reservation is the authority, this is the
+# notification - a replay resends it.
+_replace_announce() { # <wsdir> <child-row-json>
+  local wsdir="$1" c="$2" ws a nb th
+  ws="$(ws_name "$wsdir")"
+  a="$(printf '%s' "$c" | jq -r '.alias // ""')"; nb="$(printf '%s' "$c" | jq -r '.branch')"; th="$(printf '%s' "$c" | jq -r '.replacement.target_head')"
+  [ "$(printf '%s' "$c" | jq -r '.replacement.stage')" = reserved ] || return 0
+  [ -n "$a" ] || return 0
+  ( cmd_inbox send "$a" "replacement reserved for $(printf '%s' "$c" | jq -r '.replacement.of'): publish branch $nb at EXACTLY $th (git push origin $th:refs/heads/$nb - no force, no other commit), open a READY pull request for it, rewrite .agent/result.md for the new PR (keep it untracked), then tell your orchestrator. Do not touch the original branch or its PR." \
+      --from "$(_ledger_mover)" --workspace "$ws" --kind status ) >/dev/null 2>&1 \
+    || c_warn "could not message $a - the reservation stands; tell the worker by hand"
+}
+
+_replace_attach() {
+  [ $# -ge 1 ] || die "usage: cel-fanout replace attach <new-branch> --head <sha40> [--workspace NAME]"
+  local id="$1"; shift
+  local th="" ws_opt=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --head)      [ $# -ge 2 ] || die "replace: --head needs a value"; th="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      *) die "replace attach: unknown argument: $1" ;;
+    esac
+  done
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace attach: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace attach: no delegation with id '$id'"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" = child ] \
+    || die "replace attach: $id is not a reserved replacement - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.target_head')" = "$th" ] \
+    || die "replace attach: --head $th is not the head reserved for $id ($(printf '%s' "$row" | jq -r '.replacement.target_head')) - a replacement is the exact head that was validated; nothing recorded"
+  if [ "$(printf '%s' "$row" | jq -r '.replacement.stage')" = attached ]; then
+    c_ok "$id: already attached to PR #$(printf '%s' "$row" | jq -r '.replacement.pr') at ${th:0:12} - nothing changed"
+    return 0
+  fi
+  local of oh opr_n repo obranch slug
+  of="$(printf '%s' "$row" | jq -r '.replacement.of')"; oh="$(printf '%s' "$row" | jq -r '.replacement.original_head')"
+  opr_n="$(printf '%s' "$row" | jq -r '.replacement.original_pr')"; obranch="$(printf '%s' "$row" | jq -r '.replacement.original_branch')"
+  repo="$(printf '%s' "$row" | jq -r '.repo')"
+  local src; src="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$src" ] && [ "$(printf '%s' "$src" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace attach: the original $of no longer names $id as its replacement - nothing recorded"
+  _rec_guard replace-attach "$of" "$src"   # the source may have acquired debt since reserve
+  slug="$(_repo_slug "$wsdir" "$repo")"
+  { [ -n "$slug" ] && [ "$slug" != null ]; } || die "replace attach: repo '$repo' is not registered in this workspace"
+  ws_github_ready "$wsdir" "$GH" \
+    || die "replace attach: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+  local ident; ident="$(_replace_ident "$row")"
+  _ledger_unlock
+  local opr tpr me refj ref="" rc=0
+  opr="$(_replace_pr "$wsdir" "$slug" "$obranch")" || { _ledger_relock; die "replace attach: no PR found for the original $obranch on $slug - nothing recorded"; }
+  tpr="$(_replace_pr "$wsdir" "$slug" "$id")" || { _ledger_relock; die "replace attach: no PR found for $id on $slug - the worker has not published and opened the ready PR yet; nothing recorded"; }
+  me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+  refj="$(_fgh "$wsdir" api "repos/$slug/git/ref/heads/$id" 2>/dev/null)" || rc=$?
+  _ledger_relock
+  [ "$rc" -ne 0 ] || ref="$(printf '%s' "$refj" | jq -r '.object.sha // ""' 2>/dev/null || true)"
+  [ "$(printf '%s' "$opr" | jq -r '.number // ""')" = "$opr_n" ] && [ "$(printf '%s' "$opr" | jq -r '.headRefOid // ""')" = "$oh" ] \
+    || die "replace attach: the original PR head moved (PR #$opr_n is at $(printf '%s' "$opr" | jq -r '.headRefOid // "?"'), not the frozen original $oh) - nothing recorded"
+  [ "$(printf '%s' "$opr" | jq -r '.state // ""')" != MERGED ] || die "replace attach: the original PR #$opr_n is MERGED - nothing to replace; nothing recorded"
+  local tn tstate thead tauthor
+  tn="$(printf '%s' "$tpr" | jq -r '.number // ""')"; tstate="$(printf '%s' "$tpr" | jq -r '.state // ""')"
+  thead="$(printf '%s' "$tpr" | jq -r '.headRefOid // ""')"; tauthor="$(printf '%s' "$tpr" | jq -r '.author.login // ""')"
+  [ "$tstate" = OPEN ] || die "replace attach: the PR for $id is $tstate, not OPEN - nothing recorded"
+  [ "$(printf '%s' "$tpr" | jq -r '.isCrossRepository // false')" = false ] \
+    || die "replace attach: the PR for $id comes from a fork - this fleet does not own it; nothing recorded"
+  [ -n "$me" ] && [ "$tauthor" = "$me" ] \
+    || die "replace attach: the PR for $id was opened by '${tauthor:-?}', not by this fleet ('${me:-?}') - nothing recorded"
+  [ "$(printf '%s' "$tpr" | jq -r '.isDraft // false')" = false ] \
+    || die "replace attach: the PR for $id is a draft - a draft is invisible to the reviewer; open it ready for review. Nothing recorded"
+  [ "$thead" = "$th" ] && [ "$rc" -eq 0 ] && [ "$ref" = "$th" ] \
+    || die "replace attach: the published head is not the reserved one: PR #$tn is at ${thead:-?}, the remote branch at ${ref:-unreadable}, but $th was reserved - the target moved or was never pushed as validated; nothing recorded"
+  local dbase; dbase="$(repo_default_ref "$wsdir/repos/$repo" 2>/dev/null || true)"; dbase="${dbase#origin/}"
+  { [ -z "$dbase" ] || [ "$(printf '%s' "$tpr" | jq -r '.baseRefName // ""')" = "$dbase" ]; } \
+    || die "replace attach: the PR for $id targets $(printf '%s' "$tpr" | jq -r '.baseRefName // "?"'), not $dbase - nothing recorded"
+  local row2 src2; row2="$(_ledger_entry "$wsdir" "$id")"
+  src2="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$row2" ] && [ "$(_replace_ident "$row2")" = "$ident" ] && [ "$(printf '%s' "$src2" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace attach: $id changed while GitHub was being checked - nothing recorded; run it again"
+  _replace_fault before-attach
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --argjson n "$tn" --arg at "$(_now_iso)" --arg by "$(_ledger_mover)" \
+    'map(if .id == $id then .replacement += {stage:"attached", pr:$n, attached_at:$at, attached_by:$by} else . end)')" \
+    || die "replace attach: could not write the ledger - nothing recorded"
+  _replace_fault after-attach
+  c_ok "$id: attached to PR #$tn at ${th:0:12} - collect, review (--head $th) and land now work on it. No approval was carried over from $of"
+}
+
+# BINDING A CLEAN REPLACEMENT CHECKOUT (AH-261019).
+#
+# After `replace attach` the child row still names the ORIGINAL worker's
+# worktree, whose symbolic HEAD is the old branch and which may hold a large
+# private dirty tree. collect, cel-verify and every later worker prompt read
+# row.worktree, so they would bind and gate the wrong source.
+#
+# THE NATIVE CONTRACT this rests on (verified against herdr, not assumed):
+#   - herdr has no API that changes a running agent's working directory: `agent`
+#     and `pane` expose list/get/read/prompt/start/... and no chdir. An actor
+#     could only be moved by restarting it, which forfeits its native session,
+#     and a restart is exactly what this operation must not do.
+#   - herdr DOES report, per agent, name, pane_id, native session identity
+#     (agent_session.value) and cwd. That is the independent identity record.
+# So the actor's process cwd stays the old tree, by design, and what changes is
+# the EXPLICIT CHECKOUT BINDING: the one place the factory resolves "where is
+# this row's source" (row.worktree, read by collect, the verifier, land, review
+# and the revision prompt). The actor is told the exact clean path by inbox and
+# works there by absolute path; its identity (alias, pane, native session) is
+# recorded and re-checked by every acting verb, so a different or restarted
+# actor can never inherit the binding. Nothing is trusted from a path alone:
+# the clean checkout must be a linked worktree of the SAME repository, on the
+# child branch, at exactly the reserved head, with a clean status.
+#
+# One ledger write, under a non-waiting lock, after every check. Review and
+# gate evidence gathered on the old checkout is moved to binding.superseded and
+# removed from the row: it cannot approve a different source. The old tree is
+# only ever READ (GIT_OPTIONAL_LOCKS=0: not even an index refresh) and stays
+# registered to the frozen source row; gc vetoes binding.retained_worktree.
+_replace_real() { realpath -e -- "$1" 2>/dev/null; }
+
+_replace_actor() { # <alias> <pane> <herdr_ws> -> one-line JSON {name,pane_id,session,kind,cwd}, or fails with a reason on stdout
+  local alias="$1" pane="$2" hws="$3" l n
+  l="$("$HERDR" agent list 2>/dev/null)" || { printf 'herdr cannot list agents'; return 1; }
+  n="$(printf '%s' "$l" | jq -c --arg a "$alias" --arg p "$pane" --arg q "$hws:$pane" '
+    (.result.agents // []) as $all
+    | {named: [$all[] | select(.name == $a)], inpane: [$all[] | select(.pane_id == $p or .pane_id == $q)]}' 2>/dev/null)" \
+    || { printf 'herdr answered with an unreadable agent list'; return 1; }
+  [ "$(printf '%s' "$n" | jq '.named | length')" = 1 ] \
+    || { printf 'herdr reports %s agents named %s - the actor must be exactly one live agent' "$(printf '%s' "$n" | jq '.named | length')" "$alias"; return 1; }
+  [ "$(printf '%s' "$n" | jq '.inpane | length')" = 1 ] \
+    || { printf 'pane %s holds %s agents - ambiguous ownership' "$pane" "$(printf '%s' "$n" | jq '.inpane | length')"; return 1; }
+  printf '%s' "$n" | jq -e '.named[0].pane_id == .inpane[0].pane_id' >/dev/null \
+    || { printf 'the agent named %s is not the agent in pane %s' "$alias" "$pane"; return 1; }
+  printf '%s' "$n" | jq -c '.named[0] | {name, pane_id, kind: (.agent // ""), session: (.agent_session.value // ""), cwd: (.cwd // "")}'
+}
+
+_replace_tree_facts() { # <path> -> JSON {ref, head, dirty_entries, status_sha256}; read-only
+  local t="$1" ref head n sha
+  export GIT_OPTIONAL_LOCKS=0
+  ref="$(git -C "$t" symbolic-ref -q HEAD 2>/dev/null || true)"
+  head="$(git -C "$t" rev-parse HEAD 2>/dev/null)" || return 1
+  n="$(git -C "$t" status --porcelain=v1 --untracked-files=all 2>/dev/null | wc -l)"
+  sha="$(git -C "$t" status --porcelain=v1 -z --untracked-files=all 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  jq -nc --arg ref "$ref" --arg head "$head" --argjson n "$n" --arg sha "$sha" '{ref:$ref, head:$head, dirty_entries:$n, status_sha256:$sha}'
+}
+
+_replace_bind() {
+  local usage="usage: cel-fanout replace bind <new-branch> --from-worktree <old-path> --worktree <clean-path> --head <sha40> --alias <worker> --pane <pane> [--dry-run] [--workspace NAME]"
+  [ $# -ge 1 ] || die "$usage"
+  local id="$1"; shift
+  local from="" clean="" th="" alias="" pane="" ws_opt="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from-worktree) [ $# -ge 2 ] || die "replace bind: --from-worktree needs a value"; from="$2"; shift 2 ;;
+      --worktree)  [ $# -ge 2 ] || die "replace bind: --worktree needs a value"; clean="$2"; shift 2 ;;
+      --head)      [ $# -ge 2 ] || die "replace bind: --head needs a value"; th="$2"; shift 2 ;;
+      --alias)     [ $# -ge 2 ] || die "replace bind: --alias needs a value"; alias="$2"; shift 2 ;;
+      --pane)      [ $# -ge 2 ] || die "replace bind: --pane needs a value"; pane="$2"; shift 2 ;;
+      --workspace) [ $# -ge 2 ] || die "replace bind: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      --dry-run)   dry=1; shift ;;
+      *) die "replace bind: unknown argument: $1" ;;
+    esac
+  done
+  # ALL VALIDATION BEFORE ANY LEDGER WRITE. Every identity is named by the caller
+  # so that a stale request cannot bind whatever the ledger happens to hold now.
+  [ -n "$from" ] && [ -n "$clean" ] && [ -n "$th" ] && [ -n "$alias" ] && [ -n "$pane" ] \
+    || die "replace bind: --from-worktree, --worktree, --head, --alias and --pane are all required - a request that does not name the identity it expects cannot be fenced against a stale one. $usage"
+  [[ "$th" =~ ^[0-9a-f]{40}$ ]] || die "replace bind: --head must be a full 40-character lowercase commit SHA (got: '$th')"
+  case "$from" in /*) ;; *) die "replace bind: --from-worktree must be an absolute path" ;; esac
+  case "$clean" in /*) ;; *) die "replace bind: --worktree must be an absolute path" ;; esac
+
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local row; row="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row" ] || die "replace bind: no delegation with id '$id'"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.role // ""')" = child ] \
+    || die "replace bind: $id is not a replacement child - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.stage // ""')" = attached ] \
+    || die "replace bind: $id is not attached to its published clean PR yet (run: cel-fanout replace attach $id --head $th) - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.replacement.target_head')" = "$th" ] \
+    || die "replace bind: --head $th is not the head reserved for $id ($(printf '%s' "$row" | jq -r '.replacement.target_head')) - the binding is for the exact validated head; nothing recorded"
+  _rec_guard replace-bind "$id" "$row"
+  local state; state="$(printf '%s' "$row" | jq -r '.state // ""')"
+  case "$state" in running|finished|collected) ;; *) die "replace bind: $id is $state - only a live or finished replacement can be bound. Nothing recorded" ;; esac
+
+  local oreal creal
+  oreal="$(_replace_real "$from")" || die "replace bind: the old checkout $from does not exist - nothing recorded"
+  creal="$(_replace_real "$clean")" || die "replace bind: the clean checkout $clean does not exist - nothing recorded"
+
+  # A replay of THIS binding is a no-op; any other binding of a bound row is refused.
+  local b; b="$(printf '%s' "$row" | jq -c '.binding // empty')"
+  if [ -n "$b" ]; then
+    if [ "$(printf '%s' "$b" | jq -r '.worktree')" = "$creal" ] && [ "$(printf '%s' "$b" | jq -r '.from_worktree')" = "$oreal" ] \
+       && [ "$(printf '%s' "$b" | jq -r '.head')" = "$th" ] && [ "$(printf '%s' "$b" | jq -r '.actor.alias')" = "$alias" ] \
+       && [ "$(printf '%s' "$b" | jq -r '.actor.pane')" = "$pane" ]; then
+      c_ok "$id: already bound to $creal at ${th:0:12} - nothing changed"
+      return 0
+    fi
+    die "replace bind: $id is already bound to $(printf '%s' "$b" | jq -r '.worktree') - one binding per replacement; nothing recorded"
+  fi
+
+  # THE SOURCE OF THE ROW, as the ledger has it, must be what the caller says.
+  [ "$(printf '%s' "$row" | jq -r '.alias // ""')" = "$alias" ] \
+    || die "replace bind: the worker alias of $id is '$(printf '%s' "$row" | jq -r '.alias // "?"')', not '$alias' - nothing recorded"
+  [ "$(printf '%s' "$row" | jq -r '.pane // ""')" = "$pane" ] \
+    || die "replace bind: the pane of $id is '$(printf '%s' "$row" | jq -r '.pane // "?"')', not '$pane' - nothing recorded"
+  [ "$(_replace_real "$(printf '%s' "$row" | jq -r '.worktree // ""')")" = "$oreal" ] \
+    || die "replace bind: the checkout of $id is '$(printf '%s' "$row" | jq -r '.worktree // "?"')', not '$from' - the source moved or the request is stale; nothing recorded"
+  local of src; of="$(printf '%s' "$row" | jq -r '.replacement.of')"; src="$(_ledger_entry "$wsdir" "$of")"
+  [ -n "$src" ] && [ "$(printf '%s' "$src" | jq -r '.replacement.child // ""')" = "$id" ] \
+    || die "replace bind: the original $of no longer names $id as its replacement - nothing recorded"
+  _rec_guard replace-bind "$of" "$src"
+
+  # THE TWO CHECKOUTS: distinct, disjoint, the same repository.
+  [ "$creal" != "$oreal" ] || die "replace bind: the clean checkout is the old checkout ($creal) - nothing to bind"
+  case "$creal/" in "$oreal/"*) die "replace bind: the clean checkout is inside the old one - nothing recorded" ;; esac
+  case "$oreal/" in "$creal/"*) die "replace bind: the old checkout is inside the clean one - nothing recorded" ;; esac
+  local repo repodir; repo="$(printf '%s' "$row" | jq -r '.repo')"; repodir="$wsdir/repos/$repo"
+  [ -d "$repodir" ] || die "replace bind: repo '$repo' not found under $wsdir/repos"
+  local ctop ccommon ocommon rcommon
+  ctop="$(git -C "$creal" rev-parse --show-toplevel 2>/dev/null)" && [ "$(_replace_real "$ctop")" = "$creal" ] \
+    || die "replace bind: $creal is not the root of a git checkout - nothing recorded"
+  ccommon="$(_replace_real "$(git -C "$creal" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || ccommon=""
+  ocommon="$(_replace_real "$(git -C "$oreal" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || ocommon=""
+  rcommon="$(_replace_real "$(git -C "$repodir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")" || rcommon=""
+  { [ -n "$ccommon" ] && [ "$ccommon" = "$ocommon" ] && [ "$ccommon" = "$rcommon" ]; } \
+    || die "replace bind: the clean checkout is not a worktree of the same repository as the old one and $repo - an arbitrary path is never trusted; nothing recorded"
+  local cfacts
+  cfacts="$(_replace_tree_facts "$creal")" || die "replace bind: cannot read the clean checkout - nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .ref)" = "refs/heads/$id" ] \
+    || die "replace bind: the clean checkout is on '$(printf '%s' "$cfacts" | jq -r '.ref | if . == "" then "a detached HEAD" else . end')', not refs/heads/$id - nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .head)" = "$th" ] \
+    || die "replace bind: the clean checkout is at $(printf '%s' "$cfacts" | jq -r .head | cut -c1-12), not the reserved head ${th:0:12} - a mismatched head is never bound; nothing recorded"
+  [ "$(printf '%s' "$cfacts" | jq -r .dirty_entries)" = 0 ] \
+    || die "replace bind: the clean checkout has $(printf '%s' "$cfacts" | jq -r .dirty_entries) uncommitted entries - it must be clean; nothing recorded"
+  local other
+  other="$(jq -r --arg id "$id" --arg c "$creal" '.[] | select(.id != $id and (.worktree // "") == $c and ((.state // "") | IN("landed","released","abandoned") | not)) | .id' "$(_ledger_file "$wsdir")" | head -1)"
+  [ -z "$other" ] || die "replace bind: the clean checkout is already the worktree of delegation $other - ambiguous ownership; nothing recorded"
+  local ofacts; ofacts="$(_replace_tree_facts "$oreal")" || die "replace bind: cannot read the old checkout - nothing recorded"
+
+  # THE ACTOR: independently identified through herdr, executing in the OLD tree.
+  local actor
+  actor="$(_replace_actor "$alias" "$pane" "$(printf '%s' "$row" | jq -r '.herdr_ws // ""')")" || die "replace bind: actor identity not proven: $actor - nothing recorded"
+  [ -n "$(printf '%s' "$actor" | jq -r .session)" ] \
+    || die "replace bind: herdr reports no native session identity for $alias - without one the actor cannot be told from a restarted copy; nothing recorded"
+  local acwd; acwd="$(_replace_real "$(printf '%s' "$actor" | jq -r .cwd)" || true)"
+  case "$acwd/" in
+    "$oreal/"*) ;;
+    "$creal/"*) die "replace bind: the actor already executes in the clean checkout - nothing to bind" ;;
+    *) die "replace bind: the actor executes in '${acwd:-unknown}', which is not the old checkout $oreal - identity mismatch; nothing recorded" ;;
+  esac
+
+  if [ "$dry" -eq 1 ]; then
+    c_ok "$id: bind would move the source from $oreal (HEAD $(printf '%s' "$ofacts" | jq -r '.head[0:12]'), $(printf '%s' "$ofacts" | jq -r .dirty_entries) dirty entries, preserved untouched) to $creal at ${th:0:12}; actor $alias ($(printf '%s' "$actor" | jq -r '.session | .[-40:]')) keeps its session; review/gate evidence would be superseded. Dry run: nothing recorded"
+    return 0
+  fi
+
+  # COMMIT: re-read everything that was checked, immediately before the one write.
+  [ -z "${CEL_TESTING:-}" ] || [ -z "${CEL_BIND_TEST_BEFORE_COMMIT:-}" ] || eval "$CEL_BIND_TEST_BEFORE_COMMIT" || true
+  local row2 actor2 cfacts2 ofacts2
+  row2="$(_ledger_entry "$wsdir" "$id")"
+  [ -n "$row2" ] && [ "$(printf '%s' "$row2" | jq -c '{state, alias, pane, worktree, branch, repo, replacement, review, verdict, binding}')" = "$(printf '%s' "$row" | jq -c '{state, alias, pane, worktree, branch, repo, replacement, review, verdict, binding}')" ] \
+    || die "replace bind: $id changed while it was being checked - nothing recorded; run it again"
+  actor2="$(_replace_actor "$alias" "$pane" "$(printf '%s' "$row" | jq -r '.herdr_ws // ""')")" && [ "$actor2" = "$actor" ] \
+    || die "replace bind: the actor identity changed while it was being checked - nothing recorded; run it again"
+  cfacts2="$(_replace_tree_facts "$creal")" && [ "$cfacts2" = "$cfacts" ] \
+    || die "replace bind: the clean checkout changed while it was being checked - nothing recorded; run it again"
+  ofacts2="$(_replace_tree_facts "$oreal")" \
+    && [ "$(printf '%s' "$ofacts2" | jq -c '{ref, head}')" = "$(printf '%s' "$ofacts" | jq -c '{ref, head}')" ] \
+    || die "replace bind: the old checkout moved (branch or HEAD) while it was being checked - nothing recorded; run it again"
+  _replace_fault before-bind
+
+  local at by; at="$(_now_iso)"; by="$(_ledger_mover)"
+  local bdir="$wsdir/.cel/bindings" pre
+  pre="$bdir/$id-$(date -u +%Y%m%dT%H%M%SZ)-$$.pre.json"
+  mkdir -p "$bdir" && printf '%s\n' "$row2" > "$pre" || die "replace bind: cannot write the recovery record - nothing recorded"
+  local cur; cur="$(_ledger_read "$wsdir")"
+  _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg clean "$creal" --arg old "$oreal" --arg th "$th" \
+    --arg alias "$alias" --arg pane "$pane" --argjson actor "$actor" --argjson of "$ofacts" --arg at "$at" --arg by "$by" --arg pre "$pre" '
+    map(if .id == $id then
+      (.binding = {version:1, mode:"explicit-checkout-binding", at:$at, by:$by, worktree:$clean, from_worktree:$old,
+                   head:$th, branch:$id, recovery_record:$pre,
+                   actor:{alias:$alias, pane:$pane, session:$actor.session, kind:$actor.kind, native_cwd:$actor.cwd},
+                   old_tree:($of + {path:$old, retained:true}),
+                   superseded:{review:(.review // null), verdict:(.verdict // null)}})
+      | .worktree = $clean
+      | del(.review, .verdict)
+      | .history = ((.history // []) + [{state:.state, at:$at, by:$by, event:"checkout-bound"}])
+      else . end)')" \
+    || { rm -f "$pre"; die "replace bind: could not write the ledger - nothing recorded"; }
+  _replace_fault after-bind
+  ( cmd_inbox send "$alias" "checkout bound for $id: your source of truth is now $creal (branch $id at exactly $th, clean). Your process working directory is still $oreal and CANNOT be moved without restarting you - do not restart. Do all work for this PR by absolute path in $creal (cd there, or git -C $creal ...). Write your handoff to the ABSOLUTE path $creal/.agent/result.md (and every other .agent/ file under $creal/.agent/) - a relative .agent/ path resolves into $oreal, which is never settled from and must stay untouched. Never edit, stage, reset, stash, clean or commit in $oreal - it holds private evidence that is preserved byte-for-byte. Earlier review and gate evidence no longer applies: run the gate in $creal and commit there. Do not touch the original branch or its PR." \
+      --from "$by" --workspace "$(ws_name "$wsdir")" --kind status ) >/dev/null 2>&1 \
+    || c_warn "could not message $alias - the binding stands; tell the worker by hand"
+  c_ok "$id: bound to $creal at ${th:0:12}. collect, the verifier, review and land now act on that checkout; $oreal (HEAD $(printf '%s' "$ofacts" | jq -r '.head[0:12]'), $(printf '%s' "$ofacts" | jq -r .dirty_entries) dirty entries) was only read and stays retained; actor $alias keeps its native session. Review and gate evidence from the old checkout was superseded - re-review at $th. Recovery record: $pre"
+}
+
+# A bound row is only ever acted on while the binding still describes reality:
+# the checkout is still the clean branch, and the live actor (if there is one)
+# is still the one that was identified - a restarted or substituted agent never
+# inherits a binding.
+_replace_bound_guard() { # <verb> <id> <entry-json>
+  local b; b="$(printf '%s' "$3" | jq -c '.binding // empty')"
+  [ -n "$b" ] || return 0
+  local wt branch; wt="$(printf '%s' "$3" | jq -r '.worktree // ""')"; branch="$(printf '%s' "$3" | jq -r '.branch')"
+  [ "$(_replace_real "$wt")" = "$(printf '%s' "$b" | jq -r .worktree)" ] \
+    || die "$1: $2 is bound to $(printf '%s' "$b" | jq -r .worktree) but its row now names '$wt' - the binding no longer describes the row. Nothing recorded."
+  [ "$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null || true)" = "refs/heads/$branch" ] \
+    || die "$1: the bound checkout $wt is no longer on refs/heads/$branch - nothing recorded."
+  local l n
+  l="$("$HERDR" agent list 2>/dev/null)" || die "$1: $2 is bound to an actor and herdr cannot list agents to confirm it - nothing recorded."
+  n="$(printf '%s' "$l" | jq -c --arg a "$(printf '%s' "$b" | jq -r .actor.alias)" '[(.result.agents // [])[] | select(.name == $a)]' 2>/dev/null)" \
+    || die "$1: herdr answered with an unreadable agent list - nothing recorded."
+  [ "$(printf '%s' "$n" | jq length)" -gt 0 ] || return 0   # the actor has finished and left: that is normal
+  [ "$(printf '%s' "$n" | jq length)" = 1 ] \
+    && [ "$(printf '%s' "$n" | jq -r '.[0].agent_session.value // ""')" = "$(printf '%s' "$b" | jq -r .actor.session)" ] \
+    || die "$1: the agent now named $(printf '%s' "$b" | jq -r .actor.alias) is not the actor $2 was bound for (native session differs or is ambiguous) - the binding does not transfer to a different actor. Nothing recorded."
+}
+
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
 # The role check comes FIRST: the cost of the incident this closes was three
@@ -2452,9 +3618,12 @@ for line in sys.stdin.read().splitlines():
 # `reconcile` is a factory verb like the rest: it rewrites the ledger from what
 # GitHub says, which is the orchestrator's read of the world, not a worker's.
 case "${1:-}" in
-  land|release|collect)
+  land|release|collect|request-review)
     _fanout_refuse_worker "$1" "${2:-}" "$(_fanout_ws_arg "$@")" ;;
-  delegate|scout|spike|reconcile)
+  replace)
+    # the second argument is the sub-verb, not an id
+    _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
+  delegate|scout|spike|reconcile|recover)
     # No id to look a mailbox up by: the second argument here is a repo.
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
 esac
@@ -2467,16 +3636,33 @@ case "${1:-}" in
     _bg_msg="$(boxguard_admit)" || die "$1: $_bg_msg" ;;
 esac
 
+case "${1:-}:${2:-}" in
+  replace:bind) ;;   # takes the lock WITHOUT waiting, below
+  *)
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review|try|reconcile)
+  delegate|scout|spike|collect|status|release|land|review|request-review|replace|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
     flock "$ledger_fd" || die "cannot lock delegation ledger"
     ;;
 esac
+  ;;
+esac
+
+# `recover register|continue` write the ledger, so they take the lock - but
+# WITHOUT waiting: a held lock means another delegate or ledger transition is
+# in flight, which is exactly what recovery must not race. `inspect` is read-only.
+case "${1:-}:${2:-}" in
+  recover:register|recover:continue|recover:abandon|replace:bind)
+    lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
+    mkdir -p "$lock_ws/.cel"
+    exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
+    flock -n "$ledger_fd" || die "$1: the delegation ledger lock is held - another delegate or ledger transition may still be completing; refusing to race it. Nothing changed; retry when it has finished" ;;
+esac
 
 case "${1:-}" in
+  recover)  shift; cmd_recover "$@" ;;
   delegate) shift; cmd_delegate "$@" ;;
   handback) shift; cmd_handback "$@" ;;
   scout)    shift; cmd_scout "$@" ;;
@@ -2489,6 +3675,8 @@ case "${1:-}" in
   release)  shift; cmd_release "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
+  request-review) shift; cmd_request_review "$@" ;;
+  replace)  shift; cmd_replace "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|wait|collect|status|why|try|release|review|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|recover|wait|collect|status|why|try|release|review|request-review|replace|handback|land|reconcile ..." ;;
 esac

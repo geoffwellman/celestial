@@ -107,6 +107,23 @@ cel - the celestial plane
                                 unless --force; picks by name, never the
                                 first agent in a shared cwd); a plain run over a dead one
                                 resumes its last session, --fresh does not
+  cel run solo [--product p]    start the product's agent in solo mode for this
+                                launch: it builds and ships itself, no fan-out
+                                (cel run orchestrator does this on its own for
+                                a product whose mode is solo)
+  cel mode [product] [solo|fleet] [--no-restart]
+                                show or set how a product is built: fleet
+                                (orchestrator + workers) or solo (one agent).
+                                Setting it writes workspace.yaml and restarts
+                                the live agent into the new role on the same
+                                session once its turn ends; refuses solo while
+                                fleet work is still in flight
+  cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--note t]
+                                a reviewer's verdict on a solo product's PR,
+                                bound to the exact head it read
+  cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
+                                PR, approved at its current head, no red
+                                check, every protected check green there
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes
@@ -227,6 +244,8 @@ case "${1:-help}" in
   ws)       shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"
             . "$CEL_ROOT/lib/ws.sh";    cmd_ws "$@";;
   run)      shift; . "$CEL_ROOT/lib/run.sh";     cmd_run "$@";;
+  mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
+  solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
   console)  shift; . "$CEL_ROOT/lib/console.sh"; cmd_console "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
   quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;

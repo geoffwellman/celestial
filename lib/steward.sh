@@ -314,14 +314,9 @@ _steward_nudge() { # <mailbox> <workspace> <key> <message>
   fi
 }
 
-# Sanitiser copied from cel run's alias rules so the steward addresses
-# orchestrators by the same name cel run gave them.
-_steward_agent_name() {
-  local n
-  n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
-  n="${n#"${n%%[a-z]*}"}"; n="${n%-}"
-  printf '%.32s' "$n"
-}
+# The steward addresses orchestrators by the name cel run gave them: the same
+# rule, not a copy of it (cel_alias_norm, lib/common.sh).
+_steward_agent_name() { cel_alias_norm "$1"; }
 
 # Which herdr agent owns a mailbox - the inverse of lib/inbox.sh's identity.
 #
@@ -331,8 +326,8 @@ _steward_agent_name() {
 #                      the *-orch case below already covers it)
 #   anything else   -> A WORKER, whose mailbox name IS its agent name: both
 #                      come from the same <repo>-<branch> string through the
-#                      same sanitiser (_inbox_sanitise and _run_agent_name are
-#                      character-for-character identical).
+#                      same rule (_inbox_sanitise, _run_agent_name and this file's
+#                      _steward_agent_name all call cel_alias_norm).
 #
 # Workers can wait on inbox instructions too; resolving only root and
 # orchestrator panes would silently leave their unread mail unattended.
@@ -726,6 +721,31 @@ _steward_review_sweep() { # <agents-json>
             else "NONE" end),
          ([.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length)]
         | @tsv')
+    done
+  done
+}
+
+# A SOLO PRODUCT'S READY PRS. It has no delegations, so the review sweep above
+# (ledger rows, worker nudges) finds nothing to say about them. What can still
+# stall is the last step: a PR approved at its head with every check green,
+# waiting on its own agent to land it. That agent is told once per head (the
+# key carries it, so a new push is a new fact); the steward never lands it.
+_steward_solo_sweep() {
+  local ws wsdir product repo pr head
+  # shellcheck source=lib/solo.sh
+  . "${BASH_SOURCE[0]%/*}/solo.sh"
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    [ -f "$wsdir/workspace.yaml" ] || continue
+    for product in $(ws_product_names "$wsdir"); do
+      [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
+      while IFS=$'\t' read -r repo pr head; do
+        [ -n "$pr" ] || continue
+        # ONCE PER HEAD, NOT ONCE PER WINDOW: the default dedup window is four
+        # hours, which would re-mail the same fact all day while the PR sits.
+        _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
+          "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
+      done < <(solo_ready_prs "$wsdir" "$product")
     done
   done
 }
@@ -1827,6 +1847,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_sample "$agents_json"
 
   _steward_review_sweep "$agents_json"
+  _steward_solo_sweep
   # And then the ledger closes what the world already closed - after the
   # review sweep, because a PR it nudged about this tick may be the very one
   # that has just been merged.

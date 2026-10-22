@@ -208,11 +208,27 @@ test_explicit_profile_beats_the_role_binding() {
 # already resolved from the `review:` block.
 test_a_profile_without_a_model_keeps_the_reviewers_model() {
   _pws
-  printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"
+  GWT="$(mktemp -d)"
+  export CEL_CONFIG_FILE="$GWT/config.yaml"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  export CEL_GATEWAY_STATE="$GWT/state"
+  mkdir -p "$GWT/state/auth"
+  printf '{}' > "$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  export CEL_GATEWAY_STUB="$GWT/gwstub"
+  printf 'review:\n  runtime: omp\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 3 --profile effortonly --dry-run 2>/dev/null)"
-  assert_contains "$out" "--model gpt-5.6-sol"
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
   assert_contains "$out" "--thinking low"
-  rm -rf "$T"
+  rm -rf "$T" "$GWT"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
 }
 test_bindings_are_listed_by_cel_profiles() {
   _pws; local out; out="$(cd "$T" && cmd_profiles 2>/dev/null)"
@@ -515,14 +531,14 @@ test_profiles_marks_a_gateway_profile_with_its_usable_accounts() {
   _gws
   local out; out="$(cd "$T" && cmd_profiles gw 2>&1)"
   assert_contains "$out" "via gateway (2 accounts usable)"
-  assert_contains "$out" "ompgw/codex/gpt-5.5"
+  assert_contains "$out" "ompgw-codex/gpt-5.5"
   _gws_clean
 }
 test_profile_via_gateway_resolves_to_the_ompgw_model() {
   _gws
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
   profile_resolve "$T" gw >/dev/null 2>&1
-  assert_eq "$PROFILE_MODEL" "ompgw/codex/gpt-5.5"
+  assert_eq "$PROFILE_MODEL" "ompgw-codex/gpt-5.5"
   assert_eq "$PROFILE_VIA" gateway
   _gws_clean
 }
@@ -533,6 +549,35 @@ test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {
   local out; out="$(cd "$T" && GW_STUB_DOWN=1 cmd_profiles gw 2>&1)"
   assert_contains "$out" "gateway"
   assert_contains "$out" "cel gateway"
+  _gws_clean
+}
+
+# CEL-136: an OMP profile through the gateway resolves to omp's `celgw`
+# provider and the gateway's omp-PREFIXED id, keeps its own thinking level,
+# and counts only the accounts in the omp pool - never the personal one.
+test_profile_omp_via_gateway_resolves_to_the_prefixed_celgw_model() {
+  _gws
+  cat >>"$T/workspace.yaml" <<'YAML'
+  og: { runtime: omp, model: anthropic/claude-opus-5-5, thinking: low, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-opus-5-5"}]}' ;;
+esac
+EOS
+  printf '  omp_exclude: me@personal.invalid\n' >>"$CEL_CONFIG_FILE"
+  printf '{"type":"claude","email":"me@personal.invalid"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  printf '{"type":"claude","email":"a@example.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-22222222-a@example.invalid.json"
+  printf '{"type":"claude","email":"b@example.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-33333333-b@example.invalid.json"
+  local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE PROFILE_VETO
+  profile_resolve "$T" og >/dev/null 2>&1
+  assert_eq "$PROFILE_MODEL" "celgw/omp/claude-opus-5-5"
+  assert_eq "$PROFILE_THINKING" low
+  assert_eq "$PROFILE_VETO" ""
+  assert_eq "$PROFILE_GATEWAY_ACCOUNTS" 2
+  assert_contains "$PROFILE_NOTE" "omp pool"
   _gws_clean
 }
 
