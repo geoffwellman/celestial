@@ -2,13 +2,11 @@
 # claude Stop hook: an agent does not end its turn on an unanswered decision
 # without being told so.
 #
-# The failure this closes: an agent's inbox Monitor dies silently, it goes
-# idle, and nothing notices until a human asks - root sat nine hours behind on
-# exactly this. Before the turn ends, if this pane's identity has UNRESOLVED
-# decisions or blockers (`cel inbox open`, which ignores the read cursor), the
-# stop is blocked ONCE with the count and the re-arm instruction. A marker
-# file bounds it to one block per turn so it can never loop; the marker is
-# cleared on the next clean stop. Fails open on every error of its own.
+# Claude's Stop hook cannot wake an idle session; this guard only catches an
+# unanswered decision or blocker while a turn is active. Before that turn ends,
+# `cel inbox open` identifies unresolved decisions/blockers regardless of the
+# read cursor. A marker bounds the block to once per turn, so it cannot loop.
+# Fails open on every error of its own.
 #
 # Register in ~/.claude/settings.json under hooks.Stop:
 #   {"hooks":[{"type":"command","command":"bash <CEL_ROOT>/tools/hooks/inbox-guard.sh","timeout":10}]}
@@ -28,7 +26,7 @@ if [ "${open:-0}" -gt 0 ] && [ ! -f "$mark" ]; then
   {
     printf 'celestial: %s unresolved decision(s)/blocker(s) in your inbox. Reading them did not resolve them.\n' "$open"
     printf 'Run `cel inbox open`, act on each or answer it, then `cel inbox resolve <id>`.\n'
-    printf 'Then re-arm your monitor before stopping: Monitor(command: "cel inbox watch", persistent: true)\n'
+    printf 'Mail arriving after this turn ends waits for the next submitted turn; Claude has no idle Monitor.\n'
   } >&2
   exit 2
 fi

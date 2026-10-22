@@ -25,9 +25,10 @@ Do
 - A change worth a CHANGELOG line goes in `changelog.d/<your-branch>.md`, never
   in CHANGELOG.md itself.
 - On completion write `.agent/result.md`: summary, files changed, tests run, open questions. Then stop.
-- After your PR is open, a prompt from a reviewer alias (`<repo>-pr-<n>-review`)
+- After your PR is open, a message from a reviewer alias (`<repo>-pr-<n>-review`)
   is a revision request: fix on the ticket branch, run the gate, commit, push
-  THIS branch only, then `herdr agent prompt <reviewer> "pushed <sha> - re-review"`
+  THIS branch only, then `cel inbox send <reviewer> "pushed <sha> - re-review" --workspace <ws>`
+  (never type into another agent's pane)
   and stop. - `cel inbox read` at the start of every turn: your orchestrator and reviewer
   may leave you work there rather than typing into your pane. Reply the same
   way (`cel inbox send <repo>-orch "..."`).

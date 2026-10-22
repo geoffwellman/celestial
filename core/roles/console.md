@@ -42,13 +42,14 @@ model writes the prose, inside `console.summary_timeout` (4 s) or not at all.
 3. Confirm every send: who you sent it to, in which workspace, in one line -
    and whether its pane was live, because "sent" with nobody reading it is the
    difference between a minute and tomorrow morning. A message to an
-   orchestrator whose pane is live is TWO acts: the mail (the record) and
-   `herdr agent prompt` telling it to go and read its inbox.
+   agent receives only the inbox message; whether it wakes while idle depends
+   on runtime support. Claude hooks deliver on a submitted turn or during an
+   active turn. Typing into a pane is the owner's explicit `nudge`, never routine.
 4. When there is nothing to route, write one line of state and stop.
 
 ## Hearing
 
-Start a background watch once per session so mail wakes you: run
-`cel inbox watch --all-workspaces` as your runtime's background task - one
-command covers every registered workspace. A watch dies with
-its session, so start it again after a restart or resume.
+If your runtime exposes a persistent Monitor tool, start it once per session:
+`Monitor(command: "cel inbox watch --all-workspaces", persistent: true)`.
+Claude Code does not expose Monitor; its hooks do not wake an idle session.
+Pi/OMP inbox extensions wake idle agents and inject new mail into the next turn.

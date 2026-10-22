@@ -78,19 +78,29 @@ link_herdr_layouts() {
 }
 
 
-# Box-wide Claude Code preferences the plane asserts everywhere. Two parts:
-# a deep-merge of tools/claude/settings-prefs.json into ~/.claude/settings.json
-# (a real serialiser, never string concatenation), and the claude-hud config
-# symlinked so HUD customisations are tracked in this repo. The merge is
-# plane-wins for the keys it names and touches nothing else.
+# Box-wide Claude Code preferences the plane asserts everywhere. Objects are
+# deep-merged; the plane's UserPromptSubmit hook is appended once, preserving
+# the user's handlers. Its script path is resolved here so Claude need not
+# inherit CEL_ROOT in unrelated sessions.
 link_claude_prefs() {
   local prefs="$CEL_ROOT/tools/claude/settings-prefs.json"
   local settings="$HOME/.claude/settings.json"
   if [ -f "$prefs" ]; then
     mkdir -p "$HOME/.claude"
     [ -f "$settings" ] || echo '{}' > "$settings"
-    local merged
-    merged="$(jq -S --slurpfile p "$prefs" '. * $p[0]' "$settings")" || return 1
+    local hook_command merged
+    printf -v hook_command 'bash %q' "$CEL_ROOT/tools/hooks/inbox-drain.sh"
+    merged="$(jq -S --arg hook_command "$hook_command" --slurpfile p "$prefs" '
+      def append_unique:
+        reduce .[] as $item
+          ([]; if any(.[]; . == $item) then . else . + [$item] end);
+      . as $current
+      | ($p[0] | .hooks.UserPromptSubmit[0].hooks[0].command = $hook_command) as $plane
+      | ($current * $plane)
+      | .hooks.UserPromptSubmit =
+          ((($current.hooks.UserPromptSubmit // []) +
+            ($plane.hooks.UserPromptSubmit // [])) | append_unique)
+    ' "$settings")" || return 1
     if [ "$merged" != "$(jq -S . "$settings")" ]; then
       printf '%s\n' "$merged" > "$settings"
       c_ok "claude settings merged ($(jq -r 'keys|join(", ")' "$prefs"))"

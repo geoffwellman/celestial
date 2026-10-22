@@ -546,12 +546,12 @@ const state = async (req, w) => {
   }
   for (const a of ags) if (a.status === 'blocked')
     attention.push({ kind: 'blocked', text: `${a.label}: agent BLOCKED, waiting on input`, title: a.cwd, url: null });
-  // Fresh mail is delivered by a monitor or the prompt hook; mail still
-  // unread after 30 minutes means neither is running.
+  // Aged unread mail needs attention, but is not proof that delivery failed:
+  // Claude hooks run only at turn boundaries; idle wake is runtime-specific.
   const stuck = mail.items.filter((m) => m.unread && Date.now() - new Date(m.ts).getTime() > 1800e3);
   if (stuck.length)
     attention.push({ kind: 'stall',
-      text: `${stuck.length} inbox item(s) unread 30m+ (to ${[...new Set(stuck.map((m) => m.to))].join(', ')}) - is the recipient's monitor running?`,
+      text: `${stuck.length} inbox item(s) unread 30m+ (to ${[...new Set(stuck.map((m) => m.to))].join(', ')}) - check the recipient's inbox/runtime`,
       title: stuck[0].message.slice(0, 90), url: null });
 
   return {

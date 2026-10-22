@@ -1572,6 +1572,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
+  local agent_name; agent_name="$(_run_agent_name "$alias_name")"
   # The facts about THIS pull request ride with the role body rather than
   # waiting for an orchestrator to type them.
   if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
@@ -1610,10 +1611,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       fi
       ;;
   esac
-  # Out-of-band inbox delivery for runtimes without Monitor/UserPromptSubmit -
-  # on EVERY role, not just the orchestrators (CEL-95): reviewers send a
-  # worker CHANGES by inbox, and a pi worker without the hook sat `done` on
-  # two unread reviews for eight hours.
+  # Add runtime-specific inbox extension args to every role, not just
+  # orchestrators: reviewers send worker revisions through mail too. Claude's
+  # global UserPromptSubmit and launch-time Stop hooks are configured elsewhere.
   _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
   _run_retry_overlay_args "$runtime" "$role"
@@ -1624,14 +1624,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   mapfile -t launch_args < <(agent_launch_args "$runtime")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
-  local agent_name; agent_name="$(_run_agent_name "$alias_name")"
   local envprefix; local inbox_me=""
   case "$role" in
     root) inbox_me=root ;;
     orchestrator) inbox_me="$product-orch" ;;
-    # A worker or reviewer's mailbox IS its pane alias - the name reviewers and
-    # orchestrators address. Only where a hook will read it: claude reads by cwd.
-    worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
+    # Pane alias is the reader identity. Claude's hook needs it explicitly
+    # because reviewers share a tab cwd rather than standing in a worktree.
+    worker|reviewer) inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
@@ -2125,7 +2124,7 @@ run_stripped_orchestrators() {
       [ -z "$lcwd" ] || cwd="$lcwd"
       [ -n "$rt" ] || rt="$(ws_runtime "$wsdir" orchestrator)"
       hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
-      [ -n "$hookfile" ] || continue   # claude: Monitor, not a hook
+      [ -n "$hookfile" ] || continue   # Claude uses launch-time UserPromptSubmit/Stop hooks, not this extension file
       _run_pane_pid "$lpane" "$cwd" "$rt" || continue
       if _run_cmdline "$_RUN_PID" | grep -qF -- "${hookfile##*/}"; then state=ok; else state=stripped; fi
       [ "$lname" != "-" ] || lname="$name"

@@ -1,9 +1,9 @@
 // omp / pi extension: celestial inbox delivery without touching the composer.
 //
-// omp has neither claude's Monitor nor its UserPromptSubmit hook, so routine
-// mail to an omp orchestrator used to arrive only as `herdr agent prompt`,
-// which typed into the composer over the human's draft (CEL-65). This hook
-// is the omp equivalent of both halves:
+// Claude's hooks only run at turn boundaries; OMP needs this extension to
+// watch mail while idle and inject unread items into the next turn. Without it,
+// routine mail to an omp orchestrator used to arrive only as `herdr agent
+// prompt`, which typed into the composer's human draft (CEL-65).
 //   - session_start: run `cel inbox watch --parent <pid>` in its own process
 //     group; each line becomes ctx.ui.notify - out of band, composer untouched.
 //     The watch never moves the cursor.

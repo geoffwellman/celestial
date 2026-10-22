@@ -1,3 +1,16 @@
 {
-  "outputStyle": "Concise"
+  "outputStyle": "Concise",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__CEL_INBOX_DRAIN_COMMAND__",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }

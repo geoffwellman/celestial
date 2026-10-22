@@ -6,12 +6,11 @@
 # draft and Enter submits the mash-up. Observed repeatedly on the root
 # orchestrator, which is where humans type most.
 #
-# So routine traffic goes to a FILE instead: one JSONL per workspace, one
-# read cursor per recipient. Delivery is out-of-band - a Monitor background
-# task on the file wakes the recipient with a notification (no keystrokes),
-# and a UserPromptSubmit hook drains anything missed on the human's next
-# turn. Nothing here ever touches a pane; escalations that genuinely need to
-# interrupt still use `herdr agent prompt`, deliberately and rarely.
+# Routine traffic goes to a FILE instead: one JSONL per workspace, one read
+# cursor per recipient. Runtime-specific extensions or persistent monitors may
+# surface it while idle. Claude's UserPromptSubmit/Stop hooks only run at turn
+# boundaries and do not wake idle sessions. Nothing here types into a pane;
+# escalations stay inbox messages too.
 [ -n "${_CEL_INBOX:-}" ] && return 0
 _CEL_INBOX=1
 # shellcheck source=lib/common.sh
@@ -471,9 +470,9 @@ cel inbox - messages between agents that never type into a pane
   cel inbox count [--for <who>] [--workspace w|--all-workspaces]  unread count
       stdout is the number; the state behind a 0 is said on stderr.
   cel inbox watch [--for <who>] [--workspace w|--all-workspaces] [--parent <pid>]
-      tail new items, one line each (what a Monitor background task runs -
-      stdout is the notification). A decision or blocker also raises a desktop
-      notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
+      tail new items, one line each for a runtime task that monitors stdout.
+      The command itself does not wake an agent. Decisions/blockers also raise
+      a desktop notification via herdr; set CEL_INBOX_NOTIFY=0 to silence it.
   cel inbox open [--for <who>] [--workspace w|--all-workspaces] [--json] [--ranked]
       UNRESOLVED decisions and blockers for that recipient - regardless of the
       read cursor. Reading a decision does not resolve it; only `resolve` does.
@@ -810,10 +809,9 @@ _inbox_count_one() { # <ws> <who>
     | wc -l | tr -d ' '
 }
 
-# What a Monitor background task runs: one compact line per NEW item, so each
-# arrives as a single notification. Deliberately does not mark items read -
-# the recipient's own `cel inbox read` does that, and a monitor that consumed
-# the cursor would starve the catch-up hook.
+# What a runtime-provided persistent monitor may run: one compact line per
+# new item. This command does not wake agents itself and does not mark items
+# read, so the recipient's prompt hook can still catch up.
 _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   local ws="" who="" every=0 parent=""
   while [ $# -gt 0 ]; do

@@ -15,7 +15,7 @@ pr-loop", do NOT run it inline in your own session and do NOT split a new pane i
 herdr tab list --workspace $HERDR_WORKSPACE_ID           # find the PRs tab
 herdr pane list --workspace $HERDR_WORKSPACE_ID          # find its pane labelled pr-loop
 herdr agent start pr-loop --kind claude --pane <that-pane>
-herdr agent prompt pr-loop "/loop pr-loop"
+herdr agent prompt pr-loop "/loop pr-loop"   # one-time kickoff only
 ```
 
 Only when no such pane exists (workspace without the layout) does a split of your own become
