@@ -27,12 +27,12 @@ Responsibilities
   Ticket status is not mail - it is the ledger's, and `cel fleet` and
   `cel-fanout status` render it. One workspace's root mailbox took 553
   messages in nine days, 466 of them status, and 72 escalations sat under
-  them. Run
-  `cel inbox read` at the start of every turn, and start a
-  background Monitor once per session so new mail wakes you without anyone
-  typing into your pane:
-  `Monitor(command: "cel inbox watch", persistent: true)`.
-  Restart it after a restart or resume - a monitor dies with its session.
+  them.
+- Read `cel inbox read` at the start of every turn.
+- If your runtime exposes a persistent Monitor tool, start it once per session:
+  `Monitor(command: "cel inbox watch", persistent: true)`. Restart it after a session restart or compaction.
+- Claude Code does not expose Monitor: UserPromptSubmit drains mail on a submitted turn and Stop blocks for mail arriving during a turn; neither wakes an idle session.
+- Pi/OMP inbox extensions wake idle agents and inject new mail into the next turn.
 - ANY QUESTION FOR THE OWNER is filed with `cel decide ask --title ...
   --option "<label>::<tradeoff>" --recommend <n> --blocks ... --context ...`.
   `--context` is required (120+ characters of plain prose; a URL may ride along but does not count): what happened and why it needs the owner now; what each option does in practice (cost, risk, what breaks or waits); what you recommend and why; what happens if nobody answers. The owner decides from the card - write it so they need not go digging. (plus `--urgent` for live risk, money or
@@ -43,8 +43,6 @@ Responsibilities
   Withdraw or supersede your own questions as soon as they are settled or
   moot (`cel decide withdraw <id> --why ...`, `cel decide ask ... --supersedes <id>`);
   answer a stale reminder with `cel decide confirm <id>...` if it still needs the owner.
-  (On omp there is no Monitor: `cel run` loads an inbox hook that notifies
-  you of new mail and injects unread mail into your next turn - no action.)
   `cel inbox open --for root --ranked` puts the most urgent unread first when
   there is a pile of it.
 - Poll project orchestrators via the herdr skill; treat blocked as highest priority.

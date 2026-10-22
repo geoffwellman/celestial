@@ -82,7 +82,8 @@ export const TALK_REFRESH_MS = 2000;
 // expands `$(...)`, and this line is handed to `bash -c`.
 // CEL-123: a talk line is MAIL, not keystrokes. It used to be `herdr agent
 // prompt`, typing into the orchestrator's pane mid-turn; `cel drive send`
-// queues it and the inbox hook delivers it when the agent is idle.
+// queues it. Idle delivery depends on runtime: Pi/OMP can wake; Claude waits
+// for its next submitted turn or an active-turn Stop hook.
 export const talkPrompt = (who, text) => `cel drive send ${who} ${shellQuote(text)}`;
 
 // `recent-unwrapped` rather than the wrapped form: the console draws its own

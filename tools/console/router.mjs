@@ -375,9 +375,8 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
       // MAIL ALONE, EVEN TO A LIVE PANE (CEL-65). This used to add a
       // `herdr agent prompt` tap on the shoulder, which typed into the
       // orchestrator's composer and landed in the middle of the human's
-      // draft. Each runtime's inbox hook now surfaces new mail out of band and
-      // drains it into the next turn (claude: Monitor + UserPromptSubmit; omp:
-      // tools/hooks/inbox.omp.ts). A deliberate interrupt is `nudge`/`talk`.
+      // draft. Claude's UserPromptSubmit/Stop hooks do not wake an idle pane;
+      // Pi/OMP inbox extensions can. A deliberate interrupt is `nudge`/`talk`.
       return cmds;
     }
 
