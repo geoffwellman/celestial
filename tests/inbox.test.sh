@@ -281,6 +281,20 @@ test_inbox_me_is_console_from_its_directory_or_its_role() {
   assert_eq "$(CEL_INBOX_ME='' CEL_ROLE=console bash -c 'source "$1/lib/inbox.sh"; _inbox_me' _ "$CEL_ROOT")" "console"
   rm -rf "$C"
 }
+# Core's mailbox IS root: from its directory or its launch role it reads root.
+test_inbox_me_is_root_for_core() {
+  local C; C="$(mktemp -d)"; mkdir -p "$C/sub"
+  assert_eq "$(CEL_INBOX_ME='' CEL_ROLE='' CEL_CORE_DIR="$C" bash -c 'cd "$1/sub"; source "$2/lib/inbox.sh"; _inbox_me' _ "$C" "$CEL_ROOT")" "root"
+  assert_eq "$(CEL_INBOX_ME='' CEL_ROLE=core bash -c 'source "$1/lib/inbox.sh"; _inbox_me' _ "$CEL_ROOT")" "root"
+  rm -rf "$C"
+}
+test_mail_to_core_lands_in_roots_mailbox() {
+  _inbox_sandbox
+  ( CEL_INBOX_ME=t _inbox_send core "for the coordinator" --workspace demo ) >/dev/null 2>&1
+  assert_eq "$(jq -r .to "$CEL_INBOX_DIR/demo.jsonl")" root
+  assert_contains "$(CEL_INBOX_ME=root _inbox_read --for root --workspace demo)" "for the coordinator"
+  rm -rf "$CEL_INBOX_DIR"
+}
 
 # TWO READERS OF ONE MAILBOX MUST NOT SHARE A CURSOR. "root" is the address
 # orchestrators escalate to - the top, whoever is listening - and both a
@@ -562,6 +576,15 @@ test_inbox_reader_of_sees_a_pane_a_console_or_nobody() {
   mkdir -p "$CEL_PROC_DIR/4242"
   printf 'CEL_ROLE=console\0HOME=/tmp\0' > "$CEL_PROC_DIR/4242/environ"
   assert_eq "$(inbox_reader_of alpha root)" "console"
+  rm -rf "$RB" "$CEL_INBOX_DIR"
+}
+
+# A live `core` pane reads root's mail in every workspace.
+test_inbox_reader_of_root_is_a_live_core() {
+  _inbox_reader_fixture
+  export STUB_AGENTS='{"result":{"agents":[{"name":"core"}]}}'
+  assert_eq "$(inbox_reader_of alpha root)" "core"
+  assert_eq "$(inbox_reader_of alpha widget-orch)" ""
   rm -rf "$RB" "$CEL_INBOX_DIR"
 }
 
