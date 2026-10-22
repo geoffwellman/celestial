@@ -476,6 +476,18 @@ ws_build_mode() { # <wsdir> <product> -> fleet | solo | <invalid value>
   printf '%s' "${m:-fleet}"
 }
 
+# Where a solo agent keeps its own git worktrees (its role says so), and the
+# ones that exist: a directory there is a worktree when it carries a `.git`
+# file. Read by fleet (how many), and by gc (which may go).
+ws_solo_dir() { printf '%s/.cel/solo/%s' "$1" "$2"; }   # <wsdir> <product>
+ws_solo_worktrees() { # <wsdir> <product> -> one path per line
+  local d
+  for d in "$(ws_solo_dir "$1" "$2")"/*/; do
+    [ -f "${d}.git" ] && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+
 # The product's delegations that still hold work: a row in any of these
 # states has a worker, a branch or a PR nobody has landed or let go. Switching
 # such a product to solo would leave them with no orchestrator to collect,
