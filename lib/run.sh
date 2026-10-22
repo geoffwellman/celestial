@@ -582,6 +582,28 @@ review, not a detail. Nothing here is a branch, so there is nothing to push.
 EOF
 }
 
+# A SOLO PRODUCT'S PR HAS NO DELEGATION, so the role body's `cel-fanout
+# review <id>` has no id to name, and there is no worker to hand findings to:
+# the product's one agent wrote it. Empty for a fleet product.
+_run_reviewer_solo_brief() { # <wsdir> <repo> <pr>
+  local product; product="$(ws_product_of_repo "$1" "$2")"
+  [ "$(ws_build_mode "$1" "$product")" = solo ] || return 0
+  cat <<EOF
+
+## This PR belongs to a solo product
+\`$product\` is built by one agent, \`$product-orch\`, with no delegated
+workers - there is no delegation id and no worker pane. So, in place of the
+ledger steps in your role:
+- record your verdict with
+  \`cel solo review $2#$3 <approved|changes> --head <reviewed-sha> --by <your alias> --note "<one line>"\`
+  (same rules: the full 40-character SHA you read; an approval must equal
+  the PR's current head);
+- send findings and your verdict to \`$product-orch\` by \`cel inbox send\`.
+It merges with \`cel solo land $2#$3\`, which honours only your recorded
+approval of the exact head it merges.
+EOF
+}
+
 # THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
 # worktree, a `release` verb and a gc pass, because something recorded that it
 # exists. A reviewer was started by `cel run reviewer --repo r --pr n` and
@@ -1554,7 +1576,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # waiting for an orchestrator to type them.
   if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
     RUN_BODY="$RUN_BODY
-$(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path")"
+$(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path")$(_run_reviewer_solo_brief "$wsdir" "$repo" "$pr")"
   fi
 
   local AGENT_ARGS=() AGENT_ROLE_FILE="" bodyfile
