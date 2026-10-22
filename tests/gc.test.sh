@@ -112,6 +112,20 @@ _gc_solo_fixture() {
       *) return 1;;
     esac
   }
+  # A solo worktree's PR speaks for it only at its exact head (GC_PR_HEAD,
+  # default: the worktree's own HEAD).
+  gh() {
+    [ "$GC_PR" != UNKNOWN ] || return 1
+    local h="${GC_PR_HEAD:-$(command git -C "$GC_SOLO" rev-parse HEAD)}"
+    case "$1 $2" in
+      "pr list")
+        if [ "$GC_PR" = NONE ]; then printf '[]'; else
+          jq -n --arg s "$GC_PR" --arg h "$h" '[{state:$s,headRefOid:$h,updatedAt:"2026-01-01T00:00:00Z"}]'
+        fi;;
+      "pr view") jq -n --arg s "$GC_PR" --arg h "$h" '{state:$s,headRefOid:$h}';;
+      *) return 1;;
+    esac
+  }
 }
 test_gc_removes_a_merged_clean_solo_worktree() {
   _gc_solo_fixture
@@ -125,6 +139,29 @@ test_gc_keeps_a_solo_worktree_with_no_pr_open_pr_or_unsaved_work() {
   assert_eq "$(cat "$GC_SINK")" ""
   printf 'x' > "$GC_SOLO/unsaved.txt"
   GC_PR=MERGED cmd_gc >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+# `cel solo land` deletes a merged branch; a fresh worktree reusing its name
+# must not inherit the old PR's MERGED.
+test_gc_keeps_a_solo_worktree_whose_merged_pr_was_another_head() {
+  _gc_solo_fixture
+  GC_PR=MERGED GC_PR_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cmd_gc >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+test_gc_keeps_a_solo_worktree_with_a_live_process_in_it() {
+  _gc_solo_fixture
+  ( cd "$GC_SOLO" && exec sleep 30 ) & local p=$!
+  GC_PR=MERGED cmd_gc >/dev/null 2>&1
+  kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true
+  assert_eq "$(cat "$GC_SINK")" ""
+  rm -rf "$T"
+}
+test_gc_keeps_a_closed_solo_worktree_with_unmerged_commits() {
+  _gc_solo_fixture
+  command git -C "$GC_SOLO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "never merged"
+  GC_PR=CLOSED cmd_gc >/dev/null 2>&1
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }

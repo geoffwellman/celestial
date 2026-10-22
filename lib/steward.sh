@@ -761,7 +761,9 @@ _steward_solo_sweep() {
       [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
       while IFS=$'\t' read -r repo pr head; do
         [ -n "$pr" ] || continue
-        _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
+        # ONCE PER HEAD, NOT ONCE PER WINDOW: the default dedup window is four
+        # hours, which would re-mail the same fact all day while the PR sits.
+        _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
           "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
       done < <(solo_ready_prs "$wsdir" "$product")
     done

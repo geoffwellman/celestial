@@ -74,6 +74,25 @@ _gc_pr_state() { # <worktree-dir> -> MERGED|CLOSED|OPEN|NONE|UNKNOWN
     then sort_by(.updatedAt) | last | .state else "UNKNOWN" end' 2>/dev/null || printf UNKNOWN
 }
 
+# A SOLO WORKTREE'S PR, BY ITS EXACT HEAD. `cel solo land` deletes the merged
+# branch, so an agent that reuses the name for a fresh worktree would inherit
+# the old PR's MERGED - and a fresh worktree at an ancestor of main reads as
+# landed clean - and gc would remove it from under the agent. Only a PR whose
+# head IS this worktree's HEAD speaks for it; anything else is NONE (kept).
+_gc_solo_pr_state() { # <worktree-dir> -> MERGED|CLOSED|OPEN|NONE|UNKNOWN
+  local branch head rows
+  branch="$(git -C "$1" symbolic-ref --quiet --short HEAD 2>/dev/null)" \
+    && head="$(git -C "$1" rev-parse --verify HEAD 2>/dev/null)" \
+    || { printf UNKNOWN; return 0; }
+  rows="$(_gc_gh "$1" pr list --head "$branch" --state all --limit 100 --json state,headRefOid 2>/dev/null)" \
+    || { printf UNKNOWN; return 0; }
+  printf '%s' "$rows" | jq -er --arg h "$head" '
+    if type != "array" then "UNKNOWN"
+    else [.[] | select(.headRefOid == $h) | .state] as $s
+      | if ($s | index("MERGED")) then "MERGED" elif ($s | index("OPEN")) then "OPEN"
+        elif ($s | index("CLOSED")) then "CLOSED" else "NONE" end end' 2>/dev/null || printf UNKNOWN
+}
+
 # Return success to VETO deletion on running OR unverifiable state. A missing
 # row is not evidence of retirement: admission may still be creating it.
 # cmd_gc holds the registry and every ledger's writer lock while using this.
@@ -1358,7 +1377,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     gitdir="$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null)" \
       && common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
       && [ "$gitdir" != "$common" ] || { _gc_keep unlanded; continue; }
-    state="$(_gc_pr_state "$cwd")"
+    if [ "$solo_wt" = true ]; then state="$(_gc_solo_pr_state "$cwd")"; else state="$(_gc_pr_state "$cwd")"; fi
     case "$state" in MERGED|CLOSED|NONE) ;; *) _gc_keep open-pr; continue;; esac
     [ "$solo_wt" != true ] || [ "$state" != NONE ] || { _gc_keep no-pr; continue; }
     _gc_landed_clean "$cwd" "$state" || { _gc_flag_unlanded "$cwd"; _gc_keep unlanded; continue; }

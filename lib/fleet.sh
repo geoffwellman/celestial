@@ -429,8 +429,12 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     [ -n "$repo" ] && repos+=("$repo")
   done < <(ws_product_repos "$wsdir" "$product")
   ws_product_declared "$wsdir" "$product" && declared=true
+  # ws_build_mode's own reading, minus the second "is it declared?" query this
+  # function has just answered: the fleet read is held to a spawn budget.
   local mode solo_wt=0
-  mode="$(ws_build_mode "$wsdir" "$product")"
+  if [ "$declared" = true ]; then mode="$(ws_product_get "$wsdir" "$product" mode)"
+  else mode="$(ws_repo_get "$wsdir" "$product" mode)"; fi
+  mode="${mode:-fleet}"
   [ "$mode" != solo ] || solo_wt="$(ws_solo_worktrees "$wsdir" "$product" | grep -c . || true)"
 
   # THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO - the same precedence
