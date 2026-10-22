@@ -185,6 +185,8 @@ console                one per box - routes; reads cel fleet; never builds
           ├── scout           reads and reports; never writes code
           ├── spike           tries and reports; throwaway code, never shipped
           └── reviewer        one PR, one review per round
+   └── solo                or, per product: one agent that plans, builds and ships itself
+          └── reviewer        one per PR it opens
 ```
 
 A **workspace** is not a tier. It is the scope that holds configuration and
@@ -207,6 +209,41 @@ PR: its workers rebase onto origin/main and push to main, fast-forward only,
 and `cel-fanout collect` records the row landed once its commits are on main.
 Set as the workspace-level `policy.pr: none`, it applies to every repo that does
 not declare its own `pr:`.
+
+### Solo mode
+
+Not every product wants a factory. A product can be built by **one agent** that
+plans, writes, tests and ships it itself, using everything its own runtime
+offers — its own git worktrees, its harness's subagents in parallel, several
+branches and PRs at once — with none of Celestial's fan-out (no delegated
+workers, no ledger rows):
+
+```yaml
+products:
+  - name: atlas
+    repos: [atlas-app]
+    mode: solo          # fleet (default) | solo
+```
+
+`cel mode [<product>] [solo|fleet]` reads or switches it. A switch edits that
+one line of `workspace.yaml` in place (comments and layout untouched) and
+restarts the product's live agent into the new role **on the same session**,
+once its current turn ends — so an agent can switch its own mode.
+`--no-restart` leaves the live agent alone until its next launch. Switching to
+solo is refused while the product still has fleet work in flight (running,
+finished, collected, blocked or orphaned delegations): land or release it
+first. `cel run solo` starts a solo agent for one launch without changing the
+setting.
+
+The solo agent is still *the product's agent*: same directory, pane name and
+mailbox (`<product>-orch`) as an orchestrator, so mail, decisions, the
+steward and the dashboard reach it unchanged. It launches with `CEL_ROLE=solo`;
+the guard then lets it write code, commit, push, open PRs and start a
+reviewer for its own PR, and refuses fan-out verbs, starting other agents, and
+`gh pr merge`. Its PRs follow the workspace's PR and review policy; until a
+checked solo land path exists, an approved green PR is handed to the owner to
+merge. `role_profiles: { solo: <profile> }` binds its model; without one it
+uses the orchestrator's binding.
 
 ## Factory vocabulary
 

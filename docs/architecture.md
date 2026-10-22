@@ -30,6 +30,18 @@ Git worktree for a delegated worker, starts the pane and records the resulting
 identity. Worker/reviewer roles use the same GitHub and ticket interfaces that
 an operator can invoke directly.
 
+A product's build mode (`ws_build_mode`: `fleet` by default, or `solo`) picks
+which agent `cel run orchestrator` starts for it. A solo agent reuses the
+orchestrator's launch plumbing unchanged - product directory, alias, mailbox,
+resume, the one-agent-per-product refusal, and a role file still named
+`role-orchestrator.md` so GC never reaps it - and differs only in its role
+body (`core/roles/solo.md`, policy block worded without workers) and in
+`CEL_ROLE=solo`, which `lib/guard.sh` reads to allow repository writes while
+refusing fan-out, agent starts and manual merges. `cel mode` (lib/mode.sh)
+edits the one `mode:` line in place, verifies the result as data, and hands
+the restart to a transient user unit that waits for the agent to leave its
+turn before `cel run orchestrator --restart`.
+
 Launch environment is scoped to the launched process: `_run_launch_env` is the
 single construction (used by `cel run` and `cel-fanout`) and renders role
 marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as

@@ -1241,14 +1241,20 @@ _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 agent=0 force=0
-  local restart=0 fresh=0 pane_opt=""
+  local restart=0 fresh=0 pane_opt="" solo_forced=0
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
     case "$1" in
       root|orchestrator|worker|reviewer|console) role="$1"; shift ;;
+      # SOLO IS THE PRODUCT'S AGENT IN ANOTHER ROLE, not a new kind of pane: same
+      # directory, mailbox, alias, resume and one-per-product refusal as an
+      # orchestrator, so every surface that finds "the product's agent" still
+      # finds it. Only the role body, the guard and CEL_ROLE differ. The product's
+      # `mode:` picks it for `cel run orchestrator`; `cel run solo` forces it once.
+      solo) role=orchestrator; solo_forced=1; shift ;;
       --*) : ;;
-      *) die "cel run: unknown role '$1' (want root, orchestrator, worker, reviewer or console; omit for direct)" ;;
+      *) die "cel run: unknown role '$1' (want root, orchestrator, solo, worker, reviewer or console; omit for direct)" ;;
     esac
   fi
 
@@ -1320,7 +1326,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
 
   local tag="${role:-direct}" alias_name cwd runtime rolefile="" bind="$repo"
-  local review_head="" review_base="" review_path="" repodir="" label
+  local review_head="" review_base="" review_path="" repodir="" label solo=0 build_mode=""
   case "$role" in
     "")
       alias_name="$repo/direct"
@@ -1342,6 +1348,24 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       cwd="$(ws_product_dir "$wsdir" "$product")"
       runtime="$(ws_runtime "$wsdir" orchestrator)"
       rolefile="$CEL_ROOT/core/roles/project-orchestrator.md"
+      # The product's build mode decides which agent this is. An unknown value
+      # is refused: guessing would hand a product to the wrong kind of agent.
+      build_mode="$(ws_build_mode "$wsdir" "$product")"
+      case "$build_mode" in
+        fleet|solo) ;;
+        *) die "cel run: product '$product' has mode '$build_mode' - want solo or fleet (workspace.yaml)" ;;
+      esac
+      if [ "$solo_forced" -eq 1 ] || [ "$build_mode" = solo ]; then
+        solo=1
+        rolefile="$CEL_ROOT/core/roles/solo.md"
+      fi
+      # A one-off solo launch over a fleet product with work in flight would
+      # leave that work with no orchestrator to collect, review or land it.
+      if [ "$solo_forced" -eq 1 ] && [ "$build_mode" = fleet ]; then
+        local inflight; inflight="$(ws_product_live_delegations "$wsdir" "$product")"
+        [ -z "$inflight" ] || die "cel run solo: $product still has fleet work in flight - land or release it first (cel-fanout status):
+$(printf '%s\n' "$inflight" | sed 's/^/    /')"
+      fi
       ;;
     worker)
       [ -n "$branch" ] || die "cel run worker: --branch is required"
@@ -1406,10 +1430,18 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       fi
       ;;
   esac
+  # What the launched process is told it is (CEL_ROLE, read by the guard) and
+  # which build mode its policy block is worded for. Plumbing keeps `$tag`
+  # (orchestrator): the role FILE must keep ending in role-orchestrator.md,
+  # which lib/gc.sh reads as "long-lived agent, never reap".
+  local env_role="$tag" build_mode_eff="$build_mode"
+  if [ "$solo" -eq 1 ]; then env_role=solo; build_mode_eff=solo; fi
   case "$role" in
     "")           label="$(pane_label direct "$repo")" ;;
     root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
-    orchestrator) label="$(pane_label orchestrator "$product")" ;;
+    orchestrator)
+      if [ "$solo" -eq 1 ]; then label="$(pane_label solo "$product")"
+      else label="$(pane_label orchestrator "$product")"; fi ;;
     worker)       label="$(pane_label worker "$branch")" ;;
     reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
   esac
@@ -1449,6 +1481,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
   # is what makes root and the orchestrators configurable at all: neither is
   # launched by hand, so a flag would never reach them.
   # A repo or product may narrow that binding for itself; see role_profile_for.
+  # A solo agent may be bound on its own (`role_profiles: { solo: ... }`), and
+  # otherwise takes the orchestrator's binding - it is the same product's agent.
+  if [ -z "$profile" ] && [ "$solo" -eq 1 ]; then
+    profile="$(role_profile_for "$wsdir" solo "$bind")"
+  fi
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
@@ -1509,7 +1546,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
-    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}")"
+    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}" "$build_mode_eff")"
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
@@ -1574,7 +1611,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # orchestrators address. Only where a hook will read it: claude reads by cwd.
     worker|reviewer) [ -z "$(agent_inbox_hook "$runtime" file)" ] || inbox_me="$agent_name" ;;
   esac
-  envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
+  envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
 
   # RESUME (CEL-63). Root and the orchestrators carry their conversation
@@ -1680,8 +1717,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))"
   if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
     prefix_required=1
-    envprefix="$(_run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
-    dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env "$tag" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
+    envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
+    dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   fi
 
 

@@ -46,10 +46,13 @@ _CEL_GUARD=1
 #
 # CEL_ROLE=console in the environment says so outright, because unlike every
 # other role the console's cwd is a plain directory a human could also be
-# standing in - path alone is not enough to be sure.
+# standing in - path alone is not enough to be sure. CEL_ROLE=solo does the
+# same for a solo agent: it stands exactly where an orchestrator stands (the
+# product's directory), so only the launch can say which of the two it is.
 guard_role_of() { # <cwd>
   local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
   [ "${CEL_ROLE:-}" = console ] && { printf console; return 0; }
+  [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
   local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
   case "$p" in "$cons"|"$cons"/*) printf console; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
@@ -178,6 +181,47 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
   return 1
 }
 
+# THE COMMANDS A SHELL LINE WOULD RUN, one per line, each reduced to the verb
+# that would execute. A substring test on the raw text was evaded by a double
+# space, a tab, quotes, `--workspace x` or `-R x` before the verb, and missed
+# `cd x && cel-fanout land`; it would also have refused `grep "cel-fanout land"`
+# in Celestial's own repo. So the line is split where a new command starts
+# (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped, whitespace is
+# collapsed, and from the front of each piece go: env assignments, wrappers
+# (bash/sh -c, env, command, exec, nohup, time, xargs, timeout N), a path in
+# front of cel/cel-fanout/gh/herdr, and the global options that sit between a
+# tool and its verb (`-C`/`--workspace` for cel, `-R`/`--repo` for gh). The
+# rules then match the START of a piece only.
+#
+# A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
+# command (`c=cel-fanout; $c land`) or a script file still runs. What this
+# stops is the plausible mistake, spelled any of the ways an agent writes it.
+_guard_segments() { # <command> -> one normalised command per line
+  printf '%s' "$1" | tr '\t\r\n' '   ' \
+    | sed -E 's/\$\(/;/g; s/[`();|&]+/\n/g' \
+    | sed -E "s/[\"']//g; s/ +/ /g; s/^ //; s/ $//" \
+    | sed -E ':a
+        s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
+        s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
+        s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
+    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr)( |$)#\1\2#' \
+    | sed -E ':b
+        s#^(cel-fanout|cel) (-C [^ ]+|--workspace[= ][^ ]+)( |$)#\1\3#; tb
+        s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
+}
+
+# Does any command in the line start with one of these (extended) patterns?
+_guard_starts() { # <command> <ERE...> -> 0 when one does
+  local cmd="$1"; shift
+  local seg p
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    for p in "$@"; do
+      [[ "$seg" =~ ^($p)( |$) ]] && return 0
+    done
+  done < <(_guard_segments "$cmd")
+  return 1
+}
+
 # A WORKER MAKES ONE DELIVERABLE AND REPORTS. On 2026-09-18 a worker whose
 # reviewer had just approved its PR ran `cel-fanout land <its own id>` from its
 # own worktree, as a background task: the ledger lock was held for three
@@ -188,27 +232,39 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # the worker role before any check ran. This is a SHORT deny list, not an
 # allowlist: a worker's job is to write code and its dangerous verbs are the
 # few that drive the factory rather than build in it.
-#
-# Matched on the normalised command the way the git rules below are, because
-# `cel-fanout` is reached by absolute path and through `bash .../cel-fanout`
-# as often as by name, and neither `-C` nor `--workspace` changes the verb.
 _guard_worker() { # <command> -> allow | deny <reason>
-  local c="$1"
-  c="${c#"${c%%[![:space:]]*}"}"
-  local n
-  n="$(printf '%s' "$c" \
-    | sed -E 's#(^|[[:space:]])(bash|sh|env)[[:space:]]+#\1#g' \
-    | sed -E 's#(^|[[:space:]])[^[:space:]]*/(cel-fanout|cel)([[:space:]])#\1\2\3#g' \
-    | sed -E 's#(^|[[:space:]])(cel-fanout|cel)([[:space:]]+-C[[:space:]]+[^[:space:]]+)+#\1\2#g')"
-  case "$n" in
-    cel-fanout\ land*|cel-fanout\ release*|cel-fanout\ delegate*|cel-fanout\ scout*|\
-    cel-fanout\ spike*|cel-fanout\ collect*|cel-fanout\ reconcile*)
-      printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
-      return 0;;
-    cel\ run\ orchestrator*|cel\ run\ root*|cel\ run\ console*|cel\ run\ worker*|cel\ run\ reviewer*)
-      printf 'deny a worker does not start agents'
-      return 0;;
-  esac
+  if _guard_starts "$1" 'cel-fanout (land|release|delegate|scout|spike|collect|reconcile)'; then
+    printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
+    return 0
+  fi
+  if _guard_starts "$1" 'cel run (orchestrator|root|console|worker|reviewer|solo)'; then
+    printf 'deny a worker does not start agents'
+    return 0
+  fi
+  printf allow
+}
+
+# A SOLO AGENT IS THE BUILDER, so it gets the worker's freedom: it edits,
+# commits, pushes, opens PRs, makes its own git worktrees and runs its own
+# subagents. What it does NOT get is the factory: fan-out verbs and starting
+# other Celestial agents or panes are refused (a reviewer for its own PR
+# excepted), because a solo product has no orchestrator to collect, review or
+# land what a delegated worker would produce. Merging by hand is refused too
+# until there is a solo land path that checks review and CI the way
+# `cel-fanout land` does; until then a person merges.
+_guard_solo() { # <command> -> allow | deny <reason>
+  if _guard_starts "$1" 'cel-fanout (delegate|scout|spike|collect|release|reconcile|replace|recover|handback|land)'; then
+    printf 'deny this product is in solo mode: you build it yourself (your own worktrees and subagents are fine); Celestial fan-out is off - `cel mode <product> fleet` switches back to workers'
+    return 0
+  fi
+  if _guard_starts "$1" 'cel run (orchestrator|root|console|worker|solo)' 'herdr agent start' 'herdr worktree (create|open)'; then
+    printf 'deny a solo agent starts no other Celestial agents or panes (only `cel run reviewer` for its own PR)'
+    return 0
+  fi
+  if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge'; then
+    printf 'deny a solo agent does not merge by hand yet: stop at an approved, green PR and tell the owner (a checked solo land path is coming)'
+    return 0
+  fi
   printf allow
 }
 
@@ -218,6 +274,7 @@ guard_classify() { # <role> <command>
   # `other` is not the plane's concern; a worker has exactly the refusals above
   # and is otherwise unrestricted, writing code being its whole job.
   case "$role" in worker) _guard_worker "$cmd"; return 0;; esac
+  case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in other) printf allow; return 0;; esac
 
   # The sanctioned write paths. These are the mechanism; refusing them would
@@ -321,7 +378,7 @@ guard_classify_path() { # <role> <file_path>
       *) printf 'deny the console routes; it does not build - a worker does that'; return 0;;
     esac
   fi
-  case "$role" in worker|other) printf allow; return 0;; esac
+  case "$role" in worker|solo|other) printf allow; return 0;; esac
   case "$path" in
     */repos/*) printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'; return 0;;
   esac
