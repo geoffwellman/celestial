@@ -49,7 +49,7 @@ _mode_product() { # <wsdir> -> product, or nothing
 # repos[] for an implicit one - the same place ws_build_mode reads.
 #
 # AS ONE LINE, NOT A ROUND-TRIP. workspace.yaml is written by hand and
-# commented heavily; `yq -Y` re-emitted the vhs file with 284 lines changed
+# commented heavily; `yq -Y` re-emitted a real workspace file with 284 lines changed
 # (comments moved, alignment and flow style lost) to set one key. So the text
 # is edited in place: inside the block of the `- name: <product>` item under
 # the right top-level key, an existing `mode:` line is replaced, otherwise one

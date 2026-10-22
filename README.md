@@ -220,8 +220,8 @@ workers, no ledger rows):
 
 ```yaml
 products:
-  - name: thor
-    repos: [thor-games]
+  - name: atlas
+    repos: [atlas-app]
     mode: solo          # fleet (default) | solo
 ```
 
