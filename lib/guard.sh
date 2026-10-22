@@ -233,7 +233,7 @@ _guard_starts() { # <command> <ERE...> -> 0 when one does
 # allowlist: a worker's job is to write code and its dangerous verbs are the
 # few that drive the factory rather than build in it.
 _guard_worker() { # <command> -> allow | deny <reason>
-  if _guard_starts "$1" 'cel-fanout (land|release|delegate|scout|spike|collect|reconcile)'; then
+  if _guard_starts "$1" 'cel-fanout (land|release|delegate|scout|spike|collect|reconcile)' 'cel solo (land|review)'; then
     printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
     return 0
   fi
@@ -249,9 +249,9 @@ _guard_worker() { # <command> -> allow | deny <reason>
 # subagents. What it does NOT get is the factory: fan-out verbs and starting
 # other Celestial agents or panes are refused (a reviewer for its own PR
 # excepted), because a solo product has no orchestrator to collect, review or
-# land what a delegated worker would produce. Merging by hand is refused too
-# until there is a solo land path that checks review and CI the way
-# `cel-fanout land` does; until then a person merges.
+# land what a delegated worker would produce. A manual merge is refused too:
+# the solo merge door is `cel solo land`, which checks review of the exact
+# head and CI the way `cel-fanout land` does.
 _guard_solo() { # <command> -> allow | deny <reason>
   if _guard_starts "$1" 'cel-fanout (delegate|scout|spike|collect|release|reconcile|replace|recover|handback|land)'; then
     printf 'deny this product is in solo mode: you build it yourself (your own worktrees and subagents are fine); Celestial fan-out is off - `cel mode <product> fleet` switches back to workers'
@@ -261,8 +261,12 @@ _guard_solo() { # <command> -> allow | deny <reason>
     printf 'deny a solo agent starts no other Celestial agents or panes (only `cel run reviewer` for its own PR)'
     return 0
   fi
+  if _guard_starts "$1" 'cel solo review' 'cel-fanout review'; then
+    printf 'deny a solo agent does not review its own PR - its reviewer records the verdict'
+    return 0
+  fi
   if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge'; then
-    printf 'deny a solo agent does not merge by hand yet: stop at an approved, green PR and tell the owner (a checked solo land path is coming)'
+    printf 'deny a solo agent merges through `cel solo land <repo>#<pr>`, which checks policy, review of the exact head and CI before it merges'
     return 0
   fi
   printf allow

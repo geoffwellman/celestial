@@ -540,7 +540,7 @@ ws_policy_block() { # <wsdir> [product] [fleet|solo]
     printf -- '- tickets: %s; ad-hoc refs look like %s\n' "${tsys:-unset}" "${tadhoc:-unset}"
   fi
   if [ "$merge" = "self" ] && [ "$mode" = solo ]; then
-    printf -- '- merge: self - you may merge your own PR once its review has approved the current head and the required checks are green\n'
+    printf -- '- merge: self - land your own PR with `cel solo land <repo>#<n>` once its review has approved the current head and the required checks are green (it checks both, and merges only that head); never `gh pr merge`\n'
   elif [ "$merge" = "self" ]; then
     printf -- '- merge: self - you may merge after the review skill passes\n'
   else
@@ -588,7 +588,7 @@ ws_policy_block() { # <wsdir> [product] [fleet|solo]
   local rrt rmodel
   rrt="$(ws_review "$d" runtime)"; rmodel="$(ws_review "$d" model)"
   if [ -n "$rrt" ] && [ "$mode" = solo ]; then
-    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR); tell it, by `cel inbox send`, the scope and that findings come to you (`%s-orch`). Fix what it finds on the same branch and push; it re-reviews the new head\n' \
+    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR); it records its verdict with `cel solo review` and sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
       "$rrt" "${rmodel:+ model $rmodel}" "${product:-<product>}"
   elif [ -n "$rrt" ]; then
     printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
