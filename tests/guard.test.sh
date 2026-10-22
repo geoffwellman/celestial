@@ -365,8 +365,16 @@ test_core_does_not_build_delegate_or_land() {
   for c in 'cel-fanout delegate x' 'cel-fanout land CEL-1' 'cel-fanout review CEL-1 approved' \
            'cel solo land celestial#3' 'cel run worker --repo x --branch y' 'cel run reviewer --repo x --pr 1' \
            'gh pr merge 3' 'git -C repos/x commit -m y' 'git push' 'cel learn add x' 'cel release celestial 1.0.0' \
-           'herdr worktree create --cwd x'; do
+           'herdr worktree create --cwd x' 'cel-fanout request-review CEL-1 --head abc' 'cel-fanout try CEL-1' \
+           'cel-fanout some-future-verb x' 'cd /tmp && cel-fanout --workspace w land CEL-1'; do
     assert_contains "$(guard_classify core "$c")" deny
+  done
+}
+test_core_may_read_the_ledger() {
+  local c
+  for c in 'cel-fanout status --workspace w' 'cel-fanout why CEL-1' 'cel-fanout wait CEL-1' \
+           'cel-fanout --workspace w status'; do
+    assert_eq "$(guard_classify core "$c")" allow
   done
 }
 test_core_writes_only_its_own_directory() {

@@ -280,14 +280,20 @@ _guard_solo() { # <command> -> allow | deny <reason>
 # CORE COORDINATES; IT DOES NOT RUN A FACTORY. It is orchestrator-class (every
 # repository and GitHub write an orchestrator is refused, it is refused too),
 # and on top of that the verbs that belong to a PRODUCT's agent are refused
-# here, before guard_classify's blanket allow of `cel`/`cel-fanout`: fan-out,
-# landing and review verdicts, starting workers or reviewers, and the box's
-# own configuration and release (`cel mode` is core's one config write, and it
-# is a `cel` command, so it passes).
+# here, before guard_classify's blanket allow of `cel`/`cel-fanout`: every
+# cel-fanout verb but the read-only ones (an ALLOWLIST, so a verb added later
+# is refused until someone decides core may use it), landing and review
+# verdicts, starting workers or reviewers, and the box's own configuration
+# and release (`cel mode` is core's one config write, and it is a `cel`
+# command, so it passes).
 _guard_core() { # <command> -> deny <reason>, or nothing
-  if _guard_starts "$1" 'cel-fanout (delegate|scout|spike|collect|release|reconcile|replace|recover|handback|land|review)' \
-       'cel solo (land|review)' 'cel spike'; then
-    printf 'deny core coordinates; the product'"'"'s own agent delegates, reviews and lands - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
+  local seg fanout_write=0
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [[ "$seg" =~ ^cel-fanout( |$) ]] || continue
+    [[ "$seg" =~ ^cel-fanout\ (status|why|wait)( |$) ]] || { fanout_write=1; break; }
+  done < <(_guard_segments "$1")
+  if [ "$fanout_write" -eq 1 ] || _guard_starts "$1" 'cel solo (land|review)' 'cel spike'; then
+    printf 'deny core coordinates; the product'"'"'s own agent delegates, reviews and lands (core may run cel-fanout status|why|wait) - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
     return 0
   fi
   if _guard_starts "$1" 'cel run (worker|reviewer|root)' 'herdr agent start' 'herdr worktree (create|open|remove)'; then

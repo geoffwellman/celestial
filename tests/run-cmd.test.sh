@@ -426,6 +426,7 @@ test_run_solo_does_not_leak_into_worker_launches() {
 _core() {
   CORE="$(mktemp -d)/core"
   _run_core_default() { case "$1" in runtime) echo omp ;; model) echo m/x ;; thinking) echo low ;; esac; }
+  _run_live_names() { :; }
 }
 
 # Owner, 2026-10-22: core runs on omp through the gateway, on Opus.
@@ -511,12 +512,31 @@ test_run_core_refuses_a_second_core_and_restarts_the_live_one() {
   out="$(cd /tmp && CEL_CORE_DIR="$CORE" _cmd_run_in_subshell core --dry-run 2>&1)" \
     && { echo "a second core was launched: $out"; rm -rf "${CORE%/core}"; return 1; }
   assert_contains "$out" "already live"
+  # herdr is absent in CI, and the live-agent lookup only runs when it is there
   _run_orch_agent() { printf 'core\tw9:p1\tidle\t/s/core.jsonl\n'; }
-  out="$(cd /tmp && CEL_PROC_ROOT="$(mktemp -d)" CEL_CORE_DIR="$CORE" cmd_run core --restart --dry-run 2>/dev/null)"
+  out="$(have() { return 0; }; cd /tmp && CEL_PROC_ROOT="$(mktemp -d)" CEL_CORE_DIR="$CORE" cmd_run core --restart --dry-run 2>/dev/null)"
   assert_contains "$out" "herdr pane send-keys w9:p1"
   assert_contains "$out" "agent start core --kind omp --pane w9:p1"
   assert_contains "$out" "--resume /s/core.jsonl"
   rm -rf "${CORE%/core}"
+}
+# ONE READER OF ROOT'S MAIL: core and a <ws>-root pane read root by the same
+# cursor, so each refuses to start while the other is live (--force excepted).
+test_run_core_and_a_root_pane_refuse_each_other() {
+  _core
+  _run_live_names() { printf 'alpha-root\nwidget-orch\n'; }
+  local out
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" _cmd_run_in_subshell core --dry-run 2>&1)" \
+    && { echo "core started beside a root pane: $out"; rm -rf "${CORE%/core}"; return 1; }
+  assert_contains "$out" "alpha-root"
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --force --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start core"
+  _ws
+  _run_live_names() { printf 'core\n'; }
+  out="$(cd "$T" && _cmd_run_in_subshell root --dry-run 2>&1)" \
+    && { echo "a root pane started beside core: $out"; rm -rf "$T" "${CORE%/core}"; return 1; }
+  assert_contains "$out" "core is live"
+  rm -rf "$T" "${CORE%/core}"
 }
 
 # --- through the gateway --------------------------------------------------

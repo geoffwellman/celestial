@@ -801,6 +801,16 @@ _run_core_default() { # <runtime|model|thinking|via>
   manifest_default core | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
 }
 
+# ONE READER OF ROOT'S MAIL. Core reads `root` in every workspace under the
+# recipient's own cursor (<ws>.root.cursor) - the cursor a standing <ws>-root
+# pane also reads by - so core and a root pane would take each other's mail.
+# Core replaces root (the plan retires `cel run root`); until then each
+# refuses to start while the other is live, --force excepted.
+_run_live_names() { # -> one live herdr agent name per line
+  have herdr && have jq || return 0
+  herdr agent list 2>/dev/null | jq -r '.result.agents[]?.name // empty' 2>/dev/null
+  return 0
+}
 _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh> <force> <pane-opt>
   local profile="$1" model_opt="$2" thinking_opt="$3" dry="$4" restart="$5" fresh="$6" force="$7" pane_opt="$8"
   [ -z "$profile" ] || die "cel core: --profile is meaningless without a workspace (profiles are bound per workspace) - use --model/--thinking"
@@ -827,6 +837,10 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   Restart it:      cel core --restart
   Or say you mean it: cel core --force"
     fi
+  fi
+  if [ "$force" -eq 0 ]; then
+    local roots; roots="$(_run_live_names | grep -- '-root$' | tr '\n' ' ' || true)"
+    [ -z "$roots" ] || die "cel core: root agents are live (${roots% }) - core reads root's mail by the same cursor, so the two would take each other's messages. Core replaces them: close them first, or pass --force"
   fi
 
   # THROUGH THE GATEWAY when defaults.core says so: the same omp route an
@@ -1451,6 +1465,10 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       || die "cel core: core stands in no workspace - --repo/--product/--workspace/--branch/--pr do not apply"
     _run_core "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$restart" "$fresh" "$force" "$pane_opt"
     return $?
+  fi
+  # See _run_live_names: core and a root pane must not share root's cursor.
+  if [ "$role" = root ] && [ "$force" -eq 0 ] && grep -qx core <<< "$(_run_live_names)"; then
+    die "cel run root: core is live and reads root's mail in every workspace - a root pane would share its cursor and the two would take each other's messages. Talk to core (herdr agent focus core), or pass --force"
   fi
 
   local wsdir
