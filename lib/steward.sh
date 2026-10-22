@@ -33,6 +33,8 @@ _CEL_STEWARD=1
 # shellcheck source=lib/orphans.sh
 . "${BASH_SOURCE[0]%/*}/orphans.sh"
 # shellcheck source=lib/services.sh
+# shellcheck source=lib/serve.sh
+. "${BASH_SOURCE[0]%/*}/serve.sh"
 . "${BASH_SOURCE[0]%/*}/services.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
@@ -1418,11 +1420,14 @@ _steward_mem_pressure_warn() { # <avail-mb>
   # pressure and not again until the box has recovered and fallen back in.
   local flag="${_STEWARD_STATE%/*}/mem-pressure.on"
   if ! boxguard_pressure; then rm -f "$flag" 2>/dev/null; return 0; fi
-  local avail swap top="" mb dir ws wsdir p acted
+  local avail swap top="" mb dir ws wsdir p acted server_rows server_top
   read -r avail swap <<<"$(boxguard_read)"
   while IFS=$'\t' read -r mb dir; do
     [ -n "$dir" ] && top="$top${top:+, }${dir#"$HOME"/.herdr/worktrees/} $(mem_human "$mb")"
   done < <(boxguard_top_trees 5 2>/dev/null || true)
+  server_rows="$(serve_list_json 2>/dev/null || printf '[]')"
+  server_top="$(printf '%s' "$server_rows" | jq -r '.[0:5][] | "\(.name) \(.memory_mb)M"' | paste -sd', ' -)"
+  top="${top}${server_top:+; top servers: $server_top}"
   # CEL-130: line 1 is the idle-stop pass (workers, ~M freed), any further
   # lines the finished reviewers closed - all of it is what was stopped.
   acted="$(grep . "$(_gc_idle_stop_last)" 2>/dev/null | paste -sd';' - || true)"
@@ -1448,8 +1453,14 @@ _steward_memory() {
   # available would raise a blocker every tick on a perfectly healthy box.
   [ "${total:-0}" -gt 0 ] || return 0
   mem_tree_snapshot
+  local tracked untracked servers
+  tracked="$(serve_list_json 2>/dev/null || printf '[]')"
+  untracked="$(serve_adopt_json 2>/dev/null || printf '[]')"
+  servers="$(jq -cn --argjson tracked "$tracked" --argjson untracked "$untracked" '$tracked + ($untracked | map(. + {owner:"unledgered"})) | sort_by(-.memory_mb)')"
 
   local availpct=$(( avail * 100 / total )) ws
+  # Servers have their own cgroup attribution; include them beside process trees.
+  local server_top; server_top="$(printf '%s' "$servers" | jq -r '.[0:5][] | "\(.name // .unit // ("pid:"+(.pid|tostring))) \(.memory_mb)M[\(.owner // "unledgered")]"' | paste -sd', ' -)"
   # HYSTERESIS, 10% to raise and 15% to clear. A single threshold on a box
   # hovering at it posts and resolves the same item every tick, which is the
   # rolled-up version of the noise this file already fixed once.
@@ -1462,7 +1473,7 @@ _steward_memory() {
       n=$((n + 1)); [ "$n" -ge 3 ] && break
     done <<<"$trees"
     local msg
-    msg="steward: box memory low: $(mem_human "$avail") of $(mem_human "$total") available - the largest trees: ${top:-none this sweep can see}. Collect or let something go; nothing here has been killed."
+    msg="steward: box memory low: $(mem_human "$avail") of $(mem_human "$total") available - the largest trees: ${top:-none this sweep can see}. Top servers: ${server_top:-none}. Collect or let something go; nothing here has been killed."
     c_err "$msg"
     # The box is one box, but root's mailbox is per workspace - as with a
     # provider account shared by two workspaces, the condition key makes it one
@@ -1937,6 +1948,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   _steward_inbox_hooks
   run_sessions_note_roster "$agents_json"
   _steward_stale_orchestrators
+  serve_sweep
+  _serve_unledgered_report
   # CEL-90: keep the fleet cache warm so the first console read after an idle
   # spell serves a recent board. One detached refill, only when stale; the
   # tick never waits on it.

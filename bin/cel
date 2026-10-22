@@ -229,6 +229,12 @@ cel - the celestial plane
                                 (build.slots), CARGO_BUILD_JOBS = half the cores
   cel watchdog [status|print|install|uninstall] is the system-level user-manager watchdog
                                 installed; print shows the one-time owner command
+  cel serve start <name> --owner <alias> --workspace <ws>
+                                [--ttl 8h] [--port N] -- <command>
+  cel serve list [--json]      ledgered server memory, age and last request
+  cel serve stop <name>        stop a ledgered server
+  cel serve adopt [<unit|pid> --owner ... --workspace ...]
+                                list unledgered servers; explicit adoption only
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS
@@ -257,6 +263,7 @@ case "${1:-help}" in
   drive)    shift; . "$CEL_ROOT/lib/drive.sh";   cmd_drive "$@";;
   decide)   shift; . "$CEL_ROOT/lib/decide.sh";  cmd_decide "$@";;
   services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
+  serve)    shift; . "$CEL_ROOT/lib/serve.sh"; cmd_serve "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
   version|--version|-v)
             . "$CEL_ROOT/lib/version.sh"

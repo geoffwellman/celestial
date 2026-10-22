@@ -37,6 +37,29 @@ test_doctor_says_the_gateway_is_not_supervised() {
   _doctor_teardown
 }
 
+test_doctor_reports_ledgered_and_unledgered_servers() {
+  local t
+  t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl" CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '%s\n' '{"name":"demo","unit":"cel-serve-demo","owner":"worker","workspace":"alpha","started_at":100,"ttl_seconds":3600,"port":5173}' > "$CEL_SERVE_STATE/demo.json"
+  printf '%s\n' '[{"pid":1234,"memory_mb":70,"age_seconds":500,"managed":false}]' > "$t/adopt.json"
+  export CEL_SERVE_ADOPT_DATA="$(cat "$t/adopt.json")"
+  cat > "$CEL_SERVE_SYSTEMCTL" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *ControlGroup*) printf '/user.slice/cel-serve-demo.service\n';;
+esac
+EOF
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  local out; out="$(doctor_serve_line)"
+  assert_contains "$out" "preview servers: 1 ledgered, 1 unledgered"
+  assert_contains "$out" "pid:1234 70M"
+  assert_contains "$out" "demo 0M"
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
+  rm -rf "$t"
+}
+
 # ---------------------------------------------------------------- CEL-53
 # DOCTOR USED TO JUDGE A WORKSPACE WITHOUT READING IT. Each workspace's
 # `setup:` checks ran in a bare login shell, so `test -n "$WIDGET_KEY"` failed
