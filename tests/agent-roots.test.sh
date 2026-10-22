@@ -175,12 +175,12 @@ test_agent_roots_real_pi_survives_real_omp_start() {
   _ar_teardown
 }
 
-test_agent_roots_console_launch_refuses_overlap() {
+test_agent_roots_core_launch_refuses_overlap() {
   _ar_setup
   export CEL_PI_AGENT_DIR="$HOME/.omp/agent/pi"
-  _run_console_default() { case "$1" in runtime) echo pi ;; *) echo "" ;; esac; }
-  _run_console_dir() { echo "$T/console"; }
-  local out; out="$( ( _run_console "" "" "" 1 1 ) 2>&1 )" && { echo "console accepted overlap"; _ar_teardown; return 1; }
+  _run_core_default() { case "$1" in runtime) echo pi ;; *) echo "" ;; esac; }
+  _run_core_dir() { echo "$T/core"; }
+  local out; out="$( ( _run_core "" "" "" 1 0 0 0 "" ) 2>&1 )" && { echo "core accepted overlap"; _ar_teardown; return 1; }
   assert_contains "$out" "overlap"
   _ar_teardown
 }

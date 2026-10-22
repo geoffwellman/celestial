@@ -44,6 +44,8 @@ _inbox_ws() { # [name]
 #   <ws>/repos/<repo>           -> <repo>-orch
 #   ~/.herdr/worktrees/<r>/<b>  -> <r>-<b>   (the worker alias cel run gave it)
 #   the console directory       -> console   (also CEL_ROLE=console)
+#   the core directory          -> root      (also CEL_ROLE=core): core IS the
+#                                  reader of root's mailbox in every workspace
 # The console stands OUTSIDE every workspace - it is the operator's one pane
 # over the whole box - so there is no coordinate to derive and it fell through
 # to "root", draining the root orchestrator's mailbox: the same silent theft
@@ -59,7 +61,10 @@ _inbox_me() {
   [ -n "${CEL_INBOX_ME:-}" ] && { _inbox_sanitise "$CEL_INBOX_ME"; return 0; }
   local p wt rest repo branch d c
   p="$PWD"
+  [ "${CEL_ROLE:-}" = core ] && { printf 'root'; return 0; }
   [ "${CEL_ROLE:-}" = console ] && { printf 'console'; return 0; }
+  c="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+  { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'root'; return 0; }
   c="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
   { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'console'; return 0; }
   wt="$HOME/.herdr/worktrees"
@@ -282,6 +287,8 @@ inbox_reader_of() { # <ws> <mailbox> -> reader name, or empty
   local ws="$1" box="$2" roster want
   roster="$(_inbox_roster)" || return 2
   if printf '%s\n' "$roster" | grep -qxF "$box"; then printf '%s' "$box"; return 0; fi
+  # Core reads root's mail in every workspace, under its own pane name.
+  if [ "$box" = root ] && printf '%s\n' "$roster" | grep -qxF core; then printf 'core'; return 0; fi
   want="$(_inbox_agent_want "$box" "$ws")"
   if [ -n "$want" ] && printf '%s\n' "$roster" | grep -qxF "$want"; then printf '%s' "$want"; return 0; fi
   # The console drains every workspace's ROOT mailbox and no other (CEL-7), so
@@ -607,6 +614,9 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
   local to="$1" message="$2"; shift 2
   case "$to" in
     all) ;;                       # the broadcast address, left alone
+    # Core's pane is named core but its mailbox is root: a message to the
+    # coordinator by its pane name reaches the mailbox it reads.
+    core) to=root ;;
     *) to="$(_inbox_sanitise "$to")" ;;
   esac
   local from="" ws="" kind=status fp=""

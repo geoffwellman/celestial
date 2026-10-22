@@ -417,85 +417,126 @@ test_run_solo_does_not_leak_into_worker_launches() {
   rm -rf "$T"
 }
 
-# --- the console ----------------------------------------------------------
-# The console is BOX-LEVEL: it routes across every workspace and therefore
-# stands in none. No --workspace is resolved, no policy block is rendered
-# (there is no workspace to describe), and its runtime comes from agents.yaml
-# `defaults.console` rather than from a workspace binding.
-# These read the SHIPPED default from agents.yaml and assert the launch is
-# consistent with it, whatever it is - so changing the default is one edit in
-# one place. The default's value is pinned by its own test below.
-_console() { CONS="$(mktemp -d)/console"; CRT="$(manifest_default console | jq -r .runtime)"; CMODEL="$(manifest_default console | jq -r .model)"; }
+# --- core -----------------------------------------------------------------
+# Core is BOX-LEVEL: it coordinates every workspace and therefore stands in
+# none. No --workspace is resolved, no policy block is rendered, and its
+# launch comes from agents.yaml `defaults.core`. The tests stub that default
+# to a plain omp model so no gateway is consulted; the gateway route has its
+# own tests below.
+_core() {
+  CORE="$(mktemp -d)/core"
+  _run_core_default() { case "$1" in runtime) echo omp ;; model) echo m/x ;; thinking) echo low ;; esac; }
+  _run_live_names() { :; }
+}
 
-# What a first-time reader gets: the runtime the README leads with, and the
-# cheapest model that handles a fixed vocabulary of cel commands. A default
-# that rides on a subscription quota is not a default.
-test_the_shipped_console_default_is_claude_haiku() {
-  assert_eq "$(yq -r '.defaults.console.runtime' "$CEL_ROOT/agents.yaml")" claude
-  assert_eq "$(yq -r '.defaults.console.model' "$CEL_ROOT/agents.yaml")" haiku
+# Owner, 2026-10-22: core runs on omp through the gateway, on Opus.
+test_the_shipped_core_default_is_omp_on_gateway_opus() {
+  assert_eq "$(yq -r '.defaults.core.runtime' "$CEL_ROOT/agents.yaml")" omp
+  assert_eq "$(yq -r '.defaults.core.model' "$CEL_ROOT/agents.yaml")" anthropic/claude-opus-5-5
+  assert_eq "$(yq -r '.defaults.core.via' "$CEL_ROOT/agents.yaml")" gateway
 }
-test_run_console_needs_no_workspace_and_has_a_dir_of_its_own() {
-  _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  assert_contains "$out" "workspace create --cwd $CONS --label celestial/console"
-  assert_contains "$out" "agent start console --kind $CRT"
-  rm -rf "$CONS"
+test_run_core_needs_no_workspace_and_has_a_dir_of_its_own() {
+  _core
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"
+  assert_contains "$out" "workspace create --cwd $CORE --label celestial/core"
+  assert_contains "$out" "agent start core --kind omp"
+  rm -rf "${CORE%/core}"
 }
-test_run_console_takes_its_model_from_the_manifest_default() {
-  _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  assert_contains "$out" "--model $CMODEL"
-  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --model x/y --thinking high --dry-run)"
+test_run_console_is_an_alias_of_core() {
+  _core
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run console --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start core --kind omp"
+  rm -rf "${CORE%/core}"
+}
+test_run_core_takes_its_model_from_the_manifest_default() {
+  _core
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"
+  assert_contains "$out" "--model m/x"
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --model x/y --thinking high --dry-run 2>/dev/null)"
   assert_contains "$out" "--model x/y"
   assert_contains "$out" "high"
-  rm -rf "$CONS"
+  rm -rf "${CORE%/core}"
 }
-# The role file must keep ending in role-console.md: lib/gc.sh recognises a
-# long-lived agent by a role-*.md in its cmdline, and the console is the
-# longest-lived pane on the box.
-test_run_console_role_travels_as_a_file_beside_the_console_dir() {
-  _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  assert_contains "$out" "$CONS/role-console.md"
-  rm -rf "$CONS"
+# The role file must end in role-*.md: lib/gc.sh recognises a long-lived agent
+# by that substring in its cmdline.
+test_run_core_role_travels_as_a_file_beside_the_core_dir() {
+  _core
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"
+  assert_contains "$out" "$CORE/role-core.md"
+  rm -rf "${CORE%/core}"
 }
-# The guard rides differently per runtime: omp/pi load it as a --hook file,
-# claude gets it from the PreToolUse hook registered in settings.json (so
-# nothing to assert on argv beyond the permission bypass that lets the hook
-# be the only gate).
-test_run_console_gets_the_guard_hook() {
-  _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  case "$CRT" in
-    claude) assert_contains "$out" "--dangerously-skip-permissions"
-            ! printf '%s' "$out" | grep -q -- '--hook' || { echo "claude got an omp hook flag"; rm -rf "$CONS"; return 1; } ;;
-    *)      assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" ;;
-  esac
-  rm -rf "$CONS"
-}
-# CEL-68: an omp console keeps its model too; the shipped claude one gets nothing.
-test_run_console_on_omp_launches_with_no_prewalk() {
-  _console
-  local out; out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude console got --no-prewalk"; rm -rf "$CONS"; return 1; }
-  _run_console_default() { case "$1" in runtime) echo omp ;; model) echo m/x ;; esac; }
-  out="$(cd /tmp && CEL_CONSOLE_DIR="$CONS" cmd_run console --agent --dry-run)"
-  assert_contains "$out" "agent start console --kind omp"
+# Guard, inbox hook and the orchestrators' retry overlay; mail is root's in
+# every workspace (the hook sweeps them all for an explicit identity).
+test_run_core_gets_guard_inbox_and_root_identity() {
+  _core
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "--config=$CEL_ROOT/core/omp-orchestrator.yml"
   assert_contains "$out" "--no-prewalk"
-  rm -rf "$CONS"
+  assert_contains "$out" "CEL_ROLE=core"
+  assert_contains "$out" "CEL_INBOX_ME=root"
+  rm -rf "${CORE%/core}"
 }
-test_run_console_body_carries_no_workspace_policy_block() {
-  local body; body="$(_run_console_body)"
-  assert_contains "$body" "You are the console"
+test_run_core_body_carries_no_workspace_policy_block() {
+  local body; body="$(_run_core_body)"
+  assert_contains "$body" "You are core"
   ! printf '%s' "$body" | grep -q "Workspace policy" \
-    || { echo "the console got a policy block for a workspace it does not have"; return 1; }
+    || { echo "core got a policy block for a workspace it does not have"; return 1; }
 }
-# A profile is a per-workspace binding; the console has no workspace to bind
-# one from, so asking for one is a mistake rather than a silent no-op.
-test_run_console_refuses_a_profile() {
-  _console
-  ( cd /tmp && CEL_CONSOLE_DIR="$CONS" assert_fails _cmd_run_in_subshell console --agent --profile opus-pi --dry-run )
-  rm -rf "$CONS"
+# A profile is a per-workspace binding, and core stands in no workspace.
+test_run_core_refuses_a_profile_and_workspace_flags() {
+  _core
+  ( cd /tmp && CEL_CORE_DIR="$CORE" assert_fails _cmd_run_in_subshell core --profile opus-pi --dry-run )
+  ( cd /tmp && CEL_CORE_DIR="$CORE" assert_fails _cmd_run_in_subshell core --workspace alpha --dry-run )
+  rm -rf "${CORE%/core}"
+}
+# `via: gateway` takes the omp gateway route an orchestrator profile takes:
+# the routed model is launched, and a veto refuses the launch.
+test_run_core_via_gateway_launches_the_routed_model() {
+  _core
+  _run_core_default() { case "$1" in runtime) echo omp ;; model) echo anthropic/claude-x ;; via) echo gateway ;; esac; }
+  _profile_gateway_route_omp() { PROFILE_MODEL="celgw/omp/claude-x"; }
+  local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"
+  assert_contains "$out" "--model celgw/omp/claude-x"
+  _profile_gateway_route_omp() { PROFILE_VETO="the gateway is not answering"; }
+  ( cd /tmp && CEL_CORE_DIR="$CORE" assert_fails _cmd_run_in_subshell core --dry-run )
+  rm -rf "${CORE%/core}"
+}
+# ONE CORE PER BOX: a live agent in core's directory refuses a second launch;
+# --restart relaunches the live one in its own pane on its own session.
+test_run_core_refuses_a_second_core_and_restarts_the_live_one() {
+  _core
+  _run_live_agent_in_cwd() { printf 'core\tw9:p1\tidle\n'; }
+  local out
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" _cmd_run_in_subshell core --dry-run 2>&1)" \
+    && { echo "a second core was launched: $out"; rm -rf "${CORE%/core}"; return 1; }
+  assert_contains "$out" "already live"
+  # herdr is absent in CI, and the live-agent lookup only runs when it is there
+  _run_orch_agent() { printf 'core\tw9:p1\tidle\t/s/core.jsonl\n'; }
+  out="$(have() { return 0; }; cd /tmp && CEL_PROC_ROOT="$(mktemp -d)" CEL_CORE_DIR="$CORE" cmd_run core --restart --dry-run 2>/dev/null)"
+  assert_contains "$out" "herdr pane send-keys w9:p1"
+  assert_contains "$out" "agent start core --kind omp --pane w9:p1"
+  assert_contains "$out" "--resume /s/core.jsonl"
+  rm -rf "${CORE%/core}"
+}
+# ONE READER OF ROOT'S MAIL: core and a <ws>-root pane read root by the same
+# cursor, so each refuses to start while the other is live (--force excepted).
+test_run_core_and_a_root_pane_refuse_each_other() {
+  _core
+  _run_live_names() { printf 'alpha-root\nwidget-orch\n'; }
+  local out
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" _cmd_run_in_subshell core --dry-run 2>&1)" \
+    && { echo "core started beside a root pane: $out"; rm -rf "${CORE%/core}"; return 1; }
+  assert_contains "$out" "alpha-root"
+  out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --force --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start core"
+  _ws
+  _run_live_names() { printf 'core\n'; }
+  out="$(cd "$T" && _cmd_run_in_subshell root --dry-run 2>&1)" \
+    && { echo "a root pane started beside core: $out"; rm -rf "$T" "${CORE%/core}"; return 1; }
+  assert_contains "$out" "core is live"
+  rm -rf "$T" "${CORE%/core}"
 }
 
 # --- through the gateway --------------------------------------------------

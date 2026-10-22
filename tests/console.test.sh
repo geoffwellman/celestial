@@ -270,33 +270,10 @@ test_console_answer_reads_the_transcript() {
   _console_teardown
 }
 
-# --- the two consoles share one vocabulary ---------------------------------
+# --- the TUI's vocabulary --------------------------------------------------
 
-test_console_vocabulary_is_shared_by_both_consoles() {
-  source "$CEL_ROOT/lib/run.sh"
-  local vocab body
-  vocab="$(cat "$CEL_ROOT/tools/console/vocabulary.md")"
-  assert_contains "$vocab" 'cel fleet'
-  body="$(_run_console_body)"
-  assert_contains "$body" 'cel-fanout status'
-  # The role file must no longer carry its own copy of the table, or the two
-  # consoles drift the first time someone edits one of them.
-  case "$(cat "$CEL_ROOT/core/roles/console.md")" in
-    *'cel-fanout status'*) echo 'role file still carries its own vocabulary table'; return 1;;
-  esac
-}
-
-test_run_console_without_agent_points_at_cel_console() {
-  local out rc=0
-  out="$(bash "$CEL_ROOT/bin/cel" run console 2>&1)" || rc=$?
-  assert_eq "$rc" 2
-  assert_contains "$out" 'cel console'
-}
-
-test_run_console_agent_dry_run_still_launches() {
-  local out
-  out="$(bash "$CEL_ROOT/bin/cel" run console --agent --dry-run 2>&1)"
-  assert_contains "$out" 'herdr agent start console'
+test_console_vocabulary_names_the_fleet() {
+  assert_contains "$(cat "$CEL_ROOT/tools/console/vocabulary.md")" 'cel fleet'
 }
 
 test_cel_console_is_in_the_help() {
@@ -1184,17 +1161,12 @@ test_console_steering_helpers_are_proved() {
   node "$CEL_ROOT/tools/console/steer.test.mjs"
 }
 
-# ONE VOCABULARY, TWO CONSOLES (tools/console/vocabulary.md). A relay the TUI
-# can do and the agent console has never heard of is the two of them
-# disagreeing about what the console is, and the one that is wrong is always
-# the one nobody is watching.
+# ONE VOCABULARY for the TUI (tools/console/vocabulary.md): the relay and the
+# two-step are documented where the translator reads them.
 test_console_vocabulary_documents_the_relay_and_the_two_step() {
   local vocab="$CEL_ROOT/tools/console/vocabulary.md"
   assert_contains "$(cat "$vocab")" 'herdr agent read'
   assert_contains "$(cat "$vocab")" 'talk'
-  # The role says when NOT to relay: a long design discussion belongs in the
-  # pane itself, which is what `focus` is for.
-  assert_contains "$(cat "$CEL_ROOT/core/roles/console.md")" 'focus'
 }
 
 # The legend is the console's only permanent instruction, and a mode with no
@@ -1428,7 +1400,7 @@ EOF
 # where an operator will look for them.
 test_console_row_and_confidence_keys_are_documented() {
   local docs
-  docs="$(cat "$CEL_ROOT/tools/console/vocabulary.md" "$CEL_ROOT/core/roles/console.md")"
+  docs="$(cat "$CEL_ROOT/tools/console/vocabulary.md")"
   assert_contains "$docs" 'rows_inline'
   assert_contains "$docs" 'run_confidence'
   assert_contains "$docs" 'propose_confidence'

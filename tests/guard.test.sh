@@ -344,6 +344,50 @@ test_console_writes_only_its_own_directory() {
   rm -rf "$CONS" "$T"
 }
 
+# --- core: orchestrator-class, minus the product agent's factory -------------
+test_role_core_from_its_dir_and_the_environment() {
+  local C; C="$(mktemp -d)/core"; mkdir -p "$C/notes"
+  assert_eq "$(CEL_ROLE='' CEL_CORE_DIR="$C" guard_role_of "$C/notes")" core
+  assert_eq "$(CEL_ROLE=core guard_role_of /tmp)" core
+  rm -rf "${C%/core}"
+}
+test_core_may_read_coordinate_and_switch_mode() {
+  local c
+  for c in 'cel fleet --json' 'cel inbox send games-orch "x" --workspace w' 'cel decide list' \
+           'cel-fanout status --workspace w' 'cel mode games solo --workspace w' \
+           'cel run orchestrator --product games --workspace w --restart' \
+           'gh pr view 3' 'gh pr diff 3' 'git -C repos/x log --oneline' 'herdr agent focus w1:p1'; do
+    assert_eq "$(guard_classify core "$c")" allow
+  done
+}
+test_core_does_not_build_delegate_or_land() {
+  local c
+  for c in 'cel-fanout delegate x' 'cel-fanout land CEL-1' 'cel-fanout review CEL-1 approved' \
+           'cel solo land celestial#3' 'cel run worker --repo x --branch y' 'cel run reviewer --repo x --pr 1' \
+           'gh pr merge 3' 'git -C repos/x commit -m y' 'git push' 'cel learn add x' 'cel release celestial 1.0.0' \
+           'herdr worktree create --cwd x' 'cel-fanout request-review CEL-1 --head abc' 'cel-fanout try CEL-1' \
+           'cel-fanout some-future-verb x' 'cd /tmp && cel-fanout --workspace w land CEL-1'; do
+    assert_contains "$(guard_classify core "$c")" deny
+  done
+}
+test_core_may_read_the_ledger() {
+  local c
+  for c in 'cel-fanout status --workspace w' 'cel-fanout why CEL-1' 'cel-fanout wait CEL-1' \
+           'cel-fanout --workspace w status'; do
+    assert_eq "$(guard_classify core "$c")" allow
+  done
+}
+test_core_writes_only_its_own_directory() {
+  local C; C="$(mktemp -d)/core"
+  assert_eq "$(CEL_CORE_DIR="$C" guard_classify_path core "$C/notes.md")" allow
+  assert_contains "$(CEL_CORE_DIR="$C" guard_classify_path core "/home/x/ws/p/.cel/specs/a.md")" deny
+  rm -rf "${C%/core}"
+}
+test_workers_and_solo_agents_do_not_start_core() {
+  assert_contains "$(guard_classify worker 'cel core')" deny
+  assert_contains "$(guard_classify solo 'cel run core')" deny
+}
+
 # --- the bottom tier reports; it does not run the factory --------------------
 # A worker whose PR had just been approved ran `cel-fanout land <its own id>`
 # from its own worktree: the ledger lock was held for three minutes while the

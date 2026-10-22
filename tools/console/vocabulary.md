@@ -1,10 +1,7 @@
-<!-- The console's vocabulary, in ONE file.
-     Two surfaces speak it: the TUI's translator (tools/console/translate.mjs
-     puts this table in its system message) and the agent console
-     (core/roles/console.md includes it at render time, lib/run.sh). It was a
-     table in the role file first; the moment a second consumer appeared, a
-     copy would have meant the two consoles disagreeing about what the console
-     can do, and the one that is wrong is always the one nobody is watching. -->
+<!-- The console TUI's vocabulary. The TUI's translator
+     (tools/console/translate.mjs) puts this table in its system message.
+     The agent console that also included it is now `cel core`, whose role
+     (core/roles/core.md) is a coordinator's, not a fixed vocabulary. -->
 
 | command | when |
 | --- | --- |
