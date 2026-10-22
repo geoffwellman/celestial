@@ -55,6 +55,19 @@ test_drive_claude_runtime_normalises() {
   assert_eq "$(jq -r '.[2].tool.isError' <<<"$out")" "false"
 }
 
+test_drive_pi_1_2_session_parses_inbox_wake_event() {
+  command -v node >/dev/null || return 0
+  local out
+  out="$(_tr 'console.log(JSON.stringify(T.parseText(fs.readFileSync(process.env.FX + "/pi-1.2.0.jsonl","utf8"), "pi")));')"
+  assert_eq "$(jq -r 'map(.kind)|join(",")' <<<"$out")" "system,tool,assistant"
+  assert_eq "$(jq -r '.[0].source' <<<"$out")" "cel-inbox"
+  assert_contains "$(jq -r '.[0].text' <<<"$out")" "Pi 1.2.0 fixture inbox proof request"
+  assert_eq "$(jq -r '.[1].tool.name' <<<"$out")" "bash"
+  assert_eq "$(jq -r '.[1].tool.isError' <<<"$out")" "false"
+  assert_contains "$(jq -r '.[2].text' <<<"$out")" "inbox confirmed it was queued"
+
+
+}
 test_drive_tailer_partial_line_swap_and_shrink() {
   command -v node >/dev/null || return 0
   local d; d="$(mktemp -d)"
@@ -149,18 +162,49 @@ test_drive_tail_json_and_since() {
   rm -rf "$T"
 }
 
+# Every process still carrying THIS fixture's inbox dir in its environment: the
+# followers the test started (bash cel and the node tailer it runs) and
+# whatever they spawned. Used to prove a teardown left no writer behind.
+_drive_fixture_procs() {
+  local e
+  for e in /proc/[0-9]*/environ; do
+    { tr '\0' '\n' < "$e" | grep -qx "CEL_INBOX_DIR=$T/inbox" && basename "$(dirname "$e")"; } 2>/dev/null
+  done
+  return 0
+}
+
+# The follower is `bash cel` running `node` (a grandchild of the test), and
+# `pkill -P` + `kill` of the test's own background pid reached only the first
+# of them: the node tailer was orphaned and kept polling - running the herdr
+# stub and writing under the fixture - while the test removed it (CI
+# 38997229523, rm "Directory not empty"). So the follower gets its own session
+# (pid == process group) and teardown stops and joins the whole group.
+_drive_follow_start() { # <tail args...> -> prints the group leader pid; output in $T/out
+  setsid env PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" CEL_DRIVE_POLL_MS=100 \
+    "$CEL_ROOT/bin/cel" drive tail widget-orch --json --follow "$@" > "$T/out" 2>&1 &
+  printf '%s' "$!"
+}
+_drive_follow_stop() { # <pid>
+  local pid="$1" i
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  for i in $(seq 1 50); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for i in $(seq 1 50); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 0.1; done
+}
+
 test_drive_tail_follow_sees_new_turns_and_session_swap() {
   command -v node >/dev/null || return 0
   _drive_fixture
-  CEL_DRIVE_POLL_MS=100 _cel drive tail widget-orch --json --follow --since a4 > "$T/out" 2>&1 &
-  local pid=$!
+  local pid; pid="$(_drive_follow_start --since a4)"
   sleep 1.5
   printf '%s\n' '{"type":"message","id":"n1","parentId":"a4","message":{"role":"user","content":"next widget"}}' >> "$T/session.jsonl"
   sleep 1
   printf '%s\n' '{"type":"message","id":"z1","parentId":null,"message":{"role":"user","content":"fresh session"}}' > "$T/new.jsonl"
   sed -i "s#$T/session.jsonl#$T/new.jsonl#" "$T/agents.json"
   sleep 1.5
-  pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  _drive_follow_stop "$pid"
+  local left; left="$(_drive_fixture_procs | tr '\n' ' ')"
+  [ -z "$left" ] || { kill -9 $left 2>/dev/null; echo "the follower's processes outlived the test: $left"; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$T/out")" "next widget"
   assert_contains "$(cat "$T/out")" "fresh session"
   rm -rf "$T"
@@ -212,4 +256,17 @@ test_drive_redacts_json_and_quoted_secret_forms() {
   assert_contains "$out" '"token":"[redacted]"'
   assert_contains "$out" '"apiKey": "[redacted]"'
   assert_contains "$out" 'WIDGET_SECRET=[redacted]'
+}
+
+# deterministic: whatever the follower spawned is gone when the stop returns
+test_drive_follow_stop_leaves_no_process_of_the_fixture() {
+  command -v node >/dev/null || return 0
+  _drive_fixture
+  local pid; pid="$(_drive_follow_start --since a4)"
+  sleep 1.5
+  [ -n "$(_drive_fixture_procs)" ] || { echo "the follower never started"; rm -rf "$T"; return 1; }
+  _drive_follow_stop "$pid"
+  local left; left="$(_drive_fixture_procs | tr '\n' ' ')"
+  [ -z "$left" ] || { kill -9 $left 2>/dev/null; echo "left running: $left"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
 }

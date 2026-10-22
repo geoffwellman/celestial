@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# An isolated fake herdr for the launch-readiness tests (AH-261017). No socket,
+# no real panes, no tokens: it answers the handful of calls `cel run` makes and
+# models ONE pane whose shell is slow to come up. State lives in $PF_DIR.
+#
+# Behaviour knobs (environment):
+#   PF_BUSY_GETS=n       the first n `pane get` probes see a foreground child
+#                        (the rc files still running) before the shell owns it
+#   PF_ALWAYS=busy|agent|blind
+#                        never ready: a command holds the foreground / an agent
+#                        occupies the pane / herdr cannot describe the pane
+#   PF_SWAP_TERMINAL_AT=n  from the n-th probe on, the pane is another terminal
+#   PF_SWAP_SHELL_ON_SEND=1  after text was typed, the shell is replaced
+#   PF_START_FAIL=1      `agent start` is refused like herdr's agent_pane_busy
+# Calls are appended to $HERDR_LOG (one argv per line) unless PF_NOLOG=1, which
+# an in-process stub sets because it logged the call itself.
+set -u
+d="${PF_DIR:?PF_DIR is required}"; mkdir -p "$d"
+[ -n "${PF_NOLOG:-}" ] || printf '%s\n' "$*" >> "${HERDR_LOG:?HERDR_LOG is required}"
+typed() { grep -q '^pane send-text' "${HERDR_LOG:-/dev/null}" 2>/dev/null; }
+n() { local c=0; [ -f "$d/n" ] && c="$(cat "$d/n")"; printf '%s' "$c"; }
+case "$1 $2" in
+  "pane get")
+    c=$(( $(n) + 1 )); printf '%s' "$c" > "$d/n"
+    [ "${PF_ALWAYS:-}" = blind ] && exit 1
+    term=term_a; [ -n "${PF_SWAP_TERMINAL_AT:-}" ] && [ "$c" -ge "$PF_SWAP_TERMINAL_AT" ] && term=term_b
+    agent=null; [ "${PF_ALWAYS:-}" = agent ] && agent='"pi"'
+    printf '{"id":"cli:pane:get","result":{"pane":{"agent":%s,"pane_id":"%s","tab_id":"%s:t1","terminal_id":"%s"},"type":"pane_info"}}\n' \
+      "$agent" "$3" "${3%%:*}" "$term" ;;
+  "pane process-info")
+    [ "${PF_ALWAYS:-}" = blind ] && exit 1
+    c="$(n)"; sh=4242
+    [ "${PF_SWAP_SHELL_ON_SEND:-}" = 1 ] && typed && sh=4343
+    fg="{\"pid\":$sh,\"name\":\"zsh\"}"; pg=$sh
+    if [ "${PF_ALWAYS:-}" = busy ] || [ "$c" -le "${PF_BUSY_GETS:-0}" ]; then
+      fg="$fg,{\"pid\":9001,\"name\":\"git\"}"; pg=9001
+    fi
+    [ "${PF_NO_PGID:-}" = 1 ] && pg=null
+    printf '{"id":"cli:pane:process_info","result":{"process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[%s]},"type":"pane_process_info"}}\n' "$4" "$sh" "$pg" "$fg" ;;
+  "workspace create"|"worktree create")
+    printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}\n' ;;
+  "agent list") printf '{"result":{"agents":[]}}\n' ;;
+  "agent start")
+    if [ -n "${PF_START_FAIL:-}" ]; then
+      printf '{"error":{"code":"agent_pane_busy","message":"agent target pane %s is not an available shell"}}\n' "$7" >&2
+      exit 1
+    fi
+    printf '{"result":{"started":true}}\n' ;;
+  "tab list") printf '{"result":{"tabs":[]}}\n' ;;
+  "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}\n' ;;
+  *) : ;;
+esac

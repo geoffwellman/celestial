@@ -175,6 +175,76 @@ test_workers_are_unrestricted() {
   assert_eq "$(guard_classify_path worker /any/repos/x.ts)" allow
 }
 
+# --- solo: the builder, without the factory ----------------------------------
+# A solo agent stands where an orchestrator stands, so only CEL_ROLE can tell
+# the two apart - and it must, or the solo agent could not write a line.
+test_role_solo_from_the_launch_not_the_path() {
+  _gws
+  assert_eq "$(CEL_ROLE=solo guard_role_of "$T/repos/widget")" solo
+  assert_eq "$(guard_role_of "$T/repos/widget")" orchestrator
+  rm -rf "$T"
+}
+test_solo_may_build_and_ship() {
+  assert_eq "$(guard_classify solo 'git commit -m x')" allow
+  assert_eq "$(guard_classify solo 'git push -u origin WG-1-x')" allow
+  assert_eq "$(guard_classify solo 'git worktree add ../wt -b WG-2-y origin/main')" allow
+  assert_eq "$(guard_classify solo 'gh pr create --fill')" allow
+  assert_eq "$(guard_classify solo 'cel run reviewer --repo widget --pr 12')" allow
+  assert_eq "$(guard_classify solo 'cel mode bundle fleet')" allow
+  assert_eq "$(guard_classify_path solo /ws/repos/widget/src/x.ts)" allow
+}
+test_solo_may_not_fan_out_or_start_agents() {
+  local c
+  for c in 'cel-fanout delegate widget WG-1-x spec.md' 'bash /x/bin/cel-fanout scout widget b.md' \
+           'cel-fanout land WG-1-x' 'cel-fanout release WG-1-x' \
+           'cel run worker --repo widget --branch WG-1-x' 'cel run orchestrator --product bundle' \
+           'herdr agent start foo --kind pi'; do
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+test_solo_may_not_merge_by_hand() {
+  local c
+  for c in 'gh pr merge 12 --squash' 'gh -R a/b pr merge 5' 'gh --repo=a/b pr merge 5' \
+           'gh api -X PUT repos/a/b/pulls/5/merge'; do
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+# The solo agent lands through `cel solo land` but never records its own
+# verdict; a worker does neither.
+test_solo_lands_but_never_reviews_itself() {
+  assert_eq "$(guard_classify solo 'cel solo land widget#7')" allow
+  case "$(guard_classify solo 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
+  case "$(guard_classify worker 'cel solo land widget#7')" in deny*) ;; *) return 1;; esac
+  case "$(guard_classify worker 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
+}
+# The spellings that slipped past a substring match - spacing, tabs, quotes,
+# options before the verb, chains, wrappers - are the SAME command.
+test_factory_verbs_are_refused_however_they_are_spelled() {
+  local c
+  for c in 'cel-fanout  delegate x' "$(printf 'cel-fanout\tdelegate x')" '"cel-fanout" land x' \
+           'cel-fanout --workspace plane delegate x' 'cel -C /ws --workspace p run worker' \
+           'cel run "worker"' 'cd x && cel-fanout land y' 'bash -c "cel-fanout land y"' \
+           'FOO=1 timeout 30 /home/x/bin/cel-fanout delegate a b c' 'echo $(cel-fanout land y)'; do
+    case "$(guard_classify worker "$c")" in deny*) ;; *) echo "worker allowed: $c"; return 1;; esac
+    case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+# ...and text that merely MENTIONS a verb is not running it.
+test_factory_verbs_in_arguments_are_not_commands() {
+  local c
+  for c in 'grep -n "cel-fanout land" lib/guard.sh' 'git commit -m "never cel-fanout land here"' \
+           'rg "gh pr merge" docs'; do
+    assert_eq "$(guard_classify solo "$c")" allow
+    assert_eq "$(guard_classify worker "$c")" allow
+  done
+}
+test_hook_lets_a_solo_pane_commit() {
+  _gws
+  CEL_ROLE=solo _hook "$T/repos/widget" Bash '{"command":"git commit -m x"}' \
+    || { echo "solo commit blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # --- the hook end to end ---------------------------------------------------
 _hook() { # <cwd> <tool> <input-json> -> exit code, stderr in $HOOK_ERR
   local out

@@ -45,7 +45,7 @@ _gw_setup() {
   # left the live steward sweeping services this suite invented.
   export CEL_SERVICES_D="$T/services.d"
   export CEL_SERVICES_STATE="$T/services-state"
-  export PI_CODING_AGENT_DIR="$T/pi"
+  export CEL_PI_AGENT_DIR="$T/pi"
   unset CEL_GATEWAY_STUB
   cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -78,7 +78,13 @@ url=""
 for a in "\$@"; do case "\$a" in http://*|https://*) url="\$a" ;; esac; done
 case "\$url" in
   */healthz)   exit "\${GW_DOWN:-0}" ;;
-  */v1/models) printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000}]}' ;;
+  */v1/models)
+    if [ -n "\${GW_MODELS:-}" ]; then printf '%s\n' "\$GW_MODELS"; else
+    printf '%s\n' '{"data":[{"id":"gpt-5.5","context_length":272000,"max_output_tokens":8192},{"id":"claude-sonnet-4-6","context_length":200000,"max_output_tokens":64000},{"id":"claude-opus-5-5","context_length":1000000,"max_output_tokens":128000},{"id":"claude-opus-4-8","context_length":1000000,"max_output_tokens":128000},{"id":"claude-custom-unknown","context_length":200000,"max_output_tokens":64000}]}'; fi ;;
+  */v0/management/auth-files/fields)
+    prev=""; for a in "\$@"; do [ "\$prev" = -d ] && printf '%s\n' "\$a" >> "$T/curl.body"; prev="\$a"; done
+    cat >/dev/null
+    printf '{"status":"ok"}' ;;
   *) exit 7 ;;
 esac
 EOF
@@ -87,7 +93,7 @@ EOF
 }
 _gw_teardown() {
   rm -rf "$T"
-  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE PI_CODING_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_PI_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
 }
 
 # --- the config file ------------------------------------------------------
@@ -117,7 +123,7 @@ test_gateway_config_turns_session_affinity_on() {
 # THE MANAGEMENT API IS ON FOR LOOPBACK ONLY (CEL-80). CEL-60 left it out,
 # which left the web panel CLIProxyAPI serves at /management.html unable to
 # read or change anything. Keys checked against CLIProxyAPI 7.3.14's own
-# config struct: `remote-management.{allow-remote, secret-key,
+# config struct, and again against 8.0.29's (CEL-135): `remote-management.{allow-remote, secret-key,
 # disable-control-panel}`.
 test_gateway_config_enables_management_for_loopback_only() {
   _gw_setup
@@ -367,8 +373,10 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   assert_eq "$(jq -r '.providers.ompgw.baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)/v1"
   assert_eq "$(jq -r '.providers.ompgw.headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
   assert_eq "$(jq -r '.providers.ompgw.api' "$f")" openai-completions
-  assert_eq "$(jq -r '.providers.ompgw.models[0].id' "$f")" "gpt-5.5"
-  assert_eq "$(jq -r '.providers.ompgw.models[0].contextWindow' "$f")" 272000
+  # AH-261018: Codex ids ride the Responses provider, never chat completions.
+  assert_eq "$(jq -r '.providers["ompgw-codex"].api' "$f")" openai-responses
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].id' "$f")" "gpt-5.5"
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].contextWindow' "$f")" 272000
   # Claude models get pi's Anthropic surface, which the gateway serves at
   # /v1/messages - the same accounts, the richer protocol.
   assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)"
@@ -393,8 +401,249 @@ test_pi_models_claude_provider_key_matches_profile_model_id() {
   assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
   _gw_teardown
 }
+
+test_pi_models_use_canonical_opus_thinking_capabilities_only() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  gateway_pi_models_write "$T/pi/models.json"
+  local f="$T/pi/models.json"
+  local opus55='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5")'
+  local other_opus='.providers["ompgw-claude"].models[] | select(.id == "claude-opus-4-8")'
+  local unknown='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
+  assert_eq "$(jq -r "$opus55 | .reasoning" "$f")" true
+  assert_eq "$(jq -c "$opus55 | .thinkingLevelMap" "$f")" \
+    '{"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"}'
+  assert_eq "$(jq -r "$opus55 | .compat.forceAdaptiveThinking" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoEffort" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoSystemMessages" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoToolChanges" "$f")" true
+  assert_eq "$(jq -r "$opus55 | .compat.supportsTemperature" "$f")" false
+  assert_eq "$(jq -r "$opus55 | .compat.supportsStrictTools" "$f")" true
+  assert_eq "$(jq -r "$other_opus | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r "$unknown | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
+  _gw_teardown
+}
+
+# The live gateway publishes bare ids (no context_length/max_output_tokens),
+# so the generic 128000/8192 fallback must never win for a 5.5 Claude model:
+# Opus and Sonnet 5.5 carry their native window, output, input and adaptive
+# thinking. Unknown claude ids stay on the generic fallback.
+test_pi_models_project_native_5_5_capabilities_from_bare_ids() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-5-5"},{"id":"claude-opus-5-5"},{"id":"claude-custom-unknown"}]}'
+  gateway_pi_models_write "$T/pi/models.json"
+  local f="$T/pi/models.json" m
+  for m in claude-sonnet-5-5 claude-opus-5-5; do
+    local q=".providers[\"ompgw-claude\"].models[] | select(.id == \"$m\")"
+    assert_eq "$(jq -r "$q | .contextWindow" "$f")" 1000000
+    assert_eq "$(jq -r "$q | .maxTokens" "$f")" 128000
+    assert_eq "$(jq -r "$q | .reasoning" "$f")" true
+    assert_eq "$(jq -c "$q | .input" "$f")" '["text","image"]'
+    assert_eq "$(jq -r "$q | .thinkingLevelMap.medium" "$f")" medium
+    assert_eq "$(jq -r "$q | .compat.forceAdaptiveThinking" "$f")" true
+  done
+  local u='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
+  assert_eq "$(jq -r "$u | .contextWindow" "$f")" 128000
+  assert_eq "$(jq -r "$u | has(\"reasoning\")" "$f")" false
+  unset GW_MODELS
+  _gw_teardown
+}
+
 test_pi_models_provider_helper_recognises_claude_slash_model() {
   assert_eq "$(gateway_pi_provider_for_model "claude/claude-sonnet-4-6")" ompgw-claude
+}
+
+# --- the omp provider (CEL-136) -------------------------------------------
+
+# A vault with a PERSONAL claude account the omp orchestrator must never use,
+# two pool accounts, and a personal codex account. The email is matched in the
+# filename AND in the JSON, case-insensitively, so a file whose name lost the
+# address still cannot slip into the omp pool.
+_gw_omp_vault() { # <dir>
+  local d="$1"
+  mkdir -p "$d"; chmod 700 "$d"
+  printf '{"type":"claude","email":"Me@Personal.invalid","access_token":"%s"}' "$GW_FIXTURE_SECRET" \
+    >"$d/claude-11111111-me@personal.invalid.json"
+  printf '{"type":"claude","email":"pool-a@example.invalid","access_token":"%s"}' "$GW_FIXTURE_SECRET" \
+    >"$d/claude-22222222-pool-a@example.invalid.json"
+  printf '{"type":"claude","account":{"email_address":"me@personal.invalid"},"access_token":"%s"}' "$GW_FIXTURE_SECRET" \
+    >"$d/claude-33333333-renamed.json"
+  printf '{"type":"claude","email":"pool-b@example.invalid","prefix":"omp","access_token":"%s"}' "$GW_FIXTURE_SECRET" \
+    >"$d/claude-44444444-pool-b@example.invalid.json"
+  printf '{"type":"codex","email":"me@personal.invalid","access_token":"%s"}' "$GW_FIXTURE_SECRET" \
+    >"$d/codex-55555555-me@personal.invalid-plus.json"
+  chmod 600 "$d"/*.json
+}
+
+# The catalog omp itself resolved for its built-in anthropic provider: the
+# thinking MODE lives only here (`omp models --json` flattens it to levels),
+# and a guessed mode is how pi earned its thinking.type.disabled 400s.
+_gw_omp_catalog() { # <file>
+  cat >"$1" <<'EOF'
+[{"id":"claude-sonnet-4-6","name":"Claude Sonnet 4.6","reasoning":true,"input":["text","image"],
+  "contextWindow":1000000,"maxTokens":128000,
+  "thinking":{"mode":"anthropic-adaptive","efforts":["low","medium","high"],"prefixBinding":true},
+  "compat":{"officialEndpoint":true},"baseUrl":"https://api.anthropic.com/v1"}]
+EOF
+}
+
+# THE EXCLUSION FAILS CLOSED. With no excluded identity configured the pool
+# would be every claude account in the vault, personal included - the exact
+# widening the orchestrator was moved off its direct creds to avoid.
+test_gateway_omp_scope_refuses_without_an_exclusion() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  assert_fails gateway_omp_scope_plan
+  _gw_teardown
+}
+
+# The owner can include the personal account deliberately: only the literal
+# `gateway.omp_include_all: true` lifts the empty-exclusion refusal. Absent or
+# malformed values (yes, 1, True-ish typos) stay closed.
+test_gateway_omp_scope_opt_in_must_be_explicit_true() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  local v
+  for v in yes 1 on '""' maybe; do
+    cel_config_set gateway omp_include_all "$v"
+    assert_fails gateway_omp_scope_plan
+    assert_fails gateway_omp_scope_check
+  done
+  _gw_teardown
+}
+
+test_gateway_omp_scope_opt_in_includes_every_claude_account() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_include_all true
+  local plan; plan="$(gateway_omp_scope_plan)"
+  assert_eq "$(jq -r '[.[] | select(.excluded)] | length' <<<"$plan")" 0
+  assert_eq "$(jq -r '[.[] | select(.action == "add")] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-11111111-me@personal.invalid.json,claude-22222222-pool-a@example.invalid.json,claude-33333333-renamed.json"
+  ! jq -e '.[] | select(.file | startswith("codex"))' <<<"$plan" >/dev/null \
+    || { echo "codex reached the omp plan"; _gw_teardown; return 1; }
+  gateway_omp_scope_check >/dev/null || { echo "opt-in check failed"; _gw_teardown; return 1; }
+  gateway_omp_scope_apply >/dev/null || { echo "opt-in apply failed"; _gw_teardown; return 1; }
+  assert_eq "$(grep -c 'auth-files/fields' "$T/curl.argv")" 3
+  _gw_teardown
+}
+
+# Exclusions still win over the opt-in: it only permits an EMPTY list.
+test_gateway_omp_scope_opt_in_keeps_configured_exclusions() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_include_all true
+  cel_config_set gateway omp_exclude "pool-a@example.invalid"
+  local plan; plan="$(gateway_omp_scope_plan)"
+  assert_eq "$(jq -r '[.[] | select(.excluded)] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-22222222-pool-a@example.invalid.json"
+  local f; f="$(gateway_auth_dir)/claude-22222222-pool-a@example.invalid.json"
+  jq '.prefix = "omp"' "$f" >"$f.t" && mv "$f.t" "$f"
+  assert_fails gateway_omp_scope_check
+  _gw_teardown
+}
+
+# The plan names pool accounts only: personal-by-filename and
+# personal-by-JSON-only are both out, and codex is not in the omp pool at all.
+test_gateway_omp_scope_plan_excludes_the_personal_account_by_name_and_by_content() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_exclude "me@personal.invalid"
+  local plan; plan="$(gateway_omp_scope_plan)"
+  assert_eq "$(jq -r '[.[] | select(.action == "add")] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-22222222-pool-a@example.invalid.json"
+  assert_eq "$(jq -r '[.[] | select(.action == "keep")] | map(.file) | join(",")' <<<"$plan")" \
+    "claude-44444444-pool-b@example.invalid.json"
+  assert_eq "$(jq -r '[.[] | select(.excluded)] | length' <<<"$plan")" 2
+  ! jq -e '.[] | select(.file | startswith("codex"))' <<<"$plan" >/dev/null \
+    || { echo "codex reached the omp plan"; _gw_teardown; return 1; }
+  ! grep -q "$GW_FIXTURE_SECRET" <<<"$plan" || { echo "a token reached the plan"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+# An excluded account that already carries the prefix is in the omp pool NOW,
+# so the check fails and apply takes it out.
+test_gateway_omp_scope_check_fails_when_an_excluded_account_is_prefixed() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_exclude "me@personal.invalid"
+  gateway_omp_scope_check >/dev/null || { echo "clean vault failed the check"; _gw_teardown; return 1; }
+  assert_eq "$(gateway_omp_scoped_count)" 1
+  local f; f="$(gateway_auth_dir)/claude-33333333-renamed.json"
+  jq '.prefix = "omp"' "$f" >"$f.t" && mv "$f.t" "$f"
+  assert_fails gateway_omp_scope_check
+  assert_eq "$(jq -r '[.[] | select(.action == "remove")] | map(.file) | join(",")' <<<"$(gateway_omp_scope_plan)")" \
+    "claude-33333333-renamed.json"
+  _gw_teardown
+}
+
+# APPLY GOES THROUGH THE RUNNING GATEWAY, never a second writer on the vault:
+# CLIProxyAPI rewrites these files itself on every token refresh, and its
+# management PATCH serialises with that. The management key rides stdin.
+test_gateway_omp_scope_apply_patches_only_pool_accounts_through_management() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_omp_vault "$(gateway_auth_dir)"
+  cel_config_set gateway omp_exclude "me@personal.invalid"
+  gateway_omp_scope_apply >/dev/null || { echo "apply failed"; _gw_teardown; return 1; }
+  local argv; argv="$(cat "$T/curl.argv")"
+  assert_contains "$argv" "/v0/management/auth-files/fields"
+  assert_eq "$(grep -c 'auth-files/fields' "$T/curl.argv")" 1
+  assert_contains "$(cat "$T/curl.body")" '"name":"claude-22222222-pool-a@example.invalid.json"'
+  assert_contains "$(cat "$T/curl.body")" '"prefix":"omp"'
+  ! grep -q 'personal' "$T/curl.body" || { echo "apply touched the personal account"; _gw_teardown; return 1; }
+  local mk; mk="$(cat "$(gateway_state_dir)/management-key")"
+  ! grep -qF "$mk" "$T/curl.argv" || { echo "the management key reached argv"; _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+# omp's models.yml: the gateway's PREFIXED claude ids only, metadata copied
+# from omp's own catalog (allowed keys only), key and session as ENV NAMES.
+test_gateway_omp_models_yml_carries_prefixed_ids_and_no_secret() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"},{"id":"omp/claude-unknown-9"},{"id":"gpt-5.5"}]}'
+  _gw_omp_catalog "$T/cat.json"
+  mkdir -p "$T/omp"
+  printf 'providers:\n  mine:\n    baseUrl: https://example.invalid\n    apiKey: MINE\n' >"$T/omp/models.yml"
+  gateway_omp_models_write "$T/omp/models.yml" "$T/cat.json" || { echo "write failed"; _gw_teardown; return 1; }
+  local f="$T/omp/models.yml" p='.providers.celgw'
+  assert_eq "$(yq -r '.providers.mine.baseUrl' "$f")" "https://example.invalid"
+  assert_eq "$(yq -r "$p.baseUrl" "$f")" "http://127.0.0.1:$(gateway_port)"
+  assert_eq "$(yq -r "$p.api" "$f")" anthropic-messages
+  assert_eq "$(yq -r "$p.apiKey" "$f")" OMP_GATEWAY_TOKEN
+  assert_eq "$(yq -r "$p.headers[\"x-session-id\"]" "$f")" CEL_SESSION_ID
+  # No model substitution: the unknown id has no omp metadata and is dropped,
+  # the plain id and the codex id are other clients' and never listed.
+  assert_eq "$(yq -r "[$p.models[].id] | join(\",\")" "$f")" "omp/claude-sonnet-4-6"
+  assert_eq "$(yq -r "$p.models[0].thinking.mode" "$f")" anthropic-adaptive
+  assert_eq "$(yq -r "$p.models[0].thinking | has(\"prefixBinding\")" "$f")" false
+  assert_eq "$(yq -r "$p.models[0] | has(\"compat\")" "$f")" false
+  assert_eq "$(yq -r "$p.models[0].contextWindow" "$f")" 1000000
+  local key; key="$(cat "$(gateway_state_dir)/api-key")"
+  ! grep -qF "$key" "$f" || { echo "the api-key was written into models.yml"; _gw_teardown; return 1; }
+  unset GW_MODELS
+  _gw_teardown
+}
+
+# The pi contract is unchanged: omp-scoped ids are omp's, and must not leak
+# into pi's openai-completions block as `omp/claude-*` models.
+test_pi_models_skip_the_omp_scoped_ids() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"gpt-5.5"},{"id":"claude-sonnet-4-6"},{"id":"omp/claude-sonnet-4-6"}]}'
+  gateway_pi_models_write "$T/pi/models.json"
+  assert_eq "$(jq -r '[.providers[].models[].id] | sort | join(",")' "$T/pi/models.json")" "claude-sonnet-4-6,gpt-5.5"
+  unset GW_MODELS
+  _gw_teardown
 }
 
 # --- omp is gone ----------------------------------------------------------
@@ -417,4 +666,32 @@ test_no_gateway_verb_invokes_omp() {
   ! grep -rn "omp " "$CEL_ROOT/lib/gateway.sh" | grep -vE '^\s*[0-9]+:\s*#' | grep -q . \
     || { echo "lib/gateway.sh still runs omp"; _gw_teardown; return 1; }
   _gw_teardown
+}
+
+# --- the pinned release ---------------------------------------------------
+
+# THE PIN HAS A FLOOR (CEL-135). 7.3.14 benches a Claude credential until the
+# MONTHLY BILLING RESET when one 429 carries an overage claim (upstream
+# #6465, fixed in 8.0.22) - on a scratch copy of this box's config, a fake
+# upstream sending one such 429 with Retry-After: 3 was never chosen again in
+# 60s under 7.3.14 and served again after 20s under 8.0.29. 8.0.17/8.0.25
+# fix two more cooldown faults of the same family (#6415, #6545). A pin
+# rolled back below 8.0.22 brings that back, so it goes red here.
+test_gateway_pinned_release_is_at_least_8_0_22() {
+  local v; v="$(yq -r '.base_tools["cli-proxy-api"].version' "$CEL_ROOT/agents.yaml")"
+  assert_eq "$(printf '%s\n8.0.22\n' "$v" | sort -V | head -1)" "8.0.22"
+}
+
+# Both assets are the same release as the version, and every digest is a
+# sha256 - a bumped version over a stale URL would install the old binary.
+test_gateway_pinned_assets_match_the_version() {
+  local e; e="$(yq -c '.base_tools["cli-proxy-api"]' "$CEL_ROOT/agents.yaml")"
+  local v; v="$(jq -r '.version' <<<"$e")"
+  local arch
+  for arch in x64 arm64; do
+    assert_contains "$(jq -r ".assets.$arch.url" <<<"$e")" "/download/v$v/CLIProxyAPI_${v}_linux_"
+    assert_eq "$(jq -r ".assets.$arch.member" <<<"$e")" cli-proxy-api
+    [[ "$(jq -r ".assets.$arch.sha256" <<<"$e")" =~ ^[0-9a-f]{64}$ ]] \
+      || { echo "$arch sha256 is not a digest"; return 1; }
+  done
 }

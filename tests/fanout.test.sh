@@ -23,10 +23,18 @@ _fanout_setup() {
 #!/usr/bin/env bash
 echo "$@" >> "$STUB_LOG"
 case "$1 $2" in
+  "worktree open")   # mirrors herdr's usage error: one of --workspace / --cwd is required
+                     # the real parser (herdr worktree open, installed binary):
+                     #   [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label] [--focus] [--no-focus] [--trust-repository]
+                     _w=0; _p=0; _usage="usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]"
+                     case " $* " in *" --workspace "*) _w=$((_w+1));; esac; case " $* " in *" --cwd "*) _w=$((_w+1));; esac
+                     case " $* " in *" --path "*) _p=$((_p+1));; esac; case " $* " in *" --branch "*) _p=$((_p+1));; esac
+                     if [ "$_w" -ne 1 ] || [ "$_p" -ne 1 ]; then echo "$_usage" >&2; exit 1; fi
+                     touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
   "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
-  "workspace list")  if [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
+  "workspace list")  if [ -n "${STUB_OPEN_GATE:-}" ] && [ ! -f "$STUB_OPEN_GATE" ]; then echo '{"result":{"workspaces":[]}}'; elif [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
-  "pane get")        echo '{"result":{"pane":{"pane_id":"'"$3"'","tab_id":"wZ:t1"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
   "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
@@ -36,13 +44,40 @@ case "$1 $2" in
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
                      else echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"'"${STUB_STATUS:-idle}"'"}]}}'; fi;;
+  "pane send-text")
+    if [ -n "${STUB_PREFIX_FILE:-}" ]; then printf '%s' "$4" > "$STUB_PREFIX_FILE"; fi;;
+  "agent start")
+    if [ -n "${STUB_AGENT_ENV_FILE:-}" ]; then
+      prefix="$(cat "$STUB_PREFIX_FILE")"
+      bash -c "$prefix sh -c 'printf \"%s|%s\" \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"'" > "$STUB_AGENT_ENV_FILE"
+    fi;;
   *) echo '{}';;
 esac
 EOF
   chmod +x "$STUB"
   export CEL_FANOUT_HERDR="$STUB"
   export STUB_LOG STUB_WT STUB_REPO
+  export CEL_AFK_STATE="$T/afk-state"
   printf 'do the thing\n' > "$T/spec.md"
+}
+
+# A GC-retained row (AH-261018): its worktree exists as a real checkout the
+# row owns, its pane is gone, and its native session file is on disk. The
+# session is recorded on the row (explicit provenance) unless NOSESS=1.
+_fanout_retain() { # <id> <wt-dir-name> [state]
+  local id="$1" wt="$T/$2" st="${3:-collected}"
+  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base 2>/dev/null || true
+  git -C "$T/repos/widget" worktree add -q -b "$id" "$wt" 2>/dev/null || true
+  RET_WT="$(cd "$wt" && pwd -P)"
+  # the row's session lives under the pi root the launch will use
+  export CEL_PI_AGENT_DIR="$T/pi"
+  RET_SESS="$T/pi/sessions/--retained-$id--/orig-$id.jsonl"
+  mkdir -p "$(dirname "$RET_SESS")"
+  printf '{"type":"session","version":3,"id":"orig-%s","cwd":"%s"}\n' "$id" "$RET_WT" > "$RET_SESS"
+  jq --arg w "$RET_WT" --arg s "$RET_SESS" --arg st "$st" \
+    '.[0].worktree = $w | .[0].state = $st | .[0].history += [{state:$st, at:"t", by:"gc"}] | (if env.NOSESS == "1" then . else .[0].session = $s end)' \
+    "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  RET_WS="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$RET_WT\"}}]}}"
 }
 
 # A dead agent must not leave its row reading `running` forever: finished work
@@ -208,7 +243,7 @@ test_delegate_refuses_unknown_pr_open() {
   _fanout_setup
   yq -y -i '.policy.pr_open = "sometimes"' "$T/workspace.yaml"
   if (cd "$T" && "$BIN" delegate widget WG-BAD "$T/spec.md") > /dev/null 2>&1; then
-    fail "unknown pr_open value was accepted"
+    echo "unknown pr_open value was accepted"; return 1
   fi
   rm -rf "$T"
 }
@@ -593,12 +628,17 @@ echo "\$*|GH_TOKEN=\${GH_TOKEN-<unset>}" >> "$GH_LOG.env"
 case "\$1 \$2" in
   "auth token") case "\$4" in acct-b) echo tok-b;; *) exit 1;; esac;;
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}';;
-  "pr merge") exit 0;;
+  "pr view")  [ -z "\${STUB_PRVIEW_HOOK:-}" ] || eval "\$STUB_PRVIEW_HOOK"
+              echo '{"number":7,"author":{"login":"$1"},"reviewDecision":"$2","isDraft":${4:-false},"mergeable":"MERGEABLE","state":"${5:-OPEN}","headRefOid":"'"\${STUB_PR_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"'","statusCheckRollup":[{"conclusion":"$([ "$3" = 1 ] && echo FAILURE || echo SUCCESS)"}]}'
+              [ -z "\${STUB_PRVIEW_AFTER:-}" ] || eval "\$STUB_PRVIEW_AFTER";;
+  "pr merge") # a merge pinned to a head that is no longer the remote head is refused, as GitHub does
+              if [ -f "$T/remote-head" ]; then case "\$*" in *"--match-head-commit \$(cat "$T/remote-head")"*) exit 0;; *) exit 1;; esac; fi
+              exit 0;;
   *) echo '{}';;
 esac
 EOF
   chmod +x "$GH_STUB"; export CEL_FANOUT_GH="$GH_STUB" GH_LOG
+  export STUB_PR_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; unset STUB_PRVIEW_HOOK STUB_PRVIEW_AFTER; rm -f "$T/remote-head"
   # the fixture repo declares a gate, and land now refuses an unverified one:
   # a passing verdict by default, so tests about OTHER refusals still merge
   _fanout_verify_stub true
@@ -727,6 +767,84 @@ test_scout_uses_its_own_role_binding() {
   assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" scout-model
   assert_contains "$(grep '^agent start' "$STUB_LOG" | head -1)" "scout-model"
   rm -rf "$T"
+}
+
+# Gateway credentials must be staged in the actual pane shell before a worker
+# or scout starts. `pane run` creates a child context and cannot establish the
+# variables consumed by Pi's generated provider configuration.
+test_gateway_worker_and_scout_processes_receive_token_and_session() {
+  _fanout_setup
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  gateway-opus: { runtime: pi, model: claude/claude-opus-5-5, via: gateway, thinking: high }
+role_profiles:
+  worker: gateway-opus
+  scout: gateway-opus
+YAML
+  local gwt previous_pi_set previous_pi previous_no_quota previous_session_set previous_session
+  previous_pi_set="${CEL_PI_AGENT_DIR+x}"
+  previous_pi="${CEL_PI_AGENT_DIR:-}"
+  previous_no_quota="${CEL_NO_QUOTA_PROBE:-}"
+  previous_session_set="${CEL_SESSION_ID+x}"
+  previous_session="${CEL_SESSION_ID:-}"
+  gwt="$(mktemp -d)"
+  export CEL_CONFIG_FILE="$gwt/config.yaml" CEL_GATEWAY_STATE="$gwt/state"
+  printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
+  mkdir -p "$CEL_GATEWAY_STATE/auth" "$gwt/pi"
+  printf '{}' > "$CEL_GATEWAY_STATE/auth/claude-aaaaaa11-someone@example.invalid.json"
+  printf 'scout-test-api-key\n' > "$CEL_GATEWAY_STATE/api-key"
+  export CEL_PI_AGENT_DIR="$gwt/pi" CEL_NO_QUOTA_PROBE=1 CEL_SESSION_ID=parent-orchestrator
+  cat > "$gwt/gateway-stub" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5","context_length":200000,"max_output_tokens":8192}]}' ;;
+esac
+EOF
+  chmod +x "$gwt/gateway-stub"
+  export CEL_GATEWAY_STUB="$gwt/gateway-stub"
+  export STUB_PREFIX_FILE="$gwt/prefix" STUB_AGENT_ENV_FILE="$gwt/agent-env"
+  printf 'scout brief\n' > "$T/brief.md"
+  local out
+  if ! out="$(cd "$T" && "$BIN" scout widget "$T/brief.md" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    rm -rf "$T" "$gwt"
+    return 1
+  fi
+  local scout_alias; scout_alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  local scout_env; scout_env="$(cat "$STUB_AGENT_ENV_FILE")"
+  local scout_start; scout_start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+
+  : > "$STUB_LOG"
+  if ! out="$(cd "$T" && "$BIN" delegate widget WG-GW "$T/spec.md" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    rm -rf "$T" "$gwt"
+    return 1
+  fi
+  local worker_alias; worker_alias="$(jq -r '.[] | select(.shape == "ship") | .alias' "$T/.cel/delegations.json")"
+  local worker_env; worker_env="$(cat "$STUB_AGENT_ENV_FILE")"
+  local worker_start; worker_start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  local model_key; model_key="$(jq -r '.providers["ompgw-claude"].apiKey' "$gwt/pi/models.json" 2>/dev/null || true)"
+  assert_eq "$scout_env" "scout-test-api-key|$scout_alias"
+  assert_contains "$scout_start" "--model ompgw-claude/claude-opus-5-5"
+  assert_eq "$worker_env" "scout-test-api-key|$worker_alias"
+  assert_contains "$worker_start" "--model ompgw-claude/claude-opus-5-5"
+  assert_eq "$model_key" '$OMP_GATEWAY_TOKEN'
+  # The pane must load the models.json the launcher just wrote: the caller's
+  # The launch prefix pins pi's resolved root (CEL_PI_AGENT_DIR here), and a
+  # leaked PI_CODING_AGENT_DIR in the pane cannot override it.
+  local pane_dir; pane_dir="$(PI_CODING_AGENT_DIR=/leaked/omp/root bash -c "$(cat "$STUB_PREFIX_FILE") printenv PI_CODING_AGENT_DIR")"
+  assert_eq "$pane_dir" "$gwt/pi"
+  # ...and nothing launch-only was exported into the pane shell itself.
+  local after; after="$(env -u CEL_SESSION_ID -u OMP_GATEWAY_TOKEN bash -c "$(cat "$STUB_PREFIX_FILE") true
+printf '%s|%s' \"\${CEL_SESSION_ID-unset}\" \"\${OMP_GATEWAY_TOKEN-unset}\"")"
+  assert_eq "$after" "unset|unset"
+  rm -rf "$T" "$gwt"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_NO_QUOTA_PROBE
+  unset STUB_PREFIX_FILE STUB_AGENT_ENV_FILE
+  if [ -n "$previous_pi_set" ]; then export CEL_PI_AGENT_DIR="$previous_pi"; else unset CEL_PI_AGENT_DIR; fi
+  if [ -n "$previous_session_set" ]; then export CEL_SESSION_ID="$previous_session"; else unset CEL_SESSION_ID; fi
+  [ -z "$previous_no_quota" ] || export CEL_NO_QUOTA_PROBE="$previous_no_quota"
 }
 # CEL-68: an omp delegate/scout keeps its profile's model - prewalk off.
 test_omp_delegate_and_scout_launch_with_no_prewalk() {
@@ -1230,6 +1348,7 @@ case "$1 $2" in
       {"workspace_id":"wG","worktree":{"repo_root":"'"$STUB_REPO_GADGET"'","is_linked_worktree":false}},
       {"workspace_id":"wL","worktree":{"repo_root":"'"$STUB_REPO_LONE"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
+  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
   "pane list")       printf '%s' "${STUB_PANES_JSON:-{\"result\":{\"panes\":[]}}}";;
   "agent list")      echo '{"result":{"agents":[]}}';;
   *) echo '{}';;
@@ -1328,14 +1447,16 @@ test_workspace_flag_resolves_the_ledger_from_an_unrelated_cwd() {
   rm -rf "$T"
 }
 
+HA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HB="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+HC="cccccccccccccccccccccccccccccccccccccccc"
 # ---- the review verdict as a ledger fact ------------------------------------
 # On a repo whose PR author and reviewer are one GitHub account, GitHub refuses
 # approval outright and a posted review reads as the owner talking to himself in
 # public. The verdict has to live somewhere; the ledger is where.
 test_review_records_the_verdict_on_the_row() {
-  _fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-REV "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-REV approved --by widget-pr-7-review --note "gate green") > /dev/null
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
   local r; r="$(jq -c '.[0].review' "$T/.cel/delegations.json")"
   assert_eq "$(printf '%s' "$r" | jq -r .verdict)" approved
   assert_eq "$(printf '%s' "$r" | jq -r .by)" widget-pr-7-review
@@ -1346,7 +1467,7 @@ test_review_records_the_verdict_on_the_row() {
 test_review_refuses_an_unknown_verdict() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-REV2 "$T/spec.md") > /dev/null
-  local out; out="$( (cd "$T" && "$BIN" review WG-REV2 maybe --by r) 2>&1 )" && {
+  local out; out="$( (cd "$T" && "$BIN" review WG-REV2 maybe --head "$HA" --by r) 2>&1 )" && {
     echo "an unknown verdict was recorded"; rm -rf "$T"; return 1; }
   assert_contains "$out" "approved"
   rm -rf "$T"
@@ -1357,7 +1478,7 @@ test_review_refuses_an_unknown_verdict() {
 # the authority.
 test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "gate green") > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "gate green") > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )"
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge on a ledger verdict: $out"; rm -rf "$T"; return 1; }
   assert_contains "$out" "ledger"
@@ -1371,7 +1492,7 @@ test_land_accepts_a_ledger_verdict_when_the_author_is_the_reviewer() {
 # reads in full: a ticket-shaped token it rejects must never get that far.
 test_land_refuses_a_note_the_hygiene_scan_would_reject() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND approved --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by widget-pr-7-review --note "see ZZQ-$((6*2)) for more") > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a note the scan rejects"; rm -rf "$T"; return 1; }
   grep -q "^pr merge" "$GH_LOG" && { echo "merged anyway"; rm -rf "$T"; return 1; }
   assert_contains "$out" "ZZQ-$((6*2))"
@@ -1387,20 +1508,150 @@ test_land_says_which_path_approved_it() {
 
 test_land_refuses_a_changes_verdict() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
-  (cd "$T" && "$BIN" review WG-LAND changes --by widget-pr-7-review) > /dev/null
+  (cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by widget-pr-7-review) > /dev/null
   local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
     echo "landed on a changes-requested verdict"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   assert_contains "$out" "not approved"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
+# ---- AH-261017: the verdict binds to the commit the reviewer NAMED ----------
+# `review` used to stamp whatever the worker's local HEAD was - once an
+# unpushed commit the reviewer never saw. --head is now required, the SHA the
+# reviewer evaluated, and nothing infers it.
+_rev_row() { jq -c '.[0].review // null' "$T/.cel/delegations.json"; }
+
+test_review_records_the_named_head_never_the_local_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # the worker has an UNPUSHED local commit the reviewer never saw
+  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unpushed
+  local local_head; local_head="$(git -C "$STUB_WT" rev-parse HEAD)"
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r --note ok) > /dev/null
+  local r; r="$(_rev_row)"
+  assert_eq "$(printf '%s' "$r" | jq -r .head)" "$HA"
+  assert_eq "$(printf '%s' "$r" | jq -r .head_source)" explicit
+  [ "$(printf '%s' "$r" | jq -r .head)" != "$local_head" ] || { echo "stamped the local head"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_requires_a_full_commit_sha_and_mutates_nothing() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  local bad out
+  for bad in "" MISSING "${HA:0:7}" "${HA}a" "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" "HEAD" "origin/main"; do
+    for v in approved changes; do
+      if [ "$bad" = MISSING ]; then
+        out="$( (cd "$T" && "$BIN" review WG-LAND $v --by r) 2>&1 )" && { echo "recorded $v without --head"; rm -rf "$T"; return 1; }
+      else
+        out="$( (cd "$T" && "$BIN" review WG-LAND $v --head "$bad" --by r) 2>&1 )" && { echo "recorded $v with head '$bad'"; rm -rf "$T"; return 1; }
+      fi
+      assert_contains "$out" "head"
+      assert_eq "$(_rev_row)" null
+    done
+  done
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_approval_when_the_pr_head_is_not_the_named_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  export STUB_PR_HEAD="$HC"      # the remote advanced past what was reviewed
+  local out; out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r2) 2>&1 )" && {
+    echo "approved a commit that is not the PR head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "head"
+  # and a SHA that was never the PR head at all
+  out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HB" --by r3) 2>&1 )" && {
+    echo "approved an arbitrary sha"; rm -rf "$T"; return 1; }
+  # the earlier record is untouched by either refusal
+  assert_eq "$(_rev_row | jq -r .by)" r
+  assert_eq "$(_rev_row | jq -r .head)" "$HA"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_approval_of_a_pr_the_fleet_does_not_own() {
+  _fanout_land_setup someone-else REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null 2>&1 && {
+    echo "approved a colleague's PR"; rm -rf "$T"; return 1; }
+  assert_eq "$(_rev_row)" null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_refuses_when_the_delegation_changes_during_the_remote_check() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # the ledger lock is released around the remote read; a competing writer
+  # re-points the row, and the verdict must not land on the new identity
+  export STUB_PRVIEW_HOOK="jq -c 'map(.branch = \"WG-OTHER\")' '$T/.cel/delegations.json' > '$T/.cel/d.tmp' && mv '$T/.cel/d.tmp' '$T/.cel/delegations.json'"
+  local out; out="$( (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) 2>&1 )" && {
+    echo "recorded against a changed delegation"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "changed"
+  assert_eq "$(_rev_row)" null
+  unset STUB_PRVIEW_HOOK CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_review_changes_verdict_keeps_the_commit_it_names() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  export STUB_PR_HEAD="$HC"      # reviewed HA, remote has since moved: still a valid negative
+  (cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by r) > /dev/null
+  assert_eq "$(_rev_row | jq -r .verdict)" changes
+  assert_eq "$(_rev_row | jq -r .head)" "$HA"
+  assert_eq "$(_rev_row | jq -r .head_source)" explicit
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_refuses_a_legacy_ledger_approval_without_explicit_head() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  # a historical record: head came from the local worktree, no head_source
+  jq -c --arg h "$HA" '.[0].review = {verdict:"approved", by:"old", note:"", at:"2026-01-01T00:00:00Z", head:$h}' \
+    "$T/.cel/delegations.json" > "$T/d.tmp" && mv "$T/d.tmp" "$T/.cel/delegations.json"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on a legacy approval"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "explicit"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_refuses_an_explicit_approval_for_a_superseded_head() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  export STUB_PR_HEAD="$HC"      # pushed after the review
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed an unreviewed head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "head"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_pins_the_merge_to_the_head_it_checked() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1
+  grep -q "^pr merge 7 .*--match-head-commit $HA" "$GH_LOG" || { echo "merge not pinned: $(grep '^pr merge' "$GH_LOG")"; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_land_lands_nothing_when_the_head_moves_after_the_check() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by r) > /dev/null
+  # a push lands between land's PR read and its merge call
+  export STUB_PRVIEW_AFTER="printf '%s' '$HC' > '$T/remote-head'"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed a moved head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "merge of #7 failed"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  unset STUB_PRVIEW_AFTER CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+test_status_marks_a_legacy_approval_apart_from_an_attested_one() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  jq -c '.[0].review = {verdict:"approved", by:"old", head:"x"}' "$T/.cel/delegations.json" > "$T/d.tmp" \
+    && mv "$T/d.tmp" "$T/.cel/delegations.json"
+  assert_contains "$(cd "$T" && "$BIN" status)" " old "
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
 test_status_shows_the_review_column() {
-  _fanout_setup
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
   (cd "$T" && "$BIN" delegate widget WG-RCOL "$T/spec.md") > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" "REVIEW"
-  (cd "$T" && "$BIN" review WG-RCOL approved --by r) > /dev/null
+  (cd "$T" && "$BIN" review WG-RCOL approved --head "$HA" --by r) > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" " ok "
-  (cd "$T" && "$BIN" review WG-RCOL changes --by r) > /dev/null
+  (cd "$T" && "$BIN" review WG-RCOL changes --head "$HA" --by r) > /dev/null
   assert_contains "$(cd "$T" && "$BIN" status)" " chg "
   rm -rf "$T"
 }
@@ -2450,8 +2701,10 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
 test_the_ledger_stamps_the_state_it_was_created_in() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
-  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 1
-  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" running
+  # AH-261017: born `unconfirmed` (the launch receipt), then running on acceptance
+  assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 2
+  assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].history[1].state' "$T/.cel/delegations.json")" running
   assert_eq "$(jq -r '.[0].history[0].at' "$T/.cel/delegations.json")" \
             "$(jq -r '.[0].created' "$T/.cel/delegations.json")"
   rm -rf "$T"
@@ -2465,7 +2718,7 @@ test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
   (cd "$T" && "$BIN" collect WG-1-x >/dev/null)
   (cd "$T" && "$BIN" release WG-1-x --discard >/dev/null)
   assert_eq "$(jq -r '.[0].history | map(.state) | join(",")' "$T/.cel/delegations.json")" \
-            "running,collected,released"
+            "unconfirmed,running,collected,released"
   # every entry says who moved it, and the stamps never go backwards
   assert_eq "$(jq -r '.[0].history | map(.by != "" and .at != "") | all' "$T/.cel/delegations.json")" true
   assert_eq "$(jq -r '.[0].history | map(.at) | (. == sort)' "$T/.cel/delegations.json")" true
@@ -2569,8 +2822,8 @@ test_collect_does_not_land_pr_none_branch_with_zero_commits() {
 test_review_records_the_head_it_reviewed() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-RH "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-RH changes --by widget-pr-7-review) > /dev/null
-  assert_eq "$(jq -r '.[0].review.head' "$T/.cel/delegations.json")" "$(git -C "$STUB_WT" rev-parse HEAD)"
+  (cd "$T" && "$BIN" review WG-RH changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  assert_eq "$(jq -r '.[0].review.head' "$T/.cel/delegations.json")" "$HA"
   rm -rf "$T"
 }
 
@@ -2591,13 +2844,12 @@ test_handback_to_a_live_worker_goes_by_inbox_never_by_typing() {
 test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-HB2 "$T/spec.md") > /dev/null
-  (cd "$T" && "$BIN" review WG-HB2 changes --by widget-pr-7-review) > /dev/null
+  (cd "$T" && "$BIN" review WG-HB2 changes --head "$HA" --by widget-pr-7-review) > /dev/null
   local spec; spec="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
-  git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$T/repos/widget" worktree add -q -b WG-HB2 "$T/wt-hb2" 2>/dev/null || true
+  _fanout_retain WG-HB2 wt-hb2 finished
   : > "$STUB_LOG"
   local out; out="$(cd "$T" && CEL_INBOX_DIR="$T/inbox" \
-    STUB_WS_JSON="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wR\",\"worktree\":{\"checkout_path\":\"$T/wt-hb2\"}}]}}" \
+    STUB_WS_JSON="$RET_WS" \
     "$BIN" handback WG-HB2 "fix line 3" --by widget-pr-7-review 2>&1)"
   assert_contains "$(cat "$STUB_LOG")" "agent start"
   assert_contains "$out" "resumed"
@@ -2605,5 +2857,745 @@ test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
   assert_eq "$(jq -r '.[0].spec' "$T/.cel/delegations.json")" "$spec"
   assert_contains "$(find "$T/inbox" -type f -exec cat {} + 2>/dev/null)" "fix line 3"
+  rm -rf "$T"
+}
+
+# AH-261017: delegate has its own launch (pane run, send-text, agent start); it
+# takes the same readiness gate as `cel run` and never retries a refused start.
+test_delegate_types_nothing_and_starts_nothing_in_a_pane_whose_shell_is_busy() {
+  _fanout_setup
+  export PF_ALWAYS=busy CEL_PANE_READY_MS=100 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  local out rc=0
+  out="$(cd "$T" && "$BIN" delegate widget WG-BUSY "$T/spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "delegate launched into a busy pane"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "shell does not own the foreground"
+  assert_eq "$(grep -c '^pane run\|^pane send-text\|^agent start' "$STUB_LOG" || true)" 0
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json" 2>/dev/null || echo 0)" 0
+  unset PF_ALWAYS; rm -rf "$T"
+}
+test_delegate_does_not_retry_a_refused_agent_start() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  local out rc=0
+  # the stub refuses the start like herdr's agent_pane_busy
+  sed -i 's|^  "agent start")|  "agent start") if [ -n "${STUB_START_FAIL:-}" ]; then echo "agent_pane_busy" >\&2; exit 1; fi|' "$STUB"
+  out="$(cd "$T" && STUB_START_FAIL=1 "$BIN" delegate widget WG-REFUSED "$T/spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a refused start was reported as a launch"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_eq "$(grep -c '^agent start' "$STUB_LOG" || true)" 1
+  assert_eq "$(grep -c '^pane send-keys' "$STUB_LOG" || true)" 0
+  # AH-261017: the launch receipt was written BEFORE the start, and a failed
+  # start is not rolled back - herdr can time out after the agent exists - so
+  # the row stays, `unconfirmed`, saying exactly that. No task was delivered.
+  assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$out" "An agent may exist"
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
+  rm -rf "$T"
+}
+
+# AH-261017: the receipt precedes the spawn, so a delegate killed after herdr
+# started the agent leaves a trackable row, never a live agent with no row.
+test_delegate_writes_its_launch_receipt_before_the_agent_starts() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") cp "$STUB_LEDGER" "$STUB_LEDGER.at-start" 2>/dev/null \|\| echo absent > "$STUB_LEDGER.at-start";|' "$STUB"
+  (cd "$T" && STUB_LEDGER="$T/.cel/delegations.json" "$BIN" delegate widget WG-RCPT "$T/spec.md") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json.at-start")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json.at-start")" starting
+  # and the finished row is the normal running row, with the transition recorded
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" dispatched
+  assert_eq "$(jq -r '[.[0].history[].state] | join(",")' "$T/.cel/delegations.json")" "unconfirmed,running"
+  rm -rf "$T"
+}
+
+test_delegate_killed_during_agent_start_leaves_a_trackable_row() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  # the agent comes up, then the delegating process dies before it can record anything more
+  sed -i 's|^  "agent start")|  "agent start") pkill -9 -f "cel-fanout delegate widget WG-KILLED" ; sleep 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-KILLED "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" unconfirmed
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" starting
+  assert_eq "$(jq -r '.[0].alias' "$T/.cel/delegations.json")" widget-wg-killed
+  assert_eq "$(grep -c '^agent prompt' "$STUB_LOG" || true)" 0
+  rm -rf "$T"
+}
+
+# AH-261017 review round 1: a failed `delegate --reuse` start must not destroy
+# the prior row (handback resumes through --reuse; the verdict and PR live there).
+test_a_failed_reuse_start_keeps_the_prior_rows_verdict_and_pr() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  (cd "$T" && "$BIN" delegate widget WG-RU "$T/spec.md") > /dev/null
+  (cd "$T" && "$BIN" review WG-RU changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  _fanout_retain WG-RU wt-ru finished
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  local out rc=0
+  out="$(cd "$T" && STUB_WS_JSON="$RET_WS" \
+    "$BIN" delegate widget WG-RU "$T/spec.md" --reuse 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a refused start succeeded"; return 1; }
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].pr' "$T/.cel/delegations.json")" 7
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  rm -rf "$T"
+}
+
+# a start-failed receipt row may hold a live agent: it counts toward the cap
+# and fences collect/release/land until the operator records the outcome.
+test_a_start_failed_receipt_row_holds_a_slot_and_fences_consumers_until_abandoned() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  (cd "$T" && "$BIN" delegate widget WG-SF "$T/spec.md") >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_contains "$(cd "$T" && "$BIN" status 2>&1)" "1/4 used"
+  local before out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-SF" "release WG-SF --discard" "land WG-SF"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on an unsettled launch"; return 1; }
+    assert_contains "$out" "UNSETTLED launch"
+  done
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  # fresh evidence is required: a pane showing work is refused, unknown retained
+  rc=0; out="$(cd "$T" && STUB_PANE_TEXT='● editing files
+ ctx 5.0%/1.0m' "$BIN" recover abandon WG-SF --reason "looked fine" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandoned a pane that shows work"; return 1; }
+  assert_contains "$out" "not provably unstarted"
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  (cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-SF --reason "pane inspected: shell prompt only") >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" abandoned
+  assert_eq "$(jq -r '.[0].abandon.prior_launch_phase' "$T/.cel/delegations.json")" start-failed
+  # settled: release is no longer fenced
+  (cd "$T" && "$BIN" release WG-SF --keep-worktree) >/dev/null
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  rm -rf "$T"
+}
+
+# round 3: launch debt fences EVERY state. A failed --reuse start leaves a
+# finished row (verdict+PR kept) with launch.phase start-failed; no destructive
+# consumer may touch it, the worktree survives, and abandon needs fresh evidence.
+test_a_failed_reuse_over_a_finished_row_fences_every_destructive_consumer() {
+  _fanout_setup
+  export CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  (cd "$T" && "$BIN" delegate widget WG-RF "$T/spec.md") > /dev/null
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  _fanout_retain WG-RF wt-rf finished
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  (cd "$T" && STUB_WS_JSON="$RET_WS" \
+    "$BIN" delegate widget WG-RF "$T/spec.md" --reuse) >/dev/null 2>&1 || true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" finished
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-RF" "release WG-RF --discard" "release WG-RF --keep-worktree" "land WG-RF" \
+           "review WG-RF approved --head $HA --by widget-pr-7-review" "request-review WG-RF --head $HA" "handback WG-RF x --by r"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on a start-failed finished row"; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+  done
+  (cd "$T" && "$BIN" release --all --state finished >/dev/null 2>&1) || true
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  [ -d "$T/wt-rf" ] || { echo "the worktree went"; return 1; }
+  rm -rf "$T"
+}
+
+test_abandon_refuses_launch_starting_and_started_with_zero_mutation() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-ST "$T/spec.md") > /dev/null
+  local ph out rc before
+  for ph in starting started dispatch-unconfirmed; do
+    jq --arg p "$ph" '.[0].state = "unconfirmed" | .[0].launch.phase = $p' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+    before="$(cat "$T/.cel/delegations.json")"; rc=0
+    out="$(cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-ST --reason "looks idle" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "abandoned launch $ph"; return 1; }
+    assert_contains "$out" "DEFINITIVELY"
+    assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+    [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  done
+  rm -rf "$T"
+}
+
+# a delegate killed mid-start leaves launch.phase starting: honest refusal, no
+# circular pointer at the abandon that refuses it, debt and worktree unchanged.
+test_a_row_stuck_at_launch_starting_says_it_is_retained_debt_with_no_exit() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-KS "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "starting"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-KS" "release WG-KS --discard"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran"; return 1; }
+    assert_contains "$out" "RETAINED UNCERTAIN DEBT with NO supported exit" || return 1
+    case "$out" in *"recover abandon WG-KS --reason"*) echo "circular pointer to abandon: $out"; return 1 ;; esac
+  done
+  rc=0; out="$(cd "$T" && STUB_PANE_TEXT="$(_unstarted_pane)" "$BIN" recover abandon WG-KS --reason x 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "abandon accepted starting"; return 1; }
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  rm -rf "$T"
+}
+
+# round 4: a delegate whose dispatch was never confirmed (prompt MAY have been
+# delivered) is uncertain delivery debt: every destructive consumer refuses it.
+test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-DU "$T/spec.md") > /dev/null
+  jq '.[0].state = "unconfirmed" | .[0].launch.phase = "dispatch-unconfirmed"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before v out rc; before="$(cat "$T/.cel/delegations.json")"
+  for v in "collect WG-DU" "release WG-DU --discard" "release WG-DU --keep-worktree" "land WG-DU" \
+           "review WG-DU approved --head $HA --by r" "request-review WG-DU --head $HA" "handback WG-DU x --by r"; do
+    rc=0; out="$(cd "$T" && "$BIN" $v 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$v ran on dispatch-unconfirmed"; return 1; }
+    assert_contains "$out" "UNSETTLED launch" || { echo "$v"; return 1; }
+    assert_eq "$(cat "$T/.cel/delegations.json")" "$before" || return 1
+  done
+  [ -d "$STUB_WT" ] || { echo "worktree went"; return 1; }
+  rm -rf "$T"
+}
+
+# AH-261018: an explicit `false` must not collapse into "unknown" (jq `//` treats
+# false as absent). A red gate is a red gate in land's refusal AND in status.
+test_land_names_a_failed_gate_as_false_not_unknown() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_verify_stub false
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed with a failed gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "(verdict: false)"
+  case "$out" in *"verdict: unknown"*) echo "false collapsed to unknown"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1;; esac
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_status_renders_a_failed_gate_as_FAIL() {
+  _fanout_setup; _fanout_verify_stub false
+  (cd "$T" && "$BIN" delegate widget WG-RED "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  (cd "$T" && "$BIN" collect WG-RED) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" false
+  local row; row="$(cd "$T" && STUB_AGENTS_EMPTY=1 "$BIN" status | grep WG-RED || true)"
+  assert_contains "$row" "FAIL"
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+
+# AH-261018 review: a verifier that REFUSES (exit 4) or is SIGKILLed leaves the previous
+# attempt's verdict on disk; land/collect must not read that as this run's answer.
+_fanout_seed_old_pass() { # writes a passing verdict from an older run into the row's worktree
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
+  FOLD_WT="$wt"
+}
+test_land_refuses_when_the_verifier_refuses_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-refuse.sh"
+  printf '#!/usr/bin/env bash\necho "cel-verify: refusing CEL_VERIFY_ARTIFACT_DIR /x - inside a git work tree" >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a refused verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  assert_contains "$out" "refusing CEL_VERIFY_ARTIFACT_DIR"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  ls "$FOLD_WT"/.agent/verdict-history/*.json >/dev/null 2>&1 || { echo "the old verdict was not preserved"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_refuses_when_the_verifier_is_sigkilled_and_an_old_pass_is_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_seed_old_pass
+  VSTUB="$T/verify-kill.sh"
+  printf '#!/usr/bin/env bash\nkill -9 $$\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on an old pass after a SIGKILLed verifier: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+# collect records the stub, not the old pass, in the ledger
+test_collect_after_a_refused_verifier_records_no_verdict_not_the_old_pass() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-OLD "$T/spec.md") > /dev/null
+  mkdir -p "$STUB_WT/.agent"; printf 'done\n' > "$STUB_WT/.agent/result.md"
+  printf '{"at":"2025-01-01T00:00:00Z","state":"completed","gate":{"configured":true,"passed":true,"outcome":"pass"}}' > "$STUB_WT/.agent/verdict.json"
+  VSTUB="$T/verify-refuse2.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  (cd "$T" && "$BIN" collect WG-OLD) > /dev/null 2>&1
+  assert_eq "$(jq -r '.[0].verdict.gate_outcome' "$T/.cel/delegations.json")" no_verdict
+  assert_eq "$(jq -r '.[0].verdict.gate' "$T/.cel/delegations.json")" null
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# review G1: land/collect accept ONLY the verdict of their own invocation - another
+# attempt's completion (even a pass) on the same worktree never authorises them, and
+# gate evidence taken on another head never counts.
+_fanout_id_stub() { # <attempt-mode own|other> <gate-head real|bogus>
+  VSTUB="$T/verify-id.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+[ "$1" = own ] || id="someone-elses-attempt"
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"; [ "$2" = real ] || head="0000000000000000000000000000000000000bad"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:true, code:0, outcome:"pass", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+echo "verdict gate:PASS"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+test_land_never_takes_another_attempts_passing_verdict() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub other real
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on another attempt's pass: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no verdict"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_never_takes_gate_evidence_from_another_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own bogus
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on gate evidence for another head: $out"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  assert_contains "$out" "another head"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+test_land_accepts_its_own_attempt_with_gate_evidence_for_the_current_head() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_id_stub own real
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "the positive control did not land"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# review R1: validation and use are on ONE immutable snapshot - swapping the verdict file
+# between them (another attempt, anyone) can neither authorise nor veto this call.
+_fanout_snapshot_stub() { # <own-gate-passed true|false>
+  VSTUB="$T/verify-snap.sh"
+  cat > "$VSTUB" <<EOF2
+#!/usr/bin/env bash
+wt="\$1"; id=""; shift
+while [ \$# -gt 0 ]; do case "\$1" in --attempt-id) id="\$2"; shift 2;; *) shift;; esac; done
+head="\$(git -C "\$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+mkdir -p "\$wt/.agent"
+jq -nc --arg id "\$id" --arg h "\$head" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{at:\$at, attempt:\$id, state:"completed", head:\$h, gate:{configured:true, ran:true, passed:$1, code:0, outcome:"$([ "$1" = true ] && echo pass || echo fail)", head:\$h}, tests:{red_then_green:true}, diff:{files:1}, checks:{state:"SUCCESS"}, review:{decision:"APPROVED"}}' > "\$wt/.agent/verdict.json"
+EOF2
+  chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+}
+_fanout_swap_hook() { # <passed true|false> - replaces the verdict on disk with ANOTHER attempt's
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  export CEL_FANOUT_TEST_AFTER_VALIDATE="printf '%s' '{\"at\":\"2099-01-01T00:00:00Z\",\"attempt\":\"intruder\",\"state\":\"completed\",\"gate\":{\"configured\":true,\"ran\":true,\"passed\":$1,\"outcome\":\"x\"}}' > '$wt/.agent/verdict.json'"
+}
+test_a_verdict_swapped_in_after_validation_cannot_authorise_land() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub false; _fanout_swap_hook true       # own attempt FAILED; the file is then swapped for another attempt's PASS
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "landed on a swapped-in pass: $out"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  assert_contains "$out" "did not pass"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+test_land_uses_its_own_validated_snapshot_not_the_file_on_disk() {
+  _fanout_land_setup fleetbot APPROVED 0
+  _fanout_snapshot_stub true; _fanout_swap_hook false       # own attempt PASSED; the file is then swapped for a FAIL - the snapshot rules
+  (cd "$T" && "$BIN" land WG-LAND) > /dev/null 2>&1 || { echo "land did not use its validated snapshot"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
+}
+# review R2: a stub that cannot be recorded is an explicit failure, never a silent continue
+test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
+  _fanout_land_setup fleetbot APPROVED 0
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
+  mkdir -p "$wt/.agent"; chmod 500 "$wt/.agent"
+  VSTUB="$T/verify-refuse3.sh"; printf '#!/usr/bin/env bash\necho refused >&2\nexit 4\n' > "$VSTUB"; chmod +x "$VSTUB"; export CEL_FANOUT_VERIFY="$VSTUB"
+  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && { echo "land continued without a recorded stub: $out"; chmod 700 "$wt/.agent"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  chmod 700 "$wt/.agent"
+  assert_contains "$out" "could not record a no-verdict stub"
+  ! grep -q "^pr merge" "$GH_LOG" || { echo "merge was called"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
+  unset CEL_FANOUT_VERIFY; rm -rf "$T"
+}
+
+# ---- retained-session resume (AH-261018) ---------------------------------------
+# `delegate --reuse` over a GC-stopped row resumes the ORIGINAL native session
+# under the row's recorded runtime/model/thinking/profile - never the workspace's
+# current role default - and keeps the row (verdict, history, spec) intact.
+_fanout_resume_profiles() {
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  cheap: { runtime: omp, model: worker-model, thinking: low }
+  orig:  { runtime: pi, model: orig-model, thinking: medium }
+role_profiles:
+  worker: orig
+YAML
+}
+_fanout_reuse() { # <id> [extra args] - run delegate --reuse against the retained worktree
+  local id="$1"; shift
+  (cd "$T" && STUB_WS_JSON="$RET_WS" CEL_PI_AGENT_DIR="$T/pi" "$BIN" delegate widget "$id" "$T/spec.md" --reuse "$@" 2>&1)
+}
+_fanout_pi_session() { # <id> <uuid> - a pi session file for the retained worktree
+  local d="$T/pi/sessions/--$(printf '%s' "$RET_WT" | sed 's|^/||; s|/|-|g')--"
+  mkdir -p "$d"
+  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$2" "$RET_WT" > "$d/2026-10-18T10-00-00-000Z_$2.jsonl"
+  printf '%s' "$d/2026-10-18T10-00-00-000Z_$2.jsonl"
+}
+
+test_reuse_resumes_the_exact_session_with_the_rows_profile_not_the_new_default() {
+  _fanout_setup; _fanout_resume_profiles
+  (cd "$T" && "$BIN" delegate widget WG-X1 "$T/spec.md" --profile orig --because "deliberate") > /dev/null
+  (cd "$T" && "$BIN" review WG-X1 changes --head "$HA" --by widget-pr-7-review) > /dev/null
+  jq '.[0].pr = 7' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  NOSESS=1 _fanout_retain WG-X1 wt-x1 collected
+  local sess; sess="$(_fanout_pi_session WG-X1 01aaaaaa-0000-7000-8000-000000000001)"
+  # the workspace default moved on after the original launch
+  sed -i 's/^  worker: orig/  worker: cheap/' "$T/workspace.yaml"
+  local spec_before; spec_before="$(jq -r '.[0].spec' "$T/.cel/delegations.json")"
+  : > "$STUB_LOG"
+  local out; out="$(_fanout_reuse WG-X1)" || { echo "$out"; return 1; }
+  local start; start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$start" "--kind pi"
+  assert_contains "$start" "--session $sess"
+  assert_contains "$start" "orig-model"
+  if printf '%s' "$start" | grep -q "worker-model"; then echo "substituted the new default model: $start"; return 1; fi
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  assert_eq "$(jq -r '.[0].runtime' "$T/.cel/delegations.json")" pi
+  assert_eq "$(jq -r '.[0].model' "$T/.cel/delegations.json")" orig-model
+  assert_eq "$(jq -r '.[0].thinking' "$T/.cel/delegations.json")" medium
+  assert_eq "$(jq -r '.[0].profile_reason' "$T/.cel/delegations.json")" deliberate
+  assert_eq "$(jq -r '.[0].review.verdict' "$T/.cel/delegations.json")" changes
+  assert_eq "$(jq -r '.[0].pr' "$T/.cel/delegations.json")" 7
+  assert_eq "$(jq -r '.[0].spec' "$T/.cel/delegations.json")" "$spec_before"
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$sess"
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  # history keeps what happened before and records the resume on top of it
+  assert_eq "$(jq -r '[.[0].history[].state] | join(",")' "$T/.cel/delegations.json")" "unconfirmed,running,collected,running"
+  rm -rf "$T"
+}
+
+# nothing is mutated or launched when the proof fails
+_fanout_refused() { # <label> <out> <rc> <before> <expect-text>
+  [ "$3" -ne 0 ] || { echo "$1: resume was accepted"; return 1; }
+  assert_contains "$2" "$5" || return 1
+  assert_eq "$(cat "$T/.cel/delegations.json")" "$4" || return 1
+  if grep -q '^agent start\|^pane run\|^pane send-text\|^worktree create\|^worktree open\|^workspace create' "$STUB_LOG"; then echo "$1: launched or created something before refusing"; return 1; fi
+}
+_fanout_resume_refusal_setup() {
+  _fanout_setup; _fanout_resume_profiles
+  (cd "$T" && "$BIN" delegate widget WG-X2 "$T/spec.md" --profile orig) > /dev/null
+  NOSESS=1 _fanout_retain WG-X2 wt-x2 collected
+  : > "$STUB_LOG"
+}
+test_reuse_refuses_an_ambiguous_session_and_a_missing_one() {
+  _fanout_resume_refusal_setup
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused none "$out" "$rc" "$before" "no native session" || return 1
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000a >/dev/null
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-00000000000b >/dev/null
+  rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused ambiguous "$out" "$rc" "$before" "ambiguous" || return 1
+  # an explicit pick must be one of the candidates, then it resumes exactly it
+  rc=0; out="$(_fanout_reuse WG-X2 --session 01aaaaaa-0000-7000-8000-0000000000ff)" || rc=$?
+  _fanout_refused unknown "$out" "$rc" "$before" "not a session" || return 1
+  out="$(_fanout_reuse WG-X2 --session 01aaaaaa-0000-7000-8000-00000000000b)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "00000000000b.jsonl"
+  rm -rf "$T"
+}
+test_reuse_refuses_a_live_duplicate() {
+  _fanout_resume_refusal_setup
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-000000000001 >/dev/null
+  local before out rc=0 alias; before="$(cat "$T/.cel/delegations.json")"
+  alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  out="$(STUB_LIVE_ALIAS="$alias" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live-alias "$out" "$rc" "$before" "live" || return 1
+  rc=0
+  out="$(STUB_AGENTS_JSON="{\"result\":{\"agents\":[{\"pane_id\":\"wR:p1\",\"name\":\"someone\",\"cwd\":\"$RET_WT/sub\",\"agent_status\":\"idle\"}]}}" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live-cwd "$out" "$rc" "$before" "live" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_an_ownership_mismatch_and_a_changed_profile() {
+  _fanout_resume_refusal_setup
+  _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-000000000001 >/dev/null
+  local before out rc=0 good; good="$(cat "$T/.cel/delegations.json")"; before="$good"
+  out="$(_fanout_reuse WG-X2 --profile cheap)" || rc=$?
+  _fanout_refused profile "$out" "$rc" "$before" "recorded profile" || return 1
+  rc=0; out="$(_fanout_reuse WG-X2 --model other-model)" || rc=$?
+  _fanout_refused model "$out" "$rc" "$before" "recorded" || return 1
+  # the row's worktree is some other checkout than the one herdr holds for the branch
+  jq '.[0].worktree = "/elsewhere/wt"' <<< "$good" > "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused owner "$out" "$rc" "$before" "does not own" || return 1
+  # the profile's definition drifted from what the row recorded: no substitution
+  jq '.[0].model = "ghost-model"' <<< "$good" > "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused drift "$out" "$rc" "$before" "drifted" || return 1
+  rm -rf "$T"
+}
+
+
+# F1: the proof precedes EVERY mutation - a row whose branch has no live
+# worktree is refused before `herdr worktree create` (or a container) exists.
+test_reuse_over_a_row_with_no_live_worktree_creates_nothing() {
+  _fanout_resume_refusal_setup
+  git -C "$T/repos/widget" worktree remove --force "$RET_WT"
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused noworktree "$out" "$rc" "$before" "no live worktree" || return 1
+  rm -rf "$T"
+}
+
+
+# F2: native, credential-free evidence that `pi --session <file>` really
+# reopens the exact session: rpc get_state on a TEMP COPY, no model call.
+test_pi_native_session_flag_reopens_the_exact_session_without_a_model_call() {
+  command -v pi >/dev/null 2>&1 || { echo "pi not installed - skipped"; return 0; }
+  local d; d="$(mktemp -d)"
+  printf '{"type":"session","version":3,"id":"01a14e99-0000-7000-8000-000000000009","timestamp":"2026-10-18T10:00:00.000Z","cwd":"%s"}\n{"type":"model_change","id":"aa000001","parentId":null,"timestamp":"2026-10-18T10:00:01.000Z","provider":"anthropic","modelId":"claude-opus-4-8"}\n{"type":"thinking_level_change","id":"aa000002","parentId":"aa000001","timestamp":"2026-10-18T10:00:01.001Z","thinkingLevel":"medium"}\n' "$d" > "$d/src.jsonl"
+  cp "$d/src.jsonl" "$d/copy.jsonl"
+  local sha; sha="$(sha256sum "$d/src.jsonl")"
+  local out; out="$(cd "$d" && ( printf '{"type":"get_state"}\n'; sleep 4 ) | timeout 30 env PI_CODING_AGENT_DIR="$d/root" pi --mode rpc --session "$d/copy.jsonl" --no-extensions --no-mcp 2>/dev/null)"
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.sessionId')" 01a14e99-0000-7000-8000-000000000009
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.thinkingLevel')" medium
+  assert_eq "$(printf '%s' "$out" | jq -r 'select(.command == "get_state") | .data.messageCount')" 0
+  assert_eq "$(sha256sum "$d/src.jsonl")" "$sha"
+  if pgrep -af "pi --mode rpc --session $d/copy.jsonl" >/dev/null; then echo "rpc child still running"; return 1; fi
+  rm -rf "$d"
+}
+
+# ---- real-shape regressions (closed-workspace / recovered-session shapes), fail-closed scope ----------
+# A pi session as it really is: header, ONE initial model_change, a thinking
+# level, then assistant messages carrying message.model. The file name need not
+# end in the UUID (a recovered copy is recovered-working.jsonl).
+_fanout_real_session() { # <name.jsonl> <uuid> <first-model> <assistant-model> [thinking]
+  local d="$T/pi/sessions/--$(printf '%s' "$RET_WT" | sed 's|^/||; s|/|-|g')--"
+  mkdir -p "$d"
+  printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n{"type":"model_change","provider":"p","modelId":"%s"}\n{"type":"thinking_level_change","thinkingLevel":"%s"}\n{"type":"message","message":{"role":"user","content":"x"}}\n{"type":"message","message":{"role":"assistant","model":"%s","content":"y"}}\n{"type":"message","message":{"role":"assistant","model":"%s","content":"z"}}\n' \
+    "$2" "$RET_WT" "$3" "${5:-medium}" "$4" "$4" > "$d/$1"
+  printf '%s' "$d/$1"
+}
+test_reuse_resumes_a_real_shaped_session_by_header_uuid_whatever_the_file_name() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session recovered-working.jsonl 01dddddd-0000-7000-8000-000000000001 orig-model orig-model medium)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  rm -rf "$T"
+}
+test_reuse_names_a_session_by_its_header_uuid_not_its_file_name() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session a.jsonl 01dddddd-0000-7000-8000-00000000000a orig-model orig-model >/dev/null
+  local f; f="$(_fanout_real_session b.jsonl 01dddddd-0000-7000-8000-00000000000b orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2 --session 01dddddd-0000-7000-8000-00000000000b)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  rm -rf "$T"
+}
+test_reuse_refuses_when_the_assistant_tail_disagrees_with_the_row_even_if_the_only_model_change_agrees() {
+  _fanout_resume_refusal_setup
+  # recovered-session's shape: the initial model_change is the row's model, the real tail is another model
+  _fanout_real_session recovered-working.jsonl 01dddddd-0000-7000-8000-000000000002 orig-model some/other-sonnet medium >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused assistant-tail "$out" "$rc" "$before" "disagrees" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_a_thinking_level_that_disagrees_with_the_row() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000003 orig-model orig-model high >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused thinking "$out" "$rc" "$before" "disagrees" || return 1
+  rm -rf "$T"
+}
+test_reuse_refuses_a_session_a_live_process_holds() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000004 orig-model orig-model)"
+  bash -c 'sleep 30; :' holder --session "$f" & local hp=$!
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true
+  _fanout_refused holder "$out" "$rc" "$before" "holds" || return 1
+  rm -rf "$T"
+}
+# recovered / private-root inputs are UNSUPPORTED and fail closed, with a reason,
+# before anything is created: no default root, fresh conversation or path fallback
+test_reuse_fails_closed_on_recovered_and_private_root_inputs() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000005 orig-model orig-model >/dev/null
+  local before out rc=0 f; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2 --receipt "$T/restoration.json")" || rc=$?
+  _fanout_refused receipt "$out" "$rc" "$before" "unsupported" || return 1
+  # a session file OUTSIDE the default root (a recovered/private-root copy)
+  mkdir -p "$T/private"; f="$T/private/recovered-working.jsonl"
+  printf '{"type":"session","version":3,"id":"01dddddd-0000-7000-8000-000000000006","cwd":"%s"}\n' "$RET_WT" > "$f"
+  rc=0; out="$(_fanout_reuse WG-X2 --session "$f")" || rc=$?
+  _fanout_refused outside-root "$out" "$rc" "$before" "unsupported" || return 1
+  rm -rf "$T"
+}
+
+# closed-workspace's real shape: the checkout exists, the row is retained, and NO herdr
+# workspace holds the checkout (its pane/workspace was closed). The resume
+# proves everything first, then opens the EXISTING checkout (never remove,
+# never create) and resumes in it. A refusal opens nothing.
+test_reuse_with_no_herdr_workspace_refuses_without_opening_anything() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session a.jsonl 01eeeeee-0000-7000-8000-00000000000a orig-model orig-model >/dev/null
+  _fanout_real_session b.jsonl 01eeeeee-0000-7000-8000-00000000000b orig-model orig-model >/dev/null
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused absent-ws "$out" "$rc" "$before" "ambiguous" || return 1
+  [ ! -e "$STUB_OPEN_GATE" ] || { echo "opened a workspace on a refusal"; return 1; }
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_same_row() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  local f; f="$(_fanout_real_session w.jsonl 01eeeeee-0000-7000-8000-000000000001 orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--path $RET_WT"
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--branch"; then echo "passed --branch beside --path (mutually exclusive in herdr)"; return 1; fi
+  assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--cwd $T/repos/widget"
+  # the logged argv is replayed against the REAL installed parser with every path
+  # replaced by a nonexistent one: it must get past usage parsing (a semantic
+  # not_git_worktree error, no mutation), never the usage line
+  if command -v herdr >/dev/null 2>&1; then
+    local -a ra=(); local tok prev=""
+    for tok in $(grep '^worktree open' "$STUB_LOG" | sed 's/^worktree open //'); do
+      case "$prev" in --cwd|--path) ra+=("/nonexistent-cel-test-$prev");; --label|--workspace|--branch) ra+=("x");; *) ra+=("$tok");; esac
+      prev="$tok"
+    done
+    local real; real="$(herdr worktree open "${ra[@]}" 2>&1 || true)"
+    if printf '%s' "$real" | grep -q '^usage:'; then echo "REAL herdr rejects this argv: ${ra[*]} -> $real"; return 1; fi
+  fi
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--workspace"; then echo "passed a herdr workspace nobody chose"; return 1; fi
+  if grep -q '^worktree create\|worktree remove' "$STUB_LOG"; then echo "created/removed a worktree"; return 1; fi
+  assert_contains "$(grep '^agent start' "$STUB_LOG")" "--session $f"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+
+# review of the open delta: every refusal in the absent-workspace shape opens nothing
+test_reuse_in_the_absent_workspace_shape_opens_nothing_on_any_refusal() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000010 orig-model orig-model >/dev/null
+  local before out rc alias; before="$(cat "$T/.cel/delegations.json")"
+  alias="$(jq -r '.[0].alias' "$T/.cel/delegations.json")"
+  rc=0; out="$(STUB_LIVE_ALIAS="$alias" _fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused live "$out" "$rc" "$before" "live" || return 1
+  rc=0; out="$(_fanout_reuse WG-X2 --profile cheap)" || rc=$?
+  _fanout_refused profile "$out" "$rc" "$before" "recorded profile" || return 1
+  jq '.[0].worktree = "/elsewhere/wt"' <<< "$before" > "$T/.cel/delegations.json"
+  local b2; b2="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused owner "$out" "$rc" "$b2" "does not own" || return 1
+  jq '.[0].model = "ghost-model"' <<< "$before" > "$T/.cel/delegations.json"
+  b2="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused drift "$out" "$rc" "$b2" "drifted" || return 1
+  [ ! -e "$STUB_OPEN_GATE" ] || { echo "opened a workspace on a refusal"; return 1; }
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+# the actual closed-workspace row: state running, session null, default-root file, no workspace
+test_reuse_of_a_running_row_with_no_session_field_and_no_workspace_resumes() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  jq '.[0].state = "running" | .[0].session = null' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local f; f="$(_fanout_real_session real.jsonl 01eeeeee-0000-7000-8000-000000000011 orig-model orig-model)"
+  local out; out="$(_fanout_reuse WG-X2)" || { echo "$out"; return 1; }
+  assert_eq "$(grep -c '^worktree open' "$STUB_LOG")" 1
+  assert_eq "$(jq -r '.[0].session' "$T/.cel/delegations.json")" "$f"
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+# a start that fails after the open reports the opened workspace and keeps the row
+test_reuse_start_failure_after_open_names_the_opened_workspace_and_keeps_the_row() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened" CEL_PANE_READY_MS=2000 CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_STABLE=3
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000012 orig-model orig-model >/dev/null
+  sed -i 's|^  "agent start")|  "agent start") echo "agent_pane_busy" >\&2; exit 1;|' "$STUB"
+  local out rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "failed start succeeded"; return 1; }
+  assert_contains "$out" "OPENED the herdr workspace"
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].launch.phase' "$T/.cel/delegations.json")" start-failed
+  assert_eq "$(jq -r '.[0].profile' "$T/.cel/delegations.json")" orig
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+
+test_reuse_passes_an_explicit_herdr_workspace_to_worktree_open_instead_of_cwd() {
+  _fanout_resume_refusal_setup
+  export STUB_OPEN_GATE="$T/opened"
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000020 orig-model orig-model >/dev/null
+  local out; out="$(_fanout_reuse WG-X2 --herdr-workspace wExplicit)" || { echo "$out"; return 1; }
+  assert_contains "$(grep '^worktree open' "$STUB_LOG")" "--workspace wExplicit"
+  if grep '^worktree open' "$STUB_LOG" | grep -q -- "--cwd"; then echo "passed --cwd beside --workspace"; return 1; fi
+  unset STUB_OPEN_GATE; rm -rf "$T"
+}
+
+# exit 141 (SIGPIPE under pipefail): `sed ... | head -1` over a spec that quotes
+# more than a pipe buffer (64 KiB) of finding made the AFK dispatch gate die
+# silently - no message, nothing launched. The first match must be taken by sed
+# itself, never by a consumer that exits early.
+test_afk_dispatch_gate_survives_a_spec_that_quotes_more_than_a_pipe_buffer() {
+  _fanout_setup
+  mkdir -p "$T/afk-state"
+  printf '{"on":true,"since":"2026-10-19T00:00:00Z","since_epoch":1,"allow":[]}\n' > "$T/afk-state/state.json"
+  python3 - "$T/huge-spec.md" <<'PY'
+import sys
+open(sys.argv[1],"w").write("Finding-from: reviewer reviewer-example\n"+"".join("> finding line %d %s\n"%(i,"x"*80) for i in range(1500)))
+PY
+  [ "$(wc -c < "$T/huge-spec.md")" -gt 100000 ] || return 1
+  local out rc=0
+  out="$(cd "$T" && "$BIN" delegate widget WG-HUGE "$T/huge-spec.md" 2>&1)" || rc=$?
+  [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
+  rm -rf "$T"
+}
+
+# exit 141 on the real failing argv (a large repo): `git worktree list --porcelain | awk ... {print p; exit}`
+# - awk quits at the match while git is still writing the other worktrees, git
+# is SIGPIPEd and `set -o pipefail` makes the substitution fail: the delegate
+# died silently (no output, no herdr call). A repo with many worktrees triggers it.
+test_reuse_in_a_repo_with_many_worktrees_does_not_exit_141() {
+  _fanout_resume_refusal_setup
+  _fanout_real_session s.jsonl 01eeeeee-0000-7000-8000-000000000030 orig-model orig-model >/dev/null
+  local i
+  for i in $(seq 1 120); do git -C "$T/repos/widget" worktree add -q -b "zpad$i" "$T/zpad$i" 2>/dev/null; done
+  local out rc=0; out="$(_fanout_reuse WG-X2)" || rc=$?
+  [ "$rc" -ne 141 ] || { echo "exited 141 silently: [$out]"; return 1; }
+  [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
+
+# A session RECORDED ON THE ROW is held to the same rule as --session: a pi row
+# never resumes a session outside the pi session root (another runtime's root or
+# a private root), whatever its header says.
+test_reuse_refuses_a_row_recorded_session_outside_the_pi_root() {
+  _fanout_resume_refusal_setup
+  mkdir -p "$T/other-root/sessions"
+  local f="$T/other-root/sessions/foreign.jsonl"
+  printf '{"type":"session","version":3,"id":"01ffffff-0000-7000-8000-000000000001","cwd":"%s"}\n{"type":"model_change","modelId":"orig-model"}\n{"type":"thinking_level_change","thinkingLevel":"medium"}\n' "$RET_WT" > "$f"
+  jq --arg s "$f" '.[0].session = $s' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused rowsess "$out" "$rc" "$before" "unsupported" || return 1
+  # a symlink inside the root that points outside it is outside too
+  mkdir -p "$T/pi/sessions/--link--"; ln -s "$f" "$T/pi/sessions/--link--/l.jsonl"
+  jq --arg s "$T/pi/sessions/--link--/l.jsonl" '.[0].session = $s' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  before="$(cat "$T/.cel/delegations.json")"; rc=0
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  _fanout_refused symlink "$out" "$rc" "$before" "unsupported" || return 1
+  rm -rf "$T"
+}
+# the holder probe matches the exact --session argument: a holder whose command
+# line also says "delegate" is still a holder
+test_reuse_holder_probe_is_not_fooled_by_the_word_delegate() {
+  _fanout_resume_refusal_setup
+  local f; f="$(_fanout_real_session s.jsonl 01dddddd-0000-7000-8000-000000000040 orig-model orig-model)"
+  bash -c 'sleep 30; : delegate cel-fanout' pi --session "$f" & local hp=$!
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"
+  out="$(_fanout_reuse WG-X2)" || rc=$?
+  kill "$hp" 2>/dev/null || true; wait "$hp" 2>/dev/null || true
+  _fanout_refused holder2 "$out" "$rc" "$before" "holds" || return 1
   rm -rf "$T"
 }

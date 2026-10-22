@@ -224,3 +224,103 @@ test_watchdog_install_refuses_when_sudo_needs_a_password() {
   [ -e "$T/sys/cel-manager-watchdog.timer" ] && { echo "wrote without sudo"; return 1; }
   rm -rf "$T"
 }
+
+# AH-261018: with box.max_swap_pct at 100 the doubled band cannot fire, so the
+# refusal and the doctor sentence must not name one; the floor itself is kept.
+test_boxguard_text_names_no_swap_band_when_it_is_disabled() {
+  _bg_meminfo 1048576 8388608 838860    # 1 GB free, below any floor
+  local out
+  out="$(CEL_BOX_MAX_SWAP_PCT=100 boxguard_admit)" && { echo "admitted below the floor"; return 1; }
+  ! printf '%s' "$out" | grep -q "swap over" || { echo "named a band that cannot fire: $out"; return 1; }
+  assert_contains "$out" "floor"
+  out="$(boxguard_admit)" || true
+  assert_contains "$out" "swap over"
+  _bg_meminfo 3500000 8388608 838860
+  CEL_BOX_MAX_SWAP_PCT=100 boxguard_admit >/dev/null || { echo "100% still doubled the floor"; return 1; }
+  rm -rf "$T"
+}
+
+# AH-261021: swap fullness alone never raises a line; real PSI stalls do.
+_bg_psi() { # <some-avg60> <full-avg60>
+  printf 'some avg10=0.00 avg60=%s avg300=0.00 total=1\nfull avg10=0.00 avg60=%s avg300=0.00 total=1\n' "$1" "$2" > "$T/psi"
+  export CEL_PSI_MEMORY="$T/psi"
+}
+
+test_boxguard_full_swap_calm_psi_admits_and_does_not_warn() {
+  _bg_meminfo 5767168 8388608 83886     # 5.5 GB free, 99% swap
+  _bg_psi 0.03 0.03
+  boxguard_admit >/dev/null || { echo "refused on swap with no stalls"; unset CEL_PSI_MEMORY; return 1; }
+  boxguard_pressure && { echo "warned on swap with no stalls"; unset CEL_PSI_MEMORY; return 1; }
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_full_swap_with_stalls_doubles_the_line() {
+  _bg_meminfo 5767168 8388608 83886     # 5.5 GB free, 99% swap
+  _bg_psi 12.00 0.00
+  local out rc=0; out="$(boxguard_admit)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "memory stalls at some 12%"
+  boxguard_pressure || { echo "stalls not a warning"; unset CEL_PSI_MEMORY; return 1; }
+  CEL_BOX_PSI_SOME_PCT=20 boxguard_admit >/dev/null || { echo "psi_some_pct override ignored"; unset CEL_PSI_MEMORY; return 1; }
+  _bg_psi 0.00 11.00
+  boxguard_admit >/dev/null && { echo "full stalls did not double"; unset CEL_PSI_MEMORY; return 1; }
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_plain_floor_holds_with_any_swap_and_calm_psi() {
+  local sf
+  for sf in 8388608 83886 0; do
+    _bg_meminfo 2621440 8388608 "$sf"   # 2.5 GB free
+    _bg_psi 0.00 0.00
+    boxguard_admit >/dev/null && { echo "admitted under the floor (swap free $sf)"; unset CEL_PSI_MEMORY; return 1; }
+  done
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_unreadable_psi_keeps_the_swap_rule() {
+  _bg_meminfo 5767168 8388608 83886     # 5.5 GB free, 99% swap, no PSI fixture
+  boxguard_admit >/dev/null && { echo "no swap fallback at 99%"; return 1; }
+  _bg_meminfo 5767168 8388608 8388608   # 5.5 GB free, swap empty
+  boxguard_admit >/dev/null || { echo "refused with empty swap"; return 1; }
+  CEL_PSI_MEMORY=/nonexistent boxguard_admit >/dev/null || { echo "refused with empty swap, bad PSI path"; return 1; }
+  _bg_meminfo 5767168 8388608 83886
+  CEL_PSI_MEMORY=/nonexistent boxguard_admit >/dev/null && { echo "unreadable file lost the swap rule"; return 1; }
+  CEL_BOX_MAX_SWAP_PCT=100 boxguard_admit >/dev/null || { echo "swap override ignored"; return 1; }
+  rm -rf "$T"
+}
+
+test_boxguard_doctor_line_names_what_drives_the_verdict() {
+  _bg_meminfo 5767168 8388608 83886
+  _bg_psi 0.03 0.03
+  local out; out="$(boxguard_doctor_line)"
+  assert_contains "$out" "no memory stalls"
+  assert_contains "$out" "swap is info only"
+  _bg_psi 15.00 0.00
+  out="$(boxguard_doctor_line)"
+  assert_contains "$out" "memory stalls at some 15%"
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_warning_text_names_the_real_driver() {
+  local out
+  _bg_meminfo 4194304 0 0               # 4 GB: under the 5 GB warning line
+  _bg_psi 0 0
+  out="$(boxguard_warning_text)"; assert_contains "$out" "below the 5.0 GB warning line"
+  _bg_meminfo 5767168 8388608 83886     # 5.5 GB, 99% swap: stall-doubled band
+  _bg_psi 12 0
+  out="$(boxguard_warning_text)"; assert_contains "$out" "memory stalls at some 12% / full 0% with under 6.0 GB free"
+  _bg_meminfo 20971520 8388608 83886    # 20 GB free: full stalls only, no GB claim
+  _bg_psi 0 15
+  out="$(boxguard_warning_text)"; assert_contains "$out" "memory stalls at full 15%"
+  case "$out" in *"GB free)"*"under"*) echo "claimed a GB band at 20 GB: $out"; unset CEL_PSI_MEMORY; return 1;; esac
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}
+
+test_boxguard_psi_rounds_instead_of_truncating() {
+  _bg_meminfo 5767168 8388608 83886
+  _bg_psi 9.90 0
+  boxguard_admit >/dev/null && { echo "9.9 read as under 10"; unset CEL_PSI_MEMORY; return 1; }
+  _bg_psi 9.40 0
+  boxguard_admit >/dev/null || { echo "9.4 read as 10"; unset CEL_PSI_MEMORY; return 1; }
+  unset CEL_PSI_MEMORY; rm -rf "$T"
+}

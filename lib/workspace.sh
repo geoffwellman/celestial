@@ -456,6 +456,53 @@ ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default
   printf '%s\tdefault' "$(ws_orchestrators_default)"
 }
 
+# HOW A PRODUCT IS BUILT: `fleet` (an orchestrator that delegates to worker
+# panes through cel-fanout) or `solo` (one agent that plans, builds and ships
+# itself, with whatever its own runtime offers - its own worktrees and
+# subagents included). Not to be confused with ws_orchestrator_mode above,
+# which says whether `cel ws up` starts the product's agent at all.
+#
+# Declared on the product (`products[].mode`) or, for an implicit product, on
+# its repo (`repos[].mode`). Absent means fleet, so nothing about an existing
+# workspace changes. Any other value is printed as written: callers refuse it
+# rather than guess which of the two was meant.
+ws_build_mode() { # <wsdir> <product> -> fleet | solo | <invalid value>
+  local m
+  if ws_product_declared "$1" "$2"; then
+    m="$(ws_product_get "$1" "$2" mode)"
+  else
+    m="$(ws_repo_get "$1" "$2" mode)"
+  fi
+  printf '%s' "${m:-fleet}"
+}
+
+# Where a solo agent keeps its own git worktrees (its role says so), and the
+# ones that exist: a directory there is a worktree when it carries a `.git`
+# file. Read by fleet (how many), and by gc (which may go).
+ws_solo_dir() { printf '%s/.cel/solo/%s' "$1" "$2"; }   # <wsdir> <product>
+ws_solo_worktrees() { # <wsdir> <product> -> one path per line
+  local d
+  for d in "$(ws_solo_dir "$1" "$2")"/*/; do
+    [ -f "${d}.git" ] && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+
+# The product's delegations that still hold work: a row in any of these
+# states has a worker, a branch or a PR nobody has landed or let go. Switching
+# such a product to solo would leave them with no orchestrator to collect,
+# review or land them, so the switch is refused while any exist.
+# One `<id> <state>` line per row; nothing when there are none.
+ws_product_live_delegations() { # <wsdir> <product>
+  local led="$1/.cel/delegations.json" repos
+  [ -f "$led" ] || return 0
+  repos="$(ws_product_repos "$1" "$2" | jq -R . | jq -sc .)"
+  jq -r --argjson repos "$repos" '
+    .[]? | select((.repo // "") as $r | $repos | index($r))
+    | select((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked", "orphaned"))
+    | "\(.id) \(.state)"' "$led" 2>/dev/null || true
+}
+
 # Where that product's orchestrator stands. A declared product has no checkout
 # of its own - it is the directory ABOVE its repos' worktrees - so it gets a
 # products/ dir; an implicit one keeps standing in its repo, unchanged.
@@ -471,8 +518,14 @@ ws_product_dir() { # <wsdir> <product>
 # rendered CLAUDE.md block all call this, so policy is worded exactly once.
 # The optional product argument adds one line and changes nothing else: an
 # agent launched for a product has to be told the cross-repo hop is its own.
-ws_policy_block() { # <wsdir> [product]
-  local d="$1" product="${2:-}" name kind org tsys tadhoc merge pr workers reviewer r
+# The optional mode (default: the product's own, else fleet) words the block
+# for a solo agent: it builds and ships itself, so every line about spawning,
+# profiling or reviewing WORKERS would be an instruction it must not follow.
+ws_policy_block() { # <wsdir> [product] [fleet|solo]
+  local d="$1" product="${2:-}" mode="${3:-}" name kind org tsys tadhoc merge pr workers reviewer r
+  if [ -z "$mode" ]; then
+    if [ -n "$product" ]; then mode="$(ws_build_mode "$d" "$product")"; else mode=fleet; fi
+  fi
   name="$(ws_name "$d")"; kind="$(ws_kind "$d")"; org="$(ws_org "$d")"
   tsys="$(ws_ticket "$d" system)"; tadhoc="$(ws_ticket "$d" adhoc)"
   merge="$(ws_policy "$d" merge)"; pr="$(ws_policy "$d" pr)"
@@ -483,42 +536,61 @@ ws_policy_block() { # <wsdir> [product]
     printf -- '- product: %s (repos: %s) - cross-repo sequencing inside this product is yours; there is no tier above you for it\n' \
       "$product" "$(ws_product_repos "$d" "$product" | paste -sd, - | sed 's/,/, /g')"
   fi
+  if [ "$mode" = solo ]; then
+    printf -- '- build mode: solo - you build and ship this product yourself. Celestial fan-out is off: no `cel-fanout delegate`/`scout`/`spike` and no worker panes. Your own runtime is yours to use in full - your own git worktrees (under %s/.cel/solo/%s/), your subagents in parallel, several branches and PRs at once. `cel mode %s fleet` switches back to an orchestrator with workers\n' \
+      "$d" "${product:-<product>}" "${product:-<product>}"
+  fi
   if [ "$tsys" = "none" ]; then
     printf -- '- tickets: none - never invent ticket references; ad-hoc refs look like %s\n' "${tadhoc:-AH-<yymmdd>}"
   elif [ "$tsys" = "linear" ]; then
-    printf -- '- tickets: linear (use the linear skill; MCP tools if present, else `cel-linear`). ONE ticket per work package, and SEARCH BEFORE CREATE - never start work on a ticket someone else has In Progress. THE BRANCH NAME CARRIES THE TICKET ID (`<PREFIX>-<n>-<slug>`): Linear links a PR to its ticket from the branch name alone, so a branch without one is invisible on the board and `cel-fanout delegate` will refuse it. The lifecycle is then automatic - delegate sets In Progress, collect sets In Review and comments the PR link, release sets Done on a merged PR - so do not hand-drive states for delegated work. Ad-hoc refs (%s) are for throwaway work only and need `--adhoc`\n' "${tadhoc:-unset}"
+    if [ "$mode" = solo ]; then
+      printf -- '- tickets: linear (use the linear skill; MCP tools if present, else `cel-linear`). ONE ticket per work package, and SEARCH BEFORE CREATE - never start work on a ticket someone else has In Progress. THE BRANCH NAME CARRIES THE TICKET ID (`<PREFIX>-<n>-<slug>`): Linear links a PR to its ticket from the branch name alone. Nothing moves your tickets for you: set In Progress when you start, In Review when the PR opens, and Done when it merges (`cel-linear state`). Ad-hoc refs (%s) are for throwaway work only\n' "${tadhoc:-unset}"
+    else
+      printf -- '- tickets: linear (use the linear skill; MCP tools if present, else `cel-linear`). ONE ticket per work package, and SEARCH BEFORE CREATE - never start work on a ticket someone else has In Progress. THE BRANCH NAME CARRIES THE TICKET ID (`<PREFIX>-<n>-<slug>`): Linear links a PR to its ticket from the branch name alone, so a branch without one is invisible on the board and `cel-fanout delegate` will refuse it. The lifecycle is then automatic - delegate sets In Progress, collect sets In Review and comments the PR link, release sets Done on a merged PR - so do not hand-drive states for delegated work. Ad-hoc refs (%s) are for throwaway work only and need `--adhoc`\n' "${tadhoc:-unset}"
+    fi
   else
     printf -- '- tickets: %s; ad-hoc refs look like %s\n' "${tsys:-unset}" "${tadhoc:-unset}"
   fi
-  if [ "$merge" = "self" ]; then
+  if [ "$merge" = "self" ] && [ "$mode" = solo ]; then
+    printf -- '- merge: self - land your own PR with `cel solo land <repo>#<n>` once its review has approved the current head and the required checks are green (it checks both, and merges only that head); never `gh pr merge`\n'
+  elif [ "$merge" = "self" ]; then
     printf -- '- merge: self - you may merge after the review skill passes\n'
   else
     printf -- '- merge: humans-only - open a PR and stop; only humans merge\n'
   fi
   local pr_open; pr_open="$(ws_policy "$d" pr_open)"
-  if [ "${pr_open:-draft}" = "ready" ]; then
+  if [ "$mode" = solo ]; then
+    if [ "${pr_open:-draft}" = "ready" ]; then
+      printf -- '- pr: %s, opened READY FOR REVIEW (never draft; a draft is invisible to the reviewer)\n' "${pr:-required}"
+    else
+      printf -- '- pr: %s, opened as a draft\n' "${pr:-required}"
+    fi
+  elif [ "${pr_open:-draft}" = "ready" ]; then
     printf -- '- pr: %s, opened READY FOR REVIEW (never draft; a draft is invisible to the reviewer); max concurrent workers: %s\n' "${pr:-required}" "${workers:-4}"
   else
     printf -- '- pr: %s, opened as a draft; max concurrent workers: %s\n' "${pr:-required}" "${workers:-4}"
   fi
-  printf -- '- worker runtime: %s - spawn workers via `cel-fanout delegate` (or `herdr agent start <name> --kind %s`); never start workers on the orchestrator runtime (%s)\n' \
-    "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" orchestrator)"
-  # Profiles are read straight from the file rather than through lib/profiles.sh:
-  # that file sources THIS one, and a policy block is not worth a source cycle.
-  # team-contract: the block is rendered from the COMMITTED workspace.yaml
-  # alone, never through workspace.local.yaml (CEL-86). It lands in every
-  # agent's instructions; one person's local profiles must not rewrite what
-  # everyone's agents are told.
-  local profs wbound
-  profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"  # team-contract
-  wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"  # team-contract
-  if [ -n "$profs" ]; then
-    printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
-      "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
-    _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true  # team-contract
-    local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"  # team-contract
-    printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
-      "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
+  # Workers, their profiles and scouts exist only in fleet mode.
+  if [ "$mode" != solo ]; then
+    printf -- '- worker runtime: %s - spawn workers via `cel-fanout delegate` (or `herdr agent start <name> --kind %s`); never start workers on the orchestrator runtime (%s)\n' \
+      "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" worker)" "$(ws_runtime "$d" orchestrator)"
+    # Profiles are read straight from the file rather than through lib/profiles.sh:
+    # that file sources THIS one, and a policy block is not worth a source cycle.
+    # team-contract: the block is rendered from the COMMITTED workspace.yaml
+    # alone, never through workspace.local.yaml (CEL-86). It lands in every
+    # agent's instructions; one person's local profiles must not rewrite what
+    # everyone's agents are told.
+    local profs wbound
+    profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"  # team-contract
+    wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"  # team-contract
+    if [ -n "$profs" ]; then
+      printf -- '- worker profiles: %s. `cel-fanout delegate ... --profile <name> --because "<why>"` runs a worker on a different CLI/model/effort%s. CHOOSE PER TICKET from the descriptions below and say why; default only when nothing fits. Do NOT switch profiles to work around a stuck worker - a profile is for trying a model deliberately, and the ledger records which one built which branch and why\n' \
+        "$profs" "${wbound:+ (default here: $wbound, applied automatically)}"
+      _yqr -r '.worker_profiles // {} | to_entries[] | select(.value.for != null) | "  - \(.key): \(.value.for)"' "$d/workspace.yaml" 2>/dev/null || true  # team-contract
+      local sbound; sbound="$(_yqr -r '.role_profiles.scout // "" | tostring' "$d/workspace.yaml")"  # team-contract
+      printf -- '- investigations are SCOUTS: `cel-fanout scout <repo> <brief-file>` gives a read-only worktree and expects .agent/report.md - no ticket, no PR%s. Never force an investigation into an ad-hoc branch or do it in your own checkout\n' \
+        "${sbound:+ (scouts run on profile $sbound automatically - do not pass --profile unless the brief needs something else)}"
+    fi
   fi
   if [ -n "$reviewer" ]; then
     printf -- '- reviewer: %s (pr-loop requests this reviewer)\n' "$reviewer"
@@ -527,20 +599,25 @@ ws_policy_block() { # <wsdir> [product]
   fi
   local rrt rmodel
   rrt="$(ws_review "$d" runtime)"; rmodel="$(ws_review "$d" model)"
-  if [ -n "$rrt" ]; then
+  if [ -n "$rrt" ] && [ "$mode" = solo ]; then
+    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR); it records its verdict with `cel solo review` and sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
+      "$rrt" "${rmodel:+ model $rmodel}" "${product:-<product>}"
+  elif [ -n "$rrt" ]; then
     printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
       "$rrt" "${rmodel:+ model $rmodel}"
     if [ "$(ws_review_post "$d")" = "github" ]; then
-      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
     else
-      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
+      printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
     fi
   fi
   local lt rpr
   for r in $(ws_repo_names "$d"); do
     lt="$(ws_repo_get "$d" "$r" linear_team)"
     rpr=""
-    if [ "$(ws_repo_pr "$d" "$r")" = none ]; then
+    if [ "$(ws_repo_pr "$d" "$r")" = none ] && [ "$mode" = solo ]; then
+      rpr='; pr: none - commit on a branch, then rebase onto origin/main and push to main (fast-forward only, never force); no PR'
+    elif [ "$(ws_repo_pr "$d" "$r")" = none ]; then
       rpr='; pr: none - workers commit on their branch, then rebase onto origin/main and push to main (fast-forward only, never force); no PR and no `cel-fanout land` - the row goes to landed when its commits are on main (collect records it, release takes the worktree)'
     fi
     printf -- '- repo %s: branch prefix %s, gate `%s`%s%s\n' \
@@ -556,9 +633,9 @@ ws_policy_block() { # <wsdir> [product]
   [ -z "$learned" ] || printf '\n%s' "$learned"
 }
 
-ws_render_role() { # <wsdir> <rolefile> [product]
+ws_render_role() { # <wsdir> <rolefile> [product] [fleet|solo]
   [ -f "$2" ] || die "role file not found: $2"
-  cat "$2"; printf '\n'; ws_policy_block "$1" "${3:-}"
+  cat "$2"; printf '\n'; ws_policy_block "$1" "${3:-}" "${4:-}"
 }
 
 # Replace-or-append the marked block. Body travels via the environment, not

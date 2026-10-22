@@ -10,7 +10,9 @@
 _yaml_json() { # <file> -> path of the cached JSON
   local f="$1" dir key
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
-  key="$(stat -c '%i-%Y-%s' "$f" 2>/dev/null || printf none)-$(printf '%s' "$f" | cksum | cut -d' ' -f1)"
+  # -L: a symlinked file is keyed on what it points at, so editing the target
+  # invalidates the cache (the link's own inode and mtime never change).
+  key="$(stat -L -c '%i-%Y-%s' "$f" 2>/dev/null || printf none)-$(printf '%s' "$f" | cksum | cut -d' ' -f1)"
   local out="$dir/$key.json"
   if [ ! -s "$out" ]; then
     mkdir -p "$dir"

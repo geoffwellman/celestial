@@ -11,6 +11,12 @@ _ws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" 
 # exit status. Route through a subshell to contain it.
 _cmd_run_in_subshell() { ( cmd_run "$@" ); }
 
+# AH-261017: an in-process herdr stub delegates the pane probes (and a refused
+# start) to the isolated fake, which models a pane whose shell is slow to come
+# up. Fast knobs keep the deadline cases quick; the stable-probe count stays 3.
+_fake_pane() { PF_NOLOG=1 PF_DIR="${PF_DIR:-$T/pf}" "$CEL_ROOT/tests/lib/fake-herdr" "$@"; }
+export CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_MS=3000 CEL_PANE_READY_STABLE=3
+
 test_run_direct_defaults_single_repo_and_injects_no_role() {
   _ws; local out; out="$(cd "$T" && cmd_run --dry-run)"
   assert_contains "$out" "workspace create"
@@ -104,17 +110,19 @@ test_run_without_layout_skips_apply() {
   ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "layout applied with none declared"; return 1; }
   rm -rf "$T"
 }
-# Reviewer mode joins the caller's herdr view (tab "PR reviewer") instead of
-# creating a workspace, injects the pr-reviewer role, and puts the workspace's
-# review model ahead of the role args.
-_ws_review() { _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"; }
+# Reviewer mode joins the caller's herdr view (tab "PR reviewer"), injects the
+# reviewer role, and resolves a Claude model through the configured gateway.
+_ws_review() { _ws; printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"; }
 test_run_reviewer_targets_review_tab_with_model() {
-  _ws_review; local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
   assert_contains "$out" 'tab "PR reviewer"'
-  assert_contains "$out" "agent start widget-pr-12-review --kind omp"
-  assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --model gpt-5.6-sol --thinking high --append-system-prompt"
+  assert_contains "$out" "agent start widget-pr-12-review --kind pi"
+  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_run_reviewer_requires_pr_and_review_block() {
   _ws_review; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --dry-run )
@@ -167,7 +175,8 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
 # CEL-95: pi workers and reviewers carry the inbox extension and their own
 # identity, so mail addressed to the pane's alias wakes it.
 test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
-  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n' >> "$T/workspace.yaml"
+  _reviewer_gateway_fixture
+  printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
@@ -177,7 +186,80 @@ test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
-  rm -rf "$T"
+  _ws_gateway_clean
+}
+
+test_run_pi_reviewer_routes_explicit_model_override_through_gateway() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model claude-opus-5-5 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--kind pi"
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
+  assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
+  _ws_gateway_clean
+}
+# Workspace aliases are intentional: resolve them from the configured
+# gateway catalog instead of letting pi choose an ambient provider.
+test_run_pi_reviewer_resolves_sonnet_from_gateway_catalog() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_resolves_opus_alias_to_gateway_model() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: opus\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-opus-5-5"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_preserves_explicit_gateway_model_id() {
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model ompgw-claude/claude-sonnet-4-6 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _ws_gateway_clean
+    return 1
+  fi
+  assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_refuses_sonnet_when_catalog_has_no_candidate() {
+  _reviewer_gateway_fixture
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out
+  if out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    echo "reviewer accepted sonnet without a gateway catalog model"; _ws_gateway_clean; return 1
+  fi
+  assert_contains "$out" "gateway catalog advertises no Claude Sonnet model"
+  _ws_gateway_clean
 }
 
 # OMP prewalk swaps to the smol model after the first edit; a profile names a
@@ -251,6 +333,74 @@ test_run_role_file_is_per_declared_product() {
   assert_eq "$(_run_role_file "$T" orchestrator bundle)" "$T/.cel/products/bundle/role-orchestrator.md"
   assert_eq "$(_run_role_file "$T" orchestrator lone)" "$T/.cel/role-orchestrator.md"
   assert_eq "$(_run_role_file "$T" orchestrator)" "$T/.cel/role-orchestrator.md"
+  rm -rf "$T"
+}
+
+# --- solo mode ---------------------------------------------------------------
+# A solo product's agent is still THE product's agent: same directory, alias,
+# mailbox and role-file name (gc keys on role-orchestrator.md), so everything
+# that finds "the product" still finds it. What changes is CEL_ROLE (the guard
+# reads it) and the role body.
+_ws_solo() { # <product> -> a products workspace with that product in solo mode
+  _ws_products; source "$CEL_ROOT/lib/mode.sh"
+  ( cd "$T" && cmd_mode "$1" solo --no-restart ) >/dev/null
+}
+test_run_orchestrator_on_a_solo_product_launches_the_solo_agent() {
+  _ws_solo bundle
+  printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run orchestrator --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_contains "$out" "--cwd $T/products/bundle"
+  assert_contains "$out" "agent start bundle-orch"
+  assert_contains "$out" "CEL_INBOX_ME=bundle-orch"
+  # the guard still rides along: it is what refuses fan-out to a solo agent
+  assert_contains "$out" "orchestrator-guard.omp.ts"
+  rm -rf "$T"
+}
+test_run_solo_body_drops_worker_instructions_and_says_solo() {
+  _ws_solo bundle
+  local body; body="$(ws_render_role "$T" "$CEL_ROOT/core/roles/solo.md" bundle)"
+  assert_contains "$body" "build mode: solo"
+  ! printf '%s' "$body" | grep -q -e 'worker runtime:' -e 'max concurrent workers' -e 'investigations are SCOUTS' \
+    || { echo "solo body still tells it to delegate"; rm -rf "$T"; return 1; }
+  # and a fleet product's body is untouched by any of this
+  body="$(ws_policy_block "$T" lone)"
+  assert_contains "$body" "worker runtime:"
+  ! printf '%s' "$body" | grep -q 'build mode:' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_run_solo_forces_solo_once_on_a_fleet_product() {
+  _ws_products
+  local out; out="$(cd "$T" && cmd_run solo --product bundle --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_eq "$(ws_build_mode "$T" bundle)" fleet
+  rm -rf "$T"
+}
+test_run_solo_refuses_while_fleet_work_is_in_flight() {
+  _ws_products
+  mkdir -p "$T/.cel"
+  printf '[{"id":"WG-1-x","repo":"gadget","state":"running"}]' > "$T/.cel/delegations.json"
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --dry-run )
+  rm -rf "$T"
+}
+test_run_refuses_an_unknown_build_mode() {
+  _ws_products
+  sed -i 's/^    workers: 2$/    workers: 2\n    mode: sideways/' "$T/workspace.yaml"
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
+  rm -rf "$T"
+}
+test_run_solo_keeps_the_one_agent_per_product_refusal() {
+  _ws_solo bundle; _run_stub_roster "$T/products/bundle" bundle-orch
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
+  rm -rf "$T"
+}
+# Solo is the PRODUCT agent's role; a worker or reviewer launched on a solo
+# product's repo is still exactly a worker or reviewer.
+test_run_solo_does_not_leak_into_worker_launches() {
+  _ws_solo bundle
+  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_ROLE=worker"
+  ! printf '%s' "$out" | grep -q 'CEL_ROLE=solo' || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -347,7 +497,10 @@ _ws_gateway() {
 worker_profiles:
   gw: { runtime: pi, model: codex/gpt-5.5, via: gateway }
 YAML
+  GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET="${CEL_PI_AGENT_DIR+x}"
+  GWT_PREVIOUS_CEL_PI_AGENT_DIR="${CEL_PI_AGENT_DIR:-}"
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
   # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
@@ -364,7 +517,30 @@ EOS
   chmod +x "$GWT/gwstub"; export CEL_GATEWAY_STUB="$GWT/gwstub"
   PATH="$GWT/bin:$PATH"
 }
-_ws_gateway_clean() { rm -rf "$T" "$GWT"; unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE; }
+_ws_gateway_clean() {
+  rm -rf "$T" "$GWT"
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STUB CEL_GATEWAY_STATE
+  if [ -n "${GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET:-}" ]; then
+    export CEL_PI_AGENT_DIR="$GWT_PREVIOUS_CEL_PI_AGENT_DIR"
+  else
+    unset CEL_PI_AGENT_DIR
+  fi
+  unset GWT_PREVIOUS_CEL_PI_AGENT_DIR_SET GWT_PREVIOUS_CEL_PI_AGENT_DIR
+}
+
+_reviewer_gateway_fixture() {
+  _ws_gateway
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-4-5-20250929"},{"id":"claude-sonnet-5-5"},{"id":"claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'reviewer-test-api-key\n' >"$GWT/state/api-key"
+  printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
+}
 
 test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
@@ -380,13 +556,14 @@ case "$1" in
 esac
 EOS
   chmod +x "$GWT/gwstub"
-  export PI_CODING_AGENT_DIR="$GWT/pi"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
   local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
-  assert_contains "$out" "export OMP_GATEWAY_TOKEN="
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
 }
+
 
 test_run_gateway_env_reads_api_key_for_pi() {
   T="$(mktemp -d)"
@@ -403,7 +580,7 @@ EOF
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env pi pi-worker
-  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
+  output="$(bash -c "env ${GATEWAY_ENV[*]} printenv OMP_GATEWAY_TOKEN")"
   [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
@@ -412,38 +589,125 @@ EOF
   assert_eq "$omp_calls" ""
 }
 
-test_run_gateway_env_preserves_omp_auth_gateway_token_source() {
+# CEL-136: omp reads the SAME file-backed CLIProxyAPI key as pi. The old
+# `omp auth-gateway token` is the retired broker's token (CEL-60); the
+# gateway answers it with 401, so the omp route could never have worked.
+test_run_gateway_env_reads_api_key_for_omp_and_never_calls_omp() {
   T="$(mktemp -d)"
   export CEL_GATEWAY_STATE="$T/gateway"
   mkdir -p "$CEL_GATEWAY_STATE" "$T/bin"
-  printf 'pi-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
+  printf 'omp-gw-test-value\n' >"$CEL_GATEWAY_STATE/api-key"
   cat >"$T/bin/omp" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/omp.log"
-printf '%s\n' 'omp-test-value'
+printf '%s\n' 'broker-token'
 EOF
   chmod +x "$T/bin/omp"
-  local old_path="$PATH" output omp_calls
+  local old_path="$PATH" output omp_calls=""
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
   _run_gateway_env omp omp-worker
-  output="$(bash -c "${GATEWAY_ENV[*]}; printf '%s' \"\$OMP_GATEWAY_TOKEN\"")"
-  omp_calls="$(cat "$T/omp.log")"
+  output="$(bash -c "env ${GATEWAY_ENV[*]} sh -c 'printf \"%s|%s\" \"\$OMP_GATEWAY_TOKEN\" \"\$CEL_SESSION_ID\"'")"
+  [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
   rm -rf "$T"
-  assert_eq "$output" "omp-test-value"
-  assert_eq "$omp_calls" "auth-gateway token"
+  assert_eq "$output" "omp-gw-test-value|omp-worker"
+  assert_eq "$omp_calls" ""
+}
+
+# The omp orchestrator through the gateway (CEL-136). The model is the
+# gateway's per-account-PREFIXED id behind omp's `celgw` provider, the profile's
+# thinking level rides unchanged, and the pane's agent dir is pinned to omp's
+# own so a pi PI_CODING_AGENT_DIR in the pane cannot redirect omp's models.yml.
+_ws_omp_gateway() { # [omp_exclude]
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  ompgw: { runtime: omp, model: anthropic/claude-opus-5-5, thinking: low, via: gateway }
+YAML
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-opus-5-5"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf 'omp-gw-test-value\n' >"$GWT/state/api-key"
+  printf '{"type":"claude","email":"me@personal.invalid"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  printf '{"type":"claude","email":"pool@example.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-22222222-pool@example.invalid.json"
+  [ -z "${1:-}" ] || printf '  omp_exclude: %s\n' "$1" >>"$CEL_CONFIG_FILE"
+  export CEL_OMP_AGENT_DIR="$GWT/omp"
+}
+_ws_omp_gateway_clean() { unset CEL_OMP_AGENT_DIR; _ws_gateway_clean; }
+
+test_run_omp_worker_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
+  _ws_omp_gateway "me@personal.invalid"
+  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)"
+  assert_contains "$out" "--model celgw/omp/claude-opus-5-5"
+  assert_contains "$out" "--thinking low"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN=****"
+  ! printf '%s' "$out" | grep -q 'auth-gateway' || { echo "omp launch still uses the broker token"; _ws_omp_gateway_clean; return 1; }
+  ! printf '%s' "$out" | grep -q 'ompgw-claude' || { echo "omp launch still rewrites to ompgw-claude"; _ws_omp_gateway_clean; return 1; }
+  # A dry run is a preview: no models.yml for a launch that never happened.
+  [ ! -e "$GWT/omp/models.yml" ] || { echo "dry run wrote models.yml"; _ws_omp_gateway_clean; return 1; }
+  _ws_omp_gateway_clean
+}
+
+# The omp launch pins omp's own agent dir whatever the pane carries, and
+# reads the real key file.
+test_run_omp_gateway_env_pins_the_omp_agent_dir() {
+  _ws_omp_gateway "me@personal.invalid"
+  export PROFILE_VIA=gateway
+  local -a GATEWAY_ENV=()
+  _run_profile_gateway_setup omp omp-worker 1 0
+  local line; line="$(_run_launch_env worker "$T" /r.md "" omp)"
+  local out; out="$(PI_CODING_AGENT_DIR=/elsewhere/pi CEL_PI_AGENT_DIR=/elsewhere/pi bash -c "$line sh -c 'printf \"%s|%s\" \"\$PI_CODING_AGENT_DIR\" \"\$OMP_GATEWAY_TOKEN\"'")"
+  unset PROFILE_VIA
+  assert_eq "$out" "$GWT/omp|omp-gw-test-value"
+  _ws_omp_gateway_clean
+}
+
+# No configured exclusion is a VETO, not a widened pool.
+test_run_omp_worker_via_gateway_is_vetoed_without_an_exclusion() {
+  _ws_omp_gateway
+  ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run )
+  _ws_omp_gateway_clean
+}
+
+# An excluded account carrying the omp prefix is in omp's pool right now.
+test_run_omp_worker_via_gateway_is_vetoed_when_personal_is_prefixed() {
+  _ws_omp_gateway "me@personal.invalid"
+  printf '{"type":"claude","email":"me@personal.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
+  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched with personal in the pool"; _ws_omp_gateway_clean; return 1; }
+  assert_contains "$out" "cel gateway omp-scope"
+  _ws_omp_gateway_clean
+}
+
+# A model the gateway does not publish under the omp prefix is refused by
+# name - never swapped for another model.
+test_run_omp_worker_via_gateway_is_vetoed_when_the_prefixed_model_is_missing() {
+  _ws_omp_gateway "me@personal.invalid"
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-sonnet-4-6"}]}' ;;
+esac
+EOS
+  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched without the model"; _ws_omp_gateway_clean; return 1; }
+  assert_contains "$out" "omp/claude-opus-5-5"
+  _ws_omp_gateway_clean
 }
 
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a
 # launch that never happened is a side effect nobody asked for.
 test_run_worker_via_gateway_writes_no_models_json_on_a_dry_run() {
   _ws_gateway
-  export PI_CODING_AGENT_DIR="$GWT/pi"
+  export CEL_PI_AGENT_DIR="$GWT/pi"
   ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run >/dev/null 2>&1 )
-  [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset PI_CODING_AGENT_DIR; _ws_gateway_clean; return 1; }
-  unset PI_CODING_AGENT_DIR
+  [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset CEL_PI_AGENT_DIR; _ws_gateway_clean; return 1; }
+  unset CEL_PI_AGENT_DIR
   _ws_gateway_clean
 }
 
@@ -590,7 +854,8 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
 # guaranteed that directory had any relationship to the pull request. A
 # reviewer now gets a detached checkout AT THE PR'S HEAD, of its own.
 _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $HEAD_SHA
-  _ws_review
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   export CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REVIEW_DIR="$T/reviews"
   export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log"
   : > "$HERDR_LOG"
@@ -611,6 +876,8 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
     case "$1 $2" in
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "agent start") _fake_pane "$@" ;;
       *) : ;;
     esac
   }
@@ -625,6 +892,8 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
 test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_contains "$(cat "$HERDR_LOG")" "pane send-text w1:p9 env "
+  assert_contains "$(cat "$HERDR_LOG")" "CEL_SESSION_ID=widget-pr-12-review"
   local cwd; cwd="$(grep -o -- '--cwd [^ ]*' "$HERDR_LOG" | head -1 | cut -d' ' -f2)"
   [ -n "$cwd" ] || { echo "no pane cwd in the herdr log"; return 1; }
   [ "$cwd" != "$T/repos/widget" ] || { echo "reviewer opened in the orchestrator's checkout"; return 1; }
@@ -635,6 +904,65 @@ test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
+
+test_reviewer_refuses_to_start_without_gateway_api_key() {
+  _ws_pr_fixture
+  rm -f "$CEL_GATEWAY_STATE/api-key"
+  local out
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" \
+    && { echo "reviewer started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  assert_contains "$out" "gateway API key" \
+    || { reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  ! grep -q "agent start" "$HERDR_LOG" \
+    || { echo "reviewer process started without the gateway api key"; reviewer_checkout_release widget 12; rm -rf "$T"; return 1; }
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+test_reviewer_test_fixture_does_not_mutate_callers_pi_models() {
+  local caller_pi; caller_pi="$(mktemp -d)"
+  printf '%s\n' '{"providers":{"personal":{"baseUrl":"https://example.invalid"}}}' >"$caller_pi/models.json"
+  export CEL_PI_AGENT_DIR="$caller_pi"
+  _ws_pr_fixture
+  local before; before="$(cat "$caller_pi/models.json")"
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$caller_pi/models.json")" "$before"
+  reviewer_checkout_release widget 12
+  _ws_gateway_clean
+  rm -rf "$caller_pi"
+}
+
+test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
+  _ws_pr_fixture
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane run")
+        shift 3
+        bash -c "$*" >/dev/null
+        ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start")
+        bash -c "$typed_prefix sh -c 'printf \"%s|%s\" \"\${OMP_GATEWAY_TOKEN:-}\" \"\${CEL_SESSION_ID:-}\"'" > "$T/agent-env"
+        ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  assert_eq "$(cat "$T/agent-env")" "reviewer-test-api-key|widget-pr-12-review"
+  local models="$GWT/pi/models.json"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].apiKey' "$models")" '$OMP_GATEWAY_TOKEN'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].api' "$models")" "anthropic-messages"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].baseUrl' "$models")" "http://127.0.0.1:8317"
+  assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$models")" '$CEL_SESSION_ID'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[] | select(.id == "claude-opus-5-5") | .id' "$models")" "claude-opus-5-5"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+
 
 # A claim about "main" anchored to a directory is not a claim. The brief names
 # the head it is reading and the base it compares against, and says how to tell
@@ -721,8 +1049,8 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
 }
 
 # ---- CEL-70: panes act as the workspace's GitHub account ------------------
-_ws_gh_acct() { # <user>
-  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\ngithub:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
+_gh_acct_setup() { # <user> adds GitHub auth to existing T
+  printf 'github:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
   mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
   cat > "$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -736,21 +1064,27 @@ exit 0
 SH
   chmod +x "$T/bin/gh"; export PATH="$T/bin:$PATH"
 }
+_ws_gh_acct() { # <user>
+  _ws; printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$T/workspace.yaml"
+  _gh_acct_setup "$1"
+}
 test_launch_env_without_github_block_is_unchanged() {
   _ws
   assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md CARGO_BUILD_JOBS=3 "
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
-  _ws_gh_acct acct-b
+  _reviewer_gateway_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  _gh_acct_setup acct-b
   local out role
   for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
     # shellcheck disable=SC2086
     out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
     assert_contains "$out" 'gh auth token --user acct-b'
-    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; rm -rf "$T"; return 1;; esac
+    case "$out" in *tok-b*) echo "token value leaked into $role dry run"; _ws_gateway_clean; return 1;; esac
   done
-  rm -rf "$T"
+  _ws_gateway_clean
 }
 test_launch_refuses_when_the_declared_user_is_not_logged_in() {
   _ws_gh_acct acct-z
@@ -808,7 +1142,7 @@ _label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
     case "$1 $2" in
       "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
       "pane rename"|"tab rename") [ -z "${FAIL_RENAME:-}" ] ;;
-      "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s:t1"}}}' "$3" "${3%%:*}" ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       *) : ;;
@@ -896,4 +1230,280 @@ test_run_omp_orchestrators_wait_out_a_spent_budget() {
   # and the overlay itself holds at least six hours
   assert_eq "$(yq -r '.retry.maxDelayMs >= 21600000' "$ov")" true
   rm -rf "$T"
+}
+
+# ---------------------------------------------------------------------------
+# AH-261017: A PANE IS TYPED INTO ONLY ONCE ITS SHELL OWNS THE FOREGROUND.
+# A downstream workspace's reviewer launch twice died as agent_pane_busy about six
+# seconds in, with the credential substitution and role env typed into a fresh
+# pane's terminal, never submitted, a shell warning interleaved with it. The
+# shell was still reading its rc files; nothing in cel waited for it. These
+# cases drive the launcher against an isolated fake herdr whose shell is slow,
+# swapped, or absent, and read the outcome from what herdr was actually asked.
+_pf_calls() { grep -c "^$1" "$HERDR_LOG" || true; }
+_pf_reviewer() { # run the reviewer launch with fake knobs; leaves $out and $rc
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" && rc=0 || rc=$?
+}
+_pf_no_launch() { # nothing typed, nothing started, nothing recorded
+  assert_eq "$(_pf_calls 'pane send-text')" 0
+  assert_eq "$(_pf_calls 'agent start')" 0
+  assert_fails reviewers_find widget 12
+}
+_pf_clean() { reviewer_checkout_release widget 12 2>/dev/null; rm -rf "$T"; }
+
+test_launch_waits_for_a_slow_shell_then_types_the_prefix_exactly_once() {
+  _ws_pr_fixture; export PF_BUSY_GETS=6
+  _pf_reviewer
+  assert_eq "$rc" 0
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  # every probe before the text was typed, and at least BUSY + STABLE of them
+  local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
+  local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w1:p9 *$' || true)"
+  [ "$before" -ge 9 ] || { echo "typed after only $before readiness probes"; _pf_clean; return 1; }
+  assert_eq "$(reviewers_find widget 12 | jq -r .pane)" w1:p9
+  unset PF_BUSY_GETS; _pf_clean
+}
+
+test_launch_ready_pane_carries_role_and_inbox_environment() {
+  _ws_pr_fixture
+  local typed=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed="$4" ;;
+      "agent start") printf '%s' "$typed" > "$T/typed" ;;
+    esac
+  }
+  ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
+  local t; t="$(cat "$T/typed")"
+  assert_contains "$t" "CEL_ROLE=reviewer"
+  assert_contains "$t" "CEL_WORKSPACE=$T"
+  assert_contains "$t" "CEL_INBOX_ME=widget-pr-12-review"
+  assert_contains "$t" "OMP_GATEWAY_TOKEN="
+  _pf_clean
+}
+
+test_launch_past_the_deadline_types_nothing_starts_nothing_records_nothing() {
+  _ws_pr_fixture; export PF_ALWAYS=busy CEL_PANE_READY_MS=150
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch succeeded on a pane whose shell never came up"; _pf_clean; return 1; }
+  assert_contains "$out" "shell does not own the foreground"
+  case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_refuses_a_pane_an_agent_already_occupies() {
+  _ws_pr_fixture; export PF_ALWAYS=agent CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead over a live agent"; _pf_clean; return 1; }
+  assert_contains "$out" "an agent already runs in it"
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_fails_closed_when_herdr_cannot_describe_the_pane() {
+  _ws_pr_fixture; export PF_ALWAYS=blind CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead on a pane herdr could not describe"; _pf_clean; return 1; }
+  _pf_no_launch
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+test_launch_refuses_when_the_pane_changes_owner_while_waiting() {
+  _ws_pr_fixture; export PF_BUSY_GETS=50 PF_SWAP_TERMINAL_AT=3
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead after the terminal was replaced"; _pf_clean; return 1; }
+  assert_contains "$out" "changed owner"
+  _pf_no_launch
+  unset PF_BUSY_GETS PF_SWAP_TERMINAL_AT; _pf_clean
+}
+
+test_launch_refuses_to_start_when_the_shell_changes_after_the_prefix_is_typed() {
+  _ws_pr_fixture; export PF_SWAP_SHELL_ON_SEND=1
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch succeeded after the shell was replaced"; _pf_clean; return 1; }
+  assert_contains "$out" "changed after the launch line was typed"
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 0
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  assert_fails reviewers_find widget 12
+  case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
+  unset PF_SWAP_SHELL_ON_SEND; _pf_clean
+}
+
+test_a_start_refused_after_the_prefix_is_not_retried_and_is_not_a_launch() {
+  _ws_pr_fixture; export PF_START_FAIL=1
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "a refused agent start was reported as a launch"; _pf_clean; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_contains "$out" "never submitted"
+  assert_contains "$out" "agent_pane_busy"
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  assert_fails reviewers_find widget 12
+  case "$out" in *reviewer-test-api-key*|*OMP_GATEWAY_TOKEN=*) echo "the pending launch line leaked"; _pf_clean; return 1;; esac
+  unset PF_START_FAIL; _pf_clean
+}
+
+# The real CLI against the fake as an executable on PATH: the non-reviewer
+# roles share the one gate, and a restart re-enters the same shell.
+_pf_cli_fixture() {
+  _ws; mkdir -p "$T/bin"; cp "$CEL_ROOT/tests/lib/fake-herdr" "$T/bin/herdr"
+  export HERDR_LOG="$T/herdr.log" PF_DIR="$T/pf" PATH="$T/bin:$PATH"; : > "$HERDR_LOG"
+}
+test_cli_orchestrator_launch_waits_for_the_shell_then_starts_once() {
+  _pf_cli_fixture; export PF_BUSY_GETS=4
+  ( cd "$T" && "$CEL_ROOT/bin/cel" run orchestrator --repo widget ) >/dev/null 2>&1 \
+    || { echo "launch failed: $(cat "$HERDR_LOG")"; return 1; }
+  assert_eq "$(_pf_calls 'pane send-text')" 1
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_ROLE=orchestrator"
+  local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
+  local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w7:p1 *$' || true)"
+  [ "$before" -ge 7 ] || { echo "typed after only $before probes"; return 1; }
+  unset PF_BUSY_GETS; rm -rf "$T"
+}
+test_cli_root_and_console_never_type_into_a_pane_that_is_not_ready() {
+  _pf_cli_fixture; export PF_ALWAYS=busy CEL_PANE_READY_MS=120
+  local role
+  for role in root orchestrator; do
+    ( cd "$T" && "$CEL_ROOT/bin/cel" run $role --repo widget ) >/dev/null 2>&1 \
+      && { echo "$role launched into a busy pane"; return 1; }
+  done
+  assert_eq "$(_pf_calls 'pane send-text')" 0
+  assert_eq "$(_pf_calls 'agent start')" 0
+  unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; rm -rf "$T"
+}
+test_cli_worker_start_refusal_is_reported_not_retried() {
+  _pf_cli_fixture; export PF_START_FAIL=1
+  local out; out="$(cd "$T" && "$CEL_ROOT/bin/cel" run worker --repo widget --branch WG-1-x 2>&1)" \
+    && { echo "a refused start was reported as a launch"; return 1; }
+  assert_contains "$out" "NOT retried"
+  assert_eq "$(_pf_calls 'agent start')" 1
+  assert_eq "$(_pf_calls 'pane send-keys')" 0
+  unset PF_START_FAIL; rm -rf "$T"
+}
+
+# herdr's own prompt predicate also requires the foreground process GROUP to be
+# the shell's; a pane that does not report it cannot be proven ready.
+test_launch_refuses_a_pane_that_reports_no_foreground_process_group() {
+  _ws_pr_fixture; export PF_NO_PGID=1 CEL_PANE_READY_MS=100
+  _pf_reviewer
+  [ "$rc" -ne 0 ] || { echo "launch went ahead without a foreground group"; _pf_clean; return 1; }
+  _pf_no_launch
+  unset PF_NO_PGID; export CEL_PANE_READY_MS=3000; _pf_clean
+}
+
+# An omp process that STARTS on a non-gateway provider (Codex) can later switch
+# to a configured celgw model. The pane therefore needs the gateway client key
+# and its own session identity at launch whatever the starting model is: the
+# launch environment is the only place omp reads them, and a running process
+# cannot be handed them afterwards. Stub boundary: a real loopback HTTP server
+# that answers 200 to the box's key and 401 to anything else, probed from the
+# environment the launch line actually produces.
+_omp_native_auth_stub() { # <state-dir> -> sets STUB_PORT, STUB_PID
+  local d="$1"
+  cat >"$d/stub.py" <<'PY'
+import http.server, sys
+key = open(sys.argv[1]).read().strip()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = self.headers.get("Authorization", "") == "Bearer " + key
+        self.send_response(200 if ok else 401); self.end_headers()
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[2], "w").write(str(s.server_port))
+s.serve_forever()
+PY
+  python3 "$d/stub.py" "$d/state/api-key" "$d/port" & STUB_PID=$!
+  local i=0; while [ ! -s "$d/port" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  STUB_PORT="$(cat "$d/port")"
+}
+
+_omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # runs a native-omp worker launch; prints "<http>|<session>|<dir>"
+  local typed_prefix=""
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "pane send-text") typed_prefix="$4" ;;
+      "agent start")
+        bash -c "$typed_prefix sh -c 'curl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer \${OMP_GATEWAY_TOKEN:-}\" http://127.0.0.1:$STUB_PORT/v1/models; printf \"|%s|%s\" \"\${CEL_SESSION_ID:-}\" \"\${PI_CODING_AGENT_DIR:-}\"'" > "$T/agent-env"
+        ;;
+      *) : ;;
+    esac
+  }
+  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile codexomp ) >/dev/null 2>&1
+  cat "$T/agent-env" 2>/dev/null
+}
+
+test_run_native_omp_start_still_gets_gateway_credentials_for_later_switch() {
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  codexomp: { runtime: omp, model: openai-codex/gpt-6.1-sol, thinking: low }
+YAML
+  export CEL_OMP_AGENT_DIR="$GWT/omp"
+  printf 'omp-native-key\n' >"$GWT/state/api-key"
+  _omp_native_auth_stub "$GWT"
+  local out; out="$(_omp_native_launch_probe)"
+  kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null || true
+  unset CEL_OMP_AGENT_DIR
+  _ws_gateway_clean
+  assert_contains "$out" "200|"
+  assert_contains "$out" "|widget-wg-1-x|"
+  assert_contains "$out" "/omp"
+}
+
+test_run_native_omp_start_without_a_gateway_still_launches_without_credentials() {
+  _ws_gateway
+  cat >>"$T/workspace.yaml" <<'YAML'
+  codexomp: { runtime: omp, model: openai-codex/gpt-6.1-sol, thinking: low }
+YAML
+  : >"$CEL_CONFIG_FILE"   # no gateway configured on this box
+  rm -f "$GWT/state/api-key"
+  local -a GATEWAY_ENV=(stale)
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_native_omp_start_with_an_empty_key_file_launches_without_credentials() {
+  _ws_gateway
+  : >"$GWT/state/api-key"
+  local -a GATEWAY_ENV=()
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_native_pi_start_gets_no_gateway_credentials() {
+  _ws_gateway
+  printf 'k\n' >"$GWT/state/api-key"
+  local -a GATEWAY_ENV=()
+  local PROFILE_VIA=""
+  _run_profile_gateway_setup pi pi-worker 1 1
+  local n="${#GATEWAY_ENV[@]}"
+  _ws_gateway_clean
+  assert_eq "$n" "0"
+}
+
+test_run_required_gateway_with_missing_key_still_refuses() {
+  _ws_gateway
+  rm -f "$GWT/state/api-key"
+  local PROFILE_VIA=gateway
+  ( _run_profile_gateway_setup omp omp-worker 1 0 ) >/dev/null 2>&1 && { _ws_gateway_clean; echo "required gateway launched without a key"; return 1; }
+  _ws_gateway_clean
 }
