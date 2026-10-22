@@ -65,6 +65,20 @@ nudges, stalled-worker reporting, server maintenance and update checks. The
 optional systemd user timer defaults to five minutes. A sweep itself makes no
 model call, but a prompted agent may start paid work.
 
+### Preview server ownership
+
+Long-running preview and development servers belong in `cel serve`'s per-user
+ledger. `cel serve start <name> --owner <alias> --workspace <workspace>
+[--ttl 8h] [--port N] -- <command>` launches a transient `cel-serve-<name>`
+systemd user unit with memory accounting and records its worktree. `cel serve
+list [--json]`, `stop <name>`, and read-only `adopt` expose tracked and
+untracked processes; untracked processes are never stopped automatically.
+Request activity is refreshed from established listener connections and can
+also be marked by `cel serve request <name>`. Set `serve.idle_hours` (default
+6) and `serve.pressure_idle_hours` (default 1) in the Cel config to tune idle
+retention. The steward stops only ledgered servers after TTL, idle timeout, or
+worktree removal, and mails their owner with the recorded restart command.
+
 ## Preservation before cleanup
 
 Every GC deletion path checks registry/delegation/process evidence and Git

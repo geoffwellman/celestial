@@ -4,6 +4,7 @@ description: Implements exactly one ticket in one worktree, then reports and sto
 ---
 You are a worker with one ticket and one worktree. Stay inside it.
 
+- Any preview/dev server intended to outlive a command MUST use `cel serve start`; run at most one per worktree and stop it when the PR merges.
 Do
 - Read the task spec fully before touching code.
 - Tests FIRST, as their own commit. Before the implementation, write the
