@@ -111,8 +111,9 @@ cel decide - the owner's one queue of decisions, across every workspace
       and why, and what happens if nobody answers. --pr links a PR the
       question blocks (repeatable): while it is open the steward does not
       nudge that PR as a worker finding.
-  cel decide list [--json]
-      every open owner decision in every workspace, oldest first.
+  cel decide list [--json] [--workspace w] [--asker <alias>]
+      every open owner decision in every workspace, oldest first; --workspace
+      and --asker narrow it (an agent's own questions: --asker <product>-orch).
   cel decide answer <id> <option-number|"free text"|--text <text>|--option <n>> [--by who]
       digits pick that option when it exists, else they are the answer; resolve it and mail `ANSWER to "<title>": ...` to the asker's inbox.
   cel decide drop <id> --why <text> [--by who]
@@ -259,16 +260,24 @@ _decide_age() { # <secs>
 }
 
 _decide_list() {
-  local json=0
+  local json=0 ws="" asker=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
+      --workspace) ws="${2:-}"; shift 2 ;;
+      --asker) asker="${2:-}"; shift 2 ;;
       *) die "cel decide list: unknown argument '$1'" ;;
     esac
   done
   local all; all="$(decide_all_json)"
+  # Narrowed to one workspace and/or one asker: an agent's own questions.
+  if [ -n "$all" ] && { [ -n "$ws" ] || [ -n "$asker" ]; }; then
+    all="$(jq -c --arg w "$ws" --arg a "$asker" \
+      'select(($w == "" or .workspace == $w) and ($a == "" or .asker == $a))' <<< "$all")"
+  fi
   if [ "$json" -eq 1 ]; then [ -n "$all" ] && printf '%s\n' "$all"; return 0; fi
-  [ -n "$all" ] || { c_ok "no open owner decisions in any workspace" >&2; return 0; }
+  local where=" in any workspace"; [ -z "$ws" ] || where=" in $ws"
+  [ -n "$all" ] || { c_ok "no open owner decisions${asker:+ from $asker}$where" >&2; return 0; }
   local line age
   while IFS= read -r line; do
     age="$(_decide_age "$(jq -r '.age_secs' <<< "$line")")"

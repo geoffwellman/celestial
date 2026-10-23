@@ -246,6 +246,10 @@ _guard_worker() { # <command> -> allow | deny <reason>
     printf 'deny a worker does not start agents'
     return 0
   fi
+  if _guard_starts "$1" 'cel here'; then
+    printf 'deny cel here is the owner'"'"'s in-pane commands for core and product agents, not a worker'"'"'s'
+    return 0
+  fi
   printf allow
 }
 

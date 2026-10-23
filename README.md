@@ -209,6 +209,32 @@ names the product agent's route. It runs from agents.yaml `defaults.core`
 `cel core --restart` relaunches it in its own pane, `--fresh` starts a new
 conversation. Mail sent to `core` lands in `root`.
 
+### Commands inside an agent
+
+Core, orchestrators and solo agents all take the same small set of commands,
+typed in the agent's own pane instead of remembering CLI flags. Each runs
+`cel here <verb>` - a thin wrapper over one `cel` command - scoped to the
+pane's own product unless one is named (core names one: `<product>` or
+`<workspace>/<product>`). The output is posted into the conversation without
+starting a turn, so the agent sees what its owner ran.
+
+| In the agent | Runs | Does |
+| --- | --- | --- |
+| `/cel-mode [product] [solo\|fleet]` | `cel mode` | show or switch the product's mode (restart at end of turn) |
+| `/cel-status [product]` | `cel fleet --workspace <w>` (core: `cel fleet`) | agent, workers, PRs |
+| `/cel-inbox` | `cel inbox read --for <me> --all-workspaces` | unread mail now (core: root's) |
+| `/cel-decide` | `cel decide list` (others: `--workspace <w> --asker <me>`) | open owner questions |
+| `/cel-review [repo#]<pr>` | `cel run reviewer` | start a reviewer pane (not core) |
+| `/cel-land [repo#]<pr> [flags]` | `cel solo land` or `cel-fanout land <id>` | merge through the mode's checked path; fleet finds the delegation by the PR's head branch (not core) |
+| `/cel-restart` | the `cel mode` restart waiter | restart this agent on its own session once its turn ends |
+| `/cel-focus <product>` | `herdr agent focus <product>-orch` | core only |
+
+omp and pi register them through the inbox extension
+(`tools/hooks/inbox.omp.ts`); Claude Code gets `~/.claude/commands/cel-*.md`
+links from `cel setup`/`cel update`. The `cel-` prefix is deliberate: omp has
+built-in `/review` and `/restart`, Claude Code built-in `/status` and
+`/review`.
+
 `cel run <role>` starts any station with its role injected and permissions
 pre-approved; workers are spawned by orchestrators through the `fanout` skill,
 which cuts worktrees from origin's real default branch, refuses diverged refs,
