@@ -114,6 +114,22 @@ link_claude_prefs() {
     ln -sfn "$hud" "$HOME/.claude/plugins/claude-hud/config.json"
     c_ok "claude-hud config -> plane copy"
   fi
+  # The in-agent commands (/cel-mode, /cel-status, ... - lib/here.sh), one
+  # link per file so the user's own commands stay theirs. A link into a plane
+  # commands dir whose file is gone is pruned, so a retired command goes too.
+  local cmds="$CEL_ROOT/tools/claude/commands" dest="$HOME/.claude/commands" f l n=0
+  if [ -d "$cmds" ]; then
+    mkdir -p "$dest"
+    for l in "$dest"/cel-*.md; do
+      [ -L "$l" ] && [ ! -e "$l" ] || continue
+      case "$(readlink "$l")" in */tools/claude/commands/*) rm -f "$l" ;; esac
+    done
+    for f in "$cmds"/cel-*.md; do
+      [ -f "$f" ] || continue
+      ln -sfn "$f" "$dest/$(basename "$f")"; n=$((n + 1))
+    done
+    c_ok "claude commands -> plane copies ($n: /cel-*)"
+  fi
 }
 
 link_all() {

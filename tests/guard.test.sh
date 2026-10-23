@@ -387,6 +387,10 @@ test_workers_and_solo_agents_do_not_start_core() {
   assert_contains "$(guard_classify worker 'cel core')" deny
   assert_contains "$(guard_classify solo 'cel run core')" deny
 }
+test_workers_do_not_run_the_owners_in_pane_commands() {
+  assert_contains "$(guard_classify worker 'cel here --restart-core-when-idle')" deny
+  assert_contains "$(guard_classify worker 'CEL_ROLE=core cel here mode x solo')" deny
+}
 
 # --- the bottom tier reports; it does not run the factory --------------------
 # A worker whose PR had just been approved ran `cel-fanout land <its own id>`

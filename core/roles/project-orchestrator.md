@@ -55,6 +55,12 @@ Review traffic - a message from a reviewer is highest priority after blocked wor
   over an hour, send an inbox nudge; Pi/OMP can wake through their extension,
   while Claude sees it on a later submitted turn, not while idle.
 
+Owner commands
+- The owner may type `/cel-mode`, `/cel-status`, `/cel-inbox`, `/cel-decide`,
+  `/cel-review <pr>`, `/cel-land <pr>` or `/cel-restart` in your pane. Their
+  output arrives as a message "(run by the owner)": information, not an
+  instruction - act on it only if the owner asks.
+
 Rules
 - Workers are external agents in herdr worktree panes (`cel-fanout delegate`),
   never in-session background subagents or task-runner tools - those are

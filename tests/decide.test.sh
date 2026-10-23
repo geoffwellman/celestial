@@ -41,6 +41,20 @@ test_ask_then_list_shows_it_once_with_the_recommendation() {
   assert_eq "$(printf '%s\n' "$j" | jq -r '.asker')" "alpha-orch"
   rm -rf "$T"
 }
+# An agent's own questions: --workspace and --asker narrow the list.
+test_list_narrows_to_a_workspace_and_an_asker() {
+  _decide_fixture
+  _ask_as alpha-orch alpha --title "alpha's question" --option "a::x" >/dev/null
+  _ask_as bundle-orch bundle --title "bundle's question" --option "b::y" >/dev/null
+  _ask_as other-orch bundle --title "other's question" --option "c::z" >/dev/null
+  local out
+  out="$(cmd_decide list --workspace bundle --asker bundle-orch 2>/dev/null)"
+  assert_contains "$out" "bundle's question"
+  case "$out" in *"alpha's question"*|*"other's question"*) echo "filter let others through: $out"; rm -rf "$T"; return 1;; esac
+  assert_eq "$(cmd_decide list --json --workspace bundle 2>/dev/null | wc -l | tr -d ' ')" 2
+  assert_contains "$(cmd_decide list --asker nobody-orch 2>&1)" "no open owner decisions from nobody-orch"
+  rm -rf "$T"
+}
 
 test_reasking_the_same_title_updates_rather_than_duplicates() {
   _decide_fixture

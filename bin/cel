@@ -115,6 +115,10 @@ cel - the celestial plane
                                 launch: it builds and ships itself, no fan-out
                                 (cel run orchestrator does this on its own for
                                 a product whose mode is solo)
+  cel here <verb> [args]        what /cel-<verb> runs inside an agent, scoped to
+                                the pane's own product: mode, status, inbox,
+                                decide, review, land, restart (core: + focus).
+                                cel here help for the list
   cel mode [product] [solo|fleet] [--no-restart]
                                 show or set how a product is built: fleet
                                 (orchestrator + workers) or solo (one agent).
@@ -256,6 +260,7 @@ case "${1:-help}" in
   run)      shift; . "$CEL_ROOT/lib/run.sh";     cmd_run "$@";;
   core)     shift; . "$CEL_ROOT/lib/run.sh";     cmd_run core "$@";;
   mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
+  here)     shift; . "$CEL_ROOT/lib/here.sh";    cmd_here "$@";;
   solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
   console)  shift; . "$CEL_ROOT/lib/console.sh"; cmd_console "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;

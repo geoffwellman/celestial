@@ -222,9 +222,74 @@ function drain(ctx): string {
   } catch { return null; }
 }
 
+// THE IN-AGENT COMMANDS (lib/here.sh). Each /cel-<verb> runs `cel here <verb>`
+// - itself a thin wrapper over one `cel` command - and posts what it printed
+// into the conversation without starting a turn, so the agent sees what its
+// owner ran. Registered for the agents that own a product or the box (core,
+// root, orchestrators, solo agents); workers and reviewers get none. The
+// `cel-` prefix: omp has built-in /review and /restart.
+const HERE_VERBS = {
+  mode: "Show or switch this product's mode: /cel-mode [product] [solo|fleet]",
+  status: "cel fleet for this product's workspace (core: the whole box)",
+  inbox: "Read unread celestial mail now",
+  decide: "Open owner questions (core: all; others: your own)",
+  review: "Start a reviewer pane: /cel-review [repo#]<pr>",
+  land: "Merge a PR through this mode's checked path: /cel-land [repo#]<pr>",
+  restart: "Restart this agent on its own session once this turn ends",
+};
+const HERE_CORE_VERBS = { focus: "Bring a product's agent forward: /cel-focus <product>" };
+function runHere(verb: string, args: string, ctx): Promise<string> {
+  const { promise, resolve } = Promise.withResolvers<string>();
+  let out = "";
+  let child;
+  try {
+    child = spawn("bash", [celBin(), "here", verb, ...args.split(/\s+/).filter(Boolean)], {
+      cwd: (ctx && ctx.cwd) || process.cwd(), stdio: ["ignore", "pipe", "pipe"], env: process.env,
+    });
+  } catch (e) { resolve(`cel here ${verb}: could not start (${e})`); return promise; }
+  // land may run the local gate; everything else answers in seconds.
+  const limit = verb === "land" ? envMs("CEL_HERE_LAND_MS", 45 * 60000) : envMs("CEL_HERE_MS", 120000);
+  const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} out += `\n(cel here ${verb} timed out)`; }, limit);
+  child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (c) => { out += c; });
+  child.stderr.on("data", (c) => { out += c; });
+  child.on("error", (e) => { out += `\n${e}`; });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    // Colour codes are for a terminal; the conversation gets plain text.
+    const text = out.replace(/\x1b\[[0-9;]*m/g, "").trim() || "(no output)";
+    resolve(code === 0 ? text : `${text}\n(exit ${code})`);
+  });
+  return promise;
+}
+function registerHereCommands(pi): void {
+  const role = process.env.CEL_ROLE || "";
+  if (!["core", "root", "orchestrator", "solo"].includes(role)) return;
+  if (typeof pi.registerCommand !== "function") return;
+  const verbs = role === "core" ? { ...HERE_VERBS, ...HERE_CORE_VERBS } : HERE_VERBS;
+  for (const [verb, description] of Object.entries(verbs)) {
+    try {
+      pi.registerCommand(`cel-${verb}`, {
+        description,
+        handler: async (args, ctx) => {
+          try { ctx && ctx.ui && ctx.ui.notify(`cel here ${verb} ${args || ""}`.trim() + " ...", "info"); } catch {}
+          const text = await runHere(verb, args || "", ctx);
+          try {
+            await pi.sendMessage({
+              customType: "cel-command", display: true,
+              content: `/cel-${verb}${args ? " " + args : ""} (run by the owner):\n${text}`,
+            }, { triggerTurn: false });
+          } catch { try { ctx && ctx.ui && ctx.ui.notify(text.slice(0, 500), "info"); } catch {} }
+        },
+      });
+    } catch { /* fail open: a command that cannot register must not take the inbox down */ }
+  }
+}
+
 export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
+  registerHereCommands(pi);
   pi.on("agent_end", () => { waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
   pi.on("session_start", (_e, ctx) => { stopped = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {

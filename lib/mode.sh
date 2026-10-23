@@ -144,54 +144,67 @@ _mode_agent_status() { # <wsdir> <product>
 _mode_unit() { # <ws> <product>
   printf 'cel-mode-%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '-'
 }
-_mode_schedule_restart() { # <wsdir> <product> -> 0 scheduled, 3 one already pending
-  local ws; ws="$(ws_name "$1")"
-  local -a cmd=("$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" --workspace "$ws")
+# Run <cmd...> detached from the caller as user unit <unit> (setsid without
+# systemd). 0 scheduled, 3 when that unit is already running.
+_mode_detach() { # <unit> <cmd...>
+  local unit="$1"; shift
   if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_MODE_LAUNCH:-}" ]; then
-    "$CEL_MODE_LAUNCH" "${cmd[@]}"; return $?
+    "$CEL_MODE_LAUNCH" "$@"; return $?
   fi
-  local unit; unit="$(_mode_unit "$ws" "$2")"
   if have systemd-run && systemctl --user show-environment >/dev/null 2>&1; then
     systemctl --user is-active --quiet "$unit.service" 2>/dev/null && return 3
     local -a envs=(--setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=CEL_ROOT="$CEL_ROOT")
     [ -z "${HERDR_SOCKET_PATH:-}" ] || envs+=(--setenv=HERDR_SOCKET_PATH="$HERDR_SOCKET_PATH")
     [ -z "${CEL_REGISTRY:-}" ] || envs+=(--setenv=CEL_REGISTRY="$CEL_REGISTRY")
-    systemd-run --user --quiet --collect --unit "$unit" "${envs[@]}" "${cmd[@]}" && return 0
+    systemd-run --user --quiet --collect --unit "$unit" "${envs[@]}" "$@" && return 0
   fi
-  setsid nohup "${cmd[@]}" >/dev/null 2>&1 < /dev/null &
+  setsid nohup "$@" >/dev/null 2>&1 < /dev/null &
+}
+_mode_schedule_restart() { # <wsdir> <product> -> 0 scheduled, 3 one already pending
+  local ws; ws="$(ws_name "$1")"
+  _mode_detach "$(_mode_unit "$ws" "$2")" "$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" --workspace "$ws"
 }
 
-# The waiter itself. Restarts the product's agent once it has been `idle` or
-# `done` for two consecutive polls - a turn has gaps between tool calls, and
-# one quiet sample in the middle of one is not the end of it. Anything else is
-# not quiet: `working` is a turn, and `blocked` is a pending approval the owner
+# The waiter itself. Relaunches an agent once it has been `idle` or `done`
+# for two consecutive polls - a turn has gaps between tool calls, and one
+# quiet sample in the middle of one is not the end of it. Anything else is not
+# quiet: `working` is a turn, and `blocked` is a pending approval the owner
 # has not answered, which a restart would throw away. The relaunch never
 # passes --force, so `cel run --restart` itself still refuses a working agent.
 # Gives up after a bound and says so: a waiter must never outlive its reason.
-_mode_restart_when_idle() { # <wsdir> <product>
-  local wsdir="$1" product="$2" status rc quiet=0 waited=0
+# The status command prints the agent's status: rc 1 means not live, rc 2
+# means herdr could not be asked.
+_mode_when_quiet() { # <lock-file> <name> <then-what> -- <status cmd...> -- <relaunch cmd...>
+  local lock="$1" name="$2" then="$3"; shift 3; [ "${1:-}" = -- ] && shift
+  local -a st=() re=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do st+=("$1"); shift; done
+  [ $# -gt 0 ] && shift; re=("$@")
+  local status rc quiet=0 waited=0
   local poll="${CEL_MODE_POLL_SECS:-5}" limit="${CEL_MODE_WAIT_SECS:-7200}"
-  local lock="$wsdir/.cel/mode-restart-$product.lock"
-  mkdir -p "$wsdir/.cel"
+  mkdir -p "$(dirname "$lock")"
   exec 8>"$lock"
-  flock -n 8 || { c_warn "cel mode: a restart of $product is already pending"; return 0; }
+  flock -n 8 || { c_warn "a restart of $name is already pending"; return 0; }
   while [ "$waited" -lt "$limit" ]; do
-    rc=0; status="$(_mode_agent_status "$wsdir" "$product")" || rc=$?
+    rc=0; status="$("${st[@]}")" || rc=$?
     case "$rc" in
-      1) c_warn "cel mode: $product-orch is not live any more - the new mode applies at its next launch"; return 0 ;;
+      1) c_warn "$name is not live any more - $then"; return 0 ;;
       2) quiet=0 ;;   # the observer stuttered: ask again, decide nothing
       *) case "$status" in idle|done) quiet=$((quiet + 1)) ;; *) quiet=0 ;; esac ;;
     esac
-    if [ "$quiet" -ge 2 ]; then
-      # From the workspace directory, so no registry lookup stands between the
-      # waiter and the one launch path that picks the role from `mode:`.
-      ( cd "$wsdir" && cmd_run orchestrator --product "$product" --restart )
-      return $?
-    fi
+    if [ "$quiet" -ge 2 ]; then "${re[@]}"; return $?; fi
     sleep "$poll"; waited=$((waited + poll))
   done
-  c_err "cel mode: $product was not idle within ${limit}s - not restarted; the new mode applies at its next launch"
+  c_err "$name was not idle within ${limit}s - not restarted; $then"
   return 1
+}
+_mode_relaunch() { # <wsdir> <product>
+  # From the workspace directory, so no registry lookup stands between the
+  # waiter and the one launch path that picks the role from `mode:`.
+  ( cd "$1" && cmd_run orchestrator --product "$2" --restart )
+}
+_mode_restart_when_idle() { # <wsdir> <product>
+  _mode_when_quiet "$1/.cel/mode-restart-$2.lock" "$2-orch" "the new mode applies at its next launch" \
+    -- _mode_agent_status "$1" "$2" -- _mode_relaunch "$1" "$2"
 }
 
 cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
