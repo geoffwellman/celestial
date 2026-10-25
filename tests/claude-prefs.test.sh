@@ -97,3 +97,17 @@ test_claude_stop_hook_blocks_with_new_mail_as_reason() {
   assert_eq "$out" ""
   rm -rf "$t"
 }
+
+# An unresolved placeholder an older install left behind is removed; the
+# user's own prompt hooks stay.
+test_prefs_drop_an_unresolved_placeholder_hook() {
+  local h; h="$(_fake_home)"
+  mkdir -p "$h/.claude"
+  echo '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"__CEL_INBOX_DRAIN_COMMAND__"}]},{"hooks":[{"type":"command","command":"mine"}]}]}}' > "$h/.claude/settings.json"
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  local cmds; cmds="$(jq -r '[.hooks.UserPromptSubmit[].hooks[].command] | join("|")' "$h/.claude/settings.json")"
+  case "$cmds" in *__CEL_*) echo "placeholder kept: $cmds"; rm -rf "$h"; return 1;; esac
+  assert_contains "$cmds" "mine"
+  assert_contains "$cmds" "inbox-drain.sh"
+  rm -rf "$h"
+}

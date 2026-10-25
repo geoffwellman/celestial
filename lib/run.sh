@@ -1727,10 +1727,24 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # A repo or product may narrow that binding for itself; see role_profile_for.
   # A solo agent may be bound on its own (`role_profiles: { solo: ... }`), and
   # otherwise takes the orchestrator's binding - it is the same product's agent.
+  # A LANE KEEPS THE PROFILE IT WAS LAUNCHED WITH. A lane started with
+  # --profile (say, Claude Code for one feature set) and restarted by
+  # /cel-restart or `cel run solo --lane x --restart` - neither passes the
+  # flag - would otherwise come back on the product's default, a different
+  # runtime, and its session would not resume. The launch writes the choice
+  # beside the lane's role file; a later --profile replaces it.
+  local lane_profile_file=""
+  [ -z "$lane" ] || lane_profile_file="$cwd/launch-profile"
+  if [ -z "$profile" ] && [ -n "$lane_profile_file" ] && [ -s "$lane_profile_file" ]; then
+    profile="$(head -n1 "$lane_profile_file")"
+  fi
   if [ -z "$profile" ] && [ "$solo" -eq 1 ]; then
     profile="$(role_profile_for "$wsdir" solo "$bind")"
   fi
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
+  if [ -n "$lane_profile_file" ] && [ -n "$profile" ] && [ "$dry_run" -eq 0 ]; then
+    mkdir -p "$cwd" && printf '%s\n' "$profile" > "$lane_profile_file"
+  fi
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
   local PROFILE_VIA="" PROFILE_WSDIR="" PROFILE_GATEWAY_ACCOUNTS=0

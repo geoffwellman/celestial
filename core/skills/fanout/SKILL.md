@@ -92,6 +92,9 @@ cel-fanout recover abandon  <id> --reason "<what you found>"
   When the old conversation cannot be resumed (no session on the row, or an
   omp row) and the work is in git, `delegate --reuse --fresh-session` starts
   the same worker in the same checkout on a new conversation.
+  A checkout kept with `release --keep-worktree` is never removed by
+  `cel gc`; for a row released before that was recorded, `cel-fanout keep
+  <id>` marks it.
 
 Running a worker on a different model or CLI
 

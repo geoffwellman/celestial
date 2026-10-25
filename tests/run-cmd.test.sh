@@ -1620,3 +1620,14 @@ test_run_required_gateway_with_missing_key_still_refuses() {
   ( _run_profile_gateway_setup omp omp-worker 1 0 ) >/dev/null 2>&1 && { _ws_gateway_clean; echo "required gateway launched without a key"; return 1; }
   _ws_gateway_clean
 }
+
+# A lane comes back on the profile it was launched with when restarted
+# without one.
+test_run_solo_lane_restart_keeps_its_launch_profile() {
+  _ws_solo bundle
+  mkdir -p "$T/.cel/solo/bundle/lane-ui"; printf 'mylaneprof\n' > "$T/.cel/solo/bundle/lane-ui/launch-profile"
+  profile_resolve() { PROFILE_RUNTIME=claude; PROFILE_MODEL=picked-$2; PROFILE_THINKING=low; }
+  local out; out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run 2>/dev/null)"
+  assert_contains "$out" "picked-mylaneprof"
+  rm -rf "$T"
+}
