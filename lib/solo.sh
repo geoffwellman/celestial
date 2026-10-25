@@ -189,13 +189,21 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
 _solo_local_gate() { # <wsdir> <repo> <head> <gate>
   local wsdir="$1" repo="$2" head="$3" gate="$4" repodir wt="" w h rc=0 t0 secs
   repodir="$wsdir/repos/$repo"
+  # WHICH checkout: the one the caller stands in when it qualifies (the solo
+  # agent's prepared worktree, dependencies installed), else the first other
+  # qualifying one - never a reviewer's read-only checkout, which has no
+  # dependencies and belongs to the review.
+  local here; here="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  local -a cands=()
   while read -r w h; do
     [ "$h" = "$head" ] || continue
+    case "$w" in */cel/reviews/*) continue ;; esac
     # nothing modified, staged or untracked (ignored build output is fine):
     # anything else could change the gate's outcome at "exactly this head"
     [ -z "$(git -C "$w" status --porcelain 2>/dev/null)" ] || continue
-    wt="$w"; break
+    if [ -n "$here" ] && [ "$(readlink -f "$w")" = "$(readlink -f "$here")" ]; then cands=("$w" "${cands[@]}"); else cands+=("$w"); fi
   done < <(git -C "$repodir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{w=$2} /^HEAD /{print w, $2}')
+  wt="${cands[0]:-}"
   [ -n "$wt" ] || { printf '%s' "no clean checkout of $repo is at $head - the base branch gates nothing, so the repo gate (\`$gate\`) must run at exactly that head: check it out (your branch worktree, nothing modified or untracked) and land again"; return 1; }
   [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "$wt moved off $head"; return 1; }
   c_warn "cel solo land: the base branch gates nothing - running the repo gate \`$gate\` in $wt at ${head:0:12}" >&2
