@@ -30,6 +30,11 @@ _CEL_MODE=1
 # directory means that one; a workspace of one product means that one.
 _mode_product() { # <wsdir> -> product, or nothing
   local wsdir="$1" p rel
+  # A lane's mailbox is <product>-<lane>, so the launch says the product.
+  if [ -n "${CEL_PRODUCT:-}" ] && { [ -z "${CEL_INBOX_WS:-}" ] || [ "$CEL_INBOX_WS" = "$(ws_name "$wsdir")" ]; } \
+     && ws_product_names "$wsdir" | grep -qxF "$CEL_PRODUCT"; then
+    printf '%s' "$CEL_PRODUCT"; return 0
+  fi
   if [ -n "${CEL_INBOX_ME:-}" ] && [ "${CEL_INBOX_ME%-orch}" != "$CEL_INBOX_ME" ] \
      && { [ -z "${CEL_INBOX_WS:-}" ] || [ "$CEL_INBOX_WS" = "$(ws_name "$wsdir")" ]; }; then
     p="${CEL_INBOX_ME%-orch}"
@@ -118,15 +123,30 @@ _mode_write() { # <wsdir> <product> <mode>
 # would be restarting the wrong thing. Prints its status; returns 1 when no
 # such agent is live and 2 when herdr could not be asked - silence from the
 # observer is not evidence that the agent is gone.
-_mode_agent_status() { # <wsdir> <product>
+_mode_agent_status() { # <wsdir> <product> [lane]
   local name cwd roster
-  name="$(_run_agent_name "$2/orch")"; cwd="$(ws_product_dir "$1" "$2")"
+  if [ -n "${3:-}" ]; then
+    name="$(_run_agent_name "$2/$3")"; cwd="$(ws_solo_dir "$1" "$2")/lane-$3"
+  else
+    name="$(_run_agent_name "$2/orch")"; cwd="$(ws_product_dir "$1" "$2")"
+  fi
   have herdr && have jq || return 2
   roster="$(herdr agent list 2>/dev/null)" || return 2
   printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 2
   printf '%s' "$roster" | jq -er --arg n "$name" --arg c "$cwd" \
     '[.result.agents[] | select(.name == $n and (.cwd // "") == $c)][0].agent_status // empty' 2>/dev/null \
     || return 1
+}
+
+# The product's live lanes (cel run solo --lane): one `<name>\t<lane>` line
+# each - an agent standing in .cel/solo/<product>/lane-<lane>. Nothing when
+# herdr cannot be asked.
+_mode_live_lanes() { # <wsdir> <product>
+  have herdr && have jq || return 0
+  local base; base="$(ws_solo_dir "$1" "$2")/lane-"
+  herdr agent list 2>/dev/null | jq -r --arg b "$base" \
+    '.result.agents[]? | select((.cwd // "") | startswith($b)) | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null
+  return 0
 }
 
 # The restart, detached from whoever asked: when the product's own agent runs
@@ -160,9 +180,10 @@ _mode_detach() { # <unit> <cmd...>
   fi
   setsid nohup "$@" >/dev/null 2>&1 < /dev/null &
 }
-_mode_schedule_restart() { # <wsdir> <product> -> 0 scheduled, 3 one already pending
+_mode_schedule_restart() { # <wsdir> <product> [lane] -> 0 scheduled, 3 one already pending
   local ws; ws="$(ws_name "$1")"
-  _mode_detach "$(_mode_unit "$ws" "$2")" "$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" --workspace "$ws"
+  _mode_detach "$(_mode_unit "$ws" "$2${3:+-$3}")" "$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" \
+    ${3:+--lane "$3"} --workspace "$ws"
 }
 
 # The waiter itself. Relaunches an agent once it has been `idle` or `done`
@@ -197,23 +218,27 @@ _mode_when_quiet() { # <lock-file> <name> <then-what> -- <status cmd...> -- <rel
   c_err "$name was not idle within ${limit}s - not restarted; $then"
   return 1
 }
-_mode_relaunch() { # <wsdir> <product>
+_mode_relaunch() { # <wsdir> <product> [lane]
   # From the workspace directory, so no registry lookup stands between the
   # waiter and the one launch path that picks the role from `mode:`.
-  ( cd "$1" && cmd_run orchestrator --product "$2" --restart )
+  if [ -n "${3:-}" ]; then ( cd "$1" && cmd_run solo --product "$2" --lane "$3" --restart )
+  else ( cd "$1" && cmd_run orchestrator --product "$2" --restart ); fi
 }
-_mode_restart_when_idle() { # <wsdir> <product>
-  _mode_when_quiet "$1/.cel/mode-restart-$2.lock" "$2-orch" "the new mode applies at its next launch" \
-    -- _mode_agent_status "$1" "$2" -- _mode_relaunch "$1" "$2"
+_mode_restart_when_idle() { # <wsdir> <product> [lane]
+  local who="$2-orch" lock="$1/.cel/mode-restart-$2.lock"
+  [ -z "${3:-}" ] || { who="$(_run_agent_name "$2/$3")"; lock="$1/.cel/mode-restart-$2-$3.lock"; }
+  _mode_when_quiet "$lock" "$who" "the new mode applies at its next launch" \
+    -- _mode_agent_status "$1" "$2" ${3:+"$3"} -- _mode_relaunch "$1" "$2" ${3:+"$3"}
 }
 
 cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
-  local product="" want="" workspace="" restart=1 when_idle=0
+  local product="" want="" workspace="" restart=1 when_idle=0 lane=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) workspace="$2"; shift 2 ;;
       --no-restart) restart=0; shift ;;
       --restart-when-idle) when_idle=1; shift ;;
+      --lane) lane="$2"; shift 2 ;;
       solo|fleet) want="$1"; shift ;;
       -h|--help)
         printf 'usage: cel mode [<product>] [solo|fleet] [--workspace <w>] [--no-restart]\n'
@@ -237,7 +262,7 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
     || die "cel mode: '$product' is not a product of workspace '$(ws_name "$wsdir")' ($(ws_product_names "$wsdir" | paste -sd' ' -))"
 
   if [ "$when_idle" -eq 1 ]; then
-    _mode_restart_when_idle "$wsdir" "$product"; return $?
+    _mode_restart_when_idle "$wsdir" "$product" ${lane:+"$lane"}; return $?
   fi
 
   local have_mode; have_mode="$(ws_build_mode "$wsdir" "$product")"
@@ -248,6 +273,17 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
   if [ "$have_mode" = "$want" ]; then
     c_ok "$product is already $want"
     return 0
+  fi
+
+  # Lanes are solo agents with no fleet role to restart into: back to fleet
+  # only once they are closed, or their goals would be left half-built.
+  if [ "$want" = fleet ]; then
+    local lanes; lanes="$(_mode_live_lanes "$wsdir" "$product")"
+    if [ -n "$lanes" ]; then
+      c_err "cel mode: $product has live lanes - finish and close them first (fleet has one orchestrator):"
+      printf '%s\n' "$lanes" | sed 's/^/    /' >&2
+      return 1
+    fi
   fi
 
   # Fleet work in flight has an orchestrator to collect, review and land it.

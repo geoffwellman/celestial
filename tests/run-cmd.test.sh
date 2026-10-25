@@ -417,6 +417,45 @@ test_run_solo_does_not_leak_into_worker_launches() {
   rm -rf "$T"
 }
 
+# A LANE: a second solo agent on the same product, for a separate goal - its
+# own name, mailbox, directory and role file, beside a live main agent.
+test_run_solo_lane_is_its_own_agent_beside_the_main_one() {
+  _ws_solo bundle; _run_stub_roster "$T/products/bundle" bundle-orch
+  local out; out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run 2>/dev/null)"
+  assert_contains "$out" "agent start bundle-ui --kind"
+  assert_contains "$out" "workspace create --cwd $T/.cel/solo/bundle/lane-ui"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_contains "$out" "CEL_INBOX_ME=bundle-ui"
+  assert_contains "$out" "CEL_PRODUCT=bundle"
+  assert_contains "$out" "CEL_LANE=ui"
+  assert_contains "$out" "$T/.cel/solo/bundle/lane-ui/role-solo.md"
+  rm -rf "$T"
+}
+test_run_solo_lane_body_names_the_lane_and_its_peers() {
+  _ws_solo bundle
+  local body; body="$(_run_lane_brief bundle ui bundle-ui)"
+  assert_contains "$body" "You are \`bundle-ui\`, lane \`ui\` of \`bundle\`"
+  assert_contains "$body" "Land only your own PRs"
+  rm -rf "$T"
+}
+# One agent per lane, as one per product; and lanes are a solo thing.
+test_run_solo_lane_refusals() {
+  _ws_solo bundle; _run_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane orch --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane 'Bad Name' --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product lone --lane ui --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --lane ui --dry-run )
+  rm -rf "$T"
+}
+# A reviewer started by a lane sends its findings to that lane.
+test_run_reviewer_solo_brief_names_the_lane_that_asked() {
+  _ws_solo bundle
+  assert_contains "$(CEL_ROLE=solo CEL_INBOX_ME=bundle-ui _run_reviewer_solo_brief "$T" widget 7)" "send findings and your verdict to \`bundle-ui\`"
+  assert_contains "$(CEL_ROLE='' CEL_INBOX_ME='' _run_reviewer_solo_brief "$T" widget 7)" "send findings and your verdict to \`bundle-orch\`"
+  rm -rf "$T"
+}
+
 # --- core -----------------------------------------------------------------
 # Core is BOX-LEVEL: it coordinates every workspace and therefore stands in
 # none. No --workspace is resolved, no policy block is rendered, and its

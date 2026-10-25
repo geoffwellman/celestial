@@ -145,6 +145,35 @@ EOF
 }
 _rec() { printf '%s\n' "$*" >> "$T/launched"; }
 
+# LANES. Back to fleet is refused while a lane is live; a lane's restart
+# waiter watches and relaunches the lane, never the main agent.
+test_mode_refuses_fleet_while_a_lane_is_live() {
+  _mws
+  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
+  _mode_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui idle
+  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet 2>&1 )" \
+    && { echo "switched to fleet over a live lane"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "bundle-ui"
+  assert_eq "$(ws_build_mode "$T" bundle)" solo
+  rm -rf "$T"
+}
+test_mode_lane_waiter_relaunches_the_lane() {
+  _mws
+  _mode_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui idle
+  cmd_run() { printf '%s\n' "$*" >> "$T/calls"; }
+  CEL_MODE_POLL_SECS=0 _mode_restart_when_idle "$T" bundle ui >/dev/null
+  assert_eq "$(cat "$T/calls")" "solo --product bundle --lane ui --restart"
+  ( cd "$T" && CEL_MODE_LAUNCH=_rec _mode_schedule_restart "$T" bundle ui )
+  assert_contains "$(cat "$T/launched")" "mode --restart-when-idle bundle --lane ui --workspace"
+  rm -rf "$T"
+}
+# A lane's mailbox is not <product>-orch: the launch's CEL_PRODUCT names it.
+test_mode_product_comes_from_the_launch_for_a_lane() {
+  _mws
+  assert_eq "$(cd /tmp && CEL_PRODUCT=bundle CEL_INBOX_ME=bundle-ui CEL_INBOX_WS='' _mode_product "$T")" bundle
+  rm -rf "$T"
+}
+
 # The product's own agent is restarted - scheduled, never inline, so the agent
 # that ran `cel mode` is not killed mid-turn - and only when asked.
 test_mode_schedules_a_restart_for_the_product_agent_only_when_asked() {
