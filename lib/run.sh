@@ -1727,6 +1727,20 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # A repo or product may narrow that binding for itself; see role_profile_for.
   # A solo agent may be bound on its own (`role_profiles: { solo: ... }`), and
   # otherwise takes the orchestrator's binding - it is the same product's agent.
+  # A LANE KEEPS THE PROFILE IT WAS LAUNCHED WITH. A lane started with
+  # --profile (say, Claude Code for one feature set) and restarted by
+  # /cel-restart or `cel run solo --lane x --restart` - neither passes the
+  # flag - would otherwise come back on the product's default, a different
+  # runtime, and its session would not resume. The launch writes the choice
+  # beside the lane's role file; a later --profile replaces it.
+  local lane_profile_file="" lane_profile_explicit=""
+  [ -z "$lane" ] || lane_profile_file="$cwd/launch-profile"
+  # Only a profile the owner NAMED is remembered: the workspace default is
+  # looked up again each launch, so a later role_profiles change still applies.
+  [ -z "$lane_profile_file" ] || lane_profile_explicit="$profile"
+  if [ -z "$profile" ] && [ -n "$lane_profile_file" ] && [ -s "$lane_profile_file" ]; then
+    profile="$(head -n1 "$lane_profile_file")"
+  fi
   if [ -z "$profile" ] && [ "$solo" -eq 1 ]; then
     profile="$(role_profile_for "$wsdir" solo "$bind")"
   fi
@@ -1737,6 +1751,11 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$runtime"
     [ -z "$PROFILE_VETO" ] || die "cel run: profile '$profile' is vetoed - $PROFILE_VETO"
+    # Remembered only once it resolved and was not vetoed: a typo is never
+    # persisted for every later restart to die on.
+    if [ -n "$lane_profile_explicit" ] && [ "$dry_run" -eq 0 ]; then
+      mkdir -p "$cwd" && printf '%s\n' "$lane_profile_explicit" > "$lane_profile_file"
+    fi
     runtime="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
     # A profile that names no model leaves the model alone, so binding a
     # reviewer to a profile for its RUNTIME or effort does not quietly discard

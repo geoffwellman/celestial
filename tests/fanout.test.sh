@@ -3631,3 +3631,21 @@ test_reuse_holder_probe_is_not_fooled_by_the_word_delegate() {
   _fanout_refused holder2 "$out" "$rc" "$before" "holds" || return 1
   rm -rf "$T"
 }
+
+# keep marks an already-released row whose checkout exists; refuses a live
+# row or a missing checkout; idempotent.
+test_keep_marks_a_released_checkout() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-K1 "$T/spec.md") > /dev/null
+  local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"; mkdir -p "$wt"
+  local out rc=0; out="$(cd "$T" && "$BIN" keep WG-K1 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$out" "only a released" || { echo "kept a live row: $out"; rm -rf "$T"; return 1; }
+  jq '.[0].state = "released"' "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  (cd "$T" && "$BIN" keep WG-K1) > /dev/null || { echo "refused a released row"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '.[0].worktree_kept' "$T/.cel/delegations.json")" true
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  (cd "$T" && "$BIN" keep WG-K1) > /dev/null || { echo "not idempotent"; rm -rf "$T"; return 1; }
+  rm -rf "$wt"; rc=0; out="$(cd "$T" && "$BIN" keep WG-K1 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "kept a missing checkout"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
