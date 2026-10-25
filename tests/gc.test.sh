@@ -1837,3 +1837,17 @@ test_gc_idle_stop_keeps_a_stranger_in_the_worktree_when_the_pane_is_stale() {
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }
+
+# A checkout kept by `release --keep-worktree` is vetoed for every later sweep,
+# including when another, ordinary released row shares the same path.
+test_gc_never_takes_a_worktree_released_with_keep() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/ws/.cel" "$T/wt"
+  export CEL_REGISTRY="$T/registry.yaml"
+  printf 'workspaces:\n  w:\n    path: %s\n' "$T/ws" > "$CEL_REGISTRY"
+  printf '[{"id":"A","state":"released","worktree":"%s"},{"id":"B","state":"released","worktree":"%s"}]' "$T/wt" "$T/wt" > "$T/ws/.cel/delegations.json"
+  _gc_delegated_live "$T/wt" && { echo "plain released rows vetoed the path"; rm -rf "$T"; return 1; }
+  printf '[{"id":"A","state":"released","worktree":"%s","worktree_kept":true},{"id":"B","state":"released","worktree":"%s"}]' "$T/wt" "$T/wt" > "$T/ws/.cel/delegations.json"
+  _gc_delegated_live "$T/wt" || { echo "a kept worktree was not vetoed"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
