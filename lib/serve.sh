@@ -164,6 +164,9 @@ _serve_adopt_rows() {
     [ -n "$unit" ] || continue
     local short="${unit%.service}"
     [ -f "$(_serve_file "$short")" ] && continue
+    # Celestial's own services (cel-dash, cel-pages, cel-auth-gateway, ...)
+    # are the plane, not previews; only cel-serve-* units are servers it ran.
+    case "$short" in cel-serve-*) ;; cel-*) continue ;; esac
     description="$("$systemctl_bin" --user show "$unit" -p Description --value 2>/dev/null || true)"
     execstart="$("$systemctl_bin" --user show "$unit" -p ExecStart --value 2>/dev/null || true)"
     case "$unit $description $execstart" in
@@ -202,6 +205,39 @@ _serve_pid_in_ledgered_unit() { # <pid> <unit...>
   [ -n "$cgroup" ] && _serve_cgroup_is_ledgered_unit "$cgroup" "$@"
 }
 
+# WHAT IS NOT A PREVIEW, though it listens on a port. The candidate list was
+# "every process of mine with a TCP listener", and on 2026-10-24 it named live
+# omp orchestrators, Hermes' gateway and its desktop servers as previews to
+# adopt - and adopting puts a thing on a TTL that stops it. Refused here:
+#   - coding-agent runtimes (omp, pi, claude, codex, opencode, by argv[0], or
+#     argv[1] for a node/bun script);
+#   - a process inside a running user SERVICE whose name the unit pass below
+#     would not offer (hermes-gateway, cel-dash, ...): services are judged as
+#     units, by name, never as loose pids;
+#   - anything whose command contains an entry of box config `serve.ignore`
+#     (comma-separated substrings) - the owner's own standing tools.
+_serve_not_a_preview() { # <pid> <command>
+  local pid="$1" cmd="$2" a0 a1 n cg unit pat
+  read -r a0 a1 _ <<<"$cmd"
+  for n in "${a0##*/}" "${a1##*/}"; do
+    case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
+  done
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    cg="$(awk -F: '$1 == "0" {print $3; exit}' "${CEL_SERVE_PROC_ROOT:-/proc}/$pid/cgroup" 2>/dev/null || true)"
+    unit="${cg##*/}"
+    case "$unit" in
+      *.service) case "$unit" in *cel-serve-*|*server*|*preview*|*dev*|*wrangler*|*vite*|*playground*) ;; *) return 0 ;; esac ;;
+    esac
+  fi
+  local ignore; ignore="$(cel_config_get serve ignore 2>/dev/null || true)"
+  local IFS=,
+  for pat in $ignore; do
+    pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
+    [ -n "$pat" ] && [[ "$cmd" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
 serve_adopt_json() {
   local rows row pid unit id f kind
   local -a ledger_units=()
@@ -228,6 +264,8 @@ serve_adopt_json() {
       [[ -n "${ledger_pids[$pid]:-}" ]] && continue
       if [ "${#ledger_units[@]}" -gt 0 ] && _serve_pid_in_ledgered_unit "$pid" "${ledger_units[@]}"; then continue; fi
     fi
+    # a unit row is already judged by its name; a loose pid is judged here
+    if [ -z "$(jq -r '.unit // ""' <<<"$row")" ] && _serve_not_a_preview "$pid" "$(jq -r '.command // ""' <<<"$row")"; then continue; fi
     unit="$(jq -r '.unit // ""' <<<"$row")"
     if [ -n "$unit" ]; then
       id="${unit%.service}"
@@ -238,7 +276,7 @@ serve_adopt_json() {
     jq -s 'map(. + {group:(.unit // .worktree // "unknown")}) | sort_by(-.memory_mb)'
 }
 serve_adopt() { # <unit|pid> <owner> <workspace> <ttl-seconds> <port>
-  local target="$1" owner="$2" ws="$3" ttl="$4" port="$5" rows row id unit pid now f tmp initial_age
+  local target="$1" owner="$2" ws="$3" ttl="$4" port="$5" rows row id unit='' pid='' now f tmp initial_age
   if [[ "$target" =~ ^pid:([1-9][0-9]*)$ ]]; then target="${BASH_REMATCH[1]}"; fi
   [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die 'cel serve adopt: invalid ttl seconds'
   [[ "$port" =~ ^[0-9]+$ ]] || die 'cel serve adopt: invalid port'

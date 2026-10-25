@@ -190,6 +190,50 @@ EOF
   rm -rf "$t"
 }
 
+# Adopting a UNIT under `set -u` (the CLI's own setting) left `pid` unbound
+# and died after the ledger file was half-written.
+test_serve_adopts_a_unit_under_set_u() {
+  local t; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl"
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  CEL_SERVE_PROC_DATA=''
+  CEL_SERVE_ADOPT_DATA='[{"unit":"demo-preview","pid":4321,"memory_mb":40,"age_seconds":900,"worktree":"/tmp/demo","command":"serve"}]'
+  ( set -u; serve_adopt demo-preview worker alpha 3600 7001 ) || { echo "unit adopt failed under set -u"; rm -rf "$t"; return 1; }
+  assert_eq "$(jq -r '.kind + " " + (.pid|tostring)' "$CEL_SERVE_STATE/demo-preview.json")" "unit null"
+  unset CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL
+  rm -rf "$t"
+}
+
+# A listening process is no preview when it is a coding agent, or matches the
+# box's serve.ignore list; a plain dev server still is.
+test_serve_adoption_skips_agents_and_ignored_tools() {
+  local t; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl" CEL_CONFIG_FILE="$t/config.yaml"
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$CEL_SERVE_SYSTEMCTL"; chmod +x "$CEL_SERVE_SYSTEMCTL"
+  printf 'serve:\n  ignore: ".hermes/, ssh-agent"\n' > "$CEL_CONFIG_FILE"
+  CEL_SERVE_PROC_DATA=$'1001\t44961\t4096\t60\t/w/p\tomp --auto-approve --hook x\n1002\t0\t4096\t60\t/w\t/usr/bin/node /x/bin/pi --mode rpc\n1003\t0\t4096\t60\t/h\tpython3 -c import /home/u/.hermes/agent serve\n1004\t5173\t4096\t60\t/w/app\tnode node_modules/.bin/vite --port 5173'
+  local out; out="$(serve_adopt_json)"
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid]')" "[1004]"
+  unset CEL_SERVE_PROC_DATA CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_CONFIG_FILE
+  rm -rf "$t"
+}
+test_serve_a_pid_in_a_non_preview_service_is_not_a_candidate() {
+  local t; t="$(mktemp -d)"; mkdir -p "$t/proc"
+  _serve_not_a_preview_with_cgroup() { # a fake /proc/77/cgroup
+    mkdir -p "$t/proc/77"; printf '0::%s\n' "$1" > "$t/proc/77/cgroup"
+    CEL_SERVE_PROC_ROOT="$t/proc" _serve_not_a_preview 77 "node server.js"
+  }
+  _serve_not_a_preview_with_cgroup "/user.slice/user-1000.slice/user@1000.service/app.slice/hermes-gateway.service" \
+    || { echo "a pid in hermes-gateway.service was a candidate"; rm -rf "$t"; return 1; }
+  ! _serve_not_a_preview_with_cgroup "/user.slice/user-1000.slice/user@1000.service/app.slice/demo-preview.service" \
+    || { echo "a pid in a preview service was excluded"; rm -rf "$t"; return 1; }
+  ! _serve_not_a_preview_with_cgroup "/user.slice/user-1000.slice/session-4.scope" \
+    || { echo "a session process was excluded"; rm -rf "$t"; return 1; }
+  rm -rf "$t"
+}
+
 test_serve_records_request_activity_for_idle_deadline() {
   local t
   t="$(mktemp -d)"
