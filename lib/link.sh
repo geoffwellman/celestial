@@ -102,7 +102,8 @@ link_claude_prefs() {
       # goes.
       | .hooks.UserPromptSubmit =
           ((($current.hooks.UserPromptSubmit // [])
-              | map(select(any(.hooks[]?; (.command // "") | test("^__CEL_[A-Z_]+__$")) | not)) +
+              | map(.hooks = [(.hooks // [])[] | select(((.command // "") | test("^__CEL_[A-Z_]+__$")) | not)])
+              | map(select((.hooks | length) > 0)) +
             ($plane.hooks.UserPromptSubmit // [])) | append_unique)
     ' "$settings")" || return 1
     if [ "$merged" != "$(jq -S . "$settings")" ]; then

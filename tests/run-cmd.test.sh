@@ -1631,3 +1631,24 @@ test_run_solo_lane_restart_keeps_its_launch_profile() {
   assert_contains "$out" "picked-mylaneprof"
   rm -rf "$T"
 }
+
+# Only an explicit, resolvable --profile is remembered; a dry run, a vetoed
+# profile and the workspace default write nothing.
+test_run_solo_lane_remembers_only_an_explicit_resolved_profile() {
+  _ws_solo bundle
+  local f="$T/.cel/solo/bundle/lane-ui/launch-profile"
+  _run_agent_start() { :; }; _run_mark_launch() { :; }; pane_label_set() { :; }; tab_label_set() { :; }
+  herdr() { printf '{"result":{"workspace_id":"w9","pane_id":"w9:p1","agents":[]}}\n'; }
+  profile_resolve() { PROFILE_RUNTIME=claude; PROFILE_MODEL=m-$2; PROFILE_THINKING=low; [ "$2" != bad ] || PROFILE_VETO=vetoed; }
+  ( cd "$T" && cmd_run solo --product bundle --lane ui --profile p1 --dry-run ) >/dev/null 2>&1
+  [ ! -e "$f" ] || { echo "dry run wrote the profile"; rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_run solo --product bundle --lane ui ) >/dev/null 2>&1
+  [ ! -e "$f" ] || { echo "the workspace default was pinned: $(cat "$f")"; rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_run solo --product bundle --lane ui --profile p1 ) >/dev/null 2>&1
+  assert_eq "$(cat "$f" 2>/dev/null)" p1
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --profile bad ) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" p1
+  ( cd "$T" && cmd_run solo --product bundle --lane ui --profile p2 ) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" p2
+  rm -rf "$T"
+}

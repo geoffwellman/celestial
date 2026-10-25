@@ -1733,8 +1733,11 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # flag - would otherwise come back on the product's default, a different
   # runtime, and its session would not resume. The launch writes the choice
   # beside the lane's role file; a later --profile replaces it.
-  local lane_profile_file=""
+  local lane_profile_file="" lane_profile_explicit=""
   [ -z "$lane" ] || lane_profile_file="$cwd/launch-profile"
+  # Only a profile the owner NAMED is remembered: the workspace default is
+  # looked up again each launch, so a later role_profiles change still applies.
+  [ -z "$lane_profile_file" ] || lane_profile_explicit="$profile"
   if [ -z "$profile" ] && [ -n "$lane_profile_file" ] && [ -s "$lane_profile_file" ]; then
     profile="$(head -n1 "$lane_profile_file")"
   fi
@@ -1742,15 +1745,17 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
     profile="$(role_profile_for "$wsdir" solo "$bind")"
   fi
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
-  if [ -n "$lane_profile_file" ] && [ -n "$profile" ] && [ "$dry_run" -eq 0 ]; then
-    mkdir -p "$cwd" && printf '%s\n' "$profile" > "$lane_profile_file"
-  fi
 
   local PROFILE_RUNTIME PROFILE_MODEL PROFILE_THINKING PROFILE_NOTE PROFILE_ISOLATE="" PROFILE_VETO=""
   local PROFILE_VIA="" PROFILE_WSDIR="" PROFILE_GATEWAY_ACCOUNTS=0
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$runtime"
     [ -z "$PROFILE_VETO" ] || die "cel run: profile '$profile' is vetoed - $PROFILE_VETO"
+    # Remembered only once it resolved and was not vetoed: a typo is never
+    # persisted for every later restart to die on.
+    if [ -n "$lane_profile_explicit" ] && [ "$dry_run" -eq 0 ]; then
+      mkdir -p "$cwd" && printf '%s\n' "$lane_profile_explicit" > "$lane_profile_file"
+    fi
     runtime="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
     # A profile that names no model leaves the model alone, so binding a
     # reviewer to a profile for its RUNTIME or effort does not quietly discard

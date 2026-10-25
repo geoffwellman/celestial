@@ -111,3 +111,15 @@ test_prefs_drop_an_unresolved_placeholder_hook() {
   assert_contains "$cmds" "inbox-drain.sh"
   rm -rf "$h"
 }
+
+# A user hook sharing an entry with the placeholder survives.
+test_prefs_keep_a_user_hook_that_shares_an_entry_with_the_placeholder() {
+  local h; h="$(_fake_home)"
+  mkdir -p "$h/.claude"
+  echo '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"__CEL_INBOX_DRAIN_COMMAND__"},{"type":"command","command":"mine-too"}]}]}}' > "$h/.claude/settings.json"
+  HOME="$h" CEL_ROOT="$CEL_ROOT" link_claude_prefs >/dev/null
+  local cmds; cmds="$(jq -r '[.hooks.UserPromptSubmit[].hooks[].command] | join("|")' "$h/.claude/settings.json")"
+  case "$cmds" in *__CEL_*) echo "placeholder kept: $cmds"; rm -rf "$h"; return 1;; esac
+  assert_contains "$cmds" "mine-too"
+  rm -rf "$h"
+}
