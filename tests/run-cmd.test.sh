@@ -448,6 +448,25 @@ test_run_solo_lane_refusals() {
   ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --lane ui --dry-run )
   rm -rf "$T"
 }
+# A lane name that normalises, truncates or spells into another agent's name
+# (another lane, a product's -orch, a repo's direct pane or reviewer, root)
+# is refused - the cwd check alone would not see the shared mailbox.
+test_run_solo_lane_names_that_would_share_a_name_are_refused() {
+  _ws_solo bundle
+  local n
+  for n in ui- ui--x x-orch-  thirty-two-characters-is-far-too-long; do
+    ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane "$n" --dry-run ) \
+      || { echo "accepted lane '$n'"; rm -rf "$T"; return 1; }
+  done
+  _run_lane_name_ok() { ( _run_lane_name_free "$T" "$1" "$2" ) >/dev/null 2>&1; }
+  ws_product_names() { printf 'bundle\nbundle-api\n'; }
+  ws_repo_names() { printf 'widget\nbundle-ui\n'; }
+  ! _run_lane_name_ok bundle api-orch || { echo "lane took product bundle-api's agent name"; rm -rf "$T"; return 1; }
+  ! _run_lane_name_ok bundle ui-direct || { echo "lane took repo bundle-ui's direct pane name"; rm -rf "$T"; return 1; }
+  ! _run_lane_name_ok bundle ui-pr-3-review || { echo "lane took a reviewer's name"; rm -rf "$T"; return 1; }
+  _run_lane_name_ok bundle web || { echo "refused a plain lane name"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 # A reviewer started by a lane sends its findings to that lane.
 test_run_reviewer_solo_brief_names_the_lane_that_asked() {
   _ws_solo bundle

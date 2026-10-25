@@ -517,18 +517,20 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   # arrives as positional arguments: this was three processes (`jq -R`, `jq
   # -s`, `jq -n`) for a document of four numbers and a list of strings.
   # Live lanes, from the roster this read already holds: agents standing in
-  # .cel/solo/<product>/lane-<name>. Solo only; one jq, no herdr call.
+  # .cel/solo/<product>/lane-<name> (not in a deleted one). Solo units only -
+  # a fleet unit's document is unchanged - one jq, no herdr call.
   local lanes="[]"
   if [ "$mode" = solo ] && [ "$have_roster" = 1 ]; then
     lanes="$(printf '%s' "$roster" | jq -c --arg b "$(ws_solo_dir "$wsdir" "$product")/lane-" \
-      '[.result.agents[]? | select((.cwd // "") | startswith($b)) | (.cwd | ltrimstr($b))] | unique' 2>/dev/null || printf '[]')"
+      '[.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not)) | (.cwd | ltrimstr($b))] | unique' 2>/dev/null || printf '[]')"
   fi
   printf '%s' "$rows" | jq -sc --arg name "$product" --arg orch "$orch" \
     --argjson workers "$workers" --argjson cap "$cap" \
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
     --argjson declared "$declared" --arg mode "$mode" --argjson solo_wt "${solo_wt:-0}" \
     --argjson rss "$rss" --argjson orch_rss "$orch_rss" --argjson lanes "${lanes:-[]}" \
-    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt, lanes: $lanes, workers_list: .}' \
+    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt}
+     + (if $mode == "solo" then {lanes: $lanes} else {} end) + {workers_list: .}' \
     --args "${repos[@]}"
 }
 

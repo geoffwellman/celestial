@@ -139,13 +139,14 @@ _mode_agent_status() { # <wsdir> <product> [lane]
 }
 
 # The product's live lanes (cel run solo --lane): one `<name>\t<lane>` line
-# each - an agent standing in .cel/solo/<product>/lane-<lane>. Nothing when
-# herdr cannot be asked.
+# each - an agent standing in .cel/solo/<product>/lane-<lane>. A pane whose
+# directory was deleted is no live lane. Nothing when herdr cannot be asked.
 _mode_live_lanes() { # <wsdir> <product>
   have herdr && have jq || return 0
   local base; base="$(ws_solo_dir "$1" "$2")/lane-"
   herdr agent list 2>/dev/null | jq -r --arg b "$base" \
-    '.result.agents[]? | select((.cwd // "") | startswith($b)) | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null
+    '.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
+     | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null
   return 0
 }
 
@@ -182,7 +183,9 @@ _mode_detach() { # <unit> <cmd...>
 }
 _mode_schedule_restart() { # <wsdir> <product> [lane] -> 0 scheduled, 3 one already pending
   local ws; ws="$(ws_name "$1")"
-  _mode_detach "$(_mode_unit "$ws" "$2${3:+-$3}")" "$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" \
+  # `.lane-` keeps a lane's unit apart from the main agent of a product that
+  # happens to be named <product>-<lane>.
+  _mode_detach "$(_mode_unit "$ws" "$2${3:+.lane-$3}")" "$CEL_ROOT/bin/cel" mode --restart-when-idle "$2" \
     ${3:+--lane "$3"} --workspace "$ws"
 }
 
@@ -226,7 +229,7 @@ _mode_relaunch() { # <wsdir> <product> [lane]
 }
 _mode_restart_when_idle() { # <wsdir> <product> [lane]
   local who="$2-orch" lock="$1/.cel/mode-restart-$2.lock"
-  [ -z "${3:-}" ] || { who="$(_run_agent_name "$2/$3")"; lock="$1/.cel/mode-restart-$2-$3.lock"; }
+  [ -z "${3:-}" ] || { who="$(_run_agent_name "$2/$3")"; lock="$1/.cel/mode-restart-$2.lane-$3.lock"; }
   _mode_when_quiet "$lock" "$who" "the new mode applies at its next launch" \
     -- _mode_agent_status "$1" "$2" ${3:+"$3"} -- _mode_relaunch "$1" "$2" ${3:+"$3"}
 }

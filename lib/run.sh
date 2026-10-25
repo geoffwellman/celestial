@@ -608,6 +608,30 @@ approval of the exact head it merges.
 EOF
 }
 
+# A LANE'S NAME MUST BE ITS OWN. The pane name and mailbox are
+# `<product>-<lane>` after cel_alias_norm, which truncates at 32 characters -
+# so a long pair, or one that spells another agent's alias (`<q>-orch` of a
+# product `<product>-<x>`, `<repo>-direct`, `<repo>-pr-<n>-review`,
+# `<ws>-root`), would share a pane name and mailbox with that agent while its
+# directory differs, and nothing else would notice.
+_run_lane_name_free() { # <wsdir> <product> <lane>
+  local want="$2-$3" name q r
+  name="$(_run_agent_name "$2/$3")"
+  [ "$name" = "$want" ] || die "cel run solo --lane: '$3' makes the agent name '$name', not '$want' (names are cut to 32 characters) - use a shorter lane name"
+  [ "$name" != "$(_run_agent_name "$(ws_name "$1")/root")" ] || die "cel run solo --lane: '$name' is the workspace root's name"
+  while IFS= read -r q; do
+    [ -n "$q" ] || continue
+    [ "$name" != "$(_run_agent_name "$q/orch")" ] || die "cel run solo --lane: '$name' is product $q's agent - pick another lane name"
+  done < <(ws_product_names "$1")
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case "$name" in
+      "$r-direct"|"$r"-pr-*-review) die "cel run solo --lane: '$name' is the name of $r's $( [ "$name" = "$r-direct" ] && echo direct pane || echo reviewer) - pick another lane name" ;;
+    esac
+  done < <(ws_repo_names "$1")
+  return 0
+}
+
 # What a lane is told on top of the solo role: its name, that the product has
 # other agents working in the same repos, and how not to collide with them.
 _run_lane_brief() { # <product> <lane> <agent-name>
@@ -1572,11 +1596,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       # own worktrees. Solo only - in fleet the workers are the parallelism.
       if [ -n "$lane" ]; then
         [ "$build_mode" = solo ] || die "cel run solo --lane: $product is in $build_mode mode - lanes are for solo products (cel mode $product solo)"
-        case "$lane" in
-          orch) die "cel run solo --lane: 'orch' is the product's main agent - leave --lane off for it" ;;
-          *[!a-z0-9-]*|-*|'') die "cel run solo --lane: '$lane' - use lowercase letters, digits and dashes" ;;
-        esac
+        [ "$lane" != orch ] || die "cel run solo --lane: 'orch' is the product's main agent - leave --lane off for it"
+        [[ "$lane" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
+          || die "cel run solo --lane: '$lane' - use lowercase letters and digits, single dashes between them"
         alias_name="$product/$lane"
+        _run_lane_name_free "$wsdir" "$product" "$lane"
         cwd="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
       fi
       # A one-off solo launch over a fleet product with work in flight would

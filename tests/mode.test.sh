@@ -167,6 +167,28 @@ test_mode_lane_waiter_relaunches_the_lane() {
   assert_contains "$(cat "$T/launched")" "mode --restart-when-idle bundle --lane ui --workspace"
   rm -rf "$T"
 }
+# Lane `ui` of `bundle` and the main agent of a product named `bundle-ui`
+# never share a restart unit or lock.
+test_mode_lane_restart_keys_differ_from_a_lookalike_product() {
+  _mws
+  local units="$T/units"
+  _mode_detach() { printf '%s\n' "$1" >> "$units"; }
+  _mode_schedule_restart "$T" bundle ui; _mode_schedule_restart "$T" bundle-ui
+  [ "$(sort -u "$units" | wc -l)" -eq 2 ] || { echo "one unit for both: $(cat "$units")"; rm -rf "$T"; return 1; }
+  _mode_when_quiet() { printf '%s\n' "$1" >> "$T/locks"; }
+  _mode_restart_when_idle "$T" bundle ui; _mode_restart_when_idle "$T" bundle-ui
+  [ "$(sort -u "$T/locks" | wc -l)" -eq 2 ] || { echo "one lock for both: $(cat "$T/locks")"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A lane pane whose directory was deleted does not hold the product in solo.
+test_mode_a_deleted_lane_does_not_block_fleet() {
+  _mws
+  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
+  _mode_stub_roster "$T/.cel/solo/bundle/lane-ui (deleted)" bundle-ui idle
+  ( cd "$T" && cmd_mode bundle fleet --no-restart ) >/dev/null 2>&1
+  assert_eq "$(ws_build_mode "$T" bundle)" fleet
+  rm -rf "$T"
+}
 # A lane's mailbox is not <product>-orch: the launch's CEL_PRODUCT names it.
 test_mode_product_comes_from_the_launch_for_a_lane() {
   _mws
