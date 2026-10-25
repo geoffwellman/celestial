@@ -180,6 +180,31 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
   c_ok "$SOLO_REPO#$SOLO_PR reviewed: $verdict by $by (head ${head:0:12})"
 }
 
+# THE REPO'S OWN GATE, AT EXACTLY THE HEAD BEING MERGED. Used only when the
+# base branch gates nothing, so CI cannot stand in. It runs in a checkout of
+# this repo whose HEAD is that commit with no tracked change and nothing staged
+# - the solo agent's own worktree for the branch (its dependencies installed,
+# as a worker's are for the fleet land). No such checkout is a refusal, never
+# a guess. Prints the merge-body line on success, the reason on failure.
+_solo_local_gate() { # <wsdir> <repo> <head> <gate>
+  local wsdir="$1" repo="$2" head="$3" gate="$4" repodir wt="" w h rc=0 t0 secs
+  repodir="$wsdir/repos/$repo"
+  while read -r w h; do
+    [ "$h" = "$head" ] || continue
+    [ -z "$(git -C "$w" status --porcelain --untracked-files=no 2>/dev/null)" ] || continue
+    wt="$w"; break
+  done < <(git -C "$repodir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{w=$2} /^HEAD /{print w, $2}')
+  [ -n "$wt" ] || { printf '%s' "no clean checkout of $repo is at $head - the base branch gates nothing, so the repo gate (\`$gate\`) must run at exactly that head: check it out (your branch worktree, no tracked changes) and land again"; return 1; }
+  [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "$wt moved off $head"; return 1; }
+  c_warn "cel solo land: the base branch gates nothing - running the repo gate \`$gate\` in $wt at ${head:0:12}" >&2
+  t0="$(date +%s)"
+  ( cd "$wt" && timeout "${CEL_SOLO_GATE_TIMEOUT:-5400}" bash -c "$gate" ) >&2 || rc=$?
+  secs=$(( $(date +%s) - t0 ))
+  [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "the checkout moved off $head while the gate ran - nothing proven"; return 1; }
+  [ "$rc" -eq 0 ] || { printf '%s' "the repo gate (\`$gate\`) did not pass at $head (exit $rc after ${secs}s) - a red gate is a finding, not a formality"; return 1; }
+  printf 'Gate: local `%s` passed on %s (%ss; base branch has no required checks)' "$gate" "$head" "$secs"
+}
+
 cmd_solo_land() { # <ref> [--workspace W]
   [ $# -ge 1 ] || die "usage: cel solo land <repo>#<pr> [--workspace NAME]"
   # Landing is the solo agent's (or a person's) act, never a worker's or a
@@ -235,10 +260,27 @@ cmd_solo_land() { # <ref> [--workspace W]
 
   local red; red="$(printf '%s' "$pr" | jq "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
   [ "$red" = 0 ] || die "cel solo land: #$num has $red failing check(s) - a red check is a finding, not a formality"
+  # A latest run still going is not green yet (a re-run, a slow suite).
+  local pending; pending="$(printf '%s' "$pr" | jq -r "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[]
+    | select(((.status // "COMPLETED") != "COMPLETED") or ((.state // "") == "PENDING" or (.state // "") == "EXPECTED"))
+    | (.name // .context // "?")] | join(", ")')"
+  [ -z "$pending" ] || die "cel solo land: #$num still has check(s) running: $pending - land once they finish. Nothing merged."
   [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != CONFLICTING ] \
     || die "cel solo land: #$num has conflicts - rebase it, then land again"
-  local gate_body
-  gate_body="$(land_ci_gate "$wsdir" "$slug" "$pr")" || die "cel solo land: $gate_body. Nothing merged."
+  # CI stands in for the gate when the base branch's required checks are all
+  # green on this head. When the base branch gates nothing at all, the repo's
+  # own gate (workspace.yaml `gate:`) runs instead, in a clean checkout at
+  # exactly this head - the same evidence the fleet land collects locally.
+  local gate_body gate_out rc=0
+  gate_out="$(mktemp)"
+  land_ci_gate "$wsdir" "$slug" "$pr" > "$gate_out" || rc=$?
+  gate_body="$(cat "$gate_out")"; rm -f "$gate_out"
+  if [ "$rc" -ne 0 ]; then
+    local gate; gate="$(ws_repo_get "$wsdir" "$SOLO_REPO" gate)"; [ "$gate" = null ] && gate=""
+    [ "${LAND_CI_UNPROTECTED:-0}" = 1 ] && [ -n "$gate" ] || die "cel solo land: $gate_body. Nothing merged."
+    gate_body="$(_solo_local_gate "$wsdir" "$SOLO_REPO" "$head" "$gate")" \
+      || die "cel solo land: $gate_body. Nothing merged."
+  fi
 
   if afk_active; then
     local afk_ev

@@ -2772,6 +2772,10 @@ cmd_land() { # <id>
   fi
   local red; red="$(printf '%s' "$pr" | jq "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
   [ "$red" = "0" ] || die "land: PR #$num has $red failing check(s) - a red gate is a finding, not a formality"
+  local pending; pending="$(printf '%s' "$pr" | jq -r "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[]
+    | select(((.status // "COMPLETED") != "COMPLETED") or ((.state // "") == "PENDING" or (.state // "") == "EXPECTED"))
+    | (.name // .context // "?")] | join(", ")')"
+  [ -z "$pending" ] || die "land: PR #$num still has check(s) running: $pending - land once they finish. Nothing merged."
   [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != "CONFLICTING" ] || die "land: PR #$num has conflicts - a worker rebases it, then land again"
 
   # A configured gate that has not PASSED is a refusal - CI green on the PR is
