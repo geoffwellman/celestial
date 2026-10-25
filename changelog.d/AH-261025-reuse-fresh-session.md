@@ -1,0 +1,2 @@
+### Added
+- `cel-fanout delegate --reuse --fresh-session` restarts a retained row in its own checkout with a NEW conversation, under the row's recorded runtime, model, thinking and profile and every existing row proof (ownership, no live agent, no profile drift). For a row whose old session cannot be resumed - none recorded, or a runtime whose session layout is not verified (omp) - while its work is in git. Asked for by name, never a fallback; with `--session`, without `--reuse`, or with no row it is refused. The plain `--reuse` refusals now name it.
