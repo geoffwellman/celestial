@@ -139,6 +139,21 @@ test_solo_land_refuses_unreadable_protection_and_a_gate_that_dirties_the_tree() 
   assert_contains "$out" "changed files"
   unset STUB_UNPROTECTED; rm -rf "$T"
 }
+# The gate runs in the caller's own clean checkout at the head, never in a
+# reviewer's dependency-less one, even when that one is listed first.
+test_solo_land_gate_prefers_the_callers_checkout_over_a_reviewers() {
+  _solo_setup fleetbot APPROVED; _solo_gate_repo true
+  local r="$T/repos/widget"
+  git -C "$r" worktree add -q --detach "$T/state/cel/reviews/widget-pr-7" "$STUB_HEAD"
+  git -C "$r" worktree add -q --detach "$T/mine" "$STUB_HEAD"
+  # the main checkout ($r) is also clean at the head and listed first
+  ( cd "$T/mine" && _solo_local_gate "$T" widget "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
+  assert_eq "$(cat "$T/gate-cwd")" "$(readlink -f "$T/mine")"
+  # standing elsewhere: any non-reviewer checkout, never the reviewer's
+  ( cd /tmp && _solo_local_gate "$T" widget "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
+  case "$(cat "$T/gate-cwd")" in */cel/reviews/*) echo "gate ran in the reviewer checkout"; rm -rf "$T"; return 1;; esac
+  unset STUB_UNPROTECTED; rm -rf "$T"
+}
 test_solo_land_refuses_someone_elses_pr_a_draft_and_humans_only() {
   _solo_setup someone-else APPROVED
   ! _land widget#7 >/dev/null 2>&1 || { echo "landed a colleague's PR"; rm -rf "$T"; return 1; }
