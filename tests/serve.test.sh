@@ -231,7 +231,17 @@ test_serve_a_pid_in_a_non_preview_service_is_not_a_candidate() {
     || { echo "a pid in a preview service was excluded"; rm -rf "$t"; return 1; }
   ! _serve_not_a_preview_with_cgroup "/user.slice/user-1000.slice/session-4.scope" \
     || { echo "a session process was excluded"; rm -rf "$t"; return 1; }
+  # a system service (a CI runner) says nothing about the process inside it
+  ! _serve_not_a_preview_with_cgroup "/system.slice/actions.runner.x.service" \
+    || { echo "a pid in a system service was excluded"; rm -rf "$t"; return 1; }
   rm -rf "$t"
+}
+# An agent's name as an ARGUMENT is not an agent: only a script host's
+# argv[1] names the program.
+test_serve_an_agent_name_as_an_argument_is_still_a_preview() {
+  ! _serve_not_a_preview 0 "http-server /home/u/claude -p 8080" || { echo "hid http-server serving ~/claude"; return 1; }
+  ! _serve_not_a_preview 0 "vite pi --port 5173" || { echo "hid vite with arg pi"; return 1; }
+  _serve_not_a_preview 0 "/usr/bin/node /opt/omp/bin/omp --hook x" || { echo "missed omp under node"; return 1; }
 }
 
 test_serve_records_request_activity_for_idle_deadline() {

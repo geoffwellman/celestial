@@ -216,26 +216,34 @@ _serve_pid_in_ledgered_unit() { # <pid> <unit...>
 #     units, by name, never as loose pids;
 #   - anything whose command contains an entry of box config `serve.ignore`
 #     (comma-separated substrings) - the owner's own standing tools.
-_serve_not_a_preview() { # <pid> <command>
-  local pid="$1" cmd="$2" a0 a1 n cg unit pat
-  read -r a0 a1 _ <<<"$cmd"
-  for n in "${a0##*/}" "${a1##*/}"; do
-    case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
-  done
-  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-    cg="$(awk -F: '$1 == "0" {print $3; exit}' "${CEL_SERVE_PROC_ROOT:-/proc}/$pid/cgroup" 2>/dev/null || true)"
-    unit="${cg##*/}"
-    case "$unit" in
-      *.service) case "$unit" in *cel-serve-*|*server*|*preview*|*dev*|*wrangler*|*vite*|*playground*) ;; *) return 0 ;; esac ;;
-    esac
-  fi
-  local ignore; ignore="$(cel_config_get serve ignore 2>/dev/null || true)"
+_serve_ignored() { # <command> -> 0 when box config serve.ignore matches it
+  local ignore pat; ignore="$(cel_config_get serve ignore 2>/dev/null || true)"
   local IFS=,
   for pat in $ignore; do
     pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
-    [ -n "$pat" ] && [[ "$cmd" == *"$pat"* ]] && return 0
+    [ -n "$pat" ] && [[ "$1" == *"$pat"* ]] && return 0
   done
   return 1
+}
+_serve_not_a_preview() { # <pid> <command>
+  local pid="$1" cmd="$2" a0 a1 n cg unit
+  read -r a0 a1 _ <<<"$cmd"
+  n="${a0##*/}"
+  # argv[1] names the program only when argv[0] is a script host; for
+  # anything else it is an argument (`http-server ~/claude` is a preview).
+  case "$n" in node|nodejs|bun|deno|python|python3*) n="${a1##*/}" ;; esac
+  case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    cg="$(awk -F: '$1 == "0" {print $3; exit}' "${CEL_SERVE_PROC_ROOT:-/proc}/$pid/cgroup" 2>/dev/null || true)"
+    unit="${cg##*/}"
+    # only services of the user's own manager - a system service (a CI
+    # runner, sshd) says nothing about what the process inside it serves
+    case "$cg" in
+      */user@*.service/*.service)
+        case "$unit" in *cel-serve-*|*server*|*preview*|*dev*|*wrangler*|*vite*|*playground*) ;; *) return 0 ;; esac ;;
+    esac
+  fi
+  _serve_ignored "$cmd"
 }
 
 serve_adopt_json() {
@@ -264,8 +272,13 @@ serve_adopt_json() {
       [[ -n "${ledger_pids[$pid]:-}" ]] && continue
       if [ "${#ledger_units[@]}" -gt 0 ] && _serve_pid_in_ledgered_unit "$pid" "${ledger_units[@]}"; then continue; fi
     fi
-    # a unit row is already judged by its name; a loose pid is judged here
-    if [ -z "$(jq -r '.unit // ""' <<<"$row")" ] && _serve_not_a_preview "$pid" "$(jq -r '.command // ""' <<<"$row")"; then continue; fi
+    # a unit row is already judged by its name (and the ignore list); a loose
+    # pid is judged here
+    if [ -z "$(jq -r '.unit // ""' <<<"$row")" ]; then
+      _serve_not_a_preview "$pid" "$(jq -r '.command // ""' <<<"$row")" && continue
+    else
+      _serve_ignored "$(jq -r '.command // ""' <<<"$row")" && continue
+    fi
     unit="$(jq -r '.unit // ""' <<<"$row")"
     if [ -n "$unit" ]; then
       id="${unit%.service}"
