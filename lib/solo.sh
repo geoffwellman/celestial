@@ -79,12 +79,12 @@ solo_ready_prs() { # <wsdir> <product>
       [ -n "$pr" ] || continue
       land_ci_gate "$wsdir" "$slug" "$pr" >/dev/null || continue
       printf '%s\t%s\t%s\n' "$repo" "$(printf '%s' "$pr" | jq -r .number)" "$(printf '%s' "$pr" | jq -r .headRefOid)"
-    done < <(printf '%s' "$rows" | jq -c --arg repo "$repo" --slurpfile v <(jq -c . "$(_solo_reviews "$wsdir")" 2>/dev/null || printf '{}') '
+    done < <(printf '%s' "$rows" | jq -c --arg repo "$repo" --slurpfile v <(jq -c . "$(_solo_reviews "$wsdir")" 2>/dev/null || printf '{}') "$CEL_JQ_LATEST_CHECKS"'
       ($v[0] // {}) as $verdicts
       | .[]? | select(.isDraft == false and .mergeable != "CONFLICTING")
       | select((.headRefOid // "") | test("^[0-9a-f]{40}$"))
       | select((.statusCheckRollup // []) | length > 0)
-      | select(all(.statusCheckRollup[]; ((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "SKIPPED" or $s == "NEUTRAL")))
+      | select(all(.statusCheckRollup | latest_checks[]; ((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "SKIPPED" or $s == "NEUTRAL")))
       | .headRefOid as $head
       | select(.reviewDecision == "APPROVED"
                or (($verdicts["\($repo)#\(.number)"] // {}) | .verdict == "approved" and .head == $head))' 2>/dev/null || true)
@@ -233,7 +233,7 @@ cmd_solo_land() { # <ref> [--workspace W]
     die "cel solo land: #$num is not approved (reviewDecision=${rd:-none}, recorded verdict=$(printf '%s' "$rv" | jq -r '.verdict // "none"' 2>/dev/null || printf none))"
   fi
 
-  local red; red="$(printf '%s' "$pr" | jq '[.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
+  local red; red="$(printf '%s' "$pr" | jq "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
   [ "$red" = 0 ] || die "cel solo land: #$num has $red failing check(s) - a red check is a finding, not a formality"
   [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != CONFLICTING ] \
     || die "cel solo land: #$num has conflicts - rebase it, then land again"

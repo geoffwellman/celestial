@@ -16,6 +16,15 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# THE LATEST RESULT OF EACH CHECK. gh's statusCheckRollup lists every run a
+# commit ever had, so a check that failed and then passed on a re-run (a new
+# event, a corrected base) still showed as FAILURE beside its SUCCESS and
+# blocked landing a green PR. Keep one entry per workflow+check name (or
+# status context): the one that finished (else started) last. Prefix a jq
+# program with this and call `latest_checks` on .statusCheckRollup.
+CEL_JQ_LATEST_CHECKS='def latest_checks: group_by([(.workflowName // ""), (.name // .context // "")])
+  | map(sort_by(.completedAt // .startedAt // "") | last);'
+
 # THE ONE ALIAS RULE (AH-261017). A herdr agent name, a mailbox name and a
 # worker's cwd-derived identity are the same string, and they used to be made
 # by three copies of one sanitiser that cut to 32 characters AFTER stripping a

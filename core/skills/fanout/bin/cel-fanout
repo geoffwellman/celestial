@@ -1881,7 +1881,7 @@ cmd_why() { # <id> [--workspace NAME]
       printf 'pr: %s %s, review %s, checks %s\n' "$prurl" \
         "$(printf '%s' "$pr" | jq -r '.state // "?"')" \
         "$(printf '%s' "$pr" | jq -r '.reviewDecision // "none"')" \
-        "$(printf '%s' "$pr" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "")] | if length == 0 then "none" elif any(. == "FAILURE" or . == "ERROR") then "FAILING" else "green" end')"
+        "$(printf '%s' "$pr" | jq -r "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | (.conclusion // .state // "")] | if length == 0 then "none" elif any(. == "FAILURE" or . == "ERROR") then "FAILING" else "green" end')"
     else
       printf 'pr: %s (GitHub did not answer)\n' "$prurl"
     fi
@@ -2770,7 +2770,7 @@ cmd_land() { # <id>
   else
     die "land: PR #$num is not approved (reviewDecision=${rd:-none}, ledger verdict=$(printf '%s' "$entry" | jq -r '.review.verdict // "none"'))"
   fi
-  local red; red="$(printf '%s' "$pr" | jq '[.statusCheckRollup[]? | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
+  local red; red="$(printf '%s' "$pr" | jq "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
   [ "$red" = "0" ] || die "land: PR #$num has $red failing check(s) - a red gate is a finding, not a formality"
   [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != "CONFLICTING" ] || die "land: PR #$num has conflicts - a worker rebases it, then land again"
 
