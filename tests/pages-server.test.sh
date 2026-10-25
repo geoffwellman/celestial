@@ -146,10 +146,10 @@ test_index_carries_workspace_filter_and_pagination() {
   _pages_stop
 }
 
-# The index lists documents only. Every image - referenced by a page or
-# standalone - is left out of the rows and the workspace counts, yet each
-# keeps serving at its URL.
-test_index_lists_documents_never_images() {
+# The index lists documents only. Every image, video and audio file -
+# referenced by a page or standalone - is left out of the rows and the
+# workspace counts, yet each keeps serving at its URL.
+test_index_lists_documents_never_media() {
   _pages_boot 1 || return 1
   mkdir -p "$PROOT/.meta"
   printf '<img src="chart.png"><img src="./fig.svg">' > "$PROOT/report.html"
@@ -158,15 +158,15 @@ test_index_lists_documents_never_images() {
   printf '{"workspace":"orion"}' > "$PROOT/.meta/notes.html.json"
   printf 'PNG' > "$PROOT/chart.png"; printf '<svg/>' > "$PROOT/fig.svg"
   local f
-  for f in lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico; do printf 'X' > "$PROOT/$f"; done
+  for f in lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico clip.mp4 clip.webm voice.mp3 take.wav; do printf 'X' > "$PROOT/$f"; done
   printf '{"workspace":"orion"}' > "$PROOT/.meta/lonely.png.json"
   local idx; idx="$(curl -s "http://127.0.0.1:$PT/")"
   assert_contains "$idx" 'href="/report.html"'
   assert_contains "$idx" 'href="/notes.html"'
   assert_contains "$idx" 'orion (2)'
-  for f in chart.png fig.svg lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico; do
+  for f in chart.png fig.svg lonely.png pic.jpg pic2.jpeg anim.gif logo.webp favicon.ico clip.mp4 clip.webm voice.mp3 take.wav; do
     if printf '%s' "$idx" | grep -qF "href=\"/$f\""; then
-      echo "image $f listed"; _pages_stop; return 1; fi
+      echo "media $f listed"; _pages_stop; return 1; fi
     assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PT/$f")" "200"
   done
   _pages_stop

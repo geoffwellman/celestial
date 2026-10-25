@@ -71,16 +71,16 @@ const docWorkspace = (f) => {
   } catch { return ''; }
 };
 
-// The index lists documents only: every image (png/jpg/gif/svg/webp/ico) is
-// left out of the rows and the workspace counts, referenced or not. Images
-// still serve at their URLs - they are just never listed.
-const IMAGE_RE = /\.(png|jpe?g|gif|svg|webp|ico)$/i;
+// The index lists documents only: every image, video and audio file is left
+// out of the rows and the workspace counts, referenced or not. Media still
+// serve at their URLs - they are just never listed.
+const MEDIA_RE = /\.(png|jpe?g|gif|svg|webp|ico|avif|bmp|tiff?|heic|mp4|webm|mov|m4v|mkv|avi|mp3|wav|ogg|oga|m4a|aac|flac|opus)$/i;
 
 // Same visual identity as cel dash: night ground, starlight ink, gold accent.
 const index = () => {
   const names = readdirSync(ROOT).filter((f) => !f.startsWith('.'));
   const rows = names
-    .filter((f) => !IMAGE_RE.test(f))
+    .filter((f) => !MEDIA_RE.test(f))
     .map((f) => ({ f, st: statSync(join(ROOT, f)) }))
     .filter((x) => x.st.isFile())
     .sort((a, b) => b.st.mtimeMs - a.st.mtimeMs)
