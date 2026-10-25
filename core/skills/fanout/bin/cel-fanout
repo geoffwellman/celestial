@@ -2557,6 +2557,10 @@ cmd_release() {
     left="$(_release_remove_dir "$wt" "$discard")" || true
   fi
   _ledger_set_field "$wsdir" "$id" worktree_left "$left"
+  # --keep-worktree is a decision, not a postponement: recorded on the row so
+  # `cel gc` never removes that checkout afterwards (2026-10-26: a kept
+  # checkout was gone minutes after its release during a solo migration).
+  [ "$keep" -eq 0 ] || _ledger_patch "$wsdir" "$id" '.worktree_kept = true'
   [ -z "$left" ] || c_warn "$id: worktree left on disk at $wt - $left"
   # THE CONTAINER OUTLIVES ITS CHILDREN. Removing the last worktree under a
   # `<repo>/workers` container closed the container with it, and the surviving

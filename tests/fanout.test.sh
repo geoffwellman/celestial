@@ -589,6 +589,8 @@ test_release_keep_worktree_ignores_held_work() {
   _fanout_dirty_release
   (cd "$T" && "$BIN" release WG-DIRTY --keep-worktree) > /dev/null
   assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" released
+  # recorded, so gc's later worktree pass keeps the checkout too
+  assert_eq "$(jq -c '.[0].worktree_kept' "$T/.cel/delegations.json")" true
   rm -rf "$T"
 }
 test_release_of_a_clean_worktree_is_unchanged() {
