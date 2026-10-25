@@ -89,6 +89,9 @@ cel-fanout recover abandon  <id> --reason "<what you found>"
   kept as launch.phase `start-failed` (no automatic continuation: look at the
   pane, then `recover abandon`). `delegate --reuse` over an existing row marks
   it instead of replacing it, so a failed start keeps its verdict and PR.
+  When the old conversation cannot be resumed (no session on the row, or an
+  omp row) and the work is in git, `delegate --reuse --fresh-session` starts
+  the same worker in the same checkout on a new conversation.
 
 Running a worker on a different model or CLI
 

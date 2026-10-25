@@ -743,8 +743,8 @@ Your orchestrator is not watching your pane; that message is how it learns you a
 # or by working directory), an explicit option that contradicts what the row
 # recorded, a runtime with no native resume, or a session that is missing or
 # ambiguous. No stop API is invented: a live runtime is refused, not retired.
-_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt>
-  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9"
+_fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> <profile-opt> <model-opt> <thinking-opt> [fresh 0|1]
+  local wsdir="$1" row="$2" repo="$3" branch="$4" wt="$5" sopt="$6" popt="$7" mopt="$8" topt="$9" fresh="${10:-0}"
   RS_SESSION=""
   _rec_guard "delegate --reuse" "$branch" "$row"
   local st; st="$(printf '%s' "$row" | jq -r '.state // ""')"
@@ -789,8 +789,16 @@ _fanout_resume_pin() { # <wsdir> <row> <repo> <branch> <worktree> <session-opt> 
       die "delegate --reuse: profile '$RS_PROFILE' has drifted since $branch launched (row: $RS_RT $RS_MODEL $RS_THINKING; profile now: $PROFILE_RUNTIME $PROFILE_MODEL $PROFILE_THINKING) - refusing to resume under a different model. Nothing was changed"
     fi
   fi
+  # --fresh-session: the SAME worker (row, runtime, model, profile, checkout)
+  # starting a NEW conversation, asked for by name - for a row whose old
+  # session cannot be resumed (none recorded, a runtime whose layout is not
+  # verified) while everything it built is in git. Never a silent fallback.
+  if [ "$fresh" -eq 1 ]; then
+    [ -z "$sopt" ] || die "delegate --reuse: --fresh-session and --session contradict each other - nothing was changed"
+    return 0
+  fi
   [ -n "$(agent_resume "$RS_RT" flag)" ] \
-    || die "delegate --reuse: runtime '$RS_RT' has no native session resume - nothing was changed"
+    || die "delegate --reuse: runtime '$RS_RT' has no native session resume - nothing was changed (start a new conversation in the same checkout with --fresh-session)"
   _fanout_resume_session "$RS_RT" "$(readlink -f "$wt")" "$(printf '%s' "$row" | jq -r '.session // ""')" "$sopt"
 }
 
@@ -850,7 +858,7 @@ _fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
     local dir; dir="$(gateway_pi_dir)/sessions/--$(printf '%s' "$wt" | sed 's|^/||; s|/|-|g')--"
     for f in "$dir"/*.jsonl; do [ -f "$f" ] && cands+=("$f"); done
   else
-    die "delegate --reuse: no session is recorded on the row and the session layout of runtime '$rt' is not verified - nothing was changed"
+    die "delegate --reuse: no session is recorded on the row and the session layout of runtime '$rt' is not verified - nothing was changed (if the work is in git, start a new conversation in the same checkout: --reuse --fresh-session)"
   fi
   local -a ok=() ids=()
   local hdr
@@ -881,9 +889,9 @@ _fanout_resume_session_pick() { # <runtime> <worktree> <row-session> <opt>
 
 cmd_delegate() {
   _fanout_refuse_worker delegate "" "$(_fanout_ws_arg "$@")"
-  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID|FILE]]"
+  [ $# -ge 3 ] || die "usage: cel-fanout delegate <repo> <branch> <spec-file> [--herdr-workspace ID] [--profile NAME] [--because TEXT] [--model ID] [--thinking LEVEL] [--adhoc] [--reuse [--session UUID|FILE | --fresh-session]]"
   local repo="$1" branch="$2" spec="$3"; shift 3
-  local session_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt=""
+  local session_opt="" herdr_ws="" profile="" model_opt="" thinking_opt="" adhoc=0 reuse=0 shape=ship because="" ws_opt="" fresh_session=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --workspace) ws_opt="$2"; shift 2 ;;
@@ -895,11 +903,14 @@ cmd_delegate() {
       --adhoc)    adhoc=1; shift ;;
       --reuse)    reuse=1; shift ;;
       --session)  session_opt="$2"; shift 2 ;;
+      --fresh-session) fresh_session=1; shift ;;
       --receipt)  die "delegate --reuse --receipt: re-pinning a RECOVERED or PRIVATE-ROOT session is unsupported (no default root, fresh conversation or path fallback is substituted) - nothing was changed" ;;
       --shape)    shape="$2"; shift 2 ;;
       *) die "delegate: unknown argument: $1" ;;
     esac
   done
+  [ "$fresh_session" -eq 0 ] || [ "$reuse" -eq 1 ] \
+    || die "delegate: --fresh-session restarts a retained row in its own checkout - it needs --reuse"
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   # Refused BEFORE a worktree exists: a worker that would act as the wrong
@@ -1047,11 +1058,13 @@ cmd_delegate() {
   local opened_ws=0 existing="" prior_row="" resume_session="" RS_PROFILE="" RS_RT="" RS_MODEL="" RS_THINKING="" RS_SESSION=""
   if [ "$reuse" -eq 1 ]; then
     prior_row="$(_ledger_entry "$wsdir" "$branch")"
+    [ -n "$prior_row" ] || [ "$fresh_session" -eq 0 ] \
+      || die "delegate --reuse --fresh-session: $branch has no row on the ledger - there is no retained worker to restart. Nothing was changed"
     if [ -n "$prior_row" ]; then
       existing="$(git -C "$repodir" worktree list --porcelain 2>/dev/null \
         | awk -v b="refs/heads/$branch" '$1=="worktree"{p=$2} $1=="branch" && $2==b && !f {print p; f=1}')"
       [ -n "$existing" ] || die "delegate --reuse: $branch has no live worktree to resume in - nothing was changed (a missing checkout is not recreated by a resume)"
-      _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt"
+      _fanout_resume_pin "$wsdir" "$prior_row" "$repo" "$branch" "$existing" "$session_opt" "$profile" "$model_opt" "$thinking_opt" "$fresh_session"
       resume_session="$RS_SESSION"
       # ONLY NOW - every proof passed, so a refusal above opened nothing - a
       # checkout no herdr workspace holds (its workspace was closed) is OPENED
