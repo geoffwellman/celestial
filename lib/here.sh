@@ -175,7 +175,7 @@ cmd_here() {
       if [ "$who" = core ] || [ "$who" = root ]; then
         _here_cel decide list
       else
-        _here_cel decide list --workspace "$(ws_name "$HERE_WSDIR")" --asker "$(_run_agent_name "$HERE_PRODUCT/orch")"
+        _here_cel decide list --workspace "$(ws_name "$HERE_WSDIR")" --asker "${CEL_INBOX_ME:-$(_run_agent_name "$HERE_PRODUCT/orch")}"
       fi ;;
     review)
       [ "$who" != core ] || die "cel here review: core does not start reviewers - ask the product's agent"
@@ -209,11 +209,13 @@ cmd_here() {
       elif [ "$who" = root ]; then
         die "cel here restart: run cel run root --restart from another pane"
       else
-        _mode_schedule_restart "$HERE_WSDIR" "$HERE_PRODUCT" || rc=$?
+        # A lane restarts itself, never the product's main agent.
+        local me; me="$(_run_agent_name "$HERE_PRODUCT/${CEL_LANE:-orch}")"
+        _mode_schedule_restart "$HERE_WSDIR" "$HERE_PRODUCT" ${CEL_LANE:+"$CEL_LANE"} || rc=$?
         case "$rc" in
-          0) printf '%s restarts on its own session once this turn ends\n' "$(_run_agent_name "$HERE_PRODUCT/orch")" ;;
-          3) printf 'a restart of %s is already pending\n' "$(_run_agent_name "$HERE_PRODUCT/orch")" ;;
-          *) die "cel here restart: could not schedule it - run: cel run orchestrator --product $HERE_PRODUCT --restart" ;;
+          0) printf '%s restarts on its own session once this turn ends\n' "$me" ;;
+          3) printf 'a restart of %s is already pending\n' "$me" ;;
+          *) die "cel here restart: could not schedule it - run: cel run solo --product $HERE_PRODUCT${CEL_LANE:+ --lane $CEL_LANE} --restart" ;;
         esac
       fi ;;
     focus)

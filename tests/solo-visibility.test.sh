@@ -36,6 +36,18 @@ test_fleet_text_draws_a_solo_unit_without_worker_counts() {
   ! printf '%s\n' "$out" | grep bundle | grep -q 'workers' || { echo "solo row counts workers"; return 1; }
   assert_contains "$(printf '%s\n' "$out" | grep lone)" "workers 1/4"
 }
+# Live lanes show on the solo unit, from the roster the fleet read holds.
+test_fleet_shows_a_solo_products_live_lanes() {
+  _sv_ws
+  local roster
+  roster="$(jq -nc --arg a "$T/.cel/solo/bundle/lane-ui" --arg b "$T/.cel/solo/bundle/lane-api" \
+    '{result:{agents:[{name:"bundle-ui",cwd:$a,agent_status:"idle"},{name:"bundle-api",cwd:$b,agent_status:"working"}]}}')"
+  assert_eq "$(_fleet_unit "$T" bundle "$roster" | jq -c .lanes)" '["api","ui"]'
+  local doc='{"box":{"available_mb":1,"total_mb":2},"workspaces":[{"name":"w","root":{"unread":0,"open":0},"units":[
+    {"name":"bundle","mode":"solo","orch":"LIVE","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":5,"repos":["a"],"declared":true,"solo_worktrees":1,"lanes":["api","ui"]}]}]}'
+  assert_contains "$(_fleet_render "$doc" | grep bundle)" "lanes: api,ui"
+  rm -rf "$T"
+}
 
 # --- the ready-PR finder the steward nudges with -----------------------------
 H=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

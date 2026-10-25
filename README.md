@@ -209,6 +209,28 @@ names the product agent's route. It runs from agents.yaml `defaults.core`
 `cel core --restart` relaunches it in its own pane, `--fresh` starts a new
 conversation. Mail sent to `core` lands in `root`.
 
+### Solo lanes: several big goals, one agent each
+
+Fleet mode breaks work into many small tickets. When a product instead has
+two or three large feature sets that each want one agent holding the whole
+picture, run them as lanes of a solo product:
+
+```
+cel run solo --product celestial --lane ui      # pane and mailbox celestial-ui
+cel run solo --product celestial --lane api     # pane and mailbox celestial-api
+```
+
+Each lane is a full solo agent - its own pane, mailbox, directory
+(`.cel/solo/<product>/lane-<name>`) and resumable session - working in the
+product's repos through its own branches and worktrees, opening and landing
+its own PRs (`cel solo land`, same review and CI checks). Reviewers it starts
+report back to it. The product's main agent (`<product>-orch`) keeps running
+beside them. Lanes are told about each other and coordinate overlapping files
+by inbox; nothing stops two lanes editing the same file, so give them goals
+that touch different parts of the code. `cel fleet` lists a product's live
+lanes; `/cel-restart` in a lane restarts that lane only; `cel mode <p> fleet`
+is refused while any lane is live.
+
 ### Commands inside an agent
 
 Core, orchestrators and solo agents all take the same small set of commands,
