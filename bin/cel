@@ -115,6 +115,11 @@ cel - the celestial plane
                                 launch: it builds and ships itself, no fan-out
                                 (cel run orchestrator does this on its own for
                                 a product whose mode is solo)
+  cel run solo --product p --lane <name>
+                                a further solo agent on the same product for a
+                                separate goal: pane/mailbox <p>-<name>, its own
+                                directory and session; restart with --restart.
+                                Back to fleet is refused while a lane is live
   cel here <verb> [args]        what /cel-<verb> runs inside an agent, scoped to
                                 the pane's own product: mode, status, inbox,
                                 decide, review, land, restart (core: + focus).

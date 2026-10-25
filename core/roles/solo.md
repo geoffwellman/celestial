@@ -24,6 +24,10 @@ Your tools are yours
   refuses starting other Celestial agents except a reviewer for your own PR.
 - The repo's CLAUDE.md may describe the fleet flow (workers, `cel-fanout`).
   In solo mode the build-mode line of your policy block wins over it.
+- The owner may run more than one solo agent on this product - lanes, each on
+  its own goal (`cel run solo --product <p> --lane <name>`). If your role
+  carries a "You are a lane" section, follow it; either way, the others are
+  peers in the same repos, not workers of yours.
 
 How work ships
 1. Branch from the default branch, named per your policy block (ticket id in

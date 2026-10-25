@@ -401,10 +401,10 @@ _fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded> <mem>
   printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s   mem %s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 }
-# A solo product has no workers to count: its one agent, and the git
-# worktrees it keeps for its own parallel branches.
-_fleet_solo_line() { # <label> <agent> <worktrees> <mem>
-  printf '  %-12s solo %-5s worktrees %s   mem %s\n' "$1" "$2" "$3" "$4"
+# A solo product has no workers to count: its agent, any lanes (extra solo
+# agents on separate goals), and the git worktrees they keep for branches.
+_fleet_solo_line() { # <label> <agent> <worktrees> <mem> [lanes]
+  printf '  %-12s solo %-5s worktrees %s   mem %s%s\n' "$1" "$2" "$3" "$4" "${5:+   lanes: $5}"
 }
 
 # WHERE THE ORCHESTRATOR PANE STANDS, which is the directory its memory is
@@ -516,12 +516,21 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   # The rows are folded by the same jq that builds the unit, and the repo list
   # arrives as positional arguments: this was three processes (`jq -R`, `jq
   # -s`, `jq -n`) for a document of four numbers and a list of strings.
+  # Live lanes, from the roster this read already holds: agents standing in
+  # .cel/solo/<product>/lane-<name> (not in a deleted one). Solo units only -
+  # a fleet unit's document is unchanged - one jq, no herdr call.
+  local lanes="[]"
+  if [ "$mode" = solo ] && [ "$have_roster" = 1 ]; then
+    lanes="$(printf '%s' "$roster" | jq -c --arg b "$(ws_solo_dir "$wsdir" "$product")/lane-" \
+      '[.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not)) | (.cwd | ltrimstr($b))] | unique' 2>/dev/null || printf '[]')"
+  fi
   printf '%s' "$rows" | jq -sc --arg name "$product" --arg orch "$orch" \
     --argjson workers "$workers" --argjson cap "$cap" \
     --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
     --argjson declared "$declared" --arg mode "$mode" --argjson solo_wt "${solo_wt:-0}" \
-    --argjson rss "$rss" --argjson orch_rss "$orch_rss" \
-    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt, workers_list: .}' \
+    --argjson rss "$rss" --argjson orch_rss "$orch_rss" --argjson lanes "${lanes:-[]}" \
+    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt}
+     + (if $mode == "solo" then {lanes: $lanes} else {} end) + {workers_list: .}' \
     --args "${repos[@]}"
 }
 
@@ -636,7 +645,7 @@ _fleet_render() { # <doc>
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
         | if .mode == "solo"
-          then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\((.rss_mb // 0) + (.orch_rss_mb // 0))"
+          then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\((.rss_mb // 0) + (.orch_rss_mb // 0))\t\((.lanes // []) | join(","))"
           else "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)\t\(.rss_mb // 0)" end]
     | .[]' \
   | while IFS= read -r line; do
@@ -646,8 +655,8 @@ _fleet_render() { # <doc>
           _fleet_unit_line "$n" "$o" "$w" "$c" "$s" "$u" "$(mem_human "$m")"
           ;;
         SOLO*)
-          IFS=$'\t' read -r _ n o t m <<<"$line"
-          _fleet_solo_line "$n" "$o" "$t" "$(mem_human "$m")"
+          IFS=$'\t' read -r _ n o t m l <<<"$line"
+          _fleet_solo_line "$n" "$o" "$t" "$(mem_human "$m")" "$l"
           ;;
         *) printf '%s\n' "$line" ;;
       esac

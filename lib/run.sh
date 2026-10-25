@@ -214,7 +214,7 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   # fills GATEWAY_ENV in the caller): the same launch-scoped K=V words, so they
   # exist only in the launched process and never in the pane's shell.
   local gw
-  for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"}; do out="$out $gw"; done
+  for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"} ${LAUNCH_ENV_EXTRA[@]+"${LAUNCH_ENV_EXTRA[@]}"}; do out="$out $gw"; done
   # WHOSE MAILBOX (CEL-65). `cel inbox` derives the reader from cwd, and an
   # orchestrator that cd's to its workspace root read ROOT's mail for days.
   # Root and orchestrators carry their identity from the launch instead.
@@ -588,19 +588,66 @@ EOF
 _run_reviewer_solo_brief() { # <wsdir> <repo> <pr>
   local product; product="$(ws_product_of_repo "$1" "$2")"
   [ "$(ws_build_mode "$1" "$product")" = solo ] || return 0
+  # Findings go to the solo agent that asked for this reviewer: the product's
+  # main agent, or the lane that opened the PR.
+  local author="$product-orch"
+  [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && author="$CEL_INBOX_ME"
   cat <<EOF
 
 ## This PR belongs to a solo product
-\`$product\` is built by one agent, \`$product-orch\`, with no delegated
-workers - there is no delegation id and no worker pane. So, in place of the
+\`$product\` is built by solo agents, with no delegated workers - there is no
+delegation id and no worker pane. This PR is \`$author\`'s. So, in place of the
 ledger steps in your role:
 - record your verdict with
   \`cel solo review $2#$3 <approved|changes> --head <reviewed-sha> --by <your alias> --note "<one line>"\`
   (same rules: the full 40-character SHA you read; an approval must equal
   the PR's current head);
-- send findings and your verdict to \`$product-orch\` by \`cel inbox send\`.
+- send findings and your verdict to \`$author\` by \`cel inbox send\`.
 It merges with \`cel solo land $2#$3\`, which honours only your recorded
 approval of the exact head it merges.
+EOF
+}
+
+# A LANE'S NAME MUST BE ITS OWN. The pane name and mailbox are
+# `<product>-<lane>` after cel_alias_norm, which truncates at 32 characters -
+# so a long pair, or one that spells another agent's alias (`<q>-orch` of a
+# product `<product>-<x>`, `<repo>-direct`, `<repo>-pr-<n>-review`,
+# `<ws>-root`), would share a pane name and mailbox with that agent while its
+# directory differs, and nothing else would notice.
+_run_lane_name_free() { # <wsdir> <product> <lane>
+  local want="$2-$3" name q r
+  name="$(_run_agent_name "$2/$3")"
+  [ "$name" = "$want" ] || die "cel run solo --lane: '$3' makes the agent name '$name', not '$want' (names are cut to 32 characters) - use a shorter lane name"
+  [ "$name" != "$(_run_agent_name "$(ws_name "$1")/root")" ] || die "cel run solo --lane: '$name' is the workspace root's name"
+  while IFS= read -r q; do
+    [ -n "$q" ] || continue
+    [ "$name" != "$(_run_agent_name "$q/orch")" ] || die "cel run solo --lane: '$name' is product $q's agent - pick another lane name"
+  done < <(ws_product_names "$1")
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case "$name" in
+      "$r-direct"|"$r"-pr-*-review) die "cel run solo --lane: '$name' is the name of $r's $( [ "$name" = "$r-direct" ] && echo direct pane || echo reviewer) - pick another lane name" ;;
+    esac
+  done < <(ws_repo_names "$1")
+  return 0
+}
+
+# What a lane is told on top of the solo role: its name, that the product has
+# other agents working in the same repos, and how not to collide with them.
+_run_lane_brief() { # <product> <lane> <agent-name>
+  cat <<EOF
+
+## You are a lane
+You are \`$3\`, lane \`$2\` of \`$1\`. The owner runs more than one solo agent
+on this product, each on its own goal - yours is the one the owner gives you
+in this pane. Wherever the role says \`$1-orch\`, read \`$3\`: that is your
+pane name and mailbox. \`$1-orch\` and any other \`$1-*\` lane are peers working
+in the same repos.
+- Work only through your own branches and worktrees (under
+  \`.cel/solo/$1/\`), and only on your goal.
+- Before a change that touches files another lane is likely to touch, tell it
+  by \`cel inbox send <its name> "..."\`; rebase rather than overwrite.
+- Land only your own PRs.
 EOF
 }
 
@@ -1415,7 +1462,7 @@ _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
 
 cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 force=0
-  local restart=0 fresh=0 pane_opt="" solo_forced=0
+  local restart=0 fresh=0 pane_opt="" solo_forced=0 lane=""
   local profile="" model_opt="" thinking_opt=""
 
   if [ $# -gt 0 ]; then
@@ -1449,6 +1496,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --restart)   restart=1; shift ;;
       --fresh)     fresh=1; shift ;;
       --pane)      pane_opt="$2"; restart=1; shift 2 ;;
+      --lane)      lane="$2"; shift 2 ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
@@ -1502,6 +1550,8 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       die "cel run: --repo is required (workspace '$(ws_name "$wsdir")' has ${#repos[@]} repos)"
     fi
   fi
+  [ -z "$lane" ] || [ "$role" = orchestrator ] \
+    || die "cel run: --lane names a solo product's extra agent (cel run solo --product <p> --lane <name>)"
   # --product is an orchestrator's flag; every other role works in a checkout.
   [ "$role" = "orchestrator" ] || [ -n "$repo" ] || [ "$role" = "root" ] \
     || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
@@ -1539,6 +1589,19 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       if [ "$solo_forced" -eq 1 ] || [ "$build_mode" = solo ]; then
         solo=1
         rolefile="$CEL_ROOT/core/roles/solo.md"
+      fi
+      # A LANE is a second (third, ...) solo agent on the same product, for a
+      # separate goal: its own pane, name (<product>-<lane>), mailbox,
+      # directory and session, working in the product's repos through its
+      # own worktrees. Solo only - in fleet the workers are the parallelism.
+      if [ -n "$lane" ]; then
+        [ "$build_mode" = solo ] || die "cel run solo --lane: $product is in $build_mode mode - lanes are for solo products (cel mode $product solo)"
+        [ "$lane" != orch ] || die "cel run solo --lane: 'orch' is the product's main agent - leave --lane off for it"
+        [[ "$lane" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
+          || die "cel run solo --lane: '$lane' - use lowercase letters and digits, single dashes between them"
+        alias_name="$product/$lane"
+        _run_lane_name_free "$wsdir" "$product" "$lane"
+        cwd="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
       fi
       # A one-off solo launch over a fleet product with work in flight would
       # leave that work with no orchestrator to collect, review or land it.
@@ -1621,7 +1684,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
     "")           label="$(pane_label direct "$repo")" ;;
     root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
     orchestrator)
-      if [ "$solo" -eq 1 ]; then label="$(pane_label solo "$product")"
+      if [ "$solo" -eq 1 ]; then label="$(pane_label solo "$product${lane:+/$lane}")"
       else label="$(pane_label orchestrator "$product")"; fi ;;
     worker)       label="$(pane_label worker "$branch")" ;;
     reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
@@ -1732,6 +1795,8 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
   local agent_name; agent_name="$(_run_agent_name "$alias_name")"
+  [ -z "$lane" ] || RUN_BODY="$RUN_BODY
+$(_run_lane_brief "$product" "$lane" "$agent_name")"
   # The facts about THIS pull request ride with the role body rather than
   # waiting for an orchestrator to type them.
   if [ "$role" = "reviewer" ] && [ "$dry_run" -eq 0 ]; then
@@ -1741,6 +1806,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
 
   local AGENT_ARGS=() AGENT_ROLE_FILE="" bodyfile
   bodyfile="$(_run_role_file "$wsdir" "$tag" "${product:-}")"
+  # A lane's role file stands in its own directory, or it would overwrite the
+  # main agent's (role-*.md, the shape lib/gc.sh recognises).
+  [ -z "$lane" ] || bodyfile="$cwd/role-solo.md"
   # ONE ROLE FILE PER PULL REQUEST. The body now carries a head SHA, so a
   # shared $ws/.cel/role-reviewer.md would have two reviewers overwriting each
   # other's brief and one of them reading a SHA from the other's PR. The name
@@ -1783,10 +1851,14 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   mapfile -t launch_args < <(agent_launch_args "$runtime")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
 
-  local envprefix; local inbox_me=""
+  local envprefix; local inbox_me="" ; local -a LAUNCH_ENV_EXTRA=()
   case "$role" in
     root) inbox_me=root ;;
-    orchestrator) inbox_me="$product-orch" ;;
+    orchestrator) inbox_me="$product-orch"; [ -z "$lane" ] || inbox_me="$agent_name"
+      # Which product (and lane) the pane belongs to, said outright: a lane's
+      # mailbox name does not end in -orch, so nothing can derive it.
+      LAUNCH_ENV_EXTRA=("CEL_PRODUCT=$product")
+      [ -z "$lane" ] || LAUNCH_ENV_EXTRA+=("CEL_LANE=$lane") ;;
     # Pane alias is the reader identity. Claude's hook needs it explicitly
     # because reviewers share a tab cwd rather than standing in a worktree.
     worker|reviewer) inbox_me="$agent_name" ;;
@@ -1861,7 +1933,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # A declared product's directory is cel's to make: it is not a checkout,
     # so nothing else ever creates it and herdr would refuse a missing cwd.
     if [ "$role" = "orchestrator" ] && [ "$dry_run" -eq 0 ] \
-       && ws_product_declared "$wsdir" "$product"; then
+       && { [ -n "$lane" ] || ws_product_declared "$wsdir" "$product"; }; then
       mkdir -p "$cwd"
     fi
     CREATE_ARGS=(workspace create --cwd "$cwd" --label "$alias_name")
