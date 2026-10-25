@@ -2353,6 +2353,43 @@ _release_remove_dir() { # <worktree> <discard 0|1>
   [ ! -d "$wt" ] || { printf 'directory survived git worktree remove'; return 1; }
 }
 
+# KEEP A CHECKOUT THAT IS ALREADY RELEASED. `release --keep-worktree` records
+# the keep at release time; a row released (with the keep asked for) before
+# that was recorded carries nothing, so `cel gc` would take its checkout once
+# it was clean and pushed - ignored files with it. `keep` marks it: one field,
+# set only on a released/landed/abandoned row whose checkout still exists;
+# nothing is removed, moved or changed in state. Idempotent.
+cmd_keep() { # <id>... [--workspace NAME]
+  _fanout_refuse_worker keep "${1:-}" "$(_fanout_ws_arg "$@")"
+  local ws_opt="" ids=() id
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) [ $# -ge 2 ] || die "keep: --workspace needs a value"; ws_opt="$2"; shift 2 ;;
+      -*) die "keep: unknown argument: $1" ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ "${#ids[@]}" -gt 0 ] || die "usage: cel-fanout keep <id>... [--workspace NAME]"
+  local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
+  local entry state wt bad=0
+  for id in "${ids[@]}"; do
+    entry="$(_ledger_entry "$wsdir" "$id")"
+    [ -n "$entry" ] || { c_err "keep: no row $id"; bad=1; continue; }
+    state="$(printf '%s' "$entry" | jq -r '.state // ""')"
+    wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
+    case "$state" in released|landed|abandoned) ;;
+      *) c_err "keep: $id is $state - only a released, landed or abandoned row is marked (a live one is kept anyway)"; bad=1; continue ;;
+    esac
+    [ -n "$wt" ] && [ -d "$wt" ] || { c_err "keep: $id's checkout is not on disk (${wt:-none}) - nothing to keep"; bad=1; continue; }
+    if [ "$(printf '%s' "$entry" | jq -r '.worktree_kept // false')" = true ]; then
+      c_ok "$id: already kept ($wt)"; continue
+    fi
+    _ledger_patch "$wsdir" "$id" '.worktree_kept = true' || { c_err "keep: could not write $id"; bad=1; continue; }
+    c_ok "$id: kept - cel gc will not remove $wt"
+  done
+  return "$bad"
+}
+
 cmd_release() {
   _fanout_refuse_worker release "${1:-}" "$(_fanout_ws_arg "$@")"
   [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--dry-run] [--state landed,abandoned] [--keep-worktree] [--discard] [--workspace NAME]"
@@ -3661,7 +3698,7 @@ case "${1:-}:${2:-}" in
   replace:bind) ;;   # takes the lock WITHOUT waiting, below
   *)
 case "${1:-}" in
-  delegate|scout|spike|collect|status|release|land|review|request-review|replace|try|reconcile)
+  delegate|scout|spike|collect|status|release|keep|land|review|request-review|replace|try|reconcile)
     lock_ws="$(_fanout_wsdir "$(_fanout_ws_arg "$@")")"
     mkdir -p "$lock_ws/.cel"
     exec {ledger_fd}>"$lock_ws/.cel/delegations.lock"
@@ -3694,10 +3731,11 @@ case "${1:-}" in
   why)      shift; cmd_why "$@" ;;
   try)      shift; cmd_try "$@" ;;
   release)  shift; cmd_release "$@" ;;
+  keep)     shift; cmd_keep "$@" ;;
   review)   shift; cmd_review "$@" ;;
   land)     shift; cmd_land "$@" ;;
   request-review) shift; cmd_request_review "$@" ;;
   replace)  shift; cmd_replace "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
-  *) die "usage: cel-fanout delegate|scout|spike|recover|wait|collect|status|why|try|release|review|request-review|replace|handback|land|reconcile ..." ;;
+  *) die "usage: cel-fanout delegate|scout|spike|recover|wait|collect|status|why|try|release|keep|review|request-review|replace|handback|land|reconcile ..." ;;
 esac

@@ -97,8 +97,13 @@ link_claude_prefs() {
       . as $current
       | ($p[0] | .hooks.UserPromptSubmit[0].hooks[0].command = $hook_command) as $plane
       | ($current * $plane)
+      # An entry an older install wrote with the placeholder unresolved runs a
+      # command that does not exist on every prompt; the plane wrote it, so it
+      # goes.
       | .hooks.UserPromptSubmit =
-          ((($current.hooks.UserPromptSubmit // []) +
+          ((($current.hooks.UserPromptSubmit // [])
+              | map(.hooks = [(.hooks // [])[] | select(((.command // "") | test("^__CEL_[A-Z_]+__$")) | not)])
+              | map(select((.hooks | length) > 0)) +
             ($plane.hooks.UserPromptSubmit // [])) | append_unique)
     ' "$settings")" || return 1
     if [ "$merged" != "$(jq -S . "$settings")" ]; then
