@@ -1,0 +1,3 @@
+### Fixed
+- `cel solo land` on a repo whose base branch gates nothing (no branch protection, or no required check) refused every PR, because CI could not stand in for a gate and nothing else ran. It now runs the repo's own `gate:` in a clean checkout at exactly the PR head (the solo agent's branch worktree), merges only if it passes, and records `Gate: local ...` in the merge body - the evidence the fleet land collects. A required check that is not green is still a refusal; no checkout at the head is a refusal.
+- `cel solo land` and `cel-fanout land` refuse while a check's latest run is still in progress or pending, naming it.

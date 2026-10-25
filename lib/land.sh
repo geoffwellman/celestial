@@ -29,14 +29,27 @@ _land_gh() { # <wsdir> <gh args...>
 land_ci_gate() { # <wsdir> <slug> <pr-json>
   local wsdir="$1" slug="$2" pr="$3"
   local head base prot req cr missing
+  # Set when the base branch gates nothing (no readable protection, or no
+  # required check): CI cannot stand in, but a caller may run the repo's own
+  # gate instead. A required check that is not green never sets it.
+  LAND_CI_UNPROTECTED=0
   head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
   base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')"
   [ -n "$head" ] || { printf '%s' "the PR reports no head commit - nothing to check CI against"; return 1; }
   [ -n "$base" ] || { printf '%s' "the PR reports no base branch - nothing to read protection from"; return 1; }
-  prot="$(_land_gh "$wsdir" api "repos/$slug/branches/$base/protection" 2>/dev/null || true)"
-  [ -n "$prot" ] || { printf '%s' "cannot read branch protection for $base on $slug - with no readable protection there is no required check for CI to stand in with. Give the gate more time instead (CEL_VERIFY_GATE_TIMEOUT)."; return 1; }
-  req="$(printf '%s' "$prot" | jq -r '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique | .[]' 2>/dev/null || true)"
-  [ -n "$req" ] || { printf '%s' "$base on $slug requires no check - a branch nothing gates cannot lend its verdict to this one"; return 1; }
+  local prc=0
+  prot="$(_land_gh "$wsdir" api "repos/$slug/branches/$base/protection" 2>&1)" || prc=$?
+  if [ "$prc" -ne 0 ] || [ -z "$prot" ]; then
+    # GitHub's own answer that the branch has no protection is the ONLY
+    # failure that means "gates nothing"; a permission error, rate limit or
+    # network failure is unknown, and unknown never opens another path.
+    case "$prot" in *"Branch not protected"*) LAND_CI_UNPROTECTED=1 ;; esac
+    printf '%s' "cannot read branch protection for $base on $slug - with no readable protection there is no required check for CI to stand in with. Give the gate more time instead (CEL_VERIFY_GATE_TIMEOUT)."
+    return 1
+  fi
+  req="$(printf '%s' "$prot" | jq -r '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique | .[]' 2>/dev/null)" \
+    || { printf '%s' "the branch protection for $base on $slug is unreadable - nothing decided"; return 1; }
+  [ -n "$req" ] || { LAND_CI_UNPROTECTED=1; printf '%s' "$base on $slug requires no check - a branch nothing gates cannot lend its verdict to this one"; return 1; }
   cr="$(_land_gh "$wsdir" api "repos/$slug/commits/$head/check-runs" 2>/dev/null || true)"
   missing="$(printf '%s' "$cr" | jq -r --argjson want "$(printf '%s' "$req" | jq -R . | jq -sc .)" '
     [.check_runs[]? | select((.conclusion // "") == "success") | .name] as $green
