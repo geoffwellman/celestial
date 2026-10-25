@@ -3295,6 +3295,36 @@ test_reuse_refuses_an_ambiguous_session_and_a_missing_one() {
   assert_contains "$(grep '^agent start' "$STUB_LOG")" "00000000000b.jsonl"
   rm -rf "$T"
 }
+# --fresh-session: same row, runtime, model and checkout, NEW conversation -
+# for an omp row with no recorded session, which a plain resume refuses. Still
+# held to every row proof, and contradicting --session is refused.
+test_reuse_fresh_session_restarts_the_row_without_resuming() {
+  _fanout_setup; _fanout_resume_profiles
+  (cd "$T" && "$BIN" delegate widget WG-X3 "$T/spec.md" --profile cheap --because "omp row") > /dev/null
+  NOSESS=1 _fanout_retain WG-X3 wt-x3 collected
+  local before out rc=0; before="$(cat "$T/.cel/delegations.json")"; : > "$STUB_LOG"
+  out="$(_fanout_reuse WG-X3)" || rc=$?
+  _fanout_refused plain "$out" "$rc" "$before" "--fresh-session" || return 1
+  rc=0; out="$(_fanout_reuse WG-X3 --fresh-session --session x)" || rc=$?
+  _fanout_refused contradict "$out" "$rc" "$before" "contradict" || return 1
+  out="$(_fanout_reuse WG-X3 --fresh-session)" || { echo "$out"; return 1; }
+  local start; start="$(grep '^agent start' "$STUB_LOG" | head -1)"
+  assert_contains "$start" "--kind omp"
+  assert_contains "$start" "worker-model"
+  if printf '%s' "$start" | grep -q -- '--resume\|--session'; then echo "resumed a session: $start"; return 1; fi
+  assert_eq "$(jq -r length "$T/.cel/delegations.json")" 1
+  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
+  rm -rf "$T"
+}
+test_fresh_session_needs_reuse_and_a_row() {
+  _fanout_setup
+  local out rc=0
+  out="$(cd "$T" && "$BIN" delegate widget WG-X4 "$T/spec.md" --fresh-session 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$out" "needs --reuse" || { echo "accepted without --reuse: $out"; rm -rf "$T"; return 1; }
+  rc=0; out="$(cd "$T" && "$BIN" delegate widget WG-X4 "$T/spec.md" --reuse --fresh-session 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$out" "no row on the ledger" || { echo "accepted with no row: $out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 test_reuse_refuses_a_live_duplicate() {
   _fanout_resume_refusal_setup
   _fanout_pi_session WG-X2 01aaaaaa-0000-7000-8000-000000000001 >/dev/null
