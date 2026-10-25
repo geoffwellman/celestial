@@ -154,7 +154,9 @@ try:
             launch = row.get("launch") if isinstance(row.get("launch"), dict) else {}
             debt = launch.get("phase") in ("starting", "start-failed", "started", "dispatch-unconfirmed") \
                 and row["state"] not in ("abandoned", "landed", "released")
-            if row["state"] in ("running", "unconfirmed") or unknown or debt:
+            # A release that said --keep-worktree kept the checkout on
+            # purpose: no later sweep may take it (any row sharing the path).
+            if row["state"] in ("running", "unconfirmed") or unknown or debt or row.get("worktree_kept") is True:
                 print("live")
                 break
             found = True
