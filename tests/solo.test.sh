@@ -22,7 +22,11 @@ case "\$1 \$2" in
   "pr view")  echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}';;
   "pr merge") exit 0;;
   *) case "\$2" in
-       */protection) [ -n "\${STUB_UNPROTECTED:-}" ] && exit 1; echo '{"required_status_checks":{"contexts":["suite"]}}';;
+       */protection) case "\${STUB_UNPROTECTED:-}" in
+                       1) echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1;;
+                       err) echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1;;
+                     esac
+                     echo '{"required_status_checks":{"contexts":["suite"]}}';;
        *check-runs)  printf '%s' "\$STUB_CHECKS";;
        *) echo '{}';;
      esac;;
@@ -104,9 +108,9 @@ _solo_gate_repo() { # <gate-cmd> -> sets STUB_HEAD to a real commit in repos/wid
   yq -y --arg g "$1" '(.repos[] | select(.name == "widget")).gate = $g' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
 }
 test_solo_land_runs_the_repo_gate_when_the_base_gates_nothing() {
-  _solo_setup fleetbot APPROVED; _solo_gate_repo 'touch gate-ran'
+  _solo_setup fleetbot APPROVED; _solo_gate_repo "touch $T/gate-ran"
   _land widget#7 >/dev/null 2>&1 || { echo "refused a passing local gate"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
-  [ -f "$T/repos/widget/gate-ran" ] || { echo "gate did not run in the head checkout"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
+  [ -f "$T/gate-ran" ] || { echo "gate did not run"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$GH_LOG")" "Gate: local"
   unset STUB_UNPROTECTED; rm -rf "$T"
 }
@@ -118,6 +122,21 @@ test_solo_land_refuses_a_failing_repo_gate_or_no_checkout_at_the_head() {
   export STUB_HEAD=cccccccccccccccccccccccccccccccccccccccc
   out="$(_land widget#7 2>&1)" && { echo "merged with no checkout at the head"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
   assert_contains "$out" "no clean checkout"
+  unset STUB_UNPROTECTED; rm -rf "$T"
+}
+# Only GitHub's "Branch not protected" opens the local path; any other failure
+# to read protection is unknown and refuses. A gate that changes the tree
+# proves nothing about the head.
+test_solo_land_refuses_unreadable_protection_and_a_gate_that_dirties_the_tree() {
+  _solo_setup fleetbot APPROVED; _solo_gate_repo "touch $T/gate-ran"
+  export STUB_UNPROTECTED=err
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged on unreadable protection"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "ran the local gate on a 403"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
+  ! _merged || { unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _solo_setup fleetbot APPROVED; _solo_gate_repo 'touch made-by-gate'
+  out="$(_land widget#7 2>&1)" && { echo "merged after the gate dirtied the tree"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
+  assert_contains "$out" "changed files"
   unset STUB_UNPROTECTED; rm -rf "$T"
 }
 test_solo_land_refuses_someone_elses_pr_a_draft_and_humans_only() {

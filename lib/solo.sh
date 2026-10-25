@@ -191,16 +191,20 @@ _solo_local_gate() { # <wsdir> <repo> <head> <gate>
   repodir="$wsdir/repos/$repo"
   while read -r w h; do
     [ "$h" = "$head" ] || continue
-    [ -z "$(git -C "$w" status --porcelain --untracked-files=no 2>/dev/null)" ] || continue
+    # nothing modified, staged or untracked (ignored build output is fine):
+    # anything else could change the gate's outcome at "exactly this head"
+    [ -z "$(git -C "$w" status --porcelain 2>/dev/null)" ] || continue
     wt="$w"; break
   done < <(git -C "$repodir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{w=$2} /^HEAD /{print w, $2}')
-  [ -n "$wt" ] || { printf '%s' "no clean checkout of $repo is at $head - the base branch gates nothing, so the repo gate (\`$gate\`) must run at exactly that head: check it out (your branch worktree, no tracked changes) and land again"; return 1; }
+  [ -n "$wt" ] || { printf '%s' "no clean checkout of $repo is at $head - the base branch gates nothing, so the repo gate (\`$gate\`) must run at exactly that head: check it out (your branch worktree, nothing modified or untracked) and land again"; return 1; }
   [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "$wt moved off $head"; return 1; }
   c_warn "cel solo land: the base branch gates nothing - running the repo gate \`$gate\` in $wt at ${head:0:12}" >&2
   t0="$(date +%s)"
   ( cd "$wt" && timeout "${CEL_SOLO_GATE_TIMEOUT:-5400}" bash -c "$gate" ) >&2 || rc=$?
   secs=$(( $(date +%s) - t0 ))
   [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "the checkout moved off $head while the gate ran - nothing proven"; return 1; }
+  [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] \
+    || { printf '%s' "the gate changed files in $wt (git status is not clean afterwards) - what passed is not $head; make the gate leave the tree as it found it"; return 1; }
   [ "$rc" -eq 0 ] || { printf '%s' "the repo gate (\`$gate\`) did not pass at $head (exit $rc after ${secs}s) - a red gate is a finding, not a formality"; return 1; }
   printf 'Gate: local `%s` passed on %s (%ss; base branch has no required checks)' "$gate" "$head" "$secs"
 }
@@ -285,7 +289,8 @@ cmd_solo_land() { # <ref> [--workspace W]
   if afk_active; then
     local afk_ev
     afk_ev="$(jq -n --arg ws "$(ws_name "$wsdir")" --arg slug "$slug" --arg num "$num" --arg via "$approved_via" \
-      '{review:"approved", checks:"green", gate:"ci", mergeable:true, author:"fleet",
+      --arg gate "$(case "$gate_body" in "Gate: local"*) printf pass;; *) printf ci;; esac)" \
+      '{review:"approved", checks:"green", gate:$gate, mergeable:true, author:"fleet",
         workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
     afk_authorise land "$afk_ev" "$slug#$num (solo) - approved via $approved_via, checks green" >/dev/null \
       || die "cel solo land: AFK did not authorise this merge - see the refusal above. Nothing was merged."
