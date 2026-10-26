@@ -2040,7 +2040,7 @@ _run_descends() { # <pid> <ancestor> -> sets _RUN_DEPTH (hops up to it)
 # task it spawned) - so a freshly restarted alpha-orch with every flag was
 # reported missing all of them, and doctor called it stripped (CEL-87).
 _run_pane_pid() { # <pane> <cwd> <runtime>
-  local info shell d pid a0 best=""
+  local info shell d pid a0 a1 best=""
   _RUN_PID=""; _RUN_WHY=""
   info="$(herdr pane process-info --pane "$1" 2>/dev/null)" || info=""
   if [[ "$info" =~ \"shell_pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then shell="${BASH_REMATCH[1]}"; else shell=""; fi
@@ -2049,8 +2049,14 @@ _run_pane_pid() { # <pane> <cwd> <runtime>
     pid="${d##*/}"
     [ "$pid" != "$shell" ] || continue
     [ -r "$d/cmdline" ] || continue
-    a0=""; IFS= read -r -d '' a0 < "$d/cmdline" 2>/dev/null || true
+    a0=""; a1=""
+    { IFS= read -r -d '' a0; IFS= read -r -d '' a1; } < "$d/cmdline" 2>/dev/null || true
     [ "${a0##*/}" = "$3" ] || continue
+    # omp's own helpers (js-eval worker, daemon broker) are omp too, share the
+    # cwd and carry no flags. Nearest-wins only protects when the real agent
+    # also matches; when it does not, a helper alone read as "missing every
+    # flag". A helper is never the orchestrator, so it is never a candidate.
+    case "$a1" in __omp_worker*) continue ;; esac
     [ "$d/cwd" -ef "$2" ] || continue
     _run_descends "$pid" "$shell" || continue
     if [ -z "$_RUN_PID" ] || [ "$_RUN_DEPTH" -lt "$best" ] \
@@ -2151,7 +2157,7 @@ _run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
   printf '%s\n' "${argv[@]}" > "$act"
   missing="$(run_launch_diff "$exp" "$act")"
   rm -f -- "$exp" "$act"
-  if [ -n "$missing" ]; then _RUN_LAUNCH=stale; _RUN_DETAIL="$missing"; else _RUN_LAUNCH=current; fi
+  if [ -n "$missing" ]; then _RUN_LAUNCH=stale; _RUN_DETAIL="$missing; read from pid $_RUN_PID"; else _RUN_LAUNCH=current; fi
   [ -d "${vfile%/*}" ] || mkdir -p "${vfile%/*}" 2>/dev/null || return 0
   printf '%s%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" > "$vfile" 2>/dev/null || true
 }
