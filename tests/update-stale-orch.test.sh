@@ -235,7 +235,7 @@ test_cel87_missing_inbox_hook_is_named_exactly() {
   orch_stub_bare_proc 200 omp
   printf 'Name:\tomp\nPPid:\t100\n' > "$PROC/200/status"
   local out; out="$(_update_stale_orchestrators 0)"
-  assert_contains "$out" "alpha-orch (alpha) runs an older launch line (missing: inbox hook) - "
+  assert_contains "$out" "alpha-orch (alpha) runs an older launch line (missing: inbox hook; read from pid 100) - "
   orch_stub_teardown
 }
 
@@ -262,5 +262,45 @@ test_cel87_omp_helper_children_do_not_read_as_stripped() {
   printf 'Name:\tomp\nPPid:\t100\n' > "$PROC/210/status"
   printf 'Name:\tomp\nPPid:\t210\n' > "$PROC/220/status"
   assert_contains "$(run_stripped_orchestrators)" "alpha-orch	alpha	widget	w1:p1	idle	ok	"
+  orch_stub_teardown
+}
+
+# A helper is never the orchestrator. When the real omp does not match (its cwd
+# moved, or it is not under the pane's shell), a helper used to be the only
+# candidate and every flag read as missing; now the lookup fails and the
+# verdict is unknown, never stale and never current.
+test_a_helper_alone_reads_unknown_not_missing_every_flag() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  ORCH_STUB_CWD="$T/ws" orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
+  orch_stub_bare_proc 210 omp __omp_worker_js_eval_process
+  local rows out
+  rows="$(run_orchestrator_rows)"
+  assert_contains "$rows" "	unknown	"
+  out="$(_update_stale_orchestrators 0)"
+  ! printf '%s' "$out" | grep -q "missing:" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
+test_a_real_orchestrator_beside_a_helper_reads_current() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local -a argv; mapfile -t argv < <(_current_argv)
+  orch_stub_proc 100 widget-orch "$T/ws" "${argv[@]}"
+  orch_stub_bare_proc 210 omp __omp_worker_js_eval_process
+  assert_contains "$(run_orchestrator_rows)" "	current	"
+  orch_stub_teardown
+}
+
+# The stale detail names the process it read, so an alert can be traced.
+test_a_stale_launch_names_the_pid_it_read() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  orch_stub_proc 100 widget-orch "$T/ws" omp --hook "$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  orch_stub_bare_proc 210 omp __omp_worker_js_eval_process
+  local out; out="$(_update_stale_orchestrators 0)"
+  assert_contains "$out" "inbox hook"
+  assert_contains "$out" "; read from pid 100)"
   orch_stub_teardown
 }
