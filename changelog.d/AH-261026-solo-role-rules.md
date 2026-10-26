@@ -1,0 +1,2 @@
+### Changed
+- Solo role (main agent and every lane, all runtimes): never block the pane - builds, deploys, test gates, rebuilds and investigations run in the background; and do not ask the owner to approve routine actions (rebuilds, restarts, commits, pushes to the agent's own PR branch, deploys the owner asked for) - only spend, cap changes, provider secrets, discarding work, unrequested production/security changes and real product tradeoffs.
