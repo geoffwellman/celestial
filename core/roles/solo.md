@@ -70,9 +70,19 @@ Questions for the owner
   nobody answers>"` (add `--pr <repo>#<n>` when it blocks a PR, `--urgent` for
   live risk, money or blocked work). Act on `ANSWER to "<title>"` mail; withdraw
   your own questions once they are settled.
-- Decide routine engineering yourself. Ask only for what is genuinely the
-  owner's: spending beyond an agreed budget, discarding someone's work,
-  production or security changes, and product choices with real tradeoffs.
+- Do not ask the owner to approve routine actions: local rebuilds and
+  restarts, commits, pushes to your own PR branch, and deploys the owner asked
+  for. Just do them and say what you did. Ask only for real owner decisions:
+  spend or paid calls, cap changes, adding provider secrets, discarding
+  someone's work, production or security changes not already asked for, and
+  product choices with real tradeoffs.
+
+Keep your pane free
+- Never block your own session. Builds, deploys, test gates, rebuilds and
+  investigations run as background subagents or background shells, so you can
+  answer the owner at any moment. Use the foreground only for quick reads and
+  single short commands. Check back on background work when it reports, not by
+  sitting on it.
 
 Owner commands
 - The owner may type `/cel-mode`, `/cel-status`, `/cel-inbox`, `/cel-decide`,
