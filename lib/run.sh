@@ -1769,6 +1769,15 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
   # Reviewers never let pi infer a provider: aliases resolve from the current
   # gateway catalog, and explicit Claude IDs are routed through that gateway.
+  # A Codex-family id (gpt-6.1-sol, ompgw-codex/gpt-6-astra) goes through the
+  # gateway's codex provider - the same route and vetoes a worker profile
+  # with that model gets (owner request 2026-10-28: reviews on Sol/Astra).
+  if [ "$role" = reviewer ] && gateway_codex_model_p "$model"; then
+    PROFILE_MODEL="$model" PROFILE_WSDIR="$wsdir" PROFILE_VIA=gateway PROFILE_VETO=""
+    _profile_gateway_route_codex reviewer pi
+    [ -z "$PROFILE_VETO" ] || die "cel run reviewer: $PROFILE_VETO"
+    model="$PROFILE_MODEL"
+  else
   [ "$role" != reviewer ] || {
     local reviewer_model_id reviewer_models=""
     case "$model" in
@@ -1786,7 +1795,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       ompgw/claude/*) PROFILE_MODEL="ompgw-claude/${model#ompgw/claude/}" ;;
       claude/*) PROFILE_MODEL="${model#claude/}" ;;
       claude-*) PROFILE_MODEL="$model" ;;
-      *) die "cel run reviewer: model '$model' is unsupported; use sonnet, opus, or an advertised Claude model id" ;;
+      *) die "cel run reviewer: model '$model' is unsupported; use sonnet, opus, an advertised Claude model id, or a gateway Codex model (e.g. gpt-6.1-sol)" ;;
     esac
     PROFILE_WSDIR="$wsdir"
     PROFILE_VIA=gateway
@@ -1806,6 +1815,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
     fi
     model="$PROFILE_MODEL"
   }
+  fi
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
