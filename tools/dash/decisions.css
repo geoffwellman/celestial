@@ -38,3 +38,16 @@
 .nycard.gone{opacity:.7}.nygone{font:12px var(--mono);color:var(--bad);margin-bottom:4px}
 .nybulk{border:1px dashed var(--accent);border-radius:10px;padding:8px 13px;margin-bottom:8px}
 .nybulk ol{margin:4px 0 8px;padding-left:20px}
+/* the board (2026-10-28): columns grouped by the owner's pick, scrolling
+   sideways inside the card rather than squeezing each column below reading width */
+.nyby{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 10px;font:12px var(--mono);color:var(--dim)}
+.nyby .nybulks{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+.nyby .bulk{font:12px var(--mono)}
+.nyboard{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(280px,1fr);gap:12px;overflow-x:auto;padding-bottom:6px;align-items:start}
+.nycol{background:color-mix(in srgb,var(--line) 35%,transparent);border:1px solid var(--line);border-radius:10px;padding:8px;min-width:0}
+.nycol h4{display:flex;align-items:baseline;gap:6px;margin:2px 4px 8px;font:600 12px var(--mono);color:var(--dim)}
+.nycol h4 .sub{font-weight:400;opacity:.75}
+.nycol h4 .n{margin-left:auto;color:var(--ink)}
+.nyempty{font:12px var(--mono);color:var(--dim);text-align:center;padding:14px 0;opacity:.7}
+.nycard .ws{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:0 5px}
+.nyctxd>summary{cursor:pointer;font:12px var(--mono);color:var(--dim);margin:0 0 6px}

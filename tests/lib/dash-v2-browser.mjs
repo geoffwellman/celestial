@@ -170,6 +170,22 @@ const main = async () => {
             controls:['.free','.send','.why','.drop','.close'].every(function(q){return !!c.querySelector(q)})}})})()`);
     }
 
+    // the board: columns by urgency unless the owner picked another
+    // grouping, and the pick outlives a reload; every card still answers
+    if (scenario === 'board') {
+      const cols = `(function(){return Array.prototype.map.call(document.querySelectorAll('#grid #needsyou .nycol'),function(c){
+        return {col:c.dataset.col,ids:Array.prototype.map.call(c.querySelectorAll('.nycard'),function(x){return x.dataset.id})}})})()`;
+      out.byUrgency = await evaluate(cols);
+      await evaluate(`document.querySelector('#grid #needsyou .nyby button[data-by="workspace"]').click()`);
+      out.byWorkspace = await evaluate(cols);
+      out.reloaded = await load();
+      out.afterReload = await evaluate(cols);
+      out.ctxFolded = await evaluate(`(function(){var d=document.querySelector('#grid #needsyou .nycard details.nyctxd');return !!d&&!d.open})()`);
+      await evaluate(`(function(){var c=document.querySelector('#grid #needsyou .nycard[data-id="1759800000000000002"]');c.querySelector('button.opt').click();c.querySelector('button.opt').click();return 1})()`);
+      await sleep(600);
+      out.decides = posts('/api/decide').map((s) => s.body);
+    }
+
     if (scenario === 'composer') {
       await evaluate(`document.querySelector('#to .chip[data-o="bundle-orch"]').click()`);
       await evaluate(`(function(){var t=document.getElementById('task');t.value='add a gadget beta toggle';t.dispatchEvent(new Event('input'));return 1})()`);
