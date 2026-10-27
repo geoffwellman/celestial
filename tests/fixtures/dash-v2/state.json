@@ -49,6 +49,7 @@
    "workspace": "bundle",
    "asker": "bundle-orch",
    "title": "ship the gadget beta now?",
+   "context": "The gadget beta ships behind a flag; this decides whether it is on by default.",
    "urgent": false,
    "age_secs": 90000,
    "options": [
@@ -126,6 +127,7 @@
      "workspace": "bundle",
      "asker": "bundle-orch",
      "title": "ship the gadget beta now?",
+     "context": "The gadget beta ships behind a flag; this decides whether it is on by default.",
      "urgent": false,
      "age_secs": 90000,
      "options": [
