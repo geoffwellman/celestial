@@ -29,7 +29,33 @@ var NYDONE={};         // id -> 1: closed from this page, never "elsewhere"
 var NYSEEN={};         // id -> the decision as last drawn
 function nyAge(s){s=s||0;return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d'}
 function nyRec(d){var n=d.recommended;return n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
-function nyCard(d){
+// THE BOARD (owner's choice after the decisions-kanban mockup, 2026-10-28):
+// decisions sit in columns, grouped the way the owner picks - urgency by
+// default - and the pick is remembered per browser. A room keeps its plain
+// list: it holds one orchestrator's few questions. Each grouping is a column
+// list (fixed ones keep their empty columns, so "nothing urgent" is visible)
+// and the column a decision falls in.
+var NYDAY=86400;
+var NYBYS={
+  urgency:{label:'urgency',cols:[['urgent','Urgent','live risk, money or stopped work'],['blocks','Blocks work','something waits on it'],['wait','Can wait','nothing named waits on it']],
+    of:function(d){return d.urgent?'urgent':d.blocks?'blocks':'wait'}},
+  status:{label:'status',cols:[['new','Not yet confirmed','the asker has not re-checked it'],['confirmed','Confirmed still needed','the asker re-checked it']],
+    of:function(d){return d.confirmed?'confirmed':'new'}},
+  workspace:{label:'workspace',of:function(d){return d.workspace||'-'}},
+  asker:{label:'asked by',of:function(d){return d.asker||'-'}},
+  age:{label:'age',cols:[['today','Today',''],['week','This week',''],['older','Older','may be stale: answer or withdraw']],
+    of:function(d){var s=d.age_secs||0;return s<NYDAY?'today':s<7*NYDAY?'week':'older'}}};
+var NYBY=localStorage.getItem('cel-ny-board')||'urgency';
+if(!NYBYS[NYBY])NYBY='urgency';
+function nyColumns(items){
+  var def=NYBYS[NYBY],cols=(def.cols||[]).map(function(c){return {key:c[0],title:c[1],sub:c[2],items:[]}}),at={};
+  cols.forEach(function(c){at[c.key]=c});
+  items.forEach(function(d){var k=def.of(d);
+    if(!at[k]){at[k]={key:k,title:k,sub:'',items:[]};cols.push(at[k])}
+    at[k].items.push(d)});
+  return cols;
+}
+function nyCard(d,board){
   var gone=!!NYGONE[d.id];
   // CEL-113: the context is the card's body, not a link away - the owner
   // decides from it. Escaped first, then URLs inside it made clickable.
@@ -37,14 +63,16 @@ function nyCard(d){
     var t=u.replace(/[.,;:)]+$/,''),tail=u.slice(t.length);
     return '<a href="'+t+'" target="_blank" rel="noopener">'+t+'</a>'+tail}):'';
   var rec=nyRec(d);
-  return '<article class="nycard'+(d.urgent?' urgent':'')+(gone?' gone':'')+'" data-id="'+esc(d.id)+'">'+
+  return '<article class="nycard'+(d.urgent?' urgent':'')+(gone?' gone':'')+'" data-id="'+esc(d.id)+'" data-ws="'+esc(d.workspace||'')+'">'+
     (gone?'<div class="nygone">closed elsewhere \u2014 nothing here will be sent <button class="dismiss">dismiss</button></div>':'')+
     '<div class="nyhead">'+(d.urgent?'<span class="tag urgent">urgent</span>':'')+
       '<b class="nytitle">'+esc(d.title)+'</b></div>'+
-    '<div class="nymeta">'+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
+    '<div class="nymeta">'+(board?'<span class="ws">'+esc(d.workspace||'')+'</span> ':'')+esc(d.asker||'')+' \u00b7 '+nyAge(d.age_secs)+
       (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+
       (d.prs||[]).map(function(p){return ' \u00b7 '+(p.url?'<a class="pr" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.ref)+'</a>':'<span class="pr">'+esc(p.ref)+'</span>')}).join('')+'</div>'+
-    (ctx?'<div class="nyctx">'+ctx+'</div>':'')+
+    // on the board the long context folds behind "details" so a column stays
+    // scannable; the options and "other…" stay visible (CEL-118)
+    (ctx?(board?'<details class="nyctxd"><summary>details</summary><div class="nyctx">'+ctx+'</div></details>':'<div class="nyctx">'+ctx+'</div>'):'')+
     '<div class="nyopts">'+(d.options||[]).map(function(o,i){
       var r=d.recommended===i+1;
       return '<button class="opt'+(r?' rec':'')+'" data-n="'+(i+1)+'" data-label="'+esc(o.label)+'">'+
@@ -97,13 +125,12 @@ function arm(btn,label,fn){
 function nySnap(host){
   var snap={},a=document.activeElement;
   Array.prototype.forEach.call(host.querySelectorAll('.nycard'),function(card){
-    var o=card.querySelector('details.other'),fr=card.querySelector('.free'),wh=card.querySelector('.why');
-    var x={open:!!(o&&o.open),free:fr?fr.value:'',why:wh?wh.value:'',focus:null,s:0,e:0};
+    var o=card.querySelector('details.other'),fr=card.querySelector('.free'),wh=card.querySelector('.why'),cd=card.querySelector('details.nyctxd');
+    var x={open:!!(o&&o.open),ctx:!!(cd&&cd.open),free:fr?fr.value:'',why:wh?wh.value:'',focus:null,s:0,e:0};
     [['free',fr],['why',wh]].forEach(function(p){if(p[1]&&a===p[1]){x.focus=p[0];x.s=p[1].selectionStart;x.e=p[1].selectionEnd}});
-    var grp=card.closest('details.nygroup');
     x.busy=x.open||!!x.free||!!x.why||!!x.focus||Object.keys(NYARM).some(function(k){return k.indexOf(card.dataset.id+'|')===0})
       // listed in an open bulk preview is being worked on too
-      ||!!(NYBULK&&grp&&grp.dataset.ws===NYBULK&&card.querySelector('button.accept'));
+      ||!!(NYBULK&&card.dataset.ws===NYBULK&&card.querySelector('button.accept'));
     snap[card.dataset.id]=x;
   });
   return snap;
@@ -112,6 +139,7 @@ function nyRestore(host,snap){
   Array.prototype.forEach.call(host.querySelectorAll('.nycard'),function(card){
     var x=snap[card.dataset.id];if(!x)return;
     var o=card.querySelector('details.other');if(o&&x.open)o.open=true;
+    var cd=card.querySelector('details.nyctxd');if(cd&&x.ctx)cd.open=true;
     var fr=card.querySelector('.free'),wh=card.querySelector('.why');
     if(fr)fr.value=x.free;if(wh)wh.value=x.why;
     var f=x.focus==='free'?fr:x.focus==='why'?wh:null;
@@ -152,7 +180,8 @@ function renderNeedsYou(force){
     g.items.push(d)});
   groups=groups.filter(function(g){return g.items.length});
   if(NYF&&!groups.some(function(g){return g.workspace===NYF}))NYF='';
-  var sig=JSON.stringify([NYF,NYBULK,NYC,NYERR,Object.keys(NYGONE),groups.map(function(g){return g.items.map(function(d){return [d.id,d.updated||'',d.urgent]})})]);
+  var board=!host.closest('#room');
+  var sig=JSON.stringify([board,NYBY,NYF,NYBULK,NYC,NYERR,Object.keys(NYGONE),groups.map(function(g){return g.items.map(function(d){return [d.id,d.updated||'',d.urgent]})})]);
   // a refresh every few seconds must not close an open "other…" or disarm a
   // button mid-confirm: repaint only when something actually changed, and
   // then put back what the owner had open (nyRestore below)
@@ -165,15 +194,32 @@ function renderNeedsYou(force){
   var chips='<div class="nychips"><button class="chipbtn'+(NYF?'':' on')+'" data-ws="">all <b>'+total+'</b></button>'+
     groups.map(function(g){return '<button class="chipbtn'+(NYF===g.workspace?' on':'')+'" data-ws="'+esc(g.workspace)+'">'+
       esc(g.workspace)+' <b>'+g.items.filter(nyLive).length+'</b>'+(g.urgent?' <i class="u">!</i>':'')+'</button>'}).join('')+'</div>';
-  host.innerHTML='<h2>decisions <span class="n">'+total+'</span></h2>'+chips+groups.filter(function(g){return !NYF||g.workspace===NYF}).map(function(g){
+  var shown=groups.filter(function(g){return !NYF||g.workspace===NYF});
+  var head='<h2>decisions <span class="n">'+total+'</span></h2>'+chips;
+  if(board){
+    var items=[];shown.forEach(function(g){items=items.concat(g.items)});
+    var bulk=shown.map(function(g){var nrec=g.items.filter(nyLive).filter(nyRec).length;
+      return nrec?'<button class="bulk" data-ws="'+esc(g.workspace)+'">'+esc(g.workspace)+': accept all recommended ('+nrec+')</button>':''}).join('');
+    var open=NYBULK&&shown.filter(function(g){return g.workspace===NYBULK})[0];
+    host.innerHTML=head+
+      '<div class="nyby">group by '+Object.keys(NYBYS).map(function(k){
+        return '<button class="chipbtn'+(k===NYBY?' on':'')+'" data-by="'+k+'">'+esc(NYBYS[k].label)+'</button>'}).join('')+
+        (bulk?'<span class="nybulks">'+bulk+'</span>':'')+'</div>'+
+      (open?nyBulkPanel(open):'')+
+      '<div class="nyboard">'+nyColumns(items).map(function(c){var n=c.items.filter(nyLive).length;
+        return '<section class="nycol" data-col="'+esc(c.key)+'"><h4>'+esc(c.title)+(c.sub?' <span class="sub">\u00b7 '+esc(c.sub)+'</span>':'')+
+          '<span class="n">'+n+'</span></h4>'+(c.items.length?c.items.map(function(d){return nyCard(d,true)}).join(''):'<div class="nyempty">nothing here</div>')+'</section>'}).join('')+'</div>';
+    Array.prototype.forEach.call(host.querySelectorAll('.nyby button[data-by]'),function(b){
+      b.onclick=function(){NYBY=b.dataset.by;localStorage.setItem('cel-ny-board',NYBY);renderNeedsYou(true)}});
+  }else host.innerHTML=head+shown.map(function(g){
     var nrec=g.items.filter(nyLive).filter(nyRec).length;
     return '<details class="nygroup" data-ws="'+esc(g.workspace)+'"'+(NYC[g.workspace]?'':' open')+'>'+
       '<summary><span class="ws">'+esc(g.workspace)+'</span><span class="n">'+g.items.filter(nyLive).length+'</span>'+
       (nrec?'<button class="bulk" data-ws="'+esc(g.workspace)+'">accept all recommended ('+nrec+')</button>':'')+'</summary>'+
       (NYBULK===g.workspace?nyBulkPanel(g):'')+
-      g.items.map(nyCard).join('')+'</details>';
+      g.items.map(function(d){return nyCard(d,false)}).join('')+'</details>';
   }).join('');
-  Array.prototype.forEach.call(host.querySelectorAll('.chipbtn'),function(b){
+  Array.prototype.forEach.call(host.querySelectorAll('.nychips .chipbtn'),function(b){
     b.onclick=function(){NYF=b.dataset.ws;localStorage.setItem('cel-ny-filter',NYF);renderNeedsYou(true)}});
   Array.prototype.forEach.call(host.querySelectorAll('details.nygroup'),function(dt){
     // a group drawn open fires a toggle of its own; only the owner's toggles

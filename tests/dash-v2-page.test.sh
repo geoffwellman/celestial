@@ -115,6 +115,20 @@ test_dash_v2page_needs_you_shows_every_option_without_a_click() {
   _vp_down
 }
 
+test_dash_v2page_needs_you_is_a_board_grouped_by_urgency_then_the_owners_pick() {
+  _vp_boot
+  local rc=0; _vp_run board || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  # fixed columns stay, empty ones too, so "nothing urgent" is visible
+  assert_eq "$(_vpj '.byUrgency|map("\(.col)=\(.ids|join(","))")|join(" ")')" \
+    "urgent=1759800000000000001 blocks= wait=1759800000000000003,1759800000000000002"
+  assert_eq "$(_vpj '.byWorkspace|map("\(.col)=\(.ids|length)")|join(" ")')" "alpha=2 bundle=1"
+  assert_eq "$(_vpj .reloaded)" "true"
+  assert_eq "$(_vpj '.afterReload|map(.col)|join(" ")')" "alpha bundle"
+  assert_eq "$(_vpj .ctxFolded)" "true"
+  assert_eq "$(printf "%s" "$OUT" | jq -c .decides)" '[{"id":"1759800000000000002","action":"answer","option":1}]'
+  _vp_down
+}
+
 test_dash_v2page_composer_sends_one_message_act_and_any_goes_to_celestial() {
   _vp_boot
   local rc=0; _vp_run composer || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
