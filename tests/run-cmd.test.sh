@@ -245,6 +245,56 @@ test_run_pi_reviewer_preserves_explicit_gateway_model_id() {
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
   _ws_gateway_clean
 }
+# Owner request 2026-10-28: reviews on Sol/Astra. A Codex-family id goes
+# through the gateway's codex provider, never pi's own provider inference.
+_reviewer_codex_fixture() {
+  _reviewer_gateway_fixture
+  cat >"$GWT/gwstub" <<'EOS'
+#!/usr/bin/env bash
+case "$1" in
+  ready) exit 0 ;;
+  models) printf '%s\n' '{"data":[{"id":"claude-sonnet-5-5"},{"id":"gpt-6.1-sol"},{"id":"gpt-6-astra"}]}' ;;
+esac
+EOS
+  chmod +x "$GWT/gwstub"
+  printf '{}' >"$GWT/state/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
+}
+test_run_pi_reviewer_routes_a_codex_model_through_the_gateway() {
+  _reviewer_codex_fixture
+  printf 'review:\n  runtime: pi\n  model: gpt-6.1-sol\n' >> "$T/workspace.yaml"
+  local out
+  if ! out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"; then
+    printf '%s\n' "$out" >&2; _ws_gateway_clean; return 1
+  fi
+  assert_contains "$out" "--kind pi"
+  assert_contains "$out" "--model ompgw-codex/gpt-6.1-sol"
+  assert_contains "$out" "OMP_GATEWAY_TOKEN="
+  assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
+  # an explicit --model spelled with the provider says the same thing
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model ompgw-codex/gpt-6-astra --dry-run 2>&1)" \
+    || { printf '%s\n' "$out" >&2; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "--model ompgw-codex/gpt-6-astra"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_refuses_a_codex_model_the_gateway_does_not_publish() {
+  _reviewer_codex_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  local out rc=0
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model gpt-9-nova --dry-run 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "accepted an unpublished codex model: $out"; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "does not publish gpt-9-nova"
+  _ws_gateway_clean
+}
+test_run_pi_reviewer_refuses_a_codex_model_with_no_codex_account() {
+  _reviewer_codex_fixture
+  printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
+  rm -f "$GWT"/state/auth/codex-*
+  local out rc=0
+  out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --model gpt-6.1-sol --dry-run 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "accepted codex with no account: $out"; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "no usable codex account"
+  _ws_gateway_clean
+}
 test_run_pi_reviewer_refuses_sonnet_when_catalog_has_no_candidate() {
   _reviewer_gateway_fixture
   cat >"$GWT/gwstub" <<'EOS'

@@ -562,7 +562,7 @@ print the two depth views the same way. The agent pane that `cel run console
 
 ## The review loop runs itself
 
-Declare a reviewer in `workspace.yaml` with a gateway-backed Claude model:
+Declare a reviewer in `workspace.yaml` with a gateway-backed Claude or Codex model:
 
 ```yaml
 review: { runtime: pi, model: sonnet }
@@ -575,6 +575,12 @@ gateway is installed, ready, has a Claude account, and advertises the selected
 model before opening a pane. Missing gateway/model data refuses launch; pi's
 ambient provider and Anthropic login are never used. Configure a reachable
 Claude account with `cel gateway` before starting reviewers.
+
+A Codex-family id (`gpt-6.1-sol`, or spelled `ompgw-codex/gpt-6-astra`) runs
+the reviewer on the gateway's codex provider instead - `review: { runtime: pi,
+model: gpt-6.1-sol }` or `cel run reviewer ... --model gpt-6.1-sol`. The launch
+refuses when the gateway does not publish that id or holds no usable codex
+account; an id is never substituted.
 
 
 Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
