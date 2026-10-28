@@ -147,3 +147,34 @@ test_preview_sweep_stops_merged_prs_and_keeps_open_ones() {
   [ ! -f "$CEL_SERVE_STATE/preview-widget-pr7.json" ] || { echo "merged PR's server kept"; _pv_down; return 1; }
   _pv_down
 }
+
+# A partial, empty or corrupt record removes nothing but itself: a missing
+# key read as "null" or "" must never become a path relative to the caller.
+test_preview_teardown_of_a_broken_record_touches_nothing_on_disk() {
+  _pv_setup
+  mkdir -p "$CEL_SERVE_STATE/previews" "$T/cwd/null.state" "$T/cwd/.state" "$T/cwd/null"
+  local rec
+  for rec in '{}' '' 'not json' '{"repodir":"relative","worktree":"/tmp/elsewhere"}'; do
+    printf '%s' "$rec" > "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
+    (cd "$T/cwd" && _preview_teardown preview-widget-pr7 >/dev/null 2>&1)
+    [ -d "$T/cwd/null.state" ] && [ -d "$T/cwd/.state" ] && [ -d "$T/cwd/null" ] \
+      || { echo "record '$rec' removed a cwd-relative path"; _pv_down; return 1; }
+    [ ! -f "$CEL_SERVE_STATE/previews/preview-widget-pr7.json" ] || { echo "record '$rec' kept"; _pv_down; return 1; }
+  done
+  _pv_down
+}
+
+# The steward must not tear down a preview that is still starting: its record
+# exists (so a refusal can clean up) before its server does.
+test_preview_sweep_leaves_a_starting_preview_alone() {
+  _pv_setup
+  mkdir -p "$CEL_SERVE_STATE/previews" "$(_pv_wt)"
+  jq -n --arg r "$T/ws/repos/widget" --arg w "$(_pv_wt)" \
+    '{name:"preview-widget-pr7",repodir:$r,worktree:$w}' > "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
+  preview_sweep >/dev/null 2>&1
+  [ -d "$(_pv_wt)" ] || { echo "sweep removed a starting preview"; _pv_down; return 1; }
+  touch -d '-20 minutes' "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
+  preview_sweep >/dev/null 2>&1
+  [ ! -d "$(_pv_wt)" ] || { echo "sweep kept a start that died"; _pv_down; return 1; }
+  _pv_down
+}

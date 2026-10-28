@@ -85,21 +85,29 @@ _preview_wsdir() { # [workspace] -> wsdir
 }
 
 # Stop one preview and remove what it made: the server, its checkout, its
-# data and the fetched ref. Quiet about pieces already gone.
+# data and the fetched ref. Quiet about pieces already gone. A record that is
+# partial, empty or corrupt removes NOTHING on disk: the checkout path must be
+# absolute and end in .cel/previews/<name>, and the repo absolute, before any
+# rm or git runs - a missing key read as "null" or "" would otherwise be a
+# path relative to wherever the caller stands.
 _preview_teardown() { # <name>
   local name="$1" meta repodir wt
   meta="$(_preview_meta "$name")"
   [ -f "$(_serve_file "$name")" ] && { serve_stop "$name" >/dev/null 2>&1 || c_warn "cel preview: could not stop $name"; }
-  if [ -f "$meta" ]; then
-    repodir="$(jq -r '.repodir' "$meta")"; wt="$(jq -r '.worktree' "$meta")"
+  [ -f "$meta" ] || return 0
+  repodir="$(jq -r '.repodir // empty' "$meta" 2>/dev/null || true)"
+  wt="$(jq -r '.worktree // empty' "$meta" 2>/dev/null || true)"
+  if [[ "$repodir" == /* ]] && [[ "$wt" == /*/.cel/previews/"$name" ]]; then
     if [ -d "$wt" ]; then
       git -C "$repodir" worktree remove --force "$wt" 2>/dev/null || rm -rf -- "$wt"
       git -C "$repodir" worktree prune 2>/dev/null || true
     fi
-    rm -rf -- "${wt}.state"
+    rm -rf -- "$wt.state"
     git -C "$repodir" update-ref -d "refs/cel/preview/$name" 2>/dev/null || true
-    rm -f -- "$meta"
+  else
+    c_warn "cel preview: $name's record names no checkout of its own - removed the record only"
   fi
+  rm -f -- "$meta"
 }
 
 preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
@@ -230,7 +238,11 @@ preview_sweep() {
   local f name slug pr state
   for f in "$(_preview_state)"/*.json; do
     [ -f "$f" ] || continue
-    name="$(jq -r .name "$f")"
+    name="$(jq -r '.name // empty' "$f" 2>/dev/null || true)"
+    [ -n "$name" ] || continue
+    # A record without .head is a `cel preview` still starting (its server
+    # is not recorded yet): left alone for 10 minutes, then treated as dead.
+    if ! jq -e '.head' "$f" >/dev/null 2>&1 && [ -n "$(find "$f" -mmin -10 2>/dev/null)" ]; then continue; fi
     if [ ! -f "$(_serve_file "$name")" ]; then _preview_teardown "$name"; continue; fi
     slug="$(jq -r .slug "$f")"; pr="$(jq -r .pr "$f")"
     state="$(_preview_gh pr view "$pr" --repo "$slug" --json state --jq .state 2>/dev/null || true)"

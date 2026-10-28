@@ -1016,8 +1016,10 @@ preview:
 
 Every step runs under `env -i` - provider keys, gateway tokens, `GH_TOKEN`
 and the workspace's own env never reach it - and a PR that tracks a `.env` or
-`.dev.vars` file is refused. That is environment containment, not network
-isolation, so a cmd that would otherwise call a paid API says `--mock`. Each
+`.dev.vars` file is refused. That is environment containment only - not
+network isolation, and `HOME` is the real one, so files such as `~/.npmrc` or
+a CLI's saved login stay readable - so a cmd that would otherwise call a paid
+API says `--mock`. Each
 preview is a `cel serve` server (8h TTL, `--ttl` to change): `cel preview
 --list` shows them, `--stop` ends one, the same head is reused rather than
 started twice, a new head replaces the old preview, and the steward stops a
