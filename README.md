@@ -998,6 +998,33 @@ so trying a PR no longer means parking the one shared checkout on it. `--stop`
 ends the preview, `release` ends it for you, and `cel-fanout status` shows the
 port it is on.
 
+`cel preview <repo>#<pr>` does the same for any open pull request, from any
+agent or shell, without a ledger row: it checks out the PR head under
+`.cel/previews/`, runs the block's optional `setup:` (install) and `seed:`
+(fill `{data}`, the preview's own data directory) and then `cmd:`, and prints
+the url - the tailnet address and, when the app listens there, a
+`localhost:<port>` forward for clients that come in over ssh (Moshi).
+
+```yaml
+preview:
+  setup: "bun install --frozen-lockfile"
+  seed:  "cp -a ~/widget-data {data}"
+  cmd:   "bun run dev -- --mock --host {host} --port {port} --data {data}"
+  env:   { MODE: mock }
+  url:   "http://{host}:{port}"
+```
+
+Every step runs under `env -i` - provider keys, gateway tokens, `GH_TOKEN`
+and the workspace's own env never reach it - and a PR that tracks a `.env` or
+`.dev.vars` file is refused. That is environment containment only - not
+network isolation, and `HOME` is the real one, so files such as `~/.npmrc` or
+a CLI's saved login stay readable - so a cmd that would otherwise call a paid
+API says `--mock`. Each
+preview is a `cel serve` server (8h TTL, `--ttl` to change): `cel preview
+--list` shows them, `--stop` ends one, the same head is reused rather than
+started twice, a new head replaces the old preview, and the steward stops a
+preview - and removes its checkout - once its PR closes or merges.
+
 The console runs one background watch of its own: `cel inbox watch --for root
 --all-workspaces`, so a decision raised in any workspace raises a desktop
 notification rather than waiting for someone to look. Like every watch it is
