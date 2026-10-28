@@ -156,10 +156,15 @@ cel - the celestial plane
   cel gateway login <provider>  sign another subscription in (claude or codex;
                                 --no-browser for a headless box)
   cel publish <file> [name]     host an HTML doc on this box; prints its URL
+                                (--public [--include page.html]...: a share
+                                link carrying the page's own assets)
                                 --public: internet-reachable tier, own root
   cel pages [--public]          serve published docs (tailnet 7780; public 7781)
                                 --ensure: start it only if it is not already up
   cel pages tunnel              expose the public tier without tailscale
+  cel pages bundle <doc> [--include page.html]...
+                                add a live public share's screenshots/assets
+                                (and named pages) to it - same link and expiry
                                 (cloudflared quick tunnel needs no account)
   cel dash [--port n] [--ensure|--restart]  THE dashboard, one for the box:
                                 every workspace's worktrees, PRs, services,
@@ -296,7 +301,11 @@ case "${1:-help}" in
   afk)      shift; . "$CEL_ROOT/lib/afk.sh";     cmd_afk "$@";;
   dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;
   pages)    shift; . "$CEL_ROOT/lib/pages.sh"
-            if [ "${1:-}" = "tunnel" ]; then shift; cmd_pages_tunnel "$@"; else cmd_pages "$@"; fi;;
+            case "${1:-}" in
+              tunnel) shift; cmd_pages_tunnel "$@" ;;
+              bundle) shift; cmd_pages_bundle "$@" ;;
+              *) cmd_pages "$@" ;;
+            esac;;
   publish)  shift; . "$CEL_ROOT/lib/pages.sh";   cmd_publish "$@";;
   spike)    shift; . "$CEL_ROOT/lib/spike.sh";   cmd_spike "$@";;
   build-slot) shift; . "$CEL_ROOT/lib/boxguard.sh"; cmd_build_slot "$@";;
