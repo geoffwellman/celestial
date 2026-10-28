@@ -248,6 +248,10 @@ cel - the celestial plane
   cel serve stop <name>        stop a ledgered server
   cel serve adopt [<unit|pid> --owner ... --workspace ...]
                                 list unledgered servers; explicit adoption only
+  cel preview <repo>#<pr> [--port N] [--ttl 8h] [--no-wait]
+                                run an open PR's head from the repo's preview:
+                                block with no provider keys; prints its urls
+  cel preview <repo>#<pr> --stop | --list [--json]
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
 EOS
@@ -279,6 +283,7 @@ case "${1:-help}" in
   decide)   shift; . "$CEL_ROOT/lib/decide.sh";  cmd_decide "$@";;
   services) shift; . "$CEL_ROOT/lib/services.sh"; cmd_services "$@";;
   serve)    shift; . "$CEL_ROOT/lib/serve.sh"; cmd_serve "$@";;
+  preview)  shift; . "$CEL_ROOT/lib/preview.sh"; cmd_preview "$@";;
   effects)  shift; . "$CEL_ROOT/lib/effects.sh"; cmd_effects "$@";;
   version|--version|-v)
             . "$CEL_ROOT/lib/version.sh"

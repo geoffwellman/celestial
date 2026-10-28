@@ -1923,6 +1923,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   run_sessions_note_roster "$agents_json"
   _steward_stale_orchestrators
   serve_sweep
+  # previews of PRs that closed or merged, and checkouts of reaped previews
+  ( . "${BASH_SOURCE[0]%/*}/preview.sh"; preview_sweep ) || true
   _serve_unledgered_report
   # CEL-90: keep the fleet cache warm so the first console read after an idle
   # spell serves a recent board. One detached refill, only when stale; the

@@ -1,0 +1,2 @@
+### Added
+- `cel preview <repo>#<pr>` runs an open PR head on this box from the repo's `preview:` block (new optional `setup:` and `seed:` steps, `{host}` and `{data}` placeholders) under `env -i`, so no provider key, gateway token or workspace env reaches it; a PR that tracks `.env`/`.dev.vars` is refused. Prints the tailnet url and a localhost forward for ssh clients. Each preview is a `cel serve` server; `--stop`, `--list`, same-head reuse, and the steward stops previews of closed or merged PRs and removes their checkouts.
