@@ -223,6 +223,17 @@ test_pages_share_bundles_the_pages_assets_and_serves_only_them() {
   _pages_stop
 }
 
+# A page reached through an embed (iframe src, <link href>) or a page-like
+# extension is still a page: it goes only when named.
+test_pages_bundle_never_takes_an_unnamed_page_however_it_is_referenced() {
+  local d; d="$(mktemp -d)"
+  printf '<iframe src="other.html"></iframe><link href="private.html"><embed src="x.xhtml"><a href="y.shtml">y</a><img src="ok.png">' > "$d/p.html"
+  local n; for n in other.html private.html x.xhtml y.shtml ok.png; do printf 'x' > "$d/$n"; done
+  assert_eq "$(node "$CEL_ROOT/tools/pages/bundle.mjs" plan "$d" p.html | jq -c .assets)" '["ok.png"]'
+  assert_eq "$(node "$CEL_ROOT/tools/pages/bundle.mjs" plan "$d" p.html other.html | jq -c .assets)" '["ok.png","other.html"]'
+  rm -rf "$d"
+}
+
 test_pages_share_includes_a_named_page_and_its_assets_one_level() {
   _pages_boot 1 || return 1
   _pages_bundle_fixture
@@ -247,6 +258,9 @@ test_pages_bundle_extends_a_live_share_without_a_new_link() {
   printf '<img src="shot.png"><a href="m.html">m</a>' > "$PROOT/page.html"; printf 'PNG' > "$PROOT/shot.png"
   printf '<p>mock</p>' > "$PROOT/m.html"
   mkdir -p "$PROOT/pub/$tok"; cp "$PROOT/page.html" "$PROOT/pub/$tok/"
+  # a later private revision references something else: the share serves the
+  # snapshot, so the snapshot's references are what get bundled
+  printf '<img src="later.png">' > "$PROOT/page.html"; printf 'L' > "$PROOT/later.png"
   printf '{"doc":"page.html","created":"2026-10-28T04:14:59Z","expires":"2099-01-01T00:00:00Z"}' > "$PROOT/pub/$tok/.share.json"
   local out
   out="$(CEL_PAGES_ROOT="$PROOT" CEL_PAGES_PUBLIC_ROOT="$PROOT/pub" CEL_PAGES_PUBLIC_URL=https://pub.example \

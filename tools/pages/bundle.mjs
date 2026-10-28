@@ -21,7 +21,9 @@ import { lstatSync, readFileSync, copyFileSync, writeFileSync, readdirSync, exis
 import { join, extname } from 'node:path';
 
 export const TOKEN_RE = /^[a-f0-9]{16,48}$/;
-const HTML = new Set(['.html', '.htm']);
+// every page-like type: a page goes only when named, whatever the extension
+const HTML = new Set(['.html', '.htm', '.xhtml', '.shtml', '.mhtml', '.mht']);
+const isPage = (n) => HTML.has(extname(n).toLowerCase());
 
 // a reference -> a flat name in the same directory, or null
 export const localName = (ref) => {
@@ -51,26 +53,28 @@ export const references = (html) => {
 
 const regular = (root, n) => { try { return lstatSync(join(root, n)).isFile(); } catch { return false; } };
 
-// -> {assets:[...], missing:[...]}; throws on a bad include
-export const bundleFor = (root, doc, include = []) => {
+// -> {assets:[...], missing:[...]}; throws on a bad include. `docFile` is the
+// copy of the page to read references from (a live share's snapshot), when it
+// is not root/doc.
+export const bundleFor = (root, doc, include = [], docFile = null) => {
   const inc = [...new Set(include)];
   for (const n of inc) {
-    if (!safeName(n) || !HTML.has(extname(n).toLowerCase())) throw new Error(`include '${n}' is not a page in the same directory`);
+    if (!safeName(n) || !isPage(n)) throw new Error(`include '${n}' is not a page in the same directory`);
     if (!regular(root, n)) throw new Error(`include '${n}' is not a published page`);
   }
   const out = new Set(); const missing = new Set();
   const take = (n) => { if (n === doc) return; if (regular(root, n)) out.add(n); else missing.add(n); };
-  const walk = (page, followPages) => {
+  // embedded or linked, a PAGE goes only when named; any other file goes
+  const walk = (page, followPages, file) => {
     let html = '';
-    try { html = readFileSync(join(root, page), 'utf8'); } catch { return; }
+    try { html = readFileSync(file || join(root, page), 'utf8'); } catch { return; }
     const { embeds, links } = references(html);
-    embeds.forEach(take);
-    for (const l of links) {
-      if (!HTML.has(extname(l).toLowerCase())) take(l);
-      else if (followPages && inc.includes(l)) { take(l); walk(l, false); }
+    for (const l of [...embeds, ...links]) {
+      if (!isPage(l)) take(l);
+      else if (followPages && inc.includes(l) && !out.has(l)) { take(l); walk(l, false); }
     }
   };
-  if (HTML.has(extname(doc).toLowerCase())) walk(doc, true);
+  if (isPage(doc)) walk(doc, true, docFile);
   // an include the page does not link is still the owner's explicit choice
   for (const n of inc) if (!out.has(n) && n !== doc) { out.add(n); walk(n, false); }
   return { assets: [...out].sort(), missing: [...missing].sort() };
@@ -119,12 +123,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       }) : [];
       if (live.length !== 1) throw new Error(live.length ? `${doc} has ${live.length} live shares` : `${doc} has no live share`);
       const dir = join(pub, live[0]);
-      const { assets, missing } = bundleFor(root, doc, rest);
-      copyBundle(root, dir, assets);
+      // the references come from what the share SERVES - its snapshot of the
+      // page - not from a later revision of the private copy
+      const { assets, missing } = bundleFor(root, doc, rest, join(dir, doc));
       const mf = join(dir, '.share.json');
       const m = JSON.parse(readFileSync(mf, 'utf8'));
-      writeFileSync(mf, JSON.stringify({ ...m, assets }));
+      // copied files are unservable until the manifest lists them; audited
+      // before that, so nothing becomes public unrecorded
+      copyBundle(root, dir, assets);
       audit(root, { doc, action: 'bundle', token: live[0], assets });
+      writeFileSync(mf, JSON.stringify({ ...m, assets }));
       console.log(JSON.stringify({ token: live[0], expires: m.expires, assets, missing }));
     } else {
       throw new Error('usage: bundle.mjs plan|copy|extend ...');
