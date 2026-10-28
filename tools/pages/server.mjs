@@ -10,11 +10,12 @@
 // and same-origin keeps select-to-comment working from the parent frame.
 // The public tier serves documents raw: the internet gets no controls.
 import { createServer } from 'node:http';
-import { readFileSync, readdirSync, statSync, existsSync, appendFileSync, mkdirSync, copyFileSync, unlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync, appendFileSync, mkdirSync, copyFileSync, unlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { join, normalize, extname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { controlSecurity, internalError } from '../http-security.mjs';
+import { bundleFor, copyBundle } from './bundle.mjs';
 
 const ROOT = process.env.CEL_PAGES_ROOT;
 const PORT = Number(process.env.CEL_PAGES_PORT || 7780);
@@ -39,7 +40,8 @@ const MIME = {
 };
 
 // A public share is a TOKEN DIRECTORY under the public root:
-//   <pubroot>/<24-hex>/<doc>   + .share.json {doc, created, expires}
+//   <pubroot>/<24-hex>/<doc> [+ its bundle]   + .share.json {doc, assets, created, expires}
+// `assets` is the exact list of other files the token may serve (bundle.mjs).
 // Unguessable, because the public tier is reachable by anyone with the link
 // and flat document names are trivially enumerable. Expiry is enforced by the
 // public server on every request and swept by the steward.
@@ -558,14 +560,26 @@ const promote = async (req, res, makePublic) => {
   if (!existsSync(join(ROOT, name))) { res.writeHead(404).end('no such document'); return; }
   const ttlH = parsed.ttlHours === 0 ? 0 : Number(parsed.ttlHours || SHARE_TTL_DEFAULT_H);
   if (!Number.isFinite(ttlH) || ttlH < 0 || ttlH > 24 * 365) { res.writeHead(400).end('bad ttlHours'); return; }
+  // the page's own screenshots and styles go with it; another page only when
+  // the caller names it (bundle.mjs)
+  let bundle;
+  try { bundle = bundleFor(ROOT, name, Array.isArray(parsed.include) ? parsed.include.map(String) : []); }
+  catch (e) { res.writeHead(400).end(e.message); return; }
   const token = randomBytes(12).toString('hex');
   const expires = ttlH === 0 ? null : new Date(Date.now() + ttlH * 3600e3).toISOString();
   const dir = join(PUBROOT, token);
-  mkdirSync(dir, { recursive: true });
-  copyFileSync(join(ROOT, name), join(dir, name));
-  writeFileSync(join(dir, '.share.json'),
-    JSON.stringify({ doc: name, created: new Date().toISOString(), expires }));
-  try { audit({ doc: name, action: 'public', token, expires, replaced: dropped.map((s2) => s2.token) }); }
+  try {
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(join(ROOT, name), join(dir, name));
+    copyBundle(ROOT, dir, bundle.assets);
+    writeFileSync(join(dir, '.share.json'),
+      JSON.stringify({ doc: name, assets: bundle.assets, created: new Date().toISOString(), expires }));
+  } catch (e) {
+    // never leave a half-written share behind (and the old link stays live)
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
+    res.writeHead(500).end('could not write the share - nothing was published'); return;
+  }
+  try { audit({ doc: name, action: 'public', token, expires, assets: bundle.assets, replaced: dropped.map((s2) => s2.token) }); }
   catch (e) {
     // unaudited public exposure is worse than a failed click
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
@@ -573,7 +587,7 @@ const promote = async (req, res, makePublic) => {
   }
   drop();
   res.writeHead(200, { 'content-type': 'application/json' })
-    .end(JSON.stringify({ public: `${PUBURL}/${token}/${encodeURIComponent(name)}`, expires }));
+    .end(JSON.stringify({ public: `${PUBURL}/${token}/${encodeURIComponent(name)}`, expires, assets: bundle.assets, missing: bundle.missing }));
 };
 
 const server = createServer(async (req, res) => {
@@ -614,9 +628,10 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
       return;
     }
-    // PUBLIC TIER: the only readable shape is /<token>/<doc>, and only while
-    // the share is live. Flat names are refused outright - a guessable name
-    // on an internet-reachable host is the hole tokens exist to close.
+    // PUBLIC TIER: the only readable shape is /<token>/<name>, and only while
+    // the share is live and its manifest names <name> - the document or one
+    // of its bundled assets. Flat names are refused outright - a guessable
+    // name on an internet-reachable host is the hole tokens exist to close.
     if (!FEEDBACK) {
       const parts = normalize(path).replace(/^[/\\]+/, '').split('/');
       if (parts.length !== 2 || !TOKEN_RE.test(parts[0])) { res.writeHead(404).end('not found'); return; }
@@ -624,14 +639,18 @@ const server = createServer(async (req, res) => {
       if (!doc || doc.startsWith('.')) { res.writeHead(404).end('not found'); return; }
       let manifest = null;
       try { manifest = JSON.parse(readFileSync(join(ROOT, token, '.share.json'), 'utf8')); } catch { /* no manifest */ }
-      if (!manifest || manifest.doc !== doc) { res.writeHead(404).end('not found'); return; }
+      if (!manifest || !(manifest.doc === doc || (Array.isArray(manifest.assets) && manifest.assets.includes(doc)))) {
+        res.writeHead(404).end('not found'); return;
+      }
       if (shareExpired(manifest)) {
         res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8' })
           .end('this share link has expired');
         return;
       }
       const pf = join(ROOT, token, doc);
-      if (!existsSync(pf)) { res.writeHead(404).end('not found'); return; }
+      let st = null;
+      try { st = lstatSync(pf); } catch { /* absent */ }
+      if (!st || !st.isFile()) { res.writeHead(404).end('not found'); return; }
       const body = req.method === 'HEAD' ? undefined : readFileSync(pf);
       res.writeHead(200, {
         'content-type': MIME[extname(doc).toLowerCase()] || 'application/octet-stream',

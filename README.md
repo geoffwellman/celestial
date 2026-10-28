@@ -811,7 +811,13 @@ both failing the view still renders what the box itself knows.
 - **`cel publish <file>`** — self-hosted pages server (tailnet-private by
   default, per-document promotion to a public tier). Published pages carry a
   feedback widget that routes straight back to the agent that published them —
-  select text to comment on the exact passage.
+  select text to comment on the exact passage. A public share carries the
+  page's own screenshots, stylesheets and linked non-page files (same
+  directory only, copied at share time, never symlinks); another page it
+  links goes too only when named (`cel publish --public --include m.html`, or
+  `"include"` in the promote call). The token serves exactly that list.
+  `cel pages bundle <doc> [--include m.html]` adds them to a live share
+  without changing its link or expiry.
 - **`cel gc`** / **`cel steward`** — the cleanup and liveness machinery, also
   runnable by hand. `cel gc --orphans` reaps what the plane started and nobody
   owns any more: inbox watchers whose console exited, test fixtures whose

@@ -171,3 +171,104 @@ test_index_lists_documents_never_media() {
   done
   _pages_stop
 }
+
+# A SHARED PAGE CARRIES ITS OWN ASSETS, AND NOTHING ELSE. Its screenshots and
+# a linked full-size image are bundled; a linked page is not (unless named);
+# the public token serves exactly the manifest's list - never another private
+# doc, a dotfile, a traversal, a symlink, or another token's asset.
+_pages_bundle_fixture() {
+  printf 'PNG-A' > "$PROOT/shot.png"; printf 'PNG-FULL' > "$PROOT/full.png"; printf 'PNG-M' > "$PROOT/m.png"
+  printf '<html><img src="m.png"><a href="deeper.html">x</a></html>' > "$PROOT/m.html"
+  printf 'deep' > "$PROOT/deeper.html"; printf 'secret' > "$PROOT/private.html"
+  ln -s "$PROOT/private.html" "$PROOT/link.png"
+  printf '<html><img src="./shot.png"><img src="link.png"><a href="full.png">big</a><a href="./m.html">mock</a><a href="https://x.example/a.png">ext</a><img src="../etc/x.png"></html>' > "$PROOT/page.html"
+}
+_pages_promote() { # <json body> -> response
+  curl -s -X POST "http://127.0.0.1:$PT/api/promote" -H 'content-type: application/json' \
+    -H "origin: http://127.0.0.1:$PT" -H "x-cel-csrf: $PNONCE" -d "$1"
+}
+test_pages_share_bundles_the_pages_assets_and_serves_only_them() {
+  _pages_boot 1 || return 1
+  _pages_bundle_fixture
+  local out token
+  out="$(_pages_promote '{"doc":"page.html"}')"
+  token="$(printf '%s' "$out" | jq -r '.public' | sed -E 's#.*/([a-f0-9]{16,})/.*#\1#')"
+  assert_eq "$(jq -c .assets <<<"$out")" '["full.png","shot.png"]'
+  assert_eq "$(jq -c .assets "$PROOT/pub/$token/.share.json")" '["full.png","shot.png"]'
+  # the public tier, on the share root
+  local PP=$(( PT + 500 ))
+  CEL_PAGES_ROOT="$PROOT/pub" CEL_PAGES_PORT="$PP" CEL_PAGES_HOST=127.0.0.1 CEL_PAGES_FEEDBACK=0 \
+    node "$CEL_ROOT/tools/pages/server.mjs" >"$PROOT/publog" 2>&1 &
+  local ppid=$! i
+  for i in $(seq 1 80); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$PP/" && break; sleep 0.25; done
+  local code; code() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PP/$1"; }
+  assert_eq "$(code "$token/page.html")" 200
+  assert_eq "$(curl -s "http://127.0.0.1:$PP/$token/shot.png")" "PNG-A"
+  assert_eq "$(code "$token/full.png")" 200
+  assert_eq "$(code "$token/m.html")" 404          # a linked page is not intended by default
+  assert_eq "$(code "$token/private.html")" 404    # an unrelated private doc
+  assert_eq "$(code "$token/link.png")" 404        # a symlink is never bundled
+  assert_eq "$(code "$token/.share.json")" 404
+  assert_eq "$(code "$token/%2e%2e/private.html")" 404
+  assert_eq "$(code "$token/%2e%2e/%2e%2e/etc/passwd")" 404
+  assert_eq "$(code "$token/..%2fprivate.html")" 404
+  # cross-token: another share's manifest does not unlock this one's files
+  local other=cccccccccccccccccccccccc
+  mkdir -p "$PROOT/pub/$other"; printf '{"doc":"x.html","assets":["shot.png"]}' > "$PROOT/pub/$other/.share.json"
+  assert_eq "$(code "$other/shot.png")" 404
+  # a symlink planted in the token dir under a listed name is refused
+  rm -f "$PROOT/pub/$token/full.png"; ln -s "$PROOT/private.html" "$PROOT/pub/$token/full.png"
+  assert_eq "$(code "$token/full.png")" 404
+  kill "$ppid" 2>/dev/null
+  _pages_stop
+}
+
+# A page reached through an embed (iframe src, <link href>) or a page-like
+# extension is still a page: it goes only when named.
+test_pages_bundle_never_takes_an_unnamed_page_however_it_is_referenced() {
+  local d; d="$(mktemp -d)"
+  printf '<iframe src="other.html"></iframe><link href="private.html"><embed src="x.xhtml"><a href="y.shtml">y</a><img src="ok.png">' > "$d/p.html"
+  local n; for n in other.html private.html x.xhtml y.shtml ok.png; do printf 'x' > "$d/$n"; done
+  assert_eq "$(node "$CEL_ROOT/tools/pages/bundle.mjs" plan "$d" p.html | jq -c .assets)" '["ok.png"]'
+  assert_eq "$(node "$CEL_ROOT/tools/pages/bundle.mjs" plan "$d" p.html other.html | jq -c .assets)" '["ok.png","other.html"]'
+  rm -rf "$d"
+}
+
+test_pages_share_includes_a_named_page_and_its_assets_one_level() {
+  _pages_boot 1 || return 1
+  _pages_bundle_fixture
+  local out
+  out="$(_pages_promote '{"doc":"page.html","include":["m.html"]}')"
+  assert_eq "$(jq -c .assets <<<"$out")" '["full.png","m.html","m.png","shot.png"]'
+  # an include that is not a published page in the same directory is refused, nothing written
+  local before; before="$(ls "$PROOT/pub" | wc -l)"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PT/api/promote" -H 'content-type: application/json' \
+    -H "origin: http://127.0.0.1:$PT" -H "x-cel-csrf: $PNONCE" -d '{"doc":"page.html","include":["../x.html"]}')" 400
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PT/api/promote" -H 'content-type: application/json' \
+    -H "origin: http://127.0.0.1:$PT" -H "x-cel-csrf: $PNONCE" -d '{"doc":"page.html","include":["nope.html"]}')" 400
+  assert_eq "$(ls "$PROOT/pub" | wc -l)" "$before"
+  _pages_stop
+}
+
+# An existing share gets its assets IN PLACE: the link people already have
+# keeps working, with the same expiry.
+test_pages_bundle_extends_a_live_share_without_a_new_link() {
+  PROOT="$(mktemp -d)"; mkdir -p "$PROOT/pub"
+  local tok=dddddddddddddddddddddddd
+  printf '<img src="shot.png"><a href="m.html">m</a>' > "$PROOT/page.html"; printf 'PNG' > "$PROOT/shot.png"
+  printf '<p>mock</p>' > "$PROOT/m.html"
+  mkdir -p "$PROOT/pub/$tok"; cp "$PROOT/page.html" "$PROOT/pub/$tok/"
+  # a later private revision references something else: the share serves the
+  # snapshot, so the snapshot's references are what get bundled
+  printf '<img src="later.png">' > "$PROOT/page.html"; printf 'L' > "$PROOT/later.png"
+  printf '{"doc":"page.html","created":"2026-10-28T04:14:59Z","expires":"2099-01-01T00:00:00Z"}' > "$PROOT/pub/$tok/.share.json"
+  local out
+  out="$(CEL_PAGES_ROOT="$PROOT" CEL_PAGES_PUBLIC_ROOT="$PROOT/pub" CEL_PAGES_PUBLIC_URL=https://pub.example \
+    bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/pages.sh"; cmd_pages_bundle page.html --include m.html' 2>/dev/null)"
+  assert_eq "$out" "https://pub.example/$tok/page.html"
+  assert_eq "$(ls -d "$PROOT"/pub/*/ | wc -l)" 1
+  assert_eq "$(jq -c '[.assets,.expires,.created]' "$PROOT/pub/$tok/.share.json")" '[["m.html","shot.png"],"2099-01-01T00:00:00Z","2026-10-28T04:14:59Z"]'
+  [ -f "$PROOT/pub/$tok/shot.png" ] && [ -f "$PROOT/pub/$tok/m.html" ] || { echo "assets not copied"; rm -rf "$PROOT"; return 1; }
+  assert_contains "$(cat "$PROOT/.meta/promotions.log")" '"action":"bundle"'
+  rm -rf "$PROOT"
+}

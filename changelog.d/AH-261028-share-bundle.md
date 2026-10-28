@@ -1,0 +1,2 @@
+### Fixed
+- Public page shares carry their page's own assets: screenshots, stylesheets and linked non-page files in the same directory are copied into the share and listed in its manifest, and the public tier serves exactly that list (still never another private doc, a dotfile, a traversal, a symlink or another token's file). Linked pages go only when named (`cel publish --public --include`, promote `include`). `cel pages bundle <doc>` adds a live share's assets in place - same link, same expiry.

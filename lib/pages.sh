@@ -371,10 +371,15 @@ cmd_pages_tunnel() { # [--provider cloudflared|ngrok] [--port n]
   rm -f "$urlf"
 }
 
-cmd_publish() { # [--public] <file> [name]
+cmd_publish() { # [--public [--include page.html]...] <file> [name]
   local public=0
+  local -a include=()
   [ "${1:-}" = "--public" ] && { public=1; shift; }
-  [ $# -ge 1 ] || die "cel publish: usage: cel publish [--public] <file> [name]"
+  while [ "${1:-}" = --include ]; do
+    [ "$public" -eq 1 ] || die "cel publish: --include goes with --public"
+    include+=("${2:-}"); shift 2
+  done
+  [ $# -ge 1 ] || die "cel publish: usage: cel publish [--public [--include page.html]...] <file> [name]"
   local file="$1" name="${2:-}"
   [ -f "$file" ] || die "cel publish: no such file: $file"
   local base ext
@@ -401,6 +406,19 @@ cmd_publish() { # [--public] <file> [name]
       "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$expires" > "$root/$token/.share.json"
     root="$root/$token"
     url="$(_pages_public_url)/$token/$name"
+    # the page's own screenshots and styles (and any --include pages) go into
+    # the share too, resolved next to the file being published
+    if [ "$ext" = html ] || [ "$ext" = htm ]; then
+      local srcdir; srcdir="$(cd "$(dirname "$file")" && pwd)"
+      local planned
+      if ! planned="$(node "$CEL_ROOT/tools/pages/bundle.mjs" plan "$srcdir" "$(basename "$file")" "${include[@]}")"; then
+        rm -rf -- "$root"; die "cel publish: share not created"
+      fi
+      local a
+      while IFS= read -r a; do [ -n "$a" ] && cp -- "$srcdir/$a" "$root/$a"; done < <(jq -r '.assets[]' <<<"$planned")
+      jq -c --argjson p "$planned" '. + {assets: $p.assets}' "$root/.share.json" > "$root/.share.json.tmp" && mv "$root/.share.json.tmp" "$root/.share.json"
+      [ "$(jq '.missing|length' <<<"$planned")" = 0 ] || c_warn "not found next to the page, so not shared: $(jq -r '.missing|join(", ")' <<<"$planned")" >&2
+    fi
   else
     root="$(_pages_root)"
     # ONE FLAT NAMESPACE, BUT NOT A SHARED BLAST RADIUS. Republishing a name
@@ -465,4 +483,26 @@ cmd_publish() { # [--public] <file> [name]
   printf '%s\n' "$url"
   # eval-proof second line for humans; the URL alone stays machine-readable
   c_ok "published as $name$([ "$public" -eq 1 ] && printf ' [PUBLIC - the whole internet]') (same name republish updates it)" >&2
+}
+
+# A LIVE share gets its page's assets without a new link (a re-share rotates
+# the token and kills the URL people already have). Same token, created and
+# expiry; the bundle is computed from the current private files and audited.
+cmd_pages_bundle() { # <doc> [--include page.html]...
+  local doc="${1:-}"; [ -n "$doc" ] || die "usage: cel pages bundle <doc> [--include page.html]..."
+  shift
+  local -a include=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --include) include+=("${2:-}"); shift 2 ;;
+      *) die "cel pages bundle: unknown argument '$1' (want --include <page.html>)" ;;
+    esac
+  done
+  have node || die "cel pages bundle: node is not on PATH"
+  local out
+  out="$(node "$CEL_ROOT/tools/pages/bundle.mjs" extend "$(_pages_root)" "$(_pages_public_root)" "$doc" "${include[@]}")" || exit 1
+  local token; token="$(jq -r .token <<<"$out")"
+  printf '%s\n' "$(_pages_public_url)/$token/$doc"
+  c_ok "share of $doc now carries $(jq -r '.assets|length' <<<"$out") file(s): $(jq -r '.assets|join(", ")' <<<"$out") - same link, expires $(jq -r '.expires // "never"' <<<"$out")" >&2
+  [ "$(jq '.missing|length' <<<"$out")" = 0 ] || c_warn "referenced but not published, so not shared: $(jq -r '.missing|join(", ")' <<<"$out")" >&2
 }
