@@ -702,6 +702,42 @@ _gc_reviewer_agents() { # the herdr roster this reviewer's pane appears in
     '{result:{agents:[{pane_id:"w1:p3",name:"widget-pr-71-review",cwd:"/w/repos/widget",agent_status:$s}]}}'
 }
 
+test_gc_keeps_rex_reviewers_without_herdr_controls_or_checkout_release() {
+  _gc_reviewer_fixture
+  local agents pane='rex/session:fixture/block:fixture'
+  reviewers_write "$(reviewers_rows | jq --arg p "$pane" 'map(.pane = $p | .backend = "rex")')"
+  agents="$(_gc_reviewer_agents | jq --arg p "$pane" '.result.agents[0] |= (.pane_id = $p | .backend = "rex")')"
+  herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
+  reviewer_checkout_release() { printf 'release\n' >> "$GC_SINK"; }
+  _gc_reviewers 0 "$agents" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ''
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$pane"
+  assert_eq "$reviewers_closed" 0
+  rm -rf "$T"
+}
+
+test_gc_adopts_rex_reviewers_with_backend_identity_and_does_not_close_them() {
+  _gc_reviewer_fixture
+  local agents pane='rex/session:fixture/block:fixture'
+  reviewers_write '[]'
+  agents="$(_gc_reviewer_agents | jq --arg p "$pane" '.result.agents[0] |= (.pane_id = $p | .backend = "rex")')"
+  herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
+  _gc_reviewers 0 "$agents" >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ''
+  assert_eq "$(reviewers_find widget 71 | jq -r .backend)" rex
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$pane"
+  rm -rf "$T"
+}
+
+test_gc_unreadable_roster_cannot_drop_reviewer_records_or_checkouts() {
+  _gc_reviewer_fixture
+  reviewer_checkout_release() { printf 'release\n' >> "$GC_SINK"; }
+  _gc_reviewers 0 '{}' >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ''
+  assert_eq "$(reviewers_rows | jq length)" 1
+  rm -rf "$T"
+}
+
 test_gc_closes_a_reviewer_whose_pr_is_merged_or_closed() {
   local state
   for state in MERGED CLOSED; do
@@ -888,6 +924,36 @@ _gc_done_fixture() { # <state> <agent-status>
       *) return 1;;
     esac
   }
+}
+
+_gc_rex_worker() {
+  local pane='rex/session:fixture/block:fixture'
+  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq --arg p "$pane" '.result.agents[0] |= (.pane_id = $p | .backend = "rex")')"
+  local rows; rows="$(jq --arg p "$pane" 'map(.pane = $p)' "$GC_WS/.cel/delegations.json")"
+  printf '%s\n' "$rows" > "$GC_WS/.cel/delegations.json"
+  herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
+}
+
+test_gc_rex_presence_vetoes_checkout_removal_without_herdr_process_info() {
+  _gc_done_fixture landed idle
+  _gc_rex_worker
+  assert_fails _gc_agents_removable "$GC_AGENTS" "$GC_WT" demo
+  assert_eq "$(cat "$GC_SINK")" ''
+  # A descendant cwd protects the parent checkout too.
+  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq '.result.agents[0].cwd += "/src"')"
+  assert_fails _gc_agents_removable "$GC_AGENTS" "$GC_WT" demo
+  assert_eq "$(cat "$GC_SINK")" ''
+  rm -rf "$T"
+}
+
+test_gc_done_worker_pass_never_sends_rex_panes_to_herdr() {
+  _gc_done_fixture landed idle
+  _gc_rex_worker
+  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
+  assert_eq "$(cat "$GC_SINK")" ''
+  assert_eq "$done_closed" 0
+  [ -d "$GC_WT" ] || { echo 'removed Rex checkout'; return 1; }
+  rm -rf "$T"
 }
 
 test_gc_closes_a_done_pane_whose_delegation_landed() {
@@ -1444,6 +1510,15 @@ _gc_idle_stop_run() { # <minutes> -> output; observes once at t0, then at t0+min
   _gc_agents_removable() { [ -z "${GC_UNPROVEN:-}" ]; }
   CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo "$1" >/dev/null 2>&1
   CEL_GC_NOW=$((1000 + $1 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo "$1" 2>&1
+}
+
+test_gc_idle_worker_pass_keeps_rex_even_if_roster_reports_idle() {
+  _gc_done_fixture running idle
+  _gc_rex_worker
+  _gc_idle_stop_run 60 >/dev/null
+  assert_eq "$(cat "$GC_SINK")" ''
+  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" running
+  rm -rf "$T"
 }
 
 test_gc_idle_stop_stops_a_done_clean_old_worker_and_keeps_its_ledger_row() {

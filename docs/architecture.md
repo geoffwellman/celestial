@@ -25,7 +25,8 @@ boundary against the local user.
 ## Launch and lifecycle
 
 Workspace resolution supplies policy, role, runtime, profile and environment.
-`cel run` starts the selected role in a visible herdr pane. Fanout creates a
+`cel run` starts the selected role in a visible Herdr pane by default, or an
+explicitly selected managed Rex session. Fanout creates a
 Git worktree for a delegated worker, starts the pane and records the resulting
 identity. Worker/reviewer roles use the same GitHub and ticket interfaces that
 an operator can invoke directly.
@@ -123,6 +124,23 @@ shell pid, as herdr's own prompt predicate requires. `herdr agent start` is atte
 refused after the line was typed, the error names the pane, says the line (never
 printed) is pending and unsubmitted, and leaves clearing it to the owner - `cel`
 sends no Enter and no keys.
+
+Inventory consumers use `cel_agent_list` to merge Herdr and managed Rex
+agents. Inbox discovery/pruning, status views and GC share that roster, but
+control APIs remain backend-specific: `rex/<session>/<block>` is an identity,
+never a Herdr pane argument. Rex presence protects its checkout; GC does not
+infer retirement eligibility from a Rex idle status or missing screen output.
+Failed discovery is unknown, not an empty fleet or permission to prune mail.
+
+`cel ws down` (and therefore `reset`) explicitly stops managed Rex agents whose
+receipt names that exact workspace, after the existing held-work check; the
+box-wide core and other workspaces are excluded. A failed stop prevents reset
+from launching replacements. This stops runtimes without deleting worktrees.
+
+Rex verdict recording binds the calling process's live PID ancestry to its
+reviewer receipt, including alias, workspace, repository and PR. Both solo and
+fleet verdicts validate that exact target before writing; a reviewer for one
+PR cannot attribute a verdict on another PR to itself.
 
 Reaping is separate from worktree deletion. It requires a named plane-owned
 worker, proof of the role it was launched for, inherited pane identity,

@@ -19,6 +19,8 @@ _CEL_INBOX=1
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
+# shellcheck source=lib/rex.sh
+. "${BASH_SOURCE[0]%/*}/rex.sh"
 
 _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
 
@@ -237,9 +239,8 @@ _inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
 # So "nobody is reading this" becomes a FACT the box can state, rather than a
 # silence every watcher mistakes for calm.
 
-# Every pane herdr can see, one name per line. Fails (rc 1) when herdr could
-# not answer at all, which is NOT the same as "nobody is alive" - the same
-# rule prune, the steward and cel-fanout all learned the hard way.
+# Every managed agent, one name per line. Failure is not the same as nobody
+# being alive: do not infer absence when either backend could not answer.
 _inbox_roster() {
   # CEL-75: `cel fleet` already holds the roster for its whole pass, and asking
   # herdr again per workspace was seconds of each read under load.
@@ -247,11 +248,10 @@ _inbox_roster() {
     [ "$_INBOX_ROSTER_OK" = 1 ] || return 1
     printf '%s\n' "${_INBOX_ROSTER_HELD:-}"; return 0
   fi
-  have herdr || return 1
   have jq || return 1
   local out
-  out="$(herdr agent list 2>/dev/null)" || return 1
-  printf '%s' "$out" | jq -e '.result.agents' >/dev/null 2>&1 || return 1
+  out="$(cel_agent_list 2>/dev/null)" || return 1
+  printf '%s' "$out" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 1
   printf '%s' "$out" | jq -r '.result.agents[]?.name // empty'
 }
 
@@ -539,10 +539,9 @@ _inbox_prune() { # [--workspace w] [--dry-run]
   local f; f="$(_inbox_file "$ws")"
   [ -f "$f" ] || { c_ok "no mailbox for $ws"; return 0; }
 
-  local live; live="$(herdr agent list 2>/dev/null | jq -r '.result.agents[].name // empty' | sort -u || true)"
-  # herdr unreachable is not evidence that everyone died - the same rule the
-  # steward and cel-fanout both learned.
-  [ -n "$live" ] || { c_warn "herdr returned no agents - refusing to prune on no evidence"; return 0; }
+  local live
+  live="$(_inbox_roster)" || { c_warn "agent discovery unavailable - refusing to prune on no evidence"; return 0; }
+  [ -n "$live" ] || { c_warn "agent discovery returned no agents - refusing to prune on no evidence"; return 0; }
 
   local keep archive n_a
   keep="$(mktemp)"; archive="$(mktemp)"

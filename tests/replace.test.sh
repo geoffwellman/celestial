@@ -454,10 +454,10 @@ test_replace_release_of_the_original_cannot_remove_the_live_replacements_worktre
 
 test_replace_a_shared_worker_is_one_fleet_row() {
   _rp_setup; _reserve; _rp_publish; _attach
-  # the fleet's per-repo worker list carries the child and not the original
-  # that handed its worker over: one worker, one row
-  local rows; rows="$(source "$CEL_ROOT/lib/fleet.sh"; _fleet_unit_rows "$T" widget "" | awk -F"$_FLEET_US" '{print $NF}')"
-  assert_eq "$rows" "WG-1-clean" || return 1
+  # The public fleet document must carry only the replacement worker, not
+  # the source row that handed its worker over.
+  local doc; doc="$(source "$CEL_ROOT/lib/fleet.sh"; _fleet_unit "$T" widget '{"result":{"agents":[]}}')"
+  assert_eq "$(jq -c '[.workers_list[].branch]' <<<"$doc")" '["WG-1-clean"]' || return 1
   rm -rf "$T"
 }
 

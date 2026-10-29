@@ -34,7 +34,7 @@ _suite_clear_caller_env() {
       # the runner, CEL_TEST_CHROME(_WAIT_MS) and CEL_DASH_SHOTS for the dash
       # browser tests - they say how to test, not who is testing
       CEL_TEST_*|CEL_DASH_SHOTS) ;;
-      CEL_*|HERDR_*|OMP_GATEWAY_TOKEN|PI_CODING_AGENT_DIR) unset "$v" ;;
+      CEL_*|HERDR_*|REX_*|OMP_GATEWAY_TOKEN|PI_CODING_AGENT_DIR) unset "$v" ;;
     esac
   done
 }

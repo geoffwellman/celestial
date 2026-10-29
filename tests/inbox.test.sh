@@ -246,6 +246,44 @@ test_prune_dry_run_changes_nothing() {
   rm -rf "$T"
 }
 
+# Discovery merges presence only: mail for a Rex reader must not be pruned
+# just because that reader has no Herdr pane.
+test_inbox_discovers_both_backends_and_prune_keeps_rex_mail() {
+  _prune_fixture
+  local _INBOX_ROSTER_OK="" _INBOX_ROSTER_HELD=""
+  cel_agent_list() {
+    printf '%s' '{"result":{"agents":[{"name":"widget-wg-1-live"},{"name":"rex-reader","backend":"rex","pane_id":"rex/session:fixture/block:fixture"}]}}'
+  }
+  local roster; roster="$(_inbox_roster)"
+  assert_contains "$roster" widget-wg-1-live
+  assert_contains "$roster" rex-reader
+  ( CEL_INBOX_ME=t _inbox_send rex-reader 'for Rex' --workspace w ) >/dev/null
+  _inbox_prune --workspace w >/dev/null
+  assert_contains "$(cat "$T/w.jsonl")" 'for Rex'
+  assert_contains "$(cat "$T/w.archive.jsonl")" 'to the departed'
+  rm -rf "$T"
+}
+
+test_inbox_prune_keeps_every_message_when_merged_discovery_fails() {
+  _prune_fixture
+  local _INBOX_ROSTER_OK="" _INBOX_ROSTER_HELD=""
+  cel_agent_list() {
+    printf '%s' '{"result":{"agents":[{"name":"widget-wg-1-live"}]}}'
+    return 1
+  }
+  assert_fails _inbox_roster
+  _inbox_prune --workspace w >/dev/null 2>&1
+  assert_contains "$(cat "$T/w.jsonl")" 'to the departed'
+  [ ! -e "$T/w.archive.jsonl" ] || { echo 'pruned on failed discovery'; return 1; }
+  rm -rf "$T"
+}
+
+test_inbox_discovery_rejects_an_invalid_merged_roster() {
+  local _INBOX_ROSTER_OK="" _INBOX_ROSTER_HELD=""
+  cel_agent_list() { printf '%s' '{"result":{"agents":{}}}'; }
+  assert_fails _inbox_roster
+}
+
 # A PRODUCT orchestrator stands in <ws>/products/<p>, not in a repo checkout,
 # and until it was taught that coordinate it drained root's mailbox - the same
 # silent theft of root's mail the repos/ case was written to stop. Identity

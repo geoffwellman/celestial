@@ -207,6 +207,47 @@ test_solo_agent_cannot_review_its_own_pr() {
   assert_eq "$(solo_review_get "$T" widget 7)" ""
   rm -rf "$T"
 }
+
+test_solo_review_checks_shared_reviewer_identity_before_writing() {
+  _solo_setup
+  cel_assert_reviewer_identity() { printf '%s\n' "$1" "$2" "$3" "$4" > "$T/identity-call"; return 1; }
+  ! _review widget#7 changes --head "$H" --by rex-reviewer >/dev/null 2>&1 \
+    || { echo 'recorded a verdict after identity refusal'; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/identity-call")" "$(printf '%s\n' rex-reviewer "$T" widget 7)"
+  assert_eq "$(solo_review_get "$T" widget 7)" ''
+  rm -rf "$T"
+}
+
+test_solo_review_accepts_shared_identity_without_a_herdr_pane() {
+  _solo_setup
+  cel_assert_reviewer_identity() { return 0; }
+  ( unset HERDR_PANE_ID; CEL_SESSION_BACKEND=rex CEL_AGENT_NAME=rex-reviewer \
+      _review widget#7 changes --head "$H" --by rex-reviewer ) >/dev/null
+  assert_eq "$(solo_review_get "$T" widget 7 | jq -r .by)" rex-reviewer
+  rm -rf "$T"
+}
+
+test_solo_rex_reviewer_cannot_record_a_verdict_for_another_target() {
+  _solo_setup
+  export CEL_REX_STATE="$T/rex" CEL_ROLE=reviewer
+  unset CEL_SESSION_BACKEND CEL_REX_RECORD CEL_AGENT_NAME
+  mkdir -p "$CEL_REX_STATE"
+  jq -n --arg ws "$T" --arg start "$(_rex_pid_start "$$")" --argjson pid "$$" \
+    '{name:"widget-pr-7-review",role:"reviewer",workspace:$ws,repo:"widget",pr:7,pid:$pid,pid_start:$start}' \
+    > "$CEL_REX_STATE/reviewer.json"
+  local ref out
+  for ref in widget#8 gadget#7; do
+    if out="$(_review "$ref" changes --head "$H" --by widget-pr-7-review 2>&1)"; then
+      echo 'Rex reviewer recorded a verdict for another PR/repo'; rm -rf "$T"; return 1
+    fi
+    assert_contains "$out" 'only this PR reviewer'
+  done
+  assert_eq "$(solo_review_get "$T" widget 8)" ''
+  assert_eq "$(solo_review_get "$T" gadget 7)" ''
+  _review widget#7 changes --head "$H" --by widget-pr-7-review >/dev/null
+  assert_eq "$(solo_review_get "$T" widget 7 | jq -r .by)" widget-pr-7-review
+  rm -rf "$T"
+}
 test_solo_land_refuses_reviewers_and_workers() {
   _solo_setup fleetbot APPROVED
   local r

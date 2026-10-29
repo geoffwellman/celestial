@@ -15,6 +15,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/gateway.sh"
 # shellcheck source=lib/boxguard.sh
 . "${BASH_SOURCE[0]%/*}/boxguard.sh"
+# shellcheck source=lib/rex.sh
+. "${BASH_SOURCE[0]%/*}/rex.sh"
 
 # PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
 # (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
@@ -512,8 +514,7 @@ reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
 # next sweep. No herdr at all means no panes, so nothing can stand there.
 _reviewer_checkout_occupant() { # <path> -> pane<TAB>name of a pane in it; 0 = occupied
   local path="${1%/}" roster
-  have herdr || return 1
-  roster="$(herdr agent list 2>/dev/null)" || { printf 'unknown\troster unreadable'; return 0; }
+  roster="$(cel_agent_list 2>/dev/null)" || { printf 'unknown\troster unreadable'; return 0; }
   [ -n "$roster" ] || return 1
   # A reply that parses but is not a roster is as unreadable as no reply.
   printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
@@ -743,7 +744,7 @@ reviewers_record() { # <repo> <pr> <pane> <agent> [checkout] [repodir] [head]
     --argjson t "$(date +%s)" \
     'map(select(.repo != $r or ((.pr | tostring) != $p)))
      + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t,
-         checkout:$co, repodir:$rd, head:$head}]'
+         checkout:$co, repodir:$rd, head:$head} + (if ($pane | startswith("rex/")) then {backend:"rex"} else {} end)]'
 }
 
 reviewers_drop() { # <repo> <pr>
@@ -761,9 +762,9 @@ reviewers_drop() { # <repo> <pr>
 # The repo comes from the pane's cwd when there is one: the agent name has
 # been through the herdr name sanitiser (lowercased, truncated to 32) and is
 # not reliably the repo's real name, while a reviewer's cwd is its checkout.
-reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>status
-  local name pane cwd status pr repo
-  while IFS=$'\t' read -r name pane cwd status; do
+reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>status<TAB>backend
+  local name pane cwd status pr repo backend
+  while IFS=$'\t' read -r name pane cwd status backend; do
     [ -n "$name" ] && [ -n "$pane" ] || continue
     pr="${name##*-pr-}"; pr="${pr%-review}"
     case "$pr" in ''|*[!0-9]*) continue;; esac
@@ -773,10 +774,10 @@ reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>sta
     # folder name carries the PR, and the repo is what precedes it.
     case "$repo" in *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;; esac
     [ -n "$repo" ] || repo="${name%-pr-*}"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status" "${backend:-herdr}"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
     | select(((.name // "") | test("^.+-pr-[0-9]+-review$")) and ((.pane_id // "") != ""))
-    | [(.name // ""), .pane_id, (.cwd // ""), (.agent_status // "unknown")] | @tsv' 2>/dev/null)
+    | [(.name // ""), .pane_id, (.cwd // ""), (.agent_status // "unknown"), (.backend // "herdr")] | @tsv' 2>/dev/null)
   return 0
 }
 
@@ -802,8 +803,8 @@ _run_agent_name() { # <alias>
 # and the pane id would arrive in the name's place.
 _run_live_agent_in_cwd() { # <cwd> -> name<TAB>pane<TAB>status, or nothing
   local cwd="$1" roster
-  have herdr && have jq || return 0
-  roster="$(herdr agent list 2>/dev/null)" || return 0
+  have jq || return 0
+  roster="$(cel_agent_list 2>/dev/null)" || return 2
   [ -n "$roster" ] || return 0
   printf '%s' "$roster" | jq -r --arg c "$cwd" \
     '[.result.agents[]? | select((.cwd // "") == $c)
@@ -854,8 +855,8 @@ _run_core_default() { # <runtime|model|thinking|via>
 # Core replaces root (the plan retires `cel run root`); until then each
 # refuses to start while the other is live, --force excepted.
 _run_live_names() { # -> one live herdr agent name per line
-  have herdr && have jq || return 0
-  herdr agent list 2>/dev/null | jq -r '.result.agents[]?.name // empty' 2>/dev/null
+  have jq || return 0
+  { cel_agent_list 2>/dev/null || rex_agent_list; } | jq -r '.result.agents[]?.name // empty' 2>/dev/null
   return 0
 }
 _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh> <force> <pane-opt>
@@ -875,7 +876,7 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   # The same refusal as an orchestrator's, on a dry run too.
   if [ "$force" -eq 0 ] && [ "$restart" -eq 0 ]; then
     local occupant oname opane
-    occupant="$(_run_live_agent_in_cwd "$cwd")"
+    occupant="$(_run_live_agent_in_cwd "$cwd")" || die 'cel core: agent inventory is unreadable; refusing duplicate admission'
     if [ -n "$occupant" ]; then
       IFS=$'\t' read -r oname opane _ <<< "$occupant"
       [ "$oname" != "-" ] || oname="<unnamed>"
@@ -952,6 +953,14 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
     _run_restart_in_place core "$RESTART_PANE" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" "$dry" core "$runtime" "$cwd"
     return 0
   fi
+  if [ "${session_backend:-herdr}" = rex ]; then
+    if [ "$dry" = 1 ]; then
+      printf 'rex new core --cwd %s --shell=none -- <private launch script: %s %s>\n' "$cwd" "$runtime" "$(_run_dry_agent_args)"
+    else
+      _rex_launch core "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
+    fi
+    return 0
+  fi
 
   local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label "$label")
   if [ "$dry" -eq 1 ]; then
@@ -989,11 +998,13 @@ _run_sessions_file() {
   else printf '%s' "$HOME/.local/state/cel/orch-sessions.json"; fi
 }
 
-_run_sessions_record() { # <cwd> <session>
-  local f tmp cur
+_run_sessions_record() ( # <cwd> <session>; lock the whole shared map update
+  local f tmp cur fd
   [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 0
   f="$(_run_sessions_file)"
   mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  exec {fd}>"$f.lock" || return 0
+  flock -w 10 "$fd" || return 0
   cur="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cur='{}'
   [ -n "$cur" ] || cur='{}'
   tmp="$(mktemp "$f.tmp.XXXXXX" 2>/dev/null)" || return 0
@@ -1003,7 +1014,7 @@ _run_sessions_record() { # <cwd> <session>
     rm -f -- "$tmp"
   fi
   return 0
-}
+)
 
 _run_sessions_last() { # <cwd> -> session, or nothing
   jq -r --arg c "$1" '.[$c] // empty' "$(_run_sessions_file)" 2>/dev/null || true
@@ -1036,7 +1047,7 @@ run_sessions_note_roster() { # <agents-json>
 # never relaunched: that pane is not this orchestrator.
 _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<TAB>session
   local roster rows n
-  roster="$(herdr agent list 2>/dev/null)" || return 1
+  roster="$(cel_agent_list 2>/dev/null)" || return 2
   rows="$(printf '%s' "$roster" | jq -r --arg n "$1" --arg c "$2" --arg r "$3" --arg p "${4:-}" '
     def row: [((.name // "") | if . == "" then "-" else . end), .pane_id,
               (.agent_status // "unknown"),
@@ -1066,11 +1077,12 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}"
   RESUME_SESSION=""; RESTART_PANE=""
   local live="" lname lpane lstatus lsession lrc=1
-  if have herdr && have jq; then
+  if have jq; then
     live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime" "$pane_opt")" && lrc=0 || lrc=$?
   fi
   case "$lrc" in
     0) ;;
+    2) die "cel run $role: agent inventory is unreadable; refusing to infer that the session is absent" ;;
     3)
       if [ "$restart" -eq 1 ]; then
         c_err "cel run $role --restart: no agent is named $agent_name and $(printf '%s\n' "$live" | wc -l | tr -d ' ') $runtime agents share $cwd - refusing to guess which is the $role:" >&2
@@ -1098,6 +1110,11 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
       if [ "$lstatus" = working ] && [ "$force" -eq 0 ]; then
         die "cel run $role --restart: $agent_name (pane $lpane) is working - a restart now would kill its turn. Wait for it to go idle, or pass --force"
       fi
+      case "$lpane" in rex/*)
+        if [ "$fresh" = 0 ] && [ -z "$lsession" ]; then
+          die 'cel run: Rex runtime has not reported its native session identity; refusing to discard its conversation (use --fresh only when intended)'
+        fi ;;
+      esac
       RESTART_PANE="$lpane"
       [ "$fresh" -eq 1 ] || RESUME_SESSION="$lsession"
     fi
@@ -1153,6 +1170,15 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
 _run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <prefix-required> <dry-run> <agent-name> <runtime> <cwd>
   local role="$1" pane="$2" label="$3" envprefix="$4" dry_envprefix="$5" prefix_required="$6"
   local dry_run="$7" agent_name="$8" runtime="$9" cwd="${10}"
+  case "$pane" in rex/*)
+    if [ "$dry_run" = 1 ]; then
+      printf 'rex block close <owned terminal>; rex new %s -- <same runtime and session>\n' "$agent_name"
+      return 0
+    fi
+    rex_agent_stop "$pane" || die "cel run: could not stop Rex terminal $pane"
+    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
+    return $? ;;
+  esac
   if [ "$dry_run" -eq 1 ]; then
     printf 'herdr pane send-keys %s esc ctrl+c ctrl+c\n' "$pane"
     printf 'herdr pane send-text %s %s\n' "$pane" "$dry_envprefix"
@@ -1215,9 +1241,15 @@ run_session_resumers() { # -> session<TAB>pid<TAB>pane, one per live resumer
     [ -O "$d/cmdline" ] || continue
     _run_is_agent_argv "$d/cmdline" || continue
     pane="-"
+    local rex_session="" rex_block=""
     while IFS= read -r -d '' item; do
-      case "$item" in HERDR_PANE_ID=*) pane="${item#*=}"; break ;; esac
+      case "$item" in
+        HERDR_PANE_ID=*) pane="${item#*=}" ;;
+        REX_SESSION=*) rex_session="${item#*=}" ;;
+        REX_BLOCK=*) rex_block="${item#*=}" ;;
+      esac
     done < "$d/environ" 2>/dev/null
+    [ -z "$rex_session" ] || [ -z "$rex_block" ] || pane="rex/$rex_session/$rex_block"
     printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
   done
   return 0
@@ -1327,7 +1359,7 @@ run_launch_diff() { # <expected-argv-file> <actual-argv-file> -> "missing: ...; 
 _run_restart_wait() { # <pane>: until no agent is live in it
   local i=0
   while [ "$i" -lt "${CEL_RESTART_WAIT:-20}" ]; do
-    herdr agent list 2>/dev/null | jq -e --arg p "$1" \
+    cel_agent_list 2>/dev/null | jq -e --arg p "$1" \
       'any(.result.agents[]?; .pane_id == $p)' >/dev/null 2>&1 || return 0
     sleep "${CEL_RESTART_SLEEP:-1}"; i=$((i+1))
   done
@@ -1460,10 +1492,32 @@ _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
 }
 
 
-cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr n] [--profile p] [--model m] [--thinking l] [--dry-run] [--restart [--pane p]] [--fresh] [--force]
+# One admission boundary for both terminal hosts. The lock spans the final
+# roster check and launch, so two concurrent Herdr/Rex starts cannot both
+# observe the product absent. A subshell owns the descriptor: every return
+# or refusal releases it without inheriting it into a Rex server's child.
+cmd_run() (
+  local arg
+  for arg in "$@"; do
+    if [ "$arg" = --dry-run ]; then _cmd_run "$@"; return $?; fi
+  done
+  local d fd
+  d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
+  exec {fd}>"$d/launch.lock"
+  flock -w 60 "$fd" || die 'cel run: another agent launch still owns admission; retry after it finishes'
+  local _RUN_ADMISSION_FD="$fd" rc=0
+  # Contain die/exit from resolution so the owner always unlocks explicitly,
+  # even if a backend CLI happened to inherit a duplicate descriptor.
+  ( _cmd_run "$@" ) || rc=$?
+  flock -u "$fd"
+  return "$rc"
+)
+
+_cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actual starts
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 force=0
   local restart=0 fresh=0 pane_opt="" solo_forced=0 lane=""
   local profile="" model_opt="" thinking_opt=""
+  local session_backend="${CEL_SESSION_BACKEND:-}" backend_opt=""
 
   if [ $# -gt 0 ]; then
     case "$1" in
@@ -1491,6 +1545,7 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       --profile)   profile="$2"; shift 2 ;;
       --model)     model_opt="$2"; shift 2 ;;
       --thinking)  thinking_opt="$2"; shift 2 ;;
+      --session-backend) backend_opt="$2"; shift 2 ;;
       --dry-run)   dry_run=1; shift ;;
       --force)     force=1; shift ;;
       --restart)   restart=1; shift ;;
@@ -1500,6 +1555,8 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
+  session_backend="${backend_opt:-${session_backend:-herdr}}"
+  case "$session_backend" in herdr|rex) ;; *) die 'cel run: --session-backend wants herdr or rex' ;; esac
 
   # Core resolves NO workspace - see _run_core. It has to return before the
   # resolution below, which would otherwise die for want of one.
@@ -1524,6 +1581,11 @@ cmd_run() { # [role] [--repo r] [--product p] [--workspace w] [--branch b] [--pr
     wsdir="$(registry_require "$workspace")"
   else
     wsdir="$(ws_current)" || die "cel run: not inside a workspace (cd into one, or pass --workspace <name>)"
+  fi
+  if [ -z "$backend_opt" ] && [ -z "${CEL_SESSION_BACKEND:-}" ]; then
+    session_backend="$(_wsy "$wsdir" '.session_backend')"
+    session_backend="${session_backend:-herdr}"
+    case "$session_backend" in herdr|rex) ;; *) die 'workspace session_backend must be herdr or rex' ;; esac
   fi
 
   # FAIL CLOSED ON IDENTITY (CEL-70). A pane whose declared GitHub account
@@ -1699,7 +1761,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # preview of something that will not happen.
   if [ "$role" = orchestrator ] && [ "$force" -eq 0 ] && [ "$restart" -eq 0 ]; then
     local occupant oname opane
-    occupant="$(_run_live_agent_in_cwd "$cwd")"
+    occupant="$(_run_live_agent_in_cwd "$cwd")" || die 'cel run: agent inventory is unreadable; refusing duplicate admission'
     if [ -n "$occupant" ]; then
       IFS=$'\t' read -r oname opane _ <<< "$occupant"
       [ "$oname" != "-" ] || oname="<unnamed>"
@@ -1923,6 +1985,45 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   fi
 
+  # The terminal host is independent of runtime/profile/model. Existing
+  # sessions keep their host; selecting Rex affects new sessions only.
+  if [ -n "$restart_pane" ]; then
+    _run_restart_in_place "$role" "$restart_pane" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" \
+      "$dry_run" "$agent_name" "$runtime" "$cwd"
+    return $?
+  fi
+  if [ "$session_backend" = rex ]; then
+    if [ "$dry_run" = 1 ]; then
+      printf 'rex new %s --cwd %s --shell=none -- <private launch script: %s %s>\n' "$agent_name" "$cwd" "$runtime" "$(_run_dry_agent_args)"
+      return 0
+    fi
+    _rex_preflight "$agent_name" "$runtime"
+    if [ "$role" = worker ]; then
+      git check-ref-format --branch "$branch" >/dev/null || die 'invalid worker branch name'
+      cwd="$wsdir/.cel/worktrees/$repo/$branch"
+      mkdir -p "$(dirname "$cwd")"
+      if [ -e "$cwd" ]; then
+        local source_git worker_git
+        source_git="$(git -C "$wsdir/repos/$repo" rev-parse --path-format=absolute --git-common-dir)" || die 'cannot identify source repository'
+        worker_git="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)" || die 'worker path is not a registered checkout'
+        [ ! -L "$cwd" ] && [ "$source_git" = "$worker_git" ] && [ "$(git -C "$cwd" branch --show-current)" = "$branch" ] \
+          || die 'worker path belongs to a different checkout; nothing was reset'
+      elif git -C "$wsdir/repos/$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+        git -C "$wsdir/repos/$repo" worktree add "$cwd" "$branch" || die 'could not open worker checkout'
+      else
+        local base
+        base="$(repo_default_ref "$wsdir/repos/$repo")" || die 'cannot resolve worker base branch'
+        git -C "$wsdir/repos/$repo" worktree add -b "$branch" "$cwd" "$base" || die 'could not create worker checkout'
+      fi
+    else
+      mkdir -p "$cwd"
+    fi
+    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
+    if [ "$role" = reviewer ]; then
+      reviewers_record "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
+    fi
+    return 0
+  fi
 
   # Reviewer panes join the caller's own view instead of creating one.
   if [ "$role" = "reviewer" ]; then
@@ -2052,6 +2153,15 @@ _run_descends() { # <pid> <ancestor> -> sets _RUN_DEPTH (hops up to it)
 _run_pane_pid() { # <pane> <cwd> <runtime>
   local info shell d pid a0 a1 best=""
   _RUN_PID=""; _RUN_WHY=""
+  case "$1" in rex/*)
+    local f
+    for f in "$(_rex_state)"/*.json; do
+      [ -f "$f" ] || continue
+      [ "$(jq -r .pane_id "$f")" = "$1" ] || continue
+      if _rex_live "$f"; then _RUN_PID="$(jq -r .pid "$f")"; return 0; fi
+    done
+    _RUN_WHY="no verified live process for Rex terminal $1"; return 1 ;;
+  esac
   info="$(herdr pane process-info --pane "$1" 2>/dev/null)" || info=""
   if [[ "$info" =~ \"shell_pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then shell="${BASH_REMATCH[1]}"; else shell=""; fi
   if [ -z "$shell" ]; then _RUN_WHY="herdr gives no shell pid for pane $1"; return 1; fi
@@ -2143,9 +2253,9 @@ _run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
   fi
   [ "$hit" -eq 0 ] || return 0
   if [ "$role" = root ]; then
-    line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
+    line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run --session-backend herdr) 2>/dev/null)" || line=""
   else
-    line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run) 2>/dev/null)" || line=""
+    line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run --session-backend herdr) 2>/dev/null)" || line=""
   fi
   # The launch line wherever it stands in the output: taking only the last
   # line blanked the comparison as soon as anything printed after it (CEL-87).
@@ -2223,9 +2333,9 @@ run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
 
 run_orchestrator_rows() { # [only-ws] [roster-json] [record-sessions 1|0] [wsdir of only-ws] [its candidates]
   local roster ws wsdir role p name cwd mode live lname lpane lstatus rt lcwd lsession cmd
-  have herdr && have jq || return 0
+  have jq || return 0
   roster="${2:-}"
-  [ -n "$roster" ] || roster="$(herdr agent list 2>/dev/null)" || return 0
+  [ -n "$roster" ] || roster="$(cel_agent_list 2>/dev/null)" || return 0
   [ -n "$roster" ] || return 0
   for ws in ${1:-$(registry_names 2>/dev/null)}; do
     if [ -n "${4:-}" ]; then wsdir="$4"; else wsdir="$(registry_path "$ws" 2>/dev/null)" || continue; fi
@@ -2275,8 +2385,8 @@ run_stale_orchestrators() {
 # A process that cannot be found yields no row: no evidence is not a fault.
 run_stripped_orchestrators() {
   local roster ws wsdir p name cwd rt hookfile live lname lpane lstatus lcwd state
-  have herdr && have jq || return 0
-  roster="$(herdr agent list 2>/dev/null)" || return 0
+  have jq || return 0
+  roster="$(cel_agent_list 2>/dev/null)" || return 0
   for ws in $(registry_names 2>/dev/null); do
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
