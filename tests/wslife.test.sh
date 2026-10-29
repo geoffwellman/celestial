@@ -293,13 +293,13 @@ test_down_stops_only_managed_rex_roles_owned_by_the_exact_workspace() {
   _wslife_setup
   printf '[]\n' > "$T/alpha/.cel/delegations.json"
   rex_agent_list() {
-    jq -n --arg ws "$T/alpha" '{result:{agents:
+    jq -n --arg ws "$T/alpha" '{result:{agents:(
       (["root","orchestrator","solo","lane","reviewer","worker"] | map(. as $role |
         {name:$role,role:$role,backend:"rex",workspace:$ws,pane_id:("rex/session:"+$role+"/block:"+$role)}))
       + [{name:"core",role:"core",backend:"rex",workspace:$ws,pane_id:"rex/session:core/block:core"},
          {name:"foreign",role:"worker",backend:"rex",workspace:($ws+"-other"),pane_id:"rex/session:foreign/block:foreign"},
          {name:"nested",role:"worker",backend:"rex",workspace:($ws+"/nested"),pane_id:"rex/session:nested/block:nested"},
-         {name:"unowned",role:"worker",backend:"herdr",workspace:$ws,pane_id:"w:p1"}]}}'
+         {name:"unowned",role:"worker",backend:"herdr",workspace:$ws,pane_id:"w:p1"}])}}'
   }
   rex_agent_stop() { printf '%s\n' "$1" >> "$T/rex-stops"; }
   cmd_ws_down alpha >/dev/null
