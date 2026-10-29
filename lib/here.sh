@@ -128,8 +128,9 @@ _here_ledger_id() { # <repo> <pr>
 # Core restarts itself the way `cel mode` restarts a product agent: detached,
 # once it has been quiet for two polls, on its own session.
 _here_core_status() {
-  have herdr && have jq || return 2
-  local roster; roster="$(herdr agent list 2>/dev/null)" || return 2
+  have jq || return 2
+  local roster; roster="$(cel_agent_list 2>/dev/null)" || return 2
+  printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 2
   printf '%s' "$roster" | jq -er --arg c "$(_run_core_dir)" \
     '[.result.agents[]? | select(.name == "core" and (.cwd // "") == $c)][0].agent_status // empty' 2>/dev/null \
     || return 1

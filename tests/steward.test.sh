@@ -1039,6 +1039,32 @@ test_the_sweep_asks_nobody_without_a_key() {
   rm -rf "$T"
 }
 
+test_steward_keeps_rex_stall_evidence_without_herdr_screen_or_idle_inference() {
+  local t; t="$(mktemp -d)"
+  mkdir -p "$t/.cel"
+  printf '%s' '[{"id":"rex-worker","state":"running","pane":"rex/session:fixture/block:fixture","alias":"rex-worker","worktree":"/fixture/rex"}]' > "$t/.cel/delegations.json"
+  registry_names() { printf demo; }
+  registry_path() { printf '%s' "$t"; }
+  local _STEWARD_HERDR=rex_forbidden_herdr
+  rex_forbidden_herdr() { printf '%s\n' "$*" >> "$t/herdr-calls"; return 1; }
+  _steward_clear() { printf '%s\n' "$*" >> "$t/clears"; }
+  _steward_raise() { printf '%s\n' "$*" >> "$t/raises"; }
+  local agents='{"result":{"agents":[{"pane_id":"rex/session:fixture/block:fixture","name":"rex-worker","cwd":"/fixture/rex","agent_status":"idle","backend":"rex"}]}}'
+  _steward_stalled_workers "$agents" >/dev/null 2>&1
+  [ ! -s "$t/herdr-calls" ] || { echo 'Rex was read through Herdr'; return 1; }
+  [ ! -s "$t/clears" ] && [ ! -s "$t/raises" ] || { echo 'Rex screen liveness was inferred'; return 1; }
+  rm -rf "$t"
+}
+
+test_steward_failed_roster_cannot_reap_orphan_servers() {
+  local t; t="$(mktemp -d)"
+  _steward_server_procs() { printf '1 7200 7777 %s/.herdr/worktrees/fixture\n' "$HOME"; }
+  kill() { printf '%s\n' "$*" >> "$t/kills"; }
+  _steward_orphan_servers '{}' >/dev/null 2>&1
+  [ ! -s "$t/kills" ] || { echo 'reaped a server on unknown agent presence'; return 1; }
+  rm -rf "$t"
+}
+
 # --- CEL-43: a mailbox with no reader must not swallow an escalation --------
 # 72 escalations landed in root's mailbox since the 10th. Nothing was obliged
 # to read it: the standing root panes are gone and the console that replaced

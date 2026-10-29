@@ -405,21 +405,29 @@ box_summary_fragment() { # the per-class bytes cel gc appends to its own line
 # vanishing from the count: how many there are is knowable from the registry
 # alone, and a reader who sees the count knows the sweep has something to do.
 box_reviewers_json() { # -> {count, bytes}
-  local rows panes n=0 total=0 pane info pid rss
+  local rows panes agents='{"result":{"agents":[]}}' agent backend n=0 total=0 pane info pid rss
   rows="$(reviewers_rows 2>/dev/null)" || rows='[]'
   panes="$(printf '%s' "$rows" | jq -r '.[].pane // empty' 2>/dev/null)"
   # The panes that are THERE, not the ones that were written down. Every
   # reviewer older than the registry has no row, and those were the seven
   # that made this row worth measuring.
-  if have herdr && have jq; then
-    panes="$panes"$'\n'"$(reviewers_discover "$(herdr agent list 2>/dev/null)" | cut -f3)"
+  if have jq; then
+    agents="$(cel_agent_list 2>/dev/null)" || agents='{"result":{"agents":[]}}'
+    panes="$panes"$'\n'"$(reviewers_discover "$agents" | cut -f3)"
   fi
   while IFS= read -r pane; do
     [ -n "$pane" ] || continue
     n=$(( n + 1 ))
-    have herdr && have jq || continue
-    info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || continue
-    pid="$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[0].pid // empty' 2>/dev/null)" || continue
+    have jq || continue
+    agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)][0] // {}' 2>/dev/null)"
+    backend="$(printf '%s' "$agent" | jq -r '.backend // "herdr"' 2>/dev/null)"
+    if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
+      pid="$(printf '%s' "$agent" | jq -r '.pid // empty' 2>/dev/null)"
+    else
+      have herdr || continue
+      info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || continue
+      pid="$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[0].pid // empty' 2>/dev/null)" || continue
+    fi
     case "$pid" in ''|*[!0-9]*) continue;; esac
     rss="$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)" || rss=""
     case "$rss" in ''|*[!0-9]*) continue;; esac

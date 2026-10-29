@@ -514,12 +514,12 @@ check_workspaces() {
     done
 
     ledger="$path/.cel/delegations.json"
-    if [ -f "$ledger" ] && have herdr; then
-      agents="$(herdr agent list 2>/dev/null)" || agents=""
+    if [ -f "$ledger" ] && agents="$(cel_agent_list 2>/dev/null)" \
+       && printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1; then
       while IFS= read -r id; do
         [ -n "$id" ] || continue
         pane="$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pane' "$ledger")"
-        if [ -z "$agents" ] || ! printf '%s' "$agents" \
+        if ! printf '%s' "$agents" \
           | jq -e --arg p "$pane" '.result.agents[]? | select(.pane_id == $p)' >/dev/null 2>&1; then
           c_warn "stale delegation $id - cel-fanout status"
         fi

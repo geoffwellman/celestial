@@ -378,14 +378,14 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
   while IFS= read -r -d '' item; do
     case "$item" in HERDR_PANE_ID=*) pane="${item#*=}";; esac
   done < <(_gc_environ_lines "$pid")
-  [ -n "$pane" ] || return 1
+  [ -n "$pane" ] && [[ "$pane" != rex/* ]] || return 1
   cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || return 1
   # An agent_session of null is a herdr-side gap, not evidence that the pid is
   # a stranger: two live omp panes on this box carry one. It disqualifies a
   # process only when nothing else proves whose it is.
   if role="$(_gc_env_role "$pid" "$names")"; then proof=true; else role=""; fi
   row="$(printf '%s' "$agents" | jq -ce --arg p "$pane" --arg d "$cwd" --argjson proof "$proof" '
-    [.result.agents[] | select(.pane_id == $p and .cwd == $d)] |
+    [.result.agents[] | select(.pane_id == $p and .cwd == $d and (.backend // "herdr") != "rex")] |
     if length == 1 and (.[0].agent_status | IN("idle", "done")) and
       (.[0].state_change_seq | type == "number") and
       (.[0].terminal_id | type == "string") and
@@ -549,6 +549,8 @@ _gc_agents_removable() { # <agents-json> <dir> <registry-names>
     then [.[] | select(.cwd == $d or (.cwd | startswith($d + "/")))]
     else error("invalid agent roster") end')" || return 1
   while IFS= read -r row; do
+    # Presence is a veto until Rex has a backend-specific retirement proof.
+    printf '%s' "$row" | jq -e '.backend == "rex" or (.pane_id | startswith("rex/"))' >/dev/null && return 1
     pane="$(printf '%s' "$row" | jq -r .pane_id)"
     info="$(lock_spawn "${lock_fd:-} ${fd:-}" herdr pane process-info --pane "$pane" 2>/dev/null)" \
       && pid="$(_gc_fg_root "$info")" \
@@ -585,7 +587,7 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
     since="$(printf '%s' "$previous" | jq -r --arg k "$key" '.[$k] // empty')"
     [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
     if [ $((now - since)) -ge $((hours * 3600)) ]; then
-      fresh="$(lock_spawn "${fd:-} ${lock_fd:-}" herdr agent list 2>/dev/null)" || continue
+      fresh="$(lock_spawn "${fd:-} ${lock_fd:-}" cel_agent_list 2>/dev/null)" || continue
       current="$(_gc_process_identity "$pid" "$fresh" "$names")" || continue
       [ "$identity" = "$current" ] || continue
       if [ "$dry" -eq 1 ]; then
@@ -708,23 +710,25 @@ _gc_unknown_clear() { # <pane> <repo> <pr>
 # in both is ONE reviewer - keyed by pane id, so it is never closed or
 # counted twice.
 _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
-  local out='[]' repo pr pane agent status rd
-  while IFS=$'\x1f' read -r repo pr pane agent rd; do
+  local out='[]' repo pr pane agent status rd backend observed
+  while IFS=$'\x1f' read -r repo pr pane agent rd backend; do
     [ -n "$repo" ] && [ -n "$pane" ] || continue
     # A recorded pane that is not on the roster has gone by other means.
     # `gone` is a stale row, dropped as bookkeeping rather than closed.
     status="$(printf '%s' "$2" | jq -r --arg p "$pane" \
       '[.result.agents[]? | select(.pane_id == $p)][0].agent_status // "gone"' 2>/dev/null)" || status=unknown
+    observed="$(printf '%s' "$2" | jq -r --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)][0].backend // empty' 2>/dev/null)"
+    backend="${observed:-${backend:-herdr}}"
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" \
-      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, recorded:true}]')"
-  done < <(printf '%s' "$1" | jq -r '.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // "")] | join("\u001f")')
-  while IFS=$'\t' read -r repo pr pane agent status; do
+      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" --arg b "$backend" \
+      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, backend:$b, recorded:true}]')"
+  done < <(printf '%s' "$1" | jq -r '.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // ""), (.backend // "herdr")] | join("\u001f")')
+  while IFS=$'\t' read -r repo pr pane agent status backend; do
     [ -n "$pane" ] || continue
     printf '%s' "$out" | jq -e --arg p "$pane" 'any(.[]; .pane == $p)' >/dev/null 2>&1 && continue
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" \
-      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, recorded:false}]')"
+      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg b "${backend:-herdr}" \
+      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, backend:$b, recorded:false}]')"
   done < <(reviewers_discover "$2")
   printf '%s' "$out" | jq -c '.[]'
 }
@@ -752,8 +756,9 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # panes had no row - and applies them under the registry lock to whatever
 # the file says by then. A row this sweep never saw is never touched.
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
-  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state repodir
+  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state repodir backend
   reviewers_closed=0
+  printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   local rv_what="" rv_prev='{}' rv_next='{}' rv_file
   rv_file="$(_gc_reviewer_stop_state)"
   [ -f "$rv_file" ] && rv_prev="$(jq -c 'if type == "object" then . else {} end' "$rv_file" 2>/dev/null || printf '{}')"
@@ -768,6 +773,11 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       # checkout is now owned by nobody, so it goes too.
       [ "$dry" -eq 1 ] || { reviewer_checkout_release "$repo" "$pr"
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"; }
+      continue
+    fi
+    backend="$(printf '%s' "$cand" | jq -r '.backend // "herdr"')"
+    if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
+      _gc_reviewers_adopt
       continue
     fi
     repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
@@ -905,8 +915,8 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   printf '%s' "$cand" | jq -e '.recorded' >/dev/null 2>&1 && return 0
   [ "$dry" -eq 0 ] || return 0
   adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-    --arg a "$agent" --argjson t "$(date +%s)" \
-    '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t}]')"
+    --arg a "$agent" --arg b "${backend:-herdr}" --argjson t "$(date +%s)" \
+    '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, backend:$b, started_at:$t}]')"
   return 0
 }
 
@@ -949,6 +959,9 @@ _gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
       agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" \
         '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
       [ -n "$agent" ] || continue          # the pane is already gone
+      if printf '%s' "$agent" | jq -e '.backend == "rex"' >/dev/null || [[ "$pane" == rex/* ]]; then
+        _gc_done_kept unknown; continue
+      fi
       # Still in this delegation's checkout, or it is not this delegation's.
       case "$(printf '%s' "$agent" | jq -r '.cwd // ""')" in
         "$wt"|"$wt"/*) ;;
@@ -1060,6 +1073,7 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
     IFS=$'\x1f' read -r pane cwd label \
       <<< "$(printf '%s' "$row" | jq -r '[.pane_id, (.cwd // ""), (.label // "")] | join("\u001f")')" || true
     [ -n "$pane" ] || continue
+    case "$pane" in rex/*) _gc_idle_kept unknown; continue;; esac
     cwd="$(pane_cwd "$cwd")"
     # A layout names the panes it owns (services, dash, pr-watch, notes);
     # herdr carries that name as the label. A named pane was meant to stay.
@@ -1187,6 +1201,8 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
           { [ "$alias" != "-" ] && [ -n "$alias" ] \
             && [ "$(printf '%s' "$agent" | jq -r '.name // ""')" = "$alias" ]; } || continue ;;
       esac
+      # No Herdr close, idle clock or synthetic liveness proof for Rex.
+      if printf '%s' "$agent" | jq -e '.backend == "rex"' >/dev/null || [[ "$pane" == rex/* ]]; then continue; fi
       status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
       case "$status" in idle|done) ;; *) continue ;; esac
       since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
@@ -1309,7 +1325,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   [ "$known" -eq 1 ] || { c_warn "delegation discovery busy or unavailable - GC skipped"; return 0; }
   roster="$(lock_spawn "${lock_fd:-}" herdr workspace list 2>/dev/null)" \
     && ids="$(printf '%s' "$roster" | jq -er '.result.workspaces | if type == "array" and all(.[]; .workspace_id | type == "string" and length > 0) then map(.workspace_id) | join("\n") else error("invalid workspace list") end')" \
-    && agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
+    && agents="$(lock_spawn "${lock_fd:-}" cel_agent_list 2>/dev/null)" \
     && printf '%s' "$agents" | jq -e '.result.agents | type == "array" and all(.[]; (.cwd | type == "string") and (.pane_id | type == "string") and (.agent_status | type == "string"))' >/dev/null \
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
@@ -1391,7 +1407,7 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
         && [ "$(printf '%s' "$panes" | jq -r '.result.panes[0].cwd')" = "$cwd" ] \
         || { _gc_keep busy; continue; }
     fi
-    agents="$(lock_spawn "${lock_fd:-}" herdr agent list 2>/dev/null)" \
+    agents="$(lock_spawn "${lock_fd:-}" cel_agent_list 2>/dev/null)" \
       && _gc_agents_removable "$agents" "$cwd" "$names" \
       || { _gc_keep unidentified "$cwd"; continue; }
     if [ -z "$ws_id" ] && _gc_has_process_live "$cwd"; then _gc_keep live; continue; fi

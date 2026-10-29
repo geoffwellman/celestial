@@ -1599,6 +1599,61 @@ test_review_changes_verdict_keeps_the_commit_it_names() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
+_fanout_rex_reviewer() { # repo pr -> exact live ancestor receipt for this test's caller
+  source "$CEL_ROOT/lib/rex.sh"
+  export CEL_REX_STATE="$T/rex" CEL_ROLE=reviewer
+  # Ancestry, not mutable launch environment, selects the Rex identity guard.
+  unset CEL_SESSION_BACKEND CEL_REX_RECORD CEL_AGENT_NAME
+  mkdir -p "$CEL_REX_STATE"
+  REX_REVIEWER="$(cel_alias_norm "$1-pr-$2-review")"
+  jq -n --arg ws "$T" --arg repo "$1" --arg pr "$2" --arg name "$REX_REVIEWER" \
+    --arg start "$(_rex_pid_start "$$")" --argjson pid "$$" \
+    '{name:$name,role:"reviewer",workspace:$ws,repo:$repo,pr:($pr|tonumber),pid:$pid,pid_start:$start}' \
+    > "$CEL_REX_STATE/reviewer.json"
+}
+
+test_review_rex_reviewer_is_bound_to_the_resolved_pr_before_either_verdict() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  local target verdict out before
+  before="$(cat "$T/.cel/delegations.json")"
+  for target in 'widget 8' 'gadget 7'; do
+    _fanout_rex_reviewer $target
+    for verdict in approved changes; do
+      if out="$(cd "$T" && "$BIN" review WG-LAND "$verdict" --head "$HA" --by "$REX_REVIEWER" 2>&1)"; then
+        echo 'Rex reviewer recorded a verdict for another PR/repo'; rm -rf "$T"; return 1
+      fi
+      assert_contains "$out" 'only this PR reviewer'
+      assert_eq "$(cat "$T/.cel/delegations.json")" "$before"
+    done
+  done
+  rm -rf "$T"
+}
+
+test_review_rex_same_target_records_approval_and_retains_a_stale_head_negative() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  _fanout_rex_reviewer widget 7
+  (cd "$T" && "$BIN" review WG-LAND approved --head "$HA" --by "$REX_REVIEWER") >/dev/null
+  assert_eq "$(_rev_row | jq -r .verdict)" approved
+  export STUB_PR_HEAD="$HC"
+  (cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by "$REX_REVIEWER") >/dev/null
+  assert_eq "$(_rev_row | jq -r .verdict)" changes
+  assert_eq "$(_rev_row | jq -r .head)" "$HA"
+  rm -rf "$T"
+}
+
+test_review_rex_changes_refuses_a_target_changed_during_pr_resolution() {
+  _fanout_land_setup fleetbot REVIEW_REQUIRED 0
+  _fanout_rex_reviewer widget 7
+  export STUB_PRVIEW_HOOK="jq -c 'map(.branch = \"WG-OTHER\")' '$T/.cel/delegations.json' > '$T/.cel/d.tmp' && mv '$T/.cel/d.tmp' '$T/.cel/delegations.json'"
+  local out
+  if out="$(cd "$T" && "$BIN" review WG-LAND changes --head "$HA" --by "$REX_REVIEWER" 2>&1)"; then
+    echo 'Rex negative verdict followed a changed target'; rm -rf "$T"; return 1
+  fi
+  assert_contains "$out" 'changed'
+  assert_eq "$(_rev_row)" null
+  rm -rf "$T"
+}
+
 test_land_refuses_a_legacy_ledger_approval_without_explicit_head() {
   _fanout_land_setup fleetbot REVIEW_REQUIRED 0
   # a historical record: head came from the local worktree, no head_source

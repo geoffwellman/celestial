@@ -26,6 +26,17 @@ function celRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 function celBin(): string { return path.join(celRoot(), "bin", "cel"); }
+// Rex hosts the runtime directly rather than through Herdr's integration.
+// Report only state observed by the runtime, never guessed from screen text.
+function rexNote(state, ctx): void {
+  if (process.env.CEL_SESSION_BACKEND !== "rex") return;
+  try {
+    const native = ctx?.sessionManager?.getSessionFile?.() || "";
+    execFileSync(celBin(), ["sessions", "note", String(process.pid), state, native], {
+      timeout: 3000, stdio: "ignore",
+    });
+  } catch { /* status observation must not break the runtime or inbox */ }
+}
 // CEL_INBOX_WS/CEL_INBOX_ME are exported by `cel run` for root and orchestrators;
 // CEL_WORKSPACE is a directory, so it is never passed as a mailbox name.
 //
@@ -290,9 +301,10 @@ export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
   registerHereCommands(pi);
-  pi.on("agent_end", () => { waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
-  pi.on("session_start", (_e, ctx) => { stopped = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); });
+  pi.on("agent_end", (_e, ctx) => { rexNote("idle", ctx); waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
+  pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); stopped = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
+    rexNote("working", ctx);
     const mail = takeMail(ctx);
     if (!mail) return;
     return {

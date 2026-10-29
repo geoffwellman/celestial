@@ -309,6 +309,19 @@ test_box_space_counts_an_unrecorded_reviewer_pane_too() {
   rm -rf "$T"
 }
 
+test_box_rex_reviewer_rss_uses_the_roster_pid_not_herdr() {
+  _box_fixture
+  cel_agent_list() {
+    jq -n --argjson pid "$$" '{result:{agents:[{name:"widget-pr-71-review",pane_id:"rex/session:fixture/block:fixture",cwd:"/w/repos/widget",agent_status:"idle",backend:"rex",pid:$pid}]}}'
+  }
+  herdr() { printf '%s\n' "$*" >> "$T/herdr-calls"; return 1; }
+  local json; json="$(box_reviewers_json)"
+  assert_eq "$(printf '%s' "$json" | jq -r .count)" 1
+  [ "$(printf '%s' "$json" | jq -r .bytes)" -gt 0 ] || { echo 'Rex reviewer RSS was not measured'; return 1; }
+  [ ! -s "$T/herdr-calls" ] || { echo 'Rex reviewer was sent to Herdr'; return 1; }
+  rm -rf "$T"
+}
+
 # NEVER TOUCH THE LIVE BOX. box_reviewers_json asks the roster which panes
 # are reviewers, so every test that reaches cmd_box space or box_doctor_line
 # reads the live herdr unless the fixture itself stubs it - and most of the

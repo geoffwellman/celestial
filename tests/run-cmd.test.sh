@@ -2,8 +2,19 @@
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/run.sh"
 
-_ws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
-        mkdir -p "$T/repos/widget"; }
+_ws() {
+  T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
+  mkdir -p "$T/repos/widget" "$T/bin"
+  # No fixture reads the live box's core/agent inventory. Tests that need a
+  # populated roster overwrite this executable or provide their own function.
+  cat > "$T/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'agent list' ] || exit 1
+printf '{"result":{"agents":[]}}\n'
+SH
+  chmod +x "$T/bin/herdr"
+  export PATH="$T/bin:$PATH"
+}
 
 # cmd_run dies via die() (exit) on the failure paths below. assert_fails runs
 # its argument as a plain function call in this same process, so a bare exit
@@ -1036,6 +1047,7 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       "pane get"|"pane process-info") _fake_pane "$@" ;;
@@ -1303,6 +1315,7 @@ _label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
       "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
       "pane rename"|"tab rename") [ -z "${FAIL_RENAME:-}" ] ;;
       "pane get"|"pane process-info") _fake_pane "$@" ;;

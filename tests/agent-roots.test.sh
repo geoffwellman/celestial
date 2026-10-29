@@ -177,6 +177,7 @@ test_agent_roots_real_pi_survives_real_omp_start() {
 
 test_agent_roots_core_launch_refuses_overlap() {
   _ar_setup
+  cel_agent_list() { printf '{"result":{"agents":[]}}'; }
   export CEL_PI_AGENT_DIR="$HOME/.omp/agent/pi"
   _run_core_default() { case "$1" in runtime) echo pi ;; *) echo "" ;; esac; }
   _run_core_dir() { echo "$T/core"; }

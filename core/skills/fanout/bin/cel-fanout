@@ -2645,42 +2645,51 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   [ -n "$entry" ] || die "review: no delegation with id '$id'"
   [ "$verdict" != approved ] || _rec_guard review "$id" "$entry"
 
-  if [ "$verdict" = approved ]; then
-    _replace_frozen review "$id" "$entry"
-    _replace_unattached review "$id" "$entry"
-    _replace_bound_guard review "$id" "$entry"
+  local repo branch slug ident pr="" review_pr=""
+  repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"
+  if [ "$verdict" = approved ] || rex_current_agent >/dev/null; then
+    if [ "$verdict" = approved ]; then
+      _replace_frozen review "$id" "$entry"
+      _replace_unattached review "$id" "$entry"
+      _replace_bound_guard review "$id" "$entry"
+    fi
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, ON A PR THIS
     # DELEGATION OWNS. The API read validates; it is never where the SHA comes
     # from. The ledger lock is dropped around the remote call (the same rule as
     # a gate) and the row is re-read after: if its identity moved, nothing is
     # recorded.
-    local repo branch worktree slug ident
-    repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"
+    # Rex negative verdicts still bind the reviewer to this branch's PR, but
+    # need not cover the current head: a durable negative can outlive a push.
     branch="$(printf '%s' "$entry" | jq -r '.branch // ""')"
     ident="$(printf '%s' "$entry" | jq -c '{repo, branch, worktree, alias}')"
     slug="$(_repo_slug "$wsdir" "$repo")"
     [ -n "$slug" ] && [ -n "$branch" ] || die "review: cannot resolve the PR for '$id' (repo '$repo', branch '$branch') - nothing recorded"
     ws_github_ready "$wsdir" "$GH" \
-      || die "review: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")") - an approval is not recorded unverified"
+      || die "review: refusing to check the PR for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")") - the verdict target cannot be verified"
     _ledger_unlock
-    local pr me author rhead state
+    local me="" author rhead state
     pr="$(_fgh "$wsdir" pr view "$branch" --repo "$slug" --json number,author,state,headRefOid 2>/dev/null)" \
-      || { _ledger_relock; die "review: no PR found for $branch on $slug - an approval needs a pushed PR head to bind to; nothing recorded"; }
-    me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
+      || { _ledger_relock; die "review: no PR found for $branch on $slug - nothing recorded"; }
+    [ "$verdict" != approved ] || me="$(_fgh "$wsdir" api user --jq .login 2>/dev/null || true)"
     _ledger_relock
-    author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
-    rhead="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
-    state="$(printf '%s' "$pr" | jq -r '.state // ""')"
-    [ -n "$me" ] && [ "$author" = "$me" ] \
-      || die "review: PR for $branch was opened by '${author:-?}', not by this fleet ('${me:-?}') - this delegation does not own it; nothing recorded"
-    [ "$state" = OPEN ] || die "review: the PR for $branch is $state, not OPEN - nothing recorded"
-    [ "$rhead" = "$head" ] \
-      || die "review: --head $head is not the PR's current head (${rhead:-unknown}) - an approval covers exactly the remote head you reviewed; re-review the current head. Nothing recorded"
+    review_pr="$(printf '%s' "$pr" | jq -r '.number // empty')"
+    if [ "$verdict" = approved ]; then
+      author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
+      rhead="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+      state="$(printf '%s' "$pr" | jq -r '.state // ""')"
+      [ -n "$me" ] && [ "$author" = "$me" ] \
+        || die "review: PR for $branch was opened by '${author:-?}', not by this fleet ('${me:-?}') - this delegation does not own it; nothing recorded"
+      [ "$state" = OPEN ] || die "review: the PR for $branch is $state, not OPEN - nothing recorded"
+      [ "$rhead" = "$head" ] \
+        || die "review: --head $head is not the PR's current head (${rhead:-unknown}) - an approval covers exactly the remote head you reviewed; re-review the current head. Nothing recorded"
+    fi
     # CAS: re-read after the unlocked window; the delegation must be the same one.
     local entry2; entry2="$(_ledger_entry "$wsdir" "$id")"
     [ -n "$entry2" ] && [ "$(printf '%s' "$entry2" | jq -c '{repo, branch, worktree, alias}')" = "$ident" ] \
       || die "review: delegation '$id' changed while the PR was being checked - nothing recorded; run the review again"
   fi
+  cel_assert_reviewer_identity "$by" "$wsdir" "$repo" "$review_pr" \
+    || die "review: caller does not match this PR reviewer identity - nothing recorded"
 
   local cur; cur="$(_ledger_read "$wsdir")"
   _ledger_write "$wsdir" "$(printf '%s' "$cur" | jq --arg id "$id" --arg v "$verdict" \

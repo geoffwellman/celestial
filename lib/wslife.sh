@@ -222,6 +222,9 @@ cmd_ws_up() { # <name> [--dry-run]
       IFS=$'\t' read -r oname opane _ <<< "$occupant"
       if [ "$oname" = "$alias" ]; then
         _wslife_say "orchestrator $alias" "already live ($opane)"
+      elif [[ "$opane" == rex/* ]]; then
+        # Rex receipt identities are not Herdr names and cannot be renamed here.
+        _wslife_say "orchestrator $alias" "live in Rex as $oname ($opane); restart it to change its identity"
       elif [ "$dry" -eq 1 ]; then
         _wslife_say "orchestrator $alias" "would rename ${oname/#-/<unnamed>} in $opane"
       else
@@ -286,6 +289,26 @@ $held
 $held"
   fi
 
+  # Rex sessions are not children of Herdr workspaces. Close only live records
+  # created for this exact workspace, never somebody's similarly named session
+  # or the box-wide core (which may have been launched from this directory).
+  local rex agents pane agent
+  rex="$(rex_agent_list)" || die "cel ws down: Rex discovery unavailable - nothing closed"
+  agents="$(printf '%s' "$rex" | jq -ce --arg ws "$wsdir" '
+    .result.agents | if type != "array" then error("invalid Rex roster") else
+      [.[] | select(.backend == "rex" and .workspace == $ws)
+       | select(.role | IN("root", "orchestrator", "solo", "lane", "reviewer", "worker"))]
+      | if all(.[]; (.pane_id | type == "string" and startswith("rex/"))
+                     and (.name | type == "string" and length > 0))
+        then . else error("invalid Rex identity") end end')" \
+    || die "cel ws down: Rex identities unreadable - nothing closed"
+  while IFS=$'\t' read -r pane agent; do
+    [ -n "$pane" ] || continue
+    rex_agent_stop "$pane" \
+      || { c_warn "could not stop Rex agent $agent ($pane) - workspace teardown incomplete"; return 1; }
+    _wslife_say "agent $agent" "closed ($pane)"
+  done < <(printf '%s' "$agents" | jq -r '.[] | [.pane_id, .name] | @tsv')
+
   local list p alias id closed=0
   list="$(_wslife_ws_json)"
   # The agents go with their panes: herdr closes a workspace by closing the
@@ -323,7 +346,7 @@ cmd_ws_reset() { # <name> [--force]
     esac
   done
   [ -n "$name" ] || die "cel ws reset: a workspace name is required"
-  cmd_ws_down "$name" "${force[@]}"
+  cmd_ws_down "$name" "${force[@]}" || return $?
   cmd_ws_up "$name"
 }
 

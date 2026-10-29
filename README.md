@@ -231,6 +231,37 @@ that touch different parts of the code. `cel fleet` lists a product's live
 lanes; `/cel-restart` in a lane restarts that lane only; `cel mode <p> fleet`
 is refused while any lane is live.
 
+### Choose Herdr or Rex for new sessions
+
+The terminal host is independent of the agent runtime and model. Herdr stays
+the default; select Rex for a new session with:
+
+```sh
+cel run solo --product celestial --lane ui --session-backend rex
+cel run reviewer --repo celestial --pr 123 --session-backend rex
+cel core --session-backend rex
+cel sessions --json
+```
+
+Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
+`cel run` sessions. `--session-backend herdr` overrides it. Existing agents
+are never moved: a restart retains the current terminal host. Rex must already
+be installed; Celestial does not restart its server or adopt unrelated Rex
+sessions. Each new agent gets its own named Rex session, and the command
+prints its session and terminal IDs. Use `rex ls`, `rex capture -s <session>
+-b <block>` and Rex's native controls, not Herdr commands, for those terminals.
+
+Role prompts, model/profile selection, workspace and gateway environment,
+inbox identity and review gates are unchanged. Pi/OMP report their real turn
+state and native conversation file through the inbox extension; runtimes
+without that observation stay conservatively busy. A restart never silently
+discards an unreported native conversation: it refuses unless `--fresh` is
+explicit. Managed Rex sessions appear alongside Herdr agents in Celestial's
+inventory; automatic Herdr pane cleanup never closes a Rex terminal.
+
+Fleet delegation (`cel-fanout`) continues to use Herdr. The backend option is
+for sessions launched with `cel run` (including solo lanes and reviewers).
+
 ### Commands inside an agent
 
 Core, orchestrators and solo agents all take the same small set of commands,
@@ -989,10 +1020,11 @@ reads its log, `x` stops a preview. The dashboard has the same rows as a card.
 
 ### The agents
 
-The orchestrators, workers, scouts, spikes and reviewers are herdr panes, not
-services. They are started by `cel run` and `cel-fanout delegate`, and they
-stop when their pane does. `cel-fanout status` is the ledger of what was
-delegated, on which model, and where it got to.
+Agents are terminal sessions, not services: Herdr by default, or Rex for
+`cel run ... --session-backend rex`. They stop when their terminal does.
+Fleet workers started by `cel-fanout delegate` remain Herdr panes;
+`cel-fanout status` is the ledger of what was delegated, on which model, and
+where it got to.
 
 A worktree is a fresh checkout, so the gitignored files an app needs to *run* —
 keys, a built wasm directory — are simply absent from it. `repos[].seed` in
