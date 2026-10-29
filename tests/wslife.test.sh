@@ -250,6 +250,18 @@ test_up_renames_a_live_unnamed_agent_only_in_a_cwd_it_owns() {
   _wslife_teardown
 }
 
+test_up_never_renames_a_rex_identity_through_herdr() {
+  _wslife_setup
+  cel_agent_list() {
+    jq -n --arg d "$T/alpha/products/bundle" '{result:{agents:[{name:"retained-name",pane_id:"rex/session:owned/block:owned",backend:"rex",agent_status:"idle",cwd:$d,agent:"omp"}]}}'
+  }
+  cmd_ws_up alpha >/dev/null
+  case "$(cat "$STUB_DIR/calls.log")" in
+    *rex/*|*'agent start bundle-orch'*) echo 'Rex identity was sent to Herdr or duplicated'; _wslife_teardown; return 1;;
+  esac
+  _wslife_teardown
+}
+
 # --- down -------------------------------------------------------------------
 
 test_down_refuses_with_unlanded_work_named_and_force_proceeds() {
@@ -274,6 +286,75 @@ test_down_refuses_with_unlanded_work_named_and_force_proceeds() {
   ! grep -q 'worktree remove' "$STUB_DIR/calls.log" \
     || { echo "down removed a worktree"; _wslife_teardown; return 1; }
   assert_eq "$(cat "$T/alpha/.cel/delegations.json")" "$before"
+  _wslife_teardown
+}
+
+test_down_stops_only_managed_rex_roles_owned_by_the_exact_workspace() {
+  _wslife_setup
+  printf '[]\n' > "$T/alpha/.cel/delegations.json"
+  rex_agent_list() {
+    jq -n --arg ws "$T/alpha" '{result:{agents:
+      (["root","orchestrator","solo","lane","reviewer","worker"] | map(. as $role |
+        {name:$role,role:$role,backend:"rex",workspace:$ws,pane_id:("rex/session:"+$role+"/block:"+$role)}))
+      + [{name:"core",role:"core",backend:"rex",workspace:$ws,pane_id:"rex/session:core/block:core"},
+         {name:"foreign",role:"worker",backend:"rex",workspace:($ws+"-other"),pane_id:"rex/session:foreign/block:foreign"},
+         {name:"nested",role:"worker",backend:"rex",workspace:($ws+"/nested"),pane_id:"rex/session:nested/block:nested"},
+         {name:"unowned",role:"worker",backend:"herdr",workspace:$ws,pane_id:"w:p1"}]}}'
+  }
+  rex_agent_stop() { printf '%s\n' "$1" >> "$T/rex-stops"; }
+  cmd_ws_down alpha >/dev/null
+  assert_eq "$(wc -l < "$T/rex-stops")" 6
+  local role
+  for role in root orchestrator solo lane reviewer worker; do
+    assert_contains "$(cat "$T/rex-stops")" "rex/session:$role/block:$role"
+  done
+  assert_eq "$(cat "$STUB_DIR/calls.log")" ''
+  _wslife_teardown
+}
+
+test_down_preserves_rex_agents_when_held_work_refuses_teardown() {
+  _wslife_setup
+  _wslife_worktree "$T/wt"
+  _wslife_ledger "$T/wt"
+  # A running ledger row alone is not work at risk: this fixture starts clean
+  # at origin/main, so give the existing guard actual uncommitted work to see.
+  printf 'work\n' > "$T/wt/scratch.txt"
+  rex_agent_list() { printf discovery >> "$T/rex-calls"; return 1; }
+  rex_agent_stop() { printf stop >> "$T/rex-calls"; }
+  local out
+  if out="$(cmd_ws_down alpha 2>&1)"; then
+    echo 'workspace teardown bypassed held work'; _wslife_teardown; return 1
+  fi
+  assert_contains "$out" 'still has work that is neither pushed nor landed'
+  [ ! -e "$T/rex-calls" ] || { echo 'Rex teardown began before the held-work check'; return 1; }
+  _wslife_teardown
+}
+
+test_down_refuses_before_herdr_closes_when_rex_discovery_fails() {
+  _wslife_setup
+  printf '[]\n' > "$T/alpha/.cel/delegations.json"
+  rex_agent_list() { return 1; }
+  if (cmd_ws_down alpha) >/dev/null 2>&1; then
+    echo 'workspace teardown ignored failed Rex discovery'; _wslife_teardown; return 1
+  fi
+  assert_eq "$(cat "$STUB_DIR/calls.log")" ''
+  _wslife_teardown
+}
+
+test_reset_does_not_start_up_after_a_rex_stop_failure() {
+  _wslife_setup
+  printf '[]\n' > "$T/alpha/.cel/delegations.json"
+  rex_agent_list() {
+    jq -n --arg ws "$T/alpha" '{result:{agents:[{name:"owned",role:"solo",backend:"rex",workspace:$ws,pane_id:"rex/session:owned/block:owned"}]}}'
+  }
+  rex_agent_stop() { printf '%s\n' "$1" >> "$T/rex-stops"; return 1; }
+  cmd_ws_up() { printf up >> "$T/up"; }
+  if (cmd_ws_reset alpha) >/dev/null 2>&1; then
+    echo 'reset succeeded after a Rex stop failure'; _wslife_teardown; return 1
+  fi
+  assert_eq "$(cat "$T/rex-stops")" rex/session:owned/block:owned
+  [ ! -e "$T/up" ] || { echo 'reset launched despite a failed stop'; return 1; }
+  assert_eq "$(cat "$STUB_DIR/calls.log")" ''
   _wslife_teardown
 }
 

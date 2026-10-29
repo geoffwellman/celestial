@@ -153,6 +153,8 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
   [ "$head_given" -eq 1 ] || die "cel solo review: --head <full-40-char-commit-sha> is required - the verdict covers the commit you reviewed"
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "cel solo review: --head must be a full 40-character lowercase commit SHA (got: '$head')"
   _solo_resolve "$ref" "$workspace"
+  cel_assert_reviewer_identity "$by" "$SOLO_WSDIR" "$SOLO_REPO" "$SOLO_PR" \
+    || die "cel solo review: caller does not match the reviewer identity - nothing recorded"
 
   if [ "$verdict" = approved ]; then
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, on a PR this

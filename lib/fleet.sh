@@ -73,7 +73,7 @@ fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are P
 # who is alive; anything else is the no-roster path, and `-`.
 _fleet_roster() {
   local out
-  out="$(herdr agent list 2>/dev/null)" || { printf '%s' ''; return 0; }
+  out="$(cel_agent_list 2>/dev/null)" || { printf '%s' ''; return 0; }
   [ -n "$out" ] || { printf '%s' ''; return 0; }
   printf '%s' "$out" | jq -e '
     type == "object" and (.result | type) == "object"
@@ -106,7 +106,7 @@ _fleet_roster() {
 # An empty roster means herdr did not answer, and `-` says that about the
 # OBSERVER; `gone` says it about the worker. lib/stall.sh learned the
 # difference the hard way and the two must not be folded together here.
-_fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree US state US live US harness US id
+_fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree US state US live US harness US id US backend
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
   # The roster arrives as a STRING and is parsed inside the program, not as
@@ -138,7 +138,7 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
     | agent($p) as $a
     | (if $a == null then "-" else (if ($a.agent_status // "") == "" then "gone" else $a.agent_status end) end) as $live
     | [($e | tojson), $p, (.worktree // ""), (.state // ""), $live,
-       (if $a == null then "" else ($a.agent // "") end), (.id // "")]
+       (if $a == null then "" else ($a.agent // "") end), (.id // ""), ($a.backend // "herdr")]
     | join($us)' \
     "$led" 2>/dev/null || true
 }
@@ -271,8 +271,8 @@ fleet_ahead() { # <worktree> -> count | ?
 # being stalled is how a watcher earns its reputation for crying wolf, and it
 # would put this list permanently out of step with the `stalled` count beside
 # it. An empty `live` (herdr did not answer at all) is not evidence either.
-_fleet_row_facts() { # <live> <text> <worktree> <state> <id> -> 8 lines
-  local live="$1" text="$2" wt="$3" state="$4" id="$5"
+_fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 lines
+  local live="$1" text="$2" wt="$3" state="$4" id="$5" backend="${6:-herdr}"
   local quiet="" verdict="" severity="" risk="" activity="" aconf="" cached
   # Quiet time is a question about a RUNNING worker. Answering it for every
   # finished and collected row meant a `find` over every worktree on the box
@@ -284,7 +284,7 @@ _fleet_row_facts() { # <live> <text> <worktree> <state> <id> -> 8 lines
   # processes, asked a second time.
   _fleet_git_load "$wt"
   risk="$_FLEET_GIT_RISK"
-  if [ "$state" = running ] && [ "$live" != "-" ]; then
+  if [ "$backend" != rex ] && [ "$state" = running ] && [ "$live" != "-" ]; then
     verdict="$(stall_verdict "$live" "$text" "$quiet")"
     severity="$(stall_severity "$verdict" "$risk")"
   fi
@@ -296,7 +296,8 @@ _fleet_row_facts() { # <live> <text> <worktree> <state> <id> -> 8 lines
   # row is a view people stop running. It carries the steward's last answer,
   # which is why a row nobody has classified simply has neither field filled -
   # and why a stale answer is dropped rather than shown as current.
-  cached="$(liveness_cached "$id")"
+  cached=""
+  [ "$backend" = rex ] || cached="$(liveness_cached "$id")"
   if [ -n "$cached" ]; then
     activity="${cached%%	*}"
     aconf="${cached#*	}"
@@ -482,17 +483,17 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   local row rows=""
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    local entry pane wt state live harness id text
-    IFS="$_FLEET_US" read -r entry pane wt state live harness id <<<"$row"
+    local entry pane wt state live harness id backend text
+    IFS="$_FLEET_US" read -r entry pane wt state live harness id backend <<<"$row"
 
-    if [ "$have_roster" = 1 ] && [ "$state" = running ] && [ -n "$pane" ] && [ "$live" != gone ]; then
+    if [ "$have_roster" = 1 ] && [ "$backend" != rex ] && [[ "$pane" != rex/* ]] && [ "$state" = running ] && [ -n "$pane" ] && [ "$live" != gone ]; then
       text="$(herdr pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
     else
       text=""
     fi
 
     local facts quiet verdict severity ahead orss activity aconf risk
-    facts="$(_fleet_row_facts "$live" "$text" "$wt" "$state" "$id")"
+    facts="$(_fleet_row_facts "$live" "$text" "$wt" "$state" "$id" "$backend")"
     { read -r quiet; read -r verdict; read -r severity; read -r ahead
       read -r orss; read -r activity; read -r aconf; read -r risk; } <<<"$facts"
 

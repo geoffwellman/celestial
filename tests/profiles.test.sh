@@ -11,8 +11,18 @@ export CEL_NO_CREDENTIAL_PROBE=1
 # exercised with a stub in its own tests.
 export CEL_NO_QUOTA_PROBE=1
 
-_pws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-profiles/workspace.yaml" "$T/"
-         mkdir -p "$T/repos/widget"; }
+_pws() {
+  T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-profiles/workspace.yaml" "$T/"
+  mkdir -p "$T/repos/widget" "$T/bin"
+  # Profile resolution must not depend on a live core on the caller's box.
+  cat > "$T/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'agent list' ] || exit 1
+printf '{"result":{"agents":[]}}\n'
+SH
+  chmod +x "$T/bin/herdr"
+  export PATH="$T/bin:$PATH"
+}
 _aws() { T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
          mkdir -p "$T/repos/widget"; }
 

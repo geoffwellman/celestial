@@ -130,8 +130,8 @@ _mode_agent_status() { # <wsdir> <product> [lane]
   else
     name="$(_run_agent_name "$2/orch")"; cwd="$(ws_product_dir "$1" "$2")"
   fi
-  have herdr && have jq || return 2
-  roster="$(herdr agent list 2>/dev/null)" || return 2
+  have jq || return 2
+  roster="$(cel_agent_list 2>/dev/null)" || return 2
   printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 2
   printf '%s' "$roster" | jq -er --arg n "$name" --arg c "$cwd" \
     '[.result.agents[] | select(.name == $n and (.cwd // "") == $c)][0].agent_status // empty' 2>/dev/null \
@@ -142,9 +142,9 @@ _mode_agent_status() { # <wsdir> <product> [lane]
 # each - an agent standing in .cel/solo/<product>/lane-<lane>. A pane whose
 # directory was deleted is no live lane. Nothing when herdr cannot be asked.
 _mode_live_lanes() { # <wsdir> <product>
-  have herdr && have jq || return 0
+  have jq || return 0
   local base; base="$(ws_solo_dir "$1" "$2")/lane-"
-  herdr agent list 2>/dev/null | jq -r --arg b "$base" \
+  cel_agent_list 2>/dev/null | jq -r --arg b "$base" \
     '.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
      | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null
   return 0

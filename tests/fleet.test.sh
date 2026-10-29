@@ -819,6 +819,38 @@ test_fleet_worker_row_renders_from_the_entry_alone() {
   _fleet_teardown
 }
 
+test_fleet_rex_presence_does_not_read_rex_through_herdr_or_invent_stall_evidence() {
+  _fleet_setup
+  _fleet_stub_memory
+  local pane='rex/session:fixture/block:fixture' rows
+  rows="$(jq --arg p "$pane" '.[0].pane = $p' "$T/alpha/.cel/delegations.json")"
+  printf '%s\n' "$rows" > "$T/alpha/.cel/delegations.json"
+  cel_agent_list() {
+    jq -n --arg p "$pane" --arg w "$WT" \
+      '{result:{agents:[{name:"widget-widget-work",pane_id:$p,cwd:$w,backend:"rex",agent:"pi",agent_status:"idle"}]}}'
+  }
+  herdr() {
+    # The box-wide orphan summary still asks Herdr for its own pane inventory.
+    # That exact read is allowed; any targeted read/control remains a failure.
+    if [ "$#" -eq 2 ] && [ "$1 $2" = 'pane list' ]; then
+      printf '%s' '{"result":{"panes":[]}}'
+      return 0
+    fi
+    printf '%s\n' "$*" >> "$T/herdr-calls"
+    return 1
+  }
+  stall_quiet_secs() { printf 86400; }
+  liveness_cached() { printf 'crashed\thigh'; }
+  local doc worker
+  doc="$(cmd_fleet --json --workspace alpha)"
+  worker="$(printf '%s' "$doc" | jq -c '.workspaces[0].units[].workers_list[] | select(.id == "one")')"
+  assert_eq "$(printf '%s' "$worker" | jq -r .live)" idle
+  assert_eq "$(printf '%s' "$worker" | jq -r .verdict)" ''
+  assert_eq "$(printf '%s' "$worker" | jq -r .activity)" ''
+  [ ! -s "$T/herdr-calls" ] || { echo 'Rex presence triggered a Herdr targeted read/control'; return 1; }
+  _fleet_teardown
+}
+
 # AN UNREADABLE ROSTER MUST NOT BE ABLE TO EMPTY THE FLEET.
 #
 # `herdr agent list` answering with non-empty MALFORMED JSON made `--argjson

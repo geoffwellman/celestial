@@ -117,6 +117,8 @@ _steward_clear_dead_panes() {
   for ws in $(registry_names); do
     while IFS=$'\t' read -r id pane; do
       [ -n "$id" ] && [ -n "$pane" ] || continue
+      # Herdr pane discovery says nothing about a Rex session's existence.
+      case "$pane" in rex/*) continue;; esac
       if printf '%s\n' "$panes" | grep -qxF "$pane"; then continue; fi
       _steward_clear_id "$ws" "$id" "pane gone"
     done < <(cmd_inbox open --for root --workspace "$ws" --json 2>/dev/null \
@@ -575,7 +577,7 @@ _steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
 _steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
   local agents="$1" alias text
   alias="$(_steward_branch_agents "$agents" "$2" "$3" "$4" | jq -r \
-    '.[0] | (.name // .agent_id // "")' 2>/dev/null || true)"
+    '.[0] | select((.backend // "herdr") != "rex") | (.name // .agent_id // "")' 2>/dev/null || true)"
   [ -n "$alias" ] && [ "$alias" != null ] || return 0
   text="$("$_STEWARD_HERDR" agent read "$alias" --source recent-unwrapped --lines 40 2>/dev/null || true)"
   [ -n "$text" ] || return 0
@@ -584,6 +586,7 @@ _steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
 
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj ref
+  printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   # WAITING ON THE OWNER IS NOT A WORKER FINDING (CEL-115). A PR whose only
   # red check was an external review bot out of credit was nudged "get a
   # worker on it" three times in a day; no worker can pay a bill. An open
@@ -616,7 +619,10 @@ _steward_review_sweep() { # <agents-json>
       local fallback
       fallback="$(printf '%s' "$agents_json" | jq -r --arg d "$(_steward_orch_dir "$wsdir" "$prod-orch")" \
         '[.result.agents[] | select(.cwd == $d)][0].pane_id // empty')"
-      herdr agent get "$orch" >/dev/null 2>&1 || { [ -n "$fallback" ] && orch="$fallback"; }
+      if ! printf '%s' "$agents_json" | jq -e --arg n "$orch" \
+        'any(.result.agents[]?; .name == $n and .backend == "rex")' >/dev/null 2>&1; then
+        herdr agent get "$orch" >/dev/null 2>&1 || { [ -n "$fallback" ] && orch="$fallback"; }
+      fi
       # ONLY THE FLEET'S OWN PRs. Every PR a worker opens is authored by the
       # token cel runs under, so `--author @me` is the ownership line; a
       # colleague's PR must never be nudged into "action it now".
@@ -767,6 +773,7 @@ _steward_solo_sweep() {
 # a verdict.
 _steward_stalled_workers() { # <agents-json>
   local agents_json="$1" ws wsdir led
+  printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")"; [ -d "$wsdir" ] || continue
     led="$wsdir/.cel/delegations.json"
@@ -774,7 +781,7 @@ _steward_stalled_workers() { # <agents-json>
     local row
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      local id pane wt ticket branch live text quiet verdict risk sev state alias
+      local id pane wt ticket branch live text quiet verdict risk sev state alias backend
       id="$(printf '%s' "$row" | jq -r '.id')"
       alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
       state="$(printf '%s' "$row" | jq -r '.state // ""')"
@@ -792,6 +799,11 @@ _steward_stalled_workers() { # <agents-json>
 
       live="$(printf '%s' "$agents_json" | jq -r --arg p "$pane" \
         '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""')"
+      backend="$(printf '%s' "$agents_json" | jq -r --arg p "$pane" \
+        '[.result.agents[]? | select(.pane_id == $p)][0].backend // "herdr"')"
+      # Rex supplies presence, not a Herdr screen or evidence of idle/wake.
+      # Leave existing stall evidence untouched until this backend can observe it.
+      [ "$backend" != rex ] && [[ "$pane" != rex/* ]] || continue
       # A pane with no agent is only "vanished" if we could actually see the
       # roster; herdr being unreachable is not evidence that anyone died, and
       # this file already learned that lesson once.
@@ -1309,6 +1321,7 @@ _steward_server_procs() { # "<pid> <age-seconds> <port> <cwd>" per pages/dash se
 
 _steward_orphan_servers() { # <agents-json>
   local agents="$1" root pid age port cwd live
+  printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   root="${CEL_WORKTREE_ROOT:-$HOME/.herdr/worktrees}"
   while read -r pid age port cwd; do
     [ -n "${pid:-}" ] || continue
@@ -1854,7 +1867,7 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   [ "$do_gc" -eq 1 ] && _steward_box
 
   local agents_json
-  agents_json="$(herdr agent list 2>/dev/null || printf '{"result":{"agents":[]}}')"
+  agents_json="$(cel_agent_list 2>/dev/null)" || { agents_json=""; c_warn "agent discovery unavailable - liveness observations skipped"; }
   _steward_sample "$agents_json"
 
   _steward_review_sweep "$agents_json"
