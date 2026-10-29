@@ -41,7 +41,8 @@ esac
 EOF
   printf '%s' "$PV_HEAD" > "$T/pr-head"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/systemd-calls"\n' "$T" > "$T/systemd-run"
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/systemctl-calls"\n' "$T" > "$T/systemctl"
+  # is-active answers from $T/active (absent: inactive), like systemd
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/systemctl-calls"\ncase "$*" in *is-active*) [ -f "%s/active" ];; esac\n' "$T" "$T" > "$T/systemctl"
   chmod +x "$T/gh" "$T/systemd-run" "$T/systemctl"
 }
 _pv_down() {
@@ -176,5 +177,35 @@ test_preview_sweep_leaves_a_starting_preview_alone() {
   touch -d '-20 minutes' "$CEL_SERVE_STATE/previews/preview-widget-pr7.json"
   preview_sweep >/dev/null 2>&1
   [ ! -d "$(_pv_wt)" ] || { echo "sweep kept a start that died"; _pv_down; return 1; }
+  _pv_down
+}
+
+# A new head replaces the running preview: the old unit is stopped and its
+# failed state cleared before the same unit name is started again
+# (systemd-run refuses a name still loaded), and a start that fails leaves
+# nothing recorded.
+test_preview_restart_on_a_new_head_clears_the_unit_and_a_failed_start_rolls_back() {
+  _pv_setup
+  (cd "$T/ws" && cmd_preview widget#7 --no-wait >/dev/null 2>&1)
+  local w="$T/seedrepo"
+  printf 'v2\n' > "$w/app.txt"; git -C "$w" -c user.email=t@t -c user.name=t commit -qam v2
+  git -C "$w" push -q -f "$T/origin.git" HEAD:refs/pull/7/head; git -C "$w" rev-parse HEAD > "$T/pr-head"
+  : > "$T/systemctl-calls"
+  (cd "$T/ws" && cmd_preview widget#7 --no-wait >/dev/null 2>&1) || { cat "$T/systemctl-calls"; _pv_down; return 1; }
+  local calls; calls="$(cat "$T/systemctl-calls")"
+  assert_contains "$calls" "stop cel-serve-preview-widget-pr7.service"
+  assert_contains "$calls" "reset-failed cel-serve-preview-widget-pr7.service"
+  assert_contains "$(cat "$T/systemd-calls")" "CollectMode=inactive-or-failed"
+  assert_eq "$(git -C "$(_pv_wt)" rev-parse HEAD)" "$(cat "$T/pr-head")"
+  # a unit that is somehow still running refuses the start, and rolls back
+  touch "$T/active"
+  printf 'v3\n' > "$w/app.txt"; git -C "$w" -c user.email=t@t -c user.name=t commit -qam v3
+  git -C "$w" push -q -f "$T/origin.git" HEAD:refs/pull/7/head; git -C "$w" rev-parse HEAD > "$T/pr-head"
+  rm -f "$CEL_SERVE_STATE/preview-widget-pr7.json"   # its record lost, the unit still up
+  local out rc=0; out="$(cd "$T/ws" && cmd_preview widget#7 --no-wait 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "started over a running unit: $out"; _pv_down; return 1; }
+  assert_contains "$out" "nothing is left running or recorded"
+  [ ! -f "$CEL_SERVE_STATE/previews/preview-widget-pr7.json" ] || { echo "failed start left a preview record"; _pv_down; return 1; }
+  [ ! -d "$(_pv_wt)" ] || { echo "failed start left its checkout"; _pv_down; return 1; }
   _pv_down
 }

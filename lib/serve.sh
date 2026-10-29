@@ -38,8 +38,18 @@ serve_start() { # <name> <owner> <workspace> <ttl-seconds> <port> -- <command...
   [ ! -e "$d/$name.json" ] || die "cel serve start: $name already recorded"
   unit="cel-serve-$name"; worktree="${CEL_SERVE_WORKTREE:-$(pwd -P)}"; now="$(_serve_now)"
   printf -v cmd '%q ' "$@"
+  # A transient unit of this name that is still LOADED blocks systemd-run
+  # ("already loaded or has a fragment file"): a server that was stopped and
+  # exited non-zero (a dev server killed by SIGTERM does) stays loaded as
+  # failed. A running one is refused; a dead one is cleared. New units are
+  # collected even when they fail, so the next start has a free name.
+  if _serve_systemctl is-active --quiet "$unit.service" 2>/dev/null; then
+    die "cel serve start: $unit is still running - cel serve stop $name first"
+  fi
+  _serve_systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   _serve_systemd_run --unit="$unit" --property="WorkingDirectory=$worktree" \
-    --property="MemoryAccounting=yes" --property="Description=cel serve $name ($owner, $ws)" \
+    --property="MemoryAccounting=yes" --property="CollectMode=inactive-or-failed" \
+    --property="Description=cel serve $name ($owner, $ws)" \
     -- /bin/bash -lc "$cmd" || die "cel serve start: could not start $unit"
   tmp="$(mktemp "$d/.serve.XXXXXX")"
   jq -n --arg name "$name" --arg unit "$unit" --arg owner "$owner" --arg workspace "$ws" \
@@ -88,8 +98,10 @@ serve_unit_stop() { # <unit> -- require exact durable ledger ownership
     [ -f "$f" ] || continue
     [ "$(jq -r '.unit // ""' "$f" 2>/dev/null)" = "$unit" ] || continue
     id="$unit"; [[ "$id" == *.service ]] || id="$id.service"
-    _serve_systemctl stop "$id"
-    return $?
+    _serve_systemctl stop "$id" || return $?
+    # a server that exits non-zero on SIGTERM is left failed and loaded
+    _serve_systemctl reset-failed "$id" >/dev/null 2>&1 || true
+    return 0
   done
   return 1
 }
