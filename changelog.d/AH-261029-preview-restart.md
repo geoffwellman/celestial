@@ -1,0 +1,2 @@
+### Fixed
+- `cel preview` on a new PR head (and any `cel serve` restart under the same name) no longer fails with "unit already loaded": a server that exits non-zero when stopped left its transient unit loaded as failed. Units are now collected even when they fail, a stop clears the failed state, a dead unit of the same name is cleared before start and a running one is refused. A preview whose start fails leaves no record, checkout or url behind.

@@ -289,3 +289,28 @@ test_serve_gone_worktree_stops_before_ttl() {
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_NOW
   rm -rf "$t"
 }
+
+# A collected unit (the server crashed and CollectMode reaped it) is stopped:
+# its record is cleared. A unit that is loaded and will not stop keeps it.
+test_serve_stop_of_a_collected_unit_clears_its_record_and_a_stuck_one_keeps_it() {
+  local t; t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl"
+  mkdir -p "$CEL_SERVE_STATE"
+  printf '{"name":"gone","unit":"cel-serve-gone","kind":"unit"}' > "$CEL_SERVE_STATE/gone.json"
+  printf '{"name":"stuck","unit":"cel-serve-stuck","kind":"unit"}' > "$CEL_SERVE_STATE/stuck.json"
+  cat > "$CEL_SERVE_SYSTEMCTL" <<'EOS'
+#!/usr/bin/env bash
+case "$*" in
+  *"stop cel-serve-gone"*) exit 5 ;;
+  *"stop cel-serve-stuck"*) exit 1 ;;
+  *"LoadState --value cel-serve-gone"*) echo not-found ;;
+  *"LoadState --value cel-serve-stuck"*) echo loaded ;;
+esac
+EOS
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  serve_stop gone || { echo "collected unit read as a failed stop"; rm -rf "$t"; return 1; }
+  [ ! -f "$CEL_SERVE_STATE/gone.json" ] || { echo "collected unit's record kept"; rm -rf "$t"; return 1; }
+  if serve_stop stuck 2>/dev/null; then echo "a stuck unit read as stopped"; rm -rf "$t"; return 1; fi
+  [ -f "$CEL_SERVE_STATE/stuck.json" ] || { echo "stuck unit's record dropped"; rm -rf "$t"; return 1; }
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL; rm -rf "$t"
+}

@@ -195,8 +195,10 @@ preview_start() { # <wsdir> <repo> <pr> <port|0> <ttl-seconds> <wait 0|1>
   local -a urls=("$url")
   [ "$host" = 127.0.0.1 ] || [ "$host" = localhost ] || urls+=("http://localhost:$port")
 
-  CEL_SERVE_WORKTREE="$wt" serve_start "$name" "${CEL_INBOX_ME:-$(id -un)}" "$(ws_name "$wsdir")" "$ttl" "$port" -- "$run" \
-    || { _preview_teardown "$name"; die "cel preview: could not start the server"; }
+  # in a subshell: serve_start refuses with `die`, which would exit before the
+  # rollback, leaving a record with no server (running:false, url down)
+  ( CEL_SERVE_WORKTREE="$wt" serve_start "$name" "${CEL_INBOX_ME:-$(id -un)}" "$(ws_name "$wsdir")" "$ttl" "$port" -- "$run" ) \
+    || { _preview_teardown "$name"; die "cel preview: could not start the server - nothing is left running or recorded"; }
   jq -n --arg name "$name" --arg repo "$repo" --arg slug "$slug" --argjson pr "$pr" --arg head "$head" \
     --arg repodir "$repodir" --arg worktree "$wt" --arg wsdir "$wsdir" --argjson port "$port" \
     --args '{name:$name,repo:$repo,slug:$slug,pr:$pr,head:$head,repodir:$repodir,worktree:$worktree,wsdir:$wsdir,port:$port,urls:$ARGS.positional}' \
