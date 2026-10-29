@@ -98,7 +98,13 @@ serve_unit_stop() { # <unit> -- require exact durable ledger ownership
     [ -f "$f" ] || continue
     [ "$(jq -r '.unit // ""' "$f" 2>/dev/null)" = "$unit" ] || continue
     id="$unit"; [[ "$id" == *.service ]] || id="$id.service"
-    _serve_systemctl stop "$id" || return $?
+    # A server that already exited on its own was collected
+    # (CollectMode=inactive-or-failed): stop says "not loaded", and that IS
+    # stopped - otherwise its record could never be cleared. A unit still
+    # loaded that refuses to stop is a real failure.
+    if ! _serve_systemctl stop "$id" 2>/dev/null; then
+      [ "$(_serve_systemctl show -p LoadState --value "$id" 2>/dev/null)" = not-found ] || return 1
+    fi
     # a server that exits non-zero on SIGTERM is left failed and loaded
     _serve_systemctl reset-failed "$id" >/dev/null 2>&1 || true
     return 0
