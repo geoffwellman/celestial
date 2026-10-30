@@ -36,6 +36,7 @@ case "$1 $2" in
     d="$CEL_PROC_ROOT/9999"; mkdir -p "$d"
     printf '%s\0' "$kind" "$@" > "$d/cmdline"
     printf 'Name:\t%s\nPPid:\t50\n' "$kind" > "$d/status"
+    printf '9999 (runtime) S 50 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 9999\n' > "$d/stat"
     ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$d/cwd"
     tr ' ' '\n' < "$T/envprefix" | grep '^CEL_' | tr '\n' '\0' > "$d/environ"
     printf '%s\n' "$name" > "$T/started" ;;
@@ -56,6 +57,7 @@ orch_stub_proc() { # <pid> <me> <wsdir> <argv...>  (child of the pane shell, pid
   local pid="$1" me="$2" ws="$3"; shift 3
   mkdir -p "$PROC/$pid" "$PROC/50"
   printf 'Name:\tomp\nPPid:\t50\n' > "$PROC/$pid/status"
+  printf '%s (runtime) S 50 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' "$pid" "$pid" > "$PROC/$pid/stat"
   [ -f "$PROC/50/status" ] || printf 'Name:\tbash\nPPid:\t1\n' > "$PROC/50/status"
   ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$PROC/$pid/cwd"
   printf '%s\0' "$@" > "$PROC/$pid/cmdline"
@@ -81,6 +83,7 @@ orch_stub_bare_proc() { # <pid> <argv...>
   local pid="$1"; shift
   mkdir -p "$PROC/$pid" "$PROC/50"
   printf 'Name:\tomp\nPPid:\t50\n' > "$PROC/$pid/status"
+  printf '%s (runtime) S 50 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' "$pid" "$pid" > "$PROC/$pid/stat"
   [ -f "$PROC/50/status" ] || printf 'Name:\tbash\nPPid:\t1\n' > "$PROC/50/status"
   ln -sfn "${ORCH_STUB_CWD:-$T/ws/repos/widget}" "$PROC/$pid/cwd"
   printf '%s\0' "$@" > "$PROC/$pid/cmdline"; : > "$PROC/$pid/environ"

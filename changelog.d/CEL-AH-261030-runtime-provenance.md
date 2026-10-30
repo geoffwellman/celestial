@@ -1,0 +1,6 @@
+### Fixed
+- Compare live orchestrators against canonical effective SOLO/profile routing and their existing terminal backend, not a parsed Herdr-only preview. Native session IDs and one-shot kickoff prompts no longer create false launch drift.
+- Invalidate cached launch verdicts when routing content, live argv or process start identity changes, including same-size/same-timestamp local profile edits.
+- Distinguish Pi's rewritten, NUL-padded argv from observable missing hooks. Bound owned Rex receipt and direct-child watcher checks can establish inbox evidence without asserting guard enforcement or a complete current launch; unresolved evidence requests inspection without automatic restart. Genuinely missing observable hooks remain actionable.
+- Preserve complete NUL-delimited argv through comparison, so multiline kickoff text cannot impersonate hooks or model flags. Both staleness and restart confirmation consume the same identity-checked argv snapshot. Every Rex runtime requires a matching owned receipt before observable evidence is trusted.
+- Keep diagnostic canonical previews read-only: no native session-registry writes, and fresh scoped YAML/manifest parsing on cache misses prevents stale parsed configuration from overriding current routing content.

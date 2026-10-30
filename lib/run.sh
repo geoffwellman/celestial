@@ -19,6 +19,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/rex.sh"
 # shellcheck source=lib/opencode.sh
 . "${BASH_SOURCE[0]%/*}/opencode.sh"
+# shellcheck source=lib/run-evidence.sh
+. "${BASH_SOURCE[0]%/*}/run-evidence.sh"
 
 # PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
 # (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
@@ -1117,7 +1119,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
     IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
     [ "$lsession" != "-" ] || lsession=""
     [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession"
-    _run_sessions_record "$cwd" "$lsession"
+    [ "$dry_run" = 1 ] || _run_sessions_record "$cwd" "$lsession"
   fi
   if [ "$restart" -eq 1 ]; then
     if [ -z "$live" ]; then
@@ -1344,17 +1346,18 @@ _run_session_release_on_failure() { # <exit status>
 # What a launch line is made of, for comparing two of them: each flag with the
 # value that follows it. The role prompt's PATH does not count (a product can
 # move its role file without its launch being stale), nor does a resume.
-run_launch_items() { # <argv, one per line on stdin> -> items, one per line
-  local -a v; mapfile -t v
+run_launch_items() { # NUL-delimited argv -> losslessly encoded items, one per line
+  local -a v; mapfile -d '' -t v
   local i=1 n="${#v[@]}" a b
   while [ "$i" -lt "$n" ]; do
     a="${v[$i]}"; b="${v[$((i+1))]:-}"
     case "$a" in
       --*)
-        if [ -n "$b" ] && [ "${b#--}" = "$b" ]; then i=$((i+2)); else b=""; i=$((i+1)); fi
-        case "$a" in --resume|--continue) continue ;; esac
+        if [[ "$a" = *=* ]]; then b=""; i=$((i+1))
+        elif [ -n "$b" ] && [ "${b#--}" = "$b" ]; then i=$((i+2)); else b=""; i=$((i+1)); fi
+        case "$a" in --resume|--resume=*|--continue|--session|--session=*|--prompt|--prompt=*) continue ;; esac
         case "$b" in *role-*.md|'<body:'*) continue ;; esac
-        if [ -n "$b" ]; then printf '%s %s\n' "$a" "$b"; else printf '%s\n' "$a"; fi ;;
+        if [ -n "$b" ]; then printf '%q %q\n' "$a" "$b"; else printf '%q\n' "$a"; fi ;;
       *) i=$((i+1)) ;;
     esac
   done
@@ -1415,8 +1418,14 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
     c_warn "$name was started but its process could not be found - check the pane"
     return 0
   fi
+  run_runtime_evidence "$rt" "$name" "$pane" "$cwd" "$pid"
+  if [ "$RUN_EVIDENCE_ARGV" != observable ]; then
+    c_warn "$name restarted (pid $pid); $RUN_EVIDENCE_DETAIL; launch flags unverified"
+    return 0
+  fi
   exp="$(mktemp)"; act="$(mktemp)"
-  printf '%s\n' "$rt" "$@" > "$exp"; _run_cmdline "$pid" > "$act"
+  printf '%s\0' "$rt" "$@" > "$exp"
+  printf '%s\0' "${RUN_EVIDENCE_ARGV_VALUES[@]}" > "$act"
   missing="$(run_launch_missing "$exp" "$act")"
   rm -f -- "$exp" "$act"
   if [ -n "$missing" ]; then
@@ -2285,6 +2294,8 @@ _run_pane_pid() { # <pane> <cwd> <runtime>
     for f in "$(_rex_state)"/*.json; do
       [ -f "$f" ] || continue
       [ "$(jq -r .pane_id "$f")" = "$1" ] || continue
+      [ "$(jq -r .agent "$f")" = "$3" ] && [ "$(jq -r .cwd "$f")" = "$2" ] \
+        && [ "$(jq -r .backend "$f")" = rex ] || continue
       if _rex_live "$f"; then _RUN_PID="$(jq -r .pid "$f")"; return 0; fi
     done
     _RUN_WHY="no verified live process for Rex terminal $1"; return 1 ;;
@@ -2349,64 +2360,100 @@ _run_build() { # -> sets _RUN_BUILD once per process
   [ -n "${_RUN_BUILD:-}" ] || { read -r h < "$CEL_ROOT/VERSION" 2>/dev/null || true; _RUN_BUILD="${h:-unknown}"; }
 }
 
-# THE VERDICT ON ONE LIVE ORCHESTRATOR: sets _RUN_LAUNCH (current|stale|
-# unknown), _RUN_DETAIL and _RUN_MODEL. Remembered per build and pid: the
-# `cel run --dry-run` it compares with is the expensive part, and a new pid or
-# a new build compares afresh.
-_run_orch_verdict() { # <ws> <role> <product|-> <name> <pane> <cwd> <runtime>
+# Capture the canonical dry-run's resolved runtime and argv, not its display
+# shell syntax. Both terminal renderers call this formatter after role/profile
+# resolution; overriding it inside this subshell cannot affect a real launch.
+_run_expected_launch() ( # file ws role product backend
+  local target="$1" ws="$2" launch_role="$3" product="$4" backend="$5"
+  # The shared YAML parser keys on metadata; isolate a plan's parse so a
+  # same-size/same-timestamp routing edit cannot survive a verdict cache miss.
+  local CEL_YAML_CACHE CEL_MANIFEST_CACHE wsdir
+  CEL_YAML_CACHE="$(mktemp -d)" || return 1
+  CEL_MANIFEST_CACHE="$CEL_YAML_CACHE/manifest"
+  export CEL_YAML_CACHE CEL_MANIFEST_CACHE
+  trap 'rm -rf -- "$CEL_YAML_CACHE"' EXIT
+  wsdir="$(registry_path "$ws")" || return 1
+  if [ "$launch_role" = orchestrator ] && [ "$(ws_build_mode "$wsdir" "$product")" = solo ]; then launch_role=solo; fi
+  _run_dry_agent_args() { printf '%s\0' "$runtime" "${AGENT_ARGS[@]}" > "$target"; }
+  if [ "$launch_role" = root ]; then
+    cmd_run root --workspace "$ws" --fresh --force --dry-run --session-backend "$backend"
+  else
+    cmd_run "$launch_role" --product "$product" --workspace "$ws" --fresh --force --dry-run --session-backend "$backend"
+  fi
+)
+
+# A routing edit, argv rewrite or reused PID invalidates a same-build row.
+_run_verdict_signature() { # wsdir pid runtime backend
+  local -a inputs=("$1/workspace.yaml" "${CEL_MANIFEST:-$CEL_ROOT/agents.yaml}" "$CEL_ROOT/lib/run.sh") pid_fields=()
+  [ ! -f "$1/workspace.local.yaml" ] || inputs+=("$1/workspace.local.yaml")
+  inputs+=("$(_run_proc_root)/$2/cmdline")
+  local checksum stat="" start=unknown
+  if IFS= read -r stat < "$(_run_proc_root)/$2/stat" 2>/dev/null; then
+    read -r -a pid_fields <<< "${stat##*) }"; start="${pid_fields[19]:-unknown}"
+  fi
+  checksum="$(cksum "${inputs[@]}" 2>/dev/null)" || return 1
+  printf '%s:%s:%s:%s' "$3" "$4" "$start" "${checksum//$'\n'/;}"
+}
+
+# Current describes an observable launch matching the effective product plan,
+# not a fresh test of its hooks. Rewritten argv stays explicitly unknown.
+_run_orch_verdict() { # ws role product name pane cwd runtime
   local ws="$1" role="$2" p="$3" name="$4" pane="$5" cwd="$6" rt="$7"
-  local -a argv; local vfile vkey k1 k2 k3 k4 l d keep="" hit=0 i line exp act missing
+  local -a argv
+  local vfile k1 k2 k3 k4 l d saved_signature keep="" signature wsdir backend launch_role
+  local i exp act missing expected_rt
   _RUN_LAUNCH=unknown; _RUN_DETAIL=""; _RUN_MODEL="-"
   if ! _run_pane_pid "$pane" "$cwd" "$rt"; then _RUN_DETAIL="$_RUN_WHY"; return 0; fi
-  mapfile -d '' -t argv < "$(_run_proc_root)/$_RUN_PID/cmdline" 2>/dev/null || argv=()
-  if [ "${#argv[@]}" -eq 0 ]; then _RUN_DETAIL="pid $_RUN_PID has no readable command line"; return 0; fi
+  wsdir="$(registry_path "$ws" 2>/dev/null)" || { _RUN_DETAIL="workspace routing is unreadable"; return 0; }
+  backend=herdr; case "$pane" in rex/*) backend=rex ;; esac
+  launch_role="$role"
+  signature="$(_run_verdict_signature "$wsdir" "$_RUN_PID" "$rt" "$backend")" \
+    || { _RUN_DETAIL="launch evidence is unreadable"; return 0; }
+  run_runtime_evidence "$rt" "$name" "$pane" "$cwd" "$_RUN_PID"
+  if [ "$RUN_EVIDENCE_ARGV" != observable ]; then
+    _RUN_DETAIL="$RUN_EVIDENCE_DETAIL; pid $_RUN_PID; launch flags and guard registration unverified"
+    return 0
+  fi
+  argv=("${RUN_EVIDENCE_ARGV_VALUES[@]}")
   for ((i = 0; i < ${#argv[@]} - 1; i++)); do
     [ "${argv[$i]}" = --model ] && _RUN_MODEL="${argv[$((i+1))]}"
   done
+  if [ "$signature" != "$(_run_verdict_signature "$wsdir" "$_RUN_PID" "$rt" "$backend")" ]; then
+    _RUN_DETAIL="routing or process evidence changed during observation"; return 0
+  fi
   _run_build
   vfile="${CEL_CACHE:-$HOME/.cache/cel}/orch-verdicts.tsv"
   if [ -f "$vfile" ]; then
-    while IFS=$'\t' read -r k1 k2 k3 k4 l d; do
+    while IFS=$'\t' read -r k1 k2 k3 k4 l d saved_signature; do
       [ -n "$k1" ] || continue
       if [ "$k2" = "$ws" ] && [ "$k3" = "$name" ]; then
-        if [ "$k1" = "$_RUN_BUILD" ] && [ "$k4" = "$_RUN_PID" ]; then
-          hit=1; _RUN_LAUNCH="$l"; _RUN_DETAIL="${d#-}"
+        if [ "$k1" = "$_RUN_BUILD" ] && [ "$k4" = "$_RUN_PID" ] && [ "$saved_signature" = "$signature" ]; then
+          _RUN_LAUNCH="$l"; _RUN_DETAIL="${d#-}"; return 0
         fi
         continue
       fi
-      keep="$keep$k1	$k2	$k3	$k4	$l	$d
+      keep="$keep$k1	$k2	$k3	$k4	$l	$d	$saved_signature
 "
     done < "$vfile"
   fi
-  [ "$hit" -eq 0 ] || return 0
-  if [ "$role" = root ]; then
-    line="$( (cmd_run root --workspace "$ws" --fresh --force --dry-run --session-backend herdr) 2>/dev/null)" || line=""
-  else
-    line="$( (cmd_run orchestrator --product "$p" --workspace "$ws" --fresh --force --dry-run --session-backend herdr) 2>/dev/null)" || line=""
-  fi
-  # The launch line wherever it stands in the output: taking only the last
-  # line blanked the comparison as soon as anything printed after it (CEL-87).
-  local out="$line" l
-  line=""
-  while IFS= read -r l; do
-    case "$l" in
-      herdr\ agent\ start\ *\ --kind\ *\ --pane\ \<pane\>\ --\ *)
-        l="${l#herdr agent start }"
-        l="${l#* --kind }"
-        line="${l#* --pane <pane> -- }"
-        break ;;
-    esac
-  done <<<"$out"
-  if [ -z "$line" ]; then _RUN_DETAIL="cel run --dry-run gave no launch line to compare with"; return 0; fi
   exp="$(mktemp)"; act="$(mktemp)"
-  # shellcheck disable=SC2086
-  printf '%s\n' "$rt" $line > "$exp"
-  printf '%s\n' "${argv[@]}" > "$act"
-  missing="$(run_launch_diff "$exp" "$act")"
+  if ! _run_expected_launch "$exp" "$ws" "$launch_role" "$p" "$backend" >/dev/null 2>&1 || [ ! -s "$exp" ]; then
+    rm -f -- "$exp" "$act"; _RUN_DETAIL="canonical $launch_role/$backend launch plan is unavailable"; return 0
+  fi
+  IFS= read -r -d '' expected_rt < "$exp"
+  printf '%s\0' "${argv[@]}" > "$act"
+  if [ "$expected_rt" != "$rt" ]; then
+    missing="runtime $rt differs from configured $expected_rt ($launch_role/$backend)"
+  else
+    missing="$(run_launch_diff "$exp" "$act")"
+  fi
   rm -f -- "$exp" "$act"
+  if [ "$signature" != "$(_run_verdict_signature "$wsdir" "$_RUN_PID" "$rt" "$backend")" ]; then
+    _RUN_DETAIL="routing or process evidence changed during observation"; return 0
+  fi
   if [ -n "$missing" ]; then _RUN_LAUNCH=stale; _RUN_DETAIL="$missing; read from pid $_RUN_PID"; else _RUN_LAUNCH=current; fi
   [ -d "${vfile%/*}" ] || mkdir -p "${vfile%/*}" 2>/dev/null || return 0
-  printf '%s%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" > "$vfile" 2>/dev/null || true
+  printf '%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" "$signature" > "$vfile" 2>/dev/null || true
 }
 
 # EVERY ROOT/ORCHESTRATOR AND ITS LAUNCH LINE. `cel update` changes hooks and
@@ -2508,7 +2555,7 @@ run_stale_orchestrators() {
 # walk above, which needs neither.
 # Every live orchestrator whose runtime takes an inbox hook, and whether its
 # process actually carries it. One row each:
-#   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped<TAB>restart-command
+#   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped|unknown<TAB>restart-command
 # A process that cannot be found yields no row: no evidence is not a fault.
 run_stripped_orchestrators() {
   local roster ws wsdir p name cwd rt hookfile live lname lpane lstatus lcwd state
@@ -2534,8 +2581,9 @@ run_stripped_orchestrators() {
       hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
       [ -n "$hookfile" ] || continue   # Claude uses launch-time UserPromptSubmit/Stop hooks, not this extension file
       _run_pane_pid "$lpane" "$cwd" "$rt" || continue
-      if _run_cmdline "$_RUN_PID" | grep -qF -- "${hookfile##*/}"; then state=ok; else state=stripped; fi
       [ "$lname" != "-" ] || lname="$name"
+      run_runtime_evidence "$rt" "$lname" "$lpane" "$cwd" "$_RUN_PID"
+      state="$RUN_EVIDENCE_INBOX"
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$p" "$lpane" "$lstatus" "$state" \
         "cel run orchestrator --product $p --workspace $ws --restart"
     done

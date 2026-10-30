@@ -475,11 +475,23 @@ _steward_inbox_hooks() {
   while IFS=$'\t' read -r name ws p pane status state cmd; do
     [ -n "$name" ] || continue
     fp="orch-nohook-$p"; stuck="orch-nohook-stuck-$p"; key="orch-hook-restart-$ws-$p"
-    if [ "$state" != stripped ]; then
-      _steward_clear "$ws" "$fp" "$name has its inbox hook again"
-      _steward_clear "$ws" "$stuck" "$name has its inbox hook again"
+    if [ "$state" = unknown ]; then
+      # Native title rewriting is not a negative hook observation. Withdraw
+      # the unsupported failure claim, but keep the uncertainty actionable.
+      _steward_clear "$ws" "$fp" "$name missing-hook claim is unproven; native inbox evidence is unknown"
+      _steward_clear "$ws" "$stuck" "$name missing-hook claim is unproven; native inbox evidence is unknown"
+      c_warn "$name inbox evidence is unknown; inspect its native session and owned watcher, not its rewritten argv"
+      _steward_remind "$ws" root "orch-hook-unverified-$p" blocked \
+        "steward: $name native inbox evidence is unverified. Rewritten or unreadable argv does not prove a missing hook; inspect its exact native session and owned watcher. No automatic restart or guard-enforcement claim." || true
       continue
     fi
+    _steward_clear "$ws" "orch-hook-unverified-$p" "$name inbox evidence is observable again"
+    if [ "$state" = ok ]; then
+      _steward_clear "$ws" "$fp" "$name inbox evidence is present; guard enforcement is not inferred"
+      _steward_clear "$ws" "$stuck" "$name inbox evidence is present; guard enforcement is not inferred"
+      continue
+    fi
+    [ "$state" = stripped ] || continue
     # Once escalated, a human owns it: never loop restarts behind their back.
     [ -z "$(_inbox_open_fp "$ws" "$stuck" steward root)" ] || continue
     now="$(date +%s)"

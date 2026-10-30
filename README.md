@@ -1012,6 +1012,21 @@ run at turn boundaries. Pi/OMP's inbox extension supplies idle wake. The
 steward's stale-mailbox signal asks the owning orchestrator to check; it does
 not imply a Claude hook failed.
 
+Launch diagnostics compare the canonical **effective product plan**: SOLO
+role/profile overrides (including `workspace.local.yaml`), the actual runtime,
+and the existing terminal backend. Native resume IDs and one-shot kickoff
+prompts are not permanent launch requirements. Routing content, argv and PID
+start identity invalidate cached verdicts; preserving a running explicit model
+choice requires a product-local profile binding, not a global drift exemption.
+
+Pi can rewrite its process title to bare `pi`, including NUL-padding the old
+argv storage. That means launch flags are **unknown**, not absent. A matching
+owned Rex receipt and exact direct-child inbox watcher can establish observed
+inbox evidence; neither proves guard enforcement or a complete current launch.
+Without that evidence, doctor warns and the steward requests inspection without
+automatically restarting the runtime. Observable genuinely missing hooks remain
+actionable. Native OpenCode is not tested for Pi/OMP-only extension flags.
+
 ### Services
 
 `cel services` is one list of everything this box is running on a port: the
