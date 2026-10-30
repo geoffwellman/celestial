@@ -1026,6 +1026,8 @@ inbox evidence; neither proves guard enforcement or a complete current launch.
 Without that evidence, doctor warns and the steward requests inspection without
 automatically restarting the runtime. Observable genuinely missing hooks remain
 actionable. Native OpenCode is not tested for Pi/OMP-only extension flags.
+Doctor reports unknown launches by name and never turns an empty inventory or
+the absence of known drift into an all-current confirmation.
 
 ### Services
 

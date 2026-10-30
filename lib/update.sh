@@ -549,7 +549,7 @@ _update_stale_orchestrators() { # <restart 0|1>
   while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
     [ -n "$name" ] || continue
     case "$launch" in stale|unknown) ;; *) continue ;; esac
-    if [ "$shown" -eq 0 ]; then c_hd "Orchestrators on an older launch line"; shown=1; fi
+    if [ "$shown" -eq 0 ]; then c_hd "Orchestrator launch evidence"; shown=1; fi
     # An orchestrator whose process could not be read is UNKNOWN, with the
     # reason - never "missing everything", which is what CEL-63 said about
     # one that had every flag (CEL-81). It is not restarted on a guess.
