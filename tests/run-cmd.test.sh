@@ -996,9 +996,10 @@ test_reviewer_registry_reads_a_corrupt_file_as_empty() {
 # PR and no way to tell them apart. One PR, one reviewer.
 test_second_reviewer_for_the_same_pr_reuses_the_pane_and_adds_no_row() {
   _ws_review; _reviewers_fixture
-  reviewers_record widget 12 w1:p3 widget-pr-12-review
+  _run_stub_roster "$T/repos/widget" widget-pr-12-review
+  reviewers_record widget 12 wQ:p1 widget-pr-12-review
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
-  assert_contains "$out" w1:p3
+  assert_contains "$out" wQ:p1
   case "$out" in *'tab "PR reviewer"'*) printf 'a second pane was split for one PR\n' >&2; return 1;; esac
   assert_eq "$(reviewers_rows | jq -r length)" 1
   rm -rf "$T"
@@ -1108,6 +1109,7 @@ test_reviewer_process_inherits_gateway_environment_from_shell_prefix() {
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       "pane get"|"pane process-info") _fake_pane "$@" ;;

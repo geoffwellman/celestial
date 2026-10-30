@@ -321,6 +321,10 @@ contexts, or `unknown` for missing proof or incomplete teardown. A partial
 failure retains private prepared/exit evidence for an identity-checked retry;
 do not purge the receipt or proof to force cleanup. Protocol messages live in
 `<receipt>.retirement/`, outside the flat Rex runtime-receipt inventory.
+If native shutdown committed before the controller copied its exit journal,
+a non-dry retry can recover that missing copy from the exact durable protocol
+request/response. Existing malformed or negative journals are never replaced
+with a more favorable protocol response; a dry run does not repair journals.
 
 Native history, archived instructions/verdict, checkout and review artifacts
 are retained. Fresh rounds use a separate checkout rather than erasing a

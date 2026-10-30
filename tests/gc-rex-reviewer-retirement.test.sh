@@ -75,7 +75,7 @@ const ctx={
   hasPendingMessages:()=>Boolean(state().sdkPending),
   sessionManager:{
     getSessionFile:()=>process.env.RR_NATIVE,
-    getLeafId:()=>exiting()&&state().exitLeaf?state().exitLeaf:(state().liveLeaf||'final'),
+    getLeafId:()=>exiting()&&state().exitLeaf?state().exitLeaf:(state().liveLeaf||JSON.parse(fs.readFileSync(process.env.RR_NATIVE,'utf8').trim().split('\n').at(-1)).id),
   },
   ui:{getEditorText:()=>state().editorDraft||''},
   shutdown:()=>{
@@ -576,6 +576,27 @@ test_gc_rex_session_metadata_and_unrelated_review_churn_do_not_veto_retirement()
   _rr_preserved
 }
 
+test_gc_rex_accepted_native_exit_recovers_missing_controller_sidecar() {
+  _rr_fixture
+  _rr_set '.listFailure=true'
+  _rr_gc
+  _rr_exited || return
+  local exit_proof
+  for exit_proof in "$CEL_REX_STATE"/retirements/*.exit.json; do
+    [ -f "$exit_proof" ] || return 1
+    rm "$exit_proof"
+  done
+  _rr_set '.listFailure=false'
+  _rr_gc 1 '{"result":{"agents":[]}}'
+  [ -f "$RR_RECEIPT" ] && [ ! -e "$exit_proof" ] || return 1
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  _rr_gc 0 '{"result":{"agents":[]}}'
+  [ ! -f "$RR_RECEIPT" ] && [ -f "$exit_proof" ] || return 1
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return
+  _rr_preserved
+}
+
 test_gc_rex_prepared_debt_without_valid_native_exit_proof_cannot_settle() {
   local condition
   for condition in missing uncommitted expired; do
@@ -589,12 +610,12 @@ test_gc_rex_prepared_debt_without_valid_native_exit_proof_cannot_settle() {
       [ -f "$exit_proof" ] || continue
       found=$((found+1))
       case "$condition" in
-        missing) rm "$exit_proof" ;;
+        missing) rm "$exit_proof" "$RR_PROTOCOL_DIRECTORY/response.json" ;;
         uncommitted)
-          value="$(jq '.exit_committed=false' "$exit_proof")" || return
+          value="$(jq '.response.exit_committed=false' "$exit_proof")" || return
           printf '%s\n' "$value" > "$exit_proof" ;;
         expired)
-          value="$(jq '.observed_at=0' "$exit_proof")" || return
+          value="$(jq '.response.observed_at=0' "$exit_proof")" || return
           printf '%s\n' "$value" > "$exit_proof" ;;
       esac
     done

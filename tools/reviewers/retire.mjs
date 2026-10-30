@@ -474,10 +474,20 @@ export function validateExitCommitment(exit, preparedPath, prepared) {
   } catch { throw new Refusal('native_exit_commitment_unavailable'); }
 }
 
-function savedExitCommitment(preparedPath, prepared) {
+function savedExitCommitment(preparedPath, prepared, recover = false) {
   try {
     requireProof(preparedPath.endsWith('.json'), 'invalid_prepared_proof_path');
-    const filename = `${preparedPath.slice(0, -5)}.exit.json`, saved = jsonFile(filename, true);
+    const filename = `${preparedPath.slice(0, -5)}.exit.json`;
+    if (!fs.existsSync(filename) && recover) {
+      // Native shutdown may commit before the controller journals its copy.
+      // Recover only an absent copy; an existing invalid proof remains a veto.
+      const paths = ownedProtocolPaths(prepared.receipt.path);
+      const value = { version: 1, stage: 'native-exit-committed', prepared: preparedPath,
+        request: protocolFile(paths.request).value, response: protocolFile(paths.response).value };
+      validateExitCommitment(value, preparedPath, prepared);
+      saveProof(filename, value);
+    }
+    const saved = jsonFile(filename, true);
     validateExitCommitment(saved.value, preparedPath, prepared);
     return { path: filename, hash: saved.hash };
   } catch { throw new Refusal('native_exit_commitment_unavailable'); }
@@ -618,7 +628,7 @@ export async function retire(options) {
         if (retirementProcessesPresent(candidate)) continue;
         proofPath = candidatePath;
         let nativeExit;
-        try { nativeExit = savedExitCommitment(candidatePath, candidate); } catch { continue; }
+        try { nativeExit = savedExitCommitment(candidatePath, candidate, !dry); } catch { continue; }
         completion = { prepared: candidatePath, preparedHash: saved.hash, recoveredFromPrepared: true, nativeExit: nativeExit.path, nativeExitHash: nativeExit.hash };
         break;
       }
@@ -628,7 +638,7 @@ export async function retire(options) {
       requireProof(prepared.hash === completion.preparedHash && original.version === 1 && original.stage === 'prepared' && original.identity?.name === agent && original.identity.repo === repo && String(original.identity.pr) === number && original.identity.pane_id === pane && original.receipt.path === receipt && original.processes?.length > 0 && original.processes[0].pid === original.identity.pid && original.processes[0].start === original.identity.pid_start, 'retirement_proof_identity_mismatch');
       requireProof(!repodir || path.resolve(repodir) === path.join(original.identity.workspace, 'repos', repo), 'requested_workspace_repository_mismatch');
       proofPath = completion.prepared;
-      const nativeExit = savedExitCommitment(proofPath, original);
+      const nativeExit = savedExitCommitment(proofPath, original, !dry);
       requireProof(completion.nativeExit === nativeExit.path && completion.nativeExitHash === nativeExit.hash, 'native_exit_commitment_changed');
       requireProof(!retirementProcessesPresent(original), 'process_survived_rex_close');
       const containerVisible = sessionPresent(rex, original.identity.rex_session);
