@@ -1,0 +1,5 @@
+### Fixed
+- Retire completed owned Rex/Pi reviewer runtimes through a native live-leaf/debt handshake, not idle status or the last saved JSONL entry. Active, pending, draft-bearing, unknown and legacy uninstrumented contexts remain protected; existing OPEN quiet-window policy is preserved.
+- Share exact-head solo/fleet round eligibility and supported native shutdown/empty Rex-session removal between reviewer GC and `cel sessions retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]`.
+- Preserve native history, archived role/verdict and checkout artifacts; retain prepared/exit evidence for partial cleanup recovery without another native shutdown or closing a replacement. Only proven retired runtime/registry identities are reconciled.
+- Keep native protocol files outside flat Rex receipt discovery, publish role files privately and atomically, and preserve prior review-round checkouts. Fresh launch/reuse checks all retained round paths, including unnamed occupants and lost registries, instead of deleting artifacts or creating duplicate reviewers.

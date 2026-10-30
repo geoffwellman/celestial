@@ -293,6 +293,43 @@ inventory; automatic Herdr pane cleanup never closes a Rex terminal.
 Fleet delegation (`cel-fanout`) continues to use Herdr. The backend option is
 for sessions launched with `cel run` (including solo lanes and reviewers).
 
+### Retire a completed Rex reviewer, keep its evidence
+
+```sh
+cel sessions retire-reviewer widget#12 --workspace demo --dry-run
+cel sessions retire-reviewer widget#12 --workspace demo
+```
+
+The targeted command and reviewer GC share the same native proof. Idle alone
+is never eligibility: the current remote head must have a completed canonical
+solo/fleet review round, the actual Pi leaf must be settled, and no tool,
+background job, queued input, inbox retry debt, unread mail or draft may remain.
+An open PR keeps the configured reviewer quiet window. A completed `changes`
+round is not an approval and retirement never changes its verdict.
+
+New canonical Rex/Pi reviewers expose a private native handshake. It samples
+the real live leaf and in-memory debt, then rechecks them before supported
+graceful shutdown. Only after the original runtime and owned infrastructure
+have exited does the backend remove the exact empty Rex session and reconcile
+its registry row. Extra terminals, replacement processes and unknown evidence
+are protected. Older uninstrumented reviewers are kept, not silently reloaded
+or stopped using a saved-file/idle guess.
+
+The command returns JSON: `eligible` for a dry-run candidate, `retired` only
+after verified settlement, `protected` for known outstanding work/unsupported
+contexts, or `unknown` for missing proof or incomplete teardown. A partial
+failure retains private prepared/exit evidence for an identity-checked retry;
+do not purge the receipt or proof to force cleanup. Protocol messages live in
+`<receipt>.retirement/`, outside the flat Rex runtime-receipt inventory.
+
+Native history, archived instructions/verdict, checkout and review artifacts
+are retained. Fresh rounds use a separate checkout rather than erasing a
+retired round. Before every new-head or re-review handoff, run the canonical
+`cel run reviewer --repo widget --pr 12 --workspace demo` first, then send its
+inbox request: it reuses a live reviewer or starts the next round. Saved
+retirement history is evidence, not permission to approve or close a new round.
+
+
 ### Scoped OpenCode gateway migration
 
 OpenCode is pinned to the verified **2.2.5 CLI release**, not the legacy npm

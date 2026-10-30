@@ -21,6 +21,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/opencode.sh"
 # shellcheck source=lib/run-evidence.sh
 . "${BASH_SOURCE[0]%/*}/run-evidence.sh"
+# shellcheck source=lib/reviewer-retirement.sh
+. "${BASH_SOURCE[0]%/*}/reviewer-retirement.sh"
 
 # PANE LABELS. The agent name is sanitised and cut to 32 characters, which
 # is unreadable in the sidebar, so every pane the plane starts also gets
@@ -141,10 +143,13 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
       # any argument it cannot encode on one line (newlines, control chars),
       # so a multi-line role body travels as a file and only its path goes on
       # the command line.
-      local file="${rolefile:-$wsdir/.cel/role-$tag.md}"
+      local file="${rolefile:-$wsdir/.cel/role-$tag.md}" temporary
       if [ "$dry" -eq 0 ]; then
-        mkdir -p "$(dirname "$file")"
-        printf '%s\n' "$body" > "$file"
+        mkdir -p "$(dirname "$file")" || return 1
+        temporary="$(mktemp "$(dirname "$file")/.role.XXXXXX")" || return 1
+        if ! printf '%s\n' "$body" > "$temporary" || ! mv -f -- "$temporary" "$file"; then
+          rm -f -- "$temporary"; return 1
+        fi
       fi
       AGENT_ARGS=("$(agent_injection "$rt" flag)" "$file")
       AGENT_ROLE_FILE="$file"
@@ -459,16 +464,24 @@ _run_reviewer_pr_facts() { # <repodir> <slug> <pr> [wsdir] -> head<TAB>base
 # `pull/<n>/head` rather than the branch name: a contributor's branch does not
 # exist in origin at all.
 reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
-  local repodir="$1" repo="$2" pr="$3" head="$4" path
+  local repodir="$1" repo="$2" pr="$3" head="$4" path reserved=0 who
   path="$(reviewer_checkout_path "$repo" "$pr")"
+  # A new pathname is not duplicate admission. Check the whole retained
+  # round namespace even when the original checkout no longer exists.
+  if who="$(_reviewer_checkout_occupant "$path")"; then
+    c_warn "kept $path: pane ${who%%$'\t'*} is standing in it"
+    return 1
+  fi
   mkdir -p "$(dirname "$path")" || return 1
-  # A leftover from a previous round is removed rather than reused: it is at
-  # the PR's old head. But only a LEFTOVER: if a live pane still stands in it
-  # the drop refuses and so does this launch - the caller already looked for a
-  # reviewer to reuse, and a second tree would be a second reviewer for one PR.
-  _reviewer_worktree_drop "$repodir" "$path" || return 1
+  if [ -e "$path" ]; then
+    path="$(mktemp -d "$path.round.XXXXXX")" || return 1
+    reserved=1
+  fi
   git -C "$repodir" fetch -q origin "pull/$pr/head" 2>/dev/null || true
-  git -C "$repodir" worktree add -q --detach "$path" "$head" 2>/dev/null || return 1
+  if ! git -C "$repodir" worktree add -q --detach "$path" "$head" 2>/dev/null; then
+    [ "$reserved" = 0 ] || rmdir -- "$path" 2>/dev/null || true
+    return 1
+  fi
   printf '%s' "$path"
 }
 
@@ -479,23 +492,38 @@ reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
 # A roster that cannot be read is an occupied directory: deleting someone's
 # working tree is not a risk worth taking to save a few megabytes until the
 # next sweep. No herdr at all means no panes, so nothing can stand there.
-_reviewer_checkout_occupant() { # <path> -> pane<TAB>name of a pane in it; 0 = occupied
-  local path="${1%/}" roster
+_reviewer_checkout_occupant() { # path -> pane<TAB>name<TAB>managed-checkout; 0 = occupied/unknown
+  local path="${1%/}" roster match rc=0
   roster="$(cel_agent_list 2>/dev/null)" || { printf 'unknown\troster unreadable'; return 0; }
-  [ -n "$roster" ] || return 1
+  [ -n "$roster" ] || { printf 'unknown\troster unreadable'; return 0; }
   # A reply that parses but is not a roster is as unreadable as no reply.
   printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
     || { printf 'unknown\troster unreadable'; return 0; }
-  printf '%s' "$roster" | jq -er --arg c "$path" '
-      [.result.agents[]? | ((.cwd // "") | sub(" \\(deleted\\)$"; "")) as $d
-       | select($d == $c or ($d | startswith($c + "/")))][0] // empty
-      | [(.pane_id // "?"), ((.name // "") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null
+  match="$(printf '%s' "$roster" | jq -er --arg c "$path" '
+      if any(.result.agents[]?; (.cwd | type) != "string" or .cwd == "") then error("unknown native cwd") else . end
+      | [.result.agents[]? | . as $a | ((.cwd // "") | sub(" \\(deleted\\)$"; "")) as $d
+       | select($d == $c or ($d | startswith($c + "/")) or ($d | startswith($c + ".round.")))
+       | {pane_id: $a.pane_id, name: $a.name,
+          cwd: (if $d == $c or ($d | startswith($c + "/")) then $c
+                else $c + ".round." + ($d | ltrimstr($c + ".round.") | split("/")[0]) end)}]
+      | if length > 1 then [{pane_id:"unknown",name:"multiple native occupants",cwd:$c}] else . end
+      | .[0] // empty
+      | [((.pane_id // "") | if . == "" then "unknown" else . end), ((.name // "") | if . == "" then "-" else . end), .cwd] | @tsv' 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) printf '%s' "$match" ;;
+    4) return 1 ;;
+    *) printf 'unknown\troster unreadable' ;;
+  esac
 }
 
 _reviewer_worktree_drop() { # <repodir> <path>; fails, deleting nothing, while a pane stands in it
   [ -n "${2:-}" ] || return 0
   [ -e "$2" ] || [ -n "$1" ] || return 0
   local who
+  if [ -e "$2" ] && rex_reviewer_checkout_preserved "$2"; then
+    c_warn "kept $2: retained native reviewer evidence"
+    return 1
+  fi
   if [ -e "$2" ] && who="$(_reviewer_checkout_occupant "$2")"; then
     c_warn "kept $2: pane ${who%%$'\t'*} is standing in it"
     return 1
@@ -512,9 +540,9 @@ reviewer_checkout_release() { # <repo> <pr>
   row="$(reviewers_find "$1" "$2")" || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
-  # A row `cel gc` adopted carries no checkout; the path is derived from repo
-  # and PR alone.
-  [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2")"
+  # A repo/PR-derived fallback can name an older retained round. Only an
+  # explicitly recorded checkout is eligible for this legacy release path.
+  [ -n "$path" ] || return 0
   [ -e "$path" ] || return 0
   # Kept while anything stands in it; the next sweep releases it once the
   # pane has gone. The row may already be dropped by then - the gone-pane
@@ -778,7 +806,10 @@ reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>sta
     repo="${cwd##*/}"
     # A reviewer's own checkout is <reviews>/<repo>-pr-<n>: the folder
     # name carries the PR, and the repo is what precedes it.
-    case "$repo" in *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;; esac
+    case "$repo" in
+      *-pr-"$pr".round.*) repo="${repo%-pr-"$pr".round.*}" ;;
+      *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;;
+    esac
     [ -n "$repo" ] || repo="${name%-pr-*}"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status" "${backend:-herdr}"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
@@ -1840,8 +1871,38 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       # standing gets that one back. Checked before anything is created, so a
       # dry run previews the reuse honestly and no row is written twice.
       local existing
+      local reviewer_roster recorded_pane recorded_agent recorded_live reviewer_alias alias_rows alias_count
+      reviewer_roster="$(cel_agent_list 2>/dev/null)" || die 'cel run reviewer: native inventory is unreadable; no checkout changed'
+      printf '%s' "$reviewer_roster" | jq -e '.result.agents | type == "array"' >/dev/null \
+        || die 'cel run reviewer: native inventory is invalid; no checkout changed'
       if existing="$(reviewers_find "$repo" "$pr")"; then
-        c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $(printf '%s' "$existing" | jq -r .pane) - reusing it"
+        recorded_pane="$(printf '%s' "$existing" | jq -r .pane)"
+        recorded_agent="$(printf '%s' "$existing" | jq -r '.agent // ""')"
+        [ -n "$recorded_agent" ] || die 'cel run reviewer: recorded reviewer identity is incomplete'
+        recorded_live="$(printf '%s' "$reviewer_roster" | jq -r --arg p "$recorded_pane" --arg a "$recorded_agent" '[.result.agents[] | select(.pane_id == $p and .name == $a)] | length')"
+        [ "$recorded_live" = 1 ] || die "cel run reviewer: recorded reviewer for $repo#$pr is not confirmed live; reconcile its canonical retirement before relaunching"
+        c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $recorded_pane - reusing it"
+        return 0
+      fi
+      # Registry loss must not create a duplicate when a preserved round uses
+      # a non-default checkout pathname. The canonical alias is another key.
+      reviewer_alias="$(_run_agent_name "$alias_name")"
+      alias_rows="$(printf '%s' "$reviewer_roster" | jq -c --arg n "$reviewer_alias" '[.result.agents[] | select(.name == $n)]')"
+      alias_count="$(printf '%s' "$alias_rows" | jq length)"
+      [ "$alias_count" -le 1 ] || die 'cel run reviewer: multiple live native reviewers match this PR; no checkout changed'
+      if [ "$alias_count" = 1 ]; then
+        local alias_pane alias_cwd alias_base scoped_alias=0
+        IFS=$'\t' read -r alias_pane alias_cwd < <(printf '%s' "$alias_rows" | jq -r '.[0] | [.pane_id,.cwd] | @tsv')
+        [ -n "$alias_pane" ] && [ -n "$alias_cwd" ] || die 'cel run reviewer: matching native reviewer has incomplete identity'
+        alias_cwd="$(pane_cwd "$alias_cwd")"
+        alias_base="$(reviewer_checkout_path "$repo" "$pr")"
+        case "$alias_cwd" in "$alias_base"|"$alias_base".round.*) scoped_alias=1 ;; esac
+        if printf '%s' "$alias_rows" | jq -e --arg r "$repo" --arg p "$pr" \
+          '.[0] | .backend == "rex" and .role == "reviewer" and .repo == $r and (.pr|tostring) == $p' >/dev/null; then scoped_alias=1; fi
+        [ "$scoped_alias" = 1 ] || die 'cel run reviewer: matching alias is not bound to this review scope; no checkout changed'
+        [ "$dry_run" = 1 ] || reviewers_record "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" \
+          || die 'cel run reviewer: could not retain the existing native reviewer identity'
+        c_ok "reviewer for $repo#$pr is already running as $reviewer_alias in pane $alias_pane - reusing it"
         return 0
       fi
       # A LIVE REVIEWER WITH NO ROW IS STILL THE REVIEWER: its row may have been
@@ -1849,11 +1910,12 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       # directory it stands in, and the row is written back.
       local live_path live
       live_path="$(reviewer_checkout_path "$repo" "$pr")"
-      if [ -e "$live_path" ] && live="$(_reviewer_checkout_occupant "$live_path")" \
+      if live="$(_reviewer_checkout_occupant "$live_path")" \
          && [ "${live%%$'\t'*}" != unknown ]; then
-        local lpane="${live%%$'\t'*}" lname="${live#*$'\t'}"
+        local lpane lname live_checkout
+        IFS=$'\t' read -r lpane lname live_checkout <<< "$live"
         if [ "$dry_run" -eq 0 ]; then
-          reviewers_record "$repo" "$pr" "$lpane" "$lname" "$live_path" "$cwd" "" \
+          reviewers_record "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" \
             || c_warn "could not record the reviewer for $repo#$pr"
         fi
         c_ok "reviewer for $repo#$pr is already running as $lname in pane $lpane (found by its checkout) - reusing it"

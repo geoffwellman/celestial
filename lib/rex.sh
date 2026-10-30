@@ -239,9 +239,13 @@ cmd_sessions() {
           core|root|orchestrator|solo) _run_sessions_record "$(jq -r .cwd "$CEL_REX_RECORD")" "$4" "$(jq -r '.agent // empty' "$CEL_REX_RECORD")" ;;
         esac
       fi ;;
+    retire-reviewer)
+      shift
+      . "$CEL_ROOT/lib/gc.sh"
+      cmd_reviewer_retire "$@" ;;
     --json) cel_agent_list ;;
     '') cel_agent_list | jq -r '.result.agents[] | [ .name, (.backend // "herdr"), .agent, (.agent_status // "unknown"), .pane_id ] | @tsv' ;;
-    *) die 'usage: cel sessions [--json]' ;;
+    *) die 'usage: cel sessions [--json] | retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]' ;;
   esac
 }
 
