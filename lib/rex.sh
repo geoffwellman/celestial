@@ -64,8 +64,29 @@ _rex_preflight() { # name runtime; no mutation before provisioning a worker chec
   [ ! -e "$file.pending" ] && [ ! -e "$file.pid" ] || die "cel run: previous Rex launch for $1 is unresolved; inspect rex ls before retrying ($file.pending)"
 }
 
+rex_native_session_valid() { # runtime native id
+  case "$1" in
+    claude) [[ "$2" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ;;
+    opencode) [[ "$2" =~ ^ses_[A-Za-z0-9]+$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 _rex_launch() { # name runtime cwd label envprefix args...
   local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
+  # Capture only an explicit native resume argument, never cast an archived
+  # conversation from another runtime into native identity.
+  local native="" a previous="" native_flag=""
+  case "$rt" in claude) native_flag=--resume ;; opencode) native_flag=--session ;; esac
+  if [ -n "$native_flag" ]; then
+    for a in "$@"; do
+      if [ "$previous" = "$native_flag" ]; then native="$a"; fi
+      case "$a" in "$native_flag"=*) native="${a#*=}" ;; esac
+      previous="$a"
+    done
+    [ -z "$native" ] || rex_native_session_valid "$rt" "$native" \
+      || die "cel run: $rt native resume must name its exact native session identity"
+  fi
   local d file script resp session block pid start bin
   d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
   file="$(_rex_file "$name")"
@@ -112,8 +133,9 @@ _rex_launch() { # name runtime cwd label envprefix args...
   local tmp; tmp="$(mktemp "$d/.record.XXXXXX")"; chmod 600 "$tmp"
   jq -n --arg name "$name" --arg rt "$rt" --arg cwd "$cwd" --arg session "$session" --arg block "$block" \
     --argjson pid "$pid" --arg start "$start" --arg role "${env_role:-${role:-core}}" --arg workspace "${wsdir:-$cwd}" \
-    --arg repo "${repo:-}" --arg pr "${pr:-}" \
-    '{name:$name,agent:$rt,cwd:$cwd,role:$role,workspace:$workspace,repo:$repo,pr:$pr,pane_id:("rex/"+$session+"/"+$block),backend:"rex",rex_session:$session,rex_block:$block,pid:$pid,pid_start:$start,agent_status:"working"}' > "$tmp"
+    --arg repo "${repo:-}" --arg pr "${pr:-}" --arg native "$native" \
+    '{name:$name,agent:$rt,cwd:$cwd,role:$role,workspace:$workspace,repo:$repo,pr:$pr,pane_id:("rex/"+$session+"/"+$block),backend:"rex",rex_session:$session,rex_block:$block,pid:$pid,pid_start:$start,agent_status:"working"}
+      | if $native != "" then .agent_session={value:$native} else . end' > "$tmp"
   mv "$tmp" "$file"; rm -f "$file.pid" "$file.pending"
   exec {lock}>&-
   _REX_PANE="rex/$session/$block"
@@ -139,16 +161,40 @@ rex_agent_stop() { # pane id, stop only an exact owned terminal/session
   return 1
 }
 
+# Prove the reporting process descends from this exact launch. An environment
+# label or a caller-supplied PID alone does not establish runtime provenance.
+rex_reporter_pid() { # -> managed runtime PID, only for its own descendants
+  local f="${CEL_REX_RECORD:-}" target p="${BASHPID:-$$}" depth=0 k v
+  [ -n "$f" ] && [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" || return 1
+  target="$(jq -r .pid "$f")"
+  while [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 1 ] && [ "$depth" -lt 64 ]; do
+    if [ "$p" = "$target" ]; then printf '%s' "$target"; return 0; fi
+    v=""
+    while read -r k v; do [ "$k" != PPid: ] || break; done < "/proc/$p/status" 2>/dev/null
+    p="$v"; depth=$((depth+1))
+  done
+  return 1
+}
+
 # Runtime hooks report native session identity and turn state. Validate the
 # reporting PID against the launch receipt; no caller can mark another live
 # session idle by guessing its name.
 rex_session_note() { # pid state [native session file/id]
-  local pid="$1" state="$2" native="${3:-}" f="${CEL_REX_RECORD:-}" tmp
+  local pid="$1" state="$2" native="${3:-}" f="${CEL_REX_RECORD:-}" tmp reporter lock
   [ -n "$f" ] && [ -f "$f" ] || return 0
-  [ "$(jq -r .pid "$f")" = "$pid" ] && _rex_live "$f" || return 1
-  case "$state" in idle|working|blocked) ;; *) return 1 ;; esac
-  tmp="$(mktemp "$(_rex_state)/.note.XXXXXX")"; chmod 600 "$tmp"
-  jq --arg s "$state" --arg n "$native" '.agent_status=$s | if $n != "" then .agent_session={value:$n} else . end' "$f" > "$tmp" && mv "$tmp" "$f"
+  reporter="$(rex_reporter_pid)" || return 1
+  [ "$reporter" = "$pid" ] || return 1
+  exec {lock}>"$f.note.lock" || return 1
+  flock "$lock" || { exec {lock}>&-; return 1; }
+  [ "$(jq -r .pid "$f")" = "$pid" ] && _rex_live "$f" || { exec {lock}>&-; return 1; }
+  case "$state" in idle|working|blocked) ;; *) exec {lock}>&-; return 1 ;; esac
+  tmp="$(mktemp "$(_rex_state)/.note.XXXXXX")" || { exec {lock}>&-; return 1; }
+  chmod 600 "$tmp"
+  local rc=0
+  jq --arg s "$state" --arg n "$native" '.agent_status=$s | if $n != "" then .agent_session={value:$n} else . end' "$f" > "$tmp" && mv "$tmp" "$f" || rc=$?
+  rm -f "$tmp"
+  exec {lock}>&-
+  return "$rc"
 }
 
 cmd_sessions() {

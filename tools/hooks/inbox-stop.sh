@@ -5,9 +5,17 @@
 set -uo pipefail
 CEL_ROOT="${CEL_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)}"
 [ -x "$CEL_ROOT/bin/cel" ] || exit 0
+# Read native input only for managed Rex sessions. Standalone inbox behavior
+# stays unchanged; no text is ever typed into an owner's pending draft.
+native_input=""
+if [ -n "${CEL_REX_RECORD:-}" ] && [ -f "$CEL_REX_RECORD" ]; then native_input="$(cat)"; fi
+note_state() {
+  [ -z "$native_input" ] || bash "$CEL_ROOT/tools/hooks/claude-session.sh" "$1" <<<"$native_input" || true
+}
 args=(inbox read)
 [ -z "${CEL_INBOX_ME:-}" ] || args+=(--for "$CEL_INBOX_ME")
 [ -z "${CEL_INBOX_WS:-}" ] || args+=(--workspace "$CEL_INBOX_WS")
-mail="$("$CEL_ROOT/bin/cel" "${args[@]}" 2>/dev/null)" || exit 0
-[ -n "$mail" ] || exit 0
+mail="$("$CEL_ROOT/bin/cel" "${args[@]}" 2>/dev/null)" || mail=""
+if [ -z "$mail" ]; then note_state idle; exit 0; fi
+note_state working
 jq -nc --arg m "$mail" '{decision:"block",reason:("New messages arrived in your celestial inbox while you were working. Act on them before stopping:\n" + $m)}'

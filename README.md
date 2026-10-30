@@ -231,6 +231,29 @@ that touch different parts of the code. `cel fleet` lists a product's live
 lanes; `/cel-restart` in a lane restarts that lane only; `cel mode <p> fleet`
 is refused while any lane is live.
 
+A lane remembers explicitly named `--profile` and `--model` choices only after
+a successful launch; a bare `--restart` keeps those saved choices. An
+explicit new profile clears the old model override unless you also name a new
+model. Workspace/profile defaults remain dynamic; dry runs, invalid choices
+and failed launches do not replace saved choices. These overrides belong to
+that lane, never the shared workspace profile.
+
+To persist a model already used by a **managed Rex lane** without restarting
+or changing its native session, name its exact current runtime PID and launch
+model (not a requested in-session model change):
+
+```sh
+cel run solo --product <product> --lane <lane> --model <exact-model> --remember-current-model <pid> --dry-run
+cel run solo --product <product> --lane <lane> --model <exact-model> --remember-current-model <pid>
+```
+
+This bounded command verifies the lane's live Rex receipt, PID start time,
+runtime and actual `/proc` model argument before writing only its `launch-model`
+override. It does not start/stop an agent, edit global profiles or alter native
+session identity. It cannot be combined with restart, fresh, profile, thinking
+or backend changes. Model syntax validation is offline; it is not a provider
+availability check.
+
 ### Choose Herdr or Rex for new sessions
 
 The terminal host is independent of the agent runtime and model. Herdr stays
@@ -244,23 +267,59 @@ cel sessions --json
 ```
 
 Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
-`cel run` sessions. `--session-backend herdr` overrides it. Existing agents
-are never moved: a restart retains the current terminal host. Rex must already
-be installed; Celestial does not restart its server or adopt unrelated Rex
+`cel run` sessions. `--session-backend herdr` overrides it. Existing live agents
+are never moved: a restart retains their current terminal host. After a process
+has exited, normal new-launch defaults apply; keep `--session-backend rex` in
+recovery commands unless the workspace default is Rex. Rex must already be
+installed; Celestial does not restart its server or adopt unrelated Rex
 sessions. Each new agent gets its own named Rex session, and the command
 prints its session and terminal IDs. Use `rex ls`, `rex capture -s <session>
 -b <block>` and Rex's native controls, not Herdr commands, for those terminals.
 
 Role prompts, model/profile selection, workspace and gateway environment,
 inbox identity and review gates are unchanged. Pi/OMP report their real turn
-state and native conversation file through the inbox extension; runtimes
-without that observation stay conservatively busy. A restart never silently
-discards an unreported native conversation: it refuses unless `--fresh` is
-explicit. Managed Rex sessions appear alongside Herdr agents in Celestial's
+state and native conversation file through the inbox extension. Claude's
+`SessionStart`/`UserPromptSubmit` hooks report its native UUID and idle/working
+state; its existing inbox `Stop` hook reports idle only when there is no mail
+to continue processing. Reports require the receipt's live runtime PID ancestry;
+neither a guessed PID nor a backend environment label suffices. An explicit
+Claude `--resume` UUID is also captured directly from launch arguments.
+These hooks never type into a pending owner draft or wake idle Claude sessions.
+Runtimes without native observation stay conservatively busy. A restart never
+silently discards an unreported native conversation: it refuses unless `--fresh`
+is explicit. Managed Rex sessions appear alongside Herdr agents in Celestial's
 inventory; automatic Herdr pane cleanup never closes a Rex terminal.
 
 Fleet delegation (`cel-fanout`) continues to use Herdr. The backend option is
 for sessions launched with `cel run` (including solo lanes and reviewers).
+
+### Scoped OpenCode gateway migration
+
+The verified OpenCode gateway path uses a prepared, per-agent configuration:
+exact `ompgw-codex/gpt-6.1-sol`, medium effort, published 500K context/128K
+output limits, and the existing gateway credential reference. It does not
+import credentials or edit global OpenCode settings. Admission validates the
+exact role, plugin, provider, URL, route and model contract before writing a
+role file or starting a terminal. Roles live under
+`.cel/opencode/<agent>/role-<role>.md`, not another product's shared role file.
+
+```sh
+cel run solo --product <product> --profile <scoped-profile> --session-backend rex --fresh --handoff /absolute/checkpoint.md
+```
+
+The native `--prompt` kickoff instructs the new agent to read the handoff in a
+NEW OpenCode session; an archived OMP log is consultation material, never a native resume. Subsequent
+continuation consumes only OpenCode's own `ses_...` ids through `--session`;
+other runtime paths/UUIDs refuse and require an explicit fresh handoff. The
+native plugin reports the primary session's state/id, preserves task lineage
+and compaction without taking over the main receipt, and delivers idle inbox
+mail through the native session API rather than terminal typing. Medium is
+stored in the native user model and sent as Responses reasoning effort—there
+is no fabricated TUI thinking flag. The provider-scoped final fetch boundary
+pins the agent-owned affinity header instead of inheriting the launching
+core's key or accepting a downstream native-header overwrite. Existing shared
+guard policy is enforced through native tool hooks; `--auto` does not waive
+explicit denials. Never dump environments or credentials as identity evidence.
 
 ### Commands inside an agent
 

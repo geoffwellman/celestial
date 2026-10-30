@@ -100,6 +100,9 @@ test_run_launch_args_precede_role_injection_and_no_prompt_submit_duplicate() {
   assert_contains "$out" " -- --dangerously-skip-permissions --settings"
   ! printf '%s' "$out" | grep -q "inbox-drain.sh" || { echo "Claude UserPromptSubmit hook is duplicated in launch settings"; return 1; }
   assert_contains "$out" "inbox-stop.sh"
+  assert_contains "$out" 'claude-session.sh'
+  assert_contains "$out" 'SessionStart'
+  assert_contains "$out" 'UserPromptSubmit'
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
   assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --thinking high --append-system-prompt"
   ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
@@ -1713,5 +1716,90 @@ test_run_solo_lane_remembers_only_an_explicit_resolved_profile() {
   assert_eq "$(cat "$f")" p1
   ( cd "$T" && cmd_run solo --product bundle --lane ui --profile p2 ) >/dev/null 2>&1
   assert_eq "$(cat "$f")" p2
+  rm -rf "$T"
+}
+
+_lane_model_setup() {
+  _ws_solo bundle
+  mkdir -p "$T/.cel/solo/bundle/lane-ui"
+  printf 'claude-lane\n' > "$T/.cel/solo/bundle/lane-ui/launch-profile"
+  profile_resolve() { PROFILE_RUNTIME=claude; PROFILE_MODEL=claude-opus-5-5; PROFILE_THINKING=medium; [ "$2" != bad ] || PROFILE_VETO=vetoed; }
+  _run_agent_start() { :; }; _run_mark_launch() { :; }; pane_label_set() { :; }; tab_label_set() { :; }
+  herdr() { printf '{"result":{"workspace_id":"w9","pane_id":"w9:p1","agents":[]}}\n'; }
+}
+
+test_run_solo_lane_keeps_explicit_model_but_not_workspace_defaults() {
+  _lane_model_setup
+  local f="$T/.cel/solo/bundle/lane-ui/launch-model" out
+  (cd "$T" && cmd_run solo --product bundle --lane ui --model claude-sonnet-5-5) >/dev/null 2>&1
+  assert_eq "$(jq -r '.runtime + ":" + .model' "$f")" 'claude:claude-sonnet-5-5'
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --restart --dry-run 2>&1)"
+  assert_contains "$out" '--model claude-sonnet-5-5'
+  assert_contains "$out" '--kind claude'
+  (cd "$T" && cmd_run solo --product bundle --lane ui --profile replacement) >/dev/null 2>&1
+  [ ! -e "$f" ] || { echo 'new explicit profile kept the old model'; return 1; }
+  assert_eq "$(cat "$T/.cel/solo/bundle/lane-ui/launch-profile")" replacement
+  (cd "$T" && cmd_run solo --product bundle --lane ui --profile replacement --model claude-sonnet-5-5) >/dev/null 2>&1
+  assert_eq "$(jq -r .model "$f")" claude-sonnet-5-5
+  rm -rf "$T"
+}
+
+test_run_solo_lane_invalid_dry_and_failed_launch_do_not_replace_choices() {
+  _lane_model_setup
+  local f="$T/.cel/solo/bundle/lane-ui/launch-model" before
+  _run_lane_choices_commit "$T/.cel/solo/bundle/lane-ui" '' claude-sonnet-5-5 claude 0
+  before="$(cat "$f")"
+  (cd "$T" && cmd_run solo --product bundle --lane ui --model claude-opus-5-5 --dry-run) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" "$before"
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --model not-a-claude-model) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" "$before"
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --profile bad) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" "$before"
+  _run_agent_start() { return 9; }
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --profile replacement --model claude-opus-5-5) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" "$before"
+  assert_eq "$(cat "$T/.cel/solo/bundle/lane-ui/launch-profile")" claude-lane
+  _run_restart_in_place() { return 9; }
+  _run_resume_resolve() { RESUME_SESSION=''; RESTART_PANE=rex/session/block; }
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --restart --model claude-opus-5-5) >/dev/null 2>&1
+  assert_eq "$(cat "$f")" "$before"
+  rm -rf "$T"
+}
+
+test_run_solo_lane_bare_rex_restart_keeps_native_runtime_and_model() {
+  _lane_model_setup
+  local out
+  _run_lane_choices_commit "$T/.cel/solo/bundle/lane-ui" '' claude-sonnet-5-5 claude 0
+  _run_resume_resolve() { RESUME_SESSION=6b90062c-f7b9-4cf4-859c-6bba6e90df1d; RESTART_PANE=rex/session/block; }
+  _run_restart_in_place() {
+    printf '%s %s %s\n' "$2" "$9" "${AGENT_ARGS[*]}"
+  }
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --restart --dry-run 2>&1)"
+  assert_contains "$out" 'rex/session/block claude'
+  assert_contains "$out" '--model claude-sonnet-5-5'
+  rm -rf "$T"
+}
+
+test_run_solo_lane_remember_current_model_is_bounded_and_never_launches() {
+  _lane_model_setup
+  local cwd="$T/.cel/solo/bundle/lane-ui" out pid="${BASHPID:-$$}" start
+  export CEL_REX_STATE="$T/rex"
+  mkdir -p "$CEL_REX_STATE" "$T/proc/$pid"
+  start="$(_rex_pid_start "$pid")"
+  jq -n --arg cwd "$cwd" --argjson pid "$pid" --arg start "$start" \
+    '{name:"bundle-ui",agent:"claude",role:"solo",backend:"rex",cwd:$cwd,pid:$pid,pid_start:$start}' > "$CEL_REX_STATE/bundle-ui.json"
+  printf 'claude\0--model\0claude-sonnet-5-5\0' > "$T/proc/$pid/cmdline"
+  _run_proc_root() { printf '%s/proc' "$T"; }
+  _run_agent_start() { echo 'must not launch' >&2; return 1; }
+  _run_live_agent_in_cwd() { echo 'must not inspect Herdr' >&2; return 1; }
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --model claude-sonnet-5-5 --remember-current-model "$pid" --dry-run)"
+  assert_contains "$out" 'no restart'
+  [ ! -e "$cwd/launch-model" ] || return 1
+  (cd "$T" && cmd_run solo --product bundle --lane ui --model claude-sonnet-5-5 --remember-current-model "$pid") >/dev/null
+  assert_eq "$(jq -r .model "$cwd/launch-model")" claude-sonnet-5-5
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --model claude-opus-5-5 --remember-current-model "$pid") >/dev/null 2>&1
+  assert_eq "$(jq -r .model "$cwd/launch-model")" claude-sonnet-5-5
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --model claude-sonnet-5-5 --remember-current-model "$pid" --restart) >/dev/null 2>&1
+  unset CEL_REX_STATE
   rm -rf "$T"
 }

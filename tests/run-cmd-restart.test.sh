@@ -86,12 +86,6 @@ EOS
   orch_stub_teardown
 }
 
-test_runtime_resume_args_come_from_the_manifest() {
-  assert_eq "$(agent_resume omp flag)" "--resume"
-  assert_eq "$(agent_resume claude flag)" "--resume"
-  assert_eq "$(agent_resume claude value)" "id"
-  assert_eq "$(agent_resume opencode flag)" ""
-}
 
 # The incident: a restart chosen by cwd took the FIRST omp in the checkout -
 # another session in another pane - and relaunched it as the orchestrator.
@@ -203,19 +197,6 @@ test_doctor_flags_two_live_processes_on_one_session() {
   orch_stub_teardown
 }
 
-# Sourcery on #128: a runtime that cannot resume starts fresh - it is no
-# second resumer, so a live process on the recorded session must not block it.
-test_run_orchestrator_without_resume_support_is_not_refused() {
-  orch_stub_setup opencode
-  printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
-  _run_sessions_record "$T/ws/repos/widget" "$T/old.jsonl"
-  _resumer 4250 w7:p4 "$T/old.jsonl"
-  local out
-  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)" \
-    || { echo "refused a fresh launch: $out"; orch_stub_teardown; return 1; }
-  assert_contains "$out" "starting fresh"
-  orch_stub_teardown
-}
 
 # Sourcery on #128: something that merely mentions --resume (a grep, an
 # editor) is not an agent resuming the session.

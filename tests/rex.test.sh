@@ -89,11 +89,21 @@ test_rex_native_state_updates_only_the_same_launched_process() {
   _rext_setup
   _rex_launch widget-orch omp "$RT/ws/repos/widget" widget 'env CEL_ROLE=orchestrator' >/dev/null
   export CEL_REX_RECORD="$CEL_REX_STATE/widget-orch.json"
-  local pid; pid="$(jq -r .pid "$CEL_REX_RECORD")"
-  rex_session_note "$pid" idle /tmp/native-session.jsonl
+  local pid original self="${BASHPID:-$$}" start
+  pid="$(jq -r .pid "$CEL_REX_RECORD")"
+  original="$(cat "$CEL_REX_RECORD")"
+  if rex_session_note "$pid" idle /tmp/forged.jsonl; then
+    echo 'parent could impersonate its runtime by knowing the PID'; _rext_down; return 1
+  fi
+  # A receipt naming this test shell lets its real child hook report, without
+  # replacing the ancestry check or inventing an unrelated reporter process.
+  start="$(_rex_pid_start "$self")"
+  jq --argjson p "$self" --arg s "$start" '.pid=$p | .pid_start=$s' <<<"$original" > "$CEL_REX_RECORD"
+  rex_session_note "$self" idle /tmp/native-session.jsonl
   assert_eq "$(rex_agent_list | jq -r '.result.agents[0].agent_status')" idle
   assert_eq "$(rex_agent_list | jq -r '.result.agents[0].agent_session.value')" /tmp/native-session.jsonl
-  if rex_session_note 1 working; then echo 'other process updated the record'; _rext_down; return 1; fi
+  if rex_session_note 1 working; then echo 'other process updated the record'; return 1; fi
+  printf '%s\n' "$original" > "$CEL_REX_RECORD"
   rex_agent_stop rex/session:test/block:test
   assert_eq "$(rex_agent_list | jq '.result.agents|length')" 0
   _rext_down
@@ -256,5 +266,20 @@ test_rex_worker_creates_its_own_new_branch_without_switching_the_shared_checkout
     echo "$out"; _rext_down; return 1
   fi
   assert_eq "$(cat "$wt/local-work.txt")" 'keep this edit'
+  _rext_down
+}
+
+test_rex_claude_receipt_captures_only_an_explicit_native_resume_uuid() {
+  _rext_setup
+  cat >> "$CEL_MANIFEST" <<YAML
+  claude:
+    bin: "$RT/bin/runtime"
+YAML
+  local native=6b90062c-f7b9-4cf4-859c-6bba6e90df1d
+  _rex_launch widget-orch claude "$RT/ws/repos/widget" widget 'env CEL_ROLE=orchestrator' --resume "$native" >/dev/null
+  assert_eq "$(jq -r .agent_session.value "$CEL_REX_STATE/widget-orch.json")" "$native"
+  rex_agent_stop rex/session:test/block:test
+  _rex_launch widget-orch claude "$RT/ws/repos/widget" widget 'env CEL_ROLE=orchestrator' >/dev/null
+  assert_eq "$(jq 'has("agent_session")' "$CEL_REX_STATE/widget-orch.json")" false
   _rext_down
 }

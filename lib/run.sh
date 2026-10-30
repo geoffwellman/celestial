@@ -17,6 +17,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/boxguard.sh"
 # shellcheck source=lib/rex.sh
 . "${BASH_SOURCE[0]%/*}/rex.sh"
+# shellcheck source=lib/opencode.sh
+. "${BASH_SOURCE[0]%/*}/opencode.sh"
 
 # PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
 # (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
@@ -160,6 +162,12 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
       AGENT_ARGS=("$body")
       ;;
     agent_file)
+      if [ "$rt" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
+        local scoped="${rolefile:-$wsdir/.cel/opencode/role-$tag.md}"
+        opencode_agent_args "$tag" "$body" "$dry" "$scoped" "${scoped%.md}.opencode.json" \
+          || die 'cel run: scoped OpenCode role/config is not prepared'
+        return 0
+      fi
       local dir file
       dir="$(expand "$(agent_injection "$rt" dir)")"
       file="$dir/cel-$tag.md"
@@ -236,6 +244,9 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
     ghw="$(ws_github_env_word "$wsdir")"; ghg="$(ws_github_launch_guard "$wsdir")"
   fi
   [ -z "$ghw" ] || out="$ghg$out $ghw"
+  if [ "$runtime" = opencode ] && [ -n "${CEL_OPENCODE_CONFIG_FILE:-}" ]; then
+    out="$(opencode_launch_guard "$CEL_OPENCODE_CONFIG_FILE")$out $(opencode_launch_env)"
+  fi
   printf '%s ' "$out"
 }
 
@@ -1072,6 +1083,12 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
 # one PR, and a resumed one would carry the last job's context into this.
 # Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
 # flag to its AGENT_ARGS.
+_run_resume_identity_check() { # runtime candidate; never cast another harness's history
+  [ "$1" = opencode ] && [ -n "$2" ] || return 0
+  rex_native_session_valid "$1" "$2" \
+    || die 'cel run: saved context is not an OpenCode native session; preserve it and use --fresh --handoff for the migration'
+}
+
 _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint>
   local role="$1" agent_name="$2" cwd="$3" runtime="$4" pane_opt="$5"
   local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}"
@@ -1099,6 +1116,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   if [ -n "$live" ]; then
     IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
     [ "$lsession" != "-" ] || lsession=""
+    [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession"
     _run_sessions_record "$cwd" "$lsession"
   fi
   if [ "$restart" -eq 1 ]; then
@@ -1123,6 +1141,8 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   if [ "$fresh" -eq 0 ] && [ -z "$RESUME_SESSION" ] && [ -z "$live" ]; then
     RESUME_SESSION="$(_run_sessions_last "$cwd")"
   fi
+  # Both live receipts and dead-registry lookup pass the same native boundary.
+  _run_resume_identity_check "$runtime" "$RESUME_SESSION"
   # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
   # herdr still has a name for the pane already resuming it. The pane being
   # restarted is the one expected resumer - it is about to be replaced.
@@ -1130,12 +1150,13 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   # no second resumer.
   if [ "$role" != root ] && [ -n "$RESUME_SESSION" ] && [ "$force" -eq 0 ] \
      && [ -n "$(agent_resume "$runtime" flag)" ]; then
-    local rs rpid rpane others=""
+    local rs rpid rpane others="" holders
+    holders="$(run_session_resumers)" || die 'cel run: native session ownership is unreadable; refusing a duplicate writer'
     while IFS=$'\t' read -r rs rpid rpane; do
       [ "$rs" = "$RESUME_SESSION" ] || continue
       [ -n "$RESTART_PANE" ] && [ "$rpane" = "$RESTART_PANE" ] && continue
       others+="    pane $rpane  pid $rpid"$'\n'
-    done < <(run_session_resumers)
+    done <<< "$holders"
     if [ -n "$others" ]; then
       c_err "cel run $role: another live process is already resuming $RESUME_SESSION:" >&2
       printf '%s' "$others" >&2
@@ -1172,7 +1193,7 @@ _run_restart_in_place() { # <role> <pane> <label> <envprefix> <dry-envprefix> <p
   local dry_run="$7" agent_name="$8" runtime="$9" cwd="${10}"
   case "$pane" in rex/*)
     if [ "$dry_run" = 1 ]; then
-      printf 'rex block close <owned terminal>; rex new %s -- <same runtime and session>\n' "$agent_name"
+      printf 'rex block close <owned terminal>; rex new %s -- %s %s\n' "$agent_name" "$runtime" "$(_run_dry_agent_args)"
       return 0
     fi
     rex_agent_stop "$pane" || die "cel run: could not stop Rex terminal $pane"
@@ -1221,16 +1242,31 @@ _run_is_agent_argv() { # <cmdline-file>
   return 1
 }
 
-run_session_resumers() { # -> session<TAB>pid<TAB>pane, one per live resumer
-  local d pid prev a sess pane item
+run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live holder
+  local d pid prev a sess pane item f
+  local -A managed=()
+  # Native hooks know the current conversation even when a runtime rewrites
+  # argv, or Claude clears to a new UUID after its original --resume.
+  for f in "$(_rex_state)"/*.json; do
+    [ -f "$f" ] || continue
+    _rex_receipt_valid "$f" || return 1
+    _rex_live "$f" || continue
+    sess="$(jq -r '.agent_session.value // empty' "$f")"
+    [ -n "$sess" ] || continue
+    pid="$(jq -r .pid "$f")"; pane="$(jq -r .pane_id "$f")"
+    managed[$pid]=1
+    printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
+  done
   for d in "$(_run_proc_root)"/[0-9]*; do
     pid="${d##*/}"
+    [ -z "${managed[$pid]:-}" ] || continue
     [ -r "$d/cmdline" ] || continue
     sess="" prev=""
     while IFS= read -r -d '' a; do
       case "$a" in
         --resume=*) sess="${a#--resume=}" ;;
-        *) [ "$prev" = --resume ] && sess="$a" ;;
+        --session=*) sess="${a#--session=}" ;;
+        *) { [ "$prev" = --resume ] || [ "$prev" = --session ]; } && sess="$a" ;;
       esac
       [ -n "$sess" ] && break
       prev="$a"
@@ -1513,10 +1549,63 @@ cmd_run() (
   return "$rc"
 )
 
+# Only successful lane launches pin explicit choices. A new explicit profile
+# supersedes its old model override; inherited workspace defaults stay unpinned.
+_run_lane_choices_commit() { # cwd explicit-profile explicit-model runtime dry
+  local cwd="$1" profile="$2" model="$3" runtime="$4" dry="$5" tmp
+  [ "$dry" = 0 ] || return 0
+  [ -n "$profile$model" ] || return 0
+  mkdir -p "$cwd" || return 1
+  if [ -n "$model" ]; then
+    tmp="$(mktemp "$cwd/.launch-model.XXXXXX")" || return 1
+    jq -n --arg runtime "$runtime" --arg model "$model" '{runtime:$runtime,model:$model}' > "$tmp" \
+      && mv "$tmp" "$cwd/launch-model" || { rm -f "$tmp"; return 1; }
+  elif [ -n "$profile" ]; then
+    rm -f "$cwd/launch-model" || return 1
+  fi
+  if [ -n "$profile" ]; then
+    tmp="$(mktemp "$cwd/.launch-profile.XXXXXX")" || return 1
+    printf '%s\n' "$profile" > "$tmp" && mv "$tmp" "$cwd/launch-profile" \
+      || { rm -f "$tmp"; return 1; }
+  fi
+}
+
+_run_lane_model_valid() { # runtime model; offline syntax, never a provider probe
+  [ -n "$(agent_model_flag "$1")" ] || return 1
+  if [ "$1" = claude ]; then
+    case "$2" in sonnet|opus|haiku|fable|sonnet\[1m\]|opus\[1m\]) return 0 ;; esac
+    [[ "$2" =~ ^claude-(sonnet|opus|haiku|fable)-[0-9]+(-[0-9]+)*$ ]] || return 1
+  else
+    [[ "$2" =~ ^[a-zA-Z[:digit:]][a-zA-Z[:digit:]_./:+@-]*$ ]] || return 1
+  fi
+}
+
+_run_lane_remember_current_model() { # cwd name runtime model pid dry
+  local cwd="$1" name="$2" runtime="$3" model="$4" pid="$5" dry="$6" f flag a previous="" actual=""
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || die 'cel run: expected a live runtime PID'
+  f="$(_rex_file "$name")"
+  [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" \
+    || die 'cel run: no matching live managed Rex lane receipt'
+  jq -e --arg cwd "$cwd" --arg name "$name" --arg rt "$runtime" --argjson pid "$pid" \
+    '.cwd == $cwd and .name == $name and .agent == $rt and .pid == $pid and .role == "solo" and .backend == "rex"' "$f" >/dev/null \
+    || die 'cel run: current lane PID/runtime/identity does not match'
+  flag="$(agent_model_flag "$runtime")"
+  while IFS= read -r -d '' a; do
+    if [ "$previous" = "$flag" ]; then actual="$a"; fi
+    case "$a" in "$flag"=*) actual="${a#*=}" ;; esac
+    previous="$a"
+  done < "$(_run_proc_root)/$pid/cmdline"
+  [ "$actual" = "$model" ] && _rex_live "$f" \
+    || die 'cel run: requested model is not the current runtime launch model'
+  _run_lane_choices_commit "$cwd" '' "$model" "$runtime" "$dry" || die 'cel run: could not remember lane model'
+  printf 'Lane model%s: %s (verified live PID %s; no restart)\n' "$([ "$dry" = 0 ] || printf ' preview')" "$model" "$pid"
+}
+
 _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actual starts
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 force=0
   local restart=0 fresh=0 pane_opt="" solo_forced=0 lane=""
-  local profile="" model_opt="" thinking_opt=""
+  local profile="" model_opt="" thinking_opt="" remember_model_pid="" handoff=""
+  local CEL_OPENCODE_CONFIG_FILE=""
   local session_backend="${CEL_SESSION_BACKEND:-}" backend_opt=""
 
   if [ $# -gt 0 ]; then
@@ -1552,9 +1641,17 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       --fresh)     fresh=1; shift ;;
       --pane)      pane_opt="$2"; restart=1; shift 2 ;;
       --lane)      lane="$2"; shift 2 ;;
+      --remember-current-model) remember_model_pid="$2"; shift 2 ;;
+      --handoff) handoff="$2"; shift 2 ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
+  if [ -n "$remember_model_pid" ]; then
+    [ "$solo_forced" = 1 ] && [ -n "$lane" ] && [ -n "$model_opt" ] \
+      && [ -z "$profile$thinking_opt$backend_opt$repo$branch$pr$pane_opt$handoff" ] \
+      && [ "$restart$fresh$force" = 000 ] \
+      || die 'cel run: --remember-current-model PID requires solo --lane and --model only (plus product/workspace/dry-run)'
+  fi
   session_backend="${backend_opt:-${session_backend:-herdr}}"
   case "$session_backend" in herdr|rex) ;; *) die 'cel run: --session-backend wants herdr or rex' ;; esac
 
@@ -1759,7 +1856,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # a fault with a cure (`cel ws up` renames it), never an absence. The check
   # runs on a dry run too: a preview of a launch that would be refused is a
   # preview of something that will not happen.
-  if [ "$role" = orchestrator ] && [ "$force" -eq 0 ] && [ "$restart" -eq 0 ]; then
+  if [ "$role" = orchestrator ] && [ "$force" -eq 0 ] && [ "$restart" -eq 0 ] && [ -z "$remember_model_pid" ]; then
     local occupant oname opane
     occupant="$(_run_live_agent_in_cwd "$cwd")" || die 'cel run: agent inventory is unreadable; refusing duplicate admission'
     if [ -n "$occupant" ]; then
@@ -1794,14 +1891,15 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # /cel-restart or `cel run solo --lane x --restart` - neither passes the
   # flag - would otherwise come back on the product's default, a different
   # runtime, and its session would not resume. The launch writes the choice
-  # beside the lane's role file; a later --profile replaces it.
-  local lane_profile_file="" lane_profile_explicit=""
+  # beside the lane's role file; a later --profile replaces it, including any
+  # old explicit model. Model overrides are lane-local, never profile edits.
+  local lane_profile_file="" lane_profile_explicit="" lane_model_explicit=""
   [ -z "$lane" ] || lane_profile_file="$cwd/launch-profile"
-  # Only a profile the owner NAMED is remembered: the workspace default is
-  # looked up again each launch, so a later role_profiles change still applies.
+  [ -z "$lane" ] || lane_model_explicit="$model_opt"
+  # Only choices the owner NAMED are remembered, not workspace defaults.
   [ -z "$lane_profile_file" ] || lane_profile_explicit="$profile"
   if [ -z "$profile" ] && [ -n "$lane_profile_file" ] && [ -s "$lane_profile_file" ]; then
-    profile="$(head -n1 "$lane_profile_file")"
+    IFS= read -r profile < "$lane_profile_file"
   fi
   if [ -z "$profile" ] && [ "$solo" -eq 1 ]; then
     profile="$(role_profile_for "$wsdir" solo "$bind")"
@@ -1813,11 +1911,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   if [ -n "$profile" ]; then
     profile_resolve "$wsdir" "$profile" "$runtime"
     [ -z "$PROFILE_VETO" ] || die "cel run: profile '$profile' is vetoed - $PROFILE_VETO"
-    # Remembered only once it resolved and was not vetoed: a typo is never
-    # persisted for every later restart to die on.
-    if [ -n "$lane_profile_explicit" ] && [ "$dry_run" -eq 0 ]; then
-      mkdir -p "$cwd" && printf '%s\n' "$lane_profile_explicit" > "$lane_profile_file"
-    fi
+    # Persistence happens after the actual launch, not merely resolution.
     runtime="$PROFILE_RUNTIME"; thinking="$PROFILE_THINKING"
     # A profile that names no model leaves the model alone, so binding a
     # reviewer to a profile for its RUNTIME or effort does not quietly discard
@@ -1827,8 +1921,19 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # Profiles can change runtime for other roles; reviewer delivery depends on
   # pi's idle inbox extension, so keep pi execution and honor explicit flags.
   [ "$role" != reviewer ] || runtime=pi
+  if [ -n "$lane" ] && [ -z "$lane_profile_explicit$model_opt" ] && [ -f "$cwd/launch-model" ]; then
+    model_opt="$(jq -er --arg rt "$runtime" 'select(.runtime == $rt) | .model | select(type == "string" and length > 0)' "$cwd/launch-model")" \
+      || die 'cel run: saved lane model is invalid or belongs to a different runtime; name an explicit --profile or --model'
+  fi
+  if [ -n "$lane" ] && [ -n "$model_opt" ]; then
+    _run_lane_model_valid "$runtime" "$model_opt" || die 'cel run: invalid explicit lane model for this runtime'
+  fi
   [ -z "$model_opt" ]    || model="$model_opt"
   [ -z "$thinking_opt" ] || thinking="$thinking_opt"
+  if [ -n "$remember_model_pid" ]; then
+    _run_lane_remember_current_model "$cwd" "$(_run_agent_name "$alias_name")" "$runtime" "$model" "$remember_model_pid" "$dry_run"
+    return $?
+  fi
   # Reviewers never let pi infer a provider: aliases resolve from the current
   # gateway catalog, and explicit Claude IDs are routed through that gateway.
   # A Codex-family id (gpt-6.1-sol, ompgw-codex/gpt-6-astra) goes through the
@@ -1906,6 +2011,16 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # still ENDS in role-reviewer.md: lib/gc.sh tells a long-lived agent from a
   # stray one by that substring.
   [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
+  if [ "$runtime" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
+    [ "$model" = ompgw-codex/gpt-6.1-sol ] && [ "$thinking" = medium ] \
+      || die 'cel run: this scoped OpenCode route requires exact Sol 6.1 and medium thinking'
+    # Do not overwrite another implicit product's shared role file.
+    bodyfile="$wsdir/.cel/opencode/$agent_name/role-$tag.md"
+  fi
+  if [ -n "$handoff" ]; then
+    [ "$runtime" = opencode ] && [ "$fresh" = 1 ] && [[ "$handoff" = /* ]] && [ -s "$handoff" ] \
+      || die 'cel run: --handoff requires a fresh OpenCode session and an existing absolute handoff file'
+  fi
   _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" "$bodyfile"
 
   # Model and thinking flags ride ahead of the role injection, spelled the way
@@ -1914,6 +2029,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   local -a PROFILE_ARGS=()
   profile_launch_args "$runtime" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
+  if [ -n "$handoff" ]; then
+    AGENT_ARGS+=(--prompt "Read the complete migration handoff at $handoff before acting. This is a NEW OpenCode-native session, not a native resume of the archived OMP history. Preserve the model, account route, approvals, data and dirty work in that handoff. Never dump environments, credentials, resolved provider configs or full debug/config responses: use explicit non-secret identity allowlists only. Acknowledge intake through cel inbox, then wait for core to release the migration hold.")
+  fi
 
   # READ-ONLY ORCHESTRATORS. Root and the sub-orchestrators get the runtime's
   # guard hook so repository writes from their panes are refused at the tool
@@ -1978,7 +2096,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
-  _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))"
+  local affinity=""
+  # A new OpenCode controller must not inherit core's gateway affinity.
+  # Its stable unique agent name also retains this route on native restart.
+  [ "$runtime" != opencode ] || [ "${PROFILE_VIA:-}" != gateway ] || affinity="$agent_name"
+  _run_profile_gateway_setup "$runtime" "$agent_name" "$((1 - dry_run))" "$((1 - dry_run))" "$affinity"
   if [ "${#GATEWAY_ENV[@]}" -gt 0 ]; then
     prefix_required=1
     envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
@@ -1990,6 +2112,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   if [ -n "$restart_pane" ]; then
     _run_restart_in_place "$role" "$restart_pane" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" \
       "$dry_run" "$agent_name" "$runtime" "$cwd"
+    local rc=$?
+    [ "$rc" = 0 ] || return "$rc"
+    [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run"
     return $?
   fi
   if [ "$session_backend" = rex ]; then
@@ -2018,7 +2143,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     else
       mkdir -p "$cwd"
     fi
-    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}"
+    _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
+    [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run" || return $?
     if [ "$role" = reviewer ]; then
       reviewers_record "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
     fi
@@ -2107,7 +2233,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # Role and gateway environment are typed on the launch line before Herdr
   # starts the agent, so exports live in the shell that execs the runtime.
   _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
-  _run_agent_start "$pane_id" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
+  _run_agent_start "$pane_id" "$agent_name" "$runtime" "${AGENT_ARGS[@]}" || return $?
+  [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run"
 }
 
 # THE PROCESS IN A PANE (CEL-81). The first cut found an orchestrator by the

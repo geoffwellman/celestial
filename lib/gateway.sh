@@ -418,9 +418,29 @@ _gateway_locked_publish() { # <file> <function> <args...> - function gets <real 
   ( flock -x 9 || exit 1; "$fn" "$real" "$@" ) 9>"$real.lock"
 }
 
+# Credential-blind metadata from the exact installed Pi distribution. An
+# exact model id may supply capabilities the gateway's id-only list omits;
+# unknown ids never borrow them from another model in the family.
+gateway_pi_catalog_json() {
+  if [ -n "${CEL_TESTING:-}" ]; then
+    if [ -n "${CEL_PI_CODEX_CATALOG_FILE:-}" ]; then cat "$CEL_PI_CODEX_CATALOG_FILE"; else printf '[]\n'; fi
+    return
+  fi
+  local exe real
+  exe="$(command -v pi)" || return 1
+  real="$(readlink -f "$exe")" || return 1
+  if [ "${real##*/}" = mise ]; then
+    exe="$(mise which pi)" || return 1
+    real="$(readlink -f "$exe")" || return 1
+  fi
+  node "$CEL_ROOT/tools/pi/codex-catalog.mjs" "$real"
+}
+
 gateway_pi_models_write() { # [models.json path]
-  local f="${1:-$(gateway_pi_dir)/models.json}" models tmp
-  models="$(gateway_models_json | jq -c --arg re "$GATEWAY_CODEX_ID_RE" '
+  local f="${1:-$(gateway_pi_dir)/models.json}" models tmp native
+  native="$(gateway_pi_catalog_json 2>/dev/null)" || native='[]'
+  models="$(gateway_models_json | jq -c --arg re "$GATEWAY_CODEX_ID_RE" --argjson native "$native" '
+    ($native | map({key:.id,value:.}) | from_entries) as $byid |
     # Native Claude 5.5 capabilities. The gateway publishes bare ids, so
     # without this the generic 128000/8192 fallback would cap the window and
     # output and drop adaptive thinking.
@@ -435,17 +455,19 @@ gateway_pi_models_write() { # [models.json path]
                         supportsTemperature: false, supportsStrictTools: true } }
       else .
       end;
-    # HONEST CODEX METADATA: a field is written only when the gateway
-    # catalog states it. No invented window, no assumed reasoning support, no
-    # level map for levels the catalog did not advertise.
+    # Prefer exact metadata from the native distribution; otherwise retain only
+    # fields the gateway explicitly advertises. No prefix-based capability
+    # guesses and no generic 128K/text-only/non-reasoning cap for known ids.
     def codex_metadata:
-      { id: .id }
-      + (if .context_length then { contextWindow: .context_length } else {} end)
-      + (if .max_output_tokens then { maxTokens: .max_output_tokens } else {} end)
-      + (if ((.thinking.levels // []) | length) > 0
-         then { reasoning: true,
-                thinkingLevelMap: ([.thinking.levels[] | { key: ., value: . }] | from_entries) }
-         else {} end);
+      . as $g | { id: .id }
+      + (if $byid[$g.id] then $byid[$g.id]
+         else (if .context_length then { contextWindow: .context_length } else {} end)
+          + (if .max_output_tokens then { maxTokens: .max_output_tokens } else {} end)
+          + (if ((.thinking.levels // []) | length) > 0
+             then { reasoning: true,
+                    thinkingLevelMap: ([.thinking.levels[] | { key: ., value: . }] | from_entries) }
+             else {} end)
+         end);
     [ (.data // [])[]
       | if (.id | test($re)) then (codex_metadata | . + { codex: true })
         else ({
