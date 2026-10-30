@@ -1554,6 +1554,32 @@ test_steward_leaves_an_orchestrator_with_its_hook_alone() {
   assert_eq "$(_root_mail)" ""
   rm -rf "$T"
 }
+test_steward_unknown_inbox_evidence_replaces_unproven_failure_without_restart() {
+  _hook_fixture idle empty
+  _steward_raise alpha orch-nohook-bundle blocked 'previous missing-hook claim' >/dev/null
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tunknown\tunused-restart\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ''
+  assert_eq "$(cmd_inbox open --for root --workspace alpha --json | jq -sc '[.[].fp]')" '["orch-hook-unverified-bundle"]'
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tok\tunused-restart\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(_root_open)" 0
+  rm -rf "$T"
+}
+
+test_steward_observable_missing_hook_after_unknown_remains_actionable() {
+  _hook_fixture idle empty
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tunknown\tunused-restart\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ''
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tstripped\tunused-restart\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" 'bundle alpha'
+  assert_eq "$(_root_open)" 0
+  rm -rf "$T"
+}
+
 
 # The composer is empty only when the pane PROVES it: an editor box between
 # two dividers with nothing in it. Anything else - text, no box, no read - is

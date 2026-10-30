@@ -662,6 +662,10 @@ doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
   . "${BASH_SOURCE[0]%/*}/run.sh"
   local name ws p pane status state cmd bad=0
   while IFS=$'\t' read -r name ws p pane status state cmd; do
+    if [ "$state" = unknown ]; then
+      c_warn "$name ($ws) native inbox evidence is unverified; inspect its exact session and owned watcher. Rewritten argv is not proof of missing hooks; no automatic restart."
+      continue
+    fi
     [ "$state" = stripped ] || continue
     c_err "$name ($ws) is running without its inbox hook - mail will not reach it (probably a herdr restart): $cmd"
     bad=1
