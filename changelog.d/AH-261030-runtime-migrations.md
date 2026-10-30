@@ -1,0 +1,7 @@
+### Changed
+- Bootstrap pins now match verified stable OMP 18.14.0, Pi 1.4.0 and OpenCode 1.19.5; existing installations remain managed by their native updaters.
+- Pi gateway Codex models derive exact-id capability metadata from the installed published Pi catalog, including context/output limits, images and supported thinking levels. Unknown ids retain only advertised metadata; unrelated registrations remain preserved.
+- Gateway-backed OpenCode roles use an exact validated per-agent config and role file, without editing global OpenCode settings/auth/plugins. Native hooks preserve Sol 6.1/medium, final transport affinity, shared guard policy, real session/status reporting, and idle inbox delivery. Task descendants and compaction do not take over the primary receipt.
+- `cel run ... --fresh --handoff /absolute/checkpoint.md` creates an explicit new OpenCode context; archived OMP logs are not cast into native history. Later continuation accepts only OpenCode-native `ses_...` ids. Gateway affinity is agent-owned rather than inherited from the launching core.
+- Solo lanes retain explicit model overrides after successful launches. `--remember-current-model PID` persists only a verified live Rex lane's actual launch model, without restarting it or editing shared profiles.
+- Native Claude hooks report its real session UUID and turn state; Stop remains working while mail is owed. Session reports require actual runtime ancestry, and native Rex holder discovery survives rewritten process titles.
