@@ -644,13 +644,27 @@ doctor_afk_line() { # -> one line about AFK, or nothing
 doctor_stale_orchestrator_lines() {
   # shellcheck source=lib/run.sh
   . "${BASH_SOURCE[0]%/*}/run.sh"
-  local rows name ws missing cmd status
-  rows="$(run_stale_orchestrators)"
-  if [ -z "$rows" ]; then c_ok "every live root/orchestrator runs the current launch line"; return 0; fi
-  while IFS=$'\t' read -r name ws missing cmd status; do
+  local rows name ws pane status since model launch detail cmd role product current=0 all_current=1
+  rows="$(run_orchestrator_rows)"
+  if [ -z "$rows" ]; then c_warn "no live root/orchestrator launch evidence is available"; return 0; fi
+  while IFS=$'\t' read -r name ws pane status since model launch detail cmd role product; do
     [ -n "$name" ] || continue
-    c_warn "$name ($ws) runs an older launch line ($missing) - $cmd"
+    case "$launch" in
+      current) current=$((current+1)) ;;
+      stale)
+        all_current=0
+        c_warn "$name ($ws) runs an older launch line ($detail) - $cmd" ;;
+      unknown)
+        all_current=0
+        c_warn "$name ($ws) launch line unknown: $detail; inspect native evidence without restarting on a guess" ;;
+      *)
+        all_current=0
+        c_warn "$name ($ws) launch evidence $launch: $detail" ;;
+    esac
   done <<<"$rows"
+  if [ "$all_current" = 1 ] && [ "$current" -gt 0 ]; then
+    c_ok "every live root/orchestrator runs the current launch line"
+  fi
   return 0
 }
 
