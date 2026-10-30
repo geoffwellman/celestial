@@ -66,6 +66,7 @@ _rv_rex() {
   jq -n --arg cwd "$T/ws/.cel/solo/bundle" --arg ws "$T/ws" --arg rt "$1" \
     '{name:"bundle-orch",agent:$rt,cwd:$cwd,role:"solo",workspace:$ws,pane_id:"rex/fixture/session",backend:"rex",rex_session:"fixture",rex_block:"session",pid:100,pid_start:"1000",agent_status:"idle"}' \
     > "$CEL_REX_STATE/bundle-orch.json"
+  chmod 600 "$CEL_REX_STATE/bundle-orch.json"
 }
 
 _rv_verdict() {
@@ -101,7 +102,7 @@ test_runtime_verdict_local_profile_change_invalidates_same_build_and_pid() {
   _rv_proc "${RV_ARGV[@]}"
   _rv_verdict w1:p1 omp
   assert_eq "$_RUN_LAUNCH" current
-  cp "$T/ws/workspace.local.yaml" "$T/route-before"
+  cp -p "$T/ws/workspace.local.yaml" "$T/route-before"
   _rv_local omp fixture/later
   touch -r "$T/route-before" "$T/ws/workspace.local.yaml"
   _rv_verdict w1:p1 omp
@@ -223,7 +224,7 @@ test_runtime_verdict_manifest_content_invalidates_primed_expected_flags_cache() 
   _rv_proc "${RV_ARGV[@]}"
   _rv_verdict w1:p1 omp
   assert_eq "$_RUN_LAUNCH" current
-  cp "$CEL_MANIFEST" "$T/manifest-before"
+  cp -p "$CEL_MANIFEST" "$T/manifest-before"
   yq -y '.agents.omp.launch_args += ["--fixture-widget-required"]' "$CEL_MANIFEST" > "$T/manifest-next"
   cp "$T/manifest-next" "$CEL_MANIFEST"
   touch -r "$T/manifest-before" "$CEL_MANIFEST"
