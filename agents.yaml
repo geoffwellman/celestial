@@ -85,9 +85,9 @@ agents:
     # command-line argument (invalid_agent_argument), so the role travels as
     # a file path.
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt-file }
-    # The box-wide prefs install UserPromptSubmit once. Stop handles mail that
-    # arrives during this turn; neither hook wakes an idle Claude session.
-    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
+    # The global hook drains inbox once; launch-scoped hooks additionally
+    # report native Claude session/status. Stop retains owed-mail behavior.
+    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh","timeout":10}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
     resume: { flag: --resume, value: id }
     model_flag: --model
     # `claude --help`: "--effort <level>  Effort level for the current session
@@ -110,12 +110,12 @@ agents:
     update:
       command: 'omp update'
       latest: "omp update --check 2>&1 | sed -n 's/^\\(New version available\\|Current version\\): //p' | tail -1"
-    version: 18.10.4
+    version: 18.14.0
     install: "install_pinned_binary agents omp"
-    # Digests: https://github.com/can1357/oh-my-pi/releases/download/v18.10.4/SHA256SUMS.txt
+    # Digests: https://github.com/can1357/oh-my-pi/releases/tag/v18.14.0
     assets:
-      x64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.10.4/omp-linux-x64", sha256: ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e }
-      arm64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.10.4/omp-linux-arm64", sha256: 58d711d56fa0c95d208c150575dfdb08fe8fc1262e3820d2d900f0a5e750110b }
+      x64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.14.0/omp-linux-x64", sha256: e7dd2b606c4ebe9d1a7bcfad1b8820db968cd6b05409fed1c6bc8db0b6a95a8f }
+      arm64: { url: "https://github.com/can1357/oh-my-pi/releases/download/v18.14.0/omp-linux-arm64", sha256: dba8d170499709bc87359e02e677821aa76a6ef998ca0254578fe4ea07aff5bc }
     skills_dir: ~/.omp/skills
     agents_dir: ~/.omp/agent/agents
     herdr_integration: omp
@@ -178,7 +178,7 @@ agents:
       command: 'pi update --self'
       latest: 'npm view @earendil-works/pi-coding-agent version'
       rollback: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_OLD_VERSION"'
-    version: 1.2.0
+    version: 1.4.0
     install: 'npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$CEL_INSTALL_VERSION"'
     skills_dir: ~/.pi/skills
     herdr_integration: pi
@@ -257,24 +257,26 @@ agents:
     update:
       command: 'opencode upgrade'
       latest: "curl -fsSL -m 20 https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.tag_name | ltrimstr(\"v\")'"
-    version: 1.18.31
+    version: 1.19.5
     install: "install_pinned_binary agents opencode"
     # Baseline x64 runs without AVX2. Digests are from the release assets API.
     assets:
-      x64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.18.31/opencode-linux-x64-baseline.tar.gz", sha256: b283e8dbe9e6fc224bb4b79992ce3bd2174b8b7b0c3e7d1b4e6024a1d11edc84, member: opencode }
-      arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.18.31/opencode-linux-arm64.tar.gz", sha256: d4e332f46b227448582c0d9fc75f6f826dfe95c9f751bc2011fc4d937a042be6, member: opencode }
+      x64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-x64-baseline.tar.gz", sha256: 17c200fd4b2289954cc01552559f9b6d03ec157b2ddfb5eb54144f491656333d, member: opencode }
+      arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-arm64.tar.gz", sha256: fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b, member: opencode }
     skills_dir: ~/.config/opencode/skills
     herdr_integration: opencode
     required: false
     # OpenCode injects the role through its agent registry.
     role_injection: { strategy: agent_file, dir: ~/.config/opencode/agent }
+    # Actual OpenCode native store id only (ses_...). The launcher refuses
+    # archived OMP/Pi files and Claude UUIDs; initial migrations use --fresh.
+    resume: { flag: --session, value: id }
     # opencode's equivalent of the other runtimes' approval bypass.
     launch_args: [--auto]
     # Always the explicit `provider/model` form - opencode has no fuzzy match.
     model_flag: --model
-    # No `thinking:` block on purpose: opencode carries reasoning effort in its
-    # per-model config, not on the command line. A profile that asks for a
-    # level on this runtime is told so rather than having it dropped.
+    # No invented thinking/variant CLI flag: gateway OpenCode launches pin
+    # medium in the scoped agent/model config and native chat.params hook.
     notes: >
       anomalyco/opencode. Native release binary, not a Node global package.
 
