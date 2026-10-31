@@ -295,31 +295,51 @@ for sessions launched with `cel run` (including solo lanes and reviewers).
 
 ### Scoped OpenCode gateway migration
 
-The verified OpenCode gateway path uses a prepared, per-agent configuration:
-exact `ompgw-codex/gpt-6.1-sol`, medium effort, published 500K context/128K
-output limits, and the existing gateway credential reference. It does not
-import credentials or edit global OpenCode settings. Admission validates the
-exact role, plugin, provider, URL, route and model contract before writing a
-role file or starting a terminal. Roles live under
-`.cel/opencode/<agent>/role-<role>.md`, not another product's shared role file.
+OpenCode is pinned to the verified **2.2.5 CLI release**, not the legacy npm
+package or GitHub's stale latest-release pointer. Updates install digest-checked
+official assets at the existing executable's location (fresh installs use
+`~/.local/bin`); they never restart an agent or change accounts.
+
+The gateway path uses a prepared per-agent native-v2 configuration: exact
+`ompgw-codex/gpt-6.1-sol`, medium effort, evidenced 500K context/128K output
+limits, and the existing credential reference. Nothing imports credentials or
+edits global OpenCode settings. Roles live under
+`.cel/opencode/<agent>/role-<role>.md`. The plugin is a directory package with
+an explicit server export, not a standalone v1 hook file.
 
 ```sh
 cel run solo --product <product> --profile <scoped-profile> --session-backend rex --fresh --handoff /absolute/checkpoint.md
 ```
 
-The native `--prompt` kickoff instructs the new agent to read the handoff in a
-NEW OpenCode session; an archived OMP log is consultation material, never a native resume. Subsequent
-continuation consumes only OpenCode's own `ses_...` ids through `--session`;
-other runtime paths/UUIDs refuse and require an explicit fresh handoff. The
-native plugin reports the primary session's state/id, preserves task lineage
-and compaction without taking over the main receipt, and delivers idle inbox
-mail through the native session API rather than terminal typing. Medium is
-stored in the native user model and sent as Responses reasoning effort—there
-is no fabricated TUI thinking flag. The provider-scoped final fetch boundary
-pins the agent-owned affinity header instead of inheriting the launching
-core's key or accepting a downstream native-header overwrite. Existing shared
-guard policy is enforced through native tool hooks; `--auto` does not waive
-explicit denials. Never dump environments or credentials as identity evidence.
+The native `--prompt` kickoff instructs a fresh session to read the handoff;
+an archived OMP log is consultation material, never a native resume. Subsequent
+continuation accepts only an existing migrated OpenCode `ses_...` root with
+the exact directory, scoped agent, model and medium variant. Storage errors,
+pending migrations and missing IDs refuse before stopping/relaunching a
+runtime: v2's bare `--session` can otherwise create a missing session.
+
+The canonical parent owns a private authenticated `serve --stdio` process.
+Before attaching the TUI it verifies the actual server PID/version, exact
+native plugin source/location and active status, migration readiness, saved
+session identity, and scoped model availability. A private admission marker
+prevents a loaded resume plugin from draining inbox mail before those checks.
+Missing/failed plugins never admit an unguarded TUI. The server's stdin lease
+and native child processes are owned by this launch, not a shared service.
+
+The plugin preserves primary/child identity and delivers idle inbox messages
+through native synthetic input, never terminal typing. Medium is persisted
+in the native model selection and sent as Responses reasoning effort. Final
+HTTP and WebSocket boundaries preserve the agent-owned affinity route despite
+OpenCode's own header defaults. Shared guard policy covers native shell,
+write, edit and patch hooks; `--auto` never waives explicit denials.
+
+An existing completed v1 migration marker is not proof that a later v1 session
+exists in v2. Preserve a consistent database/WAL-visible backup first. When
+native lookup refuses, investigate on a disposable copy; do not reset a live
+migration marker or replace shared native storage. Any supported native import
+must preserve original parent/child IDs and history without overwriting an
+unrelated session. Installation is not authorization to quit/reload a held
+runtime. Never dump environments or credentials as identity evidence.
 
 ### Commands inside an agent
 
