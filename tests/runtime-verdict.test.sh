@@ -6,6 +6,12 @@ source "$CEL_ROOT/tests/lib/orch-stub.sh"
 _rv_setup() {
   orch_stub_setup omp
   export CEL_REX_STATE="$T/rex"
+  # Only the external gateway boundary is a fixture. Keep the real canonical
+  # routing/argv/verdict path; never contact the developer's live gateway.
+  gateway_installed() { return 0; }
+  gateway_ready() { return 0; }
+  gateway_usable_count() { printf '1'; }
+  gateway_models_json() { printf '%s' '{"data":[{"id":"gpt-6.1-sol"}]}'; }
   mkdir -p "$CEL_REX_STATE" "$T/ws/.cel/solo/bundle"
   printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
   cat > "$T/ws/workspace.yaml" <<'YAML'
