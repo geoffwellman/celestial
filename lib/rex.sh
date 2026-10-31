@@ -3,6 +3,8 @@
 # the Rex server's other sessions are never adopted, stopped or garbage-collected.
 [ -n "${_CEL_REX:-}" ] && return 0
 _CEL_REX=1
+# shellcheck source=lib/opencode.sh
+. "${BASH_SOURCE[0]%/*}/opencode.sh"
 
 _rex_state() {
   if [ -n "${CEL_REX_STATE:-}" ]; then printf '%s' "$CEL_REX_STATE"
@@ -76,16 +78,26 @@ _rex_launch() { # name runtime cwd label envprefix args...
   local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
   # Capture only an explicit native resume argument, never cast an archived
   # conversation from another runtime into native identity.
-  local native="" a previous="" native_flag=""
+  local native="" a previous="" native_flag="" native_requested=0
   case "$rt" in claude) native_flag=--resume ;; opencode) native_flag=--session ;; esac
   if [ -n "$native_flag" ]; then
     for a in "$@"; do
       if [ "$previous" = "$native_flag" ]; then native="$a"; fi
-      case "$a" in "$native_flag"=*) native="${a#*=}" ;; esac
+      case "$a" in "$native_flag") native_requested=1 ;; "$native_flag"=*) native="${a#*=}"; native_requested=1 ;; esac
       previous="$a"
     done
     [ -z "$native" ] || rex_native_session_valid "$rt" "$native" \
       || die "cel run: $rt native resume must name its exact native session identity"
+  fi
+  if [ "$rt" = opencode ] && [ "$native_requested" = 1 ]; then
+    # A v2 --session may CREATE a missing ID. Direct callers must carry the
+    # same prepared scope as cmd_run; never infer it from an old receipt.
+    [ -n "${CEL_OPENCODE_AGENT:-}" ] && [ -n "${AGENT_ROLE_FILE:-}" ] && [ -n "${CEL_OPENCODE_CONFIG_FILE:-}" ] \
+      || die 'cel run: OpenCode native resume requires the prepared scoped agent/config'
+    opencode_validate_config "${CEL_OPENCODE_AGENT#cel-}" "$AGENT_ROLE_FILE" "$CEL_OPENCODE_CONFIG_FILE" \
+      || die 'cel run: OpenCode native resume scope is not canonical'
+    opencode_validate_session "$native" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-$cwd}" \
+      || die 'cel run: refusing to publish an absent, mismatched, or unmigrated OpenCode native v2 root'
   fi
   local d file script resp session block pid start bin
   d="$(_rex_state)"; mkdir -p "$d"; chmod 700 "$d"
@@ -115,7 +127,11 @@ _rex_launch() { # name runtime cwd label envprefix args...
     printf 'export CEL_SESSION_BACKEND=rex CEL_AGENT_NAME=%q CEL_REX_RECORD=%q\n' "$name" "$file"
     # The shared prefix may have a GitHub account guard before `env`.
     # Exec the runtime only AFTER that guard, retaining its exit behavior.
-    printf '%s %q ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}" "$bin"
+    if [ "$rt" = opencode ]; then
+      printf '%s %s%q ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}" "$(opencode_launch_command)" "$bin"
+    else
+      printf '%s %q ' "${prefix/env CEL_ROLE=/exec env CEL_ROLE=}" "$bin"
+    fi
     printf '%q ' "$@"; printf '\n'
   } > "$script"
   printf '%s\n' "$script" > "$file.pending"; chmod 600 "$file.pending"

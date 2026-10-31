@@ -1,0 +1,8 @@
+{
+  "name": "celestial-opencode-plugin",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./server": "./index.mjs"
+  }
+}

@@ -1,36 +1,104 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, writeFile, readFile, rm, chmod, symlink, link } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import plugin from '../hooks/celestial.opencode.mjs';
-import { createHooks } from './runtime.mjs';
-import { buildConfig, scopedConfigInput, validateConfig } from './config.mjs';
+import plugin from './plugin/index.mjs';
+import { createPlugin } from './runtime.mjs';
 
+const execute = promisify(execFile);
+const repo = fileURLToPath(new URL('../../', import.meta.url));
 const options = { agent: 'cel-orchestrator', providerID: 'ompgw-codex', modelID: 'gpt-6.1-sol', transport: 'gateway', route: 'existing-route' };
-const model = { providerID: options.providerID, modelID: options.modelID };
-const created = { event: { type: 'session.created', properties: { info: { id: 'ses_native' } } } };
-const state = (type) => ({ event: { type: 'session.status', properties: { sessionID: 'ses_native', status: { type } } } });
+const model = { providerID: options.providerID, id: options.modelID, variant: 'medium' };
+const location = { directory: '/fixture/product', project: { id: 'fixture', directory: '/fixture/product', canonical: '/fixture/product' } };
+const admission = (changes = {}) => ({ directory: location.directory, agent: options.agent, model: { ...model }, ...changes });
+const nativeInfo = (id = 'ses_native', parentID, changes = {}) => ({
+  id, parentID, agent: parentID ? 'explore' : options.agent, model: { ...model },
+  location: { directory: location.directory }, time: { created: 1, updated: 20, busy: 10, idle: 20 }, ...changes,
+});
+// Native schema/event.ts envelopes carry data, never the removed v1 properties.
+const created = (native = nativeInfo()) => ({ id: 'evt_created', created: 1, type: 'session.created',
+  durable: { aggregateID: native.id, seq: 0, version: 1 }, data: {
+    sessionID: native.id, projectID: location.project.id, location: native.location, parentID: native.parentID,
+    agent: native.agent, model: native.model, slug: 'fixture', version: '2.2.5',
+  } });
+const status = (type, sessionID = 'ses_native') => ({ id: 'evt_status', created: 2, type: 'session.status', data: { sessionID, status: { type } } });
+const request = (changes = {}) => ({ sessionID: 'ses_native', agent: options.agent, model: { ...model }, kind: 'primary', ...changes });
+
 async function rexRecord(overrides = {}) {
   const stat = await readFile(`/proc/${process.pid}/stat`, 'utf8');
-  return { name: 'fixture-opencode-orch', agent: 'opencode', backend: 'rex', cwd: '/fixture/product', workspace: '/fixture', role: 'solo', pid: process.pid, pid_start: stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19], ...overrides };
+  return { name: 'fixture-opencode-orch', agent: 'opencode', backend: 'rex', cwd: location.directory,
+    pid: process.pid, pid_start: stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19], ...overrides };
 }
-const nativeInfo = (id, parentID) => ({ id, parentID, directory: '/fixture/product', model: { providerID: model.providerID, id: model.modelID, variant: 'medium' } });
-async function fixture(overrides = {}) {
-  let tick, stopped = false, count = 1, status = {}, fail = false;
-  const calls = [], delivered = [];
-  const lineage = new Map([['ses_native', nativeInfo('ses_native')], ['ses_other', nativeInfo('ses_other')]]);
-  const client = { session: {
-    get: async ({ path }) => lineage.has(path.id) ? { data: lineage.get(path.id) } : { error: new Error('native session not found') },
-    status: async () => ({ data: status }),
-    promptAsync: async (args) => {
-      delivered.push(args);
-      if (fail) throw new Error('fixture transient refusal');
-      return { response: { ok: true } };
+function eventStream() {
+  let waiting, previous, ended = false;
+  const queued = [];
+  return {
+    push(value) {
+      return new Promise((ack) => {
+        if (ended) { ack(); return; }
+        if (waiting) { const resolve = waiting; waiting = undefined; previous = ack; resolve({ value, done: false }); }
+        else queued.push({ value, ack });
+      });
     },
-  } };
-  const env = { CEL_ROOT: '/fixture/cel', CEL_INBOX_ME: 'widget-orch', CEL_INBOX_WS: 'sandbox', OMP_GATEWAY_TOKEN: 'fixture-only', GH_TOKEN: 'fixture-github', ...overrides.env };
-  const hooks = await createHooks({ client, directory: '/fixture/product' }, options, {
+    subscribe({ signal }) {
+      function close() {
+        ended = true;
+        previous?.(); previous = undefined;
+        for (const item of queued.splice(0)) item.ack();
+        waiting?.({ done: true }); waiting = undefined;
+      }
+      signal.addEventListener('abort', close, { once: true });
+      return { [Symbol.asyncIterator]() { return {
+        next() {
+          previous?.(); previous = undefined;
+          if (ended) return Promise.resolve({ done: true });
+          const item = queued.shift();
+          if (item) { previous = item.ack; return Promise.resolve({ value: item.value, done: false }); }
+          return new Promise((resolve) => { waiting = resolve; });
+        },
+        async return() { close(); return { done: true }; },
+      }; } };
+    },
+    ended: () => ended,
+  };
+}
+async function fixture(overrides = {}) {
+  let tick, stopped = false, count = 1, fail = false, disposed = 0, waitCalls = 0, reloads = 0;
+  const calls = [], delivered = [], gets = [], hooks = { session: new Map(), tool: new Map(), shell: new Map() };
+  const transforms = {}, stream = eventStream();
+  const lineage = new Map([['ses_native', nativeInfo()], ['ses_other', nativeInfo('ses_other')]]);
+  const registration = () => ({ async dispose() { disposed++; } });
+  const register = (domain) => async (name, callback, scope) => {
+    hooks[domain].set(name, { callback, scope });
+    return { async dispose() { hooks[domain].delete(name); disposed++; } };
+  };
+  const context = {
+    options: { ...options, ...overrides.options }, location: overrides.location ?? location,
+    provider: { async transform(callback) { transforms.provider = callback; return registration(); }, async reload() { reloads++; } },
+    model: { async transform(callback) { transforms.model = callback; return registration(); }, async reload() { reloads++; } },
+    session: {
+      hook: register('session'),
+      async get({ sessionID }) {
+        gets.push(sessionID);
+        if (!lineage.has(sessionID)) throw new Error('Native session not found');
+        return structuredClone(lineage.get(sessionID));
+      },
+      async synthetic(input) {
+        delivered.push(input);
+        if (fail) throw new Error('Native admission refused');
+        return { id: `msg_${delivered.length}`, sessionID: input.sessionID, type: 'synthetic', delivery: input.delivery };
+      },
+      async wait() { waitCalls++; throw new Error('Never wait in an idle hook or observer'); },
+    },
+    tool: { hook: register('tool') }, shell: { hook: register('shell') }, event: { subscribe: stream.subscribe },
+  };
+  const env = { CEL_ROOT: '/fixture/cel', CEL_INBOX_ME: 'widget-orch', CEL_INBOX_WS: 'sandbox',
+    OMP_GATEWAY_TOKEN: 'fixture-only', GH_TOKEN: 'fixture-github', ...overrides.env };
+  const cleanup = await createPlugin(context, {
     env, clock: { setInterval(fn) { tick = fn; return { unref() {} }; }, clearInterval() { stopped = true; } },
     run: async (bin, args) => {
       calls.push([bin, args]);
@@ -40,444 +108,570 @@ async function fixture(overrides = {}) {
       return '';
     }, ...overrides.deps,
   });
-  if (!overrides.skipConfig) await hooks.config({ provider: { [options.providerID]: { options: {} } } });
-  return { hooks, client, env, calls, delivered, tick: () => tick(), setSession(id, parentID) { lineage.set(id, nativeInfo(id, parentID)); }, setStatus(x) { status = x; }, setFail(x) { fail = x; }, stopped: () => stopped };
+  return {
+    context, cleanup, env, calls, delivered, gets, hooks, transforms, lineage,
+    emit: (event) => stream.push(event), tick: () => tick(), setCount(value) { count = value; }, setFail(value) { fail = value; },
+    hook: (name, event) => hooks.session.get(name).callback(event),
+    tool: (tool, input, sessionID = 'ses_native') => hooks.tool.get('execute.before').callback({ tool, input, sessionID, agent: options.agent, messageID: 'msg_tool', id: 'call_tool' }),
+    shell: (command) => hooks.shell.get('create.before').callback({ command, cwd: '/another/workdir', timeout: 0, shell: '/bin/bash', env: {} }),
+    stopped: () => stopped, disposed: () => disposed, streamEnded: stream.ended, waits: () => waitCalls, reloads: () => reloads,
+  };
+}
+function providerEditor() {
+  const providers = new Map(['ompgw-codex', 'openai', 'anthropic'].map((id) => [id, { provider: { id }, models: new Map() }]));
+  return { list: () => [...providers.values()], get: (id) => providers.get(id), remove: (id) => providers.delete(id), providers };
+}
+function modelEditor() {
+  const models = new Map([
+    ['ompgw-codex/gpt-6.1-sol', { ...model, settings: { reasoningEffort: 'high', unrelated: true }, enabled: true,
+      variants: [{ id: 'high', settings: { reasoningEffort: 'high' } }, { id: 'medium', settings: { unrelated: true } }] }],
+    ['ompgw-codex/gpt-other', { id: 'gpt-other', providerID: 'ompgw-codex', variants: [] }],
+    ['openai/gpt-6.1-sol', { id: model.id, providerID: 'openai', variants: [] }],
+  ]);
+  let selected;
+  return { list: () => [...models.values()], get: (p, m) => models.get(`${p}/${m}`), remove: (p, m) => models.delete(`${p}/${m}`),
+    update: (p, m, change) => change(models.get(`${p}/${m}`)), default: { set: (p, m) => { selected = `${p}/${m}`; } }, models, selected: () => selected };
+}
+async function resumeFixture(changes = {}, overrides = {}) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-resume-'));
+  const record = path.join(dir, 'record.json');
+  await writeFile(record, JSON.stringify(await rexRecord({ agent_session: { value: 'ses_native' }, ...changes })));
+  const f = await fixture({ ...overrides, env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: record, CEL_AGENT_NAME: 'fixture-opencode-orch', ...overrides.env } });
+  return { ...f, record, cleanup: async () => { await f.cleanup(); await rm(dir, { recursive: true, force: true }); } };
 }
 
-test('entrypoint exports a native plugin and scoped config preserves explicit Responses/model/medium metadata', () => {
-  assert.equal(typeof plugin, 'function');
-  const input = { agent: options.agent, roleFile: '/product/role-orchestrator.md', pluginFile: '/cel/tools/hooks/celestial.opencode.mjs', modelID: 'gpt-6.1-sol', transport: 'gateway', baseURL: 'http://127.0.0.1:8317/v1', route: '{env:CEL_SESSION_ID}', limit: { context: 500000, output: 128000 } };
-  const config = buildConfig(input);
-  assert.equal(config.model, 'ompgw-codex/gpt-6.1-sol');
-  assert.equal(config.small_model, config.model);
-  assert.deepEqual(config.enabled_providers, ['ompgw-codex']);
-  const provider = config.provider['ompgw-codex'];
-  assert.equal(provider.npm, '@ai-sdk/openai');
-  assert.equal(provider.options.apiKey, '{env:OMP_GATEWAY_TOKEN}');
-  assert.equal(provider.options.headers['x-session-id'], '{env:CEL_SESSION_ID}');
-  assert.equal(config.plugin[0][1].route, '{env:CEL_SESSION_ID}');
-  assert.deepEqual(provider.models['gpt-6.1-sol'].limit, input.limit);
-  assert.deepEqual(provider.models['gpt-6.1-sol'].modalities, { input: ['text', 'image'], output: ['text'] });
-  assert.equal(config.agent[options.agent].variant, 'medium');
-  assert.equal(config.agent[options.agent].prompt, '{file:/product/role-orchestrator.md}');
-  assert.throws(() => buildConfig({ ...input, modelID: 'gpt-6-sol' }), /substitution/);
-  assert.throws(() => buildConfig({ ...input, limit: undefined }), /evidenced/);
-  assert.throws(() => buildConfig({ ...input, route: '' }), /existing explicit/);
-});
-
-test('model and medium stay pinned, unrelated plugins/providers and GitHub identity stay intact', async () => {
+test('entrypoint is the v2 definition and setup registers native domains without session calls', async () => {
+  assert.equal(plugin.id, 'celestial');
+  assert.equal(typeof plugin.setup, 'function');
   const f = await fixture();
   try {
-    const config = { plugin: ['global-plugin'], provider: { existing: { options: { existing: true } }, [options.providerID]: { options: { baseURL: 'http://fixture/v1', apiKey: 'fixture-only' } } } };
-    await f.hooks.config(config);
-    assert.deepEqual(config.plugin, ['global-plugin']);
-    assert.deepEqual(config.provider.existing, { options: { existing: true } });
-    assert.equal(config.provider[options.providerID].options.baseURL, 'http://fixture/v1');
-    assert.equal(config.provider[options.providerID].options.apiKey, 'fixture-only');
-    const output = { options: { unrelated: true, reasoningEffort: 'high' } };
-    await f.hooks['chat.params']({ model }, output);
-    assert.deepEqual(output.options, { unrelated: true, reasoningEffort: 'medium' });
-    assert.equal(typeof config.provider[options.providerID].options.fetch, 'function');
+    assert.equal(typeof f.cleanup, 'function');
+    assert.deepEqual(f.gets, []);
+    assert.deepEqual([...f.hooks.session.keys()], ['context', 'compaction', 'generate', 'title', 'model.request', 'http.request', 'experimental.ws.handshake', 'experimental.idle']);
+    assert.deepEqual([...f.hooks.tool.keys()], ['execute.before']);
+    assert.deepEqual([...f.hooks.shell.keys()], ['create.before']);
+    assert.equal(f.waits(), 0);
     assert.equal(f.env.GH_TOKEN, 'fixture-github');
-    await assert.rejects(f.hooks['chat.params']({ model: { providerID: 'openai', modelID: 'gpt-6.1-sol' } }, output), /fallback/);
-    await f.hooks['chat.message']({ sessionID: 'ses_native', agent: options.agent }, { message: { model, agent: options.agent } });
-  } finally { await f.hooks.dispose(); }
-});
-
-test('missing gateway auth refuses rather than silently selecting native credentials', async () => {
-  const f = await fixture({ env: { OMP_GATEWAY_TOKEN: '' } });
-  try { await assert.rejects(f.hooks['chat.params']({ model }, { options: {} }), /absent/); }
-  finally { await f.hooks.dispose(); }
-});
-
-test('backlog and later idle mail use native promptAsync, coalesce, retain failed delivery, and never use composer APIs', async () => {
-  const f = await fixture();
-  try {
-    await f.hooks.event(created);
-    f.setStatus({ ses_native: { type: 'busy' } });
-    await f.tick();
-    assert.equal(f.delivered.length, 0);
-    f.setStatus({});
-    f.setFail(true);
-    await f.tick();
-    assert.equal(f.delivered.length, 1);
-    f.setFail(false);
-    await Promise.all([f.tick(), f.tick()]);
-    assert.equal(f.delivered.length, 2);
-    assert.equal(f.calls.filter(([, a]) => a[0] === 'inbox' && a[1] === 'read').length, 1);
-    assert.deepEqual(f.delivered[1].path, { id: 'ses_native' });
-    assert.deepEqual(f.delivered[1].body.model, model);
-    assert.match(f.delivered[1].body.parts[0].text, /\[mail-1\] \[sandbox\].*native delivery/);
-    assert.equal(f.delivered[1].body.agent, options.agent);
-    await f.hooks.event(state('idle'));
-    await f.tick();
-    assert.equal(f.delivered.length, 2);
-    assert.ok(f.calls.every(([, a]) => !a.includes('prompt') && !a.includes('send-text')));
-  } finally { await f.hooks.dispose(); }
+  } finally { await f.cleanup(); }
   assert.equal(f.stopped(), true);
-  await f.tick();
-  assert.equal(f.delivered.length, 2);
+  assert.equal(f.streamEnded(), true);
+  assert.equal(f.disposed(), 12);
 });
 
-test('a busy event during an awaited idle query fences the stale response', async () => {
+test('native availability removes unrelated providers/models and pins Sol base plus medium variant', async () => {
   const f = await fixture();
   try {
-    await f.hooks.event(created);
-    let resolve, entered;
-    const querying = new Promise((r) => { entered = r; });
-    f.client.session.status = () => new Promise((r) => { resolve = r; entered(); });
-    const polling = f.tick();
-    await querying;
-    await f.hooks.event(state('busy'));
-    resolve({ data: {} });
-    await polling;
-    assert.equal(f.delivered.length, 0);
-    assert.equal(f.calls.length, 0);
-  } finally { await f.hooks.dispose(); }
+    const providers = providerEditor(), models = modelEditor();
+    f.transforms.provider(providers); f.transforms.model(models);
+    assert.deepEqual([...providers.providers.keys()], ['ompgw-codex']);
+    assert.deepEqual([...models.models.keys()], ['ompgw-codex/gpt-6.1-sol']);
+    const sol = models.get(model.providerID, model.id);
+    assert.deepEqual(sol.settings, { reasoningEffort: 'medium', unrelated: true });
+    assert.deepEqual(sol.variants, [{ id: 'medium', settings: { unrelated: true, reasoningEffort: 'medium' } }]);
+    assert.equal(models.selected(), 'ompgw-codex/gpt-6.1-sol');
+  } finally { await f.cleanup(); }
 });
 
-test('Rex notes bind only a proven process and actual native session/status', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-note-'));
-  const record = path.join(dir, 'record.json');
-  await writeFile(record, JSON.stringify(await rexRecord()));
-  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: record } });
-  try {
-    await f.hooks.event(created);
-    await f.hooks.event(state('busy'));
-    await f.hooks.event(state('idle'));
-    const notes = f.calls.filter(([, a]) => a[0] === 'sessions').map(([, a]) => a);
-    assert.deepEqual(notes, ['idle', 'working', 'idle'].map((s) => ['sessions', 'note', String(process.pid), s, 'ses_native']));
-    await writeFile(record, JSON.stringify(await rexRecord({ pid: 2147483647 })));
-    await f.hooks.event(state('busy'));
-    assert.equal(f.calls.filter(([, a]) => a[0] === 'sessions').length, 3);
-    await assert.rejects(f.hooks['chat.message']({ sessionID: 'ses_other', agent: options.agent, model }, { message: {} }), /already owns/);
-  } finally { await f.hooks.dispose(); await rm(dir, { recursive: true, force: true }); }
-});
-
-test('guard covers bash, write/edit, all patch source/destination paths, and explicit one-call approval', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'forbidden' } }), /celestial guard/);
-    await f.hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'CEL_GUARD_ALLOW_ONCE=1 forbidden' } });
-    await f.hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'CEL_GUARD_ALLOW_ONCE=1' } });
-    await assert.rejects(f.hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'CEL_GUARD_ALLOW_ONCE=11 forbidden' } }), /celestial guard/);
-    await assert.rejects(f.hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'CEL_GUARD_ALLOW_ONCE=1x forbidden' } }), /celestial guard/);
-    for (const tool of ['edit', 'write']) await assert.rejects(f.hooks['tool.execute.before']({ tool }, { args: { filePath: '/forbidden' } }), /protected repository/);
-    await assert.rejects(f.hooks['tool.execute.before']({ tool: 'apply_patch' }, { args: { patchText: '*** Begin Patch\n*** Update File: allowed\n*** Move to: forbidden\n*** End Patch' } }), /protected repository/);
-    await assert.rejects(f.hooks['tool.execute.before']({ tool: 'apply_patch' }, { args: { patchText: 'unclassified' } }), /cannot classify/);
-    assert.ok(f.calls.some(([, args]) => args.includes('allowed')));
-    assert.ok(f.calls.some(([, args]) => args.includes('forbidden')));
-  } finally { await f.hooks.dispose(); }
-});
-
-test('dispose awaits an accepted reporter subprocess and rejects later status events', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-dispose-'));
-  const record = path.join(dir, 'record.json');
-  await writeFile(record, JSON.stringify(await rexRecord()));
-  let release, started, calls = 0;
-  const entered = new Promise((resolve) => { started = resolve; });
-  const held = new Promise((resolve) => { release = resolve; });
-  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: record }, deps: { run: async () => { calls++; started(); await held; return ''; } } });
-  try {
-    const event = f.hooks.event(created);
-    await entered;
-    let settled = false;
-    const closing = f.hooks.dispose().then(() => { settled = true; });
-    await Promise.resolve();
-    assert.equal(settled, false, 'dispose returned while a reporter could still write');
-    release();
-    await Promise.all([event, closing]);
-    await f.hooks.event(state('busy'));
-    assert.equal(calls, 1);
-    assert.equal(f.stopped(), true);
-  } finally { release(); await f.hooks.dispose(); await rm(dir, { recursive: true, force: true }); }
-});
-
-test('dispose joins in-flight polling before returning and never drains mail afterwards', async () => {
-  const f = await fixture();
-  try {
-    await f.hooks.event(created);
-    let release, entered;
-    const querying = new Promise((resolve) => { entered = resolve; });
-    f.client.session.status = () => new Promise((resolve) => { release = resolve; entered(); });
-    const polling = f.tick();
-    await querying;
-    let settled = false;
-    const closing = f.hooks.dispose().then(() => { settled = true; });
-    await Promise.resolve();
-    assert.equal(settled, false);
-    release({ data: {} });
-    await Promise.all([polling, closing]);
-    assert.equal(f.calls.length, 0);
-    assert.equal(f.delivered.length, 0);
-  } finally { await f.hooks.dispose(); }
-});
-
-test('scoped provider fetch overrides the exact downstream native session header without touching auth/model/body/global fetch', async () => {
-  const f = await fixture();
-  const globalFetch = globalThis.fetch;
-  const sent = [];
-  const response = new Response('local fixture');
-  const upstream = async (input, init) => { sent.push({ input, init }); return response; };
-  const untouchedFetch = async () => { throw new Error('unrelated provider must not run'); };
-  const provider = { options: { baseURL: 'http://fixture/v1', apiKey: 'fixture-only', fetch: upstream } };
-  const config = { provider: { [options.providerID]: provider, unrelated: { options: { fetch: untouchedFetch } } } };
-  try {
-    await f.hooks.config(config);
-    const nativeID = 'ses_e74ad1bd7ffeLCnD5LK1WrQd9y';
-    const body = JSON.stringify({ model: 'gpt-6.1-sol', reasoning: { effort: 'medium' } });
-    const signal = new AbortController().signal;
-    const headerForms = [
-      { 'X-Session-Id': nativeID, 'x-session-id': nativeID, Authorization: 'Bearer fixture-only', 'x-opencode-session-id': nativeID },
-      [['X-Session-Id', nativeID], ['x-session-id', nativeID], ['authorization', 'Bearer fixture-only'], ['x-opencode-session-id', nativeID]],
-      new Headers({ 'X-Session-Id': nativeID, authorization: 'Bearer fixture-only', 'x-opencode-session-id': nativeID }),
-    ];
-    for (const headers of headerForms) {
-      const init = { method: 'POST', headers, body, signal, redirect: 'manual' };
-      const input = new URL('http://fixture/v1/responses');
-      assert.equal(await provider.options.fetch(input, init), response);
-      const actual = sent.at(-1);
-      assert.equal(actual.input, input);
-      assert.equal(actual.init.headers.get('x-session-id'), 'existing-route');
-      assert.deepEqual([...actual.init.headers.keys()].filter((key) => key === 'x-session-id'), ['x-session-id']);
-      assert.equal(actual.init.headers.get('authorization'), 'Bearer fixture-only');
-      assert.equal(actual.init.headers.get('x-opencode-session-id'), nativeID);
-      assert.equal(actual.init.body, body);
-      assert.equal(actual.init.method, 'POST');
-      assert.equal(actual.init.signal, signal);
-      assert.equal(actual.init.redirect, 'manual');
-      assert.equal(init.headers, headers);
-      assert.ok(new Headers(headers).get('x-session-id').includes(nativeID), 'caller headers were mutated');
-    }
-    const request = new Request('http://fixture/v1/responses', { method: 'POST', body, headers: { 'X-Session-Id': nativeID, authorization: 'Bearer from-request', 'x-input-only': 'inherited' } });
-    await provider.options.fetch(request);
-    assert.equal(sent.at(-1).input, request);
-    assert.equal(sent.at(-1).init.headers.get('authorization'), 'Bearer from-request');
-    assert.equal(sent.at(-1).init.headers.get('x-input-only'), 'inherited');
-    assert.equal(request.headers.get('x-session-id'), nativeID);
-    await provider.options.fetch(request, { headers: { authorization: 'Bearer explicit-override' } });
-    assert.equal(sent.at(-1).init.headers.get('authorization'), 'Bearer explicit-override');
-    assert.equal(sent.at(-1).init.headers.has('x-input-only'), false, 'init.headers must replace Request headers, not resurrect them');
-    assert.equal(sent.at(-1).init.headers.get('x-session-id'), 'existing-route');
-    assert.equal(globalThis.fetch, globalFetch);
-    assert.equal(config.provider.unrelated.options.fetch, untouchedFetch);
-    assert.equal(provider.options.apiKey, 'fixture-only');
-    assert.equal(provider.options.baseURL, 'http://fixture/v1');
-  } finally { await f.hooks.dispose(); }
-});
-
-test('missing scoped transport refuses dispatch instead of using a provider or native fallback', async () => {
-  const f = await fixture({ skipConfig: true });
-  try {
-    await assert.rejects(f.hooks.config({ provider: {} }), /provider\/route is absent/);
-    await assert.rejects(f.hooks['chat.params']({ model }, { options: {} }), /transport was not configured/);
-    await assert.rejects(f.hooks.config({ provider: { [options.providerID]: { options: { fetch: 'invalid' } } } }), /not callable/);
-    await assert.rejects(f.hooks['chat.params']({ model }, { options: {} }), /transport was not configured/);
-  } finally { await f.hooks.dispose(); }
-});
-
-test('native user variant persists on model.variant without discarding existing native metadata', async () => {
-  const f = await fixture();
-  try {
-    const output = { message: { agent: options.agent, model: { ...model, variant: 'high', nativeMetadata: 'retained' } } };
-    await f.hooks['chat.message']({ sessionID: 'ses_native', agent: options.agent, model }, output);
-    assert.deepEqual(output.message.model, { ...model, variant: 'medium', nativeMetadata: 'retained' });
-    assert.equal(Object.hasOwn(output.message, 'variant'), false, 'UserMessage must not acquire unsupported top-level variant');
-  } finally { await f.hooks.dispose(); }
-});
-
-test('native child and grandchild work keep the main Rex identity, mailbox and status ownership', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-lineage-'));
-  const record = path.join(dir, 'record.json');
-  await writeFile(record, JSON.stringify(await rexRecord()));
-  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: record } });
-  try {
-    await f.hooks.event(created);
-    await f.hooks['chat.message']({ sessionID: 'ses_native', agent: options.agent, model }, { message: { model } });
-    const initialNotes = f.calls.filter(([, args]) => args[0] === 'sessions').length;
-    f.setSession('ses_child', 'ses_native');
-    f.setSession('ses_grandchild', 'ses_child');
-    for (const id of ['ses_child', 'ses_grandchild']) {
-      await f.hooks.event({ event: { type: 'session.created', properties: { info: { id, parentID: id === 'ses_child' ? 'ses_native' : 'ses_child' } } } });
-      const output = { message: { agent: 'explore', model: { ...model, variant: 'high', inherited: true } } };
-      await f.hooks['chat.message']({ sessionID: id, agent: 'explore', model }, output);
-      assert.equal(output.message.model.variant, 'medium');
-      assert.equal(output.message.model.inherited, true);
-      await f.hooks.event({ event: { type: 'session.status', properties: { sessionID: id, status: { type: 'idle' } } } });
-      await f.hooks.event({ event: { type: 'session.error', properties: { sessionID: id } } });
-    }
-    assert.equal(f.calls.filter(([, args]) => args[0] === 'sessions').length, initialNotes, 'Child events or prompts overwrote the main receipt');
-    await f.tick();
-    assert.equal(f.delivered.length, 1);
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-    assert.equal(f.delivered[0].body.agent, options.agent);
-    assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[4] === 'ses_native'));
-  } finally { await f.hooks.dispose(); await rm(dir, { recursive: true, force: true }); }
-});
-
-test('foreign roots, unknown ancestry, cycles and changed child models are refused', async () => {
-  const f = await fixture();
-  try {
-    await f.hooks.event(created);
-    f.setSession('ses_foreign_child', 'ses_other');
-    f.setSession('ses_cycle_a', 'ses_cycle_b');
-    f.setSession('ses_cycle_b', 'ses_cycle_a');
-    const chat = (id, requestedModel = model) => f.hooks['chat.message']({ sessionID: id, agent: 'explore', model: requestedModel }, { message: { model: requestedModel } });
-    await assert.rejects(chat('ses_other'), /unrelated roots/);
-    await assert.rejects(chat('ses_foreign_child'), /unrelated roots/);
-    await assert.rejects(chat('ses_unknown'), /Cannot prove native child-session ancestry/);
-    await assert.rejects(chat('ses_cycle_a'), /ancestry: cycle/);
-    f.setSession('ses_child', 'ses_native');
-    await assert.rejects(chat('ses_child', { providerID: 'openai', modelID: 'gpt-6.1-sol' }), /fallback/);
-    await f.tick();
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-  } finally { await f.hooks.dispose(); }
-});
-
-test('same-root compaction keeps native model metadata and root ownership at medium', async () => {
-  const f = await fixture();
-  try {
-    await f.hooks.event(created);
-    const output = { message: { agent: 'compaction', model: { ...model, variant: 'high', nativeMetadata: 'compaction' } } };
-    await f.hooks['chat.message']({ sessionID: 'ses_native', agent: 'compaction', model }, output);
-    assert.equal(output.message.agent, 'compaction');
-    assert.equal(output.message.model.variant, 'medium');
-    assert.equal(output.message.model.nativeMetadata, 'compaction');
-    const params = { options: { reasoningEffort: 'high' } };
-    await f.hooks['chat.params']({ sessionID: 'ses_native', agent: 'compaction', model }, params);
-    assert.equal(params.options.reasoningEffort, 'medium');
-    await f.hooks.event(state('idle'));
-    await f.tick();
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-    assert.equal(f.delivered[0].body.agent, options.agent);
-  } finally { await f.hooks.dispose(); }
-});
-
-test('scoped config validation derives the complete contract from the canonical writer', () => {
-  const scope = { agent: options.agent, roleFile: '/fixture/product/role-orchestrator.md', pluginFile: '/fixture/cel/tools/hooks/celestial.opencode.mjs', baseURL: 'http://127.0.0.1:8317/v1' };
-  const config = buildConfig(scopedConfigInput(scope));
-  const before = JSON.stringify(config);
-  assert.equal(validateConfig(config, scope), true);
-  assert.equal(JSON.stringify(config), before, 'read-only validation mutated configuration');
-  const cases = [
-    ['wrong plugin URL', (c) => { c.plugin[0][0] = 'file:///other/celestial.opencode.mjs'; }],
-    ['wrong plugin role', (c) => { c.plugin[0][1].agent = 'other-role'; }],
-    ['wrong plugin provider', (c) => { c.plugin[0][1].providerID = 'openai'; }],
-    ['missing transport', (c) => { delete c.plugin[0][1].transport; }],
-    ['wrong route reference', (c) => { c.plugin[0][1].route = '{env:OTHER_ROUTE}'; c.provider['ompgw-codex'].options.headers['x-session-id'] = '{env:OTHER_ROUTE}'; }],
-    ['wrong provider', (c) => { c.provider.openai = c.provider['ompgw-codex']; delete c.provider['ompgw-codex']; }],
-    ['wrong SDK', (c) => { c.provider['ompgw-codex'].npm = '@ai-sdk/openai-compatible'; }],
-    ['wrong auth reference', (c) => { c.provider['ompgw-codex'].options.apiKey = 'literal-fixture-secret'; }],
-    ['wrong auth environment', (c) => { c.provider['ompgw-codex'].env = ['OPENAI_API_KEY']; }],
-    ['wrong gateway URL', (c) => { c.provider['ompgw-codex'].options.baseURL = 'https://other.invalid/v1'; }],
-    ['wrong wire header', (c) => { c.provider['ompgw-codex'].options.headers = { 'X-Session-Id': '{env:CEL_SESSION_ID}' }; }],
-    ['extra enabled provider', (c) => { c.enabled_providers.push('openai'); }],
-    ['wrong model whitelist', (c) => { c.provider['ompgw-codex'].whitelist.push('gpt-6-sol'); }],
-    ['wrong model', (c) => { c.model = 'ompgw-codex/gpt-6-sol'; }],
-    ['wrong medium variant', (c) => { c.agent[options.agent].variant = 'high'; }],
-    ['wrong model effort', (c) => { c.provider['ompgw-codex'].models['gpt-6.1-sol'].options.reasoningEffort = 'high'; }],
-    ['wrong limits', (c) => { c.provider['ompgw-codex'].models['gpt-6.1-sol'].limit.context = 1000000; }],
-    ['extra plugin', (c) => { c.plugin.push('unreviewed-plugin'); }],
-  ];
-  for (const [name, mutate] of cases) {
-    const stale = JSON.parse(before);
-    mutate(stale);
-    assert.throws(() => validateConfig(stale, scope), /canonical role\/provider\/transport contract/, name);
+test('missing gateway token or route removes even the exact provider and model before requests', async () => {
+  for (const overrides of [{ env: { OMP_GATEWAY_TOKEN: '' } }, { env: { OMP_GATEWAY_TOKEN: '  ' } }, { options: { route: '' } }]) {
+    const f = await fixture(overrides);
+    try {
+      const providers = providerEditor(), models = modelEditor();
+      f.transforms.provider(providers); f.transforms.model(models);
+      assert.equal(providers.providers.size, 0); assert.equal(models.models.size, 0); assert.equal(models.selected(), undefined);
+      await f.emit(created());
+      await assert.rejects(f.hook('model.request', request({ headers: {} })), /auth\/route/);
+      await f.tick();
+      assert.equal(f.delivered.length, 0);
+      assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+    } finally { await f.cleanup(); }
   }
 });
 
-async function resumeFixture(receiptChanges = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-resume-'));
-  const record = path.join(dir, 'record.json');
-  await writeFile(record, JSON.stringify(await rexRecord({ agent_session: { value: 'ses_native' }, ...receiptChanges })));
-  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: record, CEL_AGENT_NAME: 'fixture-opencode-orch' } });
-  return { ...f, record, cleanup: async () => { await f.hooks.dispose(); await rm(dir, { recursive: true, force: true }); } };
-}
+test('all primary and auxiliary requests keep exact Sol and medium without rewriting native identity', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(created());
+    for (const name of ['context', 'compaction', 'generate', 'title']) {
+      const event = request({ options: { reasoningEffort: 'high', unrelated: true }, system: [], messages: [] });
+      await f.hook(name, event);
+      assert.deepEqual(event.options, { reasoningEffort: 'medium', unrelated: true });
+      assert.deepEqual(event.model, model);
+      for (const bad of [{ ...model, providerID: 'openai' }, { ...model, id: 'other' }, { ...model, variant: 'high' }]) {
+        await assert.rejects(f.hook(name, request({ model: bad, options: {} })), /fallback/);
+      }
+    }
+    const noVariant = request({ model: { id: model.id, providerID: model.providerID }, options: {} });
+    await f.hook('title', noVariant);
+    assert.equal(noVariant.options.reasoningEffort, 'medium', 'base settings cover native no-variant auxiliary requests');
+  } finally { await f.cleanup(); }
+});
 
-test('owned native resume wakes idle mail before any chat or session.created event', async () => {
+test('HTTP and WS affinity are pinned at native final boundaries without changing authorization/body/global fetch', async () => {
+  const f = await fixture(), originalFetch = globalThis.fetch;
+  try {
+    await f.emit(created());
+    for (const name of ['model.request', 'experimental.ws.handshake']) {
+      const event = request({ headers: { 'X-Session-Id': 'native-alias', 'x-session-id': 'native-value', Authorization: 'fixture-auth' }, url: 'ws://fixture/v1/responses' });
+      await f.hook(name, event);
+      assert.deepEqual(event.headers, { Authorization: 'fixture-auth', 'x-session-id': options.route });
+      assert.deepEqual(f.hooks.session.get(name).scope, { providerID: model.providerID });
+    }
+    const body = JSON.stringify({ model: model.id, reasoning: { effort: 'medium' }, input: [] });
+    const event = request({ request: new Request('http://fixture/v1/responses', { method: 'POST', body,
+      headers: { 'X-Session-Id': 'ses_native', authorization: 'fixture-auth', 'content-type': 'application/json' } }) });
+    await f.hook('http.request', event);
+    assert.equal(event.request.headers.get('x-session-id'), options.route);
+    assert.equal(event.request.headers.get('authorization'), 'fixture-auth');
+    assert.equal(await event.request.text(), body);
+    assert.equal(globalThis.fetch, originalFetch);
+    for (const name of ['model.request', 'http.request', 'experimental.ws.handshake']) {
+      await assert.rejects(f.hook(name, request({ model: { ...model, variant: 'low' } })), /fallback/);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test('fresh root requires exact agent, model, medium and location, not first idle or first request', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(status('idle', 'ses_other'));
+    await f.hook('experimental.idle', { sessionID: 'ses_other', background: [] });
+    await assert.rejects(f.hook('context', request({ options: {} })), /not bound/);
+    await f.emit(created());
+    await f.emit(created(nativeInfo('ses_other')));
+    await assert.rejects(f.hook('context', request({ sessionID: 'ses_other', options: {} })), /unrelated roots/);
+    await f.hook('context', request({ options: {} }));
+  } finally { await f.cleanup(); }
+  for (const changes of [{ agent: 'foreign' }, { parentID: undefined, model: undefined }, { model: { ...model, variant: 'high' } },
+    { location: { directory: '/foreign' } }, { location: { directory: location.directory, workspaceID: 'foreign' } }]) {
+    const bad = await fixture();
+    try {
+      await bad.emit(created(nativeInfo('ses_native', undefined, changes)));
+      await bad.emit(created());
+      await assert.rejects(bad.hook('context', request({ options: {} })), /refused|role|location|fallback/);
+      await bad.tick();
+      assert.equal(bad.delivered.length, 0);
+    } finally { await bad.cleanup(); }
+  }
+});
+
+test('child and grandchild tools/model work keep the same root mailbox and never rebind from child idle', async () => {
   const f = await resumeFixture();
   try {
-    await f.hooks.event({ event: { type: 'session.created', properties: { info: nativeInfo('ses_other') } } });
     await f.tick();
+    f.lineage.set('ses_child', nativeInfo('ses_child', 'ses_native'));
+    f.lineage.set('ses_grandchild', nativeInfo('ses_grandchild', 'ses_child'));
+    const initialNotes = f.calls.filter(([, args]) => args[0] === 'sessions').length;
+    for (const id of ['ses_child', 'ses_grandchild']) {
+      await f.emit(created(f.lineage.get(id)));
+      await f.hook('context', request({ sessionID: id, agent: 'explore', options: {} }));
+      await f.tool('write', { path: 'allowed' }, id);
+      await f.hook('experimental.idle', { sessionID: id, background: [] });
+      await f.emit(status('idle', id));
+    }
+    assert.equal(f.calls.filter(([, args]) => args[0] === 'sessions').length, initialNotes);
+    assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[4] === 'ses_native'));
     assert.equal(f.delivered.length, 1);
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-    assert.match(f.delivered[0].body.parts[0].text, /\[mail-1\]/);
-    const notes = f.calls.filter(([, args]) => args[0] === 'sessions').map(([, args]) => args);
-    assert.ok(notes.some((args) => args[3] === 'idle' && args[4] === 'ses_native'));
-    assert.ok(notes.every((args) => args[4] === 'ses_native'));
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
   } finally { await f.cleanup(); }
 });
 
-test('owned resume observes native busy then idle without draining mail during busy', async () => {
+test('unknown ancestry, cycles, foreign roots/locations and changed child variants refuse even guarded tools', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(created());
+    f.lineage.set('ses_foreign', nativeInfo('ses_foreign', 'ses_other'));
+    f.lineage.set('ses_cycleA', nativeInfo('ses_cycleA', 'ses_cycleB'));
+    f.lineage.set('ses_cycleB', nativeInfo('ses_cycleB', 'ses_cycleA'));
+    f.lineage.set('ses_wrong', nativeInfo('ses_wrong', 'ses_native', { model: { ...model, variant: 'high' } }));
+    f.lineage.set('ses_away', nativeInfo('ses_away', 'ses_native', { location: { directory: '/foreign' } }));
+    for (const id of ['ses_unknown', 'ses_other', 'ses_foreign', 'ses_cycleA', 'ses_wrong', 'ses_away']) {
+      await assert.rejects(f.hook('context', request({ sessionID: id, options: {} })), /ancestry|unrelated roots|fallback|location/);
+      await assert.rejects(f.tool('write', { path: 'allowed' }, id), /ancestry|unrelated roots|fallback|location/);
+    }
+    assert.ok(!f.calls.some(([bin]) => bin === 'bash'), 'unproven lineage reached mutation guard');
+  } finally { await f.cleanup(); }
+});
+
+test('v2 shell/write/edit/patch inputs reach the real shared guard, including relative paths and move sources/destinations', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-guard-'));
+  const consoleDir = path.join(temp, 'console');
+  const env = { ...process.env, CEL_ROOT: repo, CEL_ROLE: 'console', CEL_CONSOLE_DIR: consoleDir };
+  const guarded = [];
+  const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async (bin, args) => {
+    assert.equal(bin, 'bash'); guarded.push(args);
+    return (await execute(bin, args, { env })).stdout;
+  } } });
+  try {
+    await f.emit(created());
+    for (const tool of ['write', 'edit']) await assert.rejects(f.tool(tool, { path: 'repos/protected/marker' }), /celestial guard/);
+    await assert.rejects(f.tool('shell', { command: `touch ${temp}/marker`, workdir: consoleDir }), /celestial guard/);
+    await assert.rejects(f.shell(`touch ${temp}/marker`), /celestial guard/);
+    await f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/marker` });
+    await assert.rejects(f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=11 touch ${temp}/marker` }), /celestial guard/);
+    for (const operation of ['Add File', 'Delete File', 'Update File']) {
+      await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n  *** ${operation}: repos/protected/marker\n*** End Patch` }), /celestial guard/);
+    }
+    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: ${consoleDir}/allowed\n*** Move to: repos/protected/marker\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
+    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: repos/protected/marker\n*** Move to: ${consoleDir}/allowed\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
+    await assert.rejects(f.tool('patch', { patchText: 'unclassified' }), /cannot classify/);
+    await assert.rejects(f.tool('write', { filePath: 'legacy-v1-field' }), /cannot classify/);
+    await f.tool('write', { path: `${consoleDir}/allowed`, content: 'allowed' });
+    assert.ok(guarded.some((args) => args.at(-1) === '/fixture/product/repos/protected/marker'));
+  } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
+});
+
+test('recurring observer delivers already-idle later mail and retains failed admission debt without re-reading', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(created());
+    f.setCount(0); await f.tick();
+    assert.equal(f.delivered.length, 0);
+    f.setCount(2); f.setFail(true); await f.tick();
+    assert.equal(f.delivered.length, 1);
+    f.setFail(false); await Promise.all([f.tick(), f.tick()]);
+    assert.equal(f.delivered.length, 2);
+    assert.equal(f.delivered[1].delivery, 'steer');
+    assert.match(f.delivered[1].text, /\[mail-1\] \[sandbox\].*native delivery/);
+    assert.equal(f.calls.filter(([, args]) => args[0] === 'inbox' && args[1] === 'read').length, 1);
+    f.setCount(1);
+    await f.tick();
+    assert.equal(f.delivered.length, 2, 'accepted synthetic work must not be overridden by stale persisted idle');
+    await f.emit(status('idle'));
+    await f.tick();
+    assert.equal(f.delivered.length, 3);
+    assert.equal(f.waits(), 0);
+    assert.ok(f.calls.every(([, args]) => !args.includes('prompt') && !args.includes('send-text')));
+  } finally { await f.cleanup(); }
+});
+
+test('native idle hook admits steer in the current execution, never waits and never adopts other roots', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(created());
+    await f.emit(status('busy'));
+    await f.hook('experimental.idle', { sessionID: 'ses_other', background: [] });
+    assert.equal(f.delivered.length, 0);
+    await f.hook('experimental.idle', { sessionID: 'ses_native', background: [] });
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+    assert.equal(f.waits(), 0);
+  } finally { await f.cleanup(); }
+});
+
+test('missing or unencoded idle timestamps and native busy state never count as idle', async () => {
+  const f = await fixture();
+  try {
+    await f.emit(created());
+    for (const time of [{}, { busy: 30, idle: 20 }, { busy: 10, idle: '20' }, { busy: 10, idle: { epochMillis: 20 } }, { busy: '10', idle: 20 }]) {
+      f.lineage.set('ses_native', nativeInfo('ses_native', undefined, { time }));
+      await f.tick();
+    }
+    assert.equal(f.delivered.length, 0);
+    assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+    f.lineage.set('ses_native', nativeInfo());
+    await f.emit(status('busy'));
+    await f.tick();
+    assert.equal(f.delivered.length, 0, 'persisted idle cannot override a known busy event');
+    await f.emit(status('idle')); await f.tick();
+    assert.equal(f.delivered.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('busy events during awaited native idle observations fence stale responses', async () => {
+  const f = await fixture();
+  let release;
+  try {
+    await f.emit(created());
+    let entered;
+    const querying = new Promise((resolve) => { entered = resolve; });
+    f.context.session.get = () => new Promise((resolve) => { release = resolve; entered(); });
+    const polling = f.tick(); await querying;
+    await f.emit(status('busy'));
+    release(nativeInfo()); await polling;
+    assert.equal(f.delivered.length, 0);
+    assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+  } finally { release?.(nativeInfo()); await f.cleanup(); }
+});
+
+test('owned receipt restores completed-idle mail after setup without any new session event', async () => {
   const f = await resumeFixture();
   try {
-    f.setStatus({ ses_native: { type: 'busy' } });
+    const pendingProviders = providerEditor(); f.transforms.provider(pendingProviders);
+    assert.equal(pendingProviders.providers.size, 0, 'unverified resume exposed the gateway provider');
+    assert.equal(f.reloads(), 0);
+    assert.equal(f.gets.length, 0, 'setup reentered the native session store');
+    await f.emit(created(nativeInfo('ses_other')));
     await f.tick();
-    assert.equal(f.delivered.length, 0);
-    assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox' && args[1] === 'read'));
-    f.setStatus({});
-    await f.tick();
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-    const notes = f.calls.filter(([, args]) => args[0] === 'sessions').map(([, args]) => args[3]);
-    assert.equal(notes[0], 'working');
-    assert.ok(notes.includes('idle'));
+    assert.equal(f.reloads(), 2);
+    const verifiedProviders = providerEditor(); f.transforms.provider(verifiedProviders);
+    assert.deepEqual([...verifiedProviders.providers.keys()], ['ompgw-codex']);
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+    assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[4] === 'ses_native'));
+    assert.equal(JSON.parse(await readFile(f.record, 'utf8')).agent_session.value, 'ses_native');
   } finally { await f.cleanup(); }
 });
 
-test('pending resume lookup is single-flight and foreign creation cannot win ownership', async () => {
+test('resume boot observes explicit busy then completed idle and rejects missing or changed native candidates', async () => {
+  const f = await resumeFixture();
+  try {
+    f.lineage.set('ses_native', nativeInfo('ses_native', undefined, { time: { created: 1, busy: 30, idle: 20 } }));
+    await f.tick(); assert.equal(f.delivered.length, 0);
+    f.lineage.set('ses_native', nativeInfo());
+    await f.tick(); assert.equal(f.delivered.length, 1);
+  } finally { await f.cleanup(); }
+  for (const replacement of [null, nativeInfo('ses_other'), nativeInfo('ses_native', 'ses_other'),
+    nativeInfo('ses_native', undefined, { location: { directory: '/foreign' } }), nativeInfo('ses_native', undefined, { agent: 'foreign' }),
+    nativeInfo('ses_native', undefined, { model: undefined }), nativeInfo('ses_native', undefined, { model: { ...model, variant: 'high' } })]) {
+    const bad = await resumeFixture();
+    try {
+      if (replacement) bad.lineage.set('ses_native', replacement); else bad.lineage.delete('ses_native');
+      await bad.tick(); await bad.emit(created(nativeInfo('ses_other')));
+      await assert.rejects(bad.hook('context', request({ options: {} })), /native resume refused/);
+      assert.equal(bad.delivered.length, 0);
+      assert.ok(!bad.calls.some(([, args]) => args[0] === 'inbox'));
+      const providers = providerEditor(); bad.transforms.provider(providers); assert.equal(providers.providers.size, 0);
+    } finally { await bad.cleanup(); }
+  }
+});
+
+test('PID birth, reporter ancestry, role/cwd and native receipt identity remain mandatory', async () => {
+  for (const changes of [{ agent: 'pi' }, { backend: 'herdr' }, { name: 'foreign' }, { cwd: '/foreign' },
+    { pid_start: '0' }, { pid: 2147483647 }, { agent_session: { value: '/tmp/omp.jsonl' } },
+    { agent_session: { value: '12345678-1234-1234-1234-123456789abc' } }]) {
+    const f = await resumeFixture(changes);
+    try {
+      await f.emit(created()); await f.tick();
+      await assert.rejects(f.hook('context', request({ options: {} })), /native resume refused|auth\/route/);
+      assert.equal(f.delivered.length, 0);
+      assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+    } finally { await f.cleanup(); }
+  }
+  const stat = await readFile(`/proc/${process.ppid}/stat`, 'utf8');
+  const f = await resumeFixture({ pid: process.ppid, pid_start: stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] });
+  try {
+    await f.tick();
+    assert.equal(f.delivered.length, 1, 'proven server ancestor was refused');
+    assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[2] === String(process.ppid)));
+  } finally { await f.cleanup(); }
+});
+
+test('cleanup cancels event subscription, joins accepted reporters and prevents later writes', async () => {
+  const f = await resumeFixture();
+  let release, entered;
+  const held = new Promise((resolve) => { release = resolve; });
+  const reporting = new Promise((resolve) => { entered = resolve; });
+  // Replace the reporter via a fresh fixture while retaining a valid receipt.
+  const g = await fixture({ env: { CEL_SESSION_BACKEND: 'rex', CEL_REX_RECORD: f.record }, deps: {
+    run: async () => { entered(); await held; return ''; },
+  } });
+  try {
+    const polling = g.tick(); await reporting;
+    let closed = false;
+    const closing = g.cleanup().then(() => { closed = true; });
+    await Promise.resolve(); assert.equal(closed, false);
+    release(); await Promise.all([polling, closing]);
+    await g.emit(status('busy')); await g.tick();
+    assert.equal(g.delivered.length, 0);
+    assert.equal(g.streamEnded(), true);
+    assert.equal(g.stopped(), true);
+  } finally { release(); await g.cleanup(); await f.cleanup(); }
+});
+
+test('cleanup joins in-flight native reads without waiting on its own idle execution', async () => {
+  const f = await fixture();
+  let release;
+  try {
+    await f.emit(created());
+    let entered;
+    const querying = new Promise((resolve) => { entered = resolve; });
+    f.context.session.get = () => new Promise((resolve) => { release = resolve; entered(); });
+    const polling = f.tick(); await querying;
+    let closed = false;
+    const closing = f.cleanup().then(() => { closed = true; });
+    await Promise.resolve(); assert.equal(closed, false);
+    release(nativeInfo()); await Promise.all([polling, closing]);
+    assert.equal(f.delivered.length, 0);
+    assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+    assert.equal(f.waits(), 0);
+  } finally { release?.(nativeInfo()); await f.cleanup(); }
+});
+
+test('pending resume lookup is single-flight and cannot be displaced by a foreign creation', async () => {
   const f = await resumeFixture();
   let release;
   try {
     let entered, lookups = 0;
     const querying = new Promise((resolve) => { entered = resolve; });
-    f.client.session.get = async () => { lookups++; entered(); return new Promise((resolve) => { release = resolve; }); };
-    const polling = f.tick();
-    await querying;
-    await f.hooks.event({ event: { type: 'session.created', properties: { info: nativeInfo('ses_other') } } });
-    const secondPoll = f.tick();
+    f.context.session.get = async () => {
+      lookups++;
+      if (lookups === 1) { entered(); return new Promise((resolve) => { release = resolve; }); }
+      return nativeInfo();
+    };
+    const polling = f.tick(); await querying;
+    const second = f.tick();
+    const requesting = f.hook('context', request({ options: {} }));
+    await f.emit(created(nativeInfo('ses_other')));
     assert.equal(lookups, 1);
-    release({ data: nativeInfo('ses_native') });
-    await Promise.all([polling, secondPoll]);
-    assert.equal(f.delivered[0].path.id, 'ses_native');
-    assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[4] === 'ses_native'));
-  } finally { release?.({ data: nativeInfo('ses_native') }); await f.cleanup(); }
+    const providers = providerEditor(); f.transforms.provider(providers);
+    assert.equal(providers.providers.size, 0);
+    release(nativeInfo());
+    await Promise.all([polling, second, requesting]);
+    assert.equal(f.reloads(), 2);
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+  } finally { release?.(nativeInfo()); await f.cleanup(); }
 });
 
-test('unowned or non-native resume receipts refuse rather than adopting a new root', async () => {
-  for (const changes of [
-    { agent: 'pi' }, { backend: 'herdr' }, { name: 'another-agent' }, { cwd: '/foreign/product' },
-    { pid_start: '0' }, { pid: 2147483647 },
-    { agent_session: { value: '/tmp/omp-session.jsonl' } },
-    { agent_session: { value: '12345678-1234-1234-1234-123456789abc' } },
-  ]) {
-    const f = await resumeFixture(changes);
+test('busy transition after inbox drain preserves exact raw debt for a later idle without re-reading', async () => {
+  let f, reads = 0;
+  const raw = '[sandbox] {"id":"mail-good","kind":"status","from":"root","message":"keep me"}\nmalformed {record\n';
+  f = await fixture({ deps: { run: async (_bin, args) => {
+    if (args[0] === 'inbox' && args[1] === 'count') return '1';
+    if (args[0] === 'inbox' && args[1] === 'read') { reads++; await f.emit(status('busy')); return raw; }
+    return '';
+  } } });
+  try {
+    await f.emit(created()); await f.tick();
+    assert.equal(f.delivered.length, 0);
+    assert.equal(reads, 1);
+    await f.emit(status('idle')); await f.tick();
+    assert.equal(f.delivered.length, 1);
+    assert.match(f.delivered[0].text, /keep me/);
+    assert.match(f.delivered[0].text, /malformed \{record/);
+    assert.equal(reads, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('cleanup joins an in-flight idle-hook synthetic admission and shares one closing promise', async () => {
+  const f = await fixture();
+  let release, entered;
+  const held = new Promise((resolve) => { release = resolve; });
+  const admitting = new Promise((resolve) => { entered = resolve; });
+  f.context.session.synthetic = async (input) => {
+    f.delivered.push(input); entered(); await held;
+    return { id: 'msg_accepted', sessionID: input.sessionID, type: 'synthetic' };
+  };
+  try {
+    await f.emit(created());
+    const idle = f.hook('experimental.idle', { sessionID: 'ses_native', background: [] });
+    await admitting;
+    const closing = f.cleanup();
+    assert.equal(f.cleanup(), closing);
+    let closed = false; closing.then(() => { closed = true; });
+    await Promise.resolve(); assert.equal(closed, false);
+    release(); await Promise.all([idle, closing]);
+    assert.equal(closed, true);
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.waits(), 0);
+  } finally { release(); await f.cleanup(); }
+});
+
+test('canonical launch marker holds native bootstrap, provider availability, inbox and mutation sinks', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-admission-'));
+  const marker = path.join(dir, 'admission');
+  const f = await resumeFixture({}, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    await f.tick();
+    assert.deepEqual(f.gets, []);
+    assert.equal(f.reloads(), 0);
+    assert.equal(f.delivered.length, 0);
+    assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+    const providers = providerEditor(), models = modelEditor();
+    f.transforms.provider(providers); f.transforms.model(models);
+    assert.equal(providers.providers.size, 0); assert.equal(models.models.size, 0);
+    await assert.rejects(f.hook('context', request({ options: {} })), /launch admission is pending/);
+    await assert.rejects(f.tool('write', { path: 'allowed' }), /launch admission is pending/);
+    await assert.rejects(f.shell('printf allowed'), /launch admission is pending/);
+    await writeFile(marker, 'not admitted\n', { mode: 0o600 }); await f.tick();
+    assert.deepEqual(f.gets, []);
+    await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' }))); await f.tick();
+    assert.equal(f.reloads(), 4, 'launch gate and exact resume proof each rebuild scoped availability');
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+    const ready = providerEditor(); f.transforms.provider(ready);
+    assert.deepEqual([...ready.providers.keys()], ['ompgw-codex']);
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('private Herdr handoff restores an existing root without created events or first-request adoption', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-herdr-'));
+  const marker = path.join(dir, 'admission');
+  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    await f.tick(); assert.deepEqual(f.gets, []);
+    await assert.rejects(f.hook('context', request({ options: {} })), /auth\/route/);
+    await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' })), { mode: 0o600 });
+    await f.tick();
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+    await f.hook('context', request({ options: {} }));
+    await assert.rejects(f.hook('context', request({ sessionID: 'ses_other', options: {} })), /unrelated roots/);
+    assert.ok(!f.calls.some(([, args]) => args[0] === 'sessions'), 'Herdr handoff wrote a Rex receipt');
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('handoff refuses symlinks, shared modes/hardlinks, identity mismatches and unproven native candidates', async () => {
+  const cases = [
+    { mode: 0o644 }, { parentMode: 0o755 }, { symlink: true }, { hardlink: true },
+    { handoff: admission({ directory: '/foreign' }) }, { handoff: admission({ agent: 'foreign' }) },
+    { handoff: admission({ model: { ...model, variant: 'high' } }) },
+    { handoff: admission({ sessionID: 'not-native' }) },
+    { handoff: admission({ sessionID: 'ses_unknown' }), nativeRefusal: true },
+    { handoff: admission({ sessionID: 'ses_native' }), native: nativeInfo('ses_native', 'ses_other'), nativeRefusal: true },
+    { handoff: admission({ sessionID: 'ses_native' }), native: nativeInfo('ses_native', undefined, { location: { directory: '/foreign' } }), nativeRefusal: true },
+  ];
+  for (const candidate of cases) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-handoff-refusal-'));
+    const marker = path.join(dir, 'admission');
+    const source = path.join(dir, 'source');
+    await writeFile(source, JSON.stringify(candidate.handoff ?? admission({ sessionID: 'ses_native' })), { mode: candidate.mode ?? 0o600 });
+    if (candidate.symlink) await symlink(source, marker);
+    else if (candidate.hardlink) await link(source, marker);
+    else { await writeFile(marker, await readFile(source), { mode: candidate.mode ?? 0o600 }); }
+    if (candidate.parentMode) await chmod(dir, candidate.parentMode);
+    const f = await fixture({ env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
     try {
-      await f.hooks.event({ event: { type: 'session.created', properties: { info: nativeInfo('ses_other') } } });
+      if (candidate.native) f.lineage.set('ses_native', candidate.native);
       await f.tick();
-      await assert.rejects(f.hooks['chat.message']({ sessionID: 'ses_other', agent: options.agent, model }, { message: { model } }), /native resume refused/);
       assert.equal(f.delivered.length, 0);
-      assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox' && args[1] === 'read'));
-    } finally { await f.cleanup(); }
+      assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox'));
+      if (!candidate.nativeRefusal) assert.deepEqual(f.gets, [], 'unowned or mismatched handoff reached native APIs');
+      const providers = providerEditor(); f.transforms.provider(providers);
+      assert.equal(providers.providers.size, 0);
+    } finally { await f.cleanup(); await chmod(dir, 0o700); await rm(dir, { recursive: true, force: true }); }
   }
 });
 
-test('native resume candidate must resolve to the same-directory same-model root', async () => {
-  for (const replacement of [
-    { data: nativeInfo('ses_other') }, { error: new Error('missing native session') },
-    { data: nativeInfo('ses_native', 'ses_other') },
-    { data: { ...nativeInfo('ses_native'), directory: '/foreign/product' } },
-    { data: { ...nativeInfo('ses_native'), model: { providerID: 'openai', id: 'gpt-6.1-sol' } } },
-  ]) {
-    const f = await resumeFixture();
+test('Rex receipt and private handoff must nominate the same existing native ID', async () => {
+  for (const handoff of [admission(), admission({ sessionID: 'ses_other' })]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-rex-handoff-'));
+    const marker = path.join(dir, 'admission');
+    await writeFile(marker, JSON.stringify(handoff), { mode: 0o600 });
+    const f = await resumeFixture({}, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } });
     try {
-      f.client.session.get = async () => replacement;
       await f.tick();
-      await f.hooks.event({ event: { type: 'session.created', properties: { info: nativeInfo('ses_other') } } });
-      await assert.rejects(f.hooks['chat.params']({ model }, { options: {} }), /native resume refused/);
+      assert.deepEqual(f.gets, []);
       assert.equal(f.delivered.length, 0);
-      assert.ok(!f.calls.some(([, args]) => args[0] === 'inbox' && args[1] === 'read'));
-      assert.ok(f.calls.filter(([, args]) => args[0] === 'sessions').every(([, args]) => args[3] === 'blocked' && args[4] === ''));
-      assert.equal(JSON.parse(await readFile(f.record, 'utf8')).agent_session.value, 'ses_native');
-    } finally { await f.cleanup(); }
+    } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
   }
+});
+
+test('fresh launch handoff cannot adopt a root created before native-inventory admission', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-fresh-handoff-'));
+  const marker = path.join(dir, 'admission');
+  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    await f.emit(created(nativeInfo('ses_other')));
+    await writeFile(marker, JSON.stringify(admission()), { mode: 0o600 });
+    await f.tick();
+    assert.equal(f.delivered.length, 0);
+    assert.deepEqual(f.gets, []);
+    await assert.rejects(f.hook('context', request({ options: {} })), /not bound/);
+    await f.emit(created());
+    await f.hook('context', request({ options: {} }));
+    await f.tick();
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
 });

@@ -437,6 +437,11 @@ profile_launch_args() { # <runtime> <model> <thinking> [isolate-name]
   local rt="$1" model="$2" want="$3" iso="${4:-}" flag strategy level
   PROFILE_ARGS=()
 
+  # Native OpenCode v2 has no top-level model/thinking flags. Its admitted
+  # scoped config owns the exact model object and medium base/variant settings;
+  # keep the profile metadata intact for every generic consumer.
+  [ "$rt" != opencode ] || return 0
+
   # ISOLATION: run the CLI under a profile with no credential vault of its own,
   # so it falls back to the environment - i.e. to the workspace's env.local.
   # This is the only way to make a workspace's key authoritative for a runtime

@@ -255,14 +255,14 @@ agents:
   opencode:
     bin: opencode
     update:
-      command: 'opencode upgrade'
-      latest: "curl -fsSL -m 20 https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.tag_name | ltrimstr(\"v\")'"
-    version: 1.19.5
-    install: "install_pinned_binary agents opencode"
+      command: 'source "$CEL_ROOT/lib/install.sh"; existing="$(type -P opencode || true)"; destination="$HOME/.local/bin"; [ -z "$existing" ] || destination="${existing%/*}"; install_pinned_binary agents opencode opencode "$destination"'
+      latest: "curl -fsSL -m 20 'https://api.github.com/repos/anomalyco/opencode/releases?per_page=100' | jq -er '[.[] | select(.draft == false and .prerelease == false) | select(any(.assets[]?; .name == \"opencode-linux-x64-baseline.tar.gz\")) | .tag_name | capture(\"^v?(?<major>[0-9]+)\\\\.(?<minor>[0-9]+)\\\\.(?<patch>[0-9]+)$\") | [.major,.minor,.patch] | map(tonumber) | select(.[0] >= 2)] | sort | last | select(. != null) | map(tostring) | join(\".\")'"
+    version: 2.2.5
+    install: 'existing="$(type -P opencode || true)"; destination="$HOME/.local/bin"; [ -z "$existing" ] || destination="${existing%/*}"; install_pinned_binary agents opencode opencode "$destination"'
     # Baseline x64 runs without AVX2. Digests are from the release assets API.
     assets:
-      x64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-x64-baseline.tar.gz", sha256: 17c200fd4b2289954cc01552559f9b6d03ec157b2ddfb5eb54144f491656333d, member: opencode }
-      arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v1.19.5/opencode-linux-arm64.tar.gz", sha256: fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b, member: opencode }
+      x64: { url: "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-x64-baseline.tar.gz", sha256: 09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e, member: opencode }
+      arm64: { url: "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-arm64.tar.gz", sha256: 5a528f42caf576c6cdece6a191eb273d3db54effa5518e0402684d8f8026aeb6, member: opencode }
     skills_dir: ~/.config/opencode/skills
     herdr_integration: opencode
     required: false
@@ -272,11 +272,11 @@ agents:
     # archived OMP/Pi files and Claude UUIDs; initial migrations use --fresh.
     resume: { flag: --session, value: id }
     # opencode's equivalent of the other runtimes' approval bypass.
-    launch_args: [--auto]
-    # Always the explicit `provider/model` form - opencode has no fuzzy match.
+    launch_args: [--standalone, --auto]
+    # Native run accepts --model; the scoped TUI launch uses config instead.
     model_flag: --model
-    # No invented thinking/variant CLI flag: gateway OpenCode launches pin
-    # medium in the scoped agent/model config and native chat.params hook.
+    # Model and effort are native scoped config, never unsupported TUI flags.
+    # The private server retains role, guard, inbox and account affinity.
     notes: >
       anomalyco/opencode. Native release binary, not a Node global package.
 

@@ -26,7 +26,7 @@ install_download() {
 # only that member to stdout, never paths supplied by the archive onto disk.
 install_pinned_binary() (
   set -euo pipefail
-  local section="$1" name="$2" bin="${3:-$2}" arch asset url digest member tmp stage
+  local section="$1" name="$2" bin="${3:-$2}" directory="${4:-$HOME/.local/bin}" arch asset url digest member tmp stage
   arch="$(uname -m)" || exit
   case "$arch" in x86_64|amd64) arch=x64;; aarch64|arm64) arch=arm64;;
     *) echo "no pinned $name release for architecture: $arch" >&2; exit 1;; esac
@@ -44,11 +44,11 @@ install_pinned_binary() (
     mv "$tmp/download" "$tmp/binary" || exit
   fi
   [ -s "$tmp/binary" ] || exit 1
-  mkdir -p "$HOME/.local/bin" || exit
-  stage="$(mktemp "$HOME/.local/bin/.cel-install.XXXXXX")" || exit
+  mkdir -p "$directory" || exit
+  stage="$(mktemp "$directory/.cel-install.XXXXXX")" || exit
   cat "$tmp/binary" > "$stage" || exit
   chmod 755 "$stage" || exit
-  mv -fT "$stage" "$HOME/.local/bin/$bin"
+  mv -fT "$stage" "$directory/$bin"
 )
 
 install_script() (

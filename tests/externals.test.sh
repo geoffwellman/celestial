@@ -284,9 +284,13 @@ test_install_binary_activates_only_verified_release_bytes() {
   curl() { cp "$INSTALL_PAYLOAD" "$4"; }
   install_pinned_binary agents fixture-agent
   assert_eq "$("$HOME/.local/bin/fixture-agent")" pinned-release
+  install_pinned_binary agents fixture-agent fixture-agent "$HOME/.opencode/bin"
+  assert_eq "$("$HOME/.opencode/bin/fixture-agent")" pinned-release
   printf 'unverified replacement\n' > "$INSTALL_PAYLOAD"
   if install_pinned_binary agents fixture-agent > "$tmp/output" 2>&1; then return 1; fi
   assert_contains "$(cat "$tmp/output")" 'checksum mismatch'
   assert_eq "$("$HOME/.local/bin/fixture-agent")" pinned-release
+  if install_pinned_binary agents fixture-agent fixture-agent "$HOME/.opencode/bin" > "$tmp/output" 2>&1; then return 1; fi
+  assert_eq "$("$HOME/.opencode/bin/fixture-agent")" pinned-release
   rm -rf "$tmp"
 }
