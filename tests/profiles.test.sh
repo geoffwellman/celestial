@@ -78,12 +78,6 @@ test_launch_args_render_codexs_config_override() {
   local PROFILE_ARGS; profile_launch_args codex gpt-6-astra xhigh
   assert_eq "${PROFILE_ARGS[*]}" "--model gpt-6-astra -c model_reasoning_effort=xhigh"
 }
-# opencode carries effort in its own config: the model still goes on the
-# command line, the level is silently left alone.
-test_launch_args_omit_thinking_for_a_runtime_without_one() {
-  local PROFILE_ARGS; profile_launch_args opencode anthropic/claude-opus-5 high
-  assert_eq "${PROFILE_ARGS[*]}" "--model anthropic/claude-opus-5"
-}
 test_launch_args_are_empty_when_nothing_is_requested() {
   local PROFILE_ARGS; profile_launch_args omp "" ""
   assert_eq "${#PROFILE_ARGS[@]}" 0

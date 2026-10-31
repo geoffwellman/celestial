@@ -164,7 +164,8 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
       AGENT_ARGS=("$body")
       ;;
     agent_file)
-      if [ "$rt" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
+      if [ "$rt" = opencode ]; then
+        [ "${PROFILE_VIA:-}" = gateway ] || die 'cel run: OpenCode requires the prepared scoped gateway configuration'
         local scoped="${rolefile:-$wsdir/.cel/opencode/role-$tag.md}"
         opencode_agent_args "$tag" "$body" "$dry" "$scoped" "${scoped%.md}.opencode.json" \
           || die 'cel run: scoped OpenCode role/config is not prepared'
@@ -248,6 +249,7 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   [ -z "$ghw" ] || out="$ghg$out $ghw"
   if [ "$runtime" = opencode ] && [ -n "${CEL_OPENCODE_CONFIG_FILE:-}" ]; then
     out="$(opencode_launch_guard "$CEL_OPENCODE_CONFIG_FILE")$out $(opencode_launch_env)"
+    [ "${session_backend:-herdr}" = rex ] || out="$out $(opencode_launch_command)"
   fi
   printf '%s ' "$out"
 }
@@ -1085,15 +1087,19 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
 # one PR, and a resumed one would carry the last job's context into this.
 # Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
 # flag to its AGENT_ARGS.
-_run_resume_identity_check() { # runtime candidate; never cast another harness's history
+_run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
   [ "$1" = opencode ] && [ -n "$2" ] || return 0
   rex_native_session_valid "$1" "$2" \
     || die 'cel run: saved context is not an OpenCode native session; preserve it and use --fresh --handoff for the migration'
+  # v2 --session creates an absent ID. Prove this exact existing root in the
+  # same store before recording it, claiming it, or stopping a live holder.
+  opencode_validate_session "$2" "$3" "$4" "${5:-}" \
+    || die 'cel run: saved OpenCode context is not a ready matching native v2 root; preserve it and use --fresh --handoff only for an intended migration'
 }
 
-_run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint>
+_run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint> [wsdir]
   local role="$1" agent_name="$2" cwd="$3" runtime="$4" pane_opt="$5"
-  local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}"
+  local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}" resume_wsdir="${12:-}"
   RESUME_SESSION=""; RESTART_PANE=""
   local live="" lname lpane lstatus lsession lrc=1
   if have jq; then
@@ -1118,7 +1124,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   if [ -n "$live" ]; then
     IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
     [ "$lsession" != "-" ] || lsession=""
-    [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession"
+    [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession" "$cwd" "cel-$role" "$resume_wsdir"
     [ "$dry_run" = 1 ] || _run_sessions_record "$cwd" "$lsession"
   fi
   if [ "$restart" -eq 1 ]; then
@@ -1144,7 +1150,7 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
     RESUME_SESSION="$(_run_sessions_last "$cwd")"
   fi
   # Both live receipts and dead-registry lookup pass the same native boundary.
-  _run_resume_identity_check "$runtime" "$RESUME_SESSION"
+  _run_resume_identity_check "$runtime" "$RESUME_SESSION" "$cwd" "cel-$role" "$resume_wsdir"
   # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
   # herdr still has a name for the pane already resuming it. The pane being
   # restarted is the one expected resumer - it is about to be replaced.
@@ -1614,7 +1620,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   local role="" repo="" product="" workspace="" branch="" pr="" dry_run=0 force=0
   local restart=0 fresh=0 pane_opt="" solo_forced=0 lane=""
   local profile="" model_opt="" thinking_opt="" remember_model_pid="" handoff=""
-  local CEL_OPENCODE_CONFIG_FILE=""
+  local CEL_OPENCODE_CONFIG_FILE="" CEL_OPENCODE_AGENT=""
   local session_backend="${CEL_SESSION_BACKEND:-}" backend_opt=""
 
   if [ $# -gt 0 ]; then
@@ -2089,7 +2095,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     local RESUME_SESSION="" RESTART_PANE=""
     _run_resume_resolve "$role" "$agent_name" "$cwd" "$runtime" "$pane_opt" "$restart" "$fresh" "$force" "$dry_run" \
       "cel run $role${product:+ --product $product} --workspace $(ws_name "$wsdir")" \
-      "or name and adopt it: cel ws up $(ws_name "$wsdir")"
+      "or name and adopt it: cel ws up $(ws_name "$wsdir")" "$wsdir"
     resume_session="$RESUME_SESSION"; restart_pane="$RESTART_PANE"
   fi
 

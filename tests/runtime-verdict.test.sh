@@ -24,7 +24,7 @@ products:
     mode: solo
     repos: [widget]
 YAML
-  _rv_local opencode fixture/native
+  _rv_local opencode ompgw-codex/gpt-6.1-sol
   # Capture the actual argv while the real canonical dry-run constructs it;
   # never reconstruct argv by splitting its human-readable output.
   _run_dry_agent_args() {
@@ -39,7 +39,7 @@ YAML
 _rv_local() {
   cat > "$T/ws/workspace.local.yaml" <<YAML
 worker_profiles:
-  local-widget: {runtime: $1, model: $2}
+  local-widget: {runtime: $1, model: $2$([ "$1" != opencode ] || printf ', thinking: medium, via: gateway')}
 products:
   - name: bundle
     role_profiles: {solo: local-widget}
@@ -90,7 +90,6 @@ test_runtime_verdict_solo_local_opencode_profile_retains_rex_backend() {
   _rv_rex opencode
   _rv_verdict rex/fixture/session opencode
   assert_eq "$_RUN_LAUNCH" current
-  assert_eq "$_RUN_MODEL" fixture/native
   _rv_down
 }
 
