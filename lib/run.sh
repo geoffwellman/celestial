@@ -1251,8 +1251,8 @@ _run_is_agent_argv() { # <cmdline-file>
 }
 
 run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live holder
-  local d pid prev a sess pane item f
-  local -A managed=()
+  local d pid prev a sess pane item f anc hops held
+  local -A managed=() managed_pane=() cand=() cand_pane=()
   # Native hooks know the current conversation even when a runtime rewrites
   # argv, or Claude clears to a new UUID after its original --resume.
   for f in "$(_rex_state)"/*.json; do
@@ -1262,7 +1262,7 @@ run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live hold
     sess="$(jq -r '.agent_session.value // empty' "$f")"
     [ -n "$sess" ] || continue
     pid="$(jq -r .pid "$f")"; pane="$(jq -r .pane_id "$f")"
-    managed[$pid]=1
+    managed[$pid]="$sess" managed_pane[$pid]="$pane"
     printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
   done
   for d in "$(_run_proc_root)"/[0-9]*; do
@@ -1294,7 +1294,20 @@ run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live hold
       esac
     done < "$d/environ" 2>/dev/null
     [ -z "$rex_session" ] || [ -z "$rex_block" ] || pane="rex/$rex_session/$rex_block"
-    printf '%s\t%s\t%s\n' "$sess" "$pid" "$pane"
+    cand[$pid]="$sess" cand_pane[$pid]="$pane"
+  done
+  # ONE HOLDER, ONE ROW. OpenCode's launcher starts its TUI with the same
+  # --session in the same pane, so the child's argv names the session too. A
+  # descendant on the same session AND pane is that writer, not a second one;
+  # a descendant in another pane (say, a shell tool running `cel run`) is not.
+  for pid in "${!cand[@]}"; do
+    sess="${cand[$pid]}" pane="${cand_pane[$pid]}" anc="$pid" hops=0 held=""
+    while _run_ppid "$anc"; anc="$_RUN_PPID"; [ -n "$anc" ] && [ "$anc" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
+      if { [ "${managed[$anc]:-}" = "$sess" ] && [ "${managed_pane[$anc]}" = "$pane" ]; } \
+        || { [ "${cand[$anc]:-}" = "$sess" ] && [ "${cand_pane[$anc]}" = "$pane" ]; }; then held=1; break; fi
+      hops=$((hops+1))
+    done
+    [ -n "$held" ] || printf '%s\t%s\t%s\n' "$sess" "$pid" "${cand_pane[$pid]}"
   done
   return 0
 }
