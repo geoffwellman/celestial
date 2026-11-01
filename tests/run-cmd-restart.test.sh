@@ -224,6 +224,11 @@ test_session_resumers_count_a_child_of_the_holder_once_but_separate_holders_twic
   _resumer 4400 w9:p1 "$T/old.jsonl"; printf 'PPid:\t60\n' > "$PROC/4400/status"
   out="$(run_session_resumers)"
   assert_eq "$(printf '%s\n' "$out" | grep -c "$T/old.jsonl")" 2
+  # a descendant of the holder in ANOTHER pane is a second writer
+  _resumer 4302 w7:p2 "$T/old.jsonl"; printf 'PPid:\t4301\n' > "$PROC/4302/status"
+  out="$(run_session_resumers)"
+  assert_eq "$(printf '%s\n' "$out" | grep -c "$T/old.jsonl")" 3
+  assert_contains "$out" "4302"
   orch_stub_teardown
 }
 
