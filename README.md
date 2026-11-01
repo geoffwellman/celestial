@@ -1555,12 +1555,16 @@ must emit the provider key, protocol, URL, and model list consumed by the same
 revision's `cel run`, whose shell launch line exports that key. Update them
 together and keep the generated-config/launch regression green.
 
-For Pi 1.2.0's Anthropic provider, `gateway_pi_models_write` mirrors the
-canonical reasoning metadata for the configured exact ID `claude-opus-5-5`:
-reasoning, its supported thinking levels, and adaptive/mid-conversation
-compatibility. Other gateway IDs remain unmarked; capabilities do not follow a
-`claude-opus-` prefix. Recheck the pinned Pi catalog before changing the
-mapping or runtime version.
+`cel gateway pi-models --list` shows every gateway-advertised Claude/Codex chat
+model; `--json` includes capability-default and unsupported-transport details.
+Missing capability metadata never removes an advertised chat model. Exact
+reasoning, vision, context/output limits and compatibility come from the installed
+Pi catalog and matching authoritative local metadata, not sibling model names.
+`cel gateway pi-models --refresh` updates only Pi model metadata. It preserves
+provider URLs, authentication/header resolvers, unrelated providers, existing
+legacy entries and defaults; it never restarts sessions, changes their selected
+models, mints credentials or makes inference calls. Discovery reads the existing
+private gateway key and fails if it is missing rather than repairing credentials.
 
 Pins govern **fresh setup**, not a hermetic machine image. Existing executables
 are retained (GitHub CLI must be at least 2.90), distribution packages follow
