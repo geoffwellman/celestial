@@ -12,6 +12,9 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
   const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
   const directory = process.cwd();
   const native = 'ses_SavedNative';
+  const selection = env.CEL_FIXTURE_SELECTION ? JSON.parse(env.CEL_FIXTURE_SELECTION)
+    : { providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: env.CEL_FIXTURE_SESSION === 'wrong-medium' ? 'high' : 'medium' };
+  const matchesSelection = actual => actual?.providerID === selection.providerID && actual?.id === selection.id && actual?.variant === selection.variant;
   if (args[0] === 'serve') {
     if (args.join(' ') !== 'serve --stdio --hostname 127.0.0.1 --port 0') process.exit(2);
     record('serve', { admission: existsSync(env.CEL_OPENCODE_ADMISSION_FILE) });
@@ -36,12 +39,15 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
         return json({ location: { directory }, data });
       }
       if (url.pathname === '/api/experimental/migration/v1') return json({ status: env.CEL_FIXTURE_MIGRATION ?? 'completed' });
-      if (url.pathname === `/api/session/${native}` && env.CEL_FIXTURE_SESSION !== 'missing') return json({ data: { id: native, agent: config.default_agent, location: { directory }, model: { providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: env.CEL_FIXTURE_SESSION === 'wrong-medium' ? 'high' : 'medium' } } });
+      if (url.pathname === `/api/session/${native}` && env.CEL_FIXTURE_SESSION !== 'missing') return json({ data: { id: native, agent: config.default_agent, location: { directory }, model: selection } });
       if (url.pathname === '/api/model') {
         if (!scoped()) { res.writeHead(400).end(); return; }
         const handoff = existsSync(env.CEL_OPENCODE_ADMISSION_FILE) ? JSON.parse(readFileSync(env.CEL_OPENCODE_ADMISSION_FILE, 'utf8')) : undefined;
-        const admitted = handoff?.directory === directory && handoff.agent === config.default_agent && handoff.model?.variant === 'medium';
-        return json({ location: { directory }, data: admitted ? [{ providerID: 'ompgw-codex', id: 'gpt-6.1-sol', enabled: true, settings: { reasoningEffort: 'medium' }, variants: [{ id: 'medium', settings: { reasoningEffort: 'medium' } }] }] : [] });
+        const admitted = handoff?.directory === directory && handoff.agent === config.default_agent && matchesSelection(handoff.model);
+        const data = Object.entries(config.providers).flatMap(([providerID, provider]) => Object.entries(provider.models).map(([id, model]) => ({ ...model, providerID, id, enabled: true })));
+        if (env.CEL_FIXTURE_MODELS === 'foreign') data.push({ ...data[0], providerID: 'openai' });
+        if (env.CEL_FIXTURE_MODELS === 'wrong-limits') data[0].limit = { context: 1, output: 1 };
+        return json({ location: { directory }, data: admitted ? data : [] });
       }
       res.writeHead(404).end('{}');
     });
@@ -55,7 +61,7 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
   }
   if (args.includes('--standalone') || args.some(arg => ['--agent', '--model', '--thinking', '--extension'].includes(arg)) || !args.includes('--server')) process.exit(2);
   const handoff = JSON.parse(readFileSync(env.CEL_OPENCODE_ADMISSION_FILE, 'utf8'));
-  if (handoff.directory !== directory || handoff.agent !== config.default_agent || handoff.model?.variant !== 'medium') process.exit(3);
+  if (handoff.directory !== directory || handoff.agent !== config.default_agent || !matchesSelection(handoff.model)) process.exit(3);
   record('tui', { args, handoff, mode: statSync(env.CEL_OPENCODE_ADMISSION_FILE).mode & 0o777, directoryMode: statSync(path.dirname(env.CEL_OPENCODE_ADMISSION_FILE)).mode & 0o777 });
   if (env.CEL_REX_STATE) {
     const i = args.indexOf('--session');

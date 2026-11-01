@@ -142,6 +142,67 @@ _gateway_models_json_raw() {
     | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
 }
 
+# Dedicated read-only path: unlike the general helper, absent credentials are
+# an error, never an invitation to mint, repair, refresh or inspect accounts.
+_gateway_models_json_readonly() (
+  set +x
+  set -o pipefail
+  local key
+  export -n key
+  key="$(python3 - "$(_gateway_key_file)" <<'PY'
+import os, re, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as f:
+        s = os.fstat(f.fileno())
+        if not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or s.st_mode & 0o077:
+            raise ValueError()
+        raw = f.read(514)
+    if not re.fullmatch(rb'[A-Za-z0-9._~+/-]{16,512}\n?', raw):
+        raise ValueError()
+    sys.stdout.write(raw.decode('ascii').rstrip('\n'))
+except Exception:
+    sys.stderr.write('opencode catalog: existing private gateway key unavailable or unsafe\n')
+    sys.exit(1)
+PY
+  )" || return 1
+  printf 'Authorization: Bearer %s\n' "$key" \
+    | curl --disable --silent --fail --max-time 10 --max-filesize 8388608 \
+        --noproxy '*' --proto '=http' "$(gateway_url)/v1/models" -H @- 2>/dev/null \
+    || { printf 'opencode catalog: gateway model listing failed\n' >&2; return 1; }
+)
+
+_gateway_opencode_models() {
+  local sync=0 dry=0 workspace="" agent="" raw catalog wsdir
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --sync) [ "$sync" -eq 0 ] || return 2; sync=1; shift ;;
+      --dry-run) [ "$dry" -eq 0 ] || return 2; dry=1; shift ;;
+      --workspace|--agent)
+        [ "$#" -ge 2 ] && [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 2
+        if [ "$1" = --workspace ]; then [ -z "$workspace" ] || return 2; workspace="$2"
+        else [ -z "$agent" ] || return 2; agent="$2"; fi
+        shift 2 ;;
+      *) printf 'cel gateway opencode-models: use [--sync --workspace NAME --agent ALIAS [--dry-run]]\n' >&2; return 2 ;;
+    esac
+  done
+  if [ "$sync" -eq 1 ]; then
+    [ -n "$workspace" ] && [ -n "$agent" ] || { printf 'OpenCode sync requires a registered workspace and existing agent alias\n' >&2; return 2; }
+    declare -F registry_path >/dev/null || . "${BASH_SOURCE[0]%/*}/registry.sh"
+    wsdir="$(registry_path "$workspace")" || return 1
+    [ -n "$wsdir" ] && [ -f "$wsdir/workspace.yaml" ] || { printf 'OpenCode sync requires a registered workspace\n' >&2; return 1; }
+  else
+    [ "$dry" -eq 0 ] && [ -z "$workspace$agent" ] || return 2
+  fi
+  raw="$(_gateway_models_json_readonly)" || return 1
+  catalog="$(printf '%s' "$raw" | node "${BASH_SOURCE[0]%/*}/../tools/opencode/catalog.mjs" \
+    --metadata-db "$(gateway_omp_dir)/models.db")" || return 1
+  if [ "$sync" -eq 0 ]; then printf '%s\n' "$catalog"; return 0; fi
+  local -a options=(--workspace-dir "$wsdir" --agent "$agent" --plugin-file "$CEL_ROOT/tools/opencode/plugin" --base-url "$(gateway_url)/v1")
+  [ "$dry" -eq 0 ] || options+=(--dry-run)
+  printf '%s' "$catalog" | node "$CEL_ROOT/tools/opencode/sync.mjs" "${options[@]}"
+}
+
 # --- the account table ----------------------------------------------------
 
 # THE AUTH-DIR IS THE ACCOUNT LIST. CLIProxyAPI's management API is off on
@@ -928,6 +989,10 @@ cel gateway - several subscriptions behind one loopback door
                                      running gateway's management API; an
                                      empty exclusion list is refused unless
                                      gateway.omp_include_all: true
+  cel gateway opencode-models        read-only JSON chat models and omissions
+      [--sync --workspace NAME --agent ALIAS [--dry-run]]
+                                     opt-in private scoped config publication;
+                                     requires coordinated activation, never reloads
 EOS
 }
 
@@ -1050,6 +1115,7 @@ cmd_gateway() {
         printf '  key      in %s (0600) - never on the tailnet\n' "$(_gateway_mgmt_key_file)"
       fi ;;
     omp-scope) _gateway_omp_scope_cmd "$@" ;;
+    opencode-models) _gateway_opencode_models "$@" ;;
     refresh) gateway_refresh ;;
     help|-h|--help) _gateway_usage ;;
     *) c_err "cel gateway: unknown verb '$verb'"; echo; _gateway_usage; return 2 ;;
