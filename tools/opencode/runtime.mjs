@@ -33,7 +33,7 @@ export async function createPlugin(context, deps = {}) {
   const events = new AbortController();
   let sessionID, disposed = false, delivering = false, pending = '', generation = 0;
   let busyEvent = false, notes = Promise.resolve(), resumeCandidate = '', resumeSelection, resumeError, resumeLookup;
-  let refusalNoted = false, observer;
+  let refusalNoted = false, observer, admissionRefresh;
   const admissionFile = env.CEL_OPENCODE_ADMISSION_FILE;
   let launchAdmitted = admissionFile === undefined;
   if (admissionFile !== undefined && !path.isAbsolute(admissionFile)) throw new Error('OpenCode launch admission path must be absolute');
@@ -121,8 +121,18 @@ export async function createPlugin(context, deps = {}) {
   } catch (error) {
     resumeError = new Error('OpenCode native resume refused: cannot prove the owned Rex receipt', { cause: error });
   }
+  // OpenCode evicts an idle location and re-boots it on the next request, so a
+  // fresh instance can see a request or idle hook before its first observer
+  // tick. Every admission consumer awaits this one in-flight proof. Request
+  // hooks run inside the already-booted location, so the filesystem proof and
+  // provider/model reload (invalidate + notify, no session lookup) cannot
+  // reenter InstanceStore the way setup-time native calls would.
   async function refreshLaunchAdmission() {
     if (launchAdmitted) return true;
+    admissionRefresh ??= proveLaunchAdmission().finally(() => { admissionRefresh = undefined; });
+    return admissionRefresh;
+  }
+  async function proveLaunchAdmission() {
     let parent, file, handoff;
     try {
       // Open the owned private directory first, then its leaf through that FD.
@@ -157,7 +167,7 @@ export async function createPlugin(context, deps = {}) {
     return !disposed;
   }
   async function bootstrapResume() {
-    if (!launchAdmitted) throw new Error('OpenCode canonical launch admission is pending');
+    if (!await refreshLaunchAdmission()) throw new Error('OpenCode canonical launch admission is pending');
     if (resumeError) {
       if (!refusalNoted) { refusalNoted = true; await note('blocked'); }
       throw resumeError;
@@ -204,6 +214,9 @@ export async function createPlugin(context, deps = {}) {
       && Boolean(options.route?.trim() && env.OMP_GATEWAY_TOKEN?.trim());
   }
   async function admitRequest(event) {
+    // Herdr nominates its root only through the private handoff, so the proof
+    // must run before deciding whether a resume is pending.
+    await refreshLaunchAdmission();
     if (resumeError || resumeCandidate && !sessionID) await bootstrapResume();
     if (!available()) throw new Error('Scoped gateway auth/route is absent or resume refused; no provider fallback');
     assertModel(event.model);
@@ -319,7 +332,8 @@ export async function createPlugin(context, deps = {}) {
     events.abort();
     closing = (async () => {
       await Promise.allSettled(registrations.map((registration) => registration.dispose()));
-      await Promise.allSettled([...callbacks, ...polls, ...(eventTask ? [eventTask] : []), ...(resumeLookup ? [resumeLookup] : [])]);
+      await Promise.allSettled([...callbacks, ...polls, ...(eventTask ? [eventTask] : []), ...(resumeLookup ? [resumeLookup] : []),
+        ...(admissionRefresh ? [admissionRefresh] : [])]);
       await notes;
     })();
     return closing;
@@ -389,11 +403,19 @@ export async function createPlugin(context, deps = {}) {
     }));
     // Covers native user-shell and direct shell creation too, not only the
     // model-facing shell tool. Classify with the owned role, not a changed cwd.
-    registrations.push(await register(context.shell, 'create.before', (event) => {
-      if (!launchAdmitted) throw new Error('OpenCode canonical launch admission is pending');
+    registrations.push(await register(context.shell, 'create.before', async (event) => {
+      if (!await refreshLaunchAdmission()) throw new Error('OpenCode canonical launch admission is pending');
       return classify('command', event.command);
     }));
     registrations.push(await register(context.session, 'experimental.idle', async (event) => {
+      if (disposed || resumeError) return;
+      // A re-booted location may report the owned resumed root idle before the
+      // first observer tick; prove and bind only that exact candidate. A
+      // refusal stays with the observer rather than failing the native drain.
+      try {
+        if (!await refreshLaunchAdmission()) return;
+        if (!sessionID && resumeCandidate && event.sessionID === resumeCandidate) await bootstrapResume();
+      } catch { return; }
       if (disposed || event.sessionID !== sessionID || resumeError) return;
       await admitSession(event.sessionID);
       busyEvent = false; generation++;
