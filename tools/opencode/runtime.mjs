@@ -3,6 +3,8 @@ import { promisify } from 'node:util';
 import { readFile, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { catalogModels, allowsSelection, nativeModel } from './model-contract.mjs';
 const execute = promisify(execFile);
 
 // OpenCode 2.2.5 Promise plugin API. All registrations and availability edits
@@ -22,13 +24,15 @@ export async function createPlugin(context, deps = {}) {
   }
   const cel = path.join(root, 'bin/cel');
   const model = { providerID: options.providerID, id: options.modelID, variant: 'medium' };
-  const fullModel = `${model.providerID}/${model.id}`;
+  const allowedModels = catalogModels(options.catalog);
+  const allowedProviders = new Set([...allowedModels.values()].map(row => row.providerID));
+  const nativeModels = new Map([...allowedModels].map(([key, row]) => [key, nativeModel(row)]));
   const registrations = [];
   const polls = new Set();
   const callbacks = new Set();
   const events = new AbortController();
   let sessionID, disposed = false, delivering = false, pending = '', generation = 0;
-  let busyEvent = false, notes = Promise.resolve(), resumeCandidate = '', resumeError, resumeLookup;
+  let busyEvent = false, notes = Promise.resolve(), resumeCandidate = '', resumeSelection, resumeError, resumeLookup;
   let refusalNoted = false, observer;
   const admissionFile = env.CEL_OPENCODE_ADMISSION_FILE;
   let launchAdmitted = admissionFile === undefined;
@@ -80,9 +84,9 @@ export async function createPlugin(context, deps = {}) {
     return notes;
   }
   function assertModel(actual, exactVariant = false) {
-    if (!actual || actual.providerID !== model.providerID || actual.id !== model.id
-        || (exactVariant ? actual.variant !== 'medium' : actual.variant !== undefined && actual.variant !== 'medium')) {
-      throw new Error(`Celestial retains ${fullModel}#medium; provider/model/variant fallback is not permitted`);
+    if (!allowsSelection(allowedModels, actual)
+        || !options.catalog && exactVariant && actual.variant !== 'medium') {
+      throw new Error('Celestial scoped catalog refuses provider/model/variant fallback; pinned roles retain medium');
     }
   }
   function assertLocation(actual) {
@@ -144,6 +148,7 @@ export async function createPlugin(context, deps = {}) {
     finally { await file?.close(); await parent?.close(); }
     if (disposed) return false;
     if (handoff.sessionID) resumeCandidate = handoff.sessionID;
+    if (handoff.sessionID) resumeSelection = handoff.model;
     launchAdmitted = true;
     try {
       await context.provider.reload();
@@ -161,6 +166,7 @@ export async function createPlugin(context, deps = {}) {
     if (!resumeLookup) resumeLookup = (async () => {
       try {
         const native = await nativeSession(resumeCandidate);
+        if (resumeSelection && !isDeepStrictEqual(native.model, resumeSelection)) throw new Error('Native resume selection differs from the private launch proof');
         assertRoot(native);
         if (!disposed) {
           sessionID = resumeCandidate;
@@ -316,42 +322,54 @@ export async function createPlugin(context, deps = {}) {
   try {
     registrations.push(await context.provider.transform((editor) => {
       for (const record of editor.list()) {
-        if (record.provider.id !== model.providerID || !available()) editor.remove(record.provider.id);
+        if (!allowedProviders.has(record.provider.id) || !available()) editor.remove(record.provider.id);
       }
     }));
     registrations.push(await context.model.transform((editor) => {
       for (const candidate of editor.list()) {
-        if (candidate.providerID !== model.providerID || candidate.id !== model.id || !available()) editor.remove(candidate.providerID, candidate.id);
+        if (!allowedModels.has(`${candidate.providerID}/${candidate.id}`) || !available()) editor.remove(candidate.providerID, candidate.id);
       }
-      if (!available() || !editor.get(model.providerID, model.id)) return;
-      editor.update(model.providerID, model.id, (candidate) => {
-        candidate.enabled = true;
-        candidate.settings = { ...candidate.settings, reasoningEffort: 'medium' };
-        const medium = candidate.variants.find((variant) => variant.id === 'medium');
-        candidate.variants = [{ ...medium, id: 'medium', settings: { ...medium?.settings, reasoningEffort: 'medium' } }];
-      });
-      editor.default.set(model.providerID, model.id);
+      if (!available()) return;
+      for (const [key, spec] of nativeModels) {
+        const [providerID, modelID] = key.split('/');
+        if (!editor.get(providerID, modelID)) continue;
+        editor.update(providerID, modelID, candidate => {
+          candidate.enabled = true;
+          candidate.settings = { ...candidate.settings, ...structuredClone(spec.settings ?? {}) };
+          const previous = candidate.variants ?? [];
+          candidate.variants = spec.variants.map(variant => ({ ...variant,
+            settings: { ...previous.find(value => value.id === variant.id)?.settings, ...structuredClone(variant.settings) } }));
+          if (options.catalog && spec.capabilities) candidate.capabilities = structuredClone(spec.capabilities);
+          if (options.catalog && spec.limit) candidate.limit = { ...spec.limit };
+          // Custom gateway models must not silently become auxiliary families.
+          delete candidate.family;
+        });
+      }
+      if (!options.catalog) editor.default.set(model.providerID, model.id);
     }));
     for (const name of ['context', 'compaction', 'generate', 'title']) {
       registrations.push(await register(context.session, name, async (event) => {
         await admitRequest(event);
-        event.options.reasoningEffort = 'medium';
+        if (!options.catalog) event.options.reasoningEffort = 'medium';
       }));
     }
-    registrations.push(await register(context.session, 'model.request', async (event) => {
-      await admitRequest(event);
-      for (const key of Object.keys(event.headers)) if (key.toLowerCase() === 'x-session-id') delete event.headers[key];
-      event.headers['x-session-id'] = options.route;
-    }, { providerID: model.providerID }));
-    registrations.push(await register(context.session, 'http.request', async (event) => {
-      await admitRequest(event);
-      event.request.headers.set('x-session-id', options.route);
-    }, { providerID: model.providerID }));
-    registrations.push(await register(context.session, 'experimental.ws.handshake', async (event) => {
-      await admitRequest(event);
-      for (const key of Object.keys(event.headers)) if (key.toLowerCase() === 'x-session-id') delete event.headers[key];
-      event.headers['x-session-id'] = options.route;
-    }, { providerID: model.providerID }));
+    for (const providerID of allowedProviders) {
+      const scope = { providerID };
+      registrations.push(await register(context.session, 'model.request', async (event) => {
+        await admitRequest(event);
+        for (const key of Object.keys(event.headers)) if (key.toLowerCase() === 'x-session-id') delete event.headers[key];
+        event.headers['x-session-id'] = options.route;
+      }, scope));
+      registrations.push(await register(context.session, 'http.request', async (event) => {
+        await admitRequest(event);
+        event.request.headers.set('x-session-id', options.route);
+      }, scope));
+      registrations.push(await register(context.session, 'experimental.ws.handshake', async (event) => {
+        await admitRequest(event);
+        for (const key of Object.keys(event.headers)) if (key.toLowerCase() === 'x-session-id') delete event.headers[key];
+        event.headers['x-session-id'] = options.route;
+      }, scope));
+    }
     registrations.push(await register(context.tool, 'execute.before', async (event) => {
       await admitSession(event.sessionID);
       const input = event.input ?? {};

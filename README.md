@@ -300,12 +300,40 @@ package or GitHub's stale latest-release pointer. Updates install digest-checked
 official assets at the existing executable's location (fresh installs use
 `~/.local/bin`); they never restart an agent or change accounts.
 
-The gateway path uses a prepared per-agent native-v2 configuration: exact
+The gateway path starts with a prepared per-agent native-v2 configuration:
 `ompgw-codex/gpt-6.1-sol`, medium effort, evidenced 500K context/128K output
 limits, and the existing credential reference. Nothing imports credentials or
 edits global OpenCode settings. Roles live under
 `.cel/opencode/<agent>/role-<role>.md`. The plugin is a directory package with
 an explicit server export, not a standalone v1 hook file.
+
+`cel gateway opencode-models` prints the read-only gateway chat inventory as
+JSON. Advertised supported Codex/GPT and Anthropic chat IDs remain available
+when exact cached capabilities are absent; those entries use native defaults,
+not invented limits or sibling metadata. Exact capabilities enrich entries
+where available. OMP-only aliases and unsupported image APIs stay excluded.
+It uses only the existing private key and model-list/cache reads: no mint,
+refresh, account inspection, inference, or native account integration.
+
+```sh
+cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias> --dry-run
+cel gateway opencode-models --sync --workspace <registered-name> --agent <existing-alias>
+```
+
+Sync accepts only the existing private, UID-owned, non-symlinked
+`.cel/opencode/<alias>/role-orchestrator.opencode.json` and role file under the
+registered workspace; arbitrary global paths are not accepted. Namespace
+directories must be UID-owned and not group/world-writable; mode 0755 is
+allowed while role/config files remain private. It refuses noncanonical/custom
+configuration rather than discarding it. Dry-run writes
+nothing and prints only inventory/eligibility and activation status. Publication
+holds the sibling config lock, retains a private backup, and atomically replaces
+the config with mode 0600. Root/agent Sol-medium defaults, role/plugin, gateway
+route, URL and environment-key reference remain unchanged; unrelated scopes and
+native sessions/PIDs/settings are not modified. **File publication is not live
+availability:** an existing process captured inline configuration at launch.
+The result reports `activationRequired`; coordinated activation at the same
+native SID boundary belongs to its owner. This command never reloads/restarts.
 
 ```sh
 cel run solo --product <product> --profile <scoped-profile> --session-backend rex --fresh --handoff /absolute/checkpoint.md
@@ -314,9 +342,12 @@ cel run solo --product <product> --profile <scoped-profile> --session-backend re
 The native `--prompt` kickoff instructs a fresh session to read the handoff;
 an archived OMP log is consultation material, never a native resume. Subsequent
 continuation accepts only an existing migrated OpenCode `ses_...` root with
-the exact directory, scoped agent, model and medium variant. Storage errors,
-pending migrations and missing IDs refuse before stopping/relaunching a
-runtime: v2's bare `--session` can otherwise create a missing session.
+the exact directory and scoped agent. Without a catalog the exact Sol-medium
+selection remains required; a canonical catalog additionally admits an
+owner-selected eligible provider/model and its native variant, without an
+automatic fallback or changing the launch default. Storage errors, pending
+migrations and missing IDs refuse before stopping/relaunching a runtime:
+v2's bare `--session` can otherwise create a missing session.
 
 The canonical parent owns a private authenticated `serve --stdio` process.
 Before attaching the TUI it verifies the actual server PID/version, exact

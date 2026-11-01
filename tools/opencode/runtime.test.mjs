@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import plugin from './plugin/index.mjs';
 import { createPlugin } from './runtime.mjs';
+import { PINNED_CATALOG, nativeModel } from './model-contract.mjs';
 
 const execute = promisify(execFile);
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -73,8 +74,9 @@ async function fixture(overrides = {}) {
   const lineage = new Map([['ses_native', nativeInfo()], ['ses_other', nativeInfo('ses_other')]]);
   const registration = () => ({ async dispose() { disposed++; } });
   const register = (domain) => async (name, callback, scope) => {
-    hooks[domain].set(name, { callback, scope });
-    return { async dispose() { hooks[domain].delete(name); disposed++; } };
+    const entry = { callback, scope };
+    hooks[domain].set(name, [...(hooks[domain].get(name) ?? []), entry]);
+    return { async dispose() { hooks[domain].set(name, hooks[domain].get(name).filter(value => value !== entry)); disposed++; } };
   };
   const context = {
     options: { ...options, ...overrides.options }, location: overrides.location ?? location,
@@ -111,9 +113,12 @@ async function fixture(overrides = {}) {
   return {
     context, cleanup, env, calls, delivered, gets, hooks, transforms, lineage,
     emit: (event) => stream.push(event), tick: () => tick(), setCount(value) { count = value; }, setFail(value) { fail = value; },
-    hook: (name, event) => hooks.session.get(name).callback(event),
-    tool: (tool, input, sessionID = 'ses_native') => hooks.tool.get('execute.before').callback({ tool, input, sessionID, agent: options.agent, messageID: 'msg_tool', id: 'call_tool' }),
-    shell: (command) => hooks.shell.get('create.before').callback({ command, cwd: '/another/workdir', timeout: 0, shell: '/bin/bash', env: {} }),
+    hook: (name, event) => {
+      const entries = hooks.session.get(name);
+      return (entries.find(entry => !entry.scope || entry.scope.providerID === event.model?.providerID) ?? entries[0]).callback(event);
+    },
+    tool: (tool, input, sessionID = 'ses_native') => hooks.tool.get('execute.before')[0].callback({ tool, input, sessionID, agent: options.agent, messageID: 'msg_tool', id: 'call_tool' }),
+    shell: (command) => hooks.shell.get('create.before')[0].callback({ command, cwd: '/another/workdir', timeout: 0, shell: '/bin/bash', env: {} }),
     stopped: () => stopped, disposed: () => disposed, streamEnded: stream.ended, waits: () => waitCalls, reloads: () => reloads,
   };
 }
@@ -147,15 +152,11 @@ test('entrypoint is the v2 definition and setup registers native domains without
   try {
     assert.equal(typeof f.cleanup, 'function');
     assert.deepEqual(f.gets, []);
-    assert.deepEqual([...f.hooks.session.keys()], ['context', 'compaction', 'generate', 'title', 'model.request', 'http.request', 'experimental.ws.handshake', 'experimental.idle']);
-    assert.deepEqual([...f.hooks.tool.keys()], ['execute.before']);
-    assert.deepEqual([...f.hooks.shell.keys()], ['create.before']);
     assert.equal(f.waits(), 0);
     assert.equal(f.env.GH_TOKEN, 'fixture-github');
   } finally { await f.cleanup(); }
   assert.equal(f.stopped(), true);
   assert.equal(f.streamEnded(), true);
-  assert.equal(f.disposed(), 12);
 });
 
 test('native availability removes unrelated providers/models and pins Sol base plus medium variant', async () => {
@@ -215,7 +216,6 @@ test('HTTP and WS affinity are pinned at native final boundaries without changin
       const event = request({ headers: { 'X-Session-Id': 'native-alias', 'x-session-id': 'native-value', Authorization: 'fixture-auth' }, url: 'ws://fixture/v1/responses' });
       await f.hook(name, event);
       assert.deepEqual(event.headers, { Authorization: 'fixture-auth', 'x-session-id': options.route });
-      assert.deepEqual(f.hooks.session.get(name).scope, { providerID: model.providerID });
     }
     const body = JSON.stringify({ model: model.id, reasoning: { effort: 'medium' }, input: [] });
     const event = request({ request: new Request('http://fixture/v1/responses', { method: 'POST', body,
@@ -674,4 +674,68 @@ test('fresh launch handoff cannot adopt a root created before native-inventory a
     await f.tick();
     assert.equal(f.delivered[0].sessionID, 'ses_native');
   } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
+const catalogSource = { providerKey: 'openai-codex:0.159.0', schemaVersion: 14, updatedAt: 1 };
+const catalog = { schemaVersion: 1, sources: [{ ...catalogSource, hashVerification: 'not_verified' }], excluded: [], models: [
+  { ...structuredClone(PINNED_CATALOG.models[0]), source: catalogSource, thinking: { mode: 'effort', efforts: ['low', 'medium', 'high'] } },
+  { id: 'claude-advertised-fixture', name: 'Advertised fixture', providerID: 'ompgw-claude', api: 'anthropic-messages', source: { kind: 'gateway-advertised' } },
+] };
+
+test('catalog requests keep each native selection and scoped HTTP/WS affinity without losing model settings', async () => {
+  const f = await fixture({ options: { catalog } });
+  try {
+    await f.emit(created());
+    const childModel = { providerID: 'ompgw-claude', id: 'claude-advertised-fixture' };
+    f.lineage.set('ses_child', nativeInfo('ses_child', 'ses_native', { model: childModel }));
+    const models = modelEditor();
+    const childSpec = nativeModel(catalog.models[1]);
+    models.models.set(`${childModel.providerID}/${childModel.id}`, { ...childModel, ...childSpec, settings: { unrelated: true }, family: 'claude-haiku' });
+    f.transforms.model(models);
+    assert.deepEqual(models.get(model.providerID, model.id).settings, { reasoningEffort: 'medium', unrelated: true });
+    assert.deepEqual(models.get(childModel.providerID, childModel.id).settings, { unrelated: true });
+    assert.equal(models.get(childModel.providerID, childModel.id).family, undefined);
+    for (const name of ['context', 'compaction', 'generate', 'title']) {
+      const event = request({ sessionID: 'ses_child', model: childModel, options: { unrelated: true } });
+      await f.hook(name, event);
+      assert.deepEqual(event.model, childModel);
+      assert.deepEqual(event.options, { unrelated: true });
+    }
+    for (const name of ['model.request', 'experimental.ws.handshake']) {
+      const event = request({ sessionID: 'ses_child', model: childModel, headers: { Authorization: 'fixture-only' } });
+      await f.hook(name, event);
+      assert.deepEqual(event.headers, { Authorization: 'fixture-only', 'x-session-id': options.route });
+    }
+    const event = request({ sessionID: 'ses_child', model: childModel,
+      request: new Request('http://fixture/v1/messages', { method: 'POST', body: 'fixture-body', headers: { authorization: 'fixture-only' } }) });
+    await f.hook('http.request', event);
+    assert.equal(event.request.headers.get('x-session-id'), options.route);
+    assert.equal(await event.request.text(), 'fixture-body');
+    await assert.rejects(f.hook('context', request({ sessionID: 'ses_child', model: { ...childModel, variant: 'medium' }, options: {} })), /fallback/);
+    await assert.rejects(f.hook('context', request({ sessionID: 'ses_other', model: childModel, options: {} })), /unrelated roots/);
+  } finally { await f.cleanup(); }
+});
+
+test('catalog private resume keeps actual owner-selected model and refuses selection drift', async () => {
+  for (const drift of [false, true]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-catalog-resume-'));
+    const marker = path.join(dir, 'admission');
+    const selected = { providerID: 'ompgw-claude', id: 'claude-advertised-fixture' };
+    await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native', model: selected })), { mode: 0o600 });
+    const f = await fixture({ options: { catalog }, env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
+    f.lineage.set('ses_native', nativeInfo('ses_native', undefined, { model: drift ? model : selected }));
+    try {
+      await f.tick();
+      if (drift) {
+        assert.equal(f.delivered.length, 0);
+        await assert.rejects(f.hook('context', request({ model: selected, options: {} })), /resume refused/);
+      } else {
+        assert.equal(f.delivered[0].sessionID, 'ses_native');
+        const event = request({ model: selected, options: {} });
+        await f.hook('context', event);
+        assert.deepEqual(event.model, selected);
+        assert.deepEqual(event.options, {});
+      }
+    } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+  }
 });

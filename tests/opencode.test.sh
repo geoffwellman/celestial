@@ -10,6 +10,10 @@ test_opencode_private_launcher_regressions() {
   node --test "$CEL_ROOT/tools/opencode/launch.test.mjs"
 }
 
+test_opencode_scoped_catalog_sync_regressions() {
+  node --test "$CEL_ROOT/tools/opencode/model-contract.test.mjs" "$CEL_ROOT/tools/opencode/sync.test.mjs"
+}
+
 test_opencode_scoped_role_is_not_written_globally() {
   local d role config
   d="$(mktemp -d)"; role="$d/products/widget/role-orchestrator.md"; config="${role%.md}.opencode.json"

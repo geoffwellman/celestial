@@ -14,12 +14,20 @@ opencode_validate_config() { # tag rolefile configfile [expected-baseURL]; read-
   node "$CEL_ROOT/tools/opencode/config.mjs" --validate "$configfile" "cel-$tag" "$rolefile" "$CEL_ROOT/tools/opencode/plugin" "$base"
 }
 
-opencode_validate_session() { # native-id cwd scoped-agent [wsdir]; never start a server or migrate storage
-  # Pinned native contracts: v2.2.5 cli/src/database-path.ts,
-  # core/src/session/sql.ts and core/src/database/v1-migration.bun.ts.
-  local session="$1" cwd="$2" agent="$3" wsdir="${4:-}"
+opencode_validate_session() { # native-id cwd scoped-agent [wsdir] [configfile]; read-only
+  # Every before-stop/claim and Rex launch caller shares this same primitive.
+  # A canonical catalog expands owner-selected tuples, never the launch default.
+  local session="$1" cwd="$2" agent="$3" wsdir="${4:-}" config="${5:-${CEL_OPENCODE_CONFIG_FILE:-}}"
   [[ "$session" =~ ^ses_[A-Za-z0-9]+$ && "$cwd" = /* && "$agent" =~ ^cel-[a-zA-Z0-9_-]+$ ]] || return 1
   (
+    # A direct Rex caller has a prepared scope but no caller-local wsdir.
+    # Recover only its canonical workspace namespace, never from native cwd.
+    if [ -z "$wsdir" ] && [ -n "$config" ]; then
+      local scope_dir="${config%/role-orchestrator.opencode.json}"
+      wsdir="${scope_dir%/.cel/opencode/*}"
+      [ "$config" = "$wsdir/.cel/opencode/${scope_dir##*/}/role-orchestrator.opencode.json" ] \
+        && [ -f "$wsdir/workspace.yaml" ] || exit 1
+    fi
     # Rex loads this same overlay before launching the child. Resolve storage
     # against it, not against a stale controller environment or another HOME.
     if [ -n "$wsdir" ] && [ -f "$wsdir/workspace.yaml" ]; then
@@ -28,11 +36,24 @@ opencode_validate_session() { # native-id cwd scoped-agent [wsdir]; never start 
       eval "$exports" >/dev/null 2>&1 || exit 1
     fi
     cd -- "$cwd" || exit 1
-    python3 - "$session" "$cwd" "$agent" <<'PY'
+    local stored namespace alias
+    # Bootstrap can prove the existing native root before generating its scoped
+    # config. Absence retains strict legacy Sol-medium admission; an existing
+    # file (including a dangling symlink) must still pass canonical validation.
+    if [ -n "$config" ] && [ ! -e "$config" ] && [ ! -L "$config" ]; then
+      config=""
+    fi
+    if [ -n "$config" ]; then
+      [ -n "$wsdir" ] && [ "$agent" = cel-orchestrator ] || exit 1
+      namespace="${config%/role-orchestrator.opencode.json}"
+      alias="${namespace##*/}"
+      [ "$config" = "$wsdir/.cel/opencode/$alias/role-orchestrator.opencode.json" ] || exit 1
+    fi
+    stored="$(python3 - "$session" "$cwd" "$agent" "$config" <<'PY'
 import json, os, pathlib, sqlite3, sys
 
 try:
-    session, cwd, agent = sys.argv[1:]
+    session, cwd, agent, config = sys.argv[1:]
     directory = str(pathlib.Path(cwd).resolve(strict=True))
     if os.path.abspath(cwd) != directory:
         raise ValueError("native location alias mismatch")
@@ -69,13 +90,21 @@ try:
             raise ValueError("native root identity mismatch")
         if stored_directory != directory:
             raise ValueError("native location mismatch")
-        if model != {"providerID": "ompgw-codex", "id": "gpt-6.1-sol", "variant": "medium"}:
+        if not config and model != {"providerID": "ompgw-codex", "id": "gpt-6.1-sol", "variant": "medium"}:
             raise ValueError("native model mismatch")
+        if config:
+            print(json.dumps(model))
 except Exception:
     # Database/parser exceptions can embed stored content. Emit no excerpts.
     print("OpenCode existing native v2 root is unavailable, mismatched, or requires migration", file=sys.stderr)
     sys.exit(1)
 PY
+    )" || exit 1
+    if [ -n "$config" ]; then
+      printf '%s' "$stored" | node "$CEL_ROOT/tools/opencode/sync.mjs" --validate-selection \
+        --workspace-dir "$wsdir" --agent "$alias" --plugin-file "$CEL_ROOT/tools/opencode/plugin" \
+        --base-url "$(gateway_url)/v1" || exit 1
+    fi
   )
 }
 
@@ -118,7 +147,7 @@ opencode_launch_command() { # append after env assignments, before native execut
 opencode_write_config() { # destination; reads buildConfig input JSON on stdin
   local file="$1" tmp
   [[ "$file" = /* ]] || return 1
-  mkdir -p "$(dirname "$file")" || return 1
+  (umask 077; mkdir -p "$(dirname "$file")") || return 1
   tmp="$(mktemp "$(dirname "$file")/.opencode-config.XXXXXX")" || return 1
   if ! node "$CEL_ROOT/tools/opencode/config.mjs" > "$tmp"; then rm -f "$tmp"; return 1; fi
   chmod 600 "$tmp" && mv "$tmp" "$file"
