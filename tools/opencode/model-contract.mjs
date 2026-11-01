@@ -18,7 +18,7 @@ const provenance = source => object(source)
   && keys(source, ['providerKey', 'schemaVersion', 'updatedAt', 'hashVerification'])
   && typeof source.providerKey === 'string'
   && /^(anthropic|openai-codex)(?::[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9.-]+)?)?$/.test(source.providerKey)
-  && source.providerKey.length <= 128 && source.schemaVersion === 14
+  && source.providerKey.length <= 128 && [13, 14].includes(source.schemaVersion)
   && Number.isSafeInteger(source.updatedAt) && source.updatedAt >= 0;
 
 export function catalogModels(catalog = PINNED_CATALOG) {

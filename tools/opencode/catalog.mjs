@@ -65,9 +65,13 @@ export async function loadNativeMetadata(databasePath) {
   return JSON.parse(raw).filter(validSource).map(sanitizeSource);
 }
 
+// OMP 18.x rewrites model_cache as version 13 or 14 depending on which binary
+// refreshed it last; both carry the same per-model fields read here.
+export const CACHE_VERSIONS = Object.freeze([13, 14]);
+
 function validSource(source) {
   return record(source) && source.authoritative === true && typeof source.providerKey === 'string'
-    && providerKey.test(source.providerKey) && source.schemaVersion === 14
+    && providerKey.test(source.providerKey) && CACHE_VERSIONS.includes(source.schemaVersion)
     && Number.isSafeInteger(source.updatedAt) && source.updatedAt >= 0
     && Array.isArray(source.models) && source.models.length <= 4096;
 }
@@ -175,7 +179,10 @@ async function main() {
   let metadata;
   try { metadata = await loadNativeMetadata(args[1]); }
   catch { process.stderr.write('Capability metadata unavailable; advertised chat models use native client defaults.\n'); metadata = []; }
-  process.stdout.write(`${JSON.stringify(resolveCatalog(published, metadata))}\n`);
+  const catalog = resolveCatalog(published, metadata);
+  // A silent all-defaults catalog removed every effort variant once; say so.
+  if (!catalog.sources.length) process.stderr.write('No usable OMP capability metadata (unsupported cache version?); all advertised chat models use native client defaults.\n');
+  process.stdout.write(`${JSON.stringify(catalog)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
