@@ -308,6 +308,8 @@ test_launch_writer_never_rewrites_existing_model_metadata_or_touches_an_unchange
   mkdir -p "$HOME" "$T/pi"; printf 'gateway:\n  port: 8317\n' >"$CEL_CONFIG_FILE"
   printf '#!/usr/bin/env bash\ncase "$1" in ready) exit 0;; models) printf %%s '"'"'{"data":[{"id":"claude-opus-5-5"},{"id":"gpt-5.5"}]}'"'"';; esac\n' >"$T/stub"
   chmod +x "$T/stub"; export CEL_GATEWAY_STUB="$T/stub"
+  export CEL_PI_CODEX_CATALOG_FILE="$T/pi-catalog.json"
+  printf '%s' '[{"id":"claude-opus-5-5","name":"Opus fixture","api":"anthropic-messages","contextWindow":1000000,"maxTokens":128000,"reasoning":true,"input":["text","image"]},{"id":"gpt-5.5","name":"GPT fixture","api":"openai-responses","contextWindow":272000,"maxTokens":128000,"reasoning":true,"input":["text","image"]}]' >"$CEL_PI_CODEX_CATALOG_FILE"
   source "$_UAG_REPO/lib/gateway.sh"
   gateway_pi_models_write "$T/pi/models.json"
   jq '.providers["ompgw-claude"].models[0].contextWindow = 555' "$T/pi/models.json" >"$T/x" && mv "$T/x" "$T/pi/models.json"
@@ -317,7 +319,7 @@ test_launch_writer_never_rewrites_existing_model_metadata_or_touches_an_unchange
   assert_eq "$(stat -c %i%Y "$T/pi/models.json")" "$ino"
   GATEWAY_PI_WRITE=refresh gateway_pi_models_write "$T/pi/models.json"
   assert_eq "$(jq '.providers["ompgw-claude"].models[0].contextWindow' "$T/pi/models.json")" 1000000
-  unset CEL_GATEWAY_STUB CEL_PI_AGENT_DIR
+  unset CEL_GATEWAY_STUB CEL_PI_AGENT_DIR CEL_PI_CODEX_CATALOG_FILE
   rm -rf "$T"
 }
 

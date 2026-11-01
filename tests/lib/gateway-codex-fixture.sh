@@ -30,6 +30,14 @@ case "\$1" in
 esac
 EOS
   chmod +x "$T/gwstub"; export CEL_GATEWAY_STUB="$T/gwstub"
+  export CEL_PI_CODEX_CATALOG_FILE="$T/pi-catalog.json"
+  cat >"$CEL_PI_CODEX_CATALOG_FILE" <<'EOS'
+[{"id":"gpt-5.5","name":"GPT fixture","api":"openai-responses","contextWindow":272000,"maxTokens":128000,"reasoning":true,"input":["text","image"],"thinkingLevelMap":{"low":"low","medium":"medium","high":"high"}},
+ {"id":"gpt-5.5-codex","name":"Codex fixture","api":"openai-responses","contextWindow":400000,"maxTokens":128000,"reasoning":true,"input":["text","image"]},
+ {"id":"gpt-5.6-2026-10-01","name":"Versioned fixture","api":"openai-responses","contextWindow":1000000,"maxTokens":128000,"reasoning":false,"input":["text","image"]},
+ {"id":"codex-mini-latest","name":"Mini fixture","api":"openai-responses","contextWindow":200000,"maxTokens":100000,"reasoning":true,"input":["text"]},
+ {"id":"claude-sonnet-4-6","name":"Sonnet fixture","api":"anthropic-messages","contextWindow":1000000,"maxTokens":128000,"reasoning":true,"input":["text","image"],"thinkingLevelMap":{"medium":"medium"},"compat":{"forceAdaptiveThinking":true}}]
+EOS
   cat >"$T/catalog.json" <<'EOS'
 [{"id":"claude-sonnet-4-6","name":"Claude Sonnet 4.6","reasoning":true,"input":["text","image"],"contextWindow":1000000,"maxTokens":128000,
   "thinking":{"mode":"anthropic-adaptive","efforts":["low","medium","high"]}}]
@@ -37,5 +45,5 @@ EOS
 }
 _gwc_teardown() {
   rm -rf "$T"
-  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_PI_AGENT_DIR CEL_OMP_AGENT_DIR GWC_MODELS
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_GATEWAY_STUB CEL_PI_AGENT_DIR CEL_OMP_AGENT_DIR GWC_MODELS CEL_PI_CODEX_CATALOG_FILE
 }
