@@ -204,6 +204,13 @@ test('unknown selected OMP cache schema refuses output rather than silently usin
   failure(f.run(), /Unsupported authoritative OMP cache schema/);
 });
 
+test('cache version 13 supplies the same exact capabilities as version 14', (t) => {
+  const f = fixture(t);
+  for (const row of f.rows) row.version = 13;
+  f.saveCache();
+  assert.equal(success(f.run()).find((entry) => entry.id === 'gpt-5.6-sol').contextWindow, 1000000);
+});
+
 test('source and duplicate exact-ID conflicts refuse output without leaking arbitrary model data', (t) => {
   const f = fixture(t);
   f.rows[0].models[0].provider = 'unrelated-provider'; f.saveCache();

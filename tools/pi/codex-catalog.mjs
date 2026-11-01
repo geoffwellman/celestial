@@ -207,7 +207,9 @@ function selectCache(rows, family) {
   candidates.sort(compare);
   if (!candidates.length) return;
   const selected = candidates[0];
-  if (selected.version !== 14) throw new Error(`Unsupported authoritative OMP cache schema for ${family.provider}`);
+  // OMP 18.x writes model_cache as version 13 or 14 depending on which binary
+  // refreshed it last; both carry the same per-model fields read here.
+  if (![13, 14].includes(selected.version)) throw new Error(`Unsupported authoritative OMP cache schema for ${family.provider}`);
   if (candidates[1] && compare(selected, candidates[1]) === 0 && JSON.stringify(selected.models) !== JSON.stringify(candidates[1].models)) throw new Error(`Conflicting authoritative OMP cache sources for ${family.provider}`);
   return selected;
 }
