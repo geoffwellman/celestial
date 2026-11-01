@@ -55,6 +55,7 @@ cel - the celestial plane
 
   cel version                   installed build: version+commits, sha, branch
   cel setup [--agents a,b|all]  install tools + agents, link core, install externals
+  cel plugins list|install      opt-in pinned full plugins (EGM: omp/claude/codex)
   cel doctor                    diagnose this box (non-zero on problems)
   cel update                    move to the newest release, re-link, re-render
                                 and name orchestrators on an older launch
@@ -273,6 +274,7 @@ EOS
 
 case "${1:-help}" in
   setup)    shift; . "$CEL_ROOT/lib/install.sh"; . "$CEL_ROOT/lib/link.sh"; cmd_setup "$@";;
+  plugins)  shift; . "$CEL_ROOT/lib/plugins.sh"; cmd_plugins "$@";;
   doctor)   shift; . "$CEL_ROOT/lib/doctor.sh";  cmd_doctor "$@";;
   update)   shift; . "$CEL_ROOT/lib/update.sh"; cmd_update "$@";;
   release)  shift; . "$CEL_ROOT/lib/release.sh"; cmd_release "$@";;
