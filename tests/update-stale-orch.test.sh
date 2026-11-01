@@ -105,6 +105,18 @@ test_update_lists_an_obsolete_flag_as_extra() {
   orch_stub_teardown
 }
 
+# A wrapped runtime (OpenCode's launcher passes `-- <opencode> <flags>`) is
+# compared on the wrapped flags; the separator itself is not an extra flag.
+test_launch_diff_ignores_a_wrapper_separator_but_not_wrapped_flags() {
+  local T; T="$(mktemp -d)"
+  printf '%s\0' opencode --standalone --auto --session ses_X > "$T/expected"
+  printf '%s\0' node /plane/tools/opencode/launch.mjs -- /home/u/.local/bin/opencode --standalone --auto --session ses_X > "$T/actual"
+  assert_eq "$(run_launch_diff "$T/expected" "$T/actual")" ""
+  printf '%s\0' node /plane/tools/opencode/launch.mjs -- /home/u/.local/bin/opencode --standalone --session ses_X > "$T/actual"
+  assert_eq "$(run_launch_diff "$T/expected" "$T/actual")" "missing: --auto"
+  rm -rf "$T"
+}
+
 # The restart call is an argv, not a re-split string.
 test_restart_orchestrators_passes_the_restart_as_an_argv() {
   orch_stub_setup omp

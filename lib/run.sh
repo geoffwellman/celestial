@@ -1371,6 +1371,10 @@ run_launch_items() { # NUL-delimited argv -> losslessly encoded items, one per l
   while [ "$i" -lt "$n" ]; do
     a="${v[$i]}"; b="${v[$((i+1))]:-}"
     case "$a" in
+      # A wrapper hands its runtime the argv after a bare `--` (OpenCode's
+      # launcher: node launch.mjs -- opencode --auto ...). The separator and the
+      # wrapped executable path are not flags; the wrapped flags still compare.
+      --) i=$((i+1)) ;;
       --*)
         if [[ "$a" = *=* ]]; then b=""; i=$((i+1))
         elif [ -n "$b" ] && [ "${b#--}" = "$b" ]; then i=$((i+2)); else b=""; i=$((i+1)); fi
