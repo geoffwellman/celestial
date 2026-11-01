@@ -203,6 +203,33 @@ _gateway_opencode_models() {
   printf '%s' "$catalog" | node "$CEL_ROOT/tools/opencode/sync.mjs" "${options[@]}"
 }
 
+# Metadata maintenance must never create/repair authentication. Read only the
+# existing private key; unlike _gateway_api_key this has no write side effects.
+_gateway_existing_api_key() {
+  local f mode owner
+  f="$(_gateway_key_file)"
+  [ -f "$f" ] && [ -r "$f" ] && [ -s "$f" ] || return 1
+  mode="$(stat -c %a "$f" 2>/dev/null)" || return 1
+  owner="$(stat -c %u "$f" 2>/dev/null)" || return 1
+  [ "$owner" = "$(id -u)" ] || return 1
+  case "$mode" in *00) ;; *) return 1 ;; esac
+  tr -d '\r\n' < "$f"
+}
+
+gateway_models_json_existing() {
+  if [ -n "${CEL_TESTING:-}" ] && _gateway_stub; then
+    "$CEL_GATEWAY_STUB" models
+    return $?
+  fi
+  local key
+  key="$(_gateway_existing_api_key)" && [ -n "$key" ] || {
+    printf 'cel gateway pi-models: existing private gateway api-key required; authentication was not changed\n' >&2
+    return 1
+  }
+  printf 'Authorization: Bearer %s\n' "$key" \
+    | curl -sf -m 10 "$(gateway_url)/v1/models" -H @- 2>/dev/null
+}
+
 # --- the account table ----------------------------------------------------
 
 # THE AUTH-DIR IS THE ACCOUNT LIST. CLIProxyAPI's management API is off on
@@ -419,31 +446,10 @@ _gateway_start() {
 # this function, and the child is always handed the answer.
 gateway_pi_dir() { _agent_root_abs "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
 
-# Write the gateway's providers into pi's models.json, MERGING.
-#
-# models.json is the owner's file: it carries whatever providers they added by
-# hand, and a writer that rebuilt the document from the gateway's model list
-# would silently delete them. jq merges the two keys and leaves the rest
-# byte-alike.
-#
-# TWO BLOCKS, ONE GATEWAY. CLIProxyAPI serves both an OpenAI-shaped
-# /v1/chat/completions and an Anthropic-shaped /v1/messages over the same
-# accounts, and pi speaks both; Claude models go through `anthropic-messages`
-# because that is the protocol they were designed for, everything else through
-# `openai-completions`.
-# The profile prefix and models.json provider keys are derived from the same
-# helper; Claude's Anthropic endpoint is a distinct pi provider.
-#
-# CODEX IS A THIRD BLOCK (AH-261018). Chat Completions is not Codex's protocol:
-# its models are served by the gateway's OpenAI RESPONSES surface (POST
-# /v1/responses, /v1/responses/compact for compaction, and the Responses
-# websocket upgrade on the same path - CLIProxyAPI 8.0.29), and pi and omp
-# both speak `openai-responses`. Sending them through `openai-completions`
-# silently dropped compaction, reasoning items and the websocket transport,
-# and the launch id the profile produced (`ompgw/codex/gpt-5.5`) was not even
-# a model models.json listed. The family test is on the BARE id so versioned
-# ids (`gpt-5.5-codex`, `gpt-5.6-2026-10-01`, `codex-mini-latest`) are found by
-# discovery, never by a hand-kept list.
+# Register published gateway chat IDs; enrich capabilities only by exact ID.
+# Anthropic uses the gateway root; Codex uses /v1 with openai-responses.
+# Missing enrichment leaves Pi to its own defaults, never sibling-model caps.
+# Provider family selection retains the existing canonical launch policy.
 GATEWAY_CODEX_ID_RE='^(gpt-|codex-|o[0-9])'
 gateway_codex_bare_id() { # <any spelling of a codex model id> -> the id the gateway publishes
   local id="$1"
@@ -460,12 +466,9 @@ gateway_pi_provider_for_model() { # <model id>
   if gateway_codex_model_p "$1"; then printf 'ompgw-codex'; else printf 'ompgw'; fi
 }
 
-# apiKey and the session header are written as VARIABLE NAMES. pi expands them
-# from the pane's environment at launch, so no key and no session id is ever
-# in this file.
-
-# This exact configured ID mirrors Pi 1.2.0's canonical Anthropic entry.
-# Unknown IDs never inherit its capabilities by prefix.
+# New providers carry environment resolvers, never literal credentials or session
+# identities. Existing providers retain their own resolvers on a metadata refresh.
+#
 # CONCURRENT LAUNCHES AND A REFRESH PUBLISH INTO ONE FILE. read -> merge -> rename
 # without a lock loses one writer's update. Every models writer therefore runs
 # its whole read-merge-rename under an exclusive flock on a sibling `<file>.lock`,
@@ -497,48 +500,74 @@ gateway_pi_catalog_json() {
   node "$CEL_ROOT/tools/pi/codex-catalog.mjs" "$real"
 }
 
+# Discovery is the availability authority, not the capability cache. Unknown
+# published chat IDs remain selectable with Pi defaults; omissions are explicit.
+gateway_pi_models_audit_json() {
+  local native published
+  native="$(gateway_pi_catalog_json)" || {
+    printf 'cel gateway pi-models: exact capability enrichment unavailable; published chat IDs use Pi defaults\n' >&2
+    native='[]'
+  }
+  published="$(gateway_models_json_existing)" || return 1
+  jq -cn --argjson native "$native" --argjson published "$published" --arg codex_re "$GATEWAY_CODEX_ID_RE" '
+    if ($native | type) != "array" or ($published.data | type) != "array"
+    then error("invalid Pi metadata or gateway model catalog") else . end |
+    ($native | map(select(.api == "anthropic-messages" or .api == "openai-responses"))
+      | map({key:.id,value:(with_entries(select(.key as $k |
+          ["id","name","api","reasoning","input","contextWindow","maxTokens","thinkingLevelMap","compat"] | index($k))))})
+      | from_entries) as $byid |
+    (reduce $published.data[] as $m ([];
+      if ($m.id | type) != "string" then error("gateway model ID is not a string")
+      elif any(.[]; . == $m.id) then . else . + [$m.id] end)) as $ids |
+    def image_only: test("^(gpt-image([-.]|$)|chatgpt-image([-.]|$)|dall-e([-.]|$))");
+    def chat_api:
+      if contains("/") or image_only then null
+      elif startswith("claude-") then "anthropic-messages"
+      elif test($codex_re) then "openai-responses"
+      else null end;
+    {models: [$ids[] | . as $id | (chat_api) as $api | select($api != null) |
+                $byid[$id] // {id:$id,api:$api}],
+     defaults: [$ids[] | . as $id | select(chat_api != null and $byid[$id] == null) |
+                  {id:$id,reason:"no exact capability metadata; using Pi defaults"}],
+     omitted: [$ids[] | . as $id |
+       if contains("/") then {id:$id,reason:"scoped or aliased model ID"}
+       elif image_only then {id:$id,reason:"image-only model API is unsupported by Pi chat"}
+       elif chat_api == null then {id:$id,reason:"no supported gateway chat transport"}
+       else empty end]}'
+}
+
 gateway_pi_models_write() { # [models.json path]
-  local f="${1:-$(gateway_pi_dir)/models.json}" models tmp native
-  native="$(gateway_pi_catalog_json 2>/dev/null)" || native='[]'
-  models="$(gateway_models_json | jq -c --arg re "$GATEWAY_CODEX_ID_RE" --argjson native "$native" '
-    ($native | map({key:.id,value:.}) | from_entries) as $byid |
-    # Native Claude 5.5 capabilities. The gateway publishes bare ids, so
-    # without this the generic 128000/8192 fallback would cap the window and
-    # output and drop adaptive thinking.
-    def configured_opus_metadata:
-      if .id == "claude-opus-5-5" or .id == "claude-sonnet-5-5" then
-        . + { contextWindow: 1000000, maxTokens: 128000, input: ["text", "image"],
-              reasoning: true,
-              thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium",
-                                  high: "high", xhigh: "xhigh", max: "max" },
-              compat: { supportsMidConvoEffort: true, supportsMidConvoSystemMessages: true,
-                        supportsMidConvoToolChanges: true, forceAdaptiveThinking: true,
-                        supportsTemperature: false, supportsStrictTools: true } }
-      else .
-      end;
-    # Prefer exact metadata from the native distribution; otherwise retain only
-    # fields the gateway explicitly advertises. No prefix-based capability
-    # guesses and no generic 128K/text-only/non-reasoning cap for known ids.
-    def codex_metadata:
-      . as $g | { id: .id }
-      + (if $byid[$g.id] then $byid[$g.id]
-         else (if .context_length then { contextWindow: .context_length } else {} end)
-          + (if .max_output_tokens then { maxTokens: .max_output_tokens } else {} end)
-          + (if ((.thinking.levels // []) | length) > 0
-             then { reasoning: true,
-                    thinkingLevelMap: ([.thinking.levels[] | { key: ., value: . }] | from_entries) }
-             else {} end)
-         end);
-    [ (.data // [])[]
-      | if (.id | test($re)) then (codex_metadata | . + { codex: true })
-        else ({
-          id: .id,
-          contextWindow: (.context_length // 128000),
-          maxTokens: (.max_output_tokens // 8192) } | configured_opus_metadata)
-        end
-    ]' 2>/dev/null || true)"
-  [ -n "$models" ] || return 1
+  local f="${1:-$(gateway_pi_dir)/models.json}" audit models
+  audit="$(gateway_pi_models_audit_json)" || return 1
+  models="$(jq -c .models <<<"$audit")" || return 1
   _gateway_locked_publish "$f" _gateway_pi_publish "$models"
+}
+
+# Narrow operator action: no service/config/account refresh or auth minting;
+# no other client registry or native session histories are touched.
+_gateway_pi_models_cmd() {
+  local refresh=0 json=0 arg audit models
+  for arg in "$@"; do
+    case "$arg" in
+      --refresh) refresh=1 ;;
+      --json) json=1 ;;
+      --list) ;;
+      *) printf 'cel gateway pi-models: unknown argument %s\n' "$arg" >&2; return 2 ;;
+    esac
+  done
+  audit="$(gateway_pi_models_audit_json)" || return 1
+  if [ "$refresh" = 1 ]; then
+    models="$(jq -c .models <<<"$audit")" || return 1
+    GATEWAY_PI_WRITE=metadata _gateway_locked_publish "$(gateway_pi_dir)/models.json" _gateway_pi_publish "$models" || return 1
+  fi
+  if [ "$json" = 1 ]; then
+    jq --argjson refreshed "$([ "$refresh" = 1 ] && printf true || printf false)" '. + {refreshed:$refreshed}' <<<"$audit"
+  else
+    [ "$refresh" = 0 ] || printf 'Pi gateway model metadata refreshed; existing provider settings and legacy entries preserved.\n'
+    jq -r '.models[] | "\(.api)  \(.id)  context=\(.contextWindow // "client default") output=\(.maxTokens // "client default") reasoning=\(if has("reasoning") then .reasoning else "client default" end)"' <<<"$audit"
+    jq -r '.defaults[] | "defaults: \(.id) — \(.reason)"' <<<"$audit"
+    jq -r '.omitted[] | "omitted: \(.id) — \(.reason)"' <<<"$audit"
+  fi
 }
 
 # The read-merge-rename of the shared models.json, run UNDER the file lock with
@@ -558,45 +587,45 @@ _gateway_pi_publish() { # <real path> <models json>
   # refresh (cel gateway refresh / cel update, GATEWAY_PI_WRITE=refresh) lets the
   # catalog's fields win - and even then nothing is removed. A write that would
   # change nothing is skipped entirely: no temp file, no rename, no mtime churn.
-  local refresh=false; [ "${GATEWAY_PI_WRITE:-launch}" = refresh ] && refresh=true
-  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" --argjson refresh "$refresh" '
+  local refresh=false metadata=false
+  case "${GATEWAY_PI_WRITE:-launch}" in refresh) refresh=true ;; metadata) refresh=true; metadata=true ;; esac
+  jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" --argjson refresh "$refresh" --argjson metadata "$metadata" '
     def mm($old; $new):
       [ $new[] | . as $x | (($old // []) | map(select(.id == $x.id)) | .[0]) as $e
-        | if $e == null then $x elif $refresh then $e + $x else $x + $e end ]
+        | if $e == null then $x
+          elif $refresh and ($x | has("contextWindow")) then ($e | del(.name,.reasoning,.input,.contextWindow,.maxTokens,.thinkingLevelMap,.compat)) + $x
+          elif $refresh then $e + $x
+          else $x + $e end ]
       + [ ($old // [])[] | select(.id as $i | ($new | map(.id) | index($i)) | not) ];
-    # Provider-level fields follow the same rule as models: a launch keeps what is
-    # already there (headers, compat, extra keys an owner or repair set) and only
-    # fills in what is missing; a refresh lets the plane values win.
+    # Metadata refresh changes models ONLY: all provider fields, including absent
+    # resolvers, custom headers and base URLs, remain exactly as configured.
     def pblk($old; $new):
-      (if $refresh then ($old // {}) + ($new | del(.models)) else ($new | del(.models)) + ($old // {}) end)
-      + { headers: (if $refresh then (($old.headers // {}) + $new.headers) else ($new.headers + ($old.headers // {})) end),
-          models: $new.models };
-    ([$models[] | select(.codex == true) | del(.codex)]) as $codex
-    | ([$models[] | select(.codex != true) | select(.id | test("^claude"))]) as $claude
-    | ([$models[] | select(.codex != true) | select(.id | test("^claude") | not)]) as $rest
+      if $metadata and $old != null then $old + {models:$new.models}
+      else
+        (if $refresh then ($old // {}) + ($new | del(.models)) else ($new | del(.models)) + ($old // {}) end)
+        + { headers: (if $refresh then (($old.headers // {}) + $new.headers) else ($new.headers + ($old.headers // {})) end),
+            models: $new.models }
+      end;
+    ([$models[] | select(.api == "openai-responses") | del(.api)]) as $codex
+    | ([$models[] | select(.api == "anthropic-messages") | del(.api)]) as $claude
     | (.providers // {}) as $cur
-    | .providers = ($cur + {
-        ompgw: pblk($cur.ompgw; {
-          name: "cel gateway",
-          baseUrl: $url,
-          apiKey: "$OMP_GATEWAY_TOKEN",
-          api: "openai-completions",
-          headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: mm($cur.ompgw.models; $rest) }),
+    | .providers = ($cur
+      + (if ($codex | length) > 0 then {
         "ompgw-codex": pblk($cur["ompgw-codex"]; {
           name: "cel gateway (codex, responses)",
           baseUrl: $url,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "openai-responses",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: mm($cur["ompgw-codex"].models; $codex) }),
+          models: mm($cur["ompgw-codex"].models; $codex) }) } else {} end)
+      + (if ($claude | length) > 0 then {
         ($claude_provider): pblk($cur[$claude_provider]; {
           name: "cel gateway (anthropic)",
           baseUrl: $root,
           apiKey: "$OMP_GATEWAY_TOKEN",
           api: "anthropic-messages",
           headers: { "x-session-id": "$CEL_SESSION_ID" },
-          models: mm($cur[$claude_provider].models; $claude) }) })' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+          models: mm($cur[$claude_provider].models; $claude) }) } else {} end))' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
   if [ "$(jq -cS . "$tmp")" = "$(jq -cS . "$f")" ]; then rm -f "$tmp"; return 0; fi
   chmod --reference="$f" "$tmp" 2>/dev/null || true
   mv "$tmp" "$f"
@@ -977,6 +1006,10 @@ cel gateway - several subscriptions behind one loopback door
                                      service, mint the api-key
   cel gateway refresh                re-apply config, service and pi/OMP model
                                      registrations (cel update runs this)
+  cel gateway pi-models [--list] [--json] [--refresh]
+                                     audit published Pi chat models and defaults;
+                                     --refresh changes model metadata only,
+                                     preserving provider settings and legacy IDs
   cel gateway status [--json]        the door, and one row per account
   cel gateway login <provider>       sign another subscription in
                                      --no-browser: device flow, headless box
@@ -1067,6 +1100,7 @@ cmd_gateway() {
   local verb="${1:-status}"; shift || true
   case "$verb" in
     install) _gateway_install "$@" ;;
+    pi-models) _gateway_pi_models_cmd "$@" ;;
     status)
       if [ "${1:-}" = "--json" ]; then gateway_status_json; else _gateway_status_text; fi ;;
     login)

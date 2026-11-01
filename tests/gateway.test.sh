@@ -46,6 +46,15 @@ _gw_setup() {
   export CEL_SERVICES_D="$T/services.d"
   export CEL_SERVICES_STATE="$T/services-state"
   export CEL_PI_AGENT_DIR="$T/pi"
+  export CEL_PI_CODEX_CATALOG_FILE="$T/pi-catalog.json"
+  jq -n '
+    {off:null,minimal:null,low:"low",medium:"medium",high:"high",xhigh:"xhigh",max:"max"} as $map |
+    {supportsMidConvoEffort:true,supportsMidConvoSystemMessages:true,supportsMidConvoToolChanges:true,
+     forceAdaptiveThinking:true,supportsTemperature:false,supportsStrictTools:true} as $compat |
+    [{id:"gpt-5.5",name:"GPT fixture",api:"openai-responses",contextWindow:272000,maxTokens:128000,reasoning:true,input:["text","image"],thinkingLevelMap:{medium:"medium"}},
+     (["claude-sonnet-4-6","claude-opus-5-5","claude-sonnet-5-5"][] |
+       {id:.,name:.,api:"anthropic-messages",contextWindow:1000000,maxTokens:128000,reasoning:true,input:["text","image"],thinkingLevelMap:$map,compat:$compat})]
+  ' >"$CEL_PI_CODEX_CATALOG_FILE"
   unset CEL_GATEWAY_STUB
   cat >"$T/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -93,7 +102,7 @@ EOF
 }
 _gw_teardown() {
   rm -rf "$T"
-  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_PI_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE
+  unset CEL_CONFIG_FILE CEL_GATEWAY_STATE CEL_PI_AGENT_DIR CEL_SERVICES_D CEL_SERVICES_STATE CEL_PI_CODEX_CATALOG_FILE
 }
 
 # --- the config file ------------------------------------------------------
@@ -370,9 +379,7 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   cmd_gateway install --no-start >/dev/null
   gateway_pi_models_write "$T/pi/models.json"
   local f="$T/pi/models.json"
-  assert_eq "$(jq -r '.providers.ompgw.baseUrl' "$f")" "http://127.0.0.1:$(gateway_port)/v1"
-  assert_eq "$(jq -r '.providers.ompgw.headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
-  assert_eq "$(jq -r '.providers.ompgw.api' "$f")" openai-completions
+  assert_eq "$(jq -r '.providers | has("ompgw")' "$f")" false
   # AH-261018: Codex ids ride the Responses provider, never chat completions.
   assert_eq "$(jq -r '.providers["ompgw-codex"].api' "$f")" openai-responses
   assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].id' "$f")" "gpt-5.5"
@@ -385,7 +392,7 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   assert_eq "$(jq -r '.providers["ompgw-claude"].headers["x-session-id"]' "$f")" '$CEL_SESSION_ID'
   # The api-key is a VARIABLE NAME: pi expands it in the pane, so no secret
   # is ever in this file.
-  assert_eq "$(jq -r '.providers.ompgw.apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
+  assert_eq "$(jq -r '.providers["ompgw-codex"].apiKey' "$f")" '$OMP_GATEWAY_TOKEN'
   local key; key="$(cat "$(gateway_state_dir)/api-key")"
   ! grep -q "$key" "$f" || { echo "the api-key was written into models.json"; _gw_teardown; return 1; }
   _gw_teardown
@@ -419,16 +426,14 @@ test_pi_models_use_canonical_opus_thinking_capabilities_only() {
   assert_eq "$(jq -r "$opus55 | .compat.supportsMidConvoToolChanges" "$f")" true
   assert_eq "$(jq -r "$opus55 | .compat.supportsTemperature" "$f")" false
   assert_eq "$(jq -r "$opus55 | .compat.supportsStrictTools" "$f")" true
-  assert_eq "$(jq -r "$other_opus | has(\"reasoning\")" "$f")" false
-  assert_eq "$(jq -r "$unknown | has(\"reasoning\")" "$f")" false
-  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | has("reasoning")' "$f")" false
+  assert_eq "$(jq -r "$other_opus | has(\"reasoning\") or has(\"contextWindow\")" "$f")" false
+  assert_eq "$(jq -r "$unknown | has(\"reasoning\") or has(\"contextWindow\")" "$f")" false
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | .reasoning' "$f")" true
   _gw_teardown
 }
 
-# The live gateway publishes bare ids (no context_length/max_output_tokens),
-# so the generic 128000/8192 fallback must never win for a 5.5 Claude model:
-# Opus and Sonnet 5.5 carry their native window, output, input and adaptive
-# thinking. Unknown claude ids stay on the generic fallback.
+# Bare chat IDs always remain available. Exact entries obtain known capabilities;
+# unknown published IDs use Pi defaults without guessed or sibling-model caps.
 test_pi_models_project_native_5_5_capabilities_from_bare_ids() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
@@ -444,10 +449,115 @@ test_pi_models_project_native_5_5_capabilities_from_bare_ids() {
     assert_eq "$(jq -r "$q | .thinkingLevelMap.medium" "$f")" medium
     assert_eq "$(jq -r "$q | .compat.forceAdaptiveThinking" "$f")" true
   done
-  local u='.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")'
-  assert_eq "$(jq -r "$u | .contextWindow" "$f")" 128000
-  assert_eq "$(jq -r "$u | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -c '.providers["ompgw-claude"].models[] | select(.id == "claude-custom-unknown")' "$f")" '{"id":"claude-custom-unknown"}'
   unset GW_MODELS
+  _gw_teardown
+}
+
+test_pi_models_audit_exact_published_ids_and_explicit_omissions() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-5-5"},{"id":"claude-sonnet-5-5"},{"id":"gpt-5.5"},{"id":"unsupported-chat"},{"id":"omp/claude-sonnet-5-5"},{"id":"gpt-image-1"},{"id":"claude-retired"}]}'
+  local out
+  out="$(cmd_gateway pi-models --list --json)" || { _gw_teardown; return 1; }
+  assert_eq "$(jq -r '[.models[].id] | join(",")' <<<"$out")" 'claude-sonnet-5-5,gpt-5.5,claude-retired'
+  assert_eq "$(jq -r '.omitted | length' <<<"$out")" 3
+  assert_eq "$(jq -r '[.defaults[].id] | join(",")' <<<"$out")" claude-retired
+  assert_eq "$(jq -r '.omitted[] | select(.id == "omp/claude-sonnet-5-5") | .reason' <<<"$out")" 'scoped or aliased model ID'
+  assert_eq "$(jq -r '.refreshed' <<<"$out")" false
+  [ ! -e "$T/pi/models.json" ] && [ ! -e "$T/pi/models.json.lock" ] || { echo 'audit wrote the registry'; _gw_teardown; return 1; }
+  # A single published exact entry must not expand into its catalog siblings.
+  export GW_MODELS='{"data":[{"id":"claude-sonnet-5-5"}]}'
+  out="$(cmd_gateway pi-models --refresh --json)" || { _gw_teardown; return 1; }
+  assert_eq "$(jq -r '.providers | keys | join(",")' "$T/pi/models.json")" ompgw-claude
+  assert_eq "$(jq -r '[.providers["ompgw-claude"].models[].id] | join(",")' "$T/pi/models.json")" claude-sonnet-5-5
+  assert_eq "$(jq -r '.refreshed' <<<"$out")" true
+  unset GW_MODELS
+  _gw_teardown
+}
+
+test_pi_models_refresh_changes_metadata_only_and_launch_cannot_undo_it() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  cat >"$T/pi/models.json" <<'EOF'
+{"settings":{"keep":true},"providers":{
+ "ompgw-codex":{"name":"owner codex","baseUrl":"https://owner.invalid/responses","api":"openai-responses","apiKey":"!private-key-command","headers":{"x-session-id":"!private-session-command","x-owner":"$OWNER_HEADER"},"compat":{"keep":1},"extra":{"keep":2},"models":[{"id":"gpt-5.5","contextWindow":128000,"maxTokens":8192,"reasoning":false,"ownerField":7},{"id":"gpt-retired","contextWindow":17}]},
+ "ompgw-claude":{"name":"owner claude","baseUrl":"https://owner.invalid/root","api":"anthropic-messages","apiKey":"$OWNER_KEY","headers":{"x-session-id":"$OWNER_SESSION"},"models":[{"id":"claude-sonnet-4-6","contextWindow":128000,"maxTokens":8192},{"id":"claude-retired","ownerField":9}]},
+ "ompgw":{"baseUrl":"https://legacy.invalid","models":[{"id":"legacy-unknown"}]},
+ "native":{"baseUrl":"https://native.invalid","apiKey":"!native-command","models":[{"id":"native-model","contextWindow":123}]}}}
+EOF
+  local before out
+  before="$(jq -cS 'del(.providers["ompgw-codex"].models,.providers["ompgw-claude"].models)' "$T/pi/models.json")"
+  mkdir -p "$T/pi/sessions"; printf 'native-session-sentinel' >"$T/pi/sessions/retained.jsonl"
+  gateway_refresh() { echo 'broad refresh called' >&2; return 1; }
+  _gateway_api_key() { echo 'mint helper called' >&2; return 1; }
+  out="$(cmd_gateway pi-models --refresh --json)" || { _gw_teardown; return 1; }
+  assert_eq "$(jq -cS 'del(.providers["ompgw-codex"].models,.providers["ompgw-claude"].models)' "$T/pi/models.json")" "$before"
+  assert_eq "$(jq -c '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | [.contextWindow,.maxTokens,.reasoning,.input,.ownerField]' "$T/pi/models.json")" '[272000,128000,true,["text","image"],7]'
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[] | select(.id == "claude-sonnet-4-6") | .contextWindow' "$T/pi/models.json")" 1000000
+  assert_eq "$(jq -r '.providers["ompgw-claude"].models[] | select(.id == "claude-retired") | .ownerField' "$T/pi/models.json")" 9
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "gpt-retired") | .contextWindow' "$T/pi/models.json")" 17
+  assert_eq "$(cat "$T/pi/sessions/retained.jsonl")" native-session-sentinel
+  local stamp; stamp="$(stat -c %i%Y "$T/pi/models.json")"
+  gateway_pi_models_write "$T/pi/models.json" || { _gw_teardown; return 1; }
+  assert_eq "$(stat -c %i%Y "$T/pi/models.json")" "$stamp"
+  assert_eq "$(jq -cS 'del(.providers["ompgw-codex"].models,.providers["ompgw-claude"].models)' "$T/pi/models.json")" "$before"
+  _gw_teardown
+}
+
+test_pi_models_default_launch_preserves_owner_model_metadata() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  printf '%s' '{"providers":{"ompgw-codex":{"api":"openai-responses","models":[{"id":"gpt-5.5","name":"owner","contextWindow":777,"maxTokens":333,"thinkingLevelMap":{"medium":"owner"},"compat":{"owner":true}},{"id":"legacy-unknown"}]}}}' >"$T/pi/models.json"
+  gateway_pi_models_write "$T/pi/models.json" || { _gw_teardown; return 1; }
+  # Launch may fill missing metadata, but owner-provided fields always win.
+  assert_eq "$(jq -c '.providers["ompgw-codex"].models[] | select(.id == "gpt-5.5") | [.name,.contextWindow,.maxTokens,.thinkingLevelMap,.compat]' "$T/pi/models.json")" '["owner",777,333,{"medium":"owner"},{"owner":true}]'
+  assert_eq "$(jq -r '.providers["ompgw-codex"].models[] | select(.id == "legacy-unknown") | .id' "$T/pi/models.json")" legacy-unknown
+  _gw_teardown
+}
+
+test_pi_models_missing_or_nonprivate_auth_fails_without_mint_or_files() {
+  _gw_setup
+  _gateway_api_key() { printf mint-called >>"$T/mint-called"; return 1; }
+  local out
+  out="$(cmd_gateway pi-models --refresh --json 2>&1)" && { echo 'missing auth succeeded'; _gw_teardown; return 1; }
+  assert_contains "$out" 'existing private gateway api-key required'
+  [ ! -e "$T/state" ] && [ ! -e "$T/pi/models.json" ] && [ ! -e "$T/pi/models.json.lock" ] && [ ! -e "$T/mint-called" ] && [ ! -e "$T/curl.argv" ] || { echo 'missing auth mutated state or contacted gateway'; _gw_teardown; return 1; }
+  mkdir -p "$T/state"; printf 'fixture-existing-key' >"$T/state/api-key"; chmod 644 "$T/state/api-key"
+  out="$(cmd_gateway pi-models --refresh --json 2>&1)" && { echo 'public key accepted'; _gw_teardown; return 1; }
+  [ ! -e "$T/pi/models.json" ] && [ ! -e "$T/curl.argv" ] && [ ! -e "$T/mint-called" ] || { _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+test_pi_models_get_uses_existing_key_on_stdin_never_argv_or_output() {
+  _gw_setup
+  mkdir -p "$T/state"; printf 'fixture-existing-key' >"$T/state/api-key"; chmod 600 "$T/state/api-key"
+  printf 'gateway:\n  port: 49221\n' >"$CEL_CONFIG_FILE"
+  cat >"$T/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$T/curl.argv"
+cat >"$T/curl.headers"
+printf '%s' '{"data":[{"id":"gpt-5.5"}]}'
+EOF
+  _gateway_api_key() { printf mint-called >>"$T/mint-called"; return 1; }
+  local out; out="$(cmd_gateway pi-models --json)" || { _gw_teardown; return 1; }
+  assert_eq "$(cat "$T/curl.headers")" 'Authorization: Bearer fixture-existing-key'
+  assert_contains "$(cat "$T/curl.argv")" 'http://127.0.0.1:49221/v1/models -H @-'
+  case "$out$(cat "$T/curl.argv")" in *fixture-existing-key*) echo 'key leaked'; _gw_teardown; return 1 ;; esac
+  assert_eq "$(cat "$T/state/api-key")" fixture-existing-key
+  [ ! -e "$T/mint-called" ] && [ ! -e "$T/pi/models.json" ] || { _gw_teardown; return 1; }
+  _gw_teardown
+}
+
+test_pi_models_catalog_failure_does_not_block_published_chat_availability() {
+  _gw_setup
+  mkdir -p "$T/state"; printf 'fixture-existing-key' >"$T/state/api-key"; chmod 600 "$T/state/api-key"
+  gateway_pi_catalog_json() { printf 'catalog source conflict\n' >&2; return 1; }
+  local out; out="$(cmd_gateway pi-models --refresh --json)" || { _gw_teardown; return 1; }
+  assert_eq "$(jq -r '.models | length' <<<"$out")" 5
+  assert_eq "$(jq -r '.defaults | length' <<<"$out")" 5
+  assert_eq "$(jq -r '[.providers[].models[] | has("contextWindow") or has("reasoning")] | any' "$T/pi/models.json")" false
+  assert_eq "$(cat "$T/state/api-key")" fixture-existing-key
   _gw_teardown
 }
 

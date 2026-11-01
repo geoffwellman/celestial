@@ -41,9 +41,8 @@ test_pi_codex_catalog_discovers_versioned_ids_and_leaves_claude_alone() {
   _gwc_teardown
 }
 
-# HONEST CAPABILITY METADATA: a field is written only when the gateway's
-# catalog states it. An id with no metadata gets no `reasoning`, no thinking
-# map and no invented limits beyond the loader's own defaults.
+# Exact catalog entries supply capability metadata; missing enrichment never
+# blocks a published chat ID or lends it another model's capabilities.
 test_pi_codex_metadata_is_only_what_the_catalog_states() {
   _gwc_setup
   gateway_pi_models_write "$T/pi/models.json" || { _gwc_teardown; return 1; }
@@ -52,9 +51,9 @@ test_pi_codex_metadata_is_only_what_the_catalog_states() {
   assert_eq "$(jq -r "$m | select(.id==\"gpt-5.5\") | .contextWindow" "$f")" 272000
   assert_eq "$(jq -r "$m | select(.id==\"gpt-5.5\") | .reasoning" "$f")" true
   assert_eq "$(jq -r "$m | select(.id==\"gpt-5.5\") | .thinkingLevelMap | keys | join(\",\")" "$f")" "high,low,medium"
-  assert_eq "$(jq -r "$m | select(.id==\"gpt-5.6-2026-10-01\") | has(\"reasoning\")" "$f")" false
+  assert_eq "$(jq -r "$m | select(.id==\"gpt-5.6-2026-10-01\") | .reasoning" "$f")" false
   assert_eq "$(jq -r "$m | select(.id==\"gpt-5.6-2026-10-01\") | has(\"thinkingLevelMap\")" "$f")" false
-  assert_eq "$(jq -r "$m | select(.id==\"gpt-5.6-2026-10-01\") | has(\"contextWindow\")" "$f")" false
+  assert_eq "$(jq -r "$m | select(.id==\"gpt-5.6-2026-10-01\") | .contextWindow" "$f")" 1000000
   _gwc_teardown
 }
 
@@ -62,13 +61,13 @@ test_pi_codex_uses_exact_published_native_capabilities_without_family_guesses() 
   _gwc_setup
   export CEL_PI_CODEX_CATALOG_FILE="$T/pi-catalog.json"
   cat > "$CEL_PI_CODEX_CATALOG_FILE" <<'EOS'
-[{"id":"gpt-6.1-sol","name":"Sol 6.1","contextWindow":500000,"maxTokens":128000,"input":["text","image"],"reasoning":true,"thinkingLevelMap":{"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},"compat":{"supportsMidConvoSystemMessages":true}}]
+[{"id":"gpt-6.1-sol","name":"Sol 6.1","api":"openai-responses","contextWindow":500000,"maxTokens":128000,"input":["text","image"],"reasoning":true,"thinkingLevelMap":{"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},"compat":{"supportsMidConvoSystemMessages":true}}]
 EOS
-  gateway_models_json() { printf '%s' '{"data":[{"id":"gpt-6.1-sol"},{"id":"gpt-6.1-sol-unpublished"}]}'; }
+  gateway_models_json_existing() { printf '%s' '{"data":[{"id":"gpt-6.1-sol"},{"id":"gpt-6.1-sol-unpublished"}]}'; }
   gateway_pi_models_write "$T/pi/models.json" || { _gwc_teardown; return 1; }
   local f="$T/pi/models.json" m='.providers["ompgw-codex"].models[]'
   assert_eq "$(jq -c "$m | select(.id==\"gpt-6.1-sol\") | [.contextWindow,.maxTokens,.input,.reasoning,.thinkingLevelMap.medium,.thinkingLevelMap.off,.compat.supportsMidConvoSystemMessages]" "$f")" '[500000,128000,["text","image"],true,"medium",null,true]'
-  assert_eq "$(jq -r "$m | select(.id==\"gpt-6.1-sol-unpublished\") | has(\"reasoning\") or has(\"contextWindow\")" "$f")" false
+  assert_eq "$(jq -c '.providers["ompgw-codex"].models[] | select(.id=="gpt-6.1-sol-unpublished")' "$f")" '{"id":"gpt-6.1-sol-unpublished"}'
   unset CEL_PI_CODEX_CATALOG_FILE
   _gwc_teardown
 }
@@ -308,6 +307,9 @@ EOS
   chmod +x "$T/gwstub-n"; export CEL_GATEWAY_STUB="$T/gwstub-n"
   local n pids=""
   printf '[{"id":"claude-w1"},{"id":"claude-w2"},{"id":"claude-w3"},{"id":"claude-w4"},{"id":"claude-w5"},{"id":"claude-w6"}]' >"$T/cat6.json"
+  jq -n '[range(1;8) | tostring as $n |
+    {id:("claude-w"+$n),api:"anthropic-messages",name:("Claude "+$n),contextWindow:1000000,maxTokens:128000,reasoning:true,input:["text","image"]},
+    {id:("gpt-w"+$n),api:"openai-responses",name:("GPT "+$n),contextWindow:500000,maxTokens:128000,reasoning:true,input:["text","image"]}]' >"$CEL_PI_CODEX_CATALOG_FILE"
   for n in 1 2 3 4 5 6; do
     ( export GWC_N=$n; gateway_pi_models_write "$T/pi/models.json"; gateway_omp_models_write "$T/omp/models.yml" "$T/cat6.json" ) &
     pids="$pids $!"
