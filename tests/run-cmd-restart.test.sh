@@ -212,6 +212,26 @@ test_session_resumers_ignore_processes_that_are_not_agents() {
   orch_stub_teardown
 }
 
+# A launcher and the agent it starts both carry --session (OpenCode's TUI
+# child): one holder. Two unrelated processes on the same session: two.
+test_session_resumers_count_a_child_of_the_holder_once_but_separate_holders_twice() {
+  orch_stub_setup omp
+  _resumer 4300 w8:p1 "$T/old.jsonl"; printf 'PPid:\t50\n' > "$PROC/4300/status"
+  _resumer 4301 w8:p1 "$T/old.jsonl"; printf 'PPid:\t4300\n' > "$PROC/4301/status"
+  local out; out="$(run_session_resumers)"
+  assert_eq "$(printf '%s\n' "$out" | grep -c "$T/old.jsonl")" 1
+  assert_contains "$out" "4300"
+  _resumer 4400 w9:p1 "$T/old.jsonl"; printf 'PPid:\t60\n' > "$PROC/4400/status"
+  out="$(run_session_resumers)"
+  assert_eq "$(printf '%s\n' "$out" | grep -c "$T/old.jsonl")" 2
+  # a descendant of the holder in ANOTHER pane is a second writer
+  _resumer 4302 w7:p2 "$T/old.jsonl"; printf 'PPid:\t4301\n' > "$PROC/4302/status"
+  out="$(run_session_resumers)"
+  assert_eq "$(printf '%s\n' "$out" | grep -c "$T/old.jsonl")" 3
+  assert_contains "$out" "4302"
+  orch_stub_teardown
+}
+
 # Sourcery on #128: two launches racing before either agent is in /proc. The
 # first claims the session; the second, inside the claim window, is refused.
 test_session_claim_refuses_a_second_launch_inside_the_window() {
