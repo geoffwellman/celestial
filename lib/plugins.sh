@@ -3,17 +3,20 @@
 [ -z "${_CEL_PLUGINS:-}" ] || return 0
 _CEL_PLUGINS=1
 . "${BASH_SOURCE[0]%/*}/externals.sh"
+. "${BASH_SOURCE[0]%/*}/plugins-pi.sh"
+. "${BASH_SOURCE[0]%/*}/plugins-opencode.sh"
 
 _plugins_usage() {
   cat <<'EOS'
 cel plugins - optional full-bundle harness integrations
 
   cel plugins list
-  cel plugins install egm --runtime omp|claude|codex [--dry-run]
+  cel plugins install egm --runtime omp|claude|codex|pi|opencode [--dry-run]
 
 Elephant-Goldfish Model is an opt-in skills/persona plugin, not an LLM.
 Installation retains its complete agents/, skills/ and resources/ bundle.
-Pi and OpenCode are not supported by upstream EGM. No runtime is restarted.
+Upstream EGM ships no Pi/OpenCode manifest; Celestial adapters install the same
+full bundle natively there. No runtime is restarted.
 EOS
 }
 
@@ -66,7 +69,7 @@ _plugins_install() {
       *) c_err "unknown plugin option: $1"; return 2 ;;
     esac
   done
-  case "$runtime" in omp|claude|codex) ;; *) c_err 'choose an upstream-supported runtime: omp, claude or codex (not Pi/OpenCode)'; return 2 ;; esac
+  case "$runtime" in omp|claude|codex|pi|opencode) ;; *) c_err 'choose a runtime: omp, claude, codex, pi or opencode'; return 2 ;; esac
   row="$(_plugins_rows)" || return
   row="$(printf '%s\n' "$row" | while IFS=$'\t' read -r kind candidate ref source origin; do
     [ "$candidate" != "$name" ] || printf '%s\t%s\t%s\t%s\t%s\n' "$kind" "$candidate" "$ref" "$source" "$origin"
@@ -102,6 +105,8 @@ _plugins_install() {
       codex)
         codex plugin marketplace add "$root" || return
         codex plugin add "$name@$market" || return ;;
+      pi) _plugins_pi_install "$name" "$source" "$ref" "$bundle" || return ;;
+      opencode) _plugins_opencode_install "$name" "$bundle" || return ;;
     esac
   c_ok "$name installed for $runtime at $ref; start a new session to load it (nothing restarted)"
 }
@@ -115,7 +120,7 @@ cmd_plugins() {
       rows="$(_plugins_rows)" || return
       while IFS=$'\t' read -r kind name ref source origin; do
         [ -n "$name" ] || continue
-        printf '%s\t%s\t%s\tomp,claude,codex\n' "$name" "$source" "$ref"
+        printf '%s\t%s\t%s\tomp,claude,codex,pi,opencode\n' "$name" "$source" "$ref"
       done <<< "$rows" ;;
     install) _plugins_install "$@" ;;
     help|-h|--help) _plugins_usage ;;

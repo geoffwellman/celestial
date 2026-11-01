@@ -55,7 +55,7 @@ cel - the celestial plane
 
   cel version                   installed build: version+commits, sha, branch
   cel setup [--agents a,b|all]  install tools + agents, link core, install externals
-  cel plugins list|install      opt-in pinned full plugins (EGM: omp/claude/codex)
+  cel plugins list|install      opt-in pinned full plugins (EGM: omp/claude/codex/pi/opencode)
   cel doctor                    diagnose this box (non-zero on problems)
   cel update                    move to the newest release, re-link, re-render
                                 and name orchestrators on an older launch

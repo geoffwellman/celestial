@@ -1582,25 +1582,39 @@ independent PR review/landing policy.
 cel plugins list
 cel plugins install egm --runtime omp --dry-run
 cel plugins install egm --runtime omp
-# Other upstream-supported Celestial runtimes:
+# Other supported Celestial runtimes:
 cel plugins install egm --runtime claude
 cel plugins install egm --runtime codex
+cel plugins install egm --runtime pi
+cel plugins install egm --runtime opencode
 ```
 
-Choose only the runtime you want. This never runs as part of default setup,
-workspace sync or update, and never restarts an existing agent. Start a new
-session to load the plugin. Select its discovered skills in Claude Code or
-Codex; OMP exposes commands such as `/skill:egm-brainstorm`, `/skill:egm-draft`
-and `/skill:egm-review`. Goldfish reviews require actual fresh-context
-subagents; installation/discovery alone does not prove a completed review.
+All five runtimes are supported: `cel plugins install egm --runtime
+omp|claude|codex|pi|opencode [--dry-run]`. Choose only the runtime you want.
+This never runs as part of default setup, workspace sync or update, and never
+restarts an existing agent; new sessions load the plugin. Select its
+discovered skills in Claude Code or Codex; OMP exposes commands such as
+`/skill:egm-brainstorm`, `/skill:egm-draft` and `/skill:egm-review`. Goldfish
+reviews require actual fresh-context subagents; installation/discovery alone
+does not prove a completed review.
+
+- **Pi:** the pinned bundle is registered as one Pi package (`pi install`
+  with the local path), so skills load in place. Pi has no native subagents,
+  so the fresh-context review skills (`egm-review`, `egm-review-loop`,
+  `egm-brainstorm`) stop and say so unless a Pi subagent extension is
+  installed.
+- **OpenCode:** the global config gains a `skills` entry pointing into the
+  pinned bundle and the 9 reviewer personas as `subagent` agents. This is
+  compatible with Celestial's scoped launch; the default agent is unchanged.
+  A global config written as JSON with comments, or one with conflicting
+  names, is refused and the manual lines to add are printed instead.
 
 [`optional-plugins.yaml`](optional-plugins.yaml) pins the full upstream Git
 revision. Celestial verifies that checkout, preserves the bundled `skills/`,
-`agents/` and `resources/document_standards/`, and registers an immutable
-revision-named local marketplace with the selected native plugin manager.
-Edited cached bundles are preserved and refused rather than reset. Skills-only
-copying is deliberately unsupported. Upstream does not currently support Pi or
-OpenCode; those runtime selections fail without changing plugin state.
+`agents/` and `resources/document_standards/`, and registers it with the
+selected runtime (a revision-named local marketplace for OMP, Claude Code and
+Codex). Edited cached bundles are preserved and refused rather than reset.
+Skills-only copying is deliberately unsupported.
 
 
 ## Development and security
