@@ -1,1 +1,3 @@
+### Added
+
 Expose every gateway-advertised Claude/Codex chat model in scoped OpenCode configurations without making capability metadata an availability gate. Add `cel gateway opencode-models --sync --workspace NAME --agent ALIAS [--dry-run]` with existing-key-only discovery, canonical private configuration validation, locked publication and private backups. Preserve default selections, authentication/route references and native conversation identity; admit eligible owner-selected models and variants on same-session resume. Sync reports that coordinated activation is required and never restarts a running agent. Create new scope directories privately so canonical resume and direct Rex native-session capture work under permissive ambient umasks.
