@@ -208,6 +208,88 @@ test_opencode_existing_native_resume_uses_private_server_and_scoped_selection() 
   _ocl_down
 }
 
+_ocl_two_model_grant() {
+  local role="$T/.cel/opencode/widget-orch/role-orchestrator.md"
+  opencode_agent_args orchestrator 'original scoped role' 0 "$role" "${role%.md}.opencode.json" http://127.0.0.1:8317/v1 || return 1
+  node --input-type=module - "$role" "$CEL_ROOT/tools/opencode/plugin" <<'JS' | opencode_write_config "${role%.md}.opencode.json"
+import { pathToFileURL } from 'node:url';
+const { resolveCatalog } = await import(pathToFileURL(process.env.CEL_ROOT + '/tools/opencode/catalog.mjs'));
+const { scopedConfigInput } = await import(pathToFileURL(process.env.CEL_ROOT + '/tools/opencode/config.mjs'));
+const sol = { id: 'gpt-6.1-sol', name: 'Sol 6.1', api: 'openai-responses', contextWindow: 500000, maxTokens: 128000,
+  input: ['text', 'image'], reasoning: true, thinking: { mode: 'effort', efforts: ['medium'] } };
+const opus = { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', api: 'anthropic-messages', contextWindow: 1000000, maxTokens: 128000,
+  input: ['text', 'image'], reasoning: true, thinking: { mode: 'anthropic-adaptive', efforts: ['low', 'medium', 'high', 'max'] } };
+const source = (providerKey, model) => ({ providerKey, schemaVersion: 14, updatedAt: 100, authoritative: true, models: [model] });
+const catalog = resolveCatalog([sol.id, opus.id], [source('openai-codex:0.159.0', sol), source('anthropic', opus)]);
+console.log(JSON.stringify(scopedConfigInput({ agent: 'cel-orchestrator', roleFile: process.argv[2],
+  pluginFile: process.argv[3], baseURL: 'http://127.0.0.1:8317/v1', catalog })));
+JS
+}
+
+test_opencode_requested_selection_opus_uses_private_grant_and_same_native_session() {
+  _ocl_setup
+  _ocl_two_model_grant || { _ocl_down; return 1; }
+  _run_sessions_record "$T/repos/widget" ses_SavedNative
+  local out i config="$T/.cel/opencode/widget-orch/role-orchestrator.opencode.json" before
+  before="$(cat "$config")"
+  export CEL_FIXTURE_EVENTS="$T/native-events.jsonl"
+  if ! out="$(cd "$T" && CEL_FIXTURE_TUI_EXIT=1 cmd_run solo --product widget --session-backend rex --restart --model ompgw-claude/claude-opus-5-5 --thinking medium 2>&1)"; then
+    echo "$out"; _ocl_down; return 1
+  fi
+  for ((i=0;i<100;i++)); do [ -f "$CEL_REX_STATE/received-affinity" ] && break; sleep 0.1; done
+  assert_eq "$(jq -r .agent_session.value "$CEL_REX_STATE/widget-orch.json")" ses_SavedNative
+  assert_eq "$(cat "$CEL_REX_STATE/received-affinity")" widget-orch
+  assert_eq "$(cat "$config")" "$before"
+  assert_eq "$(jq -r '.model.providerID + "/" + .model.model + "/" + .model.variant' "$config")" ompgw-codex/gpt-6.1-sol/medium
+  case "$(cat "$CEL_REX_STATE/received-argv")" in *--model*|*--thinking*) echo 'selection leaked into unsupported native flags'; _ocl_down; return 1;; esac
+  # Admission grants the owner choice; native selection remains unchanged until
+  # the actual TUI picker, rather than silently rewriting native storage.
+  assert_eq "$(jq -sr 'map(select(.event == "tui"))[0].handoff.model | .providerID + "/" + .id + "/" + .variant' "$CEL_FIXTURE_EVENTS")" ompgw-codex/gpt-6.1-sol/medium
+  for ((i=0;i<100;i++)); do
+    jq -se 'any(.[]; .event == "server-stop")' "$CEL_FIXTURE_EVENTS" >/dev/null 2>&1 && break
+    sleep 0.05
+  done
+  jq -se 'any(.[]; .event == "server-stop")' "$CEL_FIXTURE_EVENTS" >/dev/null || { _ocl_down; return 1; }
+  _ocl_down
+}
+
+test_opencode_requested_selection_rejects_ungranted_tuple_before_role_or_launch_mutation() {
+  _ocl_setup
+  _ocl_two_model_grant || { _ocl_down; return 1; }
+  _run_sessions_record "$T/repos/widget" ses_SavedNative
+  local role="$T/.cel/opencode/widget-orch/role-orchestrator.md" model thinking out before
+  before="$(cat "$role")"
+  for model in ompgw-claude/claude-unknown ompgw-codex/omp/gpt-6.1-sol native/claude-opus-5-5 ompgw-claude/claude-opus-5-5; do
+    thinking=medium; [ "$model" != ompgw-claude/claude-opus-5-5 ] || thinking=invalid
+    if out="$(cd "$T" && cmd_run solo --product widget --session-backend rex --restart --model "$model" --thinking "$thinking" 2>&1)"; then
+      echo "ungranted requested selection admitted: $model $thinking"; _ocl_down; return 1
+    fi
+    assert_contains "$out" 'not granted by the private canonical scope'
+    assert_eq "$(cat "$role")" "$before"
+    assert_eq "$(_run_sessions_last "$T/repos/widget")" ses_SavedNative
+    [ ! -e "$CEL_REX_STATE/widget-orch.json" ] && [ ! -e "$CEL_REX_STATE/received-argv" ] || { _ocl_down; return 1; }
+  done
+  _ocl_down
+}
+
+test_opencode_requested_selection_legacy_grant_rejects_opus_and_keeps_sol_medium() {
+  _ocl_setup
+  local role="$T/.cel/opencode/widget-orch/role-orchestrator.md" out before
+  opencode_agent_args orchestrator 'original scoped role' 0 "$role" "${role%.md}.opencode.json" http://127.0.0.1:8317/v1 || { _ocl_down; return 1; }
+  before="$(cat "$role")"
+  if out="$(cd "$T" && cmd_run solo --product widget --session-backend rex --restart --model ompgw-claude/claude-opus-5-5 --thinking medium 2>&1)"; then
+    echo 'legacy Sol-only grant admitted Opus'; _ocl_down; return 1
+  fi
+  assert_contains "$out" 'not granted by the private canonical scope'
+  assert_eq "$(cat "$role")" "$before"
+  opencode_validate_requested_selection "$T" orchestrator "$role" "${role%.md}.opencode.json" ompgw-codex/gpt-6.1-sol medium || { _ocl_down; return 1; }
+  if opencode_validate_requested_selection "$T" orchestrator "$role" "${role%.md}.opencode.json" ompgw-codex/gpt-6.1-sol high >/dev/null 2>&1; then
+    echo 'legacy grant admitted another variant'; _ocl_down; return 1
+  fi
+  [ ! -e "$CEL_REX_STATE/widget-orch.json" ] && [ ! -e "$CEL_REX_STATE/received-argv" ] || { _ocl_down; return 1; }
+  _ocl_down
+}
+
 test_opencode_native_preflight_uses_launch_workspace_storage_overlay() {
   _ocl_setup
   local stored="$OPENCODE_DB"

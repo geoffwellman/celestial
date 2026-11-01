@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { validateConfig } from './config.mjs';
+import { catalogModels, selectionAllowed, validateNativeInventory, DEFAULT_SELECTION } from './model-contract.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const pluginDirectory = fileURLToPath(new URL('./plugin', import.meta.url));
@@ -48,6 +49,9 @@ export async function launch(binary, suppliedArgs, env = process.env) {
   const roleFile = env.CEL_ROLE_FILE;
   const baseURL = config?.providers?.['ompgw-codex']?.settings?.baseURL;
   validateConfig(config, { agent, roleFile, pluginFile: pluginDirectory, baseURL });
+  const catalog = config.plugins[0].options.catalog;
+  const allowedModels = catalogModels(catalog);
+  let selection = { ...DEFAULT_SELECTION };
   if (!binary || binary.startsWith('-')) throw new Error('missing executable');
   const args = [];
   let session;
@@ -133,11 +137,15 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     if (migration.status !== 'completed') throw new Error('native migration incomplete');
     if (session !== undefined) {
       const native = (await get(`/api/session/${encodeURIComponent(session)}`)).data;
-      if (native?.id !== session || native.parentID !== undefined || native.agent !== agent || native.location?.directory !== directory || native.model?.providerID !== 'ompgw-codex' || native.model?.id !== 'gpt-6.1-sol' || native.model?.variant !== 'medium') throw new Error('native resume identity');
+      if (native?.id !== session || native.parentID !== undefined || native.agent !== agent
+        || native.location?.directory !== directory || native.location.workspaceID !== undefined
+        || !selectionAllowed(catalog, native.model)) throw new Error('native resume identity');
+      selection = { providerID: native.model.providerID, id: native.model.id,
+        ...(native.model.variant === undefined ? {} : { variant: native.model.variant }) };
     }
     live();
     const handoff = { ...(session === undefined ? {} : { sessionID: session }), directory, agent,
-      model: { providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: 'medium' } };
+      model: selection };
     const pendingAdmission = path.join(privateDirectory, 'pending');
     await writeFile(pendingAdmission, JSON.stringify(handoff) + '\n', { mode: 0o600, flag: 'wx' });
     await chmod(pendingAdmission, 0o600);
@@ -148,11 +156,10 @@ export async function launch(binary, suppliedArgs, env = process.env) {
     while (true) {
       const models = await get('/api/model', true);
       if (models.location?.directory !== directory || !Array.isArray(models.data)) throw new Error('native model location');
-      if (models.data.some(model => model.providerID !== 'ompgw-codex' || model.id !== 'gpt-6.1-sol')) throw new Error('unscoped native model');
-      if (models.data.length > 1) throw new Error('ambiguous native model');
-      if (models.data.length === 1) {
-        const model = models.data[0];
-        if (model.enabled !== true || model.settings?.reasoningEffort !== 'medium' || model.variants?.length !== 1 || model.variants[0].id !== 'medium' || model.variants[0].settings?.reasoningEffort !== 'medium') throw new Error('native model settings');
+      if (models.data.some(model => !allowedModels.has(`${model.providerID}/${model.id}`))
+        || new Set(models.data.map(model => `${model.providerID}/${model.id}`)).size !== models.data.length) throw new Error('unscoped native model');
+      if (models.data.length === allowedModels.size) {
+        validateNativeInventory(models.data, catalog);
         break;
       }
       live(); await sleep(100);

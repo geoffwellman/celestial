@@ -4,11 +4,15 @@ import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import { catalogModels, nativeModel, scopedProviders, DEFAULT_SELECTION } from './model-contract.mjs';
 
 const SOL_LIMIT = Object.freeze({ context: 500000, output: 128000 });
 
-export function scopedConfigInput({ agent, roleFile, pluginFile, baseURL }) {
-  return { agent, roleFile, pluginFile, baseURL, modelID: 'gpt-6.1-sol', transport: 'gateway', route: '{env:CEL_SESSION_ID}', limit: { ...SOL_LIMIT } };
+export function scopedConfigInput({ agent, roleFile, pluginFile, baseURL, catalog }) {
+  const selected = catalog ? catalogModels(catalog).get(`${DEFAULT_SELECTION.providerID}/${DEFAULT_SELECTION.id}`) : null;
+  if (catalog && !selected) throw new Error('The selected default is not in the eligible catalog');
+  return { agent, roleFile, pluginFile, baseURL, modelID: DEFAULT_SELECTION.id, transport: 'gateway', route: '{env:CEL_SESSION_ID}',
+    limit: selected ? nativeModel(selected).limit : { ...SOL_LIMIT }, ...(catalog ? { catalog } : {}) };
 }
 
 export function buildConfig(input) {
@@ -18,9 +22,11 @@ export function buildConfig(input) {
   // ConfigPluginSource.scan removes configured files before module loading;
   // pluginFile retains the public input key but names a native package directory.
   if (!statSync(pluginFile).isDirectory()) throw new Error('OpenCode configured plugin must be a directory package');
-  if (modelID !== 'gpt-6.1-sol') throw new Error('This migration retains gpt-6.1-sol; model substitution is not allowed');
-  if (!isDeepStrictEqual(limit, SOL_LIMIT)) {
-    throw new Error('Supply evidenced Sol6.1 context/output limits: 500000/128000');
+  if (modelID !== DEFAULT_SELECTION.id) throw new Error('The selected default remains Sol 6.1; catalog sync does not select a model');
+  const selectedMetadata = input.catalog ? catalogModels(input.catalog).get(`${DEFAULT_SELECTION.providerID}/${modelID}`) : null;
+  const selectedLimit = selectedMetadata ? nativeModel(selectedMetadata).limit : SOL_LIMIT;
+  if (input.catalog && !selectedMetadata || !isDeepStrictEqual(limit, selectedLimit)) {
+    throw new Error('The selected model must retain its exact evidenced catalog limits');
   }
   if (transport !== 'gateway') throw new Error('This migration uses the evidenced gateway account route; native auth is not a fallback');
   const providerID = 'ompgw-codex';
@@ -38,15 +44,17 @@ export function buildConfig(input) {
   provider.settings = { baseURL: url.href.replace(/\/$/, ''), apiKey: '{env:OMP_GATEWAY_TOKEN}' };
   provider.headers = { 'x-session-id': input.route };
   provider.env = ['OMP_GATEWAY_TOKEN'];
+  const providers = input.catalog ? scopedProviders(input.catalog, provider.settings.baseURL, input.route) : { [providerID]: provider };
+  if (input.catalog) options.catalog = input.catalog;
   return {
     $schema: 'https://opencode.ai/config.json',
     model, default_agent: agent,
-    providers: { [providerID]: provider },
+    providers,
     agents: { [agent]: { description: 'Celestial scoped role', mode: 'primary', model, system: `{file:${roleFile}}` } },
     plugins: [{ package: pluginFile, options }],
     policies: [
       { action: 'provider.use', resource: '*', effect: 'deny' },
-      { action: 'provider.use', resource: providerID, effect: 'allow' },
+      ...Object.keys(providers).sort().map(id => ({ action: 'provider.use', resource: id, effect: 'allow' })),
     ],
   };
 }
@@ -54,7 +62,8 @@ export function buildConfig(input) {
 export function validateConfig(config, scope) {
   // Compare against the writer itself, including all keys/arrays and the exact
   // plugin path/options. Extra providers/plugins cannot extend this scoped grant.
-  if (!isDeepStrictEqual(config, buildConfig(scopedConfigInput(scope)))) {
+  const catalog = scope.catalog ?? config.plugins?.[0]?.options?.catalog;
+  if (!isDeepStrictEqual(config, buildConfig(scopedConfigInput({ ...scope, catalog })))) {
     throw new Error('OpenCode scoped config differs from the canonical role/provider/transport contract');
   }
   return true;

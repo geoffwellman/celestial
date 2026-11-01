@@ -6,12 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildConfig, scopedConfigInput } from './config.mjs';
+import { PINNED_CATALOG } from './model-contract.mjs';
 
 const launcher = fileURLToPath(new URL('./launch.mjs', import.meta.url));
 const plugin = fileURLToPath(new URL('./plugin', import.meta.url));
 const fixture = new URL('../../tests/lib/opencode-runtime-fixture.mjs', import.meta.url).href;
 
-async function run(options = {}, args = ['--standalone', '--auto'], interrupt = false) {
+async function run(options = {}, args = ['--standalone', '--auto'], interrupt = false, catalog) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-launch-test-'));
   const executable = path.join(dir, 'native-fixture');
   const events = path.join(dir, 'events.jsonl');
@@ -19,7 +20,7 @@ async function run(options = {}, args = ['--standalone', '--auto'], interrupt = 
   await writeFile(executable, `#!${process.execPath}\nimport(${JSON.stringify(fixture)}).then(module => module.runFixture());\n`);
   await chmod(executable, 0o700);
   await writeFile(roleFile, 'Fixture role');
-  const config = buildConfig(scopedConfigInput({ agent: 'cel-orchestrator', roleFile, pluginFile: plugin, baseURL: 'http://127.0.0.1:1/v1' }));
+  const config = buildConfig(scopedConfigInput({ agent: 'cel-orchestrator', roleFile, pluginFile: plugin, baseURL: 'http://127.0.0.1:1/v1', catalog }));
   // An allowlisted env prevents this fixture from inheriting credentials or a
   // Rex receipt. It implements no provider endpoint and can never infer.
   const env = { PATH: process.env.PATH, HOME: dir, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), CEL_OPENCODE_AGENT: 'cel-orchestrator', CEL_ROLE_FILE: roleFile, CEL_FIXTURE_EVENTS: events, CEL_FIXTURE_TUI_EXIT: '1', ...options };
@@ -109,4 +110,32 @@ test('terminating the owned parent stops both exact native children', async () =
   assert.notEqual(result.code, 0);
   assert.ok(result.rows.some(row => row.event === 'serve'));
   assert.ok(result.rows.some(row => row.event === 'tui'));
+});
+
+const source = { providerKey: 'openai-codex:0.159.0', schemaVersion: 14, updatedAt: 1 };
+const catalog = { schemaVersion: 1, sources: [{ ...source, hashVerification: 'not_verified' }], excluded: [], models: [
+  { ...structuredClone(PINNED_CATALOG.models[0]), source, thinking: { mode: 'effort', efforts: ['low', 'medium', 'high'] } },
+  { id: 'claude-advertised-fixture', name: 'Advertised fixture', providerID: 'ompgw-claude', api: 'anthropic-messages', source: { kind: 'gateway-advertised' } },
+] };
+
+test('catalog native resume carries the actual eligible selection and exact existing ID into private handoff', async () => {
+  for (const selection of [
+    { providerID: 'ompgw-codex', id: 'gpt-6.1-sol', variant: 'high' },
+    { providerID: 'ompgw-claude', id: 'claude-advertised-fixture' },
+  ]) {
+    const result = await run({ CEL_FIXTURE_SELECTION: JSON.stringify(selection) }, ['--standalone', '--auto', '--session', 'ses_SavedNative'], false, catalog);
+    assert.equal(result.code, 0, result.output);
+    const tui = result.rows.find(row => row.event === 'tui');
+    assert.deepEqual(tui.handoff.model, selection);
+    assert.equal(tui.handoff.sessionID, 'ses_SavedNative');
+    assert.ok(tui.args.includes('ses_SavedNative'));
+  }
+});
+
+test('catalog launch refuses foreign native models and mutated exact capability limits', async () => {
+  for (const mode of ['foreign', 'wrong-limits']) {
+    const result = await run({ CEL_FIXTURE_MODELS: mode }, ['--standalone', '--auto'], false, catalog);
+    assert.notEqual(result.code, 0);
+    assert.ok(!result.rows.some(row => row.event === 'tui'));
+  }
 });

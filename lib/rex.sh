@@ -96,7 +96,7 @@ _rex_launch() { # name runtime cwd label envprefix args...
       || die 'cel run: OpenCode native resume requires the prepared scoped agent/config'
     opencode_validate_config "${CEL_OPENCODE_AGENT#cel-}" "$AGENT_ROLE_FILE" "$CEL_OPENCODE_CONFIG_FILE" \
       || die 'cel run: OpenCode native resume scope is not canonical'
-    opencode_validate_session "$native" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-$cwd}" \
+    opencode_validate_session "$native" "$cwd" "$CEL_OPENCODE_AGENT" "${wsdir:-}" \
       || die 'cel run: refusing to publish an absent, mismatched, or unmigrated OpenCode native v2 root'
   fi
   local d file script resp session block pid start bin
