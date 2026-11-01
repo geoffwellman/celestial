@@ -177,6 +177,14 @@ test('unknown cache schemas and non-authoritative sources cannot authorize model
   }
 });
 
+test('cache versions 13 and 14 both supply exact capabilities', () => {
+  for (const schemaVersion of [13, 14]) {
+    const result = resolveCatalog(['exact-chat'], [source([model()], { schemaVersion })]);
+    assert.equal(result.models[0].contextWindow, 500000);
+    assert.equal(result.models[0].source.schemaVersion, schemaVersion);
+  }
+});
+
 test('corrupt private SQLite input reports a generic error without exposing its contents', async t => {
   const { dir } = await fixture(t);
   const db = path.join(dir, 'private-sentinel.db');
