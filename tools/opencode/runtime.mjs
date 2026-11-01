@@ -302,8 +302,13 @@ export async function createPlugin(context, deps = {}) {
     } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) {
       busyEvent = false; generation++;
       if (event.type === 'session.execution.failed') await note('blocked');
-    } else if (['session.deleted', 'session.moved', 'session.agent.selected', 'session.model.selected'].includes(event.type)) {
+    } else if (['session.deleted', 'session.moved'].includes(event.type)) {
       busyEvent = true; generation++;
+    } else if (['session.agent.selected', 'session.model.selected'].includes(event.type)) {
+      // A selection may arrive on an idle root with no later status, execution
+      // or idle event. Fence in-flight observations, but leave busy/idle to
+      // native time.busy/time.idle so queued mail still drains on the next poll.
+      generation++;
     }
   }
   let timer, eventTask, closing;

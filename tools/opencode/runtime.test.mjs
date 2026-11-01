@@ -436,6 +436,51 @@ test('resume boot observes explicit busy then completed idle and rejects missing
   }
 });
 
+for (const type of ['session.agent.selected', 'session.model.selected']) {
+  test(`native ${type} on an idle bound root fences in-flight reads without blocking later idle mail`, async () => {
+    // The model case mirrors an owner switch to another scoped catalog model.
+    const switched = { providerID: 'ompgw-claude', id: 'claude-advertised-fixture' };
+    const modelSwitch = type === 'session.model.selected';
+    const native = modelSwitch ? { model: switched } : {};
+    const event = { type, data: modelSwitch
+      ? { sessionID: 'ses_native', model: switched, previous: { ...model } }
+      : { sessionID: 'ses_native', agent: options.agent, previous: options.agent } };
+    const f = await resumeFixture({}, modelSwitch ? { options: { catalog } } : {});
+    let release;
+    try {
+      f.setCount(0); await f.tick();
+      assert.equal(f.delivered.length, 0, 'bound idle root had no mail');
+      f.lineage.set('ses_native', nativeInfo('ses_native', undefined, native));
+      // A selection racing an awaited native idle read still discards that read.
+      let entered;
+      const querying = new Promise((resolve) => { entered = resolve; });
+      const get = f.context.session.get;
+      f.context.session.get = (input) => new Promise((resolve) => { release = () => resolve(get(input)); entered(); });
+      f.setCount(1);
+      const before = f.calls.length;
+      const polling = f.tick(); await querying;
+      await f.emit({ id: 'evt_selected', created: 3, ...event });
+      release(); await polling;
+      assert.equal(f.delivered.length, 0, 'stale in-flight idle read drained mail');
+      assert.ok(!f.calls.slice(before).some(([, args]) => args[0] === 'inbox'), 'stale read touched the inbox');
+      f.context.session.get = get;
+      // No native idle/execution event follows a selection on an idle root;
+      // the next native time.busy/time.idle observation is the authority.
+      await f.tick();
+      assert.equal(f.delivered.length, 1, 'idle root never delivered queued mail after selection');
+      assert.equal(f.delivered[0].sessionID, 'ses_native');
+      assert.equal(f.delivered[0].delivery, 'steer');
+      assert.equal(f.waits(), 0);
+      // A selection observed while native time shows busy still delivers nothing.
+      await f.emit(status('idle')); f.setCount(1);
+      f.lineage.set('ses_native', nativeInfo('ses_native', undefined, { ...native, time: { created: 1, busy: 30, idle: 20 } }));
+      await f.emit({ id: 'evt_selected_busy', created: 4, ...event });
+      await f.tick();
+      assert.equal(f.delivered.length, 1, 'native busy root drained mail after selection');
+    } finally { release?.(); await f.cleanup(); }
+  });
+}
+
 test('PID birth, reporter ancestry, role/cwd and native receipt identity remain mandatory', async () => {
   for (const changes of [{ agent: 'pi' }, { backend: 'herdr' }, { name: 'foreign' }, { cwd: '/foreign' },
     { pid_start: '0' }, { pid: 2147483647 }, { agent_session: { value: '/tmp/omp.jsonl' } },
