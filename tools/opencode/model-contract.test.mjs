@@ -78,6 +78,8 @@ test('embedded provenance cannot waive aliases, native providers, malformed capa
 
 test('native inventory binds every tuple, capability and exact variant while preserving unrelated settings', () => {
   const inventory = catalog.models.map(row => ({ ...nativeModel(row), id: row.id, providerID: row.providerID, enabled: true }));
+  // Actual v2.2.5 Model.Info omits the configuration-only reasoning field.
+  for (const model of inventory) if (model.capabilities) delete model.capabilities.reasoning;
   inventory[0].settings.unrelated = true;
   assert.equal(validateNativeInventory(inventory, catalog), true);
   for (const change of [

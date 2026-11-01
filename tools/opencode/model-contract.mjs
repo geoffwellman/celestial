@@ -171,6 +171,9 @@ export function validateNativeInventory(inventory, catalog) {
     requireValue(row && !seen.has(key), 'Unscoped or duplicate native model');
     seen.add(key);
     const spec = nativeModel(row);
+    // Model.Info publishes reasoning as exact variants, not as a capability.
+    // Keep the config-only reasoning input out of this wire comparison.
+    if (spec.capabilities) delete spec.capabilities.reasoning;
     requireValue(actual.enabled === true && Array.isArray(actual.variants)
       && actual.variants.length === spec.variants.length
       && spec.variants.every(variant => {

@@ -2027,10 +2027,12 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # stray one by that substring.
   [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
   if [ "$runtime" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
-    [ "$model" = ompgw-codex/gpt-6.1-sol ] && [ "$thinking" = medium ] \
-      || die 'cel run: this scoped OpenCode route requires exact Sol 6.1 and medium thinking'
     # Do not overwrite another implicit product's shared role file.
     bodyfile="$wsdir/.cel/opencode/$agent_name/role-$tag.md"
+    # Admit only the requested tuple in this existing private canonical grant,
+    # before role writes or native-holder stop. Selection stays native/TUI-owned.
+    opencode_validate_requested_selection "$wsdir" "$tag" "$bodyfile" "${bodyfile%.md}.opencode.json" "$model" "$thinking" \
+      || die 'cel run: requested OpenCode model/variant is not granted by the private canonical scope'
   fi
   if [ -n "$handoff" ]; then
     [ "$runtime" = opencode ] && [ "$fresh" = 1 ] && [[ "$handoff" = /* ]] && [ -s "$handoff" ] \

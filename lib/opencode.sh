@@ -14,6 +14,33 @@ opencode_validate_config() { # tag rolefile configfile [expected-baseURL]; read-
   node "$CEL_ROOT/tools/opencode/config.mjs" --validate "$configfile" "cel-$tag" "$rolefile" "$CEL_ROOT/tools/opencode/plugin" "$base"
 }
 
+opencode_validate_requested_selection() { # wsdir tag rolefile configfile provider/model thinking
+  local wsdir="$1" tag="$2" rolefile="$3" configfile="$4" model="$5" thinking="$6"
+  local provider="${model%%/*}" id="${model#*/}" alias selection
+  [[ "$provider" =~ ^ompgw-(codex|claude)$ && "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || return 1
+  [[ -z "$thinking" || "$thinking" =~ ^[a-z][a-z0-9_-]*$ ]] || return 1
+  # Preserve legacy fresh/dry bootstrap, but never expand it into another model.
+  # Actual role creation still requires its canonical config in agent_args.
+  if [ "$model" = ompgw-codex/gpt-6.1-sol ] && [ "$thinking" = medium ] \
+      && [ ! -e "$rolefile" ] && [ ! -L "$rolefile" ]; then
+    if [ ! -e "$configfile" ] && [ ! -L "$configfile" ]; then return 0; fi
+    opencode_validate_config "$tag" "$rolefile" "$configfile"
+    return $?
+  fi
+  [ "$tag" = orchestrator ] || return 1
+  alias="${configfile%/role-orchestrator.opencode.json}"; alias="${alias##*/}"
+  [ "$configfile" = "$wsdir/.cel/opencode/$alias/role-orchestrator.opencode.json" ] \
+    && [ "$rolefile" = "$wsdir/.cel/opencode/$alias/role-orchestrator.md" ] || return 1
+  if [ -n "$thinking" ]; then
+    printf -v selection '{"providerID":"%s","id":"%s","variant":"%s"}' "$provider" "$id" "$thinking"
+  else
+    printf -v selection '{"providerID":"%s","id":"%s"}' "$provider" "$id"
+  fi
+  printf '%s' "$selection" | node "$CEL_ROOT/tools/opencode/sync.mjs" --validate-selection \
+    --workspace-dir "$wsdir" --agent "$alias" --plugin-file "$CEL_ROOT/tools/opencode/plugin" \
+    --base-url "$(gateway_url)/v1"
+}
+
 opencode_validate_session() { # native-id cwd scoped-agent [wsdir] [configfile]; read-only
   # Every before-stop/claim and Rex launch caller shares this same primitive.
   # A canonical catalog expands owner-selected tuples, never the launch default.
