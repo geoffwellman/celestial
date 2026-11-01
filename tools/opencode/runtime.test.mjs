@@ -640,6 +640,80 @@ test('canonical launch marker holds native bootstrap, provider availability, inb
   } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
 });
 
+// OpenCode evicts an idle location and re-boots it on the next request: the
+// fresh plugin instance must not refuse that request while its launch proof is
+// still valid merely because the 3s observer has not ticked yet.
+test('re-booted location admits a model request before the first observer tick from a still-valid launch proof', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-reboot-'));
+  const marker = path.join(dir, 'admission');
+  await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' })), { mode: 0o600 });
+  const f = await resumeFixture({}, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    assert.deepEqual(f.gets, [], 'setup must not call native session APIs');
+    assert.equal(f.reloads(), 0);
+    const event = request({ headers: { 'X-Session-Id': 'foreign' } });
+    await f.hook('model.request', event);
+    assert.deepEqual(event.headers, { 'x-session-id': options.route });
+    assert.ok(f.gets.includes('ses_native'), 'resumed root was not proven natively');
+    assert.equal(f.reloads(), 4, 'launch gate and exact resume proof each rebuild scoped availability once');
+    const providers = providerEditor(); f.transforms.provider(providers);
+    assert.deepEqual([...providers.providers.keys()], ['ompgw-codex']);
+    await assert.rejects(f.hook('model.request', request({ sessionID: 'ses_other', headers: {} })), /unrelated roots/);
+    await f.tick();
+    assert.equal(f.reloads(), 4, 'observer must reuse the request-time admission');
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('request-time and observer launch admission share one refresh', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-reboot-herdr-'));
+  const marker = path.join(dir, 'admission');
+  await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' })), { mode: 0o600 });
+  const f = await fixture({ env: { CEL_SESSION_BACKEND: 'herdr', CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    await Promise.all([f.hook('model.request', request({ headers: {} })), f.tick()]);
+    assert.equal(f.reloads(), 4, 'concurrent admission proofs rebuilt availability more than once');
+    assert.ok(f.gets.includes('ses_native'), 'resumed root was not proven natively');
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('request-time admission still refuses a missing or unowned launch proof', async () => {
+  for (const mode of [undefined, 0o644]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-reboot-refusal-'));
+    const marker = path.join(dir, 'admission');
+    if (mode) await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' })), { mode });
+    const f = await resumeFixture({}, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } });
+    try {
+      await assert.rejects(f.hook('model.request', request({ headers: {} })), /launch admission is pending/);
+      await assert.rejects(f.shell('printf allowed'), /launch admission is pending/);
+      await f.hook('experimental.idle', { sessionID: 'ses_native', background: [] });
+      assert.deepEqual(f.gets, []);
+      assert.equal(f.reloads(), 0);
+      assert.equal(f.delivered.length, 0);
+    } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('re-booted location binds the owned resumed root from a native idle before the first observer tick', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-reboot-idle-'));
+  const marker = path.join(dir, 'admission');
+  await writeFile(marker, JSON.stringify(admission({ sessionID: 'ses_native' })), { mode: 0o600 });
+  const f = await resumeFixture({}, { env: { CEL_OPENCODE_ADMISSION_FILE: marker } });
+  try {
+    await f.hook('experimental.idle', { sessionID: 'ses_other', background: [] });
+    assert.equal(f.delivered.length, 0, 'a foreign idle must not deliver');
+    await f.hook('experimental.idle', { sessionID: 'ses_native', background: [] });
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.delivered[0].sessionID, 'ses_native');
+    assert.equal(f.waits(), 0);
+    await f.tick();
+    assert.equal(f.reloads(), 4);
+  } finally { await f.cleanup(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('private Herdr handoff restores an existing root without created events or first-request adoption', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-herdr-'));
   const marker = path.join(dir, 'admission');
