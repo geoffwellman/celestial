@@ -292,6 +292,19 @@ test_gateway_usable_count_is_per_provider() {
   _gw_teardown
 }
 
+# PRESENT IS NOT USABLE: a credential file the proxy cannot load is still
+# listed (it is there) but never counted toward a launch.
+test_gateway_unparseable_credential_is_listed_but_not_usable() {
+  _gw_setup
+  cmd_gateway install --no-start >/dev/null
+  _gw_auth_fixture "$(gateway_auth_dir)"
+  printf '{"type":"codex","access_tok' > "$(gateway_auth_dir)/codex-e5f6a7b8-broken@example.invalid-plus.json"
+  assert_eq "$(gateway_accounts_json | jq '[.[] | select(.provider == "codex")] | length')" 2
+  assert_eq "$(gateway_accounts_json | jq -r '.[] | select(.email == "broken@example.invalid") | .ok')" false
+  assert_eq "$(gateway_usable_count codex)" 1
+  _gw_teardown
+}
+
 # THE RULE THE WHOLE FEATURE RESTS ON. The auth files hold live OAuth tokens
 # and the config holds the api-key; a status command reads both and must print
 # neither.
