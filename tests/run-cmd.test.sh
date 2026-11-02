@@ -1803,3 +1803,144 @@ test_run_solo_lane_remember_current_model_is_bounded_and_never_launches() {
   unset CEL_REX_STATE
   rm -rf "$T"
 }
+
+# A NEW LANE IS A FOLDER CLAUDE CODE HAS NEVER SEEN. Its folder-trust prompt
+# defaults to "No, exit", so the first stray keystroke ended the lane. The
+# launch records trust where Claude Code itself reads it (projects[<dir>]
+# .hasTrustDialogAccepted in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json), for
+# the lane's own directory only, before the agent starts - and leaves every
+# other byte of meaning in that file alone.
+_lane_claude_config() { # -> CLAUDE_CONFIG_DIR under $T, and $T/bin on PATH
+  export CLAUDE_CONFIG_DIR="$T/claude-config"; mkdir -p "$CLAUDE_CONFIG_DIR" "$T/bin"
+  PATH="$T/bin:$PATH"
+}
+_lane_dirs() { # -> the lane's directory as given and as resolved, one per line, unique
+  local d="$T/.cel/solo/bundle/lane-ui"
+  { printf '%s\n' "$d"; (cd "$d" && pwd -P); } | sort -u
+}
+
+test_run_solo_lane_claude_pretrusts_only_its_directory_before_start() {
+  _lane_model_setup; _lane_claude_config
+  local f="$CLAUDE_CONFIG_DIR/.claude.json" d
+  printf '%s\n' '{"numStartups":7,"firstStartTime":12345678901234567890,"projects":{"/elsewhere":{"allowedTools":["Bash"],"hasTrustDialogAccepted":false}},"userID":"u-1"}' > "$f"
+  chmod 600 "$f"
+  _run_agent_start() { jq -c .projects "$CLAUDE_CONFIG_DIR/.claude.json" > "$T/projects-at-start"; }
+  (cd "$T" && cmd_run solo --product bundle --lane ui) >/dev/null 2>&1 || { echo 'the lane did not launch'; return 1; }
+  [ -s "$T/projects-at-start" ] || { echo 'the agent was never started'; return 1; }
+  while IFS= read -r d; do
+    assert_eq "$(jq -r --arg d "$d" '.[$d].hasTrustDialogAccepted' "$T/projects-at-start")" true
+  done < <(_lane_dirs)
+  # that directory and nothing else: not its parents, not the workspace
+  assert_eq "$(jq -r '.projects | keys | length' "$f")" "$(( $(_lane_dirs | wc -l) + 1 ))"
+  assert_eq "$(jq -c '.projects["/elsewhere"]' "$f")" '{"allowedTools":["Bash"],"hasTrustDialogAccepted":false}'
+  assert_eq "$(jq -c 'del(.projects)' "$f")" '{"numStartups":7,"firstStartTime":12345678901234567890,"userID":"u-1"}'
+  assert_eq "$(stat -c %a "$f")" 600
+  # replaced by rename: no temporary file or lock left beside it
+  assert_eq "$(ls -A "$CLAUDE_CONFIG_DIR")" .claude.json
+  rm -rf "$T"
+}
+
+# An entry Claude Code already keeps for the directory keeps its other fields;
+# a second launch over an already trusted lane does not rewrite the file.
+test_run_solo_lane_claude_trust_keeps_an_existing_entry_and_is_idempotent() {
+  _lane_model_setup; _lane_claude_config
+  local f="$CLAUDE_CONFIG_DIR/.claude.json" d before
+  mkdir -p "$T/.cel/solo/bundle/lane-ui"
+  d="$(cd "$T/.cel/solo/bundle/lane-ui" && pwd -P)"
+  jq -n --arg d "$d" '{projects: {($d): {lastSessionId: "s-1", hasTrustDialogAccepted: false}}}' > "$f"
+  (cd "$T" && cmd_run solo --product bundle --lane ui) >/dev/null 2>&1 || { echo 'the lane did not launch'; return 1; }
+  assert_eq "$(jq -c --arg d "$d" '.projects[$d]' "$f")" '{"lastSessionId":"s-1","hasTrustDialogAccepted":true}'
+  before="$(stat -c %i "$f")"
+  (cd "$T" && cmd_run solo --product bundle --lane ui --restart) >/dev/null 2>&1
+  assert_eq "$(stat -c %i "$f")" "$before"
+  rm -rf "$T"
+}
+
+# Claude Code serialises its own writes of that file with the lock directory
+# <file>.lock. A held lock, or a file that is not a JSON object, is never
+# written over: the launch is refused before any agent starts.
+test_run_solo_lane_claude_trust_refuses_a_held_lock_or_unreadable_config() {
+  _lane_model_setup; _lane_claude_config
+  local f="$CLAUDE_CONFIG_DIR/.claude.json"
+  printf '{"userID":"u-1"}\n' > "$f"
+  mkdir "$f.lock"
+  _run_agent_start() { touch "$T/started"; }
+  (cd "$T" && CEL_CLAUDE_LOCK_WAIT_MS=100 assert_fails _cmd_run_in_subshell solo --product bundle --lane ui) >/dev/null 2>&1
+  [ ! -e "$T/started" ] || { echo 'started over a held lock'; return 1; }
+  assert_eq "$(cat "$f")" '{"userID":"u-1"}'
+  [ -d "$f.lock" ] || { echo "removed Claude Code's lock"; return 1; }
+  rmdir "$f.lock"
+  printf 'not json\n' > "$f"
+  (cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui) >/dev/null 2>&1
+  [ ! -e "$T/started" ] || { echo 'started over an unreadable config'; return 1; }
+  assert_eq "$(cat "$f")" 'not json'
+  assert_eq "$(ls -A "$CLAUDE_CONFIG_DIR")" .claude.json
+  rm -rf "$T"
+}
+
+# AND ITS GOAL REACHES IT. Mail for a Claude lane is delivered by the
+# UserPromptSubmit hook, which fires only on a submitted turn - and a freshly
+# started Claude session has none, so a brief sent before the first launch sat
+# unread and the lane reported no goal. A fake claude here models both
+# failures: it exits at the trust prompt, and it only runs the hook for a first
+# prompt on its command line.
+test_run_solo_lane_claude_first_turn_delivers_mail_sent_before_launch() {
+  _lane_model_setup; _lane_claude_config
+  source "$CEL_ROOT/lib/inbox.sh"
+  export CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" FAKE_CLAUDE_OUT="$T/claude-out"
+  mkdir -p "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  bundled:\n    path: %s\n' "$T" > "$CEL_REGISTRY"
+  printf '%s\n' '{"id":"item-1","ts":"2026-11-02T09:00:00Z","from":"root","to":"bundle-ui","kind":"message","message":"goal: build the export page"}' > "$CEL_INBOX_DIR/bundled.jsonl"
+  cat > "$T/bin/claude" <<'SH'
+#!/usr/bin/env bash
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dangerously-skip-permissions) shift ;;
+    --settings|--append-system-prompt-file|--model|--effort|--resume) shift 2 ;;
+    -*) echo "fake claude: unknown option $1" > "$FAKE_CLAUDE_OUT"; exit 2 ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+[ "$(jq -r --arg d "$(pwd -P)" '.projects[$d].hasTrustDialogAccepted' "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" 2>/dev/null)" = true ] \
+  || { echo 'trust prompt: No, exit' > "$FAKE_CLAUDE_OUT"; exit 1; }
+[ -n "$prompt" ] || { echo 'idle: no turn was submitted' > "$FAKE_CLAUDE_OUT"; exit 0; }
+{ printf 'turn: %s\n' "$prompt"; bash "$CEL_ROOT/tools/hooks/inbox-drain.sh" </dev/null; } > "$FAKE_CLAUDE_OUT"
+SH
+  chmod +x "$T/bin/claude"
+  _run_mark_launch() { printf '%s' "$2" > "$T/prefix"; }
+  _run_agent_start() {
+    shift 3
+    ( cd "$T/.cel/solo/bundle/lane-ui" && eval "$(cat "$T/prefix") claude \"\$@\"" )
+  }
+  (cd "$T" && cmd_run solo --product bundle --lane ui) >/dev/null 2>&1
+  local out; out="$(cat "$FAKE_CLAUDE_OUT" 2>/dev/null)"
+  assert_contains "$out" 'turn: '
+  assert_contains "$out" 'goal: build the export page'
+  rm -rf "$T"
+}
+
+# The first turn is for a FRESH Claude lane only: a resumed session already
+# holds its goal, another runtime has its own inbox delivery, and a dry run
+# writes nothing (it says what it would trust).
+test_run_solo_lane_first_turn_and_trust_only_where_they_apply() {
+  _lane_model_setup; _lane_claude_config
+  local out
+  out="$(cd "$T" && cmd_run solo --product bundle --lane ui --dry-run 2>&1)"
+  [ ! -e "$CLAUDE_CONFIG_DIR/.claude.json" ] || { echo 'a dry run wrote the Claude config'; return 1; }
+  assert_contains "$out" "hasTrustDialogAccepted"
+  assert_contains "$out" "cel inbox read"
+  _run_agent_start() { shift 3; printf '%s\n' "$@" > "$T/args"; }
+  (
+    _run_resume_resolve() { RESUME_SESSION=6b90062c-f7b9-4cf4-859c-6bba6e90df1d; RESTART_PANE=""; AGENT_ARGS+=(--resume "$RESUME_SESSION"); }
+    cd "$T" && cmd_run solo --product bundle --lane ui
+  ) >/dev/null 2>&1
+  assert_eq "$(tail -1 "$T/args")" 6b90062c-f7b9-4cf4-859c-6bba6e90df1d
+  rm -f "$CLAUDE_CONFIG_DIR/.claude.json" "$T/args"
+  profile_resolve() { PROFILE_RUNTIME=omp; PROFILE_MODEL=some-model; PROFILE_THINKING=medium; }
+  (cd "$T" && cmd_run solo --product bundle --lane ui --profile omp-lane) >/dev/null 2>&1
+  [ -s "$T/args" ] || { echo 'the omp lane did not launch'; return 1; }
+  [ ! -e "$CLAUDE_CONFIG_DIR/.claude.json" ] || { echo 'an omp lane wrote the Claude config'; return 1; }
+  ! grep -q 'cel inbox read' "$T/args" || { echo 'an omp lane got a Claude first turn'; return 1; }
+  rm -rf "$T"
+}
