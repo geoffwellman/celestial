@@ -66,39 +66,50 @@ const run = (cmd, args, timeout = 15000) =>
       resolve(err ? null : out)));
 
 // Each upstream has its own staleness budget: pane state is cheap and local,
-// gh burns rate limit.
+// gh burns rate limit. Per key one read is in flight at a time, shared by
+// every ask that arrives meanwhile. A fetcher answers undefined when its
+// upstream failed: that is never kept as the answer - the last good value
+// stands (`empty` when there is none) - and it holds off the next try for
+// the same budget, at most a minute.
 const cache = {};
-const cached = async (key, ttlMs, fn) => {
-  const c = cache[key];
-  if (c && Date.now() - c.t < ttlMs) return c.v;
-  const v = await fn();
-  cache[key] = { t: Date.now(), v };
-  return v;
+const cached = (key, ttlMs, fn, empty) => {
+  const e = cache[key] || (cache[key] = { v: undefined, t: 0, hold: 0, p: null });
+  const answer = () => (e.v === undefined ? empty : e.v);
+  if (Date.now() - e.t < e.hold) return Promise.resolve(answer());
+  if (!e.p) {
+    e.p = Promise.resolve().then(fn).then((v) => {
+      e.t = Date.now();
+      if (v === undefined) { e.hold = Math.min(ttlMs, 60000); return answer(); }
+      e.v = v; e.hold = ttlMs; return v;
+    }).finally(() => { e.p = null; });
+  }
+  return e.p;
 };
 
 const agents = () => cached('agents', 8000, async () => {
   const out = await run('herdr', ['agent', 'list']);
-  if (!out) return [];
-  try { return JSON.parse(out).result.agents || []; } catch { return []; }
-});
+  try { return JSON.parse(out).result.agents || []; } catch { return undefined; }
+}, []);
 
 const wsLabels = () => cached('wslabels', 30000, async () => {
   const out = await run('herdr', ['workspace', 'list']);
   const m = {};
   try {
     for (const w of JSON.parse(out).result.workspaces || []) m[w.workspace_id] = w.label;
-  } catch { /* no herdr, no labels */ }
+  } catch { return undefined; }
   return m;
-});
+}, {});
 
 const prs = (w) => cached(`prs:${w.name}`, 60000, async () => {
   const fields = 'number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,author';
   const all = [];
+  let asked = 0, answered = 0;
   await Promise.all((w.repos || []).map(async (r) => {
     if (!r.slug) return;
+    asked++;
     const out = await run('gh', ['pr', 'list', '--repo', r.slug, '--json', fields, '--limit', '30'], 20000);
     let list = [];
-    try { list = JSON.parse(out || '[]'); } catch { /* gh error page */ }
+    try { const j = JSON.parse(out); if (Array.isArray(j)) { list = j; answered++; } } catch { /* gh error page */ }
     for (const p of list) {
       const checks = p.statusCheckRollup || [];
       const bad = checks.filter((c) => ['FAILURE', 'ERROR'].includes(c.conclusion || c.state)).length;
@@ -111,8 +122,9 @@ const prs = (w) => cached(`prs:${w.name}`, 60000, async () => {
       });
     }
   }));
-  return all;
-});
+  // every repo unreadable is a failed read; one of several is a partial list
+  return asked && !answered ? undefined : all;
+}, []);
 
 // The delegation ledger, joined onto worktree rows by branch: which model
 // built it, what shape it is, and the VERDICT collect recorded - gate result,
@@ -122,16 +134,17 @@ const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
   const f = join(w.wsdir, '.cel', 'delegations.json');
   if (!existsSync(f)) return {};
   try {
-    // parsed once per change, shared with the v2 feeds
+    // parsed once per change, shared with the v2 feeds; null: torn mid-write
     const rows = store.json(f);
+    if (rows === null) return undefined;
     if (!Array.isArray(rows)) return {};
     const by = {};
     // herdr lowercases worktree directory names; the ledger keeps the branch
     // as written. Join case-insensitively or nothing ever matches.
     for (const r of rows) if (r && r.branch) by[(r.repo + '/' + r.branch).toLowerCase()] = r;
     return by;
-  } catch { return {}; }
-});
+  } catch { return undefined; }
+}, {});
 
 const worktreeRows = async (w) => {
   const ag = await agents();
@@ -178,8 +191,8 @@ const wsAgents = async (w) => {
 // publishes and reviews with.
 const viewer = () => cached('viewer', 3600000, async () => {
   const out = await run('gh', ['api', 'user', '-q', '.login'], 20000);
-  return (out || '').trim();
-});
+  return out === null ? undefined : out.trim();
+}, '');
 
 // The workspace inbox: agent-to-agent mail that deliberately never types
 // into a pane, so the dashboard is where a human watches it move. Read
@@ -279,11 +292,11 @@ const linear = (w) => cached(`linear:${w.name}`, 120000, async () => {
       body: JSON.stringify({ query }),
       signal: AbortSignal.timeout(15000),
     });
-    if (!r.ok) return null;
+    if (!r.ok) return undefined;
     const j = await r.json();
     const v = j?.data?.viewer;
     const nodes = v && [...(v.active?.nodes || []), ...(v.finished?.nodes || [])];
-    if (!nodes) return null;
+    if (!nodes) return undefined;
 
     // One ordered column list across every team the workspace declares.
     // De-duplicated by name: two teams sharing "In Progress" is one column.
@@ -314,8 +327,8 @@ const linear = (w) => cached(`linear:${w.name}`, 120000, async () => {
         priority: i.priorityLabel || '', updated: i.updatedAt,
       })).sort((a, b) => a.pri - b.pri || (a.updated < b.updated ? 1 : -1)),
     };
-  } catch { return null; }
-});
+  } catch { return undefined; }
+}, null);
 
 // WHAT IS RUNNING ON A PORT, asked of the plane rather than re-derived here.
 // `cel services --json` already joins the declared services to the previews
@@ -323,10 +336,10 @@ const linear = (w) => cached(`linear:${w.name}`, 120000, async () => {
 // implementation in JavaScript would be a second answer to one question.
 const services = (w) => cached(`services:${w.name}`, 5000, async () => {
   const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', w.name, '--json'], 10000);
-  // Always a list: a `cel` that answers something else (an old build, a
-  // wrapper, an error document) must not reach `.filter` in state().
-  try { const doc = JSON.parse(out || '[]'); return Array.isArray(doc) ? doc : []; } catch { return []; }
-});
+  // Always a list: a `cel` that fails or answers something else (an old
+  // build, a wrapper, an error document) is a failed read, never `.filter`ed.
+  try { const doc = JSON.parse(out); return Array.isArray(doc) ? doc : undefined; } catch { return undefined; }
+}, []);
 
 // THE PROXY ONLY CARRIES PORTS THIS WORKSPACE KNOWS. A tailnet neighbour who
 // can reach the dashboard must not be able to browse this box's loopback by
@@ -363,8 +376,8 @@ const backlog = (w) => cached(`backlog:${w.name}`, 15000, async () => {
   const f = join(w.wsdir, 'backlog.yaml');
   if (!existsSync(f)) return null;
   const out = await run('yq', ['.', f]);
-  try { return JSON.parse(out); } catch { return null; }
-});
+  try { return JSON.parse(out) ?? undefined; } catch { return undefined; }
+}, null);
 
 // The joined view the page actually renders. A worktree and a PR on the same
 // branch are one piece of work; a worktree with no agent AND no open PR is
@@ -404,10 +417,10 @@ const subscriptions = () => cached('subs', 60000, async () => {
     if (Array.isArray(q.subscriptions)) return q.subscriptions;
   } catch { /* fall through to the cached copy */ }
   try {
-    const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000) || '{}');
+    const doc = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['fleet', '--json'], 20000));
     return Array.isArray(doc.subscriptions) ? doc.subscriptions : [];
-  } catch { return []; }
-});
+  } catch { return undefined; }
+}, []);
 
 // The gateway's own web panel. It listens on loopback only, so the
 // card links it only when this page is itself being viewed on loopback - over
@@ -415,11 +428,13 @@ const subscriptions = () => cached('subs', 60000, async () => {
 // that works only on the box, shown on the tailnet, is an invitation to
 // expose the panel to make it work.
 const gatewayPanel = () => cached('gwpanel', 600000, async () => {
+  const out = await run(join(CEL_ROOT, 'bin/cel'), ['gateway', 'panel', '--json'], 8000);
+  if (out === null) return undefined;
   try {
-    const d = JSON.parse(await run(join(CEL_ROOT, 'bin/cel'), ['gateway', 'panel', '--json'], 8000) || 'null');
+    const d = JSON.parse(out || 'null');
     return d && d.url ? { url: String(d.url), ssh: String(d.ssh || '') } : null;
-  } catch { return null; }
-});
+  } catch { return undefined; }
+}, null);
 const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''));
 
 // NEEDS YOU: the owner's decisions across every workspace, read from
@@ -430,9 +445,9 @@ const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''
 const REFRESH_MS = Math.min(8000, Math.max(500, Number(cfg.refreshMs) || 8000));
 const decisions = () => cached('decisions', REFRESH_MS, async () => {
   const out = await run(join(CEL_ROOT, 'bin/cel'), ['decide', 'list', '--json'], 10000);
-  if (!out) return [];
+  if (out === null) return undefined;
   return out.split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
-});
+}, []);
 
 // Grouped by workspace, and inside a group: urgent first, then what blocks
 // something, then oldest - the order an owner should answer in.

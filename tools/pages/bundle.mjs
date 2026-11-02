@@ -51,7 +51,7 @@ export const references = (html) => {
   return { embeds: emb.map(localName).filter(Boolean), links: links.map(localName).filter(Boolean) };
 };
 
-const regular = (root, n) => { try { return lstatSync(join(root, n)).isFile(); } catch { return false; } };
+export const regular = (root, n) => { try { return lstatSync(join(root, n)).isFile(); } catch { return false; } };
 
 // -> {assets:[...], missing:[...]}; throws on a bad include. `docFile` is the
 // copy of the page to read references from (a live share's snapshot), when it

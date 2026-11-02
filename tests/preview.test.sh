@@ -86,6 +86,44 @@ test_preview_on_the_tailnet_also_prints_localhost_and_forwards_it() {
   _pv_down
 }
 
+# the forwarder itself, against 127.0.0.2 standing in for the tailnet address
+_pv_free_port() { node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})'; }
+
+test_preview_forward_exits_visibly_when_the_app_never_answers() {
+  command -v node >/dev/null || return 0
+  local port err rc=0
+  port="$(_pv_free_port)"
+  err="$(CEL_PREVIEW_FORWARD_TRIES=3 CEL_PREVIEW_FORWARD_DELAY_MS=20 \
+    timeout 5 node "$CEL_ROOT/tools/preview/forward.mjs" "$port" 127.0.0.2 2>&1 >/dev/null)" || rc=$?
+  # 124 would mean it took 127.0.0.1 anyway and sat there forwarding to nothing
+  assert_eq "$rc" "1"
+  assert_contains "$err" "127.0.0.2:$port never answered"
+}
+
+test_preview_forward_relays_once_the_app_answers() {
+  command -v node >/dev/null || return 0
+  local out
+  out="$(FWD="$CEL_ROOT/tools/preview/forward.mjs" timeout 10 node -e '
+const net = require("net"), { spawn } = require("child_process");
+// the readiness probe of the forwarder connects and drops at once, resetting a
+// socket this side already wrote to - that reset is expected, not a failure
+const up = net.createServer((c) => { c.on("error", () => {}); c.end("hello"); }).listen(0, "127.0.0.2", () => {
+  const port = up.address().port;
+  // The forwarder must not inherit stdout: an orphan would hold the $(...)
+  // pipe open past `timeout` and turn a 10 s failure into the 120 s test limit.
+  const f = spawn(process.execPath, [process.env.FWD, String(port), "127.0.0.2"], { env: { ...process.env, CEL_PREVIEW_FORWARD_DELAY_MS: "20" }, stdio: ["ignore", "ignore", "inherit"] });
+  const stop = setTimeout(() => done("no forward (8s)"), 8000);
+  const done = (s) => { clearTimeout(stop); console.log(s); f.kill(); up.close(); };
+  const attempt = (n) => {
+    const c = net.connect(port, "127.0.0.1"); let b = "";
+    c.on("data", (d) => (b += d)); c.on("end", () => done(b));
+    c.on("error", () => (n ? setTimeout(() => attempt(n - 1), 50) : done("no forward")));
+  };
+  attempt(100);
+});')"
+  assert_eq "$out" "hello"
+}
+
 test_preview_of_the_same_head_reuses_the_running_one() {
   _pv_setup
   (cd "$T/ws" && cmd_preview widget#7 --no-wait >/dev/null 2>&1)

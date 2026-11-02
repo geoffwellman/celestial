@@ -38,7 +38,7 @@ def latest_checks: group_by([(.workflowName // ""), (.name // .context // "")])
 # than 32 - the dash at position 32 is the truncation boundary of an alias that
 # already exists and is kept, so no established alias is renamed. The bash
 # wrappers (_inbox_sanitise, _run_agent_name, _steward_agent_name) just call
-# this; tools/dash/v2.mjs carries a JS copy, held equal by a test.
+# this, and tools/dash/v2.mjs asks it rather than keep a copy.
 cel_alias_norm() { # <string> -> alias
   local n="$1"
   # An already-clean name (the common case: an alias being re-normalised) is

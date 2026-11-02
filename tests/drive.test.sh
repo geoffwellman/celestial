@@ -91,6 +91,25 @@ console.log(r.join(" "));')"
   assert_eq "$out" "a b 0 c! 0! d"
 }
 
+test_drive_tailer_keeps_a_codepoint_split_across_polls() {
+  command -v node >/dev/null || return 0
+  local d; d="$(mktemp -d)"
+  local out
+  out="$(D="$d" _tr 'const p = process.env.D + "/s.jsonl";
+const line = Buffer.from(JSON.stringify({ text: "hi \u{1F600} there" }) + "\n");
+const cut = line.indexOf(0xf0) + 2;   // two of the emoji'"'"'s four bytes
+fs.writeFileSync(p, "{\"text\":\"first\"}\n");
+const t = new T.Tailer(p);
+const r = [t.poll().map(l => JSON.parse(l).text).join("|")];
+fs.appendFileSync(p, line.subarray(0, cut));
+r.push(String(t.poll().length));
+fs.appendFileSync(p, line.subarray(cut));
+r.push(t.poll().map(l => JSON.parse(l).text).join("|"));
+console.log(r.join(" / "));')"
+  rm -rf "$d"
+  assert_eq "$out" "first / 0 / hi 😀 there"
+}
+
 test_drive_tail_of_a_13mb_file_reads_only_new_bytes() {
   command -v node >/dev/null || return 0
   local d; d="$(mktemp -d)"
