@@ -1,21 +1,18 @@
 # shellcheck shell=bash
 # cel work / cel history - THE WORK ITEM.
 #
-# The factory tracked its MACHINES and not its PRODUCTS. `cel fleet` showed
-# workspaces and workers, `cel-fanout status` delegations, `cel-linear board`
-# tickets and `gh pr list` pull requests; each of those is one system's view of
-# a thing none of them owns. So "what happened to ABC-49" could only be
-# answered by visiting four surfaces and holding the join in your head, and the
-# join is exactly what goes wrong quietly.
+# `cel fleet`, `cel-fanout status`, `cel-linear board` and `gh pr list` each
+# show one system's view of a thing none of them owns; joining them by hand is
+# exactly what goes wrong quietly, so the join lives here.
 #
 # A WORK ITEM is that thing: keyed by its ticket when it has one, else by its
 # delegation, carrying whichever of the four parts exist, with one merged list
 # of events and one computed stage. This file is the MODEL and the two views
 # over it. It is a READ: it never writes anything but its own cache.
 #
-# The JSON shape is FROZEN here (CEL-45) and documented in README beside it -
-# the console and the dash render this document and add nothing to it, so that
-# two surfaces cannot drift into two different answers about one item.
+# The JSON shape is fixed here and documented in README beside it - the
+# console and the dash render this document and add nothing to it, so two
+# surfaces cannot drift into two different answers about one item.
 [ -n "${_CEL_WORK:-}" ] && return 0
 _CEL_WORK=1
 # shellcheck source=lib/common.sh
@@ -54,11 +51,9 @@ work_wsdir() { # [name-or-path] -> <wsdir>
 
 # --- the ledger, with a history it can always read -------------------------
 #
-# Rows written before CEL-45 carry one timestamp and no `history`, and a
-# timeline that drew nothing for them would make the whole view look broken on
-# the first box it met. A missing history is SYNTHESISED here, at read time,
-# from what the row does have - and never written back: a backfill on disk is
-# a guess that outlives the guesser and is indistinguishable from a record.
+# Older rows carry one timestamp and no `history`. A missing history is
+# SYNTHESISED here, at read time, from what the row does have - and never
+# written back: a backfill on disk is indistinguishable from a record.
 work_ledger_json() { # <wsdir> -> JSON array
   local f="$1/.cel/delegations.json"
   [ -f "$f" ] || { printf '[]'; return 0; }
@@ -94,7 +89,7 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
     age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
     if [ "$age" -lt "$ttl" ]; then cat "$f"; return 0; fi
   fi
-  # A FAILED READ IS NOT AN EMPTY ONE (CEL-79). Any refusal marks the pass
+  # A FAILED READ IS NOT AN EMPTY ONE. Any refusal marks the pass
   # failed: the document is still printed (the ledger and mail parts stand),
   # but it is never cached - the previous cache is kept, and the next read
   # asks again rather than serving "no PRs" for work.cache_secs.
@@ -130,10 +125,8 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
   printf '%s' "$doc"
 }
 
-# The mailbox, read RAW and WHOLE. The console's timeline windowed to 24 hours
-# and so lost every message about anything that took longer than a day, which
-# is most of them. The file is append-only and local; there is no reason to
-# read less than all of it.
+# The mailbox, read RAW and WHOLE: most items outlive any time window, and the
+# file is append-only and local, so there is no reason to read less.
 _work_mail() { # <ws> -> JSON array
   local f="${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}/$1.jsonl"
   [ -f "$f" ] || { printf '[]'; return 0; }
@@ -142,14 +135,13 @@ _work_mail() { # <ws> -> JSON array
 
 # --- the shared jq: the key, the stage, the next action --------------------
 #
-# One definition of each, read by the model and by `work_stage` alike: two
+# One definition of each, read by the model and by `_work_stage` alike: two
 # copies of the stage order is two surfaces that can disagree about what a
 # thing IS.
 _WORK_JQ_DEFS='
 # A STAMP IS A MOMENT, NOT A STRING. The ledger writes UTC (`...Z`) and the
-# mailbox writes local time with an offset (`...+10:00`), so sorting the text
-# put every message ten hours late and a history read as if the mail arrived
-# after the merge it announced. Everything orders on THIS.
+# mailbox local time with an offset (`...+10:00`), so text order is wrong.
+# Everything orders on THIS.
 def tsec:
   (. // "") as $s
   | ($s | capture("^(?<b>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$") // null) as $m
@@ -164,8 +156,8 @@ def tsec:
     end;
 def tickre: "[A-Z][A-Z0-9]+-[0-9]+";
 # The ticket id in a string, or "". A SUBSTRING MATCH IS WRONG: "ABC-4" is
-# inside "ABC-49" and matching that way joined a small ticket to a big one s
-# PR. The scan is anchored on the whole token.
+# inside "ABC-49". tickof takes the whole digit run; names anchors the key on
+# token boundaries.
 # CASE IS NOT IDENTITY: a branch cut as abc-49-fix is work for ABC-49, so the
 # match ignores case and the key is always the canonical uppercase id.
 def tickof($s): (($s // "") | [scan(tickre; "i")] | (.[0] // "") | ascii_upcase);
@@ -209,14 +201,10 @@ def next_of($stage):
    building: "collect", ready: "delegate", backlog: "-"}[$stage] // "-";
 '
 
-# The stage of one item, for anything holding a part-built item (and for the
-# tests, which prove the order case by case).
-work_stage() { # <item-json> -> stage
+# The stage of one item - a test seam, so the tests can prove the order case
+# by case without building the whole model.
+_work_stage() { # <item-json> -> stage
   printf '%s' "$1" | jq -r "$_WORK_JQ_DEFS"' stage_of'
-}
-
-work_next_action() { # <stage> -> the verb
-  printf '%s' "$1" | jq -Rr "$_WORK_JQ_DEFS"' next_of(.)'
 }
 
 # --- the model -------------------------------------------------------------
@@ -251,9 +239,8 @@ work_items() { # <wsdir> [--since <iso>] [--fresh] [--stage S] [--product P] [--
   done
 
   # THE INPUTS GO THROUGH FILES, NEVER ARGV. A real workspace's mailbox is
-  # megabytes of JSON and a box with sixty delegations is not much smaller;
-  # passed as --argjson the first run on this box died with "Argument list too
-  # long" before it drew a single row. --slurpfile has no such ceiling.
+  # megabytes of JSON; passed as --argjson it overflows the argv limit
+  # ("Argument list too long"). --slurpfile has no such ceiling.
   local tmp; tmp="$(mktemp -d)" || return 1
   printf '%s' "$led"     > "$tmp/led.json"
   printf '%s' "$mail"    > "$tmp/mail.json"
@@ -506,9 +493,8 @@ cmd_work() { # [<workspace>] [<key>] [--stage S] [--product P] [--json] [--fresh
   if [ -n "$ws_arg" ]; then
     dirs+=("$(work_wsdir "$ws_arg")")
   else
-    # NO WORKSPACE NAMED IS EVERY WORKSPACE. "see all the work items" is the
-    # question this verb was asked for, and one workspace at a time is what it
-    # was asked to replace.
+    # NO WORKSPACE NAMED IS EVERY WORKSPACE: the board answers "all the work
+    # items", not one workspace at a time.
     local n
     for n in $(registry_names); do dirs+=("$(registry_path "$n")"); done
     [ "${#dirs[@]}" -gt 0 ] || die "work: no workspace - name one, or register one with cel ws add"
@@ -561,7 +547,7 @@ cmd_history() { # [<workspace>] [--since 7d] [--key K] [--json]
     items="$(work_items "$d" ${iso:+--since "$iso"} ${key:+--key "$key"})"
     # The GROUPING is the view: one object per item, its events in time order,
     # groups ordered by most recent event. `--json` is the same document, so
-    # the console and the dash render identically (the CEL-35 rule).
+    # the console and the dash render identically.
     items="$(printf '%s' "$items" | jq -c "$_WORK_JQ_DEFS"' . as $i | {key, title, stage, next, ws, product, last,
         events: ($i.events | map(select($since == "" or ((.at | tsec) >= ($since | tsec)))))}
        | select((.events | length) > 0)' --arg since "$iso" 2>/dev/null || true)"

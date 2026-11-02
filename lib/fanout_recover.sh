@@ -1,11 +1,10 @@
 # shellcheck shell=bash
-# `cel-fanout recover` (AH-261017): canonical registration and ONE safe
-# continuation of a worker whose launch was only partly recorded - a live agent
-# in its pane, a correct worktree, and NO ledger row, because the delegating
-# process died or timed out between `herdr agent start` and the ledger append
-# (the 2026-10-17 W710 case). Sourced by cel-fanout, which supplies the ledger
-# primitives (_ledger_*), $HERDR and the workspace helpers; this file only
-# defines functions.
+# `cel-fanout recover`: canonical registration and ONE safe continuation of a
+# worker whose launch was only partly recorded - a live agent in its pane, a
+# correct worktree, and NO ledger row, because the delegating process died or
+# timed out between `herdr agent start` and the ledger append. Sourced by
+# cel-fanout, which supplies the ledger primitives (_ledger_*), $HERDR and the
+# workspace helpers; this file only defines functions.
 #
 # WHAT THIS IS NOT. It is not an adoption verb and not a repair of the ledger:
 #   - no raw row import: every field of the row is derived from the workspace,
@@ -16,8 +15,7 @@
 #     task delivery, model/tool success, the session file, approval and
 #     head_source stay unknown and are listed as such in recovery.unproven.
 #
-# HERDR 0.9.1, what it does and does not give us (read from the installed
-# binary and `herdr agent list`; nothing here was tried on a live worker):
+# HERDR, what it does and does not give us:
 #   - `agent list` reports name, pane_id, agent kind, agent_status,
 #     interactive_ready, and launch_pending while a start is unconfirmed.
 #   - `agent prompt` is the one supported way to hand a task to an existing

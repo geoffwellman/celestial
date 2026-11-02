@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-63: restarting an orchestrator keeps its conversation. The session is
+# Restarting an orchestrator keeps its conversation. The session is
 # the one herdr recorded for THAT pane - omp's --continue picks the newest
 # session in the cwd, and several omp sessions share one cwd on a real box.
 source "$CEL_ROOT/lib/common.sh"
@@ -87,8 +87,8 @@ EOS
 }
 
 
-# The incident: a restart chosen by cwd took the FIRST omp in the checkout -
-# another session in another pane - and relaunched it as the orchestrator.
+# A restart chosen by cwd would take the FIRST omp in the checkout - another
+# session in another pane - and relaunch it as the orchestrator.
 test_restart_chooses_the_named_agent_among_two_in_one_cwd() {
   orch_stub_setup omp
   orch_stub_roster_two "$T/ws/repos/widget" "" widget-orch
@@ -125,7 +125,7 @@ test_restart_never_relaunches_a_pane_whose_agent_has_another_name() {
   orch_stub_teardown
 }
 
-# CEL-83: a restart sets the pane label again.
+# A restart sets the pane label again.
 test_restart_relabels_the_pane() {
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
@@ -135,10 +135,10 @@ test_restart_relabels_the_pane() {
   orch_stub_teardown
 }
 
-# CEL-102: two omp processes resumed ONE session file for two days - an old
-# pane that had lost its herdr name, and a fresh `cel run orchestrator`. Each
-# answered mail and the owner got contradicting replies. A process already
-# resuming the file is refused by pane, whatever herdr thinks its name is.
+# Two processes resuming ONE session file (say an old pane that lost its herdr
+# name and a fresh `cel run orchestrator`) both answer mail, with contradicting
+# replies. A process already resuming the file is refused by pane, whatever
+# herdr thinks its name is.
 _resumer() { # <pid> <pane> <session>
   mkdir -p "$PROC/$1"
   printf '%s\0' omp --resume "$3" > "$PROC/$1/cmdline"
@@ -198,7 +198,7 @@ test_doctor_flags_two_live_processes_on_one_session() {
 }
 
 
-# Sourcery on #128: something that merely mentions --resume (a grep, an
+# Something that merely mentions --resume (a grep, an
 # editor) is not an agent resuming the session.
 test_session_resumers_ignore_processes_that_are_not_agents() {
   orch_stub_setup omp
@@ -232,7 +232,7 @@ test_session_resumers_count_a_child_of_the_holder_once_but_separate_holders_twic
   orch_stub_teardown
 }
 
-# Sourcery on #128: two launches racing before either agent is in /proc. The
+# Two launches racing before either agent is in /proc. The
 # first claims the session; the second, inside the claim window, is refused.
 test_session_claim_refuses_a_second_launch_inside_the_window() {
   orch_stub_setup omp
@@ -244,7 +244,7 @@ test_session_claim_refuses_a_second_launch_inside_the_window() {
   orch_stub_teardown
 }
 
-# CEL-103: a launch that fails after claiming its session gives the claim
+# A launch that fails after claiming its session gives the claim
 # back, so a retry a few seconds later is not refused for sixty of them.
 test_failed_restart_releases_its_session_claim() {
   orch_stub_setup omp
@@ -258,7 +258,7 @@ test_failed_restart_releases_its_session_claim() {
   orch_stub_teardown
 }
 
-# CEL-103: restarting the same pane twice in a minute is the pane replacing
+# Restarting the same pane twice in a minute is the pane replacing
 # itself, not a second resumer; its own claim must not refuse it.
 test_restart_of_the_same_pane_is_not_refused_by_its_own_claim() {
   orch_stub_setup omp
@@ -272,9 +272,8 @@ test_restart_of_the_same_pane_is_not_refused_by_its_own_claim() {
   orch_stub_teardown
 }
 
-# AH-261102: a lane recorded on omp and restarted with --profile opus (Claude)
-# planned to resume the omp transcript into Claude. Another runtime's session
-# is never resumed: the restart starts fresh, and says so.
+# A lane recorded on omp and restarted onto another runtime (Claude) never
+# resumes the omp transcript: the restart starts fresh, and says so.
 test_restart_onto_another_runtime_starts_fresh_instead_of_resuming() {
   orch_stub_setup claude
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/sessions/abc.jsonl" omp

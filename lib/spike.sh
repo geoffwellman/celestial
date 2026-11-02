@@ -9,8 +9,8 @@ _CEL_SPIKE=1
 
 # One question per unknown; Enter accepts the visible default. Reads stdin so
 # tests can feed answers; an empty read (EOF) also takes the default. A
-# private copy: lib/ws.sh owns the canonical one and these two tasks run in
-# parallel, so neither sources the other.
+# private copy of lib/ws.sh's _ask (this module does not source ws.sh); keep
+# the two in step.
 _ask() { # <question> <default>
   local a=""
   if [ -t 0 ]; then read -r -p "  $1${2:+ [$2]}: " a || true
@@ -56,7 +56,7 @@ cmd_promote() { # <name> [--no-remote] [--prefix P] [--gate G]
   else
     org="$(ws_org "$wsdir")"
     have gh || die "gh is required to create a remote (or pass --no-remote)"
-    # As the workspace's own account when it declares one (CEL-70).
+    # As the workspace's own account when it declares one.
     ws_gh "$wsdir" repo create "$org/$name" --private --source "$dest" --push
     url="git@github.com:$org/$name.git"
   fi
