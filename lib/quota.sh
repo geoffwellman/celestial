@@ -1145,6 +1145,13 @@ quota_orch_pool() {
 # projection is used / fraction-of-window-elapsed, and only once 5% of the
 # window has passed - earlier than that it is a guess about one burst. The
 # dashboard's usage card draws the same rule (tools/dash/v2.mjs).
+#
+# A WINDOW WHOSE RESET HAS PASSED IS NOT AT RISK (AH-261102). The list is
+# usually the cached one, and a cache file is only rewritten when someone asks
+# the providers again, so a 7d window read at 97% went on reading 97% "at
+# reset" a time already gone - the steward raised it sixty-one times. After
+# the reset that number describes a window that is over; it is skipped, so a
+# past reset is never quoted and the item comes down until a fresh read.
 quota_at_risk() {
   jq -c '
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
@@ -1156,6 +1163,7 @@ quota_at_risk() {
         | (.used_pct // 0) as $u
         | ((.name // "") | len) as $l
         | ((.resets_at // null) | if . == null then null else (sub("\\.[0-9]+"; "") | fromdateiso8601? // null) end) as $r
+        | select($r == null or $r > $now)
         | (if $l != null and $r != null then (($l - ($r - $now)) / $l) else null end) as $f
         | (if $f != null and $f > 0.05 and $f <= 1 then ([999, ($u / $f)] | min | round) else ($u | round) end) as $p
         | select($p >= 100 or $u >= 95)

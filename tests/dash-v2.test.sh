@@ -475,6 +475,19 @@ test_v2_usage_projects_each_window_and_flags_the_account_at_risk() {
   _v2_down
 }
 
+# AH-261102: a reading whose reset has passed is a window that is over - the
+# card does not flag it, the same rule as the steward's quota_at_risk.
+test_v2_usage_does_not_flag_a_window_whose_reset_has_passed() {
+  _v2_boot; _v2_quota_fixture
+  local past; past="$(date -u -d "@$(( $(date +%s) - 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  jq --arg p "$past" '.subscriptions[1].windows[0] |= (.used_pct = 97 | .resets_at = $p)' "$T/quota.json" > "$T/q.json" \
+    && mv "$T/q.json" "$T/quota.json"
+  local u; u="$(_v2_get "$(_v2_url usage)")"
+  assert_eq "$(printf '%s' "$u" | jq -r '[.summary.at_risk[].who] | join(",")')" "ana@alpha.test"
+  assert_eq "$(printf '%s' "$u" | jq '.groups[0].accounts[] | select(.who == "ben@alpha.test") | .at_risk')" "false"
+  _v2_down
+}
+
 test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   _v2_boot; _v2_quota_fixture
   local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
