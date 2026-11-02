@@ -9,9 +9,9 @@
 # asserted AGAINST - one api-key unlocks every subscription in the vault, so it
 # must never reach stdout, a service file or models.json.
 #
-# THE OMP STUB IS A TRIPWIRE. CEL-60 removed omp's broker and gateway; if any
-# `cel gateway` verb still shells out to omp, the argv log it writes fails the
-# last test in this file rather than being discovered on a live box.
+# THE OMP STUB IS A TRIPWIRE. No `cel gateway` verb may shell out to omp; if
+# one does, the argv log it writes fails the last test in this file rather
+# than being discovered on a live box.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/gateway.sh"
 
@@ -129,11 +129,10 @@ test_gateway_config_turns_session_affinity_on() {
   _gw_teardown
 }
 
-# THE MANAGEMENT API IS ON FOR LOOPBACK ONLY (CEL-80). CEL-60 left it out,
-# which left the web panel CLIProxyAPI serves at /management.html unable to
-# read or change anything. Keys checked against CLIProxyAPI 7.3.14's own
-# config struct, and again against 8.0.29's (CEL-135): `remote-management.{allow-remote, secret-key,
-# disable-control-panel}`.
+# THE MANAGEMENT API IS ON FOR LOOPBACK ONLY, so the web panel CLIProxyAPI
+# serves at /management.html can read and change the vault. Keys checked
+# against CLIProxyAPI's config struct (7.3.14 and 8.0.29):
+# `remote-management.{allow-remote, secret-key, disable-control-panel}`.
 test_gateway_config_enables_management_for_loopback_only() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
@@ -380,7 +379,7 @@ test_pi_models_block_carries_the_session_header_and_plain_model_ids() {
   gateway_pi_models_write "$T/pi/models.json"
   local f="$T/pi/models.json"
   assert_eq "$(jq -r '.providers | has("ompgw")' "$f")" false
-  # AH-261018: Codex ids ride the Responses provider, never chat completions.
+  # Codex ids ride the Responses provider, never chat completions.
   assert_eq "$(jq -r '.providers["ompgw-codex"].api' "$f")" openai-responses
   assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].id' "$f")" "gpt-5.5"
   assert_eq "$(jq -r '.providers["ompgw-codex"].models[0].contextWindow' "$f")" 272000
@@ -565,7 +564,7 @@ test_pi_models_provider_helper_recognises_claude_slash_model() {
   assert_eq "$(gateway_pi_provider_for_model "claude/claude-sonnet-4-6")" ompgw-claude
 }
 
-# --- the omp provider (CEL-136) -------------------------------------------
+# --- the omp provider -----------------------------------------------------
 
 # A vault with a PERSONAL claude account the omp orchestrator must never use,
 # two pool accounts, and a personal codex account. The email is matched in the
@@ -758,10 +757,9 @@ test_pi_models_skip_the_omp_scoped_ids() {
 
 # --- omp is gone ----------------------------------------------------------
 
-# CEL-60 replaced omp's broker and gateway with one CLIProxyAPI service. omp
-# stays on the box as an AGENT RUNTIME, but nothing under `cel gateway` may
-# call it any more - two credential vaults is the failure this ticket exists
-# to end.
+# One CLIProxyAPI service is the gateway. omp stays on the box as an AGENT
+# RUNTIME, but nothing under `cel gateway` may call it - two credential vaults
+# is the failure this design avoids.
 test_no_gateway_verb_invokes_omp() {
   _gw_setup
   cmd_gateway install --no-start >/dev/null
@@ -780,13 +778,10 @@ test_no_gateway_verb_invokes_omp() {
 
 # --- the pinned release ---------------------------------------------------
 
-# THE PIN HAS A FLOOR (CEL-135). 7.3.14 benches a Claude credential until the
-# MONTHLY BILLING RESET when one 429 carries an overage claim (upstream
-# #6465, fixed in 8.0.22) - on a scratch copy of this box's config, a fake
-# upstream sending one such 429 with Retry-After: 3 was never chosen again in
-# 60s under 7.3.14 and served again after 20s under 8.0.29. 8.0.17/8.0.25
-# fix two more cooldown faults of the same family (#6415, #6545). A pin
-# rolled back below 8.0.22 brings that back, so it goes red here.
+# THE PIN HAS A FLOOR. Below 8.0.22, CLIProxyAPI benches a Claude credential
+# until the MONTHLY BILLING RESET when one 429 carries an overage claim
+# (upstream #6465), and 8.0.17/8.0.25 fix two more cooldown faults of the same
+# family (#6415, #6545). A pin rolled back below 8.0.22 goes red here.
 test_gateway_pinned_release_is_at_least_8_0_22() {
   local v; v="$(yq -r '.base_tools["cli-proxy-api"].version' "$CEL_ROOT/agents.yaml")"
   assert_eq "$(printf '%s\n8.0.22\n' "$v" | sort -V | head -1)" "8.0.22"

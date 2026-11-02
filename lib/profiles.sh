@@ -222,7 +222,7 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
 # env key to check (the gateway mints the OAuth), no fallback provider to swap
 # to, and no balance endpoint - the account table is `cel gateway status`.
 # What IS the plane's business is the pair of ways this fails silently. A
-# gateway that is down serves no models at all, and a credential the broker
+# gateway that is down serves no models at all, and a credential the gateway
 # has disabled vanishes from /v1/models entirely, so a worker sent there dies
 # with "Unknown model" and looks from the outside like a worker thinking hard.
 # Both are vetoes, decided here, before a pane spawns.
@@ -272,16 +272,21 @@ _profile_gateway_route() { # <profile name> [runtime]
     [ "$PROFILE_GATEWAY_ACCOUNTS" -gt 0 ] 2>/dev/null \
       || PROFILE_VETO="the gateway has no usable $prov account (a disabled credential is not listed at all) - cel gateway login $prov"
   fi
-  if [ -n "$PROFILE_VETO" ]; then
-    PROFILE_NOTE="VETOED: $PROFILE_VETO"
-    c_err "profile $name: $PROFILE_VETO"
-  else
-    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
-  fi
+  _profile_gateway_verdict "$name" "via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
   return 0
 }
 
-# Codex through the gateway (AH-261018), for pi AND omp. The model is the
+# PROFILE_NOTE for a gateway route: the veto, said on stderr too, or <note>.
+_profile_gateway_verdict() { # <profile name> <note when admitted>
+  if [ -n "$PROFILE_VETO" ]; then
+    PROFILE_NOTE="VETOED: $PROFILE_VETO"
+    c_err "profile $1: $PROFILE_VETO"
+  else
+    PROFILE_NOTE="$2"
+  fi
+}
+
+# Codex through the gateway, for pi AND omp. The model is the
 # profile's own, spelled the way the runtime's provider block lists it
 # (`ompgw-codex/<id>` for pi, `celgw-codex/<id>` for omp) - the id the profile
 # names is never swapped for a neighbour: an id the gateway does not publish is
@@ -305,16 +310,11 @@ _profile_gateway_route_codex() { # <profile name> <pi|omp>
       PROFILE_VETO="the gateway does not publish $id (its Codex catalog: cel gateway status; ids are never substituted)"
     fi
   fi
-  if [ -n "$PROFILE_VETO" ]; then
-    PROFILE_NOTE="VETOED: $PROFILE_VETO"
-    c_err "profile $name: $PROFILE_VETO"
-  else
-    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
-  fi
+  _profile_gateway_verdict "$name" "via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts usable)"
   return 0
 }
 
-# omp through the gateway (CEL-136): omp's `celgw` provider (models.yml) and
+# omp through the gateway: omp's `celgw` provider (models.yml) and
 # the gateway's omp-PREFIXED id, served only by the scoped pool - see
 # lib/gateway.sh "the omp provider". The model is the profile's model, never
 # a substitute: no prefixed id for it is a veto by name. Claude only, because
@@ -347,12 +347,7 @@ _profile_gateway_route_omp() { # <profile name>
       PROFILE_VETO="the gateway does not publish $GATEWAY_OMP_PREFIX/$id (cel gateway omp-scope --check)"
     fi
   fi
-  if [ -n "$PROFILE_VETO" ]; then
-    PROFILE_NOTE="VETOED: $PROFILE_VETO"
-    c_err "profile $name: $PROFILE_VETO"
-  else
-    PROFILE_NOTE="via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts in the omp pool)"
-  fi
+  _profile_gateway_verdict "$name" "via gateway ($PROFILE_GATEWAY_ACCOUNTS accounts in the omp pool)"
   return 0
 }
 
@@ -399,10 +394,9 @@ _profile_quota_check() { # <wsdir> <name> <fallback-model>
 #
 # "The env var is set" is NOT the same as "this account gets billed". omp keeps
 # its own credential vault and that vault beats the environment outright, so a
-# key exported from env.local can be silently ignored. That is not theoretical:
-# on 2026-09-11 a workspace's OpenRouter traffic went to the box owner's
-# personal account and drained it, while `cel profiles` reported the route
-# reachable - because it was checking a variable omp never reads.
+# key exported from env.local can be silently ignored - and the workspace's
+# traffic billed to whichever account omp holds, while a check of the
+# variable reports the route reachable.
 #
 # Keys are compared by HASH and never printed, and a mismatch is a warning
 # rather than a refusal: the run may well be what you wanted, but you should
