@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-131: every agent-to-agent message goes through the inbox. Role and skill
+# Every agent-to-agent message goes through the inbox. Role and skill
 # texts may name `herdr agent prompt` only for the one-time kickoff that
 # launches an agent, or to say it is never used between agents.
 test_role_and_skill_texts_never_prompt_between_agents() {

@@ -17,26 +17,18 @@ _CEL_REGISTRY=1
 _CEL_REGISTRY_DEFAULT="$HOME/.local/share/cel/registry.yaml"
 
 # A LOCK MUST NOT OUTLIVE THE PROCESS THAT TOOK IT. flock lives on the open
-# file description, not on the process, so any child that inherits the
-# descriptor keeps the lock held after its parent is gone - and a lock held by
-# a process that has nothing to do with the data looks exactly like a lock in
-# use, so nothing recovers from it. On 2026-09-16 every `cel-fanout release`
-# on one workspace blocked on .cel/delegations.lock for an hour and a half
-# behind seven test servers a killed gate had left running on inherited
-# descriptors. Bash cannot set FD_CLOEXEC, so every spawn out of a locked
-# region goes through here instead: the descriptor is closed and then the
-# command is exec'd, leaving no copy of the lock anywhere down the tree - not
-# even in an intermediate shell, which would hold it just as effectively as
-# the child. It is a SUBSHELL function on purpose: the close (and the exec)
-# must happen in a forked copy, never in the caller - bash 5.3 can run a
-# command substitution without forking, and a bare `exec` there would replace
-# the caller outright and drop the lock. An external command is exec'd so no
-# intermediate shell is left behind; a shell function or builtin cannot be
-# exec'd and is called in place, which is equally safe once the descriptor is
-# closed. An empty <fd> means "no lock held" and is not an error, so callers
-# pass "${fd:-}" unguarded. A BACKGROUNDED spawn does not go through here:
-# `&` forks a job shell that would keep its own copy of the descriptor for as
-# long as the child runs, so write `cmd {fd}>&- &` and close it inline.
+# file description, so any child that inherits the descriptor keeps the lock
+# held after its parent is gone, and nothing can tell that from a lock in use.
+# Bash cannot set FD_CLOEXEC, so every spawn out of a locked region goes
+# through here: the descriptor is closed and then the command is exec'd,
+# leaving no copy of the lock down the tree - not even in an intermediate
+# shell. It is a SUBSHELL function on purpose: bash 5.3 can run a command
+# substitution without forking, and a bare `exec` there would replace the
+# caller and drop the lock. A shell function or builtin cannot be exec'd and is
+# called in place, which is equally safe once the descriptor is closed. An
+# empty <fd> means "no lock held", so callers pass "${fd:-}" unguarded. A
+# BACKGROUNDED spawn does not go through here: `&` forks a job shell that keeps
+# its own copy of the descriptor, so write `cmd {fd}>&- &` and close it inline.
 lock_spawn() ( # <fd>[ <fd>...] <cmd> [args...] - descriptors as ONE argument
   local _lock_fds="$1" _lock_fd _lock_kind; shift
   [ $# -gt 0 ] || return 2
@@ -46,12 +38,10 @@ lock_spawn() ( # <fd>[ <fd>...] <cmd> [args...] - descriptors as ONE argument
 )
 CEL_REGISTRY="${CEL_REGISTRY:-$_CEL_REGISTRY_DEFAULT}"
 
-# One-time migration from the pre-public in-repo location. Fires only when the
-# caller has not overridden CEL_REGISTRY (tests always do), the new file does
-# not exist yet, and the old one does. mv, not cp: the repo copy is untracked
-# now, and leaving private entries on disk inside a public checkout is the
-# exact failure this move exists to end. Warning rides stderr - accessors run
-# inside command substitutions.
+# Migrates a legacy $CEL_ROOT/registry.yaml to $CEL_REGISTRY, only when that is
+# the default path and does not exist yet. Copied atomically, then the repo copy
+# is REMOVED: private entries must not stay inside a public checkout. Warns on
+# stderr - accessors run inside command substitutions.
 _registry_migrate() (
   [ "$CEL_REGISTRY" = "$_CEL_REGISTRY_DEFAULT" ] || return 0
   [ ! -f "$CEL_REGISTRY" ] || return 0

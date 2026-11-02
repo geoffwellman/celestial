@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # lib/boxguard.sh - admission by free memory, the warning line, one heavy
-# build at a time and the manager watchdog (CEL-122). The box is driven by a
+# build at a time and the manager watchdog. The box is driven by a
 # fixture meminfo through CEL_MEMINFO: a test may not arrange a full box.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/boxguard.sh"
@@ -65,7 +65,7 @@ test_boxguard_pressure_is_the_warning_line() {
   rm -rf "$T"
 }
 
-# CEL-127: swap widens the warning only up to 2x the REFUSE floor, never 2x the warning line.
+# Swap widens the warning only up to 2x the REFUSE floor, never 2x the warning line.
 test_boxguard_warning_ignores_cold_swap_above_twice_the_floor() {
   _bg_meminfo 9961472 8388608 1090519   # 9.5 GB free, 87% swap
   printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n' > "$T/psi"
@@ -225,7 +225,7 @@ test_watchdog_install_refuses_when_sudo_needs_a_password() {
   rm -rf "$T"
 }
 
-# AH-261018: with box.max_swap_pct at 100 the doubled band cannot fire, so the
+# With box.max_swap_pct at 100 the doubled band cannot fire, so the
 # refusal and the doctor sentence must not name one; the floor itself is kept.
 test_boxguard_text_names_no_swap_band_when_it_is_disabled() {
   _bg_meminfo 1048576 8388608 838860    # 1 GB free, below any floor
@@ -240,7 +240,7 @@ test_boxguard_text_names_no_swap_band_when_it_is_disabled() {
   rm -rf "$T"
 }
 
-# AH-261021: swap fullness alone never raises a line; real PSI stalls do.
+# Swap fullness alone never raises a line; real PSI stalls do.
 _bg_psi() { # <some-avg60> <full-avg60>
   printf 'some avg10=0.00 avg60=%s avg300=0.00 total=1\nfull avg10=0.00 avg60=%s avg300=0.00 total=1\n' "$1" "$2" > "$T/psi"
   export CEL_PSI_MEMORY="$T/psi"

@@ -9,11 +9,11 @@ _CEL_MANIFEST_LIB=1
 # Overridable so tests can point at a fixture.
 CEL_MANIFEST="${CEL_MANIFEST:-$CEL_ROOT/agents.yaml}"
 
-# YQ ONCE, JQ AFTER (CEL-111). `yq` on this box is the pipx Python wrapper: an
-# interpreter start, then a jq, for every field - and field access is the hot
-# path (agent_get alone runs dozens of times per `cel run`). The manifest is
-# converted to JSON once and cached beside its path; every query after that is
-# a plain jq on the cache, rebuilt only when agents.yaml is newer than it.
+# YQ ONCE, JQ AFTER. The Python `yq` wrapper costs an interpreter start plus a
+# jq per field, and field access is the hot path (agent_get runs dozens of
+# times per `cel run`). The manifest is converted to JSON once and cached
+# beside its path; every query after that is a plain jq on the cache, rebuilt
+# only when agents.yaml is newer than it.
 _manifest_json() { # -> path of a JSON copy of $CEL_MANIFEST
   local d="${CEL_MANIFEST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/manifest}"
   local key="${CEL_MANIFEST//\//%}"
@@ -82,7 +82,7 @@ agent_guard_hook() { # <runtime> <flag|file>
   _mq -r --arg a "$1" --arg k "$2" '.agents[$a].guard_hook[$k] // "" | tostring'
 }
 
-# How a runtime resumes a session (CEL-63): flag and value kind, or "".
+# How a runtime resumes a session: flag and value kind, or "".
 agent_resume() { # <runtime> <flag|value>
   _mq -r --arg a "$1" --arg k "$2" '.agents[$a].resume[$k] // "" | tostring'
 }

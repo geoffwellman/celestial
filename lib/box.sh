@@ -1,14 +1,7 @@
 # shellcheck shell=bash
 # lib/box.sh - the box itself is a resource the factory spends.
 #
-# The plane measured its machines and never its floor space, so the first
-# symptom of a full disk was a build failing rather than a dashboard going
-# amber, and the only remedy anyone had was a human remembering to run
-# `docker system prune` by hand. Measured 2026-09-20: 144G of 193G used, of
-# which `cel gc` knew about 9.3G (worker worktrees), Docker held ~74G with 41G
-# of images, 8.7G of build cache and a 3.5G exited container reclaimable right
-# then, and toolchain caches another 10G that regenerates on demand. The word
-# "docker" did not appear anywhere in lib, bin, core or tools.
+# Reports disk use by class and sweeps what the box can regenerate.
 #
 # THREE KINDS OF LITTER, AND THEY ARE NOT ALIKE:
 #   ours         the factory made it (worktrees, ~/.cache/cel, scratch)
@@ -30,11 +23,8 @@ _CEL_BOX=1
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"   # the reviewer registry, for the report
 
-# FOURTEEN DAYS on images and build cache. The working set on a real box is
-# three to six days old and the superseded build tags are two weeks and older;
-# seven days would evict an image somebody is still bisecting against, and
-# thirty frees almost nothing extra. Exited containers carry no age filter at
-# all: nothing depends on a dead container.
+# The AGE column shown for the docker rows. The docker sweep itself has no age
+# filter: it removes every unused image and all build cache.
 _BOX_DOCKER_AGE_DAYS=14
 
 # Overridable so the suite can drive the sweepers against a docker that is
@@ -43,10 +33,8 @@ _BOX_DOCKER_AGE_DAYS=14
 # unset and resolves plain `docker` on PATH.
 _box_docker_bin() { printf '%s' "${CEL_BOX_DOCKER:-docker}"; }
 
-# The keep list. Re-pulling a 13M base image to save nothing is a bad trade,
-# however old the local copy is, so base images are exempt regardless of age.
-# A repository containing a `/` with no local build history is a pull, not
-# something this box made.
+# The keep list. Re-pulling a base image to save nothing is a bad trade, so
+# base images are exempt regardless of age.
 _box_docker_keep_patterns() { printf '%s\n' 'ubuntu:*' 'alpine:*'; }
 
 # THE POLICY TABLE. class <TAB> path <TAB> age_days.
@@ -95,7 +83,7 @@ _box_bytes() { # <path> -> bytes, 0 when absent or unreadable
 # Docker prints sizes for humans ("8.7GB (21%)"), and every number this file
 # reports has to add up with every other one, so they are converted once here.
 # Docker uses decimal units for kB/MB/GB and binary ones only when it says
-# KiB/MiB/GiB; treating them alike overstates a 41G image store by 10%.
+# KiB/MiB/GiB; treating them alike overstates sizes by up to 10%.
 _box_human_bytes() { # <human size> -> bytes
   printf '%s' "$1" | awk '
     { s = $0
@@ -251,10 +239,9 @@ _box_docker_used() { # <in-use list> <id> <repo> <tag> -> 0 when referenced
   return 1
 }
 
-# THE ONE SELECTION. The dry run prints it; the real run deletes it. There is
-# no second path that can disagree - which is what CEL-88 was: the real path
-# kept every image whose `{{.Parent}}` was empty (every BuildKit or pulled
-# image), and freed nothing while the dry run promised 58 GB.
+# ONE SELECTION per sweep: the dry run prints it and the real run deletes it,
+# so the two cannot disagree. An empty `{{.Parent}}` is no reason to keep:
+# every BuildKit-built or pulled image has one.
 _box_docker_plan() { # -> "image<TAB>id<TAB>bytes" lines, then "cache<TAB>-<TAB>bytes"; 1 when unknowable
   local used id repo tag size json
   local -A keep=() bytes=() order=()
@@ -394,11 +381,7 @@ box_summary_fragment() { # the per-class bytes cel gc appends to its own line
 
 # ------------------------------------------------------------ the reviewers
 
-# 3 GB of idle reviewer panes is a bigger number than most of the disk rows
-# above, and it was invisible: this report measured the floor and never the
-# agents standing on it. `box memory low: 1.4G of 23G available` went into
-# root's mailbox all day on 2026-09-21 and nothing anywhere could name the
-# seven reviewer panes that were most of it.
+# Idle reviewer panes can hold more than most disk rows, so they are reported.
 #
 # Bytes, not kB, so the number adds up with every other one here. A pane
 # whose process cannot be read counts in the total as zero rather than
@@ -408,9 +391,8 @@ box_reviewers_json() { # -> {count, bytes}
   local rows panes agents='{"result":{"agents":[]}}' agent backend n=0 total=0 pane info pid rss
   rows="$(reviewers_rows 2>/dev/null)" || rows='[]'
   panes="$(printf '%s' "$rows" | jq -r '.[].pane // empty' 2>/dev/null)"
-  # The panes that are THERE, not the ones that were written down. Every
-  # reviewer older than the registry has no row, and those were the seven
-  # that made this row worth measuring.
+  # The panes that are THERE, not only the registered ones: reviewers older
+  # than the registry have no row.
   if have jq; then
     agents="$(cel_agent_list 2>/dev/null)" || agents='{"result":{"agents":[]}}'
     panes="$panes"$'\n'"$(reviewers_discover "$agents" | cut -f3)"
@@ -542,10 +524,8 @@ box_doctor_line() {
       + [{name: "reviewer panes", bytes: (.reviewers.bytes // 0)}])
     | sort_by(-.bytes) | .[0] // {name:"nothing", bytes:0}
     | "\(.name) \(.bytes)"')"
-  # THE REMEDY BELONGS IN THE FINDING. When the largest reclaimable thing is
-  # a pile of finished reviewers, `cel gc --box` is the wrong instruction:
-  # the plain sweep is what closes them, and sending a reader to the docker
-  # flag for a memory problem is how three gigabytes stayed put for a day.
+  # THE REMEDY BELONGS IN THE FINDING. Finished reviewers are closed by the
+  # plain sweep, not by `--box`, so the remedy names that.
   remedy="cel gc --box clears it, cel box space shows the rest"
   case "${largest% *}" in
     "reviewer panes") remedy="cel gc closes every reviewer whose PR is merged or closed; cel box space shows the rest" ;;

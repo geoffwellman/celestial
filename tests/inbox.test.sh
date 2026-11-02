@@ -164,9 +164,8 @@ test_stop_hook_fails_open_without_cel() {
 }
 
 # A pane derives its own mailbox with _inbox_sanitise - lowercased, cut to 32
-# characters - but the sender wrote whatever string it had to hand, and the two
-# agreed only by luck. Observed in a live inbox: fifty-odd messages across a
-# dozen phantom mailboxes, several of them the same recipient spelled two ways.
+# characters - so send normalises whatever string the sender had to hand into
+# that same name.
 test_the_recipient_is_normalised_at_send_time() {
   local T; T="$(mktemp -d)"; export CEL_INBOX_DIR="$T"
   cel_inbox_send() { ( CEL_INBOX_ME=tester _inbox_send "$@" --workspace w ); }
@@ -285,9 +284,8 @@ test_inbox_discovery_rejects_an_invalid_merged_roster() {
 }
 
 # A PRODUCT orchestrator stands in <ws>/products/<p>, not in a repo checkout,
-# and until it was taught that coordinate it drained root's mailbox - the same
-# silent theft of root's mail the repos/ case was written to stop. Identity
-# still comes from the PATH: no workspace.yaml lookup, no env plumbing.
+# and reads <p>-orch, never root's mailbox. Identity still comes from the
+# PATH: no workspace.yaml lookup, no env plumbing.
 
 _inbox_ws_fixture() { # a workspace dir with a product and a repo, in $IT
   IT="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$IT/"
@@ -308,9 +306,8 @@ test_inbox_me_still_knows_repos_and_root() {
 
 # --- the console stands outside every workspace ------------------------------
 # Identity comes from where an agent stands, and the console stands nowhere:
-# its directory is not a workspace, so without a case of its own it fell
-# through to "root" and drained the root orchestrator's mailbox - the same
-# silent theft the products/ case was written to stop.
+# its directory is not a workspace, so it needs a case of its own rather than
+# falling through to "root".
 test_inbox_me_is_console_from_its_directory_or_its_role() {
   local C; C="$(mktemp -d)"
   assert_eq "$(CEL_INBOX_ME='' CEL_CONSOLE_DIR="$C" bash -c 'cd "$1"; source "$2/lib/inbox.sh"; _inbox_me' _ "$C" "$CEL_ROOT")" "console"
@@ -452,11 +449,8 @@ EOS
 }
 
 # --- rollup: one open item per condition --------------------------------------
-# Measured in a live mailbox: twenty-four open `blocked` items from the
-# steward, all the same sentence about the same exhausted provider, one every
-# four hours. The condition was one condition; the console showed it
-# twenty-four times. A fingerprint makes the repeat an UPDATE on the item that
-# is already open rather than another item nobody will read.
+# A fingerprint makes a repeat an UPDATE on the item that is already open
+# rather than another item nobody will read.
 _inbox_raw() { # <ws> <id> <ts> <from> <kind> <message>
   local f="$CEL_INBOX_DIR/$1.jsonl"; mkdir -p "$CEL_INBOX_DIR"
   jq -nc --arg id "$2" --arg ts "$3" --arg from "$4" --arg kind "$5" --arg msg "$6" \
@@ -544,8 +538,7 @@ test_resolve_all_counts_a_rolled_up_item_once() {
   rm -rf "$CEL_INBOX_DIR"
 }
 
-# The console loops the workspaces itself today, but a chain (or a human) must
-# be able to see everything waiting in ONE call.
+# A chain (or a human) must be able to see everything waiting in ONE call.
 test_inbox_open_all_workspaces_prefixes_every_line() {
   _inbox_registry_fixture
   ( CEL_INBOX_ME=t _inbox_send root "alpha question" --kind decision --workspace alpha ) >/dev/null 2>&1
@@ -558,18 +551,15 @@ test_inbox_open_all_workspaces_prefixes_every_line() {
   rm -rf "$CEL_INBOX_DIR" "$REG"
 }
 
-# --- CEL-43: root is a mailbox nobody has to read ---------------------------
+# --- root is a mailbox nobody has to read ---------------------------------
 #
-# Counted on one box on 2026-09-19: root had taken 553 messages since the 10th
-# and 466 of them were `status`. Three faults, three groups of assertions -
-# status stops being mail, a mailbox with no reader is a fault, and what is
-# left gets ranked. NOTHING HERE DELETES A MESSAGE, so every test below ends
-# by asserting the file is exactly as long as it was.
+# Status stops being mail, a mailbox with no reader is a fault, and what is
+# left gets ranked. NOTHING HERE DELETES A MESSAGE, so the tests below check
+# the file is exactly as long as it was.
 _inbox_lines() { wc -l < "$CEL_INBOX_DIR/${1:-demo}.jsonl" 2>/dev/null | tr -d ' ' || printf 0; }
 
-# Rule 6 told every orchestrator to report ticket status to root, and that one
-# instruction is the 466. The warning is the migration: a role file in the
-# wild still does this, so the message is delivered and the sender is told.
+# Status to root warns rather than refusing: a role file may still send it,
+# so the message is delivered and the sender is told.
 test_status_to_root_warns_and_still_delivers() {
   _inbox_sandbox
   local err
@@ -609,8 +599,8 @@ test_inbox_reader_of_sees_a_pane_a_console_or_nobody() {
   export STUB_AGENTS='{"result":{"agents":[{"name":"widget-orch"}]}}'
   assert_eq "$(inbox_reader_of alpha widget-orch)" "widget-orch"
   assert_eq "$(inbox_reader_of alpha root)" ""
-  # the console watches every workspace's root mailbox at once (CEL-7), and
-  # CEL-32's marker is what proves one is actually running
+  # the console watches every workspace's root mailbox at once, and its
+  # CEL_ROLE=console environ marker is what proves one is actually running
   mkdir -p "$CEL_PROC_DIR/4242"
   printf 'CEL_ROLE=console\0HOME=/tmp\0' > "$CEL_PROC_DIR/4242/environ"
   assert_eq "$(inbox_reader_of alpha root)" "console"
@@ -626,8 +616,7 @@ test_inbox_reader_of_root_is_a_live_core() {
   rm -rf "$RB" "$CEL_INBOX_DIR"
 }
 
-# An escalation is by definition the kind that cannot wait, and it was the one
-# kind that raised nothing: 72 of them landed in a mailbox with no reader.
+# An escalation cannot wait either: it raises a notification like a decision.
 test_watch_raises_a_notification_for_an_escalation_too() {
   _inbox_notify_fixture
   _inbox_watch_then_send escalation 1
@@ -637,8 +626,8 @@ test_watch_raises_a_notification_for_an_escalation_too() {
 
 # --- ranking what is left ---------------------------------------------------
 # The model supplies ONE thing: a level per message. Counts, ages, ordering
-# and the cut are the code's, so an unreachable model degrades to today's
-# ordering rather than losing messages.
+# and the cut are the code's, so an unreachable model degrades to the kind
+# defaults rather than losing messages.
 _triage_fixture() {
   _inbox_sandbox
   source "$CEL_ROOT/lib/triage.sh"
@@ -691,9 +680,8 @@ test_a_below_threshold_answer_keeps_its_kinds_default_rank() {
 # A message is scored ONCE. The console redraws every ten seconds; a score per
 # draw is a provider bill per operator per day. This holds however the answer
 # came back: a confident score AND a below-floor one are each asked about at
-# most once, because the fallback is remembered too. The below-floor case was
-# the leak - an unsure answer wrote no cache line and was re-posted every draw,
-# and those are exactly the messages the model stays unsure about.
+# most once, because the fallback is remembered too - the model stays unsure
+# about the same messages, so an uncached unsure answer would re-post forever.
 test_a_message_is_scored_once_however_often_it_is_drawn() {
   _triage_fixture
   _triage_send decision "LEVEL2 ship the bundle or hold"
@@ -708,11 +696,9 @@ test_a_message_is_scored_once_however_often_it_is_drawn() {
   rm -rf "$TB" "$CEL_INBOX_DIR"
 }
 
-# An unreachable OR FAILING model is today's ordering, not an error and not a
-# loss - and it is asked at most ONCE, not a doomed HTTP call per ten-second
-# redraw. A failed post records the fallback for every pending id so the next
-# draw reads the cache instead of re-posting. The old code wrote nothing on a
-# failure and re-posted forever.
+# An unreachable OR FAILING model is the kind-default ordering, not an error
+# and not a loss - and it is asked at most ONCE, not per redraw: a failed post
+# records the fallback for every pending id so the next draw reads the cache.
 test_an_unreachable_model_falls_back_to_the_kind_defaults() {
   _triage_fixture
   # a model that is reached but FAILS: it logs one line per attempt, then
@@ -756,12 +742,8 @@ test_open_ranked_shows_the_top_three_and_then_how_many_more() {
 }
 
 # ---- an empty answer is not the same as an answer that could not be given --
-# Measured from a herdr worktree: `cel inbox read --for celestial-orch` printed
-# nothing and exited 0 with 127 messages waiting, because a cwd outside every
-# registered workspace derives no workspace and the reader went looking in a
-# mailbox that does not exist. Three states shared one output - no mail, mail
-# somewhere else, and no mailbox at all - and a 40-hour-old escalation sat in
-# the third of them all morning.
+# Three states must not share one output: no mail, mail somewhere else, and
+# no mailbox at all (a cwd outside every workspace derives none).
 
 test_inbox_read_outside_any_workspace_refuses_rather_than_reading_empty() {
   _inbox_sandbox; export CEL_INBOX_DIR
@@ -795,9 +777,8 @@ test_inbox_read_with_no_mail_names_the_reader_and_the_workspace() {
   rm -rf "$CEL_INBOX_DIR"
 }
 
-# Mail you have, elsewhere: today the only way to learn this is to guess
-# --all-workspaces. Saying it must not read the other mailbox - the cursor is
-# per reader and must not move for a workspace nobody asked about.
+# Mail you have, elsewhere, is said without reading the other mailbox - the
+# cursor is per reader and must not move for a workspace nobody asked about.
 test_inbox_read_says_where_the_mail_is_when_it_is_in_another_workspace() {
   _inbox_registry_fixture
   ( CEL_INBOX_ME=t _inbox_send widget-orch "over here" --workspace beta ) >/dev/null 2>&1
@@ -849,12 +830,9 @@ test_inbox_read_json_distinguishes_the_three_states_by_field() {
 }
 
 # A TYPO IN --workspace IS THE SAME FAULT ONE ARGUMENT TO THE LEFT. root,
-# console and all are addresses rather than agents and exist before their
-# first message - but only somewhere that exists. Checking the reader first
-# meant `--workspace ghost-ws --for root` answered "no unread mail in
-# ghost-ws" and exited 0, and root is what the steward, fleet and every
-# orchestrator escalate to: the commonest reader of all went back to calm
-# silence on a stale or mistyped workspace.
+# console and all are addresses that exist before their first message - but
+# only in a workspace that exists, so an unknown --workspace is never "no
+# unread mail", even for root.
 test_inbox_read_does_not_call_an_unregistered_workspace_empty_for_root() {
   _inbox_registry_fixture
   ( CEL_INBOX_ME=t _inbox_send root "read me" --workspace alpha ) >/dev/null 2>&1
@@ -877,8 +855,7 @@ test_inbox_read_does_not_call_an_unregistered_workspace_empty_for_root() {
 
 # THE SAME CLASS OF ANSWER EXITS THE SAME WAY. "standing here names no
 # workspace" and "--workspace names one nothing knows" are one fault - the
-# question could not be asked - and a caller that branches on status saw one
-# of them as a refusal and the other as a clean, empty, successful read.
+# question could not be asked - so both exit 2.
 test_inbox_a_workspace_that_does_not_exist_exits_non_zero_either_way() {
   _inbox_registry_fixture
   local d rc=0; d="$(mktemp -d)"
@@ -902,8 +879,7 @@ test_inbox_a_workspace_that_does_not_exist_exits_non_zero_either_way() {
   rm -rf "$d" "$CEL_INBOX_DIR" "$REG"
 }
 
-# CEL-96: a fingerprint rolls up whatever the kind. A `status` with an fp was
-# appended fresh every tick, because only decision/blocked were looked up.
+# A fingerprint rolls up whatever the kind, `status` included.
 test_a_fingerprint_rolls_up_a_status_item_too() {
   _inbox_sandbox
   local a b
@@ -914,11 +890,8 @@ test_a_fingerprint_rolls_up_a_status_item_too() {
   rm -rf "$CEL_INBOX_DIR"
 }
 
-# CEL-111: ONE WATCH IS ONE SMALL PROCESS GROUP, NOT A TREE PER WORKSPACE.
-# --all-workspaces used to fork a `tail | jq | while` pipeline per mailbox plus
-# a wrapper subshell each; with twenty agents on a five-workspace box that was
-# ~200 watcher processes. A single merged tail is bounded regardless of how
-# many workspaces are registered.
+# ONE WATCH IS ONE SMALL PROCESS GROUP, NOT A TREE PER WORKSPACE: a single
+# merged tail stays bounded however many workspaces are registered.
 _inbox_watch_bg() { # <parent-pid> <outfile> -> prints the watcher's pgid
   CEL_INBOX_ME=console CEL_INBOX_NOTIFY=0 CEL_WATCH_PARENT_POLL=1 \
     setsid bash -c 'source "$1/lib/inbox.sh"; _inbox_watch --for root --all-workspaces --parent "$2"' _ "$CEL_ROOT" "$1" > "$2" 2>/dev/null &
@@ -973,7 +946,7 @@ test_inbox_watch_group_exits_when_its_parent_dies() {
   rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
 }
 
-# Review on #136: --all-workspaces over exactly one mailbox - tail prints no
+# --all-workspaces over exactly one mailbox - tail prints no
 # `==>` header for a single file - still names the workspace.
 test_inbox_watch_all_workspaces_with_one_workspace_names_it() {
   _inbox_sandbox; export CEL_INBOX_DIR
@@ -988,8 +961,8 @@ test_inbox_watch_all_workspaces_with_one_workspace_names_it() {
   rm -f "$out"; rm -rf "$CEL_INBOX_DIR" "$REG"
 }
 
-# CEL-122: a worker launched with CEL_INBOX_WS but standing outside every
-# workspace sent to `default`, and its report never reached its orchestrator.
+# A worker launched with CEL_INBOX_WS but standing outside every workspace
+# sends to that workspace, not `default`.
 test_inbox_send_outside_any_workspace_honours_cel_inbox_ws() {
   _inbox_sandbox
   local d; d="$(mktemp -d)"

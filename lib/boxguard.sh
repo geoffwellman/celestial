@@ -1,12 +1,6 @@
 # shellcheck shell=bash
-# THE BOX SURVIVES MEMORY PRESSURE (CEL-122).
-#
-# 2026-10-12: 23 GB of RAM and 7 GB of swap full, load 182. The kernel's
-# OOM-killer took rustc and node, then the user systemd manager itself - and
-# with it the steward, gc, the dashboard and every transient unit. One
-# orchestrator had six release cargo builds going at once, four workers
-# compiling the same crate. Nothing in the plane asked whether the box could
-# afford another worker or another build before starting one.
+# THE BOX SURVIVES MEMORY PRESSURE: nothing may start a worker or a heavy
+# build the box cannot afford, and an OOM-killed user manager comes back.
 #
 # Four guards live here, all small and all overridable by env for the suite:
 #   - admission: no new worker while MemAvailable is under a floor, or under
@@ -89,18 +83,16 @@ _boxguard_stalls() {
   printf 'memory stalls at some %s%% / full %s%%' "${some:-?}" "${full:-?}"
 }
 
-# PRESSURE IS LOW MemAvailable, NOT SWAP (CEL-126), AND SWAP FULLNESS NEVER
-# RAISES A LINE BY ITSELF. This box keeps swap at 99-100% with cold pages of
-# idle agents (swappiness 10) while PSI reads ~0, so a swap clause made both
-# lines double permanently and refused real work at 5 GB free. The 12 Oct OOM
-# had MemAvailable near 0, which the plain floor still catches. Now:
+# PRESSURE IS LOW MemAvailable, NOT SWAP, AND SWAP FULLNESS NEVER RAISES A
+# LINE BY ITSELF: idle agents' cold pages keep swap near full while PSI reads
+# ~0. A swap clause would double both lines permanently. The rule:
 #   pressured below <line>  =  avail < line,
 #                           or avail < 2*line AND the kernel shows stalls
 #                              (PSI some/full avg60 at box.psi_some_pct /
 #                              box.psi_full_pct, default 10 each),
 #                           or avail < 2*line, PSI UNREADABLE and swap over
-#                              box.max_swap_pct (the old rule, so a box
-#                              without PSI keeps its protection).
+#                              box.max_swap_pct (so a box without PSI keeps
+#                              its protection).
 # High swap with plenty available, or with calm PSI, is doctor info only.
 # Admission and the warning line both go through this one helper.
 _boxguard_under() { # <avail> <swap> <line-mb>
@@ -162,8 +154,8 @@ boxguard_pressure() {
     return 0
   fi
   [ "${avail:--1}" -ge 0 ] || return 1
-  # CEL-127: stalls widen the band only up to 2x the REFUSE floor, never 2x the
-  # warning line - 9.5 GB free with cold swap warned every orchestrator.
+  # Stalls widen the band only up to 2x the REFUSE floor, never 2x the
+  # warning line, so cold swap with plenty free does not warn.
   [ "$avail" -lt "$(boxguard_warn_avail_mb)" ] && return 0
   _boxguard_under "$avail" "$swap" "$(boxguard_min_avail_mb)"
 }
@@ -189,8 +181,8 @@ boxguard_warning_text() { # [what-gc-did]
   printf '%s\n' "$msg"
 }
 
-# Half the cores, at least one: four workers each running cargo at full
-# width was most of the load-182 afternoon.
+# Half the cores, at least one: concurrent full-width cargo builds overload
+# the box.
 boxguard_cargo_jobs() {
   if [[ "${CEL_CARGO_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$CEL_CARGO_JOBS"; return 0; fi
   local n; n="$(nproc 2>/dev/null || printf 2)"
@@ -233,10 +225,9 @@ cmd_build_slot() { # [--] <cmd...>
 }
 
 # ── the manager watchdog ─────────────────────────────────────────────────────
-# The user manager is not restarted by anything when the OOM-killer takes it:
-# it needed `sudo systemctl start user@<uid>.service` by hand. A user unit can
-# not watch its own manager, so this is a SYSTEM timer, installed once by the
-# owner: `cel watchdog install` via non-interactive sudo, or `print` to paste.
+# Nothing restarts the user manager when the OOM-killer takes it, and a user
+# unit cannot watch its own manager, so this is a SYSTEM timer installed once:
+# `cel watchdog install` via non-interactive sudo, or `print` to paste.
 _boxguard_wd_dir() { printf '%s' "${CEL_WATCHDOG_UNIT_DIR:-/etc/systemd/system}"; }
 BOXGUARD_WD_UNIT=cel-manager-watchdog
 
@@ -274,10 +265,9 @@ WantedBy=timers.target
 }
 
 # `install` writes the same two files `print` shows, through `sudo -n`: cel
-# never prompts for a password, and an owner without passwordless sudo gets
-# `print` instead. Units are written via tee from files - the printed script
-# once lost the newline before its EOF (command substitution strips it), the
-# heredoc never closed and pasting it swallowed the timer.
+# never prompts for a password; without passwordless sudo use `print`. Units
+# are written via tee from files, not from a heredoc built by command
+# substitution (which strips the newline before EOF).
 _boxguard_wd_install() { # <user> <uid> <dir>
   local tmp u=$BOXGUARD_WD_UNIT
   if ! sudo -n true 2>/dev/null; then
@@ -333,7 +323,7 @@ cmd_watchdog() { # [status|print|install|uninstall]
   esac
 }
 
-# One line for cel doctor: free, swap, and the three largest consumers.
+# One line for cel doctor: free, swap, the thresholds and the PSI/swap note.
 boxguard_doctor_line() {
   local avail swap
   read -r avail swap <<<"$(boxguard_read)"

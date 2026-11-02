@@ -3,9 +3,8 @@
 # registry.sh and profiles.sh; safe to source twice.
 
 # YAML IS READ THROUGH A JSON CACHE. `yq` here is the Python wrapper and every
-# call is a Python start (~130 ms); the fleet made thirty of them per run and
-# the console took twelve seconds to draw. A file is converted once per
-# (inode, mtime, size) and every accessor then asks jq, which is ~5 ms. The
+# call is a Python start, while callers read many fields per run. A file is
+# converted once per (inode, mtime, size) and every accessor then asks jq. The
 # expressions are jq expressions already - the wrapper's language is jq's.
 _yaml_json() { # <file> -> path of the cached JSON
   local f="$1" dir key
@@ -26,13 +25,10 @@ _yqr() { # <jq args...> <file>   - the shape every read call here already has
   jq "${args[@]}" "$j"
 }
 
-# A PER-BOX ROLE ROUTE, WITHOUT A SHARED-FILE EDIT. workspace.yaml is one file
-# in the workspace's own repo, read the same way by everyone who clones it.
-# Under a per-login box - one person, one set of provider credentials - that
-# is a problem for exactly the two things nobody launches by hand: root and
-# the orchestrators only ever get a model from role_profiles, so a login
-# without the credential the shared file names has no way to run either,
-# short of an uncommitted local edit that collides with every sync.
+# A PER-BOX ROLE ROUTE, WITHOUT A SHARED-FILE EDIT. workspace.yaml is shared by
+# everyone who clones it, but root and the orchestrators only ever get a model
+# from role_profiles - so a login without the credential the shared file names
+# needs a local override that does not collide with every sync.
 #
 # workspace.local.yaml, gitignored, sits beside workspace.yaml and is allowed
 # to do three things and nothing else: override role_profiles (workspace-level,
@@ -59,7 +55,7 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
     printf '%s' "$basej"; return 0
   }
   # The merge's cache identity is borrowed from the two inputs' own cache
-  # keys (already device+inode+mtime+size+path, see _yaml_json) rather than
+  # keys (already inode+mtime+size+path, see _yaml_json) rather than
   # restated here, so it can't drift from that scheme.
   local dir key out
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"

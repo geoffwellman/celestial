@@ -1,19 +1,10 @@
 # shellcheck shell=bash
 # cel services - the things this box is RUNNING, as one list.
 #
-# The owner drives this box from a laptop, 2026-09-18: "anything we can add to
-# help with local testing management, monitoring the state of services and
-# accessing them?" There was nothing. `workspace.yaml services:` was a list of
-# name and url with no state, no health and no way to start or stop anything,
-# and the previews `cel-fanout try` starts were a separate world the list did
-# not know about. So "is the builder up", "open the preview of ABC-49" and
-# "restart the worker service" were all a pane away instead of a key away.
-#
-# ONE MODEL, TWO SOURCES. A service is what `services:` declares; a preview is
-# a ledger row with a `try` block. They are the same row here because they are
-# the same question to an operator - something is listening on a port and I
-# want to look at it - and a console view that had to be read twice would be
-# read once.
+# ONE MODEL, THREE SOURCES. A service is what `services:` declares, a box
+# service is a file in services.d, and a preview is a ledger row with a `try`
+# block. They share one row shape because they are the same question to an
+# operator: something is listening on a port and I want to look at it.
 [ -n "${_CEL_SERVICES:-}" ] && return 0
 _CEL_SERVICES=1
 # shellcheck source=lib/common.sh
@@ -34,17 +25,13 @@ svc_state_file() { printf '%s' "$1/.cel/services.json"; }
 
 # --- box services ------------------------------------------------------------
 #
-# THE SOURCE WITH NO WORKSPACE. The auth broker and auth gateway (47311/47411)
-# ran on this box for a day started by an acceptance run and watched by nobody:
-# `cel gateway install` wrote its two definitions to a private file because a
-# service could only belong to a workspace. They belong to the BOX - every
-# workspace uses them and none owns them - so they live in `services.d`, one
-# JSON file per service with exactly a `services:` row's shape, and every
-# consumer that iterates services gets them for free.
+# THE SOURCE WITH NO WORKSPACE. Services like the auth broker and gateway
+# belong to the BOX - every workspace uses them and none owns them - so they
+# live in `services.d`, one JSON file per service with exactly a `services:`
+# row's shape, and every consumer that iterates services gets them for free.
 #
 # 0600 files in a 0700 directory: `env` is where a service's bearer goes, and
-# the gateway's bearer grants every subscription in the vault to whatever can
-# read it.
+# the gateway's bearer grants every subscription in the vault.
 svc_box_dir() {
   printf '%s' "${CEL_SERVICES_D:-${XDG_CONFIG_HOME:-$HOME/.config}/cel/services.d}"
 }
@@ -114,13 +101,15 @@ svc_listening() { # <port>
 }
 
 # A value a service declaration may name rather than hold: `$NAME` or
-# `$(one command)`. The gateway's health check needs a bearer that grants every
-# subscription in the vault, so the file names the command that reads it and
-# the value never sits on disk. The pattern is narrow on purpose - no quotes,
-# semicolons, backticks or pipes reach the eval.
+# `$(one command)`, so a bearer is read at launch and never sits on disk. The
+# pattern is narrow on purpose - no quotes, semicolons, backticks or pipes.
+_svc_value_is_dynamic() { # <declared value>
+  printf '%s' "${1:-}" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'
+}
+
 _svc_shell_value() { # <declared value> -> the value, expanded if it is such a form
   local v="${1:-}"
-  if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then
+  if _svc_value_is_dynamic "$v"; then
     eval "printf '%s' \"$v\"" 2>/dev/null || true
     return 0
   fi
@@ -132,10 +121,8 @@ _svc_shell_value() { # <declared value> -> the value, expanded if it is such a f
 # `health:` path is asked, with a short budget: a probe that can block for
 # thirty seconds turns one sick service into a console that will not draw.
 #
-# The declaration may be a path OR a whole URL, and it may name a bearer:
-# `cel gateway install` writes a full URL, and both the broker and the gateway
-# answer 401 to an unauthenticated read, so a check that could only GET a path
-# anonymously called a working gateway down once every tick forever. The token
+# The declaration may be a path OR a whole URL, and it may name a bearer: the
+# broker and the gateway answer 401 to an unauthenticated read. The token
 # rides stdin, never argv - a bearer in a command line is a bearer in `ps`.
 svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>"]
   local p="${1:-0}" h="${2:-}" auth="${3:-}" url tok
@@ -158,13 +145,9 @@ svc_health_ok() { # <port> <health path or url> [auth: "bearer <value-or-$(cmd)>
 
 # The first process whose cwd is inside the service's directory. herdr exposes
 # no pid for a pane, so the cwd is the only handle there is - the same
-# attribution lib/memory.sh makes, and with the same honesty: a process that
-# chdirs elsewhere leaves the tree.
-# ONE WALK, NOT ONE PER SERVICE. The first cut ran `readlink` per process per
-# row: ~900 external processes for one service, and `cel services` took 15
-# seconds - which is 15 seconds the console spends not drawing. `ls -l` prints
-# every cwd link in one go, exactly as lib/memory.sh learned to do, and the
-# snapshot is a plain string so every later lookup is a grep over it.
+# attribution lib/memory.sh makes: a process that chdirs elsewhere leaves the tree.
+# One /proc walk per snapshot, not one per service: a readlink fork per process
+# per row took seconds. The snapshot is a plain string; each lookup greps it.
 SVC_PROCS="${SVC_PROCS:-}"
 svc_proc_snapshot() { # pid TAB cwd, this user's processes only
   local me; me="$(id -un)"
@@ -190,13 +173,12 @@ svc_uptime_secs() { # <pid>
   printf '%s' "${s:-0}"
 }
 
-# REACH IS THE WHOLE POINT. Every dev server and every preview on this box
-# listens on 127.0.0.1, which from the owner's laptop is the laptop. The
-# dashboard already binds the tailnet IP, so the address that actually works
-# from there is the dash's proxy path - and only when the dash is up, because
-# a URL that 404s is worse than the loopback one an operator can tunnel.
-# One dashboard for the box (CEL-107), so every workspace's services reach
-# through the same port; <wsdir> stays in the signature for its callers.
+# REACH IS THE WHOLE POINT. Dev servers and previews listen on 127.0.0.1,
+# which from a remote laptop is the laptop. The dashboard binds the tailnet IP,
+# so the address that works from there is the dash's proxy path - and only
+# when the dash is up, because a URL that 404s is worse than the loopback one
+# an operator can tunnel. One dashboard serves the box, so every workspace's
+# services reach through the same port; <wsdir> stays in the signature for its callers.
 svc_reach() { # <wsdir> <port>
   local port="${2:-0}" dport host
   [ "$port" -gt 0 ] 2>/dev/null || return 0
@@ -241,10 +223,6 @@ _svc_all() { # [wsdir]
   _svc_declared "${1:-}"
   _svc_previews "${1:-}"
   _svc_box
-}
-
-svc_names() { # [wsdir]
-  _svc_all "${1:-}" | jq -r '.name'
 }
 
 svc_entry() { # [wsdir] <name> -> the declaration, empty if unknown
@@ -355,7 +333,7 @@ _svc_pane_forget() { # <wsdir|box> <name>
 # belongs to rather than wherever the operator happened to be standing - the
 # same rule `cel-fanout try` follows for a preview under its worker.
 # Answers through globals, like _svc_box_home_pane: a refused `agent list` is
-# herdr's own words in _SVC_WS_ERR, not a silent "no pane" (CEL-79).
+# herdr's own words in _SVC_WS_ERR, not a silent "no pane".
 _SVC_WS_PANE=""
 _SVC_WS_ERR=""
 _svc_ws_pane() { # <wsdir> -> _SVC_WS_PANE, or "" and _SVC_WS_ERR
@@ -373,16 +351,13 @@ _svc_ws_pane() { # <wsdir> -> _SVC_WS_PANE, or "" and _SVC_WS_ERR
 }
 
 # WHERE A BOX SERVICE LIVES. A service with no workspace has no pane to sit
-# under, and herdr's `pane split` requires both a direction AND a target: the
-# old box-level call passed neither, herdr printed its usage, and every box
-# service on this box was unstartable (2026-09-23, `cel gateway install`).
-# `--current` is not the answer either - the steward runs from a systemd timer
-# where there is no current pane. Nor is a bare `tab create`: herdr puts that
-# tab in whichever workspace is FOCUSED, and the first fix's smoke test put
-# `cel services` inside the focused product workspace, where a `cel ws reset`
-# of that product would have killed the gateway. Box services get a dedicated
-# Herdr WORKSPACE labelled `cel services`, looked up by that label and created
-# (unfocused) only when absent. No product lifecycle touches it.
+# under, and herdr's `pane split` requires both a direction AND a target.
+# `--current` is not the answer - the steward runs from a systemd timer where
+# there is no current pane. Nor is a bare `tab create`: herdr puts that tab in
+# whichever workspace is FOCUSED, where a `cel ws reset` of that product would
+# kill the service. Box services get a dedicated herdr WORKSPACE labelled
+# `cel services`, looked up by that label and created (unfocused) only when
+# absent. No product lifecycle touches it.
 _SVC_BOX_WS_LABEL="cel services"
 
 # _svc_box_home_pane answers through globals rather than stdout: when it fails
@@ -466,14 +441,11 @@ svc_start() { # [wsdir] <name>
       continue
     fi
     v="$(printf '%s' "$e" | jq -r --arg k "$k" '.env[$k] | tostring')"
-    # ONE EXCEPTION TO THE QUOTING, and it is the reason the gateway works at
-    # all: a value that is exactly `$NAME` or `$(one command ...)` is passed
-    # through unquoted so the pane expands it itself. That is how a service
-    # definition names a bearer without ever holding one - `cel gateway
-    # install` writes `$(omp auth-broker token)` and the token stays in omp's
-    # own 0600 file. The pattern is narrow on purpose: no quotes, no
-    # semicolons, no backticks, no pipes.
-    if printf '%s' "$v" | grep -Eq '^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\([A-Za-z0-9_][A-Za-z0-9_./ -]*\)$'; then      envs+=("$k=$v")
+    # A dynamic value (`$NAME` / `$(one command)`) passes through unquoted so
+    # the pane expands it itself - how `cel gateway install` names a bearer
+    # (`$(omp auth-broker token)`) without the definition ever holding one.
+    if _svc_value_is_dynamic "$v"; then
+      envs+=("$k=$v")
     else
       envs+=("$(printf '%s=%q' "$k" "$v")")
     fi
@@ -482,7 +454,7 @@ svc_start() { # [wsdir] <name>
   # EVERY split names a direction and a target. A workspace service sits under
   # its workspace's pane; everything else goes to the box's `cel services` workspace.
   # A WORKSPACE service never falls back to the box home: a transient
-  # \`agent list\` miss would start it in the wrong place, silently.
+  # `agent list` miss would start it in the wrong place, silently.
   local target=""
   if [ "$kind" != box ] && [ -n "$d" ]; then
     _svc_ws_pane "$d"
@@ -504,8 +476,8 @@ svc_start() { # [wsdir] <name>
     return 1
   }
   local resp pane
-  # stderr is CAPTURED, not discarded: herdr's usage line was the whole answer
-  # to this bug and the old code threw it away.
+  # stderr is CAPTURED, not discarded: herdr's refusal (often its usage line)
+  # is the only diagnosis there is.
   resp="$("$_SERVICES_HERDR" pane split --pane "$target" --direction down \
     --cwd "$cwd" --no-focus 2>&1 || true)"
   pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' 2>/dev/null | head -1 || true)"
@@ -612,9 +584,8 @@ cmd_services() { # [start|stop|restart|logs|open <name>] [--workspace w] [--json
   if [ -n "$workspace" ]; then
     wsdir="$(registry_require "$workspace")"
   else
-    # NOT BEING IN A WORKSPACE IS NO LONGER AN ERROR. Run from ~ this used to
-    # say "not inside a workspace", which is exactly the place where the box's
-    # own services - the gateway, the broker - are all there is to look at.
+    # Outside a workspace is not an error: from ~ the box's own services -
+    # the gateway, the broker - are all there is to look at.
     wsdir="$(ws_current || true)"
   fi
   if [ -z "$wsdir" ] && [ -z "$(_svc_box)" ]; then

@@ -29,19 +29,16 @@ CEL_JQ_LATEST_CHECKS='def _cel_t: if . == null or startswith("0001-") then "" el
 def latest_checks: group_by([(.workflowName // ""), (.name // .context // "")])
   | map(sort_by([(.startedAt | _cel_t), (.completedAt | _cel_t)]) | last);'
 
-# THE ONE ALIAS RULE (AH-261017). A herdr agent name, a mailbox name and a
-# worker's cwd-derived identity are the same string, and they used to be made
-# by three copies of one sanitiser that cut to 32 characters AFTER stripping a
-# trailing dash. A name whose 32nd character is a dash therefore came out as
-# `abc-` the first time and `abc` the second, so the same worker had two
-# mailboxes depending on how many times its name had been through a sanitiser.
+# THE ALIAS RULE. A herdr agent name, a mailbox name and a worker's
+# cwd-derived identity are the same string, so they must be made by one
+# idempotent rule - otherwise one worker can end up with two mailboxes.
 #
-# Idempotent by construction: lowercase, squeeze anything outside
-# [a-z0-9_-] to one dash, start at the first letter, cut to 32. A dash is
-# stripped only when the result is SHORTER than 32 - the dash at position 32
-# is the truncation boundary of an alias that already exists and is kept, so
-# no established alias is renamed and no mailbox is orphaned. Every caller
-# (_inbox_sanitise, _run_agent_name, _steward_agent_name) is this function.
+# Lowercase, squeeze anything outside [a-z0-9_-] to one dash, start at the
+# first letter, cut to 32. A dash is stripped only when the result is SHORTER
+# than 32 - the dash at position 32 is the truncation boundary of an alias that
+# already exists and is kept, so no established alias is renamed. The bash
+# wrappers (_inbox_sanitise, _run_agent_name, _steward_agent_name) just call
+# this; tools/dash/v2.mjs carries a JS copy, held equal by a test.
 cel_alias_norm() { # <string> -> alias
   local n="$1"
   # An already-clean name (the common case: an alias being re-normalised) is
@@ -60,12 +57,12 @@ cel_alias_norm() { # <string> -> alias
   printf '%s' "$n"
 }
 
-# A PANE'S CWD, AS A PATH (CEL-89). When the directory a pane stands in is
-# removed, herdr reports its cwd with the kernel's literal ` (deleted)` suffix.
-# Every parse of a pane cwd goes through here: on 2026-09-30 that suffix ended
-# up inside a repo name (`widget-pr-41 (deleted)`), GitHub knew no such repo,
-# and five reviewers of merged PRs were kept forever. The stripped path still
-# does not exist, so "is the directory gone" (CEL-84) reads the same.
+# A PANE'S CWD, AS A PATH. When the directory a pane stands in is removed,
+# herdr reports its cwd with the kernel's literal ` (deleted)` suffix; left on,
+# it leaks into derived names (a repo slug GitHub does not know). Shell code
+# deriving a path or name from a pane cwd strips it here (a few jq filters
+# test the suffix inline). The stripped path still does not exist, so "is the
+# directory gone" reads the same.
 pane_cwd() { # <cwd> -> the path without a trailing " (deleted)"
   printf '%s' "${1% (deleted)}"
 }

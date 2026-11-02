@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# The dashboard's REVERSE PROXY. The owner drives this box from a laptop over
-# the tailnet, and every dev server and every `try` preview listens on
+# The dashboard's REVERSE PROXY. Operators reach this box over the tailnet,
+# and every dev server and every `try` preview listens on
 # 127.0.0.1 - unreachable from there. The dash already binds the tailnet IP,
 # so it forwards /svc/<port>/… to loopback, and only for ports that belong to
 # a service or a preview this workspace knows about.
