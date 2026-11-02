@@ -152,6 +152,45 @@ EOF
   rm -rf "$t"
 }
 
+# ONLY A LEDGERED SERVER MAY BE STOPPED, so the ledger row exists before the
+# unit does: a unit the ledger never heard of can never be stopped by cel. A
+# record that cannot be written launches nothing; a launch that fails leaves
+# no record behind.
+test_serve_start_ledgers_before_it_launches() {
+  local t
+  t="$(mktemp -d)"
+  export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl" CEL_SERVE_SYSTEMD_RUN="$t/systemd-run"
+  mkdir -p "$CEL_SERVE_STATE" "$t/bin"
+  cat > "$CEL_SERVE_SYSTEMD_RUN" <<'EOF'
+#!/usr/bin/env bash
+if jq -e '.unit == "cel-serve-demo"' "$CEL_SERVE_STATE/demo.json" >/dev/null 2>&1; then
+  echo ledgered >> "$CEL_SERVE_STATE/launches"
+else
+  echo unledgered >> "$CEL_SERVE_STATE/launches"
+fi
+[ "${SERVE_RUN_FAILS:-0}" = 0 ]
+EOF
+  chmod +x "$CEL_SERVE_SYSTEMD_RUN"
+  CEL_SERVE_NOW=100 CEL_SERVE_WORKTREE="$t"
+  # the record is in place when the unit is launched
+  serve_start demo worker alpha 60 8080 -- sleep 30
+  assert_eq "$(cat "$CEL_SERVE_STATE/launches")" ledgered
+  rm -f "$CEL_SERVE_STATE/demo.json" "$CEL_SERVE_STATE/launches"
+  # a record that cannot be written launches nothing
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$t/bin/jq"; chmod +x "$t/bin/jq"
+  if (PATH="$t/bin:$PATH"; serve_start demo worker alpha 60 8080 -- sleep 30) >/dev/null 2>&1; then
+    echo "start succeeded without a ledger record"; rm -rf "$t"; return 1
+  fi
+  [ ! -e "$CEL_SERVE_STATE/launches" ] || { echo "launched $(cat "$CEL_SERVE_STATE/launches") with no ledger record"; rm -rf "$t"; return 1; }
+  # a launch that fails leaves no record behind
+  if (SERVE_RUN_FAILS=1 serve_start demo worker alpha 60 8080 -- sleep 30) >/dev/null 2>&1; then
+    echo "start succeeded when the launch failed"; rm -rf "$t"; return 1
+  fi
+  [ ! -e "$CEL_SERVE_STATE/demo.json" ] || { echo "a failed launch left its record"; rm -rf "$t"; return 1; }
+  unset CEL_SERVE_NOW CEL_SERVE_WORKTREE CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_SYSTEMD_RUN
+  rm -rf "$t"
+}
+
 test_serve_unit_stop_refuses_anything_not_in_ledger() {
   local t
   t="$(mktemp -d)"

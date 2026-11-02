@@ -138,12 +138,22 @@ _pages_have_unit() {
 
 _pages_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 
+# One Environment= directive, quoted the way systemd unquotes it: a value
+# holding a quote, a backslash, a % (a specifier) or a line break stays one
+# value instead of closing the quote or starting a directive of its own.
+_pages_unit_env() { # <name> <value>
+  local v="$2"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//\%/%%}"
+  v="${v//$'\n'/\\n}"; v="${v//$'\r'/\\r}"
+  printf 'Environment="%s=%s"' "$1" "$v"
+}
+
 # The unit text: PATH fixed (node is not on systemd's), CEL_PAGES_* carried
 # from whoever ensured it, so a configured port survives a restart.
 pages_unit_text() { # <log> [--public]
   local log="$1" v env=""; shift
   for v in $(compgen -e); do
-    case "$v" in CEL_PAGES_*) env="$env"$'\n'"Environment=\"$v=${!v}\"" ;; esac
+    case "$v" in CEL_PAGES_*) env="$env"$'\n'"$(_pages_unit_env "$v" "${!v}")" ;; esac
   done
   printf '%s' "[Unit]
 Description=celestial pages server$([ "${1:-}" = --public ] && printf ' (public)')

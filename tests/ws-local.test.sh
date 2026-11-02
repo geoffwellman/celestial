@@ -16,6 +16,39 @@ _wl_setup() {
   cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/alpha/workspace.yaml"
 }
 
+# THE CACHE IS KEYED ON CONTENT. An in-place edit that keeps the inode, the
+# size and the timestamp (two saves in one second, a restored mtime) must be
+# read, not served from the copy of the old text.
+test_yaml_cache_sees_a_same_size_same_mtime_edit() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache"
+  printf 'name: aaaa\n' > "$T/w.yaml"; touch -d '2020-01-01 00:00:00' "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" aaaa
+  printf 'name: bbbb\n' > "$T/w.yaml"; touch -d '2020-01-01 00:00:00' "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" bbbb
+  rm -rf "$T"
+}
+
+# NO HASH, NO CACHE. Where md5sum cannot run, an edit must still be read: a
+# key that cannot see the content would pin the first parse forever - for a
+# plain file and for the workspace.local.yaml merge alike.
+test_yaml_cache_rereads_an_edit_when_md5sum_is_unavailable() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache"
+  md5sum() { return 127; }
+  printf 'name: aaaa\n' > "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" aaaa
+  printf 'name: bbbbbb\n' > "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" bbbbbb
+  mkdir -p "$T/ws"; printf 'name: ws\nenv: {A: base}\n' > "$T/ws/workspace.yaml"
+  printf 'env: {A: one}\n' > "$T/ws/workspace.local.yaml"
+  assert_eq "$(_yqr_ws -r .env.A "$T/ws")" one
+  printf 'env: {A: two}\n' > "$T/ws/workspace.local.yaml"
+  assert_eq "$(_yqr_ws -r .env.A "$T/ws")" two
+  unset -f md5sum
+  rm -rf "$T"
+}
+
 # --- 1: every routing read goes through the merge ---------------------------
 # A reader that asks workspace.yaml for role_profiles/worker_profiles directly
 # silently ignores the local override - the person whose login can't reach the

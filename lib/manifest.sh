@@ -11,21 +11,44 @@ CEL_MANIFEST="${CEL_MANIFEST:-$CEL_ROOT/agents.yaml}"
 
 # YQ ONCE, JQ AFTER. The Python `yq` wrapper costs an interpreter start plus a
 # jq per field, and field access is the hot path (agent_get runs dozens of
-# times per `cel run`). The manifest is converted to JSON once and cached
-# beside its path; every query after that is a plain jq on the cache, rebuilt
-# only when agents.yaml is newer than it.
+# times per `cel run`). The manifest is converted to JSON once per CONTENT -
+# a timestamp says nothing about an edit that kept or restored the mtime - and
+# every query after that is a plain jq on the cache.
+#
+# A HIT FORKS NOTHING. Beside the JSON lives the exact text it was converted
+# from, both named by that text's hash, and `<key>.current` names the hash
+# last converted. A read compares the manifest to that text with builtins
+# only; md5sum and yq run once per change. The pair is immutable once written,
+# so a reader can never match one text and be handed another's parse. A new
+# conversion removes the pairs it supersedes.
 _manifest_json() { # -> path of a JSON copy of $CEL_MANIFEST
   local d="${CEL_MANIFEST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/manifest}"
-  local key="${CEL_MANIFEST//\//%}"
-  local c="$d/$key.json"
-  if [ -s "$c" ] && [ "$c" -nt "$CEL_MANIFEST" ]; then printf '%s' "$c"; return 0; fi
-  mkdir -p "$d" 2>/dev/null || true
-  local tmp="$c.$$.$RANDOM"
-  if yq -c . "$CEL_MANIFEST" > "$tmp" 2>/dev/null && [ -s "$tmp" ] && mv -f "$tmp" "$c" 2>/dev/null; then
-    printf '%s' "$c"; return 0
+  local key="${CEL_MANIFEST//\//%}" text="" h="" seen=""
+  [ -r "$CEL_MANIFEST" ] || return 1
+  IFS= read -r -d '' text < "$CEL_MANIFEST" || true
+  if IFS= read -r h 2>/dev/null < "$d/$key.current" && [ -s "$d/$key.$h.json" ] && [ -f "$d/$key.$h.yaml" ] \
+      && { IFS= read -r -d '' seen 2>/dev/null < "$d/$key.$h.yaml" || true; } && [ "$seen" = "$text" ]; then
+    printf '%s' "$d/$key.$h.json"; return 0
   fi
-  rm -f "$tmp" 2>/dev/null
-  return 1
+  mkdir -p "$d" 2>/dev/null || return 1
+  # Convert the text just compared, not whatever the file holds a moment later.
+  local tmp="$d/.$key.$$.$RANDOM"
+  printf '%s' "$text" > "$tmp.yaml" 2>/dev/null || { rm -f "$tmp.yaml"; return 1; }
+  h="$(md5sum < "$tmp.yaml")"; h="${h%% *}"
+  if [ ${#h} -ne 32 ] || ! { yq -c . "$tmp.yaml" > "$tmp.json" 2>/dev/null && [ -s "$tmp.json" ]; }; then
+    rm -f "$tmp.yaml" "$tmp.json"; return 1
+  fi
+  # the JSON before its text: a matching text always has its parse beside it
+  mv -f "$tmp.json" "$d/$key.$h.json" && mv -f "$tmp.yaml" "$d/$key.$h.yaml" \
+    && printf '%s\n' "$h" > "$tmp.cur" && mv -f "$tmp.cur" "$d/$key.current" \
+    || { rm -f "$tmp.yaml" "$tmp.json" "$tmp.cur"; return 1; }
+  local old stale=()
+  for old in "$d/$key".????????????????????????????????.json "$d/$key".????????????????????????????????.yaml "$d/$key.json"; do
+    [ -e "$old" ] || continue
+    case "$old" in "$d/$key.$h.json"|"$d/$key.$h.yaml") ;; *) stale+=("$old") ;; esac
+  done
+  [ "${#stale[@]}" -eq 0 ] || rm -f "${stale[@]}"
+  printf '%s' "$d/$key.$h.json"
 }
 # jq on the cached JSON; straight yq when the cache cannot be written.
 _mq() {
