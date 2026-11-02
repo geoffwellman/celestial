@@ -286,6 +286,26 @@ test_concurrent_liveness_writers_are_fail_safe() {
   unset CEL_LIVENESS_NOW
   rm -rf "$T"
 }
+# Liveness is advisory: a box with no flock(1) still keeps the clock, and a
+# held lock skips one update - neither aborts the set -e caller (fleet,
+# steward, status) that asked for an age.
+test_liveness_with_no_flock_or_a_held_lock_never_aborts() {
+  _liveness_setup
+  source "$CEL_ROOT/tests/lib/no-flock.sh"
+  export CEL_LIVENESS_NOW=1000000
+  local run='set -euo pipefail; source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/liveness.sh"
+    printf "%s" "$(liveness_output_age alpha/ABC-1 x)"; liveness_remember alpha/ABC-1 working 0.9; echo " done"'
+  local out hfd
+  out="$(PATH="$(no_flock_path "$T")" bash -c "$run" 2>&1)"
+  assert_eq "$out" "0 done"
+  assert_contains "$(_liveness_row alpha/ABC-1)" working
+  exec {hfd}>"$CEL_LIVENESS_STATE.lock"; flock "$hfd"
+  out="$(CEL_LIVENESS_LOCK_WAIT=1 bash -c "$run" 2>&1)"
+  exec {hfd}>&-
+  assert_contains "$out" " done"
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
 
 # A stray CEL_LIVENESS_NOW in a real process must not freeze the clock: the
 # override is honoured only inside the test harness, and only as an integer.

@@ -140,6 +140,16 @@ test_mode_write_under_another_writers_lock_is_fail_safe() {
   assert_contains "$out" "changed while"
   rm -rf "$T"
 }
+# A box with no flock(1) writes as it always did - no lock is not a conflict.
+test_mode_write_with_no_flock_still_writes() {
+  _mws
+  source "$CEL_ROOT/tests/lib/no-flock.sh"
+  local out; out="$( cd "$T" && PATH="$(no_flock_path "$T")" _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
+    || { echo "refused without flock: $out"; rm -rf "$T"; return 1; }
+  assert_eq "$(ws_build_mode "$T" bundle)" solo
+  _data_is_orig_plus products bundle solo || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
 
 # Fleet work still in flight has nobody to land it once the product is solo.
 test_mode_refuses_solo_while_fleet_work_is_in_flight() {

@@ -284,6 +284,23 @@ test_session_release_of_a_superseded_claim_is_fail_safe() {
   orch_stub_teardown
 }
 
+# A box with no flock(1) claims as it did before the lock existed: unlocked,
+# but still one claim per session - no lock binary is not a held lock.
+test_session_claim_with_no_flock_still_claims_and_releases() {
+  orch_stub_setup omp
+  source "$CEL_ROOT/tests/lib/no-flock.sh"
+  export CEL_ORCH_SESSIONS="$T/sessions.json"
+  local f tok rc=0 path; f="$(_run_session_claim_file "$T/old.jsonl")"; path="$(no_flock_path "$T")"
+  PATH="$path" _run_session_claim "$T/old.jsonl" w1:p1 || rc=$?
+  assert_eq "$rc" 0
+  tok="$_RUN_SESSION_CLAIM_TOKEN"
+  rc=0; PATH="$path" _run_session_claim "$T/old.jsonl" w2:p1 || rc=$?
+  assert_eq "$rc" 1
+  PATH="$path" _run_session_release "$T/old.jsonl" "$tok"
+  [ ! -e "$f" ] || { echo "release without flock left the claim"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
 # A launch that fails after claiming its session gives the claim
 # back, so a retry a few seconds later is not refused for sixty of them.
 test_failed_restart_releases_its_session_claim() {

@@ -67,17 +67,19 @@ _mode_product() { # <wsdir> -> product, or nothing
 #
 # NEVER OVER SOMEONE ELSE'S EDIT. cel mode writers queue on one lock, and the
 # edit is made from a snapshot: if the file no longer matches it right before
-# the rename (the owner saved meanwhile), nothing is written and it returns 2.
+# the rename (the owner saved meanwhile), or the lock cannot be had, nothing
+# is written and it returns 2. A box without flock(1) skips only the lock.
 _mode_write() { # <wsdir> <product> <mode> -> 0 written, 1 refused, 2 changed underneath
-  local f tmp key snap fd rc=0
+  local f tmp key snap fd="" rc=0
   f="$(readlink -f "$1/workspace.yaml")" || return 1
   if ws_product_declared "$1" "$2"; then key=products; else key=repos; fi
-  mkdir -p "$1/.cel" && have flock || return 2
-  exec {fd}>"$1/.cel/workspace.lock" || return 2
-  flock -w "${CEL_MODE_WRITE_LOCK_WAIT:-10}" "$fd" || { exec {fd}>&-; return 2; }
-  snap="$(mktemp)" || { exec {fd}>&-; return 1; }
-  tmp="$(mktemp "$f.cel-mode.XXXXXX")" || { rm -f -- "$snap"; exec {fd}>&-; return 1; }
-  cat -- "$f" > "$snap" || { rm -f -- "$snap" "$tmp"; exec {fd}>&-; return 1; }
+  if have flock; then
+    mkdir -p "$1/.cel" && exec {fd}>"$1/.cel/workspace.lock" || return 2
+    flock -w "${CEL_MODE_WRITE_LOCK_WAIT:-10}" "$fd" || { exec {fd}>&-; return 2; }
+  fi
+  snap="$(mktemp)" || { [ -z "$fd" ] || exec {fd}>&-; return 1; }
+  tmp="$(mktemp "$f.cel-mode.XXXXXX")" || { rm -f -- "$snap"; [ -z "$fd" ] || exec {fd}>&-; return 1; }
+  cat -- "$f" > "$snap" || { rm -f -- "$snap" "$tmp"; [ -z "$fd" ] || exec {fd}>&-; return 1; }
   if awk -v sect="$key" -v name="$2" -v mode="$3" '
     function ind(s) { match(s, /^ */); return RLENGTH }
     function noise(s) { return s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/ }
@@ -125,7 +127,7 @@ _mode_write() { # <wsdir> <product> <mode> -> 0 written, 1 refused, 2 changed un
     rc=1
   fi
   rm -f -- "$tmp" "$snap"
-  exec {fd}>&-
+  [ -z "$fd" ] || exec {fd}>&-
   return "$rc"
 }
 

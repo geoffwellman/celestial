@@ -138,16 +138,21 @@ _liveness_row() { # <key> -> the row, or ""
 
 # steward, fleet and status all write this file, each for its own workers: the
 # rewrite re-reads it under one lock and replaces it through a temp of its own,
-# so no writer drops another's row or shares its temp.
+# so no writer drops another's row or shares its temp. Liveness is advisory: a
+# box without flock(1) writes unlocked as it always did, and a lock not had
+# within CEL_LIVENESS_LOCK_WAIT seconds skips this update (returns 1).
 _liveness_put() { # <key> <hash> <changed_at> <activity> <confidence> <answered_at>
-  local f fd tmp rc=0; f="$(_liveness_state_file)"
+  local f fd="" tmp rc=0; f="$(_liveness_state_file)"
   mkdir -p "$(dirname "$f")"; touch "$f"
-  exec {fd}>"$f.lock"
-  flock -w 10 "$fd" || { exec {fd}>&-; return 1; }
-  tmp="$(mktemp "$f.XXXXXX")" || { exec {fd}>&-; return 1; }
-  { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:--}"; } \
-    > "$tmp" && chmod --reference="$f" "$tmp" && mv -f "$tmp" "$f" || { rc=1; rm -f "$tmp"; }
-  exec {fd}>&-
+  if command -v flock >/dev/null 2>&1; then
+    exec {fd}>"$f.lock"
+    flock -w "${CEL_LIVENESS_LOCK_WAIT:-10}" "$fd" || { exec {fd}>&-; return 1; }
+  fi
+  if tmp="$(mktemp "$f.XXXXXX")"; then
+    { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:--}"; } \
+      > "$tmp" && chmod --reference="$f" "$tmp" && mv -f "$tmp" "$f" || { rc=1; rm -f "$tmp"; }
+  else rc=1; fi
+  [ -z "$fd" ] || exec {fd}>&-
   return "$rc"
 }
 
@@ -177,7 +182,7 @@ liveness_output_age() { # <key> <pane-text> -> seconds
   set -- $row
   ohash="${2:-}"; changed="${3:-}"; act="${4:--}"; conf="${5:--}"; ans="${6:--}"
   if [ "$ohash" != "$hash" ] || [ -z "$changed" ]; then
-    _liveness_put "$key" "$hash" "$now" "$act" "$conf" "$ans"
+    _liveness_put "$key" "$hash" "$now" "$act" "$conf" "$ans" || true
     printf 0
     return 0
   fi
@@ -194,7 +199,7 @@ liveness_backdate() { # <key> <seconds>
   set -- $row
   ans="${6:--}"
   case "$ans" in ''|-|*[!0-9]*) ans=- ;; *) ans=$(( ans - back )) ;; esac
-  _liveness_put "$key" "$2" "$(( $3 - back ))" "$4" "$5" "$ans"
+  _liveness_put "$key" "$2" "$(( $3 - back ))" "$4" "$5" "$ans" || true
 }
 
 # The last answer about a worker, remembered so a VIEW can carry it without
@@ -206,7 +211,7 @@ liveness_remember() { # <key> <activity> <confidence>
   # shellcheck disable=SC2086
   set -- $1 $2 $3 $row
   hash="${5:-0}"; changed="${6:-$(_liveness_now)}"
-  _liveness_put "$1" "$hash" "$changed" "$2" "$3" "$(_liveness_now)"
+  _liveness_put "$1" "$hash" "$changed" "$2" "$3" "$(_liveness_now)" || true
 }
 
 # "<activity>\t<confidence>", or nothing when there is no answer or it has
