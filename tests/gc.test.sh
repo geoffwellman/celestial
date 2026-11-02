@@ -310,7 +310,7 @@ test_gc_old_working_process_never_loses_its_veto() {
   GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq '.result.agents[0].agent_status = "working"')"
   _gc_reap 1 0 "$GC_AGENTS" demo
   assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(jq '.idle | length' "$HOME/.local/state/cel/gc-idle.json")" 0
+  assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
 }
 
 test_gc_resume_sequence_and_unknown_identity_reset_idle_observation() {
@@ -324,7 +324,7 @@ test_gc_resume_sequence_and_unknown_identity_reset_idle_observation() {
   assert_eq "$(cat "$GC_SINK")" ""
   GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq '.result.agents[0].pane_id = "different-pane"')"
   _gc_reap 1 0 "$GC_AGENTS" demo
-  assert_eq "$(jq '.idle | length' "$HOME/.local/state/cel/gc-idle.json")" 0
+  assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
 }
 
 test_gc_never_reaps_day_old_working_or_hand_started_tmp_processes() {
@@ -351,7 +351,7 @@ test_gc_unknown_ownership_does_not_reuse_an_old_idle_clock() {
   rm "$GC_WS/.cel/role-worker.md"
   _gc_reap 1 0 "$GC_AGENTS" demo
   assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(jq '.idle | length' "$HOME/.local/state/cel/gc-idle.json")" 0
+  assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
 }
 
 test_gc_squash_merge_accepts_only_the_exact_clean_merged_head() {
@@ -402,7 +402,7 @@ test_gc_running_delegation_veto_follows_symlinked_parent_of_process_cwd() {
   jq -n --arg w "$T/checkout-alias" '[{worktree:$w,state:"running"}]' > "$GC_WS/.cel/delegations.json"
   _gc_reap 1 0 "$GC_AGENTS" demo
   assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(jq '.idle | length' "$HOME/.local/state/cel/gc-idle.json")" 0
+  assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
 }
 
 # --- the launch environment, not argv -------------------------------------
@@ -603,7 +603,7 @@ _gc_box_fixture() {
   _gc_managed_fixture
   export CEL_BOX_RM_LOG="$T/box-removed"
   : > "$CEL_BOX_RM_LOG"
-  mkdir -p "$HOME/.bun/install/cache" "$HOME/.cache/cel" "$HOME/restore"
+  mkdir -p "$HOME/.bun/install/cache" "${XDG_CACHE_HOME:-$HOME/.cache}/cel" "$HOME/restore"
   printf 'aged\n' > "$HOME/.bun/install/cache/old-package"
   touch -d '60 days ago' "$HOME/.bun/install/cache/old-package"
   printf 'irreplaceable\n' > "$HOME/restore/profile-dump.tar"
@@ -1294,7 +1294,7 @@ _gc_deleted_reviewer_fixture() {
 }
 
 _gc_deleted_reviewer_agents() {
-  jq -n --arg c "$HOME/.local/state/cel/reviews/widget-pr-41 (deleted)" \
+  jq -n --arg c "${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviews/widget-pr-41 (deleted)" \
     '{result:{agents:[{pane_id:"w1:p5",name:"widget-pr-41-review",cwd:$c,agent_status:"idle"}]}}'
 }
 
@@ -1332,9 +1332,9 @@ test_gc_keeps_an_unreadable_deleted_folder_reviewer_with_one_warning() {
 test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
   _gc_deleted_reviewer_fixture
   GC_PR_STATE=UNKNOWN
-  mkdir -p "$HOME/.local/state/cel"
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/cel"
   jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 widget#41":{since:$t}}' \
-    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+    > "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-unknown.json"
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   assert_eq "$(grep -c . "$GC_MAIL")" 1
@@ -1349,9 +1349,9 @@ test_gc_reports_a_reviewer_unknown_for_a_day_to_root_once() {
 test_gc_unknown_clock_is_keyed_by_pane_and_reviewer() {
   _gc_deleted_reviewer_fixture
   GC_PR_STATE=UNKNOWN
-  mkdir -p "$HOME/.local/state/cel"
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/cel"
   jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 gadget#9":{since:$t}, "w1:p5":{since:$t}}' \
-    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+    > "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-unknown.json"
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   assert_eq "$(cat "$GC_MAIL")" ""
   rm -rf "$T"
@@ -1361,9 +1361,9 @@ test_gc_unknown_clock_is_keyed_by_pane_and_reviewer() {
 test_gc_unknown_report_retries_when_the_send_fails() {
   _gc_deleted_reviewer_fixture
   GC_PR_STATE=UNKNOWN
-  mkdir -p "$HOME/.local/state/cel"
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/cel"
   jq -n --argjson t "$(( $(date +%s) - 90000 ))" '{"w1:p5 widget#41":{since:$t}}' \
-    > "$HOME/.local/state/cel/gc-reviewer-unknown.json"
+    > "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-unknown.json"
   cmd_inbox() { printf '%s\n' "$*" >> "$GC_MAIL"; return 1; }
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   cmd_inbox() { printf '%s\n' "$*" >> "$GC_MAIL"; }

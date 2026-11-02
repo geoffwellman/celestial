@@ -19,7 +19,7 @@ _CEL_AFK=1
 # in the box's own state dir, so every workspace on this box reads one answer
 # rather than four that disagree. Resolved per call, never frozen at source
 # time, because the tests point it at a fixture AFTER sourcing this file.
-afk_dir()   { printf '%s' "${CEL_AFK_STATE:-$HOME/.local/share/cel/afk}"; }
+afk_dir()   { printf '%s' "${CEL_AFK_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/afk}"; }
 _afk_state(){ printf '%s/state.json' "$(afk_dir)"; }
 _afk_log()  { printf '%s/log.jsonl' "$(afk_dir)"; }
 # Overridable so the named GitHub exception can be watched in a test without

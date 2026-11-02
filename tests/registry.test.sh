@@ -49,7 +49,7 @@ test_registry_migrates_repo_copy_once() {
   printf 'workspaces:\n  demo:\n    path: /tmp/demo\n    remote: null\n' > "$T/root/registry.yaml"
   ( HOME="$T/home" CEL_ROOT="$T/root" _CEL_REGISTRY='' CEL_REGISTRY='' \
     bash -c 'unset _CEL_REGISTRY CEL_REGISTRY; source "'"$CEL_ROOT"'/lib/registry.sh" 2>/dev/null
-             [ -f "$HOME/.local/share/cel/registry.yaml" ] && [ ! -f "$CEL_ROOT/registry.yaml" ]' )
+             [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/cel/registry.yaml" ] && [ ! -f "$CEL_ROOT/registry.yaml" ]' )
   local rc=$?
   [ "$rc" = 0 ] || { echo "migration did not move the file"; rm -rf "$T"; return 1; }
   rm -rf "$T"
@@ -60,7 +60,7 @@ test_registry_migration_skipped_when_overridden() {
   printf 'workspaces: {}\n' > "$T/root/registry.yaml"
   ( HOME="$T/home" CEL_ROOT="$T/root" \
     bash -c 'unset _CEL_REGISTRY; CEL_REGISTRY="'"$T"'/elsewhere.yaml"; source "'"$CEL_ROOT"'/lib/registry.sh" 2>/dev/null
-             [ -f "$CEL_ROOT/registry.yaml" ] && [ ! -e "$HOME/.local/share/cel/registry.yaml" ]' )
+             [ -f "$CEL_ROOT/registry.yaml" ] && [ ! -e "${XDG_DATA_HOME:-$HOME/.local/share}/cel/registry.yaml" ]' )
   local rc=$?
   [ "$rc" = 0 ] || { echo "override did not suppress migration"; rm -rf "$T"; return 1; }
   rm -rf "$T"

@@ -28,7 +28,7 @@ export const CEL_ROOT = process.env.CEL_ROOT
   || join(homedir(), 'celestial');
 
 const CONFIG_PATH = () => process.env.CEL_CONSOLE_CONFIG
-  || join(homedir(), '.local/share/cel/config.yaml');
+  || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/config.yaml');
 
 // A two-level YAML reader for ONE known shape (`console:` and its scalar
 // keys, plus the one nested block `console.router:`). Not a YAML parser and

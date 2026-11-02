@@ -773,7 +773,7 @@ fleet_refill_spawn() { # <file> <only> <secs>
 
 # The cache file for a read, for the steward's warm-up as well as cmd_fleet.
 _fleet_cache_file() { # <only>
-  local dir="${CEL_CACHE:-$HOME/.cache/cel}"
+  local dir="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}"
   mkdir -p "$dir"
   printf '%s/fleet%s.json' "$dir" "${1:+.$1}"
 }

@@ -116,7 +116,7 @@ async function tail(args) {
 async function receipt(args) {
   const id = args.find((a) => !a.startsWith("--"));
   if (!id || !/^\d+$/.test(id)) die("usage: cel drive receipt <id> [--json]");
-  const dir = process.env.CEL_INBOX_DIR || path.join(process.env.HOME, ".local/share/cel/inbox");
+  const dir = process.env.CEL_INBOX_DIR || path.join(process.env.XDG_DATA_HOME || path.join(process.env.HOME, ".local/share"), "cel/inbox");
   let item = null, ws = null;
   for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
     if (!f.endsWith(".jsonl")) continue;

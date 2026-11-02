@@ -28,7 +28,7 @@ _CEL_QUOTA=1
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
 
-_quota_dir() { printf '%s' "${CEL_QUOTA_DIR:-$HOME/.local/share/cel/quota}"; }
+_quota_dir() { printf '%s' "${CEL_QUOTA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/quota}"; }
 _QUOTA_TTL="${CEL_QUOTA_TTL:-300}"
 
 provider_balance() { # <provider> <key>
@@ -139,7 +139,7 @@ quota_remaining() { # <provider> [wsdir]
 # `gateway/<provider>/<short id>` - which survives a refresh, and the cache
 # file keyed by it is OVERWRITTEN rather than joined by a sibling. Files that
 # match no current identity are swept on the next list.
-_sub_cache_dir() { printf '%s' "${CEL_CACHE:-$HOME/.cache/cel}"; }
+_sub_cache_dir() { printf '%s' "${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}"; }
 _SUB_TTL="${CEL_SUB_TTL:-60}"
 
 # THE FILE NAME IS A HASH, NEVER THE ACCOUNT ID. Account ids come out of
@@ -327,7 +327,7 @@ _cpa_auth_dir() {
     . "${BASH_SOURCE[0]%/*}/gateway.sh"
     d="$(gateway_auth_dir 2>/dev/null || true)"
   fi
-  [ -n "$d" ] || d="${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}/auth"
+  [ -n "$d" ] || d="${CEL_GATEWAY_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/gateway}/auth"
   expand "$d"
 }
 

@@ -138,7 +138,7 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
 # The mailbox, read RAW and WHOLE: most items outlive any time window, and the
 # file is append-only and local, so there is no reason to read less.
 _work_mail() { # <ws> -> JSON array
-  local f="${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}/$1.jsonl"
+  local f="${CEL_INBOX_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/inbox}/$1.jsonl"
   [ -f "$f" ] || { printf '[]'; return 0; }
   jq -sc '[.[] | select(type == "object")]' "$f" 2>/dev/null || printf '[]'
 }
