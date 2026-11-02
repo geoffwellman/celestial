@@ -621,6 +621,53 @@ _box_diag_owner() { # <pane> <cwd> <roster pane<TAB>name<TAB>cwd lines>
   if [ -n "$pane" ]; then printf 'agent=? pane=%s' "$pane"; else printf 'agent=?'; fi
 }
 
+# THE ARGV GOES INTO A MAILBOX, so a build's secrets must not. Values of
+# --build-arg, --secret and -e/--env, in both `--flag value` and
+# `--flag=value` form, and every bare KEY=VALUE token lose their value; a
+# KEY= is kept, because which argument was passed is the useful part.
+_box_diag_redact() { # <argv...> -> one line, secret values replaced by ***
+  local a out="" next=0 flag val
+  for a in "$@"; do
+    if [ "$next" = 1 ]; then
+      next=0
+      if [[ "$a" == *=* ]]; then a="${a%%=*}=***"; else a='***'; fi
+    else
+      case "$a" in
+        --build-arg|--secret|-e|--env) next=1 ;;
+        --build-arg=*|--secret=*|-e=*|--env=*)
+          flag="${a%%=*}" val="${a#*=}"
+          if [[ "$val" == *=* ]]; then a="$flag=${val%%=*}=***"; else a="$flag=***"; fi ;;
+        *)
+          if [[ "$a" =~ ^[A-Za-z_][A-Za-z0-9_.-]*= ]]; then a="${a%%=*}=***"; fi ;;
+      esac
+    fi
+    out="${out:+$out }$a"
+  done
+  printf '%s' "$out"
+}
+
+# The roster as pane<TAB>name<TAB>cwd lines, from cel_agent_list - with the
+# herdr binary under the same time limit as docker. A herdr that hangs reads
+# as an empty herdr roster, so Rex sessions still resolve and every other
+# build falls back to `agent=? pane=<id>`; the alert is never held. A herdr
+# that is a shell function (the suite's stub) is called as it is.
+_box_diag_roster() {
+  have jq || return 0
+  (
+    if [ "$(type -t herdr)" = file ]; then
+      _box_herdr_bin="$(type -P herdr)"
+      herdr() {
+        if have timeout; then
+          timeout -k 2 "$(_box_diag_timeout)" "$_box_herdr_bin" "$@" && return 0
+        fi
+        printf '{"result":{"agents":[]}}\n'
+      }
+    fi
+    cel_agent_list 2>/dev/null
+  ) | jq -r '.result.agents[]?
+    | [(.pane_id // ""), (.name // ""), ((.cwd // "") | sub(" \\(deleted\\)$"; ""))] | @tsv' 2>/dev/null || true
+}
+
 _box_diag_builds_line() { # <docker-answered 0|1> -> the `docker builds:` line
   local proc d pid a0 parent roster="" item cwd cmd out="" shown=0
   local -a argv=() builds=() top=()
@@ -648,15 +695,12 @@ _box_diag_builds_line() { # <docker-answered 0|1> -> the `docker builds:` line
     return 0
   fi
   mapfile -t top < <(printf '%s\n' "${top[@]}" | sort -n)
-  if have jq; then
-    roster="$(cel_agent_list 2>/dev/null | jq -r '.result.agents[]?
-      | [(.pane_id // ""), (.name // ""), ((.cwd // "") | sub(" \\(deleted\\)$"; ""))] | @tsv' 2>/dev/null)" || roster=""
-  fi
+  roster="$(_box_diag_roster)"
   for pid in "${top[@]}"; do
     [ "$shown" -lt "$_BOX_DIAG_BUILDS_MAX" ] || break
     argv=()
     { mapfile -d '' -t argv < "$proc/$pid/cmdline"; } 2>/dev/null || true
-    cmd="${argv[*]}"
+    cmd="$(_box_diag_redact "${argv[@]}")"
     cmd="${cmd//[$'\n\t\r']/ }"
     [ "${#cmd}" -le "$_BOX_DIAG_ARGV_MAX" ] || cmd="${cmd:0:$_BOX_DIAG_ARGV_MAX}..."
     cwd="$(readlink "$proc/$pid/cwd" 2>/dev/null)" || cwd=""

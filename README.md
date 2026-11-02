@@ -979,7 +979,9 @@ both failing the view still renders what the box itself knows.
   images / build cache / volumes summary (left out when docker is absent,
   slow past `CEL_BOX_DIAG_TIMEOUT` seconds, default 30, or not this user's to
   query) and every running `docker build` / `buildx` with the agent whose pane
-  or working directory it runs in.
+  or working directory it runs in - secret values in the build's argv
+  (`--build-arg`, `--secret`, `-e`/`--env`, any `KEY=VALUE`) printed as `***`,
+  and the herdr lookup held to the same time limit.
 
 ## What runs in the background
 

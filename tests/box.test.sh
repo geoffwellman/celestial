@@ -462,15 +462,50 @@ test_box_diag_bounds_the_builds_line() {
   _box_diag_fixture
   local i long; long="$(printf 'A%.0s' {1..300})"
   for i in 11 12 13 14 15 16 17 18; do
-    _box_fake_proc "$i" 1 - - docker build --build-arg "X=$long" .
+    _box_fake_proc "$i" 1 - - docker build --tag "$long" .
   done
   local out; out="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box diag)"
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 1
-  assert_contains "$out" "docker builds: 8 running - pid 11 agent=? cwd=?: docker build --build-arg X=AAA"
+  assert_contains "$out" "docker builds: 8 running - pid 11 agent=? cwd=?: docker build --tag AAA"
   assert_contains "$out" "...; pid 12 "
   assert_contains "$out" "; +3 more"
   case "$out" in *"pid 16 "*) printf 'named more than five builds\n' >&2; return 1;; esac
   [ "${#out}" -lt 1000 ] || { printf 'builds line is %s characters\n' "${#out}" >&2; return 1; }
+  rm -rf "$T"
+}
+
+# The line goes into a mailbox: no build secret may ride along in it.
+test_box_diag_redacts_secret_values_from_build_argv() {
+  _box_diag_fixture
+  # Two builds, so each redacted argv stays under the 120-character cut and
+  # truncation can never be what hides a value.
+  _box_fake_proc 21 1 - - docker buildx build --build-arg TOKEN=s3cr3t-a --build-arg=NPM=s3cr3t-b \
+    --secret id=npm,src=/run/s3cr3t-c --secret=s3cr3t-d .
+  _box_fake_proc 22 1 - - docker build -e API=s3cr3t-e --env=s3cr3t-f \
+    --env s3cr3t-g PASSWORD=s3cr3t-h -t img:latest .
+  local out; out="$(CEL_BOX_DOCKER=cel-no-such-docker CEL_BOX_DIAG_TIMEOUT=1 cmd_box diag)"
+  case "$out" in *s3cr3t*) printf 'a secret reached the diagnosis: %s\n' "$out" >&2; return 1;; esac
+  assert_contains "$out" "pid 21 agent=? cwd=?: docker buildx build --build-arg TOKEN=*** --build-arg=NPM=*** --secret id=*** --secret=*** .;"
+  assert_contains "$out" "pid 22 agent=? cwd=?: docker build -e API=*** --env=*** --env *** PASSWORD=*** -t img:latest ."
+  rm -rf "$T"
+}
+
+# A herdr that hangs must not hold the alert: the lookup is bounded, and the
+# build is still named by the pane its tree inherited.
+test_box_diag_bounds_a_hung_herdr_and_falls_back_to_the_pane() {
+  _box_diag_fixture
+  unset -f herdr
+  cat > "$BOX_STUB_BIN/herdr" <<'EOS'
+#!/usr/bin/env bash
+exec sleep 30
+EOS
+  chmod +x "$BOX_STUB_BIN/herdr"
+  PATH="$BOX_STUB_BIN:$PATH"
+  _box_fake_proc 31 1 "$T/wt/alpha" "HERDR_PANE_ID=wA:p1" docker build .
+  local start=$SECONDS out
+  out="$(CEL_BOX_DOCKER=cel-no-such-docker CEL_BOX_DIAG_TIMEOUT=1 cmd_box diag 2>&1)"
+  [ $((SECONDS - start)) -lt 10 ] || { printf 'diag took %ss behind a hung herdr\n' "$((SECONDS - start))" >&2; return 1; }
+  assert_eq "$out" "docker builds: 1 running - pid 31 agent=? pane=wA:p1 cwd=$T/wt/alpha: docker build ."
   rm -rf "$T"
 }
 
