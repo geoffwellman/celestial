@@ -312,12 +312,18 @@ afk_end() { # <completed|failed|partial> [what happened]
   if [ -n "$_AFK_PREV_EXIT" ]; then eval "$_AFK_PREV_EXIT"; else trap - EXIT; fi
   afk_record "$act" "$(afk_authorisation "$act")" "$_AFK_OPEN_DETAIL${2:+ - $2}" "$1"
 }
+_afk_status() { return "$1"; }
 _afk_end_on_exit() {
-  local prev="$_AFK_PREV_EXIT"
+  local rc=$? prev="$_AFK_PREV_EXIT"
   if [ -n "$_AFK_OPEN_STEP" ]; then afk_end partial "stopped after: $_AFK_OPEN_STEP"
   else afk_end failed "stopped before it took effect"; fi
-  # an EXIT trap that was there before the act still runs
-  if [ -n "$prev" ]; then eval "set -- $prev"; eval "$3"; fi
+  # An EXIT trap that was there before the act still runs - and sees the
+  # process's real exit status in $?, not the status of the record above
+  # (lib/run.sh's `_run_session_release_on_failure $?` decides on it). The
+  # status is restored on the left of `||` so `set -e` cannot end the trap.
+  [ -n "$prev" ] || return 0
+  eval "set -- $prev"
+  if [ "$rc" -eq 0 ]; then eval "$3"; else _afk_status "$rc" || eval "$3"; fi
 }
 
 # THE NAMED EXCEPTION, IN FULL. The reply states what was fixed and cites the

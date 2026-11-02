@@ -307,6 +307,23 @@ test_regression_afk_begin_refusal_records_nothing_and_keeps_the_callers_exit_tra
   assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" failed || { _afk_teardown; return 1; }
   _afk_teardown
 }
+# ...and that trap sees the process's real exit status, not the record's:
+# a trap deciding on `$?` (lib/run.sh releases a session claim on failure)
+# must not read a failed exit as success. Under `set -e` too, as cel-fanout runs.
+test_regression_the_callers_exit_trap_sees_the_real_exit_status() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  local rc=0
+  ( trap 'printf %s "$?" > "$T/prev-rc"' EXIT; afk_begin land "$(_ev_land)" "alpha/widget#71"; exit 7 ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$(cat "$T/prev-rc" 2>/dev/null)" 7 || { _afk_teardown; return 1; }
+  assert_eq "$rc" 7 || { _afk_teardown; return 1; }
+  rm -f "$T/prev-rc"; rc=0
+  ( set -e; trap 'printf %s "$?" > "$T/prev-rc"' EXIT; afk_begin land "$(_ev_land)" "alpha/widget#71"; false ) >/dev/null 2>&1 || rc=$?
+  assert_eq "$(cat "$T/prev-rc" 2>/dev/null)" 1 || { _afk_teardown; return 1; }
+  assert_eq "$rc" 1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '[.[].outcome] | join(",")')" failed,failed || { _afk_teardown; return 1; }
+  _afk_teardown
+}
 
 # THE LOG SAYS WHAT HAPPENED, NOT WHAT WAS ALLOWED. An act the door let
 # through is recorded once its effect was attempted, with how it ended.
