@@ -541,7 +541,7 @@ test_mail_to_an_alias_with_no_live_pane_is_reported() {
 _FLEET_SHIMMED_TOOLS=(
   awk sed grep cut tr head tail sort uniq wc find stat readlink dirname
   basename date id ls cat rm mkdir mktemp touch flock xargs getent ps
-  bash sh env jq git yq node python3 cksum mv cp chmod ln sleep tee expr seq
+  bash sh env jq git yq node python3 cksum md5sum mv cp chmod ln sleep tee expr seq
 )
 _fleet_spawn_shim() { # -> $T/shim, the whole PATH; argv lands in CEL_SPAWN_LOG
   local s="$T/shim" b real
@@ -596,7 +596,7 @@ _fleet_add_rows() { # <n>
 # fan-out wearing different clothes. What it asserts is the SHAPE - a fixed
 # cost plus a small constant per row - not a frozen count. Most of the fixed
 # cost belongs to other libraries reading their own documents (`cksum` and
-# `stat` per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
+# `md5sum` per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
 # accessors run), so it moves when they do: re-measure against the main the
 # branch sits on before moving the ceiling, and keep only a few processes of
 # slack above the measurement. One jq per render validates the roster, which
