@@ -1,8 +1,8 @@
 # shellcheck shell=bash
-# `cel-fanout recover` (AH-261017): canonical registration and one safe
-# continuation of a worker whose launch was only partly recorded.
+# `cel-fanout recover`: canonical registration and one safe continuation of a
+# worker whose launch was only partly recorded.
 #
-# The fixture rebuilds the exact W710 shape with NO real herdr, gh, token or
+# The fixture rebuilds that partial-launch shape with NO real herdr, gh, token or
 # model: a live agent in a pane, the right worktree and branch, herdr reporting
 # idle + launch_pending, a session path that does not exist, and no ledger row.
 # The herdr stub answers from files and refuses to log anything it should never
@@ -400,7 +400,7 @@ test_recover_is_not_a_worker_verb() {
   _rc_cleanup
 }
 
-# ---- review round 1 -------------------------------------------------------
+# ---- an unresolved recovery: other verbs, abandon, the cap, register/continue
 _rc_sha() { printf '%040d' 1 | tr 0 a; }
 
 test_land_review_request_review_and_handback_refuse_an_unresolved_recovery() {

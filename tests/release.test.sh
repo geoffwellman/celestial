@@ -2,8 +2,7 @@
 # Cutting a version is three things in one order - a PR, a tag, a GitHub
 # Release - and the order is forced by this repo's branch protection: main
 # takes no direct pushes, so the version bump must arrive as a reviewed PR and
-# the tag can only follow its merge. Nothing has been tagged since v0.2.0 while
-# forty-odd merges landed, because the process lived in someone's head.
+# the tag can only follow its merge.
 #
 # Everything the workflow does that can run off GitHub lives in
 # tools/release/cut.py and tools/release/notes.py and is tested here directly;
@@ -426,10 +425,9 @@ test_release_tag_shows_as_available_on_the_release_channel() {
 
 # The publish job reads the version off main's head subject, and GitHub's
 # squash merge appends the PR number: `release: v0.3.0 (#57)`. A naive strip of
-# the `release: v` prefix yields `0.3.0 (#57)`, which never equals VERSION, so
-# the VERSION-agrees check refused the ONLY path a release can actually take -
-# every hand-pushed tag worked and the real merge did not. Parsing lives in
-# cut.py so this shape is tested without GitHub.
+# the `release: v` prefix yields `0.3.0 (#57)`, which never equals VERSION, and
+# would refuse the ONLY path a release actually takes. Parsing lives in cut.py so
+# this shape is tested without GitHub.
 _subject() { python3 "$_REL_REPO/tools/release/cut.py" --version-from-subject "$1"; }
 
 test_release_version_from_a_squash_merge_subject() {
@@ -570,7 +568,7 @@ test_release_fragment_with_two_sections_files_each_under_its_own_heading() {
   out="$(_notes unreleased --changelog "$T/CHANGELOG.md" --fragments "$T/changelog.d")" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^### Fixed' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c '^### Added' <<<"$out")" "1" || { rm -rf "$T"; return 1; }
-  # Counting headings proves nothing about where the entries went (CEL-79):
+  # Counting headings proves nothing about where the entries went:
   # each entry must sit in the section of the heading it was written under.
   local under
   under="$(awk '/^### /{h=$0; next} /^- /{print h "|" $0}' <<<"$out")"

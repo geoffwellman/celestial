@@ -49,18 +49,16 @@ jobs:
         run: |
           # The private vocabulary - workspace, product and employer names, real
           # ticket prefixes - lives in a repository secret, one regex per line,
-          # and the scan REFUSES to run without it: a scan with generic checks
-          # only let two workspace names into this tree on 2026-09-18.
+          # and the scan REFUSES to run without it: generic checks alone let
+          # private names through.
           umask 077
           printf '%s\n' "$CEL_PRIVATE_PATTERNS" > "$RUNNER_TEMP/private-patterns.txt"
-          # Two scans: every ref's history with the generic checks (a dirty
-          # branch anywhere fails every PR), and the TREE with the private
-          # vocabulary required. History predating the vocabulary is the
+          # Two scans: history with the generic checks, and the TREE with the
+          # private vocabulary required. History predating the vocabulary is the
           # owner's to rewrite or accept; new work cannot add to it.
           # A PULL REQUEST IS JUDGED ON ITS OWN ANCESTRY (base..head), a push
           # on the pushed branch's history; the every-ref scan runs nightly
-          # below. Every ref on every PR meant one dirty branch failed every
-          # other PR - twice on 2026-09-18.
+          # below, so one dirty branch cannot fail every other PR.
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
             python3 tools/release/hygiene.py --history "${{ github.event.pull_request.base.sha }}..HEAD"
           else

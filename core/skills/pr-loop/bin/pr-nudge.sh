@@ -4,9 +4,9 @@
 #
 # TWO calls, deliberately. `gh pr edit --remove-reviewer X --add-reviewer X` sends both in ONE
 # API request and the REMOVAL WINS: it returns success, prints the PR url, and leaves the PR
-# with NO reviewer at all — a nudge that silently un-asks for the review it meant to chase
-# (observed 2026-08-31). The removal is also what makes the nudge work: adding a
-# login already on the request is a no-op that fires no event.
+# with NO reviewer at all — a nudge that silently un-asks for the review it meant to chase.
+# The removal is also what makes the nudge work: adding a login already on the request is a
+# no-op that fires no event.
 #
 # Verifies the reviewer is actually back on the PR before reporting success — the failure this
 # exists to prevent was invisible precisely because the command reported success.

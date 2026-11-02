@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# An isolated fake herdr for the launch-readiness tests (AH-261017). No socket,
+# An isolated fake herdr for the launch-readiness tests. No socket,
 # no real panes, no tokens: it answers the handful of calls `cel run` makes and
 # models ONE pane whose shell is slow to come up. State lives in $PF_DIR.
 #

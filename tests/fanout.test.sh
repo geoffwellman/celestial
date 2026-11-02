@@ -61,7 +61,7 @@ EOF
   printf 'do the thing\n' > "$T/spec.md"
 }
 
-# A GC-retained row (AH-261018): its worktree exists as a real checkout the
+# A GC-retained row: its worktree exists as a real checkout the
 # row owns, its pane is gone, and its native session file is on disk. The
 # session is recorded on the row (explicit provenance) unless NOSESS=1.
 _fanout_retain() { # <id> <wt-dir-name> [state]
@@ -149,8 +149,7 @@ test_status_does_not_reopen_a_collected_row() {
 }
 
 # The worktree must be cut from the REMOTE default, never from whatever the
-# checkout is parked on — a contaminated base put two stray commits onto seven
-# ticket branches before this was fixed.
+# checkout is parked on, or stray local commits leak onto ticket branches.
 test_delegate_branches_from_origin_default_when_reachable() {
   _fanout_setup
   # Give the fixture repo a commit and an origin/main to branch from.
@@ -340,8 +339,7 @@ test_status_lists_delegations() {
 # ---- the ticket gate -------------------------------------------------------
 # Work with no ticket is invisible: Linear attaches a PR to its ticket purely
 # from the branch name, so an unticketed branch can never appear on the board.
-# Measured on a live box, 15 of 15 agent-opened PRs carried no ticket, because
-# "one ticket per work package" was advice while the mechanism took any name.
+# The ticket is enforced by the mechanism, not left as advice.
 
 # ws-alpha declares `tickets: {system: none}`, so the gate must stay dormant
 # there - these set it to linear explicitly.
@@ -474,8 +472,8 @@ test_redelegating_replaces_the_ledger_row() {
 # PLAIN workspace with no worktree metadata. herdr then has no repo_root to
 # nest it under, so it shows at top level with no parent - "homeless" - while
 # the ledger records it as though it were the worktree, and `release` later
-# removes nothing. Re-delegation after an orphan is routine, so this compounded
-# on a live box until several worktrees were stranded.
+# removes nothing. Re-delegation after an orphan is routine, so unchecked this
+# strands worktrees.
 _fanout_existing_wt() {
   _fanout_setup
   git -C "$T/repos/widget" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
@@ -525,10 +523,8 @@ EOF
 }
 
 # ---- fail-closed release ---------------------------------------------------
-# Three worktrees had their uncommitted work hand-salvaged to patches in one
-# day because release removed whatever it was pointed at. Releasing is not
-# landing: a worktree with unpushed commits or uncommitted changes is work,
-# and destroying it needs the word for it.
+# Releasing is not landing: a worktree with unpushed commits or uncommitted
+# changes is work, and destroying it needs the word for it.
 _fanout_dirty_release() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-DIRTY "$T/spec.md") > /dev/null
@@ -536,9 +532,8 @@ _fanout_dirty_release() {
   printf 'unsaved\n' > "$STUB_WT/work.txt"
 }
 # Bulk: `--all` takes the rows the world has finished with - landed and
-# abandoned - and nothing else. It once defaulted to finished,collected and
-# released twelve rows of work awaiting review; the wider set is still
-# reachable, but only by naming it.
+# abandoned - and nothing else; work awaiting review stays. The wider set is
+# reachable only by naming it.
 test_release_all_takes_landed_and_abandoned_and_leaves_the_rest_alone() {
   _fanout_setup
   for t in WG-A WG-B WG-C; do (cd "$T" && "$BIN" delegate widget "$t" "$T/spec.md" >/dev/null); done
@@ -848,7 +843,7 @@ printf '%s|%s' \"\${CEL_SESSION_ID-unset}\" \"\${OMP_GATEWAY_TOKEN-unset}\"")"
   if [ -n "$previous_session_set" ]; then export CEL_SESSION_ID="$previous_session"; else unset CEL_SESSION_ID; fi
   [ -z "$previous_no_quota" ] || export CEL_NO_QUOTA_PROBE="$previous_no_quota"
 }
-# CEL-68: an omp delegate/scout keeps its profile's model - prewalk off.
+# An omp delegate/scout keeps its profile's model - prewalk off.
 test_omp_delegate_and_scout_launch_with_no_prewalk() {
   _fanout_setup; _fanout_bind_profiles deep
   (cd "$T" && "$BIN" delegate widget WG-NP "$T/spec.md") > /dev/null
@@ -950,10 +945,9 @@ test_land_applies_the_workspace_env_to_the_gate() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
-# THE LEDGER LOCK IS FOR LEDGER WRITES, NOT FOR GATES. collect took the lock,
-# then ran cel-verify, whose gate queues on the box-wide suite lock - so the
-# ledger lock was held for the queue plus the whole gate, and every other
-# fanout command on the box waited behind it (a release waited six minutes).
+# THE LEDGER LOCK IS FOR LEDGER WRITES, NOT FOR GATES. The gate queues on the
+# box-wide suite lock; holding the ledger lock across it would block every
+# other fanout command on the box for the whole queue plus gate.
 test_collect_releases_the_ledger_lock_while_the_gate_runs() {
   _fanout_setup
   local fifo="$T/gate.fifo" started="$T/gate.started"
@@ -1050,10 +1044,9 @@ test_worker_pane_loads_the_workspace_env_before_the_agent_starts() {
   rm -rf "$T"
 }
 
-# A worker that has written its result and gone IDLE is finished. The live-agent
-# rule was meant to stop a BUSY agent being declared done; "still alive" stood in
-# for "still working" and did not survive contact with a worker that finishes and
-# waits. Its row read `running` with the work pushed and the PR open.
+# A worker that has written its result and gone IDLE is finished: the
+# live-agent rule stops a BUSY agent being declared done, but "alive" is not
+# "working".
 test_status_marks_finished_when_agent_is_idle_with_a_result() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-IDLE "$T/spec.md") > /dev/null
@@ -1103,9 +1096,9 @@ test_scout_is_told_to_report_to_the_orchestrator_mailbox() {
 
 # The orchestrator mailbox must use the complete shared sanitiser, not half
 # of the sanitiser - lowercase and substitute, but no 32-character truncation.
-# A repo name past 27 characters therefore addressed an untruncated mailbox
-# while the orchestrator answered to the truncated one, so every completion
-# notice from that repo was filed where nobody reads.
+# Otherwise a repo name past 27 characters addresses an untruncated mailbox
+# while the orchestrator answers to the truncated one, and completion notices
+# go unread.
 test_the_orchestrator_mailbox_is_truncated_like_every_other_name() {
   local long=repository-with-a-very-long-name
   assert_eq "$(bash -c 'source "$1/lib/run.sh"; _run_agent_name "$2-orch"' _ "$CEL_ROOT" "$long")" \
@@ -1129,8 +1122,8 @@ test_the_workspace_env_selector_is_shell_quoted() {
 # A worker stands in ~/.herdr/worktrees/..., where
 # ws_current finds nothing, so an unqualified `cel inbox send` resolves the
 # workspace to the literal `default` - a mailbox no orchestrator reads. The
-# completion notice has to name the workspace, or the whole announcement is a
-# no-op in exactly the silent way it was written to prevent.
+# completion notice has to name the workspace, or the announcement is a
+# silent no-op.
 test_the_completion_notice_names_the_workspace() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-WS "$T/spec.md") > /dev/null
@@ -1266,12 +1259,9 @@ test_fanout_failed_ledger_rename_preserves_rows_and_cleans_temp() {
 }
 
 # --- the worker cap ---------------------------------------------------------
-# policy.workers was a sentence in the injected policy block and nothing else,
-# so each orchestrator kept a private count - which only ever goes up, because
-# delegating is an act it performs and finishing is an event nobody reports to
-# it. Both directions were live on one day: an orchestrator holding four
-# tickets as "blocked until a slot frees" with zero workers running, and
-# nothing that would have stopped another from starting a fifth.
+# policy.workers is enforced here, not by each orchestrator keeping a private
+# count - such a count only ever goes up, because finishing is an event nobody
+# reports to the orchestrator.
 _cap_fill() { # <n> running rows for widget
   local i; for i in $(seq 1 "$1"); do
     (cd "$T" && "$BIN" delegate widget "WG-9$i" "$T/spec.md") > /dev/null 2>&1
@@ -1410,8 +1400,8 @@ test_status_reports_slots_per_product() {
 # not a git toplevel - so the toplevel lookup finds the REPO orchestrator's
 # workspace and nests every worker under the wrong parent.
 # herdr will only cut a worktree of the repo a workspace OWNS, and offers no
-# way to nest under an arbitrary parent (measured live, 2026-09-16: under a
-# product pane it cut a worktree of the workspace-config repo). So a product
+# way to nest under an arbitrary parent (under a product pane it cuts a
+# worktree of the workspace-config repo). So a product
 # pane is never the nest target - the repo's own workspace is, always.
 test_delegate_nests_under_the_repo_workspace_even_when_a_product_pane_exists() {
   _fanout_products_setup
@@ -1517,10 +1507,9 @@ test_land_refuses_a_changes_verdict() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
-# ---- AH-261017: the verdict binds to the commit the reviewer NAMED ----------
-# `review` used to stamp whatever the worker's local HEAD was - once an
-# unpushed commit the reviewer never saw. --head is now required, the SHA the
-# reviewer evaluated, and nothing infers it.
+# ---- the verdict binds to the commit the reviewer NAMED --------------------
+# --head is required: the SHA the reviewer evaluated. Nothing infers it from
+# the worker's local HEAD, which may hold commits the reviewer never saw.
 _rev_row() { jq -c '.[0].review // null' "$T/.cel/delegations.json"; }
 
 test_review_records_the_named_head_never_the_local_one() {
@@ -1715,9 +1704,8 @@ test_status_shows_the_review_column() {
 
 # ---- spikes: throwaway code that answers a question -------------------------
 # A worker's deliverable is a PR, a scout's is a report and it may not write
-# code. "Try it and tell me if it works" is neither, and was being run as one
-# of them - either shipping unreviewed experiments or a scout reading code it
-# should have been running.
+# code. "Try it and tell me if it works" is neither: run as a worker it ships
+# unreviewed experiments, run as a scout it reads code it should be running.
 test_spike_records_its_shape_and_is_forbidden_to_ship() {
   _fanout_linear_setup
   printf 'does the cache help?\n' > "$T/try-cache.md"
@@ -1776,9 +1764,8 @@ test_status_shows_spikes_as_such() {
 
 # ---- a gate that ran out of time is not a gate that failed --------------------
 # `timeout` returns 124 when it killed the command. Read as a failure, a green
-# branch was recorded as gate:FAIL and land refused a verdict that did not
-# exist. Unknown is not passed - but it is not failed either, and the two lead
-# to opposite actions.
+# branch would be recorded as gate:FAIL. Unknown is not passed - but it is not
+# failed either, and the two lead to opposite actions.
 _fanout_verify_timeout_stub() { # [secs]
   VSTUB="$T/verify-timeout-stub.sh"
   local secs="${1:-600}"
@@ -1896,12 +1883,9 @@ test_gate_from_ci_refuses_protection_with_no_required_contexts() {
   assert_contains "$out" "requires no check"
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
-# ---- CEL-97: with --gate-from-ci, CI is asked FIRST -------------------------
-# On 2026-10-03 a land with --gate-from-ci waited sixteen, then twenty-nine,
-# then more than forty minutes for a local suite - queued behind every
-# worker's suite for the box lock - before it ever looked at the CI run that
-# had already passed on the same head. The flag says "CI's verdict is good
-# enough"; asking for it last made it the slowest route to the same merge.
+# ---- with --gate-from-ci, CI is asked FIRST ---------------------------------
+# The flag says "CI's verdict is good enough"; asking for it only after a local
+# suite queued behind the box lock would make it the slowest route to a merge.
 _fanout_verify_spy() { # records that the local gate ran, and what it was given
   VSTUB="$T/verify-spy.sh"
   cat > "$VSTUB" <<EOF
@@ -1936,8 +1920,8 @@ test_gate_from_ci_with_ci_not_green_runs_the_local_gate_as_before() {
   ! grep -q "Gate: CI" "$GH_LOG" || { echo "claimed CI evidence it did not have"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
-# The gate timeout land passes covers the wait for the box's suite lock too:
-# --gate-timeout 30 that queued forty minutes for the lock was not a bound.
+# The gate timeout land passes covers the wait for the box's suite lock too,
+# or the timeout is not a bound.
 test_land_asks_the_verifier_to_count_the_lock_wait_in_the_timeout() {
   _fanout_land_setup fleetbot APPROVED 0
   _fanout_verify_spy
@@ -1947,12 +1931,10 @@ test_land_asks_the_verifier_to_count_the_lock_wait_in_the_timeout() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 # ---- and a gate that produced NO VERDICT is not a red gate either ------------
-# On 2026-09-21 an approved, CI-green branch was refused with "the repo's gate
-# did not pass (verdict: unknown)": the gate process had been killed by a
-# signal, so it never timed out and never reported a status, and land had only
-# two shapes to put that in - timed out, or failed. It is neither. The refusal
-# must name what happened, and CI may stand in for it on exactly the terms it
-# stands in for a timeout: every protected check green on that head.
+# A gate killed by a signal never times out and never reports a status; it is
+# neither timed out nor failed. The refusal must name what happened, and CI
+# may stand in for it on exactly the terms it stands in for a timeout: every
+# protected check green on that head.
 _fanout_verify_no_verdict_stub() { # [reason]
   VSTUB="$T/verify-no-verdict-stub.sh"
   local reason="${1:-the gate process was killed by SIGTERM before it reported a status}"
@@ -2031,14 +2013,10 @@ test_status_renders_a_timed_out_gate_as_TO() {
 }
 
 # ---- the ledger lock must not outlive the invocation that took it -----------
-# On 2026-09-16 every `cel-fanout release` on a workspace blocked on flock of
-# .cel/delegations.lock for an hour and a half. The holders were seven test
-# servers a gate had booted: collect held the lock on an inherited descriptor,
-# the verifier it spawned inherited that descriptor, the gate died, and the
-# servers it had backgrounded did not. A lock whose owner is gone but whose
-# descriptor is still open cannot be told apart from a lock in use, so nothing
-# recovered - the fleet just waited. The descriptor must therefore be closed
-# on every spawn out of the locked region.
+# A gate may background servers that outlive it. If a spawned child inherits
+# the descriptor of .cel/delegations.lock, the lock stays held after its owner
+# is gone and cannot be told apart from a lock in use, so every fanout command
+# blocks. The descriptor must be closed on every spawn out of the locked region.
 test_collect_does_not_leak_the_ledger_lock_into_the_verifier() {
   _fanout_setup
   local vstub="$T/verify-leaky.sh" fds="$T/verifier-fds" spid="$T/sleeper.pid"
@@ -2102,8 +2080,7 @@ test_lock_spawn_children_do_not_hold_the_lock_open() {
 
 # ── seed: the local files a fresh checkout does not have ─────────────────────
 # A worktree is a fresh checkout, so every gitignored file the repo needs to
-# RUN is missing from it. Seven worktrees were symlinked by hand in one
-# evening before this existed.
+# RUN is missing from it.
 _seed_yaml() { # appends a seed: block to the fixture's widget entry
   cat >> "$T/workspace.yaml" <<'YAML'
     seed:
@@ -2402,13 +2379,10 @@ test_why_on_an_unknown_id_fails() {
 }
 
 # ---- reconcile: the ledger learns what the world already did ----------------
-# Measured on the box 2026-09-18: 37 rows sitting in finished/collected, 22 of
-# them PRs GitHub had merged up to a week earlier with no worktree left on
-# disk - merged through GitHub by hand, so `land` and `release` never ran and
-# the ledger never learned. A row the world has already resolved is noise on
-# the operator's list, and reconciling it by hand is a script somebody writes
-# twice. ONE `gh pr list` per repo: a workspace with forty rows must not make
-# forty requests.
+# Rows merged through GitHub by hand never ran `land` or `release`, so the
+# ledger never learned. A row the world has already resolved is noise on the
+# operator's list. ONE `gh pr list` per repo: a workspace with forty rows must
+# not make forty requests.
 _reconcile_setup() {
   _fanout_setup
   export CEL_INBOX_DIR="$T/inbox"; mkdir -p "$CEL_INBOX_DIR"
@@ -2557,8 +2531,7 @@ test_release_all_merged_releases_only_the_merged_rows() {
 # The console offers the same clean-up from the workers table. The option list
 # is asserted from ui.mjs's source rather than by importing it: the TUI is
 # ink, and console.mjs imports it lazily precisely so the suite never needs
-# node_modules to exist. (This lives here because CEL-24 owns the fanout and
-# steward test files only.)
+# node_modules to exist.
 test_console_x_picker_offers_the_merged_cleanup_first() {
   local src; src="$(cat "$CEL_ROOT/tools/console/ui.mjs")"
   assert_contains "$src" "release --all --merged"
@@ -2573,8 +2546,8 @@ test_console_x_picker_offers_the_merged_cleanup_first() {
 # --- a worker does not run the factory --------------------------------------
 # The guard is a hook, and a hook can be missing (a pi launched by hand, a
 # future runtime). The binary refuses on its own, before any `gh` call and
-# before the ledger lock - the lock is the part that hung an orchestrator's
-# `status` for three minutes the day this was written.
+# before the ledger lock - so a stray worker call can never stall the
+# orchestrator's commands behind that lock.
 _fanout_worker_cwd_setup() {
   _fanout_setup
   export CEL_WORKTREES="$T/wt"
@@ -2645,7 +2618,7 @@ test_delegate_marks_the_worker_with_the_plane_launch_environment() {
   rm -rf "$T"
 }
 
-# CEL-95: a delegated pi worker is launched with the inbox extension and
+# A delegated pi worker is launched with the inbox extension and
 # its own mailbox identity, so a reviewer's CHANGES mail wakes it.
 test_delegate_pi_worker_gets_inbox_extension_and_identity() {
   _fanout_setup
@@ -2661,13 +2634,11 @@ test_delegate_pi_worker_gets_inbox_extension_and_identity() {
   rm -rf "$T"
 }
 
-# --- CEL-50: a pane is not a worker -----------------------------------------
+# --- a pane is not a worker -------------------------------------------------
 #
-# A delegate left the task prompt TYPED BUT UNSUBMITTED in the worker pane:
-# two workers sat two hours at +0 commits with the dispatch below the divider
-# and `ctx 0.0%`, while the ledger read `running`. The row now carries what
-# actually happened, and the worktree - which was fine - stays put so a
-# re-prompt is all the recovery anyone needs.
+# A prompt typed but never submitted is not a running worker. The row records
+# what actually happened, and the worktree stays put so a re-prompt is all the
+# recovery anyone needs.
 _unstarted_pane() {
   printf '%s\n' \
     '────────────────────────────────────────' \
@@ -2700,8 +2671,7 @@ test_delegate_records_running_when_the_prompt_is_accepted() {
 }
 
 # A row reading `running` at +0 commits with a pane at zero context is the
-# exact shape that read like progress for two hours. It is now its own state
-# in the listing.
+# shape that reads like progress, so it is its own state in the listing.
 test_status_shows_the_silence_instead_of_a_row_that_reads_like_progress() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-SIL "$T/spec.md") > /dev/null
@@ -2711,7 +2681,7 @@ test_status_shows_the_silence_instead_of_a_row_that_reads_like_progress() {
   rm -rf "$T"
 }
 
-# ---- CEL-70: the workspace's own GitHub account ---------------------------
+# ---- the workspace's own GitHub account -----------------------------------
 test_land_runs_every_gh_call_as_the_workspace_account() {
   _fanout_land_setup fleetbot APPROVED 0
   printf 'github:\n  user: acct-b\n' >> "$T/workspace.yaml"
@@ -2749,16 +2719,14 @@ test_scout_and_worker_launch_carry_the_token_substitution() {
   rm -rf "$T"
 }
 
-# ---- the history stamp (CEL-45) -------------------------------------------
-# A row carried ONE timestamp - `created` - so half a work item's life was
-# unrecorded: nothing said when it was collected, landed or released, and no
-# timeline could draw what nobody wrote down. Every transition now appends
-# {state, at, by} to the row's `history`.
+# ---- the history stamp ----------------------------------------------------
+# Every transition appends {state, at, by} to the row's `history`, so a work
+# item's whole life - collected, landed, released - is on the record.
 
 test_the_ledger_stamps_the_state_it_was_created_in() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-1-x "$T/spec.md" >/dev/null)
-  # AH-261017: born `unconfirmed` (the launch receipt), then running on acceptance
+  # born `unconfirmed` (the launch receipt), then running on acceptance
   assert_eq "$(jq -r '.[0].history | length' "$T/.cel/delegations.json")" 2
   assert_eq "$(jq -r '.[0].history[0].state' "$T/.cel/delegations.json")" unconfirmed
   assert_eq "$(jq -r '.[0].history[1].state' "$T/.cel/delegations.json")" running
@@ -2784,7 +2752,7 @@ test_every_transition_appends_one_history_entry_in_order_with_its_mover() {
   rm -rf "$T"
 }
 
-# CEL-83: every delegated pane gets a readable label, set before the agent
+# Every delegated pane gets a readable label, set before the agent
 # starts; a failed rename warns and never blocks the launch.
 test_delegate_labels_worker_pane_before_agent_start() {
   _fanout_setup
@@ -2815,7 +2783,7 @@ test_delegate_failed_rename_still_launches() {
   rm -rf "$T"
 }
 
-# CEL-119: a `pr: none` repo's worker pushes to main itself - fast-forward
+# A `pr: none` repo's worker pushes to main itself - fast-forward
 # only, no PR - and a repo without the key keeps the PR instruction.
 test_delegate_prompt_pushes_to_main_for_pr_none_repo() {
   _fanout_setup
@@ -2859,7 +2827,7 @@ test_collect_keeps_pr_none_work_not_on_main_collected() {
   rm -rf "$T"
 }
 
-# PR #145 review: a pr: none worker that wrote result.md WITHOUT committing has
+# A pr: none worker that wrote result.md WITHOUT committing has
 # nothing ahead of main either - that is not landed work.
 test_collect_does_not_land_pr_none_branch_with_zero_commits() {
   _fanout_setup
@@ -2872,10 +2840,10 @@ test_collect_does_not_land_pr_none_branch_with_zero_commits() {
   rm -rf "$T"
 }
 
-# ------------------------------------------------ review hand-back (CEL-130)
-# Under pressure gc may stop a worker that is only waiting on review, so the
-# reviewer's hand-back can no longer assume a pane to type into: the findings
-# travel by inbox, and a stopped worker is resumed in place to read them.
+# ------------------------------------------------ review hand-back
+# gc may stop a worker that is only waiting on review, so the reviewer's
+# hand-back cannot assume a pane to type into: the findings travel by inbox,
+# and a stopped worker is resumed in place to read them.
 test_review_records_the_head_it_reviewed() {
   _fanout_setup
   (cd "$T" && "$BIN" delegate widget WG-RH "$T/spec.md") > /dev/null
@@ -2917,7 +2885,7 @@ test_handback_resumes_a_stopped_worker_in_place_and_keeps_its_row() {
   rm -rf "$T"
 }
 
-# AH-261017: delegate has its own launch (pane run, send-text, agent start); it
+# Delegate has its own launch (pane run, send-text, agent start); it
 # takes the same readiness gate as `cel run` and never retries a refused start.
 test_delegate_types_nothing_and_starts_nothing_in_a_pane_whose_shell_is_busy() {
   _fanout_setup
@@ -2941,7 +2909,7 @@ test_delegate_does_not_retry_a_refused_agent_start() {
   assert_contains "$out" "NOT retried"
   assert_eq "$(grep -c '^agent start' "$STUB_LOG" || true)" 1
   assert_eq "$(grep -c '^pane send-keys' "$STUB_LOG" || true)" 0
-  # AH-261017: the launch receipt was written BEFORE the start, and a failed
+  # The launch receipt was written BEFORE the start, and a failed
   # start is not rolled back - herdr can time out after the agent exists - so
   # the row stays, `unconfirmed`, saying exactly that. No task was delivered.
   assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 1
@@ -2952,7 +2920,7 @@ test_delegate_does_not_retry_a_refused_agent_start() {
   rm -rf "$T"
 }
 
-# AH-261017: the receipt precedes the spawn, so a delegate killed after herdr
+# The receipt precedes the spawn, so a delegate killed after herdr
 # started the agent leaves a trackable row, never a live agent with no row.
 test_delegate_writes_its_launch_receipt_before_the_agent_starts() {
   _fanout_setup
@@ -2981,7 +2949,7 @@ test_delegate_killed_during_agent_start_leaves_a_trackable_row() {
   rm -rf "$T"
 }
 
-# AH-261017 review round 1: a failed `delegate --reuse` start must not destroy
+# A failed `delegate --reuse` start must not destroy
 # the prior row (handback resumes through --reuse; the verdict and PR live there).
 test_a_failed_reuse_start_keeps_the_prior_rows_verdict_and_pr() {
   _fanout_setup
@@ -3033,7 +3001,7 @@ test_a_start_failed_receipt_row_holds_a_slot_and_fences_consumers_until_abandone
   rm -rf "$T"
 }
 
-# round 3: launch debt fences EVERY state. A failed --reuse start leaves a
+# Launch debt fences EVERY state. A failed --reuse start leaves a
 # finished row (verdict+PR kept) with launch.phase start-failed; no destructive
 # consumer may touch it, the worktree survives, and abandon needs fresh evidence.
 test_a_failed_reuse_over_a_finished_row_fences_every_destructive_consumer() {
@@ -3096,7 +3064,7 @@ test_a_row_stuck_at_launch_starting_says_it_is_retained_debt_with_no_exit() {
   rm -rf "$T"
 }
 
-# round 4: a delegate whose dispatch was never confirmed (prompt MAY have been
+# A delegate whose dispatch was never confirmed (prompt MAY have been
 # delivered) is uncertain delivery debt: every destructive consumer refuses it.
 test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
   _fanout_setup
@@ -3114,7 +3082,7 @@ test_a_dispatch_unconfirmed_row_fences_every_destructive_consumer() {
   rm -rf "$T"
 }
 
-# AH-261018: an explicit `false` must not collapse into "unknown" (jq `//` treats
+# An explicit `false` must not collapse into "unknown" (jq `//` treats
 # false as absent). A red gate is a red gate in land's refusal AND in status.
 test_land_names_a_failed_gate_as_false_not_unknown() {
   _fanout_land_setup fleetbot APPROVED 0
@@ -3136,7 +3104,7 @@ test_status_renders_a_failed_gate_as_FAIL() {
 }
 
 
-# AH-261018 review: a verifier that REFUSES (exit 4) or is SIGKILLed leaves the previous
+# A verifier that REFUSES (exit 4) or is SIGKILLed leaves the previous
 # attempt's verdict on disk; land/collect must not read that as this run's answer.
 _fanout_seed_old_pass() { # writes a passing verdict from an older run into the row's worktree
   local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
@@ -3179,7 +3147,7 @@ test_collect_after_a_refused_verifier_records_no_verdict_not_the_old_pass() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
-# review G1: land/collect accept ONLY the verdict of their own invocation - another
+# land/collect accept ONLY the verdict of their own invocation - another
 # attempt's completion (even a pass) on the same worktree never authorises them, and
 # gate evidence taken on another head never counts.
 _fanout_id_stub() { # <attempt-mode own|other> <gate-head real|bogus>
@@ -3220,7 +3188,7 @@ test_land_accepts_its_own_attempt_with_gate_evidence_for_the_current_head() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
-# review R1: validation and use are on ONE immutable snapshot - swapping the verdict file
+# Validation and use are on ONE immutable snapshot - swapping the verdict file
 # between them (another attempt, anyone) can neither authorise nor veto this call.
 _fanout_snapshot_stub() { # <own-gate-passed true|false>
   VSTUB="$T/verify-snap.sh"
@@ -3253,7 +3221,7 @@ test_land_uses_its_own_validated_snapshot_not_the_file_on_disk() {
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"; return 1; }
   unset CEL_FANOUT_VERIFY CEL_FANOUT_TEST_AFTER_VALIDATE; rm -rf "$T"
 }
-# review R2: a stub that cannot be recorded is an explicit failure, never a silent continue
+# A stub that cannot be recorded is an explicit failure, never a silent continue
 test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
   _fanout_land_setup fleetbot APPROVED 0
   local wt; wt="$(jq -r '.[0].worktree' "$T/.cel/delegations.json")"
@@ -3266,7 +3234,7 @@ test_land_fails_loudly_when_the_no_verdict_stub_cannot_be_recorded() {
   unset CEL_FANOUT_VERIFY; rm -rf "$T"
 }
 
-# ---- retained-session resume (AH-261018) ---------------------------------------
+# ---- retained-session resume ---------------------------------------------------
 # `delegate --reuse` over a GC-stopped row resumes the ORIGINAL native session
 # under the row's recorded runtime/model/thinking/profile - never the workspace's
 # current role default - and keeps the row (verdict, history, spec) intact.
@@ -3561,7 +3529,7 @@ test_reuse_with_no_herdr_workspace_opens_the_existing_checkout_then_resumes_the_
   unset STUB_OPEN_GATE; rm -rf "$T"
 }
 
-# review of the open delta: every refusal in the absent-workspace shape opens nothing
+# Every refusal in the absent-workspace shape opens nothing
 test_reuse_in_the_absent_workspace_shape_opens_nothing_on_any_refusal() {
   _fanout_resume_refusal_setup
   export STUB_OPEN_GATE="$T/opened"

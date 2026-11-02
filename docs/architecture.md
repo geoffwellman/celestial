@@ -179,7 +179,7 @@ the child now owns, and `_ledger_append` keeps lineage across a re-delegation.
 No new ledger state exists - the child is an ordinary `running` row whose
 collect/review/land are gated on `stage: attached`.
 
-`replace bind` (AH-261019) rebinds an attached child's source checkout to the
+`replace bind` rebinds an attached child's source checkout to the
 clean candidate's worktree. The native contract: herdr reports an agent's name,
 pane, native session and cwd but offers no way to change a running agent's
 cwd, so the actor is never moved or restarted; instead the child row carries
@@ -191,7 +191,7 @@ checkout left the child branch or the agent named by the binding is a
 different native session. gc vetoes `binding.old_tree.path` whatever the
 state, and `_ledger_append` keeps the binding across a re-delegation.
 
-### Gateway transports, agent updates and runtime retirement (AH-261018)
+### Gateway transports, agent updates and runtime retirement
 
 - **Codex over Responses.** The gateway serves Chat Completions, Anthropic Messages and OpenAI Responses (`/v1/responses`, `/v1/responses/compact`, and the Responses websocket upgrade on the same path) over one vault. Claude uses `anthropic-messages`; Codex-family ids use `openai-responses` (pi provider `ompgw-codex`, omp provider `celgw-codex`) so compaction and reasoning items are not dropped by a chat-completions substitution. Which transport a live turn actually negotiates (SSE or websocket) is a property of the runtime and is proven with an authenticated turn, not asserted by the writer.
 - **Native start, gateway later.** An omp launched on a native model still receives the gateway client environment and the registered gateway providers; a running process's environment is fixed, so a session started earlier is recovered through its own native session resume (`cel run <role> --restart`, which passes `--resume` for omp and `--session` for pi), never by pretending new variables reach it.
