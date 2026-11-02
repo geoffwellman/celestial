@@ -18,7 +18,10 @@ pane extents and re-derive the chain fractions that land on them:
 
 which is pane i's share of whatever area is left when it splits off pane i-1.
 """
-import json, subprocess, sys
+import argparse, json, subprocess, sys
+
+# herdr's own split words, and the rect axis/extent each one stacks panes along.
+AXES = {"right": ("x", "width"), "down": ("y", "height")}
 
 
 def layout_for(pane_id):
@@ -26,53 +29,73 @@ def layout_for(pane_id):
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
         sys.exit(f"capture-layout: herdr returned nothing for {pane_id}\n{out.stderr.strip()}")
-    return json.loads(out.stdout)["result"]["layout"]
+    try:
+        return json.loads(out.stdout)["result"]["layout"]
+    except (ValueError, KeyError, TypeError) as err:
+        sys.exit(f"capture-layout: herdr pane layout for {pane_id} is not a layout ({err!r})")
 
 
 def labels():
+    """Pane labels are cosmetic: an unreadable pane list means none, not a failure."""
     out = subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True)
-    if out.returncode != 0:
+    try:
+        return {p["pane_id"]: p for p in json.loads(out.stdout)["result"]["panes"]} \
+            if out.returncode == 0 else {}
+    except (ValueError, KeyError, TypeError):
         return {}
-    return {p["pane_id"]: p for p in json.loads(out.stdout)["result"]["panes"]}
 
 
-def main(argv):
-    if not argv:
-        sys.exit(__doc__)
-    pane_id = argv[0]
-    title = argv[argv.index("--title") + 1] if "--title" in argv else None
+def nonneg(text):
+    value = int(text)
+    if value < 0:
+        raise ValueError(text)
+    return value
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="capture-layout.py", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("pane_id")
+    parser.add_argument("--title", default=None)
     # Emitted as a `tabs:` list member. The default suits a bare tabs block; pass
     # --indent 4 to nest it under `layouts: - id: ... tabs:` in a plugin config.
-    pad = " " * int(argv[argv.index("--indent") + 1]) if "--indent" in argv else ""
+    parser.add_argument("--indent", type=nonneg, default=0)
+    args = parser.parse_args(argv)
+    pad = " " * args.indent
 
-    lay = layout_for(pane_id)
-    panes, splits = lay["panes"], lay.get("splits", [])
-    if not splits:
-        sys.exit(f"capture-layout: tab {lay['tab_id']} has a single pane; nothing to capture")
-
-    dirs = {s["direction"] for s in splits}
-    if len(dirs) > 1:
-        sys.exit(f"capture-layout: tab {lay['tab_id']} mixes {sorted(dirs)}. A chain of "
-                 "panes cannot express a two-axis tree; split it into two tabs, or "
-                 "write this layout by hand.")
-    direction = dirs.pop()
-    axis, extent = ("x", "width") if direction == "right" else ("y", "height")
-
-    ordered = sorted(panes, key=lambda p: p["rect"][axis])
-    ext = [p["rect"][extent] for p in ordered]
+    lay = layout_for(args.pane_id)
+    try:
+        tab, panes, splits = lay["tab_id"], lay["panes"], lay.get("splits", [])
+        if not splits:
+            sys.exit(f"capture-layout: tab {tab} has a single pane; nothing to capture")
+        dirs = {s["direction"] for s in splits}
+        if len(dirs) > 1:
+            sys.exit(f"capture-layout: tab {tab} mixes {sorted(dirs)}. A chain of "
+                     "panes cannot express a two-axis tree; split it into two tabs, or "
+                     "write this layout by hand.")
+        direction = dirs.pop()
+        if direction not in AXES:
+            sys.exit(f"capture-layout: tab {tab} splits {direction!r}; only "
+                     f"{sorted(AXES)} are understood")
+        axis, extent = AXES[direction]
+        ordered = sorted(panes, key=lambda p: p["rect"][axis])
+        ext = [p["rect"][extent] for p in ordered]
+        ids = [p["pane_id"] for p in ordered]
+        # pane i's share of the area remaining when it splits off pane i-1
+        sizes = [sum(ext[i:]) / sum(ext[i - 1:]) for i in range(1, len(ext))]
+    except (KeyError, TypeError, AttributeError, ZeroDivisionError) as err:
+        sys.exit(f"capture-layout: herdr pane layout for {args.pane_id} has an "
+                 f"unexpected shape ({err!r})")
     meta = labels()
 
-    lines = [f"  - title: {title or lay['tab_id']}", "    panes:"]
-    for i, p in enumerate(ordered):
-        info = meta.get(p["pane_id"], {})
-        lines.append(f"      - title: {info.get('label') or p['pane_id'].split(':')[-1]}")
+    lines = [f"  - title: {args.title or tab}", "    panes:"]
+    for i, pane in enumerate(ids):
+        lines.append(f"      - title: {meta.get(pane, {}).get('label') or pane.split(':')[-1]}")
         if i:
-            # pane i's share of the area remaining when it splits off pane i-1
-            size = sum(ext[i:]) / sum(ext[i - 1:])
             lines.append(f"        split: {direction}")
-            lines.append(f"        size: {size:.4f}")
+            lines.append(f"        size: {sizes[i - 1]:.4f}")
     print("\n".join(pad + l for l in lines))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()

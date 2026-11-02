@@ -402,12 +402,15 @@ if [ -n "$slug" ] && [ -n "$branch" ] && [ -z "${verify_sig:-}" ] && command -v 
   if [ -n "$prj" ]; then
     pr_num="$(printf '%s' "$prj" | jq -r '.number // null')"
     r_dec="$(printf '%s' "$prj" | jq -r 'if (.reviewDecision // "") == "" then "NONE" else .reviewDecision end')"
+    # Only an explicit pass is a pass. Every terminal non-pass GitHub reports
+    # (cancelled, timed out, action required, stale, startup failure) is a
+    # failure, and a state not listed here is PENDING - never SUCCESS.
     c_state="$(printf '%s' "$prj" | jq -r '
       [.statusCheckRollup[]? | (.conclusion // .state // "")] as $s
       | if ($s|length)==0 then "NONE"
-        elif ($s|map(select(.=="FAILURE" or .=="ERROR"))|length)>0 then "FAILURE"
-        elif ($s|map(select(.=="PENDING" or .=="IN_PROGRESS" or .=="QUEUED" or .==""))|length)>0 then "PENDING"
-        else "SUCCESS" end')"
+        elif any($s[]; IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STALE","STARTUP_FAILURE")) then "FAILURE"
+        elif all($s[]; IN("SUCCESS","NEUTRAL","SKIPPED")) then "SUCCESS"
+        else "PENDING" end')"
   else c_state=NONE; r_dec=NONE; fi
 fi
 

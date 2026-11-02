@@ -205,13 +205,18 @@ cmd_state() { # <IDENTIFIER> <state-name e.g. "In Progress">
 CEL_CACHE_DIR="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}"
 BOARD_TTL="${CEL_LINEAR_BOARD_TTL:-60}"
 
-_board_raw() { # <team-key> -> the raw GraphQL response
+# A subshell, so the temp file's EXIT trap is this function's alone.
+_board_raw() ( # <team-key> -> the raw GraphQL response
   local team="$1" f="$CEL_CACHE_DIR/linear-board-$1.json" age
+  # Served only while fresh AND still a board response: a torn write or a hand
+  # edit is refetched, not rendered as a broken board for the rest of the TTL.
   if [ -s "$f" ]; then
     age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
-    [ "$age" -lt "$BOARD_TTL" ] && { cat "$f"; return 0; }
+    if [ "$age" -lt "$BOARD_TTL" ] && jq -e '.data.teams.nodes | type == "array"' "$f" >/dev/null 2>&1; then
+      cat "$f"; return 0
+    fi
   fi
-  local since resp
+  local since resp tmp
   # "Done today" is the board's own definition of recent: a column of
   # everything ever completed is an archive, and the operator's question is
   # what moved while they were away.
@@ -223,10 +228,18 @@ _board_raw() { # <team-key> -> the raw GraphQL response
                                          {completedAt: {gt: $since}}]}) {
           nodes { identifier title url createdAt updatedAt state { name } assignee { name } } } } } }' \
     "$(jq -n --arg k "$team" --arg s "$since" '{k: $k, since: $s}')")" || return 1
+  # Ticket titles and assignees can be private: owner-only whatever the
+  # caller's umask, published by rename, and no temp left behind on any exit.
+  umask 077
   mkdir -p "$CEL_CACHE_DIR"
-  printf '%s' "$resp" > "$f.$$" && mv -f "$f.$$" "$f"
+  tmp="$(mktemp "$f.XXXXXX")"
+  trap 'rm -f -- "$tmp"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  printf '%s' "$resp" > "$tmp" && mv -f "$tmp" "$f"
   printf '%s' "$resp"
-}
+)
 
 # One row per issue, already in the team's workflow order. Every consumer -
 # the text form, `--json`, the console - reads this, so "grouped by state in

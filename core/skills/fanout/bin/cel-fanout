@@ -1141,9 +1141,9 @@ cmd_delegate() {
   else
     resp="$("$HERDR" worktree create --workspace "$herdr_ws" --branch "$branch" --label "$branch" --no-focus \
       ${base:+--base "$base"})"
-    child_ws="$(printf '%s' "$resp" | jq -r '.. | .workspace_id? // empty' | head -1)"
-    worktree="$(printf '%s' "$resp" | jq -r '.. | .checkout_path? // empty' | head -1)"
-    pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
+    child_ws="$(printf '%s' "$resp" | jq -r 'first(.. | .workspace_id? // empty)')"
+    worktree="$(printf '%s' "$resp" | jq -r 'first(.. | .checkout_path? // empty)')"
+    pane="$(printf '%s' "$resp" | jq -r 'first(.. | .pane_id? // empty)')"
     # A response with no checkout path means herdr did NOT attach a worktree.
     # Recording that as a delegation is what stranded the real ones, so it is
     # a hard failure rather than something to guess around.
@@ -1445,7 +1445,7 @@ cmd_wait() {
   local wsdir; wsdir="$(_fanout_wsdir)"
   local running; running="$(_ledger_read "$wsdir" | jq -r '.[] | select(.state == "running") | .id')"
   local settled; settled="$(_ledger_read "$wsdir" | jq -r \
-    '.[] | select(.state == "finished" or .state == "orphaned") | .id' | head -1)"
+    'first(.[] | select(.state == "finished" or .state == "orphaned") | .id)')"
   [ -n "$running" ] || [ -n "$settled" ] || die "nothing delegated"
 
   local start_ms; start_ms="$(_now_ms)"
@@ -1454,7 +1454,7 @@ cmd_wait() {
     # its agent vanished) is already settled: return it instead of polling a
     # pane that no longer exists.
     settled="$(_ledger_read "$wsdir" | jq -r \
-      '.[] | select(.state == "finished" or .state == "orphaned") | .id' | head -1)"
+      'first(.[] | select(.state == "finished" or .state == "orphaned") | .id)')"
     [ -z "$settled" ] || { printf '%s\n' "$settled"; return 0; }
 
     local agents id pane status
@@ -1463,7 +1463,7 @@ cmd_wait() {
       [ -n "$id" ] || continue
       pane="$(_ledger_field "$wsdir" "$id" pane)"
       status="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
-        '.result.agents[]? | select(.pane_id == $p) | .agent_status' | head -1)"
+        'first(.result.agents[]? | select(.pane_id == $p) | .agent_status)')"
       case "$status" in
         idle|blocked|done) printf '%s\n' "$id"; return 0 ;;
       esac
@@ -1607,7 +1607,7 @@ cmd_status() {
     live="-"
     if [ -n "$agents" ]; then
       live="$(printf '%s' "$agents" | jq -r --arg p "$pane" \
-        '.result.agents[]? | select(.pane_id == $p) | .agent_status' | head -1)"
+        'first(.result.agents[]? | select(.pane_id == $p) | .agent_status)')"
       [ -n "$live" ] || live="-"
     fi
 
@@ -2006,7 +2006,7 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
   # belongs to rather than wherever the operator happened to be standing.
   local resp newpane
   resp="$(_ledger_spawn "$HERDR" pane split --pane "$pane" --direction down --cwd "$wt" --no-focus "${wsenv[@]}")"
-  newpane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
+  newpane="$(printf '%s' "$resp" | jq -r 'first(.. | .pane_id? // empty)')"
   [ -n "$newpane" ] || die "try: herdr pane split returned no pane id - nothing was started"
 
   local runline="$cmd"
@@ -3502,7 +3502,7 @@ _replace_bind() {
   [ "$(printf '%s' "$cfacts" | jq -r .dirty_entries)" = 0 ] \
     || die "replace bind: the clean checkout has $(printf '%s' "$cfacts" | jq -r .dirty_entries) uncommitted entries - it must be clean; nothing recorded"
   local other
-  other="$(jq -r --arg id "$id" --arg c "$creal" '.[] | select(.id != $id and (.worktree // "") == $c and ((.state // "") | IN("landed","released","abandoned") | not)) | .id' "$(_ledger_file "$wsdir")" | head -1)"
+  other="$(jq -r --arg id "$id" --arg c "$creal" 'first(.[] | select(.id != $id and (.worktree // "") == $c and ((.state // "") | IN("landed","released","abandoned") | not)) | .id)' "$(_ledger_file "$wsdir")")"
   [ -z "$other" ] || die "replace bind: the clean checkout is already the worktree of delegation $other - ambiguous ownership; nothing recorded"
   local ofacts; ofacts="$(_replace_tree_facts "$oreal")" || die "replace bind: cannot read the old checkout - nothing recorded"
 
