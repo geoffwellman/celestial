@@ -1,0 +1,8 @@
+### Fixed
+- `cel run` session claims fail closed: a claim lock that cannot be opened or had within `CEL_SESSION_CLAIM_LOCK_WAIT` (default 10s) refuses the launch ("session claim store is unavailable") instead of claiming unlocked.
+- A failed launch releases only its own session claim: claims carry a per-launch token and release removes the claim, under the lock, only when the token still matches, so an older launch's exit can no longer delete a same-pane relaunch's newer claim.
+- Liveness state updates (`steward`, `fleet`, `status`) re-read and rewrite the state file under one lock through a unique temp file, so concurrent writers for different workers no longer drop each other's rows or share `liveness-state.tmp`.
+- `cel mode ... fleet` refuses to switch when the lane inventory cannot be read (herdr unavailable or malformed roster) instead of treating it as "no live lanes".
+- `cel mode` writes to `workspace.yaml` are serialized on `.cel/workspace.lock` and made from a snapshot that must still match the file right before the rename; a concurrent edit is never overwritten (nothing is written and the command says to run it again).
+- `cel work` / `cel history` fail with the ledger path named when `.cel/delegations.json` is malformed, not an array, or empty, instead of showing the workspace as having no delegated work.
+- The work cache is written through a unique `mktemp` file instead of `<cache>.$$`, which subshells of one process shared.

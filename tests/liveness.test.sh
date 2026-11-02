@@ -269,6 +269,23 @@ test_two_workers_do_not_share_an_output_clock() {
   unset CEL_LIVENESS_NOW
   rm -rf "$T"
 }
+# steward, fleet and status update the one state file at once, each for its
+# own worker: no writer may drop another's row or share its temp file.
+test_concurrent_liveness_writers_are_fail_safe() {
+  _liveness_setup
+  export CEL_LIVENESS_NOW=1000000
+  local i; local -a kids=()
+  for i in $(seq 1 40); do
+    liveness_output_age "alpha/ABC-$i" "text $i" >/dev/null & kids+=("$!")
+  done
+  for i in "${kids[@]}"; do wait "$i"; done
+  assert_eq "$(awk 'END { print NR }' "$CEL_LIVENESS_STATE")" 40
+  for i in $(seq 1 40); do
+    [ -n "$(_liveness_row "alpha/ABC-$i")" ] || { echo "row alpha/ABC-$i lost"; rm -rf "$T"; return 1; }
+  done
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
 
 # A stray CEL_LIVENESS_NOW in a real process must not freeze the clock: the
 # override is honoured only inside the test harness, and only as an integer.

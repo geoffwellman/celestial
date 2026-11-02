@@ -136,11 +136,19 @@ _liveness_row() { # <key> -> the row, or ""
   awk -v k="$1" '$1 == k { row = $0 } END { if (row != "") print row }' "$f"
 }
 
+# steward, fleet and status all write this file, each for its own workers: the
+# rewrite re-reads it under one lock and replaces it through a temp of its own,
+# so no writer drops another's row or shares its temp.
 _liveness_put() { # <key> <hash> <changed_at> <activity> <confidence> <answered_at>
-  local f; f="$(_liveness_state_file)"
+  local f fd tmp rc=0; f="$(_liveness_state_file)"
   mkdir -p "$(dirname "$f")"; touch "$f"
+  exec {fd}>"$f.lock"
+  flock -w 10 "$fd" || { exec {fd}>&-; return 1; }
+  tmp="$(mktemp "$f.XXXXXX")" || { exec {fd}>&-; return 1; }
   { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:--}"; } \
-    > "$f.tmp" && mv "$f.tmp" "$f"
+    > "$tmp" && chmod --reference="$f" "$tmp" && mv -f "$tmp" "$f" || { rc=1; rm -f "$tmp"; }
+  exec {fd}>&-
+  return "$rc"
 }
 
 # The one clock every timestamp in this file reads. CEL_LIVENESS_NOW pins it,

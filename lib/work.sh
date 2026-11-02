@@ -54,10 +54,14 @@ work_wsdir() { # [name-or-path] -> <wsdir>
 # Older rows carry one timestamp and no `history`. A missing history is
 # SYNTHESISED here, at read time, from what the row does have - and never
 # written back: a backfill on disk is indistinguishable from a record.
+#
+# A LEDGER THAT CANNOT BE READ IS NOT AN EMPTY ONE. Only a missing file is
+# "no delegations"; broken JSON, a non-array or a torn empty file returns 1
+# with the reason on stderr, so no view reports work it could not see as none.
 work_ledger_json() { # <wsdir> -> JSON array
   local f="$1/.cel/delegations.json"
   [ -f "$f" ] || { printf '[]'; return 0; }
-  jq -c 'if type == "array" then . else [] end
+  jq -ce 'if type == "array" then . else error("not an array") end
     | map(. + {history: (
         if ((.history // []) | length) > 0 then .history
         else (([{state: "created", at: (.created // ""), by: ""}]
@@ -70,7 +74,9 @@ work_ledger_json() { # <wsdir> -> JSON array
                    [{state: .state, at: (.review.at // .verdict.at // .created), by: ""}]
                  else [] end))
           | map(select(.at != "")) | sort_by(.at))
-        end)})' "$f" 2>/dev/null || printf '[]'
+        end)})' "$f" 2>/dev/null && return 0
+  printf 'work: the delegation ledger %s is unreadable - its delegated work cannot be shown\n' "$f" >&2
+  return 1
 }
 
 # --- the two systems that cost a round trip --------------------------------
@@ -120,7 +126,11 @@ _work_remote() { # <wsdir> <ws> <fresh 0|1> -> {tickets:[],prs:[]}
   doc="$(jq -nc --argjson t "$tix" --argjson p "$prs" '{tickets: $t, prs: $p}')"
   if [ "$failed" -eq 0 ]; then
     mkdir -p "$(_work_cache_dir)" 2>/dev/null || true
-    printf '%s' "$doc" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null || rm -f "$f.$$"
+    # A temp of its own: subshells share $$, so "$f.$$" is not unique.
+    local tmp
+    if tmp="$(mktemp "$f.XXXXXX" 2>/dev/null)"; then
+      printf '%s' "$doc" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+    fi
   fi
   printf '%s' "$doc"
 }
@@ -226,7 +236,7 @@ work_items() { # <wsdir> [--since <iso>] [--fresh] [--stage S] [--product P] [--
   local ws; ws="$(ws_name "$wsdir" 2>/dev/null)"; [ -n "$ws" ] || ws="$(basename "$wsdir")"
 
   local led mail remote repomap
-  led="$(work_ledger_json "$wsdir")"
+  led="$(work_ledger_json "$wsdir")" || return 1
   mail="$(_work_mail "$ws")"
   remote="$(_work_remote "$wsdir" "$ws" "$fresh")"
   # repo -> product, so an item can say which product it belongs to without
@@ -504,12 +514,12 @@ cmd_work() { # [<workspace>] [<key>] [--stage S] [--product P] [--json] [--fresh
   for d in "${dirs[@]}"; do
     [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
     if [ -n "$key" ]; then
-      items="$(work_items "$d" --key "$key" "${pass[@]+"${pass[@]}"}")"
+      items="$(work_items "$d" --key "$key" "${pass[@]+"${pass[@]}"}")" || return 1
       [ -n "$items" ] || continue
       if [ "$json" = 1 ]; then printf '%s\n' "$items"; else _work_one "$items"; fi
       return 0
     fi
-    items="$(work_items "$d" "${pass[@]+"${pass[@]}"}")"
+    items="$(work_items "$d" "${pass[@]+"${pass[@]}"}")" || return 1
     if [ "$json" = 1 ]; then
       [ -n "$items" ] && printf '%s\n' "$items"
     else
@@ -544,7 +554,7 @@ cmd_history() { # [<workspace>] [--since 7d] [--key K] [--json]
   local first=1 items all=""
   for d in "${dirs[@]}"; do
     [ -n "$d" ] && [ -f "$d/workspace.yaml" ] || continue
-    items="$(work_items "$d" ${iso:+--since "$iso"} ${key:+--key "$key"})"
+    items="$(work_items "$d" ${iso:+--since "$iso"} ${key:+--key "$key"})" || return 1
     # The GROUPING is the view: one object per item, its events in time order,
     # groups ordered by most recent event. `--json` is the same document, so
     # the console and the dash render identically.

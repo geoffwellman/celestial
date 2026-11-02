@@ -37,6 +37,7 @@ test_mode_switch_is_one_added_line_and_reads_back() {
 
 test_mode_switch_back_replaces_the_same_line() {
   _mws
+  _mode_stub_roster "$T/elsewhere" someone idle
   ( cd "$T" && cmd_mode bundle solo --no-restart && cmd_mode bundle fleet --no-restart ) >/dev/null
   assert_eq "$(ws_build_mode "$T" bundle)" fleet
   assert_eq "$(_changed_lines)" 1
@@ -113,6 +114,33 @@ test_mode_refuses_a_flow_style_entry_and_leaves_the_file_alone() {
   rm -rf "$T"
 }
 
+# The owner (or another cel mode) editing workspace.yaml while this edit is
+# being validated must not lose that edit: the source is checked right before
+# the rename and the write is refused, untouched, when it moved.
+test_mode_write_over_a_concurrent_edit_is_fail_safe() {
+  _mws
+  chmod() { printf '# edited meanwhile\n' >> "$T/workspace.yaml"; command chmod "$@"; }
+  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
+    && { unset -f chmod; echo "overwrote a concurrent edit"; rm -rf "$T"; return 1; }
+  unset -f chmod
+  grep -qx '# edited meanwhile' "$T/workspace.yaml" || { echo "the concurrent edit was lost"; rm -rf "$T"; return 1; }
+  assert_eq "$(ws_build_mode "$T" bundle)" fleet
+  assert_contains "$out" "changed while"
+  [ -z "$(find "$T" -maxdepth 1 -name 'workspace.yaml.cel-mode.*')" ] || { echo "left a temp file"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Two cel mode writers queue on one lock; one that cannot get it writes nothing.
+test_mode_write_under_another_writers_lock_is_fail_safe() {
+  _mws
+  local hfd; exec {hfd}>"$T/.cel/workspace.lock"; flock "$hfd"
+  local out; out="$( cd "$T" && CEL_MODE_WRITE_LOCK_WAIT=1 _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
+    && { exec {hfd}>&-; echo "wrote under another writer's lock"; rm -rf "$T"; return 1; }
+  exec {hfd}>&-
+  assert_eq "$(_changed_lines)" 0
+  assert_contains "$out" "changed while"
+  rm -rf "$T"
+}
+
 # Fleet work still in flight has nobody to land it once the product is solo.
 test_mode_refuses_solo_while_fleet_work_is_in_flight() {
   _mws
@@ -154,6 +182,19 @@ test_mode_refuses_fleet_while_a_lane_is_live() {
   local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet 2>&1 )" \
     && { echo "switched to fleet over a live lane"; rm -rf "$T"; return 1; }
   assert_contains "$out" "bundle-ui"
+  assert_eq "$(ws_build_mode "$T" bundle)" solo
+  rm -rf "$T"
+}
+# A roster herdr cannot give is not "no lanes": back to fleet is refused
+# until the lanes can be seen, never assumed away.
+test_mode_fleet_switch_with_an_unreadable_roster_is_fail_safe() {
+  _mws
+  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
+  mkdir -p "$T/bin"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/herdr"; chmod +x "$T/bin/herdr"
+  PATH="$T/bin:$PATH"
+  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet --no-restart 2>&1 )" \
+    && { echo "switched to fleet without seeing the lanes"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cannot read"
   assert_eq "$(ws_build_mode "$T" bundle)" solo
   rm -rf "$T"
 }

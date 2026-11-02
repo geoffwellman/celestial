@@ -244,6 +244,46 @@ test_session_claim_refuses_a_second_launch_inside_the_window() {
   orch_stub_teardown
 }
 
+# A claim store whose lock is held past the wait is unknown, not free: the
+# claim fails closed (rc 2) and writes nothing, and the launch is refused.
+test_session_claim_under_a_held_lock_is_fail_safe() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  local f lock hfd rc=0 out
+  f="$(_run_session_claim_file "$T/s.jsonl")"
+  mkdir -p "$(dirname "$f")"; lock="$(dirname "$f")/.lock"
+  exec {hfd}>"$lock"; flock "$hfd"
+  CEL_SESSION_CLAIM_LOCK_WAIT=1 _run_session_claim "$T/s.jsonl" || rc=$?
+  if out="$(CEL_SESSION_CLAIM_LOCK_WAIT=1 _restart)"; then
+    exec {hfd}>&-; echo "launched without the claim lock: $out"; orch_stub_teardown; return 1
+  fi
+  exec {hfd}>&-
+  assert_eq "$rc" 2
+  [ ! -e "$f" ] || { echo "claimed without the lock: $(cat "$f")"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "session claim store is unavailable"
+  orch_stub_teardown
+}
+
+# A same-pane relaunch refreshes the claim; the older launch's failure trap
+# must not delete that newer claim, only its own.
+test_session_release_of_a_superseded_claim_is_fail_safe() {
+  orch_stub_setup omp
+  export CEL_ORCH_SESSIONS="$T/sessions.json"
+  local f old new
+  f="$(_run_session_claim_file "$T/old.jsonl")"
+  _run_session_claim "$T/old.jsonl" w1:p1 || { echo "first claim refused"; orch_stub_teardown; return 1; }
+  old="$_RUN_SESSION_CLAIM_TOKEN"
+  _run_session_claim "$T/old.jsonl" w1:p1 || { echo "same-pane claim refused"; orch_stub_teardown; return 1; }
+  new="$_RUN_SESSION_CLAIM_TOKEN"
+  [ -n "$old" ] && [ "$old" != "$new" ] || { echo "claims not token-bound: '$old' '$new'"; orch_stub_teardown; return 1; }
+  _run_session_release "$T/old.jsonl" "$old"
+  [ -e "$f" ] || { echo "stale release deleted the newer claim"; orch_stub_teardown; return 1; }
+  if _run_session_claim "$T/old.jsonl" w2:p1; then echo "newer claim no longer held"; orch_stub_teardown; return 1; fi
+  _run_session_release "$T/old.jsonl" "$new"
+  [ ! -e "$f" ] || { echo "owner release left its claim"; orch_stub_teardown; return 1; }
+  orch_stub_teardown
+}
+
 # A launch that fails after claiming its session gives the claim
 # back, so a retry a few seconds later is not refused for sixty of them.
 test_failed_restart_releases_its_session_claim() {
