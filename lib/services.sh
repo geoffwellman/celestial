@@ -80,15 +80,20 @@ svc_box_write() { # <name> <json-spec>
 # A PORT IS THE HANDLE. Everything below - listening, health, the proxy path,
 # the row an operator clicks - keys off the port in the declared url, so a url
 # without one (http://host/path) is taken as the scheme's default rather than
-# guessed at.
+# guessed at. Userinfo and a bracketed IPv6 host are skipped; a port that is
+# not a number is 0, never a fragment of the host.
 svc_port_of_url() { # <url>
-  local u="${1:-}" hostport
+  local u="${1:-}" hostport port=""
   [ -n "$u" ] || { printf 0; return 0; }
-  hostport="${u#*://}"; hostport="${hostport%%/*}"
+  hostport="${u#*://}"; hostport="${hostport%%[/?#]*}"; hostport="${hostport##*@}"
   case "$hostport" in
-    *:*) printf '%s' "${hostport##*:}" ;;
-    *)   case "$u" in https://*) printf 443 ;; *) printf 80 ;; esac ;;
+    \[*\]:*) port="${hostport##*\]:}" ;;
+    \[*) ;;
+    *:*) port="${hostport##*:}" ;;
   esac
+  [ -n "$port" ] || case "$u" in https://*) port=443 ;; *) port=80 ;; esac
+  case "$port" in *[!0-9]*) port=0 ;; esac
+  printf '%s' "$port"
 }
 
 # Listening means something accepted a connection. Deliberately /dev/tcp, in
@@ -311,22 +316,35 @@ _svc_box_record() { # <name> <pane>
     '{name: $n, pane: $p, pid: 0, started: $at, log: ("pane:" + $p)}' > "$f"
 }
 
-_svc_pane_record() { # <wsdir|box> <name> <pane>
-  local f
-  if [ "$1" = box ]; then _svc_box_record "$2" "$3"; return 0; fi
-  f="$(svc_state_file "$1")"
+# A workspace's services.json is one document for all its services, so each
+# read-modify-write holds a lock beside it and publishes through a private
+# temp file: concurrent starts and stops of different services must not
+# lose each other's records.
+_svc_state_update() { # <wsdir> <jq args...>
+  local f fd rc=0; f="$(svc_state_file "$1")"; shift
   mkdir -p "$(dirname "$f")"
+  if have flock && exec {fd}>>"$f.lock"; then flock "$fd"; else fd=""; fi
+  _svc_state_write "$f" "$@" || rc=$?
+  [ -z "$fd" ] || exec {fd}>&-
+  return "$rc"
+}
+_svc_state_write() { # <file> <jq args...>
+  local f="$1" tmp; shift
   [ -f "$f" ] || printf '{}\n' > "$f"
-  jq --arg n "$2" --arg p "$3" --arg at "$(date -u +%FT%TZ)" \
-    '.[$n] = {pane: $p, started: $at}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  tmp="$(mktemp "$f.XXXXXX")" || return 1
+  jq "$@" "$f" > "$tmp" && mv "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+_svc_pane_record() { # <wsdir|box> <name> <pane>
+  if [ "$1" = box ]; then _svc_box_record "$2" "$3"; return 0; fi
+  _svc_state_update "$1" --arg n "$2" --arg p "$3" --arg at "$(date -u +%FT%TZ)" \
+    '.[$n] = {pane: $p, started: $at}'
 }
 
 _svc_pane_forget() { # <wsdir|box> <name>
-  local f
   if [ "$1" = box ]; then rm -f "$(svc_box_state_file "$2")"; return 0; fi
-  f="$(svc_state_file "$1")"
-  [ -f "$f" ] || return 0
-  jq --arg n "$2" 'del(.[$n])' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  [ -f "$(svc_state_file "$1")" ] || return 0
+  _svc_state_update "$1" --arg n "$2" 'del(.[$n])'
 }
 
 # The workspace's own pane, so a service appears beside the workspace it
@@ -487,9 +505,18 @@ svc_start() { # [wsdir] <name>
   }
   local runline="$cmd"
   [ "${#envs[@]}" -eq 0 ] || runline="env ${envs[*]} $cmd"
-  "$_SERVICES_HERDR" pane run "$pane" "$runline" >/dev/null 2>&1 \
-    || c_warn "$name: could not start it in $pane - read the pane"
-  _svc_pane_record "$store" "$name" "$pane"
+  # A command that never reached the pane started nothing: no record, no
+  # success, and the empty pane just split goes again.
+  if ! "$_SERVICES_HERDR" pane run "$pane" "$runline" >/dev/null 2>&1; then
+    "$_SERVICES_HERDR" pane close "$pane" >/dev/null 2>&1 \
+      || c_warn "$name: could not close the empty pane $pane - close it by hand"
+    c_err "$name: herdr could not run the command in $pane - not started"
+    return 1
+  fi
+  _svc_pane_record "$store" "$name" "$pane" || {
+    c_err "$name: started in $pane but its pane could not be recorded - stop it with: herdr pane close $pane"
+    return 1
+  }
   c_ok "$name started in $pane"
 }
 
@@ -503,8 +530,15 @@ svc_stop() { # [wsdir] <name>
     pane="$(printf '%s' "$e" | jq -r '.pane // ""' 2>/dev/null || true)"
   fi
   [ -n "$pane" ] || { c_warn "$name is not running under a pane this plane started"; return 0; }
-  "$_SERVICES_HERDR" pane close "$pane" >/dev/null 2>&1 \
-    || c_warn "could not close pane $pane - close it by hand"
+  # The pane id is the only handle there is: it is forgotten only once the
+  # pane is closed, or herdr says the pane no longer exists.
+  if ! "$_SERVICES_HERDR" pane close "$pane" >/dev/null 2>&1; then
+    case "$("$_SERVICES_HERDR" pane get "$pane" 2>&1)" in
+      *'"pane_not_found"'*) ;;
+      *) c_err "$name: could not close pane $pane - it is still recorded; close it by hand or retry"
+         return 1 ;;
+    esac
+  fi
   _svc_pane_forget "$store" "$name"
   c_ok "$name stopped ($pane)"
 }
@@ -524,7 +558,10 @@ svc_open() { # <wsdir> <name>
 }
 
 svc_restart() { # <wsdir> <name>
-  svc_stop "$1" "$2" >/dev/null 2>&1 || true
+  # A stop that failed leaves the old pane running and recorded; starting
+  # again would only report it as already running.
+  local out
+  out="$(svc_stop "$1" "$2" 2>&1)" || { printf '%s\n' "$out"; return 1; }
   svc_start "$1" "$2"
 }
 

@@ -81,6 +81,37 @@ test_manifest_runs_yq_once_per_process() {
   rm -rf "$B"
 }
 
+# ...and that one conversion is of the CURRENT text: an edit that leaves the
+# manifest no newer than the cache (a restored or older mtime) is still read.
+test_manifest_cache_sees_an_edit_that_keeps_size_and_mtime() {
+  local B; B="$(mktemp -d)"
+  local CEL_MANIFEST="$B/agents.yaml" CEL_MANIFEST_CACHE="$B/cache"
+  printf 'agents:\n  claude:\n    bin: aaaa\n' > "$CEL_MANIFEST"; touch -d '2020-01-01 00:00:00' "$CEL_MANIFEST"
+  assert_eq "$(agent_get claude bin)" aaaa
+  printf 'agents:\n  claude:\n    bin: bbbb\n' > "$CEL_MANIFEST"; touch -d '2020-01-01 00:00:00' "$CEL_MANIFEST"
+  assert_eq "$(agent_get claude bin)" bbbb
+  rm -rf "$B"
+}
+
+# One conversion per CHANGE, and only the current one kept: a read that finds
+# the text unchanged runs neither md5sum nor yq, and converting a new text
+# removes the conversion it supersedes.
+test_manifest_cache_keeps_only_the_current_conversion_and_forks_nothing_on_a_hit() {
+  local B; B="$(mktemp -d)"
+  local CEL_MANIFEST="$B/agents.yaml" CEL_MANIFEST_CACHE="$B/cache"
+  printf 'agents:\n  claude:\n    bin: aaaa\n' > "$CEL_MANIFEST"
+  assert_eq "$(agent_get claude bin)" aaaa
+  printf 'agents:\n  claude:\n    bin: bbbb\n' > "$CEL_MANIFEST"
+  assert_eq "$(agent_get claude bin)" bbbb
+  assert_eq "$(find "$B/cache" -name '*.json' | wc -l | tr -d ' ')" 1
+  md5sum() { echo md5sum >> "$B/forks"; command md5sum "$@"; }
+  yq() { echo yq >> "$B/forks"; command yq "$@"; }
+  assert_eq "$(agent_get claude bin)" bbbb
+  unset -f md5sum yq
+  [ ! -e "$B/forks" ] || { echo "a cache hit ran: $(tr '\n' ' ' < "$B/forks")"; rm -rf "$B"; return 1; }
+  rm -rf "$B"
+}
+
 # AH-261018: pi resumes through its own native `--session`, so a restart keeps
 # the original session file instead of starting fresh; omp keeps `--resume`.
 test_manifest_declares_native_session_resume_for_pi_and_omp() {

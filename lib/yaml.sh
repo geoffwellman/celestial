@@ -4,16 +4,24 @@
 
 # YAML IS READ THROUGH A JSON CACHE. `yq` here is the Python wrapper and every
 # call is a Python start, while callers read many fields per run. A file is
-# converted once per (inode, mtime, size) and every accessor then asks jq. The
+# converted once per (content, path) and every accessor then asks jq. The
 # expressions are jq expressions already - the wrapper's language is jq's.
 _yaml_json() { # <file> -> path of the cached JSON
-  local f="$1" dir key
+  local f="$1" dir key sum fresh=""
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
-  # -L: a symlinked file is keyed on what it points at, so editing the target
-  # invalidates the cache (the link's own inode and mtime never change).
-  key="$(stat -L -c '%i-%Y-%s' "$f" 2>/dev/null || printf none)-$(printf '%s' "$f" | cksum | cut -d' ' -f1)"
+  # THE KEY IS THE TEXT. Inode, mtime and size do not identify it: an in-place
+  # edit within one second, or a restored mtime, keeps all three. md5sum reads
+  # through a symlink, so editing the target is a new key too.
+  key="$(printf '%s' "$f" | cksum | cut -d' ' -f1)"
+  if sum="$(md5sum -- "$f" 2>/dev/null)"; then
+    key="${sum%% *}-$key"
+  else
+    # No content hash, no cache: a key that cannot see an edit would serve
+    # the old parse forever, so the file is converted on every read.
+    key="nohash-$key"; fresh=1
+  fi
   local out="$dir/$key.json"
-  if [ ! -s "$out" ]; then
+  if [ -n "$fresh" ] || [ ! -s "$out" ]; then
     mkdir -p "$dir"
     yq -c . "$f" > "$out.tmp.$$" 2>/dev/null && mv -f "$out.tmp.$$" "$out" || { rm -f "$out.tmp.$$"; return 1; }
   fi
@@ -55,13 +63,14 @@ _ws_effective_json() { # <wsdir> -> path of the cached, locally-overridden JSON
     printf '%s' "$basej"; return 0
   }
   # The merge's cache identity is borrowed from the two inputs' own cache
-  # keys (already inode+mtime+size+path, see _yaml_json) rather than
-  # restated here, so it can't drift from that scheme.
+  # keys (already content+path, see _yaml_json) rather than restated here, so
+  # it can't drift from that scheme - and, like them, an input converted
+  # without a content hash is merged afresh on every read.
   local dir key out
   dir="${CEL_YAML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/yaml-json}"
   key="merged-$(basename "$basej" .json)-$(basename "$localj" .json)"
   out="$dir/$key.json"
-  if [ ! -s "$out" ]; then
+  if [ ! -s "$out" ] || [[ "$key" == *nohash-* ]]; then
     mkdir -p "$dir"
     jq -s '
       .[0] as $b | .[1] as $l |

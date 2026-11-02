@@ -33,9 +33,10 @@ serve_start() { # <name> <owner> <workspace> <ttl-seconds> <port> -- <command...
   [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -le 65535 ] || die 'cel serve start: invalid port'
   [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die 'cel serve start: invalid owner'
   [[ "$ws" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die 'cel serve start: invalid workspace'
-  local d unit worktree now tmp cmd
+  local d unit worktree now tmp cmd f
   d="$(_serve_state)"; mkdir -p "$d"; chmod 700 "$d"
-  [ ! -e "$d/$name.json" ] || die "cel serve start: $name already recorded"
+  f="$(_serve_file "$name")"
+  [ ! -e "$f" ] || die "cel serve start: $name already recorded"
   unit="cel-serve-$name"; worktree="${CEL_SERVE_WORKTREE:-$(pwd -P)}"; now="$(_serve_now)"
   printf -v cmd '%q ' "$@"
   # A transient unit of this name that is still LOADED blocks systemd-run
@@ -47,15 +48,26 @@ serve_start() { # <name> <owner> <workspace> <ttl-seconds> <port> -- <command...
     die "cel serve start: $unit is still running - cel serve stop $name first"
   fi
   _serve_systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
+  # THE LEDGER ROW COMES FIRST. Only a ledgered server may be stopped, so a
+  # unit launched before its record was written could outlive a failed write
+  # with nothing able to stop it. The record is published (no-clobber: a
+  # concurrent start of the same name loses here, before it launches) and the
+  # unit launched second; a launch that fails takes its record back.
+  tmp="$(mktemp "$d/.serve.XXXXXX")" || die "cel serve start: cannot write the ledger in $d"
+  if ! jq -n --arg name "$name" --arg unit "$unit" --arg owner "$owner" --arg workspace "$ws" \
+      --arg worktree "$worktree" --argjson started "$now" --argjson ttl "$ttl" --argjson port "$port" \
+      --arg command "$cmd" '{name:$name,unit:$unit,owner:$owner,workspace:$workspace,worktree:$worktree,started_at:$started,ttl_seconds:$ttl,port:$port,last_request_at:$started,command:$command}' > "$tmp" \
+    || ! chmod 600 "$tmp"; then
+    rm -f "$tmp"; die "cel serve start: could not write the ledger record for $name - nothing started"
+  fi
+  if ! ln "$tmp" "$f" 2>/dev/null; then
+    rm -f "$tmp"; die "cel serve start: $name already recorded"
+  fi
+  rm -f "$tmp"
   _serve_systemd_run --unit="$unit" --property="WorkingDirectory=$worktree" \
     --property="MemoryAccounting=yes" --property="CollectMode=inactive-or-failed" \
     --property="Description=cel serve $name ($owner, $ws)" \
-    -- /bin/bash -lc "$cmd" || die "cel serve start: could not start $unit"
-  tmp="$(mktemp "$d/.serve.XXXXXX")"
-  jq -n --arg name "$name" --arg unit "$unit" --arg owner "$owner" --arg workspace "$ws" \
-    --arg worktree "$worktree" --argjson started "$now" --argjson ttl "$ttl" --argjson port "$port" \
-    --arg command "$cmd" '{name:$name,unit:$unit,owner:$owner,workspace:$workspace,worktree:$worktree,started_at:$started,ttl_seconds:$ttl,port:$port,last_request_at:$started,command:$command}' > "$tmp"
-  chmod 600 "$tmp"; mv "$tmp" "$( _serve_file "$name" )"
+    -- /bin/bash -lc "$cmd" || { rm -f "$f"; die "cel serve start: could not start $unit"; }
 }
 
 _serve_cgroup_memory() { # <unit> -> memory current bytes

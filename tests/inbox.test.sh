@@ -277,6 +277,35 @@ test_inbox_prune_keeps_every_message_when_merged_discovery_fails() {
   rm -rf "$T"
 }
 
+# PRUNE HOLDS THE MAILBOX LOCK. A send that lands after prune read the mailbox
+# and before it rewrote it must survive the rewrite: prune and the sender take
+# the same lock, so the send waits and lands in the rewritten mailbox. The
+# hook fires while prune archives - between its read and its rewrite - and
+# gives an unlocked send time to land in the window.
+test_prune_keeps_mail_sent_while_it_runs() {
+  _prune_fixture
+  cat() {
+    local me="$BASHPID"
+    if [ ! -e "$T/hooked" ] && [ "$(readlink "/proc/$me/fd/1")" = "$T/w.archive.jsonl" ]; then
+      : > "$T/hooked"
+      # 9>&-: the sender must not inherit a lock descriptor prune may hold
+      ( CEL_INBOX_ME=t _inbox_send widget-wg-1-live 'sent during prune' --workspace w ) >/dev/null 2>&1 9>&- &
+      local i
+      for i in $(seq 20); do grep -qF 'sent during prune' "$T/w.jsonl" && break; sleep 0.1; done
+    fi
+    command cat "$@"
+  }
+  _inbox_prune --workspace w >/dev/null
+  unset -f cat
+  local i
+  for i in $(seq 50); do grep -qF 'sent during prune' "$T/w.jsonl" && break; sleep 0.1; done
+  [ -e "$T/hooked" ] || { echo "the hook never fired"; rm -rf "$T"; return 1; }
+  grep -qF 'sent during prune' "$T/w.jsonl" || { echo "a send made during prune was lost"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/w.archive.jsonl")" "to the departed"
+  ! grep -qF 'to the departed' "$T/w.jsonl" || { echo "dead worker's mail kept"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_inbox_discovery_rejects_an_invalid_merged_roster() {
   local _INBOX_ROSTER_OK="" _INBOX_ROSTER_HELD=""
   cel_agent_list() { printf '%s' '{"result":{"agents":{}}}'; }
@@ -887,6 +916,25 @@ test_a_fingerprint_rolls_up_a_status_item_too() {
   b="$(_inbox_send root "afk expired" --from steward --kind status --fp afk-expired --workspace demo 2>/dev/null)"
   assert_eq "$b" "$a"
   assert_eq "$(jq -s '[.[] | select(.kind == "update" and .ref == "'"$a"'")] | length' "$CEL_INBOX_DIR/demo.jsonl")" "1"
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# ONE OPEN ITEM PER CONDITION, EVEN UNDER CONCURRENCY. The lookup for the open
+# item and the append that follows it hold one mailbox lock, so senders of the
+# same fingerprint at the same moment roll up into one item. The lookup is
+# slowed so every sender would look before any appended without the lock.
+test_concurrent_sends_of_one_fingerprint_open_one_item() {
+  _inbox_sandbox; export CEL_INBOX_DIR
+  eval "$(declare -f _inbox_open_fp | sed '1s/^_inbox_open_fp /_inbox_open_fp_real /')"
+  _inbox_open_fp() { local r; r="$(_inbox_open_fp_real "$@")"; sleep 1; printf '%s' "$r"; }
+  local i
+  for i in 1 2 3; do
+    ( _inbox_send root "credit is dry ($i)" --from steward --kind blocked --fp quota-dry --workspace demo ) >/dev/null 2>&1 &
+  done
+  wait
+  local f="$CEL_INBOX_DIR/demo.jsonl"
+  assert_eq "$(jq -s '[.[] | select(.fp == "quota-dry" and .kind == "blocked")] | length' "$f")" "1"
+  assert_eq "$(jq -s '[.[] | select(.kind == "update")] | length' "$f")" "2"
   rm -rf "$CEL_INBOX_DIR"
 }
 

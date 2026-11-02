@@ -372,11 +372,16 @@ _inbox_every_ws() { # [extra-ws]
   return 0
 }
 
-# Append is atomic enough for one line under O_APPEND, but two senders can
-# still interleave partial writes on some filesystems, so serialise on a lock
-# when flock is available.
-_inbox_append() { # <file> <json-line>
-  local f="$1" line="$2"
+# THE MAILBOX LOCK. Append is atomic enough for one line under O_APPEND, but
+# two senders can still interleave partial writes on some filesystems, and a
+# look-then-write (a fingerprint roll-up, a prune) must not interleave with
+# anyone at all - so every writer runs under a flock on the mailbox file itself
+# when flock is available. <cmd> runs with the mailbox open for append on fd 9.
+# The lock is the file's INODE: a writer that replaced the mailbox would leave
+# a waiting sender appending to the old, unlinked one, so nobody replaces it -
+# a rewrite goes in place.
+_inbox_with_lock() { # <file> <cmd...>
+  local f="$1"; shift
   mkdir -p "$(dirname "$f")"
   # A MIGRATION THAT WAS KILLED HALF WAY (cel inbox migrate) leaves a pending
   # journal; whoever takes the lock next finishes it BEFORE touching the file,
@@ -385,12 +390,17 @@ _inbox_append() { # <file> <json-line>
   if have flock; then
     ( flock 9
       [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
-      printf '%s\n' "$line" >&9 ) 9>>"$f"
+      "$@" ) 9>>"$f"
   else
     [ ! -f "$pend" ] || _inbox_migrate_resume "$(basename "${f%.jsonl}")"
-    printf '%s\n' "$line" >> "$f"
+    "$@" 9>>"$f"
   fi
 }
+
+_inbox_append() { # <file> <json-line>
+  _inbox_with_lock "$1" _inbox_write_line "$2"
+}
+_inbox_write_line() { printf '%s\n' "$1" >&9; }  # under _inbox_with_lock
 
 cmd_inbox() {
   local sub="${1:-help}"; shift 2>/dev/null || true
@@ -499,22 +509,27 @@ _inbox_prune() { # [--workspace w] [--dry-run]
   local live
   live="$(_inbox_roster)" || { c_warn "agent discovery unavailable - refusing to prune on no evidence"; return 0; }
   [ -n "$live" ] || { c_warn "agent discovery returned no agents - refusing to prune on no evidence"; return 0; }
+  # A dry run writes nothing and takes nothing; a real prune holds the mailbox
+  # lock from its read to its rewrite, so mail sent meanwhile waits for it and
+  # lands in the rewritten mailbox instead of under it.
+  if [ "$dry" -eq 1 ]; then _inbox_prune_run "$ws" "$live" 1; return; fi
+  _inbox_with_lock "$f" _inbox_prune_run "$ws" "$live" 0
+}
 
-  local keep archive n_a
-  keep="$(mktemp)"; archive="$(mktemp)"
-  local line to
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    to="$(printf '%s' "$line" | jq -r '.to // ""')"
-    case "$to" in
-      ''|all|root|console|*-orch) printf '%s\n' "$line" >> "$keep"; continue ;;
-    esac
-    if printf '%s\n' "$live" | grep -qxF "$to"; then
-      printf '%s\n' "$line" >> "$keep"
-    else
-      printf '%s\n' "$line" >> "$archive"
-    fi
-  done < "$f"
+_inbox_prune_run() { # <ws> <live roster> <dry 0|1>
+  local ws="$1" dry="$3" f keep archive n_a livej
+  f="$(_inbox_file "$ws")"
+  livej="$(printf '%s\n' "$2" | jq -Rn '[inputs | select(. != "")]')" || return 1
+  # One jq pass per side rather than one per line: the lock is held throughout.
+  # Lines are passed through raw, never re-serialised.
+  local def='def rcpt: (((try fromjson catch null) | objects | .to) // "") | tostring;
+    def kept: rcpt as $t | ($t == "" or $t == "all" or $t == "root" or $t == "console"
+      or ($t | endswith("-orch")) or any($live[]; . == $t));'
+  keep="$(mktemp "$(_inbox_dir)/.prune.XXXXXX")"; archive="$(mktemp "$(_inbox_dir)/.prune.XXXXXX")"
+  if ! jq -rR --argjson live "$livej" "$def"' select(. != "") | select(kept)' "$f" > "$keep" \
+    || ! jq -rR --argjson live "$livej" "$def"' select(. != "") | select(kept | not)' "$f" > "$archive"; then
+    rm -f "$keep" "$archive"; c_err "$ws: could not read the mailbox - nothing pruned"; return 1
+  fi
 
   n_a="$(grep -c . "$archive" 2>/dev/null || printf 0)"
   if [ "$n_a" -eq 0 ]; then
@@ -526,8 +541,9 @@ _inbox_prune() { # [--workspace w] [--dry-run]
     rm -f "$keep" "$archive"; return 0
   fi
   cat "$archive" >> "$(_inbox_dir)/$ws.archive.jsonl"
-  mv "$keep" "$f"
-  rm -f "$archive"
+  # In place, not mv: senders waiting on the lock hold this inode.
+  cat "$keep" > "$f"
+  rm -f "$keep" "$archive"
   c_ok "$ws: archived $n_a message(s) addressed to workers that no longer exist -> $ws.archive.jsonl"
 }
 
@@ -586,17 +602,23 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
   fi
   ws="$(_inbox_ws "$ws")"
   [ -n "$from" ] || from="$(_inbox_me)"
-  local id line ref=""
-  id="$(date +%s%N)"
   # ONE OPEN ITEM PER CONDITION. While an item with this fp is still open, a
   # repeat becomes an update ON it: one new line for the reader (the bell
-  # rings once), still one thing to resolve.
+  # rings once), still one thing to resolve. The lookup and the append hold
+  # one mailbox lock, so two senders of one condition cannot both find it
+  # absent and open two items.
+  _inbox_with_lock "$(_inbox_file "$ws")" _inbox_send_locked "$ws" "$to" "$from" "$kind" "$message" "$fp"
+}
+
+_inbox_send_locked() { # <ws> <to> <from> <kind> <message> <fp>  - under _inbox_with_lock
+  local ws="$1" to="$2" from="$3" kind="$4" message="$5" fp="$6" id line ref=""
+  id="$(date +%s%N)"
   [ -n "$fp" ] && ref="$(_inbox_open_fp "$ws" "$fp" "$from" "$to")"
   if [ -n "$ref" ]; then
     line="$(jq -nc --arg id "$id" --arg ts "$(date -Is)" --arg to "$to" --arg from "$from" \
       --arg ref "$ref" --arg msg "$message" \
       '{id: $id, ts: $ts, to: $to, from: $from, kind: "update", ref: $ref, message: $msg}')"
-    _inbox_append "$(_inbox_file "$ws")" "$line"
+    _inbox_write_line "$line"
     c_ok "rolled up into $ref for $to in $ws" >&2
     printf '%s\n' "$ref"
     return 0
@@ -606,7 +628,7 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
     --arg pane "${HERDR_PANE_ID:-}" --arg fp "$fp" \
     '{id: $id, ts: $ts, to: $to, from: $from, kind: $kind, message: $msg, cwd: $cwd, pane: $pane}
      | if $fp == "" then . else . + {fp: $fp} end')"
-  _inbox_append "$(_inbox_file "$ws")" "$line"
+  _inbox_write_line "$line"
   c_ok "queued for $to in $ws" >&2
   printf '%s\n' "$id"
 }

@@ -233,9 +233,9 @@ test_runtime_verdict_manifest_content_invalidates_primed_expected_flags_cache() 
   yq -y '.agents.omp.launch_args += ["--fixture-widget-required"]' "$CEL_MANIFEST" > "$T/manifest-next"
   cp "$T/manifest-next" "$CEL_MANIFEST"
   touch -r "$T/manifest-before" "$CEL_MANIFEST"
-  # Ordinary manifest reads still see the primed parsed cache. Verdict capture
-  # must independently resolve the changed effective manifest, not trust it.
-  assert_eq "$(agent_launch_args omp)" "$initial_args"
+  # The parsed cache is keyed on content, so an ordinary manifest read sees the
+  # same-mtime edit too; verdict capture must agree with it.
+  assert_contains "$(agent_launch_args omp)" --fixture-widget-required
   _rv_verdict w1:p1 omp
   assert_eq "$_RUN_LAUNCH" stale
   assert_contains "$_RUN_DETAIL" --fixture-widget-required
