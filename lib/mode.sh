@@ -64,11 +64,22 @@ _mode_product() { # <wsdir> -> product, or nothing
 # The result must equal the original with exactly this one key set, compared
 # as plain data, or nothing is written. The write replaces the file a symlink
 # points at, never the link, and keeps a missing final newline missing.
-_mode_write() { # <wsdir> <product> <mode>
-  local f tmp key
+#
+# NEVER OVER SOMEONE ELSE'S EDIT. cel mode writers queue on one lock, and the
+# edit is made from a snapshot: if the file no longer matches it right before
+# the rename (the owner saved meanwhile), or the lock cannot be had, nothing
+# is written and it returns 2. A box without flock(1) skips only the lock.
+_mode_write() { # <wsdir> <product> <mode> -> 0 written, 1 refused, 2 changed underneath
+  local f tmp key snap fd="" rc=0
   f="$(readlink -f "$1/workspace.yaml")" || return 1
   if ws_product_declared "$1" "$2"; then key=products; else key=repos; fi
-  tmp="$(mktemp "$f.cel-mode.XXXXXX")" || return 1
+  if have flock; then
+    mkdir -p "$1/.cel" && exec {fd}>"$1/.cel/workspace.lock" || return 2
+    flock -w "${CEL_MODE_WRITE_LOCK_WAIT:-10}" "$fd" || { exec {fd}>&-; return 2; }
+  fi
+  snap="$(mktemp)" || { [ -z "$fd" ] || exec {fd}>&-; return 1; }
+  tmp="$(mktemp "$f.cel-mode.XXXXXX")" || { rm -f -- "$snap"; [ -z "$fd" ] || exec {fd}>&-; return 1; }
+  cat -- "$f" > "$snap" || { rm -f -- "$snap" "$tmp"; [ -z "$fd" ] || exec {fd}>&-; return 1; }
   if awk -v sect="$key" -v name="$2" -v mode="$3" '
     function ind(s) { match(s, /^ */); return RLENGTH }
     function noise(s) { return s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/ }
@@ -106,15 +117,18 @@ _mode_write() { # <wsdir> <product> <mode>
         print L[i]
         if (i == s && !m) print pad "mode: " mode
       }
-    }' "$f" > "$tmp" \
-     && { [ -z "$(tail -c1 "$f")" ] || truncate -s -1 "$tmp"; } \
+    }' "$snap" > "$tmp" \
+     && { [ -z "$(tail -c1 "$snap")" ] || truncate -s -1 "$tmp"; } \
      && [ "$(yq -cS --arg k "$key" --arg n "$2" --arg m "$3" \
-            '(.[$k][] | select(.name == $n)).mode = $m' "$f")" = "$(yq -cS . "$tmp")" ]; then
+            '(.[$k][] | select(.name == $n)).mode = $m' "$snap")" = "$(yq -cS . "$tmp")" ]; then
     chmod --reference="$f" "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$f"
+    if cmp -s -- "$snap" "$f"; then mv -f -- "$tmp" "$f" || rc=1; else rc=2; fi
   else
-    rm -f -- "$tmp"; return 1
+    rc=1
   fi
+  rm -f -- "$tmp" "$snap"
+  [ -z "$fd" ] || exec {fd}>&-
+  return "$rc"
 }
 
 # THE PRODUCT'S OWN AGENT, by name AND directory. Any agent standing in the
@@ -140,14 +154,15 @@ _mode_agent_status() { # <wsdir> <product> [lane]
 
 # The product's live lanes (cel run solo --lane): one `<name>\t<lane>` line
 # each - an agent standing in .cel/solo/<product>/lane-<lane>. A pane whose
-# directory was deleted is no live lane. Nothing when herdr cannot be asked.
+# directory was deleted is no live lane. Returns 2 when herdr cannot be asked:
+# an unreadable roster is not "no lanes".
 _mode_live_lanes() { # <wsdir> <product>
-  have jq || return 0
-  local base; base="$(ws_solo_dir "$1" "$2")/lane-"
-  cel_agent_list 2>/dev/null | jq -r --arg b "$base" \
-    '.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
-     | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null
-  return 0
+  have jq || return 2
+  local base roster; base="$(ws_solo_dir "$1" "$2")/lane-"
+  roster="$(cel_agent_list 2>/dev/null)" || return 2
+  printf '%s' "$roster" | jq -r --arg b "$base" \
+    '.result.agents[] | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
+     | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null || return 2
 }
 
 # The restart, detached from whoever asked: when the product's own agent runs
@@ -281,7 +296,11 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
   # Lanes are solo agents with no fleet role to restart into: back to fleet
   # only once they are closed, or their goals would be left half-built.
   if [ "$want" = fleet ]; then
-    local lanes; lanes="$(_mode_live_lanes "$wsdir" "$product")"
+    local lanes lrc=0; lanes="$(_mode_live_lanes "$wsdir" "$product")" || lrc=$?
+    if [ "$lrc" -ne 0 ]; then
+      c_err "cel mode: cannot read $product's live lanes (herdr did not answer) - not switching to fleet while lanes may still run; try again"
+      return 1
+    fi
     if [ -n "$lanes" ]; then
       c_err "cel mode: $product has live lanes - finish and close them first (fleet has one orchestrator):"
       printf '%s\n' "$lanes" | sed 's/^/    /' >&2
@@ -300,7 +319,10 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
     fi
   fi
 
-  _mode_write "$wsdir" "$product" "$want" \
+  local wrc=0; _mode_write "$wsdir" "$product" "$want" || wrc=$?
+  [ "$wrc" -ne 2 ] \
+    || die "cel mode: $wsdir/workspace.yaml changed while this edit was being made, or another cel mode is writing it - nothing was written; run it again"
+  [ "$wrc" -eq 0 ] \
     || die "cel mode: could not set mode on '$product' in $wsdir/workspace.yaml - the entry is in a layout this edits only by hand (a flow-style \`{ name: ... }\` item), or the edit would have changed more than that key. Nothing was written; add \`mode: $want\` to its entry yourself"
   [ "$(ws_build_mode "$wsdir" "$product")" = "$want" ] \
     || die "cel mode: wrote $wsdir/workspace.yaml but it still reads '$(ws_build_mode "$wsdir" "$product")' for $product"

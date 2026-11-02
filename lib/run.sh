@@ -1230,9 +1230,14 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
     # and claim it, so a launch racing this one before either agent is in
     # /proc is refused too. A preview claims nothing.
     if [ "$dry_run" -eq 0 ]; then
-      _run_session_claim "$RESUME_SESSION" "$RESTART_PANE" \
-        || die "cel run $role: another launch claimed $RESUME_SESSION in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force"
-      _RUN_CLAIMED_SESSION="$RESUME_SESSION"
+      local crc=0
+      _run_session_claim "$RESUME_SESSION" "$RESTART_PANE" || crc=$?
+      case "$crc" in
+        0) ;;
+        1) die "cel run $role: another launch claimed $RESUME_SESSION in the last ${CEL_SESSION_CLAIM_SECS:-60}s - two processes on one session answer mail twice. Wait and check the panes, or pass --force" ;;
+        *) die "cel run $role: the session claim store is unavailable (its lock is held or unwritable) - refusing a possible second writer on $RESUME_SESSION. Retry, or pass --force" ;;
+      esac
+      _RUN_CLAIMED_SESSION="$RESUME_SESSION" _RUN_CLAIMED_SESSION_TOKEN="$_RUN_SESSION_CLAIM_TOKEN"
       trap '_run_session_release_on_failure $?' EXIT
     fi
   fi
@@ -1370,10 +1375,14 @@ run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live hold
 # CLAIMING A SESSION. Two launches that overlap both see an empty /proc -
 # neither agent has started yet. The check and a short-lived claim are taken
 # under one flock, so the second launch inside the window
-# (CEL_SESSION_CLAIM_SECS, default 60) sees the first one's claim.
+# (CEL_SESSION_CLAIM_SECS, default 60) sees the first one's claim. A lock that
+# cannot be had is a claim store that cannot be read: it refuses (rc 2), never
+# claims unlocked.
 #
 # The claim names the pane it was taken for: `--restart` of that same pane is
-# the pane replacing itself, not a second resumer.
+# the pane replacing itself, not a second resumer. It also carries a token
+# unique to the launch that took it (left in _RUN_SESSION_CLAIM_TOKEN), so a
+# release removes that launch's own claim and never a newer one.
 _run_session_claim_file() { # <session> -> path of its claim file
   local dir key
   dir="$(dirname "$(_run_sessions_file)")/session-claims"
@@ -1381,36 +1390,67 @@ _run_session_claim_file() { # <session> -> path of its claim file
   printf '%s/%s' "$dir" "$key"
 }
 
-_run_session_claim() { # <session> [pane] -> 0 claimed, 1 claimed by another launch
-  local f lock fd="" now held hpane rc=0 pane="${2:-}"
+# Opens and takes the claim directory's lock on fd $_RUN_CLAIM_FD, in THIS
+# shell (a command substitution would drop the lock as it returned); 1 when
+# the lock cannot be opened or had within CEL_SESSION_CLAIM_LOCK_WAIT seconds.
+# A box without flock(1) claims unlocked, as before the lock existed: the
+# missing binary is not a held lock.
+_RUN_CLAIM_FD=""
+_run_session_claim_lock() { # <claim file>
+  _RUN_CLAIM_FD=""
+  mkdir -p "$(dirname "$1")" 2>/dev/null || return 1
+  have flock || return 0
+  { exec {_RUN_CLAIM_FD}>"$(dirname "$1")/.lock"; } 2>/dev/null || { _RUN_CLAIM_FD=""; return 1; }
+  flock -w "${CEL_SESSION_CLAIM_LOCK_WAIT:-10}" "$_RUN_CLAIM_FD" && return 0
+  exec {_RUN_CLAIM_FD}>&-; _RUN_CLAIM_FD=""
+  return 1
+}
+_run_session_claim_unlock() {
+  [ -z "$_RUN_CLAIM_FD" ] || { flock -u "$_RUN_CLAIM_FD"; exec {_RUN_CLAIM_FD}>&-; }
+  _RUN_CLAIM_FD=""
+}
+
+_RUN_SESSION_CLAIM_TOKEN=""
+_run_session_claim() { # <session> [pane] -> 0 claimed, 1 claimed by another launch, 2 store unavailable
+  local f now held hpane token rc=0 pane="${2:-}"
   f="$(_run_session_claim_file "$1")"
-  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
-  lock="$(dirname "$f")/.lock"
-  if have flock && exec {fd}>"$lock" 2>/dev/null; then flock -w 10 "$fd" || true; fi
+  _run_session_claim_lock "$f" || return 2
   now="$(date +%s)"
-  read -r held hpane < "$f" 2>/dev/null || true
+  { read -r held hpane; } < "$f" 2>/dev/null || true
   case "${held:-}" in ''|*[!0-9]*) held="" ;; esac
   if [ -n "$held" ] && [ $((now - held)) -lt "${CEL_SESSION_CLAIM_SECS:-60}" ] \
      && ! { [ -n "$pane" ] && [ "${hpane:-}" = "$pane" ]; }; then
     rc=1
   else
-    printf '%s %s\n' "$now" "$pane" > "$f"
+    token="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)" || token="$BASHPID.$RANDOM$RANDOM.$now"
+    if { printf '%s %s\n%s\n' "$now" "$pane" "$token" > "$f"; } 2>/dev/null; then
+      _RUN_SESSION_CLAIM_TOKEN="$token"
+    else rc=2; fi
   fi
-  if [ -n "$fd" ]; then flock -u "$fd"; exec {fd}>&-; fi
+  _run_session_claim_unlock
   return "$rc"
 }
 
 # A LAUNCH THAT FAILS GIVES ITS CLAIM BACK, so the retry is not refused for the
-# claim's full minute or pushed to --force, which also skips the check.
-_run_session_release() { # <session>
-  rm -f "$(_run_session_claim_file "$1")" 2>/dev/null || true
+# claim's full minute or pushed to --force, which also skips the check. Only
+# its own claim: one a same-pane relaunch refreshed since carries another
+# token and stays. A lock that cannot be had removes nothing; the claim expires.
+_run_session_release() { # <session> <token>
+  local f htoken=""
+  f="$(_run_session_claim_file "$1")"
+  _run_session_claim_lock "$f" || return 0
+  { read -r _; read -r htoken; } < "$f" 2>/dev/null || true
+  [ -z "${2:-}" ] || [ "$htoken" != "$2" ] || rm -f "$f" 2>/dev/null || true
+  _run_session_claim_unlock
+  return 0
 }
 
 # Called from the EXIT trap cmd_run sets after claiming: a non-zero exit -
 # any die after the claim - releases it; a launch that succeeded keeps it.
-_RUN_CLAIMED_SESSION=""
+_RUN_CLAIMED_SESSION="" _RUN_CLAIMED_SESSION_TOKEN=""
 _run_session_release_on_failure() { # <exit status>
-  [ "$1" -eq 0 ] || [ -z "$_RUN_CLAIMED_SESSION" ] || _run_session_release "$_RUN_CLAIMED_SESSION"
+  [ "$1" -eq 0 ] || [ -z "$_RUN_CLAIMED_SESSION" ] \
+    || _run_session_release "$_RUN_CLAIMED_SESSION" "$_RUN_CLAIMED_SESSION_TOKEN"
   return 0
 }
 
