@@ -14,12 +14,11 @@ STEWARD_TIMER_UNIT="cel-steward"
 steward_timer_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
 
 # THE TIMER MUST HAVE A NEXT TRIGGER IN ANY MANAGER, HOWEVER IT STARTED.
-# The first unit was OnBootSec + OnUnitActiveSec + Persistent. After the user
-# manager restarted mid-uptime, OnBootSec had long passed, OnUnitActiveSec had
+# OnBootSec + OnUnitActiveSec + Persistent alone cannot rearm after a user
+# manager restarts mid-uptime: OnBootSec has long passed, OnUnitActiveSec has
 # no activation in that manager to count from, and Persistent only applies to
-# OnCalendar - so list-timers showed NEXT "-" and the steward (and gc with it)
-# did not run for fourteen hours while the box went into OOM. Restarting the
-# timer did not rearm it either.
+# OnCalendar - so list-timers shows NEXT "-" and the steward (and gc with it)
+# stops running. Restarting the timer does not rearm it either.
 #
 # OnActiveSec fires relative to the TIMER's own activation, so every start of
 # the timer - boot, manager restart, `systemctl start` - schedules a tick a
@@ -59,7 +58,7 @@ steward_timer_interval() { # <timer-file> -> minutes (default 5)
   printf '%s' "${m:-5}"
 }
 
-# Rewrite an installed timer written before it rearmed itself. Silent and a
+# Rewrite an installed timer that does not rearm itself. Silent and a
 # no-op when no timer is installed or it is already current.
 steward_timer_upgrade() {
   local f; f="$(steward_timer_dir)/$STEWARD_TIMER_UNIT.timer"
@@ -78,7 +77,8 @@ steward_timer_upgrade() {
   printf 'rewrote %s so it rearms after a manager restart' "$f"
 }
 
-# "Fri 2026-10-02 18:51:20 BST" -> epoch; empty for n/a, 0 or unparseable.
+# systemd timestamp ("<Day> YYYY-MM-DD HH:MM:SS <TZ>") -> epoch; empty for
+# n/a, 0 or unparseable.
 _steward_timer_epoch() {
   case "$1" in ""|n/a|0) return 0 ;; esac
   date -d "$1" +%s 2>/dev/null || true

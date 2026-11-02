@@ -30,12 +30,10 @@ _CEL_UPDATE=1
 
 _update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
 
-# WHICH STREAM THIS BOX FOLLOWS. Everything that said "you are behind" -
-# --check, the steward's daily check, the dashboard chip, doctor - compared
-# the installed version to the newest release TAG, so a box tracking main sat
-# thirty-odd merges past v0.2.0 and every surface said "up to date". A box on
-# the `main` channel is told about COMMITS; a box on `release` keeps today's
-# behaviour, which is the default because releases are what users should run.
+# WHICH STREAM THIS BOX FOLLOWS. A box on the `main` channel is told about
+# COMMITS, because a release tag alone hides how far past it main has moved; a
+# box on `release` compares against the newest release tag, which is the
+# default because releases are what users should run.
 _update_channel() {
   local c
   c="$(cel_config_get update channel)"
@@ -53,7 +51,7 @@ _update_set_channel() { # <main|release>
 }
 
 # Both channels open with the same two lines, because "what am I running" is
-# the question every one of these surfaces was silently answering wrong.
+# the first question every one of these surfaces answers.
 _update_header() { # <newest-tag-or-empty>
   printf '  installed  v%s  %s  (%s)\n' "$(cel_build_version)" "$(cel_build_sha)" "$(cel_build_branch)"
   if [ -n "${1:-}" ]; then
@@ -125,23 +123,22 @@ _update_reapply() {
   for ws in $(registry_names 2>/dev/null); do
     "$CEL_ROOT/bin/cel" ws sync "$ws" || c_warn "ws sync $ws failed"
   done
-  # One dashboard for the box (CEL-107); its restart also stops any server a
-  # workspace still runs from before, so the old ports can redirect.
+  # One dashboard for the box; its restart also stops any server a workspace
+  # still runs of its own, so the old ports can redirect.
   "$CEL_ROOT/bin/cel" dash --restart || c_warn "dash did not restart"
   "$CEL_ROOT/bin/cel" pages --restart || c_warn "pages did not restart"
   "$CEL_ROOT/bin/cel" pages --public --restart || c_warn "public pages did not restart"
 }
 
-# --- agents and gateway (AH-261018) ---------------------------------------
-# `cel update` used to stop at "Celestial is current" and never touched the
-# coding agents it launches, so a box could sit on stale claude/omp/pi/codex
-# for weeks while every surface said "up to date". The components below run on
-# EVERY update, whether or not the plane's own git moved, each through the
-# agent's OWN installer (agents.yaml `update:`), and report what actually
-# happened per component: old version, new version, and - because an updater
-# that exits 0 can still leave an agent behind - the published latest. A
-# failed or still-behind component is a non-success exit with the way forward;
-# the command is idempotent, so the way forward is "fix the cause, rerun".
+# --- agents and gateway ------------------------------------------------------
+# Celestial being current says nothing about the coding agents it launches,
+# so the components below run on EVERY update, whether or not the plane's own
+# git moved, each through the agent's OWN installer (agents.yaml `update:`),
+# and report what actually happened per component: old version, new version,
+# and - because an updater that exits 0 can still leave an agent behind - the
+# published latest. A failed or still-behind component is a non-success exit
+# with the way forward; the command is idempotent, so the way forward is "fix
+# the cause, rerun".
 # No live session is signalled or restarted by any of it.
 
 _update_semver() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true; }
@@ -237,7 +234,7 @@ _update_agents() { # returns 1 when any component failed or is still behind
     local ok=1
     out="$(_update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" 2>&1)" || ok=0
     new="$(_update_agent_version "$a")" || new="?"
-    # a version that moved is recorded BEFORE any failure branch (F1)
+    # a version that moved is recorded BEFORE any failure branch
     if [ "$old" != "?" ] && [ "$new" != "?" ] && [ "$old" != "$new" ]; then
       _update_record_previous "$a" "$old" || { c_err "$a: could not record previous version $old in $(_update_dir)"; rc=1; }
     fi
@@ -273,8 +270,8 @@ _update_agents() { # returns 1 when any component failed or is still behind
   return "$rc"
 }
 
-# --- pi extensions and built-in MCP (AH-261018) ----------------------------
-# Pi's startup warnings had two causes, both fixed by SUPPORTED means rather
+# --- pi extensions and built-in MCP ------------------------------------------
+# Two sources of pi startup warnings, both fixed by SUPPORTED means rather
 # than patching node_modules or hiding the output:
 #  1. an extension release that carries its own `typebox` dependency (older
 #     pi-subagents, rpiv-todo) - fixed by upgrading to the pinned release that
@@ -287,7 +284,7 @@ _update_agents() { # returns 1 when any component failed or is still behind
 # reported, not hidden.
 
 _update_pi_dir() { gateway_pi_dir; }
-# pi reads PI_CODING_AGENT_DIR; cel resolves the root it manages (PR177). Every
+# pi reads PI_CODING_AGENT_DIR; cel resolves the root it manages. Every
 # pi call here pins the former to the latter so the directory written is the
 # directory pi reads, whatever the caller's environment carries.
 _update_pi() { PI_CODING_AGENT_DIR="$(_update_pi_dir)" pi "$@"; }
@@ -480,11 +477,11 @@ _update_components() {
   return "$rc"
 }
 
-# A running omp/pi launched before the gateway launch environment existed has
-# no gateway client key or session identity, and a process environment is
-# fixed at exec: nothing here can hand it one. Reported with the supported
-# recovery - the native session resume `cel run <role> --restart` performs
-# when the session is idle - and never acted on.
+# A running omp/pi that carries a role but no gateway client key was launched
+# without the gateway environment, and a process environment is fixed at exec:
+# nothing here can hand it one. Reported with the supported recovery - the
+# native session resume `cel run <role> --restart` performs when the session
+# is idle - and never acted on.
 _update_stale_gateway_env() {
   gateway_installed || return 0
   local pid comm env_ has_role has_tok item shown=0 cwd
@@ -551,8 +548,8 @@ _update_stale_orchestrators() { # <restart 0|1>
     case "$launch" in stale|unknown) ;; *) continue ;; esac
     if [ "$shown" -eq 0 ]; then c_hd "Orchestrator launch evidence"; shown=1; fi
     # An orchestrator whose process could not be read is UNKNOWN, with the
-    # reason - never "missing everything", which is what CEL-63 said about
-    # one that had every flag (CEL-81). It is not restarted on a guess.
+    # reason - never reported as missing every flag, and never restarted on a
+    # guess.
     if [ "$launch" = unknown ]; then
       printf '  %s (%s) launch line unknown: %s\n' "$name" "$ws" "$detail"
       continue
@@ -571,8 +568,8 @@ _update_stale_orchestrators() { # <restart 0|1>
   return 0
 }
 
-# `--check` shows what `--restart-orchestrators` would act on, too: the owner
-# could not see it before running the restart (CEL-81).
+# `--check` shows what `--restart-orchestrators` would act on, too, so it can
+# be seen before the restart.
 _update_check() {
   local rc=0
   _update_check_version || rc=$?
@@ -680,9 +677,9 @@ cmd_update() { # [--check [--agents] | --rollback | --components | --channel mai
 
   _update_require_pristine
 
-  # The main channel takes main's TIP: this box asked for what landed
-  # yesterday, and the same pristine check, previous-sha record, re-apply,
-  # doctor and rollback path carry it.
+  # The main channel takes main's TIP: this box asked for what has landed, and
+  # the same pristine check, previous-sha record, re-apply, doctor and rollback
+  # path carry it.
   if [ "$(_update_channel)" = main ]; then
     git -C "$CEL_ROOT" fetch -q origin main 2>/dev/null || true
     local n before_main

@@ -1,18 +1,11 @@
 # shellcheck shell=bash
 # cel decide - one queue for every decision an orchestrator needs from the owner.
 #
-# Questions for the owner used to live at the end of an orchestrator's chat
-# turn ("pick a style, pick a name..."), invisible to anyone not looking at
-# that pane, or as root mail mixed in with the steward's own reminders about
-# them. One orchestrator told the owner "18 open decisions going back days";
-# the mailboxes held 12 open items, 7 of them reminders - neither number was
-# the owner's real to-do list. And an answer typed into a pane recorded
-# nothing, so stale questions stayed open and the reminders kept firing.
-#
-# So a decision is a RECORD in the workspace's inbox JSONL: `kind: decision`,
-# addressed to `owner`, with structured fields. `list` reads every workspace,
-# `answer` resolves it and mails the answer to the asker (its inbox hook wakes
-# it - nothing is ever typed into a pane), and the steward stops nagging.
+# A decision is a RECORD in the workspace's inbox JSONL, not a question left at
+# the end of a chat turn or mixed into root mail: `kind: decision`, addressed
+# to `owner`, with structured fields. `list` reads every workspace, `answer`
+# resolves it and mails the answer to the asker (its inbox hook wakes it -
+# nothing is ever typed into a pane), and the steward stops nagging.
 [ -n "${_CEL_DECIDE:-}" ] && return 0
 _CEL_DECIDE=1
 # shellcheck source=lib/inbox.sh
@@ -37,7 +30,7 @@ decide_open_json() { # <ws>
         | .id as $i
         | ([$all[] | select(.kind == "update" and .ref == $i and has("title"))] | last) as $u
         | (if $u then . + ($u | {title, options, recommended, context, blocks}) + (if ($u | has("prs")) then {prs: $u.prs} else {} end) + (if $u.urgent == true then {urgent: true} else {} end) + {updated: $u.ts} else . end)
-        # CEL-128: the latest confirm (still needs the owner), counted only
+        # the latest confirm (still needs the owner), counted only
         # when it is newer than the last change to the question
         | ([$all[] | select(.kind == "confirm" and .ref == $i)] | last) as $c
         | (if $c and (($c.ts | _epoch) >= ((.updated // .ts) | _epoch))
@@ -153,10 +146,8 @@ _decide_ask() {
     esac
   done
   [ -n "$title" ] || die "cel decide ask: --title is required"
-  # CEL-113: THE OWNER DECIDES FROM THE CARD. Most open questions once carried
-  # a title, two option labels and at best a bare URL, and the owner had to go
-  # digging before answering. So a question without real prose is refused: a
-  # URL may ride along, but it does not count toward the minimum.
+  # THE OWNER DECIDES FROM THE CARD, so a question without real prose is
+  # refused: a URL may ride along, but it does not count toward the minimum.
   local prose
   prose="$(printf '%s' "$context" | sed -E 's#[a-z]+://[^[:space:]]+##g' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
   if [ "${#prose}" -lt 120 ]; then
@@ -169,13 +160,12 @@ _decide_ask() {
   fi
   local wsname
   wsname="$(_inbox_ws_here "$ws")" || die "cel decide ask: standing here names no workspace - pass --workspace"
-  # A typo here used to create a fresh mailbox no list would ever read.
+  # A typo must not create a fresh mailbox no list would ever read.
   _inbox_ws_known "$wsname" || die "cel decide ask: no workspace named '$wsname' is registered here (cel ws list)"
   local asker; asker="$(_inbox_me)"
-  # CEL-115: each --pr gets the PR's URL when the workspace knows the repo, so
-  # the dashboard card can link straight to it.
-  # The workspace helpers are loaded here, not at the top: `cel decide` runs
-  # without them, and the URL was then silently never resolved.
+  # Each --pr gets the PR's URL when the workspace knows the repo, so the
+  # dashboard card can link straight to it. The workspace helpers are loaded
+  # here, not at the top, because `cel decide` otherwise runs without them.
   if [ "$prs" != "[]" ]; then
     # shellcheck source=lib/registry.sh
     . "${BASH_SOURCE[0]%/*}/registry.sh"
@@ -203,7 +193,7 @@ _decide_ask() {
      + (if $urgent then {urgent: true} else {} end)
      + (if $sup != "" then {supersedes: $sup} else {} end)
      # always present, even empty: a re-ask is the current word from the asker on
-     # which PRs wait, so one that drops --pr must unlink them (CEL-115)
+     # which PRs wait, so one that drops --pr must unlink them
      + {prs: $prs}')"
   _decide_locked "$wsname" _decide_ask_write "$wsname" "$asker" "$title" "$fields" "$supersedes"
 }
@@ -371,11 +361,9 @@ _decide_drop() {
   _decide_close "$rec" "$by" dropped "$why" "DROPPED \"$title\": $why (decision $id, by $by)"
 }
 
-# THE ASKER CAN CLOSE ITS OWN QUESTION (CEL-101). Questions settled in an
-# orchestrator's chat or made moot by a merge sat in the owner's panel until
-# the owner typed a reason to drop them; the one party that knew they were
-# stale had no way to say so. Identity is derived, never a flag: --by here
-# would let anyone close anyone's question.
+# THE ASKER CAN CLOSE ITS OWN QUESTION: it is the one party that knows when a
+# question was settled elsewhere or made moot. Identity is derived, never a
+# flag: --by here would let anyone close anyone's question.
 _decide_withdraw() {
   [ $# -ge 1 ] || die "usage: cel decide withdraw <id> --why <text>"
   local id="$1" why=""; shift
@@ -407,10 +395,8 @@ _decide_withdraw_locked() { # <ws> <id> <asker> <why>
   c_ok "$2 withdrawn" >&2
 }
 
-# "STILL NEEDED" IS REMEMBERED (CEL-128). The stale sweep re-listed the same
-# unchanged questions every day because a confirmation recorded nothing. A
-# `confirm` record names the decision; the sweep skips it for a week unless
-# the question changes after it.
+# "STILL NEEDED" IS REMEMBERED. A `confirm` record names the decision; the
+# stale sweep skips it for a week unless the question changes after it.
 _decide_confirm() {
   local ids=() why=""
   while [ $# -gt 0 ]; do
@@ -441,10 +427,9 @@ _decide_confirm() {
   return "$rc"
 }
 
-# REMINDERS ARE NOT DECISIONS. The steward used to file its nags as open
-# `blocked` items, and each one was then counted as another thing the owner
-# had to decide. Recognised by sender AND text, so a real steward alarm (a
-# stalled worker, an exhausted provider) stays open.
+# REMINDERS ARE NOT DECISIONS. Older stewards filed their nags as open
+# `blocked` items; this resolves them. Recognised by sender AND text, so a real
+# steward alarm (a stalled worker, an exhausted provider) stays open.
 _DECIDE_REMINDER_RE='UNRESOLVED decision|open decision\(s\)|in your celestial inbox|^REMINDER|REMINDER for'
 _decide_migrate() {
   local apply=0

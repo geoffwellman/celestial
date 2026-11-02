@@ -2,19 +2,10 @@
 # cel afk - away from keyboard: what the factory may decide while nobody is
 # watching.
 #
-# AFK CHANGES WHO DECIDES, NEVER WHAT IS REQUIRED. Measured over 2026-09-20/22,
-# the work that stopped overnight had nothing to do with code: an approved,
-# green, gate-verified PR sat 36 hours because two bot-review threads needed a
-# human to type a reply; five rebases on that one PR each cost a worker restart
-# and a ~25 minute gate; two PRs paused on "shall I land this?" when workspace
-# policy already said `merge: self`; and documented follow-up work went
-# undispatched waiting for a nod. None of that is a safety property - it is an
-# orchestrator waiting for permission it already had.
-#
-# So a PR still needs its review, its green gate and its verdict. What AFK
-# removes is the pause between a decision being obvious and a human being awake
-# to say so, and it removes it for exactly four acts (the owner, 2026-09-22).
-# Anything else waits, and the waiting is recorded rather than silent.
+# AFK CHANGES WHO DECIDES, NEVER WHAT IS REQUIRED. A PR still needs its
+# review, its green gate and its verdict; AFK only removes the pause between a
+# decision being obvious and a human being awake to say so, for exactly the
+# pre-authorised acts below. Anything else waits, and the waiting is recorded.
 [ -n "${_CEL_AFK:-}" ] && return 0
 _CEL_AFK=1
 # shellcheck source=lib/common.sh
@@ -34,9 +25,9 @@ _afk_log()  { printf '%s/log.jsonl' "$(afk_dir)"; }
 # Overridable so the named GitHub exception can be watched in a test without
 # reaching a real review thread.
 _afk_gh()   { printf '%s' "${CEL_AFK_GH:-gh}"; }
-# A reply or a rebase acts for the workspace that owns the PR (CEL-70): as its
+# A reply or a rebase acts for the workspace that owns the PR: as its
 # `github.user` when it declares one, refused if that account is not logged
-# in, and exactly today's call when nothing owns it or nothing is declared.
+# in, and plain `gh` when nothing owns it or nothing is declared.
 _afk_ws_gh() { # <wsdir-or-empty> <gh args...>
   local w="$1"; shift
   if [ -n "$w" ]; then CEL_WS_GH_BIN="$(_afk_gh)" ws_gh "$w" "$@"; else "$(_afk_gh)" "$@"; fi
@@ -53,9 +44,10 @@ _afk_wsdir_for_slug() { # <owner/name> -> wsdir, or nothing
   return 0
 }
 
-# The four, and the words each one is recorded under. The authorisation is
-# written beside every act because "the agent merged something" and "the agent
-# merged something under pre-authorisation 2" are different mornings.
+# The pre-authorised acts, and the words each one is recorded under. The
+# authorisation is written beside every act because "the agent merged
+# something" and "the agent merged something under pre-authorisation 2" are
+# different mornings.
 afk_authorisation() { # <act> -> the pre-authorisation that covers it
   case "$1" in
     resolve_thread) printf 'pre-authorisation 1 (bot review thread verified fixed and reviewer-confirmed)' ;;
@@ -131,13 +123,6 @@ afk_post_allowed() { # <kind>
   esac
 }
 
-# AFK NEVER TURNS ITS OWN SCOPE UP. Branch protection, repository settings and
-# any policy - including this one - are the operator's, awake.
-afk_policy_change_allowed() { # <what>
-  _afk_refuse "a change to $1" \
-    "AFK never changes policy, repository settings or its own scope - it changes who decides, not what is required"
-}
-
 # EVIDENCE, ACT BY ACT. Each refusal is named, because "refused" in a log at
 # 04:00 tells the morning nothing about what to fix.
 _afk_check_resolve_thread() { # <evidence-json>
@@ -166,9 +151,8 @@ _afk_check_land() { # <evidence-json>
   case "$gate" in
     pass|ci) ;;
     fail) _afk_refuse land "the repo's gate did not pass - a worker fixes it, then land again"; return 1 ;;
-    # CEL-56's fourth outcome: a gate that reported nothing did not fail and
-    # did not pass, so there is nothing here to merge on and nothing to send a
-    # worker after either.
+    # A gate that reported nothing neither failed nor passed: there is nothing
+    # to merge on and nothing to send a worker after.
     *) _afk_refuse land "the gate produced no verdict ($gate) - re-run collect and find out what is killing it"; return 1 ;;
   esac
   [ "$(jq -r '.mergeable // false' <<<"$e")" = true ] \
@@ -214,11 +198,11 @@ _afk_check_dispatch() { # <evidence-json>
   fi
 }
 
-# PRE-AUTHORISATION 5: WORK ALREADY ORDERED (CEL-78). A spec the orchestrator
-# wrote under the workspace's .cel/specs/ BEFORE AFK went on is work the owner
-# asked for awake; turning AFK on must not stop it. A spec written after needs
-# a written-down finding (pre-authorisation 4), as before. The evidence is the
-# spec's path and mtime, recorded in the act log.
+# PRE-AUTHORISATION 5: WORK ALREADY ORDERED. A spec the orchestrator wrote
+# under the workspace's .cel/specs/ BEFORE AFK went on is work the owner asked
+# for awake; turning AFK on must not stop it. A spec written after needs a
+# written-down finding (pre-authorisation 4). The evidence is the spec's path
+# and mtime, recorded in the act log.
 _afk_since_epoch() { afk_state_json | jq -r '.since_epoch // ((.since // "") | if . == "" then 0 else (fromdateiso8601? // 0) end)'; }
 afk_spec_ordered() { # <spec-path>
   local p="$1" m s
@@ -253,7 +237,7 @@ _afk_check_release() { # <evidence-json>
 }
 
 # THE ONE DOOR. Every autonomous act while AFK comes through here: the mode has
-# to be on and unexpired, the act has to be one of the four, its own evidence
+# to be on and unexpired, the act has to be pre-authorised, its own evidence
 # has to be present, and it has to be happening where this orchestrator lives.
 # Then - and only then - it is recorded.
 afk_authorise() { # <act> <evidence-json> [detail]
@@ -307,14 +291,13 @@ afk_resolve_thread() { # <slug> <pr-number> <thread-id> <evidence-json>
   c_ok "resolved $slug#$pr thread $thread (fixed in $(jq -r .fixed_commit <<<"$e"))"
 }
 
-# PRE-AUTHORISATION 3, AS AN ACT AND NOT AS AN OPINION. Five of the 36 hours
-# CEL-59 measured were rebases: another PR merges, strict branch protection
-# pushes this one behind, and the branch needs exactly `git rebase` and a push -
-# no decision, no new code, and no reason for it to wait until morning. The
-# evidence is DERIVED HERE from git and from the PR, never passed in: a caller
-# that hands this function its own answers is a caller that can hand it the
-# wrong ones. Conflicts are detected without touching the worktree, so the
-# refusal costs nothing and leaves the branch exactly as the morning expects.
+# PRE-AUTHORISATION 3, AS AN ACT AND NOT AS AN OPINION. Another PR merges,
+# strict branch protection pushes this one behind, and the branch needs exactly
+# `git rebase` and a push - no decision and no new code. The evidence is
+# DERIVED HERE from git and from the PR, never passed in: a caller that hands
+# this function its own answers can hand it the wrong ones. Conflicts are
+# detected without touching the worktree, so a refusal leaves the branch as it
+# was.
 afk_rebase_retry() { # <worktree> [--base <ref>]
   local wt="$1"; shift
   local base=""

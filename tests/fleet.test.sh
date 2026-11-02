@@ -6,9 +6,9 @@
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/fleet.sh"
 
-# The pane text from the 2026-09-14 incident, copied (not sourced) from
-# tests/stall.test.sh on purpose: a shared helper between two suites makes a
-# change in one silently move the other's evidence.
+# A dead pane's text (a provider stream error and a retry prompt), copied (not
+# sourced) from tests/stall.test.sh on purpose: a shared helper between two
+# suites makes a change in one silently move the other's evidence.
 _fleet_death() {
   printf '%s\n' \
     '  Running tests...' \
@@ -78,7 +78,7 @@ EOF
 [ -n "${STUB_HERDR_BAD:-}" ] && { printf '%s' '{"result":{"agents":[{"name":"widget-orch",'; exit 0; }
 case "$1 $2" in
   "agent list")
-    # CEL-44: a live agent with NO herdr name, in a cwd the caller names. The
+    # A live agent with NO herdr name, in a cwd the caller names. The
     # fleet must not read it as an absence.
     extra=""
     [ -z "${STUB_UNNAMED_CWD:-}" ] \
@@ -93,19 +93,16 @@ esac
 EOF
   chmod +x "$T/bin/herdr"
   PATH="$T/bin:$PATH"
-  # No live console on this fixture box: CEL-43 reads the CEL-32 marker out of
-  # a process environment, and the real /proc would let whatever is running on
-  # the developer's box decide the answer.
+  # No live console on this fixture box: the mail reader is found by a marker
+  # in a process environment, and the real /proc would let whatever is running
+  # on the developer's box decide the answer.
   export CEL_PROC_DIR="$T/proc"; mkdir -p "$CEL_PROC_DIR"
 }
 
-# MEMORY. The box has 24 GB and no view on this plane could say where it had
-# gone: one pi worker is ~340 MB resident and a forgotten test server is
-# invisible until something is killed. A fixture meminfo stands in for the box
-# (a test may not arrange 5% available) and the tree walk is stubbed, because
-# what `cel fleet` owns is the SHAPE - which directory belongs to which row -
-# and not the arithmetic, which tests/memory.test.sh proves against a real
-# process.
+# MEMORY. A fixture meminfo stands in for the box (a test may not arrange 5%
+# available) and the tree walk is stubbed, because what `cel fleet` owns is
+# the SHAPE - which directory belongs to which row - and not the arithmetic,
+# which tests/memory.test.sh proves against a real process.
 _fleet_stub_memory() {
   printf 'MemTotal:       25165824 kB\nMemAvailable:    7235174 kB\n' >"$T/meminfo"
   export CEL_MEMINFO="$T/meminfo"
@@ -159,8 +156,8 @@ test_fleet_counts_root_mail_per_workspace() {
   _fleet_teardown
 }
 
-# The incident replayed through the fleet view: a dead pane plus a worktree
-# nothing has written to for two hours is one stalled worker.
+# A dead pane plus a worktree nothing has written to for two hours is one
+# stalled worker.
 test_fleet_reports_a_dead_pane_as_stalled() {
   _fleet_setup
   find "$WT" -exec touch -d '2 hours ago' {} + 2>/dev/null || true
@@ -210,10 +207,9 @@ test_fleet_survives_herdr_being_down() {
 }
 
 # PRODUCTS. The unit of the view is the thing an orchestrator actually stands
-# over. Measured on 2026-09-17: a workspace declaring one product over two
-# repos, with one live orchestrator for it, rendered as two repo rows both
-# saying `orch -` - the one orchestrator that existed was invisible, and the
-# cap `cel-fanout delegate` enforces per product was shown per repo.
+# over: a product over two repos with one live orchestrator is ONE row showing
+# that orchestrator, carrying the cap `cel-fanout delegate` enforces per
+# product.
 _fleet_declare_bundle() { # [workers-cap]
   local cap="${1:-}"
   {
@@ -258,7 +254,7 @@ test_fleet_prefers_the_products_worker_cap() {
 }
 
 # A declared product says which repos it is; an implicit one is a repo and
-# renders exactly as it always did.
+# renders as its bare name.
 test_fleet_text_names_a_declared_products_repos() {
   _fleet_setup
   _fleet_declare_bundle
@@ -281,11 +277,9 @@ test_fleet_leaves_an_undeclared_workspace_as_repos() {
   _fleet_teardown
 }
 
-# THE COUNT WAS NEVER THE ANSWER. `stalled 1` told an operator that something
-# was wrong and nothing about which worker, why, or what it was holding - so
-# the console could only tell them to run the view they were already staring
-# at. These are the rows behind the number, and the console (CEL-20) is
-# written against exactly these keys.
+# THE COUNT IS NOT THE ANSWER. `stalled 1` says something is wrong and nothing
+# about which worker, why, or what it is holding. These are the rows behind
+# the number, and the console is written against exactly these keys.
 test_fleet_workers_list_carries_a_row_per_live_worker() {
   _fleet_setup
   local led="$T/alpha/.cel/delegations.json"
@@ -400,7 +394,7 @@ test_fleet_rejects_unknown_arguments() {
   _fleet_teardown
 }
 
-# --- CEL-27: subscriptions, from the cache and never from the network --------
+# --- subscriptions, from the cache and never from the network --------------
 # The fleet read is on the console's refresh loop. A live call to Anthropic or
 # ChatGPT on that path would put two network round trips between an operator
 # and every draw, so the field is whatever the 60 s cache already holds.
@@ -426,11 +420,11 @@ test_fleet_json_carries_an_empty_subscription_list_when_nothing_is_cached() {
   _fleet_teardown
 }
 
-# CEL-35: the fleet field is not a directory listing, it is the subscription
-# list read from the cache. Two copies of one Claude login (pi's and Claude
-# Code's) with the same windows are one subscription here exactly as they are
-# in `cel quota`, or the console and the dashboard count this box's logins
-# differently - which is how five rows appeared for two accounts.
+# The fleet field is not a directory listing, it is the subscription list
+# read from the cache. Two copies of one Claude login (pi's and Claude Code's)
+# with the same windows are one subscription here exactly as they are in
+# `cel quota`, or the console and the dashboard count this box's logins
+# differently.
 test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
   _fleet_setup
   export CEL_CACHE="$T/cache35"
@@ -448,7 +442,7 @@ test_fleet_subscriptions_are_the_quota_list_folded_the_same_way() {
   _fleet_teardown
 }
 
-# CEL-42: what the pane is DOING, beside what herdr says it is doing. The
+# What the pane is DOING, beside what herdr says it is doing. The
 # fleet never asks the model itself - a view that makes a network call per row
 # is a view people stop running - it carries the steward's last answer, which
 # is why the two fields are only present when one was remembered.
@@ -466,11 +460,11 @@ test_fleet_workers_list_carries_the_last_liveness_answer() {
   _fleet_teardown
 }
 
-# A NAMELESS AGENT IS A FAULT, NOT AN ABSENCE (CEL-44). herdr cleared a live
-# orchestrator's name on restart; `cel fleet` resolves one by its alias on the
-# roster, so the product read `orch -` - which anyone acting on would answer by
-# starting a SECOND orchestrator on top of the live one. A live agent in the
-# product's own cwd reads as `unnamed`, which is a state with a cure.
+# A NAMELESS AGENT IS A FAULT, NOT AN ABSENCE. herdr can clear a live
+# orchestrator's name on restart; `cel fleet` resolves one by its alias, and
+# `orch -` invites starting a SECOND orchestrator on top of the live one. A
+# live agent in the product's own cwd reads as `unnamed`, which is a state
+# with a cure.
 test_fleet_reports_a_live_unnamed_agent_as_unnamed() {
   _fleet_setup
   local doc
@@ -483,7 +477,7 @@ test_fleet_reports_a_live_unnamed_agent_as_unnamed() {
   _fleet_teardown
 }
 
-# --- CEL-43: a mailbox with no reader --------------------------------------
+# --- a mailbox with no reader ----------------------------------------------
 # Every view of this box reads `cel fleet --json`, so the three facts that
 # decide whether root's mail is going anywhere belong in it: how much is
 # unread, how long the oldest has waited, and WHO is alive to read it. The
@@ -516,10 +510,9 @@ test_fleet_mail_doctor_line_names_the_mailbox_nobody_reads() {
   _fleet_teardown
 }
 
-# --- CEL-50: mail to a pane that is not there -------------------------------
+# --- mail to a pane that is not there -------------------------------------
 #
-# `alpha-ABC-48` was sent a finding by inbox; the ledger showed `live: -` and
-# nothing received it. The message was accepted and went nowhere, which is the
+# A message accepted for an alias with no live pane goes nowhere, which is the
 # worst of both: the sender believes it was delivered. An alias with no live
 # pane is a fact the box can see, so it says so.
 test_mail_to_an_alias_with_no_live_pane_is_reported() {
@@ -528,29 +521,23 @@ test_mail_to_an_alias_with_no_live_pane_is_reported() {
   local out; out="$(fleet_alias_undeliverable "$roster" widget-ABC-48 || true)"
   assert_contains "$out" 'widget-ABC-48'
   assert_contains "$out" 'no live pane'
-  # A roster nobody could read is not evidence that anyone died - the lesson
-  # lib/stall.sh already paid for.
+  # A roster nobody could read is not evidence that anyone died.
   assert_eq "$(fleet_alias_undeliverable '' widget-ABC-48)" ""
 }
 
-# --- CEL-48: the cost of the read is itself a fact the suite holds ----------
+# --- the cost of the read is itself a fact the suite holds -----------------
 #
-# Measured on 2026-09-20, before any of this: `cel console --render-once`
-# took 7.1-7.4s wall with 62% of it SYSTEM time, and `cel fleet --json` was
-# ~70% of that - 278 jq and 112 git processes on one render, 154 of the jq and
-# all of the git inside this file. Nothing on the path talks to a network; the
-# whole cost was fork and exec for crumbs of work. A performance fix with no
-# test rots in a month, so the budget is asserted: jq and git are shimmed onto
-# a prepended PATH, they log their argv, and the counts must stay under a
-# ceiling that GROWS WITH THE ROWS rather than multiplying by them.
+# Nothing on the read's path talks to a network; its cost is fork and exec. A
+# performance fix with no test rots, so the budget is asserted: every binary
+# the read can reach is shimmed onto PATH and logs its argv, and the count
+# must stay under a ceiling that GROWS WITH THE ROWS rather than multiplying
+# by them.
 
-# The shim: a counter in front of EVERY binary the read can reach, not just
-# the two this ticket set out to reduce. The first version of this budget
-# counted jq and git alone and would have passed while the total tripled -
-# "a budget that only watches the two tools you were thinking about is a
-# budget that rots the moment someone reaches for a third". PATH is REPLACED
-# rather than prepended, so a tool nobody listed here cannot run at all and
-# the render fails loudly instead of slipping past uncounted.
+# The shim: a counter in front of EVERY binary the read can reach, not just jq
+# and git - a budget that only watches the tools you were thinking about rots
+# the moment someone reaches for another. PATH is REPLACED rather than
+# prepended, so a tool nobody listed here cannot run at all and the render
+# fails loudly instead of slipping past uncounted.
 _FLEET_SHIMMED_TOOLS=(
   awk sed grep cut tr head tail sort uniq wc find stat readlink dirname
   basename date id ls cat rm mkdir mktemp touch flock xargs getent ps
@@ -574,13 +561,11 @@ SHIM
 }
 
 # THE BOX'S PROCESS TABLE IS NOT THIS FIXTURE'S BUSINESS. `fleet_orphans_json`
-# walks every pid on the machine (lib/orphans.sh, CEL-47) and costs ~1050 awk,
-# 117 tr and 117 readlink on this box - three quarters of every process a real
-# `cel fleet` starts, identical on main and on this branch, and completely
-# outside anything a fixture can arrange. It is stubbed for the same reason
-# `_fleet_stub_memory` stubs the memory walk: what is being budgeted here is
-# what lib/fleet.sh does per row, and a number that moves with whatever else
-# is running on the box budgets nothing.
+# walks every pid on the machine (lib/orphans.sh), which dominates a real
+# `cel fleet`'s process count and is outside anything a fixture can arrange.
+# It is stubbed for the same reason `_fleet_stub_memory` stubs the memory
+# walk: what is budgeted here is what lib/fleet.sh does per row, and a number
+# that moves with whatever else is running on the box budgets nothing.
 _fleet_stub_box_walk() {
   orphans_list() { :; }
   orphans_totals() { printf '0 0\n'; }
@@ -604,47 +589,21 @@ _fleet_add_rows() { # <n>
   jq -c --argjson add "$add" '. + $add' "$led" >"$led.tmp" && mv "$led.tmp" "$led"
 }
 
-# THE CEILING IS ON EVERY PROCESS, NOT ON THE TWO THIS TICKET WAS ABOUT.
+# THE CEILING IS ON EVERY PROCESS, NOT ON jq AND git ALONE.
 #
-# Measured on this fixture against main 81022b5 (CEL-52), with the box walk
-# stubbed and PATH REPLACED by the shim so nothing can run uncounted:
-#
-#                3 rows                        12 rows
-#   before       185 total (64 jq, 12 git)       239 total (109 jq, 12 git)
-#   after        158 total (47 jq,  4 git)       176 total ( 56 jq,  4 git)
-#
-# Five processes per extra row became one. The remainder is fixed cost that
-# belongs to other libraries reading their own documents - `cksum` and `stat`
-# per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
-# accessors run - and it MOVES: CEL-43's mail triple added 26 to both sides
-# between one measurement and the next, CEL-49 and CEL-51 added an awk per
-# row to both, and CEL-52 added eight more to the fixed cost on both sides.
-# That is why this number is taken against the main the branch
-# actually sits on and re-taken after every rebase; a ceiling measured against
-# a different main is how a branch gets called three times slower than a
-# checkout that predates two other tickets. What the ceiling asserts is the
-# SHAPE - a fixed cost plus a small constant per row - not a frozen count.
-#
-# The first version of this budget counted jq and git ALONE. It would have
-# passed a change that traded a per-row jq for a per-row awk, which is the
-# same fan-out wearing different clothes; a budget that watches only the tools
-# its author was thinking about rots the moment somebody reaches for a third.
-# The ceiling below is the TOTAL, and main fails it at both sizes (213 > 187,
-# 267 > 232), which is the only way to know it is measuring anything. Measured
-# here against main dcf17c0, whose pane-silence read (CEL-50) costs a jq on
-# every running row on BOTH sides: main 213 at 3 rows and 267 at 12, the
-# branch 181 and 226, repeatable across three runs. The saving is now mostly
-# fixed cost rather than slope, and the ceiling is set to the branch plus six,
-# so the headroom is real slack and not a repeat of the measurement. One of those jq is the roster
-# being validated once per render rather than being allowed to fail inside
-# whichever program touched it first, which is a process well spent.
-#
-# CEL-81 added an orchestrator row per root/orchestrator to every workspace
-# block and was held to THIS ceiling rather than raising it: the candidates
-# come from one jq that also yields the product list (replacing a YAML read),
-# the mail counts are folded into the workspace's existing jq, and the /proc
-# walk is builtins. What is left is one `herdr pane process-info` per LIVE
-# orchestrator - 178 on main, 180 here at 3 rows.
+# It is the TOTAL, with the box walk stubbed and PATH REPLACED by the shim so
+# nothing can run uncounted: a per-row jq traded for a per-row awk is the same
+# fan-out wearing different clothes. What it asserts is the SHAPE - a fixed
+# cost plus a small constant per row - not a frozen count. Most of the fixed
+# cost belongs to other libraries reading their own documents (`cksum` and
+# `stat` per file for lib/yaml.sh's cache key, `yq` per YAML, and the jq those
+# accessors run), so it moves when they do: re-measure against the main the
+# branch sits on before moving the ceiling, and keep only a few processes of
+# slack above the measurement. One jq per render validates the roster, which
+# is a process well spent. Per-workspace fields (orchestrator rows, mail
+# counts) are folded into existing jq rather than paid for with new
+# processes; what remains is one `herdr pane process-info` per LIVE
+# orchestrator.
 _fleet_assert_budget() { # <rows> <total-spawns>
   local rows="$1" total="$2"
   local max=$(( 172 + 5 * rows ))
@@ -688,16 +647,14 @@ test_fleet_spawn_budget_grows_with_rows_rather_than_multiplying_by_them() {
   return "$rc"
 }
 
-# THE DOCUMENT DID NOT MOVE. CEL-48 changed how every row is computed - one
-# jq over the ledger, one batched git per worktree - and the one thing it was
-# not allowed to change is the answer. This is `cel fleet --json` captured on
-# this fixture before the rewrite, compact and in order, so a field that
+# THE DOCUMENT DOES NOT MOVE. Rows are computed with one jq over the ledger
+# and one batched git per worktree, and the answer must match this capture of
+# `cel fleet --json` on this fixture, compact and in order, so a field that
 # silently reorders or loses its type fails here. The box, subscriptions and
 # orphan fields are the live machine's and are not part of the capture; the
 # worktree path, the age of the newest file and the age of the oldest unread
-# are normalised for the same reason. RE-CAPTURED after each rebase, from the
-# main the branch sits on: it landed first against 9f7cf2d and is taken here
-# against dcf17c0, which added the pane-silence fields to every worker row.
+# are normalised for the same reason. Re-capture it deliberately when a
+# change adds or reorders fields.
 _FLEET_GOLDEN_WORKSPACES='[{"name":"alpha","root":{"unread":1,"open":0},"mail":{"to_root_unread":1,"oldest_secs":1,"reader":""},"units":[{"name":"bundle","mode":"fleet","orch":"LIVE","workers":2,"cap":4,"stalled":1,"unlanded":1,"rss_mb":370,"orch_rss_mb":120,"repos":["widget","gadget"],"declared":true,"solo_worktrees":0,"workers_list":[{"id":"one","ticket":"","repo":"widget","branch":"widget-work","shape":"ship","state":"running","live":"idle","quiet_secs":0,"verdict":"","severity":"","ahead":"0","rss_mb":370,"pr":"","created":"","alias":"","pane":"wA:p2","worktree":"WT","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"two","ticket":"","repo":"widget","branch":"widget-old","shape":"ship","state":"collected","live":"gone","quiet_secs":-1,"verdict":"","severity":"","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p3","worktree":"T/gone","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""},{"id":"three","ticket":"","repo":"gadget","branch":"gadget-work","shape":"ship","state":"running","live":"gone","quiet_secs":-1,"verdict":"vanished","severity":"normal","ahead":"?","rss_mb":0,"pr":"","created":"","alias":"","pane":"wA:p4","worktree":"T/none","profile":"","runtime":"","model":"","activity":"","activity_confidence":"","silence":"","silence_reset":"","harness":""}]}]},{"name":"beta","root":{"unread":0,"open":0},"mail":{"to_root_unread":0,"oldest_secs":0,"reader":""},"units":[{"name":"gadget","mode":"fleet","orch":"-","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":0,"repos":["gadget"],"declared":false,"solo_worktrees":0,"workers_list":[]}]}]'
 
 _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
@@ -710,7 +667,7 @@ _fleet_normalise() { # < doc -> .workspaces, paths and ages made reproducible
     | walk(if type == "object" and has("quiet_secs")
            then .quiet_secs = (if .quiet_secs >= 0 then 0 else -1 end)
            else . end)
-    # The oldest unread (CEL-43) is measured from a fixed timestamp in the
+    # The oldest unread is measured from a fixed timestamp in the
     # fixture against the clock, so it grows by a second every second.
     | walk(if type == "object" and has("oldest_secs")
            then .oldest_secs = (if .oldest_secs > 0 then 1 else 0 end)
@@ -730,12 +687,10 @@ test_fleet_json_is_identical_to_the_document_captured_before_the_rewrite() {
   return "$rc"
 }
 
-# A REPO IN A STATE NOBODY PLANNED FOR. The per-row git calls were forgiving -
-# every one of them ended in `|| true` or a `?` - and a batched query that
-# asks one question for four repos is exactly the kind of change that turns
-# "could not ask" into an error. Detached HEAD, a branch with no remote twin,
-# a checkout with no origin at all and a dirty tree each produce the row they
-# produced before, `?` and all.
+# A REPO IN A STATE NOBODY PLANNED FOR. A batched query that asks one question
+# for four repos must not turn "could not ask" into an error: a detached HEAD,
+# a branch with no remote twin, a checkout with no origin at all and a dirty
+# tree each still produce a row, `?` and all.
 _fleet_broken_worktrees() {
   local d
   for d in detached noupstream noorigin dirty; do
@@ -793,10 +748,8 @@ test_fleet_rows_survive_a_repo_in_a_broken_state() {
 # THE HELPERS ARE A CONTRACT WITH cel-fanout, NOT PRIVATE TO THE SWEEP.
 # `fleet_ahead` is what `cel-fanout status` prints in its AHEAD column, and
 # `fleet_worker_row` with three arguments is how that binary renders a row.
-# The sweep inside this file reaches the batched git query directly, so
-# nothing here exercised either entry point - and a duplicated definition of
-# `fleet_ahead` calling a function that does not exist shipped green, because
-# bash keeps only the LAST definition of a name and no test ever called it.
+# The sweep inside this file reaches the batched git query directly, so these
+# tests are the only thing that exercises either entry point.
 test_fleet_ahead_answers_the_external_caller() {
   _fleet_setup
   assert_eq "$(fleet_ahead "$WT")" "0"
@@ -853,12 +806,9 @@ test_fleet_rex_presence_does_not_read_rex_through_herdr_or_invent_stall_evidence
 
 # AN UNREADABLE ROSTER MUST NOT BE ABLE TO EMPTY THE FLEET.
 #
-# `herdr agent list` answering with non-empty MALFORMED JSON made `--argjson
-# roster` fail before jq ever opened the ledger, and the `|| true` that keeps
-# this read from dying turned that into an empty row list - so `cel fleet
-# --json` rendered a box with no workers on it, which is indistinguishable
-# from a box with no workers on it. A failure path that degrades to silence is
-# the worst kind: the operator acts on the silence.
+# `herdr agent list` answering with non-empty MALFORMED JSON must not take the
+# rows with it: a fleet that renders no workers is indistinguishable from a
+# box with no workers, and the operator acts on the silence.
 #
 # The rows are the LEDGER's, and the ledger is readable whatever herdr is
 # doing. An unusable roster is the same statement as an absent one - `-`, a
@@ -916,7 +866,7 @@ HERDR
 # and nothing else: `{}`, `[]`, and a document about something other than
 # agents all parse, and all of them read as a roster that knows about nobody
 # - which is `gone` for every worker on the box. A pane manager answering
-# `{}` is a MUTE OBSERVER, not evidence of sixteen dead workers, and the two
+# `{}` is a MUTE OBSERVER, not evidence that every worker is dead, and the two
 # readings send an operator to opposite places. Only a document whose
 # `.result.agents` is an array has said anything about who is alive.
 _fleet_roster_says_nothing() { # <stdout-of-herdr-agent-list>
@@ -959,10 +909,9 @@ test_fleet_a_plausible_but_wrong_roster_convicts_nobody() {
   _fleet_teardown
 }
 
-# CEL-75: THE WHOLE DOCUMENT IS CACHED. At a load average of 32 one read took
-# 67-116 s, and a console refreshing every few seconds stacked read upon read
-# behind it. A second call inside `fleet.cache_secs` is served from the cache
-# under $CEL_CACHE without re-reading a single workspace; `--fresh` re-reads.
+# THE WHOLE DOCUMENT IS CACHED. A second call inside `fleet.cache_secs` is
+# served from the cache under $CEL_CACHE without re-reading a single
+# workspace; `--fresh` re-reads.
 test_fleet_serves_a_young_cache_and_fresh_rereads() {
   _fleet_setup
   export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30
@@ -980,8 +929,8 @@ test_fleet_serves_a_young_cache_and_fresh_rereads() {
   _fleet_teardown
 }
 
-# CEL-79: a young cache file that is not a fleet document (truncated by a full
-# disk, or overwritten by hand) was served as is, and `cel fleet` printed an
+# A young cache file that is not a fleet document (truncated by a full disk,
+# or overwritten by hand) must not be served as is, or `cel fleet` prints an
 # empty board with success. A cached read is re-validated before it is used.
 test_fleet_rereads_when_the_young_cache_is_corrupt() {
   _fleet_setup
@@ -994,7 +943,7 @@ test_fleet_rereads_when_the_young_cache_is_corrupt() {
   _fleet_teardown
 }
 
-# CEL-81: one row per orchestrator in the fleet document, so the console reads
+# One row per orchestrator in the fleet document, so the console reads
 # it rather than running probes of its own - live ones with their launch line,
 # and a product whose mode is auto but has no agent as `missing`.
 test_fleet_json_carries_an_orchestrator_row_per_product() {
@@ -1022,11 +971,10 @@ test_fleet_json_carries_an_orchestrator_row_per_product() {
   orch_stub_teardown
 }
 
-# AH-261017: an orchestrator's mailbox is the alias rule's name for
-# "<product>-orch", not the bare string. A 31-character product makes the
-# 32-character cut end in a dash (the shape `cel inbox migrate` repairs), and a
-# longer one is cut mid-word; the row must read THAT mailbox and THAT cursor,
-# holes included - the old row read a cursor path that did not exist.
+# An orchestrator's mailbox is the alias rule's name for "<product>-orch", not
+# the bare string. A 31-character product makes the 32-character cut end in a
+# dash (the shape `cel inbox migrate` repairs), and a longer one is cut
+# mid-word; the row must read THAT mailbox and THAT cursor, holes included.
 test_fleet_orchestrator_row_reads_the_cut_mailbox_and_its_cursor_holes() {
   source "$CEL_ROOT/tests/lib/orch-stub.sh"
   orch_stub_setup omp
@@ -1056,11 +1004,10 @@ test_fleet_orchestrator_row_reads_the_cut_mailbox_and_its_cursor_holes() {
   orch_stub_teardown
 }
 
-# CEL-90: SERVE STALE, REFILL IN THE BACKGROUND. At a load average of 25-30 a
-# full read took 32-45 s against the console's 20 s timeout, and the rebuild
-# ran inline in the caller: the console was killed at 20 s, the cache was
-# never written, and the next refresh found it expired and did the same. The
-# console sat on "stale" indefinitely while every killed rebuild added load.
+# SERVE STALE, REFILL IN THE BACKGROUND. An expired cache is served at once
+# and rebuilt in a detached session: a rebuild run inline by a caller that
+# times out never writes the cache, so every refresh would find it expired
+# and repeat the killed work.
 _fleet_seed_old_cache() { # -> $CEL_CACHE/fleet.json, a valid document 10 min old
   mkdir -p "$CEL_CACHE"
   printf '{"workspaces":[],"marker":"old"}\n' >"$CEL_CACHE/fleet.json"
@@ -1151,8 +1098,8 @@ test_fleet_write_keeps_the_old_cache_when_the_build_fails() {
   _fleet_teardown
 }
 
-# CEL-90 r2: a cache written before CEL-90 has no generated_at; serving it
-# must still say how old it is (from the file's mtime) and carry cache_secs.
+# A cache written by an older cel has no generated_at; serving it must still
+# say how old it is (from the file's mtime) and carry cache_secs.
 test_fleet_serves_a_pre_cel90_cache_with_its_age_and_cache_secs() {
   _fleet_setup
   export CEL_CACHE="$T/cache" CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_DELAY=60

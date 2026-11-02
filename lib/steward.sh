@@ -4,8 +4,8 @@
 # registered workspace's review flow and nudge the responsible orchestrator
 # when it has stalled, surface blocked agents, and check the plane's own
 # servers answer. Nudges are rate-limited per PR through a state file so a
-# stuck orchestrator is reminded, not spammed. Keep it running:
-#   while :; do cel steward; sleep 900; done   (the steward pane)
+# stuck orchestrator is reminded, not spammed. Keep it running with
+# `cel steward --install` (a systemd user timer).
 [ -n "${_CEL_STEWARD:-}" ] && return 0
 _CEL_STEWARD=1
 # shellcheck source=lib/registry.sh
@@ -60,25 +60,19 @@ _steward_due() { # <key>
     > "$_STEWARD_STATE.tmp" && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
 }
 
-# THE STEWARD SAYS A THING ONCE. Measured 2026-09-17: root's mailbox held
-# twenty-four open `blocked` items from the steward, all the same sentence
-# about one exhausted provider, one every four hours since the 12th - because
-# each reopening of the dedup window posted a FRESH item and nothing ever
-# looked at what had already been said. The owner: "it's the same message over
-# and over so it can be rolled up". A raise carries a condition key, so a
-# repeat lands as an update on the item that is already open.
+# THE STEWARD SAYS A THING ONCE. A raise carries a condition key, so a repeat
+# lands as an update on the item already open instead of a fresh item.
 _steward_raise() { # <ws> <fp> <kind> <message>
   cmd_inbox send root "$4" --from steward --workspace "$1" --kind "$3" --fp "$2" \
     >/dev/null 2>&1 || true
 }
 
-# ONCE PER CHANGE OF STATE (AH-261102). Some conditions only the owner can
-# change - an interactive login - and re-raising one every window is a bell
-# about a fact nobody learns anything new from: omp's disabled credential rang
-# root 163 times. This raises when no item with the key is open, or when the
-# open item's latest word differs from <message>; an unchanged state says
-# nothing. So the message must carry the state and nothing that drifts per
-# tick - no percentages, no clock times.
+# ONCE PER CHANGE OF STATE. Some conditions only the owner can change - an
+# interactive login - and re-raising them every window says nothing new. This
+# raises when no item with the key is open, or when the open item's latest
+# word differs from <message>; an unchanged state says nothing. So the message
+# must carry the state and nothing that drifts per tick - no percentages, no
+# clock times.
 _steward_raise_on_change() { # <ws> <fp> <kind> <message>
   local id last
   id="$(_inbox_open_fp "$1" "$2" steward root)"
@@ -91,11 +85,10 @@ _steward_raise_on_change() { # <ws> <fp> <kind> <message>
   _steward_raise "$@"
 }
 
-# ...and takes it down again. The other half of the same measurement was four
-# STALLED WORKER items whose panes had been gone for days: nothing resolved an
-# item when its condition stopped being true, so the backlog only ever grew. A
-# `cleared:` status line goes with it, because an item that vanishes silently
-# leaves the operator wondering whether it was fixed or merely lost.
+# ...and takes it down again once its condition stops being true, so the
+# backlog does not only grow. A `cleared:` status line goes with it, because an
+# item that vanishes silently leaves the operator wondering whether it was
+# fixed or merely lost.
 _steward_clear_id() { # <ws> <id> <message>
   [ -n "${2:-}" ] || return 0
   cmd_inbox resolve "$2" --by steward --workspace "$1" >/dev/null 2>&1 || true
@@ -124,7 +117,7 @@ _steward_panes() {
   fi
 }
 
-# THE FOUR-DAYS-DEAD CASE. A STALLED WORKER item names the pane the operator
+# DEAD PANES. A STALLED WORKER item names the pane the operator
 # would go and look at; when that pane no longer exists on the box there is
 # nothing left to act on, and the item is pure noise in a mailbox someone has
 # to read. Cleared once per tick, and only when herdr actually answered -
@@ -162,10 +155,9 @@ _steward_mail_sweep() { # <agents-json>
       case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
       # the owner's queue is `cel decide`, summarised once a day below
       [ "$who" = owner ] && continue
-      # ONLY MAIL THAT NEEDS SOMEONE. Measured 2026-09-26: the unread
-      # reminder fired for piles of worker done-reports (`status`), which ask
-      # nothing of anyone, and for the steward's own earlier reminders. Count
-      # escalations, decisions and blockers from other senders, nothing else.
+      # ONLY MAIL THAT NEEDS SOMEONE: escalations, decisions and blockers from
+      # other senders. Done-reports (`status`) and the steward's own earlier
+      # reminders ask nothing of anyone.
       local waiting
       waiting="$(_steward_unread_actionable "$ws" "$who")"
       n="$(printf '%s\n' "$waiting" | grep -c . || true)"
@@ -196,9 +188,9 @@ _steward_mail_sweep() { # <agents-json>
 
       local readcmd="cel inbox read --for $who --workspace $ws"
       local stale_msg="steward: $n unread escalation(s)/decision(s)/blocker(s) in your celestial inbox, oldest untouched $((age / 60))m. Run '$readcmd' now and act on the escalations first."
-      # CEL-65/CEL-131: never type into any agent's composer. Runtime delivery
-      # differs: Pi/OMP can wake idle agents; Claude hooks run only on a
-      # submitted turn or while a turn is active.
+      # Never type into any agent's composer. Runtime delivery differs: Pi/OMP
+      # can wake idle agents; Claude hooks run only on a submitted turn or
+      # while a turn is active.
       if _steward_due "inbox-stale-$ws-$who"; then
         _steward_remind "$ws" "$who" remind-unread status "$stale_msg" \
           && c_warn "$ws/$who: $n unread ($((age / 60))m) - mailed a reminder"
@@ -208,13 +200,10 @@ _steward_mail_sweep() { # <agents-json>
     done
   done
 
-  # OWNER DECISIONS: ONE LINE A DAY, NEVER A DECISION ITSELF (CEL-93). This
-  # used to mail every recipient "you have N UNRESOLVED decision(s)" as a
-  # `blocked` item each hour; the reminders were then counted as open items in
-  # their own right, until one orchestrator told the owner "18 open decisions"
-  # where the real list was five. Questions for the owner now live in
-  # `cel decide`, and the steward's whole contribution is a status line per
-  # workspace per day saying how many are waiting and for how long.
+  # OWNER DECISIONS: ONE LINE A DAY, NEVER A DECISION ITSELF. Questions for the
+  # owner live in `cel decide`; per-recipient reminders would be counted as open
+  # items in their own right. The steward's whole contribution is a status line
+  # per workspace per day saying how many are waiting and for how long.
   # shellcheck source=lib/decide.sh
   . "${BASH_SOURCE[0]%/*}/decide.sh"
   for ws in $(registry_names); do
@@ -231,17 +220,17 @@ _steward_mail_sweep() { # <agents-json>
   _steward_decide_stale_sweep
 }
 
-# STALE QUESTIONS GO BACK TO WHOEVER ASKED (CEL-101). Open decisions sat for
-# days that had been settled in an orchestrator's chat or made moot by a merge;
-# only the asker knows, so once a day each asker gets ONE message listing its
-# questions older than three days and is asked to confirm or withdraw them.
-# The day window stops repeats; the fp rolls a next-day nudge into the one
-# still open instead of stacking a second item beside it (CEL-96).
+# STALE QUESTIONS GO BACK TO WHOEVER ASKED. A decision may have been settled in
+# an orchestrator's chat or made moot by a merge, and only the asker knows - so
+# once a day each asker gets ONE message listing its questions older than three
+# days and is asked to confirm or withdraw them. The day window stops repeats;
+# the fp rolls a next-day nudge into the one still open instead of stacking a
+# second item beside it.
 _steward_decide_stale_sweep() {
   local ws open asker
   for ws in $(registry_names); do
     # idle, not age: a question the asker re-asked yesterday is not stale
-    # CEL-128: a recent "still needed" (newer than any change) silences it
+    # a recent "still needed" (newer than any change) silences it
     open="$(decide_open_json "$ws" | jq -c --argjson cw "${CEL_DECIDE_CONFIRM_SECS:-604800}" \
       'select((.idle_secs // .age_secs) >= 259200)
        | select((.confirmed_secs // null) == null or .confirmed_secs >= $cw)' 2>/dev/null || true)"
@@ -253,11 +242,10 @@ _steward_decide_stale_sweep() {
   done
 }
 
-# CHECK, SEND, RECORD - UNDER ONE LOCK (Sourcery on #127). Recording the day
-# key before sending meant a failed send silenced the asker for a day, and
-# two sweeps at once could both pass the check and both send. So the window
-# is only read first, the key is written only after the mail landed, and a
-# lock spans all three.
+# CHECK, SEND, RECORD - UNDER ONE LOCK. The day key is written only after the
+# mail landed, so a failed send does not silence the asker for a day, and the
+# lock spanning all three stops two sweeps from both passing the check and
+# both sending.
 _steward_stale_nudge_once() { # <ws> <asker> <open-json-lines>
   local ws="$1" asker="$2" open="$3" lock key last list
   key="decide-stale-$ws-$asker"
@@ -287,18 +275,17 @@ _steward_unread_actionable() { # <ws> <who>
     | select(.from != "steward")' 2>/dev/null || true
 }
 
-# ONE LIVE REMINDER PER RECIPIENT AND KIND. Each reminder used to be a fresh
-# item and none was ever taken down, so a mailbox showed seven where one was
-# true. Posting a new one resolves every earlier open one with the same key,
-# with a resolution line naming its replacement so nothing vanishes unexplained.
+# ONE LIVE REMINDER PER RECIPIENT AND KIND. Posting a new one resolves every
+# earlier open one with the same key, with a resolution line naming its
+# replacement so nothing vanishes unexplained.
 _steward_remind() { # <ws> <who> <fp> <kind> <message>
   local ws="$1" who="$2" fp="$3" kind="$4" msg="$5" f new prev id legacy=""
   f="$(_inbox_file "$ws")"
   mkdir -p "$(dirname "$f")"
   new="$(date +%s%N)"
-  # Reminders posted before CEL-82 carry no fp, so they are recognised by
-  # their sentence - otherwise the first reminder after an upgrade would
-  # leave every old one open beside it.
+  # Legacy reminders carry no fp, so they are recognised by their sentence -
+  # otherwise the first reminder after an upgrade would leave every old one
+  # open beside it.
   case "$fp" in
     remind-open)   legacy="UNRESOLVED decision" ;;
     remind-unread) legacy="in your celestial inbox" ;;
@@ -324,7 +311,7 @@ _steward_remind() { # <ws> <who> <fp> <kind> <message>
   return 0
 }
 
-# A NUDGE IS MAIL (CEL-65/CEL-131). Every recipient gets a rate-limited inbox
+# A NUDGE IS MAIL. Every recipient gets a rate-limited inbox
 # message; the runtime controls when it can be delivered to an agent turn.
 _steward_nudge() { # <mailbox> <workspace> <key> <message>
   _steward_due "$3" || return 0
@@ -390,27 +377,23 @@ _steward_launch_orch() { # <product> <workspace>
 _steward_orchestrators() { # <agents-json>
   local agents_json="$1" ws wsdir p want live mode src
   # An empty roster means herdr did not answer, not that every orchestrator
-  # died - launching one per product on a transport failure is how you get a
-  # box full of duplicates, which is the incident this whole function is for.
+  # died - launching one per product on a transport failure would fill the box
+  # with duplicate orchestrators.
   [ "$(printf '%s' "$agents_json" | jq -r '[.result.agents[]?] | length' 2>/dev/null || printf 0)" -gt 0 ] || return 0
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
     for p in $(ws_product_names "$wsdir"); do
-      # THE SAME RESOLVED VALUE `up` ACTS ON. 2026-09-21: this loop read the
-      # product's `orchestrator:` key alone while `cel ws up` read a workspace
-      # mode a string `layout:` had invented, so `up` printed "already right"
-      # while the steward said the same orchestrator would not start - 24
-      # times, the factory arguing with itself in front of the operator. Both
-      # now ask ws_orchestrator_mode, and only `auto` is ever started: a
-      # product started deliberately, or not at all, must never be started
-      # behind the operator's back.
+      # THE SAME RESOLVED VALUE `up` ACTS ON: both ask ws_orchestrator_mode, so
+      # `cel ws up` and the steward never disagree. Only `auto` is ever
+      # started: a product started deliberately, or not at all, must never be
+      # started behind the operator's back.
       IFS=$'\t' read -r mode src <<< "$(ws_orchestrator_mode "$wsdir" "$p")"
       want="$(_run_agent_name "$p-orch")"
       if [ "$mode" != auto ]; then
         # Nobody asked for this one to be started, so its absence is not a
-        # fault - and a fault raised while the two readers disagreed comes
-        # down with a sentence that says what is actually true.
+        # fault - any fault raised earlier comes down with a sentence that
+        # says what is actually true.
         _steward_clear "$ws" "orch-ensure-$p" \
           "$ws/$p is set to manual; nothing will start it automatically ($mode via $src)"
         continue
@@ -434,14 +417,11 @@ _steward_orchestrators() { # <agents-json>
   done
 }
 
-# AN ORCHESTRATOR HERDR BROUGHT BACK DEAF (CEL-85). herdr records a session
-# path for a pane, not a command, so a herdr server restart relaunches every
-# omp orchestrator as a bare `omp --resume=<file>`: no inbox hook, no guard,
-# no CEL_ env. On 2026-09-28 every one of them sat idle all night on its mail
-# (85 unread in one) until the owner typed. Restarting through `cel run
-# --restart` fixes it at once, so the steward does that - but only when it
-# can prove nobody is mid-sentence in the composer: losing a draft the owner
-# typed is worse than a missed wake. Otherwise root is told, once.
+# A resumed orchestrator without the canonical launch contract (a bare
+# `omp --resume=<file>` after a herdr restart) cannot receive inbox hooks.
+# Restart it through `cel run --restart` only when its composer is provably
+# empty - losing a typed draft is worse than a missed wake; otherwise root is
+# told, once.
 #
 # Its own functions so tests can replace them: a real restart opens a pane.
 _steward_restart_orch() { # <product> <workspace>
@@ -473,8 +453,8 @@ _steward_orch_composer_empty() { # <pane>
 
 # CLAIM BEFORE RESTARTING. Two overlapping ticks (a timer tick beside a hand
 # run) could both read an old timestamp and both restart the same pane, so
-# the 30-minute check and its record happen under one lock (Sourcery on #107).
-# A tick that cannot take the lock leaves the restart to the one that did.
+# the 30-minute check and its record happen under one lock. A tick that
+# cannot take the lock leaves the restart to the one that did.
 _steward_claim_restart() { # <key>
   local key="$1"
   mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
@@ -548,12 +528,9 @@ _steward_inbox_hooks() {
   return 0
 }
 
-# THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. Twenty-two of the 37 rows the
-# owner found in finished/collected were PRs GitHub had merged days earlier:
-# merged through the web UI, checkouts removed by hand, so nothing ever ran
-# `land` or `release`. Deciding that is deterministic, so it belongs in a tick
-# rather than in a human's afternoon. One `gh pr list` per repo per tick,
-# which is nothing at a five-minute tick.
+# THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. A PR merged through the web UI,
+# its checkout removed by hand, never runs `land` or `release`. Deciding that is
+# deterministic, so a tick does it: one `gh pr list` per repo per tick.
 # A reconcile that fails is ONE sweep failing: the stalled-worker sweep after
 # it is the one whose delay costs work, so this never takes the tick with it.
 _steward_reconcile() {
@@ -566,20 +543,17 @@ _steward_reconcile() {
   return 0
 }
 
-# BLOCKED IS NOT ABSENT (CEL-50). "Nobody on ABC-44, get a worker on it" was
-# said while a worker sat on the branch, throttled on a spent 5h window - and
-# the remedy it asked for, another worker, spends the window it is waiting on.
-# So before the sweep says a branch has nobody, it asks what the pane on that
+# BLOCKED IS NOT ABSENT. A worker throttled on a spent window is still on its
+# branch, and another worker would spend the window it is waiting on. So
+# before the sweep says a branch has nobody, it asks what the pane on that
 # branch is actually doing. "<silence>\t<reset>" or nothing.
-# WHERE A BRANCH'S WORKER STANDS (CEL-72). Both lookups below used to guess
-# $HOME/.herdr/worktrees/<repo>/<branch> and compare it byte-for-byte with each
-# agent's cwd - but herdr lowercases the worktree name, so an uppercase ticket
-# branch never matched: on 2026-09-24 three live workers, one `working`, were
-# each reported as "nobody on <branch>". The ledger records the real worktree,
-# so it answers first; a PR opened by hand has no row, and for that one the
-# guess is compared case-insensitively. Prints "<exact-path>|<guess>" - exact
-# may be empty, which is why the separator is not a tab: IFS whitespace folds
-# a leading empty field away and the guess would be read as the exact path.
+# WHERE A BRANCH'S WORKER STANDS. The ledger records the real worktree, so it
+# answers first; a PR opened by hand has no row, and for that one the guess
+# $HOME/.herdr/worktrees/<repo>/<branch> is compared case-insensitively,
+# because herdr lowercases the worktree name. Prints "<exact-path>|<guess>" -
+# exact may be empty, which is why the separator is not a tab: IFS whitespace
+# folds a leading empty field away and the guess would be read as the exact
+# path.
 _steward_branch_worktree() { # <wsdir> <repo> <branch>
   local led="$1/.cel/delegations.json" wt=""
   if [ -f "$led" ]; then
@@ -595,7 +569,7 @@ _steward_branch_worktree() { # <wsdir> <repo> <branch>
 _steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
   local wt guess
   IFS='|' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
-  # The ledger row, when there is one, is the ONLY answer (CEL-79): an agent
+  # The ledger row, when there is one, is the ONLY answer: an agent
   # at the guessed path is then someone else's pane. The guess is for a PR
   # opened by hand, with no row at all.
   printf '%s' "$1" | jq -c --arg w "$wt" --arg g "$guess" \
@@ -618,13 +592,12 @@ _steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
-  # WAITING ON THE OWNER IS NOT A WORKER FINDING (CEL-115). A PR whose only
-  # red check was an external review bot out of credit was nudged "get a
-  # worker on it" three times in a day; no worker can pay a bill. An open
-  # decision filed with `cel decide ask --pr <repo>#<n>` silences the red,
-  # changes-requested and no-worker nudges for exactly that PR until it is
-  # closed. Only the explicit link counts: free text naming "#7" somewhere is
-  # too loose and once silenced the wrong PR. Read once per workspace.
+  # WAITING ON THE OWNER IS NOT A WORKER FINDING: no worker can, say, pay an
+  # external review bot's bill. An open decision filed with
+  # `cel decide ask --pr <repo>#<n>` silences the red, changes-requested and
+  # no-worker nudges for exactly that PR until it is closed. Only the explicit
+  # link counts: free text naming "#7" is too loose to identify a PR. Read once
+  # per workspace.
   # shellcheck source=lib/decide.sh
   . "${BASH_SOURCE[0]%/*}/decide.sh"
   local -A owner_prs
@@ -643,8 +616,7 @@ _steward_review_sweep() { # <agents-json>
       # is not registered (started by hand), fall back to whichever agent
       # pane lives in the repo checkout.
       # THE PRODUCT'S orchestrator, not the repo's: a repo inside a declared
-      # product has no pane of its own, so `widget/orch` named something that
-      # never existed and every nudge about it was reported as delivered.
+      # product has no pane of its own.
       local prod; prod="$(ws_product_of_repo "$wsdir" "$repo")"
       orch="$(_run_agent_name "$prod-orch")"
       local fallback
@@ -661,24 +633,20 @@ _steward_review_sweep() { # <agents-json>
       # below it, including reminders about our ticket naming convention.
       prsj="$(ws_gh "$wsdir" pr list --repo "$slug" --author @me \
               --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" || continue
-      # "LEAVE IT" IS SAYABLE (CEL-96). An orchestrator was woken four times
-      # overnight to action an APPROVED PR whose code had already reached main
-      # through two others, with a written disposition on it - nothing could
-      # tell the steward not to merge it. A `superseded` or `hold` label is that
-      # sentence; such a PR is dropped before any check below sees it.
+      # "LEAVE IT" IS SAYABLE. A `superseded` or `hold` label tells the steward
+      # to stop nudging about a PR (e.g. one whose code reached main through
+      # others); such a PR is dropped before any check below sees it.
       prsj="$(printf '%s' "$prsj" | jq -c '[.[] | select([.labels[]?.name | ascii_downcase]
         | any(. == "superseded" or . == "hold") | not)]' 2>/dev/null)" || continue
 
       # UNTICKETED PRs. Linear links a PR to its ticket purely from the branch
       # name, so a branch with no identifier can never be tracked: no status to
-      # read, no attachment, nothing on the board. `cel-fanout delegate` now
-      # refuses to create one, but branches opened before that - or by hand -
-      # still need surfacing, so the board and the repo cannot drift apart
-      # silently. A day's grace, so work in flight is not nagged immediately.
-      # A DRAFT IS THE AUTHOR'S PRIVATE WORK. The review sweep below already
-      # leaves drafts alone; this check nagged them anyway (owner, 2026-09-17:
-      # "they are intentionally left as drafts"). The steward has no business
-      # with a PR its author has not put up for anything yet.
+      # read, no attachment, nothing on the board. `cel-fanout delegate`
+      # refuses to create one, but branches opened by hand still need
+      # surfacing, so the board and the repo cannot drift apart silently. A
+      # day's grace, so work in flight is not nagged immediately.
+      # A DRAFT IS THE AUTHOR'S PRIVATE WORK, left alone here as in the review
+      # sweep below.
       # Any prefix the repo answers to, current or historical - a branch named
       # before a team re-key is still ticketed and must not be nagged.
       # `tprefix` is an ALTERNATION of every prefix the repo answers to, for
@@ -726,10 +694,10 @@ _steward_review_sweep() { # <agents-json>
               "steward: PR #$num on $repo has changes requested and nobody working on $branch - restart the review loop (worker fixes, then reviewer re-reviews)."
           fi
         elif [ "$failing" -gt 0 ] && [ "$working" = "0" ]; then
-          # A worker reading `idle` on a red branch is the case this whole
-          # ticket is about: it may be throttled, wedged on a transport error,
-          # or holding a prompt it never took. Every one of those is a report,
-          # and none of them is answered by spawning a fifth worker.
+          # A worker reading `idle` on a red branch may be throttled, wedged on
+          # a transport error, or holding a prompt it never took. Every one of
+          # those is a report, and none of them is answered by spawning
+          # another worker.
           local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
           if [ -n "$sil" ]; then
             _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
@@ -741,12 +709,11 @@ _steward_review_sweep() { # <agents-json>
         fi
       done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) |
         [.number, .headRefName,
-         # HEAD-AWARE (CEL-96). reviewDecision is sticky across pushes: an
-         # approval of a head that has since moved still reads APPROVED, and a
-         # change request already answered by a push still reads
-         # CHANGES_REQUESTED - 665 of one orchestrator'"'"'s 1,697 messages were
-         # nudges like these. Only a review of the CURRENT head counts, and a
-         # change request is over once a later approval exists.
+         # HEAD-AWARE. reviewDecision is sticky across pushes: an approval of a
+         # head that has since moved still reads APPROVED, and a change request
+         # already answered by a push still reads CHANGES_REQUESTED. Only a
+         # review of the CURRENT head counts, and a change request is over once
+         # a later approval exists.
          (. as $pr | .headRefOid as $h | ([.reviews[]?] | sort_by(.submittedAt // "")) as $rs
           | ([$rs[] | select(.state == "CHANGES_REQUESTED")] | last) as $cr
           | if ($pr.reviewDecision // "") == "APPROVED" then
@@ -836,8 +803,7 @@ _steward_stalled_workers() { # <agents-json>
       # Leave existing stall evidence untouched until this backend can observe it.
       [ "$backend" != rex ] && [[ "$pane" != rex/* ]] || continue
       # A pane with no agent is only "vanished" if we could actually see the
-      # roster; herdr being unreachable is not evidence that anyone died, and
-      # this file already learned that lesson once.
+      # roster; herdr being unreachable is not evidence that anyone died.
       text=""
       if [ -n "$pane" ] && [ -n "$live" ]; then
         text="$("$_STEWARD_HERDR" pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
@@ -845,7 +811,7 @@ _steward_stalled_workers() { # <agents-json>
       quiet="$(stall_quiet_secs "$wt")"
       local wrote=0; [ -f "$wt/.agent/result.md" ] || [ -f "$wt/.agent/report.md" ] && wrote=1
 
-      # WHAT IS IT ACTUALLY DOING (CEL-42). Code filters, then the model
+      # WHAT IS IT ACTUALLY DOING. Code filters, then the model
       # judges the few that are left: a candidate is a worker the box has
       # already noticed something odd about, and everything else is not asked
       # about at all. The answer REPORTS - there is no branch below this that
@@ -871,7 +837,7 @@ _steward_stalled_workers() { # <agents-json>
         fi
       fi
       verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote" "$lv")"
-      # THE THREE SILENCES (CEL-50), read from the pane rather than asked of
+      # THE THREE SILENCES, read from the pane rather than asked of
       # anyone: they cost nothing, need no router, and each one renders as a
       # worker thinking. A throttled worker is reported ONCE as a warning and
       # never raised as a repeating blocked item - the remedy is waiting, and
@@ -899,12 +865,12 @@ _steward_stalled_workers() { # <agents-json>
       sev="$(stall_severity "$verdict" "$risk")"
       local msg; msg="$(stall_message "$verdict" "$ticket" "$pane" "$quiet" \
         "$(stall_branch_pushed "$wt")" "$risk" "$branch")"
-      # The model's own sentence, appended rather than substituted: the four
-      # facts root used to gather by hand still lead, and the reason follows.
+      # The model's own sentence, appended rather than substituted: the stall
+      # facts still lead, and the reason follows.
       [ -n "$lv" ] && msg="$msg | $(liveness_sentence "$lv" "$lact" "$lconf" "${still:-0}")"
       # ...and the block itself, where the pane shows one: "stalled" plus
-      # "throttled until 19:00" is an instruction; "stalled" alone sent an
-      # orchestrator to spawn a worker against an exhausted account.
+      # "throttled until 19:00" is an instruction; "stalled" alone invites
+      # spawning a worker against an exhausted account.
       [ -n "$silv" ] && msg="$msg | $(liveness_silence_sentence "$silv" "$silr")"
 
       # Loud means the work itself is at stake, so it goes to root's mailbox as
@@ -923,10 +889,8 @@ _steward_stalled_workers() { # <agents-json>
 
 # Which mailbox should a ready ticket go to? Its prefix names a repo, the repo
 # names a product, and that product's orchestrator can take the work without
-# the hop through root - the hop where most of it used to be lost, forwarded
-# by mail nobody drained. Ambiguity (two products answering to one prefix) or
-# a product whose orchestrator is not on the roster falls back to root, which
-# is where every ready ticket went before.
+# the hop through root. Ambiguity (two products answering to one prefix) or
+# a product whose orchestrator is not on the roster falls back to root.
 _steward_ready_ticket_dest() { # <wsdir> <ticket-id> <agents-json>
   local wsdir="$1" id="$2" agents_json="$3" repo pfx prods
   pfx="${id%-*}"
@@ -968,11 +932,11 @@ _steward_ready_tickets() { # [agents-json]
         -H @- -H 'Content-Type: application/json' \
         -d "$(jq -nc --arg k "$key" --arg st "$trigger" '{query: "query($k: String!, $st: String!) { issues(filter: {team: {key: {eq: $k}}, state: {name: {eq: $st}}}, first: 100) { nodes { identifier title assignee { isMe } state { name type } labels { nodes { name } } } } }", variables: {k: $k, st: $st}}')" \
         2>/dev/null | jq -r '
-        # ONLY THE FLEET'"'"'S OWN OPEN WORK (CEL-96). The nag repeated for
-        # tickets assigned to colleagues, tickets already Done, and the owner'"'"'s
-        # deliberately blocked ticket. Unassigned stays in: the board trigger is
-        # how the owner hands the fleet new work, usually before anyone owns it.
-        # The page is 100, not 20, because these filters run after the limit.
+        # ONLY OPEN WORK FOR THE FLEET: skip tickets assigned to colleagues,
+        # completed or canceled, or deliberately blocked. Unassigned stays in:
+        # the board trigger is how the owner hands the fleet new work, usually
+        # before anyone owns it. The page is 100 because these filters run
+        # after the limit.
         .data.issues.nodes[]?
         | select(.assignee == null or .assignee.isMe == true)
         | select(((.state.type // "") | IN("completed", "canceled")) | not)
@@ -1008,11 +972,8 @@ _steward_ready_tickets() { # [agents-json]
         _steward_due "ready-$id" || continue
         # NEVER offer to move it back. The trigger state is the HUMAN'S signal
         # that they want this built; an agent reversing it erases the request
-        # with nobody informed. This message used to end "(or move it back if
-        # it is not ready)" and root duly filed two tickets the owner had just
-        # moved into Todo straight back to Backlog, silently and without a
-        # comment. If it genuinely cannot be started, say so ON the ticket and
-        # leave the state for the human to change.
+        # with nobody informed. If it genuinely cannot be started, say so ON the
+        # ticket and leave the state for the human to change.
         local dest; dest="$(_steward_ready_ticket_dest "$wsdir" "$id" "$agents_json")"
         cmd_inbox send "$dest" \
           "steward: $id is in '$trigger' with no branch anywhere - $title. The owner moved it there to say BUILD THIS: plan it and delegate to the owning repo orchestrator. DO NOT change its state out of '$trigger' yourself - if it cannot be started, comment on the ticket saying exactly what is missing and leave the state alone for the owner to decide." \
@@ -1049,12 +1010,9 @@ _steward_quota() {
     for p in $(_yqr -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST" 2>/dev/null); do
       r="$(quota_remaining "$p" "$wsdir" 2>/dev/null || printf unknown)"
       [ "$r" = unknown ] && continue
-      # A dry account nobody routes to vetoes nothing. Measured 2026-09-17:
-      # every workspace on the box carried a "deepseek credit is -0.24"
-      # blocker for a direct deepseek account no profile used - the deepseek
-      # models all go through openrouter - because the key was in the
-      # environment and the balance check ran for every provider with one.
-      # The blocker is about routes, so it needs a route to exist.
+      # A dry account nobody routes to vetoes nothing: having its key in the
+      # environment is not a route. The blocker is about routes, so it needs a
+      # route to exist.
       if ! _steward_provider_used "$wsdir" "$p"; then
         _steward_clear "$ws" "quota-dry-$p" "$p is dry but no profile in $ws routes to it - nothing is vetoed"
         continue
@@ -1071,7 +1029,7 @@ _steward_quota() {
       else
         # Back above the floor: the blocker the steward raised is no longer
         # true, so the steward takes it down rather than leaving a human to
-        # work out whether a four-day-old item still applies.
+        # work out whether an old item still applies.
         _steward_clear "$ws" "quota-dry-$p" "$p credit is $(printf '%.2f' "$r") (floor $floor) - back above the floor, routes to it are live again"
         if awk -v r="$r" -v f="$floor" 'BEGIN { exit !(r+0 < 3*f+0) }'; then
           c_warn "$ws: $p is down to $(printf '%.2f' "$r") $(provider_balance "$p" unit) (floor $floor) - running low"
@@ -1092,9 +1050,8 @@ _steward_quota() {
 #
 # A SUBSCRIPTION IS THE BOX'S, NOT A WORKSPACE'S. There is one Claude account
 # behind every workspace on this machine, so the item goes to the first
-# registered workspace's root mailbox - saying it once per box is the whole
-# point, and saying it per workspace would be the twenty-four-item pile this
-# rollup exists to prevent.
+# registered workspace's root mailbox - saying it once per box, not once per
+# workspace.
 _steward_subscriptions() {
   # shellcheck source=lib/quota.sh
   . "$CEL_ROOT/lib/quota.sh"
@@ -1132,22 +1089,18 @@ _steward_subscriptions() {
   done < <(_subscription_accounts)
 }
 
-# THE ORCHESTRATORS' OWN POOL (CEL-98). Root and the orchestrators run
+# THE ORCHESTRATORS' OWN POOL. Root and the orchestrators run
 # `omp --model anthropic/...` on omp's OWN Anthropic credentials, not the
 # gateway, so the per-account sweep above - which reads whichever copy answers
-# best - can call an account healthy while omp's copy of it is dead. On
-# 2026-10-04 one of three was disabled (refresh token rejected) and the other
-# two were spent, and every orchestrator stopped with nothing anywhere saying
-# so. So the pool is judged as a pool: ONE item to root when every live
-# credential is at or above the threshold on its unscoped 5h or 7d window,
-# resolved when that stops being true. Read from `omp usage --json` - no model
-# call.
+# best - can call an account healthy while omp's copy of it is dead. So the
+# pool is judged as a pool: ONE item to root when every live credential is at
+# or above the threshold on its unscoped 5h or 7d window, resolved when that
+# stops being true. Read from `omp usage --json` - no model call.
 #
-# A DISABLED CREDENTIAL IS ITS OWN ITEM, SAID ONCE PER CHANGE (AH-261102). It
-# comes back only when the owner runs `omp login anthropic` at a terminal;
-# nothing a tick does changes it, so the old once-a-window re-raise was 163
-# updates on one unchanged fact. `orch-pool-login` is raised when the set of
-# disabled credentials changes and taken down when it is empty.
+# A DISABLED CREDENTIAL IS ITS OWN ITEM, SAID ONCE PER CHANGE. It comes back
+# only when the owner runs `omp login anthropic` at a terminal; nothing a tick
+# does changes it. `orch-pool-login` is raised when the set of disabled
+# credentials changes and taken down when it is empty.
 _steward_orch_pool() {
   # shellcheck source=lib/quota.sh
   command -v _sub_omp_usage >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
@@ -1190,7 +1143,7 @@ _steward_orch_pool() {
   fi
 }
 
-# ON PACE FOR THE CAP (CEL-108). The per-account sweep above speaks at 80% of a
+# ON PACE FOR THE CAP. The per-account sweep above speaks at 80% of a
 # window; by then a weekly window can already be a day from empty, and the
 # question the owner asks is earlier - "at this week's pace, does anything run
 # out before it resets?". So ONE item to root, keyed `usage-pace`, naming every
@@ -1218,14 +1171,12 @@ _steward_usage_pace() {
   fi
 }
 
-# THE QUEUE IS VISIBLE OR IT IS A HANG. Since 2026-09-18 the suite takes a
-# box-wide lock (tests/run.sh): six concurrent copies took the load to 190 and
-# three workers had to be interrupted by hand. A worker whose gate is queued
-# behind another suite now looks, from outside, exactly like a worker that
-# died - and the failure mode of that mistake is somebody killing the holder
-# and losing both runs. So the steward watches the lock itself: held far
-# longer than any suite takes, and root is told who has it and for how long.
-# It NEVER kills it. A suite is the thing this whole plane exists to run.
+# THE QUEUE IS VISIBLE OR IT IS A HANG. The suite takes a box-wide lock
+# (tests/run.sh), so a worker whose gate is queued behind another suite looks,
+# from outside, exactly like a worker that died - and killing the holder would
+# lose both runs. So the steward watches the lock itself: held far longer than
+# any suite takes, and root is told who has it and for how long. It NEVER
+# kills it.
 _STEWARD_SUITE_HOLD_WARN_SECS="${CEL_SUITE_HOLD_WARN_SECS:-1800}"
 
 _steward_suite_lock_path() {
@@ -1293,8 +1244,7 @@ _steward_afk_sweep() {
   # shellcheck source=lib/afk.sh
   . "${BASH_SOURCE[0]%/*}/afk.sh"
   local s msg ws
-  # ...and taken down when it stops being true, now that it is one open item
-  # rather than a line per tick (CEL-96).
+  # ...and taken down when it stops being true.
   if ! afk_expired; then
     for ws in $(registry_names); do _steward_clear "$ws" afk-expired "AFK is no longer expired-and-on"; done
     return 0
@@ -1306,15 +1256,14 @@ _steward_afk_sweep() {
 }
 
 _steward_servers() {
-  # ONE dashboard for the box (CEL-107), ensured once - never one per
+  # ONE dashboard for the box, ensured once - never one per
   # workspace; the old per-workspace ports are its redirects, not servers.
   # SUBSHELL, not a bare call. cmd_dash reports missing prerequisites with
     # die(), and die() is `exit 1` - which `||` cannot catch, because an exit
-    # is not a non-zero return. A single missing tool therefore terminated the
-    # whole tick here, silently skipping everything after it: ready tickets,
-    # the share sweep, the update check. Observed under systemd, where node is
-    # absent from PATH - the tick looked like it ran, printed most of its
-    # output, and simply never reached the part that picks up work.
+    # is not a non-zero return. A single missing tool (node absent from PATH
+    # under systemd) would otherwise end the whole tick here, silently
+    # skipping everything after it: ready tickets, the share sweep, the
+    # update check.
   ( cmd_dash --ensure ) >/dev/null 2>&1 \
     || c_err "dash (port $(dash_port)) is down and would not start - cel dash --ensure"
   # Expired public shares are swept, not merely refused: a token dir left on
@@ -1340,15 +1289,13 @@ _steward_servers() {
   cmd_pages --public --ensure >/dev/null 2>&1 || c_err "public pages server is down and would not start - cel pages --public --ensure"
 }
 
-# ORPHANED TEST SERVERS HAVE NO OWNER TO NOTICE THEM. On 2026-09-16 seven
-# `node tools/pages/server.mjs` processes, booted by a repo's suite inside a
-# gate run that was killed mid-flight, stayed alive for a hundred minutes
-# parented to init - and because they had inherited the ledger lock of the
-# collect that started the gate, every delegation command on that workspace
-# blocked behind them. Nobody was looking: a server in a worktree is not a
-# pane, not an agent and not a box service, so no sweep on this box named it.
-# This one does. Age comes from the listing rather than being read again here
-# so the sweep can be tested without a real server.
+# ORPHANED TEST SERVERS HAVE NO OWNER TO NOTICE THEM. A server booted by a
+# repo's suite inside a gate run that was killed mid-flight outlives it,
+# parented to init - and may hold an inherited ledger lock that blocks every
+# delegation command on that workspace. A server in a worktree is not a pane,
+# not an agent and not a box service, so only this sweep names it. Age comes
+# from the listing rather than being read again here so the sweep can be
+# tested without a real server.
 _steward_server_procs() { # "<pid> <age-seconds> <port> <cwd>" per pages/dash server
   local pid cmd cwd age port
   for pid in $(pgrep -u "$(id -u)" -f 'tools/(pages|dash)/server\.mjs' 2>/dev/null || true); do
@@ -1390,14 +1337,12 @@ _steward_orphan_servers() { # <agents-json>
 
 # MEMORY: THE STEWARD SAYS SOMETHING BEFORE THE BOX DOES.
 #
-# The owner, 2026-09-18: "how are we monitoring memory for the workers and can
-# that be visualised in the console too?" Nothing was. The box has 24 GB and
-# sits at 17 GB used with agents up; a runaway test server or a forgotten
-# session was invisible until the kernel picked something to kill, and what it
-# picks is never what anyone would have chosen. Two warnings, and NO KILLING:
-# the steward reports, the orchestrator decides. A sweep that reaped a worker
-# mid-gate would destroy the work it was measuring, and the one number it has
-# is an attribution by cwd, not proof of who is at fault.
+# A runaway test server or a forgotten session is otherwise invisible until the
+# kernel picks something to kill, and what it picks is never what anyone would
+# have chosen. Two warnings, and NO KILLING: the steward reports, the
+# orchestrator decides. A sweep that reaped a worker mid-gate would destroy the
+# work it was measuring, and the one number it has is an attribution by cwd,
+# not proof of who is at fault.
 _STEWARD_MEM_WORKER_WARN_MB="${CEL_MEM_WORKER_WARN_MB:-2048}"
 
 # Every tree the steward knows about, largest first, as `name<TAB>mb`. One
@@ -1406,7 +1351,7 @@ _STEWARD_MEM_WORKER_WARN_MB="${CEL_MEM_WORKER_WARN_MB:-2048}"
 #
 # ONLY `running` DELEGATIONS. A collected or released row's worktree is gone
 # or going, so naming it as one of the largest trees points an operator at
-# something nobody can act on - the same rule the fleet's worker list learned.
+# something nobody can act on - the same rule as the fleet's worker list.
 _steward_mem_trees() { # -> name<TAB>mb, biggest first
   _steward_mem_trees_raw | sort -t"$(printf '\t')" -k2,2nr
 }
@@ -1432,8 +1377,8 @@ _steward_mem_trees_raw() {
       "$wsdir/.cel/delegations.json" 2>/dev/null || true)
   done
   # ORPHANS ARE A TREE TOO, even though no pane owns them: the line exists to
-  # answer "what is holding the memory", and for four days the true answer
-  # was "a thousand processes nobody is looking at" while it named panes.
+  # answer "what is holding the memory", and orphaned processes can be the
+  # true answer.
   local on omb
   read -r on omb <<<"$(orphans_list 2>/dev/null | orphans_totals)"
   [ "${on:-0}" -gt 0 ] && [ "${omb:-0}" -gt 0 ] && printf 'orphans\t%s\n' "$omb"
@@ -1446,13 +1391,13 @@ _steward_mem_owner() { # <wsdir> <repo>
   printf '%s-orch' "$(ws_product_of_repo "$1" "$2")"
 }
 
-# THE WARNING LINE (CEL-122). Below it the orchestrators - the ones who can
+# THE WARNING LINE. Below it the orchestrators - the ones who can
 # stop delegating and collect - hear about it once per condition, rolled up
 # (one fp per workspace, re-sent at most once per _steward_due window), naming
 # the biggest consumers grouped by worktree. Admission (lib/boxguard.sh)
 # refuses new workers lower down; this is the earlier word.
 _steward_mem_pressure_warn() { # <avail-mb>
-  # ONCE PER CONDITION (CEL-126): the orchestrators hear it on entering
+  # ONCE PER CONDITION: the orchestrators hear it on entering
   # pressure and not again until the box has recovered and fallen back in.
   local flag="${_STEWARD_STATE%/*}/mem-pressure.on"
   if ! boxguard_pressure; then rm -f "$flag" 2>/dev/null; return 0; fi
@@ -1464,7 +1409,7 @@ _steward_mem_pressure_warn() { # <avail-mb>
   server_rows="$(serve_list_json 2>/dev/null || printf '[]')"
   server_top="$(printf '%s' "$server_rows" | jq -r '.[0:5][] | "\(.name) \(.memory_mb)M"' | paste -sd', ' -)"
   top="${top}${server_top:+; top servers: $server_top}"
-  # CEL-130: line 1 is the idle-stop pass (workers, ~M freed), any further
+  # Line 1 is the idle-stop pass (workers, ~M freed), any further
   # lines the finished reviewers closed - all of it is what was stopped.
   acted="$(grep . "$(_gc_idle_stop_last)" 2>/dev/null | paste -sd';' - || true)"
   acted="${acted:+gc stopped idle workers and finished reviewers: $acted}"
@@ -1498,8 +1443,7 @@ _steward_memory() {
   # Servers have their own cgroup attribution; include them beside process trees.
   local server_top; server_top="$(printf '%s' "$servers" | jq -r '.[0:5][] | "\(.name // .unit // ("pid:"+(.pid|tostring))) \(.memory_mb)M[\(.owner // "unledgered")]"' | paste -sd', ' -)"
   # HYSTERESIS, 10% to raise and 15% to clear. A single threshold on a box
-  # hovering at it posts and resolves the same item every tick, which is the
-  # rolled-up version of the noise this file already fixed once.
+  # hovering at it would post and resolve the same item every tick.
   if [ "$availpct" -lt 10 ]; then
     local trees top="" name mb n=0
     trees="$(_steward_mem_trees)"
@@ -1553,15 +1497,13 @@ _steward_memory() {
 # reports and never kills, because what it is looking at is a worker mid-gate
 # whose work a kill would destroy. Nothing in the four orphan classes has any
 # work to lose - a watcher for a console that exited, a fixture whose worktree
-# was deleted nine days ago, a shell on a pty nobody can reach, a runner whose
-# suite was killed - and the alternative was proved on 2026-09-19 to be a
-# gigabyte of them accumulating over four days with the steward running every
-# five minutes and mentioning none of it.
+# was deleted, a shell on a pty nobody can reach, a runner whose suite was
+# killed - and left alone they accumulate for days.
 #
 # ONE ROLLED-UP LINE, AND ONLY WHEN SOMETHING WENT. `reaped 6 orphans (2
-# watchers, 3 fixtures, 1 shell), 410 MB` is a sentence somebody reads; 173
-# items saying "reaped pid 40213" is the litter moved from /proc to root's
-# mailbox. And a tick that reaped nothing says nothing at all.
+# watchers, 3 fixtures, 1 shell), 410 MB` is a sentence somebody reads; an item
+# per reaped pid is the litter moved from /proc to root's mailbox. And a tick
+# that reaped nothing says nothing at all.
 _steward_orphans() {
   local rows line n mb ws
   rows="$(orphans_list 2>/dev/null)" || return 0
@@ -1616,13 +1558,9 @@ _STEWARD_UNIT="cel-steward"
 . "${BASH_SOURCE[0]%/*}/steward_timer.sh"   # steward_timer_unit
 # A MAILBOX NOBODY READS MUST NOT BE ABLE TO SWALLOW AN ESCALATION.
 #
-# Counted on this box on 2026-09-19: one workspace's `root` mailbox had taken
-# 553 messages since 10 September - 72 of them escalations - and nothing was
-# obliged to open it. The standing root panes are gone; the console that
-# replaced them is a process that may not be running, and `lib/inbox.sh`
-# raised a desktop notification for the blocking kinds only. One escalation,
-# still unread when this was written, said a reviewer pane had been dead for
-# two days.
+# A root mailbox can take hundreds of messages with nothing obliged to open
+# it: the console that reads it is a process that may not be running, and
+# `lib/inbox.sh` raises a desktop notification for the blocking kinds only.
 #
 # So the steward escalates the FACT, once per workspace, rolled up on
 # `root-unread-<ws>` and self-clearing: a `blocked` item, which is the kind
@@ -1637,9 +1575,8 @@ _steward_root_unread() {
   for ws in $(registry_names); do
     local f; f="$(_inbox_file "$ws")"
     [ -s "$f" ] || continue
-    # Only what a person must answer, decide or unblock. Status is the ledger's
-    # job now (CEL-43 part 1), and ranking a pile of it would have been a way
-    # of living with the pile.
+    # Only what a person must answer, decide or unblock. Status is the
+    # ledger's job.
     local waiting
     waiting="$(inbox_unread_json "$ws" root \
       | jq -sc --argjson age "$_STEWARD_ROOT_UNREAD_SECS" --arg now "$(date -Is)" '
@@ -1654,8 +1591,8 @@ _steward_root_unread() {
     oldest_secs="$(inbox_oldest_unread_secs "$ws" root 'escalation|decision|blocked')"
     [ "${oldest_secs:-0}" -ge "$_STEWARD_ROOT_UNREAD_SECS" ] || continue
     # herdr unreachable is NOT evidence that nobody is reading - the same rule
-    # `cel inbox prune` and the orchestrator sweep both learned. Unknown says
-    # nothing this tick.
+    # as `cel inbox prune` and the orchestrator sweep. Unknown says nothing
+    # this tick.
     reader="$(inbox_reader_of "$ws" root)"; rc=$?
     [ "$rc" -eq 2 ] && continue
     if [ -n "$reader" ]; then
@@ -1675,15 +1612,13 @@ _steward_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user
 # Every trigger the steward owns (a Linear ticket moved into the workspace's
 # trigger state, a stalled review, a mailbox nobody is draining, a dashboard
 # that fell over) is documented as "the steward notices", and none of it
-# happens unless something runs a tick. `cel --help` said "run it on a loop"
-# and nothing in the plane established that loop, so trigger_state was a
-# promise with no machinery: tickets sat in Todo indefinitely.
+# happens unless something runs a tick.
 #
 # A systemd USER TIMER rather than a herdr pane running `while true`, because
 # the steward's whole job is to be running when nobody is watching. A pane
-# loop dies with the herdr session and takes the watcher with it silently -
-# which is exactly how this gap went unnoticed. The timer survives logout and
-# reboot, and `journalctl --user -u cel-steward` keeps the history.
+# loop dies with the herdr session and takes the watcher with it silently.
+# The timer survives logout and reboot, and `journalctl --user -u cel-steward`
+# keeps the history.
 _steward_install() { # [--interval MIN] [--remove]
   local mins=5 remove=0
   while [ $# -gt 0 ]; do
@@ -1748,8 +1683,8 @@ _steward_update_check() {
   case "$chan" in main) ;; *) chan=release ;; esac
 
   # On the main channel the tag never moves, so "a new release is out" never
-  # fires and the box hears nothing for thirty-odd merges. What it needs to
-  # hear is the distance and the sha its build came from.
+  # fires however far behind the box is. What it needs to hear is the
+  # distance and the sha its build came from.
   if [ "$chan" = main ]; then
     local n ws
     git -C "$CEL_ROOT" fetch -q origin main 2>/dev/null || true
@@ -1787,13 +1722,11 @@ _steward_update_check() {
   return 0
 }
 
-# ORCHESTRATORS ON AN OLDER LAUNCH LINE (CEL-63), reported ONCE PER
-# ORCHESTRATOR PER BUILD: the finding only changes when the plane or the
-# orchestrator does, so a nudge per tick would be the same sentence every five
-# minutes. The marker was once a single build sha written on every pass, even
-# a pass that found nothing - so an orchestrator that went stale later in the
-# same build was never reported (Sourcery on #98). It now keys each report by
-# build, orchestrator and the difference found.
+# ORCHESTRATORS ON AN OLDER LAUNCH LINE, reported ONCE PER ORCHESTRATOR PER
+# BUILD: the finding only changes when the plane or the orchestrator does, so
+# a nudge per tick would be the same sentence every five minutes. Each report
+# is keyed by build, orchestrator and the difference found, so an
+# orchestrator that goes stale later in the same build is still reported.
 _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
   . "${BASH_SOURCE[0]%/*}/version.sh"
@@ -1828,17 +1761,14 @@ _steward_stale_orchestrators() {
 # `| sed -n 1p`, NEVER `| head -1`, on anything that can be long. bin/cel runs
 # under `set -euo pipefail`: when `head` closes the pipe after one line the
 # producer takes SIGPIPE, the pipeline's status is 141, and `set -e` ends the
-# tick right there - silently. The stale-mailbox sweep did exactly that once
-# the product workspace's mailbox passed a pipe buffer in size: 55 failed
-# ticks in a day, "Main process exited, status=2", no message. sed reads to
-# the end and exits 0.
-# CEL-105: THE DASHBOARD'S MEMORY OF THE BOX. The v2 page draws load over a
-# day and which worker was running, waiting or idle when - and nothing on the
-# box remembered either: herdr answers "now" and the ledger records only
-# state changes a person made. So each tick appends one line (load, memory,
-# swap, every pane's status) to a small ring, trimmed to the newest
-# CEL_SAMPLES_KEEP lines. Cheap by design: /proc and the agent list the tick
-# already fetched.
+# tick right there - silently - once the input passes a pipe buffer in size.
+# sed reads to the end and exits 0.
+# THE DASHBOARD'S MEMORY OF THE BOX. The dashboard draws load over a day and
+# which worker was running, waiting or idle when - and herdr answers only
+# "now" while the ledger records only state changes a person made. So each
+# tick appends one line (load, memory, swap, every pane's status) to a small
+# ring, trimmed to the newest CEL_SAMPLES_KEEP lines. Cheap by design: /proc
+# and the agent list the tick already fetched.
 _steward_sample() { # <agents-json>
   local f="${CEL_SAMPLES_FILE:-$HOME/.local/share/cel/samples.jsonl}" keep="${CEL_SAMPLES_KEEP:-2000}"
   local load mem swap
@@ -1889,9 +1819,9 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
       *) die "cel steward: unknown argument '$1' (want --no-gc or --install)" ;;
     esac
   done
-  # TICKS NEVER OVERLAP (CEL-111). The timer fires every five minutes and a
-  # slow tick outlived it: five stewards ran at once, each walking /proc and
-  # every worktree. A tick that finds one running says so and goes.
+  # TICKS NEVER OVERLAP. A slow tick can outlive the timer interval, and
+  # overlapping stewards each walk /proc and every worktree. A tick that finds
+  # one running says so and goes.
   _steward_tick_claim || return 0
   have herdr || die "cel steward: herdr is not on PATH"
   have jq    || die "cel steward: jq is not on PATH"
@@ -1964,9 +1894,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # reading it in the wrong order.
   _steward_memory
   # AND WHAT HAS NO PANE AT ALL. The sweep above groups by worktree and pane,
-  # so every reparented watcher, dead-worktree fixture and pane-less shell on
-  # the box was invisible to it - a gigabyte of them, under a headline that
-  # named an orchestrator.
+  # so reparented watchers, dead-worktree fixtures and pane-less shells are
+  # invisible to it.
   _steward_orphans
   _steward_services
   # And the other box-wide resource: one suite runs at a time, so a gate that
@@ -1982,14 +1911,14 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   # previews of PRs that closed or merged, and checkouts of reaped previews
   ( . "${BASH_SOURCE[0]%/*}/preview.sh"; preview_sweep ) || true
   _serve_unledgered_report
-  # CEL-90: keep the fleet cache warm so the first console read after an idle
+  # Keep the fleet cache warm so the first console read after an idle
   # spell serves a recent board. One detached refill, only when stale; the
   # tick never waits on it.
   ( . "${BASH_SOURCE[0]%/*}/fleet.sh" && fleet_cache_warm ) || true
   c_ok "tick complete"
 }
 
-# ── declared services (CEL-26) ───────────────────────────────────────────────
+# ── declared services ────────────────────────────────────────────────────────
 #
 # A service with a `health:` path is the only thing on this box that can be
 # asked, rather than guessed at, whether it is working - so it is asked, once
@@ -1998,9 +1927,9 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
 # point at which root hears about it. The count lives beside the nudge state
 # because it is the same kind of fact: what was true last time this ran.
 # RESOLVED PER CALL, never captured at source time. The suite points
-# CEL_STEWARD_STATE at a fixture AFTER sourcing this file, and a path frozen
-# when the library loaded meant every test counted down-ticks in the real
-# box's state file - which is both a lie and a write to the live box.
+# CEL_STEWARD_STATE at a fixture AFTER sourcing this file; a path frozen when
+# the library loaded would make every test count down-ticks in the real box's
+# state file.
 _steward_svc_state() {
   printf '%s' "${CEL_STEWARD_SVC_STATE:-${CEL_STEWARD_STATE:-$_STEWARD_STATE}.services}"
 }
@@ -2023,9 +1952,8 @@ _steward_services() {
   for ws in $(registry_names); do
     _steward_services_for "$ws" "$(registry_path "$ws" || true)"
   done
-  # ...and the box's own. These are the services with nobody to speak for
-  # them: the auth broker and gateway ran unsupervised for a day because no
-  # workspace declared them, which is the whole reason services.d exists.
+  # ...and the box's own: the services no workspace declares, which is the
+  # whole reason services.d exists.
   _steward_services_for box ""
 }
 

@@ -19,7 +19,7 @@ S
 }
 _st_teardown() { rm -rf "$T"; }
 
-# The unit the incident ran on: no trigger survives a manager restart.
+# A legacy unit: monotonic triggers only, so none survives a manager restart.
 _st_old_timer() {
   printf '[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nPersistent=true\n' > "$1"
 }

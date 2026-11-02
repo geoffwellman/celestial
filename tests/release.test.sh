@@ -102,13 +102,9 @@ test_release_cut_refuses_non_semver_and_not_greater_versions() {
 
 # --- cel release <product> <value>: the plane cuts ANY product's release -----
 
-# `cel release` used to mean "cut a version of celestial itself" - it
-# dispatched celestial's own release.yml in whatever repo the box's checkout
-# pointed at. Every local refusal passed for anyone who was not the owner and
-# then `gh workflow run` returned 403, so it failed at the last step looking
-# like it should have worked. The plane now reads a per-repo `release:` block,
-# checks the caller may dispatch BEFORE spending anything, and releasing the
-# plane itself is one ordinary instance of that.
+# The plane reads a per-repo `release:` block, checks the caller may dispatch
+# BEFORE spending anything (rather than failing with a 403 at the last step),
+# and releasing the plane itself is one ordinary instance of that.
 
 # A whole fixture workspace: six repos across three release shapes, real repo
 # directories for the version files, and a `gh` stub first on PATH that logs

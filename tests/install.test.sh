@@ -1,9 +1,7 @@
 # shellcheck shell=bash
 # pi extensions. `npm install -g` puts a package on disk and nothing more; pi
-# loads only what `pi install <source>` has registered in its settings. Every
-# extension the plane declared was therefore installed and never loaded - ten
-# of them, including the one that gives pi a Claude subscription - and the
-# first pi worker could not start. Found 2026-09-16.
+# loads only what `pi install <source>` has registered in its settings, so
+# every declared extension must go through pi's own installer.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/manifest.sh"
 source "$CEL_ROOT/lib/install.sh"
