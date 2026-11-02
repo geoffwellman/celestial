@@ -121,13 +121,11 @@ test_the_flag_overrides_the_env_var() {
   rm -rf "$T"
 }
 
-# A GATE THAT IS KILLED MUST TAKE ITS CHILDREN WITH IT. The 2026-09-16 hang
-# was seven test servers left running for a hundred minutes by a suite the
-# verifier's timeout cut off mid-run. A single SIGTERM is not a kill: a node
-# server with a shutdown handler, or anything that ignores TERM while it
-# finishes, simply stays - reparented to init, still holding every descriptor
-# it inherited, including the ledger lock of the collect that spawned the
-# verifier. The gate therefore runs in its own process group and the timeout
+# A GATE THAT IS KILLED MUST TAKE ITS CHILDREN WITH IT. A single SIGTERM is not
+# a kill: a node server with a shutdown handler, or anything that ignores TERM
+# while it finishes, simply stays - reparented to init, still holding every
+# descriptor it inherited, including the ledger lock of the collect that spawned
+# the verifier. The gate therefore runs in its own process group and the timeout
 # escalates to SIGKILL on that whole group.
 test_a_timed_out_gate_leaves_no_background_children() {
   _vrepo; _vcommit impl src/a.ts
@@ -186,7 +184,7 @@ test_the_gate_queues_for_the_suite_lock_and_the_wait_is_not_a_timeout() {
   rm -rf "$T"
 }
 
-# CEL-97: land's --gate-timeout must bound the whole wait, lock included. With
+# Land's --gate-timeout must bound the whole wait, lock included. With
 # --lock-in-timeout a lock held past the timeout is a timeout - no verdict -
 # and the gate never starts.
 test_lock_in_timeout_counts_the_lock_wait_against_the_gate() {
@@ -235,13 +233,9 @@ test_the_gate_does_not_queue_behind_a_lock_its_caller_holds() {
   rm -rf "$T"
 }
 
-# THE TIMEOUT WATCHDOG MUST NOT HOLD THE LOCK EITHER. On 2026-09-19 every gate
-# on the box queued for eighteen minutes behind a `sleep 1800` with ppid 1:
-# this verifier's watchdog sleep, orphaned when the gate finished early and the
-# watchdog shell was killed, still holding the suite lock descriptor it had
-# inherited. The gate's own children were already spawned with the descriptor
-# closed; the watchdog was not, and a lock held by a stray sleep looks exactly
-# like a lock in use.
+# THE TIMEOUT WATCHDOG MUST NOT HOLD THE LOCK EITHER. Its sleep is orphaned when
+# the gate finishes early and the watchdog shell is killed; holding the suite
+# lock descriptor, it would look exactly like a lock in use.
 test_the_gate_timeout_watchdog_does_not_keep_the_suite_lock() {
   _vrepo; _vcommit impl src/a.ts
   local lock="$T/suite.lock"
@@ -255,18 +249,11 @@ test_the_gate_timeout_watchdog_does_not_keep_the_suite_lock() {
 }
 
 # ---- a gate that produced NO VERDICT is not a gate that failed ---------------
-# Measured on 2026-09-21: `cel-fanout land` on an approved, CI-green branch
-# refused with "the repo's gate did not pass (verdict: unknown)" while the same
-# suite run by hand in the same worktree passed. The verdict said
-# `timed_out:false`, no output at all, and `passed:false` - so the timeout arm,
-# which exists precisely so that "no verdict" does not read as "the code is
-# wrong", never applied. The gate had been killed by a signal: `wait` returned
-# 128+n, which fell through to the `*)` arm and was recorded as a failure.
-#
-# A process that died without ever reporting a status did not fail. It said
-# nothing, and a worker sent to fix code that was never shown to be wrong is
-# the exact confusion this file's own comments exist to prevent. Four outcomes,
-# not three: pass, fail, timed out, and produced no verdict.
+# A gate killed by a signal makes `wait` return 128+n. That must not fall
+# through to "failed": a process that died without reporting a status said
+# nothing, and a worker sent to fix code that was never shown to be wrong is the
+# confusion the timeout arm exists to prevent. Four outcomes, not three: pass,
+# fail, timed out, and produced no verdict.
 test_a_gate_killed_by_a_signal_has_no_verdict_rather_than_failing() {
   _vrepo; _vcommit impl src/a.ts
   local out rc=0
@@ -395,11 +382,10 @@ test_a_process_the_gate_leaves_behind_does_not_hold_the_suite_lock() {
   assert_eq "$held" 0
 }
 
-# ------------------------------------------------ AH-261018: full gate evidence
-# A downstream repository's canonical verification failed (exit 1) and the verifier kept only the
-# last 12 lines and DELETED the rest: the failing test's identity was
-# irretrievable. The complete output is now a private durable artifact bound to
-# the attempt and the head, recorded in the verdict next to the exact exit.
+# ------------------------------------------------------------ full gate evidence
+# A 12-line tail cannot identify the failing test, so the complete output is a
+# private durable artifact bound to the attempt and the head, recorded in the
+# verdict next to the exact exit.
 _vev() { # a repo plus an isolated artifact root
   _vrepo; _vcommit impl src/a.ts
   # OUTSIDE the repo: an artifact root inside a git work tree is refused

@@ -1,13 +1,10 @@
 # shellcheck shell=bash
 # `release --all` and the container that has to outlive its children.
 #
-# 2026-09-19, this box: an orchestrator ran `release --all` to free memory and
-# it took twelve rows in `finished` and `collected` - work awaiting collection
-# or review, with open PRs. For one row it printed "left as-is: no merged PR
-# (release is not a merge)" and removed the worktree anyway, and when the last
-# child went herdr dropped the `<repo>/workers` container, scattering the
-# surviving workers to the sidebar's top level. Three faults, one verb; these
-# are the tests for all three.
+# `release --all` must not take rows in `finished` or `collected` (work awaiting
+# collection or review, with open PRs); a row it leaves as-is must keep its
+# worktree; and the `<repo>/workers` herdr container must survive its last
+# child being released, or surviving workers scatter to the sidebar's top level.
 source "$CEL_ROOT/lib/common.sh"
 BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
 
@@ -109,7 +106,7 @@ test_release_all_dry_run_removes_nothing() {
   rm -rf "$T"
 }
 
-# --merged (CEL-24) ADDS rows GitHub has already merged to the same one pass -
+# --merged ADDS rows GitHub has already merged to the same one pass -
 # it does not replace the scope with "whatever state these are in".
 test_release_all_merged_adds_the_merged_pr_row() {
   _relt_one_of_each

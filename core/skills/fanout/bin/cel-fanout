@@ -124,10 +124,8 @@ VERIFY="${CEL_FANOUT_VERIFY:-$CEL_ROOT/core/skills/verify/bin/cel-verify}"
 # EVERY SPAWN OUT OF THE LOCKED REGION CLOSES THE LEDGER LOCK FIRST. The
 # mutating entrypoints hold .cel/delegations.lock on $ledger_fd for the whole
 # invocation, and a descriptor is inherited by every child unless it is closed
-# on the spawn. On 2026-09-16 that inheritance chain ran collect -> verifier ->
-# gate -> seven test servers: the gate was killed by the verifier's timeout,
-# the servers were not, and for the next hundred minutes they held a lock on
-# a ledger they had never read while every release on the workspace waited.
+# on the spawn: a grandchild that outlives a killed parent (a gate's test
+# servers, a herdr daemon) would otherwise hold the ledger lock indefinitely.
 # Anything that can outlive this process - the verifier, a herdr call that may
 # start a daemon, an agent - is started through here. See lock_spawn in
 # lib/registry.sh.
@@ -136,13 +134,11 @@ _ledger_spawn() { # <cmd> [args...]
 }
 
 # AND THE LOCK IS NOT HELD ACROSS A GATE. Closing the descriptor on the spawn
-# stops the CHILD holding it; this releases it in the parent. `collect` took
-# the ledger lock, then ran cel-verify, whose gate queues on the box-wide suite
-# lock: the ledger lock was therefore held for the whole queue plus the whole
-# gate - minutes to half an hour - and every other fanout command on the box
-# waited behind it (a release waited six minutes on 2026-09-19). The lock
-# exists to serialise ledger WRITES. Anything long and external runs between
-# these two, and whatever was read before must be re-read after.
+# stops the CHILD holding it; this releases it in the parent. A gate queues on
+# the box-wide suite lock and can run for a long time, and every other fanout
+# command on the box would wait behind a held ledger lock. The lock exists to
+# serialise ledger WRITES. Anything long and external runs between these two,
+# and whatever was read before must be re-read after.
 _ledger_unlock() {
   [ -n "${ledger_fd:-}" ] || return 0
   flock -u "$ledger_fd" 2>/dev/null || true
@@ -153,9 +149,8 @@ _ledger_relock() {
 }
 
 # SEEDING A WORKTREE. A fresh checkout is missing every gitignored file the
-# repo needs to run, so a worker can build the ticket and never once start it -
-# and the owner symlinks the same keys file into worktree after worktree by
-# hand. Runs before the agent does, so the files are there from its first
+# repo needs to run, so a worker can build the ticket and never once start it.
+# Runs before the agent does, so the files are there from its first
 # command. Sets SEEDED to the paths the worktree now has, for the prompt line;
 # nothing here is ever fatal, because a repo without the file locally still
 # deserves its worker.
@@ -202,9 +197,8 @@ _fanout_seed_worktree() { # <wsdir> <repo> <worktree>
 # owns the repo by its git toplevel; when none does (the repo's orchestrator
 # retired in favour of a product one, or herdr closed an empty container when
 # its last child was released) a bare shell labelled `<repo>/workers` is made
-# for it. Without one the workers appear at the sidebar's top level, homeless -
-# which is how this file once lost track of a whole batch, and how a
-# `release --all` scattered the survivors on 2026-09-19.
+# for it. Without one the workers appear at the sidebar's top level, homeless,
+# and are easy to lose track of.
 _container_ensure() { # <repodir> <repo> -> workspace id, empty if impossible
   local repodir="$1" repo="$2" toplevel id
   [ -d "$repodir" ] || return 1
@@ -249,15 +243,13 @@ _repo_slug() { # <wsdir> <repo>
 # Run the verifier for a delegation and fold its verdict into the ledger row.
 # Prints the verdict's one-line summary. Never fails the caller: a verifier
 # that cannot run is a verdict of "unknown", which land treats as not passed.
-# A VERDICT THIS INVOCATION DID NOT PRODUCE IS NOT THIS INVOCATION'S VERDICT. The
-# verifier runs with its stderr discarded and its status ignored, then the file
-# it should have written is read - so a refused, aborted or SIGKILLed verifier
-# left the PREVIOUS attempt's verdict.json in place, possibly gate.passed:true on
-# an older head, and land/collect read it as current. The prior verdict is now
-# preserved (never overwritten) under .agent/verdict-history/ BEFORE the verifier
-# runs, and whatever this invocation leaves behind is accepted only if it is a
-# completed verdict written at or after the invocation started; anything else
-# becomes an explicit no-verdict stub carrying the verifier's own words.
+# A VERDICT THIS INVOCATION DID NOT PRODUCE IS NOT THIS INVOCATION'S VERDICT. A
+# refused, aborted or SIGKILLed verifier can leave an older attempt's
+# verdict.json (possibly gate.passed:true on an older head). So the prior
+# verdict is preserved (never overwritten) under .agent/verdict-history/ BEFORE
+# the verifier runs, and whatever this invocation leaves behind is accepted only
+# if it is a completed verdict carrying this invocation's attempt id; anything
+# else becomes an explicit no-verdict stub carrying the verifier's own words.
 _fanout_verdict_stub() { # <worktree> <reason> <snapshot-file> - publishes AND records the stub; non-zero if it cannot
   local wt="$1" tmp stub snap="$3"
   tmp="$wt/.agent/.verdict.stub.$$"
@@ -288,22 +280,16 @@ _fanout_verify() { # <wsdir> <id> <entry-json> [gate-timeout] [verb]
   slug="$(_repo_slug "$wsdir" "$repo")"
   local line state_before state_now
   state_before="$(printf '%s' "$entry" | jq -r '.state // ""')"
-  # THE WORKSPACE'S ENV REACHES THE GATE. It was read in exactly one place -
-  # the pane split in `try` - so collect and land ran the verifier with the
-  # caller's environment, and the plane's declared CEL_VERIFY_GATE_TIMEOUT
-  # (its suite outgrew the 600s default on a loaded box) never applied: two
-  # collects came back gate:TIMEOUT(600s), which is no verdict at all, while
-  # CI ran the same suite green. Scoped to a subshell so env.local cannot
+  # THE WORKSPACE'S ENV REACHES THE GATE, so a declared CEL_VERIFY_GATE_TIMEOUT
+  # applies to collect and land too. Scoped to a subshell so env.local cannot
   # leak into the rest of this process; an explicit --gate-timeout still wins,
   # because giving one run more time must not mean editing the workspace.
   #
   # The ledger lock is DROPPED around the gate and taken again to write the
-  # verdict - see _ledger_unlock for the six minutes that bought.
-  # LAND'S TIMEOUT BOUNDS THE WHOLE WAIT. A land given --gate-timeout 30 sat
-  # forty minutes in the suite-lock queue on 2026-10-03 because the clock only
-  # started once the lock was won. Collect keeps that behaviour (its timeout is
-  # about the suite outgrowing it); land is a human waiting, so for land the
-  # queue counts.
+  # verdict - see _ledger_unlock.
+  # LAND'S TIMEOUT BOUNDS THE WHOLE WAIT, including the suite-lock queue: land
+  # is a human waiting. Collect's timeout starts once the lock is won (its
+  # timeout is about the suite outgrowing it).
   local lock_flag=""; [ "$verb" = land ] && lock_flag=--lock-in-timeout
   local v_t0 v_err v_rc v_id
   v_t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -439,12 +425,10 @@ _ledger_write() ( # <wsdir> <json>
   mv -f -- "$tmp" "$f" || return 1
 )
 
-# REPLACES any existing row with the same id. Re-delegating a branch - after an
-# orphan, a crash, or a credit outage - used to append a second row, and
-# _ledger_entry takes the FIRST match, so every later collect/release read the
-# STALE row: its worktree path, its state, its model. The board and the ledger
-# then disagreed about work that had already been redone. Observed as 190 rows
-# for 178 delegations.
+# REPLACES any existing row with the same id. Re-delegating a branch (after an
+# orphan, a crash, or a credit outage) must not append a second row:
+# _ledger_entry takes the FIRST match, so every later collect/release would
+# read the STALE row - its worktree path, its state, its model.
 _ledger_append() { # <wsdir> <entry-json>
   local st; st="$(printf '%s' "$2" | jq -r '.state // ""')"
   ledger_state_valid "$st" || die "ledger: refusing to write state '$st' (allowed: $CEL_LEDGER_STATES)"
@@ -561,8 +545,8 @@ _ledger_patch() { # <wsdir> <id> <jq-filter> [jq args...]
 }
 
 # SQUASH MERGES MAKE LANDED WORK LOOK UNPUSHED. The branch's commits are never
-# ancestors of main after a squash, so every landed row read "unpushed" and
-# orchestrators fell back to --discard by reflex (2026-10-09, ~135 rows).
+# ancestors of main after a squash, so a plain ancestry check reads every
+# landed row as "unpushed".
 # With the PR's merged head known, a commit is landed when it precedes that
 # head or its patch is already in main (git cherry); only the rest count.
 _wt_unmerged_after() { # <worktree> <merged-head-oid> -> count | fail
@@ -581,8 +565,8 @@ _wt_unmerged_after() { # <worktree> <merged-head-oid> -> count | fail
 # True when the worktree's branch has commits and every one is already in
 # origin's default branch by patch (git cherry), i.e. it was pushed to main.
 # A branch with NOTHING ahead of main also prints nothing from cherry, and a
-# worker that blocked without committing must never read as landed (PR #145
-# review) - so it needs at least one commit past where it started.
+# worker that blocked without committing must never read as landed - so it
+# needs at least one commit past where it started.
 _wt_on_main() { # <worktree> <start-sha>
   local base out n
   [ -n "${2:-}" ] || return 1
@@ -626,12 +610,9 @@ _fanout_pr_phrase() {
   esac
 }
 
-# A PANE IS NOT A WORKER (CEL-50). `herdr agent prompt` returning success means
-# the text reached the pane, not that the agent took it. On 2026-09-18 a
-# delegate left the whole dispatch TYPED BUT UNSUBMITTED in two worker panes:
-# both sat two hours at +0 commits with `ctx 0.0%`, the ledger read `running`,
-# and re-prompting started them instantly - the run was otherwise fine. A
-# reviewer pane did exactly the same three days later.
+# A PANE IS NOT A WORKER. `herdr agent prompt` returning success means the text
+# reached the pane, not that the agent took it: a dispatch can sit typed but
+# unsubmitted while the ledger reads `running`.
 #
 # So the dispatch is confirmed from the pane itself before the row claims to
 # be running: a first turn, or context off zero. An unreadable pane is NOT
@@ -662,14 +643,12 @@ _fanout_dispatch() { # <alias> <prompt-text> -> 0 accepted, 1 unconfirmed
   _fanout_prompt_accepted "$alias" "$tries"
 }
 
-# A WORKER DOES NOT RUN THE FACTORY. On 2026-09-18 a worker ran `cel-fanout
-# land <its own id>` from its worktree the moment its reviewer approved: the
-# ledger lock was held for three minutes while the gate ran, the orchestrator's
-# `status` hung on it, and branch protection - not this code - stopped the
-# merge. lib/guard.sh refuses the same verbs, but a guard is a hook and a hook
-# can be missing (a pi launched by hand, a runtime that has no hooks yet), so
-# the binary refuses on its own. Called before `gh` and before the ledger lock,
-# because taking that lock is half of the incident.
+# A WORKER DOES NOT RUN THE FACTORY. A worker running `land`, `release` and the
+# like from its worktree would hold the ledger lock through a gate and act
+# outside its role. lib/guard.sh refuses the same verbs, but a guard is a hook
+# and a hook can be missing (a pi launched by hand, a runtime that has no hooks
+# yet), so the binary refuses on its own. Called before `gh` and before the
+# ledger lock, so a refused worker never holds that lock.
 _fanout_refuse_worker() { # <verb> [id] [workspace]
   [ "$(guard_role_of "$PWD")" = worker ] || return 0
   local verb="$1" id="${2:-}" ws_opt="${3:-}" mailbox="the orchestrator"
@@ -712,7 +691,7 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   else
     local pr_phrase; pr_phrase="$(_fanout_pr_phrase "$wsdir")" || exit 1
     if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ]; then
-      # CEL-119: a `pr: none` repo has no PR to land - the worker's push to
+      # A `pr: none` repo has no PR to land - the worker's push to
       # main IS the landing, so the kickoff says how to do it safely.
       prompt_text="Your task spec is $abs_spec.$seedline Read it fully and execute exactly it, then run the gate.
 
@@ -736,7 +715,7 @@ Your orchestrator is not watching your pane; that message is how it learns you a
   printf '%s' "$prompt_text"
 }
 
-# THE PROOF A RETAINED ROW MAY BE RESUMED (AH-261018). Sets RS_PROFILE, RS_RT,
+# THE PROOF A RETAINED ROW MAY BE RESUMED. Sets RS_PROFILE, RS_RT,
 # RS_MODEL, RS_THINKING and RS_SESSION from the ROW - never from the workspace
 # default - or dies having changed nothing: an unsettled launch, a row that is
 # not retained, a worktree the row does not own, a live agent for it (by alias
@@ -914,7 +893,7 @@ cmd_delegate() {
 
   local wsdir; wsdir="$(_fanout_wsdir "$ws_opt")"
   # Refused BEFORE a worktree exists: a worker that would act as the wrong
-  # GitHub account is not worth a checkout to clean up (CEL-70).
+  # GitHub account is not worth a checkout to clean up.
   ws_github_ready "$wsdir" "$GH" \
     || die "delegate: refusing to launch for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
   local repodir="$wsdir/repos/$repo"
@@ -923,18 +902,15 @@ cmd_delegate() {
 
   # THE TICKET GATE. A work package without a ticket is invisible: no status to
   # read, nothing for a PR to attach to, no way to tell it apart from abandoned
-  # work. Measured on this box, 15 of 15 agent-opened PRs carried no ticket,
-  # because "one ticket per work package" was advice in a policy block while
-  # the mechanism happily accepted any branch name.
+  # work. The mechanism enforces it rather than leaving it as policy advice.
   # Deliberately does NOT create the ticket: an agent that auto-creates on
   # every delegation duplicates work someone is already doing. Search first,
   # reuse if it exists, and create only when it genuinely does not.
   local ticket=""
   case "$shape" in ship|scout|spike) ;; *) die "delegate: --shape must be ship, scout or spike";; esac
   # A scout produces knowledge, not a change: no PR will ever exist to link to
-  # a ticket, so the ticket gate does not apply. That is the whole reason the
-  # shape exists - investigations were being forced into ad-hoc branches to
-  # get past the gate, or done in an orchestrator's own checkout. A spike is
+  # a ticket, so the ticket gate does not apply (investigations belong in a
+  # scout, not an ad-hoc branch or an orchestrator's own checkout). A spike is
   # the same bargain with code: it answers the question by building something
   # and then throws it away, so nothing it makes will ever reach a board.
   case "$shape" in scout|spike) adhoc=1 ;; esac
@@ -957,14 +933,10 @@ cmd_delegate() {
   # an agent exists (the prompt is built after the launch receipt).
   [ "$shape" != ship ] || _fanout_pr_phrase "$wsdir" >/dev/null || exit 1
 
-  # THE CAP IS ENFORCED HERE, not remembered by whoever is delegating.
-  # `policy.workers` was a sentence in the injected policy block and nothing
-  # else, so each orchestrator kept a private count - which only ever goes up,
-  # because delegating is an act it performs and finishing is an event nobody
-  # reports to it. Both failure directions were live on 2026-09-15: one
-  # orchestrator sat on four tickets believing it was at capacity with no
-  # workers running at all, while nothing would have stopped another from
-  # starting a fifth. A number in a prompt is a wish; this is the number.
+  # THE CAP IS ENFORCED HERE, not remembered by whoever is delegating. An
+  # orchestrator's private count drifts - delegating is an act it performs,
+  # finishing is an event nobody reports to it - so it can both over- and
+  # under-count. The ledger is the number.
   #
   # AND THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO. With products one
   # orchestrator stands over several repos; counting per repo would quietly let
@@ -1001,7 +973,7 @@ cmd_delegate() {
   # convention exists for this check: while the operator is awake nothing about
   # it changes, and while they are asleep it is the difference between
   # dispatching a finding and dispatching an idea.
-  # PRE-AUTHORISATION 5 (CEL-78): a spec already under .cel/specs/ before AFK
+  # PRE-AUTHORISATION 5: a spec already under .cel/specs/ before AFK
   # went on is work somebody ordered awake - it keeps moving.
   if afk_active && afk_spec_ordered "$abs_spec"; then
     afk_authorise ordered_work "$(afk_ordered_evidence "$abs_spec" "$wused" "$wcap")" >/dev/null \
@@ -1009,9 +981,8 @@ cmd_delegate() {
   elif afk_active; then
     local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
     # The FIRST match is taken by sed itself (`q`), never by `| head -1`: under
-    # `set -o pipefail` a consumer that exits early SIGPIPEs the producer once
-    # it has written more than a pipe buffer, and the whole delegate died with
-    # exit 141 and no message on a spec that quotes a long finding.
+    # `set -o pipefail` a consumer that exits early SIGPIPEs the producer, and
+    # delegate would die with exit 141 and no message on a long spec.
     afk_src="$(sed -n '/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b/{s/^[Ff]inding-from:[[:space:]]*\(reviewer\|scout\)\b.*/\1/;p;q}' "$abs_spec")"
     afk_quote="$(sed -n '/^>/{s/^>[[:space:]]*//;p;q}' "$abs_spec")"
     afk_prov="$( ( local_profile="$profile"
@@ -1036,19 +1007,13 @@ cmd_delegate() {
   fi
 
   # WHERE THE WORKER NESTS. herdr shows a worktree under the workspace it was
-  # created from - and it will only create a worktree of the repo that
-  # workspace OWNS. Measured live on 2026-09-16: asked to create under a
-  # product orchestrator's pane (cwd <ws>/products/<p>, no repo of its own),
-  # herdr walked up to the nearest git repository - the WORKSPACE CONFIG repo
-  # - and cut a worktree of that. There is no parent/nesting option in herdr
-  # at all. So the nest target is always the repo's own workspace, found by
-  # its git toplevel, whether or not a product orchestrator exists; and when
-  # no workspace holds that repo (its orchestrator retired in favour of a
-  # product one), a CONTAINER workspace is created for it - a bare shell
-  # labelled <repo>/workers - so workers still have a home in the sidebar
-  # instead of appearing at the top level, homeless, which is how this file
-  # once lost track of a whole batch.
-  # RESUMING A RETAINED ROW (AH-261018). `--reuse` over an existing row is the
+  # created from, and from a cwd that owns no repo it walks up to the nearest
+  # git repository (e.g. the workspace config repo) and cuts a worktree of
+  # that. There is no parent/nesting option in herdr. So the nest target is
+  # always the repo's own workspace, found by its git toplevel; when none holds
+  # the repo, a CONTAINER workspace (a bare shell labelled <repo>/workers) is
+  # created so workers still have a home in the sidebar.
+  # RESUMING A RETAINED ROW. `--reuse` over an existing row is the
   # canonical recovery for a runtime gc retired: the SAME worker comes back -
   # the row's recorded runtime, model, thinking and profile and its original
   # native session - not whatever the workspace's role default is today.
@@ -1097,12 +1062,11 @@ cmd_delegate() {
   # on. A long-lived checkout parked on a feature branch (or simply behind) then
   # hands every worker a contaminated base: its commits ride along on the ticket
   # branch, the PR carries changes nobody reviewed, and the eventual rebase
-  # conflicts in files the ticket never touched. Observed repeatedly - two stray
-  # commits reached seven ticket branches this way before this fix.
+  # conflicts in files the ticket never touched.
   #
   # Fetched first so the base is today's remote tip rather than a stale local
   # ref. Best-effort: a repo with no reachable origin still delegates, it just
-  # falls back to herdr's default (the old behaviour), because refusing to
+  # falls back to herdr's default, because refusing to
   # delegate offline is worse than an occasional rebase.
   # The fetch is best-effort and its FAILURE MUST NOT SKIP THE BASE: offline, or a
   # remote that needs credentials, still leaves a usable (if slightly stale)
@@ -1235,18 +1199,15 @@ cmd_delegate() {
   local -a PROFILE_ARGS=()
   profile_launch_args "$rt" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
-  _run_keep_model_args "$rt"   # same helper as cel run (CEL-68)
-  # Inbox delivery, same as cel run (CEL-95): reviewers reach a worker by
-  # inbox, and a pi worker without the hook never saw their CHANGES.
+  _run_keep_model_args "$rt"   # same helper as cel run
+  # Inbox delivery, same as cel run: reviewers reach a worker by inbox, and a
+  # worker without the hook never sees their CHANGES.
   _run_inbox_hook_args "$rt"
 
-  # Runtime-wide launch flags, same as cel run. THESE WERE MISSING HERE: every
-  # worker delegated through fanout started without its runtime's approval
-  # bypass (omp --auto-approve, claude --dangerously-skip-permissions), so it
-  # ran until the first tool call needing approval and then sat blocked with
-  # nobody watching - which the ledger reports as `running`, indistinguishable
-  # from a worker that is simply slow. cel run has applied them since the flags
-  # were added; only this path was skipped.
+  # Runtime-wide launch flags, same as cel run. Without its runtime's approval
+  # bypass (omp --auto-approve, claude --dangerously-skip-permissions) a worker
+  # blocks on its first tool call needing approval with nobody watching, which
+  # the ledger reports as `running`, indistinguishable from a slow worker.
   local -a launch_args=()
   mapfile -t launch_args < <(agent_launch_args "$rt")
   [ "${#launch_args[@]}" -eq 0 ] || AGENT_ARGS=("${launch_args[@]}" "${AGENT_ARGS[@]}")
@@ -1256,7 +1217,7 @@ cmd_delegate() {
   # herdr agent names must be [a-z][a-z0-9_-]{0,31}; the readable repo/branch
   # form lives on as the worktree label only.
   local alias; alias="$(_run_agent_name "$repo/$branch")"
-  # The hook reads the mailbox named for this pane's alias (CEL-95).
+  # The hook reads the mailbox named for this pane's alias.
   local inbox_me=""
   [ -z "$(agent_inbox_hook "$rt" file)" ] || inbox_me="$alias"
   local -a GATEWAY_ENV=()
@@ -1286,13 +1247,13 @@ cmd_delegate() {
   # still succeeds, and the agent starts with no credentials at all - a silent
   # version of the failure above.
   # ...AND THE LOCAL FILES GIT NEVER CARRIED. Before the agent starts, not
-  # after: a worker that cannot run the app spends its first minutes finding
+  # after: a worker that cannot run the app wastes its first turns finding
   # that out.
   _fanout_seed_worktree "$wsdir" "$repo" "$worktree"
   local seedline=""
   [ -z "$SEEDED" ] || seedline=$'\n\n'"Seeded local config, not yours to commit: $SEEDED"
 
-  # THE SAME READINESS GATE AS `cel run` (AH-261017): nothing is typed - not the
+  # THE SAME READINESS GATE AS `cel run`: nothing is typed - not the
   # env eval, not the launch line - until the pane's shell owns the foreground,
   # and the pane must still be that terminal and shell after each typing. It
   # fails closed here, before any ledger row records a launch; nothing is
@@ -1321,7 +1282,7 @@ cmd_delegate() {
     _run_pane_recheck "$pane" "$pane_ident"
   fi
 
-  # A readable label (CEL-83), set again on --reuse. A scout or spike is named
+  # A readable label, set again on --reuse. A scout or spike is named
   # for its brief; its generated branch is a scratch coordinate.
   local plabel
   case "$shape" in
@@ -1331,10 +1292,10 @@ cmd_delegate() {
   pane_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
   tab_label_set "$pane" "$plabel" _ledger_spawn "$HERDR"
 
-  # THE LAUNCH RECEIPT GOES DOWN BEFORE THE AGENT STARTS (AH-261017). Appending
-  # the row only after start and dispatch left a successful spawn untrackable
-  # when this process was interrupted, or herdr's own start timed out, in
-  # between: a live agent in a pane, no ledger row (the 2026-10-17 W710 case).
+  # THE LAUNCH RECEIPT GOES DOWN BEFORE THE AGENT STARTS. Appending the row only
+  # after start and dispatch would leave a successful spawn untrackable if this
+  # process is interrupted, or herdr's own start times out, in between: a live
+  # agent in a pane with no ledger row.
   # The row is written first as `unconfirmed` - the one existing state that
   # claims no task is running - with launch.phase saying how far the launch got.
   # A failed or interrupted start is NOT rolled back: herdr can time out AFTER
@@ -1356,7 +1317,7 @@ cmd_delegate() {
   # --reuse of an EXISTING row (a stopped agent resumed in place, e.g. by
   # `handback`) must not replace it before the start succeeds: the old row
   # carries the review verdict and PR the revision round depends on. It is only
-  # marked, and replaced - as before - once the new agent actually exists.
+  # marked, and replaced once the new agent actually exists.
   if [ -n "$prior_row" ]; then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"starting", at:$at}' --arg at "$(_now_iso)"
   else
@@ -1373,10 +1334,9 @@ cmd_delegate() {
   if [ -z "$prior_row" ]; then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
   fi
-  # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" made a
-  # silent loss indistinguishable from success: a worker that reported done while
-  # its rebase had eaten its own commit, and a branch that sat unlanded for two
-  # days, both looked exactly like a finished job from outside. Pushing and opening
+  # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" makes
+  # a silent loss (a rebase that ate the worker's own commit, a branch never
+  # landed) indistinguishable from success. Pushing and opening
   # a PR makes the work addressable the moment it exists. Whether that PR opens as
   # a DRAFT or READY FOR REVIEW is workspace policy (`policy.pr_open`, default
   # draft): a workspace whose reviewer bot ignores drafts (some do) wants
@@ -1389,15 +1349,14 @@ cmd_delegate() {
   # The orchestrator's own mailbox name. It is the PRODUCT's orchestrator, not
   # the repo's: with products declared, `widget` and `gadget` may answer to one
   # `bundle-orch`, and a notice addressed to `widget-orch` would be filed to a
-  # mailbox nobody reads. An undeclared repo is its own product, so this is the
-  # old name unchanged.
+  # mailbox nobody reads. An undeclared repo is its own product.
   #
   # Through the SHARED sanitiser, not a hand-rolled copy of half of it: the
   # lowercase-and-substitute part is easy to reproduce and the 32-character
   # truncation is easy to forget, and forgetting it is silent. A name longer
   # than 27 characters would produce an untruncated `<name>-orch` here while
   # the orchestrator answers to the truncated form, so every completion notice
-  # would be filed where nobody reads - the exact failure this prompt ends.
+  # would be filed where nobody reads.
   # _run_agent_name is character-for-character _inbox_sanitise; tests/steward
   # asserts that identity so this stays true.
   local orch_mailbox
@@ -1405,8 +1364,7 @@ cmd_delegate() {
   # ...AND THE WORKSPACE IT LIVES IN. A worker stands in ~/.herdr/worktrees/...,
   # where `ws_current` finds nothing, so an unqualified `cel inbox send` resolves
   # the workspace to the literal string `default` - a mailbox no orchestrator
-  # reads. Every completion notice would have been filed there, making the
-  # announcement a no-op in exactly the silent way it was written to prevent.
+  # reads, making the announcement a no-op.
   # Quote the workspace selector for the same reason as the environment line.
   local ws_sel; ws_sel="$(printf '%q' "$(ws_name "$wsdir")")"
 
@@ -1415,8 +1373,8 @@ cmd_delegate() {
 
   # UNCONFIRMED IS NOT A FAILURE, and it must not cost the worktree: the pane
   # and the agent are healthy, only the submit was lost. The row carries the
-  # state so a human or the steward can re-prompt exactly the alias that needs
-  # it, instead of discovering it two hours later by reading panes by hand.
+  # state so a human or the steward can look at exactly the pane that needs
+  # it, instead of discovering it later by reading panes by hand.
   if ! _fanout_dispatch "$alias" "$prompt_text"; then
     dstate=unconfirmed
     c_warn "$branch: the dispatch was never accepted after two attempts - the row is 'unconfirmed' (launch.phase dispatch-unconfirmed) and the worktree is intact. A prompt MAY have been delivered, so this is retained uncertain debt: look at the pane before sending anything (a blind re-prompt can pay for the work twice). collect, release, land, review and gc leave the row alone, and this tool has no supported exit for it"
@@ -1586,7 +1544,7 @@ cmd_collect() {
   if [ -f "$worktree/.agent/result.md" ]; then
     cat "$worktree/.agent/result.md"
     _ledger_update_state "$wsdir" "$id" collected
-    # CEL-119: a `pr: none` repo lands by pushing to main, so there is no
+    # A `pr: none` repo lands by pushing to main, so there is no
     # merged PR for land/release to find. Once every commit on the branch is
     # in origin/main (by patch, so a rebase still counts) the row is landed.
     if [ "$(ws_repo_pr "$wsdir" "$repo")" = none ] && _wt_on_main "$worktree" "$(printf '%s' "$entry" | jq -r '.start_sha // ""')"; then
@@ -1656,8 +1614,8 @@ cmd_status() {
     # RECONCILE THE LEDGER AGAINST REALITY. An agent can vanish without ever
     # updating its own row — a herdr restart, a closed pane, a crashed runtime —
     # and the row then reads `running` forever. That is the worst possible
-    # rendering: finished work sits invisible (found only by walking worktrees by
-    # hand) and abandoned work looks healthy. Both were observed in one day. So a
+    # rendering: finished work sits invisible and abandoned work looks
+    # healthy. So a
     # `running` row whose agent is gone is re-stated from what is ON DISK:
     #
     #   result.md present -> `finished`  (it got there; it just needs landing)
@@ -1667,13 +1625,10 @@ cmd_status() {
     # released is never re-opened by a missing agent, and a WORKING agent is
     # always believed over the disk.
     #
-    # But a worker that has written its result and gone IDLE is finished, and
-    # was being read as still running - the live-agent rule was written to stop
-    # a busy agent being declared done, and "still alive" was standing in for
-    # "still working". It does not: idle is the settled state herdr reports
-    # when a worker has stopped, and the last instruction a worker is given is
-    # to write result.md and stop. So the row sat `running` with the work
-    # pushed, the PR open and nobody looking.
+    # But a worker that has written its result and gone IDLE is finished: idle
+    # is the settled state herdr reports when a worker has stopped, and the last
+    # instruction a worker is given is to write result.md and stop. "Still
+    # alive" is not "still working".
     # `working` and `blocked` still hold the row open; blocked in particular is
     # waiting for a human, not finished.
     local wt ahead settled=0
@@ -1708,10 +1663,10 @@ cmd_status() {
     # hanging at the sidebar's top level, which is the fact the operator has to
     # act on. There is no re-parent verb in herdr 0.9, so this is a report.
     if _ws_detached "$wslist" "$(printf '%s' "$e" | jq -r '.herdr_ws // ""')"; then live=detached; fi
-    # A ROW THAT READS LIKE PROGRESS AND IS NOT (CEL-50). `running`, `+0` and a
-    # pane at zero context was the rendering two workers sat behind for two
-    # hours. The silence is appended to the live column - the disagreement is
-    # the signal, exactly as the console's live column shows it.
+    # A ROW THAT READS LIKE PROGRESS AND IS NOT. `running`, `+0` and a pane at
+    # zero context can hide an unsubmitted dispatch. The silence is appended to
+    # the live column - the disagreement is the signal, exactly as the
+    # console's live column shows it.
     if [ "$state" = running ] || [ "$state" = unconfirmed ]; then
       local sil=""
       if [ -n "$pane" ] && [ "$live" != "-" ] && [ "$live" != detached ]; then
@@ -1745,32 +1700,19 @@ cmd_status() {
       "$id" "$repo" "$branch" "$state" "$live" "+$ahead" "${ticket:-adhoc}" "$review" "$gatecol" "$trycol" "${model:--}"
   done <<< "$(_ledger_read "$wsdir" | jq -c '.[]')"
 
-  # SLOTS ARE A FACT, NOT A MEMORY. `policy.workers` was only ever a sentence
-  # in the injected policy block, so every orchestrator kept its own count -
-  # and a count kept in an agent's head is incremented when it delegates and
-  # then never decremented, because nothing tells it a worker finished.
-  # Observed 2026-09-15: an orchestrator holding four tickets as "blocked until
-  # a slot frees" with ZERO running workers, its last one collected the
-  # previous day. Printed per repo, after reconciliation, so the number shown
-  # is the number that is true.
+  # SLOTS ARE A FACT, NOT A MEMORY. An orchestrator's own count of its workers
+  # only ever goes up, because nothing tells it a worker finished. Printed per
+  # product, after reconciliation, so the number shown is the number that is
+  # true.
   # Slots are for a human reading the table; the machine form is rows only.
   [ "$json" -eq 1 ] || _fanout_slots "$wsdir"
 }
 
-# Used / free per PRODUCT, from the reconciled ledger - the cap belongs to the
-# orchestrator, and one orchestrator may stand over several repos. A repo in no
-# declared product is its own product, so a workspace without products prints
-# exactly what it printed before.
-# WHY IS THIS ONE STUCK - the question the fleet view could not answer.
-#
-# The owner asked the console why a worker was stalled and was told to run
-# `cel fleet`, which was already on the screen in front of them. A count is
-# not a diagnosis: the facts that settle it are the verdict, how long it has
-# been quiet, whether losing the worktree would cost work, what its pane last
-# said, what it last told anyone, and what its PR thinks. Root gathered those
-# six by hand, every time. This gathers them in one read, in that order, and
-# ends with the single next act - because a report that stops at "something is
-# wrong" leaves the operator exactly where they started.
+# WHY IS THIS ONE STUCK. A count is not a diagnosis: the facts that settle it
+# are the verdict, how long it has been quiet, whether losing the worktree would
+# cost work, what its pane last said, what it last told anyone, and what its PR
+# thinks. This gathers them in one read, in that order, and ends with the single
+# next act.
 #
 # A READ. It never prompts, never releases and never writes the ledger.
 cmd_why() { # <id> [--workspace NAME]
@@ -1826,10 +1768,8 @@ cmd_why() { # <id> [--workspace NAME]
   else age="quiet for $(( quiet / 60 ))m"; fi
   # QUIET IS NOT THE SAME AS QUEUED. One suite runs at a time on this box
   # (tests/run.sh takes a box-wide lock), so a worker whose gate is waiting its
-  # turn prints one line and then says nothing for as long as the run in front
-  # of it takes. Reported as "quiet for 22m" that reads as a dead worker, and
-  # the cure somebody reaches for - kill it, or start it again - costs both
-  # runs. The pane says which it is, so this says which it is.
+  # turn says nothing for as long as the run in front of it takes, and killing
+  # or restarting it costs both runs. The pane says which it is.
   local queued
   queued="$(printf '%s' "$text" | grep -o 'waiting for the suite lock (held by pid [0-9]*' | tail -1 || true)"
   [ -n "$queued" ] && age="queued for the suite lock behind pid ${queued##* }"
@@ -1837,9 +1777,8 @@ cmd_why() { # <id> [--workspace NAME]
     "$([ -n "$risk" ] && printf 'WORK AT RISK (%s)' "$risk" || printf 'nothing at risk')" \
     "$pushed"
 
-  # 2b. WHAT THE PANE IS DOING, when the steward's last sweep asked (CEL-42).
-  # The timer says how long; this says what, and how much longer the timer
-  # alone would have taken to notice - which is the whole reason it is here.
+  # 2b. WHAT THE PANE IS DOING, when the steward's last sweep asked.
+  # The timer says how long; this says what.
   local cached lact lconf lv
   cached="$(liveness_cached "$id")"
   if [ -n "$cached" ]; then
@@ -1906,6 +1845,9 @@ cmd_why() { # <id> [--workspace NAME]
   return 0
 }
 
+# Used / free per PRODUCT, from the reconciled ledger - the cap belongs to the
+# orchestrator, and one orchestrator may stand over several repos. A repo in no
+# declared product is its own product.
 _fanout_slots() { # <wsdir>
   local p cap used repos n label
   printf '\n'
@@ -1926,12 +1868,9 @@ _fanout_slots() { # <wsdir>
 }
 
 # ── try: a running instance of a ticket ──────────────────────────────────────
-# Nothing used to hand anyone a running copy of a branch. The two ways of
-# getting one were both bad: switch the orchestrator's shared checkout onto the
-# PR branch, which parks the one local instance on one ticket, or start the app
-# from the worktree by hand and collide with whatever else is on the same fixed
-# ports. So each try gets a BLOCK of ports of its own and a pane of its own,
-# and the ledger row remembers both.
+# A running copy of a branch without parking the orchestrator's shared checkout
+# on one ticket or colliding on fixed ports: each try gets a BLOCK of ports of
+# its own and a pane of its own, and the ledger row remembers both.
 
 # Free means nothing answers. Deliberately dependency-free - /dev/tcp is in
 # bash itself, and reaching for nc or lsof here would make a preview depend on
@@ -2087,17 +2026,14 @@ cmd_try() { # <id> [--stop] [--workspace NAME]
   # AND THE URL THAT WORKS FROM THE LAPTOP. A preview listens on 127.0.0.1,
   # which from the machine the owner is actually sitting at is that machine -
   # so when the workspace's dashboard is up, the line printed is its proxy
-  # path (CEL-26), and the loopback url only when there is nothing to proxy
+  # path, and the loopback url only when there is nothing to proxy
   # through. One line either way: two would be two things to try.
   local reach; reach="$(svc_reach "$wsdir" "$(svc_port_of_url "$url")" 2>/dev/null || true)"
   printf '%s\n' "${reach:-$url}"
 }
 
 # BULK: every row in the given states, one at a time, a failure on one row
-# never stopping the next. `release --all` defaults to finished,collected - the
-# rows nobody is working on any more; `collect --all` to finished. The owner,
-# 2026-09-18, looking at twenty-six rows: "can we have a bulk action on the
-# workers per workspace?"
+# never stopping the next. `collect --all` defaults to finished.
 _fanout_bulk() { # <verb> <default-states> [args...]
   local verb="$1" states="$2"; shift 2
   local -a pass=(); local ws_opt=""
@@ -2120,13 +2056,10 @@ _fanout_bulk() { # <verb> <default-states> [args...]
   [ "$failed" -eq 0 ]
 }
 
-# ONE GITHUB READ PER REPO, not one per row. The pass below runs over every
-# row a repo has in flight, and asking `gh pr view` per row turned a forty-row
-# workspace into forty requests - slow enough that the operator stopped
-# running the reconcile script at all, which is how the rows piled up in the
-# first place. `--state all` because the interesting answers are MERGED and
-# CLOSED; `--limit 200` is well past any repo's in-flight count here and keeps
-# it to a single page.
+# ONE GITHUB READ PER REPO, not one per row: a per-row `gh pr view` makes a
+# large workspace slow enough that reconcile stops being run. `--state all`
+# because the interesting answers are MERGED and CLOSED; `--limit 200` is well
+# past any repo's in-flight count and keeps it to a single page.
 # NEVER FAILS: GitHub unreachable is no evidence about any row, so it answers
 # with an empty index and every row is left exactly as it was.
 _pr_index() { # <wsdir> <repo> -> JSON array of PRs
@@ -2170,15 +2103,11 @@ _agent_gone() { # <alias>
   ! "$HERDR" agent get "$1" >/dev/null 2>&1
 }
 
-# THE LEDGER IS THE OPERATOR'S LIST OF "SOMEBODY'S CONCERN". The owner, at the
-# console on 2026-09-18: "why do we have all these collected and finished
-# workers listed ... what are they all hanging around for?" 37 rows; 22 of
-# them PRs GitHub had merged up to a week earlier, merged through the web UI
-# with the checkouts removed by hand, so `land` and `release` never ran and
-# nothing ever told the ledger. Two more were closed unmerged. Seven were
-# reports written and never read. A row the world has already resolved is
-# noise on that list, and reconciling it by hand is a script somebody writes
-# twice - so it lives here, and the steward runs it every tick.
+# THE LEDGER IS THE OPERATOR'S LIST OF "SOMEBODY'S CONCERN". PRs merged or
+# closed outside `land` (e.g. through the web UI) and reports never read leave
+# rows the world has already resolved; they are noise on that list. So
+# reconcile resolves them from GitHub's word, and the steward runs it every
+# tick.
 cmd_reconcile() { # [--workspace NAME] [--dry-run]
   _fanout_refuse_worker reconcile "" "$(_fanout_ws_arg "$@")"
   local ws_opt="" dry=0
@@ -2226,7 +2155,7 @@ cmd_reconcile() { # [--workspace NAME] [--dry-run]
       if [ -n "$pr" ]; then
         # ONE FIELD PER LINE, never @tsv into `read`: tab is IFS whitespace,
         # so consecutive tabs collapse and an unmerged PR's empty mergedAt
-        # shifted closedAt into it - every closed PR read as merged.
+        # would shift closedAt into it, reading every closed PR as merged.
         { IFS= read -r prstate; IFS= read -r merged; IFS= read -r closed; } <<< "$(printf '%s' "$pr" \
           | jq -r '(.state // ""), (.mergedAt // ""), (.closedAt // "")')"
       fi
@@ -2395,16 +2324,12 @@ cmd_release() {
   [ $# -ge 1 ] || die "usage: cel-fanout release <id>|--all [--merged] [--dry-run] [--state landed,abandoned] [--keep-worktree] [--discard] [--workspace NAME]"
   if [ "$1" = --all ]; then
     shift
-    # ONE DECISION PER ROW, TAKEN BEFORE ANYTHING IS REMOVED. 2026-09-19: an
-    # orchestrator ran `release --all` to free memory and meant "release the
-    # landed rows". It released twelve rows in `finished` and `collected` -
-    # work awaiting collection or review, with open PRs - because --all
-    # defaulted to those states, and the --merged pass and the state pass each
-    # reached their own verdict about the same row. So: `--all` is `landed`
-    # and `abandoned`, the states that mean the world has finished with the
-    # row; `--merged` ADDS rows GitHub has already merged rather than replacing
-    # the set; anything else is one explicit `release <id>` per row, with the
-    # refusals that come with it. `--state` still names a wider set out loud.
+    # ONE DECISION PER ROW, TAKEN BEFORE ANYTHING IS REMOVED. `--all` is
+    # `landed` and `abandoned`, the states that mean the world has finished
+    # with the row; `--merged` ADDS rows GitHub has already merged rather than
+    # replacing the set; anything else (finished/collected work awaiting review,
+    # with open PRs) is one explicit `release <id>` per row, with the refusals
+    # that come with it. `--state` still names a wider set out loud.
     local -a rest=(); local merged_only=0 dry=0 states="landed,abandoned" ws_opt=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -2420,10 +2345,8 @@ cmd_release() {
     local ids; ids="$(printf '%s' "$ledger" | jq -r --arg s ",$states," \
       '.[] | select(("," + (.state // "") + ",") as $k | $s | contains($k)) | .id')"
     if [ "$merged_only" -eq 1 ]; then
-      # The same single `gh pr list` read reconcile makes - the operator's
-      # actual question after a merge spree is "clean up what is already in
-      # main", and answering it by state alone released branches that had
-      # never landed.
+      # The same single `gh pr list` read reconcile makes - "clean up what is
+      # already in main" is answered by GitHub, never by state alone.
       ids="$ids"$'\n'"$(_merged_ids "$wsdir" "finished,collected,reported")"
     fi
     local take; take="$(printf '%s\n' "$ids" | awk 'NF && !seen[$0]++')"
@@ -2520,11 +2443,9 @@ cmd_release() {
       # one direction nobody checks.
       c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge); the row is ${state:-unknown}, so its worktree goes"
     else
-      # A "LEFT AS-IS" LINE IS A PROMISE. On 2026-09-19 this line was printed
-      # about a row that still had an open PR and then its worktree was
-      # removed anyway, and the work had to be rebuilt by hand. The path that
-      # prints it now returns before anything is removed: an unmerged ticket
-      # on a row nobody has finished with is a decision for a person.
+      # A "LEFT AS-IS" LINE IS A PROMISE: this path returns before anything is
+      # removed. An unmerged ticket on a row nobody has finished with is a
+      # decision for a person.
       c_warn "$ticket left as-is: $branch has no merged PR (release is not a merge) - nothing removed, the row stays $state.
   Land it, or mark the row landed/abandoned, or keep the checkout:
     cel-fanout release $id --keep-worktree"
@@ -2545,11 +2466,9 @@ cmd_release() {
     --repo "$(_repo_slug "$wsdir" "$repo")" --json state,headRefOid 2>/dev/null \
     | jq -r 'if .state == "MERGED" then .headRefOid // "" else "" end' 2>/dev/null || true)"
   held="$(_wt_unlanded "$wt" "$shape" "$pr_merged_head")"
-  # A WORKTREE THAT IS ALREADY GONE HOLDS NOTHING. Twenty-two rows on this box
-  # sat in finished/collected for a week with merged PRs and no directory:
-  # the old orchestrators removed the checkouts through herdr by hand and
-  # never released the row, and release then refused with "still holds
-  # work" about a path that did not exist. Say so, and let the row close.
+  # A WORKTREE THAT IS ALREADY GONE HOLDS NOTHING. A checkout removed by hand
+  # must not make release refuse with "still holds work" about a path that
+  # does not exist. Say so, and let the row close.
   if [ ! -d "$wt" ]; then
     c_warn "$id: worktree already gone ($wt) - nothing to hold, releasing the row"
     held=""
@@ -2585,9 +2504,8 @@ cmd_release() {
   [ "$keep" -eq 1 ] || _with_timeout "herdr worktree remove --workspace $herdr_ws" \
     "$HERDR" worktree remove --workspace "$herdr_ws" --force \
     || c_warn "$id: herdr had no worktree to remove for $herdr_ws - removing $wt directly"
-  # THE DIRECTORY IS THE POINT. "herdr had no worktree to remove" was the
-  # common path, and the row closed while the checkout stayed: ~135 released
-  # rows still on disk in one cleanup (2026-10-09). So release removes the
+  # THE DIRECTORY IS THE POINT. herdr often has no worktree to remove, and the
+  # row would close while the checkout stayed. So release removes the
   # linked worktree itself, and a row whose directory survives says why.
   local left=""
   if [ "$keep" -eq 0 ] && [ -d "$wt" ]; then
@@ -2595,14 +2513,13 @@ cmd_release() {
   fi
   _ledger_set_field "$wsdir" "$id" worktree_left "$left"
   # --keep-worktree is a decision, not a postponement: recorded on the row so
-  # `cel gc` never removes that checkout afterwards (2026-10-26: a kept
-  # checkout was gone minutes after its release during a solo migration).
+  # `cel gc` never removes that checkout afterwards.
   [ "$keep" -eq 0 ] || _ledger_patch "$wsdir" "$id" '.worktree_kept = true'
   [ -z "$left" ] || c_warn "$id: worktree left on disk at $wt - $left"
   # THE CONTAINER OUTLIVES ITS CHILDREN. Removing the last worktree under a
-  # `<repo>/workers` container closed the container with it, and the surviving
-  # workers - linked worktrees with nothing left to nest under - were detached
-  # to the sidebar's top level where nobody was looking for them. The container
+  # `<repo>/workers` container closes the container with it, and the surviving
+  # workers - linked worktrees with nothing left to nest under - are detached
+  # to the sidebar's top level. The container
   # is one bare shell; putting it straight back costs nothing and keeps the
   # sidebar's home for the next delegate.
   [ "$keep" -eq 1 ] || _container_ensure "$wsdir/repos/$repo" "$repo" >/dev/null || true
@@ -2610,7 +2527,7 @@ cmd_release() {
 }
 
 # THE REVIEW VERDICT IS A LEDGER FACT. On a repository whose PR author and
-# reviewer are one GitHub account - every solo repo here - GitHub refuses to
+# reviewer are one GitHub account, GitHub refuses to
 # accept an approval at all, and a posted review reads as the owner talking to
 # himself in public. The verdict still has to exist somewhere a machine can
 # read: `land` needs it, `status` shows it, and the merge commit carries it
@@ -2634,8 +2551,8 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   case "$verdict" in approved|changes) ;; *) die "review: verdict must be approved or changes (got: $verdict)";; esac
   [ -n "$by" ] || die "review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
   # THE COMMIT IT COVERS IS NAMED BY THE REVIEWER, NEVER INFERRED. A worker's
-  # local HEAD is not what was reviewed (an unpushed commit was once stamped
-  # as the reviewed head); neither is the remote head at the moment of
+  # local HEAD is not what was reviewed (it may hold unpushed commits);
+  # neither is the remote head at the moment of
   # recording. The reviewer reads the SHA off the diff it evaluated and says it.
   [ "$head_given" -eq 1 ] || die "review: --head <full-40-char-commit-sha> is required - the verdict covers the commit you reviewed, and it is never inferred"
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "review: --head must be a full 40-character lowercase commit SHA (got: '$head') - not an abbreviation, a ref or HEAD"
@@ -2698,7 +2615,7 @@ cmd_review() { # <id> <approved|changes> --head <sha> --by <alias> [--note TEXT]
   c_ok "$id reviewed: $verdict by $by (head ${head:0:12})"
 }
 
-# THE HAND-BACK (CEL-130). Under memory pressure gc may stop a worker that is
+# THE HAND-BACK. Under memory pressure gc may stop a worker that is
 # idle, pushed and waiting only on review - its pane goes, its session file
 # and worktree stay. A reviewer typing findings into that pane would type
 # into nothing, so the findings travel by INBOX, always, and a worker whose
@@ -2832,13 +2749,11 @@ cmd_land() { # <id>
   # not the same fact, since the branch may have moved since. Verify now if
   # there is no verdict yet; unknown is not passed.
   local gate ci_gate_body=""; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
-  # CI FIRST WHEN THE CALLER SAID CI IS ENOUGH. On 2026-10-03 three lands with
-  # --gate-from-ci waited 16, 29 and more than 40 minutes for a local suite -
-  # queued for the box's suite lock behind every worker's suite - before ever
-  # looking at the CI run that had already passed on the same head. Every
-  # protected check green on the PR's EXACT head is the same evidence the
-  # timeout path below accepts; asked first, it costs two API calls. When it is
-  # not green, nothing is decided here and the local gate runs as it always did.
+  # CI FIRST WHEN THE CALLER SAID CI IS ENOUGH, so --gate-from-ci never waits
+  # in the box's suite-lock queue for a local suite. Every protected check
+  # green on the PR's EXACT head is the same evidence the timeout path below
+  # accepts; asked first, it costs two API calls. When it is not green,
+  # nothing is decided here and the local gate runs.
   if [ -n "$gate" ] && [ "$gate_from_ci" -eq 1 ]; then
     local ci_first
     if ci_first="$(land_ci_gate "$wsdir" "$slug" "$pr")"; then
@@ -2850,8 +2765,8 @@ cmd_land() { # <id>
     _fanout_verify "$wsdir" "$id" "$entry" "$gate_timeout" land >/dev/null || true
     local wt gp gto gout gnvr; wt="$(printf '%s' "$entry" | jq -r '.worktree // ""')"
     # NOT `// "unknown"`: jq's alternative operator treats an explicit false as
-    # absent, so a gate that FAILED was reported as "unknown". null is unknown;
-    # false is false.
+    # absent, so a FAILED gate would read as "unknown". null is unknown; false
+    # is false.
     # THE VALIDATED SNAPSHOT, never the path: _fanout_verify read the verdict once,
     # validated that copy, and handed it over. A second read of verdict.json here
     # could see another attempt's file swapped in after validation.
@@ -2861,15 +2776,11 @@ cmd_land() { # <id>
     gout="$(jq -r '.gate.outcome // ""' "$vsnap" 2>/dev/null || true)"
     gnvr="$(jq -r '.gate.no_verdict_reason // "it never reported an exit status"' "$vsnap" 2>/dev/null || true)"
     [ -z "${FANOUT_VERDICT_SNAPSHOT:-}" ] || rm -f "$FANOUT_VERDICT_SNAPSHOT"; FANOUT_VERDICT_SNAPSHOT=""
-    # UNKNOWN IS NOT FAILED, AND THERE ARE TWO WAYS TO BE UNKNOWN. A gate the
-    # timeout killed produced no verdict, so there is nothing here to call a
-    # finding; refusing it as a red gate sent a worker to fix code that was
-    # never shown to be wrong. On 2026-09-21 the same refusal was printed for a
-    # gate that was killed by a signal and never reported anything at all -
-    # `passed:false`, `timed_out:false`, no output - which is a third state
-    # this branch did not have and read as the worst of the four. Either give
-    # the gate what it needs, or lean on CI - and if CI, say so out loud and
-    # record which check carried the branch.
+    # UNKNOWN IS NOT FAILED, AND THERE ARE TWO WAYS TO BE UNKNOWN: a gate the
+    # timeout killed, and a gate killed by a signal that reported nothing
+    # (`passed:false`, `timed_out:false`, no output). Neither is a finding to
+    # send a worker after. Either give the gate what it needs, or lean on CI -
+    # and if CI, say so out loud and record which check carried the branch.
     if [ "$gto" = true ] || [ "$gout" = no_verdict ]; then
       if [ "$gate_from_ci" -eq 1 ]; then
         ci_gate_body="$(land_ci_gate "$wsdir" "$slug" "$pr")" || die "land --gate-from-ci: $ci_gate_body"
@@ -2888,19 +2799,15 @@ cmd_land() { # <id>
   # statement that a human's nod is not a further one. It is asked with the
   # evidence THIS function just proved - not with anything a caller supplied -
   # so a landing that happens while nobody is watching is a landing that passed
-  # both, in that order, and is recorded as such. Asking afterwards would have
-  # been a log line, not a gate; PR #82's review said so, correctly.
+  # both, in that order, and is recorded as such. Asking afterwards would be a
+  # log line, not a gate.
   #
-  # AND `author` IS DERIVED, NOT ASSERTED. It is the one field of the five that
-  # this block could have claimed without proving: review, checks, gate and
-  # mergeable are each proved by a refusal a few lines above - and so is the
-  # author, by the `[ "$author" = "$me" ] || die` guard that runs on EVERY path
-  # before the GitHub-approval and ledger-verdict branches split, so a
-  # colleague's PR never reaches this line at all. Round 2 of #82's review read
-  # that comparison as living only inside the ledger-verdict `elif`; it does
-  # not. The literal goes anyway: a constant that is true because of a check
-  # somewhere else is a constant that stays behind when that check moves, and
-  # this evidence exists precisely so that nobody has to take a caller's word.
+  # AND `author` IS DERIVED, NOT ASSERTED. Review, checks, gate and mergeable
+  # are each proved by a refusal above, and so is the author, by the
+  # `[ "$author" = "$me" ] || die` guard that runs on EVERY path before the
+  # GitHub-approval and ledger-verdict branches split. It is still derived
+  # here rather than written as a literal: a constant that is true because of a
+  # check somewhere else stays behind when that check moves.
   if afk_active; then
     local afk_ev
     afk_ev="$(jq -n --arg r approved --arg c green --arg g "$([ -n "$gate" ] && { [ -n "$ci_gate_body" ] && printf ci || printf pass; } || printf pass)" \
@@ -2947,7 +2854,7 @@ cmd_land() { # <id>
   _ledger_update_state "$wsdir" "$id" landed
 }
 
-# REQUESTING THE EXTERNAL REVIEWER (AH-261017). The workspace names a GitHub
+# REQUESTING THE EXTERNAL REVIEWER. The workspace names a GitHub
 # reviewer in `policy.reviewer` (the one `pr_open: ready` asks for). A raw
 # `gh pr edit --add-reviewer` is refused to orchestrators by lib/guard.sh, on
 # purpose: it is the same door as labels, titles and bodies. This is the one
@@ -3090,7 +2997,7 @@ cmd_request_review() { # <id> --head <sha40> [--reviewer LOGIN] [--workspace NAM
   c_ok "$id: requested $reviewer on $slug#$num for $head (verified in requested_reviewers; a request to look, not an approval and not permission to land)"
 }
 
-# REPLACING A PR WHOSE BRANCH CARRIES WHAT MUST NOT BE PUBLISHED (AH-261017).
+# REPLACING A PR WHOSE BRANCH CARRIES WHAT MUST NOT BE PUBLISHED.
 #
 # A published branch cannot be cleaned: force-pushing it rewrites reviewed
 # history, and a fresh PR opened by hand has no delegation row, so collect,
@@ -3449,7 +3356,7 @@ _replace_attach() {
   c_ok "$id: attached to PR #$tn at ${th:0:12} - collect, review (--head $th) and land now work on it. No approval was carried over from $of"
 }
 
-# BINDING A CLEAN REPLACEMENT CHECKOUT (AH-261019).
+# BINDING A CLEAN REPLACEMENT CHECKOUT.
 #
 # After `replace attach` the child row still names the ORIGINAL worker's
 # worktree, whose symbolic HEAD is the old branch and which may hold a large
@@ -3680,8 +3587,7 @@ _replace_bound_guard() { # <verb> <id> <entry-json>
 
 # All mutating entrypoints serialize the complete read/modify/write cycle.
 # Do not lock wait: it must let other invocations settle the ledger it reads.
-# The role check comes FIRST: the cost of the incident this closes was three
-# minutes of held lock, so the refusal has to happen before the lock is taken.
+# The role check comes FIRST, so a refused worker never holds the lock.
 # `reconcile` is a factory verb like the rest: it rewrites the ledger from what
 # GitHub says, which is the orchestrator's read of the world, not a worker's.
 case "${1:-}" in
@@ -3695,8 +3601,8 @@ case "${1:-}" in
     _fanout_refuse_worker "$1" "" "$(_fanout_ws_arg "$@")" ;;
 esac
 
-# ADMISSION BY MEMORY (CEL-122): a worker is ~400 MB before it compiles
-# anything, and the 2026-10-12 OOM took the user manager down with it. Every
+# ADMISSION BY MEMORY: a worker is ~400 MB before it compiles anything, and
+# running the box out of memory can take the user manager down with it. Every
 # workspace, every shape, and before the ledger lock or a worktree exists.
 case "${1:-}" in
   delegate|scout|spike)

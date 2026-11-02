@@ -77,7 +77,7 @@ orch_stub_roster_two() { # <cwd> <name-of-first|""> <name-of-second|""> - two om
     "$2" "$1" "$T" "$3" "$1" "$T" > "$T/roster.json"
 }
 
-# CEL-85: a bare `omp --resume=<file>` as herdr relaunches it after a server
+# A bare `omp --resume=<file>` as herdr relaunches it after a server
 # restart - no hooks, no CEL_ env - still a child of the pane shell (pid 50).
 orch_stub_bare_proc() { # <pid> <argv...>
   local pid="$1"; shift

@@ -1,7 +1,7 @@
-// CEL-101: drive the dashboard's decisions panel in a real headless browser.
+// Drive the dashboard's decisions panel in a real headless browser.
 //
-// The owner opened "other…", started typing, and lost the text a few seconds
-// later when the 8 s refresh rebuilt the panel. Only a browser shows that: a
+// Typed "other…" text must survive the 8 s refresh that rebuilds the panel.
+// Only a browser shows that: a
 // curl of the page cannot type, focus or wait for a timer. No test dependency
 // is installed for this - Chrome is driven over its DevTools protocol with
 // node's own fetch and WebSocket.
@@ -41,7 +41,7 @@ export const findChrome = () => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// CEL-102: under the parallel runner Chrome can take well over 10 s to write
+// Under the parallel runner Chrome can take well over 10 s to write
 // DevToolsActivePort. Wait a generous, bounded time (CEL_TEST_CHROME_WAIT_MS,
 // default 60 s), retry the launch once, and on failure show Chrome's stderr.
 export const chromeWaitMs = () => Number(process.env.CEL_TEST_CHROME_WAIT_MS) || 60000;

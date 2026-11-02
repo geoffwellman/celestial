@@ -18,9 +18,8 @@ from notes import UNRELEASED, assemble, default_fragments, fragment_files, secti
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 # The subject a release lands on main with. GitHub's squash merge appends the
-# pull request number - `release: v0.3.0 (#57)` - and a plain prefix strip left
-# `0.3.0 (#57)`, which never equalled VERSION, so the publish job refused the
-# only path a release can actually take while hand-pushed tags kept working.
+# pull request number - `release: v0.3.0 (#57)` - so a plain prefix strip would
+# never equal VERSION and the publish job would refuse the only real path.
 SUBJECT = re.compile(r"^release: v(\S+?)(?: \(#[0-9]+\))?$")
 
 

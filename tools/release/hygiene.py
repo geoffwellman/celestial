@@ -84,8 +84,7 @@ def history_inputs(root, revs=None):
     `git rev-list <revs>` names (e.g. `origin/main..HEAD`, a PR's own
     ancestry). The all-refs form is the publication check; the range form is
     what a pull request is judged on, so that one dirty branch elsewhere in
-    the repository does not fail every other PR - measured 2026-09-18, when
-    it did exactly that, twice in a day."""
+    the repository does not fail every other PR."""
     if git(root, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError("history scan requires a complete clone (fetch-depth: 0)")
     blobs = {}
