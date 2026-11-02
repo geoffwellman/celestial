@@ -19,6 +19,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { startReviewerRetirement } from "./reviewer-retirement.mjs";
 
 function celRoot(): string {
   if (process.env.CEL_ROOT) return process.env.CEL_ROOT;
@@ -74,6 +75,35 @@ let retryTimer = null;
 let wakeSince = 0;
 let stopped = false;
 let lastCtx = null;
+let reviewerRetirement = null;
+let nativeTurnActive = false;
+
+function startRetirement(ctx): void {
+  try { reviewerRetirement?.dispose(); } catch {}
+  reviewerRetirement = startReviewerRetirement({
+    getContext: () => lastCtx,
+    getInboxDebt: () => ({ owed, pending: pending.length > 0, waking }),
+    getNativeTurnActive: () => nativeTurnActive,
+    // Retirement cannot turn a failed/malformed count into an empty mailbox.
+    countUnread: () => {
+      const value = execFileSync("bash", [celBin(), "inbox", "count", ...wsArgs()], {
+        cwd: lastCtx.cwd, encoding: "utf8", timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error("inbox_count_unknown");
+      const count = Number(value);
+      if (!Number.isSafeInteger(count)) throw new Error("inbox_count_unknown");
+      return count;
+    },
+    prepareExit: () => { stopped = true; stopWatcher(); },
+    restoreAfterFailedExit: () => {
+      stopped = false;
+      startWatcher(lastCtx);
+      owed = true;
+      scheduleWake(lastCtx);
+    },
+  });
+}
 function takeMail(ctx): string {
   const fresh = drain(ctx); // null = the drain itself failed, not "no mail"
   const all = [pending, fresh].filter(Boolean).join("\n");
@@ -314,9 +344,13 @@ export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
   registerHereCommands(pi);
-  pi.on("agent_end", (_e, ctx) => { rexNote("idle", ctx); waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
-  pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); stopped = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); });
+  pi.on("agent_end", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = false; rexNote("idle", ctx); waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
+  pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); stopped = false; nativeTurnActive = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); startRetirement(ctx); });
+  pi.on("session_tree", (_e, ctx) => { lastCtx = ctx; });
+  pi.on("agent_start", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = true; });
   pi.on("before_agent_start", (_e, ctx) => {
+    nativeTurnActive = true;
+    lastCtx = ctx;
     rexNote("working", ctx);
     const mail = takeMail(ctx);
     if (!mail) return;
@@ -329,6 +363,6 @@ export default function celestialInbox(pi): void {
       },
     };
   });
-  pi.on("session_shutdown", () => { stopped = true; stopWatcher(); });
-  process.once("exit", () => { stopped = true; stopWatcher(); });
+  pi.on("session_shutdown", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
+  process.once("exit", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
 }

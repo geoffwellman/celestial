@@ -293,6 +293,56 @@ inventory; automatic Herdr pane cleanup never closes a Rex terminal.
 Fleet delegation (`cel-fanout`) continues to use Herdr. The backend option is
 for sessions launched with `cel run` (including solo lanes and reviewers).
 
+### Retire a completed Rex reviewer, keep its evidence
+
+```sh
+cel sessions retire-reviewer widget#12 --workspace demo --dry-run
+cel sessions retire-reviewer widget#12 --workspace demo
+```
+
+The targeted command, reviewer GC and `cel solo land` share the same native
+proof. Idle alone is never eligibility: the PR must be merged or closed (an
+open PR can still take a push or a re-review request, so its reviewer stays),
+the PR's final head must have a completed canonical solo/fleet review round,
+the actual Pi leaf must be settled, and no tool, background job, queued input,
+inbox retry debt, unread mail or draft may remain. A completed `changes`
+round is not an approval and retirement never changes its verdict.
+
+After a successful merge, `cel solo land` retires that PR's Rex reviewer the
+same way. A reviewer it has to keep (still mid-turn, mail owed, proof
+unavailable) is named and left for the next `cel gc` sweep; retirement never
+fails a land.
+
+New canonical Rex/Pi reviewers expose a private native handshake. It samples
+the real live leaf and in-memory debt, then rechecks them before supported
+graceful shutdown. Only after the original runtime and owned infrastructure
+have exited does the backend remove the exact empty Rex session and reconcile
+its registry row. Extra terminals, replacement processes and unknown evidence
+are protected. Older uninstrumented reviewers are kept, not silently reloaded
+or stopped using a saved-file/idle guess. A reviewer that went by other means
+(its pane is off the roster, its PID generation has exited and no retirement
+proof is in flight) loses only its registry row to `cel gc`, so the PR can be
+reviewed again; its receipt, checkout and native log stay.
+
+The command returns JSON: `eligible` for a dry-run candidate, `retired` only
+after verified settlement, `protected` for known outstanding work/unsupported
+contexts, or `unknown` for missing proof or incomplete teardown. A partial
+failure retains private prepared/exit evidence for an identity-checked retry;
+do not purge the receipt or proof to force cleanup. Protocol messages live in
+`<receipt>.retirement/`, outside the flat Rex runtime-receipt inventory.
+If native shutdown committed before the controller copied its exit journal,
+a non-dry retry can recover that missing copy from the exact durable protocol
+request/response. Existing malformed or negative journals are never replaced
+with a more favorable protocol response; a dry run does not repair journals.
+
+Native history, archived instructions/verdict, checkout and review artifacts
+are retained. Fresh rounds use a separate checkout rather than erasing a
+retired round. Before every new-head or re-review handoff, run the canonical
+`cel run reviewer --repo widget --pr 12 --workspace demo` first, then send its
+inbox request: it reuses a live reviewer or starts the next round. Saved
+retirement history is evidence, not permission to approve or close a new round.
+
+
 ### Scoped OpenCode gateway migration
 
 OpenCode is pinned to the verified **2.2.5 CLI release**, not the legacy npm

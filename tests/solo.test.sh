@@ -1,6 +1,11 @@
 # shellcheck shell=bash
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/solo.sh"
+source "$CEL_ROOT/lib/gc.sh"
+# A land retires its PR's reviewer through gc.sh's shared target. These
+# fixtures own no reviewer and must never read the box's roster; the real
+# proof runs in gc-rex-reviewer-retirement.test.sh.
+reviewer_retire_target() { printf '%s\n' '{"status":"absent","reason":"no_reviewer_for_pull_request"}'; return 4; }
 
 # A products workspace with `bundle` (widget+gadget) in solo mode and merge:
 # self; `lone` stays fleet. GitHub is a stub: PR #7 on widget, head H, opened
@@ -58,6 +63,47 @@ test_solo_land_refuses_without_approval() {
   local out; out="$(_land widget#7 2>&1)" && { echo "merged unreviewed"; rm -rf "$T"; return 1; }
   assert_contains "$out" "not approved"
   ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# The merge ends the review: the PR's reviewer is retired AFTER the merge, and
+# a reviewer that has to be kept never turns a merged PR into a failed land.
+test_solo_land_retires_the_prs_reviewer_after_the_merge() {
+  _solo_setup
+  _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+  reviewer_retire_target() {
+    { printf '%s ' "$2" "$3" "$4"; if _merged; then echo merged; else echo unmerged; fi; } >> "$T/retire.log"
+    printf '%s\n' '{"status":"retired","reason":"runtime_exited_session_absent_evidence_preserved","pane":"rex/review/terminal"}'
+  }
+  local out; out="$(_land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/retire.log")" "widget 7 0 merged" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "retired the Rex reviewer for widget#7 (pane rex/review/terminal)" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_solo_land_succeeds_when_its_reviewer_must_be_kept() {
+  local rc
+  for rc in 3 2; do
+    _solo_setup
+    _review widget#7 approved --head "$H" --by widget-pr-7-review >/dev/null
+    export STUB_RETIRE_RC="$rc"
+    reviewer_retire_target() {
+      if [ "$STUB_RETIRE_RC" = 3 ]; then printf '%s\n' '{"status":"protected","reason":"native_retirement_work_owed"}'
+      else printf '%s\n' '{"status":"unknown","reason":"native_inventory_unreadable"}'; fi
+      return "$STUB_RETIRE_RC"
+    }
+    local out; out="$(_land widget#7 2>&1)" || { echo "land failed on retirement rc $rc: $out"; rm -rf "$T"; return 1; }
+    _merged || { rm -rf "$T"; return 1; }
+    case "$rc" in
+      3) assert_contains "$out" "kept the reviewer for widget#7: native_retirement_work_owed" ;;
+      2) assert_contains "$out" "reviewer retirement for widget#7 is incomplete: native_inventory_unreadable" ;;
+    esac || { rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+}
+test_solo_land_refused_never_retires_a_reviewer() {
+  _solo_setup
+  reviewer_retire_target() { : > "$T/retired"; return 0; }
+  ! _land widget#7 >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  [ ! -e "$T/retired" ] || { echo "retired the reviewer of an unmerged PR"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # The approval covers the commit reviewed; a push after it is unreviewed code.
