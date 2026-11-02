@@ -62,21 +62,24 @@ _learn_pinned() { # <wsdir>
   awk '/^## Pinned/{s=1; next} /^## /{s=0} s && /^- /{print}' "$f"
 }
 
-# tier and date of one entry line: "a 2026-09-12" | "p 2026-09-12" | "u -"
+# tier and date of one entry line: "a 2026-09-12" | "p 2026-09-12" | "u -",
+# or "x 2026-99-99" for a date that cannot exist - never stale, never decayed:
+# an unreadable date is not an ancient one.
 _learn_meta() { # <line>
-  local m
+  local m d
   m="$(printf '%s' "$1" | grep -oE '<!--[ap]:[0-9]{4}-[0-9]{2}-[0-9]{2}-->' | head -1 || true)"
   [ -n "$m" ] || { printf 'u -'; return 0; }
-  printf '%s %s' "${m:4:1}" "${m:6:10}"
+  d="${m:6:10}"
+  [ "$(date -d "$d" +%F 2>/dev/null)" = "$d" ] || { printf 'x %s' "$d"; return 0; }
+  printf '%s %s' "${m:4:1}" "$d"
 }
 _learn_stale() { # <line> -> 0 if stale
   local t d age; read -r t d <<<"$(_learn_meta "$1")"
-  [ "$t" = u ] && return 1
+  case "$t" in a|p) ;; *) return 1;; esac
   age="$(_learn_days_since "$d")"
   case "$t" in
     a) [ "$age" -ge "$_LEARN_AGING_DAYS" ];;
     p) [ "$age" -ge "$_LEARN_PERISHABLE_DAYS" ];;
-    *) return 1;;
   esac
 }
 _learn_fact() { printf '%s' "$1" | sed -E 's/^- //; s/ *<!--[ap]:[0-9-]+-->$//'; }
@@ -164,7 +167,7 @@ _learn_list() { # [--dir d]
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     n=$((n+1)); read -r t dt <<<"$(_learn_meta "$line")"
-    case "$t" in a) tag="aging $(_learn_days_since "$dt")d";; p) tag="perishable $(_learn_days_since "$dt")d";; *) tag="undated";; esac
+    case "$t" in a) tag="aging $(_learn_days_since "$dt")d";; p) tag="perishable $(_learn_days_since "$dt")d";; x) tag="invalid date $dt";; *) tag="undated";; esac
     _learn_stale "$line" && tag="$tag STALE"
     printf '  %2d. %s  [%s]\n' "$n" "$(_learn_fact "$line")" "$tag"
   done < <(_learn_entries "$d")
@@ -220,7 +223,7 @@ _learn_stow() { # [--dir d]
     local victim="" vi=-1 i vdate="9999-99-99"
     for i in "${!keep[@]}"; do
       local t dt; read -r t dt <<<"$(_learn_meta "${keep[$i]}")"
-      [ "$t" = u ] && dt="9999-99-98"      # undated evicted after every dated one
+      case "$t" in u|x) dt="9999-99-98";; esac      # undated and undatable evicted after every dated one
       if [[ "$dt" < "$vdate" ]]; then vdate="$dt"; vi=$i; victim="${keep[$i]}"; fi
     done
     [ "$vi" -ge 0 ] || break

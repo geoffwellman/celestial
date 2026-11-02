@@ -263,6 +263,87 @@ test_the_log_records_every_act_with_its_authorisation_and_survives_a_restart() {
   _afk_teardown
 }
 
+# THE LOG SAYS WHAT HAPPENED, NOT WHAT WAS ALLOWED. An act the door let
+# through is recorded once its effect was attempted, with how it ended.
+_afk_gh_failing_on() { # <graphql-mutation-name>
+  cat > "$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$*" in *$1*) exit 1 ;; esac
+printf '{}'
+EOF
+  chmod +x "$T/bin/gh"
+}
+
+test_regression_a_resolved_thread_is_logged_once_as_completed() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  afk_resolve_thread alpha/widget 71 THREAD_1 "$(_ev_thread)" >/dev/null 2>&1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" completed || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
+test_regression_a_reply_that_did_not_post_is_logged_as_failed() {
+  _afk_setup
+  _afk_gh_failing_on addPullRequestReviewThreadReply
+  cmd_afk on --until '+8h' >/dev/null
+  assert_fails afk_resolve_thread alpha/widget 71 THREAD_1 "$(_ev_thread)" || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" failed || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
+# Replied, then the resolve failed: the reply is out there, and the log must
+# say the act stopped half way rather than that the thread was resolved.
+test_regression_a_reply_posted_but_not_resolved_is_logged_as_partial() {
+  _afk_setup
+  _afk_gh_failing_on resolveReviewThread
+  cmd_afk on --until '+8h' >/dev/null
+  assert_fails afk_resolve_thread alpha/widget 71 THREAD_1 "$(_ev_thread)" || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" partial || { _afk_teardown; return 1; }
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "not resolved" || { _afk_teardown; return 1; }
+  assert_contains "$(bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/afk.sh"; cmd_afk log')" "partial" \
+    || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
+# AFK STATE IS REPLACED, NEVER REWRITTEN IN PLACE: a reader sees the old
+# document or the new one, never an empty or half-written one.
+test_regression_afk_on_and_off_replace_the_state_file_atomically() {
+  _afk_setup
+  cmd_afk on --until '+8h' >/dev/null
+  local i1 i2 i3
+  i1="$(stat -c %i "$CEL_AFK_STATE/state.json")"
+  cmd_afk off >/dev/null
+  i2="$(stat -c %i "$CEL_AFK_STATE/state.json")"
+  cmd_afk on --until '+8h' >/dev/null
+  i3="$(stat -c %i "$CEL_AFK_STATE/state.json")"
+  [ "$i1" != "$i2" ] && [ "$i2" != "$i3" ] || { echo "state.json rewritten in place ($i1 $i2 $i3)"; _afk_teardown; return 1; }
+  assert_eq "$(afk_state_json | jq -r .on)" true || { _afk_teardown; return 1; }
+  assert_eq "$(find "$CEL_AFK_STATE" -name '.state*' | wc -l)" 0 || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
+# Concurrent autonomous acts append one whole line each: the append waits on
+# the log lock.
+test_regression_afk_record_waits_for_the_log_lock() {
+  have flock || return 0
+  _afk_setup
+  mkdir -p "$CEL_AFK_STATE"
+  local lock="$CEL_AFK_STATE/log.lock" holder i rc=0
+  ( exec 9>>"$lock"; flock 9; exec sleep 30 ) &
+  holder=$!
+  for i in $(seq 1 50); do flock -n "$lock" -c true 2>/dev/null || break; sleep 0.1; done
+  timeout 2 bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/afk.sh"; afk_record land auth detail completed' || rc=$?
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  assert_eq "$rc" 124 || { echo "the append did not wait for the lock"; _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | wc -l)" 0 || { _afk_teardown; return 1; }
+  afk_record land auth detail completed || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[0].outcome')" completed || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
 test_cel_dispatches_afk() {
   _afk_setup
   local out; out="$(CEL_AFK_STATE="$T/afk" "$CEL_ROOT/bin/cel" afk status)"
@@ -545,6 +626,28 @@ test_afk_rebase_retry_refuses_a_branch_carrying_unpushed_work() {
   local out; out="$(cmd_afk rebase-retry "$T/wt" --base origin/main 2>&1)" && { _afk_teardown; return 1; }
   assert_contains "$out" "new work"
   assert_eq "$(afk_log_json | jq -sr 'length')" 0
+  _afk_teardown
+}
+
+test_regression_afk_rebase_retry_logs_completed_once_the_push_lands() {
+  _afk_git_fixture 0 0
+  cmd_afk on --until '+8h' >/dev/null
+  cmd_afk rebase-retry "$T/wt" --base origin/main >/dev/null 2>&1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" completed || { _afk_teardown; return 1; }
+  _afk_teardown
+}
+
+# Rebased here, refused there: the worktree moved but the PR did not, and the
+# log says exactly that instead of "rebased and pushed".
+test_regression_afk_rebase_retry_logs_partial_when_the_push_is_refused() {
+  _afk_git_fixture 0 0
+  git -C "$T/wt" remote set-url --push origin "$T/nowhere.git"
+  cmd_afk on --until '+8h' >/dev/null
+  local out; out="$(cmd_afk rebase-retry "$T/wt" --base origin/main 2>&1)" && { _afk_teardown; return 1; }
+  assert_contains "$out" "push was refused" || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_teardown; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" partial || { _afk_teardown; return 1; }
   _afk_teardown
 }
 

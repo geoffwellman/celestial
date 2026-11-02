@@ -103,11 +103,30 @@ afk_state_json() {
 afk_active()  { [ "$(afk_state_json | jq -r '.on and (.expired | not)')" = true ]; }
 afk_expired() { [ "$(afk_state_json | jq -r '.expired')" = true ]; }
 
-afk_record() { # <act> <authorisation> <detail>
+# THE LOG SAYS WHAT HAPPENED. An act that reports its own ending is recorded
+# once, after its effect was attempted: completed, failed, or partial (some of
+# it is out there and the rest is not). `authorised` is what the door writes
+# for a caller that does not report an ending - allowed, not known done.
+# Appends take the log lock so two acts at once cannot interleave a line.
+afk_record() { # <act> <authorisation> <detail> <outcome>
+  local line
   mkdir -p "$(afk_dir)"
-  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg act "$1" \
-    --arg auth "$2" --arg detail "$3" \
-    '{at:$at, act:$act, authorisation:$auth, detail:$detail}' >> "$(_afk_log)"
+  line="$(jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg act "$1" \
+    --arg auth "$2" --arg detail "$3" --arg outcome "$4" \
+    '{at:$at, act:$act, authorisation:$auth, detail:$detail, outcome:$outcome}')" || return 1
+  if have flock; then
+    ( flock 9; printf '%s\n' "$line" >> "$(_afk_log)" ) 9>>"$(afk_dir)/log.lock"
+  else
+    printf '%s\n' "$line" >> "$(_afk_log)"
+  fi
+}
+
+# Replaced, never rewritten in place: a reader sees the old document or the
+# new one, never an empty or half-written one.
+_afk_write_state() { # <json>
+  local d tmp; d="$(afk_dir)"
+  mkdir -p "$d" && tmp="$(mktemp "$d/.state.XXXXXX")" || return 1
+  printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$(_afk_state)" || { rm -f "$tmp"; return 1; }
 }
 
 afk_log_json() { cat "$(_afk_log)" 2>/dev/null || true; }
@@ -239,10 +258,11 @@ _afk_check_release() { # <evidence-json>
 # THE ONE DOOR. Every autonomous act while AFK comes through here: the mode has
 # to be on and unexpired, the act has to be pre-authorised, its own evidence
 # has to be present, and it has to be happening where this orchestrator lives.
-# Then - and only then - it is recorded.
-afk_authorise() { # <act> <evidence-json> [detail]
-  local act="$1" e="${2:-{\}}" detail="${3:-}" auth
-  auth="$(afk_authorisation "$act")" \
+# Admitting records nothing: an act that reports its own ending records it
+# with afk_record once the effect was attempted.
+afk_admit() { # <act> <evidence-json>
+  local act="$1" e="${2:-{\}}"
+  afk_authorisation "$act" >/dev/null \
     || { _afk_refuse "$act" "that is not one of the five pre-authorised acts"; return 1; }
   if ! afk_active; then
     if afk_expired; then
@@ -264,11 +284,19 @@ afk_authorise() { # <act> <evidence-json> [detail]
     return 1
   fi
   "_afk_check_$act" "$e" || return 1
+}
+
+# The door for a caller that does not report how the act ended: admitted, and
+# recorded as `authorised` at once.
+afk_authorise() { # <act> <evidence-json> [detail]
+  local act="$1" e="${2:-{\}}" detail="${3:-}" auth
+  afk_admit "$act" "$e" || return 1
+  auth="$(afk_authorisation "$act")"
   if [ "$act" = ordered_work ] && [ -z "$detail" ]; then
     detail="$(jq -r '"spec \(.spec) (mtime \(.spec_mtime | todate))"' <<<"$e")"
   fi
   [ -n "$detail" ] || detail="$(jq -rc '. | tostring' <<<"$e" 2>/dev/null || printf '%s' "$e")"
-  afk_record "$act" "$auth" "$detail"
+  afk_record "$act" "$auth" "$detail" authorised
   printf '%s authorised: %s\n' "$act" "$auth"
 }
 
@@ -277,17 +305,23 @@ afk_authorise() { # <act> <evidence-json> [detail]
 # BEFORE gh is reached - a reply posted and then withdrawn is a comment the
 # author has already been mailed.
 afk_resolve_thread() { # <slug> <pr-number> <thread-id> <evidence-json>
-  local slug="$1" pr="$2" thread="$3" e="$4" w body
+  local slug="$1" pr="$2" thread="$3" e="$4" w body auth what
   afk_post_allowed bot_thread_resolution >/dev/null || return 1
-  afk_authorise resolve_thread "$e" "$slug#$pr thread $thread" >/dev/null || return 1
+  afk_admit resolve_thread "$e" || return 1
+  auth="$(afk_authorisation resolve_thread)"; what="$slug#$pr thread $thread"
   w="$(_afk_wsdir_for_slug "$slug")"
   body="$(jq -r '"Fixed in \(.fixed_commit): \(.fixed_summary). Resolved by the fleet while the operator is away (cel afk, pre-authorisation 1); a reviewer confirmed the fix after that commit."' <<<"$e")"
-  _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){clientMutationId}}' \
-    -f t="$thread" -f b="$body" >/dev/null \
-    || { c_warn "afk: the reply to $thread did not post - the thread is left open"; return 1; }
-  _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' \
-    -f t="$thread" >/dev/null \
-    || { c_warn "afk: replied to $thread but could not resolve it"; return 1; }
+  if ! _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){clientMutationId}}' \
+    -f t="$thread" -f b="$body" >/dev/null; then
+    afk_record resolve_thread "$auth" "$what - the reply did not post; the thread is left open" failed
+    c_warn "afk: the reply to $thread did not post - the thread is left open"; return 1
+  fi
+  if ! _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' \
+    -f t="$thread" >/dev/null; then
+    afk_record resolve_thread "$auth" "$what - replied, but the thread is not resolved" partial
+    c_warn "afk: replied to $thread but could not resolve it"; return 1
+  fi
+  afk_record resolve_thread "$auth" "$what" completed
   c_ok "resolved $slug#$pr thread $thread (fixed in $(jq -r .fixed_commit <<<"$e"))"
 }
 
@@ -358,7 +392,9 @@ afk_rebase_retry() { # <worktree> [--base <ref>]
     '{was_mergeable: ($st == "OPEN" and $m != "CONFLICTING" and $m != ""),
       behind: $behind, new_work: $new_work, conflicts: $conflicts,
       branch: $b, base: $base}')"
-  afk_authorise rebase_retry "$e" "$branch onto $base (no new work, no conflict)" >/dev/null || return 1
+  afk_admit rebase_retry "$e" || return 1
+  local auth what
+  auth="$(afk_authorisation rebase_retry)"; what="$branch onto $base (no new work, no conflict)"
 
   # A REBASE NEEDS A COMMITTER, and a box with no global identity (a fresh CI
   # runner, a container) has none - which would fail here as "would not rebase"
@@ -369,13 +405,17 @@ afk_rebase_retry() { # <worktree> [--base <ref>]
     || ident=(-c user.email=cel-afk@localhost -c user.name='cel afk')
   if ! git -C "$wt" "${ident[@]}" rebase "$base" >/dev/null 2>&1; then
     git -C "$wt" rebase --abort >/dev/null 2>&1 || true
+    afk_record rebase_retry "$auth" "$what - would not rebase after all; aborted, nothing pushed" failed
     c_warn "afk: $branch would not rebase onto $base after all - aborted, nothing pushed, left for the morning"
     return 1
   fi
   # --force-with-lease: the branch is ours and it moved under a rebase, but if
   # something else pushed to it in the meantime this must lose, not win.
-  git -C "$wt" push --force-with-lease origin "$branch" >/dev/null 2>&1 \
-    || { c_warn "afk: rebased $branch onto $base but the push was refused - the retry is not done"; return 1; }
+  if ! git -C "$wt" push --force-with-lease origin "$branch" >/dev/null 2>&1; then
+    afk_record rebase_retry "$auth" "$what - rebased in the worktree, but the push was refused" partial
+    c_warn "afk: rebased $branch onto $base but the push was refused - the retry is not done"; return 1
+  fi
+  afk_record rebase_retry "$auth" "$what" completed
   c_ok "rebased $branch onto $base and pushed (cel afk, pre-authorisation 3)"
 }
 
@@ -404,13 +444,12 @@ cmd_afk() {
         epoch="$(_afk_parse_until "$until_text")" \
           || die "cel afk on: cannot read '--until $until_text' as a time - say +8h, 07:30 or an ISO timestamp"
       fi
-      mkdir -p "$(afk_dir)"
-      jq -n --arg since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg reason "$reason" \
+      _afk_write_state "$(jq -n --arg since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg reason "$reason" \
         --arg ut "$until_text" --argjson ue "$epoch" --arg scope "$scope" \
         --argjson se "$(date +%s)" --argjson allow "$allow" \
         '{on:true, since:$since, since_epoch:$se, allow:$allow, reason:$reason, until_text:$ut, scope:$scope,
-          until:(if $ue > 0 then (($ue|todate)) else "" end), until_epoch:$ue}' \
-        > "$(_afk_state)"
+          until:(if $ue > 0 then (($ue|todate)) else "" end), until_epoch:$ue}')" \
+        || die "cel afk on: could not write $(_afk_state)"
       if [ "$epoch" -gt 0 ]; then
         c_ok "AFK is on until $(_afk_iso "$epoch")${reason:+ ($reason)}"
       else
@@ -428,8 +467,7 @@ cmd_afk() {
       fi
       ;;
     off)
-      mkdir -p "$(afk_dir)"
-      printf '{"on":false,"expired":false}\n' > "$(_afk_state)"
+      _afk_write_state '{"on":false,"expired":false}' || die "cel afk off: could not write $(_afk_state)"
       c_ok "AFK is off - decisions wait for you again"
       ;;
     status)
@@ -446,7 +484,7 @@ cmd_afk() {
       if [ "${1:-}" = "--json" ]; then afk_log_json; return 0; fi
       local n; n="$(afk_log_json | wc -l)"
       if [ "$n" -eq 0 ]; then c_ok "AFK did nothing autonomous"; return 0; fi
-      afk_log_json | jq -r '"  \(.at)  \(.act)  \(.detail)  [\(.authorisation)]"'
+      afk_log_json | jq -r '"  \(.at)  \(.act)  \(.outcome // "authorised")  \(.detail)  [\(.authorisation)]"'
       ;;
     resolve-thread)
       # PRE-AUTHORISATION 1's ENTRY POINT. The evidence is named on the command

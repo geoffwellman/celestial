@@ -1978,6 +1978,24 @@ test_steward_tick_exits_when_another_holds_the_lock() {
   rm -rf "$T"
 }
 
+# The pidfile is read and written under the flock; a claimant that cannot take
+# the flock has not synchronised with whoever holds it, so it must not claim -
+# whatever the pidfile says.
+test_regression_steward_tick_does_not_claim_without_the_flock() {
+  have flock || return 0
+  local T holder i rc=0; T="$(mktemp -d)"
+  export CEL_STEWARD_LOCK="$T/tick.lock"
+  : > "$CEL_STEWARD_LOCK"
+  ( exec 9>>"$CEL_STEWARD_LOCK"; flock 9; exec sleep 30 ) &
+  holder=$!
+  for i in $(seq 1 50); do flock -n "$CEL_STEWARD_LOCK" -c true 2>/dev/null || break; sleep 0.1; done
+  local out; out="$(_steward_tick_claim 2>&1)" || rc=$?
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || { echo "claimed a tick without the flock: $out"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$CEL_STEWARD_LOCK")" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # ---- a PR waiting on the owner is not a worker finding -----------------------
 # A red PR linked to an open `cel decide` question is blocked on the owner, not
 # on a worker, so it gets no nudge until the decision closes.
