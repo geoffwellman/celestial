@@ -1,14 +1,9 @@
 #!/usr/bin/env node
 // Pure tests for the watcher the console arms and must take with it.
 //
-// On 2026-09-19 a walk of the box found thirteen `cel inbox watch --for root
-// --all-workspaces` trees reparented to init, four of them days old: every
-// console that had exited had left one behind, because `child.kill()` on
-// unmount reaches the watcher only on a clean React teardown and reaches its
-// `tail`/`jq` children never. So the lifetime is owned here, the same way
-// term.mjs owns the screen modes: one `stop`, on every exit path there is,
-// killing the whole process GROUP - and it is injectable (spawn, proc, kill)
-// so those paths can be proved without a terminal or a real signal.
+// One `stop`, on every exit path, kills the watcher's whole process GROUP
+// (its `tail`/`jq` children too); spawn, proc and kill are injected so those
+// paths are proved without a terminal or a real signal.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { startWatcher } from './watcher.mjs';

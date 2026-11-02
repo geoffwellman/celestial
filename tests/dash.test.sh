@@ -149,11 +149,9 @@ up.listen(Number(process.env.UP), "127.0.0.1", () => {
 
 # A TOKEN IN A URL IS A TOKEN IN A LOG. The proxy takes its control token as a
 # query parameter because a browser cannot set a header on a plain navigation
-# - and the first cut of that logged `req.url` verbatim, so clicking a service
-# link wrote the dash's control token in cleartext into a log file that
-# outlives the process (PR #54 review). The query form is now exchanged for a
-# scoped cookie and bounced once to the same path without it, and the request
-# line is redacted on its way to the log either way.
+# - so the query form is exchanged for a scoped cookie and bounced once to the
+# same path without it, and the request line is redacted on its way to the log
+# either way.
 test_dash_proxy_never_logs_the_control_token() {
   local up; up="$(_dash_free_port)"
   _dash_boot "$up"
@@ -180,17 +178,12 @@ test_dash_proxy_never_logs_the_control_token() {
   _dash_shutdown
 }
 
-# --- CEL-43 section 4: box material appears four times -----------------------
-# The owner, 2026-09-19: "why are there multiple cel broker and gateway
-# services?" There is exactly one of each. What multiplied was the DISPLAY:
-# four per-workspace dashboards on this box each rendered the same box-level
-# rows inside their own services panel, and each rendered the whole
-# subscriptions panel, which is box-level in its entirety. Flipping between
-# tabs reads as several brokers.
+# --- box material is drawn once ---------------------------------------------
+# Box-level rows (box services, subscriptions) belong to the box, not to a
+# workspace: one Box panel, never repeated in a workspace's services list.
 #
 # Two workspaces, one box service and one workspace service, so the partition
-# is visible in one fixture. Since CEL-107 there is one dashboard, so the box
-# panel is simply always drawn.
+# is visible in one fixture.
 _dash_box_boot() { # <this-workspace>
   local me="$1"
   T="$(mktemp -d)"
@@ -235,7 +228,7 @@ EOF
   STATE="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/state")"
 }
 
-# The one dashboard (CEL-107): the box row is in the Box panel, never in the
+# The box row is in the Box panel, never in the
 # workspace's own services list, and the subscriptions come with it.
 test_dash_box_panel_is_drawn_once_apart_from_workspace_services() {
   _dash_box_boot alpha
@@ -246,9 +239,8 @@ test_dash_box_panel_is_drawn_once_apart_from_workspace_services() {
 
 
 
-# THE SUBSCRIPTIONS CARD IS `cel quota --json` (CEL-80): the owner asked
-# whether the quotas show on the dashboard, and the answer has to be the same
-# rows `cel quota` prints - one per account, every window.
+# THE SUBSCRIPTIONS CARD IS `cel quota --json`: the same rows `cel quota`
+# prints - one per account, every window.
 test_dash_box_card_carries_every_account_from_cel_quota() {
   _dash_box_boot alpha
   assert_eq "$(printf '%s' "$STATE" | jq -r '[.subscriptions[].account] | join(",")')" "acct-A,acct-B"

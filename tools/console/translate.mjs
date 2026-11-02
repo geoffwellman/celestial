@@ -1,4 +1,4 @@
-// The console's translator: one sentence in, ONE command line out.
+// The console's translator: one sentence in, a proposed command line out.
 //
 // Deliberately a bare `fetch` and nothing else. An SDK would pull a provider's
 // whole client surface - retries, streaming, telemetry, a version to keep - in
@@ -13,8 +13,7 @@
 // is not made of commands is treated as a failure to translate, because a model
 // apologising in prose must not become a command nobody read.
 //
-// Two things changed on 2026-09-17, both because a person expected them. A
-// sentence can need a SEQUENCE ("clean the blockers on sandbox" is a read and
+// A sentence can need a SEQUENCE ("clean the blockers on sandbox" is a read and
 // then a resolve), so the first ask may return up to five command lines and the
 // TUI proposes them as one chain. And a MISS is not a dead end: the second ask
 // runs in options mode, where the model returns up to three candidates each
@@ -178,10 +177,9 @@ cel inbox open --for root --workspace sandbox
 cel inbox resolve --all --from steward --workspace sandbox
 why did the last build fail -> ?`;
 
-// Options mode: the SECOND ask, after a miss. The operator has already been
-// told "no command for that" once and it taught them nothing; what a person
-// expects of something that failed to understand them is an interpretation and
-// a choice, not a shrug.
+// Options mode: the SECOND ask, after a miss. What a person expects of
+// something that failed to understand them is an interpretation and a choice,
+// not a shrug.
 const OPTIONS_SYSTEM = (vocab) => `A human operator typed a sentence at the celestial console and it
 could not be turned into a command. Offer up to THREE candidate command lines
 they might have meant, best first.
@@ -265,12 +263,9 @@ export const parseOptions = (text) => {
 
 export class NoTranslator extends Error {}
 
-// One request, one answer, 15 seconds. No streaming: there is nothing to
-// stream - the reply is one short line - and a stream would mean partial
-// commands appearing on an operator's command line as they arrive.
 // One request, one reply, no streaming: the reply is a few short lines and a
 // stream would mean partial text appearing while the operator reads.
-const _chat = async ({ cfg, table, key, base, system, user, timeout, maxTokens = 400 }) => {
+const chat = async ({ cfg, table, key, base, system, user, timeout, maxTokens = 400 }) => {
   const provider = cfg.console.provider;
   const model = cfg.console.model || table.default_model || '';
   const anthropic = provider === 'anthropic';
@@ -297,7 +292,7 @@ const _chat = async ({ cfg, table, key, base, system, user, timeout, maxTokens =
 
 // Provider, key and endpoint for this box, or a NoTranslator saying what is
 // missing. Shared by every model call so the three error messages exist once.
-const _connection = (configPath, root) => {
+const connection = (configPath, root) => {
   const cfg = readConfig(configPath);
   for (const w of cfg.warnings) process.stderr.write(`  ! ${w}\n`);
   const provider = cfg.console.provider;
@@ -319,9 +314,6 @@ as the output prints them. If the output does not answer the question, say so
 in one line and name the command that would. No markdown, no headings, no
 apologies.`;
 
-// After a sentence's commands have run: what do they say? Off with
-// console.answer: off in the config. Returns null when off or on any failure -
-// the raw output is still on screen, the answer is a courtesy on top of it.
 export const trimTranscript = (transcript, cap = 6000, head = 40, tail = 20) => {
   const blocks = String(transcript || '').split(/\n(?=\$ )/);
   const out = blocks.map((b) => {
@@ -332,16 +324,19 @@ export const trimTranscript = (transcript, cap = 6000, head = 40, tail = 20) => 
   return out.length > cap ? `${out.slice(0, cap)}\n… (cut at ${cap} chars)` : out;
 };
 
+// After a sentence's commands have run: what do they say? Off with
+// console.answer: off in the config. Returns null when off or on any failure -
+// the raw output is still on screen, the answer is a courtesy on top of it.
 export const answer = async ({ sentence, transcript, root = CEL_ROOT, configPath }) => {
-  const { cfg, table, key, base } = _connection(configPath, root);
+  const { cfg, table, key, base } = connection(configPath, root);
   if (String(cfg.console.answer || '').toLowerCase() === 'off') return null;
   // What the model reads: each command's output trimmed to its first 40 and
   // last 20 lines, and the whole thing capped. A ledger table of eighty
-  // released rows is not what anyone asked about, and a 30-second timeout on
-  // an 8 KB transcript was the first thing to fail on this box.
+  // released rows is not what anyone asked about, and a long transcript is
+  // the first thing to time out.
   const clipped = trimTranscript(transcript, 6000);
   const user = `Question: ${sentence}\n\nWhat ran, and what it printed:\n${clipped}`;
-  const text = await _chat({ cfg, table, key, base, system: ANSWER_SYSTEM, user, timeout: 60000, maxTokens: 300 });
+  const text = await chat({ cfg, table, key, base, system: ANSWER_SYSTEM, user, timeout: 60000, maxTokens: 300 });
   const out = String(text || '').trim();
   return out || null;
 };
@@ -379,9 +374,8 @@ export const translate = async ({ sentence, state = '', root = CEL_ROOT, configP
   const system = options ? OPTIONS_SYSTEM(vocabulary(root)) : SYSTEM(vocabulary(root));
   const user = `Current state:\n${state}\n\nSentence: ${sentence}`;
   // The SECOND ask gets longer: the operator has already been told the first
-  // one missed, they are waiting on purpose, and a 15-second cut-off turned a
-  // menu of three good options into "no command for that" on this box.
-  const text = await _chat({ cfg, table, root, key, base, system, user, timeout: options ? 30000 : 15000 });
+  // one missed and is waiting on purpose for a menu of options.
+  const text = await chat({ cfg, table, root, key, base, system, user, timeout: options ? 30000 : 15000 });
   if (options) return parseOptions(text);
   const { cmds, raw, answer: answered } = parseReply(text);
   return { cmds, cmd: cmds[0] || null, raw, answer: answered };
@@ -393,16 +387,14 @@ export const translatorLabel = (configPath) => {
   return `${cfg.console.provider}/${cfg.console.model || '?'}`;
 };
 
-// --- CEL-41: the summary, and the three-way split it belongs to -------------
+// --- the summary, and the three-way split it belongs to --------------------
 //
-// The owner, 2026-09-19: "I'm not suggesting we use jev for summarisation, we
-// can use deepseek for that." So three different things do three different
-// jobs and none of them does another's:
+// Three different things do three different jobs and none of them does
+// another's:
 //
 //   jev (the decision model, router.mjs) chooses WHICH rows matter and how
 //       urgent each one is. It writes nothing - it cannot, and asking it to
-//       count or compare dates is the documented way to get a confident wrong
-//       answer.
+//       count or compare dates is the way to get a confident wrong answer.
 //   code (views.mjs) computes every number exactly from the fleet JSON and
 //       assembles the small facts object below.
 //   this function hands that object to the chat model and gets two to four
@@ -436,9 +428,9 @@ export const summaryTimeout = (configPath) => {
 };
 
 export const summarise = async ({ facts, root = CEL_ROOT, configPath, timeout }) => {
-  const { cfg, table, key, base } = _connection(configPath, root);
+  const { cfg, table, key, base } = connection(configPath, root);
   if (String(cfg.console.summary || '').toLowerCase() === 'off') return null;
-  const text = await _chat({
+  const text = await chat({
     cfg, table, key, base,
     system: SUMMARY_SYSTEM,
     user: `The operator asked: ${facts.question || '(nothing in particular)'}\n\nFacts:\n${JSON.stringify(facts, null, 1)}`,

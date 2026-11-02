@@ -2,11 +2,7 @@
 // Pure tests for the key map: one key, on one panel, over one selection,
 // produces one PROPOSAL.
 //
-// The verbs are the half of CEL-25 that changes the box, and every one of them
-// used to be a command an operator typed from memory. A key that writes the
-// wrong `--workspace` is the same accident as a router that guesses one, so
-// the map lives in a pure function and is asserted here rather than reached
-// only by pressing a key in a terminal nobody is running under test.
+// The map is pure so a key can never write the wrong `--workspace` unasserted.
 import assert from 'node:assert/strict';
 import { verbFor, VERBS } from './verbs.mjs';
 
@@ -31,10 +27,8 @@ t('every verb the ticket names has a row', () => {
   );
 });
 
-// CEL-36: `t` on a unit's orchestrator row opens the relay. It is not a
-// command the guard runs - the console's own word, taken before the
-// allowlist ever sees the line - so the proposal is deliberately not a `cel`
-// line, and Enter hands it to the console rather than to bash.
+// `t` on an orchestrator row opens the relay: a console word, not a `cel` line,
+// so Enter hands it to the console rather than to bash.
 t('t on the orchestrator row opens the relay to its pane', () => {
   assert.deepEqual(verbFor('orch', 't', ORCH).cmds, ['talk bundle-orch']);
   assert.equal(verbFor('orch', 't', { ws: 'alpha' }).cmds.length, 0);
@@ -107,10 +101,8 @@ t('a key on a panel that does not own it is nothing at all', () => {
   assert.equal(verbFor('board', 's', null), null);
 });
 
-// CEL-44: the unit view can open a workspace and put it back to its declared
-// shape. `u` is the idempotent reconcile; the reset key is SHIFTED because it
-// stops things first - and `R` stays what it was, the single-orchestrator
-// restart this ticket was told to leave alone.
+// `u` is the idempotent `ws up`; the reset key is SHIFTED because it stops
+// things first, and `R` stays the single-orchestrator restart.
 t('u proposes ws up and the shifted key proposes ws reset', () => {
   assert.deepEqual(verbFor('orch', 'u', ORCH).cmds, ['cel ws up alpha']);
   assert.deepEqual(verbFor('orch', 'U', ORCH).cmds, ['cel ws reset alpha']);

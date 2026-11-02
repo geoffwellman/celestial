@@ -1,9 +1,9 @@
 # shellcheck shell=bash
-# CEL-93: the dashboard's Needs-you panel answers owner decisions through the
+# The dashboard's Needs-you panel answers owner decisions through the
 # real `cel decide`, behind the dashboard's Host and CSRF guard.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/tests/lib/dash-boot.sh"
-# CEL-113: every question needs real context
+# every question needs real context
 DD_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 
 _dd_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
@@ -31,8 +31,7 @@ _dd_boot() {
   done
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
-# the v2 page and the decisions panel it loads (CEL-123 retired /classic;
-# the panel lives in /decisions.js)
+# the v2 page and the decisions panel it loads from /decisions.js
 _dd_page() {
   curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/" && curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/decisions.js"
 }
@@ -83,7 +82,7 @@ test_dash_decide_refuses_missing_csrf_and_alien_host() {
   _dd_down
 }
 
-# Review on #118: a button sends its 1-based index, so a numeric label is
+# A button sends its 1-based index, so a numeric label is
 # recorded as clicked; free text from the box is free text even if digits.
 test_dash_option_buttons_answer_by_index() {
   _dd_boot
@@ -115,7 +114,7 @@ test_dash_concurrent_answers_resolve_once() {
   _dd_down
 }
 
-# Sourcery on #122: an option the decision does not have is refused, never
+# An option the decision does not have is refused, never
 # recorded as the free-text answer "9".
 test_dash_refuses_an_option_the_decision_does_not_have() {
   _dd_boot
@@ -138,7 +137,7 @@ _dd_ask() { # <ws> args...
   CEL_INBOX_ME="$ws-orch" "$CEL_ROOT/bin/cel" decide ask --workspace "$ws" --context "$DD_CTX" "$@" 2>/dev/null
 }
 
-# CEL-99: decisions are grouped by workspace; inside a group urgent first,
+# Decisions are grouped by workspace; inside a group urgent first,
 # then the ones that block something, then oldest first.
 test_dash_groups_and_orders_decisions() {
   _dd_boot
@@ -180,7 +179,6 @@ test_dash_bulk_accept_sends_only_listed_ids_and_keeps_refusals() {
   _dd_down
 }
 
-# --- CEL-101 ------------------------------------------------------------------
 # One click closes a stale decision with a fixed reason, through the same
 # guarded path a typed drop takes.
 test_dash_one_click_close_sends_the_fixed_reason() {
@@ -196,14 +194,7 @@ test_dash_one_click_close_sends_the_fixed_reason() {
   _dd_down
 }
 
-# CEL-125: test_dash_refresh_keeps_what_the_owner_is_typing drove the classic
-# page in a real browser and was removed rather than fixed. It waited a fixed
-# 10 s for cards and then carried on regardless (41 of 50 runs under load hit
-# a null card), and asserted exact refresh counts against a 1 s timer - timing,
-# not behaviour. /classic is being retired; v2's decisions panel is covered by
-# the v2 page tests.
-
-# CEL-113: the card shows the context text itself, links clickable, plus
+# The card shows the context text itself, links clickable, plus
 # blocks and age - the owner decides from the card, not from a click away.
 test_cel113_card_renders_context_blocks_and_age() {
   local out; out="$(node -e '
@@ -222,7 +213,7 @@ test_cel113_card_renders_context_blocks_and_age() {
   assert_contains "$out" "2h"
 }
 
-# CEL-115: a decision's --pr links show on the card, as links when known.
+# A decision's --pr links show on the card, as links when known.
 test_cel115_card_links_the_prs_a_decision_blocks() {
   local out; out="$(node -e '
     const fs=require("fs"),vm=require("vm");

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# CEL-106: dashboard v2, the page. Served by the real dash server at /, the
-# classic page at /classic; every /api/ call the page makes is answered from
+# Dashboard v2, the page, served by the real dash server at / (/classic only
+# redirects there); every /api/ call the page makes is answered from
 # tests/fixtures/dash-v2 by the browser driver (tests/lib/dash-v2-browser.mjs)
 # and recorded, so nothing here reaches a real inbox or decision.
 source "$CEL_ROOT/lib/common.sh"
@@ -205,7 +205,7 @@ test_dash_v2page_working_now_lists_only_working_and_blocked() {
   _vp_down
 }
 
-# CEL-108: one Usage card replaces "Usage forecast" and "Claude accounts" -
+# One Usage card (no separate forecast or accounts cards) - a
 # summary strip, a group per provider with a bar per window and a pace tick,
 # who-uses-it tags, merged pay-as-you-go rows, a row that opens to who used it
 # only when the feed could tell, and per-window history when expanded.
@@ -254,9 +254,8 @@ test_dash_v2page_room_opens_from_the_grid_with_transcript_composer_and_status() 
   _vp_down
 }
 
-# review of #147 on live data: a repo orchestrator's room showed its
-# neighbours' PRs, markdown came out raw, and the grid's decisions chrome
-# was repeated in the side panel
+# A repo orchestrator's room lists only its repo's PRs, renders markdown, and
+# lists decisions without repeating the grid's decisions chrome.
 test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions_plainly() {
   _vp_boot
   local rc=0; _vp_run room || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
@@ -272,8 +271,7 @@ test_dash_v2page_room_is_scoped_to_its_repo_renders_markdown_and_lists_decisions
   _vp_down
 }
 
-# CEL-129: live, a product orchestrator's room listed none of its 13 decisions; a
-# room loaded from its URL must hold the decisions panel, not the grid
+# A room loaded from its URL holds its decisions panel, not the grid's.
 test_dash_v2page_room_opened_from_its_url_lists_its_decisions() {
   _vp_boot
   local rc=0; _vp_run roomdirect || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1

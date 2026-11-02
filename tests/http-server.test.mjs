@@ -27,13 +27,11 @@ case "$1 $2" in
   'agent list') printf '{"result":{"agents":[]}}';;
   'workspace list') printf '{"result":{"workspaces":[]}}';;
   'pane list') printf '{"result":{"panes":[]}}';;
-  'agent prompt'|'pane focus'|'inbox resolve'|state*) printf '%s %s\\n' "$1" "$2" >> "$CALLS"; printf ok;;
+  'agent prompt'|'pane focus') printf '%s %s\\n' "$1" "$2" >> "$CALLS"; printf ok;;
   *) printf '{}';;
 esac
 `, { mode: 0o700 });
   for (const name of ['herdr', 'gh', 'yq', 'cel']) await symlink('fixture', join(bin, name));
-  await mkdir(join(dir, 'core/skills/linear/bin'), { recursive: true });
-  await symlink(join(bin, 'fixture'), join(dir, 'core/skills/linear/bin/cel-linear'));
   const reserve = createServer();
   reserve.listen(0, '127.0.0.1');
   await once(reserve, 'listening');
@@ -96,7 +94,7 @@ for (const kind of ['pages', 'dash']) {
     const s = await boot(t, kind);
     const token = await session(s);
     const paths = kind === 'pages' ? ['/api/promote', '/api/revoke', '/api/feedback'] :
-      ['/api/focus', '/api/inbox-resolve', '/api/ticket-state', '/api/client-log'];
+      ['/api/focus', '/api/client-log'];
     for (const path of paths) {
       assert.equal((await post(s, path, null, {})).status, 403, path);
       const wrongToken = (token[0] === 'A' ? 'B' : 'A') + token.slice(1);
@@ -169,13 +167,10 @@ test('dashboard: all control mutations accept the current browser token', { time
   const headers = { origin: `http://127.0.0.1:${s.port}`, 'sec-fetch-site': 'same-origin' };
   for (const [path, body, status] of [
     ['/api/focus', { pane: 'w1:p1' }, 200],
-    ['/api/inbox-resolve', { id: '1234567890123' }, 200],
-    ['/api/ticket-state', { id: 'WG-1', state: 'Ready' }, 200],
     ['/api/client-log', { event: 'fixture' }, 204],
   ]) assert.equal((await post(s, path, token, body, headers)).status, status, path);
-  assert.deepEqual((await readFile(join(s.dir, 'calls'), 'utf8')).trim().split('\n'),
-    ['pane focus', 'inbox resolve', 'state WG-1']);
-  // CEL-123: the one remote-typing endpoint is gone
+  assert.deepEqual((await readFile(join(s.dir, 'calls'), 'utf8')).trim().split('\n'), ['pane focus']);
+  // the one remote-typing endpoint is gone
   assert.equal((await post(s, '/api/prompt', token, { target: 'w1:p1', message: 'x' }, headers)).status, 404);
 });
 

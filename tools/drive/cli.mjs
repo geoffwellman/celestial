@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// `cel drive list|tail|receipt` (CEL-120). `send` lives in lib/drive.sh: it is
+// `cel drive list|tail|receipt`. `send` lives in lib/drive.sh: it is
 // `cel inbox send` and nothing else, so the delivery rules stay in the omp
 // inbox hook - the only code that can see isIdle() and the composer.
 //
 // Who is running comes from `herdr agent list` + `herdr pane list`, never
-// `cel fleet`: the console's cold fleet read timed out at 20 s under load and
-// a chat view cannot wait on the whole fleet to show one conversation.
+// `cel fleet`: a cold fleet read can take tens of seconds under load, and a
+// chat view cannot wait on the whole fleet to show one conversation.
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -33,7 +33,7 @@ function placeOf(cwd, wss) {
   const i = rest.findIndex((s) => s === "repos" || s === "products");
   return { workspace: w.name, product: i >= 0 && rest[i + 1] ? rest[i + 1] : null };
 }
-// Orchestrators today; workers join in phase 2.
+// Only orchestrators are listed: an `-orch` name, or root.
 const isOrch = (n) => typeof n === "string" && (/-orch$/.test(n) || n === "root");
 
 async function list() {

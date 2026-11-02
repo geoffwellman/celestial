@@ -1,11 +1,6 @@
 #!/usr/bin/env node
 // Pure tests for the depth views and for the rule that the console never puts
 // raw JSON in front of an operator.
-//
-// The renderers are pure functions over data the console already has, for the
-// same reason the mouse parser is: "the unit view lost the PR column" is not
-// something anyone will notice by looking at a terminal, and a view nobody can
-// assert is a view that rots.
 import assert from 'node:assert/strict';
 import {
   renderOutput, unitView, workerView, memHuman, sortWorkers,
@@ -97,7 +92,7 @@ t('the worker view is the facts line and the diagnosis under it', () => {
   }
 });
 
-// --- section 4: no raw JSON, ever ------------------------------------------
+// --- no raw JSON, ever -----------------------------------------------------
 
 t('herdr agent focus becomes one line', () => {
   const out = renderOutput('herdr agent focus bundle-orch', 'focused session=cel window w1:p0\n');
@@ -158,14 +153,13 @@ t('text that is not JSON is left exactly as it came', () => {
   assert.equal(renderOutput('cel fleet', raw), raw);
 });
 
-// --- CEL-22: memory --------------------------------------------------------
+// --- memory ----------------------------------------------------------------
 
 t('megabytes read the way an operator says them', () => {
   assert.equal(memHuman(370), '370M');
   assert.equal(memHuman(7065), '6.9G');
   assert.equal(memHuman(24576), '24G');
-  // absent is not zero: an older cel on PATH carries no box block, and
-  // "mem NaN" on the status edge is worse than no number at all
+  // absent is not zero: no box block renders as no number, never "NaN"
   assert.equal(memHuman(undefined), '');
   assert.equal(memHuman(null), '');
 });
@@ -187,8 +181,7 @@ t('the fleet table carries a unit\u2019s memory beside its counts', () => {
   assert.match(out, /unlanded 0 {3}mem 1\.9G/);
 });
 
-// `s` IS A TOGGLE, so both orders have to be an order someone asked for.
-// Biggest first: the question the sort answers is "which one do I collect".
+// `s` toggles the memory sort: biggest tree first, or the default order.
 t('the memory sort puts the biggest tree first and leaves the default order alone', () => {
   assert.deepEqual(sortWorkers(WORKERS, false).map((w) => w.id), ['ABC-49-slug', 'ABC-50-other']);
   assert.deepEqual(sortWorkers(WORKERS, true).map((w) => w.id), ['ABC-50-other', 'ABC-49-slug']);
@@ -200,12 +193,7 @@ t('the memory sort puts the biggest tree first and leaves the default order alon
 });
 
 
-// --- CEL-25: the board, the PRs, the digest and the timeline ---------------
-//
-// An operator steers by the ticket board and the pull requests, and neither
-// was on screen: the console showed the fleet's own state and nothing about
-// the work it exists to move. These are the rows, and they are pure so a
-// column that goes missing goes missing in a test.
+// --- the board, the PRs, the digest and the timeline -----------------------
 
 const NOW = Date.parse('2026-09-20T12:00:00Z');
 
@@ -352,12 +340,8 @@ t('the unit view lays out the board and the PRs with the rest', () => {
 
 // --- QUOTA: the subscriptions behind the box, direct and through the gateway
 //
-// CEL-35: ONE LIST. The gateway's accounts used to be fetched by the view
-// itself with a second command and drawn from a second shape, so the console
-// and the dashboard answered "how many subscriptions does this box have"
-// differently. Now every row - direct or through the gateway - arrives in the
-// fleet document, and `source` is the only thing that says which door it came
-// through.
+// Every row, direct or through the gateway, arrives in one fleet-document
+// list; `source` alone says which.
 const SUBS35 = [
   { source: 'direct', provider: 'claude', account: 'pi+claude-code', label: 'pi + claude-code',
     windows: [{ name: '5h', used_pct: 16, resets_at: '2026-09-18T09:00:00Z' }],
@@ -379,8 +363,7 @@ t('the quota view groups direct rows above gateway rows, from one list', () => {
   assert.ok(at('openai-codex') > at('via gateway'), 'a gateway row is not under the gateway heading');
 });
 
-// An account nobody can read is a ROW WITH A REASON, not a silence: the empty
-// console view next to a full dashboard is what started this ticket.
+// An account nobody can read is a row with a reason, not a silence.
 t('an unreadable account is a row that says why', () => {
   const text = quotaView({ subscriptions: SUBS35 }).join('\n');
   assert.match(text, /acct-alpha-1\s+unreadable: the usage endpoint could not be read/);
@@ -394,11 +377,8 @@ t('the quota view never asks the gateway itself', () => {
 
 process.stdout.write('views.test.mjs: all good\n');
 
-// --- CEL-27: subscriptions -------------------------------------------------
-// The fleet runs on two subscriptions and the console could not see either.
-// The edge is the one row that belongs to no panel, so it carries the
-// TIGHTEST window per provider - the number that decides whether delegating
-// again is worth doing at all.
+// --- subscriptions on the status edge --------------------------------------
+// The edge carries the TIGHTEST window per provider.
 
 const SUBS = [
   { provider: 'claude', account: 'a1b2c3', windows: [{ name: '5h', used_pct: 16, resets_at: '2026-09-18T09:00:00Z' }, { name: '7d', used_pct: 41, resets_at: '2026-09-19T19:00:00Z' }], extra: { state: 'disabled', reason: 'out_of_credits' } },

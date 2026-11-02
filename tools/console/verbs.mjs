@@ -1,11 +1,8 @@
 // THE VERBS: every act the console offers, as one pure function.
 //
-// Before this the console could show an operator everything and change
-// nothing: "it doesn't really feel like I can steer anything from there"
-// (owner, 2026-09-18). The seven verbs below are what steering actually is -
-// start this, answer that, land it, nudge him, restart her, move the ticket,
-// get it reviewed - and each used to exist only as a command line typed from
-// memory in another window.
+// The verbs below are what steering is - start this, answer that, land it,
+// nudge him, restart her, move the ticket, get it reviewed - each one key on
+// the panel it belongs to.
 //
 // EVERY VERB IS A PROPOSAL, never an execution. The key puts a command on the
 // command line with the cursor where the words go, and Enter runs it; Esc
@@ -47,17 +44,17 @@ export const VERBS = [
   { name: 'answer', panel: 'waiting', key: 'a', what: 'reply to the sender and close the item' },
   { name: 'nudge', panel: 'workers', key: 'n', what: 'prompt this worker' },
   { name: 'restart', panel: 'orch', key: 'R', what: 'start the orchestrator again when it is not live' },
-  // CEL-36. Not a proposal the guard runs: `talk <who>` is the console's own
-  // word for "wire my command line to that pane", and submitValue takes it
-  // before the allowlist is ever asked. It is here rather than hard-coded in
-  // the key map so the legend and the help table list it with the rest.
-  // CEL-44. `u` reconciles the whole workspace this unit lives in - the panes
-  // it declares, the orchestrators it wants, and the rename of any live agent
+  // `u` reconciles the whole workspace this unit lives in - the panes it
+  // declares, the orchestrators it wants, and the rename of any live agent
   // herdr has lost the name of. The reset key is SHIFTED because it stops
-  // things first; `R` stays the single-orchestrator restart it has always
-  // been, which is the finer instrument of the two.
+  // things first; `R` stays the single-orchestrator restart, the finer
+  // instrument of the two.
   { name: 'up', panel: 'orch', key: 'u', what: 'put this workspace back to its declared shape (idempotent)' },
   { name: 'reset', panel: 'orch', key: 'U', what: 'close this workspace down and open it again - stops agents' },
+  // Not a proposal the guard runs: `talk <who>` is the console's own word
+  // for "wire my command line to that pane", and submitValue takes it before
+  // the allowlist is ever asked. It is here rather than hard-coded in the key
+  // map so the legend and the help table list it with the rest.
   { name: 'talk', panel: 'orch', key: 't', what: 'relay the command line to this orchestrator\u2019s pane until Esc' },
 ];
 

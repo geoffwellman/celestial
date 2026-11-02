@@ -1,4 +1,4 @@
-// cel dash server - ONE for the box, zero dependencies (CEL-107). Launched by
+// cel dash server - ONE for the box, zero dependencies. Launched by
 // lib/dash.sh with CEL_DASH_CONFIG (JSON: port, host, and
 // workspaces [{name, wsdir, repos [{name, slug}], services, linearTeams,
 // triggerState}]; name/wsdir/repos at the top level are the first workspace,
@@ -21,10 +21,8 @@ import { controlSecurity, internalError } from '../http-security.mjs';
 import { createV2 } from './v2.mjs';
 import { store } from './store.mjs';
 const cfg = JSON.parse(process.env.CEL_DASH_CONFIG || '{}');
-// CEL-107: there used to be one server per workspace, each polling the same
-// herdr and gh as the others, and the per-workspace restart race took one of
-// them down. Now one server carries every workspace; a config without the
-// list (an old launcher, a test fixture) is a list of one.
+// One server carries every workspace; a config without the list (an old
+// launcher, a test fixture) is a list of one.
 const WORKSPACES = Array.isArray(cfg.workspaces) && cfg.workspaces.length ? cfg.workspaces
   : [{ name: cfg.name, wsdir: cfg.wsdir, repos: cfg.repos, services: cfg.services, linearTeams: cfg.linearTeams, triggerState: cfg.triggerState }];
 if (!cfg.name) Object.assign(cfg, { name: WORKSPACES[0].name, wsdir: WORKSPACES[0].wsdir, repos: WORKSPACES[0].repos || [] });
@@ -34,8 +32,6 @@ const wsOf = (name) => (name ? WORKSPACES.find((w) => w.name === name) || null :
 const wsParam = (req) => new URL(req.url || '/', 'http://x').searchParams.get('ws') || '';
 // The plane's own directory name is the reader's choice, so resolve it from
 // this file (tools/dash/server.mjs -> two levels up) the way bin/cel does.
-// A hardcoded fallback meant anyone who cloned under a different name got a
-// dashboard reading role files out of a directory that did not exist.
 const CEL_ROOT = process.env.CEL_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FX_DIR = process.env.CEL_EFFECTS_DIR || join(homedir(), '.local/share/cel/vendor/canvasui');
 const WORKTREES = join(homedir(), '.herdr', 'worktrees');
@@ -45,7 +41,7 @@ const security = controlSecurity({
   csrfToken: process.env.CEL_DASH_CSRF_TOKEN,
 });
 // files the pages load by name; anything else under / is not served
-const STATIC_FILES = new Set(['/factory.js', '/factory.css', '/decisions.js', '/decisions.css', '/v2.js', '/v2.css']);
+const STATIC_FILES = new Set(['/decisions.js', '/decisions.css', '/v2.js', '/v2.css']);
 const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(homedir(), '.local/share/cel/update');
 
 // The steward writes this file hours after the dashboard booted, so it is read
@@ -126,7 +122,7 @@ const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
   const f = join(w.wsdir, '.cel', 'delegations.json');
   if (!existsSync(f)) return {};
   try {
-    // CEL-116: parsed once per change, shared with the v2 feeds
+    // parsed once per change, shared with the v2 feeds
     const rows = store.json(f);
     if (!Array.isArray(rows)) return {};
     const by = {};
@@ -204,7 +200,7 @@ const triageRanks = () => {
 const inbox = (w) => cached(`inbox:${w.name}`, 8000, async () => {
   const f = join(INBOX_DIR, `${w.name}.jsonl`);
   if (!existsSync(f)) return { items: [], byWho: [], open: [] };
-  // CEL-116: the shared, append-aware parse; never mutated below
+  // the shared, append-aware parse; never mutated below
   const items = store.jsonl(f);
   // unread = after each recipient's cursor, so the dash agrees with cel inbox
   const cursor = (who) => {
@@ -223,11 +219,8 @@ const inbox = (w) => cached(`inbox:${w.name}`, 8000, async () => {
     .filter((it) => (it.kind === 'decision' || it.kind === 'blocked') && !resolved.has(it.id))
     .map((it) => ({ id: it.id, ts: it.ts, to: it.to, from: it.from, kind: it.kind, message: it.message }));
   const marked = mail.map((it) => ({ ...it, unread: !cursors[it.to] || it.id > cursors[it.to] }));
-  // CEL-43: THE SAME ORDER THE CONSOLE DRAWS. A level per message comes from a
-  // decision model through lib/triage.sh, which scores each id once and writes
-  // `<id>\t<rank>` to a cache; this card reads the cache and does the ordering
-  // itself - the model supplies the level and nothing else. No cache (or no
-  // model) is today's ordering, by the kind's own default, not a loss.
+  // The same order the console draws: a level per message from the
+  // lib/triage.sh cache, else the kind's own default.
   const ranks = triageRanks();
   const KIND_RANK = { blocked: 3, decision: 2, escalation: 2, update: 1, status: 0 };
   for (const it of marked) it.rank = ranks.has(it.id) ? ranks.get(it.id) : (KIND_RANK[it.kind] ?? 0);
@@ -330,10 +323,8 @@ const linear = (w) => cached(`linear:${w.name}`, 120000, async () => {
 // implementation in JavaScript would be a second answer to one question.
 const services = (w) => cached(`services:${w.name}`, 5000, async () => {
   const out = await run(join(CEL_ROOT, 'bin/cel'), ['services', '--workspace', w.name, '--json'], 10000);
-  // ALWAYS A LIST. A `cel` that answers something else - an old build, a
-  // wrapper, an error document - used to flow straight into the card; since
-  // CEL-43 partitions these rows, a non-array reached `.filter` and took the
-  // whole /api/state read down with it, on every request, until a restart.
+  // Always a list: a `cel` that answers something else (an old build, a
+  // wrapper, an error document) must not reach `.filter` in state().
   try { const doc = JSON.parse(out || '[]'); return Array.isArray(doc) ? doc : []; } catch { return []; }
 });
 
@@ -400,32 +391,12 @@ const paneNames = async () => {
   return m;
 };
 
-// THE SUBSCRIPTIONS, from the same 60 s cache `cel fleet` reads.
-//
-// THE SUBSCRIPTIONS, from `cel fleet --json` and from nowhere else.
-//
-// This card used to merge `cel quota --json` with `cel gateway status --json`
-// itself while the console read the fleet document, so the two surfaces
-// answered "which subscriptions does this box have" differently: the owner,
-// 2026-09-19, "The TUI is not showing any usage other than claude; the
-// dashboard is showing all usage". CEL-35 makes the fleet document the one
-// list - direct logins and gateway accounts, already folded - and the card
-// draws it without a merge of its own.
-//
-// Cached a minute, like the windows it reports: they move in hours, and the
-// fleet read walks /proc once for the whole box.
-// Box material - box services, subscriptions, the gateway panel - used to be
-// drawn by whichever of four per-workspace dashboards the `dash.box` flag
-// named (CEL-43), because four copies of one broker read as four brokers.
-// With one dashboard for the box (CEL-107) there is nothing to choose: it is
-// drawn here, once.
+// The box's workspace registry. Box material (box services, subscriptions,
+// the gateway panel) is drawn once, by the one dashboard for the box.
 const REGISTRY = () => process.env.CEL_REGISTRY || join(homedir(), '.local/share/cel/registry.yaml');
 
-// CEL-80: THE CARD IS `cel quota --json`, the rows `cel quota` prints. The
-// fleet document is the cached copy of the same list and is only as fresh as
-// the last live read, so on a box where nobody had run `cel quota` lately the
-// card showed nothing or yesterday's accounts. Asked only by the one
-// dashboard that draws the card, a minute apart; the fleet cache is the
+// The Subscriptions card is `cel quota --json`, the rows `cel quota` prints.
+// The fleet document is a cached copy of the same list and is only the
 // fallback when the live read fails.
 const subscriptions = () => cached('subs', 60000, async () => {
   try {
@@ -438,7 +409,7 @@ const subscriptions = () => cached('subs', 60000, async () => {
   } catch { return []; }
 });
 
-// The gateway's own web panel (CEL-80). It listens on loopback only, so the
+// The gateway's own web panel. It listens on loopback only, so the
 // card links it only when this page is itself being viewed on loopback - over
 // the ssh tunnel, or on the box - and shows the tunnel line otherwise. A link
 // that works only on the box, shown on the tailnet, is an invitation to
@@ -451,7 +422,7 @@ const gatewayPanel = () => cached('gwpanel', 600000, async () => {
 });
 const isLoopback = (addr) => /^(127\.|::1$|::ffff:127\.)/.test(String(addr || ''));
 
-// NEEDS YOU (CEL-93): the owner's decisions across every workspace, read from
+// NEEDS YOU: the owner's decisions across every workspace, read from
 // `cel decide list --json` so the board and the CLI cannot disagree about
 // what is open. Answering goes back through `cel decide answer|drop` - one
 // writer path, so the asker is told through its inbox exactly as from a shell.
@@ -463,10 +434,8 @@ const decisions = () => cached('decisions', REFRESH_MS, async () => {
   return out.split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
 });
 
-// CEL-99: 53 decisions in one flat list, in whatever order the CLI read the
-// mailboxes, was a list nobody could work through. Grouped by workspace (the
-// owner thinks per project), and inside a group: urgent first, then what
-// blocks something, then oldest - the order an owner should answer in.
+// Grouped by workspace, and inside a group: urgent first, then what blocks
+// something, then oldest - the order an owner should answer in.
 const decisionRank = (d) => (d.urgent ? 0 : 2) + ((d.blocks || '') ? 0 : 1);
 const orderDecisions = (list) => [...list].sort((a, b) =>
   decisionRank(a) - decisionRank(b) || (b.age_secs || 0) - (a.age_secs || 0));
@@ -508,9 +477,9 @@ const state = async (req, w) => {
   const needsYou = orderDecisions(await decisions());
   const needsYouGroups = groupDecisions(needsYou);
   const [wts, prList, ags, bl, me, mail, lin, pnames, subs, svcs, gwp] = await Promise.all([worktreeRows(w), prs(w), wsAgents(w), backlog(w), viewer(), inbox(w), linear(w), paneNames(), subscriptions(), services(w), gatewayPanel()]);
-  // A PARTITION, NOT A NEW QUERY: `cel services --json` has tagged every row
-  // with the workspace that owns it since CEL-34, and `box` is the tag for
-  // what belongs to nobody. A workspace's panel lists its own rows only.
+  // A partition, not a new query: `cel services --json` tags every row with
+  // the workspace that owns it, and `box` is the tag for what belongs to
+  // nobody. A workspace's panel lists its own rows only.
   const wsServices = svcs.filter((x) => (x.workspace || w.name) !== 'box');
   const boxServices = svcs.filter((x) => (x.workspace || '') === 'box');
   // an inbox line addressed to or from a pane shows that pane's name
@@ -580,13 +549,9 @@ const readBody = async (req, max = 20000) => {
 // One line per request on stderr (so it lands in the dash log). Without it,
 // "I refreshed and nothing changed" is unanswerable: you cannot tell a stale
 // browser from a request that never arrived.
-// A LOG LINE IS A PLACE A SECRET CAN END UP. The proxy accepts its control
-// token as a query parameter, because a browser cannot set a header on a
-// plain navigation - and the first cut of this printed `req.url` verbatim, so
-// clicking a service link wrote the dash's control token, in cleartext, into
-// a log that outlives the process. Redaction lives in the ONE function that
-// writes a request line rather than at each call site, where the next one
-// would be forgotten.
+// A log line is a place a secret can end up: the proxy accepts its control
+// token as a query parameter, so every request line is redacted here, in the
+// one function that writes it, rather than at each call site.
 const SECRET_PARAMS = /\b(cel_token|token|access_token|authorization|api_key|key)=[^&\s]*/gi;
 const safeUrl = (url) => String(url || '').replace(SECRET_PARAMS, (m) => `${m.split('=')[0]}=REDACTED`);
 
@@ -595,22 +560,17 @@ const logReq = (req, code) => {
   console.error(`${new Date().toISOString()} ${req.method} ${safeUrl(req.url)} ${code} ${req.headers.host || '-'} "${ua}"`);
 };
 
-// CEL-105: the v2 page's feeds and its one named-action door, in their own
-// module so this file does not grow another thousand lines.
+// the v2 page's feeds and its one named-action door
 const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents });
 
-// CEL-116 (live check of #141): /api/state is what the Needs-you card and
-// the header count are drawn from, and it was the one thing a refresh still
-// waited 3-4 s for - the feeds painted, Needs-you said 0, then jumped to 14.
-// It is served warm now, like the v2 feeds: the last answer at once, a
-// refresh behind it past CEL_DASH_STATE_TTL_MS (default the page refresh, at most 5 s), kept warm for a
-// minute after a page last asked. A failed read is never kept: cold, it
-// answers 500 as before; warm, the last good answer stands. Any POST may have
-// changed it (a resolve, a decision), so a POST forgets every answer.
-// A warm answer is only served while the files it was read from are as they
-// were: a new inbox line (a decision asked, a resolution) or a ledger write
-// is the very thing the owner is waiting to see, so it drops the warm answer
-// and the upstream caches that would hide it, and the ask computes fresh.
+// /api/state is served warm, like the v2 feeds: the last answer at once, a
+// refresh behind it past CEL_DASH_STATE_TTL_MS (default the page refresh, at
+// most 5 s), kept warm for a minute after a page last asked. A failed read is
+// never kept: cold, it answers 500; warm, the last good answer stands. Any
+// POST may have changed it, so a POST forgets every answer.
+// A warm answer is only served while the files it was read from are
+// unchanged: a new inbox line or a ledger write drops the warm answer and the
+// upstream caches that would hide it, and the ask computes fresh.
 const states = new Map();
 const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
 const stateSig = () => WORKSPACES.map((x) => `${fileSig(join(INBOX_DIR, `${x.name}.jsonl`))}/${fileSig(join(x.wsdir, '.cel', 'delegations.json'))}`).join('|');
@@ -620,10 +580,8 @@ const warmState = (w, warmer = false) => {
   if (!warmer) f.asked = Date.now();
   const sig = stateSig();
   // Every computation resolves to ITS OWN answer, and is kept only if no
-  // later-started one has landed first. Review on #141: a request waiting on
-  // a computation that a newer file change superseded used to wake to an
-  // emptied entry and answer 500 - the classic page's refresh failed right
-  // after every mutation, which is exactly when the owner is mid-thought.
+  // later-started one has landed first, so a request waiting on a superseded
+  // computation still gets an answer rather than an emptied entry.
   const refresh = () => {
     if (f.p && f.psig === sig) return f.p;
     const gen = ++f.gen;
@@ -646,13 +604,8 @@ const warmState = (w, warmer = false) => {
   if (Date.now() - f.at >= STATE_TTL()) refresh().catch(() => {});
   return Promise.resolve({ v: f.v, at: f.at });
 };
-// The warm read runs AHEAD of the page's poll, once per state TTL: the
-// classic page prints the answer's own `updated` time, and polls every
-// REFRESH_MS - served from a value refreshed only when an ask found it stale,
-// every other poll repeated the last answer and the page fell a refresh
-// behind (review on #141). Ahead of the poll, each poll gets a read at most
-// one TTL old, as fresh as the per-request read it replaces, and every open
-// tab shares it.
+// The warm read runs AHEAD of the page's poll, once per state TTL, so each
+// poll gets a read at most one TTL old and every open tab shares it.
 const STATE_TTL = () => Number(process.env.CEL_DASH_STATE_TTL_MS) || Math.min(5000, REFRESH_MS);
 setInterval(() => {
   for (const [k, f] of states) {
@@ -748,15 +701,14 @@ const server = createServer(async (req, res) => {
       return;
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && (req.url === '/' || req.url.startsWith('/?'))) {
-      // v2 (CEL-106) is the front door. The shell is read per request, and
-      // no-store, so a deploy shows up on the next reload.
+      // v2 is the front door. The shell is read per request, and no-store,
+      // so a deploy shows up on the next reload.
       const body = readFileSync(new URL('./v2.html', import.meta.url), 'utf8')
         .replace('__CEL_CSRF__', security.token).replace('__CEL_BUILD__', htmlText(cfg.build)).replace('<!--UPDATE-CHIP-->', updateChip());
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' })
         .end(req.method === 'HEAD' ? undefined : body);
     } else if ((req.method === 'GET' || req.method === 'HEAD') && (req.url === '/classic' || req.url.startsWith('/classic?'))) {
-      // CEL-123: the classic page is retired (no browser had opened it since
-      // v2); a bookmark lands on the one dashboard instead of a 404.
+      // the retired classic page: a bookmark lands on the one dashboard
       res.writeHead(302, { location: '/', 'cache-control': 'no-store' }).end();
     } else if (req.method === 'GET' && (req.url === '/api/state' || req.url.startsWith('/api/state?'))) {
       const w = wsOf(wsParam(req));
@@ -780,19 +732,6 @@ const server = createServer(async (req, res) => {
       if (!/^[A-Za-z0-9]+:[A-Za-z0-9]+$/.test(String(pane || ''))) { res.writeHead(400).end('bad pane id'); return; }
       const out = await run('herdr', ['pane', 'focus', String(pane)], 10000);
       res.writeHead(out === null ? 502 : 200).end(out === null ? 'focus failed' : 'ok');
-    } else if (req.method === 'POST' && req.url === '/api/inbox-resolve') {
-      // Closing a decision from the board. Appends a resolution record via
-      // the same command an agent would use, so the ledger has one writer
-      // path and the dash never invents its own format.
-      const { id, ws } = await readBody(req, 2000);
-      if (!/^\d{10,25}$/.test(String(id || ''))) { res.writeHead(400).end('bad decision id'); return; }
-      const w = wsOf(String(ws || ''));
-      if (!w) { res.writeHead(400).end('no such workspace'); return; }
-      const out = await run(join(CEL_ROOT, 'bin/cel'),
-        ['inbox', 'resolve', String(id), '--by', 'dashboard', '--workspace', w.name], 10000);
-      if (out === null) { res.writeHead(502).end('could not resolve (already resolved, or not a decision?)'); return; }
-      delete cache[`inbox:${w.name}`];
-      res.writeHead(200).end('ok');
     } else if (req.method === 'POST' && req.url === '/api/decide') {
       // POST only, behind the same Host and CSRF guard as every other control
       // (security.allow above). The page confirms the exact text first.
@@ -820,19 +759,6 @@ const server = createServer(async (req, res) => {
         results.push({ id: String((it && it.id) || ''), ok: r.code === 200, ...(r.error ? { error: r.error } : {}) });
       }
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ results }));
-    } else if (req.method === 'POST' && req.url === '/api/ticket-state') {
-      // Moving a ticket is how work is STARTED from the board: the trigger
-      // state is what the steward watches for, so this endpoint is the
-      // dashboard's half of "kick off a build".
-      const { id, state: st } = await readBody(req, 2000);
-      if (!/^[A-Z][A-Z0-9]*-\d+$/.test(String(id || ''))) { res.writeHead(400).end('bad ticket id'); return; }
-      if (!String(st || '').match(/^[A-Za-z0-9 ._-]{1,40}$/)) { res.writeHead(400).end('bad state'); return; }
-      const out = await run(join(CEL_ROOT, 'core/skills/linear/bin/cel-linear'),
-        ['state', String(id), String(st)], 20000);
-      if (out === null) { res.writeHead(502).end('cel-linear could not move it (key? state name?)'); return; }
-      // the card must reflect the move immediately, whichever workspace shows it
-      for (const k of Object.keys(cache)) if (k.startsWith('linear:')) delete cache[k];
-      res.writeHead(200).end(out.trim() || 'ok');
     } else {
       res.writeHead(404).end('not found');
     }

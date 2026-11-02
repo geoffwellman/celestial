@@ -1,16 +1,12 @@
 # shellcheck shell=bash
-# `cel console` - the plane's own TUI and the small model wired into its
-# command line. Every assertion here drives a NON-INTERACTIVE mode: a suite
-# that needed a terminal would be a suite nobody runs, so the TUI's three
-# panels are rendered once to stdout and the translator is exercised against a
-# stub HTTP server rather than a provider.
+# `cel console`: every assertion drives a non-interactive mode (panels rendered
+# once to stdout, the translator against a stub HTTP server), so no terminal.
 source "$CEL_ROOT/lib/common.sh"
 
 CONSOLE_MJS="$CEL_ROOT/tools/console/console.mjs"
 
-# A miniature box: a `cel` stand-in that answers the two reads the console
-# makes, plus a mailbox directory. Never the live box - the console reads root
-# mail, and a test that drained it would cost someone a decision.
+# A miniature box: a `cel` stand-in for the console's reads plus a mailbox.
+# Never the live box - a test that drained root mail would lose a decision.
 _console_setup() {
   T="$(mktemp -d)"
   mkdir -p "$T/bin" "$T/inbox"
@@ -57,11 +53,9 @@ EOF
 
 _console_teardown() { rm -rf "$T"; }
 
-# A timestamp <seconds> ago, in the shape the mailbox writes. Every fixture
-# that feeds one of the console's relative windows - the 24h tail, the digest
-# since the cursor, the timeline - is anchored HERE rather than on a date
-# somebody typed, so the suite says the same thing tomorrow as today. See
-# test_console_time_windowed_fixtures_carry_no_frozen_dates.
+# A timestamp <seconds> ago in the mailbox's shape; every fixture feeding a
+# relative window is anchored here (see
+# test_console_time_windowed_fixtures_carry_no_frozen_dates).
 _console_ago() { # <seconds> [format]
   date -u -d "@$(( $(date -u +%s) - ${1:-0} ))" "+${2:-%Y-%m-%dT%H:%M:%S+00:00}"
 }
@@ -81,9 +75,7 @@ test_console_render_once_shows_fleet_decisions_and_inbox() {
   _console_teardown
 }
 
-# ONE POLICY, TWO SURFACES. The refusal has to be the guard's, word for word,
-# or the TUI and the agent console start disagreeing about what the console
-# may do - and the one that is wrong is always the one nobody tested.
+# The TUI's refusal is the guard's, word for word, so both consoles agree.
 test_console_refuses_a_command_outside_the_allowlist() {
   _console_setup
   local out rc=0
@@ -104,14 +96,8 @@ test_console_runs_an_allowlisted_command() {
 
 # --- the translator ---------------------------------------------------------
 
-# A provider that is a file on disk: the console must be testable without a
-# key, a network or anyone's credit.
-#
-# The stub is started with its stdout and stderr on a FILE and killed by a
-# trap as well as by hand. On 2026-09-16 a stub that inherited the suite's
-# stdout held the pipe open after the test returned: `tests/run.sh console |
-# tail` never saw EOF and ran for nearly two hours against a server that had
-# been reparented to init. A server outliving its test is a hung suite.
+# A provider stub on disk (no key, network or credit). Its output goes to a
+# file and a trap kills it: a server that outlives its test hangs the suite.
 _console_stub_server() { # <reply-content>
   cat >"$T/stub.mjs" <<'EOF'
 import { createServer } from 'node:http';
@@ -182,9 +168,7 @@ test_console_translate_rejects_prose() {
   _console_teardown
 }
 
-# THE TUI MUST BE FULLY USEFUL WITH NO LLM AT ALL. A console that refused to
-# start without a provider key would make the deterministic panels - the part
-# that is always right - hostage to an optional convenience.
+# The deterministic panels must work with no LLM configured at all.
 test_console_translate_without_config_says_so() {
   _console_setup
   local out rc=0
@@ -284,10 +268,7 @@ test_cel_console_is_in_the_help() {
 
 # --- the ink dependencies --------------------------------------------------
 
-# The TUI is ink, so it has node_modules - the first thing on this plane that
-# does. A missing install must produce ONE line naming the fix, because the
-# alternative is an ERR_MODULE_NOT_FOUND stack trace in front of an operator
-# who has no reason to know the console is a React app.
+# A missing ink install prints ONE line naming the fix, never a stack trace.
 test_console_deps_are_detected_and_the_fix_is_named() {
   source "$CEL_ROOT/lib/console.sh"
   local D; D="$(mktemp -d)"
@@ -329,26 +310,19 @@ test_console_dependencies_are_pinned_and_committed() {
   assert_eq "$tracked" ''
 }
 
-# --- v2: mouse, line editing, options and chains ---------------------------
+# --- mouse, line editing, options and chains --------------------------------
 
-# The mouse parser and the hit map are PURE on purpose: a terminal that has to
-# be driven by hand to prove a click lands on the right row is a thing nobody
-# proves, and "off by one row" is the whole failure mode of a hit map.
+# The mouse parser and hit map are pure, so row-accurate clicks are provable.
 test_console_mouse_parser_and_hit_test_are_proved() {
   node "$CEL_ROOT/tools/console/mouse.test.mjs"
 }
 
-# The command line edits like a shell, and the history walk filters by prefix.
-# Both are pure functions for the same reason as the mouse: keystroke behaviour
-# nobody can assert is keystroke behaviour that regresses in silence.
+# Shell-style line editing and the prefix-filtered history walk are pure.
 test_console_line_editor_and_history_walk_are_proved() {
   node "$CEL_ROOT/tools/console/edit.test.mjs"
 }
 
-# A MISS IS NOT A DEAD END. "no command for that" told the operator nothing
-# they did not already know; the second ask returns candidates with reasons and
-# the operator picks one, which is what a person expects of a thing that failed
-# to understand them.
+# A miss is not a dead end: the second ask returns candidates with reasons.
 test_console_ask_offers_numbered_options_on_a_miss() {
   _console_setup
   _console_config
@@ -367,9 +341,7 @@ cel-fanout status --workspace alpha -- what is in flight there'
   _console_teardown
 }
 
-# One sentence can be a SEQUENCE. "clean the blockers on alpha" is a read and
-# then a resolve; a translator that can only ever return one line makes the
-# operator type the second half themselves.
+# One sentence can translate to a chain (a read, then a resolve).
 test_console_ask_returns_a_chain_of_commands() {
   _console_setup
   _console_config
@@ -385,9 +357,7 @@ cel inbox resolve --all --from widget-orch --workspace alpha'
   _console_teardown
 }
 
-# The response line used to overwrite the key legend and never clear, so the
-# operator lost their bindings to a message from four minutes ago. Two lines,
-# always: the transient one and the permanent one.
+# The transient response line and the key legend are separate lines.
 test_console_render_once_keeps_status_and_legend_apart() {
   _console_setup
   local out
@@ -414,11 +384,7 @@ test_console_run_appends_to_history() {
 
 # --- full screen -----------------------------------------------------------
 
-# The console runs on the alternate screen, like htop or vim: it fills the
-# terminal, nothing it draws lands in the scrollback, and quitting gives the
-# operator back the screen they had. The enter/leave pairs are proved by a unit
-# test because the failure mode - leaving on one exit path and not another - is
-# a terminal the owner has to reset by hand.
+# The console runs on the alternate screen; every exit path must leave it.
 test_console_terminal_mode_pairs_are_proved() {
   node "$CEL_ROOT/tools/console/term.test.mjs"
 }
@@ -435,10 +401,8 @@ test_console_render_once_never_switches_screens() {
   _console_teardown
 }
 
-# Since CEL-14 a unit is a PRODUCT, which may carry several repos. The console
-# said "(2 repos)" for two products and showed a declared product under its
-# bare name, which is the one place an operator cannot tell a product from the
-# repo it happens to share a name with.
+# A unit is a product that may carry several repos: the head line counts
+# products and a declared product names its repos.
 test_console_counts_products_and_names_their_repos() {
   _console_setup
   cat >"$T/fleet.json" <<'EOF'
@@ -454,16 +418,12 @@ EOF
   assert_contains "$out" '(2 products)'
   assert_contains "$out" 'widget (widget-core, widget-web)'
   case "$out" in *'repos)'*) echo 'the head line still counts repos'; return 1;; esac
-  # An undeclared unit is still just its name - a repo dressed up as a product
-  # with "(gadget)" after it is noise.
+  # An undeclared unit is just its name, with no repo list.
   case "$out" in *'gadget (gadget)'*) echo 'an undeclared unit got a repo list'; return 1;; esac
   _console_teardown
 }
 
-# A CHAIN IS CHECKED WHOLE, THEN RUN. Validating each line as it came up meant a
-# chain whose second line the guard refuses had already run its first: the
-# operator pressed Enter on a proposal they were told would be checked, and got
-# half of it plus a refusal. Nothing runs until every line is allowed.
+# A chain is checked whole, then run: nothing runs until every line is allowed.
 test_console_chain_runs_nothing_when_a_later_line_is_denied() {
   _console_setup
   local ran="$T/ran.log"
@@ -499,11 +459,10 @@ test_console_chain_runs_its_lines_in_order() {
   _console_teardown
 }
 
-# --- CEL-20: depth ---------------------------------------------------------
+# --- depth ------------------------------------------------------------------
 
-# A box with WORKERS in it. CEL-19's `workers_list` is the frozen contract the
-# console is written against: until it lands the shape comes from this stub,
-# which is the same thing the console will read from `cel fleet --json`.
+# A box with workers in it, stubbed in the `workers_list` shape of
+# `cel fleet --json`.
 _console_depth_setup() {
   _console_setup
   cat >"$T/fleet.json" <<'EOF'
@@ -545,9 +504,7 @@ EOF
   export CEL_FANOUT_BIN="$T/bin/cel-fanout"
 }
 
-# THE UNIT VIEW IS THE ANSWER TO "what is going on with bundle". Before it, a
-# fleet row said "workers 2/4 stalled 1" and every follow-up question meant
-# leaving the console.
+# The unit view answers "what is going on with <unit>" in the console.
 test_console_render_once_unit_shows_orchestrator_workers_and_mail() {
   _console_depth_setup
   local out
@@ -579,9 +536,7 @@ test_console_render_once_unit_that_does_not_exist_says_so() {
   _console_teardown
 }
 
-# THE WORKER VIEW IS THE ANSWER TO "why". It runs `cel-fanout why` on open and
-# shows what it said, because telling the operator to go and run the command
-# themselves is what the console did before and it is what they complained of.
+# The worker view runs `cel-fanout why` on open and shows what it said.
 test_console_render_once_worker_runs_why_and_shows_it() {
   _console_depth_setup
   local out
@@ -606,20 +561,17 @@ test_console_render_once_worker_that_does_not_exist_says_so() {
   _console_teardown
 }
 
-# NO RAW JSON, EVER. The console knows the shape of everything it runs, so an
-# operator who clicked a row got a box of braces for no reason at all.
+# No raw JSON, ever: the console renders everything it runs.
 test_console_output_rendering_is_proved() {
   node "$CEL_ROOT/tools/console/views.test.mjs"
 }
 
-# CEL-75: a fleet read that times out under load keeps the last good board.
+# A fleet read that times out under load keeps the last good board.
 test_console_keeps_the_last_good_fleet_when_a_refresh_fails() {
   node "$CEL_ROOT/tools/console/state.test.mjs"
 }
 
-# THE MODEL ANSWERS FROM STATE. "which workers are idle" is in the state the
-# console already sends; running three commands to re-learn it is the console
-# handing the operator homework.
+# The model answers from the state it was sent, without running commands.
 test_console_ask_can_answer_from_state_without_running_anything() {
   _console_depth_setup
   _console_config
@@ -668,11 +620,8 @@ test_console_legends_name_the_depth_views() {
   assert_contains "$out" 'Enter'
 }
 
-# --- CEL-22: memory --------------------------------------------------------
-# "how are we monitoring memory for the workers and can that be visualised in
-# the console too?" - the owner, 2026-09-18. The console reads the same
-# `cel fleet --json` every other answer comes from, so the fixture carries the
-# `box` block and the per-tree numbers CEL-22 added to it.
+# --- memory -----------------------------------------------------------------
+# The fixture carries the `box` block and per-tree memory of `cel fleet --json`.
 _console_memory_setup() {
   _console_depth_setup
   cat >"$T/fleet.json" <<'EOF'
@@ -693,10 +642,8 @@ _console_memory_setup() {
 EOF
 }
 
-# THE FLEET ROW AND THE STATUS EDGE. A unit's footprint belongs beside its
-# worker count - the two numbers an operator weighs against each other before
-# delegating another one - and the box's headroom belongs where nothing else
-# competes for it.
+# A unit's memory footprint sits beside its worker count; the box's headroom
+# is on the status edge.
 test_console_render_once_shows_memory_per_unit_and_the_boxs_headroom() {
   _console_memory_setup
   local out
@@ -746,7 +693,7 @@ test_console_unit_legend_names_the_memory_sort() {
   assert_contains "$out" 's mem'
 }
 
-# --- CEL-23: the decision router -------------------------------------------
+# --- the decision router ----------------------------------------------------
 
 # A DECISION model, not a chat one: it does not write the command line, it
 # picks one label out of ten and the console fills the slots itself. The stub
@@ -766,9 +713,8 @@ const s = createServer((req, res) => {
     const code = Number(process.env.RSTUB_STATUS || '200');
     if (code !== 200) { res.writeHead(code, { 'content-type': 'text/plain' }); res.end('nope'); return; }
     const probs = process.env.RSTUB_PROBS ? JSON.parse(process.env.RSTUB_PROBS) : undefined;
-    // CEL-41: one request carries every question, so the stub counts the
-    // requests it was sent - a second call is the regression this file is
-    // here to catch - and answers whatever extra questions a test wants.
+    // One request carries every question, so the stub counts requests (a
+    // second call is the regression) and answers any extra questions asked.
     appendFileSync(process.env.RSTUB_COUNT_FILE, 'req\n');
     const extra = process.env.RSTUB_EXTRA ? JSON.parse(process.env.RSTUB_EXTRA) : {};
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -893,8 +839,7 @@ test_console_router_failure_falls_through_to_the_chat_model() {
   _console_teardown
 }
 
-# `--no-router` is the escape hatch: one flag and the console is exactly what
-# it was before this ticket.
+# `--no-router` (or the config switch) turns the router off entirely.
 test_console_no_router_asks_the_chat_model_directly() {
   _console_depth_setup
   _console_router_config
@@ -924,14 +869,9 @@ test_console_router_slot_filling_is_proved() {
   node "$CEL_ROOT/tools/console/router.test.mjs"
 }
 
-# COMMAND SUBSTITUTION IN A MESSAGE. The `message` intent is the one place an
-# operator's own words reach the command line, and that line is handed to
-# `bash -c`. Inside DOUBLE quotes bash still runs `$(...)` and backticks, and
-# the guard's console branch allows every `cel ...` line without looking at
-# metacharacters - so `tell bundle-orch "hi $(touch /tmp/pwned)"` was a
-# proposal that ran `touch` the moment the operator pressed Enter. The text is
-# single-quoted now, and this test runs the router's own output through the
-# console's real execution path to prove it.
+# The `message` intent single-quotes the operator's text, so `$(...)` and
+# backticks reach `bash -c` inert (the guard does not check metacharacters);
+# proved through the console's real execution path.
 test_console_router_message_text_cannot_run_a_command() {
   _console_depth_setup
   PATH="$T/bin:$PATH"
@@ -950,10 +890,8 @@ test_console_router_message_text_cannot_run_a_command() {
   _console_teardown
 }
 
-# --- CEL-27: the subscriptions on the status edge and in their own view ------
-# Stubbed fleet JSON, because the console must never make the network call
-# itself: the edge and the QUOTA view render from whatever `cel fleet --json`
-# already carries, which is the 60 s cache.
+# --- subscriptions on the status edge and in their own view ------------------
+# Rendered from the stubbed `cel fleet --json`; the console never calls out.
 _console_subs_setup() {
   _console_setup
   cat >"$T/fleet.json" <<'EOF'
@@ -987,22 +925,15 @@ test_console_quota_view_renders_one_row_per_account_and_window() {
   assert_contains "$out" 'a1b2c3'
   assert_contains "$out" '5h'
   assert_contains "$out" '16%'
-  # CEL-49: the disabled reason is top-up being switched off, and it says so -
-  # "out of credits" on a healthy account is worse than silence.
+  # The disabled reason says top-up is off, never "out of credits".
   assert_contains "$out" 'top-up is off'
   _console_teardown
 }
 
-# CEL-35's parity test (console vs classic dashboard subscription cells) went
-# with the classic page in CEL-123: only one copy of subCells is left.
+# --- the console as a control panel ------------------------------------------
 
-# --- CEL-25: the console as a control panel ---------------------------------
-
-# The BOARD and the PRS are the two things an operator actually steers by, and
-# neither was on screen: the console showed the fleet's own state and nothing
-# about the work it exists to move. Both are stubbed here for the same reason
-# the rest of this file stubs `cel` - a suite that asked Linear and GitHub for
-# the truth would be a suite that fails when someone else merges something.
+# The board and the PRs are stubbed like `cel`, so no assertion depends on
+# live Linear or GitHub state.
 _console_panel_setup() {
   _console_depth_setup
   mkdir -p "$T/cache" "$T/state"
@@ -1050,9 +981,8 @@ EOF
   # since the operator last looked, so a frozen cursor decides which fixture
   # mail is in the count purely by what today is.
   export CEL_TEST_CURSOR_AGO=3600
-  # ONE clock read (CEL-79): the cursor and the "since HH:MM" the test expects
-  # both come from this epoch. Two reads flaked whenever a minute boundary fell
-  # between setup and the assertion.
+  # One clock read: the cursor and the expected "since HH:MM" share this epoch,
+  # so a minute boundary cannot fall between them.
   CEL_TEST_CURSOR_AT=$(( $(date -u +%s) - CEL_TEST_CURSOR_AGO ))
   date -u -d "@$CEL_TEST_CURSOR_AT" '+%Y-%m-%dT%H:%M:%SZ' | tr -d '\n' > "$T/state/alpha.root.console.cursor"
 }
@@ -1096,10 +1026,7 @@ test_console_verb_keys_are_proved() {
   node "$CEL_ROOT/tools/console/verbs.test.mjs"
 }
 
-# THE SERVICES VIEW. "is the builder up, and what is its URL from the laptop"
-# is one keypress from the main screen, and this is the text that key draws -
-# rendered from a stubbed `cel services --json` so the assertion is on the
-# columns rather than on whatever this box happens to be running.
+# The services view, rendered from a stubbed `cel services --json`.
 _console_services_setup() {
   T="$(mktemp -d)"
   mkdir -p "$T/bin" "$T/inbox"
@@ -1152,11 +1079,8 @@ test_console_fleet_header_counts_services_up_and_down() {
   _console_teardown
 }
 
-# CEL-36: reaching an orchestrator now, and seeing it answer. The watch and
-# the relay are ink in the TUI and cannot be driven without a terminal, so
-# what is asserted is everything that DECIDES: which message counts as the
-# reply, which command a relayed line becomes, and what the operator is told
-# when nothing comes back.
+# The watch and relay are ink, so this asserts what decides: which message is
+# the reply, which command a relayed line becomes, and the no-reply message.
 test_console_steering_helpers_are_proved() {
   node "$CEL_ROOT/tools/console/steer.test.mjs"
 }
@@ -1178,20 +1102,14 @@ test_console_talk_mode_has_a_legend_that_says_how_to_leave() {
   assert_contains "$out" 'relay'
 }
 
-# --- CEL-37: the console takes its watcher with it -------------------------
+# --- the console takes its watcher with it ----------------------------------
 
-# THIRTEEN WATCHERS REPARENTED TO INIT, four of them days old. Every console
-# that exited left `cel inbox watch` and its `tail`/`jq` children running
-# against a pane that no longer existed. The lifetime is a unit test for the
-# same reason the screen modes are: the failure is invisible until someone
-# walks /proc a week later.
+# An exiting console kills its `cel inbox watch` and its `tail`/`jq` children.
 test_console_watcher_lifetime_is_proved() {
   node "$CEL_ROOT/tools/console/watcher.test.mjs"
 }
 
-# A gigabyte of orphans under `celestial-orch 1.7G` went unmentioned because
-# no view had a field for it. The box line is where an operator looks at the
-# box, so that is where the count goes - and only when there is one.
+# The box line names orphaned processes and their memory, only when present.
 test_console_box_line_names_the_orphans_when_there_are_any() {
   _console_memory_setup
   local out
@@ -1216,13 +1134,10 @@ test_console_box_line_is_silent_when_there_are_no_orphans() {
   _console_teardown
 }
 
-# --- CEL-41: the console answers instead of transcribing --------------------
+# --- the console answers instead of transcribing ----------------------------
 
-# MANY QUESTIONS COST NOTHING EXTRA. The decisions endpoint evaluates every
-# question in one request in parallel, so the router asks for the slots, the
-# danger and the answerability beside the intent rather than spending its one
-# call on a single label and filling the rest with regexes. The count file is
-# the assertion that matters: a second request is latency the operator pays.
+# The router asks every question in one decisions request; the count file
+# asserts there is no second request.
 test_console_router_asks_every_question_in_one_request() {
   _console_depth_setup
   _console_router_config
@@ -1339,10 +1254,7 @@ EOF
   _console_teardown
 }
 
-# THE MODEL PICKS THE ROWS; THE CONSOLE WRITES THE LINE. Twenty-two workers
-# is a wall of text that answers nothing. The choice question ranks the rows
-# in one call, and every number in the sentence underneath them is counted
-# here in code - jev cannot count and is not asked to (jaggedness #2, #3).
+# The model picks the rows; the console counts every number in the summary.
 test_console_triage_picks_rows_and_the_console_counts_them() {
   T="$(mktemp -d)"
   cat >"$T/triage.test.mjs" <<'EOF'
@@ -1407,11 +1319,8 @@ test_console_row_and_confidence_keys_are_documented() {
   assert_contains "$docs" 'summary_timeout'
 }
 
-# THE CHAT MODEL WRITES THE SENTENCE; IT DOES NOT WRITE A NUMBER (CEL-41 §5,
-# the owner: "I'm not suggesting we use jev for summarisation, we can use
-# deepseek for that"). Every digit in the prose must already be in the facts
-# object the console computed, because "7 of 40 workers need you" is a figure
-# an operator acts on and no style rule catches it.
+# The chat model writes the sentence, never a number: every digit in its prose
+# must already be in the facts the console computed.
 test_console_summary_prose_never_invents_a_number() {
   _console_setup
   _console_config
@@ -1478,10 +1387,8 @@ EOF
   _console_teardown
 }
 
-# CEL-44: the vocabulary is the one place both consoles read what they may do.
-# `cel ws down` stops PANES; the line that says so exists because the nearest
-# words to it - "close the workspace", "clean it up" - are what an operator
-# reaches for when they mean worktrees, and that is `cel-fanout release`.
+# The vocabulary carries `cel ws up/down/reset` and says down stops PANES,
+# never worktrees (that is `cel-fanout release`).
 test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
   local v="$CEL_ROOT/tools/console/vocabulary.md"
   assert_contains "$(cat "$v")" 'cel ws up <w>'
@@ -1490,12 +1397,9 @@ test_console_vocabulary_carries_the_workspace_lifecycle_rows() {
   assert_contains "$(cat "$v")" 'PANES, never worktrees'
 }
 
-# --- CEL-43: the digest ranks what is left ----------------------------------
-# Root's mailbox is where everything shouts at once, and the console drew it
-# newest-first: a status line from a minute ago sat above an escalation from
-# yesterday saying a reviewer pane had died. The levels come from the model
-# through lib/triage.sh's cache - the console never scores anything itself,
-# it reads the cache and does the ordering and the cut in code.
+# --- the digest ranks what is left ------------------------------------------
+# Root mail is ordered by lib/triage.sh's cached levels and cut in code; the
+# console never scores anything itself.
 test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
   _console_panel_setup
   printf '%s\n' \
@@ -1518,13 +1422,9 @@ test_console_digest_ranks_root_mail_and_cuts_at_the_top_three() {
   _console_teardown
 }
 
-# --- CEL-43 section 5: a detail view that cannot resolve what it shows ------
-# Observed by the owner on a real BLOCKED item: the header read `id undefined`
-# and [resolve] did nothing. Two faults. The INBOX tail dropped the id of the
-# record it had just parsed, so a detail opened from that pane had no identity
-# (one opened from WAITING did, which is why it worked there); and a tail row
-# can be a HISTORICAL record whose item the steward already self-cleared, yet
-# the view offered a button that could never work.
+# --- detail view identity and actions ---------------------------------------
+# An INBOX tail row keeps the id of its record and sees the resolution that
+# closed it.
 test_console_tail_rows_carry_the_id_of_the_record() {
   _console_setup
   printf '%s\n' \
@@ -1570,7 +1470,7 @@ assert.deepEqual(detailButtons(done, [], false), ['reply', 'go to']);
 
 // a tail row for something that was never an open item at all
 assert.equal(detailActions({ id: 'm1', kind: 'status' }, []).note, 'not an open item - this is the log');
-// and the id-less row that started this: no identity, no button
+// and an id-less row: no identity, no button
 assert.equal(detailActions({ kind: 'blocked' }, []).resolve, false);
 
 // the outcome of a resolve is REPORTED, either way
@@ -1587,25 +1487,9 @@ EOF
   _console_teardown
 }
 
-# --- CEL-57: a suite that goes red because a day passed ---------------------
-#
-# On 2026-09-21T09:00Z three console tests turned red on a `main` whose every
-# PR had landed green. No commit did it: the console's tail, digest and
-# timeline are WINDOWS ON NOW (24 hours by default), and the fixtures pinned
-# absolute timestamps - 2026-09-20T09:00Z mail, a 2026-09-20T11:47Z merge.
-# Every gate run before 09:00Z the next day sat inside the window and passed;
-# the first one after it did not, on unchanged code. A test that passes
-# because of the date it was run on is a test that proves nothing, and the
-# seven PRs that landed behind it are what that costs.
-#
-# So: no fixture that feeds a relative window may carry a frozen timestamp.
-# The fields that feed one are `ts` (the mailbox tail, the digest, the
-# timeline) and `mergedAt` (what landed since the cursor); a frozen
-# `resets_at` or a frozen linear `updatedAt` is not windowed and nothing
-# asserts on its age, so the lint says what it means rather than every date.
-# This is a lint over this file, because the failure it pins is not a
-# behaviour of the console - it is a property of its fixtures, and by the time
-# it shows up as behaviour the suite is already red for everybody.
+# --- no frozen dates in time-windowed fixtures ------------------------------
+# Fixtures feeding a relative window (`ts`, `mergedAt`) must not carry frozen
+# timestamps, or the suite goes red on unchanged code once a day passes.
 test_console_time_windowed_fixtures_carry_no_frozen_dates() {
   local pat='"(ts|mergedAt)":"[0-9]{4}-[0-9]{2}-[0-9]{2}'  # frozen-date-lint-self
   local hits
@@ -1616,11 +1500,9 @@ test_console_time_windowed_fixtures_carry_no_frozen_dates() {
   }
 }
 
-# ---------------------------------------------------------------- CEL-59
-# AN OPERATOR RETURNING MUST SEE IT WITHOUT ASKING. AFK changes who decides,
-# so the status edge carries it: on, and until when. And the morning question
-# - "what did you do while I was asleep" - is answered on the same screen,
-# each act with the pre-authorisation that covered it.
+# --- AFK --------------------------------------------------------------------
+# The status screen shows AFK, its expiry, and each logged act with the
+# pre-authorisation that covered it.
 _console_afk_on() { # <until-iso> [expired]
   printf '{"on":true,"until":"%s","until_text":"%s","reason":"asleep","expired":%s}\n' \
     "$1" "$1" "${2:-false}" > "$T/afk.status.json"

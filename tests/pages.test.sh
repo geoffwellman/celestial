@@ -187,18 +187,18 @@ test_reindex_backfills_the_workspace_from_the_recorded_cwd() {
   rm -rf "$T"
 }
 
-# --- Codex review, PR #9 ----------------------------------------------------
+# --- workspace-matching edge cases ------------------------------------------
 
 # `/home/me/ws/a` mangles to `-home-me-ws-a`, which is a PREFIX of alpha's
-# `-home-me-ws-alpha`. A substring match handed alpha's pages to workspace `a`,
-# depending only on registry order.
+# `-home-me-ws-alpha`. A substring match would hand alpha's pages to workspace
+# `a`, depending only on registry order.
 test_a_mangled_path_matches_a_whole_segment_not_a_prefix() {
   T="$(mktemp -d)"
   mkdir -p "$T/ws/a" "$T/ws/alpha"
   printf 'name: a\nrepos: []\n' > "$T/ws/a/workspace.yaml"
   printf 'name: alpha\nrepos: []\n' > "$T/ws/alpha/workspace.yaml"
   export CEL_REGISTRY="$T/registry.yaml"
-  # `a` deliberately FIRST, which is the order that used to decide it
+  # `a` deliberately FIRST, the order a prefix match would pick
   printf 'workspaces:\n  a: { path: %s/ws/a }\n  alpha: { path: %s/ws/alpha }\n' "$T" "$T" > "$CEL_REGISTRY"
   local mang; mang="$(printf '%s' "$T/ws/alpha" | tr '/' '-')"
   assert_eq "$(_pages_workspace "/tmp/claude-1000/$mang/sess/scratchpad")" alpha

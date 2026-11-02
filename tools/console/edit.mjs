@@ -3,9 +3,7 @@
 // Everything here is the part of the console the operator's fingers know: a
 // cursor, the shell chords (Ctrl+W, Ctrl+K, Ctrl+U) and a history walk that
 // filters by what is already typed. It lives outside ui.mjs so it can be
-// asserted without a terminal, a React renderer or node_modules - the first
-// version of this was inline in the ink component and the only way to prove
-// "Ctrl+W at the start of the line" was to sit in front of it.
+// asserted without a terminal, a React renderer or node_modules.
 //
 // Every function takes and returns a plain {value, cursor} pair. No state, no
 // clamping surprises: the cursor is always 0..value.length.
@@ -19,8 +17,7 @@ export const insert = (value, cursor, text) => {
   return { value: value.slice(0, c) + text + value.slice(c), cursor: c + text.length };
 };
 
-// Backspace deletes BEFORE the cursor, Delete deletes UNDER it. The first cut
-// had both doing `slice(0, -1)`, which meant the cursor was decoration.
+// Backspace deletes BEFORE the cursor, Delete deletes UNDER it.
 export const backspace = (value, cursor) => {
   const c = clamp(cursor, 0, value.length);
   if (!c) return { value, cursor: c };

@@ -3,11 +3,8 @@
 // filling that turns one of ten intents into a line an operator can press
 // Enter on.
 //
-// Pure on purpose, and for a sharper reason than the other console tests. The
-// router's model does NOT write the command - it picks a label - so every
-// character of what lands on the command line is produced here, from the
-// sentence and the fleet state. A slot filler nobody can assert is a slot
-// filler that will one day put someone else's workspace in a `--workspace`.
+// The router's model only picks a label, so every character of the command
+// line - including every `--workspace` - is produced here and asserted.
 import assert from 'node:assert/strict';
 import { facts, plan, options, shellQuote, INTENT_NAMES, addresseeIn, steerFor, band, RUN_CONFIDENCE, PROPOSE_CONFIDENCE } from './router.mjs';
 
@@ -62,7 +59,7 @@ t('facts carry the workspaces, the products and their workspace, and a count', (
   assert.equal(F.workers.length, 2);
   assert.deepEqual(F.workers[0], {
     id: 'ABC-49-slug', ticket: 'ABC-49', workspace: 'alpha', product: 'bundle',
-    // CEL-25: the pane to prompt, the repo a PR is in, and its number
+    // the pane to prompt, the repo a PR is in, and its number
     alias: 'ABC-49-slug', repo: 'widget', pr: 0,
   });
 });
@@ -74,8 +71,8 @@ t('gateway is the account table, box-level and slotless', () => {
   assert.deepEqual(plan('gateway', 'how much codex quota is left', F), ['cel gateway status']);
 });
 
-// CEL-80: the gateway's own web panel, one command away - the URL and the
-// ssh tunnel that reaches it from a laptop, never a tailnet link.
+// The gateway's web panel: its URL and the ssh tunnel that reaches it from a
+// laptop, never a tailnet link.
 t('gateway_panel is the panel URL and its tunnel, slotless', () => {
   assert.deepEqual(plan('gateway_panel', 'open the gateway panel', F), ['cel gateway panel']);
   assert.deepEqual(plan('gateway_panel', 'where is the cliproxy web interface', F), ['cel gateway panel']);
@@ -121,7 +118,7 @@ t('focus takes a product to its orchestrator and a worker to itself', () => {
 
 t('message splits the addressee from the text, quoted or not', () => {
   // bundle-orch's pane is LIVE here, and still the plan is mail alone: a
-  // prompt types into the composer (CEL-65).
+  // prompt would type into its composer.
   assert.deepEqual(plan('message', 'tell bundle-orch to pick up ABC-49 next', F), [
     "cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha",
   ]);
@@ -133,13 +130,9 @@ t('message splits the addressee from the text, quoted or not', () => {
   assert.equal(plan('message', 'tell them to hurry up', F), null);
 });
 
-// THE MESSAGE TEXT IS THE ONE PLACE A PERSON'S OWN WORDS REACH THE COMMAND
-// LINE, and that command line is run by `bash -c`. Inside DOUBLE quotes bash
-// still expands `$(...)`, `` `...` `` and `$VAR`, so the first version of this
-// - which escaped only the double quote - turned `tell bundle-orch "hi $(rm
-// -rf ~)"` into a proposal that deleted a home directory when the operator
-// pressed Enter. The guard's console branch allows every `cel *` line without
-// looking at metacharacters, so nothing downstream catches it either.
+// Message text reaches a `bash -c` command line and the guard does not check
+// metacharacters, so it must be single-quoted: `$(...)`, backticks and `$VAR`
+// stay inert.
 t('message text cannot break out of its argument', () => {
   const inj = plan('message', 'tell bundle-orch "hi $(rm -rf ~)"', F);
   assert.equal(inj[0], "cel inbox send bundle-orch 'hi $(rm -rf ~)' --workspace alpha");
@@ -216,11 +209,9 @@ t('the top three become options, each expanded where the slots allow', () => {
 });
 
 
-// --- CEL-25: the verbs as intents ------------------------------------------
+// --- the verbs as intents --------------------------------------------------
 //
-// Every key on a panel is also a sentence someone will type, and a console
-// that can only be steered by keys is a console you have to be looking at.
-// Two sentences each, because one is an example and two is a rule.
+// Every panel key is also a sentence; two sentences per verb.
 
 const VDOC = {
   workspaces: [{
@@ -306,7 +297,7 @@ t('review starts a reviewer on the repo the PR is in', () => {
   assert.equal(plan('review', 'review the gadget work', VF), null);
 });
 
-// --- services (CEL-26) -----------------------------------------------------
+// --- services --------------------------------------------------------------
 //
 // A service resolves by its own name, and a preview by the ticket it runs,
 // because "open the preview of ABC-49" is how anyone actually says it. The
@@ -346,7 +337,7 @@ t('no services means every service intent misses', () => {
 });
 
 
-// --- CEL-27: "how much Claude do I have left" ------------------------------
+// --- "how much Claude do I have left" --------------------------------------
 // The subscription windows are the one fact the fleet document cannot answer
 // from a workspace name, so the intent takes no slots at all.
 t('the quota intent is the whole subscription read', () => {
@@ -355,13 +346,11 @@ t('the quota intent is the whole subscription read', () => {
 });
 
 
-// --- CEL-36: reaching an orchestrator, and seeing it answer ----------------
+// --- reaching an orchestrator, and seeing it answer ------------------------
 //
-// "so we can't actually steer the orchestrators from the TUI?" (owner,
-// 2026-09-19). Everything below is the resolution half of the answer: who a
-// sentence is addressed to, and what reaching them costs. A wrong addressee
-// is mail - or worse, a pane prompt - in a stranger's session, so every rung
-// of the ladder is asserted rather than assumed.
+// Who a sentence is addressed to, and what reaching them costs: a wrong
+// addressee is mail or a pane prompt in a stranger's session, so every rung of
+// the ladder is asserted.
 
 const SDOC = {
   workspaces: [
@@ -411,8 +400,8 @@ t('a workspace with two products asks which one instead of guessing', () => {
   assert.equal(plan('message', 'tell beta "hi"', SF), null);
 });
 
-// CEL-65: a routine message never types into a live composer - the runtime's
-// inbox hook surfaces it out of band and drains it into the next turn.
+// A routine message never types into a live composer - the runtime's inbox
+// hook surfaces it out of band and drains it into the next turn.
 t('message to a LIVE orchestrator is mail alone - no herdr agent prompt', () => {
   const cmds = plan('message', 'tell bundle-orch to pick up ABC-49 next', SF);
   assert.deepEqual(cmds, ["cel inbox send bundle-orch 'pick up ABC-49 next' --workspace alpha"]);
@@ -428,8 +417,7 @@ t('message to an orchestrator with no live pane is mail alone, and says so', () 
     'sent to gadget-orch (no live pane - it reads this when it next starts; run "start gadget-orch" to wake it)');
 });
 
-// A worker is mail as it always was: the two-step is for orchestrators, whose
-// panes are the thing the operator could not reach at all.
+// A message to a worker is plain mail.
 t('message to a worker is unchanged', () => {
   assert.deepEqual(plan('message', 'tell ABC-49-slug "push what you have"', SF),
     ["cel inbox send ABC-49-slug 'push what you have' --workspace alpha"]);
@@ -449,7 +437,7 @@ t('talk is an intent, and it resolves to the console\u2019s relay mode', () => {
   assert.equal(plan('talk', 'let me speak to somebody', SF), null);
 });
 
-// --- CEL-44: opening, closing and resetting a workspace ---------------------
+// --- opening, closing and resetting a workspace ----------------------------
 
 t('the three workspace-lifecycle intents emit their cel ws lines', () => {
   for (const n of ['workspace_up', 'workspace_down', 'workspace_reset']) {

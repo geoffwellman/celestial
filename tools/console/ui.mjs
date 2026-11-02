@@ -1,21 +1,18 @@
 // The interactive console: ink (React for the terminal).
 //
-// Chosen over raw ANSI by the owner on 2026-09-16 for the reason the console
-// exists at all - this is the surface people LOOK at. Flexbox layout means the
-// panels survive a resize without a redraw routine of our own; a component
-// tree means a count that changes updates in place instead of a screen being
-// repainted under the operator's cursor.
+// Ink rather than raw ANSI: flexbox layout survives a resize without a redraw
+// routine of our own, and a component tree updates a changed count in place
+// instead of repainting the screen under the operator's cursor.
 //
 // No JSX: that would need a build step, and a tool whose source you cannot read
 // in the checkout you are debugging is a worse tool. createElement is aliased
 // to `h` and the tree below reads as a layout.
 //
-// v2 (CEL-17) is the list of things the owner expected of a terminal UI on
-// 2026-09-17 and did not get: a command line that edits like a shell, a status
-// line that clears itself and never eats the legend, a mouse, a detail view
-// that is a place rather than a popup, and a model that offers options instead
-// of shrugging. The pure parts of all of that live in edit.mjs, mouse.mjs and
-// legend.mjs so they can be proved without a terminal.
+// What it must do: a command line that edits like a shell, a status line that
+// clears itself and never eats the legend, a mouse, a detail view that is a
+// place rather than a popup, and a model that offers options. The pure parts
+// live in edit.mjs, mouse.mjs and legend.mjs so they can be proved without a
+// terminal.
 import React, {
   createElement as h, useState, useEffect, useRef, useCallback, useMemo,
 } from 'react';
@@ -26,10 +23,10 @@ import { spawn } from 'node:child_process';
 import { C, orchColour, kindColour } from './theme.mjs';
 import {
   CEL_BIN, fleet, fleetRows, openItems, inboxTail, runCommand, runChain, run, thread,
-  readHistory, appendHistory, unitLabel, findUnit, findWorker, why as whyOf, askState,
-  renderOutput, allServices, roster as rosterOf,
+  readHistory, appendHistory, findUnit, findWorker, why as whyOf, askState,
+  allServices, roster as rosterOf,
 } from './state.mjs';
-import { workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, orchestratorsOf, orchestratorsView, orchRestart, triageFacts, triageView, parseJson, detailActions, detailButtons, resolveOutcome } from './views.mjs';
+import { unitLabel, renderOutput, workersOf, quiet, prNumber, workerFacts, workerButtons, memHuman, memFree, memLevel, sortWorkers, workerCells, workerHeader, orphansEdge, subsEdge, subsLevel, quotaView, boardLine, prLine, workerForTicket, timelineSort, timelineLine, ticketView, prView, ciState, serviceLine, orchestratorsOf, orchestratorsView, orchRestart, triageFacts, triageView, parseJson, detailActions, detailButtons, resolveOutcome } from './views.mjs';
 import { boardFor, prsFor, digestFor, rankedMail, timelineFor, refresh as refreshPanels, writeCursor } from './board.mjs';
 import { verbFor, legendFor } from './verbs.mjs';
 import { translate, answer, summarise, NoTranslator, translatorLabel } from './translate.mjs';
@@ -97,8 +94,7 @@ const complete = (value, doc) => {
 };
 
 // A window onto a list, plus the "there is more" markers. Every panel scrolls
-// now, because a fleet of four workspaces on a laptop screen silently lost its
-// last two rows off the bottom of a box that had no indication it was clipped.
+// and says when it is clipped, so rows never vanish silently off the bottom.
 const window_ = (list, offset, height) => {
   const h2 = Math.max(1, height);
   const start = Math.max(0, Math.min(offset, Math.max(0, list.length - h2)));
@@ -171,11 +167,8 @@ const OpenPanel = ({ items, sel, offset, height, innerRef, focused, loaded }) =>
     h(More, { n: w.below }));
 };
 
-// THE DETAIL VIEW IS A PLACE. It was a three-line popup inside the waiting
-// panel, which meant the message was still truncated and the rest of the
-// conversation was somewhere else entirely - so reading a decision meant
-// leaving the console for a pane. Now it takes the room, carries the whole
-// message and the thread around it, and has buttons you can click.
+// THE DETAIL VIEW IS A PLACE: it takes the room, carries the whole message and
+// the thread around it, and has buttons you can click.
 const DetailView = ({ item, thread: rows, innerRef, target, openIds = [] }) => {
   // WHAT THIS ITEM CAN ACTUALLY HAVE DONE TO IT, computed from its live state
   // rather than from the pane it was opened in (views.mjs).
@@ -226,9 +219,7 @@ const TailPanel = ({ lines, offset, height, innerRef, focused, loaded }) => {
 };
 
 // The command line, with a cursor. Inverse video on the character under it,
-// and on a trailing space when the cursor is at the end - a "cursor" that is
-// always a bar at the right edge is not a cursor, it is a decoration, and the
-// first cut of this console shipped exactly that.
+// and on a trailing space when the cursor is at the end.
 const CommandLine = ({ value, cursor, proposed }) => {
   const c = Math.max(0, Math.min(cursor, value.length));
   const colour = proposed ? C.accent : C.ink;
@@ -250,11 +241,10 @@ const Overlay = ({ title, lines, innerRef }) =>
     ...lines.map((l, i) => h(Text, { key: i, color: C.ink, wrap: 'truncate-end' }, l || ' ')));
 
 
-// --- CEL-20: the unit view ---------------------------------------------------
+// --- the unit view -----------------------------------------------------------
 //
-// A fleet row said "workers 2/4  stalled 1" and every question after that one
-// meant leaving the console. This is the page behind the row: who the
-// orchestrator is, every worker it has out, what is waiting, what was said.
+// The page behind a fleet row: who the orchestrator is, every worker it has
+// out, what is waiting, what was said.
 
 const verdictColour = (w) => {
   if (!w.verdict) return C.dim;
@@ -262,10 +252,9 @@ const verdictColour = (w) => {
   return C.warn;
 };
 
-// EVERY PORT THIS BOX IS HOLDING, in one list. The owner drives this box from
-// a laptop: the row that matters is not the pid, it is the URL that reaches
-// the thing from somewhere else, so `reach` is the widest column and `o` is
-// the key that uses it.
+// EVERY PORT THIS BOX IS HOLDING, in one list. The row that matters is the URL
+// that reaches the thing from another machine, not the pid, so `reach` is the
+// widest column and `o` is the key that uses it.
 const ServicesPanel = ({ rows, sel, innerRef }) =>
   h(Panel, {
     title: 'SERVICES', innerRef, focused: true,
@@ -280,7 +269,7 @@ const ServicesPanel = ({ rows, sel, innerRef }) =>
     : [h(Text, { key: 'none', color: C.dim }, '  nothing declared and no previews running')]));
 
 // Rows are read from the fleet document on every draw, so the view follows a
-// refresh; the restart key proposes, and refuses on `working` (CEL-81).
+// refresh; the restart key proposes, and refuses on `working`.
 const OrchestratorsPanel = ({ rows, sel, innerRef }) =>
   h(Panel, { title: 'ORCHESTRATORS', innerRef, focused: true, right: 'r restart · Esc back' },
     ...orchestratorsView(rows, sel).slice(1).map((l, i) => h(Text, {
@@ -349,10 +338,10 @@ const UnitMail = ({ lines, innerRef }) =>
       h(Text, { color: C.dim }, `${m.from}: `),
       h(Text, { color: C.ink }, m.message))));
 
-// --- CEL-20: the worker view, which is the answer to "why" -------------------
+// --- the worker view, which is the answer to "why" --------------------------
 //
-// It runs `cel-fanout why` on open. The complaint this ticket exists for was a
-// console that answered "why is this one stalled" with the name of a command.
+// It runs `cel-fanout why` on open, so "why is this one stalled" gets an
+// answer rather than the name of a command.
 
 const WorkerView = ({ worker, ws, why, busy, preview, innerRef }) =>
   h(Panel, {
@@ -376,13 +365,12 @@ const WorkerView = ({ worker, ws, why, busy, preview, innerRef }) =>
       h(Text, { key: b, color: b === '[release]' ? C.warn : C.ink }, b),
     ].filter(Boolean))));
 
-// --- CEL-25: the two panels an operator steers by ---------------------------
+// --- the two panels an operator steers by -----------------------------------
 //
 // A PANEL THAT WOULD NOT FIT COLLAPSES TO ITS TITLE, with the count still on
-// it, and Enter (or Ctrl+T onto it) opens it again. CEL-17's rule is that
-// nothing renders below the last screen row; six panels on a 24-row terminal
-// cannot all be open, and a console that silently drew the last two off the
-// bottom is a console with two panels nobody knew it had.
+// it, and Enter (or Ctrl+T onto it) opens it again. Nothing may render below
+// the last screen row, and a panel drawn off the bottom is one nobody knows
+// the console has.
 const Collapsed = ({ title, n, innerRef }) =>
   h(Box, { ref: innerRef },
     h(Text, { color: C.dim }, `${title}  (${n})  Enter expands`));
@@ -415,10 +403,8 @@ const PrsPanel = ({ rows, sel, innerRef, focused, collapsed }) => (collapsed
     h(Text, { color: C.dim }, i === sel ? '\u25b8 ' : '  '),
     h(Text, { color: ciState(r) === 'fail' ? C.warn : C.ink }, prLine(r))))));
 
-// THE TIMELINE: the box's own history in one column, newest LAST. Three
-// sources that used to be three screens - the mailboxes, the ledger and the
-// pull requests - and an operator who had been away reconstructed the order
-// between them by hand.
+// THE TIMELINE: the box's own history in one column, newest LAST - the
+// mailboxes, the ledger and the pull requests merged into one order.
 const TimelineView = ({ events, sel, innerRef }) =>
   h(Panel, {
     title: 'TIMELINE', innerRef, focused: true,
@@ -438,7 +424,7 @@ const TextView = ({ title, right, text, innerRef }) =>
       key: i, color: /^\[|^[A-Z ]+$/.test(l) ? C.ink : C.dim, wrap: 'truncate-end',
     }, l || ' ')));
 
-// CEL-36: THE RELAY. The pane's own last lines, drawn in the console's frame,
+// THE RELAY. The pane's own last lines, drawn in the console's frame,
 // with the command line still under it - that is the whole difference between
 // steering an orchestrator and reading about one.
 const TalkPanel = ({ who, lines, innerRef }) =>
@@ -475,17 +461,17 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [picker, setPicker] = useState(null);     // {query, sel} - Ctrl+R
   const [, setTick] = useState(0);                // a resize is a re-render
   const [loaded, setLoaded] = useState(false);    // first fleet+inbox read done
-  const [rosterNames, setRosterNames] = useState([]);  // the names herdr knows (CEL-36)
+  const [rosterNames, setRosterNames] = useState([]);  // the names herdr knows
   const [outView, setOutView] = useState(false);  // OUTPUT takes the screen after a command; Esc back
   const [svcs, setSvcs] = useState(null);         // the SERVICES view: null = closed
   const [ssel, setSsel] = useState(0);
-  const [orchs, setOrchs] = useState(false);      // the ORCHESTRATORS view (CEL-81)
+  const [orchs, setOrchs] = useState(false);      // the ORCHESTRATORS view
   const [osel, setOsel] = useState(0);
   const [unit, setUnit] = useState(null);         // the unit view: one product, whole
   const [wsel, setWsel] = useState(0);            // which worker row the unit view has
   const [wsort, setWsort] = useState(false);      // `s`: the workers by memory, biggest first
   const [worker, setWorker] = useState(null);     // {worker, ws, why, busy} - the answer to "why"
-  // CEL-25: the two panels the operator steers by, the line that says what
+  // The two panels the operator steers by, the line that says what
   // changed, and the sub-panel Ctrl+T is currently on inside the unit view.
   const [board, setBoard] = useState(null);       // null: no board to be had here
   const [prs, setPrs] = useState(null);
@@ -497,7 +483,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const [tsel, setTsel] = useState(0);
   const [page, setPage] = useState(null);         // {title, right, text} - ticket or PR detail
   const [raw, setRaw] = useState(false);          // the output view showing the text as it came
-  // CEL-36: steering. `talk` is the relay mode - {who, lines} - and `reply` is
+  // Steering. `talk` is the relay mode - {who, lines} - and `reply` is
   // the answer the watch caught, kept so Enter can open it whole.
   const [talk, setTalk] = useState(null);
   const [reply, setReply] = useState(null);
@@ -536,10 +522,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const unitRef = useRef(null); unitRef.current = unit;
   const workerRef = useRef(null); workerRef.current = worker;
 
-  // A status message is TRANSIENT and the legend is not. The v1 console wrote
-  // the response over the legend and left it there, so five minutes after a
-  // command the operator was looking at a stale sentence where their key
-  // bindings used to be.
+  // A status message is TRANSIENT and the legend is not: the response must
+  // not sit over the key bindings long after the command that produced it.
   const say = useCallback((text) => {
     setStatus(text);
     setStatusAt(new Date().toTimeString().slice(0, 8));
@@ -552,8 +536,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     return () => clearTimeout(t);
   }, [status, statusAt, statusSecs]);
 
-  // ONE REFRESH IN FLIGHT. A read that outlives the interval (CEL-75: 67-116 s
-  // under load) must not have a second started behind it every tick; the
+  // ONE REFRESH IN FLIGHT. A read that outlives the interval (it can take
+  // minutes under load) must not have a second started behind it every tick; the
   // read runs in the background and input is never waiting on it.
   const inFlight = useRef(false);
   const reload = useCallback(async () => {
@@ -581,14 +565,14 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   }, [reload, refresh]);
 
   // THE WATCH IS THE DELIVERY PATH, not a nicety: `cel inbox watch` is what
-  // raises the desktop notification for a decision or a blocker (lib/inbox.sh,
-  // CEL-7). The console runs one so that mail arriving while the operator is
+  // raises the desktop notification for a decision or a blocker (lib/inbox.sh).
+  // The console runs one so that mail arriving while the operator is
   // looking at another tab still reaches them; the bell below is the same
   // event, for the operator who IS looking.
   //
   // Its LIFETIME is watcher.mjs's, not this effect's: a React cleanup runs on
-  // a clean unmount and on none of the exit paths that actually happen, which
-  // is how thirteen of these ended up reparented to init.
+  // a clean unmount and on none of the exit paths that actually happen, so a
+  // watcher tied to it would be orphaned.
   useEffect(() => startWatcher({
     bin: CEL_BIN,
     spawn,
@@ -722,19 +706,13 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
 
   const setLine = useCallback((v, c) => { setValue(v); setCursor(c ?? v.length); }, []);
 
-  // CEL-41: THE ANSWER TO A QUESTION ABOUT MANY ROWS.
-  //
-  // "which workers need me" used to be answered with the worker table - forty
-  // rows, thirty-nine of them released weeks ago (owner, 2026-09-19: "output
-  // is often just a wall of text, especially if you're listing out past
-  // workers"). Three things share the work now and none of them does
-  // another's: the decision model picks WHICH rows matter and how urgent each
-  // is, views.mjs counts every number exactly from the rows themselves, and
-  // the chat model turns those counted facts into English.
+  // THE ANSWER TO A QUESTION ABOUT MANY ROWS. Three parts, none doing
+  // another's job: the decision model picks WHICH rows matter and how urgent
+  // each is, views.mjs counts every number exactly from the rows themselves,
+  // and the chat model turns those counted facts into English.
   //
   // The counted lines are drawn FIRST and the prose is swapped in if it
-  // arrives. A console that waits on a model before it draws is a console
-  // that hangs, and the numbers already answered the question.
+  // arrives: never block drawing on a model when the numbers already answer.
   const triageAnswer = useCallback(async (sentence, transcript, rows) => {
     const under = (text) => `${text}\n\n${'─'.repeat(40)}\n${transcript}`;
     let picked = [], attention = {};
@@ -782,17 +760,16 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     await explain(sentence, transcript);
   }, [explain, triageAnswer]);
 
-  // THE REPLY WATCH. A send used to end in silence: the mail was the record
-  // and the record is invisible until somebody opens the mailbox. For up to
-  // `console.reply_wait` seconds after a message to a live orchestrator the
-  // console polls that mailbox for the agent's next line to the operator, puts
-  // its first line in the status and keeps the whole thing for Enter.
+  // THE REPLY WATCH. For up to `console.reply_wait` seconds after a message to
+  // a live orchestrator the console polls that mailbox for the agent's next
+  // line to the operator, puts its first line in the status and keeps the
+  // whole thing for Enter.
   //
   // It is a TIMER, not a wait: the render loop keeps drawing, typing is never
   // blocked, and a second send replaces the watch rather than stacking one on
   // top of it. When the window closes the console says where the answer will
   // turn up instead of pretending it is still looking - the inbox tail shows
-  // it when it lands (CEL-7/CEL-20).
+  // it when it lands.
   const watchReply = useCallback((who, ws) => {
     if (!who || !ws) return;
     if (watchRef.current) { clearTimeout(watchRef.current); watchRef.current = null; }
@@ -870,8 +847,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           asked.current = text;
           steerRef.current = r.steer || null;
           propose(r.cmds);
-          // THE BANDS (CEL-41). The console never runs a sentence without an
-          // Enter - that rule is older than the router and it stays - so
+          // THE BANDS. The console never runs a sentence without an Enter, so
           // what a band changes is what the operator is TOLD. `run` is the
           // line as it always was; `propose` names the intent it is unsure
           // of, and a destructive sentence lands here however sure the model
@@ -960,9 +936,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   }, []);
 
   // ENTER IS A PLACE, EVERYWHERE. A fleet row opens the unit it names, a worker
-  // row opens the answer to "why", a message opens the message. The console
-  // that only ever printed to an output box was a console you could read and
-  // not drive.
+  // row opens the answer to "why", a message opens the message.
   // THE TWO SLOW PANELS, loaded when the unit opens and after every command.
   // Both cross a network to somebody else's rate limit, so board.mjs holds
   // them for a minute and `refreshPanels()` is what a command clears - the
@@ -1068,10 +1042,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     setPage({ title: `PR \u00b7 #${row.number} ${row.repo}`, right: `${u.ws} \u00b7 Esc back`, text: prView({ pr: row, worker: w || null, ws: u.ws }) });
   }, []);
 
-  // `T` on the main screen. Not a bare `t`, which the ticket asked for and the
-  // command line cannot spare: the line is live on the main screen and "tell
-  // bundle-orch ..." is a sentence the router is documented to take, so a bare
-  // `t` would have eaten the first letter of it.
+  // `T` on the main screen, not a bare `t`: the command line is live there and
+  // "tell bundle-orch ..." is a sentence the router takes, so a bare `t` would
+  // eat its first letter.
   const openTimeline = useCallback(async () => {
     setTimeline([]);
     say('reading the mailboxes, the ledger and the pull requests\u2026');
@@ -1096,10 +1069,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     openWhy(found.worker, found.ws);
   }, [doc, openWhy, say]);
 
-  // A RESOLVE THAT REPORTS. It used to fire the command into the output view
-  // and say nothing of its own, so the owner pressing [resolve] on an item the
-  // steward had already cleared saw no message at all and no change - which
-  // reads exactly like a broken button.
+  // A RESOLVE THAT REPORTS: it always says what happened, including on an item
+  // the steward already cleared - silence would read exactly like a broken
+  // button.
   const resolveItem = useCallback(async (it) => {
     if (!it) return;
     const openIds = (itemsRef.current || []).filter((x) => x.ws === it.ws).map((x) => x.id);
@@ -1128,8 +1100,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   }, [say, setLine]);
 
   // A message is FROM something that has a page of its own: a worker alias has
-  // a worker view, `<product>-orch` has a unit view. Reading "ABC-49 is
-  // blocked" and having no way from there to ABC-49 is the whole complaint.
+  // a worker view, `<product>-orch` has a unit view, and the detail view links
+  // to it.
   const senderTarget = useCallback((from) => {
     const name = String(from || '');
     const m = /^(.+)-orch$/.exec(name);
@@ -1302,8 +1274,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       if (dbl) openDetail(itemsRef.current[hit.index]);
       return;
     }
-    // "I can't click on stuff in the inbox" - the tail was the one panel with
-    // no selection and no Enter at all.
+    // The inbox tail selects and opens on a click like the other panels.
     if (hit.panel === 'inbox') {
       setPane('inbox');
       setSel(hit.index);
@@ -1334,11 +1305,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
 
   const unitWorkers = unit ? sortWorkers(workersOf(unit), wsort) : [];
   const unitItems = unit ? items.filter((it) => it.ws === unit.ws) : [];
-  // CEL-43: the unit's mail in the same order the text digest and the dash
-  // card use - most urgent first, by the level a decision model gave each
-  // message once (lib/triage.sh's cache), then oldest first inside a level.
-  // Newest-first put a status line above an escalation saying a reviewer pane
-  // had been dead for two days.
+  // The unit's mail in the same order the text digest and the dash card use -
+  // most urgent first, by the level a decision model gave each message once
+  // (lib/triage.sh's cache), then oldest first inside a level, so an
+  // escalation is never buried under newer status lines.
   const unitMail = unit
     ? (() => {
       const ranked = rankedMail(unit.ws, { top: 10 });
@@ -1420,10 +1390,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       return;
     }
 
-    // THE DETAIL VIEW HAS NO COMMAND LINE, so bare letters are actions here and
-    // only here. Everywhere else a typed letter is a letter - the first cut of
-    // this console bound bare j/k/f/o/r/w/q and "what's blocked" flipped the
-    // panel and lost its w.
+    // THE DETAIL VIEW HAS NO COMMAND LINE, so bare letters are actions there.
+    // Everywhere else a typed letter is a letter, or a sentence like "what's
+    // blocked" would lose its letters to key bindings.
     // THE DEPTH VIEWS. Bare letters are actions here only while the command
     // line is EMPTY: the moment the operator has typed something they are
     // typing, not pressing keys, and a view that ate their `f` would be a view
@@ -1449,11 +1418,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       }
       return;
     }
-    // THE SERVICES VIEW. `S` from the main screen, because "is the builder up
-    // and what is its URL from my laptop" is the question this box could not
-    // answer without opening a pane. Every control is a PROPOSAL on the
-    // command line: stopping a service someone else is looking at is not
-    // something a single keypress should do.
+    // THE ORCHESTRATORS AND SERVICES VIEWS. Every control that changes
+    // something is a PROPOSAL on the command line: restarting or stopping a
+    // thing someone else is looking at is not something a single keypress
+    // should do.
     if (orchs && !detail) {
       const list = orchestratorsOf(doc);
       const row = list[osel];
@@ -1511,8 +1479,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       }
     } else if (unit && pane === 'unit' && !detail) {
       if (key.escape) { setUnit(null); setPane('fleet'); say('back'); return; }
-      // CTRL+T CYCLES THE FOCUS round the six panels. Only the focused one is
-      // guaranteed room on a short terminal, so cycling is also how a
+      // CTRL+T CYCLES THE FOCUS round the unit view's panels. Only the focused
+      // one is guaranteed room on a short terminal, so cycling is also how a
       // collapsed panel is opened - and Enter on a collapsed title does the
       // same thing from the mouse's side.
       if (key.ctrl && input === 't') {
@@ -1566,10 +1534,10 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           return;
         }
         if (input === 'f') { execute(`herdr agent focus ${unit.name}-orch`); return; }
-        // Clean-up from the list itself (owner, 2026-09-18): `c` collects and
-        // `x` releases the SELECTED worker - as proposals, so the command is
-        // on the line and Enter is the operator's. A row that is finished or
-        // collected is exactly the row these are for.
+        // Clean-up from the list itself: `c` collects and `x` releases the
+        // SELECTED worker - as proposals, so the command is on the line and
+        // Enter is the operator's. A row that is finished or collected is
+        // exactly the row these are for.
         if (input === 'c' && unitWorkers[wsel]) { propose([`cel-fanout collect ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
         if (input === 'x' && unitWorkers[wsel]) { propose([`cel-fanout release ${unitWorkers[wsel].id} --workspace ${unit.ws}`]); return; }
         // Shifted: the whole workspace. Finished and collected rows are the
@@ -1582,7 +1550,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           const opts = [];
           // FIRST, when there is anything it could touch: after a merge spree
           // the operator's actual question is "clean up what is already in
-          // main", and by-state alone released branches that never landed.
+          // main", and by-state alone would release branches that never landed.
           // The console makes no network calls, so the count is the rows the
           // command will READ - `release --all --merged` asks GitHub which of
           // them merged, in one list per repo, and leaves the rest alone.
@@ -1671,7 +1639,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     if (key.rightArrow) { const r = right(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
 
     // Arrows move the selection - they are what anyone reaches for first,
-    // and Shift+arrow never arrived through the owner's terminal host. The
+    // and Shift+arrow does not arrive through every terminal host. The
     // command history is Ctrl+P / Ctrl+N (previous / next, the shell
     // spelling) and the Ctrl+R picker.
     if (key.upArrow || key.downArrow) {
@@ -1679,9 +1647,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       return;
     }
     // ink names the byte Backspace sends on almost every terminal (\x7f)
-    // "delete" and only \b "backspace"; the first cut forward-deleted on
-    // Backspace, which at the end of a line does nothing - "I cannot
-    // backspace". The raw chunk tells the two apart: Delete is \x1b[3~.
+    // "delete" and only \b "backspace", so treating key.delete as a forward
+    // delete would break Backspace. The raw chunk tells the two apart: Delete
+    // is \x1b[3~.
     const forwardDelete = key.delete && lastRaw.current === '\x1b[3~';
     if (key.backspace || (key.delete && !forwardDelete)) { const r = backspace(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
     if (forwardDelete) { const r = del(value, cursor); setValue(r.value); setCursor(r.cursor); return; }
@@ -1703,7 +1671,7 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
           setLine(r.value);
           return;
         }
-        // Three panels now, not two: the inbox tail is a list you can enter.
+        // Three panels: the inbox tail is a list you can enter too.
         case 't': setPane((p) => (p === 'fleet' ? 'waiting' : p === 'waiting' ? 'inbox' : 'fleet')); setSel(0); return;
         case 'y': openTimeline(); return;
         case 'd': if (pane === 'waiting') openDetail(items[sel]); else if (pane === 'inbox') openDetail(tail[sel]); return;
@@ -1731,9 +1699,9 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
     // terminals; the markers are control bytes but the text between them is
     // exactly what the operator meant to type. Take the text, drop the rest.
     // A WHOLE LINE IN ONE CHUNK - a paste with a newline, or herdr's `pane run`
-    // - is text followed by Enter, not a keypress ink has a name for: it came
+    // - is text followed by Enter, not a keypress ink has a name for: it comes
     // through as input with a \r inside, which the control-byte rule below
-    // then dropped whole. Insert the text, then submit it.
+    // would drop whole. Insert the text, then submit it.
     if (input && /[\r\n]/.test(input)) {
       const first = input.replace(/\x1b\[20[01]~/g, '').split(/\r?\n|\r/)[0].replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
       const r = insert(value, cursor, first);
@@ -1755,19 +1723,18 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
       setQuota(true);
       return;
     }
-    // THE TIMELINE, from the main screen. The ticket asked for a bare `t` and
-    // the command line cannot spare one: it is live here, and "tell
-    // bundle-orch ..." is a sentence the router is documented to take, so a
-    // bare `t` would eat the first letter of it. Shift+T on an EMPTY line, and
-    // Ctrl+Y anywhere, which is the binding for someone who types capitals.
+    // THE TIMELINE, from the main screen. Not a bare `t`: the command line is
+    // live here, and "tell bundle-orch ..." is a sentence the router takes, so
+    // a bare `t` would eat the first letter of it. Shift+T on an EMPTY line,
+    // and Ctrl+Y anywhere, which is the binding for someone who types capitals.
     if (input === 'T' && !value && view === 'main') { openTimeline(); return; }
-    // CEL-80: `G` on an empty line proposes `cel gateway panel` - the web
+    // `G` on an empty line proposes `cel gateway panel` - the web
     // panel's loopback URL and the ssh tunnel to it. A proposal like every
     // other key: Enter runs it.
     if (input === 'G' && !value && view === 'main' && !key.ctrl && !key.meta) { propose(['cel gateway panel']); return; }
-    // `S` on the main screen with an empty command line opens the services
-    // view. A bare letter is an action ONLY when there is nothing typed - the
-    // first cut of this console ate the S of "status" out of a sentence.
+    // `O` and `S` on the main screen with an empty command line open the
+    // orchestrators and services views. A bare letter is an action ONLY when
+    // there is nothing typed, so it never eats the first letter of a sentence.
     if (input === 'O' && !value && !unit && !worker && !detail && !svcs && !orchs && !talk) {
       const list = orchestratorsOf(doc);
       setOrchs(true); setOsel(0); setPane('orchestrators');
@@ -1882,9 +1849,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
   const pickerMatches = picker ? historyFilter(history.current, picker.query).slice(0, 12) : [];
 
   // ONE VIEW AT A TIME. Help, the history picker and a decision's detail each
-  // take the whole stack; appending them under three panels that already fill
-  // the screen put them below the last row, where nobody ever saw them - the
-  // owner's "? did nothing" was exactly that.
+  // take the whole stack: appended under panels that already fill the screen
+  // they would land below the last row, where nobody sees them.
   const view = help ? 'help' : quota ? 'quota' : picker ? 'picker' : page ? 'page'
     : timeline ? 'timeline' : detail ? 'detail'
       : talk ? 'talk'
@@ -1944,9 +1910,8 @@ const App = ({ refresh, statusSecs, noRouter = false }) => {
             ? [
               // SIX PANELS ON A TERMINAL THAT MAY HAVE ROOM FOR THREE. The
               // focused one is always open; the rest collapse to a title and a
-              // count when the screen is short, because CEL-17's rule is that
-              // nothing may render below the last row - and the panels that
-              // went below it were panels nobody knew the console had.
+              // count when the screen is short, because nothing may render
+              // below the last row.
               h(Box, { key: 'digest' }, h(Text, { color: C.dim, wrap: 'truncate-end' }, digest || ' ')),
               h(OrchPanel, { key: 'orch', unit, innerRef: refs.unitOrch }),
               h(WorkersPanel, { key: 'workers', workers: unitWorkers, sel: upane === 'workers' ? wsel : -1, innerRef: refs.unitWorkers, focused: upane === 'workers', byMemory: wsort }),
@@ -2038,8 +2003,8 @@ export const start = async (opts) => {
   // the one bug in this file an operator cannot work around.
   try { process.stdout.write(LEAVE); } catch { /* the pipe is gone */ }
   // AND THEN WE GO. Reading stdin directly for mouse reports keeps a handle on
-  // the terminal that outlives the React tree, so a console that merely
-  // returned from start() sat there after Ctrl+C with the screen restored and
-  // no way to type at it - the worst of both. Quitting means quitting.
+  // the terminal that outlives the React tree, so merely returning from
+  // start() would leave the console alive after Ctrl+C with the screen
+  // restored and no way to type at it. Quitting means quitting.
   process.exit(0);
 };

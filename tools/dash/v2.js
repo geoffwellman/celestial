@@ -1,13 +1,12 @@
-// Dashboard v2 (CEL-106). Built from the approved mockup; data from
-// /api/state and the /api/v2/* feeds (CEL-105).
+// Dashboard v2: data from /api/state and the /api/v2/* feeds.
 //
-// THE #127 RULE, PAGE-WIDE. A refresh every few seconds must never destroy
+// THE REFRESH RULE, PAGE-WIDE. A refresh every few seconds must never destroy
 // what the owner is doing: open details, typed text, an armed button, an open
 // drawer or palette. So nothing here rebuilds an element the owner can type
 // in. Card bodies repaint only when their own HTML changed; the composer, the
 // drawer's message box and the palette input are static elements that no
-// render touches; and the decisions panel is the shared one (decisions.js),
-// which snapshots and restores its own cards.
+// render touches; and the decisions panel (decisions.js) snapshots and
+// restores its own cards.
 'use strict';
 var csrf=document.querySelector('meta[name="cel-csrf-token"]').content;
 window.V2ERRORS=[];
@@ -27,14 +26,14 @@ function recall(k,d){try{var v=JSON.parse(localStorage.getItem(k)||'null');retur
 // ---- data ------------------------------------------------------------------
 var S=null;            // /api/state as fetched
 var F={};              // /api/v2/<feed> by name
-var FAT={};            // when the server computed each F[name], ms (CEL-116)
+var FAT={};            // when the server computed each F[name], ms
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
 var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
 function inWs(w){return WSF==='all'||!w||w===WSF}
 function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
-// the 8 s refresh; ?refreshMs in the dash config is the server-side
-// same knob a test uses here is window.v2refresh()
+// the 8 s refresh; the dash config's refreshMs is the server's own knob.
+// A test drives a refresh with window.v2refresh()
 var REFRESH_MS=8000;
 window.V2REFRESHES=0;
 async function getJSON(u){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}return r.json()}
@@ -44,7 +43,7 @@ async function getJSON(u){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var 
 // ('state' for /api/state) and clears on the next success.
 var ERR={};
 function failed(name){return function(e){ERR[name]=(e&&e.status)||'network'}}
-// CEL-116: the server's x-cel-computed-at, so a card drawn from an old value says so
+// the server's x-cel-computed-at, so a card drawn from an old value says so
 async function getFeed(u,name){var r=await fetch(u,{cache:'no-store'});if(!r.ok){var e=new Error(u+' '+r.status);e.status=r.status;throw e}
   var at=Date.parse(r.headers.get('x-cel-computed-at')||'');FAT[name]=isNaN(at)?Date.now():at;return r.json()}
 // FIRST PAINT WITHOUT WAITING: one request for the last value of every card's
@@ -80,9 +79,9 @@ window.v2refresh=function(){return refresh()};
 var NYSORT=recall('cel-v2-nysort','urgent');
 function buildLast(){
   var groups=((S&&S.needsYouGroups)||[]).filter(function(g){return ROOM||inWs(g.workspace)}).map(function(g){
-    // CEL-129: a room is scoped by asker alone - the grid chip (WSF) hid a
-    // product orchestrator whose decisions sit in another workspace group
-    // in a room, only what that orchestrator asked (CEL-121)
+    // in a room, only what that orchestrator asked, scoped by asker alone:
+    // the grid chip (WSF) would hide a product orchestrator whose decisions
+    // sit in another workspace group
     var items=g.items.filter(function(d){return !NYDONE[d.id]&&(!ROOM||d.asker===ROOM)});
     if(NYSORT==='newest')items.sort(function(a,b){return (a.age_secs||0)-(b.age_secs||0)});
     else if(NYSORT==='oldest')items.sort(function(a,b){return (b.age_secs||0)-(a.age_secs||0)});
@@ -94,7 +93,6 @@ function refreshTabs(){var n=LAST?LAST.needsYou.length:0;$('nyc').textContent=n;
 var NYHOST=null;       // the one #needsyou, moved between its card and the overlay
 function needsHost(){
   var h=NYHOST;
-  // CEL-118: a card no longer folds, so there is nothing for a title click to open
   if(!h){h=NYHOST=document.createElement('div');h.id='needsyou'}
   return h;
 }
@@ -120,8 +118,8 @@ function ago(iso){var s=(Date.now()-new Date(iso).getTime())/1000;if(!(s>=0))ret
 function wsTag(w){return '<span class="ws">'+esc(w)+'</span>'}
 function none(t){return '<div class="sub">'+esc(t)+'</div>'}
 // Who is running and what is open come from the fleet feed, which spans
-// every workspace in the filter; /api/state is one workspace's view and left
-// "All workspaces" with no orchestrators, workers or PRs (#132 on real data).
+// every workspace in the filter; /api/state is one workspace's view, so
+// "All workspaces" would show no orchestrators, workers or PRs.
 function orchs(){return ((F.fleet||{}).orchestrators)||[]}
 // working and blocked first: a pane that finished hours ago is still listed,
 // below the ones that need watching
@@ -196,8 +194,8 @@ function cardStatus(id){
   for(var j=0;j<src.length;j++){var m=src[j];if(m==='state'?!S:F[m]===undefined)return 'loading '+m+'…'}
   return '';
 }
-// ---- usage (CEL-108) --------------------------------------------------------
-// One card from the approved mockup: a summary strip, then each provider's
+// ---- usage ------------------------------------------------------------------
+// One card: a summary strip, then each provider's
 // accounts with one bar per window (used now, a tick at the projected % at
 // reset), then the pay-as-you-go balances. A row opens to who used it this
 // week only when the feed could tell; the expanded view adds each window's
@@ -291,9 +289,9 @@ function cardEl(w){
   el.innerHTML='<h3><span class="ttl">'+esc(w.t)+'</span>'+(w.id==='needs'?' <span class="n" id="alerts-h"></span>':'')+'<span class="scope"></span>'+
     '<select class="size" title="card size"><option value="half">half</option><option value="full">full width</option><option value="tall">tall</option></select>'+
     '<span class="x"></span><span class="ex" title="expand">⤢</span><span class="grip" title="drag to move">⠿</span></h3><div class="body"></div>';
-  // CEL-116: until /api/state first answers, Needs-you says loading - an
-  // empty card or a 0 would read as "nothing needs you"
-  // CEL-129: in a room the panel belongs to the room; a grid render (the first
+  // until /api/state first answers, Needs-you says loading - an
+  // empty card or a 0 would read as "nothing needs you".
+  // In a room the panel belongs to the room; a grid render (the first
   // one, when the page loads on #room=) must not take it back
   if(w.id==='needs'){var nb=el.querySelector('.body');nb.insertAdjacentHTML('beforeend','<div class="nyload">'+none(cardStatus('needs')||'loading needs you…')+'</div>');if(ROOM)$('rdechost').appendChild(needsHost());else nb.appendChild(needsHost())}
   return el;
@@ -337,7 +335,7 @@ function fillWsFilter(list){
   if(sel.value!==WSF)sel.value=WSF;
 }
 
-// ---- two-click actions, by identity (the #127 rule) -------------------------
+// ---- two-click actions, by identity (the refresh rule) ---------------------
 // The first click arms ("send: <label>?") for 4 s; the second runs it. Armed
 // state is keyed by what the button does, not the element, so a repaint that
 // rebuilds the button keeps it armed.
@@ -442,7 +440,7 @@ function findAgent(name){
   return {name:name,ws:'',status:'unknown',pane:null,pr:null,model:'',now:''};
 }
 function openDrawer(name){
-  // an orchestrator is opened as its room, wherever it is named (CEL-121)
+  // an orchestrator is opened as its room, wherever it is named
   if(orchs().some(function(o){return o.name===name})){openRoom(name);return}
   DRAWER=name;$('drawer').classList.add('open');renderDrawer();remember('agent',name)}
 function renderDrawer(){
@@ -595,7 +593,7 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){if(OV)closeOverlay();else if(ROOM&&!DRAWER)closeRoom();else if(DRAWER)$('dclose').onclick()}
 });
 
-// ---- an orchestrator's room (CEL-121) ----------------------------------------
+// ---- an orchestrator's room -------------------------------------------------
 // The one place an orchestrator is seen and driven from: its own conversation
 // (read from its session file by the drive core, redacted there), a composer
 // that MAILS it (delivered by its inbox hook when it is idle - never typed
@@ -711,10 +709,8 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden&&RT&
 // ---- beside it: status, workers, PRs, stuck ---------------------------------
 // A workspace orchestrator owns its workspace's work; a repo orchestrator
 // (<repo>-orch) owns its repo's.
-// Review of #147 on live data: guessing from whether the repo had work today
-// fell back to the whole workspace, and one repo's orchestrator showed
-// a sibling repo's PRs. Only the workspace's own orchestrator (<ws>-orch)
-// sees the workspace; every other one sees exactly its repo.
+// Only the workspace's own orchestrator (<ws>-orch) sees the whole
+// workspace; every other one sees exactly its repo, never a sibling's.
 function roomOwns(name,o){
   var repo=name.replace(/-orch$/,''),ws=o?o.ws:null;
   if(ws&&repo===ws)return function(x){return x.ws===ws};

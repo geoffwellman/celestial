@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-116: the dashboard parses each file once and keeps it, reading only an
+# The dashboard parses each file once and keeps it, reading only an
 # inbox's appended tail; and the doctor's probe waits long enough, on a cheap
 # endpoint, that a busy box does not call a running dashboard DOWN.
 source "$CEL_ROOT/lib/common.sh"
@@ -66,7 +66,7 @@ http.server.ThreadingHTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever(
   rm -rf "$T"
 }
 
-# review on #141: an append that splits a multibyte character between two
+# An append that splits a multibyte character between two
 # writes is decoded whole, and an unreadable inbox is an error, not calm
 test_dash_store_keeps_a_split_multibyte_line_whole_and_throws_on_unreadable() {
   local T; T="$(mktemp -d)"

@@ -1,12 +1,11 @@
-// The drive core's reader (CEL-120): turn an agent's session JSONL into the
+// The drive core's reader: turn an agent's session JSONL into the
 // normalised events the dashboard and the console both draw.
 //
-// Why a session file and not the screen: the console's `talk` scraped
-// `herdr agent read`, which is wrapped, truncated text; omp, pi and claude
-// all write a structured append-only JSONL conversation, and herdr names the
-// file for every pane. Reading means tailing that file - never reparsing it:
-// one orchestrator's session was 13 MB after three weeks, and a poll that
-// rereads it every second is the console's 20-second cold read again.
+// Why a session file and not the screen: `herdr agent read` is wrapped,
+// truncated text, while omp, pi and claude all write a structured append-only
+// JSONL conversation and herdr names the file for every pane. Reading means
+// tailing that file - never reparsing it: sessions grow to many MB, and
+// rereading one on every poll is a multi-second cold read.
 //
 // Event: {id, parentId, ts, kind: user|assistant|thinking|tool|system|compaction,
 //         text?, tool?: {name, summary, isError}, fold}
@@ -14,16 +13,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// ---- redaction (owner, 2026-10-11) ------------------------------------
+// ---- redaction --------------------------------------------------------
 // A transcript carries every tool output the agent saw, including any secret
 // it printed. The view masks the obvious shapes; it is a net, not a vault.
 const R = "[redacted]";
 const PATTERNS = [
-  // JSON form, either spacing: "token":"x", "apiKey": "a b" (review of #146)
+  // JSON form, either spacing: "token":"x", "apiKey": "a b"
   [/"([A-Za-z0-9_-]*(?:key|token|secret|password|passwd))"(\s*:\s*)"(?:[^"\\]|\\.)*"/gi, (_m, n, sep) => `"${n}"${sep}"${R}"`],
   // NAME=value where the name says secret - env lines, query strings, flags.
-  // A quoted value is masked whole, spaces and all: FOO_SECRET="a b" leaked
-  // "b" when only the first word was taken.
+  // A quoted value is masked whole, spaces and all: FOO_SECRET="a b" must not
+  // leak "b".
   [/\b([A-Za-z0-9_]*(?:key|token|secret|password|passwd))\s*=\s*("[^"]*"|'[^']*'|[^\s&"',;]+)/gi, (_m, n) => `${n}=${R}`],
   [/\bBearer\s+[A-Za-z0-9._~+\/=-]{8,}/g, () => `Bearer ${R}`],
   [/\bsk-[A-Za-z0-9_-]{16,}/g, () => R],
@@ -42,7 +41,7 @@ export function redact(s) {
 // ---- normalisation ----------------------------------------------------
 const clip = (s, n = 80) => { s = String(s ?? "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
 // Redact BEFORE clipping: a secret cut in half at 80 characters no longer
-// matches its pattern, and its first half leaked (review of #146).
+// matches its pattern, and its first half would leak.
 function toolSummary(name, args) {
   let a = args;
   if (typeof a === "string") { try { a = JSON.parse(a); } catch { return `${name}: ${clip(redact(a))}`; } }
@@ -159,8 +158,7 @@ export class Normaliser {
 // Per file {inode, size, offset} plus the trailing partial line. A changed
 // inode or a shrink means the file was swapped or truncated: cold start
 // again and say so (`reset`). Cold start reads only the last COLD bytes and
-// throws away the first, almost certainly partial, line - `tail -c 2MB | jq`
-// failed on exactly that.
+// throws away the first, almost certainly partial, line.
 export const COLD_BYTES = 2_000_000;
 export class Tailer {
   constructor(file, { coldBytes = COLD_BYTES } = {}) {

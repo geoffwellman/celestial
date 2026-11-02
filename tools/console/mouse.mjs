@@ -8,8 +8,7 @@
 //
 // SGR mouse reporting (\x1b[?1006h) is used rather than the original X10
 // encoding because X10 packs the coordinates into single bytes and silently
-// stops working past column 223 - which on the owner's screen is a real
-// column.
+// stops working past column 223 - a real column on a wide screen.
 
 // \x1b[<b;x;yM  = press (or motion/wheel), \x1b[<b;x;ym = release.
 // Coordinates arrive 1-based; they are kept that way, because every number the
@@ -17,9 +16,9 @@
 // in one place and not the other is how a hit map ends up off by one.
 const SGR = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/;
 // The X10 fallback: \x1b[M then three bytes, each value + 32. Some terminal
-// hosts - the owner's herdr panes, 2026-09-17 - answer ?1000h but never
-// ?1006h, so their reports arrive in this form; unparsed, they were typed
-// into the command line as "[M !!". Release is button code 3 here.
+// hosts (herdr panes among them) answer ?1000h but never ?1006h, so their
+// reports arrive in this form; unparsed, they would be typed into the command
+// line as "[M !!". Release is button code 3 here.
 const X10 = /\x1b\[M([\s\S])([\s\S])([\s\S])/;
 const ANY = new RegExp(`${SGR.source}|${X10.source}`);
 
@@ -86,7 +85,7 @@ export const hitTest = (map, x, y) => {
 };
 
 // Turning mouse tracking on is cheap; leaving it on is not. A terminal left in
-// mouse mode will not let the owner select text with the mouse at all, and the
+// mouse mode will not let the operator select text with the mouse at all, and the
 // only way out is a reset they have to know about - so every exit path,
 // including a crash and a SIGTERM, goes through disableMouse().
 export const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';

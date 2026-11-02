@@ -1,7 +1,6 @@
-// The console's dark palette, taken from the dashboard's CSS variables
-// (tools/dash/server.mjs) so the two surfaces read as one tool rather than two
-// programs that happen to ship together. Truecolor hex: ink passes it to
-// chalk, which downgrades on terminals that cannot do it.
+// The console's dark palette; the right-hand names are the dashboard's CSS
+// variables for the same roles. Truecolor hex: ink passes it to chalk, which
+// downgrades on terminals that cannot do it.
 export const C = {
   ink: '#eceae4',     // body text        (--ink)
   dim: '#8b93a1',     // secondary text   (--dim)
