@@ -45,7 +45,7 @@ test_claude_native_hooks_use_real_session_and_runtime_ancestry() {
   assert_eq "$out" ''
   assert_eq "$(jq -r .agent_status "$CEL_REX_RECORD")" idle
   assert_eq "$(jq -r .agent_session.value "$CEL_REX_RECORD")" "$CN_NATIVE"
-  assert_eq "$(jq -r --arg cwd "$CN_DIR/cwd" '.[$cwd]' "$CEL_ORCH_SESSIONS")" "$CN_NATIVE"
+  assert_eq "$(jq -c --arg cwd "$CN_DIR/cwd" '.[$cwd]' "$CEL_ORCH_SESSIONS")" "$(jq -cn --arg s "$CN_NATIVE" '{session: $s, runtime: "claude"}')"
   _claude_native_hook UserPromptSubmit
   assert_eq "$(jq -r .agent_status "$CEL_REX_RECORD")" working
   _claude_native_hook Stop idle

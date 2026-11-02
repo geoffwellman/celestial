@@ -225,7 +225,7 @@ try {
   const observed = (await readFile(notes, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.ok(observed.every(row => row.agent_session?.value === session.id), 'Child rebound main native receipt');
   assert.ok(observed.some(row => row.agent_status === 'working') && observed.some(row => row.agent_status === 'idle'));
-  const registry = JSON.parse(await readFile(env.CEL_ORCH_SESSIONS, 'utf8')); assert.equal(registry[product], session.id);
+  const registry = JSON.parse(await readFile(env.CEL_ORCH_SESSIONS, 'utf8')); assert.deepEqual(registry[product], { session: session.id, runtime: 'opencode' });
   const beforeSibling = await readFile(record, 'utf8');
   assert.throws(() => execFileSync(path.join(root, 'bin/cel'), ['sessions', 'note', String(child.pid), 'blocked', session.id], { env: { ...env, CEL_ROOT: root }, stdio: 'pipe' }));
   assert.equal(await readFile(record, 'utf8'), beforeSibling);
