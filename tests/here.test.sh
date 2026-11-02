@@ -168,3 +168,36 @@ JS
     esac
   done
 }
+
+# A /cel-* COMMAND'S OUTPUT IS BOUNDED. A land can run a noisy gate for most of
+# an hour; the agent keeps how it started and how it ended, and says the
+# middle was dropped, instead of holding all of it in memory.
+test_here_command_output_is_bounded_head_and_tail() {
+  local T; T="$(mktemp -d)"
+  mkdir -p "$T/bin"
+  cat > "$T/bin/cel" <<'SH'
+#!/usr/bin/env bash
+echo FIRST-LINE
+head -c 2000000 /dev/zero | tr '\0' x
+echo
+echo LAST-LINE
+SH
+  chmod +x "$T/bin/cel"
+  local out hook="$CEL_ROOT/tools/hooks/inbox.omp.ts"
+  out="$(CEL_ROOT="$T" CEL_ROLE=orchestrator CEL_INBOX_HOOK=1 CEL_HERE_OUTPUT_MAX=4096 \
+    HOOK="$hook" node --no-warnings - <<'JS'
+(async () => {
+  const cmds = {}; const sent = [];
+  const pi = { on() {}, registerCommand(n, o) { cmds[n] = o; }, sendMessage(m, o) { sent.push({ m, o }); } };
+  (await import(process.env.HOOK)).default(pi);
+  await cmds["cel-status"].handler("", { cwd: "/tmp", ui: { notify() {} } });
+  const c = sent[0].m.content;
+  console.log(JSON.stringify({ len: c.length, first: c.includes("FIRST-LINE"), last: c.includes("LAST-LINE"), dropped: /characters of output dropped/.test(c) }));
+  process.exit(0);
+})();
+JS
+)"
+  rm -rf "$T"
+  assert_eq "$(jq -r '.len < 5000' <<< "$out")" true
+  assert_eq "$(jq -c '[.first, .last, .dropped]' <<< "$out")" '[true,true,true]'
+}
