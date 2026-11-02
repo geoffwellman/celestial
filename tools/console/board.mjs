@@ -93,10 +93,8 @@ export const repoSlugs = async (ws) => cached(`slugs:${ws}`, async () => {
 
 const PR_FIELDS = 'number,title,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt';
 
-// ONE CALL PER REPO, never one per row. The first sketch asked for the checks
-// of each PR separately, which on a product with six open PRs was seven
-// requests every refresh - `statusCheckRollup` is in the list form and the
-// list form is the whole panel.
+// ONE CALL PER REPO, never one per row: `statusCheckRollup` is in the list
+// form and the list form is the whole panel.
 export const prsFor = async (ws, repos) => cached(`prs:${ws}:${(repos || []).join(',')}`, async () => {
   const slugs = await repoSlugs(ws);
   const out = [];
@@ -181,15 +179,11 @@ export const mailSince = (ws, iso) => {
   return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
 };
 
-// --- CEL-43: what is left, ranked -------------------------------------------
+// --- what is left, ranked --------------------------------------------------
 //
-// Root's mailbox was drawn newest-first, so a status line from a minute ago
-// sat above an escalation from yesterday saying a reviewer pane had died.
-// The LEVELS come from a decision model through lib/triage.sh, which scores a
-// message once and writes `<id>\t<rank>` to a cache; the console reads that
-// cache and does the ordering and the cut itself. The console never scores
-// anything: it redraws every ten seconds, and a score per draw is a provider
-// bill per operator per day.
+// Rank LEVELS come from lib/triage.sh, which scores each message once and
+// caches `<id>\t<rank>`; the console only reads that cache and does the
+// ordering and the cut. It never scores: it redraws every ten seconds.
 export const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE
   || join(homedir(), '.local/share/cel/inbox/triage.cache');
 
@@ -206,9 +200,9 @@ export const triageRanks = () => {
   return out;
 };
 
-// What a kind means when nobody has scored it - the same table as
-// lib/triage.sh's triage_default_rank, so an unreachable model degrades to
-// today's ordering on both surfaces rather than to two different ones.
+// What a kind means when nobody has scored it - the same table as the kind
+// fallback in lib/triage.sh's triage_ranked jq program, so an unscored message
+// orders the same on both surfaces.
 export const KIND_RANK = { blocked: 3, decision: 2, escalation: 2, update: 1, status: 0 };
 export const rankOf = (m, ranks) => (ranks.has(m.id) ? ranks.get(m.id) : (KIND_RANK[m.kind] ?? 0));
 
@@ -233,9 +227,8 @@ export const digestFor = (ws, { items = [], repos = [], now = Date.now() } = {})
   const from = since(ws, now);
   const mail = mailSince(ws, from).filter((m) => m.to === 'root' || m.to === 'all');
   // Merged PRs come from the cache if the timeline has already filled it, and
-  // are left out otherwise. A header line that costs a round trip per repo is
-  // a header line that makes opening a unit feel slow, which is the exact
-  // complaint the panel refresh budget exists to avoid.
+  // are left out otherwise: a header line that costs a round trip per repo
+  // makes opening a unit feel slow.
   const seen = peek(`merged:${ws}:${(repos || []).join(',')}`) || [];
   const floor = Date.parse(from) || 0;
   const merged = seen.filter((p) => (Date.parse(p.mergedAt) || 0) >= floor).length;
@@ -251,10 +244,8 @@ export const digestCounts = (ws, { items = [], now = Date.now() } = {}) => {
 
 // --- the timeline ----------------------------------------------------------
 //
-// THE BOX'S OWN HISTORY, in one column. Three sources that were three screens:
-// the mailboxes say what was said, the fleet document says what was delegated,
-// and the PR lists say what landed. An operator reconstructing the last two
-// hours had to read all three and put them in order by hand.
+// The box's history in one column: mail (what was said), the fleet document
+// (what was delegated) and the PR lists (what landed), merged in time order.
 export const timelineFor = async (doc, { now = Date.now() } = {}) => {
   const events = [];
   for (const ws of (doc && doc.workspaces) || []) {

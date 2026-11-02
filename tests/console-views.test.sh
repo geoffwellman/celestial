@@ -1,10 +1,6 @@
 # shellcheck shell=bash
-# CEL-49: BARS. Every surface already had `used_pct` and none of them drew one,
-# so an operator read six numbers where a glance at six bars would have done.
-#
-# All of this is pure over tools/console/views.mjs - the same module the ink
-# UI and `cel console --render-quota` both draw from - so a bar that is wrong
-# here is wrong on the screen.
+# Usage bars, pure over tools/console/views.mjs - the module both the ink UI
+# and `cel console --render-quota` draw from.
 _views_node() { # <script>
   local t; t="$(mktemp -d)"
   printf '%s' "$1" > "$t/t.mjs"
@@ -14,10 +10,8 @@ _views_node() { # <script>
   return $rc
 }
 
-# A bar is a TRACK of a fixed width with a filled prefix: it may never render
-# wider than its track (that is a wrapped line, which is worse than no bar),
-# and 100% must be distinguishable from 99% - the difference between "the next
-# delegation refuses" and "there is room for one more".
+# A bar never renders wider than its fixed track, and 100% is distinguishable
+# from 99%.
 test_a_bar_never_exceeds_its_track_at_any_percentage() {
   local out
   out="$(_views_node '
@@ -41,9 +35,7 @@ process.stdout.write("bars: all good\n");
   assert_contains "$out" 'bars: all good'
 }
 
-# A BAR THAT WRAPS IS WORSE THAN NO BAR. Below the minimum track there is
-# nothing to draw that is honest, so the caller gets an empty string and prints
-# the text it printed before.
+# Below the minimum track a bar is an empty string; it never wraps.
 test_a_track_too_narrow_to_be_honest_draws_nothing() {
   local out
   out="$(_views_node '
@@ -55,9 +47,8 @@ process.stdout.write("narrow: all good\n");
   assert_contains "$out" 'narrow: all good'
 }
 
-# The QUOTA page draws the bar from the `used_pct` the fleet document already
-# carries - never a number computed in the renderer, which is the bug CEL-35
-# exists to prevent - and falls back to today's text on a narrow terminal.
+# The QUOTA page draws each bar from the document's own `used_pct`, never a
+# renderer-computed number, and falls back to text on a narrow terminal.
 _views_doc() {
   cat <<'JSON'
 {"subscriptions":[
@@ -92,10 +83,8 @@ process.stdout.write("quota page: all good\n");
   assert_contains "$out" 'quota page: all good'
 }
 
-# The cells carry the percentage they were drawn from, so the dashboard colours
-# and sizes the same bar the console draws instead of matching rows to windows
-# by index - which it did, and which put the wrong colour on the extra-usage
-# row the moment one existed.
+# Each cell carries the percentage its bar is drawn from, so the dashboard
+# never matches rows to windows by index.
 test_sub_cells_carry_the_percentage_the_bar_is_drawn_from() {
   local doc; doc="$(_views_doc)"
   local out
@@ -112,9 +101,7 @@ process.stdout.write("cells: all good\n");
   assert_contains "$out" 'cells: all good'
 }
 
-# The status edge is the other surface that already had the number: the bar
-# goes AFTER the figures, because the figures are what an operator reads first
-# and the edge is one row shared with the memory headroom.
+# The status edge draws its bar after the figures, and drops it when narrow.
 test_the_status_edge_draws_a_bar_beside_its_figures() {
   local doc; doc="$(_views_doc)"
   local out
@@ -132,8 +119,8 @@ process.stdout.write("edge: all good\n");
   assert_contains "$out" 'edge: all good'
 }
 
-# CEL-81: the ORCHESTRATORS view - every orchestrator's launch line at a
-# glance, and a restart key that refuses on `working` as `--restart` does.
+# The ORCHESTRATORS view shows every launch state, and its restart key
+# refuses on `working` as `--restart` does.
 test_the_orchestrators_view_renders_every_launch_state_and_refuses_working() {
   local out
   out="$(_views_node '

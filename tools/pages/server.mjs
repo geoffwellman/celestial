@@ -6,7 +6,7 @@
 // On the private tier an HTML document is served inside a CHROME SHELL: a nav
 // bar plus a same-origin iframe holding the document itself (`?raw=1`).
 // Chrome rather than injection because a published page owns its own CSS -
-// injecting a bar into `body` fought fixed headers and full-height layouts -
+// a bar injected into `body` fights fixed headers and full-height layouts -
 // and same-origin keeps select-to-comment working from the parent frame.
 // The public tier serves documents raw: the internet gets no controls.
 import { createServer } from 'node:http';
@@ -15,7 +15,7 @@ import { join, normalize, extname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { controlSecurity, internalError } from '../http-security.mjs';
-import { bundleFor, copyBundle } from './bundle.mjs';
+import { TOKEN_RE, bundleFor, copyBundle } from './bundle.mjs';
 
 const ROOT = process.env.CEL_PAGES_ROOT;
 const PORT = Number(process.env.CEL_PAGES_PORT || 7780);
@@ -45,7 +45,6 @@ const MIME = {
 // Unguessable, because the public tier is reachable by anyone with the link
 // and flat document names are trivially enumerable. Expiry is enforced by the
 // public server on every request and swept by the steward.
-const TOKEN_RE = /^[a-f0-9]{16,48}$/;
 const SHARE_TTL_DEFAULT_H = 168;   // 7 days
 
 const shareDirs = (root) => {
@@ -658,7 +657,8 @@ const server = createServer(async (req, res) => {
       }).end(body);
       return;
     }
-    // one flat directory: strip to the basename so traversal cannot escape
+    // one flat directory: a name with a separator or a leading dot is refused,
+    // so traversal cannot escape
     const name = normalize(path).replace(/^[/\\]+/, '');
     const file = join(ROOT, name);
     if (name.includes('/') || name.includes('\\') || name.startsWith('.') || !existsSync(file)) {

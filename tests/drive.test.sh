@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-120: the drive core - read an orchestrator's conversation from its
+# The drive core - read an orchestrator's conversation from its
 # session file and send to it only through the mailbox, with a receipt.
 FX="$CEL_ROOT/tests/fixtures/drive"
 TR="$CEL_ROOT/tools/drive/transcript.mjs"
@@ -173,12 +173,11 @@ _drive_fixture_procs() {
   return 0
 }
 
-# The follower is `bash cel` running `node` (a grandchild of the test), and
-# `pkill -P` + `kill` of the test's own background pid reached only the first
-# of them: the node tailer was orphaned and kept polling - running the herdr
-# stub and writing under the fixture - while the test removed it (CI
-# 38997229523, rm "Directory not empty"). So the follower gets its own session
-# (pid == process group) and teardown stops and joins the whole group.
+# The follower is `bash cel` running `node` (a grandchild of the test), so
+# killing only the test's own background pid would orphan the node tailer,
+# which keeps polling and writing under the fixture while the test removes it.
+# So the follower gets its own session (pid == process group) and teardown
+# stops and joins the whole group.
 _drive_follow_start() { # <tail args...> -> prints the group leader pid; output in $T/out
   setsid env PATH="$T/bin:$PATH" CEL_INBOX_DIR="$T/inbox" CEL_REGISTRY="$T/registry.yaml" CEL_DRIVE_POLL_MS=100 \
     "$CEL_ROOT/bin/cel" drive tail widget-orch --json --follow "$@" > "$T/out" 2>&1 &
@@ -234,7 +233,7 @@ test_drive_send_refuses_an_unknown_orchestrator() {
   rm -rf "$T"
 }
 
-# Review of #146: a secret cut in half by the 80-char tool summary must still
+# A secret cut in half by the 80-char tool summary must still
 # be masked - redact first, then clip - and JSON and quoted forms count too.
 test_drive_redacts_before_clipping_tool_summaries() {
   command -v node >/dev/null || return 0

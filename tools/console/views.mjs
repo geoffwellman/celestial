@@ -4,14 +4,8 @@
 // data to text. `--render-once --unit bundle` prints exactly what the ink
 // unit view draws, the tests assert on the text, and a column that goes
 // missing goes missing in a test rather than in front of an operator.
-//
-// The owner, 2026-09-18, after an evening with the console: "when I click on
-// items in the fleet panel it gives me an output box with JSON"; "I'm unable
-// to learn what's going on at anything more than surface level". Both of those
-// are this file - a list you can enter, and output the console renders because
-// it already knows the shape of everything it runs.
 
-// A UNIT IS A PRODUCT, not a repo (CEL-14). A declared product names the repos
+// A UNIT IS A PRODUCT, not a repo. A declared product names the repos
 // it bundles, exactly as `cel fleet` does - without it the one row where a
 // product and a repo of the same name differ is the row that looks identical.
 export const unitLabel = (u) => (u && u.declared && (u.repos || []).length
@@ -43,10 +37,10 @@ export const prNumber = (url) => {
 // per row.
 //
 // ABSENT IS NOT ZERO. An older `cel` on PATH carries no `box` block and no
-// (rss_mb is PSS since CEL-100 - shared pages split among their users - with
-// RSS as fallback; the field name is kept for compatibility.)
 // `rss_mb`, and `mem 0M` claims a measurement nobody made - so the empty
-// string is the answer and the caller leaves the column out.
+// string is the answer and the caller leaves the column out. (`rss_mb` is PSS
+// - shared pages split among their users - with RSS as fallback; the field
+// name is kept for compatibility.)
 export const memHuman = (mb) => {
   if (mb === null || mb === undefined || mb === '' || Number.isNaN(Number(mb))) return '';
   const n = Math.max(0, Math.round(Number(mb)));
@@ -61,12 +55,9 @@ export const memFree = (box) => {
   return free ? `mem ${free} free` : '';
 };
 
-// The processes with no owner at all, when there are any. A gigabyte of
-// reparented watchers, dead-worktree fixtures and shells on ptys nobody can
-// reach sat unmentioned on this box for four days while the status edge
-// showed the headroom they were eating; the edge names them now, with the
-// command that takes them away. SILENT AT ZERO - a permanent "0 orphans" is
-// a row that teaches an operator to stop reading the row.
+// The processes with no owner at all, when there are any, with the command
+// that takes them away. SILENT AT ZERO - a permanent "0 orphans" is a row
+// that teaches an operator to stop reading the row.
 export const orphansEdge = (box) => {
   const n = Number(box?.orphans?.count || 0);
   if (!(n > 0)) return '';
@@ -126,9 +117,7 @@ export const memLevel = (box) => {
 // The order the eye needs: what is WRONG first (a verdict), then what is
 // running, then what is finished and waiting to be collected, then what is
 // collected and waiting to be landed or released. Inside a group the newest
-// first. Ledger order - the order tickets happened to be delegated in over
-// three weeks - told the operator nothing, and the screenshot that said so
-// had twenty-six rows of it.
+// first; ledger order says nothing about what needs attention.
 const STATE_RANK = { blocked: 0, running: 1, finished: 2, collected: 3 };
 export const sortWorkers = (workers, byMemory = false) => {
   const list = [...(workers || [])];
@@ -143,14 +132,13 @@ export const sortWorkers = (workers, byMemory = false) => {
 
 // Column widths, shared by the TUI panel and the text view so they cannot
 // drift. A cell is CUT to its width, never allowed to push its neighbours:
-// one forty-four-character scout id used to shove every column off the edge.
+// a long scout id must not shove every column off the edge.
 export const WORKER_COLS = { ticket: 9, slug: 20, state: 9, live: 12, via: 18, quiet: 6, verdict: 10, ahead: 5, rss: 6 };
 
-// THE DISAGREEMENT IS THE SIGNAL (CEL-42). herdr's word for a pane and what
-// the pane is actually doing agreed on none of the four failures this box saw
-// in two days: `working` while a suite hung, `idle` while three cores burned,
-// `working` through a chain of sleeps, `done` while a background task ran. So
-// the live column shows the runtime's word alone while the two agree, and both
+// THE DISAGREEMENT IS THE SIGNAL. herdr's word for a pane and what the pane is
+// actually doing can disagree - `working` while a suite hangs, `idle` while
+// cores burn, `done` while a background task runs. So the live column shows
+// the runtime's word alone while the two agree, and both
 // - `working!loop` - the moment they do not. A column that always showed both
 // would be twice as wide and say nothing new on the healthy rows.
 const ACTIVITY_SHORT = {
@@ -172,13 +160,11 @@ export const liveOf = (w) => {
   if ((AGREES[live.toLowerCase()] || []).includes(activity)) return live;
   return `${live}!${ACTIVITY_SHORT[activity] || activity}`;
 };
-// What is running the ticket: the profile name when the delegation recorded
-// one (`opus-pi`, `deepseek`), else runtime/model with the provider prefix
-// and version tail dropped (`omp/deepseek-v4.1-flash` → `omp/deepseek`).
+// What is running the ticket, HARNESS FIRST: the roster's agent kind (pi,
+// omp, claude, hermes) or the ledger's runtime, then the profile name or the
+// model with provider prefix and version tail dropped
+// (`openrouter/deepseek-v4.1-flash` under omp → `omp/deepseek-flash`).
 export const viaOf = (w) => {
-  // HARNESS FIRST, always: the owner asked twice. The roster's agent kind
-  // (pi, omp, claude, hermes) or the ledger's runtime, then the profile name
-  // or the model with provider prefix and version tail dropped.
   const h = String(w.harness || w.runtime || '');
   // `default` is a profile NAME that says nothing; the model behind it does.
   let tail = String(w.profile || '');
@@ -219,7 +205,7 @@ export const workerCells = (w) => ({
 });
 export const workerLine = (w) => Object.values(workerCells(w)).join(' ');
 
-// CEL-43: the ranked mailbox. One line per message with the level in front of
+// The ranked mailbox. One line per message with the level in front of
 // it, then `and N more` - because a list that silently stops is a list an
 // operator cannot tell from an empty one.
 export const rankedLines = ({ top = [], more = 0 } = {}) => {
@@ -230,17 +216,12 @@ export const rankedLines = ({ top = [], more = 0 } = {}) => {
   return out;
 };
 
-// --- CEL-43: what a detail view may actually DO -----------------------------
+// --- what a detail view may actually DO -------------------------------------
 //
-// The owner opened a real `BLOCKED · productivity` item and pressed
-// [resolve]; nothing happened. The item had been self-cleared by the steward
-// hours earlier when the memory it complained about came back, so there was
-// nothing left to resolve - but the view offered the button anyway, because
-// the buttons were a fixed row rather than a fact about the item.
-//
-// So the actions are COMPUTED FROM THE ITEM'S LIVE STATE: only something that
-// is open right now, and has an id to name, can be resolved. Everything else
-// says why instead. Never show a button that cannot work.
+// The actions are COMPUTED FROM THE ITEM'S LIVE STATE: only something that
+// is open right now, and has an id to name, can be resolved - the steward may
+// have self-cleared it since the panel was drawn. Everything else says why
+// instead. Never show a button that cannot work.
 export const detailActions = (item = {}, openIds = []) => {
   const id = String(item.id || '');
   if (item.resolved) {
@@ -265,10 +246,8 @@ export const detailButtons = (item, openIds = [], hasTarget = false) => {
   return out;
 };
 
-// A RESOLVE SAYS WHAT HAPPENED. It used to run the command and show whatever
-// the output view showed, so a refusal or a non-zero exit was indistinguishable
-// from success: the operator pressed the button and the item stayed where it
-// was, with no sentence anywhere saying why.
+// A RESOLVE SAYS WHAT HAPPENED. A refusal or a non-zero exit must not look
+// like success, so the outcome is one sentence naming which it was and why.
 export const resolveOutcome = (item = {}, r = {}) => {
   if (!r.allow) return `refused: ${r.reason || 'the console allowlist said no'}`;
   if (r.ok) return `resolved ${item.id}`;
@@ -293,9 +272,8 @@ export const unitView = ({
   // while I was not looking - before they have read anything else.
   if (digest) out.push(digest);
   // AND THE MAILBOX, RANKED, RIGHT UNDER IT. Everything that escalates
-  // addresses `root`, and the console is what listens; drawing it
-  // newest-first put a status line above an escalation saying a reviewer pane
-  // had been dead for two days.
+  // addresses `root`, and the console is what listens; ranked, an escalation
+  // is never buried under a status line.
   for (const line of rankedLines(mail || {})) out.push(line);
   out.push('');
   out.push('ORCHESTRATOR');
@@ -342,14 +320,10 @@ export const unitView = ({
   return out.join('\n');
 };
 
-// --- CEL-25: the board, the pull requests, the digest and the timeline ------
+// --- the board, the pull requests, the digest and the timeline -------------
 //
-// The owner, 2026-09-18, after two days with the console: "it can be a lot
-// more informative yet, and it doesn't really feel like I can steer anything
-// from there". What was on screen was the FLEET'S OWN state - workers,
-// decisions, mail. What an operator actually steers by - the ticket board, the
-// open pull requests, what changed since they last looked - was not there at
-// all, so every one of those questions meant leaving the console.
+// What an operator steers by - the ticket board, the open pull requests, what
+// changed since they last looked - drawn beside the fleet's own state.
 
 // An age the way it gets said out loud. Minutes under an hour, hours under two
 // days, days after that: nobody decides anything differently because a PR was
@@ -526,8 +500,7 @@ export const timelineLine = (e) => [
 ].join(' ');
 
 // NEWEST LAST. Every other list in this console is newest-first because it is
-// a queue you work down; the timeline is a story, and a story read upwards is
-// why the operator kept scrolling to find where they had got to.
+// a queue you work down; the timeline is a story, and a story reads downwards.
 export const timelineSort = (events) => [...(events || [])]
   .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
 
@@ -572,7 +545,7 @@ export const workerView = ({ worker, ws = '', why = '', preview = false }) => {
 
 // What came back: one document, a stream of one-per-line documents, or text.
 // JSONL is not a nicety here - `cel inbox open --json` is exactly that shape,
-// and treating it as prose is what put braces on the screen.
+// and treating it as prose would put braces on the screen.
 export const parseJson = (text) => {
   const raw = String(text || '').trim();
   if (!raw || !/^[[{]/.test(raw)) return null;
@@ -656,9 +629,8 @@ export const servicesView = (rows = []) => {
   return out;
 };
 
-// THE ORCHESTRATORS VIEW (CEL-81). "How do we update all the orchestrators
-// again? Can we show their state?" - every root/orchestrator on the box, with
-// the launch-line verdict `cel update --restart-orchestrators` acts on. All of
+// THE ORCHESTRATORS VIEW. Every root/orchestrator on the box, with the
+// launch-line verdict `cel update --restart-orchestrators` acts on. All of
 // it is read from the fleet document; the view runs no probe of its own.
 export const orchestratorsOf = (doc) => (doc && Array.isArray(doc.workspaces) ? doc.workspaces : [])
   .flatMap((ws) => (Array.isArray(ws.orchestrators) ? ws.orchestrators : [])
@@ -771,12 +743,10 @@ export const renderOutput = (cmd, text) => {
   return keyValue(parsed.value).join('\n');
 };
 
-// --- CEL-27: the two subscriptions the fleet actually runs on ---------------
+// --- the two subscriptions the fleet actually runs on -----------------------
 //
-// The box does not run on API keys alone: it runs on a Claude subscription and
-// a Codex one, and until this existed neither was visible anywhere on the
-// plane. A five-hour window at 100% stops every worker on that account, and
-// the operator found out by watching a delegation refuse.
+// The box runs on a Claude subscription and a Codex one; a five-hour window
+// at 100% stops every worker on that account.
 //
 // All of this is pure over `cel fleet --json`, which carries the 60 s cache.
 // The console NEVER asks a provider itself: a status edge that makes a network
@@ -823,11 +793,7 @@ export const subsEdge = (doc, width) => {
   return parts.join(' · ');
 };
 
-// --- CEL-49: the bar every surface already had the number for ---------------
-//
-// The owner, 2026-09-20: it is not drawing bar charts as asked. Every surface
-// carried `used_pct` and every one of them printed it as digits, so reading
-// six accounts meant reading twelve numbers and comparing them by hand.
+// --- the usage bar ----------------------------------------------------------
 //
 // THE RULES, because three renderers draw this and none of them may disagree:
 //   - the track is a FIXED width and the bar is a filled prefix of it, so a
@@ -841,8 +807,7 @@ export const subsEdge = (doc, width) => {
 //     text it printed before.
 //
 // The number comes from `used_pct` in the fleet document and is never computed
-// here: two renderers arriving at the same fact by different arithmetic is the
-// bug CEL-35 exists to prevent.
+// here, so no two renderers can reach the same fact by different arithmetic.
 export const BAR_MIN = 6;
 
 export const usageBar = (pct, width) => {
@@ -877,20 +842,12 @@ export const resetHuman = (iso) => {
   return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][at.getDay()]} ${hhmm}`;
 };
 
-// THE CELLS A SUBSCRIPTION ROW BECOMES, and the whole of CEL-35's "one
-// renderer's data, two views". The console pads them into columns and the
-// dashboard puts them in a table, but the strings are built here (and by the
-// marked copy in tools/dash/server.mjs, which the suite compares against this
-// one): the console and the dashboard disagreeing about how many
-// subscriptions this box has is the bug this function exists to prevent.
-//
-// One array per line: [provider, label, window, reset, pct]. The provider and
-// the label are named once per account, because a column that repeats the same
-// string is a column the eye stops reading. The PERCENTAGE travels with the
-// cells (CEL-49) so the bar a surface draws is sized and coloured from the
-// same number the text was written from, rather than matched back to a window
-// by index - which the dashboard did, and which put the wrong colour on the
-// extra-usage row the moment one existed.
+// THE CELLS A SUBSCRIPTION ROW BECOMES. One array per line: [provider,
+// label, window, reset, pct]. The provider and the label are named once per
+// account, because a column that repeats the same string is a column the eye
+// stops reading. The PERCENTAGE travels with the cells so the bar is sized and
+// coloured from the same number the text was written from, never matched
+// back to a window by index.
 export const subCells = (s) => {
   const provider = String((s && s.provider) || '');
   const label = String((s && (s.label || s.account)) || '');
@@ -920,10 +877,9 @@ export const subCells = (s) => {
 // the fleet document does not carry one, and this is the screen where somebody
 // would paste a screenshot.
 //
-// CEL-35 removed the `cel gateway status` detour this view used to take for
-// the second half of its rows. The gateway's accounts arrive in the fleet
-// document with everything else now, and a view that runs its own command is
-// a view that can disagree with the list it is drawn beside.
+// The gateway's accounts arrive in the fleet document with everything else;
+// a view that ran its own command could disagree with the list it is drawn
+// beside.
 export const quotaView = (doc, width) => {
   const out = ['SUBSCRIPTIONS'];
   const subs = (doc && doc.subscriptions) || [];
@@ -934,7 +890,7 @@ export const quotaView = (doc, width) => {
   // THE TRACK IS SIZED TO THE COLUMN AND NEVER GUESSED. The fixed part of a
   // row is 2 + 12 + 1 + 24 + 1 = 40 columns, the window text and its reset
   // take about 34 more, so a bar is only drawn where one fits whole; below
-  // that this is exactly the view it was before.
+  // that the rows carry no bar.
   const cols = Math.floor(Number(width) || Number(process?.env?.COLUMNS) || process?.stdout?.columns || 80);
   const track = cols >= 100 ? 14 : cols >= 84 ? 8 : 0;
   const groups = [['direct', subs.filter((s) => s && s.source !== 'gateway')],
@@ -945,8 +901,8 @@ export const quotaView = (doc, width) => {
     for (const s of rows) {
       for (const c of subCells(s)) {
         const bar = c[4] === null || c[4] === undefined ? '' : usageBar(c[4], track);
-        // The label is truncated, not wrapped: a 36-character Codex account id
-        // left whole pushed every window off the right of the terminal.
+        // The label is truncated, not wrapped: a long Codex account id left
+        // whole would push every window off the right of the terminal.
         out.push(`  ${c[0].padEnd(12)} ${c[1].slice(0, 24).padEnd(24)} ${bar ? `${bar} ` : track ? ' '.repeat(track + 1) : ''}${c[2]}${c[3] ? `   ${c[3]}` : ''}`.trimEnd());
       }
     }
@@ -954,18 +910,15 @@ export const quotaView = (doc, width) => {
   return out;
 };
 
-// --- CEL-41: the triage answer ---------------------------------------------
+// --- the triage answer -----------------------------------------------------
 //
-// Ask the console about one stalled worker and it used to hand back the whole
-// worker table - forty rows, thirty-nine of them released weeks ago (owner,
-// 2026-09-19: "output is often just a wall of text, especially if you're
-// listing out past workers"). The fix is a division of labour with a hard
-// edge in the middle:
+// Asked about one stalled worker, the console answers with the rows that
+// matter, not the whole worker table. A division of labour with a hard edge
+// in the middle:
 //
 //   jev  chooses WHICH rows matter and how urgent each one is. It writes
 //        nothing - it is a classifier, and asking it for prose, a count or a
-//        date comparison is the documented way to get a confident wrong
-//        answer (model-jaggedness #2, #3, #9).
+//        date comparison is the way to get a confident wrong answer.
 //   code (this file) computes every number exactly from the fleet JSON the
 //        console already holds: the tally, the ages, how many were left out.
 //   the chat model turns that small object into two to four English lines.
@@ -1027,8 +980,7 @@ export const ATTENTION_WORDS = ['nothing to do', 'running normally', 'waiting on
 // The whole object the chat model is handed. Small on purpose: the selected
 // rows and a tally of what was left out, and not one field more. A decision
 // or a summary given the whole fleet is a model reading state nobody asked
-// about, which is jaggedness #5 and the failure this codebase is one careless
-// edit away from.
+// about.
 export const triageFacts = ({ rows = [], picked = [], attention = {}, question = '' }) => {
   const pickedIds = new Set(picked.map((w) => String(w && w.id)));
   const rest = rows.filter((w) => !pickedIds.has(String(w && w.id)));

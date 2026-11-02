@@ -1,4 +1,4 @@
-// CEL-105: THE DATA BEHIND DASHBOARD V2. Every card on the v2 page reads one
+// THE DATA BEHIND DASHBOARD V2. Every card on the v2 page reads one
 // feed here; none of them is a new store. Activity is what the inbox, the
 // delegation ledger and gh already say; lanes are the ledger's own history
 // with the steward's pane-status samples laid over it; load is the same ring.
@@ -15,7 +15,7 @@ import { store } from './store.mjs';
 
 const DAY = 86400e3;
 const iso = (v) => { if (v === null || v === undefined || v === "") return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
-// CEL-116: parsed once and kept (store.mjs); the rows are shared, never mutate them
+// parsed once and kept (store.mjs); the rows are shared, never mutate them
 const readJsonl = (f) => { try { return store.jsonl(f); } catch { return []; } };
 const median = (xs) => {
   if (!xs.length) return null;
@@ -51,8 +51,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     let n = String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^[^a-z]+/, '');
     return n.length > 32 ? n.slice(0, 32) : n.replace(/-+$/, '');
   };
-  // CEL-116: served warm like `slow` - a plain TTL cache made every request
-  // in the 30th second wait on five yq spawns, and every 8th on herdr
+  // served through `slow`, so once warm a request never waits on the yq
+  // spawns behind it
   const workspaces = () => slow('v2ws', 30000, async () => {
     let list = [];
     try {
@@ -96,13 +96,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- slow upstreams: gh and `cel quota` -------------------------------
-  // Review on #131, three rules. ONE FETCH IN FLIGHT: the page asks merges,
-  // cycle and heat at the same moment, and a plain TTL cache let all three
-  // miss together and run gh three times. NEVER CACHE A FAILURE: a rate-limit
-  // or a network blip cached for ten minutes is ten minutes of a card that
-  // says "no merges" with full confidence. NEVER BLOCK ON A WARM VALUE: past
-  // its TTL a value is still served while a refresh runs behind it, and a
-  // timer keeps the passes warm so a request only waits on a cold box.
+  // Per key: one computation in flight at a time; a failed computation
+  // (throws, null or undefined) is never cached; and a warm value is served
+  // at once while a refresh past its TTL runs behind it.
   const flights = {};
   const slow = (key, ttlMs, fn) => {
     const f = flights[key] || (flights[key] = { v: undefined, t: 0, p: null });
@@ -121,20 +117,13 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     }
     return refresh();
   };
-  // ---- computed feeds, kept warm (CEL-116) --------------------------------
-  // The same three rules as `slow`, one level up: a feed's computed answer is
-  // kept per (feed, query) and served at once; past CEL_DASH_FEED_TTL_MS a
-  // refresh runs behind it, and a timer refreshes every feed a page asked for
-  // in the last ten minutes, so a refresh only waits on a cold server. A
-  // computation that throws is not kept. Each answer carries when it was
-  // computed, so a card can say how old it is.
+  // ---- computed feeds, kept warm -------------------------------------------
+  // The same three invariants as `slow`, per (feed, query); each answer
+  // carries when it was computed, so a card can say how old it is.
   const feeds = new Map();
-  // Review on #141: a feed computed while gh failed is served but never kept
-  // as fresh (t=0) - yet a repo gh cannot resolve fails EVERY time (two did on
-  // the live box), and retrying it on every ask and every warm pass was a gh
-  // spawn every few seconds forever. So a degraded feed is retried at most
-  // once per CEL_DASH_DEGRADED_RETRY_MS (default 60 s); in between its last
-  // answer is served, and it says how old it is.
+  // A feed computed while an upstream failed is served but never fresh (t=0),
+  // and is retried at most once per CEL_DASH_DEGRADED_RETRY_MS (default 60 s)
+  // so a repo gh can never resolve does not spawn gh on every ask.
   let upstreamFailures = 0;
   const compute = (f) => {
     const before = upstreamFailures;
@@ -171,8 +160,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return Promise.resolve(f);
   };
   // one feed at a time, so a warm pass never holds the event loop for all of
-  // them at once; only feeds a page asked for in the last minute are kept warm
-  // (review on #141), and one nobody asked for in ten minutes is forgotten
+  // them at once; only feeds a page asked for in the last minute are kept
+  // warm, and one nobody asked for in ten minutes is forgotten
   let feedWarming = false;
   const feedWarm = async () => {
     if (feedWarming) return;
@@ -202,14 +191,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (!v) upstreamFailures++;
     return v;
   };
-  // CEL-117: merged PRs are fetched BY DATE, not by count. `--limit 200` was
-  // the newest 200 merges whatever their date, so a repo with 220 merges in a
-  // fortnight showed 200 and its oldest days quietly emptied. Every card the
-  // page shows asks 90 days or less, so they share ONE 90-day fetch per repo;
-  // a longer ask (heat?days=365) fetches its own window on demand and never
-  // widens the shared one (review on #142). GitHub's search answers at most
-  // 1000 per query: a full page is followed by another ending at the oldest
-  // day seen, and PRs are de-duplicated by number.
+  // Merged PRs are fetched BY DATE, not by count, so a busy repo's oldest
+  // days never quietly empty. Every card the page shows asks 90 days or less,
+  // so they share ONE 90-day fetch per repo; a longer ask (heat?days=365)
+  // fetches its own window on demand and never widens the shared one.
+  // GitHub's search answers at most 1000 per query: a full page is followed
+  // by another ending at the oldest day seen, and PRs are de-duplicated by number.
   const SHARED_WINDOW = 90;
   const MERGE_PAGE = 1000;
   const ymdUtc = (t) => new Date(t).toISOString().slice(0, 10);
@@ -219,8 +206,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       resolve(err ? { ok: false, err: String(errOut || err.message || '') } : { ok: true, out }));
   });
   // Only GitHub saying the repo does not exist or is not ours to read is "no
-  // access"; a rate limit, a timeout or a network blip is not (review on #142)
-  // - that is a failure, never cached, and the last good answer stands.
+  // access"; a rate limit, a timeout or a network blip is not - that is a
+  // failure, never cached, and the last good answer stands.
   const DENIED = /Could not resolve to a Repository|cannot be searched|Resource not accessible|HTTP 404|Not Found/i;
   const mergedList = async (slug, days) => {
     const v = await slow(`gh:merged:${slug}:${days}`, 600000, async () => {
@@ -242,8 +229,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         end = ymdUtc(oldest);
       }
       // GitHub's search answers a repo we cannot read with an empty list and
-      // exit 0 - the live box showed two such repos as a calm 0. An empty
-      // answer is checked against the repo itself.
+      // exit 0, so an empty answer is checked against the repo itself.
       if (!seen.size) {
         const r = await ghTry(['repo', 'view', slug, '--json', 'name'], 30000);
         if (!r.ok) return DENIED.test(r.err) ? { denied: true } : null;
@@ -291,9 +277,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
     return items;
   };
-  // CEL-116: one workspace's inbox and ledger items, rebuilt only when the
-  // store hands back a new parse (a grown inbox, a rewritten ledger) - the
-  // largest inbox is tens of thousands of lines, and every row was re-dated
+  // one workspace's inbox and ledger items, rebuilt only when the store hands
+  // back a new parse (a grown inbox, a rewritten ledger) rather than re-dated
   // on every request. The items are shared: never mutate them.
   const actMemo = new Map();
   const wsActivity = (ws) => {
@@ -329,7 +314,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     actMemo.set(ws.name, { mail, led, items });
     return items;
   };
-  // a ring, newest CEL_DASH_ACTIVITY_KEEP lines (review on #131): the feed
+  // a ring, newest CEL_DASH_ACTIVITY_KEEP lines: the feed
   // only ever shows the recent past, and a log nobody trims is a disk leak
   const logAct = (ws, text) => {
     try {
@@ -425,17 +410,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- lanes --------------------------------------------------------------
-  // Review of #132 on real data: every lane was amber all day. Stale rows
-  // (a "running" nobody touched in weeks, finished or orphaned work) each drew
-  // one segment across the whole window, and every state that was not
-  // "running" read as "waiting". Now: the ledger contributes only its running
-  // spans; an open-ended "running" counts up to now only while a pane is live
-  // in that worktree (and takes the pane's state); waiting means a pane that
-  // said "blocked" - a person is needed - and nothing else.
+  // The ledger contributes only its running spans, so a stale row never
+  // draws one segment across the whole window; an open-ended "running"
+  // counts up to now only while a pane is live in that worktree (and takes
+  // the pane's state); waiting means a pane that said "blocked" - a person
+  // is needed - and nothing else.
   const PANE_STATE = { working: 'running', blocked: 'waiting', idle: 'idle', done: 'idle' };
-  // CEL-116: the sample ring indexed once per change, worktree -> what its
-  // pane said, oldest first. Every ledger row used to scan the whole ring
-  // (hundreds of rows x thousands of samples) on every request.
+  // the sample ring indexed once per change, worktree -> what its pane said,
+  // oldest first, so a request never rescans the ring per ledger row
   let paneMemo = { rows: null, idx: new Map() };
   const paneIndex = () => {
     const rows = readJsonl(SAMPLES());
@@ -445,7 +427,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     for (const s of samples) {
       const seen = new Set();
       for (const p of s.panes || []) {
-        // the first pane in a sample for a cwd is the one that counts, as before
+        // the first pane in a sample for a cwd is the one that counts
         if (!p || !p.cwd || seen.has(p.cwd)) continue;
         seen.add(p.cwd);
         let l = idx.get(p.cwd); if (!l) { l = []; idx.set(p.cwd, l); }
@@ -541,11 +523,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- services: the box's own and each workspace's ---------------------
-  // the box's servers bind the tailnet address, not loopback: try both
   // Each server is probed on the host IT binds - a dashboard's dash.host,
-  // the pages server's CEL_PAGES_HOST - then on this box's own addresses
-  // (the default bind is the tailnet IP, not loopback: probing 127.0.0.1
-  // alone called every one of them down).
+  // the pages server's CEL_PAGES_HOST - then on this box's own addresses:
+  // the default bind is the tailnet IP, so probing loopback alone reads as down.
   const localAddrs = () => Object.values(networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4').map((a) => a.address);
   const answersOn = (port, host) => new Promise((resolve) => {
     const sock = connect(Number(port), host);
@@ -566,12 +546,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       });
     });
   };
-  // Review on #132: every tab polls this every 8 s, and it spawns `cel
-  // services` per workspace and probes ports. One run in flight, shared by
-  // every request (the promise is cached, not just the value), ~8 s fresh;
-  // workspaces and probes run side by side.
-  // the promise is cached per workspace (and for pages), so a scope of "all"
-  // and a scope of one share the same runs
+  // Every tab polls this, and it spawns `cel services` per workspace and
+  // probes ports. One run in flight per workspace (and for pages), shared by
+  // every request - the promise is cached, not just the value - and ~8 s
+  // fresh, so a scope of "all" and a scope of one share the same runs.
   const svcFlights = {};
   const once = (key, fn) => {
     const f = svcFlights[key];
@@ -599,7 +577,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return rows;
   });
   const services = async (wss) => {
-    // CEL-107: one dashboard for the box, and it is the server answering this
+    // one dashboard for the box, and it is the server answering this
     // request - up by construction, so it is a row and not a probe
     const served = await run(CEL(), ['serve', 'list', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
     const unknown = await run(CEL(), ['serve', 'adopt', '--json'], 15000).then((x) => JSON.parse(x || '[]')).catch(() => []);
@@ -647,7 +625,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const d = byDay[localDay(p.mergedAt)];
       if (d) d.counts[p.repo] = (d.counts[p.repo] || 0) + 1;
     }
-    // CEL-117: days are the box's local calendar days (the owner reads the
+    // days are the box's local calendar days (the owner reads the
     // chart in local time); GitHub's own search buckets by UTC, so a merge
     // near midnight can sit one day apart from github.com - by design
     return { days: out, timezone: TZ_NAME, no_access: noAccess, unavailable };
@@ -677,11 +655,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       if (t.getTime() < from) continue;
       grid[(t.getDay() + 6) % 7][t.getHours()] += 1;
     }
-    // CEL-106's page: Monday first, local time
+    // Monday first, local time
     return { days, cells: grid };
   };
 
-  // ---- forecast -----------------------------------------------------------
+  // ---- quota ----------------------------------------------------------------
   const WINDOW_MS = { '5h': 5 * 3600e3, '7d': 7 * DAY, monthly: 30 * DAY, daily: DAY, weekly: 7 * DAY };
   const winLen = (name) => {
     if (WINDOW_MS[name]) return WINDOW_MS[name];
@@ -696,20 +674,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     recordUsage(q);
     return q;
   });
-  // ---- usage (CEL-108) ----------------------------------------------------
-  // THE ONE USAGE CARD. "Usage forecast" and "Claude accounts" were the same
-  // windows drawn twice as flat rows, and neither said the things the owner
-  // asks: which account runs out before it resets, which ones the
-  // orchestrators are on, and which paid balances have vetoed their workers.
-  // Everything here is read, not decided: windows from `cel quota --json`,
-  // the orchestrators' pool from omp (the CEL-98 source, via the same JSON),
-  // the floor veto from quota_vetoed, and who used an account from the
-  // delegation ledgers.
+  // ---- usage ----------------------------------------------------------------
+  // One card per provider answering: which account runs out before it resets,
+  // which ones the orchestrators are on, and which paid balances have vetoed
+  // their workers. Everything is read, not decided: windows, the
+  // orchestrators' pool and the floor veto from `cel quota --json`, and who
+  // used an account from the delegation ledgers.
   //
-  // History: no sampler records quota, so the dashboard keeps its own short
-  // ring of each `cel quota` read it makes (at most one a minute, a week
-  // kept) - the expanded card's per-window lines come from there and say so
-  // when there is nothing yet.
+  // History: nothing else records quota, so the dashboard keeps its own short
+  // ring of each `cel quota` read it makes (at most one a minute, a week kept)
+  // for the expanded card's per-window lines.
   const USAGE_RING = () => join(STATE_DIR, 'dash-usage.jsonl');
   const winKey = (s, w) => `${s.provider}|${String(s.label || s.account || '').toLowerCase()}|${w.name}|${w.scope || ''}`;
   let lastRecord = 0;
@@ -844,34 +818,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       history: ring.length > 1,
     };
   };
-  const forecast = async () => {
-    const q = (await quota()) || {};
-    const items = [];
-    const now = Date.now();
-    for (const s of Array.isArray(q.subscriptions) ? q.subscriptions : []) {
-      for (const w of s.windows || []) {
-        const len = winLen(w.name); const resets = new Date(w.resets_at).getTime();
-        const used = Number(w.used_pct) || 0;
-        let projected = used;
-        if (len && resets) {
-          const frac = (len - (resets - now)) / len;
-          // too early in a window to extrapolate: say what is used, not a guess
-          if (frac > 0.05 && frac <= 1) projected = Math.min(999, Math.round(used / frac));
-        }
-        items.push({ who: s.label || s.account || s.provider, pool: s.provider + (w.scope ? `/${w.scope}` : ''),
-          window: w.name, used_pct: used, resets: iso(w.resets_at), projected_pct: projected });
-      }
-    }
-    return { accounts: items };
-  };
 
-  // ---- drive: an orchestrator's room (CEL-121) -----------------------------
-  // The room reads the conversation itself, through the drive core (CEL-120):
-  // who is running from `cel drive list` (herdr, never `cel fleet` - its cold
-  // read was 20 s under load), the transcript from a per-file offset tailer
-  // kept in this process. A poll reads only the bytes written since the last
-  // one; a 13 MB session is never reparsed. A room nobody has looked at for
-  // ten minutes is forgotten, so this costs nothing while nobody watches.
+  // ---- drive: an orchestrator's room ---------------------------------------
+  // The room reads the conversation itself, through the drive core: who is
+  // running from `cel drive list` (herdr, never `cel fleet`, whose cold read
+  // is slow under load), the transcript from a per-file offset tailer kept
+  // in this process. A poll reads only the bytes written since the last one;
+  // a large session is never reparsed. A room nobody has looked at for ten
+  // minutes is forgotten, so this costs nothing while nobody watches.
   const driveList = () => slow('drive:list', 4000, async () => {
     const out = await run(CEL(), ['drive', 'list', '--json'], 10000);
     if (out === null) return null;
@@ -944,7 +898,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const act = async (req, res, body) => {
     const { action, target } = body || {};
     const args = (body && typeof body.args === 'object' && body.args) || {};
-    // CEL-121: mail to a live orchestrator through `cel drive send` - kind
+    // mail to a live orchestrator through `cel drive send` - kind
     // owner, from owner, delivered by its inbox hook when the turn ends.
     // Never typed into its pane.
     if (action === 'drive.send') {
@@ -965,7 +919,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const wsName = String(args.ws || cfg.name);
     if (!all.some((w) => w.name === wsName)) return [400, 'unknown workspace'];
     const cel = (argv) => run(CEL(), argv, 30000);
-    // Review on #131: a mailbox is only one somebody reads. `cel inbox send`
+    // A mailbox is only one somebody reads. `cel inbox send`
     // will write to any name, so the dashboard checks first: a ledger alias,
     // the workspace's own orchestrator or a repo orchestrator it declares,
     // or root. A typo here would otherwise be a message nobody ever sees.
@@ -1019,13 +973,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // one feed's answer as { v, t }: `since` is per browser (its cookie and
   // ?at), so it is built fresh from the cached activity and stuck lists; every
   // other feed is cached whole per (feed, query)
-  const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'forecast', 'usage', 'fleet', 'services']);
+  const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'fleet', 'services']);
   const answer = async (name, req, url, wss, peek = false) => {
     if (name === 'since') return { v: await since(req, url, wss), at: Date.now() };
-    // Review on #141: the cache key is built only from the parameters the
-    // feed reads, each clamped as the feed clamps it, and the feed computes
-    // from that same normalised query - so the map is bounded by workspaces
-    // x a handful of values, whatever a client sends
+    // The cache key is built only from the parameters the feed reads, each
+    // clamped as the feed clamps it, and the feed computes from that same
+    // normalised query - so the map stays bounded whatever a client sends.
     const n = (k, d, lo, hi) => Math.min(hi, Math.max(lo, Math.floor(Number(url.searchParams.get(k)) || d)));
     const q = new URLSearchParams();
     if (name === 'lanes') { const r = url.searchParams.get('range'); q.set('range', !r || r === 'today' ? 'today' : r === '3d' ? '3d' : '7d'); }
@@ -1051,7 +1004,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       case 'merges': return feed(key, () => merges(url, wss), peek);
       case 'cycle': return feed(key, () => cycle(url, wss), peek);
       case 'heat': return feed(key, () => heat(url, wss), peek);
-      case 'forecast': return feed(key, () => forecast(), peek);
       case 'usage': return feed(key, () => usage(wss), peek);
       case 'fleet': return feed(key, () => fleet(wss), peek);
       default: return feed(key, () => services(wss), peek);
@@ -1127,8 +1079,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     } catch { /* a failed warm-up is retried next interval */ }
   };
   // Started by the first v2 request, not at boot: a dashboard nobody opens
-  // the v2 page on has no reason to spend gh rate limit or run `cel quota`
-  // (and the v1 suite's fixtures were torn down under a boot-time quota run).
+  // the v2 page on has no reason to spend gh rate limit or run `cel quota`.
   let warming = false;
   const startWarm = () => {
     if (warming) return;

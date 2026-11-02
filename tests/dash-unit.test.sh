@@ -1,8 +1,7 @@
 # shellcheck shell=bash
-# CEL-109: the dashboard was started with `setsid nohup ... &` from inside the
-# steward's oneshot unit; setsid leaves the session but not the cgroup, so
-# systemd killed the dashboard when the tick ended. It now runs as an
-# installed user unit, cel-dash.service. systemctl is a stub that logs argv
+# The dashboard runs as an installed user unit, cel-dash.service: a `setsid`
+# child of the steward's oneshot unit stays in its cgroup and dies when the
+# tick ends. systemctl is a stub that logs argv
 # and, on start/restart, brings up a fake server - the live manager is never
 # touched.
 source "$CEL_ROOT/lib/common.sh"
@@ -96,10 +95,8 @@ test_dash_doctor_names_the_unit_state() {
   _du_down
 }
 
-# The pages servers were started the same `setsid ... &` way from the same
-# steward tick, so they died the same death. CEL-109 made them transient
-# units; CEL-122: transient units died with the user manager, so pages is now
-# an installed, enabled user unit like cel-dash.
+# The pages server is an installed, enabled user unit like cel-dash, for the
+# same reason; a transient unit would die with the user manager.
 test_pages_ensure_installs_an_enabled_unit_not_a_transient_one() {
   _du_setup
   source "$CEL_ROOT/lib/pages.sh"
@@ -123,8 +120,8 @@ S
   assert_contains "$u" "Restart=on-failure"
   assert_contains "$u" "Environment=\"CEL_PAGES_PORT=$PORT\""
   assert_contains "$u" "WantedBy=default.target"
-  # a live TRANSIENT cel-pages (pre-CEL-122) would shadow the new file: stopped
-  # before the first install
+  # a live TRANSIENT cel-pages from an older install would shadow the new
+  # file: stopped before the first install
   local stop_line en_line
   stop_line="$(grep -n -- '--user stop cel-pages.service' "$DU_LOG" | head -1 | cut -d: -f1)"
   en_line="$(grep -n -- '--user enable cel-pages.service' "$DU_LOG" | head -1 | cut -d: -f1)"

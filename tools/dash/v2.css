@@ -1,5 +1,4 @@
-/* dashboard v2 (CEL-106), from the approved mockup. The night sky is CSS
-   only - no image asset - by the owner's decision. */
+/* dashboard v2. The night sky is CSS only - no image asset. */
 :root{--bg:#0d1117;--panel:#141a23;--panel2:#1a2230;--line:#263042;--ink:#e6edf3;--dim:#9aa7b8;--faint:#5d6b7e;--gold:#e3b34c;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--blue:#3b82f6}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -94,7 +93,7 @@ select.pill{appearance:none;padding-right:26px;background-image:linear-gradient(
 .ovcard{min-height:auto}.ovcard .dc{display:block}
 .chip.on{border-color:#e3b34c;background:#2a2414}.urg{display:inline-flex;gap:4px;align-items:center}
 
-/* the shared decisions panel (decisions.css) reads these */
+/* the decisions panel (decisions.css) reads these */
 :root{--raise:#1a2230;--accent:#e3b34c;--accent-soft:#2a2414;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--mint:#3fb950}
 button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:6px;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}
@@ -121,13 +120,13 @@ kbd{font:11px var(--mono);color:var(--faint)}
 .armed{background:var(--gold)!important;color:#1b1408!important;border-color:var(--gold)!important}
 .ovctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 .lt2 b.ok,.lt2 b.running{background:#3fb950}.lt2 b.waiting{background:#d29922}
-/* the decisions panel inside a card: every card shows in full (CEL-118) */
+/* the decisions panel inside a card: every card shows in full */
 .w #needsyou h2,.w #needsyou .nychips{display:none}
 .w #needsyou{margin:0}
 #needsyou .nycard{padding:8px 10px;margin-bottom:6px;border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px}
 #needsyou .nycard.urgent{border-left-color:var(--bad)}
 #needsyou .nyhead{margin:0}
-/* CEL-118: options and "other…" are never folded away - a card that showed
+/* options and "other…" are never folded away - a card that showed
    only "accept recommended" read as the owner's only choice */
 #needsyou .nyact{margin-top:4px}
 #needsyou .nycard.flash{outline:2px solid var(--gold)}
@@ -135,7 +134,7 @@ kbd{font:11px var(--mono);color:var(--faint)}
 .ov #needsyou h2,.ov #needsyou .nychips{display:flex}
 .ov #needsyou h2{font-size:14px;margin:0 0 6px}
 @media(max-width:600px){.top{flex-wrap:wrap;padding:8px}.search{min-width:0}.hero{height:220px}.hero h1{font-size:19px;bottom:100px}.composer{margin:-60px 8px 0}.wrap{padding:0 8px}.w.tall{grid-row:auto}#updated{display:none}}
-/* the usage card (CEL-108), from the approved mockup */
+/* the usage card */
 .usum{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:2px 0 12px}.usum>div{background:#0f141c;border:1px solid #1d2532;border-radius:10px;padding:10px}
 .usum .big{font-size:22px}.neg{color:var(--bad);font-weight:700}.pos{color:var(--ok);font-weight:700}.amb{color:var(--warn)}
 .ugrp{margin-top:12px}.ugrp h4{margin:0 0 4px;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.5px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -154,7 +153,7 @@ kbd{font:11px var(--mono);color:var(--faint)}
 .ulegend{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px}
 .uspark{width:100%;height:28px;display:block}.uspark polyline{fill:none;stroke:var(--blue);stroke-width:2;vector-effect:non-scaling-stroke}
 @media(max-width:860px){.usum{grid-template-columns:repeat(2,1fr)}.uacct{grid-template-columns:1fr}.umoney{grid-template-columns:1fr 1fr}.umoney .sub{grid-column:1/-1}}
-/* ---- an orchestrator's room (CEL-121): opened from the grid, full width ---- */
+/* ---- an orchestrator's room: opened from the grid, full width ---- */
 .room{display:none;max-width:1400px;margin:0 auto;padding:12px 18px 24px}
 .room.open{display:block}
 body.inroom .hero,body.inroom .composer,body.inroom .wrap{display:none}

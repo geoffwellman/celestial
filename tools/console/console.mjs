@@ -4,9 +4,9 @@
 // Celestial's OWN interface, not an agent pane pretending to be one. The three
 // panels are deterministic reads (lib/fleet.sh, lib/inbox.sh) and the command
 // line runs exactly what the operator typed, after lib/guard.sh has said it
-// may. A small model is wired into one job and one only: turning a typed
-// sentence into ONE proposed command, which the operator then presses Enter to
-// run. It never executes anything itself.
+// may. Models only propose: a typed sentence becomes a proposed command,
+// which the operator then presses Enter to run. No model executes anything
+// itself.
 //
 // The interactive UI is ink and lives in ui.mjs, imported lazily: --render-once
 // and --translate are what the tests drive and what a pipe wants, and neither
@@ -53,22 +53,20 @@ for (let i = 0; i < argv.length; i += 1) {
   else { process.stderr.write(`cel console: unknown argument '${a}'\n${usage}\n`); process.exit(2); }
 }
 
-// The state the translator gets as context: the same two reads the panels
-// show. A model asked "what is waiting on me in alpha" cannot answer with a
-// workspace name unless it has been told which names exist - and a
-// hallucinated --workspace is a command that fails in front of the operator.
-// The router is handed the same two reads, reduced to names.
-
 const main = async () => {
   if (opts.translate) {
+    // The state the translator gets as context: the same two reads the panels
+    // show. A model asked "what is waiting on me in alpha" cannot answer with a
+    // workspace name unless it has been told which names exist - and a
+    // hallucinated --workspace is a command that fails in front of the operator.
+    // The router is handed the same two reads, reduced to names.
     const doc = await fleet();
     const items = await openItems(doc);
     const state = askState(doc, items);
 
-    // THE ROUTER FIRST. It answers in under a second where the chat model
-    // took six, and when it cannot - not configured, down, an intent whose
-    // slots do not fill - the sentence carries on to the chat model exactly
-    // as it did before this existed. An operator should not be able to tell
+    // THE ROUTER FIRST. It answers in under a second, and when it cannot -
+    // not configured, down, an intent whose slots do not fill - the sentence
+    // carries on to the chat model. An operator should not be able to tell
     // which of the two answered except by the line on stderr.
     if (opts.router) {
       try {
@@ -114,11 +112,10 @@ const main = async () => {
       process.stdout.write(`${cmds.join('\n')}\n`);
       return;
     }
-    // THE SECOND ASK. A miss used to end here with "no command for that",
-    // which told the operator nothing; now the model is asked what the
-    // sentence might have meant and the answers are offered as a numbered
-    // list. Exit 1 either way: nothing was translated, and a caller testing
-    // the exit status must not mistake a menu for a command.
+    // THE SECOND ASK. On a miss the model is asked what the sentence might
+    // have meant and the answers are offered as a numbered list. Exit 1 either
+    // way: nothing was translated, and a caller testing the exit status must
+    // not mistake a menu for a command.
     let options = [];
     try {
       ({ options } = await translate({ sentence: opts.translate, state, mode: 'options' }));

@@ -1,8 +1,6 @@
 # shellcheck shell=bash
-# CEL-102: `cel dash --restart` started the new server while the old one still
-# held the port; it died with EADDRINUSE and nothing retried. Restart/ensure
-# now wait (bounded) for the port to be free, then verify the new server
-# answers - or say so and fail.
+# `cel dash` restart/ensure waits (bounded) for the port to be free, then
+# verifies the new server answers - or says so and fails.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/dash.sh"
 
@@ -71,8 +69,8 @@ test_dash_ensure_fails_clearly_when_the_port_stays_held() {
   _dr_down
 }
 
-# Sourcery on #128: an old dashboard that ignores SIGTERM kept answering, and
-# ensure then reported it as the healthy new server. Stop escalates to KILL.
+# Stop escalates to KILL, so an old dashboard that ignores SIGTERM is never
+# reported as the healthy new server.
 test_dash_stop_kills_a_server_that_ignores_term() {
   _dr_setup
   CEL_DASH_CONFIG="{\"port\":$PORT}" bash -c 'trap "" TERM; exec -a "node tools/dash/server.mjs" sleep 60' &
@@ -84,9 +82,8 @@ test_dash_stop_kills_a_server_that_ignores_term() {
   _dr_down
 }
 
-# CEL-111: the live dashboard was stopped cleanly from under the box - a test's
-# restart read the live registry's legacy port 7770. Under the suite, stop
-# never signals a server that was not started under the suite.
+# Under the suite, stop never signals a server that was not started under the
+# suite (such as the box's live dashboard).
 test_dash_stop_under_the_suite_spares_a_server_it_did_not_start() {
   _dr_setup
   env -u CEL_TESTING CEL_DASH_CONFIG="{\"port\":$PORT}" bash -c 'exec -a "node tools/dash/server.mjs" sleep 30' &

@@ -2,10 +2,11 @@
 // The preview listens on the box's tailnet address; a remote client that
 // reaches the box over ssh (Moshi forwards the box's localhost) needs the same
 // port on 127.0.0.1. Byte-for-byte TCP, one upstream connection per client.
-// It waits until the app answers on <host>:<port> before taking 127.0.0.1:
-// grabbing it first would make an app that binds every interface fail with
-// EADDRINUSE. When 127.0.0.1:<port> is then taken - the app bound every
-// interface - there is nothing to forward, and this exits quietly.
+// It waits up to ~30 min for the app to answer on <host>:<port> before taking
+// 127.0.0.1 - grabbing it first would make an app that binds every interface
+// fail with EADDRINUSE - then listens whether or not the app ever answered.
+// When 127.0.0.1:<port> is taken - the app bound every interface - there is
+// nothing to forward, and this exits quietly.
 import net from 'node:net';
 
 const [port, host] = [Number(process.argv[2]), process.argv[3]];

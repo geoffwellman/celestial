@@ -1,17 +1,14 @@
 # shellcheck shell=bash
-# CEL-107: ONE DASHBOARD FOR THE BOX. `cel dash` used to start a server per
-# workspace; v2 already read across every workspace, so four processes served
-# one page while polling herdr and gh four times over, and the per-workspace
-# restart race took one of them down. Now: one server, the old ports redirect
-# to it, the steward ensures it once, doctor names it, and the classic page
-# takes ?ws=<name>.
+# ONE DASHBOARD FOR THE BOX: one server reads every workspace, the steward
+# ensures it once, doctor names it, the old per-workspace ports are closed,
+# and /api/state takes ?ws=<name>.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/dash.sh"
 
 _do_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
 # Two workspaces, each still carrying the port its old per-workspace server
-# held (retired in CEL-123); the box config names the dashboard's port.
+# held; the box config names the dashboard's port.
 _do_setup() {
   T="$(mktemp -d)"
   mkdir -p "$T/bin" "$T/alpha" "$T/beta" "$T/inbox" "$T/logs" "$T/home"
@@ -59,7 +56,7 @@ test_dash_one_ensure_starts_exactly_one_server_for_every_workspace() {
   _do_down
 }
 
-# CEL-123: the old per-workspace ports are retired - nothing listens on them.
+# The old per-workspace ports are retired - nothing listens on them.
 test_dash_one_old_ports_are_closed() {
   _do_setup
   "$CEL_ROOT/bin/cel" dash --ensure >/dev/null 2>&1
@@ -68,7 +65,7 @@ test_dash_one_old_ports_are_closed() {
   _do_down
 }
 
-# CEL-123: /classic is gone; a bookmark lands on the one dashboard.
+# /classic is retired and only redirects to / (README still documents it).
 test_dash_one_classic_redirects_to_the_front_door() {
   _do_setup
   "$CEL_ROOT/bin/cel" dash --ensure >/dev/null 2>&1
