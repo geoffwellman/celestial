@@ -1,0 +1,8 @@
+### Fixed
+- `cel-verify` no longer records a PR's checks as `SUCCESS` when a check was cancelled, timed out, needs action, went stale or failed to start: those are `FAILURE`, only `SUCCESS`/`NEUTRAL`/`SKIPPED` count as a pass, and a state it does not recognise is `PENDING`.
+- `cel-fanout` takes every "first match" with jq's `first()` instead of `| head -1`, so a large herdr response or ledger no longer kills `delegate`, `try`, `wait`, `status` or `replace bind` with a silent exit 141.
+- `tools/release/cut.py` is all or nothing: CHANGELOG and VERSION are staged beside themselves and replaced only after every fragment has been moved aside, and any failure puts everything back, so an interrupted or refused cut never leaves a new section with the old VERSION or a subset of fragments deleted. Replaced files keep their mode.
+- `pr-nudge.sh` reports success only when the configured reviewer's exact login is back on the PR (it no longer accepts a login that merely contains it, or reads it as a pattern), and prints usage instead of "unbound variable" when called without its two arguments.
+- `capture-layout.py` refuses a missing or invalid `--title`/`--indent` value, a malformed or misshapen herdr answer, and a split direction other than `right`/`down` with a one-line message, instead of a traceback or a layout guessed as vertical.
+- The nightly every-ref hygiene job pins `actions/checkout` to the same commit as every other job.
+- `cel-linear board` refetches a cache entry that is not a board response instead of serving it for the rest of the minute, writes the cache owner-only whatever the caller's umask, and leaves no temp file behind on failure or signal.

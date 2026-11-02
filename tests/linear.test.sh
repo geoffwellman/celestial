@@ -129,3 +129,29 @@ test_linear_board_caches_the_query_for_a_minute() {
   assert_eq "$(ls "$CEL_CACHE"/linear-board-ABC.json | wc -l)" 1
   rm -rf "$T"
 }
+
+# Ticket titles and assignees can be private: the cache is the owner's alone
+# whatever umask the caller runs with, and a publish leaves no temp beside it.
+test_linear_board_cache_is_private_whatever_the_umask() {
+  _linear_board_fixture
+  ( umask 022; "$CEL_ROOT/core/skills/linear/bin/cel-linear" board --team ABC --json >/dev/null )
+  assert_eq "$(stat -c %a "$CEL_CACHE/linear-board-ABC.json")" 600
+  assert_eq "$(ls -A "$CEL_CACHE")" "linear-board-ABC.json"
+  rm -rf "$T"
+}
+
+# A cache entry that is not a board response (a torn write, a hand edit) is
+# refetched, not served - for a whole TTL - as an empty or broken board.
+test_linear_board_refetches_a_malformed_cache() {
+  _linear_board_fixture
+  local bad
+  for bad in '{"data":{"teams":{"nod' '{"data":null}'; do
+    printf '%s' "$bad" > "$CEL_CACHE/linear-board-ABC.json"
+    : > "$T/calls"
+    local out; out="$("$CEL_ROOT/core/skills/linear/bin/cel-linear" board --team ABC --json)"
+    assert_contains "$out" "ABC-49"
+    assert_eq "$(wc -l < "$T/calls")" 1
+    assert_eq "$(jq -r '.data.teams.nodes[0].key' "$CEL_CACHE/linear-board-ABC.json")" ABC
+  done
+  rm -rf "$T"
+}

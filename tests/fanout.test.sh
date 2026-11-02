@@ -31,16 +31,17 @@ case "$1 $2" in
                      case " $* " in *" --path "*) _p=$((_p+1));; esac; case " $* " in *" --branch "*) _p=$((_p+1));; esac
                      if [ "$_w" -ne 1 ] || [ "$_p" -ne 1 ]; then echo "$_usage" >&2; exit 1; fi
                      touch "${STUB_OPEN_GATE:-/dev/null}"; echo '{"result":{"workspace_id":"wR","pane_id":"wR:p1"}}';;
-  "worktree create") echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}';;
+  "worktree create") if [ -n "${STUB_CREATE_FILE:-}" ]; then cat "$STUB_CREATE_FILE"; else echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}'; fi;;
   "workspace list")  if [ -n "${STUB_OPEN_GATE:-}" ] && [ ! -f "$STUB_OPEN_GATE" ]; then echo '{"result":{"workspaces":[]}}'; elif [ -n "${STUB_WS_JSON:-}" ]; then printf "%s" "$STUB_WS_JSON"; elif [ -n "${STUB_NO_WS:-}" ]; then echo '{"result":{"workspaces":[]}}'; else echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}'; fi;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"wC","label":"widget/workers"}}}';;
   "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
-  "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
+  "pane split")      if [ -n "${STUB_SPLIT_FILE:-}" ]; then cat "$STUB_SPLIT_FILE"; else echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}'; fi;;
   "pane read")       printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent read")      if [ -n "${STUB_AGENT_READ_FAIL:-}" ]; then exit 1; fi
                      printf '%s\n' "${STUB_PANE_TEXT:-reading src and running the gate}";;
   "agent get")       if [ -n "${STUB_LIVE_ALIAS:-}" ] && [ "$3" = "$STUB_LIVE_ALIAS" ]; then exit 0; fi; exit 1;;
   "agent list")      if [ -n "${STUB_AGENTS_FAIL:-}" ]; then exit 1;
+                     elif [ -n "${STUB_AGENTS_FILE:-}" ]; then cat "$STUB_AGENTS_FILE";
                      elif [ -n "${STUB_AGENTS_JSON:-}" ]; then printf '%s' "$STUB_AGENTS_JSON";
                      elif [ -n "${STUB_AGENTS_EMPTY:-}" ]; then echo '{"result":{"agents":[]}}';
                      else echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"'"${STUB_STATUS:-idle}"'"}]}}'; fi;;
@@ -3670,5 +3671,50 @@ test_keep_marks_a_released_checkout() {
   (cd "$T" && "$BIN" keep WG-K1) > /dev/null || { echo "not idempotent"; rm -rf "$T"; return 1; }
   rm -rf "$wt"; rc=0; out="$(cd "$T" && "$BIN" keep WG-K1 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "kept a missing checkout"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A LARGE HERDR RESPONSE OR LEDGER IS NOT A CRASH. Every "first match" below is
+# taken by jq's first(), never by `| head -1`: under pipefail, head exiting after
+# one line SIGPIPEs a jq that still has output, and the command dies with 141
+# and no message. Each fixture writes well past a pipe buffer (64 KiB).
+_fanout_many_panes() { # <file> <n> - a herdr result whose first pane_id is wZ:p1, then n more
+  jq -nc --arg wt "$STUB_WT" --argjson n "$2" \
+    '{result:{workspace_id:"wZ",pane_id:"wZ:p1",checkout_path:$wt,panes:[range($n) | {pane_id:"wZ:q\(.)"}]}}' > "$1"
+}
+test_delegate_survives_a_large_worktree_create_response() {
+  _fanout_setup
+  _fanout_many_panes "$T/create.json" 20000
+  local rc=0; (cd "$T" && STUB_CREATE_FILE="$T/create.json" "$BIN" delegate widget WG-BIGRESP "$T/spec.md") > /dev/null 2>&1 || rc=$?
+  assert_eq "$rc" 0
+  assert_eq "$(jq -r '.[0].pane + " " + .[0].worktree' "$T/.cel/delegations.json")" "wZ:p1 $STUB_WT"
+  rm -rf "$T"
+}
+test_try_survives_a_large_pane_split_response() {
+  _fanout_setup; _preview_yaml
+  (cd "$T" && "$BIN" delegate widget WG-BIGSPLIT "$T/spec.md") > /dev/null
+  jq -nc '{result:{pane:{pane_id:"wZ:p9"},panes:[range(20000) | {pane_id:"wZ:q\(.)"}]}}' > "$T/split.json"
+  local rc=0; (cd "$T" && STUB_SPLIT_FILE="$T/split.json" CEL_TRY_PORT_BASE=48780 "$BIN" try WG-BIGSPLIT) > /dev/null 2>&1 || rc=$?
+  assert_eq "$rc" 0
+  assert_eq "$(jq -r '.[0].try.pane' "$T/.cel/delegations.json")" "wZ:p9"
+  rm -rf "$T"
+}
+test_wait_returns_the_first_settled_id_from_a_large_ledger() {
+  _fanout_setup
+  mkdir -p "$T/.cel"
+  jq -n '[range(12000) | {id:"WG-\(. + 100000)", repo:"widget", state:"finished", pane:"wZ:s\(.)"}]' > "$T/.cel/delegations.json"
+  local id rc=0; id="$(cd "$T" && "$BIN" wait --timeout 2000 2>/dev/null)" || rc=$?
+  assert_eq "$rc:$id" "0:WG-100000"
+  rm -rf "$T"
+}
+test_status_and_wait_survive_a_large_agent_list() {
+  _fanout_setup
+  (cd "$T" && "$BIN" delegate widget WG-BIGLIST "$T/spec.md") > /dev/null
+  jq -nc '{result:{agents:[range(40000) | {pane_id:"wZ:p1", agent_status:"idle"}]}}' > "$T/agents.json"
+  local out rc=0; out="$(cd "$T" && STUB_AGENTS_FILE="$T/agents.json" "$BIN" status 2>&1)" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$out" "WG-BIGLIST"
+  local id; rc=0; id="$(cd "$T" && STUB_AGENTS_FILE="$T/agents.json" "$BIN" wait --timeout 2000 2>/dev/null)" || rc=$?
+  assert_eq "$rc:$id" "0:WG-BIGLIST"
   rm -rf "$T"
 }

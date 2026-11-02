@@ -387,3 +387,14 @@ test_bound_row_handback_delivers_but_never_resumes_a_new_session() {
   assert_eq "$(cat "$T/herdr-bad.log")" ""
   rm -rf "$T"
 }
+
+# However many live rows already own the clean checkout, the answer is the
+# ambiguity refusal naming the first - not exit 141 from a SIGPIPEd jq.
+test_bind_refuses_a_checkout_many_live_rows_own() {
+  _rb_setup
+  jq --arg c "$(realpath "$T/wtc")" '. + [range(12000) | {id:"WG-\(. + 100000)",repo:"widget",branch:"WG-\(. + 100000)",alias:"widget-WG-\(. + 100000)",pane:"p2",worktree:$c,state:"running",shape:"ship"}]' \
+    "$T/.cel/delegations.json" > "$T/n" && mv "$T/n" "$T/.cel/delegations.json"
+  LEDGER_SUM="$(_rb_sum)"
+  _rb_bind; _rb_refused "already the worktree of delegation WG-100000 - ambiguous ownership" || return 1
+  rm -rf "$T"
+}

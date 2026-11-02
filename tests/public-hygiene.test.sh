@@ -155,3 +155,13 @@ test_hygiene_ignores_followups_file_names_but_not_unknown_prefixes() {
   assert_fails _hygiene_scan
   rm -rf "$T"
 }
+
+# Every external workflow action runs at a reviewed commit: a mutable tag (`@v4`)
+# can be moved under the job, and the job holds this repository's token. A
+# `./` reference is this repository's own file, reviewed with the change.
+test_every_workflow_action_is_pinned_to_a_commit() {
+  local hits
+  hits="$(grep -nE '^[[:space:]-]*uses:' "$CEL_ROOT"/.github/workflows/*.yml \
+    | grep -vE 'uses:[[:space:]]*(\./|[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$))' || true)"
+  assert_eq "" "$hits"
+}
