@@ -18,7 +18,7 @@ _CEL_INBOX=1
 # shellcheck source=lib/rex.sh
 . "${BASH_SOURCE[0]%/*}/rex.sh"
 
-_inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
+_inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/inbox}"; }
 
 # Which mailbox: the current workspace, or --workspace. Box state, not repo
 # content, so it lives beside the registry rather than in the workspace repo.
@@ -53,9 +53,9 @@ _inbox_me() {
   p="$PWD"
   [ "${CEL_ROLE:-}" = core ] && { printf 'root'; return 0; }
   [ "${CEL_ROLE:-}" = console ] && { printf 'console'; return 0; }
-  c="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+  c="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
   { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'root'; return 0; }
-  c="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+  c="${CEL_CONSOLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/console}"
   { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'console'; return 0; }
   wt="$HOME/.herdr/worktrees"
   if [ "${p#"$wt/"}" != "$p" ]; then

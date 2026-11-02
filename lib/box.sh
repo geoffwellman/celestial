@@ -55,8 +55,8 @@ regenerable	$HOME/.cache/pip	14
 regenerable	$HOME/.cache/ms-playwright	30
 regenerable	$HOME/.cache/puppeteer	30
 regenerable	$HOME/.cache/selenium	30
-ours	$HOME/.cache/cel	7
-ours	$HOME/.local/state/cel/scratch	3
+ours	${XDG_CACHE_HOME:-$HOME/.cache}/cel	7
+ours	${XDG_STATE_HOME:-$HOME/.local/state}/cel/scratch	3
 someones	$HOME/restore	0
 someones	$HOME/backups	0
 EOS

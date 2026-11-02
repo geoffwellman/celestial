@@ -22,7 +22,7 @@ _CEL_EFFECTS=1
 # shellcheck source=lib/common.sh
 . "${BASH_SOURCE[0]%/*}/common.sh"
 
-_fx_dir()      { printf '%s' "${CEL_EFFECTS_DIR:-$HOME/.local/share/cel/vendor/canvasui}"; }
+_fx_dir()      { printf '%s' "${CEL_EFFECTS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/vendor/canvasui}"; }
 _fx_registry() { printf '%s' "${CEL_EFFECTS_REGISTRY:-https://canvasui.dev/r}"; }
 
 # The celestial picks, and why each one:

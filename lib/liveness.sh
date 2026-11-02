@@ -35,7 +35,7 @@ _CEL_LIVENESS=1
 # history rather than news.
 : "${CEL_LIVENESS_CACHE_SECS:=900}"
 
-_LIVENESS_STATE="${CEL_LIVENESS_STATE:-$HOME/.local/share/cel/liveness-state}"
+_LIVENESS_STATE="${CEL_LIVENESS_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/liveness-state}"
 _liveness_state_file() { printf '%s' "${CEL_LIVENESS_STATE:-$_LIVENESS_STATE}"; }
 
 # --- configuration ----------------------------------------------------------

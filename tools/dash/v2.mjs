@@ -36,8 +36,8 @@ const STUCK = {
 };
 
 export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents: agentsCold }) => {
-  const STATE_DIR = process.env.CEL_DASH_STATE_DIR || join(homedir(), '.local/share/cel');
-  const SAMPLES = () => process.env.CEL_SAMPLES_FILE || join(homedir(), '.local/share/cel/samples.jsonl');
+  const STATE_DIR = process.env.CEL_DASH_STATE_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel');
+  const SAMPLES = () => process.env.CEL_SAMPLES_FILE || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/samples.jsonl');
   const ACTIVITY = () => join(STATE_DIR, 'dash-activity.jsonl');
   const SEEN = () => join(STATE_DIR, 'dash-seen.json');
   const CEL = () => process.env.CEL_DASH_CEL || join(CEL_ROOT, 'bin/cel');

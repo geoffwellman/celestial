@@ -13,7 +13,7 @@ import { homedir } from 'node:os';
 import { shellQuote } from './router.mjs';
 import { readConfig } from './translate.mjs';
 
-const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
+const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/inbox');
 
 // NINETY SECONDS, and not a minute more by default. The watch holds nothing
 // open and blocks nothing - it is a poll in the render loop - but a status

@@ -226,7 +226,7 @@ if [ -n "$gate" ] && [ "$gate" != "null" ]; then
     # state:"running" - and that is the documented limit, never a faked verdict.
     g_head="$v_head"
     g_attempt="$v_attempt"
-    art_root="${CEL_VERIFY_ARTIFACT_DIR:-$HOME/.local/state/cel/verify}"
+    art_root="${CEL_VERIFY_ARTIFACT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/verify}"
     _verify_art_root_check "$art_root" "$wt" || { _verify_stub "cel-verify refused to run: the artifact root $art_root is unsafe (inside a git work tree, or not owned by you with mode 0700) - the gate did not run; this is no verdict"; exit 4; }
     art_dir="$art_root/$(printf '%s' "${branch:-detached}" | tr -c 'A-Za-z0-9._-' '_')/${g_head:0:12}-$g_attempt"
     ( umask 077; mkdir -p "$art_dir" ) || die "cel-verify: cannot create the artifact directory $art_dir"

@@ -191,7 +191,7 @@ boxguard_cargo_jobs() {
 }
 
 # ── one heavy build at a time ────────────────────────────────────────────────
-_boxguard_slot_dir() { printf '%s' "${CEL_BUILD_SLOT_DIR:-$HOME/.local/share/cel/build-slot}"; }
+_boxguard_slot_dir() { printf '%s' "${CEL_BUILD_SLOT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/build-slot}"; }
 
 cmd_build_slot() { # [--] <cmd...>
   [ "${1:-}" = "--" ] && shift

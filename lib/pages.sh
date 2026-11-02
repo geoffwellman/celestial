@@ -13,7 +13,7 @@ _CEL_PAGES=1
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 
-_pages_root() { printf '%s' "${CEL_PAGES_ROOT:-$HOME/.local/share/cel/pages}"; }
+_pages_root() { printf '%s' "${CEL_PAGES_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/pages}"; }
 
 # Which workspace a document was published FROM, or empty.
 #
@@ -83,7 +83,7 @@ _pages_port() { printf '%s' "${CEL_PAGES_PORT:-7780}"; }
 
 # The public tier is a SEPARATE root and server: nothing crosses from the
 # tailnet-private tier without an explicit --public at publish time.
-_pages_public_root() { printf '%s' "${CEL_PAGES_PUBLIC_ROOT:-$HOME/.local/share/cel/pages-public}"; }
+_pages_public_root() { printf '%s' "${CEL_PAGES_PUBLIC_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/pages-public}"; }
 _pages_public_port() { printf '%s' "${CEL_PAGES_PUBLIC_PORT:-7781}"; }
 
 # Where a public share is reachable from, most durable first:
@@ -95,7 +95,7 @@ _pages_public_port() { printf '%s' "${CEL_PAGES_PUBLIC_PORT:-7781}"; }
 #   4. loopback                  - honest fallback: nothing is public yet
 # Tailscale is therefore ONE option, never a requirement: a laptop with
 # cloudflared (or any tunnel that prints a URL) shares publicly just fine.
-_pages_tunnel_url_file() { printf '%s' "${CEL_PAGES_TUNNEL_URL_FILE:-$HOME/.local/share/cel/pages-tunnel.url}"; }
+_pages_tunnel_url_file() { printf '%s' "${CEL_PAGES_TUNNEL_URL_FILE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/pages-tunnel.url}"; }
 
 _pages_public_url() {
   if [ -n "${CEL_PAGES_PUBLIC_URL:-}" ]; then printf '%s' "${CEL_PAGES_PUBLIC_URL%/}"; return 0; fi
@@ -124,7 +124,7 @@ _pages_host() {
 # workspace layout owns them. `--ensure` is the supervision hook - idempotent,
 # detached, logs to ~/.local/share/cel/logs - and the steward calls it every
 # tick, which is what makes a dead server come back without a human noticing.
-_pages_log_dir() { printf '%s' "${CEL_PAGES_LOG_DIR:-$HOME/.local/share/cel/logs}"; }
+_pages_log_dir() { printf '%s' "${CEL_PAGES_LOG_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/logs}"; }
 
 _pages_unit() { if [ "$1" = 1 ]; then printf cel-pages-public; else printf cel-pages; fi; }
 

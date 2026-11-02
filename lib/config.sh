@@ -11,7 +11,7 @@
 [ -n "${_CEL_CONFIG:-}" ] && return 0
 _CEL_CONFIG=1
 
-cel_config_file() { printf '%s' "${CEL_CONFIG_FILE:-$HOME/.local/share/cel/config.yaml}"; }
+cel_config_file() { printf '%s' "${CEL_CONFIG_FILE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/config.yaml}"; }
 
 # Empty when the file, the section or the key is absent - callers pick their
 # own default rather than being handed the word "null".

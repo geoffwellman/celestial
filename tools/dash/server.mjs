@@ -33,7 +33,7 @@ const wsParam = (req) => new URL(req.url || '/', 'http://x').searchParams.get('w
 // The plane's own directory name is the reader's choice, so resolve it from
 // this file (tools/dash/server.mjs -> two levels up) the way bin/cel does.
 const CEL_ROOT = process.env.CEL_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const FX_DIR = process.env.CEL_EFFECTS_DIR || join(homedir(), '.local/share/cel/vendor/canvasui');
+const FX_DIR = process.env.CEL_EFFECTS_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/vendor/canvasui');
 const WORKTREES = join(homedir(), '.herdr', 'worktrees');
 const security = controlSecurity({
   host: cfg.host || '127.0.0.1', port: cfg.port || 7770,
@@ -42,7 +42,7 @@ const security = controlSecurity({
 });
 // files the pages load by name; anything else under / is not served
 const STATIC_FILES = new Set(['/decisions.js', '/decisions.css', '/v2.js', '/v2.css']);
-const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(homedir(), '.local/share/cel/update');
+const UPDATE_DIR = process.env.CEL_UPDATE_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/update');
 
 // The steward writes this file hours after the dashboard booted, so it is read
 // PER REQUEST and spliced into the shell below - a chip captured at startup
@@ -197,7 +197,7 @@ const viewer = () => cached('viewer', 3600000, async () => {
 // The workspace inbox: agent-to-agent mail that deliberately never types
 // into a pane, so the dashboard is where a human watches it move. Read
 // straight off the JSONL - no cursor is touched here, looking is not reading.
-const INBOX_DIR = process.env.CEL_INBOX_DIR || join(homedir(), '.local', 'share', 'cel', 'inbox');
+const INBOX_DIR = process.env.CEL_INBOX_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/inbox');
 const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE || join(INBOX_DIR, 'triage.cache');
 const triageRanks = () => {
   const out = new Map();
@@ -406,7 +406,7 @@ const paneNames = async () => {
 
 // The box's workspace registry. Box material (box services, subscriptions,
 // the gateway panel) is drawn once, by the one dashboard for the box.
-const REGISTRY = () => process.env.CEL_REGISTRY || join(homedir(), '.local/share/cel/registry.yaml');
+const REGISTRY = () => process.env.CEL_REGISTRY || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/registry.yaml');
 
 // The Subscriptions card is `cel quota --json`, the rows `cel quota` prints.
 // The fleet document is a cached copy of the same list and is only the

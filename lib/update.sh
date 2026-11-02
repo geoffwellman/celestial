@@ -28,7 +28,7 @@ _CEL_UPDATE=1
 # shellcheck source=lib/gateway.sh
 . "${BASH_SOURCE[0]%/*}/gateway.sh"   # gateway_refresh
 
-_update_dir() { printf '%s' "${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; }
+_update_dir() { printf '%s' "${CEL_UPDATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/update}"; }
 
 # WHICH STREAM THIS BOX FOLLOWS. A box on the `main` channel is told about
 # COMMITS, because a release tag alone hides how far past it main has moved; a

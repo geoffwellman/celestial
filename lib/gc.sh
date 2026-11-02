@@ -484,7 +484,7 @@ _gc_kept_line() { # <summary|doctor>
 
 # cel doctor reports the LAST sweep's blindness rather than running its own:
 # a doctor that swept would take the registry lock every time anyone ran it.
-_gc_kept_state() { printf '%s' "${CEL_GC_KEPT_STATE:-$HOME/.local/state/cel/gc-kept.json}"; }
+_gc_kept_state() { printf '%s' "${CEL_GC_KEPT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-kept.json}"; }
 
 _gc_kept_save() {
   local f r json='{}' tmp=""
@@ -556,7 +556,7 @@ _gc_agents_removable() { # <agents-json> <dir> <registry-names>
 
 _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   local hours="$1" dry="$2" agents="$3" names="$4"
-  local file="$HOME/.local/state/cel/gc-idle.json" fd previous='{}' next='{}' tmp="" boot now ignored pids pid identity key since fresh current identities='[]'
+  local file="${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json" fd previous='{}' next='{}' tmp="" boot now ignored pids pid identity key since fresh current identities='[]'
   boot="$(cat /proc/sys/kernel/random/boot_id)" && read -r now ignored < /proc/uptime || return 0
   now="${now%%.*}"
   [[ "$now" =~ ^[0-9]+$ ]] || return 0
@@ -668,7 +668,7 @@ _gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
 # whose PR cannot be read; warning every steward tick is noise. Past 24h the
 # pane is reported to root once, keyed by a condition fp so a repeat
 # supersedes rather than stacks, and marked reported so later ticks stay quiet.
-_gc_unknown_file() { printf '%s' "${CEL_GC_UNKNOWN_STATE:-$HOME/.local/state/cel/gc-reviewer-unknown.json}"; }
+_gc_unknown_file() { printf '%s' "${CEL_GC_UNKNOWN_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-unknown.json}"; }
 
 # Keyed by pane AND reviewer: herdr reuses pane ids, and a reused pane is a
 # different reviewer whose clock starts fresh.
@@ -965,7 +965,7 @@ cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
 # worker pushes again - and a push is a new head, which its recorded verdict
 # no longer covers. N minutes quiet (gc.reviewer_stop_minutes, default 30;
 # ~5 under memory pressure) and its pane goes.
-_gc_reviewer_stop_state() { printf '%s' "${CEL_GC_REVIEWER_STOP_STATE:-$HOME/.local/state/cel/gc-reviewer-stop.json}"; }
+_gc_reviewer_stop_state() { printf '%s' "${CEL_GC_REVIEWER_STOP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-stop.json}"; }
 
 gc_reviewer_stop_minutes() {
   local n="${CEL_GC_REVIEWER_STOP_MIN:-}"
@@ -1245,8 +1245,8 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
 # working, blocked or unknown agent is never touched.
 # The last pass's stops, one line, read by the steward's pressure warning so
 # it can name what was done rather than promise it.
-_gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-$HOME/.local/state/cel/gc-idle-stop-last.txt}"; }
-_gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-$HOME/.local/state/cel/gc-idle-stop.json}"; }
+_gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle-stop-last.txt}"; }
+_gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle-stop.json}"; }
 
 gc_idle_stop_minutes() {
   local n="${CEL_GC_IDLE_STOP_MIN:-}"

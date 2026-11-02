@@ -50,9 +50,9 @@ guard_role_of() { # <cwd>
   [ "${CEL_ROLE:-}" = console ] && { printf console; return 0; }
   [ "${CEL_ROLE:-}" = core ] && { printf core; return 0; }
   [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
-  local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+  local cons="${CEL_CONSOLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/console}"
   case "$p" in "$cons"|"$cons"/*) printf console; return 0;; esac
-  local core="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+  local core="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
   case "$p" in "$core"|"$core"/*) printf core; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
   local d="$p"
@@ -395,14 +395,14 @@ guard_classify_path() { # <role> <file_path>
   # a workspace, so every path outside its directory belongs to someone whose
   # job it is not.
   if [ "$role" = console ]; then
-    local cons="${CEL_CONSOLE_DIR:-$HOME/.local/share/cel/console}"
+    local cons="${CEL_CONSOLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/console}"
     case "$path" in
       "$cons"/*) printf allow; return 0;;
       *) printf 'deny the console routes; it does not build - a worker does that'; return 0;;
     esac
   fi
   if [ "$role" = core ]; then
-    local core="${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"
+    local core="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
     case "$path" in
       "$core"/*) printf allow; return 0;;
       *) printf 'deny core writes only its own notes (%s) - a product agent changes everything else; send it the request' "$core"; return 0;;
