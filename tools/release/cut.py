@@ -7,9 +7,14 @@ the YAML so it can be run and tested on fixtures without GitHub - a release
 step that can only be exercised by cutting a release is a step nobody exercises.
 """
 import argparse
+import contextlib
 import datetime
+import os
 import re
+import shutil
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,6 +41,55 @@ def parse(version):
     return tuple(int(part) for part in match.groups()) if match else None
 
 
+def _stage(path, text):
+    """A flushed sibling temp file holding `text`, with `path`'s mode; nothing
+    is replaced yet."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".cut", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    return Path(tmp)
+
+
+def _commit(rewrites, fragments, fragments_dir):
+    """All or nothing: both files are staged and every fragment is moved aside
+    before either file is replaced, and any failure puts back what was done -
+    a half cut (new section, old VERSION, some fragments gone) cannot be rerun."""
+    staged, moved, replaced, aside = {}, [], [], None
+    try:
+        for path, (_, new) in rewrites.items():
+            staged[path] = _stage(path, new)
+        if fragments:
+            aside = Path(tempfile.mkdtemp(prefix=".cut-", dir=fragments_dir))
+            for path in fragments:
+                path.rename(aside / path.name)
+                moved.append(path)
+        for path, tmp in staged.items():
+            os.replace(tmp, path)
+            replaced.append(path)
+    except BaseException:
+        for path in replaced:
+            os.replace(_stage(path, rewrites[path][0]), path)
+        for path in moved:
+            (aside / path.name).rename(path)
+        for tmp in staged.values():
+            tmp.unlink(missing_ok=True)
+        if aside is not None:
+            with contextlib.suppress(OSError):
+                aside.rmdir()
+        raise
+    if aside is not None:
+        # Hidden, so a leftover is never read as a fragment, and untracked, so
+        # `git commit -a` never ships it.
+        shutil.rmtree(aside, ignore_errors=True)
+
+
 def cut(changelog_path, version_path, version, today, fragments_dir=None):
     """Rewrite both files, consume the fragments; returns the shipping section."""
     new = parse(version)
@@ -43,7 +97,8 @@ def cut(changelog_path, version_path, version, today, fragments_dir=None):
         # `v0.3.0` and `0.3` both reach here from a dispatch input box, and
         # both would produce a tag nothing else in the plane can compare.
         raise SystemExit(f"cut: '{version}' is not a semver x.y.z version")
-    current = version_path.read_text(encoding="utf-8").strip()
+    current_text = version_path.read_text(encoding="utf-8")
+    current = current_text.strip()
     old = parse(current)
     if old is None:
         raise SystemExit(f"cut: {version_path} holds '{current}', which is not semver")
@@ -76,12 +131,11 @@ def cut(changelog_path, version_path, version, today, fragments_dir=None):
     _, _, after = rest.partition("\n## [")
     tail = ("## [" + after) if after else ""
     shipped = f"{heading}\n\n## [{version}] - {today}\n\n{body}\n\n"
-    changelog_path.write_text(before + shipped + tail, encoding="utf-8")
-    version_path.write_text(version + "\n", encoding="utf-8")
     # In the same commit as the section they became, or the next cut ships
     # them twice.
-    for path in fragments:
-        path.unlink()
+    _commit({changelog_path: (text, before + shipped + tail),
+             version_path: (current_text, version + "\n")},
+            fragments, fragments_dir)
     return body
 
 
@@ -110,7 +164,10 @@ def main(argv=None):
     # symlinked into test fixtures, and a default taken from __file__ made a
     # fixture cut delete the real repository's fragments.
     fragments = Path(args.fragments) if args.fragments else default_fragments(changelog)
-    print(cut(changelog, version_file, args.version, today, fragments))
+    try:
+        print(cut(changelog, version_file, args.version, today, fragments))
+    except OSError as err:
+        raise SystemExit(f"cut: {err}") from None
     return 0
 
 

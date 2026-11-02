@@ -100,6 +100,54 @@ test_release_cut_refuses_non_semver_and_not_greater_versions() {
   rm -rf "$T"
 }
 
+# A cut is all or nothing. A step that cannot complete leaves CHANGELOG, VERSION
+# and every fragment as they were, so the cut can simply be rerun; a half cut
+# (new section, old VERSION, or a subset of fragments gone) cannot be.
+test_release_cut_that_cannot_consume_its_fragments_changes_nothing() {
+  local T before rc=0; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"; printf '0.2.0\n' >"$T/VERSION"
+  _rel_fragment "$T/changelog.d" "a-fix.md" '### Fixed' '- a fix lands'
+  before="$(cat "$T/CHANGELOG.md")"
+  chmod 555 "$T/changelog.d"
+  _cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" \
+    --fragments "$T/changelog.d" --today 2026-02-01 >/dev/null 2>"$T/err" || rc=$?
+  chmod 755 "$T/changelog.d"
+  [ "$rc" -ne 0 ] || { echo "the cut reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/CHANGELOG.md")" "$before" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$T/VERSION")" "0.2.0" || { rm -rf "$T"; return 1; }
+  assert_eq "$(ls -A "$T/changelog.d")" "a-fix.md" || { rm -rf "$T"; return 1; }
+  assert_eq "$(ls -A "$T" | LC_ALL=C sort | tr '\n' ' ')" "CHANGELOG.md VERSION changelog.d err " || { rm -rf "$T"; return 1; }
+  case "$(cat "$T/err")" in *Traceback*) echo "a refusal printed a traceback"; rm -rf "$T"; return 1;; esac
+  rm -rf "$T"
+}
+
+test_release_cut_never_leaves_the_changelog_ahead_of_version() {
+  local T before rc=0; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"; printf '0.2.0\n' >"$T/VERSION"
+  before="$(cat "$T/CHANGELOG.md")"
+  chmod 444 "$T/VERSION"
+  _cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" --today 2026-02-01 >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    assert_eq "$(cat "$T/VERSION")" "0.3.0" || { rm -rf "$T"; return 1; }
+    assert_contains "$(cat "$T/CHANGELOG.md")" "## [0.3.0] - 2026-02-01" || { rm -rf "$T"; return 1; }
+  else
+    assert_eq "$(cat "$T/VERSION")" "0.2.0" || { rm -rf "$T"; return 1; }
+    assert_eq "$(cat "$T/CHANGELOG.md")" "$before" || { rm -rf "$T"; return 1; }
+  fi
+  rm -rf "$T"
+}
+
+# Replacing a file must not change who can read it.
+test_release_cut_keeps_file_modes() {
+  local T; T="$(mktemp -d)"
+  _rel_changelog "$T/CHANGELOG.md"; printf '0.2.0\n' >"$T/VERSION"
+  chmod 644 "$T/CHANGELOG.md" "$T/VERSION"
+  _cut 0.3.0 --changelog "$T/CHANGELOG.md" --version-file "$T/VERSION" --today 2026-02-01 >/dev/null \
+    || { rm -rf "$T"; return 1; }
+  assert_eq "$(stat -c %a "$T/CHANGELOG.md") $(stat -c %a "$T/VERSION")" "644 644" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # --- cel release <product> <value>: the plane cuts ANY product's release -----
 
 # The plane reads a per-repo `release:` block, checks the caller may dispatch

@@ -578,3 +578,27 @@ test_a_verdict_that_cannot_be_published_is_an_error_not_a_supersession() {
   assert_eq "$(_v .gate.passed)" null          # the fenced stub is still what is on disk: no pass is current
   rm -rf "$T" "$ART"
 }
+
+# A check that did not pass is not green: only SUCCESS/NEUTRAL/SKIPPED count as
+# passing, every terminal non-pass is FAILURE, and a state it does not know is
+# PENDING - never SUCCESS.
+_vchecks() { # <rollup-json> -> checks.state cel-verify records for it
+  cat > "$T/gh" <<GH
+#!/usr/bin/env bash
+printf '%s' '{"number":7,"reviewDecision":"","statusCheckRollup":$1}'
+GH
+  chmod +x "$T/gh"
+  CEL_VERIFY_GH="$T/gh" "$VERIFY" "$T" --slug o/r --quiet
+  _v .checks.state
+}
+test_checks_that_did_not_pass_are_never_success() {
+  _vrepo; _vcommit impl src/a.ts
+  local s; for s in CANCELLED TIMED_OUT ACTION_REQUIRED STARTUP_FAILURE STALE FAILURE ERROR; do
+    assert_eq "$s:$(_vchecks '[{"conclusion":"SUCCESS"},{"conclusion":"'"$s"'"}]')" "$s:FAILURE"
+  done
+  assert_eq "$(_vchecks '[{"conclusion":"SUCCESS"},{"conclusion":"NEUTRAL"},{"conclusion":"SKIPPED"},{"state":"SUCCESS"}]')" SUCCESS
+  assert_eq "$(_vchecks '[{"conclusion":"SUCCESS"},{"state":"EXPECTED"}]')" PENDING
+  assert_eq "$(_vchecks '[{"conclusion":"SUCCESS"},{"conclusion":"SOMETHING_NEW"}]')" PENDING
+  assert_eq "$(_vchecks '[]')" NONE
+  rm -rf "$T"
+}

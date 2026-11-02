@@ -11,6 +11,7 @@
 # Verifies the reviewer is actually back on the PR before reporting success — the failure this
 # exists to prevent was invisible precisely because the command reported success.
 set -euo pipefail
+[ $# -eq 2 ] || { echo "usage: pr-nudge.sh <repo> <number>" >&2; exit 2; }
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 cel_pr_require_reviewer || exit 1
 repo="$1"; num="$2"; reviewer="$REVIEWER"
@@ -19,8 +20,9 @@ gh pr edit "$num" --repo "$repo" --remove-reviewer "$reviewer" >/dev/null
 gh pr edit "$num" --repo "$repo" --add-reviewer "$reviewer" >/dev/null
 
 for _ in 1 2 3; do
+  # The login itself, compared whole: not a pattern, not a substring of another login.
   if gh pr view "$num" --repo "$repo" --json reviewRequests \
-       --jq '[.reviewRequests[].login]' | grep -q "$reviewer"; then
+       | jq -e --arg r "$reviewer" 'any(.reviewRequests[]?; .login == $r)' >/dev/null; then
     echo "nudged: $reviewer re-requested on $repo#$num"
     exit 0
   fi
