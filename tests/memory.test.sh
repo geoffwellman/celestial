@@ -68,7 +68,7 @@ test_mem_tree_rss_mb_counts_a_real_child_and_leaves_a_sibling_at_zero() {
   assert_eq "$(readlink "/proc/$pid/cwd")" "$T/mine/sub"
 
   local kb mb
-  # PSS where the kernel offers it (CEL-100), RSS otherwise.
+  # PSS where the kernel offers it, RSS otherwise.
   kb="$(awk '/^Pss:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null)"
   [ -n "$kb" ] || kb="$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")"
   mb="$(mem_tree_rss_mb "$T/mine")"
@@ -106,10 +106,8 @@ test_mem_tree_sum_adds_every_process_under_the_directory() {
   assert_eq "$(printf '%s\n' "$list" | mem_tree_sum /w/three)" "0"
 }
 
-# ONE WALK PER FLEET READ, not one per worker: the whole box costs under 50 ms
-# once and 40 ms again for every worker after that. The snapshot is the
-# mechanism, so the snapshot is what is asserted - a second call must not go
-# back to /proc.
+# ONE WALK PER SNAPSHOT, not one per worker. The snapshot is the mechanism, so
+# the snapshot is what is asserted - a later read must not go back to /proc.
 test_mem_tree_snapshot_is_reused_by_every_later_read() {
   mem_tree_snapshot
   assert_contains "$MEM_SNAPSHOT" "/"
@@ -120,13 +118,11 @@ test_mem_tree_snapshot_is_reused_by_every_later_read() {
   assert_eq "$(mem_tree_rss_mb /w/snap)" "0"
 }
 
-# ---- CEL-100: one process, counted once ----------------------------------------
-# The steward reported a worker at 4.4G whose agent measured ~300 MB: summing
-# VmRSS over every process in a tree counts each shared page (the node binary,
-# libc, bash) once per process that maps it. PSS splits shared pages between
-# their users, so a tree's sum is what it actually costs. A fixture /proc
-# (CEL_PROC) holds a multi-threaded process - its task/ entries each repeat
-# the whole process's RSS - and a shared-page process whose PSS is under RSS.
+# ---- one process, counted once -----------------------------------------------
+# Summed VmRSS counts each shared page once per process mapping it; PSS splits
+# them, so a tree's sum is what it costs. A fixture /proc (CEL_PROC) holds a
+# multi-threaded process - its task/ entries each repeat the whole process's
+# RSS - and a shared-page process whose PSS is under RSS.
 _mem_fixture_proc() { # <root> <pid> <cwd> <rss-kb> <pss-kb|''> [threads]
   local d="$1/$2"; mkdir -p "$d"
   ln -s "$3" "$d/cwd"

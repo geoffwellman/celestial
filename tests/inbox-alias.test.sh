@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# AH-261017: mailbox identities are idempotent, and a mailbox that was split by
-# the old sanitiser can be recovered without losing or replaying a message.
+# Mailbox identities are idempotent, and a mailbox split by an earlier
+# sanitiser can be recovered without losing or replaying a message.
 #
 # Everything here drives the real `cel inbox` CLI against a throwaway
 # CEL_INBOX_DIR and HOME. The synthetic worker is widget-platform /
@@ -58,7 +58,7 @@ test_alias_rule_is_one_rule_across_inbox_run_and_steward() {
   done
 }
 
-# --- the incident, through the CLI -------------------------------------------
+# --- one worker, one mailbox, through the CLI --------------------------------
 
 test_full_name_and_canonical_alias_reach_the_same_worker_mailbox() {
   _ia_setup || return 1

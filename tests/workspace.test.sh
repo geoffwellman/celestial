@@ -301,11 +301,9 @@ test_worker_role_forbids_landing() {
 }
 
 # RELEASE DECLARATIONS. A repo says how it is released - which workflow file,
-# which dispatch input, what values that input accepts - because the four
-# products on a box release four different ways and the plane must not own any
-# of those semantics. A repo with no `release:` block is simply not releasable,
-# and saying so is the whole point: before this, `cel release` assumed every
-# repo was celestial and handed a 403 to anyone else.
+# which dispatch input, what values that input accepts - and the plane owns
+# none of those semantics. A repo with no `release:` block is simply not
+# releasable, and says so.
 _ws_release_fixture() { # -> $tmp with a workspace declaring three shapes
   local tmp; tmp="$(mktemp -d)"
   cat >"$tmp/workspace.yaml" <<'EOS'
@@ -361,7 +359,7 @@ test_ws_repo_releasable_needs_a_workflow() {
   rm -rf "$tmp"
 }
 
-# ---- CEL-70: a workspace acts as its own GitHub account -------------------
+# ---- a workspace acts as its own GitHub account ----------------------------
 # gh's ACTIVE account is box-global; a workspace naming `github.user` must get
 # that account per process (GH_TOKEN) and never move the global one.
 _gh_acct_fixture() { # [github-block-yaml]
@@ -445,7 +443,7 @@ test_nothing_calls_gh_auth_switch() {
   assert_eq "$hits" ""
 }
 
-# CEL-119: a repo entry's `pr:` overrides policy.pr for that repo only, so a
+# A repo entry's `pr:` overrides policy.pr for that repo only, so a
 # spikes repo can push straight to main while its siblings keep their PRs.
 test_ws_repo_pr_overrides_workspace_policy_per_repo() {
   local tmp; tmp="$(mktemp -d)"

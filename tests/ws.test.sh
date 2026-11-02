@@ -78,15 +78,11 @@ test_ws_add_requires_a_workspace_repo() {
   rm -rf "$T" "$src"
 }
 
-# ---------------------------------------------------------------- CEL-53
-# THE FIRST COMMAND A NEWCOMER RUNS. `cel ws sync <name>` against a workspace
-# that was never registered exited 1 with nothing on stdout and nothing on
-# stderr: `registry_require` dies inside `$( )`, so the refusal was written
-# into the dead subshell's captured output and thrown away. A person being
-# onboarded has nobody to ask, so a mute failure is indistinguishable from
-# "I typed it wrong" - which is exactly the moment self-diagnosis has to work.
-# Every one of these asserts the OUTPUT, never only the status: a swallowed
-# refusal is a silent exit, and a status-only assertion passes right through it.
+# ---------------------------------------------------- unregistered workspaces
+# A verb naming an unregistered workspace must refuse OUT LOUD: a refusal
+# raised inside `$( )` is captured and thrown away, leaving a silent exit 1.
+# Every one of these asserts the OUTPUT, never only the status: a status-only
+# assertion passes right through a swallowed refusal.
 _ws_stderr_of() { # <verb> [args...] -> prints stderr, returns the exit status
   ( cmd_ws "$@" ) 2>&1 >/dev/null
 }
@@ -149,13 +145,9 @@ test_the_secret_location_is_named_identically_everywhere() {
   done < <(grep -n 'zshenv' "$skill" || true)
 }
 
-# AND IT MUST NOT WRITE ANYTHING ON THE WAY OUT. The swallowed refusal did not
-# only go unseen - the caller carried on with the refusal TEXT as the
-# workspace path, so `_ws_sync_one` ran `mkdir -p "$wsdir/repos"` and appended
-# to `"$wsdir/.gitignore"`, creating a directory in the current working
-# directory whose name was the colourised error message. One such directory
-# was committed to this branch by a red test run before the fix, which is how
-# it was found. A refusal creates nothing.
+# AND IT MUST NOT WRITE ANYTHING ON THE WAY OUT. A caller that carried on with
+# the refusal TEXT as the workspace path would mkdir/append under the current
+# directory. A refusal creates nothing.
 test_a_refused_verb_writes_nothing_into_the_working_directory() {
   _sandbox
   local cwd="$T/cwd"; mkdir -p "$cwd"
@@ -164,7 +156,7 @@ test_a_refused_verb_writes_nothing_into_the_working_directory() {
   rm -rf "$T"
 }
 
-# CEL-70: a workspace with ssh_host clones over that alias, url unchanged.
+# A workspace with ssh_host clones over that alias, url unchanged.
 test_ws_sync_clones_over_the_declared_ssh_alias() {
   _sandbox
   printf '' | cmd_ws new t9 --kind hustle --org o --merge self --path "$T/t9" --no-remote >/dev/null

@@ -1,12 +1,12 @@
 # shellcheck shell=bash
-# `cel drive` (CEL-120): see and drive an orchestrator from one shared core.
+# `cel drive`: see and drive an orchestrator from one shared core.
 #
 # list/tail/receipt read herdr and the session files (tools/drive/cli.mjs).
 # send is MAIL and only mail: `cel inbox send --kind owner --from owner`, then
 # the omp inbox hook delivers it at the next idle point with an empty
 # composer, or as soon as a busy turn ends. Never `herdr agent prompt`, never
-# keys - those typed over half-written drafts (CEL-65) and left prompts
-# sitting unsubmitted in composers for hours.
+# keys - those type over half-written drafts and can leave prompts sitting
+# unsubmitted in a composer.
 [ -n "${_CEL_DRIVE:-}" ] && return 0
 _CEL_DRIVE=1
 # shellcheck source=lib/registry.sh

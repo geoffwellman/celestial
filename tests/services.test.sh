@@ -149,8 +149,8 @@ EOF
 # up, and nothing invented when it is not.
 test_services_reach_is_the_dash_proxy_url() {
   _svc_setup
-  # the one dashboard's port (CEL-107) comes from the box config first;
-  # (a workspace's own dash.port is ignored since CEL-123)
+  # the one dashboard's port comes from the box config; a workspace's own
+  # dash.port is ignored
   export CEL_CONFIG_FILE="$T/config.yaml"
   local dash; dash="$(_svc_free_port)"
   printf 'dash:\n  port: %s\n' "$dash" >"$CEL_CONFIG_FILE"
@@ -169,9 +169,8 @@ test_services_reach_is_the_dash_proxy_url() {
 # --- box services ------------------------------------------------------------
 #
 # A box service belongs to the box, not to a workspace: the auth broker and
-# gateway run for every workspace at once, and until CEL-34 they were started
-# by hand and watched by nobody. `services.d` is the seam - one JSON file per
-# service, the same shape as a `services:` row.
+# gateway run for every workspace at once. `services.d` is the seam - one JSON
+# file per service, the same shape as a `services:` row.
 
 _svc_box_setup() { # writes a fixture services.d and box state dir
   _svc_setup
@@ -180,9 +179,8 @@ _svc_box_setup() { # writes a fixture services.d and box state dir
   mkdir -p "$CEL_SERVICES_D"
 }
 
-# Outside any workspace there is still something to say: `cel services` run
-# from ~ used to answer "not inside a workspace", which is the one place the
-# box's own services are all there is to look at.
+# Outside any workspace there is still something to say: from ~ the box's own
+# services are all there is to look at.
 test_box_services_are_listed_outside_any_workspace() {
   _svc_box_setup
   printf '{"name":"cel-auth-broker","url":"http://127.0.0.1:47311","cmd":"omp auth-broker serve","health":"/"}\n' \
@@ -248,10 +246,9 @@ test_box_service_start_records_state_off_any_workspace() {
   _svc_teardown
 }
 
-# The steward sweep is the reason box services exist at all: tonight's broker
-# and gateway ran unsupervised because no workspace declared them. Two down
-# ticks raise ONE rolled-up blocker, `restart: auto` restarts once, and the
-# blocker clears when the service answers again.
+# The steward sweep supervises box services, which no workspace declares. Two
+# down ticks raise ONE rolled-up blocker, `restart: auto` restarts once, and
+# the blocker clears when the service answers again.
 test_steward_sweep_watches_box_services() {
   _svc_box_setup
   source "$CEL_ROOT/lib/steward.sh"
@@ -280,11 +277,9 @@ test_steward_sweep_watches_box_services() {
   _svc_teardown
 }
 
-# A box service's `health:` is a whole URL, not a path - `cel gateway install`
-# writes one - and the broker and the gateway both answer 401 to an
-# unauthenticated read, so a health check that could not present a bearer
-# called a working gateway down and the sweep would have raised a blocker
-# about it every ten minutes.
+# A box service's `health:` may be a whole URL, not a path - `cel gateway
+# install` writes one - and the broker and the gateway both answer 401 to an
+# unauthenticated read, so the check must present the declared bearer.
 test_health_accepts_a_full_url_and_a_declared_bearer() {
   _svc_box_setup
   local port; port="$(_svc_free_port)"
@@ -315,12 +310,8 @@ test_box_service_in_home_reports_no_process_tree_memory() {
 
 # --- starting a service is a pane split, and a split needs a direction -------
 #
-# 2026-09-23: `cel gateway install` ended with "cel-auth-gateway: herdr pane
-# split returned no pane id - nothing was started". herdr's CLI had grown a
-# requirement - a split names a DIRECTION and a TARGET pane - and the
-# box-level branch here passed neither, so herdr printed its usage and every
-# box service on this box was unstartable. The sentence above is the second
-# half of the bug: it described the symptom and hid herdr's own message.
+# herdr's `pane split` requires a DIRECTION and a TARGET pane and prints its
+# usage otherwise.
 #
 # This stub is the real CLI's contract: refuse a split without a direction and
 # a target, exactly as herdr does, and log argv so a test can read what was
@@ -385,8 +376,8 @@ _svc_split_args() { # the argv of the last `pane split`
 }
 
 # A box service has no workspace pane to sit under, so it needs a home of its
-# own: `cel` finds or creates a tab and splits from a pane in it. The split
-# must carry a direction and a target or herdr refuses it.
+# own: `cel` finds or creates the services workspace and splits from a pane in
+# it. The split must carry a direction and a target or herdr refuses it.
 test_box_service_split_names_a_direction_and_a_target() {
   _svc_box_setup
   _svc_strict_herdr
@@ -401,10 +392,9 @@ test_box_service_split_names_a_direction_and_a_target() {
 }
 
 # A box service belongs to the box, not to whichever product workspace the
-# operator is focused on. The orchestrator's smoke test of the first fix
-# created `cel services` as a TAB inside the focused product workspace (wAA):
-# a `cel ws reset` of that product would have killed the gateway. The home is
-# a dedicated Herdr workspace found by its label and created if absent.
+# operator is focused on: a tab there would die with a `cel ws reset` of that
+# product. The home is a dedicated herdr workspace found by its label and
+# created if absent.
 test_box_service_lands_in_the_dedicated_services_workspace() {
   _svc_box_setup
   _svc_strict_herdr
@@ -476,7 +466,7 @@ test_workspace_service_split_still_targets_the_workspace_pane() {
 
 # A workspace service whose workspace pane cannot be resolved fails loudly,
 # naming the workspace. It never falls back to the box services home: a
-# transient \`agent list\` miss would otherwise start it in the wrong place.
+# transient `agent list` miss would otherwise start it in the wrong place.
 test_workspace_service_without_a_workspace_pane_fails_naming_it() {
   _svc_setup
   _svc_strict_herdr
@@ -511,8 +501,7 @@ test_concurrent_box_starts_create_one_services_home() {
   _svc_teardown
 }
 
-# When herdr refuses, say what herdr said. "returned no pane id" hid a CLI
-# change for a day.
+# When herdr refuses, say what herdr said: a paraphrase hides the cause.
 test_a_refused_split_reports_herdrs_own_message() {
   _svc_box_setup
   _svc_strict_herdr
@@ -533,7 +522,7 @@ EOF
   _svc_teardown
 }
 
-# CEL-79: when `herdr agent list` itself refuses, the operator is told what
+# When `herdr agent list` itself refuses, the operator is told what
 # herdr said - not "no herdr pane found", which sends them looking for an agent
 # that may be running fine.
 test_workspace_service_reports_herdrs_agent_list_refusal() {

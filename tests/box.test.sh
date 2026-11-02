@@ -88,8 +88,8 @@ test_box_space_reports_all_three_classes_and_exits_zero() {
   rm -rf "$T"
 }
 
-# The shape is frozen: CEL-45's work views may consume it, and a renamed key
-# is a silently empty panel over there rather than an error over here.
+# The shape is frozen: other views consume it, and a renamed key is a
+# silently empty panel there rather than an error here.
 test_box_space_json_shape_is_frozen() {
   _box_fixture
   _box_stub_docker
@@ -130,7 +130,7 @@ test_box_space_without_docker_exits_zero_with_no_docker_rows() {
 
 # --------------------------------------------------------------- the sweepers
 
-# CEL-88: every unused image and all build cache under --box, and never a
+# Every unused image and all build cache under --box, and never a
 # container or volume prune - a stopped container's image stays.
 test_docker_sweep_prunes_all_build_cache_and_never_containers_or_volumes() {
   _box_fixture
@@ -153,8 +153,7 @@ test_docker_sweep_keeps_base_images_regardless_of_age() {
     case "$removals" in *"$keep"*) printf 'keep-listed image %s was in a removal argv\n' "$keep" >&2; return 1;; esac
   done
   assert_contains "$removals" ddd
-  # CEL-88: an empty {{.Parent}} is no longer a reason to keep - BuildKit
-  # images all have one, and that rule kept everything.
+  # An empty {{.Parent}} is no reason to keep - BuildKit images all have one.
   assert_contains "$removals" ccc
   rm -rf "$T"
 }
@@ -255,9 +254,7 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
 }
 
 # ------------------------------------------------------------- the reviewers
-# 3 GB of idle reviewer panes was a bigger number than most of the disk rows
-# above it, and it was invisible: the report measured the floor and never the
-# agents standing on it.
+# Idle reviewer panes are reported alongside the disk rows.
 _box_reviewer_rows() {
   reviewers_record widget 71 w1:p3 widget-pr-71-review
   # An empty roster still (discovery must not reach the live box), plus one

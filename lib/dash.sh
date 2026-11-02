@@ -1,15 +1,10 @@
 # shellcheck shell=bash
-# cel dash - THE dashboard: one server for the whole box (CEL-107). Gathers
+# cel dash - THE dashboard: one server for the whole box. Gathers
 # the static config of every registered workspace (name, repos, services) here
 # with the same yq the rest of the plane uses, then hands it to the
 # zero-dependency node server as JSON; the server reads live state (herdr, gh)
 # itself. Defaults to the tailnet IP when available, else loopback; --host
 # explicitly selects another listener for the private control plane.
-#
-# It used to be one server per workspace. v2 reads across every workspace, so
-# all four served the same page while polling the same herdr and gh four times
-# over, and the per-workspace restart race took one of them down. The ports
-# those servers had still answer, with a redirect here, for one release.
 [ -n "${_CEL_DASH:-}" ] && return 0
 _CEL_DASH=1
 # shellcheck source=lib/registry.sh
@@ -19,9 +14,8 @@ _CEL_DASH=1
 # shellcheck source=lib/config.sh
 . "${BASH_SOURCE[0]%/*}/config.sh"
 
-# The one port: `dash: port:` in the box config, else 7770. CEL-123 retired
-# the per-workspace `dash.port` (and the redirect listeners it drove); a
-# workspace.yaml still carrying one is named by doctor, never obeyed.
+# The one port: `dash: port:` in the box config, else 7770. A per-workspace
+# `dash.port` in workspace.yaml is named by doctor, never obeyed.
 dash_port() {
   local p
   p="$(cel_config_get dash port)"
@@ -85,8 +79,7 @@ _dash_config() { # <port> <host> -> JSON on stdout
 
 # The dashboard is a box service like the pages servers: nothing owns its
 # pane, so `--ensure` starts it only when its port is not already answering,
-# and the steward calls it every tick. Warning about a dead dashboard achieved
-# nothing - it stayed dead.
+# and the steward calls it every tick so a dead dashboard comes back.
 _dash_log_dir() { printf '%s' "${CEL_DASH_LOG_DIR:-$HOME/.local/share/cel/logs}"; }
 
 # Is anything listening on host:port? A bash /dev/tcp connect, so a server
@@ -99,18 +92,16 @@ _dash_port_free() { # <host> <port> -> 0 when nothing accepts a connection
   [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]
 }
 
-# Does a dashboard answer on host:port? CEL-116: the probe asked the classic state feed,
-# the heaviest thing the server computes, with 3 s to do it - on a box at load
-# 30 a running dashboard was reported DOWN and --ensure tried to start a
-# second one. /api/session is a constant answer; 10 s is a busy box, not a
-# dead one.
+# Does a dashboard answer on host:port? /api/session is a constant answer, not
+# the heavy state feed, and 10 s is a busy box, not a dead one: a short probe
+# under load reports a running dashboard DOWN and --ensure starts a second one.
 _dash_answers() { # <host> <port>
   curl -sf -m "${CEL_DASH_PROBE_S:-10}" -o /dev/null "http://$1:$2/api/session"
 }
 
-# CEL-102: wait (bounded, CEL_DASH_PORT_WAIT_S, default 15 s) for the port to
-# come free. A restart that starts the new server while the old one still
-# holds it dies with EADDRINUSE and nothing retries.
+# Wait (bounded, CEL_DASH_PORT_WAIT_S, default 15 s) for the port to come
+# free. A restart that starts the new server while the old one still holds it
+# dies with EADDRINUSE and nothing retries.
 _dash_wait_port_free() { # <host> <port>
   local host="$1" port="$2" bound="${CEL_DASH_PORT_WAIT_S:-15}" t0=$SECONDS
   while ! _dash_port_free "$host" "$port"; do
@@ -120,13 +111,11 @@ _dash_wait_port_free() { # <host> <port>
   return 0
 }
 
-# THE DASHBOARD IS A SYSTEMD USER SERVICE (CEL-109). It was started with
-# `setsid nohup ... &`, and setsid leaves the session but NOT the cgroup: run
-# from the steward's oneshot unit (or any systemd-run context), the dashboard
-# sat in that unit's cgroup and systemd killed it when the tick finished - it
-# went down twice in minutes with nothing in its log. An installed unit has its
-# own cgroup, restarts on failure, and carries the PATH it was installed with
-# (without it node is not found under systemd and it exits 1 silently).
+# THE DASHBOARD IS A SYSTEMD USER SERVICE. setsid leaves the session but NOT
+# the cgroup: forked from the steward's oneshot unit (or any systemd-run
+# context), the dashboard is killed when the tick finishes. An installed unit
+# has its own cgroup, restarts on failure, and carries a fixed PATH (without
+# it node is not found under systemd and it exits 1 silently).
 # overridable only so an on-box check can run beside the live unit
 DASH_UNIT="${CEL_DASH_UNIT:-cel-dash}"
 _dash_unit_dir() { printf '%s' "${CEL_SYSTEMD_DIR:-$HOME/.config/systemd/user}"; }
@@ -140,8 +129,8 @@ _dash_have_unit() {
 }
 
 # PATH is FIXED, like the steward unit's, never the caller's: the steward and
-# a shell carry different PATHs, and baking in whichever ran last made the
-# file differ every tick and the unit rewrite (and restart) every time.
+# a shell carry different PATHs, and baking in whichever ran last would make
+# the file differ every tick and the unit rewrite (and restart) every time.
 dash_unit_text() { # <port> <host> <workdir> <log>
   printf '%s' "[Unit]
 Description=celestial dashboard (one for the box)
@@ -219,7 +208,7 @@ _dash_ensure() { # <port> <host>
     systemctl --user start "$DASH_UNIT.service" >/dev/null 2>&1 \
       || { c_err "dash: systemctl --user start $DASH_UNIT.service failed - see $log and journalctl --user -u $DASH_UNIT"; return 1; }
   else
-    # No user manager (a container, a plain laptop session): fork, as before.
+    # No user manager (a container, a plain laptop session): fork instead.
     setsid nohup "$CEL_ROOT/bin/cel" dash --port "$port" --host "$host" \
       >>"$log" 2>&1 &
     pid=$!
@@ -243,11 +232,9 @@ _dash_stop() { # <port>...
   local port pid env pids=""
   for pid in $(pgrep -f 'tools/dash/server\.mjs' 2>/dev/null); do
     env="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(CEL_DASH_CONFIG|CEL_TESTING)=' || true)"
-    # A TEST NEVER STOPS A SERVER IT DID NOT START (CEL-111). _dash_restart
-    # used to stop every workspace's legacy dash port, read from the registry -
-    # and a test without a fixture registry read the live one, matched the
-    # box's real dashboard on 7770 and stopped it cleanly, nothing in the
-    # journal. Under the suite only a server started under the suite counts.
+    # A TEST NEVER STOPS A SERVER IT DID NOT START: under the suite only a
+    # server whose environ carries CEL_TESTING counts, so a test can never
+    # match the box's live dashboard.
     if [ -n "${CEL_TESTING:-}" ]; then
       case "$env" in *CEL_TESTING=*) ;; *) continue ;; esac
     fi
@@ -325,9 +312,8 @@ cmd_dash() { # [--port n] [--host h] [--ensure] [--restart]
     exec node "$CEL_ROOT/tools/dash/server.mjs"
 }
 
-# THE DOCTOR'S LINE: one dashboard, where it is, and whether it answers. A
-# second dash server is named too - it is a per-workspace one left over from
-# before CEL-107, holding a port the redirects want.
+# THE DOCTOR'S LINE: one dashboard, where it is, and whether it answers. More
+# than one dash server running is named too - the extras are leftovers.
 dash_doctor_line() {
   local port host n
   port="$(dash_port)"; host="$(dash_host)"
