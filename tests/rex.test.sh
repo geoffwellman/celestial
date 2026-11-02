@@ -109,9 +109,9 @@ test_rex_native_state_updates_only_the_same_launched_process() {
   _rext_down
 }
 
-# AH-261102: omp runs task subagents in the lane's own process, so the hook
-# reported a subagent's transcript - a file inside the parent session's own
-# directory - and the receipt recorded it as the lane's session.
+# omp runs task subagents in the lane's own process, so the hook can report a
+# subagent's transcript - a file inside the parent session's own directory.
+# The receipt must never record that as the lane's session.
 test_rex_omp_subagent_transcript_is_never_captured_as_the_session() {
   _rext_setup
   local self="${BASHPID:-$$}" parent sub cwd="$RT/ws/repos/widget"

@@ -54,12 +54,12 @@ _mode_product() { # <wsdir> -> product, or nothing
 # repos[] for an implicit one - the same place ws_build_mode reads.
 #
 # AS ONE LINE, NOT A ROUND-TRIP. workspace.yaml is written by hand and
-# commented heavily; `yq -Y` re-emitted a real workspace file with 284 lines changed
-# (comments moved, alignment and flow style lost) to set one key. So the text
-# is edited in place: inside the block of the `- name: <product>` item under
-# the right top-level key, an existing `mode:` line is replaced, otherwise one
-# is inserted right after the name line at the item's key indentation. A
-# flow-style item (`- { name: x }`) is refused rather than rewritten.
+# commented heavily; a `yq -Y` round-trip moves comments and loses alignment
+# and flow style to set one key. So the text is edited in place: inside the
+# block of the `- name: <product>` item under the right top-level key, an
+# existing `mode:` line is replaced, otherwise one is inserted right after the
+# name line at the item's key indentation. A flow-style item (`- { name: x }`)
+# is refused rather than rewritten.
 #
 # The result must equal the original with exactly this one key set, compared
 # as plain data, or nothing is written. The write replaces the file a symlink

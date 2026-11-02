@@ -74,15 +74,14 @@ rex_native_session_valid() { # runtime native id
   esac
 }
 
-# A SUBAGENT'S TRANSCRIPT IS NEVER THE AGENT'S SESSION (AH-261102). omp runs
-# task subagents inside the agent's own process - same PID, same hooks - and
-# keeps each one's transcript in the parent session's own directory:
+# A SUBAGENT'S TRANSCRIPT IS NEVER THE AGENT'S SESSION. omp runs task
+# subagents inside the agent's own process - same PID, same hooks - and keeps
+# each one's transcript in the parent session's own directory:
 #   <sessions>/<stem>.jsonl           the agent's session
 #   <sessions>/<stem>/<Task>.jsonl    a subagent it ran
-# A Rex receipt recorded one, and a restart planned to resume it. Claude's
-# subagents (<uuid>/subagents/agent-*.jsonl) never get here: its hook drops
-# payloads carrying an agent_id and reports a session id, not a file. pi has
-# no in-process subagents; a separate process fails the reporter-PID check.
+# Recording one would make a restart resume the subagent. Claude's subagents
+# never get here (its hook drops payloads carrying an agent_id); pi has no
+# in-process subagents, and a separate process fails the reporter-PID check.
 native_session_is_subagent() { # native session -> 0 for a subagent transcript
   case "$1" in /*/*.jsonl) [ -f "${1%/*}.jsonl" ] ;; *) return 1 ;; esac
 }

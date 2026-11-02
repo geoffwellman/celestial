@@ -98,7 +98,7 @@ test_an_unticketed_delegation_keys_on_its_own_id_and_says_so() {
 
 # --- 3. the stage -----------------------------------------------------------
 
-_stage() { work_stage "$1"; }
+_stage() { _work_stage "$1"; }
 
 test_stage_released_beats_merged() {
   _work_setup
@@ -418,10 +418,9 @@ test_history_json_across_workspaces_is_one_valid_document() {
   rm -rf "$T"
 }
 
-# CEL-79: a failed remote read is not an empty one. It used to be cached as
-# `{tickets:[],prs:[]}` for work.cache_secs, so one gh hiccup hid every PR for
-# two minutes even after gh came back. The previous cache is kept, and the
-# next successful read writes a fresh one.
+# A failed remote read is not an empty one: it is never cached as
+# `{tickets:[],prs:[]}`, which would hide every PR for work.cache_secs. The
+# previous cache is kept, and the next successful read writes a fresh one.
 test_a_failed_remote_read_keeps_the_previous_cache() {
   _work_setup; _two_items
   work_items "$T" >/dev/null
@@ -439,7 +438,7 @@ test_a_failed_first_read_is_not_cached_as_empty() {
   assert_contains "$(cat "$CEL_CACHE/work-alpha.json")" '"prs":[{'
   rm -rf "$T"
 }
-# CEL-79 review: a zero exit is not proof of a good read. gh answering with
+# A zero exit is not proof of a good read. gh answering with
 # no output or broken JSON is a failure too, and must not overwrite the cache.
 test_an_unusable_successful_read_keeps_the_previous_cache() {
   _work_setup; _two_items

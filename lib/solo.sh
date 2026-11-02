@@ -12,8 +12,9 @@
 # `land` proves what `cel-fanout land` proves (policy, ownership, an approval
 # for the exact head, no red check, no conflict, every protected check green
 # on that head) using the same checks (lib/land.sh), and merges only that
-# head. There is no local gate run here: a solo agent runs the repo gate
-# before it pushes, and CI on the exact head is the evidence the merge cites.
+# head. Protected CI on the exact head is the preferred evidence; when the base
+# branch has no required checks, the repo gate runs locally in a clean
+# checkout at exactly that head instead (_solo_local_gate).
 [ -n "${_CEL_SOLO:-}" ] && return 0
 _CEL_SOLO=1
 # shellcheck source=lib/mode.sh
@@ -184,10 +185,11 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
 
 # THE REPO'S OWN GATE, AT EXACTLY THE HEAD BEING MERGED. Used only when the
 # base branch gates nothing, so CI cannot stand in. It runs in a checkout of
-# this repo whose HEAD is that commit with no tracked change and nothing staged
-# - the solo agent's own worktree for the branch (its dependencies installed,
-# as a worker's are for the fleet land). No such checkout is a refusal, never
-# a guess. Prints the merge-body line on success, the reason on failure.
+# this repo whose HEAD is that commit with nothing modified, staged or
+# untracked - the solo agent's own worktree for the branch (its dependencies
+# installed, as a worker's are for the fleet land). No such checkout is a
+# refusal, never a guess. Prints the merge-body line on success, the reason
+# on failure.
 _solo_local_gate() { # <wsdir> <repo> <head> <gate>
   local wsdir="$1" repo="$2" head="$3" gate="$4" repodir wt="" w h rc=0 t0 secs
   repodir="$wsdir/repos/$repo"

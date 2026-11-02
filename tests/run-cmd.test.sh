@@ -22,7 +22,7 @@ SH
 # exit status. Route through a subshell to contain it.
 _cmd_run_in_subshell() { ( cmd_run "$@" ); }
 
-# AH-261017: an in-process herdr stub delegates the pane probes (and a refused
+# An in-process herdr stub delegates the pane probes (and a refused
 # start) to the isolated fake, which models a pane whose shell is slow to come
 # up. Fast knobs keep the deadline cases quick; the stable-probe count stays 3.
 _fake_pane() { PF_NOLOG=1 PF_DIR="${PF_DIR:-$T/pf}" "$CEL_ROOT/tests/lib/fake-herdr" "$@"; }
@@ -173,7 +173,7 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
-  # CEL-65: an orchestrator reads ITS mailbox wherever it cds to
+  # an orchestrator reads ITS mailbox wherever it cds to
   assert_contains "$out" "CEL_INBOX_ME=widget-orch"
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "orchestrator-guard.omp.ts"
@@ -181,14 +181,14 @@ test_run_loads_the_guard_hook_for_orchestrators_only() {
   assert_contains "$out" "CEL_INBOX_ME=root"
   out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
   ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
-  # CEL-95: a worker DOES get the inbox hook - reviewers send it CHANGES by
-  # inbox, and without delivery a review round stalled for eight hours.
+  # a worker DOES get the inbox hook - reviewers send it CHANGES by inbox,
+  # and without delivery a review round stalls.
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-wg-1-x"
   rm -rf "$T"
 }
 
-# CEL-95: pi workers and reviewers carry the inbox extension and their own
+# Pi workers and reviewers carry the inbox extension and their own
 # identity, so mail addressed to the pane's alias wakes it.
 test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
   _reviewer_gateway_fixture
@@ -259,7 +259,7 @@ test_run_pi_reviewer_preserves_explicit_gateway_model_id() {
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
   _ws_gateway_clean
 }
-# Owner request 2026-10-28: reviews on Sol/Astra. A Codex-family id goes
+# Reviews on Sol/Astra: a Codex-family id goes
 # through the gateway's codex provider, never pi's own provider inference.
 _reviewer_codex_fixture() {
   _reviewer_gateway_fixture
@@ -551,7 +551,7 @@ _core() {
   _run_live_names() { :; }
 }
 
-# Owner, 2026-10-22: core runs on omp through the gateway, on Opus.
+# Core runs on omp through the gateway, on Opus.
 test_the_shipped_core_default_is_omp_on_gateway_opus() {
   assert_eq "$(yq -r '.defaults.core.runtime' "$CEL_ROOT/agents.yaml")" omp
   assert_eq "$(yq -r '.defaults.core.model' "$CEL_ROOT/agents.yaml")" anthropic/claude-opus-5-5
@@ -679,7 +679,7 @@ YAML
   export CEL_PI_AGENT_DIR="$GWT/pi"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
-  # CEL-60: the accounts the preflight counts are the proxy's auth-dir files.
+  # the accounts the preflight counts are the proxy's auth-dir files.
   export CEL_GATEWAY_STATE="$GWT/state"
   mkdir -p "$GWT/state/auth"
   printf '{}' > "$GWT/state/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
@@ -765,9 +765,8 @@ EOF
   assert_eq "$omp_calls" ""
 }
 
-# CEL-136: omp reads the SAME file-backed CLIProxyAPI key as pi. The old
-# `omp auth-gateway token` is the retired broker's token (CEL-60); the
-# gateway answers it with 401, so the omp route could never have worked.
+# omp reads the SAME file-backed CLIProxyAPI key as pi, never
+# `omp auth-gateway token` (a retired broker's token the gateway rejects with 401).
 test_run_gateway_env_reads_api_key_for_omp_and_never_calls_omp() {
   T="$(mktemp -d)"
   export CEL_GATEWAY_STATE="$T/gateway"
@@ -792,7 +791,7 @@ EOF
   assert_eq "$omp_calls" ""
 }
 
-# The omp orchestrator through the gateway (CEL-136). The model is the
+# The omp orchestrator through the gateway. The model is the
 # gateway's per-account-PREFIXED id behind omp's `celgw` provider, the profile's
 # thinking level rides unchanged, and the pane's agent dir is pinned to omp's
 # own so a pi PI_CODING_AGENT_DIR in the pane cannot redirect omp's models.yml.
@@ -925,11 +924,11 @@ test_run_dry_run_shows_the_prefix_ahead_of_the_agent_command() {
   rm -rf "$T"
 }
 
-# CEL-44: A LIVE AGENT IN THE PRODUCT'S CWD IS AN ORCHESTRATOR, NAMED OR NOT.
-# On 2026-09-18 herdr cleared `widget-orch`'s name when it restarted; every
-# surface resolves an orchestrator by its alias on the roster, so the live one
-# read as dead and the cure for a dead one is to start another - on top of it.
-# The refusal is here, at the one door that starts them.
+# A LIVE AGENT IN THE PRODUCT'S CWD IS AN ORCHESTRATOR, NAMED OR NOT.
+# herdr can clear an agent's name on restart; every surface resolves an
+# orchestrator by its roster alias, so an unnamed live one reads as dead and
+# would get a second started on top of it. The refusal is here, at the one
+# door that starts them.
 _run_stub_roster() { # <cwd> <name|->
   mkdir -p "$T/bin"
   cat >"$T/bin/herdr" <<EOF
@@ -968,11 +967,9 @@ test_run_orchestrator_ignores_a_live_agent_in_another_cwd() {
 }
 
 # ---------------------------------------------------- the reviewer registry
-# A reviewer is started by `cel run reviewer --repo r --pr n` and was recorded
-# NOWHERE, so nothing downstream could know it had finished: seven idle
-# reviewer panes for six merged PRs held ~3.0 GB on this box one morning
-# because no sweep could even see them. The row is what makes the reviewer
-# collectable; `cel gc` reads it.
+# A reviewer started by `cel run reviewer --repo r --pr n` gets a registry
+# row; without it no sweep could see a finished reviewer's idle pane. The row
+# is what makes the reviewer collectable; `cel gc` reads it.
 _reviewers_fixture() { export CEL_REVIEWERS_STATE="$T/reviewers.json"; }
 
 test_reviewer_row_records_the_pr_and_is_found_and_dropped_again() {
@@ -1022,13 +1019,9 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
 }
 
 # ------------------------------------------- the reviewer reads the PR's tree
-# THREE WRONG CONCLUSIONS IN ONE DAY, ONE CAUSE. A reviewer pane used to open
-# in the ORCHESTRATOR'S OWN CHECKOUT, which on 2026-09-21 sat 18 commits behind
-# `main` all day: a reviewer of #75 reported that code which had landed hours
-# earlier "does not exist on this branch", and the orchestrator measured a
-# branch as 3x slower than a `main` that predated lib/orphans.sh. Nothing
-# guaranteed that directory had any relationship to the pull request. A
-# reviewer now gets a detached checkout AT THE PR'S HEAD, of its own.
+# A reviewer gets a detached checkout AT THE PR'S HEAD, of its own - never the
+# orchestrator's checkout, which may sit far behind `main` and bear no
+# relationship to the pull request.
 _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $HEAD_SHA
   _reviewer_gateway_fixture
   printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
@@ -1156,8 +1149,8 @@ test_reviewer_brief_names_the_head_sha_and_the_base() {
   rm -rf "$T"
 }
 
-# CEL-52 made a reviewer's pane close when its PR closes; a checkout that
-# outlives the pane is the same litter in a new form.
+# A reviewer's pane closes when its PR closes; a checkout that outlives the
+# pane is the same litter in a new form.
 test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
@@ -1170,9 +1163,8 @@ test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {
   rm -rf "$T"
 }
 
-# CEL-67: the workspace's name for a repo is a nickname, not a GitHub slug.
-# `gh pr view --repo celestial` failed every reviewer launch; the PR is read
-# from the repo's declared GitHub identity instead.
+# The workspace's name for a repo is a nickname, not a GitHub slug; the PR
+# is read from the repo's declared GitHub identity instead.
 test_reviewer_asks_github_by_slug_not_local_name() {
   _ws_pr_fixture
   sed -i 's#git@github.com:someone/widget.git#git@github.com:acme/widget-gh.git#' "$T/workspace.yaml"
@@ -1200,7 +1192,7 @@ test_github_slug_from_url_handles_ssh_and_https() {
   assert_fails github_slug_from_url /tmp/local/origin
 }
 
-# Sourcery on #88: the host must BE github.com, not contain it.
+# The host must BE github.com, not contain it.
 test_github_slug_from_url_refuses_lookalike_hosts() {
   assert_fails github_slug_from_url git@evilgithub.com:acme/repo.git
   assert_fails github_slug_from_url https://evilgithub.com/acme/repo.git
@@ -1226,7 +1218,7 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
   rm -rf "$T"
 }
 
-# ---- CEL-70: panes act as the workspace's GitHub account ------------------
+# ---- panes act as the workspace's GitHub account ------------------
 _gh_acct_setup() { # <user> adds GitHub auth to existing T
   printf 'github:\n  user: %s\n' "$1" >> "$T/workspace.yaml"
   mkdir -p "$T/bin"; GH_LOG="$T/gh.log"; : > "$GH_LOG"; export GH_LOG
@@ -1279,7 +1271,7 @@ test_reviewer_pr_lookup_runs_as_the_workspace_account() {
 }
 # The pane evaluates the token itself, so auth can vanish between cel's
 # readiness check and the typed line. Then the agent must NOT start, and the
-# pane must say how to fix it (Sourcery on #89).
+# pane must say how to fix it.
 test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
   _ws_gh_acct acct-b
   local line; line="$(_run_launch_env worker "$T" /r.md)touch $T/agent-ran"
@@ -1297,7 +1289,7 @@ test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
 }
 
 # ------------------------------------------------------------ pane labels
-# CEL-83: the agent name is sanitised and cut to 32 characters, which reads
+# The agent name is sanitised and cut to 32 characters, which reads
 # badly in the sidebar; every pane the plane starts also gets a free-text label.
 _label_len() { LC_ALL=C.UTF-8 awk '{print length($0)}' <<<"$1"; }
 test_pane_label_shapes() {
@@ -1335,7 +1327,7 @@ _label_check() { # <expected-label>
   local r s; r="$(grep -n '^pane rename' "$HERDR_LOG" | cut -d: -f1)"
   s="$(grep -n '^agent start' "$HERDR_LOG" | cut -d: -f1)"
   [ "$r" -lt "$s" ] || { echo "rename after agent start"; return 1; }
-  # ...and its tab carries the same text (CEL-83 addendum), except a reviewer's,
+  # ...and its tab carries the same text, except a reviewer's,
   # which keeps "PR reviewer".
   if [ -n "${2:-}" ]; then
     assert_eq "$(grep -c '^tab rename' "$HERDR_LOG" || true)" 0
@@ -1367,10 +1359,10 @@ test_run_failed_rename_still_launches() {
   rm -rf "$T"
 }
 
-# CEL-94: a live reviewer whose registry row has gone (pruned, or dropped as
-# "gone" under a stale pane id) is still THE reviewer for that PR. Relaunching
-# used to drop its checkout from under it; it is found on the roster by the
-# directory it stands in, reused, and its row is written back.
+# A live reviewer whose registry row has gone (pruned, or dropped as
+# "gone" under a stale pane id) is still THE reviewer for that PR: it is
+# found on the roster by the directory it stands in, reused (its checkout
+# kept), and its row is written back.
 test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded() {
   _ws_review; _reviewers_fixture
   export CEL_REVIEW_DIR="$T/reviews"
@@ -1392,9 +1384,9 @@ test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded
   unset -f herdr; rm -rf "$T"
 }
 
-# CEL-98: a spent Claude budget answers 429 with retry-after-ms around 5.5M,
-# and omp's default retry.maxDelayMs (300000) refused the wait, so the
-# orchestrator's turn stopped until a human typed. Root and the orchestrators
+# A spent Claude budget answers 429 with retry-after-ms around 5.5M,
+# and omp's default retry.maxDelayMs (300000) refuses that wait, stopping the
+# orchestrator's turn until a human types. Root and the orchestrators
 # on omp carry a --config overlay raising it past a 5h reset; workers do not -
 # a worker that sleeps for hours holds a slot better given to another.
 test_run_omp_orchestrators_wait_out_a_spent_budget() {
@@ -1412,11 +1404,9 @@ test_run_omp_orchestrators_wait_out_a_spent_budget() {
 }
 
 # ---------------------------------------------------------------------------
-# AH-261017: A PANE IS TYPED INTO ONLY ONCE ITS SHELL OWNS THE FOREGROUND.
-# A downstream workspace's reviewer launch twice died as agent_pane_busy about six
-# seconds in, with the credential substitution and role env typed into a fresh
-# pane's terminal, never submitted, a shell warning interleaved with it. The
-# shell was still reading its rc files; nothing in cel waited for it. These
+# A PANE IS TYPED INTO ONLY ONCE ITS SHELL OWNS THE FOREGROUND.
+# Typing into a pane whose shell is still reading its rc files leaves the
+# launch line unsubmitted and the pane agent_pane_busy. These
 # cases drive the launcher against an isolated fake herdr whose shell is slow,
 # swapped, or absent, and read the outcome from what herdr was actually asked.
 _pf_calls() { grep -c "^$1" "$HERDR_LOG" || true; }

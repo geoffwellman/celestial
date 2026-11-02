@@ -20,12 +20,10 @@ _land_gh() { # <wsdir> <gh args...>
 # not and returns 1. Never dies: fleet land asks this BEFORE its local gate too,
 # and a "no" there means "run the gate as before", not "refuse".
 #
-# WHAT MAY STAND IN FOR A GATE. The first cut of this accepted any successful
-# check run on the head - a docs build or a lint job going green would have
-# carried a merge while the suite was red. CI substitutes for the gate only
-# when EVERY check the base branch is PROTECTED by concluded success on this
-# head, matched by name. No protection, or protection this token cannot read,
-# is not permission: absence of evidence is not evidence.
+# WHAT MAY STAND IN FOR A GATE: only EVERY check the base branch is PROTECTED
+# by, concluded success on this head, matched by name - a green docs or lint
+# job alone never carries a merge. No protection, or protection this token
+# cannot read, is not permission: absence of evidence is not evidence.
 land_ci_gate() { # <wsdir> <slug> <pr-json>
   local wsdir="$1" slug="$2" pr="$3"
   local head base prot req cr missing

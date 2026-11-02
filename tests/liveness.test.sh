@@ -1,7 +1,6 @@
 # shellcheck shell=bash
 # What the pane is actually doing. The timers in lib/stall.sh answer "how long
-# has it been quiet"; this answers "is that quiet healthy", which is the
-# question every real failure on this box turned out to hang on.
+# has it been quiet"; this answers "is that quiet healthy".
 #
 # The endpoint is stubbed by replacing `curl` - the same posture as the Linear
 # sweep in tests/steward.test.sh - so a test can hand the classifier any answer,
@@ -196,8 +195,8 @@ test_a_classification_reports_a_worker_the_runtime_calls_working() {
   assert_eq "$(stall_verdict working 'npm test' 60 0 looping)" looping
   assert_eq "$(stall_verdict working 'npm test' 60 0)" ""
 }
-# A worker that wrote its result is finished, not stalled - the CEL-22
-# precedent - and nothing the model says reopens that.
+# A worker that wrote its result is finished, not stalled, and nothing the
+# model says reopens that.
 test_a_worker_that_wrote_its_result_is_never_reported() {
   assert_eq "$(stall_verdict idle 'done' 99999 1 crashed)" ""
 }
@@ -378,22 +377,21 @@ EOF
   rm -rf "$T"
 }
 
-# --- CEL-50: the three silences ---------------------------------------------
+# --- the three silences -----------------------------------------------------
 #
-# A pane that exists is not a worker that is working. Three shapes cost this
-# box a day between them and every one of them renders exactly like an agent
-# thinking: a prompt that was typed but never submitted, a session that
-# accepts input and errors on every turn, and an account whose window is
-# spent. They are read from the pane text alone - no request, no key, no
-# router - because none of them needs judgement, only recognition.
+# A pane that exists is not a worker that is working. Three shapes render
+# exactly like an agent thinking: a prompt that was typed but never submitted,
+# a session that accepts input and errors on every turn, and an account whose
+# window is spent. They are read from the pane text alone - no request, no key,
+# no router - because none of them needs judgement, only recognition.
 
 _silence_setup() {
   T="$(mktemp -d)"
   export CEL_LIVENESS_STATE="$T/liveness-state"
 }
 
-# The 2026-09-18 dispatch incident, as a pane: the whole prompt sitting below
-# the divider, the context at zero, and two hours of nothing.
+# An undispatched prompt, as a pane: the whole prompt sitting below the
+# divider, the context at zero, and nothing since.
 _pane_unstarted() {
   cat <<'PANE'
   pi - alpha/ABC-7
@@ -422,9 +420,8 @@ test_a_pane_with_a_first_assistant_turn_is_not_unstarted() {
   rm -rf "$T"
 }
 
-# THE CLASS, NOT THE MESSAGE. The transport bug that produced this wrote one
-# sentence; the next one will write a different one, so the error asserted
-# here is deliberately NOT the one from the incident.
+# THE CLASS, NOT THE MESSAGE. Any terminal error repeated with no turn between
+# counts, whatever its wording, so the error asserted here is arbitrary.
 test_a_repeated_terminal_error_with_no_turn_between_is_erroring() {
   _silence_setup
   local pane; pane="$(printf '%s\n' \
@@ -520,13 +517,11 @@ test_the_silence_sentence_names_the_block_and_the_reset() {
   rm -rf "$T"
 }
 
-# A WORKER WHOSE WORK IS ABOUT RATE LIMITS IS NOT RATE LIMITED (PR #81 review).
-# `throttled` was recognised from the words appearing anywhere in the pane, so
-# a worker running the quota suite, grepping lib/quota.sh, or showing a diff
-# with `429` in it was reported as blocked on a provider - while it was
-# working, with turns on the pane and the context moving. That report sends an
-# orchestrator to wait for a window that was never spent, which is the exact
-# false positive the ticket calls worse than the silence it replaces.
+# A WORKER WHOSE WORK IS ABOUT RATE LIMITS IS NOT RATE LIMITED.
+# Rate-limit words anywhere in a busy pane - a worker running the quota suite,
+# grepping lib/quota.sh, or showing a diff with `429` in it, with turns on the
+# pane and the context moving - are not `throttled`. That false report would
+# send an orchestrator to wait for a window that was never spent.
 test_a_busy_pane_whose_own_output_mentions_rate_limits_is_not_throttled() {
   _silence_setup
   local pane; pane="$(printf '%s\n' \
@@ -551,8 +546,8 @@ test_a_provider_refusal_after_the_last_turn_is_still_throttled() {
   rm -rf "$T"
 }
 
-# CEL-79: a pinned clock with a leading zero is still base ten. Bash arithmetic
-# reads `08` as a malformed octal literal and the age read died with it.
+# A pinned clock with a leading zero is still base ten: bash arithmetic would
+# read `08` as a malformed octal literal.
 test_a_pinned_clock_with_a_leading_zero_is_decimal() {
   _liveness_setup
   export CEL_LIVENESS_NOW=08
@@ -563,8 +558,8 @@ test_a_pinned_clock_with_a_leading_zero_is_decimal() {
   rm -rf "$T"
 }
 
-# CEL-79: an answer recorded at time 0 is still an answer. The cache used to
-# read answered_at > 0 as "there is one", so a clock pinned at 0 lost it.
+# An answer recorded at time 0 is still an answer: answered_at > 0 is not the
+# "there is one" test, or a clock pinned at 0 would lose it.
 test_an_answer_recorded_at_time_zero_is_still_cached() {
   _liveness_setup
   export CEL_LIVENESS_NOW=0
