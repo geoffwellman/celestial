@@ -105,10 +105,15 @@ test_preview_forward_relays_once_the_app_answers() {
   local out
   out="$(FWD="$CEL_ROOT/tools/preview/forward.mjs" timeout 10 node -e '
 const net = require("net"), { spawn } = require("child_process");
-const up = net.createServer((c) => c.end("hello")).listen(0, "127.0.0.2", () => {
+// the readiness probe of the forwarder connects and drops at once, resetting a
+// socket this side already wrote to - that reset is expected, not a failure
+const up = net.createServer((c) => { c.on("error", () => {}); c.end("hello"); }).listen(0, "127.0.0.2", () => {
   const port = up.address().port;
-  const f = spawn(process.execPath, [process.env.FWD, String(port), "127.0.0.2"], { env: { ...process.env, CEL_PREVIEW_FORWARD_DELAY_MS: "20" }, stdio: "inherit" });
-  const done = (s) => { console.log(s); f.kill(); up.close(); };
+  // The forwarder must not inherit stdout: an orphan would hold the $(...)
+  // pipe open past `timeout` and turn a 10 s failure into the 120 s test limit.
+  const f = spawn(process.execPath, [process.env.FWD, String(port), "127.0.0.2"], { env: { ...process.env, CEL_PREVIEW_FORWARD_DELAY_MS: "20" }, stdio: ["ignore", "ignore", "inherit"] });
+  const stop = setTimeout(() => done("no forward (8s)"), 8000);
+  const done = (s) => { clearTimeout(stop); console.log(s); f.kill(); up.close(); };
   const attempt = (n) => {
     const c = net.connect(port, "127.0.0.1"); let b = "";
     c.on("data", (d) => (b += d)); c.on("end", () => done(b));
