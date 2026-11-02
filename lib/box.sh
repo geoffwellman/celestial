@@ -170,8 +170,16 @@ _box_rm() { # <path>
 
 # ------------------------------------------------------------------ the docker
 
-_box_docker_df() { # the raw rows of `docker system df --format json`
-  "$(_box_docker_bin)" system df --format json 2>/dev/null || true
+# With a timeout (whole seconds) the query is bounded and an unanswered one -
+# no `timeout` on the box, a daemon that hangs, a socket this user may not
+# open - returns 1 instead of waiting or guessing.
+_box_docker_df() { # [timeout-secs] -> the raw rows of `docker system df --format json`
+  local -a cmd=("$(_box_docker_bin)" system df --format json)
+  if [ -n "${1:-}" ]; then
+    have timeout || return 1
+    cmd=(timeout -k 2 "$1" "${cmd[@]}")
+  fi
+  "${cmd[@]}" 2>/dev/null
 }
 
 _box_docker_row() { # <rows> <Type> -> size<TAB>reclaimable in bytes
@@ -186,7 +194,7 @@ _box_docker_row() { # <rows> <Type> -> size<TAB>reclaimable in bytes
 box_docker_json() { # the docker half of the report, or nothing when absent
   have "$(_box_docker_bin)" || return 1
   local rows img con vol bld
-  rows="$(_box_docker_df)"
+  rows="$(_box_docker_df)" || true
   [ -n "$rows" ] || return 1
   IFS=$'\t' read -r img_s img_r <<< "$(_box_docker_row "$rows" Images)"
   IFS=$'\t' read -r con_s con_r <<< "$(_box_docker_row "$rows" Containers)"
@@ -493,7 +501,182 @@ _box_space_table() {
   return 0
 }
 
-cmd_box() { # space [--json]
+# ------------------------------------------------------------ the diagnosis
+
+# WHAT IS FILLING THE DISK RIGHT NOW, for an alert to append (AH-261103). The
+# disk monitor's warning named the newest entries under home and /tmp; the
+# 18 GiB/h drop that prompted this was Docker images and build cache in a
+# root-owned /var/lib/docker, so the warning named nothing anybody could act
+# on. At most two lines, both read-only and bounded:
+#   docker: images <size> (<n> reclaimable), build cache ..., volumes ...
+#   docker builds: <n> running - pid <pid> agent=<who> cwd=<dir>: <argv>; ...
+# The first is left out when docker is absent, too slow, or not this user's
+# to query: that is a normal box, not a finding. The second is left out when
+# nothing is building and there is no docker to build with.
+
+# The kernel's, unless a test points it at a fixture tree - the same variable
+# lib/orphans.sh reads, so one export fakes both.
+_box_proc() { printf '%s' "${CEL_PROC:-/proc}"; }
+
+# Seconds `docker system df` may take before the diagnosis goes without it.
+# An alert is waiting on this line, and a hung daemon must not hold it. Thirty
+# because the plain query took 14 s on the loaded box on 2026-11-03, and a
+# bound that drops the answer on exactly the busy box that needs it is no use.
+_box_diag_timeout() {
+  local t="${CEL_BOX_DIAG_TIMEOUT:-30}"
+  case "$t" in ''|*[!0-9]*|0) t=30 ;; esac
+  printf '%s' "$t"
+}
+
+# The line goes into a mailbox: forty parallel builds are one fact, and a
+# build argv can carry a page of --build-arg flags.
+_BOX_DIAG_BUILDS_MAX=5
+_BOX_DIAG_ARGV_MAX=120
+
+_box_diag_docker_line() { # -> the `docker:` line, or nothing with status 1
+  have "$(_box_docker_bin)" || return 1
+  have jq || return 1
+  local rows img_s img_r bld_s bld_r vol_s vol_r
+  rows="$(_box_docker_df "$(_box_diag_timeout)")" || return 1
+  [ -n "$rows" ] || return 1
+  IFS=$'\t' read -r img_s img_r <<< "$(_box_docker_row "$rows" Images)"
+  IFS=$'\t' read -r bld_s bld_r <<< "$(_box_docker_row "$rows" "Build Cache")"
+  IFS=$'\t' read -r vol_s vol_r <<< "$(_box_docker_row "$rows" "Local Volumes")"
+  printf 'docker: images %s (%s reclaimable), build cache %s (%s reclaimable), volumes %s (%s reclaimable)\n' \
+    "$(box_human "$img_s")" "$(box_human "$img_r")" \
+    "$(box_human "$bld_s")" "$(box_human "$bld_r")" \
+    "$(box_human "$vol_s")" "$(box_human "$vol_r")"
+}
+
+# `docker build`, its `image build` and `builder build` spellings, and
+# `buildx build|b|bake` - from the CLI or from the docker-buildx plugin binary
+# the CLI runs underneath it. Global options are skipped, with the value of
+# the ones that take one, so `docker --context ci build` is still a build.
+_box_is_docker_build() { # <argv...> -> 0 for a build
+  case "${1##*/}" in docker|docker-buildx) ;; *) return 1 ;; esac
+  shift
+  local -a sub=()
+  while [ $# -gt 0 ] && [ "${#sub[@]}" -lt 2 ]; do
+    case "$1" in
+      --config|-c|--context|-H|--host|-l|--log-level|--tlscacert|--tlscert|--tlskey|--builder)
+        shift; [ $# -gt 0 ] && shift; continue ;;
+      -*) shift; continue ;;
+    esac
+    sub+=("$1"); shift
+  done
+  case "${sub[0]:-} ${sub[1]:-}" in
+    "build "*|"buildx build"|"buildx b"|"buildx bake"|"image build"|"builder build") return 0 ;;
+  esac
+  return 1
+}
+
+_box_ppid() { # <pid> -> its parent, from <proc>/<pid>/status
+  local k v
+  { while read -r k v; do
+      [ "$k" = PPid: ] && { printf '%s' "$v"; return 0; }
+    done < "$(_box_proc)/$1/status"; } 2>/dev/null || true
+  return 1
+}
+
+# The pane a process stands in, read from its environment the way
+# run_session_resumers reads it, and from its parents' when its own is
+# unreadable or bare: a build started by an agent's shell tool inherits the
+# agent's HERDR_PANE_ID, or its REX_SESSION and REX_BLOCK.
+_box_diag_pane() { # <pid> -> herdr pane id or rex/<session>/<block>
+  local p="$1" hops=0 item pane rs rb
+  while [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 1 ] && [ "$hops" -lt 64 ]; do
+    pane="" rs="" rb=""
+    { while IFS= read -r -d '' item; do
+        case "$item" in
+          HERDR_PANE_ID=*) pane="${item#*=}" ;;
+          REX_SESSION=*) rs="${item#*=}" ;;
+          REX_BLOCK=*) rb="${item#*=}" ;;
+        esac
+      done < "$(_box_proc)/$p/environ"; } 2>/dev/null || true
+    [ -z "$rs" ] || [ -z "$rb" ] || pane="rex/$rs/$rb"
+    if [ -n "$pane" ]; then printf '%s' "$pane"; return 0; fi
+    p="$(_box_ppid "$p")" || return 1
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# The owner of one build: the agent in its pane when the environment says
+# which; otherwise the agent whose working directory most closely contains the
+# build's, said as an inference; otherwise the bare pane, or nothing.
+_box_diag_owner() { # <pane> <cwd> <roster pane<TAB>name<TAB>cwd lines>
+  local pane="$1" cwd="$2" p n c best="" blen=0
+  if [ -n "$pane" ]; then
+    while IFS=$'\t' read -r p n c; do
+      [ -n "$p" ] && [ "$p" = "$pane" ] && [ -n "$n" ] && { printf 'agent=%s' "$n"; return 0; }
+    done <<< "$3"
+  fi
+  if [ -n "$cwd" ]; then
+    while IFS=$'\t' read -r p n c; do
+      [ -n "$n" ] && [ -n "$c" ] && [ "$c" != / ] || continue
+      case "$cwd" in "$c"|"$c"/*) [ "${#c}" -gt "$blen" ] && { best="$n"; blen="${#c}"; } ;; esac
+    done <<< "$3"
+    [ -z "$best" ] || { printf 'agent=%s (by cwd)' "$best"; return 0; }
+  fi
+  if [ -n "$pane" ]; then printf 'agent=? pane=%s' "$pane"; else printf 'agent=?'; fi
+}
+
+_box_diag_builds_line() { # <docker-answered 0|1> -> the `docker builds:` line
+  local proc d pid a0 parent roster="" item cwd cmd out="" shown=0
+  local -a argv=() builds=() top=()
+  local -A is_build=()
+  proc="$(_box_proc)"
+  for d in "$proc"/[0-9]*; do
+    a0=""
+    { read -r -d '' a0 < "$d/cmdline"; } 2>/dev/null || true
+    case "${a0##*/}" in docker|docker-buildx) ;; *) continue ;; esac
+    { mapfile -d '' -t argv < "$d/cmdline"; } 2>/dev/null || continue
+    _box_is_docker_build "${argv[@]}" || continue
+    pid="${d##*/}"
+    is_build[$pid]=1
+    builds+=("$pid")
+  done
+  # ONE BUILD, ONE ROW: `docker build` runs the docker-buildx plugin as its
+  # child, and both argvs say build.
+  for pid in "${builds[@]}"; do
+    parent="$(_box_ppid "$pid")" || parent=""
+    [ -n "$parent" ] && [ -n "${is_build[$parent]:-}" ] && continue
+    top+=("$pid")
+  done
+  if [ "${#top[@]}" -eq 0 ]; then
+    [ "$1" = 1 ] && printf 'docker builds: none running\n'
+    return 0
+  fi
+  mapfile -t top < <(printf '%s\n' "${top[@]}" | sort -n)
+  if have jq; then
+    roster="$(cel_agent_list 2>/dev/null | jq -r '.result.agents[]?
+      | [(.pane_id // ""), (.name // ""), ((.cwd // "") | sub(" \\(deleted\\)$"; ""))] | @tsv' 2>/dev/null)" || roster=""
+  fi
+  for pid in "${top[@]}"; do
+    [ "$shown" -lt "$_BOX_DIAG_BUILDS_MAX" ] || break
+    argv=()
+    { mapfile -d '' -t argv < "$proc/$pid/cmdline"; } 2>/dev/null || true
+    cmd="${argv[*]}"
+    cmd="${cmd//[$'\n\t\r']/ }"
+    [ "${#cmd}" -le "$_BOX_DIAG_ARGV_MAX" ] || cmd="${cmd:0:$_BOX_DIAG_ARGV_MAX}..."
+    cwd="$(readlink "$proc/$pid/cwd" 2>/dev/null)" || cwd=""
+    cwd="$(pane_cwd "$cwd")"
+    item="pid $pid $(_box_diag_owner "$(_box_diag_pane "$pid")" "$cwd" "$roster") cwd=${cwd:-?}: $cmd"
+    out="${out:+$out; }$item"
+    shown=$((shown + 1))
+  done
+  [ "${#top[@]}" -le "$shown" ] || out="$out; +$(( ${#top[@]} - shown )) more"
+  printf 'docker builds: %d running - %s\n' "${#top[@]}" "$out"
+}
+
+box_diag() { # -> at most two lines; always exits 0
+  local answered=0
+  _box_diag_docker_line && answered=1
+  _box_diag_builds_line "$answered"
+  return 0
+}
+
+cmd_box() { # space [--json] | diag
   local verb="${1:-space}"
   shift || true
   case "$verb" in
@@ -503,7 +686,10 @@ cmd_box() { # space [--json]
         '') _box_space_table ;;
         *) die "cel box space: unknown argument '$1' (want --json)" ;;
       esac ;;
-    *) die "cel box: unknown subcommand '$verb' (want space)" ;;
+    diag)
+      [ $# -eq 0 ] || die "cel box diag: unknown argument '$1' (takes none)"
+      box_diag ;;
+    *) die "cel box: unknown subcommand '$verb' (want space or diag)" ;;
   esac
 }
 
