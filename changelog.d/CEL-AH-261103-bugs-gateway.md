@@ -5,3 +5,4 @@
 - `cel gateway status` still lists a vault credential file that is not valid JSON, but marks it `ok: false` and it no longer counts as a usable account for launch admission.
 - `tools/hooks/guard-classify.sh` no longer answers `allow` when it cannot load the guard policy or is given an unknown mode: it exits 2 with the reason on stderr, so adapters can tell a broken classifier from a permitted call.
 - `/cel-*` owner commands keep a bounded head and tail of the command's output (default 64 KiB, `CEL_HERE_OUTPUT_MAX`) and say how much was dropped, instead of holding a long `land` gate's whole output in agent memory.
+- OpenCode keeps allowing when the guard classifier reports its own error (exit 2), as it did when the classifier printed `allow`; other classifier failures still refuse.
