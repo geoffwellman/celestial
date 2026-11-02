@@ -974,7 +974,14 @@ both failing the view still renders what the box itself knows.
   fourteen-day age for docker with base images exempt; `--dry-run` covers it
   exactly as it covers the old work. The steward sweeps on a six-hour cadence
   and `cel doctor` warns below a free-space floor, naming the largest
-  reclaimable class and the command that clears it.
+  reclaimable class and the command that clears it. `cel box diag` is the
+  same question asked by an alert: at most two bounded lines - docker's own
+  images / build cache / volumes summary (left out when docker is absent,
+  slow past `CEL_BOX_DIAG_TIMEOUT` seconds, default 30, or not this user's to
+  query) and every running `docker build` / `buildx` with the agent whose pane
+  or working directory it runs in - secret values in the build's argv
+  (`--build-arg`, `--secret`, `-e`/`--env`, any `KEY=VALUE`) printed as `***`,
+  and the herdr lookup held to the same time limit.
 
 ## What runs in the background
 
@@ -1467,6 +1474,7 @@ policy block into every agent.
 | `cel publish` / `cel pages` | self-hosted documents |
 | `cel gc [--reap h] [--orphans] [--box]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
 | `cel box space [--json]` | what is large on this box, what is reclaimable, and what is nobody's to delete |
+| `cel box diag` | two bounded lines for a disk alert: docker images, build cache and volumes, and running docker builds with their owning agent |
 | `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |

@@ -248,6 +248,9 @@ cel - the celestial plane
                                 delete - ours, regenerable, or someone's
                                 (someone's is reported, never swept), plus
                                 the reviewer panes and the RSS they hold
+  cel box diag                  two bounded lines for a disk alert: docker's
+                                images / build cache / volumes, and running
+                                docker builds with the agent that owns each
   cel drive list|tail|send|receipt
                                 see an orchestrator's conversation (from its
                                 session file) and mail it as owner, with a
