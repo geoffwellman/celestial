@@ -279,6 +279,24 @@ test_v2_act_refuses_phantom_targets_and_repos() {
   _v2_down
 }
 
+# The page names an orchestrator by its agent's alias (cel_alias_norm); the
+# act door must accept exactly that name, and the fleet row's solo tag must
+# land on it - for a repo or product whose declared name is not already one.
+test_v2_orchestrators_are_known_by_their_canonical_alias() {
+  _v2_boot
+  printf 'name: bundle\nrepos:\n  - name: Gadget.App\n    url: git@example.invalid:bundle/gadget.git\nproducts:\n  - name: Thor Games\n    mode: solo\n    repos: [Gadget.App]\n' > "$T/bundle/workspace.yaml"
+  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"gadget-app-orch\",\"agent\":\"omp\",\"agent_status\":\"idle\",\"cwd\":\"$T/bundle\",\"pane_id\":\"w0:p1\"},{\"name\":\"thor-games-orch\",\"agent\":\"omp\",\"agent_status\":\"idle\",\"cwd\":\"$T/bundle\",\"pane_id\":\"w0:p2\"}],\"workspaces\":[]}}'" > "$T/bin/herdr"
+  local f; f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | .name + ":" + .mode] | sort | join(",")')" "gadget-app-orch:fleet,thor-games-orch:solo"
+  local who
+  for who in gadget-app-orch thor-games-orch; do
+    assert_eq "$(_v2_act "{\"action\":\"message\",\"target\":\"$who\",\"args\":{\"ws\":\"bundle\",\"text\":\"hi $who\"}}" -H "x-cel-csrf: $TOKEN")" "200" \
+      || { cat "$T/act.out"; _v2_down; return 1; }
+    assert_eq "$(jq -r --arg w "$who" 'select(.to == $w and .from == "dashboard") | .message' "$T/inbox/bundle.jsonl")" "hi $who"
+  done
+  _v2_down
+}
+
 # Parallel cold requests share ONE gh fetch, and a failed gh call is not
 # cached - the next request tries again.
 test_v2_gh_pass_is_shared_in_flight_and_failures_are_not_cached() {

@@ -126,21 +126,3 @@ test_steward_nudges_a_solo_agent_once_per_ready_head() {
   assert_eq "$(grep -c . "$T/mail")" 2
   rm -rf "$T"
 }
-
-# --- the dashboard's copy of the alias rule ------------------------------------
-# tools/dash/v2.mjs names a solo product's agent with a JS copy of
-# cel_alias_norm; they must agree, or the solo tag lands on nobody.
-test_dashboard_alias_rule_matches_cel_alias_norm() {
-  local n js
-  for n in 'bundle-orch' 'Thor Games-orch' 'a__b-orch' '9lives-orch' 'x--y-orch' \
-           'a-very-long-product-name-for-testing-orch' 'widget.app-orch'; do
-    js="$(node -e '
-      const s = process.argv[1];
-      let n = String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-").replace(/^[^a-z]+/, "");
-      console.log(n.length > 32 ? n.slice(0, 32) : n.replace(/-+$/, ""));' "$n")"
-    assert_eq "$js" "$(cel_alias_norm "$n")" || { echo "differs for: $n"; return 1; }
-  done
-  # and that copy is the one the dashboard runs
-  grep -qF '.replace(/[^a-z0-9_-]+/g, '"'"'-'"'"').replace(/-+/g, '"'"'-'"'"').replace(/^[^a-z]+/, '"'"''"'"')' "$CEL_ROOT/tools/dash/v2.mjs" \
-    || { echo "tools/dash/v2.mjs no longer carries this rule"; return 1; }
-}

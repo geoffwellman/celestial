@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 // ---- redaction --------------------------------------------------------
 // A transcript carries every tool output the agent saw, including any secret
@@ -158,18 +159,20 @@ export class Normaliser {
 // Per file {inode, size, offset} plus the trailing partial line. A changed
 // inode or a shrink means the file was swapped or truncated: cold start
 // again and say so (`reset`). Cold start reads only the last COLD bytes and
-// throws away the first, almost certainly partial, line.
+// throws away the first, almost certainly partial, line. One decoder per
+// file holds a code point split across two polls until its last byte lands.
 export const COLD_BYTES = 2_000_000;
 export class Tailer {
   constructor(file, { coldBytes = COLD_BYTES } = {}) {
     this.file = file; this.coldBytes = coldBytes;
     this.ino = null; this.offset = 0; this.carry = ""; this.bytesRead = 0; this.reset = false;
+    this.decoder = new StringDecoder("utf8");
   }
   #read(from, to) {
     const len = to - from; if (len <= 0) return "";
     const buf = Buffer.alloc(len);
     const fd = fs.openSync(this.file, "r");
-    try { let got = 0; while (got < len) { const n = fs.readSync(fd, buf, got, len - got, from + got); if (!n) break; got += n; } this.bytesRead += got; return buf.subarray(0, got).toString("utf8"); }
+    try { let got = 0; while (got < len) { const n = fs.readSync(fd, buf, got, len - got, from + got); if (!n) break; got += n; } this.bytesRead += got; return this.decoder.write(buf.subarray(0, got)); }
     finally { fs.closeSync(fd); }
   }
   poll() {
@@ -179,6 +182,7 @@ export class Tailer {
     if (this.ino === null || st.ino !== this.ino || st.size < this.offset) {
       this.reset = this.ino !== null;
       const from = Math.max(0, st.size - this.coldBytes);
+      this.decoder = new StringDecoder("utf8");
       text = this.#read(from, st.size);
       if (from > 0) { const i = text.indexOf("\n"); text = i >= 0 ? text.slice(i + 1) : ""; }
       this.carry = "";

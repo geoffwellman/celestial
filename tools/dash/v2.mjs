@@ -46,10 +46,18 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const BOOT = new Date().toISOString();
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
   const soloExpr = '[((.products // [])[] | select(.mode == "solo") | .name), ((.repos // [])[] | select(.mode == "solo") | .name)]';
-  // lib/common.sh cel_alias_norm, the one rule that names agents and mailboxes
-  const aliasNorm = (s) => {
-    let n = String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^[^a-z]+/, '');
-    return n.length > 32 ? n.slice(0, 32) : n.replace(/-+$/, '');
+  // Agent and mailbox names are lib/common.sh's cel_alias_norm, asked of that
+  // one rule and never re-derived here: raw name -> canonical alias, and no
+  // entry when the shell cannot answer, so nothing is matched or mailed by
+  // a guess.
+  const canonical = async (names) => {
+    const uniq = [...new Set(names)];
+    if (!uniq.length) return new Map();
+    const out = await run('bash', ['-c', '. "$0" && for n; do cel_alias_norm "$n"; echo; done',
+      join(CEL_ROOT, 'lib', 'common.sh'), ...uniq], 8000);
+    if (out === null) return new Map();
+    const lines = out.split('\n');
+    return new Map(uniq.map((n, i) => [n, lines[i]]));
   };
   // served through `slow`, so once warm a request never waits on the yq
   // spawns behind it
@@ -75,6 +83,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], solo: Array.isArray(solo) ? solo : [] });
     }
     if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], solo: [] });
+    // each workspace's orchestrators by the names their agents and mailboxes
+    // carry: its own, one per declared repo, one per solo product
+    const orch = (n) => `${n}-orch`;
+    const names = (w) => ({ own: [w.name], repos: w.repos.map((r) => r && r.name).filter(Boolean), solo: w.solo.filter(Boolean) });
+    const canon = await canonical(out.flatMap((w) => Object.values(names(w)).flat().map(orch)));
+    const known = (ns) => ns.map((n) => canon.get(orch(n))).filter(Boolean);
+    for (const w of out) {
+      const n = names(w);
+      w.orchs = { own: known(n.own), repos: known(n.repos), solo: known(n.solo) };
+    }
     return out;
   });
   // ?ws=<name>|all; unknown is an error, not an empty card that reads as calm
@@ -513,7 +531,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       }
       const home = wss.find((w) => under(cwd, w.path));
       if (home && /-orch$/.test(String(a.name || ''))) {
-        const solo = (home.solo || []).some((p) => aliasNorm(`${p}-orch`) === a.name);
+        const solo = home.orchs.solo.includes(a.name);
         orchestrators.push({ name: a.name, ws: home.name, status: a.agent_status || 'unknown', pane: a.pane_id || null, mode: solo ? 'solo' : 'fleet' });
       }
     }
@@ -921,11 +939,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const cel = (argv) => run(CEL(), argv, 30000);
     // A mailbox is only one somebody reads. `cel inbox send`
     // will write to any name, so the dashboard checks first: a ledger alias,
-    // the workspace's own orchestrator or a repo orchestrator it declares,
-    // or root. A typo here would otherwise be a message nobody ever sees.
+    // the workspace's own orchestrator, a repo orchestrator it declares or a
+    // solo product's agent - each by its canonical alias, the name the page
+    // shows - or root. A typo here would otherwise be a message nobody sees.
     const ws = all.find((w) => w.name === wsName);
     const repos = new Set(ws.repos.map((r) => r.name));
-    const known = new Set(['root', `${ws.name}-orch`, ...[...repos].map((r) => `${r}-orch`),
+    const known = new Set(['root', ...ws.orchs.own, ...ws.orchs.repos, ...ws.orchs.solo,
       ...ledgerOf(ws).map((r) => r.alias).filter(Boolean)]);
     if (action === 'message') {
       const text = String(args.text || '').trim();

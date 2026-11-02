@@ -15,7 +15,7 @@ import { join, normalize, extname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { controlSecurity, internalError } from '../http-security.mjs';
-import { TOKEN_RE, bundleFor, copyBundle } from './bundle.mjs';
+import { TOKEN_RE, bundleFor, copyBundle, regular } from './bundle.mjs';
 
 const ROOT = process.env.CEL_PAGES_ROOT;
 const PORT = Number(process.env.CEL_PAGES_PORT || 7780);
@@ -453,16 +453,33 @@ const chrome = (name) => `<!doctype html><meta charset="utf-8">
 })()</script>`;
 
 
-const feedback = async (req, res) => {
+// A request's JSON object, or null once the refusal is sent: an oversized
+// body is 413 and one that is not a JSON object is the caller's 400 - never
+// the outer catch's 500.
+const readJson = async (req, res, max) => {
   let body = '';
-  for await (const c of req) { body += c; if (body.length > 20000) { res.writeHead(413).end('too long'); return; } }
-  const { doc, message, quote } = JSON.parse(body || '{}');
+  for await (const c of req) { body += c; if (body.length > max) { res.writeHead(413).end('too long'); return null; } }
+  let v = null;
+  try { v = JSON.parse(body || '{}'); } catch { /* refused below */ }
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  res.writeHead(400).end('body must be a JSON object');
+  return null;
+};
+
+// a document the private tier would serve: flat, not a dotfile, a regular file
+const published = (name) => !!name && !name.startsWith('.') && !name.includes('\\') && regular(ROOT, name);
+
+const feedback = async (req, res) => {
+  const parsed = await readJson(req, res, 20000);
+  if (!parsed) return;
+  const { doc, message, quote } = parsed;
   const name = String(doc || '').split('/').pop();
   const msg = String(message || '').trim().slice(0, 4000);
   const q = String(quote || '').trim().slice(0, 600);
   if (!name || !msg) { res.writeHead(400).end('doc and message required'); return; }
+  if (!published(name)) { res.writeHead(404).end('no such document'); return; }
   let meta = null;
-  try { meta = JSON.parse(readFileSync(join(ROOT, '.meta', `${name}.json`), 'utf8')); } catch { /* unpublished or pre-meta doc */ }
+  try { meta = JSON.parse(readFileSync(join(ROOT, '.meta', `${name}.json`), 'utf8')); } catch { /* pre-meta doc */ }
   // The prompt has to say what to DO with the feedback, or the agent reads a
   // remark and moves on - the reader then sees nothing change and reasonably
   // concludes the loop is broken.
@@ -531,9 +548,8 @@ const audit = (entry) => {
     JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
 };
 const promote = async (req, res, makePublic) => {
-  let body = '';
-  for await (const c of req) { body += c; if (body.length > 4000) { res.writeHead(413).end(); return; } }
-  const parsed = JSON.parse(body || '{}');
+  const parsed = await readJson(req, res, 4000);
+  if (!parsed) return;
   const name = cleanName(parsed.doc);
   if (!name || name.startsWith('.')) { res.writeHead(404).end('no such document'); return; }
   if (!PUBROOT) { res.writeHead(503).end('no public tier configured'); return; }

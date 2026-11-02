@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { request } from 'node:http';
+import { request, createServer as createHttpServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -174,6 +174,38 @@ test('dashboard: all control mutations accept the current browser token', { time
   assert.equal((await post(s, '/api/prompt', token, { target: 'w1:p1', message: 'x' }, headers)).status, 404);
 });
 
+test('dashboard: a burst of proxy asks shares one `cel services` read, and a failed read keeps the last good ports', { timeout: 30000 }, async (t) => {
+  const s = await boot(t, 'dash');
+  const token = await session(s);
+  const up = createHttpServer((req, res) => res.end('upstream'));
+  up.listen(0, '127.0.0.1');
+  await once(up, 'listening');
+  t.after(() => up.close());
+  const port = up.address().port;
+  await rm(join(s.dir, 'bin/cel'));
+  await writeFile(join(s.dir, 'bin/cel'), `#!/bin/sh
+case "$1" in
+  services) echo x >> "$HOME/services-calls"; /bin/sleep 0.3
+    [ -e "$HOME/services-fail" ] && exit 1
+    printf '[{"port":${port},"workspace":"test"}]';;
+  *) printf '{}';;
+esac
+`, { mode: 0o700 });
+  const get = () => s.call(`/svc/${port}/x`, { headers: { 'x-cel-csrf': token } });
+  const calls = async () => (await readFile(join(s.dir, 'services-calls'), 'utf8')).trim().split('\n').length;
+  const burst = await Promise.all(Array.from({ length: 8 }, get));
+  assert.deepEqual(burst.map((r) => `${r.status} ${r.text}`), Array(8).fill('200 upstream'));
+  assert.equal(await calls(), 1);
+  // past the 5 s budget, `cel services` fails: the proxy must not forget the port
+  await writeFile(join(s.dir, 'services-fail'), '');
+  await new Promise((r) => setTimeout(r, 5200));
+  assert.equal((await get()).status, 200);
+  assert.equal(await calls(), 2);
+  // and the failed read holds off the next try for the same budget
+  assert.equal((await get()).status, 200);
+  assert.equal(await calls(), 2);
+});
+
 test('pages: stored feedback renders as text and the real chrome mutation handlers work', { timeout: 20000 }, async (t) => {
   const s = await boot(t, 'pages');
   const marker = '<img src=x onerror="globalThis.feedbackExecuted=true">';
@@ -239,6 +271,35 @@ test('pages: response construction errors do not crash later requests', { timeou
   await mkdir(join(s.dir, 'directory.txt'));
   assert.equal((await s.call('/directory.txt')).status, 500);
   assert.equal((await s.call('/t.html?raw=1')).status, 200);
+});
+
+test('pages: a malformed JSON body is the caller\'s 400, not a server 500', { timeout: 20000 }, async (t) => {
+  const s = await boot(t, 'pages');
+  const token = await session(s);
+  const raw = (path, body) => s.call(path, { method: 'POST', body,
+    headers: { 'content-type': 'application/json', 'x-cel-csrf': token } });
+  for (const path of ['/api/feedback', '/api/promote', '/api/revoke']) {
+    for (const body of ['{not json', 'null', '[]', '"t.html"']) assert.equal((await raw(path, body)).status, 400, `${path} ${body}`);
+  }
+  assert.equal((await raw('/api/feedback', JSON.stringify({ doc: 't.html', message: 'x'.repeat(30000) }))).status, 413);
+  assert.equal((await raw('/api/promote', JSON.stringify({ doc: 't.html', pad: 'x'.repeat(5000) }))).status, 413);
+  assert.equal((await post(s, '/api/feedback', token, { doc: 't.html', message: 'still fine' })).status, 200);
+});
+
+test('pages: feedback is accepted only for a published document', { timeout: 20000 }, async (t) => {
+  const s = await boot(t, 'pages');
+  const token = await session(s);
+  await mkdir(join(s.dir, 'folder.html'));
+  await mkdir(join(s.dir, '.meta'));
+  // a crafted sidecar for an unpublished name must not reach a pane
+  await writeFile(join(s.dir, '.meta/ghost.html.json'), JSON.stringify({ pane: 'w9:p9' }));
+  for (const doc of ['ghost.html', '.meta', '.hidden.html', 'folder.html', 'a\\b.html']) {
+    assert.equal((await post(s, '/api/feedback', token, { doc, message: 'hello' })).status, 404, doc);
+  }
+  await assert.rejects(readFile(join(s.dir, 'calls')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(s.dir, '.meta/feedback.log')), { code: 'ENOENT' });
+  assert.equal((await post(s, '/api/feedback', token, { doc: 't.html', message: 'hello' })).status, 200);
+  assert.equal(JSON.parse((await s.call('/api/doc?name=t.html')).text).feedback[0].message, 'hello');
 });
 
 test('public pages: arbitrary tunnel Host can read a live token, never private APIs', { timeout: 20000 }, async (t) => {
