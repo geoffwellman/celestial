@@ -331,3 +331,186 @@ test_box_fixture_stubs_the_roster_so_no_test_reads_the_live_one() {
   assert_eq "$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box space --json | jq -r '.reviewers.count')" 0
   rm -rf "$T"
 }
+
+# ------------------------------------------------------------- the diagnosis
+
+# A fixture /proc as well as a fixture home: `cel box diag` walks every
+# process, and a docker build running on the box the suite runs on must not
+# turn up in a fixture's output.
+_box_diag_fixture() {
+  _box_fixture
+  export CEL_PROC="$T/proc"
+  export CEL_REX_STATE="$T/rex"
+  mkdir -p "$CEL_PROC" "$CEL_REX_STATE"
+}
+
+_box_fake_proc() { # <pid> <ppid> <cwd|-> <space-separated environ|-> <argv...>
+  local pid="$1" ppid="$2" cwd="$3" env="$4" d
+  shift 4
+  d="$CEL_PROC/$pid"
+  mkdir -p "$d"
+  printf 'Name:\tx\nPPid:\t%s\n' "$ppid" > "$d/status"
+  printf '%s\0' "$@" > "$d/cmdline"
+  # shellcheck disable=SC2086 # one environ entry per word, on purpose
+  [ "$env" = - ] || printf '%s\0' $env > "$d/environ"
+  if [ "$cwd" != - ]; then mkdir -p "$cwd"; ln -s "$cwd" "$d/cwd"; fi
+}
+
+test_box_diag_summarises_docker_images_build_cache_and_volumes() {
+  _box_diag_fixture
+  _box_stub_docker
+  local out; out="$(cmd_box diag)"
+  assert_eq "$out" "docker: images 41.2 GB (8.7 GB reclaimable), build cache 8.7 GB (8.7 GB reclaimable), volumes 1.0 GB (0 B reclaimable)
+docker builds: none running"
+  assert_contains "$(cat "$DOCKER_LOG")" "system df --format json"
+  rm -rf "$T"
+}
+
+# No docker is a normal box: nothing is said and the alert carries on.
+test_box_diag_without_docker_says_nothing_and_exits_zero() {
+  _box_diag_fixture
+  local out; out="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box diag 2>&1)"
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+# A user outside the docker group gets docker's "permission denied" on the
+# socket; the diagnosis neither repeats it nor reports a zero store.
+test_box_diag_skips_a_docker_this_user_cannot_query() {
+  _box_diag_fixture
+  cat > "$BOX_STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+echo 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock' >&2
+exit 1
+EOS
+  chmod +x "$BOX_STUB_BIN/docker"
+  PATH="$BOX_STUB_BIN:$PATH"
+  local out; out="$(cmd_box diag 2>&1)"
+  assert_eq "$out" ""
+  rm -rf "$T"
+}
+
+# An alert is waiting on this line; a hung daemon must not hold it.
+test_box_diag_bounds_a_hung_docker_with_its_timeout() {
+  _box_diag_fixture
+  cat > "$BOX_STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+exec sleep 30
+EOS
+  chmod +x "$BOX_STUB_BIN/docker"
+  PATH="$BOX_STUB_BIN:$PATH"
+  local start=$SECONDS out
+  out="$(CEL_BOX_DIAG_TIMEOUT=1 cmd_box diag 2>&1)"
+  assert_eq "$out" ""
+  [ $((SECONDS - start)) -lt 10 ] || { printf 'diag took %ss behind a hung docker\n' "$((SECONDS - start))" >&2; return 1; }
+  rm -rf "$T"
+}
+
+test_box_diag_recognises_build_spellings_and_nothing_else() {
+  _box_is_docker_build docker build -t img .
+  _box_is_docker_build /usr/bin/docker --context ci build .
+  _box_is_docker_build docker image build .
+  _box_is_docker_build docker builder build .
+  _box_is_docker_build docker buildx --builder ci build .
+  _box_is_docker_build docker buildx bake
+  _box_is_docker_build /usr/libexec/docker/cli-plugins/docker-buildx buildx build .
+  assert_fails _box_is_docker_build docker ps
+  assert_fails _box_is_docker_build docker buildx ls
+  assert_fails _box_is_docker_build docker run build
+  assert_fails _box_is_docker_build bash -c 'docker build .'
+}
+
+# The owner comes from the pane the build's process tree inherited (its own
+# environment, else its parents'), then from the agent whose cwd contains it,
+# said as an inference; the plugin child of a `docker build` is the same build.
+test_box_diag_names_running_builds_with_their_owning_agent() {
+  _box_diag_fixture
+  _box_stub_docker
+  herdr() {
+    jq -n --arg a "$T/wt/alpha" --arg b "$T/wt/beta" --arg root "$T" '{result:{agents:[
+      {name:"worker-alpha", pane_id:"wA:p1", cwd:$a},
+      {name:"worker-beta", pane_id:"wA:p2", cwd:$b},
+      {name:"rex-worker", pane_id:"rex/s1/b2", cwd:($root + "/wt/rex")},
+      {name:"core", pane_id:"wA:p0", cwd:$root}]}}'
+  }
+  # worker-alpha's runtime -> its shell -> a build with no readable environ,
+  # standing in beta's directory: the inherited pane wins over the cwd.
+  _box_fake_proc 100 1 "$T/wt/alpha" "HERDR_PANE_ID=wA:p1 PATH=/bin" pi
+  _box_fake_proc 101 100 "$T/wt/alpha" "HERDR_PANE_ID=wA:p1" bash -c 'docker buildx build -t img .'
+  _box_fake_proc 102 101 "$T/wt/beta/sub" - docker buildx build -t img .
+  _box_fake_proc 103 102 "$T/wt/beta/sub" - /usr/libexec/docker/cli-plugins/docker-buildx buildx build -t img .
+  # no pane anywhere up the tree: the closest containing agent cwd, not core's
+  _box_fake_proc 200 1 "$T/wt/beta" - docker build .
+  # a pane nobody in the roster owns, and a cwd that cannot be read
+  _box_fake_proc 400 1 - "HERDR_PANE_ID=wZ:p9" docker --context ci build .
+  # a Rex session's pane
+  _box_fake_proc 500 1 "$T/wt/rex" "REX_SESSION=s1 REX_BLOCK=b2" docker image build .
+  # not a build
+  _box_fake_proc 300 1 "$T/wt/alpha" "HERDR_PANE_ID=wA:p1" docker ps
+  local builds; builds="$(cmd_box diag | sed -n 2p)"
+  assert_contains "$builds" "docker builds: 4 running - "
+  assert_contains "$builds" "pid 102 agent=worker-alpha cwd=$T/wt/beta/sub: docker buildx build -t img ."
+  assert_contains "$builds" "pid 200 agent=worker-beta (by cwd) cwd=$T/wt/beta: docker build ."
+  assert_contains "$builds" "pid 400 agent=? pane=wZ:p9 cwd=?: docker --context ci build ."
+  assert_contains "$builds" "pid 500 agent=rex-worker cwd=$T/wt/rex: docker image build ."
+  case "$builds" in *"pid 103"*|*"pid 101"*|*"docker ps"*) printf 'listed a non-build or a plugin child: %s\n' "$builds" >&2; return 1;; esac
+  rm -rf "$T"
+}
+
+# Forty parallel builds are one fact: five named, argv cut short, the rest counted.
+test_box_diag_bounds_the_builds_line() {
+  _box_diag_fixture
+  local i long; long="$(printf 'A%.0s' {1..300})"
+  for i in 11 12 13 14 15 16 17 18; do
+    _box_fake_proc "$i" 1 - - docker build --tag "$long" .
+  done
+  local out; out="$(CEL_BOX_DOCKER=cel-no-such-docker cmd_box diag)"
+  assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 1
+  assert_contains "$out" "docker builds: 8 running - pid 11 agent=? cwd=?: docker build --tag AAA"
+  assert_contains "$out" "...; pid 12 "
+  assert_contains "$out" "; +3 more"
+  case "$out" in *"pid 16 "*) printf 'named more than five builds\n' >&2; return 1;; esac
+  [ "${#out}" -lt 1000 ] || { printf 'builds line is %s characters\n' "${#out}" >&2; return 1; }
+  rm -rf "$T"
+}
+
+# The line goes into a mailbox: no build secret may ride along in it.
+test_box_diag_redacts_secret_values_from_build_argv() {
+  _box_diag_fixture
+  # Two builds, so each redacted argv stays under the 120-character cut and
+  # truncation can never be what hides a value.
+  _box_fake_proc 21 1 - - docker buildx build --build-arg TOKEN=s3cr3t-a --build-arg=NPM=s3cr3t-b \
+    --secret id=npm,src=/run/s3cr3t-c --secret=s3cr3t-d .
+  _box_fake_proc 22 1 - - docker build -e API=s3cr3t-e --env=s3cr3t-f \
+    --env s3cr3t-g PASSWORD=s3cr3t-h -t img:latest .
+  local out; out="$(CEL_BOX_DOCKER=cel-no-such-docker CEL_BOX_DIAG_TIMEOUT=1 cmd_box diag)"
+  case "$out" in *s3cr3t*) printf 'a secret reached the diagnosis: %s\n' "$out" >&2; return 1;; esac
+  assert_contains "$out" "pid 21 agent=? cwd=?: docker buildx build --build-arg TOKEN=*** --build-arg=NPM=*** --secret id=*** --secret=*** .;"
+  assert_contains "$out" "pid 22 agent=? cwd=?: docker build -e API=*** --env=*** --env *** PASSWORD=*** -t img:latest ."
+  rm -rf "$T"
+}
+
+# A herdr that hangs must not hold the alert: the lookup is bounded, and the
+# build is still named by the pane its tree inherited.
+test_box_diag_bounds_a_hung_herdr_and_falls_back_to_the_pane() {
+  _box_diag_fixture
+  unset -f herdr
+  cat > "$BOX_STUB_BIN/herdr" <<'EOS'
+#!/usr/bin/env bash
+exec sleep 30
+EOS
+  chmod +x "$BOX_STUB_BIN/herdr"
+  PATH="$BOX_STUB_BIN:$PATH"
+  _box_fake_proc 31 1 "$T/wt/alpha" "HERDR_PANE_ID=wA:p1" docker build .
+  local start=$SECONDS out
+  out="$(CEL_BOX_DOCKER=cel-no-such-docker CEL_BOX_DIAG_TIMEOUT=1 cmd_box diag 2>&1)"
+  [ $((SECONDS - start)) -lt 10 ] || { printf 'diag took %ss behind a hung herdr\n' "$((SECONDS - start))" >&2; return 1; }
+  assert_eq "$out" "docker builds: 1 running - pid 31 agent=? pane=wA:p1 cwd=$T/wt/alpha: docker build ."
+  rm -rf "$T"
+}
+
+test_box_diag_takes_no_arguments() {
+  _box_diag_fixture
+  if (cmd_box diag --json) >/dev/null 2>&1; then printf 'diag accepted an argument\n' >&2; return 1; fi
+  rm -rf "$T"
+}
