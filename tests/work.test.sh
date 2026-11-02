@@ -309,6 +309,35 @@ test_with_gh_and_linear_both_failing_the_ledger_and_mail_parts_still_render() {
   rm -rf "$T"
 }
 
+# A LEDGER THAT CANNOT BE READ IS NOT AN EMPTY ONE. Broken JSON, a non-array
+# or a torn empty file fails the document - the board must never say "no
+# delegated work" when it simply could not look.
+test_an_unreadable_work_ledger_is_fail_safe() {
+  _work_setup
+  local bad out rc
+  for bad in '[{"id":"WG-1-x",' '{"rows":[]}' ''; do
+    printf '%s' "$bad" > "$T/.cel/delegations.json"
+    rc=0; out="$(work_items "$T" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "ledger '$bad' read as: [$out]"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "$T/.cel/delegations.json"
+    rc=0; out="$( (cmd_work "$T") 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "cel work rendered ledger '$bad' as: $out"; rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+
+# Subshells keep their parent's $$, so a cache temp named after it is shared
+# by every concurrent read in one process: a writer must never truncate or
+# rename another writer's in-flight temp.
+test_work_cache_temp_files_are_fail_safe() {
+  _work_setup; _two_items
+  printf 'in flight\n' > "$CEL_CACHE/work-alpha.json.$$"
+  ( work_items "$T" --fresh >/dev/null )
+  assert_eq "$(cat "$CEL_CACHE/work-alpha.json.$$" 2>/dev/null)" "in flight"
+  assert_contains "$(cat "$CEL_CACHE/work-alpha.json")" '"prs":[{'
+  rm -rf "$T"
+}
+
 # A STAMP IS A MOMENT, NOT A STRING. The ledger writes UTC and the mailbox
 # writes local time with an offset, so ordering the text put every message ten
 # hours late: the first real read of this box showed mail announcing a merge

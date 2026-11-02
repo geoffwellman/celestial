@@ -269,6 +269,43 @@ test_two_workers_do_not_share_an_output_clock() {
   unset CEL_LIVENESS_NOW
   rm -rf "$T"
 }
+# steward, fleet and status update the one state file at once, each for its
+# own worker: no writer may drop another's row or share its temp file.
+test_concurrent_liveness_writers_are_fail_safe() {
+  _liveness_setup
+  export CEL_LIVENESS_NOW=1000000
+  local i; local -a kids=()
+  for i in $(seq 1 40); do
+    liveness_output_age "alpha/ABC-$i" "text $i" >/dev/null & kids+=("$!")
+  done
+  for i in "${kids[@]}"; do wait "$i"; done
+  assert_eq "$(awk 'END { print NR }' "$CEL_LIVENESS_STATE")" 40
+  for i in $(seq 1 40); do
+    [ -n "$(_liveness_row "alpha/ABC-$i")" ] || { echo "row alpha/ABC-$i lost"; rm -rf "$T"; return 1; }
+  done
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
+# Liveness is advisory: a box with no flock(1) still keeps the clock, and a
+# held lock skips one update - neither aborts the set -e caller (fleet,
+# steward, status) that asked for an age.
+test_liveness_with_no_flock_or_a_held_lock_never_aborts() {
+  _liveness_setup
+  source "$CEL_ROOT/tests/lib/no-flock.sh"
+  export CEL_LIVENESS_NOW=1000000
+  local run='set -euo pipefail; source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/liveness.sh"
+    printf "%s" "$(liveness_output_age alpha/ABC-1 x)"; liveness_remember alpha/ABC-1 working 0.9; echo " done"'
+  local out hfd
+  out="$(PATH="$(no_flock_path "$T")" bash -c "$run" 2>&1)"
+  assert_eq "$out" "0 done"
+  assert_contains "$(_liveness_row alpha/ABC-1)" working
+  exec {hfd}>"$CEL_LIVENESS_STATE.lock"; flock "$hfd"
+  out="$(CEL_LIVENESS_LOCK_WAIT=1 bash -c "$run" 2>&1)"
+  exec {hfd}>&-
+  assert_contains "$out" " done"
+  unset CEL_LIVENESS_NOW
+  rm -rf "$T"
+}
 
 # A stray CEL_LIVENESS_NOW in a real process must not freeze the clock: the
 # override is honoured only inside the test harness, and only as an integer.
