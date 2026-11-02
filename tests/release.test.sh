@@ -254,7 +254,20 @@ case "\$1 \$2" in
     printf '%s\n' "\${CEL_TEST_DISPATCH_OUT:-Created workflow_dispatch event}" ;;
   'run watch')    printf 'run completed with success\n' ;;
   'run view')     printf '2026-01-05T00:00:00Z\n' ;;
-  'release list') printf 'v0.2.0 https://github.com/someone/thing/releases/tag/v0.2.0\n' ;;
+  'release list')
+    # gh's own field list for \`release list --json\`: any other field is
+    # refused the way gh refuses it - the whole call fails, nothing printed.
+    f=""; q="."
+    while [ \$# -gt 0 ]; do case "\$1" in --json) f="\$2"; shift 2 ;; --jq) q="\$2"; shift 2 ;; *) shift ;; esac; done
+    for k in \${f//,/ }; do
+      case "\$k" in
+        createdAt|isDraft|isImmutable|isLatest|isPrerelease|name|publishedAt|tagName) ;;
+        *) printf 'Unknown JSON field: "%s"\n' "\$k" >&2; exit 1 ;;
+      esac
+    done
+    printf '%s' '[{"tagName":"v0.2.0","name":"v0.2.0","publishedAt":"2026-01-02T00:00:00Z","createdAt":"2026-01-02T00:00:00Z","isLatest":true,"isDraft":false,"isPrerelease":false,"isImmutable":false}]' \
+      | jq -c --arg f "\$f" '[.[] | with_entries(select(.key as \$k | (\$f | split(",") | index(\$k)) != null))]' \
+      | jq -r "\$q" ;;
   'release view') printf '%s https://github.com/someone/thing/releases/tag/%s\n' "\$3" "\$3" ;;
   'run list')
     case "\$a" in
@@ -414,6 +427,17 @@ test_release_status_json_carries_the_same_facts() {
   assert_eq "$(printf '%s' "$out" | jq -r '.[0].commits_since')" "7" || { _prel_cleanup; return 1; }
   assert_contains "$(printf '%s' "$out" | jq -r '.[0].in_flight')" "runs/99" || { _prel_cleanup; return 1; }
   assert_contains "$(printf '%s' "$out" | jq -r '.[0].newest')" "v0.2.0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# `gh release list --json` has no url field, and gh refuses the whole call
+# when asked for one - so the newest release vanished from status. The stub
+# refuses unknown fields the same way; the page is built from repo and tag.
+test_regression_release_status_names_the_newest_release_with_fields_gh_accepts() {
+  _prel_fixture
+  local out; out="$(_prel status gadget --json)" || { _prel_cleanup; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.[0].newest')" \
+    "v0.2.0 https://github.com/someone/doodad/releases/tag/v0.2.0" || { _prel_cleanup; return 1; }
   _prel_cleanup
 }
 

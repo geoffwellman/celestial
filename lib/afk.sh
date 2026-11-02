@@ -103,10 +103,10 @@ afk_state_json() {
 afk_active()  { [ "$(afk_state_json | jq -r '.on and (.expired | not)')" = true ]; }
 afk_expired() { [ "$(afk_state_json | jq -r '.expired')" = true ]; }
 
-# THE LOG SAYS WHAT HAPPENED. An act that reports its own ending is recorded
-# once, after its effect was attempted: completed, failed, or partial (some of
-# it is out there and the rest is not). `authorised` is what the door writes
-# for a caller that does not report an ending - allowed, not known done.
+# THE LOG SAYS WHAT HAPPENED. Every act is recorded once, after its effect
+# was attempted: completed, failed, or partial (some of it is out there and the
+# rest is not). `authorised` - allowed, not known done - is what entries from
+# before every act reported its ending say; nothing writes it any more.
 # Appends take the log lock so two acts at once cannot interleave a line.
 afk_record() { # <act> <authorisation> <detail> <outcome>
   local line
@@ -286,18 +286,38 @@ afk_admit() { # <act> <evidence-json>
   "_afk_check_$act" "$e" || return 1
 }
 
-# The door for a caller that does not report how the act ended: admitted, and
-# recorded as `authorised` at once.
-afk_authorise() { # <act> <evidence-json> [detail]
-  local act="$1" e="${2:-{\}}" detail="${3:-}" auth
+# THE DOOR FOR AN ACT ITS CALLER CARRIES OUT (land, dispatch, ordered work):
+# admitted here, and recorded ONCE, after the effect, by afk_end with how it
+# ended. A caller that exits between this door and its afk_end - a die before
+# the merge, a launch that never came up - is still recorded, by the EXIT trap
+# set here: `partial` once afk_step has said some of the act is out there,
+# `failed` otherwise. An act let through and never written down is exactly
+# what this log exists to rule out.
+_AFK_OPEN_ACT="" _AFK_OPEN_DETAIL="" _AFK_OPEN_STEP="" _AFK_PREV_EXIT=""
+afk_begin() { # <act> <evidence-json> [detail]
+  local act="$1" e="${2:-{\}}" detail="${3:-}"
   afk_admit "$act" "$e" || return 1
-  auth="$(afk_authorisation "$act")"
   if [ "$act" = ordered_work ] && [ -z "$detail" ]; then
     detail="$(jq -r '"spec \(.spec) (mtime \(.spec_mtime | todate))"' <<<"$e")"
   fi
   [ -n "$detail" ] || detail="$(jq -rc '. | tostring' <<<"$e" 2>/dev/null || printf '%s' "$e")"
-  afk_record "$act" "$auth" "$detail" authorised
-  printf '%s authorised: %s\n' "$act" "$auth"
+  _AFK_OPEN_ACT="$act" _AFK_OPEN_DETAIL="$detail" _AFK_OPEN_STEP=""
+  _AFK_PREV_EXIT="$(trap -p EXIT)"
+  trap _afk_end_on_exit EXIT
+}
+afk_step() { _AFK_OPEN_STEP="$1"; }  # <what of the open act is now out there>
+afk_end() { # <completed|failed|partial> [what happened]
+  [ -n "$_AFK_OPEN_ACT" ] || return 0
+  local act="$_AFK_OPEN_ACT"; _AFK_OPEN_ACT=""
+  if [ -n "$_AFK_PREV_EXIT" ]; then eval "$_AFK_PREV_EXIT"; else trap - EXIT; fi
+  afk_record "$act" "$(afk_authorisation "$act")" "$_AFK_OPEN_DETAIL${2:+ - $2}" "$1"
+}
+_afk_end_on_exit() {
+  local prev="$_AFK_PREV_EXIT"
+  if [ -n "$_AFK_OPEN_STEP" ]; then afk_end partial "stopped after: $_AFK_OPEN_STEP"
+  else afk_end failed "stopped before it took effect"; fi
+  # an EXIT trap that was there before the act still runs
+  if [ -n "$prev" ]; then eval "set -- $prev"; eval "$3"; fi
 }
 
 # THE NAMED EXCEPTION, IN FULL. The reply states what was fixed and cites the

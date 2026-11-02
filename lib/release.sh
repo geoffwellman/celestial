@@ -243,8 +243,11 @@ _release_status_rows() { # <wsdir> [product] -> one tab-separated row per repo
     ahead="$(ws_gh "$wsdir" api "repos/$slug/compare/$tag...HEAD" --jq '.ahead_by' 2>/dev/null)" || ahead=""
     flight="$(ws_gh "$wsdir" run list --repo "$slug" --workflow "$(ws_repo_release "$wsdir" "$r" workflow)" \
       --status in_progress --limit 1 --json url --jq '.[0].url' 2>/dev/null)" || flight=""
-    newest="$(ws_gh "$wsdir" release list --repo "$slug" --limit 1 --json tagName,url \
-      --jq '.[0] | "\(.tagName) \(.url)"' 2>/dev/null)" || newest=""
+    # `gh release list` has no url field (it refuses the whole call when asked
+    # for one); a release page is addressed by its repo and tag.
+    newest="$(ws_gh "$wsdir" release list --repo "$slug" --limit 1 --json tagName \
+      --jq '.[0].tagName // empty' 2>/dev/null)" || newest=""
+    [ -z "$newest" ] || newest="$newest https://github.com/$slug/releases/tag/$newest"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(ws_name "$wsdir")" "$(ws_product_of_repo "$wsdir" "$r")" "$r" "$slug" \
       "${cur:-unknown}" "${ahead:-?}" "${flight:-}" "${newest:-}"

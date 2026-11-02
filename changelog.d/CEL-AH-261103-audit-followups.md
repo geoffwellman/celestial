@@ -1,0 +1,5 @@
+### Fixed
+- AFK landings (`cel-fanout land`, `cel solo land`) and dispatches (`cel-fanout delegate` of a reviewer/scout finding or of ordered work) are now logged once, after the merge or launch, as `completed`, `failed` or `partial` - not as `authorised` before anything happened. A run that stops between the AFK check and the merge or launch is still logged, as `failed`, or `partial` when part of it (a worktree, a started worker) already exists. Refusals are unchanged.
+- The console's AFK log and `cel work` / `cel history` events now show how each AFK act ended; older entries without an outcome show nothing extra.
+- `cel release status` shows the newest release again: it asked `gh release list` for a `url` field gh does not have, so gh refused the whole call. The release link is now built from the repo and tag.
+- Taking the reviewer registry lock (and the subscription-cache, inbox-watch and `cel-verify` verdict locks) no longer sends the rest of the process's error output to `/dev/null`; only a failure to open the lock file itself is silenced.
