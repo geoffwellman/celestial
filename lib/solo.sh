@@ -319,6 +319,27 @@ cmd_solo_land() { # <ref> [--workspace W]
     --match-head-commit "$head" --body "$body" >/dev/null 2>&1 \
     || die "cel solo land: merge of #$num failed - check the PR page; nothing here retries a merge"
   c_ok "landed $SOLO_REPO#$num on $slug (approved via $approved_via)"
+  _solo_land_retire_reviewer "$wsdir" "$SOLO_REPO" "$num"
+}
+
+# THE MERGE ENDS THE REVIEW. That PR's Rex reviewer is retired through the one
+# targeted path (gc.sh reviewer_retire_target): the same native proof and
+# graceful shutdown `cel gc` uses, never a blind close. It is not part of the
+# land's result - the PR is merged whatever happens here - and a reviewer kept
+# now (mid-turn, mail owed, proof unknown) is retried by every `cel gc` sweep.
+# A Herdr reviewer, or none, is left to that sweep as before.
+_solo_land_retire_reviewer() { # <wsdir> <repo> <pr>
+  local out rc=0 reason pane
+  out="$(. "$CEL_ROOT/lib/gc.sh" && reviewer_retire_target "$1" "$2" "$3" 0)" || rc=$?
+  reason="$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)" || reason=""
+  pane="$(printf '%s' "$out" | jq -r '.pane // empty' 2>/dev/null)" || pane=""
+  case "$rc" in
+    0) c_ok "retired the Rex reviewer for $2#$3${pane:+ (pane $pane)}; native evidence and checkout kept" ;;
+    4) : ;;
+    3) c_warn "kept the reviewer for $2#$3: ${reason:-protected} - \`cel gc\` retires it once it settles" ;;
+    *) c_warn "reviewer retirement for $2#$3 is incomplete: ${reason:-unknown} - \`cel gc\` retries it" ;;
+  esac
+  return 0
 }
 
 cmd_solo() {

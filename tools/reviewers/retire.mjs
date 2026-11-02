@@ -533,7 +533,7 @@ function clearSettledRequest(receipt, nonce) {
 }
 
 export async function retire(options) {
-  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, minutes, declared = [], githubUser = '', repodir = '' } = options;
+  const { repo, pr: number, pane, agent, dry, receipt, wsname, slug, declared = [], githubUser = '', repodir = '' } = options;
   let proofPath;
   const rex = (args, opts) => command(process.env.CEL_REX_BIN || 'rex', ['--autostart=false', ...args], opts);
   const gh = () => {
@@ -556,6 +556,10 @@ export async function retire(options) {
     requireProof(['idle', 'done'].includes(r.agent_status), 'reviewer_not_idle', 'protected');
     requireProof(Number.isInteger(r.pid) && r.pid > 1 && typeof r.pid_start === 'string' && path.isAbsolute(r.cwd) && path.isAbsolute(r.workspace) && path.isAbsolute(r.agent_session?.value || ''), 'incomplete_runtime_receipt');
     requireProof(!repodir || path.resolve(repodir) === path.join(r.workspace, 'repos', repo), 'requested_workspace_repository_mismatch');
+    // A reviewer exists for one pull request. While it is open, a new push or
+    // a re-review request can still arrive: only a merged or closed PR ends it.
+    const remote = gh();
+    requireProof(remote.state !== 'OPEN', 'pull_request_open', 'protected');
     const tree = descendants(r.pid), root = tree[0];
     requireProof(root.start === r.pid_start && ['pi', 'pi-coding-agent'].includes(root.argv[0]) && ['node', 'pi', 'bun'].some(name => path.basename(root.exe).startsWith(name)), 'runtime_generation_mismatch');
     const env = root.env;
@@ -576,12 +580,11 @@ export async function retire(options) {
     requireProof(processInfo.child?.pid === r.pid && processInfo.foreground?.pid === r.pid, 'rex_foreground_repurposed', 'protected');
     const capture = rex(['block', 'call', 'format', '{"format":"text","trim":true,"unwrap":true,"max_bytes":983040}', '-s', r.rex_session, '-b', r.rex_block]);
     emptyComposer(capture, r.cwd);
-    const remote = gh(), round = durableRound(r, remote);
+    const round = durableRound(r, remote);
     const nativePath = r.agent_session.value;
     requireProof(nativePath.startsWith(`${env.PI_CODING_AGENT_DIR}/sessions/`), 'native_path_outside_launch_root');
     const native = ownedFile(nativePath);
     const parsed = inspect ? parseNative(native.bytes, r.cwd, timestamp(round.round.at), inspect.response.live_leaf) : { id: nativeStructure(native.bytes, r.cwd).header.id };
-    requireProof(!inspect || remote.state !== 'OPEN' || Date.now() - parsed.finalAt >= minutes * 60000, 'completed_round_quiet_window', 'protected');
     const taskCutoff = inspect ? parsed.finalAt : Date.now();
     if (root.cwd.endsWith(' (deleted)')) requireProof(fs.readdirSync(`/proc/${r.pid}/cwd`).length === 0, 'deleted_cwd_contains_untracked_evidence');
     const tasks = taskMetadata(r.cwd, parsed, r.pid, taskCutoff);
@@ -678,7 +681,7 @@ export async function retire(options) {
     }
     requireProof(!proofPath, 'native_exit_commitment_unavailable');
     requireProof(fs.existsSync(receipt), 'receipt_and_retirement_proof_unavailable');
-    requireProof(Number.isInteger(minutes) && minutes >= 0 && /^[^/\s]+\/[^/\s]+$/.test(slug) && wsname, 'invalid_workspace_arguments');
+    requireProof(/^[^/\s]+\/[^/\s]+$/.test(slug) && wsname, 'invalid_workspace_arguments');
     const preflight = snapshot();
     const nonce = crypto.randomUUID();
     const inspect = await nativeHandshake(receipt, preflight.identity, 'inspect', nonce);
@@ -749,8 +752,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
   if (process.argv[2] === '--checkout-preserved') {
     process.exitCode = checkoutPreserved(process.argv[3], process.argv[4]) ? 0 : 1;
   } else {
-    const [repo, pr, pane, agent, dry, receipt, wsname, slug, quiet, helpers = '', githubUser = '', repodir = ''] = process.argv.slice(2);
-    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, minutes: Number(quiet), declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir });
+    const [repo, pr, pane, agent, dry, receipt, wsname, slug, helpers = '', githubUser = '', repodir = ''] = process.argv.slice(2);
+    const result = await retire({ repo, pr, pane, agent, dry: dry === '1', receipt, wsname, slug, declared: helpers.split('\n').filter(Boolean).map(line => line.split('\t')), githubUser, repodir });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exitCode = result.status === 'retired' || (dry === '1' && result.status === 'eligible') ? 0 : result.status === 'protected' ? 3 : 2;
   }

@@ -300,12 +300,18 @@ cel sessions retire-reviewer widget#12 --workspace demo --dry-run
 cel sessions retire-reviewer widget#12 --workspace demo
 ```
 
-The targeted command and reviewer GC share the same native proof. Idle alone
-is never eligibility: the current remote head must have a completed canonical
-solo/fleet review round, the actual Pi leaf must be settled, and no tool,
-background job, queued input, inbox retry debt, unread mail or draft may remain.
-An open PR keeps the configured reviewer quiet window. A completed `changes`
+The targeted command, reviewer GC and `cel solo land` share the same native
+proof. Idle alone is never eligibility: the PR must be merged or closed (an
+open PR can still take a push or a re-review request, so its reviewer stays),
+the PR's final head must have a completed canonical solo/fleet review round,
+the actual Pi leaf must be settled, and no tool, background job, queued input,
+inbox retry debt, unread mail or draft may remain. A completed `changes`
 round is not an approval and retirement never changes its verdict.
+
+After a successful merge, `cel solo land` retires that PR's Rex reviewer the
+same way. A reviewer it has to keep (still mid-turn, mail owed, proof
+unavailable) is named and left for the next `cel gc` sweep; retirement never
+fails a land.
 
 New canonical Rex/Pi reviewers expose a private native handshake. It samples
 the real live leaf and in-memory debt, then rechecks them before supported

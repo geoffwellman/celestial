@@ -6,6 +6,7 @@ source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/registry.sh"
 source "$CEL_ROOT/lib/gc.sh"
 source "$CEL_ROOT/lib/reviewer-retirement.sh"
+source "$CEL_ROOT/lib/solo.sh"
 RR_SOURCE_ROOT="$CEL_ROOT"
 RR_NODE="$(node -p process.execPath)"
 
@@ -185,7 +186,7 @@ NODE
   ln -s boundary "$RR_T/bin/rex"; ln -s boundary "$RR_T/bin/gh"; ln -s boundary "$RR_T/bin/cel"
   export PATH="$RR_T/bin:${RR_NODE%/*}:$PATH" CEL_REX_BIN="$RR_T/bin/rex" GH="$RR_T/bin/gh"
   jq -n --arg head "$RR_HEAD" --arg cwd "$RR_CO" \
-    '{head:$head,cwd:$cwd,prState:"OPEN",mail:0,capture:("Review complete; verdict recorded.\n────────────────────\n\n────────────────────\n"+$cwd+"\nusage counters (fixture) fixture-model\n")}' > "$RR_T/boundary.json"
+    '{head:$head,cwd:$cwd,prState:"MERGED",mail:0,capture:("Review complete; verdict recorded.\n────────────────────\n\n────────────────────\n"+$cwd+"\nusage counters (fixture) fixture-model\n")}' > "$RR_T/boundary.json"
   : > "$RR_T/calls.jsonl"
   _rr_native completed
   jq -n --arg head "$RR_HEAD" --arg by "$RR_ALIAS" \
@@ -294,7 +295,7 @@ _rr_cleanup() {
 test_gc_rex_completed_exact_head_rounds_retire_and_preserve_evidence() {
   local verdict state
   for verdict in approved changes; do
-    for state in OPEN MERGED; do
+    for state in MERGED CLOSED; do
       _rr_fixture
       _rr_set ".prState=\"$state\""
       if [ "$verdict" = changes ]; then _rr_set '.stoppedNulls=true'; fi
@@ -322,6 +323,90 @@ test_gc_rex_completed_exact_head_rounds_retire_and_preserve_evidence() {
       _rr_cleanup
     done
   done
+}
+
+# An open PR can still take a push or a re-review request, so even a reviewer
+# with a completed, exact-head round on it keeps running - approved or changes.
+# It is refused before any terminal, native handshake or inbox is touched.
+test_gc_rex_open_pr_keeps_a_completed_reviewer_untouched() {
+  local verdict
+  for verdict in approved changes; do
+    _rr_fixture
+    _rr_set '.prState="OPEN"'
+    local rounds; rounds="$(jq --arg v "$verdict" '."widget#71".verdict=$v' "$RR_WS/.cel/solo-reviews.json")"
+    printf '%s\n' "$rounds" > "$RR_WS/.cel/solo-reviews.json"
+    RR_VERDICT_BEFORE="$(sha256sum "$RR_WS/.cel/solo-reviews.json")"
+    _rr_gc; _rr_kept || return
+    ! grep -q 'retirement incomplete' "$RR_T/gc.out" || return 1
+    assert_eq "$(jq -s '[.[] | select(.cmd=="rex" or .cmd=="cel")] | length' "$RR_T/calls.jsonl")" 0 || return
+    [ ! -e "$RR_PROTOCOL_DIRECTORY/request.json" ] || return 1
+    [ ! -e "$RR_T/producer-events.jsonl" ] || return 1
+    _rr_cleanup
+  done
+}
+
+# `cel sessions retire-reviewer` and `cel solo land` share one targeted path.
+test_targeted_rex_reviewer_retirement_dry_run_then_retires() {
+  _rr_fixture
+  cel_agent_list() { _rr_agents; }
+  local out rc=0 reviewers_closed=0
+  out="$(reviewer_retire_target "$RR_WS" widget 71 1)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_eq "$(printf '%s' "$out" | jq -r .status)" eligible || return
+  _rr_kept || return
+  rc=0; out="$(reviewer_retire_target "$RR_WS" widget 71 0)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_eq "$(printf '%s' "$out" | jq -r '[.status, .pane] | join(" ")')" "retired $RR_PANE" || return
+  _rr_exited || return
+  [ ! -e "$RR_RECEIPT" ] || return 1
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+  _rr_preserved
+}
+
+test_targeted_rex_reviewer_retirement_refuses_open_absent_and_herdr_targets() {
+  _rr_fixture
+  cel_agent_list() { _rr_agents; }
+  local out rc=0
+  _rr_set '.prState="OPEN"'
+  out="$(reviewer_retire_target "$RR_WS" widget 71 0)" || rc=$?
+  assert_eq "$rc" 3 || return
+  assert_eq "$(printf '%s' "$out" | jq -r '[.status, .reason] | join(" ")')" 'protected pull_request_open' || return
+  rc=0; out="$(reviewer_retire_target "$RR_WS" widget 72 0)" || rc=$?
+  assert_eq "$rc" 4 || return
+  reviewers_write "$(reviewers_rows | jq 'map(.pane="window:pane" | .backend="herdr")')"
+  cel_agent_list() { printf '%s' '{"result":{"agents":[{"pane_id":"window:pane","name":"widget-pr-71-review","agent_status":"idle","cwd":"/fixture","backend":"herdr"}]}}'; }
+  rc=0; out="$(reviewer_retire_target "$RR_WS" widget 71 0)" || rc=$?
+  assert_eq "$rc" 4 || return
+  assert_eq "$(printf '%s' "$out" | jq -r .reason)" herdr_reviewer_keeps_gc_path || return
+  cel_agent_list() { return 1; }
+  rc=0; out="$(reviewer_retire_target "$RR_WS" widget 71 0)" || rc=$?
+  assert_eq "$rc" 2 || return
+  kill -0 "$RR_PID" && [ -f "$RR_RECEIPT" ] || return 1
+  assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 0 || return
+  _rr_preserved
+}
+
+# After its merge, `cel solo land` retires the PR's reviewer through the same
+# proof; a reviewer that must be kept is reported, and the land still succeeds.
+test_solo_land_retirement_uses_the_shared_proof_and_never_fails_the_land() {
+  _rr_fixture
+  cel_agent_list() { _rr_agents; }
+  local out rc=0 reviewers_closed=0
+  _rr_set '.mail=1'
+  out="$(_solo_land_retire_reviewer "$RR_WS" widget 71 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_contains "$out" 'kept the reviewer for widget#71: pending_reviewer_mail' || return
+  _rr_kept || return
+  _rr_set '.mail=0'
+  rc=0; out="$(_solo_land_retire_reviewer "$RR_WS" widget 71 2>&1)" || rc=$?
+  assert_eq "$rc" 0 || return
+  assert_contains "$out" "retired the Rex reviewer for widget#71 (pane $RR_PANE)" || return
+  _rr_exited || return
+  [ ! -e "$RR_RECEIPT" ] || return 1
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+  _rr_preserved
 }
 
 test_gc_rex_active_pending_tools_and_later_user_work_keep_registry() {

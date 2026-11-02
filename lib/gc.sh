@@ -862,12 +862,52 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   return 0
 }
 
-# One explicit reviewer target, with the same proof used by automatic GC.
-# Unlike worktree GC this operation never releases a checkout or native log.
+# THE ONE TARGETED RETIREMENT: `cel sessions retire-reviewer` and `cel solo
+# land` (after its merge) share it, with the same proof the GC sweep uses.
+# It never releases a checkout or native log. Prints the result JSON; returns
+# 0 retired (eligible on a dry run), 3 protected, 2 unknown, and 4 when this
+# PR has no Rex reviewer to retire - none at all, or a Herdr one, which keeps
+# its canonical GC path.
+reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1>
+  local wsdir="$1" repo="$2" pr="$3" dry="$4" roster selected pane agent backend result rc=0 status
+  roster="$(cel_agent_list 2>/dev/null)" \
+    && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+    || { printf '%s\n' '{"status":"unknown","reason":"native_inventory_unreadable"}'; return 2; }
+  selected="$(_gc_reviewer_candidates "$(reviewers_rows)" "$roster" \
+    | jq -sc --arg r "$repo" --arg p "$pr" '[.[] | select(.repo == $r and (.pr|tostring) == $p)]')" \
+    || { printf '%s\n' '{"status":"unknown","reason":"candidate_inventory_invalid"}'; return 2; }
+  case "$(printf '%s' "$selected" | jq length)" in
+    0) printf '%s\n' '{"status":"absent","reason":"no_reviewer_for_pull_request"}'; return 4 ;;
+    1) ;;
+    *) printf '%s\n' '{"status":"unknown","reason":"multiple_reviewers_for_pull_request"}'; return 2 ;;
+  esac
+  IFS=$'\t' read -r pane agent backend < <(printf '%s' "$selected" | jq -r '.[0] | [.pane,.agent,(.backend // "herdr")] | @tsv')
+  { [ "$backend" = rex ] || [[ "$pane" = rex/* ]]; } \
+    || { printf '%s\n' '{"status":"absent","reason":"herdr_reviewer_keeps_gc_path"}'; return 4; }
+  [ -n "$agent" ] || { printf '%s\n' '{"status":"unknown","reason":"reviewer_identity_missing"}'; return 2; }
+  result="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$wsdir/repos/$repo")" || rc=$?
+  status="$(printf '%s' "$result" | jq -er '.status | select(type == "string")' 2>/dev/null)" \
+    || { printf '%s\n' '{"status":"unknown","reason":"invalid native retirement response"}'; return 2; }
+  if [ "$rc" = 0 ] && [ "$dry" = 0 ] && [ "$status" = retired ]; then
+    if ! reviewers_update --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
+      'map(select(.repo != $r or (.pr|tostring) != $p or .pane != $pane))'; then
+      printf '%s' "$result" | jq -c '.status="unknown" | .reason="native runtime retired; reviewer registry cleanup remains owed"'
+      return 2
+    fi
+  elif [ "$rc" = 0 ]; then
+    case "$dry:$status" in
+      1:eligible|1:retired) : ;;
+      *) printf '%s\n' '{"status":"unknown","reason":"native retirement phase did not match its result"}'; return 2 ;;
+    esac
+  fi
+  printf '%s\n' "$result" | jq -c --arg pane "$pane" '. + {pane:$pane}'
+  return "$rc"
+}
+
 cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
   local usage='usage: cel sessions retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]'
   [ $# -ge 1 ] || die "$usage"
-  local ref="$1" workspace="" dry=0 wsdir repo pr roster candidates selected pane agent backend repodir result rc=0 status
+  local ref="$1" workspace="" dry=0 wsdir repo pr result rc=0
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -882,27 +922,11 @@ cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
   if [ -n "$workspace" ]; then wsdir="$(registry_require "$workspace")"
   else wsdir="$(ws_current)" || die 'reviewer retirement requires --workspace outside a registered workspace'; fi
   ws_repo_names "$wsdir" | grep -qxF "$repo" || die "reviewer retirement: repo is not in the requested workspace"
-  roster="$(cel_agent_list 2>/dev/null)" || die 'reviewer retirement: native inventory is unreadable'
-  printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null || die 'reviewer retirement: native inventory is invalid'
-  candidates="$(_gc_reviewer_candidates "$(reviewers_rows)" "$roster")"
-  selected="$(printf '%s\n' "$candidates" | jq -sc --arg r "$repo" --arg p "$pr" '[.[] | select(.repo == $r and (.pr|tostring) == $p)]')" || die 'reviewer retirement: candidate inventory is invalid'
-  [ "$(printf '%s' "$selected" | jq length)" = 1 ] || die 'reviewer retirement: no unique recorded reviewer target'
-  IFS=$'\t' read -r pane agent backend < <(printf '%s' "$selected" | jq -r '.[0] | [.pane,.agent,(.backend // "herdr")] | @tsv')
-  { [ "$backend" = rex ] || [[ "$pane" = rex/* ]]; } || die 'targeted native retirement supports Rex reviewers; Herdr reviewers retain their canonical GC path'
-  [ -n "$agent" ] || die 'reviewer retirement: exact native reviewer identity is missing'
-  repodir="$wsdir/repos/$repo"
-  result="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$repodir")" || rc=$?
-  status="$(printf '%s' "$result" | jq -er '.status | select(type == "string")' 2>/dev/null)" || { printf '%s\n' '{"status":"unknown","reason":"invalid native retirement response"}'; return 2; }
-  if [ "$rc" = 0 ] && [ "$dry" = 0 ] && [ "$status" = retired ]; then
-    if ! reviewers_update --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-      'map(select(.repo != $r or (.pr|tostring) != $p or .pane != $pane))'; then
-      printf '%s' "$result" | jq -c '.status="unknown" | .reason="native runtime retired; reviewer registry cleanup remains owed"'
-      return 2
-    fi
-  elif [ "$rc" = 0 ]; then
-    case "$dry:$status" in
-      1:eligible|1:retired) : ;;
-      *) printf '%s\n' '{"status":"unknown","reason":"native retirement phase did not match its result"}'; return 2 ;;
+  result="$(reviewer_retire_target "$wsdir" "$repo" "$pr" "$dry")" || rc=$?
+  if [ "$rc" = 4 ]; then
+    case "$(printf '%s' "$result" | jq -r .reason)" in
+      herdr_reviewer_keeps_gc_path) die 'targeted native retirement supports Rex reviewers; Herdr reviewers retain their canonical GC path' ;;
+      *) die 'reviewer retirement: no unique recorded reviewer target' ;;
     esac
   fi
   printf '%s\n' "$result"
