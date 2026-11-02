@@ -1778,6 +1778,29 @@ test_steward_keeps_the_pool_item_when_omp_answers_garbage() {
   rm -rf "$T"
 }
 
+# OWNER-ONLY, SO ONCE PER CHANGE (AH-261102). A credential omp disabled comes
+# back only through an interactive `omp login anthropic`; no tick changes it.
+# Re-raising it every window rang root's bell 163 times about one unchanged
+# fact. It is said when it starts, again only when the set of disabled
+# credentials changes, and taken down when it is empty.
+test_steward_raises_a_disabled_credential_once_per_change_of_state() {
+  _pool_fixture "$_POOL_DEAD"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" i
+  for i in 1 2 3 4 5; do _STEWARD_WINDOW=0 _steward_orch_pool >/dev/null 2>&1; done
+  assert_eq "$(jq -s '[.[] | select(.from == "steward" and (.message | contains("ana@alpha.test")))] | length' "$f")" "1"
+  # a second credential goes: that is a change, said once
+  POOL_FILTER="$_POOL_DEAD"' | .disabledCredentials += [{provider: "anthropic", email: "ben@alpha.test", accountId: "ant-ben"}]'
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_orch_pool >/dev/null 2>&1; done
+  assert_eq "$(jq -s '[.[] | select(.from == "steward" and (.message | contains("ben@alpha.test")))] | length' "$f")" "1"
+  assert_eq "$(jq -s '[.[] | select(.from == "steward" and .kind != "resolution")] | length' "$f")" "2"
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "omp login anthropic"
+  # the owner logs back in: the item comes down
+  POOL_FILTER='.'
+  _steward_orch_pool >/dev/null 2>&1
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  rm -rf "$T"
+}
+
 # --- CEL-101: stale decisions get one nudge per asker per day ----------------
 test_cel101_steward_asks_each_asker_about_stale_decisions_once_a_day() {
   _orch_fixture; _nudge_herdr_stub
@@ -1942,6 +1965,34 @@ test_steward_says_nothing_about_usage_with_headroom() {
   _pace_fixture 20 172800
   _steward_usage_pace >/dev/null 2>&1
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  rm -rf "$T"
+}
+
+# A RESET IN THE PAST IS NOT A FORECAST (AH-261102). The read is the cached
+# list, and nothing refreshes a cache file between `cel quota` runs, so a 7d
+# window at 97% kept being reported - sixty-one times - "at reset" a time that
+# had already gone by. Once the reset passes, that reading describes a window
+# that is over: it is not at risk, the open item comes down, and the past
+# reset is never quoted.
+test_quota_at_risk_ignores_a_window_whose_reset_has_passed() {
+  _pace_fixture 97 -3600
+  assert_eq "$(subscription_list | quota_at_risk | jq 'length')" "0"
+  rm -rf "$T"
+}
+
+test_steward_clears_the_pace_item_once_the_reset_passes_and_never_cites_it() {
+  _pace_fixture 97 600
+  _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1
+  local f="$CEL_INBOX_DIR/alpha.jsonl" id past i
+  id="$(_inbox_open_fp alpha usage-pace steward root)"
+  [ -n "$id" ] || { echo "no open usage-pace item"; return 1; }
+  # the reset goes by; the cached reading still says 97%
+  _pace_set 97 -3600
+  past="$(jq -r '.[0].windows[0].resets_at' "$T/subs.json")"
+  for i in 1 2 3; do _STEWARD_WINDOW=0 _steward_usage_pace >/dev/null 2>&1; done
+  assert_eq "$(_inbox_open_fp alpha usage-pace steward root)" ""
+  assert_eq "$(jq -s --arg i "$id" '[.[] | select(.kind == "update" and .ref == $i)] | length' "$f")" "0"
+  if grep -qF "$past" "$f"; then echo "cited a reset already past: $past"; return 1; fi
   rm -rf "$T"
 }
 
