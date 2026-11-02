@@ -1,11 +1,6 @@
 #!/usr/bin/env node
-// Pure tests for the steering half of CEL-36: the reply watch and the relay.
-//
-// The UI around these is ink and cannot be driven without a terminal, so
-// everything that decides WHAT is said, WHICH command is run and WHICH reply
-// counts lives here and is asserted without one. A watch that matched the
-// wrong message would put another agent's words in the status line under an
-// orchestrator's name, which is worse than showing nothing.
+// Pure tests for steering: the reply watch and the relay decide what is said,
+// which command runs and which reply counts - never another agent's words.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,9 +33,8 @@ t('the reply is the addressee\u2019s next message to root, after the send', () =
   assert.equal(m.id, '4');
 });
 
-// THREE WAYS TO MATCH THE WRONG THING, all of them tried by hand first: an
-// older message from the right agent, a newer one from the wrong agent, and
-// one addressed to a worker rather than to the operator.
+// A watch ignores an older message from the right agent, a newer one from the
+// wrong agent, and one addressed to a worker rather than the operator.
 t('nothing older, nothing from another agent, nothing addressed elsewhere', () => {
   assert.equal(replyFrom({ ws: 'alpha', who: 'bundle-orch', since: '2026-09-19T11:00:00+00:00', dir: inbox }), null);
   assert.equal(replyFrom({ ws: 'alpha', who: 'nobody-orch', since, dir: inbox }), null);
@@ -69,9 +63,7 @@ t('the wait is 90 s unless the config says otherwise', () => {
   assert.equal(replyWaitSecs(join(T, 'no-such.yaml')), 90);
 });
 
-// THE RELAY. Two commands, both already on the console's allowlist, and
-// nothing else: `talk` is the one place the console passes a conversation
-// through, so the surface it needs is exactly two verbs wide.
+// The relay uses exactly two commands, both already on the console allowlist.
 t('a talk line is mailbox mail (cel drive send), single-quoted like every other', () => {
   assert.equal(talkPrompt('bundle-orch', 'what is left on ABC-49?'),
     "cel drive send bundle-orch 'what is left on ABC-49?'");

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-105: the dashboard v2 data feeds (/api/v2/*) and its one control door
+# The dashboard v2 data feeds (/api/v2/*) and its one control door
 # (/api/v2/act). Every feed is read against a fixture ledger, inbox, sample
 # ring and a stub gh that logs its argv - so "one gh pass serves three cards"
 # is a line count, not a hope.
@@ -84,14 +84,12 @@ EOF
   TOKEN="$(curl -sf "http://127.0.0.1:$DASH_PORT/api/session" | jq -r .csrfToken)"
 }
 # the healed ask must see gh's answer, not the degraded one served while a
-# slow retry runs (CEL-116): give the retry all the time it needs
+# slow retry runs: give the retry all the time it needs
 _v2_boot_failing_gh() { _V2_FAIL_GH=1 CEL_DASH_DEGRADED_WAIT_MS=20000 CEL_DASH_DEGRADED_RETRY_MS=1 _v2_boot; }
 _v2_down() {
   _dash_stop_group "${DASH_PID:-}"
-  # (the server's CLI children are stopped and joined above, so nothing is left
-  # writing under $T; the retry is kept only for a slow filesystem)
-  # a CLI the server spawned can outlive it by a moment and still be writing
-  # under $T/home on a loaded box; retry the removal rather than flake
+  # the server's CLI children are stopped and joined above; the retry only
+  # covers a slow filesystem
   local i; if [ -n "${T:-}" ]; then for i in 1 2 3 4 5; do rm -rf "$T" 2>/dev/null && break; sleep 0.3; done; rm -rf "$T"; fi
   DASH_PID=""; T=""; trap - EXIT
 }
@@ -203,16 +201,6 @@ test_v2_load_reads_the_sample_ring() {
   _v2_down
 }
 
-test_v2_forecast_projects_quota_to_reset() {
-  _v2_boot
-  local f; f="$(_v2_get "$(_v2_url forecast)")"
-  assert_eq "$(printf '%s' "$f" | jq -r '.accounts[0].who')" "alpha@example.invalid"
-  assert_eq "$(printf '%s' "$f" | jq -r '.accounts[0].window')" "5h"
-  # 40% used with half the window gone projects to ~80%
-  assert_eq "$(printf '%s' "$f" | jq '.accounts[0].projected_pct | . >= 75 and . <= 85')" "true"
-  _v2_down
-}
-
 test_v2_ws_all_spans_the_registry() {
   _v2_boot
   local l; l="$(_v2_get "$(_v2_url 'lanes?range=today&ws=all')")"
@@ -276,7 +264,7 @@ test_steward_sample_appends_and_trims_the_ring() {
   rm -rf "$t"
 }
 
-# Review on #131: a target is a mailbox somebody reads - a ledger alias, an
+# A target is a mailbox somebody reads - a ledger alias, an
 # orchestrator the workspace has, or root - and a stuck fix's repo is one the
 # workspace declares. Anything else would mint a phantom mailbox.
 test_v2_act_refuses_phantom_targets_and_repos() {
@@ -291,8 +279,8 @@ test_v2_act_refuses_phantom_targets_and_repos() {
   _v2_down
 }
 
-# Review on #131: parallel cold requests share ONE gh fetch, and a failed gh
-# call is not cached - the next request tries again.
+# Parallel cold requests share ONE gh fetch, and a failed gh call is not
+# cached - the next request tries again.
 test_v2_gh_pass_is_shared_in_flight_and_failures_are_not_cached() {
   _v2_boot
   # slow the stub so the four requests overlap while it runs
@@ -312,7 +300,7 @@ test_v2_gh_pass_is_shared_in_flight_and_failures_are_not_cached() {
   _v2_down
 }
 
-# Review on #131: the dashboard's own action log is a ring, not a growing file.
+# The dashboard's own action log is a ring, not a growing file.
 test_v2_activity_log_is_bounded() {
   _v2_boot
   local i
@@ -324,10 +312,7 @@ test_v2_activity_log_is_bounded() {
   _v2_down
 }
 
-# --- CEL-106, real-data round ------------------------------------------------
-# With "All workspaces" the page showed no orchestrators, no workers and no
-# PRs: it read them from the per-workspace /api/state. The fleet feed covers
-# every workspace in scope.
+# The fleet feed covers every workspace in scope.
 test_v2_fleet_lists_orchestrators_workers_and_prs_across_workspaces() {
   _v2_boot
   printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"alpha-orch\",\"agent\":\"omp\",\"agent_status\":\"working\",\"cwd\":\"$T/alpha\",\"pane_id\":\"w0:p1\"},{\"name\":\"bundle-orch\",\"agent\":\"omp\",\"agent_status\":\"idle\",\"cwd\":\"$T/bundle\",\"pane_id\":\"w0:p2\"},{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"blocked\",\"cwd\":\"$T/wt/widget-ok\",\"pane_id\":\"w1:p1\"},{\"name\":\"stranger\",\"agent\":\"pi\",\"agent_status\":\"idle\",\"cwd\":\"/elsewhere\",\"pane_id\":\"w9:p1\"}],\"workspaces\":[]}}'" > "$T/bin/herdr"
@@ -343,11 +328,8 @@ test_v2_fleet_lists_orchestrators_workers_and_prs_across_workspaces() {
   _v2_down
 }
 
-# Lanes were amber all day: stale ledger rows (a "running" nobody has touched
-# in weeks, finished work) each drew one segment over the whole window, and
-# every non-running state read as "waiting". Only work active in the range
-# shows; finished is not waiting; an open-ended "running" with no live pane
-# is not running now.
+# Lanes show only work active in the range; finished is not waiting; an
+# open-ended "running" with no live pane is not running now.
 test_v2_lanes_show_only_live_work_and_never_call_finished_waiting() {
   _v2_boot
   local l; l="$(_v2_get "$(_v2_url 'lanes?range=3d')")"
@@ -370,8 +352,8 @@ test_v2_load_without_samples_says_collecting_and_has_current() {
 }
 
 # Running services: the box's own (pages, the one dashboard) beside every
-# workspace's declared services. One dashboard for the box (CEL-107): no
-# per-workspace dashboard rows, and the one there is is this server - up.
+# workspace's declared services; no per-workspace dashboard rows, and the one
+# dashboard is this server - up.
 test_v2_services_lists_box_and_workspace_services() {
   _v2_boot
   printf 'name: bundle\ndash:\n  port: 1\nservices:\n  - name: gadget-preview\n    url: http://127.0.0.1:2\n' > "$T/bundle/workspace.yaml"
@@ -387,9 +369,8 @@ test_v2_services_lists_box_and_workspace_services() {
   _v2_down
 }
 
-# The box's servers bind the tailnet address, not loopback; a probe of
-# 127.0.0.1 called every one of them down. The pages server is probed on its
-# own CEL_PAGES_HOST.
+# Each service is probed on its own host (the box's servers bind the tailnet
+# address, not loopback); the pages server on CEL_PAGES_HOST.
 test_v2_services_probe_each_service_on_its_own_host() {
   _v2_boot
   local p2; p2="$(_v2_port)"
@@ -407,8 +388,7 @@ test_v2_services_probe_each_service_on_its_own_host() {
   _v2_down
 }
 
-# Review on #132: the services feed ran `cel services` per workspace on every
-# poll of every tab. Two requests at once share one run.
+# Two simultaneous services requests share one `cel services` run.
 test_v2_services_two_simultaneous_requests_run_cel_services_once() {
   _v2_boot
   : > "$T/cel.log"
@@ -422,7 +402,7 @@ test_v2_services_two_simultaneous_requests_run_cel_services_once() {
   _v2_down
 }
 
-# --- CEL-108: the usage card's feed ------------------------------------------
+# --- the usage card's feed --------------------------------------------------
 # One feed for the one card: subscriptions grouped by provider with every
 # window projected to its reset, who runs on each account (omp's pool for the
 # orchestrators, the gateway's vault for workers), and the pay-as-you-go
@@ -475,8 +455,8 @@ test_v2_usage_projects_each_window_and_flags_the_account_at_risk() {
   _v2_down
 }
 
-# AH-261102: a reading whose reset has passed is a window that is over - the
-# card does not flag it, the same rule as the steward's quota_at_risk.
+# A reading whose reset has passed is a window that is over - the card does
+# not flag it, the same rule as the steward's quota_at_risk.
 test_v2_usage_does_not_flag_a_window_whose_reset_has_passed() {
   _v2_boot; _v2_quota_fixture
   local past; past="$(date -u -d "@$(( $(date +%s) - 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
@@ -512,7 +492,7 @@ test_v2_usage_says_who_used_an_account_only_when_it_can_tell() {
   _v2_down
 }
 
-# CEL-116: a refresh paints from one snapshot of every card's feed, and a
+# A refresh paints from one snapshot of every card's feed, and a
 # feed answered from the warm cache says when it was computed
 test_v2_snapshot_carries_every_card_feed_with_its_age() {
   _v2_boot
@@ -543,7 +523,7 @@ test_v2_feed_cache_serves_warm_and_sees_new_mail() {
   _v2_down
 }
 
-# CEL-116 live check: the Needs-you card comes from /api/state, which must be
+# The Needs-you card comes from /api/state, which must be
 # warm like the feeds, and before its first answer the page says loading -
 # never a count of 0 that reads as "nothing needs you"
 test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
@@ -558,10 +538,8 @@ test_v2_state_is_served_warm_and_needs_you_never_paints_zero_before_data() {
   _v2_down
 }
 
-# review on #141: a /api/state ask waiting on a read that a newer inbox
-# change superseded woke to an emptied entry and answered 500 - the classic
-# page's refresh failed right after every mutation. Asks racing appends all
-# answer 200, and the last answer shows the last line.
+# /api/state asks racing inbox appends all answer 200, and the last answer
+# shows the last line.
 test_v2_state_asks_racing_inbox_changes_never_fail() {
   _v2_boot
   curl -sf -m 20 -o /dev/null "http://127.0.0.1:$DASH_PORT/api/state"
@@ -577,9 +555,8 @@ test_v2_state_asks_racing_inbox_changes_never_fail() {
   _v2_down
 }
 
-# CEL-117: the merged-PR list is fetched by date, not by count. The old
-# `--limit 200` silently dropped the oldest merges of a busy repo (the live
-# box showed 200 where GitHub had 220).
+# The merged-PR list is fetched by date, not by count, so a busy repo's oldest
+# merges are never dropped.
 _v2_gh_merges() { # <count>: a gh that answers <count> merges only to a dated search, 200 otherwise
   local m; m="$(_v2_ago 7200)"
   cat >"$T/bin/gh" <<EOF
@@ -600,7 +577,7 @@ test_v2_merges_counts_a_busy_repo_in_full() {
   _v2_down
 }
 
-# CEL-117: the day boundary is the box's local midnight, in every feed.
+# The day boundary is the box's local midnight, in every feed.
 test_v2_merges_buckets_by_local_midnight() {
   local tz=Pacific/Auckland y d2 a b
   y="$(TZ=$tz date -d 'yesterday' +%F)"; d2="$(TZ=$tz date -d '2 days ago' +%F)"
@@ -616,11 +593,8 @@ test_v2_merges_buckets_by_local_midnight() {
   _v2_down
 }
 
-# CEL-125: a free port picked by bind-and-close is free only until another
-# parallel test takes it. When two dashboards raced for one port, the loser
-# died with EADDRINUSE and its test talked to the WINNER's server - another
-# fixture, another gh stub - and failed as a "flake". A boot must end talking
-# to its own server or not at all.
+# A boot must end talking to its own server or not at all: a port picked by
+# bind-and-close can be taken by a parallel test's server.
 test_v2_boot_never_talks_to_a_server_it_did_not_start() {
   local decoy port
   port="$(_v2_port)"
@@ -642,7 +616,7 @@ http.server.HTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever()' "$port
   _v2_down
 }
 
-# CEL-117: a repo the box cannot read is flagged, not counted as 0 merges.
+# A repo the box cannot read is flagged, not counted as 0 merges.
 # GitHub's search answers an unreadable repo with an empty list and exit 0, so
 # "no merges" has to be checked against the repo itself.
 test_v2_merges_flags_an_unreadable_repo() {
@@ -659,7 +633,7 @@ EOF2
   _v2_down
 }
 
-# review on #142: a rate limit or a network blip is not "no access"
+# A rate limit or a network blip is not "no access".
 test_v2_merges_does_not_call_a_transient_failure_no_access() {
   _v2_boot
   printf '#!/usr/bin/env bash\necho "API rate limit exceeded" >&2\nexit 1\n' > "$T/bin/gh"
@@ -670,8 +644,8 @@ test_v2_merges_does_not_call_a_transient_failure_no_access() {
   _v2_down
 }
 
-# review on #142: one long ask fetches its own window; it does not widen the
-# shared fetch every card uses
+# One long ask fetches its own window; it does not widen the shared fetch
+# every card uses.
 test_v2_a_long_window_ask_does_not_widen_the_shared_fetch() {
   _v2_boot
   sleep 1; : > "$T/gh.log"; kill -USR2 "$DASH_PID"; sleep 0.3
@@ -687,7 +661,7 @@ test_v2_a_long_window_ask_does_not_widen_the_shared_fetch() {
   _v2_down
 }
 
-# ---- CEL-121: the drive routes behind an orchestrator's room ---------------
+# ---- the drive routes behind an orchestrator's room ------------------------
 # A live orchestrator (alpha-orch) whose session file is a fixture: herdr is
 # re-stubbed to name it, so `cel drive` (the real one) resolves it.
 _v2_drive_fixture() {
@@ -752,11 +726,8 @@ test_v2_drive_send_needs_csrf_mails_owner_and_has_a_receipt() {
   _v2_down
 }
 
-# CI 38995999512 (and 38968150598, 38993000322): teardown `rm` of the fixture
-# failed while something still wrote under it. The dashboard server runs CLIs
-# (cel quota, gh) as children; _v2_down killed only the server's own pid, so a
-# child that was mid-run kept creating files under $T/home after the server was
-# gone and raced the `rm -rf`. The producer must be stopped and joined first.
+# Teardown stops and joins the CLIs the server runs as children (cel quota,
+# gh), so none is still writing under $T when the fixture is removed.
 test_v2_teardown_stops_and_joins_a_child_the_server_spawned() {
   _v2_boot
   cat >"$T/bin/cel" <<EOS

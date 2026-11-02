@@ -1,13 +1,10 @@
 // The console's ROUTER: one sentence in, one intent out, and the console
 // fills the slots.
 //
-// The sentence path used to be a chat model writing a command line, and on
-// 2026-09-18 that cost 6.5 s for "what's blocked" and 16 s for a miss (the
-// miss pays for a second ask). Routing is not writing: it is choosing one
-// label out of ten, which is a classification problem, and a decision model
-// answers typed questions about a state instead of generating text. The same
-// six sentences measured through the decisions endpoint on this box came back
-// in 0.3-0.8 s with a probability distribution attached.
+// Routing is not writing: it is choosing one label out of a fixed set, which
+// is a classification problem, and a decision model answers typed questions
+// about a state, with a probability distribution attached, in a fraction of
+// the time a chat model takes to write a command line.
 //
 // The rule that makes this safe is that the MODEL NEVER WRITES A COMMAND. It
 // returns `product_status` and a confidence; every character that reaches the
@@ -21,7 +18,7 @@
 // a transcript, and sentences the router cannot place.
 import { readConfig, readProvider, CEL_ROOT } from './translate.mjs';
 
-// The ten intents and the one-line rubric each carries into the question. A
+// The intents and the one-line rubric each carries into the question. A
 // rubric is what the classifier reads instead of examples, so it says what the
 // operator WANTS, not what the command is.
 export const INTENTS = [
@@ -35,19 +32,17 @@ export const INTENTS = [
   ['clean_inbox', 'clear out the mailbox - sweep what has piled up in a workspace'],
   ['try', 'run or preview one worker\u2019s work so it can be looked at'],
   ['quota', 'how much of the Claude or Codex subscription is left, and when a window resets'],
-  // CEL-25: the seven verbs. Each is an ACT on the box rather than a read of
-  // it, and the rubric says what the operator wants rather than what the
-  // command is - a classifier reads rubrics, not examples.
+  // The verbs. Each is an ACT on the box rather than a read of it.
   ['start_ticket', 'get work started on a named ticket - pick it up, begin it, put someone on it'],
   ['answer', 'reply to a decision or question waiting on the operator, and close it'],
   ['land', 'land, merge or ship a finished pull request or ticket'],
   ['nudge', 'type into a worker\u2019s or orchestrator\u2019s pane directly, right now (herdr agent prompt) - poke it, remind it, tell it to push'],
-  // CEL-36: the one place the console relays a conversation. `message` is
+  // The one place the console relays a conversation. `message` is
   // mail with a tap on the shoulder; `talk` is the operator's command line
   // wired to a pane until they press Esc.
   ['talk', 'open a back-and-forth with an orchestrator - talk to it, speak to it, have a word'],
   ['restart_orchestrator', 'start a product\u2019s orchestrator again after it has stopped'],
-  // CEL-44: the workspace as a thing with a shape, which can be opened,
+  // The workspace as a thing with a shape, which can be opened,
   // closed and put back. `up` is a reconcile and safe to repeat; the other
   // two stop agents, which is why they are always proposed below.
   ['workspace_up', 'open a workspace, or put it back to the layout and agents it declares'],
@@ -56,7 +51,6 @@ export const INTENTS = [
   ['move_ticket', 'move a ticket to another state on the board'],
   ['review', 'get a reviewer onto a pull request'],
   ['gateway', 'which accounts or subscriptions are signed in and usable behind the box\u2019s gateway'],
-  // CEL-80: the gateway's web panel, which the owner could not find.
   ['gateway_panel', 'open the gateway\u2019s web panel or management interface - the cliproxy web page'],
   ['open_service', 'open or look at one named service or preview - give me its URL'],
   ['service_ctl', 'start, stop or restart one named service'],
@@ -70,11 +64,11 @@ export const INTENT_NAMES = INTENTS.map(([n]) => n);
 
 // The state, reduced. The chat model gets the whole fleet JSON because it has
 // to write names; the classifier only has to recognise them, and a 12 KB
-// state on a question with ten answers is money spent on tokens nobody reads.
+// state on a classification question is money spent on tokens nobody reads.
 export const facts = (doc, items = [], services = [], roster = []) => {
   const workspaces = [];
   const products = [];
-  // CEL-36: the orchestrators as addressees in their own right - the alias to
+  // The orchestrators as addressees in their own right - the alias to
   // write to, the workspace its mailbox is in, the repos it owns (so "tell the
   // platform to ..." reaches the product that holds `platform`) and whether
   // its pane is live, which is the difference between mail read in an hour and
@@ -94,7 +88,7 @@ export const facts = (doc, items = [], services = [], roster = []) => {
         live: LIVE_PANE.test(String(u.orch || '')),
       });
       for (const w of u.workers_list || []) {
-        // The alias, the repo and the PR number ride along for CEL-25's
+        // The alias, the repo and the PR number ride along for the
         // verbs: `nudge` addresses a herdr pane and `land`/`review` need the
         // repo a PR is in, and both are in the fleet document the console
         // already holds. Looking them up a second time from a command would
@@ -170,9 +164,9 @@ const state = (sentence, f) => ({
 
 // --- slot filling ---------------------------------------------------------
 
-// Case-insensitive substring on a word boundary. Plain `includes` matched
-// `beta` inside `alphabetal` on the first draft of this; a name that appears
-// inside another word is not the operator naming it.
+// Case-insensitive substring on a word boundary. Plain `includes` would match
+// `beta` inside `alphabetal`; a name that appears inside another word is not
+// the operator naming it.
 const names = (sentence, name) => {
   if (!name) return false;
   const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -223,7 +217,7 @@ const prWorkerIn = (sentence, f) => {
 // The order is the safety property. Each rung is narrower than the one under
 // it, so a sentence that names a worker can never resolve to the orchestrator
 // above it - and a workspace with two products resolves to NOTHING, returning
-// the question instead. Guessing there is mail, and now a pane prompt, in
+// the question instead. Guessing there is mail, or a pane prompt, in
 // somebody else's session.
 export const addresseeIn = (sentence, f) => {
   const s = String(sentence || '');
@@ -277,7 +271,7 @@ export const addresseeIn = (sentence, f) => {
 //
 // Only double quotes (and the smart pair) delimit: an apostrophe is a
 // character people write - "tell bundle-orch don't bother" - and treating it
-// as a delimiter truncated the message at "don".
+// as a delimiter would truncate the message at "don".
 const messageText = (sentence, hit) => {
   const quoted = /"([^"]{2,})"|“([^”]{2,})”/.exec(sentence);
   if (quoted) return (quoted[1] || quoted[2]).trim();
@@ -305,13 +299,12 @@ const serviceIn = (sentence, f) => {
 // SINGLE QUOTES, ALWAYS, for anything a person typed.
 //
 // The message text is the only place an operator's own words reach the
-// command line, and that line is handed to `bash -c`. The first version of
-// this wrapped it in DOUBLE quotes and escaped the double quote, which is no
-// protection at all: inside double quotes bash still expands `$(...)`,
-// backticks and `$VAR`, so `tell bundle-orch "hi $(rm -rf ~)"` proposed a
-// line that deleted a home directory when the operator pressed Enter. Nothing
-// downstream catches it - the guard's console branch allows every `cel ...`
-// line without reading it for metacharacters, and it should not have to.
+// command line, and that line is handed to `bash -c`. Double quotes are no
+// protection: inside them bash still expands `$(...)`, backticks and `$VAR`,
+// so `tell bundle-orch "hi $(rm -rf ~)"` would propose a line that deletes a
+// home directory when the operator pressed Enter. Nothing downstream catches
+// it - the guard's console branch allows every `cel ...` line without reading
+// it for metacharacters, and it should not have to.
 //
 // Inside SINGLE quotes bash expands nothing at all; the only character that
 // matters is the single quote itself, which cannot be escaped and is instead
@@ -372,17 +365,17 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
       const text = messageText(s, hit);
       if (!text) return null;
       const cmds = [`cel inbox send ${hit.who} ${shellQuote(text)} --workspace ${hit.workspace}`];
-      // MAIL ALONE, EVEN TO A LIVE PANE (CEL-65). This used to add a
-      // `herdr agent prompt` tap on the shoulder, which typed into the
-      // orchestrator's composer and landed in the middle of the human's
-      // draft. Claude's UserPromptSubmit/Stop hooks do not wake an idle pane;
-      // Pi/OMP inbox extensions can. A deliberate interrupt is `nudge`/`talk`.
+      // MAIL ALONE, EVEN TO A LIVE PANE. A `herdr agent prompt` tap on the
+      // shoulder would type into the orchestrator's composer, in the middle
+      // of the human's draft. Claude's UserPromptSubmit/Stop hooks do not wake
+      // an idle pane; Pi/OMP inbox extensions can. A deliberate interrupt is
+      // `nudge`/`talk`.
       return cmds;
     }
 
     // `talk to bundle-orch`. Not a command the guard runs: it is the console's
     // own relay mode, and this line is what the command line carries into it.
-    // Every line typed once it is open becomes `cel drive send` (CEL-123).
+    // Every line typed once it is open becomes `cel drive send`.
     case 'talk': {
       const hit = addresseeIn(s, f);
       if (!hit || hit.ask || !hit.orch) return null;
@@ -436,7 +429,7 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
       return [`cel-fanout try ${w.id} --workspace ${w.workspace}`];
     }
 
-    // --- CEL-25: the verbs ------------------------------------------------
+    // --- the verbs --------------------------------------------------------
 
     case 'start_ticket': {
       const m = TICKET.exec(s.toUpperCase());
@@ -483,9 +476,8 @@ export const plan = (intent, sentence, f, { selected = null, hints = null } = {}
     case 'nudge': {
       const quoted = /"([^"]{2,})"|\u201c([^\u201d]{2,})\u201d/.exec(s);
       if (!quoted) return null;
-      // AN ORCHESTRATOR IS A PANE TOO (CEL-36). This was `workerIn` only, so
-      // the one agent an operator most often wants right now - the one handing
-      // out the work - had no immediate path at all.
+      // AN ORCHESTRATOR IS A PANE TOO: the one handing out the work is the
+      // agent an operator most often wants to reach right now.
       const w = workerIn(s, f);
       let who = w ? (w.alias || w.id) : '';
       if (!who) {
@@ -622,9 +614,8 @@ export const decisionsUrl = (provider, api) => {
   return api.replace(/\/v1\/chat\/completions\/?$/, '/alpha/decisions');
 };
 
-// The router's own config block, or null when there is none - which is
-// today's chat-only path, unchanged. `enabled: false` is the same answer with
-// the config left in place.
+// The router's own config block, or null when there is none - the chat-only
+// path. `enabled: false` is the same answer with the config left in place.
 export const routerConfig = (configPath, root = CEL_ROOT) => {
   const cfg = readConfig(configPath);
   const r = cfg.console.router;
@@ -638,12 +629,10 @@ export const routerConfig = (configPath, root = CEL_ROOT) => {
   const url = decisionsUrl(provider, api);
   const floor = Number(r.min_confidence);
   const num = (v, dflt) => (Number.isFinite(Number(v)) ? Number(v) : dflt);
-  // THE BAND, not a single floor. `min_confidence` was one threshold with
-  // nothing below it: under it the console shrugged and the operator typed
-  // the command themselves. Confidence is a distribution and it should route
-  // - sure runs, unsure proposes, lost asks - so the old key survives as the
-  // run threshold for boxes that set it, and the two new ones are defaulted
-  // here rather than required in anybody's config.
+  // THE BAND, not a single floor: sure runs, unsure proposes, lost asks. The
+  // legacy `min_confidence` key still sets the run threshold for boxes that
+  // have it, and the two new ones are defaulted here rather than required in
+  // anybody's config.
   const legacy = Number.isFinite(floor) ? floor : null;
   const run = num(r.run_confidence, legacy === null ? RUN_CONFIDENCE : legacy);
   const propose = num(r.propose_confidence, PROPOSE_CONFIDENCE);
@@ -691,11 +680,10 @@ export const ROUTER_TIMEOUT = 10000;
 
 // MANY QUESTIONS COST NOTHING. The decisions endpoint evaluates every
 // question in one request IN PARALLEL, so a speculative question you may not
-// use is free - and the router used to spend its one call on a single label
-// and then fill every slot with a regex. It still fills ids with regexes,
-// because an id the model invented is somebody else's worker; what the model
-// adds is the two slots a sentence can leave implicit, and two yes/no
-// questions about what should happen next.
+// use is free. Ids are still filled with regexes, because an id the model
+// invented is somebody else's worker; what the model adds is the two slots a
+// sentence can leave implicit, and two yes/no questions about what should
+// happen next.
 export const questions = (f) => {
   const listed = (names, what) => Object.fromEntries([
     ...names.map((n) => [n, `the ${what} called ${n}`]),
@@ -706,8 +694,7 @@ export const questions = (f) => {
       type: 'choice',
       instructions: 'What does the operator want the console to do?',
       // `criteria`, not `options`: the endpoint's own name for the set, one
-      // rubric per choice. Verified against the live API on 2026-09-18 -
-      // sending `options:` is a 400 naming this field.
+      // rubric per choice. Sending `options:` is a 400 naming this field.
       criteria: Object.fromEntries(INTENTS),
     },
     workspace: {
@@ -743,12 +730,11 @@ const numberOf = (a) => {
   return Number.isFinite(n) ? n : null;
 };
 
-// --- CEL-41: triage -------------------------------------------------------
+// --- triage ---------------------------------------------------------------
 //
-// `choice` returns a probability for EVERY option, which is how the
-// semantic-find cookbook ranks 218 lines in one request. A worker table is
-// the same shape of problem: one option per row, plus `none` so "no row
-// answers this" has somewhere to go.
+// `choice` returns a probability for EVERY option, so one request can rank a
+// whole worker table: one option per row, plus `none` so "no row answers
+// this" has somewhere to go.
 export const rowId = (row) => String((row && (row.id || row.ticket)) || '');
 
 export const relevantQuestion = (sentence, rows) => ({
@@ -799,7 +785,7 @@ export const pickRelevant = (probabilities, { floor = RELEVANT_FLOOR, max = RELE
 // One request for a table: which rows matter, and how urgent each one is.
 // Every question in it is evaluated in parallel, so the attention scores cost
 // nothing beside the selection they refine. Rows are capped because a ledger
-// with three hundred rows in it is state nobody asked about (#5).
+// with three hundred rows in it is state nobody asked about.
 export const TRIAGE_ROWS_MAX = 40;
 export const triage = async ({ sentence, rows = [], configPath, root = CEL_ROOT, attention = true }) => {
   const cfg = routerConfig(configPath, root);
@@ -862,14 +848,6 @@ const askDecision = async (cfg, sentence, f) => {
   };
 };
 
-// The whole router: ask, then fill the slots here. Throws NoRouter when there
-// is nothing configured and a plain Error on any failure - both mean the same
-// thing to the caller, which is "ask the chat model", and the caller is the
-// only place that knows how to say that to a person.
-// WHICH BAND A SENTENCE LANDS IN. One threshold used to gate: above it the
-// console proposed, below it nothing happened at all. A probability carries
-// more than a yes, so it routes - and two of the speculative questions can
-// pull a sentence DOWN a band whatever the intent's own confidence says.
 // STOPPING THINGS IS ALWAYS A PROPOSAL, whatever the model's own answers.
 // `destructive` is a question put to a model, and a model that says no on the
 // one sentence that closes a workspace full of live agents costs an operator
@@ -877,6 +855,9 @@ const askDecision = async (cfg, sentence, f) => {
 // depends on the guess.
 export const ALWAYS_PROPOSE = ['workspace_down', 'workspace_reset'];
 
+// WHICH BAND A SENTENCE LANDS IN. A probability carries more than a yes, so
+// it routes - and two of the speculative questions can pull a sentence DOWN a
+// band whatever the intent's own confidence says.
 export const band = ({ intent = '', confidence, destructive = null, answerable = null, cmds, cfg }) => {
   if (!cmds) return 'ask';
   if (ALWAYS_PROPOSE.includes(intent)) return 'propose';
@@ -896,6 +877,10 @@ export const askReason = (opts) => (opts.length >= 2
   ? `did you mean (1) ${opts[0].intent} or (2) ${opts[1].intent}?`
   : `did you mean ${opts.length ? `(1) ${opts[0].intent}` : 'something else'}?`);
 
+// The whole router: ask, then fill the slots here. Throws NoRouter when there
+// is nothing configured and a plain Error on any failure - both mean the same
+// thing to the caller, which is "ask the chat model", and the caller is the
+// only place that knows how to say that to a person.
 export const route = async ({ sentence, doc, items = [], services = [], roster = [], configPath, root = CEL_ROOT, selected = null }) => {
   const cfg = routerConfig(configPath, root);
   if (!cfg) throw new NoRouter('no router configured');
@@ -924,8 +909,7 @@ export const route = async ({ sentence, doc, items = [], services = [], roster =
     };
   }
   // THE QUESTION BACK, built from the top two intents by the model's own
-  // probabilities. The console used to offer three candidates off a miss
-  // list; the probabilities came back in the same answer all along.
+  // probabilities.
   const opts = options(probabilities, sentence, f, { selected, hints, limit: ASK_OPTIONS })
     .filter((o) => o.intent !== 'other');
   return { ...common, cmds: null, options: opts, reason: askReason(opts) };

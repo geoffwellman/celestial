@@ -1,11 +1,11 @@
-// The decisions panel (CEL-99/#125, CEL-101/#127), shared by the classic
-// dashboard and v2 (CEL-106). It used to live inline in the classic page (retired in CEL-123); v2
-// needed the same two-click confirm, refresh-safe typing and "closed
-// elsewhere", and a second copy is how one of them would quietly regress. So
-// both pages load this file and supply the same small host contract:
-//   $(id), esc(s), post(path, body), toast(text, ok), refreshTabs(),
-//   LAST (with needsYou / needsYouGroups), #needsyou and #alerts-h elements.
-// ---- needs you (CEL-99) -------------------------------------------------
+// The decisions panel: two-click confirm, refresh-safe typing and "closed
+// elsewhere". The v2 page loads this file before v2.js, which supplies the
+// host globals it uses:
+//   $(id), esc(s), post(path, body) -> {ok, text}, toast(text, ok),
+//   refreshTabs() (v2.js's declaration replaces the fallback below),
+//   LAST ({needsYou, needsYouGroups}), the #needsyou host element and the
+//   #alerts-h count in its card.
+// ---- needs you ------------------------------------------------------------
 // The choice, not the chrome: each option is a button with its tradeoff
 // printed under it (a hover title is invisible on a phone), the recommended
 // one is primary, and free text / drop hide behind one "other…" per card.
@@ -15,10 +15,9 @@ var NYF=localStorage.getItem('cel-ny-filter')||'';
 var NYC=JSON.parse(localStorage.getItem('cel-ny-collapsed')||'{}');
 var NYERR={};          // id -> reason the last send failed; stays on screen
 var NYBULK=null;       // workspace whose "accept all" list is open
-// WHAT THE OWNER IS DOING SURVIVES A REFRESH (CEL-101). The panel is rebuilt
-// from innerHTML whenever its data changes, and the owner lost a half-typed
-// answer within seconds: a new decision arriving anywhere repainted the list,
-// closing "other…", dropping the text, the focus and an armed button. So the
+// WHAT THE OWNER IS DOING SURVIVES A REFRESH. The panel is rebuilt from
+// innerHTML whenever its data changes, and a new decision arriving anywhere
+// would close "other…" and drop typed text, focus and an armed button. So the
 // rebuild snapshots each card's state by decision id and puts it back, armed
 // buttons live here rather than on an element the rebuild throws away, and a
 // card the owner was working on that closed elsewhere stays on screen marked
@@ -29,8 +28,7 @@ var NYDONE={};         // id -> 1: closed from this page, never "elsewhere"
 var NYSEEN={};         // id -> the decision as last drawn
 function nyAge(s){s=s||0;return s<3600?Math.round(s/60)+'m':s<86400?Math.round(s/3600)+'h':Math.round(s/86400)+'d'}
 function nyRec(d){var n=d.recommended;return n&&d.options&&d.options[n-1]?{n:n,label:d.options[n-1].label}:null}
-// THE BOARD (owner's choice after the decisions-kanban mockup, 2026-10-28):
-// decisions sit in columns, grouped the way the owner picks - urgency by
+// THE BOARD: decisions sit in columns, grouped the way the owner picks - urgency by
 // default - and the pick is remembered per browser. A room keeps its plain
 // list: it holds one orchestrator's few questions. Each grouping is a column
 // list (fixed ones keep their empty columns, so "nothing urgent" is visible)
@@ -57,8 +55,8 @@ function nyColumns(items){
 }
 function nyCard(d,board){
   var gone=!!NYGONE[d.id];
-  // CEL-113: the context is the card's body, not a link away - the owner
-  // decides from it. Escaped first, then URLs inside it made clickable.
+  // the context is the card's body, not a link away - the owner decides
+  // from it. Escaped first, then URLs inside it made clickable.
   var ctx=d.context?esc(d.context).replace(/https?:\/\/[^\s<>"']+/g,function(u){
     var t=u.replace(/[.,;:)]+$/,''),tail=u.slice(t.length);
     return '<a href="'+t+'" target="_blank" rel="noopener">'+t+'</a>'+tail}):'';
@@ -71,7 +69,7 @@ function nyCard(d,board){
       (d.blocks?' \u00b7 <span class="blocks">blocks: '+esc(d.blocks)+'</span>':'')+
       (d.prs||[]).map(function(p){return ' \u00b7 '+(p.url?'<a class="pr" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.ref)+'</a>':'<span class="pr">'+esc(p.ref)+'</span>')}).join('')+'</div>'+
     // on the board the long context folds behind "details" so a column stays
-    // scannable; the options and "other…" stay visible (CEL-118)
+    // scannable; the options and "other…" stay visible
     (ctx?(board?'<details class="nyctxd"><summary>details</summary><div class="nyctx">'+ctx+'</div></details>':'<div class="nyctx">'+ctx+'</div>'):'')+
     '<div class="nyopts">'+(d.options||[]).map(function(o,i){
       var r=d.recommended===i+1;
@@ -82,7 +80,7 @@ function nyCard(d,board){
     '<details class="other"><summary>other\u2026</summary>'+
       '<div class="otherrow"><input class="free" placeholder="free-text answer"><button class="send">answer</button></div>'+
       '<div class="otherrow"><input class="why" placeholder="reason to drop"><button class="drop">drop</button></div>'+
-      // CEL-101: most stale questions are stale for one of two reasons; saying
+      // most stale questions are stale for one of two reasons; saying
       // so should not need typing. Same arm-then-send, same guarded endpoint.
       '<div class="otherrow"><button class="close" data-why="already done">already done</button>'+
         '<button class="close" data-why="no longer needed">no longer needed</button></div></details></div>'+
@@ -223,8 +221,8 @@ function renderNeedsYou(force){
     b.onclick=function(){NYF=b.dataset.ws;localStorage.setItem('cel-ny-filter',NYF);renderNeedsYou(true)}});
   Array.prototype.forEach.call(host.querySelectorAll('details.nygroup'),function(dt){
     // a group drawn open fires a toggle of its own; only the owner's toggles
-    // count, or every repaint cleared the signature and the next refresh
-    // repainted again - the loop that ate typed text every few seconds
+    // count, or every repaint would clear the signature and the next refresh
+    // repaint again, losing typed text every few seconds
     dt.ontoggle=function(){if(dt.open===!NYC[dt.dataset.ws])return;
       if(dt.open)delete NYC[dt.dataset.ws];else NYC[dt.dataset.ws]=1;
       localStorage.setItem('cel-ny-collapsed',JSON.stringify(NYC));host.dataset.sig=''}});
@@ -265,6 +263,6 @@ function renderNeedsYou(force){
       arm(this,'drop',function(){nySend(card,{id:id,action:'drop',value:v})})};
   });
   nyRestore(host,snap0);
-  // v2 folds each card to its title until opened; the fold is put back here
+  // optional host hook after each repaint (v2.js does not define one)
   if(typeof nyAfterRender==='function')nyAfterRender(host);
 }

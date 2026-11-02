@@ -1,10 +1,8 @@
 // The key legend and the help text, in one place because they are one thing.
 //
-// The v1 console printed its bindings into the same line it printed responses
-// into, so the moment anything happened the operator lost the bindings and had
-// no way to get them back. Now the legend is permanent, the status is
-// transient, and F1 shows the whole table - all three read from here, so a new
-// binding cannot be documented in one of them and not the others.
+// The legend is permanent, the status is transient, and F1 shows the whole
+// table - all three read from here, so a new binding cannot be documented in
+// one of them and not the others.
 export const BINDINGS = {
   'command line': [
     ['←/→ Home/End', 'move the cursor (Ctrl+A / Ctrl+E jump)'],
@@ -33,9 +31,8 @@ export const BINDINGS = {
     ['Ctrl+D', 'open the detail view'],
     ['click / double-click', 'select / open the detail view'],
   ],
-  // EVERY LIST IS A PLACE YOU CAN ENTER. The inbox tail was the one panel with
-  // no selection at all - "I can't click on stuff in the inbox" - so a line
-  // that told you something was happening was a line you could not follow.
+  // EVERY LIST IS A PLACE YOU CAN ENTER: a line that tells you something is
+  // happening must be a line you can follow.
   inbox: [
     ['↑/↓', 'select up / down (Ctrl+T cycles fleet → waiting → inbox)'],
     ['Enter / double-click', 'open the message detail'],
@@ -84,7 +81,7 @@ export const BINDINGS = {
     ['w why', 're-run cel-fanout why'],
     ['Esc', 'back to the unit view'],
   ],
-  // CEL-36: THE ONE PLACE THE CONSOLE RELAYS A CONVERSATION. Everything else
+  // THE ONE PLACE THE CONSOLE RELAYS A CONVERSATION. Everything else
   // it does is a command; this is a wire to a pane, and the way out of it has
   // to be on the screen or an operator force-quits the console to get out.
   talk: [

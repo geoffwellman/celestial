@@ -1,6 +1,6 @@
 // Everything the console KNOWS, gathered by shelling out to the same CLIs an
 // operator would type. No state of its own, no daemon, no cache that can be
-// wrong: the dashboard learned this the hard way and the console follows it.
+// wrong.
 //
 // Kept apart from the ink UI on purpose - these functions are what
 // `--render-once` prints and what the tests drive, so the panels can be proved
@@ -12,18 +12,11 @@ import { homedir } from 'node:os';
 
 import { legend } from './legend.mjs';
 import {
-  unitLabel, unitView, workerView, fleetTable, openLine, tailLine, workersOf,
+  unitView, workerView, fleetTable, openLine, tailLine, workersOf,
   memFree, orphansEdge, sortWorkers, subsEdge, quotaView, timelineView, servicesView,
   afkEdge, afkLogView,
 } from './views.mjs';
 import { boardFor, prsFor, digestFor, rankedMail, timelineFor } from './board.mjs';
-
-export { memHuman, memFree, memLevel, sortWorkers, subsEdge, subsLevel, quotaView } from './views.mjs';
-
-export { unitLabel, openLine, tailLine } from './views.mjs';
-export { afkEdge, afkLogView } from './views.mjs';
-export { servicesView, serviceLine, serviceCounts, svcUptime } from './views.mjs';
-export { renderOutput } from './views.mjs';
 
 export const CEL_ROOT = process.env.CEL_ROOT || join(homedir(), 'celestial');
 export const CEL_BIN = process.env.CEL_BIN || 'cel';
@@ -32,8 +25,8 @@ export const CEL_BIN = process.env.CEL_BIN || 'cel';
 // at a stub rather than at the live box.
 export const FANOUT_BIN = process.env.CEL_FANOUT_BIN || 'cel-fanout';
 // herdr is the pane manager; the console shells out to it for the roster and
-// - since CEL-36 - for the relay. An env override exists for the same reason
-// as the two above: the tests must never reach the live box's panes.
+// the relay. An env override exists for the same reason as the two above: the
+// tests must never reach the live box's panes.
 export const HERDR_BIN = process.env.CEL_HERDR_BIN || 'herdr';
 const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
 
@@ -49,7 +42,7 @@ export const run = (cmd, args, timeout = 20000) =>
 // THE ROSTER: the names herdr knows, which is not the same set as the fleet
 // document's. A product renamed last month leaves its pane running under the
 // old alias, and an operator reading that name off the board should be able
-// to address it (CEL-36). Empty on any failure - a console with no roster
+// to address it. Empty on any failure - a console with no roster
 // still resolves every name the fleet carries.
 export const roster = async () => {
   const r = await run(HERDR_BIN, ['agent', 'list'], 10000);
@@ -60,12 +53,10 @@ export const roster = async () => {
   } catch { return []; }
 };
 
-// AFK rides on the fleet document rather than on a sixth argument to
-// `statusRow`. CEL-51's bug was a renderer that forgot to pass one of the
-// arguments the edge declared, and the edge the owner asked for twice was
-// absent from four views out of five; a fact carried BY THE DOCUMENT cannot be
-// forgotten by a call site. Empty on any failure - a console that cannot read
-// the AFK state says nothing about it, which is the honest outcome.
+// AFK rides on the fleet document rather than on another argument to
+// `statusRow`: a fact carried BY THE DOCUMENT cannot be forgotten by a call
+// site. Empty on any failure - a console that cannot read the AFK state says
+// nothing about it, which is the honest outcome.
 export const afkState = async () => {
   const r = await run(CEL_BIN, ['afk', 'status', '--json'], 10000);
   if (!r.ok) return null;
@@ -78,16 +69,12 @@ export const afkLog = async () => {
   return r.out.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 };
 
-// THE LAST GOOD READ, KEPT. On 2026-09-25, at a load average of 32 on a
-// 16-thread box, `cel fleet --json` took 67-116 s against the 20 s timeout
-// below, and the FLEET panel showed only `! Command failed` on every refresh:
-// the operator lost the whole board exactly when the box was busiest. A
-// console that has read the fleet once keeps drawing that read, says how old
-// it is and why, and keeps retrying on the normal cadence. The error alone is
-// shown only when there has never been a good read.
-// PER SESSION (CEL-79): a module-global lastGood let a second session in the
-// same process draw the first one's board as its own stale read. A caller
-// that holds a session passes it; the default is this process's own console.
+// THE LAST GOOD READ, KEPT per console session: a timeout under load must not
+// blank the board. A console that has read the fleet once keeps drawing that
+// read, says how old it is and why, and keeps retrying on the normal cadence;
+// the error alone is shown only when there has never been a good read. A
+// caller that holds a session passes it; the default is this process's own
+// console.
 export const fleetSession = () => ({ lastGood: null });
 const defaultSession = fleetSession();
 const hhmm = (d) => d.toTimeString().slice(0, 5);
@@ -114,7 +101,7 @@ export const fleet = async (runner = run, session = defaultSession) => {
     try {
       const doc = JSON.parse(r.out);
       session.lastGood = { doc, at: new Date() };
-      // A served-stale document (CEL-90) says so: `cel fleet` returns the
+      // A served-stale document says so: `cel fleet` returns the
       // old cache at once and refills it behind, so an old `generated_at`
       // is shown as stale rather than passed off as a fresh read.
       const age = ageSecs(doc);
@@ -126,7 +113,7 @@ export const fleet = async (runner = run, session = defaultSession) => {
     } catch { error = 'cel fleet returned no JSON'; reason = 'fleet refresh returned no JSON'; }
   }
   const { lastGood } = session;
-  // CEL-90: the time on the label is when the DOCUMENT was built
+  // The time on the label is when the DOCUMENT was built
   // (`generated_at`), not when this console last read it - a served-stale
   // cache read moments ago is still as old as its build.
   if (lastGood) return { ...lastGood.doc, afk, stale: `stale, as of ${hhmm(builtAt(lastGood))} (${reason})` };
@@ -134,13 +121,9 @@ export const fleet = async (runner = run, session = defaultSession) => {
 };
 
 // `cel inbox open` is per workspace by design (lib/inbox.sh), so the console
-// asks each mailbox in turn rather than inventing a flag in a library it does
-// not own. IN TURN, NOT ONE AFTER ANOTHER: four workspaces at 0.05s each were
-// a fifth of a second of a render spent waiting on calls that have nothing to
-// say to one another, and this file already batches exactly this way where it
-// fetches a board and its PRs together. A workspace whose call fails is
-// skipped and the rest stand - which is what the `continue` did, and what a
-// bare Promise.all would have thrown away.
+// asks each mailbox rather than inventing a flag in a library it does not
+// own. The calls run IN PARALLEL - they have nothing to say to one another -
+// and a workspace whose call fails is skipped while the rest stand.
 // Oldest first: a decision that has been waiting two days belongs above one
 // that arrived a minute ago.
 export const openItems = async (doc) => {
@@ -164,9 +147,7 @@ export const openItems = async (doc) => {
 // the same thing the watch is tailing. The live TUI still runs the watch - that
 // is what raises the desktop notification - and appends its lines on top.
 // The tail is TODAY'S mail: the last 24 hours of root-addressed lines, newest
-// last. The whole history is `cel inbox read`; a week of two retired
-// orchestrators reporting every step to root (458 status lines on one box)
-// is not a tail, it is an archive, and "▲ 194 more" was the console saying so.
+// last. The whole history is `cel inbox read`; a tail is not an archive.
 export const TAIL_HOURS = Number(process.env.CEL_CONSOLE_TAIL_HOURS || 24);
 export const inboxTail = (doc, n = 8) => {
   const lines = [];
@@ -193,9 +174,8 @@ export const inboxTail = (doc, n = 8) => {
       if (m.to !== 'root' && m.to !== 'all') continue;
       if ((Date.parse(m.ts) || 0) < since) continue;
       // IDENTITY SURVIVES THE TAIL. This row is a view of a real record and
-      // used to arrive without the id it had just parsed, so a detail view
-      // opened from the INBOX pane read `id undefined` and its [resolve] did
-      // nothing, while the same item opened from WAITING resolved fine.
+      // carries its id, so a detail view opened from the INBOX pane resolves
+      // exactly as one opened from WAITING does.
       lines.push({
         ws: ws.name, id: m.id || '', ts: m.ts || '', kind: m.kind, from: m.from,
         message: String(m.message || '').replace(/\n/g, ' '),
@@ -207,8 +187,7 @@ export const inboxTail = (doc, n = 8) => {
   }
   lines.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   // The same sender saying the same thing again is one line with a count,
-  // not a screen of it: the steward's nudges and a worker's repeated status
-  // were most of what the tail showed.
+  // not a screen of it.
   const out = [];
   for (const l of lines) {
     const p = out[out.length - 1];
@@ -268,10 +247,6 @@ export const appendHistory = (line) => {
   } catch { /* a console that cannot write its history is still a console */ }
 };
 
-// A UNIT IS A PRODUCT, not a repo (CEL-14) - unitLabel lives in views.mjs now,
-// with the rest of the rendering, and is re-exported above so the TUI's import
-// did not have to move house.
-
 // The rows the fleet panel draws, flattened so the TUI's selection is one
 // index into one list rather than a pair of cursors over a nested structure.
 export const fleetRows = (doc) => {
@@ -307,8 +282,8 @@ export const runCommand = async (cmd) => {
 // A CHAIN IS CHECKED WHOLE, THEN RUN. The model may answer a sentence with a
 // sequence, and the operator presses Enter once for the lot - so the allowlist
 // has to have seen every line before the first one runs. Interleaving the two
-// meant a refusal on line two arrived after line one had already changed the
-// box, which is precisely the outcome the guard exists to prevent.
+// would let a refusal on line two arrive after line one had already changed
+// the box, which is precisely the outcome the guard exists to prevent.
 //
 // Execution still stops at the first non-zero exit: passing the guard is not
 // the same as succeeding, and running step three over a failed step two is how
@@ -334,10 +309,8 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // The whole desk as plain text: `cel console --render-once`. It is what the
 // tests assert on and what an operator pipes into a file when something is
 // wrong and a full-screen UI is the last thing they want.
-// STATUS AND LEGEND ARE TWO LINES. The v1 console wrote its responses over the
-// key legend and never cleared them, so the operator lost their bindings to a
-// message from four minutes ago. Here - and in the TUI - the transient line and
-// the permanent one are separate rows that cannot overwrite each other.
+// STATUS AND LEGEND ARE TWO LINES. Here - and in the TUI - the transient line
+// and the permanent one are separate rows that cannot overwrite each other.
 // THE STATUS LINE'S RIGHT EDGE IS WHERE THE BOX ITSELF SPEAKS. It is the one
 // row that belongs to no panel, and the headroom is the fact that changes what
 // an operator may do next - there is no point opening a unit view to decide
@@ -345,15 +318,10 @@ export const runChain = async (cmds, onStep = () => {}) => {
 // sit beside it for exactly the same reason: a 5h window at 100% means the
 // next delegation refuses, whatever the memory says.
 //
-// CEL-51: THE DOCUMENT AND THE WIDTH ARE BOTH REQUIRED, AND THIS FUNCTION
-// REFUSES WITHOUT THE FIRST. CEL-49 landed the subscription edge here and four
-// of the five renderers below called `statusRow(status, doc.box)`; JavaScript
-// handed the declared third parameter `undefined`, `subsEdge(undefined)`
-// answered `''`, and the edge the owner asked for twice was ABSENT from the
-// services, unit, worker and timeline views - looking exactly like a box with
-// no subscriptions, which is why nobody noticed. A missing document is a
-// programming error and it now throws where it is written, rather than drawing
-// a row that looks fine on the operator's screen.
+// THE DOCUMENT IS REQUIRED, AND THIS FUNCTION THROWS WITHOUT IT. Without it
+// the subscription edge answers '' and the row looks exactly like a box with
+// no subscriptions, so a missing document is a programming error thrown where
+// it is written rather than a row that looks fine on the operator's screen.
 export const statusRow = (status, box, doc, width) => {
   if (!doc) throw new TypeError('statusRow: the fleet document is required - the status edge cannot say what it was not given');
   const left = `${status}${status ? `   ${new Date().toTimeString().slice(0, 8)}` : ''}`;
@@ -364,9 +332,6 @@ export const statusRow = (status, box, doc, width) => {
   return [left, afkEdge(doc.afk), subs, mem, orphansEdge(box)].filter(Boolean).join('   ');
 };
 
-// WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out
-// here: the declared services and every `try` preview, already joined, already
-// probed. One call per workspace, because that is the shape of the command.
 // WHERE A TEXT RENDERER LEARNS ITS WIDTH. The ink UI has `stdout.columns` and
 // hands it down; these renderers print to whatever `--render-once` was piped
 // into, so the terminal says so through COLUMNS or through stdout itself. When
@@ -377,6 +342,9 @@ export const statusRow = (status, box, doc, width) => {
 const renderWidth = (width) =>
   Math.floor(Number(width) || Number(process?.env?.COLUMNS) || process?.stdout?.columns || 0);
 
+// WHAT IS RUNNING ON A PORT, asked of `cel services` rather than worked out
+// here: the declared services and every `try` preview, already joined, already
+// probed. One call per workspace, because that is the shape of the command.
 export const services = async (ws) => {
   const args = ['services', '--json'];
   if (ws) args.push('--workspace', ws);
@@ -385,7 +353,7 @@ export const services = async (ws) => {
   try { const v = JSON.parse(r.out); return Array.isArray(v) ? v : []; } catch { return []; }
 };
 
-// One probe per workspace, all four at once and none of them able to take the
+// One probe per workspace, all at once and none of them able to take the
 // others down: `services` already answers [] for a failure, and the catch is
 // belt and braces for a call that rejects rather than resolving. The keys come
 // back in the document's order however the answers arrive.
@@ -448,10 +416,10 @@ export const renderQuota = async () => {
 
 // --- depth: one unit, one worker -------------------------------------------
 //
-// CEL-19 froze `units[].workers_list`; everything below consumes it and
-// nothing here computes a verdict of its own. Two places deciding whether a
-// worker is stalled is two answers to one question, and the wrong one is
-// always the one nobody is looking at.
+// `units[].workers_list` is the fleet's frozen worker list; everything below
+// consumes it and nothing here computes a verdict of its own. Two places
+// deciding whether a worker is stalled is two answers to one question, and
+// the wrong one is always the one nobody is looking at.
 
 export const findUnit = (doc, name) => {
   for (const ws of doc.workspaces || []) {
@@ -474,9 +442,9 @@ export const findWorker = (doc, id) => {
   return null;
 };
 
-// THE DIAGNOSIS, RUN FOR THE OPERATOR RATHER THAN SUGGESTED TO THEM. The whole
-// complaint behind this ticket was a console that answered "why is this worker
-// stalled" with the name of a command to go and type.
+// THE DIAGNOSIS, RUN FOR THE OPERATOR RATHER THAN SUGGESTED TO THEM: "why is
+// this worker stalled" is answered with the diagnosis, not the name of a
+// command to go and type.
 export const why = async (id, ws) => {
   const args = ['why', id];
   if (ws) args.push('--workspace', ws);
@@ -528,9 +496,9 @@ export const renderTimeline = async ({ status = '' } = {}) => {
   return out.join('\n');
 };
 
-// THE STATE THE MODEL IS ASKED FROM. It is the fleet document whole - which
-// since CEL-19 carries every worker, its verdict, its quiet time and its PR -
-// plus the open decisions. A model given only counts can only ever answer with
-// a command telling the operator to go and look, which is what it did.
+// THE STATE THE MODEL IS ASKED FROM. It is the fleet document whole - every
+// worker, its verdict, its quiet time and its PR - plus the open decisions. A
+// model given only counts can only ever answer with a command telling the
+// operator to go and look.
 export const askState = (doc, items) =>
   `fleet: ${JSON.stringify(doc)}\nopen decisions: ${JSON.stringify(items)}`;

@@ -2,10 +2,8 @@
 //
 // `cel inbox watch` is the DELIVERY PATH, not a nicety: it is what raises the
 // desktop notification for a decision or a blocker while the operator is
-// looking at another tab. It is also, as of a walk of the box on 2026-09-19,
-// the most-littered process on it: thirteen `cel inbox watch --for root
-// --all-workspaces` trees reparented to init, four of them days old, one per
-// console that had ever exited. Two reasons, both fixed here.
+// looking at another tab. A watch that outlives its console is a process tree
+// reparented to init and left there for days, so two rules hold here.
 //
 // FIRST, `child.kill()` ON A REACT CLEANUP IS NOT AN EXIT PATH. It runs on a
 // clean unmount and on nothing else - not Ctrl-C, not the SIGTERM a closing
@@ -29,8 +27,7 @@ export const startWatcher = ({
 } = {}) => {
   // And the watcher is told which console owns it, so it can leave on its own
   // if this process dies in a way that runs no handler at all (SIGKILL, a
-  // pty host that vanishes). Belt and braces: four of the thirteen were days
-  // old, which is how long a missed kill lasts without it.
+  // pty host that vanishes). Belt and braces for a kill that never arrived.
   const child = spawn(bin, [...WATCH_ARGS, '--parent', String(proc.pid)],
     { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
 

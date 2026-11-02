@@ -1,10 +1,6 @@
-// CEL-36: the half of steering that happens AFTER the console sends.
-//
-// The complaint this file answers is not that mail did not arrive - it did -
-// but that the operator saw nothing afterwards: no acknowledgement, no reply,
-// no sign the orchestrator existed ("it doesn't really feel like I can steer
-// anything from there", owner). A console that sends into silence is a
-// console people stop sending from.
+// The half of steering that happens AFTER the console sends: an
+// acknowledgement, the reply, a sign the orchestrator exists. A console that
+// sends into silence is a console people stop sending from.
 //
 // Two things live here, and both are deliberately pure or file-only so they
 // can be proved without a terminal: WHICH message counts as the reply, and
@@ -23,7 +19,7 @@ const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/sha
 // open and blocks nothing - it is a poll in the render loop - but a status
 // line that claims to be waiting long after the operator has moved on is a
 // lie about what the console is doing. When it expires the inbox tail takes
-// over, which is where the reply lands anyway (CEL-7/CEL-20).
+// over, which is where the reply lands anyway.
 export const REPLY_WAIT_DEFAULT = 90;
 export const REPLY_POLL_MS = 2000;
 
@@ -38,7 +34,7 @@ export const replyWaitSecs = (configPath) => {
 // does (state.mjs): the file is what the command prints, and a poll every two
 // seconds should not be two processes every two seconds.
 //
-// THREE WAYS TO MATCH THE WRONG THING, all of them seen while writing this: an
+// THREE WAYS TO MATCH THE WRONG THING: an
 // older message from the right agent (the one that was already there),
 // anything from another agent, and a message the agent addressed to one of its
 // workers. Each is excluded below, and each has a test.
@@ -61,7 +57,7 @@ export const replyFrom = ({ ws, who, since, dir }) => {
 
 // ONE LINE IN THE STATUS, the whole thing in the detail view. A reply is
 // usually a paragraph, and a status line that wraps is a status line that ate
-// the legend under it - which is the bug CEL-17 was written to fix.
+// the legend under it.
 export const replyLine = (who, msg) =>
   `${who}: ${String((msg && msg.message) || '').split('\n')[0].trim()}`;
 
@@ -80,10 +76,10 @@ export const TALK_REFRESH_MS = 2000;
 // Single quotes, for the same reason as every other place an operator's own
 // words reach a command line (router.mjs): inside double quotes bash still
 // expands `$(...)`, and this line is handed to `bash -c`.
-// CEL-123: a talk line is MAIL, not keystrokes. It used to be `herdr agent
-// prompt`, typing into the orchestrator's pane mid-turn; `cel drive send`
-// queues it. Idle delivery depends on runtime: Pi/OMP can wake; Claude waits
-// for its next submitted turn or an active-turn Stop hook.
+// A talk line is MAIL, not keystrokes: `cel drive send` queues it rather than
+// typing into the orchestrator's pane mid-turn. Idle delivery depends on
+// runtime: Pi/OMP can wake; Claude waits for its next submitted turn or an
+// active-turn Stop hook.
 export const talkPrompt = (who, text) => `cel drive send ${who} ${shellQuote(text)}`;
 
 // `recent-unwrapped` rather than the wrapped form: the console draws its own

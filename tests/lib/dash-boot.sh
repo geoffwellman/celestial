@@ -1,12 +1,10 @@
 # shellcheck shell=bash
 # Start a test dashboard on a port it really owns.
 #
-# Picking a "free" port (bind port 0, close, reuse the number) races under the
-# parallel suite: another test can take the number in between, the loser's node
-# dies with EADDRINUSE, and its readiness probe gets an answer from the WINNER's
-# server - another fixture, another gh stub, another CSRF token - so the test
-# fails far from the cause. So a boot waits for its OWN server's "listening"
-# line; if it died on EADDRINUSE it picks again.
+# A "free" port picked by binding port 0 and closing it can be taken by a
+# parallel test before node binds it; the loser then dies with EADDRINUSE while
+# its readiness probe answers from the WINNER's server. So a boot waits for its
+# OWN server's "listening" line; if it died on EADDRINUSE it picks again.
 #
 #   _dash_launch <port-fn> <log> <config-template> <path>
 #     <config-template> holds the literal @PORT@; sets DASH_PORT and DASH_PID.

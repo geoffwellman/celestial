@@ -1,8 +1,6 @@
-// CEL-116: PARSE ONCE, KEEP WARM. A dashboard refresh asked eleven feeds at
-// once and each one re-read and re-parsed whole inbox files (one was 5 MB)
-// and ledgers, several times over - on a loaded box that was seconds per
-// card. Here a file is parsed once and kept, keyed by path, and looked at
-// again only when its size, mtime or inode moves. Inboxes are append-only, so
+// PARSE ONCE, KEEP WARM. Many feeds read the same inbox and ledger files, so
+// a file is parsed once and kept, keyed by path, and looked at again only
+// when its size, mtime or inode moves. Inboxes are append-only, so
 // growth reads only the appended tail; a shrink, a new inode or a changed
 // head (a ring rewritten in place) is a full reload.
 import { statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
@@ -26,8 +24,8 @@ export const createStore = () => {
   const same = (e, s) => e && e.ino === s.ino && e.size === s.size && e.mtime === s.mtime;
   // rows of a JSONL file; the returned array is shared - callers must not
   // mutate it. Missing is empty; any other read failure (a directory where
-  // the file should be, a permission) throws, as readFileSync did, so the
-  // caller answers 500 rather than an empty inbox that reads as calm.
+  // the file should be, a permission) throws, so the caller answers 500
+  // rather than an empty inbox that reads as calm.
   const NL = 0x0a;
   const jsonl = (f) => {
     const s = sig(f);
@@ -38,7 +36,7 @@ export const createStore = () => {
       if (e && e.ino === s.ino && s.size > e.size && e.head.equals(readRange(f, 0, Math.min(HEAD, e.size)))) {
         // the tail only; an unfinished line waits in `partial` as BYTES -
         // a multibyte character split across two appends must not be
-        // decoded half at a time (review on #141)
+        // decoded half at a time
         const buf = Buffer.concat([e.partial, readRange(f, e.size, s.size - e.size)]);
         const cut = buf.lastIndexOf(NL) + 1;
         const rows = e.rows.concat(parseLines(buf.subarray(0, cut).toString('utf8')));

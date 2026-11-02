@@ -1,18 +1,6 @@
 # shellcheck shell=bash
-# CEL-51: the status edge, asserted on the ASSEMBLED view.
-#
-# CEL-49 put subscription usage on the console status edge and drew it as a
-# bar. Every test it shipped with called `subsEdge` by hand with both of its
-# arguments, so all of them passed while four of the five renderers in
-# tools/console/state.mjs called `statusRow(status, doc.box)` and handed the
-# function `undefined` for the document it declared. `subsEdge(undefined)`
-# answers `''`, so on the services, unit, worker and timeline views the edge
-# was not barless - it was ABSENT, and looked exactly like a box with no
-# subscriptions. The width was not passed either, so even the one correct call
-# site selected a zero-width track and drew no bar.
-#
-# Nothing here calls `subsEdge`. Everything is asserted on what the view
-# prints, because what the view prints is the thing that was wrong.
+# The status edge, asserted on what every ASSEMBLED view prints (never by
+# calling `subsEdge` directly): each view carries the subscription edge.
 source "$CEL_ROOT/lib/common.sh"
 
 CONSOLE_MJS="$CEL_ROOT/tools/console/console.mjs"
@@ -84,15 +72,13 @@ EOF
 
 _state_teardown() { rm -rf "$T"; }
 
-# The five views, by the flags that render them. `--render-once` on its own is
-# the fleet desk - the only one that was ever correct.
+# The five views, by the flags that render them (`--render-once` alone is the
+# fleet desk).
 _state_views() {
   printf '%s\n' '' '--services' '--unit bundle' '--worker ABC-49-slug' '--timeline'
 }
 
-# THE BUG ITSELF. The owner asked for this display twice and it landed on one
-# view out of five, because a call that forgets an argument is a call
-# JavaScript is happy to make.
+# Every view shows the subscription edge for every provider.
 test_every_view_shows_the_subscription_edge() {
   _state_setup
   export COLUMNS=120
@@ -114,9 +100,7 @@ test_every_view_shows_the_subscription_edge() {
   _state_teardown
 }
 
-# The width has to reach `subsEdge` or it selects a zero-width track and
-# `usageBar` correctly draws nothing - which is how a "bar" ticket shipped
-# without one. The bar goes AFTER the figures, on the same edge.
+# Every view passes its width through, so the bar is drawn after the figures.
 test_every_view_draws_a_bar_when_the_width_allows() {
   _state_setup
   export COLUMNS=120
@@ -132,9 +116,7 @@ test_every_view_draws_a_bar_when_the_width_allows() {
   _state_teardown
 }
 
-# A TERMINAL TOO NARROW TO BE HONEST GETS THE TEXT. The figures are what an
-# operator reads first; the track is the first thing dropped when the row is
-# tight, because a status edge that wraps costs a line of the desk.
+# A narrow terminal keeps the figures and drops the bar rather than wrapping.
 test_a_narrow_terminal_keeps_the_figures_and_drops_the_bar() {
   _state_setup
   export COLUMNS=50
@@ -151,9 +133,7 @@ test_a_narrow_terminal_keeps_the_figures_and_drops_the_bar() {
   _state_teardown
 }
 
-# The case that must stay DISTINGUISHABLE from the bug: a box that genuinely
-# has no subscriptions renders no edge and does not error. Before CEL-51 these
-# two looked identical on four views, which is why nobody noticed.
+# A box with no subscriptions renders no edge and does not error.
 test_a_box_with_no_subscriptions_renders_no_edge_and_does_not_error() {
   _state_setup
   # the same fleet, with the subscriptions taken out
@@ -179,11 +159,7 @@ test_a_box_with_no_subscriptions_renders_no_edge_and_does_not_error() {
   _state_teardown
 }
 
-# A MISSING DOCUMENT IS A PROGRAMMING ERROR, NOT AN EMPTY EDGE. This is the
-# whole of CEL-51 in one assertion: `statusRow` used to accept `undefined` for
-# the document it declared and answer with a row that looked fine. It refuses
-# now, so the next renderer that forgets fails where it is written rather than
-# on the operator's screen six weeks later.
+# `statusRow` refuses a missing fleet document instead of drawing an empty edge.
 test_status_row_refuses_a_missing_document() {
   local out rc=0
   out="$(node --input-type=module -e "
@@ -196,32 +172,13 @@ test_status_row_refuses_a_missing_document() {
   return 0
 }
 
-# --- CEL-48: the GATHERING, as opposed to the drawing ----------------------
-#
-# Everything above is about what the assembled view prints. What follows is
-# about how many CLI calls the console makes before a character is drawn,
-# which is not something a rendered string can be asked about. Two blocks,
-# one file, because both are tests of tools/console/state.mjs.
-#
-# The console's GATHERING, as opposed to its drawing. Everything here is about
-# how many CLI calls the console makes and in what order, which is not
-# something tools/console/views.mjs can be asked about: these are the reads
-# that happen before a single character is drawn.
-#
-# Measured on 2026-09-20: `cel console --render-once` took 7.1-7.4s on a box
-# with four workspaces, and ~1.0s of it was two `for … await` loops in
-# state.mjs making eight serial `cel` calls - four `cel inbox open` and four
-# `cel services` - that have nothing to do with each other. A stub that sleeps
-# a known amount turns "are they concurrent?" into an assertion, which is the
-# only way that stays true.
+# --- gathering: the CLI calls made before anything is drawn -----------------
+# Per-workspace `cel inbox open` and `cel services` calls run concurrently.
 source "$CEL_ROOT/lib/common.sh"
 
 STATE_MJS="$CEL_ROOT/tools/console/state.mjs"
 
-# Four workspaces, each call costing a fifth of a second, and `beta` failing
-# outright: one workspace whose inbox or services call fails must leave that
-# entry empty and the other three intact, which is what the serial loop did
-# with `continue` and what a batch must not lose.
+# Four workspaces, each call taking 0.2s, and `beta` failing outright.
 _cs_setup() {
   T="$(mktemp -d)"
   mkdir -p "$T/bin"
@@ -258,9 +215,7 @@ EOF
   node "$T/t.mjs"
 }
 
-# THE FOUR CALLS RUN TOGETHER. Four workspaces at 0.2s each is 0.8s serial and
-# ~0.2s batched; the threshold is half of serial, which no amount of machine
-# noise crosses in the wrong direction.
+# The four calls run together: the threshold is half the serial time.
 test_console_state_opens_every_inbox_at_once() {
   _cs_setup
   local rc=0
@@ -287,9 +242,7 @@ assert.ok(ms < 500, `servicesByWorkspace took ${ms}ms - the four calls are still
   return "$rc"
 }
 
-# One workspace failing is one workspace missing, not a blank console. This is
-# today's behaviour (`if (!r.ok) continue`) and the batch must keep it: a
-# rejected promise in a Promise.all would take the other three with it.
+# One workspace failing its calls leaves that entry empty and the rest intact.
 test_console_state_survives_one_workspace_failing_its_calls() {
   _cs_setup
   local rc=0
@@ -308,9 +261,7 @@ assert.deepEqual(all.map((s) => s.ws), ["alpha", "gamma", "delta"]);
   return "$rc"
 }
 
-# OLDEST FIRST, whatever order the answers came back in. The serial loop got
-# this for free by asking in workspace order and sorting after; a batch that
-# resolves out of order must still land on the same list.
+# Open items stay oldest first whatever order the answers arrive in.
 test_console_state_keeps_open_items_oldest_first() {
   _cs_setup
   local rc=0

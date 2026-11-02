@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# CEL-102: the browser helper waited 10 s for Chrome's DevToolsActivePort; on a
-# loaded CI runner Chrome took longer and the test flaked. The wait is now
-# generous, env-overridable, retried once, and a failure shows Chrome's stderr.
+# The browser helper's wait for Chrome's DevToolsActivePort is generous (a
+# loaded CI runner is slow), env-overridable, retried once, and a failure
+# shows Chrome's stderr.
 source "$CEL_ROOT/lib/common.sh"
 
 # a "chrome" that takes <delay> s to open its port, chattering on stderr

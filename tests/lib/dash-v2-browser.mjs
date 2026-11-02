@@ -284,7 +284,7 @@ const main = async () => {
     }
 
     if (scenario === 'usage') {
-      // the one usage card, drawn from the mockup's structure
+      // the one usage card
       const q = (sel) => `#grid .w[data-id=usage] ${sel}`;
       out.oldCards = await evaluate(`document.querySelectorAll('#grid .w[data-id=forecast],#grid .w[data-id=accounts]').length`);
       out.summary = await evaluate(`[].slice.call(document.querySelectorAll('${q('.usum .big')}')).map(function(e){return e.textContent}).join('|')`);
