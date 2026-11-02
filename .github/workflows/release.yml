@@ -56,8 +56,11 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          git config user.name 'celestial release'
-          git config user.email 'release@users.noreply.github.com'
+          # The Actions bot identity. A made-up <name>@users.noreply.github.com
+          # address belongs to whichever real account owns that login, and
+          # GitHub credits that stranger as a contributor.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch -c "release-$VERSION"
           # Refuses a non-semver or not-greater version and an empty
           # [Unreleased] section; prints the section that is shipping.
@@ -116,8 +119,8 @@ jobs:
           version='${{ steps.version.outputs.version }}'
           python3 tools/release/notes.py "$version" > "$RUNNER_TEMP/notes.md"
           if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            git config user.name 'celestial release'
-            git config user.email 'release@users.noreply.github.com'
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git tag -a "v$version" -F "$RUNNER_TEMP/notes.md"
             git push origin "v$version"
           fi
