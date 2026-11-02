@@ -190,8 +190,8 @@ EOF
   rm -rf "$t"
 }
 
-# Adopting a UNIT under `set -u` (the CLI's own setting) left `pid` unbound
-# and died after the ledger file was half-written.
+# Adopting a UNIT works under `set -u` (the CLI's own setting): no unbound
+# `pid`, no half-written ledger file.
 test_serve_adopts_a_unit_under_set_u() {
   local t; t="$(mktemp -d)"
   export CEL_SERVE_STATE="$t/state" CEL_SERVE_SYSTEMCTL="$t/systemctl"

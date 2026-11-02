@@ -6,9 +6,8 @@
 # tools/console/console.mjs.
 #
 # It is the ONE cel command that is not a script the agents also run, because
-# it is the one thing an operator looks at rather than calls. `cel run console
-# --agent` still starts the old Claude pane for people who want to talk to a
-# full agent; this is the default and the thing the README leads with.
+# it is the one thing an operator looks at rather than calls. Talking to a
+# full agent is `cel run core` (alias `cel run console`), a separate pane.
 [ -n "${_CEL_CONSOLE:-}" ] && return 0
 _CEL_CONSOLE=1
 # shellcheck source=lib/common.sh

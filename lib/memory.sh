@@ -1,34 +1,19 @@
 # shellcheck shell=bash
 # What a worker actually costs, and what the box has left.
 #
-# The owner, 2026-09-18: "how are we monitoring memory for the workers and can
-# that be visualised in the console too?" Nothing did. herdr exposes no pid for
-# a pane, so there was no handle on a worker's processes at all, and the box -
-# 24 GB, sitting at 17 GB used with agents up - only ever announced its state
-# by having the kernel kill something, which is never the thing you would have
-# chosen. A runaway test server or a forgotten session was invisible until then.
+# THE CWD IS THE HANDLE. herdr exposes no pid for a pane, so every process
+# whose working directory is under a worker's worktree is that worker's: the
+# shell, the agent, its tools and its test runs. It is an attribution, not a
+# containment boundary: a process that chdirs elsewhere leaves the tree.
 #
-# THE CWD IS THE HANDLE. Every process whose working directory is under a
-# worker's worktree is that worker's: the shell, the agent, its tools and its
-# test runs. Measured on this box, summing `VmRSS` over that set gives 370 MB
-# for a worker mid-gate - the number an operator wants - in under 50 ms for the
-# whole box. It is an attribution, not a containment boundary: a process that
-# chdirs elsewhere leaves the tree, which is the honest answer rather than a
-# guess, and the alternative (walking parent pids from a pane nobody can name)
-# has no starting point.
-#
-# PSS, NOT RSS, WHERE READABLE (CEL-100). Summed RSS counted every shared page
-# once per process: a worker running the suite - hundreds of bash processes
-# sharing one binary - read 4.4G against ~300 MB real, and the steward alarmed
-# on it. smaps_rollup is one more grep over the box, not one per process.
+# PSS, NOT RSS, WHERE READABLE: summed RSS counts every shared page once per
+# process mapping it. RSS is the fallback where smaps_rollup is unreadable.
 [ -n "${_CEL_MEMORY:-}" ] && return 0
 _CEL_MEMORY=1
 
-# ONE WALK PER READ. `cel fleet` asks about every worker, every orchestrator
-# and the box; a walk per question turned a 50 ms read into one that scaled
-# with the number of workers - exactly the cost profile the view exists to
-# expose. The snapshot is a plain string (rss-kB TAB cwd per line) so a caller
-# fills it once and every later sum is arithmetic.
+# ONE /proc WALK PER SNAPSHOT: a fleet read asks about every worker, and a walk
+# per question scales with the worker count. The snapshot is a plain string
+# (kB TAB cwd per line, PSS or RSS) so every later sum is arithmetic.
 MEM_SNAPSHOT="${MEM_SNAPSHOT:-}"
 
 # Every process of THIS USER with a readable cwd. Other users' processes are
@@ -41,28 +26,20 @@ MEM_SNAPSHOT="${MEM_SNAPSHOT:-}"
 # and the open. A walk that died on a vanished pid would fail most of the time
 # it ran.
 mem_tree_list() {
-  # TWO processes for the whole box, not two per pid. The first cut ran
-  # readlink and awk for each of ~900 processes: 4.5 seconds, most of the
-  # console's 12-second start. `ls -l` prints every cwd link in one go
-  # (owner in column 3 - only this user's processes are ours to read), and
-  # one awk over every status file gives every RSS, keyed by the pid in the
-  # file name. Processes that vanish between the two reads simply drop out.
+  # A fixed number of processes for the whole box, never per pid (per-pid forks
+  # took seconds). `ls -l` prints every cwd link with its owner in column 3 -
+  # only this user's processes are ours to read. Vanished pids drop out.
   local me; me="$(id -un)" proc="${CEL_PROC:-/proc}"
   {
-    # `|| true` on both: other users' cwd links are unreadable and a pid can
-    # vanish mid-read, and either makes ls or awk exit non-zero - which under
-    # set -e and pipefail killed the whole fleet call, silently, exit 2.
+    # `|| true` on both: unreadable cwd links and vanished pids make ls/awk
+    # exit non-zero, which under set -e and pipefail kills the fleet call.
     # The glob is the top level only: `task/<tid>` entries are threads, each
     # repeating its whole process's memory, and are never walked.
     { ls -l "$proc"/[0-9]*/cwd 2>/dev/null || true; } | awk -v me="$me" '$3 == me { i = NF - 2; p = $i; sub(/\/cwd$/, "", p); sub(/.*\//, "", p); print "C\t" p "\t" $NF }'
     # grep -s, not awk over the files: gawk aborts the whole run when one
-    # status file has vanished between the glob and the open, and on this box
-    # one always has - the first cut counted 375 of 660 processes.
+    # status file vanishes between the glob and the open.
     { grep -Hs '^VmRSS:' "$proc"/[0-9]*/status || true; } | awk -F'[:[:space:]]+' '{ p = $1; sub(/\/status$/, "", p); sub(/.*\//, "", p); print "R\t" p "\t" $3 }'
-    # PSS where the kernel offers it (CEL-100): summed RSS counts every shared
-    # page - node, libc, bash - once per process mapping it, and a worker mid-
-    # gate read 4.4G against ~300 MB real. PSS splits those pages among their
-    # users, so a tree's sum is what it costs. RSS remains the fallback.
+    # PSS where the kernel offers it; a tree's PSS sum is what it costs.
     { grep -Hs '^Pss:' "$proc"/[0-9]*/smaps_rollup || true; } | awk -F'[:[:space:]]+' '{ p = $1; sub(/\/smaps_rollup$/, "", p); sub(/.*\//, "", p); print "P\t" p "\t" $3 }'
   } | awk -F'\t' '
     $1 == "C" { cwd[$2] = $3 }
@@ -90,9 +67,7 @@ mem_tree_sum() { # <dir> < snapshot -> mb
     END { printf "%d", kb / 1024 }'
 }
 
-# The NAME says rss and every published field (rss_mb, orch_rss_mb,
-# agents_rss_mb) keeps it for compatibility with the console and JSON readers,
-# but since CEL-100 the value is PSS where readable, RSS only as fallback.
+# Named rss for the published fields (rss_mb etc.); the value is PSS, RSS fallback.
 mem_tree_rss_mb() { # <dir> -> mb (PSS, RSS fallback)
   local dir="${1:-}"
   [ -n "$dir" ] || { printf 0; return 0; }
@@ -104,9 +79,8 @@ mem_tree_rss_mb() { # <dir> -> mb (PSS, RSS fallback)
 }
 
 # `total_mb available_mb used_pct` from /proc/meminfo. AVAILABLE, not free:
-# free is the number that panics people (this box shows a few hundred MB free
-# and 7 GB available, because the page cache is doing its job), and available
-# is the kernel's own estimate of what a new process could actually have.
+# free excludes reclaimable page cache; available is the kernel's estimate of
+# what a new process could actually have.
 #
 # CEL_MEMINFO exists for the suite: a test may not arrange a box at 5%
 # available, and the steward's whole behaviour hangs on that number.

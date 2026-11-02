@@ -2,11 +2,8 @@
 # `cel ws up|down|reset|status` - a workspace has a declared shape and the
 # plane can put it back.
 #
-# The incident this suite is written against (2026-09-19): one orchestrator's
-# herdr workspace was gone, another's pane held a LIVE agent whose herdr NAME
-# had been cleared on restart, and every surface that resolves an orchestrator
-# by its alias reported `orch -` for both. A nameless agent read as a dead one,
-# and the cure for a dead one is to start another - on top of the live one.
+# Central case: an agent whose herdr NAME was cleared on restart must read as
+# live-but-unnamed and be renamed, never as dead and started again on top.
 #
 # Every herdr call goes through a STATEFUL stub: `up` has to be idempotent, and
 # idempotence cannot be proved against a stub that forgets what it was asked to
@@ -178,19 +175,19 @@ EOF
 
 test_layout_accessors_read_the_block_and_default_to_today() {
   _wslife_setup
-  assert_eq "$(ws_layout_get "$T/alpha" orchestrators)" "auto"
+  assert_eq "$(ws_layout_declared "$T/alpha" orchestrators)" "auto"
   assert_eq "$(ws_layout_panes "$T/alpha" | head -1)" "$(printf 'dash\t.\tcel dash --ensure')"
   assert_eq "$(ws_layout_panes "$T/alpha" | wc -l)" "2"
-  # A workspace with no layout: block is exactly what it is today - manual
-  # orchestrators, no extra panes, and the root layout id unchanged.
+  # A workspace with no layout: block means manual orchestrators, no extra
+  # panes, and no root layout id.
   local bare="$T/bare"; mkdir -p "$bare"; printf 'name: bare\n' >"$bare/workspace.yaml"
-  assert_eq "$(ws_layout_get "$bare" orchestrators)" "manual"
+  assert_eq "$(ws_orchestrator_mode "$bare" any | cut -f1)" "manual"
   assert_eq "$(ws_layout_panes "$bare")" ""
-  # The old scalar form (`layout: dev`) is the herdr workspace-manager layout
-  # `cel run root` applies, and must survive the block arriving beside it.
+  # The scalar form (`layout: dev`) is the herdr workspace-manager layout
+  # `cel run root` applies, and must coexist with the map form.
   printf 'name: bare\nlayout: dev\n' >"$bare/workspace.yaml"
   assert_eq "$(ws_layout "$bare")" "dev"
-  assert_eq "$(ws_layout_get "$T/alpha" id)" ""
+  assert_eq "$(ws_layout_declared "$T/alpha" id)" ""
   assert_eq "$(ws_layout "$T/alpha")" ""
   _wslife_teardown
 }
@@ -370,13 +367,13 @@ test_down_refuses_when_the_ledger_cannot_be_read() {
   : >"$STUB_DIR/calls.log"
   local out
 
-  # ABSENT: setup left no delegations.json - once read as "nothing held".
+  # ABSENT: setup left no delegations.json - must not read as "nothing held".
   rm -f "$T/alpha/.cel/delegations.json"
   out="$( (cmd_ws_down alpha) 2>&1 )" && {
     echo "down proceeded with an absent ledger"; _wslife_teardown; return 1; }
   assert_contains "$out" "no delegation ledger"
 
-  # MALFORMED: a real path, unparseable content - the `|| true` used to eat it.
+  # MALFORMED: a real path, unparseable content.
   printf '[\n' >"$T/alpha/.cel/delegations.json"
   out="$( (cmd_ws_down alpha) 2>&1 )" && {
     echo "down proceeded over a malformed ledger"; _wslife_teardown; return 1; }
@@ -401,9 +398,9 @@ test_down_refuses_when_the_ledger_cannot_be_read() {
   _wslife_teardown
 }
 
-# A LEDGER THAT WAS READ AND SAYS NOTHING IS A YES. The fix must not turn every
-# `down` into a refusal: a well-formed ledger with no unlanded work still
-# closes the panes without --force.
+# A LEDGER THAT WAS READ AND SAYS NOTHING IS A YES. Failing closed must not
+# turn every `down` into a refusal: a well-formed ledger with no unlanded work
+# still closes the panes without --force.
 test_down_proceeds_when_the_ledger_is_read_and_empty() {
   _wslife_setup
   cmd_ws_up alpha >/dev/null
@@ -475,15 +472,10 @@ test_doctor_names_the_unnamed_agent_and_says_nothing_otherwise() {
 }
 
 # --- ONE FACT, ONE READER ---------------------------------------------------
-# The owner, 2026-09-21: he shut an orchestrator down, ran `cel ws up` as the
-# tool told him to, and was told `already right` while the steward said the
-# opposite twenty-four times. Both were reading real config, and different
-# config: the workspace declared `layout: <string>` (a herdr layout id), which
-# `ws_layout_get` could not read keys out of, so it fell through to a
-# hardcoded `manual` nobody had written - and the product's own
-# `orchestrator: auto` could not overrule it, because the merge rule only let
-# a product turn something OFF. Unreachable config reads as a declaration and
-# behaves as nothing.
+# `up`, `status` and the steward must resolve a product's orchestrator mode
+# through ws_orchestrator_mode alone. A string `layout:` (a herdr layout id)
+# says nothing about orchestrators, and a product's own `orchestrator: auto`
+# must still be able to turn one ON.
 
 _wslife_string_layout_yaml() { # a herdr layout id, plus a product opting IN
   cat <<'YAML'
@@ -508,8 +500,7 @@ repos:
 YAML
 }
 
-# The three shapes of silence must resolve the SAME mode. Today the string one
-# differs by accident, and it is the only one anybody hit.
+# The three shapes of silence must resolve the SAME mode.
 test_orchestrator_mode_has_one_default_whatever_shape_the_layout_has() {
   _wslife_setup
   local a="$T/none" b="$T/str" c="$T/obj" d
@@ -541,9 +532,8 @@ test_a_product_may_opt_in_to_auto_and_not_only_out() {
   _wslife_teardown
 }
 
-# THE REGRESSION, as reported: `layout: <string>` plus a product declaring
-# `orchestrator: auto`. `up` starts it, and every surface says where the mode
-# came from - the owner could not tell, and neither could the steward.
+# `layout: <string>` plus a product declaring `orchestrator: auto`: `up`
+# starts it, and every surface says where the mode came from.
 test_up_and_status_name_the_source_of_the_effective_mode() {
   _wslife_setup
   _wslife_string_layout_yaml >"$T/alpha/workspace.yaml"
@@ -565,7 +555,7 @@ test_up_and_status_name_the_source_of_the_effective_mode() {
   _wslife_teardown
 }
 
-# CEL-83: herdr tabs default to a bare number. `up` names any numbered tab in
+# herdr tabs default to a bare number. `up` names any numbered tab in
 # a workspace it owns from what is in it - here, the agent living there.
 test_up_names_a_numbered_tab_from_what_is_in_it() {
   _wslife_setup

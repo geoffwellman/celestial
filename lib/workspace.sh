@@ -27,10 +27,9 @@ ws_current() {
 ws_name()   { _wsy "$1" '.name'; }
 ws_kind()   { _wsy "$1" '.kind'; }
 ws_org()    { _wsy "$1" '.org'; }
-# THE LAYOUT, IN TWO SHAPES THAT MUST NOT COLLIDE. `layout: dev` has always
-# named the herdr workspace-manager layout `cel run root` applies. CEL-44 gives
-# a workspace a DECLARED SHAPE under the same key - what should be running in
-# it - so the value may now be a map:
+# THE LAYOUT, IN TWO SHAPES THAT MUST NOT COLLIDE. A scalar `layout: dev`
+# names the herdr workspace-manager layout `cel run root` applies; a map
+# declares what should be running in the workspace:
 #
 #   layout:
 #     orchestrators: auto      # auto | manual | none
@@ -38,9 +37,8 @@ ws_org()    { _wsy "$1" '.org'; }
 #       - { label: dash, cwd: ., cmd: cel dash --ensure }
 #
 # A map has no workspace-manager id unless it says `id:`, and a scalar declares
-# no shape. Reading one as the other is how `cel run root` would hand herdr a
-# block of yaml as a layout name, so each accessor answers for its own shape
-# and returns nothing for the other.
+# no shape. Each accessor answers for its own shape and returns nothing for the
+# other, so herdr is never handed a block of yaml as a layout name.
 ws_layout() { # <wsdir> - the workspace-manager layout id, or ""
   _yqr -r '.layout as $l
     | (if ($l | type) == "string" then $l
@@ -49,19 +47,10 @@ ws_layout() { # <wsdir> - the workspace-manager layout id, or ""
 }
 
 # WHAT SILENCE MEANS, IN ONE PLACE. A workspace with no `layout:` block behaves
-# as `orchestrators: manual` and no extra panes - exactly what every workspace
-# did before CEL-44. The default lives here so `up`, `status`, the steward and
-# the doctor line cannot each invent their own idea of what silence means.
-#
-# THE DEFAULT IS THE SAME FOR ALL THREE SHAPES OF SILENCE. 2026-09-21: a
-# workspace declaring `layout: <string>` - a herdr layout id, which says
-# nothing whatever about orchestrators - fell through this function's key read
-# and landed on a hardcoded `manual` nobody had written anywhere, and the
-# product's own `orchestrator: auto` could not overrule it. The operator ran
-# `cel ws up` and was told "already right" while the steward said the same
-# orchestrator would not start, 24 times. A string layout, an object layout
-# with the key absent, and no layout at all now answer identically, and the
-# one word they answer is written once, here.
+# as `orchestrators: manual` and no extra panes. The default lives here so
+# `up`, `status`, the steward and the doctor line agree. A string layout, an
+# object layout without the key, and no layout at all all answer this same
+# word - and a product's own `orchestrator:` can still overrule it.
 ws_orchestrators_default() { printf 'manual'; }
 
 # The DECLARED value of a layout key, or "" when the block is absent, is a
@@ -70,13 +59,6 @@ ws_orchestrators_default() { printf 'manual'; }
 ws_layout_declared() { # <wsdir> <key>
   _yqr -r --arg k "$2" '.layout as $l
     | (if ($l | type) == "object" then ($l[$k] // "") else "" end) | tostring' "$1/workspace.yaml"
-}
-
-ws_layout_get() { # <wsdir> <key>
-  local v
-  v="$(ws_layout_declared "$1" "$2")"
-  if [ -z "$v" ] && [ "$2" = orchestrators ]; then ws_orchestrators_default; return 0; fi
-  printf '%s' "$v"
 }
 
 # One declared pane per line as `label\tcwd\tcmd`, IN FILE ORDER: the order is
@@ -167,12 +149,10 @@ ws_repo_get() {
     "$1/workspace.yaml"
 }
 
-# Whether this repo's work goes through a PR (CEL-119). A repo entry's `pr:`
-# overrides `policy.pr` for that repo alone: the owner wanted a spikes repo
-# pushed straight to main while every sibling kept its PRs, and a
-# workspace-wide switch could only say yes or no for all of them. A value
-# outside required|none is a config error - guessing would either open PRs
-# nobody reviews or push unreviewed work to a repo that wanted review.
+# Whether this repo's work goes through a PR. A repo entry's `pr:` overrides
+# `policy.pr` for that repo alone. A value outside required|none is a config
+# error - guessing would either open PRs nobody reviews or push unreviewed
+# work to a repo that wanted review.
 ws_repo_pr() { # <wsdir> <repo> -> required|none
   local v; v="$(ws_repo_get "$1" "$2" pr)"
   [ -n "$v" ] || v="$(ws_policy "$1" pr)"
@@ -188,7 +168,7 @@ ws_repo_pr() { # <wsdir> <repo> -> required|none
 github_slug_from_url() { # <url> [ssh-alias-host] -> owner/name
   # The host is matched EXACTLY, anchored at the start: a substring match
   # turned git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
-  # A workspace's declared `github.ssh_host` (CEL-70) is github.com under an
+  # A workspace's declared `github.ssh_host` is github.com under an
   # ~/.ssh/config alias, so `git@<alias>:o/r` is accepted - that exact host
   # only, passed by the caller that read the declaration. Never a pattern:
   # `github-*` would let any lookalike alias name a GitHub slug.
@@ -222,7 +202,7 @@ ws_repo_github_slug() { # <wsdir> <repo> [repodir] -> owner/name
   github_slug_from_url "$url" "$alias"
 }
 
-# THE WORKSPACE'S GITHUB ACCOUNT (CEL-70).
+# THE WORKSPACE'S GITHUB ACCOUNT.
 #
 #   github:
 #     user: acct-b              # the gh account this workspace acts as
@@ -232,7 +212,7 @@ ws_repo_github_slug() { # <wsdir> <repo> [repodir] -> owner/name
 # ~/.config/gh/hosts.yml. `gh auth switch` for one workspace would silently
 # re-identify every orchestrator, worker, steward sweep and land in every
 # other workspace, so nothing here ever switches: the override is GH_TOKEN,
-# which beats hosts.yml for one process only. Absent block = today exactly.
+# which beats hosts.yml for one process only. Absent block = box default.
 ws_github_user()     { _wsy "$1" '.github.user'; }
 ws_github_ssh_host() { _wsy "$1" '.github.ssh_host'; }
 
@@ -320,14 +300,10 @@ ws_of_checkout() { # <dir> -> wsdir, or fail
 #     version_file: VERSION      # what `status` reads as "current"
 #     changelog: changelog.d/    # fragment dir, for --dry-run's pending section
 #
-# The plane owns none of these semantics on purpose: the products on one box
-# release four different ways - a bump input deriving the version from the
-# newest tag, an exact version with a VERSION file, plain tags with no script,
-# nothing at all - and a plane that hardcodes one of them is useful to exactly
-# one person. Before this existed, `cel release` assumed every repo was
-# celestial: every local refusal passed for anyone else and `gh workflow run`
-# then returned 403, failing at the last step looking like it should have
-# worked. A repo with no block is NOT releasable, and says so first.
+# The plane owns none of these semantics on purpose: products release in
+# different ways (a bump input deriving the version from the newest tag, an
+# exact version with a VERSION file, plain tags, nothing at all), so none is
+# assumed. A repo with no block is NOT releasable, and says so first.
 #
 # A list value (`accepts`) comes back space separated so `case` and `for` both
 # work on it without the caller learning jq.
@@ -347,9 +323,7 @@ ws_repo_releasable() { # <wsdir> <repo>
 
 # SEED: the gitignored local files a worktree needs before it can RUN. A
 # worktree is a fresh checkout, so every file git was told to ignore - the keys
-# file, a built wasm directory - is simply absent, and the ticket cannot be
-# tested where it was written. On 2026-09-17 seven worktrees were symlinked by
-# hand in one evening for exactly this. Declared per repo:
+# file, a built wasm directory - is simply absent. Declared per repo:
 #
 #   seed:
 #     - apps/builder/.dev.vars                  # symlinked (the common case)
@@ -388,14 +362,10 @@ ws_repo_preview_env() { # <wsdir> <repo> - one KEY=VALUE per line, raw
     | to_entries[] | "\(.key)=\(.value)"' "$1/workspace.yaml"
 }
 
-# PRODUCTS. An orchestrator used to be bound to exactly one repo, so two repos
-# that are really one system - a platform and the things that consume it -
-# needed two orchestrators and a tier above them purely to sequence work that
-# crossed the line between them. That hop is where most of a workspace's mail
-# went, and a hop exists to be removed. A product is one or more repos with one
-# orchestrator; a repo named in no declared product is its own IMPLICIT
-# product, in place, so a workspace written before any of this behaves exactly
-# as it did.
+# PRODUCTS. A product is one or more repos with one orchestrator, so work that
+# crosses repos of one system needs no extra hop. A repo named in no declared
+# product is its own IMPLICIT product, in place, so a workspace without a
+# `products:` block behaves as one orchestrator per repo.
 #
 # A repo named in two declared products is a config error that belongs to
 # `cel doctor`, not here: these helpers just resolve the FIRST declaration so
@@ -434,19 +404,13 @@ ws_product_get() { # <wsdir> <product> <key>
 }
 
 # THE EFFECTIVE ORCHESTRATOR MODE FOR ONE PRODUCT, AND WHERE IT CAME FROM.
-# `up`, `status`, the dry run and the steward all ask this and nothing else:
-# two components deriving one fact by different routes, neither saying which
-# route it used, is the 2026-09-21 incident in full.
+# `up`, `status`, the dry run and the steward all ask this and nothing else,
+# so they cannot derive the mode by different routes and disagree.
 #
-# A PRODUCT MAY OPT IN, NOT ONLY OUT. The old merge rule let
-# `products[].orchestrator` override the workspace mode only when it said
-# `manual` or `none`, so `auto` under a workspace that was not auto was
-# unreachable config - it read as a declaration and behaved as nothing. All
-# three values now win, because a per-product declaration that cannot turn
-# something ON is a trap.
-#
-# The source is returned beside the mode because the owner could not tell
-# where `manual` had come from, and neither could anyone reading three files.
+# Precedence: products[].orchestrator, then layout.orchestrators, then the
+# default. Any of auto|manual|none wins at each level - a product may opt IN,
+# not only out. The source is returned beside the mode so a reader can tell
+# which file said so.
 ws_orchestrator_mode() { # <wsdir> <product> -> "<mode>\t<product|layout|default>"
   local own lay
   own="$(ws_product_get "$1" "$2" orchestrator)"
@@ -577,9 +541,8 @@ ws_policy_block() { # <wsdir> [product] [fleet|solo]
     # Profiles are read straight from the file rather than through lib/profiles.sh:
     # that file sources THIS one, and a policy block is not worth a source cycle.
     # team-contract: the block is rendered from the COMMITTED workspace.yaml
-    # alone, never through workspace.local.yaml (CEL-86). It lands in every
-    # agent's instructions; one person's local profiles must not rewrite what
-    # everyone's agents are told.
+    # alone, never through workspace.local.yaml. It lands in every agent's
+    # instructions; one person's local profiles must not rewrite it.
     local profs wbound
     profs="$(_yqr -r '.worker_profiles // {} | keys_unsorted | join(", ")' "$d/workspace.yaml")"  # team-contract
     wbound="$(_yqr -r '.role_profiles.worker // "" | tostring' "$d/workspace.yaml")"  # team-contract
@@ -663,8 +626,7 @@ ws_link_skills() { # <wsdir> <targetdir>
   mkdir -p "$t"
   # Self-heal: a skill deleted from the workspace must take its repo links
   # with it, or the dangling link keeps shadowing the plane copy of the same
-  # name (observed: stale pr-loop/fanout shadows outliving their source).
-  # Only links that point into THIS workspace's skills dir are ours to prune.
+  # name. Only links into THIS workspace's skills dir are ours to prune.
   for s in "$t"/*; do
     [ -L "$s" ] && [ ! -e "$s" ] || continue
     case "$(readlink "$s")" in "$1"/skills/*) rm -f "$s";; esac

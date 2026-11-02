@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # cel ws list|new|add|sync|push|up|down|reset|status - the workspace commands. Dispatch
-# wiring lives in bin/cel (Task 8); this file is command logic only.
+# wiring lives in bin/cel; this file is command logic only.
 [ -n "${_CEL_WS:-}" ] && return 0
 _CEL_WS=1
 . "${BASH_SOURCE[0]%/*}/registry.sh"
@@ -30,24 +30,16 @@ _ask() { # <question> <default>
   printf '%s' "${a:-$2}"
 }
 
-# A REFUSAL THAT NOBODY EVER SAW. `registry_require` ends in `die`, and every
-# caller wrote `wsdir="$(registry_require "$n")"` - so the process that died
-# was the command substitution's subshell, its message went into the captured
-# stdout that the caller then threw away, and the caller carried on with an
-# empty path and exited 1 with an empty terminal. The owner's teammate met
-# that on their FIRST command on 2026-09-21: `cel ws sync <name>` for a
-# workspace nobody had registered, exit 1, no stdout, no stderr. Being
-# onboarded is exactly the moment you cannot tell "I did it wrong" from "it is
-# broken", and there is nobody to ask.
-#
-# So the check happens in the CALLER's process, never inside `$( )`, and the
-# message rides stderr - the refusal is not the command's output, and a
-# caller redirecting stdout must still see why it stopped.
+# REFUSE OUT LOUD, FROM THE CALLER'S PROCESS. `registry_require` ends in `die`,
+# and inside `wsdir="$(registry_require "$n")"` that kills only the subshell:
+# the message lands in captured stdout and the caller carries on with an empty
+# path. So the check runs in the CALLER's process, never inside `$( )`, and the
+# message rides stderr so a caller redirecting stdout still sees why it stopped.
 _ws_die() { c_err "$*" >&2; exit 1; }
 
 # Resolves a workspace name into $_WS_DIR, or refuses out loud. Call it as a
 # statement - `_ws_require "$n"; d="$_WS_DIR"` - never as `$(_ws_require ...)`,
-# which is the bug this exists to end.
+# which loses the refusal.
 _ws_require() { # <name>
   local p; p="$(registry_path "$1" 2>/dev/null || true)"
   [ -n "$p" ] || _ws_die "workspace '$1' is not registered - register it with: cel ws add <git-url> ('cel ws list' shows the ones that are)"
@@ -71,8 +63,7 @@ cmd_ws() {
   # One gate for every verb that takes a workspace name, in this process, before
   # dispatch - including the lifecycle verbs, whose own `registry_require` calls
   # sit inside `$( )` in lib/wslife.sh. A name that cannot be resolved is
-  # refused here, by name, with the command that would fix it. One silent verb
-  # is enough to lose the next newcomer.
+  # refused here, by name, with the command that would fix it.
   case "$sub" in
     sync|push|env|up|down|reset|status)
       local _n; _n="$(_ws_name_arg "$@")"
@@ -86,7 +77,7 @@ cmd_ws() {
     sync) _ws_sync "$@";;
     push) _ws_push "$@";;
     env) _ws_env "$@";;
-    # CEL-44: the lifecycle verbs. `up` reconciles a workspace to its declared
+    # The lifecycle verbs. `up` reconciles a workspace to its declared
     # shape and is safe to run twice; `down` and `reset` stop things, and
     # refuse over work that is neither pushed nor landed.
     up) cmd_ws_up "$@";;
@@ -257,7 +248,7 @@ _ws_sync_one() {
     url="$(ws_repo_get "$wsdir" "$r" url)"
     if [ ! -d "$wsdir/repos/$r" ]; then
       if [ -n "$url" ]; then
-        # Over the workspace's SSH alias when it declares one (CEL-70): the
+        # Over the workspace's SSH alias when it declares one: the
         # push key is whatever github.com resolves to, independent of gh.
         # workspace.yaml keeps the canonical github.com url.
         git clone -q "$(ws_github_clone_url "$wsdir" "$url")" "$wsdir/repos/$r"
@@ -319,7 +310,7 @@ _ws_push() {
   have gh || die "cel ws push: gh is required"
   _ws_require "$name"; path="$_WS_DIR"
   # The workspace repo is created AS the workspace's own account when it
-  # declares one (CEL-70) - never the box's active account by default.
+  # declares one - never the box's active account by default.
   if [ -n "$(ws_github_user "$path")" ]; then
     ws_github_ready "$path" || die "cel ws push: $(ws_github_fix "$(ws_github_user "$path")")"
   else

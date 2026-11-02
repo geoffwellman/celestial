@@ -1,16 +1,12 @@
 # shellcheck shell=bash
 # cel inbox - agent-to-agent messages that cannot hijack a human's keyboard.
 #
-# `herdr agent prompt` types into the target pane's composer, so a status
-# report arriving while the operator is mid-sentence concatenates with their
-# draft and Enter submits the mash-up. Observed repeatedly on the root
-# orchestrator, which is where humans type most.
-#
-# Routine traffic goes to a FILE instead: one JSONL per workspace, one read
-# cursor per recipient. Runtime-specific extensions or persistent monitors may
-# surface it while idle. Claude's UserPromptSubmit/Stop hooks only run at turn
-# boundaries and do not wake idle sessions. Nothing here types into a pane;
-# escalations stay inbox messages too.
+# `herdr agent prompt` types into the target pane's composer, where it would
+# concatenate with a human's half-typed draft. Routine traffic goes to a FILE
+# instead: one JSONL per workspace, one read cursor per recipient. Runtime-
+# specific extensions or persistent monitors may surface it while idle;
+# Claude's UserPromptSubmit/Stop hooks only run at turn boundaries and do not
+# wake idle sessions. Nothing here types into a pane, escalations included.
 [ -n "${_CEL_INBOX:-}" ] && return 0
 _CEL_INBOX=1
 # shellcheck source=lib/common.sh
@@ -28,19 +24,16 @@ _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}"; }
 # content, so it lives beside the registry rather than in the workspace repo.
 _inbox_ws() { # [name]
   if [ -n "${1:-}" ]; then printf '%s' "$1"; return 0; fi
-  # The launch says whose workspace this is (run.sh exports it): a worker
-  # standing outside every workspace sent to `default` and its report never
-  # reached its orchestrator (CEL-122).
+  # The launch names the workspace (run.sh exports CEL_INBOX_WS), so a worker
+  # standing outside every workspace still sends to its orchestrator's.
   if [ -n "${CEL_INBOX_WS:-}" ]; then printf '%s' "$CEL_INBOX_WS"; return 0; fi
   local d; d="$(ws_current 2>/dev/null)" || { printf 'default'; return 0; }
   local n; n="$(ws_name "$d")"; printf '%s' "${n:-default}"
 }
 
-# WHO AM I? Every pane must drain its OWN mailbox: a hook that assumed "root"
-# meant a project orchestrator's session drained root's queue and advanced
-# root's cursor, so root silently lost mail it had never seen. Identity comes
-# from where the agent is standing, which is unambiguous and needs no env
-# plumbing through herdr:
+# WHO AM I? Every pane drains its OWN mailbox: draining another's advances
+# that reader's cursor and it silently loses mail. Identity comes from where
+# the agent is standing, which needs no env plumbing through herdr:
 #   <ws>                        -> root
 #   <ws>/products/<product>     -> <product>-orch
 #   <ws>/repos/<repo>           -> <repo>-orch
@@ -48,14 +41,9 @@ _inbox_ws() { # [name]
 #   the console directory       -> console   (also CEL_ROLE=console)
 #   the core directory          -> root      (also CEL_ROLE=core): core IS the
 #                                  reader of root's mailbox in every workspace
-# The console stands OUTSIDE every workspace - it is the operator's one pane
-# over the whole box - so there is no coordinate to derive and it fell through
-# to "root", draining the root orchestrator's mailbox: the same silent theft
-# the products/ case below was written to stop.
-# A product orchestrator stands in <ws>/products/<p> rather than a repo
-# checkout; before it had a coordinate of its own it fell through to "root"
-# and drained root's mailbox - exactly the loss the repos/ case was written
-# to stop. No workspace.yaml lookup here on purpose: the path IS the answer.
+# The console stands outside every workspace, so it has its own rule rather
+# than falling through to root. No workspace.yaml lookup on purpose: the path
+# IS the answer.
 _inbox_me() {
   # An explicit identity goes through the same rule as every other name: a
   # canonical alias is unchanged (the rule is idempotent), and one that was
@@ -125,10 +113,9 @@ _inbox_ws_here() { # [name] -> <ws>, rc 1 when the cwd derives nothing
   printf '%s' "$n"
 }
 
-# CEL-53's lesson, applied again: a `die` inside `$( )` kills the subshell and
-# the caller carries on with an empty string, so the refusal never reaches the
-# terminal that needed it. This prints and returns; the caller returns 2 from
-# its own frame, where a non-zero status is visible.
+# A `die` inside `$( )` kills only the subshell and the caller carries on with
+# an empty string. This prints and returns; the caller returns 2 from its own
+# frame, where a non-zero status is visible.
 _inbox_no_workspace() { # <subcommand>
   c_err "cel inbox $1: standing here names no workspace, so there is no mailbox to read - this is not 'no mail'" >&2
   c_err "  name one with --workspace <name>, or read them all with --all-workspaces (cel ws list)" >&2
@@ -136,29 +123,21 @@ _inbox_no_workspace() { # <subcommand>
 
 _inbox_file()   { printf '%s/%s.jsonl' "$(_inbox_dir)" "$1"; }
 
-# Has this name EVER been a mailbox here? A `--for` typo invents a recipient,
-# and an invented recipient is empty by construction - which read exactly like
-# a mailbox somebody was keeping up with. Evidence is a message ever addressed
-# to the name, or a cursor left by a past read. `root` and `console` exist by
-# definition: they are addresses, not agents, and are correct before their
-# first message.
-# Is <ws> a workspace this box knows at all? A typo in --workspace is the same
-# fault as a typo in --for, one argument to the left: it names a mailbox that
-# cannot exist. Registered in the registry, or already holding a mailbox file
-# (a workspace can take mail before it is registered, and a fixture has no
-# registry at all) - anything else is a name nobody has ever used here.
+# Is <ws> a workspace this box knows? Registered, or already holding a mailbox
+# file (a workspace can take mail before it is registered, and a fixture has
+# no registry at all). Anything else is a --workspace typo.
 _inbox_ws_known() { # <ws>
   [ -f "$(_inbox_file "$1")" ] && return 0
   _inbox_all_ws | grep -qxF "$1"
 }
 
+# Has <who> EVER been a mailbox in <ws>? A `--for` typo names a recipient that
+# is empty by construction, which must not read as "no mail". Evidence is a
+# message ever addressed to the name, or a cursor left by a past read. `root`,
+# `console` and `all` are addresses, not agents, and exist by definition.
 _inbox_known() { # <ws> <who>
-  # THE WORKSPACE IS CHECKED BEFORE THE READER. root, console and all exist by
-  # definition - but only somewhere that exists. Short-circuiting on the reader
-  # first meant `--workspace ghost-ws` for the commonest reader of all (root is
-  # what the steward, fleet and every orchestrator escalate to) answered "no
-  # unread mail in ghost-ws" and exited 0: exactly the calm silence this was
-  # written to end, moved one argument to the left.
+  # The workspace is checked before the reader: root/console/all exist by
+  # definition, but only in a workspace that exists.
   _inbox_ws_known "$1" || return 1
   case "$2" in root|console|all) return 0 ;; esac
   local c; for c in "$(_inbox_dir)/$1.$2.cursor" "$(_inbox_dir)/$1.$2."*.cursor; do
@@ -188,13 +167,9 @@ _inbox_elsewhere() { # <ws> <who>
 # so a no-mail sentence there would be injected into every turn as if someone
 # had said it. --json is asked for deliberately, so its state object is stdout.
 #
-# Returns 2 for a workspace that does not exist, so that the two ways of
-# naming one - a cwd that derives nothing, and an explicit --workspace nobody
-# has registered - are one class of answer to a caller reading $?. They are
-# the same fault (you asked about a mailbox that cannot exist) and a script
-# that saw one as a refusal and the other as a clean empty read is exactly the
-# confusion this ticket exists to end; --json could tell them apart and a
-# shell caller could not.
+# Returns 2 for a workspace that does not exist, matching the refusal for a
+# cwd that names no workspace: both ask about a mailbox that cannot exist,
+# and a shell caller sees only $?.
 _inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
   local ws="$1" who="$2" json="$3" state=empty lines="" where="" n c
   if ! _inbox_ws_known "$ws"; then state=no_workspace
@@ -229,21 +204,15 @@ _inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
 
 # --- WHO IS ALIVE TO READ THIS MAILBOX -------------------------------------
 #
-# When the plan retired standing root agents, `root` survived as a NAME - the
-# top, whoever is listening - with the console as the intended listener. A
-# console that is not running listens to nothing. Counted on one box on
-# 2026-09-19: root had taken 553 messages since the 10th, 72 of them
-# escalations, into a mailbox nothing was obliged to open; one of them, still
-# unread, said a reviewer pane had been dead for two days.
-#
-# So "nobody is reading this" becomes a FACT the box can state, rather than a
-# silence every watcher mistakes for calm.
+# `root` is a NAME - the top, whoever is listening - and may have no live
+# reader at all. "Nobody is reading this" is a FACT the box states, rather
+# than a silence every watcher mistakes for calm.
 
 # Every managed agent, one name per line. Failure is not the same as nobody
 # being alive: do not infer absence when either backend could not answer.
 _inbox_roster() {
-  # CEL-75: `cel fleet` already holds the roster for its whole pass, and asking
-  # herdr again per workspace was seconds of each read under load.
+  # A caller that already holds the roster (cel fleet) passes it in; asking
+  # herdr again per workspace costs seconds of each read under load.
   if [ -n "${_INBOX_ROSTER_OK:-}" ]; then
     [ "$_INBOX_ROSTER_OK" = 1 ] || return 1
     printf '%s\n' "${_INBOX_ROSTER_HELD:-}"; return 0
@@ -256,16 +225,14 @@ _inbox_roster() {
 }
 
 # The console stands outside every workspace and has no pane alias, so the
-# roster cannot see it. CEL-32's marker can: `cel console` exports
-# CEL_ROLE=console, and /proc/<pid>/environ is fixed at exec, so it survives a
+# roster cannot see it. Its CEL_ROLE=console marker can: `cel console` exports
+# it, and /proc/<pid>/environ is fixed at exec, so it survives a
 # runtime that rewrites its own argv (the reason lib/gc.sh reads environ too).
 # CEL_PROC_DIR is the seam a test drives this through; nothing else moves it.
 _inbox_console_live() {
-  # ONE grep OVER EVERY environ, not a tr and a grep per process: on a box
-  # running several hundred processes that was two forks each, and under load
-  # it was most of the several seconds inbox_reader_of cost a fleet read
-  # (CEL-75). -z makes NUL the record separator, so -x still matches a whole
-  # variable.
+  # One grep over every environ, not forks per process: per-pid forks cost
+  # seconds on a loaded box. -z makes NUL the record separator, so -x still
+  # matches a whole variable.
   local d="${CEL_PROC_DIR:-/proc}"
   grep -qszx 'CEL_ROLE=console' "$d"/[0-9]*/environ 2>/dev/null
 }
@@ -291,16 +258,16 @@ inbox_reader_of() { # <ws> <mailbox> -> reader name, or empty
   if [ "$box" = root ] && printf '%s\n' "$roster" | grep -qxF core; then printf 'core'; return 0; fi
   want="$(_inbox_agent_want "$box" "$ws")"
   if [ -n "$want" ] && printf '%s\n' "$roster" | grep -qxF "$want"; then printf '%s' "$want"; return 0; fi
-  # The console drains every workspace's ROOT mailbox and no other (CEL-7), so
-  # it is a reader of root and is not evidence for anybody else's.
+  # The console drains every workspace's ROOT mailbox and no other, so it is
+  # a reader of root and is not evidence for anybody else's.
   if [ "$box" = root ] && _inbox_console_live; then printf 'console'; return 0; fi
   return 0
 }
 
 # The unread items for a recipient WITHOUT touching a cursor: looking is not
-# reading. Everything that reports on a backlog - fleet, doctor, the steward,
-# the ranking - reads through here, so they cannot disagree about what unread
-# means.
+# reading. The steward, triage and inbox_mail_json share it so they agree on
+# what unread means; _inbox_count_one also honours the caller's per-reader
+# cursor.
 inbox_unread_json() { # <ws> <who>
   local f cs
   f="$(_inbox_file "$1")"
@@ -319,12 +286,12 @@ inbox_unread_json() { # <ws> <who>
 #   line 1      the mark (all a plain cursor ever held, no trailing newline)
 #   digit lines ids below the mark that are still unread (the holes)
 #   #merged X   migration bookkeeping: legacy name X is already folded in
-# so a mark and its holes can never be written apart. No migration, one line,
-# and this is the plain mark it always was.
+# so a mark and its holes can never be written apart. Without a migration
+# the file is one line: the plain mark.
 #
 # One JSON array of {k, h} for the cursor files that exist; empty array means
 # nothing was ever read. A message is unread when EVERY listed cursor says so
-# (the furthest-along reader wins, as before, now hole-aware). Builtins only:
+# (the furthest-along reader wins, hole-aware). Builtins only:
 # `cel fleet` counts the processes it starts.
 _inbox_cursors_json() { # <cursor-file>...
   local c out="" sep="" lines l h
@@ -377,13 +344,10 @@ inbox_mail_json() { # <ws> [who]
     '{to_root_unread: $n, oldest_secs: $secs, reader: $reader}'
 }
 
-# ONE CURSOR PER READER, NOT PER MAILBOX. "root" is the address orchestrators
-# escalate to - the top, whoever is listening - and it now has two readers: a
-# standing root pane and the console that watches every workspace at once.
-# Sharing one cursor means whichever looked first consumed the other's mail,
-# which is exactly the loss the cursor was introduced to prevent. When the
-# reader IS the recipient the name is unchanged, so existing cursors keep
-# their place.
+# ONE CURSOR PER READER, NOT PER MAILBOX. A mailbox such as root can have
+# several readers (a root pane, the console); a shared cursor would let
+# whichever looked first consume the other's mail. When the reader IS the
+# recipient the plain <ws>.<who>.cursor name is used.
 _inbox_cursor() { # <ws> <recipient>
   local reader; reader="$(_inbox_me)"
   if [ -n "$reader" ] && [ "$reader" != "$2" ]; then
@@ -399,9 +363,8 @@ _inbox_cursor() { # <ws> <recipient>
 # knowing which box it came from.
 _inbox_all_ws() { registry_names 2>/dev/null || true; }
 # The sweep --all-workspaces makes, plus the mailbox --workspace named beside it
-# when the registry does not list it. --workspace used to be ignored there; an
-# orchestrator launched for a workspace the registry has not caught up with
-# must still read its home mailbox while sweeping the rest.
+# when the registry does not list it: an orchestrator launched for a workspace
+# the registry has not caught up with still reads its home mailbox.
 _inbox_every_ws() { # [extra-ws]
   local all; all="$(_inbox_all_ws)"
   [ -n "$all" ] && printf '%s\n' "$all"
@@ -511,21 +474,15 @@ cel inbox - messages between agents that never type into a pane
 EOS
 }
 
-# Mail to a worker that no longer exists can never be read by anyone: a worker
-# mailbox is named for one worktree on one branch, and when that agent is gone
-# the name refers to nobody. Left in place it is permanent noise - the steward
-# reports the backlog every tick, and a watcher that always has something to
-# say is a watcher people stop reading. Observed 2026-09-15 in a live inbox:
-# 31 recipients holding unread mail, every one of them a dead worker, and not
-# a single live agent behind.
+# Mail to a worker that no longer exists can never be read: a worker mailbox
+# is named for one worktree on one branch. Left in place it is permanent
+# noise in every backlog report.
 #
 # Archived rather than deleted: it is the record of what was said to a worker
-# that never heard it, which is exactly the evidence you want when asking why
-# a ticket stalled.
+# that never heard it - evidence for why a ticket stalled.
 #
-# ROOT AND ORCHESTRATORS ARE NEVER PRUNED. They are restarted routinely - a
-# compaction, a model change, a crash - and mail sent while one was down is
-# the mail it most needs on the way back up.
+# ROOT AND ORCHESTRATORS ARE NEVER PRUNED. They are restarted routinely, and
+# mail sent while one was down is the mail it most needs on the way back up.
 _inbox_prune() { # [--workspace w] [--dry-run]
   local ws="" dry=0
   while [ $# -gt 0 ]; do
@@ -576,10 +533,8 @@ _inbox_prune() { # [--workspace w] [--dry-run]
 
 # The id of the OPEN item carrying this condition key, or nothing. Resolved
 # items do not count: a condition that came back is news again.
-# ANY KIND (CEL-96). Only decision/blocked used to be looked up, so a `status`
-# raised with an fp was appended fresh every tick - 1,148 "AFK expired" lines
-# in a day and a half. A status item still stays out of `cel inbox open` (it
-# asks nobody for anything); it is rolled up and resolved all the same.
+# Any kind: a `status` with an fp rolls up too, though it stays out of
+# `cel inbox open` (it asks nobody for anything).
 _inbox_open_fp() { # <ws> <fp> [from] [to]
   local f; f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
@@ -597,19 +552,9 @@ _inbox_open_fp() { # <ws> <fp> [from] [to]
 
 _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key]
   [ $# -ge 2 ] || die "usage: cel inbox send <to> <message> [--from x] [--kind status|escalation] [--fp key]"
-  # THE RECIPIENT IS NORMALISED THE SAME WAY IT NORMALISES ITSELF.
-  #
-  # A pane derives its own mailbox with _inbox_sanitise - lowercased and cut to
-  # 32 characters - but the sender wrote whatever string it had to hand, and
-  # the two only agreed by luck. A branch named ABC-20-faithful-integrity
-  # produced `product-games-ABC-20-faithful-integrity`, while the worker
-  # itself answered to the lowercased 32-character form, so the message sat in
-  # a mailbox with almost the right name that nobody would ever open. Found in
-  # a live inbox on 2026-09-15: 50-odd messages across a dozen phantom
-  # mailboxes, several of them the same recipient spelled two ways.
-  #
-  # Normalising here makes the address canonical at the point of sending, so a
-  # caller can be careless about case and length and still be delivered.
+  # THE RECIPIENT IS NORMALISED THE SAME WAY IT NORMALISES ITSELF
+  # (_inbox_sanitise), so a sender careless about case or length still
+  # reaches the mailbox the pane actually reads.
   local to="$1" message="$2"; shift 2
   case "$to" in
     all) ;;                       # the broadcast address, left alone
@@ -628,19 +573,14 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
       *) die "cel inbox send: unknown argument '$1'" ;;
     esac
   done
-  # `owner` (CEL-120) is mail the owner typed himself via `cel drive send`:
-  # the orchestrator should know a person is waiting, not automation.
+  # `owner` is mail a person typed via `cel drive send`: the orchestrator
+  # should know a person is waiting, not automation.
   case "$kind" in status|escalation|decision|blocked|owner) ;;
     *) die "cel inbox send: --kind must be status, escalation, decision, blocked or owner (got '$kind')";; esac
-  # STATUS TO ROOT IS WRITE-ONLY TELEMETRY. Of the 553 messages root's mailbox
-  # took on one box between 10 and 19 September, 466 were `status` - one
-  # instruction in core/roles/project-orchestrator.md told every orchestrator
-  # to report every ticket there, and the same facts were already in the
-  # ledger and rendered by `cel fleet`, `cel-fanout status` and the dashboard.
-  # Mail to root is for something a person must answer, decide or unblock.
-  #
-  # WARNED, NOT REFUSED: a role file somewhere in the wild still does this,
-  # and a refusal would break it mid-flight. The message still arrives.
+  # STATUS TO ROOT IS WRITE-ONLY TELEMETRY: ticket status already lives in the
+  # ledger (`cel fleet`, `cel-fanout status`, the dashboard). Mail to root is
+  # for something a person must answer, decide or unblock. Warned, not
+  # refused, so role files that still do it keep working.
   if [ "$to" = root ] && [ "$kind" = status ]; then
     c_warn "status to root is not read by anyone; the ledger already carries it" >&2
   fi
@@ -648,12 +588,9 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
   [ -n "$from" ] || from="$(_inbox_me)"
   local id line ref=""
   id="$(date +%s%N)"
-  # ONE OPEN ITEM PER CONDITION. The steward reopens its window every four
-  # hours and posted a fresh blocker each time, so one exhausted provider
-  # filled a mailbox with twenty-four copies of one sentence and the console
-  # showed twenty-four rows where one was true. While the item it already
-  # posted is still open, the repeat becomes an update ON that item: still one
-  # new line for the reader (the bell rings, once), still one thing to resolve.
+  # ONE OPEN ITEM PER CONDITION. While an item with this fp is still open, a
+  # repeat becomes an update ON it: one new line for the reader (the bell
+  # rings once), still one thing to resolve.
   [ -n "$fp" ] && ref="$(_inbox_open_fp "$ws" "$fp" "$from" "$to")"
   if [ -n "$ref" ]; then
     line="$(jq -nc --arg id "$id" --arg ts "$(date -Is)" --arg to "$to" --arg from "$from" \
@@ -801,16 +738,11 @@ _inbox_count_one() { # <ws> <who>
   local f cs
   f="$(_inbox_file "$ws")"
   [ -f "$f" ] || { printf '0\n'; return 0; }
-  # THE RECIPIENT'S BACKLOG, NOT THE CALLER'S. A count asked from a shell or
-  # the steward used the caller's own per-reader cursor, so every caller saw
-  # a different number and the steward nagged about "root: 537 unread" that
-  # the console had drained days earlier. The recipient's own cursor is the
-  # measure - and for root, whose mail the console drains when no root pane
-  # exists (CEL-7), the console's cursor counts too: whichever is further.
-  # Three cursors can each prove the mail was read: the recipient's own, the
-  # caller's per-reader one (a Monitor that read on the recipient's behalf),
-  # and for root the console's. The furthest along wins - ids are fixed-width
-  # digits, so string order is time order.
+  # THE RECIPIENT'S BACKLOG, NOT THE CALLER'S. Three cursors can each prove
+  # the mail was read: the recipient's own, the caller's per-reader one (a
+  # Monitor that read on the recipient's behalf), and for root the console's.
+  # The furthest along wins - ids are fixed-width digits, so string order is
+  # time order.
   cs="$(_inbox_cursors_json "$(_inbox_dir)/$ws.$who.cursor" "$(_inbox_cursor "$ws" "$who")" \
           $([ "$who" = root ] && printf '%s' "$(_inbox_dir)/$ws.root.console.cursor"))"
   jq -c --arg who "$who" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
@@ -833,19 +765,10 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
     esac
   done
   [ -n "$who" ] || who="$(_inbox_me)"
-  # BELT AND BRACES FOR A CONSOLE THAT DID NOT GET TO KILL US. A walk of the
-  # box on 2026-09-19 found thirteen of these trees reparented to init, four
-  # of them days old: every console that exited uncleanly left one tailing a
-  # mailbox for a pane that no longer existed. The console now kills the group
-  # on every exit path (tools/console/watcher.mjs), and this is the half that
-  # survives the path nobody thought of - the watcher follows the pid it was
-  # told owns it, and goes when that pid goes. Signalling our own process
-  # group, not just this pid, because the work is a `tail | jq` pipeline.
-  # ONE WATCH PER PARENT AND READER, ENFORCED (CEL-111). A hook that restarts
-  # its watcher, or a console started twice, must never leave two tailing the
-  # same mailbox for the same pane. A short wait covers the old watcher still
-  # exiting after a restart; anything still holding it after that is a live
-  # duplicate, and this one goes quietly.
+  # ONE WATCH PER PARENT AND READER, enforced by a lock: a restarted hook or a
+  # console started twice must not leave two tailing the same mailbox. A short
+  # wait covers the old watcher still exiting; anything still holding the lock
+  # after that is a live duplicate, and this one exits quietly.
   if [ -n "$parent" ] && have flock; then
     local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-watch"
     mkdir -p "$lkd" 2>/dev/null || true
@@ -854,18 +777,20 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
       flock -w "${CEL_INBOX_WATCH_LOCK_WAIT:-1}" "$lkfd" || return 0
     fi
   fi
+  # The watcher follows the pid it was told owns it and goes when that pid
+  # goes, so a parent that exits uncleanly cannot leave it tailing a dead
+  # pane's mailbox (the console also kills the group: tools/console/watcher.mjs).
+  # It signals its own process group because the work is a `tail | jq` pipeline.
   local poller=""
   if [ -n "$parent" ]; then
     ( while kill -0 "$parent" 2>/dev/null; do sleep "${CEL_WATCH_PARENT_POLL:-5}"; done
       kill -TERM -- "-$$" 2>/dev/null || kill -TERM "$$" 2>/dev/null ) &
     poller=$!
   fi
-  # ONE TAIL FOR EVERY MAILBOX (CEL-111). --all-workspaces used to fork a
-  # `tail | jq | while` pipeline per workspace, each under its own wrapper
-  # subshell - ten processes per watcher on a five-workspace box, and every
-  # orchestrator, worker and reviewer hook runs one: 200 on the box. tail
-  # follows all the files at once and names each on a `==> file <==` header;
-  # one jq carries the current workspace across lines.
+  # ONE TAIL FOR EVERY MAILBOX: tail follows all the files at once and names
+  # each on a `==> file <==` header; one jq carries the current workspace
+  # across lines. Every agent hook runs a watcher, so a pipeline per
+  # workspace multiplies process counts across the box.
   local names n f files=() single=""
   local only=""
   if [ "$every" -eq 0 ]; then single="$(_inbox_ws "$ws")"; names="$single"
@@ -912,19 +837,17 @@ _inbox_watch_lines() { # <who> <single-ws|""> <only-ws|""> < ws\tkind\tfrom\tmsg
       if [ -n "$single" ]; then ws="$single"
       else [ -n "$ws" ] || ws="$only"; prefix="[$ws] "; fi
       printf '%sINBOX %s from %s: %s  (cel inbox read --for %s)\n' "$prefix" "$kind" "$from" "$msg" "$who"
-      # An ESCALATION is by definition the kind that cannot wait, and it was
-      # the one kind that raised nothing: 72 of them landed in root's mailbox
-      # in nine days with no signal anywhere else.
+      # The kinds that cannot wait for someone to read this pane also raise a
+      # desktop notification.
       case "$kind" in escalation|decision|blocked) _inbox_notify "$kind" "$from" "$ws" "$msg" ;; esac
     done
 }
 
-# A DECISION MUST NOT WAIT FOR THE OPERATOR TO CHANGE TABS. stdout is a
-# notification only to whatever is reading this pane; a question addressed to
-# the top of the tree, landing in a workspace nobody is looking at, sat unseen
-# for hours. So the two kinds that block someone also raise a desktop
-# notification. Best-effort in every direction: no herdr, no HERDR_ENV, or a
-# failing call must never kill the watch that is the only delivery path.
+# A DECISION MUST NOT WAIT FOR THE OPERATOR TO CHANGE TABS. stdout reaches
+# only whatever reads this pane, so the kinds that block someone also raise a
+# desktop notification. Best-effort in every direction: no herdr, no
+# HERDR_ENV, or a failing call must never kill the watch that is the only
+# delivery path.
 _inbox_notify() { # <kind> <from> <ws> <message>
   [ "${CEL_INBOX_NOTIFY:-1}" = 0 ] && return 0
   [ "${HERDR_ENV:-}" = "1" ] || return 0
@@ -954,8 +877,7 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   [ -n "$who" ] || who="$(_inbox_me)"
   # RANKED IS A DIFFERENT QUESTION ABOUT THE SAME MAILBOX: not "what is still
   # open" but "of what I have not read, what needs me now". It runs over the
-  # UNREAD set, after the two fixes above have cut the volume, and it is a
-  # look - the cursor does not move.
+  # UNREAD set and is a look - the cursor does not move.
   if [ "$ranked" -eq 1 ]; then
     # shellcheck source=lib/triage.sh
     . "${BASH_SOURCE[0]%/*}/triage.sh"
@@ -969,9 +891,8 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
     triage_render "$(_inbox_ws "$ws")" "$who" "$json"
     return 0
   fi
-  # Everything waiting on one reader, in ONE call. The console loops the
-  # registry itself today; a chain or a human has no such loop, and "what is
-  # waiting on me" is not a per-workspace question.
+  # Everything waiting on one reader, in ONE call: "what is waiting on me" is
+  # not a per-workspace question.
   if [ "$every" -eq 1 ]; then
     local n
     for n in $(_inbox_every_ws "$ws"); do
@@ -1015,12 +936,10 @@ _inbox_append_resolution() { # <file> <ref> <to> <by>
     '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: $to, message: ("resolved by " + $by)}')"
 }
 
-# CLEANING THE INBOX IS ONE LINE, NOT TWENTY-FOUR. Resolving by id is right
-# for an answer to one question and absurd for a mailbox full of a watcher's
-# repeats: root's held twenty-eight items that were four conditions. Every
-# filter given must match; none given means everything open for the reader,
-# which is allowed on purpose - the count is printed so the operator sees
-# exactly what the line did.
+# Bulk resolve: resolving by id fits an answer to one question, not a mailbox
+# of a watcher's repeats. Every filter given must match; none given means
+# everything open for the reader, allowed on purpose - the count is printed
+# so the operator sees exactly what the line did.
 _inbox_resolve_all() { # [--from w] [--matching s] [--kind k] [--older-than h] [--for w] [--by w] [--workspace w]
   local who="" ws="" by="" from="" matching="" kind="" older=""
   while [ $# -gt 0 ]; do

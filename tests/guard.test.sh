@@ -55,12 +55,9 @@ test_orchestrator_may_write_its_own_notes() {
 }
 
 # An orchestrator owns the STATE of its own checkout, never its authorship.
-# Before this, `gh pr checkout 1393` was allowed by omission and `git checkout
-# main` was denied: an orchestrator could move onto a PR branch to run it
-# locally and could not move back, so its checkout drifted off main with
-# nobody else standing over it. Moving between refs that already exist creates
-# and discards nothing - the incidents the guard was written for are all
-# authorship.
+# It may move onto a PR branch to run it locally and back to main; moving
+# between refs that already exist creates
+# and discards nothing; the guard exists to stop authorship.
 test_orchestrator_may_move_its_own_checkout() {
   local c
   for c in 'git checkout main' 'git switch main' 'git checkout origin/W-49-slug' \
@@ -153,7 +150,7 @@ test_orchestrator_may_not_edit_repo_files_by_tool() {
   rm -rf "$T"
 }
 # Root's cwd is the WORKSPACE repo - config, not product - which root and the
-# owner's assistant legitimately commit to. Product checkouts stay off-limits.
+# owner legitimately commit to. Product checkouts stay off-limits.
 test_root_may_commit_workspace_config_but_not_products() {
   assert_eq "$(guard_classify root 'git add workspace.yaml && git commit -m tune')" allow
   assert_eq "$(guard_classify root 'git push')" allow

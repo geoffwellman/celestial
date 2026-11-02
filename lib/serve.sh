@@ -223,17 +223,16 @@ _serve_pid_in_ledgered_unit() { # <pid> <unit...>
   [ -n "$cgroup" ] && _serve_cgroup_is_ledgered_unit "$cgroup" "$@"
 }
 
-# WHAT IS NOT A PREVIEW, though it listens on a port. The candidate list was
-# "every process of mine with a TCP listener", and on 2026-10-24 it named live
-# omp orchestrators, Hermes' gateway and its desktop servers as previews to
-# adopt - and adopting puts a thing on a TTL that stops it. Refused here:
+# WHAT IS NOT A PREVIEW, though it listens on a port. "Every process of mine
+# with a TCP listener" includes live agent runtimes and standing gateways, and
+# adopting puts a thing on a TTL that stops it. Refused here:
 #   - coding-agent runtimes (omp, pi, claude, codex, opencode, by argv[0], or
 #     argv[1] for a node/bun script);
 #   - a process inside a running user SERVICE whose name the unit pass below
 #     would not offer (hermes-gateway, cel-dash, ...): services are judged as
 #     units, by name, never as loose pids;
 #   - anything whose command contains an entry of box config `serve.ignore`
-#     (comma-separated substrings) - the owner's own standing tools.
+#     (comma-separated substrings) - the operator's own standing tools.
 _serve_ignored() { # <command> -> 0 when box config serve.ignore matches it
   local ignore pat; ignore="$(cel_config_get serve ignore 2>/dev/null || true)"
   local IFS=,

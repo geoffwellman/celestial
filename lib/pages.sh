@@ -41,13 +41,10 @@ _pages_workspace() { # [dir] -> name | ""
   case "$d" in
     "$wt"/*)
       repo="${d#"$wt"/}"; repo="${repo%%/*}"
-      # AMBIGUITY IS NOT A TIE TO BREAK. Worktrees are global - one directory
-      # per repo NAME, not per workspace - so when two registered workspaces
-      # declare the same repo, the path cannot say which one spawned this
-      # worker. Picking the first in the registry would attribute the page to a
-      # workspace that has never seen it, and attribution drives both the
-      # filter and the collision rule. Unattributed is honest; wrong is not.
-      # (Codex review, PR #9.)
+      # AMBIGUITY IS NOT A TIE TO BREAK. Worktrees are per repo NAME, not per
+      # workspace, so when two registered workspaces declare the same repo the
+      # path cannot say which one spawned this worker. Attribution drives both
+      # the filter and the collision rule: unattributed is honest; wrong is not.
       local hits="" 
       while read -r n; do
         [ -n "$n" ] || continue
@@ -67,12 +64,9 @@ _pages_workspace() { # [dir] -> name | ""
     [ -n "$n" ] || continue
     p="$(registry_path "$n")"; [ -n "$p" ] || continue
     local m; m="$(printf '%s' "$p" | tr '/' '-')"
-    # A WHOLE PATH SEGMENT, not a substring. `/home/me/ws/a` mangles to
-    # `-home-me-ws-a`, which is a prefix of `alpha`'s `-home-me-ws-alpha`, so a
-    # substring match hands every page published from alpha to workspace a -
-    # whichever the registry happens to list first. The sidecar and the
-    # collision decision would then both name the wrong workspace.
-    # (Codex review, PR #9.)
+    # A WHOLE PATH SEGMENT, not a substring: `/home/me/ws/a` mangles to
+    # `-home-me-ws-a`, a prefix of alpha's `-home-me-ws-alpha`, so a substring
+    # match would attribute alpha's pages to workspace a.
     case "$d" in */"$m"|*/"$m"/*) printf '%s' "$n"; return 0;; esac
   done < <(registry_names)
   return 0
@@ -176,8 +170,8 @@ _pages_unit_install() { # <unit> <log> [--public]
   dir="$(_pages_unit_dir)"; f="$dir/$unit.service"
   new="$(pages_unit_text "$@")"
   _PAGES_UNIT_CHANGED=0
-  # First install over a pre-CEL-122 box: a live TRANSIENT unit of the same
-  # name shadows the new file until the manager restarts - stop it once.
+  # No installed file yet: a live TRANSIENT unit of the same name would shadow
+  # the new file until the manager restarts - stop it once.
   [ -f "$f" ] || systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
   if [ ! -f "$f" ] || [ "$(cat "$f")" != "$new" ]; then
     mkdir -p "$dir"; printf '%s\n' "$new" >"$f"; _PAGES_UNIT_CHANGED=1
@@ -206,9 +200,8 @@ _pages_ensure() { # <public 0|1>
   fi
   mkdir -p "$(_pages_log_dir)"
   if _pages_have_unit; then
-    # CEL-109 gave pages its own cgroup as a TRANSIENT unit; CEL-122 found
-    # transient units do not survive the user manager going down. An
-    # installed, enabled unit (like cel-dash) comes back with the manager.
+    # An installed, enabled unit (like cel-dash), not a transient one: only
+    # that comes back when the user manager restarts.
     local unit; unit="$(_pages_unit "$public")"
     _pages_unit_install "$unit" "$log" "${flag[@]}"
     systemctl --user reset-failed "$unit.service" >/dev/null 2>&1 || true
@@ -422,32 +415,23 @@ cmd_publish() { # [--public [--include page.html]...] <file> [name]
   else
     root="$(_pages_root)"
     # ONE FLAT NAMESPACE, BUT NOT A SHARED BLAST RADIUS. Republishing a name
-    # in place is the whole design - the URL stays stable across revisions,
-    # like an artifact redeploy - so a timestamp on every name would be a cure
-    # worse than the disease: every revision would get a new URL and every
-    # link already sent would rot. The clobber worth preventing is the one
-    # nobody intends: ANOTHER workspace's page of the same name. So the name is
-    # suffixed only when the incumbent belongs to someone else, and suffixed
-    # with the workspace rather than a timestamp, so that workspace's own
-    # republishes stay stable and in place too.
+    # in place keeps its URL stable across revisions, so names are never
+    # timestamped. The clobber worth preventing is ANOTHER workspace's page of
+    # the same name: only then is the name suffixed, with the publishing
+    # workspace, so that workspace's own republishes stay stable too.
     local owner; owner="$(_pages_owner "$root" "$name")"
     if [ -n "$owner" ] && [ -n "$ws" ] && [ "$owner" != "$ws" ]; then
-      # Separate statements: a single `local a=... b=$a` leaves b reading an
-      # unset a on this shell, which silently produced names like `-beta.html`.
+      # Separate statements: in a single `local a=... b=$a`, b reads an unset a
+      # on this shell.
       local stem; stem="${name%."$ext"}"
-      # SANITISE THE SUFFIX. A workspace name is not restricted to
-      # filename-safe characters, and this is appended AFTER the document name
-      # was sanitised - so a workspace called `team/docs` would produce
-      # `report-team/docs.html`, a path rather than a name. Same rule the
-      # document name gets. (Codex review, PR #9.)
+      # SANITISE THE SUFFIX: it is appended after the document name was
+      # sanitised, and a workspace called `team/docs` would otherwise produce
+      # `report-team/docs.html`, a path. Same rule the document name gets.
       local wss; wss="$(printf '%s' "$ws" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
       wss="${wss#-}"; wss="${wss%-}"; wss="${wss:-ws}"
       local want="$stem-$wss" n=1
-      # AND THE FALLBACK HAS TO BE FREE TOO. `report-beta.html` can already
-      # belong to a third workspace - one that simply published a document
-      # called that - and stopping at the first candidate would overwrite it,
-      # reintroducing the clobber one name along. Walk until the name is
-      # unowned or ours. (Codex review, PR #9.)
+      # The fallback must be free too: `report-beta.html` may already belong
+      # to a third workspace. Walk until the name is unowned or ours.
       while :; do
         local cand="$want.$ext" cowner
         cowner="$(_pages_owner "$root" "$cand")"

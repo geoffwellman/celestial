@@ -2,22 +2,14 @@
 # cel ws up|down|reset|status - a workspace has a declared shape, and the
 # plane can put it back.
 #
-# The owner, 2026-09-19: "so there is no way to open or close a workspace from
-# the console? or reset it to the appropriate layout and initial setup - there
-# should be. I can't restart the alpha session." Three gaps behind that
-# sentence, and this file answers all three:
-#
-#   1. A workspace declared no shape, so there was nothing to return it TO.
-#      `layout:` in workspace.yaml now says what should be running in it
-#      (lib/workspace.sh: ws_layout_get, ws_layout_panes).
-#   2. Nothing could open or close one. `up` RECONCILES - idempotent, never
-#      destructive - and `down` closes the panes it owns.
-#   3. A nameless agent was invisible. herdr cleared a live orchestrator's
-#      name when it restarted; every surface resolves one by its alias on the
-#      roster, so a LIVE product read as dead - and the answer to a dead
-#      orchestrator is to start another, on top of the one that is running.
-#      `up` renames it instead, which is the whole reason this is a reconcile
-#      and not a launcher.
+#   - `layout:` in workspace.yaml says what should be running in it
+#     (lib/workspace.sh: ws_layout_declared, ws_layout_panes).
+#   - `up` RECONCILES - idempotent, never destructive - and `down` closes the
+#     panes it owns.
+#   - herdr can clear a live orchestrator's name on restart, and every surface
+#     resolves an agent by its roster alias, so a nameless live agent reads as
+#     dead. `up` renames it rather than starting a second one on top of it,
+#     which is why this is a reconcile and not a launcher.
 #
 # WHAT THIS FILE NEVER DOES: remove a worktree, or write the delegation
 # ledger. `down` is about PANES. Work is landed and let go by `cel-fanout
@@ -64,8 +56,8 @@ _wslife_label() { printf '%s' "$1"; }
 # WHICH PRODUCTS WANT AN ORCHESTRATOR. One resolver answers, per product:
 # `layout.orchestrators` is the workspace-wide switch (auto | manual | none),
 # `products[].orchestrator` overrides it in EITHER direction, and silence -
-# in any of its three shapes - means manual, which starts nothing. See
-# ws_orchestrator_mode in lib/workspace.sh for the incident behind that.
+# in any of its three shapes - means manual, which starts nothing (see
+# ws_orchestrator_mode in lib/workspace.sh).
 wslife_orchestrators() { # <wsdir>
   local p mode
   for p in $(ws_product_names "$1"); do
@@ -81,13 +73,10 @@ wslife_orchestrators() { # <wsdir>
 # "unlanded" means - a `down` that let go of work `release` would have refused
 # is the same loss by another door.
 #
-# FAIL CLOSED WHEN IT CANNOT SEE. Every way of failing to READ the ledger once
-# produced an empty result, indistinguishable from "nothing is held", so the
-# refusal never fired over a missing, unreadable or malformed ledger - the
-# exact stranding it exists to prevent, with no warning at all. So a read that
-# cannot be trusted returns 3 with the reason on stdout; only a ledger that was
-# actually read returns 0, with one line per worktree at risk (empty when it
-# genuinely holds nothing).
+# FAIL CLOSED WHEN IT CANNOT SEE. A missing, unreadable or malformed ledger
+# returns 3 with the reason on stdout - never an empty "nothing is held". Only
+# a ledger that was actually read returns 0, with one line per worktree at
+# risk (empty when it genuinely holds nothing).
 _wslife_held_work() { # <wsdir> -> lines; return 0 read ok, 3 cannot tell
   local led="$1/.cel/delegations.json" branch wt risk rows
   if [ ! -e "$led" ]; then
@@ -186,15 +175,14 @@ cmd_ws_up() { # <name> [--dry-run]
     resp="$(herdr tab create --workspace "$ws_id" --cwd "$cwd" --label "$pane_label" --no-focus)" \
       || die "cel ws up: herdr tab create failed for pane '$pane_label'"
     pane="$(printf '%s' "$resp" | jq -r '.. | .pane_id? // empty' | head -1)"
-    # An empty pane when no cmd is declared: a pane is a place to work, and a
-    # workspace that insisted on a command for every one of them would be a
-    # workspace nobody could declare a scratch pane in.
+    # An empty pane when no cmd is declared: a scratch pane is a valid
+    # declaration.
     [ -z "$pane_cmd" ] || herdr pane run "$pane" "$pane_cmd" >/dev/null 2>&1 \
       || c_warn "pane '$pane_label' opened but '$pane_cmd' could not be typed into it"
     _wslife_say "pane $pane_label" "created${pane_cmd:+ ($pane_cmd)}"
   done < <(ws_layout_panes "$wsdir")
 
-  # NUMBERED TABS (CEL-83 addendum). herdr names a tab with a bare number;
+  # NUMBERED TABS. herdr names a tab with a bare number;
   # name each from what is in it - a pane's label, else its agent's name.
   [ -z "$ws_id" ] || _wslife_name_tabs "$ws_id" "$dry"
 
@@ -260,11 +248,9 @@ cmd_ws_down() { # <name> [--force]
   have jq    || die "cel ws down: jq is not on PATH"
 
   # FAIL CLOSED, exactly as `cel-fanout release` does. Closing a pane does not
-  # destroy a worktree, but it does take away the agent that was about to push
-  # it, and an operator who meant "tidy up" would never learn which branch they
-  # had stranded. The refusal NAMES them - and a ledger it CANNOT read is not a
-  # quiet yes: a guard that cannot see does not wave you through, it says why it
-  # cannot tell and stops.
+  # destroy a worktree, but it takes away the agent that was about to push it.
+  # The refusal NAMES the branches at risk, and a ledger it CANNOT read stops
+  # with the reason rather than reading as a quiet yes.
   local held rc=0
   held="$(_wslife_held_work "$wsdir")" || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -374,9 +360,8 @@ _wslife_members() { # <wsdir> <name> -> kind\tname\tdeclared\tlive\taction\tsour
   for p in $(ws_product_names "$wsdir"); do
     alias="$(_run_agent_name "$p-orch")"
     dir="$(ws_product_dir "$wsdir" "$p")"
-    # ONE RESOLVER, AND IT SAYS WHERE THE ANSWER CAME FROM. This table used to
-    # merge the layout mode with the product's own value by a rule of its own,
-    # which is how `status` and the steward came to disagree in public.
+    # ONE RESOLVER (ws_orchestrator_mode), so `status` and the steward cannot
+    # disagree about the mode, and it says where the answer came from.
     local declared source
     IFS=$'\t' read -r declared source <<< "$(ws_orchestrator_mode "$wsdir" "$p")"
     occupant="$(_run_live_agent_in_cwd "$dir")"
@@ -426,8 +411,8 @@ cmd_ws_status() { # [<name>] [--json]
     printf '%s\n' "$n"
     while IFS=$'\t' read -r kind mname declared live action source; do
       [ -n "$kind" ] || continue
-      # The SOURCE rides beside the mode, in the same column: "declared
-      # manual" told the owner nothing about which of three files said so.
+      # The SOURCE rides beside the mode, in the same column, so the reader
+      # sees which file declared it.
       local shown="$declared"
       [ "$source" = '-' ] || shown="$declared via $source"
       printf '  %-12s %-22s declared %-18s live %-8s %s\n' \

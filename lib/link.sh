@@ -41,9 +41,9 @@ link_core_agents() {
   return 0
 }
 
-# The fleet-agents era linked the three role bodies into ~/.claude/agents, which
-# is what exposed them to global subagent dispatch. Remove any such link, from
-# either repo, wherever it still points at a roles directory.
+# Role bodies must never sit in an agents dir, where they become globally
+# dispatchable subagents. Remove any link into core/roles/ or a fleet-agents
+# checkout.
 unlink_stale_roles() {
   local a ad l target
   for a in $(agent_names); do
@@ -61,10 +61,8 @@ unlink_stale_roles() {
   return 0
 }
 
-# CORRECTED in Task 4. The original linked $HOME/.config/herdr/layouts, which
-# herdr-plugin-workspace-manager does not read - nothing in the plugin refers to
-# that path, so the layout vendored there had never been applied to anything.
-# The plugin reads config.yml from its own config directory and nowhere else.
+# herdr-plugin-workspace-manager reads config.yml from its own config
+# directory (`herdr plugin config-dir`) and nowhere else.
 link_herdr_layouts() {
   local cfg="$CEL_ROOT/tools/herdr/layouts/config.yml"
   [ -f "$cfg" ] || return 0

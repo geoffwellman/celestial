@@ -1,13 +1,9 @@
 # shellcheck shell=bash
-# cel inbox migrate - recover a mailbox the old sanitiser split (AH-261017).
-#
-# Until AH-261017 the alias sanitiser stripped a trailing dash and THEN cut to
-# 32 characters, so a name whose 32nd character is a dash was `abc-` the first
-# time and `abc` the second. A worker's mail sent by full name reached `abc-`;
-# mail sent to its own alias (already 32 characters) was normalised again and
-# filed under the 31-character phantom `abc`, which nothing reads. The rule is
-# fixed (cel_alias_norm); this is the one-time repair of mail that already
-# landed on the wrong side.
+# cel inbox migrate - one-time repair of mailboxes an earlier alias sanitiser
+# split in two: a 31-character legacy name beside its 32-character canonical
+# alias (cel_alias_norm), or any name that is not canonical. Mail filed under
+# the legacy name is read by nobody. Runs only when invoked; dry run unless
+# --apply.
 #
 # WHAT IT DOES. For every legacy name S that has a canonical target T:
 #   * rewrites `to` from S to T in the mailbox file, keeping the original in

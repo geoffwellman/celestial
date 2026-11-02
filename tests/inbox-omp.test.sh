@@ -242,7 +242,7 @@ test_omp_inbox_no_backlog_no_wake() {
   assert_eq "$(jq -r '.notes|length' <<<"$out")" "0"
 }
 
-# CEL-inbox-delivery: an orchestrator with an explicit identity (CEL_INBOX_ME)
+# An orchestrator with an explicit identity (CEL_INBOX_ME)
 # is reached in EVERY registered workspace, not only the one its launch named,
 # while other recipients' mail is never touched; a dead watcher is recovered
 # and its downtime backlog delivered once; a wake withheld for a draft or an
@@ -376,8 +376,8 @@ test_omp_inbox_wake_without_agent_end_does_not_strand_later_mail() {
 }
 
 # The CLI half: --workspace beside --all-workspaces adds that mailbox to the
-# sweep (it used to be ignored), so a launch workspace missing from the
-# registry is still read. Without --workspace nothing changes.
+# sweep, so a launch workspace missing from the registry is still read.
+# Without --workspace nothing changes.
 test_inbox_all_workspaces_with_workspace_includes_an_unregistered_one() {
   D="$(mktemp -d)"; REG="$(mktemp -d)"; mkdir -p "$REG/alpha"
   printf 'workspaces:\n  alpha:\n    path: %s\n' "$REG/alpha" > "$REG/registry.yaml"

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# workspace.local.yaml (CEL-86): the team contract stays in the committed
+# workspace.local.yaml: the team contract stays in the committed
 # workspace.yaml; a gitignored local file may change routing and per-box env,
 # and nothing else. These tests pin both halves of that line.
 source "$CEL_ROOT/lib/common.sh"
@@ -143,7 +143,7 @@ test_doctor_fails_when_workspace_yaml_is_not_committed() {
   rm -rf "$T"
 }
 
-# --- Sourcery follow-ups ----------------------------------------------------
+# --- malformed or out-of-scope local files ----------------------------------
 test_doctor_warns_on_a_team_key_inside_a_local_repo_entry() {
   _wl_setup
   printf 'repos:\n  - name: widget\n    gate: "true"\n' > "$T/alpha/workspace.local.yaml"

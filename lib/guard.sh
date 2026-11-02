@@ -6,17 +6,11 @@
 # judge; workers in worktrees write; anything that lands on main goes through
 # `cel-fanout land`, which checks policy before it merges.
 #
-# On 2026-09-11 a steward prompt reading "PR #1309 is APPROVED - action it
-# now" led an orchestrator to merge a colleague's PR and push two commits to
-# another colleague's branch. The prompt was fixed (--author @me). This fixes
-# the CAPABILITY: the next bad prompt - a misread ticket, a confusing inbox
-# message, an invented instruction - produces a refusal, not an incident.
-#
-# A second, quieter reason: every change an orchestrator makes in its own
-# checkout is invisible to the factory - no ticket, no worker, no ledger row,
-# no PR. Several hundred uncommitted files were found in one orchestrator
-# checkout the day this was written. With the guard on, "all work goes through
-# a delegated worker" is a property of the system rather than a request.
+# The guard limits the CAPABILITY, so a bad prompt - a misread ticket, a
+# confusing inbox message, an invented instruction - produces a refusal, not
+# a write. It also keeps orchestrator changes visible: anything changed in an
+# orchestrator's own checkout has no ticket, worker, ledger row or PR, so all
+# work goes through a delegated worker.
 #
 # THE CONSOLE IS THE OTHER WAY ROUND: an allowlist, not a deny list. An
 # orchestrator's job is broad - it reads anything, writes specs, drives the
@@ -28,8 +22,8 @@
 # nobody thought about is refused rather than waved through.
 #
 # Sourced by tools/hooks/orchestrator-guard.sh (claude PreToolUse) and by the
-# tests. Depends on nothing but common.sh so the hook stays fast and cannot be
-# taken down by unrelated library breakage.
+# tests. Sources no other library, so the hook stays fast and cannot be taken
+# down by unrelated library breakage.
 [ -n "${_CEL_GUARD:-}" ] && return 0
 _CEL_GUARD=1
 
@@ -80,7 +74,7 @@ guard_role_of() { # <cwd>
 # The deny list is EXPLICIT VERBS paired with the thing they mutate, not a
 # heuristic about "dangerous-looking" commands. The cost of a false deny is an
 # orchestrator that has to delegate a typo fix; the cost of a false allow is
-# the incident above. When in doubt the list errs towards deny, and the
+# an unreviewed write. When in doubt the list errs towards deny, and the
 # refusal always says what to do instead.
 # The console's allowlist. Matched against the command with leading whitespace
 # stripped, so the verb has to BE the command rather than appear somewhere in
@@ -117,16 +111,10 @@ _guard_console() { # <command>
   printf 'deny the console routes; it does not build - %s' "$hint"
 }
 
-# An orchestrator owns the STATE of its own checkout, never its authorship.
-# Until this was added, `gh pr checkout 1393` was allowed by omission while
-# `git checkout main` was denied: an orchestrator could move ONTO a PR branch
-# to run it locally and could not move back, and one product orchestrator told
-# its owner its checkout "goes back to main when the PR merges". Nobody else
-# stands over that checkout, so keeping `main` current in it is its job.
-# Moving between refs that ALREADY EXIST creates nothing and discards nothing;
-# every incident at the top of this file is authorship - a merged colleague's
-# PR, pushed commits, hundreds of uncommitted files - and none of them is a
-# branch switch.
+# An orchestrator owns the STATE of its own checkout, never its authorship:
+# nobody else stands over that checkout, so keeping `main` current in it (and
+# moving onto a PR branch to run it locally, and back) is its job. Moving
+# between refs that ALREADY EXIST creates nothing and discards nothing.
 #
 # The line: exactly one ref, no flag that creates (-b/-B/-c/-C/--orphan/
 # --track/--detach), no `--` or path (that discards working-tree state), and
@@ -158,8 +146,8 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
     "gh pr")
       case "${t[2]:-}" in
         checkout)
-          # Allowed by omission before this existed; explicit so that a later
-          # tightening of the gh rules below cannot silently regress it.
+          # Explicit so that a later tightening of the gh rules below cannot
+          # silently regress it.
           [ "$n" -eq 4 ] || return 1
           case "${t[3]}" in -*) return 1;; esac
           return 0;;
@@ -187,16 +175,15 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 }
 
 # THE COMMANDS A SHELL LINE WOULD RUN, one per line, each reduced to the verb
-# that would execute. A substring test on the raw text was evaded by a double
-# space, a tab, quotes, `--workspace x` or `-R x` before the verb, and missed
-# `cd x && cel-fanout land`; it would also have refused `grep "cel-fanout land"`
-# in Celestial's own repo. So the line is split where a new command starts
-# (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped, whitespace is
-# collapsed, and from the front of each piece go: env assignments, wrappers
-# (bash/sh -c, env, command, exec, nohup, time, xargs, timeout N), a path in
-# front of cel/cel-fanout/gh/herdr, and the global options that sit between a
-# tool and its verb (`-C`/`--workspace` for cel, `-R`/`--repo` for gh). The
-# rules then match the START of a piece only.
+# that would execute. A substring test on the raw text is evaded by spacing,
+# quotes, global options before the verb or a chain (`cd x && ...`), and
+# refuses `grep "cel-fanout land"`. So the line is split where a new command
+# starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
+# whitespace is collapsed, and from the front of each piece go: env
+# assignments, wrappers (bash/sh -c, env, command, exec, nohup, time, xargs,
+# timeout N), a path in front of cel/cel-fanout/gh/herdr, and the global
+# options between a tool and its verb (`-C`/`--workspace` for cel, `-R`/`--repo`
+# for gh). The rules then match the START of a piece only.
 #
 # A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
 # command (`c=cel-fanout; $c land`) or a script file still runs. What this
@@ -227,16 +214,10 @@ _guard_starts() { # <command> <ERE...> -> 0 when one does
   return 1
 }
 
-# A WORKER MAKES ONE DELIVERABLE AND REPORTS. On 2026-09-18 a worker whose
-# reviewer had just approved its PR ran `cel-fanout land <its own id>` from its
-# own worktree, as a background task: the ledger lock was held for three
-# minutes while `land` ran the gate, the orchestrator's `cel-fanout status`
-# hung on that lock, and the only thing that stopped the merge was branch
-# protection - the PR happened to be behind. The role file had said "never
-# merge" all along; nothing enforced it, because every command was allowed for
-# the worker role before any check ran. This is a SHORT deny list, not an
-# allowlist: a worker's job is to write code and its dangerous verbs are the
-# few that drive the factory rather than build in it.
+# A WORKER MAKES ONE DELIVERABLE AND REPORTS. A worker that lands its own PR
+# holds the ledger lock for the whole gate and merges without its
+# orchestrator. This is a SHORT deny list, not an allowlist: a worker's job is
+# to write code and its dangerous verbs are the few that drive the factory.
 _guard_worker() { # <command> -> allow | deny <reason>
   if _guard_starts "$1" 'cel-fanout (land|release|delegate|scout|spike|collect|reconcile)' 'cel solo (land|review)'; then
     printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
@@ -343,16 +324,13 @@ guard_classify() { # <role> <command>
   # git write from it is a product write - denied, in its own checkout or a
   # worker's worktree alike. ROOT's cwd is the workspace directory, which is
   # itself a small git repo of config (workspace.yaml, layouts, notes) that
-  # root and the owner's own assistant legitimately commit to; so for root a
-  # git write is denied only when the command reaches INTO a product checkout
-  # (repos/) or a worker's worktree. This mirrors firstmate's rule, which
-  # guards `projects/`, not the supervisor's own home.
+  # root and the owner legitimately commit to; so for root a git write is
+  # denied only when the command reaches INTO a product checkout (repos/) or a
+  # worker's worktree.
   # `git -C <dir> commit`, `git --git-dir=x push`, `git -c k=v merge`: the verb
-  # is no longer adjacent to `git`, and a substring match on "git commit" lets
-  # it straight through - an evasion route wide enough to write to a product
-  # repo from any pane. Strip those options out before matching. The ORIGINAL
-  # command is still what the root/product check below looks at, since -C is
-  # exactly how a command reaches into repos/.
+  # is no longer adjacent to `git`, so those options are stripped before
+  # matching. The ORIGINAL command is still what the root/product check below
+  # looks at, since -C is exactly how a command reaches into repos/.
   local norm
   norm="$(printf '%s' "$cmd" | sed -E 's/git( +-C +[^ ]+| +--git-dir=[^ ]+| +--work-tree=[^ ]+| +-c +[^ ]+)+/git/g')"
   local git_write=0
@@ -376,9 +354,7 @@ guard_classify() { # <role> <command>
 
   # Worktree and workspace lifecycle goes through cel-fanout (release refuses
   # to destroy unlanded work; delegate refuses an occupied path). A direct
-  # `herdr worktree remove --force` from an orchestrator pane skips every one
-  # of those checks - observed the day this was added, from root, on a
-  # worktree that happened to be clean.
+  # `herdr worktree remove --force` skips every one of those checks.
   case "$cmd" in
     *herdr\ worktree\ remove*|*herdr\ worktree\ create*)
       printf 'deny worktree lifecycle goes through cel-fanout (delegate / release), which refuses to destroy unlanded work; herdr worktree is not called directly from an orchestrator pane'
