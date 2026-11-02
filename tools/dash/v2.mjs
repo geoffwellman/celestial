@@ -742,7 +742,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return w.scope ? `${w.scope} ${base === 'Week' ? 'week' : base.toLowerCase()}` : base;
   };
   // used / fraction of the window gone; quota_at_risk in lib/quota.sh is the
-  // steward's copy of this rule and the two must agree
+  // steward's copy of this rule and the two must agree - including that a
+  // window whose reset has already passed is a stale reading, never at risk
   const project = (used, len, resets, now) => {
     if (!len || !resets) return used;
     const frac = (len - (resets - now)) / len;
@@ -792,7 +793,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
         const history = ring.filter((r) => r.u && r.u[key] !== undefined).map((r) => [r.ts, r.u[key]]);
         return { label: winLabel(w), name: w.name, scope: w.scope || null, used_pct: used, resets: iso(w.resets_at),
           projected_pct: projected, level: level(Math.max(used, projected >= 100 ? 75 : 0)),
-          at_risk: projected >= 100 || used >= 95, len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
+          at_risk: !(resets && resets <= now) && (projected >= 100 || used >= 95), len: len || 0, history: history.length > 1 ? history.slice(-200) : [] };
       }).sort((a, b) => (a.len - b.len) || String(a.scope || '').localeCompare(String(b.scope || '')));
       for (const w of windows) {
         if (w.at_risk) atRisk.push({ who, provider: s.provider, window: w.label, used_pct: w.used_pct, projected_pct: w.projected_pct, resets: w.resets });

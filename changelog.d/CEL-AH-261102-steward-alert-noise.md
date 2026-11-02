@@ -1,0 +1,3 @@
+### Fixed
+- The steward's `usage-pace` item no longer cites a reset that has already passed: `quota_at_risk` (and the dashboard usage card, which mirrors it) skips a window whose reset is in the past - the cached reading describes a window that is over - so the item clears after the reset instead of re-raising the stale percentage every window until a fresh read.
+- A credential omp has disabled is now its own steward item (`orch-pool-login`), raised once per change of the set of disabled credentials and resolved when it is empty, instead of being re-raised every window as part of `orch-pool`. Only the owner can fix it (`omp login anthropic` at a terminal), so repeating an unchanged fact only rang root's bell. `orch-pool` now covers only an every-credential-hot pool.

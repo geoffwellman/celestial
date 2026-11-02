@@ -72,6 +72,25 @@ _steward_raise() { # <ws> <fp> <kind> <message>
     >/dev/null 2>&1 || true
 }
 
+# ONCE PER CHANGE OF STATE (AH-261102). Some conditions only the owner can
+# change - an interactive login - and re-raising one every window is a bell
+# about a fact nobody learns anything new from: omp's disabled credential rang
+# root 163 times. This raises when no item with the key is open, or when the
+# open item's latest word differs from <message>; an unchanged state says
+# nothing. So the message must carry the state and nothing that drifts per
+# tick - no percentages, no clock times.
+_steward_raise_on_change() { # <ws> <fp> <kind> <message>
+  local id last
+  id="$(_inbox_open_fp "$1" "$2" steward root)"
+  if [ -n "$id" ]; then
+    last="$(jq -r -s --arg i "$id" \
+      '[.[] | select(.id == $i or (.kind == "update" and .ref == $i)) | .message] | last // ""' \
+      "$(_inbox_file "$1")" 2>/dev/null || true)"
+    [ "$last" = "$4" ] && return 0
+  fi
+  _steward_raise "$@"
+}
+
 # ...and takes it down again. The other half of the same measurement was four
 # STALLED WORKER items whose panes had been gone for days: nothing resolved an
 # item when its condition stopped being true, so the backlog only ever grew. A
@@ -1120,9 +1139,15 @@ _steward_subscriptions() {
 # 2026-10-04 one of three was disabled (refresh token rejected) and the other
 # two were spent, and every orchestrator stopped with nothing anywhere saying
 # so. So the pool is judged as a pool: ONE item to root when every live
-# credential is at or above the threshold on its unscoped 5h or 7d window, or
-# when any credential is disabled; resolved when that stops being true. Read
-# from `omp usage --json` - no model call.
+# credential is at or above the threshold on its unscoped 5h or 7d window,
+# resolved when that stops being true. Read from `omp usage --json` - no model
+# call.
+#
+# A DISABLED CREDENTIAL IS ITS OWN ITEM, SAID ONCE PER CHANGE (AH-261102). It
+# comes back only when the owner runs `omp login anthropic` at a terminal;
+# nothing a tick does changes it, so the old once-a-window re-raise was 163
+# updates on one unchanged fact. `orch-pool-login` is raised when the set of
+# disabled credentials changes and taken down when it is empty.
 _steward_orch_pool() {
   # shellcheck source=lib/quota.sh
   command -v _sub_omp_usage >/dev/null 2>&1 || . "$CEL_ROOT/lib/quota.sh"
@@ -1130,8 +1155,8 @@ _steward_orch_pool() {
   [ -n "$ws" ] || return 0
   local raw; raw="$(_sub_omp_usage)"
   [ -n "$raw" ] || return 0
-  local warn="${CEL_ORCH_POOL_WARN_PCT:-85}" verdict
-  verdict="$(printf '%s' "$raw" | jq -r --argjson warn "$warn" '
+  local warn="${CEL_ORCH_POOL_WARN_PCT:-85}" verdict hot dead
+  verdict="$(printf '%s' "$raw" | jq -c --argjson warn "$warn" '
     def anth: ((.provider // "") | ascii_downcase) as $p | $p == "anthropic" or $p == "claude";
     [(.reports // [])[]? | select(anth)
      | {who: (.metadata.email // .metadata.accountId // "?"),
@@ -1139,23 +1164,29 @@ _steward_orch_pool() {
                | select((.scope.tier // null) == null and (.scope.modelId // null) == null)
                | select((.window.id // .scope.windowId // "") as $w | $w == "5h" or $w == "7d")
                | (.amount.usedFraction // 0) * 100] | max // 0)}] as $live
-    | [(.disabledCredentials // [])[]? | select(anth) | (.email // .accountId // "?")] as $dead
+    | ([(.disabledCredentials // [])[]? | select(anth) | (.email // .accountId // "?")] | unique) as $dead
     | ($live | length > 0 and all(.pct >= $warn)) as $hot
-    | if ($dead | length) == 0 and ($hot | not) then "clear"
-      else ([ (if $hot then "every live credential is at or above \($warn)% of its 5h or 7d window ("
-                 + ($live | map("\(.who) \(.pct | floor)%") | join(", ")) + ")" else empty end),
-              (if ($dead | length) > 0 then "disabled in omp: " + ($dead | join(", "))
-                 + " - re-login with: omp login anthropic" else empty end) ] | join("; "))
-      end' 2>/dev/null || true)"
+    | {hot: (if $hot then "every live credential is at or above \($warn)% of its 5h or 7d window ("
+                + ($live | map("\(.who) \(.pct | floor)%") | join(", ")) + ")" else "" end),
+       dead: ($dead | join(", "))}' 2>/dev/null || true)"
   # An unreadable answer is NO EVIDENCE, not headroom: clearing on it would
   # take down a true warning the first time omp changed its document shape.
   [ -n "$verdict" ] || return 0
-  if [ "$verdict" != clear ]; then
-    c_warn "orchestrator pool: $verdict"
+  hot="$(printf '%s' "$verdict" | jq -r '.hot')"
+  dead="$(printf '%s' "$verdict" | jq -r '.dead')"
+  if [ -n "$hot" ]; then
+    c_warn "orchestrator pool: $hot"
     _steward_due "orch-pool" && _steward_raise "$ws" orch-pool blocked \
-      "steward: the orchestrators' Claude pool (omp's anthropic credentials) is nearly out - $verdict. When it is spent, orchestrator turns wait for the reset." || true
+      "steward: the orchestrators' Claude pool (omp's anthropic credentials) is nearly out - $hot. When it is spent, orchestrator turns wait for the reset." || true
   else
     _steward_clear "$ws" orch-pool "the orchestrators' Claude pool has headroom again"
+  fi
+  if [ -n "$dead" ]; then
+    c_warn "orchestrator pool: disabled in omp: $dead - re-login with: omp login anthropic"
+    _steward_raise_on_change "$ws" orch-pool-login blocked \
+      "steward: omp has disabled the orchestrators' anthropic credential(s) $dead - orchestrators run without them until the owner signs back in at a terminal: omp login anthropic" || true
+  else
+    _steward_clear "$ws" orch-pool-login "omp's anthropic credentials are all signed in again"
   fi
 }
 
