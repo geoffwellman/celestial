@@ -656,15 +656,72 @@ _run_lane_brief() { # <product> <lane> <agent-name>
 ## You are a lane
 You are \`$3\`, lane \`$2\` of \`$1\`. The owner runs more than one solo agent
 on this product, each on its own goal - yours is the one the owner gives you
-in this pane. Wherever the role says \`$1-orch\`, read \`$3\`: that is your
-pane name and mailbox. \`$1-orch\` and any other \`$1-*\` lane are peers working
-in the same repos.
+in this pane or sends to your mailbox, \`$3\` (read it with \`cel inbox read\`;
+a brief may be waiting there from before you started). Wherever the role says
+\`$1-orch\`, read \`$3\`: that is your pane name and mailbox. \`$1-orch\` and
+any other \`$1-*\` lane are peers working in the same repos.
 - Work only through your own branches and worktrees (under
   \`.cel/solo/$1/\`), and only on your goal.
 - Before a change that touches files another lane is likely to touch, tell it
   by \`cel inbox send <its name> "..."\`; rebase rather than overwrite.
 - Land only your own PRs.
 EOF
+}
+
+# A FRESH CLAUDE LANE GETS A FIRST TURN. Claude's mail arrives through its
+# UserPromptSubmit hook (tools/hooks/inbox-drain.sh), which runs only when a
+# turn is submitted - and a session started with nothing to say submits none,
+# so a brief sent to the lane before it started sat unread while the lane
+# reported it had no goal. This rides on the command line as Claude's first
+# prompt: one line, no option syntax, and the hook attaches what is waiting.
+_run_lane_kickoff() { # <product> <lane> <agent-name>
+  printf 'You have just started as %s, lane %s of %s. Any mail already waiting in your inbox is attached to this message; if it gives your goal, start on it. If nothing is attached, run cel inbox read once, and if there is still no goal, say so in one line and wait for the owner.' "$3" "$2" "$1"
+}
+
+# CLAUDE CODE ASKS BEFORE IT WORKS IN A FOLDER IT HAS NOT SEEN, and a lane's
+# directory is always new to it. The prompt's default answer is "No, exit",
+# so any keystroke that reached the pane before the owner did ended the lane.
+# Claude Code 2.1 keeps the answer in its global config, and reads it there:
+# projects[<absolute dir>].hasTrustDialogAccepted in
+# ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json (checked against the installed
+# 2.1.316 binary, whose own "set projects[...].hasTrustDialogAccepted: true
+# in <file>" hint names the same key). That key is set here for exactly the
+# directory given - as given and as resolved, the two names Claude may see
+# for it - and nothing else in the file changes. Claude serialises its own
+# writes with the lock DIRECTORY <file>.lock (proper-lockfile), so this takes
+# the same lock, writes a private temporary file and renames it over. A lock
+# somebody holds past the wait, or a file that is not a JSON object, is
+# refused rather than overwritten.
+_run_claude_config_file() { printf '%s/.claude.json' "${CLAUDE_CONFIG_DIR:-$HOME}"; }
+
+_run_claude_trust_dir() { # <dir>
+  local given="$1" real f target lock tmp="" waited=0 wait_ms="${CEL_CLAUDE_LOCK_WAIT_MS:-5000}" rc=0
+  real="$(cd "$given" 2>/dev/null && pwd -P)" || return 1
+  f="$(_run_claude_config_file)"; lock="$f.lock"; target="$f"
+  if [ -L "$f" ]; then target="$(readlink -f -- "$f")" || return 1; fi
+  mkdir -p "$(dirname "$f")" || return 1
+  until mkdir "$lock" 2>/dev/null; do
+    [ "$waited" -lt "$wait_ms" ] || return 1
+    _run_ms_sleep 50; waited=$((waited + 50))
+  done
+  local dirs filter='
+    if type != "object" or ((.projects // {}) | type) != "object" then error("not a Claude Code config")
+    else .projects = (reduce $dirs[] as $d ((.projects // {}); .[$d] = ((.[$d] // {}) + {hasTrustDialogAccepted: true}))) end'
+  dirs="$(jq -cn --arg a "$given" --arg b "$real" '[$a, $b] | unique')"
+  if [ ! -e "$target" ]; then
+    tmp="$(mktemp "$target.tmp.XXXXXX")" && jq -n --argjson dirs "$dirs" "{} | $filter" > "$tmp" \
+      && mv -f -- "$tmp" "$target" || rc=1
+  elif jq -e --argjson dirs "$dirs" '. as $c | type == "object" and all($dirs[]; . as $d | $c.projects[$d].hasTrustDialogAccepted? == true)' \
+         "$target" >/dev/null 2>&1; then
+    : # already trusted: the file is left exactly as it is
+  else
+    # An empty input gives empty output, which must never replace the file.
+    tmp="$(mktemp "$target.tmp.XXXXXX")" && jq --argjson dirs "$dirs" "$filter" "$target" > "$tmp" 2>/dev/null \
+      && [ -s "$tmp" ] && chmod --reference="$target" "$tmp" && mv -f -- "$tmp" "$target" || rc=1
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
 }
 
 # THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
@@ -2116,6 +2173,20 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       "cel run $role${product:+ --product $product} --workspace $(ws_name "$wsdir")" \
       "or name and adopt it: cel ws up $(ws_name "$wsdir")" "$wsdir"
     resume_session="$RESUME_SESSION"; restart_pane="$RESTART_PANE"
+  fi
+  # A Claude lane: trusted folder and, for a fresh session, a first turn (see
+  # _run_claude_trust_dir and _run_lane_kickoff). Trust is recorded before
+  # any pane exists, on every path below - new pane, Rex, restart in place -
+  # and a failure to record it launches nothing.
+  if [ -n "$lane" ] && [ "$runtime" = claude ]; then
+    [ -n "$resume_session" ] || AGENT_ARGS+=("$(_run_lane_kickoff "$product" "$lane" "$agent_name")")
+    if [ "$dry_run" -eq 1 ]; then
+      printf 'set projects[%s].hasTrustDialogAccepted in %s\n' "$cwd" "$(_run_claude_config_file)"
+    else
+      mkdir -p "$cwd"
+      _run_claude_trust_dir "$cwd" \
+        || die "cel run solo --lane: could not record Claude Code's folder trust for $cwd in $(_run_claude_config_file) (its lock $(_run_claude_config_file).lock is held, or the file is not a JSON object) - nothing was launched; re-run once Claude Code has finished writing it"
+    fi
   fi
 
   # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:

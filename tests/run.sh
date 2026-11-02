@@ -158,6 +158,10 @@ _suite_lock_take
 # interruption. Individual tests can fail before their own cleanup; retaining
 # whole temporary Git repositories across runs would exhaust temporary storage.
 export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cel-tests.XXXXXX")"
+# NO FIXTURE WRITES THE OPERATOR'S CLAUDE CODE CONFIG. A Claude lane launch
+# records folder trust in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json (lib/run.sh);
+# a test launch must land in this run's directory, never the real file.
+export CLAUDE_CONFIG_DIR="$TMPDIR/claude-config"
 
 # AND EVERY PROCESS A TEST STARTED GOES WITH IT. On 2026-09-16 a gate run that
 # was killed mid-suite left seven test servers from tests/pages-server.test.sh
