@@ -46,6 +46,21 @@ test_stow_archives_stale_with_provenance_and_keeps_the_rest() {
   rm -rf "$T"
 }
 
+# A date that cannot exist is not an ancient date: it is never stale, stow
+# leaves it where it is, and list says the date is unreadable.
+test_regression_an_impossible_date_is_not_stale_and_is_never_stowed() {
+  _lws; _learn_init "$T"
+  printf -- '- typo date <!--a:2026-99-99-->\n- feb thirty <!--p:2026-02-30-->\n' >> "$T/learnings.md"
+  assert_fails _learn_stale "- typo date <!--a:2026-99-99-->" || { rm -rf "$T"; return 1; }
+  _learn_stow --dir "$T" >/dev/null 2>&1
+  local kept; kept="$(_learn_entries "$T")"
+  assert_contains "$kept" "typo date" || { rm -rf "$T"; return 1; }
+  assert_contains "$kept" "feb thirty" || { rm -rf "$T"; return 1; }
+  [ ! -f "$T/.cel/learnings-archive.md" ] || { echo "an undatable entry was archived"; rm -rf "$T"; return 1; }
+  assert_contains "$(_learn_list --dir "$T")" "typo date  [invalid date 2026-99-99]" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 test_pinned_survives_stow() {
   _lws
   _learn_add "standing rule" --pin --dir "$T" 2>/dev/null

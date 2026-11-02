@@ -236,6 +236,11 @@ open(p, "w").write(head + "repos:\n" + first)
 PY
 }
 
+# Knobs, for the run-correlation tests: CEL_TEST_DISPATCH_OUT is what
+# `workflow run` prints (newer gh names the run it created), CEL_TEST_NEW_RUN
+# is a workflow_dispatch run that appears only once the dispatch happened,
+# CEL_TEST_DISPATCH_FAIL makes the dispatch itself fail, CEL_TEST_TAG is the
+# newest tag GitHub reports.
 _prel_gh_stub() {
   cat >"$T/bin/gh" <<EOS
 #!/usr/bin/env bash
@@ -243,18 +248,25 @@ printf '%s\n' "\$*" >>"$LOG"
 a="\$*"
 case "\$1 \$2" in
   'repo view')    printf '%s\n' "\${CEL_TEST_PERM:-WRITE}" ;;
-  'workflow run') printf 'Created workflow_dispatch event\n' ;;
+  'workflow run')
+    [ -z "\${CEL_TEST_DISPATCH_FAIL:-}" ] || exit 1
+    : >"$T/dispatched"
+    printf '%s\n' "\${CEL_TEST_DISPATCH_OUT:-Created workflow_dispatch event}" ;;
   'run watch')    printf 'run completed with success\n' ;;
+  'run view')     printf '2026-01-05T00:00:00Z\n' ;;
   'release list') printf 'v0.2.0 https://github.com/someone/thing/releases/tag/v0.2.0\n' ;;
+  'release view') printf '%s https://github.com/someone/thing/releases/tag/%s\n' "\$3" "\$3" ;;
   'run list')
     case "\$a" in
       *in_progress*) printf 'https://github.com/someone/thing/actions/runs/99\n' ;;
-      *)             printf '42 https://github.com/someone/thing/actions/runs/42\n' ;;
+      *)
+        [ -e "$T/dispatched" ] && [ -n "\${CEL_TEST_NEW_RUN:-}" ] && printf '%s\n' "\$CEL_TEST_NEW_RUN"
+        printf '42 https://github.com/someone/thing/actions/runs/42\n' ;;
     esac ;;
   *)
     case "\$1:\$a" in
       api:*compare*) printf '7\n' ;;
-      api:*tags*)    printf 'v0.2.0\n' ;;
+      api:*tags*)    printf '%s\n' "\${CEL_TEST_TAG:-v0.2.0}" ;;
     esac ;;
 esac
 EOS
@@ -421,6 +433,108 @@ test_release_bare_version_refuses_where_several_repos_are_releasable() {
   assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
   assert_contains "$out" "cel release <product>" || { _prel_cleanup; return 1; }
   assert_eq "$(cat "$LOG")" "" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- the run that is followed is the run that was dispatched ----------------
+
+# Every test here arms its own AFK directory (off), so the box's own AFK state
+# cannot decide whether a fixture dispatches.
+
+# gh names the run it created: that run is followed, and what is reported is
+# the release THIS value tags - not whatever release happens to be newest.
+test_regression_release_follow_watches_the_run_the_dispatch_created() {
+  _prel_fixture
+  local out
+  out="$(CEL_AFK_STATE="$T/afk" \
+    CEL_TEST_DISPATCH_OUT='https://github.com/someone/widget/actions/runs/77' \
+    _prel bundle 0.3.0 --repo widget --follow)" || { echo "$out"; _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "run watch 77" || { _prel_cleanup; return 1; }
+  ! grep -q '^run watch 42' "$LOG" || { echo "followed an older run"; _prel_cleanup; return 1; }
+  assert_contains "$out" "released  v0.3.0" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# Registration lag: the only workflow_dispatch run GitHub lists is one that was
+# there BEFORE the dispatch. Following it would report somebody else's release.
+test_regression_release_follow_never_watches_a_run_that_predates_the_dispatch() {
+  _prel_fixture
+  local out
+  out="$(CEL_AFK_STATE="$T/afk" _prel gadget 0.3.0 --follow)" || { echo "$out"; _prel_cleanup; return 1; }
+  ! grep -q '^run watch' "$LOG" || { echo "followed a run that predates the dispatch"; _prel_cleanup; return 1; }
+  ! printf '%s' "$out" | grep -q 'runs/42' || { echo "reported a run that predates the dispatch"; _prel_cleanup; return 1; }
+  assert_contains "$out" "the run is queued" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# An older gh that names no run: the one workflow_dispatch run that was not
+# there before the dispatch is ours.
+test_regression_release_follow_finds_the_one_new_dispatch_run() {
+  _prel_fixture
+  local out
+  out="$(CEL_AFK_STATE="$T/afk" CEL_TEST_NEW_RUN='43 https://github.com/someone/doodad/actions/runs/43' \
+    _prel gadget 0.3.0 --follow)" || { echo "$out"; _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "run watch 43" || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "--event workflow_dispatch" || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- the declared tag shape, all of it ---------------------------------------
+
+# A template with text after {version}: the newest tag is read through the
+# WHOLE shape, so `release-0.2.0-prod` is 0.2.0 and a lower version is refused.
+_prel_suffixed_repo() {
+  cat >>"$WS/workspace.yaml" <<'EOS'
+  - name: suffixed
+    url: git@github.com:someone/suffixed.git
+    release:
+      workflow: release.yml
+      input: version
+      accepts: semver
+      tag: "release-{version}-prod"
+EOS
+}
+test_regression_release_reads_the_current_version_through_a_suffixed_tag_template() {
+  _prel_fixture; _prel_suffixed_repo
+  assert_eq "$(CEL_TEST_TAG=release-0.2.0-prod _release_current "$WS" suffixed someone/suffixed)" "0.2.0" \
+    || { _prel_cleanup; return 1; }
+  local out rc=0
+  out="$(CEL_AFK_STATE="$T/afk" CEL_TEST_TAG=release-0.2.0-prod _prel suffixed 0.1.0)" || rc=$?
+  assert_eq "$rc" "1" || { echo "$out"; _prel_cleanup; return 1; }
+  assert_contains "$out" "not greater than suffixed's current 0.2.0" || { _prel_cleanup; return 1; }
+  assert_eq "$(grep -c 'workflow run' "$LOG" || true)" "0" || { _prel_cleanup; return 1; }
+  CEL_AFK_STATE="$T/afk" CEL_TEST_TAG=release-0.2.0-prod _prel suffixed 0.3.0 >/dev/null || { _prel_cleanup; return 1; }
+  assert_contains "$(cat "$LOG")" "workflow run release.yml --repo someone/suffixed -f version=0.3.0" \
+    || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# A tag that is not of the declared shape says nothing about the version.
+test_regression_release_current_ignores_a_tag_of_another_shape() {
+  _prel_fixture; _prel_suffixed_repo
+  assert_eq "$(CEL_TEST_TAG=v0.9.0 _release_current "$WS" suffixed someone/suffixed)" "" \
+    || { _prel_cleanup; return 1; }
+  assert_eq "$(CEL_TEST_TAG=release-0.2.0-staging _release_current "$WS" suffixed someone/suffixed)" "" \
+    || { _prel_cleanup; return 1; }
+  _prel_cleanup
+}
+
+# --- under AFK, the log records what the dispatch did ------------------------
+
+test_regression_release_under_afk_records_the_dispatch_outcome() {
+  _prel_fixture
+  export CEL_AFK_STATE="$T/afk"
+  # shellcheck source=lib/afk.sh
+  . "$_REL_REPO/lib/afk.sh"
+  cmd_afk on --until '+8h' --allow release:gadget@0.3.0 >/dev/null
+  local rc=0
+  CEL_TEST_DISPATCH_FAIL=1 _prel gadget 0.3.0 >/dev/null || rc=$?
+  assert_eq "$rc" "1" || { _prel_cleanup; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "release")] | length')" "1" || { _prel_cleanup; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" "failed" || { _prel_cleanup; return 1; }
+  _prel gadget 0.3.0 >/dev/null || { _prel_cleanup; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" "completed" || { _prel_cleanup; return 1; }
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "gadget@0.3.0" || { _prel_cleanup; return 1; }
   _prel_cleanup
 }
 

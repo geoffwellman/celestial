@@ -577,6 +577,10 @@ _doctor_suite_lock_path() {
 _doctor_watch_count() { pgrep -cf 'cel inbox watch' 2>/dev/null || printf 0; }
 _doctor_fork_rate() { # processes created per second over a short sample
   local a b s="${CEL_DOCTOR_FORK_SECS:-2}"
+  # The sample length is also the divisor: a whole number of seconds or the default.
+  case "$s" in
+    ''|*[!0-9]*|0*) c_warn "CEL_DOCTOR_FORK_SECS='$s' is not a whole number of seconds - sampling for 2" >&2; s=2 ;;
+  esac
   a="$(awk '/^processes/{print $2}' /proc/stat 2>/dev/null)" || { printf 0; return; }
   sleep "$s"
   b="$(awk '/^processes/{print $2}' /proc/stat 2>/dev/null)" || { printf 0; return; }

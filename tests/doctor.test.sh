@@ -259,6 +259,15 @@ test_doctor_exec_load_is_red_over_the_bound() {
   _doctor_fork_rate() { printf 600; }
   assert_fails doctor_exec_load_line
 }
+# A sample length that is not a whole number of seconds is not a divisor: zero
+# and fractions fall back to the default sample instead of breaking doctor.
+test_regression_doctor_fork_rate_survives_a_zero_or_fractional_sample_length() {
+  local s r
+  for s in 0 0.5 junk; do
+    r="$(CEL_DOCTOR_FORK_SECS="$s" _doctor_fork_rate 2>/dev/null)"
+    [[ "$r" =~ ^[0-9]+$ ]] || { echo "CEL_DOCTOR_FORK_SECS=$s gave '$r'"; return 1; }
+  done
+}
 _doctor_pi_fixture() {
   _doctor_setup
   export CEL_REGISTRY="$T/registry.yaml"

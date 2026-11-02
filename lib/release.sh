@@ -54,7 +54,7 @@ _release_repo_dir() { printf '%s/repos/%s' "$1" "$2"; }
 # knows. Prints nothing when neither answers - a first release has no
 # predecessor, and refusing one would be wrong.
 _release_current() { # <wsdir> <repo> <slug>
-  local vf dir tag pat
+  local vf dir tag pat pre suf v
   vf="$(ws_repo_release "$1" "$2" version_file)"
   dir="$(_release_repo_dir "$1" "$2")"
   if [ -n "$vf" ] && [ -f "$dir/$vf" ]; then
@@ -64,11 +64,17 @@ _release_current() { # <wsdir> <repo> <slug>
   have gh || return 0
   tag="$(ws_gh "$1" api "repos/$3/tags" --jq '.[0].name' 2>/dev/null)" || tag=""
   [ -n "$tag" ] || return 0
-  # strip whatever the declared tag shape puts in front of the version, so
-  # `v0.2.0` and `release-0.2.0` both compare as versions
+  # The version is what the declared tag shape puts around it, read through
+  # the WHOLE shape: `release-{version}-prod` reads `release-0.2.0-prod` as
+  # 0.2.0, and a tag of any other shape says nothing about the version. With
+  # no shape declared, a leading `v` is dropped.
   pat="$(ws_repo_release "$1" "$2" tag)"
-  [ -n "$pat" ] || pat="v{version}"
-  printf '%s' "${tag#"${pat%%\{version\}*}"}"
+  if [ -z "$pat" ]; then printf '%s' "${tag#v}"; return 0; fi
+  case "$pat" in *'{version}'*) ;; *) return 0 ;; esac
+  pre="${pat%%\{version\}*}"; suf="${pat#*\{version\}}"
+  case "$tag" in "$pre"*"$suf") ;; *) return 0 ;; esac
+  v="${tag#"$pre"}"; v="${v%"$suf"}"
+  printf '%s' "$v"
 }
 
 _release_tag_for() { # <wsdir> <repo> <version>
@@ -159,28 +165,64 @@ _release_dry_run() { # <wsdir> <repo> <slug> <product> <value>
   return 0
 }
 
-# Tail the run to its conclusion and say what came out of it, because "the run
-# is queued" is not an answer anybody can act on.
-_release_follow() { # <wsdir> <repo> <slug> <run-id>
+# Tail the run to its conclusion and say which release IT cut, because "the
+# run is queued" is not an answer anybody can act on - and "the newest release"
+# may be somebody else's. A version under a declared tag shape names its tag;
+# otherwise it is the first release published after the run was created.
+_release_follow() { # <wsdir> <repo> <slug> <run-id> <value>
   ws_gh "$1" run watch "$4" --repo "$3" --exit-status >/dev/null 2>&1 || c_warn "the run did not finish green"
-  local rel; rel="$(ws_gh "$1" release list --repo "$3" --limit 1 --json tagName,url \
-    --jq '.[0] | "\(.tagName) \(.url)"' 2>/dev/null)" || rel=""
+  local tag="" since rel=""
+  if _release_is_semver "$5" && [ -n "$(ws_repo_release "$1" "$2" tag)" ]; then
+    tag="$(_release_tag_for "$1" "$2" "$5")"
+  else
+    since="$(ws_gh "$1" run view "$4" --repo "$3" --json createdAt --jq .createdAt 2>/dev/null)" || since=""
+    [ -z "$since" ] || tag="$(ws_gh "$1" release list --repo "$3" --limit 20 --json tagName,publishedAt \
+      --jq "[.[] | select((.publishedAt // \"\") >= \"$since\")] | last | .tagName // empty" 2>/dev/null)" || tag=""
+  fi
+  [ -z "$tag" ] || rel="$(ws_gh "$1" release view "$tag" --repo "$3" --json tagName,url \
+    --jq '"\(.tagName) \(.url)"' 2>/dev/null)" || rel=""
   if [ -n "$rel" ]; then printf '  released  %s\n' "$rel"; else printf '  no GitHub Release was published by that run\n'; fi
 }
 
-_release_dispatch() { # <wsdir> <repo> <slug> <product> <value> <follow>
-  local wf input run id url
+# WHICH RUN IS OURS. gh names the run its dispatch created when GitHub returns
+# it; otherwise ours is the one workflow_dispatch run by this account that was
+# not listed before the dispatch. None yet, or more than one new, is not
+# guessed at: following another run would report another release.
+_release_dispatch_runs() { # <wsdir> <slug> <workflow> <actor> -> "id url" per run
+  local by=(); [ -z "$4" ] || by=(--user "$4")
+  ws_gh "$1" run list --workflow "$3" --repo "$2" --event workflow_dispatch "${by[@]}" --limit 20 \
+    --json databaseId,url --jq '.[] | "\(.databaseId) \(.url)"' 2>/dev/null || true
+}
+_release_poll_secs() { if [ -n "${CEL_TESTING:-}" ]; then printf 0; else printf 3; fi; }
+
+_release_dispatch() { # <wsdir> <repo> <slug> <product> <value> <follow> -> 1 when nothing was dispatched
+  local wf input actor before out run="" fresh tries id url
   wf="$(ws_repo_release "$1" "$2" workflow)"; input="$(ws_repo_release "$1" "$2" input)"
-  ws_gh "$1" workflow run "$wf" --repo "$3" -f "$input=$5" \
-    || die "cel release: could not dispatch $wf in $3"
+  actor="$(ws_gh "$1" api user --jq .login 2>/dev/null)" || actor=""
+  before="$(_release_dispatch_runs "$1" "$3" "$wf" "$actor")"
+  out="$(ws_gh "$1" workflow run "$wf" --repo "$3" -f "$input=$5")" \
+    || { c_err "cel release: could not dispatch $wf in $3"; return 1; }
   c_ok "dispatched $wf in $3 with $input=$5"
-  run="$(ws_gh "$1" run list --workflow "$wf" --repo "$3" --limit 1 --json databaseId,url \
-    --jq '.[0] | "\(.databaseId) \(.url)"' 2>/dev/null)" || run=""
+  url="$(printf '%s\n' "$out" | grep -oE 'https://[^[:space:]]+/actions/runs/[0-9]+' | head -n1 || true)"
+  if [ -n "$url" ]; then
+    run="${url##*/} $url"
+  else
+    # Following waits a little for the run to register; a script asks once.
+    tries=1; [ "$6" = "1" ] && tries=10
+    while :; do
+      fresh="$(_release_dispatch_runs "$1" "$3" "$wf" "$actor" | grep -vxF -f <(printf '%s\n' "$before") || true)"
+      [ -z "$fresh" ] || break
+      tries=$((tries - 1)); [ "$tries" -gt 0 ] || break
+      sleep "$(_release_poll_secs)"
+    done
+    if [ "$(printf '%s\n' "$fresh" | grep -c .)" -eq 1 ]; then run="$fresh"
+    elif [ -n "$fresh" ]; then c_warn "more than one new $wf run appeared in $3 - not guessing which one this dispatch started"; fi
+  fi
   id="${run%% *}"; url="${run#* }"
   if [ -n "$run" ]; then printf '  %s\n' "$url"; else
     printf '  the run is queued; watch it with: gh run list --workflow %s --repo %s\n' "$wf" "$3"
   fi
-  [ "$6" = "1" ] && [ -n "$id" ] && _release_follow "$1" "$2" "$3" "$id"
+  [ "$6" = "1" ] && [ -n "$id" ] && _release_follow "$1" "$2" "$3" "$id" "$5"
   return 0
 }
 
@@ -319,15 +361,26 @@ cmd_release() { # <product> <value> [--repo r] [--dry-run] [--follow|--no-follow
 
   have gh || die "cel release: gh is required to dispatch the workflow"
   _release_check_permission "$slug" "$product" "$wsdir"
-  # UNDER AFK a release goes only where the owner named it first.
+  # UNDER AFK a release goes only where the owner named it first, and the log
+  # records whether the dispatch happened, once it was tried.
   # shellcheck source=lib/afk.sh
   . "${BASH_SOURCE[0]%/*}/afk.sh"
+  local afk=0 rc=0
   if afk_active; then
-    afk_authorise release "$(jq -nc --arg p "$product" --arg v "$value" '{product:$p, version:$v}')" \
-      "$product@$value" >/dev/null || die "cel release: AFK did not authorise this release - see the refusal above. Nothing dispatched."
+    afk_admit release "$(jq -nc --arg p "$product" --arg v "$value" '{product:$p, version:$v}')" \
+      || die "cel release: AFK did not authorise this release - see the refusal above. Nothing dispatched."
+    afk=1
   fi
   # Following is the useful default where someone is watching; in a script it
   # would just hold the pipeline open.
   [ "$follow" -eq -1 ] && { [ -t 1 ] && follow=1 || follow=0; }
-  _release_dispatch "$wsdir" "$repo" "$slug" "$product" "$value" "$follow"
+  _release_dispatch "$wsdir" "$repo" "$slug" "$product" "$value" "$follow" || rc=$?
+  if [ "$afk" -eq 1 ]; then
+    if [ "$rc" -eq 0 ]; then
+      afk_record release "$(afk_authorisation release)" "$product@$value dispatched" completed
+    else
+      afk_record release "$(afk_authorisation release)" "$product@$value - the dispatch failed; nothing was released" failed
+    fi
+  fi
+  [ "$rc" -eq 0 ] || exit 1
 }
