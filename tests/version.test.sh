@@ -10,11 +10,9 @@ test_version_compare() {
   assert_fails cel_version_lt "" 1.0.0
 }
 
-# The owner, 2026-09-18: "I don't think we should rely on just the version -
-# what about commits in between new versions?" A box that tracks main sits
-# thirty-odd merges past the newest tag and every surface said "up to date",
-# so the build string carries the distance from the tag, the sha and the
-# branch - `+31` is the thing people quote at each other.
+# A box that tracks main can sit many merges past the newest tag, so the build
+# string carries the distance from the tag, the sha and the branch - `+31` is
+# the thing people quote at each other.
 _ver_fixture() { # -> T, ROOT; CEL_ROOT points at the fake
   T="$(mktemp -d)"
   ROOT="$T/root"

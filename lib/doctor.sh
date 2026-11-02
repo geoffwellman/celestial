@@ -49,9 +49,7 @@ _CEL_DOCTOR=1
 # One line for the services this box runs on nobody's behalf in particular:
 # how many it declares and how many are actually answering. The second half is
 # the part that matters - a gateway configured in cel.yaml with nothing in
-# services.d is a gateway no sweep is watching, which is exactly how the broker
-# and the gateway spent a day up, unsupervised, with nothing on the box able to
-# notice if they stopped.
+# services.d is a gateway no sweep is watching, so nothing notices if it stops.
 doctor_box_services_line() {
   local rows n healthy e url health hauth port
   rows="$(_svc_box)"
@@ -85,14 +83,9 @@ doctor_serve_line() {
   printf '%s\n' "$rows" | jq -r 'sort_by(-.memory_mb)[] | "    \(.name // .unit // ("pid:"+(.pid|tostring))) \(.memory_mb)M \(.age_seconds)s \(.owner // "unledgered") \(.worktree // "")"'
 }
 
-# HOW FAR BEHIND THE TREE YOU ARE READING IS. On 2026-09-21 the orchestrator's
-# $ws/repos/celestial sat at d2da692 while main was at 81022b5 - eighteen
-# commits, all day - and every conclusion drawn from it was truthful about the
-# wrong tree: a branch "measured" 3x slower than a main that predated
-# lib/orphans.sh, and a review of #75 declaring that code which had landed
-# hours earlier did not exist. Nothing anywhere said the checkout was stale.
-# This is the cheap half of CEL-55 and it would have caught all three on the
-# first tick of the day.
+# HOW FAR BEHIND THE TREE YOU ARE READING IS. Every conclusion drawn from a
+# stale checkout - a benchmark, a review - is truthful about the wrong tree,
+# and nothing else says the checkout is stale.
 #
 # A CHECKOUT THAT CANNOT BE ASKED IS UNKNOWN. No remote, no network, a remote
 # that refuses - all of them say so out loud, because silence here reads as
@@ -162,7 +155,7 @@ check_roles_and_runtimes() {
   return "$fail"
 }
 
-# THE WORKSPACE'S OWN GITHUB ACCOUNT (CEL-70). A declared `github.user` that
+# THE WORKSPACE'S OWN GITHUB ACCOUNT. A declared `github.user` that
 # is not logged in makes every launch and every plane call for that workspace
 # refuse, so doctor says it first, with the fix. `gh auth status` lists every
 # logged-in account per host; only whether ours is among them is read here -
@@ -178,9 +171,8 @@ doctor_github_account() { # <name> <wsdir>
   fi
   host="$(ws_github_ssh_host "$wsdir")"
   [ -n "$host" ] || return "$rc"
-  # A LITERAL, standalone Host token (CEL-79): the alias used to go into a
-  # regex, so its dots matched anything, and a wildcard `Host gh.*` passed for
-  # an entry that names no key for this account.
+  # A LITERAL, standalone Host token, never a regex: a dot must not match any
+  # character, and a wildcard `Host gh.*` names no key for this account.
   # Case-insensitive, as ssh itself matches Host patterns.
   if awk -v h="$host" 'tolower($1) == "host" {
         for (i = 2; i <= NF; i++) if (tolower($i) == tolower(h)) found = 1 }
@@ -192,21 +184,9 @@ doctor_github_account() { # <name> <wsdir>
   return "$rc"
 }
 
-# Per-registered-workspace audit. Warnings (local-only, uncloned
-# repos, missing gate binaries, stale delegations) never fail the pass; only
-# c_err findings do. Herdr/ledger checks are guarded behind `have herdr` so
-# this runs on a box with no server, and behind the ledger file existing so a
-# workspace that has never fanned out is never penalised for it.
-# A WORKSPACE WITH WORKERS AND NO CONTAINER TO HOLD THEM. herdr shows a worker
-# worktree nested under the `<repo>/workers` workspace it was cut from, and
-# closes that container when its last child is released - which detached a
-# whole batch of survivors to the sidebar's top level on 2026-09-19 with
-# nothing saying so. `release` puts the container straight back; this is what
-# notices when something else took it away. herdr is read through the same
-# override the fanout tests stub, so this check is testable without a server.
-# A ROW IN A STATE NOBODY KNOWS is vetoed by gc for its own worktree forever;
-# naming it here is how anyone finds out (CEL-114: an `abandoned` row once
-# vetoed the whole box, and the orchestrator that owned it never knew).
+# A ROW IN A STATE NOBODY KNOWS is vetoed by gc for its own worktree forever,
+# and the orchestrator that owns it is not told; naming it here is how anyone
+# finds out.
 doctor_ledger_states() { # <wsdir> <ws-name>
   local f="$1/.cel/delegations.json" bad
   [ -f "$f" ] || return 0
@@ -220,6 +200,13 @@ doctor_ledger_states() { # <wsdir> <ws-name>
   done <<< "$bad"
 }
 
+# A WORKSPACE WITH WORKERS AND NO CONTAINER TO HOLD THEM. herdr shows a worker
+# worktree nested under the `<repo>/workers` workspace it was cut from, and
+# closes that container when its last child is released - which can detach the
+# survivors to the sidebar's top level with nothing saying so. `release` puts
+# the container straight back; this is what notices when something else took
+# it away. herdr is read through the same override the fanout tests stub, so
+# this check is testable without a server.
 doctor_worker_containers() { # <wsdir>
   local wsdir="$1" r top h ledger
   ledger="$wsdir/.cel/delegations.json"
@@ -240,12 +227,10 @@ doctor_worker_containers() { # <wsdir>
   return 0
 }
 
-# DOCTOR USED TO JUDGE A WORKSPACE WITHOUT READING IT. Every `setup:` check ran
-# in a bare login shell, so a step like `test -n "$WIDGET_KEY"` failed on a box
-# that was configured correctly: the value lives in the workspace's gitignored
-# env.local, and nothing had sourced it. A newcomer saw red lines against work
-# they had just done properly and learned that the tool cannot be trusted -
-# the worst possible lesson on day one, and the hardest to unlearn.
+# A WORKSPACE IS JUDGED WITH ITS OWN ENV LOADED. A `setup:` check such as
+# `test -n "$WIDGET_KEY"` reads a value that lives in the workspace's
+# gitignored env.local; run in a bare login shell it would fail on a box that
+# is configured correctly and teach a newcomer to distrust the tool.
 #
 # The env is loaded the way the rest of the tree loads it (ws_env_exports),
 # inside a subshell, so one workspace's values cannot reach the next workspace
@@ -404,6 +389,11 @@ doctor_ws_contract_lines() { # <wsdir> <name> -> 1 if the contract is not commit
   fi
 }
 
+# Per-registered-workspace audit. Warnings (local-only, uncloned
+# repos, missing gate binaries, stale delegations) never fail the pass; only
+# c_err findings do. Herdr/ledger checks are guarded behind `have herdr` so
+# this runs on a box with no server, and behind the ledger file existing so a
+# workspace that has never fanned out is never penalised for it.
 check_workspaces() {
   local fail=0 n path remote r url gate first role rt bin_
   local ledger agents id pane
@@ -433,9 +423,9 @@ check_workspaces() {
     [ -n "$remote" ] || c_warn "$n is local-only (cel ws push $n to publish)"
     doctor_github_account "$n" "$path" || fail=1
 
-    # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` survived the
-    # retirement of standing root agents as a name - the top, whoever is
-    # listening - and a console that is not running listens to nothing.
+    # A MAILBOX WITH NO READER IS A FAULT, NOT SILENCE. `root` is a name - the
+    # top, whoever is listening - and a console that is not running listens to
+    # nothing.
     local mailline; mailline="$(fleet_mail_doctor_line "$n" 2>/dev/null || true)"
     [ -z "$mailline" ] || c_warn "${mailline#  }"
 
@@ -544,10 +534,10 @@ check_externals() {
   return 1
 }
 
-# The console is ink, so it has node_modules - and a box where `cel setup` ran
-# before this ticket landed has a perfectly healthy plane and no console. That
-# is a WARNING, not a failure: nothing else on the box depends on it, and a red
-# doctor for an optional UI teaches people to ignore a red doctor.
+# The console is ink, so it has node_modules - and a box where they were never
+# installed has a perfectly healthy plane and no console. That is a WARNING,
+# not a failure: nothing else on the box depends on it, and a red doctor for an
+# optional UI teaches people to ignore a red doctor.
 check_console_deps() {
   local d; d="$(console_tool_dir)"
   c_hd "Console"
@@ -556,20 +546,18 @@ check_console_deps() {
   else
     c_warn "$(console_deps_hint "$d")"
   fi
-  # WHETHER THE BOX CAN SEE WHAT ITS PANES ARE DOING (CEL-42), and which model
+  # WHETHER THE BOX CAN SEE WHAT ITS PANES ARE DOING, and which model
   # answers. Never a failure: liveness is an addition to the stall timers, and
   # a box without it watches its workers exactly as it always did.
   c_ok "$(liveness_doctor_line)"
   return 0
 }
 
-# A LEAKED SUITE LOCK IS A BOX-WIDE OUTAGE AND NOTHING ELSE SAYS SO. On
-# 2026-09-19 every gate on this box queued behind the suite lock for eighteen
-# minutes; the holder was a `sleep 1800` with ppid 1 that had inherited the
-# runner's lock descriptor and kept the lock alive after the runner was gone.
-# The lock is fixed at the source (tests/run.sh and cel-verify now spawn every
-# child with the descriptor closed), but a lock is held by whatever holds it,
-# and an operator staring at a queue needs to be told which of the two it is.
+# A LEAKED SUITE LOCK IS A BOX-WIDE OUTAGE AND NOTHING ELSE SAYS SO: every
+# gate on the box queues behind it. A child that inherited the runner's lock
+# descriptor (a stray `sleep` reparented to pid 1) keeps the lock alive after
+# the runner is gone; tests/run.sh and cel-verify close the descriptor in every
+# child, but an operator staring at a queue needs to be told which it is.
 # Held by a live suite is normal and silent; held while the pid in the file is
 # gone, or is running somewhere that is not a checkout, is a leak - a suite
 # runs from inside a checkout, a stray `sleep` does not.
@@ -584,8 +572,8 @@ _doctor_suite_lock_path() {
   printf '%s/cel-suite-%s.lock' "${TMPDIR:-/tmp}" "${UID:-0}"
 }
 
-# THE BOX'S EXEC RATE, COUNTED (CEL-111). 182 `cel inbox watch` processes and
-# a 600/sec fork rate went unnoticed for a week because nothing counted them.
+# THE BOX'S EXEC RATE, COUNTED. Leaked `cel inbox watch` processes and the
+# fork rate they drive stay invisible until something counts them.
 _doctor_watch_count() { pgrep -cf 'cel inbox watch' 2>/dev/null || printf 0; }
 _doctor_fork_rate() { # processes created per second over a short sample
   local a b s="${CEL_DOCTOR_FORK_SECS:-2}"
@@ -669,8 +657,8 @@ doctor_stale_orchestrator_lines() {
 }
 
 # AN ORCHESTRATOR THAT CANNOT HEAR ITS MAIL. A FAILURE, unlike an older
-# launch line: after the herdr restart of 2026-09-28 every orchestrator ran
-# without its inbox hook, mail piled up all night and nothing woke anyone.
+# launch line: a herdr restart can bring orchestrators back without their
+# inbox hook, and mail then piles up with nothing to wake them.
 doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
   # shellcheck source=lib/run.sh
   . "${BASH_SOURCE[0]%/*}/run.sh"
@@ -702,7 +690,7 @@ doctor_agent_roots_lines() { # -> 1 when the pi and omp roots overlap
   return 1
 }
 
-# TWO LIVE PROCESSES ON ONE SESSION FILE (CEL-102). Each answers the same
+# TWO LIVE PROCESSES ON ONE SESSION FILE. Each answers the same
 # mail separately and the owner gets contradicting replies. A failure.
 doctor_shared_session_lines() { # -> 1 when any session file has two resumers
   # shellcheck source=lib/run.sh
@@ -732,8 +720,8 @@ cmd_doctor() {
   else
     c_ok "v$_v$([ -z "$_latest" ] && printf ' (offline - update check skipped)')"
   fi
-  # The version alone hid the distance: a box on the main channel is thirty-odd
-  # merges past its tag and every surface used to call that "up to date".
+  # The version alone hides the distance: a box on the main channel can be
+  # many merges past its tag, so it is told how far behind origin/main it is.
   _chan="$(cel_config_get update channel)"
   case "$_chan" in main) ;; *) _chan=release ;; esac
   if [ "$_chan" = main ]; then
@@ -778,8 +766,8 @@ cmd_doctor() {
   fi
 
   c_hd "Login-shell PATH"
-  # The bug class that cost us hours: tools resolve in the current shell but not
-  # in a fresh login shell, because a dotfile replaces PATH instead of appending.
+  # Tools that resolve in the current shell but not in a fresh login shell,
+  # because a dotfile replaces PATH instead of appending.
   local sh_missing=""
   for b in $(for a in $(agent_names); do agent_get "$a" bin; done) herdr node; do
     have "$b" || continue
@@ -795,8 +783,7 @@ cmd_doctor() {
   if have herdr; then
     local cv sv
     # `|| true`: herdr status exits non-zero while the server reloads plugins,
-    # and under set -e a failing substitution would kill doctor with no message
-    # (seen live during the Task 9 cut-over, exit 101).
+    # and under set -e a failing substitution would kill doctor with no message.
     cv="$(herdr status 2>/dev/null | awk '/^client:/{f=1} f&&/version:/{print $2; exit}' || true)"
     sv="$(herdr status 2>/dev/null | awk '/^server:/{f=1} f&&/version:/{print $2; exit}' || true)"
     if [ -n "$sv" ] && [ "$cv" != "$sv" ]; then
@@ -816,8 +803,9 @@ cmd_doctor() {
   fi
 
   check_console_deps || fail=1
-  # A warning, never a failure: the orchestrator works, it is just missing
-  # what the last update added (CEL-63).
+  # A stale launch line is a warning: the orchestrator works, it is just
+  # missing what the last update added. A stripped inbox hook, a shared
+  # session file or overlapping agent roots are failures.
   c_hd "Orchestrators"
   doctor_stale_orchestrator_lines
   doctor_inbox_hook_lines || fail=1
@@ -834,11 +822,11 @@ cmd_doctor() {
   check_workspaces || fail=1
   check_externals || fail=1
 
-  # THE STEWARD IS WHAT RUNS GC. A timer that lost its next trigger after a
-  # user-manager restart left a box fourteen hours without a tick and walked
-  # it into OOM, while every other line here stayed green. An old unit is
-  # rewritten in place (this is also how `cel update` repairs it, since it
-  # ends in doctor); a stale tick is a failure carrying the repair command.
+  # THE STEWARD IS WHAT RUNS GC. A timer can lose its next trigger after a
+  # user-manager restart, leaving the box without a tick while every other
+  # line here stays green. An old unit is rewritten in place (this is also how
+  # `cel update` repairs it, since it ends in doctor); a stale tick is a
+  # failure carrying the repair command.
   local stline
   if stline="$(steward_timer_upgrade)"; then
     [ -z "$stline" ] || c_ok "$stline"
@@ -857,8 +845,9 @@ cmd_doctor() {
   local gcline; gcline="$(gc_doctor_line)"
   [ -z "$gcline" ] || c_warn "$gcline"
 
-  # One line, and only when the box-wide suite lock is held by something that
-  # is not running tests - which blocks every gate on the box until it dies.
+  # Exec load is always one line, a failure over its bound. The suite lock is
+  # one line only when the box-wide lock is held by something that is not
+  # running tests - which blocks every gate on the box until it dies.
   local execline
   if execline="$(doctor_exec_load_line)"; then c_ok "$execline"; else c_err "$execline"; fail=1; fi
   local lockline; lockline="$(doctor_suite_lock_line)"
@@ -877,15 +866,13 @@ cmd_doctor() {
     case "$afkline" in *expired*) c_warn "$afkline" ;; *) c_ok "$afkline" ;; esac
   fi
 
-  # AND THE FLOOR SPACE. The factory measured its machines and never the box
-  # they stand on, so the first symptom of a full disk was a build failing.
-  # A warning rather than a failure, and it names the largest reclaimable
-  # class and the command that clears it: 144G of 193G was diagnosable for
-  # months and nothing anywhere diagnosed it.
+  # AND THE FLOOR SPACE. Unmeasured, a full disk first shows up as a failing
+  # build. A warning rather than a failure, and it names the largest
+  # reclaimable class and the command that clears it.
   local boxline; boxline="$(box_doctor_line)"
   [ -z "$boxline" ] || c_warn "$boxline"
 
-  # MEMORY AND WHO HOLDS IT (CEL-122), and whether anything will restart the
+  # MEMORY AND WHO HOLDS IT, and whether anything will restart the
   # user manager if the OOM-killer takes it. Warnings: neither is a defect.
   local memline top="" mb dir
   memline="$(boxguard_doctor_line)"

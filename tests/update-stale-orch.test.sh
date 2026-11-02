@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-63: after `cel update`, orchestrators still running an older launch line
+# After `cel update`, orchestrators still running an older launch line
 # are named, with what they lack and the exact command that fixes them.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/update.sh"
@@ -76,8 +76,8 @@ test_steward_reports_stale_orchestrators_once_per_build() {
   unset CEL_UPDATE_DIR; orch_stub_teardown
 }
 
-# Sourcery on #98: the marker was written even when nothing was stale, so an
-# orchestrator that went stale LATER in the same build was never reported.
+# The once-per-build marker is written only when something was stale, so an
+# orchestrator that goes stale LATER in the same build is still reported.
 test_steward_reports_an_orchestrator_that_goes_stale_later_in_the_build() {
   source "$CEL_ROOT/lib/steward.sh"
   orch_stub_setup omp
@@ -129,10 +129,9 @@ test_restart_orchestrators_passes_the_restart_as_an_argv() {
   orch_stub_teardown
 }
 
-# CEL-81: the resolver read /proc/1187 - systemd --user, an ANCESTOR of the
-# pane - and reported an orchestrator that had every flag as missing them all.
-# The process is found downward from the pane's shell, and an unreadable
-# ancestor is never consulted.
+# The process is found downward from the pane's shell. An unreadable ANCESTOR
+# of the pane (systemd --user) is never consulted: reading it reports an
+# orchestrator that has every flag as missing them all.
 test_stale_detection_finds_the_omp_process_below_an_unreadable_ancestor() {
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
@@ -186,7 +185,7 @@ test_update_check_previews_the_stale_list() {
   orch_stub_teardown
 }
 
-# CEL-85: herdr brings an orchestrator back as a bare `omp --resume=<file>` -
+# herdr brings an orchestrator back as a bare `omp --resume=<file>` -
 # no inbox hook and no CEL_ env, so the env-keyed lookup above cannot even
 # see it. It is found from the pane's shell downward and reported stripped.
 test_stripped_orchestrator_is_found_from_the_pane_shell() {
@@ -214,10 +213,9 @@ test_doctor_fails_a_stripped_orchestrator_and_names_the_command() {
   orch_stub_teardown
 }
 
-# CEL-87: alpha-orch was restarted with the full launch line and `cel update
-# --check` still called it stale, missing every item - the walk took the
-# NEWEST omp under the pane's shell, which was one the orchestrator had
-# spawned itself. The pane's orchestrator is the one nearest the shell.
+# The pane's orchestrator is the omp nearest the shell, not the NEWEST omp
+# under it, which may be one the orchestrator spawned itself; taking that one
+# would call a full launch line stale, missing every item.
 test_cel87_full_launch_line_is_not_listed_beside_an_unrelated_process() {
   orch_stub_setup omp
   orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
@@ -262,9 +260,9 @@ test_cel87_trailing_dry_run_output_does_not_blank_the_verdict() {
   orch_stub_teardown
 }
 
-# CEL-87: omp's own helpers are also named omp (a js-eval worker, a daemon
-# broker) and carry no inbox hook. doctor and the steward's repair read them
-# through the same lookup and called a healthy orchestrator stripped.
+# omp's own helpers are also named omp (a js-eval worker, a daemon broker) and
+# carry no inbox hook. doctor and the steward's repair read them through the
+# same lookup, so they must not make a healthy orchestrator read as stripped.
 test_cel87_omp_helper_children_do_not_read_as_stripped() {
   orch_stub_setup omp
   orch_stub_roster alpha-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
@@ -278,9 +276,8 @@ test_cel87_omp_helper_children_do_not_read_as_stripped() {
 }
 
 # A helper is never the orchestrator. When the real omp does not match (its cwd
-# moved, or it is not under the pane's shell), a helper used to be the only
-# candidate and every flag read as missing; now the lookup fails and the
-# verdict is unknown, never stale and never current.
+# moved, or it is not under the pane's shell), the lookup fails and the verdict
+# is unknown - never stale, never current, never every flag missing.
 test_a_helper_alone_reads_unknown_not_missing_every_flag() {
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"

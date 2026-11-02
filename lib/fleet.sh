@@ -2,13 +2,10 @@
 # cel fleet - the whole box in one read.
 #
 # Every other view is per workspace: `cel-fanout status` needs you standing in
-# one, a dashboard serves one, the steward warns about one at a time. So the
-# question an operator actually asks first - "what is the state of
-# everything?" - was answered by visiting each workspace in turn and holding
-# the picture in their head, which is exactly the kind of bookkeeping that
-# goes wrong quietly. This is that question as a single deterministic call: no
-# tokens, no agent judgement, only numbers that are true at the moment of the
-# read.
+# one, a dashboard serves one, the steward warns about one at a time. This
+# file answers the question an operator asks first - "what is the state of
+# everything?" - as a single deterministic call: no tokens, no agent
+# judgement, only numbers that are true at the moment of the read.
 #
 # It is a READ. It never nudges, never writes and always exits 0 (a usage
 # error aside), because a view that can change the box is a view people are
@@ -41,11 +38,10 @@ _FLEET_US=$'\x1f'
 # The processes with no owner at all, as one field of the box.
 #
 # Every view of this box reads `cel fleet --json`, so a class of process that
-# is not in this document is a class no view can mention - which is how a
-# gigabyte of reparented watchers, fixtures and dead pane shells sat under a
-# headline that said `celestial-orch 1.7G`. Zeroes rather than an absent key:
-# a console that has to ask whether the field exists gets it wrong once.
-fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are PSS, RSS fallback - CEL-100)
+# is not in this document is a class no view can mention. Zeroes rather than
+# an absent key: a console that has to ask whether the field exists gets it
+# wrong once.
+fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are PSS, RSS fallback)
   local n mb
   read -r n mb <<<"$(orphans_list 2>/dev/null | orphans_totals)"
   printf '{"count":%d,"rss_mb":%d}' "${n:-0}" "${mb:-0}"
@@ -61,16 +57,14 @@ fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are P
 # roster to fail inside whichever jq touched it first. An unreadable answer is
 # an answer nobody got, which this file already has a word for: empty, every
 # orchestrator `-`, and nobody convicted. The validation costs one jq per
-# render, against a read that starts a hundred and forty.
+# render.
 #
 # AND SHAPE-VALID IS NOT ANSWERED. Checking only that the bytes PARSE admits
 # `{}`, `[]`, an error envelope, and any document about something other than
 # agents - each of which then reads as a roster that knows about nobody, and
-# so as `gone` for every worker on the box. Measured with a stub printing
-# `{}`: 16 of 16 workers rendered `gone` against a healthy roster's 5 done /
-# 8 gone / 1 idle / 2 working. A mute observer convicted the whole fleet.
-# Only a document with `.result.agents` as an ARRAY has said anything about
-# who is alive; anything else is the no-roster path, and `-`.
+# so as `gone` for every worker on the box. Only a document with
+# `.result.agents` as an ARRAY has said anything about who is alive; anything
+# else is the no-roster path, and `-`.
 _fleet_roster() {
   local out
   out="$(cel_agent_list 2>/dev/null)" || { printf '%s' ''; return 0; }
@@ -87,25 +81,21 @@ _fleet_roster() {
 # The ledger is read with jq, deliberately, and not by sourcing cel-fanout:
 # cel-fanout is a BINARY that runs a delegation when sourced, not a library.
 #
-# This used to emit one JSON entry per line and leave the caller to start a jq
-# per row to pull the three fields it needed out again, and another to ask the
-# roster what that row's pane was doing. Five jq processes per worker, 154 on
-# one render. The roster is a document like any other, so the join belongs in
-# the same program: one jq per REPO answers everything the loop reads.
+# One jq per REPO answers everything the loop reads, the roster join
+# included: a jq per row to pull fields back out, or to ask the roster about
+# that row's pane, multiplies with the worker count.
 #
-# ONLY THE STATES THAT ARE STILL SOMEBODY'S CONCERN. The first cut of this
-# list took everything but `released`, and on the live box the unit view
-# filled with `landed`, `salvaged` and `orphaned` rows - finished business,
-# every one of them rendered as a worker with `live: gone` and no readable
-# worktree. A list of things nobody can act on is a list people stop reading,
-# and it buried the rows that mattered. `running` is working; `finished` and
-# `collected` are waiting on a human to land them or let them go. Everything
-# else is history, and history is what `cel-fanout status --json` is for -
-# that view still carries every state, `released` included.
+# ONLY THE STATES THAT ARE STILL SOMEBODY'S CONCERN. `landed`, `salvaged` and
+# `orphaned` rows are finished business - `live: gone`, no readable worktree -
+# and listing them buries the rows that matter. `running`, `unconfirmed` and
+# `blocked` are a worker still in play; `finished` and `collected` are waiting
+# on a human to land them or let them go. Everything else is history, and
+# history is what `cel-fanout status --json` is for - that view still carries
+# every state, `released` included.
 #
 # An empty roster means herdr did not answer, and `-` says that about the
-# OBSERVER; `gone` says it about the worker. lib/stall.sh learned the
-# difference the hard way and the two must not be folded together here.
+# OBSERVER; `gone` says it about the worker. lib/stall.sh draws the same
+# distinction, and the two must not be folded together here.
 _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree US state US live US harness US id US backend
   local led="$1/.cel/delegations.json"
   [ -f "$led" ] || return 0
@@ -145,12 +135,9 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
 
 # EVERY GIT QUESTION THIS VIEW ASKS OF ONE WORKTREE, ASKED ONCE.
 #
-# Measured on 2026-09-20: a single render started 112 git processes, all of
-# them here - 36 `symbolic-ref`, 32 `rev-parse --verify`, 24 `rev-list
-# --count`, 10 `status --porcelain`, 10 `rev-parse --abbrev-ref`. Twelve per
-# running row, for four numbers, and half of them asked twice because both
-# `unlanded` and the row's own severity want the same at-risk answer. The work
-# is trivial; the fork is not, and system time was 62% of the render.
+# Every git call is a fork, and the forks - not the work - dominate the
+# render; both `unlanded` and the row's own severity want the same at-risk
+# answer.
 #
 # So: ONE `for-each-ref` covering every ref the questions are about (which
 # branch is checked out, whether it has a remote twin, where origin/HEAD
@@ -159,16 +146,14 @@ _fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree
 # remembered per worktree for the length of the read, so the second caller
 # pays nothing.
 #
-# IT STAYS FORGIVING. Every call it replaces ended in `|| true` or a `?`, and
-# a batched query that turns "could not ask" into an error would convict a
-# detached HEAD, a branch the remote has never seen, or a checkout with no
-# origin at all. Unknown is `?` and at-risk is empty, exactly as before.
+# IT STAYS FORGIVING. A batched query that turns "could not ask" into an
+# error would convict a detached HEAD, a branch the remote has never seen, or
+# a checkout with no origin at all. Unknown is `?` and at-risk is empty.
 declare -gA _FLEET_GIT_FACTS=()
 _FLEET_GIT_AHEAD='?'
 _FLEET_GIT_RISK=''
 # It sets two variables rather than printing them, because a memo written
-# inside `$(...)` is written in a subshell and thrown away - the first version
-# of this cached nothing at all and asked every question twice.
+# inside `$(...)` is written in a subshell and thrown away.
 _fleet_git_load() { # <worktree> -> sets _FLEET_GIT_AHEAD, _FLEET_GIT_RISK
   local wt="${1:-}"
   if [ -n "$wt" ] && [ -n "${_FLEET_GIT_FACTS[$wt]+x}" ]; then
@@ -182,10 +167,9 @@ _fleet_git_load() { # <worktree> -> sets _FLEET_GIT_AHEAD, _FLEET_GIT_RISK
   declare -A have=()
   if [ -n "$wt" ] && [ -d "$wt" ]; then
     # %(HEAD) is this worktree's HEAD, so the checked-out branch comes out of
-    # the same read as the refs - and a detached HEAD simply marks nothing,
-    # which is the `symbolic-ref --quiet HEAD` test this replaces. The marker
-    # is emitted as `*` or `-` rather than as git's "* or a space", because a
-    # leading empty field and `read` do not survive each other.
+    # the same read as the refs, and a detached HEAD simply marks nothing. The
+    # marker is emitted as `*` or `-` rather than as git's "* or a space",
+    # because a leading empty field and `read` do not survive each other.
     refs="$(git -C "$wt" for-each-ref \
       --format='%(if)%(HEAD)%(then)*%(else)-%(end) %(refname) %(symref)' \
       refs/heads refs/remotes/origin 2>/dev/null || true)"
@@ -221,19 +205,19 @@ _fleet_git_load() { # <worktree> -> sets _FLEET_GIT_AHEAD, _FLEET_GIT_RISK
     fi
 
     # `.agent/` is the worker's REPORT - result.md and verdict.json, written
-    # at the end and never committed - so counting it made every finished
-    # worker look like one holding work at risk. lib/stall.sh learned that;
-    # this is the same filter, on the same output.
+    # at the end and never committed - so counting it would make every
+    # finished worker look like one holding work at risk. Same filter as
+    # lib/stall.sh, on the same output.
     local dirty unpushed=0
     dirty="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v ' \.agent/' | grep -c . || true)"
     if [ -n "$br" ] && [ "$br" != HEAD ]; then
       if [ -n "${have[origin/$br]:-}" ]; then
         unpushed="$(git -C "$wt" rev-list --count "origin/$br..HEAD" 2>/dev/null || printf 0)"
       elif [ -n "${have[origin/main]:-}" ]; then
-        # No remote branch AT ALL - the 404 case from the incident. Everything
-        # this worktree has ever committed is unpushed, counted from
-        # origin/main exactly as stall_work_at_risk counts it, and reusing the
-        # number above when that is the base it already asked for.
+        # No remote branch AT ALL: everything this worktree has ever committed
+        # is unpushed, counted from origin/main exactly as stall_work_at_risk
+        # counts it, and reusing the number above when that is the base it
+        # already asked for.
         if [ "$base" = origin/main ] && [[ "$ahead" =~ ^[0-9]+$ ]]; then
           unpushed="$ahead"
         else
@@ -260,11 +244,10 @@ fleet_ahead() { # <worktree> -> count | ?
 
 # EVERYTHING A ROW IS JUDGED ON, COMPUTED ONCE.
 #
-# The verdict, the age, the footprint and the at-risk answer were each
-# computed twice - once for the row and once for the unit's counts - and the
-# unit then started a jq to read two of them back out of the JSON it had just
-# been handed. One call, one set of facts, and the count an operator compares
-# against the list is literally the same value the list carries.
+# One call, one set of facts - the verdict, the age, the footprint and the
+# at-risk answer - shared by the row and the unit's counts, so the count an
+# operator compares against the list is literally the same value the list
+# carries.
 #
 # THE VERDICT IS ONLY EVER PASSED ON A RUNNING ROW. A collected or finished
 # worker is idle with nothing written since, by design - convicting it of
@@ -274,14 +257,13 @@ fleet_ahead() { # <worktree> -> count | ?
 _fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 lines
   local live="$1" text="$2" wt="$3" state="$4" id="$5" backend="${6:-herdr}"
   local quiet="" verdict="" severity="" risk="" activity="" aconf="" cached
-  # Quiet time is a question about a RUNNING worker. Answering it for every
-  # finished and collected row meant a `find` over every worktree on the box
-  # on every fleet call - most of the console's start. Those rows show '-'.
+  # Quiet time is a question about a RUNNING worker: answering it for every
+  # row would `find` over every worktree on the box on every fleet call.
+  # Other rows show '-'.
   [ "$state" = running ] && quiet="$(stall_quiet_secs "$wt")"
   # The batched git query, and the only place it is asked from: both the
-  # at-risk answer and the ahead count come out of it, which is why
-  # stall_work_at_risk is not called here any more - it is the same four
-  # processes, asked a second time.
+  # at-risk answer and the ahead count come out of it, so stall_work_at_risk
+  # is not called here (it would ask the same questions a second time).
   _fleet_git_load "$wt"
   risk="$_FLEET_GIT_RISK"
   if [ "$backend" != rex ] && [ "$state" = running ] && [ "$live" != "-" ]; then
@@ -291,7 +273,7 @@ _fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 line
   # -1, not 0: a worktree that cannot be read has an UNKNOWN age, and zero
   # would render as a worker that wrote something a moment ago.
   [ -n "$quiet" ] || quiet=-1
-  # WHAT THE PANE IS DOING, when somebody has recently asked (CEL-42). The
+  # WHAT THE PANE IS DOING, when somebody has recently asked. The
   # fleet never asks itself: this view is read in a loop and a network call per
   # row is a view people stop running. It carries the steward's last answer,
   # which is why a row nobody has classified simply has neither field filled -
@@ -304,10 +286,10 @@ _fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 line
   fi
   # Newline-separated, not tab: see _FLEET_US above for what `read` does to a
   # run of tabs, and these fields are empty most of the time. The trailing `.`
-  # is not decoration - `$(...)` eats trailing newlines, so a row whose last
-  # facts are empty came back short, the caller's last `read` hit EOF and
-  # returned non-zero, and under `set -e` that took `cel-fanout status --json`
-  # down with it.
+  # is not decoration - `$(...)` eats trailing newlines, so without it a row
+  # whose last facts are empty comes back short, the caller's last `read` hits
+  # EOF and returns non-zero, and under `set -e` that kills
+  # `cel-fanout status --json`.
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n.' \
     "$quiet" "$verdict" "$severity" "$_FLEET_GIT_AHEAD" \
     "$(mem_tree_rss_mb "$wt")" "$activity" "$aconf" "$risk"
@@ -315,13 +297,11 @@ _fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 line
 
 # ONE LEDGER ROW AS THE THING AN OPERATOR ACTUALLY ASKS ABOUT.
 #
-# The owner, at the console on 2026-09-18: "when I asked it why one of my
-# workers was stalled it just told me to run cel fleet". The view carried a
-# stalled COUNT and nothing else - no id, no verdict, no reason - so neither
-# the console nor the model could answer from state they were never given.
-# This is that state. `cel fleet --json` and `cel-fanout status --json` both
-# render from HERE, so the two surfaces cannot describe the same worker
-# differently; the shape is a contract the console is written against.
+# The console and the model answer "why is this worker stalled?" from this
+# state - id, verdict, reason - not from a stalled COUNT. `cel fleet --json`
+# and `cel-fanout status --json` both render from HERE, so the two surfaces
+# cannot describe the same worker differently; the shape is a contract the
+# console is written against.
 #
 # The last argument is the facts above when the caller already has them (the
 # fleet's own sweep does), and absent when it does not (cel-fanout calls this
@@ -331,9 +311,8 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
   [ -n "$live" ] || live="-"
   local wt="${4:-}" state="${5:-}" facts="${6:-}"
   if [ -z "$facts" ]; then
-    # One jq for all three when the caller did not already have them: every jq
-    # is a process, and at seven per row the fleet spent longer parsing its
-    # own ledger than reading the box.
+    # One jq for all three when the caller did not already have them: every
+    # jq is a process, and this runs once per row.
     local ewt estate id
     { read -r ewt; read -r estate; read -r id; } < <(printf '%s' "$e" |
       jq -r '[(.worktree // ""), (.state // ""), (.id // "")] | .[]')
@@ -341,7 +320,7 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
     [ -n "$state" ] || state="$estate"
     facts="$(_fleet_row_facts "$live" "$text" "$wt" "$state" "$id")"
   fi
-  # ...AND WHAT THE PANE IS, which needs nobody asked at all (CEL-50). A pane
+  # ...AND WHAT THE PANE IS, which needs nobody asked at all. A pane
   # holding an unsubmitted prompt, erroring on every turn, or refused by its
   # provider all render as a worker thinking, and all three are visible in the
   # text. Carried as its own field so a view can show `running` and the reason
@@ -374,15 +353,13 @@ fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state]
       harness: $harness}'
 }
 
-# MAIL TO A PANE THAT IS NOT THERE (CEL-50). A worker was sent a finding by
-# inbox; the ledger showed `live: -` and nothing received it. The message was
-# accepted and went nowhere, which is worse than a refusal - the sender
-# believes it was delivered. Prints the sentence and returns 0 when the alias
-# has no live pane.
+# MAIL TO A PANE THAT IS NOT THERE. A message accepted for an alias with no
+# live pane goes nowhere, which is worse than a refusal - the sender believes
+# it was delivered. Prints the sentence and returns 0 when the alias has no
+# live pane.
 #
 # A roster nobody could read is NOT evidence that anyone died: an empty
-# agents document says nothing at all, the lesson lib/stall.sh already paid
-# for once.
+# agents document says nothing at all.
 fleet_alias_undeliverable() { # <agents-json> <alias>
   local agents="${1:-}" alias="${2:-}"
   [ -n "$agents" ] && [ -n "$alias" ] || return 1
@@ -397,7 +374,7 @@ fleet_alias_undeliverable() { # <agents-json> <alias>
 # The unit line. The unit is the PRODUCT: the thing one orchestrator stands
 # over. A declared product names its repos after itself, because `bundle` on
 # its own tells an operator nothing about which checkouts are moving; an
-# implicit product IS its repo and renders byte-for-byte as it always has.
+# implicit product IS its repo and renders as its bare name.
 _fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded> <mem>
   printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s   mem %s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7"
@@ -447,8 +424,8 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   [ -n "$cap" ] || cap=4
 
   # An empty roster means herdr did not answer. That is not evidence that
-  # anyone died - lib/stall.sh learned that the hard way - so with no roster
-  # every orchestrator reads as unknown and nothing is convicted.
+  # anyone died, so with no roster every orchestrator reads as unknown and
+  # nothing is convicted.
   local have_roster=0
   [ -n "$roster" ] && have_roster=1
 
@@ -463,11 +440,9 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
         *)       orch="LIVE" ;;
       esac
     else
-      # NO ALIAS IS NOT NO ORCHESTRATOR (CEL-44). herdr cleared a live
-      # orchestrator's name when it restarted on 2026-09-18 and this view,
-      # which resolves one by its alias, reported `orch -` for a product whose
-      # pane was running - and the act that follows `-` is starting another one
-      # on top of it. An agent alive in the product's OWN directory is that
+      # NO ALIAS IS NOT NO ORCHESTRATOR. herdr can clear a live agent's name
+      # on restart, and `orch -` invites starting a second orchestrator on top
+      # of the live one. An agent alive in the product's OWN directory is that
       # product's orchestrator whatever herdr calls it, and `unnamed` is a
       # state with a cure: cel ws up <workspace>.
       local here
@@ -506,7 +481,7 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
 "
     # The unit's footprint is the sum of its workers' - every state the list
     # carries, not only `running`: a collected worker whose pane is still up
-    # is still holding the memory, and hiding it is how 3 GB goes missing
+    # is still holding the memory, and leaving it out would lose that memory
     # between the row and the box.
     rss=$((rss + ${orss:-0}))
     # The count IS the list: counted from the same verdict the row carries, so
@@ -515,8 +490,7 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   done < <(for repo in "${repos[@]}"; do _fleet_unit_rows "$wsdir" "$repo" "$roster"; done)
 
   # The rows are folded by the same jq that builds the unit, and the repo list
-  # arrives as positional arguments: this was three processes (`jq -R`, `jq
-  # -s`, `jq -n`) for a document of four numbers and a list of strings.
+  # arrives as positional arguments - no extra jq to assemble either.
   # Live lanes, from the roster this read already holds: agents standing in
   # .cel/solo/<product>/lane-<name> (not in a deleted one). Solo units only -
   # a fleet unit's document is unchanged - one jq, no herdr call.
@@ -547,15 +521,15 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   open="$(_inbox_open --for root --workspace "$ws" 2>/dev/null | grep -c . || true)"
   [ -n "$open" ] || open=0
   # WHETHER ROOT'S MAIL IS GOING ANYWHERE AT ALL. Every view of this box reads
-  # `cel fleet --json`, and until CEL-43 none of them could say who was alive
-  # to read the mailbox everything escalates to - so 72 escalations in nine
-  # days landed somewhere nobody was obliged to look.
+  # `cel fleet --json`, so who is alive to read the mailbox everything
+  # escalates to belongs here - otherwise escalations land where nobody is
+  # obliged to look.
   mail="$(inbox_mail_json "$ws" root 2>/dev/null)"
   [ -n "$mail" ] || mail='{"to_root_unread":0,"oldest_secs":0,"reader":""}'
 
   # The orchestrator candidates are one jq over the workspace and the roster,
   # and the product list is read off them rather than asked of the YAML a
-  # second time (CEL-81 kept the spawn budget by trading, not by raising it).
+  # second time (the fleet read is held to a spawn budget).
   local cands
   cands="$(run_orchestrator_candidates "$ws" "$wsdir" "$roster")"
   units=""
@@ -564,7 +538,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 "
   done
 
-  # The orchestrator rows (CEL-81) are folded into THIS jq, mail included:
+  # The orchestrator rows are folded into THIS jq, mail included:
   # the rows arrive as TSV with each mailbox's name and cursor state, and the inbox file is
   # read here once for all of them - no jq per orchestrator (the budget).
   local orows ifile
@@ -589,7 +563,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
                      | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length)}]}'
 }
 
-# EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE (CEL-81), from the same rows
+# EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE, from the same rows
 # `cel update` acts on, so the console shows what `--restart-orchestrators`
 # would do and never runs a probe of its own. Each row gains the mailbox's
 # cursor state (mark and holes), the same rule _inbox_count_one applies (the recipient's
@@ -616,8 +590,7 @@ _fleet_orch_tsv() { # <ws> <wsdir> <roster-json> <candidates>
 # orphans_doctor_line do: the check belongs beside the facts it reads.
 #
 # Silent when someone is reading, and silent when there is nothing unread. A
-# watcher that speaks every tick is a watcher people stop reading - which is
-# how root got to 553 messages in the first place.
+# watcher that speaks every tick is a watcher people stop reading.
 fleet_mail_doctor_line() { # <ws> -> one line, or nothing
   local mail n secs reader age
   mail="$(inbox_mail_json "$1" root 2>/dev/null)" || return 0
@@ -674,23 +647,21 @@ _fleet_render() { # <doc>
 # `cel quota` and from the steward's tick) and an empty list when nothing has
 # asked yet - absent is absent, never a zero window.
 #
-# CEL-35: it is the SAME FUNCTION `cel quota --json` calls, not a second
-# reading of the same directory. This field listed one row per cache file and
-# the quota command folded pi's login into Claude Code's, so the console said
-# five subscriptions where `cel quota` said two, and the operator had to guess
-# which surface was lying.
+# It is the SAME FUNCTION `cel quota --json` calls, not a second reading of
+# the same directory, so the console and `cel quota` cannot count different
+# subscriptions.
 _fleet_subscriptions() {
   # shellcheck source=lib/quota.sh
   . "${BASH_SOURCE[0]%/*}/quota.sh"
   subscription_list --cached
 }
 
-# THE WHOLE DOCUMENT, CACHED (CEL-75). On 2026-09-25, at a load average of 32
-# on a 16-thread box, one read took 67-116 s (about 5 s idle), and a console
-# refreshing every few seconds started read after read behind the one still
-# running, which made the load that made the read slow. A copy younger than
-# `fleet.cache_secs` (default 30) is served as is; `--fresh` bypasses it.
-# Concurrent callers queue on one lock and take what the holder wrote rather
+# THE WHOLE DOCUMENT, CACHED. Under load one read takes tens of seconds, and a
+# console refreshing every few seconds would start read after read behind the
+# one still running, adding to the load that makes the read slow. A valid
+# copy of any age is served at once, and one older than `fleet.cache_secs`
+# (default 30) also starts a detached refill; `--fresh` bypasses the cache.
+# Concurrent builders queue on one lock and take what the holder wrote rather
 # than each starting a read of its own. CEL_FLEET_CACHE_SECS overrides the
 # config; the suite sets it to 0 so a test that mutates a fixture sees it.
 _fleet_cache_secs() {
@@ -706,8 +677,8 @@ _fleet_cache_secs() {
 
 _fleet_cache_young() { # <file> <secs>
   [ -s "$1" ] || return 1
-  # A young file is served only if it is still a fleet document (CEL-79): a
-  # truncated or hand-edited cache printed an empty board with success.
+  # A young file is served only if it is still a fleet document: a truncated
+  # or hand-edited cache would print an empty board with success.
   jq -e '.workspaces | type == "array"' "$1" >/dev/null 2>&1 || return 1
   local now m
   now="$(date +%s)"; m="$(stat -c %Y "$1" 2>/dev/null || printf 0)"
@@ -722,7 +693,7 @@ _fleet_doc() { # <only> -> the JSON document
   # has just been committed to, not the answer from the last draw.
   _FLEET_GIT_FACTS=()
   # The mailbox reader is asked of the roster this pass already holds, not of
-  # a fresh `herdr agent list` per workspace (CEL-75).
+  # a fresh `herdr agent list` per workspace.
   _INBOX_ROSTER_HELD="$(printf '%s' "$roster" | jq -r '.result.agents[]?.name // empty' 2>/dev/null || true)"
   [ -n "$roster" ] || _INBOX_ROSTER_HELD=""
   _INBOX_ROSTER_OK=0; [ -n "$roster" ] && _INBOX_ROSTER_OK=1
@@ -759,9 +730,9 @@ _fleet_cache_valid() { # <file>
 }
 
 # Build and write the cache, holding the lock on fd 9 in THIS shell only. The
-# build runs with fd 9 CLOSED: before CEL-90 every awk, jq and subshell under
-# the read inherited it, so a killed holder's reparented children kept the
-# lock - and every console behind it waited on a read nobody would collect.
+# build runs with fd 9 CLOSED: otherwise every awk, jq and subshell under the
+# read inherits it, a killed holder's reparented children keep the lock, and
+# every console behind it waits on a read nobody will collect.
 _fleet_write() { # <file> <only>
   local doc
   doc="$(_fleet_doc "$2" 9>&-)"
@@ -775,15 +746,13 @@ _fleet_write() { # <file> <only>
   printf '%s' "$doc"
 }
 
-# THE DETACHED REFILL (CEL-90). Before this, the rebuild ran in the caller:
-# at a load of 25-30 it took 32-82 s, the console killed it at 20 s, the
-# cache was never written, and the next refresh found it expired and did the
-# same - the console sat on "stale" for good while every killed rebuild added
-# load for nothing. Now the caller returns the old document at once and the
-# rebuild runs in its own session, where no caller's timeout or exit reaches
-# it. SINGLE-FLIGHT on the same lock, taken non-blocking: a second refill
-# that finds one running simply exits, and one that wins after a refill has
-# just finished sees a young cache and exits too.
+# THE DETACHED REFILL. The rebuild runs in its own session, where no caller's
+# timeout or exit reaches it: a rebuild run inline by a caller that gets
+# killed never writes the cache, so every refresh finds it expired and
+# repeats the killed work. The caller returns the old document at once.
+# SINGLE-FLIGHT on the same lock, taken non-blocking: a second refill that
+# finds one running simply exits, and one that wins after a refill has just
+# finished sees a young cache and exits too.
 _fleet_refill() { # <file> <only> <secs>
   exec 9>"$1.lock"
   flock -n 9 || return 0
@@ -836,7 +805,7 @@ cmd_fleet() {
   secs="$(_fleet_cache_secs)"
   if [ "$secs" -gt 0 ]; then
     file="$(_fleet_cache_file "$only")"
-    # SERVE STALE (CEL-90): a valid document of ANY age is returned at once;
+    # SERVE STALE: a valid document of ANY age is returned at once;
     # one past `cache_secs` also starts the detached refill. The document
     # carries `generated_at`, so a reader says honestly how old it is.
     if [ "$fresh" -eq 0 ] && _fleet_cache_valid "$file"; then
@@ -845,8 +814,8 @@ cmd_fleet() {
       # check and the cat, and an empty read is not a board.
       if printf '%s' "$doc" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
         _fleet_cache_young "$file" "$secs" || fleet_refill_spawn "$file" "$only" "$secs"
-        # A cache from before CEL-90 has no generated_at: its age is the
-        # file's mtime, or a reader would pass it off as fresh.
+        # A cache with no generated_at (written by an older cel) takes its
+        # age from the file's mtime, or a reader would pass it off as fresh.
         local m; m="$(stat -c %Y "$file" 2>/dev/null || printf 0)"
         doc="$(printf '%s' "$doc" | jq -c --arg m "$(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)" \
           '.generated_at //= $m')"

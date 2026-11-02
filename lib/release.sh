@@ -3,13 +3,9 @@
 # factory MAKES. Releasing the plane itself is one ordinary instance of that,
 # not the only meaning.
 #
-# It used to be the only meaning: the command dispatched celestial's own
-# release.yml in whatever repo the box's checkout pointed at, so for anyone
-# who is not the owner every local refusal passed (semver, greater-than,
-# non-empty changelog) and `gh workflow run` then returned 403 - it failed at
-# the last step looking like it should have worked. That refusal is now made
-# FIRST and locally: a caller with READ is told where releases of that product
-# actually come from, before anything is spent.
+# Permission is checked locally BEFORE dispatch: a caller with only READ is
+# told where releases of that product actually come from, instead of
+# `gh workflow run` failing with a 403 at the last step.
 #
 # The plane owns no versioning semantics. A repo declares how it is released
 # (lib/workspace.sh, `release:`) - which workflow, which input, what values
@@ -101,8 +97,8 @@ _release_check_value() { # <wsdir> <repo> <slug> <value>
   die "cel release: $2 accepts $(printf '%s' "$accepts" | sed 's/ /, /g') - '$4' is none of them"
 }
 
-# Every release call acts for the workspace that owns the repo (CEL-70):
-# ws_gh gives it that workspace's `github.user`, or today's call without one.
+# Every release call acts for the workspace that owns the repo: ws_gh gives it
+# that workspace's `github.user`, or plain `gh` without one.
 _release_gh() { # <wsdir-or-empty> <gh args...>
   local w="$1"; shift
   if [ -n "$w" ]; then ws_gh "$w" "$@"; else gh "$@"; fi
@@ -277,10 +273,9 @@ _release_resolve_repo() { # <wsdir> <product> <explicit-repo> <value>
   esac
 }
 
-# COMPATIBILITY. `cel release 0.3.0` with no product is the plane's own habit
-# and keeps working wherever the current workspace has exactly one releasable
-# repo. Anywhere else it refuses and names the form to use, rather than
-# guessing which product the owner meant.
+# SHORTHAND. `cel release 0.3.0` with no product works wherever the current
+# workspace has exactly one releasable repo. Anywhere else it refuses and names
+# the form to use, rather than guessing which product the owner meant.
 _release_only_product() { # <wsdir> <value>
   local wsdir="$1" r found=()
   while read -r r; do
@@ -324,7 +319,7 @@ cmd_release() { # <product> <value> [--repo r] [--dry-run] [--follow|--no-follow
 
   have gh || die "cel release: gh is required to dispatch the workflow"
   _release_check_permission "$slug" "$product" "$wsdir"
-  # UNDER AFK a release goes only where the owner named it first (CEL-78).
+  # UNDER AFK a release goes only where the owner named it first.
   # shellcheck source=lib/afk.sh
   . "${BASH_SOURCE[0]%/*}/afk.sh"
   if afk_active; then

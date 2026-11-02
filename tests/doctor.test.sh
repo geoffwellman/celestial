@@ -24,9 +24,8 @@ test_doctor_counts_box_services() {
   _doctor_teardown
 }
 
-# The failure this ticket exists for: a box with a gateway in its config and
-# nothing in services.d is a gateway nobody is watching, and doctor is where
-# that gets said out loud.
+# A box with a gateway in its config and nothing in services.d is a gateway
+# nobody is watching, and doctor is where that gets said out loud.
 test_doctor_says_the_gateway_is_not_supervised() {
   _doctor_setup
   cel_config_set gateway gateway_port 47411
@@ -60,13 +59,10 @@ EOF
   rm -rf "$t"
 }
 
-# ---------------------------------------------------------------- CEL-53
-# DOCTOR USED TO JUDGE A WORKSPACE WITHOUT READING IT. Each workspace's
-# `setup:` checks ran in a bare login shell, so `test -n "$WIDGET_KEY"` failed
-# on a correctly configured box - the value lives in that workspace's
-# gitignored env.local and nothing had sourced it. A newcomer saw red lines
-# against work they had done correctly and learned the tool cannot be trusted,
-# which is the worst thing doctor can teach on day one.
+# ----------------------------------------------------------------
+# DOCTOR JUDGES A WORKSPACE WITH ITS OWN ENV LOADED. A `setup:` check such as
+# `test -n "$WIDGET_KEY"` reads a value from that workspace's gitignored
+# env.local; in a bare login shell it would fail on a correctly configured box.
 _setup_ws() { # <dir> <yaml-setup-block>
   mkdir -p "$1"
   cat > "$1/workspace.yaml" <<'YAML'
@@ -132,10 +128,8 @@ test_doctor_workspace_envs_do_not_leak_into_each_other() {
   _doctor_teardown
 }
 
-# A CHECKOUT NOBODY TOLD YOU WAS STALE. The orchestrator's `$ws/repos/<repo>`
-# sat 18 commits behind origin/main for a whole day on 2026-09-21 and every
-# conclusion drawn from it - a benchmark, two reviews - was wrong about the
-# wrong tree. This is the cheap half of that: one line, the count, the cure.
+# A CHECKOUT NOBODY TOLD YOU WAS STALE. Every conclusion drawn from a stale
+# `$ws/repos/<repo>` is about the wrong tree: one line, the count, the cure.
 _doctor_repo_fixture() { # -> $T/clone, behind origin/main by $1 commits
   T="$(mktemp -d)"
   local g=(git -c user.email=t@t -c user.name=t) i
@@ -174,7 +168,7 @@ test_doctor_calls_an_unaskable_checkout_unknown() {
   rm -rf "$T"
 }
 
-# ---------------------------------------------------------------- CEL-59
+# ----------------------------------------------------------------
 # AN AFK MODE THAT STAYS ON BECAUSE NOBODY TURNED IT OFF is how a fortnight of
 # unattended merges happens. `--until` expires on its own, and doctor is where
 # an AFK left on past that hour is said out loud - the operator who thinks
@@ -208,9 +202,9 @@ test_doctor_is_silent_when_afk_was_never_armed() {
   _doctor_afk_teardown
 }
 
-# CEL-79: the ssh alias check matches the declared alias as a literal,
-# standalone Host token. It used to interpolate it into a regex, so a dot
-# matched any character, and a wildcard Host pattern was taken as the entry.
+# The ssh alias check matches the declared alias as a literal, standalone
+# Host token, never a regex: a dot is not any character, and a wildcard Host
+# pattern is not the entry.
 _doctor_ssh_fixture() { # <ssh-config-body>
   T="$(mktemp -d)"
   mkdir -p "$T/home/.ssh" "$T/bin"
@@ -246,9 +240,9 @@ test_doctor_ssh_alias_matches_regardless_of_case() {
   rm -rf "$T"
 }
 
-# CEL-111: the inbox-watch leak was invisible for a week because nothing
-# counted. Doctor counts watchers and samples the box's fork rate, and says so
-# in red over a bound.
+# Leaked inbox watchers are invisible until something counts them. Doctor
+# counts watchers and samples the box's fork rate, and says so in red over a
+# bound.
 test_doctor_exec_load_is_quiet_green_under_the_bound() {
   _doctor_watch_count() { printf 4; }
   _doctor_fork_rate() { printf 30; }

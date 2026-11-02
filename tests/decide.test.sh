@@ -13,7 +13,7 @@ _decide_fixture() {
   printf 'name: alpha\n' > "$T/alpha/workspace.yaml"
   printf 'name: bundle\n' > "$T/bundle/workspace.yaml"
 }
-# CEL-113: ask refuses a question with no real context; every fixture gives one
+# ask refuses a question with no real context; every fixture gives one
 # (a later --context in "$@" wins).
 DECIDE_CTX="The widget build broke after the alpha merge and the beta release waits on it. Option one ships today with a known gap; option two waits a day. I recommend one; if nobody answers, beta slips."
 _ask_as() { # <asker> <ws> args...
@@ -126,7 +126,7 @@ test_migrate_dry_run_lists_only_reminders_and_apply_keeps_real_decisions() {
   rm -rf "$T"
 }
 
-# Review on #117: a mistyped --workspace must not invent a mailbox nobody lists.
+# A mistyped --workspace must not invent a mailbox nobody lists.
 test_ask_refuses_an_unknown_workspace() {
   _decide_fixture
   assert_fails eval '( _ask_as alpha-orch alhpa --title x )'
@@ -176,7 +176,7 @@ test_answer_option_flag_refuses_a_missing_option() {
   rm -rf "$T"
 }
 
-# CEL-99: an urgent question sorts first on the dashboard; the flag has to
+# An urgent question sorts first on the dashboard; the flag has to
 # survive the round trip through the mailbox, and a re-ask can raise it.
 test_urgent_flag_round_trips_and_defaults_off() {
   _decide_fixture
@@ -192,7 +192,7 @@ test_urgent_flag_round_trips_and_defaults_off() {
   rm -rf "$T"
 }
 
-# Review on #125: a re-ask that does not repeat --urgent is not a downgrade;
+# A re-ask that does not repeat --urgent is not a downgrade;
 # the flag stays until the question is answered.
 test_reask_without_urgent_keeps_it_urgent() {
   _decide_fixture
@@ -204,9 +204,9 @@ test_reask_without_urgent_keeps_it_urgent() {
   rm -rf "$T"
 }
 
-# --- CEL-101: the asker closes its own question ------------------------------
-# Some open questions were settled in an orchestrator's chat, made moot by a
-# merge, or replaced by a newer one; only the owner could close them.
+# --- the asker closes its own question ---------------------------------------
+# A question settled in chat, made moot by a merge, or replaced by a newer one
+# can be closed by the orchestrator that asked it, not only by the owner.
 test_withdraw_by_the_asker_resolves_it() {
   _decide_fixture
   local id; id="$(_ask_as alpha-orch alpha --title "still needed?")"
@@ -245,8 +245,8 @@ test_ask_supersedes_closes_the_old_one_and_links_it() {
   rm -rf "$T"
 }
 
-# Review on #127: a same-title re-ask updates in place and would have
-# silently left the superseded question open. Refused, nothing written.
+# A same-title re-ask updates in place and would silently leave the superseded
+# question open. Refused, nothing written.
 test_supersedes_with_a_same_title_reask_is_refused() {
   _decide_fixture
   local a b; a="$(_ask_as alpha-orch alpha --title "first")"
@@ -259,7 +259,7 @@ test_supersedes_with_a_same_title_reask_is_refused() {
   rm -rf "$T"
 }
 
-# Review on #127: the owner's history shows why a question went away.
+# The owner's history shows why a question went away.
 test_withdraw_reason_is_in_the_resolution_message() {
   _decide_fixture
   local id; id="$(_ask_as alpha-orch alpha --title "why gone?")"
@@ -268,7 +268,7 @@ test_withdraw_reason_is_in_the_resolution_message() {
   rm -rf "$T"
 }
 
-# --- CEL-113: a decision carries enough context to decide from the card ------
+# --- a decision carries enough context to decide from the card ---------------
 test_cel113_ask_refuses_without_context() {
   _decide_fixture
   local out
@@ -297,7 +297,7 @@ test_cel113_ask_accepts_real_context_with_a_url_on_top() {
   rm -rf "$T"
 }
 
-# CEL-115: --pr links a question to the PR it blocks, repeatable, kept on the
+# --pr links a question to the PR it blocks, repeatable, kept on the
 # record so the steward stops calling that PR a worker finding.
 test_ask_pr_links_are_stored_on_the_record() {
   _decide_fixture
@@ -310,7 +310,7 @@ test_ask_pr_links_are_stored_on_the_record() {
   rm -rf "$T"
 }
 
-# CEL-115 review: a re-ask is the current word on which PRs wait - dropping
+# A re-ask is the current word on which PRs wait - dropping
 # --pr unlinks them - and every repo URL form resolves to a PR link.
 test_reask_without_pr_unlinks_and_ssh_urls_resolve() {
   _decide_fixture
