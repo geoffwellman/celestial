@@ -271,3 +271,72 @@ test_restart_of_the_same_pane_is_not_refused_by_its_own_claim() {
   out="$(_restart)" || { echo "second restart refused: $out"; orch_stub_teardown; return 1; }
   orch_stub_teardown
 }
+
+# AH-261102: a lane recorded on omp and restarted with --profile opus (Claude)
+# planned to resume the omp transcript into Claude. Another runtime's session
+# is never resumed: the restart starts fresh, and says so.
+test_restart_onto_another_runtime_starts_fresh_instead_of_resuming() {
+  orch_stub_setup claude
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/sessions/abc.jsonl" omp
+  local out; out="$(_restart)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$(cat "$HLOG")" "agent start widget-orch --kind claude --pane w1:p1"
+  ! _new_cmdline | grep -q -- "--resume" || { echo "resumed an omp session into claude: $(_new_cmdline)"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "last ran on omp"
+  assert_contains "$out" "starting fresh"
+  orch_stub_teardown
+}
+
+# The Rex lane in the report: the receipt names the omp runtime; restarting
+# it onto claude replaces the same terminal without resuming that file.
+test_rex_lane_restart_onto_claude_does_not_resume_the_omp_receipt() {
+  orch_stub_setup claude
+  local out
+  out="$(
+    _run_orch_agent() { printf 'widget-solo\trex/session:fixture/block:fixture\tidle\t%s\tomp\n' "$ORCH_STUB_T/s/parent.jsonl"; }
+    AGENT_ARGS=()
+    _run_resume_resolve orchestrator widget-solo "$T/ws/repos/widget" claude '' 1 0 0 1 relaunch adopt 2>&1
+    printf 'RESUME=%s RESTART=%s ARGS=%s\n' "$RESUME_SESSION" "$RESTART_PANE" "${AGENT_ARGS[*]}"
+  )" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_eq "$(printf '%s\n' "$out" | tail -1)" "RESUME= RESTART=rex/session:fixture/block:fixture ARGS="
+  ! printf '%s' "$out" | grep -q -- "--resume" || { echo "resumed: $out"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "starting fresh"
+  orch_stub_teardown
+}
+
+# Over an absent agent the session map supplies the session; it carries the
+# runtime that wrote it, and only that runtime resumes it.
+test_run_over_absent_agent_never_resumes_another_runtimes_session() {
+  orch_stub_setup claude
+  printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
+  local out cwd="$T/ws/repos/widget" native=6b90062c-f7b9-4cf4-859c-6bba6e90df1d
+  _run_sessions_record "$cwd" "$T/old.jsonl" omp
+  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)"
+  ! printf '%s' "$out" | grep -q -- "--resume" || { echo "resumed omp into claude: $out"; orch_stub_teardown; return 1; }
+  assert_contains "$out" "starting fresh"
+  assert_eq "$(_run_sessions_last "$cwd")" "$T/old.jsonl"
+  # A record written before runtimes were kept: an omp path is still no
+  # Claude session id.
+  jq -n --arg c "$cwd" --arg s "$T/old.jsonl" '{($c): $s}' > "$CEL_ORCH_SESSIONS"
+  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)"
+  ! printf '%s' "$out" | grep -q -- "--resume" || { echo "resumed a legacy omp record into claude: $out"; orch_stub_teardown; return 1; }
+  # The same runtime still resumes its own session.
+  _run_sessions_record "$cwd" "$native" claude
+  out="$( (cd "$T/ws" && cmd_run orchestrator --dry-run) 2>&1)"
+  assert_contains "$out" "--resume $native"
+  orch_stub_teardown
+}
+
+# A receipt that captured a subagent transcript before capture refused them
+# resumes the session that ran the subagent, never the subagent's file.
+test_restart_over_a_recorded_subagent_transcript_resumes_its_parent_session() {
+  orch_stub_setup omp
+  local parent="$T/sessions/2026-11-02T00-00-00-000Z_01abc.jsonl" sub out
+  sub="${parent%.jsonl}/WidgetSyncTask.jsonl"
+  mkdir -p "${parent%.jsonl}"; : > "$parent"; : > "$sub"
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$sub"
+  out="$(_restart)" || { printf '%s\n' "$out"; orch_stub_teardown; return 1; }
+  assert_contains "$(_new_cmdline)" "--resume $parent "
+  ! _new_cmdline | grep -q WidgetSyncTask || { echo "resumed the subagent: $(_new_cmdline)"; orch_stub_teardown; return 1; }
+  assert_eq "$(_run_sessions_last "$T/ws/repos/widget")" "$parent"
+  orch_stub_teardown
+}

@@ -109,6 +109,30 @@ test_rex_native_state_updates_only_the_same_launched_process() {
   _rext_down
 }
 
+# AH-261102: omp runs task subagents in the lane's own process, so the hook
+# reported a subagent's transcript - a file inside the parent session's own
+# directory - and the receipt recorded it as the lane's session.
+test_rex_omp_subagent_transcript_is_never_captured_as_the_session() {
+  _rext_setup
+  local self="${BASHPID:-$$}" parent sub cwd="$RT/ws/repos/widget"
+  parent="$RT/sessions/2026-11-02T00-00-00-000Z_01abc.jsonl"
+  sub="${parent%.jsonl}/WidgetSyncTask.jsonl"
+  mkdir -p "${parent%.jsonl}"; : > "$parent"; : > "$sub"
+  export CEL_REX_RECORD="$CEL_REX_STATE/widget-solo.json" CEL_ORCH_SESSIONS="$RT/sessions.json"
+  jq -n --argjson pid "$self" --arg start "$(_rex_pid_start "$self")" --arg w "$cwd" \
+    '{name:"widget-solo",pid:$pid,pid_start:$start,cwd:$w,workspace:$w,role:"solo",agent:"omp",backend:"rex",rex_session:"session:test",rex_block:"block:test",pane_id:"rex/session:test/block:test",agent_status:"idle"}' > "$CEL_REX_RECORD"
+  cmd_sessions note "$self" working "$parent" || { rm -f "$CEL_REX_RECORD"; _rext_down; return 1; }
+  cmd_sessions note "$self" idle "$sub" || { rm -f "$CEL_REX_RECORD"; _rext_down; return 1; }
+  local value status last
+  value="$(jq -r .agent_session.value "$CEL_REX_RECORD")"; status="$(jq -r .agent_status "$CEL_REX_RECORD")"
+  last="$(_run_sessions_last "$cwd")"
+  rm -f "$CEL_REX_RECORD"; unset CEL_ORCH_SESSIONS; _rext_down
+  assert_eq "$value" "$parent"
+  # the subagent finishing is not the lane going idle
+  assert_eq "$status" working
+  assert_eq "$last" "$parent"
+}
+
 test_rex_dead_pid_receipt_does_not_claim_a_live_session() {
   _rext_setup
   jq -n --argjson p "$$" '{name:"widget-orch",pid:$p,pid_start:"incorrect",pane_id:"rex/session:test/block:test"}' > "$CEL_REX_STATE/widget-orch.json"

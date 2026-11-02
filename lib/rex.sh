@@ -74,6 +74,19 @@ rex_native_session_valid() { # runtime native id
   esac
 }
 
+# A SUBAGENT'S TRANSCRIPT IS NEVER THE AGENT'S SESSION (AH-261102). omp runs
+# task subagents inside the agent's own process - same PID, same hooks - and
+# keeps each one's transcript in the parent session's own directory:
+#   <sessions>/<stem>.jsonl           the agent's session
+#   <sessions>/<stem>/<Task>.jsonl    a subagent it ran
+# A Rex receipt recorded one, and a restart planned to resume it. Claude's
+# subagents (<uuid>/subagents/agent-*.jsonl) never get here: its hook drops
+# payloads carrying an agent_id and reports a session id, not a file. pi has
+# no in-process subagents; a separate process fails the reporter-PID check.
+native_session_is_subagent() { # native session -> 0 for a subagent transcript
+  case "$1" in /*/*.jsonl) [ -f "${1%/*}.jsonl" ] ;; *) return 1 ;; esac
+}
+
 _rex_launch() { # name runtime cwd label envprefix args...
   local name="$1" rt="$2" cwd="$3" label="$4" prefix="$5"; shift 5
   # Capture only an explicit native resume argument, never cast an archived
@@ -200,6 +213,9 @@ rex_session_note() { # pid state [native session file/id]
   [ -n "$f" ] && [ -f "$f" ] || return 0
   reporter="$(rex_reporter_pid)" || return 1
   [ "$reporter" = "$pid" ] || return 1
+  # A subagent's turns are not the agent's: neither its transcript nor its
+  # idle/working edges are recorded.
+  ! native_session_is_subagent "$native" || return 0
   exec {lock}>"$f.note.lock" || return 1
   flock "$lock" || { exec {lock}>&-; return 1; }
   [ "$(jq -r .pid "$f")" = "$pid" ] && _rex_live "$f" || { exec {lock}>&-; return 1; }
@@ -221,7 +237,7 @@ cmd_sessions() {
       rex_session_note "$2" "$3" "$4" || return $?
       if [ -n "$4" ] && [ -n "${CEL_REX_RECORD:-}" ] && [ -f "$CEL_REX_RECORD" ]; then
         case "$(jq -r .role "$CEL_REX_RECORD")" in
-          core|root|orchestrator|solo) _run_sessions_record "$(jq -r .cwd "$CEL_REX_RECORD")" "$4" ;;
+          core|root|orchestrator|solo) _run_sessions_record "$(jq -r .cwd "$CEL_REX_RECORD")" "$4" "$(jq -r '.agent // empty' "$CEL_REX_RECORD")" ;;
         esac
       fi ;;
     --json) cel_agent_list ;;

@@ -1064,15 +1064,18 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
 # The last session seen for each root/orchestrator DIRECTORY - identity here
 # is a directory, not a name (see _run_live_agent_in_cwd) - so an
 # orchestrator that died can be brought back into its own conversation.
+# Each entry is {session, runtime}: only the runtime that wrote a session can
+# resume it (AH-261102). Older entries are a bare session string.
 _run_sessions_file() {
   if [ -n "${CEL_ORCH_SESSIONS:-}" ]; then printf '%s' "$CEL_ORCH_SESSIONS"
   elif [ -n "${CEL_TESTING:-}" ]; then printf '%s' "${TMPDIR:-/tmp}/cel-orch-sessions.json"
   else printf '%s' "$HOME/.local/state/cel/orch-sessions.json"; fi
 }
 
-_run_sessions_record() ( # <cwd> <session>; lock the whole shared map update
+_run_sessions_record() ( # <cwd> <session> [runtime]; lock the whole shared map update
   local f tmp cur fd
   [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 0
+  ! native_session_is_subagent "$2" || return 0
   f="$(_run_sessions_file)"
   mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
   exec {fd}>"$f.lock" || return 0
@@ -1080,7 +1083,7 @@ _run_sessions_record() ( # <cwd> <session>; lock the whole shared map update
   cur="$(jq -c 'if type == "object" then . else {} end' "$f" 2>/dev/null)" || cur='{}'
   [ -n "$cur" ] || cur='{}'
   tmp="$(mktemp "$f.tmp.XXXXXX" 2>/dev/null)" || return 0
-  if printf '%s' "$cur" | jq -c --arg c "$1" --arg s "$2" '.[$c] = $s' > "$tmp"; then
+  if printf '%s' "$cur" | jq -c --arg c "$1" --arg s "$2" --arg r "${3:-}" '.[$c] = {session: $s, runtime: $r}' > "$tmp"; then
     mv -f -- "$tmp" "$f"
   else
     rm -f -- "$tmp"
@@ -1089,20 +1092,24 @@ _run_sessions_record() ( # <cwd> <session>; lock the whole shared map update
 )
 
 _run_sessions_last() { # <cwd> -> session, or nothing
-  jq -r --arg c "$1" '.[$c] // empty' "$(_run_sessions_file)" 2>/dev/null || true
+  jq -r --arg c "$1" '.[$c] // empty | if type == "object" then (.session // empty) else . end' "$(_run_sessions_file)" 2>/dev/null || true
+}
+
+_run_sessions_last_runtime() { # <cwd> -> runtime that recorded it, or nothing
+  jq -r --arg c "$1" '.[$c] // empty | if type == "object" then (.runtime // empty) else empty end' "$(_run_sessions_file)" 2>/dev/null || true
 }
 
 # Remember the session of every live root/orchestrator in a roster. Cheap, so
 # the steward calls it every tick: the record is what makes "resume the last
 # session" possible after the agent is gone.
 run_sessions_note_roster() { # <agents-json>
-  local cwd sess
-  while IFS=$'\t' read -r cwd sess; do
-    [ -n "$cwd" ] && [ -n "$sess" ] && _run_sessions_record "$cwd" "$sess"
+  local cwd sess rt
+  while IFS=$'\t' read -r cwd sess rt; do
+    [ -n "$cwd" ] && [ -n "$sess" ] && _run_sessions_record "$cwd" "$sess" "$rt"
   done < <(printf '%s' "${1:-}" | jq -r '.result.agents[]?
     | select((.name // "") | test("(-orch|-root)$|^core$"))
     | select((.agent_session.value // "") != "")
-    | [(.cwd // ""), .agent_session.value] | @tsv' 2>/dev/null)
+    | [(.cwd // ""), .agent_session.value, (.agent // "")] | @tsv' 2>/dev/null)
   return 0
 }
 
@@ -1117,13 +1124,14 @@ run_sessions_note_roster() { # <agents-json>
 # Status: 0 found (one row), 1 none, 3 ambiguous (every candidate row),
 # 4 the named --pane holds an agent under ANOTHER name (that row) - which is
 # never relaunched: that pane is not this orchestrator.
-_run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<TAB>session
+_run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<TAB>session<TAB>runtime
   local roster rows n
   roster="$(cel_agent_list 2>/dev/null)" || return 2
   rows="$(printf '%s' "$roster" | jq -r --arg n "$1" --arg c "$2" --arg r "$3" --arg p "${4:-}" '
     def row: [((.name // "") | if . == "" then "-" else . end), .pane_id,
               (.agent_status // "unknown"),
-              ((.agent_session.value // "") | if . == "" then "-" else . end)] | @tsv;
+              ((.agent_session.value // "") | if . == "" then "-" else . end),
+              ((.agent // "") | if . == "" then "-" else . end)] | @tsv;
     [.result.agents[]? | select((.pane_id // "") != "")] as $a
     | if $p != "" then ($a[] | select(.pane_id == $p) | row)
       elif ([$a[] | select(.name == $n)] | length) > 0 then ([$a[] | select(.name == $n)][0] | row)
@@ -1154,11 +1162,46 @@ _run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
     || die 'cel run: saved OpenCode context is not a ready matching native v2 root; preserve it and use --fresh --handoff only for an intended migration'
 }
 
+# A RUNTIME SWITCH NEVER RESUMES (AH-261102). `--restart --profile opus` moved
+# an omp lane onto Claude and planned `claude --resume <omp transcript>`. One
+# runtime cannot resume another's session, so the launch starts fresh, says
+# so, and leaves the old session where it is. OpenCode is not switched here:
+# its migration is explicit (--fresh --handoff; _run_resume_identity_check).
+# The recorded runtime decides; a record without one (older map entries, a
+# roster row naming no agent) is judged by the shape this runtime resumes.
+_run_resume_foreign() { # <runtime> <session> <recorded-runtime|""> <agent-name> -> 0: start fresh
+  local rt="$1" s="$2" was="$3"
+  [ "$rt" != opencode ] || return 1
+  if [ -z "$was" ]; then
+    [ -n "$s" ] || return 1
+    case "$(agent_resume "$rt" value)" in
+      path) [[ "$s" != /* ]] || return 1 ;;
+      id) [[ "$s" = */* ]] || { [ "$rt" = claude ] && ! rex_native_session_valid claude "$s"; } || return 1 ;;
+      *) return 1 ;;
+    esac
+    was="another runtime"
+  fi
+  [ "$was" != "$rt" ] || return 1
+  printf '  %s last ran on %s - %s cannot resume that session; starting fresh%s\n' \
+    "$4" "$was" "$rt" "${s:+ (it stays at $s)}" >&2
+}
+
+# A subagent transcript recorded before capture refused them stands for the
+# session that ran it - the file beside its directory.
+_run_resume_parent_session() { # <session> -> the session to resume
+  if native_session_is_subagent "$1"; then
+    printf '  %s is a subagent transcript - using its parent session\n' "$1" >&2
+    printf '%s' "${1%/*}.jsonl"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint> [wsdir]
   local role="$1" agent_name="$2" cwd="$3" runtime="$4" pane_opt="$5"
   local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}" resume_wsdir="${12:-}"
   RESUME_SESSION=""; RESTART_PANE=""
-  local live="" lname lpane lstatus lsession lrc=1
+  local live="" lname lpane lstatus lsession lruntime lrc=1
   if have jq; then
     live="$(_run_orch_agent "$agent_name" "$cwd" "$runtime" "$pane_opt")" && lrc=0 || lrc=$?
   fi
@@ -1179,10 +1222,13 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
       live="" ;;
   esac
   if [ -n "$live" ]; then
-    IFS=$'\t' read -r lname lpane lstatus lsession <<< "$live"
+    IFS=$'\t' read -r lname lpane lstatus lsession lruntime <<< "$live"
     [ "$lsession" != "-" ] || lsession=""
+    [ "$lruntime" != "-" ] || lruntime=""
+    [ -z "$lsession" ] || lsession="$(_run_resume_parent_session "$lsession")"
+    if [ "$fresh" = 0 ] && _run_resume_foreign "$runtime" "$lsession" "$lruntime" "$agent_name"; then fresh=1; fi
     [ "$fresh" = 1 ] || _run_resume_identity_check "$runtime" "$lsession" "$cwd" "cel-$role" "$resume_wsdir"
-    [ "$dry_run" = 1 ] || _run_sessions_record "$cwd" "$lsession"
+    [ "$dry_run" = 1 ] || _run_sessions_record "$cwd" "$lsession" "$lruntime"
   fi
   if [ "$restart" -eq 1 ]; then
     if [ -z "$live" ]; then
@@ -1205,6 +1251,10 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   # Over a dead or absent agent, come back into the last recorded session.
   if [ "$fresh" -eq 0 ] && [ -z "$RESUME_SESSION" ] && [ -z "$live" ]; then
     RESUME_SESSION="$(_run_sessions_last "$cwd")"
+    [ -z "$RESUME_SESSION" ] || RESUME_SESSION="$(_run_resume_parent_session "$RESUME_SESSION")"
+    if _run_resume_foreign "$runtime" "$RESUME_SESSION" "$(_run_sessions_last_runtime "$cwd")" "$agent_name"; then
+      RESUME_SESSION=""; fresh=1
+    fi
   fi
   # Both live receipts and dead-registry lookup pass the same native boundary.
   _run_resume_identity_check "$runtime" "$RESUME_SESSION" "$cwd" "cel-$role" "$resume_wsdir"
@@ -2623,7 +2673,7 @@ run_orchestrator_rows() { # [only-ws] [roster-json] [record-sessions 1|0] [wsdir
           "$name" "$ws" "cel run orchestrator --product $p --workspace $ws" "$role" "$p"
         continue
       fi
-      [ "${3:-1}" = 0 ] || [ "$lsession" = "-" ] || _run_sessions_record "$cwd" "$lsession"
+      [ "${3:-1}" = 0 ] || [ "$lsession" = "-" ] || _run_sessions_record "$cwd" "$lsession" "${rt#-}"
       [ "$lname" != "-" ] || lname="$name"
       [ "$lcwd" != "-" ] || lcwd="$cwd"
       _run_status_since "$lname" "$ws" "$lstatus"
