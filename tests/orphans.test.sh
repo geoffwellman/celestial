@@ -47,7 +47,7 @@ EOF
   PATH="$bin:$PATH"
 }
 
-# The box as the walk found it on 2026-09-19: a watcher from a console that
+# One of each orphan class: a watcher from a console that
 # exited, a fixture under a deleted worktree, a bare shell on a dead pty, a
 # killed gate runner - and, beside each, the thing that looks like it and is
 # not.
@@ -368,7 +368,7 @@ test_orphans_never_reaps_the_auth_broker_or_gateway_by_their_real_launch_line() 
 }
 
 # A process that rewrites its title can leave the last argument without a
-# trailing NUL; dropping it would change protected/class matching (CEL-90 r1).
+# trailing NUL; dropping it would change protected/class matching.
 test_orphans_list_keeps_a_final_argument_with_no_trailing_nul() {
   _orphans_fixture
   printf 'bash\0tests/run.sh' >"$P/4030/cmdline"

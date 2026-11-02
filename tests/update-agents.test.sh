@@ -1,10 +1,10 @@
 # shellcheck shell=bash
-# AH-261018: `cel update` keeps the box's coding agents and gateway
+# `cel update` keeps the box's coding agents and gateway
 # registrations current even when Celestial's own git is already current.
 #
 # Every CLI here is a stub on a prepended PATH that keeps its "installed
 # version" in a file: nothing installs, downloads or contacts a registry. What
-# is asserted is the CONTRACT the owner asked for - per-component old/new
+# is asserted is the CONTRACT - per-component old/new
 # versions, idempotence, partial failure that is not reported as success, a
 # declared pin that is reported rather than silently called current, a latest
 # that is still ahead after the update treated as a blocker, no restart of a
@@ -212,7 +212,7 @@ test_update_rollback_restores_recorded_agent_versions_where_declared() {
 }
 
 # ------------------------------------------- pi extensions + built-in MCP
-# AH-261018: startup warnings are fixed by supported upgrades/migration, never
+# Startup warnings are fixed by supported upgrades/migration, never
 # by patching node_modules or suppressing output.
 _uag_pi_fixture() {
   _uag_fixture
@@ -324,7 +324,7 @@ test_launch_writer_never_rewrites_existing_model_metadata_or_touches_an_unchange
 }
 
 
-# ----------------------------------------------- F1: the way back is durable
+# --------------------------------------------------- the way back is durable
 # A version that moved and then FAILED (or stopped short of latest) must still
 # have its old version recorded; the record survives a torn temp file and
 # parallel writers.
@@ -365,7 +365,7 @@ test_update_previous_record_survives_a_torn_temp_file_and_parallel_writers() {
   _uag_cleanup
 }
 
-# --------------------------------------------- F6: MCP migration continuity
+# ------------------------------------------------- MCP migration continuity
 test_update_keeps_the_adapter_when_two_host_configs_define_one_server_differently() {
   _uag_pi_fixture
   mkdir -p "$HOME/.cursor"

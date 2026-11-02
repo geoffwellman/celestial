@@ -21,7 +21,7 @@ _CEL_GC=1
 # shellcheck source=lib/memory.sh
 . "${BASH_SOURCE[0]%/*}/memory.sh"   # what an idle agent was holding
 
-# WHOSE ACCOUNT ASKS ABOUT A CHECKOUT (CEL-70). ws_of_checkout names the
+# WHOSE ACCOUNT ASKS ABOUT A CHECKOUT. ws_of_checkout names the
 # workspace a worktree belongs to, and a workspace with `github.user` must be asked about
 # as that account. A declared account that is not logged in makes the call
 # fail, which every caller here already reads as UNKNOWN: kept, never closed.
@@ -121,8 +121,7 @@ try:
     with open(sys.argv[2]) as source:
         rows = json.load(source)
     # One shared list (lib/ledger_states.sh). A row in a state outside it is
-    # UNKNOWN for its own worktree - vetoed - and nobody else's: one odd row
-    # used to veto every worktree on the box.
+    # UNKNOWN for its own worktree - vetoed - and nobody else's.
     states = set(sys.argv[3].split())
     if not isinstance(rows, list) or not all(
         isinstance(row, dict) and isinstance(row.get("worktree"), str)
@@ -191,20 +190,19 @@ _gc_panes_settled() { # <pane-list-json>
 
 # An unregistered worktree can still host a hand-started process. Unknown
 # /proc visibility is a veto, not an empty process list.
-# ONE /proc PASS PER RUN (CEL-111). This used to readlink every pid on the box
-# once per worktree: ~1,300 pids x 274 worktrees, 666 readlink execs in 15s on
-# its own. The cwd table is read once per run and every worktree is matched
-# against it - the fast path, which can only KEEP. A table that could not be
-# read is still a veto. Nothing is removed on the snapshot's word alone:
-# _gc_has_process_live re-walks /proc for that one worktree immediately before
-# any removal, so a process started mid-sweep is still seen.
+# ONE /proc PASS PER RUN. The cwd table is read once per run and every
+# worktree is matched against it - the fast path, which can only KEEP. A
+# table that could not be read is still a veto. Nothing is removed on the
+# snapshot's word alone: _gc_has_process_live re-walks /proc for that one
+# worktree immediately before any removal, so a process started mid-sweep is
+# still seen.
 _GC_CWDS="" _GC_CWDS_STATE=""
 _gc_cwd_reset() { _GC_CWDS="" _GC_CWDS_STATE=""; }
 # AN UNREADABLE cwd IS A VETO - EXCEPT FOR A FIXED SET OF SYSTEM PROCESSES.
 # Our own uid runs privilege-separated or non-dumpable processes whose cwd the
 # kernel will not show us: the user systemd manager and its (sd-pam),
-# ssh-agent, sshd-session, sftp-server. Each one vetoed EVERY worktree, so gc
-# kept all 232 as "live" and removed nothing, for weeks. These are matched by
+# ssh-agent, sshd-session, sftp-server. Left as vetoes, any one of them would
+# keep EVERY worktree live. These are matched by
 # exact comm and none of them is an agent, a runtime or a tool that could sit
 # in a worktree. Anything else unreadable, an agent included, still vetoes.
 # Chosen over an environ PWD fallback: environ is unreadable for exactly the
@@ -289,15 +287,12 @@ _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
   return 1
 }
 
-# --- foreground group ownership (AH-261018) --------------------------------
-# Installed gc demanded EXACTLY ONE foreground process, so a verified Claude
-# carrying the Hindsight MCP server it launched (its direct child, in the same
-# foreground group) was refused before identity was even computed: six idle
-# runtimes could not be retired. The root is still proven by the exact checks
-# in _gc_process_identity (pid, birth, pane, role, session, comm); what is
-# widened is ONLY this: every OTHER foreground process must be a declared
+# --- foreground group ownership --------------------------------------------
+# A verified root may carry helpers it launched (e.g. Claude's Hindsight MCP
+# server, a direct child in the same foreground group). The root is still
+# proven by the exact checks in _gc_process_identity (pid, birth, pane, role,
+# session, comm); every OTHER foreground process must be a declared
 # helper (agents.yaml `owned_children`) that is
-#   - exactly the declared path under $HOME (no suffix trust),
 #   - exactly the declared path under $HOME (no suffix trust),
 #   - a DIRECT child of the verified root pid (a grandchild is not owned),
 #   - born after the root (its start tick is not earlier),
@@ -459,8 +454,8 @@ _gc_keep() { # <reason> [dir]
   GC_KEPT["$r"]=$(( ${GC_KEPT["$r"]:-0} + 1 ))
   if [ "$r" = unidentified ] && [ -n "$d" ]; then GC_UNIDENTIFIED+=("$d"); fi
   kept=$(( ${kept:-0} + 1 ))
-  # A dry run says why, row by row (CEL-80): a total of 58 kept told the
-  # owner nothing about which worker was holding what.
+  # A dry run says why, row by row: a bare total says nothing about which
+  # worker is holding what.
   if [ "${dry:-0}" -eq 1 ] && [ -n "${cwd:-}" ]; then printf '  kept %s: %s\n' "$cwd" "$r"; fi
   return 0
 }
@@ -569,7 +564,7 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
     mkdir -p "$(dirname "$file")" || return 0
     # Held on an inherited descriptor, so every spawn below goes through
     # lock_spawn: a child that outlives this sweep would hold the lock with
-    # it (the 2026-09-16 ledger hang, lib/registry.sh).
+    # it (see lib/registry.sh).
     exec {fd}>"$file.lock" && flock -n "$fd" || return 0
   fi
   if [ -e "$file" ]; then
@@ -638,8 +633,8 @@ _gc_reviewer_pr_json() { # <repo> <pr> <cwd> <repodir> <fields> -> gh pr view JS
   if [ -n "$cwd" ] && [ -d "$cwd" ]; then
     out="$(_gc_gh "$cwd" pr view "$2" --json "$f" 2>/dev/null)" || return 1
   else
-    # The folder is gone (CEL-89): resolve the GitHub repo the way `cel run
-    # reviewer` does (CEL-67) - declared url, else the clone's origin - never
+    # The folder is gone: resolve the GitHub repo the way `cel run
+    # reviewer` does - declared url, else the clone's origin - never
     # from the folder name. The bare name is the last resort.
     IFS=$'\t' read -r wsdir slug < <(_gc_reviewer_slug "$1" "${4:-}") || true
     if [ -n "${slug:-}" ] && [ -n "${wsdir:-}" ]; then
@@ -669,11 +664,10 @@ _gc_reviewer_slug() { # <repo> [repodir] -> wsdir<TAB>owner/name, or fail
   printf '%s\t%s\n' "$wsdir" "$slug"
 }
 
-# KEPT AS UNKNOWN FOR A DAY IS A BLOCKER (CEL-89). The fail-safe keeps a
-# reviewer whose PR cannot be read, and warned on every steward tick - which
-# is noise the owner learned to skip. Past 24h the pane is reported to root
-# once, keyed by a condition fp so a repeat supersedes rather than stacks
-# (CEL-82), and marked reported so later ticks stay quiet.
+# KEPT AS UNKNOWN FOR A DAY IS A BLOCKER. The fail-safe keeps a reviewer
+# whose PR cannot be read; warning every steward tick is noise. Past 24h the
+# pane is reported to root once, keyed by a condition fp so a repeat
+# supersedes rather than stacks, and marked reported so later ticks stay quiet.
 _gc_unknown_file() { printf '%s' "${CEL_GC_UNKNOWN_STATE:-$HOME/.local/state/cel/gc-reviewer-unknown.json}"; }
 
 # Keyed by pane AND reviewer: herdr reuses pane ids, and a reused pane is a
@@ -749,9 +743,9 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # the pane instead of splitting another one beside it.
 #
 # THE WRITE BACK IS A MERGE, NOT A SNAPSHOT. This sweep reads the rows once
-# and then spends seconds in `gh` per reviewer; a `cel run reviewer` landing
-# in that window used to be erased by the final write, and the next call for
-# its PR split a duplicate pane. So the sweep carries only the two facts it
+# and then spends seconds in `gh` per reviewer; a snapshot write would erase
+# a `cel run reviewer` landing in that window, and the next call for its PR
+# would split a duplicate pane. So the sweep carries only the two facts it
 # actually established - which panes it closed or found gone, and which live
 # panes had no row - and applies them under the registry lock to whatever
 # the file says by then. A row this sweep never saw is never touched.
@@ -790,7 +784,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     fi
     case "$state" in
       OPEN)
-        # FINISHED IS A FACT TOO (CEL-130): idle, verdict in the ledger for
+        # FINISHED IS A FACT TOO: idle, verdict in the ledger for
         # the head GitHub shows now, and quiet for the window. Its checkout is
         # kept - `cel run reviewer --repo --pr` brings the reviewer back.
         if _gc_reviewer_finished "$repo" "$pr" "$cwd" "$repodir" "$pane" "$status"; then
@@ -827,10 +821,9 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       continue
     fi
     drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
-    # The pane is gone; its checkout goes with it. CEL-52 closed the pane and
-    # CEL-55 gave the reviewer a worktree of its own - a checkout that
-    # outlives the reviewer is the same litter in a new form. Released before
-    # the row is dropped, because the row is where the path is written down.
+    # The pane is gone; its checkout goes with it - a reviewer checkout that
+    # outlives its reviewer is litter. Released before the row is dropped,
+    # because the row is where the path is written down.
     reviewer_checkout_release "$repo" "$pr"
     c_ok "closed the reviewer for $repo#$pr (PR $state, pane $pane)"
     reviewers_closed=$((reviewers_closed + 1))
@@ -839,7 +832,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   # stale row and adopts nothing.
   [ "$dry" -eq 1 ] && return 0
   mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
-  # The steward's pressure warning names what was stopped (CEL-126/130).
+  # The steward's pressure warning names what was stopped.
   [ -z "$rv_what" ] || printf '%s\n' "$rv_what" >> "$(_gc_idle_stop_last)" 2>/dev/null || true
   printf '%s' "$drop$adopt" | grep -q '[^][]' || return 0
   reviewers_update --argjson drop "$drop" --argjson adopt "$adopt" \
@@ -850,9 +843,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   return 0
 }
 
-# THE FINISHED REVIEWER (CEL-130). On 2026-10-14 four reviewer panes sat
-# `done` with their verdicts recorded, on a box with full swap, and nothing
-# would stop them because their PRs were still open. A reviewer whose verdict
+# THE FINISHED REVIEWER. A reviewer whose verdict
 # is in the ledger for the PR's CURRENT head has nothing left to do until the
 # worker pushes again - and a push is a new head, which its recorded verdict
 # no longer covers. N minutes quiet (gc.reviewer_stop_minutes, default 30;
@@ -893,8 +884,7 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
 
 # An APPROVED verdict `cel-fanout review` wrote for exactly this head, in any
 # ledger. A CHANGES verdict is a reviewer waiting on the worker's re-push:
-# closing it would leave "pushed - re-review" with nobody to read it, and a
-# stalled review loop has cost days (review of #157).
+# closing it would leave "pushed - re-review" with nobody to read it.
 _gc_verdict_recorded() { # <repo> <branch> <head>
   local ws wsdir f
   while IFS= read -r ws; do
@@ -920,12 +910,11 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   return 0
 }
 
-# THE FINISHED WORKERS (CEL-80). On 2026-09-25, 13 of 23 live worker panes
-# belonged to delegations already landed or finished - `done` for days and
-# never closed. Workers nest as tabs in their repo's herdr workspace, and the
-# worktree pass above only knows a workspace whose FIRST pane sits in a
-# worktree, so a finished worker's pane was never anyone's to close. The
-# ledger records the pane each delegation ran in; this pass starts there.
+# THE FINISHED WORKERS. Workers nest as tabs in their repo's herdr
+# workspace, and the worktree pass above only knows a workspace whose FIRST
+# pane sits in a worktree, so a finished worker's pane is nobody else's to
+# close. The ledger records the pane each delegation ran in; this pass starts
+# there.
 #
 # A pane is closed only when every one of these is a fact: the delegation is
 # landed/released/abandoned (a `finished` row whose PR merged is reconciled to
@@ -1033,12 +1022,10 @@ _gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
   return 0
 }
 
-# THE EMPTY PANES (CEL-84). CEL-80 closes a landed delegation's pane while
-# its agent sits idle, but the common case is a worker that already QUIT and
-# left its shell behind. On 2026-09-27 the owner's pane picker held 36 panes
-# with no agent, and 20 were closed by hand. The same scan found a proxy, a
-# script, an editor and the owner's own shells in agentless panes - so "no
-# agent" alone is never enough. A pane is empty only when herdr reports no
+# THE EMPTY PANES. The finished-worker pass closes a landed delegation's pane
+# while its agent sits idle, but a worker that already QUIT leaves its shell
+# behind. Agentless panes also host proxies, scripts, editors and the owner's
+# own shells - so "no agent" alone is never enough. A pane is empty only when herdr reports no
 # agent, its foreground is a bare interactive shell with no child, it sits in
 # a worker/scout/reviewer checkout under ~/.herdr/worktrees (or a directory
 # that no longer exists), that checkout holds nothing uncommitted or unpushed
@@ -1117,10 +1104,9 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
   return 0
 }
 
-# IDLE AGENTS ARE STOPPED BY TIME AND MEMORY, NOT ONLY BY LEDGER (CEL-122).
-# At the 2026-10-12 OOM, seven workers were `done` and one `idle` - 400-550 MB
-# each - and gc reaped none of them, because every pass here waits for the
-# ledger row to close. A `done`/`idle` worker that has sat for N minutes
+# IDLE AGENTS ARE STOPPED BY TIME AND MEMORY, NOT ONLY BY LEDGER: every other
+# pass waits for the ledger row to close, while idle runtimes hold hundreds of
+# MB each. A `done`/`idle` worker that has sat for N minutes
 # (gc.idle_stop_minutes, default 60; ~10 below the box warning line) with
 # nothing uncommitted and nothing unpushed has its PANE closed: the process
 # goes, the session file stays (resume with `cel-fanout delegate --reuse`),
@@ -1128,7 +1114,7 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
 # considered - orchestrators and reviewers are never in the ledger - and a
 # working, blocked or unknown agent is never touched.
 # The last pass's stops, one line, read by the steward's pressure warning so
-# it can name what was done rather than promise it (CEL-126).
+# it can name what was done rather than promise it.
 _gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-$HOME/.local/state/cel/gc-idle-stop-last.txt}"; }
 _gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-$HOME/.local/state/cel/gc-idle-stop.json}"; }
 
@@ -1162,8 +1148,7 @@ _gc_tell_waiter_stopped() { # <wsdir> <ws> <ledger> <id> <mb>
 # every artifact stay exactly as they were, and `cel-fanout delegate --reuse`
 # resumes it. The states it considers are every state in which a live agent
 # may still sit behind a retained row: `collected`, `reported` and `salvaged`
-# hold a runtime exactly like `running`/`finished` do, and installed gc looked
-# only at the latter two, so six collected runtimes were never even candidates.
+# hold a runtime exactly like `running`/`finished` do.
 # `landed`, `released`, `abandoned` rows belong to the done/worktree passes.
 _GC_RETIRE_STATES="running finished collected reported salvaged"
 _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
@@ -1181,7 +1166,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
     while IFS=$'\t' read -r id pane wt alias; do
       [ -n "$pane" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
       agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
-      # A STALE PANE BINDING (AH-261018): the row names a pane that no longer
+      # A STALE PANE BINDING: the row names a pane that no longer
       # hosts this worktree's agent (renumbered, closed and re-created, or
       # re-bound by a recovery). The worktree's own agent is then found by
       # its cwd - and only when EXACTLY ONE live agent sits in it. Two or
@@ -1207,7 +1192,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       case "$status" in idle|done) ;; *) continue ;; esac
       since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
       [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
-      # The clock belongs to a HEAD as well as a pane (CEL-130): a worker that
+      # The clock belongs to a HEAD as well as a pane: a worker that
       # committed since it was first seen idle has been working, whatever its
       # status says now, and "unchanged since it reported" starts over.
       head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
@@ -1222,7 +1207,7 @@ _gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_st
       fi
       # An OPEN PR means a reviewer or orchestrator will prompt this agent for
       # a revision round: closing it breaks that hand-off. Unknown is kept too.
-      # CEL-130: under memory pressure a worker waiting ONLY on review may go -
+      # Under memory pressure a worker waiting ONLY on review may go -
       # clean, pushed, and its PR's head is the head it has sat on for the
       # whole window. `cel-fanout handback` resumes it in place for the next
       # round and delivers the findings by inbox, so nothing types into a
@@ -1331,8 +1316,8 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
 
   local removed=0 reaped=0 kept=0 reviewers_closed=0 done_closed=0 managed=$'\n' candidates='[]'
   _gc_keep_reset; _gc_cwd_reset
-  # NEVER SILENT (CEL-80): the sweep used to print one line at the very end,
-  # so a slow run was indistinguishable from a hung one.
+  # NEVER SILENT: announce the sweep up front, so a slow run is
+  # distinguishable from a hung one.
   printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')" >&2
   # Finished workers' panes first: a closed pane is one fewer live process

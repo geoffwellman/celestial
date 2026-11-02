@@ -1,17 +1,15 @@
 # shellcheck shell=bash
 # RANKING WHAT IS LEFT IN A MAILBOX.
 #
-# This is the third of CEL-43's three fixes and deliberately the last: it runs
-# over the UNREAD set only, after status stopped being mail and after a
-# mailbox with no reader became a fault. Ranking a pile of 553 messages would
-# have been a way of living with the pile.
+# Runs over the UNREAD set only: ranking orders what is waiting, it is not a
+# way of living with an unread pile.
 #
 # WHAT THE MODEL DOES, AND ONLY THAT: it supplies a LEVEL per message. Counts,
 # ages, ordering, the cut and the fallback are the code's. A classifier that
 # also decided how many lines to draw would be a classifier whose bad day is
 # an operator's missing escalation - so below `triage.min_confidence` a
 # message keeps its kind's default rank and an unreachable model degrades to
-# today's ordering rather than losing anything.
+# the plain kind ordering rather than losing anything.
 #
 # One request, one `score` question per message: the decisions endpoint
 # evaluates every question in a request in parallel, and the messages share no
@@ -33,10 +31,8 @@ _CEL_TRIAGE=1
 # The levels, concrete and in order. Vague levels ("high", "medium") make a
 # classifier guess at the rubric; these say what a person would DO.
 #
-# They travel as `criteria`, which is the endpoint's own name for the set -
-# verified against the live API on 2026-09-19, where sending `levels:` is a
-# 400 naming this field. tools/console/router.mjs learned the same thing about
-# `choice` a day earlier.
+# They travel as `criteria`, the endpoint's own name for the set; `levels:` is
+# rejected with a 400.
 TRIAGE_LEVELS='[
   "informational - a person never needs to act",
   "useful context - read when convenient",
@@ -45,8 +41,8 @@ TRIAGE_LEVELS='[
 ]'
 
 # Below the floor the model is guessing, and a guess must not be able to push
-# an escalation under a status line. The kind's own default stands instead -
-# which IS today's ordering, so the degraded path is the old behaviour.
+# an escalation under a status line. The kind's own default stands instead,
+# so the degraded path is the plain kind ordering.
 triage_min_confidence() {
   local v; v="$(cel_config_get triage min_confidence)"
   [ -n "$v" ] || v=0.6
@@ -57,17 +53,6 @@ triage_top_n() {
   local v; v="$(cel_config_get inbox top_n)"
   case "$v" in ''|*[!0-9]*) v=3 ;; esac
   printf '%s' "$v"
-}
-
-# What each kind means when nobody has scored it: a blocker is somebody
-# stopped, a decision or an escalation wants an answer, status wants nothing.
-triage_default_rank() { # <kind>
-  case "$1" in
-    blocked) printf 3 ;;
-    decision|escalation) printf 2 ;;
-    update) printf 1 ;;
-    *) printf 0 ;;
-  esac
 }
 
 # One line per scored id: `<id><TAB><rank>`. A FILE, not a process cache: the
@@ -216,8 +201,9 @@ triage_ranked() { # <ws> <who>
   fi
   # One pass over the cache in jq rather than a shell loop per message: a
   # mailbox with hundreds of unread items is exactly the case this exists for.
-  # The kind defaults below are triage_default_rank's, spelled in jq so the
-  # whole ordering is one expression; the two are asserted equal by the suite.
+  # Unscored kinds fall back to what they mean: a blocker is somebody stopped,
+  # a decision or an escalation wants an answer, status wants nothing. The
+  # console's KIND_RANK (tools/console/board.mjs) is the same table.
   local cache raw; cache="$(_triage_cache_file)"
   raw="$(cat "$cache" 2>/dev/null || true)"
   printf '%s\n' "$items" | jq -sc --arg raw "$raw" '

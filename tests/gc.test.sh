@@ -166,7 +166,7 @@ test_gc_keeps_a_closed_solo_worktree_with_unmerged_commits() {
   rm -rf "$T"
 }
 
-# AH-261017: a recovered launch is `unconfirmed` with an idle live agent in its
+# A recovered launch is `unconfirmed` with an idle live agent in its
 # pane. Neither a merged/closed/absent PR nor a gone-looking pane may let gc
 # take its worktree while the row is unsettled.
 test_gc_never_erases_an_unresolved_recovered_launch() {
@@ -888,11 +888,9 @@ test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
 }
 
 # ------------------------------------------------- the finished-worker pass
-# CEL-80. On 2026-09-25, 13 of 23 live worker panes belonged to delegations
-# already landed or finished - panes `done` for days, never closed, because
-# workers nest as tabs in their repo's workspace and the worktree pass only
-# ever looked at workspaces whose first pane sat in a worktree. The ledger
-# knows which pane each delegation ran in; that is where this pass starts.
+# Workers nest as tabs in their repo's workspace, so the worktree pass never
+# sees their panes. The ledger knows which pane each delegation ran in; that
+# is where this pass starts.
 _gc_done_fixture() { # <state> <agent-status>
   T="$(mktemp -d)"
   export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml"
@@ -964,7 +962,7 @@ test_gc_closes_a_done_pane_whose_delegation_landed() {
   rm -rf "$T"
 }
 
-# AH-261017: a released/landed ORIGINAL whose worker was handed to a running
+# A released/landed ORIGINAL whose worker was handed to a running
 # replacement shares its pane; the done-pane pass must not close that pane on
 # the original row's word. Control: the same row without a replacement closes.
 test_gc_does_not_close_the_pane_a_running_replacement_shares_with_a_released_original() {
@@ -1039,8 +1037,7 @@ test_gc_done_pane_dry_run_says_what_it_would_close_and_closes_nothing() {
   rm -rf "$T"
 }
 
-# THE EMPTY PANES (CEL-84). A worker that quit leaves its shell behind; 36
-# such panes cluttered the owner's pane picker on 2026-09-27. Only a bare
+# THE EMPTY PANES. A worker that quit leaves its shell behind. Only a bare
 # shell in a clean worker checkout (or a deleted one) is empty - a service,
 # an editor, an owner's shell and a layout's pane are all kept.
 _gc_empty_fixture() {
@@ -1168,7 +1165,7 @@ test_gc_keeps_a_shell_in_a_deleted_directory_outside_the_worktrees() {
   rm -rf "$T"
 }
 
-# CEL-88. The dry run and the real run go through ONE selection; only the
+# The dry run and the real run go through ONE selection; only the
 # final delete differs. A stub docker with an in-use image, an unused image
 # and a stopped container's image; build cache on the side.
 _gc_docker_stub() {
@@ -1267,11 +1264,9 @@ test_gc_box_docker_failure_warns_with_the_error_and_exits_nonzero() {
   rm -rf "$T"
 }
 
-# THE FOLDER IS GONE, THE PR IS NOT (CEL-89). When a review checkout is
-# removed herdr reports the pane's cwd with a literal ` (deleted)` suffix, and
-# the parse that read the repo from that cwd produced `widget-pr-41 (deleted)`:
-# GitHub knew no such repo, the fail-safe kept the reviewer, and five
-# reviewers of merged PRs stacked up on the owner's box, warned about every tick.
+# THE FOLDER IS GONE, THE PR IS NOT. When a review checkout is removed herdr
+# reports the pane's cwd with a literal ` (deleted)` suffix; the repo must
+# come from the declared url or the clone's origin, never that cwd.
 _gc_deleted_reviewer_fixture() {
   T="$(mktemp -d)"
   export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json" CEL_REGISTRY="$T/registry.yaml"
@@ -1379,9 +1374,8 @@ test_gc_unknown_report_retries_when_the_send_fails() {
 }
 
 # ------------------------------------- a live reviewer keeps its checkout
-# CEL-94: review checkouts were deleted while their reviewer was mid-review -
-# herdr showed the pane's cwd as "(deleted)" and the reviewer fell back to a
-# /tmp clone. Liveness is asked of the herdr roster AT THE MOMENT OF DELETION,
+# A review checkout is never deleted while its reviewer is mid-review.
+# Liveness is asked of the herdr roster AT THE MOMENT OF DELETION,
 # never of the reviewer registry: a row can name a pane id that is gone while
 # a newer pane for the same PR is working in the very same directory.
 _gc_live_checkout_fixture() { # roster comes from GC_ROSTER
@@ -1416,8 +1410,7 @@ test_gc_releases_the_checkout_once_no_pane_stands_in_it() {
   rm -rf "$T"
 }
 
-# A relaunch for the same PR used to drop the directory before re-creating it,
-# whatever was working in it.
+# A relaunch for the same PR never drops a directory a live pane stands in.
 test_relaunch_never_deletes_a_checkout_a_live_pane_stands_in() {
   _gc_live_checkout_fixture
   GC_ROSTER="$(jq -nc --arg c "$CO (deleted)" \
@@ -1427,7 +1420,7 @@ test_relaunch_never_deletes_a_checkout_a_live_pane_stands_in() {
   rm -rf "$T"
 }
 
-# Sourcery on #119: a roster reply that parses but is not a roster must not
+# A roster reply that parses but is not a roster must not
 # read as "nobody here", and an adopted row (no checkout field) still has its
 # checkout released once its pane is gone.
 test_a_malformed_roster_keeps_the_checkout() {
@@ -1446,8 +1439,7 @@ test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
   rm -rf "$T"
 }
 
-# CEL-111: one /proc pass per gc run, not one per worktree - the per-worktree
-# readlink of every pid on the box was 666 execs in 15 seconds.
+# One /proc pass per gc run, not one per worktree.
 test_gc_has_process_reads_proc_once_per_run() {
   local B; B="$(mktemp -d)"
   printf '#!/bin/sh\necho x >> "%s/count"\nexec /usr/bin/readlink "$@"\n' "$B" > "$B/readlink"
@@ -1463,7 +1455,7 @@ test_gc_has_process_reads_proc_once_per_run() {
   rm -rf "$B"
 }
 
-# Review on #136: the snapshot is the fast path, never the last word. A
+# The snapshot is the fast path, never the last word. A
 # process that starts in a worktree after the table was read is still seen by
 # the live check that runs right before any removal.
 test_gc_live_recheck_sees_a_process_the_snapshot_missed() {
@@ -1500,9 +1492,8 @@ test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
   _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
 }
 
-# ------------------------------------------------- the idle-stop pass (CEL-122)
-# At the OOM, seven `done` workers held 400-550 MB each and gc reaped none:
-# every pass waited for the ledger row to close. A done/idle worker that has
+# ------------------------------------------------- the idle-stop pass
+# A done/idle worker that has
 # sat N minutes with nothing unsaved has its pane closed; ledger untouched.
 _gc_idle_stop_run() { # <minutes> -> output; observes once at t0, then at t0+mins*60
   export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
@@ -1581,7 +1572,7 @@ test_gc_idle_stop_minutes_drop_under_memory_pressure() {
   rm -rf "$T"
 }
 
-# Review of #148: a clean, pushed worker idle while its PR awaits review is
+# A clean, pushed worker idle while its PR awaits review is
 # the reviewer's to prompt - closing it breaks the revision round.
 test_gc_idle_stop_keeps_a_worker_whose_pr_is_open() {
   _gc_done_fixture running done
@@ -1601,10 +1592,9 @@ test_gc_idle_stop_keeps_an_agent_whose_identity_is_unproven() {
   rm -rf "$T"
 }
 
-# ------------------------------------- review waiters under pressure (CEL-130)
-# At 12:22 on 2026-10-14, 15 agents were `done` on a box with full swap and
-# gc stopped none: 4 reviewers had recorded their verdicts and 5 workers sat
-# behind open PRs waiting on them. Both are now stoppable - on facts.
+# ------------------------------------- review waiters under pressure
+# A reviewer with a recorded verdict for the current head, and a worker
+# waiting only on that review, are both stoppable under pressure - on facts.
 _gc_rv_fixture() { # <review-head> <pr-head>
   _gc_reviewer_fixture
   export CEL_REGISTRY="$T/registry.yaml" CEL_GC_REVIEWER_STOP_STATE="$T/rv-stop.json" CEL_TESTING=1
@@ -1721,7 +1711,7 @@ test_gc_idle_stop_restarts_the_clock_when_the_head_moves() {
   rm -rf "$T"
 }
 
-# Review of #157: a CHANGES verdict means the reviewer is waiting on the
+# A CHANGES verdict means the reviewer is waiting on the
 # worker's re-push - closing it would leave "pushed - re-review" with nobody.
 test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
   GC_VERDICT=changes _gc_rv_fixture aaa111 aaa111
@@ -1731,11 +1721,8 @@ test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
   rm -rf "$T"
 }
 
-# ----------------------------------- retirement ownership (AH-261018)
-# Installed gc required EXACTLY ONE foreground process, so every verified
-# Claude carrying its direct Hindsight MCP child was refused before identity
-# was even computed, and six idle runtimes could never be retired. The root is
-# still proven by exact pid/birth/pane/role; the only widening is a declared
+# ----------------------------------- retirement ownership
+# The root is proven by exact pid/birth/pane/role; the only widening is a declared
 # helper (agents.yaml `owned_children`) that is a DIRECT child of that root,
 # born after it, in the same pane, with the exact declared argv.
 _gc_claude_fixture() { # <child-kind: mcp|other|wrongscript|elsewhere|grandchild|none>

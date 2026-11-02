@@ -62,16 +62,15 @@ EOS
   export CEL_ROOT="$ROOT"
   export CEL_UPDATE_DIR="$T/updatestate"
   # EVERY box-level path is isolated here, in the base fixture, not only in
-  # the channel one: the box this suite runs on is itself on the main
-  # channel since 2026-09-18, and three release-channel tests started
-  # reporting "main is 3 commits ahead" because they read the real config.
-  # An absent config file is the release channel; an absent registry has no
-  # workspaces to post to.
+  # the channel one: a box running this suite may itself be on the main
+  # channel, and a release-channel test that reads the real config reports
+  # main's commits instead. An absent config file is the release channel; an
+  # absent registry has no workspaces to post to.
   export CEL_CONFIG_FILE="$T/config.yaml" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
   # The two side effects are what the tests watch; the real ones re-link the
   # box and shell out to doctor, neither of which belongs in a unit test.
   _update_reapply() { printf 'reapply\n' >>"$LOG"; }
-  # AH-261018: agent updaters and gateway registration have their own suite
+  # Agent updaters and gateway registration have their own suite
   # (update-agents.test.sh); this one must never run a real `claude update`.
   _update_components() { return 0; }
   _update_stale_gateway_env() { :; }
@@ -313,9 +312,8 @@ EOS
 # it is also the only thing that can tell the dashboard about one.
 test_steward_writes_and_clears_the_available_marker() {
   # The channel fixture, not the bare one: with the box itself on the main
-  # channel, an unisolated CEL_CONFIG_FILE made this test follow the REAL
-  # config and post "3 new commits" into every real root mailbox on each
-  # suite run (measured 2026-09-18, four times in an hour).
+  # channel, an unisolated CEL_CONFIG_FILE would make this test follow the REAL
+  # config and post "3 new commits" into every real root mailbox.
   _upd_channel_fixture
   printf 'update:\n  channel: release\n' >"$CEL_CONFIG_FILE"
   source "$_UPD_REPO/lib/steward.sh"
@@ -407,17 +405,14 @@ test_dash_restart_is_idempotent_when_nothing_is_running() {
 }
 
 # --- the channel ------------------------------------------------------------
-# Everything that said "you are behind" compared the installed version to the
-# newest release TAG, so a box tracking main sat thirty-odd merges past v0.2.0
-# and every surface said "up to date". A box that tracks main has to be told
-# about COMMITS; a box that tracks releases keeps today's behaviour. Both have
-# to say WHAT is new, which is why the fixture's origin carries both tags and
-# extra commits on main.
-# EVERY box-level path the code under test can reach goes into the fixture.
-# Measured while writing this ticket: the steward test below left CEL_REGISTRY
-# and CEL_INBOX_DIR alone, so three suite runs posted "3 new commits on
-# celestial main" into the real root mailbox of every workspace on the box. A
-# test that can write to the live box is a test that will.
+# A box that tracks main is told about COMMITS, because a release tag alone
+# hides how far past it main has moved; a box that tracks releases compares
+# against the newest tag. Both have to say WHAT is new, which is why the
+# fixture's origin carries both tags and extra commits on main.
+# EVERY box-level path the code under test can reach goes into the fixture:
+# a steward test with a live CEL_REGISTRY and CEL_INBOX_DIR posts into the
+# real root mailbox of every workspace on the box. A test that can write to
+# the live box is a test that will.
 _upd_channel_fixture() { # _upd_fixture + box-level config, registry and mailbox
   _upd_fixture
   export CEL_CONFIG_FILE="$T/config.yaml"

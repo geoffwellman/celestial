@@ -15,12 +15,10 @@ cel_latest_remote_version() {
     | sed 's#.*refs/tags/v##' | sort -V | tail -1
 }
 
-# THE BUILD, not the release. The owner, 2026-09-18: "I don't think we should
-# rely on just the version - what about commits in between new versions?" On a
-# box that tracks main, VERSION alone is a lie by omission: it says v0.2.0
-# while the checkout is thirty-odd merges past the tag of that name. So the
-# build people quote is `v0.2.0+31 (d43910c, main)` - the nearest tag, the
-# distance from it, the sha and the branch.
+# THE BUILD, not the release. On a box that tracks main, VERSION alone hides
+# the merges since its tag, so the build people quote is
+# `v0.2.0+31 (d43910c, main)` - the nearest tag, the distance from it, the sha
+# and the branch.
 cel_build_tag() { # nearest reachable v* tag, without the v; VERSION when none
   local t
   t="$(git -C "$CEL_ROOT" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"

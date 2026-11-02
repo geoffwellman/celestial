@@ -72,13 +72,13 @@ test_check_workspaces_errs_on_missing_registered_path() {
   rm -rf "$T"
 }
 
-# --- doctor_ws_local_lines: workspace.local.yaml drift, AH-260928 ----------
+# --- doctor_ws_local_lines: workspace.local.yaml drift ----------------------
 #
-# workspace.local.yaml is allowed to override role_profiles/worker_profiles
-# and nothing else - the merge in _ws_effective_json silently drops anything
-# outside that. Silent-drop is the right enforcement for the merge itself,
-# but a hand-written per-box file needs a loud check somewhere, which is
-# what doctor_ws_local_lines is for.
+# workspace.local.yaml may set only the keys in _WS_LOCAL_KEYS (lib/yaml.sh),
+# and only routing inside a product/repo entry - the merge in
+# _ws_effective_json silently drops anything outside that. Silent-drop is the
+# right enforcement for the merge itself, but a hand-written per-box file needs
+# a loud check somewhere, which is what doctor_ws_local_lines is for.
 
 _dwl_setup() { # <wsdir var> - a bare wsdir, no registry needed
   T="$(mktemp -d)"

@@ -1,16 +1,11 @@
 # shellcheck shell=bash
 # What the plane started and nobody owns any more.
 #
-# The owner, 2026-09-19: "the agents are leaving other processes laying around
-# hogging memory other than the harness itself". A walk of the box found, all
-# reparented to init: thirteen `cel inbox watch` trees from consoles that had
-# exited, four of them days old; fifty-six `/bin/sh .../bin/long-running` test
-# fixtures whose worktree had been deleted nine days earlier; 173 bare pane
-# shells on ptys whose herdr pane was gone, 4-8 MB each; and gate runners
-# whose suite had been killed. Roughly a gigabyte, and none of it was
-# mentioned anywhere: the steward's memory sweep (CEL-22) groups by pane, so a
-# process with no pane is a process it cannot see. `celestial-orch 1.7G` was
-# the headline while the orphans went unnamed.
+# Processes reparented to init after their owner went: `cel inbox watch` trees
+# from exited consoles, test fixtures under deleted worktrees, bare pane
+# shells on ptys whose herdr pane is gone, and gate runners whose suite was
+# killed. The steward's memory sweep groups by pane, so a process with no
+# pane is one it cannot see; this file names them.
 #
 # A WORKER SESSION IS NOT AN ORPHAN. A pi or omp session for a row the ledger
 # calls finished or landed has an owner - the orchestrator - and `release
@@ -173,12 +168,10 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
   now="$(date +%s)"
   ttys="$(_orphans_pane_ttys)" || ttys_known=0
 
-  # NO SUBPROCESS PER PID (CEL-90). At a load of 25-30 this walk forked an
-  # awk, a tr, two readlinks and a stat for each of ~800 processes and took
-  # 28 s on its own - more than the console's whole 20 s budget, and growing
-  # with the very process count it was measuring. Every per-pid fact is now
-  # read with bash builtins, and the two symlinks bash cannot read are
-  # resolved for the few candidates in ONE batched `find` after the walk.
+  # NO SUBPROCESS PER PID: a fork per process makes the walk scale with the
+  # very process count it measures and blows the console's time budget. Every
+  # per-pid fact is read with bash builtins, and the two symlinks bash cannot
+  # read are resolved for the few candidates in ONE batched `find` after the walk.
   local -A st_name st_ppid st_uid st_rss
   local -a order=()
   local parents=$'\n' pidmap="" key val rest n p u r

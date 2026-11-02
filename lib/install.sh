@@ -158,12 +158,9 @@ install_extensions() {
     if [ "$a" = pi ]; then
       # THROUGH pi's OWN INSTALLER, not npm. `npm install -g` puts the package
       # on disk and nothing more; pi loads only what `pi install <source>` has
-      # registered in its settings, so every extension this file has ever
-      # listed was installed and never loaded - `pi list` said "No packages
-      # installed" with ten of them sitting in node_modules. Among them the
-      # Anthropic auth extension, which is the only way pi reaches a Claude
-      # subscription. Found 2026-09-16 when the first pi worker could not
-      # start. `npm:` is pi's source scheme; the version pin rides along.
+      # registered in its settings (including the Anthropic auth extension,
+      # the only way pi reaches a Claude subscription). `npm:` is pi's source
+      # scheme; the version pin rides along.
       "$(agent_get "$a" bin)" install "npm:$ext" || return
       echo "      + $ext"
     fi
@@ -303,10 +300,8 @@ cmd_setup() {
   c_hd "Next"
   echo "    gh auth login && claude setup-token   # human-only steps"
   echo "    eval \"\$(cel shellenv)\"                 # add to your shell rc"
-  # ONE PLACE SECRETS LIVE. This used to be three (workspace.yaml's hint said
-  # env.local, the setup skill said ~/.zshenv, the checker read whatever the
-  # shell happened to hold), and three answers to "where do I put my key" is
-  # zero answers - the newcomer puts it somewhere and nothing agrees.
+  # ONE PLACE SECRETS LIVE: three answers to "where do I put my key" is zero
+  # answers, so setup, the workspace hint and the checker all name env.local.
   echo "    <workspace>/env.local                 # per-workspace secrets (gitignored);"
   echo "                                          # ~/.zshenv only for a box-wide credential"
   echo "    cel doctor                            # verify"

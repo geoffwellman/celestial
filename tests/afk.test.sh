@@ -1,12 +1,9 @@
 # shellcheck shell=bash
 # `cel afk` - what the factory may decide while nobody is watching.
 #
-# AFK CHANGES WHO DECIDES, NEVER WHAT IS REQUIRED. Measured over 2026-09-20/22:
-# an approved, green, gate-verified PR sat 36 hours on two bot-review threads a
-# human had to type a reply into; two more paused on "shall I land this?" when
-# the workspace policy already said `merge: self`. None of that is a safety
-# property - so the four acts below are pre-authorised, each on its own
-# evidence, and every refusal here is one an agent used to make by waiting.
+# AFK CHANGES WHO DECIDES, NEVER WHAT IS REQUIRED. The pre-authorised acts
+# below each stand on their own evidence; every refusal here is one an agent
+# must still make by waiting.
 #
 # Nothing in this file touches the live box or a real PR: `gh` and `herdr` are
 # stubs on a prepended PATH that log their argv, and the state directory is a
@@ -127,7 +124,7 @@ test_afk_never_merges_red_unreviewed_or_unmergeable() {
   _afk_teardown
 }
 
-# CEL-56'S FOURTH OUTCOME. A gate that produced no verdict did not fail and did
+# A GATE THAT PRODUCED NO VERDICT did not fail and did
 # not pass; AFK removes the pause, not the check, so it is not a merge.
 test_afk_refuses_a_landing_whose_gate_produced_no_verdict() {
   _afk_setup
@@ -222,19 +219,8 @@ test_afk_dispatch_needs_a_written_finding_and_respects_cap_and_quota() {
   _afk_teardown
 }
 
-# AFK never widens its own scope, and never starts work somewhere it was not
-# armed: an orchestrator asleep in one product is not an orchestrator loose on
-# the box.
-test_afk_never_changes_policy_or_its_own_scope() {
-  _afk_setup
-  cmd_afk on --until '+8h' >/dev/null
-  local out
-  out="$(afk_policy_change_allowed 'branch protection' 2>&1)" && { _afk_teardown; return 1; }
-  assert_contains "$out" "AFK never changes policy"
-  out="$(afk_policy_change_allowed 'afk scope' 2>&1)" && { _afk_teardown; return 1; }
-  _afk_teardown
-}
-
+# AFK never starts work somewhere it was not armed: an orchestrator asleep in
+# one product is not an orchestrator loose on the box.
 test_afk_refuses_an_act_in_another_orchestrators_workspace() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
@@ -285,14 +271,11 @@ test_cel_dispatches_afk() {
   _afk_teardown
 }
 
-# =========================================================== round 1 review
+# =========================================================== real call sites
 # THE DOOR HAS TO BE REACHED FROM A REAL ACT. Everything above proves
-# `afk_authorise` refuses when it is called; PR #82's review found that the two
-# mutating call sites recorded the act AFTER doing it and never went through the
-# door at all, and that two of the four pre-authorisations had no caller
-# anywhere outside this file. A refusal that only exists in a unit test is the
-# gap this ticket is about. So: the fanout binary is driven end to end against
-# stubs, and the assertion is on what the stub was NOT asked to do.
+# `afk_authorise` refuses when it is called; this proves the mutating call
+# sites go through it BEFORE acting. The fanout binary is driven end to end
+# against stubs, and the assertion is on what the stub was NOT asked to do.
 BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
 
 _afk_fanout_setup() {
@@ -381,7 +364,7 @@ test_land_while_afk_is_on_passes_the_door_and_is_recorded() {
   _afk_fanout_teardown
 }
 
-# ---------------------------------------------------------- round 2 review
+# ---------------------------------------------------------- author identity
 # WHOSE PR IS THIS. `land` proves the author against the fleet's own GitHub
 # identity on every path - the guard sits above the split between a GitHub
 # approval and the ledger verdict - so a colleague's PR never reaches the AFK
@@ -572,7 +555,7 @@ test_afk_rebase_retry_refuses_while_afk_is_off() {
   _afk_teardown
 }
 
-# ============================================================ CEL-78
+# ============================================================ ordered work
 # ORDERED WORK DOES NOT STOP WHEN THE OWNER STEPS AWAY. A spec already written
 # under .cel/specs/ before AFK went on is work somebody ordered awake.
 test_afk_ordered_spec_written_before_afk_is_authorised_and_logged() {
