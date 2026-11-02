@@ -16,6 +16,19 @@ _wl_setup() {
   cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/alpha/workspace.yaml"
 }
 
+# THE CACHE IS KEYED ON CONTENT. An in-place edit that keeps the inode, the
+# size and the timestamp (two saves in one second, a restored mtime) must be
+# read, not served from the copy of the old text.
+test_yaml_cache_sees_a_same_size_same_mtime_edit() {
+  local T; T="$(mktemp -d)"
+  local CEL_YAML_CACHE="$T/cache"
+  printf 'name: aaaa\n' > "$T/w.yaml"; touch -d '2020-01-01 00:00:00' "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" aaaa
+  printf 'name: bbbb\n' > "$T/w.yaml"; touch -d '2020-01-01 00:00:00' "$T/w.yaml"
+  assert_eq "$(_yqr -r .name "$T/w.yaml")" bbbb
+  rm -rf "$T"
+}
+
 # --- 1: every routing read goes through the merge ---------------------------
 # A reader that asks workspace.yaml for role_profiles/worker_profiles directly
 # silently ignores the local override - the person whose login can't reach the

@@ -129,6 +129,18 @@ S
   _du_down
 }
 
+# A carried CEL_PAGES_* value is ONE directive whatever it holds: quotes,
+# backslashes, a % (a systemd specifier) and a newline are escaped rather than
+# closing the quote, expanding, or starting a directive of their own.
+test_pages_unit_escapes_the_environment_it_carries() {
+  source "$CEL_ROOT/lib/pages.sh"
+  export CEL_PAGES_TITLE='a "q" b\c 50% x'$'\n''ExecStartPre=/bin/false'
+  local u; u="$(pages_unit_text /tmp/pages.log)"
+  unset CEL_PAGES_TITLE
+  assert_contains "$u" 'Environment="CEL_PAGES_TITLE=a \"q\" b\\c 50%% x\nExecStartPre=/bin/false"'
+  ! printf '%s\n' "$u" | grep -q '^ExecStartPre=' || { echo "the value started a directive of its own"; return 1; }
+}
+
 # A changed unit (dash.port moved) on an ACTIVE service: `start` is a no-op,
 # so the old server kept the old port and every tick said "did not come up".
 test_dash_ensure_restarts_an_active_unit_whose_file_changed() {

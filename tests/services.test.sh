@@ -115,6 +115,92 @@ test_services_start_records_a_pane_and_stop_closes_it() {
   _svc_teardown
 }
 
+# A herdr whose pane split works but whose `pane run`, `pane close` and
+# `pane get` answer as SVC_RUN / SVC_CLOSE / SVC_GET say (ok, fail, gone).
+_svc_failing_herdr() {
+  cat >"$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/calls"
+case "\$1 \$2" in
+  'pane split') printf '{"result":{"pane_id":"w1:p9"}}' ;;
+  'agent list') printf '{"result":{"agents":[{"cwd":"%s/alpha","pane_id":"w1:p1"}]}}' "$T" ;;
+  'pane run')   [ "\${SVC_RUN:-ok}" = ok ] || { echo 'run refused' >&2; exit 1; } ;;
+  'pane close') [ "\${SVC_CLOSE:-ok}" = ok ] || { echo 'close refused' >&2; exit 1; } ;;
+  'pane get')
+    if [ "\${SVC_GET:-ok}" = gone ]; then
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}' "\$3"; exit 1
+    fi
+    printf '{"result":{"pane":{"pane_id":"%s"}}}' "\$3" ;;
+  *) printf '{}' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  printf 'name: alpha\nservices:\n  - {name: builder, url: "http://127.0.0.1:4322", cmd: "python3 -m http.server 4322", cwd: "%s/alpha/run"}\n' "$T" \
+    > "$T/alpha/workspace.yaml"
+}
+
+# A start whose command never reached the pane did not start anything: it
+# fails, records nothing, and closes the empty pane it split.
+test_services_start_is_a_failure_when_pane_run_fails() {
+  _svc_setup; _svc_failing_herdr
+  local out rc=0
+  out="$(SVC_RUN=fail "$CEL" services start builder --workspace alpha 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "start exited 0 when pane run failed: $out"; _svc_teardown; return 1; }
+  case "$out" in *"builder started"*) echo "start said started: $out"; _svc_teardown; return 1 ;; esac
+  assert_eq "$(jq -r '.builder.pane // "none"' "$T/alpha/.cel/services.json" 2>/dev/null || printf none)" none
+  assert_contains "$(cat "$T/calls")" "pane close w1:p9"
+  _svc_teardown
+}
+
+# A stop whose pane would not close keeps the record - the pane id is the only
+# handle there is - and says it failed. A pane herdr says is already gone is
+# stopped, and its record goes.
+test_services_stop_keeps_the_record_when_pane_close_fails() {
+  _svc_setup; _svc_failing_herdr
+  "$CEL" services start builder --workspace alpha >/dev/null
+  local out rc=0
+  out="$(SVC_CLOSE=fail "$CEL" services stop builder --workspace alpha 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "stop exited 0 when pane close failed: $out"; _svc_teardown; return 1; }
+  case "$out" in *"builder stopped"*) echo "stop said stopped: $out"; _svc_teardown; return 1 ;; esac
+  assert_eq "$(jq -r '.builder.pane' "$T/alpha/.cel/services.json")" "w1:p9"
+  # ...and a restart does not pretend the old one is gone either
+  rc=0; SVC_CLOSE=fail "$CEL" services restart builder --workspace alpha >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "restart exited 0 when its stop failed"; _svc_teardown; return 1; }
+  SVC_CLOSE=fail SVC_GET=gone "$CEL" services stop builder --workspace alpha >/dev/null
+  assert_eq "$(jq -r '.builder // "gone"' "$T/alpha/.cel/services.json")" gone
+  _svc_teardown
+}
+
+# Starts and stops of DIFFERENT services in one workspace at once must not
+# lose each other's records.
+test_services_state_survives_concurrent_updates() {
+  _svc_setup
+  local i
+  for i in $(seq 1 16); do _svc_pane_record "$T/alpha" "svc$i" "w1:p$i" & done
+  wait
+  assert_eq "$(jq 'length' "$T/alpha/.cel/services.json")" 16
+  for i in $(seq 1 8); do _svc_pane_forget "$T/alpha" "svc$i" & done
+  wait
+  assert_eq "$(jq -c 'keys | sort' "$T/alpha/.cel/services.json")" \
+    "$(printf '%s\n' svc9 svc10 svc11 svc12 svc13 svc14 svc15 svc16 | jq -Rcs 'split("\n") | map(select(. != "")) | sort')"
+  _svc_teardown
+}
+
+# The port is the handle, so a URL the parser cannot read is 0, never a
+# fragment of the host.
+test_services_port_of_url_reads_ipv6_userinfo_and_defaults() {
+  assert_eq "$(svc_port_of_url 'http://127.0.0.1:4322')" 4322
+  assert_eq "$(svc_port_of_url 'http://[::1]/')" 80
+  assert_eq "$(svc_port_of_url 'https://[::1]')" 443
+  assert_eq "$(svc_port_of_url 'http://[::1]:8080/x')" 8080
+  local ui="user:x"   # userinfo with a colon, assembled so no URL literal carries one
+  assert_eq "$(svc_port_of_url "http://$ui@host/")" 80
+  assert_eq "$(svc_port_of_url "http://$ui@host:9000/")" 9000
+  assert_eq "$(svc_port_of_url 'http://host?a=b:c')" 80
+  assert_eq "$(svc_port_of_url 'http://host:/')" 80
+  assert_eq "$(svc_port_of_url 'http://host:abc/')" 0
+}
+
 # A name+url entry - the shape every workspace.yaml already has - stays valid
 # and is OBSERVE-ONLY: there is nothing to start, and saying so is better than
 # starting something arbitrary.

@@ -12,13 +12,15 @@ CEL_MANIFEST="${CEL_MANIFEST:-$CEL_ROOT/agents.yaml}"
 # YQ ONCE, JQ AFTER. The Python `yq` wrapper costs an interpreter start plus a
 # jq per field, and field access is the hot path (agent_get runs dozens of
 # times per `cel run`). The manifest is converted to JSON once and cached
-# beside its path; every query after that is a plain jq on the cache, rebuilt
-# only when agents.yaml is newer than it.
+# beside its path, keyed on its CONTENT: a timestamp says nothing about an
+# edit that kept or restored the mtime. Every query after that is a plain jq
+# on the cache.
 _manifest_json() { # -> path of a JSON copy of $CEL_MANIFEST
   local d="${CEL_MANIFEST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel/manifest}"
+  local sum; sum="$(md5sum -- "$CEL_MANIFEST" 2>/dev/null)" || return 1
   local key="${CEL_MANIFEST//\//%}"
-  local c="$d/$key.json"
-  if [ -s "$c" ] && [ "$c" -nt "$CEL_MANIFEST" ]; then printf '%s' "$c"; return 0; fi
+  local c="$d/$key.${sum%% *}.json"
+  if [ -s "$c" ]; then printf '%s' "$c"; return 0; fi
   mkdir -p "$d" 2>/dev/null || true
   local tmp="$c.$$.$RANDOM"
   if yq -c . "$CEL_MANIFEST" > "$tmp" 2>/dev/null && [ -s "$tmp" ] && mv -f "$tmp" "$c" 2>/dev/null; then
