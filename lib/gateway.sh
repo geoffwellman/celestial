@@ -1,34 +1,23 @@
 # shellcheck shell=bash
 # cel gateway - several subscriptions behind one loopback door.
 #
-# The owner has more than one Codex or Claude subscription signed in and wants
-# work spread across them so no single one maxes out. Until CEL-60 that door
-# was omp's `auth-broker` + `auth-gateway` pair, and on this box it had NEVER
-# run: `omp auth-gateway status --json` answered `ready:false,
-# brokerConfigured:false` with zero credentials, so every worker queued on one
-# account - on 2026-09-20 one Anthropic account hit its five-hour limit and
-# stalled four workers while another sat at 16%.
+# CLIProxyAPI is ONE supervised process that is both the credential vault (one
+# OAuth JSON per account in its auth-dir) and the OpenAI/Anthropic-shaped
+# surface on loopback, so work spreads across every signed-in Codex or Claude
+# subscription instead of queueing on one. Nothing here calls omp's own auth
+# gateway: two credential vaults is the failure this design avoids.
 #
-# The door is now CLIProxyAPI: ONE supervised process that is both the
-# credential vault (one OAuth JSON per account in its auth-dir) and the
-# OpenAI/Anthropic-shaped surface on loopback. omp stays on the box - it is an
-# agent runtime kind - but nothing here calls it any more, because two
-# credential vaults is the failure this replaced.
-#
-# THE SESSION KEY IS THE WHOLE BALANCING MECHANISM, AND PI DOES NOT SEND ONE.
-# The first spike (.cel/specs/SPIKE-gateway.report.md) put a logging proxy in
-# front of the gateway and watched three pi runs with three distinct
-# --session-id values arrive with no session header at all - pi's --session-id
-# is local bookkeeping and never leaves the process. So the launcher injects
-# one: a provider `headers` entry bound to $CEL_SESSION_ID, set per worker.
-# CLIProxyAPI reads exactly that header, and `routing.session-affinity: true`
-# then pins one account for the length of the conversation.
+# THE SESSION KEY IS THE WHOLE BALANCING MECHANISM, AND PI DOES NOT SEND ONE:
+# pi's --session-id is local bookkeeping and never leaves the process. So the
+# launcher injects one: a provider `headers` entry bound to $CEL_SESSION_ID,
+# set per worker. CLIProxyAPI reads exactly that header, and
+# `routing.session-affinity: true` then pins one account for the length of the
+# conversation.
 #
 # THE API-KEY IS NEVER PRINTED. One key unlocks every subscription in the
 # vault to anything that can reach the port, which is why the service binds
-# 127.0.0.1, the management API is left out of the config entirely, and pi's
-# provider block names the VARIABLE ($CEL_GATEWAY_API_KEY) rather than holding
-# the value.
+# 127.0.0.1, the management API is loopback-only, and client provider blocks
+# name the VARIABLE ($OMP_GATEWAY_TOKEN) rather than holding the value.
 [ -n "${_CEL_GATEWAY:-}" ] && return 0
 _CEL_GATEWAY=1
 # shellcheck source=lib/common.sh
@@ -38,8 +27,7 @@ _CEL_GATEWAY=1
 # shellcheck source=lib/services.sh
 . "${BASH_SOURCE[0]%/*}/services.sh"   # svc_box_write, svc_start
 
-# CLIProxyAPI's own default (config.example.yaml:7). Nothing on this box has
-# ever bound it, so there is no legacy port to keep.
+# CLIProxyAPI's own default (config.example.yaml:7).
 _GATEWAY_DEFAULT_PORT=8317
 
 # The box's gateway state: the config CLIProxyAPI reads, the api-key it
@@ -51,10 +39,10 @@ gateway_auth_dir()   { printf '%s/auth' "$(gateway_state_dir)"; }
 _gateway_key_file()  { printf '%s/api-key' "$(gateway_state_dir)"; }
 _gateway_mgmt_key_file() { printf '%s/management-key' "$(gateway_state_dir)"; }
 
-# The port, from the box config, with CLIProxyAPI's default. `gateway_port`
-# is the key CEL-60 writes; `gateway.gateway_port` is what CEL-28 wrote and is
-# still read so an existing box keeps answering on the port its workers know.
-# Loopback is not configurable: see the api-key note above.
+# The port, from the box config, with CLIProxyAPI's default. `gateway.port` is
+# the key install writes; the legacy `gateway.gateway_port` is still read so an
+# existing box keeps answering on the port its workers know. Loopback is not
+# configurable: see the api-key note above.
 gateway_port() {
   local v; v="$(cel_config_get gateway port)"
   [ -n "$v" ] || v="$(cel_config_get gateway gateway_port)"
@@ -71,27 +59,28 @@ gateway_installed() {
   [ -n "$(cel_config_get gateway port)" ] || [ -n "$(cel_config_get gateway gateway_port)" ]
 }
 
-# The api-key, minted once and read from a 0600 file. MINTED ONCE MATTERS: a
-# second `install` that rolled it would 401 every pi worker already launched
-# against this gateway, and the failure reads as "the model is gone".
+# Mint a 32-byte hex secret into <file> once, in a 0700 dir. MINTED ONCE
+# MATTERS: rolling a key would 401 every client already holding it.
+_gateway_mint_secret() { # <file>
+  local f="$1"
+  [ -s "$f" ] && return 0
+  mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
+  ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
+}
+
+# The api-key, read from a 0600 file. A rolled key reads as "the model is
+# gone" to every pi worker already launched against this gateway.
 _gateway_api_key() {
   local f; f="$(_gateway_key_file)"
-  if [ ! -s "$f" ]; then
-    mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
-    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
-  fi
+  _gateway_mint_secret "$f"
   tr -d '\r\n' < "$f"
 }
 
-# The management secret, minted once like the api-key and for the same reason:
-# a panel already open in a browser holds it. 0600 in the gateway's own state
-# dir, never printed and never in a repo.
+# The management secret: a panel already open in a browser holds it. 0600 in
+# the gateway's own state dir, never printed and never in a repo.
 _gateway_mgmt_key() {
   local f; f="$(_gateway_mgmt_key_file)"
-  if [ ! -s "$f" ]; then
-    mkdir -p "$(dirname "$f")"; chmod 700 "$(dirname "$f")" 2>/dev/null || true
-    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f" )
-  fi
+  _gateway_mint_secret "$f"
   chmod 600 "$f" 2>/dev/null || true
   tr -d '\r\n' < "$f"
 }
@@ -105,16 +94,13 @@ gateway_panel_ssh() {
   printf 'ssh -L %s:127.0.0.1:%s %s' "$p" "$p" "$(hostname -s 2>/dev/null || hostname)"
 }
 
-# TEST SEAM, kept from CEL-28 because lib/quota.sh and lib/profiles.sh have
-# suites that set it: `$CEL_GATEWAY_STUB ready|models` stands in for the HTTP
-# reads so no suite depends on which accounts this box is signed in to.
+# TEST SEAM, set by the gateway, quota and profiles suites:
+# `$CEL_GATEWAY_STUB ready|models` stands in for the HTTP reads so no suite
+# depends on which accounts this box is signed in to.
 _gateway_stub() { [ -n "${CEL_GATEWAY_STUB:-}" ]; }
 
-# Is the door open? GET /healthz, UNAUTHENTICATED - the real health probe this
-# gateway never had. omp's only readable route was /v1/models behind a bearer,
-# so a health check had to carry the key that unlocks every subscription just
-# to say "up", and an unauthenticated read answered 401 and called a working
-# gateway down once a tick forever.
+# Is the door open? GET /healthz is UNAUTHENTICATED, so a health check never
+# carries the key that unlocks every subscription just to say "up".
 gateway_ready() {
   _gateway_stub && { "$CEL_GATEWAY_STUB" ready; return $?; }
   curl -sf -m 5 -o /dev/null "$(gateway_health_url)" 2>/dev/null
@@ -124,9 +110,8 @@ gateway_ready() {
 # rides STDIN, never argv - a bearer in a command line is a bearer in `ps`.
 #
 # The catalog every client but omp sees: ids published only because an
-# account carries the omp prefix (CEL-136, `omp/<model>`) are omp's and are
-# dropped here, so pi's models.json, the reviewer catalog and doctor read
-# exactly the catalog they read before any account was prefixed.
+# account carries the omp prefix (`omp/<model>`) are omp's and are dropped
+# here, so pi's models.json, the reviewer catalog and doctor never see them.
 gateway_models_json() {
   local js; js="$(_gateway_models_json_raw)" || return 1
   [ -n "$js" ] || return 1
@@ -232,12 +217,10 @@ gateway_models_json_existing() {
 
 # --- the account table ----------------------------------------------------
 
-# THE AUTH-DIR IS THE ACCOUNT LIST. CLIProxyAPI's management API is off on
-# this box (it is the remote-control surface, and one api-key already unlocks
-# everything), so the files ARE the evidence - and reading them costs no
-# quota, which omp's `auth-gateway check --strict` spent once per status.
+# THE AUTH-DIR IS THE ACCOUNT LIST. The files ARE the evidence, and reading
+# them costs no quota and needs no management-API call.
 #
-# The filenames carry what the table needs (SPIKE-cliproxy.report.md):
+# The filenames carry what the table needs:
 #   claude-<hash>-<email>.json          internal/auth/claude/filename.go:27,32
 #   codex-<hash>-<email>-<plan>.json    internal/auth/codex/filename.go:24-31
 # The PLAN exists only in the name, which is why the name is parsed at all
@@ -247,11 +230,11 @@ gateway_models_json_existing() {
 # list gateway accounts beside the direct ones:
 #   { source, provider, id, email, plan, type, ok, windows: [] }
 #
-# `windows` is EMPTY, always, and that is not a bug: CLIProxyAPI removed
-# built-in usage accounting in v6.10.0, and its per-credential quota snapshot
-# is the last upstream response's rate-limit headers - empty until an account
-# serves traffic, so "no usage probe" and not "0% used". CEL-61 builds the
-# usage reader over these same files.
+# `windows` is EMPTY, always, and that is not a bug: CLIProxyAPI has no
+# built-in usage accounting, and its per-credential quota snapshot is the last
+# upstream response's rate-limit headers - empty until an account serves
+# traffic, so "no usage probe" and not "0% used". lib/quota.sh reads usage
+# from these same files.
 gateway_accounts_json() {
   local d; d="$(gateway_auth_dir)"
   [ -d "$d" ] || { printf '[]'; return 0; }
@@ -350,8 +333,7 @@ api-keys:
   - "$(_gateway_api_key)"
 
 # Provider prefixes stay off, so model ids reach pi plain (gpt-5.5, not
-# ompgw/openai-codex/gpt-5.5). The earlier gateway's three-segment ids broke
-# everything in the plane that splits a model id on the first slash.
+# ompgw/openai-codex/gpt-5.5): the plane splits a model id on the first slash.
 force-model-prefix: false
 
 routing:
@@ -362,15 +344,12 @@ routing:
   session-affinity: true
   session-affinity-ttl: 1h
 
-# THE MANAGEMENT API, LOOPBACK ONLY (CEL-80). CEL-60 left this block out, and
-# the web panel at /management.html could then read and change nothing. Keys
-# checked against CLIProxyAPI 7.3.14's config struct, and again against
-# 8.0.29's (CEL-135): v8 still reads this legacy layout as written and does
-# not rewrite it on load - only a v8 management-API config write migrates the
-# file to the v8 layout. allow-remote: false is
-# what keeps it on this machine - the panel is reached over an ssh tunnel
-# (cel gateway panel), never on the tailnet. CLIProxyAPI hashes a plaintext
-# secret-key in place on load; the plaintext stays in the 0600 key file.
+# THE MANAGEMENT API, LOOPBACK ONLY: the web panel at /management.html needs
+# it. CLIProxyAPI v8 still reads this legacy layout as written and does not
+# rewrite it on load. allow-remote: false is what keeps it on this machine -
+# the panel is reached over an ssh tunnel (cel gateway panel), never on the
+# tailnet. CLIProxyAPI hashes a plaintext secret-key in place on load; the
+# plaintext stays in the 0600 key file.
 remote-management:
   allow-remote: false
   secret-key: "$(_gateway_mgmt_key)"
@@ -392,18 +371,15 @@ EOF
 
 # --- the service ----------------------------------------------------------
 
-# ONE box service, where omp needed two. It belongs to the BOX and not to any
-# workspace - every workspace's workers go through this one door - so CEL-34's
-# `services.d` is its home, where `cel services` and the steward sweep already
-# look.
+# ONE box service. It belongs to the BOX and not to any workspace - every
+# workspace's workers go through this one door - so its home is `services.d`,
+# where `cel services` and the steward sweep already look.
 #
-# THE NAME IS UNCHANGED (`cel-auth-gateway`). lib/doctor.sh and lib/orphans.sh
-# both key off it, and they belong to other tickets; the process behind the
-# name changed, the handle the box holds it by did not.
+# The name `cel-auth-gateway` is the handle lib/doctor.sh and lib/orphans.sh
+# key off; keep it stable.
 #
 # The health check carries NO bearer: /healthz is unauthenticated
-# (internal/api/server_routes.go:44-52), so the probe no longer has to present
-# the key that unlocks every subscription just to say "up".
+# (internal/api/server_routes.go:44-52).
 gateway_service_specs() {
   jq -n --arg p "$(gateway_port)" --arg cfg "$(gateway_config_file)" '[
     { name: "cel-auth-gateway",
@@ -438,12 +414,12 @@ _gateway_start() {
 
 # pi's agent dir. An AMBIENT PI_CODING_AGENT_DIR is deliberately not read here:
 # omp exports that same variable for itself, so a pane that ever ran an omp
-# launch carries omp's root, and every later pi launched from it put its
-# sessions in omp's tree - where omp's startup then renamed them from under the
-# live process (2026-10-17, two live workers). A custom pi-only root is
-# an explicit choice, spelled CEL_PI_AGENT_DIR (the twin of CEL_OMP_AGENT_DIR).
-# Every consumer - the models writer, the child's environment, doctor - asks
-# this function, and the child is always handed the answer.
+# launch carries omp's root, and a pi launched from it would put its sessions
+# in omp's tree, where omp's startup renames them from under the live process.
+# A custom pi-only root is an explicit choice, spelled CEL_PI_AGENT_DIR (the
+# twin of CEL_OMP_AGENT_DIR). Every consumer - the models writer, the child's
+# environment, doctor - asks this function, and the child is always handed
+# the answer.
 gateway_pi_dir() { _agent_root_abs "${CEL_PI_AGENT_DIR:-$HOME/.pi/agent}"; }
 
 # Register published gateway chat IDs; enrich capabilities only by exact ID.
@@ -577,16 +553,15 @@ _gateway_pi_publish() { # <real path> <models json>
   [ -f "$f" ] || ( umask 077; printf '{"providers":{}}' > "$f" )
   tmp="$(mktemp "$(dirname "$f")/.models.XXXXXX")"
   local claude_provider; claude_provider="$(gateway_pi_provider_for_model claude-sonnet-4-6)"
-  # NON-DESTRUCTIVE BY DEFAULT (AH-261018). This writer runs at every gateway
-  # launch, workers and reviewers alike, against ONE shared models.json that
-  # live sessions have already read. Replacing a provider's model list rewrote
-  # capability metadata under running sessions (thinking maps, windows the
-  # owner or a repair tuned). So a launch ADDS ids that are missing and leaves
-  # every model entry that already exists exactly as it is (existing fields
-  # win); ids no longer published are kept, not deleted. Only an explicit
-  # refresh (cel gateway refresh / cel update, GATEWAY_PI_WRITE=refresh) lets the
-  # catalog's fields win - and even then nothing is removed. A write that would
-  # change nothing is skipped entirely: no temp file, no rename, no mtime churn.
+  # NON-DESTRUCTIVE BY DEFAULT. This writer runs at every gateway launch,
+  # workers and reviewers alike, against ONE shared models.json that live
+  # sessions have already read, so a launch must never rewrite capability
+  # metadata under them. A launch ADDS ids that are missing and leaves every
+  # existing model entry exactly as it is (existing fields win); ids no longer
+  # published are kept, not deleted. Only an explicit refresh (cel gateway
+  # refresh / cel update, GATEWAY_PI_WRITE=refresh) lets the catalog's fields
+  # win - and even then nothing is removed. A write that would change nothing
+  # is skipped entirely: no temp file, no rename, no mtime churn.
   local refresh=false metadata=false
   case "${GATEWAY_PI_WRITE:-launch}" in refresh) refresh=true ;; metadata) refresh=true; metadata=true ;; esac
   jq --argjson models "$models" --arg url "$(gateway_url)/v1" --arg root "$(gateway_url)" --arg claude_provider "$claude_provider" --argjson refresh "$refresh" --argjson metadata "$metadata" '
@@ -639,7 +614,7 @@ gateway_pi_registered() { # <provider/id> [models.json]
     '[.providers[$p].models[]? | select(.id == $id)] | length > 0' "$f" >/dev/null 2>&1
 }
 
-# --- the omp provider (CEL-136) -------------------------------------------
+# --- the omp provider -----------------------------------------------------
 #
 # omp's orchestrator reaches the gateway through ONE scoped pool: the claude
 # accounts that carry CLIProxyAPI's per-credential `prefix: omp`. A prefixed
@@ -824,7 +799,7 @@ PY
 #   celgw        Claude, one model per `omp/<id>` the gateway publishes AND
 #                omp's catalog describes - an id with no metadata is dropped,
 #                never given another model's (the omp-scoped pool).
-#   celgw-codex  Codex over `openai-responses` (AH-261018), every Codex-family
+#   celgw-codex  Codex over `openai-responses`, every Codex-family
 #                id the gateway publishes, versioned ids included. Metadata is
 #                omp's own catalog entry when it has one for the EXACT id, else
 #                only what the gateway catalog states - nothing is borrowed
@@ -835,7 +810,7 @@ PY
 # registers Codex.
 gateway_omp_models_write() { # [models.yml] [catalog json file] [codex catalog json file]
   local f="${1:-$(gateway_omp_dir)/models.yml}" cat_file="${2:-}" codex_file="${3:-}"
-  local raw catalog codex_catalog claude_block codex_block tmp cur n_claude n_codex
+  local raw catalog codex_catalog claude_block codex_block n_claude n_codex
   raw="$(_gateway_models_json_raw)" || return 1
   if [ -n "$cat_file" ]; then catalog="$(cat "$cat_file")"; else catalog="$(gateway_omp_catalog_json anthropic || true)"; fi
   if [ -n "$codex_file" ]; then codex_catalog="$(cat "$codex_file")"; else codex_catalog="$(gateway_omp_catalog_json openai-codex || true)"; fi
@@ -880,8 +855,8 @@ gateway_omp_models_write() { # [models.yml] [catalog json file] [codex catalog j
 # omp's read-merge-rename, under the file lock. NON-DESTRUCTIVE like pi's writer:
 # existing model entries keep their fields and ids no longer published are kept;
 # only GATEWAY_PI_WRITE=refresh lets the catalog's fields win (nothing is ever
-# removed). Provider-level fields (name, baseUrl, api, apiKey, headers) are the
-# plane's and are rewritten.
+# removed). Provider-level fields (name, baseUrl, api, apiKey, headers) follow
+# the same precedence: existing values win on launch, the plane's on refresh.
 _gateway_omp_publish() { # <real path> <claude block> <codex block> <n claude> <n codex>
   local f="$1" claude_block="$2" codex_block="$3" n_claude="$4" n_codex="$5" cur tmp refresh=false
   [ "${GATEWAY_PI_WRITE:-launch}" = refresh ] && refresh=true
@@ -926,7 +901,7 @@ _gateway_omp_scope_cmd() { # [--check|--apply|--json]
   esac
 }
 
-# --- refresh after `cel update` (AH-261018) -------------------------------
+# --- refresh after `cel update` -------------------------------------------
 #
 # Re-applies everything the plane writes for the gateway, whether or not
 # Celestial's own git moved: the proxy config (it carries the installed Claude

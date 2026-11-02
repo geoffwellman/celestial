@@ -12,8 +12,9 @@
 #   available  optional jq producing a boolean; false is a veto on its own
 #   unit       usd (informational)
 #   floor      below this the route is vetoed
-# Cached five minutes under ~/.local/share/cel/quota/, keyed by provider, so a
-# steward tick or a burst of delegations does not hammer anyone's API.
+# Cached five minutes under ~/.local/share/cel/quota/, keyed by provider and
+# key fingerprint, so a steward tick or a burst of delegations does not hammer
+# anyone's API.
 [ -n "${_CEL_QUOTA:-}" ] && return 0
 _CEL_QUOTA=1
 # shellcheck source=lib/common.sh
@@ -47,12 +48,10 @@ _quota_key() { # <provider> [wsdir]
     printf '%s' "${!keyenv:-}" )
 }
 
-# WHY A CREDIT READ CAME BACK EMPTY. `unknown` answered two different
-# questions with one word: "there is no key for this provider in this
-# workspace" - a fact about where you are standing, and correct, since CEL-49
-# left credit workspace-scoped on purpose - and "I asked and could not tell",
-# which is a fault. An operator who cannot tell those apart reads every
-# workspace without an OpenRouter key as broken.
+# WHY A CREDIT READ CAME BACK EMPTY. "There is no key for this provider in
+# this workspace" is a fact about where you are standing (credit is
+# workspace-scoped on purpose); "I asked and could not tell" is a fault. One
+# word for both makes every workspace without an OpenRouter key read as broken.
 #
 #   ok      a number was read
 #   no_key  this provider declares a balance and this workspace has no key
@@ -122,36 +121,28 @@ quota_remaining() { # <provider> [wsdir]
 # --- SUBSCRIPTIONS ----------------------------------------------------------
 #
 # A key with credit on it is only half of what the fleet spends. The other
-# half is two SIGNED-IN SUBSCRIPTIONS - Claude (Max, through Claude Code and
-# through pi's OAuth) and Codex (ChatGPT, through omp) - and until CEL-27
-# nothing on the plane could see either. The owner, 2026-09-18: "we need to be
-# able to monitor the signed-in subscriptions for Codex and Claude". A five
-# hour window at 100% stops every worker on that account just as hard as an
-# empty balance does, and it does it without a single error message anywhere
-# the operator looks.
+# half is SIGNED-IN SUBSCRIPTIONS - Claude (Max, through Claude Code and
+# through pi's OAuth) and Codex (ChatGPT, through omp). A five hour window at
+# 100% stops every worker on that account just as hard as an empty balance
+# does, and it does it without a single error message anywhere the operator
+# looks.
 #
 # A TOKEN IS NEVER PRINTED, ANYWHERE. These are live bearer credentials for
 # the owner's own accounts, and this file is read by `cel quota`, by the
 # steward's mail, by the console's status edge and by a dashboard served over
 # a tailnet.
 #
-# AN ACCOUNT IS WHERE IT IS SIGNED IN, NOT WHICH TOKEN IT HOLDS. CEL-27 named
-# a Claude account by the first six hex of its token's sha256, and pi refreshes
-# that token whenever it feels like it: every refresh minted a new "account",
-# a new `subscription-claude-<fp>.json` and a new row on every surface that
-# lists that directory. The owner, 2026-09-19: "somehow we are showing 4
-# claude subscriptions? there are only 3 I've signed into." So the identity is
-# the credential's HOME - `claude/pi`, `claude/claude-code`,
-# `codex/<account_id>`, `gateway/<provider>/<short id>` - which survives a
-# refresh, and the cache file keyed by it is OVERWRITTEN rather than joined by
-# a sibling. Files that match no current identity are swept on the next list,
-# which is also the one-off migration for the five that existed when this
-# landed.
+# AN ACCOUNT IS WHERE IT IS SIGNED IN, NOT WHICH TOKEN IT HOLDS. Tokens are
+# refreshed at will, so an identity derived from one would mint a new
+# "account" on every refresh. The identity is the credential's HOME -
+# `claude/pi`, `claude/claude-code`, `codex/<account_id>`,
+# `gateway/<provider>/<short id>` - which survives a refresh, and the cache
+# file keyed by it is OVERWRITTEN rather than joined by a sibling. Files that
+# match no current identity are swept on the next list.
 _sub_cache_dir() { printf '%s' "${CEL_CACHE:-$HOME/.cache/cel}"; }
 _SUB_TTL="${CEL_SUB_TTL:-60}"
 
-# Measured on this box 2026-09-18: pi's stored OAuth token answers Anthropic's
-# usage endpoint with both windows, and that was one curl away.
+# pi's stored OAuth token answers Anthropic's usage endpoint with both windows.
 _SUB_ANTHROPIC_URL="${CEL_SUB_ANTHROPIC_URL:-https://api.anthropic.com/api/oauth/usage}"
 # Read out of the Codex binary (0.153.2) rather than guessed: the CLI's own
 # rate-limit display is served by `<chatgpt base>/wham/usage`, which answers a
@@ -160,31 +151,21 @@ _SUB_ANTHROPIC_URL="${CEL_SUB_ANTHROPIC_URL:-https://api.anthropic.com/api/oauth
 # nothing, so no inference has to be bought to read it.
 _SUB_CODEX_URL="${CEL_SUB_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}"
 
-# opencode's own usage endpoint. CLIProxyAPI does not hold this credential and
-# omp's usage path is on its way out, so the row the owner has today survives
-# only if celestial reads the source directly.
+# opencode's own usage endpoint. CLIProxyAPI does not hold this credential, so
+# celestial reads the source directly.
 _SUB_OPENCODE_URL="${CEL_SUB_OPENCODE_URL:-https://opencode.ai/zen/go/v1/usage}"
 
-# THE BOX ALREADY KNOWS. CEL-49: every symptom the owner reported on
-# 2026-09-20 - Codex reading `unreadable`, Fable missing, one Anthropic
-# account of three missing, opencode absent - was cel reading a file it hoped
-# was fresh while `omp usage --json` sat on PATH holding REFRESHED OAUTH PER
-# ACCOUNT and answering for all of them in one call. ~/.codex/auth.json last
-# refreshed 2026-09-04 and that endpoint answers `401 token_expired`; no
-# amount of parsing fixes a stale token.
-#
-# So omp is the source when it is there, and the per-provider endpoint reads
-# below are the fallback for a box without it - which is the normal case for
-# this repo, and must degrade to exactly the old behaviour, never to an error.
+# `omp usage --json` holds REFRESHED OAUTH PER ACCOUNT and answers for all of
+# them in one call, where a credential file on disk may hold a token long
+# expired (`401 token_expired`) - and no amount of parsing fixes a stale
+# token. So omp is a source when it is there; a box without it must degrade
+# to the per-provider reads below, never to an error.
 _sub_omp_usage() {
   command -v omp >/dev/null 2>&1 || return 0
   omp usage --json 2>/dev/null || true
 }
 
-# The rows omp's document becomes. MEASURED, not guessed (the first cut of
-# this read `.accounts`, which does not exist: every row fell out, every
-# caller fell back to the old path, and the output was byte-for-byte the
-# output the ticket was filed about). `omp usage --json` answers
+# The rows omp's document becomes. `omp usage --json` answers
 #
 #   {generatedAt, reports: [...], accountsWithoutUsage, disabledCredentials,
 #    capacity}
@@ -193,14 +174,13 @@ _sub_omp_usage() {
 # planType, ...}, limits:[...]}. THE EMAIL AND THE ACCOUNT ID LIVE UNDER
 # `.metadata`, not at the top of the report.
 #
-# `.limits[]` is the authoritative window list - the old jq read the
-# `.five_hour`/`.seven_day` subset and so lost every scoped window, of which
-# Fable is one; naming Fable here would lose the next one - and each limit is
+# `.limits[]` is the authoritative window list - reading a named subset
+# (`.five_hour`/`.seven_day`) loses every scoped window - and each limit is
 # {id, label, scope:{windowId,tier,modelId,...}, window:{id,label,durationMs,
 # resetsAt}, amount:{used,limit,remaining,usedFraction,unit}, status}, which
 # is exactly the shape a bar needs.
 #
-# tests/fixtures/omp-usage.json is this box's own answer with the identities
+# tests/fixtures/omp-usage.json is a real answer with the identities
 # replaced: a stub that disagrees with the tool tests nothing.
 _sub_omp_rows() {
   local raw; raw="$(_sub_omp_usage)"
@@ -259,11 +239,11 @@ _sub_omp_rows() {
                  then {state: "unreadable",
                        reason: ($a.error // "omp holds this credential but reported no usage for it")}
                  else {state: "enabled", reason: ""} end)}' 2>/dev/null || true
-  # A CREDENTIAL OMP DISABLED IS OMP'S TO RE-LOGIN (CEL-98). The orchestrators
-  # run on omp's own pool, so a refresh token it lost leaves them short an
-  # account while the gateway's copy of the same login is fine - and the old
-  # hint, `cel gateway login`, re-logged the copy that was not broken. An
-  # account omp still reports usage for is not dead, so it is not repeated.
+  # A CREDENTIAL OMP DISABLED IS OMP'S TO RE-LOGIN. The orchestrators run on
+  # omp's own pool, so a refresh token omp lost leaves them short an account
+  # even while the gateway's copy of the same login is fine: the hint is
+  # `omp login`, not `cel gateway login`. An account omp still reports usage
+  # for is not dead, so it is not repeated.
   printf '%s' "$raw" | jq -c '
     ([(.reports // [])[]? | (.metadata.email // .metadata.accountId // empty)]) as $live
     | (.disabledCredentials // [])[]?
@@ -283,7 +263,7 @@ _sub_omp_rows() {
   return 0
 }
 
-# --- THE ONE VAULT (CEL-61) -------------------------------------------------
+# --- THE ONE VAULT ----------------------------------------------------------
 #
 # CLIProxyAPI is the only credential store on this box, and it cannot report
 # usage: it removed usage statistics in v6.10.0 and keeps only a snapshot of
@@ -291,19 +271,16 @@ _sub_omp_rows() {
 # overwritten rather than accumulated, and only for three providers. What it
 # does keep is each account's OAuth token, one file per account, and celestial
 # already knows how to turn a live token into windows. So the vault is the
-# account list and the provider is the source of truth for the numbers, which
-# is what omp was doing internally all along.
+# account list and the provider is the source of truth for the numbers.
 #
-# The auth-dir is CEL-60's decision AND CEL-60's helper: `gateway_auth_dir`
-# (lib/gateway.sh) is the one place that knows where the vault lives. Two
-# answers to "where are the credentials" is the two-lists failure this ticket
-# exists to end, in miniature and inside one process, so this asks rather than
-# knows. gateway.sh is sourced HERE rather than at the top of the file because
-# it pulls in the service registry, and every caller of quota.sh does not need
-# it. This reads the vault and never writes to it.
+# `gateway_auth_dir` (lib/gateway.sh) is the one place that knows where the
+# vault lives, so this asks rather than knows. gateway.sh is sourced HERE
+# rather than at the top of the file because it pulls in the service
+# registry, and every caller of quota.sh does not need it. This reads the
+# vault and never writes to it.
 #
-# `CEL_CPA_AUTH_DIR` is the test seam; the last line is CEL-60's own default,
-# for a caller that has quota.sh without gateway.sh beside it.
+# `CEL_CPA_AUTH_DIR` is the test seam; the last line is gateway.sh's own
+# default, for a caller that has quota.sh without gateway.sh beside it.
 _cpa_auth_dir() {
   local d="${CEL_CPA_AUTH_DIR:-}"
   if [ -z "$d" ] && [ -f "${BASH_SOURCE[0]%/*}/gateway.sh" ]; then
@@ -365,44 +342,26 @@ _cpa_expired() { # <file>
 # CELESTIAL DOES NOT REFRESH THESE CREDENTIALS. NOTHING HERE POSTS TO A TOKEN
 # ENDPOINT, AND NOTHING HERE WRITES TO THE AUTH-DIR.
 #
-# The first cut of this reader refreshed in memory and wrote nothing, on the
-# theory that a reader which never writes cannot corrupt the vault. The #84
-# review found the hole: the DAMAGE IS DONE AT THE PROVIDER, NOT ON DISK. Both
-# providers rotate the refresh token when it is used - Anthropic's own client
-# keeps the stored one only `if tokenResp.RefreshToken == ""`
+# The damage of a refresh is done AT THE PROVIDER, NOT ON DISK: both providers
+# rotate the refresh token when it is used - Anthropic's own client keeps the
+# stored one only `if tokenResp.RefreshToken == ""`
 # (`internal/auth/claude/anthropic_auth.go:579-580`), and CLIProxyAPI's Codex
 # path carries a `refresh_token_reused` branch
-# (`internal/auth/codex/openai_auth.go:336`) precisely because auth.openai.com
-# enforces rotation. Spend the vault's refresh token to draw a usage bar,
-# discard the replacement, and the file is still perfect JSON holding a token
-# the provider has already retired: CLIProxyAPI fails at its NEXT refresh and
-# the owner is sent to a browser to log in again. A status read that silently
-# de-authorises the box is worse than no status read.
+# (`internal/auth/codex/openai_auth.go:336`) because auth.openai.com enforces
+# rotation. Spend the vault's refresh token to draw a usage bar and the file
+# is left holding a token the provider has already retired: CLIProxyAPI fails
+# at its NEXT refresh and the owner is sent to a browser to log in again.
 #
-# Writing the rotation back instead does not fix it either. CLIProxyAPI
-# refreshes these credentials itself on a fifteen-minute loop
-# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialising per auth id and
-# guarding against out-of-order persistence with locks that live INSIDE its
-# process (`sdk/cliproxy/auth/conductor.go:196-201`) - locks celestial cannot
-# take. A second writer can only race it, and the loser of that race writes
-# back a refresh token the provider has retired, which is the same failure by
-# a longer route.
+# Writing the rotation back does not fix it either. CLIProxyAPI refreshes
+# these credentials itself on a fifteen-minute loop
+# (`sdk/cliproxy/service_lifecycle.go:91-93`), serialising per auth id with
+# locks that live INSIDE its process (`sdk/cliproxy/auth/conductor.go:196-201`);
+# a second writer can only race it and write back a retired token.
 #
-# CLIProxyAPI DOES expose a local way to make it refresh one credential -
-# `POST /v0/management/auth-files/refresh?name=<file>`
-# (`internal/api/server_management.go:187`) - and it would be the right door if
-# it were open. It is not: management routes are registered only when a
-# management secret or a local password is configured
-# (`internal/api/server.go:241-245`), and CEL-60 leaves the management API off.
-# Turning it on to draw a bar would add a second credential surface to the box
-# for a status read, which is a worse trade than a stale row.
-#
-# So the vault's owner is the only refresher, which is what it is built to be.
-# celestial presents whatever token the file currently holds. CLIProxyAPI
-# refreshes every credential it holds on a fifteen-minute loop while it runs,
-# so a token that is stale ANYWAY is news in itself - the gateway is not
-# running, or that account is signed out - and a stale row that says so is
-# honest where a broken login is not.
+# So the vault's owner is the only refresher, and celestial presents whatever
+# token the file currently holds. A token that is stale ANYWAY is news in
+# itself - the gateway is not running, or that account is signed out - and a
+# stale row that says so is honest where a broken login is not.
 _cpa_access_token() { # <file>
   _cpa_field "$1" '.access_token // .tokens.access_token'
 }
@@ -410,13 +369,12 @@ _cpa_access_token() { # <file>
 # The window mapping, shared by every provider read here so one account's
 # windows cannot be shaped differently from another's. It is the shape
 # `_sub_omp_rows` produces - `{name, scope, used_pct, resets_at}` - because the
-# console's QUOTA view and the dash card render that and this ticket changes
-# neither.
+# console's QUOTA view and the dash card render that.
 #
 # A SCOPE IS READ, NEVER NAMED. `seven_day_fable` is one scoped window among
 # however many the provider invents next; the duration prefix gives the name
 # and whatever is left is the scope, so the next one appears without a code
-# change. Naming Fable here is how CEL-49's bug comes back.
+# change.
 _CPA_WINDOW_JQ='
 def iso: if . == null then null
          elif type == "number"
@@ -438,9 +396,9 @@ def keywindows: to_entries
 # THE AUTHORITATIVE LIST, WHEN THE PROVIDER SENDS ONE. Anthropic answers a
 # dozen top-level codename keys (`nimbus_quill`, `amber_gauge`, ...) - most
 # null, some real objects with a null reset - AND `.limits[]` of {kind,
-# percent, resets_at, scope.model.display_name}. Reading the keys printed
-# `nimbus_quill 0% (resets Nimbus Quill)` and lost Fable (CEL-64, the CEL-49
-# bug back again), so when `.limits[]` carries kinds it is the only source.
+# percent, resets_at, scope.model.display_name}. The keys print codenames as
+# windows and miss scoped ones, so when `.limits[]` carries kinds it is the
+# only source.
 def kindname($k): if ($k | test("session|five_hour|5h")) then "5h"
                   elif ($k | test("weekly|seven_day|7d")) then "7d"
                   elif ($k | test("daily|one_day|1d")) then "1d"
@@ -521,7 +479,7 @@ _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
          extra: ((.extra_usage.disabled_reason // null) as $dr
                  | if $dr == null then {state: "enabled", reason: ""}
                    # `out_of_credits` with `spend.enabled: false` means TOP-UP
-                   # IS SWITCHED OFF, not "this account is spent" (CEL-49).
+                   # IS SWITCHED OFF, not "this account is spent".
                    else {state: "disabled",
                          reason: (if ((.spend.enabled // false) == false)
                                   then "top-up is off" else ($dr | gsub("_"; " ")) end)} end)}' \
@@ -530,10 +488,8 @@ _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
   return 0
 }
 
-# THREE DIFFERENT PIECES OF NEWS, THREE STATES. The old Codex path printed
-# `unreadable` for all of them and read `unreadable` for sixteen days before
-# anyone noticed - one word for a transient fault, an expired token and a
-# signed-out account, and it is acted on as the first.
+# THREE DIFFERENT PIECES OF NEWS, THREE STATES. One word for a transient
+# fault, an expired token and a signed-out account gets acted on as the first.
 #
 #   stale        the vault's token has expired and CLIProxyAPI - the only
 #                thing that may refresh it - has not. Nothing is broken: it
@@ -597,15 +553,14 @@ _sub_cliproxy_rows() {
   return 0
 }
 
-# OPENCODE IS NOT IN THE VAULT AND MUST NOT FALL OUT OF THE LIST. omp reported
-# it and omp is going; CLIProxyAPI has never held it. The credential is
-# opencode's own auth file, read exactly where opencode keeps it.
+# OPENCODE IS NOT IN THE VAULT AND MUST NOT FALL OUT OF THE LIST: CLIProxyAPI
+# has never held it. The credential is opencode's own auth file, read exactly
+# where opencode keeps it.
 _sub_opencode_rows() {
   local f="${CEL_OPENCODE_AUTH:-$HOME/.local/share/opencode/auth.json}"
   [ -f "$f" ] || return 0
-  # THE LIVE FILE IS KEYED `opencode-go` AND HOLDS A `key` (2026-09-25), and
-  # the first cut read only `.opencode.*`: no token, no call, no row, and no
-  # word anywhere that anything was missing. The account and label are the
+  # The live file is keyed `opencode-go` and holds a `key`; the older
+  # `.opencode.*` spellings are still read. The account and label are the
   # ones omp gives this credential, so the two sources join on it.
   local tok; tok="$(jq -r '."opencode-go".key // ."opencode-go".access
                            // .opencode.access // .opencode.key // .opencode.token
@@ -667,12 +622,11 @@ _subscription_accounts() {
 # {provider, account, label, source, windows: [{name, used_pct, resets_at}],
 #  extra: {state, reason}} for one account, cached 60 s.
 #
-# A FAILURE TO ASK IS A ROW, NOT A SILENCE. Until CEL-35 an unreadable account
-# was left out of the cache entirely, so `cel fleet` never mentioned it and
-# the console showed Claude alone while the dashboard (which asked the
-# providers itself) showed Codex too. An empty windows list with `state:
-# unreadable` and the reason is the version of that an operator can act on,
-# and it is cached like any other answer so every surface shows the same row.
+# A FAILURE TO ASK IS A ROW, NOT A SILENCE. An account missing from the cache
+# is missing from `cel fleet` and the console while the dashboard may still
+# show it. An empty windows list with `state: unreadable` and the reason is
+# something an operator can act on, and it is cached like any other answer so
+# every surface shows the same row.
 subscription_usage() { # <provider> <token> [account] [label]
   local p="$1" tok="$2" acct="${3:-}" label="${4:-}"
   [ -n "$acct" ] || acct="$(_sub_fp "$tok")"
@@ -703,7 +657,7 @@ subscription_usage() { # <provider> <token> [account] [label]
                    # `disabled_reason: out_of_credits` with `spend.enabled:
                    # false` means TOP-UP IS SWITCHED OFF, not "this account is
                    # spent". Saying the second about a healthy account is
-                   # worse than saying nothing (CEL-49).
+                   # worse than saying nothing.
                    else {state: "disabled",
                          reason: (if ((.spend.enabled // false) == false)
                                   then "top-up is off"
@@ -736,11 +690,10 @@ subscription_usage() { # <provider> <token> [account] [label]
   esac
 
   if [ -z "$doc" ]; then
-    # CACHED, deliberately, since CEL-35. A cached failure holds for sixty
-    # seconds, which is the price of the row being THERE at all: the row that
-    # was missing from the cache was missing from `cel fleet`, from the console
-    # and from the steward, and an account nobody can see is an account whose
-    # wall arrives as a mystery. The reason travels with it.
+    # CACHED, deliberately. A cached failure holds for sixty seconds, which is
+    # the price of the row being THERE at all - in `cel fleet`, the console
+    # and the steward - instead of an account whose wall arrives as a mystery.
+    # The reason travels with it.
     doc="$(jq -nc --arg p "$p" --arg a "$acct" --arg l "$label" \
       '{provider: $p, account: $a, label: $l, source: "direct", windows: [],
         extra: {state: "unreadable",
@@ -784,23 +737,13 @@ subscription_list() { # [--cached]
 
   local p a t label rows="" keep=""
 
-  # THE VAULT FIRST, WHEN IT HAS ACCOUNTS IN IT. CEL-61, the owner's decision
-  # of 2026-09-23: CLIProxyAPI is the one credential store on this box and
-  # celestial reads usage out of those credentials itself. The alternative -
-  # CPA serving the traffic while omp reports the usage - is two lists of
-  # accounts with nothing keeping them the same, so an account logged into one
-  # and forgotten in the other makes `cel quota` quietly stop describing the
-  # accounts the workers actually run on.
-  #
-  # omp's path stays underneath until the new reader has proved itself on the
-  # live box (tools/quota-compare.sh is how that is checked); an empty or
-  # absent vault is today's behaviour, exactly.
-  # PER ACCOUNT, NOT PER SOURCE (CEL-64/CEL-80). #84 skipped omp entirely the
-  # moment the vault held any account, and on 2026-09-23 both Codex accounts
-  # and opencode vanished from every surface because the vault held Claude
-  # only. An account is provider + email; the vault's row answers for it when
-  # the vault holds it and could read it, omp's row otherwise, and an account
-  # either source knows appears exactly once.
+  # PER ACCOUNT, NOT PER SOURCE. CLIProxyAPI's vault is the one credential
+  # store on this box and celestial reads usage out of those credentials
+  # itself; omp's report stays underneath until tools/quota-compare.sh --gate
+  # passes on the live box. An account is provider + email: the vault's row
+  # answers for it when the vault holds it and could read it, omp's row
+  # otherwise, and an account either source knows appears exactly once. An
+  # empty or absent vault leaves the omp and direct reads exactly as they are.
   local vrow vk cpa_rows="" cpa_usable=" "
   if [ -n "$(_cpa_accounts)" ]; then
     while IFS= read -r vrow; do
@@ -814,11 +757,10 @@ subscription_list() { # [--cached]
   fi
   local omp_keys=" " cpa_providers
   cpa_providers=" $(printf '%s' "$cpa_rows" | jq -r '.provider' 2>/dev/null | sort -u | tr '\n' ' ')"
-  # OMP FIRST, WHEN IT IS THERE. It holds its own refreshed OAuth per account
-  # and covers every provider it knows in one call, so for those providers the
-  # per-file token reads below are not a second opinion - they are a worse one,
-  # and a stale token read beside a fresh one is how an account came to read
-  # `unreadable` while the owner's own prompt tool showed it fine.
+  # OMP NEXT. It holds its own refreshed OAuth per account and covers every
+  # provider it knows in one call, so for those providers the per-file token
+  # reads below are not a second opinion - they are a worse one: a stale token
+  # read beside a fresh one makes a healthy account read `unreadable`.
   local orow op oa omp_providers="" omp_seen=0
   while IFS= read -r orow; do
     [ -n "$orow" ] || continue
@@ -838,15 +780,12 @@ subscription_list() { # [--cached]
   done < <(_sub_omp_rows)
 
   # TWO SILENCES THAT ARE NOT THE SAME NEWS. A box with no omp on it falls
-  # back to the per-provider reads and says nothing, deliberately: that is the
-  # normal case for this repo and it is not a fault. But omp ON PATH that
-  # answers nothing usable - a shape drift, a truncated response, an error
-  # document, a jq expression that no longer matches - falls back to exactly
-  # the same stale reads, and read the same way it is invisible. That is how
-  # this shipped once: the mapping looked at `.accounts`, produced zero rows,
-  # and every surface printed the old output with nothing anywhere saying so.
-  # One line on stderr, and only in that case - stdout is a JSON document that
-  # callers parse, and the fallback still produces the best answer available.
+  # back to the per-provider reads and says nothing: that is not a fault. But
+  # omp ON PATH that answers nothing usable - a shape drift, a truncated
+  # response, an error document - falls back to the same stale reads and
+  # would be invisible. One line on stderr, and only in that case - stdout is
+  # a JSON document that callers parse, and the fallback still produces the
+  # best answer available.
   if [ "$omp_seen" -eq 0 ] && [ -z "$cpa_rows" ] && command -v omp >/dev/null 2>&1; then
     printf 'cel quota: omp is on PATH but produced no usable subscription rows (%s); falling back to the per-provider reads, which may be stale\n' \
       "try: omp usage --json" >&2
@@ -882,9 +821,9 @@ subscription_list() { # [--cached]
     keep="$keep subscription-$vp-$va.json"
   done <<< "$cpa_rows"
 
-  # THE SWEEP. Every file that is not one of this run's identities is a token
-  # hash from before CEL-35 or an account that has been signed out, and both
-  # of them are a row on the console for a subscription that does not exist.
+  # THE SWEEP. Every file that is not one of this run's identities is a stale
+  # identity or a signed-out account: a row on the console for a subscription
+  # that does not exist.
   local f base
   for f in "$dir"/subscription-*.json; do
     [ -f "$f" ] || continue
@@ -1046,7 +985,7 @@ _sub_line() { # <usage-json> [bar-width]
   [ "$state" = unreadable ] && out="${out}unreadable: ${reason}"
   # A credential that needs a human carries the command that fixes it, and it
   # says so where the windows would be - the row with nothing in it is the one
-  # nobody acts on (CEL-61).
+  # nobody acts on.
   [ "$state" = needs_login ] && out="${out}${reason}"
   [ "$state" = stale ] && out="${out}${reason}"
   printf '%s' "$out"
@@ -1073,10 +1012,10 @@ cmd_quota() { # [provider] [--json]
     for p in $(_quota_providers "$only"); do
       while IFS=$'\t' read -r wn wd; do
       r="$(quota_remaining "$p" "$wd")"
-      # CEL-108: the key's fingerprint (the one the balance cache is keyed
-      # on), so the usage card can say "one account, both workspaces"
-      # rather than draw the same dry key twice; and the veto as
-      # quota_vetoed decides it, so the card never re-derives the floor rule.
+      # The key's fingerprint (the one the balance cache is keyed on), so the
+      # usage card can say "one account, both workspaces" rather than draw the
+      # same dry key twice; and the veto as quota_vetoed decides it, so the
+      # card never re-derives the floor rule.
       local acct="" vet=false k
       k="$(_quota_key "$p" "$wd")"
       [ -n "$k" ] && acct="$(printf '%s' "$k" | sha256sum | cut -c1-12)"
@@ -1123,11 +1062,11 @@ cmd_quota() { # [provider] [--json]
   _quota_balances "$only" "$wsdir"
 }
 
-# WHO THE ORCHESTRATORS RUN ON (CEL-108). Root and every orchestrator use omp's
-# own Anthropic credentials (CEL-98), so the usage card tags an account `orch`
-# from the same document the steward's pool check reads, and `not orch` for one
-# omp has disabled - a Claude account can be healthy in the gateway's vault
-# and still be out of the orchestrators' pool. {live, disabled}, emails
+# WHO THE ORCHESTRATORS RUN ON. Root and every orchestrator use omp's own
+# Anthropic credentials, so the usage card tags an account `orch` from the
+# same document the steward's pool check reads, and `not orch` for one omp
+# has disabled - a Claude account can be healthy in the gateway's vault and
+# still be out of the orchestrators' pool. {live, disabled}, emails
 # lowercased; both empty when omp is absent or answers nothing usable.
 quota_orch_pool() {
   local raw; raw="$(_sub_omp_usage)"
@@ -1139,19 +1078,18 @@ quota_orch_pool() {
     2>/dev/null || printf '{"live":[],"disabled":[]}'
 }
 
-# ON PACE FOR THE CAP (CEL-108). Reads a subscription list (the JSON array
+# ON PACE FOR THE CAP. Reads a subscription list (the JSON array
 # subscription_list prints) on stdin and prints the windows at risk: projected
 # to reach 100% before they reset at the pace so far, or already at 95%. The
 # projection is used / fraction-of-window-elapsed, and only once 5% of the
 # window has passed - earlier than that it is a guess about one burst. The
 # dashboard's usage card draws the same rule (tools/dash/v2.mjs).
 #
-# A WINDOW WHOSE RESET HAS PASSED IS NOT AT RISK (AH-261102). The list is
-# usually the cached one, and a cache file is only rewritten when someone asks
-# the providers again, so a 7d window read at 97% went on reading 97% "at
-# reset" a time already gone - the steward raised it sixty-one times. After
-# the reset that number describes a window that is over; it is skipped, so a
-# past reset is never quoted and the item comes down until a fresh read.
+# A WINDOW WHOSE RESET HAS PASSED IS NOT AT RISK. The list is usually the
+# cached one, and a cache file is only rewritten when someone asks the
+# providers again, so its number can describe a window that is already over.
+# It is skipped, so a past reset is never quoted and the item comes down
+# until a fresh read.
 quota_at_risk() {
   jq -c '
     def len: if . == "5h" then 18000 elif . == "1d" or . == "daily" then 86400
@@ -1180,12 +1118,8 @@ _quota_providers() { # [provider]
 
 # name<TAB>wsdir for every registered workspace whose OWN env (workspace.yaml
 # `env:` or env.local) sets this provider's key - or, when none does, one line
-# for the workspace you are standing in, which is the old answer and still the
-# right one for a box with a single workspace.
-#
-# CEL-80: run from plane, `cel quota` said "no key in this workspace" for
-# OpenRouter and DeepSeek, whose keys live in the workspaces that pay for
-# them. A balance belongs to the workspace that owns the key.
+# for the workspace you are standing in. A balance belongs to the workspace
+# that owns the key, wherever `cel quota` is run from.
 _quota_owners() { # <provider> [wsdir]
   local p="$1" cur="${2:-}" keyenv n d found=0
   keyenv="$(provider_get "$p" key_env)"
@@ -1209,10 +1143,7 @@ _quota_owners() { # <provider> [wsdir]
 
 _quota_balances() { # [provider] [wsdir]
   local wsdir="${2:-}"
-  local p list
-  if [ -n "${1:-}" ]; then list="$1"; else
-    list="$(yq -r '.providers | to_entries[] | select(.value.balance != null) | .key' "$CEL_MANIFEST")"
-  fi
+  local p list; list="$(_quota_providers "${1:-}")"
   printf '  %-12s %-12s %-14s %-8s %s\n' PROVIDER WORKSPACE REMAINING FLOOR STATE
   local r floor st wn wd
   for p in $list; do

@@ -512,9 +512,9 @@ YAML
   GWT="$(mktemp -d)"; mkdir -p "$GWT/bin"
   export CEL_CONFIG_FILE="$GWT/config.yaml"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
-  # CEL-60: the account list is the proxy's auth-dir, one OAuth JSON per
-  # account, not an omp `check --json`. Two codex accounts is what makes the
-  # "2 accounts usable" line below mean anything.
+  # The account list is the proxy's auth-dir, one OAuth JSON per account. Two
+  # codex accounts is what makes the "2 accounts usable" line below mean
+  # anything.
   export CEL_GATEWAY_STATE="$GWT/state"
   mkdir -p "$GWT/state/auth"
   printf '{}' > "$GWT/state/auth/codex-aaaaaa11-someone@example.invalid-plus.json"
@@ -556,7 +556,7 @@ test_profile_via_gateway_is_vetoed_when_the_gateway_is_down() {
   _gws_clean
 }
 
-# CEL-136: an OMP profile through the gateway resolves to omp's `celgw`
+# An OMP profile through the gateway resolves to omp's `celgw`
 # provider and the gateway's omp-PREFIXED id, keeps its own thinking level,
 # and counts only the accounts in the omp pool - never the personal one.
 test_profile_omp_via_gateway_resolves_to_the_prefixed_celgw_model() {
@@ -585,7 +585,7 @@ EOS
   _gws_clean
 }
 
-# --- workspace.local.yaml: per-box override, AH-260928 ---------------------
+# --- workspace.local.yaml: per-box override --------------------------------
 #
 # A team box under one login per person, each on a different provider, needs
 # root and the orchestrators - launched by nobody, so never a --profile flag
@@ -674,12 +674,10 @@ test_cel_profiles_marks_a_local_only_profile() {
   rm -rf "$T"
 }
 
-# --- multi-entry products[]/repos[]: AH-260928 regression coverage --------
+# --- multi-entry products[]/repos[] ---------------------------------------
 #
-# The jq merge indexes local products[]/repos[] BY POSITION after a filtering
-# map, not by match - so only a local entry that happens to sit first in the
-# base list's iteration order was ever reachable. These fail against that
-# shape and pass against the match-indexed fix.
+# Local products[]/repos[] entries merge BY NAME, not by position: every
+# local entry must be reachable wherever it sits in the base list's order.
 
 _pws_products3() {
   _pws
