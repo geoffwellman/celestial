@@ -761,6 +761,41 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     [ -n "$cand" ] || continue
     IFS=$'\t' read -r repo pr pane agent status cwd < <(printf '%s' "$cand" \
       | jq -r '[.repo, .pr, .pane, .agent, .status, .cwd] | @tsv')
+    backend="$(printf '%s' "$cand" | jq -r '.backend // "herdr"')"
+    repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
+    if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
+      local retirement retirement_rc=0 retirement_status retirement_reason
+      retirement="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$repodir")" || retirement_rc=$?
+      retirement_status="$(printf '%s' "$retirement" | jq -er '.status | select(type == "string")' 2>/dev/null)" || retirement_status=unknown
+      if [ "$retirement_rc" = 0 ] && [ "$dry" = 1 ] && [ "$retirement_status" = retired ]; then
+        c_ok "would reconcile completed native retirement for $repo#$pr (pane $pane; no runtime close)"
+        continue
+      fi
+      if [ "$retirement_rc" = 0 ] && [ "$dry" = 1 ] && [ "$retirement_status" = eligible ]; then
+        c_ok "would retire completed native reviewer for $repo#$pr (pane $pane; evidence and checkout kept)"
+      elif [ "$retirement_rc" = 0 ] && [ "$dry" = 0 ] && [ "$retirement_status" = retired ]; then
+        drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+        reviewers_closed=$((reviewers_closed + 1))
+        c_ok "retired native reviewer for $repo#$pr (pane $pane; native evidence and checkout kept)"
+      elif [ "$status" = gone ] && _gc_rex_row_runtime_gone "$agent" "$pane" "$retirement"; then
+        # Gone by other means, with no retirement of ours in flight: the row
+        # is bookkeeping, and keeping it would refuse every relaunch for the
+        # PR. Only the row goes - receipt, checkout and native log stay.
+        if [ "$dry" -eq 1 ]; then
+          c_ok "would drop the stale row for $repo#$pr (Rex pane $pane gone, runtime exited; evidence kept)"
+        else
+          drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+          c_ok "dropped the stale row for $repo#$pr (Rex pane $pane gone, runtime exited; evidence kept)"
+        fi
+      else
+        _gc_reviewers_adopt
+        if [ "$retirement_status" != protected ]; then
+          retirement_reason="$(printf '%s' "$retirement" | jq -r '.reason // "native retirement proof unavailable"' 2>/dev/null)" || retirement_reason='native retirement proof unavailable'
+          c_warn "native reviewer retirement incomplete for $repo#$pr: $retirement_reason"
+        fi
+      fi
+      continue
+    fi
     if [ "$status" = gone ]; then
       # A recorded pane that is no longer on the roster has gone by other
       # means. Dropping the row is bookkeeping, not a closure - but its
@@ -769,12 +804,6 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"; }
       continue
     fi
-    backend="$(printf '%s' "$cand" | jq -r '.backend // "herdr"')"
-    if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
-      _gc_reviewers_adopt
-      continue
-    fi
-    repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
     state="$(_gc_reviewer_pr_state "$repo" "$pr" "$cwd" "$repodir")"
     if [ "$state" = UNKNOWN ]; then
       [ "$dry" -eq 1 ] || _gc_unknown_note "$pane" "$repo" "$pr" \
@@ -843,6 +872,94 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   return 0
 }
 
+# A recorded Rex reviewer whose pane left the roster is gone only when all of
+# these are facts: the retirement attempt answered with valid JSON and names
+# no retirement proof of ours (prepared/exit debt is settled by replay, never
+# dropped), no launch for the alias is unresolved, and the receipt is absent,
+# belongs to another pane, or records a PID generation that has exited.
+_gc_rex_row_runtime_gone() { # <agent> <pane> <retirement-json>
+  local agent="$1" pane="$2" f
+  [ -n "$agent" ] || return 1
+  printf '%s' "$3" | jq -e 'type == "object" and (has("proof") | not)' >/dev/null 2>&1 || return 1
+  f="$(_rex_file "$agent")"
+  [ ! -e "$f.pending" ] && [ ! -e "$f.pid" ] && [ ! -L "$f" ] || return 1
+  [ -e "$f" ] || return 0
+  _rex_receipt_valid "$f" || return 1
+  [ "$(jq -r '.pane_id // ""' "$f")" = "$pane" ] || return 0
+  ! _rex_live "$f"
+}
+
+# THE ONE TARGETED RETIREMENT: `cel sessions retire-reviewer` and `cel solo
+# land` (after its merge) share it, with the same proof the GC sweep uses.
+# It never releases a checkout or native log. Prints the result JSON; returns
+# 0 retired (eligible on a dry run), 3 protected, 2 unknown, and 4 when this
+# PR has no Rex reviewer to retire - none at all, or a Herdr one, which keeps
+# its canonical GC path.
+reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1>
+  local wsdir="$1" repo="$2" pr="$3" dry="$4" roster selected pane agent backend result rc=0 status
+  roster="$(cel_agent_list 2>/dev/null)" \
+    && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+    || { printf '%s\n' '{"status":"unknown","reason":"native_inventory_unreadable"}'; return 2; }
+  selected="$(_gc_reviewer_candidates "$(reviewers_rows)" "$roster" \
+    | jq -sc --arg r "$repo" --arg p "$pr" '[.[] | select(.repo == $r and (.pr|tostring) == $p)]')" \
+    || { printf '%s\n' '{"status":"unknown","reason":"candidate_inventory_invalid"}'; return 2; }
+  case "$(printf '%s' "$selected" | jq length)" in
+    0) printf '%s\n' '{"status":"absent","reason":"no_reviewer_for_pull_request"}'; return 4 ;;
+    1) ;;
+    *) printf '%s\n' '{"status":"unknown","reason":"multiple_reviewers_for_pull_request"}'; return 2 ;;
+  esac
+  IFS=$'\t' read -r pane agent backend < <(printf '%s' "$selected" | jq -r '.[0] | [.pane,.agent,(.backend // "herdr")] | @tsv')
+  { [ "$backend" = rex ] || [[ "$pane" = rex/* ]]; } \
+    || { printf '%s\n' '{"status":"absent","reason":"herdr_reviewer_keeps_gc_path"}'; return 4; }
+  [ -n "$agent" ] || { printf '%s\n' '{"status":"unknown","reason":"reviewer_identity_missing"}'; return 2; }
+  result="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$wsdir/repos/$repo")" || rc=$?
+  status="$(printf '%s' "$result" | jq -er '.status | select(type == "string")' 2>/dev/null)" \
+    || { printf '%s\n' '{"status":"unknown","reason":"invalid native retirement response"}'; return 2; }
+  if [ "$rc" = 0 ] && [ "$dry" = 0 ] && [ "$status" = retired ]; then
+    if ! reviewers_update --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
+      'map(select(.repo != $r or (.pr|tostring) != $p or .pane != $pane))'; then
+      printf '%s' "$result" | jq -c '.status="unknown" | .reason="native runtime retired; reviewer registry cleanup remains owed"'
+      return 2
+    fi
+  elif [ "$rc" = 0 ]; then
+    case "$dry:$status" in
+      1:eligible|1:retired) : ;;
+      *) printf '%s\n' '{"status":"unknown","reason":"native retirement phase did not match its result"}'; return 2 ;;
+    esac
+  fi
+  printf '%s\n' "$result" | jq -c --arg pane "$pane" '. + {pane:$pane}'
+  return "$rc"
+}
+
+cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
+  local usage='usage: cel sessions retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]'
+  [ $# -ge 1 ] || die "$usage"
+  local ref="$1" workspace="" dry=0 wsdir repo pr result rc=0
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workspace) [ $# -ge 2 ] || die "$usage"; workspace="$2"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      *) die "$usage" ;;
+    esac
+  done
+  [[ "$ref" = *#* ]] || die "$usage"
+  repo="${ref%%#*}"; pr="${ref#*#}"
+  [ -n "$repo" ] && [[ "$pr" =~ ^[0-9]+$ ]] || die "$usage"
+  if [ -n "$workspace" ]; then wsdir="$(registry_require "$workspace")"
+  else wsdir="$(ws_current)" || die 'reviewer retirement requires --workspace outside a registered workspace'; fi
+  ws_repo_names "$wsdir" | grep -qxF "$repo" || die "reviewer retirement: repo is not in the requested workspace"
+  result="$(reviewer_retire_target "$wsdir" "$repo" "$pr" "$dry")" || rc=$?
+  if [ "$rc" = 4 ]; then
+    case "$(printf '%s' "$result" | jq -r .reason)" in
+      herdr_reviewer_keeps_gc_path) die 'targeted native retirement supports Rex reviewers; Herdr reviewers retain their canonical GC path' ;;
+      *) die 'reviewer retirement: no unique recorded reviewer target' ;;
+    esac
+  fi
+  printf '%s\n' "$result"
+  return "$rc"
+}
+
 # THE FINISHED REVIEWER. A reviewer whose verdict
 # is in the ledger for the PR's CURRENT head has nothing left to do until the
 # worker pushes again - and a push is a new head, which its recorded verdict
@@ -904,9 +1021,22 @@ _gc_verdict_recorded() { # <repo> <branch> <head>
 _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   printf '%s' "$cand" | jq -e '.recorded' >/dev/null 2>&1 && return 0
   [ "$dry" -eq 0 ] || return 0
+  local checkout base suffix
+  checkout="$(printf '%s' "$cand" | jq -r '.cwd // ""')"
+  checkout="$(pane_cwd "$checkout")"
+  base="$(reviewer_checkout_path "$repo" "$pr")"
+  case "$checkout" in
+    "$base") ;;
+    "$base".round.*)
+      suffix="${checkout#"$base.round."}"; suffix="${suffix%%/*}"
+      checkout="$base.round.$suffix" ;;
+    *) checkout="" ;;
+  esac
   adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-    --arg a "$agent" --arg b "${backend:-herdr}" --argjson t "$(date +%s)" \
-    '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, backend:$b, started_at:$t}]')"
+    --arg a "$agent" --arg b "${backend:-herdr}" --arg co "$checkout" --arg rd "${repodir:-}" --argjson t "$(date +%s)" \
+    '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, backend:$b, started_at:$t}
+      + (if $co != "" then {checkout:$co} else {} end)
+      + (if $rd != "" then {repodir:$rd} else {} end)]')"
   return 0
 }
 
