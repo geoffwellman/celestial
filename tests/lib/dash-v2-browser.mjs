@@ -1,4 +1,4 @@
-// CEL-106: drive dashboard v2 in a real headless browser against fixture feeds.
+// Drive dashboard v2 in a real headless browser against fixture feeds.
 //
 //   node dash-v2-browser.mjs <base-url> <fixture-dir> <scenario> [shot-dir]
 //
@@ -159,7 +159,7 @@ const main = async () => {
       out.gone = await evaluate(`!${card}`);
     }
 
-    // CEL-118: nothing clicked - every card already shows each option and the
+    // nothing clicked - every card already shows each option and the
     // "other…" row, because a hidden choice reads as "accept is the only one"
     if (scenario === 'unopened') {
       out.cards = await evaluate(`(function(){var vis=function(e){return !!e&&e.offsetParent!==null};
@@ -284,7 +284,7 @@ const main = async () => {
     }
 
     if (scenario === 'usage') {
-      // CEL-108: the one usage card, drawn from the mockup's structure
+      // the one usage card, drawn from the mockup's structure
       const q = (sel) => `#grid .w[data-id=usage] ${sel}`;
       out.oldCards = await evaluate(`document.querySelectorAll('#grid .w[data-id=forecast],#grid .w[data-id=accounts]').length`);
       out.summary = await evaluate(`[].slice.call(document.querySelectorAll('${q('.usum .big')}')).map(function(e){return e.textContent}).join('|')`);
@@ -318,8 +318,8 @@ const main = async () => {
     }
 
     if (scenario === 'roomdirect') {
-      // CEL-129: a room opened straight from its URL (a bookmark, a reload)
-      // lost its decisions - the grid's first render took the panel back
+      // a room opened straight from its URL (a bookmark, a reload) keeps its
+      // decisions - the grid's first render must not take the panel back
       await evaluate(`location.hash='room=alpha-orch';location.reload();1`);
       await sleep(500);
       out.loaded = await until(`typeof ROOM!=='undefined' && ROOM==='alpha-orch' && !!S`, 8000);
@@ -327,7 +327,7 @@ const main = async () => {
       out.decisions = await evaluate(`document.querySelectorAll('#room #needsyou .nycard').length`);
     }
     if (scenario === 'room') {
-      // CEL-121: the Orchestrators card opens a room; the URL says which
+      // the Orchestrators card opens a room; the URL says which
       await evaluate(`document.querySelector('#grid .w[data-id=orchs] [data-room="alpha-orch"]').click()`);
       out.opened = await until(`document.getElementById('room').classList.contains('open') && document.querySelectorAll('#rconv .ev').length`, 8000);
       out.hash = await evaluate('location.hash');
@@ -339,7 +339,7 @@ const main = async () => {
       out.decisions = await evaluate(`document.querySelectorAll('#room #needsyou .nycard').length`);
       out.md = await evaluate(`(function(){var e=[].slice.call(document.querySelectorAll('#rconv .ev.assistant')).pop();return {strong:e.querySelectorAll('strong').length,code:e.querySelectorAll('code').length,li:e.querySelectorAll('ul li').length,ol:e.querySelectorAll('ol li').length,a:(e.querySelector('a')||{}).href||'',rawB:e.querySelectorAll('b').length}})()`);
       out.repoScope = await evaluate(`(function(){var f=roomOwns('widget-orch',{ws:'alpha'});return [f({ws:'alpha'},'widget'),f({ws:'alpha'},'gadget'),f({ws:'bundle'},'widget')]})()`);
-      // CEL-129: a product orchestrator's decisions live in another workspace's
+      // a product orchestrator's decisions live in another workspace's
       // group; the grid's workspace chip must not hide them in its room
       out.chipRoom = await evaluate(`(function(){var w=WSF,r=ROOM;WSF='alpha';ROOM='bundle-orch';buildLast();var n=LAST.needsYou.map(function(d){return d.asker});WSF=w;ROOM=r;buildLast();return n})()`);
       out.decHeading = await evaluate(`(function(){var h=document.querySelector('#room #needsyou h2'),c=document.querySelector('#room #needsyou .nychips');return (!!h&&h.offsetParent!==null)||(!!c&&c.offsetParent!==null)})()`);

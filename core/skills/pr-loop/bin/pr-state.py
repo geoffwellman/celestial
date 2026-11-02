@@ -1,10 +1,9 @@
 """Decide what one PR needs next, from `gh pr view` + timeline JSON files.
 
 Reads two FILES named by $PR_FILE and $TL_FILE rather than one composed JSON document.
-Composing them (`jq -n --argjson pr "$pr" --argjson t "$timeline"`) put both payloads on the
-command line, and a long-lived PR's timeline is easily megabytes: a real PR open 18
-days died with `jq: Argument list too long` while every short-lived PR worked. Files have no
-such ceiling, and it drops the jq dependency from this path entirely.
+Composing them (`jq -n --argjson pr "$pr" --argjson t "$timeline"`) would put both payloads on
+the command line, and a long-lived PR's timeline is easily megabytes (`jq: Argument list too
+long`). Files have no such ceiling, and it drops the jq dependency from this path entirely.
 
 Separate from pr-format.py (the standing dashboard) because this answers a different
 question: not "what is open?" but "what should I DO about this one, right now?". The whole
@@ -14,7 +13,7 @@ cannot drift apart — the skill says what each action means, this decides which
 Env:
   REVIEWER   the review bot to shepherd (from the workspace policy; no default)
   NUDGE_MIN  minutes to wait on a requested review before nudging (default 15)
-  MAX_NUDGE  nudges since the last commit before escalating to the human (default 3)
+  MAX_NUDGE  nudges since the last commit before escalating to the human (default 1)
   STALE_H    hours after which an unanswered request is retried once more anyway (default 6)
 """
 import datetime
@@ -24,9 +23,9 @@ import sys
 
 REVIEWER = os.environ.get("REVIEWER", "")
 NUDGE_MIN = int(os.environ.get("NUDGE_MIN", "15"))
-# Default 1, not 3: a re-request has never been OBSERVED to make the reviewer review
-# anything (2026-08-31 — observed reviewing a colleague's PRs that morning with no request
-# event at all, while ignoring seven on ours). One attempt, then hand it to a human.
+# Default 1: a re-request is not a proven trigger for the reviewer bot (it has been seen
+# reviewing other PRs with no request event while ignoring requests). One attempt, then
+# hand it to a human.
 MAX_NUDGE = int(os.environ.get("MAX_NUDGE", "1"))
 STALE_H = float(os.environ.get("STALE_H", "6"))
 # The GitHub login this loop acts for. Empty disables the ownership guard — set it deliberately.

@@ -14,14 +14,12 @@ CEL_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 export CEL_ROOT
 # test-only seams (e.g. CEL_LIVENESS_NOW) are honoured only when this is set
 export CEL_TESTING=1
-# CEL-75: `cel fleet` caches its document; a suite that mutates a fixture and
+# `cel fleet` caches its document; a suite that mutates a fixture and
 # re-reads must see the change, so the cache is off unless a test turns it on.
 export CEL_FLEET_CACHE_SECS=0
-# NO TEST INHERITS WHO IS RUNNING IT (CEL-103). Every worker pane exports its
-# inbox identity - CEL_INBOX_ME and CEL_INBOX_WS since CEL-95 - and its role,
-# workspace and herdr pane. They leaked into every fixture: eight inbox tests
-# failed on every worker's box for a week, reported each time as "pre-existing,
-# also on main", while CI, which has no such environment, stayed green. So
+# NO TEST INHERITS WHO IS RUNNING IT. Every worker pane exports its inbox
+# identity (CEL_INBOX_ME, CEL_INBOX_WS), role, workspace and herdr pane; leaked
+# into fixtures they make tests fail on agent boxes while CI stays green. So
 # every CEL_* and HERDR_* variable is dropped here except the ones this runner
 # (or the suite lock that a nested run inherits) sets on purpose; a test that
 # needs one sets it itself.
@@ -47,15 +45,10 @@ for arg in "$@"; do
   esac
 done
 
-# ONE SUITE AT A TIME ON THIS BOX. On 2026-09-18 six copies of this script ran
-# at once - four workers rebasing after a merge, one fixing a review finding,
-# one finishing a build. Each run is ~650 tests forking yq, node and bun; on
-# six cores with sixteen agent sessions the load reached 190, swap filled, the
-# steward raised memory blockers, and every suite crawled past its timeout, so
-# the workers were about to retry and make it worse. The worker cap bounds how
-# many workers EXIST, not how many gates RUN, and nothing anywhere said "one
-# suite at a time", so nothing enforced it; three workers were interrupted by
-# hand. A suite now queues instead, and says so rather than looking hung.
+# ONE SUITE AT A TIME ON THIS BOX. Concurrent suites (each forking yq, node and
+# bun hundreds of times) overload a shared box until every one of them crawls
+# past its timeout. The worker cap bounds how many workers EXIST, not how many
+# gates RUN, so a suite queues here instead, and says so rather than looking hung.
 #
 # The path is one function so a test can point it at a fixture. It is resolved
 # before TMPDIR is replaced below, so the fallback names the real temporary
@@ -75,20 +68,16 @@ suite_lock_path() {
 # still be most of the suite, and "it's only a few tests" is what everyone says
 # while the load climbs.
 #
-# AND IT IS HELD BY EVERY CHILD THAT INHERITS THE DESCRIPTOR. On 2026-09-19,
-# hours after this lock landed, every gate on the box queued for eighteen
-# minutes behind a `sleep 1800` with ppid 1 - a background process started
-# somewhere under this runner, holding a copy of the lock long after the runner
-# itself was gone. flock lives on the open file description, not on the
-# process, and bash cannot mark a descriptor close-on-exec (`exec {fd}>` sets
-# it only for the exec that never comes when the child is a fork). CEL-12 hit
-# exactly this on the ledger lock and answered it with lock_spawn in
-# lib/registry.sh: close the descriptor in the forked child, then exec, so no
-# copy survives anywhere down the tree. This runner is zero-dependency by
-# design and does not source the libraries it tests, so it carries the same
-# helper rather than importing it. Every child goes through it - including the
-# two shells that run before any test, which source each file to check it and
-# to list its test functions, and which are children like any other.
+# AND IT IS HELD BY EVERY CHILD THAT INHERITS THE DESCRIPTOR. flock lives on the
+# open file description, not on the process, so a background process started
+# under this runner would hold the lock long after the runner is gone. bash
+# cannot mark a descriptor close-on-exec (`exec {fd}>` sets it only for the exec
+# that never comes when the child is a fork), so - like lock_spawn in
+# lib/registry.sh - the descriptor is closed in the forked child before exec.
+# This runner is zero-dependency by design and does not source the libraries it
+# tests, so it carries the same helper rather than importing it. Every child goes
+# through it - including the two shells that run before any test, which source
+# each file to check it and to list its test functions.
 SUITE_LOCK_FD=""
 _suite_spawn() ( # <fd> <cmd> [args...] - lock_spawn, inlined
   local _fd="$1"; shift
@@ -99,17 +88,15 @@ _suite_lock_take() {
   local path; path="$(suite_lock_path)"
   # --no-lock means the whole run stays out of the queue, nested gates
   # included: tests/fanout.test.sh runs collect, which runs cel-verify, which
-  # would otherwise queue on the box lock from inside a run that chose not to
-  # (CEL-97 measured four such tests sitting at the per-test limit).
+  # would otherwise queue on the box lock from inside a run that chose not to.
   if [ "$NO_LOCK" -eq 1 ]; then export CEL_SUITE_LOCK_HELD=1; return 0; fi
   [ "$path" = none ] && return 0
   # RE-ENTRANT BY INHERITANCE. tests/fanout.test.sh runs `cel-fanout collect`,
   # which runs cel-verify, which runs a gate - a whole second suite, started
-  # from inside a suite that is already holding this lock. On CI, where
-  # XDG_RUNTIME_DIR is unset and both processes resolve the same path, that is
-  # a run waiting twenty minutes for itself until the job is cancelled. A
-  # process started under a held lock is ALREADY INSIDE IT and must not queue;
-  # the holder says so in the environment, which children inherit for free.
+  # from inside a suite that is already holding this lock. Where both resolve
+  # the same path (CI: no XDG_RUNTIME_DIR) queueing would deadlock. A process
+  # started under a held lock is ALREADY INSIDE IT and must not queue; the
+  # holder says so in the environment, which children inherit for free.
   [ -n "${CEL_SUITE_LOCK_HELD:-}" ] && return 0
   command -v flock >/dev/null 2>&1 || return 0
   mkdir -p "$(dirname "$path")" 2>/dev/null || true
@@ -124,13 +111,12 @@ _suite_lock_take() {
     since="$(printf '%s\n' "$held" | awk '{print $2}')"
     cwd="$(printf '%s\n' "$held" | cut -s -d' ' -f3-)"
     printf 'waiting for the suite lock (held by pid %s since %s) \xe2\x80\xa6\n' "$pid" "$since"
-    # A WAIT THAT HAS BECOME A PROBLEM SAYS SO, ONCE. The eighteen-minute
-    # queue above looked from every pane like a hung gate; the one notice
-    # above had scrolled away and nothing said anything after it. So a wait
-    # past CEL_SUITE_WAIT_WARN repeats itself with the holder's directory -
-    # and if the recorded pid is gone, the lock is held by something that
-    # merely inherited the descriptor, which is a different problem with a
-    # different fix and must not read as "somebody is running tests".
+    # A WAIT THAT HAS BECOME A PROBLEM SAYS SO, ONCE. The notice above scrolls
+    # away and a long queue then looks like a hung gate, so a wait past
+    # CEL_SUITE_WAIT_WARN repeats itself with the holder's directory - and if
+    # the recorded pid is gone, the lock is held by something that merely
+    # inherited the descriptor, which is a different problem with a different
+    # fix and must not read as "somebody is running tests".
     local t0 warned=0 warn="${CEL_SUITE_WAIT_WARN:-120}"
     t0="$(date +%s)"
     until flock -w 1 "$SUITE_LOCK_FD"; do
@@ -145,7 +131,7 @@ _suite_lock_take() {
     done
     printf 'suite lock acquired after %ss\n' "$(( $(date +%s) - t0 ))"
   fi
-  # pid, start time and CWD: on a box with sixteen agent sessions a pid alone
+  # pid, start time and CWD: with many agent sessions on the box a pid alone
   # does not say which of them is in front of you.
   printf '%s %s %s\n' "$$" "$(date +%H:%M)" "$PWD" > "$path"
   # The path as well as the fact: a child that resolved it differently (a
@@ -163,13 +149,11 @@ export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cel-tests.XXXXXX")"
 # a test launch must land in this run's directory, never the real file.
 export CLAUDE_CONFIG_DIR="$TMPDIR/claude-config"
 
-# AND EVERY PROCESS A TEST STARTED GOES WITH IT. On 2026-09-16 a gate run that
-# was killed mid-suite left seven test servers from tests/pages-server.test.sh
-# alive for a hundred minutes, holding the descriptors they had inherited -
-# including a workspace's delegation ledger lock, which blocked the whole
-# fleet. Temporary files are not the only thing a killed suite leaks. So each
-# test runs in its own process group and the group is killed when the test
-# ends, whether it ended by passing, failing, or this runner being killed.
+# AND EVERY PROCESS A TEST STARTED GOES WITH IT. A killed suite otherwise leaks
+# test servers that keep the descriptors they inherited (a delegation ledger
+# lock, for one) and block the fleet. So each test runs in its own process group
+# and the group is killed when the test ends, whether it ended by passing,
+# failing, or this runner being killed.
 CURRENT_GROUP=""
 _kill_current_group() {
   [ -n "$CURRENT_GROUP" ] || return 0
@@ -178,15 +162,12 @@ _kill_current_group() {
   return 0
 }
 
-# AND EVERY PROCESS THAT ESCAPED ITS GROUP. A walk of the box on 2026-09-19
-# found fifty-six `/bin/sh .../bin/long-running` fixtures still up, all
-# reparented to init, whose cwd was a `cel-tests.*` directory deleted nine
-# days earlier: a `last-words` test starts deliberately long-lived processes
-# with setsid - which is precisely a process the group kill above cannot
-# reach - and the suite that started them was killed. The CWD is the handle
-# (lib/memory.sh made the same argument for measuring a worker): anything
-# still sitting in this run's private TMPDIR was started by this run and has
-# nothing left to do, because the directory it is standing in is about to go.
+# AND EVERY PROCESS THAT ESCAPED ITS GROUP. Some tests (`last-words`) start
+# deliberately long-lived processes with setsid, which the group kill above
+# cannot reach. The CWD is the handle (lib/memory.sh makes the same argument for
+# measuring a worker): anything still sitting in this run's private TMPDIR was
+# started by this run and has nothing left to do, because its directory is about
+# to go.
 _kill_tmpdir_strays() {
   case "${TMPDIR:-}" in */cel-tests.*) ;; *) return 0;; esac
   local link pid target
@@ -200,23 +181,20 @@ _kill_tmpdir_strays() {
 }
 PRELUDE="set -e; source '$CEL_ROOT/tests/lib/assert.sh'"
 
-# A TEST CANNOT HOLD THE BOX. On 2026-10-04 the suite lock was held for eighty
-# minutes by one run stuck in a single new test whose `tools/dash/server.mjs`
-# child never exited; two workers' suites and a land queued behind it, and
-# nothing anywhere bounded a single test. Each test now has a wall limit
-# (CEL_TEST_TIMEOUT seconds, generous by default - the slowest honest test is
-# well under a minute) and on expiry its whole process group goes, servers
-# included, and it is reported as a timeout naming the test.
+# A TEST CANNOT HOLD THE BOX. One stuck test would otherwise hold the suite lock
+# indefinitely. Each test has a wall limit (CEL_TEST_TIMEOUT seconds, generous by
+# default - the slowest honest test is well under a minute) and on expiry its
+# whole process group goes, servers included, and it is reported as a timeout
+# naming the test.
 TEST_TIMEOUT="${CEL_TEST_TIMEOUT:-120}"
 case "$TEST_TIMEOUT" in ''|*[!0-9]*|0) TEST_TIMEOUT=120 ;; esac
 
-# INDEPENDENT FILES RUN SIDE BY SIDE. CI's suite reached nineteen minutes
-# against a twenty-minute job limit and a rerun was cancelled at the limit,
-# blocking a merge. Every test already lives in its own process and its own
-# mktemp fixture, so most files share nothing and can run at once; the few that
-# do share something - a wall clock they measure, a box-wide process table
-# they sweep - are listed in SERIAL_FILES with the reason, and run alone after
-# the parallel pool has drained. CEL_TEST_JOBS=1 is the old serial runner.
+# INDEPENDENT FILES RUN SIDE BY SIDE, to keep CI inside its job time limit.
+# Every test already lives in its own process and its own mktemp fixture, so
+# most files share nothing and can run at once; the few that do share something
+# - a wall clock they measure, a box-wide process table they sweep - are listed
+# in SERIAL_FILES with the reason, and run alone after the parallel pool has
+# drained. CEL_TEST_JOBS=1 runs every file serially.
 if [ -z "${CEL_TEST_JOBS:-}" ]; then
   CEL_TEST_JOBS="$(nproc 2>/dev/null || echo 2)"
   [ "$CEL_TEST_JOBS" -le 6 ] || CEL_TEST_JOBS=6
@@ -263,14 +241,13 @@ _run_file() { # <n> <file>
     # the box until it dies, long after the run that produced it finished. So
     # the descriptor is closed on the way into each test.
     #
-    # THE WALL LIMIT IS `timeout`, INSIDE THE TEST'S OWN SESSION (CEL-100).
-    # A separate watchdog process slept beside every test and, killed when the
-    # test finished first, left its `sleep` on PID 1 - 385 `sleep 120`s from
-    # one run; group kills and a FIFO wait each left a race. GNU timeout puts
-    # itself in its own process group (here: the setsid group, already its
-    # own) and on expiry signals that whole group, servers included, then
-    # KILLs it a second later. When the test ends first, timeout exits with
-    # it: nothing is left behind because nothing else was started.
+    # THE WALL LIMIT IS `timeout`, INSIDE THE TEST'S OWN SESSION. A separate
+    # watchdog process would leave its `sleep` on PID 1 whenever the test
+    # finished first. GNU timeout puts itself in its own process group (here:
+    # the setsid group, already its own) and on expiry signals that whole group,
+    # servers included, then KILLs it a second later. When the test ends first,
+    # timeout exits with it: nothing is left behind because nothing else was
+    # started.
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
       exec setsid timeout -k 1 "$TEST_TIMEOUT" bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
     CURRENT_GROUP=$!

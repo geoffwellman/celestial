@@ -1,12 +1,10 @@
 # shellcheck shell=bash
-# CEL-114: release must actually free the worktree.
+# Release must actually free the worktree.
 #
-# A disk-full cleanup across four workspaces found ~135 rows `released` with
-# their checkouts still on disk: herdr said it "had no worktree to remove",
-# the row closed anyway, and the directory stayed. Squash merges made every
-# landed row look unpushed, so orchestrators fell back to --discard. And one
-# `abandoned` row - a state reconcile itself writes - made gc veto every
-# worktree on the box because gc's list of states did not include it.
+# A row must not close as `released` while its checkout stays on disk (herdr
+# answering it "had no worktree to remove"); a squash-merged row must not read
+# as unpushed; and gc's list of states must include every state reconcile
+# writes (`abandoned`), or one such row vetoes every worktree on the box.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/ledger_states.sh"
 BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"

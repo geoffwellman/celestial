@@ -63,7 +63,7 @@ test_linear_request_failure_removes_private_header_file() {
   rm -rf "$T"
 }
 
-# --- CEL-25: the board -----------------------------------------------------
+# --- the board ---------------------------------------------------------------
 
 # `cel-linear board` is what the console's BOARD panel reads, and the console
 # refreshes after every command - so the raw query is cached for a minute on
