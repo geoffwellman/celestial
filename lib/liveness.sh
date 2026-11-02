@@ -1,35 +1,15 @@
 # shellcheck shell=bash
-# WHAT THE PANE IS ACTUALLY DOING - the judgment the timers in lib/stall.sh
-# cannot make.
+# What a worker's pane is actually doing - the judgment the timers in
+# lib/stall.sh cannot make. A runtime's own status can be wrong for hours, so
+# the pane tail is classified by a decisions request: small state, two typed
+# questions, every number computed in bash and handed over as a named field.
 #
-# stall.sh decides a worker is stuck from two numbers: a fatal marker plus
-# fifteen minutes of quiet, or three hours of silence with no marker. Every
-# real failure on this box in the two days to 2026-09-20 slipped through both,
-# because the runtime's own status was wrong and the clock had not run out:
+# IT REPORTS AND NOTHING ELSE: no path from an answer to a kill, release or
+# re-prompt. tests/liveness.test.sh asserts this file never names the verbs
+# that end a process.
 #
-#   - a test fixture held a pipe and the suite hung 3 h 8 min while herdr
-#     reported `working`;
-#   - an omp worker burned three cores while herdr reported `idle`;
-#   - a worker sat in `sleep 1500` blocks, reporting `working`, doing nothing;
-#   - another reported `done` while it was waiting on a background task it had
-#     started itself.
-#
-# A person reading twenty lines of the pane knows which of those is healthy in
-# a second. A timer never will, and lengthening the timer only trades missed
-# stalls for false ones. So the pane is read by something that reads: one
-# decision request, a small state, two typed questions, a bounded answer, and
-# no arithmetic anywhere near the model (the classifier is not a calculator -
-# every number here is computed in bash and handed over as a named field).
-#
-# IT REPORTS AND NOTHING ELSE. There is no path from an answer to a kill, a
-# release or a re-prompt; the memory sweep (CEL-22) set that posture and this
-# keeps it. A watcher that can end a process is a watcher whose mistakes cost
-# work, and a test in tests/liveness.test.sh asserts this file never names the
-# verbs that end one.
-#
-# IT IS ALSO OPTIONAL. No router, no key, a failing endpoint, a slow one, an
-# answer below the confidence floor: all of them produce no verdict at all and
-# the timers decide exactly as they did before.
+# IT IS ALSO OPTIONAL: no router, no key, a failing or slow endpoint, or an
+# answer below the confidence floor all yield no verdict, and the timers decide.
 [ -n "${_CEL_LIVENESS:-}" ] && return 0
 _CEL_LIVENESS=1
 # shellcheck source=lib/config.sh
@@ -81,7 +61,7 @@ liveness_model() {
 # The key, read from the environment variable the provider table names - never
 # from the config file's own `key:`, and never onto a command line: it goes to
 # the endpoint in a header curl reads from stdin, so it is not in /proc for
-# every other agent on this box to read.
+# other processes to read.
 liveness_key() {
   local env_name v
   env_name="$(cel_config_get console.router key_env)"
@@ -231,9 +211,8 @@ liveness_cached() { # <key>
   set -- $row
   [ -n "${4:-}" ] && [ "${4:-}" != "-" ] || return 0
   now="$(_liveness_now)"
-  # PRESENCE, not "> 0": an answer recorded at time 0 is still an answer
-  # (CEL-79). Rows written before this carry 0 for "never answered", and the
-  # activity check above already refuses those.
+  # PRESENCE, not "> 0": an answer recorded at time 0 is still an answer. A
+  # row that was never answered has no activity, which the check above refuses.
   case "${6:-}" in ''|-|*[!0-9-]*) return 0 ;; esac
   [ $(( now - ${6} )) -le "$CEL_LIVENESS_CACHE_SECS" ] || return 0
   printf '%s\t%s' "$4" "$5"
@@ -320,7 +299,7 @@ liveness_verdict() { # <activity> <confidence> <secs-since-output-changed> <ledg
   [ -n "$act" ] || return 0
   awk -v c="$conf" -v f="$(liveness_min_confidence)" 'BEGIN { exit !(c + 0 >= f + 0) }' || return 0
   case "$act" in
-    # The point of the whole ticket: neither waits three hours.
+    # Neither waits for the three-hour quiet timer.
     looping|crashed) printf '%s' "$act" ;;
     # A normal approval pause is not news until it has lasted.
     waiting_on_input)
@@ -348,25 +327,16 @@ liveness_classify() { # <pane-text> <runtime-status> <secs> <ledger-state>
   printf '%s\t%s\t%s' "$verdict" "$act" "$conf"
 }
 
-# --- THE THREE SILENCES (CEL-50) --------------------------------------------
+# --- the three silences -----------------------------------------------------
 #
 # Everything above asks a model what a pane is DOING. These three ask nothing:
 # they are recognised from the pane text alone, with no router, no key and no
-# request, because none of them needs judgement. Each cost this box real work
-# in one day and each renders exactly like an agent thinking:
+# request, and each renders exactly like an agent thinking:
 #
-#   - a dispatch left TYPED BUT UNSUBMITTED in the composer. Two workers sat
-#     two hours at +0 commits, the full prompt below the divider, `ctx 0.0%`,
-#     and the ledger reading `running`. Re-prompting started both instantly;
-#     the pane and the agent were healthy, only the submit was lost. A
-#     reviewer pane did the same thing three days later, so this is about
-#     PANES, not workers;
-#   - a session that accepts input and fails every turn. Two pi sessions took
-#     four prompts and a steward nudge and errored on all five while herdr
-#     reported `done`;
-#   - an account whose window is spent. Four workers stopped on HTTP 429 and
-#     read as idle, and the steward escalated "nobody is on this" while a
-#     blocked worker sat right there.
+#   - a prompt TYPED BUT UNSUBMITTED in the composer (any pane, not only
+#     workers): context at 0%, text below the divider, ledger `running`;
+#   - a session that accepts input and fails every turn;
+#   - an account whose rate-limit window is spent, which reads as idle.
 #
 # They REPORT, like everything else here.
 
@@ -405,9 +375,9 @@ _liveness_pending_text() { # <pane-text>
   return 1
 }
 
-# The error CLASS, not the message. The transport bug that produced this wrote
-# one sentence and the next one will write another, so what is matched is
-# "a terminal error line, repeated, with no turn between the prompts".
+# The error CLASS, not the message: wording changes between failures, so what
+# is matched is "a terminal error line, repeated, with no turn between the
+# prompts".
 _liveness_repeated_error() { # <pane-text>
   local n
   n="$(printf '%s\n' "$1" \
@@ -417,18 +387,13 @@ _liveness_repeated_error() { # <pane-text>
   [ -n "$n" ] && [ "$n" -ge 2 ]
 }
 
-# A provider limit, in the words every provider on this box uses for one -
-# and ONLY when the pane is actually stopped on it.
+# A provider limit - and ONLY when the pane is actually stopped on it.
 #
-# Recognising the words anywhere in the text reported a worker running the
-# quota suite, grepping lib/quota.sh or showing a diff with `429` in it as
-# blocked on a provider (PR #81 review). Two conditions keep that out, and
-# both are about position rather than wording: the limit must be on a line
-# SHAPED like a provider refusal - one that begins with the error, not one
-# that merely contains the phrase - and no turn may follow it, because an
-# agent that took a turn after the refusal is not stopped on it. A false
-# `throttled` sends an orchestrator to wait out a window that was never
-# spent, which is worse than the silence this replaces.
+# Matching the words anywhere would flag a worker running the quota suite or
+# showing a diff containing `429`. So the limit must be on a line SHAPED like
+# a provider refusal (one that begins with the error), and no agent turn may
+# follow it. A false `throttled` sends an orchestrator to wait out a window
+# that was never spent, which is worse than silence.
 _liveness_is_throttled() { # <pane-text>
   printf '%s\n' "$1" | awk '
     tolower($0) ~ /^[[:space:]]*[^[:alnum:][:space:]]{0,3}[[:space:]]*(api[ _-]?error|http[ \/][0-9]|error|err|request failed|rate[ _]limit)/ &&
@@ -437,9 +402,8 @@ _liveness_is_throttled() { # <pane-text>
     END { exit !(lim > 0 && lim > turn) }'
 }
 
-# WHEN, not just "blocked". A wait whose end nobody can name is the same
-# report the steward was already making; the reset is the half an operator
-# acts on, and it comes from the windows lib/quota.sh already reads.
+# WHEN, not just "blocked": the reset time is the half an operator acts on,
+# read from the windows lib/quota.sh already reads.
 liveness_reset_at() { # <cel-provider> -> a human time, or nothing
   [ -n "${1:-}" ] || return 0
   local sub p a t r

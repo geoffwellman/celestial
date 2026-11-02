@@ -22,10 +22,9 @@ _CEL_RUN=1
 # shellcheck source=lib/run-evidence.sh
 . "${BASH_SOURCE[0]%/*}/run-evidence.sh"
 
-# PANE LABELS (CEL-83). The agent name is sanitised and cut to 32 characters
-# (`celestial-cel-70-workspace-githu`), which is unreadable in the sidebar, so
-# every pane the plane starts also gets herdr's free-text label. herdr takes
-# 300+ characters without complaint; the cap is what reads well, not a limit.
+# PANE LABELS. The agent name is sanitised and cut to 32 characters, which
+# is unreadable in the sidebar, so every pane the plane starts also gets
+# herdr's free-text label. The cap is for readability, not a herdr limit.
 CEL_PANE_LABEL_MAX=40
 
 _pane_label_words() { # <slug> -> words separated by single spaces
@@ -77,9 +76,9 @@ pane_label_set() { # <pane> <label> [herdr-command...]
   return 0
 }
 
-# TABS TOO (CEL-83 addendum): herdr names a tab with a bare number, so a tab
-# that holds one agent carries the same text as its pane. Not for a reviewer:
-# its tab is shared and keeps "PR reviewer". Same rule as the pane: warn, go on.
+# TABS TOO: herdr names a tab with a bare number, so a tab that holds one
+# agent carries the same text as its pane. Not for a reviewer: its tab is
+# shared and keeps "PR reviewer". Same rule as the pane: warn, go on.
 tab_label_set() { # <pane> <label> [herdr-command...]
   local pane="$1" label="$2" tab; shift 2
   [ $# -gt 0 ] || set -- herdr
@@ -91,12 +90,9 @@ tab_label_set() { # <pane> <label> [herdr-command...]
 }
 
 # Where a role's body is written for a runtime that injects it from a file.
-#
-# Every orchestrator launch used to overwrite $wsdir/.cel/role-orchestrator.md,
-# which was harmless while there was one orchestrator per workspace and is not
-# now: two products' orchestrators would trade role bodies underneath each
-# other. A DECLARED product gets its own directory; an implicit one keeps the
-# original path so nothing about an existing workspace moves.
+# A DECLARED product gets its own directory so two products' orchestrators
+# never overwrite each other's role body; an implicit one keeps the original
+# path so nothing about an existing workspace moves.
 #
 # The filename must keep ending in `role-orchestrator.md`: lib/gc.sh tells a
 # long-lived agent from a stray one by that substring in the cmdline, and a
@@ -110,34 +106,28 @@ _run_role_file() { # <wsdir> <tag> [product]
   fi
 }
 
-# Fills the global AGENT_ARGS array per the runtime's role_injection strategy
-# in agents.yaml. File writes are real side effects, so they are skipped on a dry
-# run - only the herdr command line is ever a preview.
-#
-# AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
-# launch environment below carries it, and `cel gc` proves ownership with it.
-# KEEP THE MODEL THE LAUNCH NAMED (CEL-68). OMP prewalk swaps to the box's
-# `smol` model after the first edit/write, so a profile's model would silently
-# become another one - and the ledger's provenance would lie. Every omp launch
-# (cel run of any role, cel-fanout delegate/scout) goes through here; other
-# runtimes get nothing. Prepends to AGENT_ARGS.
+# KEEP THE MODEL THE LAUNCH NAMED: omp prewalk would swap to the box's `smol`
+# model after the first write, and the ledger's model provenance would lie.
+# Every omp launch goes through here; prepends --no-prewalk to AGENT_ARGS.
 _run_keep_model_args() { # <runtime>
   [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
 }
 
-# WAIT OUT A SPENT BUDGET (CEL-98). When every Claude credential in omp's pool
-# is spent, the server answers 429 with retry-after-ms around 5,500,000 and
-# omp's default retry.maxDelayMs (300000) refuses the wait: the orchestrator's
-# turn stopped until a human typed, and a timer screen-scraping panes was the
-# stopgap. omp 18 reads a --config overlay per launch, so core, root and the
-# orchestrators wait in-process and keep their context. Workers do not: a
-# worker asleep for hours holds a slot better given to another.
+# WAIT OUT A SPENT BUDGET: a pool-wide 429 asks for a retry longer than omp's
+# default retry.maxDelayMs, so core, root and the orchestrators get a --config
+# overlay that waits in-process. Workers do not: one asleep for hours holds a slot.
 _run_retry_overlay_args() { # <runtime> <role>
   [ "$1" = omp ] || return 0
   case "$2" in core|root|orchestrator) ;; *) return 0 ;; esac
   AGENT_ARGS=("--config=$CEL_ROOT/core/omp-orchestrator.yml" "${AGENT_ARGS[@]}")
 }
 
+# Fills the global AGENT_ARGS array per the runtime's role_injection strategy
+# in agents.yaml. File writes are real side effects, so they are skipped on a dry
+# run - only the herdr command line is ever a preview.
+#
+# AGENT_ROLE_FILE is set to the path the role travelled as, or emptied: the
+# launch environment below carries it, and `cel gc` proves ownership with it.
 _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   local rt="$1" tag="$2" body="$3" dry="$4" wsdir="$5" rolefile="${6:-}" strategy
   AGENT_ROLE_FILE=""
@@ -188,19 +178,6 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
   esac
 }
 
-# THE LAUNCHER MARKS ITS CHILDREN. `cel gc` used to prove a process was a
-# plane worker by finding the role file path in /proc/<pid>/cmdline. pi
-# rewrites its own argv (process.title), so a live pi worker's cmdline is the
-# two bytes `pi` and padding: every pi worker on the box read as unidentified,
-# GC kept their worktrees whole, and for weeks the steward journal printed
-# `0 worktrees removed, 0 agents reaped` without anyone noticing.
-# /proc/<pid>/environ is fixed at exec and no runtime rewrites it, so
-# ownership travels there instead.
-#
-# `herdr agent start` has no --env option (checked against `--help`), so the
-# variables go on as an `env K=V ...` PREFIX to the launch line it types. That
-# is deliberately scoped to the launch: an `export` in the pane would outlive
-# the agent and mark every later command in that shell as a plane worker.
 # Prepend the runtime's inbox hook (agents.yaml inbox_hook) to AGENT_ARGS, if
 # it has one. Shared by `cel run` and `cel-fanout delegate` so a worker gets
 # the same delivery whichever path launched it.
@@ -212,6 +189,9 @@ _run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
   fi
 }
 
+# THE LAUNCHER MARKS ITS CHILDREN in /proc/<pid>/environ, fixed at exec, which
+# `cel gc` reads to prove ownership (pi rewrites its argv). As an `env K=V ...`
+# prefix, not an `export`: an export would outlive the agent in the pane's shell.
 _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V K=V K=V `
   local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" runtime="${5:-}" out
   printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
@@ -228,14 +208,13 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   # exist only in the launched process and never in the pane's shell.
   local gw
   for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"} ${LAUNCH_ENV_EXTRA[@]+"${LAUNCH_ENV_EXTRA[@]}"}; do out="$out $gw"; done
-  # WHOSE MAILBOX (CEL-65). `cel inbox` derives the reader from cwd, and an
-  # orchestrator that cd's to its workspace root read ROOT's mail for days.
-  # Root and orchestrators carry their identity from the launch instead.
+  # WHOSE MAILBOX: `cel inbox` derives the reader from cwd, which an agent can
+  # leave; root and orchestrators carry their identity from the launch instead.
   [ -z "$me" ] || printf -v out '%s CEL_INBOX_ME=%q CEL_INBOX_WS=%q' "$out" "$me" "$(ws_name "$wsdir")"
   # A runtime whose role is injected as a prompt argument has no file to name;
   # the other two still say whose the process is.
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
-  # Workers compile; half the cores each, not all of them (CEL-122).
+  # Workers compile: half the cores each, not all of them.
   case "$role" in worker|scout|spike)
     printf -v out '%s CARGO_BUILD_JOBS=%q' "$out" "$(boxguard_cargo_jobs)" ;;
   esac
@@ -254,21 +233,13 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   printf '%s ' "$out"
 }
 
-# WHEN IS A PANE SAFE TO TYPE INTO (AH-261017). `herdr agent start` only works
-# on an "available shell": herdr's own definition is that the pane's
-# interactive shell owns the foreground - no foreground command, editor or
-# agent. A fresh pane is NOT there yet: the shell is still reading its rc files
-# (oh-my-zsh's update check forks git, prints warnings) and text typed then is
-# interleaved with that output and never submitted, and the later `agent start`
-# is refused as agent_pane_busy with the credential prefix sitting in the
-# terminal. So readiness is read from the two structured herdr surfaces that
-# expose it - `pane get` (terminal_id, agent) and `pane process-info`
-# (shell_pid, foreground_processes) - and nothing is typed until, over
-# CEL_PANE_READY_STABLE consecutive probes inside the CEL_PANE_READY_MS
-# deadline, the pane has had no agent, the same terminal and shell, and a
-# foreground consisting of the shell alone (its process group, as herdr's own
-# prompt predicate requires, and no other process). A terminal or shell that changes
-# under us is somebody else's pane now: refuse, never wait it out.
+# WHEN IS A PANE SAFE TO TYPE INTO. `herdr agent start` needs an "available
+# shell": the pane's interactive shell owns the foreground. A fresh pane is still
+# reading its rc files, and text typed then is never submitted. So nothing is
+# typed until CEL_PANE_READY_STABLE consecutive probes inside CEL_PANE_READY_MS
+# see no agent, the same terminal and shell, and a foreground of the shell alone
+# (its process group, no other process). A terminal or shell that changes under
+# us is somebody else's pane now: refuse, never wait it out.
 # Probe output is one line: "<terminal_id>:<shell_pid>\t<verdict>", verdict one of
 # ready | agent | busy | unavailable. Pane text is never read.
 _run_pane_probe() { # <pane>
@@ -425,8 +396,8 @@ _run_apply_layout() { # <layout> <ws_id> <wsdir> <fallback-pane> -> pane id
 # from its own pane), in tabs labelled "PR reviewer". Panes are smart-sized:
 # each new reviewer splits the tab's current largest pane along its longer
 # visual edge. Six panes fill a tab; the seventh PR opens a fresh
-# "PR reviewer" tab and the count restarts. No new workspace, no worktree -
-# the reviewer only reads.
+# "PR reviewer" tab and the count restarts. No new workspace: the pane opens
+# in <cwd>, the reviewer's own checkout.
 _RUN_REVIEW_TAB_CAP=6
 _run_reviewer_pane() { # <cwd> -> pane id
   local ws="${HERDR_WORKSPACE_ID:-}" cwd="$1" tab pane resp n first
@@ -460,21 +431,10 @@ _run_reviewer_pane() { # <cwd> -> pane id
   printf '%s' "$pane"
 }
 
-# THE TREE A REVIEWER READS. Until CEL-55 a reviewer pane opened in the
-# ORCHESTRATOR'S OWN CHECKOUT ($ws/repos/<repo>) and was then told a PR
-# number: nothing guaranteed that directory had any relationship to the pull
-# request, and nothing kept it current. On 2026-09-21 it sat at d2da692 while
-# main was at 81022b5 - eighteen commits and a whole day behind - and produced
-# three wrong conclusions before lunch: a branch measured as 3x slower than a
-# "main" that predated lib/orphans.sh, and a reviewer of #75 reporting that
-# lib/wslife.sh "does not exist on this branch" hours after it landed. Both
-# answers were truthful about the wrong tree.
-#
-# So a reviewer gets a checkout of its own, DETACHED at the PR's head, in the
-# manner scouts already get a worktree: a linked git worktree of the
-# orchestrator's clone, which costs a fetch rather than a clone and which the
-# orchestrator cannot move underneath it. Detached on purpose - nothing in it
-# is a branch, so there is nothing there to push.
+# THE TREE A REVIEWER READS is a checkout of its own, DETACHED at the PR's head:
+# the orchestrator's checkout has no relationship to the PR and drifts. A linked
+# worktree of the orchestrator's clone costs a fetch, not a clone; detached, it
+# has no branch to push.
 _run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-$HOME/.local/state/cel/reviews}"; }
 
 reviewer_checkout_path() { # <repo> <pr>
@@ -503,12 +463,9 @@ reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
   path="$(reviewer_checkout_path "$repo" "$pr")"
   mkdir -p "$(dirname "$path")" || return 1
   # A leftover from a previous round is removed rather than reused: it is at
-  # the head the PR had then, which is the staleness this ticket is about.
-  # But only a LEFTOVER: if a live pane still stands in it the drop refuses
-  # and so does this launch (CEL-94). The caller has already looked for a
-  # live reviewer to reuse, so whatever is standing here is not one we can
-  # take over - and a second tree at another path would be a second reviewer
-  # for one PR, which is what reusing exists to prevent.
+  # the PR's old head. But only a LEFTOVER: if a live pane still stands in it
+  # the drop refuses and so does this launch - the caller already looked for a
+  # reviewer to reuse, and a second tree would be a second reviewer for one PR.
   _reviewer_worktree_drop "$repodir" "$path" || return 1
   git -C "$repodir" fetch -q origin "pull/$pr/head" 2>/dev/null || true
   git -C "$repodir" worktree add -q --detach "$path" "$head" 2>/dev/null || return 1
@@ -516,13 +473,8 @@ reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
 }
 
 # WHO IS STANDING IN THIS CHECKOUT, asked of the herdr roster at the moment
-# it matters. CEL-94: on 2026-10-03 review checkouts were deleted under five
-# working reviewers, twice for two of the PRs - herdr showed their cwd as
-# "(deleted)" and they fell back to /tmp clones. Every delete decided from
-# the reviewer REGISTRY: a row whose pane id had gone released "its" path
-# while a newer pane for the same PR worked in that very directory, and a
-# relaunch whose row had been pruned dropped the path unconditionally. The
-# registry says who was recorded; only the roster says who is there.
+# it matters. The reviewer registry says who was recorded; only the roster
+# says who is there, so no delete is ever decided from the registry.
 #
 # A roster that cannot be read is an occupied directory: deleting someone's
 # working tree is not a risk worth taking to save a few megabytes until the
@@ -553,16 +505,15 @@ _reviewer_worktree_drop() { # <repodir> <path>; fails, deleting nothing, while a
   return 0
 }
 
-# CEL-52 made a reviewer's pane close when its PR closes. A checkout that
-# outlives the pane is the same litter in a new form, so whatever closes the
-# reviewer calls this - `cel gc` does, right after the pane goes.
+# A reviewer's checkout goes with its pane: whatever closes the reviewer calls
+# this - `cel gc` does, right after the pane goes.
 reviewer_checkout_release() { # <repo> <pr>
   local row path repodir
   row="$(reviewers_find "$1" "$2")" || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
-  # A row `cel gc` adopted carries no checkout, but the path is derived from
-  # repo and PR alone; without this an adopted reviewer's checkout outlived it.
+  # A row `cel gc` adopted carries no checkout; the path is derived from repo
+  # and PR alone.
   [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2")"
   [ -e "$path" ] || return 0
   # Kept while anything stands in it; the next sweep releases it once the
@@ -577,8 +528,7 @@ reviewer_checkout_release() { # <repo> <pr>
 # WHAT THE REVIEWER IS TOLD IT IS READING. Appended to the role body so the
 # facts arrive with the agent rather than in whatever an orchestrator happens
 # to type: the head SHA, the base it compares against, and the command that
-# tells it the head has moved since this pane started - reviewing an older
-# head is fine, reviewing one silently is how #75 happened.
+# tells it the head has moved - reviewing an older head is fine, silently is not.
 _run_reviewer_brief() { # <repo> <pr> <head> <base> <path>
   cat <<EOF
 
@@ -670,28 +620,22 @@ EOF
 
 # A FRESH CLAUDE LANE GETS A FIRST TURN. Claude's mail arrives through its
 # UserPromptSubmit hook (tools/hooks/inbox-drain.sh), which runs only when a
-# turn is submitted - and a session started with nothing to say submits none,
-# so a brief sent to the lane before it started sat unread while the lane
-# reported it had no goal. This rides on the command line as Claude's first
-# prompt: one line, no option syntax, and the hook attaches what is waiting.
+# turn is submitted, so a brief sent before the lane started would sit unread.
+# This rides on the command line as Claude's first prompt: one line, no option
+# syntax, and the hook attaches what is waiting.
 _run_lane_kickoff() { # <product> <lane> <agent-name>
   printf 'You have just started as %s, lane %s of %s. Any mail already waiting in your inbox is attached to this message; if it gives your goal, start on it. If nothing is attached, run cel inbox read once, and if there is still no goal, say so in one line and wait for the owner.' "$3" "$2" "$1"
 }
 
 # CLAUDE CODE ASKS BEFORE IT WORKS IN A FOLDER IT HAS NOT SEEN, and a lane's
-# directory is always new to it. The prompt's default answer is "No, exit",
-# so any keystroke that reached the pane before the owner did ended the lane.
-# Claude Code 2.1 keeps the answer in its global config, and reads it there:
-# projects[<absolute dir>].hasTrustDialogAccepted in
-# ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json (checked against the installed
-# 2.1.316 binary, whose own "set projects[...].hasTrustDialogAccepted: true
-# in <file>" hint names the same key). That key is set here for exactly the
-# directory given - as given and as resolved, the two names Claude may see
-# for it - and nothing else in the file changes. Claude serialises its own
+# directory is always new to it; the prompt's default answer is "No, exit".
+# So projects[<dir>].hasTrustDialogAccepted is set in
+# ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json for exactly that directory - as given
+# and as resolved - and nothing else in the file changes. Claude serialises its
 # writes with the lock DIRECTORY <file>.lock (proper-lockfile), so this takes
 # the same lock, writes a private temporary file and renames it over. A lock
-# somebody holds past the wait, or a file that is not a JSON object, is
-# refused rather than overwritten.
+# held past the wait, or a file that is not a JSON object, is refused rather
+# than overwritten.
 _run_claude_config_file() { printf '%s/.claude.json' "${CLAUDE_CONFIG_DIR:-$HOME}"; }
 
 _run_claude_trust_dir() { # <dir>
@@ -724,14 +668,9 @@ _run_claude_trust_dir() { # <dir>
   return "$rc"
 }
 
-# THE REVIEWER REGISTRY. A worker is a DELEGATION: it has a ledger row, a
-# worktree, a `release` verb and a gc pass, because something recorded that it
-# exists. A reviewer was started by `cel run reviewer --repo r --pr n` and
-# recorded NOWHERE, so nothing could know it was finished - measured on this
-# box on 2026-09-21, seven idle `<repo>-pr-N-review` panes, six of them for
-# PRs that had already merged, holding ~3.0 GB of RSS between them. `cel gc`
-# could not even see them: it considers only panes under ~/.herdr/worktrees,
-# and a reviewer runs in the orchestrator's own checkout.
+# THE REVIEWER REGISTRY. A worker is a DELEGATION with a ledger row, a release
+# verb and a gc pass; a reviewer needs its own record, or nothing can know it is
+# finished and its idle pane outlives its PR.
 #
 # Deliberately NOT the delegation ledger: a reviewer is not a delegation and
 # must not appear in `cel-fanout status`. It is box-level state, so it lives
@@ -763,11 +702,8 @@ _reviewers_write_raw() { # <json-array> - the write itself; callers hold the loc
 }
 
 # EVERY READ-MODIFY-WRITE OF THE REGISTRY HAPPENS HERE, UNDER A LOCK. The
-# rename at the end is atomic, but the read before it is not: `cel gc` reads
-# the rows, spends seconds in `gh` per reviewer and writes back, and a
-# `cel run reviewer` that recorded a row in that window was simply gone -
-# last write wins, so the next call for that PR split a duplicate pane and
-# the one-reviewer-per-PR guarantee this file exists to give was lost.
+# rename is atomic but the read before it is not, and `cel gc` holds rows for
+# seconds of `gh` calls: unlocked, last write wins and a row is lost.
 #
 # A registry somebody else is holding is REFUSED, never clobbered: the
 # caller is told, and the worst case is a reviewer that is not indexed,
@@ -824,12 +760,10 @@ reviewers_drop() { # <repo> <pr>
     'map(select(.repo != $r or ((.pr | tostring) != $p)))'
 }
 
-# THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. Every reviewer
-# that predates the registry - and on the box that produced this rule that
-# was all seven of them - has no row and would be invisible to anything that
-# only read the file. What it does have is the NAME `cel run reviewer` gave
-# it (_run_agent_name of "<repo>/pr-<n>-review"), so the roster itself says
-# which panes are reviewers and which pull request each is for.
+# THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. A reviewer with no
+# row still has the NAME `cel run reviewer` gave it (_run_agent_name of
+# "<repo>/pr-<n>-review"), so the roster says which panes are reviewers and for
+# which pull request.
 #
 # The repo comes from the pane's cwd when there is one: the agent name has
 # been through the herdr name sanitiser (lowercased, truncated to 32) and is
@@ -842,8 +776,8 @@ reviewers_discover() { # <agents-json> -> repo<TAB>pr<TAB>pane<TAB>agent<TAB>sta
     case "$pr" in ''|*[!0-9]*) continue;; esac
     cwd="$(pane_cwd "$cwd")"
     repo="${cwd##*/}"
-    # A reviewer's own checkout is <reviews>/<repo>-pr-<n> (CEL-55): the
-    # folder name carries the PR, and the repo is what precedes it.
+    # A reviewer's own checkout is <reviews>/<repo>-pr-<n>: the folder
+    # name carries the PR, and the repo is what precedes it.
     case "$repo" in *-pr-"$pr") repo="${repo%-pr-"$pr"}" ;; esac
     [ -n "$repo" ] || repo="${name%-pr-*}"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$pr" "$pane" "$name" "$status" "${backend:-herdr}"
@@ -861,14 +795,9 @@ _run_agent_name() { # <alias>
 }
 
 # WHO IS ALREADY STANDING HERE. An orchestrator's identity in this plane is a
-# DIRECTORY, not a name: on 2026-09-18 herdr cleared `widget-orch`'s name
-# when it restarted and every surface that resolves an orchestrator by its
-# alias then read the live pane as dead - which invites starting a second one
-# on top of it. The roster carries each agent's cwd, so the question "is
-# anything alive in this product's directory" has an answer that survives a
-# lost name. Empty when herdr cannot be asked: silence from the observer is
-# not evidence about the observed, and a refusal on it would block every
-# launch on a box whose herdr is restarting.
+# DIRECTORY, not a name: herdr can lose a name on restart, and a live pane read
+# as dead invites a second one on top of it. Status 2 when the roster cannot be
+# read: callers refuse admission rather than guess the directory is empty.
 #
 # A NAMELESS AGENT REPORTS ITS NAME AS `-`, never as an empty field: tab is an
 # IFS whitespace character, so a leading empty column collapses under `read`
@@ -1053,19 +982,16 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   _run_agent_start "$pane_id" core "$runtime" "${AGENT_ARGS[@]}"
 }
 
-# --- resuming root and the orchestrators (CEL-63) --------------------------
-# Restarting an orchestrator to pick up new launch flags used to throw its
-# conversation away: `cel run orchestrator` always started fresh, and the only
-# way to keep context was a hand-written script. And omp's --continue is not
-# a substitute - three omp sessions shared the celestial checkout's cwd and
-# --continue takes the newest, not the orchestrator's. So a resume always
-# names the exact session herdr recorded for the pane.
+# --- resuming root and the orchestrators -----------------------------------
+# A restart keeps the conversation: a resume always names the exact session
+# recorded for the pane, never omp's --continue, which takes the newest
+# session in the cwd - not necessarily this agent's.
 
 # The last session seen for each root/orchestrator DIRECTORY - identity here
 # is a directory, not a name (see _run_live_agent_in_cwd) - so an
 # orchestrator that died can be brought back into its own conversation.
 # Each entry is {session, runtime}: only the runtime that wrote a session can
-# resume it (AH-261102). Older entries are a bare session string.
+# resume it. Older entries are a bare session string.
 _run_sessions_file() {
   if [ -n "${CEL_ORCH_SESSIONS:-}" ]; then printf '%s' "$CEL_ORCH_SESSIONS"
   elif [ -n "${CEL_TESTING:-}" ]; then printf '%s' "${TMPDIR:-/tmp}/cel-orch-sessions.json"
@@ -1113,13 +1039,10 @@ run_sessions_note_roster() { # <agents-json>
   return 0
 }
 
-# The live agent for a root/orchestrator, BY HERDR NAME. The owner's
-# hand-written restart script chose by cwd and took the FIRST omp in the
-# celestial checkout: that was another session in another pane, which it
-# relaunched as `celestial-orch` with the inbox hook while the real
-# orchestrator lost its name. So cwd+runtime is a fallback ONLY when exactly
-# one agent there matches; several is an ambiguity the operator settles with
-# --pane. A missing name or session is `-` so tab-splitting keeps columns.
+# The live agent for a root/orchestrator, BY HERDR NAME. Choosing by cwd alone
+# can pick another session in another pane, so cwd+runtime is a fallback ONLY
+# when exactly one agent there matches; several is an ambiguity the operator
+# settles with --pane. A missing name or session is `-` so tab-splitting keeps columns.
 #
 # Status: 0 found (one row), 1 none, 3 ambiguous (every candidate row),
 # 4 the named --pane holds an agent under ANOTHER name (that row) - which is
@@ -1147,11 +1070,6 @@ _run_orch_agent() { # <name> <cwd> <runtime> [pane] -> name<TAB>pane<TAB>status<
   return 0
 }
 
-# RESUME (CEL-63). Root, core and the orchestrators carry their conversation
-# across a restart; workers and reviewers never do - each is one ticket or
-# one PR, and a resumed one would carry the last job's context into this.
-# Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
-# flag to its AGENT_ARGS.
 _run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
   [ "$1" = opencode ] && [ -n "$2" ] || return 0
   rex_native_session_valid "$1" "$2" \
@@ -1162,13 +1080,12 @@ _run_resume_identity_check() { # runtime candidate cwd scoped-agent [wsdir]
     || die 'cel run: saved OpenCode context is not a ready matching native v2 root; preserve it and use --fresh --handoff only for an intended migration'
 }
 
-# A RUNTIME SWITCH NEVER RESUMES (AH-261102). `--restart --profile opus` moved
-# an omp lane onto Claude and planned `claude --resume <omp transcript>`. One
-# runtime cannot resume another's session, so the launch starts fresh, says
-# so, and leaves the old session where it is. OpenCode is not switched here:
-# its migration is explicit (--fresh --handoff; _run_resume_identity_check).
-# The recorded runtime decides; a record without one (older map entries, a
-# roster row naming no agent) is judged by the shape this runtime resumes.
+# A RUNTIME SWITCH NEVER RESUMES: one runtime cannot resume another's session,
+# so the launch starts fresh, says so, and leaves the old session where it is.
+# OpenCode is not switched here: its migration is explicit (--fresh --handoff;
+# _run_resume_identity_check). The recorded runtime decides; a record without
+# one (older map entries, a roster row naming no agent) is judged by the shape
+# this runtime resumes.
 _run_resume_foreign() { # <runtime> <session> <recorded-runtime|""> <agent-name> -> 0: start fresh
   local rt="$1" s="$2" was="$3"
   [ "$rt" != opencode ] || return 1
@@ -1197,6 +1114,10 @@ _run_resume_parent_session() { # <session> -> the session to resume
   fi
 }
 
+# RESUME. Root, core and the orchestrators carry their conversation across a
+# restart; workers and reviewers never do - each is one ticket or one PR.
+# Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
+# flag to its AGENT_ARGS.
 _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint> [wsdir]
   local role="$1" agent_name="$2" cwd="$3" runtime="$4" pane_opt="$5"
   local restart="$6" fresh="$7" force="$8" dry_run="$9" relaunch="${10}" adopt="${11}" resume_wsdir="${12:-}"
@@ -1258,11 +1179,9 @@ _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restar
   fi
   # Both live receipts and dead-registry lookup pass the same native boundary.
   _run_resume_identity_check "$runtime" "$RESUME_SESSION" "$cwd" "cel-$role" "$resume_wsdir"
-  # NEVER A SECOND PROCESS ON ONE SESSION FILE (CEL-102), whether or not
-  # herdr still has a name for the pane already resuming it. The pane being
-  # restarted is the one expected resumer - it is about to be replaced.
-  # Only when this runtime CAN resume: one that cannot starts fresh and is
-  # no second resumer.
+  # NEVER A SECOND PROCESS ON ONE SESSION FILE, whether or not herdr still has
+  # a name for the pane resuming it. The pane being restarted is the expected
+  # resumer; a runtime that cannot resume starts fresh and is no second resumer.
   if [ "$role" != root ] && [ -n "$RESUME_SESSION" ] && [ "$force" -eq 0 ] \
      && [ -n "$(agent_resume "$runtime" flag)" ]; then
     local rs rpid rpane others="" holders
@@ -1339,12 +1258,6 @@ _run_cmdline() { # <pid> -> argv, one per line
   tr '\0' '\n' < "$(_run_proc_root)/$1/cmdline" 2>/dev/null || true
 }
 
-# WHO IS RESUMING WHICH SESSION FILE (CEL-102). Two omp processes resumed one
-# session file for two days - an old pane that had lost its herdr name, and a
-# fresh orchestrator - and each answered mail on its own. herdr's roster
-# cannot see a nameless pane's session, but /proc can: every live process
-# whose argv says `--resume <file>` (or `--resume=<file>`), with the pane it
-# stands in (HERDR_PANE_ID from its environ; `-` when it has none).
 # The runtimes that resume a session, by the basename of argv[0] or (for a
 # script run by node/bun) argv[1].
 _run_is_agent_argv() { # <cmdline-file>
@@ -1357,6 +1270,10 @@ _run_is_agent_argv() { # <cmdline-file>
   return 1
 }
 
+# WHO IS RESUMING WHICH SESSION FILE. herdr's roster cannot see a nameless
+# pane's session, but /proc can: every live agent whose argv says `--resume
+# <file>` (or `--resume=`, `--session`), with the pane it stands in
+# (HERDR_PANE_ID from its environ; `-` when it has none).
 run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live holder
   local d pid prev a sess pane item f anc hops held
   local -A managed=() managed_pane=() cand=() cand_pane=()
@@ -1419,14 +1336,13 @@ run_session_resumers() { # -> native session<TAB>pid<TAB>pane, one per live hold
   return 0
 }
 
-# CLAIMING A SESSION (CEL-102). Two launches that overlap both see an empty
-# /proc - neither agent has started yet. The check and a short-lived claim are
-# taken under one flock, so the second launch inside the window
+# CLAIMING A SESSION. Two launches that overlap both see an empty /proc -
+# neither agent has started yet. The check and a short-lived claim are taken
+# under one flock, so the second launch inside the window
 # (CEL_SESSION_CLAIM_SECS, default 60) sees the first one's claim.
 #
-# The claim names the pane it was taken for (CEL-103): `--restart` of that same
-# pane a few seconds later is the pane replacing itself, not a second resumer,
-# and was being refused by its own claim.
+# The claim names the pane it was taken for: `--restart` of that same pane is
+# the pane replacing itself, not a second resumer.
 _run_session_claim_file() { # <session> -> path of its claim file
   local dir key
   dir="$(dirname "$(_run_sessions_file)")/session-claims"
@@ -1453,10 +1369,8 @@ _run_session_claim() { # <session> [pane] -> 0 claimed, 1 claimed by another lau
   return "$rc"
 }
 
-# A LAUNCH THAT FAILS GIVES ITS CLAIM BACK (CEL-103). A refused or crashed
-# launch kept the claim for its full minute, so the obvious retry was refused
-# too unless the operator reached for --force - the flag that also skips the
-# check the claim exists for.
+# A LAUNCH THAT FAILS GIVES ITS CLAIM BACK, so the retry is not refused for the
+# claim's full minute or pushed to --force, which also skips the check.
 _run_session_release() { # <session>
   rm -f "$(_run_session_claim_file "$1")" 2>/dev/null || true
 }
@@ -1513,9 +1427,8 @@ run_launch_missing() { # <expected-argv-file> <actual-argv-file>
   printf '%s' "$out"
 }
 
-# Both directions of the difference (Sourcery on #98): a flag the current
-# launch has DROPPED is as stale as one it added, so the old line carries
-# something the plane decided to stop passing. Empty when the lines agree.
+# Both directions of the difference: a flag the current launch has DROPPED is
+# as stale as one it added. Empty when the lines agree.
 run_launch_diff() { # <expected-argv-file> <actual-argv-file> -> "missing: ...; extra: ..."
   local missing extra out=""
   missing="$(run_launch_missing "$1" "$2")"
@@ -1571,12 +1484,10 @@ _run_restart_confirm() { # <pane> <cwd> <runtime> <name> <argv...>
 _run_gateway_env() { # <runtime> <agent-name> [require-key] [session-id] mutates GATEWAY_ENV
   local runtime="$1" agent_name="$2" require_key="${3:-1}" token session_var
   # Its own statement: bash expands every word of one `local` before assigning
-  # any, so a default naming $agent_name on the line above read it EMPTY and
-  # the pane exported CEL_SESSION_ID='' - one affinity key for every worker.
+  # any, so on the line above $agent_name would still be empty here.
   local session_id="${4:-${CEL_SESSION_ID:-$agent_name}}"
-  # Both runtimes read the CLIProxyAPI api-key file. omp's own
-  # `auth-gateway token` is the retired broker's (CEL-60) and the gateway
-  # answers it with 401 (CEL-136).
+  # Both runtimes read the CLIProxyAPI api-key file; the gateway answers omp's
+  # own `auth-gateway token` with 401.
   local key_file; key_file="$(_gateway_key_file)"
   if [ "$require_key" = 1 ] && { [ ! -r "$key_file" ] || [ ! -s "$key_file" ]; }; then
     die "gateway API key file is missing, empty, or unreadable - cel gateway install"
@@ -1824,7 +1735,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     case "$session_backend" in herdr|rex) ;; *) die 'workspace session_backend must be herdr or rex' ;; esac
   fi
 
-  # FAIL CLOSED ON IDENTITY (CEL-70). A pane whose declared GitHub account
+  # FAIL CLOSED ON IDENTITY. A pane whose declared GitHub account
   # cannot produce a token would act as whichever account is active - the
   # exact mistake the github: block exists to prevent. Dry runs too: a
   # preview of a launch that would refuse must not look like a success.
@@ -1926,19 +1837,16 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
       # ONE PULL REQUEST, ONE REVIEWER. Asking for a reviewer that is already
-      # standing gets that one back; before this, a second `cel run reviewer
-      # --pr 71` split another pane over the same PR and left no way to tell
-      # the two apart. Checked before anything is created, so a dry run
-      # previews the reuse honestly and no row is written twice.
+      # standing gets that one back. Checked before anything is created, so a
+      # dry run previews the reuse honestly and no row is written twice.
       local existing
       if existing="$(reviewers_find "$repo" "$pr")"; then
         c_ok "reviewer for $repo#$pr is already running as $(printf '%s' "$existing" | jq -r '.agent // "?"') in pane $(printf '%s' "$existing" | jq -r .pane) - reusing it"
         return 0
       fi
-      # A LIVE REVIEWER WITH NO ROW IS STILL THE REVIEWER (CEL-94). Its row
-      # may have been pruned or dropped under a stale pane id; relaunching
-      # then dropped the checkout it was working in. The roster finds it by
-      # the directory it stands in, and the row is written back.
+      # A LIVE REVIEWER WITH NO ROW IS STILL THE REVIEWER: its row may have been
+      # pruned or dropped under a stale pane id. The roster finds it by the
+      # directory it stands in, and the row is written back.
       local live_path live
       live_path="$(reviewer_checkout_path "$repo" "$pr")"
       if [ -e "$live_path" ] && live="$(_reviewer_checkout_occupant "$live_path")" \
@@ -2077,7 +1985,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # gateway catalog, and explicit Claude IDs are routed through that gateway.
   # A Codex-family id (gpt-6.1-sol, ompgw-codex/gpt-6-astra) goes through the
   # gateway's codex provider - the same route and vetoes a worker profile
-  # with that model gets (owner request 2026-10-28: reviews on Sol/Astra).
+  # with that model gets.
   if [ "$role" = reviewer ] && gateway_codex_model_p "$model"; then
     PROFILE_MODEL="$model" PROFILE_WSDIR="$wsdir" PROFILE_VIA=gateway PROFILE_VETO=""
     _profile_gateway_route_codex reviewer pi
@@ -2144,11 +2052,10 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # A lane's role file stands in its own directory, or it would overwrite the
   # main agent's (role-*.md, the shape lib/gc.sh recognises).
   [ -z "$lane" ] || bodyfile="$cwd/role-solo.md"
-  # ONE ROLE FILE PER PULL REQUEST. The body now carries a head SHA, so a
-  # shared $ws/.cel/role-reviewer.md would have two reviewers overwriting each
-  # other's brief and one of them reading a SHA from the other's PR. The name
-  # still ENDS in role-reviewer.md: lib/gc.sh tells a long-lived agent from a
-  # stray one by that substring.
+  # ONE ROLE FILE PER PULL REQUEST. The body carries a head SHA, so a shared
+  # $ws/.cel/role-reviewer.md would have two reviewers reading each other's
+  # brief. The name still ENDS in role-reviewer.md: lib/gc.sh tells a
+  # long-lived agent from a stray one by that substring.
   [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
   if [ "$runtime" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
     # Do not overwrite another implicit product's shared role file.
@@ -2165,8 +2072,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   _run_agent_args "$runtime" "$tag" "$RUN_BODY" "$dry_run" "$wsdir" "$bodyfile"
 
   # Model and thinking flags ride ahead of the role injection, spelled the way
-  # THIS runtime spells them (agents.yaml model_flag / thinking) rather than
-  # assuming --model, which is what limited this to claude and omp before.
+  # THIS runtime spells them (agents.yaml model_flag / thinking).
   local -a PROFILE_ARGS=()
   profile_launch_args "$runtime" "$model" "$thinking" "${PROFILE_ISOLATE:-}"
   [ "${#PROFILE_ARGS[@]}" -eq 0 ] || AGENT_ARGS=("${PROFILE_ARGS[@]}" "${AGENT_ARGS[@]}")
@@ -2177,8 +2083,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # READ-ONLY ORCHESTRATORS. Root and the sub-orchestrators get the runtime's
   # guard hook so repository writes from their panes are refused at the tool
   # call; workers and reviewers do not - writing is a worker's whole job, and a
-  # reviewer only reads. Enforced here rather than requested in the role text,
-  # because a prompt was what caused the incident this exists to prevent.
+  # reviewer only reads. Enforced here, not requested in the role text: a prompt
+  # is not a guard.
   case "$role" in
     root|orchestrator)
       local gflag gfile
@@ -2209,8 +2115,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       # mailbox name does not end in -orch, so nothing can derive it.
       LAUNCH_ENV_EXTRA=("CEL_PRODUCT=$product")
       [ -z "$lane" ] || LAUNCH_ENV_EXTRA+=("CEL_LANE=$lane") ;;
-    # Pane alias is the reader identity. Claude's hook needs it explicitly
-    # because reviewers share a tab cwd rather than standing in a worktree.
+    # Pane alias is the reader identity, passed explicitly so delivery never
+    # depends on the pane's cwd.
     worker|reviewer) inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
@@ -2239,15 +2145,12 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     fi
   fi
 
-  # THROUGH THE GATEWAY. A `via: gateway` profile does not reach a provider:
-  # it reaches this box's auth-gateway, which holds several subscriptions per
-  # provider and picks one BY SESSION KEY. pi sends no session identity of its
-  # own (proved with a logging proxy in SPIKE-gateway), so the only lever is a
-  # provider `headers` entry bound to an environment variable - which means
-  # the pane needs two variables set before the agent starts:
+  # THROUGH THE GATEWAY. A `via: gateway` profile reaches this box's gateway,
+  # which picks a subscription BY SESSION KEY; pi sends no session identity of
+  # its own, so a provider `headers` entry reads it from the environment:
   #
   # OMP_GATEWAY_TOKEN is resolved in the pane from the file-backed CLIProxyAPI
-  # key, for pi and omp alike (omp: the celgw provider in models.yml, CEL-136).
+  # key, for pi and omp alike (omp: the celgw provider in models.yml).
   # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
   # for its life; the next worker may land on another.
   local -a GATEWAY_ENV=()
@@ -2330,12 +2233,6 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     return 0
   fi
 
-  if [ -n "$restart_pane" ]; then
-    _run_restart_in_place "$role" "$restart_pane" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" \
-      "$dry_run" "$agent_name" "$runtime" "$cwd"
-    return 0
-  fi
-
   local -a CREATE_ARGS
   if [ "$role" = "worker" ]; then
     local repodir="$wsdir/repos/$repo"
@@ -2392,17 +2289,12 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run"
 }
 
-# THE PROCESS IN A PANE (CEL-81). The first cut found an orchestrator by the
-# launch marks in /proc/*/environ, and on this box it read /proc/1187 -
-# `systemd --user`, an ANCESTOR of every pane, which the user cannot read - and
-# reported bundle-orch as missing every flag it had. So the process is found
-# DOWNWARD from the pane's own shell (herdr names its pid): the runtime binary
-# as argv[0], standing in the pane's cwd. Nothing above the shell is ever
-# consulted.
+# THE PROCESS IN A PANE is found DOWNWARD from the pane's own shell (herdr names
+# its pid): the runtime binary as argv[0], standing in the pane's cwd. Nothing
+# above the shell is consulted - an ancestor like `systemd --user` is every pane's.
 #
 # BUILTINS ONLY in the walk. `cel fleet` reads this for every orchestrator on
-# every console refresh, and its spawn budget (tests/fleet.test.sh) is the
-# reason a tr/sed/readlink per /proc entry is not an option: the cwd is
+# every console refresh, within a spawn budget (tests/fleet.test.sh): the cwd is
 # compared with `-ef`, argv and PPid are read with `read`.
 _run_ppid() { # <pid> -> sets _RUN_PPID
   local k v
@@ -2428,10 +2320,7 @@ _run_descends() { # <pid> <ancestor> -> sets _RUN_DEPTH (hops up to it)
 # THIS IS THE ONE ANSWER to "which process is this pane's orchestrator":
 # `cel update --check`, --restart-orchestrators, doctor, the steward's repair
 # and the console all ask it. It takes the runtime process NEAREST the pane's
-# shell, newest pid only between equals. It used to take the newest of all,
-# and omp's own helpers are omp too (a js-eval worker, a daemon broker, a
-# task it spawned) - so a freshly restarted alpha-orch with every flag was
-# reported missing all of them, and doctor called it stripped (CEL-87).
+# shell, newest pid only between equals: omp's own helpers are omp too.
 _run_pane_pid() { # <pane> <cwd> <runtime>
   local info shell d pid a0 a1 best=""
   _RUN_PID=""; _RUN_WHY=""
@@ -2602,11 +2491,10 @@ _run_orch_verdict() { # ws role product name pane cwd runtime
   printf '%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$keep" "$_RUN_BUILD" "$ws" "$name" "$_RUN_PID" "$_RUN_LAUNCH" "${_RUN_DETAIL:--}" "$signature" > "$vfile" 2>/dev/null || true
 }
 
-# EVERY ROOT/ORCHESTRATOR AND ITS LAUNCH LINE. `cel update` changes hooks and
-# launch flags, but a running orchestrator keeps the command line it started
-# with: the inbox hook (CEL-65) and --no-prewalk (CEL-68) silently did not
-# apply to any orchestrator that was already up. So each live one's actual
-# argv is compared with what `cel run --dry-run` would launch now.
+# EVERY ROOT/ORCHESTRATOR AND ITS LAUNCH LINE. A running orchestrator keeps the
+# command line it started with, so hooks and flags `cel update` changes do not
+# reach it; each live one's actual argv is compared with what `cel run --dry-run`
+# would launch now.
 #
 # The candidates and their live agents come from ONE jq per workspace over the
 # workspace's JSON and the roster - the same program `cel fleet` runs, so the
@@ -2642,7 +2530,7 @@ run_orchestrator_candidates() { # <ws> <wsdir> <roster-json>
     | . as $c
     | ([$a[] | select(.name == $c.name)]) as $byname
     | ([$a[] | select((.cwd // "") == $c.cwd)]) as $bycwd
-    # by name; cwd only when exactly one agent stands there (CEL-63)
+    # by name; cwd only when exactly one agent stands there
     | (if ($byname | length) > 0 then $byname[0] elif ($bycwd | length) == 1 then $bycwd[0] else null end) as $l
     | [$c.role, $c.product, $c.name, $c.cwd, $c.mode,
        (if $l then "live" else "-" end),
@@ -2696,9 +2584,9 @@ run_stale_orchestrators() {
   return 0
 }
 
-# CEL-85: herdr relaunches an orchestrator as a bare `omp --resume=<file>`
-# after a server restart - no hooks, no CEL_ env - so this uses the pane-shell
-# walk above, which needs neither.
+# herdr relaunches an orchestrator as a bare `omp --resume=<file>` after a
+# server restart - no hooks, no CEL_ env - so this uses the pane-shell walk
+# above, which needs neither.
 # Every live orchestrator whose runtime takes an inbox hook, and whether its
 # process actually carries it. One row each:
 #   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped|unknown<TAB>restart-command
@@ -2736,8 +2624,3 @@ run_stripped_orchestrators() {
   done
   return 0
 }
-# STALE LAUNCH LINES. `cel update` changes hooks and launch flags, but a
-# running orchestrator keeps the command line it started with: the inbox hook
-# (CEL-65) and --no-prewalk (CEL-68) silently did not apply to any
-# orchestrator that was already up. So compare each live one's actual argv
-# (/proc/<pid>/cmdline) with what `cel run --dry-run` would launch now.

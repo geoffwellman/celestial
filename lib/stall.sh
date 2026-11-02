@@ -1,28 +1,13 @@
 # shellcheck shell=bash
-# Dead workers.
+# Dead workers, observed from OUTSIDE the agent.
 #
-# A worker whose provider stream dies leaves its pane sitting on a retry
-# prompt. herdr reports that pane as `idle` - the SAME word it reports for a
-# worker waiting for input, and for one between turns. Nothing escalated, the
-# Linear ticket kept saying In Progress, and on 2026-09-14 three workers died
-# on the identical error:
-#
-#   ✘ server_error: Upstream error from Together: Stream error: h2 protocol
-#     error: error reading a body from connection
-#   ↻ F5 to Retry
-#
-# One of them sat that way for roughly fifteen hours with its branch never
-# pushed, so the work existed only in a local worktree - which the gc reaper
-# removes. Root found all three by hand, and only because the owner asked.
-#
-# WHY THE INBOX WATCHERS COULD NOT SEE IT: the orchestrators watch the
-# celestial inbox, and a dead worker sends no mail. That is the point. An
-# inbox-only watcher is structurally blind to producer failure - it can only
-# see agents alive enough to report. Liveness has to be observed from OUTSIDE
-# the agent, which is what this file does.
+# A worker whose provider stream dies sits on a retry prompt that the runtime
+# reports as `idle` - the same word as a healthy worker between turns - and a
+# dead worker sends no mail, so inbox watchers cannot see it. Its unpushed work
+# lives only in a worktree that gc may remove.
 #
 # Everything here is a pure function of (pane text, worktree, clock) so the
-# real failure can be replayed in a test rather than described.
+# failures can be replayed in tests.
 [ -n "${_CEL_STALL:-}" ] && return 0
 _CEL_STALL=1
 # shellcheck source=lib/common.sh
@@ -83,10 +68,8 @@ stall_quiet_secs() { # <worktree>
 # whether losing this worktree costs work should be computed the same way by
 # whoever is asking.
 # `.agent/` is excluded: result.md and verdict.json are the worker's REPORT,
-# written at the end and never committed, so counting them made every finished
-# worker look like one holding work at risk. Three did on the first live run.
-# The incident's at-risk files were a chrome wrapper and two untracked modules -
-# code - and those still count.
+# written at the end and never committed, so counting them would make every
+# finished worker look like one holding work at risk. Untracked code still counts.
 stall_work_at_risk() { # <worktree>
   local wt="$1" br dirty unpushed base
   [ -d "$wt" ] || return 0
@@ -97,8 +80,8 @@ stall_work_at_risk() { # <worktree>
     if git -C "$wt" rev-parse --verify -q "origin/$br" >/dev/null 2>&1; then
       unpushed="$(git -C "$wt" rev-list --count "origin/$br..HEAD" 2>/dev/null || printf 0)"
     else
-      # No remote branch AT ALL - the 404 case from the incident. Everything
-      # this worktree has ever committed is unpushed.
+      # No remote branch AT ALL: everything this worktree has ever committed
+      # is unpushed.
       base="$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')"
       git -C "$wt" rev-parse --verify -q "$base" >/dev/null 2>&1 \
         && unpushed="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || printf 0)" \
@@ -139,7 +122,7 @@ stall_branch_pushed() { # <worktree> -> yes|no|?
 : "${CEL_STALL_MARKER_SECS:=900}"
 : "${CEL_STALL_QUIET_SECS:=10800}"
 
-# WHO GETS ASKED ABOUT, and it is deliberately almost nobody (CEL-42).
+# WHO GETS ASKED ABOUT, and it is deliberately almost nobody.
 #
 # The steward sweeps every five minutes across every workspace. A sweep that
 # asked a model about twenty healthy workers would be a waste, and it would
@@ -149,9 +132,9 @@ stall_branch_pushed() { # <worktree> -> yes|no|?
 # about it.
 #
 #   working, but the pane text has not moved in five minutes
-#                        Three of the four failures this exists for reported
-#                        `working` throughout. Five minutes is longer than a
-#                        model turn and shorter than a test run.
+#                        A runtime can report `working` while hung. Five
+#                        minutes is longer than a model turn and shorter than
+#                        a test run.
 #   idle or done, ledger still running
 #                        The runtime says there is nothing to do and the ledger
 #                        says the work is not finished. One of them is wrong.
@@ -160,7 +143,7 @@ stall_branch_pushed() { # <worktree> -> yes|no|?
 #                        a crash or a worker quoting one.
 #
 # A vanished agent is the TIMERS' business - there is no pane left to read -
-# and a worker that wrote its result is finished, not stalled (CEL-22).
+# and a worker that wrote its result is finished, not stalled.
 : "${CEL_LIVENESS_STILL_SECS:=300}"
 stall_liveness_candidate() { # <live> <ledger-state> <secs-since-output-changed> <marker> <has-result 0|1>
   local live="$1" state="$2" still="${3:-}" marker="${4:-}" done_="${5:-0}"
@@ -181,12 +164,10 @@ stall_liveness_candidate() { # <live> <ledger-state> <secs-since-output-changed>
 #   quiet           no marker, but nothing has moved in a very long time
 #   ""              alive, or not yet conclusive
 #
-# CEL-42 adds a fifth outcome and a fifth argument: the classification of what
-# the pane is DOING (lib/liveness.sh), which is an EXTRA input and never a
-# replacement. The marker and quiet rules still stand on their own and still
-# fire first, so a box with no router, no key or a failing endpoint behaves
-# exactly as it did before; the classification only fills the gaps they leave -
-# which, on the evidence of the last two days, is where every real failure was.
+# A fifth argument carries the classification of what the pane is DOING
+# (lib/liveness.sh) - an EXTRA input, never a replacement. The marker and quiet
+# rules still fire first, so with no router, key or working endpoint nothing
+# changes; the classification only fills the gaps they leave:
 #   looping|crashed|waiting_on_input|finished   what the pane is doing
 stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1] [liveness-verdict]
   local live="$1" text="$2" quiet="${3:-}" done_="${4:-0}" lv="${5:-}"
@@ -197,13 +178,9 @@ stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1] [liv
     # that outranks the runtime's own word for its state.
     working)     [ -n "$lv" ] && printf '%s' "$lv"; return 0 ;;
   esac
-  # A WORKER THAT WROTE ITS RESULT IS FINISHED, NOT STALLED. It has reached the
-  # last instruction it was given - write .agent/result.md and stop - so of
-  # course it is idle and of course nothing has been written since. Reporting
-  # that as a stall is how a watcher earns its reputation for crying wolf: on
-  # the first live run this sweep flagged three finished workers,
-  # each with a pushed branch and an open PR. `cel-fanout status` reconciles
-  # these to `finished`; they are its business, not this one's.
+  # A WORKER THAT WROTE ITS RESULT IS FINISHED, NOT STALLED: it was told to
+  # write .agent/result.md and stop, so idle and quiet is expected.
+  # `cel-fanout status` reconciles these to `finished`; they are its business.
   [ "$done_" = 1 ] && return 0
   local marker; marker="$(stall_marker "$text")"
   if [ -n "$marker" ]; then
@@ -219,16 +196,14 @@ stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1] [liv
 
 # Loud when delay costs the WORK, not merely time. A stalled worker whose
 # branch is pushed can be re-delegated at leisure; one holding commits the
-# remote has never seen is a gc sweep away from losing them outright - which
-# is exactly what nearly happened on 2026-09-14.
+# remote has never seen is a gc sweep away from losing them outright.
 stall_severity() { # <verdict> <work-at-risk>
   [ -n "$1" ] || return 0
   [ -n "$2" ] && printf 'loud' || printf 'normal'
 }
 
-# The escalation line. These four facts - ticket, pane, how long, and what is
-# at risk - are precisely what root had to gather by hand, so the message
-# carries them rather than asking the reader to go and look.
+# The escalation line carries the four facts an operator needs - ticket, pane,
+# how long, and what is at risk - rather than asking the reader to go and look.
 stall_message() { # <verdict> <ticket> <pane> <quiet-secs> <pushed> <at-risk> <branch>
   local verdict="$1" ticket="$2" pane="$3" quiet="$4" pushed="$5" risk="$6" branch="$7"
   local age="unknown"
@@ -237,8 +212,8 @@ stall_message() { # <verdict> <ticket> <pane> <quiet-secs> <pushed> <at-risk> <b
   case "$verdict" in
     vanished) what="its agent is GONE from the roster (ledger still says running)" ;;
     quiet)    what="nothing has been written for $age and it is not working" ;;
-    # CEL-42: read off the pane rather than off the clock, which is why none
-    # of these mentions an age at all.
+    # Read off the pane rather than the clock, so only waiting_on_input (gated
+    # on how long the pause has lasted) mentions an age.
     looping)  what="its pane is REPEATING itself - the same command and output over and over, with no progress" ;;
     crashed)  what="its pane is showing a crash, not an agent" ;;
     waiting_on_input) what="it is WAITING for someone to answer it and has been for $age" ;;
