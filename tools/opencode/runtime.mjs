@@ -227,7 +227,13 @@ export async function createPlugin(context, deps = {}) {
     if (typeof arg !== 'string' || !arg.trim()) throw new Error(`celestial guard: cannot classify ${mode}`);
     if (mode === 'command' && /^CEL_GUARD_ALLOW_ONCE=1(?:\s|$)/.test(arg)) return;
     if (mode === 'path') arg = path.resolve(directory, arg);
-    const verdict = (await run('bash', [path.join(root, 'tools/hooks/guard-classify.sh'), mode, directory, arg])).trim();
+    let verdict;
+    // Exit 2 is the classifier reporting its own error (bad mode or policy).
+    // It used to print `allow` instead, so allow here keeps OpenCode's behaviour
+    // until the owner picks one fail-open/closed policy; any other failure of the
+    // classifier itself still refuses.
+    try { verdict = (await run('bash', [path.join(root, 'tools/hooks/guard-classify.sh'), mode, directory, arg])).trim(); }
+    catch (error) { if (error?.code === 2) return; throw error; }
     if (verdict.startsWith('deny')) throw new Error(`celestial guard: ${verdict.slice(4).trim()}`);
   }
   async function deliver() {

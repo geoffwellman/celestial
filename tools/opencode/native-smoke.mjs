@@ -75,7 +75,7 @@ try {
   await mkdir(path.join(fakeRoot, 'tools/hooks'), { recursive: true });
   await mkdir(home); await mkdir(product);
   await writeFile(path.join(fakeRoot, 'bin/cel'), '#!/bin/bash\nset -euo pipefail\ncase "$1 $2" in\n "inbox count") if [ -s "$CEL_SMOKE_MAIL" ]; then printf 1; else printf 0; fi;;\n "inbox read") cat "$CEL_SMOKE_MAIL"; rm -f "$CEL_SMOKE_MAIL";;\n "sessions note") CEL_ROOT="$CEL_SMOKE_REAL_ROOT" "$CEL_SMOKE_REAL_ROOT/bin/cel" "$@" 2>> "$CEL_SMOKE_REPORTER_LOG"; jq -c . "$CEL_REX_RECORD" >> "$CEL_SMOKE_NOTES";;\n *) exit 2;;\nesac\n', { mode: 0o700 });
-  await writeFile(path.join(fakeRoot, 'tools/hooks/guard-classify.sh'), '#!/bin/bash\nset -euo pipefail\nverdict="$(CEL_ROOT="$CEL_SMOKE_REAL_ROOT" bash "$CEL_SMOKE_REAL_ROOT/tools/hooks/guard-classify.sh" "$@")"\nprintf "%s\\n" "$verdict" >> "$CEL_SMOKE_GUARD_LOG"\nprintf "%s\\n" "$verdict"\n', { mode: 0o700 });
+  await writeFile(path.join(fakeRoot, 'tools/hooks/guard-classify.sh'), '#!/bin/bash\nset -uo pipefail\nverdict="$(CEL_ROOT="$CEL_SMOKE_REAL_ROOT" bash "$CEL_SMOKE_REAL_ROOT/tools/hooks/guard-classify.sh" "$@")"; rc=$?\nprintf "%s rc=%s\\n" "$verdict" "$rc" >> "$CEL_SMOKE_GUARD_LOG"\nprintf "%s\\n" "$verdict"\nexit "$rc"\n', { mode: 0o700 });
   await writeFile(path.join(dir, 'workspace.yaml'), 'name: native-opencode-fixture\nmode: solo\nrepos: []\n');
   const probeBin = path.join(dir, 'probe-bin'); await mkdir(probeBin);
   for (const name of ['gh', 'git']) await writeFile(path.join(probeBin, name), '#!/bin/bash\nprintf "unexpected owned probe command executed\\n" >&2\nexit 97\n', { mode: 0o700 });

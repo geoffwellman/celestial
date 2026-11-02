@@ -321,6 +321,18 @@ test('v2 shell/write/edit/patch inputs reach the real shared guard, including re
   } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
 });
 
+test('a classifier that reports its own error (exit 2) allows as before; other classifier failures still refuse', async () => {
+  let failure;
+  const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => { throw failure; } } });
+  try {
+    await f.emit(created());
+    failure = Object.assign(new Error('guard-classify: policy failed to load'), { code: 2 });
+    await f.tool('write', { path: 'allowed', content: 'x' });
+    failure = Object.assign(new Error('spawn bash ENOENT'), { code: 'ENOENT' });
+    await assert.rejects(f.tool('write', { path: 'allowed', content: 'x' }), /ENOENT/);
+  } finally { await f.cleanup(); }
+});
+
 test('recurring observer delivers already-idle later mail and retains failed admission debt without re-reading', async () => {
   const f = await fixture();
   try {

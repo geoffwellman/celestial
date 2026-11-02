@@ -245,9 +245,26 @@ const HERE_VERBS = {
   restart: "Restart this agent on its own session once this turn ends",
 };
 const HERE_CORE_VERBS = { focus: "Bring a product's agent forward: /cel-focus <product>" };
+// A BOUNDED CAPTURE. A land can run a noisy gate for most of an hour and all
+// of it would otherwise sit in this agent's memory: the first quarter of the
+// cap (how it started) and the last three quarters (how it ended) are kept,
+// and the middle is counted and said to be gone.
+function boundedOutput(max: number) {
+  const headMax = Math.floor(max / 4), tailMax = max - headMax;
+  let head = "", tail = "", dropped = 0;
+  return {
+    add(c: string): void {
+      if (head.length < headMax) { const take = c.slice(0, headMax - head.length); head += take; c = c.slice(take.length); }
+      if (!c) return;
+      tail += c;
+      if (tail.length > tailMax) { dropped += tail.length - tailMax; tail = tail.slice(tail.length - tailMax); }
+    },
+    text(): string { return dropped ? `${head}\n... (${dropped} characters of output dropped) ...\n${tail}` : head + tail; },
+  };
+}
 function runHere(verb: string, args: string, ctx): Promise<string> {
   const { promise, resolve } = Promise.withResolvers<string>();
-  let out = "";
+  const out = boundedOutput(envMs("CEL_HERE_OUTPUT_MAX", 64 * 1024));
   let child;
   try {
     child = spawn("bash", [celBin(), "here", verb, ...args.split(/\s+/).filter(Boolean)], {
@@ -256,15 +273,15 @@ function runHere(verb: string, args: string, ctx): Promise<string> {
   } catch (e) { resolve(`cel here ${verb}: could not start (${e})`); return promise; }
   // land may run the local gate; everything else answers in seconds.
   const limit = verb === "land" ? envMs("CEL_HERE_LAND_MS", 45 * 60000) : envMs("CEL_HERE_MS", 120000);
-  const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} out += `\n(cel here ${verb} timed out)`; }, limit);
+  const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} out.add(`\n(cel here ${verb} timed out)`); }, limit);
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (c) => { out += c; });
-  child.stderr.on("data", (c) => { out += c; });
-  child.on("error", (e) => { out += `\n${e}`; });
+  child.stdout.on("data", (c) => { out.add(c); });
+  child.stderr.on("data", (c) => { out.add(c); });
+  child.on("error", (e) => { out.add(`\n${e}`); });
   child.on("close", (code) => {
     clearTimeout(timer);
     // Colour codes are for a terminal; the conversation gets plain text.
-    const text = out.replace(/\x1b\[[0-9;]*m/g, "").trim() || "(no output)";
+    const text = out.text().replace(/\x1b\[[0-9;]*m/g, "").trim() || "(no output)";
     resolve(code === 0 ? text : `${text}\n(exit ${code})`);
   });
   return promise;

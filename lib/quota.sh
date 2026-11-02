@@ -142,6 +142,45 @@ quota_remaining() { # <provider> [wsdir]
 _sub_cache_dir() { printf '%s' "${CEL_CACHE:-$HOME/.cache/cel}"; }
 _SUB_TTL="${CEL_SUB_TTL:-60}"
 
+# THE FILE NAME IS A HASH, NEVER THE ACCOUNT ID. Account ids come out of
+# credential and provider documents - a `/` or `..` in one is not a path the
+# cache may follow - so the name is derived from provider+account and the
+# identity itself travels inside the JSON. The provider prefix is cosmetic and
+# kept only when it is plain.
+_sub_cache_file() { # <provider> <account>
+  local p="$1" h
+  h="$(printf '%s\t%s' "$1" "$2" | sha256sum | cut -c1-16)"
+  case "$p" in ''|*[!a-z0-9]*) p=x ;; esac
+  printf '%s/subscription-%s-%s.json' "$(_sub_cache_dir)" "$p" "$h"
+}
+
+# ONE FILE IS PUBLISHED WHOLE: a 0600 temp sibling (mktemp's mode), renamed
+# over the target, so a reader sees the old answer or the new one and never a
+# truncated half. The dot-prefixed temp never matches a reader's glob.
+_sub_cache_put() { # <file> <doc>
+  local dir tmp; dir="$(dirname "$1")"
+  mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+  tmp="$(mktemp "$dir/.subscription.XXXXXX")" || return 1
+  if printf '%s' "$2" > "$tmp" && mv -f -- "$tmp" "$1"; then return 0; fi
+  rm -f -- "$tmp"; return 1
+}
+
+# ONE WRITER OF THE CACHE SET AT A TIME: a list's publish-and-sweep and a
+# single account's write serialise on one flock, so one run cannot sweep a file
+# another is publishing. Held for the writes only - never across a network
+# read - and a lock that cannot be had in ten seconds is not a reason to leave
+# the cache stale, so the write then goes ahead (each file is still atomic).
+_sub_cache_locked() { # <cmd...>
+  local dir fd="" rc=0; dir="$(_sub_cache_dir)"
+  mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
+  if command -v flock >/dev/null 2>&1 && exec {fd}>"$dir/.subscription.lock" 2>/dev/null; then
+    flock -w 10 "$fd" || true
+  else fd=""; fi
+  "$@" || rc=$?
+  [ -z "$fd" ] || exec {fd}>&-
+  return "$rc"
+}
+
 # pi's stored OAuth token answers Anthropic's usage endpoint with both windows.
 _SUB_ANTHROPIC_URL="${CEL_SUB_ANTHROPIC_URL:-https://api.anthropic.com/api/oauth/usage}"
 # Read out of the Codex binary (0.153.2) rather than guessed: the CLI's own
@@ -431,21 +470,26 @@ def limitwindows: (.limits // [])
            resets_at: (($w.window.resetsAt // $w.window.resets_at // $w.resetsAt) | iso)});
 '
 
+# The body on stdout, and WHICH failure in the status: 0 a 2xx answer, 2 the
+# provider rejected the token (401/403), 1 anything else - no connection, a
+# timeout, a 5xx. Only the second is a login; the rest is the endpoint.
 _cpa_usage_fetch() { # <provider> <token> <account>
+  local url out code
+  local -a hdr=()
   case "$1" in
-    claude)
-      printf 'authorization: Bearer %s\n' "$2" |
-        curl -sf -m 10 "$_SUB_ANTHROPIC_URL" -H @- \
-          -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null || true ;;
-    codex)
-      printf 'authorization: Bearer %s\n' "$2" |
-        curl -sf -m 10 "$_SUB_CODEX_URL" -H @- \
-          -H "chatgpt-account-id: $3" -H 'originator: codex_cli_rs' 2>/dev/null || true ;;
-    opencode)
-      printf 'authorization: Bearer %s\n' "$2" |
-        curl -sf -m 10 "$_SUB_OPENCODE_URL" -H @- 2>/dev/null || true ;;
+    claude) url="$_SUB_ANTHROPIC_URL"; hdr=(-H 'anthropic-beta: oauth-2025-04-20') ;;
+    codex) url="$_SUB_CODEX_URL"; hdr=(-H "chatgpt-account-id: $3" -H 'originator: codex_cli_rs') ;;
+    opencode) url="$_SUB_OPENCODE_URL" ;;
+    *) return 1 ;;
   esac
-  return 0
+  out="$(printf 'authorization: Bearer %s\n' "$2" |
+    curl -s -m 10 "$url" -H @- "${hdr[@]}" -w '\n%{http_code}' 2>/dev/null)" || return 1
+  code="${out##*$'\n'}"
+  case "$code" in
+    2??) printf '%s' "${out%$'\n'*}"; return 0 ;;
+    401|403) return 2 ;;
+    *) return 1 ;;
+  esac
 }
 
 _cpa_map_usage() { # <provider> <account> <label> <source>  (body on stdin)
@@ -530,7 +574,7 @@ _cpa_unreadable_row() { # <provider> <account> <label>
 # file can claim a live token and be wrong; the answer to that is a
 # `needs_login` row, never a retry through a token endpoint.
 _sub_cliproxy_rows() {
-  local p a label f tok resp doc
+  local p a label f tok
   while IFS=$'\t' read -r p a label f; do
     [ -n "$p" ] || continue
     tok="$(_cpa_access_token "$f")"
@@ -539,17 +583,29 @@ _sub_cliproxy_rows() {
     if [ -z "$tok" ] || _cpa_expired "$f"; then
       _cpa_stale_row "$p" "$a" "$label"; continue
     fi
-    resp="$(_cpa_usage_fetch "$p" "$tok" "$a")"
     # A REJECTED TOKEN IS NOT MET WITH A REFRESH: see the note above
     # _cpa_access_token. The vault called this token live and the provider
     # disagreed, which is a credential only a human can replace - and the one
     # thing that must not happen on the way to saying so is a token endpoint
     # call that retires the vault's refresh token.
-    if [ -z "$resp" ]; then _cpa_needs_login_row "$p" "$a" "$label"; continue; fi
-    doc="$(printf '%s' "$resp" | _cpa_map_usage "$p" "$a" "$label" cliproxy)"
-    if [ -n "$doc" ]; then printf '%s\n' "$doc"
-    else _cpa_unreadable_row "$p" "$a" "$label"; fi
+    _cpa_usage_row "$p" "$tok" "$a" "$label"
   done < <(_cpa_accounts)
+  return 0
+}
+
+# One account's row from one usage read: needs_login ONLY when the provider
+# answered 401/403; no answer, a 5xx or a body that is not usage is unreadable.
+_cpa_usage_row() { # <provider> <token> <account> <label>
+  local resp doc rc=0
+  resp="$(_cpa_usage_fetch "$1" "$2" "$3")" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) _cpa_needs_login_row "$1" "$3" "$4"; return 0 ;;
+    *) _cpa_unreadable_row "$1" "$3" "$4"; return 0 ;;
+  esac
+  doc="$(printf '%s' "$resp" | _cpa_map_usage "$1" "$3" "$4" cliproxy)"
+  if [ -n "$doc" ]; then printf '%s\n' "$doc"
+  else _cpa_unreadable_row "$1" "$3" "$4"; fi
   return 0
 }
 
@@ -566,12 +622,8 @@ _sub_opencode_rows() {
                            // .opencode.access // .opencode.key // .opencode.token
                            // .access // .key // empty' "$f" 2>/dev/null || true)"
   [ -n "$tok" ] || return 0
-  local resp doc a=opencode-go l="OpenCode Go"
-  resp="$(_cpa_usage_fetch opencode "$tok" "$a")"
-  if [ -z "$resp" ]; then _cpa_needs_login_row opencode "$a" "$l"; return 0; fi
-  doc="$(printf '%s' "$resp" | _cpa_map_usage opencode "$a" "$l" cliproxy)"
-  if [ -n "$doc" ]; then printf '%s\n' "$doc"
-  else _cpa_unreadable_row opencode "$a" "$l"; fi
+  local a=opencode-go l="OpenCode Go"
+  _cpa_usage_row opencode "$tok" "$a" "$l"
   return 0
 }
 
@@ -631,7 +683,7 @@ subscription_usage() { # <provider> <token> [account] [label]
   local p="$1" tok="$2" acct="${3:-}" label="${4:-}"
   [ -n "$acct" ] || acct="$(_sub_fp "$tok")"
   [ -n "$label" ] || label="$acct"
-  local cache; cache="$(_sub_cache_dir)/subscription-$p-$acct.json"
+  local cache; cache="$(_sub_cache_file "$p" "$acct")"
   if [ -f "$cache" ]; then
     local age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || echo 0) ))
     if [ "$age" -lt "$_SUB_TTL" ]; then cat "$cache"; return 0; fi
@@ -704,11 +756,8 @@ subscription_usage() { # <provider> <token> [account] [label]
   # but they do carry when each account is spent, which is exactly the thing
   # you would want to know before deciding whether a box is worth attacking.
   # A normal umask of 022 would leave them world-readable, so the mode is set
-  # rather than inherited.
-  mkdir -p "$(_sub_cache_dir)"
-  chmod 700 "$(_sub_cache_dir)" 2>/dev/null || true
-  printf '%s' "$doc" > "$cache"
-  chmod 600 "$cache" 2>/dev/null || true
+  # (by _sub_cache_put) rather than inherited.
+  _sub_cache_locked _sub_cache_put "$cache" "$doc" || true
   printf '%s' "$doc"
 }
 
@@ -725,17 +774,20 @@ subscription_usage() { # <provider> <token> [account] [label]
 subscription_list() { # [--cached]
   local dir; dir="$(_sub_cache_dir)"
   if [ "${1:-}" = --cached ]; then
+    # each file on its own: one unparseable file is one missing row, never the
+    # whole list folded to `[]`
     local f found=""
     for f in "$dir"/subscription-*.json; do
       [ -f "$f" ] || continue
-      found="$found$(cat "$f")
+      found="$found$(jq -c 'select(type == "object")' "$f" 2>/dev/null)
 "
     done
     printf '%s' "$found" | _sub_fold
     return 0
   fi
 
-  local p a t label rows="" keep=""
+  local p a t label rows="" keep="" f
+  local -a pub_f=() pub_d=()
 
   # PER ACCOUNT, NOT PER SOURCE. CLIProxyAPI's vault is the one credential
   # store on this box and celestial reads usage out of those credentials
@@ -771,12 +823,11 @@ subscription_list() { # [--cached]
     case "$cpa_usable" in *" $vk "*) continue ;; esac
     omp_keys="$omp_keys$vk "
     oa="$(printf '%s' "$orow" | jq -r '.account')"
-    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
-    printf '%s' "$orow" > "$dir/subscription-$op-$oa.json"
-    chmod 600 "$dir/subscription-$op-$oa.json" 2>/dev/null || true
+    f="$(_sub_cache_file "$op" "$oa")"
+    pub_f+=("$f"); pub_d+=("$orow")
     rows="$rows$orow
 "
-    keep="$keep subscription-$op-$oa.json"
+    keep="$keep ${f##*/}"
   done < <(_sub_omp_rows)
 
   # TWO SILENCES THAT ARE NOT THE SAME NEWS. A box with no omp on it falls
@@ -801,7 +852,8 @@ subscription_list() { # [--cached]
     case "$cpa_providers" in *" $p "*) continue ;; esac
     rows="$rows$(subscription_usage "$p" "$t" "$a" "$label")
 "
-    keep="$keep subscription-$p-$a.json"
+    f="$(_sub_cache_file "$p" "$a")"
+    keep="$keep ${f##*/}"
   done < <(_sub_direct_accounts)
 
   # The vault's rows: every usable one, and an unusable one only for an
@@ -813,26 +865,34 @@ subscription_list() { # [--cached]
     case "$omp_keys" in *" $vk "*) continue ;; esac
     vp="$(printf '%s' "$vrow" | jq -r '.provider')"
     va="$(printf '%s' "$vrow" | jq -r '.account')"
-    mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
-    printf '%s' "$vrow" > "$dir/subscription-$vp-$va.json"
-    chmod 600 "$dir/subscription-$vp-$va.json" 2>/dev/null || true
+    f="$(_sub_cache_file "$vp" "$va")"
+    pub_f+=("$f"); pub_d+=("$vrow")
     rows="$rows$vrow
 "
-    keep="$keep subscription-$vp-$va.json"
+    keep="$keep ${f##*/}"
   done <<< "$cpa_rows"
 
-  # THE SWEEP. Every file that is not one of this run's identities is a stale
-  # identity or a signed-out account: a row on the console for a subscription
-  # that does not exist.
-  local f base
-  for f in "$dir"/subscription-*.json; do
-    [ -f "$f" ] || continue
-    base="$(basename "$f")"
-    case " $keep " in *" $base "*) continue ;; esac
-    rm -f "$f"
-  done
+  # PUBLISH, THEN THE SWEEP, under the cache lock and after every network read
+  # is done: each file is renamed into place whole, and every file that is not
+  # one of this run's identities is a stale identity or a signed-out account -
+  # a row on the console for a subscription that does not exist.
+  _sub_cache_locked _sub_publish_set "$dir" "$keep" || true
 
   printf '%s' "$rows" | _sub_fold
+}
+
+# subscription_list's write half, run under _sub_cache_locked. The files and
+# documents are the caller's `pub_f`/`pub_d` arrays (bash cannot pass an
+# array); <keep> is the space-separated set of file names this run owns.
+_sub_publish_set() { # <dir> <keep>
+  local i f
+  for i in "${!pub_f[@]}"; do _sub_cache_put "${pub_f[$i]}" "${pub_d[$i]}" || true; done
+  for f in "$1"/subscription-*.json; do
+    [ -f "$f" ] || continue
+    case " $2 " in *" ${f##*/} "*) continue ;; esac
+    rm -f -- "$f"
+  done
+  return 0
 }
 
 # ONE SUBSCRIPTION READ TWICE IS ONE ROW. pi keeps its own copy of the owner's

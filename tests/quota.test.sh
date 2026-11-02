@@ -157,14 +157,13 @@ test_a_rotated_pi_token_leaves_one_row_and_one_cache_file() {
   # pi refreshes its OAuth token between the two reads, as it does all day
   jq -nc --arg t "${PI_TOKEN}-rotated" '{anthropic: {access: $t, refresh: "r"}}' \
     > "$HOME/.pi/agent/auth.json"
-  rm -f "$CEL_CACHE"/subscription-claude-pi.json
+  rm -f "$(_sub_cache_file claude pi)"
   local out; out="$(subscription_list)"
 
   # pi and Claude Code are two credential files and so two cache files; what
   # must NOT be there is a third one minted by the refresh.
   assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 2
-  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-pi.json$')" 1
-  [ -f "$CEL_CACHE/subscription-claude-pi.json" ] || {
+  [ -f "$(_sub_cache_file claude pi)" ] || {
     printf 'the cache is not keyed by identity: %s\n' "$(ls "$CEL_CACHE")" >&2; return 1; }
   [ -f "$CEL_CACHE/subscription-claude-abc123.json" ] && {
     printf 'the stale token-hashed cache file survived\n' >&2; return 1; }
@@ -213,7 +212,7 @@ test_codex_unreadable_is_still_a_row_with_its_reason() {
   assert_eq "$(printf '%s' "$row" | jq -r '.windows | length')" 0
   [ -n "$(printf '%s' "$row" | jq -r '.extra.reason')" ] || {
     printf 'an unreadable row with no reason is a row nobody can act on\n' >&2; return 1; }
-  [ -f "$CEL_CACHE/subscription-codex-$CX_ACCOUNT.json" ] || {
+  [ -f "$(_sub_cache_file codex "$CX_ACCOUNT")" ] || {
     printf 'the unreadable row was not cached, so the fleet path cannot see it\n' >&2; return 1; }
   assert_contains "$(cmd_quota 2>/dev/null)" 'unreadable'
   _quota_stub_stop
@@ -259,7 +258,8 @@ test_subscription_usage_caches_so_two_calls_ask_once() {
   subscription_usage claude "$PI_TOKEN" pi >/dev/null
   subscription_usage claude "$PI_TOKEN" pi >/dev/null
   assert_eq "$(grep -c . "$T/hits")" 1
-  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-pi.json')" 1
+  assert_eq "$(ls "$CEL_CACHE" | grep -c '^subscription-claude-')" 1
+  [ -f "$(_sub_cache_file claude pi)" ] || { printf 'pi cache file missing\n' >&2; return 1; }
   _quota_stub_stop
   _quota_teardown
 }
@@ -644,6 +644,14 @@ const s = createServer((req, res) => {
       writeFileSync(`${dir}/fresh`, fresh().concat([t]).join('\n') + '\n');
       return json(200, { access_token: t, refresh_token: 'fixture-refresh-rotated', expires_in: 3600 });
     }
+    // `codes`: `<token> <status> [body]` per line answers that bearer with
+    // exactly that status and body, before any other rule.
+    const coded = read('codes').split('\n').map((x) => x.trim().split(' '))
+      .find(([t]) => t && t === auth);
+    if (coded) {
+      res.writeHead(Number(coded[1]), { 'content-type': 'application/json' });
+      return res.end(coded.slice(2).join(' '));
+    }
     if (!fresh().includes(auth)) return json(401, { error: 'token_expired' });
     if (req.url.includes('codex')) return json(200, read('codex.json'));
     if (req.url.includes('zen')) return json(200, read('opencode.json'));
@@ -807,6 +815,134 @@ test_a_rejected_vault_token_reads_as_needs_login() {
   local out; out="$(subscription_list)"
   assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 4
   [ -s "$T/refreshes" ] && { printf 'a rejected token was met with a refresh\n' >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# NO ANSWER IS NOT A REJECTION. Only a 401/403 is the provider refusing a
+# credential; a 5xx, a refused connection or a 200 that is not usage is the
+# endpoint failing, and sending the owner to log in again fixes none of them.
+test_only_a_401_or_403_reads_as_needs_login() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  _cpa_opencode_auth
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  printf '%s\n' 'fixture-cpa-claude-one 403 {"error":"forbidden"}' \
+    'fixture-cpa-claude-two 500 {"error":"boom"}' \
+    'fixture-cpa-codex-three 200 not-json' \
+    'fixture-cpa-codex-four 401 {"error":"token_expired"}' \
+    'fixture-opencode-token 503 {"error":"down"}' > "$T/codes"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  local a want
+  for a in ant-one:needs_login ant-two:unreadable cx-three:unreadable cx-four:needs_login opencode-go:unreadable; do
+    want="${a#*:}"; a="${a%%:*}"
+    assert_eq "$a=$(printf '%s' "$out" | jq -r --arg a "$a" '.[] | select(.account == $a) | .extra.state')" "$a=$want"
+  done
+  printf '%s\n' 'fixture-opencode-token 401 {"error":"expired"}' > "$T/codes"
+  assert_eq "$(_sub_opencode_rows | jq -r '.extra.state')" needs_login
+  [ -s "$T/refreshes" ] && { printf 'a failed read was met with a refresh\n' >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_an_unreachable_usage_endpoint_is_unreadable_not_a_login() {
+  _quota_setup
+  _cpa_vault
+  _cpa_opencode_auth
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  export CEL_SUB_ANTHROPIC_URL="http://127.0.0.1:1/api/oauth/usage"
+  export CEL_SUB_CODEX_URL="http://127.0.0.1:1/backend-api/codex-wham/usage"
+  export CEL_SUB_OPENCODE_URL="http://127.0.0.1:1/zen/go/v1/usage"
+  . "$CEL_ROOT/lib/quota.sh"
+  local out; out="$(subscription_list)"
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "unreadable")] | length')" 5
+  assert_eq "$(printf '%s' "$out" | jq -r '[.[] | select(.extra.state == "needs_login")] | length')" 0
+  _quota_teardown
+}
+
+# The cache file holding <account>'s row, found by content: the name is not
+# the identity.
+_cache_file_for() { # <account>
+  local f
+  for f in "$CEL_CACHE"/subscription-*.json; do
+    [ "$(jq -r '.account' "$f" 2>/dev/null)" = "$1" ] && { printf '%s' "$f"; return 0; }
+  done
+  return 1
+}
+
+# A READER MID-PUBLICATION SEES A WHOLE FILE. A file rewritten in place is
+# empty for an instant, and the fleet path folding one bad file used to blank
+# every subscription on the console.
+test_a_cache_rewrite_replaces_the_file_rather_than_truncating_it() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  mkdir -p "$T/empty"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  subscription_list >/dev/null
+  local f before; f="$(_cache_file_for cx-three)"; before="$(stat -c %i "$f")"
+  subscription_list >/dev/null
+  f="$(_cache_file_for cx-three)"
+  [ "$(stat -c %i "$f")" != "$before" ] || {
+    printf 'the cache file was rewritten in place (inode %s), so a reader can see it half-written\n' "$before" >&2
+    return 1; }
+  assert_eq "$(stat -c %a "$f")" 600
+  _quota_stub_stop
+  _quota_teardown
+}
+
+test_one_partial_cache_file_does_not_blank_the_cached_list() {
+  _quota_setup
+  . "$CEL_ROOT/lib/quota.sh"
+  mkdir -p "$CEL_CACHE"
+  jq -nc '{provider: "codex", account: "cx-whole", label: "whole", source: "cliproxy",
+           windows: [], extra: {state: "enabled", reason: ""}}' > "$CEL_CACHE/subscription-codex-whole.json"
+  printf '{"provider":"claude","acc' > "$CEL_CACHE/subscription-claude-half.json"
+  assert_eq "$(subscription_list --cached | jq -r '[.[].account] | join(",")')" cx-whole
+  _quota_teardown
+}
+
+# ONE WRITER OF THE CACHE SET AT A TIME: a list does not publish or sweep while
+# another holds the cache lock.
+test_cache_publication_waits_for_the_cache_lock() {
+  _quota_setup
+  _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
+  _cpa_vault
+  mkdir -p "$T/empty" "$CEL_CACHE"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local held
+  ( trap - EXIT INT TERM
+    flock "$CEL_CACHE/.subscription.lock" -c "touch '$T/held'; sleep 2; touch '$T/released'" ) & held=$!
+  local i=0
+  while [ ! -e "$T/held" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  subscription_list >/dev/null
+  [ -e "$T/released" ] || {
+    printf 'the list published while another writer held the cache lock\n' >&2
+    wait "$held"; return 1; }
+  wait "$held"
+  _cache_file_for cx-three >/dev/null || { printf 'nothing was published after the lock\n' >&2; return 1; }
+  _quota_stub_stop
+  _quota_teardown
+}
+
+# AN ACCOUNT ID IS NOT A PATH. It comes out of a credential or provider
+# document; a `/` or `..` in one must neither escape the cache directory nor
+# lose the row, and odd-but-legal ids must round-trip intact.
+test_account_ids_never_become_cache_paths() {
+  _quota_setup
+  _quota_stub_server "$(_claude_body)" "$(_codex_body)"
+  export CEL_CPA_AUTH_DIR="$T/no-vault-here"
+  mkdir -p "$T/empty" "$CEL_CACHE/subscription-codex-x"; export PATH="$T/empty:/usr/bin:/bin"
+  . "$CEL_ROOT/lib/quota.sh"
+  local id ids=('x/../../escaped' '-leading-dash' 'with space' 'ünïcødé' '..')
+  for id in "${ids[@]}"; do subscription_usage codex "$CX_TOKEN" "$id" >/dev/null 2>&1; done
+  [ -e "$T/escaped.json" ] && { printf 'an account id wrote outside the cache: %s\n' "$T/escaped.json" >&2; return 1; }
+  local cached; cached="$(subscription_list --cached)"
+  for id in "${ids[@]}"; do
+    assert_eq "$id:$(printf '%s' "$cached" | jq -r --arg a "$id" '[.[] | select(.account == $a)] | length')" "$id:1"
+  done
   _quota_stub_stop
   _quota_teardown
 }

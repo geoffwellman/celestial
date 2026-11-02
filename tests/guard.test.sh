@@ -430,3 +430,20 @@ test_the_deny_is_the_workers_alone() {
   assert_eq "$(guard_classify other 'cel-fanout land ABC-1')" allow
   assert_eq "$(guard_classify other 'cel run worker --repo widget')" allow
 }
+
+# THE CLASSIFIER'S OWN FAILURE IS NOT `allow`. A mode it does not know or a
+# policy that will not load exits 2 with the reason on stderr and no verdict,
+# so the adapters can tell a broken classifier from a permitted call.
+test_guard_classifier_failure_is_an_error_not_an_allow() {
+  local cls="$CEL_ROOT/tools/hooks/guard-classify.sh" out rc
+  rc=0; out="$(bash "$cls" bogus /tmp 'git push' 2>/dev/null)" || rc=$?
+  assert_eq "mode:$rc:$out" "mode:2:"
+  assert_contains "$(bash "$cls" bogus /tmp 'git push' 2>&1 >/dev/null)" 'unknown mode'
+  local T; T="$(mktemp -d)"
+  rc=0; out="$(CEL_ROOT="$T" bash "$cls" command /tmp 'git push' 2>/dev/null)" || rc=$?
+  assert_eq "policy:$rc:$out" "policy:2:"
+  rm -rf "$T"
+  # a working classifier still answers both modes
+  assert_eq "$(bash "$cls" command /tmp 'ls')" allow
+  assert_eq "$(bash "$cls" path /tmp /tmp/x)" allow
+}

@@ -1,0 +1,8 @@
+### Fixed
+- Subscription usage reads no longer call a network failure a login problem: only a 401/403 from the provider marks a vault or OpenCode account `needs_login`; no connection, a timeout, a 5xx or a body that is not usage now reads `unreadable`.
+- The subscription cache is published atomically (0600 temp file renamed into place) and the list's publish-and-sweep runs under one cache lock, so `cel fleet`, the console and the dashboard never read a half-written file; the cached reader skips an unparseable file instead of folding the whole list to `[]`.
+- Subscription cache file names are a hash of provider + account instead of the raw account id, so an id containing `/` or `..` can no longer write outside the cache directory or lose its row; old-style names are swept on the next list.
+- `cel gateway status` still lists a vault credential file that is not valid JSON, but marks it `ok: false` and it no longer counts as a usable account for launch admission.
+- `tools/hooks/guard-classify.sh` no longer answers `allow` when it cannot load the guard policy or is given an unknown mode: it exits 2 with the reason on stderr, so adapters can tell a broken classifier from a permitted call.
+- `/cel-*` owner commands keep a bounded head and tail of the command's output (default 64 KiB, `CEL_HERE_OUTPUT_MAX`) and say how much was dropped, instead of holding a long `land` gate's whole output in agent memory.
+- OpenCode keeps allowing when the guard classifier reports its own error (exit 2), as it did when the classifier printed `allow`; other classifier failures still refuse.

@@ -238,7 +238,7 @@ gateway_models_json_existing() {
 gateway_accounts_json() {
   local d; d="$(gateway_auth_dir)"
   [ -d "$d" ] || { printf '[]'; return 0; }
-  local f base rest provider hash email plan rows=""
+  local f base rest provider hash email plan ok rows=""
   for f in "$d"/*.json; do
     [ -f "$f" ] || continue
     base="$(basename "$f" .json)"
@@ -254,15 +254,18 @@ gateway_accounts_json() {
     case "$rest" in
       *-*) case "${rest##*-}" in *@*) ;; *) plan="${rest##*-}"; email="${rest%-*}" ;; esac ;;
     esac
-    rows="$rows$(jq -nc --arg p "$provider" --arg i "${hash:0:6}" --arg e "$email" --arg pl "$plan" \
-      '{source:"gateway", provider:$p, id:$i, email:$e, plan:$pl, type:"oauth", ok:true, windows:[]}')
+    # PRESENT IS NOT USABLE: a file that is not a JSON object is no credential
+    # the proxy can load, so it is listed (it exists) but never counted.
+    ok=true; jq -e 'type == "object"' "$f" >/dev/null 2>&1 || ok=false
+    rows="$rows$(jq -nc --arg p "$provider" --arg i "${hash:0:6}" --arg e "$email" --arg pl "$plan" --argjson ok "$ok" \
+      '{source:"gateway", provider:$p, id:$i, email:$e, plan:$pl, type:"oauth", ok:$ok, windows:[]}')
 "
   done
   printf '%s' "$rows" | jq -sc '.' 2>/dev/null || printf '[]'
 }
 
 # How many accounts the balancer could actually pick from, all providers or
-# one. A credential file that exists is a credential the proxy will try; it
+# one. A credential file that loads is a credential the proxy will try; it
 # cannot be known to be spent without spending a request on finding out.
 gateway_usable_count() { # [provider]
   local js; js="$(gateway_accounts_json)"
