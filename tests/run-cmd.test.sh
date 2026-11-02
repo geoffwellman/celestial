@@ -1005,6 +1005,36 @@ test_second_reviewer_for_the_same_pr_reuses_the_pane_and_adds_no_row() {
   rm -rf "$T"
 }
 
+# A Rex reviewer that went by other means (pane off the roster, its PID
+# generation exited, no retirement of ours in flight) left a row that refused
+# every relaunch for its PR. gc drops that row - only the row: the receipt
+# stays as evidence - and the next `cel run reviewer` launches.
+test_reviewer_relaunches_after_gc_drops_a_gone_rex_reviewers_row() {
+  _reviewer_gateway_fixture; _reviewers_fixture
+  printf 'review:\n  runtime: claude\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
+  . "$CEL_ROOT/lib/gc.sh"
+  export CEL_REX_STATE="$T/rex"; mkdir -m 700 "$CEL_REX_STATE"
+  local dead receipt="$T/rex/widget-pr-12-review.json" out rc=0
+  bash -c 'exit 0' & dead=$!; wait "$dead"
+  jq -n --arg ws "$T" --argjson pid "$dead" \
+    '{name:"widget-pr-12-review",agent:"pi",cwd:($ws+"/repos/widget"),role:"reviewer",workspace:$ws,repo:"widget",pr:"12",
+      pane_id:"rex/widget-review/terminal",backend:"rex",rex_session:"widget-review",rex_block:"terminal",
+      pid:$pid,pid_start:"1",agent_status:"idle"}' > "$receipt"
+  chmod 600 "$receipt"
+  reviewers_record widget 12 rex/widget-review/terminal widget-pr-12-review
+  reviewers_write "$(reviewers_rows | jq 'map(.backend="rex")')"
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a stale Rex row was reused: $out"; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "not confirmed live" || { _ws_gateway_clean; return 1; }
+  _gc_reviewers 0 "$(cel_agent_list)" >/dev/null 2>&1
+  assert_eq "$(reviewers_rows | jq -r length)" 0 || { _ws_gateway_clean; return 1; }
+  [ -f "$receipt" ] || { echo "gc removed the Rex receipt"; _ws_gateway_clean; return 1; }
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run 2>&1)" \
+    || { printf 'relaunch refused after gc: %s\n' "$out" >&2; _ws_gateway_clean; return 1; }
+  assert_contains "$out" "agent start widget-pr-12-review --kind pi" || { _ws_gateway_clean; return 1; }
+  _ws_gateway_clean
+}
+
 # A read-modify-write with no lock is two reviewers overwriting each other.
 # The whole update is held under a lock on the registry, and a registry
 # somebody else is holding is REFUSED rather than clobbered.
@@ -1442,6 +1472,7 @@ test_launch_ready_pane_carries_role_and_inbox_environment() {
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
       "pane get"|"pane process-info") _fake_pane "$@" ;;

@@ -319,7 +319,10 @@ graceful shutdown. Only after the original runtime and owned infrastructure
 have exited does the backend remove the exact empty Rex session and reconcile
 its registry row. Extra terminals, replacement processes and unknown evidence
 are protected. Older uninstrumented reviewers are kept, not silently reloaded
-or stopped using a saved-file/idle guess.
+or stopped using a saved-file/idle guess. A reviewer that went by other means
+(its pane is off the roster, its PID generation has exited and no retirement
+proof is in flight) loses only its registry row to `cel gc`, so the PR can be
+reviewed again; its receipt, checkout and native log stay.
 
 The command returns JSON: `eligible` for a dry-run candidate, `retired` only
 after verified settlement, `protected` for known outstanding work/unsupported

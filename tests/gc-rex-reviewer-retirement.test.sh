@@ -503,14 +503,30 @@ test_gc_rex_dry_run_keeps_runtime_receipt_registry_and_checkout() {
   _rr_kept
 }
 
-test_gc_gone_rex_metadata_retains_checkout_and_evidence() {
+# A pane off the roster whose PID generation exited, with no retirement proof
+# of ours, is a stale row: only the row goes. Receipt, checkout, verdict and
+# native log stay, and nothing is closed.
+test_gc_gone_rex_row_is_dropped_but_its_evidence_is_kept() {
   _rr_fixture
   kill "$RR_PID"; wait "$RR_PID" 2>/dev/null || true
-  _rr_gc 0 '{"result":{"agents":[]}}'
-  _rr_preserved || return
-  # A gone roster is not physical-retirement proof or permission to release.
+  _rr_gc 1 '{"result":{"agents":[]}}'
   assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
-  [ -f "$RR_RECEIPT" ]
+  _rr_gc 0 '{"result":{"agents":[]}}'
+  assert_eq "$(reviewers_rows | jq length)" 0 || return
+  [ -f "$RR_RECEIPT" ] || return 1
+  assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+  assert_eq "$(jq -s '[.[] | select(.cmd=="rex" or .cmd=="gh")] | length' "$RR_T/calls.jsonl")" 0 || return
+  _rr_preserved
+}
+
+# Absent from one roster read is not gone: a live generation keeps its row.
+test_gc_rex_row_with_a_live_generation_is_kept_when_its_pane_is_unlisted() {
+  _rr_fixture
+  _rr_set '.prState="OPEN"'
+  _rr_gc 0 '{"result":{"agents":[]}}'
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  kill -0 "$RR_PID" && [ -f "$RR_RECEIPT" ] || return 1
+  _rr_preserved
 }
 
 test_gc_rex_retirement_does_not_drop_a_concurrently_rebound_registry_row() {

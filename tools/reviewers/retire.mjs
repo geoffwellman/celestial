@@ -556,6 +556,8 @@ export async function retire(options) {
     requireProof(['idle', 'done'].includes(r.agent_status), 'reviewer_not_idle', 'protected');
     requireProof(Number.isInteger(r.pid) && r.pid > 1 && typeof r.pid_start === 'string' && path.isAbsolute(r.cwd) && path.isAbsolute(r.workspace) && path.isAbsolute(r.agent_session?.value || ''), 'incomplete_runtime_receipt');
     requireProof(!repodir || path.resolve(repodir) === path.join(r.workspace, 'repos', repo), 'requested_workspace_repository_mismatch');
+    // An exited generation has nothing to retire; it is never asked of GitHub.
+    requireProof(liveGeneration({ pid: r.pid, start: r.pid_start }), 'runtime_generation_exited');
     // A reviewer exists for one pull request. While it is open, a new push or
     // a re-review request can still arrive: only a merged or closed PR ends it.
     const remote = gh();
@@ -613,6 +615,8 @@ export async function retire(options) {
     let completion;
     const completedAlreadyRecorded = fs.existsSync(completed);
     if (completedAlreadyRecorded) {
+      // A refusal still names the proof: its holder is retirement debt, not a stale row.
+      proofPath = completed;
       completion = jsonFile(completed, true).value;
       requireProof(completion.version === 1 && completion.stage === 'retired' && completion.processesExited === true && completion.sessionAbsent === true && completion.nativePrefixPreserved === true && (completion.artifactsPreserved === true || completion.recoveredFromPrepared === true) && path.dirname(completion.prepared) === proofDir, 'unknown_retirement_proof');
     } else if (fs.existsSync(proofDir)) {

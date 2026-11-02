@@ -777,6 +777,16 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
         reviewers_closed=$((reviewers_closed + 1))
         c_ok "retired native reviewer for $repo#$pr (pane $pane; native evidence and checkout kept)"
+      elif [ "$status" = gone ] && _gc_rex_row_runtime_gone "$agent" "$pane" "$retirement"; then
+        # Gone by other means, with no retirement of ours in flight: the row
+        # is bookkeeping, and keeping it would refuse every relaunch for the
+        # PR. Only the row goes - receipt, checkout and native log stay.
+        if [ "$dry" -eq 1 ]; then
+          c_ok "would drop the stale row for $repo#$pr (Rex pane $pane gone, runtime exited; evidence kept)"
+        else
+          drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"
+          c_ok "dropped the stale row for $repo#$pr (Rex pane $pane gone, runtime exited; evidence kept)"
+        fi
       else
         _gc_reviewers_adopt
         if [ "$retirement_status" != protected ]; then
@@ -860,6 +870,23 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
      | $cur + [$adopt[] | select((.pane as $p | $cur | map(.pane) | index($p)) == null)]' \
     || c_warn "could not update the reviewer registry - stale rows remain"
   return 0
+}
+
+# A recorded Rex reviewer whose pane left the roster is gone only when all of
+# these are facts: the retirement attempt answered with valid JSON and names
+# no retirement proof of ours (prepared/exit debt is settled by replay, never
+# dropped), no launch for the alias is unresolved, and the receipt is absent,
+# belongs to another pane, or records a PID generation that has exited.
+_gc_rex_row_runtime_gone() { # <agent> <pane> <retirement-json>
+  local agent="$1" pane="$2" f
+  [ -n "$agent" ] || return 1
+  printf '%s' "$3" | jq -e 'type == "object" and (has("proof") | not)' >/dev/null 2>&1 || return 1
+  f="$(_rex_file "$agent")"
+  [ ! -e "$f.pending" ] && [ ! -e "$f.pid" ] && [ ! -L "$f" ] || return 1
+  [ -e "$f" ] || return 0
+  _rex_receipt_valid "$f" || return 1
+  [ "$(jq -r '.pane_id // ""' "$f")" = "$pane" ] || return 0
+  ! _rex_live "$f"
 }
 
 # THE ONE TARGETED RETIREMENT: `cel sessions retire-reviewer` and `cel solo

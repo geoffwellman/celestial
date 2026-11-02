@@ -540,9 +540,9 @@ reviewer_checkout_release() { # <repo> <pr>
   row="$(reviewers_find "$1" "$2")" || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
-  # A repo/PR-derived fallback can name an older retained round. Only an
-  # explicitly recorded checkout is eligible for this legacy release path.
-  [ -n "$path" ] || return 0
+  # A row `cel gc` adopted carries no checkout; the path is derived from repo
+  # and PR alone. Retained Rex evidence and occupants still veto the drop.
+  [ -n "$path" ] || path="$(reviewer_checkout_path "$1" "$2")"
   [ -e "$path" ] || return 0
   # Kept while anything stands in it; the next sweep releases it once the
   # pane has gone. The row may already be dropped by then - the gone-pane
