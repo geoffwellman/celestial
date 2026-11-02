@@ -1794,7 +1794,13 @@ _steward_tick_claim() {
   local f="${CEL_STEWARD_LOCK:-$_STEWARD_STATE.tick.lock}" fd pid cmd rc=0
   mkdir -p "${f%/*}" 2>/dev/null || true
   exec {fd}>>"$f" || return 0
-  have flock && flock -w 5 "$fd"
+  # No flock, no claim: whoever holds it is mid-claim, and reading the pidfile
+  # without it is exactly the race the lock exists to close.
+  if have flock && ! flock -w 5 "$fd"; then
+    printf 'steward: could not take the tick lock %s within 5s - this one exits\n' "$f"
+    exec {fd}>&-
+    return 1
+  fi
   pid="$(head -c 32 "$f" 2>/dev/null | tr -dc 0-9)"
   if [ -n "$pid" ] && [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null; then
     cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
