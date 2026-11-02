@@ -33,7 +33,7 @@ _GATEWAY_DEFAULT_PORT=8317
 # The box's gateway state: the config CLIProxyAPI reads, the api-key it
 # accepts, and the vault of OAuth files. NEVER inside a repo - a worktree gets
 # committed, pushed and read by a reviewer.
-gateway_state_dir() { printf '%s' "${CEL_GATEWAY_STATE:-$HOME/.local/share/cel/gateway}"; }
+gateway_state_dir() { printf '%s' "${CEL_GATEWAY_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/gateway}"; }
 gateway_config_file() { printf '%s/config.yaml' "$(gateway_state_dir)"; }
 gateway_auth_dir()   { printf '%s/auth' "$(gateway_state_dir)"; }
 _gateway_key_file()  { printf '%s/api-key' "$(gateway_state_dir)"; }

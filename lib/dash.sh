@@ -80,7 +80,7 @@ _dash_config() { # <port> <host> -> JSON on stdout
 # The dashboard is a box service like the pages servers: nothing owns its
 # pane, so `--ensure` starts it only when its port is not already answering,
 # and the steward calls it every tick so a dead dashboard comes back.
-_dash_log_dir() { printf '%s' "${CEL_DASH_LOG_DIR:-$HOME/.local/share/cel/logs}"; }
+_dash_log_dir() { printf '%s' "${CEL_DASH_LOG_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/logs}"; }
 
 # Is anything listening on host:port? A bash /dev/tcp connect, so a server
 # mid-shutdown that still holds the port but no longer answers http counts.
@@ -307,8 +307,8 @@ cmd_dash() { # [--port n] [--host h] [--ensure] [--restart]
   # Mutations require X-Cel-CSRF from GET /api/session. Automation may instead
   # supply CEL_DASH_CSRF_TOKEN before startup; never put it in workspace.yaml.
   CEL_DASH_CONFIG="$(_dash_config "$port" "$host")" \
-  CEL_EFFECTS_DIR="${CEL_EFFECTS_DIR:-$HOME/.local/share/cel/vendor/canvasui}" \
-  CEL_INBOX_DIR="$(printf '%s' "${CEL_INBOX_DIR:-$HOME/.local/share/cel/inbox}")" \
+  CEL_EFFECTS_DIR="${CEL_EFFECTS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/vendor/canvasui}" \
+  CEL_INBOX_DIR="$(printf '%s' "${CEL_INBOX_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/inbox}")" \
     exec node "$CEL_ROOT/tools/dash/server.mjs"
 }
 

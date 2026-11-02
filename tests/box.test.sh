@@ -17,12 +17,12 @@ _box_fixture() {
   # regenerable: costs a re-download, never data
   mkdir -p "$HOME/.bun/install/cache" "$HOME/.npm/_cacache" "$HOME/.cache/uv"
   # ours: the factory made it
-  mkdir -p "$HOME/.cache/cel" "$HOME/.local/state/cel/scratch"
+  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/cel" "${XDG_STATE_HOME:-$HOME/.local/state}/cel/scratch"
   # someone's: large, irreplaceable, NOT the janitor's
   mkdir -p "$HOME/restore"
   _box_age_file "$HOME/.bun/install/cache/old-package" 60
   _box_age_file "$HOME/.bun/install/cache/fresh-package" 1
-  _box_age_file "$HOME/.cache/cel/old-scratch" 60
+  _box_age_file "${XDG_CACHE_HOME:-$HOME/.cache}/cel/old-scratch" 60
   _box_age_file "$HOME/restore/profile-dump.tar" 400
   BOX_STUB_BIN="$T/bin"
   mkdir -p "$BOX_STUB_BIN"
@@ -195,8 +195,8 @@ test_cache_sweep_dry_run_produces_bytes_and_removes_nothing() {
 test_ours_sweep_takes_aged_cel_scratch() {
   _box_fixture
   _box_sweep_ours 0 >/dev/null
-  [ -d "$HOME/.cache/cel" ] || { printf 'cel cache root removed\n' >&2; return 1; }
-  [ -e "$HOME/.cache/cel/old-scratch" ] && { printf 'aged cel scratch kept\n' >&2; return 1; }
+  [ -d "${XDG_CACHE_HOME:-$HOME/.cache}/cel" ] || { printf 'cel cache root removed\n' >&2; return 1; }
+  [ -e "${XDG_CACHE_HOME:-$HOME/.cache}/cel/old-scratch" ] && { printf 'aged cel scratch kept\n' >&2; return 1; }
   rm -rf "$T"
 }
 

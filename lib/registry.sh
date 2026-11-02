@@ -14,7 +14,7 @@ _CEL_REGISTRY=1
 # shellcheck source=lib/yaml.sh
 . "${BASH_SOURCE[0]%/*}/yaml.sh"
 
-_CEL_REGISTRY_DEFAULT="$HOME/.local/share/cel/registry.yaml"
+_CEL_REGISTRY_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/cel/registry.yaml"
 
 # A LOCK MUST NOT OUTLIVE THE PROCESS THAT TOOK IT. flock lives on the open
 # file description, so any child that inherits the descriptor keeps the lock

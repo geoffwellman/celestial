@@ -41,7 +41,7 @@ _CEL_STEWARD=1
 # the failure this sweep exists for is a specific string in a specific pane,
 # and a test that cannot supply that string proves nothing.
 _STEWARD_HERDR="${CEL_STEWARD_HERDR:-herdr}"
-_STEWARD_STATE="${CEL_STEWARD_STATE:-$HOME/.local/share/cel/steward-state}"
+_STEWARD_STATE="${CEL_STEWARD_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/steward-state}"
 # The reconcile binary, overridable so a test can watch the call without
 # reading a live GitHub. Addressed by path rather than by name: the steward
 # runs from a systemd timer, where `cel shellenv`'s PATH does not exist.
@@ -1678,7 +1678,7 @@ _steward_update_check() {
   # shellcheck source=lib/config.sh
   . "${BASH_SOURCE[0]%/*}/config.sh"
   local v latest dir chan
-  dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"
+  dir="${CEL_UPDATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/update}"
   chan="$(cel_config_get update channel)"
   case "$chan" in main) ;; *) chan=release ;; esac
 
@@ -1731,7 +1731,7 @@ _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
   . "${BASH_SOURCE[0]%/*}/version.sh"
   local dir marker build rows fresh ws msg key seen
-  dir="${CEL_UPDATE_DIR:-$HOME/.local/share/cel/update}"; marker="$dir/orch-stale-reported"
+  dir="${CEL_UPDATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/update}"; marker="$dir/orch-stale-reported"
   build="$(cel_build_sha)"
   rows="$(run_stale_orchestrators)"
   [ -n "$rows" ] || return 0
@@ -1770,7 +1770,7 @@ _steward_stale_orchestrators() {
 # ring, trimmed to the newest CEL_SAMPLES_KEEP lines. Cheap by design: /proc
 # and the agent list the tick already fetched.
 _steward_sample() { # <agents-json>
-  local f="${CEL_SAMPLES_FILE:-$HOME/.local/share/cel/samples.jsonl}" keep="${CEL_SAMPLES_KEEP:-2000}"
+  local f="${CEL_SAMPLES_FILE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/samples.jsonl}" keep="${CEL_SAMPLES_KEEP:-2000}"
   local load mem swap
   load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || printf 0)"
   mem="$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{if(t>0) printf "%.1f", (t-a)*100/t; else print 0}' /proc/meminfo 2>/dev/null || printf 0)"

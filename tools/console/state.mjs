@@ -28,7 +28,7 @@ export const FANOUT_BIN = process.env.CEL_FANOUT_BIN || 'cel-fanout';
 // the relay. An env override exists for the same reason as the two above: the
 // tests must never reach the live box's panes.
 export const HERDR_BIN = process.env.CEL_HERDR_BIN || 'herdr';
-const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
+const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/inbox');
 
 export const run = (cmd, args, timeout = 20000) =>
   new Promise((resolve) => {
@@ -229,7 +229,7 @@ export const thread = (item, span = 3600 * 1000) => {
 // which entry point ran the command, which is not something an operator can
 // see or reason about.
 export const HISTORY_PATH = () => process.env.CEL_CONSOLE_HISTORY
-  || join(homedir(), '.local/share/cel/console/history');
+  || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/console/history');
 export const HISTORY_MAX = 500;
 
 export const readHistory = () => {

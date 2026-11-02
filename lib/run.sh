@@ -440,7 +440,7 @@ _run_reviewer_pane() { # <cwd> -> pane id
 # the orchestrator's checkout has no relationship to the PR and drifts. A linked
 # worktree of the orchestrator's clone costs a fetch, not a clone; detached, it
 # has no branch to push.
-_run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-$HOME/.local/state/cel/reviews}"; }
+_run_review_dir() { printf '%s' "${CEL_REVIEW_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviews}"; }
 
 reviewer_checkout_path() { # <repo> <pr>
   printf '%s/%s-pr-%s' "$(_run_review_dir)" "$1" "$2"
@@ -703,7 +703,7 @@ _run_claude_trust_dir() { # <dir>
 # Deliberately NOT the delegation ledger: a reviewer is not a delegation and
 # must not appear in `cel-fanout status`. It is box-level state, so it lives
 # where the rest of the box's state does, beside gc-kept.json.
-_reviewers_state() { printf '%s' "${CEL_REVIEWERS_STATE:-$HOME/.local/state/cel/reviewers.json}"; }
+_reviewers_state() { printf '%s' "${CEL_REVIEWERS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviewers.json}"; }
 
 # A missing or corrupt file is an EMPTY registry, never an error: a stale file
 # must break neither the launcher nor the sweep that reads it.
@@ -868,7 +868,7 @@ _run_dry_agent_args() {
 # live and where the guard lets it write. `cel run console` (and `cel run
 # core`) start the same pane; its alias is `core` and its mailbox is `root`
 # in every workspace.
-_run_core_dir() { printf '%s' "${CEL_CORE_DIR:-$HOME/.local/share/cel/core}"; }
+_run_core_dir() { printf '%s' "${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"; }
 
 # No policy block. Every other role's body ends with the workspace's policy
 # because the workspace is the thing it is bound to; core is bound to the box,
@@ -1026,7 +1026,7 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
 _run_sessions_file() {
   if [ -n "${CEL_ORCH_SESSIONS:-}" ]; then printf '%s' "$CEL_ORCH_SESSIONS"
   elif [ -n "${CEL_TESTING:-}" ]; then printf '%s' "${TMPDIR:-/tmp}/cel-orch-sessions.json"
-  else printf '%s' "$HOME/.local/state/cel/orch-sessions.json"; fi
+  else printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/orch-sessions.json"; fi
 }
 
 _run_sessions_record() ( # <cwd> <session> [runtime]; lock the whole shared map update
@@ -2470,7 +2470,7 @@ _run_now() { printf -v _RUN_NOW '%(%s)T' -1; }
 # rewritten with builtins, for the same budget.
 _run_status_since() { # <name> <ws> <status> -> sets _RUN_SINCE
   local f n w st t keep="" found=""
-  f="${CEL_CACHE:-$HOME/.cache/cel}/orch-status.tsv"; _run_now
+  f="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}/orch-status.tsv"; _run_now
   if [ -f "$f" ]; then
     while IFS=$'\t' read -r n w st t; do
       [ -n "$n" ] || continue
@@ -2559,7 +2559,7 @@ _run_orch_verdict() { # ws role product name pane cwd runtime
     _RUN_DETAIL="routing or process evidence changed during observation"; return 0
   fi
   _run_build
-  vfile="${CEL_CACHE:-$HOME/.cache/cel}/orch-verdicts.tsv"
+  vfile="${CEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cel}/orch-verdicts.tsv"
   if [ -f "$vfile" ]; then
     while IFS=$'\t' read -r k1 k2 k3 k4 l d saved_signature; do
       [ -n "$k1" ] || continue

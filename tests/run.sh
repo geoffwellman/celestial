@@ -149,6 +149,35 @@ export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cel-tests.XXXXXX")"
 # a test launch must land in this run's directory, never the real file.
 export CLAUDE_CONFIG_DIR="$TMPDIR/claude-config"
 
+# NO TEST READS OR WRITES THE BOX'S OWN STATE. The libraries keep AFK, inbox,
+# registry, gc and reviewer records, caches and config under the XDG base
+# directories (${XDG_DATA_HOME:-~/.local/share}/cel and its siblings); read
+# from the real ones, a box with AFK on failed release tests that CI passed.
+# So every test gets its own four XDG homes, fresh per test; a test that sets
+# one itself still wins. HOME stays real: git identity and Chrome come from it.
+#
+# The tools the tests run also find things through XDG, and stay where they
+# were: mise (behind the node and bun shims) keeps its installs and config
+# there, so its directories are pinned to the real ones; herdr finds its
+# server's socket at XDG_CONFIG_HOME/herdr/herdr.sock, so that socket - and
+# only it - is linked into each private config home and herdr answers as it
+# did before.
+_suite_real_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+export MISE_DATA_DIR="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
+export MISE_CONFIG_DIR="${MISE_CONFIG_DIR:-$_suite_real_config/mise}"
+export MISE_CACHE_DIR="${MISE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/mise}"
+export MISE_STATE_DIR="${MISE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mise}"
+_suite_herdr_sock="$_suite_real_config/herdr/herdr.sock"
+_suite_xdg() { # <dir> - this process's four XDG homes, under <dir>
+  export XDG_DATA_HOME="$1/data" XDG_CONFIG_HOME="$1/config" \
+         XDG_CACHE_HOME="$1/cache" XDG_STATE_HOME="$1/state"
+  if [ -S "$_suite_herdr_sock" ]; then
+    mkdir -p "$XDG_CONFIG_HOME/herdr" && ln -sfn "$_suite_herdr_sock" "$XDG_CONFIG_HOME/herdr/herdr.sock"
+  fi
+}
+# The run's own set, for the shells that source each file before any test.
+_suite_xdg "$TMPDIR/xdg/run"
+
 # AND EVERY PROCESS A TEST STARTED GOES WITH IT. A killed suite otherwise leaks
 # test servers that keep the descriptors they inherited (a delegation ledger
 # lock, for one) and block the fleet. So each test runs in its own process group
@@ -212,7 +241,7 @@ RESULTS="$TMPDIR/.results"; mkdir -p "$RESULTS"
 # $RESULTS/<n>.out and its counts to <n>.count. The report is printed by the
 # main shell, in file order, so a parallel run reads exactly like a serial one.
 _run_file() { # <n> <file>
-  local n="$1" f="$2" base t tout out rc limit_hit p=0 fl=0
+  local n="$1" f="$2" base t tout out rc limit_hit p=0 fl=0 k=0
   local rep="$RESULTS/$n.out"
   base="$(basename "$f")"
   CURRENT_GROUP=""
@@ -233,6 +262,7 @@ _run_file() { # <n> <file>
     if [ -n "$FILTER" ]; then case "$t" in *"$FILTER"*) ;; *) continue;; esac; fi
     tout="$RESULTS/$n.test-output"
     limit_hit="$RESULTS/$n.limit"; rm -f "$limit_hit"
+    k=$((k + 1))
     local t0; t0="$(date +%s%N)"
     # THE LOCK DESCRIPTOR IS NOT THE TEST'S TO HOLD. Every child inherits it,
     # and this runner deliberately tolerates tests that leak a process (the
@@ -249,6 +279,9 @@ _run_file() { # <n> <file>
     # timeout exits with it: nothing is left behind because nothing else was
     # started.
     ( [ -n "$SUITE_LOCK_FD" ] && exec {SUITE_LOCK_FD}>&-
+      # numbered, not named: a test's name in the path pushes herdr's socket
+      # past the 108 bytes a unix socket address can hold
+      _suite_xdg "$TMPDIR/xdg/$n.$k"
       exec setsid timeout -k 1 "$TEST_TIMEOUT" bash -c "$PRELUDE; source '$f'; $t" ) > "$tout" 2>&1 &
     CURRENT_GROUP=$!
     rc=0; wait "$CURRENT_GROUP" || rc=$?

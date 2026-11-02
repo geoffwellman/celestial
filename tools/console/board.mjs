@@ -24,7 +24,7 @@ export const LINEAR_BIN = () => process.env.CEL_LINEAR_BIN || 'cel-linear';
 export const GH_BIN = () => process.env.CEL_GH_BIN || 'gh';
 export const TTL = Number(process.env.CEL_CONSOLE_CACHE_TTL || 60000);
 export const STATE_DIR = () => process.env.CEL_CONSOLE_STATE_DIR
-  || join(homedir(), '.local/share/cel/console');
+  || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/console');
 
 const sh = (cmd, args, timeout = 20000) =>
   new Promise((resolve) => {
@@ -161,7 +161,7 @@ export const since = (ws, now = Date.now()) => readCursor(ws)
 
 // --- the mailbox, read raw -------------------------------------------------
 
-const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(homedir(), '.local/share/cel/inbox');
+const INBOX_DIR = () => process.env.CEL_INBOX_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/inbox');
 
 export const mailSince = (ws, iso) => {
   let text;
@@ -185,7 +185,7 @@ export const mailSince = (ws, iso) => {
 // caches `<id>\t<rank>`; the console only reads that cache and does the
 // ordering and the cut. It never scores: it redraws every ten seconds.
 export const TRIAGE_CACHE = () => process.env.CEL_TRIAGE_CACHE
-  || join(homedir(), '.local/share/cel/inbox/triage.cache');
+  || join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), 'cel/inbox/triage.cache');
 
 export const triageRanks = () => {
   const out = new Map();

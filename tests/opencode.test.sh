@@ -184,6 +184,6 @@ test_opencode_unscoped_launch_refuses_before_global_role_write() {
   _gwc_setup
   if (PROFILE_VIA=''; _run_agent_args opencode orchestrator body 0 "$T" >/dev/null 2>&1); then _gwc_teardown; return 1; fi
   [ ! -e "$T/.cel/role-orchestrator.md" ] || { _gwc_teardown; return 1; }
-  [ ! -e "$HOME/.config/opencode/agents/cel-orchestrator.md" ] || { _gwc_teardown; return 1; }
+  [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agents/cel-orchestrator.md" ] || { _gwc_teardown; return 1; }
   _gwc_teardown
 }
