@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Both usage readers, side by side, per account and per window.
 #
-# CEL-61 made celestial read usage from CLIProxyAPI's vault; omp's path stays
-# underneath until this says the two agree on the live box. It is deliberately
-# a tool and not a `cel` verb: it is run by hand, once, before omp's path is
-# removed in a later ticket, and it asks both sources in one go - which spends
-# nothing but a status read against each provider.
+# celestial reads usage from CLIProxyAPI's vault; omp's path stays underneath
+# until this says the two agree on the live box. It is deliberately a tool and
+# not a `cel` verb: it is run by hand before omp's path is removed, and it asks
+# both sources in one go - which spends nothing but a status read against each
+# provider.
 #
 # NO TOKEN IS PRINTED. The rows carry none, and nothing here reads a
 # credential file except through lib/quota.sh, which does not print one either.
@@ -47,10 +47,9 @@ jq -r --argjson a "$cpa" --argjson b "$omp" -n '
 printf '\n  accounts: cliproxy %s, omp %s\n' \
   "$(printf '%s' "$cpa" | jq -r 'length')" "$(printf '%s' "$omp" | jq -r 'length')"
 
-# THE GATE (CEL-64/CEL-80). `--gate` fails when any account or window omp
-# reports is missing from the MERGED list - `subscription_list`, which is what
-# every surface draws. #84 became the default without passing this, and the
-# owner lost both Codex rows, opencode and Fable the same afternoon.
+# THE GATE. `--gate` fails when any account or window omp reports is missing
+# from the MERGED list - `subscription_list`, which is what every surface
+# draws - so retiring omp's path cannot silently drop a row.
 # CEL_QUOTA_COMPARE_MERGED is the test seam: a merged list to judge instead.
 if [ "${1:-}" = --gate ]; then
   merged="${CEL_QUOTA_COMPARE_MERGED:-$(subscription_list 2>/dev/null || printf '[]')}"

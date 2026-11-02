@@ -1,9 +1,8 @@
 // omp / pi extension: celestial inbox delivery without touching the composer.
 //
 // Claude's hooks only run at turn boundaries; OMP needs this extension to
-// watch mail while idle and inject unread items into the next turn. Without it,
-// routine mail to an omp orchestrator used to arrive only as `herdr agent
-// prompt`, which typed into the composer's human draft (CEL-65).
+// watch mail while idle and inject unread items into the next turn, without
+// ever typing into the composer's human draft.
 //   - session_start: run `cel inbox watch --parent <pid>` in its own process
 //     group; each line becomes ctx.ui.notify - out of band, composer untouched.
 //     The watch never moves the cursor.
@@ -11,8 +10,8 @@
 //     inject what it returns as a context message - delivered exactly once,
 //     like tools/hooks/inbox-drain.sh.
 //   - session_shutdown: kill the watcher's whole group (one tail | jq | while
-//     over every mailbox, CEL-111 - and at most one per pid and reader),
-//     so no tail outlives the session; --parent is the backstop.
+//     over every mailbox, and at most one per pid and reader), so no tail
+//     outlives the session; --parent is the backstop.
 // Recipient and workspace come from the launch context: `cel` derives the
 // reader from cwd/CEL_ROLE, and CEL_WORKSPACE names the mailbox when set.
 // Fails open everywhere: an inbox problem must never take the agent down.
@@ -41,9 +40,8 @@ function rexNote(state, ctx): void {
 // CEL_WORKSPACE is a directory, so it is never passed as a mailbox name.
 //
 // An EXPLICIT identity (CEL_INBOX_ME, which `cel run` sets only for root and
-// orchestrators) is reached in every registered workspace: mail to an
-// orchestrator sent from another workspace sat for days because this hook
-// watched, counted and drained its launch workspace alone. Still filtered to that one recipient, so
+// orchestrators) is reached in every registered workspace, so mail sent from
+// another workspace is never stranded. Still filtered to that one recipient, so
 // nobody else's mail - root's included - is read or has its cursor moved.
 // --workspace rides along so a launch workspace the registry lacks stays in
 // the sweep. CEL_INBOX_ALL_WS=0 restores single-workspace scope. Workers get
@@ -59,7 +57,7 @@ function wsArgs(): string[] {
 const envMs = (k, d) => { const n = Number(process.env[k]); return Number.isFinite(n) && n > 0 ? n : d; };
 
 let watcher = null;
-// CEL-76: wake an idle orchestrator (nobody at the keyboard) for new mail.
+// Wake an idle orchestrator (nobody at the keyboard) for new mail.
 // Coalesced: one timer per burst, and no second wake until agent_end.
 let api = null;
 let wakeTimer = null;
@@ -124,12 +122,11 @@ function tryWake(ctx): void {
 }
 export function __watcherPid(): number | undefined { return watcher ? watcher.pid : undefined; }
 
-// WATCHER RECOVERY. A watcher that dies (killed, OOM, a `cel` upgrade under
-// it) used to leave watcher=null for the rest of the session: an orchestrator
-// sat on unread mail with no watch process at all. The hook owns the lifecycle,
-// so it restarts it - one at a time, backoff doubling to 60s and reset once a
-// watcher has lived a minute, never after shutdown - and then counts what
-// arrived while nobody was tailing, through the same coalesced wake.
+// WATCHER RECOVERY. A watcher can die (killed, OOM, a `cel` upgrade under it),
+// and without one the session sits on unread mail. The hook owns the
+// lifecycle, so it restarts it - one at a time, backoff doubling to 60s and
+// reset once a watcher has lived a minute, never after shutdown - and then
+// counts what arrived while nobody was tailing, through the same coalesced wake.
 let restartTimer = null;
 let restartDelay = 0;
 let watcherStarted = 0;
@@ -187,11 +184,10 @@ function startWatcher(ctx): void {
   } catch { watcher = null; scheduleRestart(ctx); }
 }
 
-// CEL-85: the watcher tails from the end, so mail already waiting when the
-// session starts never produced a line - an orchestrator restarted onto an
-// 85-message backlog sat on it until a human typed. Count it (the count does
-// not move the cursor), say so out of band, and arm the SAME coalesced wake
-// new mail uses: its idle/empty-composer rules decide, nothing else delivers.
+// The watcher tails from the end, so mail already waiting when the session
+// starts never produces a line. Count it (the count does not move the cursor),
+// say so out of band, and arm the SAME coalesced wake new mail uses: its
+// idle/empty-composer rules decide, nothing else delivers.
 function unreadCount(ctx): number {
   try {
     const n = execFileSync("bash", [celBin(), "inbox", "count", ...wsArgs()], {
@@ -210,7 +206,7 @@ function wakeForBacklog(ctx): void {
   scheduleWake(ctx);
 }
 
-// CEL-120: every delivered item carries `[<id>]` so `cel drive receipt` can
+// Every delivered item carries `[<id>]` so `cel drive receipt` can
 // prove the message reached the conversation by matching the session file
 // exactly, not fuzzily. Read as --json and rendered here; a line that is not
 // an item (a sweep prefix aside) is passed through as text.

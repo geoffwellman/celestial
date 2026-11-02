@@ -1,16 +1,13 @@
 # shellcheck shell=bash
-# AH-261018: Codex through the box gateway is a first-class transport, and a
-# native-start omp still gets the gateway registered.
+# Codex through the box gateway is a first-class transport, and a native-start
+# omp still gets the gateway registered.
 #
-# Before this, the gateway writer sent every non-Claude model through
-# `openai-completions` (Chat Completions) under a model id the launch line did
-# not even spell the same way (`ompgw/codex/gpt-5.5` against a models.json that
-# listed `gpt-5.5`), and omp's provider was Claude-only. CLIProxyAPI 8.0.29
-# serves the OpenAI Responses surface (POST /v1/responses, the
-# /v1/responses/compact route, and the Responses websocket upgrade on the same
-# path); omp 18.11 and pi 1.2 speak `openai-responses`. These tests pin what the
-# WRITERS and the ROUTER produce; the wire is proven separately, with a real
-# authenticated turn, never here (no key, no network, no inference).
+# Codex models ride `openai-responses` (CLIProxyAPI serves POST /v1/responses,
+# the /v1/responses/compact route, and the Responses websocket upgrade on the
+# same path; omp and pi speak `openai-responses`) under exactly the id the
+# gateway publishes. These tests pin what the WRITERS and the ROUTER produce;
+# the wire is proven separately, with a real authenticated turn, never here
+# (no key, no network, no inference).
 source "$CEL_ROOT/tests/lib/gateway-codex-fixture.sh"
 
 # ---------------------------------------------------------------- pi writer

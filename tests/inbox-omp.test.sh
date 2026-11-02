@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CEL-65: the omp inbox hook delivers mail out of band (ui.notify) and drains
+# The omp inbox hook delivers mail out of band (ui.notify) and drains
 # it into the next turn exactly once - never through the composer. Driven by a
 # faithful harness of omp's hook API (pi.on + before_agent_start's
 # { message } return + session_shutdown), with the real `cel inbox` behind it.
@@ -68,7 +68,7 @@ test_omp_inbox_hook_notifies_drains_once_and_cleans_up() {
   # shutdown took the whole watcher group with it
   [ "$(jq -r '.pid // ""' <<<"$out")" != "" ] || { echo "no watcher pid"; rm -rf "$d"; return 1; }
   assert_eq "$(jq -r '.alive' <<<"$out")" "false"
-  # CEL-111: a launched hook's watcher is a bounded group, not a tree
+  # a launched hook's watcher is a bounded group, not a tree
   local g; g="$(jq -r '.group' <<<"$out")"
   [ "$g" -ge 1 ] && [ "$g" -le 6 ] || { echo "hook watcher group has $g processes"; rm -rf "$d"; return 1; }
   rm -rf "$d"
@@ -79,7 +79,7 @@ test_omp_guard_is_still_a_separate_fail_open_adapter() {
   ! grep -q "inbox" "$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" || { echo "guard grew inbox logic"; return 1; }
 }
 
-# CEL-76: an idle orchestrator with an empty composer wakes itself for mail
+# An idle orchestrator with an empty composer wakes itself for mail
 # via pi.sendMessage({..}, {triggerTurn:true}); drafts/streaming stay notify-only.
 _omp_wake_harness() { # <inbox-dir> <mode: idle|draft|streaming|burst|throws> [reader]
   CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME="${3:-widget-orch}" CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
@@ -174,7 +174,7 @@ test_omp_inbox_ctx_throwing_falls_back_to_notify() {
   assert_contains "$(jq -r '.turn.message.content' <<<"$out")" "msg-0"
 }
 
-# CEL-76 review: a failed wake must not lose mail or wedge later wakes.
+# A failed wake must not lose mail or wedge later wakes.
 _assert_failed_send_keeps_mail() {
   local out; out="$(_wake "$1")"
   assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
@@ -185,10 +185,9 @@ _assert_failed_send_keeps_mail() {
 test_omp_inbox_throwing_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendthrows; }
 test_omp_inbox_rejecting_send_keeps_mail_and_rearms() { command -v node >/dev/null || return 0; _assert_failed_send_keeps_mail sendrejects; }
 
-# CEL-85: mail that was ALREADY waiting when the session started never woke
-# anyone - the watcher only reacts to new lines, so an orchestrator restarted
-# onto an 85-message backlog sat on it until a human typed. session_start now
-# arms the same coalesced wake new mail uses.
+# Mail ALREADY waiting when the session starts produces no watcher line (the
+# watcher only reacts to new lines), so session_start arms the same coalesced
+# wake new mail uses.
 _omp_backlog_harness() { # <inbox-dir> <mode: idle|draft|none>
   CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=400 HOOK="$HOOK" node --no-warnings - <<'JS'
@@ -393,7 +392,7 @@ test_inbox_all_workspaces_with_workspace_includes_an_unregistered_one() {
   rm -rf "$D" "$REG"
 }
 
-# Review note on PR #113: a drain that FAILS (timeout, transient error) is not
+# A drain that FAILS (timeout, transient error) is not
 # a drain that found nothing. It must leave the mail owed so the retry timer
 # delivers it, rather than waiting for the next unrelated event.
 test_omp_inbox_failed_drain_keeps_mail_owed_and_retries() {
@@ -415,7 +414,7 @@ SH
   assert_eq "$(jq -r '.turn' <<<"$out")" "null"
 }
 
-# CEL-95: a WORKER identity (not an orchestrator) is woken by mail addressed
+# A WORKER identity (not an orchestrator) is woken by mail addressed
 # to it and not by anyone else's - the pi worker launch sets CEL_INBOX_ME to
 # its own alias.
 test_inbox_hook_worker_identity_wakes_on_its_own_mail_only() {
@@ -432,7 +431,7 @@ test_inbox_hook_worker_identity_wakes_on_its_own_mail_only() {
   rm -rf "$D" "$REG"
 }
 
-# CEL-120: owner mail to a BUSY orchestrator stays queued (no wake, cursor
+# Owner mail to a BUSY orchestrator stays queued (no wake, cursor
 # untouched) until the turn ends, then arrives at agent_end - carrying its
 # `[<id>]` so `cel drive receipt` can find it in the conversation. A
 # non-empty composer is never written to on the way.

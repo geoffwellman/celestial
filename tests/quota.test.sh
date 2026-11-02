@@ -42,7 +42,7 @@ _quota_teardown() { rm -rf "$T"; }
 # the cache can be proved, and records the headers so the Claude beta header
 # and the Codex account header are asserted rather than assumed.
 #
-# A THIRD BODY, PICKED BY BEARER. CEL-35 turns on whether two Claude logins
+# A THIRD BODY, PICKED BY BEARER. Account identity turns on whether two Claude logins
 # read the same windows or different ones, and the only thing that tells the
 # two reads apart is the token they present - so the stub answers the
 # claude-code token from its own file when one is given.
@@ -106,7 +106,7 @@ _quota_stub_stop() {
   trap - EXIT INT TERM
 }
 
-# The Anthropic OAuth usage shape, measured on this box 2026-09-18.
+# The Anthropic OAuth usage shape, as the endpoint answers it.
 _claude_body() { # [five-hour-pct] [seven-day-pct]
   jq -nc --argjson a "${1:-16.0}" --argjson b "${2:-41.0}" \
     '{five_hour: {utilization: $a, resets_at: "2026-09-18T09:00:00Z"},
@@ -138,14 +138,12 @@ test_subscription_list_finds_both_providers_and_prints_no_token() {
   _quota_teardown
 }
 
-# --- CEL-35: an account is WHERE it is signed in --------------------------
+# --- an account is WHERE it is signed in ------------------------------------
 #
-# The owner, 2026-09-19: "somehow we are showing 4 claude subscriptions? there
-# are only 3 I've signed into". CEL-27 named a Claude account by the first six
-# hex of its token's sha256, and pi refreshes that token: every refresh minted
-# a new account, a new cache file and a new row on every surface. The identity
-# is now the credential's HOME - pi, claude-code, the codex account id - so a
-# refresh overwrites one file and the row count is the login count.
+# Tokens are refreshed at will, so an identity derived from one would mint a
+# new account, cache file and row on every refresh. The identity is the
+# credential's HOME - pi, claude-code, the codex account id - so a refresh
+# overwrites one file and the row count is the login count.
 test_a_rotated_pi_token_leaves_one_row_and_one_cache_file() {
   _quota_setup
   _quota_stub_server "$(_claude_body)" "$(_codex_body)"
@@ -200,10 +198,9 @@ test_two_claude_logins_with_different_windows_stay_two_rows() {
   _quota_teardown
 }
 
-# AN UNREADABLE ACCOUNT IS A ROW, NOT A SILENCE. Codex answers nothing on this
-# box, so CEL-27 cached nothing, so `cel fleet` listed nothing, so the console
-# showed Claude alone while the dashboard showed everything. A row that says
-# why is the only version of this an operator can act on.
+# AN UNREADABLE ACCOUNT IS A ROW, NOT A SILENCE. Without the row, `cel fleet`
+# and the console list nothing for the account while the dashboard shows it.
+# A row that says why is the only version of this an operator can act on.
 test_codex_unreadable_is_still_a_row_with_its_reason() {
   _quota_setup
   _quota_stub_server "$(_claude_body)" "$(_codex_body)"
@@ -232,7 +229,7 @@ test_subscription_usage_parses_the_claude_shape() {
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "5h") | .used_pct == 16')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.windows[] | select(.name == "7d") | .used_pct == 41')" true
   assert_eq "$(printf '%s' "$out" | jq -r '.extra.state')" disabled
-  # CEL-49: `disabled_reason: out_of_credits` with spending switched off means
+  # `disabled_reason: out_of_credits` with spending switched off means
   # top-up is off, not "this account is spent", and the row says the true one.
   assert_eq "$(printf '%s' "$out" | jq -r '.extra.reason')" 'top-up is off'
   # the endpoint only answers an OAuth token with its beta header
@@ -347,23 +344,19 @@ test_the_cached_list_is_the_same_list_as_the_live_one() {
   _quota_teardown
 }
 
-# --- CEL-49: ask the box what it already knows ------------------------------
+# --- ask the box what it already knows ---------------------------------------
 #
-# The owner, 2026-09-20: Codex reads `unreadable` while their prompt tool shows
-# it fine, Fable is missing, one Anthropic account of three is missing, and
-# opencode is nowhere. Every one of those is cel reading a worse source than
-# the box already has: `omp usage --json` holds refreshed OAuth per account and
-# answers for all of them, with `.limits[]` as the authoritative window list.
+# `omp usage --json` holds refreshed OAuth per account and answers for all of
+# them, with `.limits[]` as the authoritative window list; a stale per-file
+# token is a worse source than the box already has.
 #
 # NOTHING HERE CALLS A PROVIDER. `omp` is a stub on a prepended PATH printing
 # canned JSON, exactly as the endpoint stub above serves the fallback path.
 
-# THE FIXTURE IS THIS BOX'S OWN ANSWER, with the identities replaced by
-# fictional ones: `omp usage --json | jq del(.reports[].limits)` carries no
-# secret, and a stub shaped like a document omp does not produce tests
-# nothing - the first cut of this file invented `{accounts: [...]}`, the code
-# was written to match the invention, and the gate passed while `cel quota`
-# never changed. So tests/fixtures/omp-usage.json is the real shape:
+# THE FIXTURE IS A REAL ANSWER, with the identities replaced by fictional
+# ones: `omp usage --json | jq del(.reports[].limits)` carries no secret, and
+# a stub shaped like a document omp does not produce tests nothing. So
+# tests/fixtures/omp-usage.json is the real shape:
 # {generatedAt, reports:[{provider, metadata:{accountId,email,planType},
 # limits:[...]}], accountsWithoutUsage, disabledCredentials, capacity}, with
 # three Anthropic accounts (each carrying a Fable-scoped weekly window), two
@@ -512,14 +505,11 @@ test_no_key_in_this_workspace_reads_differently_from_asked_and_failed() {
   _quota_teardown
 }
 
-# A STUB THAT DISAGREES WITH THE TOOL IS THE BUG, NOT THE SAFETY NET. The
-# first cut of this file invented `{accounts: [...]}`; omp answers
-# `{generatedAt, reports, accountsWithoutUsage, disabledCredentials,
-# capacity}`, so every row fell out, every caller fell back to the old path,
-# and this suite passed while `cel quota` printed exactly the output the
-# ticket was filed about. The fixture is pinned to the real shape here, and
-# where omp is actually installed its own top-level keys are compared - which
-# is the assertion that would have caught it.
+# A STUB THAT DISAGREES WITH THE TOOL IS THE BUG, NOT THE SAFETY NET. omp
+# answers `{generatedAt, reports, accountsWithoutUsage, disabledCredentials,
+# capacity}`; a mapping that reads any other shape drops every row and falls
+# back silently. The fixture is pinned to the real shape here, and where omp
+# is actually installed its own top-level keys are compared.
 test_the_omp_fixture_is_the_shape_the_tool_answers() {
   local keys; keys="$(jq -r 'keys | sort | join(",")' "$(fixture omp-usage.json)")"
   assert_eq "$keys" 'accountsWithoutUsage,capacity,disabledCredentials,generatedAt,reports'
@@ -543,12 +533,11 @@ test_the_omp_mapping_yields_a_row_per_report() {
   assert_eq "$(_sub_omp_rows | grep -c .)" 6
 }
 
-# --- CEL-49 review: the two silences are not the same news ------------------
+# --- the two silences are not the same news ---------------------------------
 #
-# A box with no omp falls back quietly, as the ticket requires. omp that IS
-# there and answers nothing usable falls back to the same stale reads - and
-# read the same way it is invisible, which is exactly how the `.accounts`
-# mapping shipped green. One line on stderr tells them apart.
+# A box with no omp falls back quietly. omp that IS there and answers nothing
+# usable falls back to the same stale reads - and read the same way it would
+# be invisible. One line on stderr tells them apart.
 test_omp_present_but_useless_says_so_on_stderr() {
   _quota_setup
   _quota_stub_server "$(_claude_body)" "$(_codex_body)"
@@ -603,14 +592,11 @@ test_the_cached_path_never_warns_about_omp() {
     printf 'the cached path warned about a tool it never ran:\n%s\n' "$err" >&2; return 1; }
 }
 
-# --- CEL-61: the usage reader owns the vault --------------------------------
+# --- the usage reader owns the vault ----------------------------------------
 #
-# The owner's decision, 2026-09-23 (option C): CLIProxyAPI becomes the ONE
-# credential store on the box and celestial reads usage from those credentials
-# itself, because the alternative - CPA serving traffic while omp reports usage
-# - leaves two lists of accounts with nothing keeping them the same, and an
-# account logged into one and forgotten in the other stops `cel quota` matching
-# the accounts the workers actually run on.
+# CLIProxyAPI is the ONE credential store on the box and celestial reads usage
+# from those credentials itself, so `cel quota` describes exactly the accounts
+# the workers run on.
 #
 # NOTHING HERE CALLS A PROVIDER AND NOTHING HERE TOUCHES THE REAL VAULT: the
 # fixture auth-dir is built under mktemp in CLIProxyAPI's own filename and JSON
@@ -626,8 +612,7 @@ test_the_cached_path_never_warns_about_omp() {
 # moment that call reappears; nothing in lib/quota.sh knows the address.
 #
 # It answers 401 to any bearer that is not in its `fresh` list, which is what
-# an expired access token looks like from here - the CEL-49 symptom
-# ("unreadable" for sixteen days) was exactly this answer going unrecognised.
+# an expired access token looks like from here.
 _cpa_stub_server() { # <claude-json> <codex-json> <opencode-json>
   printf '%s' "$1" > "$T/claude.json"
   printf '%s' "$2" > "$T/codex.json"
@@ -844,7 +829,7 @@ test_two_readers_leave_the_cliproxy_vault_byte_identical() {
   # otherwise shoot the server out from under the second.
   # The two readers BY PID: a bare `wait` also waits for the stub server,
   # which is this shell's child too and only leaves on its sixty-second dead
-  # man's switch - CEL-97 measured this one test at 60 s of CI's suite.
+  # man's switch.
   local ra rb
   ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-a" subscription_list >/dev/null 2>&1 ) & ra=$!
   ( trap - EXIT INT TERM; CEL_CACHE="$T/cache-b" subscription_list >/dev/null 2>&1 ) & rb=$!
@@ -880,7 +865,7 @@ test_an_absent_cliproxy_vault_falls_back_to_omp_unchanged() {
   _quota_teardown
 }
 
-# CLIProxyAPI does not hold opencode, and the owner has that row today.
+# CLIProxyAPI does not hold opencode, so its row must come from opencode's own file.
 test_opencode_still_reports_beside_the_vault_accounts() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
@@ -919,8 +904,8 @@ test_the_vault_rows_have_the_same_shape_as_the_omp_rows() {
   _quota_teardown
 }
 
-# The parity tool is what the owner runs on the live box before omp's path is
-# removed in a later ticket: both readers, per account and per window.
+# The parity tool is run by hand on the live box before omp's path is
+# removed: both readers, per account and per window.
 test_the_parity_tool_prints_both_readers_side_by_side() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
@@ -936,11 +921,9 @@ test_the_parity_tool_prints_both_readers_side_by_side() {
   _quota_teardown
 }
 
-# ONE ANSWER TO "WHERE ARE THE CREDENTIALS". CEL-60 owns the vault's location
-# and publishes `gateway_auth_dir`; a second opinion here would be the
-# two-lists failure this ticket exists to end, rebuilt inside one process. With
-# no test seam set, the reader must find the accounts `cel gateway status`
-# lists.
+# ONE ANSWER TO "WHERE ARE THE CREDENTIALS". lib/gateway.sh owns the vault's
+# location and publishes `gateway_auth_dir`; with no test seam set, the reader
+# must find the accounts `cel gateway status` lists.
 test_the_vault_is_found_where_cel_gateway_says_it_is() {
   _quota_setup
   _cpa_stub_server "$(_cpa_claude_body)" "$(_codex_body)" "$(_cpa_opencode_body)"
@@ -956,18 +939,16 @@ test_the_vault_is_found_where_cel_gateway_says_it_is() {
   _quota_teardown
 }
 
-# --- CEL-80 (absorbs CEL-64): merge per account, not per source -------------
+# --- merge per account, not per source --------------------------------------
 #
-# #84 made the vault all-or-nothing: the moment CLIProxyAPI held one account,
-# omp was skipped entirely, and on 2026-09-23 both Codex accounts and opencode
-# fell off `cel quota` because the vault held only Claude. An account is
-# provider + email; whichever source can read it answers once.
+# A vault holding only Claude must not drop omp's Codex and opencode rows. An
+# account is provider + email; whichever source can read it answers once.
 
 _cpa_vault_claude_only() {
   export CEL_CPA_AUTH_DIR="$T/cpa-auth"
   mkdir -p "$CEL_CPA_AUTH_DIR"; chmod 700 "$CEL_CPA_AUTH_DIR"
-  # CLIProxyAPI's real Claude file carries the email and NO uuid: the live
-  # vault on 2026-09-25 had `email` + `type` only, so the join is by email.
+  # CLIProxyAPI's real Claude file carries the email and NO uuid (`email` +
+  # `type` only), so the join is by email.
   local n
   for n in one two; do
     jq -nc --arg n "$n" '{type: "claude", access_token: ("fixture-cpa-claude-" + $n),
@@ -998,10 +979,10 @@ test_every_account_from_either_source_appears_exactly_once() {
   _quota_teardown
 }
 
-# The live Anthropic answer, captured 2026-09-25 with the numbers changed: a
-# dozen codename keys, most null, one (`nimbus_quill`) a real object with a
-# null reset - and the authoritative `.limits[]` beside them. Reading the keys
-# printed `nimbus_quill 0% (resets Nimbus Quill)` and lost Fable.
+# A real Anthropic answer with the numbers changed: a dozen codename keys,
+# most null, one (`nimbus_quill`) a real object with a null reset - and the
+# authoritative `.limits[]` beside them. Codename keys must never become
+# windows, and the Fable-scoped window must survive.
 test_the_claude_reader_maps_limits_and_ignores_codename_keys() {
   _quota_setup
   _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" '{}'
@@ -1017,8 +998,7 @@ test_the_claude_reader_maps_limits_and_ignores_codename_keys() {
 }
 
 # opencode's real auth file is keyed `opencode-go` and holds a `key`, and its
-# usage answer is `{usage: {rolling, weekly, monthly}}` - neither of which the
-# CEL-61 reader looked for, so the row silently vanished on the live box.
+# usage answer is `{usage: {rolling, weekly, monthly}}`.
 test_opencode_reads_its_real_auth_and_usage_shapes_beside_the_vault() {
   _quota_setup
   _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" \
@@ -1036,8 +1016,7 @@ test_opencode_reads_its_real_auth_and_usage_shapes_beside_the_vault() {
   _quota_teardown
 }
 
-# The check #84 should have passed before it became the default: every
-# account and window omp reports must be in the merged list.
+# The gate: every account and window omp reports must be in the merged list.
 test_quota_compare_gate_fails_when_the_merge_loses_an_omp_window() {
   _quota_setup
   _cpa_stub_server "$(cat "$(fixture anthropic-oauth-usage.json)")" "$(_codex_body)" '{}'
@@ -1056,10 +1035,9 @@ test_quota_compare_gate_fails_when_the_merge_loses_an_omp_window() {
   _quota_teardown
 }
 
-# CREDIT IS READ WITH THE KEY OF THE WORKSPACE THAT OWNS IT (CEL-80). From
-# plane, `cel quota` printed "no key in this workspace" for OpenRouter and
-# DeepSeek while the workspaces holding those keys sat one directory away.
-# Every workspace that owns a key gets its own balance row.
+# CREDIT IS READ WITH THE KEY OF THE WORKSPACE THAT OWNS IT, wherever
+# `cel quota` runs from. Every workspace that owns a key gets its own balance
+# row.
 test_credit_is_shown_for_every_workspace_that_owns_a_key() {
   _quota_setup
   _quota_manifest_stub
@@ -1088,11 +1066,10 @@ EOF2
   _quota_teardown
 }
 
-# --- CEL-98: the login hint names the store that holds the dead credential ---
+# --- the login hint names the store that holds the dead credential ----------
 # The orchestrators run on omp's OWN Anthropic pool, not the gateway. A
-# credential omp disabled (its refresh token rejected) printed
-# `cel gateway login claude`, which re-logs the gateway's copy - already fine -
-# and leaves the orchestrators' copy dead. The hint has to name omp's login.
+# credential omp disabled (its refresh token rejected) must name omp's login:
+# `cel gateway login claude` re-logs the gateway's copy, which is fine.
 test_an_omp_disabled_credential_hints_the_omp_login() {
   _quota_setup
   _omp_stub
@@ -1118,12 +1095,11 @@ test_a_gateway_disabled_credential_keeps_the_gateway_login() {
   _quota_teardown
 }
 
-# --- CEL-108: what the usage card needs from `cel quota --json` ---------------
+# --- what the usage card needs from `cel quota --json` ----------------------
 # The card tags each Claude account by who runs on it and merges two
 # workspaces that share one paid key into one row. Both are facts celestial
-# already holds - omp's pool (the CEL-98 source) and the key fingerprint the
-# balance cache is keyed on - so the JSON carries them rather than the
-# dashboard guessing.
+# already holds - omp's pool and the key fingerprint the balance cache is
+# keyed on - so the JSON carries them rather than the dashboard guessing.
 test_cel108_quota_json_names_the_orchestrator_pool_and_disabled_credentials() {
   _quota_setup
   _omp_stub
