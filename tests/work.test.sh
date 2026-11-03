@@ -230,6 +230,31 @@ test_events_include_the_afk_acts_and_the_reviewer_registry() {
   rm -rf "$T"
 }
 
+# An AFK act's event says how it ended; an entry from before acts reported
+# their ending carries no outcome, and its event shows nothing in its place.
+test_regression_afk_events_show_how_each_act_ended() {
+  _work_setup
+  _work_ledger '[{"id":"WG-49-x","repo":"widget","branch":"WG-49-x","ticket":"WG-49","state":"landed",
+                  "created":"2026-01-01T00:00:00Z"}]'
+  mkdir -p "$T/state/afk"
+  printf '%s\n' \
+    '{"at":"2026-01-05T02:00:00Z","act":"land","authorisation":"pre-auth 2","detail":"widget #66 WG-49-x","outcome":"failed"}' \
+    '{"at":"2026-01-05T03:00:00Z","act":"land","authorisation":"pre-auth 2","detail":"widget #66 WG-49-x"}' \
+    > "$T/state/afk/log.jsonl"
+  printf '%s\n' '[{"number":66,"title":"retry","headRefName":"WG-49-x","state":"MERGED",
+    "reviewDecision":"APPROVED","statusCheckRollup":[],"createdAt":"2026-01-02T00:00:00Z",
+    "mergedAt":"2026-01-05T00:00:00Z","updatedAt":"2026-01-05T00:00:00Z"}]' > "$T/prs.json"
+  local afk with without
+  afk="$(work_items "$T" | jq -c '[.events[] | select(.source == "afk")]')"
+  assert_eq "$(printf '%s' "$afk" | jq 'length')" 2 || { rm -rf "$T"; return 1; }
+  with="$(printf '%s' "$afk" | jq -r '.[] | select(.at == "2026-01-05T02:00:00Z") | .what')"
+  without="$(printf '%s' "$afk" | jq -r '.[] | select(.at == "2026-01-05T03:00:00Z") | .what')"
+  case " $with " in *" failed"[:\ ]*) ;; *) printf 'the outcome is missing: %s\n' "$with" >&2; rm -rf "$T"; return 1;; esac
+  # the same entry with no outcome renders as the same line, minus the outcome
+  assert_eq "$without" "${with/ failed/}" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
 # --- 5. the verbs -----------------------------------------------------------
 
 _two_items() {

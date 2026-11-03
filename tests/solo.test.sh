@@ -25,7 +25,7 @@ echo "\$@" >> "$GH_LOG"
 case "\$1 \$2" in
   "api user") echo fleetbot;;
   "pr view")  echo '{"number":7,"author":{"login":"${1:-fleetbot}"},"reviewDecision":"${2:-}","isDraft":${4:-false},"mergeable":"'"\${STUB_MERGEABLE:-MERGEABLE}"'","state":"${5:-OPEN}","headRefOid":"'"\$STUB_HEAD"'","baseRefName":"main","statusCheckRollup":'"\${STUB_ROLLUP:-\$STUB_ROLLUP_DEFAULT}"'}';;
-  "pr merge") exit 0;;
+  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || exit 1; exit 0;;
   *) case "\$2" in
        */protection) case "\${STUB_UNPROTECTED:-}" in
                        1) echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1;;
@@ -228,10 +228,24 @@ test_solo_land_refuses_a_conflicted_pr() {
 test_solo_land_stops_when_afk_refuses() {
   _solo_setup fleetbot APPROVED
   afk_active() { return 0; }
-  afk_authorise() { printf '%s' "$2" > "$T/afk-asked"; return 1; }
+  afk_admit() { printf '%s' "$2" > "$T/afk-asked"; return 1; }
   ! _land widget#7 >/dev/null 2>&1 && ! _merged || { echo "merged although AFK refused"; rm -rf "$T"; return 1; }
   assert_eq "$(jq -r .approved_via "$T/afk-asked")" "GitHub approval"
   rm -rf "$T"
+}
+# ...and a merge AFK let through is logged with how it ended, after the merge
+# was tried - not as "authorised" before it.
+test_regression_solo_land_under_afk_logs_the_merge_outcome() {
+  _solo_setup fleetbot APPROVED
+  export CEL_AFK_STATE="$T/afk"
+  cmd_afk on --until '+8h' >/dev/null
+  STUB_MERGE_FAIL=1 _land widget#7 >/dev/null 2>&1 && { echo "a failed merge reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" failed || { rm -rf "$T"; return 1; }
+  _land widget#7 >/dev/null 2>&1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" completed || { rm -rf "$T"; return 1; }
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "#7" || { rm -rf "$T"; return 1; }
+  unset CEL_AFK_STATE; rm -rf "$T"
 }
 # The squash body lands on main; a ticket-shaped token there would fail every
 # later PR's history scan, so the merge is refused before it happens.

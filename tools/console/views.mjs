@@ -82,8 +82,9 @@ export const afkEdge = (afk) => {
 };
 
 // "What did you do while I was asleep" has ONE answer to read, not four
-// surfaces to reconstruct - so the acts come with the pre-authorisation each
-// one was covered by, in the order they happened.
+// surfaces to reconstruct - so the acts come with how each one ended and the
+// pre-authorisation it was covered by, in the order they happened. An entry
+// written before acts reported their ending carries no outcome and shows none.
 export const afkLogView = (afk, entries = []) => {
   if (!afk || afk.on !== true) return [];
   const out = ['', 'AFK LOG'];
@@ -92,7 +93,8 @@ export const afkLogView = (afk, entries = []) => {
     return out;
   }
   for (const e of entries.slice(-8)) {
-    out.push(`  ${String(e.at || '').slice(0, 16)} ${e.act} ${e.detail || ''} [${e.authorisation || 'unrecorded'}]`);
+    const outcome = e.outcome ? ` ${e.outcome}` : '';
+    out.push(`  ${String(e.at || '').slice(0, 16)} ${e.act}${outcome} ${e.detail || ''} [${e.authorisation || 'unrecorded'}]`);
   }
   return out;
 };

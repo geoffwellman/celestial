@@ -52,3 +52,16 @@ test_repo_default_ref_refuses_dangling_authoritative_default() {
   assert_fails repo_default_ref "$T"
   rm -rf "$T"
 }
+
+# `exec {fd}>file 2>/dev/null` (or `exec 8>file 2>/dev/null`) does not just
+# hush the open: an exec with no command makes every redirection permanent, so
+# the rest of the process writes stderr to /dev/null. The open is braced -
+# `{ exec {fd}>file; } 2>/dev/null` - wherever it is silenced.
+# A process substitution (`exec {fd}< <(cmd 2>/dev/null)`) silences only cmd.
+test_regression_no_exec_redirect_silences_stderr_for_the_rest_of_the_process() {
+  local hits
+  hits="$(cd "$CEL_ROOT" && git ls-files -z lib bin core tools tests/lib \
+    | xargs -0 grep -nE '(^|[^{] )exec +(\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9]+)[<>]+[^;&|]* 2>/dev/null' 2>/dev/null \
+    | grep -vE '^[^:]+\.(md|json|css|html|mjs|js|py):|[<>]\(' || true)"
+  assert_eq "$hits" ""
+}

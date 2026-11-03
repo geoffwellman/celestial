@@ -1049,6 +1049,19 @@ test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
   rm -rf "$T"
 }
 
+# The registry lock silences only its own open. A bare `exec {fd}>lock
+# 2>/dev/null` pointed the caller's stderr at /dev/null for the rest of the
+# process, so every warning after a registry write vanished.
+test_regression_reviewer_registry_write_leaves_later_stderr_visible() {
+  have flock || return 0
+  _ws; _reviewers_fixture
+  local err
+  err="$( { reviewers_record widget 71 w1:p3 widget-pr-71-review >/dev/null; printf 'later-stderr\n' >&2; } 2>&1 )"
+  assert_contains "$err" later-stderr || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  rm -rf "$T"
+}
+
 # ------------------------------------------- the reviewer reads the PR's tree
 # A reviewer gets a detached checkout AT THE PR'S HEAD, of its own - never the
 # orchestrator's checkout, which may sit far behind `main` and bear no

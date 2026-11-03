@@ -1530,6 +1530,27 @@ test_console_shows_the_afk_log_with_its_authorisation() {
   _console_teardown
 }
 
+# Each act says how it ended; an entry written before acts reported their
+# ending has no outcome, and its line shows nothing in its place.
+test_regression_console_afk_log_shows_each_acts_outcome() {
+  _console_setup
+  cat >"$T/afklog.mjs" <<'EOF'
+import assert from 'node:assert/strict';
+const { afkLogView } = await import(process.env.VIEWS_MJS);
+const base = { at: '2026-09-22T02:10:00Z', act: 'land', authorisation: 'pre-authorisation 2', detail: 'widget#71' };
+const [, , ended] = afkLogView({ on: true }, [{ ...base, outcome: 'failed' }]);
+const [, , older] = afkLogView({ on: true }, [base]);
+assert.ok(ended.split(' ').includes('failed'), `the outcome is missing: ${ended}`);
+assert.equal(older, ended.replace(' failed', ''), 'an entry with no outcome grew something in its place');
+process.stdout.write('afk log: all good\n');
+EOF
+  local out
+  out="$(VIEWS_MJS="$CEL_ROOT/tools/console/views.mjs" node "$T/afklog.mjs" 2>&1)" \
+    || { printf '%s\n' "$out"; _console_teardown; return 1; }
+  assert_contains "$out" 'afk log: all good'
+  _console_teardown
+}
+
 # AFK off is SILENT. A permanent "AFK off" row is a row that teaches an
 # operator to stop reading the edge.
 test_console_says_nothing_about_afk_when_it_is_off() {

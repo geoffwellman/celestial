@@ -173,7 +173,8 @@ _sub_cache_put() { # <file> <doc>
 _sub_cache_locked() { # <cmd...>
   local dir fd="" rc=0; dir="$(_sub_cache_dir)"
   mkdir -p "$dir"; chmod 700 "$dir" 2>/dev/null || true
-  if command -v flock >/dev/null 2>&1 && exec {fd}>"$dir/.subscription.lock" 2>/dev/null; then
+  # braced: a bare `exec ... 2>/dev/null` silences every later stderr write
+  if command -v flock >/dev/null 2>&1 && { exec {fd}>"$dir/.subscription.lock"; } 2>/dev/null; then
     flock -w 10 "$fd" || true
   else fd=""; fi
   "$@" || rc=$?

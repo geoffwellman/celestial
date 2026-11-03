@@ -795,7 +795,8 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
     local lkd="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cel-inbox-watch"
     mkdir -p "$lkd" 2>/dev/null || true
     local lkfd
-    if exec {lkfd}>>"$lkd/$(_inbox_sanitise "$who").$parent.lock" 2>/dev/null; then
+    # braced: a bare `exec ... 2>/dev/null` silences every later stderr write
+    if { exec {lkfd}>>"$lkd/$(_inbox_sanitise "$who").$parent.lock"; } 2>/dev/null; then
       flock -w "${CEL_INBOX_WATCH_LOCK_WAIT:-1}" "$lkfd" || return 0
     fi
   fi

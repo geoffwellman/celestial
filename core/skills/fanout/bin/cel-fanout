@@ -975,8 +975,10 @@ cmd_delegate() {
   # dispatching a finding and dispatching an idea.
   # PRE-AUTHORISATION 5: a spec already under .cel/specs/ before AFK
   # went on is work somebody ordered awake - it keeps moving.
+  # Either door only ADMITS here: the act is recorded once the dispatch below
+  # has ended - completed, failed, or partial (lib/afk.sh afk_begin).
   if afk_active && afk_spec_ordered "$abs_spec"; then
-    afk_authorise ordered_work "$(afk_ordered_evidence "$abs_spec" "$wused" "$wcap")" >/dev/null \
+    afk_begin ordered_work "$(afk_ordered_evidence "$abs_spec" "$wused" "$wcap")" \
       || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
   elif afk_active; then
     local afk_src afk_quote afk_prov afk_rem afk_floor afk_ev
@@ -1002,7 +1004,7 @@ cmd_delegate() {
       --arg ws "$(ws_name "$wsdir" 2>/dev/null || basename "$wsdir")" --arg repo "$repo" --arg br "$branch" \
       '{source:$src, quote:$q, workers:$w, cap:$c, quota_pct:$pct, quota_floor:$fl,
         workspace:$ws, repo:$repo, branch:$br}')"
-    afk_authorise dispatch "$afk_ev" "$repo/$branch from $abs_spec (${afk_src:-no source}) - $wused/$wcap workers" >/dev/null \
+    afk_begin dispatch "$afk_ev" "$repo/$branch from $abs_spec (${afk_src:-no source}) - $wused/$wcap workers" \
       || die "delegate: AFK did not authorise this dispatch - see the refusal above. No worktree, no pane, no worker."
   fi
 
@@ -1045,7 +1047,7 @@ cmd_delegate() {
         "$HERDR" worktree open --path "$existing" --label "$branch" --no-focus \
           "${open_scope[@]}" >/dev/null \
           || die "delegate --reuse: every proof passed but herdr could not open the existing checkout $existing - the row is untouched and nothing was removed or recreated (open it yourself with: herdr worktree open --cwd '$repodir' --path '$existing')"
-        opened_ws=1
+        opened_ws=1; afk_step "opened the herdr workspace for $existing"
       fi
     fi
   elif [ -n "$session_opt" ]; then
@@ -1148,6 +1150,7 @@ cmd_delegate() {
     # Recording that as a delegation is what stranded the real ones, so it is
     # a hard failure rather than something to guess around.
     [ -n "$worktree" ] || die "herdr worktree create for '$branch' returned no checkout path - it did not attach a worktree. Check 'herdr workspace list' for a stray workspace labelled '$branch' and remove it before retrying."
+    afk_step "created the worktree $worktree"
   fi
   [ -n "$child_ws" ] || die "herdr worktree create for '$branch' did not return a workspace id"
   [ -n "$worktree" ] || die "herdr worktree create for '$branch' did not return a checkout path"
@@ -1327,6 +1330,8 @@ cmd_delegate() {
   # Where the branch started, so a `pr: none` collect can tell "pushed to
   # main" from "never committed" - both leave nothing ahead of origin/main.
   [ -n "$prior_row" ] || [ -z "$start_sha" ] || _ledger_set_field "$wsdir" "$branch" start_sha "$start_sha"
+  # An agent may exist from here on, even when the start below reports failure.
+  afk_step "asked herdr to start worker $alias in $pane"
   if ! ( _RUN_AGENT_QUIET=1 _RUN_AGENT_SPAWN=_ledger_spawn _run_agent_start "$pane" "$alias" "$rt" "${AGENT_ARGS[@]}" ); then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"start-failed", at:$at, note:"herdr agent start failed or timed out - an agent may still exist in the pane; the row is kept, not rolled back"}' --arg at "$(_now_iso)"
     die "delegate: $branch: herdr agent start did not complete - the ledger row is kept (launch.phase start-failed; $([ -n "$prior_row" ] && echo "its earlier verdict and PR are intact" || echo "state unconfirmed")), the worktree and pane are untouched. An agent may exist in $pane: inspect it and never start a second one on top.$([ "$opened_ws" = 1 ] && printf ' NOTE: this resume OPENED the herdr workspace for %s (via herdr worktree open) before the start failed - it is still open; close it yourself if you abandon the resume.' "$worktree") There is no automatic continuation for this row; once you have looked, cel-fanout recover abandon $branch --reason '<what you found>' records it"
@@ -1334,6 +1339,7 @@ cmd_delegate() {
   if [ -z "$prior_row" ]; then
     _ledger_patch "$wsdir" "$branch" '.launch = {phase:"started", at:$at}' --arg at "$(_now_iso)"
   fi
+  afk_step "worker $alias started in $pane"
   # THE WORKER MUST NOT FINISH INVISIBLY. Stopping at "commit + result.md" makes
   # a silent loss (a rebase that ate the worker's own commit, a branch never
   # landed) indistinguishable from success. Pushing and opening
@@ -1397,6 +1403,10 @@ cmd_delegate() {
     # unconfirmed -> running as a recorded transition.
     [ "$dstate" != running ] || _ledger_update_state "$wsdir" "$branch" running
   fi
+  # The act AFK let through ends here: a worker running its task, or one whose
+  # task may never have arrived.
+  if [ "$dstate" = running ]; then afk_end completed "worker $alias running in $pane"
+  else afk_end partial "worker $alias started in $pane; its task was never confirmed as received"; fi
   # In Progress the moment a worker actually exists, not when an agent
   # remembers to say so. Best-effort by design - see _fanout_ticket_state.
   if [ "$shape" = ship ] && [ "$dstate" = running ]; then _fanout_ticket_state "$ticket" "In Progress"; fi
@@ -2799,8 +2809,8 @@ cmd_land() { # <id>
   # statement that a human's nod is not a further one. It is asked with the
   # evidence THIS function just proved - not with anything a caller supplied -
   # so a landing that happens while nobody is watching is a landing that passed
-  # both, in that order, and is recorded as such. Asking afterwards would be a
-  # log line, not a gate.
+  # both, in that order. Asking afterwards would be a log line, not a gate; the
+  # log line comes after the merge, saying whether it went through.
   #
   # AND `author` IS DERIVED, NOT ASSERTED. Review, checks, gate and mergeable
   # are each proved by a refusal above, and so is the author, by the
@@ -2816,7 +2826,7 @@ cmd_land() { # <id>
       --arg author "$([ -n "$me" ] && [ "$author" = "$me" ] && printf fleet || printf '%s' "${author:-unknown}")" \
       '{review:$r, checks:$c, gate:$g, mergeable:true, author:$author,
         workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
-    afk_authorise land "$afk_ev" "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified" >/dev/null \
+    afk_begin land "$afk_ev" "$slug#$num ($branch) - approved via $approved_via, checks green, gate verified" \
       || die "land: AFK did not authorise this merge - see the refusal above. Nothing was merged."
   fi
 
@@ -2847,8 +2857,11 @@ cmd_land() { # <id>
     [ -z "$bad" ] || die "land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
     merge_args+=(--body "$body")
   fi
-  _fgh "$wsdir" "${merge_args[@]}" >/dev/null 2>&1 \
-    || die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
+  if ! _fgh "$wsdir" "${merge_args[@]}" >/dev/null 2>&1; then
+    afk_end failed "the merge did not go through"
+    die "land: merge of #$num failed - check the PR page; nothing here retries a merge"
+  fi
+  afk_end completed "merged"
   c_ok "landed $id as #$num on $slug (approved via $approved_via)"
   _fanout_ticket_state "$ticket" "Done"
   _ledger_update_state "$wsdir" "$id" landed

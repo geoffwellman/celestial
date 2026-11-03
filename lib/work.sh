@@ -352,13 +352,16 @@ work_items() { # <wsdir> [--since <iso>] [--fresh] [--stage S] [--product P] [--
                      {at: .closed_at, source: "reviewer", what: ("reviewer " + (.agent // "") + " closed")}
                    else empty end) ] | .[] ]
           # The AFK act log: what the box did on its own while nobody watched -
-          # the morning question "what happened to this overnight".
+          # the morning question "what happened to this overnight" - and how
+          # each act ended, where the entry says (older entries do not).
           + [ $afk[]? | select(
                 names(.detail; $k)
                 or ($d != null and ($d.branch // "") != "" and ((.detail // "") | contains($d.branch)))
                 or ($pr != null and ($pr.slug // "") != ""
                     and names(.detail; $pr.slug + "#" + ($pr.number | tostring))))
-              | {at: .at, source: "afk", what: (.act + ": " + (.detail // "") + " [" + (.authorisation // "") + "]")} ]
+              | {at: .at, source: "afk",
+                 what: (.act + (if (.outcome // "") != "" then " " + .outcome else "" end)
+                        + ": " + (.detail // "") + " [" + (.authorisation // "") + "]")} ]
           # The mailbox, whole: a message that NAMES this item is part of its story.
           + [ $mail[]? | select(names(.message; $k) or names(.from; $k))
               | {at: .ts, source: "mail",

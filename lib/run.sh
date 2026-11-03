@@ -740,7 +740,9 @@ reviewers_update() { # [jq-args...] <filter>
   local f lock fd="" rows next rc=0
   f="$(_reviewers_state)"; lock="$f.lock"
   mkdir -p "$(dirname "$f")" || return 1
-  if have flock && exec {fd}>"$lock" 2>/dev/null; then
+  # The braces scope the silencing to the open: `exec {fd}>"$lock" 2>/dev/null`
+  # would point this whole process's stderr at /dev/null from here on.
+  if have flock && { exec {fd}>"$lock"; } 2>/dev/null; then
     if ! flock -w "${CEL_REVIEWERS_LOCK_WAIT:-10}" "$fd"; then
       exec {fd}>&-
       c_warn "the reviewer registry is held by another writer - not updated"

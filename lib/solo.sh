@@ -298,13 +298,14 @@ cmd_solo_land() { # <ref> [--workspace W]
       || die "cel solo land: $gate_body. Nothing merged."
   fi
 
+  # AFK admits here and records after the merge, saying whether it went through.
   if afk_active; then
     local afk_ev
     afk_ev="$(jq -n --arg ws "$(ws_name "$wsdir")" --arg slug "$slug" --arg num "$num" --arg via "$approved_via" \
       --arg gate "$(case "$gate_body" in "Gate: local"*) printf pass;; *) printf ci;; esac)" \
       '{review:"approved", checks:"green", gate:$gate, mergeable:true, author:"fleet",
         workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
-    afk_authorise land "$afk_ev" "$slug#$num (solo) - approved via $approved_via, checks green" >/dev/null \
+    afk_begin land "$afk_ev" "$slug#$num (solo) - approved via $approved_via, checks green" \
       || die "cel solo land: AFK did not authorise this merge - see the refusal above. Nothing was merged."
   fi
 
@@ -315,9 +316,12 @@ cmd_solo_land() { # <ref> [--workspace W]
   local bad; bad="$(land_body_hygiene "$body")" || die "cel solo land: could not run the hygiene check on the commit body - nothing was merged"
   [ -z "$bad" ] || die "cel solo land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
   # MERGE ONLY THE HEAD THAT WAS CHECKED: GitHub refuses if it moved since.
-  _land_gh "$wsdir" pr merge "$num" --repo "$slug" --squash --delete-branch \
-    --match-head-commit "$head" --body "$body" >/dev/null 2>&1 \
-    || die "cel solo land: merge of #$num failed - check the PR page; nothing here retries a merge"
+  if ! _land_gh "$wsdir" pr merge "$num" --repo "$slug" --squash --delete-branch \
+    --match-head-commit "$head" --body "$body" >/dev/null 2>&1; then
+    afk_end failed "the merge did not go through"
+    die "cel solo land: merge of #$num failed - check the PR page; nothing here retries a merge"
+  fi
+  afk_end completed "merged"
   c_ok "landed $SOLO_REPO#$num on $slug (approved via $approved_via)"
   _solo_land_retire_reviewer "$wsdir" "$SOLO_REPO" "$num"
 }
