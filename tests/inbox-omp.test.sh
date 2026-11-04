@@ -38,7 +38,7 @@ const { execFileSync } = require('node:child_process');
   for (let i = 0; i < 50 && notes.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
   const turn1 = await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] });
   const turn2 = await fire('before_agent_start', { prompt: 'again', systemPrompt: [] });
-  const pid = mod.__watcherPid && mod.__watcherPid();
+  const pid = mod.__watcherPid && mod.__watcherPid(pi);
   let group = -1;
   try { group = execFileSync('ps', ['-o', 'pid=', '-g', String(pid)], { encoding: 'utf8' }).split('\n').filter(Boolean).length; } catch {}
   await fire('session_shutdown', {});
@@ -284,7 +284,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const send = (to, msg, ws) => cel('send', to, msg, '--workspace', ws);
   const mod = await import(process.env.HOOK);
   mod.default(pi);
-  const livePid = () => { const p = mod.__watcherPid(); if (!p) return 0; try { process.kill(p, 0); return p; } catch { return 0; } };
+  const livePid = () => { const p = mod.__watcherPid(pi); if (!p) return 0; try { process.kill(p, 0); return p; } catch { return 0; } };
   const waitLive = async (ms, not) => { for (let i = 0; i < ms / 100 && !(livePid() && livePid() !== not); i++) await sleep(100); return livePid(); };
   const path0 = process.env.PATH;
   if (sc === 'spawn-fails') process.env.PATH = '/nonexistent';   // fork/exec refused: 'error', never 'exit'
@@ -298,12 +298,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     send('root', 'beta-for-root', 'beta');
     await sleep(2000);
   } else if (sc === 'watcher-dies') {
-    r.pid1 = mod.__watcherPid();
+    r.pid1 = mod.__watcherPid(pi);
     process.kill(-r.pid1, 'SIGKILL');
     await sleep(50);
     send('widget-orch', 'during-downtime', 'beta');
-    for (let i = 0; i < 40 && !(mod.__watcherPid() && mod.__watcherPid() !== r.pid1); i++) await sleep(100);
-    r.pid2 = mod.__watcherPid();
+    for (let i = 0; i < 40 && !(mod.__watcherPid(pi) && mod.__watcherPid(pi) !== r.pid1); i++) await sleep(100);
+    r.pid2 = mod.__watcherPid(pi);
     await sleep(2500);
     send('widget-orch', 'after-recovery', 'alpha');
     await sleep(2000);
@@ -382,7 +382,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     r.pid = await waitLive(1000);
   }
   r.turn = (await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] })) || null;
-  const pid = mod.__watcherPid();
+  const pid = mod.__watcherPid(pi);
   await fire('session_shutdown', {});
   await sleep(400);
   r.alive = false; if (pid) { try { process.kill(-pid, 0); r.alive = true; } catch {} }
@@ -477,6 +477,96 @@ test_omp_inbox_retiring_session_is_not_respawned_until_retirement_fails() {
   assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
   assert_eq "$(jq -r '.pidWhileRetiring' <<<"$out")" "0"
   [ "$(jq -r '.pid' <<<"$out")" != 0 ] || { echo "watcher not back after a failed retirement"; return 1; }
+  assert_eq "$(jq -r '.alive' <<<"$out")" "false"
+}
+
+# OMP binds the same prepared extension factory to in-process task sessions.
+# Their contexts have agent.kind="sub" and dispose emits session_shutdown;
+# neither event means the native terminal's main session has shut down.
+test_omp_inbox_subagent_lifecycle_cannot_stop_or_consume_the_main_inbox() {
+  command -v node >/dev/null || return 0
+  local d out; d="$(mktemp -d)"
+  out="$(CEL_INBOX_DIR="$d" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_INBOX_ALL_WS=0 \
+    CEL_ROOT="$CEL_ROOT" CEL_INBOX_WATCH_CHECK_MS=100 CEL_INBOX_RESTART_MS=100 \
+    CEL_INBOX_WAKE_MS=100 CEL_INBOX_RETRY_MS=100 HOOK="$HOOK" node --no-warnings - <<'JS'
+const cp = require('node:child_process');
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+(async () => {
+  const mod = await import(process.env.HOOK);
+  const sent = [], childSent = [], notes = [];
+  let draft = 'owner draft', writes = 0;
+  const makeRuntime = (kind, output) => {
+    const handlers = {};
+    const pi = { on: (event, fn) => (handlers[event] ||= []).push(fn),
+      sendMessage: (message, options) => output.push({ message, options }) };
+    const ctx = { agent: { kind, id: kind, depth: kind === 'main' ? 0 : 1 },
+      cwd: process.cwd(), hasUI: kind === 'main', isIdle: () => true,
+      sessionManager: { getSessionFile: () => kind === 'main' ? '/fixture/main.jsonl' : '/fixture/main/Task.jsonl' },
+      ui: { notify: message => notes.push({ kind, message }), getEditorText: () => kind === 'main' ? draft : '',
+        setEditorText: () => { writes++; }, pasteToEditor: () => { writes++; } } };
+    mod.default(pi);
+    return { pi, fire: async event => { let result; for (const fn of handlers[event] || []) result = await fn({ type: event }, ctx); return result; } };
+  };
+  const main = makeRuntime('main', sent);
+  await main.fire('session_start');
+  const originalPid = mod.__watcherPid(main.pi);
+  await sleep(1200);
+  const mainExitListeners = process.listenerCount('exit');
+  const child = makeRuntime('sub', childSent);
+  await child.fire('session_start');
+  const afterChildStart = mod.__watcherPid(main.pi);
+  const childPid = mod.__watcherPid(child.pi) || 0;
+  cp.execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', 'widget-orch', 'main-only-mail', '--workspace', 'demo'], { stdio: 'ignore' });
+  const childTurn = await child.fire('before_agent_start');
+  await child.fire('agent_start');
+  await child.fire('agent_end');
+  await child.fire('session_shutdown');
+  await main.fire('agent_end'); // Ending main turns must not inherit child shutdown.
+  await sleep(500); // More than four idle/retry checks, no main turn starts.
+  const childAddedNoExitListener = process.listenerCount('exit') === mainExitListeners;
+  const afterChildShutdown = mod.__watcherPid(main.pi) || 0;
+  const beforeDraftClears = sent.length;
+  const unreadWhileDraft = cp.execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'count', '--for', 'widget-orch', '--workspace', 'demo'], { encoding: 'utf8' }).trim();
+  // A later watcher failure still recovers while idle after the task disposes.
+  if (afterChildShutdown) process.kill(-afterChildShutdown, 'SIGKILL');
+  for (let i = 0; i < 40; i++) {
+    if (mod.__watcherPid(main.pi) && mod.__watcherPid(main.pi) !== afterChildShutdown) break;
+    await sleep(100);
+  }
+  const recoveredPid = mod.__watcherPid(main.pi) || 0;
+  draft = '';
+  for (let i = 0; i < 40 && sent.length === 0; i++) await sleep(100);
+  const mainTurn = await main.fire('before_agent_start');
+  await main.fire('session_shutdown');
+  await sleep(500);
+  let alive = false;
+  if (recoveredPid) { try { process.kill(-recoveredPid, 0); alive = true; } catch {} }
+  console.log(JSON.stringify({ originalPid, afterChildStart, childPid, afterChildShutdown, recoveredPid,
+    childTurn: childTurn || null, mainTurn: mainTurn || null, beforeDraftClears, unreadWhileDraft, childAddedNoExitListener,
+    sent, childSent, childNotes: notes.filter(note => note.kind === 'sub').length, writes, alive }));
+  process.exit(0);
+})().catch(error => { console.log(JSON.stringify({ error: String(error.stack || error) })); process.exit(0); });
+JS
+  )"
+  rm -rf "$d"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  [ "$(jq -r '.originalPid // 0' <<<"$out")" != 0 ] || { echo "main watcher never started"; return 1; }
+  assert_eq "$(jq -r '.afterChildStart' <<<"$out")" "$(jq -r '.originalPid' <<<"$out")"
+  assert_eq "$(jq -r '.afterChildShutdown' <<<"$out")" "$(jq -r '.originalPid' <<<"$out")"
+  assert_eq "$(jq -r '.childPid' <<<"$out")" "0"
+  assert_eq "$(jq -r '.childAddedNoExitListener' <<<"$out")" "true"
+  assert_eq "$(jq -r '.childTurn' <<<"$out")" "null"
+  assert_eq "$(jq -r '.childSent|length' <<<"$out")" "0"
+  assert_eq "$(jq -r '.childNotes' <<<"$out")" "0"
+  assert_eq "$(jq -r '.beforeDraftClears' <<<"$out")" "0"
+  assert_eq "$(jq -r '.unreadWhileDraft' <<<"$out")" "1"
+  [ "$(jq -r '.recoveredPid' <<<"$out")" != 0 ] || { echo "idle recovery stopped with the child"; return 1; }
+  [ "$(jq -r '.recoveredPid' <<<"$out")" != "$(jq -r '.originalPid' <<<"$out")" ] || { echo "dead watcher was not replaced"; return 1; }
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_contains "$(jq -r '.sent[0].message.content' <<<"$out")" "main-only-mail"
+  assert_eq "$(jq -r '.sent[0].options.triggerTurn' <<<"$out")" "true"
+  assert_eq "$(jq -r '.mainTurn' <<<"$out")" "null"
+  assert_eq "$(jq -r '.writes' <<<"$out")" "0"
   assert_eq "$(jq -r '.alive' <<<"$out")" "false"
 }
 
