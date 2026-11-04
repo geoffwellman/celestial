@@ -2726,12 +2726,16 @@ run_stale_orchestrators() {
 # herdr relaunches an orchestrator as a bare `omp --resume=<file>` after a
 # server restart - no hooks, no CEL_ env - so this uses the pane-shell walk
 # above, which needs neither.
-# Every live orchestrator whose runtime takes an inbox hook, and whether its
-# process actually carries it. One row each:
-#   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped|unknown<TAB>restart-command
-# A process that cannot be found yields no row: no evidence is not a fault.
+# Every live orchestrator and solo lane whose runtime takes an inbox hook, and
+# whether it can hear its mail. One row each:
+#   name<TAB>workspace<TAB>product<TAB>pane<TAB>status<TAB>ok|stripped|deaf|unknown<TAB>restart-command<TAB>lane
+# stripped: the observable argv lacks the hook. deaf: the hook is in argv but
+# no `cel inbox watch --parent <pid>` child is alive (run_evidence_deaf) - the
+# watcher died and the session never brought it back. lane is `-` for the
+# product's main agent. A process that cannot be found yields no row: no
+# evidence is not a fault.
 run_stripped_orchestrators() {
-  local roster ws wsdir p name cwd rt hookfile live lname lpane lstatus lcwd state
+  local roster ws wsdir p name cwd live lane lname lpane lstatus rt lcwd
   have jq || return 0
   roster="$(cel_agent_list 2>/dev/null)" || return 0
   for ws in $(registry_names 2>/dev/null); do
@@ -2747,19 +2751,41 @@ run_stripped_orchestrators() {
            elif ($bycwd | length) == 1 then $bycwd[0] else empty end)
         | [((.name // "") | if . == "" then "-" else . end), .pane_id,
            (.agent_status // "unknown"), (.agent // ""), (.cwd // "")] | @tsv' 2>/dev/null)" || live=""
-      [ -n "$live" ] || continue
-      IFS=$'\t' read -r lname lpane lstatus rt lcwd <<< "$live"
-      [ -z "$lcwd" ] || cwd="$lcwd"
-      [ -n "$rt" ] || rt="$(ws_runtime "$wsdir" orchestrator)"
-      hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
-      [ -n "$hookfile" ] || continue   # Claude uses launch-time UserPromptSubmit/Stop hooks, not this extension file
-      _run_pane_pid "$lpane" "$cwd" "$rt" || continue
-      [ "$lname" != "-" ] || lname="$name"
-      run_runtime_evidence "$rt" "$lname" "$lpane" "$cwd" "$_RUN_PID"
-      state="$RUN_EVIDENCE_INBOX"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$p" "$lpane" "$lstatus" "$state" \
-        "cel run orchestrator --product $p --workspace $ws --restart"
+      if [ -n "$live" ]; then
+        IFS=$'\t' read -r lname lpane lstatus rt lcwd <<< "$live"
+        _run_inbox_row "$ws" "$wsdir" "$p" - "$name" "$cwd" "$lname" "$lpane" "$lstatus" "$rt" "$lcwd" \
+          "cel run orchestrator --product $p --workspace $ws --restart"
+      fi
+      # Solo lanes: agents standing in .cel/solo/<product>/lane-<lane>.
+      while IFS=$'\t' read -r lane lname lpane lstatus rt lcwd; do
+        [ -n "$lane" ] || continue
+        _run_inbox_row "$ws" "$wsdir" "$p" "$lane" "$(_run_agent_name "$p/$lane")" "$lcwd" "$lname" "$lpane" "$lstatus" "$rt" "$lcwd" \
+          "cel run solo --product $p --lane $lane --workspace $ws --restart"
+      done < <(printf '%s' "$roster" | jq -r --arg b "$(ws_solo_dir "$wsdir" "$p")/lane-" '
+        .result.agents[]? | select((.pane_id // "") != "")
+        | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
+        | (.cwd | ltrimstr($b)) as $lane | select($lane | test("^[a-z0-9]+(-[a-z0-9]+)*$"))
+        | [$lane, ((.name // "") | if . == "" then "-" else . end), .pane_id,
+           (.agent_status // "unknown"), ((.agent // "") | if . == "" then "-" else . end), .cwd] | @tsv' 2>/dev/null)
     done
   done
   return 0
+}
+
+_run_inbox_row() { # ws wsdir product lane|- name cwd lname lpane lstatus runtime lcwd restart-cmd
+  local ws="$1" wsdir="$2" p="$3" lane="$4" name="$5" cwd="$6" lname="$7" lpane="$8" lstatus="$9"
+  local rt="${10}" lcwd="${11}" cmd="${12}" hookfile state
+  [ -z "$lcwd" ] || cwd="$lcwd"
+  { [ -n "$rt" ] && [ "$rt" != - ]; } || rt="$(ws_runtime "$wsdir" orchestrator)"
+  hookfile="$(agent_inbox_hook "$rt" file 2>/dev/null)" || hookfile=""
+  [ -n "$hookfile" ] || return 0   # Claude uses launch-time UserPromptSubmit/Stop hooks, not this extension file
+  _run_pane_pid "$lpane" "$cwd" "$rt" || return 0
+  [ "$lname" != "-" ] || lname="$name"
+  run_runtime_evidence "$rt" "$lname" "$lpane" "$cwd" "$_RUN_PID"
+  state="$RUN_EVIDENCE_INBOX"
+  # Only an argv-proven hook can be deaf; a bare Pi's ok IS its watcher.
+  if [ "$state" = ok ] && [ "$RUN_EVIDENCE_ARGV" = observable ] && run_evidence_deaf "$_RUN_PID"; then
+    state=deaf
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$lname" "$ws" "$p" "$lpane" "$lstatus" "$state" "$cmd" "$lane"
 }

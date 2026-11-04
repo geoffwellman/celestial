@@ -176,6 +176,34 @@ test_runtime_evidence_watcher_lookup_is_bounded_and_not_required_for_opencode() 
   rm -rf "$RTE"
 )
 
+# Deaf: up past the grace, every thread's children readable, and no child of
+# any thread running `inbox watch`. Any doubt is not deaf.
+test_runtime_evidence_deaf_needs_an_old_process_and_no_watcher_child() (
+  _rte_setup
+  printf '100000.00 0.00\n' > "$CEL_PROC_ROOT/uptime"
+  run_evidence_deaf 410 || { echo "no watcher child did not read deaf"; return 1; }
+  _rte_watch
+  ! run_evidence_deaf 410 || { echo "a watcher child read deaf"; return 1; }
+  # a watcher on another thread's list counts too
+  : > "$CEL_PROC_ROOT/410/task/410/children"
+  mkdir -p "$CEL_PROC_ROOT/410/task/412"; printf '411 ' > "$CEL_PROC_ROOT/410/task/412/children"
+  ! run_evidence_deaf 410 || { echo "another thread's watcher read deaf"; return 1; }
+  rm -rf "$CEL_PROC_ROOT/410/task/412"
+  # a child that vanished mid-read is not proof of anything
+  printf '999 ' > "$CEL_PROC_ROOT/410/task/410/children"
+  ! run_evidence_deaf 410 || { echo "unreadable child read deaf"; return 1; }
+  : > "$CEL_PROC_ROOT/410/task/410/children"
+  # young: still inside the hook's own start/restart window
+  printf '100.00 0.00\n' > "$CEL_PROC_ROOT/uptime"
+  ! run_evidence_deaf 410 || { echo "young process read deaf"; return 1; }
+  rm -f "$CEL_PROC_ROOT/uptime"
+  ! run_evidence_deaf 410 || { echo "unknown age read deaf"; return 1; }
+  printf '100000.00 0.00\n' > "$CEL_PROC_ROOT/uptime"
+  rm -f "$CEL_PROC_ROOT/410/task/410/children"
+  ! run_evidence_deaf 410 || { echo "unreadable children read deaf"; return 1; }
+  rm -rf "$RTE"
+)
+
 test_runtime_evidence_codex_is_observable_but_unsupported_runtime_is_unknown() (
   _rte_setup
   printf '%s\0' codex --model widget > "$CEL_PROC_ROOT/410/cmdline"

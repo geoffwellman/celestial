@@ -17,6 +17,7 @@
 // Fails open everywhere: an inbox problem must never take the agent down.
 // @ts-nocheck
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startReviewerRetirement } from "./reviewer-retirement.mjs";
@@ -74,6 +75,14 @@ let owed = false;
 let retryTimer = null;
 let wakeSince = 0;
 let stopped = false;
+// A reviewer retirement in progress (prepareExit until a failed exit is
+// restored) and the process exiting: states a gone watcher stays gone in.
+let retiring = false;
+let exiting = false;
+// session_shutdown happened and nothing since proves the session went on.
+// A turn that was already ending reports agent_end AFTER shutdown, so
+// agent_end is no proof; a new session_start, or a new turn starting, is.
+let shutDown = false;
 let lastCtx = null;
 let reviewerRetirement = null;
 let nativeTurnActive = false;
@@ -95,8 +104,9 @@ function startRetirement(ctx): void {
       if (!Number.isSafeInteger(count)) throw new Error("inbox_count_unknown");
       return count;
     },
-    prepareExit: () => { stopped = true; stopWatcher(); },
+    prepareExit: () => { retiring = true; stopped = true; stopWatcher(); },
     restoreAfterFailedExit: () => {
+      retiring = false;
       stopped = false;
       startWatcher(lastCtx);
       owed = true;
@@ -157,9 +167,44 @@ export function __watcherPid(): number | undefined { return watcher ? watcher.pi
 // lifecycle, so it restarts it - one at a time, backoff doubling to 60s and
 // reset once a watcher has lived a minute, never after shutdown - and then
 // counts what arrived while nobody was tailing, through the same coalesced wake.
+//
+// The exit event is not the only way a watcher goes: a spawn the kernel
+// refuses (EAGAIN in a fork storm, EMFILE, ENOENT) emits 'error' and NEVER
+// 'exit' - in node and in bun - so the old variable held a pid-less child
+// forever and nothing restarted it. So liveness is the child PROCESS, and it
+// is re-checked where the session is known to be alive: every agent_end, and
+// a slow idle check for a session that sits without turns.
 let restartTimer = null;
 let restartDelay = 0;
 let watcherStarted = 0;
+// A pid is not an identity: once the watcher is reaped, the kernel can hand
+// its pid to any other child of this process - a bash tool, say - with the
+// same parent. The kernel's identity is the pair (pid, starttime: field 22
+// of /proc/<pid>/stat), recorded at spawn and compared on every look.
+const PROCFS = (() => { try { readFileSync("/proc/self/stat"); return true; } catch { return false; } })();
+function procStat(pid) { // -> { state, ppid, start } or throws
+  const s = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const f = s.slice(s.lastIndexOf(")") + 2).split(" ");
+  return { state: f[0], ppid: f[1], start: f[19] };
+}
+// Still the process this hook spawned (alive or an unreaped zombie), so its
+// pid - and the process group it leads - cannot belong to anyone else.
+function ownsPid(w): boolean {
+  if (!w || !w.pid) return false;
+  if (!PROCFS) return w.exitCode == null && w.signalCode == null; // unreaped: the pid is still held
+  try {
+    const st = procStat(w.pid);
+    return w.celStart != null && st.start === w.celStart && st.ppid === String(process.pid);
+  } catch { return false; }
+}
+function watcherAlive(w): boolean {
+  if (!w || !w.pid || w.exitCode != null || w.signalCode != null) return false;
+  if (!PROCFS) {
+    try { process.kill(w.pid, 0); return true; } catch (e) { return !!e && e.code === "EPERM"; }
+  }
+  if (!ownsPid(w)) return false;
+  try { const { state } = procStat(w.pid); return state !== "Z" && state !== "X"; } catch { return false; }
+}
 function scheduleRestart(ctx): void {
   if (stopped || restartTimer) return;
   const base = envMs("CEL_INBOX_RESTART_MS", 2000);
@@ -167,11 +212,19 @@ function scheduleRestart(ctx): void {
   restartDelay = restartDelay ? Math.min(restartDelay * 2, 60000) : base;
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    if (stopped || watcher) return;
+    if (stopped || watcherAlive(watcher)) return;
     startWatcher(ctx);
     wakeForBacklog(ctx);
   }, restartDelay);
   try { restartTimer.unref(); } catch {}
+}
+// Respawn now when no live watcher exists. A pending backoff restart is
+// superseded: a turn ending is not a crash loop.
+function ensureWatcher(ctx): void {
+  if (stopped || retiring || exiting || !ctx || watcherAlive(watcher)) return;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  startWatcher(ctx);
+  wakeForBacklog(ctx);
 }
 
 function stopWatcher(): void {
@@ -179,13 +232,13 @@ function stopWatcher(): void {
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   const w = watcher; watcher = null;
-  if (!w || !w.pid) return;
+  if (!ownsPid(w)) return; // a reused pid's group is someone else's
   try { process.kill(-w.pid, "SIGTERM"); } catch { try { w.kill("SIGTERM"); } catch {} }
 }
 
 function startWatcher(ctx): void {
   const w0 = watcher; watcher = null;
-  if (w0 && w0.pid) { try { process.kill(-w0.pid, "SIGTERM"); } catch {} }
+  if (ownsPid(w0)) { try { process.kill(-w0.pid, "SIGTERM"); } catch {} }
   if (stopped) return;
   try {
     const w = spawn("bash", [celBin(), "inbox", "watch", ...wsArgs(), "--parent", String(process.pid)], {
@@ -194,8 +247,12 @@ function startWatcher(ctx): void {
       stdio: ["ignore", "pipe", "ignore"],
       env: { ...process.env, CEL_INBOX_NOTIFY: process.env.CEL_INBOX_NOTIFY ?? "0" },
     });
+    // Read before this tick ends: nothing reaps it until the event loop runs,
+    // so the pid is still this child's.
+    if (w.pid && PROCFS) { try { w.celStart = procStat(w.pid).start; } catch {} }
     w.unref();
-    w.on("error", () => {});
+    // A refused spawn reports here and never through 'exit'.
+    w.on("error", () => { if (watcher === w && !watcherAlive(w)) { watcher = null; scheduleRestart(ctx); } });
     w.on("exit", () => { if (watcher === w) { watcher = null; scheduleRestart(ctx); } });
     let buf = "";
     w.stdout.setEncoding("utf8");
@@ -344,13 +401,30 @@ export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
   registerHereCommands(pi);
-  pi.on("agent_end", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = false; rexNote("idle", ctx); waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
-  pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); stopped = false; nativeTurnActive = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); startRetirement(ctx); });
+  // agent_end of a running session: a gone watcher comes back. Not after
+  // session_shutdown - the turn that was ending when it came is not proof.
+  pi.on("agent_end", (_e, ctx) => {
+    lastCtx = ctx; nativeTurnActive = false; rexNote("idle", ctx); waking = false;
+    if (!shutDown) ensureWatcher(ctx);
+    if (owed && lastCtx) scheduleWake(lastCtx);
+  });
+  // A turn STARTING after session_shutdown proves the session resumed.
+  const resumed = (ctx) => {
+    if (!shutDown || retiring || exiting) return;
+    shutDown = false; stopped = false; ensureWatcher(ctx);
+  };
+  pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); shutDown = false; stopped = false; nativeTurnActive = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); startRetirement(ctx); });
+  // Idle: no turn ends, so a watcher whose death was never reported is
+  // found here. It never un-stops a shut-down session, and leaves a pending
+  // backoff restart to run.
+  const idleCheck = setInterval(() => { if (!restartTimer) ensureWatcher(lastCtx); }, envMs("CEL_INBOX_WATCH_CHECK_MS", 60000));
+  try { idleCheck.unref(); } catch {}
   pi.on("session_tree", (_e, ctx) => { lastCtx = ctx; });
-  pi.on("agent_start", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = true; });
+  pi.on("agent_start", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = true; resumed(ctx); });
   pi.on("before_agent_start", (_e, ctx) => {
     nativeTurnActive = true;
     lastCtx = ctx;
+    resumed(ctx);
     rexNote("working", ctx);
     const mail = takeMail(ctx);
     if (!mail) return;
@@ -363,6 +437,6 @@ export default function celestialInbox(pi): void {
       },
     };
   });
-  pi.on("session_shutdown", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
-  process.once("exit", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
+  pi.on("session_shutdown", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; shutDown = true; stopped = true; stopWatcher(); });
+  process.once("exit", () => { exiting = true; clearInterval(idleCheck); reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
 }

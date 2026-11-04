@@ -199,6 +199,56 @@ test_stripped_orchestrator_is_found_from_the_pane_shell() {
   orch_stub_teardown
 }
 
+# The hook in argv is not the watcher it runs: an agent up past the grace
+# with no `cel inbox watch --parent <pid>` child is DEAF, and a watcher child
+# makes it ok again. No uptime (or anything unreadable) stays ok.
+_deaf_fixture() { # <pid>
+  orch_stub_bare_proc "$1" omp --hook "$CEL_ROOT/tools/hooks/inbox.omp.ts" "--resume=$T/s.jsonl"
+  mkdir -p "$PROC/$1/task/$1"; : > "$PROC/$1/task/$1/children"
+  printf '100000.00 0.00\n' > "$PROC/uptime"
+}
+_deaf_watcher() { # <parent-pid> <watcher-pid>
+  mkdir -p "$PROC/$2"
+  printf '%s\0' bash "$CEL_ROOT/bin/cel" inbox watch --parent "$1" > "$PROC/$2/cmdline"
+  printf '%s ' "$2" > "$PROC/$1/task/$1/children"
+}
+test_hooked_orchestrator_without_a_live_watcher_reads_deaf() {
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  _deaf_fixture 100
+  assert_contains "$(run_stripped_orchestrators)" "widget-orch	alpha	widget	w1:p1	idle	deaf	cel run orchestrator --product widget --workspace alpha --restart	-"
+  _deaf_watcher 100 101
+  assert_contains "$(run_stripped_orchestrators)" "	idle	ok	"
+  : > "$PROC/100/task/100/children"; rm -f "$PROC/uptime"
+  assert_contains "$(run_stripped_orchestrators)" "	idle	ok	"
+  orch_stub_teardown
+}
+
+# A solo lane is checked like the product's main agent and restarts as a lane.
+test_deaf_solo_lane_is_listed_with_its_lane_restart() {
+  orch_stub_setup omp
+  export ORCH_STUB_CWD="$T/ws/.cel/solo/widget/lane-disk-cleanup"
+  mkdir -p "$ORCH_STUB_CWD"
+  orch_stub_roster widget-disk-cleanup "$ORCH_STUB_CWD" idle "$T/s.jsonl"
+  _deaf_fixture 100
+  assert_contains "$(run_stripped_orchestrators)" "widget-disk-cleanup	alpha	widget	w1:p1	idle	deaf	cel run solo --product widget --lane disk-cleanup --workspace alpha --restart	disk-cleanup"
+  unset ORCH_STUB_CWD
+  orch_stub_teardown
+}
+
+test_doctor_fails_a_deaf_orchestrator() {
+  source "$CEL_ROOT/lib/doctor.sh"
+  orch_stub_setup omp
+  orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
+  _deaf_fixture 100
+  local out rc=0
+  out="$(doctor_inbox_hook_lines)" || rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "widget-orch (alpha) has its inbox hook but no live inbox watcher"
+  assert_contains "$out" "cel run orchestrator --product widget --workspace alpha --restart"
+  orch_stub_teardown
+}
+
 test_doctor_fails_a_stripped_orchestrator_and_names_the_command() {
   source "$CEL_ROOT/lib/doctor.sh"
   orch_stub_setup omp

@@ -451,15 +451,20 @@ _steward_orchestrators() { # <agents-json>
   done
 }
 
-# A resumed orchestrator without the canonical launch contract (a bare
-# `omp --resume=<file>` after a herdr restart) cannot receive inbox hooks.
-# Restart it through `cel run --restart` only when its composer is provably
-# empty - losing a typed draft is worse than a missed wake; otherwise root is
-# told, once.
+# A resumed orchestrator or solo lane without the canonical launch contract (a
+# bare `omp --resume=<file>` after a herdr restart) cannot receive inbox
+# hooks; one whose hook is loaded but whose `cel inbox watch --parent` child
+# is gone (deaf) cannot either. Restart it through `cel run --restart` only
+# when its composer is provably empty - losing a typed draft is worse than a
+# missed wake; otherwise root is told, once.
 #
 # Its own functions so tests can replace them: a real restart opens a pane.
-_steward_restart_orch() { # <product> <workspace>
-  cel run orchestrator --product "$1" --workspace "$2" --restart >/dev/null 2>&1
+_steward_restart_orch() { # <product> <workspace> [lane]
+  if [ -n "${3:-}" ]; then
+    cel run solo --product "$1" --lane "$3" --workspace "$2" --restart >/dev/null 2>&1
+  else
+    cel run orchestrator --product "$1" --workspace "$2" --restart >/dev/null 2>&1
+  fi
 }
 
 # EMPTY ONLY WHEN THE PANE PROVES IT. Neither herdr nor omp will tell another
@@ -503,36 +508,83 @@ _steward_claim_restart() { # <key>
   ) 9>>"$_STEWARD_STATE.restart.lock"
 }
 
+# FIRST SEEN. A condition that must hold across ticks before the steward acts
+# records when it was first observed; _steward_forget drops it once it is gone.
+_steward_first_seen() { # <key> -> epoch first observed (recorded now if new)
+  local first now
+  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
+  first="$(awk -v k="$1" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
+  if [ "${first:-0}" -gt 0 ]; then printf '%s' "$first"; return 0; fi
+  now="$(date +%s)"
+  { cat "$_STEWARD_STATE"; printf '%s %s\n' "$1" "$now"; } > "$_STEWARD_STATE.tmp.$$" \
+    && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+  printf '%s' "$now"
+}
+_steward_forget() { # <key>
+  [ -f "$_STEWARD_STATE" ] && awk -v k="$1" '$1==k{f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
+  awk -v k="$1" '$1!=k' "$_STEWARD_STATE" > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+}
+# Drop every <prefix>* record but the keys named: a condition no row
+# reported this tick - the agent gone, its row unreadable - starts over.
+_steward_forget_unseen() { # <prefix> [key...]
+  local prefix="$1"; shift
+  [ -f "$_STEWARD_STATE" ] || return 0
+  awk -v p="$prefix" -v keep=" $* " 'index($1, p) == 1 && index(keep, " " $1 " ") == 0 {f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
+  awk -v p="$prefix" -v keep=" $* " '!(index($1, p) == 1 && index(keep, " " $1 " ") == 0)' "$_STEWARD_STATE" \
+    > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+}
+
 _steward_inbox_hooks() {
-  local name ws p pane status state cmd fp stuck key now last why
-  while IFS=$'\t' read -r name ws p pane status state cmd; do
+  local name ws p pane status state cmd lane unit fp stuck key seen now last why deaf_seen=()
+  local gone hint still has_no fixed cleared lost
+  while IFS=$'\t' read -r name ws p pane status state cmd lane; do
     [ -n "$name" ] || continue
-    fp="orch-nohook-$p"; stuck="orch-nohook-stuck-$p"; key="orch-hook-restart-$ws-$p"
+    [ "$lane" != - ] || lane=""
+    unit="$p${lane:+-lane-$lane}"
+    fp="orch-nohook-$unit"; stuck="orch-nohook-stuck-$unit"; key="orch-hook-restart-$ws-$unit"
+    seen="orch-deaf-seen-$ws-$unit"
+    [ "$state" != deaf ] || deaf_seen+=("$seen")
     if [ "$state" = unknown ]; then
       # Native title rewriting is not a negative hook observation. Withdraw
       # the unsupported failure claim, but keep the uncertainty actionable.
       _steward_clear "$ws" "$fp" "$name missing-hook claim is unproven; native inbox evidence is unknown"
       _steward_clear "$ws" "$stuck" "$name missing-hook claim is unproven; native inbox evidence is unknown"
       c_warn "$name inbox evidence is unknown; inspect its native session and owned watcher, not its rewritten argv"
-      _steward_remind "$ws" root "orch-hook-unverified-$p" blocked \
+      _steward_remind "$ws" root "orch-hook-unverified-$unit" blocked \
         "steward: $name native inbox evidence is unverified. Rewritten or unreadable argv does not prove a missing hook; inspect its exact native session and owned watcher. No automatic restart or guard-enforcement claim." || true
       continue
     fi
-    _steward_clear "$ws" "orch-hook-unverified-$p" "$name inbox evidence is observable again"
+    _steward_clear "$ws" "orch-hook-unverified-$unit" "$name inbox evidence is observable again"
     if [ "$state" = ok ]; then
       _steward_clear "$ws" "$fp" "$name inbox evidence is present; guard enforcement is not inferred"
       _steward_clear "$ws" "$stuck" "$name inbox evidence is present; guard enforcement is not inferred"
       continue
     fi
-    [ "$state" = stripped ] || continue
+    case "$state" in
+      stripped)
+        gone="came back without its inbox hook"; hint=" (probably a herdr restart)"
+        still="still without its inbox hook"; has_no="has no inbox hook"
+        fixed="restarted it with the full launch line"; cleared="was restarted with its inbox hook"
+        lost="its process came back without the inbox hook (probably a herdr restart)" ;;
+      deaf)
+        # Deaf must outlast the hook's own restart backoff (60s): a watcher
+        # caught between two of the hook's restarts is not deafness.
+        now="$(date +%s)"
+        [ $((now - $(_steward_first_seen "$seen"))) -ge "${CEL_STEWARD_DEAF_CONFIRM:-120}" ] || continue
+        gone="has its inbox hook but no live inbox watcher"; hint=" (its cel inbox watch --parent child is gone)"
+        still="still without a live inbox watcher"; has_no="has no live inbox watcher"
+        fixed="restarted it so its inbox hook starts a new watcher"; cleared="was restarted so its hook starts a new watcher"
+        lost="its inbox hook is loaded but its inbox watcher is gone" ;;
+      *) continue ;;
+    esac
     # Once escalated, a human owns it: never loop restarts behind their back.
     [ -z "$(_inbox_open_fp "$ws" "$stuck" steward root)" ] || continue
     now="$(date +%s)"
     last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE" 2>/dev/null || printf 0)"
     if [ "${last:-0}" -gt 0 ] && [ $((now - last)) -lt 1800 ]; then
-      c_err "$name was restarted and is still without its inbox hook - not restarting again: $cmd"
+      c_err "$name was restarted and is $still - not restarting again: $cmd"
       _steward_raise "$ws" "$stuck" blocked \
-        "steward: $name was restarted $(( (now - last) / 60 ))m ago and came back still without its inbox hook, so it cannot receive mail. Not restarting it again - look at its pane and run: $cmd"
+        "steward: $name was restarted $(( (now - last) / 60 ))m ago and came back $still, so it cannot receive mail. Not restarting it again - look at its pane and run: $cmd"
       continue
     fi
     why=""
@@ -541,24 +593,28 @@ _steward_inbox_hooks() {
     fi
     if [ -z "$why" ]; then
       _steward_claim_restart "$key" || continue
-      if _steward_restart_orch "$p" "$ws"; then
-        c_ok "$name came back without its inbox hook - restarted it ($cmd)"
-        cmd_inbox send root "$name came back without its inbox hook (probably a herdr restart); restarted it with the full launch line" \
+      if _steward_restart_orch "$p" "$ws" ${lane:+"$lane"}; then
+        c_ok "$name $gone - restarted it ($cmd)"
+        cmd_inbox send root "$name $gone$hint; $fixed" \
           --from steward --workspace "$ws" --kind status >/dev/null 2>&1 || true
-        _steward_clear "$ws" "$fp" "$name was restarted with its inbox hook"
+        _steward_clear "$ws" "$fp" "$name $cleared"
+        _steward_forget "$seen"
       else
-        c_err "$name has no inbox hook and the restart failed: $cmd"
+        c_err "$name $has_no and the restart failed: $cmd"
         _steward_raise "$ws" "$stuck" blocked \
-          "steward: $name has no inbox hook and 'cel run --restart' failed, so it cannot receive mail. Run: $cmd"
+          "steward: $name $has_no and 'cel run --restart' failed, so it cannot receive mail. Run: $cmd"
       fi
       continue
     fi
-    c_warn "$name has no inbox hook and $why - not restarting it: $cmd"
-    # Said once: a stripped orchestrator stays stripped tick after tick.
+    c_warn "$name $has_no and $why - not restarting it: $cmd"
+    # Said once: a stripped or deaf agent stays so tick after tick.
     [ -z "$(_inbox_open_fp "$ws" "$fp" steward root)" ] || continue
     _steward_remind "$ws" root "$fp" blocked \
-      "steward: $name cannot receive mail - its process came back without the inbox hook (probably a herdr restart), and $why, so the steward will not restart it. When it is safe, run: $cmd" || true
+      "steward: $name cannot receive mail - $lost, and $why, so the steward will not restart it. When it is safe, run: $cmd" || true
   done < <(run_stripped_orchestrators)
+  # Deafness is confirmed across consecutive sightings only: an agent whose
+  # row vanished (gone, restarted, unreadable) and comes back deaf is new.
+  _steward_forget_unseen orch-deaf-seen- "${deaf_seen[@]}"
   return 0
 }
 
