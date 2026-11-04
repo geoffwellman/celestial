@@ -263,6 +263,10 @@ cp.ChildProcess.prototype.emit = function (ev, ...a) { return globalThis.__dropE
 require('node:module').registerHooks({ resolve: (spec, c, next) => spec === './reviewer-retirement.mjs'
   ? { url: 'data:text/javascript,export function startReviewerRetirement(o){globalThis.__retire=o;return{dispose(){}}}', shortCircuit: true }
   : next(spec, c) });
+// Every child the hook spawns, so a scenario can stand in for the kernel.
+const spawned = []; const spawn0 = cp.spawn;
+cp.spawn = function (...a) { const c = spawn0.apply(this, a); spawned.push(c); return c; };
+require('node:module').syncBuiltinESMExports();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   const sc = process.env.SCENARIO;
@@ -328,11 +332,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     send('widget-orch', 'after-heal', 'alpha');
     await sleep(2000);
   } else if (sc === 'shutdown-then-turn') {
-    // session_shutdown with no session_start after it, yet the session goes on.
+    // session_shutdown with no session_start after it. The turn that was
+    // ending reports agent_end late: no proof, the watcher stays down.
     await fire('session_shutdown', {});
     r.pidAfterShutdown = livePid();
     await fire('agent_end', {});
+    await sleep(1000);
+    r.pidAfterLateEnd = livePid();
+    // A new turn starting is proof the session went on.
+    await fire('agent_start', {});
+    await fire('agent_end', {});
     r.pid = await waitLive(1000);
+    send('widget-orch', 'after-heal', 'alpha');
+    await sleep(2000);
+  } else if (sc === 'pid-reused') {
+    // The watcher dies and the runtime never says so; the kernel hands its
+    // pid to another child of this process (a bash tool).
+    const w = spawned.find((c) => c.pid === livePid());
+    const other = spawn0('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    globalThis.__dropExit = true;
+    process.kill(-w.pid, 'SIGKILL');
+    await sleep(1000);
+    globalThis.__dropExit = false;
+    w.exitCode = null; w.signalCode = null; w.pid = other.pid;
+    r.otherPid = other.pid;
+    await fire('agent_end', {});
+    r.pid = await waitLive(2000, other.pid);
+    try { process.kill(other.pid, 0); r.otherAlive = true; } catch { r.otherAlive = false; }
+    try { process.kill(-other.pid, 'SIGKILL'); } catch {}
     send('widget-orch', 'after-heal', 'alpha');
     await sleep(2000);
   } else if (sc === 'exit-lost' || sc === 'exit-lost-idle') {
@@ -403,8 +430,9 @@ test_omp_inbox_dead_watcher_is_recovered_and_downtime_mail_lands_once() {
 
 # A WATCHER THAT IS GONE IS RESPAWNED, whatever took it: a spawn the kernel
 # refused (EAGAIN/EMFILE/ENOENT emit 'error' and never 'exit'), an exit the
-# runtime never delivered, or a session_shutdown with the session still going.
-# Liveness is the child's pid, not the variable that once held it.
+# runtime never delivered, or a session_shutdown the session went on from.
+# Liveness is the child process (pid AND its kernel starttime), not the
+# variable that once held it.
 _assert_healed() { # <report>
   assert_eq "$(jq -r '.error // ""' <<<"$1")" ""
   [ "$(jq -r '.pid' <<<"$1")" != 0 ] || { echo "no live watcher after self-heal"; return 1; }
@@ -416,10 +444,20 @@ test_omp_inbox_watcher_whose_spawn_failed_is_respawned() {
   command -v node >/dev/null || return 0
   _assert_healed "$(_delivery spawn-fails)"
 }
-test_omp_inbox_watcher_gone_after_shutdown_is_respawned_when_the_session_goes_on() {
+test_omp_inbox_watcher_stays_down_after_shutdown_until_a_new_turn_proves_the_session_went_on() {
   command -v node >/dev/null || return 0
   local out; out="$(_delivery shutdown-then-turn)"
   assert_eq "$(jq -r '.pidAfterShutdown' <<<"$out")" "0"
+  assert_eq "$(jq -r '.pidAfterLateEnd' <<<"$out")" "0"
+  _assert_healed "$out"
+}
+# A reused pid is someone else's process: never read as the watcher, and its
+# process group is never signalled.
+test_omp_inbox_watcher_pid_reused_by_another_child_is_respawned_and_left_alone() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_delivery pid-reused)"
+  [ "$(jq -r '.pid' <<<"$out")" != "$(jq -r '.otherPid' <<<"$out")" ] || { echo "reused pid read as the watcher"; return 1; }
+  assert_eq "$(jq -r '.otherAlive' <<<"$out")" "true"
   _assert_healed "$out"
 }
 test_omp_inbox_watcher_dead_without_exit_event_is_respawned_at_agent_end() {

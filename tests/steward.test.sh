@@ -1723,6 +1723,22 @@ test_steward_forgets_deafness_that_heals_before_it_is_confirmed() {
   rm -rf "$T"
 }
 
+# A row that vanishes (agent gone, roster unreadable) ends the sighting: an
+# agent that comes back deaf later is confirmed afresh, not on an old stamp.
+test_steward_forgets_deafness_whose_row_vanished() {
+  _hook_fixture idle empty
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tunused-restart\t-\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  sed -i 's/^\(orch-deaf-seen-alpha-bundle\) .*/\1 1/' "$_STEWARD_STATE"   # an old sighting
+  : > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  ! grep -q '^orch-deaf-seen-' "$_STEWARD_STATE" || { echo "vanished row's sighting kept"; return 1; }
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tunused-restart\t-\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ""
+  rm -rf "$T"
+}
+
 test_steward_does_not_restart_a_deaf_orchestrator_over_a_draft() {
   _hook_fixture idle draft
   printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tcel run orchestrator --product bundle --workspace alpha --restart\t-\n' > "$T/rows"

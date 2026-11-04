@@ -524,9 +524,18 @@ _steward_forget() { # <key>
   [ -f "$_STEWARD_STATE" ] && awk -v k="$1" '$1==k{f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
   awk -v k="$1" '$1!=k' "$_STEWARD_STATE" > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
 }
+# Drop every <prefix>* record but the keys named: a condition no row
+# reported this tick - the agent gone, its row unreadable - starts over.
+_steward_forget_unseen() { # <prefix> [key...]
+  local prefix="$1"; shift
+  [ -f "$_STEWARD_STATE" ] || return 0
+  awk -v p="$prefix" -v keep=" $* " 'index($1, p) == 1 && index(keep, " " $1 " ") == 0 {f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
+  awk -v p="$prefix" -v keep=" $* " '!(index($1, p) == 1 && index(keep, " " $1 " ") == 0)' "$_STEWARD_STATE" \
+    > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+}
 
 _steward_inbox_hooks() {
-  local name ws p pane status state cmd lane unit fp stuck key seen now last why
+  local name ws p pane status state cmd lane unit fp stuck key seen now last why deaf_seen=()
   local gone hint still has_no fixed cleared lost
   while IFS=$'\t' read -r name ws p pane status state cmd lane; do
     [ -n "$name" ] || continue
@@ -534,7 +543,7 @@ _steward_inbox_hooks() {
     unit="$p${lane:+-lane-$lane}"
     fp="orch-nohook-$unit"; stuck="orch-nohook-stuck-$unit"; key="orch-hook-restart-$ws-$unit"
     seen="orch-deaf-seen-$ws-$unit"
-    [ "$state" = deaf ] || _steward_forget "$seen"
+    [ "$state" != deaf ] || deaf_seen+=("$seen")
     if [ "$state" = unknown ]; then
       # Native title rewriting is not a negative hook observation. Withdraw
       # the unsupported failure claim, but keep the uncertainty actionable.
@@ -603,6 +612,9 @@ _steward_inbox_hooks() {
     _steward_remind "$ws" root "$fp" blocked \
       "steward: $name cannot receive mail - $lost, and $why, so the steward will not restart it. When it is safe, run: $cmd" || true
   done < <(run_stripped_orchestrators)
+  # Deafness is confirmed across consecutive sightings only: an agent whose
+  # row vanished (gone, restarted, unreadable) and comes back deaf is new.
+  _steward_forget_unseen orch-deaf-seen- "${deaf_seen[@]}"
   return 0
 }
 
