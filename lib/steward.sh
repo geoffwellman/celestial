@@ -374,8 +374,29 @@ _steward_launch_orch() { # <product> <workspace>
   cel run orchestrator --product "$1" --workspace "$2" >/dev/null 2>&1
 }
 
+# AN ALERT THE OWNER ALREADY HOLDS A CARD FOR IS NOT AN ALERT. An orchestrator
+# that will not start because it waits on an owner answer (a profile only the
+# owner may reroute) was re-raised to root every half hour for days beside
+# the open `cel decide` card that already asked the owner.
+# A card carries no structured link to an agent - only to PRs (`--pr`) - so
+# the link is what the asker wrote: an open card in the same workspace whose
+# title or blocks names the agent (`widget-orch`), or names the product as a
+# word of its own together with "agent" or "orchestrator" ("Restore Widget
+# solo agent ..."). A hyphenated longer name (`widget-lane-builder`) is
+# another agent and does not match.
+_steward_owner_card() { # <ws> <agent> <product> -> "<id>\t<title>" or nothing
+  # shellcheck source=lib/decide.sh
+  . "${BASH_SOURCE[0]%/*}/decide.sh"
+  decide_open_json "$1" | jq -r --arg a "$2" --arg p "$3" '
+    ($a | ascii_downcase) as $agent
+    | ("(^|[^a-z0-9-])" + ($p | ascii_downcase | gsub("[-_]"; "[-_ ]")) + "($|[^a-z0-9-])") as $product
+    | select([(.title // ""), (.blocks // "")] | map(ascii_downcase) | any(
+        contains($agent) or (test($product) and test("\\b(agent|orchestrator)\\b"))))
+    | [.id, .title] | @tsv' 2>/dev/null | head -n1
+}
+
 _steward_orchestrators() { # <agents-json>
-  local agents_json="$1" ws wsdir p want live mode src
+  local agents_json="$1" ws wsdir p want live mode src card
   # An empty roster means herdr did not answer, not that every orchestrator
   # died - launching one per product on a transport failure would fill the box
   # with duplicate orchestrators.
@@ -409,9 +430,19 @@ _steward_orchestrators() { # <agents-json>
         c_ok "started $want - $ws/$p resolves orchestrator: auto (via $src) and had no live pane (retried at most every 30m)"
         _steward_clear "$ws" "orch-ensure-$p" "$want was started again"
       else
-        c_err "could not start $want for $ws/$p - cel run orchestrator --product $p --workspace $ws (retried at most every 30m)"
-        _steward_raise "$ws" "orch-ensure-$p" blocked \
-          "steward: $ws/$p resolves orchestrator: auto (via $src) and $want will not start - cel run orchestrator --product $p --workspace $ws"
+        card="$(_steward_owner_card "$ws" "$want" "$p")"
+        if [ -n "$card" ]; then
+          # The owner has the question; root gains nothing from the alarm too,
+          # and one already raised comes down saying why.
+          c_warn "$want will not start for $ws/$p and waits on owner decision ${card%%$'\t'*} - no alert while that card is open"
+          _steward_clear "$ws" "orch-ensure-$p" \
+            "$want will not start, and that waits on open owner decision ${card%%$'\t'*} (${card#*$'\t'}) - no alert while the card is open"
+        else
+          c_err "could not start $want for $ws/$p - cel run orchestrator --product $p --workspace $ws (retried at most every 30m)"
+          # Once per change: the retry every half hour is not news to root.
+          _steward_raise_on_change "$ws" "orch-ensure-$p" blocked \
+            "steward: $ws/$p resolves orchestrator: auto (via $src) and $want will not start - cel run orchestrator --product $p --workspace $ws"
+        fi
       fi
     done
   done
@@ -1504,8 +1535,17 @@ _steward_memory() {
 # watchers, 3 fixtures, 1 shell), 410 MB` is a sentence somebody reads; an item
 # per reaped pid is the litter moved from /proc to root's mailbox. And a tick
 # that reaped nothing says nothing at all.
+#
+# ONCE PER BOX, AND ONCE PER CHANGE. The orphans are the box's, not a
+# workspace's, so the line goes to the first registered workspace's root
+# mailbox only, as the subscription items do; posted to every workspace, root
+# read each reap four times. And every reap rolled up into one item shown as
+# "x45" under the latest line, which read as that line repeating every cycle.
+# So a reap that says what the last one said posts nothing, and the mail
+# carries the classes, not the megabytes, which differ every time a fixture
+# is taken - the journal line keeps the size.
 _steward_orphans() {
-  local rows line n mb ws
+  local rows line ws
   rows="$(orphans_list 2>/dev/null)" || return 0
   [ -n "$rows" ] || return 0
   local class pid rss age cwd args
@@ -1516,14 +1556,10 @@ _steward_orphans() {
   line="$(printf '%s\n' "$rows" | orphans_reaped_line)"
   [ -n "$line" ] || return 0
   c_warn "$line"
-  read -r n mb <<<"$(printf '%s\n' "$rows" | orphans_totals)"
-  # The box is one box and root's mailbox is per workspace, as with the memory
-  # blocker: the condition key keeps it one rolled-up item in each rather than
-  # a fresh one every tick.
-  for ws in $(registry_names); do
-    cmd_inbox send root "steward: $line - processes with no owner (reparented watchers, fixtures whose worktree is gone, shells on dead ptys). cel gc --orphans --dry-run shows what a sweep would take." \
-      --from steward --workspace "$ws" --kind status --fp orphans >/dev/null 2>&1 || true
-  done
+  ws="$(registry_names | head -n1)"
+  [ -n "$ws" ] || return 0
+  _steward_raise_on_change "$ws" orphans status \
+    "steward: ${line%, * MB} - processes with no owner (reparented watchers, fixtures whose worktree is gone, shells on dead ptys). cel gc --orphans --dry-run shows what a sweep would take."
   return 0
 }
 

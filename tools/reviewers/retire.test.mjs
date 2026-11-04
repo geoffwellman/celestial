@@ -173,6 +173,20 @@ test('only the verified watcher poll sleep may churn without rebinding stable in
   assert.notDeepEqual(validatedProcessEvidence(replacedPipe, r, [], launch), original);
 });
 
+test('a watcher whose tail follows the exact parent is stable infrastructure; a foreign parent is not', () => {
+  const launch = '/tmp/widget-launch', r = { name: 'widget-pr-7-review', workspace: '/tmp/widget-workspace' };
+  const env = { CEL_REX_RECORD: '/tmp/widget-state/widget-pr-7-review.json', CEL_ROOT: launch, CEL_AGENT_NAME: r.name, CEL_ROLE: 'reviewer', CEL_WORKSPACE: r.workspace };
+  const proc = (pid, ppid, pgrp, argv) => ({ pid, ppid, pgrp, start: String(1000 + pid), comm: path.basename(argv[0]), cwd, exe: `/usr/bin/${path.basename(argv[0])}`, argv, env });
+  const watcherArgs = ['bash', `${launch}/bin/cel`, 'inbox', 'watch', '--parent', '100'];
+  const tree = [proc(100, 1, 100, ['pi']), proc(200, 100, 200, watcherArgs), proc(202, 200, 200, ['tail', '-n', '0', '-F', '-s', '1', '--pid=100', '/tmp/widget-inbox.jsonl']), proc(203, 200, 200, watcherArgs)];
+  const evidence = validatedProcessEvidence(tree, r, [], launch);
+  assert.deepEqual(evidence.processes.map(p => p.pid), [100, 200, 202, 203]);
+  assert.deepEqual(evidence.watcherGroups, [{ pgrp: 200, leader: 200, start: '1200' }]);
+  for (const follow of [['-s', '1', '--pid=999'], ['-s', '9', '--pid=100'], ['--pid=100']]) {
+    refusal(() => validatedProcessEvidence([...tree.slice(0, 2), proc(202, 200, 200, ['tail', '-n', '0', '-F', ...follow, '/tmp/widget-inbox.jsonl']), tree[3]], r, [], launch), 'unknown_watcher_child', 'protected');
+  }
+});
+
 test('Rex UI revisions and clients do not substitute for exact terminal topology', () => {
   const session = { session_id: 'widget-session', label: 'widget-reviewer', revision: 1, clients: [], windows: [{ window_id: 'window-1', layers: [{ blocks: [{ block_id: 'block-1' }] }] }] };
   assert.deepEqual(sessionTopology({ ...session, revision: 200, clients: [{ id: 'ui-client' }] }), sessionTopology(session));

@@ -183,6 +183,76 @@ test_steward_reports_a_failed_orchestrator_launch() {
   rm -rf "$T"
 }
 
+# An open owner card, written the way `cel decide ask` records one.
+_owner_card() { # <ws> <id> <title> <blocks>
+  jq -nc --arg id "$2" --arg t "$3" --arg b "$4" \
+    '{id: $id, ts: "2026-11-01T00:00:00+00:00", to: "owner", from: "root", kind: "decision", title: $t, message: $t, blocks: $b, asker: "root", options: [], context: "fixture"}' \
+    >> "$CEL_INBOX_DIR/$1.jsonl"
+}
+_steward_rows() { jq -c 'select(.from == "steward")' "$CEL_INBOX_DIR/alpha.jsonl" 2>/dev/null | wc -l | tr -d ' '; }
+
+# A launch that keeps failing is retried every half hour; root hears about it
+# once, not on every retry.
+test_steward_orchestrator_alert_is_raised_once_per_change() {
+  _orch_fixture
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  : > "$T/state"   # the half-hour retry window has passed
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_eq "$(wc -l < "$T/launched" | tr -d ' ')" "2"
+  assert_eq "$(_steward_rows)" "1"
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "bundle-orch will not start"
+  rm -rf "$T"
+}
+
+# THE OWNER ALREADY HAS THE QUESTION. While an open `cel decide` card names the
+# agent that will not start, the alert stays down - and one raised before the
+# card was filed comes down saying which card holds it. When the card closes,
+# a launch that still fails is an alert again.
+test_steward_orchestrator_alert_waits_while_an_owner_card_covers_it() {
+  _orch_fixture
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "will not start"
+  _owner_card alpha 1700000000000000001 "Restore Bundle solo agent through the gateway" \
+    "Main Bundle solo agent taking turns; not the separate lane"
+  : > "$T/state"
+  local out; out="$(STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" 2>&1)"
+  assert_contains "$out" "1700000000000000001"
+  assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+  local rows; rows="$(_steward_rows)"
+  : > "$T/state"
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_eq "$(_steward_rows)" "$rows"
+  printf '{"id":"1700000000000000009","ts":"2026-11-02T00:00:00+00:00","kind":"resolution","ref":"1700000000000000001","by":"owner","to":"root","message":"answered"}\n' \
+    >> "$CEL_INBOX_DIR/alpha.jsonl"
+  : > "$T/state"
+  STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "bundle-orch will not start"
+  rm -rf "$T"
+}
+
+# The agent's own name covers it too; a card about something else of the
+# product's, or about a longer-named agent, does not.
+test_steward_orchestrator_alert_is_covered_only_by_a_card_naming_that_agent() {
+  local title blocks want
+  while IFS='|' read -r title blocks want; do
+    _orch_fixture
+    _owner_card alpha 1700000000000000001 "$title" "$blocks"
+    STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
+    if [ "$want" = covered ]; then
+      assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
+    else
+      assert_contains "$(cmd_inbox open --for root --workspace alpha)" "bundle-orch will not start"
+    fi
+    rm -rf "$T"
+  done <<'CASES'
+Gateway route for the main lane|bundle-orch taking turns|covered
+Bundle orchestrator credentials|nothing else|covered
+Bundle pricing page copy|the pricing page|alert
+Bundle-tools agent credentials|bundle-tools-orch taking turns|alert
+Widget agent credentials|widget-orch taking turns|alert
+CASES
+}
+
 # --- routing ready tickets -------------------------------------------------
 # A ready ticket's prefix names a repo, the repo names a product, and that
 # product's orchestrator takes it directly; root is only the fallback.
@@ -895,6 +965,48 @@ test_steward_orphan_sweep_is_silent_when_it_reaped_nothing() {
   local out; out="$(_steward_orphans 2>&1)"
   assert_eq "$out" ""
   assert_eq "$(cmd_inbox read --for root --workspace alpha --all)" ""
+  rm -rf "$T"
+}
+
+_orphan_watcher_proc() { # one live process the fixture /proc calls a reparented watcher
+  local w
+  sleep 60 & w=$!
+  mkdir -p "$T/proc/$w"
+  printf 'Name:\tbash\nPPid:\t1\nUid:\t%s\t%s\t%s\t%s\nVmRSS:\t%s kB\n' \
+    "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" "${1:-8000}" > "$T/proc/$w/status"
+  ln -sfn "$T" "$T/proc/$w/cwd"
+  printf 'cel\0inbox\0watch\0--for\0root\0' > "$T/proc/$w/cmdline"
+}
+
+# THE ORPHANS ARE THE BOX'S. Said in every workspace, root read each reap
+# four times; it goes to the first registered workspace only.
+test_steward_reports_orphan_reaps_once_per_box() {
+  _orphan_steward_fixture
+  mkdir -p "$T/beta"
+  printf 'name: beta\nrepos: [{name: gizmo}]\n' > "$T/beta/workspace.yaml"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
+  _orphan_watcher_proc
+  _steward_orphans >/dev/null 2>&1
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "reaped 1 orphan (1 watcher)"
+  assert_eq "$(cmd_inbox read --for root --workspace beta --all)" ""
+  rm -rf "$T"
+}
+
+# AND ONLY WHEN IT CHANGES. Another reap of the same shape - whatever its size -
+# says nothing new; a reap of a different shape does.
+test_steward_reports_an_unchanged_orphan_reap_once() {
+  _orphan_steward_fixture
+  _orphan_watcher_proc 8000
+  _steward_orphans >/dev/null 2>&1
+  rm -rf "$T/proc"; mkdir -p "$T/proc"
+  _orphan_watcher_proc 3000
+  _steward_orphans >/dev/null 2>&1
+  assert_eq "$(_steward_rows)" "1"
+  rm -rf "$T/proc"; mkdir -p "$T/proc"
+  _orphan_watcher_proc; _orphan_watcher_proc
+  _steward_orphans >/dev/null 2>&1
+  assert_eq "$(_steward_rows)" "2"
+  assert_contains "$(jq -r 'select(.from == "steward") | .message' "$CEL_INBOX_DIR/alpha.jsonl" | tail -n1)" "reaped 2 orphans (2 watchers) - "
   rm -rf "$T"
 }
 

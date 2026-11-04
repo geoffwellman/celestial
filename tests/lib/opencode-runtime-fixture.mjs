@@ -18,6 +18,9 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
   if (args[0] === 'serve') {
     if (args.join(' ') !== 'serve --stdio --hostname 127.0.0.1 --port 0') process.exit(2);
     record('serve', { admission: existsSync(env.CEL_OPENCODE_ADMISSION_FILE) });
+    // A native server that dies before it is ready (a store still held by
+    // the previous generation, a crash on start).
+    if (env.CEL_FIXTURE_SERVE === 'exit') process.exit(5);
     const plugin = { id: 'celestial', source: { type: 'local', path: config.plugins[0].package }, features: { server: true }, state: { status: 'active' } };
     let inventories = 0;
     const server = createServer((req, res) => {
@@ -36,6 +39,12 @@ export async function runFixture(args = process.argv.slice(2), env = process.env
         if (env.CEL_FIXTURE_PLUGIN === 'wrong-source') data = [{ ...plugin, source: { type: 'local', path: '/wrong' } }];
         if (env.CEL_FIXTURE_PLUGIN === 'duplicate') data = [plugin, plugin];
         if (inventories === 1 && env.CEL_FIXTURE_PLUGIN === 'delayed') data = [];
+        // The first location-scoped request boots the location and loads
+        // every plugin inside it: on a loaded box that outlasts a request.
+        if (inventories === 1 && env.CEL_FIXTURE_PLUGIN === 'slow') {
+          setTimeout(() => { if (!res.destroyed) json({ location: { directory }, data }); }, 2500);
+          return;
+        }
         return json({ location: { directory }, data });
       }
       if (url.pathname === '/api/experimental/migration/v1') return json({ status: env.CEL_FIXTURE_MIGRATION ?? 'completed' });

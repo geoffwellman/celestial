@@ -60,24 +60,47 @@ test('private server admission precedes TUI; transient empty plugin inventory is
   assert.ok(!events.includes('server-signal'), 'stdio lease EOF should finish before signal escalation');
 });
 
-for (const mode of ['failed', 'wrong-source', 'duplicate']) {
+// The one line a refused launch prints names the step that refused.
+const reasonOf = result => /guarded private launch refused \(reason=([A-Za-z0-9_]+)\)/.exec(result.output)?.[1];
+
+for (const [mode, reason] of [['failed', 'guard_inactive'], ['wrong-source', 'guard_inactive'], ['duplicate', 'guard_ambiguous']]) {
   test(`guard ${mode} refuses before TUI and cleans owned server`, async () => {
     const result = await run({ CEL_FIXTURE_PLUGIN: mode });
     assert.notEqual(result.code, 0);
     assert.ok(!result.rows.some(row => row.event === 'tui'));
     assert.ok(!result.output.includes('fixture-secret-do-not-echo'));
+    assert.equal(reasonOf(result), reason, result.output);
   });
 }
 
-for (const mode of ['missing', 'wrong-medium']) {
+for (const [mode, reason] of [['missing', 'session_response_404'], ['wrong-medium', 'session_identity']]) {
   test(`native resume ${mode} refuses without creating or attaching`, async () => {
     const result = await run({ CEL_FIXTURE_SESSION: mode }, ['--standalone', '--auto', '--session', 'ses_SavedNative']);
     assert.notEqual(result.code, 0);
     assert.ok(result.rows.some(row => row.event === '/api/session/ses_SavedNative'));
     assert.ok(!result.rows.some(row => row.event === 'tui'));
     assert.ok(result.rows.every(row => !row.event.includes('prompt')));
+    assert.equal(reasonOf(result), reason, result.output);
+    assert.ok(!result.output.includes('ses_SavedNative'), 'the reason must not carry the native session ID');
   });
 }
+
+// The first relaunch after a Rex restart: the first location-scoped request
+// boots the location and loads every plugin inside it, and on a box busy with
+// every agent relaunching it outlasts the 2s request cap.
+test('a plugin inventory slower than the request cap refuses as a plugin request timeout', async () => {
+  const result = await run({ CEL_FIXTURE_PLUGIN: 'slow' });
+  assert.notEqual(result.code, 0);
+  assert.ok(!result.rows.some(row => row.event === 'tui'));
+  assert.equal(reasonOf(result), 'plugin_request_timeout', result.output);
+});
+
+test('a native server that exits before readiness refuses as server_exited', async () => {
+  const result = await run({ CEL_FIXTURE_SERVE: 'exit' });
+  assert.notEqual(result.code, 0);
+  assert.ok(!result.rows.some(row => row.event === 'tui'));
+  assert.equal(reasonOf(result), 'server_exited', result.output);
+});
 
 test('existing exact native session is read before admission and passed unchanged', async () => {
   const result = await run({}, ['--standalone', '--auto', '--session', 'ses_SavedNative']);
@@ -95,13 +118,15 @@ test('unfinished migration never attaches or creates a session', async () => {
   const result = await run({ CEL_FIXTURE_MIGRATION: 'required' });
   assert.notEqual(result.code, 0);
   assert.ok(!result.rows.some(row => row.event === 'tui'));
+  assert.equal(reasonOf(result), 'migration_incomplete', result.output);
 });
 
 test('native server, model and agent override flags refuse before native startup', async () => {
-  for (const args of [['--server', 'http://127.0.0.1:1'], ['--model', 'other/model'], ['--agent', 'other'], ['--continue'], ['--session', 'ses_one', '--session', 'ses_two']]) {
+  for (const [args, reason] of [[['--server', 'http://127.0.0.1:1'], 'unsupported_argument'], [['--model', 'other/model'], 'unsupported_argument'], [['--agent', 'other'], 'unsupported_argument'], [['--continue'], 'unsupported_argument'], [['--session', 'ses_one', '--session', 'ses_two'], 'session_argument']]) {
     const result = await run({}, args);
     assert.notEqual(result.code, 0);
     assert.equal(result.rows.length, 0);
+    assert.equal(reasonOf(result), reason, result.output);
   }
 });
 
@@ -133,9 +158,10 @@ test('catalog native resume carries the actual eligible selection and exact exis
 });
 
 test('catalog launch refuses foreign native models and mutated exact capability limits', async () => {
-  for (const mode of ['foreign', 'wrong-limits']) {
+  for (const [mode, reason] of [['foreign', 'model_unscoped'], ['wrong-limits', 'model_contract']]) {
     const result = await run({ CEL_FIXTURE_MODELS: mode }, ['--standalone', '--auto'], false, catalog);
     assert.notEqual(result.code, 0);
     assert.ok(!result.rows.some(row => row.event === 'tui'));
+    assert.equal(reasonOf(result), reason, result.output);
   }
 });
