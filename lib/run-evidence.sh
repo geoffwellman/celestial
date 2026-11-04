@@ -71,6 +71,47 @@ _run_evidence_watcher() { # proc root, native PID, cwd; bounded direct children 
   return 1
 }
 
+# A HOOK THAT IS LOADED BUT NOT LISTENING. The inbox hook in argv proves only
+# that the runtime loaded it; an idle agent hears mail through the hook's
+# `cel inbox watch --parent <pid>` child, and a session whose watcher died and
+# never came back is as deaf as one launched without the hook. Deaf needs ALL
+# of: the process has been up past the hook's own restart backoff (60s) plus
+# slack (CEL_INBOX_DEAF_GRACE, 180s), every thread's children list is readable
+# and bounded, and no child at all runs `inbox watch` - any watcher-shaped
+# child, exact or not, is enough not to call it deaf. Anything unreadable is
+# "cannot tell", never deaf.
+run_evidence_deaf() { # native PID -> 0 when deaf
+  local pid="$1" root start after up ticks t children child n=0 i
+  local -a ids=() args=()
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
+  root="$(_run_proc_root)"
+  start="$(_run_evidence_start "$root" "$pid")" || return 1
+  IFS=' .' read -r up _ < "$root/uptime" 2>/dev/null || return 1
+  [[ "$up" =~ ^[0-9]+$ ]] || return 1
+  ticks="$(getconf CLK_TCK 2>/dev/null)" || ticks=100
+  [[ "$ticks" =~ ^[1-9][0-9]*$ ]] || ticks=100
+  [ $(( up - start / ticks )) -ge "${CEL_INBOX_DEAF_GRACE:-180}" ] || return 1
+  for t in "$root/$pid/task"/*/children; do
+    [ -r "$t" ] || return 1
+    n=$((n+1)); [ "$n" -le 256 ] || return 1
+    children=""; IFS= read -r -n 8192 children < "$t" || true
+    [ "${#children}" -lt 8192 ] || return 1
+    ids=(); read -r -a ids <<< "$children"
+    [ "${#ids[@]}" -le 128 ] || return 1
+    for child in "${ids[@]}"; do
+      [[ "$child" =~ ^[0-9]+$ ]] || continue
+      args=()
+      mapfile -d '' -t args < "$root/$child/cmdline" 2>/dev/null || return 1
+      for ((i=0; i+1<${#args[@]}; i++)); do
+        [ "${args[$i]}" = inbox ] && [ "${args[$((i+1))]}" = watch ] && return 1
+      done
+    done
+  done
+  [ "$n" -gt 0 ] || return 1
+  after="$(_run_evidence_start "$root" "$pid")" || return 1
+  [ "$start" = "$after" ]
+}
+
 run_runtime_evidence() { # runtime name pane cwd pid -> evidence states and NUL-preserving ARGV_VALUES array
   local runtime="$1" name="$2" pane="$3" cwd="$4" pid="$5" root start after i flag file bare_pi=1
   local -a argv=()

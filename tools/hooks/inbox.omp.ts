@@ -17,6 +17,7 @@
 // Fails open everywhere: an inbox problem must never take the agent down.
 // @ts-nocheck
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startReviewerRetirement } from "./reviewer-retirement.mjs";
@@ -74,6 +75,11 @@ let owed = false;
 let retryTimer = null;
 let wakeSince = 0;
 let stopped = false;
+// A reviewer retirement in progress (prepareExit until a failed exit is
+// restored) and the process exiting: the only states a gone watcher is
+// meant to stay gone in. session_shutdown alone is not one - see agent_end.
+let retiring = false;
+let exiting = false;
 let lastCtx = null;
 let reviewerRetirement = null;
 let nativeTurnActive = false;
@@ -95,8 +101,9 @@ function startRetirement(ctx): void {
       if (!Number.isSafeInteger(count)) throw new Error("inbox_count_unknown");
       return count;
     },
-    prepareExit: () => { stopped = true; stopWatcher(); },
+    prepareExit: () => { retiring = true; stopped = true; stopWatcher(); },
     restoreAfterFailedExit: () => {
+      retiring = false;
       stopped = false;
       startWatcher(lastCtx);
       owed = true;
@@ -157,9 +164,27 @@ export function __watcherPid(): number | undefined { return watcher ? watcher.pi
 // lifecycle, so it restarts it - one at a time, backoff doubling to 60s and
 // reset once a watcher has lived a minute, never after shutdown - and then
 // counts what arrived while nobody was tailing, through the same coalesced wake.
+//
+// The exit event is not the only way a watcher goes: a spawn the kernel
+// refuses (EAGAIN in a fork storm, EMFILE, ENOENT) emits 'error' and NEVER
+// 'exit' - in node and in bun - so the old variable held a pid-less child
+// forever and nothing restarted it. So liveness is the child PROCESS, and it
+// is re-checked where the session is known to be alive: every agent_end, and
+// a slow idle check for a session that sits without turns.
 let restartTimer = null;
 let restartDelay = 0;
 let watcherStarted = 0;
+function watcherAlive(w): boolean {
+  if (!w || !w.pid || w.exitCode != null || w.signalCode != null) return false;
+  try { process.kill(w.pid, 0); } catch (e) { return !!e && e.code === "EPERM"; }
+  try {
+    // Exited but unreaped (its exit never delivered), or the pid reused by a
+    // process that is not this session's child.
+    const s = readFileSync(`/proc/${w.pid}/stat`, "utf8");
+    const f = s.slice(s.lastIndexOf(")") + 2).split(" ");
+    return f[0] !== "Z" && f[0] !== "X" && f[1] === String(process.pid);
+  } catch (e) { return !(e && e.code === "ENOENT"); } // no procfs: the signal probe stands
+}
 function scheduleRestart(ctx): void {
   if (stopped || restartTimer) return;
   const base = envMs("CEL_INBOX_RESTART_MS", 2000);
@@ -167,11 +192,19 @@ function scheduleRestart(ctx): void {
   restartDelay = restartDelay ? Math.min(restartDelay * 2, 60000) : base;
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    if (stopped || watcher) return;
+    if (stopped || watcherAlive(watcher)) return;
     startWatcher(ctx);
     wakeForBacklog(ctx);
   }, restartDelay);
   try { restartTimer.unref(); } catch {}
+}
+// Respawn now when no live watcher exists. A pending backoff restart is
+// superseded: a turn ending is not a crash loop.
+function ensureWatcher(ctx): void {
+  if (stopped || retiring || exiting || !ctx || watcherAlive(watcher)) return;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  startWatcher(ctx);
+  wakeForBacklog(ctx);
 }
 
 function stopWatcher(): void {
@@ -195,7 +228,8 @@ function startWatcher(ctx): void {
       env: { ...process.env, CEL_INBOX_NOTIFY: process.env.CEL_INBOX_NOTIFY ?? "0" },
     });
     w.unref();
-    w.on("error", () => {});
+    // A refused spawn reports here and never through 'exit'.
+    w.on("error", () => { if (watcher === w && !watcherAlive(w)) { watcher = null; scheduleRestart(ctx); } });
     w.on("exit", () => { if (watcher === w) { watcher = null; scheduleRestart(ctx); } });
     let buf = "";
     w.stdout.setEncoding("utf8");
@@ -344,8 +378,19 @@ export default function celestialInbox(pi): void {
   if (process.env.CEL_INBOX_HOOK === "0") return;
   api = pi;
   registerHereCommands(pi);
-  pi.on("agent_end", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = false; rexNote("idle", ctx); waking = false; if (owed && lastCtx) scheduleWake(lastCtx); });
+  // agent_end proves the session is alive, whatever session_shutdown said
+  // before it: unless it is retiring or exiting, a gone watcher comes back.
+  pi.on("agent_end", (_e, ctx) => {
+    lastCtx = ctx; nativeTurnActive = false; rexNote("idle", ctx); waking = false;
+    if (!retiring && !exiting) { stopped = false; ensureWatcher(ctx); }
+    if (owed && lastCtx) scheduleWake(lastCtx);
+  });
   pi.on("session_start", (_e, ctx) => { rexNote("idle", ctx); stopped = false; nativeTurnActive = false; lastCtx = ctx; startWatcher(ctx); wakeForBacklog(ctx); startRetirement(ctx); });
+  // Idle: no turn ends, so a watcher whose death was never reported is
+  // found here. It never un-stops a shut-down session, and leaves a pending
+  // backoff restart to run.
+  const idleCheck = setInterval(() => { if (!restartTimer) ensureWatcher(lastCtx); }, envMs("CEL_INBOX_WATCH_CHECK_MS", 60000));
+  try { idleCheck.unref(); } catch {}
   pi.on("session_tree", (_e, ctx) => { lastCtx = ctx; });
   pi.on("agent_start", (_e, ctx) => { lastCtx = ctx; nativeTurnActive = true; });
   pi.on("before_agent_start", (_e, ctx) => {
@@ -364,5 +409,5 @@ export default function celestialInbox(pi): void {
     };
   });
   pi.on("session_shutdown", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
-  process.once("exit", () => { reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
+  process.once("exit", () => { exiting = true; clearInterval(idleCheck); reviewerRetirement?.dispose(); reviewerRetirement = null; stopped = true; stopWatcher(); });
 }

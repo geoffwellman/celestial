@@ -662,19 +662,23 @@ doctor_stale_orchestrator_lines() {
 
 # AN ORCHESTRATOR THAT CANNOT HEAR ITS MAIL. A FAILURE, unlike an older
 # launch line: a herdr restart can bring orchestrators back without their
-# inbox hook, and mail then piles up with nothing to wake them.
-doctor_inbox_hook_lines() { # -> 1 when any live orchestrator is stripped
+# inbox hook, and a session can keep its hook but lose the watcher the hook
+# runs (deaf); either way mail then piles up with nothing to wake it.
+doctor_inbox_hook_lines() { # -> 1 when any live orchestrator or lane is stripped or deaf
   # shellcheck source=lib/run.sh
   . "${BASH_SOURCE[0]%/*}/run.sh"
-  local name ws p pane status state cmd bad=0
-  while IFS=$'\t' read -r name ws p pane status state cmd; do
-    if [ "$state" = unknown ]; then
-      c_warn "$name ($ws) native inbox evidence is unverified; inspect its exact session and owned watcher. Rewritten argv is not proof of missing hooks; no automatic restart."
-      continue
-    fi
-    [ "$state" = stripped ] || continue
-    c_err "$name ($ws) is running without its inbox hook - mail will not reach it (probably a herdr restart): $cmd"
-    bad=1
+  local name ws p pane status state cmd lane bad=0
+  while IFS=$'\t' read -r name ws p pane status state cmd lane; do
+    case "$state" in
+      unknown)
+        c_warn "$name ($ws) native inbox evidence is unverified; inspect its exact session and owned watcher. Rewritten argv is not proof of missing hooks; no automatic restart." ;;
+      stripped)
+        c_err "$name ($ws) is running without its inbox hook - mail will not reach it (probably a herdr restart): $cmd"
+        bad=1 ;;
+      deaf)
+        c_err "$name ($ws) has its inbox hook but no live inbox watcher (no cel inbox watch --parent child) - mail will not wake it: $cmd"
+        bad=1 ;;
+    esac
   done < <(run_stripped_orchestrators)
   return "$bad"
 }

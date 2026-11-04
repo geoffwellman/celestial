@@ -1694,6 +1694,54 @@ test_steward_observable_missing_hook_after_unknown_remains_actionable() {
   rm -rf "$T"
 }
 
+# DEAF: the hook is in argv but its `cel inbox watch --parent` child is gone.
+# Same rule as stripped - restart only an idle agent with an empty composer -
+# once the deafness has outlasted the hook's own restart backoff.
+test_steward_restarts_a_deaf_idle_orchestrator_once_it_stays_deaf() {
+  _hook_fixture idle empty
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tcel run orchestrator --product bundle --workspace alpha --restart\t-\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ""          # first sighting: could be the hook's own restart gap
+  assert_eq "$(_root_mail)" ""
+  # the next tick, past the confirmation window
+  sed -i 's/^\(orch-deaf-seen-alpha-bundle\) .*/\1 1/' "$_STEWARD_STATE"
+  local out; out="$(_steward_inbox_hooks)"
+  assert_eq "$(cat "$T/restarted")" "bundle alpha"
+  assert_contains "$out" "bundle-orch has its inbox hook but no live inbox watcher - restarted it"
+  assert_contains "$(_root_mail)" "bundle-orch has its inbox hook but no live inbox watcher (its cel inbox watch --parent child is gone); restarted it so its inbox hook starts a new watcher"
+  rm -rf "$T"
+}
+
+test_steward_forgets_deafness_that_heals_before_it_is_confirmed() {
+  _hook_fixture idle empty
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tunused-restart\t-\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tok\tunused-restart\t-\n' > "$T/rows"
+  _steward_inbox_hooks >/dev/null
+  ! grep -q '^orch-deaf-seen-' "$_STEWARD_STATE" || { echo "healed deafness still recorded"; return 1; }
+  assert_eq "$(cat "$T/restarted")" ""
+  rm -rf "$T"
+}
+
+test_steward_does_not_restart_a_deaf_orchestrator_over_a_draft() {
+  _hook_fixture idle draft
+  printf 'bundle-orch\talpha\tbundle\tw:p2\tidle\tdeaf\tcel run orchestrator --product bundle --workspace alpha --restart\t-\n' > "$T/rows"
+  CEL_STEWARD_DEAF_CONFIRM=0 _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" ""
+  assert_contains "$(_root_mail)" "cannot receive mail - its inbox hook is loaded but its inbox watcher is gone"
+  rm -rf "$T"
+}
+
+test_steward_restarts_a_deaf_solo_lane_as_a_lane() {
+  _hook_fixture idle empty
+  _steward_restart_orch() { printf '%s\n' "$*" >> "$T/restarted"; }
+  printf 'bundle-disk-cleanup\talpha\tbundle\tw:p3\tidle\tdeaf\tcel run solo --product bundle --lane disk-cleanup --workspace alpha --restart\tdisk-cleanup\n' > "$T/rows"
+  CEL_STEWARD_DEAF_CONFIRM=0 _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" "bundle alpha disk-cleanup"
+  assert_contains "$(_root_mail)" "bundle-disk-cleanup has its inbox hook but no live inbox watcher"
+  rm -rf "$T"
+}
+
 
 # The composer is empty only when the pane PROVES it: an editor box between
 # two dividers with nothing in it. Anything else - text, no box, no read - is

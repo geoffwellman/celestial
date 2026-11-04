@@ -251,8 +251,18 @@ _omp_delivery_harness() { # <scenario> -> JSON report (env: D=inbox dir, REG=reg
   CEL_INBOX_DIR="$D" CEL_REGISTRY="$REG/registry.yaml" SCENARIO="$1" \
   CEL_INBOX_ME="${CEL_INBOX_ME:-widget-orch}" CEL_INBOX_WS=alpha CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=300 CEL_INBOX_RETRY_MS=400 \
-  CEL_INBOX_RESTART_MS=300 CEL_INBOX_WAKE_STUCK_MS=1500 HOOK="$HOOK" node --no-warnings - <<'JS'
-const { execFileSync } = require('node:child_process');
+  CEL_INBOX_RESTART_MS=300 CEL_INBOX_WAKE_STUCK_MS=1500 CEL_INBOX_WATCH_CHECK_MS="${CEL_INBOX_WATCH_CHECK_MS:-60000}" \
+  HOOK="$HOOK" node --no-warnings - <<'JS'
+const cp = require('node:child_process');
+const { execFileSync } = cp;
+// A runtime that never delivers a child's 'exit' (the case the hook must
+// survive): while set, the event is swallowed before any listener sees it.
+const emit = cp.ChildProcess.prototype.emit;
+cp.ChildProcess.prototype.emit = function (ev, ...a) { return globalThis.__dropExit && ev === 'exit' ? false : emit.call(this, ev, ...a); };
+// Reviewer retirement, stubbed to hand its prepare/restore callbacks out.
+require('node:module').registerHooks({ resolve: (spec, c, next) => spec === './reviewer-retirement.mjs'
+  ? { url: 'data:text/javascript,export function startReviewerRetirement(o){globalThis.__retire=o;return{dispose(){}}}', shortCircuit: true }
+  : next(spec, c) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   const sc = process.env.SCENARIO;
@@ -270,7 +280,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const send = (to, msg, ws) => cel('send', to, msg, '--workspace', ws);
   const mod = await import(process.env.HOOK);
   mod.default(pi);
+  const livePid = () => { const p = mod.__watcherPid(); if (!p) return 0; try { process.kill(p, 0); return p; } catch { return 0; } };
+  const waitLive = async (ms, not) => { for (let i = 0; i < ms / 100 && !(livePid() && livePid() !== not); i++) await sleep(100); return livePid(); };
+  const path0 = process.env.PATH;
+  if (sc === 'spawn-fails') process.env.PATH = '/nonexistent';   // fork/exec refused: 'error', never 'exit'
   await fire('session_start', {});
+  process.env.PATH = path0;
   await sleep(1500);
   const r = {};
   if (sc === 'cross-ws') {
@@ -308,6 +323,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await sleep(1200);           // woken; agent_end never arrives
     send('widget-orch', 'second', 'beta');
     await sleep(3000);           // past the stuck window
+  } else if (sc === 'spawn-fails') {
+    r.pid = await waitLive(2000);
+    send('widget-orch', 'after-heal', 'alpha');
+    await sleep(2000);
+  } else if (sc === 'shutdown-then-turn') {
+    // session_shutdown with no session_start after it, yet the session goes on.
+    await fire('session_shutdown', {});
+    r.pidAfterShutdown = livePid();
+    await fire('agent_end', {});
+    r.pid = await waitLive(1000);
+    send('widget-orch', 'after-heal', 'alpha');
+    await sleep(2000);
+  } else if (sc === 'exit-lost' || sc === 'exit-lost-idle') {
+    const pid1 = livePid();
+    globalThis.__dropExit = true;
+    process.kill(-pid1, 'SIGKILL');
+    await sleep(1000);
+    globalThis.__dropExit = false;
+    r.pidBeforeTurn = livePid();
+    if (sc === 'exit-lost') await fire('agent_end', {});
+    r.pid = await waitLive(2000, pid1);
+    send('widget-orch', 'after-heal', 'alpha');
+    await sleep(2000);
+  } else if (sc === 'retiring') {
+    globalThis.__retire.prepareExit();
+    await fire('agent_end', {});
+    await sleep(1000);
+    r.pidWhileRetiring = livePid();
+    globalThis.__retire.restoreAfterFailedExit();
+    r.pid = await waitLive(1000);
   }
   r.turn = (await fire('before_agent_start', { prompt: 'hi', systemPrompt: [] })) || null;
   const pid = mod.__watcherPid();
@@ -353,6 +398,47 @@ test_omp_inbox_dead_watcher_is_recovered_and_downtime_mail_lands_once() {
   assert_eq "$(_sent_text "$out" | grep -c after-recovery)" "1"
   assert_eq "$(jq -r '.turn' <<<"$out")" "null"
   assert_eq "$(jq -r '.meUnread' <<<"$out")" "0"
+  assert_eq "$(jq -r '.alive' <<<"$out")" "false"
+}
+
+# A WATCHER THAT IS GONE IS RESPAWNED, whatever took it: a spawn the kernel
+# refused (EAGAIN/EMFILE/ENOENT emit 'error' and never 'exit'), an exit the
+# runtime never delivered, or a session_shutdown with the session still going.
+# Liveness is the child's pid, not the variable that once held it.
+_assert_healed() { # <report>
+  assert_eq "$(jq -r '.error // ""' <<<"$1")" ""
+  [ "$(jq -r '.pid' <<<"$1")" != 0 ] || { echo "no live watcher after self-heal"; return 1; }
+  assert_eq "$(_sent_text "$1" | grep -c after-heal)" "1"
+  assert_eq "$(jq -r '.meUnread' <<<"$1")" "0"
+  assert_eq "$(jq -r '.alive' <<<"$1")" "false"
+}
+test_omp_inbox_watcher_whose_spawn_failed_is_respawned() {
+  command -v node >/dev/null || return 0
+  _assert_healed "$(_delivery spawn-fails)"
+}
+test_omp_inbox_watcher_gone_after_shutdown_is_respawned_when_the_session_goes_on() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_delivery shutdown-then-turn)"
+  assert_eq "$(jq -r '.pidAfterShutdown' <<<"$out")" "0"
+  _assert_healed "$out"
+}
+test_omp_inbox_watcher_dead_without_exit_event_is_respawned_at_agent_end() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_delivery exit-lost)"
+  assert_eq "$(jq -r '.pidBeforeTurn' <<<"$out")" "0"
+  _assert_healed "$out"
+}
+test_omp_inbox_watcher_dead_without_exit_event_is_respawned_while_idle() {
+  command -v node >/dev/null || return 0
+  local out; out="$(CEL_INBOX_WATCH_CHECK_MS=400 _delivery exit-lost-idle)"
+  _assert_healed "$out"
+}
+test_omp_inbox_retiring_session_is_not_respawned_until_retirement_fails() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_delivery retiring)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.pidWhileRetiring' <<<"$out")" "0"
+  [ "$(jq -r '.pid' <<<"$out")" != 0 ] || { echo "watcher not back after a failed retirement"; return 1; }
   assert_eq "$(jq -r '.alive' <<<"$out")" "false"
 }
 
