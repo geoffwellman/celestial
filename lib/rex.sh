@@ -11,10 +11,15 @@ _rex_state() {
   elif [ -n "${CEL_TESTING:-}" ]; then printf '%s/cel-rex' "${TMPDIR:-/tmp}"
   else printf '%s/cel/rex' "${XDG_STATE_HOME:-$HOME/.local/state}"; fi
 }
-_rex_cli() (
-  # Server autostart and its terminals must never retain launcher locks.
+# No child - a Rex server, a terminal, apt, a relaunched agent - may inherit a
+# launcher, admission or server-generation lock lease.
+_rex_close_leases() {
   [ -z "${_RUN_ADMISSION_FD:-}" ] || exec {_RUN_ADMISSION_FD}>&-
   [ -z "${_REX_LAUNCH_FD:-}" ] || exec {_REX_LAUNCH_FD}>&-
+  [ -z "${_REX_GEN_FD:-}" ] || exec {_REX_GEN_FD}>&-
+}
+_rex_cli() (
+  _rex_close_leases
   exec "${CEL_REX_BIN:-rex}" "$@"
 )
 _rex_file() { printf '%s/%s.json' "$(_rex_state)" "$1"; }
@@ -161,9 +166,10 @@ _rex_launch() { # name runtime cwd label envprefix args...
   local tmp; tmp="$(mktemp "$d/.record.XXXXXX")"; chmod 600 "$tmp"
   jq -n --arg name "$name" --arg rt "$rt" --arg cwd "$cwd" --arg session "$session" --arg block "$block" \
     --argjson pid "$pid" --arg start "$start" --arg role "${env_role:-${role:-core}}" --arg workspace "${wsdir:-$cwd}" \
-    --arg repo "${repo:-}" --arg pr "${pr:-}" --arg native "$native" \
+    --arg repo "${repo:-}" --arg pr "${pr:-}" --arg native "$native" --argjson relaunch "${_REX_RELAUNCH:-null}" \
     '{name:$name,agent:$rt,cwd:$cwd,role:$role,workspace:$workspace,repo:$repo,pr:$pr,pane_id:("rex/"+$session+"/"+$block),backend:"rex",rex_session:$session,rex_block:$block,pid:$pid,pid_start:$start,agent_status:"working"}
-      | if $native != "" then .agent_session={value:$native} else . end' > "$tmp"
+      | if $native != "" then .agent_session={value:$native} else . end
+      | if $relaunch != null then .relaunch=$relaunch else . end' > "$tmp"
   mv "$tmp" "$file"; rm -f "$file.pid" "$file.pending"
   exec {lock}>&-
   _REX_PANE="rex/$session/$block"
@@ -228,6 +234,479 @@ rex_session_note() { # pid state [native session file/id]
   return "$rc"
 }
 
+# ── Rex server generations ───────────────────────────────────────────────────
+# A Rex server restart - a package upgrade, `rex server stop`, a crash - ends
+# every program in its sessions: every managed runtime dies at once and its
+# receipt goes dead, so the roster simply stops listing it. Nothing else would
+# notice. Every steward tick records which server instance answers and which
+# managed runtimes are live under it (rex_generation_tick). When the instance
+# changes, the runtimes that were live under the old one and whose receipts
+# are still that same launch - not stopped or retired (both remove the
+# receipt), not relaunched since (a new PID) - died with that server, and each
+# is resumed ONCE through the `cel run` line its own launch recorded: the
+# canonical door, with all its refusals, into its saved session, with its
+# explicit profile/model/thinking (a lane keeps its remembered choices). The
+# new generation is committed BEFORE any resume, so a failed or interrupted
+# resume is reported, never retried behind anyone's back.
+#
+# The server that answers after a restart is not the one that went away: a
+# client-autostarted server runs with --exit-empty and without the tailnet,
+# and it restores the old sessions as empty shells under the same labels. So
+# the restore (_rex_restore) closes those dead shells for the agents it is
+# about to resume, makes sure a server answers (starting a persistent one if
+# the last shell's close ended an exit-empty server), turns tailnet serving
+# back on if the old server had it, and only then resumes.
+#
+# Rows: <outcome>\t<name>\t<workspace>\t<detail>, outcome one of
+#   resumed        running again; detail is the session it resumed
+#   failed         its relaunch ran and did not leave a live runtime
+#   held           not resumed: no recorded relaunch line (reviewers and
+#                  workers never resume; older receipts), no saved session, a
+#                  session record that disagrees with its receipt, no server
+#   skipped        stopped, retired, relaunched or still running
+#   server         a fact about the server (version/API revision, closed shells,
+#                  tailnet restored, a server started)
+#   server-failed  a server problem a person must fix (tailnet not restored)
+_rex_generation_file() { printf '%s/server-generation' "$(_rex_state)"; }
+
+_rex_server_status() { # -> the running server's status JSON; never starts one
+  local s
+  s="$(_rex_cli --autostart=false server status --json 2>/dev/null)" || return 1
+  jq -ce 'select(type == "object" and (.instance_id | type) == "string" and (.instance_id | length) > 0)' <<<"$s" 2>/dev/null
+}
+_rex_server_instance() {
+  local s; s="$(_rex_server_status)" || return 1
+  jq -r .instance_id <<<"$s"
+}
+_rex_tailscale_of() { jq -r '.tailscale.state // "off"' <<<"$1"; } # <status-json>
+
+_rex_live_generation() { # -> [{name,pid,pid_start}] of live launches; rc 1 when unreadable
+  local f rows='[]'
+  for f in "$(_rex_state)"/*.json; do
+    [ -f "$f" ] || continue
+    _rex_receipt_valid "$f" || return 1
+    _rex_live "$f" || continue
+    rows="$(jq -c --arg n "$(basename "$f" .json)" --slurpfile r "$f" \
+      '. + [{name: $n, pid: $r[0].pid, pid_start: $r[0].pid_start}]' <<<"$rows")" || return 1
+  done
+  printf '%s' "$rows"
+}
+
+# What a later restore needs of this server: who it is, what it ran, whether
+# it served the tailnet, and the launches live under it.
+_rex_generation_commit() { # <status-json> <live-json>
+  local tmp
+  tmp="$(mktemp "$(_rex_state)/.generation.XXXXXX")" || return 1
+  if jq -n --argjson s "$1" --arg at "$(date -u +%FT%TZ)" --argjson live "$2" \
+       '{instance: $s.instance_id, rex_version: ($s.rex_version // ""), api_revision: ($s.api_revision // null),
+         tailscale: ($s.tailscale.state // "off"), exit_empty: ($s.exit_empty // null), observed_at: $at, live: $live}' \
+       > "$tmp" && mv -f "$tmp" "$(_rex_generation_file)"; then
+    return 0
+  fi
+  rm -f "$tmp"; return 1
+}
+
+# One owner of a generation change at a time: the safety net and a managed
+# upgrade both hold this for their whole run, and every child closes it.
+_rex_generation_lock() {
+  exec {_REX_GEN_FD}>>"$(_rex_generation_file).lock" || return 1
+  flock -n "$_REX_GEN_FD" && return 0
+  exec {_REX_GEN_FD}>&-; _REX_GEN_FD=""; return 1
+}
+_rex_generation_unlock() {
+  [ -z "${_REX_GEN_FD:-}" ] || exec {_REX_GEN_FD}>&-
+  _REX_GEN_FD=""
+}
+
+_rex_one_line() { tr '\t\n' '  ' | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-300; }
+
+# Why a dead launch cannot come back through its own recorded line; empty when it can.
+_rex_resume_veto() { # <receipt>
+  local f="$1" role repo pr ws cwd want have
+  if ! jq -e '.relaunch | type == "array" and length > 1 and all(.[]; type == "string")' "$f" >/dev/null 2>&1; then
+    role="$(jq -r '.role // ""' "$f")"
+    case "$role" in
+      reviewer)
+        repo="$(jq -r '.repo // ""' "$f")"; pr="$(jq -r '.pr // "" | tostring' "$f")"
+        ws="$(ws_name "$(jq -r '.workspace // ""' "$f")" 2>/dev/null || true)"
+        printf 'reviewers never resume - if %s#%s is still open: cel run reviewer --repo %s --pr %s%s' \
+          "$repo" "$pr" "$repo" "$pr" "${ws:+ --workspace $ws}" ;;
+      worker) printf 'workers resume through cel-fanout delegate --reuse' ;;
+      *) printf 'its launch predates recorded relaunch lines - resume it by hand once (cel run ... --restart), which records one' ;;
+    esac
+    return 0
+  fi
+  want="$(jq -r '.agent_session.value // ""' "$f")"
+  if [ -z "$want" ]; then
+    printf 'its runtime never reported a native session, so a relaunch would start a fresh conversation'
+    return 0
+  fi
+  cwd="$(jq -r '.cwd // ""' "$f")"
+  have="$(_run_sessions_last "$cwd")"
+  [ "$have" = "$want" ] \
+    || printf 'the saved session for %s is %s, not its receipt'"'"'s %s - refusing to resume into another conversation' \
+      "$cwd" "${have:-nothing}" "$want"
+}
+
+# Runs the receipt's recorded `cel run` line. REX_AUTOSTART=false: a server
+# started from a steward tick would live in the tick's cgroup and die with it.
+_rex_relaunch() { # <receipt>
+  local -a argv=()
+  mapfile -d '' -t argv < <(jq -j '.relaunch[] | ., "\u0000"' "$1")
+  [ "${#argv[@]}" -gt 1 ] || return 1
+  (
+    _rex_close_leases
+    REX_AUTOSTART=false exec "$CEL_ROOT/bin/cel" "${argv[@]}"
+  ) </dev/null
+}
+
+# A row when this launch is NOT to be relaunched; nothing when it is.
+_rex_resume_check() { # <name> <pid> <pid-start>
+  local name="$1" pid="$2" start="$3" f ws veto
+  f="$(_rex_file "$name")"
+  if [ ! -f "$f" ]; then
+    printf 'skipped\t%s\t\tstopped or retired since (its receipt is gone)\n' "$name"; return 0
+  fi
+  if ! _rex_receipt_valid "$f"; then
+    printf 'held\t%s\t\tits receipt is unreadable\n' "$name"; return 0
+  fi
+  ws="$(jq -r '.workspace // ""' "$f")"
+  if [ "$(jq -r '.pid | tostring' "$f")" != "$pid" ] || [ "$(jq -r '.pid_start' "$f")" != "$start" ]; then
+    printf 'skipped\t%s\t%s\trelaunched since\n' "$name" "$ws"; return 0
+  fi
+  if _rex_live "$f"; then
+    printf 'skipped\t%s\t%s\tstill running\n' "$name" "$ws"; return 0
+  fi
+  if compgen -G "$(_rex_state)/retirements/$name-$pid-$start-*.json" >/dev/null; then
+    printf 'skipped\t%s\t%s\tits retirement had begun\n' "$name" "$ws"; return 0
+  fi
+  veto="$(_rex_resume_veto "$f")"
+  [ -z "$veto" ] || printf 'held\t%s\t%s\t%s\n' "$name" "$ws" "$(_rex_one_line <<<"$veto")"
+}
+
+_rex_relaunch_one() { # <name> <old-pid> -> resumed|failed row
+  local name="$1" pid="$2" f ws out rc=0
+  f="$(_rex_file "$name")"; ws="$(jq -r '.workspace // ""' "$f")"
+  out="$(_rex_relaunch "$f" 2>&1)" || rc=$?
+  if [ "$rc" = 0 ] && [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f" \
+     && [ "$(jq -r '.pid | tostring' "$f")" != "$pid" ]; then
+    printf 'resumed\t%s\t%s\t%s\n' "$name" "$ws" "$(jq -r '.agent_session.value // ""' "$f" | _rex_one_line)"
+  else
+    out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | _rex_one_line)"
+    printf 'failed\t%s\t%s\t%s\n' "$name" "$ws" "${out:-its relaunch left no live runtime (exit $rc)}"
+  fi
+}
+
+# RESTORED SHELLS: sessions labelled <name> in which no block runs a program.
+# A live agent's block always has a child, and anything unobservable is kept.
+_rex_session_dead() { # <session> -> 0 only when every block provably runs nothing
+  local s="$1" j blocks b info
+  j="$(_rex_cli --autostart=false session inspect "$s" --json 2>/dev/null)" || return 1
+  blocks="$(jq -r '[.windows[]?.layers[]?.blocks[]?.block_id] | .[]' <<<"$j" 2>/dev/null)" || return 1
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    info="$(_rex_cli --autostart=false block call process '{}' -s "$s" -b "$b" 2>/dev/null)" || return 1
+    jq -e 'type == "object" and .error == null and .child == null and .foreground == null' <<<"$info" >/dev/null 2>&1 || return 1
+  done <<<"$blocks"
+}
+_rex_close_dead_duplicates() { # <label> -> how many were closed
+  local j s n=0
+  j="$(_rex_cli --autostart=false ls --json 2>/dev/null)" || { printf 0; return 0; }
+  for s in $(jq -r --arg l "$1" '(.sessions? // .)[]? | select(.label == $l) | .session_id' <<<"$j" 2>/dev/null); do
+    _rex_session_dead "$s" || continue
+    if _rex_cli --autostart=false kill "$s" >/dev/null 2>&1; then n=$((n + 1)); fi
+  done
+  printf '%s' "$n"
+}
+
+# A SERVER THAT ANSWERS, serving the tailnet if the old one did. A server
+# started here is persistent (not --exit-empty) and in its own scope. Prints
+# server rows; sets _REX_STATUS and _REX_STARTED. rc 1 when none answers.
+_rex_server_ready() { # <tailscale-state-before>
+  local before="$1" s="" i state first
+  _REX_STATUS=""; _REX_STARTED=0
+  s="$(_rex_server_status)" || s=""
+  if [ -z "$s" ]; then
+    _rex_server_start "$before" >/dev/null 2>&1 || true
+    _rex_wait_instance "" 1 >/dev/null || { printf 'server-failed\trex\t\tno Rex server answered, and starting one failed\n'; return 1; }
+    s="$(_rex_server_status)" || { printf 'server-failed\trex\t\tthe started Rex server stopped answering\n'; return 1; }
+    _REX_STARTED=1
+    printf 'server\trex\t\tstarted a persistent Rex server (none was answering)\n'
+  fi
+  state="$(_rex_tailscale_of "$s")"
+  if [ "$before" = running ] && [ "$state" != running ]; then
+    first="$state"
+    _rex_cli --autostart=false server tailscale on >/dev/null 2>&1 || true
+    for ((i = 0; i < ${CEL_REX_SERVER_WAIT_TENTHS:-300}; i++)); do
+      s="$(_rex_server_status)" || s=""
+      state="$(_rex_tailscale_of "${s:-null}")"
+      [ "$state" != running ] || break
+      sleep 0.1
+    done
+    if [ "$state" = running ]; then
+      printf 'server\ttailscale\t\ttailnet serving restored (the new server came up %s)\n' "$first"
+    else
+      printf 'server-failed\ttailscale\t\tthe old server served the tailnet; this one is still %s after rex server tailscale on\n' "$state"
+    fi
+    [ -n "$s" ] || return 1
+  fi
+  _REX_STATUS="$s"
+}
+
+# THE RESTORE after any restart. stdin: the launches live under the old server
+# (<name> <pid> <pid-start>); <old> its generation record. Classifies them,
+# closes the dead restored shells of the ones to resume, makes sure a server
+# answers (again: closing the last shell ends an exit-empty server), commits
+# the new generation, then resumes each one and confirms it stayed alive. With
+# no server, nothing is committed, so the launches wait for the next one.
+_rex_restore() { # <old-generation-json>
+  local old="$1" name pid start row todo="" closed n attempt rows="" f ws outcome detail
+  while IFS=$'\t' read -r name pid start; do
+    [ -n "$name" ] || continue
+    row="$(_rex_resume_check "$name" "$pid" "$start")"
+    if [ -n "$row" ]; then printf '%s\n' "$row"; else todo+="$name"$'\t'"$pid"$'\n'; fi
+  done
+  for attempt in 1 2; do
+    closed=""
+    while IFS=$'\t' read -r name pid; do
+      [ -n "$name" ] || continue
+      n="$(_rex_close_dead_duplicates "$name")"
+      [ "${n:-0}" = 0 ] || closed+="${closed:+, }$name ($n)"
+    done <<<"$todo"
+    [ -z "$closed" ] || printf 'server\tshells\t\tclosed dead restored sessions: %s\n' "$closed"
+    if ! _rex_server_ready "$(jq -r '.tailscale // "off"' <<<"$old")"; then
+      while IFS=$'\t' read -r name pid; do
+        [ -z "$name" ] || printf 'held\t%s\t%s\tno Rex server answered; it resumes when one does\n' \
+          "$name" "$(jq -r '.workspace // ""' "$(_rex_file "$name")")"
+      done <<<"$todo"
+      return 0
+    fi
+    # A server started here has restored the saved sessions once more.
+    [ "$_REX_STARTED" = 1 ] || break
+  done
+  printf 'server\tversion\t\trex %s, API revision %s -> rex %s, API revision %s\n' \
+    "$(jq -r 'if (.rex_version // "") == "" then "?" else .rex_version end' <<<"$old")" \
+    "$(jq -r '.api_revision // "?"' <<<"$old")" \
+    "$(jq -r '.rex_version // "?"' <<<"$_REX_STATUS")" "$(jq -r '.api_revision // "?"' <<<"$_REX_STATUS")"
+  _rex_generation_commit "$_REX_STATUS" "$(_rex_live_generation || printf '[]')" || true
+  while IFS=$'\t' read -r name pid; do
+    [ -n "$name" ] || continue
+    rows+="$(_rex_relaunch_one "$name" "$pid")"$'\n'
+  done <<<"$todo"
+  # A runtime that starts and then dies is a failure, not a resume.
+  if grep -q '^resumed' <<<"$rows"; then sleep "${CEL_REX_RESUME_SETTLE_SECS:-15}"; fi
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r outcome name ws detail <<<"$row"
+    f="$(_rex_file "$name")"
+    if [ "$outcome" = resumed ] && ! { [ -f "$f" ] && _rex_receipt_valid "$f" && _rex_live "$f"; }; then
+      row="$(printf 'failed\t%s\t%s\tit started, then exited within %ss' "$name" "$ws" "${CEL_REX_RESUME_SETTLE_SECS:-15}")"
+    fi
+    printf '%s\n' "$row"
+  done <<<"$rows"
+}
+
+# THE SAFETY NET, for restarts nobody announced. Prints nothing unless the
+# server instance changed since the last tick; then a header row
+# "generation\t<old>\t<new>" and the restore's rows. No answering server is no
+# evidence (and asking with autostart would start one), and the first
+# observation has no previous generation to compare with.
+rex_generation_tick() {
+  local status cur now prev old
+  [ -d "$(_rex_state)" ] && command -v "${CEL_REX_BIN:-rex}" >/dev/null 2>&1 || return 0
+  _rex_generation_lock || return 0
+  if ! status="$(_rex_server_status)"; then _rex_generation_unlock; return 0; fi
+  cur="$(jq -r .instance_id <<<"$status")"
+  if ! now="$(_rex_live_generation)"; then _rex_generation_unlock; return 2; fi
+  prev="$(jq -c 'select(type == "object" and (.instance | type) == "string" and (.live | type) == "array")' \
+    "$(_rex_generation_file)" 2>/dev/null || true)"
+  old="$(jq -r '.instance // ""' <<<"${prev:-null}")"
+  if [ -z "$prev" ] || [ "$old" = "$cur" ]; then
+    _rex_generation_commit "$status" "$now" || { _rex_generation_unlock; return 1; }
+    _rex_generation_unlock; return 0
+  fi
+  printf 'generation\t%s\t%s\n' "$old" "$cur"
+  jq -r '.live[] | [.name, (.pid | tostring), .pid_start] | @tsv' <<<"$prev" | _rex_restore "$prev"
+  _rex_generation_unlock
+}
+
+# ── keeping Rex current ──────────────────────────────────────────────────────
+# The rex package comes from pkgs.superlogical.com, which unattended-upgrades
+# does not cover, and upgrading it under live sessions killed every Rex agent
+# once. rex_upgrade_round is the managed path: only when apt offers a NEWER rex
+# from that origin, only when every live managed Rex agent is idle and can be
+# resumed canonically (else the round is skipped and retried later - a busy
+# agent is never restarted), it records them, upgrades, restarts the server if
+# the package did not, resumes each one in its saved session and checks it is
+# alive. The steward runs a round at most every 30 minutes.
+#
+# Seams for tests; the real ones touch apt, sudo and systemd, so a suite that
+# forgot to replace one finds no candidate and changes nothing on the box.
+_rex_apt_policy() { [ -n "${CEL_TESTING:-}" ] || LC_ALL=C apt-cache policy rex 2>/dev/null; }
+_rex_apt_upgrade() {
+  [ -z "${CEL_TESTING:-}" ] || { echo 'refusing a real apt upgrade under tests' >&2; return 1; }
+  ( _rex_close_leases
+    exec sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -q rex ) </dev/null
+}
+_rex_server_stop() {
+  [ -z "${CEL_TESTING:-}" ] || [ -n "${CEL_REX_BIN:-}" ] || return 1
+  _rex_cli --autostart=false server stop </dev/null
+}
+# A persistent server (not --exit-empty, unlike client autostart), serving the
+# tailnet when the old one did, in its own transient scope - never the
+# caller's cgroup: a server started from the steward's oneshot unit would be
+# killed when the tick ends.
+_rex_server_start() { # <tailscale-state-before>
+  [ -z "${CEL_TESTING:-}" ] || return 1
+  local -a flags=()
+  [ "${1:-}" != running ] || flags=(--tailscale)
+  ( _rex_close_leases
+    exec systemd-run --user --scope --quiet --collect --unit "cel-rex-server-$(date +%s)" \
+      -- "${CEL_REX_BIN:-rex}" server start "${flags[@]}" ) </dev/null
+}
+
+_REX_ORIGIN=pkgs.superlogical.com
+
+# -> "<installed>\t<candidate>\t<origin-ok 0|1>" from apt's policy.
+_rex_policy_versions() {
+  _rex_apt_policy | awk -v origin="$_REX_ORIGIN" '
+    $1 == "Installed:" { inst = $2; next }
+    $1 == "Candidate:" { cand = $2; next }
+    /^ (\*\*\*)? +[^ ]+ +-?[0-9]+$/ { v = ($1 == "***") ? $2 : $1; next }
+    $1 ~ /^-?[0-9]+$/ && $2 ~ /:\/\// { if (v == cand && index($2, origin) > 0) ok = 1 }
+    END { printf "%s\t%s\t%d\n", inst, cand, ok + 0 }'
+}
+
+# -> "<installed>\t<candidate>" when apt offers a newer rex from its own origin.
+rex_upgrade_candidate() {
+  local inst cand ok
+  IFS=$'\t' read -r inst cand ok < <(_rex_policy_versions) || return 1
+  [ -n "$inst" ] && [ "$inst" != "(none)" ] && [ -n "$cand" ] && [ "$cand" != "(none)" ] || return 1
+  [ "$ok" = 1 ] && dpkg --compare-versions "$cand" gt "$inst" || return 1
+  printf '%s\t%s\n' "$inst" "$cand"
+}
+
+# Every live managed Rex launch, with what the upgrade needs to know about it.
+# Sets _REX_PLAN (TSV name/pid/pid-start), _REX_BUSY (names not idle) and
+# _REX_HELD ("name: why" for launches that could not be resumed). rc 1 when
+# the inventory is unreadable.
+_rex_upgrade_plan() {
+  local f name status veto
+  _REX_PLAN=""; _REX_BUSY=""; _REX_HELD=""
+  for f in "$(_rex_state)"/*.json; do
+    [ -f "$f" ] || continue
+    _rex_receipt_valid "$f" || return 1
+    _rex_live "$f" || continue
+    name="$(basename "$f" .json)"
+    status="$(jq -r '.agent_status // "unknown"' "$f")"
+    [ "$status" = idle ] || _REX_BUSY+="${_REX_BUSY:+, }$name ($status)"
+    veto="$(_rex_resume_veto "$f")"
+    [ -z "$veto" ] || _REX_HELD+="${_REX_HELD:+; }$name: $(_rex_one_line <<<"$veto")"
+    _REX_PLAN+="$(jq -r --arg n "$name" '[$n, (.pid | tostring), .pid_start] | @tsv' "$f")"$'\n'
+  done
+}
+
+_rex_wait_instance() { # <instance-to-leave|""> <present 0|1> -> instance; bounded
+  local i id
+  for ((i = 0; i < ${CEL_REX_SERVER_WAIT_TENTHS:-300}; i++)); do
+    id="$(_rex_server_instance || true)"
+    if [ "$2" = 1 ] && [ -n "$id" ] && [ "$id" != "$1" ]; then printf '%s' "$id"; return 0; fi
+    if [ "$2" = 0 ] && [ -z "$id" ]; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# One round. Output, first line:
+#   (nothing)                      no newer rex from its origin
+#   waiting\t<candidate>\t<why>    skipped (busy agents, a lock); the next round retries
+#   blocked\t<candidate>\t<why>    skipped until a person acts (an agent that could
+#                                  not be resumed, an unreadable receipt)
+#   failed\t<candidate>\t<why>     apt did not install it; nothing was stopped
+#   upgraded\t<from>\t<to>\t<who restarted the server>
+# then, after an upgrade, the restore's server and agent rows (see above).
+rex_upgrade_round() {
+  local versions inst cand old cur restarted out rc=0 deadline lock
+  command -v "${CEL_REX_BIN:-rex}" >/dev/null 2>&1 || return 0
+  versions="$(rex_upgrade_candidate)" || return 0
+  IFS=$'\t' read -r inst cand <<<"$versions"
+  mkdir -p "$(_rex_state)"; chmod 700 "$(_rex_state)"
+  if ! _rex_generation_lock; then
+    printf 'waiting\t%s\tanother Rex server change is in progress\n' "$cand"; return 0
+  fi
+  # Nothing changes before every live agent is idle and resumable. Busy
+  # agents get a bounded wait; an unresumable one skips the round at once.
+  deadline=$((SECONDS + ${CEL_REX_UPGRADE_IDLE_SECS:-120}))
+  while :; do
+    if ! _rex_upgrade_plan; then
+      _rex_generation_unlock
+      printf 'blocked\t%s\ta Rex receipt is unreadable - nothing was changed\n' "$cand"; return 0
+    fi
+    if [ -n "$_REX_HELD" ]; then
+      _rex_generation_unlock
+      printf 'blocked\t%s\tthese Rex agents could not be resumed after a server restart: %s\n' "$cand" "$_REX_HELD"; return 0
+    fi
+    [ -n "$_REX_BUSY" ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      _rex_generation_unlock
+      printf 'waiting\t%s\tnot every Rex agent went idle within %ss: %s\n' "$cand" "${CEL_REX_UPGRADE_IDLE_SECS:-120}" "$_REX_BUSY"; return 0
+    fi
+    sleep "${CEL_REX_UPGRADE_POLL_SECS:-10}"
+  done
+  # No Celestial launch may start between the last idle check and the stop.
+  exec {lock}>>"$(_rex_state)/launch.lock" || { _rex_generation_unlock; printf 'waiting\t%s\tlaunch admission is unavailable\n' "$cand"; return 0; }
+  if ! flock -w 60 "$lock"; then
+    exec {lock}>&-; _rex_generation_unlock
+    printf 'waiting\t%s\tanother agent launch holds admission\n' "$cand"; return 0
+  fi
+  local _RUN_ADMISSION_FD="$lock"
+  if ! _rex_upgrade_plan || [ -n "$_REX_HELD$_REX_BUSY" ]; then
+    exec {lock}>&-; _rex_generation_unlock
+    printf 'waiting\t%s\tan agent changed state at the last check: %s\n' "$cand" "${_REX_BUSY:-$_REX_HELD}"; return 0
+  fi
+  local oldstatus oldrec=""
+  oldstatus="$(_rex_server_status || true)"
+  old="$(jq -r '.instance_id // ""' <<<"${oldstatus:-null}")"
+  # RECORDED BEFORE ANYTHING CAN END THEM: these exact launches, and what the
+  # server was (version, API revision, tailnet), are the generation to restore.
+  # If this run dies part-way, the safety net finds them dead under whichever
+  # server answers next and restores them itself.
+  if [ -n "$oldstatus" ]; then
+    _rex_generation_commit "$oldstatus" "$(printf '%s' "$_REX_PLAN" \
+      | jq -Rcs '[split("\n")[] | select(length > 0) | split("\t") | {name: .[0], pid: (.[1] | tonumber), pid_start: .[2]}]')" \
+      || { exec {lock}>&-; _rex_generation_unlock; printf 'waiting\t%s\tcould not record the Rex agents to restore\n' "$cand"; return 0; }
+    oldrec="$(cat "$(_rex_generation_file)")"
+  fi
+  out="$(_rex_apt_upgrade 2>&1)" || rc=$?
+  IFS=$'\t' read -r cur _ _ < <(_rex_policy_versions)
+  if [ "$rc" != 0 ] || [ "$cur" != "$cand" ]; then
+    exec {lock}>&-; _rex_generation_unlock
+    printf 'failed\t%s\tapt did not install it (exit %s, installed %s): %s\n' "$cand" "$rc" "${cur:-?}" \
+      "$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | _rex_one_line)"
+    return 0
+  fi
+  # The package restarts only its system units; a per-user server keeps the
+  # old binary until it is restarted, which is done here, never mid-turn, and
+  # into a persistent server that serves the tailnet if the old one did.
+  cur="$(_rex_server_instance || true)"
+  if [ -n "$cur" ] && [ "$cur" != "$old" ]; then
+    restarted="the server had already restarted"
+  else
+    restarted="cel restarted the server"
+    if [ -n "$cur" ]; then
+      _rex_server_stop >/dev/null 2>&1 || true
+      _rex_wait_instance "$cur" 0 || true
+    fi
+    _rex_server_start "$(_rex_tailscale_of "${oldstatus:-null}")" >/dev/null 2>&1 || true
+    _rex_wait_instance "$old" 1 >/dev/null || true
+  fi
+  exec {lock}>&-; unset _RUN_ADMISSION_FD
+  [ -n "$oldrec" ] || oldrec='{}'
+  printf 'upgraded\t%s\t%s\t%s\n' "$inst" "$cand" "$restarted"
+  printf '%s' "$_REX_PLAN" | _rex_restore "$oldrec"
+  _rex_generation_unlock
+}
+
 cmd_sessions() {
   case "${1:-}" in
     note)
@@ -243,9 +722,25 @@ cmd_sessions() {
       shift
       . "$CEL_ROOT/lib/gc.sh"
       cmd_reviewer_retire "$@" ;;
+    rex-upgrade)
+      shift
+      . "$CEL_ROOT/lib/steward.sh"
+      case "${1:-}" in
+        --check)
+          local versions
+          if versions="$(rex_upgrade_candidate)"; then
+            printf 'rex %s is installed; %s is available from %s\n' "${versions%%$'\t'*}" "${versions#*$'\t'}" "$_REX_ORIGIN"
+          else
+            printf 'no newer rex from %s\n' "$_REX_ORIGIN"
+          fi
+          _rex_upgrade_plan || die 'cel sessions rex-upgrade: a Rex receipt is unreadable'
+          printf 'busy: %s\nnot resumable: %s\n' "${_REX_BUSY:-none}" "${_REX_HELD:-none}" ;;
+        '') _steward_rex_upgrade ;;
+        *) die 'usage: cel sessions rex-upgrade [--check]' ;;
+      esac ;;
     --json) cel_agent_list ;;
     '') cel_agent_list | jq -r '.result.agents[] | [ .name, (.backend // "herdr"), .agent, (.agent_status // "unknown"), .pane_id ] | @tsv' ;;
-    *) die 'usage: cel sessions [--json] | retire-reviewer <repo>#<pr> [--workspace W] [--dry-run]' ;;
+    *) die 'usage: cel sessions [--json] | retire-reviewer <repo>#<pr> [--workspace W] [--dry-run] | rex-upgrade [--check]' ;;
   esac
 }
 

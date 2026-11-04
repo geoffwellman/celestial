@@ -271,8 +271,8 @@ Or set `session_backend: rex` in a workspace's `workspace.yaml` for its new
 are never moved: a restart retains their current terminal host. After a process
 has exited, normal new-launch defaults apply; keep `--session-backend rex` in
 recovery commands unless the workspace default is Rex. Rex must already be
-installed; Celestial does not restart its server or adopt unrelated Rex
-sessions. Each new agent gets its own named Rex session, and the command
+installed; Celestial does not adopt unrelated Rex sessions. Each new agent gets
+its own named Rex session, and the command
 prints its session and terminal IDs. Use `rex ls`, `rex capture -s <session>
 -b <block>` and Rex's native controls, not Herdr commands, for those terminals.
 
@@ -292,6 +292,47 @@ inventory; automatic Herdr pane cleanup never closes a Rex terminal.
 
 Fleet delegation (`cel-fanout`) continues to use Herdr. The backend option is
 for sessions launched with `cel run` (including solo lanes and reviewers).
+
+### Rex server restarts and rex upgrades
+
+A Rex server restart ends every program in its sessions. Each core, root,
+orchestrator and solo-lane receipt records the `cel run` line that brings it
+back (its role, product, lane, workspace and the profile/model/thinking you
+named; a lane keeps its remembered choices). Every steward tick records the
+running server instance and the live managed agents; when the instance changes,
+each agent that was live under the old server and was not stopped, retired or
+relaunched since is resumed ONCE through that line, into its saved session, and
+root gets one summary. Reviewers and workers never resume: they, and agents
+launched before relaunch lines were recorded, are listed in the summary with
+the command to run.
+
+Before resuming, the restore repairs what a restart leaves behind. The new
+server restores the old sessions as empty shells under the same labels: for
+each agent being resumed, the sessions with its label in which no block runs a
+program are closed (a session still running something is never touched). A
+client-autostarted server runs with `--exit-empty`, so closing the last shell
+can end it: if no server answers, a persistent one (`rex server start`, in its
+own systemd scope, with `--tailscale` when the old one served the tailnet) is
+started before any resume. If the old server served the tailnet and the new
+one does not, `rex server tailscale on` is run and verified. The summary names
+the server's version and API revision before and after.
+
+The steward also keeps rex current, at most every 30 minutes:
+
+```sh
+cel sessions rex-upgrade --check   # newer rex? which Rex agents are busy or not resumable?
+cel sessions rex-upgrade           # one round now
+```
+
+A round runs only when apt offers a newer rex from `pkgs.superlogical.com`
+(`apt-cache policy rex`; it does not run `apt-get update`). It waits up to
+`CEL_REX_UPGRADE_IDLE_SECS` (120) for every live Rex agent to be idle, and skips
+the round otherwise; any live agent it could not resume (a reviewer, a worker,
+an older receipt, a missing saved session) blocks it, and root is told. Then it
+records the agents, runs `sudo -n apt-get install --only-upgrade -y rex`,
+restarts the per-user Rex server in its own systemd scope if the package did
+not, resumes each recorded agent, checks it is still alive after a short
+settle, and sends root one summary. New Celestial launches wait while it runs.
 
 ### Retire a completed Rex reviewer, keep its evidence
 
