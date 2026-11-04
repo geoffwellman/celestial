@@ -131,9 +131,16 @@ export function validatedProcessEvidence(tree, r, declared, rootPath) {
       const basename = path.basename(a[0] || '');
       const ancestor = tree.find(x => x.pid === p.ppid);
       requireProof(ancestor && ancestor.pgrp === watcher.pgrp, 'unbound_watcher_child', 'protected');
+      // The parent is followed by the tail (`-s <poll> --pid=<root>`), or, by
+      // a tail without `--pid`, by the watcher shell polling with sleep.
+      // Watchers started before either still run a poller subshell, whose
+      // sleep is the same poll one level down.
       const poll = root.env.CEL_WATCH_PARENT_POLL || '5';
-      const sleep = basename === 'sleep' && a.length === 2 && a[1] === poll && /^(?:[1-9]|[1-5][0-9]|60|0\.[0-9]+)$/.test(poll) && ancestor.pid !== watcher.pid && ancestor.ppid === watcher.pid && JSON.stringify(ancestor.argv) === JSON.stringify(watcher.argv) && !tree.some(child => child.ppid === p.pid);
-      const tail = basename === 'tail' && a.length >= 5 && a[1] === '-n' && a[2] === '0' && a[3] === '-F' && a.slice(4).every(filename => path.isAbsolute(filename) && filename.endsWith('.jsonl'));
+      const poller = ancestor.pid === watcher.pid || (ancestor.ppid === watcher.pid && JSON.stringify(ancestor.argv) === JSON.stringify(watcher.argv));
+      const sleep = basename === 'sleep' && a.length === 2 && a[1] === poll && /^(?:[1-9]|[1-5][0-9]|60|0\.[0-9]+)$/.test(poll) && poller && !tree.some(child => child.ppid === p.pid);
+      const follow = ['-s', poll, `--pid=${root.pid}`];
+      const files = a.slice(4, 7).every((v, i) => v === follow[i]) ? a.slice(7) : a.slice(4);
+      const tail = basename === 'tail' && a.length >= 5 && a[1] === '-n' && a[2] === '0' && a[3] === '-F' && files.length > 0 && files.every(filename => path.isAbsolute(filename) && filename.endsWith('.jsonl'));
       const jq = ['jq', 'jaq'].includes(basename) && a.length === 10 && a[1] === '-nRr' && a[2] === '--unbuffered' && a[3] === '--arg' && a[4] === 'who' && a[5] === r.name && a[6] === '--arg' && a[7] === 'dir' && path.isAbsolute(a[8]) && a[8].endsWith('/') && fs.readFileSync(path.join(rootPath, 'lib/inbox.sh'), 'utf8').includes(`_INBOX_WATCH_JQ='${a[9]}'`);
       const shell = isWatch && JSON.stringify(a) === JSON.stringify(watcher.argv);
       requireProof(sleep || tail || jq || shell, 'unknown_watcher_child', 'protected');

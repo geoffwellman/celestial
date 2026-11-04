@@ -275,6 +275,78 @@ test_inbox_watch_exits_when_its_parent_is_gone() {
   return 1
 }
 
+# NO ELEMENT OF A WATCHER MAY DIE AND LEAVE THE REST UNWATCHED. The parent
+# used to be followed by a subshell forking `sleep` every five seconds; one
+# transient fork failure killed it silently, the rest of the watcher lived on
+# with nothing following the agent, and when the agent died the watcher was
+# reparented to init - the "reaped 1 orphan (1 watcher), 3 MB" the steward
+# kept posting. So each element of a live watcher is killed in turn, then the
+# parent, and every process the watcher had must be gone - with a tail that
+# follows the parent itself (`--pid`), and with one that cannot.
+_inbox_watch_element_death() { # [dir to put first on PATH]
+  local T2; T2="$(mktemp -d)"
+  local k=0 parent w i kids victim desc tree pid left path="${1:+$1:}$PATH"
+  local -a elements
+  while :; do
+    sleep 60 & parent=$!
+    PATH="$path" CEL_INBOX_DIR="$T2" XDG_RUNTIME_DIR="$T2" CEL_WATCH_PARENT_POLL=1 \
+      "$CEL_ROOT/bin/cel" inbox watch --for root --workspace alpha --parent "$parent" >/dev/null 2>&1 &
+    w=$!
+    i=0
+    while [ "$i" -lt 50 ]; do
+      kids="$(cat "/proc/$w/task/$w/children" 2>/dev/null || true)"
+      read -r -a elements <<<"$kids"
+      [ "${#elements[@]}" -ge 3 ] && break
+      sleep 0.1; i=$((i + 1))
+    done
+    if [ "${#elements[@]}" -lt 3 ]; then
+      echo "the watcher never came up (children: ${elements[*]:-none})"
+      kill -TERM "$w" "$parent" 2>/dev/null || true; rm -rf "$T2"; return 1
+    fi
+    if [ "$k" -ge "${#elements[@]}" ]; then
+      kill -TERM "$w" "$parent" 2>/dev/null || true; rm -rf "$T2"; return 0
+    fi
+    sleep 0.3
+    tree="$w"
+    for pid in $(cat "/proc/$w/task/$w/children" 2>/dev/null); do
+      tree="$tree $pid $(cat "/proc/$pid/task/$pid/children" 2>/dev/null || true)"
+    done
+    victim="${elements[$k]}"
+    desc="$(tr '\0' ' ' <"/proc/$victim/cmdline" 2>/dev/null || true)"
+    kill -KILL "$victim" 2>/dev/null || true
+    sleep 0.3
+    kill "$parent" 2>/dev/null || true
+    i=0; left="$tree"
+    while [ "$i" -lt 40 ]; do
+      left=""
+      for pid in $tree; do kill -0 "$pid" 2>/dev/null && left="$left $pid"; done
+      [ -z "$left" ] && break
+      sleep 0.2; i=$((i + 1))
+    done
+    if [ -n "$left" ]; then
+      echo "element $k of the watcher ($desc) died first, and the watcher outlived its parent:$left"
+      # shellcheck disable=SC2086
+      kill -KILL $left 2>/dev/null || true; rm -rf "$T2"; return 1
+    fi
+    k=$((k + 1))
+  done
+}
+test_inbox_watch_goes_with_its_parent_whichever_element_died_first() {
+  _inbox_watch_element_death
+}
+# BusyBox's tail has no --pid: the watch finds that out and follows the
+# parent from its own shell, which is no side process either.
+test_inbox_watch_goes_with_its_parent_when_tail_cannot_follow_a_pid() {
+  local bin; bin="$(mktemp -d)"
+  printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --pid*) echo "tail: unrecognized option $a" >&2; exit 1 ;; esac; done\nexec %s "$@"\n' \
+    "$(command -v tail)" > "$bin/tail"
+  chmod +x "$bin/tail"
+  local rc=0
+  _inbox_watch_element_death "$bin" || rc=$?
+  rm -rf "$bin"
+  return "$rc"
+}
+
 # --- box services are protected by IDENTITY, not by a hopeful substring ----
 
 # THE FIRST CUT OF THIS PROTECTION WAS DEAD CODE. It matched the strings
