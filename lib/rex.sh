@@ -398,16 +398,21 @@ _rex_relaunch_one() { # <name> <old-pid> -> resumed|failed row
 }
 
 # RESTORED SHELLS: sessions labelled <name> in which no block runs a program.
-# A live agent's block always has a child, and anything unobservable is kept.
+# FAIL CLOSED: a session counts as dead only when at least one block was seen
+# and every block's process report NAMES child and foreground as null. An
+# empty or unreadable topology, an omitted key, or any error is alive.
 _rex_session_dead() { # <session> -> 0 only when every block provably runs nothing
-  local s="$1" j blocks b info
+  local s="$1" j blocks b info seen=0
   j="$(_rex_cli --autostart=false session inspect "$s" --json 2>/dev/null)" || return 1
-  blocks="$(jq -r '[.windows[]?.layers[]?.blocks[]?.block_id] | .[]' <<<"$j" 2>/dev/null)" || return 1
+  blocks="$(jq -r '[.windows[]?.layers[]?.blocks[]?.block_id | select(type == "string" and length > 0)] | .[]' <<<"$j" 2>/dev/null)" || return 1
   while IFS= read -r b; do
     [ -n "$b" ] || continue
     info="$(_rex_cli --autostart=false block call process '{}' -s "$s" -b "$b" 2>/dev/null)" || return 1
-    jq -e 'type == "object" and .error == null and .child == null and .foreground == null' <<<"$info" >/dev/null 2>&1 || return 1
+    jq -e 'type == "object" and has("child") and has("foreground") and .child == null and .foreground == null
+      and ((has("error") | not) or .error == null)' <<<"$info" >/dev/null 2>&1 || return 1
+    seen=$((seen + 1))
   done <<<"$blocks"
+  [ "$seen" -gt 0 ]
 }
 _rex_close_dead_duplicates() { # <label> -> how many were closed
   local j s n=0
@@ -488,7 +493,16 @@ _rex_restore() { # <old-generation-json>
     "$(jq -r 'if (.rex_version // "") == "" then "?" else .rex_version end' <<<"$old")" \
     "$(jq -r '.api_revision // "?"' <<<"$old")" \
     "$(jq -r '.rex_version // "?"' <<<"$_REX_STATUS")" "$(jq -r '.api_revision // "?"' <<<"$_REX_STATUS")"
-  _rex_generation_commit "$_REX_STATUS" "$(_rex_live_generation || printf '[]')" || true
+  # ONCE needs the record first: without it a later tick would resume these
+  # again, so nothing is relaunched when the generation cannot be written.
+  local live=""
+  if ! live="$(_rex_live_generation)" || ! _rex_generation_commit "$_REX_STATUS" "$live"; then
+    while IFS=$'\t' read -r name pid; do
+      [ -z "$name" ] || printf 'held\t%s\t%s\tthe new Rex server generation could not be recorded, so nothing was resumed\n' \
+        "$name" "$(jq -r '.workspace // ""' "$(_rex_file "$name")")"
+    done <<<"$todo"
+    return 0
+  fi
   while IFS=$'\t' read -r name pid; do
     [ -n "$name" ] || continue
     rows+="$(_rex_relaunch_one "$name" "$pid")"$'\n'
@@ -543,10 +557,11 @@ rex_generation_tick() {
 # Seams for tests; the real ones touch apt, sudo and systemd, so a suite that
 # forgot to replace one finds no candidate and changes nothing on the box.
 _rex_apt_policy() { [ -n "${CEL_TESTING:-}" ] || LC_ALL=C apt-cache policy rex 2>/dev/null; }
-_rex_apt_upgrade() {
+_rex_apt_upgrade() { # <exact vetted version>
   [ -z "${CEL_TESTING:-}" ] || { echo 'refusing a real apt upgrade under tests' >&2; return 1; }
+  [ -n "${1:-}" ] || return 1
   ( _rex_close_leases
-    exec sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -q rex ) </dev/null
+    exec sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -q "rex=$1" ) </dev/null
 }
 _rex_server_stop() {
   [ -z "${CEL_TESTING:-}" ] || [ -n "${CEL_REX_BIN:-}" ] || return 1
@@ -567,13 +582,18 @@ _rex_server_start() { # <tailscale-state-before>
 
 _REX_ORIGIN=pkgs.superlogical.com
 
-# -> "<installed>\t<candidate>\t<origin-ok 0|1>" from apt's policy.
+# -> "<installed>\t<candidate>\t<origin-ok 0|1>" from apt's policy. The
+# candidate counts only when one of its sources is https on exactly the
+# origin host - never a host that merely contains the name.
 _rex_policy_versions() {
   _rex_apt_policy | awk -v origin="$_REX_ORIGIN" '
     $1 == "Installed:" { inst = $2; next }
     $1 == "Candidate:" { cand = $2; next }
     /^ (\*\*\*)? +[^ ]+ +-?[0-9]+$/ { v = ($1 == "***") ? $2 : $1; next }
-    $1 ~ /^-?[0-9]+$/ && $2 ~ /:\/\// { if (v == cand && index($2, origin) > 0) ok = 1 }
+    $1 ~ /^-?[0-9]+$/ && $2 ~ /^https:\/\// {
+      host = substr($2, 9); sub(/\/.*/, "", host)
+      if (v == cand && host == origin) ok = 1
+    }
     END { printf "%s\t%s\t%d\n", inst, cand, ok + 0 }'
 }
 
@@ -587,12 +607,14 @@ rex_upgrade_candidate() {
 }
 
 # Every live managed Rex launch, with what the upgrade needs to know about it.
-# Sets _REX_PLAN (TSV name/pid/pid-start), _REX_BUSY (names not idle) and
-# _REX_HELD ("name: why" for launches that could not be resumed). rc 1 when
-# the inventory is unreadable.
+# Sets _REX_PLAN (TSV name/pid/pid-start), _REX_BUSY (names not idle),
+# _REX_HELD ("name: why" for launches that could not be resumed) and
+# _REX_FOREIGN (sessions on the server that are not a live managed launch: a
+# server stop would end them, and nothing would bring them back). rc 1 when
+# a receipt is unreadable, 2 when the server's session list is.
 _rex_upgrade_plan() {
-  local f name status veto
-  _REX_PLAN=""; _REX_BUSY=""; _REX_HELD=""
+  local f name status veto managed='' j
+  _REX_PLAN=""; _REX_BUSY=""; _REX_HELD=""; _REX_FOREIGN=""
   for f in "$(_rex_state)"/*.json; do
     [ -f "$f" ] || continue
     _rex_receipt_valid "$f" || return 1
@@ -603,7 +625,14 @@ _rex_upgrade_plan() {
     veto="$(_rex_resume_veto "$f")"
     [ -z "$veto" ] || _REX_HELD+="${_REX_HELD:+; }$name: $(_rex_one_line <<<"$veto")"
     _REX_PLAN+="$(jq -r --arg n "$name" '[$n, (.pid | tostring), .pid_start] | @tsv' "$f")"$'\n'
+    managed+="$(jq -r '.rex_session // ""' "$f")"$'\n'
   done
+  # No server answering has no sessions to end.
+  _rex_server_status >/dev/null || return 0
+  j="$(_rex_cli --autostart=false ls --json 2>/dev/null)" || return 2
+  _REX_FOREIGN="$(jq -r --arg m "$managed" '($m | split("\n") | map(select(length > 0))) as $ids
+    | [(.sessions? // .)[] | select(.session_id as $s | $ids | any(. == $s) | not)
+       | "\(.label // "unlabelled") (\(.session_id))"] | sort | join(", ")' <<<"$j" 2>/dev/null)" || return 2
 }
 
 _rex_wait_instance() { # <instance-to-leave|""> <present 0|1> -> instance; bounded
@@ -621,7 +650,8 @@ _rex_wait_instance() { # <instance-to-leave|""> <present 0|1> -> instance; bound
 #   (nothing)                      no newer rex from its origin
 #   waiting\t<candidate>\t<why>    skipped (busy agents, a lock); the next round retries
 #   blocked\t<candidate>\t<why>    skipped until a person acts (an agent that could
-#                                  not be resumed, an unreadable receipt)
+#                                  not be resumed, a session Celestial does not
+#                                  manage, an unreadable receipt or session list)
 #   failed\t<candidate>\t<why>     apt did not install it; nothing was stopped
 #   upgraded\t<from>\t<to>\t<who restarted the server>
 # then, after an upgrade, the restore's server and agent rows (see above).
@@ -637,14 +667,23 @@ rex_upgrade_round() {
   # Nothing changes before every live agent is idle and resumable. Busy
   # agents get a bounded wait; an unresumable one skips the round at once.
   deadline=$((SECONDS + ${CEL_REX_UPGRADE_IDLE_SECS:-120}))
+  local prc
   while :; do
-    if ! _rex_upgrade_plan; then
+    prc=0; _rex_upgrade_plan || prc=$?
+    if [ "$prc" != 0 ]; then
       _rex_generation_unlock
-      printf 'blocked\t%s\ta Rex receipt is unreadable - nothing was changed\n' "$cand"; return 0
+      if [ "$prc" = 2 ]; then printf 'blocked\t%s\tthe Rex session list is unreadable - nothing was changed\n' "$cand"
+      else printf 'blocked\t%s\ta Rex receipt is unreadable - nothing was changed\n' "$cand"; fi
+      return 0
     fi
     if [ -n "$_REX_HELD" ]; then
       _rex_generation_unlock
       printf 'blocked\t%s\tthese Rex agents could not be resumed after a server restart: %s\n' "$cand" "$_REX_HELD"; return 0
+    fi
+    # A server stop ends EVERY session, and only managed launches come back.
+    if [ -n "$_REX_FOREIGN" ]; then
+      _rex_generation_unlock
+      printf 'blocked\t%s\tthe Rex server holds sessions Celestial does not manage, which a restart would end: %s\n' "$cand" "$_REX_FOREIGN"; return 0
     fi
     [ -n "$_REX_BUSY" ] || break
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -660,9 +699,9 @@ rex_upgrade_round() {
     printf 'waiting\t%s\tanother agent launch holds admission\n' "$cand"; return 0
   fi
   local _RUN_ADMISSION_FD="$lock"
-  if ! _rex_upgrade_plan || [ -n "$_REX_HELD$_REX_BUSY" ]; then
+  if ! _rex_upgrade_plan || [ -n "$_REX_HELD$_REX_BUSY$_REX_FOREIGN" ]; then
     exec {lock}>&-; _rex_generation_unlock
-    printf 'waiting\t%s\tan agent changed state at the last check: %s\n' "$cand" "${_REX_BUSY:-$_REX_HELD}"; return 0
+    printf 'waiting\t%s\tsomething changed at the last check: %s\n' "$cand" "${_REX_BUSY:-${_REX_HELD:-${_REX_FOREIGN:-unreadable inventory}}}"; return 0
   fi
   local oldstatus oldrec=""
   oldstatus="$(_rex_server_status || true)"
@@ -677,7 +716,8 @@ rex_upgrade_round() {
       || { exec {lock}>&-; _rex_generation_unlock; printf 'waiting\t%s\tcould not record the Rex agents to restore\n' "$cand"; return 0; }
     oldrec="$(cat "$(_rex_generation_file)")"
   fi
-  out="$(_rex_apt_upgrade 2>&1)" || rc=$?
+  # Exactly the version vetted above, never whatever apt resolves by then.
+  out="$(_rex_apt_upgrade "$cand" 2>&1)" || rc=$?
   IFS=$'\t' read -r cur _ _ < <(_rex_policy_versions)
   if [ "$rc" != 0 ] || [ "$cur" != "$cand" ]; then
     exec {lock}>&-; _rex_generation_unlock
@@ -733,8 +773,9 @@ cmd_sessions() {
           else
             printf 'no newer rex from %s\n' "$_REX_ORIGIN"
           fi
-          _rex_upgrade_plan || die 'cel sessions rex-upgrade: a Rex receipt is unreadable'
-          printf 'busy: %s\nnot resumable: %s\n' "${_REX_BUSY:-none}" "${_REX_HELD:-none}" ;;
+          _rex_upgrade_plan || die 'cel sessions rex-upgrade: a Rex receipt or the Rex session list is unreadable'
+          printf 'busy: %s\nnot resumable: %s\nunmanaged sessions a restart would end: %s\n' \
+            "${_REX_BUSY:-none}" "${_REX_HELD:-none}" "${_REX_FOREIGN:-none}" ;;
         '') _steward_rex_upgrade ;;
         *) die 'usage: cel sessions rex-upgrade [--check]' ;;
       esac ;;

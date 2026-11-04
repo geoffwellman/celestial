@@ -42,11 +42,17 @@ case "$*" in
   'session inspect '*' --json')
     f="$S/sess/$3"; [ -f "$f" ] || exit 1
     IFS=$'\t' read -r l b p < "$f"
-    jq -n --arg s "$3" --arg b "$b" '{session_id:$s, windows:[{window_id:"w", layers:[{blocks:[{block_id:$b}]}]}]}' ;;
+    # block "none": a session whose topology shows no block at all
+    if [ "$b" = none ]; then jq -n --arg s "$3" '{session_id:$s, windows:[{window_id:"w", layers:[{blocks:[]}]}]}'
+    else jq -n --arg s "$3" --arg b "$b" '{session_id:$s, windows:[{window_id:"w", layers:[{blocks:[{block_id:$b}]}]}]}'; fi ;;
   'block call process {} -s '*)
     f="$S/sess/$6"; [ -f "$f" ] || exit 1
     IFS=$'\t' read -r l b p < "$f"
-    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then jq -n --argjson p "$p" '{child:{pid:$p},foreground:{pid:$p},last_exit:null}'
+    # blocks "omits"/"errors": reports that do not name child and foreground
+    # as null, or carry an error
+    if [ "$b" = omits ]; then printf '{"last_exit":{"exit_code":0}}\n'
+    elif [ "$b" = errors ]; then printf '{"child":null,"foreground":null,"error":{"code":"internal"}}\n'
+    elif [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then jq -n --argjson p "$p" '{child:{pid:$p},foreground:{pid:$p},last_exit:null}'
     else printf '{"child":null,"foreground":null,"last_exit":{"exit_code":0}}\n'; fi ;;
   'kill '*)
     echo "kill $2" >> "$REXT_CALLS"; rm -f "$S/sess/$2"
@@ -236,6 +242,42 @@ test_rex_restart_never_resumes_into_another_conversation() {
   _rg_down
 }
 
+# ONCE needs its record: if the new generation cannot be written, nothing is
+# relaunched (a later tick would resume it a second time) and it is held.
+test_rex_restart_resumes_nothing_when_the_generation_cannot_be_recorded() {
+  _rg_setup
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  CEL_ROOT="$RT/celroot" rex_generation_tick >/dev/null
+  _rg_server_restart instance-B
+  _rex_generation_commit() { return 1; }
+  local out; out="$(CEL_ROOT="$RT/celroot" rex_generation_tick)"
+  assert_contains "$out" "$(printf 'held\talpha-orch\t%s\tthe new Rex server generation could not be recorded' "$RT/ws")"
+  if grep -q '^resumed' <<<"$out"; then echo "resumed without a record: $out"; _rg_down; return 1; fi
+  [ ! -e "$REXT_LOG" ] || { echo "relaunched: $(cat "$REXT_LOG")"; _rg_down; return 1; }
+  _rg_down
+}
+
+# Only a report that NAMES child and foreground as null, for at least one
+# block, is a dead shell. Omitted keys, an error, an empty topology, a live
+# child or an unreadable session are all alive - never closed.
+test_rex_dead_session_check_fails_closed() {
+  _rg_setup
+  local live; live="$(_rg_detached_sleep)"; RG_PIDS="$live"
+  printf 'a\tblock:1\t\n' > "$REXT_SRV/sess/s-dead"
+  printf 'a\tomits\t\n' > "$REXT_SRV/sess/s-omits"
+  printf 'a\terrors\t\n' > "$REXT_SRV/sess/s-errors"
+  printf 'a\tnone\t\n' > "$REXT_SRV/sess/s-empty"
+  printf 'a\tblock:2\t%s\n' "$live" > "$REXT_SRV/sess/s-live"
+  _rex_session_dead s-dead || { echo 'a named-null report was not dead'; _rg_down; return 1; }
+  local s
+  for s in s-omits s-errors s-empty s-live s-missing; do
+    if _rex_session_dead "$s"; then echo "$s counted as dead"; _rg_down; return 1; fi
+  done
+  assert_eq "$(_rex_close_dead_duplicates a)" 1
+  assert_eq "$(cat "$REXT_CALLS")" 'kill s-dead'
+  _rg_down
+}
+
 # The steward says it once: one summary to root, one note per resumed agent.
 test_steward_reports_a_rex_restart_once_to_root_and_notes_resumed_agents() {
   _rg_setup
@@ -269,7 +311,7 @@ _rg_apt() { # installed candidate [origin]
     printf ' *** %s 1001\n        100 /var/lib/dpkg/status\n' "$i"
   }
   _rex_apt_upgrade() {
-    echo apt >> "$REXT_CALLS"
+    echo "apt $1" >> "$REXT_CALLS"
     local i c o; IFS=$'\t' read -r i c o < "$RT/apt"
     printf '%s\t%s\t%s\n' "$c" "$c" "$o" > "$RT/apt"
     [ -z "${RG_PACKAGE_RESTARTS:-}" ] || _rg_server_restart instance-pkg
@@ -296,7 +338,7 @@ test_rex_upgrade_waits_for_idle_agents_then_upgrades_restarts_and_resumes_once()
   assert_contains "$out" "$(printf 'server\tversion\t\trex v1, API revision 0 -> rex v2, API revision 10')"
   # stop, a persistent server asked to serve the tailnet, the restored shell
   # closed, the tailnet verified (and turned on when the flag did not take).
-  assert_eq "$(cat "$REXT_CALLS")" "$(printf 'apt\nstop\nstart running\nkill session:alpha-orch\ntailscale on')"
+  assert_eq "$(cat "$REXT_CALLS")" "$(printf 'apt 0.0.2-gbbb\nstop\nstart running\nkill session:alpha-orch\ntailscale on')"
   assert_eq "$(cat "$REXT_SRV/tailscale")" running
   assert_eq "$(cat "$REXT_LOG")" 'false|run orchestrator --product alpha --workspace alpha --session-backend rex --model m1'
   _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'resumed agent is not alive'; _rg_down; return 1; }
@@ -318,7 +360,7 @@ test_rex_upgrade_after_a_package_restart_keeps_a_server_up_for_the_resume() {
   _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
   local out; out="$(RG_PACKAGE_RESTARTS=1 CEL_ROOT="$RT/celroot" rex_upgrade_round)"
   assert_eq "$(sed -n 1p <<<"$out")" "$(printf 'upgraded\t0.0.1-gaaa\t0.0.2-gbbb\tthe server had already restarted')"
-  assert_eq "$(cat "$REXT_CALLS")" "$(printf 'apt\nkill session:alpha-orch\nstart running\ntailscale on')"
+  assert_eq "$(cat "$REXT_CALLS")" "$(printf 'apt 0.0.2-gbbb\nkill session:alpha-orch\nstart running\ntailscale on')"
   assert_contains "$out" "$(printf 'resumed\talpha-orch')"
   _rg_down
 }
@@ -335,9 +377,32 @@ test_rex_upgrade_refuses_unresumable_agents_and_foreign_or_older_candidates() {
   kill "$(jq -r .pid "$CEL_REX_STATE/widget-pr-7-review.json")"; rm -f "$CEL_REX_STATE/widget-pr-7-review.json"
   _rg_apt 0.0.1-gaaa 1.16.1-1 http://archive.ubuntu.com/ubuntu
   assert_eq "$(CEL_ROOT="$RT/celroot" rex_upgrade_round)" ""
+  # The origin is the exact https host, not a name that merely contains it.
+  _rg_apt 0.0.1-gaaa 0.0.2-gbbb https://pkgs.superlogical.com.lookalike.example/rex/apt
+  assert_eq "$(CEL_ROOT="$RT/celroot" rex_upgrade_round)" ""
+  _rg_apt 0.0.1-gaaa 0.0.2-gbbb http://pkgs.superlogical.com/rex/apt
+  assert_eq "$(CEL_ROOT="$RT/celroot" rex_upgrade_round)" ""
   _rg_apt 0.0.2-gbbb 0.0.1-gaaa
   assert_eq "$(CEL_ROOT="$RT/celroot" rex_upgrade_round)" ""
   [ ! -e "$REXT_CALLS" ] || { echo "changed the box: $(cat "$REXT_CALLS")"; _rg_down; return 1; }
+  _rg_down
+}
+
+# A server stop ends EVERY session. One the owner opened outside Celestial
+# would not come back, so the round is skipped and says which.
+test_rex_upgrade_refuses_while_the_server_holds_unmanaged_sessions() {
+  _rg_setup
+  _rg_apt 0.0.1-gaaa 0.0.2-gbbb
+  _rg_agent alpha-orch solo idle "$(_rg_line alpha)"
+  local owner; owner="$(_rg_detached_sleep)"; RG_PIDS="$RG_PIDS $owner"
+  printf 'notes\tblock:n\t%s\n' "$owner" > "$REXT_SRV/sess/session:owner"
+  local out; out="$(CEL_ROOT="$RT/celroot" rex_upgrade_round)"
+  assert_eq "$out" "$(printf 'blocked\t0.0.2-gbbb\tthe Rex server holds sessions Celestial does not manage, which a restart would end: notes (session:owner)')"
+  [ ! -e "$REXT_CALLS" ] || { echo "changed the box: $(cat "$REXT_CALLS")"; _rg_down; return 1; }
+  _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'managed agent was stopped'; _rg_down; return 1; }
+  # Once it is gone, the same round goes ahead.
+  rm -f "$REXT_SRV/sess/session:owner"
+  assert_contains "$(CEL_ROOT="$RT/celroot" rex_upgrade_round)" "$(printf 'upgraded\t0.0.1-gaaa\t0.0.2-gbbb')"
   _rg_down
 }
 

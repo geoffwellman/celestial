@@ -538,6 +538,51 @@ test_gc_rex_retirement_does_not_drop_a_concurrently_rebound_registry_row() {
   _rr_preserved
 }
 
+# THE RACE BEHIND THAT TEST'S CI FLAKE. The native side publishes each
+# response by rename, over the previous one (the exit answer replaces the
+# inspect answer). A poll that opens the old file and re-checks the name after
+# the rename must read again, not refuse the whole retirement with
+# evidence_changed_during_read. A separate process replaces stale responses
+# back to back while the handshake polls, then publishes the real answer.
+test_rex_retirement_handshake_reads_through_a_response_replaced_mid_read() {
+  local T; T="$(mktemp -d)"; chmod 700 "$T"
+  local rc=0 out
+  # A script file, not stdin: retire.mjs runs as a CLI when argv[1] is "-".
+  cat > "$T/handshake.mjs" <<'NODE'
+import fs from 'node:fs'; import path from 'node:path'; import {spawn} from 'node:child_process'; import {pathToFileURL} from 'node:url';
+const [root, dir, node] = process.argv.slice(2);
+const {nativeHandshake} = await import(pathToFileURL(path.join(root, 'tools/reviewers/retire.mjs')));
+const receipt = path.join(dir, 'reviewer.json'), protocol = `${receipt}.retirement`;
+fs.mkdirSync(protocol, {mode: 0o700});
+const identity = {name: 'widget-pr-71-review', pid: 4242, pid_start: '7', agent_session: {value: '/native.jsonl'}};
+const churner = spawn(node, ['--input-type=module', '-e', `
+import fs from 'node:fs';
+const [protocol, identity] = [process.argv[1], JSON.parse(process.argv[2])];
+const response = protocol + '/response.json';
+let n = 0;
+const publish = value => { const t = response + '.' + (n++) + '.tmp'; fs.writeFileSync(t, JSON.stringify(value) + '\\n', {mode: 0o600}); fs.renameSync(t, response); };
+const stale = {version: 1, type: 'cel-reviewer-retirement-response', phase: 'inspect', nonce: 'stale', pad: 'x'.repeat(60000)};
+const until = Date.now() + 2500;
+while (Date.now() < until) publish(stale);
+const request = JSON.parse(fs.readFileSync(protocol + '/request.json', 'utf8'));
+publish({version: 1, type: 'cel-reviewer-retirement-response', phase: request.phase, nonce: request.nonce,
+  name: identity.name, pid: identity.pid, pid_start: identity.pid_start, native_session: identity.agent_session.value,
+  observed_at: Date.now(), status: 'ready', reason: '', live_leaf: 'leaf', is_idle: true, sdk_pending: false,
+  native_turn_active: false, inbox_owed: false, inbox_pending: false, inbox_waking: false, composer_empty: true, exit_committed: false});
+`, protocol, JSON.stringify(identity)], {stdio: 'inherit'});
+const exited = new Promise(resolve => churner.on('exit', resolve));
+try {
+  const {response} = await nativeHandshake(receipt, identity, 'inspect', 'the-nonce');
+  console.log(`answered ${response.nonce}`);
+} catch (error) { console.log(`refused ${error.message}`); }
+await exited;
+NODE
+  out="$("$RR_NODE" "$T/handshake.mjs" "$RR_SOURCE_ROOT" "$T" "$RR_NODE" 2>&1)" || rc=$?
+  rm -rf "$T"
+  [ "$rc" = 0 ] || { echo "$out"; return 1; }
+  assert_eq "$out" 'answered the-nonce'
+}
+
 test_gc_herdr_reviewer_closed_pr_behavior_is_unchanged() {
   _rr_fixture
   reviewers_write "$(reviewers_rows | jq 'map(.pane="window:pane" | .backend="herdr")')"

@@ -308,8 +308,10 @@ the command to run.
 
 Before resuming, the restore repairs what a restart leaves behind. The new
 server restores the old sessions as empty shells under the same labels: for
-each agent being resumed, the sessions with its label in which no block runs a
-program are closed (a session still running something is never touched). A
+each agent being resumed, the sessions with its label are closed only when at
+least one block was seen and every block's process report names child and
+foreground as null - an omitted key, an error, an empty or unreadable session
+counts as alive and is never touched. A
 client-autostarted server runs with `--exit-empty`, so closing the last shell
 can end it: if no server answers, a persistent one (`rex server start`, in its
 own systemd scope, with `--tailscale` when the old one served the tailnet) is
@@ -320,19 +322,25 @@ the server's version and API revision before and after.
 The steward also keeps rex current, at most every 30 minutes:
 
 ```sh
-cel sessions rex-upgrade --check   # newer rex? which Rex agents are busy or not resumable?
+cel sessions rex-upgrade --check   # newer rex? busy, not resumable, or unmanaged sessions?
 cel sessions rex-upgrade           # one round now
 ```
 
-A round runs only when apt offers a newer rex from `pkgs.superlogical.com`
-(`apt-cache policy rex`; it does not run `apt-get update`). It waits up to
-`CEL_REX_UPGRADE_IDLE_SECS` (120) for every live Rex agent to be idle, and skips
-the round otherwise; any live agent it could not resume (a reviewer, a worker,
-an older receipt, a missing saved session) blocks it, and root is told. Then it
-records the agents, runs `sudo -n apt-get install --only-upgrade -y rex`,
-restarts the per-user Rex server in its own systemd scope if the package did
-not, resumes each recorded agent, checks it is still alive after a short
-settle, and sends root one summary. New Celestial launches wait while it runs.
+A round runs only when apt's candidate for rex is newer than the installed
+version and comes from `https://pkgs.superlogical.com` exactly (that host, not
+one containing the name; `apt-cache policy rex`, without `apt-get update`). It
+waits up to `CEL_REX_UPGRADE_IDLE_SECS` (120) for every live Rex agent to be
+idle, and skips the round otherwise. Root is told once, and nothing changes,
+while the round is blocked by any live agent it could not resume (a reviewer,
+a worker, an older receipt, a missing saved session) or by ANY Rex session
+that is not a live managed launch - a session you opened yourself, or an old
+empty shell: stopping the server ends every session, and only managed agents
+come back. Close those sessions (`rex ls`, `rex kill`) to let it proceed. Then
+it records the agents, installs exactly the version it vetted
+(`sudo -n apt-get install --only-upgrade -y rex=<version>`), restarts the
+per-user Rex server in its own systemd scope if the package did not, resumes
+each recorded agent, checks it is still alive after a short settle, and sends
+root one summary. New Celestial launches wait while it runs.
 
 ### Retire a completed Rex reviewer, keep its evidence
 
