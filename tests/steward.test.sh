@@ -230,27 +230,64 @@ test_steward_orchestrator_alert_waits_while_an_owner_card_covers_it() {
   rm -rf "$T"
 }
 
-# The agent's own name covers it too; a card about something else of the
-# product's, or about a longer-named agent, does not.
+# A card covers the agent it names as a name of its own, or the product's own
+# agent ("<Product> orchestrator", "<Product> solo agent"); a card about
+# another agent of the same product, a longer-named agent or something else
+# of the product's covers neither. Two auto products, so every card is also
+# checked against the agent it must NOT hide.
 test_steward_orchestrator_alert_is_covered_only_by_a_card_naming_that_agent() {
-  local title blocks want
-  while IFS='|' read -r title blocks want; do
+  local title blocks covers open p n=0
+  # The cases arrive on their own descriptor, so nothing the sweep runs can
+  # read them off stdin and leave a case untested.
+  while IFS='|' read -r -u 3 title blocks covers; do
+    n=$((n + 1))
     _orch_fixture
+    cat > "$T/alpha/workspace.yaml" <<YAML
+name: alpha
+tickets: {system: linear, trigger_state: Ready}
+products:
+  - {name: bundle, repos: [widget], orchestrator: auto}
+  - {name: slot, repos: [gadget], orchestrator: auto}
+repos:
+  - {name: widget, url: "git@github.com:someone/widget.git", prefix: WG, linear_team: ALPHA}
+  - {name: gadget, url: "git@github.com:someone/gadget.git", prefix: OT, linear_team: ALPHA}
+YAML
     _owner_card alpha 1700000000000000001 "$title" "$blocks"
     STUB_LAUNCH_RC=1 _steward_orchestrators "$ROSTER" >/dev/null 2>&1
-    if [ "$want" = covered ]; then
-      assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
-    else
-      assert_contains "$(cmd_inbox open --for root --workspace alpha)" "bundle-orch will not start"
-    fi
+    open="$(cmd_inbox open --for root --workspace alpha)"
+    for p in bundle slot; do
+      if [ "$p" = "$covers" ]; then
+        case "$open" in *"$p-orch will not start"*)
+          echo "card '$title | $blocks' should cover $p-orch: $open"; rm -rf "$T"; return 1 ;; esac
+      else
+        case "$open" in *"$p-orch will not start"*) ;; *)
+          echo "card '$title | $blocks' hid $p-orch: $open"; rm -rf "$T"; return 1 ;; esac
+      fi
+    done
     rm -rf "$T"
-  done <<'CASES'
-Gateway route for the main lane|bundle-orch taking turns|covered
-Bundle orchestrator credentials|nothing else|covered
-Bundle pricing page copy|the pricing page|alert
-Bundle-tools agent credentials|bundle-tools-orch taking turns|alert
-Widget agent credentials|widget-orch taking turns|alert
+  done 3<<'CASES'
+Restore Bundle solo agent through the gateway|Main Bundle solo agent taking turns; not the working Slot Builder lane|bundle
+Gateway route for the main lane|bundle-orch taking turns|bundle
+Bundle orchestrator credentials|nothing else|bundle
+Slot orchestrator credentials||slot
+bundle-slot-builder lane stuck|bundle-slot-builder taking turns|none
+bundle-slot-orch wont start||none
+slot-orchestrator stuck||none
+Bundle slot builder agent|the slot builder lane|none
+Bundle pricing page copy|the pricing page|none
+Widget agent credentials|widget-orch taking turns|none
 CASES
+  assert_eq "$n" "10"
+}
+
+# Names are matched literally: a product name is never a pattern.
+test_steward_owner_card_matches_names_literally() {
+  _orch_fixture
+  _owner_card alpha 1700000000000000001 "xzy orchestrator is down" "xzy-orch taking turns"
+  assert_eq "$(_steward_owner_card alpha x.y-orch x.y)" ""
+  _owner_card alpha 1700000000000000002 "x.y orchestrator is down" ""
+  assert_eq "$(_steward_owner_card alpha x.y-orch x.y)" "1700000000000000002	x.y orchestrator is down"
+  rm -rf "$T"
 }
 
 # --- routing ready tickets -------------------------------------------------

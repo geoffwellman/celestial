@@ -379,19 +379,22 @@ _steward_launch_orch() { # <product> <workspace>
 # owner may reroute) was re-raised to root every half hour for days beside
 # the open `cel decide` card that already asked the owner.
 # A card carries no structured link to an agent - only to PRs (`--pr`) - so
-# the link is what the asker wrote: an open card in the same workspace whose
-# title or blocks names the agent (`widget-orch`), or names the product as a
-# word of its own together with "agent" or "orchestrator" ("Restore Widget
-# solo agent ..."). A hyphenated longer name (`widget-lane-builder`) is
-# another agent and does not match.
+# the link is what the asker wrote, and it is read narrowly: an open card in
+# the same workspace whose title or blocks names the agent as a name of its
+# own (`widget-orch`, but not `big-widget-orch` or `widget-orchestrator`), or
+# names the product's own agent - the product as a name of its own followed
+# directly by "orch", "orchestrator" or "solo agent" ("Restore Widget solo
+# agent ..."). "Widget lane builder agent" names another agent of the
+# product, and `widget-lane-orch` another agent altogether: neither matches.
+# Names are matched literally, never as patterns.
 _steward_owner_card() { # <ws> <agent> <product> -> "<id>\t<title>" or nothing
   # shellcheck source=lib/decide.sh
   . "${BASH_SOURCE[0]%/*}/decide.sh"
   decide_open_json "$1" | jq -r --arg a "$2" --arg p "$3" '
-    ($a | ascii_downcase) as $agent
-    | ("(^|[^a-z0-9-])" + ($p | ascii_downcase | gsub("[-_]"; "[-_ ]")) + "($|[^a-z0-9-])") as $product
-    | select([(.title // ""), (.blocks // "")] | map(ascii_downcase) | any(
-        contains($agent) or (test($product) and test("\\b(agent|orchestrator)\\b"))))
+    def literal: ascii_downcase | gsub("(?<c>[.*+?^$()\\[\\]{}|\\\\])"; "\\\(.c)");
+    ("(^|[^a-z0-9-])" + ($a | literal) + "($|[^a-z0-9-])") as $agent
+    | ("(^|[^a-z0-9-])" + ($p | literal) + "\\s+(orch|orchestrator|solo\\s+agent)($|[^a-z0-9-])") as $main
+    | select([(.title // ""), (.blocks // "")] | map(ascii_downcase) | any(test($agent) or test($main)))
     | [.id, .title] | @tsv' 2>/dev/null | head -n1
 }
 

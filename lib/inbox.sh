@@ -815,8 +815,17 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   # goes, tail exits, jq and the line loop read EOF and `wait` below returns.
   # Every element ends the watch by dying, so none can die and leave the rest
   # of it unwatched.
-  local follow=()
-  [ -n "$parent" ] && follow=(-s "${CEL_WATCH_PARENT_POLL:-1}" --pid="$parent")
+  #
+  # `--pid` is GNU and uutils coreutils, so it is checked, not assumed: a
+  # tail without it (BusyBox) leaves the following to this shell itself,
+  # between polls - still no side process, and this shell's death takes the
+  # tail with it (the EXIT trap below). Five seconds either way; a line still
+  # arrives the moment it is written.
+  local poll="${CEL_WATCH_PARENT_POLL:-5}" follow=() shell_follows=0
+  if [ -n "$parent" ]; then
+    if tail --pid="$$" -n 0 /dev/null >/dev/null 2>&1; then follow=(-s "$poll" --pid="$parent")
+    else shell_follows=1; fi
+  fi
   # ONE TAIL FOR EVERY MAILBOX: tail follows all the files at once and names
   # each on a `==> file <==` header; one jq carries the current workspace
   # across lines. Every agent hook runs a watcher, so a pipeline per
@@ -846,6 +855,10 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   trap "kill $tpid 2>/dev/null; trap - EXIT; exit 130" INT TERM
   # shellcheck disable=SC2064
   trap "kill $tpid 2>/dev/null" EXIT
+  if [ "$shell_follows" -eq 1 ]; then
+    while kill -0 "$parent" 2>/dev/null && kill -0 "$fmt" 2>/dev/null; do sleep "$poll"; done
+    kill "$tpid" 2>/dev/null || true
+  fi
   wait "$fmt"
 }
 

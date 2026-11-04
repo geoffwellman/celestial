@@ -281,14 +281,15 @@ test_inbox_watch_exits_when_its_parent_is_gone() {
 # with nothing following the agent, and when the agent died the watcher was
 # reparented to init - the "reaped 1 orphan (1 watcher), 3 MB" the steward
 # kept posting. So each element of a live watcher is killed in turn, then the
-# parent, and every process the watcher had must be gone.
-test_inbox_watch_goes_with_its_parent_whichever_element_died_first() {
+# parent, and every process the watcher had must be gone - with a tail that
+# follows the parent itself (`--pid`), and with one that cannot.
+_inbox_watch_element_death() { # [dir to put first on PATH]
   local T2; T2="$(mktemp -d)"
-  local k=0 parent w i kids victim desc tree pid left
+  local k=0 parent w i kids victim desc tree pid left path="${1:+$1:}$PATH"
   local -a elements
   while :; do
     sleep 60 & parent=$!
-    CEL_INBOX_DIR="$T2" XDG_RUNTIME_DIR="$T2" CEL_WATCH_PARENT_POLL=1 \
+    PATH="$path" CEL_INBOX_DIR="$T2" XDG_RUNTIME_DIR="$T2" CEL_WATCH_PARENT_POLL=1 \
       "$CEL_ROOT/bin/cel" inbox watch --for root --workspace alpha --parent "$parent" >/dev/null 2>&1 &
     w=$!
     i=0
@@ -298,6 +299,10 @@ test_inbox_watch_goes_with_its_parent_whichever_element_died_first() {
       [ "${#elements[@]}" -ge 3 ] && break
       sleep 0.1; i=$((i + 1))
     done
+    if [ "${#elements[@]}" -lt 3 ]; then
+      echo "the watcher never came up (children: ${elements[*]:-none})"
+      kill -TERM "$w" "$parent" 2>/dev/null || true; rm -rf "$T2"; return 1
+    fi
     if [ "$k" -ge "${#elements[@]}" ]; then
       kill -TERM "$w" "$parent" 2>/dev/null || true; rm -rf "$T2"; return 0
     fi
@@ -325,6 +330,21 @@ test_inbox_watch_goes_with_its_parent_whichever_element_died_first() {
     fi
     k=$((k + 1))
   done
+}
+test_inbox_watch_goes_with_its_parent_whichever_element_died_first() {
+  _inbox_watch_element_death
+}
+# BusyBox's tail has no --pid: the watch finds that out and follows the
+# parent from its own shell, which is no side process either.
+test_inbox_watch_goes_with_its_parent_when_tail_cannot_follow_a_pid() {
+  local bin; bin="$(mktemp -d)"
+  printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --pid*) echo "tail: unrecognized option $a" >&2; exit 1 ;; esac; done\nexec %s "$@"\n' \
+    "$(command -v tail)" > "$bin/tail"
+  chmod +x "$bin/tail"
+  local rc=0
+  _inbox_watch_element_death "$bin" || rc=$?
+  rm -rf "$bin"
+  return "$rc"
 }
 
 # --- box services are protected by IDENTITY, not by a hopeful substring ----
