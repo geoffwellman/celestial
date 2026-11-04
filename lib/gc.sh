@@ -764,7 +764,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     backend="$(printf '%s' "$cand" | jq -r '.backend // "herdr"')"
     repodir="$(printf '%s' "$cand" | jq -r '.repodir // ""')"
     if [ "$backend" = rex ] || [[ "$pane" == rex/* ]]; then
-      local retirement retirement_rc=0 retirement_status retirement_reason
+      local retirement retirement_rc=0 retirement_status retirement_reason retirement_detail
       retirement="$(rex_reviewer_retire "$repo" "$pr" "$pane" "$agent" "$dry" "$repodir")" || retirement_rc=$?
       retirement_status="$(printf '%s' "$retirement" | jq -er '.status | select(type == "string")' 2>/dev/null)" || retirement_status=unknown
       if [ "$retirement_rc" = 0 ] && [ "$dry" = 1 ] && [ "$retirement_status" = retired ]; then
@@ -791,7 +791,8 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
         _gc_reviewers_adopt
         if [ "$retirement_status" != protected ]; then
           retirement_reason="$(printf '%s' "$retirement" | jq -r '.reason // "native retirement proof unavailable"' 2>/dev/null)" || retirement_reason='native retirement proof unavailable'
-          c_warn "native reviewer retirement incomplete for $repo#$pr: $retirement_reason"
+          retirement_detail="$(printf '%s' "$retirement" | jq -r '.detail // ""' 2>/dev/null)" || retirement_detail=''
+          c_warn "native reviewer retirement incomplete for $repo#$pr: $retirement_reason${retirement_detail:+ ($retirement_detail)}"
         fi
       fi
       continue

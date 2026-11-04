@@ -982,6 +982,7 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
     dry_envprefix="$(GATEWAY_ENV=("OMP_GATEWAY_TOKEN=****" "CEL_SESSION_ID=****"); _run_launch_env core "$cwd" "$AGENT_ROLE_FILE" root "$runtime")"
   fi
 
+  local _REX_RELAUNCH; _REX_RELAUNCH="$(_run_rex_relaunch)"
   local label=celestial/core
   if [ -n "$RESTART_PANE" ]; then
     _run_restart_in_place core "$RESTART_PANE" "$label" "$envprefix" "$dry_envprefix" "$prefix_required" "$dry" core "$runtime" "$cwd"
@@ -1013,6 +1014,35 @@ _run_core() { # <profile> <model-opt> <thinking-opt> <dry-run> <restart> <fresh>
   [ -n "$pane_id" ] && [ "$pane_id" != "null" ] || pane_id="${ws_id}:p1"
   _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
   _run_agent_start "$pane_id" core "$runtime" "${AGENT_ARGS[@]}"
+}
+
+# THE LINE THAT BRINGS AN AGENT BACK, recorded in its Rex receipt: after a Rex
+# server restart or a managed rex upgrade (lib/rex.sh) the agent is resumed by
+# running exactly this, so it comes back through the same door - same role,
+# product, lane and workspace, its saved session (a launch over a dead agent
+# resumes the last recorded one) and the profile/model/thinking the owner
+# named. Never --restart: if anything is live there by then, the duplicate
+# refusal stops the relaunch rather than killing a turn. A lane remembers its
+# own profile and model beside its role file, so they are left to that memory.
+# Reads the caller's (cmd_run / _run_core) resolved locals; prints a JSON array.
+_run_rex_relaunch() {
+  local -a line=(run)
+  case "$role" in
+    core) line+=(core) ;;
+    root) line+=(root) ;;
+    *) if [ "${solo_forced:-0}" = 1 ]; then line+=(solo); else line+=(orchestrator); fi
+       line+=(--product "$product")
+       [ -z "${lane:-}" ] || line+=(--lane "$lane") ;;
+  esac
+  [ "$role" = core ] || line+=(--workspace "${workspace:-$(ws_name "$wsdir")}")
+  line+=(--session-backend rex)
+  if [ -z "${lane:-}" ]; then
+    [ -z "${profile_opt:-}" ] || line+=(--profile "$profile_opt")
+    [ -z "${model_opt:-}" ] || line+=(--model "$model_opt")
+  fi
+  [ -z "${thinking_opt:-}" ] || line+=(--thinking "$thinking_opt")
+  # Not `jq --args`: jq still parses a `--model` after it as its own option.
+  printf '%s\0' "${line[@]}" | jq -Rsc 'split("\u0000") | .[:-1]'
 }
 
 # --- resuming root and the orchestrators -----------------------------------
@@ -1769,6 +1799,9 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       *) die "cel run: unknown argument '$1'" ;;
     esac
   done
+  # What was NAMED, before defaults fill it in: a Rex receipt's relaunch line
+  # (_run_rex_relaunch) repeats only the owner's explicit choices.
+  local profile_opt="$profile"
   if [ -n "$remember_model_pid" ]; then
     [ "$solo_forced" = 1 ] && [ -n "$lane" ] && [ -n "$model_opt" ] \
       && [ -z "$profile$thinking_opt$backend_opt$repo$branch$pr$pane_opt$handoff" ] \
@@ -2234,6 +2267,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       "or name and adopt it: cel ws up $(ws_name "$wsdir")" "$wsdir"
     resume_session="$RESUME_SESSION"; restart_pane="$RESTART_PANE"
   fi
+  local _REX_RELAUNCH=""
+  [ "$role" != root ] && [ "$role" != orchestrator ] || _REX_RELAUNCH="$(_run_rex_relaunch)"
   # A Claude lane: trusted folder and, for a fresh session, a first turn (see
   # _run_claude_trust_dir and _run_lane_kickoff). Trust is recorded before
   # any pane exists, on every path below - new pane, Rex, restart in place -

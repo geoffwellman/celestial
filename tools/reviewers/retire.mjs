@@ -83,7 +83,8 @@ function liveGeneration(p) {
     const text = fs.readFileSync(`/proc/${p.pid}/stat`, 'utf8');
     const fields = text.slice(text.lastIndexOf(') ') + 2).trim().split(/\s+/);
     return fields[19] === p.start; // Zombies are not proven exited/reaped.
-  } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+    // ESRCH: the stat file was opened, then the task was reaped before the read.
+  } catch (error) { if (error.code === 'ENOENT' || error.code === 'ESRCH') return false; throw error; }
 }
 function descendants(root) {
   const out = [], seen = new Set(), queue = [root];
@@ -509,7 +510,7 @@ function writeProtocol(filename, value) {
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
 
-async function nativeHandshake(receipt, identity, phase, nonce, leaf) {
+export async function nativeHandshake(receipt, identity, phase, nonce, leaf) {
   const { request: requestPath, response: responsePath } = ownedProtocolPaths(receipt);
   if (phase === 'inspect' && fs.existsSync(requestPath)) {
     const prior = protocolFile(requestPath).value;
@@ -524,7 +525,14 @@ async function nativeHandshake(receipt, identity, phase, nonce, leaf) {
   writeProtocol(requestPath, request);
   while (Date.now() <= request.expires_at) {
     let response;
-    try { response = protocolFile(responsePath).value; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // The native side publishes by rename over the previous answer (exit
+    // replaces inspect): a read that straddles that rename sees the name move
+    // to a new inode. That is a reply in flight, so it is read again; only a
+    // settled answer for this nonce is ever validated.
+    try { response = protocolFile(responsePath).value; } catch (error) {
+      const replaced = error instanceof Refusal && error.message === 'evidence_changed_during_read';
+      if (error.code !== 'ENOENT' && !replaced) throw error;
+    }
     if (response?.nonce === nonce && response.phase === phase) return { request, response: validateNativeResponse(response, request) };
     await new Promise(resolve => setTimeout(resolve, 50));
   }
@@ -735,7 +743,11 @@ export async function retire(options) {
     clearSettledRequest(receipt, nonce);
     return { status: 'retired', reason: 'runtime_exited_session_absent_evidence_preserved', receipt, proof: completed, prepared: proofPath, native: first.native.path, checkout: first.checkout.path, verdict: first.round.path };
   } catch (error) {
-    return { status: error instanceof Refusal ? error.status : 'unknown', reason: error instanceof Refusal ? error.message : 'unreadable_or_malformed_retirement_evidence', receipt, ...(proofPath ? { proof: proofPath } : {}) };
+    if (error instanceof Refusal) return { status: error.status, reason: error.message, receipt, ...(proofPath ? { proof: proofPath } : {}) };
+    // Name the failure: an unexplained "malformed" verdict cannot be told
+    // apart from a race when it is seen once, in CI, after the fact.
+    const detail = [error?.code || error?.name, String(error?.stack || '').split('\n')[1]?.trim()].filter(Boolean).join(' ');
+    return { status: 'unknown', reason: 'unreadable_or_malformed_retirement_evidence', detail, receipt, ...(proofPath ? { proof: proofPath } : {}) };
   }
 }
 

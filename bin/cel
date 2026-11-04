@@ -76,6 +76,8 @@ cel - the celestial plane
   cel sessions [--json]          list live Herdr and managed Rex agent sessions
                                 cel run ... --session-backend herdr|rex
                                 (workspace default: session_backend: herdr)
+  cel sessions rex-upgrade [--check]  upgrade rex once every Rex agent is idle,
+                                then resume them (the steward runs it every 30m)
   cel shellenv                  print shell env; eval this in your rc
 
   cel ws new <name> [--org o]   scaffold a workspace that does not exist yet

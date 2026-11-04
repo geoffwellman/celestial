@@ -1824,6 +1824,103 @@ _steward_sample() { # <agents-json>
   fi
 }
 
+# ── Rex server restarts and upgrades ─────────────────────────────────────────
+# lib/rex.sh decides and acts (rex_generation_tick, rex_upgrade_round); this
+# says what happened, once: ONE summary to root per restart or upgrade, and a
+# note to each resumed agent, whose background shells, subagents and servers
+# ended with the old server. The Rex server is box-wide, so the summary goes
+# to the root mailbox of the first workspace it touched (core reads them all).
+_steward_rex_ws() { # [rows] -> workspace name for root's summary
+  local p n first=""
+  while IFS=$'\t' read -r _ _ p _; do
+    [ -n "$p" ] || continue
+    n="$(ws_name "$p" 2>/dev/null || true)"
+    [ -z "$n" ] || first="$(printf '%s\n%s\n' "$first" "$n" | sed '/^$/d' | sort | sed -n 1p)"
+  done <<<"${1:-}"
+  [ -n "$first" ] || first="$(registry_names 2>/dev/null | sed -n 1p)"
+  printf '%s' "$first"
+}
+
+_steward_rex_summary() { # <headline> <rows> -> the message
+  local msg="$1" rows="$2" o label list
+  for o in server-failed server resumed failed held skipped; do
+    list="$(awk -F '\t' -v o="$o" '$1 == o {
+      if (o ~ /^server/) printf "%s%s", (n++ ? "; " : ""), $4
+      else { printf "%s%s", (n++ ? "; " : ""), $2; if (o != "resumed") printf " (%s)", $4 } }' <<<"$rows")"
+    [ -n "$list" ] || continue
+    case "$o" in
+      server-failed) label="Rex server NEEDS ATTENTION" ;;
+      server)  label="Rex server" ;;
+      resumed) label="Resumed in their saved sessions and alive" ;;
+      failed)  label="FAILED to resume" ;;
+      held)    label="Not resumed" ;;
+      skipped) label="Left alone" ;;
+    esac
+    msg+=" $label: $list."
+  done
+  printf '%s' "$msg"
+}
+
+_steward_rex_report() { # <headline> <rows> <what happened, for the agents>
+  # Never `status`: status to root is telemetry nobody reads, and every agent
+  # the root coordinates was just restarted under it.
+  local rows="$2" ws kind=escalation name p n
+  ws="$(_steward_rex_ws "$rows")"
+  if awk -F '\t' '$1 == "failed" || $1 == "held" || $1 == "server-failed" { f = 1 } END { exit !f }' <<<"$rows"; then kind=blocked; fi
+  local msg; msg="$(_steward_rex_summary "$1" "$rows")"
+  if [ "$kind" = blocked ]; then c_err "$msg"; else c_ok "$msg"; fi
+  [ -z "$ws" ] || cmd_inbox send root "$msg" --from steward --workspace "$ws" --kind "$kind" >/dev/null 2>&1 || true
+  while IFS=$'\t' read -r _ name p _; do
+    n="$(ws_name "$p" 2>/dev/null || true)"
+    [ -n "$n" ] || continue
+    cmd_inbox send "$name" "steward: $3, which ended your runtime; you were resumed in your saved session. Anything running then - subagents, background shells, gates, dev servers - was killed: re-check it and rerun only what is still needed." \
+      --from steward --workspace "$n" --kind status >/dev/null 2>&1 || true
+  done < <(awk -F '\t' '$1 == "resumed"' <<<"$rows")
+}
+
+# The safety net: a restart this plane did not drive (see rex_generation_tick).
+_steward_rex_generation() {
+  local out rc=0 old new rows
+  out="$(rex_generation_tick)" || rc=$?
+  [ "$rc" != 2 ] || c_warn "a Rex receipt is unreadable - Rex restart detection skipped this tick"
+  [ -n "$out" ] || return 0
+  IFS=$'\t' read -r _ old new <<<"$(sed -n 1p <<<"$out")"
+  rows="$(sed 1d <<<"$out")"
+  # Every restart gets its server facts logged; root hears only when an agent
+  # was affected or the server needs a person.
+  awk -F '\t' '$1 == "server" { print "the Rex server restarted: " $4 }' <<<"$rows" | while IFS= read -r l; do c_ok "$l"; done
+  if ! awk -F '\t' '$1 != "server" { f = 1 } END { exit !f }' <<<"$rows"; then
+    c_ok "the Rex server restarted ($old -> $new); no managed agent was live under it"; return 0
+  fi
+  _steward_rex_report "steward: the Rex server restarted outside the managed upgrade (instance $old -> $new), ending every program in its sessions." \
+    "$rows" "the Rex server restarted"
+}
+
+# The managed upgrade; `cel sessions rex-upgrade` runs one round by hand.
+_steward_rex_upgrade() {
+  local out status a b c rows ws
+  out="$(rex_upgrade_round)" || true
+  [ -n "$out" ] || return 0
+  IFS=$'\t' read -r status a b c <<<"$(sed -n 1p <<<"$out")"
+  rows="$(sed 1d <<<"$out")"
+  ws="$(_steward_rex_ws)"
+  case "$status" in
+    waiting) c_warn "rex $a is available; the managed upgrade skipped this round: $b" ;;
+    blocked)
+      c_err "rex $a is available; the managed upgrade is blocked: $b"
+      [ -z "$ws" ] || _steward_raise_on_change "$ws" rex-upgrade-blocked blocked \
+        "steward: rex $a is available, but the managed upgrade will not restart the Rex server: $b" ;;
+    failed)
+      # Nothing was stopped: said once per state, not every round.
+      c_err "the managed rex upgrade to $a failed: $b"
+      [ -z "$ws" ] || _steward_raise_on_change "$ws" rex-upgrade-failed blocked \
+        "steward: the managed rex upgrade to $a failed and nothing was restarted: $b" ;;
+    upgraded)
+      [ -z "$ws" ] || { _steward_clear "$ws" rex-upgrade-blocked "rex was upgraded to $b"; _steward_clear "$ws" rex-upgrade-failed "rex was upgraded to $b"; }
+      _steward_rex_report "steward: upgraded rex $a -> $b while every Rex agent was idle; $c." "$rows" "rex was upgraded and its server restarted" ;;
+  esac
+}
+
 # The claim is a pidfile, checked and written under a flock that is held for
 # that instant only. Holding the flock for the whole tick would hand the
 # descriptor to everything the tick starts - one long-lived child and no tick
@@ -1872,6 +1969,12 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
   have jq    || die "cel steward: jq is not on PATH"
   have gh    || die "cel steward: gh is not on PATH"
   c_hd "steward tick $(date '+%F %T')"
+
+  # FIRST: a Rex server that restarted took its agents with it, and every
+  # sweep below would read their absence as the truth. Then, at most every
+  # 30 minutes, the managed rex upgrade (skipped while any Rex agent is busy).
+  _steward_rex_generation
+  if _STEWARD_WINDOW=1800 _steward_due rex-upgrade; then _steward_rex_upgrade; fi
 
   # Under memory pressure the reap window collapses: idle agents are the
   # reclaimable mass on this box, and 2h idle is finished work, not a pause.
