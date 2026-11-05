@@ -79,12 +79,16 @@ _box_docker_keep_patterns() {
     while IFS= read -r pat || [ -n "$pat" ]; do
       case "$pat" in ''|'#'*) continue ;; esac
       [[ "$pat" =~ $brackets ]] || { printf 'box: malformed docker keep glob\n' >&2; return 1; }
-      case "$pat" in slot-studio-local/media-executor:*) executor=1 ;; esac
+      # Only the reserved complete-set producer file can narrow this namespace.
+      # Legacy/global and arbitrary producer declarations never establish ownership.
+      if [ "$file" = "$dir/slot-studio-executors.patterns" ]; then
+        case "$pat" in slot-studio-local/media-executor:*) executor=1 ;; esac
+      fi
       patterns+="$pat"$'\n'
     done < "$file"
   done
   printf '%s\n' 'ubuntu:*' 'alpine:*' 'slot-studio-media-executor-base:*'
-  # Without an explicit executor declaration, ownership is unknown: preserve it.
+  # Missing/empty executor authority preserves legacy blanket protection.
   [ "$executor" -eq 1 ] || printf '%s\n' 'slot-studio-local/media-executor:*'
   [ -z "$patterns" ] || printf '%s' "$patterns"
   return 0

@@ -1099,14 +1099,19 @@ An image survives if **any tag** matches a keep pattern, its image label is
 image ID. Labels protect containerless bases too. Built-ins retain `ubuntu:*`,
 `alpine:*`, and `slot-studio-media-executor-base:*` (all immutable source tags).
 The executor namespace `slot-studio-local/media-executor:*` is conservatively
-retained unless a validated declaration explicitly names that repository.
-Once declared, only its matching tags, labels and container references veto
-removal: exact current and rollback tags allow superseded executors to be swept.
+retained unless the reserved producer-owned `keep_dir/slot-studio-executors.patterns`
+contains validated, nonempty executor declarations. This file opts into bounded
+cleanup and MUST represent the **COMPLETE live + rollback + in-flight image set**.
+Legacy/global declarations and arbitrary producer files cannot enable narrowing,
+even if they contain executor references. A missing, empty or unrelated-only
+reserved file preserves the blanket; malformed/unreadable files refuse mutation.
+Once opted in, exact live, rollback and in-flight tags allow superseded unused
+executors to be swept; labels and actual container references remain vetoes.
 Other image families retain their existing policy.
 
 The operator-owned legacy `keep_file` defaults to
 `${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns`. Each producer owns
-one file, e.g. `follow-main.patterns`, inside `keep_dir`, defaulting to
+one file, e.g. `other-producer.patterns`, inside `keep_dir`, defaulting to
 `${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns.d`. **All files are
 unioned with the legacy file and built-ins. Never replace another producer's
 file or the global operator file.** Each selected `*.patterns` file contains
@@ -1132,14 +1137,18 @@ lock="${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock"
 keep_dir="${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns.d"
 mkdir -p "${lock%/*}" "$keep_dir"
 (
+  set -e
   flock -x 9
-  # Hold this same lock across build/import/tag changes AND publication.
-  docker build --label cel.keep=true -t private/base:local .
-  tmp="$(mktemp "$keep_dir/.follow-main.XXXXXX")"
+  # The sole executor producer publishes its COMPLETE set before building.
+  # Retain every required live/rollback/in-flight tag, not just these examples.
+  tmp="$(mktemp "$keep_dir/.executors.XXXXXX")"
   printf '%s\n' 'slot-studio-local/media-executor:current-42' \
-    'slot-studio-local/media-executor:rollback-41' > "$tmp"
+    'slot-studio-local/media-executor:rollback-41' \
+    'slot-studio-local/media-executor:candidate-43' > "$tmp"
   chmod 600 "$tmp"
-  mv -T -- "$tmp" "$keep_dir/follow-main.patterns"
+  mv -T -- "$tmp" "$keep_dir/slot-studio-executors.patterns"
+  # Pre-admission precedes image creation and deployment; keep the shared lock.
+  docker build -t slot-studio-local/media-executor:candidate-43 .
 ) 9>>"$lock"
 ```
 
@@ -1147,15 +1156,21 @@ Alternatively put `LABEL cel.keep=true` in the producer's Dockerfile. Existing
 images cannot be relabelled in place: declare their tags in the keep file
 before publishing/moving tags, or rebuild with the label under the lock.
 
-Migration: first update each producer to publish only its own file under this
-lock. While still holding the lock, move any producer-owned declarations out of
-the legacy global file without discarding operator or other-producer entries.
-A legacy executor wildcard still protects every executor until explicitly
-removed by the operator. Publish current **and** rollback before enabling
-bounded cleanup; absence of a rollback is not permission to omit an existing
-required rollback. Follow-main worktree candidates are observations, not image
-keep declarations or cleanup grants. `keep_dir` is additive to contract v1;
-existing consumers of `keep_file` remain compatible.
+Migration: keep the legacy global declarations and emergency fallback intact
+until the executor publisher pre-admits each candidate **before build/deploy**,
+publishes the COMPLETE live/rollback/in-flight set atomically, and has tested
+the shared-lock contract. Only then create `slot-studio-executors.patterns`.
+Do not bootstrap this opt-in from the old post-healthy-deploy global snapshot:
+it can omit an already-building candidate. Under the same lock, remove only
+producer-owned entries from the global file without discarding operator or
+other-producer protections. A legacy executor wildcard remains a veto until
+explicitly removed by the operator. Retain required rollback and pending
+candidates until their ownership is genuinely retired, including failed or
+unresolved deployments. Follow-main worktree candidates are observations, not
+image keep declarations or cleanup grants. The receiver cannot infer omitted
+required images from a syntactically valid set: completeness is the producer's
+admission contract. `keep_dir` is additive to contract v1; existing `keep_file`
+consumers remain compatible.
 
 
 ## What runs in the background
