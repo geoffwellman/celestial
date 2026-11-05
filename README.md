@@ -854,11 +854,13 @@ through `cel inbox` instead - a JSONL mailbox per workspace, with a read
 cursor per *reader* so a standing root pane and the console can both drain
 root's mail without stealing each other's place. Delivery is inbox-only, but
 idle wake depends on runtime. Claude Code's global `UserPromptSubmit` hook
-drains mail when the next turn is submitted; its launch-time `Stop` hook blocks
-once for mail arriving during an active turn. Neither wakes an idle Claude
-session. The Pi/OMP inbox extension watches mail, raises `ui.notify`, and
-injects unread items into a turn; a runtime with a persistent `Monitor` may
-also run `cel inbox watch`, but Claude Code does not expose `Monitor`.
+drains mail on submission; its launch-time `Stop` hook continues for mail
+arriving during a turn. Managed **Rex Claude lanes** also start a receipt-bound
+idle watcher through `claude-session.sh`. It sends a native Unix peer event,
+not terminal text, into the same conversation without submitting the owner's
+draft. Mail stays unread until Claude or its normal inbox hook reads it.
+The Pi/OMP inbox extension watches mail, raises `ui.notify`, and injects unread
+items into a turn. Claude Code does not expose a persistent `Monitor`.
 Console `tell` is mail alone. `nudge` and `talk` are the owner's deliberate
 interrupts; direct `herdr agent prompt` is otherwise limited to one-time
 launch kickoffs. Escalations remain inbox items, not pane prompts.
@@ -1201,6 +1203,7 @@ them. Hook programs fail open on their own errors:
 |---|---|---|
 | `inbox-drain.sh` | Claude `UserPromptSubmit` | drains the pane's mailbox when a turn is submitted; it does not wake an idle session |
 | `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
+| `claude-session.sh` / `claude-idle-mail.py` | Claude session/turn boundaries, then native peer socket | reports the exact native session and ensures one lifetime-bound idle watcher for a managed Rex lane; never writes terminal input |
 | `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
 | `orchestrator-guard.sh` | `PreToolUse` | **read-only orchestrators**: from a root or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools). Workers are untouched. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
@@ -1209,11 +1212,46 @@ Inbox hooks use explicit `CEL_INBOX_ME`/`CEL_INBOX_WS` when the launcher
 provides them; otherwise the inbox command derives identity from the working
 directory.
 
-`cel inbox watch` streams one line per new item for a runtime task that can
-monitor its output. Claude Code has no persistent `Monitor`: its hooks only
-run at turn boundaries. Pi/OMP's inbox extension supplies idle wake. The
-steward's stale-mailbox signal asks the owning orchestrator to check; it does
-not imply a Claude hook failed.
+`cel inbox watch` streams notices without moving a cursor. It is not itself
+an idle-wake API. Claude's idle watcher instead uses the socket published to
+its hooks as `CLAUDE_CODE_MESSAGING_SOCKET` (observed with native Claude Code
+2.1.318). It requires an exact launch recipient/workspace, a live matching Rex
+receipt, runtime PID ancestry, and the native conversation UUID. Before every
+send, Linux `SO_PEERCRED` must match the receipt's PID/UID/start time; each event
+also carries the native session ID. Missing support or ambiguous identity has
+**no terminal-input fallback**. In particular, Rex `send`/`send-key` and screen
+capture cannot atomically establish that an owner's composer is empty.
+
+The watcher polls every five seconds. Each unread generation has one stable
+notification ID, used for native duplicate suppression; later mail gets a new
+ID even when the unread count is unchanged. Attempts are bounded to three,
+with 30- then 120-second spacing. A lock and private atomic state file beside
+the Rex receipt (`<receipt>.inbox/state.json`) survive watcher restarts. Socket
+write success is recorded as `notified_not_delivered`, never as delivery.
+Exhausted attempts leave `waiting_for_delivery` and the canonical unread mail
+intact. New mail rearms attempts; an ordinary prompt/Stop hook can still drain
+the backlog. Replacing the runtime PID, native session, or receipt ends the
+old watcher; a later native hook starts the new owner. No conversation is
+forked, model changed, lane restarted, or terminal draft submitted.
+
+If the native runtime does not publish the socket, state says `unavailable`:
+the prerequisite is native Claude peer messaging enabled for that session.
+MCP channels are a separate preview facility, require launch-time registration
+and consent/policy eligibility, and do not acknowledge notification delivery;
+they are not silently substituted. Already-idle lanes acquire this watcher
+at their **next normal hook boundary** after the updated hooks are installed;
+updating files alone does not retroactively run a hook or wake them.
+
+The opt-in integration `python3 tests/claude-idle-native.py` requires installed
+Claude Code, Linux peer credentials/pidfds, and `python3-pexpect`. It runs a real
+isolated native Claude against a deterministic loopback provider, with a fake
+key and isolated HOME/config (no paid inference). It proves idle peer-event
+delivery through the actual Stop hook, refusal of a foreign session, retry
+deduplication, watcher recovery, later-mail wake, and an owner draft submitted
+only by the fixture's later explicit Enter. Evidence remains in the printed
+fixture directory. Native support missing is a failure with the prerequisite,
+not a source-test pass. The normal gate runs the credential-free selector,
+identity, cursor, and retry regressions without launching Claude.
 
 Launch diagnostics compare the canonical **effective product plan**: SOLO
 role/profile overrides (including `workspace.local.yaml`), the actual runtime,

@@ -31,3 +31,9 @@ record_cwd="$(jq -r '.cwd // empty' "$CEL_REX_RECORD")" || exit 0
 [ -n "$record_cwd" ] && [ "$cwd" -ef "$record_cwd" ] || exit 0
 pid="$(rex_reporter_pid)" || exit 0
 "$CEL_ROOT/bin/cel" sessions note "$pid" "$state" "$native" >/dev/null 2>&1 || true
+# SessionStart binds the idle watcher to this exact native conversation and
+# receipt PID. Re-ensure at later boundaries if the watcher previously exited.
+# Missing native peer support is reported, never replaced with terminal input.
+if [ -n "${CEL_INBOX_ME:-}" ] && [ -n "${CEL_INBOX_WS:-}" ]; then
+  python3 "$CEL_ROOT/tools/hooks/claude-idle-mail.py" start "$native" "$pid" || true
+fi
