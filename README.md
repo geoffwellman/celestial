@@ -860,7 +860,7 @@ idle watcher through `claude-session.sh`. It sends a native Unix peer event,
 not terminal text, into the same conversation without submitting the owner's
 draft. Mail stays unread until Claude or its normal inbox hook reads it.
 The Pi/OMP inbox extension watches mail, raises `ui.notify`, and injects unread
-items into a turn. Claude Code does not expose a persistent `Monitor`.
+items into a turn. The Claude watcher does not depend on a `Monitor` tool.
 Console `tell` is mail alone. `nudge` and `talk` are the owner's deliberate
 interrupts; direct `herdr agent prompt` is otherwise limited to one-time
 launch kickoffs. Escalations remain inbox items, not pane prompts.
@@ -1203,7 +1203,7 @@ them. Hook programs fail open on their own errors:
 |---|---|---|
 | `inbox-drain.sh` | Claude `UserPromptSubmit` | drains the pane's mailbox when a turn is submitted; it does not wake an idle session |
 | `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
-| `claude-session.sh` / `claude-idle-mail.py` | Claude session/turn boundaries, then native peer socket | reports the exact native session and ensures one lifetime-bound idle watcher for a managed Rex lane; never writes terminal input |
+| `claude-session.sh` / `claude-idle-mail.py` | Claude async session/submit hooks, then native peer socket | reports the exact native session and retains one lifetime-bound watcher as Claude's own child; never writes terminal input |
 | `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
 | `orchestrator-guard.sh` | `PreToolUse` | **read-only orchestrators**: from a root or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools). Workers are untouched. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
@@ -1222,33 +1222,80 @@ also carries the native session ID. Missing support or ambiguous identity has
 **no terminal-input fallback**. In particular, Rex `send`/`send-key` and screen
 capture cannot atomically establish that an owner's composer is empty.
 
+New launches register the watcher as an **asynchronous native command hook**
+and keep it in the foreground of that hook. This preserves the native process
+ancestry that lets Claude recognize an own-child message, including in
+`bypassPermissions` mode, without changing inbound policy. Detaching the hook
+watcher would erase that proof and cause bypass-mode Claude to hold its mail.
+The adapter does not assert a fake peer permission mode or forge a sender.
+
 The watcher polls every five seconds. Each unread generation has one stable
-notification ID, used for native duplicate suppression; later mail gets a new
-ID even when the unread count is unchanged. Attempts are bounded to three,
-with 30- then 120-second spacing. A lock and private atomic state file beside
-the Rex receipt (`<receipt>.inbox/state.json`) survive watcher restarts. Socket
-write success is recorded as `notified_not_delivered`, never as delivery.
-Exhausted attempts leave `waiting_for_delivery` and the canonical unread mail
-intact. New mail rearms attempts; an ordinary prompt/Stop hook can still drain
-the backlog. Replacing the runtime PID, native session, or receipt ends the
-old watcher; a later native hook starts the new owner. No conversation is
-forked, model changed, lane restarted, or terminal draft submitted.
+notification ID; later mail gets a new ID even when its unread count is
+unchanged. Native duplicate suppression is time-limited, so retries reconcile
+the exact hook-provided transcript first: a matching native queue/user receipt
+suppresses further sends even after that window expires. This is notification
+receipt, **not mailbox delivery**. Only complete, session/ID-matched top-level
+rows count; nested API-request copies do not. Reads are bounded to 1 MiB per
+poll. Partial, oversized, malformed, replaced or truncated transcripts retain
+unread debt and suppress retries instead of guessing absence.
+
+Absent receipts allow at most three attempts, with 30- then 120-second spacing.
+A lock and private atomic state beside the Rex receipt
+(`<receipt>.inbox/state.json`) retain attempts and the pre-send transcript
+boundary across watcher restarts. Socket write success is
+`notified_not_delivered`, never delivery. Exhausted attempts leave
+`waiting_for_delivery` and canonical unread mail intact. New mail rearms
+attempts; an ordinary prompt/Stop hook can still drain the backlog. Replacing
+the runtime PID, native session, or receipt ends the old watcher; a later native
+hook starts the new owner. No conversation is forked, model changed, lane
+restarted, or terminal draft submitted.
 
 If the native runtime does not publish the socket, state says `unavailable`:
 the prerequisite is native Claude peer messaging enabled for that session.
 MCP channels are a separate preview facility, require launch-time registration
 and consent/policy eligibility, and do not acknowledge notification delivery;
-they are not silently substituted. Already-idle lanes acquire this watcher
-at their **next normal hook boundary** after the updated hooks are installed;
-updating files alone does not retroactively run a hook or wake them.
+they are not silently substituted. Updating files alone cannot retrofit the
+new async hook registrations into an already-idle old launch. A later
+owner-authorized native resume can use the new launch hooks while preserving
+the saved conversation/model; this patch never restarts a lane itself.
+
+For an **existing** canonical Rex receipt, an explicit attach path requires no
+agent restart or model change, but is **disabled by default**. Detached external
+senders are held by bypass-mode Claude unless the owner separately approves
+native `crossSessionInbound: "accept"`. This is a security-policy decision,
+not a flag the adapter sets for itself. In user settings it can affect other
+Claude sessions too; never enable it automatically to make a smoke pass.
+
+After that separate owner approval, use the actual native socket/transcript
+paths reported by that session, not a guessed socket default:
+
+```bash
+python3 "$CEL_ROOT/tools/hooks/claude-idle-mail.py" attach \
+  "$CANONICAL_REX_RECEIPT" "$NATIVE_SOCKET" "$NATIVE_TRANSCRIPT" \
+  --native-consent-settings "$NATIVE_USER_SETTINGS"
+```
+
+Attach derives the reader/workspace/native UUID from the canonical receipt,
+verifies the PID/start time, owned transcript UUID/cwd, and kernel socket peer,
+and requires `accept` in that native process's actual user settings file.
+Without the explicit consent path it refuses **before starting a watcher**;
+it never edits permission settings. Higher-priority native policy still wins.
+`watcher_ensured_not_delivery` is deliberately not a delivery acknowledgement:
+only a matched native transcript receipt and the ordinary inbox drain prove
+the event and mail reached the session. The [native inbound rules](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)
+and [async hook contract](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background)
+describe these separate trust paths.
 
 The opt-in integration `python3 tests/claude-idle-native.py` requires installed
 Claude Code, Linux peer credentials/pidfds, and `python3-pexpect`. It runs a real
 isolated native Claude against a deterministic loopback provider, with a fake
-key and isolated HOME/config (no paid inference). It proves idle peer-event
-delivery through the actual Stop hook, refusal of a foreign session, retry
-deduplication, watcher recovery, later-mail wake, and an owner draft submitted
-only by the fixture's later explicit Enter. Evidence remains in the printed
+key and isolated HOME/config (no paid inference). It proves own-child idle wake
+in the production bypass mode, actual Stop-hook delivery, foreign-session
+refusal, no retries after the native dedup window expires, disabled unconsented
+attach, consented attach to the same live native process, later-mail wake, and
+an owner draft submitted only by the fixture's later explicit Enter. Only the
+fixture's isolated native settings receive its explicit attach consent.
+Evidence remains in the printed
 fixture directory. Native support missing is a failure with the prerequisite,
 not a source-test pass. The normal gate runs the credential-free selector,
 identity, cursor, and retry regressions without launching Claude.

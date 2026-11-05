@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import signal
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +23,7 @@ import uuid
 import pexpect
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_idle", ROOT / "tools/hooks/claude-idle-mail.py")
 idle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(idle)
@@ -43,9 +45,10 @@ def main():
         "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
         "projects": {str(cwd): {"hasTrustDialogAccepted": True}}}))
     native = str(uuid.uuid4())
-    record_path = directory / "rex/lane.json"
+    record_path = directory / "rex/native-fixture-lane.json"
     state_path = Path(str(record_path) + ".inbox/state.json")
     requests = []
+    provider_release = threading.Event()
 
     class Provider(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
@@ -59,6 +62,10 @@ def main():
                 return
             requests.append(body)
             (directory / "provider-requests.json").write_text(json.dumps(requests, indent=2))
+            if len(requests) == 1:
+                # Keep the real native peer turn active past its retry deadline;
+                # the watcher must reconcile its persisted native receipt.
+                provider_release.wait(60)
             text = "Deterministic native fixture response. No provider inference."
             events = [
                 ("message_start", {"type": "message_start", "message": {
@@ -93,18 +100,19 @@ def main():
            "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
            "HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",
            "ALL_PROXY": "http://127.0.0.1:1", "NO_PROXY": "127.0.0.1,localhost",
+           "GIT_SSH_COMMAND": "/bin/false", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
            "CEL_ROOT": str(ROOT), "CEL_REX_RECORD": str(record_path),
            "CEL_REX_STATE": str(directory / "rex"), "CEL_AGENT_NAME": "native-fixture-lane",
            "CEL_INBOX_ME": "native-fixture-lane", "CEL_INBOX_WS": "native-fixture",
            "CEL_INBOX_DIR": str(directory / "inbox"), "CEL_ORCH_SESSIONS": str(directory / "sessions.json")}
-    settings = {"hooks": {
-        "SessionStart": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh", "timeout": 10}]}],
-        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh", "timeout": 10}]}],
+    settings = {"skipDangerousModePermissionPrompt": True, "hooks": {
+        "SessionStart": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh watch", "async": True}]}],
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh watch", "async": True}]}],
         "Stop": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/inbox-stop.sh", "timeout": 10}]}]}}
     screen = (directory / "screen.log").open("w")
-    child = pexpect.spawn("claude", ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+    child = pexpect.spawn("claude", ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                                      "--settings", json.dumps(settings), "--debug-file", str(directory / "debug.log"),
-                                     "--session-id", native, "--model", MODEL],
+                                     "--session-id", native, "--model", MODEL, "--dangerously-skip-permissions"],
                           cwd=str(cwd), env=env, encoding="utf8", dimensions=(30, 120), timeout=1)
     child.logfile_read = screen
     record = {"name": "native-fixture-lane", "agent": "claude", "backend": "rex", "role": "solo",
@@ -159,28 +167,51 @@ def main():
         for _ in range(5):
             pump()
         send_mail("ACTUAL_NATIVE_INBOX_MAIL_ONE")
+        until(lambda: has_request("This is only a wake notification"), "receive a real native idle peer event")
+        until(lambda: state().get("status") == "native_received_mail_unread", "reconcile the actual native transcript receipt")
+        retry_deadline = state()["last_attempt"] + 36
+        while time.time() < retry_deadline:
+            pump()
+        assert state()["attempts"] == 1, "Native receipt did not suppress an expired-window retry"
+        assert not (directory / "inbox/native-fixture.native-fixture-lane.cursor").exists(), "Wake consumed the mailbox before native hook delivery"
+        provider_release.set()
         until(lambda: has_request("ACTUAL_NATIVE_INBOX_MAIL_ONE"), "deliver actual mail through the native Stop continuation")
         until(lambda: state().get("status") == "idle", "observe the hook's canonical inbox drain")
         assert not has_request(draft), "Native wake submitted the owner's draft"
         assert not has_request("FOREIGN_SESSION_MUST_NOT_DELIVER")
         assert has_request("This is only a wake notification"), "No native idle peer event reached the model boundary"
-        before_retry = len(requests)
-        idle.send_wake(target, state()["message_id"])
-        for _ in range(10):
-            pump()
-        assert len(requests) == before_retry, "Native retry duplicated an already delivered peer event"
-        # Restart only our fixture watcher, not Claude. The next native hook
-        # must reacquire its lock and recover the same durable state.
+        receipt = state()
+        assert idle.receipt_status(target, receipt) == "present", "No authoritative native transcript receipt"
+        assert receipt["native_receipt"] in ("user", "queue-operation")
+        # Restart only our fixture watcher, not Claude. Attach through its
+        # canonical receipt without typing or invoking a native turn hook.
         old_watcher = state()["watcher"]
         with os.fdopen(os.pidfd_open(old_watcher["pid"]), "rb") as watcher_fd:
             assert idle.proc_identity(old_watcher["pid"])[1] == old_watcher["pid_start"]
             signal.pidfd_send_signal(watcher_fd.fileno(), signal.SIGTERM)
+        refused = subprocess.run([sys.executable, str(ROOT / "tools/hooks/claude-idle-mail.py"),
+                                  "attach", str(record_path), target["socket"], target["transcript"]],
+                                 cwd=cwd, env=env, capture_output=True, text=True, timeout=10)
+        assert refused.returncode != 0 and "attach is disabled" in refused.stderr
+        # This consent changes only the isolated fixture's real native setting.
+        # Production attach never writes it; an owner must separately approve
+        # the native security-policy change before using the opt-in flag.
+        consent = directory / "config/settings.json"
+        consent.write_text(json.dumps({"crossSessionInbound": "accept"}))
+        for _ in range(10):
+            pump()
+        attached = subprocess.run([sys.executable, str(ROOT / "tools/hooks/claude-idle-mail.py"),
+                                   "attach", str(record_path), target["socket"], target["transcript"],
+                                   "--native-consent-settings", str(consent)],
+                                  cwd=cwd, env=env, check=True, capture_output=True, text=True, timeout=10)
+        attach_result = json.loads(attached.stdout)
+        assert attach_result["recipient"] == "native-fixture-lane" and attach_result["session"] == native
+        until(lambda: state().get("watcher", {}).get("pid") != old_watcher["pid"], "attach its fixture watcher without a Claude restart or hook boundary")
         # A later explicit owner Enter must still submit exactly the retained
         # draft, separately from the earlier peer event.
         child.send("\r")
         until(lambda: has_request(draft), "preserve the draft until explicit owner submission")
         until(lambda: json.loads(record_path.read_text())["agent_status"] == "idle", "finish the owner fixture turn")
-        until(lambda: state().get("watcher", {}).get("pid") != old_watcher["pid"], "recover its fixture watcher after a hook boundary")
         send_mail("ACTUAL_NATIVE_INBOX_MAIL_TWO")
         until(lambda: has_request("ACTUAL_NATIVE_INBOX_MAIL_TWO"), "wake again for later mail")
         until(lambda: state().get("status") == "idle", "drain the second message")
@@ -189,11 +220,18 @@ def main():
         debug = (directory / "debug.log").read_text()
         assert "session_id mismatch" in debug
         assert "Routed user message to queue" in debug
-        assert "Dropped peer message from unknown: duplicate" in debug
+        rows = [json.loads(line) for line in Path(target["transcript"]).read_text().splitlines()]
+        native_users = [row for row in rows if row.get("type") == "user" and row.get("sessionId") == native]
+        wakes = [row for row in native_users if row.get("origin", {}).get("kind") == "peer"]
+        assert len(wakes) == 2, "Native retry or watcher recovery duplicated an idle wake"
+        for marker in ("ACTUAL_NATIVE_INBOX_MAIL_ONE", "ACTUAL_NATIVE_INBOX_MAIL_TWO"):
+            delivered = [row for row in native_users if marker in str(row.get("message", {}).get("content", ""))]
+            assert len(delivered) == 1, "Native hook delivered a mailbox item more than once"
         print("PASS real native idle peer event -> Stop-hook inbox delivery; later mail rearmed; foreign session refused; draft retained; model/session unchanged", flush=True)
         (directory / "result.json").write_text(json.dumps({"passed": True, "native_session": native,
             "model": MODEL, "request_count": len(requests), "state": state()}, indent=2))
     finally:
+        provider_release.set()
         child.terminate(force=True)
         screen.close()
         server.shutdown()
