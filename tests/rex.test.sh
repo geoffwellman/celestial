@@ -28,6 +28,7 @@ YAML
 #!/bin/bash
 case "$1" in
   new)
+    printf '%s\n' "$@" > "$CEL_REX_STATE/rex-args"
     shift
     cwd=""
     while [ "$1" != -- ]; do
@@ -82,6 +83,28 @@ test_rex_run_preserves_role_inbox_args_and_working_directory() {
   if (cd "$RT/ws" && cmd_run orchestrator --repo widget --session-backend herdr --dry-run >/dev/null 2>&1); then
     echo 'duplicate admitted across terminal backends'; _rext_down; return 1
   fi
+  _rext_down
+}
+
+test_rex_only_claude_closes_on_native_completion_without_a_backing_shell() {
+  _rext_setup
+  local rt args
+  for rt in claude pi; do
+    printf '  %s:\n    bin: "%s/bin/runtime"\n' "$rt" "$RT" >> "$CEL_MANIFEST"
+  done
+  for rt in claude omp pi; do
+    _rex_launch widget-orch "$rt" "$RT/ws/repos/widget" widget 'env CEL_ROLE=orchestrator' >/dev/null
+    args="$(cat "$CEL_REX_STATE/rex-args")"
+    assert_contains "$args" '--shell=none'
+    if [ "$rt" = claude ]; then
+      if [[ "$args" == *--keep-open* ]]; then
+        echo 'Claude terminal outlives its native process'; _rext_down; return 1
+      fi
+    else
+      assert_contains "$args" '--keep-open'
+    fi
+    rex_agent_stop rex/session:test/block:test
+  done
   _rext_down
 }
 

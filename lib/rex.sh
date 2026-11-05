@@ -152,7 +152,12 @@ _rex_launch() { # name runtime cwd label envprefix args...
     printf '%q ' "$@"; printf '\n'
   } > "$script"
   printf '%s\n' "$script" > "$file.pending"; chmod 600 "$file.pending"
-  if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none --keep-open --json -- /bin/bash "$script")"; then
+  # Claude owns its terminal directly. Retaining it after normal native exit
+  # would orphan a shell-flavored block that a dead PID cannot authorize us
+  # to close. Other runtimes keep their existing terminal-retention policy.
+  local -a terminal_exit=(--keep-open)
+  [ "$rt" != claude ] || terminal_exit=()
+  if ! resp="$(_rex_cli new "$name" --cwd "$cwd" --window "$label" --shell=none "${terminal_exit[@]}" --json -- /bin/bash "$script")"; then
     # A timeout can have created a session: keep the script and pid receipt,
     # and refuse a blind retry; do not destroy an unobserved session.
     die "cel run: Rex launch was not acknowledged; inspect rex ls before retrying ($name)"

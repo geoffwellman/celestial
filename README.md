@@ -276,6 +276,26 @@ its own named Rex session, and the command
 prints its session and terminal IDs. Use `rex ls`, `rex capture -s <session>
 -b <block>` and Rex's native controls, not Herdr commands, for those terminals.
 
+Managed terminals start the native process directly, with no backing login
+shell. Claude terminals close on normal completion; Rex can retain a quick
+startup failure for diagnostics. Other runtimes keep their existing retention
+policy. A restart closes only its exact live owned block; an additional user
+window is preserved. The enclosing zero-window session can remain:
+automatic session deletion requires an atomic server-side empty-session
+condition, which Rex API revision 10 does not provide.
+
+A server restart is different: Rex revision 10 restores command terminals as
+new default shells, not as the original native processes. Their old PID receipts
+cannot authorize deletion of those replacement shells. Avoiding that restoration
+requires an upstream per-block no-restore policy; the published terminal schema
+has none. Existing retained or repurposed shells are likewise not safe to delete
+using a dead PID receipt.
+
+For a credential-free lifecycle proof on a disposable isolated Rex server, run
+`python3 tests/rex-lifecycle-native.py`. Add `--claude` to exercise the installed
+Claude CLI with a deterministic loopback provider, native UUID resume and the
+same model arguments, without paid inference or touching live sessions.
+
 Role prompts, model/profile selection, workspace and gateway environment,
 inbox identity and review gates are unchanged. Pi/OMP report their real turn
 state and native conversation file through the inbox extension. Claude's
