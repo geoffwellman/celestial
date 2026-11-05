@@ -23,9 +23,9 @@ cleanup() {
   rm -rf -- "$scratch"
 }
 trap cleanup EXIT
-for name in labelled rollback current base other disposable referenced; do
+for name in labelled rollback current inflight base other disposable referenced; do
   case "$name" in
-    rollback|current|disposable|referenced) tags[$name]="slot-studio-local/media-executor:$nonce-$name" ;;
+    rollback|current|inflight|disposable) tags[$name]="slot-studio-local/media-executor:$nonce-$name" ;;
     base) tags[$name]="slot-studio-media-executor-base:$nonce" ;;
     *) tags[$name]="$nonce:$name" ;;
   esac
@@ -42,8 +42,8 @@ done
 container="$(flock -o "$lock" "$docker_bin" container create --name "$nonce" --entrypoint /not-executed "${tags[referenced]}")"
 (
   flock -x 9
-  printf '%s\n' "${tags[current]}" "${tags[rollback]}" > "$scratch/config/cel/docker-keep-patterns.d/.follow-main.next"
-  mv "$scratch/config/cel/docker-keep-patterns.d/.follow-main.next" "$scratch/config/cel/docker-keep-patterns.d/follow-main.patterns"
+  printf '%s\n' "${tags[current]}" "${tags[rollback]}" "${tags[inflight]}" > "$scratch/config/cel/docker-keep-patterns.d/.follow-main.next"
+  mv "$scratch/config/cel/docker-keep-patterns.d/.follow-main.next" "$scratch/config/cel/docker-keep-patterns.d/slot-studio-executors.patterns"
   printf '%s\n' "${tags[other]}" > "$scratch/config/cel/docker-keep-patterns.d/other.patterns"
 ) 9>>"$lock"
 export SMOKE_DOCKER="$docker_bin" SMOKE_IDS="${ids[*]}" SMOKE_LOG="$scratch/calls"
@@ -68,7 +68,7 @@ XDG_CONFIG_HOME="$scratch/config" CEL_BOX_DOCKER="$scratch/docker" CEL_BOX_DOCKE
 # Legacy operator file remains supported and independent of producer files.
 printf '# operator-owned\n' > "$scratch/legacy"
 XDG_CONFIG_HOME="$scratch/config" CEL_BOX_DOCKER="$scratch/docker" CEL_BOX_DOCKER_KEEP_FILE="$scratch/legacy" CEL_BOX_DOCKER_KEEP_DIR="$scratch/config/cel/docker-keep-patterns.d" "$root/bin/cel" box sweep-docker >/dev/null
-for name in labelled rollback current base other referenced; do
+for name in labelled rollback current inflight base other referenced; do
   "$docker_bin" image inspect "${ids[$name]}" >/dev/null
 done
 if "$docker_bin" image inspect "${ids[disposable]}" >/dev/null 2>&1; then
@@ -76,4 +76,4 @@ if "$docker_bin" image inspect "${ids[disposable]}" >/dev/null 2>&1; then
 fi
 removals="$(grep '^image rm ' "$SMOKE_LOG")"
 [ "$removals" = "image rm ${ids[disposable]}" ] || { printf 'unexpected mutation: %s\n' "$removals" >&2; exit 1; }
-printf 'PASS real Docker consumer: current, rollback, immutable base, other producer, label and stopped-container references survive; superseded executor removed; no existing images/cache touched\n'
+printf 'PASS real Docker consumer: current, rollback, in-flight, immutable base, other producer, label and stopped-container references survive; superseded executor removed; no existing images/cache touched\n'

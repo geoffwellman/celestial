@@ -691,10 +691,11 @@ test_docker_retention_namespaced_producers_union_and_bound_executor_cleanup() {
   _box_retention_fixture
   local dir; dir="$(_box_docker_keep_dir)"
   mkdir -p "$dir"
-  printf '%s\n' 'slot-studio-local/media-executor:current' 'slot-studio-local/media-executor:rollback-42' > "$dir/follow-main.patterns"
+  printf '%s\n' 'slot-studio-local/media-executor:current' 'slot-studio-local/media-executor:rollback-42' 'slot-studio-local/media-executor:inflight' > "$dir/slot-studio-executors.patterns"
   printf '%s\n' 'other/producer:release' > "$dir/other.patterns"
   jq '. + [
     {Id:"sha256:111",RepoTags:["slot-studio-local/media-executor:current"],Size:1,Config:{Labels:null}},
+    {Id:"sha256:333",RepoTags:["slot-studio-local/media-executor:inflight"],Size:1,Config:{Labels:null}},
     {Id:"sha256:222",RepoTags:["other/producer:release"],Size:1,Config:{Labels:null}}
   ] | map(if .Id == "sha256:ddd" then .RepoTags=["slot-studio-local/media-executor:superseded"] else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
   mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
@@ -745,7 +746,7 @@ test_docker_retention_publication_lock_preserves_other_producer() {
   cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || return 1
   assert_eq "$(_box_prune_calls)" ''
-  mv "$dir/.follow-main.next" "$dir/follow-main.patterns"
+  mv "$dir/.follow-main.next" "$dir/slot-studio-executors.patterns"
   exec 8>&-
   cmd_box sweep-docker >/dev/null
   assert_eq "$(cat "$dir/other.patterns")" 'other:release'
@@ -776,4 +777,24 @@ test_docker_retention_legacy_bracket_globs_remain_supported() {
   cmd_box sweep-docker >/dev/null
   assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
   rm -rf "$T"
+}
+
+test_docker_retention_only_reserved_complete_set_can_narrow_executor_namespace() {
+  local declaration
+  for declaration in legacy generic empty-authority unrelated-authority; do
+    _box_retention_fixture
+    local dir; dir="$(_box_docker_keep_dir)"
+    mkdir -p "$dir"
+    jq 'map(if .Id == "sha256:ddd" then .RepoTags=["slot-studio-local/media-executor:inflight"] else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
+    mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
+    case "$declaration" in
+      legacy) printf 'slot-studio-local/media-executor:rollback-42\n' >> "$(_box_docker_keep_file)" ;;
+      generic) printf 'slot-studio-local/media-executor:rollback-42\n' > "$dir/other.patterns" ;;
+      empty-authority) printf '# no complete executor set\n' > "$dir/slot-studio-executors.patterns" ;;
+      unrelated-authority) printf 'other:release\n' > "$dir/slot-studio-executors.patterns" ;;
+    esac
+    cmd_box sweep-docker >/dev/null
+    assert_eq "$(grep 'image rm' "$DOCKER_LOG" || true)" ''
+    rm -rf "$T"
+  done
 }
