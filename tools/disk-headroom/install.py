@@ -44,7 +44,9 @@ def replace_bytes(path, data, mode):
 
 
 def install(home, cel, hashes, retire_v1=False, docker=False, apply=False,
-            cel_sha256=None, docker_runtime_sha256=None, release_queue_issuer=None):
+            cel_sha256=None, docker_runtime_sha256=None, release_queue_issuer=None, follow_main_issuer=None):
+    if follow_main_issuer is not None:
+        controller.reviewed_follow_main_issuer(follow_main_issuer)
     if not apply:
         print('Plan: preserve standalone scripts; back up and transactionally install controller/service drop-ins; '
               'no timers stopped, disabled or enabled. Parent must quiesce existing timers/services before --apply.')
@@ -58,11 +60,11 @@ def install(home, cel, hashes, retire_v1=False, docker=False, apply=False,
         except BlockingIOError:
             raise ValueError('controller invocation is active; migration refused')
         return install_quiescent(Path(home).resolve(), Path(cel).resolve(), hashes, retire_v1, docker,
-                                 directory, cel_sha256, docker_runtime_sha256, release_queue_issuer)
+                                 directory, cel_sha256, docker_runtime_sha256, release_queue_issuer, follow_main_issuer)
 
 
 def install_quiescent(home, cel, hashes, retire_v1, docker, directory, cel_sha256, docker_runtime_sha256,
-                      release_queue_issuer):
+                      release_queue_issuer, follow_main_issuer):
     units = home / '.config/systemd/user'
     existing_dropins = {}
     for name in UNITS:
@@ -78,18 +80,43 @@ def install_quiescent(home, cel, hashes, retire_v1, docker, directory, cel_sha25
                 existing_dropins[name] = [Path(p) for p in shlex.split(fields.get('DropInPaths', ''))]
     if not os.access(cel, os.X_OK) or controller.executable_digest(cel) != cel_sha256:
         raise ValueError('missing or changed reviewed cel executable SHA256')
-    if docker and controller.runtime_files(cel)[1] != docker_runtime_sha256:
-        raise ValueError('missing or changed reviewed Docker runtime SHA256')
-    config = {'version': 1, 'cel': str(cel), 'cel_sha256': cel_sha256,
-              'docker_runtime_sha256': docker_runtime_sha256, 'handler_sha256': hashes,
+    runtime_files, runtime_digest = controller.runtime_files(cel)
+    if runtime_digest != docker_runtime_sha256:
+        raise ValueError('missing or changed reviewed CLI runtime SHA256')
+    # The maintenance application owns its reviewed dependency packet. A normal
+    # update of the general-purpose CLI must not invalidate cleanup/notification
+    # pins or silently swap the code used by an unattended maintenance pass.
+    runtime = home / '.local/lib/cel-disk-headroom/approved-runtime' / runtime_digest
+    parent = runtime
+    while parent != home:
+        if parent.is_symlink() or (parent.exists() and
+                (not parent.is_dir() or parent.stat().st_uid != os.getuid())):
+            raise ValueError(f'unsafe approved runtime directory: {parent}')
+        parent = parent.parent
+    config = {'version': 1, 'cel': str(runtime / 'bin/cel'), 'cel_sha256': cel_sha256,
+              'docker_runtime_sha256': runtime_digest, 'handler_sha256': hashes,
               'retire_notification_version': 1 if retire_v1 else 0, 'docker_opt_in': docker,
               'release_queue_issuer': release_queue_issuer}
+    if follow_main_issuer is not None:
+        config['follow_main_issuer'] = follow_main_issuer
     dest = home / '.local/lib/cel-disk-headroom/controller.py'
     wrapper = home / '.local/bin/cel-disk-headroom'
-    payloads = {
+    payloads = {}
+    for relative, data in runtime_files.items():
+        path = runtime / relative
+        mode = 0o700 if relative == 'bin/cel' else 0o600
+        if path.is_symlink():
+            raise ValueError(f'changed immutable approved runtime: {path}')
+        if path.exists():
+            if (not path.is_file() or path.stat().st_uid != os.getuid() or
+                    path.read_bytes() != data or stat.S_IMODE(path.stat().st_mode) != mode):
+                raise ValueError(f'changed immutable approved runtime: {path}')
+            continue
+        payloads[path] = (data, mode)
+    payloads.update({
         dest: (Path(__file__).with_name('controller.py').read_bytes(), 0o755),
         wrapper: (('#!/bin/sh\nexec /usr/bin/python3 ' + shlex.quote(str(dest)) + ' "$@"\n').encode(), 0o755),
-        home / '.config/cel/disk-headroom.json': ((json.dumps(config, sort_keys=True) + '\n').encode(), 0o600)}
+        home / '.config/cel/disk-headroom.json': ((json.dumps(config, sort_keys=True) + '\n').encode(), 0o600)})
     mapping = {'cel-disk-monitor': 'run', 'cel-disk-release-drain': 'handler release-drain',
                'cel-disk-drain': 'handler ordinary-drain', 'cel-disk-retire': 'handler preservation-retire'}
     for name, verb in mapping.items():
@@ -175,6 +202,7 @@ def main():
     p.add_argument('--cel-sha256')
     p.add_argument('--docker-runtime-sha256')
     p.add_argument('--release-queue-issuer', help='exact reviewed producer identity; required for apply')
+    p.add_argument('--follow-main-issuer', help='optional exact reviewed observer identity; never a cleanup grant')
     p.add_argument('--describe-cel', action='store_true', help='print candidate digests for review; never install')
     p.add_argument('--handler-sha256', action='append', default=[], metavar='NAME=SHA256')
     p.add_argument('--retire-notification-v1', action='store_true')
@@ -193,7 +221,7 @@ def main():
                               'docker_runtime_sha256': controller.runtime_files(cel)[1]}, sort_keys=True))
             return 0
         install(Path.home(), a.cel, hashes, a.retire_notification_v1, a.enable_safe_docker, a.apply,
-                a.cel_sha256, a.docker_runtime_sha256, a.release_queue_issuer)
+                a.cel_sha256, a.docker_runtime_sha256, a.release_queue_issuer, a.follow_main_issuer)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         print(f'headroom installation refused: {e}', file=sys.stderr)
         return 1

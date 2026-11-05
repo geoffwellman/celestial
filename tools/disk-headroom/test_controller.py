@@ -39,7 +39,10 @@ if name=='cel':
   sys.exit(0)
  if sys.argv[1:3]==['box','sweep-docker']:name='docker-sweep'
 if name=='docker':
+ if (h/'fail-docker-facts').exists(): print('fixture diagnostics unavailable');sys.exit(9)
  print('{}');sys.exit(0)
+if name=='cel-disk-retire':
+ (h/'retire-environment').write_text(json.dumps({k:os.environ.get(k) for k in ('CEL_RETIRE_NOTIFY_RECIPIENT','CEL_RETIRE_MIN_FREE','CEL_RETIRE_HOOK_AFTER_COPY')}))
 config=json.loads((h/'effects').read_text()).get(name,{})
 if config.get('sleep'):time.sleep(config['sleep'])
 if config.get('delta'):
@@ -121,27 +124,72 @@ class HeadroomTests(unittest.TestCase):
                                  True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
                                  self.data['release_queue_issuer'])
 
+    def follow_manifest(self):
+        self.data['follow_main_issuer'] = 'fixture-follow-main'
+        self.configure()
+        parent = self.h / 'code/slot-studio-wt'
+        candidate = parent / ('local-' + 'c' * 12)
+        candidate.mkdir(parents=True)
+        metadata = self.h / 'code/slot-studio/.git/worktrees' / candidate.name
+        metadata.mkdir(parents=True)
+        (candidate / '.git').write_text('gitdir: ' + str(metadata) + '\n')
+        (metadata / 'HEAD').write_text('c' * 40 + '\n')
+        (candidate / '.git').chmod(0o600)
+        (metadata / 'HEAD').chmod(0o600)
+        live = parent / ('local-' + 'a' * 12)
+        live.mkdir()
+        live_metadata = metadata.parent / live.name
+        live_metadata.mkdir()
+        (live / '.git').write_text('gitdir: ' + str(live_metadata) + '\n')
+        (live_metadata / 'HEAD').write_text('a' * 40 + '\n')
+        (live / '.git').chmod(0o600)
+        (live_metadata / 'HEAD').chmod(0o600)
+        manifest = {
+            'version': 1, 'issuer': self.data['follow_main_issuer'],
+            'generated_at': m.datetime.datetime.now(m.datetime.timezone.utc).isoformat(),
+            'live': {'worktree': str(parent / ('local-' + 'a' * 12)),
+                     'image': 'slot-studio-local/media-executor:' + 'a' * 12},
+            'rollback': {'worktree': str(parent / ('local-' + 'b' * 12)),
+                         'image': 'slot-studio-local/media-executor:' + 'b' * 12},
+            'base': {'image': 'slot-studio-media-executor-base:local', 'label': 'cel.keep=true'},
+            'worktree_candidates': [{'path': str(candidate), 'head': 'c' * 40}],
+            'retired_this_pass': []}
+        path = self.h / '.cache/slot-builder-iso/follow-main-manifest.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(manifest))
+        path.chmod(0o600)
+        return path, manifest, metadata
+
+    def observe_follow(self):
+        c = self.controller()
+        c.load()
+        return c.follow_main_facts()
+
 
     def test_threshold_stops_after_each_phase(self):
         self.effects({'cel-disk-release-drain': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'docker', 'docker'])
         p = self.state()['producers']['release-drain']
         self.assertEqual(p['observed_df_delta_bytes'], 5 * m.GIB)
         self.assertEqual(p['after_available_bytes'], m.TARGET)
+        self.assertEqual(self.state()['docker_facts']['system_df']['status'], 'ok')
+        self.assertIn('follow-main-executor-images', self.state()['producers'])
+        self.assertEqual(self.mail('root'), [])
+        self.assertEqual(self.mail('celestial-disk-cleanup'), [])
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual(len(self.commands()), 1)
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'docker', 'docker', 'docker', 'docker'])
 
     def test_threshold_after_ordinary_stops_retirement_and_docker(self):
         self.effects({'cel-disk-drain': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'docker', 'docker'])
         self.assertEqual(self.state()['producers']['ordinary-drain']['after_available_bytes'], m.TARGET)
 
     def test_threshold_after_retirement_stops_docker(self):
         self.effects({'cel-disk-retire': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'cel-disk-retire'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'cel-disk-retire', 'docker', 'docker'])
         self.assertEqual(self.state()['producers']['preservation-retire']['after_available_bytes'], m.TARGET)
 
     def test_threshold_after_docker_records_measured_recovery(self):
@@ -150,10 +198,100 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(self.state()['producers']['docker-sweep']['after_available_bytes'], m.TARGET)
         self.assertEqual(self.mail('root'), [])
 
-    def test_already_at_threshold_never_invokes_handler_units(self):
+    def test_healthy_nonretirement_handler_triggers_still_skip(self):
         self.free(m.TARGET)
-        self.assertEqual(self.controller().run('ordinary-drain'), 0)
+        for name in ('release-drain', 'ordinary-drain', 'docker-sweep'):
+            with self.subTest(name=name):
+                self.assertEqual(self.controller().run(name), 0)
         self.assertEqual(self.commands(), [])
+
+    def test_healthy_daily_retirement_runs_reviewed_child_without_probe_or_guard_bypass(self):
+        self.free(m.TARGET + m.GIB)
+        with patch.dict(os.environ, {'CEL_RETIRE_MIN_FREE': '0', 'CEL_RETIRE_HOOK_AFTER_COPY': 'unsafe'}):
+            self.assertEqual(self.controller().run('preservation-retire'), 0)
+        self.assertEqual(self.commands(), [['cel-disk-retire', '--apply']])
+        state = self.state()
+        self.assertEqual(state['producers']['preservation-retire']['status'], 'ok')
+        self.assertEqual(state['pass_status'], 'target-met')
+        self.assertNotIn('docker_facts', state)
+        self.assertEqual(state['notifications'], {})
+        environment = json.loads((self.h / 'retire-environment').read_text())
+        self.assertEqual(environment, {'CEL_RETIRE_NOTIFY_RECIPIENT': 'celestial-disk-cleanup',
+                                       'CEL_RETIRE_MIN_FREE': None, 'CEL_RETIRE_HOOK_AFTER_COPY': None})
+
+    def test_healthy_daily_retirement_keeps_pin_notification_and_lock_gates(self):
+        self.free(m.TARGET + m.GIB)
+        pin = self.data['handler_sha256'].pop('preservation-retire')
+        self.configure()
+        self.assertEqual(self.controller().run('preservation-retire'), 1)
+        self.assertIn('reviewed handler SHA256', self.state()['producers']['preservation-retire']['output'])
+        self.data['handler_sha256']['preservation-retire'] = pin
+        self.data['retire_notification_version'] = 0
+        self.configure()
+        self.assertEqual(self.controller().run('preservation-retire'), 1)
+        self.assertIn('lane-notification adapter', self.state()['producers']['preservation-retire']['output'])
+        self.data['retire_notification_version'] = 1
+        self.configure()
+        c = self.controller()
+        with open(c.directory / 'lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(c.run('preservation-retire'), 75)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.state()['notifications'], {})
+
+    def test_healthy_daily_retirement_retains_real_child_timeout(self):
+        self.free(m.TARGET + m.GIB)
+        self.effects({'cel-disk-retire': {'sleep': 10}})
+        self.assertEqual(self.controller(pass_seconds=3, handler_seconds=1, control_reserve=1).run('preservation-retire'), 1)
+        self.assertEqual(self.state()['producers']['preservation-retire']['status'], 'timeout')
+        self.assertEqual(self.commands(), [['cel-disk-retire', '--apply']])
+        self.assertEqual(self.state()['notifications'], {})
+
+    def test_healthy_full_pass_refreshes_sources_without_mutation_or_mail(self):
+        manifest, data, metadata = self.follow_manifest()
+        queue = manifest.with_name('release-queue.json')
+        queue.write_text(json.dumps({'version': 1, 'issuer': self.data['release_queue_issuer'],
+                                    'generated_at': data['generated_at'], 'entries': [], 'held_count': 0}))
+        self.free(m.TARGET)
+        watched = [manifest, queue, metadata / 'HEAD',
+                   Path(data['worktree_candidates'][0]['path']) / '.git', self.config, self.h / 'free',
+                   *self.bin.iterdir()]
+        before = {p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns) for p in watched}
+        self.assertEqual(self.controller().run(), 0)
+        state = self.state()
+        self.assertEqual(state['pass_status'], 'target-met')
+        self.assertEqual(state['capacity_deficit_bytes'], 0)
+        self.assertEqual(state['docker_facts']['system_df']['status'], 'ok')
+        self.assertEqual(state['docker_facts']['container_writable']['status'], 'ok')
+        self.assertGreaterEqual(state['docker_facts']['observed_at'], state['started_at'])
+        for name in ('gate-runs', 'follow-main-executor-images'):
+            self.assertEqual(state['producers'][name]['status'], 'observed')
+            self.assertGreaterEqual(state['producers'][name]['observed_at'], state['started_at'])
+        self.assertEqual(state['producers']['follow-main-executor-images']['candidate_count'], 1)
+        self.assertEqual(state['producers']['follow-main-executor-images']['authorization'], 'none')
+        self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
+                                           ['docker', 'ps', '-a', '--size', '--format', '{{json .}}']])
+        self.assertEqual(state['notifications'], {})
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns) for p in watched}, before)
+        # Single-handler timer triggers neither duplicate probes nor notifications.
+        self.assertEqual(self.controller().run('ordinary-drain'), 0)
+        self.assertEqual(len(self.commands()), 2)
+        self.assertEqual(self.state()['docker_facts'], state['docker_facts'])
+
+    def test_healthy_full_pass_keeps_diagnostic_failure_explicit_and_silent(self):
+        self.free(m.TARGET)
+        (self.h / 'fail-docker-facts').touch()
+        self.assertEqual(self.controller().run(), 0)
+        state = self.state()
+        self.assertEqual(state['pass_status'], 'target-met')
+        for name in ('system_df', 'container_writable'):
+            self.assertEqual(state['docker_facts'][name]['status'], 'failed')
+            self.assertEqual(state['docker_facts'][name]['exit_code'], 9)
+            self.assertIn('diagnostics unavailable', state['docker_facts'][name]['output'])
+        self.assertGreaterEqual(state['docker_facts']['observed_at'], state['started_at'])
+        self.assertEqual(state['producers']['follow-main-executor-images']['status'], 'missing-adapter')
+        self.assertEqual(state['notifications'], {})
+        self.assertEqual(len(self.commands()), 2)
 
     def test_partial_failure_continues_measures_and_reports(self):
         self.effects({'cel-disk-release-drain': {'delta': m.GIB, 'rc': 1},
@@ -349,11 +487,146 @@ class HeadroomTests(unittest.TestCase):
             self.assertNotIn(key, environment)
         self.assertEqual(environment['CEL_RETIRE_NOTIFY_RECIPIENT'], 'celestial-disk-cleanup')
 
+    def test_notifications_reach_native_inbox_with_valid_categories_once(self):
+        # Exercise the real inbox consumer, not the transport fixture's ACK.
+        cli = self.bin / 'cel'
+        cli.write_text('''#!/bin/bash
+set -euo pipefail
+export CEL_ROOT="$HEADROOM_SOURCE_ROOT"
+source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/lib/inbox.sh"
+[[ "$1" == inbox && "$2" == send ]] || exit 2
+shift 2
+_inbox_send "$@"
+''')
+        cli.chmod(0o700)
+        self.data['cel_sha256'] = m.executable_digest(cli)
+        self.configure()
+        inbox = self.h / 'native-inbox'
+        inbox.mkdir()
+        with patch.dict(os.environ, {
+                'HEADROOM_SOURCE_ROOT': str(HERE.parents[1]),
+                'HOME': str(self.h), 'CEL_INBOX_DIR': str(inbox),
+                'CEL_REGISTRY': str(self.h / 'registry.yaml'),
+                'XDG_DATA_HOME': str(self.h / 'data'),
+                'XDG_STATE_HOME': str(self.h / 'state'),
+                'XDG_CACHE_HOME': str(self.h / 'cache'),
+                'XDG_CONFIG_HOME': str(self.h / 'config'),
+                'CEL_REX_STATE': str(self.h / 'rex'), 'REX_AUTOSTART': 'false'}):
+            controller = self.controller()
+            controller.load()
+            delivered = controller.notify('celestial-disk-cleanup', 'maintenance', 'routine maintenance')
+            self.assertTrue(delivered, self.state()['notifications'])
+            self.assertTrue(controller.notify('celestial-disk-cleanup', 'maintenance', 'routine maintenance'))
+            self.assertTrue(controller.notify('root', 'capacity', 'owner capacity decision'))
+        rows = [json.loads(line) for line in (inbox / 'plane.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['to'], row['kind'], row['message']) for row in rows], [
+            ('celestial-disk-cleanup', 'status', 'routine maintenance'),
+            ('root', 'escalation', 'owner capacity decision')])
+        self.assertTrue(all(not row['debt'] for row in self.state()['notifications'].values()))
+
+    def test_installed_native_cli_survives_source_updates_and_delivers_mail(self):
+        source = self.h / 'source-runtime'
+        files, digest = m.runtime_files(HERE.parents[1] / 'bin/cel')
+        for relative, data in files.items():
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o700 if relative == 'bin/cel' else 0o600)
+        good = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=good):
+            installer.install(self.h, source / 'bin/cel', self.data['handler_sha256'],
+                              True, True, True, m.executable_digest(source / 'bin/cel'), digest,
+                              self.data['release_queue_issuer'])
+        config = self.h / '.config/cel/disk-headroom.json'
+        installed = json.loads(config.read_text())
+        inbox = self.h / 'native-inbox'
+        inbox.mkdir()
+        # Roster discovery is unrelated to delivery; never contact host daemons.
+        for name, response in (('herdr', '{"result":{"agents":[]}}'), ('rex', '{"sessions":[]}')):
+            path = self.bin / name
+            path.write_text('#!/bin/sh\nprintf \'%s\\n\' \'' + response + '\'\n')
+            path.chmod(0o700)
+        docker = self.bin / 'docker'
+        docker.write_text('''#!/usr/bin/python3
+import json, sys
+image = 'sha256:' + 'd' * 64
+operation = sys.argv[1:3]
+if operation == ['container', 'ls']:
+    pass
+elif operation == ['image', 'ls']:
+    print(json.dumps({'ID': image}))
+elif operation == ['image', 'inspect']:
+    print(json.dumps([{'Id': image, 'Size': 4096, 'RepoTags': ['fixture-temporary:old'], 'Config': {'Labels': None}}]))
+elif operation == ['system', 'df']:
+    print(json.dumps({'Type': 'Images', 'Size': '4096B', 'Reclaimable': '4096B'}))
+else:
+    raise SystemExit('mutation or unexpected daemon operation refused')
+''')
+        docker.chmod(0o700)
+        proc = self.h / 'proc'
+        proc.mkdir()
+        environment = {
+            'HOME': str(self.h), 'CEL_INBOX_DIR': str(inbox),
+            'CEL_REGISTRY': str(self.h / 'registry.yaml'),
+            'XDG_DATA_HOME': str(self.h / 'data'), 'XDG_STATE_HOME': str(self.h / 'state'),
+            'XDG_CACHE_HOME': str(self.h / 'cache'), 'XDG_CONFIG_HOME': str(self.h / 'config'),
+            'CEL_REX_STATE': str(self.h / 'rex'), 'REX_AUTOSTART': 'false',
+            'CEL_BOX_DOCKER': str(docker), 'CEL_PROC': str(proc)}
+        (source / 'lib/inbox.sh').write_text('printf used > "$FIXTURE_HOME/obsolete-source"\nexit 9\n')
+        with patch.dict(os.environ, environment):
+            controller = FakeFree(self.h, config)
+            controller.load()
+            delivered = controller.notify('celestial-disk-cleanup', 'maintenance', 'packet survives library update')
+            self.assertTrue(delivered, controller.state['notifications'])
+            (source / 'bin/cel').write_text('#!/bin/sh\nexit 99\n')
+            delivered = controller.notify('root', 'capacity', 'packet survives executable update')
+            self.assertTrue(delivered, controller.state['notifications'])
+            packet_environment = dict(os.environ, CEL_ROOT=str(Path(installed['cel']).parent.parent))
+            capability = subprocess.run([installed['cel'], 'box', 'docker-safety'],
+                                        env=packet_environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(capability.returncode, 0, capability.stderr)
+            self.assertEqual(json.loads(capability.stdout)['version'], 1)
+            dry = subprocess.run([installed['cel'], 'box', 'sweep-docker', '--dry-run'],
+                                 env=packet_environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertEqual(dry.stdout.strip(), '4096')
+        rows = [json.loads(line) for line in (inbox / 'plane.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['to'], row['kind'], row['message']) for row in rows], [
+            ('celestial-disk-cleanup', 'status', 'packet survives library update'),
+            ('root', 'escalation', 'packet survives executable update')])
+        self.assertFalse((self.h / 'obsolete-source').exists())
+
+
     def test_last_handler_cannot_consume_notification_reserve(self):
-        self.effects({'docker-sweep': {'sleep': 10}})
-        start = time.monotonic()
-        self.assertEqual(self.controller(pass_seconds=1.5, handler_seconds=10, control_reserve=1).run(), 1)
-        self.assertLess(time.monotonic() - start, 1.5)
+        self.effects({'docker-sweep': {'sleep': 5}})
+        # Charge real elapsed time only during the last handler. Earlier short
+        # command scheduling must not skip the path under test; the streamed
+        # child still really times out, and real notification children must run.
+        monotonic = time.monotonic
+        elapsed = 0.0
+        started = None
+
+        def clock():
+            return elapsed if started is None else elapsed + monotonic() - started
+
+        with patch.object(m.time, 'monotonic', new=clock):
+            controller = self.controller(pass_seconds=12, handler_seconds=10, control_reserve=10)
+            command = controller.command
+
+            def charge_last(argv, *args, **kwargs):
+                nonlocal elapsed, started
+                if argv[-1] != 'sweep-docker':
+                    return command(argv, *args, **kwargs)
+                started = monotonic()
+                try:
+                    return command(argv, *args, **kwargs)
+                finally:
+                    elapsed += monotonic() - started
+                    started = None
+
+            with patch.object(controller, 'command', new=charge_last):
+                self.assertEqual(controller.run(), 1)
         self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'timeout')
         self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
         self.assertEqual(self.mail('root'), [])
@@ -539,6 +812,317 @@ class HeadroomTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'explicit reviewed'):
             self.controller().load()
         self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+
+    def test_follow_main_is_optional_and_invalid_configuration_fails_closed(self):
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'missing-adapter')
+        self.assertEqual(row['authorization'], 'none')
+        for value in (None, '', '  ', 4, [], {}, 'x' * 257, 'issuer\n'):
+            with self.subTest(value=value):
+                self.data['follow_main_issuer'] = value
+                self.configure()
+                with self.assertRaisesRegex(ValueError, 'follow-main issuer'):
+                    self.controller().load()
+                if value is not None:
+                    with self.assertRaisesRegex(ValueError, 'follow-main issuer'):
+                        installer.install(self.h, self.bin / 'cel', {}, follow_main_issuer=value)
+
+    def test_follow_main_observes_retention_not_authorization(self):
+        path, data, _ = self.follow_manifest()
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'observed', row)
+        for key in ('live', 'rollback', 'base', 'generated_at'):
+            self.assertEqual(row[key], data[key])
+        self.assertEqual(row['candidate_count'], 1)
+        self.assertLess(row['publication_age_seconds'], 10)
+        self.assertTrue(row['source_controlled_deletion_disabled'])
+        self.assertEqual(row['authorization'], 'none')
+        self.assertNotIn('worktree_candidates', row)
+        data['rollback'] = None
+        data.pop('retired_this_pass')
+        data['worktree_candidates'] = []
+        path.write_text(json.dumps(data))
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'observed')
+        self.assertIsNone(row['rollback'])
+        self.assertEqual(row['candidate_count'], 0)
+        self.assertEqual(self.commands(), [])
+
+    def test_follow_main_rejects_unknown_malformed_stale_and_duplicate_facts(self):
+        path, original, _ = self.follow_manifest()
+        cases = [
+            {'version': True}, {'version': 2}, {'issuer': 'different-issuer'},
+            {'issuer': original['issuer'].upper()}, {'issuer': None}, {'unknown': []},
+            {'generated_at': '2020-01-01T00:00:00Z'},
+            {'generated_at': '2026-01-01T00:00:00'},
+            {'generated_at': '2026-01-01T01:00:00+01:00'},
+            {'generated_at': '2026-99-01T00:00:00Z'},
+            {'generated_at': (m.datetime.datetime.now(m.datetime.timezone.utc) + m.datetime.timedelta(seconds=120)).isoformat()},
+            {'live': None}, {'live': dict(original['live'], extra=True)},
+            {'live': dict(original['live'], image='other:tag')},
+            {'live': dict(original['live'], worktree=str(self.h / 'elsewhere/local-' ) + 'a' * 12)},
+            {'rollback': original['live']}, {'base': dict(original['base'], label='cel.keep=false')},
+            {'base': dict(original['base'], image='invalid image')},
+            {'worktree_candidates': None}, {'worktree_candidates': original['worktree_candidates'] * 2},
+            {'worktree_candidates': original['worktree_candidates'] * 257},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], head='d' * 40)]},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], head='c' * 39)]},
+            {'rollback': {'worktree': str(self.h / 'code/slot-studio-wt' / ('local-' + 'a' * 40)),
+                          'image': 'slot-studio-local/media-executor:' + 'a' * 40}},
+            {'worktree_candidates': [{'path': str(self.h / 'code/slot-studio-wt' / ('local-' + 'a' * 40)),
+                                      'head': 'a' * 40}]},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], extra=True)]},
+            {'worktree_candidates': [{'path': original['live']['worktree'], 'head': 'a' * 40}]},
+            {'retired_this_pass': ['not-a-grant']},
+            {'tracing_policy': None}, {'tracing_policy': {}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'not-a-head'}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'd' * 40, 'extra': True}},
+            {'tracing_policy': {'mode': 'capped', 'uncapped_opt_in': 'rejected', 'source_sha': 'd' * 40}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'yes', 'source_sha': 'd' * 40}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps(dict(original, **changes)))
+                row = self.observe_follow()
+                self.assertEqual(row['status'], 'blocked')
+                self.assertEqual(row['authorization'], 'none')
+                self.assertNotIn('candidate_count', row)
+        for raw in ('{}', '[]', '{', json.dumps(original)[:-1] + ', "version": 1}', 'x' * 65537):
+            with self.subTest(raw=raw[:30]):
+                path.write_text(raw)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+
+    def test_follow_main_timestamp_freshness_boundaries(self):
+        path, data, _ = self.follow_manifest()
+        stamp = m.datetime.datetime.fromisoformat(data['generated_at']).timestamp()
+        for age, expected in ((-61, 'blocked'), (-60, 'observed'), (600, 'observed'), (601, 'blocked')):
+            with self.subTest(age=age), patch.object(m.time, 'time', return_value=stamp + age):
+                self.assertEqual(self.observe_follow()['status'], expected)
+
+    def test_follow_main_owned_nonsymlink_bounded_files_and_metadata(self):
+        path, data, metadata = self.follow_manifest()
+        candidate_git = Path(data['worktree_candidates'][0]['path']) / '.git'
+        for target in (path, candidate_git, metadata / 'HEAD'):
+            with self.subTest(target=target):
+                before = target.read_bytes()
+                target.chmod(0o666)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.chmod(0o600)
+                saved = target.with_name(target.name + '.saved')
+                target.rename(saved)
+                target.symlink_to(saved)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.unlink()
+                os.mkfifo(target, 0o600)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.unlink()
+                saved.rename(target)
+                self.assertEqual(target.read_bytes(), before)
+        c = self.controller()
+        c.load()
+        with patch.object(m.os, 'getuid', return_value=os.getuid() + 1):
+            self.assertEqual(c.follow_main_facts()['status'], 'blocked')
+        for directory in (path.parent, metadata, candidate_git.parent):
+            saved = directory.with_name(directory.name + '.saved')
+            directory.rename(saved)
+            directory.symlink_to(saved, target_is_directory=True)
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+            directory.unlink()
+            saved.rename(directory)
+        path.unlink()
+        self.assertEqual(self.observe_follow()['status'], 'blocked')
+
+    def test_follow_main_head_metadata_mismatch_and_escape_are_blocked(self):
+        _, data, metadata = self.follow_manifest()
+        head = metadata / 'HEAD'
+        for value in ('d' * 40, 'ref: refs/heads/main', 'x' * 129):
+            head.write_text(value + '\n')
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        head.write_text('c' * 40 + '\n')
+        pointer = Path(data['worktree_candidates'][0]['path']) / '.git'
+        for value in ('gitdir: /elsewhere', 'gitdir: relative/path', 'malformed'):
+            pointer.write_text(value + '\n')
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        self.assertEqual(self.commands(), [])
+
+    def test_installer_carries_optional_observer_identity_transactionally(self):
+        good = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=good):
+            self.install()
+            config = self.h / '.config/cel/disk-headroom.json'
+            self.assertNotIn('follow_main_issuer', json.loads(config.read_text()))
+            installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
+                              True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
+                              self.data['release_queue_issuer'], 'fixture-follow-main')
+        self.assertEqual(json.loads(config.read_text())['follow_main_issuer'], 'fixture-follow-main')
+        previous = config.read_bytes()
+        def fail_reload(argv, **kwargs):
+            if 'daemon-reload' in argv:
+                raise subprocess.CalledProcessError(1, argv, stderr='fixture failure')
+            return good
+        with patch.object(installer.subprocess, 'run', fail_reload):
+            with self.assertRaisesRegex(ValueError, 'rollback'):
+                installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
+                                  True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
+                                  self.data['release_queue_issuer'], 'different-fixture-issuer')
+        self.assertEqual(config.read_bytes(), previous)
+
+    def test_tracing_policy_requires_fresh_source_attestation_and_never_grants_deletion(self):
+        path, data, _ = self.follow_manifest()
+        self.free(m.TARGET)
+        for mode in ('disabled', 'enabled', 'unknown'):
+            for opt_in in ('rejected', 'allowed', 'unknown'):
+                with self.subTest(mode=mode, uncapped_opt_in=opt_in):
+                    policy = {'mode': mode, 'uncapped_opt_in': opt_in, 'source_sha': 'a' * 40}
+                    data['tracing_policy'] = policy
+                    path.write_text(json.dumps(data))
+                    self.assertEqual(self.controller().run(), 0)
+                    state = self.state()
+                    row = state['producers']['miniflare-tracing']
+                    expected = 'disabled-by-source-policy' if mode == 'disabled' and opt_in == 'rejected' else 'blocked'
+                    self.assertEqual(row['status'], expected)
+                    self.assertEqual(row['tracing_policy'], policy)
+                    self.assertEqual(row['authorization'], 'none')
+                    self.assertFalse(row['database_deletion_authorized'])
+                    self.assertFalse(row['bounded_enabled_tracing'])
+                    self.assertEqual(row['generated_at'], data['generated_at'])
+                    self.assertEqual(state['notifications'], {})
+        data['tracing_policy'] = {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'a' * 40}
+        for changes in ({'generated_at': '2020-01-01T00:00:00Z'}, {'issuer': 'different-issuer'},
+                        {'tracing_policy': dict(data['tracing_policy'], source_sha=None)},
+                        {'tracing_policy': dict(data['tracing_policy'], source_sha='d' * 40)}):
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps(dict(data, **changes)))
+                self.assertEqual(self.controller().run(), 0)
+                row = self.state()['producers']['miniflare-tracing']
+                self.assertEqual(row['status'], 'blocked')
+                self.assertNotIn('tracing_policy', row)
+        data.pop('tracing_policy')
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.controller().run(), 0)
+        row = self.state()['producers']['miniflare-tracing']
+        self.assertEqual(row['status'], 'missing-adapter')
+        self.assertNotIn('tracing_policy', row)
+        self.assertTrue(all(command[0] == 'docker' for command in self.commands()))
+
+    def test_native_manifest_observer_reads_real_detached_metadata_without_mutation(self):
+        path, data, old_metadata = self.follow_manifest()
+        candidate = Path(data['worktree_candidates'][0]['path'])
+        (candidate / '.git').unlink()
+        candidate.rmdir()
+        (old_metadata / 'HEAD').unlink()
+        old_metadata.rmdir()
+        repo = self.h / 'code/slot-studio'
+        def git(*args):
+            result = subprocess.run(['/usr/bin/git', '-C', str(repo), *args],
+                                    capture_output=True, text=True, timeout=10, umask=0o077,
+                                    env=dict(os.environ, HOME=str(self.h), GIT_CONFIG_GLOBAL='/dev/null',
+                                             GIT_CONFIG_NOSYSTEM='1', GIT_TEMPLATE_DIR=''))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        git('init', '-b', 'main')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture')
+        head = git('rev-parse', 'HEAD')
+        candidate = candidate.parent / ('local-' + head[:12])
+        git('worktree', 'add', '--detach', str(candidate), head)
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'live fixture')
+        live_head = git('rev-parse', 'HEAD')
+        live = candidate.parent / ('local-' + live_head[:12])
+        git('worktree', 'add', '--detach', str(live), live_head)
+        data['live'] = {'worktree': str(live), 'image': 'slot-studio-local/media-executor:' + live_head[:12]}
+        data['worktree_candidates'] = [{'path': str(candidate), 'head': head}]
+        data['tracing_policy'] = {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': live_head}
+        path.write_text(json.dumps(data))
+        git_files = [candidate / '.git', live / '.git',
+                     repo / '.git/worktrees' / candidate.name / 'HEAD',
+                     repo / '.git/worktrees' / live.name / 'HEAD']
+        for git_file in git_files:
+            git_file.chmod(0o664)
+            self.assertEqual(git_file.stat().st_uid, os.getuid())
+            self.assertEqual(git_file.stat().st_gid, os.getgid())
+        def snapshot():
+            return {str(p.relative_to(self.h)): (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+                    for root in (self.h / 'code', self.h / '.cache', self.bin)
+                    for p in root.rglob('*') if p.is_file()}
+        before = snapshot()
+        program = ('import importlib.util,json,pathlib,sys; '
+                   's=importlib.util.spec_from_file_location("headroom",sys.argv[1]); '
+                   'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                   'c=m.Controller(pathlib.Path.home(),sys.argv[2]); c.load(); c.producer_facts(); '
+                   'print(json.dumps(c.state["producers"]))')
+        result = subprocess.run(['/usr/bin/python3', '-B', '-c', program, str(HERE / 'controller.py'), str(self.config)],
+                                env=dict(os.environ, HOME=str(self.h)), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        producers = json.loads(result.stdout)
+        row = producers['follow-main-executor-images']
+        self.assertEqual(row['status'], 'observed')
+        self.assertEqual(row['candidate_count'], 1)
+        self.assertEqual(row['live'], data['live'])
+        self.assertEqual(row['rollback'], data['rollback'])
+        self.assertEqual(row['base'], data['base'])
+        self.assertEqual(row['authorization'], 'none')
+        self.assertTrue(row['source_controlled_deletion_disabled'])
+        tracing = producers['miniflare-tracing']
+        self.assertEqual(tracing['status'], 'disabled-by-source-policy')
+        self.assertEqual(tracing['tracing_policy']['source_sha'], live_head)
+        self.assertEqual(tracing['authorization'], 'none')
+        self.assertFalse(tracing['database_deletion_authorized'])
+        self.assertFalse(tracing['bounded_enabled_tracing'])
+        self.assertEqual(snapshot(), before)
+        self.assertTrue(candidate.exists())
+        self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
+                                           ['docker', 'ps', '-a', '--size', '--format', '{{json .}}']])
+        # Only read-only Git metadata accepts shared primary-group writes.
+        for git_file in git_files:
+            with self.subTest(world_writable=git_file.name):
+                git_file.chmod(0o666)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                git_file.chmod(0o664)
+        path.chmod(0o664)
+        self.assertEqual(self.observe_follow()['status'], 'blocked')
+        path.chmod(0o600)
+        with patch.object(m.os, 'getgid', return_value=os.getgid() + 1):
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        other_groups = set(os.getgroups()) - {os.getgid()}
+        if other_groups:
+            git_file = git_files[0]
+            os.chown(git_file, -1, min(other_groups))
+            try:
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+            finally:
+                os.chown(git_file, -1, os.getgid())
+        self.assertEqual(self.observe_follow()['status'], 'observed')
+        self.assertTrue(all(git_file.stat().st_mode & 0o777 == 0o664 for git_file in git_files))
+
+    def test_bounded_metadata_read_rejects_changed_file_or_directory_entry(self):
+        path = self.h / 'stable-metadata'
+        path.write_text('head\n')
+        path.chmod(0o600)
+        original_fstat = m.os.fstat
+        def changed_fstat(fd):
+            result = original_fstat(fd)
+            if m.stat.S_ISREG(result.st_mode):
+                changed_fstat.calls += 1
+                if changed_fstat.calls == 2:
+                    values = list(result)
+                    values[6] += 1
+                    return os.stat_result(values)
+            return result
+        changed_fstat.calls = 0
+        with patch.object(m.os, 'fstat', changed_fstat):
+            with self.assertRaisesRegex(ValueError, 'changed during bounded read'):
+                m.owned_read(self.h, path.name, 128, git_metadata=True)
+        original_stat = m.os.stat
+        def changed_entry(*args, **kwargs):
+            result = original_stat(*args, **kwargs)
+            values = list(result)
+            values[1] += 1
+            return os.stat_result(values)
+        with patch.object(m.os, 'stat', changed_entry):
+            with self.assertRaisesRegex(ValueError, 'changed during bounded read'):
+                m.owned_read(self.h, path.name, 128, git_metadata=True)
 
 
 if __name__ == '__main__':

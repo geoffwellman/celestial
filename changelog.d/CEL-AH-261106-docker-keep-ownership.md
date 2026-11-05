@@ -1,0 +1,4 @@
+### Fixed
+
+- Docker retention now unions the operator-owned legacy keep file with every producer-owned `docker-keep-patterns.d/*.patterns` file. The version-1 safety contract adds `keep_dir`; explicit missing paths, malformed/unreadable declarations and selected symlinks refuse mutation.
+- Executor images remain conservatively protected unless the reserved producer-owned `slot-studio-executors.patterns` file provides a validated nonempty executor set. Legacy/global and generic producer files cannot narrow the namespace. The reserved file is the COMPLETE live, rollback and in-flight set, with candidate tags admitted under the shared lock before build/deploy; only then may superseded unused executors be swept. Immutable base prefixes, `cel.keep=true`, other producers and container references still veto removal. The README documents atomic producer publication and migration without replacing global operator declarations.
