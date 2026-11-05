@@ -62,7 +62,7 @@ To prevent an installed CLI update between capability lookup and deletion from s
 
 `~/.local/state/cel-disk-headroom/status.json` is atomically replaced with fsync; `receipts.jsonl` is append-only with fsync. Running intent precedes dispatch. Each attempted handler records available bytes immediately before/after, bounded output, exit/status, blocker age and next retry. Deltas are **observed filesystem-window changes**, not exclusive reclaimed bytes: concurrent writers, hardlinks and receipt/state writes also affect availability. Exit zero while preserving every candidate does not imply recovery.
 
-Below target, bounded `docker system df --format '{{json .}}'` and `docker ps -a --size --format '{{json .}}'` record daemon totals and container writable layers. Each gets at most 15 seconds and retains 64 KiB output. No `du` traversal is performed. Docker failures are recorded, not estimated as zero.
+Every full monitor pass refreshes known producer facts and bounded `docker system df --format '{{json .}}'` / `docker ps -a --size --format '{{json .}}'` observations once, including already-healthy and recovered passes. Observation runs after handler dispatches, inside the reserved control-plane budget and before any deficit notifications. Each Docker command gets at most 15 seconds and retains 64 KiB output. Single-handler timer triggers do not duplicate these probes. No `du` traversal is performed. Missing/blocked producer adapters and failed/timed-out Docker commands remain explicit, timestamped observations, not estimated zero totals or successful telemetry. A healthy pass sends no notifications; observation failures do not change measured headroom or imply cleanup failure/success.
 
 | Producer/class | Interface and limit |
 | --- | --- |
