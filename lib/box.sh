@@ -33,9 +33,37 @@ _BOX_DOCKER_AGE_DAYS=14
 # unset and resolves plain `docker` on PATH.
 _box_docker_bin() { printf '%s' "${CEL_BOX_DOCKER:-docker}"; }
 
-# The keep list. Re-pulling a base image to save nothing is a bad trade, so
-# base images are exempt regardless of age.
-_box_docker_keep_patterns() { printf '%s\n' 'ubuntu:*' 'alpine:*'; }
+# Built-ins protect containerless local bases and rollback tags. Producers may
+# add newline-delimited repo:tag shell globs, never shell code.
+_box_docker_keep_file() { printf '%s' "${CEL_BOX_DOCKER_KEEP_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns}"; }
+_box_docker_lock_file() { printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock"; }
+_box_docker_keep_patterns() {
+  local file parent pat patterns=""
+  file="$(_box_docker_keep_file)"
+  parent="${file%/*}"
+  while [ "$parent" != "${parent%/*}" ]; do
+    if [ -d "$parent" ] && { [ ! -r "$parent" ] || [ ! -x "$parent" ]; }; then
+      printf 'box: cannot inspect docker keep directory: %s\n' "$parent" >&2; return 1
+    fi
+    parent="${parent%/*}"
+  done
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ -r "$file" ] && patterns="$(cat -- "$file")" || {
+      printf 'box: cannot read docker keep declarations: %s\n' "$file" >&2; return 1;
+    }
+  elif [ "${CEL_BOX_DOCKER_KEEP_FILE+x}" = x ]; then
+    printf 'box: declared docker keep file is missing: %s\n' "$file" >&2; return 1
+  fi
+  while IFS= read -r pat; do
+    case "$pat" in ''|'#'*) continue ;; esac
+    if [[ "$pat" != *:* || "$pat" == *[[:space:]]* ]]; then
+      printf 'box: malformed docker keep declaration\n' >&2; return 1
+    fi
+  done <<< "$patterns"
+  printf '%s\n' 'ubuntu:*' 'alpine:*' 'slot-studio-media-executor-base:*' 'slot-studio-local/media-executor:*'
+  [ -z "$patterns" ] || printf '%s\n' "$patterns"
+  return 0
+}
 
 # THE POLICY TABLE. class <TAB> path <TAB> age_days.
 #
@@ -211,64 +239,92 @@ box_docker_json() { # the docker half of the report, or nothing when absent
       build_cache:{size:$bs,reclaimable:$br}}'
 }
 
-_box_docker_keep() { # <repository> <tag> -> 0 keep, 1 removable
-  local repo="$1" tag="$2" pat
+_box_docker_keep() { # <repository:tag> <validated patterns> -> 0 keep, 1 removable
+  local pat
   while IFS= read -r pat; do
+    case "$pat" in ''|'#'*) continue ;; esac
     # shellcheck disable=SC2053
-    [[ "$repo:$tag" == $pat ]] && return 0
-  done < <(_box_docker_keep_patterns)
+    [[ "$1" == $pat ]] && return 0
+  done <<< "$2"
   return 1
 }
 
-# What any container, running OR stopped, references. `docker container ls
-# -a` prints a name (repo:tag, or bare repo meaning :latest) or an image id.
-# A failed listing is NOT an empty one: it returns 1 with docker's error on
-# stderr, and the sweep aborts rather than treating every image as unused.
+# Inspect containers' ACTUAL image IDs: a tag can move after creation.
+# A failed listing or inspection is unknown, not an empty reference set.
 _box_docker_in_use() {
-  local out
-  if ! out="$("$(_box_docker_bin)" container ls -a --format '{{.Image}}' 2>&1)"; then
-    printf 'box: docker container ls failed: %s\n' "$out" >&2
-    return 1
-  fi
-  printf '%s\n' "$out"
-}
-
-_box_docker_used() { # <in-use list> <id> <repo> <tag> -> 0 when referenced
-  local ref short="${2#sha256:}"
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    case "$ref" in
-      "$3:$4"|"$2") return 0 ;;
-      sha256:*) [[ "$short" == "${ref#sha256:}"* || "${ref#sha256:}" == "$short"* ]] && return 0 ;;
-    esac
-    [ "$4" = latest ] && [ "$ref" = "$3" ] && return 0
-    [[ "$ref" =~ ^[0-9a-f]{12,64}$ ]] && [[ "$short" == "$ref"* || "$ref" == "$short"* ]] && return 0
-  done <<< "$1"
-  return 1
-}
-
-# ONE SELECTION per sweep: the dry run prints it and the real run deletes it,
-# so the two cannot disagree. An empty `{{.Parent}}` is no reason to keep:
-# every BuildKit-built or pulled image has one.
-_box_docker_plan() { # -> "image<TAB>id<TAB>bytes" lines, then "cache<TAB>-<TAB>bytes"; 1 when unknowable
-  local used id repo tag size json
-  local -A keep=() bytes=() order=()
-  local -a ids=()
-  used="$(_box_docker_in_use)" || return 1
-  # Keep is decided per image ID: if ANY tag of an ID is keep-listed or in
-  # use, the whole ID is kept. Each removable ID appears once.
-  while IFS=$'\t' read -r id repo tag size; do
+  local ids id json used=""
+  ids="$("$(_box_docker_bin)" container ls -a --no-trunc --format '{{.ID}}')" || return 1
+  while IFS= read -r id; do
     [ -n "$id" ] || continue
-    if [ -z "${order[$id]:-}" ]; then order[$id]=1; ids+=("$id"); bytes[$id]="$(_box_human_bytes "$size")"; fi
-    if [ "$repo" != "<none>" ] && _box_docker_keep "$repo" "$tag"; then keep[$id]=1; continue; fi
-    _box_docker_used "$used" "$id" "$repo" "$tag" && keep[$id]=1
-  done < <("$(_box_docker_bin)" image ls --format json 2>/dev/null \
-    | jq -r '[.ID, .Repository, .Tag, .Size] | @tsv' 2>/dev/null || true)
-  for id in "${ids[@]}"; do
-    [ -n "${keep[$id]:-}" ] && continue
-    printf 'image\t%s\t%s\n' "$id" "${bytes[$id]}"
+    json="$("$(_box_docker_bin)" container inspect "$id")" || return 1
+    id="$(printf '%s' "$json" | jq -er 'if type == "array" and length == 1 and (.[0].Image | type == "string" and length > 0) then .[0].Image else error("unknown container image") end')" || return 1
+    used="${used}${id}"$'\n'
+  done <<< "$ids"
+  printf '%s' "$used"
+}
+
+# Capture every full ID and inspect every label/tag before publishing a plan.
+# Failed/malformed inventory refuses ALL mutation, including build-cache prune.
+_box_docker_inventory() {
+  local rows ids id json inventory=""
+  rows="$("$(_box_docker_bin)" image ls --no-trunc --format json)" || return 1
+  ids="$(printf '%s\n' "$rows" | jq -rs 'if all(.[]; type == "object" and (.ID | type == "string" and length > 0)) then [.[].ID] | unique | .[] else error("unknown image inventory") end')" || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    json="$("$(_box_docker_bin)" image inspect "$id")" || return 1
+    json="$(printf '%s' "$json" | jq -ec --arg id "$id" '
+      if type == "array" and length == 1 and (.[0] |
+        .Id == $id and (.Size | type == "number" and . >= 0) and
+        (.RepoTags == null or (.RepoTags | type == "array" and all(.[]; type == "string"))) and
+        (.Config | type == "object") and
+        (.Config.Labels == null or (.Config.Labels | type == "object" and all(.[]; type == "string"))))
+      then .[0] else error("unknown image tags or labels") end')" || return 1
+    inventory="${inventory}${json}"$'\n'
+  done <<< "$ids"
+  printf '%s' "$inventory"
+}
+
+# A build can need a containerless FROM image. Preserve images and cache while
+# any local build is running; unknown process references also veto mutation.
+_box_docker_builds_idle() {
+  local proc d
+  local -a argv=()
+  proc="$(_box_proc)"
+  [ -d "$proc" ] && [ -r "$proc" ] || return 1
+  for d in "$proc"/[0-9]*; do
+    [ -d "$d" ] || continue
+    argv=()
+    if ! { mapfile -d '' -t argv < "$d/cmdline"; } 2>/dev/null; then
+      [ ! -d "$d" ] && continue
+      printf 'box: cannot inspect docker build references: %s\n' "$d" >&2; return 1
+    fi
+    [ "${#argv[@]}" -gt 0 ] || continue
+    if _box_is_docker_build "${argv[@]}"; then
+      printf 'box: docker build active; preserving images and cache\n' >&2; return 1
+    fi
   done
-  json="$(box_docker_json 2>/dev/null)" || json='{}'
+}
+
+_box_docker_plan() { # -> image<TAB>full-id<TAB>bytes, cache<TAB>-<TAB>bytes; 1 unknown
+  local used patterns inventory image id tag size json keep
+  _box_docker_builds_idle || return 1
+  patterns="$(_box_docker_keep_patterns)" || return 1
+  used="$(_box_docker_in_use)" || return 1
+  inventory="$(_box_docker_inventory)" || return 1
+  while IFS= read -r image; do
+    [ -n "$image" ] || continue
+    id="$(printf '%s' "$image" | jq -r '.Id')" || return 1
+    case $'\n'"$used"$'\n' in *$'\n'"$id"$'\n'*) continue ;; esac
+    [ "$(printf '%s' "$image" | jq -r '.Config.Labels["cel.keep"] // ""')" != true ] || continue
+    keep=0
+    while IFS= read -r tag; do
+      if _box_docker_keep "$tag" "$patterns"; then keep=1; break; fi
+    done <<< "$(printf '%s' "$image" | jq -r '.RepoTags[]?')"
+    [ "$keep" -eq 0 ] || continue
+    size="$(printf '%s' "$image" | jq -r '.Size | floor')" || return 1
+    printf 'image\t%s\t%s\n' "$id" "$size"
+  done <<< "$inventory"
+  json="$(box_docker_json 2>/dev/null)" || return 1
   printf 'cache\t-\t%s\n' "$(printf '%s' "$json" | jq -r '(.build_cache.reclaimable // 0) | floor')"
 }
 
@@ -288,11 +344,24 @@ _box_reclaimed() { # <prune output> -> bytes, from docker's own summary line
 # touched, and containers are not pruned: a stopped container's image stays.
 # A failed delete is a warning on stderr with docker's own error and exit 1,
 # never a quiet "0 B freed".
-_box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a failure
+# Producers take this same lock across build/tag/atomic keep-file replacement.
+# Docker has no compare-and-delete tag API; uncoordinated writers are not safe.
+_box_sweep_docker() (
+  local lock
+  have "$(_box_docker_bin)" || { printf 0; return 2; }
+  lock="$(_box_docker_lock_file)"
+  mkdir -p -- "${lock%/*}" && [ ! -L "$lock" ] && exec 9>>"$lock" && flock -n 9 || {
+    printf 'box: docker image ownership lock unavailable; preserving images and cache\n' >&2
+    printf 0; return 1
+  }
+  _box_sweep_docker_locked "${1:-0}"
+)
+
+_box_sweep_docker_locked() { # <dry> -> bytes on stdout; exit 2 absent, 1 failure
   # Dry: an UPPER BOUND (summed per-image sizes double-count shared layers).
   # Real: what docker says it freed - df delta for images, the prune's own
   # "Total reclaimed space" for build cache.
-  local dry="${1:-0}" total=0 failed=0 kind id bytes err plan before after rmd=0
+  local dry="${1:-0}" total=0 failed=0 kind id bytes err plan before after rmd=0 current candidate found
   have "$(_box_docker_bin)" || { printf 0; return 2; }
   "$(_box_docker_bin)" system df --format json >/dev/null 2>&1 || { printf 0; return 2; }
   plan="$(_box_docker_plan)" || { printf 0; return 1; }
@@ -300,8 +369,16 @@ _box_sweep_docker() { # <dry> -> bytes on stdout; exit 2 when absent, 1 on a fai
   while IFS=$'\t' read -r kind id bytes; do
     [ -n "$kind" ] || continue
     if [ "$dry" -eq 1 ]; then total=$(( total + bytes )); continue; fi
+    # Recheck container IDs, builds, all tags and labels before EACH mutation.
+    current="$(_box_docker_plan)" || { failed=1; break; }
+    _box_docker_builds_idle || { failed=1; break; }
     case "$kind" in
       image)
+        found=0
+        while IFS=$'\t' read -r candidate err _; do
+          [ "$candidate" = image ] && [ "$err" = "$id" ] && found=1
+        done <<< "$current"
+        [ "$found" -eq 1 ] || continue
         if err="$("$(_box_docker_bin)" image rm "$id" 2>&1 >/dev/null)"; then rmd=1
         else failed=1; printf 'box: docker image rm %s failed: %s\n' "$id" "$err" >&2; fi ;;
       cache)
@@ -720,7 +797,7 @@ box_diag() { # -> at most two lines; always exits 0
   return 0
 }
 
-cmd_box() { # space [--json] | diag
+cmd_box() { # space [--json] | diag | docker-safety | sweep-docker [--dry-run]
   local verb="${1:-space}"
   shift || true
   case "$verb" in
@@ -733,7 +810,17 @@ cmd_box() { # space [--json] | diag
     diag)
       [ $# -eq 0 ] || die "cel box diag: unknown argument '$1' (takes none)"
       box_diag ;;
-    *) die "cel box: unknown subcommand '$verb' (want space or diag)" ;;
+    docker-safety)
+      [ $# -eq 0 ] || die "cel box docker-safety: takes no arguments"
+      jq -n --arg keep_file "$(_box_docker_keep_file)" --arg lock_file "$(_box_docker_lock_file)" \
+        '{version:1,keep_label:"cel.keep=true",keep_file:$keep_file,lock_file:$lock_file}' ;;
+    sweep-docker)
+      case "$#:${1:-}" in
+        0:) _box_sweep_docker 0 ;;
+        1:--dry-run) _box_sweep_docker 1 ;;
+        *) die "cel box sweep-docker: want only --dry-run" ;;
+      esac ;;
+    *) die "cel box: unknown subcommand '$verb' (want space, diag, docker-safety or sweep-docker)" ;;
   esac
 }
 

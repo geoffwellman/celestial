@@ -1172,6 +1172,9 @@ _gc_docker_stub() {
   _gc_box_fixture
   mkdir -p "$T/dbin"
   export GC_DOCKER_LOG="$T/docker.argv" GC_DOCKER_FAIL=""
+  export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" CEL_PROC="$T/proc"
+  unset CEL_BOX_DOCKER_KEEP_FILE
+  mkdir -p "$CEL_PROC"
   : > "$GC_DOCKER_LOG"
   cat > "$T/dbin/docker" <<'EOS'
 #!/usr/bin/env bash
@@ -1184,14 +1187,25 @@ case "$1 $2" in
     printf '%s\n' '{"Type":"Build Cache","Size":"2GB","Reclaimable":"2GB"}' ;;
   "container ls")
     [ "$GC_DOCKER_FAIL" = ls ] && { printf 'Error: daemon hiccup\n' >&2; exit 1; }
-    printf '%s\n' 'widget:live' 'sha256:ssss11112222' ;;
+    printf '%s\n' live-container stopped-container ;;
+  "container inspect")
+    case "$3" in
+      live-container) printf '[{"Image":"sha256:aaaa"}]\n' ;;
+      stopped-container) printf '[{"Image":"sha256:ssss11112222"}]\n' ;;
+    esac ;;
   "image ls")
     printf '%s\n' '{"ID":"sha256:aaaa","Repository":"widget","Tag":"live","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:ssss11112222","Repository":"widget","Tag":"stopped","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:aaaa","Repository":"widget","Tag":"old","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:uuuu","Repository":"ghcr.io/example/gadget","Tag":"older","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}'
     printf '%s\n' '{"ID":"sha256:uuuu","Repository":"ghcr.io/example/gadget","Tag":"old","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1GB"}' ;;
-  "image inspect") printf 'Error: template parsing error\n' >&2; exit 1 ;;
+  "image inspect")
+    case "$3" in
+      sha256:aaaa) tags='["widget:live","widget:old"]' ;;
+      sha256:ssss11112222) tags='["widget:stopped"]' ;;
+      sha256:uuuu) tags='["ghcr.io/example/gadget:older","ghcr.io/example/gadget:old"]' ;;
+    esac
+    printf '[{"Id":"%s","RepoTags":%s,"Size":1000000000,"Config":{"Labels":null}}]\n' "$3" "$tags" ;;
   "image rm")
     [ "$GC_DOCKER_FAIL" = rm ] && { printf 'Error: conflict: unable to remove\n' >&2; exit 1; }
     printf '%s\n' "$3" >> "${GC_DOCKER_LOG%.argv}.rm"; printf 'Deleted: %s\n' "$3" ;;

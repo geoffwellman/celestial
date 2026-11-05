@@ -1069,11 +1069,12 @@ both failing the view still renders what the box itself knows.
   **regenerable** (docker images and build cache, toolchain caches — deleting
   costs a re-download, never data) and **someone's** (restore dumps, dated
   backups — reported with an age and a suggestion, and never swept by
-  anything). `cel gc --box` sweeps the first two after the worktree pass, on a
-  fourteen-day age for docker with base images exempt; `--dry-run` covers it
-  exactly as it covers the old work. The steward sweeps on a six-hour cadence
-  and `cel doctor` warns below a free-space floor, naming the largest
-  reclaimable class and the command that clears it. `cel box diag` is the
+  anything). `cel gc --box` sweeps the first two after the worktree pass. Docker
+  removes only unreferenced, unprotected full image IDs (without force), plus
+  build cache; there is no image age filter. `--dry-run` reports the same policy
+  without deleting. The steward sweeps on a six-hour cadence and `cel doctor`
+  warns below a free-space floor, naming the largest reclaimable class and the
+  command that clears it. `cel box diag` is the
   same question asked by an alert: at most two bounded lines - docker's own
   images / build cache / volumes summary (left out when docker is absent,
   slow past `CEL_BOX_DIAG_TIMEOUT` seconds, default 30, or not this user's to
@@ -1081,6 +1082,51 @@ both failing the view still renders what the box itself knows.
   or working directory it runs in - secret values in the build's argv
   (`--build-arg`, `--secret`, `-e`/`--env`, any `KEY=VALUE`) printed as `***`,
   and the herdr lookup held to the same time limit.
+
+### Docker image retention and producer ownership
+
+`cel box docker-safety` returns the version-1 JSON consumer contract, including
+the resolved `keep_file`, `lock_file`, and `keep_label` (`cel.keep=true`).
+`cel box sweep-docker [--dry-run]` runs only the Docker sweep, prints a byte
+count (an upper bound in dry runs), and exits nonzero on unknown observations
+or mutation failure; exit 2 means Docker is unavailable. No image/system,
+container or volume prune is used. Build-cache prune remains a separate step.
+
+An image survives if **any tag** matches a keep pattern, its image label is
+`cel.keep=true`, or any running/stopped container references its actual full
+image ID. Labels protect containerless bases too. Built-ins retain `ubuntu:*`,
+`alpine:*`, `slot-studio-media-executor-base:*` (conservatively all source tags),
+and `slot-studio-local/media-executor:*`, including rollback tags. Additional
+newline-delimited `repository:tag` shell globs belong in
+`${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns`; blank lines and
+lines starting `#` are ignored. Patterns are matched as data, never executed or
+expanded against the working directory. `CEL_BOX_DOCKER_KEEP_FILE` selects an
+explicit file; a missing explicit file, unreadable/malformed declaration,
+failed inventory, unknown image labels/tags, or failed container inspection
+refuses all Docker mutation. An absent default declaration file is allowed.
+
+**Producers must share the ownership lock**, including builds, image import,
+tag moves and keep-file replacement. The sweep holds the lock and rechecks
+references/retention immediately before each mutation; an active local Docker
+build also vetoes the sweep. Docker has no atomic compare-and-delete tag API:
+the lock contract is required, not protection against uncoordinated tag writers
+or remote clients starting builds. Use the `lock_file` reported above (default
+`${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock`):
+
+```bash
+lock="${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock"
+keep_file="${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns"
+mkdir -p "${lock%/*}" "${keep_file%/*}"
+flock -o "$lock" docker build --label cel.keep=true -t private/base:local .
+flock -o "$lock" docker image tag private/base:local private/base:rollback-42
+# Publish a complete declaration file, preserving any existing keep patterns:
+flock -o "$lock" install -m 600 ./docker-keep-patterns "$keep_file"
+```
+
+Alternatively put `LABEL cel.keep=true` in the producer's Dockerfile. Existing
+images cannot be relabelled in place: declare their tags in the keep file
+before publishing/moving tags, or rebuild with the label under the lock.
+
 
 ## What runs in the background
 
@@ -1574,6 +1620,8 @@ policy block into every agent.
 | `cel gc [--reap h] [--orphans] [--box]` | reclaim worktrees + idle agents; `--orphans` reaps processes with no owner; `--box` sweeps docker and toolchain caches |
 | `cel box space [--json]` | what is large on this box, what is reclaimable, and what is nobody's to delete |
 | `cel box diag` | two bounded lines for a disk alert: docker images, build cache and volumes, and running docker builds with their owning agent |
+| `cel box docker-safety` | versioned Docker retention contract and producer lock/declaration paths |
+| `cel box sweep-docker [--dry-run]` | Docker-only fail-closed sweep; exact unprotected image IDs and unused build cache |
 | `cel inbox send · read · count · watch` | agent messages that never type into a pane; `--all-workspaces` for the console |
 | `cel steward` | one proactive tick over the whole fleet |
 | `cel spike` / `cel promote` | throwaway repo → real repo |

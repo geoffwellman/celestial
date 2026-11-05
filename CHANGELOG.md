@@ -7,6 +7,9 @@ watch the repo (Watch → Custom → Releases) to be notified.
 
 ## [Unreleased]
 
+### Fixed
+- Docker sweeps retain `cel.keep=true` image labels, declared keep-pattern files, and Slot Studio local bases/rollback images by full image ID across all tags. Unknown inventory, labels, declarations, container references or live-build observations refuse mutation. Producers and sweeps share an ownership lock; references and retention are rechecked before each deletion. `cel box docker-safety` exposes the versioned producer contract, and `cel box sweep-docker [--dry-run]` provides its Docker-only consumer.
+
 ## [0.5.0] - 2026-10-13
 
 ### Added

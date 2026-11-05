@@ -12,6 +12,9 @@ source "$CEL_ROOT/lib/box.sh"
 _box_fixture() {
   T="$(mktemp -d)"
   export HOME="$T/home"
+  export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" CEL_PROC="$T/proc"
+  unset CEL_BOX_DOCKER_KEEP_FILE
+  mkdir -p "$CEL_PROC"
   export CEL_BOX_RM_LOG="$T/removed"
   : > "$CEL_BOX_RM_LOG"
   # regenerable: costs a re-download, never data
@@ -63,8 +66,15 @@ case "\$1 \$2" in
     printf '%s\n' '{"ID":"sha256:ccc","Repository":"ghcr.io/alpha/bundle","Tag":"base","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"210MB"}'
     printf '%s\n' '{"ID":"sha256:ddd","Repository":"widget","Tag":"build-91","CreatedAt":"2025-01-01 00:00:00 +0000 UTC","Size":"1.2GB"}'
     ;;
+  "container ls") ;;
   "image inspect")
-    case "\$*" in *ccc*) printf '\n';; *) printf 'sha256:parent\n';; esac
+    repo=widget; tag=build-91; size=1200000000
+    case "\$3" in
+      sha256:aaa) repo=ubuntu; tag=24.04; size=78000000 ;;
+      sha256:bbb) repo=alpine; tag=3.19; size=13000000 ;;
+      sha256:ccc) repo=ghcr.io/alpha/bundle; tag=base; size=210000000 ;;
+    esac
+    printf '[{"Id":"%s","RepoTags":["%s:%s"],"Size":%s,"Config":{"Labels":null}}]\n' "\$3" "\$repo" "\$tag" "\$size"
     ;;
   *) printf 'Total reclaimed space: 1.5GB\n' ;;
 esac
@@ -512,5 +522,166 @@ EOS
 test_box_diag_takes_no_arguments() {
   _box_diag_fixture
   if (cmd_box diag --json) >/dev/null 2>&1; then printf 'diag accepted an argument\n' >&2; return 1; fi
+  rm -rf "$T"
+}
+
+# Containerless labelled base, configured rollback alias, seeded local base,
+# actual stopped-container ID, and one disposable image. This is a real sweep
+# consumer, not a test of just the pattern-matching helper.
+_box_retention_fixture() {
+  _box_fixture
+  export DOCKER_LOG BOX_DOCKER_IMAGES="$T/images.json" BOX_DOCKER_FAIL="" BOX_DOCKER_LATE="" BOX_DOCKER_STATE="$T/state"
+  mkdir -p "$BOX_DOCKER_STATE" "$HOME/.config/cel"
+  printf '%s\n' 'retained/release:rollback-*' > "$HOME/.config/cel/docker-keep-patterns"
+  cat > "$BOX_DOCKER_IMAGES" <<'EOS'
+[
+ {"Id":"sha256:aaa","RepoTags":["private/base:local","private/base:alias"],"Size":1,"Config":{"Labels":{"cel.keep":"true"}}},
+ {"Id":"sha256:bbb","RepoTags":["build:old","retained/release:rollback-42"],"Size":1,"Config":{"Labels":null}},
+ {"Id":"sha256:ccc","RepoTags":["slot-studio-media-executor-base:local","ordinary:alias"],"Size":1,"Config":{"Labels":null}},
+ {"Id":"sha256:ddd","RepoTags":["disposable:old"],"Size":1,"Config":{"Labels":null}},
+ {"Id":"sha256:eee","RepoTags":["moved:old"],"Size":1,"Config":{"Labels":null}},
+ {"Id":"sha256:fff","RepoTags":["slot-studio-local/media-executor:rollback-42"],"Size":1,"Config":{"Labels":null}}
+]
+EOS
+  cat > "$BOX_STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+case "$1 $2" in
+  "system df") printf '%s\n' '{"Type":"Images","Size":"6B","Reclaimable":"1B"}' '{"Type":"Build Cache","Size":"0B","Reclaimable":"0B"}' ;;
+  "container ls")
+    [ "$BOX_DOCKER_FAIL" != container-ls ] || exit 1
+    printf '%s\n' stopped
+    if [ -e "$BOX_DOCKER_STATE/listed" ] && [ "$BOX_DOCKER_LATE" = container ]; then printf '%s\n' new-container; fi ;;
+  "container inspect")
+    [ "$BOX_DOCKER_FAIL" != container-inspect ] || exit 1
+    if [ "$3" = stopped ]; then printf '[{"Image":"sha256:eee"}]\n'; else printf '[{"Image":"sha256:ddd"}]\n'; fi ;;
+  "image ls")
+    [ "$BOX_DOCKER_FAIL" != image-ls ] || exit 1
+    [ "$BOX_DOCKER_FAIL" != image-json ] || { printf 'broken JSON\n'; exit 0; }
+    if [ -e "$BOX_DOCKER_STATE/listed" ]; then
+      case "$BOX_DOCKER_LATE" in
+        label) jq 'map(if .Id == "sha256:ddd" then .Config.Labels={"cel.keep":"true"} else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"; mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES" ;;
+        tag) jq 'map(if .Id == "sha256:ddd" then .RepoTags += ["retained/release:rollback-new"] else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"; mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES" ;;
+        inspect) exit 1 ;;
+      esac
+    fi
+    touch "$BOX_DOCKER_STATE/listed"
+    jq -c '.[] | {ID:.Id}' "$BOX_DOCKER_IMAGES" ;;
+  "image inspect")
+    [ "$BOX_DOCKER_FAIL" != image-inspect ] || exit 1
+    if [ "$BOX_DOCKER_FAIL" = labels ]; then
+      jq -c --arg id "$3" '[.[] | select(.Id == $id) | .Config.Labels={"cel.keep":42}]' "$BOX_DOCKER_IMAGES"
+    else jq -c --arg id "$3" '[.[] | select(.Id == $id)]' "$BOX_DOCKER_IMAGES"; fi ;;
+  "image rm") [ "$3" = sha256:ddd ] || exit 89 ;;
+  "builder prune") printf 'Total reclaimed space: 0B\n' ;;
+  *) exit 90 ;;
+esac
+EOS
+  chmod +x "$BOX_STUB_BIN/docker"
+  export CEL_BOX_DOCKER="$BOX_STUB_BIN/docker"
+}
+
+test_docker_retention_containerless_label_and_configured_rollback_survive() {
+  _box_retention_fixture
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
+  case "$(_box_prune_calls)" in *'image prune'*|*'system prune'*|*'image rm --force'*) return 1 ;; esac
+  rm -rf "$T"
+}
+
+test_docker_retention_unknown_inspection_and_inventory_refuse_all_mutation() {
+  local failure rc
+  for failure in image-ls image-json image-inspect labels container-ls container-inspect; do
+    _box_retention_fixture
+    export BOX_DOCKER_FAIL="$failure"
+    rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || { printf 'accepted unknown %s\n' "$failure" >&2; return 1; }
+    assert_eq "$(_box_prune_calls)" ''
+    rm -rf "$T"
+  done
+}
+
+test_docker_retention_unreadable_and_missing_declarations_refuse_mutation() {
+  local declaration rc
+  for declaration in missing directory malformed dangling; do
+    _box_retention_fixture
+    export CEL_BOX_DOCKER_KEEP_FILE="$T/$declaration"
+    case "$declaration" in
+      directory) mkdir "$CEL_BOX_DOCKER_KEEP_FILE" ;;
+      malformed) printf 'not a repo tag\n' > "$CEL_BOX_DOCKER_KEEP_FILE" ;;
+      dangling) ln -s "$T/nonexistent" "$CEL_BOX_DOCKER_KEEP_FILE" ;;
+    esac
+    rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || return 1
+    assert_eq "$(_box_prune_calls)" ''
+    rm -rf "$T"
+  done
+}
+
+test_docker_retention_rechecks_late_tags_labels_and_actual_container_ids() {
+  local late
+  for late in tag label container; do
+    _box_retention_fixture
+    export BOX_DOCKER_LATE="$late"
+    cmd_box sweep-docker >/dev/null
+    assert_eq "$(grep 'image rm' "$DOCKER_LOG" || true)" ''
+    rm -rf "$T"
+  done
+}
+
+test_docker_retention_unknown_recheck_refuses_image_and_cache_mutation() {
+  _box_retention_fixture
+  export BOX_DOCKER_LATE=inspect
+  local rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  assert_eq "$(_box_prune_calls)" ''
+  rm -rf "$T"
+}
+
+test_docker_retention_live_build_and_unreadable_process_preserve_images() {
+  _box_retention_fixture
+  mkdir -p "$CEL_PROC/123"
+  printf 'docker\0build\0.\0' > "$CEL_PROC/123/cmdline"
+  local rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  assert_eq "$(_box_prune_calls)" ''
+  rm "$CEL_PROC/123/cmdline"
+  rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  assert_eq "$(_box_prune_calls)" ''
+  rm -rf "$T"
+}
+
+test_docker_retention_producer_lock_excludes_sweep() {
+  _box_retention_fixture
+  local lock; lock="$(_box_docker_lock_file)"
+  mkdir -p "${lock%/*}"
+  exec 8>>"$lock"; flock -x 8
+  local rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+  exec 8>&-
+  [ "$rc" -ne 0 ] || return 1
+  assert_eq "$(_box_prune_calls)" ''
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
+  rm -rf "$T"
+}
+
+test_docker_retention_public_safety_contract_and_dry_run() {
+  _box_retention_fixture
+  local contract; contract="$(cmd_box docker-safety)"
+  assert_eq "$(printf '%s' "$contract" | jq -r '.version')" 1
+  assert_eq "$(printf '%s' "$contract" | jq -r '.keep_label')" cel.keep=true
+  assert_eq "$(printf '%s' "$contract" | jq -r '.lock_file')" "$(_box_docker_lock_file)"
+  assert_eq "$(cmd_box sweep-docker --dry-run)" 1
+  assert_eq "$(_box_prune_calls)" ''
+  rm -rf "$T"
+}
+
+test_docker_retention_docker_omitted_empty_labels_are_known_absent() {
+  _box_retention_fixture
+  jq 'map(if .Id == "sha256:ddd" then .Config={} else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
+  mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
   rm -rf "$T"
 }
