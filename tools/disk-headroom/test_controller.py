@@ -41,6 +41,8 @@ if name=='cel':
 if name=='docker':
  if (h/'fail-docker-facts').exists(): print('fixture diagnostics unavailable');sys.exit(9)
  print('{}');sys.exit(0)
+if name=='cel-disk-retire':
+ (h/'retire-environment').write_text(json.dumps({k:os.environ.get(k) for k in ('CEL_RETIRE_NOTIFY_RECIPIENT','CEL_RETIRE_MIN_FREE','CEL_RETIRE_HOOK_AFTER_COPY')}))
 config=json.loads((h/'effects').read_text()).get(name,{})
 if config.get('sleep'):time.sleep(config['sleep'])
 if config.get('delta'):
@@ -196,10 +198,54 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(self.state()['producers']['docker-sweep']['after_available_bytes'], m.TARGET)
         self.assertEqual(self.mail('root'), [])
 
-    def test_already_at_threshold_never_invokes_handler_units(self):
+    def test_healthy_nonretirement_handler_triggers_still_skip(self):
         self.free(m.TARGET)
-        self.assertEqual(self.controller().run('ordinary-drain'), 0)
+        for name in ('release-drain', 'ordinary-drain', 'docker-sweep'):
+            with self.subTest(name=name):
+                self.assertEqual(self.controller().run(name), 0)
         self.assertEqual(self.commands(), [])
+
+    def test_healthy_daily_retirement_runs_reviewed_child_without_probe_or_guard_bypass(self):
+        self.free(m.TARGET + m.GIB)
+        with patch.dict(os.environ, {'CEL_RETIRE_MIN_FREE': '0', 'CEL_RETIRE_HOOK_AFTER_COPY': 'unsafe'}):
+            self.assertEqual(self.controller().run('preservation-retire'), 0)
+        self.assertEqual(self.commands(), [['cel-disk-retire', '--apply']])
+        state = self.state()
+        self.assertEqual(state['producers']['preservation-retire']['status'], 'ok')
+        self.assertEqual(state['pass_status'], 'target-met')
+        self.assertNotIn('docker_facts', state)
+        self.assertEqual(state['notifications'], {})
+        environment = json.loads((self.h / 'retire-environment').read_text())
+        self.assertEqual(environment, {'CEL_RETIRE_NOTIFY_RECIPIENT': 'celestial-disk-cleanup',
+                                       'CEL_RETIRE_MIN_FREE': None, 'CEL_RETIRE_HOOK_AFTER_COPY': None})
+
+    def test_healthy_daily_retirement_keeps_pin_notification_and_lock_gates(self):
+        self.free(m.TARGET + m.GIB)
+        pin = self.data['handler_sha256'].pop('preservation-retire')
+        self.configure()
+        self.assertEqual(self.controller().run('preservation-retire'), 1)
+        self.assertIn('reviewed handler SHA256', self.state()['producers']['preservation-retire']['output'])
+        self.data['handler_sha256']['preservation-retire'] = pin
+        self.data['retire_notification_version'] = 0
+        self.configure()
+        self.assertEqual(self.controller().run('preservation-retire'), 1)
+        self.assertIn('lane-notification adapter', self.state()['producers']['preservation-retire']['output'])
+        self.data['retire_notification_version'] = 1
+        self.configure()
+        c = self.controller()
+        with open(c.directory / 'lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(c.run('preservation-retire'), 75)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.state()['notifications'], {})
+
+    def test_healthy_daily_retirement_retains_real_child_timeout(self):
+        self.free(m.TARGET + m.GIB)
+        self.effects({'cel-disk-retire': {'sleep': 10}})
+        self.assertEqual(self.controller(pass_seconds=3, handler_seconds=1, control_reserve=1).run('preservation-retire'), 1)
+        self.assertEqual(self.state()['producers']['preservation-retire']['status'], 'timeout')
+        self.assertEqual(self.commands(), [['cel-disk-retire', '--apply']])
+        self.assertEqual(self.state()['notifications'], {})
 
     def test_healthy_full_pass_refreshes_sources_without_mutation_or_mail(self):
         manifest, data, metadata = self.follow_manifest()
