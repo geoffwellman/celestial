@@ -13,7 +13,7 @@ _box_fixture() {
   T="$(mktemp -d)"
   export HOME="$T/home"
   export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" CEL_PROC="$T/proc"
-  unset CEL_BOX_DOCKER_KEEP_FILE
+  unset CEL_BOX_DOCKER_KEEP_FILE CEL_BOX_DOCKER_KEEP_DIR
   mkdir -p "$CEL_PROC"
   export CEL_BOX_RM_LOG="$T/removed"
   : > "$CEL_BOX_RM_LOG"
@@ -672,6 +672,7 @@ test_docker_retention_public_safety_contract_and_dry_run() {
   assert_eq "$(printf '%s' "$contract" | jq -r '.version')" 1
   assert_eq "$(printf '%s' "$contract" | jq -r '.keep_label')" cel.keep=true
   assert_eq "$(printf '%s' "$contract" | jq -r '.lock_file')" "$(_box_docker_lock_file)"
+  assert_eq "$(printf '%s' "$contract" | jq -r '.keep_dir')" "$(_box_docker_keep_dir)"
   assert_eq "$(cmd_box sweep-docker --dry-run)" 1
   assert_eq "$(_box_prune_calls)" ''
   rm -rf "$T"
@@ -681,6 +682,97 @@ test_docker_retention_docker_omitted_empty_labels_are_known_absent() {
   _box_retention_fixture
   jq 'map(if .Id == "sha256:ddd" then .Config={} else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
   mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
+  rm -rf "$T"
+}
+
+test_docker_retention_namespaced_producers_union_and_bound_executor_cleanup() {
+  _box_retention_fixture
+  local dir; dir="$(_box_docker_keep_dir)"
+  mkdir -p "$dir"
+  printf '%s\n' 'slot-studio-local/media-executor:current' 'slot-studio-local/media-executor:rollback-42' > "$dir/follow-main.patterns"
+  printf '%s\n' 'other/producer:release' > "$dir/other.patterns"
+  jq '. + [
+    {Id:"sha256:111",RepoTags:["slot-studio-local/media-executor:current"],Size:1,Config:{Labels:null}},
+    {Id:"sha256:222",RepoTags:["other/producer:release"],Size:1,Config:{Labels:null}}
+  ] | map(if .Id == "sha256:ddd" then .RepoTags=["slot-studio-local/media-executor:superseded"] else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
+  mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
+  assert_eq "$(cat "$dir/other.patterns")" 'other/producer:release'
+  assert_eq "$(cat "$(_box_docker_keep_file)")" 'retained/release:rollback-*'
+  rm -rf "$T"
+}
+
+test_docker_retention_invalid_namespaced_declarations_refuse_all_mutation() {
+  local declaration rc
+  for declaration in missing file symlink dangling directory malformed nul brackets unreadable unreadable-dir symlink-dir; do
+    _box_retention_fixture
+    export CEL_BOX_DOCKER_KEEP_DIR="$T/keeps"
+    case "$declaration" in
+      missing) ;;
+      file) touch "$CEL_BOX_DOCKER_KEEP_DIR" ;;
+      symlink-dir) mkdir "$T/target"; ln -s "$T/target" "$CEL_BOX_DOCKER_KEEP_DIR" ;;
+      *) mkdir "$CEL_BOX_DOCKER_KEEP_DIR"
+        case "$declaration" in
+          symlink) ln -s "$(_box_docker_keep_file)" "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          dangling) ln -s "$T/missing" "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          directory) mkdir "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          malformed) printf 'unknown declaration\n' > "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          nul) printf 'repo:ta\0g\n' > "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          brackets) printf 'repo:tag[\n' > "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          unreadable) touch "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns"; chmod 000 "$CEL_BOX_DOCKER_KEEP_DIR/a.patterns" ;;
+          unreadable-dir) chmod 000 "$CEL_BOX_DOCKER_KEEP_DIR" ;;
+        esac ;;
+    esac
+    rc=0; cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || { printf 'accepted %s keep directory\n' "$declaration" >&2; return 1; }
+    assert_eq "$(_box_prune_calls)" ''
+    chmod -R u+rwX "$CEL_BOX_DOCKER_KEEP_DIR" 2>/dev/null || true
+    rm -rf "$T"
+  done
+}
+
+test_docker_retention_publication_lock_preserves_other_producer() {
+  _box_retention_fixture
+  local dir lock rc=0
+  dir="$(_box_docker_keep_dir)"; lock="$(_box_docker_lock_file)"
+  mkdir -p "$dir" "${lock%/*}"
+  printf 'other:release\n' > "$dir/other.patterns"
+  exec 8>>"$lock"; flock -x 8
+  printf 'slot-studio-local/media-executor:rollback-42\n' > "$dir/.follow-main.next"
+  cmd_box sweep-docker >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  assert_eq "$(_box_prune_calls)" ''
+  mv "$dir/.follow-main.next" "$dir/follow-main.patterns"
+  exec 8>&-
+  cmd_box sweep-docker >/dev/null
+  assert_eq "$(cat "$dir/other.patterns")" 'other:release'
+  assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
+  rm -rf "$T"
+}
+
+test_docker_retention_missing_executor_declaration_preserves_namespace() {
+  local declaration
+  for declaration in absent empty unrelated; do
+    _box_retention_fixture
+    jq 'map(if .Id == "sha256:ddd" then .RepoTags=["slot-studio-local/media-executor:unknown"] else . end)' "$BOX_DOCKER_IMAGES" > "$BOX_DOCKER_IMAGES.next"
+    mv "$BOX_DOCKER_IMAGES.next" "$BOX_DOCKER_IMAGES"
+    if [ "$declaration" != absent ]; then
+      mkdir -p "$(_box_docker_keep_dir)"
+      touch "$(_box_docker_keep_dir)/producer.patterns"
+      [ "$declaration" != unrelated ] || printf 'other:current\n' > "$(_box_docker_keep_dir)/producer.patterns"
+    fi
+    cmd_box sweep-docker >/dev/null
+    assert_eq "$(grep 'image rm' "$DOCKER_LOG" || true)" ''
+    rm -rf "$T"
+  done
+}
+
+test_docker_retention_legacy_bracket_globs_remain_supported() {
+  _box_retention_fixture
+  printf 'retained/release:rollback-[0-9][0-9]\n' > "$(_box_docker_keep_file)"
   cmd_box sweep-docker >/dev/null
   assert_eq "$(grep 'image rm' "$DOCKER_LOG")" 'image rm sha256:ddd'
   rm -rf "$T"
