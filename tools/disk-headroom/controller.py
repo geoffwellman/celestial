@@ -520,7 +520,9 @@ class Controller:
             failed = False
             incomplete = []
             if only:
-                if before < TARGET:
+                # The daily preservation trigger needs archive-copy headroom;
+                # its unchanged helper reserve is not an under-floor recovery path.
+                if before < TARGET or only == 'preservation-retire':
                     failed = self.phase(only)['status'] != 'ok'
             elif before < TARGET:
                 for name in HANDLERS:
