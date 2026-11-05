@@ -328,7 +328,7 @@ class Controller:
         try:
             data = json.loads(owned_read(self.home, relative, 65536), object_pairs_hook=unique_object)
             required = {'version', 'issuer', 'generated_at', 'live', 'rollback', 'base', 'worktree_candidates'}
-            if not isinstance(data, dict) or not required <= set(data) or set(data) - required - {'retired_this_pass'}:
+            if not isinstance(data, dict) or not required <= set(data) or set(data) - required - {'retired_this_pass', 'tracing_policy'}:
                 raise ValueError('unknown follow-main manifest schema')
             if type(data['version']) is not int or data['version'] != 1 or data['issuer'] != self.config['follow_main_issuer']:
                 raise ValueError('unknown follow-main version or issuer')
@@ -350,6 +350,22 @@ class Controller:
                 if not match:
                     raise ValueError('invalid follow-main worktree head name')
                 return match[1]
+
+            def detached_head(value):
+                # Small read-only linked-worktree metadata, never Git execution.
+                if time.monotonic() >= self.deadline:
+                    raise ValueError('follow-main metadata observation deadline exhausted')
+                suffix = worktree(value)
+                pointer = owned_read(self.home, str(Path(value).relative_to(self.home) / '.git'), 4096).decode().strip()
+                prefix = 'gitdir: '
+                gitdir = Path(pointer[len(prefix):]) if pointer.startswith(prefix) else None
+                metadata = self.home / 'code/slot-studio/.git/worktrees'
+                if gitdir is None or not gitdir.is_absolute() or str(gitdir) != pointer[len(prefix):] or gitdir.parent != metadata:
+                    raise ValueError('unexpected follow-main Git metadata location')
+                head = owned_read(self.home, str(gitdir.relative_to(self.home) / 'HEAD'), 128).decode().strip()
+                if not re.fullmatch(r'[0-9a-f]{40}', head) or not head.startswith(suffix):
+                    raise ValueError('follow-main detached HEAD does not match worktree name')
+                return head
 
             paths, retained_heads = set(), []
             for name in ('live', 'rollback'):
@@ -384,19 +400,22 @@ class Controller:
                     raise ValueError('duplicate or retained follow-main candidate')
                 paths.add(row['path'])
                 heads.add(head)
-                # Follow-main uses detached linked worktrees. Read only the small
-                # Git metadata; never invoke Git, repair refs, or acquire its locks.
-                pointer = owned_read(self.home, str(Path(row['path']).relative_to(self.home) / '.git'), 4096).decode().strip()
-                prefix = 'gitdir: '
-                gitdir = Path(pointer[len(prefix):]) if pointer.startswith(prefix) else None
-                metadata = self.home / 'code/slot-studio/.git/worktrees'
-                if gitdir is None or not gitdir.is_absolute() or str(gitdir) != pointer[len(prefix):] or gitdir.parent != metadata:
-                    raise ValueError('unexpected follow-main Git metadata location')
-                actual = owned_read(self.home, str(gitdir.relative_to(self.home) / 'HEAD'), 128).decode().strip()
-                if actual != head:
+                if detached_head(row['path']) != head:
                     raise ValueError('follow-main candidate HEAD metadata mismatch')
+            policy = data.get('tracing_policy')
+            if 'tracing_policy' in data:
+                if (not isinstance(policy, dict) or set(policy) != {'mode', 'uncapped_opt_in', 'source_sha'}
+                        or policy['mode'] not in ('disabled', 'enabled', 'unknown')
+                        or policy['uncapped_opt_in'] not in ('rejected', 'allowed', 'unknown')
+                        or not isinstance(policy['source_sha'], str)
+                        or not re.fullmatch(r'[0-9a-f]{40}', policy['source_sha'])):
+                    raise ValueError('invalid follow-main tracing policy metadata')
+                if detached_head(data['live']['worktree']) != policy['source_sha']:
+                    raise ValueError('follow-main tracing policy source does not match live detached HEAD')
             fact.update(status='observed', live=data['live'], rollback=data['rollback'], base=base,
                         candidate_count=len(candidates), generated_at=stamp, publication_age_seconds=int(age))
+            if policy is not None:
+                fact['tracing_policy'] = policy
         except (OSError, ValueError, TypeError, OverflowError, RecursionError) as e:
             fact.update(status='blocked', blocker=str(e))
         return fact
@@ -422,9 +441,26 @@ class Controller:
                 fact['blocker'] = 'release queue stale or future dated; handler remains authoritative'
         except (OSError, ValueError) as e:
             fact = {'status': 'missing-adapter', 'blocker': str(e), 'source': str(q)}
+        follow = self.follow_main_facts()
+        tracing = {'status': 'missing-adapter', 'authorization': 'none',
+                   'database_deletion_authorized': False, 'bounded_enabled_tracing': False,
+                   'blocker': 'no fresh source tracing-policy adapter; no tracing files selected'}
+        if follow['status'] == 'blocked':
+            tracing.update(status='blocked', source=follow['source'],
+                           blocker='follow-main publication untrusted: ' + follow['blocker'])
+        elif follow['status'] == 'observed' and 'tracing_policy' in follow:
+            policy = follow['tracing_policy']
+            tracing.update(source=follow['source'], generated_at=follow['generated_at'],
+                           publication_age_seconds=follow['publication_age_seconds'], tracing_policy=policy)
+            if policy['mode'] == 'disabled' and policy['uncapped_opt_in'] == 'rejected':
+                tracing.update(status='disabled-by-source-policy',
+                               scope='issuer-reported running-source prevention only; not bounded enabled tracing or a database cleanup grant')
+                tracing.pop('blocker')
+            else:
+                tracing.update(status='blocked', blocker='source does not attest disabled tracing with uncapped opt-in rejected; no cap or deletion grant')
         facts = {'gate-runs': fact,
-                 'follow-main-executor-images': self.follow_main_facts(),
-                 'miniflare-tracing': {'status': 'missing-adapter', 'blocker': 'no exact closed-set producer adapter; no tracing files selected'},
+                 'follow-main-executor-images': follow,
+                 'miniflare-tracing': tracing,
                  'stale-worktrees': {'status': 'delegated', 'handler': 'preservation-retire', 'blocker': 'handler eligibility, preservation and minimum-free guards remain authoritative'}}
         now = int(time.time())
         for name, row in facts.items():

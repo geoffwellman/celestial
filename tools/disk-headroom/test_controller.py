@@ -134,6 +134,14 @@ class HeadroomTests(unittest.TestCase):
         (metadata / 'HEAD').write_text('c' * 40 + '\n')
         (candidate / '.git').chmod(0o600)
         (metadata / 'HEAD').chmod(0o600)
+        live = parent / ('local-' + 'a' * 12)
+        live.mkdir()
+        live_metadata = metadata.parent / live.name
+        live_metadata.mkdir()
+        (live / '.git').write_text('gitdir: ' + str(live_metadata) + '\n')
+        (live_metadata / 'HEAD').write_text('a' * 40 + '\n')
+        (live / '.git').chmod(0o600)
+        (live_metadata / 'HEAD').chmod(0o600)
         manifest = {
             'version': 1, 'issuer': self.data['follow_main_issuer'],
             'generated_at': m.datetime.datetime.now(m.datetime.timezone.utc).isoformat(),
@@ -685,6 +693,11 @@ class HeadroomTests(unittest.TestCase):
             {'worktree_candidates': [dict(original['worktree_candidates'][0], extra=True)]},
             {'worktree_candidates': [{'path': original['live']['worktree'], 'head': 'a' * 40}]},
             {'retired_this_pass': ['not-a-grant']},
+            {'tracing_policy': None}, {'tracing_policy': {}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'not-a-head'}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'd' * 40, 'extra': True}},
+            {'tracing_policy': {'mode': 'capped', 'uncapped_opt_in': 'rejected', 'source_sha': 'd' * 40}},
+            {'tracing_policy': {'mode': 'disabled', 'uncapped_opt_in': 'yes', 'source_sha': 'd' * 40}},
         ]
         for changes in cases:
             with self.subTest(changes=changes):
@@ -773,6 +786,44 @@ class HeadroomTests(unittest.TestCase):
                                   self.data['release_queue_issuer'], 'different-fixture-issuer')
         self.assertEqual(config.read_bytes(), previous)
 
+    def test_tracing_policy_requires_fresh_source_attestation_and_never_grants_deletion(self):
+        path, data, _ = self.follow_manifest()
+        self.free(m.TARGET)
+        for mode in ('disabled', 'enabled', 'unknown'):
+            for opt_in in ('rejected', 'allowed', 'unknown'):
+                with self.subTest(mode=mode, uncapped_opt_in=opt_in):
+                    policy = {'mode': mode, 'uncapped_opt_in': opt_in, 'source_sha': 'a' * 40}
+                    data['tracing_policy'] = policy
+                    path.write_text(json.dumps(data))
+                    self.assertEqual(self.controller().run(), 0)
+                    state = self.state()
+                    row = state['producers']['miniflare-tracing']
+                    expected = 'disabled-by-source-policy' if mode == 'disabled' and opt_in == 'rejected' else 'blocked'
+                    self.assertEqual(row['status'], expected)
+                    self.assertEqual(row['tracing_policy'], policy)
+                    self.assertEqual(row['authorization'], 'none')
+                    self.assertFalse(row['database_deletion_authorized'])
+                    self.assertFalse(row['bounded_enabled_tracing'])
+                    self.assertEqual(row['generated_at'], data['generated_at'])
+                    self.assertEqual(state['notifications'], {})
+        data['tracing_policy'] = {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': 'a' * 40}
+        for changes in ({'generated_at': '2020-01-01T00:00:00Z'}, {'issuer': 'different-issuer'},
+                        {'tracing_policy': dict(data['tracing_policy'], source_sha=None)},
+                        {'tracing_policy': dict(data['tracing_policy'], source_sha='d' * 40)}):
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps(dict(data, **changes)))
+                self.assertEqual(self.controller().run(), 0)
+                row = self.state()['producers']['miniflare-tracing']
+                self.assertEqual(row['status'], 'blocked')
+                self.assertNotIn('tracing_policy', row)
+        data.pop('tracing_policy')
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.controller().run(), 0)
+        row = self.state()['producers']['miniflare-tracing']
+        self.assertEqual(row['status'], 'missing-adapter')
+        self.assertNotIn('tracing_policy', row)
+        self.assertTrue(all(command[0] == 'docker' for command in self.commands()))
+
     def test_native_manifest_observer_reads_real_detached_metadata_without_mutation(self):
         path, data, old_metadata = self.follow_manifest()
         candidate = Path(data['worktree_candidates'][0]['path'])
@@ -794,7 +845,14 @@ class HeadroomTests(unittest.TestCase):
         head = git('rev-parse', 'HEAD')
         candidate = candidate.parent / ('local-' + head[:12])
         git('worktree', 'add', '--detach', str(candidate), head)
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'live fixture')
+        live_head = git('rev-parse', 'HEAD')
+        live = candidate.parent / ('local-' + live_head[:12])
+        git('worktree', 'add', '--detach', str(live), live_head)
+        data['live'] = {'worktree': str(live), 'image': 'slot-studio-local/media-executor:' + live_head[:12]}
         data['worktree_candidates'] = [{'path': str(candidate), 'head': head}]
+        data['tracing_policy'] = {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': live_head}
         path.write_text(json.dumps(data))
         def snapshot():
             return {str(p.relative_to(self.h)): (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
@@ -818,7 +876,12 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(row['base'], data['base'])
         self.assertEqual(row['authorization'], 'none')
         self.assertTrue(row['source_controlled_deletion_disabled'])
-        self.assertEqual(producers['miniflare-tracing']['status'], 'missing-adapter')
+        tracing = producers['miniflare-tracing']
+        self.assertEqual(tracing['status'], 'disabled-by-source-policy')
+        self.assertEqual(tracing['tracing_policy']['source_sha'], live_head)
+        self.assertEqual(tracing['authorization'], 'none')
+        self.assertFalse(tracing['database_deletion_authorized'])
+        self.assertFalse(tracing['bounded_enabled_tracing'])
         self.assertEqual(snapshot(), before)
         self.assertTrue(candidate.exists())
         self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
