@@ -52,6 +52,12 @@ def read_json(path, cap=16 * 1024 * 1024):
     return json.loads(data)
 
 
+def reviewed_queue_issuer(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('release queue issuer requires an explicit reviewed nonempty string')
+    return value
+
+
 def executable_digest(path):
     path = Path(path)
     s = path.lstat()
@@ -159,8 +165,9 @@ class Controller:
         self.config = read_json(self.config_path, 65536)
         if not isinstance(self.config, dict) or type(self.config.get('version')) is not int or self.config.get('version') != 1 or set(self.config) - {
                 'version', 'handler_sha256', 'retire_notification_version', 'docker_opt_in',
-                'cel', 'cel_sha256', 'docker_runtime_sha256'}:
+                'cel', 'cel_sha256', 'docker_runtime_sha256', 'release_queue_issuer'}:
             raise ValueError('unknown configuration/version')
+        reviewed_queue_issuer(self.config.get('release_queue_issuer'))
         hashes = self.config.get('handler_sha256', {})
         if not isinstance(hashes, dict) or set(hashes) - set(DEFAULTS):
             raise ValueError('unknown handler')
@@ -265,7 +272,7 @@ class Controller:
         q = self.home / '.cache/slot-builder-iso/release-queue.json'
         try:
             data = read_json(q)
-            if not isinstance(data, dict) or data.get('version') != 1 or data.get('issuer') != 'standout-slot-builder' or not isinstance(data.get('entries'), list):
+            if not isinstance(data, dict) or data.get('version') != 1 or data.get('issuer') != self.config['release_queue_issuer'] or not isinstance(data.get('entries'), list):
                 raise ValueError('unknown release queue schema')
             stamp = data.get('generated_at')
             if not isinstance(stamp, str):

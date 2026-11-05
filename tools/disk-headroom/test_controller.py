@@ -80,6 +80,7 @@ class HeadroomTests(unittest.TestCase):
                      'retire_notification_version': 1, 'handler_sha256': {
                          name: hashlib.sha256((self.bin / binary).read_bytes()).hexdigest()
                          for name, (binary, _) in m.DEFAULTS.items()}}
+        self.data['release_queue_issuer'] = 'fixture-producer'
         self.data['cel_sha256'] = m.executable_digest(self.bin / 'cel')
         self.data['docker_runtime_sha256'] = m.runtime_files(self.bin / 'cel')[1]
         self.configure()
@@ -117,7 +118,8 @@ class HeadroomTests(unittest.TestCase):
 
     def install(self):
         return installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
-                                 True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'])
+                                 True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
+                                 self.data['release_queue_issuer'])
 
 
     def test_threshold_stops_after_each_phase(self):
@@ -271,7 +273,7 @@ class HeadroomTests(unittest.TestCase):
     def test_queue_staleness_is_explicit_status_not_authority(self):
         q = self.h / '.cache/slot-builder-iso/release-queue.json'
         q.parent.mkdir(parents=True)
-        q.write_text(json.dumps({'version': 1, 'issuer': 'standout-slot-builder',
+        q.write_text(json.dumps({'version': 1, 'issuer': 'fixture-producer',
                                  'generated_at': '2020-01-01T00:00:00Z', 'entries': [], 'held_count': 3}))
         self.controller().run()
         row = self.state()['producers']['gate-runs']
@@ -316,12 +318,15 @@ class HeadroomTests(unittest.TestCase):
             self.assertIn('cel-disk-headroom', text)
         monitor = (self.h / '.config/systemd/user/cel-disk-monitor.service.d/50-headroom.conf').read_text()
         self.assertIn(' run\n', monitor)
+        installed_config = json.loads((self.h / '.config/cel/disk-headroom.json').read_text())
+        self.assertEqual(installed_config['release_queue_issuer'], self.data['release_queue_issuer'])
 
     def test_installer_refuses_active_or_unknown_units(self):
         for output in ('LoadState=loaded\nActiveState=active\n', 'LoadState=not-found\nActiveState=inactive\n'):
             with patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output, '')):
                 with self.assertRaises(ValueError):
-                    installer.install(self.h, self.bin / 'cel', {}, apply=True)
+                    installer.install(self.h, self.bin / 'cel', {}, apply=True,
+                                      release_queue_issuer=self.data['release_queue_issuer'])
             self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
 
     def test_migration_respects_direct_controller_lock(self):
@@ -329,7 +334,8 @@ class HeadroomTests(unittest.TestCase):
         with open(c.directory / 'lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaises(ValueError):
-                installer.install(self.h, self.bin / 'cel', {}, apply=True)
+                installer.install(self.h, self.bin / 'cel', {}, apply=True,
+                                  release_queue_issuer=self.data['release_queue_issuer'])
 
     def test_production_adapter_strips_unsafe_standalone_test_hooks(self):
         c = self.controller()
@@ -502,6 +508,37 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(len(roots), 3)
         self.assertTrue(all(value.startswith(str(c.directory / 'docker-runtime-')) for value in roots[:2]))
         self.assertEqual(roots[2], str(self.bin.parent))
+
+    def test_queue_issuer_requires_exact_reviewed_configuration(self):
+        q = self.h / '.cache/slot-builder-iso/release-queue.json'
+        q.parent.mkdir(parents=True)
+        c = self.controller()
+        c.load()
+        queue = {'version': 1, 'generated_at': m.datetime.datetime.now(m.datetime.timezone.utc).isoformat(),
+                 'entries': [], 'held_count': 0}
+        for issuer in (None, '', 'different-producer', 'FIXTURE-PRODUCER'):
+            with self.subTest(issuer=issuer):
+                q.write_text(json.dumps(dict(queue, issuer=issuer)))
+                c.producer_facts()
+                self.assertEqual(self.state()['producers']['gate-runs']['status'], 'missing-adapter')
+        q.write_text(json.dumps(dict(queue, issuer=self.data['release_queue_issuer'])))
+        c.producer_facts()
+        self.assertEqual(self.state()['producers']['gate-runs']['status'], 'observed')
+
+    def test_missing_or_invalid_issuer_refuses_config_and_install(self):
+        for issuer in (None, '', '   ', 7):
+            with self.subTest(issuer=issuer):
+                self.data['release_queue_issuer'] = issuer
+                self.configure()
+                with self.assertRaisesRegex(ValueError, 'explicit reviewed'):
+                    self.controller().load()
+                with self.assertRaisesRegex(ValueError, 'explicit reviewed'):
+                    installer.install(self.h, self.bin / 'cel', {}, apply=True, release_queue_issuer=issuer)
+        self.data.pop('release_queue_issuer')
+        self.configure()
+        with self.assertRaisesRegex(ValueError, 'explicit reviewed'):
+            self.controller().load()
+        self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
 
 
 if __name__ == '__main__':

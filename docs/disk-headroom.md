@@ -24,6 +24,7 @@ The owner-controlled regular file `~/.config/cel/disk-headroom.json` has schema 
   "cel": "<absolute runtime-resolved cel executable>",
   "cel_sha256": "<reviewed executable SHA256>",
   "docker_runtime_sha256": "<reviewed Docker CLI runtime digest>",
+  "release_queue_issuer": "<exact reviewed producer identity>",
   "handler_sha256": {
     "release-drain": "<reviewed SHA256>",
     "ordinary-drain": "<reviewed SHA256>",
@@ -33,6 +34,8 @@ The owner-controlled regular file `~/.config/cel/disk-headroom.json` has schema 
   "docker_opt_in": false
 }
 ```
+
+`release_queue_issuer` is required, nonempty operator configuration. Parent supplies the exact existing producer identity privately through `--release-queue-issuer`; no producer name is embedded in public source or fixtures, and the identity is never inferred from the queue itself. Missing configuration is a real failure. A queue whose issuer differs from the configured string (including case differences) is rejected, preserving exact issuer acceptance rather than widening it.
 
 The existing handlers are fixed at `~/.local/bin/cel-disk-{release-drain,drain,retire}`. Missing or changed pins/executables are real failed statuses, never no-op success. Standalone smoke hooks, including a lowered retirement free-space reserve or after-copy shell command, are stripped from production adapter environments. Handler eligibility, observer, manifest and preservation guards remain authoritative. Exceptions such as a missing `cel` configuration finish the phase as failed instead of leaving durable `running` intent behind.
 
@@ -81,13 +84,14 @@ Building and testing this code does not change live scripts, units, timers or cl
    python3 tools/disk-headroom/install.py --apply --cel "$CEL_BIN" \
      --cel-sha256 "$REVIEWED_CEL_SHA" \
      --docker-runtime-sha256 "$REVIEWED_DOCKER_RUNTIME_SHA" \
+     --release-queue-issuer "$REVIEWED_RELEASE_QUEUE_ISSUER" \
      --handler-sha256 "release-drain=$REVIEWED_RELEASE_SHA" \
      --handler-sha256 "ordinary-drain=$REVIEWED_DRAIN_SHA" \
      --handler-sha256 "preservation-retire=$REVIEWED_RETIRE_SHA" \
      --retire-notification-v1 --enable-safe-docker
    ```
 
-   Omit opt-ins until prerequisites are met; missing gates remain visible blockers. CLI executable review pin is required for apply; runtime pin is required when Docker is enabled.
+   Omit opt-ins until prerequisites are met; missing gates remain visible blockers. CLI executable review pin and explicit reviewed release-queue issuer are required for apply; runtime pin is required when Docker is enabled.
 4. Before mutation, installer checks manager-loaded and local service drop-ins. A later-sorting `ExecStart` override is refused, as is a conflicting managed destination. It saves independent, fsynced preimages and original modes of controller, wrapper, config and drop-ins under `~/.local/state/cel-disk-headroom/install-backups/transaction-*`, with a durable manifest. It then atomically replaces each file and daemon-reloads. Any caught write/reload/interrupt failure restores all changed preimages (removes only newly created installation files) and reloads again. Rollback failures are explicit and keep the backup path; parent must keep timers stopped. A hard process kill cannot promise an automatic multi-file rollback: use the durable manifest/preimages for operator recovery. Backup evidence is retained, not auto-pruned.
 5. Parent starts `cel-disk-monitor.service`, supervises the real pass and reads byte measurements/statuses, then restarts the existing timers. The installer never toggles timers, starts cleanup, or changes standalone scripts/state. Monitor service now invokes maintenance, not the old duplicate routine root-warning behavior.
 6. Operator rollback: stop the four timers, wait for services, remove only the four `50-headroom.conf` drop-ins, daemon-reload, then restart existing timers. Original standalone scripts remain available. This restores old alert-only/root-warning monitor behavior; it does not restore deleted dependencies or grant a new class. Preserve controller receipts and transaction backups.
