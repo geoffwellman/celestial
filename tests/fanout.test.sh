@@ -2054,10 +2054,10 @@ STUB
 # descriptor, the CALLER still holds the lock afterwards (a helper that closed
 # it in the calling process would release a ledger mid-update), and a
 # backgrounded spawn that closes the descriptor inline leaves the lock free
-# the moment the region ends, even while the child runs on.
+# after the region ends and the child has started, even while it runs on.
 test_lock_spawn_children_do_not_hold_the_lock_open() {
   local D out; D="$(mktemp -d)"
-  out="$(CEL_ROOT="$CEL_ROOT" LOCKFILE="$D/delegations.lock" bash -c '
+  out="$(CEL_ROOT="$CEL_ROOT" LOCKFILE="$D/delegations.lock" READY="$D/ready" bash -c '
     set -u
     . "$CEL_ROOT/lib/registry.sh"
     exec {fd}>"$LOCKFILE"
@@ -2065,12 +2065,24 @@ test_lock_spawn_children_do_not_hold_the_lock_open() {
     if lock_spawn "$fd" bash -c "ls -l /proc/\$\$/fd" | grep -q delegations.lock
       then echo leaked-into-child; else echo no-lock-fd; fi
     if flock -n "$LOCKFILE" -c true; then echo lost-the-lock; else echo still-mine; fi
-    sleep 60 {fd}>&- &
+    bash -c "printf ready > \"\$READY\"; exec sleep 60" {fd}>&- &
     child=$!
+    # Forked children still inherit fd until scheduled to apply redirections.
+    # Wait for that transition, not an arbitrary sleep, before releasing ours.
+    deadline=$((SECONDS + 15))
+    while [ ! -s "$READY" ]; do
+      if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$child" 2>/dev/null; then
+        echo child-not-ready >&2
+        kill "$child" 2>/dev/null; wait "$child" 2>/dev/null || true
+        exit 1
+      fi
+      sleep 0.01
+    done
     exec {fd}>&-
     kill -0 "$child" 2>/dev/null && echo alive
     if flock -n "$LOCKFILE" -c true; then echo relocked; else echo still-held; fi
     kill "$child" 2>/dev/null
+    wait "$child" 2>/dev/null || true
   ' 2>&1)"
   rm -rf "$D"
   assert_contains "$out" no-lock-fd
