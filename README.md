@@ -1094,6 +1094,11 @@ count (an upper bound in dry runs), and exits nonzero on unknown observations
 or mutation failure; exit 2 means Docker is unavailable. No image/system,
 container or volume prune is used. Build-cache prune remains a separate step.
 
+For recurring 20 GiB recovery, reviewed runtime/handler pins, producer observations,
+native notification verification and transactional service migration, see the
+[disk headroom controller runbook](docs/disk-headroom.md). A low-disk reading
+never expands cleanup eligibility or turns a producer candidate into a grant.
+
 An image survives if **any tag** matches a keep pattern, its image label is
 `cel.keep=true`, or any running/stopped container references its actual full
 image ID. Labels protect containerless bases too. Built-ins retain `ubuntu:*`,
