@@ -26,7 +26,7 @@ if [ "${open:-0}" -gt 0 ] && [ ! -f "$mark" ]; then
   {
     printf 'celestial: %s unresolved decision(s)/blocker(s) in your inbox. Reading them did not resolve them.\n' "$open"
     printf 'Run `cel inbox open`, act on each or answer it, then `cel inbox resolve <id>`.\n'
-    printf 'Mail arriving after this turn ends waits for the next submitted turn; Claude has no idle Monitor.\n'
+    printf 'Idle wake requires a managed native peer watcher; without it, mail waits for the next submitted turn.\n'
   } >&2
   exit 2
 fi

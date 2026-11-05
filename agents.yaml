@@ -85,9 +85,10 @@ agents:
     # command-line argument (invalid_agent_argument), so the role travels as
     # a file path.
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt-file }
-    # The global hook drains inbox once; launch-scoped hooks additionally
-    # report native Claude session/status. Stop retains owed-mail behavior.
-    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh","timeout":10}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
+    # Async native hooks retain the watcher as Claude's own child, preserving
+    # native inbound permission checks without declaring a forged peer mode.
+    # Stop retains owed-mail behavior; the global submit hook still drains mail.
+    launch_args: ["--dangerously-skip-permissions", "--settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh watch","async":true}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/claude-session.sh watch","async":true}]}],"Stop":[{"hooks":[{"type":"command","command":"bash $CEL_ROOT/tools/hooks/inbox-stop.sh","timeout":10}]}]}}']
     resume: { flag: --resume, value: id }
     model_flag: --model
     # `claude --help`: "--effort <level>  Effort level for the current session
