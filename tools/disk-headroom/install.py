@@ -80,20 +80,43 @@ def install_quiescent(home, cel, hashes, retire_v1, docker, directory, cel_sha25
                 existing_dropins[name] = [Path(p) for p in shlex.split(fields.get('DropInPaths', ''))]
     if not os.access(cel, os.X_OK) or controller.executable_digest(cel) != cel_sha256:
         raise ValueError('missing or changed reviewed cel executable SHA256')
-    if docker and controller.runtime_files(cel)[1] != docker_runtime_sha256:
-        raise ValueError('missing or changed reviewed Docker runtime SHA256')
-    config = {'version': 1, 'cel': str(cel), 'cel_sha256': cel_sha256,
-              'docker_runtime_sha256': docker_runtime_sha256, 'handler_sha256': hashes,
+    runtime_files, runtime_digest = controller.runtime_files(cel)
+    if runtime_digest != docker_runtime_sha256:
+        raise ValueError('missing or changed reviewed CLI runtime SHA256')
+    # The maintenance application owns its reviewed dependency packet. A normal
+    # update of the general-purpose CLI must not invalidate cleanup/notification
+    # pins or silently swap the code used by an unattended maintenance pass.
+    runtime = home / '.local/lib/cel-disk-headroom/approved-runtime' / runtime_digest
+    parent = runtime
+    while parent != home:
+        if parent.is_symlink() or (parent.exists() and
+                (not parent.is_dir() or parent.stat().st_uid != os.getuid())):
+            raise ValueError(f'unsafe approved runtime directory: {parent}')
+        parent = parent.parent
+    config = {'version': 1, 'cel': str(runtime / 'bin/cel'), 'cel_sha256': cel_sha256,
+              'docker_runtime_sha256': runtime_digest, 'handler_sha256': hashes,
               'retire_notification_version': 1 if retire_v1 else 0, 'docker_opt_in': docker,
               'release_queue_issuer': release_queue_issuer}
     if follow_main_issuer is not None:
         config['follow_main_issuer'] = follow_main_issuer
     dest = home / '.local/lib/cel-disk-headroom/controller.py'
     wrapper = home / '.local/bin/cel-disk-headroom'
-    payloads = {
+    payloads = {}
+    for relative, data in runtime_files.items():
+        path = runtime / relative
+        mode = 0o700 if relative == 'bin/cel' else 0o600
+        if path.is_symlink():
+            raise ValueError(f'changed immutable approved runtime: {path}')
+        if path.exists():
+            if (not path.is_file() or path.stat().st_uid != os.getuid() or
+                    path.read_bytes() != data or stat.S_IMODE(path.stat().st_mode) != mode):
+                raise ValueError(f'changed immutable approved runtime: {path}')
+            continue
+        payloads[path] = (data, mode)
+    payloads.update({
         dest: (Path(__file__).with_name('controller.py').read_bytes(), 0o755),
         wrapper: (('#!/bin/sh\nexec /usr/bin/python3 ' + shlex.quote(str(dest)) + ' "$@"\n').encode(), 0o755),
-        home / '.config/cel/disk-headroom.json': ((json.dumps(config, sort_keys=True) + '\n').encode(), 0o600)}
+        home / '.config/cel/disk-headroom.json': ((json.dumps(config, sort_keys=True) + '\n').encode(), 0o600)})
     mapping = {'cel-disk-monitor': 'run', 'cel-disk-release-drain': 'handler release-drain',
                'cel-disk-drain': 'handler ordinary-drain', 'cel-disk-retire': 'handler preservation-retire'}
     for name, verb in mapping.items():

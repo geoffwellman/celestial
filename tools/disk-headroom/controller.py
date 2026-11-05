@@ -492,7 +492,7 @@ class Controller:
             env = dict(os.environ, CEL_ROOT=str(Path(cel).parent.parent))
             r = self.command([cel, 'inbox', 'send', recipient, message,
                               '--from', 'celestial-disk-cleanup', '--workspace', 'plane',
-                              '--kind', 'escalation' if recipient == 'root' else 'info'], 30, env)
+                              '--kind', 'escalation' if recipient == 'root' else 'status'], 30, env)
         except (OSError, ValueError, KeyError, TypeError) as e:
             r = {'status': 'failed', 'output': str(e)}
         if r['status'] == 'ok' and f'queued for {recipient} in plane' in r['output']:

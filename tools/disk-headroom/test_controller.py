@@ -487,11 +487,146 @@ class HeadroomTests(unittest.TestCase):
             self.assertNotIn(key, environment)
         self.assertEqual(environment['CEL_RETIRE_NOTIFY_RECIPIENT'], 'celestial-disk-cleanup')
 
+    def test_notifications_reach_native_inbox_with_valid_categories_once(self):
+        # Exercise the real inbox consumer, not the transport fixture's ACK.
+        cli = self.bin / 'cel'
+        cli.write_text('''#!/bin/bash
+set -euo pipefail
+export CEL_ROOT="$HEADROOM_SOURCE_ROOT"
+source "$CEL_ROOT/lib/common.sh"
+source "$CEL_ROOT/lib/inbox.sh"
+[[ "$1" == inbox && "$2" == send ]] || exit 2
+shift 2
+_inbox_send "$@"
+''')
+        cli.chmod(0o700)
+        self.data['cel_sha256'] = m.executable_digest(cli)
+        self.configure()
+        inbox = self.h / 'native-inbox'
+        inbox.mkdir()
+        with patch.dict(os.environ, {
+                'HEADROOM_SOURCE_ROOT': str(HERE.parents[1]),
+                'HOME': str(self.h), 'CEL_INBOX_DIR': str(inbox),
+                'CEL_REGISTRY': str(self.h / 'registry.yaml'),
+                'XDG_DATA_HOME': str(self.h / 'data'),
+                'XDG_STATE_HOME': str(self.h / 'state'),
+                'XDG_CACHE_HOME': str(self.h / 'cache'),
+                'XDG_CONFIG_HOME': str(self.h / 'config'),
+                'CEL_REX_STATE': str(self.h / 'rex'), 'REX_AUTOSTART': 'false'}):
+            controller = self.controller()
+            controller.load()
+            delivered = controller.notify('celestial-disk-cleanup', 'maintenance', 'routine maintenance')
+            self.assertTrue(delivered, self.state()['notifications'])
+            self.assertTrue(controller.notify('celestial-disk-cleanup', 'maintenance', 'routine maintenance'))
+            self.assertTrue(controller.notify('root', 'capacity', 'owner capacity decision'))
+        rows = [json.loads(line) for line in (inbox / 'plane.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['to'], row['kind'], row['message']) for row in rows], [
+            ('celestial-disk-cleanup', 'status', 'routine maintenance'),
+            ('root', 'escalation', 'owner capacity decision')])
+        self.assertTrue(all(not row['debt'] for row in self.state()['notifications'].values()))
+
+    def test_installed_native_cli_survives_source_updates_and_delivers_mail(self):
+        source = self.h / 'source-runtime'
+        files, digest = m.runtime_files(HERE.parents[1] / 'bin/cel')
+        for relative, data in files.items():
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o700 if relative == 'bin/cel' else 0o600)
+        good = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=good):
+            installer.install(self.h, source / 'bin/cel', self.data['handler_sha256'],
+                              True, True, True, m.executable_digest(source / 'bin/cel'), digest,
+                              self.data['release_queue_issuer'])
+        config = self.h / '.config/cel/disk-headroom.json'
+        installed = json.loads(config.read_text())
+        inbox = self.h / 'native-inbox'
+        inbox.mkdir()
+        # Roster discovery is unrelated to delivery; never contact host daemons.
+        for name, response in (('herdr', '{"result":{"agents":[]}}'), ('rex', '{"sessions":[]}')):
+            path = self.bin / name
+            path.write_text('#!/bin/sh\nprintf \'%s\\n\' \'' + response + '\'\n')
+            path.chmod(0o700)
+        docker = self.bin / 'docker'
+        docker.write_text('''#!/usr/bin/python3
+import json, sys
+image = 'sha256:' + 'd' * 64
+operation = sys.argv[1:3]
+if operation == ['container', 'ls']:
+    pass
+elif operation == ['image', 'ls']:
+    print(json.dumps({'ID': image}))
+elif operation == ['image', 'inspect']:
+    print(json.dumps([{'Id': image, 'Size': 4096, 'RepoTags': ['fixture-temporary:old'], 'Config': {'Labels': None}}]))
+elif operation == ['system', 'df']:
+    print(json.dumps({'Type': 'Images', 'Size': '4096B', 'Reclaimable': '4096B'}))
+else:
+    raise SystemExit('mutation or unexpected daemon operation refused')
+''')
+        docker.chmod(0o700)
+        proc = self.h / 'proc'
+        proc.mkdir()
+        environment = {
+            'HOME': str(self.h), 'CEL_INBOX_DIR': str(inbox),
+            'CEL_REGISTRY': str(self.h / 'registry.yaml'),
+            'XDG_DATA_HOME': str(self.h / 'data'), 'XDG_STATE_HOME': str(self.h / 'state'),
+            'XDG_CACHE_HOME': str(self.h / 'cache'), 'XDG_CONFIG_HOME': str(self.h / 'config'),
+            'CEL_REX_STATE': str(self.h / 'rex'), 'REX_AUTOSTART': 'false',
+            'CEL_BOX_DOCKER': str(docker), 'CEL_PROC': str(proc)}
+        (source / 'lib/inbox.sh').write_text('printf used > "$FIXTURE_HOME/obsolete-source"\nexit 9\n')
+        with patch.dict(os.environ, environment):
+            controller = FakeFree(self.h, config)
+            controller.load()
+            delivered = controller.notify('celestial-disk-cleanup', 'maintenance', 'packet survives library update')
+            self.assertTrue(delivered, controller.state['notifications'])
+            (source / 'bin/cel').write_text('#!/bin/sh\nexit 99\n')
+            delivered = controller.notify('root', 'capacity', 'packet survives executable update')
+            self.assertTrue(delivered, controller.state['notifications'])
+            packet_environment = dict(os.environ, CEL_ROOT=str(Path(installed['cel']).parent.parent))
+            capability = subprocess.run([installed['cel'], 'box', 'docker-safety'],
+                                        env=packet_environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(capability.returncode, 0, capability.stderr)
+            self.assertEqual(json.loads(capability.stdout)['version'], 1)
+            dry = subprocess.run([installed['cel'], 'box', 'sweep-docker', '--dry-run'],
+                                 env=packet_environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertEqual(dry.stdout.strip(), '4096')
+        rows = [json.loads(line) for line in (inbox / 'plane.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['to'], row['kind'], row['message']) for row in rows], [
+            ('celestial-disk-cleanup', 'status', 'packet survives library update'),
+            ('root', 'escalation', 'packet survives executable update')])
+        self.assertFalse((self.h / 'obsolete-source').exists())
+
+
     def test_last_handler_cannot_consume_notification_reserve(self):
-        self.effects({'docker-sweep': {'sleep': 10}})
-        start = time.monotonic()
-        self.assertEqual(self.controller(pass_seconds=1.5, handler_seconds=10, control_reserve=1).run(), 1)
-        self.assertLess(time.monotonic() - start, 1.5)
+        self.effects({'docker-sweep': {'sleep': 5}})
+        # Charge real elapsed time only during the last handler. Earlier short
+        # command scheduling must not skip the path under test; the streamed
+        # child still really times out, and real notification children must run.
+        monotonic = time.monotonic
+        elapsed = 0.0
+        started = None
+
+        def clock():
+            return elapsed if started is None else elapsed + monotonic() - started
+
+        with patch.object(m.time, 'monotonic', new=clock):
+            controller = self.controller(pass_seconds=12, handler_seconds=10, control_reserve=10)
+            command = controller.command
+
+            def charge_last(argv, *args, **kwargs):
+                nonlocal elapsed, started
+                if argv[-1] != 'sweep-docker':
+                    return command(argv, *args, **kwargs)
+                started = monotonic()
+                try:
+                    return command(argv, *args, **kwargs)
+                finally:
+                    elapsed += monotonic() - started
+                    started = None
+
+            with patch.object(controller, 'command', new=charge_last):
+                self.assertEqual(controller.run(), 1)
         self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'timeout')
         self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
         self.assertEqual(self.mail('root'), [])
