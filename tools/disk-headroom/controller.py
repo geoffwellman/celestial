@@ -65,8 +65,8 @@ def reviewed_follow_main_issuer(value):
     return value
 
 
-def owned_read(home, relative, cap):
-    """Read bounded regular metadata through owned, nonsymlink directories."""
+def owned_read(home, relative, cap, *, git_metadata=False):
+    """Read stable bounded metadata; only Git reads allow primary-group writes."""
     parts = Path(relative).parts
     if not parts or Path(relative).is_absolute() or any(p in ('.', '..') for p in parts):
         raise ValueError('invalid metadata path')
@@ -85,13 +85,21 @@ def owned_read(home, relative, cap):
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(fd, 'rb') as f:
             s = os.fstat(f.fileno())
-            if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o022:
-                raise ValueError('metadata must be an owner-controlled nonsymlink regular file')
+            group_write_allowed = git_metadata and s.st_gid == os.getgid()
+            if (not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o002
+                    or (s.st_mode & 0o020 and not group_write_allowed)):
+                raise ValueError('metadata must be an owned nonsymlink regular file with safe write permissions')
             if s.st_size > cap:
                 raise ValueError('metadata exceeds size limit')
             data = f.read(cap + 1)
             if len(data) > cap:
                 raise ValueError('metadata exceeds size limit')
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if (len(data) != s.st_size or identity(s) != identity(os.fstat(f.fileno()))
+                    or identity(s) != identity(os.stat(parts[-1], dir_fd=directory, follow_symlinks=False))):
+                raise ValueError('metadata changed during bounded read')
             return data
     finally:
         os.close(directory)
@@ -356,13 +364,13 @@ class Controller:
                 if time.monotonic() >= self.deadline:
                     raise ValueError('follow-main metadata observation deadline exhausted')
                 suffix = worktree(value)
-                pointer = owned_read(self.home, str(Path(value).relative_to(self.home) / '.git'), 4096).decode().strip()
+                pointer = owned_read(self.home, str(Path(value).relative_to(self.home) / '.git'), 4096, git_metadata=True).decode().strip()
                 prefix = 'gitdir: '
                 gitdir = Path(pointer[len(prefix):]) if pointer.startswith(prefix) else None
                 metadata = self.home / 'code/slot-studio/.git/worktrees'
                 if gitdir is None or not gitdir.is_absolute() or str(gitdir) != pointer[len(prefix):] or gitdir.parent != metadata:
                     raise ValueError('unexpected follow-main Git metadata location')
-                head = owned_read(self.home, str(gitdir.relative_to(self.home) / 'HEAD'), 128).decode().strip()
+                head = owned_read(self.home, str(gitdir.relative_to(self.home) / 'HEAD'), 128, git_metadata=True).decode().strip()
                 if not re.fullmatch(r'[0-9a-f]{40}', head) or not head.startswith(suffix):
                     raise ValueError('follow-main detached HEAD does not match worktree name')
                 return head

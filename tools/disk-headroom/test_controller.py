@@ -900,6 +900,13 @@ class HeadroomTests(unittest.TestCase):
         data['worktree_candidates'] = [{'path': str(candidate), 'head': head}]
         data['tracing_policy'] = {'mode': 'disabled', 'uncapped_opt_in': 'rejected', 'source_sha': live_head}
         path.write_text(json.dumps(data))
+        git_files = [candidate / '.git', live / '.git',
+                     repo / '.git/worktrees' / candidate.name / 'HEAD',
+                     repo / '.git/worktrees' / live.name / 'HEAD']
+        for git_file in git_files:
+            git_file.chmod(0o664)
+            self.assertEqual(git_file.stat().st_uid, os.getuid())
+            self.assertEqual(git_file.stat().st_gid, os.getgid())
         def snapshot():
             return {str(p.relative_to(self.h)): (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
                     for root in (self.h / 'code', self.h / '.cache', self.bin)
@@ -932,6 +939,55 @@ class HeadroomTests(unittest.TestCase):
         self.assertTrue(candidate.exists())
         self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
                                            ['docker', 'ps', '-a', '--size', '--format', '{{json .}}']])
+        # Only read-only Git metadata accepts shared primary-group writes.
+        for git_file in git_files:
+            with self.subTest(world_writable=git_file.name):
+                git_file.chmod(0o666)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                git_file.chmod(0o664)
+        path.chmod(0o664)
+        self.assertEqual(self.observe_follow()['status'], 'blocked')
+        path.chmod(0o600)
+        with patch.object(m.os, 'getgid', return_value=os.getgid() + 1):
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        other_groups = set(os.getgroups()) - {os.getgid()}
+        if other_groups:
+            git_file = git_files[0]
+            os.chown(git_file, -1, min(other_groups))
+            try:
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+            finally:
+                os.chown(git_file, -1, os.getgid())
+        self.assertEqual(self.observe_follow()['status'], 'observed')
+        self.assertTrue(all(git_file.stat().st_mode & 0o777 == 0o664 for git_file in git_files))
+
+    def test_bounded_metadata_read_rejects_changed_file_or_directory_entry(self):
+        path = self.h / 'stable-metadata'
+        path.write_text('head\n')
+        path.chmod(0o600)
+        original_fstat = m.os.fstat
+        def changed_fstat(fd):
+            result = original_fstat(fd)
+            if m.stat.S_ISREG(result.st_mode):
+                changed_fstat.calls += 1
+                if changed_fstat.calls == 2:
+                    values = list(result)
+                    values[6] += 1
+                    return os.stat_result(values)
+            return result
+        changed_fstat.calls = 0
+        with patch.object(m.os, 'fstat', changed_fstat):
+            with self.assertRaisesRegex(ValueError, 'changed during bounded read'):
+                m.owned_read(self.h, path.name, 128, git_metadata=True)
+        original_stat = m.os.stat
+        def changed_entry(*args, **kwargs):
+            result = original_stat(*args, **kwargs)
+            values = list(result)
+            values[1] += 1
+            return os.stat_result(values)
+        with patch.object(m.os, 'stat', changed_entry):
+            with self.assertRaisesRegex(ValueError, 'changed during bounded read'):
+                m.owned_read(self.h, path.name, 128, git_metadata=True)
 
 
 if __name__ == '__main__':
