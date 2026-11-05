@@ -33,35 +33,60 @@ _BOX_DOCKER_AGE_DAYS=14
 # unset and resolves plain `docker` on PATH.
 _box_docker_bin() { printf '%s' "${CEL_BOX_DOCKER:-docker}"; }
 
-# Built-ins protect containerless local bases and rollback tags. Producers may
-# add newline-delimited repo:tag shell globs, never shell code.
+# Each producer publishes its own complete file under the shared image lock.
+# The legacy file remains operator-owned; declarations are data, never code.
 _box_docker_keep_file() { printf '%s' "${CEL_BOX_DOCKER_KEEP_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns}"; }
+_box_docker_keep_dir() { printf '%s' "${CEL_BOX_DOCKER_KEEP_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns.d}"; }
 _box_docker_lock_file() { printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock"; }
-_box_docker_keep_patterns() {
-  local file parent pat patterns=""
-  file="$(_box_docker_keep_file)"
-  parent="${file%/*}"
-  while [ "$parent" != "${parent%/*}" ]; do
-    if [ -d "$parent" ] && { [ ! -r "$parent" ] || [ ! -x "$parent" ]; }; then
-      printf 'box: cannot inspect docker keep directory: %s\n' "$parent" >&2; return 1
+_box_docker_keep_path() { # reject symlinks and inaccessible ancestors, including dangling links
+  local path="$1"
+  while :; do
+    if [ -L "$path" ] || { [ -e "$path" ] && { [ ! -r "$path" ] || { [ -d "$path" ] && [ ! -x "$path" ]; }; }; }; then
+      printf 'box: cannot inspect docker keep declaration path: %s\n' "$path" >&2; return 1
     fi
-    parent="${parent%/*}"
+    [ "$path" != "${path%/*}" ] || break
+    path="${path%/*}"
   done
-  if [ -e "$file" ] || [ -L "$file" ]; then
-    [ -f "$file" ] && [ -r "$file" ] && patterns="$(cat -- "$file")" || {
-      printf 'box: cannot read docker keep declarations: %s\n' "$file" >&2; return 1;
-    }
+}
+_box_docker_keep_patterns() {
+  local file dir pat patterns="" executor=0 rc brackets='^([^][]|\[[^][]+\])*$'
+  local -a files=()
+  file="$(_box_docker_keep_file)"; dir="$(_box_docker_keep_dir)"
+  _box_docker_keep_path "$file" && _box_docker_keep_path "$dir" || return 1
+  if [ -e "$file" ]; then files+=("$file")
   elif [ "${CEL_BOX_DOCKER_KEEP_FILE+x}" = x ]; then
     printf 'box: declared docker keep file is missing: %s\n' "$file" >&2; return 1
   fi
-  while IFS= read -r pat; do
-    case "$pat" in ''|'#'*) continue ;; esac
-    if [[ "$pat" != *:* || "$pat" == *[[:space:]]* ]]; then
-      printf 'box: malformed docker keep declaration\n' >&2; return 1
+  if [ -e "$dir" ]; then
+    [ -d "$dir" ] || { printf 'box: docker keep directory is not a directory\n' >&2; return 1; }
+    for file in "$dir"/*.patterns; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      files+=("$file")
+    done
+  elif [ "${CEL_BOX_DOCKER_KEEP_DIR+x}" = x ]; then
+    printf 'box: declared docker keep directory is missing: %s\n' "$dir" >&2; return 1
+  fi
+  for file in "${files[@]}"; do
+    _box_docker_keep_path "$file" || return 1
+    [ -f "$file" ] && [ -r "$file" ] || { printf 'box: cannot read docker keep declarations: %s\n' "$file" >&2; return 1; }
+    # Reference globs are data; reject unknown bytes and unbalanced brackets.
+    # Checking bytes before read also refuses NULs, rather than silently dropping them.
+    rc=0
+    LC_ALL=C grep -a -q -v -E '^($|#.*|[][![:alnum:]._/:*?-]+:[][![:alnum:]._*?-]+)$' "$file" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      printf 'box: malformed or unreadable docker keep declaration\n' >&2; return 1
     fi
-  done <<< "$patterns"
-  printf '%s\n' 'ubuntu:*' 'alpine:*' 'slot-studio-media-executor-base:*' 'slot-studio-local/media-executor:*'
-  [ -z "$patterns" ] || printf '%s\n' "$patterns"
+    while IFS= read -r pat || [ -n "$pat" ]; do
+      case "$pat" in ''|'#'*) continue ;; esac
+      [[ "$pat" =~ $brackets ]] || { printf 'box: malformed docker keep glob\n' >&2; return 1; }
+      case "$pat" in slot-studio-local/media-executor:*) executor=1 ;; esac
+      patterns+="$pat"$'\n'
+    done < "$file"
+  done
+  printf '%s\n' 'ubuntu:*' 'alpine:*' 'slot-studio-media-executor-base:*'
+  # Without an explicit executor declaration, ownership is unknown: preserve it.
+  [ "$executor" -eq 1 ] || printf '%s\n' 'slot-studio-local/media-executor:*'
+  [ -z "$patterns" ] || printf '%s' "$patterns"
   return 0
 }
 
@@ -812,8 +837,8 @@ cmd_box() { # space [--json] | diag | docker-safety | sweep-docker [--dry-run]
       box_diag ;;
     docker-safety)
       [ $# -eq 0 ] || die "cel box docker-safety: takes no arguments"
-      jq -n --arg keep_file "$(_box_docker_keep_file)" --arg lock_file "$(_box_docker_lock_file)" \
-        '{version:1,keep_label:"cel.keep=true",keep_file:$keep_file,lock_file:$lock_file}' ;;
+      jq -n --arg keep_file "$(_box_docker_keep_file)" --arg keep_dir "$(_box_docker_keep_dir)" --arg lock_file "$(_box_docker_lock_file)" \
+        '{version:1,keep_label:"cel.keep=true",keep_file:$keep_file,keep_dir:$keep_dir,lock_file:$lock_file}' ;;
     sweep-docker)
       case "$#:${1:-}" in
         0:) _box_sweep_docker 0 ;;

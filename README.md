@@ -1088,7 +1088,7 @@ both failing the view still renders what the box itself knows.
 ### Docker image retention and producer ownership
 
 `cel box docker-safety` returns the version-1 JSON consumer contract, including
-the resolved `keep_file`, `lock_file`, and `keep_label` (`cel.keep=true`).
+the resolved `keep_file`, `keep_dir`, `lock_file`, and `keep_label` (`cel.keep=true`).
 `cel box sweep-docker [--dry-run]` runs only the Docker sweep, prints a byte
 count (an upper bound in dry runs), and exits nonzero on unknown observations
 or mutation failure; exit 2 means Docker is unavailable. No image/system,
@@ -1097,15 +1097,27 @@ container or volume prune is used. Build-cache prune remains a separate step.
 An image survives if **any tag** matches a keep pattern, its image label is
 `cel.keep=true`, or any running/stopped container references its actual full
 image ID. Labels protect containerless bases too. Built-ins retain `ubuntu:*`,
-`alpine:*`, `slot-studio-media-executor-base:*` (conservatively all source tags),
-and `slot-studio-local/media-executor:*`, including rollback tags. Additional
-newline-delimited `repository:tag` shell globs belong in
-`${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns`; blank lines and
-lines starting `#` are ignored. Patterns are matched as data, never executed or
-expanded against the working directory. `CEL_BOX_DOCKER_KEEP_FILE` selects an
-explicit file; a missing explicit file, unreadable/malformed declaration,
-failed inventory, unknown image labels/tags, or failed container inspection
-refuses all Docker mutation. An absent default declaration file is allowed.
+`alpine:*`, and `slot-studio-media-executor-base:*` (all immutable source tags).
+The executor namespace `slot-studio-local/media-executor:*` is conservatively
+retained unless a validated declaration explicitly names that repository.
+Once declared, only its matching tags, labels and container references veto
+removal: exact current and rollback tags allow superseded executors to be swept.
+Other image families retain their existing policy.
+
+The operator-owned legacy `keep_file` defaults to
+`${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns`. Each producer owns
+one file, e.g. `follow-main.patterns`, inside `keep_dir`, defaulting to
+`${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns.d`. **All files are
+unioned with the legacy file and built-ins. Never replace another producer's
+file or the global operator file.** Each selected `*.patterns` file contains
+newline-delimited `repository:tag` shell globs (`*`, `?`, bracket sets/ranges);
+blank lines and lines starting `#` are ignored. Patterns are data, never shell
+code or filesystem expansions. Temporary files must not end in `.patterns`.
+`CEL_BOX_DOCKER_KEEP_FILE` and `CEL_BOX_DOCKER_KEEP_DIR` select explicit paths;
+missing explicit paths, unreadable/malformed declarations, selected symlinks
+(including ancestors), failed inventory, unknown labels/tags, or failed
+container inspection refuse all Docker mutation. Absent default paths are
+allowed; absent executor ownership preserves the whole executor namespace.
 
 **Producers must share the ownership lock**, including builds, image import,
 tag moves and keep-file replacement. The sweep holds the lock and rechecks
@@ -1117,17 +1129,33 @@ or remote clients starting builds. Use the `lock_file` reported above (default
 
 ```bash
 lock="${XDG_STATE_HOME:-$HOME/.local/state}/cel/docker-images.lock"
-keep_file="${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns"
-mkdir -p "${lock%/*}" "${keep_file%/*}"
-flock -o "$lock" docker build --label cel.keep=true -t private/base:local .
-flock -o "$lock" docker image tag private/base:local private/base:rollback-42
-# Publish a complete declaration file, preserving any existing keep patterns:
-flock -o "$lock" install -m 600 ./docker-keep-patterns "$keep_file"
+keep_dir="${XDG_CONFIG_HOME:-$HOME/.config}/cel/docker-keep-patterns.d"
+mkdir -p "${lock%/*}" "$keep_dir"
+(
+  flock -x 9
+  # Hold this same lock across build/import/tag changes AND publication.
+  docker build --label cel.keep=true -t private/base:local .
+  tmp="$(mktemp "$keep_dir/.follow-main.XXXXXX")"
+  printf '%s\n' 'slot-studio-local/media-executor:current-42' \
+    'slot-studio-local/media-executor:rollback-41' > "$tmp"
+  chmod 600 "$tmp"
+  mv -T -- "$tmp" "$keep_dir/follow-main.patterns"
+) 9>>"$lock"
 ```
 
 Alternatively put `LABEL cel.keep=true` in the producer's Dockerfile. Existing
 images cannot be relabelled in place: declare their tags in the keep file
 before publishing/moving tags, or rebuild with the label under the lock.
+
+Migration: first update each producer to publish only its own file under this
+lock. While still holding the lock, move any producer-owned declarations out of
+the legacy global file without discarding operator or other-producer entries.
+A legacy executor wildcard still protects every executor until explicitly
+removed by the operator. Publish current **and** rollback before enabling
+bounded cleanup; absence of a rollback is not permission to omit an existing
+required rollback. Follow-main worktree candidates are observations, not image
+keep declarations or cleanup grants. `keep_dir` is additive to contract v1;
+existing consumers of `keep_file` remain compatible.
 
 
 ## What runs in the background
