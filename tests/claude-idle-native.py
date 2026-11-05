@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -30,9 +31,24 @@ spec.loader.exec_module(idle)
 MODEL = "claude-sonnet-4-6"
 
 
+def fixture_hook():
+    """Run production bootstrap/watch as a native child with fixture-only timing."""
+    payload = json.load(sys.stdin)
+    subprocess.run(["bash", str(ROOT / "tools/hooks/claude-session.sh")],
+                   input=json.dumps(payload), text=True, check=True)
+    record = idle.read_record(os.environ["CEL_REX_RECORD"])
+    # Accelerate only backoff/poll timing in this isolated fixture process.
+    # Identity, kernel transport, receipts, cursor and native delivery are real.
+    idle.RETRY_SECONDS = (0, 1, 5)
+    idle.POLL_SECONDS = 0.05
+    idle.start(payload["session_id"], record["pid"], payload["transcript_path"])
+
+
 def main():
     if not shutil.which("claude"):
         raise RuntimeError("Prerequisite: installed native Claude Code with Unix peer messaging")
+    if os.geteuid() == 0:
+        raise RuntimeError("Prerequisite: non-root account so Unix socket permission denial exercises real failed writes")
     directory = Path(tempfile.mkdtemp(prefix="cel-claude-idle-native-"))
     print(f"Native fixture evidence: {directory}", flush=True)
     for child in ("home", "config", "cwd", "inbox", "rex"):
@@ -106,8 +122,10 @@ def main():
            "CEL_INBOX_ME": "native-fixture-lane", "CEL_INBOX_WS": "native-fixture",
            "CEL_INBOX_DIR": str(directory / "inbox"), "CEL_ORCH_SESSIONS": str(directory / "sessions.json")}
     settings = {"skipDangerousModePermissionPrompt": True, "hooks": {
-        "SessionStart": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh watch", "async": True}]}],
-        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/claude-session.sh watch", "async": True}]}],
+        "SessionStart": [{"hooks": [{"type": "command", "command": sys.executable,
+                                    "args": [str(Path(__file__).resolve()), "--hook"], "async": True}]}],
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": sys.executable,
+                                        "args": [str(Path(__file__).resolve()), "--hook"], "async": True}]}],
         "Stop": [{"hooks": [{"type": "command", "command": f"bash {ROOT}/tools/hooks/inbox-stop.sh", "timeout": 10}]}]}}
     screen = (directory / "screen.log").open("w")
     child = pexpect.spawn("claude", ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
@@ -148,6 +166,7 @@ def main():
     def has_request(text):
         return any(text in json.dumps(request.get("messages", [])) for request in requests)
 
+    blocked_socket, socket_mode = None, None
     try:
         until(lambda: state().get("status") == "idle", "start its receipt-bound native watcher")
         assert not requests, "Idle startup must not call any model endpoint"
@@ -166,13 +185,24 @@ def main():
         child.send(draft)  # This fixture owns this isolated PTY; never a Rex/live pane.
         for _ in range(5):
             pump()
+        blocked_socket = Path(target["socket"])
+        socket_mode = stat.S_IMODE(blocked_socket.stat().st_mode)
+        blocked_socket.chmod(0)  # deny this fixture's real native socket, not a transport mock
         send_mail("ACTUAL_NATIVE_INBOX_MAIL_ONE")
+        until(lambda: state().get("attempts") == 3 and state().get("status") == "retry_backoff", "retain retry debt after three real socket write failures")
+        failed = state()
+        assert "Permission denied" in failed["error"] and not requests
+        assert not (directory / "inbox/native-fixture.native-fixture-lane.cursor").exists()
+        failed_message_id, failed_fingerprint = failed["message_id"], failed["fingerprint"]
+        blocked_socket.chmod(socket_mode)
         until(lambda: has_request("This is only a wake notification"), "receive a real native idle peer event")
         until(lambda: state().get("status") == "native_received_mail_unread", "reconcile the actual native transcript receipt")
+        assert state()["message_id"] == failed_message_id and state()["fingerprint"] == failed_fingerprint
+        assert state()["attempts"] == 4, "Same unread mail did not recover after the third failed write"
         retry_deadline = state()["last_attempt"] + 36
         while time.time() < retry_deadline:
             pump()
-        assert state()["attempts"] == 1, "Native receipt did not suppress an expired-window retry"
+        assert state()["attempts"] == 4, "Native receipt did not suppress an expired-window retry"
         assert not (directory / "inbox/native-fixture.native-fixture-lane.cursor").exists(), "Wake consumed the mailbox before native hook delivery"
         provider_release.set()
         until(lambda: has_request("ACTUAL_NATIVE_INBOX_MAIL_ONE"), "deliver actual mail through the native Stop continuation")
@@ -183,35 +213,18 @@ def main():
         receipt = state()
         assert idle.receipt_status(target, receipt) == "present", "No authoritative native transcript receipt"
         assert receipt["native_receipt"] in ("user", "queue-operation")
-        # Restart only our fixture watcher, not Claude. Attach through its
-        # canonical receipt without typing or invoking a native turn hook.
+        # Restart only our fixture watcher. A normal native submit hook must
+        # recover it as an own-child; no external attach or policy change.
         old_watcher = state()["watcher"]
         with os.fdopen(os.pidfd_open(old_watcher["pid"]), "rb") as watcher_fd:
             assert idle.proc_identity(old_watcher["pid"])[1] == old_watcher["pid_start"]
             signal.pidfd_send_signal(watcher_fd.fileno(), signal.SIGTERM)
-        refused = subprocess.run([sys.executable, str(ROOT / "tools/hooks/claude-idle-mail.py"),
-                                  "attach", str(record_path), target["socket"], target["transcript"]],
-                                 cwd=cwd, env=env, capture_output=True, text=True, timeout=10)
-        assert refused.returncode != 0 and "attach is disabled" in refused.stderr
-        # This consent changes only the isolated fixture's real native setting.
-        # Production attach never writes it; an owner must separately approve
-        # the native security-policy change before using the opt-in flag.
-        consent = directory / "config/settings.json"
-        consent.write_text(json.dumps({"crossSessionInbound": "accept"}))
-        for _ in range(10):
-            pump()
-        attached = subprocess.run([sys.executable, str(ROOT / "tools/hooks/claude-idle-mail.py"),
-                                   "attach", str(record_path), target["socket"], target["transcript"],
-                                   "--native-consent-settings", str(consent)],
-                                  cwd=cwd, env=env, check=True, capture_output=True, text=True, timeout=10)
-        attach_result = json.loads(attached.stdout)
-        assert attach_result["recipient"] == "native-fixture-lane" and attach_result["session"] == native
-        until(lambda: state().get("watcher", {}).get("pid") != old_watcher["pid"], "attach its fixture watcher without a Claude restart or hook boundary")
         # A later explicit owner Enter must still submit exactly the retained
         # draft, separately from the earlier peer event.
         child.send("\r")
         until(lambda: has_request(draft), "preserve the draft until explicit owner submission")
         until(lambda: json.loads(record_path.read_text())["agent_status"] == "idle", "finish the owner fixture turn")
+        until(lambda: state().get("watcher", {}).get("pid") != old_watcher["pid"], "recover its native own-child watcher at the submit boundary")
         send_mail("ACTUAL_NATIVE_INBOX_MAIL_TWO")
         until(lambda: has_request("ACTUAL_NATIVE_INBOX_MAIL_TWO"), "wake again for later mail")
         until(lambda: state().get("status") == "idle", "drain the second message")
@@ -227,11 +240,14 @@ def main():
         for marker in ("ACTUAL_NATIVE_INBOX_MAIL_ONE", "ACTUAL_NATIVE_INBOX_MAIL_TWO"):
             delivered = [row for row in native_users if marker in str(row.get("message", {}).get("content", ""))]
             assert len(delivered) == 1, "Native hook delivered a mailbox item more than once"
-        print("PASS real native idle peer event -> Stop-hook inbox delivery; later mail rearmed; foreign session refused; draft retained; model/session unchanged", flush=True)
+        print("PASS three real socket failures -> same-mail recovery -> exactly-once native Stop delivery; capped-backoff receipt suppression; draft/model/session unchanged", flush=True)
         (directory / "result.json").write_text(json.dumps({"passed": True, "native_session": native,
-            "model": MODEL, "request_count": len(requests), "state": state()}, indent=2))
+            "model": MODEL, "request_count": len(requests), "retry_failures": 3,
+            "fixture_retry_seconds": [0, 1, 5], "native_policy_unchanged": True, "state": state()}, indent=2))
     finally:
         provider_release.set()
+        if blocked_socket is not None and blocked_socket.exists():
+            blocked_socket.chmod(socket_mode)
         child.terminate(force=True)
         screen.close()
         server.shutdown()
@@ -253,4 +269,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--hook"]:
+        fixture_hook()
+    else:
+        main()

@@ -39,7 +39,7 @@ class IdleMailTests(unittest.TestCase):
         with patch.object(idle, "unread", return_value=fingerprint):
             idle.tick(str(ROOT), str(self.record), self.state_path, self.target, self.state, now)
 
-    def test_wake_is_not_delivery_and_retry_is_bounded_across_watcher_restart(self):
+    def test_wake_is_not_delivery_and_retry_backoff_is_capped_across_watcher_restart(self):
         cursor = self.path / "demo.lane.cursor"
         cursor.write_text("unconsumed")
         with patch.object(idle, "send_wake") as send:
@@ -50,9 +50,9 @@ class IdleMailTests(unittest.TestCase):
             self.tick("mail-one", 1030)
             self.tick("mail-one", 1150)
             self.tick("mail-one", 9999)
-            self.assertEqual(send.call_count, 3)
+            self.assertEqual(send.call_count, 4)
             self.assertEqual(len({call.args[1] for call in send.call_args_list}), 1)
-            self.assertEqual(self.state["status"], "waiting_for_delivery")
+            self.assertEqual(self.state["status"], "notified_not_delivered")
         self.assertEqual(cursor.read_text(), "unconsumed")
 
     def test_later_mail_and_native_drain_rearm_notifications(self):
@@ -95,7 +95,7 @@ class IdleMailTests(unittest.TestCase):
     def test_unavailable_socket_retains_debt_and_never_marks_delivered(self):
         with patch.object(idle, "send_wake", side_effect=FileNotFoundError("native socket absent")):
             self.tick("one", 1000)
-        self.assertEqual(self.state["status"], "waiting_for_delivery")
+        self.assertEqual(self.state["status"], "retry_backoff")
         self.assertEqual(self.state["fingerprint"], "one")
         self.assertEqual(self.state["attempts"], 1)
 
@@ -148,27 +148,38 @@ class IdleMailTests(unittest.TestCase):
                 stream.write(encoded[:20])
             self.tick("one", 1030)
             self.assertEqual(self.state["receipt_cursor"], cursor)
-            self.assertEqual(self.state["status"], "receipt_unknown_mail_unread")
+            self.assertEqual(self.state["status"], "blocked_receipt_unknown")
+            self.assertIn("Cannot prove native receipt absence", self.state["error"])
             with transcript.open("a") as stream:
                 stream.write(encoded[20:] + "\n")
             self.tick("one", 1000000)
             self.assertEqual(send.call_count, 1)
             self.assertEqual(self.state["native_receipt"], "user")
 
-    def test_attach_requires_canonical_reader_record_and_native_transcript_binding(self):
-        transcript = Path(self.target["transcript"])
-        transcript.write_text(json.dumps({"type": "user", "sessionId": self.native, "cwd": str(self.path)}) + "\n")
-        with patch.dict(os.environ, {"CEL_REX_STATE": str(self.path)}), patch.object(idle, "connect_peer") as connect:
-            idle.validate_attach(str(self.record), self.target)
-            connect.assert_called_once_with(self.target)
-            connect.reset_mock()
-            with self.assertRaisesRegex(ValueError, "canonical"):
-                idle.validate_attach(str(self.record), dict(self.target, name="other-reader"))
-            connect.assert_not_called()
-            transcript.write_text(json.dumps({"type": "user", "sessionId": "foreign", "cwd": str(self.path)}) + "\n")
-            with self.assertRaisesRegex(ValueError, "does not prove"):
-                idle.validate_attach(str(self.record), self.target)
-            connect.assert_not_called()
+    def test_three_failed_writes_recover_same_unread_set_after_backoff_cap(self):
+        cursor = self.path / "demo.lane.cursor"
+        cursor.write_text("unconsumed")
+        with patch.object(idle, "send_wake", side_effect=[OSError("one"), OSError("two"), OSError("three"), None]) as send:
+            for now in (1000, 1030, 1150):
+                self.tick("same-unread-mail", now)
+            self.assertEqual(send.call_count, 3)
+            self.assertEqual(self.state["status"], "retry_backoff")
+            self.assertEqual(self.state["next_retry_at"], 1270)
+            message_id = self.state["message_id"]
+            self.state = json.loads(self.state_path.read_text())
+            self.tick("same-unread-mail", 1200)
+            self.assertEqual(send.call_count, 3)
+            self.tick("same-unread-mail", 1270)
+            self.assertEqual(send.call_count, 4)
+            self.assertEqual(self.state["message_id"], message_id)
+            self.assertEqual(self.state["status"], "notified_not_delivered")
+            self.assertNotIn("error", self.state)
+            Path(self.target["transcript"]).write_text(json.dumps({"type": "queue-operation", "operation": "enqueue",
+                "sessionId": self.native, "content": idle.wake_content(self.target, message_id)}) + "\n")
+            self.tick("same-unread-mail", 1000000)
+            self.assertEqual(send.call_count, 4)
+            self.assertEqual(self.state["status"], "native_received_mail_unread")
+        self.assertEqual(cursor.read_text(), "unconsumed")
 
 
 

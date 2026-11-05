@@ -1239,16 +1239,21 @@ rows count; nested API-request copies do not. Reads are bounded to 1 MiB per
 poll. Partial, oversized, malformed, replaced or truncated transcripts retain
 unread debt and suppress retries instead of guessing absence.
 
-Absent receipts allow at most three attempts, with 30- then 120-second spacing.
-A lock and private atomic state beside the Rex receipt
-(`<receipt>.inbox/state.json`) retain attempts and the pre-send transcript
-boundary across watcher restarts. Socket write success is
-`notified_not_delivered`, never delivery. Exhausted attempts leave
-`waiting_for_delivery` and canonical unread mail intact. New mail rearms
-attempts; an ordinary prompt/Stop hook can still drain the backlog. Replacing
-the runtime PID, native session, or receipt ends the old watcher; a later native
-hook starts the new owner. No conversation is forked, model changed, lane
-restarted, or terminal draft submitted.
+With an authoritative absent receipt and an idle target, the watcher retries
+after 30 seconds and then every 120 seconds until recovery. The backoff is
+capped, not the debt's lifetime: three transient failed writes do not strand
+the same unread set forever. A lock and private atomic state beside the Rex
+receipt (`<receipt>.inbox/state.json`) retain attempts, next retry time and the
+pre-send transcript boundary across watcher restarts. Socket write success is
+`notified_not_delivered`, never delivery. Native receipt suppresses retries;
+uncertain evidence instead produces `blocked_receipt_unknown` (or
+`blocked_read_error`) with an explicit reason and a transition-only stderr
+notice. The watcher never guesses absence or consumes mail to clear a block.
+An operator must inspect the native transcript or use the canonical launcher
+to recover missing evidence. New mail rearms notification identity; an ordinary
+prompt/Stop hook can still drain the backlog. Replacing the runtime PID,
+native session or receipt ends the old watcher. No conversation is forked,
+model changed, lane restarted or terminal draft submitted.
 
 If the native runtime does not publish the socket, state says `unavailable`:
 the prerequisite is native Claude peer messaging enabled for that session.
@@ -1259,43 +1264,27 @@ new async hook registrations into an already-idle old launch. A later
 owner-authorized native resume can use the new launch hooks while preserving
 the saved conversation/model; this patch never restarts a lane itself.
 
-For an **existing** canonical Rex receipt, an explicit attach path requires no
-agent restart or model change, but is **disabled by default**. Detached external
-senders are held by bypass-mode Claude unless the owner separately approves
-native `crossSessionInbound: "accept"`. This is a security-policy decision,
-not a flag the adapter sets for itself. In user settings it can affect other
-Claude sessions too; never enable it automatically to make a smoke pass.
-
-After that separate owner approval, use the actual native socket/transcript
-paths reported by that session, not a guessed socket default:
-
-```bash
-python3 "$CEL_ROOT/tools/hooks/claude-idle-mail.py" attach \
-  "$CANONICAL_REX_RECEIPT" "$NATIVE_SOCKET" "$NATIVE_TRANSCRIPT" \
-  --native-consent-settings "$NATIVE_USER_SETTINGS"
-```
-
-Attach derives the reader/workspace/native UUID from the canonical receipt,
-verifies the PID/start time, owned transcript UUID/cwd, and kernel socket peer,
-and requires `accept` in that native process's actual user settings file.
-Without the explicit consent path it refuses **before starting a watcher**;
-it never edits permission settings. Higher-priority native policy still wins.
-`watcher_ensured_not_delivery` is deliberately not a delivery acknowledgement:
-only a matched native transcript receipt and the ordinary inbox drain prove
-the event and mail reached the session. The [native inbound rules](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)
+External attach is deliberately **not supported**. A user-settings file alone
+cannot prove effective native permission policy across project/local, managed
+and CLI layers, and the adapter must not guess consent or widen policy.
+Existing launches acquire the new own-child hook through a root-coordinated
+canonical resume preserving the exact saved conversation, actual model and
+thinking settings. The [native inbound rules](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)
 and [async hook contract](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background)
-describe these separate trust paths.
+describe why an own-child watcher is different from an external sender.
 
 The opt-in integration `python3 tests/claude-idle-native.py` requires installed
 Claude Code, Linux peer credentials/pidfds, and `python3-pexpect`. It runs a real
 isolated native Claude against a deterministic loopback provider, with a fake
 key and isolated HOME/config (no paid inference). It proves own-child idle wake
-in the production bypass mode, actual Stop-hook delivery, foreign-session
-refusal, no retries after the native dedup window expires, disabled unconsented
-attach, consented attach to the same live native process, later-mail wake, and
-an owner draft submitted only by the fixture's later explicit Enter. Only the
-fixture's isolated native settings receive its explicit attach consent.
-Evidence remains in the printed
+in the production bypass mode, three real Unix-socket permission failures and
+recovery for the same unread set, exactly-once Stop-hook delivery, refusal of a
+foreign session, receipt-based suppression beyond the native dedup window,
+own-child watcher recovery and later mail. The unsubmitted owner draft is
+preserved until the fixture's explicit Enter. Only fixture-local poll/backoff
+constants are accelerated; the native runtime, kernel transport, identity,
+receipts, inbox cursor and hooks remain real. No native permission policy is
+changed. Evidence remains in the printed
 fixture directory. Native support missing is a failure with the prerequisite,
 not a source-test pass. The normal gate runs the credential-free selector,
 identity, cursor, and retry regressions without launching Claude.
