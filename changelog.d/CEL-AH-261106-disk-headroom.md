@@ -1,0 +1,5 @@
+## Recurring disk headroom maintenance
+
+Add a supported bounded controller for the 20 GiB root-filesystem available-space floor. It reuses reviewed, SHA-pinned release/ordinary/preservation handlers, measures available bytes before and after each, stops at the target, and records durable producer blockers and any remaining measurable capacity deficit. Docker cleanup requires an explicit opt-in plus the deployed Docker-only safety-v1 capability; missing adapters fail closed and never authorize another deletion class.
+
+The opt-in installer preserves existing standalone scripts/timers and migrates their service entry points onto one shared controller lock after the parent quiesces the old units. Monitor invocations run maintenance instead of duplicate routine root warnings. Routine work goes to the disk lane; root receives confirmed-enqueue, debt-retried and deduplicated capacity/grant decisions, with a separate emergency escalation. No live migration or cleanup is performed by the build/test workflow. See `docs/disk-headroom.md` for deployment prerequisites, notification-protocol gating, diagnostics, rollback and isolated acceptance coverage.
