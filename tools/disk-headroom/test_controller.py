@@ -26,6 +26,9 @@ h=pathlib.Path(os.environ['FIXTURE_HOME'])
 name=pathlib.Path(sys.argv[0]).name
 with open(h/'commands','a') as f: f.write(json.dumps([name,*sys.argv[1:]])+'\\n')
 if name=='cel':
+ with open(h/'cli-roots','a') as f: f.write(os.environ.get('CEL_ROOT','')+'\\n')
+ inherited=pathlib.Path(os.environ.get('CEL_ROOT',''))/'intruder.py'
+ if inherited.is_file(): exec(inherited.read_text())
  if sys.argv[1:3]==['box','docker-safety']:
   if (h/'mutate-cli').exists(): (h/'.local/bin/cel').write_text('#!/usr/bin/python3\\nraise SystemExit(42)\\n')
   print(json.dumps({'version':int((h/'docker-version').read_text()),'keep_label':'cel.keep=true','lock_file':str(h/'docker.lock')}));sys.exit(0)
@@ -240,6 +243,9 @@ class HeadroomTests(unittest.TestCase):
         self.configure()
         self.assertEqual(self.controller().run(), 1)
         self.assertFalse(any(x[1:3] == ['box', 'sweep-docker'] for x in self.commands()))
+        self.assertEqual(self.mail('root'), [])
+        self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
+        self.assertTrue(self.state()['root_capacity_decision_deferred'])
         self.data['docker_opt_in'] = True
         self.configure()
         (self.h / 'docker-version').write_text('0')
@@ -480,6 +486,22 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(value['cel_sha256'], self.data['cel_sha256'])
         self.assertEqual(value['docker_runtime_sha256'], self.data['docker_runtime_sha256'])
         self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+
+    def test_inherited_cel_root_cannot_redirect_snapshot_or_notification(self):
+        bad = self.h / 'untrusted-root'
+        bad.mkdir()
+        marker = self.h / 'untrusted-executed'
+        (bad / 'intruder.py').write_text(f'pathlib.Path({str(marker)!r}).touch(); raise SystemExit(99)\n')
+        with patch.dict(os.environ, {'CEL_ROOT': str(bad)}):
+            self.assertEqual(self.controller().run('docker-sweep'), 0)
+            c = self.controller()
+            c.load()
+            self.assertTrue(c.notify('root', 'fixture', 'private fixture enqueue'))
+        self.assertFalse(marker.exists())
+        roots = (self.h / 'cli-roots').read_text().splitlines()
+        self.assertEqual(len(roots), 3)
+        self.assertTrue(all(value.startswith(str(c.directory / 'docker-runtime-')) for value in roots[:2]))
+        self.assertEqual(roots[2], str(self.bin.parent))
 
 
 if __name__ == '__main__':

@@ -195,7 +195,9 @@ class Controller:
                 path.write_bytes(data)
                 path.chmod(0o555 if relative == 'bin/cel' else 0o444)
             cel = str(root / 'bin/cel')
-            cap = self.command([cel, 'box', 'docker-safety'], 15, deadline=self.work_deadline)
+            env = dict(os.environ, CEL_ROOT=str(root))
+            cap = self.command([cel, 'box', 'docker-safety'], 15, env,
+                               deadline=self.work_deadline)
             if cap['status'] != 'ok':
                 return cap
             safe = json.loads(cap['output'])
@@ -203,7 +205,7 @@ class Controller:
                 raise ValueError('missing safety v1 capability')
             # Validate the declared lock protocol; the callee acquires it once.
             # Acquiring it here too would deadlock/refuse the nonblocking callee.
-            return self.command([cel, 'box', 'sweep-docker'], self.handler_seconds,
+            return self.command([cel, 'box', 'sweep-docker'], self.handler_seconds, env,
                                 deadline=self.work_deadline)
 
     def handler(self, name):
@@ -310,9 +312,11 @@ class Controller:
         self.state['notifications'][recipient] = debt
         self.save()
         try:
-            r = self.command([self.cel_path(), 'inbox', 'send', recipient, message,
+            cel = self.cel_path()
+            env = dict(os.environ, CEL_ROOT=str(Path(cel).parent.parent))
+            r = self.command([cel, 'inbox', 'send', recipient, message,
                               '--from', 'celestial-disk-cleanup', '--workspace', 'plane',
-                              '--kind', 'escalation' if recipient == 'root' else 'info'], 30)
+                              '--kind', 'escalation' if recipient == 'root' else 'info'], 30, env)
         except (OSError, ValueError, KeyError, TypeError) as e:
             r = {'status': 'failed', 'output': str(e)}
         if r['status'] == 'ok' and f'queued for {recipient} in plane' in r['output']:

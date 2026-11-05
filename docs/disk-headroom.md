@@ -40,6 +40,10 @@ Retirement additionally requires notification protocol version 1. The pinned han
 
 Docker requires both explicit `docker_opt_in=true` and live `cel box docker-safety` capability JSON with integer `version=1`, `keep_label=cel.keep=true`, and an absolute `lock_file`. The **callee** acquires that lock; the controller validates the declared protocol but does not double-acquire it. Only `cel box sweep-docker` follows; there is no fallback to general box sweep, image/container/volume prune or a sourced internal function.
 
+With `docker_opt_in=false`, the Docker phase is deliberately blocked/unattempted: the pass exits 1 and reports routine work to the lane. Consequently **normal root capacity escalation is deferred while available space is at least 1 GiB but below 20 GiB**, because not every configured handler completed. Emergency escalation below 1 GiB remains independent. Parent deployment enables Docker only after verifying safety-v1 and its reviewed runtime pin.
+
+Snapshot capability and mutation calls explicitly set `CEL_ROOT` to the copied runtime root; notification calls set it to the validated CLI deployment root. An inherited `CEL_ROOT` cannot redirect either call to another source tree.
+
 To prevent an installed CLI update between capability lookup and deletion from silently substituting code, the Docker runtime digest binds `bin/cel` and the complete sorted `lib/*.sh` set, including each relative path, byte length and content. The controller checks that digest and executable pin, independently copies those verified bytes into a private disposable runtime, and runs **both capability and mutation from that same snapshot**. Source checkout changes after snapshot creation cannot change the consumer. The copied scripts are read-only; the temporary runtime contains only copied code and is removed after the phase. Missing runtime dependencies fail closed. Any deployed CLI/library change requires a newly reviewed runtime pin. This does not replace producer locking during Docker build/tag/import or retention-file publication.
 
 ## Durable observability and notifications
