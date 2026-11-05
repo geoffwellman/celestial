@@ -44,7 +44,9 @@ def replace_bytes(path, data, mode):
 
 
 def install(home, cel, hashes, retire_v1=False, docker=False, apply=False,
-            cel_sha256=None, docker_runtime_sha256=None, release_queue_issuer=None):
+            cel_sha256=None, docker_runtime_sha256=None, release_queue_issuer=None, follow_main_issuer=None):
+    if follow_main_issuer is not None:
+        controller.reviewed_follow_main_issuer(follow_main_issuer)
     if not apply:
         print('Plan: preserve standalone scripts; back up and transactionally install controller/service drop-ins; '
               'no timers stopped, disabled or enabled. Parent must quiesce existing timers/services before --apply.')
@@ -58,11 +60,11 @@ def install(home, cel, hashes, retire_v1=False, docker=False, apply=False,
         except BlockingIOError:
             raise ValueError('controller invocation is active; migration refused')
         return install_quiescent(Path(home).resolve(), Path(cel).resolve(), hashes, retire_v1, docker,
-                                 directory, cel_sha256, docker_runtime_sha256, release_queue_issuer)
+                                 directory, cel_sha256, docker_runtime_sha256, release_queue_issuer, follow_main_issuer)
 
 
 def install_quiescent(home, cel, hashes, retire_v1, docker, directory, cel_sha256, docker_runtime_sha256,
-                      release_queue_issuer):
+                      release_queue_issuer, follow_main_issuer):
     units = home / '.config/systemd/user'
     existing_dropins = {}
     for name in UNITS:
@@ -84,6 +86,8 @@ def install_quiescent(home, cel, hashes, retire_v1, docker, directory, cel_sha25
               'docker_runtime_sha256': docker_runtime_sha256, 'handler_sha256': hashes,
               'retire_notification_version': 1 if retire_v1 else 0, 'docker_opt_in': docker,
               'release_queue_issuer': release_queue_issuer}
+    if follow_main_issuer is not None:
+        config['follow_main_issuer'] = follow_main_issuer
     dest = home / '.local/lib/cel-disk-headroom/controller.py'
     wrapper = home / '.local/bin/cel-disk-headroom'
     payloads = {
@@ -175,6 +179,7 @@ def main():
     p.add_argument('--cel-sha256')
     p.add_argument('--docker-runtime-sha256')
     p.add_argument('--release-queue-issuer', help='exact reviewed producer identity; required for apply')
+    p.add_argument('--follow-main-issuer', help='optional exact reviewed observer identity; never a cleanup grant')
     p.add_argument('--describe-cel', action='store_true', help='print candidate digests for review; never install')
     p.add_argument('--handler-sha256', action='append', default=[], metavar='NAME=SHA256')
     p.add_argument('--retire-notification-v1', action='store_true')
@@ -193,7 +198,7 @@ def main():
                               'docker_runtime_sha256': controller.runtime_files(cel)[1]}, sort_keys=True))
             return 0
         install(Path.home(), a.cel, hashes, a.retire_notification_v1, a.enable_safe_docker, a.apply,
-                a.cel_sha256, a.docker_runtime_sha256, a.release_queue_issuer)
+                a.cel_sha256, a.docker_runtime_sha256, a.release_queue_issuer, a.follow_main_issuer)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         print(f'headroom installation refused: {e}', file=sys.stderr)
         return 1

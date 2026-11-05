@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import stat
@@ -56,6 +57,53 @@ def reviewed_queue_issuer(value):
     if not isinstance(value, str) or not value.strip():
         raise ValueError('release queue issuer requires an explicit reviewed nonempty string')
     return value
+
+
+def reviewed_follow_main_issuer(value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 256 or any(ord(c) < 32 for c in value):
+        raise ValueError('follow-main issuer requires an explicit reviewed nonempty string (at most 256 characters)')
+    return value
+
+
+def owned_read(home, relative, cap):
+    """Read bounded regular metadata through owned, nonsymlink directories."""
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or any(p in ('.', '..') for p in parts):
+        raise ValueError('invalid metadata path')
+    directory = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            s = os.fstat(directory)
+            if s.st_uid != os.getuid():
+                raise ValueError('metadata directory is not owner owned')
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        s = os.fstat(directory)
+        if s.st_uid != os.getuid():
+            raise ValueError('metadata directory is not owner owned')
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        with os.fdopen(fd, 'rb') as f:
+            s = os.fstat(f.fileno())
+            if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o022:
+                raise ValueError('metadata must be an owner-controlled nonsymlink regular file')
+            if s.st_size > cap:
+                raise ValueError('metadata exceeds size limit')
+            data = f.read(cap + 1)
+            if len(data) > cap:
+                raise ValueError('metadata exceeds size limit')
+            return data
+    finally:
+        os.close(directory)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate manifest key')
+        result[key] = value
+    return result
 
 
 def executable_digest(path):
@@ -165,9 +213,11 @@ class Controller:
         self.config = read_json(self.config_path, 65536)
         if not isinstance(self.config, dict) or type(self.config.get('version')) is not int or self.config.get('version') != 1 or set(self.config) - {
                 'version', 'handler_sha256', 'retire_notification_version', 'docker_opt_in',
-                'cel', 'cel_sha256', 'docker_runtime_sha256', 'release_queue_issuer'}:
+                'cel', 'cel_sha256', 'docker_runtime_sha256', 'release_queue_issuer', 'follow_main_issuer'}:
             raise ValueError('unknown configuration/version')
         reviewed_queue_issuer(self.config.get('release_queue_issuer'))
+        if 'follow_main_issuer' in self.config:
+            reviewed_follow_main_issuer(self.config['follow_main_issuer'])
         hashes = self.config.get('handler_sha256', {})
         if not isinstance(hashes, dict) or set(hashes) - set(DEFAULTS):
             raise ValueError('unknown handler')
@@ -268,6 +318,89 @@ class Controller:
         self.save()
         return result
 
+    def follow_main_facts(self):
+        relative = '.cache/slot-builder-iso/follow-main-manifest.json'
+        fact = {'source': str(self.home / relative), 'authorization': 'none',
+                'source_controlled_deletion_disabled': True,
+                'scope': 'observed retention facts only; candidates are not closure or a cleanup grant'}
+        if 'follow_main_issuer' not in self.config:
+            return dict(fact, status='missing-adapter', blocker='follow-main issuer not configured; no retention facts trusted')
+        try:
+            data = json.loads(owned_read(self.home, relative, 65536), object_pairs_hook=unique_object)
+            required = {'version', 'issuer', 'generated_at', 'live', 'rollback', 'base', 'worktree_candidates'}
+            if not isinstance(data, dict) or not required <= set(data) or set(data) - required - {'retired_this_pass'}:
+                raise ValueError('unknown follow-main manifest schema')
+            if type(data['version']) is not int or data['version'] != 1 or data['issuer'] != self.config['follow_main_issuer']:
+                raise ValueError('unknown follow-main version or issuer')
+            if 'retired_this_pass' in data and data['retired_this_pass'] != []:
+                raise ValueError('follow-main producer must publish nondeleting status')
+            stamp = data['generated_at']
+            if not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)', stamp):
+                raise ValueError('follow-main timestamp must be UTC')
+            generated = datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+            age = time.time() - generated.timestamp()
+            if age < -60 or age > 600:
+                raise ValueError('follow-main manifest stale or future dated')
+            parent = self.home / 'code/slot-studio-wt'
+
+            def worktree(value):
+                if not isinstance(value, str) or str(Path(value)) != value or Path(value).parent != parent:
+                    raise ValueError('unexpected follow-main worktree parent')
+                match = re.fullmatch(r'local-([0-9a-f]{12}|[0-9a-f]{40})', Path(value).name)
+                if not match:
+                    raise ValueError('invalid follow-main worktree head name')
+                return match[1]
+
+            paths, retained_heads = set(), []
+            for name in ('live', 'rollback'):
+                row = data[name]
+                if name == 'rollback' and row is None:
+                    continue
+                if not isinstance(row, dict) or set(row) != {'worktree', 'image'}:
+                    raise ValueError('invalid follow-main retention ref')
+                suffix = worktree(row['worktree'])
+                if row['image'] != 'slot-studio-local/media-executor:' + suffix:
+                    raise ValueError('follow-main image does not match worktree head')
+                if any(suffix.startswith(old) or old.startswith(suffix) for old in retained_heads):
+                    raise ValueError('duplicate follow-main retention ref')
+                paths.add(row['worktree'])
+                retained_heads.append(suffix)
+            base = data['base']
+            if not isinstance(base, dict) or set(base) != {'image', 'label'} or base != {
+                    'image': 'slot-studio-media-executor-base:local', 'label': 'cel.keep=true'}:
+                raise ValueError('invalid follow-main base retention ref')
+            candidates = data['worktree_candidates']
+            if not isinstance(candidates, list) or len(candidates) > 256:
+                raise ValueError('invalid or oversized follow-main candidate list')
+            heads = set()
+            for row in candidates:
+                if not isinstance(row, dict) or set(row) != {'path', 'head'}:
+                    raise ValueError('invalid follow-main candidate')
+                suffix = worktree(row['path'])
+                head = row['head']
+                if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head) or not head.startswith(suffix):
+                    raise ValueError('invalid follow-main candidate head')
+                if row['path'] in paths or head in heads or any(head.startswith(old) for old in retained_heads):
+                    raise ValueError('duplicate or retained follow-main candidate')
+                paths.add(row['path'])
+                heads.add(head)
+                # Follow-main uses detached linked worktrees. Read only the small
+                # Git metadata; never invoke Git, repair refs, or acquire its locks.
+                pointer = owned_read(self.home, str(Path(row['path']).relative_to(self.home) / '.git'), 4096).decode().strip()
+                prefix = 'gitdir: '
+                gitdir = Path(pointer[len(prefix):]) if pointer.startswith(prefix) else None
+                metadata = self.home / 'code/slot-studio/.git/worktrees'
+                if gitdir is None or not gitdir.is_absolute() or str(gitdir) != pointer[len(prefix):] or gitdir.parent != metadata:
+                    raise ValueError('unexpected follow-main Git metadata location')
+                actual = owned_read(self.home, str(gitdir.relative_to(self.home) / 'HEAD'), 128).decode().strip()
+                if actual != head:
+                    raise ValueError('follow-main candidate HEAD metadata mismatch')
+            fact.update(status='observed', live=data['live'], rollback=data['rollback'], base=base,
+                        candidate_count=len(candidates), generated_at=stamp, publication_age_seconds=int(age))
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError) as e:
+            fact.update(status='blocked', blocker=str(e))
+        return fact
+
     def producer_facts(self):
         q = self.home / '.cache/slot-builder-iso/release-queue.json'
         try:
@@ -290,7 +423,7 @@ class Controller:
         except (OSError, ValueError) as e:
             fact = {'status': 'missing-adapter', 'blocker': str(e), 'source': str(q)}
         facts = {'gate-runs': fact,
-                 'follow-main-executor-images': {'status': 'missing-adapter', 'blocker': 'no producer release/retention status adapter; Docker safety does not infer producer closure'},
+                 'follow-main-executor-images': self.follow_main_facts(),
                  'miniflare-tracing': {'status': 'missing-adapter', 'blocker': 'no exact closed-set producer adapter; no tracing files selected'},
                  'stale-worktrees': {'status': 'delegated', 'handler': 'preservation-retire', 'blocker': 'handler eligibility, preservation and minimum-free guards remain authoritative'}}
         now = int(time.time())
