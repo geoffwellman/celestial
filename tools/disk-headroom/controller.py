@@ -516,8 +516,10 @@ class Controller:
                          capacity_deficit_bytes=deficit)
             if only:
                 return 1 if failed else 0
+            # Every full pass refreshes bounded diagnostics in the reserved
+            # control-plane budget, even when cleanup reached the target.
+            self.producer_facts()
             if deficit:
-                self.producer_facts()
                 lane_ok = self.notify('celestial-disk-cleanup', 'maintenance',
                     f'[disk maintenance] available={after}B target={TARGET}B deficit={deficit}B. '
                     f'Observed window delta={after-before}B, not exclusive reclaimed bytes. '

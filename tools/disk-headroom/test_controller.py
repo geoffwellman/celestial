@@ -39,6 +39,7 @@ if name=='cel':
   sys.exit(0)
  if sys.argv[1:3]==['box','sweep-docker']:name='docker-sweep'
 if name=='docker':
+ if (h/'fail-docker-facts').exists(): print('fixture diagnostics unavailable');sys.exit(9)
  print('{}');sys.exit(0)
 config=json.loads((h/'effects').read_text()).get(name,{})
 if config.get('sleep'):time.sleep(config['sleep'])
@@ -158,23 +159,27 @@ class HeadroomTests(unittest.TestCase):
     def test_threshold_stops_after_each_phase(self):
         self.effects({'cel-disk-release-drain': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'docker', 'docker'])
         p = self.state()['producers']['release-drain']
         self.assertEqual(p['observed_df_delta_bytes'], 5 * m.GIB)
         self.assertEqual(p['after_available_bytes'], m.TARGET)
+        self.assertEqual(self.state()['docker_facts']['system_df']['status'], 'ok')
+        self.assertIn('follow-main-executor-images', self.state()['producers'])
+        self.assertEqual(self.mail('root'), [])
+        self.assertEqual(self.mail('celestial-disk-cleanup'), [])
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual(len(self.commands()), 1)
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'docker', 'docker', 'docker', 'docker'])
 
     def test_threshold_after_ordinary_stops_retirement_and_docker(self):
         self.effects({'cel-disk-drain': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'docker', 'docker'])
         self.assertEqual(self.state()['producers']['ordinary-drain']['after_available_bytes'], m.TARGET)
 
     def test_threshold_after_retirement_stops_docker(self):
         self.effects({'cel-disk-retire': {'delta': 5 * m.GIB}})
         self.assertEqual(self.controller().run(), 0)
-        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'cel-disk-retire'])
+        self.assertEqual([x[0] for x in self.commands()], ['cel-disk-release-drain', 'cel-disk-drain', 'cel-disk-retire', 'docker', 'docker'])
         self.assertEqual(self.state()['producers']['preservation-retire']['after_available_bytes'], m.TARGET)
 
     def test_threshold_after_docker_records_measured_recovery(self):
@@ -187,6 +192,52 @@ class HeadroomTests(unittest.TestCase):
         self.free(m.TARGET)
         self.assertEqual(self.controller().run('ordinary-drain'), 0)
         self.assertEqual(self.commands(), [])
+
+    def test_healthy_full_pass_refreshes_sources_without_mutation_or_mail(self):
+        manifest, data, metadata = self.follow_manifest()
+        queue = manifest.with_name('release-queue.json')
+        queue.write_text(json.dumps({'version': 1, 'issuer': self.data['release_queue_issuer'],
+                                    'generated_at': data['generated_at'], 'entries': [], 'held_count': 0}))
+        self.free(m.TARGET)
+        watched = [manifest, queue, metadata / 'HEAD',
+                   Path(data['worktree_candidates'][0]['path']) / '.git', self.config, self.h / 'free',
+                   *self.bin.iterdir()]
+        before = {p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns) for p in watched}
+        self.assertEqual(self.controller().run(), 0)
+        state = self.state()
+        self.assertEqual(state['pass_status'], 'target-met')
+        self.assertEqual(state['capacity_deficit_bytes'], 0)
+        self.assertEqual(state['docker_facts']['system_df']['status'], 'ok')
+        self.assertEqual(state['docker_facts']['container_writable']['status'], 'ok')
+        self.assertGreaterEqual(state['docker_facts']['observed_at'], state['started_at'])
+        for name in ('gate-runs', 'follow-main-executor-images'):
+            self.assertEqual(state['producers'][name]['status'], 'observed')
+            self.assertGreaterEqual(state['producers'][name]['observed_at'], state['started_at'])
+        self.assertEqual(state['producers']['follow-main-executor-images']['candidate_count'], 1)
+        self.assertEqual(state['producers']['follow-main-executor-images']['authorization'], 'none')
+        self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
+                                           ['docker', 'ps', '-a', '--size', '--format', '{{json .}}']])
+        self.assertEqual(state['notifications'], {})
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns) for p in watched}, before)
+        # Single-handler timer triggers neither duplicate probes nor notifications.
+        self.assertEqual(self.controller().run('ordinary-drain'), 0)
+        self.assertEqual(len(self.commands()), 2)
+        self.assertEqual(self.state()['docker_facts'], state['docker_facts'])
+
+    def test_healthy_full_pass_keeps_diagnostic_failure_explicit_and_silent(self):
+        self.free(m.TARGET)
+        (self.h / 'fail-docker-facts').touch()
+        self.assertEqual(self.controller().run(), 0)
+        state = self.state()
+        self.assertEqual(state['pass_status'], 'target-met')
+        for name in ('system_df', 'container_writable'):
+            self.assertEqual(state['docker_facts'][name]['status'], 'failed')
+            self.assertEqual(state['docker_facts'][name]['exit_code'], 9)
+            self.assertIn('diagnostics unavailable', state['docker_facts'][name]['output'])
+        self.assertGreaterEqual(state['docker_facts']['observed_at'], state['started_at'])
+        self.assertEqual(state['producers']['follow-main-executor-images']['status'], 'missing-adapter')
+        self.assertEqual(state['notifications'], {})
+        self.assertEqual(len(self.commands()), 2)
 
     def test_partial_failure_continues_measures_and_reports(self):
         self.effects({'cel-disk-release-drain': {'delta': m.GIB, 'rc': 1},
