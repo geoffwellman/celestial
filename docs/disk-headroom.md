@@ -1,25 +1,29 @@
 # Recurring disk headroom controller
 
-`tools/disk-headroom/controller.py` runs the existing owner-approved handlers in order: producer release drain, ordinary manifest drain, preservation retirement, then the safe Docker-only sweep. It does not implement deletion or infer new cleanup grants. The target is **20 GiB available to this user on `/`**, measured with `statvfs.f_bavail * f_frsize`, not root-reserved free blocks.
+`tools/disk-headroom/controller.py` runs existing owner-approved handlers in order: producer release drain, ordinary manifest drain, preservation retirement, then the safe Docker-only sweep. It orchestrates existing deletion handlers; it does not infer new cleanup grants. The target is **20 GiB available to this user on `/`**, measured with `statvfs.f_bavail * f_frsize`, not root-reserved free blocks.
 
-This is a maintenance controller, not a promise of capacity. A pass stops before the next handler once available space reaches 20 GiB. If approved cleanup cannot reach it, `status.json` records the exact remaining byte deficit. No sessions, media, evidence, databases, unpublished gate runs, tracing files, image rollback prerequisites or new classes become eligible merely because the disk is low.
+The controller is not a capacity promise. It stops before the next handler once available space reaches 20 GiB. If the target cannot be reached, durable status reports the remaining byte deficit. Sessions, media, evidence, databases, unpublished gate runs, tracing files and rollback prerequisites never become eligible merely because the disk is low.
 
 ## Bounds and serialization
 
-- One nonblocking `flock` at `~/.local/state/cel-disk-headroom/lock` spans the entire pass, including diagnostics and confirmed message enqueue. A competing invocation exits **75**, not success. Handler subprocesses inherit the lock descriptor; the parent closes rather than explicitly unlocking it.
-- Each handler gets at most 650 seconds and all commands share a 2,400-second monotonic pass deadline. A timed-out process group is killed; at most five further seconds are allowed to reap it. Installed service `TimeoutStartSec=2460` and `KillMode=control-group` provide an independent outer bound. The service environment retains Herdr/Rex/mise discovery paths.
-- `cel-disk-monitor.service` becomes the controller entry point through a supported drop-in. Its existing timer remains the recurring scheduler; no extra competing timer is created. Existing release/ordinary/retire service entry points go through the same controller lock and threshold guard. The standalone scripts and their timers are retained, not deleted or disabled.
-- Direct invocation of a standalone script bypasses this controller lock (the old release handler also has its own lock). During controlled deployment, the parent must quiesce the lane's manual invocations as well. After migration, invoke the existing services or `cel-disk-headroom handler NAME`, not the old binaries directly.
-- This controller does not replace the Docker adapter's separate image-publication lock or authorize global prune.
+- A nonblocking `flock` at `~/.local/state/cel-disk-headroom/lock` spans each pass, including diagnostics and confirmed message enqueue. Competing invocations exit **75**, not threshold success. Handler subprocesses inherit the descriptor; the parent closes rather than explicitly unlocking it.
+- A pass has a 2,400-second monotonic command deadline. **The last 120 seconds are reserved before every handler child dispatch**, including Docker capability lookup and mutation. Individual handlers receive at most 650 seconds, capped by that earlier work deadline. Timed-out process groups are killed; reaping gets at most five additional seconds, inside the control-plane reserve. Diagnostics need at most two 15-second commands; each notification has a 30-second bound. Installed `TimeoutStartSec=2460` and `KillMode=control-group` provide an independent outer service bound.
+- Work that cannot be dispatched before the work deadline gets an explicit `skipped` producer status and next retry. A timeout is incomplete work, not proof that approved reclaim was exhausted. The remaining control-plane time stays available for diagnostics, lane messages and emergency escalation.
+- `cel-disk-monitor.service` becomes the controller entry point through a drop-in. Its existing timer remains the recurring scheduler; no new timer is created. Existing release/ordinary/retire service entry points use the same controller lock and threshold guard. Standalone scripts and timers remain intact.
+- Managed services set `SuccessExitStatus=75`: expected overlap does not mark systemd failed, but the controller still prints the contention reason and returns 75. This means **another pass owns the lock**, not that the floor was reached. Read `status.json` for the owning pass's actual result. Other failure/deficit exit codes remain non-successful.
+- Direct standalone-script invocation bypasses the controller lock. Parent deployment must quiesce manual lane invocations too. After migration, use services or `cel-disk-headroom handler NAME`, not the original binaries directly.
+- Serialization is not global: the six-hour steward Docker sweep and this controller's Docker-only consumer share the separate Docker image lock; steward cache/“ours” sweeps remain independent. Deltas therefore remain observed windows, not exclusive reclaim attribution.
 
-## Explicit adapter gates
+## Explicit reviewed adapter gates
 
-The owner-controlled regular file `~/.config/cel/disk-headroom.json` has schema version 1. Group/world-writable or unknown configuration versions/keys are refused. The supported installer creates it from explicitly supplied review pins:
+The owner-controlled regular file `~/.config/cel/disk-headroom.json` has schema version 1. Group/world-writable files and unknown configuration keys/versions are refused. The installer records explicitly supplied review pins; it never treats current installed bytes as automatic approval.
 
 ```json
 {
   "version": 1,
-  "cel": "/home/geoff/celestial-plane/bin/cel",
+  "cel": "<absolute runtime-resolved cel executable>",
+  "cel_sha256": "<reviewed executable SHA256>",
+  "docker_runtime_sha256": "<reviewed Docker CLI runtime digest>",
   "handler_sha256": {
     "release-drain": "<reviewed SHA256>",
     "ordinary-drain": "<reviewed SHA256>",
@@ -30,54 +34,60 @@ The owner-controlled regular file `~/.config/cel/disk-headroom.json` has schema 
 }
 ```
 
-The three existing handlers are fixed at `~/.local/bin/cel-disk-{release-drain,drain,retire}`. A missing executable, missing pin, changed pin or unknown handler is a real failed status, never a no-op success. Their eligibility checks and manifests remain authoritative. Pins are deliberately **not** inferred from whatever binary happens to be installed.
+The existing handlers are fixed at `~/.local/bin/cel-disk-{release-drain,drain,retire}`. Missing or changed pins/executables are real failed statuses, never no-op success. Standalone smoke hooks, including a lowered retirement free-space reserve or after-copy shell command, are stripped from production adapter environments. Handler eligibility, observer, manifest and preservation guards remain authoritative. Exceptions such as a missing `cel` configuration finish the phase as failed instead of leaving durable `running` intent behind.
 
-Retirement additionally requires explicit notification protocol version 1: the reviewed handler must honor `CEL_RETIRE_NOTIFY_RECIPIENT=celestial-disk-cleanup`, including confirmed enqueue/debt handling. The previously installed retirement script always sends root and therefore must remain gated until its owner deploys that support. Setting the config flag is an operator attestation to the pinned version, not a feature-detection guess. Preservation budget/observer/age guards must not be relaxed to meet the floor; in particular its own 20 GiB post-copy reserve can keep candidates while the disk is low.
+Retirement additionally requires notification protocol version 1. The pinned handler must honor `CEL_RETIRE_NOTIFY_RECIPIENT=celestial-disk-cleanup`, preserve original-recipient delivery debt, and confirm enqueue. Setting the flag attests to the reviewed pinned capability, not guessed feature support. Its minimum post-copy 20 GiB reserve remains unchanged and can keep candidates while space is low.
 
-Docker requires **both** `docker_opt_in=true` and a successful live `cel box docker-safety` JSON capability with `version=1`, `keep_label=cel.keep=true`, and a nonempty `lock_file`. Only then is `cel box sweep-docker` invoked. The Docker safety change must be deployed first, with producer rollback/base retention configured and reviewed. An older `cel`, malformed capability or absent gate is a blocker. No fallback to `cel box sweep`, image/container/volume prune or an internal library function exists.
+Docker requires both explicit `docker_opt_in=true` and live `cel box docker-safety` capability JSON with integer `version=1`, `keep_label=cel.keep=true`, and an absolute `lock_file`. The **callee** acquires that lock; the controller validates the declared protocol but does not double-acquire it. Only `cel box sweep-docker` follows; there is no fallback to general box sweep, image/container/volume prune or a sourced internal function.
 
-## Durable observability and routing
+To prevent an installed CLI update between capability lookup and deletion from silently substituting code, the Docker runtime digest binds `bin/cel` and the complete sorted `lib/*.sh` set, including each relative path, byte length and content. The controller checks that digest and executable pin, independently copies those verified bytes into a private disposable runtime, and runs **both capability and mutation from that same snapshot**. Source checkout changes after snapshot creation cannot change the consumer. The copied scripts are read-only; the temporary runtime contains only copied code and is removed after the phase. Missing runtime dependencies fail closed. Any deployed CLI/library change requires a newly reviewed runtime pin. This does not replace producer locking during Docker build/tag/import or retention-file publication.
 
-`~/.local/state/cel-disk-headroom/status.json` is atomically replaced with fsync, and `receipts.jsonl` is append-only with fsync. A handler's running intent is saved before dispatch. Every attempted handler records available bytes immediately before/after, its bounded output tail, exit/status, blocker age and next retry. Deltas are **observed filesystem-window changes**, not exclusive reclaimed bytes: concurrent producers, hardlinks, handler receipts and controller state writes also change availability. A handler may return zero while preserving all candidates; this does not imply successful recovery.
+## Durable observability and notifications
 
-Below target, daemon-provided `docker system df --format '{{json .}}'` and `docker ps -a --size --format '{{json .}}'` capture image/cache totals and container writable-layer facts. Each command is bounded to 15 seconds and its retained output to 64 KiB. There is no `du` traversal. Docker daemon failures are recorded explicitly, not estimated as zero.
+`~/.local/state/cel-disk-headroom/status.json` is atomically replaced with fsync; `receipts.jsonl` is append-only with fsync. Running intent precedes dispatch. Each attempted handler records available bytes immediately before/after, bounded output, exit/status, blocker age and next retry. Deltas are **observed filesystem-window changes**, not exclusive reclaimed bytes: concurrent writers, hardlinks and receipt/state writes also affect availability. Exit zero while preserving every candidate does not imply recovery.
 
-Producer statuses include:
+Below target, bounded `docker system df --format '{{json .}}'` and `docker ps -a --size --format '{{json .}}'` record daemon totals and container writable layers. Each gets at most 15 seconds and retains 64 KiB output. No `du` traversal is performed. Docker failures are recorded, not estimated as zero.
 
-| Producer/class | Known interface and limits |
+| Producer/class | Interface and limit |
 | --- | --- |
-| Gate runs | Release queue version/issuer/count/held count and timestamp, plus release-drain result. Published dependency targets only; not blanket whole-run closure. Missing/invalid queue is explicit. |
+| Gate runs | Queue issuer/version/timestamp/age, entry and held counts plus release-drain result. Only published dependency targets, not whole-run closure. Missing/invalid/stale queues remain explicit blockers. |
 | Ordinary runs | Existing manifest handler; no expansion to run-owned roots. |
-| Stale worktrees/previews | Existing preservation-retire result; eligibility and minimum-free guards stay authoritative. |
-| Follow-main/executor images | Explicit missing producer release/status adapter, even when safe generic Docker sweep is available. Retention is not inferred from age or tag disappearance. |
-| Miniflare tracing | Explicit missing exact closed-set adapter; no inferred deletion. |
+| Stale worktrees/previews | Preservation-retire handler result; age, observer, independent-copy and minimum-free guards remain authoritative. |
+| Follow-main/executor images | Missing machine-consumable producer release/retention-status adapter is explicit. Existing source live/rollback protections are not denied, but are not inferred to authorize cleanup; a success-branch-only/force-removal script is not adopted. |
+| Miniflare tracing | Missing opt-in exact closed-set adapter is explicit. Off-by-default tracing and a small current footprint do not authorize deletion. |
 
-Routine maintenance/failures go to `celestial-disk-cleanup`, with a 30-minute confirmed-enqueue dedupe and retries on debt. Root gets only a **capacity/grant/class decision required** after approved configured attempts cannot close the measurable gap, not routine monitor level warnings or no-change reports. One normal capacity decision is acknowledged/deduplicated per below-target episode; a subsequent emergency below 1 GiB creates a distinct clear decision escalation, reminded at most daily. Recovery to 20 GiB clears the episode. Enqueue success requires exit zero **and** `queued for RECIPIENT in plane`; failed or ambiguous sends retain durable debt and retry on the next controller pass. This acknowledgment means confirmed mailbox enqueue, not that the owner answered or granted anything.
+Routine maintenance and failures go to `celestial-disk-cleanup`, with a 30-minute confirmed-enqueue dedupe. Failed/ambiguous enqueue creates durable debt with `next_retry`; **no resend occurs before that time**, even if another timer invokes a pass sooner. At or after the due boundary, a later controller pass retries. Exit zero plus `queued for RECIPIENT in plane` is required. Enqueue acknowledgment is not an owner answer or a new cleanup grant.
 
-Exit codes: 0 target reached (or successful serialized single-handler trigger), 1 handler/deadline/config failure, 2 measurable capacity deficit after successful handlers, 3 notification debt, 75 lock contention. These intentionally remain nonzero in systemd when the maintenance goal was not achieved.
+Normal root capacity decisions are emitted only after all configured approved handlers complete successfully and the floor remains unmet. Failed, blocked, deadline-skipped or timed-out work is reported to the lane and deferred, never presented to root as exhausted reclaim; `root_capacity_decision_deferred` makes this explicit. One normal decision is acknowledged/deduplicated per below-target episode. An emergency below 1 GiB is an independent explicit decision even during an incomplete pass; its message says maintenance is incomplete, rather than claiming exhaustion, and is reminded at most daily. Recovery clears the episode. Routine disk-level warnings and no-change reports are not duplicated to root.
 
-## Parent-controlled migration
+Exit codes: 0 target reached or successful serialized single-handler trigger; 1 handler/deadline/config failure; 2 measurable deficit after completed handlers; 3 notification debt; 75 contention. The systemd overlap exception above does not change these controller meanings.
 
-No live scripts, units, timer state or cleanup are changed by building/testing this code. The installer defaults to a plan; `--apply` is required. Deployment is the parent's responsibility:
+## Parent-controlled transactional migration
 
-1. Coordinate with the cleanup lane: no direct standalone invocations during migration. Obtain exact reviewed handler hashes. Deploy the Docker safety version/producer retention first. Deploy the retirement notification protocol first, or leave that gate off and record the blocker.
-2. Stop (do not disable/delete) the four existing `cel-disk-{monitor,release-drain,drain,retire}.timer` units. Let their finite services complete. This temporarily quiesces the old non-locking units before new entry points are installed. The installer refuses any active or unknown service/timer, rather than racing it.
-3. From the deployed tracked checkout, first view the plan, then install with explicit reviewed values. For example, with shell variables already holding reviewed hashes:
+Building and testing this code does not change live scripts, units, timers or cleanup. The installer defaults to a plan; `--apply` is explicit. Parent deployment:
+
+1. Coordinate no direct lane invocations. Obtain reviewed handler hashes and retirement notification capability. Deploy Docker safety and producer retention first, before opting in.
+2. Stop (do not disable/delete) the four existing `cel-disk-{monitor,release-drain,drain,retire}.timer` units and let finite services finish. The installer also takes the controller lock and refuses active or unknown units.
+3. Resolve the actual installed CLI rather than assuming a checkout folder. Display candidate CLI/runtime digests for review; this read-only command does not approve them. Supply reviewed values when applying:
 
    ```sh
-   python3 tools/disk-headroom/install.py --cel /home/geoff/celestial-plane/bin/cel
-   python3 tools/disk-headroom/install.py --apply \
-     --cel /home/geoff/celestial-plane/bin/cel \
+   CEL_BIN="$(readlink -f "$(command -v cel)")"
+   python3 tools/disk-headroom/install.py --cel "$CEL_BIN" --describe-cel
+   python3 tools/disk-headroom/install.py --cel "$CEL_BIN"
+   python3 tools/disk-headroom/install.py --apply --cel "$CEL_BIN" \
+     --cel-sha256 "$REVIEWED_CEL_SHA" \
+     --docker-runtime-sha256 "$REVIEWED_DOCKER_RUNTIME_SHA" \
      --handler-sha256 "release-drain=$REVIEWED_RELEASE_SHA" \
      --handler-sha256 "ordinary-drain=$REVIEWED_DRAIN_SHA" \
      --handler-sha256 "preservation-retire=$REVIEWED_RETIRE_SHA" \
      --retire-notification-v1 --enable-safe-docker
    ```
 
-   Omit the two opt-ins until their prerequisites are satisfied. Missing gates remain visible failures/blockers, not permission to substitute another cleanup mechanism. The installer copies the tracked controller independently of the source worktree and installs `cel-disk-headroom`; existing standalone monitor/drain/retire scripts and state are unchanged. Existing conflicting managed drop-ins are refused.
-4. The parent starts `cel-disk-monitor.service` and supervises the real pass, checks before/after available bytes and producer statuses, then restarts the four existing timers. The monitor service now calls the controller, so its former routine root warning/diagnostic behavior is not executed. No timers are enabled, disabled, stopped or started by the installer.
-5. Rollback requires the parent to stop the four timers, wait for services, remove only `50-headroom.conf` in the four `cel-disk-*.service.d` directories, daemon-reload and restart the existing timers. The original standalone monitor is still present, so rollback restores its old alert-only/root-warning behavior. Preserve controller status/receipts for evidence; rollback does not restore deleted dependencies or grant any new class.
+   Omit opt-ins until prerequisites are met; missing gates remain visible blockers. CLI executable review pin is required for apply; runtime pin is required when Docker is enabled.
+4. Before mutation, installer checks manager-loaded and local service drop-ins. A later-sorting `ExecStart` override is refused, as is a conflicting managed destination. It saves independent, fsynced preimages and original modes of controller, wrapper, config and drop-ins under `~/.local/state/cel-disk-headroom/install-backups/transaction-*`, with a durable manifest. It then atomically replaces each file and daemon-reloads. Any caught write/reload/interrupt failure restores all changed preimages (removes only newly created installation files) and reloads again. Rollback failures are explicit and keep the backup path; parent must keep timers stopped. A hard process kill cannot promise an automatic multi-file rollback: use the durable manifest/preimages for operator recovery. Backup evidence is retained, not auto-pruned.
+5. Parent starts `cel-disk-monitor.service`, supervises the real pass and reads byte measurements/statuses, then restarts the existing timers. The installer never toggles timers, starts cleanup, or changes standalone scripts/state. Monitor service now invokes maintenance, not the old duplicate routine root-warning behavior.
+6. Operator rollback: stop the four timers, wait for services, remove only the four `50-headroom.conf` drop-ins, daemon-reload, then restart existing timers. Original standalone scripts remain available. This restores old alert-only/root-warning monitor behavior; it does not restore deleted dependencies or grant a new class. Preserve controller receipts and transaction backups.
 
 ## Isolated verification
 
-Run `python3 tools/disk-headroom/test_controller.py` (also wired into `bash tests/run.sh disk_headroom`). The harness uses private fake HOME, fake free-byte observations and real bounded child executables; host disk handlers are never called. It covers threshold crossing between phases, already-healthy unit triggers, partial-failure deltas, timeout, whole-pass budget, common flock, idempotent handlers, missing/changed adapters, Docker capability/opt-in, root enqueue debt/false ACK/retry/dedupe/emergency transition, producer gaps and quiescent installer behavior. It proves orchestration, not production reclaimability or safe behavior of an unreviewed pinned handler. The parent must supervise the first real pass after deployment.
+Run `python3 -B tools/disk-headroom/test_controller.py` (also wired into `bash tests/run.sh disk_headroom`). Private fake HOME/free-byte observations and real fixture children exercise thresholds, partial failures, per-handler and whole-pass bounds, last-phase notification reserve, skipped-phase root deferral, emergency routing, lock overlap, idempotence, exact retry boundaries, missing/changed adapters, frozen CLI execution, sourced-library drift, later drop-in refusal and transactional write/reload rollback. Host cleanup is never invoked. These tests prove orchestration, not production reclaimability or safety of an unreviewed handler. Parent must supervise the first deployed real pass.

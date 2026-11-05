@@ -27,6 +27,7 @@ name=pathlib.Path(sys.argv[0]).name
 with open(h/'commands','a') as f: f.write(json.dumps([name,*sys.argv[1:]])+'\\n')
 if name=='cel':
  if sys.argv[1:3]==['box','docker-safety']:
+  if (h/'mutate-cli').exists(): (h/'.local/bin/cel').write_text('#!/usr/bin/python3\\nraise SystemExit(42)\\n')
   print(json.dumps({'version':int((h/'docker-version').read_text()),'keep_label':'cel.keep=true','lock_file':str(h/'docker.lock')}));sys.exit(0)
  if sys.argv[1:3]==['inbox','send']:
   recipient=sys.argv[3]
@@ -63,6 +64,11 @@ class HeadroomTests(unittest.TestCase):
             p = self.bin / name
             p.write_text(FIXTURE)
             p.chmod(0o700)
+        library = self.h / '.local/lib'
+        library.mkdir(parents=True)
+        for name in ('box.sh', 'common.sh', 'run.sh'):
+            (library / name).write_text('# private fixture library\n')
+            (library / name).chmod(0o600)
         self.env = patch.dict(os.environ, {'FIXTURE_HOME': str(self.h), 'PATH': str(self.bin) + ':/usr/bin:/bin'})
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -71,6 +77,8 @@ class HeadroomTests(unittest.TestCase):
                      'retire_notification_version': 1, 'handler_sha256': {
                          name: hashlib.sha256((self.bin / binary).read_bytes()).hexdigest()
                          for name, (binary, _) in m.DEFAULTS.items()}}
+        self.data['cel_sha256'] = m.executable_digest(self.bin / 'cel')
+        self.data['docker_runtime_sha256'] = m.runtime_files(self.bin / 'cel')[1]
         self.configure()
         self.effects({})
         (self.h / 'docker-version').write_text('1')
@@ -98,6 +106,16 @@ class HeadroomTests(unittest.TestCase):
 
     def mail(self, recipient):
         return [x for x in self.commands() if x[:4] == ['cel', 'inbox', 'send', recipient]]
+    def retry_due(self):
+        state = self.state()
+        for row in state['notifications'].values():
+            row['next_retry'] = 0
+        m.atomic(self.h / '.local/state/cel-disk-headroom/status.json', state)
+
+    def install(self):
+        return installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
+                                 True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'])
+
 
     def test_threshold_stops_after_each_phase(self):
         self.effects({'cel-disk-release-drain': {'delta': 5 * m.GIB}})
@@ -141,9 +159,9 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(s['producers']['release-drain']['status'], 'failed')
         self.assertEqual(s['producers']['release-drain']['observed_df_delta_bytes'], m.GIB)
         self.assertEqual(s['producers']['ordinary-drain']['before_available_bytes'], 16 * m.GIB)
-        self.assertEqual(len(self.mail('root')), 1)
-        self.assertTrue(s['notifications']['root']['acked_at'])
-        self.assertFalse(s['notifications']['root']['debt'])
+        self.assertEqual(self.mail('root'), [])
+        self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
+        self.assertTrue(s['root_capacity_decision_deferred'])
 
     def test_idempotent_handlers_and_root_capacity_dedupe(self):
         self.effects({'cel-disk-release-drain': {'delta': m.GIB}})
@@ -162,7 +180,12 @@ class HeadroomTests(unittest.TestCase):
         (self.h / 'false-ack').touch()
         self.assertEqual(self.controller().run(), 3)
         self.assertTrue(self.state()['notifications']['root']['debt'])
+        self.assertEqual(len(self.mail('root')), 1)  # future next_retry prevents resend
+        self.retry_due()
+        self.assertEqual(self.controller().run(), 3)
+        self.assertEqual(len(self.mail('root')), 2)
         (self.h / 'false-ack').unlink()
+        self.retry_due()
         self.assertEqual(self.controller().run(), 2)
         self.assertFalse(self.state()['notifications']['root']['debt'])
         self.assertEqual(len(self.mail('root')), 3)
@@ -192,6 +215,9 @@ class HeadroomTests(unittest.TestCase):
         self.assertIn(c.run(), (1, 3))  # timeout is failure; mail may finish within .2s
         self.assertLess(time.monotonic() - start, 2)
         self.assertFalse(any(x[0].startswith('cel-disk-') for x in self.commands()))
+        self.assertEqual(self.state()['incomplete_handlers'], list(m.HANDLERS))
+        self.assertTrue(all(self.state()['producers'][name]['status'] == 'skipped' for name in m.HANDLERS))
+        self.assertEqual(self.mail('root'), [])
         lock = self.h / '.local/state/cel-disk-headroom/lock'
         with open(lock, 'a') as f:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -259,7 +285,7 @@ class HeadroomTests(unittest.TestCase):
         config.write_text('original config')
         with patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')):
             with self.assertRaises(ValueError):
-                installer.install(self.h, self.bin / 'cel', {}, docker=True, apply=True)
+                self.install()
         self.assertEqual(config.read_text(), 'original config')
         self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
         self.assertEqual(file.read_text(), 'operator owned\n')
@@ -271,8 +297,8 @@ class HeadroomTests(unittest.TestCase):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, 'LoadState=loaded\nActiveState=inactive\n', '')
         with patch.object(installer.subprocess, 'run', systemctl):
-            installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'], True, True, True)
-            installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'], True, True, True)
+            self.install()
+            self.install()
         for p, b in originals.items():
             self.assertEqual(p.read_bytes(), b)
         self.assertFalse(any(x in ('stop', 'disable', 'enable', 'start') for cmd in calls for x in cmd))
@@ -280,6 +306,7 @@ class HeadroomTests(unittest.TestCase):
             text = (self.h / '.config/systemd/user' / (name + '.service.d/50-headroom.conf')).read_text()
             self.assertIn('ExecStart=\nExecStart=', text)
             self.assertIn('KillMode=control-group', text)
+            self.assertIn('SuccessExitStatus=75', text)
             self.assertIn('cel-disk-headroom', text)
         monitor = (self.h / '.config/systemd/user/cel-disk-monitor.service.d/50-headroom.conf').read_text()
         self.assertIn(' run\n', monitor)
@@ -309,6 +336,150 @@ class HeadroomTests(unittest.TestCase):
         for key in ('CEL_RETIRE_MIN_FREE', 'CEL_RETIRE_HOOK_AFTER_COPY', 'CEL_DRAIN_ROOT'):
             self.assertNotIn(key, environment)
         self.assertEqual(environment['CEL_RETIRE_NOTIFY_RECIPIENT'], 'celestial-disk-cleanup')
+
+    def test_last_handler_cannot_consume_notification_reserve(self):
+        self.effects({'docker-sweep': {'sleep': 10}})
+        start = time.monotonic()
+        self.assertEqual(self.controller(pass_seconds=1.5, handler_seconds=10, control_reserve=1).run(), 1)
+        self.assertLess(time.monotonic() - start, 1.5)
+        self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'timeout')
+        self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
+        self.assertEqual(self.mail('root'), [])
+
+    def test_skipped_handlers_defer_root_but_emergency_is_explicit(self):
+        self.assertEqual(self.controller(pass_seconds=2, control_reserve=3).run(), 1)
+        self.assertEqual(self.state()['incomplete_handlers'], list(m.HANDLERS))
+        self.assertEqual(len(self.mail('celestial-disk-cleanup')), 1)
+        self.assertEqual(self.mail('root'), [])
+        self.free(m.GIB // 2)
+        self.assertEqual(self.controller(pass_seconds=2, control_reserve=3).run(), 1)
+        self.assertEqual(len(self.mail('root')), 1)
+        self.assertIn('Maintenance is incomplete', self.mail('root')[0][4])
+
+    def test_debt_retry_occurs_at_due_boundary_not_before(self):
+        c = self.controller()
+        c.load()
+        c.state['notifications']['root'] = {'key': 'capacity', 'debt': True, 'next_retry': 1234}
+        with patch.object(m.time, 'time', return_value=1233):
+            self.assertFalse(c.notify('root', 'capacity', 'decision'))
+        self.assertEqual(self.mail('root'), [])
+        with patch.object(m.time, 'time', return_value=1234):
+            self.assertTrue(c.notify('root', 'capacity', 'decision'))
+        self.assertEqual(len(self.mail('root')), 1)
+
+    def test_missing_cel_configuration_finishes_failed_phase(self):
+        self.data.pop('cel')
+        self.configure()
+        self.assertEqual(self.controller().run('docker-sweep'), 1)
+        self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'failed')
+        self.assertNotEqual(self.state()['pass_status'], 'running')
+
+    def test_installed_cli_change_between_capability_and_sweep_cannot_swap_runtime(self):
+        (self.h / 'mutate-cli').touch()
+        self.assertEqual(self.controller().run('docker-sweep'), 0)
+        self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'ok')
+        self.assertNotEqual(m.executable_digest(self.bin / 'cel'), self.data['cel_sha256'])
+        self.assertTrue(any(cmd[1:3] == ['box', 'sweep-docker'] for cmd in self.commands()))
+
+    def test_changed_sourced_cli_library_fails_before_dispatch(self):
+        (self.h / '.local/lib/box.sh').write_text('# changed after review\n')
+        self.assertEqual(self.controller().run('docker-sweep'), 1)
+        self.assertEqual(self.commands(), [])
+        self.assertIn('runtime SHA256', self.state()['producers']['docker-sweep']['output'])
+
+    def test_later_execstart_override_is_refused_before_install(self):
+        path = self.h / '.config/systemd/user/cel-disk-monitor.service.d/90-override.conf'
+        path.parent.mkdir(parents=True)
+        path.write_text('[Service]\nExecStart=\nExecStart=/old/monitor\n')
+        with patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')):
+            with self.assertRaisesRegex(ValueError, 'later drop-in'):
+                self.install()
+        self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+        self.assertIn('/old/monitor', path.read_text())
+
+    def installation_preimages(self):
+        paths = [self.h / '.local/lib/cel-disk-headroom/controller.py',
+                 self.h / '.local/bin/cel-disk-headroom', self.h / '.config/cel/disk-headroom.json']
+        paths.extend(self.h / '.config/systemd/user' / (name + '.service.d/50-headroom.conf') for name in installer.UNITS)
+        return {p: (p.read_bytes(), p.stat().st_mode & 0o777) for p in paths}
+
+    def assert_preimages(self, originals):
+        self.assertEqual(self.installation_preimages(), originals)
+        manifests = list((self.h / '.local/state/cel-disk-headroom/install-backups').glob('*/manifest.json'))
+        self.assertTrue(manifests)
+        self.assertTrue(all(json.loads(p.read_text())['files'] for p in manifests))
+
+    def test_daemon_reload_failure_restores_all_preimages_and_modes(self):
+        good = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=good):
+            self.install()
+        config = self.h / '.config/cel/disk-headroom.json'
+        config.write_text('original config\n')
+        config.chmod(0o640)
+        originals = self.installation_preimages()
+        reloads = []
+        def fail_reload(argv, **kwargs):
+            if argv[-1] == 'daemon-reload':
+                reloads.append(argv)
+                if len(reloads) == 1:
+                    raise subprocess.CalledProcessError(1, argv)
+            return good
+        with patch.object(installer.subprocess, 'run', fail_reload):
+            with self.assertRaisesRegex(ValueError, 'preimages restored'):
+                self.install()
+        self.assertEqual(len(reloads), 2)
+        self.assert_preimages(originals)
+
+    def test_post_replace_write_failure_restores_new_and_existing_paths(self):
+        config = self.h / '.config/cel/disk-headroom.json'
+        config.parent.mkdir(parents=True)
+        config.write_text('before\n')
+        config.chmod(0o640)
+        replace = installer.replace_bytes
+        injected = []
+        def fail_after_replace(path, data, mode):
+            replace(path, data, mode)
+            if path == config and not injected:
+                injected.append(True)
+                raise OSError('injected ENOSPC after replace')
+        with patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')):
+            with patch.object(installer, 'replace_bytes', fail_after_replace):
+                with self.assertRaisesRegex(ValueError, 'preimages restored'):
+                    self.install()
+        self.assertEqual(config.read_text(), 'before\n')
+        self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+        self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+        self.assertFalse((self.h / '.local/bin/cel-disk-headroom').exists())
+        self.assertTrue(injected)
+
+    def test_manager_loaded_later_override_is_refused(self):
+        path = self.h / 'manager/95-runtime.conf'
+        path.parent.mkdir()
+        path.write_text('[Service]\nExecStart=/old/runtime\n')
+        result = subprocess.CompletedProcess([], 0, f'LoadState=loaded\nActiveState=inactive\nDropInPaths={path}\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(ValueError, 'later drop-in'):
+                self.install()
+        self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+
+    def test_capability_timeout_stays_timeout_not_completed_failure(self):
+        c = self.controller()
+        c.load()
+        with patch.object(c, 'command', return_value={'status': 'timeout', 'output': 'deadline'}) as command:
+            result = c.phase('docker-sweep')
+        self.assertEqual(result['status'], 'timeout')
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(self.state()['producers']['docker-sweep']['status'], 'timeout')
+
+    def test_describe_cli_prints_candidates_without_install(self):
+        r = subprocess.run(['/usr/bin/python3', '-B', str(HERE / 'install.py'),
+                            '--cel', str(self.bin / 'cel'), '--describe-cel'],
+                           capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        value = json.loads(r.stdout)
+        self.assertEqual(value['cel_sha256'], self.data['cel_sha256'])
+        self.assertEqual(value['docker_runtime_sha256'], self.data['docker_runtime_sha256'])
+        self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
 
 
 if __name__ == '__main__':
