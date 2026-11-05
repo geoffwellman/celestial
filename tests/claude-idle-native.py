@@ -166,6 +166,22 @@ def main():
     def has_request(text):
         return any(text in json.dumps(request.get("messages", [])) for request in requests)
 
+    def native_user_rows():
+        users = []
+        with Path(target["transcript"]).open("rb") as stream:
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break
+                row = json.loads(line)
+                if row.get("type") == "user" and row.get("sessionId") == native:
+                    users.append(row)
+        return users
+
+    def both_deliveries_persisted():
+        users = native_user_rows()
+        return all(any(marker in str(row.get("message", {}).get("content", "")) for row in users)
+                   for marker in ("ACTUAL_NATIVE_INBOX_MAIL_ONE", "ACTUAL_NATIVE_INBOX_MAIL_TWO"))
+
     blocked_socket, socket_mode = None, None
     try:
         until(lambda: state().get("status") == "idle", "start its receipt-bound native watcher")
@@ -233,8 +249,10 @@ def main():
         debug = (directory / "debug.log").read_text()
         assert "session_id mismatch" in debug
         assert "Routed user message to queue" in debug
-        rows = [json.loads(line) for line in Path(target["transcript"]).read_text().splitlines()]
-        native_users = [row for row in rows if row.get("type") == "user" and row.get("sessionId") == native]
+        # The cursor can drain before Claude's asynchronous transcript append.
+        # Await actual durable receipt, then still require exactly one per item.
+        until(both_deliveries_persisted, "persist both native hook delivery records")
+        native_users = native_user_rows()
         wakes = [row for row in native_users if row.get("origin", {}).get("kind") == "peer"]
         assert len(wakes) == 2, "Native retry or watcher recovery duplicated an idle wake"
         for marker in ("ACTUAL_NATIVE_INBOX_MAIL_ONE", "ACTUAL_NATIVE_INBOX_MAIL_TWO"):
