@@ -121,6 +121,39 @@ class HeadroomTests(unittest.TestCase):
                                  True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
                                  self.data['release_queue_issuer'])
 
+    def follow_manifest(self):
+        self.data['follow_main_issuer'] = 'fixture-follow-main'
+        self.configure()
+        parent = self.h / 'code/slot-studio-wt'
+        candidate = parent / ('local-' + 'c' * 12)
+        candidate.mkdir(parents=True)
+        metadata = self.h / 'code/slot-studio/.git/worktrees' / candidate.name
+        metadata.mkdir(parents=True)
+        (candidate / '.git').write_text('gitdir: ' + str(metadata) + '\n')
+        (metadata / 'HEAD').write_text('c' * 40 + '\n')
+        (candidate / '.git').chmod(0o600)
+        (metadata / 'HEAD').chmod(0o600)
+        manifest = {
+            'version': 1, 'issuer': self.data['follow_main_issuer'],
+            'generated_at': m.datetime.datetime.now(m.datetime.timezone.utc).isoformat(),
+            'live': {'worktree': str(parent / ('local-' + 'a' * 12)),
+                     'image': 'slot-studio-local/media-executor:' + 'a' * 12},
+            'rollback': {'worktree': str(parent / ('local-' + 'b' * 12)),
+                         'image': 'slot-studio-local/media-executor:' + 'b' * 12},
+            'base': {'image': 'slot-studio-media-executor-base:local', 'label': 'cel.keep=true'},
+            'worktree_candidates': [{'path': str(candidate), 'head': 'c' * 40}],
+            'retired_this_pass': []}
+        path = self.h / '.cache/slot-builder-iso/follow-main-manifest.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(manifest))
+        path.chmod(0o600)
+        return path, manifest, metadata
+
+    def observe_follow(self):
+        c = self.controller()
+        c.load()
+        return c.follow_main_facts()
+
 
     def test_threshold_stops_after_each_phase(self):
         self.effects({'cel-disk-release-drain': {'delta': 5 * m.GIB}})
@@ -539,6 +572,206 @@ class HeadroomTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'explicit reviewed'):
             self.controller().load()
         self.assertFalse((self.h / '.local/lib/cel-disk-headroom/controller.py').exists())
+
+    def test_follow_main_is_optional_and_invalid_configuration_fails_closed(self):
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'missing-adapter')
+        self.assertEqual(row['authorization'], 'none')
+        for value in (None, '', '  ', 4, [], {}, 'x' * 257, 'issuer\n'):
+            with self.subTest(value=value):
+                self.data['follow_main_issuer'] = value
+                self.configure()
+                with self.assertRaisesRegex(ValueError, 'follow-main issuer'):
+                    self.controller().load()
+                if value is not None:
+                    with self.assertRaisesRegex(ValueError, 'follow-main issuer'):
+                        installer.install(self.h, self.bin / 'cel', {}, follow_main_issuer=value)
+
+    def test_follow_main_observes_retention_not_authorization(self):
+        path, data, _ = self.follow_manifest()
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'observed', row)
+        for key in ('live', 'rollback', 'base', 'generated_at'):
+            self.assertEqual(row[key], data[key])
+        self.assertEqual(row['candidate_count'], 1)
+        self.assertLess(row['publication_age_seconds'], 10)
+        self.assertTrue(row['source_controlled_deletion_disabled'])
+        self.assertEqual(row['authorization'], 'none')
+        self.assertNotIn('worktree_candidates', row)
+        data['rollback'] = None
+        data.pop('retired_this_pass')
+        data['worktree_candidates'] = []
+        path.write_text(json.dumps(data))
+        row = self.observe_follow()
+        self.assertEqual(row['status'], 'observed')
+        self.assertIsNone(row['rollback'])
+        self.assertEqual(row['candidate_count'], 0)
+        self.assertEqual(self.commands(), [])
+
+    def test_follow_main_rejects_unknown_malformed_stale_and_duplicate_facts(self):
+        path, original, _ = self.follow_manifest()
+        cases = [
+            {'version': True}, {'version': 2}, {'issuer': 'different-issuer'},
+            {'issuer': original['issuer'].upper()}, {'issuer': None}, {'unknown': []},
+            {'generated_at': '2020-01-01T00:00:00Z'},
+            {'generated_at': '2026-01-01T00:00:00'},
+            {'generated_at': '2026-01-01T01:00:00+01:00'},
+            {'generated_at': '2026-99-01T00:00:00Z'},
+            {'generated_at': (m.datetime.datetime.now(m.datetime.timezone.utc) + m.datetime.timedelta(seconds=120)).isoformat()},
+            {'live': None}, {'live': dict(original['live'], extra=True)},
+            {'live': dict(original['live'], image='other:tag')},
+            {'live': dict(original['live'], worktree=str(self.h / 'elsewhere/local-' ) + 'a' * 12)},
+            {'rollback': original['live']}, {'base': dict(original['base'], label='cel.keep=false')},
+            {'base': dict(original['base'], image='invalid image')},
+            {'worktree_candidates': None}, {'worktree_candidates': original['worktree_candidates'] * 2},
+            {'worktree_candidates': original['worktree_candidates'] * 257},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], head='d' * 40)]},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], head='c' * 39)]},
+            {'rollback': {'worktree': str(self.h / 'code/slot-studio-wt' / ('local-' + 'a' * 40)),
+                          'image': 'slot-studio-local/media-executor:' + 'a' * 40}},
+            {'worktree_candidates': [{'path': str(self.h / 'code/slot-studio-wt' / ('local-' + 'a' * 40)),
+                                      'head': 'a' * 40}]},
+            {'worktree_candidates': [dict(original['worktree_candidates'][0], extra=True)]},
+            {'worktree_candidates': [{'path': original['live']['worktree'], 'head': 'a' * 40}]},
+            {'retired_this_pass': ['not-a-grant']},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps(dict(original, **changes)))
+                row = self.observe_follow()
+                self.assertEqual(row['status'], 'blocked')
+                self.assertEqual(row['authorization'], 'none')
+                self.assertNotIn('candidate_count', row)
+        for raw in ('{}', '[]', '{', json.dumps(original)[:-1] + ', "version": 1}', 'x' * 65537):
+            with self.subTest(raw=raw[:30]):
+                path.write_text(raw)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+
+    def test_follow_main_timestamp_freshness_boundaries(self):
+        path, data, _ = self.follow_manifest()
+        stamp = m.datetime.datetime.fromisoformat(data['generated_at']).timestamp()
+        for age, expected in ((-61, 'blocked'), (-60, 'observed'), (600, 'observed'), (601, 'blocked')):
+            with self.subTest(age=age), patch.object(m.time, 'time', return_value=stamp + age):
+                self.assertEqual(self.observe_follow()['status'], expected)
+
+    def test_follow_main_owned_nonsymlink_bounded_files_and_metadata(self):
+        path, data, metadata = self.follow_manifest()
+        candidate_git = Path(data['worktree_candidates'][0]['path']) / '.git'
+        for target in (path, candidate_git, metadata / 'HEAD'):
+            with self.subTest(target=target):
+                before = target.read_bytes()
+                target.chmod(0o666)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.chmod(0o600)
+                saved = target.with_name(target.name + '.saved')
+                target.rename(saved)
+                target.symlink_to(saved)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.unlink()
+                os.mkfifo(target, 0o600)
+                self.assertEqual(self.observe_follow()['status'], 'blocked')
+                target.unlink()
+                saved.rename(target)
+                self.assertEqual(target.read_bytes(), before)
+        c = self.controller()
+        c.load()
+        with patch.object(m.os, 'getuid', return_value=os.getuid() + 1):
+            self.assertEqual(c.follow_main_facts()['status'], 'blocked')
+        for directory in (path.parent, metadata, candidate_git.parent):
+            saved = directory.with_name(directory.name + '.saved')
+            directory.rename(saved)
+            directory.symlink_to(saved, target_is_directory=True)
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+            directory.unlink()
+            saved.rename(directory)
+        path.unlink()
+        self.assertEqual(self.observe_follow()['status'], 'blocked')
+
+    def test_follow_main_head_metadata_mismatch_and_escape_are_blocked(self):
+        _, data, metadata = self.follow_manifest()
+        head = metadata / 'HEAD'
+        for value in ('d' * 40, 'ref: refs/heads/main', 'x' * 129):
+            head.write_text(value + '\n')
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        head.write_text('c' * 40 + '\n')
+        pointer = Path(data['worktree_candidates'][0]['path']) / '.git'
+        for value in ('gitdir: /elsewhere', 'gitdir: relative/path', 'malformed'):
+            pointer.write_text(value + '\n')
+            self.assertEqual(self.observe_follow()['status'], 'blocked')
+        self.assertEqual(self.commands(), [])
+
+    def test_installer_carries_optional_observer_identity_transactionally(self):
+        good = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nActiveState=inactive\n', '')
+        with patch.object(installer.subprocess, 'run', return_value=good):
+            self.install()
+            config = self.h / '.config/cel/disk-headroom.json'
+            self.assertNotIn('follow_main_issuer', json.loads(config.read_text()))
+            installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
+                              True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
+                              self.data['release_queue_issuer'], 'fixture-follow-main')
+        self.assertEqual(json.loads(config.read_text())['follow_main_issuer'], 'fixture-follow-main')
+        previous = config.read_bytes()
+        def fail_reload(argv, **kwargs):
+            if 'daemon-reload' in argv:
+                raise subprocess.CalledProcessError(1, argv, stderr='fixture failure')
+            return good
+        with patch.object(installer.subprocess, 'run', fail_reload):
+            with self.assertRaisesRegex(ValueError, 'rollback'):
+                installer.install(self.h, self.bin / 'cel', self.data['handler_sha256'],
+                                  True, True, True, self.data['cel_sha256'], self.data['docker_runtime_sha256'],
+                                  self.data['release_queue_issuer'], 'different-fixture-issuer')
+        self.assertEqual(config.read_bytes(), previous)
+
+    def test_native_manifest_observer_reads_real_detached_metadata_without_mutation(self):
+        path, data, old_metadata = self.follow_manifest()
+        candidate = Path(data['worktree_candidates'][0]['path'])
+        (candidate / '.git').unlink()
+        candidate.rmdir()
+        (old_metadata / 'HEAD').unlink()
+        old_metadata.rmdir()
+        repo = self.h / 'code/slot-studio'
+        def git(*args):
+            result = subprocess.run(['/usr/bin/git', '-C', str(repo), *args],
+                                    capture_output=True, text=True, timeout=10, umask=0o077,
+                                    env=dict(os.environ, HOME=str(self.h), GIT_CONFIG_GLOBAL='/dev/null',
+                                             GIT_CONFIG_NOSYSTEM='1', GIT_TEMPLATE_DIR=''))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        git('init', '-b', 'main')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture')
+        head = git('rev-parse', 'HEAD')
+        candidate = candidate.parent / ('local-' + head[:12])
+        git('worktree', 'add', '--detach', str(candidate), head)
+        data['worktree_candidates'] = [{'path': str(candidate), 'head': head}]
+        path.write_text(json.dumps(data))
+        def snapshot():
+            return {str(p.relative_to(self.h)): (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+                    for root in (self.h / 'code', self.h / '.cache', self.bin)
+                    for p in root.rglob('*') if p.is_file()}
+        before = snapshot()
+        program = ('import importlib.util,json,pathlib,sys; '
+                   's=importlib.util.spec_from_file_location("headroom",sys.argv[1]); '
+                   'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                   'c=m.Controller(pathlib.Path.home(),sys.argv[2]); c.load(); c.producer_facts(); '
+                   'print(json.dumps(c.state["producers"]))')
+        result = subprocess.run(['/usr/bin/python3', '-B', '-c', program, str(HERE / 'controller.py'), str(self.config)],
+                                env=dict(os.environ, HOME=str(self.h)), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        producers = json.loads(result.stdout)
+        row = producers['follow-main-executor-images']
+        self.assertEqual(row['status'], 'observed')
+        self.assertEqual(row['candidate_count'], 1)
+        self.assertEqual(row['live'], data['live'])
+        self.assertEqual(row['rollback'], data['rollback'])
+        self.assertEqual(row['base'], data['base'])
+        self.assertEqual(row['authorization'], 'none')
+        self.assertTrue(row['source_controlled_deletion_disabled'])
+        self.assertEqual(producers['miniflare-tracing']['status'], 'missing-adapter')
+        self.assertEqual(snapshot(), before)
+        self.assertTrue(candidate.exists())
+        self.assertEqual(self.commands(), [['docker', 'system', 'df', '--format', '{{json .}}'],
+                                           ['docker', 'ps', '-a', '--size', '--format', '{{json .}}']])
 
 
 if __name__ == '__main__':
