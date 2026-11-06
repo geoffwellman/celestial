@@ -1817,35 +1817,58 @@ _steward_update_check() {
   return 0
 }
 
-# ORCHESTRATORS ON AN OLDER LAUNCH LINE, reported ONCE PER ORCHESTRATOR PER
-# BUILD: the finding only changes when the plane or the orchestrator does, so
-# a nudge per tick would be the same sentence every five minutes. Each report
-# is keyed by build, orchestrator and the difference found, so an
-# orchestrator that goes stale later in the same build is still reported.
+# OLDER LAUNCH LINES: report once per build, orchestrator and difference.
+# An open owner card suppresses only the agent it names; closing the card
+# makes an unresolved difference actionable again within the same build.
 _steward_stale_orchestrators() {
   # shellcheck source=lib/version.sh
   . "${BASH_SOURCE[0]%/*}/version.sh"
-  local dir marker build rows fresh ws msg key seen
+  local dir marker build rows fresh ws msg key seen agent why restart card actionable covered wsrows
   dir="${CEL_UPDATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/update}"; marker="$dir/orch-stale-reported"
   build="$(cel_build_sha)"
   rows="$(run_stale_orchestrators)"
   [ -n "$rows" ] || return 0
   # Keys from an older build are history: drop them so the file stays small.
   seen="$(awk -F '\t' -v b="$build" '$1 == b' "$marker" 2>/dev/null || true)"
+  actionable=""; covered=""
+  while IFS=$'\t' read -r agent ws why restart; do
+    [ -n "$agent" ] || continue
+    card="$(_steward_owner_card "$ws" "$agent" "${agent%-orch}")"
+    if [ -n "$card" ]; then
+      covered+="$agent"$'\t'"$ws"$'\n'
+      # Forget its report while covered: closing the card must make the
+      # still-stale launch actionable again, even within this same build.
+      seen="$(printf '%s\n' "$seen" | awk -F '\t' -v a="$agent" -v w="$ws" '$2 != a || $3 != w')"
+      c_warn "$agent waits on owner decision ${card%%$'\t'*} - no launch-line alert while that card is open"
+      continue
+    fi
+    actionable+="$agent"$'\t'"$ws"$'\t'"$why"$'\t'"$restart"$'\n'
+  done <<< "$rows"
   fresh=""
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     printf '%s\n' "$seen" | grep -qxF -- "$build	$key" && continue
     fresh="$fresh$key"$'\n'
-  done < <(printf '%s\n' "$rows" | cut -f1-3)
-  [ -n "$fresh" ] || return 0
-  for ws in $(printf '%s' "$fresh" | cut -f2 | sort -u); do
+  done < <(printf '%s' "$actionable" | cut -f1-3)
+  for ws in $(printf '%s\n' "$rows" | cut -f2 | sort -u); do
     [ -n "$ws" ] || continue
-    msg="$(printf '%s' "$fresh" | awk -F '\t' -v w="$ws" '$2 == w {
+    wsrows="$(printf '%s' "$actionable" | awk -F '\t' -v w="$ws" '$2 == w')"
+    if [ -z "$wsrows" ]; then
+      _steward_clear "$ws" orch-stale "stale launch differences in $ws wait on open owner decisions - no launch-line alert while those cards are open"
+      continue
+    fi
+    msg="$(printf '%s\n' "$wsrows" | awk -F '\t' '{
       printf "%s%s runs an older launch line (%s)", (n++ ? "; " : ""), $1, $3 }')"
-    msg="$msg - $(printf '%s\n' "$rows" | awk -F '\t' -v w="$ws" '$2 == w { printf "%s%s", (n++ ? "; " : ""), $4 }')"
-    c_warn "$msg"
-    _steward_raise "$ws" orch-stale status "steward: after the update to $build, $msg"
+    msg="$msg - $(printf '%s\n' "$wsrows" | awk -F '\t' '{ printf "%s%s", (n++ ? "; " : ""), $4 }')"
+    if [ -n "$(printf '%s' "$fresh" | awk -F '\t' -v w="$ws" '$2 == w')" ]; then
+      c_warn "$msg"
+      _steward_raise "$ws" orch-stale status "steward: after the update to $build, $msg"
+    elif [ -n "$(printf '%s' "$covered" | awk -F '\t' -v w="$ws" '$2 == w')" ] &&
+         [ -n "$(_inbox_open_fp "$ws" orch-stale steward root)" ]; then
+      # An aggregate already open must stop naming a newly covered agent,
+      # without silencing another agent or repeating an unchanged warning.
+      _steward_raise_on_change "$ws" orch-stale status "steward: after the update to $build, $msg"
+    fi
   done
   mkdir -p "$dir" 2>/dev/null || return 0
   { [ -z "$seen" ] || printf '%s\n' "$seen"
