@@ -65,7 +65,7 @@ test_doctor_lists_a_stale_orchestrator() {
 test_steward_reports_stale_orchestrators_once_per_build() {
   source "$CEL_ROOT/lib/steward.sh"
   orch_stub_setup omp
-  export CEL_UPDATE_DIR="$T/upd"
+  export CEL_UPDATE_DIR="$T/upd" CEL_INBOX_DIR="$T/inbox"
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
   orch_stub_proc 100 widget-orch "$T/ws" omp
   _steward_raise() { printf '%s|%s\n' "$1" "$4" >> "$T/raised"; }
@@ -81,7 +81,7 @@ test_steward_reports_stale_orchestrators_once_per_build() {
 test_steward_reports_an_orchestrator_that_goes_stale_later_in_the_build() {
   source "$CEL_ROOT/lib/steward.sh"
   orch_stub_setup omp
-  export CEL_UPDATE_DIR="$T/upd"
+  export CEL_UPDATE_DIR="$T/upd" CEL_INBOX_DIR="$T/inbox"
   printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
   _steward_raise() { printf '%s|%s\n' "$1" "$4" >> "$T/raised"; }
   _steward_stale_orchestrators >/dev/null

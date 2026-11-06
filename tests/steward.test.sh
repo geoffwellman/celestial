@@ -290,6 +290,58 @@ test_steward_owner_card_matches_names_literally() {
   rm -rf "$T"
 }
 
+_stale_launch_fixture() {
+  _orch_fixture
+  export CEL_UPDATE_DIR="$T/update"
+  run_stale_orchestrators() {
+    printf 'bundle-orch\talpha\tmodel differs\tcel run orchestrator --product bundle --workspace alpha --restart\n'
+    [ -z "${SECOND_STALE_AGENT:-}" ] || printf 'lone-orch\talpha\tmissing inbox hook\tcel run orchestrator --product lone --workspace alpha --restart\n'
+    return 0
+  }
+}
+_stale_launch_message() {
+  local id; id="$(_inbox_open_fp alpha orch-stale steward root)"
+  jq -rs --arg id "$id" '[.[] | select(.id == $id or (.kind == "update" and .ref == $id)) | .message] | last // ""' "$CEL_INBOX_DIR/alpha.jsonl"
+}
+
+test_steward_launch_alert_waits_for_owner_then_reopens_in_same_build() {
+  _stale_launch_fixture
+  _steward_stale_orchestrators >/dev/null
+  assert_contains "$(_stale_launch_message)" "bundle-orch runs an older launch line"
+  _owner_card alpha 1700000000000000001 "Keep bundle-orch on its chosen model" "bundle-orch model choice"
+  _steward_stale_orchestrators >/dev/null
+  assert_eq "$(_inbox_open_fp alpha orch-stale steward root)" ""
+  local rows; rows="$(_steward_rows)"
+  _steward_stale_orchestrators >/dev/null
+  # Losing the report cache must not bypass an open owner card.
+  rm -f "$CEL_UPDATE_DIR/orch-stale-reported"
+  _steward_stale_orchestrators >/dev/null
+  assert_eq "$(_steward_rows)" "$rows"
+  printf '{"id":"1700000000000000009","ts":"2026-11-02T00:00:00+00:00","kind":"resolution","ref":"1700000000000000001","by":"owner","to":"root","message":"answered"}\n' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  _steward_stale_orchestrators >/dev/null
+  assert_contains "$(_stale_launch_message)" "bundle-orch runs an older launch line"
+  rm -rf "$T"
+}
+
+test_steward_launch_card_does_not_hide_another_stale_agent() {
+  _stale_launch_fixture
+  SECOND_STALE_AGENT=1
+  _steward_stale_orchestrators >/dev/null
+  assert_contains "$(_stale_launch_message)" "bundle-orch runs an older launch line"
+  assert_contains "$(_stale_launch_message)" "lone-orch runs an older launch line"
+  _owner_card alpha 1700000000000000001 "Keep bundle-orch on its chosen model" "bundle-orch model choice"
+  _steward_stale_orchestrators >/dev/null
+  local message; message="$(_stale_launch_message)"
+  assert_contains "$message" "lone-orch runs an older launch line"
+  if [[ "$message" == *bundle-orch* ]]; then
+    echo "covered agent remained in the active launch warning: $message"; return 1
+  fi
+  local rows; rows="$(_steward_rows)"
+  _steward_stale_orchestrators >/dev/null
+  assert_eq "$(_steward_rows)" "$rows"
+  rm -rf "$T"
+}
+
 # --- routing ready tickets -------------------------------------------------
 # A ready ticket's prefix names a repo, the repo names a product, and that
 # product's orchestrator takes it directly; root is only the fallback.
