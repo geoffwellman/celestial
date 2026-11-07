@@ -323,6 +323,9 @@ for f in "$CEL_ROOT"/tests/*.test.sh; do
   [ -z "$FILE_FILTER" ] || [ "$(basename "$f")" = "$FILE_FILTER" ] || continue
   FILES+=("$f")
 done
+if [ -n "$FILE_FILTER" ] && [ "${#FILES[@]}" -eq 0 ]; then
+  echo "no test file named $FILE_FILTER in tests/" >&2; exit 1
+fi
 # Parallel-safe files first (their pool starts at once), serial files after.
 for i in "${!FILES[@]}"; do
   case "$SERIAL_FILES" in *" $(basename "${FILES[$i]}") "*) ;; *) ORDER+=("$i") ;; esac
