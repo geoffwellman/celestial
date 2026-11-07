@@ -106,20 +106,35 @@ calls nothing external while holding it - the budget, git, the launcher,
 herdr and the inbox are all called outside it - and JSON is written temp +
 rename. `cel team start` builds the folder aside and renames it into place,
 so a half-made team is never visible and a second start of the id fails.
+Authority is checked in `cel team` itself: start, add, retire, close and
+`cap` belong to `<product>-orch` (the lead) or the owner's shell; a
+`decision` event and the spend cap (`team.json` `spend_cap`) are the lead's
+or the owner's only, so nothing a member writes - brief.md included - can
+grant spend or authority.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
-asks `budget_admit team-member` (lib/budget.sh) BEFORE any write, so a
-refusal leaves nothing behind. Under the lock it re-checks ownership, writes
-the reserved row, the packet and a one-time token
-`launch/<alias>.token` (mode 600, random hex), then, outside it, runs `cel
+asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
+so a refusal leaves nothing behind; N counts team-member rows that are
+reserved but not yet launched in every registered workspace, which the live
+inventory cannot see. Under the lock it counts the team's non-retired rows
+against `budget.max_team_members`, so two adds to one team cannot both pass
+at the limit (two adds to different teams at once can still both pass the
+box-wide check - the window is the admission call). It then re-checks
+ownership, writes the reserved row, the packet and a one-time token
+`launch/<alias>.token` (mode 600, random hex), and outside the lock runs `cel
 run member --workspace <name> --team <f> --member <alias>`, which consumes
-the token before it launches. Exit 0 marks the row `launched`; 1 (refused,
-nothing started) retires it; anything else leaves it `reserved` and never
-relaunches. `ready` needs both `launched` and the member's own `cel team ack`,
-whichever lands second. Retirement goes through `member_retire` (lib/run.sh),
-which confirms the pane's identity; `cel team close` first checks every live
-builder's worktree for uncommitted changes or commits on no origin ref and
-refuses before retiring anyone unless `--force-keep`.
+the token before it launches. Exit 0 marks the row `launched` (retried, and
+reported as a running member to retire if it cannot be written); exit 1 is a
+refusal that may still have left a worktree, branch or pane, so
+`member_retire` clears what it can prove is ours before the row is retired;
+anything else leaves it `reserved` and never relaunches. `ready` needs both
+`launched` and the member's own `cel team ack`, whichever lands second.
+Retirement goes through `member_retire` (lib/run.sh), which confirms the
+pane's identity. Keeping a builder's worktree is decided here: `cel team
+retire` checks it for uncommitted changes or commits on no origin ref and
+passes `--keep` when it finds any; `cel team close` checks every live
+builder first, refuses before retiring anyone, and with `--force-keep`
+passes `--keep` for every builder.
 
 Builder ownership: each glob is split into `/` segments with an implicit
 trailing `**` (a path owns its subtree). Two globs overlap when some path

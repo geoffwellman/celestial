@@ -557,7 +557,11 @@ that can be built at the same time, or one that needs a specialist (device
 QA, design, data, a release check), gets a **team** that the product's agent
 leads. The lead stays the only integrator: one integration branch and PR per
 repo, reviewed by `cel run reviewer` and landed with `cel solo land` as above.
-Members are short-lived scoped agents, at most four per wave.
+Members are short-lived scoped agents, admitted against the box-wide agent
+budget that every product's agents and reviewers share - by default 8 agents
+and 4 team members in all (`cel budget` shows the counts; `cel run reviewer`
+can be refused too). Only the product's orchestrator (`<product>-orch`) or the
+owner starts and leads a team.
 
 ```
 cel team start login --product shop --brief-file brief.md      # lead only
@@ -593,8 +597,11 @@ write holds the folder's lock and JSON is replaced whole.
   team verdict <f> --repo r --head <sha> pass|changes|blocked|advisory
   --evidence <file>`. A newer `candidate.updated` makes older verdicts show
   as stale.
-- **Owner decisions** go through the lead's `cel decide ask`; members spend
-  nothing unless the lead wrote a cap into `brief.md` from one.
+- **Owner decisions** go through the lead's `cel decide ask`; only the lead
+  or the owner records a `decision` event. Members spend nothing unless the
+  lead sets the team's spend cap from one (`cel team cap <f> "<cap>"`, kept in
+  `team.json`); nothing in `brief.md`, which members can write, widens a
+  member's authority or spend.
 - **Closing** — `cel team retire <f> <alias>` closes one member's pane; `cel
   team close <f>` retires everyone and refuses while a builder's work is not
   on origin, unless `--force-keep` (which keeps those worktrees).

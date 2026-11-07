@@ -13,9 +13,10 @@ What the orchestrator is (solo.md has the detail):
   land`.
 - For a feature with two or more independent parts, or a specialist need, it
   starts a feature team (`cel team start`) and LEADS it: it is the team's
-  only integration owner - one integration branch and PR per repo - adds at
-  most four members per wave through `cel team add` (each admitted against
-  the box-wide agent budget), hands each one a scope packet, takes owner
+  only integration owner - one integration branch and PR per repo - adds
+  members through `cel team add` (each admitted against the box-wide agent
+  budget: by default 8 agents and 4 team members across every product; see
+  `cel budget`), hands each one a scope packet, sets the spend cap, takes owner
   decisions through `cel decide`, and closes the team with `cel team close`.
 
 If you were started with this file as your role, say so to the owner
