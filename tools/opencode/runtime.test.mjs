@@ -295,8 +295,8 @@ test('unknown ancestry, cycles, foreign roots/locations and changed child varian
 
 test('v2 shell/write/edit/patch inputs reach the real shared guard, including relative paths and move sources/destinations', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'cel-opencode-guard-'));
-  const consoleDir = path.join(temp, 'console');
-  const env = { ...process.env, CEL_ROOT: repo, CEL_ROLE: 'console', CEL_CONSOLE_DIR: consoleDir };
+  const coreDir = path.join(temp, 'core');
+  const env = { ...process.env, CEL_ROOT: repo, CEL_ROLE: 'core', CEL_CORE_DIR: coreDir };
   const guarded = [];
   const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async (bin, args) => {
     assert.equal(bin, 'bash'); guarded.push(args);
@@ -305,18 +305,18 @@ test('v2 shell/write/edit/patch inputs reach the real shared guard, including re
   try {
     await f.emit(created());
     for (const tool of ['write', 'edit']) await assert.rejects(f.tool(tool, { path: 'repos/protected/marker' }), /celestial guard/);
-    await assert.rejects(f.tool('shell', { command: `touch ${temp}/marker`, workdir: consoleDir }), /celestial guard/);
-    await assert.rejects(f.shell(`touch ${temp}/marker`), /celestial guard/);
-    await f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/marker` });
-    await assert.rejects(f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=11 touch ${temp}/marker` }), /celestial guard/);
+    await assert.rejects(f.tool('shell', { command: `touch ${temp}/repos/marker`, workdir: coreDir }), /celestial guard/);
+    await assert.rejects(f.shell(`touch ${temp}/repos/marker`), /celestial guard/);
+    await f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/repos/marker` });
+    await assert.rejects(f.tool('shell', { command: `CEL_GUARD_ALLOW_ONCE=11 touch ${temp}/repos/marker` }), /celestial guard/);
     for (const operation of ['Add File', 'Delete File', 'Update File']) {
       await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n  *** ${operation}: repos/protected/marker\n*** End Patch` }), /celestial guard/);
     }
-    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: ${consoleDir}/allowed\n*** Move to: repos/protected/marker\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
-    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: repos/protected/marker\n*** Move to: ${consoleDir}/allowed\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
+    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: ${coreDir}/allowed\n*** Move to: repos/protected/marker\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
+    await assert.rejects(f.tool('patch', { patchText: `*** Begin Patch\n*** Update File: repos/protected/marker\n*** Move to: ${coreDir}/allowed\n@@\n-old\n+new\n*** End Patch` }), /celestial guard/);
     await assert.rejects(f.tool('patch', { patchText: 'unclassified' }), /cannot classify/);
     await assert.rejects(f.tool('write', { filePath: 'legacy-v1-field' }), /cannot classify/);
-    await f.tool('write', { path: `${consoleDir}/allowed`, content: 'allowed' });
+    await f.tool('write', { path: `${coreDir}/allowed`, content: 'allowed' });
     assert.ok(guarded.some((args) => args.at(-1) === '/fixture/product/repos/protected/marker'));
   } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
 });

@@ -365,26 +365,6 @@ test_no_path_from_an_answer_to_a_kill() {
   assert_eq "$bad" ""
 }
 
-# --- the console column -----------------------------------------------------
-
-# The DISAGREEMENT is the signal: herdr saying `working` while the pane is
-# looping is the exact shape every real failure took, so the live column shows
-# both and agreement shows one.
-test_the_live_column_shows_the_disagreement_only() {
-  local out
-  out="$(node --input-type=module -e "
-    import { liveOf } from '$CEL_ROOT/tools/console/views.mjs';
-    process.stdout.write([
-      liveOf({ live: 'working', activity: 'looping' }),
-      liveOf({ live: 'working', activity: 'working' }),
-      liveOf({ live: 'idle', activity: 'finished' }),
-      liveOf({ live: 'idle', activity: 'crashed' }),
-      liveOf({ live: 'idle' }),
-    ].join('|'));
-  ")"
-  assert_eq "$out" 'working!loop|working|idle|idle!crash|idle'
-}
-
 # --- `why` says it in words -------------------------------------------------
 
 # The operator's question is "why is this one stuck", and "quiet for 38m" was

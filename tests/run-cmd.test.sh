@@ -570,6 +570,23 @@ test_run_console_is_an_alias_of_core() {
   assert_contains "$out" "agent start core --kind omp"
   rm -rf "${CORE%/core}"
 }
+# Top-level `cel console` is a permanent alias of `cel core`: the CLI hands
+# both the same argv on the one run path. The run library is stubbed so the
+# test sees exactly what the dispatcher passed.
+test_cel_console_dispatches_exactly_like_cel_core() {
+  local root; root="$(mktemp -d)"
+  mkdir -p "$root/bin"
+  cp "$CEL_ROOT/bin/cel" "$root/bin/cel"
+  cp -r "$CEL_ROOT/lib" "$root/lib"
+  cp "$CEL_ROOT/VERSION" "$root/" 2>/dev/null || true
+  printf 'cmd_run() { printf "%%s\\n" "$@"; }\n' > "$root/lib/run.sh"
+  local core console
+  core="$("$root/bin/cel" core --restart --model x/y --dry-run 2>&1)"
+  console="$("$root/bin/cel" console --restart --model x/y --dry-run 2>&1)"
+  assert_eq "$console" "$core"
+  assert_eq "$core" "$(printf 'core\n--restart\n--model\nx/y\n--dry-run')"
+  rm -rf "$root"
+}
 test_run_core_takes_its_model_from_the_manifest_default() {
   _core
   local out; out="$(cd /tmp && CEL_CORE_DIR="$CORE" cmd_run core --dry-run 2>/dev/null)"

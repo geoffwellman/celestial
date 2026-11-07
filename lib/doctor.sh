@@ -19,8 +19,6 @@ _CEL_DOCTOR=1
 . "${BASH_SOURCE[0]%/*}/install.sh"   # extensions_missing
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"   # _run_wsm_bin, for the layout check
-# shellcheck source=lib/console.sh
-. "${BASH_SOURCE[0]%/*}/console.sh"   # console_deps_ok, for the console check
 # shellcheck source=lib/liveness.sh
 . "${BASH_SOURCE[0]%/*}/liveness.sh"  # liveness_doctor_line
 # shellcheck source=lib/gc.sh
@@ -534,21 +532,11 @@ check_externals() {
   return 1
 }
 
-# The console is ink, so it has node_modules - and a box where they were never
-# installed has a perfectly healthy plane and no console. That is a WARNING,
-# not a failure: nothing else on the box depends on it, and a red doctor for an
-# optional UI teaches people to ignore a red doctor.
-check_console_deps() {
-  local d; d="$(console_tool_dir)"
-  c_hd "Console"
-  if console_deps_ok "$d"; then
-    c_ok "console UI deps installed (ink)"
-  else
-    c_warn "$(console_deps_hint "$d")"
-  fi
-  # WHETHER THE BOX CAN SEE WHAT ITS PANES ARE DOING, and which model
-  # answers. Never a failure: liveness is an addition to the stall timers, and
-  # a box without it watches its workers exactly as it always did.
+# WHETHER THE BOX CAN SEE WHAT ITS PANES ARE DOING, and which model answers.
+# Never a failure: liveness is an addition to the stall timers, and a box
+# without it watches its workers exactly as it always did.
+check_liveness() {
+  c_hd "Liveness"
   c_ok "$(liveness_doctor_line)"
   return 0
 }
@@ -810,7 +798,7 @@ cmd_doctor() {
     c_warn "no registry yet ($CEL_REGISTRY) - created on first cel ws new/add"
   fi
 
-  check_console_deps || fail=1
+  check_liveness || fail=1
   # A stale launch line is a warning: the orchestrator works, it is just
   # missing what the last update added. A stripped inbox hook, a shared
   # session file or overlapping agent roots are failures.
