@@ -20,6 +20,9 @@ case "$mode" in
   *) printf 'guard-classify: unknown mode %q (want command, path or read)\n' "$mode" >&2; exit 2 ;;
 esac
 role="$(guard_role_of "$cwd")"
+# Where the pane stands: a builder's bare `git push` and a relative edit path
+# are resolved against it (lib/guard.sh).
+_GUARD_CWD="$cwd"
 case "$mode" in
   command) guard_classify "$role" "$arg" ;;
   path)    guard_classify_path "$role" "$arg" ;;

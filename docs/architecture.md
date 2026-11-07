@@ -60,6 +60,23 @@ directories under its root with no liveness check. This prevents new
 collisions only; it does not repair already-relocated sessions or running
 processes, which belong to the retained-runtime lifecycle.
 
+One box-wide live agent budget (`lib/budget.sh`) admits team members and new
+reviewers: `budget_admit <kind>` counts the native inventory
+(`cel_agent_list`) by role against `budget.max_live_agents` and
+`budget.max_team_members` in the box config, then asks `boxguard_admit` for
+the memory floor; an unreadable inventory refuses. Product agents are counted
+and warned, never blocked. Team members start through one door,
+`cel team add`, which reserves the member row and writes a one-time launch
+token that `cel run member` spends before any check (the guard refuses every
+agent both `cel run member` and the token directory). The launcher admits the
+member under the same launch lock as every `cel run`, gives a builder its own
+worktree on `team/<feature>/<name>` at the recorded base, marks the process
+`CEL_ROLE=member` with `CEL_TEAM`, `CEL_TEAM_ROLE` and `CEL_TEAM_MEMBER`, and
+reports success only when the inventory shows that agent in that pane.
+`member_retire` closes a member's pane only after the pane's process proves
+that launch identity - the same `/proc/<pid>/environ` proof that attributes a
+reviewer to its workspace.
+
 Prompt policy guides agents; it is not a sandbox. Agent commands run with the
 launching user's filesystem and account privileges. Several runtime launch
 strategies pre-approve tool permissions. Only use trusted workspace content,

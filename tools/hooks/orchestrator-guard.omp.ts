@@ -1,6 +1,6 @@
 // omp / pi extension: orchestrators are read-only over repositories.
 //
-// Loaded on root and orchestrator launches only (agents.yaml guard_hook, via
+// Loaded on root, product-agent and team-member launches (agents.yaml guard_hook, via
 // cel run). Fires before every tool call; asks the plane's classifier
 // (tools/hooks/guard-classify.sh) whether this pane's role may do this, and
 // blocks with the reason when it may not. The rules live in lib/guard.sh and

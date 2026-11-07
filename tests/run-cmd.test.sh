@@ -2164,3 +2164,338 @@ test_run_solo_lane_first_turn_and_trust_only_where_they_apply() {
   ! grep -q 'cel inbox read' "$T/args" || { echo 'an omp lane got a Claude first turn'; return 1; }
   rm -rf "$T"
 }
+
+# ------------------------------------------------ the box agent budget, reviewers
+# A NEW reviewer is admitted against the box-wide budget; at the limit it is
+# refused before any checkout or pane exists.
+_roster_of() { # <n> -> a roster of n idle agents
+  jq -cn --argjson n "$1" '{result:{agents:[range($n) | {name:("a\(.)-orch"), pane_id:("w2:p\(.)"), cwd:"/elsewhere", agent_status:"idle"}]}}'
+}
+test_reviewer_launch_is_refused_at_the_box_agent_budget() {
+  _ws_pr_fixture
+  export ROSTER; ROSTER="$(_roster_of 8)"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") printf '%s\n' "$ROSTER" ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info"|"agent start") _fake_pane "$@" ;;
+      *) : ;;
+    esac
+  }
+  local out rc=0
+  out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || { echo "reviewer started over the budget: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "box agent budget: 8 live agents, the limit is 8"
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "a reviewer process started over the budget"; rm -rf "$T"; return 1; }
+  [ ! -e "$(reviewer_checkout_path widget 12)" ] || { echo "a checkout was made for a refused reviewer"; rm -rf "$T"; return 1; }
+  # under the limit the same launch is admitted
+  ROSTER="$(_roster_of 7)"; : > "$HERDR_LOG"
+  (cd "$T" && cmd_run reviewer --repo widget --pr 12) >/dev/null 2>&1
+  assert_contains "$(cat "$HERDR_LOG")" "agent start widget-pr-12-review"
+  reviewer_checkout_release widget 12
+  rm -rf "$T"
+}
+# Product agents are counted, never blocked: over the budget they start and warn.
+test_product_agent_over_the_budget_is_warned_not_blocked() {
+  _ws
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+[ "\$*" = 'agent list' ] || exit 1
+printf '%s\n' '$(_roster_of 8)'
+SH
+  local out
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>&1)"
+  assert_contains "$out" "starts anyway"
+  assert_contains "$out" "agent start widget-orch"
+  rm -rf "$T"
+}
+
+# ------------------------------------------- team members: cel run member
+# `cel run member` is cel team add's launcher. It starts nothing without the
+# one-time token cel team add writes, spends it, launches the member row's
+# exact identity and confirms the native agent before it says so.
+_team_fixture() { # <role> -> $T workspace, team "login", member $ALIAS reserved; $BASE_SHA
+  local role="${1:-builder}"
+  _ws
+  export CEL_REX_STATE="$T/rex" CEL_CONFIG_FILE="$T/config.yaml" CLAUDE_CONFIG_DIR="$T/claude"
+  export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log" CEL_MEMBER_CONFIRM_MS=300
+  mkdir -p "$T/rex" "$T/claude"; : > "$HERDR_LOG"
+  local g=(git -c user.email=t@t -c user.name=t)
+  ORIGIN="$T/origin"; mkdir -p "$ORIGIN"
+  git -C "$ORIGIN" init -q -b main
+  "${g[@]}" -C "$ORIGIN" commit -q --allow-empty -m base
+  BASE_SHA="$(git -C "$ORIGIN" rev-parse HEAD)"
+  "${g[@]}" -C "$ORIGIN" commit -q --allow-empty -m 'main moved on'
+  rm -rf "$T/repos/widget"; git clone -q "$ORIGIN" "$T/repos/widget"
+  ALIAS="widget-login-$role"; TD="$T/.cel/teams/login"
+  mkdir -p "$TD/members" "$TD/launch"
+  local branch="" wt="" base=""
+  if [ "$role" = builder ]; then branch="team/login/builder"; wt="$TD/wt/$ALIAS"; base="$BASE_SHA"; fi
+  jq -n --arg a "$ALIAS" --arg r "$role" --arg b "$branch" --arg w "$wt" --arg s "$base" \
+    '{feature:"login", product:"widget", workspace:"alpha", lead:"widget-orch", repos:["widget"], state:"open",
+      members:[{alias:$a, role:$r, focus:"backend", repo:"widget", branch:$b, worktree:$w, base_sha:$s,
+                owns:["src/**"], state:"reserved", model:"", created:"2026-11-08T00:00:00Z"}]}' > "$TD/team.json"
+  printf '# Scope packet for %s\nBuild the login backend.\n' "$ALIAS" > "$TD/members/$ALIAS.md"
+  _team_token
+  # herdr: the roster shows what `agent start` started, in the pane it was given.
+  printf '[]' > "$T/started.json"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list")
+        [ ! -f "$T/herdr-down" ] || return 1
+        jq -c '{result:{agents:.}}' "$T/started.json" ;;
+      "tab list") printf '{"result":{"tabs":[]}}' ;;
+      "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+      "pane get"|"pane process-info") _fake_pane "$@" ;;
+      "agent start")
+        _fake_pane "$@" || return 1
+        if [ -z "${TEAM_NO_SHOW:-}" ]; then
+          jq -c --arg n "$3" --arg p "$7" '. + [{name:$n, pane_id:$p, cwd:"x", agent_status:"idle"}]' \
+            "$T/started.json" > "$T/started.tmp" && mv "$T/started.tmp" "$T/started.json"
+        fi ;;
+      *) : ;;
+    esac
+  }
+}
+_team_token() { # a fresh valid token for $ALIAS
+  (umask 077; printf '%s\n' "0123456789abcdef0123456789abcdef" > "$TD/launch/$ALIAS.token")
+  chmod 600 "$TD/launch/$ALIAS.token"
+}
+_member_run() { (cd "$T" && cmd_run member --team login --member "$ALIAS") 2>&1; }
+
+test_run_member_refuses_without_a_launch_token() {
+  _team_fixture builder
+  rm -f "$TD/launch/$ALIAS.token"
+  local out rc=0
+  out="$(_member_run)" || rc=$?
+  [ "$rc" != 0 ] || { echo "a member started without a token: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "no launch token"
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "an agent started without a token"; rm -rf "$T"; return 1; }
+  [ ! -e "$TD/wt/$ALIAS" ] || { echo "a worktree was made without a token"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_run_member_refuses_an_invalid_token_and_spends_it() {
+  _team_fixture qa
+  local out rc
+  chmod 644 "$TD/launch/$ALIAS.token"
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "mode-600"
+  [ ! -e "$TD/launch/$ALIAS.token" ] || { echo "a refused token was not spent"; rm -rf "$T"; return 1; }
+  _team_token; touch -d '20 minutes ago' "$TD/launch/$ALIAS.token"
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "older than 600s"
+  (umask 077; printf 'not-a-token\n' > "$TD/launch/$ALIAS.token")
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "does not hold a token"
+  ln -s /etc/hostname "$TD/launch/$ALIAS.token"
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "not a regular file"
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "an agent started on an invalid token"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_run_member_spends_the_token_once() {
+  _team_fixture qa
+  local out rc=0
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 0
+  [ ! -e "$TD/launch/$ALIAS.token" ] || { echo "the token survived its launch"; rm -rf "$T"; return 1; }
+  ls "$TD/launch" | grep -q . && { echo "the launch dir kept a spent token: $(ls "$TD/launch")"; rm -rf "$T"; return 1; }
+  # the same call again has nothing to spend
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "no launch token"
+  rm -rf "$T"
+}
+test_run_member_builder_gets_its_worktree_at_base_sha() {
+  _team_fixture builder
+  local out rc=0 wt
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 0
+  wt="$TD/wt/$ALIAS"
+  assert_eq "$(git -C "$wt" symbolic-ref --short HEAD)" "team/login/builder"
+  assert_eq "$(git -C "$wt" rev-parse HEAD)" "$BASE_SHA"
+  [ "$BASE_SHA" != "$(git -C "$T/repos/widget" rev-parse origin/main)" ] || { echo "fixture: base equals main"; return 1; }
+  assert_contains "$(cat "$HERDR_LOG")" "tab create --workspace w1 --label team login --cwd $wt"
+  rm -rf "$T"
+}
+test_run_member_env_mailbox_and_identity_are_exact() {
+  _team_fixture builder
+  local out rc=0 sent
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 0
+  assert_eq "$(printf '%s\n' "$out" | tail -1)" "member $ALIAS pane w1:p9"
+  sent="$(grep '^pane send-text w1:p9 ' "$HERDR_LOG")"
+  local kv
+  for kv in "CEL_ROLE=member" "CEL_WORKSPACE=$T" "CEL_TEAM=login" "CEL_TEAM_ROLE=builder" \
+            "CEL_TEAM_MEMBER=$ALIAS" "CEL_INBOX_ME=$ALIAS" "CEL_INBOX_WS=alpha" "CEL_PRODUCT=widget" \
+            "CEL_ROLE_FILE=$TD/members/$ALIAS.role-member.md"; do
+    assert_contains "$sent " " $kv " || { rm -rf "$T"; return 1; }
+  done
+  assert_contains "$(cat "$HERDR_LOG")" "agent start $ALIAS --kind claude --pane w1:p9"
+  # the role is the scope packet, and no product-agent policy block rides with it
+  assert_eq "$(cat "$TD/members/$ALIAS.role-member.md")" "$(cat "$TD/members/$ALIAS.md")"
+  # a Claude member's new directory is trusted before it starts
+  assert_eq "$(jq -r --arg d "$TD/wt/$ALIAS" '.projects[$d].hasTrustDialogAccepted' "$CLAUDE_CONFIG_DIR/.claude.json")" true
+  rm -rf "$T"
+}
+test_run_member_read_only_role_stands_in_the_team_dir() {
+  _team_fixture qa
+  local rc=0
+  _member_run >/dev/null || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$(cat "$HERDR_LOG")" "tab create --workspace w1 --label team login --cwd $TD "
+  [ ! -e "$TD/wt" ] || { echo "a qa member got a worktree"; rm -rf "$T"; return 1; }
+  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_TEAM_ROLE=qa"
+  rm -rf "$T"
+}
+test_run_member_is_admitted_against_the_team_budget() {
+  _team_fixture qa
+  jq -cn '[range(4) | {name:("widget-x-qa-\(.)"), pane_id:("w1:p\(. + 1)"), cwd:"/w/.cel/teams/x", agent_status:"idle"}]' > "$T/started.json"
+  local out rc=0
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "4 team members live, the limit is 4"
+  ! grep -q "agent start" "$HERDR_LOG" || { echo "a member started over the budget"; rm -rf "$T"; return 1; }
+  # unknown inventory refuses too
+  _team_token; touch "$T/herdr-down"
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "unreadable"
+  rm -rf "$T"
+}
+test_run_member_launches_only_a_reserved_row() {
+  _team_fixture qa
+  jq '.members[0].state = "ready"' "$TD/team.json" > "$TD/t" && mv "$TD/t" "$TD/team.json"
+  local out rc=0
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "not reserved"
+  _team_token; jq '.members[0].state = "reserved" | .state = "closed"' "$TD/team.json" > "$TD/t" && mv "$TD/t" "$TD/team.json"
+  rc=0; out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "not open"
+  rm -rf "$T"
+}
+test_run_member_builder_branch_must_be_the_teams() {
+  _team_fixture builder
+  jq '.members[0].branch = "main"' "$TD/team.json" > "$TD/t" && mv "$TD/t" "$TD/team.json"
+  local out rc=0
+  out="$(_member_run)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "want team/login/<name>"
+  [ ! -e "$TD/wt/$ALIAS" ] || { echo "a worktree was made on a foreign branch"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_run_member_unconfirmed_start_is_exit_3() {
+  _team_fixture qa
+  local out rc=0
+  out="$(TEAM_NO_SHOW=1 _member_run)" || rc=$?
+  assert_eq "$rc" 3
+  assert_contains "$out" "unconfirmed"
+  rm -rf "$T"
+}
+test_run_member_dry_run_spends_nothing_and_shows_the_launch() {
+  _team_fixture builder
+  local out
+  out="$(cd "$T" && cmd_run member --team login --member "$ALIAS" --dry-run 2>&1)"
+  assert_contains "$out" "worktree add -b team/login/builder $TD/wt/$ALIAS $BASE_SHA"
+  assert_contains "$out" 'herdr tab "team login"'
+  assert_contains "$out" "CEL_TEAM_MEMBER=$ALIAS"
+  [ -e "$TD/launch/$ALIAS.token" ] || { echo "a dry run spent the token"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Runtime and profile: role_profiles.team-<role>, else role_profiles.member,
+# else the workspace default.
+test_run_member_profile_resolution() {
+  _team_fixture qa
+  local out
+  out="$(cd "$T" && cmd_run member --team login --member "$ALIAS" --dry-run 2>&1)"
+  assert_contains "$out" "--kind claude"
+  cat >> "$T/workspace.yaml" <<'YAML'
+worker_profiles:
+  om: { runtime: omp }
+role_profiles: { member: om }
+YAML
+  out="$(cd "$T" && cmd_run member --team login --member "$ALIAS" --dry-run 2>&1)"
+  assert_contains "$out" "--kind omp"
+  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  # the role's own binding beats the member-wide one
+  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/workspace.yaml"
+  printf 'role_profiles: { member: om, team-qa: cl }\nworker_profiles:\n  om: { runtime: omp }\n  cl: { runtime: claude }\n' >> "$T/workspace.yaml"
+  out="$(cd "$T" && cmd_run member --team login --member "$ALIAS" --dry-run 2>&1)"
+  assert_contains "$out" "--kind claude"
+  rm -rf "$T"
+}
+test_run_team_and_member_flags_belong_to_member_only() {
+  _ws
+  assert_fails _cmd_run_in_subshell orchestrator --repo widget --team login --dry-run
+  rm -rf "$T"
+}
+
+# ---------------------------------------------- member_retire: the exact pane
+_retire_fixture() { # $ALIAS live in w1:p9, its process carrying <env...> (@T@ = the workspace)
+  _team_fixture builder
+  jq -cn --arg a "$ALIAS" '[{name:$a, pane_id:"w1:p9", cwd:"x", agent_status:"idle"}]' > "$T/started.json"
+  export CEL_PROC_DIR="$T/proc"; mkdir -p "$CEL_PROC_DIR/777"
+  local e
+  { printf '%s\0' HERDR_PANE_ID=w1:p9; for e in "$@"; do printf '%s\0' "${e//@T@/$T}"; done; } > "$CEL_PROC_DIR/777/environ"
+  herdr() {
+    printf '%s\n' "$*" >> "$HERDR_LOG"
+    case "$1 $2" in
+      "agent list") jq -c '{result:{agents:.}}' "$T/started.json" ;;
+      "pane process-info") printf '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":4242,"foreground_process_group_id":777,"foreground_processes":[{"pid":777}]}}}' ;;
+      "pane close") printf '[]' > "$T/started.json" ;;
+      *) : ;;
+    esac
+  }
+}
+test_member_retire_closes_the_proven_pane() {
+  _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  local out rc=0
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$(cat "$HERDR_LOG")" "pane close w1:p9"
+  # already gone is not an error
+  rc=0; member_retire "$T" login "$ALIAS" >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$T"
+}
+test_member_retire_refuses_an_unproven_pane() {
+  local env
+  for env in "CEL_TEAM_MEMBER=widget-login-qa" "CEL_TEAM=other"; do
+    _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder" "$env"
+    local out rc=0
+    out="$(member_retire "$T" login "$ALIAS" 2>&1)" || rc=$?
+    assert_eq "$rc" 1 || { rm -rf "$T"; return 1; }
+    assert_contains "$out" "cannot be proven"
+    ! grep -q "pane close" "$HERDR_LOG" || { echo "closed an unproven pane ($env)"; rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
+  # a reviewer's process in that pane is not the member either
+  _retire_fixture CEL_ROLE=reviewer CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  assert_eq "$(member_retire "$T" login "$ALIAS" >/dev/null 2>&1; echo $?)" 1
+  rm -rf "$T"
+}
+test_member_retire_keeps_an_unpushed_worktree_and_removes_a_pushed_one() {
+  _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  local wt="$TD/wt/$ALIAS" out g=(git -c user.email=t@t -c user.name=t)
+  git -C "$T/repos/widget" worktree add -q -b team/login/builder "$wt" "$BASE_SHA"
+  "${g[@]}" -C "$wt" commit -q --allow-empty -m 'member work'
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)"
+  assert_contains "$out" "kept worktree $wt (team/login/builder was never pushed)"
+  [ -d "$wt" ] || { echo "an unpushed worktree was removed"; rm -rf "$T"; return 1; }
+  git -C "$wt" push -q origin team/login/builder 2>/dev/null
+  printf 'scratch\n' > "$wt/dirty.txt"
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)"
+  assert_contains "$out" "uncommitted changes"
+  rm -f "$wt/dirty.txt"
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)"
+  [ ! -e "$wt" ] || { echo "a clean pushed worktree was kept: $out"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+test_member_retire_refuses_when_the_inventory_is_unreadable() {
+  _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  herdr() { printf '%s\n' "$*" >> "$HERDR_LOG"; return 1; }
+  local out rc=0
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "unreadable"
+  rm -rf "$T"
+}

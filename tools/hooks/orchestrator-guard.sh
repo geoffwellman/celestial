@@ -28,18 +28,22 @@ tool="$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null)"
 # and covers nothing but the call it was set on.
 cwd="$(printf '%s' "$in" | jq -r '.cwd // empty' 2>/dev/null)"; [ -n "$cwd" ] || cwd="$PWD"
 role="$(guard_role_of "$cwd")"
+_GUARD_CWD="$cwd"   # a builder's bare `git push` and relative paths resolve here (lib/guard.sh)
 cmd="$(printf '%s' "$in" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)"
 
 verdict=allow
 case "$role" in
   # Panes outside the plane (a reviewer, a scratch session) are otherwise
-  # untouched; the forge API token is the one thing no agent reads.
+  # untouched; the forge API token and team launch tokens are what no agent reads.
   other)
     case "$tool" in
       Bash) case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
-            _guard_names_forge_token "$cmd" && verdict="$_GUARD_TOKEN_DENY" ;;
-      Read|Edit|Write|MultiEdit|NotebookEdit) _guard_names_forge_token "$path" && verdict="$_GUARD_TOKEN_DENY" ;;
+            _guard_names_forge_token "$cmd" && verdict="$_GUARD_TOKEN_DENY"
+            _guard_names_launch_token "$cmd" && verdict="$_GUARD_LAUNCH_TOKEN_DENY" ;;
+      Read|Edit|Write|MultiEdit|NotebookEdit)
+            _guard_names_forge_token "$path" && verdict="$_GUARD_TOKEN_DENY"
+            _guard_names_launch_token "$path" && verdict="$_GUARD_LAUNCH_TOKEN_DENY" ;;
     esac ;;
   *)
     case "$tool" in

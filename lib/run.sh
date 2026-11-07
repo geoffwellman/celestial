@@ -25,6 +25,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/run-evidence.sh"
 # shellcheck source=lib/reviewer-retirement.sh
 . "${BASH_SOURCE[0]%/*}/reviewer-retirement.sh"
+# shellcheck source=lib/budget.sh
+. "${BASH_SOURCE[0]%/*}/budget.sh"     # budget_admit: the box-wide live agent budget
 
 # PANE LABELS. The agent name is sanitised and cut to 32 characters, which
 # is unreadable in the sidebar, so every pane the plane starts also gets
@@ -379,19 +381,20 @@ _run_apply_layout() { # <layout> <ws_id> <wsdir> <fallback-pane> -> pane id
   [ -n "$pane" ] && printf '%s' "$pane" || printf '%s' "$fallback"
 }
 
-# Reviewer panes live in the CALLER's herdr view (the orchestrator runs this
-# from its own pane), in tabs labelled "PR reviewer". Panes are smart-sized:
-# each new reviewer splits the tab's current largest pane along its longer
-# visual edge. Six panes fill a tab; the seventh PR opens a fresh
-# "PR reviewer" tab and the count restarts. No new workspace: the pane opens
-# in <cwd>, the reviewer's own checkout.
+# Reviewer and team-member panes live in the CALLER's herdr view (the product
+# agent runs `cel run reviewer` / `cel team add` from its own pane), in tabs
+# with one label per kind: "PR reviewer", or "team <feature>" - one per
+# feature. Panes are smart-sized: each new pane splits the tab's current
+# largest pane along its longer visual edge. Six panes fill a tab; the seventh
+# opens a fresh tab with the same label and the count restarts. No new
+# workspace: the pane opens in <cwd>, the agent's own directory.
 _RUN_REVIEW_TAB_CAP=6
-_run_reviewer_pane() { # <cwd> -> pane id
-  local ws="${HERDR_WORKSPACE_ID:-}" cwd="$1" tab pane resp n first
-  [ -n "$ws" ] || die "cel run reviewer: not inside a herdr pane (no HERDR_WORKSPACE_ID)"
-  # newest "PR reviewer" tab: earlier ones are already full
+_run_tab_pane() { # <tab-label> <cwd> <who: reviewer|member> -> pane id
+  local label="$1" cwd="$2" who="$3" ws="${HERDR_WORKSPACE_ID:-}" tab pane resp n first
+  [ -n "$ws" ] || die "cel run $who: not inside a herdr pane (no HERDR_WORKSPACE_ID)"
+  # newest tab with the label: earlier ones are already full
   tab="$(herdr tab list --workspace "$ws" \
-         | jq -r '.result.tabs[] | select(.label == "PR reviewer") | .tab_id' | tail -1)"
+         | jq -r --arg l "$label" '.result.tabs[] | select(.label == $l) | .tab_id' | tail -1)"
   n=0
   if [ -n "$tab" ]; then
     read -r n first < <(herdr pane list --workspace "$ws" \
@@ -399,8 +402,8 @@ _run_reviewer_pane() { # <cwd> -> pane id
                               | "\(length) \(.[0].pane_id // "")"')
   fi
   if [ -z "$tab" ] || [ "$n" -ge "$_RUN_REVIEW_TAB_CAP" ]; then
-    resp="$(herdr tab create --workspace "$ws" --label "PR reviewer" --cwd "$cwd" --no-focus)" \
-      || die "cel run reviewer: tab create failed"
+    resp="$(herdr tab create --workspace "$ws" --label "$label" --cwd "$cwd" --no-focus)" \
+      || die "cel run $who: tab create failed"
     pane="$(printf '%s' "$resp" | jq -r '.result.root_pane.pane_id // empty')"
   else
     # Largest pane by area gets the split, along its longer visual edge - a
@@ -409,12 +412,12 @@ _run_reviewer_pane() { # <cwd> -> pane id
     read -r target dir < <(herdr pane layout --pane "$first" \
       | jq -r '.result.layout.panes | max_by(.rect.width * .rect.height)
                | "\(.pane_id) \(if .rect.width >= 2 * .rect.height then "right" else "down" end)"')
-    [ -n "$target" ] || die "cel run reviewer: could not read the PR reviewer tab layout"
+    [ -n "$target" ] || die "cel run $who: could not read the $label tab layout"
     resp="$(herdr pane split --pane "$target" --direction "$dir" --cwd "$cwd" --no-focus)" \
-      || die "cel run reviewer: pane split failed"
+      || die "cel run $who: pane split failed"
     pane="$(printf '%s' "$resp" | jq -r '.result.pane.pane_id // empty')"
   fi
-  [ -n "$pane" ] || die "cel run reviewer: no pane id in herdr response"
+  [ -n "$pane" ] || die "cel run $who: no pane id in herdr response"
   printf '%s' "$pane"
 }
 
@@ -731,15 +734,44 @@ _reviewers_here() { # <wsdir> <repo> -> true|false: may a workspace-less row be 
   printf true
 }
 
+# WHAT A HERDR PANE'S AGENT WAS LAUNCHED AS, proven from the process: its
+# runtime carries the launch line's env (_run_launch_env) in
+# /proc/<pid>/environ, fixed at exec. Only a pid in the pane's foreground group
+# that carries this pane's HERDR_PANE_ID and the expected CEL_ROLE counts.
+# Prints the named variables' values, tab-separated, when every such pid
+# carries all of them and they agree; nothing otherwise (no proof, or two
+# different answers).
+_run_pane_launch_env() { # <pane> <role> <VAR...> -> values<TAB>..., or nothing
+  local pane="$1" role="$2" info pid item k v line found=""; shift 2
+  local -A env
+  have herdr || return 0
+  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || return 0
+  for pid in $(printf '%s' "$info" | jq -r --arg p "$pane" \
+      '.result.process_info | select(.pane_id == $p) | .foreground_processes[]?.pid | select(type == "number")' 2>/dev/null); do
+    env=()
+    while IFS= read -r -d '' item; do
+      case "$item" in *=*) env["${item%%=*}"]="${item#*=}" ;; esac
+    done < <({ cat "${CEL_PROC_DIR:-/proc}/$pid/environ"; } 2>/dev/null)
+    [ "${env[HERDR_PANE_ID]:-}" = "$pane" ] && [ "${env[CEL_ROLE]:-}" = "$role" ] || continue
+    line=""
+    for k in "$@"; do
+      v="${env[$k]:-}"
+      [ -n "$v" ] || continue 2
+      line="$line${line:+$'\t'}$v"
+    done
+    [ -z "$found" ] || [ "$found" = "$line" ] || return 0
+    found="$line"
+  done
+  printf '%s' "$found"
+}
+
 # WHICH WORKSPACE A LIVE REVIEWER WAS LAUNCHED FOR, proven from the process,
 # never guessed from a name or a box-wide checkout path. A Rex reviewer's
-# receipt records it (validated by rex_agent_list). A Herdr reviewer's runtime
-# carries CEL_WORKSPACE in /proc/<pid>/environ, fixed at exec by the launch
-# line (_run_launch_env); the pid must be in the pane's foreground group and
-# carry this pane's HERDR_PANE_ID and CEL_ROLE=reviewer. No proof, or two
-# different answers, prints nothing.
+# receipt records it (validated by rex_agent_list); a Herdr reviewer's runtime
+# carries CEL_WORKSPACE with CEL_ROLE=reviewer (_run_pane_launch_env). No
+# proof, or two different answers, prints nothing.
 reviewer_pane_workspace() { # <agents-json> <pane> -> workspace directory, or nothing
-  local pane="$2" row info pid item envws envpane envrole found=""
+  local pane="$2" row
   row="$(printf '%s' "$1" | jq -c --arg p "$pane" \
     '[.result.agents[]? | select(.pane_id == $p)] | if length == 1 then .[0] else empty end' 2>/dev/null)" || return 0
   [ -n "$row" ] || return 0
@@ -748,23 +780,7 @@ reviewer_pane_workspace() { # <agents-json> <pane> -> workspace directory, or no
       and (.workspace | type == "string" and length > 0)) | .workspace' 2>/dev/null
     return 0
   fi
-  have herdr || return 0
-  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || return 0
-  for pid in $(printf '%s' "$info" | jq -r --arg p "$pane" \
-      '.result.process_info | select(.pane_id == $p) | .foreground_processes[]?.pid | select(type == "number")' 2>/dev/null); do
-    envws="" envpane="" envrole=""
-    while IFS= read -r -d '' item; do
-      case "$item" in
-        CEL_WORKSPACE=*) envws="${item#*=}" ;;
-        HERDR_PANE_ID=*) envpane="${item#*=}" ;;
-        CEL_ROLE=*) envrole="${item#*=}" ;;
-      esac
-    done < <({ cat "${CEL_PROC_DIR:-/proc}/$pid/environ"; } 2>/dev/null)
-    [ "$envpane" = "$pane" ] && [ "$envrole" = reviewer ] && [ -n "$envws" ] || continue
-    [ -z "$found" ] || [ "$found" = "$envws" ] || return 0
-    found="$envws"
-  done
-  printf '%s' "$found"
+  _run_pane_launch_env "$pane" reviewer CEL_WORKSPACE
 }
 
 # A LIVE REVIEWER FOUND BY NAME OR CHECKOUT IS REUSED ONLY WHEN IT IS THIS
@@ -1775,6 +1791,188 @@ _run_reviewer_catalog_model() { # <sonnet|opus> <gateway model catalog JSON>
 }
 
 
+# ── team members: the scoped-role launcher behind `cel team add` ────────────
+# A team member is a short-lived scoped agent on one feature. It is started
+# through ONE door - `cel team add`, which reserves its row in
+# <ws>/.cel/teams/<feature>/team.json, writes a one-time launch token and
+# calls `cel run member` - never by hand: the guard refuses `cel run member`
+# typed by any agent and refuses every agent a read of the tokens, and this
+# launcher starts nothing without a token it can spend.
+_RUN_TEAM_FEATURE_RE='^[a-z0-9][a-z0-9-]{1,40}$'
+_RUN_TEAM_ROLES=' builder product design qa platform release analyst '
+
+run_team_dir() { printf '%s/.cel/teams/%s' "$1" "$2"; }   # <wsdir> <feature>
+
+# THE TOKEN IS SPENT BEFORE IT IS CHECKED. The rename is atomic, so of two
+# launches racing for one token exactly one gets it, and a token that then
+# fails a check is gone too: every attempt costs cel team add a fresh one.
+# Valid: a regular file (not a link) owned by this user, mode 600, one line of
+# 32-128 lowercase hex, written within CEL_TEAM_TOKEN_MAX_AGE seconds (600).
+_run_member_token_spend() { # <team-dir> <alias>; dies unless a valid token was spent
+  local f="$1/launch/$2.token" spent owner mode mtime tok="" age max="${CEL_TEAM_TOKEN_MAX_AGE:-600}"
+  local why="members are started by cel team add only, which writes it"
+  [ -e "$f" ] || [ -L "$f" ] || die "cel run member: no launch token for $2 - $why"
+  [ ! -L "$f" ] && [ -f "$f" ] || die "cel run member: the launch token for $2 is not a regular file - refused; $why"
+  spent="$f.spent.$BASHPID"
+  mv -fT -- "$f" "$spent" 2>/dev/null \
+    || die "cel run member: the launch token for $2 was taken by another launch - nothing started"
+  read -r owner mode mtime < <(stat -c '%u %a %Y' -- "$spent" 2>/dev/null) || true
+  IFS= read -r tok < "$spent" || true
+  rm -f -- "$spent"
+  [ "${owner:-}" = "$(id -u)" ] && [ "${mode:-}" = 600 ] \
+    || die "cel run member: the launch token for $2 is not this user's mode-600 file (spent, nothing started) - $why"
+  [[ "$tok" =~ ^[0-9a-f]{32,128}$ ]] \
+    || die "cel run member: the launch token for $2 does not hold a token (spent, nothing started) - $why"
+  age=$(( EPOCHSECONDS - ${mtime:-0} ))
+  [ "$age" -ge -5 ] && [ "$age" -le "$max" ] \
+    || die "cel run member: the launch token for $2 is ${age}s old, older than ${max}s (spent, nothing started) - cel team add writes a fresh one per launch"
+}
+
+# The member row by alias, from a team that is open. Sets MEMBER_* in the
+# caller: PRODUCT, ROLE, FOCUS, REPO, BRANCH, WT, BASE, MODEL, DIR.
+_run_member_load() { # <wsdir> <feature> <alias>; dies on anything but one valid reserved row
+  local wsdir="$1" feature="$2" alias="$3" dir tj row
+  dir="$(run_team_dir "$wsdir" "$feature")"
+  tj="$(jq -ce --arg f "$feature" 'select(type == "object" and .feature == $f and .state == "open"
+          and (.members | type == "array") and (.product | type == "string" and length > 0))' "$dir/team.json" 2>/dev/null)" \
+    || die "cel run member: $dir/team.json is missing, does not parse, names another feature or is not open"
+  row="$(printf '%s' "$tj" | jq -c --arg a "$alias" '[.members[] | select(.alias == $a)] | if length == 1 then .[0] else empty end')"
+  [ -n "$row" ] || die "cel run member: team $feature has no single member row for $alias"
+  MEMBER_DIR="$dir"
+  MEMBER_PRODUCT="$(printf '%s' "$tj" | jq -r .product)"
+  { ws_product_names "$wsdir"; ws_repo_names "$wsdir"; } | grep -qxF -- "$MEMBER_PRODUCT" \
+    || die "cel run member: team $feature names product '$MEMBER_PRODUCT', which workspace '$(ws_name "$wsdir")' does not have"
+  IFS=$'\t' read -r MEMBER_ROLE MEMBER_FOCUS MEMBER_REPO MEMBER_BRANCH MEMBER_WT MEMBER_BASE MEMBER_MODEL < <(
+    printf '%s' "$row" | jq -r '[.role, .focus, .repo, .branch, .worktree, .base_sha, .model]
+      | map(if type == "string" and length > 0 then . else "-" end) | @tsv')
+  [ "$(printf '%s' "$row" | jq -r '.state // ""')" = reserved ] \
+    || die "cel run member: $alias is $(printf '%s' "$row" | jq -r '.state // "stateless"'), not reserved - cel team add reserves a row before it launches one"
+  local v
+  for v in MEMBER_ROLE MEMBER_FOCUS MEMBER_REPO MEMBER_BRANCH MEMBER_WT MEMBER_BASE MEMBER_MODEL; do
+    [ "${!v}" != - ] || printf -v "$v" '%s' ""
+  done
+  case "$_RUN_TEAM_ROLES" in *" $MEMBER_ROLE "*) ;; *) die "cel run member: $alias has role '${MEMBER_ROLE:-none}' - want one of:$_RUN_TEAM_ROLES" ;; esac
+  [ -f "$dir/members/$alias.md" ] \
+    || die "cel run member: no scope packet $dir/members/$alias.md - a member is launched with its task, never into an empty pane"
+  if [ -n "$MEMBER_REPO" ]; then
+    ws_repo_names "$wsdir" | grep -qxF -- "$MEMBER_REPO" \
+      || die "cel run member: $alias names repo '$MEMBER_REPO', which this workspace does not have"
+  fi
+  [ "$MEMBER_ROLE" = builder ] || return 0
+  # A builder writes ONE branch, team/<feature>/<name>, in ONE worktree under
+  # the team directory, from the head the lead recorded.
+  [ -n "$MEMBER_REPO" ] || die "cel run member: builder $alias names no repo"
+  [[ "$MEMBER_BRANCH" =~ ^team/"$feature"/[A-Za-z0-9._-]+$ ]] && git check-ref-format --branch "$MEMBER_BRANCH" >/dev/null 2>&1 \
+    || die "cel run member: builder $alias has branch '$MEMBER_BRANCH' - want team/$feature/<name>"
+  [ "$MEMBER_WT" = "$dir/wt/$alias" ] \
+    || die "cel run member: builder $alias has worktree '$MEMBER_WT' - want $dir/wt/$alias"
+  [[ "$MEMBER_BASE" =~ ^[0-9a-f]{40}$ ]] \
+    || die "cel run member: builder $alias has base_sha '$MEMBER_BASE' - want the lead's 40-hex integration head"
+}
+
+# The builder's worktree: a new branch at base_sha. An existing worktree is
+# reused only when it is already on that branch (a lead relaunching a member
+# whose start was not confirmed); anything else there is refused.
+_run_member_worktree() { # <repodir> <worktree> <branch> <base> <dry>
+  local repodir="$1" wt="$2" branch="$3" base="$4" dry="$5" on
+  if [ "$dry" = 1 ]; then
+    printf 'git -C %s worktree add -b %s %s %s\n' "$repodir" "$branch" "$wt" "$base"
+    return 0
+  fi
+  if [ -e "$wt" ]; then
+    on="$(git -C "$wt" symbolic-ref -q --short HEAD 2>/dev/null)" || on=""
+    [ "$on" = "$branch" ] && [ "$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)" = "$wt" ] \
+      || die "cel run member: $wt exists and is not a worktree on $branch - nothing started"
+    c_ok "reusing the worktree $wt on $branch"
+    return 0
+  fi
+  git -C "$repodir" show-ref --verify -q "refs/heads/$branch" \
+    && die "cel run member: branch $branch already exists in $repodir without its worktree - nothing started"
+  git -C "$repodir" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$repodir" fetch -q origin 2>/dev/null || true
+  git -C "$repodir" cat-file -e "$base^{commit}" 2>/dev/null \
+    || die "cel run member: base $base is not in $repodir (fetched origin) - push the integration head first"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$repodir" worktree add -q -b "$branch" "$wt" "$base" >/dev/null 2>&1 \
+    || die "cel run member: git worktree add -b $branch $wt $base failed in $repodir"
+}
+
+# THE EXACT NATIVE AGENT IS UP: the inventory shows exactly one agent of that
+# name, in the pane it was started in. 1 = not seen within the window.
+_run_member_confirm() { # <name> <pane>
+  local name="$1" pane="$2" total="${CEL_MEMBER_CONFIRM_MS:-15000}" poll="${CEL_PANE_READY_POLL_MS:-250}" t0 roster
+  t0=$((${EPOCHREALTIME/./} / 1000))
+  while :; do
+    if roster="$(cel_agent_list 2>/dev/null)" \
+       && [ "$(printf '%s' "$roster" | jq -r --arg n "$name" --arg p "$pane" \
+            '[.result.agents[]? | select(.name == $n)] | if length == 1 and .[0].pane_id == $p then "yes" else "no" end' 2>/dev/null)" = yes ]; then
+      return 0
+    fi
+    [ $(( ${EPOCHREALTIME/./} / 1000 - t0 )) -lt "$total" ] || return 1
+    _run_ms_sleep "$poll"
+  done
+}
+
+# RETIRE ONE MEMBER: close its exact pane, after proving the pane's agent IS
+# that member - the inventory names exactly one agent with the alias, and the
+# process in that pane carries the launch's CEL_ROLE=member, CEL_WORKSPACE,
+# CEL_TEAM and CEL_TEAM_MEMBER (_run_pane_launch_env, the proof a reviewer's
+# workspace is read by). A builder's worktree is removed only when it is clean
+# and its branch is pushed; otherwise it is kept and said so on stdout.
+# team.json is the caller's (cel team retire): this never touches it.
+# 0 = closed, or already gone. 1 = refused, nothing closed, reason on stderr.
+member_retire() { # <wsdir> <feature> <alias>
+  local wsdir="${1:-}" feature="${2:-}" alias="${3:-}" dir roster rows n pane backend proof pws pteam palias
+  _mr_refuse() { printf 'member_retire: %s - nothing closed\n' "$1" >&2; return 1; }
+  [[ "$feature" =~ $_RUN_TEAM_FEATURE_RE ]] || { _mr_refuse "feature '$feature' is not a feature id"; return 1; }
+  [ -n "$alias" ] && [ "$(cel_alias_norm "$alias")" = "$alias" ] || { _mr_refuse "'$alias' is not an agent alias"; return 1; }
+  dir="$(run_team_dir "$wsdir" "$feature")"
+  [ -d "$dir" ] || { _mr_refuse "no team directory $dir"; return 1; }
+  roster="$(cel_agent_list 2>/dev/null)" && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+    || { _mr_refuse "the live agent inventory is unreadable, so which pane is $alias is unknown"; return 1; }
+  rows="$(printf '%s' "$roster" | jq -c --arg a "$alias" '[.result.agents[] | select(.name == $a)]')"
+  n="$(printf '%s' "$rows" | jq length)"
+  case "$n" in
+    0) c_ok "$alias is not live - no pane to close" ;;
+    1)
+      IFS=$'\t' read -r pane backend < <(printf '%s' "$rows" | jq -r '.[0] | [(.pane_id // ""), (.backend // "herdr")] | @tsv')
+      [ -n "$pane" ] || { _mr_refuse "the live $alias has no pane id"; return 1; }
+      { [ "$backend" != rex ] && [[ "$pane" != rex/* ]]; } \
+        || { _mr_refuse "$alias runs in Rex, and cel run member starts members in herdr only - not one of ours"; return 1; }
+      proof="$(_run_pane_launch_env "$pane" member CEL_WORKSPACE CEL_TEAM CEL_TEAM_MEMBER)"
+      IFS=$'\t' read -r pws pteam palias <<< "$proof"
+      [ -n "$proof" ] && { [ "$pws" = "$wsdir" ] || [ "$pws" -ef "$wsdir" ]; } && [ "$pteam" = "$feature" ] && [ "$palias" = "$alias" ] \
+        || { _mr_refuse "the agent named $alias in pane $pane cannot be proven to be member $alias of team $feature in $wsdir"; return 1; }
+      herdr pane close "$pane" >/dev/null 2>&1 || { _mr_refuse "herdr could not close pane $pane"; return 1; }
+      c_ok "closed $alias (pane $pane)" ;;
+    *) _mr_refuse "$n live agents are named $alias - which one is the member is unknown"; return 1 ;;
+  esac
+  _run_member_worktree_retire "$wsdir" "$dir" "$alias"
+  return 0
+}
+
+_run_member_worktree_retire() { # <wsdir> <team-dir> <alias>
+  local wsdir="$1" dir="$2" alias="$3" row role repo branch wt dirty ahead
+  row="$(jq -c --arg a "$alias" '[.members[]? | select(.alias == $a)] | if length == 1 then .[0] else empty end' "$dir/team.json" 2>/dev/null)" || row=""
+  [ -n "$row" ] || return 0
+  IFS=$'\t' read -r role repo branch < <(printf '%s' "$row" | jq -r '[(.role // "-"), (.repo // "-"), (.branch // "-")] | @tsv')
+  wt="$dir/wt/$alias"
+  [ "$role" = builder ] && [ -d "$wt" ] || return 0
+  if ! dirty="$(git -C "$wt" status --porcelain 2>/dev/null)"; then
+    printf 'kept worktree %s (its state cannot be read)\n' "$wt"; return 0
+  fi
+  if [ -n "$dirty" ]; then printf 'kept worktree %s (uncommitted changes)\n' "$wt"; return 0; fi
+  if ! git -C "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+    printf 'kept worktree %s (%s was never pushed)\n' "$wt" "$branch"; return 0
+  fi
+  ahead="$(git -C "$wt" rev-list --count "refs/remotes/origin/$branch..HEAD" 2>/dev/null)" || ahead=""
+  if [ "$ahead" != 0 ]; then printf 'kept worktree %s (%s commit(s) not pushed)\n' "$wt" "${ahead:-unknown}"; return 0; fi
+  if git -C "$wsdir/repos/$repo" worktree remove "$wt" >/dev/null 2>&1; then
+    c_ok "removed worktree $wt ($branch is pushed)"
+  else
+    printf 'kept worktree %s (git worktree remove refused)\n' "$wt"
+  fi
+}
+
 # One admission boundary for both terminal hosts. The lock spans the final
 # roster check and launch, so two concurrent Herdr/Rex starts cannot both
 # observe the product absent. A subshell owns the descriptor: every return
@@ -1854,10 +2052,14 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   local profile="" model_opt="" thinking_opt="" remember_model_pid="" handoff=""
   local CEL_OPENCODE_CONFIG_FILE="" CEL_OPENCODE_AGENT=""
   local session_backend="${CEL_SESSION_BACKEND:-}" backend_opt=""
+  local team="" member="" MEMBER_DIR="" MEMBER_PRODUCT="" MEMBER_ROLE="" MEMBER_FOCUS=""
+  local MEMBER_REPO="" MEMBER_BRANCH="" MEMBER_WT="" MEMBER_BASE="" MEMBER_MODEL=""
 
   if [ $# -gt 0 ]; then
     case "$1" in
       root|orchestrator|reviewer) role="$1"; shift ;;
+      # cel team add's launcher; see _run_member_token_spend.
+      member) role=member; shift ;;
       # Retired with fan-out; refused for one release so a habit gets an answer.
       worker|scout|spike) die "cel run $1: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)" ;;
       # `console` is core's old name and stays an alias of it.
@@ -1888,6 +2090,8 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       --pane)      pane_opt="$2"; restart=1; shift 2 ;;
       --lane)      lane="$2"; shift 2 ;;
       --remember-current-model) remember_model_pid="$2"; shift 2 ;;
+      --team)    team="$2"; shift 2 ;;
+      --member)  member="$2"; shift 2 ;;
       --handoff) handoff="$2"; shift 2 ;;
       *) die "cel run: unknown argument '$1'" ;;
     esac
@@ -1934,6 +2138,26 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     case "$session_backend" in herdr|rex) ;; *) die 'workspace session_backend must be herdr or rex' ;; esac
   fi
 
+  # A TEAM MEMBER comes from cel team add only: its token first (spent even
+  # when what follows refuses), then its reserved row in team.json, which names
+  # the product, the repo and - for a builder - branch, worktree and base. A
+  # dry run previews and spends nothing. Members run in herdr: they live in
+  # their feature's tab.
+  if [ "$role" = member ]; then
+    [[ "$team" =~ $_RUN_TEAM_FEATURE_RE ]] \
+      || die "cel run member: --team wants a feature id ([a-z0-9][a-z0-9-]{1,40}), got '$team'"
+    [ -n "$member" ] && [ "$(cel_alias_norm "$member")" = "$member" ] \
+      || die "cel run member: --member wants the alias cel team add gave the member, got '$member'"
+    [ -z "$repo$product$pr$lane$pane_opt$handoff$profile$model_opt$thinking_opt$backend_opt" ] && [ "$force" = 0 ] \
+      || die "cel run member: everything but --workspace, --team and --member comes from the member's row in team.json"
+    [ "$dry_run" = 1 ] || _run_member_token_spend "$(run_team_dir "$wsdir" "$team")" "$member"
+    _run_member_load "$wsdir" "$team" "$member"
+    repo="$MEMBER_REPO"; product="$MEMBER_PRODUCT"; model_opt="$MEMBER_MODEL"
+    session_backend=herdr
+  elif [ -n "$team$member" ]; then
+    die "cel run: --team and --member belong to cel run member (cel team add's launcher)"
+  fi
+
   # FAIL CLOSED ON IDENTITY. A pane whose declared GitHub account
   # cannot produce a token would act as whichever account is active - the
   # exact mistake the github: block exists to prevent. Dry runs too: a
@@ -1961,7 +2185,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   [ -z "$lane" ] || [ "$role" = orchestrator ] \
     || die "cel run: --lane names a solo product's extra agent (cel run solo --product <p> --lane <name>)"
   # --product is an orchestrator's flag; every other role works in a checkout.
-  [ "$role" = "orchestrator" ] || [ -n "$repo" ] || [ "$role" = "root" ] \
+  [ "$role" = "orchestrator" ] || [ -n "$repo" ] || [ "$role" = "root" ] || [ "$role" = member ] \
     || die "cel run: --repo is required for $role (--product names a product, which has no checkout of its own)"
 
   local tag="${role:-direct}" alias_name cwd runtime rolefile="" bind="$repo"
@@ -2086,6 +2310,11 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         c_ok "reviewer for $repo#$pr is already running as $lname in pane $lpane (found by its checkout) - reusing it"
         return 0
       fi
+      # A NEW REVIEWER IS ADMITTED against the box agent budget; reusing a
+      # live one above never is - it adds nothing to the box.
+      local budget_why
+      budget_why="$(budget_admit reviewer "$reviewer_roster")" \
+        || die "cel run reviewer: $budget_why - no checkout changed"
       # AND THE TREE IT READS IS THE PR'S, not this directory's. A dry run
       # asks the forge nothing and creates nothing: it is a preview of a launch,
       # and a preview that fetches is a side effect.
@@ -2104,6 +2333,26 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         cwd="$review_path"
       fi
       ;;
+    member)
+      alias_name="$member"
+      bind="$product"
+      runtime="$(ws_runtime "$wsdir" orchestrator)"
+      local member_roster budget_why
+      member_roster="$(cel_agent_list 2>/dev/null)" \
+        && printf '%s' "$member_roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
+        || die "cel run member: the live agent inventory is unreadable - nothing started (fail closed)"
+      printf '%s' "$member_roster" | jq -e --arg n "$member" '[.result.agents[] | select(.name == $n)] | length == 0' >/dev/null \
+        || die "cel run member: an agent named $member is already live - nothing started"
+      budget_why="$(budget_admit team-member "$member_roster")" || die "cel run member: $budget_why"
+      if [ "$MEMBER_ROLE" = builder ]; then
+        cwd="$MEMBER_WT"
+        _run_member_worktree "$wsdir/repos/$repo" "$MEMBER_WT" "$MEMBER_BRANCH" "$MEMBER_BASE" "$dry_run"
+      else
+        # Every other role reads: it stands in the team directory, the one
+        # place the guard lets it write.
+        cwd="$MEMBER_DIR"
+      fi
+      ;;
   esac
   # What the launched process is told it is (CEL_ROLE, read by the guard).
   # Plumbing keeps `$tag` (orchestrator): the role FILE must keep ending in
@@ -2116,6 +2365,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
     root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
     orchestrator) label="$(pane_label solo "$product${lane:+/$lane}")" ;;
     reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
+    member)       label="$(_pane_label_cap "$member · $MEMBER_ROLE${MEMBER_FOCUS:+/$MEMBER_FOCUS}")" ;;
   esac
 
   # ONE ORCHESTRATOR PER PRODUCT, AND THE DUPLICATE IS REFUSED HERE. This is
@@ -2136,6 +2386,13 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   Name it and adopt it:  cel ws up $(ws_name "$wsdir")
   Or say you mean it:    cel run orchestrator --product ${product:-$repo} --force"
     fi
+  fi
+
+  # PRODUCT AGENTS ARE COUNTED, NEVER BLOCKED: over the box agent budget the
+  # product's own agent (or root) still starts, and the launch says so.
+  if { [ "$role" = orchestrator ] || [ "$role" = root ]; } && [ "$restart" -eq 0 ] && [ -z "$remember_model_pid" ]; then
+    local budget_note
+    budget_note="$(budget_admit product)" || c_warn "cel run: $budget_note"
   fi
 
   # Model and reasoning level, resolved before the role body is rendered
@@ -2172,6 +2429,11 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   fi
   if [ -z "$profile" ] && [ "$solo" -eq 1 ]; then
     profile="$(role_profile_for "$wsdir" solo "$bind")"
+  fi
+  # A team member: role_profiles.team-<role>, else role_profiles.member (the
+  # line below), else the workspace default - no runtime is hard-coded.
+  if [ -z "$profile" ] && [ "$role" = member ]; then
+    profile="$(role_profile_for "$wsdir" "team-$MEMBER_ROLE" "$bind")"
   fi
   [ -n "$profile" ] || profile="$(role_profile_for "$wsdir" "$tag" "$bind")"
 
@@ -2254,7 +2516,12 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   fi
 
   local RUN_BODY
-  if [ -n "$rolefile" ]; then
+  if [ "$role" = member ]; then
+    # The scope packet IS a member's role. No workspace policy block: that
+    # block hands a product agent's authority (open PRs, land) to its reader.
+    RUN_BODY="$(cat -- "$MEMBER_DIR/members/$member.md")" \
+      || die "cel run member: cannot read the scope packet for $member"
+  elif [ -n "$rolefile" ]; then
     RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}")"
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
@@ -2279,6 +2546,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   # brief. The name still ENDS in role-reviewer.md: lib/gc.sh tells a
   # long-lived agent from a stray one by that substring.
   [ "$role" = "reviewer" ] && bodyfile="$wsdir/.cel/reviews/pr-$pr/role-reviewer.md"
+  [ "$role" = member ] && bodyfile="$MEMBER_DIR/members/$member.role-member.md"
   if [ "$runtime" = opencode ] && [ "${PROFILE_VIA:-}" = gateway ]; then
     # Do not overwrite another implicit product's shared role file.
     bodyfile="$wsdir/.cel/opencode/$agent_name/role-$tag.md"
@@ -2302,13 +2570,14 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     AGENT_ARGS+=(--prompt "Read the complete migration handoff at $handoff before acting. This is a NEW OpenCode-native session, not a native resume of the archived OMP history. Preserve the model, account route, approvals, data and dirty work in that handoff. Never dump environments, credentials, resolved provider configs or full debug/config responses: use explicit non-secret identity allowlists only. Acknowledge intake through cel inbox, then wait for core to release the migration hold.")
   fi
 
-  # THE GUARD HOOK. Root and the product agents get the runtime's guard hook,
-  # so a refused command is refused at the tool call (lib/guard.sh: root is
-  # read-only over repositories, a solo agent may not merge by hand or start
-  # other agents); a reviewer only reads. Enforced here, not requested in the
-  # role text: a prompt is not a guard.
+  # THE GUARD HOOK. Root, the product agents and team members get the
+  # runtime's guard hook, so a refused command is refused at the tool call
+  # (lib/guard.sh: root is read-only over repositories, a solo agent may not
+  # merge by hand or start other agents, a member stays inside its team's
+  # scope); a reviewer only reads. Enforced here, not requested in the role
+  # text: a prompt is not a guard.
   case "$role" in
-    root|orchestrator)
+    root|orchestrator|member)
       local gflag gfile
       gflag="$(agent_guard_hook "$runtime" flag)"; gfile="$(agent_guard_hook "$runtime" file)"
       if [ -n "$gflag" ] && [ -n "$gfile" ]; then
@@ -2340,6 +2609,10 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # Pane alias is the reader identity, passed explicitly so delivery never
     # depends on the pane's cwd.
     reviewer) inbox_me="$agent_name" ;;
+    # A team member: its alias is its mailbox, and the guard reads its team
+    # and role from these.
+    member) inbox_me="$agent_name"
+      LAUNCH_ENV_EXTRA=("CEL_PRODUCT=$product" "CEL_TEAM=$team" "CEL_TEAM_ROLE=$MEMBER_ROLE" "CEL_TEAM_MEMBER=$agent_name") ;;
   esac
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
@@ -2366,6 +2639,18 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       mkdir -p "$cwd"
       _run_claude_trust_dir "$cwd" \
         || die "cel run solo --lane: could not record Claude Code's folder trust for $cwd in $(_run_claude_config_file) (its lock $(_run_claude_config_file).lock is held, or the file is not a JSON object) - nothing was launched; re-run once Claude Code has finished writing it"
+    fi
+  fi
+  # A Claude member too: its directory is new to Claude Code, and its first
+  # turn says to acknowledge and start (the scope packet is its role). Other
+  # runtimes' inbox extensions wake an idle session on mail.
+  if [ "$role" = member ] && [ "$runtime" = claude ]; then
+    AGENT_ARGS+=("You have just started as $agent_name, $MEMBER_ROLE on team $team. Your role above is your scope packet and task. Run cel team ack $team now, then start on the task; mail already waiting in your inbox is attached to this message.")
+    if [ "$dry_run" -eq 1 ]; then
+      printf 'set projects[%s].hasTrustDialogAccepted in %s\n' "$cwd" "$(_run_claude_config_file)"
+    else
+      _run_claude_trust_dir "$cwd" \
+        || die "cel run member: could not record Claude Code's folder trust for $cwd in $(_run_claude_config_file) - nothing was launched"
     fi
   fi
 
@@ -2414,6 +2699,32 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     return 0
   fi
 
+  # A team member joins its feature's tab ("team <feature>") in the caller's -
+  # the lead's - view, and is reported up only once the inventory shows that
+  # exact agent in that pane. Exit 3: started, not confirmed - the caller
+  # keeps the member reserved and never relaunches it blindly.
+  if [ "$role" = member ]; then
+    if [ "$dry_run" -eq 1 ]; then
+      printf 'herdr tab "team %s": split its largest pane, or a new tab per %s panes\n' "$team" "$_RUN_REVIEW_TAB_CAP"
+      printf 'herdr pane send-text <pane> %s\n' "$dry_envprefix"
+      printf 'herdr agent start %s --kind %s --pane <pane> -- %s\n' \
+        "$agent_name" "$runtime" "$(_run_dry_agent_args)"
+      return 0
+    fi
+    have herdr || die "cel run: herdr is not on PATH"
+    have jq    || die "cel run: jq is not on PATH"
+    local member_pane; member_pane="$(_run_tab_pane "team $team" "$cwd" member)"
+    pane_label_set "$member_pane" "$label"
+    _run_mark_launch "$member_pane" "$envprefix" "$prefix_required"
+    _run_agent_start "$member_pane" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
+    if ! _run_member_confirm "$agent_name" "$member_pane"; then
+      c_err "cel run member: $agent_name was started in pane $member_pane but the agent inventory does not show it there - its launch is unconfirmed; look at the pane before anything relaunches it"
+      return 3
+    fi
+    printf 'member %s pane %s\n' "$agent_name" "$member_pane"
+    return 0
+  fi
+
   # Reviewer panes join the caller's own view instead of creating one.
   if [ "$role" = "reviewer" ]; then
     if [ "$dry_run" -eq 1 ]; then
@@ -2426,7 +2737,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     fi
     have herdr || die "cel run: herdr is not on PATH"
     have jq    || die "cel run: jq is not on PATH"
-    local pane_id; pane_id="$(_run_reviewer_pane "$cwd")"
+    local pane_id; pane_id="$(_run_tab_pane "PR reviewer" "$cwd" reviewer)"
     pane_label_set "$pane_id" "$label"
     _run_mark_launch "$pane_id" "$envprefix" "$prefix_required"
     _run_agent_start "$pane_id" "$agent_name" "$runtime" "${AGENT_ARGS[@]}"
