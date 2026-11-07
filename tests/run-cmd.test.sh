@@ -1056,6 +1056,79 @@ test_legacy_reviewer_rows_are_keyed_by_the_workspace_they_were_cut_from() {
   rm -rf "$T"
 }
 
+# A row with no workspace and no repodir (one `cel gc` adopted from the
+# roster, say) when TWO registered workspaces hold the repo is neither's: it
+# is not found by either, and recording the key in one never deletes it.
+test_workspace_less_reviewer_row_is_nobodys_while_two_workspaces_have_the_repo() {
+  _ws; _reviewers_fixture
+  local b="$T/b"; mkdir -p "$b/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml"
+  registry_add alpha "$T" ""; registry_add beta "$b" ""
+  printf '%s\n' '[{"repo":"widget","pr":12,"pane":"wA:p1","agent":"widget-pr-12-review"}]' > "$CEL_REVIEWERS_STATE"
+  assert_fails reviewers_find "$T" widget 12 || { rm -rf "$T"; return 1; }
+  assert_fails reviewers_find "$b" widget 12 || { rm -rf "$T"; return 1; }
+  reviewers_record "$b" widget 12 wB:p1 widget-pr-12-review
+  assert_eq "$(reviewers_rows | jq -c '[.[] | .pane] | sort')" '["wA:p1","wB:p1"]' || { rm -rf "$T"; return 1; }
+  reviewers_drop "$T" widget 12
+  assert_eq "$(reviewers_rows | jq -c '[.[] | .pane] | sort')" '["wA:p1","wB:p1"]'
+  rm -rf "$T"
+}
+
+# A corrupt registry rebuilt by `cel gc` keeps each live reviewer's
+# workspace when its process proves it (CEL_WORKSPACE in the environ of the
+# pane's foreground process). Workspace B, holding the same repo and asking
+# for the same PR, is refused - it neither reuses nor re-records A's
+# reviewer. Unproven, the rebuilt row is nobody's and B is refused all the same.
+_reviewers_two_ws_rebuild() { # <proven 0|1> -> T (workspace A), RW_B (workspace B)
+  _ws_review; _reviewers_fixture
+  . "$CEL_ROOT/lib/gc.sh"
+  RW_B="$(mktemp -d)"; cp "$T/workspace.yaml" "$RW_B/"; mkdir -p "$RW_B/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_REVIEW_DIR="$T/reviews" CEL_PROC_DIR="$T/proc"
+  registry_add alpha "$T" ""; registry_add beta "$RW_B" ""
+  local co="$T/reviews/widget-pr-12"; mkdir -p "$co" "$T/proc/4242"
+  printf 'CEL_ROLE=reviewer\0CEL_WORKSPACE=%s\0HERDR_PANE_ID=wA:p1\0' "$T" > "$T/proc/4242/environ"
+  local info='{}'
+  [ "$1" = 0 ] || info='{"result":{"process_info":{"pane_id":"wA:p1","foreground_processes":[{"pid":4242}]}}}'
+  cat > "$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[{"name":"widget-pr-12-review","agent_status":"idle","pane_id":"wA:p1","cwd":"$co"}]}}' ;;
+  "pane process-info") printf '%s\n' '$info' ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  gh() { return 1; }
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  _gc_reviewers 0 "$(cel_agent_list)" >/dev/null 2>&1
+}
+
+test_gc_rebuild_keeps_a_proven_workspace_and_another_workspace_cannot_take_the_reviewer() {
+  _reviewers_two_ws_rebuild 1
+  local out rc=0 rows
+  rows="$(reviewers_rows)"
+  assert_eq "$(printf '%s' "$rows" | jq -c '[.[] | [.pane, .workspace]]')" "$(jq -nc --arg w "$T" '[["wA:p1", $w]]')" \
+    || { rm -rf "$T" "$RW_B"; return 1; }
+  out="$(cd "$RW_B" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'workspace B took over A'"'"'s reviewer: %s\n' "$out" >&2; rm -rf "$T" "$RW_B"; return 1; }
+  assert_contains "$out" "belongs to workspace $T" || { rm -rf "$T" "$RW_B"; return 1; }
+  assert_eq "$(reviewers_rows)" "$rows"
+  rm -rf "$T" "$RW_B"
+}
+
+test_gc_rebuild_without_proof_leaves_a_row_another_workspace_cannot_take() {
+  _reviewers_two_ws_rebuild 0
+  local out rc=0 rows
+  rows="$(reviewers_rows)"
+  assert_eq "$(printf '%s' "$rows" | jq -c '[.[] | [.pane, (.workspace // "")]]')" '[["wA:p1",""]]' \
+    || { rm -rf "$T" "$RW_B"; return 1; }
+  out="$(cd "$RW_B" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'workspace B took over an unattributed reviewer: %s\n' "$out" >&2; rm -rf "$T" "$RW_B"; return 1; }
+  assert_contains "$out" "cannot be proven" || { rm -rf "$T" "$RW_B"; return 1; }
+  assert_eq "$(reviewers_rows)" "$rows"
+  rm -rf "$T" "$RW_B"
+}
+
 # A registry that does not parse is UNKNOWN, not empty: read as empty, it
 # admits a second reviewer beside one whose row was in it. Nothing is written
 # over it, and admission refuses until `cel gc` rebuilds it.
@@ -1501,6 +1574,8 @@ test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded
     case "$1 $2" in
       "agent list") jq -nc --arg c "$RC_CO" \
         '{result:{agents:[{pane_id:"w1:p7",name:"widget-pr-12-review",cwd:$c,agent_status:"working"}]}}';;
+      # the read-only probe of whose workspace the live reviewer serves
+      "pane process-info") return 1;;
       *) printf 'herdr %s\n' "$*" >> "$T/herdr.log"; return 1;;
     esac
   }

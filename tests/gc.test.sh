@@ -774,6 +774,24 @@ test_gc_dry_run_leaves_an_unreadable_reviewer_registry_alone() {
   rm -rf "$T"
 }
 
+# The targeted retirement asked from workspace B never picks a row with no
+# workspace while workspace A also has the repo: that reviewer may be A's.
+test_gc_targeted_retirement_ignores_a_workspace_less_row_another_workspace_may_own() {
+  _gc_reviewer_fixture
+  local a="$T/a" b="$T/b" out rc=0
+  mkdir -p "$a/repos/widget" "$b/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml"
+  registry_add alpha "$a" ""; registry_add beta "$b" ""
+  printf '%s\n' '[{"repo":"widget","pr":12,"pane":"rex/s/b","agent":"widget-pr-12-review","backend":"rex"}]' > "$CEL_REVIEWERS_STATE"
+  cel_agent_list() { printf '%s\n' '{"result":{"agents":[]}}'; }
+  rex_reviewer_retire() { printf 'retire %s\n' "$*" >> "$GC_SINK"; printf '{"status":"eligible"}\n'; }
+  out="$(reviewer_retire_target "$b" widget 12 1)" || rc=$?
+  assert_eq "$rc" 4 || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r .reason)" no_reviewer_for_pull_request || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GC_SINK")" ''
+  rm -rf "$T"
+}
+
 test_gc_closes_a_reviewer_whose_pr_is_merged_or_closed() {
   local state
   for state in MERGED CLOSED; do

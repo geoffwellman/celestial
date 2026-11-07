@@ -729,9 +729,11 @@ reviewers_rows() { # -> JSON array; 2 = the file exists and is not a registry
 
 # WHICH WORKSPACE A ROW BELONGS TO. Rows written before the key carried a
 # workspace still say where they were cut from: `repodir` is
-# <workspace>/repos/<repo>. A legacy row without even that belongs to the
-# asking workspace only when that workspace has the repo ($here) - a
-# workspace without it cannot have launched the reviewer.
+# <workspace>/repos/<repo>. A row without even that ($here) belongs to the
+# asking workspace only when no OTHER registered workspace has the repo: a
+# workspace without it cannot have launched the reviewer, and with two
+# candidates the row is nobody's - never matched, never replaced by a record,
+# left for `cel gc` to attribute from the live process.
 _REVIEWERS_JQ_SCOPE='
   def rv_ws: . as $x | ("/repos/" + ($x.repo // "")) as $tail
     | if (($x.workspace // "") | type == "string" and length > 0) then $x.workspace
@@ -741,7 +743,72 @@ _REVIEWERS_JQ_SCOPE='
   def rv_key($ws; $here; $r; $p): .repo == $r and ((.pr | tostring) == $p)
     and (rv_ws as $w | if $w == null then $here else $w == $ws end);'
 
-_reviewers_here() { [ -d "$1/repos/$2" ] && printf true || printf false; } # <wsdir> <repo>
+_reviewers_here() { # <wsdir> <repo> -> true|false: may a workspace-less row be this workspace's?
+  local names ws d
+  [ -d "$1/repos/$2" ] || { printf false; return 0; }
+  # A workspace registry that cannot be read cannot rule the others out.
+  names="$(registry_names 2>/dev/null)" || { printf false; return 0; }
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    d="$(registry_path "$ws" 2>/dev/null)" || { printf false; return 0; }
+    [ -n "$d" ] && ! [ "$d" -ef "$1" ] || continue
+    [ ! -d "$d/repos/$2" ] || { printf false; return 0; }
+  done <<< "$names"
+  printf true
+}
+
+# WHICH WORKSPACE A LIVE REVIEWER WAS LAUNCHED FOR, proven from the process,
+# never guessed from a name or a box-wide checkout path. A Rex reviewer's
+# receipt records it (validated by rex_agent_list). A Herdr reviewer's runtime
+# carries CEL_WORKSPACE in /proc/<pid>/environ, fixed at exec by the launch
+# line (_run_launch_env); the pid must be in the pane's foreground group and
+# carry this pane's HERDR_PANE_ID and CEL_ROLE=reviewer. No proof, or two
+# different answers, prints nothing.
+reviewer_pane_workspace() { # <agents-json> <pane> -> workspace directory, or nothing
+  local pane="$2" row info pid item envws envpane envrole found=""
+  row="$(printf '%s' "$1" | jq -c --arg p "$pane" \
+    '[.result.agents[]? | select(.pane_id == $p)] | if length == 1 then .[0] else empty end' 2>/dev/null)" || return 0
+  [ -n "$row" ] || return 0
+  if [[ "$pane" == rex/* ]] || printf '%s' "$row" | jq -e '.backend == "rex"' >/dev/null 2>&1; then
+    printf '%s' "$row" | jq -r 'select(.backend == "rex" and .role == "reviewer"
+      and (.workspace | type == "string" and length > 0)) | .workspace' 2>/dev/null
+    return 0
+  fi
+  have herdr || return 0
+  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || return 0
+  for pid in $(printf '%s' "$info" | jq -r --arg p "$pane" \
+      '.result.process_info | select(.pane_id == $p) | .foreground_processes[]?.pid | select(type == "number")' 2>/dev/null); do
+    envws="" envpane="" envrole=""
+    while IFS= read -r -d '' item; do
+      case "$item" in
+        CEL_WORKSPACE=*) envws="${item#*=}" ;;
+        HERDR_PANE_ID=*) envpane="${item#*=}" ;;
+        CEL_ROLE=*) envrole="${item#*=}" ;;
+      esac
+    done < <({ cat "${CEL_PROC_DIR:-/proc}/$pid/environ"; } 2>/dev/null)
+    [ "$envpane" = "$pane" ] && [ "$envrole" = reviewer ] && [ -n "$envws" ] || continue
+    [ -z "$found" ] || [ "$found" = "$envws" ] || return 0
+    found="$envws"
+  done
+  printf '%s' "$found"
+}
+
+# A LIVE REVIEWER FOUND BY NAME OR CHECKOUT IS REUSED ONLY WHEN IT IS THIS
+# WORKSPACE'S. Its alias and checkout path are box-wide, so another
+# workspace's review of the same repo and PR answers to both. Proven to be
+# another workspace's: refused. Unproven, while another registered workspace
+# also has the repo: refused too - which of them it serves is unknown.
+_run_reviewer_owned() { # <agents-json> <pane> <wsdir> <repo> <pr>; dies unless reusable
+  local owner
+  owner="$(reviewer_pane_workspace "$1" "$2")"
+  if [ -n "$owner" ]; then
+    [ "$owner" -ef "$3" ] || [ "$owner" = "$3" ] \
+      || die "cel run reviewer: the live reviewer for $4#$5 in pane $2 belongs to workspace $owner, not this one; no checkout changed"
+    return 0
+  fi
+  [ "$(_reviewers_here "$3" "$4")" = true ] \
+    || die "cel run reviewer: the live reviewer for $4#$5 in pane $2 cannot be proven to be this workspace's, and another workspace has $4; no checkout changed"
+}
 
 reviewers_write() { # <json-array> - the whole file, under the lock
   reviewers_update --argjson rows "$1" '$rows'
@@ -2037,6 +2104,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
         if printf '%s' "$alias_rows" | jq -e --arg r "$repo" --arg p "$pr" --arg ws "$wsdir" \
           '.[0] | .backend == "rex" and .role == "reviewer" and .repo == $r and (.pr|tostring) == $p and .workspace == $ws' >/dev/null; then scoped_alias=1; fi
         [ "$scoped_alias" = 1 ] || die 'cel run reviewer: matching alias is not bound to this review scope; no checkout changed'
+        _run_reviewer_owned "$reviewer_roster" "$alias_pane" "$wsdir" "$repo" "$pr"
         [ "$dry_run" = 1 ] || reviewers_record "$wsdir" "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" \
           || die 'cel run reviewer: could not retain the existing native reviewer identity'
         c_ok "reviewer for $repo#$pr is already running as $reviewer_alias in pane $alias_pane - reusing it"
@@ -2051,6 +2119,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
          && [ "${live%%$'\t'*}" != unknown ]; then
         local lpane lname live_checkout
         IFS=$'\t' read -r lpane lname live_checkout <<< "$live"
+        _run_reviewer_owned "$reviewer_roster" "$lpane" "$wsdir" "$repo" "$pr"
         if [ "$dry_run" -eq 0 ]; then
           reviewers_record "$wsdir" "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" \
             || c_warn "could not record the reviewer for $repo#$pr"
