@@ -44,7 +44,6 @@ _gc_managed_fixture() {
   git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
   git -C "$T/repo" worktree add -q -b task "$GC_WT"
   registry_add demo "$GC_WS" ""
-  jq -n --arg w "$GC_WT" '[{id:"task",worktree:$w,state:"collected"}]' > "$GC_WS/.cel/delegations.json"
   GC_PR=MERGED; GC_STATUS=idle; GC_DISCOVERY_FAIL=""; GC_AGENTS='{"result":{"agents":[]}}'
   GC_SINK="$T/sink"; : > "$GC_SINK"
   herdr() {
@@ -92,12 +91,12 @@ test_gc_removes_only_proven_settled_clean_worktrees() {
   rm -rf "$T"
 }
 
-# A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>) have no
-# ledger row. They go when their PR merged or closed and nothing is unsaved;
-# a clean one with no PR yet is kept - it may have just been made.
+# A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>) go when
+# their PR merged or closed and nothing is unsaved; a clean one with no PR
+# yet is kept - it may have just been made.
 _gc_solo_fixture() {
   _gc_managed_fixture
-  printf '[]' > "$GC_WS/.cel/delegations.json"   # the herdr worktree is now unlisted: vetoed
+  command git -C "$T/repo" worktree remove "$GC_WT"   # only the solo worktree is in play
   cp "$CEL_ROOT/tests/fixtures/ws-products/workspace.yaml" "$GC_WS/"
   sed -i 's/^    workers: 2$/    workers: 2\n    mode: solo/' "$GC_WS/workspace.yaml"
   GC_SOLO="$GC_WS/.cel/solo/bundle/feat"
@@ -174,65 +173,28 @@ test_gc_keeps_a_closed_solo_worktree_with_unmerged_commits() {
   rm -rf "$T"
 }
 
-# A recovered launch is `unconfirmed` with an idle live agent in its
-# pane. Neither a merged/closed/absent PR nor a gone-looking pane may let gc
-# take its worktree while the row is unsettled.
-test_gc_never_erases_an_unresolved_recovered_launch() {
-  _gc_managed_fixture
-  jq '.[0].state = "unconfirmed" | .[0].recovery = {id:"r1", dispatch:{phase:"registered"}}' \
-    "$GC_WS/.cel/delegations.json" > "$T/next"
-  mv "$T/next" "$GC_WS/.cel/delegations.json"
-  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
-  assert_eq "$(cat "$GC_SINK")" ""
-  [ -d "$GC_WT" ] || { echo "the recovered worktree was removed"; return 1; }
-  rm -rf "$T"
-}
-
-test_gc_keeps_a_finished_row_with_launch_debt() {
-  _gc_managed_fixture
-  jq '.[0].state = "finished" | .[0].launch = {phase:"start-failed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
-  mv "$T/next" "$GC_WS/.cel/delegations.json"
-  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
-  assert_eq "$(cat "$GC_SINK")" ""
-  jq '.[0].launch = {phase:"dispatch-unconfirmed"}' "$GC_WS/.cel/delegations.json" > "$T/next"
-  mv "$T/next" "$GC_WS/.cel/delegations.json"
-  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_vetoes_running_delegations_for_every_pr_state_and_orphans() {
-  _gc_managed_fixture
-  jq '.[0].state = "running"' "$GC_WS/.cel/delegations.json" > "$T/next"
-  mv "$T/next" "$GC_WS/.cel/delegations.json"
-  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
-  herdr() {
-    case "$1 $2" in
-      "workspace list") printf '{"result":{"workspaces":[]}}';;
-      "agent list") printf '{"result":{"agents":[]}}';;
-      "worktree remove") printf 'herdr remove\n' >> "$GC_SINK";;
-      *) return 1;;
-    esac
-  }
-  _gc_has_process() { return 1; }
-  for GC_PR in MERGED CLOSED NONE; do cmd_gc >/dev/null; done
-  assert_eq "$(cat "$GC_SINK")" ""
+# GC NEVER READS THE RETIRED DELEGATION LEDGER. A delegations.json and
+# delegations.lock that cannot be opened at all (directories: chmod is no
+# barrier to root) and garbage bindings beside a merged solo worktree change
+# nothing: the sweep runs, removes it, and never mentions them.
+test_gc_never_reads_the_delegation_ledger() {
+  _gc_solo_fixture
+  pgrep() { printf '%s\n' "$$"; }
+  mkdir -p "$GC_WS/.cel/delegations.json/x" "$GC_WS/.cel/delegations.lock/x"
+  printf '{not json' > "$GC_WS/.cel/bindings"
+  local out="$T/gc.out" rc=0
+  GC_PR=MERGED cmd_gc >"$out" 2>&1 || rc=$?
+  assert_eq "$rc" 0 || { cat "$out"; return 1; }
+  assert_eq "$(cat "$GC_SINK")" "git remove" || { cat "$out"; return 1; }
+  if grep -qiE 'delegation|ledger|binding|skipped|directory|denied' "$out"; then
+    echo "gc touched the ledger:"; cat "$out"; return 1
+  fi
   rm -rf "$T"
 }
 
 test_gc_vetoes_unknown_discovery_instead_of_discovering_orphans() {
   _gc_managed_fixture
   for GC_DISCOVERY_FAIL in workspace pane agent; do cmd_gc >/dev/null; done
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_vetoes_malformed_or_unlisted_ledger_state() {
-  _gc_managed_fixture
-  for json in '{' '{}' '[]' '[{"worktree":null,"state":"running"}]'; do
-    printf '%s' "$json" > "$GC_WS/.cel/delegations.json"
-    cmd_gc >/dev/null
-  done
   assert_eq "$(cat "$GC_SINK")" ""
   rm -rf "$T"
 }
@@ -245,15 +207,6 @@ test_gc_merged_and_closed_prs_do_not_erase_dirty_or_new_commits() {
   git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -qm work
   for GC_PR in MERGED CLOSED; do cmd_gc >/dev/null; done
   assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_keeps_work_during_delegate_admission_lock() {
-  _gc_managed_fixture
-  local fd; exec {fd}>"$GC_WS/.cel/delegations.lock"; flock "$fd"
-  cmd_gc >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  exec {fd}>&-
   rm -rf "$T"
 }
 
@@ -271,13 +224,13 @@ _gc_idle_fixture() {
   }
   CEL_MANIFEST="$T/agents.yaml"
   printf 'agents:\n  bash:\n    role_injection: {strategy: append_flag_file, flag: --role-file}\n' > "$CEL_MANIFEST"
-  printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
+  printf 'reviewer role\n' > "$GC_WS/.cel/role-reviewer.md"
   # The test owns this process. It blocks on a FIFO without a busy loop or
   # descendants; production identity reads its real /proc argv/env/stat.
   mkfifo "$T/input"
   exec {GC_INPUT}<>"$T/input"
   printf 'read -r line\n' > "$T/agent.sh"
-  HERDR_PANE_ID=w1:p1 bash "$T/agent.sh" --role-file "$GC_WS/.cel/role-worker.md" < "$T/input" &
+  HERDR_PANE_ID=w1:p1 bash "$T/agent.sh" --role-file "$GC_WS/.cel/role-reviewer.md" < "$T/input" &
   GC_PID=$!
   # -9, and no bare `wait`: a fixture that ignores TERM (the pi case this
   # ticket is about) would otherwise hang the whole suite - it hung it for
@@ -356,7 +309,7 @@ test_gc_unknown_ownership_does_not_reuse_an_old_idle_clock() {
   for ((i=0;i<100;i++)); do _gc_process_identity "$GC_PID" "$GC_AGENTS" demo >/dev/null && break; sleep 0.01; done
   _gc_reap 1 0 "$GC_AGENTS" demo
   _gc_age_observation
-  rm "$GC_WS/.cel/role-worker.md"
+  rm "$GC_WS/.cel/role-reviewer.md"
   _gc_reap 1 0 "$GC_AGENTS" demo
   assert_eq "$(cat "$GC_SINK")" ""
   assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
@@ -393,26 +346,6 @@ test_gc_names_preserved_unlanded_work() {
   rm -rf "$T"
 }
 
-test_gc_running_delegation_veto_follows_symlinked_parent_of_process_cwd() {
-  local checkout; checkout="$(mktemp -d)"
-  mkdir "$checkout/nested"
-  cd "$checkout/nested"
-  _gc_idle_fixture
-  local i identity=""
-  for ((i=0;i<100;i++)); do
-    identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" && break
-    sleep 0.01
-  done
-  [ -n "$identity" ] || { echo "test process did not start"; return 1; }
-  _gc_reap 1 0 "$GC_AGENTS" demo
-  _gc_age_observation
-  ln -s "$checkout" "$T/checkout-alias"
-  jq -n --arg w "$T/checkout-alias" '[{worktree:$w,state:"running"}]' > "$GC_WS/.cel/delegations.json"
-  _gc_reap 1 0 "$GC_AGENTS" demo
-  assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(jq '.idle | length' "${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle.json")" 0
-}
-
 # --- the launch environment, not argv -------------------------------------
 # pi rewrites its own argv (process.title): /proc/<pid>/cmdline of a live pi
 # worker is `pi` and padding, so the role path the old identity gate looked
@@ -434,7 +367,7 @@ _gc_env_fixture() {
     printf '  bash:\n    role_injection: {strategy: append_flag_file, flag: --role-file}\n'
     printf '  pi:\n    role_injection: {strategy: append_flag_file, flag: --append-system-prompt}\n    signal: int\n'
   } > "$CEL_MANIFEST"
-  printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
+  printf 'reviewer role\n' > "$GC_WS/.cel/role-reviewer.md"
   # A real process whose comm is `pi` and whose argv holds no role path: a
   # copy of bash under that name reproduces the rewrite without pi installed.
   mkdir -p "$T/bin"
@@ -453,8 +386,8 @@ _gc_spawn_pi() { # <marked 0|1>
   # would then survive the INT the reap depends on for a reason that has
   # nothing to do with the code under test.
   if [ "$1" -eq 1 ]; then
-    env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
-        CEL_ROLE_FILE="$GC_WS/.cel/role-worker.md" CEL_WORKSPACE="$GC_WS" \
+    env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=reviewer \
+        CEL_ROLE_FILE="$GC_WS/.cel/role-reviewer.md" CEL_WORKSPACE="$GC_WS" \
         "$T/bin/pi" "$T/agent.sh" < "$T/input" &
   else
     env --default-signal=INT HERDR_PANE_ID=w1:p1 "$T/bin/pi" "$T/agent.sh" < "$T/input" &
@@ -473,8 +406,8 @@ test_gc_identity_accepts_the_launch_environment_when_argv_is_rewritten() {
   _gc_env_fixture
   _gc_spawn_pi 1 || return 1
   local identity; identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" \
-    || { echo "an environment-marked pi worker was not identified"; return 1; }
-  assert_contains "$identity" "$GC_WS/.cel/role-worker.md"
+    || { echo "an environment-marked pi reviewer was not identified"; return 1; }
+  assert_contains "$identity" "$GC_WS/.cel/role-reviewer.md"
 }
 
 test_gc_identity_rejects_a_runtime_carrying_neither_marker() {
@@ -487,7 +420,7 @@ test_gc_identity_rejects_a_runtime_carrying_neither_marker() {
 # registered workspace, a root/orchestrator role, or a workspace the registry
 # does not know proves nothing, and the argv fallback finds nothing either.
 _gc_spawn_pi_env() { # <role-file> <workspace>
-  env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
+  env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=reviewer \
       CEL_ROLE_FILE="$1" CEL_WORKSPACE="$2" \
       "$T/bin/pi" "$T/agent.sh" < "$T/input" &
   GC_PID=$!
@@ -503,12 +436,12 @@ _gc_spawn_pi_env() { # <role-file> <workspace>
 test_gc_identity_rejects_a_mismatched_launch_environment() {
   _gc_env_fixture
   mkdir -p "$T/elsewhere/.cel"
-  printf 'worker role\n' > "$T/elsewhere/.cel/role-worker.md"
+  printf 'reviewer role\n' > "$T/elsewhere/.cel/role-reviewer.md"
   printf 'root role\n' > "$GC_WS/.cel/role-root.md"
-  _gc_spawn_pi_env "$T/elsewhere/.cel/role-worker.md" "$GC_WS" || return 1
+  _gc_spawn_pi_env "$T/elsewhere/.cel/role-reviewer.md" "$GC_WS" || return 1
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo || return 1
   builtin kill -9 "$GC_PID" 2>/dev/null || true
-  _gc_spawn_pi_env "$GC_WS/.cel/role-worker.md" "$T/elsewhere" || return 1
+  _gc_spawn_pi_env "$GC_WS/.cel/role-reviewer.md" "$T/elsewhere" || return 1
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo || return 1
   builtin kill -9 "$GC_PID" 2>/dev/null || true
   _gc_spawn_pi_env "$GC_WS/.cel/role-root.md" "$GC_WS" || return 1
@@ -524,7 +457,7 @@ test_gc_identity_still_accepts_the_legacy_argv_stamp() {
     identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" && break
     sleep 0.01
   done
-  assert_contains "$identity" "$GC_WS/.cel/role-worker.md"
+  assert_contains "$identity" "$GC_WS/.cel/role-reviewer.md"
 }
 
 # A live agent whose herdr session id is null (observed on two omp panes)
@@ -941,54 +874,15 @@ test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
   rm -rf "$T"
 }
 
-# ------------------------------------------------- the finished-worker pass
-# Workers nest as tabs in their repo's workspace, so the worktree pass never
-# sees their panes. The ledger knows which pane each delegation ran in; that
-# is where this pass starts.
-_gc_done_fixture() { # <state> <agent-status>
-  T="$(mktemp -d)"
-  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml"
-  GC_WS="$T/workspace"; GC_WT="$HOME/.herdr/worktrees/widget/abc-1-task"
-  mkdir -p "$GC_WS/.cel" "$T/repo" "$(dirname "$GC_WT")"
-  git -C "$T/repo" init -q
-  git -C "$T/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$T/repo" update-ref refs/remotes/origin/main HEAD
-  git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-  git -C "$T/repo" worktree add -q -b abc-1-task "$GC_WT"
-  registry_add demo "$GC_WS" ""
-  jq -n --arg w "$GC_WT" --arg s "$1" \
-    '[{id:"ABC-1-task",repo:"widget",branch:"abc-1-task",pane:"w9:p2",worktree:$w,state:$s,history:[]}]' \
-    > "$GC_WS/.cel/delegations.json"
-  GC_AGENTS="$(jq -nc --arg w "$GC_WT" --arg s "$2" \
-    '{result:{agents:[{pane_id:"w9:p2",name:"widget-abc-1-task",cwd:$w,agent_status:$s}]}}')"
-  GC_PR=MERGED
-  GC_SINK="$T/sink"; : > "$GC_SINK"
-  herdr() {
-    case "$1 $2" in
-      "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
-      *) return 1;;
-    esac
-  }
-  gh() {
-    [ "$GC_PR" != UNKNOWN ] || return 1
-    case "$1 $2" in
-      "pr list") jq -n --arg s "$GC_PR" '[{state:$s,updatedAt:"2026-01-01T00:00:00Z"}]';;
-      *) return 1;;
-    esac
-  }
-}
-
-_gc_rex_worker() {
-  local pane='rex/session:fixture/block:fixture'
-  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq --arg p "$pane" '.result.agents[0] |= (.pane_id = $p | .backend = "rex")')"
-  local rows; rows="$(jq --arg p "$pane" 'map(.pane = $p)' "$GC_WS/.cel/delegations.json")"
-  printf '%s\n' "$rows" > "$GC_WS/.cel/delegations.json"
-  herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
-}
-
+# A Rex agent in a checkout is a veto until Rex has a backend-specific
+# retirement proof: herdr is never asked about its pane.
 test_gc_rex_presence_vetoes_checkout_removal_without_herdr_process_info() {
-  _gc_done_fixture landed idle
-  _gc_rex_worker
+  T="$(mktemp -d)"
+  GC_WT="$T/wt"; mkdir -p "$GC_WT"
+  GC_SINK="$T/sink"; : > "$GC_SINK"
+  GC_AGENTS="$(jq -nc --arg w "$GC_WT" \
+    '{result:{agents:[{pane_id:"rex/session:fixture/block:fixture",backend:"rex",name:"widget-task",cwd:$w,agent_status:"idle"}]}}')"
+  herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
   assert_fails _gc_agents_removable "$GC_AGENTS" "$GC_WT" demo
   assert_eq "$(cat "$GC_SINK")" ''
   # A descendant cwd protects the parent checkout too.
@@ -998,101 +892,8 @@ test_gc_rex_presence_vetoes_checkout_removal_without_herdr_process_info() {
   rm -rf "$T"
 }
 
-test_gc_done_worker_pass_never_sends_rex_panes_to_herdr() {
-  _gc_done_fixture landed idle
-  _gc_rex_worker
-  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
-  assert_eq "$(cat "$GC_SINK")" ''
-  assert_eq "$done_closed" 0
-  [ -d "$GC_WT" ] || { echo 'removed Rex checkout'; return 1; }
-  rm -rf "$T"
-}
-
-test_gc_closes_a_done_pane_whose_delegation_landed() {
-  _gc_done_fixture landed done
-  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  assert_contains "$out" 'closed 1 done panes'
-  rm -rf "$T"
-}
-
-# A released/landed ORIGINAL whose worker was handed to a running
-# replacement shares its pane; the done-pane pass must not close that pane on
-# the original row's word. Control: the same row without a replacement closes.
-test_gc_does_not_close_the_pane_a_running_replacement_shares_with_a_released_original() {
-  _gc_done_fixture released done
-  jq '. + [(.[0] | .id = "ABC-1-clean" | .branch = "abc-1-clean" | .state = "running" | .replacement = {role:"child", of:"ABC-1-task", stage:"attached"})]
-      | .[0].replacement = {role:"source", child:"ABC-1-clean"}' \
-    "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" "" || { echo "$out"; return 1; }
-  assert_contains "$out" 'closed 0 done panes'
-  # control: drop the lineage and the very same pane closes
-  jq 'map(del(.replacement)) | map(select(.id != "ABC-1-clean"))' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  rm -rf "$T"
-}
-
-test_gc_keeps_a_working_pane_even_when_its_delegation_landed() {
-  _gc_done_fixture landed working
-  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" ""
-  assert_contains "$out" 'kept 1: 1 working'
-  rm -rf "$T"
-}
-
-# `finished` with its PR merged is `landed` that nobody wrote down yet: it is
-# reconciled first, and then it qualifies like any other landed row.
-test_gc_reconciles_finished_and_merged_to_landed_then_closes_it() {
-  _gc_done_fixture finished idle
-  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
-  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" landed
-  assert_eq "$(jq -r '.[0].history[-1].by' "$GC_WS/.cel/delegations.json")" gc
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  rm -rf "$T"
-}
-
-test_gc_keeps_a_done_pane_over_dirty_work() {
-  _gc_done_fixture landed done
-  printf 'x' > "$GC_WT/uncommitted.txt"
-  local out; out="$(_gc_done_panes 0 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" ""
-  assert_contains "$out" '1 dirty'
-  rm -rf "$T"
-}
-
-test_gc_keeps_a_done_pane_whose_pr_is_open_or_unreadable() {
-  local s
-  for s in OPEN UNKNOWN; do
-    _gc_done_fixture landed done
-    GC_PR="$s"
-    _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
-    assert_eq "$(cat "$GC_SINK")" ""
-    rm -rf "$T"
-  done
-}
-
-# A pane id herdr has reused for something else is not this delegation's.
-test_gc_never_closes_a_pane_now_somewhere_else() {
-  _gc_done_fixture landed done
-  GC_AGENTS="$(printf '%s' "$GC_AGENTS" | jq -c '.result.agents[0].cwd = "/elsewhere"')"
-  _gc_done_panes 0 "$GC_AGENTS" demo >/dev/null 2>&1
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_done_pane_dry_run_says_what_it_would_close_and_closes_nothing() {
-  _gc_done_fixture finished done
-  local out; out="$(_gc_done_panes 1 "$GC_AGENTS" demo 2>&1)"
-  assert_eq "$(cat "$GC_SINK")" ""
-  assert_contains "$out" 'would close'
-  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" finished
-  rm -rf "$T"
-}
-
-# THE EMPTY PANES. A worker that quit leaves its shell behind. Only a bare
-# shell in a clean worker checkout (or a deleted one) is empty - a service,
+# THE EMPTY PANES. An agent that quit leaves its shell behind. Only a bare
+# shell in a clean checkout (or a deleted one) is empty - a service,
 # an editor, an owner's shell and a layout's pane are all kept.
 _gc_empty_fixture() {
   _gc_shell_children() { :; }   # the stub shell has no children
@@ -1560,120 +1361,20 @@ test_gc_unreadable_cwd_of_an_unknown_process_still_vetoes() {
   _gc_has_process "/nonexistent/wt" || { echo "unknown unreadable cwd no longer vetoes"; return 1; }
 }
 
-# ------------------------------------------------- the idle-stop pass
-# A done/idle worker that has
-# sat N minutes with nothing unsaved has its pane closed; ledger untouched.
-_gc_idle_stop_run() { # <minutes> -> output; observes once at t0, then at t0+mins*60
-  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
-  # the strict identity proof is its own suite; here it passes unless a test says not
-  _gc_agents_removable() { [ -z "${GC_UNPROVEN:-}" ]; }
-  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo "$1" >/dev/null 2>&1
-  CEL_GC_NOW=$((1000 + $1 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo "$1" 2>&1
-}
-
-test_gc_idle_worker_pass_keeps_rex_even_if_roster_reports_idle() {
-  _gc_done_fixture running idle
-  _gc_rex_worker
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ''
-  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" running
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_stops_a_done_clean_old_worker_and_keeps_its_ledger_row() {
-  _gc_done_fixture running done
-  local out; out="$(_gc_idle_stop_run 60)"
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  assert_contains "$out" "stopped 1 idle agents"
-  assert_eq "$(jq -r '.[0].state' "$GC_WS/.cel/delegations.json")" running
-  [ -d "$GC_WT" ] || { echo "worktree removed"; return 1; }
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_waits_out_the_window() {
-  _gc_done_fixture running idle
-  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
-  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo 60 >/dev/null 2>&1
-  CEL_GC_NOW=$((1000 + 59 * 60)) _gc_idle_stop 0 "$GC_AGENTS" demo 60 >/dev/null 2>&1
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_never_stops_a_working_agent() {
-  _gc_done_fixture running working
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_never_stops_over_dirty_or_unpushed_work() {
-  _gc_done_fixture running done
-  printf 'x' > "$GC_WT/uncommitted.txt"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -f "$GC_WT/uncommitted.txt"
-  git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local
-  rm -f "$T/idle-stop.json"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-# Orchestrators and reviewers are never in the delegation ledger, so a done
-# agent that no row names is never this pass's to stop.
-test_gc_idle_stop_never_stops_an_agent_the_ledger_does_not_name() {
-  _gc_done_fixture running done
-  GC_AGENTS="$(jq -nc --arg w "$GC_WS" '{result:{agents:[{pane_id:"w1:p1",name:"widget-orch",cwd:$w,agent_status:"done"}]}}')"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_minutes_drop_under_memory_pressure() {
-  T="$(mktemp -d)"
-  export CEL_TESTING=1 CEL_CONFIG_FILE="$T/none.yaml"
-  printf 'MemTotal: 25165824 kB\nMemAvailable: 8388608 kB\n' > "$T/ok"
-  printf 'MemTotal: 25165824 kB\nMemAvailable: 1048576 kB\n' > "$T/low"
-  assert_eq "$(CEL_MEMINFO="$T/ok" gc_idle_stop_minutes)" 60
-  assert_eq "$(CEL_MEMINFO="$T/low" gc_idle_stop_minutes)" 10
-  assert_eq "$(CEL_MEMINFO="$T/ok" CEL_GC_IDLE_STOP_MIN=30 gc_idle_stop_minutes)" 30
-  rm -rf "$T"
-}
-
-# A clean, pushed worker idle while its PR awaits review is
-# the reviewer's to prompt - closing it breaks the revision round.
-test_gc_idle_stop_keeps_a_worker_whose_pr_is_open() {
-  _gc_done_fixture running done
-  GC_PR=OPEN
-  local out; out="$(_gc_idle_stop_run 60)"
-  assert_eq "$(cat "$GC_SINK")" ""
-  assert_contains "$out" "kept 1"
-  rm -rf "$T"
-}
-
-# ...and only a process proven to be this plane's agent is stopped.
-test_gc_idle_stop_keeps_an_agent_whose_identity_is_unproven() {
-  _gc_done_fixture running done
-  GC_UNPROVEN=1
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-# ------------------------------------- review waiters under pressure
-# A reviewer with a recorded verdict for the current head, and a worker
-# waiting only on that review, are both stoppable under pressure - on facts.
-_gc_rv_fixture() { # <review-head> <pr-head>
+# ------------------------------------- finished reviewers
+# A reviewer whose approval (`cel solo review`, .cel/solo-reviews.json) is
+# for the PR's current head is done once quiet for the window - on facts.
+_gc_rv_fixture() { # <review-head> <pr-head>; verdict from GC_VERDICT (default approved)
   _gc_reviewer_fixture
   export CEL_REGISTRY="$T/registry.yaml" CEL_GC_REVIEWER_STOP_STATE="$T/rv-stop.json" CEL_TESTING=1
   GC_WS="$T/workspace"; mkdir -p "$GC_WS/.cel"
   registry_add demo "$GC_WS" ""
-  jq -n --arg h "$1" --arg v "${GC_VERDICT:-approved}" '[{id:"ABC-7-thing",repo:"widget",branch:"abc-7-thing",state:"finished",
-    review:{verdict:$v,by:"widget-pr-71-review",head:$h}}]' > "$GC_WS/.cel/delegations.json"
+  jq -n --arg v "${GC_VERDICT:-approved}" --arg h "$1" \
+    '{"widget#71": {verdict:$v, by:"widget-pr-71-review", head:$h, at:"2026-01-01T00:00:00Z"}}' > "$GC_WS/.cel/solo-reviews.json"
   GC_PR_HEAD="$2"
   gh() {
     [ "$GC_PR_STATE" != UNKNOWN ] || return 1
-    jq -n --arg s "$GC_PR_STATE" --arg h "$GC_PR_HEAD" '{state:$s,headRefOid:$h,headRefName:"abc-7-thing"}'
+    jq -n --arg s "$GC_PR_STATE" --arg h "$GC_PR_HEAD" '{state:$s,headRefOid:$h}'
   }
   GC_PR_STATE=OPEN; GC_REVIEW_STATUS=done
 }
@@ -1723,101 +1424,14 @@ test_gc_reviewer_minutes_drop_under_pressure() {
   assert_eq "$(gc_reviewer_stop_minutes)" 5
 }
 
-_gc_waiter_fixture() {
-  _gc_done_fixture running done
-  git -C "$GC_WT" update-ref "refs/remotes/origin/abc-1-task" HEAD
-  GC_PR=OPEN; GC_PR_HEAD="$(git -C "$GC_WT" rev-parse HEAD)"
-  gh() {
-    case "$1 $2" in
-      "pr list") jq -n --arg s "$GC_PR" '[{state:$s,updatedAt:"2026-01-01T00:00:00Z"}]';;
-      "pr view") jq -n --arg h "$GC_PR_HEAD" '{headRefOid:$h}';;
-      *) return 1;;
-    esac
-  }
-  GC_INBOX="$T/inbox"; : > "$GC_INBOX"
-  cmd_inbox() { printf '%s\n' "$*" >> "$GC_INBOX"; }
-}
-
-test_gc_idle_stop_stops_a_review_waiter_under_pressure_and_tells_the_orchestrator() {
-  _gc_waiter_fixture
-  boxguard_pressure() { return 0; }
-  local out; out="$(_gc_idle_stop_run 10)"
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  assert_contains "$(cat "$GC_INBOX")" "send widget-orch"
-  assert_contains "$(cat "$GC_INBOX")" "ABC-1-task"
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_keeps_a_review_waiter_without_pressure() {
-  _gc_waiter_fixture
-  boxguard_pressure() { return 1; }
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_keeps_a_review_waiter_whose_pr_head_is_not_its_head() {
-  _gc_waiter_fixture
-  boxguard_pressure() { return 0; }
-  GC_PR_HEAD=0000000000000000000000000000000000000000
-  _gc_idle_stop_run 10 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-test_gc_idle_stop_restarts_the_clock_when_the_head_moves() {
-  _gc_waiter_fixture
-  boxguard_pressure() { return 0; }
-  export CEL_GC_IDLE_STOP_STATE="$T/idle-stop.json" CEL_TESTING=1
-  _gc_agents_removable() { return 0; }
-  CEL_GC_NOW=1000 _gc_idle_stop 0 "$GC_AGENTS" demo 10 >/dev/null 2>&1
-  git -C "$GC_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m more
-  git -C "$GC_WT" update-ref "refs/remotes/origin/abc-1-task" HEAD
-  GC_PR_HEAD="$(git -C "$GC_WT" rev-parse HEAD)"
-  CEL_GC_NOW=$((1000 + 600)) _gc_idle_stop 0 "$GC_AGENTS" demo 10 >/dev/null 2>&1
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
 # A CHANGES verdict means the reviewer is waiting on the
-# worker's re-push - closing it would leave "pushed - re-review" with nobody.
+# author's re-push - closing it would leave "pushed - re-review" with nobody.
 test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
   GC_VERDICT=changes _gc_rv_fixture aaa111 aaa111
   _gc_rv_run 60 >/dev/null
   assert_eq "$(cat "$GC_SINK")" ""
   assert_eq "$(reviewers_rows | jq -r length)" 1
   rm -rf "$T"
-}
-
-# A solo product's reviewer records its verdict with `cel solo review`, in the
-# workspace's .cel/solo-reviews.json - there is no delegation. Its approval of
-# exactly the current head finishes it just the same; an approval of an older
-# head, or a CHANGES verdict, keeps it.
-_gc_rv_solo_fixture() { # <verdict> <review-head> <pr-head>
-  _gc_rv_fixture "$2" "$3"
-  rm -f "$GC_WS/.cel/delegations.json"
-  jq -n --arg v "$1" --arg h "$2" \
-    '{"widget#71": {verdict:$v, by:"widget-pr-71-review", head:$h, at:"2026-01-01T00:00:00Z"}}' > "$GC_WS/.cel/solo-reviews.json"
-}
-
-test_gc_closes_a_finished_solo_reviewer_whose_approval_is_for_the_current_head() {
-  _gc_rv_solo_fixture approved aaa111 aaa111
-  reviewer_checkout_release() { :; }
-  local out; out="$(_gc_rv_run 30)"
-  assert_eq "$(cat "$GC_SINK")" "close w1:p3" || { rm -rf "$T"; return 1; }
-  assert_contains "$out" "verdict recorded"
-  rm -rf "$T"
-}
-
-test_gc_keeps_a_solo_reviewer_without_an_approval_of_the_current_head() {
-  local case
-  for case in "approved aaa111 bbb222" "changes aaa111 aaa111"; do
-    # shellcheck disable=SC2086 # the case is three words on purpose
-    _gc_rv_solo_fixture $case
-    _gc_rv_run 60 >/dev/null
-    assert_eq "$(cat "$GC_SINK")" "" || { echo "closed on: $case"; rm -rf "$T"; return 1; }
-    rm -rf "$T"
-  done
 }
 
 # ----------------------------------- retirement ownership
@@ -1835,7 +1449,7 @@ agents:
     owned_children:
       - {argv0: node, argv_suffix: /.hindsight/coding-agents/dist/mcp-server.js}
 YML
-  printf 'worker role\n' > "$GC_WS/.cel/role-worker.md"
+  printf 'reviewer role\n' > "$GC_WS/.cel/role-reviewer.md"
   mkdir -p "$T/bin" "$HOME/.hindsight/coding-agents/dist"
   cp "$(command -v bash)" "$T/bin/claude"
   cp "$(command -v bash)" "$T/bin/node"
@@ -1855,8 +1469,8 @@ YML
     grandchild)  printf '( "$T_BIN/node" "$T_MCP" & wait ) &\nwait\n' > "$T/agent.sh" ;;
     none)        printf 'exec 3<>"$T_BLK"; read -r -u 3 x\n' > "$T/agent.sh" ;;
   esac
-  env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=worker \
-      CEL_ROLE_FILE="$GC_WS/.cel/role-worker.md" CEL_WORKSPACE="$GC_WS" \
+  env --default-signal=INT HERDR_PANE_ID=w1:p1 CEL_ROLE=reviewer \
+      CEL_ROLE_FILE="$GC_WS/.cel/role-reviewer.md" CEL_WORKSPACE="$GC_WS" \
       T="$T" T_BIN="$T/bin" T_BLK="$T/blk" T_MCP="$HOME/.hindsight/coding-agents/dist/mcp-server.js" T_PREVIEW="$T/preview.js" \
       "$T/bin/claude" "$T/agent.sh" </dev/null &
   GC_PID=$!
@@ -1893,7 +1507,7 @@ test_gc_identity_accepts_a_verified_runtime_with_its_declared_direct_child() {
   local identity; identity="$(_gc_process_identity "$GC_PID" "$GC_AGENTS" demo)" \
     || { echo "verified Claude plus its direct Hindsight MCP child was refused"; return 1; }
   assert_contains "$identity" "\"pid\":\"$GC_PID\""
-  assert_contains "$identity" "$GC_WS/.cel/role-worker.md"
+  assert_contains "$identity" "$GC_WS/.cel/role-reviewer.md"
   # the removable-agents gate reads the same foreground group
   _gc_agents_removable "$GC_AGENTS" "$PWD" demo \
     || { echo "removable gate refused the same pair"; return 1; }
@@ -1925,47 +1539,6 @@ test_gc_identity_refuses_a_helper_with_the_right_name_and_the_wrong_script() {
   assert_fails _gc_process_identity "$GC_PID" "$GC_AGENTS" demo
 }
 
-# Retirement releases the RUNTIME and nothing else: ledger row, worktree,
-# session pointer and branch all remain; the `collected` row (which installed
-# gc never even looked at) and a stale pane binding (row names a pane that no
-# longer exists, the live agent has moved to another pane in the same
-# worktree) are both retired.
-test_gc_idle_stop_retires_a_collected_row_whose_pane_binding_is_stale() {
-  _gc_done_fixture collected done
-  jq '.[0].pane = "w1:gone" | .[0].alias = "widget-abc-1-task"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  local before; before="$(cat "$GC_WS/.cel/delegations.json")"
-  local out; out="$(_gc_idle_stop_run 60)"
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2" || { echo "$out"; return 1; }
-  assert_eq "$(cat "$GC_WS/.cel/delegations.json")" "$before"
-  [ -d "$GC_WT" ] || { echo "worktree removed by runtime retirement"; return 1; }
-  git -C "$GC_WT" rev-parse --verify -q abc-1-task >/dev/null || { echo "branch lost"; return 1; }
-  rm -rf "$T"
-}
-
-# Ambiguity is a veto: two live agents in one worktree and no pane binding
-# that selects one means nothing is retired on a guess.
-test_gc_idle_stop_does_not_guess_between_two_agents_when_the_pane_is_stale() {
-  _gc_done_fixture collected done
-  jq '.[0].pane = "w1:gone"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  GC_AGENTS="$(jq -nc --arg w "$GC_WT" \
-    '{result:{agents:[{pane_id:"w9:p2",name:"a",cwd:$w,agent_status:"done"},{pane_id:"w9:p3",name:"b",cwd:$w,agent_status:"done"}]}}')"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-# Landed/released/abandoned rows are NOT runtime-retirement candidates here
-# (their own passes own them), and retained dirty work still vetoes a
-# collected row, so the widened states never loosen the clean gate.
-test_gc_idle_stop_keeps_dirty_work_on_a_collected_row() {
-  _gc_done_fixture collected done
-  printf 'x' > "$GC_WT/uncommitted.txt"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-
 # F4: the helper is the declared path under THIS user's home, not anything that
 # ends with the same suffix. `node <elsewhere>/.hindsight/.../mcp-server.js` is
 # another program with the same tail and is a veto.
@@ -1977,38 +1550,3 @@ test_gc_identity_refuses_a_look_alike_helper_outside_home() {
 
 # the control: the same shape under $HOME passes (see the accepts-a-verified-
 # runtime test above), so the veto above is about provenance and nothing else.
-
-# F5: rebinding by cwd is tied to the delegation row. The sole agent in the
-# worktree is retired only when herdr's name for it IS the row's alias.
-test_gc_idle_stop_rebinds_a_stale_pane_only_to_the_agent_the_row_names() {
-  _gc_done_fixture collected done
-  jq '.[0].pane = "w1:gone" | .[0].alias = "widget-abc-1-task"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" "close w9:p2"
-  rm -rf "$T"
-}
-test_gc_idle_stop_keeps_a_stranger_in_the_worktree_when_the_pane_is_stale() {
-  _gc_done_fixture collected done
-  jq '.[0].pane = "w1:gone" | .[0].alias = "someone-elses-worker"' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  # and a row with no alias at all binds nothing
-  jq 'del(.[0].alias)' "$GC_WS/.cel/delegations.json" > "$T/l.tmp" && mv "$T/l.tmp" "$GC_WS/.cel/delegations.json"
-  rm -f "$T/idle-stop.json"; _gc_idle_stop_run 60 >/dev/null
-  assert_eq "$(cat "$GC_SINK")" ""
-  rm -rf "$T"
-}
-
-# A checkout kept by `release --keep-worktree` is vetoed for every later sweep,
-# including when another, ordinary released row shares the same path.
-test_gc_never_takes_a_worktree_released_with_keep() {
-  local T; T="$(mktemp -d)"
-  mkdir -p "$T/ws/.cel" "$T/wt"
-  export CEL_REGISTRY="$T/registry.yaml"
-  printf 'workspaces:\n  w:\n    path: %s\n' "$T/ws" > "$CEL_REGISTRY"
-  printf '[{"id":"A","state":"released","worktree":"%s"},{"id":"B","state":"released","worktree":"%s"}]' "$T/wt" "$T/wt" > "$T/ws/.cel/delegations.json"
-  _gc_delegated_live "$T/wt" && { echo "plain released rows vetoed the path"; rm -rf "$T"; return 1; }
-  printf '[{"id":"A","state":"released","worktree":"%s","worktree_kept":true},{"id":"B","state":"released","worktree":"%s"}]' "$T/wt" "$T/wt" > "$T/ws/.cel/delegations.json"
-  _gc_delegated_live "$T/wt" || { echo "a kept worktree was not vetoed"; rm -rf "$T"; return 1; }
-  rm -rf "$T"
-}

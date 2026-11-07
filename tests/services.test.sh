@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # `cel services` - one model for everything this box is running on a port:
-# the services a workspace declares and the previews `cel-fanout try` starts.
+# the services a workspace declares and the box's own services.d entries.
 #
 # Nothing here touches the live box. herdr is a stub on a prepended PATH that
 # logs its argv, the "service" is a python http server on a free port in a
@@ -210,23 +210,6 @@ test_services_without_cmd_are_observe_only() {
   local out; out="$("$CEL" services start docs --workspace alpha 2>&1)"
   assert_contains "$out" "observe-only"
   assert_eq "$(printf '%s' "$("$CEL" services --workspace alpha --json)" | jq -r '.[0].observe_only')" true
-  _svc_teardown
-}
-
-# Every running preview is a service too. The ledger row is the declaration:
-# its ticket names it, and its url carries the port.
-test_services_include_running_try_previews() {
-  _svc_setup
-  printf 'name: alpha\nservices: []\n' > "$T/alpha/workspace.yaml"
-  cat >"$T/alpha/.cel/delegations.json" <<EOF
-[{"id":"d1","repo":"widget","branch":"ABC-49-slug","ticket":"ABC-49","worktree":"$T/alpha/run",
-  "try":{"pane":"w1:p3","port":4400,"url":"http://localhost:4401","started":"2026-09-18T10:00:00+00:00"}}]
-EOF
-  local out; out="$("$CEL" services --workspace alpha --json)"
-  assert_eq "$(printf '%s' "$out" | jq -r '.[0].name')" "try ABC-49"
-  assert_eq "$(printf '%s' "$out" | jq -r '.[0].kind')" preview
-  assert_eq "$(printf '%s' "$out" | jq -r '.[0].ticket')" "ABC-49"
-  assert_eq "$(printf '%s' "$out" | jq -r '.[0].port')" 4401
   _svc_teardown
 }
 

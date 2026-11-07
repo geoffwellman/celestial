@@ -209,10 +209,7 @@ test('durable verdict freshness follows only the exact selected own round', () =
   const original = selectedRound(ledger, soloSelector);
   assert.deepEqual(selectedRound({ ...ledger, 'widget#99': { verdict: 'approved', at: at(8) } }, soloSelector), original);
   assert.notEqual(selectedRound({ ...ledger, 'widget#7': { ...round, head: 'b'.repeat(40) } }, soloSelector).hash, original.hash);
-  const selector = { kind: 'fleet', id: 'WG-7', repo: 'widget', branch: 'WG-7-review' };
-  const fleet = [{ id: 'WG-7', repo: 'widget', branch: 'WG-7-review', review: round }, { id: 'WG-99', review: { verdict: 'changes' } }];
-  assert.deepEqual(selectedRound(fleet, selector), selectedRound([fleet[1], fleet[0]], selector));
-  refusal(() => selectedRound([fleet[0], fleet[0]], selector), 'ambiguous_or_missing_own_review_round');
+  refusal(() => selectedRound([{ id: 'WG-7', review: round }], { kind: 'fleet', id: 'WG-7' }), 'unknown_solo_review_ledger');
 });
 
 test('archived role bytes remain verifiable after a later round rewrites the canonical role', () => {

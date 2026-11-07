@@ -165,10 +165,14 @@ _wslife_worktree() { # <path>
   git -C "$wt" checkout -q -b WG-1-x
 }
 
-_wslife_ledger() { # <worktree>
-  cat >"$T/alpha/.cel/delegations.json" <<EOF
-[{"id":"one","repo":"widget","branch":"WG-1-x","pane":"wZ:p2","worktree":"$1","state":"running","ticket":"WG-1"}]
-EOF
+# A solo worktree of product `bundle` on branch WG-1-x, linked from the repo
+# at <base> (built by _wslife_worktree). Prints its path.
+_wslife_solo() { # <base>
+  local wt="$T/alpha/.cel/solo/bundle/WG-1-x"
+  git -C "$1" checkout -q main
+  mkdir -p "${wt%/*}"
+  git -C "$1" worktree add -q "$wt" WG-1-x
+  printf '%s' "$wt"
 }
 
 # --- the shape, declared ----------------------------------------------------
@@ -264,11 +268,10 @@ test_up_never_renames_a_rex_identity_through_herdr() {
 test_down_refuses_with_unlanded_work_named_and_force_proceeds() {
   _wslife_setup
   _wslife_worktree "$T/wt"
-  _wslife_ledger "$T/wt"
-  printf 'work\n' >"$T/wt/scratch.txt"
+  local wt; wt="$(_wslife_solo "$T/wt")"
+  printf 'work\n' >"$wt/scratch.txt"
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
-  local before; before="$(cat "$T/alpha/.cel/delegations.json")"
 
   local out; out="$( (cmd_ws_down alpha) 2>&1 )" && {
     echo "down proceeded over unlanded work"; _wslife_teardown; return 1; }
@@ -278,17 +281,15 @@ test_down_refuses_with_unlanded_work_named_and_force_proceeds() {
   out="$(cmd_ws_down alpha --force)"
   assert_contains "$out" "closed"
   assert_contains "$(cat "$STUB_DIR/calls.log")" "workspace close"
-  # NEITHER PATH IS A CLEAN-UP. `down` is about PANES: removing a worktree or
-  # editing the ledger is `cel-fanout release`'s job and stays there.
+  # NEITHER PATH IS A CLEAN-UP. `down` is about PANES, never worktrees.
   ! grep -q 'worktree remove' "$STUB_DIR/calls.log" \
     || { echo "down removed a worktree"; _wslife_teardown; return 1; }
-  assert_eq "$(cat "$T/alpha/.cel/delegations.json")" "$before"
+  [ -d "$wt" ] || { echo "down removed the solo worktree"; _wslife_teardown; return 1; }
   _wslife_teardown
 }
 
 test_down_stops_only_managed_rex_roles_owned_by_the_exact_workspace() {
   _wslife_setup
-  printf '[]\n' > "$T/alpha/.cel/delegations.json"
   rex_agent_list() {
     jq -n --arg ws "$T/alpha" '{result:{agents:(
       (["root","orchestrator","solo","lane","reviewer","worker"] | map(. as $role |
@@ -312,10 +313,8 @@ test_down_stops_only_managed_rex_roles_owned_by_the_exact_workspace() {
 test_down_preserves_rex_agents_when_held_work_refuses_teardown() {
   _wslife_setup
   _wslife_worktree "$T/wt"
-  _wslife_ledger "$T/wt"
-  # A running ledger row alone is not work at risk: this fixture starts clean
-  # at origin/main, so give the existing guard actual uncommitted work to see.
-  printf 'work\n' > "$T/wt/scratch.txt"
+  local wt; wt="$(_wslife_solo "$T/wt")"
+  printf 'work\n' > "$wt/scratch.txt"
   rex_agent_list() { printf discovery >> "$T/rex-calls"; return 1; }
   rex_agent_stop() { printf stop >> "$T/rex-calls"; }
   local out
@@ -329,7 +328,6 @@ test_down_preserves_rex_agents_when_held_work_refuses_teardown() {
 
 test_down_refuses_before_herdr_closes_when_rex_discovery_fails() {
   _wslife_setup
-  printf '[]\n' > "$T/alpha/.cel/delegations.json"
   rex_agent_list() { return 1; }
   if (cmd_ws_down alpha) >/dev/null 2>&1; then
     echo 'workspace teardown ignored failed Rex discovery'; _wslife_teardown; return 1
@@ -340,7 +338,6 @@ test_down_refuses_before_herdr_closes_when_rex_discovery_fails() {
 
 test_reset_does_not_start_up_after_a_rex_stop_failure() {
   _wslife_setup
-  printf '[]\n' > "$T/alpha/.cel/delegations.json"
   rex_agent_list() {
     jq -n --arg ws "$T/alpha" '{result:{agents:[{name:"owned",role:"solo",backend:"rex",workspace:$ws,pane_id:"rex/session:owned/block:owned"}]}}'
   }
@@ -355,57 +352,26 @@ test_reset_does_not_start_up_after_a_rex_stop_failure() {
   _wslife_teardown
 }
 
-# THE GUARD THAT CANNOT SEE DOES NOT WAVE YOU THROUGH. Every way of failing to
-# READ the ledger once produced an empty result - indistinguishable from
-# "nothing is held" - so `down` closed the panes over a missing, unreadable or
-# malformed ledger silently, the exact stranding the refusal exists to prevent,
-# and with no --force warning because that only prints when something IS held.
-# Each unreadable state now refuses without --force and says why it cannot tell.
-test_down_refuses_when_the_ledger_cannot_be_read() {
+# FAN-OUT WAS RETIRED: `down` reads no delegation ledger. A ledger that cannot
+# be read at all (here a directory where the file would be) changes nothing.
+test_down_ignores_the_retired_delegation_ledger() {
   _wslife_setup
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
-  local out
-
-  # ABSENT: setup left no delegations.json - must not read as "nothing held".
-  rm -f "$T/alpha/.cel/delegations.json"
-  out="$( (cmd_ws_down alpha) 2>&1 )" && {
-    echo "down proceeded with an absent ledger"; _wslife_teardown; return 1; }
-  assert_contains "$out" "no delegation ledger"
-
-  # MALFORMED: a real path, unparseable content.
-  printf '[\n' >"$T/alpha/.cel/delegations.json"
-  out="$( (cmd_ws_down alpha) 2>&1 )" && {
-    echo "down proceeded over a malformed ledger"; _wslife_teardown; return 1; }
-  assert_contains "$out" "not valid JSON"
-
-  # UNREADABLE: present and well-formed, but no permission to read it.
-  printf '[]\n' >"$T/alpha/.cel/delegations.json"
-  chmod 000 "$T/alpha/.cel/delegations.json"
-  out="$( (cmd_ws_down alpha) 2>&1 )" && {
-    chmod 644 "$T/alpha/.cel/delegations.json"
-    echo "down proceeded over an unreadable ledger"; _wslife_teardown; return 1; }
-  assert_contains "$out" "not readable"
-  chmod 644 "$T/alpha/.cel/delegations.json"
-
-  # None of the three touched a pane: a refusal is not a partial teardown.
-  assert_eq "$(cat "$STUB_DIR/calls.log")" ""
-
-  # ...and --force still lets an operator who means it through.
-  rm -f "$T/alpha/.cel/delegations.json"
-  out="$(cmd_ws_down alpha --force)"
+  mkdir -p "$T/alpha/.cel/delegations.json"
+  local out; out="$(cmd_ws_down alpha)" || { _wslife_teardown; return 1; }
   assert_contains "$out" "closed"
   _wslife_teardown
 }
 
-# A LEDGER THAT WAS READ AND SAYS NOTHING IS A YES. Failing closed must not
-# turn every `down` into a refusal: a well-formed ledger with no unlanded work
-# still closes the panes without --force.
-test_down_proceeds_when_the_ledger_is_read_and_empty() {
+# NOTHING HELD IS A YES: a workspace whose solo worktrees are clean closes its
+# panes without --force.
+test_down_proceeds_when_nothing_is_held() {
   _wslife_setup
+  _wslife_worktree "$T/wt"
+  _wslife_solo "$T/wt" >/dev/null
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
-  printf '[]\n' >"$T/alpha/.cel/delegations.json"
   local out; out="$(cmd_ws_down alpha)"
   assert_contains "$out" "closed"
   assert_contains "$(cat "$STUB_DIR/calls.log")" "workspace close"
@@ -414,8 +380,7 @@ test_down_proceeds_when_the_ledger_is_read_and_empty() {
 
 test_reset_is_down_then_up_in_order() {
   _wslife_setup
-  # A ledger that was read and says nothing: reset must not refuse itself.
-  printf '[]\n' >"$T/alpha/.cel/delegations.json"
+  # Nothing held: reset must not refuse itself.
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
   local out; out="$(cmd_ws_reset alpha)"

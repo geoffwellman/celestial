@@ -17,18 +17,17 @@
    "ws": "plane",
    "status": "idle",
    "pane": "w0:p3"
-  }
- ],
- "workers": [
+  },
   {
    "name": "widget-abc-12-colour",
    "ws": "alpha",
    "status": "working",
    "pane": "w1:p1",
-   "repo": "widget",
+   "mode": "solo",
+   "product": "widget",
+   "lane": "abc-12-colour",
    "branch": "ABC-12-widget-colour",
-   "id": "ABC-12",
-   "model": "anthropic/opus",
+   "repo": "widget",
    "pr": 12
   },
   {
@@ -36,10 +35,11 @@
    "ws": "bundle",
    "status": "blocked",
    "pane": "w2:p1",
-   "repo": "gadget",
+   "mode": "solo",
+   "product": "gadget",
+   "lane": "wg-7-beta",
    "branch": "WG-7-gadget-beta",
-   "id": "WG-7",
-   "model": "anthropic/opus",
+   "repo": "gadget",
    "pr": 7
   },
   {
@@ -47,20 +47,22 @@
    "ws": "alpha",
    "status": "idle",
    "pane": "w3:p1",
-   "repo": "widget",
+   "mode": "solo",
+   "product": "widget",
+   "lane": "abc-9-old",
    "branch": "ABC-9-old",
-   "id": "ABC-9",
-   "model": ""
+   "repo": "widget"
   },
   {
    "name": "gadget-wg-3-done",
    "ws": "bundle",
    "status": "done",
    "pane": "w4:p1",
-   "repo": "gadget",
+   "mode": "solo",
+   "product": "gadget",
+   "lane": "wg-3-done",
    "branch": "WG-3-done",
-   "id": "WG-3",
-   "model": ""
+   "repo": "gadget"
   }
  ],
  "prs": [

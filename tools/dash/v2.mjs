@@ -1,8 +1,7 @@
 // THE DATA BEHIND DASHBOARD V2. Every card on the v2 page reads one
-// feed here; none of them is a new store. Activity is what the inbox, the
-// delegation ledger and gh already say; lanes are the ledger's own history
-// with the steward's pane-status samples laid over it, and each live solo
-// agent's own samples; load is the same ring.
+// feed here; none of them is a new store. Activity is what the inbox and gh
+// already say; lanes are each live solo agent's own pane-status samples from
+// the steward's ring; load is the same ring.
 // The one write path is /api/v2/act, and it maps a NAME to one existing
 // command - the page never sends a command line, and nothing here types into
 // a pane: a dashboard that could would be a remote shell behind a cookie.
@@ -24,16 +23,10 @@ const median = (xs) => {
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
-const TERMINAL = new Set(['landed', 'released', 'abandoned', 'failed', 'cancelled']);
 // The fixes a stuck row can offer. Each one only MAILS the owning
 // orchestrator: the dashboard notices, the orchestrator decides.
 const STUCK = {
-  approved_not_landed: 'approved but not landed - land it or say why not',
   merge_conflict: 'has merge conflicts - rebase it',
-  changes_no_worker: 'changes requested and no worker on it - restart one',
-  idle_with_mail: 'worker idle with unread mail - wake it',
-  review_incomplete: 'finished with no review verdict - review it',
-  no_activity: 'no activity in 14 days - finish or abandon it',
 };
 
 export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, agents: agentsCold }) => {
@@ -48,10 +41,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
   // every product the workspace builds (lib/workspace.sh ws_product_names):
   // the declared ones in file order, then each repo no product claims - each
-  // with its build mode (ws_build_mode: absent is fleet)
+  // with its build mode (ws_build_mode: absent is solo)
   const productExpr = '(.products // []) as $ps | ([$ps[].repos // []] | flatten) as $used'
-    + ' | [($ps[] | {name: .name, mode: (.mode // "fleet")}),'
-    + ' ((.repos // [])[] | select(.name as $n | $used | any(. == $n) | not) | {name: .name, mode: (.mode // "fleet")})]';
+    + ' | [($ps[] | {name: .name, mode: (.mode // "solo")}),'
+    + ' ((.repos // [])[] | select(.name as $n | $used | any(. == $n) | not) | {name: .name, mode: (.mode // "solo")})]';
   // Agent and mailbox names are lib/common.sh's cel_alias_norm, asked of that
   // one rule and never re-derived here: raw name -> canonical alias, and no
   // entry when the shell cannot answer, so nothing is matched or mailed by
@@ -116,14 +109,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return one.length ? one : null;
   };
 
-  const ledgerOf = (ws) => {
-    const rows = store.json(join(ws.path, '.cel', 'delegations.json'));
-    return Array.isArray(rows) ? rows.filter((r) => r && r.branch) : [];
-  };
   const inboxOf = (ws) => readJsonl(join(INBOX_DIR, `${ws.name}.jsonl`));
-  const cursorOf = (ws, who) => {
-    try { return readFileSync(join(INBOX_DIR, `${ws.name}.${who}.cursor`), 'utf8').trim(); } catch { return ''; }
-  };
 
   // ---- slow upstreams: gh and `cel quota` -------------------------------
   // Per key: one computation in flight at a time; a failed computation
@@ -307,41 +293,28 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
     return items;
   };
-  // one workspace's inbox and ledger items, rebuilt only when the store hands
-  // back a new parse (a grown inbox, a rewritten ledger) rather than re-dated
-  // on every request. The items are shared: never mutate them.
+  // one workspace's inbox items, rebuilt only when the store hands back a new
+  // parse (a grown inbox) rather than re-dated on every request. The items
+  // are shared: never mutate them.
   const actMemo = new Map();
   const wsActivity = (ws) => {
     const mail = inboxOf(ws);
-    const led = store.json(join(ws.path, '.cel', 'delegations.json'));
     const m0 = actMemo.get(ws.name);
-    if (m0 && m0.mail === mail && m0.led === led) return m0.items;
+    if (m0 && m0.mail === mail) return m0.items;
     const items = [];
-    {
-      const decisions = new Map(mail.filter((m) => m.kind === 'decision' || m.kind === 'blocked').map((m) => [m.id, m]));
-      for (const m of mail) {
-        const ts = iso(m.ts);
-        if (!ts) continue;
-        const msg = String(m.message || '').slice(0, 200);
-        if (m.kind === 'decision') items.push({ ts, ws: ws.name, kind: 'decision', sub: 'new', text: `decision asked: ${msg}` });
-        else if (m.kind === 'resolution' && decisions.has(m.ref)) {
-          const d = decisions.get(m.ref);
-          items.push({ ts, ws: ws.name, kind: d.kind === 'decision' ? 'decision' : 'incident', sub: 'closed',
-            text: `closed: ${String(d.message || '').slice(0, 160)}` });
-        } else if (m.kind === 'blocked' || m.kind === 'escalation') items.push({ ts, ws: ws.name, kind: 'incident', sub: 'new', text: msg });
-      }
-      for (const r of ledgerOf(ws)) {
-        for (const h of r.history || []) {
-          const ts = iso(h.at);
-          if (ts) items.push({ ts, ws: ws.name, kind: 'worker', text: `${r.id || r.branch} ${h.state}${h.by ? ` (${h.by})` : ''}` });
-        }
-        if (r.review && iso(r.review.at)) {
-          items.push({ ts: iso(r.review.at), ws: ws.name, kind: 'review',
-            text: `${r.id || r.branch} review ${r.review.verdict}${r.review.by ? ` by ${r.review.by}` : ''}` });
-        }
-      }
+    const decisions = new Map(mail.filter((m) => m.kind === 'decision' || m.kind === 'blocked').map((m) => [m.id, m]));
+    for (const m of mail) {
+      const ts = iso(m.ts);
+      if (!ts) continue;
+      const msg = String(m.message || '').slice(0, 200);
+      if (m.kind === 'decision') items.push({ ts, ws: ws.name, kind: 'decision', sub: 'new', text: `decision asked: ${msg}` });
+      else if (m.kind === 'resolution' && decisions.has(m.ref)) {
+        const d = decisions.get(m.ref);
+        items.push({ ts, ws: ws.name, kind: d.kind === 'decision' ? 'decision' : 'incident', sub: 'closed',
+          text: `closed: ${String(d.message || '').slice(0, 160)}` });
+      } else if (m.kind === 'blocked' || m.kind === 'escalation') items.push({ ts, ws: ws.name, kind: 'incident', sub: 'new', text: msg });
     }
-    actMemo.set(ws.name, { mail, led, items });
+    actMemo.set(ws.name, { mail, items });
     return items;
   };
   // a ring, newest CEL_DASH_ACTIVITY_KEEP lines: the feed
@@ -357,48 +330,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- stuck --------------------------------------------------------------
-  const stuck = async (wss) => {
-    const now = Date.now();
-    const approvedDays = Number(process.env.CEL_DASH_STUCK_APPROVED_DAYS) || 2;
-    const ag = await agents();
-    const agentAt = (wt) => ag.find((a) => wt && a.cwd === wt) || null;
-    const items = [];
-    const add = (ws, ref, reason, since) => items.push({ ws, ref, reason, since: iso(since) || null,
-      fix: { label: `tell ${ref.split('/')[0]}-orch`, action: `stuck.${reason}` }, text: STUCK[reason] });
-    const pulls = await open(wss);
-    for (const ws of wss) {
-      const rows = ledgerOf(ws);
-      const mail = inboxOf(ws).filter((m) => m.kind !== 'resolution');
-      for (const r of rows) {
-        const ref = `${r.repo}/${r.branch}`;
-        if (TERMINAL.has(r.state)) continue;
-        const hist = (r.history || []).map((h) => ({ ...h, t: new Date(h.at).getTime() })).filter((h) => h.t);
-        const last = hist.length ? Math.max(...hist.map((h) => h.t)) : 0;
-        const rv = r.review || {};
-        if (rv.verdict === 'approved' && now - new Date(rv.at).getTime() > approvedDays * DAY) add(ws.name, ref, 'approved_not_landed', rv.at);
-        if (r.state === 'finished' && !rv.verdict) {
-          const fin = hist.filter((h) => h.state === 'finished').pop();
-          if (fin && now - fin.t > DAY) add(ws.name, ref, 'review_incomplete', fin.at);
-        }
-        const a = agentAt(r.worktree);
-        if (r.state === 'running' && a && a.agent_status === 'idle' && r.alias) {
-          const cur = cursorOf(ws, r.alias);
-          const unread = mail.filter((m) => m.to === r.alias && (!cur || m.id > cur));
-          if (unread.length) add(ws.name, ref, 'idle_with_mail', unread[0].ts);
-        }
-        if (r.state === 'running' && last && now - last > 14 * DAY) add(ws.name, ref, 'no_activity', new Date(last).toISOString());
-      }
-      for (const p of pulls.filter((x) => x.ws === ws.name)) {
-        const ref = `${p.repo}/${p.headRefName}`;
-        if (p.mergeable === 'CONFLICTING') add(ws.name, ref, 'merge_conflict', p.updatedAt);
-        if (p.reviewDecision === 'CHANGES_REQUESTED') {
-          const row = rows.find((r) => r.repo === p.repo && String(r.branch).toLowerCase() === String(p.headRefName).toLowerCase());
-          if (!row || TERMINAL.has(row.state) || !agentAt(row.worktree)) add(ws.name, ref, 'changes_no_worker', p.updatedAt);
-        }
-      }
-    }
-    return items;
-  };
+  // an open PR GitHub cannot merge: its agent should rebase it
+  const stuck = async (wss) => (await open(wss)).filter((p) => p.mergeable === 'CONFLICTING').map((p) => {
+    const ref = `${p.repo}/${p.headRefName}`;
+    return { ws: p.ws, ref, reason: 'merge_conflict', since: iso(p.updatedAt) || null,
+      fix: { label: `tell ${p.repo}-orch`, action: 'stuck.merge_conflict' }, text: STUCK.merge_conflict };
+  });
 
   // ---- "since you last looked", per browser -------------------------------
   const COOKIE = 'cel_v2_seen';
@@ -442,7 +379,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // ---- who each live agent is ---------------------------------------------
   // By the identity cel gave it - a directory and a cel_alias_norm name -
   // never by a name's shape alone:
-  //  - a fleet worker stands in its ledger row's worktree (or herdr's);
   //  - a solo LANE (cel run solo --lane) stands in
   //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
   //  - a reviewer (cel run reviewer) stands in its review checkout of
@@ -450,7 +386,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   //    workspace declares;
   //  - a main agent carries one of the workspace's `-orch` names (w.mains)
   //    and stands in that workspace.
-  const WORKTREES = () => join(homedir(), '.herdr', 'worktrees');
   const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
   const LANE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
   const REVIEWER = /-pr-(\d+)-review$/;
@@ -468,16 +403,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const soloProducts = (w) => w.products.filter((p) => p.mode === 'solo').map((p) => p.name);
   const identities = async (wss) => {
     const ag = await agents();
-    const workers = []; const mains = []; const lanes = []; const reviewers = []; const rest = []; const keys = [];
+    const mains = []; const lanes = []; const reviewers = []; const rest = []; const keys = [];
     for (const a of ag) {
       const cwd = a.cwd || '';
       const me = { name: String(a.name || ''), status: a.agent_status || 'unknown', pane: a.pane_id || null, cwd };
-      let ws = null; let row = null;
-      for (const w of wss) {
-        row = ledgerOf(w).find((r) => r.worktree && r.worktree === cwd) || null;
-        if (row || w.repos.some((r) => under(cwd, join(WORKTREES(), r.name)))) { ws = w; break; }
-      }
-      if (ws) { workers.push({ ...me, name: me.name || (row && row.alias) || a.pane_id, ws: ws.name, row }); continue; }
       if (!me.name) continue;
       // a pane whose directory was deleted is no live lane (lib/mode.sh)
       const lane = [];
@@ -506,7 +435,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const home = wss.find((w) => under(me.cwd, w.path) && w.mains.has(me.name));
       if (home) mains.push({ ...me, ws: home.name, ...home.mains.get(me.name) });
     }
-    return { workers, mains, lanes, reviewers };
+    return { mains, lanes, reviewers };
   };
   // A workspace's solo lanes as cel made them - every lane-<name> directory
   // of a solo product, live or not - each by its canonical name. This, not a
@@ -526,8 +455,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
   // The branch a checkout stands on, read from its own .git (a worktree's is
   // a file naming its gitdir); '' for a directory that is no checkout, or a
-  // detached head. A solo agent has no ledger row: this is the one place its
-  // current branch is written down.
+  // detached head. This is the one place a solo agent's current branch is
+  // written down.
   const branchAt = (dir) => {
     let head;
     try {
@@ -550,14 +479,11 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- lanes --------------------------------------------------------------
-  // The ledger contributes only its running spans, so a stale row never
-  // draws one segment across the whole window; an open-ended "running"
-  // counts up to now only while a pane is live in that worktree (and takes
-  // the pane's state); waiting means a pane that said "blocked" - a person
-  // is needed - and nothing else.
+  // waiting means a pane that said "blocked" - a person is needed - and
+  // nothing else.
   const PANE_STATE = { working: 'running', blocked: 'waiting', idle: 'idle', done: 'idle' };
-  // the sample ring indexed once per change, worktree -> what its pane said,
-  // oldest first, so a request never rescans the ring per ledger row
+  // the sample ring indexed once per change, cwd -> what its pane said,
+  // oldest first, so a request never rescans the ring per agent
   let paneMemo = { rows: null, idx: new Map() };
   const paneIndex = () => {
     const rows = readJsonl(SAMPLES());
@@ -589,7 +515,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     }
     return clipped.map((x) => ({ from: iso(x.from), to: iso(x.to), state: x.state }));
   };
-  // A solo agent has no ledger: its own pane's samples are its spans. A
+  // A solo agent's own pane's samples are its spans. A
   // sample stands for at most SAMPLE_SPAN - the strip's half-hour slot - so a
   // steward that stopped sampling is not drawn as work, and the live pane has
   // the last word from its last sample on (or, with none that recent, for the
@@ -611,7 +537,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (range === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime(); end = start + DAY; }
     else { start = now - (range === '3d' ? 3 : 7) * DAY; end = now; }
     const byCwd = paneIndex();
-    const ag = await agents();
     const id = await identities(wss);
     let prs = [];
     try { prs = [...await open(wss), ...await merged(wss)]; } catch { prs = []; }
@@ -619,34 +544,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const out = [];
     for (const ws of wss) {
       const lanesOut = [];
-      for (const r of ledgerOf(ws)) {
-        const hist = (r.history || []).map((h) => ({ state: h.state, t: new Date(h.at).getTime() })).filter((h) => h.t).sort((a, b) => a.t - b.t);
-        const live = r.worktree ? ag.find((a) => a.cwd === r.worktree) : null;
-        const segs = [];
-        for (let i = 0; i < hist.length; i++) {
-          if (hist[i].state !== 'running') continue;
-          if (i + 1 < hist.length) segs.push({ from: hist[i].t, to: hist[i + 1].t, state: 'running' });
-          else if (live) segs.push({ from: hist[i].t, to: now, state: PANE_STATE[live.agent_status] || 'idle', open: true });
-        }
-        // the samples say what the pane was actually doing, inside the
-        // ledger's running spans only
-        const mine = (r.worktree && byCwd.get(r.worktree)) || [];
-        let final = [];
-        for (const sg of segs) {
-          const inside = mine.filter((m) => m.t >= sg.from && m.t < sg.to);
-          if (!inside.length) { final.push({ from: sg.from, to: sg.to, state: sg.open ? sg.state : 'running' }); continue; }
-          if (inside[0].t > sg.from) final.push({ from: sg.from, to: inside[0].t, state: 'running' });
-          inside.forEach((m, i) => final.push({ from: m.t, to: i + 1 < inside.length ? inside[i + 1].t : sg.to,
-            // the live pane has the last word on the open span
-            state: (sg.open && i === inside.length - 1) ? sg.state : m.state }));
-        }
-        const segments = clipSpans(final, start, clipTo);
-        if (!segments.length) continue;
-        const pr = prs.find((p) => p.repo === r.repo && String(p.headRefName).toLowerCase() === String(r.branch).toLowerCase());
-        lanesOut.push({ ref: `${r.repo}/${r.branch}`, ...(pr ? { pr: pr.number } : {}), label: r.id || r.branch, segments });
-      }
-      // a solo product's agents - its main one and each live lane - are at
-      // work with no ledger row at all: each is a row of its own
+      // a solo product's agents - its main one and each live lane - each a
+      // row of its own
       for (const x of [...id.mains.filter((m) => m.mode === 'solo'), ...id.lanes]) {
         if (x.ws !== ws.name) continue;
         const segments = clipSpans(soloSpans(x, byCwd, now), start, clipTo);
@@ -663,11 +562,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   const fleet = async (wss) => {
     const id = await identities(wss);
     const pulls = await open(wss);
-    const workers = id.workers.map(({ row, cwd, ...x }) => {
-      const pr = row ? pulls.find((p) => p.repo === row.repo && String(p.headRefName).toLowerCase() === String(row.branch).toLowerCase()) : null;
-      return { ...x, repo: row ? row.repo : cwd.split('/').slice(-2)[0], branch: row ? row.branch : cwd.split('/').pop(),
-        id: row ? row.id || row.branch : '', model: row ? row.model || '' : '', ...(pr ? { pr: pr.number } : {}) };
-    });
     // main agents and solo lanes: each restartable and mailable by its name;
     // a solo one says which branch and PR it is on where its pane shows it
     const orchestrators = [...id.mains, ...id.lanes].map(({ cwd, ...x }) => ({ ...x, ...(x.mode === 'solo' ? soloWork({ ...x, cwd }, pulls) : {}) }));
@@ -677,7 +571,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     });
     const prs = pulls.map((p) => ({ ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,
       review: p.reviewDecision || 'REVIEW_REQUIRED', mergeable: p.mergeable || '', draft: !!p.isDraft }));
-    return { orchestrators, workers, reviewers, prs };
+    return { orchestrators, reviewers, prs };
   };
 
   // ---- services: the box's own and each workspace's ---------------------
@@ -834,10 +728,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   });
   // ---- usage ----------------------------------------------------------------
   // One card per provider answering: which account runs out before it resets,
-  // which ones the orchestrators are on, and which paid balances have vetoed
-  // their workers. Everything is read, not decided: windows, the
-  // orchestrators' pool and the floor veto from `cel quota --json`, and who
-  // used an account from the delegation ledgers.
+  // which ones the orchestrators are on, and which paid balances are below
+  // their floor. Everything is read, not decided: windows, the orchestrators'
+  // pool and the floor veto from `cel quota --json`.
   //
   // History: nothing else records quota, so the dashboard keeps its own short
   // ring of each `cel quota` read it makes (at most one a minute, a week kept)
@@ -860,14 +753,6 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
   const PROVIDER_TITLE = { claude: 'Claude', codex: 'ChatGPT (codex)', opencode: 'OpenCode' };
   const PROVIDER_ORDER = ['claude', 'codex', 'opencode'];
-  // a ledger model to the subscription it spends; anything else is an API key
-  const modelProvider = (m) => {
-    const x = String(m || '').toLowerCase();
-    if (/claude|anthropic|opus|sonnet|haiku/.test(x)) return 'claude';
-    if (/gpt|codex|openai/.test(x)) return 'codex';
-    if (/opencode/.test(x)) return 'opencode';
-    return null;
-  };
   const winLabel = (w) => {
     const len = winLen(w.name);
     const base = len === 5 * 3600e3 ? '5 hours' : len === DAY ? 'Day' : len === 7 * DAY ? 'Week' : len === 30 * DAY ? 'Month' : String(w.name || 'window');
@@ -889,21 +774,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const live = new Set((pool.live || []).map((x) => String(x).toLowerCase()));
     const dead = new Set((pool.disabled || []).map((x) => String(x).toLowerCase()));
     const gw = new Set((q.gateway || []).map((x) => String(x).toLowerCase()));
-    // who used each subscription this week, by workspace and profile - from
-    // every ledger on the box, since a subscription is the box's
     const weekAgo = now - 7 * DAY;
-    const usedBy = {};
-    for (const ws of await workspaces()) {
-      for (const r of ledgerOf(ws)) {
-        const p = modelProvider(r.model || r.profile);
-        const at = new Date(((r.history || [])[0] || {}).at || 0).getTime();
-        if (!p || !(at >= weekAgo)) continue;
-        const k = `${ws.name}\t${r.profile || r.model || '?'}`;
-        (usedBy[p] = usedBy[p] || {})[k] = ((usedBy[p] || {})[k] || 0) + 1;
-      }
-    }
-    const usedList = (p) => Object.entries(usedBy[p] || {}).map(([k, n]) => { const [ws, profile] = k.split('\t'); return { ws, profile, n }; })
-      .sort((a, b) => b.n - a.n || a.ws.localeCompare(b.ws));
     const ring = readJsonl(USAGE_RING()).filter((r) => new Date(r.ts).getTime() >= weekAgo);
     const atRisk = [];
     const groups = {};
@@ -932,20 +803,14 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       }
       const g = groups[s.provider] || (groups[s.provider] = { provider: s.provider, title: PROVIDER_TITLE[s.provider] || s.provider, accounts: [] });
       g.accounts.push({ who, account: s.account || who, tags, state: (s.extra || {}).state || '', reason: (s.extra || {}).reason || '',
-        at_risk: windows.some((w) => w.at_risk), windows: windows.map(({ len, ...w }) => w), used_by: null });
+        at_risk: windows.some((w) => w.at_risk), windows: windows.map(({ len, ...w }) => w) });
     }
     const glist = Object.values(groups).sort((a, b) => {
       const ia = PROVIDER_ORDER.indexOf(a.provider); const ib = PROVIDER_ORDER.indexOf(b.provider);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.provider.localeCompare(b.provider);
     });
     for (const g of glist) {
-      g.used_by = usedList(g.provider);
-      g.who = { orch: g.accounts.some((a) => a.tags.includes('orch')), workers: g.accounts.some((a) => a.tags.includes('workers')),
-        profiles: [...new Set(g.used_by.map((u) => u.profile))] };
-      // A gateway round-robins one provider's accounts and the ledger does not
-      // record which one served a worker, so the split is only knowable when
-      // there is one account; otherwise the row does not pretend.
-      if (g.accounts.length === 1 && g.used_by.length) g.accounts[0].used_by = g.used_by;
+      g.who = { orch: g.accounts.some((a) => a.tags.includes('orch')), workers: g.accounts.some((a) => a.tags.includes('workers')) };
     }
     // pay-as-you-go: one row per account (key fingerprint), workspaces merged
     const names = new Set(wss.map((w) => w.name));
@@ -1078,8 +943,8 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (!all.some((w) => w.name === wsName)) return [400, 'unknown workspace'];
     const cel = (argv) => run(CEL(), argv, 30000);
     // A mailbox is only one somebody reads. `cel inbox send`
-    // will write to any name, so the dashboard checks first: a ledger alias,
-    // one of the workspace's main agents, a solo lane it has made, a live
+    // will write to any name, so the dashboard checks first: one of the
+    // workspace's main agents, a solo lane it has made, a live
     // reviewer of one of its repos - each by its canonical alias, the name the
     // page shows - or root. A typo here would otherwise be a message nobody sees.
     const ws = all.find((w) => w.name === wsName);
@@ -1087,7 +952,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     if (action === 'message') {
       const text = String(args.text || '').trim();
       if (!NAME.test(String(target || '')) || !text || text.length > 4000) return [400, 'message needs a target and text'];
-      const known = new Set(['root', ...ws.mains.keys(), ...ledgerOf(ws).map((r) => r.alias).filter(Boolean),
+      const known = new Set(['root', ...ws.mains.keys(),
         ...(await laneDirs(ws)).map((l) => l.name), ...(await identities([ws])).reviewers.map((r) => r.name)]);
       if (!known.has(String(target))) return [400, 'unknown recipient'];
       // urgent goes as an escalation so it notifies; an ask is labelled so

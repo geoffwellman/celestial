@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 # cel services - the things this box is RUNNING, as one list.
 #
-# ONE MODEL, THREE SOURCES. A service is what `services:` declares, a box
-# service is a file in services.d, and a preview is a ledger row with a `try`
-# block. They share one row shape because they are the same question to an
-# operator: something is listening on a port and I want to look at it.
+# ONE MODEL, TWO SOURCES. A service is what `services:` declares, and a box
+# service is a file in services.d. They share one row shape because they are
+# the same question to an operator: something is listening on a port and I
+# want to look at it.
 [ -n "${_CEL_SERVICES:-}" ] && return 0
 _CEL_SERVICES=1
 # shellcheck source=lib/common.sh
@@ -208,25 +208,11 @@ _svc_declared() { # <wsdir>
     }' "$1/workspace.yaml" 2>/dev/null || true
 }
 
-# ...and every running preview. The ledger row IS the declaration: `try`
-# allocated the ports and wrote the url, so nothing is re-derived here.
-_svc_previews() { # <wsdir>
-  [ -n "${1:-}" ] || return 0
-  local f="$1/.cel/delegations.json"
-  [ -f "$f" ] || return 0
-  jq -c --arg ws "$(ws_name "$1")" '.[]? | select(.try.url != null) | {
-      name: ("try " + (.ticket // .id)), url: .try.url, cmd: "", cwd: (.worktree // ""),
-      health: "", health_auth: "", restart: "", env: {}, kind: "preview", workspace: $ws, ticket: (.ticket // ""),
-      pane: (.try.pane // ""), id: (.id // "")
-    }' "$f" 2>/dev/null || true
-}
-
 # THE ENUMERATOR, and the reason box services cost every consumer nothing.
 # Workspace rows first, then the box's own: inside a workspace the workspace's
 # services are the question being asked and the box's are context underneath.
 _svc_all() { # [wsdir]
   _svc_declared "${1:-}"
-  _svc_previews "${1:-}"
   _svc_box
 }
 
@@ -348,8 +334,7 @@ _svc_pane_forget() { # <wsdir|box> <name>
 }
 
 # The workspace's own pane, so a service appears beside the workspace it
-# belongs to rather than wherever the operator happened to be standing - the
-# same rule `cel-fanout try` follows for a preview under its worker.
+# belongs to rather than wherever the operator happened to be standing.
 # Answers through globals, like _svc_box_home_pane: a refused `agent list` is
 # herdr's own words in _SVC_WS_ERR, not a silent "no pane".
 _SVC_WS_PANE=""
@@ -641,7 +626,7 @@ cmd_services() { # [start|stop|restart|logs|open <name>] [--workspace w] [--json
   if [ "$json" -eq 1 ]; then printf '%s\n' "$rows"; return 0; fi
   local n; n="$(printf '%s' "$rows" | jq 'length')"
   if [ "${n:-0}" -eq 0 ]; then
-    c_warn "no services declared in $(ws_name "$wsdir") and no previews running"
+    c_warn "no services declared in $(ws_name "$wsdir")"
     return 0
   fi
   # Two blocks, because they answer two different questions: what this

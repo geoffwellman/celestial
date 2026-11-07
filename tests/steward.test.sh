@@ -569,17 +569,13 @@ SH
   rm -rf "$T"
 }
 
-# A SOLO PRODUCT HAS NO WORKERS. Its red or changes-requested PR goes to its
-# own agent as a fix-it-on-the-branch finding: no worker lookup on the branch,
-# and no "get a worker" or "restart the worker" remedy it cannot follow.
-test_review_sweep_routes_a_solo_red_pr_to_its_agent_without_fleet_remedies() {
+# A PRODUCT HAS NO WORKERS. Its red or changes-requested PR goes to its own
+# agent as a fix-it-on-the-branch finding: no worker lookup on the branch, and
+# no "get a worker" or "restart the worker" remedy it cannot follow - even with
+# an idle pane standing in some checkout of that branch.
+test_review_sweep_routes_a_red_pr_to_its_agent_without_worker_remedies() {
   _orch_fixture
-  sed -i 's/{name: bundle, repos: \[widget\], orchestrator: auto}/{name: bundle, repos: [widget], orchestrator: auto, mode: solo}/' \
-    "$T/alpha/workspace.yaml"
-  mkdir -p "$T/bin" "$T/alpha/.cel" "$T/wt"
-  # a leftover fleet row on the same branch, with an idle pane standing in it
-  printf '[{"id":"old","repo":"widget","branch":"WG-1-x","state":"running","worktree":"%s/wt"}]\n' "$T" \
-    > "$T/alpha/.cel/delegations.json"
+  mkdir -p "$T/bin" "$T/wt"
   local roster
   roster="$(printf '{"result":{"agents":[{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p2"},{"name":"old-worker","agent_status":"idle","pane_id":"w:p3","cwd":"%s/wt"}]}}' "$T")"
   cat > "$T/bin/gh" <<'SH'
@@ -598,17 +594,17 @@ SH
   chmod +x "$T/bin/gh" "$T/bin/herdr"
   PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
   local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
-  assert_contains "$mail" "PR #7 on widget has FAILING checks" || { rm -rf "$T"; return 1; }
-  assert_contains "$mail" "PR #8 on widget has changes requested" || { rm -rf "$T"; return 1; }
-  case "$mail" in *worker*|*delegate*) echo "fleet remedy mailed to a solo product: $mail"; rm -rf "$T"; return 1 ;; esac
+  assert_contains "$mail" "PR #7 on widget has FAILING checks on WG-1-x - a red gate is a finding: fix it on the branch and push." || { rm -rf "$T"; return 1; }
+  assert_contains "$mail" "PR #8 on widget has changes requested at its current head - address them on WG-2-y, push, and ask its reviewer to re-review" || { rm -rf "$T"; return 1; }
+  case "$mail" in *worker*|*delegate*|*nobody*) echo "worker remedy mailed to a product: $mail"; rm -rf "$T"; return 1 ;; esac
   # nobody's pane was read to decide who stands on the branch
-  if grep -q '^agent read' "$T/herdr.argv" 2>/dev/null; then echo "solo sweep read a worker pane"; rm -rf "$T"; return 1; fi
+  if grep -q '^agent read' "$T/herdr.argv" 2>/dev/null; then echo "review sweep read a worker pane"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
 
 # ---- orphaned test servers ---------------------------------------------------
-# A test server whose worktree no longer has an agent can hold a workspace's
-# ledger lock while nothing names it. The steward names it with pid and port,
+# A test server whose worktree no longer has an agent holds a port and memory
+# while nothing names it. The steward names it with pid and port,
 # and reaps one older than an hour.
 # Servers under CEL_ROOT are the box's own services and are never touched.
 _orphan_fixture() { # <age-seconds>; sets ORPHAN_PID and stubs process listing
@@ -820,14 +816,10 @@ test_steward_says_new_commits_on_main_once_as_a_status_line() {
 _mem_steward_fixture() { # <total-kb> <available-kb>
   T="$(mktemp -d)"
   export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
-  mkdir -p "$T/alpha/.cel" "$T/alpha/products/bundle" "$T/inbox" "$T/wt/ABC-49-slug"
+  mkdir -p "$T/alpha/.cel" "$T/alpha/products/bundle" "$T/inbox"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
   printf 'name: alpha\nrepos: [{name: widget}, {name: gadget}]\nproducts:\n  - name: bundle\n    repos: [widget, gadget]\n' \
     > "$T/alpha/workspace.yaml"
-  cat > "$T/alpha/.cel/delegations.json" <<EOF
-[{"id":"ABC-49-slug","ticket":"ABC-49","repo":"widget","branch":"ABC-49-slug","pane":"w3:p1","worktree":"$T/wt/ABC-49-slug","state":"running"},
- {"id":"ABC-50-done","ticket":"ABC-50","repo":"gadget","branch":"ABC-50-done","pane":"w3:p2","worktree":"$T/wt/gone","state":"collected"}]
-EOF
   CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
   printf 'MemTotal:       %s kB\nMemAvailable:   %s kB\n' "$1" "$2" > "$T/meminfo"
   export CEL_MEMINFO="$T/meminfo"
@@ -837,7 +829,6 @@ EOF
   mem_tree_snapshot_clear() { :; }
   mem_tree_rss_mb() {
     case "$1" in
-      *"/wt/ABC-49-slug"*)  printf 2400 ;;
       *products/bundle*)    printf 800 ;;
       *) printf 0 ;;
     esac
@@ -857,12 +848,8 @@ test_steward_raises_one_blocker_when_the_box_runs_out_of_memory() {
   local open; open="$(cmd_inbox open --for root --workspace alpha)"
   assert_eq "$(printf '%s\n' "$open" | grep -c 'box memory low')" "1"
   assert_contains "$open" "1.2G of 24G available"
-  assert_contains "$open" "ABC-49-slug 2.3G"
   assert_contains "$open" "bundle-orch 800M"
   assert_contains "$open" "Top servers: preview-demo 880M"
-  # a collected delegation is finished business and its worktree is gone: it is
-  # not one of the trees anybody can act on
-  case "$open" in *ABC-50-done*) echo 'a collected worker was named as a live tree'; rm -rf "$T"; return 1;; esac
   rm -rf "$T"
 }
 
@@ -881,37 +868,6 @@ test_steward_clears_the_memory_blocker_only_when_headroom_really_returns() {
   _STEWARD_WINDOW=0 _steward_memory >/dev/null 2>&1
   assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
-  rm -rf "$T"
-}
-
-# A SINGLE WORKER OVER THE THRESHOLD IS THE ORCHESTRATOR'S BUSINESS, not
-# root's: the orchestrator is the thing that can collect it or let it finish.
-# The box itself is healthy here, so this is the only sweep that speaks.
-test_steward_tells_the_product_orchestrator_about_a_worker_over_the_threshold() {
-  _mem_steward_fixture 25165824 12582912
-  local out
-  out="$(_STEWARD_WINDOW=0 _steward_memory 2>&1)"
-  assert_contains "$out" "ABC-49-slug"
-  assert_contains "$out" "2.3G"
-  case "$out" in *'box memory low'*) echo 'a healthy box was reported as low'; rm -rf "$T"; return 1;; esac
-  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
-  assert_contains "$mail" "ABC-49-slug"
-  assert_contains "$mail" "2.3G"
-  # NO KILLING. The steward names it; a sweep that reaped a worker mid-gate
-  # would destroy the work it was measuring.
-  case "$mail" in *kill*) echo 'the steward offered to kill a worker'; rm -rf "$T"; return 1;; esac
-  rm -rf "$T"
-}
-
-# Under the threshold is not news. A worker at a normal 340 MB reported every
-# tick is how an operator learns to skip the steward's output.
-test_steward_stays_quiet_about_a_worker_of_ordinary_size() {
-  _mem_steward_fixture 25165824 12582912
-  mem_tree_rss_mb() { printf 340; }
-  local out
-  out="$(_STEWARD_WINDOW=0 CEL_MEM_WORKER_WARN_MB=2048 _steward_memory 2>&1)"
-  assert_eq "$out" ""
-  assert_eq "$(cmd_inbox count --for bundle-orch --workspace alpha)" "0"
   rm -rf "$T"
 }
 
@@ -984,115 +940,6 @@ test_steward_clears_a_subscription_blocker_when_the_window_drops() {
   assert_eq "$(cmd_inbox open --for root --workspace alpha)" ""
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
   rm -rf "$T"
-}
-
-# --- the steward closes what the world already closed ----------------------
-# A PR merged through GitHub by hand never ran `land` or `release`, so the
-# ledger would keep it as somebody's concern. Reconciling is deterministic, so
-# the steward does it every tick - once per workspace, which is one `gh pr
-# list` per repo per tick and fine at a five-minute tick.
-_reconcile_tick_fixture() {
-  T="$(mktemp -d)"
-  export HOME="$T/home"; mkdir -p "$HOME"
-  export CEL_REGISTRY="$T/registry.yaml"
-  mkdir -p "$T/alpha" "$T/beta"
-  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  beta: {path: "%s/beta"}\n' "$T" "$T" > "$CEL_REGISTRY"
-  printf 'name: alpha\nrepos: []\n' > "$T/alpha/workspace.yaml"
-  printf 'name: beta\nrepos: []\n'  > "$T/beta/workspace.yaml"
-  : > "$T/reconciled"
-  mkdir -p "$T/bin"
-  cat > "$T/bin/cel-fanout-stub" <<SH
-#!/usr/bin/env bash
-echo "\$@" >> "$T/reconciled"
-echo "reconcile: 0 landed, 0 abandoned, 0 reports waiting, 0 released"
-SH
-  chmod +x "$T/bin/cel-fanout-stub"
-  export CEL_STEWARD_FANOUT="$T/bin/cel-fanout-stub"
-}
-
-_reconcile_ledger() { # <ws> <json> - written byte for byte; '' is a zero-byte file
-  mkdir -p "$T/$1/.cel"
-  printf '%s' "$2" > "$T/$1/.cel/delegations.json"
-}
-
-test_steward_reconciles_every_workspace_with_live_rows_once_per_tick() {
-  _reconcile_tick_fixture
-  _reconcile_ledger alpha '[{"id":"a1","state":"running"}]'
-  _reconcile_ledger beta '[{"id":"b1","state":"landed"},{"id":"b2","state":"finished"}]'
-  local out; out="$(_steward_reconcile 2>&1)"
-  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "1"
-  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "1"
-  # the pass is in the tick log, or nobody can tell what it did
-  assert_contains "$out" "reconcile: 0 landed"
-  rm -rf "$T"
-}
-
-# A workspace with no ledger, or one whose every row is over, has nothing to
-# reconcile: no `gh pr list` per repo every five minutes for it.
-test_steward_skips_reconcile_where_no_delegation_is_live() {
-  _reconcile_tick_fixture
-  _reconcile_ledger alpha '[{"id":"a1","state":"landed"},{"id":"a2","state":"released"},{"id":"a3","state":"abandoned"}]'
-  _steward_reconcile >/dev/null 2>&1
-  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "0" || { rm -rf "$T"; return 1; }
-  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "0" || { rm -rf "$T"; return 1; }
-  # a row in a state nobody knows, or a ledger nobody can read, is not "over"
-  _reconcile_ledger alpha '[{"id":"a1","state":"landed"},{"id":"a4","state":"mystery"}]'
-  _reconcile_ledger beta '{not json'
-  _steward_reconcile >/dev/null 2>&1
-  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "1"
-  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "1"
-  rm -rf "$T"
-}
-
-# A reconcile that cannot run is one sweep failing, not a tick dying: the
-# stalled-worker sweep below it is the one that costs work.
-test_steward_survives_a_reconcile_that_fails() {
-  _reconcile_tick_fixture
-  _reconcile_ledger alpha '[{"id":"a1","state":"running"}]'
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/cel-fanout-stub"
-  local out; out="$(_steward_reconcile 2>&1)"
-  assert_contains "$out" "reconcile failed"
-  rm -rf "$T"
-}
-
-# The stalled-worker sweep skips a ledger whose rows are all over, and the
-# stall items raised while a row was running go with it; nothing else does.
-test_stall_sweep_over_a_finished_ledger_takes_down_only_its_stall_items() {
-  _rollup_fixture
-  _reconcile_ledger alpha '[{"id":"w1","state":"landed","pane":"w:p9"}]'
-  cmd_inbox send root "STALLED WORKER WG-1 (w:p9): stalled" \
-    --from steward --kind blocked --fp stall-w1 --workspace alpha >/dev/null 2>&1
-  cmd_inbox send root "some other blocker" \
-    --from steward --kind blocked --fp quota-x --workspace alpha >/dev/null 2>&1
-  _steward_stalled_workers '{"result":{"agents":[]}}' >/dev/null 2>&1
-  local open; open="$(cmd_inbox open --for root --workspace alpha)"
-  case "$open" in *"STALLED WORKER"*) echo "stall item outlived its finished row: $open"; rm -rf "$T"; return 1 ;; esac
-  assert_contains "$open" "some other blocker"
-  rm -rf "$T"
-}
-
-# A ledger is "over" only when it is a list of rows, every one terminal. A
-# document of any other shape - and an empty file - says nothing about what
-# is running, so reconcile still runs and no open stall item is taken down.
-test_fanout_sweeps_treat_an_unrecognised_ledger_as_live() {
-  local shape out
-  for shape in 'null' '{}' '{"delegations":null}' ''; do
-    _reconcile_tick_fixture
-    _reconcile_ledger alpha "$shape"
-    _steward_reconcile >/dev/null 2>&1
-    out="$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)"
-    rm -rf "$T"
-    [ "$out" = 1 ] || { echo "reconcile skipped for a ledger of shape '$shape'"; return 1; }
-
-    _rollup_fixture
-    _reconcile_ledger alpha "$shape"
-    cmd_inbox send root "STALLED WORKER WG-1 (w:p9): stalled" \
-      --from steward --kind blocked --fp stall-w1 --workspace alpha >/dev/null 2>&1
-    _steward_stalled_workers '{"result":{"agents":[]}}' >/dev/null 2>&1
-    out="$(cmd_inbox open --for root --workspace alpha)"
-    rm -rf "$T"
-    case "$out" in *"STALLED WORKER"*) ;; *) echo "stall item closed over a ledger of shape '$shape'"; return 1 ;; esac
-  done
 }
 
 # ── services ─────────────────────────────────────────────────────────────────
@@ -1350,133 +1197,6 @@ test_steward_memory_trees_include_the_orphans_as_one_tree() {
   rm -rf "$T"
 }
 
-# --- the stalled sweep asks what the pane is doing ---------------------------
-#
-# A runtime's own status can be wrong while the timers have not run out. The
-# sweep asks a classifier about the FEW workers code has already singled out -
-# and about nobody else, because a request per healthy worker every five
-# minutes is both a waste and a documented way to make the answers worse.
-_stall_sweep_setup() {
-  T="$(mktemp -d)"
-  export CEL_REGISTRY="$T/registry.yaml"
-  export CEL_INBOX_DIR="$T/inbox"
-  export CEL_STEWARD_STATE="$T/steward-state"
-  export CEL_LIVENESS_STATE="$T/liveness-state"
-  export CEL_CONFIG_FILE="$T/config.yaml"
-  export CEL_LIVENESS_URL="https://stub.invalid/alpha/decisions"
-  export OPENROUTER_API_KEY=test-key
-  _STEWARD_STATE="$CEL_STEWARD_STATE"
-  mkdir -p "$T/inbox" "$T/alpha/.cel" "$T/bin"
-  printf 'console:\n  router:\n    provider: openrouter\n    model: alpha/decide-1\n    key_env: OPENROUTER_API_KEY\n' \
-    > "$CEL_CONFIG_FILE"
-  printf 'workspaces:\n  alpha: { path: %s/alpha, remote: null }\n' "$T" > "$CEL_REGISTRY"
-  printf 'name: alpha\nkind: hustle\ntickets: { system: none }\nrepos: [{name: widget, prefix: WG}]\n' \
-    > "$T/alpha/workspace.yaml"
-  mkdir -p "$T/wt-busy" "$T/wt-stuck"
-  cat > "$T/alpha/.cel/delegations.json" <<EOF
-[{"id":"busy","repo":"widget","branch":"widget-busy","pane":"wA:p1","alias":"widget-busy","worktree":"$T/wt-busy","state":"running","ticket":"WG-1"},
- {"id":"stuck","repo":"widget","branch":"widget-stuck","pane":"wA:p2","alias":"widget-stuck","worktree":"$T/wt-stuck","state":"running","ticket":"WG-2"}]
-EOF
-  cat > "$T/bin/herdr" <<'EOF'
-#!/usr/bin/env bash
-echo "$@" >> "$STUB_LOG"
-case "$1 $2" in
-  "pane read")  printf '%s\n' "reading src and running the gate" ;;
-  "agent read") case "$3" in
-                  *stuck*) printf '%s\n' "${STUB_STUCK_TEXT:-npm test}" ;;
-                  *) printf '%s\n' "moving along $RANDOM" ;;
-                esac ;;
-  *) printf '%s\n' '{}' ;;
-esac
-EOF
-  chmod +x "$T/bin/herdr"
-  export STUB_LOG="$T/herdr.log"; : > "$STUB_LOG"
-  _STEWARD_HERDR="$T/bin/herdr"
-  AGENTS_JSON='{"result":{"agents":[{"pane_id":"wA:p1","agent_status":"working"},{"pane_id":"wA:p2","agent_status":"working"}]}}'
-  : > "$T/requests"
-  STUB_ACTIVITY=looping STUB_CONFIDENCE=0.81
-  curl() {
-    local body=""
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -H) case "$2" in @-) cat >/dev/null ;; esac; shift 2 ;;
-        -d) body="$2"; shift 2 ;;
-        *) shift ;;
-      esac
-    done
-    printf '%s\n' "$body" >> "$T/requests"
-    jq -nc --arg a "$STUB_ACTIVITY" --argjson c "$STUB_CONFIDENCE" \
-      '{answers: {activity: {value: $a, confidence: $c}, needs_a_person: {probability: 0.2}}}'
-  }
-  # One worker's pane has looked the same for an hour; the other's moves every
-  # read. The age is kept by lib/liveness.sh, so it is seeded the same way.
-  source "$CEL_ROOT/lib/liveness.sh"
-  liveness_output_age alpha/stuck "${STUB_STUCK_TEXT:-npm test}" >/dev/null
-  liveness_backdate alpha/stuck 3600
-}
-
-test_the_sweep_asks_about_the_candidate_and_nobody_else() {
-  _stall_sweep_setup
-  _steward_stalled_workers "$AGENTS_JSON" >/dev/null 2>&1
-  assert_eq "$(grep -c . "$T/requests" || true)" 1
-  assert_contains "$(cat "$T/requests")" 'npm test'
-  case "$(cat "$T/requests")" in *moving\ along*) echo 'the healthy worker was asked about'; return 1;; esac
-  rm -rf "$T"
-}
-
-# `working` for an hour with a frozen pane is exactly the shape the timers miss:
-# no marker, and three hours away from the quiet rule.
-test_a_looping_worker_is_reported_before_the_timer_would_have() {
-  _stall_sweep_setup
-  local out; out="$(_steward_stalled_workers "$AGENTS_JSON" 2>&1)"
-  assert_contains "$out" 'looping'
-  assert_contains "$out" 'WG-2'
-  case "$out" in *WG-1*) echo 'the healthy worker was reported'; return 1;; esac
-  rm -rf "$T"
-}
-
-# The model REPORTS. Nothing it can answer reaches a verb that ends a process -
-# the memory sweep's posture, and the reason this feature is allowed to exist.
-test_no_answer_reaches_a_kill() {
-  _stall_sweep_setup
-  STUB_ACTIVITY=crashed
-  _steward_stalled_workers "$AGENTS_JSON" >/dev/null 2>&1
-  local log; log="$(cat "$STUB_LOG")"
-  case "$log" in
-    *"agent stop"*|*"agent remove"*|*kill*|*terminate*|*"agent prompt"*)
-      echo "the sweep acted on a pane: $log"; return 1 ;;
-  esac
-  rm -rf "$T"
-}
-
-# With no key on the box nothing is asked and the timers decide alone, which is
-# every box that has not configured a router.
-test_the_sweep_asks_nobody_without_a_key() {
-  _stall_sweep_setup
-  unset OPENROUTER_API_KEY
-  local out; out="$(_steward_stalled_workers "$AGENTS_JSON" 2>&1)"
-  assert_eq "$(grep -c . "$T/requests" || true)" 0
-  case "$out" in *looping*) echo 'a verdict appeared with no model behind it'; return 1;; esac
-  rm -rf "$T"
-}
-
-test_steward_keeps_rex_stall_evidence_without_herdr_screen_or_idle_inference() {
-  local t; t="$(mktemp -d)"
-  mkdir -p "$t/.cel"
-  printf '%s' '[{"id":"rex-worker","state":"running","pane":"rex/session:fixture/block:fixture","alias":"rex-worker","worktree":"/fixture/rex"}]' > "$t/.cel/delegations.json"
-  registry_names() { printf demo; }
-  registry_path() { printf '%s' "$t"; }
-  local _STEWARD_HERDR=rex_forbidden_herdr
-  rex_forbidden_herdr() { printf '%s\n' "$*" >> "$t/herdr-calls"; return 1; }
-  _steward_clear() { printf '%s\n' "$*" >> "$t/clears"; }
-  _steward_raise() { printf '%s\n' "$*" >> "$t/raises"; }
-  local agents='{"result":{"agents":[{"pane_id":"rex/session:fixture/block:fixture","name":"rex-worker","cwd":"/fixture/rex","agent_status":"idle","backend":"rex"}]}}'
-  _steward_stalled_workers "$agents" >/dev/null 2>&1
-  [ ! -s "$t/herdr-calls" ] || { echo 'Rex was read through Herdr'; return 1; }
-  [ ! -s "$t/clears" ] && [ ! -s "$t/raises" ] || { echo 'Rex screen liveness was inferred'; return 1; }
-  rm -rf "$t"
-}
-
 test_steward_failed_roster_cannot_reap_orphan_servers() {
   local t; t="$(mktemp -d)"
   _steward_server_procs() { printf '1 7200 7777 %s/.herdr/worktrees/fixture\n' "$HOME"; }
@@ -1596,42 +1316,6 @@ test_steward_says_manual_plainly_rather_than_will_not_start() {
   ! printf '%s' "$out" | grep -q 'lone-orch will not start' \
     || { echo "the steward still reports a failure to start a manual product: $out"; rm -rf "$T"; return 1; }
   assert_eq "$(grep -c lone "$T/launched" || true)" "0"
-  rm -rf "$T"
-}
-
-# --- blocked is not absent ---------------------------------------------------
-#
-# A worker the box can see on the branch, throttled on a spent window, is
-# named as BLOCKED and no re-dispatch is requested: spawning another would
-# spend the window it is waiting on.
-test_a_red_gate_with_a_blocked_worker_names_the_block_not_a_missing_worker() {
-  _orch_fixture
-  mkdir -p "$T/bin"
-  : > "$T/prompts"
-  cat > "$T/bin/gh" <<'SH'
-#!/usr/bin/env bash
-printf '%s' '[{"number":11,"headRefName":"WG-44-x","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"}]'
-SH
-  cat > "$T/bin/herdr" <<SH
-#!/usr/bin/env bash
-case "\$1 \$2" in
-  "agent get")    [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
-  "agent prompt") printf '%s\n' "\$3 \$4" >> "$T/prompts" ;;
-  "agent read")   printf 'API Error: 429 Too Many Requests {"type":"rate_limit_error"}\n ctx 61.0%%/1.0m\n' ;;
-esac
-exit 0
-SH
-  chmod +x "$T/bin/gh" "$T/bin/herdr"
-  _STEWARD_HERDR="$T/bin/herdr"
-  local roster
-  roster='{"result":{"agents":[{"name":"widget-WG-44-x","agent_status":"idle","pane_id":"w:p2","cwd":"'"$HOME"'/.herdr/worktrees/widget/WG-44-x"},{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
-  PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
-  # the nudge is mail to the product orchestrator, not a prompt
-  local msg; msg="$(cmd_inbox read --for bundle-orch --workspace alpha --all | grep 'on widget' || true)"
-  assert_contains "$msg" 'throttled'
-  case "$msg" in
-    *"get a worker on it"*|*"nobody on"*) echo "the steward asked for another worker: $msg"; return 1 ;;
-  esac
   rm -rf "$T"
 }
 
@@ -1763,72 +1447,6 @@ SH
   assert_contains "$(grep -- '--repo someone/widget' "$GH_LOG")" "GH_TOKEN=tok-b"
   assert_contains "$(grep -- '--repo other/gizmo' "$GH_LOG")" "GH_TOKEN=<unset>"
   assert_eq "$(grep -- '--repo other/gizmo' "$GH_LOG" | grep -c tok-b || true)" "0"
-  rm -rf "$T"
-}
-
-# --- finding a ticket branch's worker ----------------------------------------
-# Herdr lowercases the worktree name (ABC-7-thing -> .../abc-7-thing), so a
-# guessed $HOME/.herdr/worktrees/<repo>/<branch> never matches an uppercase
-# ticket branch. The ledger records the real worktree; these pin that.
-_cel72_fixture() { # <agent-status|none> <ledger 0|1> <cwd>
-  _orch_fixture
-  mkdir -p "$T/bin" "$T/alpha/.cel"
-  if [ "$2" = 1 ]; then
-    printf '[{"id":"WG-72-x","repo":"widget","branch":"WG-72-x","state":"running","worktree":"%s/wt/widget-alpha/wg-72-x"}]' "$T" \
-      > "$T/alpha/.cel/delegations.json"
-  fi
-  cat > "$T/bin/gh" <<'SH'
-#!/usr/bin/env bash
-printf '%s' '[{"number":12,"headRefName":"WG-72-x","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z"}]'
-SH
-  cat > "$T/bin/herdr" <<'SH'
-#!/usr/bin/env bash
-case "$1 $2" in
-  "agent get")  [ "$3" = bundle-orch ] && exit 0 || exit 1 ;;
-  "agent read") printf 'API Error: 429 Too Many Requests {"type":"rate_limit_error"}\n' ;;
-esac
-exit 0
-SH
-  chmod +x "$T/bin/gh" "$T/bin/herdr"
-  _STEWARD_HERDR="$T/bin/herdr"
-  local agent=''
-  [ "$1" = none ] || agent='{"name":"widget-wg-72-x","agent_status":"'"$1"'","pane_id":"w:p2","cwd":"'"$T/$3"'"},'
-  local roster='{"result":{"agents":['"$agent"'{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p3"}]}}'
-  PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
-  MSG="$(cmd_inbox read --for bundle-orch --workspace alpha --all | grep 'on widget' || true)"
-}
-
-test_cel72_a_working_worker_at_the_ledger_worktree_is_not_nobody() {
-  _cel72_fixture working 1 'wt/widget-alpha/wg-72-x'
-  case "$MSG" in *"nobody on"*) echo "working worker reported as nobody: $MSG"; rm -rf "$T"; return 1 ;; esac
-  assert_eq "$MSG" ""
-  rm -rf "$T"
-}
-
-test_cel72_an_idle_worker_at_the_ledger_worktree_is_named_not_nobody() {
-  _cel72_fixture idle 1 'wt/widget-alpha/wg-72-x'
-  assert_contains "$MSG" "its worker on WG-72-x is"
-  case "$MSG" in *"nobody on"*) echo "idle worker reported as nobody: $MSG"; rm -rf "$T"; return 1 ;; esac
-  rm -rf "$T"
-}
-
-test_cel72_no_agent_at_the_ledger_worktree_is_still_nobody() {
-  _cel72_fixture none 1 ''
-  assert_contains "$MSG" "nobody on WG-72-x"
-  rm -rf "$T"
-}
-
-test_cel72_without_a_ledger_row_the_lowercased_guess_is_found() {
-  _cel72_fixture idle 0 'home/.herdr/worktrees/widget/wg-72-x'
-  assert_contains "$MSG" "its worker on WG-72-x is"
-  rm -rf "$T"
-}
-
-# When the ledger names the worktree, an agent standing at the GUESSED
-# path is someone else - the guess is only for a branch with no ledger row.
-test_cel79_a_ledger_row_excludes_an_agent_at_the_guessed_path() {
-  _cel72_fixture idle 1 'home/.herdr/worktrees/widget/wg-72-x'
-  assert_contains "$MSG" "nobody on WG-72-x"
   rm -rf "$T"
 }
 
@@ -2558,6 +2176,79 @@ test_regression_steward_tick_does_not_claim_without_the_flock() {
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   [ "$rc" -ne 0 ] || { echo "claimed a tick without the flock: $out"; rm -rf "$T"; return 1; }
   assert_eq "$(cat "$CEL_STEWARD_LOCK")" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# ---- the retired delegation ledger is never read ----------------------------
+# Fan-out was retired on 2026-11-08, so a whole tick - every sweep cmd_steward
+# runs - must leave a workspace's old `.cel/delegations.json` alone, however
+# big it is. The tick runs in its own bash against a fixture box: stub herdr,
+# gh, omp, tailscale, systemd, curl and node, a git that cannot reach the
+# network, and the box web servers (dash, pages) not started.
+_ledger_tick() { # [tracer argv...] - one real `cmd_steward --no-gc` tick
+  timeout 60 "$@" bash -c '
+    source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/steward.sh"
+    cmd_dash() { :; }; cmd_pages() { :; }
+    cmd_steward --no-gc'
+}
+
+test_regression_steward_tick_never_reads_the_retired_delegation_ledger() {
+  local T real_git; T="$(mktemp -d)"; real_git="$(command -v git)"
+  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
+  export CEL_STEWARD_STATE="$T/state" CEL_STEWARD_LOCK="$T/tick.lock"
+  export CEL_PROC="$T/proc" CEL_PROC_DIR="$T/proc" CEL_PROC_ROOT="$T/proc" CEL_SERVE_PROC_ROOT="$T/proc"
+  export CEL_SERVE_PROC_DATA='' CEL_SERVE_ADOPT_DATA='[]' CEL_SERVE_STATE="$T/serve"
+  export CEL_SERVE_SYSTEMCTL="$T/bin/systemctl" CEL_SYSTEMD_DIR="$T/systemd" CEL_SERVICES_D="$T/services.d"
+  export CEL_WORKTREE_ROOT="$T/wt" CEL_SUITE_LOCK="$T/suite.lock" CEL_UPDATE_DIR="$T/update"
+  export CEL_CONFIG_FILE="$T/config.yaml" CEL_MANIFEST="$T/agents.yaml" CEL_CACHE="$T/cache"
+  export CEL_STEWARD_HERDR="$T/bin/herdr" CEL_SERVICES_HERDR="$T/bin/herdr"
+  mkdir -p "$HOME" "$T/bin" "$T/proc" "$T/inbox" "$T/alpha/.cel"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget, prefix: WG}]\nproducts:\n  - {name: bundle, repos: [widget]}\n' \
+    > "$T/alpha/workspace.yaml"
+  # A big ledger whose every row is long over: what a retired box keeps.
+  local led="$T/alpha/.cel/delegations.json"
+  jq -n '[range(2000) | {id: "WG-\(.)-x", ticket: "WG-\(.)", repo: "widget", branch: "WG-\(.)-x",
+    pane: "w:p\(.)", worktree: "/nonexistent/wg-\(.)", state: (["landed", "released", "abandoned"][. % 3])}]' > "$led"
+  assert_eq "$(jq length "$led")" "2000" || { rm -rf "$T"; return 1; }
+  printf '#!/usr/bin/env bash\ncase "$1 $2" in "agent list") echo %s ;; *) echo "{}" ;; esac\n' \
+    "'{\"result\":{\"agents\":[]}}'" > "$T/bin/herdr"
+  printf '#!/usr/bin/env bash\necho "[]"\n' > "$T/bin/gh"
+  local stub; for stub in omp tailscale systemctl systemd-run curl node; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/$stub"
+  done
+  printf '#!/usr/bin/env bash\ncase " $* " in *" fetch "*|*" ls-remote "*) exit 1 ;; esac\nexec %q "$@"\n' \
+    "$real_git" > "$T/bin/git"
+  chmod +x "$T/bin/"*
+  export PATH="$T/bin:$PATH"
+  local out rc
+
+  # Unreadable: a sweep that still opened it would say so, or die on it.
+  chmod 000 "$led"
+  rc=0; out="$(_ledger_tick 2>&1)" || rc=$?
+  assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
+  if printf '%s' "$out" | grep -q delegations; then echo "the tick spoke of the ledger: $out"; rm -rf "$T"; return 1; fi
+
+  # Root reads a mode-000 file, so the proof cannot rest on chmod: watch every
+  # path the tick touches, or - with no strace - make the ledger a FIFO that
+  # any open blocks on until the timeout fails the tick.
+  if strace -f -qq -e trace=%file -o /dev/null true >/dev/null 2>&1; then
+    rc=0; out="$(_ledger_tick strace -f -qq -e trace=%file -o "$T/strace" 2>&1)" || rc=$?
+    assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
+    # the trace saw the tick walk this very workspace...
+    grep -qF "$T/alpha/workspace.yaml" "$T/strace" || { echo "the trace never saw the workspace"; rm -rf "$T"; return 1; }
+    # ...and never once touch the ledger in it
+    if grep -n delegations "$T/strace"; then echo "the tick touched the ledger"; rm -rf "$T"; return 1; fi
+  else
+    rm -f "$led"; mkfifo "$led"
+    rc=0; out="$(_ledger_tick 2>&1)" || rc=$?
+    [ "$rc" != 124 ] || { echo "the tick blocked opening the ledger FIFO"; rm -rf "$T"; return 1; }
+    assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
+  fi
+  if printf '%s' "$out" | grep -q delegations; then echo "the tick spoke of the ledger: $out"; rm -rf "$T"; return 1; fi
   rm -rf "$T"
 }
 

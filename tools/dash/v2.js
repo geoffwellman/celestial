@@ -119,7 +119,7 @@ function wsTag(w){return '<span class="ws">'+esc(w)+'</span>'}
 function none(t){return '<div class="sub">'+esc(t)+'</div>'}
 // Who is running and what is open come from the fleet feed, which spans
 // every workspace in the filter; /api/state is one workspace's view, so
-// "All workspaces" would show no orchestrators, workers or PRs.
+// "All workspaces" would show no orchestrators or PRs.
 function orchs(){return ((F.fleet||{}).orchestrators)||[]}
 // a solo product's agents - its main one and each lane - build and ship
 // themselves: in solo they are the ones at work
@@ -130,8 +130,8 @@ function revs(){return ((F.fleet||{}).reviewers)||[]}
 // below the ones that need watching
 var WRANK={working:0,blocked:1,idle:2,done:3};
 function byRank(a,b){return (WRANK[a.status]==null?4:WRANK[a.status])-(WRANK[b.status]==null?4:WRANK[b.status])}
-function workers(){return (((F.fleet||{}).workers)||[]).slice().sort(byRank)}
-function prRows(){var w={};workers().forEach(function(x){if(x.pr)w[x.repo+'#'+x.pr]=x.name});
+// a PR's agent: the solo agent whose branch it is
+function prRows(){var w={};solos().forEach(function(x){if(x.pr)w[x.repo+'#'+x.pr]=x.name});
   return (((F.fleet||{}).prs)||[]).map(function(p){return {ws:p.ws,repo:p.repo,number:p.number,title:p.title,url:p.url,review:p.review,
     checks:p.mergeable==='CONFLICTING'?'failing':'',draft:p.draft,agent:w[p.repo+'#'+p.number]||''}})}
 function prOf(w){return w.pr?prRows().filter(function(p){return p.repo===w.repo&&p.number===w.pr})[0]||null:null}
@@ -149,13 +149,12 @@ var BODY={
   return it.map(function(r){return '<div class="row" data-ws="'+esc(r.ws)+'" data-ref="'+esc(r.ref)+'"><span class="dot '+(/conflict/i.test(r.reason)?'bad':'warn')+'"></span><span class="t"><b>'+esc(r.ref)+'</b> '+wsTag(r.ws)+'<br><span class="sub">'+esc(r.reason)+(r.since?' · '+ago(r.since):'')+'</span></span>'+
    (r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck')},
  working:function(){
-  // only panes that need watching - workers, solo agents and lanes,
-  // reviewers; idle and finished ones show in lanes
-  var it=workers().map(function(w){return {name:w.name,ws:w.ws,status:w.status,what:w.repo+'/'+w.branch,model:w.model}})
-   .concat(solos().map(function(o){return {name:o.name,ws:o.ws,status:o.status,what:'solo '+soloWhat(o)}}))
+  // only panes that need watching - solo agents and lanes, reviewers; idle
+  // and finished ones show in lanes
+  var it=solos().map(function(o){return {name:o.name,ws:o.ws,status:o.status,what:'solo '+soloWhat(o)}})
    .concat(revs().map(function(r){return {name:r.name,ws:r.ws,status:r.status,what:'reviewing '+r.repo+'#'+r.pr}}))
    .filter(function(w){return inWs(w.ws)&&(w.status==='working'||w.status==='blocked')}).sort(byRank);
-  return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.what)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
+  return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.what)+' · '+esc(w.status||'')+'</span></span></div>'}).join('')||none('nothing running')},
  activity:function(){var it=feedItems('activity');if(!F.activity)return none('waiting for the activity feed');
   return '<div class="feed">'+it.slice(0,12).map(actRow).join('')+'</div>'||none('quiet')},
  prs:function(){var it=prRows().filter(function(p){return inWs(p.ws)});
@@ -170,7 +169,7 @@ var BODY={
   var mx=Math.max.apply(null,[1].concat(vals.map(function(v){return v[1]})));var tot=vals.reduce(function(a,v){return a+v[1]},0);
   return '<div><span class="big">'+tot+'</span> <span class="sub">PRs merged'+(WSF==='all'?' across all repos':' in '+esc(WSF))+'</span></div>'+(function(){var na=(F.merges.no_access||[]).filter(function(r){return WSF==='all'||rw[r]===WSF});var un=(F.merges.unavailable||[]).filter(function(r){return WSF==='all'||rw[r]===WSF});return (na.length?'<div class="sub">no access: '+na.map(esc).join(', ')+'</div>':'')+(un.length?'<div class="sub">gh unavailable, retrying: '+un.map(esc).join(', ')+'</div>':'')})()+'<div class="chart">'+vals.map(function(v){return '<div title="'+esc(v[0])+' ('+esc(F.merges.timezone||'local')+' day): '+v[1]+' merged" style="height:'+Math.max(3,v[1]/mx*100)+'%"></div>'}).join('')+'</div><div class="days">'+vals.map(function(v){return '<span>'+esc(String(v[0]).slice(8))+'</span>'}).join('')+'</div>'},
  usage:function(big){return usageHtml(F.usage,!!big)},
- afk:function(){return '<div class="row"><span class="t"><b>Away mode</b><br><span class="sub">While away the fleet lands approved green PRs and restarts stalled orchestrators; everything else waits and shows up in Since you last looked.</span></span></div><div class="row"><button class="btn rec" data-act="afk.on" data-label="go away">Go away</button><button class="btn" data-act="afk.off" data-label="I\'m back">I\'m back</button></div>'},
+ afk:function(){return '<div class="row"><span class="t"><b>Away mode</b><br><span class="sub">While away each solo agent lands its own approved, green, gate-verified PRs and resolves bot review threads it has fixed; everything else waits and shows up in Since you last looked.</span></span></div><div class="row"><button class="btn rec" data-act="afk.on" data-label="go away">Go away</button><button class="btn" data-act="afk.off" data-label="I\'m back">I\'m back</button></div>'},
  lanes:function(){return lanesHtml(F.lanes,false)},
  heat:function(){var c=((F.heat||{}).cells)||[];if(!F.heat)return none('waiting for the heat feed');var dn=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   var mx=Math.max.apply(null,[1].concat([].concat.apply([],c)));
@@ -212,7 +211,6 @@ function cardStatus(id){
 // reset), then the pay-as-you-go balances. A row opens to who used it this
 // week only when the feed could tell; the expanded view adds each window's
 // line over the week when the dashboard has recorded one.
-var UX=recall('cel-v2-usage-open',{});
 function money(v,u){if(v==null)return '?';var n=Number(v);return (n<0?'-':'')+(u==='usd'||!u?'$':'')+Math.abs(n).toFixed(2)+(u&&u!=='usd'?' '+esc(u):'')}
 function whenShort(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d))return '';
   var h=(d-Date.now())/3600e3;return h<20?hhmm(iso):d.toLocaleDateString([], {weekday:'short'})+' '+hhmm(iso)}
@@ -234,18 +232,15 @@ function usageHtml(d,big){
    '<div><div class="big" style="color:var('+(risk.length?'--warn':'--ok')+')">'+risk.length+' at risk</div><div class="sub">'+
      (risk.length?risk.slice(0,3).map(function(r){return esc(r.who)+' '+esc(r.window)+' on pace for '+esc(Math.min(999,r.projected_pct))+'%'+(r.resets?' before '+esc(whenShort(r.resets)):'')}).join('; '):'nothing on pace to hit a cap before it resets')+'</div></div>'+
    '<div><div class="big">'+esc(o.serving||0)+' of '+esc(o.of||0)+'</div><div class="sub">Claude accounts serving orchestrators</div></div>'+
-   '<div><div class="big'+(sm.below_floor?' neg':'')+'">'+esc(sm.below_floor||0)+' dry</div><div class="sub">pay-as-you-go balances below their floor - those workers are vetoed</div></div>'+
+   '<div><div class="big'+(sm.below_floor?' neg':'')+'">'+esc(sm.below_floor||0)+' dry</div><div class="sub">pay-as-you-go balances below their floor</div></div>'+
    '<div><div class="big pos">'+money(sm.funded,'usd')+'</div><div class="sub">funded balance'+((sm.funded_by||[]).length?': '+esc(sm.funded_by.join('; ')):'')+'</div></div></div>';
   (d.groups||[]).forEach(function(g){
     var who=[];if(g.who&&g.who.orch)who.push(uTag('orch')+'<span class="sub">orchestrators</span>');if(g.who&&g.who.workers)who.push(uTag('workers')+'<span class="sub">workers via gateway</span>');
-    if(g.who&&(g.who.profiles||[]).length)who.push('<span class="sub">'+esc(g.who.profiles.join(' / '))+' profiles</span>');
     h+='<div class="ugrp" data-provider="'+esc(g.provider)+'"><h4>'+esc(g.title)+' · subscription'+(g.accounts.length>1?'s':'')+(who.length?' <span class="uwho">who uses it: '+who.join(' ')+'</span>':'')+'</h4>';
     g.accounts.forEach(function(a){
-      var k=g.provider+'|'+a.account,can=!!(a.used_by&&a.used_by.length),open=can&&UX[k];
-      h+='<div class="uacct'+(can?' can':'')+'" data-uk="'+esc(k)+'"><div class="un"><b>'+(can?(open?'▾ ':'▸ '):'')+esc(a.who)+'</b>'+(a.tags||[]).map(uTag).join('')+
+      h+='<div class="uacct"><div class="un"><b>'+esc(a.who)+'</b>'+(a.tags||[]).map(uTag).join('')+
         (a.state&&a.state!=='enabled'&&a.state!=='disabled'?'<div class="sub neg">'+esc(a.reason||a.state)+'</div>':'')+'</div>'+
         '<div class="uws">'+(a.windows||[]).map(function(w){return uWin(w,big)}).join('')+'</div></div>';
-      if(open)h+='<div class="uused">this week: '+a.used_by.map(function(u){return esc(u.ws)+' · '+esc(u.profile)+' ×'+esc(u.n)}).join(', ')+'</div>';
     });
     h+='</div>';
   });
@@ -262,8 +257,6 @@ function usageHtml(d,big){
   h+='<div class="ulegend sub"><span><i class="ubar ulg"><i class="ok" style="width:60%"></i></i> used now</span><span>│ projected at reset, at this week\'s pace</span><span>amber ≥ 75% · red ≥ 95% or below floor</span>'+(d.at?'<span>as of '+esc(hhmm(d.at))+'</span>':'')+'</div>';
   return h;
 }
-function usageToggle(e){var r=e.target.closest('.uacct.can');if(!r)return false;var k=r.dataset.uk;if(UX[k])delete UX[k];else UX[k]=1;store('cel-v2-usage-open',UX);renderAll();return true}
-
 function actRow(r){return '<div class="row" data-ws="'+esc(r.ws)+'"><time>'+hhmm(r.ts)+'</time>'+wsTag(r.ws)+'<span class="sub" style="width:64px">'+esc(r.kind)+'</span><span class="t">'+(r.url?'<a href="'+esc(r.url)+'" target="_blank" rel="noopener">'+esc(r.text)+'</a>':esc(r.text))+'</span></div>'}
 
 // Today by workspace: one row per workspace, a half-hour strip (count, amber =
@@ -289,11 +282,11 @@ function lanesHtml(d,all){
       cells+='<i class="'+cls+'" style="opacity:'+(n?0.35+Math.min(n,6)/6*0.65:1)+'" title="'+n+' at '+hhmm(new Date(a).toISOString())+'">'+(n>1?n:'')+'</i>'}
     return '<div class="wsrow" data-lane="'+esc(w.ws)+'" data-ws="'+esc(w.ws)+'"><span class="ln2">'+(w.lanes.length?(open?'▾ ':'▸ '):'  ')+'<b>'+esc(w.ws)+'</b><br><span class="sub">'+w.lanes.length+' at work'+(waiting?' · <span class="w8">'+waiting+' waiting</span>':'')+'</span></span><div class="strip" style="grid-template-columns:repeat('+ns+',1fr)">'+(w.lanes.length?cells:'<em>nothing at work</em>')+nowl+'</div></div>'+
      // a solo agent's row names it, its lane and - where known - its branch
-     // and PR; a worker's names its branch and PR
-     (open?w.lanes.map(function(l){return '<div class="sublane" data-ws="'+esc(w.ws)+'"><span class="ln2 sub">'+esc(l.agent?l.agent+' · '+(l.lane?'lane '+l.lane:'solo')+(l.branch?' · '+l.branch+(l.pr?' #'+l.pr:''):''):l.ref+(l.pr?' #'+l.pr:' (no PR yet)'))+'</span><div class="lt2">'+l.segments.map(function(s){var a=new Date(s.from).getTime(),b=new Date(s.to).getTime();
+     // and PR
+     (open?w.lanes.map(function(l){return '<div class="sublane" data-ws="'+esc(w.ws)+'"><span class="ln2 sub">'+esc(l.agent+' · '+(l.lane?'lane '+l.lane:'solo')+(l.branch?' · '+l.branch+(l.pr?' #'+l.pr:''):''))+'</span><div class="lt2">'+l.segments.map(function(s){var a=new Date(s.from).getTime(),b=new Date(s.to).getTime();
        return '<b class="'+esc(s.state)+'" style="left:'+pct(a)+'%;width:'+Math.max(0.5,pct(b)-pct(a))+'%" title="'+esc(l.label+' - '+s.state)+'">'+esc(l.label)+'</b>'}).join('')+nowl+'</div></div>'}).join(''):'')});
   return '<div class="lanes2"><div class="lh2"><span></span><div class="ticks">'+ticks+nowl+'</div></div>'+rows.join('')+'</div>'+
-   (rows.length?'<div class="sub">The strip counts workers and solo agents at work per half hour (amber = waiting on a person). Click a workspace for a row per PR or solo agent.</div>':none('no workspaces in range'));
+   (rows.length?'<div class="sub">The strip counts solo agents at work per half hour (amber = waiting on a person). Click a workspace for a row per solo agent.</div>':none('no workspaces in range'));
 }
 
 function cardEl(w){
@@ -394,7 +387,6 @@ $('grid').addEventListener('click',function(e){
   var x=e.target.closest('.w h3 .x');if(x){var id=x.closest('.w').dataset.id;
     L.hidden=L.hidden.indexOf(id)>=0?L.hidden.filter(function(h){return h!==id}):L.hidden.concat([id]);saveLayout();renderAll();return}
   var ex=e.target.closest('.w h3 .ex');if(ex){expand(ex.closest('.w').dataset.id);return}
-  if(usageToggle(e))return;
   var lane=e.target.closest('.wsrow');if(lane&&!lane.closest('#ov')){var ws=lane.dataset.lane,el=lane.closest('.body');
     var waiting=!!lane.querySelector('.w8');var cur=LX[ws]!==undefined?LX[ws]:waiting;LX[ws]=!cur;store('cel-v2-lanes',LX);renderAll();return}
   var ag=e.target.closest('[data-agent]');if(ag){openDrawer(ag.dataset.agent);return}
@@ -447,13 +439,11 @@ function renderThread(){
 // ---- agent drawer ----------------------------------------------------------
 var DRAWER=null;
 function findAgent(name){
-  var w=workers().filter(function(x){return x.name===name})[0];
-  if(w)return {name:name,ws:w.ws,status:w.status,pane:w.pane,pr:prOf(w),model:w.model,now:w.repo+'/'+w.branch};
   var o=orchs().filter(function(x){return x.name===name})[0];
-  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:prOf(o),model:'',now:o.mode==='solo'?o.status+' · solo '+soloWhat(o):o.status};
+  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:prOf(o),now:o.mode==='solo'?o.status+' · solo '+soloWhat(o):o.status};
   var r=revs().filter(function(x){return x.name===name})[0];
-  if(r)return {name:name,ws:r.ws,status:r.status,pane:r.pane,pr:prOf(r),model:'',now:'reviewing '+r.repo+'#'+r.pr};
-  return {name:name,ws:'',status:'unknown',pane:null,pr:null,model:'',now:''};
+  if(r)return {name:name,ws:r.ws,status:r.status,pane:r.pane,pr:prOf(r),now:'reviewing '+r.repo+'#'+r.pr};
+  return {name:name,ws:'',status:'unknown',pane:null,pr:null,now:''};
 }
 function openDrawer(name){
   // an orchestrator is opened as its room, wherever it is named; a solo lane
@@ -464,7 +454,7 @@ function renderDrawer(){
   if(!DRAWER)return;var a=findAgent(DRAWER);
   var mail=((S&&S.inbox)||[]).filter(function(x){return x.to===a.name||x.toName===a.name});
   var lines=feedItems('activity').filter(function(x){return x.text.indexOf(a.name)>=0||(a.pr&&x.text.indexOf('#'+a.pr.number)>=0)}).slice(0,5);
-  var html='<div class="sub">'+esc(a.ws)+(a.model?' · '+esc(a.model.split('/').pop()):'')+'</div><h4>Now</h4><div>'+esc(a.status||'')+(a.now&&a.now!==a.status?' · '+esc(a.now):'')+'</div>'+
+  var html='<div class="sub">'+esc(a.ws)+'</div><h4>Now</h4><div>'+esc(a.status||'')+(a.now&&a.now!==a.status?' · '+esc(a.now):'')+'</div>'+
     '<h4>Last lines</h4><pre class="mono tail">'+(lines.length?lines.map(function(x){return hhmm(x.ts)+' '+esc(x.text)}).join('\n'):'nothing recorded yet')+'</pre>'+
     '<h4>PR</h4><div>'+(a.pr?'<a href="'+esc(a.pr.url)+'" target="_blank" rel="noopener">'+esc(a.pr.repo+'#'+a.pr.number)+'</a> '+esc(a.pr.title)+' <span class="sub">'+esc(a.pr.review||'')+'</span>':'no PR yet')+'</div>'+
     '<h4>Inbox</h4><div>'+(mail.length?mail.slice(-3).map(function(x){return '<div class="sub">'+hhmm(x.ts)+' '+esc(x.fromName||x.from)+': '+esc(String(x.message).slice(0,140))+'</div>'}).join(''):'<span class="sub">nothing addressed to it</span>')+'</div>';
@@ -493,7 +483,7 @@ function expand(id){
   }else if(id==='activity'){
     AQ.items=null;AQ.more=true;
     b.innerHTML='<div class="ovctl"><input class="actq" placeholder="search"><select class="actkind"><option value="">every kind</option>'+
-      ['merge','review','decision','incident','worker','orchestrator'].map(function(k){return '<option>'+k+'</option>'}).join('')+'</select>'+
+      ['merge','decision','incident','orchestrator'].map(function(k){return '<option>'+k+'</option>'}).join('')+'</select>'+
       '<select class="actws"><option value="">every workspace</option></select><input type="date" class="actday"></div><div class="actlist"></div><button class="btn actmore">older →</button>';
     var sel=b.querySelector('.actws');[].slice.call($('wsf').options).slice(1).forEach(function(o){var x=document.createElement('option');x.textContent=o.value;sel.appendChild(x)});
     if(WSF!=='all')sel.value=WSF;
@@ -543,7 +533,6 @@ function closeOverlay(){
 }
 $('ovx').onclick=closeOverlay;
 $('ov').addEventListener('click',function(e){if(e.target.id==='ov')closeOverlay();
-  if(usageToggle(e))return;
   var ag=e.target.closest('[data-agent]');if(ag)openDrawer(ag.dataset.agent)});
 
 // ---- ⌘K palette ----------------------------------------------------------
@@ -553,7 +542,6 @@ function palItems(){
   var it=[];
   ((S&&S.needsYou)||[]).forEach(function(d){if(!NYDONE[d.id])it.push({k:'decision',ws:d.workspace,text:d.title,key:d.id})});
   prRows().forEach(function(p){it.push({k:'PR',ws:p.ws,text:p.repo+'#'+p.number+' '+p.title,key:p.repo+'#'+p.number,url:p.url})});
-  workers().forEach(function(w){it.push({k:'agent',ws:w.ws,text:w.name,key:w.name})});
   orchs().forEach(function(o){it.push({k:'agent',ws:o.ws,text:o.name,key:o.name})});
   revs().forEach(function(r){it.push({k:'agent',ws:r.ws,text:r.name,key:r.name})});
   ((F.stuck||{}).items||[]).forEach(function(s){it.push({k:'stuck',ws:s.ws,text:s.ref+' - '+s.reason,key:s.ref})});
@@ -615,7 +603,7 @@ document.addEventListener('keydown',function(e){
 // The one place an orchestrator is seen and driven from: its own conversation
 // (read from its session file by the drive core, redacted there), a composer
 // that MAILS it (delivered by its inbox hook when it is idle - never typed
-// into its pane), and beside it what it owns: workers, PRs, stuck items and
+// into its pane), and beside it what it owns: PRs, stuck items and
 // its open decisions, answerable with the same card as Needs you. The grid
 // stays the front page; #room=<orch> is the URL, so a bookmark or the phone's
 // back button does what it says.
@@ -724,7 +712,7 @@ async function pollRoom(){
   if(document.hidden)rt.paused=true;else rt.timer=setTimeout(pollRoom,ROOM_POLL_MS);
 }
 document.addEventListener('visibilitychange',function(){if(!document.hidden&&RT&&RT.paused){RT.paused=false;pollRoom()}});
-// ---- beside it: status, workers, PRs, stuck ---------------------------------
+// ---- beside it: status, PRs, stuck -----------------------------------------
 // A workspace orchestrator owns its workspace's work; a repo orchestrator
 // (<repo>-orch) owns its repo's.
 // Only the workspace's own orchestrator (<ws>-orch) sees the whole
@@ -742,12 +730,10 @@ function renderRoomSide(){
   $('rdot').className='dot '+(st==='working'?'ok':st==='blocked'?'warn':'idle');
   $('rstat').textContent=st+(RT.err?' · transcript '+RT.err:'');
   var owns=roomOwns(ROOM,o);
-  var ws=workers().filter(function(w){return owns(w,w.repo)});
   var ps=prRows().filter(function(p){return owns(p,p.repo)});
   var sk=((F.stuck||{}).items||[]).filter(function(s){return owns(s,String(s.ref).split('/')[0])});
   var html='<h4>Status</h4><div class="row"><span class="dot '+(st==='working'?'ok':'idle')+'"></span><span class="t"><b>'+esc(st)+'</b>'+(o?' '+wsTag(o.ws):'')+'</span></div>'+
     '<div class="sub">model '+esc(RT.model||'unknown')+(RT.lastTs?' · last turn '+esc(ago(RT.lastTs))+' ago':'')+'</div>'+
-    '<h4>Workers ('+ws.length+')</h4>'+(ws.map(function(w){return '<div class="row"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b><br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status)+'</span></span></div>'}).join('')||none('no workers'))+
     '<h4>Open PRs ('+ps.length+')</h4>'+(ps.map(function(p){return '<div class="row"><span class="t">'+esc(p.title)+'</span><a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub">'+(p.review==='APPROVED'?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review')+'</span></div>'}).join('')||none('no open PRs'))+
     '<h4>Stuck ('+sk.length+')</h4>'+(sk.map(function(r){return '<div class="row"><span class="dot warn"></span><span class="t"><b>'+esc(r.ref)+'</b><br><span class="sub">'+esc(r.reason)+'</span></span>'+(r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck'));
   var el=$('rside');if(el._html!==html){el._html=html;el.innerHTML=html;restoreArmed(el)}

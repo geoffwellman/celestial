@@ -403,8 +403,6 @@ test_doctor_check_workspaces_runs_github_account_check() {
       doctor_ws_contract_lines() { return 0; }
       ws_runtime() { printf 'bash'; }
       agent_get() { printf 'bash'; }
-      doctor_ledger_states() { return 0; }
-      doctor_worker_containers() { return 0; }
       check_workspaces
     ) 2>&1
   )"

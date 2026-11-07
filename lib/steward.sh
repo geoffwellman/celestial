@@ -22,10 +22,6 @@ _CEL_STEWARD=1
 . "${BASH_SOURCE[0]%/*}/dash.sh"
 # shellcheck source=lib/inbox.sh
 . "${BASH_SOURCE[0]%/*}/inbox.sh"
-# shellcheck source=lib/stall.sh
-. "${BASH_SOURCE[0]%/*}/stall.sh"
-# shellcheck source=lib/liveness.sh
-. "${BASH_SOURCE[0]%/*}/liveness.sh"
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"
 # shellcheck source=lib/memory.sh
@@ -36,18 +32,10 @@ _CEL_STEWARD=1
 # shellcheck source=lib/serve.sh
 . "${BASH_SOURCE[0]%/*}/serve.sh"
 . "${BASH_SOURCE[0]%/*}/services.sh"
-# shellcheck source=lib/ledger_states.sh
-. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
 
-# Overridable so the stalled-worker sweep can be driven against a stub pane:
-# the failure this sweep exists for is a specific string in a specific pane,
-# and a test that cannot supply that string proves nothing.
+# Overridable so the pane sweeps can be driven against a stub herdr.
 _STEWARD_HERDR="${CEL_STEWARD_HERDR:-herdr}"
 _STEWARD_STATE="${CEL_STEWARD_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/steward-state}"
-# The reconcile binary, overridable so a test can watch the call without
-# reading a live GitHub. Addressed by path rather than by name: the steward
-# runs from a systemd timer, where `cel shellenv`'s PATH does not exist.
-_STEWARD_FANOUT="${CEL_STEWARD_FANOUT:-$CEL_ROOT/core/skills/fanout/bin/cel-fanout}"
 _STEWARD_WINDOW="${CEL_STEWARD_WINDOW:-14400}"   # repeat-nudge window, seconds
 
 # ONE WRITER AT A TIME, AND NEVER A TORN FILE. Every rewrite of a steward state
@@ -673,72 +661,6 @@ _steward_inbox_hooks() {
   return 0
 }
 
-# THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. A PR merged through the web UI,
-# its checkout removed by hand, never runs `land` or `release`. Deciding that is
-# deterministic, so a tick does it: one `gh pr list` per repo per tick - but
-# only for a workspace whose ledger still has a row that is not over. A solo
-# workspace, or one whose every delegation has landed, been released or
-# abandoned, has nothing left to reconcile.
-# A reconcile that fails is ONE sweep failing: the stalled-worker sweep after
-# it is the one whose delay costs work, so this never takes the tick with it.
-_steward_reconcile() {
-  local ws wsdir bin="${CEL_STEWARD_FANOUT:-$_STEWARD_FANOUT}"
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    ledger_has_live_rows "$wsdir/.cel/delegations.json" || continue
-    if ! "$bin" reconcile --workspace "$ws" 2>&1; then
-      c_warn "$ws: reconcile failed - run 'cel-fanout reconcile --workspace $ws' by hand"
-    fi
-  done
-  return 0
-}
-
-# BLOCKED IS NOT ABSENT. A worker throttled on a spent window is still on its
-# branch, and another worker would spend the window it is waiting on. So
-# before the sweep says a branch has nobody, it asks what the pane on that
-# branch is actually doing. "<silence>\t<reset>" or nothing.
-# WHERE A BRANCH'S WORKER STANDS. The ledger records the real worktree, so it
-# answers first; a PR opened by hand has no row, and for that one the guess
-# $HOME/.herdr/worktrees/<repo>/<branch> is compared case-insensitively,
-# because herdr lowercases the worktree name. Prints "<exact-path>|<guess>" -
-# exact may be empty, which is why the separator is not a tab: IFS whitespace
-# folds a leading empty field away and the guess would be read as the exact
-# path.
-_steward_branch_worktree() { # <wsdir> <repo> <branch>
-  local led="$1/.cel/delegations.json" wt=""
-  if [ -f "$led" ]; then
-    wt="$(jq -r --arg r "$2" --arg b "$3" \
-      '[(if type == "array" then .[] else .delegations[]? end)
-        | select(.repo == $r and .branch == $b and (.worktree // "") != "")][-1].worktree // ""' \
-      "$led" 2>/dev/null || true)"
-  fi
-  printf '%s|%s' "$wt" "$HOME/.herdr/worktrees/$2/$3"
-}
-
-# The agents standing on a branch, as a JSON array, by _steward_branch_worktree.
-_steward_branch_agents() { # <agents-json> <wsdir> <repo> <branch>
-  local wt guess
-  IFS='|' read -r wt guess <<< "$(_steward_branch_worktree "$2" "$3" "$4")"
-  # The ledger row, when there is one, is the ONLY answer: an agent
-  # at the guessed path is then someone else's pane. The guess is for a PR
-  # opened by hand, with no row at all.
-  printf '%s' "$1" | jq -c --arg w "$wt" --arg g "$guess" \
-    '[.result.agents[]? | select(.cwd != null and
-       (if $w != "" then .cwd == $w
-        else (.cwd | ascii_downcase) == ($g | ascii_downcase) end))]' \
-    2>/dev/null || printf '[]'
-}
-
-_steward_branch_silence() { # <agents-json> <wsdir> <repo> <branch>
-  local agents="$1" alias text
-  alias="$(_steward_branch_agents "$agents" "$2" "$3" "$4" | jq -r \
-    '.[0] | select((.backend // "herdr") != "rex") | (.name // .agent_id // "")' 2>/dev/null || true)"
-  [ -n "$alias" ] && [ "$alias" != null ] || return 0
-  text="$("$_STEWARD_HERDR" agent read "$alias" --source recent-unwrapped --lines 40 2>/dev/null || true)"
-  [ -n "$text" ] || return 0
-  liveness_pane_silence "$text"
-}
-
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
@@ -776,7 +698,7 @@ _steward_review_sweep() { # <agents-json>
         'any(.result.agents[]?; .name == $n and .backend == "rex")' >/dev/null 2>&1; then
         herdr agent get "$orch" >/dev/null 2>&1 || { [ -n "$fallback" ] && orch="$fallback"; }
       fi
-      # ONLY THE FLEET'S OWN PRs. Every PR a worker opens is authored by the
+      # ONLY OUR OWN PRs. Every PR a solo agent opens is authored by the
       # token cel runs under, so `--author @me` is the ownership line; a
       # colleague's PR must never be nudged into "action it now".
       # Colleagues' PRs are theirs to land. This filter guards every check
@@ -791,10 +713,9 @@ _steward_review_sweep() { # <agents-json>
 
       # UNTICKETED PRs. Linear links a PR to its ticket purely from the branch
       # name, so a branch with no identifier can never be tracked: no status to
-      # read, no attachment, nothing on the board. `cel-fanout delegate`
-      # refuses to create one, but branches opened by hand still need
-      # surfacing, so the board and the repo cannot drift apart silently. A
-      # day's grace, so work in flight is not nagged immediately.
+      # read, no attachment, nothing on the board. Branches opened without a
+      # ticket still need surfacing, so the board and the repo cannot drift
+      # apart silently. A day's grace, so work in flight is not nagged immediately.
       # A DRAFT IS THE AUTHOR'S PRIVATE WORK, left alone here as in the review
       # sweep below.
       # Any prefix the repo answers to, current or historical - a branch named
@@ -823,12 +744,9 @@ _steward_review_sweep() { # <agents-json>
         done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
 
-      # A SOLO PRODUCT HAS NO WORKERS. Its own agent opened the PR and fixes it
-      # on the branch, so nothing below asks the delegation ledger or herdr who
-      # stands on that branch, and nothing tells it to find or restart one.
-      local solo=0
-      [ "$(ws_build_mode "$wsdir" "$prod")" != solo ] || solo=1
-      local num branch review failing working
+      # THE PRODUCT'S OWN AGENT opened the PR and fixes it on the branch:
+      # the nudge goes to it, never to a worker it does not have.
+      local num branch review failing
       while IFS=$'\t' read -r num branch review failing; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
@@ -838,41 +756,12 @@ _steward_review_sweep() { # <agents-json>
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
           continue
         fi
-        if [ "$solo" -eq 1 ]; then
-          if [ "$review" = "CHANGES_REQUESTED" ]; then
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
-              "steward: PR #$num on $repo has changes requested at its current head - address them on $branch, push, and ask its reviewer to re-review (cel run reviewer --repo $repo --pr $num if none is running)."
-          elif [ "$failing" -gt 0 ]; then
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
-              "steward: PR #$num on $repo has FAILING checks on $branch - a red gate is a finding: fix it on the branch and push."
-          fi
-          continue
-        fi
-        # a worker actively on the branch means the loop is moving - leave it
-        working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
-          | jq -r '[.[] | select(.agent_status == "working")] | length')"
-        if [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
-          local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
-          if [ -n "$sil" ]; then
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
-              "steward: PR #$num on $repo has changes requested and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
-          else
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
-              "steward: PR #$num on $repo has changes requested and nobody working on $branch - restart the review loop (worker fixes, then reviewer re-reviews)."
-          fi
-        elif [ "$failing" -gt 0 ] && [ "$working" = "0" ]; then
-          # A worker reading `idle` on a red branch may be throttled, wedged on
-          # a transport error, or holding a prompt it never took. Every one of
-          # those is a report, and none of them is answered by spawning
-          # another worker.
-          local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
-          if [ -n "$sil" ]; then
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
-              "steward: PR #$num on $repo has FAILING checks and its worker on $branch is $(liveness_silence_sentence "$(printf '%s' "$sil" | cut -f1)" "$(printf '%s' "$sil" | cut -f2 -s)"). The worker exists - do not delegate another."
-          else
-            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
-              "steward: PR #$num on $repo has FAILING checks and nobody on $branch - a red gate is a finding, get a worker on it."
-          fi
+        if [ "$review" = "CHANGES_REQUESTED" ]; then
+          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
+            "steward: PR #$num on $repo has changes requested at its current head - address them on $branch, push, and ask its reviewer to re-review (cel run reviewer --repo $repo --pr $num if none is running)."
+        elif [ "$failing" -gt 0 ]; then
+          _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
+            "steward: PR #$num on $repo has FAILING checks on $branch - a red gate is a finding: fix it on the branch and push."
         fi
       done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) |
         [.number, .headRefName,
@@ -898,8 +787,8 @@ _steward_review_sweep() { # <agents-json>
   done
 }
 
-# A SOLO PRODUCT'S READY PRS. It has no delegations, so the review sweep above
-# (ledger rows, worker nudges) finds nothing to say about them. What can still
+# A SOLO PRODUCT'S READY PRS. The review sweep above nudges about changes
+# requested and red checks; what can still
 # stall is the last step: a PR approved at its head with every check green,
 # waiting on its own agent to land it. That agent is told once per head (the
 # key carries it, so a new push is a new fact); the steward never lands it.
@@ -929,146 +818,6 @@ _steward_solo_sweep() {
 # INBOX rather than typing into its pane. Rate-limited per ticket, and only
 # when no branch already carries the ticket id - a started ticket is not a
 # request to start it again.
-# STALLED WORKERS. Every other watcher here asks an agent to report; this one
-# asks the box. A worker whose provider stream died sends no mail, keeps its
-# pane on a retry prompt, and reads as `idle` - the same word herdr uses for a
-# healthy worker between turns. The detection lives in lib/stall.sh as pure
-# functions so transport failures can be replayed in tests. This sweep walks
-# delegations still marked `running`, reads each pane's tail, and asks for
-# a verdict. A ledger whose every row is over has nobody to watch: it costs
-# one read, and any stall item raised while it had is taken down with it.
-_steward_stalled_workers() { # <agents-json>
-  local agents_json="$1" ws wsdir led
-  printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")"; [ -d "$wsdir" ] || continue
-    led="$wsdir/.cel/delegations.json"
-    [ -f "$led" ] || continue
-    if ! ledger_has_live_rows "$led"; then
-      _steward_clear_stall_items "$ws"
-      continue
-    fi
-    local row
-    while IFS= read -r row; do
-      [ -n "$row" ] || continue
-      local id pane wt ticket branch live text quiet verdict risk sev state alias backend
-      id="$(printf '%s' "$row" | jq -r '.id')"
-      alias="$(printf '%s' "$row" | jq -r '.alias // ""')"
-      state="$(printf '%s' "$row" | jq -r '.state // ""')"
-      pane="$(printf '%s' "$row" | jq -r '.pane // ""')"
-      wt="$(printf '%s' "$row" | jq -r '.worktree // ""')"
-      ticket="$(printf '%s' "$row" | jq -r '.ticket // ""')"
-      branch="$(printf '%s' "$row" | jq -r '.branch // ""')"
-
-      # A row that has LEFT `running` - collected, released, finished - is no
-      # longer stalled by definition, and its blocker must go with it.
-      if [ "$state" != running ]; then
-        _steward_clear "$ws" "stall-$id" "delegation $id is no longer running ($state)"
-        continue
-      fi
-
-      live="$(printf '%s' "$agents_json" | jq -r --arg p "$pane" \
-        '[.result.agents[]? | select(.pane_id == $p) | .agent_status][0] // ""')"
-      backend="$(printf '%s' "$agents_json" | jq -r --arg p "$pane" \
-        '[.result.agents[]? | select(.pane_id == $p)][0].backend // "herdr"')"
-      # Rex supplies presence, not a Herdr screen or evidence of idle/wake.
-      # Leave existing stall evidence untouched until this backend can observe it.
-      [ "$backend" != rex ] && [[ "$pane" != rex/* ]] || continue
-      # A pane with no agent is only "vanished" if we could actually see the
-      # roster; herdr being unreachable is not evidence that anyone died.
-      text=""
-      if [ -n "$pane" ] && [ -n "$live" ]; then
-        text="$("$_STEWARD_HERDR" pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
-      fi
-      quiet="$(stall_quiet_secs "$wt")"
-      local wrote=0; [ -f "$wt/.agent/result.md" ] || [ -f "$wt/.agent/report.md" ] && wrote=1
-
-      # WHAT IS IT ACTUALLY DOING. Code filters, then the model
-      # judges the few that are left: a candidate is a worker the box has
-      # already noticed something odd about, and everything else is not asked
-      # about at all. The answer REPORTS - there is no branch below this that
-      # kills, releases or re-prompts anything.
-      local lv="" lact="" lconf="" ltext="" still=""
-      if liveness_enabled; then
-        CEL_LIVENESS_STILL_SECS="$(liveness_still_secs)"
-        # Its own read, its own source: `recent-unwrapped` is the pane as a
-        # person scrolling back sees it, which is what the question is about.
-        [ -n "$alias" ] && ltext="$("$_STEWARD_HERDR" agent read "$alias" \
-          --source recent-unwrapped --lines "$(liveness_lines)" 2>/dev/null || true)"
-        [ -n "$ltext" ] && still="$(liveness_output_age "$ws/$id" "$ltext")"
-        if stall_liveness_candidate "$live" "$state" "$still" "$(stall_marker "$ltext")" "$wrote"; then
-          local ans; ans="$(liveness_classify "$ltext" "$live" "${still:-0}" "$state")"
-          if [ -n "$ans" ]; then
-            lv="$(printf '%s' "$ans" | cut -f1)"
-            lact="$(printf '%s' "$ans" | cut -f2)"
-            lconf="$(printf '%s' "$ans" | cut -f3)"
-            # Remembered so `cel fleet` and the console can carry it without
-            # asking again - the views are read far more often than this runs.
-            liveness_remember "$id" "$lact" "$lconf"
-          fi
-        fi
-      fi
-      verdict="$(stall_verdict "$live" "$text" "$quiet" "$wrote" "$lv")"
-      # THE THREE SILENCES, read from the pane rather than asked of
-      # anyone: they cost nothing, need no router, and each one renders as a
-      # worker thinking. A throttled worker is reported ONCE as a warning and
-      # never raised as a repeating blocked item - the remedy is waiting, and
-      # a nudge every tick spends the window it is waiting on.
-      local sil="" silv="" silr=""
-      sil="$(liveness_pane_silence "${ltext:-$text}" \
-             "$(printf '%s' "$row" | jq -r '.provider // ""')")"
-      if [ -n "$sil" ]; then
-        silv="$(printf '%s' "$sil" | cut -f1)"
-        silr="$(printf '%s' "$sil" | cut -f2 -s)"
-      fi
-      if [ -z "$verdict" ] && [ -n "$silv" ]; then
-        _steward_due "stall-$ws-$id" \
-          && c_warn "$ws/$id: ${ticket:-$branch} - $(liveness_silence_sentence "$silv" "$silr")"
-        continue
-      fi
-      # Working again: the sweep has already computed that, so it is also the
-      # moment to resolve what it raised.
-      if [ -z "$verdict" ]; then
-        _steward_clear "$ws" "stall-$id" "$ws/$id is working again"
-        continue
-      fi
-
-      risk="$(stall_work_at_risk "$wt")"
-      sev="$(stall_severity "$verdict" "$risk")"
-      local msg; msg="$(stall_message "$verdict" "$ticket" "$pane" "$quiet" \
-        "$(stall_branch_pushed "$wt")" "$risk" "$branch")"
-      # The model's own sentence, appended rather than substituted: the stall
-      # facts still lead, and the reason follows.
-      [ -n "$lv" ] && msg="$msg | $(liveness_sentence "$lv" "$lact" "$lconf" "${still:-0}")"
-      # ...and the block itself, where the pane shows one: "stalled" plus
-      # "throttled until 19:00" is an instruction; "stalled" alone invites
-      # spawning a worker against an exhausted account.
-      [ -n "$silv" ] && msg="$msg | $(liveness_silence_sentence "$silv" "$silr")"
-
-      # Loud means the work itself is at stake, so it goes to root's mailbox as
-      # a BLOCKED item - the kind the inbox refuses to let anyone bury - and it
-      # repeats. A stalled worker whose work is already pushed is a warning.
-      if [ "$sev" = loud ]; then
-        _STEWARD_WINDOW=1800 _steward_due "stall-$ws-$id" \
-          && _steward_raise "$ws" "stall-$id" blocked "$msg"
-        c_err "$ws/$id: $msg"
-      else
-        _steward_due "stall-$ws-$id" && c_warn "$ws/$id: $msg"
-      fi
-    done < <(jq -c '.[]' "$led" 2>/dev/null || true)
-  done
-}
-
-# Every stall item the steward still has open for root in <ws>, resolved: the
-# rows they were raised about are over. One mailbox read.
-_steward_clear_stall_items() { # <ws>
-  local id
-  while IFS= read -r id; do
-    if [ -n "$id" ]; then _steward_clear_id "$1" "$id" "no delegation in $1 is running any more"; fi
-  done < <(cmd_inbox open --for root --workspace "$1" --json 2>/dev/null \
-    | jq -r 'select(.from == "steward" and ((.fp // "") | startswith("stall-"))) | .id' 2>/dev/null || true)
-}
-
 # Resolve ticket ownership independently of liveness: an absent orchestrator
 # still owns its tickets, and its covering owner card must hold their nudges.
 # Unknown or ambiguous prefix ownership stays actionable through root.
@@ -1546,21 +1295,16 @@ _steward_orphan_servers() { # <agents-json>
 # orchestrator decides. A sweep that reaped a worker mid-gate would destroy the
 # work it was measuring, and the one number it has is an attribution by cwd,
 # not proof of who is at fault.
-_STEWARD_MEM_WORKER_WARN_MB="${CEL_MEM_WORKER_WARN_MB:-2048}"
 
 # Every tree the steward knows about, largest first, as `name<TAB>mb`. One
 # /proc walk for the whole sweep, as in lib/fleet.sh: the snapshot is what
 # keeps this cheap enough to run every five minutes.
-#
-# ONLY `running` DELEGATIONS. A collected or released row's worktree is gone
-# or going, so naming it as one of the largest trees points an operator at
-# something nobody can act on - the same rule as the fleet's worker list.
 _steward_mem_trees() { # -> name<TAB>mb, biggest first
   _steward_mem_trees_raw | sort -t"$(printf '\t')" -k2,2nr
 }
 
 _steward_mem_trees_raw() {
-  local ws wsdir p d id wt mb
+  local ws wsdir p d mb
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
@@ -1570,14 +1314,6 @@ _steward_mem_trees_raw() {
       mb="$(mem_tree_rss_mb "$d")"
       [ "${mb:-0}" -gt 0 ] && printf '%s-orch\t%s\n' "$p" "$mb"
     done
-    [ -f "$wsdir/.cel/delegations.json" ] || continue
-    while IFS=$'\t' read -r id wt; do
-      [ -n "$id" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
-      mb="$(mem_tree_rss_mb "$wt")"
-      [ "${mb:-0}" -gt 0 ] && printf '%s\t%s\n' "$id" "$mb"
-    done < <(jq -r '.[]? | select((.state // "") == "running")
-                    | [(.id // ""), (.worktree // "")] | @tsv' \
-      "$wsdir/.cel/delegations.json" 2>/dev/null || true)
   done
   # ORPHANS ARE A TREE TOO, even though no pane owns them: the line exists to
   # answer "what is holding the memory", and orphaned processes can be the
@@ -1588,17 +1324,11 @@ _steward_mem_trees_raw() {
   printf ''
 }
 
-# Which product owns a delegation, so the warning goes to the orchestrator that
-# can act on it rather than to root, who would only forward it.
-_steward_mem_owner() { # <wsdir> <repo>
-  printf '%s-orch' "$(ws_product_of_repo "$1" "$2")"
-}
-
 # THE WARNING LINE. Below it the orchestrators - the ones who can
-# stop delegating and collect - hear about it once per condition, rolled up
+# stop what they started - hear about it once per condition, rolled up
 # (one fp per workspace, re-sent at most once per _steward_due window), naming
 # the biggest consumers grouped by worktree. Admission (lib/boxguard.sh)
-# refuses new workers lower down; this is the earlier word.
+# refuses new launches lower down; this is the earlier word.
 _steward_mem_pressure_warn() { # <avail-mb>
   # ONCE PER CONDITION: the orchestrators hear it on entering
   # pressure and not again until the box has recovered and fallen back in.
@@ -1612,10 +1342,9 @@ _steward_mem_pressure_warn() { # <avail-mb>
   server_rows="$(serve_list_json 2>/dev/null || printf '[]')"
   server_top="$(printf '%s' "$server_rows" | jq -r '.[0:5][] | "\(.name) \(.memory_mb)M"' | paste -sd', ' -)"
   top="${top}${server_top:+; top servers: $server_top}"
-  # Line 1 is the idle-stop pass (workers, ~M freed), any further
-  # lines the finished reviewers closed - all of it is what was stopped.
+  # The finished reviewers gc's last sweep closed - all of it is what was stopped.
   acted="$(grep . "$(_gc_idle_stop_last)" 2>/dev/null | paste -sd';' - || true)"
-  acted="${acted:+gc stopped idle workers and finished reviewers: $acted}"
+  acted="${acted:+gc closed finished reviewers: $acted}"
   local msg; msg="steward: $(boxguard_warning_text "$acted") Biggest worktrees: ${top:-none attributable}."
   c_warn "$msg"
   [ -f "$flag" ] && return 0
@@ -1670,27 +1399,6 @@ _steward_memory() {
 
   _steward_mem_pressure_warn "$avail"
 
-  # AND ONE WORKER THAT IS THE PROBLEM ON ITS OWN. A pi worker is ~340 MB
-  # resident; a tree over 2 GB is a test server nobody stopped or a run that
-  # went wrong, and its own orchestrator is the thing that can collect it.
-  local wsdir id repo wt mb who
-  for ws in $(registry_names); do
-    wsdir="$(registry_path "$ws")" || continue
-    [ -f "$wsdir/.cel/delegations.json" ] || continue
-    while IFS=$'\t' read -r id repo wt; do
-      [ -n "$id" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
-      mb="$(mem_tree_rss_mb "$wt")"
-      [ "${mb:-0}" -ge "$_STEWARD_MEM_WORKER_WARN_MB" ] || continue
-      who="$(_steward_mem_owner "$wsdir" "$repo")"
-      c_warn "$ws/$id is holding $(mem_human "$mb") in $wt - told $who"
-      _steward_due "mem-worker-$ws-$id" || continue
-      cmd_inbox send "$who" \
-        "steward: worker $id is holding $(mem_human "$mb") of memory (threshold $(mem_human "$_STEWARD_MEM_WORKER_WARN_MB")) in $wt. Nothing has been stopped - check whether it left a test server or a preview running, and collect it if it is done." \
-        --from steward --workspace "$ws" --kind status --fp "mem-worker-$id" >/dev/null 2>&1 || true
-    done < <(jq -r '.[]? | select((.state // "") == "running")
-                    | [(.id // ""), (.repo // ""), (.worktree // "")] | @tsv' \
-      "$wsdir/.cel/delegations.json" 2>/dev/null || true)
-  done
   mem_tree_snapshot_clear
 }
 
@@ -2186,13 +1894,8 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
 
   _steward_review_sweep "$agents_json"
   _steward_solo_sweep
-  # And then the ledger closes what the world already closed - after the
-  # review sweep, because a PR it nudged about this tick may be the very one
-  # that has just been merged.
-  _steward_reconcile
-  # Before the inbox sweeps: a dead worker is the one failure no inbox watcher
-  # can see, and the one whose delay can cost the work rather than just time.
-  _steward_stalled_workers "$agents_json"
+  # (No ledger reconcile or stalled-worker sweep: fan-out was retired on
+  # 2026-11-08 and the steward reads no delegation ledger any more.)
   # An item naming a pane that no longer exists cannot be acted on by anyone.
   _steward_clear_dead_panes
   # And the mailbox itself: unread escalations with nobody alive to read them.

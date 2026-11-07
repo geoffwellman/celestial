@@ -327,16 +327,8 @@ function artifacts(cwd) {
   return { cwd, exists: true, entries };
 }
 export function selectedRound(ledger, selector) {
-  let round;
-  if (selector.kind === 'solo') {
-    requireProof(object(ledger), 'unknown_solo_review_ledger');
-    round = ledger[selector.key];
-  } else {
-    requireProof(selector.kind === 'fleet' && Array.isArray(ledger), 'unknown_fleet_review_ledger');
-    const rows = ledger.filter(row => row.id === selector.id && row.repo === selector.repo && row.branch === selector.branch);
-    requireProof(rows.length === 1, 'ambiguous_or_missing_own_review_round');
-    round = rows[0].review;
-  }
+  requireProof(selector.kind === 'solo' && object(ledger), 'unknown_solo_review_ledger');
+  const round = ledger[selector.key];
   requireProof(object(round), 'own_review_round_unavailable');
   return { round, hash: sha(JSON.stringify(round)) };
 }
@@ -350,16 +342,6 @@ function durableRound(r, pr) {
   if (fs.existsSync(solo)) {
     const selector = { kind: 'solo', key: `${r.repo}#${r.pr}` }, saved = jsonFile(solo);
     if (saved.value[selector.key]) candidates.push({ path: solo, selector, ...selectedRound(saved.value, selector) });
-  }
-  const fleet = path.join(r.workspace, '.cel', 'delegations.json');
-  if (fs.existsSync(fleet)) {
-    const saved = jsonFile(fleet);
-    requireProof(Array.isArray(saved.value), 'unknown_fleet_ledger');
-    for (const row of saved.value) if (row.repo === r.repo && row.branch === pr.headRefName && row.review?.head_source === 'explicit') {
-      requireProof(typeof row.id === 'string' && row.id.length > 0, 'unidentified_fleet_review_round');
-      const selector = { kind: 'fleet', id: row.id, repo: row.repo, branch: row.branch };
-      candidates.push({ path: fleet, selector, ...selectedRound(saved.value, selector) });
-    }
   }
   const matches = candidates.filter(c => ['approved', 'changes'].includes(c.round.verdict) && c.round.head === pr.headRefOid && c.round.by === r.name && Number.isFinite(timestamp(c.round.at)));
   requireProof(matches.length > 0, 'no_completed_current_head_round', 'protected');

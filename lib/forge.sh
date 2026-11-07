@@ -44,8 +44,8 @@
 # (mode 600, the host as the descriptor names it). The token is read only
 # for a request to that exact host and travels on curl's stdin as a config
 # line - never in argv, a log or an error. A repo declared on plain http://
-# says so on stderr at every operation: its token crosses the network
-# unencrypted. CEL_FORGE_CURL names the curl binary - that backend's one
+# says so on stderr for every request that sends its token: it crosses the
+# network unencrypted. CEL_FORGE_CURL names the curl binary - that backend's one
 # stub seam, honoured only under CEL_TESTING (set by tests/run.sh), so a
 # stray variable cannot hand the token to another binary. The token's
 # directory follows XDG_CONFIG_HOME, the standard per-user config root.
@@ -103,10 +103,6 @@ _forge_call() { # <op> <wsdir> <repo> [args...]
     github)
       "_forge_github_$op" "$wsdir" "$(printf '%s' "$desc" | jq -r '"\(.owner)/\(.repo)"')" "$@" ;;
     forgejo)
-      case "$(printf '%s' "$desc" | jq -r .api_url)" in
-        http://*) printf 'forge: token sent unencrypted to %s - plain http is declared for this repo\n' \
-                    "$(printf '%s' "$desc" | jq -r .host)" >&2 ;;
-      esac
       "_forge_forgejo_$op" "$wsdir" "$desc" "$@" ;;
     *)
       printf "forge %s: repo '%s' has no known provider (%s)\n" "$op" "$repo" "$provider" >&2
@@ -343,6 +339,11 @@ _forge_fj() { # <host> <METHOD> <url> [json-body]
     *) printf 'forge: refusing to send the %s token to %s\n' "$host" "$url" >&2; return 1 ;;
   esac
   tok="$(_forge_forgejo_token "$host")" || return 1
+  # Said only now, with the token in hand and the request about to go: an
+  # operation refused before this point sent nothing over plain http.
+  case "$url" in
+    http://*) printf 'forge: token sent unencrypted to %s - plain http is declared for this repo\n' "$host" >&2 ;;
+  esac
   local -a args=(--config - --silent --show-error --proto '=http,https' --max-time "${CEL_FORGE_TIMEOUT:-60}"
                  --request "$method" --header 'Accept: application/json' --write-out '\n%{http_code}')
   if [ $# -ge 4 ]; then

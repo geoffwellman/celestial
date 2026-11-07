@@ -28,22 +28,6 @@ console.log([a, same, b, c, d].join('|'));
   rm -rf "$T"
 }
 
-test_dash_store_json_follows_the_file() {
-  local T; T="$(mktemp -d)"
-  local out; out="$(_df_node "
-import { createStore } from '$CEL_ROOT/tools/dash/store.mjs';
-import { writeFileSync } from 'node:fs';
-const f = '$T/delegations.json'; const s = createStore();
-const miss = s.json(f);
-writeFileSync(f, '[{\"branch\":\"ABC-1\"}]');
-const a = s.json(f).length;
-writeFileSync(f, '[{\"branch\":\"ABC-1\"},{\"branch\":\"ABC-2\"}]');
-console.log([miss, a, s.json(f).length].join('|'));
-")"
-  assert_eq "$out" "|1|2"
-  rm -rf "$T"
-}
-
 test_dash_doctor_probe_is_patient_and_cheap() {
   local T; T="$(mktemp -d)"
   local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"

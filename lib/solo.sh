@@ -1,17 +1,15 @@
 # shellcheck shell=bash
 # cel solo - the review record and the merge door for a SOLO product's PRs.
 #
-# A fleet PR belongs to a delegation: its review verdict lives on the ledger
-# row and `cel-fanout land <id>` merges it. A solo product has no delegations
-# - one agent opens its PRs directly - so neither has anywhere to stand. These
-# are the same two acts with the PR itself as the key:
+# A solo product's PRs are opened directly by its one agent, and the PR itself
+# is the key for the two acts on them:
 #
 #   cel solo review <repo>#<n> approved|changes --head <sha> --by <alias>
 #   cel solo land   <repo>#<n>
 #
-# `land` proves what `cel-fanout land` proves (policy, ownership, an approval
-# for the exact head, no red check, no conflict, every protected check green
-# on that head) using the same checks (lib/land.sh), and merges only that
+# `land` proves policy, ownership, an approval for the exact head, no red
+# check, no conflict, and every protected check green on that head, using
+# the shared checks in lib/land.sh, and merges only that
 # head. Protected CI on the exact head is the preferred evidence; when the base
 # branch has no required checks, the repo gate runs locally in a clean
 # checkout at exactly that head instead (_solo_local_gate).
@@ -100,7 +98,7 @@ solo_ready_prs() { # <wsdir> <product>
 
 # `<repo>#<n>` or a bare `<n>` when the product has exactly one repo. Sets
 # SOLO_WSDIR, SOLO_PRODUCT, SOLO_REPO, SOLO_PR; refuses a repo that is not in
-# a solo product, because a fleet PR has a delegation and its own door.
+# a solo product.
 _solo_resolve() { # <ref> <workspace-or-empty>
   local ref="$1" workspace="$2" repo="" pr=""
   if [ -n "$workspace" ]; then
@@ -125,11 +123,11 @@ _solo_resolve() { # <ref> <workspace-or-empty>
     || die "cel solo: '$repo' is not a repo of workspace '$(ws_name "$SOLO_WSDIR")'"
   SOLO_PRODUCT="$(ws_product_of_repo "$SOLO_WSDIR" "$repo")"
   [ "$(ws_build_mode "$SOLO_WSDIR" "$SOLO_PRODUCT")" = solo ] \
-    || die "cel solo: '$repo' belongs to '$SOLO_PRODUCT', which is not in solo mode - its PRs are delegations: cel-fanout review / cel-fanout land"
+    || die "cel solo: '$repo' belongs to '$SOLO_PRODUCT', which is not in solo mode - fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
   SOLO_REPO="$repo"; SOLO_PR="$pr"
 }
 
-# Forge calls go through gh as GH when a caller (a test, cel-fanout) set it,
+# Forge calls go through gh as GH when a caller (a test) set it,
 # as lib/land.sh's do.
 _solo_forge() { CEL_FORGE_GH="${GH:-gh}" "$@"; }
 
@@ -152,7 +150,7 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
       *) die "cel solo review: unknown argument: $1" ;;
     esac
   done
-  # The same rules as a fleet verdict (cel-fanout review): attributed, and
+  # Attributed, and
   # bound to the exact commit the reviewer read - never inferred.
   case "$verdict" in approved|changes) ;; *) die "cel solo review: verdict must be approved or changes (got: $verdict)";; esac
   [ -n "$by" ] || die "cel solo review: --by <reviewer-alias> is required - an unattributed verdict is not a review"
@@ -191,7 +189,7 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
 # base branch gates nothing, so CI cannot stand in. It runs in a checkout of
 # this repo whose HEAD is that commit with nothing modified, staged or
 # untracked - the solo agent's own worktree for the branch (its dependencies
-# installed, as a worker's are for the fleet land). No such checkout is a
+# installed). No such checkout is a
 # refusal, never a guess. The commit is also fetched from the forge as the
 # PR's own ref (refs/pull/<n>/head, which GitHub and Forgejo both serve): the
 # head the gate passes must be the head the forge would merge. Prints the
@@ -236,13 +234,11 @@ _solo_local_gate() { # <wsdir> <repo> <pr> <head> <gate>
 
 cmd_solo_land() { # <ref> [--workspace W]
   [ $# -ge 1 ] || die "usage: cel solo land <repo>#<pr> [--workspace NAME]"
-  # Landing is the solo agent's (or a person's) act, never a worker's or a
-  # reviewer's: the reviewer judges, it does not merge what it judged.
+  # Landing is the solo agent's (or a person's) act, never a reviewer's: the
+  # reviewer judges, it does not merge what it judged.
   case "${CEL_ROLE:-}" in
-    worker|reviewer|scout|spike) die "cel solo land: a ${CEL_ROLE} does not merge - the product's agent lands an approved PR" ;;
+    reviewer) die "cel solo land: a ${CEL_ROLE} does not merge - the product's agent lands an approved PR" ;;
   esac
-  [ "$(guard_role_of "$PWD")" != worker ] \
-    || die "cel solo land: refused from a worker worktree - the product's agent lands an approved PR"
   local ref="$1" workspace=""; shift
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -305,7 +301,7 @@ cmd_solo_land() { # <ref> [--workspace W]
   # CI stands in for the gate when the base branch's required checks are all
   # green on this head. When the base branch gates nothing at all, the repo's
   # own gate (workspace.yaml `gate:`) runs instead, in a clean checkout at
-  # exactly this head - the same evidence the fleet land collects locally.
+  # exactly this head.
   local gate_body gate_out rc=0
   gate_out="$(mktemp)"
   land_ci_gate "$wsdir" "$SOLO_REPO" "$pr" > "$gate_out" || rc=$?
@@ -322,7 +318,7 @@ cmd_solo_land() { # <ref> [--workspace W]
     local afk_ev
     afk_ev="$(jq -n --arg ws "$(ws_name "$wsdir")" --arg slug "$slug" --arg num "$num" --arg via "$approved_via" \
       --arg gate "$(case "$gate_body" in "Gate: local"*) printf pass;; *) printf ci;; esac)" \
-      '{review:"approved", checks:"green", gate:$gate, mergeable:true, author:"fleet",
+      '{review:"approved", checks:"green", gate:$gate, mergeable:true, author:"solo",
         workspace:$ws, pr:$num, slug:$slug, approved_via:$via}')"
     afk_begin land "$afk_ev" "$slug#$num (solo) - approved via $approved_via, checks green" \
       || die "cel solo land: AFK did not authorise this merge - see the refusal above. Nothing was merged."

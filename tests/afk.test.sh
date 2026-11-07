@@ -44,7 +44,7 @@ _ev_thread() { # [overrides-json]
 _ev_land() {
   jq -nc --argjson o "${1:-{\}}" '{
     review: "approved", checks: "green", gate: "pass",
-    mergeable: true, author: "fleet", pr: 71
+    mergeable: true, author: "solo", pr: 71
   } * $o'
 }
 _ev_rebase() {
@@ -52,20 +52,14 @@ _ev_rebase() {
     was_mergeable: true, behind: true, new_work: false, conflicts: false, pr: 71
   } * $o'
 }
-_ev_dispatch() {
-  jq -nc --argjson o "${1:-{\}}" '{
-    source: "reviewer", quote: "the retry path has no test",
-    workers: 2, cap: 4, quota_pct: 40, quota_floor: 20
-  } * $o'
-}
 
 # ---------------------------------------------------------------- AFK is off
 # THE REGRESSION THAT KEEPS AFK FROM BECOMING THE DEFAULT. With no AFK on,
-# every one of the four acts waits, exactly as it did before this file existed.
+# every one of the acts waits, exactly as it did before this file existed.
 test_afk_off_every_pre_authorised_act_still_waits() {
   _afk_setup
   local act out
-  for act in resolve_thread land rebase_retry dispatch; do
+  for act in resolve_thread land rebase_retry; do
     out="$(afk_admit "$act" "$(_ev_land)" 2>&1)" && { _afk_teardown; return 1; }
     assert_contains "$out" "AFK is off" || { _afk_teardown; return 1; }
   done
@@ -103,7 +97,6 @@ test_each_pre_authorisation_fires_when_its_evidence_is_present() {
   afk_admit resolve_thread "$(_ev_thread)"   || { _afk_teardown; return 1; }
   afk_admit land           "$(_ev_land)"     || { _afk_teardown; return 1; }
   afk_admit rebase_retry   "$(_ev_rebase)"   || { _afk_teardown; return 1; }
-  afk_admit dispatch       "$(_ev_dispatch)" || { _afk_teardown; return 1; }
   # Admitting is not acting: nothing is logged until an act reports its end.
   assert_eq "$(afk_log_json | jq -sr 'length')" 0
   _afk_teardown
@@ -120,7 +113,7 @@ test_afk_never_merges_red_unreviewed_or_unmergeable() {
   assert_contains "$(afk_admit land "$(_ev_land '{"mergeable":false}')" 2>&1)" \
     "conflicts"
   assert_contains "$(afk_admit land "$(_ev_land '{"author":"someone-else"}')" 2>&1)" \
-    "not this fleet's PR"
+    "not this product's own PR"
   _afk_teardown
 }
 
@@ -204,18 +197,15 @@ test_afk_refuses_a_rebase_that_conflicts_or_carries_new_work() {
   _afk_teardown
 }
 
-# A QUEUE EMPTIED OVERNIGHT INTO AN EXHAUSTED ACCOUNT HELPS NOBODY.
-test_afk_dispatch_needs_a_written_finding_and_respects_cap_and_quota() {
+# FAN-OUT WAS RETIRED: dispatching a worker and starting ordered work are no
+# longer acts AFK can authorise, so the door refuses them outright.
+test_afk_no_longer_authorises_dispatch_or_ordered_work() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
-  assert_contains "$(afk_admit dispatch "$(_ev_dispatch '{"quote":""}')" 2>&1)" \
-    "no reviewer or scout finding"
-  assert_contains "$(afk_admit dispatch "$(_ev_dispatch '{"source":"orchestrator"}')" 2>&1)" \
-    "no reviewer or scout finding"
-  assert_contains "$(afk_admit dispatch "$(_ev_dispatch '{"workers":4}')" 2>&1)" \
-    "worker cap"
-  assert_contains "$(afk_admit dispatch "$(_ev_dispatch '{"quota_pct":10}')" 2>&1)" \
-    "quota floor"
+  assert_contains "$(afk_admit dispatch '{"source":"reviewer","quote":"x"}' 2>&1)" \
+    "not one of the four pre-authorised acts" || { _afk_teardown; return 1; }
+  assert_contains "$(afk_admit ordered_work '{}' 2>&1)" \
+    "not one of the four pre-authorised acts" || { _afk_teardown; return 1; }
   _afk_teardown
 }
 
@@ -252,14 +242,14 @@ test_the_log_records_every_act_with_its_authorisation_and_survives_a_restart() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
   ( afk_begin land "$(_ev_land)" "alpha/widget#71" && afk_end completed "merged" ) >/dev/null
-  ( afk_begin dispatch "$(_ev_dispatch)" "widget/WG-1" && afk_end completed ) >/dev/null
+  ( afk_begin rebase_retry "$(_ev_rebase)" "widget/WG-1" && afk_end completed ) >/dev/null
   # A restart: nothing of this process survives, only the state directory.
   local out
   out="$(bash -c '. "$CEL_ROOT/lib/common.sh"; . "$CEL_ROOT/lib/afk.sh"; cmd_afk log')"
   assert_contains "$out" "land"
   assert_contains "$out" "pre-authorisation 2"
-  assert_contains "$out" "dispatch"
-  assert_contains "$out" "pre-authorisation 4"
+  assert_contains "$out" "rebase_retry"
+  assert_contains "$out" "pre-authorisation 3"
   _afk_teardown
 }
 
@@ -289,9 +279,9 @@ test_regression_an_act_that_exits_before_its_effect_is_recorded_failed() {
 test_regression_an_act_that_exits_half_way_is_recorded_partial() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
-  ( afk_begin dispatch "$(_ev_dispatch)" "widget/WG-1"; afk_step "created the worktree /x"; exit 1 ) >/dev/null 2>&1 || true
+  ( afk_begin land "$(_ev_land)" "alpha/widget#71"; afk_step "asked GitHub to merge #71"; exit 1 ) >/dev/null 2>&1 || true
   assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" partial || { _afk_teardown; return 1; }
-  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "created the worktree /x" || { _afk_teardown; return 1; }
+  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "asked GitHub to merge #71" || { _afk_teardown; return 1; }
   _afk_teardown
 }
 # A refusal records nothing and arms nothing; and an EXIT trap the caller
@@ -309,7 +299,7 @@ test_regression_afk_begin_refusal_records_nothing_and_keeps_the_callers_exit_tra
 }
 # ...and that trap sees the process's real exit status, not the record's:
 # a trap deciding on `$?` (lib/run.sh releases a session claim on failure)
-# must not read a failed exit as success. Under `set -e` too, as cel-fanout runs.
+# must not read a failed exit as success. Under `set -e` too, as cel solo land runs.
 test_regression_the_callers_exit_trap_sees_the_real_exit_status() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
@@ -414,236 +404,18 @@ test_cel_dispatches_afk() {
   _afk_teardown
 }
 
-# =========================================================== real call sites
-# THE DOOR HAS TO BE REACHED FROM A REAL ACT. Everything above proves
-# `afk_admit` refuses when it is called; this proves the mutating call
-# sites go through it BEFORE acting. The fanout binary is driven end to end
-# against stubs, and the assertion is on what the stub was NOT asked to do.
-BIN="$CEL_ROOT/core/skills/fanout/bin/cel-fanout"
-
-_afk_fanout_setup() {
-  T="$(mktemp -d)"
-  export CEL_AFK_STATE="$T/afk"
-  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
-  yq -y '.policy.merge = "self"' "$T/workspace.yaml" > "$T/ws.tmp" && mv "$T/ws.tmp" "$T/workspace.yaml"
-  mkdir -p "$T/repos/widget"; git -C "$T/repos/widget" init -q
-  STUB_WT="$T/widget-worker"; mkdir -p "$STUB_WT"
-  git -C "$STUB_WT" init -q
-  git -C "$STUB_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$STUB_WT" update-ref refs/remotes/origin/main HEAD
-  git -C "$STUB_WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-  STUB_REPO="$(git -C "$T/repos/widget" rev-parse --show-toplevel)"
-  STUB_LOG="$T/stub.log"; : > "$STUB_LOG"
-  cat > "$T/herdr-stub.sh" <<'EOF'
-#!/usr/bin/env bash
-echo "$@" >> "$STUB_LOG"
-case "$1 $2" in
-  "worktree create")
-    # STUB_NO_CHECKOUT: herdr answers without attaching a worktree
-    if [ -n "${STUB_NO_CHECKOUT:-}" ]; then echo '{"result":{"workspace_id":"wZ"}}'
-    else echo '{"result":{"workspace_id":"wZ","pane_id":"wZ:p1","checkout_path":"'"$STUB_WT"'"}}'; fi;;
-  "workspace list")  echo '{"result":{"workspaces":[{"workspace_id":"wY","worktree":{"repo_root":"'"$STUB_REPO"'","is_linked_worktree":false}}]}}';;
-  "pane split")      echo '{"result":{"pane":{"pane_id":"wZ:p9"}}}';;
-  "pane get"|"pane process-info") PF_NOLOG=1 PF_DIR="${PF_DIR:-$STUB_LOG.pf}" HERDR_LOG="$STUB_LOG" "$CEL_ROOT/tests/lib/fake-herdr" "$@";;
-  "agent list")      echo '{"result":{"agents":[{"pane_id":"wZ:p1","agent_status":"idle"}]}}';;
-  *) echo '{}';;
-esac
-EOF
-  chmod +x "$T/herdr-stub.sh"
-  export CEL_FANOUT_HERDR="$T/herdr-stub.sh" STUB_LOG STUB_WT STUB_REPO
-  GH_LOG="$T/gh.log"; : > "$GH_LOG"
-  cat > "$T/gh-stub.sh" <<EOF
-#!/usr/bin/env bash
-echo "\$@" >> "$GH_LOG"
-case "\$1 \$2" in
-  "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
-  "pr merge") [ -z "\${STUB_MERGE_FAIL:-}" ] || exit 1; exit 0;;
-  *) echo '{}';;
-esac
-EOF
-  chmod +x "$T/gh-stub.sh"; export CEL_FANOUT_GH="$T/gh-stub.sh" CEL_AFK_GH="$T/gh-stub.sh" GH_LOG
-  cat > "$T/verify-stub.sh" <<'EOF'
-#!/usr/bin/env bash
-wt="$1"; mkdir -p "$wt/.agent"
-printf '{"at":"x","gate":{"configured":true,"passed":true},"tests":{"red_then_green":true},"diff":{"files":1},"checks":{"state":"SUCCESS"},"review":{"decision":"APPROVED"}}' > "$wt/.agent/verdict.json"
-echo "verdict gate:PASS"
-EOF
-  chmod +x "$T/verify-stub.sh"; export CEL_FANOUT_VERIFY="$T/verify-stub.sh"
-  # A spec that says where its finding came from, which is what
-  # pre-authorisation 4 is about.
-  printf 'Finding-from: reviewer widget-pr-7-review\n\n> the retry path has no test\n\ndo the thing\n' > "$T/spec.md"
-  printf 'do the thing\n' > "$T/bare-spec.md"
-}
-_afk_fanout_teardown() {
-  rm -rf "$T"
-  unset CEL_AFK_STATE CEL_FANOUT_HERDR CEL_FANOUT_GH CEL_FANOUT_VERIFY CEL_AFK_GH
-}
-
-# THE LANDING GOES THROUGH THE DOOR BEFORE IT MERGES. AFK armed over another
-# workspace is AFK that authorises nothing here - and the proof is that `gh pr
-# merge` was never called, not that a message was printed afterwards.
-test_land_while_afk_is_scoped_elsewhere_refuses_before_merging() {
-  _afk_fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
-  cmd_afk on --until '+8h' --scope beta >/dev/null
-  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
-    echo "landed under an AFK armed over another workspace"; _afk_fanout_teardown; return 1; }
-  assert_contains "$out" "another orchestrator's workspace"
-  ! grep -q "^pr merge" "$GH_LOG" || {
-    echo "it merged and refused afterwards - the door is downstream of the act"; _afk_fanout_teardown; return 1; }
-  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
-  _afk_fanout_teardown
-}
-
-# ...and when it does authorise, the act is recorded with the pre-authorisation
-# that covered it, from the real landing rather than from a hand-built object.
-test_land_while_afk_is_on_passes_the_door_and_is_recorded() {
-  _afk_fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  (cd "$T" && "$BIN" land WG-LAND) > /dev/null || { _afk_fanout_teardown; return 1; }
-  grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge"; _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 1
-  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 2"
-  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "#7"
-  _afk_fanout_teardown
-}
-
-# THE LOG SAYS HOW THE LANDING ENDED, written after the merge was tried: a
-# merge that went through is `completed`, one GitHub refused is `failed` -
-# never a bare `authorised` written before anything happened.
-test_regression_afk_land_is_logged_with_how_the_merge_ended() {
-  _afk_fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  (cd "$T" && STUB_MERGE_FAIL=1 "$BIN" land WG-LAND) > /dev/null 2>&1 && {
-    echo "a refused merge reported success"; _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 1 || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" failed || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running || { _afk_fanout_teardown; return 1; }
-  (cd "$T" && "$BIN" land WG-LAND) > /dev/null || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 2 || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" completed || { _afk_fanout_teardown; return 1; }
-  _afk_fanout_teardown
-}
-
-# ---------------------------------------------------------- author identity
-# WHOSE PR IS THIS. `land` proves the author against the fleet's own GitHub
-# identity on every path - the guard sits above the split between a GitHub
-# approval and the ledger verdict - so a colleague's PR never reaches the AFK
-# door at all. That is asserted here rather than argued: AFK on, an approved
-# green PR opened by someone else, and NOTHING merges and nothing is recorded
-# as an autonomous act. The evidence object derives `author` from the same two
-# values that guard rather than stating it, so the two cannot drift apart.
-_afk_fanout_foreign_author() {
-  cat > "$T/gh-stub.sh" <<EOF
-#!/usr/bin/env bash
-echo "\$@" >> "$GH_LOG"
-case "\$1 \$2" in
-  "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"someone-else"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
-  "pr merge") exit 0;;
-  *) echo '{}';;
-esac
-EOF
-  chmod +x "$T/gh-stub.sh"
-}
-
-test_land_while_afk_is_on_never_merges_a_colleagues_pr() {
-  _afk_fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/spec.md") > /dev/null
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  _afk_fanout_foreign_author
-  : > "$GH_LOG"
-  local out; out="$( (cd "$T" && "$BIN" land WG-LAND) 2>&1 )" && {
-    echo "landed a PR this fleet did not open"; _afk_fanout_teardown; return 1; }
-  assert_contains "$out" "theirs to land"
-  ! grep -q "^pr merge" "$GH_LOG" || { echo "it merged a colleague's PR"; _afk_fanout_teardown; return 1; }
-  # ...and no autonomous act is recorded for something that never happened.
-  assert_eq "$(afk_log_json | jq -sr '[.[] | select(.act == "land")] | length')" 0
-  assert_eq "$(jq -r '.[0].state' "$T/.cel/delegations.json")" running
-  _afk_fanout_teardown
-}
-
-# AND THE DOOR ITSELF STILL REFUSES IT. The guard above is the first wall; this
-# is the second, and it is the one that would still be standing if the first
-# ever moved - which is the only reason the evidence carries an author field at
-# all. `unknown` is what the derivation yields when the fleet's identity cannot
-# be read: an account this process could not name is not this fleet.
-test_the_door_refuses_a_landing_whose_author_is_not_the_fleet() {
+# THE DOOR REFUSES A LANDING THAT IS NOT THE PRODUCT'S OWN PR. `cel solo land`
+# proves the author against the workspace's own GitHub identity before it gets
+# here; this is the second wall, the one still standing if the first moved.
+test_the_door_refuses_a_landing_whose_author_is_not_solo() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
   assert_contains "$(afk_admit land "$(_ev_land '{"author":"someone-else"}')" 2>&1)" \
-    "not this fleet's PR"
-  assert_contains "$(afk_admit land "$(_ev_land '{"author":"unknown"}')" 2>&1)" \
-    "not this fleet's PR"
+    "not this product's own PR"
+  assert_contains "$(afk_admit land "$(_ev_land '{"author":"fleet"}')" 2>&1)" \
+    "not this product's own PR"
   assert_eq "$(afk_log_json | jq -sr 'length')" 0
   _afk_teardown
-}
-
-# A SPEC THAT NAMES NO FINDING IS NOT DISPATCHED OVERNIGHT. Pre-authorisation 4
-# is "a follow-up a reviewer or scout documented", and the refusal has to land
-# before a worktree, a pane or an agent exists - a worker spawned at 04:00 and
-# then disowned is worse than one never started.
-test_dispatch_while_afk_is_on_refuses_a_spec_with_no_written_finding() {
-  _afk_fanout_setup
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  local out; out="$( (cd "$T" && "$BIN" delegate widget WG-NEW "$T/bare-spec.md") 2>&1 )" && {
-    echo "dispatched a spec with no finding behind it"; _afk_fanout_teardown; return 1; }
-  assert_contains "$out" "no reviewer or scout finding"
-  ! grep -q "^worktree create" "$STUB_LOG" || {
-    echo "a worktree was created before the door was asked"; _afk_fanout_teardown; return 1; }
-  [ ! -s "$T/.cel/delegations.json" ] || assert_eq "$(jq -r 'length' "$T/.cel/delegations.json")" 0
-  _afk_fanout_teardown
-}
-
-test_dispatch_while_afk_is_on_proceeds_from_a_documented_finding() {
-  _afk_fanout_setup
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  (cd "$T" && "$BIN" delegate widget WG-NEW "$T/spec.md") > /dev/null || { _afk_fanout_teardown; return 1; }
-  grep -q "^worktree create" "$STUB_LOG" || { echo "nothing was dispatched"; _afk_fanout_teardown; return 1; }
-  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 4"
-  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "widget/WG-NEW"
-  _afk_fanout_teardown
-}
-
-# THE LOG SAYS HOW THE DISPATCH ENDED: a worker running its task is
-# `completed`, a worker whose task was never confirmed is `partial`, and a
-# dispatch that stopped before any worktree existed is `failed`.
-test_regression_afk_dispatch_is_logged_with_how_the_launch_ended() {
-  _afk_fanout_setup
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  (cd "$T" && "$BIN" delegate widget WG-NEW "$T/spec.md") > /dev/null 2>&1 || { _afk_fanout_teardown; return 1; }
-  local want=partial
-  [ "$(jq -r '.[0].state' "$T/.cel/delegations.json")" = running ] && want=completed
-  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" "$want" || { _afk_fanout_teardown; return 1; }
-  assert_contains "$(afk_log_json | jq -sr '.[-1].detail')" "widget/WG-NEW" || { _afk_fanout_teardown; return 1; }
-  _afk_fanout_teardown
-}
-test_regression_afk_dispatch_that_stops_before_a_worktree_is_logged_failed() {
-  _afk_fanout_setup
-  cmd_afk on --until '+8h' --scope alpha >/dev/null
-  (cd "$T" && STUB_NO_CHECKOUT=1 "$BIN" delegate widget WG-NEW "$T/spec.md") > /dev/null 2>&1 && {
-    echo "a dispatch with no worktree reported success"; _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr 'length')" 1 || { _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr '.[-1].outcome')" failed || { _afk_fanout_teardown; return 1; }
-  assert_contains "$(afk_log_json | jq -sr '.[-1].authorisation')" "pre-authorisation 4" || { _afk_fanout_teardown; return 1; }
-  _afk_fanout_teardown
-}
-
-# AND AFK OFF CHANGES NOTHING ABOUT ORDINARY WORK. The convention this adds to
-# specs is read only while AFK is on; an operator at the keyboard delegates the
-# same specs they always did.
-test_afk_off_leaves_an_ordinary_dispatch_and_landing_alone() {
-  _afk_fanout_setup
-  (cd "$T" && "$BIN" delegate widget WG-LAND "$T/bare-spec.md") > /dev/null \
-    || { echo "AFK off blocked an ordinary dispatch"; _afk_fanout_teardown; return 1; }
-  (cd "$T" && "$BIN" land WG-LAND) > /dev/null || { _afk_fanout_teardown; return 1; }
-  grep -q "^pr merge 7" "$GH_LOG" || { echo "AFK off blocked an ordinary landing"; _afk_fanout_teardown; return 1; }
-  assert_eq "$(afk_log_json | jq -sr 'length')" 0
-  _afk_fanout_teardown
 }
 
 # ------------------------------------------- pre-authorisation 1's entry point
@@ -766,40 +538,6 @@ test_afk_rebase_retry_refuses_while_afk_is_off() {
   _afk_teardown
 }
 
-# ============================================================ ordered work
-# ORDERED WORK DOES NOT STOP WHEN THE OWNER STEPS AWAY. A spec already written
-# under .cel/specs/ before AFK went on is work somebody ordered awake.
-test_afk_ordered_spec_written_before_afk_is_authorised_and_logged() {
-  _afk_setup
-  mkdir -p "$T/ws/.cel/specs"; printf 'x\n' > "$T/ws/.cel/specs/CEL-1.md"
-  touch -d '-1 hour' "$T/ws/.cel/specs/CEL-1.md"
-  cmd_afk on --until '+8h' >/dev/null
-  afk_spec_ordered "$T/ws/.cel/specs/CEL-1.md" || { _afk_teardown; return 1; }
-  ( afk_begin ordered_work "$(afk_ordered_evidence "$T/ws/.cel/specs/CEL-1.md" 1 4)" && afk_end completed ) \
-    || { _afk_teardown; return 1; }
-  assert_contains "$(afk_log_json | jq -r .authorisation)" "pre-authorisation 5"
-  assert_contains "$(afk_log_json | jq -r .detail)" "CEL-1.md"
-  assert_contains "$(afk_log_json | jq -r .detail)" "mtime"
-  assert_eq "$(afk_log_json | jq -r .outcome)" completed
-  _afk_teardown
-}
-
-test_afk_spec_written_after_afk_with_no_finding_is_refused() {
-  _afk_setup
-  cmd_afk on --until '+8h' >/dev/null
-  mkdir -p "$T/ws/.cel/specs"; printf 'x\n' > "$T/ws/.cel/specs/CEL-2.md"
-  touch -d '+1 minute' "$T/ws/.cel/specs/CEL-2.md"
-  assert_fails afk_spec_ordered "$T/ws/.cel/specs/CEL-2.md"
-  assert_contains "$(afk_admit ordered_work "$(afk_ordered_evidence "$T/ws/.cel/specs/CEL-2.md" 1 4)" 2>&1)" \
-    "written after AFK went on"
-  assert_contains "$(afk_admit dispatch "$(_ev_dispatch '{"source":"none"}')" 2>&1)" \
-    "no reviewer or scout finding"
-  # Outside .cel/specs is not ordered work either.
-  printf 'x\n' > "$T/loose.md"; touch -d '-1 hour' "$T/loose.md"
-  assert_fails afk_spec_ordered "$T/loose.md"
-  _afk_teardown
-}
-
 test_afk_release_needs_a_recorded_allowance() {
   _afk_setup
   cmd_afk on --until '+8h' >/dev/null
@@ -816,7 +554,7 @@ test_afk_on_lists_what_keeps_moving() {
   _afk_setup
   local out; out="$(cmd_afk on --until '+8h' --allow release:widget@0.3.0 2>&1)"
   assert_contains "$out" "pre-authorisation 1"
-  assert_contains "$out" "pre-authorisation 5"
+  assert_contains "$out" "pre-authorisation 3"
   assert_contains "$out" "release:widget@0.3.0"
   _afk_teardown
 }

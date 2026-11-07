@@ -262,11 +262,13 @@ test_solo_land_refuses_someone_elses_pr_a_draft_and_humans_only() {
   ! _land widget#7 >/dev/null 2>&1 && ! _merged || { echo "landed under humans-only"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-# A fleet product's PR is a delegation: it has its own door.
-test_solo_refuses_a_fleet_products_pr() {
+# A product still declared `mode: fleet` is refused with the retirement line.
+test_solo_refuses_a_legacy_fleet_products_pr() {
   _solo_setup fleetbot APPROVED
-  local out; out="$(_land lone#7 2>&1)" && { echo "landed a fleet PR"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "cel-fanout land"
+  local out; out="$( ws_build_mode() { [ "$2" = lone ] && printf fleet || printf solo; }; _land lone#7 2>&1 )" \
+    && { echo "landed a fleet PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "fan-out was retired on 2026-11-08" || { rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 test_solo_land_refuses_a_conflicted_pr() {
@@ -281,7 +283,8 @@ test_solo_land_stops_when_afk_refuses() {
   afk_active() { return 0; }
   afk_admit() { printf '%s' "$2" > "$T/afk-asked"; return 1; }
   ! _land widget#7 >/dev/null 2>&1 && ! _merged || { echo "merged although AFK refused"; rm -rf "$T"; return 1; }
-  assert_eq "$(jq -r .approved_via "$T/afk-asked")" "GitHub approval"
+  assert_eq "$(jq -r .approved_via "$T/afk-asked")" "GitHub approval" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .author "$T/afk-asked")" "solo"
   rm -rf "$T"
 }
 # ...and a merge AFK let through is logged with how it ended, after the merge
@@ -302,7 +305,7 @@ test_regression_solo_land_under_afk_logs_the_merge_outcome() {
 # later PR's history scan, so the merge is refused before it happens.
 test_solo_land_refuses_a_review_note_the_history_scan_would_reject() {
   _solo_setup
-  # built at runtime, as in fanout.test.sh, so the tree scan never sees it
+  # built at runtime so the tree scan never sees it
   local bad="ZZQ-$((6*2))"
   _review widget#7 approved --head "$H" --by r --note "see $bad" >/dev/null
   local out; out="$(_land widget#7 2>&1)" && { echo "merged a dirty body"; rm -rf "$T"; return 1; }
@@ -380,8 +383,8 @@ test_solo_land_on_forgejo_accepts_its_approval_of_the_head_only() {
   assert_eq "$(tail -n1 "$FJ_BODY_LOG" | jq -r .head_commit_id)" "$FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-# land_ci_gate itself, on Forgejo (the one rule `cel solo land` and
-# `cel-fanout land` share): the base's exact rule requires
+# land_ci_gate itself, on Forgejo (the rule `cel solo land` relies on): the
+# base's exact rule requires
 # `ci / test (pull_request)`. Pending on the head is not green; green is the
 # CI evidence, named; a head that moved since it was read decides nothing;
 # an unprotected base tells the caller its own gate may run. No gh at all.
@@ -453,12 +456,9 @@ test_solo_rex_reviewer_cannot_record_a_verdict_for_another_target() {
   assert_eq "$(solo_review_get "$T" widget 7 | jq -r .by)" widget-pr-7-review
   rm -rf "$T"
 }
-test_solo_land_refuses_reviewers_and_workers() {
+test_solo_land_refuses_a_reviewer() {
   _solo_setup fleetbot APPROVED
-  local r
-  for r in reviewer worker; do
-    ! ( cd "$T" && CEL_ROLE=$r cmd_solo_land widget#7 ) >/dev/null 2>&1 || { echo "$r landed"; rm -rf "$T"; return 1; }
-  done
+  ! ( cd "$T" && CEL_ROLE=reviewer cmd_solo_land widget#7 ) >/dev/null 2>&1 || { echo "reviewer landed"; rm -rf "$T"; return 1; }
   ! _merged || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }

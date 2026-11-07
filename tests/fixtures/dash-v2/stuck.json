@@ -3,21 +3,21 @@
   {
    "ws": "alpha",
    "ref": "widget/ABC-13-sprocket",
-   "reason": "changes requested, no worker on the branch",
+   "reason": "merge_conflict",
    "since": "2026-10-05T10:00:00Z",
    "fix": {
-    "label": "ask alpha-orch to pick it up",
-    "action": "stuck.changes_requested"
+    "label": "tell widget-orch",
+    "action": "stuck.merge_conflict"
    }
   },
   {
    "ws": "bundle",
    "ref": "gadget/WG-5-gadget-sync",
-   "reason": "conflicts with main",
+   "reason": "merge_conflict",
    "since": "2026-10-04T10:00:00Z",
    "fix": {
-    "label": "ask for a rebase",
-    "action": "stuck.conflict"
+    "label": "tell gadget-orch",
+    "action": "stuck.merge_conflict"
    }
   }
  ]

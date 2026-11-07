@@ -148,85 +148,9 @@ test_quiet_age_is_empty_for_a_missing_worktree() {
   assert_eq "$(stall_quiet_secs /nonexistent/worktree)" ""
 }
 
-# --- the sweep, end to end --------------------------------------------------
-# Drive the actual steward sweep, not just the marker matcher, to prove an
-# idle worker's transport failure reaches the inbox.
-_sweep_fixture() { # -> T (home), WS (workspace dir), WT (worktree)
-  T="$(mktemp -d)"
-  WS="$T/ws/alpha"; WT="$T/worktrees/widget/wg-12-feature"
-  mkdir -p "$WS/.cel" "$WT"
-  printf 'name: alpha\nrepos: []\n' > "$WS/workspace.yaml"
-  export CEL_REGISTRY="$T/registry.yaml"
-  printf 'workspaces:\n  alpha: { path: %s }\n' "$WS" > "$CEL_REGISTRY"
-  export CEL_STEWARD_STATE="$T/steward-state"
-  export CEL_INBOX_DIR="$T/inbox"
-  # a worktree holding committed-but-unpushed work, quiet for hours
-  git -C "$WT" init -q -b main
-  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
-  git -C "$WT" update-ref refs/remotes/origin/main HEAD
-  git -C "$WT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-  git -C "$WT" checkout -q -b WG-12-feature
-  printf 'test\n' > "$WT/a.test.ts"; git -C "$WT" add -A
-  git -C "$WT" -c user.email=t@t -c user.name=t commit -q -m "failing test"
-  find "$WT" -exec touch -d '15 hours ago' {} + 2>/dev/null || true
-  jq -n --arg wt "$WT" '[{id:"WG-12-feature", state:"running", pane:"w1:p1",
-    worktree:$wt, ticket:"WG-12", branch:"WG-12-feature", repo:"widget"}]' \
-    > "$WS/.cel/delegations.json"
-  # A herdr stub whose pane read returns the representative transport error.
-  STUB="$T/herdr"; cat > "$STUB" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1 $2" = "pane read" ]; then
-  printf '%s\n' '  Running tests...' \
-    '✘ server_error: Upstream error from Together: Stream error: h2 protocol error: error reading a body from connection' \
-    '↻ F5 to Retry'
-  exit 0
-fi
-echo '{}'
-EOF
-  chmod +x "$STUB"; export CEL_STEWARD_HERDR="$STUB"
-}
-test_the_sweep_escalates_an_idle_transport_failure() {
-  source "$CEL_ROOT/lib/steward.sh"
-  _sweep_fixture
-  _STEWARD_STATE="$CEL_STEWARD_STATE"
-  local agents out
-  agents='{"result":{"agents":[{"pane_id":"w1:p1","agent_status":"idle"}]}}'
-  out="$(_steward_stalled_workers "$agents" 2>&1)"
-  assert_contains "$out" "STALLED WORKER WG-12"
-  assert_contains "$out" "w1:p1"
-  assert_contains "$out" "pushed=no"
-  assert_contains "$out" "AT RISK"
-  # and root was told through the mailbox, as a kind nobody can bury
-  local mail; mail="$(cat "$CEL_INBOX_DIR"/*.jsonl 2>/dev/null || true)"
-  assert_contains "$mail" "WG-12"
-  assert_contains "$mail" '"kind":"blocked"'
-  rm -rf "$T"
-}
-# A worker that is genuinely working must never be reported, whatever its pane
-# happens to be printing - a false stall is how a watcher loses its credibility.
-test_the_sweep_leaves_a_working_agent_alone() {
-  source "$CEL_ROOT/lib/steward.sh"
-  _sweep_fixture
-  _STEWARD_STATE="$CEL_STEWARD_STATE"
-  local agents out
-  agents='{"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}'
-  out="$(_steward_stalled_workers "$agents" 2>&1)"
-  ! printf '%s' "$out" | grep -q "STALLED" || { echo "reported a working agent: $out"; rm -rf "$T"; return 1; }
-  rm -rf "$T"
-}
-# herdr being unreachable is not evidence that anyone died.
-test_the_sweep_does_not_invent_a_vanished_agent_when_the_roster_is_empty() {
-  source "$CEL_ROOT/lib/steward.sh"
-  _sweep_fixture
-  _STEWARD_STATE="$CEL_STEWARD_STATE"
-  local out; out="$(_steward_stalled_workers '{"result":{"agents":[]}}' 2>&1)"
-  assert_contains "$out" "GONE from the roster"
-  rm -rf "$T"
-}
-
 # A worker that wrote its result has reached the last instruction it was given.
-# Of course it is idle and of course nothing has moved since - that is finished,
-# and cel-fanout status reconciles it. Reporting it as stalled is how a watcher
+# Of course it is idle and of course nothing has moved since - that is finished.
+# Reporting it as stalled is how a watcher
 # gets ignored. A completed worker with a pushed branch and an open PR
 # requires no recovery.
 test_a_worker_that_wrote_its_result_is_finished_not_stalled() {

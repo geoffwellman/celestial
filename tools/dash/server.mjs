@@ -126,30 +126,9 @@ const prs = (w) => cached(`prs:${w.name}`, 60000, async () => {
   return asked && !answered ? undefined : all;
 }, []);
 
-// The delegation ledger, joined onto worktree rows by branch: which model
-// built it, what shape it is, and the VERDICT collect recorded - gate result,
-// red-then-green, CI, review. The table used to show only what herdr and gh
-// knew; this is what the plane itself knows.
-const ledger = (w) => cached(`ledger:${w.name}`, 5000, async () => {
-  const f = join(w.wsdir, '.cel', 'delegations.json');
-  if (!existsSync(f)) return {};
-  try {
-    // parsed once per change, shared with the v2 feeds; null: torn mid-write
-    const rows = store.json(f);
-    if (rows === null) return undefined;
-    if (!Array.isArray(rows)) return {};
-    const by = {};
-    // herdr lowercases worktree directory names; the ledger keeps the branch
-    // as written. Join case-insensitively or nothing ever matches.
-    for (const r of rows) if (r && r.branch) by[(r.repo + '/' + r.branch).toLowerCase()] = r;
-    return by;
-  } catch { return undefined; }
-}, {});
-
 const worktreeRows = async (w) => {
   const ag = await agents();
   const labels = await wsLabels();
-  const led = await ledger(w);
   const rows = [];
   for (const r of w.repos || []) {
     const dir = join(WORKTREES, r.name);
@@ -157,17 +136,12 @@ const worktreeRows = async (w) => {
     for (const branch of readdirSync(dir)) {
       const path = join(dir, branch);
       const a = ag.find((x) => x.cwd === path);
-      const l = led[(r.name + '/' + branch).toLowerCase()] || null;
       rows.push({
         repo: r.name, branch, path,
         agent: a ? a.agent : null,
         pane: a ? a.pane_id : null,
         status: a ? a.agent_status : null,
         label: a ? labels[a.workspace_id] || branch : branch,
-        model: l ? l.model || null : null,
-        shape: l ? l.shape || 'ship' : null,
-        why: l ? l.profile_reason || null : null,
-        verdict: l ? l.verdict || null : null,
       });
     }
   }
@@ -583,12 +557,12 @@ const v2 = createV2({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTRY, ag
 // most 5 s), kept warm for a minute after a page last asked. A failed read is
 // never kept: cold, it answers 500; warm, the last good answer stands. Any
 // POST may have changed it, so a POST forgets every answer.
-// A warm answer is only served while the files it was read from are
-// unchanged: a new inbox line or a ledger write drops the warm answer and the
-// upstream caches that would hide it, and the ask computes fresh.
+// A warm answer is only served while the inbox files it was read from are
+// unchanged: a new inbox line drops the warm answer and the upstream caches
+// that would hide it, and the ask computes fresh.
 const states = new Map();
 const fileSig = (f) => { try { const st = statSync(f); return `${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
-const stateSig = () => WORKSPACES.map((x) => `${fileSig(join(INBOX_DIR, `${x.name}.jsonl`))}/${fileSig(join(x.wsdir, '.cel', 'delegations.json'))}`).join('|');
+const stateSig = () => WORKSPACES.map((x) => fileSig(join(INBOX_DIR, `${x.name}.jsonl`))).join('|');
 const warmState = (w, warmer = false) => {
   let f = states.get(w.name);
   if (!f) { f = { v: undefined, at: 0, p: null, gen: 0, have: 0 }; states.set(w.name, f); }
@@ -612,7 +586,7 @@ const warmState = (w, warmer = false) => {
     // the files moved: this ask waits for an answer read after the change,
     // as it always did, and the caches that would hide the change go first
     delete cache.decisions;
-    for (const x of WORKSPACES) { delete cache[`inbox:${x.name}`]; delete cache[`ledger:${x.name}`]; }
+    for (const x of WORKSPACES) delete cache[`inbox:${x.name}`];
     return refresh();
   }
   if (f.v === undefined || warmer) return refresh();
