@@ -147,6 +147,16 @@ cel - the celestial plane
   cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
                                 PR, approved at its current head, no red
                                 check, every protected check green there
+  cel forge repo|whoami <repo>  a repo's forge (GitHub or Forgejo) and the
+                                account this workspace acts as on it
+  cel forge pr view|checks|reviews <repo>#<n> [--json]
+                                a PR in Celestial's words on either forge:
+                                head and base, checks and what the base
+                                requires, reviews bound to the head they read
+  cel forge pr list <repo> [open|closed|merged|all] [--author L|@me] [--head B]
+  cel forge pr create <repo> --head <branch> --base <branch> --title t --body-file f
+                                open a PR, ready or draft as the policy says
+                                (Forgejo's draft is a WIP: title prefix)
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes
@@ -291,6 +301,7 @@ case "${1:-help}" in
   mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
   here)     shift; . "$CEL_ROOT/lib/here.sh";    cmd_here "$@";;
   solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
+  forge)    shift; . "$CEL_ROOT/lib/forge.sh";   cmd_forge "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
   quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;
   gateway)  shift; . "$CEL_ROOT/lib/gateway.sh";  cmd_gateway "$@";;
