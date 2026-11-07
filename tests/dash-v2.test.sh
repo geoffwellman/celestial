@@ -72,7 +72,7 @@ EOF
     printf '{"ts":"%s","load":1.5,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/wt/widget-ok","status":"working"}]}\n' "$(_v2_ago 7000)" "$T"
     printf '{"ts":"%s","load":2.5,"mem_pct":50,"swap_pct":3,"panes":[{"cwd":"%s/wt/widget-ok","status":"idle"}]}\n' "$(_v2_ago 600)" "$T"
   } > "$T/state/samples.jsonl"
-  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox"
+  export HOME="$T/home" CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_REVIEW_DIR="$T/reviews"
   if [ -n "${_V2_FAIL_GH:-}" ]; then cp "$T/bin/gh" "$T/bin/gh.ok"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"; fi
   export CEL_DASH_ACTIVITY_KEEP=5
   export CEL_SAMPLES_FILE="$T/state/samples.jsonl" CEL_DASH_STATE_DIR="$T/state" CEL_DASH_CEL="$T/bin/cel"
@@ -302,8 +302,10 @@ test_v2_orchestrators_are_known_by_their_canonical_alias() {
 # A solo product, named so its agents' names are cel_alias_norm's and not the
 # product's own ("Thor Games" -> thor-games-*): its main agent, two live
 # lanes (ui working; api idle, standing on a branch with an open PR), a lane
-# made but not running (docs), a reviewer, and two panes that only LOOK like
-# lanes - a stranger in a lane's directory and a lane whose directory is gone.
+# made but not running (docs), a reviewer in its review checkout, and three
+# panes that only LOOK like one of them - a stranger in a lane's directory, a
+# lane whose directory is gone, and a reviewer's name outside any review
+# checkout.
 _v2_solo_fixture() {
   SOLO="$T/bundle/.cel/solo/Thor Games"
   mkdir -p "$T/bundle/products/Thor Games" "$SOLO/lane-ui" "$SOLO/lane-api" "$SOLO/lane-docs" "$T/gitdirs/api" "$T/reviews/gadget-pr-10"
@@ -316,7 +318,8 @@ _v2_solo_fixture() {
     {name: "thor-games-api", agent: "omp", agent_status: "idle", cwd: ($s + "/lane-api"), pane_id: "w2:p3"},
     {name: "gadget-pr-10-review", agent: "pi", agent_status: "working", cwd: ($r + "/gadget-pr-10"), pane_id: "w2:p4"},
     {name: "intruder", agent: "pi", agent_status: "working", cwd: ($s + "/lane-ui"), pane_id: "w2:p5"},
-    {name: "thor-games-old", agent: "pi", agent_status: "working", cwd: ($s + "/lane-old (deleted)"), pane_id: "w2:p6"}],
+    {name: "thor-games-old", agent: "pi", agent_status: "working", cwd: ($s + "/lane-old (deleted)"), pane_id: "w2:p6"},
+    {name: "gadget-pr-9-review", agent: "pi", agent_status: "working", cwd: ($b + "/../elsewhere/gadget-pr-9"), pane_id: "w2:p7"}],
     workspaces: [], panes: []}}' > "$T/agents.json"
   printf '#!/usr/bin/env bash\ncat %q\n' "$T/agents.json" > "$T/bin/herdr"
 }
@@ -332,8 +335,9 @@ test_v2_solo_fleet_knows_agents_lanes_and_reviewers_by_identity() {
   assert_eq "$(printf '%s' "$f" | jq -r '.orchestrators[] | select(.name == "thor-games-api") | "\(.branch) \(.repo)#\(.pr)"')" "ABC-4-redo gadget#10"
   assert_eq "$(printf '%s' "$f" | jq -r '[.reviewers[] | "\(.name)|\(.repo)#\(.pr)|\(.branch)|\(.status)"] | join(",")')" \
     "gadget-pr-10-review|gadget#10|ABC-4-redo|working"
-  # a stranger in a lane's directory, or a lane whose directory is gone, is no lane
-  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .workers[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old")] | length')" "0"
+  # a stranger in a lane's directory, a lane whose directory is gone, or a
+  # reviewer's name outside its review checkout, is none of them
+  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .workers[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old" or .name == "gadget-pr-9-review")] | length')" "0"
   _v2_down
 }
 
@@ -345,18 +349,24 @@ test_v2_solo_restart_binds_the_exact_product_or_lane() {
   assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-orch","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
   # a made lane that is not running restarts the same way
   assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-docs","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  # a main agent with no product of its own: a declared repo's by --repo, the
+  # workspace's own by the workspace alone
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"gadget-orch","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"bundle-orch","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
   assert_eq "$(cat "$T/run.log")" "$(printf '%s\n' \
     'run solo --workspace bundle --product Thor\ Games --lane api --restart ' \
     'run orchestrator --workspace bundle --product Thor\ Games --restart ' \
-    'run solo --workspace bundle --product Thor\ Games --lane docs --restart ')"
-  # nothing else is restartable: a reviewer, a stranger, the workspace's own
-  # name (it is no product), a lane of another workspace
+    'run solo --workspace bundle --product Thor\ Games --lane docs --restart ' \
+    'run orchestrator --workspace bundle --repo gadget --restart ' \
+    'run orchestrator --workspace bundle --restart ')"
+  # nothing else is restartable: a reviewer, a stranger, a lane the workspace
+  # never made, a lane of another workspace
   local who
-  for who in gadget-pr-10-review intruder bundle-orch thor-games-nope; do
+  for who in gadget-pr-10-review intruder thor-games-nope; do
     assert_eq "$(_v2_act "{\"action\":\"orch.restart\",\"target\":\"$who\",\"args\":{\"ws\":\"bundle\"}}" -H "x-cel-csrf: $TOKEN")" "400"
   done
   assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-api","args":{"ws":"alpha"}}' -H "x-cel-csrf: $TOKEN")" "400"
-  assert_eq "$(wc -l < "$T/run.log" | tr -d ' ')" "3"
+  assert_eq "$(wc -l < "$T/run.log" | tr -d ' ')" "5"
   _v2_down
 }
 
@@ -372,6 +382,7 @@ test_v2_solo_message_reaches_lanes_and_reviewers() {
   done
   assert_eq "$(_v2_act '{"action":"message","target":"thor-games-nope","args":{"ws":"bundle","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
   assert_eq "$(_v2_act '{"action":"message","target":"intruder","args":{"ws":"bundle","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  assert_eq "$(_v2_act '{"action":"message","target":"gadget-pr-9-review","args":{"ws":"bundle","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
   _v2_down
 }
 

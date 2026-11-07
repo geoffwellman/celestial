@@ -91,9 +91,9 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     }
     if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], products: [] });
     // each workspace's main agents by the names their panes and mailboxes
-    // carry: one per product - the only ones a restart can bind to, since
-    // `cel run orchestrator --product` is how each is started - and, as names
-    // only, one per declared repo and the workspace's own
+    // carry, each with how `cel run orchestrator` names it for a restart: one
+    // per product (--product), one per declared repo (--repo) and the
+    // workspace's own (no selector); a product's name wins a clash
     const orch = (n) => `${n}-orch`;
     const canon = await canonical(out.flatMap((w) => [w.name, ...w.repos.map((r) => r && r.name), ...w.products.map((p) => p.name)]
       .filter(Boolean).map(orch)));
@@ -101,7 +101,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       const mains = new Map();
       const put = (n, v) => { const a = canon.get(orch(n)); if (a) mains.set(a, v); };
       put(w.name, { product: null, mode: 'fleet' });
-      for (const r of w.repos) if (r && r.name) put(r.name, { product: null, mode: 'fleet' });
+      for (const r of w.repos) if (r && r.name) put(r.name, { product: null, repo: r.name, mode: 'fleet' });
       for (const p of w.products) put(p.name, { product: p.name, mode: p.mode === 'solo' ? 'solo' : 'fleet' });
       w.mains = mains;
     }
@@ -445,14 +445,25 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   //  - a fleet worker stands in its ledger row's worktree (or herdr's);
   //  - a solo LANE (cel run solo --lane) stands in
   //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
-  //  - a reviewer (cel run reviewer) is named <repo>-pr-<n>-review for a repo
-  //    the workspace declares;
+  //  - a reviewer (cel run reviewer) stands in its review checkout of
+  //    <repo>#<n> and is named <repo>-pr-<n>-review, for a repo the
+  //    workspace declares;
   //  - a main agent carries one of the workspace's `-orch` names (w.mains)
   //    and stands in that workspace.
   const WORKTREES = () => join(homedir(), '.herdr', 'worktrees');
   const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
   const LANE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
   const REVIEWER = /-pr-(\d+)-review$/;
+  // where `cel run reviewer` checks a PR out and stands its reviewer
+  // (lib/run.sh _run_review_dir, reviewer_checkout_path): <dir>/<repo>-pr-<n>,
+  // or a later round's <dir>/<repo>-pr-<n>.round.<k>
+  const REVIEWS = () => process.env.CEL_REVIEW_DIR
+    || join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'cel', 'reviews');
+  const inReview = (cwd, repo, pr) => {
+    const c = cwd.replace(/ \(deleted\)$/, '');
+    const at = join(REVIEWS(), `${repo}-pr-${pr}`);
+    return under(c, at) || c.startsWith(`${at}.round.`);
+  };
   const laneBase = (w, product) => join(w.path, '.cel', 'solo', product, 'lane-');
   const soloProducts = (w) => w.products.filter((p) => p.mode === 'solo').map((p) => p.name);
   const identities = async (wss) => {
@@ -479,7 +490,10 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       }
       const review = [];
       const m = REVIEWER.exec(me.name);
-      if (m) for (const w of wss) for (const r of w.repos) if (r && r.name) review.push({ w, repo: r.name, pr: Number(m[1]), key: `${r.name}/pr-${m[1]}-review` });
+      // a reviewer is its canonical name AND its own review checkout
+      if (m) for (const w of wss) for (const r of w.repos) {
+        if (r && r.name && inReview(cwd, r.name, m[1])) review.push({ w, repo: r.name, pr: Number(m[1]), key: `${r.name}/pr-${m[1]}-review` });
+      }
       for (const c of [...lane, ...review]) keys.push(c.key);
       rest.push({ me, lane, review });
     }
@@ -1084,18 +1098,23 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       logAct(wsName, `dashboard: message to ${target}`);
       return [200, 'ok'];
     }
-    // Restart exactly the agent the page named: a product's main agent by its
-    // product, a solo lane by its product and lane - never "whichever
-    // orchestrator the workspace defaults to".
+    // Restart exactly the agent the page named, with the selector
+    // `cel run` knows it by: a product's main agent by --product, a declared
+    // repo's by --repo, the workspace's own by the workspace alone, and a solo
+    // lane by its product and --lane. Any other name is refused.
     if (action === 'orch.restart') {
       const name = String(target || '');
       if (!NAME.test(name)) return [400, 'restart needs a target'];
       const main = ws.mains.get(name);
-      const lane = main && main.product ? null : (await laneDirs(ws)).find((l) => l.name === name);
+      const lane = main ? null : (await laneDirs(ws)).find((l) => l.name === name);
       let argv;
-      if (main && main.product) argv = ['run', 'orchestrator', '--workspace', wsName, '--product', main.product, '--restart'];
-      else if (lane) argv = ['run', 'solo', '--workspace', wsName, '--product', lane.product, '--lane', lane.lane, '--restart'];
-      else return [400, 'not a product agent or solo lane of this workspace'];
+      if (main) {
+        argv = ['run', 'orchestrator', '--workspace', wsName];
+        if (main.product) argv.push('--product', main.product);
+        else if (main.repo) argv.push('--repo', main.repo);
+        argv.push('--restart');
+      } else if (lane) argv = ['run', 'solo', '--workspace', wsName, '--product', lane.product, '--lane', lane.lane, '--restart'];
+      else return [400, 'not a main agent or solo lane of this workspace'];
       if (await run(CEL(), argv, 120000) === null) return [502, 'restart failed'];
       logAct(wsName, `dashboard: restarted ${name}`);
       return [200, 'ok'];
