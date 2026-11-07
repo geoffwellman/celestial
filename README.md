@@ -1256,7 +1256,7 @@ them. Hook programs fail open on their own errors:
 | `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
 | `claude-session.sh` / `claude-idle-mail.py` | Claude async session/submit hooks, then native peer socket | reports the exact native session and retains one lifetime-bound watcher as Claude's own child; never writes terminal input |
 | `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
-| `orchestrator-guard.sh` | `PreToolUse` | **read-only orchestrators**: from a root or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools). Workers are untouched. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
+| `orchestrator-guard.sh` | `PreToolUse` | **read-only orchestrators**: from a root or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools). Workers are otherwise untouched, but in every pane the hook runs in - claude panes of any role; omp/pi root, orchestrator and solo panes - the forge API token (`~/.config/cel/forge`) is refused to shell commands and the native read/edit tools. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
 
 Inbox hooks use explicit `CEL_INBOX_ME`/`CEL_INBOX_WS` when the launcher

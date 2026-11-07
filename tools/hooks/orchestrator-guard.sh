@@ -28,17 +28,27 @@ tool="$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null)"
 # and covers nothing but the call it was set on.
 cwd="$(printf '%s' "$in" | jq -r '.cwd // empty' 2>/dev/null)"; [ -n "$cwd" ] || cwd="$PWD"
 role="$(guard_role_of "$cwd")"
-case "$role" in worker|other) exit 0;; esac
+cmd="$(printf '%s' "$in" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)"
 
 verdict=allow
-case "$tool" in
-  Bash)
-    cmd="$(printf '%s' "$in" | jq -r '.tool_input.command // empty' 2>/dev/null)"
-    case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
-    verdict="$(guard_classify "$role" "$cmd")" ;;
-  Edit|Write|MultiEdit|NotebookEdit)
-    path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)"
-    verdict="$(guard_classify_path "$role" "$path")" ;;
+case "$role" in
+  # Workers and panes outside the plane are otherwise untouched; the forge
+  # API token is the one thing no agent reads.
+  worker|other)
+    case "$tool" in
+      Bash) case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
+            _guard_names_forge_token "$cmd" && verdict="$_GUARD_TOKEN_DENY" ;;
+      Read|Edit|Write|MultiEdit|NotebookEdit) _guard_names_forge_token "$path" && verdict="$_GUARD_TOKEN_DENY" ;;
+    esac ;;
+  *)
+    case "$tool" in
+      Bash)
+        case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
+        verdict="$(guard_classify "$role" "$cmd")" ;;
+      Read) verdict="$(guard_classify_read "$role" "$path")" ;;
+      Edit|Write|MultiEdit|NotebookEdit) verdict="$(guard_classify_path "$role" "$path")" ;;
+    esac ;;
 esac
 
 case "$verdict" in

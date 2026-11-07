@@ -1254,7 +1254,7 @@ _ws_pr_fixture() { # -> origin with main at $BASE_SHA and refs/pull/12/head at $
   }
   gh() {
     case "$*" in
-      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{headRefOid:$h, baseRefName:"main"}' ;;
+      *"pr view"*) jq -n --arg h "$HEAD_SHA" '{number:12, state:"OPEN", headRefOid:$h, baseRefName:"main"}' ;;
       *) return 1 ;;
     esac
   }
@@ -1346,7 +1346,7 @@ test_reviewer_brief_names_the_head_sha_and_the_base() {
   local body; body="$(cat "$T/.cel/reviews/pr-12/role-reviewer.md")"
   assert_contains "$body" "$HEAD_SHA"
   assert_contains "$body" "origin/main"
-  assert_contains "$body" "headRefOid"
+  assert_contains "$body" "cel forge pr view widget#12 --json"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
@@ -1374,7 +1374,7 @@ test_reviewer_asks_github_by_slug_not_local_name() {
   gh() {
     printf '%s\n' "$*" >> "$GH_LOG"
     case "$*" in
-      *"pr view 12 --repo acme/widget-gh "*) jq -n --arg h "$HEAD_SHA" '{headRefOid:$h, baseRefName:"main"}' ;;
+      *"pr view 12 --repo acme/widget-gh "*) jq -n --arg h "$HEAD_SHA" '{number:12, state:"OPEN", headRefOid:$h, baseRefName:"main"}' ;;
       *) return 1 ;;
     esac
   }
@@ -1406,8 +1406,8 @@ test_github_slug_from_url_refuses_lookalike_hosts() {
   assert_fails github_slug_from_url https://github.com/o/r/extra
 }
 
-# No declared url: the checkout's origin remote is the identity; a
-# non-GitHub origin fails closed with the existing error.
+# No declared url: the checkout's origin remote is the identity; an origin
+# that names no forge fails closed with the existing error.
 test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
   _ws_pr_fixture
   sed -i '/url: git@github.com/d' "$T/workspace.yaml"
@@ -1416,7 +1416,7 @@ test_reviewer_slug_falls_back_to_origin_and_fails_closed() {
   git -C "$T/repos/widget" remote set-url origin "$ORIGIN"
   assert_fails ws_repo_github_slug "$T" widget "$T/repos/widget"
   local out; out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" && { echo "launched without a slug"; return 1; }
-  assert_contains "$out" "cannot read widget#12 from GitHub"
+  assert_contains "$out" "cannot read widget#12 from its forge"
   rm -rf "$T"
 }
 
@@ -1431,7 +1431,7 @@ if [ "$1 $2" = "auth token" ]; then
   case "$4" in acct-a) echo tok-a ;; acct-b) echo tok-b ;; *) echo "not logged in: $4" >&2; exit 1 ;; esac
   exit 0
 fi
-[ "$1 $2" = "pr view" ] && echo '{"headRefOid":"abc123","baseRefName":"main"}'
+[ "$1 $2" = "pr view" ] && echo '{"number":12,"state":"OPEN","headRefOid":"abc123","baseRefName":"main"}'
 exit 0
 SH
   chmod +x "$T/bin/gh"; export PATH="$T/bin:$PATH"
@@ -1467,8 +1467,24 @@ test_launch_refuses_when_the_declared_user_is_not_logged_in() {
 }
 test_reviewer_pr_lookup_runs_as_the_workspace_account() {
   _ws_gh_acct acct-b
-  _run_reviewer_pr_facts "$T/repos/widget" someone/widget 12 "$T" >/dev/null
-  assert_contains "$(cat "$GH_LOG")" "pr view 12 --repo someone/widget --json headRefOid,baseRefName|GH_TOKEN=tok-b"
+  assert_eq "$(_run_reviewer_pr_facts "$T" widget 12)" "abc123"$'\t'"main"
+  assert_contains "$(grep '^pr view 12 --repo someone/widget --json ' "$GH_LOG")" "|GH_TOKEN=tok-b"
+  rm -rf "$T"
+}
+# A Forgejo repo's reviewer reads the same facts from Forgejo's API, as the
+# token owner, and never from gh.
+test_reviewer_pr_facts_come_from_forgejo() {
+  _ws_gh_acct acct-b
+  yq -y '(.repos[] | select(.name == "widget")) |= (.url = "git@forgejo-ct.internal:geoff/gizmo.git" | .forge = "forgejo" | .host = "http://forgejo.internal")' \
+    "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  source "$CEL_ROOT/tests/lib/forgejo-stub.sh"; _forgejo_stub "$T"
+  : > "$GH_LOG"
+  assert_eq "$(_run_reviewer_pr_facts "$T" widget 31)" "$FJ_FIXTURE_HEAD"$'\t'"main" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -v '^auth token' "$GH_LOG")" "" || { echo "a Forgejo repo reached gh"; rm -rf "$T"; return 1; }
+  # no token, no facts - and the launch refuses rather than review a guess
+  rm -f "$XDG_CONFIG_HOME/cel/forge/forgejo.internal.token"
+  assert_fails _run_reviewer_pr_facts "$T" widget 31 || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # The pane evaluates the token itself, so auth can vanish between cel's

@@ -2759,14 +2759,16 @@ cmd_land() { # <id>
   # not the same fact, since the branch may have moved since. Verify now if
   # there is no verdict yet; unknown is not passed.
   local gate ci_gate_body=""; gate="$(ws_repo_get "$wsdir" "$repo" gate)"; [ "$gate" = null ] && gate=""
+  # land_ci_gate (lib/land.sh) asks the repo's forge, in Celestial's words.
+  local ci_pr; ci_pr="$(printf '%s' "$pr" | jq -c '{number, head_sha: .headRefOid, base_ref: .baseRefName}')"
   # CI FIRST WHEN THE CALLER SAID CI IS ENOUGH, so --gate-from-ci never waits
   # in the box's suite-lock queue for a local suite. Every protected check
   # green on the PR's EXACT head is the same evidence the timeout path below
-  # accepts; asked first, it costs two API calls. When it is not green,
+  # accepts; asked first, it costs a few API calls. When it is not green,
   # nothing is decided here and the local gate runs.
   if [ -n "$gate" ] && [ "$gate_from_ci" -eq 1 ]; then
     local ci_first
-    if ci_first="$(land_ci_gate "$wsdir" "$slug" "$pr")"; then
+    if ci_first="$(land_ci_gate "$wsdir" "$repo" "$ci_pr")"; then
       ci_gate_body="$ci_first (local gate not run)"
       c_warn "$id: every protected check is green on the PR head; landing on CI evidence, local gate not run - $ci_first"
     fi
@@ -2793,7 +2795,7 @@ cmd_land() { # <id>
     # and if CI, say so out loud and record which check carried the branch.
     if [ "$gto" = true ] || [ "$gout" = no_verdict ]; then
       if [ "$gate_from_ci" -eq 1 ]; then
-        ci_gate_body="$(land_ci_gate "$wsdir" "$slug" "$pr")" || die "land --gate-from-ci: $ci_gate_body"
+        ci_gate_body="$(land_ci_gate "$wsdir" "$repo" "$ci_pr")" || die "land --gate-from-ci: $ci_gate_body"
         c_warn "$id: the local gate did not complete; landing on CI evidence - $ci_gate_body"
       elif [ "$gout" = no_verdict ]; then
         die "land: the gate produced no verdict on $branch - $gnvr. It did not fail and it did not run out of time, so there is nothing here to send a worker after: re-run \`cel-fanout collect $id\` and find out what is killing it, or rely on CI (every protected check green) and say so with --gate-from-ci"

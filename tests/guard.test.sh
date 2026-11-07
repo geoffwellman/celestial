@@ -202,9 +202,111 @@ test_solo_may_not_fan_out_or_start_agents() {
 test_solo_may_not_merge_by_hand() {
   local c
   for c in 'gh pr merge 12 --squash' 'gh -R a/b pr merge 5' 'gh --repo=a/b pr merge 5' \
-           'gh api -X PUT repos/a/b/pulls/5/merge'; do
+           'gh api -X PUT repos/a/b/pulls/5/merge' 'tea pr merge 5' 'tea pulls m 5' \
+           'curl -X POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge' \
+           '/usr/bin/curl --config - http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge -d @b.json'; do
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
   done
+}
+# `cel forge` is a door on both forges: its reads are everyone's, opening a
+# PR is the builder's (worker, solo) and never an orchestrator's, and the
+# same writes by hand - tea, or curl at a forge's API - stay refused.
+test_cel_forge_reads_are_open_and_pr_create_is_the_builders() {
+  local role c
+  for role in orchestrator root core solo worker; do
+    for c in 'cel forge pr view gizmo#31' 'cel forge pr checks gizmo#31 --json' 'cel forge pr reviews gizmo#31' \
+             'cel forge pr list gizmo open' 'cel forge whoami gizmo' 'cel forge repo gizmo'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
+    done
+  done
+  for role in solo worker; do
+    assert_eq "$(guard_classify "$role" 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md')" allow || return 1
+  done
+  for role in orchestrator root core; do
+    for c in 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md' \
+             'cel --workspace sandbox forge pr create gizmo --head a --base main --title t --body-file b'; do
+      case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'tea pr merge 31' 'tea pulls create --title x' 'tea pr close 31' 'tea pr approve 31' \
+           'curl -X POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge' \
+           'curl --request=PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31' \
+           'curl -XDELETE http://forgejo.internal/api/v1/repos/geoff/gizmo/branch_protections/main' \
+           'curl -d @body.json http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls' \
+           'curl --json {} https://api.github.com/repos/o/r/pulls'; do
+    case "$(guard_classify orchestrator "$c")" in deny*) ;; *) echo "orchestrator allowed: $c"; return 1;; esac
+  done
+  for c in 'curl -s http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31' 'tea pr list' 'tea pr 31'; do
+    assert_eq "$(guard_classify orchestrator "$c")" allow || { echo "orchestrator refused a read: $c"; return 1; }
+  done
+}
+# A forge write by hand is refused however the client is spelled: curl with
+# a body in any form (-d@x, -dX, --data-*, -F/--form, -T/--upload-file,
+# --json), a method in any form (-X POST, -XPOST, -sXPOST, --request[=]M, any
+# case) or options from a file (-K/--config); `tea api` with anything but a
+# plain GET; tea's write verbs with its global flags before them. Every role
+# that can run the guard: orchestrators, root and core change no forge state,
+# a worker uses gh / `cel forge` as before, and a solo agent changes its forge
+# only through `cel forge` and `cel solo land`.
+test_raw_forge_writes_are_refused_however_they_are_spelled() {
+  local fj=http://forgejo.internal/api/v1/repos/o/r role c
+  local -a writes=(
+    "curl -d@b.json $fj/pulls" "curl -dFILE $fj/issues/3/comments" "curl -sXPOST $fj/pulls/3/merge"
+    "curl -XPOST $fj/pulls/3/merge" "curl -X post $fj/pulls/3" "curl --request DELETE $fj/branch_protections/main"
+    "curl --request=PATCH $fj/pulls/3" "curl --data-binary @x $fj/pulls" "curl --data-raw {} https://api.github.com/repos/o/r/pulls"
+    "curl --data-urlencode a=b $fj/pulls" "curl -F f=@x $fj/releases/1/assets" "curl --form f=@x $fj/releases/1/assets"
+    "curl -T x $fj/contents/a" "curl --upload-file x $fj/contents/a" "curl --json {} $fj/pulls"
+    "curl -K cfg $fj/pulls/3/merge" "curl --config=cfg $fj/pulls/3/merge" "/usr/bin/curl -fsSd@x $fj/pulls"
+    'tea api -X POST repos/o/r/pulls/3/merge' 'tea api -XPOST repos/o/r/pulls/3/merge'
+    'tea api --method=DELETE repos/o/r/branch_protections/main' 'tea api --method PATCH repos/o/r/pulls/3'
+    'tea api -f title=x repos/o/r/pulls' 'tea api --data @b.json repos/o/r/pulls'
+    'tea pulls --repo o/r merge 3' 'tea --login fj pr close 3' 'tea pr --repo o/r create --title x'
+    'tea -l fj pulls -r o/r m 3' 'tea branches protect main' 'tea releases delete v1'
+  )
+  for role in orchestrator root core worker solo; do
+    for c in "${writes[@]}"; do
+      case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  # reads stay reads
+  for role in orchestrator worker solo; do
+    for c in "curl -s $fj/pulls/3" "curl -sSfL $fj/pulls" "curl -o out.json $fj/pulls" "curl -X GET $fj/pulls/3" \
+             "curl -sI $fj/pulls/3" 'tea api repos/o/r/pulls/3' 'tea api -X GET repos/o/r/pulls/3' 'tea pr list --repo o/r' 'tea pr 31'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused a read: $c"; return 1; }
+    done
+  done
+}
+# The Forgejo token is the forge's own key: no agent reads, copies or rewrites
+# it, whichever role it plays and however it names the file.
+test_no_agent_reads_or_writes_the_forge_token() {
+  local role c
+  for role in orchestrator root core worker solo other; do
+    for c in 'cat ~/.config/cel/forge/forgejo.internal.token' 'less $HOME/.config/cel/forge/x.token' \
+             'head -c5 ${XDG_CONFIG_HOME:-~/.config}/cel/forge/forgejo.internal.token' \
+             'cp ~/.config/cel/forge/forgejo.internal.token /tmp/t' 'base64 /home/u/.config/cel/forge/*' \
+             'ls ~/.config/cel/forge' 'cd ~/.config/cel/forge && cat *' "grep -r . \"\$HOME/.config/cel/forge/\""; do
+      case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+    case "$(guard_classify_read "$role" /home/u/.config/cel/forge/forgejo.internal.token)" in deny*) ;; *) echo "$role may Read the token"; return 1;; esac
+    case "$(guard_classify_path "$role" /home/u/.config/cel/forge/forgejo.internal.token)" in deny*) ;; *) echo "$role may write the token"; return 1;; esac
+    assert_eq "$(guard_classify_read "$role" /home/u/ws/repos/widget/lib/forge.sh)" allow || return 1
+  done
+  # the plane's own files are not the token
+  assert_eq "$(guard_classify orchestrator 'cat lib/forge.sh tests/fixtures/forge/forgejo/pull.json')" allow
+}
+# ...and the hook enforces it where it runs: a claude worker or reviewer pane
+# (otherwise untouched) included, the native Read tool included.
+test_hook_refuses_the_forge_token_to_every_pane() {
+  _gws
+  local tok='/home/u/.config/cel/forge/forgejo.internal.token' cwd
+  for cwd in "$T/repos/widget" "${CEL_WORKTREES:-$HOME/.herdr/worktrees}/repo/WG-1" /tmp; do
+    _hook "$cwd" Bash "{\"command\":\"cat $tok\"}" && { echo "hook let $cwd cat the token"; rm -rf "$T"; return 1; }
+    assert_contains "$HOOK_ERR" "forge API token" || { rm -rf "$T"; return 1; }
+    _hook "$cwd" Read "{\"file_path\":\"$tok\"}" && { echo "hook let $cwd Read the token"; rm -rf "$T"; return 1; }
+    _hook "$cwd" Read '{"file_path":"/tmp/notes.md"}' || { echo "hook blocked an ordinary Read in $cwd"; rm -rf "$T"; return 1; }
+  done
+  _hook "${CEL_WORKTREES:-$HOME/.herdr/worktrees}/repo/WG-1" Bash '{"command":"git push"}' || { echo "hook blocked a worker push"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
 }
 # The solo agent lands through `cel solo land` but never records its own
 # verdict; a worker does neither.

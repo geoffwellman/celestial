@@ -1803,19 +1803,22 @@ test_land_refuses_a_timed_out_gate_as_unknown_not_failed() {
 }
 # CI can only stand in for the gate if the checks that stood in are the ones the
 # base branch is PROTECTED by. Any-green-check-will-do proves nothing: a docs
-# build or a lint job going green says nothing about the suite.
+# build or a lint job going green says nothing about the suite. The checks are
+# the PR head's rollup (latest run of each), as forge_pr_checks reads it.
 _fanout_ci_gh_stub() { # <protection-json|empty to make it unreadable> <check-runs-json>
+  local rollup
+  rollup="$(printf '%s' "$2" | jq -c '[.check_runs[] | {name, status: ((.status // "completed") | ascii_upcase),
+    conclusion: (.conclusion // "" | ascii_upcase)}]')"
   cat > "$T/gh-stub.sh" <<STUB_EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
 case "\$1 \$2" in
   "api user") echo fleetbot;;
-  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"deadbeefcafe","baseRefName":"main","statusCheckRollup":[{"conclusion":"SUCCESS"}]}';;
+  "pr view")  echo '{"number":7,"author":{"login":"fleetbot"},"reviewDecision":"APPROVED","isDraft":false,"mergeable":"MERGEABLE","state":"OPEN","headRefOid":"deadbeefcafe","baseRefName":"main","statusCheckRollup":$rollup}';;
   "pr merge") exit 0;;
   *) case "\$2" in
        */protection) [ -n '$1' ] || exit 1; printf '%s' '$1';;
        */rules/branches/*) echo '[[]]';;
-       *check-runs)  printf '%s' '$2';;
        *) echo '{}';;
      esac;;
 esac
@@ -1915,7 +1918,7 @@ test_gate_from_ci_with_ci_not_green_runs_the_local_gate_as_before() {
   _fanout_land_setup fleetbot APPROVED 0
   _fanout_verify_spy
   _fanout_ci_gh_stub '{"required_status_checks":{"contexts":["suite"]}}' \
-    '{"check_runs":[{"name":"suite","status":"in_progress","conclusion":null}]}'
+    '{"check_runs":[{"name":"docs","conclusion":"success"}]}'
   (cd "$T" && "$BIN" land WG-LAND --gate-from-ci) > /dev/null 2>&1 || { echo "land refused a passing local gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   [ -e "$T/verify-ran" ] || { echo "the local gate did not run although CI was not green"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }
   grep -q "^pr merge 7" "$GH_LOG" || { echo "did not merge on a passing local gate"; unset CEL_FANOUT_VERIFY; rm -rf "$T"; return 1; }

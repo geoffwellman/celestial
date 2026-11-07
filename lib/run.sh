@@ -7,6 +7,8 @@ _CEL_RUN=1
 . "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
+# shellcheck source=lib/forge.sh
+. "${BASH_SOURCE[0]%/*}/forge.sh"   # forge_pr_view: a reviewer's PR facts, on either forge
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/profiles.sh
@@ -446,23 +448,20 @@ reviewer_checkout_path() { # <repo> <pr>
   printf '%s/%s-pr-%s' "$(_run_review_dir)" "$1" "$2"
 }
 
-# What GitHub says this PR is, asked once at launch: the head we are about to
-# check out and the base branch the diff is against. Both travel into the
-# brief, because a review whose "main" is a directory is not a review.
-_run_reviewer_pr_facts() { # <repodir> <slug> <pr> [wsdir] -> head<TAB>base
+# What the repo's forge says this PR is, asked once at launch: the head we
+# are about to check out and the base branch the diff is against. Both
+# travel into the brief, because a review whose "main" is a directory is not
+# a review. GitHub or Forgejo alike (lib/forge.sh), as the workspace's own
+# account there; the forge's reason for a refusal goes to stderr.
+_run_reviewer_pr_facts() { # <wsdir> <repo> <pr> -> head<TAB>base
   local out
-  [ -n "$2" ] || return 1
-  if [ -n "${4:-}" ]; then
-    out="$(ws_gh "$4" pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
-  else
-    out="$(gh pr view "$3" --repo "$2" --json headRefOid,baseRefName 2>/dev/null)" || return 1
-  fi
-  printf '%s' "$out" | jq -re '[.headRefOid, .baseRefName] | @tsv' 2>/dev/null
+  out="$(forge_pr_view "$1" "$2" "$3")" || return 1
+  printf '%s' "$out" | jq -re 'if (.head_sha | type) == "string" and .head_sha != "" then [.head_sha, (.base_ref // "")] | @tsv else error("no head") end' 2>/dev/null
 }
 
 # The PR head reaches a fork's commits too, which is why this fetches
 # `pull/<n>/head` rather than the branch name: a contributor's branch does not
-# exist in origin at all.
+# exist in origin at all. GitHub and Forgejo both serve that ref.
 reviewer_checkout_make() { # <repodir> <repo> <pr> <head> -> path
   local repodir="$1" repo="$2" pr="$3" head="$4" path reserved=0 who
   path="$(reviewer_checkout_path "$repo" "$pr")"
@@ -576,7 +575,7 @@ It is not the orchestrator's working copy and nothing moves it under you.
   directory, and anchor every claim about the base to that ref.
 
 Before you conclude anything, check the head has not moved:
-\`gh pr view $2 --repo $1 --json headRefOid\`. If it differs from \`$3\`, say so
+\`cel forge pr view $1#$2 --json\` (its \`head_sha\`). If it differs from \`$3\`, say so
 in your verdict - you are reviewing an older head, which is a fact about the
 review, not a detail. Nothing here is a branch, so there is nothing to push.
 EOF
@@ -2128,20 +2127,18 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
         return 0
       fi
       # AND THE TREE IT READS IS THE PR'S, not this directory's. A dry run
-      # asks GitHub nothing and creates nothing: it is a preview of a launch,
+      # asks the forge nothing and creates nothing: it is a preview of a launch,
       # and a preview that fetches is a side effect.
       repodir="$cwd"
       review_path="$(reviewer_checkout_path "$repo" "$pr")"
       if [ "$dry_run" -eq 0 ]; then
-        have gh || die "cel run reviewer: gh is not on PATH - the PR's head cannot be resolved"
         have jq || die "cel run reviewer: jq is not on PATH"
-        local facts slug
-        slug="$(ws_repo_github_slug "$wsdir" "$repo" "$repodir")" || slug=""
-        facts="$(_run_reviewer_pr_facts "$repodir" "$slug" "$pr" "$wsdir")" \
-          || die "cel run reviewer: cannot read $repo#$pr from GitHub - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
+        local facts
+        facts="$(_run_reviewer_pr_facts "$wsdir" "$repo" "$pr")" \
+          || die "cel run reviewer: cannot read $repo#$pr from its forge - a reviewer without a head SHA would review whatever tree it stood in, which is the bug this refuses"
         IFS=$'\t' read -r review_head review_base <<< "$facts"
         [ -n "$review_head" ] \
-          || die "cel run reviewer: GitHub returned no head SHA for $repo#$pr"
+          || die "cel run reviewer: the forge returned no head SHA for $repo#$pr"
         review_path="$(reviewer_checkout_make "$repodir" "$repo" "$pr" "$review_head")" \
           || die "cel run reviewer: could not check out $repo#$pr at $review_head (is $repodir a clone of $repo?)"
         cwd="$review_path"
