@@ -292,36 +292,52 @@ _rr_cleanup() {
   rm -rf "$RR_T"
 }
 
-test_gc_rex_completed_exact_head_rounds_retire_and_preserve_evidence() {
-  local verdict state
-  for verdict in approved changes; do
-    for state in MERGED CLOSED; do
-      _rr_fixture
-      _rr_set ".prState=\"$state\""
-      if [ "$verdict" = changes ]; then _rr_set '.stoppedNulls=true'; fi
-      local rounds; rounds="$(jq --arg v "$verdict" '."widget#71".verdict=$v' "$RR_WS/.cel/solo-reviews.json")"
-      printf '%s\n' "$rounds" > "$RR_WS/.cel/solo-reviews.json"
-      RR_VERDICT_BEFORE="$(sha256sum "$RR_WS/.cel/solo-reviews.json")"
-      _rr_gc
-      _rr_exited || return
-      [ ! -e "$RR_RECEIPT" ] || return 1
-      assert_eq "$(reviewers_rows | jq length)" 0 || return
-      assert_eq "$reviewers_closed" 1 || return
-      assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
-      _rr_preserved || return
-      jq -se 'map(.type) as $events | ($events|index("inbox-stopped"))!=null and ($events|index("sdk-shutdown"))!=null and ($events|index("inbox-stopped"))<($events|index("sdk-shutdown"))' "$RR_T/producer-events.jsonl" >/dev/null || return
-      assert_eq "$(jq -r '.nativeLiveAtKill // false' "$RR_T/boundary.json")" false || return
-      # Mailbox queries must bind the exact alias and receipt's workspace.
-      jq -se --arg a "$RR_ALIAS" 'any(.[]; .cmd=="cel" and (.args|index($a))!=null and (.args|index("--all-workspaces"))!=null and (.args|index("bundle"))!=null)' "$RR_T/calls.jsonl" >/dev/null || return
-      jq -se '
-        [to_entries[] | select(.value.cmd=="rex" and (.value.args|index("kill"))!=null)] as $close |
-        ($close|length)==1 and
-        ($close[0].value.args|index("--autostart=false"))!=null and
-        ($close[0].value.args|index("widget-review"))!=null and
-        any(to_entries[]; .key>$close[0].key and .value.cmd=="rex" and (.value.args|index("ls"))!=null)
-      ' "$RR_T/calls.jsonl" >/dev/null || return
-      _rr_cleanup
-    done
+# Only an APPROVED round of the current head ends a reviewer's job: once its
+# PR is merged or closed, that reviewer retires with its evidence kept.
+test_gc_rex_completed_exact_head_approved_rounds_retire_and_preserve_evidence() {
+  local state
+  for state in MERGED CLOSED; do
+    _rr_fixture
+    _rr_set ".prState=\"$state\""
+    # one of the two also proves a stop record carrying nulls still retires
+    if [ "$state" = CLOSED ]; then _rr_set '.stoppedNulls=true'; fi
+    local rounds; rounds="$(jq '."widget#71".verdict="approved"' "$RR_WS/.cel/solo-reviews.json")"
+    printf '%s\n' "$rounds" > "$RR_WS/.cel/solo-reviews.json"
+    RR_VERDICT_BEFORE="$(sha256sum "$RR_WS/.cel/solo-reviews.json")"
+    _rr_gc
+    _rr_exited || return
+    [ ! -e "$RR_RECEIPT" ] || return 1
+    assert_eq "$(reviewers_rows | jq length)" 0 || return
+    assert_eq "$reviewers_closed" 1 || return
+    assert_eq "$(sha256sum "$RR_NATIVE")" "$RR_NATIVE_BEFORE" || return
+    _rr_preserved || return
+    jq -se 'map(.type) as $events | ($events|index("inbox-stopped"))!=null and ($events|index("sdk-shutdown"))!=null and ($events|index("inbox-stopped"))<($events|index("sdk-shutdown"))' "$RR_T/producer-events.jsonl" >/dev/null || return
+    assert_eq "$(jq -r '.nativeLiveAtKill // false' "$RR_T/boundary.json")" false || return
+    # Mailbox queries must bind the exact alias and receipt's workspace.
+    jq -se --arg a "$RR_ALIAS" 'any(.[]; .cmd=="cel" and (.args|index($a))!=null and (.args|index("--all-workspaces"))!=null and (.args|index("bundle"))!=null)' "$RR_T/calls.jsonl" >/dev/null || return
+    jq -se '
+      [to_entries[] | select(.value.cmd=="rex" and (.value.args|index("kill"))!=null)] as $close |
+      ($close|length)==1 and
+      ($close[0].value.args|index("--autostart=false"))!=null and
+      ($close[0].value.args|index("widget-review"))!=null and
+      any(to_entries[]; .key>$close[0].key and .value.cmd=="rex" and (.value.args|index("ls"))!=null)
+    ' "$RR_T/calls.jsonl" >/dev/null || return
+    _rr_cleanup
+  done
+}
+
+# A reviewer whose round asked for CHANGES stays for the re-review, even once
+# the PR is merged or closed: gc touches no terminal, registry or receipt.
+test_gc_rex_completed_exact_head_changes_round_keeps_the_reviewer() {
+  local state
+  for state in MERGED CLOSED; do
+    _rr_fixture
+    _rr_set ".prState=\"$state\""
+    local rounds; rounds="$(jq '."widget#71".verdict="changes"' "$RR_WS/.cel/solo-reviews.json")"
+    printf '%s\n' "$rounds" > "$RR_WS/.cel/solo-reviews.json"
+    RR_VERDICT_BEFORE="$(sha256sum "$RR_WS/.cel/solo-reviews.json")"
+    _rr_gc; _rr_kept || return
+    _rr_cleanup
   done
 }
 

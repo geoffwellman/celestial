@@ -791,9 +791,12 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   [ "$dry" -eq 1 ] && return 0
   mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
   # The steward's pressure warning names what this sweep stopped; an empty
-  # file says nothing was.
-  if [ -n "$rv_what" ]; then printf '%s\n' "$rv_what" > "$(_gc_idle_stop_last)" 2>/dev/null || true
-  else : > "$(_gc_idle_stop_last)" 2>/dev/null || true; fi
+  # file says nothing was. Best effort: stderr is redirected before the file
+  # is opened, so a write that cannot open it stays quiet.
+  local idle_last; idle_last="$(_gc_idle_stop_last)"
+  mkdir -p "$(dirname "$idle_last")" 2>/dev/null || true
+  if [ -n "$rv_what" ]; then printf '%s\n' "$rv_what" 2>/dev/null > "$idle_last" || true
+  else : 2>/dev/null > "$idle_last" || true; fi
   [ "${#recover[@]}" -gt 0 ] || printf '%s' "$drop$adopt$attrib" | grep -q '[^][]' || return 0
   reviewers_update "${recover[@]}" --argjson drop "$drop" --argjson adopt "$adopt" --argjson attrib "$attrib" \
     'map(select((.pane as $p | $drop | index($p)) == null))
