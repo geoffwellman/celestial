@@ -149,9 +149,10 @@ grouping: policy, ticket tracker, environment, profiles, dashboard. A
 together. Its agent's pane and mailbox are `<product>-orch`. `root` is the
 mailbox name for "the top, whoever is listening", which is `cel core`.
 `cel run root` still starts a standing director inside one workspace, but it
-is not the path this README assumes. A product orchestrator role
-(`core/roles/project-orchestrator.md`) is kept for planned feature teams; it is
-not launched today.
+is not the path this README assumes. The product orchestrator and the solo
+agent are one role (`core/roles/solo.md`; `project-orchestrator.md` points at
+it): it builds small work itself and leads a [feature team](#feature-teams)
+when a feature needs one.
 
 `cel core` (also `cel console`, `cel run core` and `cel run console`) starts
 the box's coordinator: one agent pane, standing in no workspace, that reads
@@ -548,6 +549,55 @@ dashboard tags its agent row, the steward tells the agent - once per head - when
 a PR of its is approved and green but unmerged, and `cel gc` removes its
 worktrees under `<ws>/.cel/solo/<product>/` once their PR has merged or closed
 and nothing in them is unsaved (a worktree with no PR yet is kept).
+
+### Feature teams
+
+Small work stays with the product's agent. A feature with two or more parts
+that can be built at the same time, or one that needs a specialist (device
+QA, design, data, a release check), gets a **team** that the product's agent
+leads. The lead stays the only integrator: one integration branch and PR per
+repo, reviewed by `cel run reviewer` and landed with `cel solo land` as above.
+Members are short-lived scoped agents, at most four per wave.
+
+```
+cel team start login --product shop --brief-file brief.md      # lead only
+cel team event login candidate.updated --data '{"repo":"web","head":"<sha>","branch":"CEL-login"}'
+cel team add login builder --repo web --owns 'src/auth/**' --focus backend --task-file t1.md
+cel team add login qa --repo web --focus browser --task-file t2.md
+cel team status login            # roster, liveness, candidate heads, verdict freshness, who owes next
+cel team close login             # retires everyone; refuses over unpushed builder work
+```
+
+Everything a team is lives in `<ws>/.cel/teams/<feature>/` (feature ids are
+`[a-z0-9][a-z0-9-]{1,40}`): `team.json` (the roster), `brief.md`,
+`acceptance.yaml`, `contracts/`, `events.jsonl` (append-only),
+`verdicts.json`, and a scope packet per member, `members/<alias>.md`. Every
+write holds the folder's lock and JSON is replaced whole.
+
+- **Roles** — `product`, `design`, `builder`, `qa`, `platform`, `release`,
+  `analyst` (`core/roles/team-<role>.md`), each narrowed by an optional focus
+  pack (`core/roles/focus/<role>/<focus>.md`, a short checklist). Only a
+  builder writes code, on `team/<feature>/<member>` in its own worktree,
+  inside the paths it `--owns`; it pushes that branch and never opens a PR.
+  Two builders' `--owns` globs may not overlap in one repo; where overlap
+  cannot be decided exactly it counts as overlapping and the refusal says why.
+- **Adding a member** admits it against the box-wide agent budget first (a
+  refusal is printed and nothing is written), then reserves its row, writes
+  its scope packet and a one-time launch token, and launches it with `cel run
+  member`. It is `reserved` until the launcher confirmed the exact agent AND
+  the member ran `cel team ack`; a launch that never confirms stays reserved
+  and is not relaunched.
+- **Reporting** — members append `task.ready` (head + gate result),
+  `preview.ready` and `decision` events with `cel team event ... --to
+  <alias>` (which also mails), and judge the lead's candidate head with `cel
+  team verdict <f> --repo r --head <sha> pass|changes|blocked|advisory
+  --evidence <file>`. A newer `candidate.updated` makes older verdicts show
+  as stale.
+- **Owner decisions** go through the lead's `cel decide ask`; members spend
+  nothing unless the lead wrote a cap into `brief.md` from one.
+- **Closing** — `cel team retire <f> <alias>` closes one member's pane; `cel
+  team close <f>` retires everyone and refuses while a builder's work is not
+  on origin, unless `--force-keep` (which keeps those worktrees).
 
 ## The review loop
 
@@ -1297,6 +1347,7 @@ policy block into every agent.
 | `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent |
 | `cel mode [<p>] [solo]` | show a product's mode, or set it to solo |
 | `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head / merge an approved, green PR |
+| `cel team start · add · ack · event · verdict · status · retire · close` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, close that keeps unpushed work |
 | `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
 | `cel profiles` | profiles, role bindings and the exact launch flags each resolves to |
 | `cel steward --install [--interval m]` | run the steward on a timer (the thing that makes any of it proactive) |

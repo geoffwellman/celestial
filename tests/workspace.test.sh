@@ -138,13 +138,14 @@ test_ws_render_role_appends_policy() {
   assert_contains "$out" "You are the solo agent for one product"
   assert_contains "$out" "Workspace policy"
 }
-# The orchestrator role is held for the feature-team rewrite; it must say it
-# is not launched, so nobody mistakes it for live behaviour.
-test_project_orchestrator_role_says_it_is_not_launched() {
+# The orchestrator and the solo agent are one role: project-orchestrator.md
+# carries no body of its own and points at solo.md, which leads teams.
+test_project_orchestrator_role_is_the_solo_role() {
   local f="$CEL_ROOT/core/roles/project-orchestrator.md"
   assert_contains "$(cat "$f")" "name: project-orchestrator"
-  assert_contains "$(cat "$f")" "THIS ROLE IS NOT LIVE"
   assert_contains "$(cat "$f")" "core/roles/solo.md"
+  assert_contains "$(cat "$CEL_ROOT/core/roles/solo.md")" "Leading a feature team"
+  assert_contains "$(cat "$CEL_ROOT/core/roles/solo.md")" "cel team add"
 }
 test_ws_render_claude_block_is_idempotent() {
   local tmp; tmp="$(mktemp -d)"
