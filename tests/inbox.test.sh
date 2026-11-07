@@ -71,6 +71,145 @@ test_inbox_survives_quotes_and_newlines() {
   rm -rf "$CEL_INBOX_DIR"
 }
 
+# ---- a mailbox that does not parse -----------------------------------------
+# A torn append (a disk that filled mid-write) leaves a line jq cannot read.
+# That is not "no mail": every look fails naming the file, and a read moves no
+# cursor, so the mail behind the bad line is still owed once it is repaired.
+_inbox_corrupt_fixture() {
+  _inbox_sandbox; export CEL_INBOX_ME=root
+  _inbox_send root "first" --workspace demo >/dev/null 2>&1
+  _inbox_read --for root --workspace demo >/dev/null 2>&1
+  _inbox_send root "second" --workspace demo >/dev/null 2>&1
+  QID="$(_inbox_send root "ship it?" --kind decision --workspace demo 2>/dev/null)"
+  cp "$CEL_INBOX_DIR/demo.jsonl" "$CEL_INBOX_DIR/good"
+  printf '{"id":"9' >> "$CEL_INBOX_DIR/demo.jsonl"
+}
+test_inbox_read_of_a_corrupt_mailbox_fails_and_keeps_the_cursor() {
+  _inbox_corrupt_fixture
+  local f="$CEL_INBOX_DIR/demo.jsonl" c="$CEL_INBOX_DIR/demo.root.cursor" before out err rc=0
+  before="$(cat "$c")"
+  out="$(_inbox_read --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  err="$(cat "$CEL_INBOX_DIR/err")"
+  [ "$rc" -ne 0 ] || { echo "a corrupt mailbox read as a success"; return 1; }
+  assert_eq "$out" ""
+  assert_contains "$err" "$f is corrupt"
+  ! printf '%s' "$err" | grep -q 'no unread mail' || { echo "a corrupt mailbox reported as no unread mail"; return 1; }
+  assert_eq "$(cat "$c")" "$before"
+  rc=0; out="$(_inbox_read --for root --workspace demo --json 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "--json read of a corrupt mailbox exited 0"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r '.state + " " + .file')" "corrupt $f"
+  assert_eq "$(cat "$c")" "$before"
+  # repaired in place, the mail behind the bad line is delivered, once
+  cp "$CEL_INBOX_DIR/good" "$f"
+  out="$(_inbox_read --for root --workspace demo 2>/dev/null)"
+  assert_contains "$out" "second"
+  ! printf '%s' "$out" | grep -q 'first' || { echo "re-delivered mail the cursor had passed"; return 1; }
+  rm -rf "$CEL_INBOX_DIR"
+}
+test_inbox_unread_open_and_resolve_of_a_corrupt_mailbox_fail_naming_it() {
+  _inbox_corrupt_fixture
+  local f="$CEL_INBOX_DIR/demo.jsonl" out sum rc=0
+  sum="$(cksum < "$f")"
+  out="$(inbox_unread_json demo root 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "inbox_unread_json exited 0 on a corrupt mailbox"; return 1; }
+  assert_eq "$out" ""
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  rc=0; out="$(_inbox_open --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "open of a corrupt mailbox exited 0"; return 1; }
+  assert_eq "$out" ""
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  rc=0; out="$(_inbox_sub _inbox_resolve "$QID" --by human --workspace demo 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "resolve in a corrupt mailbox exited 0"; return 1; }
+  assert_contains "$out" "$f is corrupt"
+  rc=0; out="$(_inbox_sub _inbox_resolve --all --for root --by human --workspace demo 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "bulk resolve in a corrupt mailbox exited 0"; return 1; }
+  assert_contains "$out" "$f is corrupt"
+  assert_eq "$(cksum < "$f")" "$sum"
+  rm -rf "$CEL_INBOX_DIR"
+}
+# One corrupt mailbox in a sweep neither hides the others' mail nor turns the
+# sweep into a failure the hooks would drop that delivered mail for.
+test_inbox_read_all_workspaces_delivers_past_a_corrupt_mailbox() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "from beta" --workspace beta ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "from alpha" --workspace alpha ) >/dev/null 2>&1
+  printf '{"id":"9' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  local out err
+  out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces 2>"$CEL_INBOX_DIR/err")"
+  err="$(cat "$CEL_INBOX_DIR/err")"
+  assert_contains "$out" "[beta]"
+  assert_contains "$out" "from beta"
+  assert_contains "$err" "$CEL_INBOX_DIR/alpha.jsonl is corrupt"
+  # with nothing else to deliver, the sweep fails rather than say "no mail"
+  local rc=0
+  out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a sweep that could not read a mailbox exited 0"; return 1; }
+  ! grep -q 'no unread mail' "$CEL_INBOX_DIR/err" || { echo "a corrupt sweep reported as no unread mail"; return 1; }
+  # --json names the corrupt mailbox on stdout, for hooks that never see stderr
+  out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces --json 2>/dev/null)" || true
+  assert_eq "$(printf '%s' "$out" | sed 's/^\[alpha\] //' | jq -r '.state + " " + .file')" "corrupt $CEL_INBOX_DIR/alpha.jsonl"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+# The count is what the hooks ask before they read, so a corrupt mailbox must
+# not count as 0 there either. stdout stays a number - the unread items before
+# the first bad line, a floor - while the status is 1 and stderr names the
+# file, whether the bad line is the first one or a later one.
+test_inbox_count_of_a_corrupt_mailbox_fails_with_a_floor() {
+  _inbox_sandbox; export CEL_INBOX_ME=root
+  local f="$CEL_INBOX_DIR/demo.jsonl" out rc=0
+  printf 'not json\n' > "$f"
+  _inbox_send root "behind the bad line" --workspace demo >/dev/null 2>&1
+  out="$(_inbox_count --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "count of a mailbox torn at line 1 exited 0"; return 1; }
+  assert_eq "$out" "0"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  ! grep -q 'no unread mail' "$CEL_INBOX_DIR/err" || { echo "a corrupt count reported as no unread mail"; return 1; }
+  : > "$f"
+  _inbox_send root "one" --workspace demo >/dev/null 2>&1
+  _inbox_send root "two" --workspace demo >/dev/null 2>&1
+  printf '{"id":"9' >> "$f"
+  _inbox_send root "three" --workspace demo >/dev/null 2>&1
+  rc=0; out="$(_inbox_count --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "count of a mailbox torn at line 3 exited 0"; return 1; }
+  assert_eq "$out" "2"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  rm -rf "$CEL_INBOX_DIR"
+}
+# A hook asks for ONE number across every mailbox: the others still count.
+test_inbox_count_all_workspaces_sums_past_a_corrupt_mailbox() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "one" --workspace alpha ) >/dev/null 2>&1
+  printf 'not json\n' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  ( CEL_INBOX_ME=t _inbox_send root "two" --workspace beta ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "three" --workspace beta ) >/dev/null 2>&1
+  local out rc=0
+  out="$(CEL_INBOX_ME=console _inbox_count --for root --all-workspaces 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a sum over a corrupt mailbox exited 0"; return 1; }
+  assert_eq "$out" "3"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$CEL_INBOX_DIR/alpha.jsonl is corrupt"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+# Every other look at a corrupt mailbox is unknown too: the facts every view
+# reads say corrupt rather than 0, and a condition-key lookup fails - while a
+# send that carries a key still lands, as a new item, instead of being lost.
+test_inbox_mail_json_oldest_and_open_fp_of_a_corrupt_mailbox_are_unknown() {
+  _inbox_corrupt_fixture; _INBOX_ROSTER_OK=0   # no live herdr: the reader is not the question
+  local f="$CEL_INBOX_DIR/demo.jsonl" out rc=0
+  out="$(inbox_mail_json demo root 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "inbox_mail_json exited 0 on a corrupt mailbox"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -c '{to_root_unread, oldest_secs, corrupt}')" \
+    '{"to_root_unread":null,"oldest_secs":null,"corrupt":true}'
+  rc=0; out="$(inbox_oldest_unread_secs demo root 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "inbox_oldest_unread_secs exited 0 on a corrupt mailbox"; return 1; }
+  assert_eq "$out" ""
+  rc=0; out="$(_inbox_open_fp demo a-condition 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "_inbox_open_fp exited 0 on a corrupt mailbox"; return 1; }
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  _inbox_send root "still delivered" --kind blocked --fp a-condition --workspace demo >/dev/null 2>&1
+  grep -q 'still delivered' "$f" || { echo "a keyed send into a corrupt mailbox was dropped"; return 1; }
+  rm -rf "$CEL_INBOX_DIR"
+}
+
 # ---- decisions are a ledger, not a queue ----------------------------------
 # `read` moves a cursor; a question that needs an answer must not be buried by
 # the next status message. A decision or blocker stays OPEN until a resolution
@@ -120,6 +259,19 @@ test_resolve_refuses_an_unknown_or_non_decision_id() {
   local s; s="$(_inbox_send root "status" --workspace demo 2>/dev/null)"
   assert_fails _inbox_sub _inbox_resolve "$s" --workspace demo
   assert_fails _inbox_sub _inbox_resolve 000 --workspace demo
+  rm -rf "$CEL_INBOX_DIR"
+}
+# Resolving is checked against the mailbox as it stands: an item already
+# closed is refused, naming who closed it, and no second record is written.
+test_resolve_refuses_an_item_already_resolved() {
+  _inbox_sandbox
+  local a err rc=0
+  a="$(_inbox_send root "q1" --kind decision --workspace demo 2>/dev/null)"
+  _inbox_resolve "$a" --by human --workspace demo >/dev/null 2>&1
+  err="$(_inbox_sub _inbox_resolve "$a" --by robot --workspace demo 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a closed item was resolved a second time"; return 1; }
+  assert_contains "$err" "already resolved (by human"
+  assert_eq "$(jq -c --arg a "$a" 'select(.kind == "resolution" and .ref == $a)' "$CEL_INBOX_DIR/demo.jsonl" | wc -l | tr -d ' ')" "1"
   rm -rf "$CEL_INBOX_DIR"
 }
 test_send_rejects_an_unknown_kind() {
@@ -564,6 +716,51 @@ test_resolve_all_counts_a_rolled_up_item_once() {
   _inbox_send root "dry" --from steward --kind blocked --fp q --workspace demo >/dev/null 2>&1
   assert_contains "$(_inbox_resolve --all --from steward --for root --by human --workspace demo 2>&1)" "resolved 1"
   assert_eq "$(_inbox_open --for root --workspace demo)" ""
+  rm -rf "$CEL_INBOX_DIR"
+}
+
+# --- resolvers racing ----------------------------------------------------------
+# Two identical resolvers run at once against one mailbox. Each signals on a
+# FIFO as it reaches for the mailbox lock, which the test holds until both
+# have signalled. A resolver that chose its items before taking the lock has
+# chosen them by then, so the race the lock prevents is forced every run,
+# with no sleeps. Statuses land in race.a/race.b, output in race.{a,b}.out.
+_resolve_race() { # <_inbox_resolve args...>
+  local f="$CEL_INBOX_DIR/demo.jsonl" sig="$CEL_INBOX_DIR/race.fifo" lk rd who got
+  mkfifo "$sig"
+  exec {rd}<>"$sig"
+  exec {lk}>>"$f"
+  command flock "$lk"
+  for who in a b; do
+    ( exec {lk}>&- {rd}>&-
+      flock() { printf '%s\n' "$who" > "$sig"; command flock "$@"; }
+      rc=0; ( _inbox_resolve "$@" ) > "$CEL_INBOX_DIR/race.$who.out" 2>&1 || rc=$?
+      printf '%s' "$rc" > "$CEL_INBOX_DIR/race.$who" ) &
+  done
+  read -r -t 30 -u "$rd" got && read -r -t 30 -u "$rd" got \
+    || { echo "a resolver never reached the mailbox lock"; return 1; }
+  exec {lk}>&-
+  wait
+  exec {rd}>&-
+}
+test_concurrent_bulk_resolves_close_each_item_exactly_once() {
+  _resolve_all_fixture
+  _resolve_race --all --for root --by human --workspace demo
+  assert_eq "$(jq -r 'select(.kind == "resolution") | .ref' "$CEL_INBOX_DIR/demo.jsonl" | sort | tr '\n' ' ')" "100 200 300 "
+  assert_eq "$(cat "$CEL_INBOX_DIR/race.a" "$CEL_INBOX_DIR/race.b")" "00"
+  local outs; outs="$(cat "$CEL_INBOX_DIR/race.a.out" "$CEL_INBOX_DIR/race.b.out")"
+  assert_contains "$outs" "resolved 3"
+  assert_contains "$outs" "resolved 0"
+  assert_eq "$(_inbox_open --for root --workspace demo)" ""
+  rm -rf "$CEL_INBOX_DIR"
+}
+test_concurrent_resolves_of_one_item_close_it_once() {
+  _inbox_sandbox
+  local a; a="$(_inbox_send root "q" --kind decision --workspace demo 2>/dev/null)"
+  _resolve_race "$a" --by human --workspace demo
+  assert_eq "$(jq -c --arg a "$a" 'select(.kind == "resolution" and .ref == $a)' "$CEL_INBOX_DIR/demo.jsonl" | wc -l | tr -d ' ')" "1"
+  assert_eq "$(cat "$CEL_INBOX_DIR/race.a" "$CEL_INBOX_DIR/race.b" | fold -w1 | sort | tr -d '\n')" "01"
+  assert_contains "$(cat "$CEL_INBOX_DIR/race.a.out" "$CEL_INBOX_DIR/race.b.out")" "already resolved"
   rm -rf "$CEL_INBOX_DIR"
 }
 

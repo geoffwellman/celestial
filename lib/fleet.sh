@@ -515,17 +515,23 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   [ -d "$wsdir" ] || return 0
   [ -f "$wsdir/workspace.yaml" ] || return 0
 
-  local unread open units product mail
-  unread="$(_inbox_count --for root --workspace "$ws" 2>/dev/null || printf 0)"
-  [ -n "$unread" ] || unread=0
-  open="$(_inbox_open --for root --workspace "$ws" 2>/dev/null | grep -c . || true)"
-  [ -n "$open" ] || open=0
+  local unread open units product mail corrupt=false
   # WHETHER ROOT'S MAIL IS GOING ANYWHERE AT ALL. Every view of this box reads
   # `cel fleet --json`, so who is alive to read the mailbox everything
   # escalates to belongs here - otherwise escalations land where nobody is
   # obliged to look.
-  mail="$(inbox_mail_json "$ws" root 2>/dev/null)"
+  # A MAILBOX THAT DOES NOT PARSE IS UNKNOWN, NOT EMPTY: inbox_mail_json says
+  # corrupt, and every count read off it is null rather than 0.
+  mail="$(inbox_mail_json "$ws" root 2>/dev/null)" || corrupt=true
   [ -n "$mail" ] || mail='{"to_root_unread":0,"oldest_secs":0,"reader":""}'
+  if [ "$corrupt" = true ]; then
+    unread=null; open=null
+  else
+    unread="$(_inbox_count --for root --workspace "$ws" 2>/dev/null)" || true
+    [ -n "$unread" ] || unread=0
+    open="$(_inbox_open --for root --workspace "$ws" 2>/dev/null | grep -c . || true)"
+    [ -n "$open" ] || open=0
+  fi
 
   # The orchestrator candidates are one jq over the workspace and the roster,
   # and the product list is read off them rather than asked of the YAML a
@@ -547,7 +553,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
   [ -f "$ifile" ] || ifile=/dev/null
   printf '%s' "$units" | jq -sc --arg name "$ws" \
     --argjson unread "$unread" --argjson open "$open" --argjson mail "$mail" \
-    --arg orows "$orows" --rawfile inbox "$ifile" \
+    --argjson corrupt "$corrupt" --arg orows "$orows" --rawfile inbox "$ifile" \
     "$_INBOX_UNREAD_DEF"'([$inbox | split("\n")[] | select(length > 0) | (try fromjson catch empty)]) as $mails
      | ([$mails[] | select(.kind == "resolution") | .ref]) as $done
      | {name: $name, root: {unread: $unread, open: $open}, mail: $mail, units: .,
@@ -557,10 +563,10 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
           | {name: .[0], ws: .[1], pane: .[2], status: .[3], since: (.[4] | tonumber? // 0),
              model: .[5], launch: .[6], detail: (if .[7] == "-" then "" else .[7] end), cmd: .[8],
              role: .[9], product: .[10],
-             unread: ([$mails[] | select(.kind != "resolution") | select(.to == $who or .to == "all")
-                       | select(unread($cs))] | length),
-             open: ([$mails[] | select(.kind == "decision" or .kind == "blocked")
-                     | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length)}]}'
+             unread: (if $corrupt then null else ([$mails[] | select(.kind != "resolution") | select(.to == $who or .to == "all")
+                       | select(unread($cs))] | length) end),
+             open: (if $corrupt then null else ([$mails[] | select(.kind == "decision" or .kind == "blocked")
+                     | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length) end)}]}'
 }
 
 # EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE, from the same rows
@@ -590,10 +596,15 @@ _fleet_orch_tsv() { # <ws> <wsdir> <roster-json> <candidates>
 # orphans_doctor_line do: the check belongs beside the facts it reads.
 #
 # Silent when someone is reading, and silent when there is nothing unread. A
-# watcher that speaks every tick is a watcher people stop reading.
+# watcher that speaks every tick is a watcher people stop reading. A mailbox
+# that does not parse is never silent: its unread mail is unknown.
 fleet_mail_doctor_line() { # <ws> -> one line, or nothing
   local mail n secs reader age
-  mail="$(inbox_mail_json "$1" root 2>/dev/null)" || return 0
+  if ! mail="$(inbox_mail_json "$1" root 2>/dev/null)"; then
+    [ "$(printf '%s' "$mail" | jq -r '.corrupt // false' 2>/dev/null)" = true ] || return 0
+    printf "  %s: root's mailbox %s is corrupt - its unread mail is unknown, not empty\n" "$1" "$(_inbox_file "$1")"
+    return 0
+  fi
   [ -n "$mail" ] || return 0
   n="$(printf '%s' "$mail" | jq -r '.to_root_unread')"
   secs="$(printf '%s' "$mail" | jq -r '.oldest_secs')"
@@ -614,7 +625,9 @@ _fleet_render() { # <doc>
   [ "${orph_n:-0}" -gt 0 ] 2>/dev/null \
     && orph="   $orph_n orphans ($(mem_human "$(printf '%s' "$1" | jq -r '.box.orphans.rss_mb // 0')")) - cel gc --orphans"
   printf '%s' "$1" | jq -r --arg box "box $free free of $total$orph" '.workspaces[]
-    | "\(.name)   (\(.units | length) products)   root mail: \(.root.unread) unread, \(.root.open) open   \($box)"
+    | (if .mail.corrupt then "root mail: UNKNOWN (mailbox corrupt)"
+       else "root mail: \(.root.unread) unread, \(.root.open) open" end) as $rootmail
+    | "\(.name)   (\(.units | length) products)   \($rootmail)   \($box)"
       as $head
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label

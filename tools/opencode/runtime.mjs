@@ -236,15 +236,33 @@ export async function createPlugin(context, deps = {}) {
     catch (error) { if (error?.code === 2) return; throw error; }
     if (verdict.startsWith('deny')) throw new Error(`celestial guard: ${verdict.slice(4).trim()}`);
   }
+  // A MAILBOX THAT DOES NOT PARSE is said once per file in this session: its
+  // mail is unknown, and saying so every idle tick would wake the agent forever.
+  const corruptSaid = new Set();
+  function corruptNotice(ws, file) {
+    if (corruptSaid.has(file)) return '';
+    corruptSaid.add(file);
+    return `${ws}celestial inbox: mailbox ${file} is corrupt (a line does not parse) - its mail is unknown, not empty, and nothing was marked read. Tell the owner.`;
+  }
   async function deliver() {
     if (disposed || delivering || !sessionID || !available()) return;
     delivering = true;
     const observed = generation;
     try {
       if (!pending) {
-        const count = Number((await run(cel, ['inbox', 'count', ...wsArgs])).trim());
-        if (disposed || observed !== generation || !(count > 0)) return;
-        const raw = await run(cel, ['inbox', 'read', '--json', ...wsArgs]);
+        // A count that FAILS (a corrupt mailbox exits 1 with only a floor on
+        // stdout) is unknown, not empty: read anyway, and the read says why.
+        let count = NaN;
+        try { count = Number((await run(cel, ['inbox', 'count', ...wsArgs])).trim()); } catch { /* unknown */ }
+        if (disposed || observed !== generation || (Number.isFinite(count) && !(count > 0))) return;
+        let raw;
+        try { raw = await run(cel, ['inbox', 'read', '--json', ...wsArgs]); }
+        catch (error) {
+          // A corrupt mailbox fails the read with its {state: corrupt} report
+          // on stdout: an answer to deliver (once per file), not a failure.
+          raw = String(error?.stdout ?? '');
+          if (!/"state":"corrupt"/.test(raw)) throw error;
+        }
         // Store the drained bytes before parsing. A malformed record or a
         // refused/ambiguous native admission must not lose or re-drain debt.
         pending = raw.trim();
@@ -254,8 +272,9 @@ export async function createPlugin(context, deps = {}) {
               const match = /^(\[[^\]]+\] )?(\{.*\})$/.exec(line.trim());
               if (!match) return line;
               const item = JSON.parse(match[2]);
+              if (!item.id && item.state === 'corrupt') return corruptNotice(match[1] ?? '', String(item.file ?? ''));
               return item.id ? `[${item.id}] ${match[1] ?? ''}${item.kind} from ${item.from}: ${item.message}` : line;
-            }).join('\n');
+            }).filter(Boolean).join('\n');
           } catch { /* the original drained payload remains owed */ }
         }
       }
