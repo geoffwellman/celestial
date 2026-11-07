@@ -70,26 +70,29 @@ doctor_box_services_line() {
   return 0
 }
 
+# One count line: the inventory itself is what `cel serve list` (ledgered) and
+# `cel serve adopt` (unledgered) are for, and a list here buries the findings.
 doctor_serve_line() {
-  local tracked untracked_rows managed untracked rows
-  tracked="$(serve_list_json 2>/dev/null || printf '[]')"
-  untracked_rows="$(serve_adopt_json 2>/dev/null || printf '[]')"
-  managed="$(printf '%s' "$tracked" | jq 'length')"
-  untracked="$(printf '%s' "$untracked_rows" | jq 'length')"
-  printf '  preview servers: %s ledgered, %s unledgered; see cel serve list/adopt\n' "$managed" "$untracked"
-  rows="$(jq -cn --argjson tracked "$tracked" --argjson unledgered "$untracked_rows" '$tracked + $unledgered')"
-  printf '%s\n' "$rows" | jq -r 'sort_by(-.memory_mb)[] | "    \(.name // .unit // ("pid:"+(.pid|tostring))) \(.memory_mb)M \(.age_seconds)s \(.owner // "unledgered") \(.worktree // "")"'
+  local managed untracked
+  managed="$(serve_list_json 2>/dev/null || printf '[]')"
+  untracked="$(serve_adopt_json 2>/dev/null || printf '[]')"
+  printf '  preview servers: %s ledgered, %s unledgered - see cel serve list (cel serve adopt for the unledgered)\n' \
+    "$(printf '%s' "$managed" | jq 'length')" "$(printf '%s' "$untracked" | jq 'length')"
 }
 
 # HOW FAR BEHIND THE TREE YOU ARE READING IS. Every conclusion drawn from a
 # stale checkout - a benchmark, a review - is truthful about the wrong tree,
 # and nothing else says the checkout is stale.
 #
+# ONLY A CHECKOUT ON ITS DEFAULT BRANCH IS ASKED. A feature branch (or a
+# detached head) is behind the default branch by design, and no pull on it
+# would change that, so it says nothing - and costs no fetch.
+#
 # A CHECKOUT THAT CANNOT BE ASKED IS UNKNOWN. No remote, no network, a remote
 # that refuses - all of them say so out loud, because silence here reads as
 # "up to date", which is exactly the failure being guarded.
 doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
-  local dir="$1" label="$2" br n
+  local dir="$1" label="$2" br cur n
   git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
   if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
     printf '%s: UNKNOWN - no origin remote, so how current it is cannot be asked\n' "$label"
@@ -101,6 +104,8 @@ doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
     | awk '/HEAD branch:/{print $NF; exit}' || true)"
   [ -n "$br" ] && [ "$br" != "(unknown)" ] || {
     printf '%s: UNKNOWN - origin names no default branch\n' "$label"; return 0; }
+  cur="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [ "$cur" = "$br" ] || return 0
   if ! git -C "$dir" fetch -q origin "$br" 2>/dev/null; then
     printf '%s: UNKNOWN - origin/%s could not be fetched (offline?), so staleness is unknown\n' "$label" "$br"
     return 0
@@ -108,7 +113,9 @@ doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
   n="$(git -C "$dir" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || true)"
   case "$n" in ''|*[!0-9]*) printf '%s: UNKNOWN - HEAD and origin/%s cannot be compared\n' "$label" "$br"; return 0;; esac
   [ "$n" -gt 0 ] || return 0
-  printf '%s: %s commits behind origin/%s - git -C %s pull --ff-only\n' "$label" "$n" "$br" "$dir"
+  # Remote and branch named: a bare pull follows whatever upstream the branch
+  # happens to track, which need not be the default branch counted here.
+  printf '%s: %s commits behind origin/%s - git -C %s pull --ff-only origin %s\n' "$label" "$n" "$br" "$dir" "$br"
 }
 
 check_roles_and_runtimes() {

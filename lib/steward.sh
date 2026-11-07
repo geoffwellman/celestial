@@ -36,6 +36,8 @@ _CEL_STEWARD=1
 # shellcheck source=lib/serve.sh
 . "${BASH_SOURCE[0]%/*}/serve.sh"
 . "${BASH_SOURCE[0]%/*}/services.sh"
+# shellcheck source=lib/ledger_states.sh
+. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
 
 # Overridable so the stalled-worker sweep can be driven against a stub pane:
 # the failure this sweep exists for is a specific string in a specific pane,
@@ -48,16 +50,56 @@ _STEWARD_STATE="${CEL_STEWARD_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/st
 _STEWARD_FANOUT="${CEL_STEWARD_FANOUT:-$CEL_ROOT/core/skills/fanout/bin/cel-fanout}"
 _STEWARD_WINDOW="${CEL_STEWARD_WINDOW:-14400}"   # repeat-nudge window, seconds
 
+# ONE WRITER AT A TIME, AND NEVER A TORN FILE. Every rewrite of a steward state
+# file goes through here: under the file's own lock, <fn> reads the current
+# content on stdin and prints the new content, which is published through a
+# unique temp file in the same directory and a rename. A non-zero <fn> leaves
+# the file as it was and is the return status, so a check and its record (is
+# this key due?) are one step that no other writer can get between.
+_steward_state_edit() { # <file> <fn> [args...]
+  local f="$1" rc=0; shift
+  mkdir -p "$(dirname "$f")" && touch "$f" || return 1
+  (
+    if have flock; then flock 9 || exit 1; fi
+    tmp="$(mktemp "$f.XXXXXX")" || exit 1
+    chmod --reference="$f" "$tmp" 2>/dev/null || true
+    "$@" < "$f" > "$tmp" || { st=$?; rm -f "$tmp"; exit "$st"; }
+    mv -f "$tmp" "$f" || { rm -f "$tmp"; exit 1; }
+  ) 9>>"$f.lock" || rc=$?
+  return "$rc"
+}
+
+# The edits, each a filter from the old content to the new. A record is one
+# line: "<key> <value...>".
+_steward_state_due() { # <key> <now> <window>: record now, or fail inside the window
+  awk -v k="$1" -v now="$2" -v w="$3" '
+    $1 == k { t = $2; next } { print }
+    END { if (now - (t + 0) < w) exit 1; print k, now }'
+}
+_steward_state_note() { # <key> <now>: record now unless already recorded
+  awk -v k="$1" -v now="$2" '{ print } $1 == k { f = 1 } END { if (f) exit 1; print k, now }'
+}
+_steward_state_set() { # <key> <value...>: replace the record
+  local k="$1"; shift
+  awk -v k="$k" -v line="$k $*" '$1 != k { print } END { print line }'
+}
+_steward_state_add() { # <key> <n>: add n to the record's value
+  awk -v k="$1" -v n="$2" '$1 == k { t = $2; next } { print } END { printf "%s %.0f\n", k, t + n }'
+}
+_steward_state_drop() { # <key>: drop the record; fail when there is none
+  awk -v k="$1" '$1 == k { f = 1; next } { print } END { exit !f }'
+}
+_steward_state_drop_unseen() { # <prefix> [key...]: drop prefix* records but the keys named; fail if none
+  local p="$1"; shift
+  awk -v p="$p" -v keep=" $* " '
+    index($1, p) == 1 && index(keep, " " $1 " ") == 0 { f = 1; next } { print }
+    END { exit !f }'
+}
+
 # True (and records the nudge) when this key has not been nudged inside the
 # window. Keys carry no spaces: "owner/repo#1".
 _steward_due() { # <key>
-  local key="$1" now last
-  now="$(date +%s)"
-  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
-  last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
-  [ $((now - last)) -ge "$_STEWARD_WINDOW" ] || return 1
-  { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
-    > "$_STEWARD_STATE.tmp" && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_due "$1" "$(date +%s)" "$_STEWARD_WINDOW"
 }
 
 # THE STEWARD SAYS A THING ONCE. A raise carries a condition key, so a repeat
@@ -493,46 +535,28 @@ _steward_orch_composer_empty() { # <pane>
 
 # CLAIM BEFORE RESTARTING. Two overlapping ticks (a timer tick beside a hand
 # run) could both read an old timestamp and both restart the same pane, so
-# the 30-minute check and its record happen under one lock. A tick that
-# cannot take the lock leaves the restart to the one that did.
+# the 30-minute check and its record are one locked step: the second tick
+# finds the first one's claim and leaves the restart to it.
 _steward_claim_restart() { # <key>
-  local key="$1"
-  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
-  (
-    if have flock; then flock -n 9 || exit 1; fi
-    local now last
-    now="$(date +%s)"
-    last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
-    [ $((now - last)) -ge 1800 ] || exit 1
-    { awk -v k="$key" '$1!=k' "$_STEWARD_STATE"; printf '%s %s\n' "$key" "$now"; } \
-      > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
-  ) 9>>"$_STEWARD_STATE.restart.lock"
+  _STEWARD_WINDOW=1800 _steward_due "$1"
 }
 
 # FIRST SEEN. A condition that must hold across ticks before the steward acts
 # records when it was first observed; _steward_forget drops it once it is gone.
 _steward_first_seen() { # <key> -> epoch first observed (recorded now if new)
   local first now
-  mkdir -p "${_STEWARD_STATE%/*}"; touch "$_STEWARD_STATE"
-  first="$(awk -v k="$1" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE")"
-  if [ "${first:-0}" -gt 0 ]; then printf '%s' "$first"; return 0; fi
   now="$(date +%s)"
-  { cat "$_STEWARD_STATE"; printf '%s %s\n' "$1" "$now"; } > "$_STEWARD_STATE.tmp.$$" \
-    && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
-  printf '%s' "$now"
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_note "$1" "$now" || true
+  first="$(awk -v k="$1" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE" 2>/dev/null || true)"
+  if [ "${first:-0}" -gt 0 ]; then printf '%s' "$first"; else printf '%s' "$now"; fi
 }
 _steward_forget() { # <key>
-  [ -f "$_STEWARD_STATE" ] && awk -v k="$1" '$1==k{f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
-  awk -v k="$1" '$1!=k' "$_STEWARD_STATE" > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_drop "$1" || true
 }
 # Drop every <prefix>* record but the keys named: a condition no row
 # reported this tick - the agent gone, its row unreadable - starts over.
 _steward_forget_unseen() { # <prefix> [key...]
-  local prefix="$1"; shift
-  [ -f "$_STEWARD_STATE" ] || return 0
-  awk -v p="$prefix" -v keep=" $* " 'index($1, p) == 1 && index(keep, " " $1 " ") == 0 {f=1} END{exit !f}' "$_STEWARD_STATE" || return 0
-  awk -v p="$prefix" -v keep=" $* " '!(index($1, p) == 1 && index(keep, " " $1 " ") == 0)' "$_STEWARD_STATE" \
-    > "$_STEWARD_STATE.tmp.$$" && mv "$_STEWARD_STATE.tmp.$$" "$_STEWARD_STATE"
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_drop_unseen "$@" || true
 }
 
 _steward_inbox_hooks() {
@@ -627,12 +651,17 @@ _steward_inbox_hooks() {
 
 # THE LEDGER LEARNS WHAT THE WORLD ALREADY DID. A PR merged through the web UI,
 # its checkout removed by hand, never runs `land` or `release`. Deciding that is
-# deterministic, so a tick does it: one `gh pr list` per repo per tick.
+# deterministic, so a tick does it: one `gh pr list` per repo per tick - but
+# only for a workspace whose ledger still has a row that is not over. A solo
+# workspace, or one whose every delegation has landed, been released or
+# abandoned, has nothing left to reconcile.
 # A reconcile that fails is ONE sweep failing: the stalled-worker sweep after
 # it is the one whose delay costs work, so this never takes the tick with it.
 _steward_reconcile() {
-  local ws bin="${CEL_STEWARD_FANOUT:-$_STEWARD_FANOUT}"
+  local ws wsdir bin="${CEL_STEWARD_FANOUT:-$_STEWARD_FANOUT}"
   for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    ledger_has_live_rows "$wsdir/.cel/delegations.json" || continue
     if ! "$bin" reconcile --workspace "$ws" 2>&1; then
       c_warn "$ws: reconcile failed - run 'cel-fanout reconcile --workspace $ws' by hand"
     fi
@@ -770,18 +799,35 @@ _steward_review_sweep() { # <agents-json>
         done < <(printf '%s' "$prsj" | jq -r '.[] | select(.isDraft | not) | [.number, .headRefName, .createdAt] | @tsv')
       fi
 
+      # A SOLO PRODUCT HAS NO WORKERS. Its own agent opened the PR and fixes it
+      # on the branch, so nothing below asks the delegation ledger or herdr who
+      # stands on that branch, and nothing tells it to find or restart one.
+      local solo=0
+      [ "$(ws_build_mode "$wsdir" "$prod")" != solo ] || solo=1
       local num branch review failing working
       while IFS=$'\t' read -r num branch review failing; do
         [ -n "$num" ] || continue
         failing="${failing:-0}"
         if [ "$review" != "APPROVED" ] && [ -n "${owner_prs["$repo#$num"]:-}" ]; then continue; fi
-        # a worker actively on the branch means the loop is moving - leave it
-        working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
-          | jq -r '[.[] | select(.agent_status == "working")] | length')"
         if [ "$review" = "APPROVED" ]; then
           _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-approved" \
             "steward: PR #$num on $repo is APPROVED - action it now (merge per policy, or surface for the human)."
-        elif [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
+          continue
+        fi
+        if [ "$solo" -eq 1 ]; then
+          if [ "$review" = "CHANGES_REQUESTED" ]; then
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-changes" \
+              "steward: PR #$num on $repo has changes requested at its current head - address them on $branch, push, and ask its reviewer to re-review (cel run reviewer --repo $repo --pr $num if none is running)."
+          elif [ "$failing" -gt 0 ]; then
+            _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-red" \
+              "steward: PR #$num on $repo has FAILING checks on $branch - a red gate is a finding: fix it on the branch and push."
+          fi
+          continue
+        fi
+        # a worker actively on the branch means the loop is moving - leave it
+        working="$(_steward_branch_agents "$agents_json" "$wsdir" "$repo" "$branch" \
+          | jq -r '[.[] | select(.agent_status == "working")] | length')"
+        if [ "$review" = "CHANGES_REQUESTED" ] && [ "$working" = "0" ]; then
           local sil; sil="$(_steward_branch_silence "$agents_json" "$wsdir" "$repo" "$branch")"
           if [ -n "$sil" ]; then
             _steward_nudge "$prod-orch" "$(ws_name "$wsdir")" "$slug#$num-blocked" \
@@ -865,7 +911,8 @@ _steward_solo_sweep() {
 # healthy worker between turns. The detection lives in lib/stall.sh as pure
 # functions so transport failures can be replayed in tests. This sweep walks
 # delegations still marked `running`, reads each pane's tail, and asks for
-# a verdict.
+# a verdict. A ledger whose every row is over has nobody to watch: it costs
+# one read, and any stall item raised while it had is taken down with it.
 _steward_stalled_workers() { # <agents-json>
   local agents_json="$1" ws wsdir led
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
@@ -873,6 +920,10 @@ _steward_stalled_workers() { # <agents-json>
     wsdir="$(registry_path "$ws")"; [ -d "$wsdir" ] || continue
     led="$wsdir/.cel/delegations.json"
     [ -f "$led" ] || continue
+    if ! ledger_has_live_rows "$led"; then
+      _steward_clear_stall_items "$ws"
+      continue
+    fi
     local row
     while IFS= read -r row; do
       [ -n "$row" ] || continue
@@ -982,6 +1033,16 @@ _steward_stalled_workers() { # <agents-json>
       fi
     done < <(jq -c '.[]' "$led" 2>/dev/null || true)
   done
+}
+
+# Every stall item the steward still has open for root in <ws>, resolved: the
+# rows they were raised about are over. One mailbox read.
+_steward_clear_stall_items() { # <ws>
+  local id
+  while IFS= read -r id; do
+    if [ -n "$id" ]; then _steward_clear_id "$1" "$id" "no delegation in $1 is running any more"; fi
+  done < <(cmd_inbox open --for root --workspace "$1" --json 2>/dev/null \
+    | jq -r 'select(.from == "steward" and ((.fp // "") | startswith("stall-"))) | .id' 2>/dev/null || true)
 }
 
 # Resolve ticket ownership independently of liveness: an absent orchestrator
@@ -1665,13 +1726,8 @@ _steward_box() {
   box_sweep 0 || true   # a failed docker delete is already warned; still count what was freed
   local freed=$(( ${BOX_FREED_DOCKER:-0} + ${BOX_FREED_CACHES:-0} + ${BOX_FREED_OURS:-0} ))
   local total=0
-  if [ -f "$_STEWARD_STATE" ]; then
-    total="$(awk '$1=="box-freed-bytes"{t=$2} END{print t+0}' "$_STEWARD_STATE")"
-  fi
-  total=$(( total + freed ))
-  { awk '$1!="box-freed-bytes"' "$_STEWARD_STATE" 2>/dev/null || true
-    printf 'box-freed-bytes %s\n' "$total"; } > "$_STEWARD_STATE.tmp" \
-    && mv "$_STEWARD_STATE.tmp" "$_STEWARD_STATE"
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_add box-freed-bytes "$freed" || true
+  total="$(awk '$1=="box-freed-bytes"{t=$2} END{printf "%.0f", t+0}' "$_STEWARD_STATE" 2>/dev/null || printf 0)"
   c_ok "box: $(box_human "$freed") freed this sweep, $(box_human "$total") since this state file began"
   return 0
 }
@@ -2202,10 +2258,7 @@ _steward_svc_read() { # <key> -> "<down-count> <restarted>"
 }
 
 _steward_svc_write() { # <key> <down-count> <restarted>
-  local f; f="$(_steward_svc_state)"
-  mkdir -p "$(dirname "$f")"; touch "$f"
-  { awk -v k="$1" '$1 != k' "$f"; printf '%s %s %s\n' "$1" "$2" "$3"; } \
-    > "$f.tmp" && mv "$f.tmp" "$f"
+  _steward_state_edit "$(_steward_svc_state)" _steward_state_set "$1" "$2" "$3"
 }
 
 _steward_services() {

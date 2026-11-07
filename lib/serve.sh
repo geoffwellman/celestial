@@ -411,23 +411,38 @@ serve_sweep() {
     c_warn "$msg"
   done
 }
+# ONCE A DAY PER PRODUCT, AND ONLY WHEN IT ARRIVED. The stamp file holds one
+# "<day> <ws> <product>" line per delivered message; a send that fails leaves
+# its product unstamped, so the next tick tries it again instead of the day
+# passing in silence. Lines from an earlier day are dropped.
 _serve_unledgered_report() {
-  local rows n state_file today ws wsdir product msg
+  local rows n state_file today ws wsdir product msg sent delivered="" failed="" tmp
   rows="$(serve_adopt_json 2>/dev/null || printf '[]')"
   n="$(printf '%s' "$rows" | jq 'length')"
   [ "$n" -gt 0 ] || return 0
   today="$(date -u +%F)"; state_file="$(_serve_state)/unledgered-reported"
   mkdir -p "$(_serve_state)" || return 0
-  [ "$(cat "$state_file" 2>/dev/null || true)" != "$today" ] || return 0
+  sent="$(awk -v d="$today" '$1 == d && NF == 3 { print $2, $3 }' "$state_file" 2>/dev/null || true)"
   msg="steward: $n unledgered preview/dev server(s), biggest first: $(printf '%s' "$rows" | jq -r '.[0:10][] | "\(.unit // ("pid:"+(.pid|tostring))) \(.memory_mb)MB \(.age_seconds)s \(.worktree)"' | paste -sd';' -). Review with 'cel serve adopt'; nothing unledgered was stopped."
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     for product in $(ws_product_names "$wsdir" 2>/dev/null); do
-      cmd_inbox send "$product-orch" "$msg" --from steward --workspace "$ws" --kind status --fp unledgered-servers >/dev/null 2>&1 || true
+      case $'\n'"$sent"$'\n' in *$'\n'"$ws $product"$'\n'*) continue ;; esac
+      if cmd_inbox send "$product-orch" "$msg" --from steward --workspace "$ws" --kind status --fp unledgered-servers >/dev/null 2>&1; then
+        delivered="$delivered$ws $product"$'\n'
+      else
+        failed="$failed $ws/$product-orch"
+      fi
     done
   done
-  printf '%s\n' "$today" > "$state_file"
+  [ -n "$delivered$failed" ] || return 0
+  if [ -n "$delivered" ]; then
+    tmp="$(mktemp "$state_file.XXXXXX")" || return 0
+    { [ -z "$sent" ] || printf '%s\n' "$sent"; printf '%s' "$delivered"; } | sed "s/^/$today /" > "$tmp" \
+      && mv -f "$tmp" "$state_file" || rm -f "$tmp"
+  fi
   c_warn "$msg"
+  [ -z "$failed" ] || c_warn "unledgered-server report not delivered to:$failed - retried next tick"
 }
 
 

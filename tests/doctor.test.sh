@@ -52,9 +52,11 @@ esac
 EOF
   chmod +x "$CEL_SERVE_SYSTEMCTL"
   local out; out="$(doctor_serve_line)"
-  assert_contains "$out" "preview servers: 1 ledgered, 1 unledgered"
-  assert_contains "$out" "pid:1234 70M"
-  assert_contains "$out" "demo 0M"
+  assert_contains "$out" "preview servers: 1 ledgered, 1 unledgered" || { rm -rf "$t"; return 1; }
+  assert_contains "$out" "cel serve list" || { rm -rf "$t"; return 1; }
+  # a count and a pointer, never the inventory itself
+  assert_eq "$(printf '%s\n' "$out" | grep -c .)" 1 || { rm -rf "$t"; return 1; }
+  case "$out" in *pid:1234*) echo "doctor listed an unledgered server: $out"; rm -rf "$t"; return 1 ;; esac
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
   rm -rf "$t"
 }
@@ -146,7 +148,34 @@ test_doctor_says_how_far_behind_a_checkout_is() {
   local out; out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)"
   assert_contains "$out" "3 commits behind"
   assert_contains "$out" "alpha/widget"
-  assert_contains "$out" "git -C $T/clone pull --ff-only"
+  # the remedy names the remote and branch it counted against
+  assert_contains "$out" "git -C $T/clone pull --ff-only origin main"
+  rm -rf "$T"
+}
+
+# The remedy it gives actually brings the checkout level with the default
+# branch, even when the branch tracks some other upstream.
+test_doctor_remedy_for_a_stale_default_branch_clears_the_finding() {
+  _doctor_repo_fixture 2
+  git -C "$T/clone" config branch.main.merge refs/heads/elsewhere
+  local out cmd; out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)"
+  cmd="${out#* - }"
+  eval "$cmd" >/dev/null 2>&1 || { echo "remedy failed: $cmd"; rm -rf "$T"; return 1; }
+  assert_eq "$(doctor_checkout_behind_line "$T/clone" alpha/widget)" ""
+  rm -rf "$T"
+}
+
+# A feature branch is behind the default branch by design, and pulling it
+# would not change that: no finding, and no fetch.
+test_doctor_says_nothing_about_a_checkout_on_a_feature_branch() {
+  _doctor_repo_fixture 3
+  git -C "$T/clone" checkout -q -b feature
+  local out
+  out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)" \
+    || { echo "the check itself failed on a feature branch"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$T"; return 1; }
+  git -C "$T/clone" checkout -q --detach
+  assert_eq "$(doctor_checkout_behind_line "$T/clone" alpha/widget)" ""
   rm -rf "$T"
 }
 
