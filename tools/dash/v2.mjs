@@ -574,6 +574,109 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     return { orchestrators, reviewers, prs };
   };
 
+  // ---- feature teams --------------------------------------------------------
+  // Each workspace's .cel/teams/<feature>/ exactly as `cel team` writes it:
+  // team.json (the roster), events.jsonl (what happened) and verdicts.json
+  // (the specialists' word on a head). Nothing else - no ledger, and no branch
+  // read off a checkout: a repo's candidate head is its latest
+  // candidate.updated event, and a member is live only when an agent of
+  // exactly its alias is on the roster. A team whose files do not read is a
+  // row that says so, never a team that silently is not there.
+  const TEAM_RESERVED_MS = () => (Number(process.env.CEL_TEAM_RESERVED_SECS) || 600) * 1000;
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const isStr = (v) => typeof v === 'string' && v !== '';
+  const readTeamJson = (f) => JSON.parse(readFileSync(f, 'utf8'));
+  // the steward's rules (lib/steward.sh _steward_team_read), word for word
+  const teamProblem = (t, feature, vs) => {
+    if (!isObj(t)) return 'team.json is not an object';
+    if (t.feature !== feature) return `team.json names feature ${JSON.stringify(t.feature ?? null)}, not its directory`;
+    if (!isStr(t.product)) return 'team.json has no product';
+    if (!Array.isArray(t.members)) return 'team.json has no members list';
+    if (t.members.some((m) => !isObj(m) || !isStr(m.alias) || typeof m.state !== 'string')) return 'a team.json member has no alias or state';
+    if (vs.some((v) => !isObj(v) || typeof v.repo !== 'string' || typeof v.head !== 'string')) return 'a verdicts.json entry has no repo or head';
+    return '';
+  };
+  const roleOf = (v) => `${v.role || '?'}${isStr(v.focus) ? `/${v.focus}` : ''}`;
+  const short = (h) => String(h || '').slice(0, 12);
+  const teamRow = (w, feature, dir, live, now) => {
+    const row = { ws: w.name, feature };
+    let t;
+    try { t = readTeamJson(join(dir, 'team.json')); } catch { return { ...row, error: 'team.json does not parse' }; }
+    let vs = [];
+    if (existsSync(join(dir, 'verdicts.json'))) {
+      let v;
+      try { v = readTeamJson(join(dir, 'verdicts.json')); } catch { v = null; }
+      vs = Array.isArray(v) ? v : isObj(v) ? Object.values(v) : null;
+      if (!vs) return { ...row, error: 'verdicts.json does not parse' };
+    }
+    const problem = teamProblem(t, feature, vs);
+    if (problem) return { ...row, error: problem };
+    const lead = isStr(t.lead) ? t.lead : `${t.product}-orch`;
+    const state = t.state || 'open';
+    let ev = [];
+    try { ev = readJsonl(join(dir, 'events.jsonl')).filter(isObj); } catch { ev = []; }
+    const cand = new Map(); const reservedAt = new Map();
+    for (const e of ev) {
+      const d = isObj(e.data) ? e.data : {};
+      if (e.type === 'candidate.updated' && typeof d.repo === 'string' && typeof d.head === 'string') cand.set(d.repo, { repo: d.repo, head: d.head, at: iso(e.ts) });
+      if (e.type === 'member.reserved' && isStr(d.alias)) reservedAt.set(d.alias, iso(e.ts));
+    }
+    const members = t.members.map((m) => ({ alias: m.alias, role: m.role || '?', focus: isStr(m.focus) ? m.focus : null,
+      repo: isStr(m.repo) ? m.repo : null, state: m.state, live: live.get(m.alias) || 'not running',
+      since: m.state === 'reserved' ? (reservedAt.get(m.alias) || iso(m.created)) : null }));
+    // each role/focus's latest word per repo; an older one it replaced is history
+    const latest = new Map();
+    for (const v of vs) {
+      const k = JSON.stringify([v.repo, v.role || '', v.focus || '']);
+      const p = latest.get(k);
+      if (!p || (Date.parse(v.at) || 0) >= (Date.parse(p.at) || 0)) latest.set(k, v);
+    }
+    const verdicts = [...latest.values()].map((v) => {
+      const c = cand.get(v.repo);
+      return { role: v.role || '?', focus: isStr(v.focus) ? v.focus : null, repo: v.repo, head: v.head, verdict: v.verdict || '?',
+        by: v.by || null, at: iso(v.at), fresh: !c ? 'no candidate' : c.head === v.head ? 'fresh' : 'stale' };
+    });
+    const candidates = [...cand.values()];
+    // WHO OWES NEXT, from these files alone: an unconfirmed launch is the
+    // lead's, a candidate nobody has judged is qa's (the lead's when the team
+    // has none), a finding at the candidate is the lead's to route, and a
+    // candidate every verdict passes is the lead's to land.
+    const owes = [];
+    if (state !== 'closed') {
+      for (const m of members.filter((x) => x.state === 'reserved')) {
+        const at = Date.parse(m.since || '');
+        if (Number.isNaN(at) || now - at >= TEAM_RESERVED_MS()) owes.push({ who: lead, what: `${m.alias} reserved ${Number.isNaN(at) ? 'at no recorded time' : `${Math.round((now - at) / 60000)}m ago`} - launch unconfirmed: look, then retire it or add it again` });
+        else owes.push({ who: m.alias, what: 'its acknowledgement (cel team ack)' });
+      }
+      const qa = members.filter((m) => m.role === 'qa' && m.state !== 'retired' && m.state !== 'done').map((m) => m.alias);
+      for (const c of candidates) {
+        const at = verdicts.filter((v) => v.repo === c.repo && v.fresh === 'fresh');
+        const bad = at.filter((v) => v.verdict === 'changes' || v.verdict === 'blocked');
+        if (bad.length) owes.push({ who: lead, what: `${c.repo}@${short(c.head)}: ${bad.map((v) => `${roleOf(v)} says ${v.verdict}`).join(', ')}` });
+        else if (!at.length) owes.push({ who: qa.length ? qa.join(', ') : lead, what: `a verdict on ${c.repo}@${short(c.head)}${qa.length ? '' : ' (no qa member)'}` });
+        else owes.push({ who: lead, what: `${c.repo}@${short(c.head)} passed - integrate and land it` });
+      }
+      if (!candidates.length) {
+        const b = members.filter((m) => m.role === 'builder' && (m.state === 'ready' || m.state === 'working')).map((m) => m.alias);
+        owes.push(b.length ? { who: b.join(', '), what: 'a contribution (task.ready) for the lead to make a candidate' } : { who: lead, what: 'members, or a candidate' });
+      }
+    }
+    return { ...row, product: t.product, lead, state, repos: Array.isArray(t.repos) ? t.repos : [], created: iso(t.created), members, candidates, verdicts, owes };
+  };
+  const teams = async (wss) => {
+    const live = new Map((await agents()).map((a) => [String(a.name || ''), a.agent_status || 'unknown']));
+    const now = Date.now();
+    const items = [];
+    for (const w of wss) {
+      const root = join(w.path, '.cel', 'teams');
+      let dirs = [];
+      try { dirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { continue; }
+      // a directory without a team.json is not a team (yet)
+      for (const feature of dirs) if (existsSync(join(root, feature, 'team.json'))) items.push(teamRow(w, feature, join(root, feature), live, now));
+    }
+    return { items };
+  };
+
   // ---- services: the box's own and each workspace's ---------------------
   // Each server is probed on the host IT binds - a dashboard's dash.host,
   // the pages server's CEL_PAGES_HOST - then on this box's own addresses:
@@ -1011,7 +1114,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // one feed's answer as { v, t }: `since` is per browser (its cookie and
   // ?at), so it is built fresh from the cached activity and stuck lists; every
   // other feed is cached whole per (feed, query)
-  const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'fleet', 'services']);
+  const FEED_NAMES = new Set(['since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'fleet', 'services', 'teams']);
   const answer = async (name, req, url, wss, peek = false) => {
     if (name === 'since') return { v: await since(req, url, wss), at: Date.now() };
     // The cache key is built only from the parameters the feed reads, each
@@ -1044,6 +1147,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       case 'heat': return feed(key, () => heat(url, wss), peek);
       case 'usage': return feed(key, () => usage(wss), peek);
       case 'fleet': return feed(key, () => fleet(wss), peek);
+      case 'teams': return feed(key, () => teams(wss), peek);
       default: return feed(key, () => services(wss), peek);
     }
   };
@@ -1052,7 +1156,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // at once and the live refresh updates it
   const PAGE_QUERY = { activity: 'limit=30', merges: 'days=14', load: 'hours=24', lanes: 'range=today' };
   const snapshot = async (req, url, wss) => {
-    const names = ['fleet', 'services', 'since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage'];
+    const names = ['fleet', 'services', 'since', 'activity', 'stuck', 'lanes', 'load', 'merges', 'cycle', 'heat', 'usage', 'teams'];
     const out = {};
     await Promise.all(names.map(async (n) => {
       const u = new URL(`http://localhost/api/v2/${n}?${PAGE_QUERY[n] || ''}`);

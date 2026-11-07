@@ -291,3 +291,27 @@ test_dash_v2page_room_opened_from_its_url_lists_its_decisions() {
   assert_eq "$(_vpj .decisions)" "2"
   _vp_down
 }
+
+# The Feature teams card draws a fixture team from the teams feed: who is on
+# it (role, state, live), the candidate head, each verdict and whether it is
+# for that candidate, and who owes next; a team whose files do not read says
+# so; the workspace filter applies.
+test_dash_v2page_feature_teams_card_renders_a_fixture_team() {
+  _vp_boot
+  local rc=0; _vp_run teams || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .title)" "Feature teams"
+  assert_eq "$(_vpj '[.teams[] | "\(.ws)/\(.feature)"] | join(",")')" "alpha/checkout-v2,bundle/gadget-api,bundle/broken"
+  assert_eq "$(_vpj '.teams[0].members | join(",")')" \
+    "widget-checkout-v2-builder|working|live (working),widget-checkout-v2-qa|reserved|not running,widget-checkout-v2-design|retired|not running"
+  assert_eq "$(_vpj '.teams[0].cands | join(",")')" "widget@222222222222"
+  assert_eq "$(_vpj '.teams[0].verdicts | join(",")')" \
+    "qa/browser pass widget@111111111111|stale,reviewer/security changes widget@222222222222|fresh"
+  assert_contains "$(_vpj '.teams[0].owes | join(",")')" "widget-orch widget-checkout-v2-qa reserved 45m ago - launch unconfirmed"
+  assert_contains "$(_vpj '.teams[0].owes | join(",")')" "widget-orch widget@222222222222: reviewer/security says changes"
+  assert_eq "$(_vpj '.teams[1].owes | join(",")')" "bundle-gadget-api-builder a contribution (task.ready) for the lead to make a candidate"
+  assert_contains "$(_vpj .teams[2].error)" "team.json does not parse"
+  assert_eq "$(_vpj '.bundle | join(",")')" "gadget-api,broken"
+  [ "$(_vpj .asked)" -ge 2 ] || { echo "the teams feed was not asked: $OUT"; return 1; }
+  if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T"/shots/teams-*.png "$CEL_DASH_SHOTS"/ 2>/dev/null || true; fi
+  _vp_down
+}

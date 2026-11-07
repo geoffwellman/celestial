@@ -29,7 +29,7 @@ var F={};              // /api/v2/<feed> by name
 var FAT={};            // when the server computed each F[name], ms
 var LAST=null;         // what decisions.js draws: S's decisions, filtered
 var WSF=recall('cel-v2-ws','all');
-var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage'];
+var FEEDS=['fleet','services','since','activity','stuck','lanes','load','merges','cycle','heat','usage','teams'];
 function inWs(w){return WSF==='all'||!w||w===WSF}
 function wsOf(x){return x&&(x.ws||x.workspace)||(S&&S.workspace)||''}
 // the 8 s refresh; the dash config's refreshMs is the server's own knob.
@@ -103,7 +103,7 @@ var W=[
  {id:'stuck',t:'Stuck - and why'},{id:'working',t:'Working now'},{id:'activity',t:'Activity'},{id:'prs',t:'Pull requests'},
  {id:'orchs',t:'Orchestrators'},{id:'merges',t:'Merged PRs in your workspaces · 14 days'},{id:'usage',t:'Usage',size:'full'},{id:'afk',t:'Away mode'},
  {id:'lanes',t:'Today by workspace',size:'full'},{id:'heat',t:'When work lands'},{id:'cycle',t:'Time to merge'},{id:'funnel',t:'PR flow'},
- {id:'load',t:'Box load · 24h'},{id:'box',t:'Box'},{id:'services',t:'Running services'}];
+ {id:'load',t:'Box load · 24h'},{id:'box',t:'Box'},{id:'services',t:'Running services'},{id:'teams',t:'Feature teams',size:'full'}];
 var LAYOUT_KEY='cel-v2-layout';
 var L=recall(LAYOUT_KEY,null)||{};
 L.order=(L.order||[]).filter(function(id){return W.some(function(w){return w.id===id})});
@@ -194,17 +194,45 @@ var BODY={
     return '<h4>Preview/dev servers</h4>'+(s.length?s.map(function(x){return '<div class=\"row\"><span class=\"t\">'+esc(x.name)+'</span><span class=\"sub\">'+esc(x.kind==='unledgered'?'unledgered':x.owner)+' · '+esc(x.memory_mb||0)+'M · '+esc(x.age_seconds||0)+'s'+(x.port?' · :'+esc(x.port):'')+'</span></div>'}).join(''):none('no preview servers'))})()},
  services:function(){var s=(((F.services||{}).items)||[]).filter(function(x){return x.ws==='box'||inWs(x.ws)});
   return s.map(function(x){var up=x.state==='up';return '<div class="row" data-ws="'+esc(x.ws)+'"><span class="dot '+(up?'ok':'bad')+'"></span><span class="sub mono" style="width:56px">'+(x.port?':'+esc(x.port):'')+'</span><span class="t">'+(x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.name)+'</a>':esc(x.name))+'</span><span class="sub">'+esc(x.state)+'</span>'+wsTag(x.ws)+'</div>'}).join('')||none('no services')},
+ teams:function(){var it=feedItems('teams');
+  return it.map(teamHtml).join('')||none('no feature teams')},
 };
 // what each card is drawn from; a card waits for, or reports, its sources
 var NEEDS={needs:['state'],since:['since'],stuck:['stuck'],activity:['activity'],merges:['merges'],usage:['usage'],lanes:['lanes'],
   heat:['heat'],cycle:['cycle'],load:['load'],box:['load'],working:['fleet'],prs:['fleet'],orchs:['fleet'],
-  services:['services'],funnel:['fleet','merges'],afk:[]};
+  services:['services'],funnel:['fleet','merges'],afk:[],teams:['teams']};
 function cardStatus(id){
   var src=NEEDS[id]||[];
   for(var i=0;i<src.length;i++){var n=src[i];if(ERR[n]!==undefined)return n+' unavailable ('+ERR[n]+') - retrying'}
   for(var j=0;j<src.length;j++){var m=src[j];if(m==='state'?!S:F[m]===undefined)return 'loading '+m+'…'}
   return '';
 }
+// ---- feature teams -----------------------------------------------------------
+// One block per team, everything from its own files (the teams feed): the
+// roster with each member's state and whether an agent of its alias is live,
+// the candidate head per repo, each specialist's latest verdict and whether it
+// is for that candidate, and who owes the next move. A team whose files do
+// not read is drawn as exactly that.
+var TSTATE={reserved:'warn',ready:'ok',working:'ok',done:'idle',retired:'idle'};
+function teamHtml(t){
+  var head='<span class="t"><b>'+esc(t.feature)+'</b>';
+  if(t.error)return '<div class="team" data-ws="'+esc(t.ws)+'" data-feature="'+esc(t.feature)+'"><div class="row"><span class="dot bad"></span>'+head+
+   ' <span class="sub tmerr">'+esc(t.error)+' - not readable, so not supervised</span></span>'+wsTag(t.ws)+'</div></div>';
+  var mem=(t.members||[]).map(function(m){var up=m.live!=='not running';
+   return '<div class="row tm" data-alias="'+esc(m.alias)+'"><span class="dot '+(TSTATE[m.state]||'idle')+'"></span><span class="t">'+esc(m.alias)+
+    ' <span class="sub">'+esc(m.role)+(m.focus?'/'+esc(m.focus):'')+(m.repo?' · '+esc(m.repo):'')+' · <b class="tmstate">'+esc(m.state)+'</b>'+(m.state==='reserved'&&m.since?' '+esc(ago(m.since)):'')+
+    ' · <span class="tmlive'+(up?' up':'')+'">'+(up?'live ('+esc(m.live)+')':'not running')+'</span></span></span></div>'}).join('');
+  var cand=(t.candidates||[]).map(function(c){return '<span class="tcand mono" data-repo="'+esc(c.repo)+'">'+esc(c.repo)+'@'+esc(String(c.head).slice(0,12))+'</span>'}).join(' ');
+  var ver=(t.verdicts||[]).map(function(v){
+   return '<div class="row tv" data-fresh="'+esc(v.fresh)+'"><span class="dot '+(v.fresh!=='fresh'?'idle':v.verdict==='pass'||v.verdict==='advisory'?'ok':'bad')+'"></span><span class="t">'+
+    esc(v.role)+(v.focus?'/'+esc(v.focus):'')+' <b>'+esc(v.verdict)+'</b> <span class="sub mono">'+esc(v.repo)+'@'+esc(String(v.head).slice(0,12))+'</span></span><span class="sub tvfresh">'+esc(v.fresh)+'</span></div>'}).join('');
+  var owes=(t.owes||[]).map(function(o){return '<div class="towe"><b>'+esc(o.who)+'</b> <span class="sub">'+esc(o.what)+'</span></div>'}).join('');
+  return '<div class="team" data-ws="'+esc(t.ws)+'" data-feature="'+esc(t.feature)+'"><div class="row"><span class="dot '+(t.state==='closed'?'idle':'ok')+'"></span>'+head+
+   ' <span class="sub">'+esc(t.product)+' · lead '+esc(t.lead)+' · '+esc(t.state)+'</span></span>'+wsTag(t.ws)+'</div>'+
+   '<div class="tsec"><h4>Members</h4>'+(mem||none('no members'))+'</div>'+
+   '<div class="tsec"><h4>Candidates</h4>'+(cand?'<div class="tcands">'+cand+'</div>':none('no candidate yet'))+'</div>'+
+   '<div class="tsec"><h4>Verdicts</h4>'+(ver||none('no verdicts'))+'</div>'+
+   (t.state==='closed'?'':'<div class="tsec towes"><h4>Owes next</h4>'+(owes||none('nobody'))+'</div>')+'</div>'}
 // ---- usage ------------------------------------------------------------------
 // One card: a summary strip, then each provider's
 // accounts with one bar per window (used now, a tick at the projected % at

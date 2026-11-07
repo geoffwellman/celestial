@@ -353,6 +353,26 @@ const main = async () => {
       out.hashAfter = await evaluate('location.hash');
     }
 
+    if (scenario === 'teams') {
+      // what the Feature teams card shows, team by team, then under the
+      // `bundle` filter
+      const read = `[].slice.call(document.querySelectorAll('#grid .w[data-id=teams] .team')).map(function(t){
+        var q=function(s){return [].slice.call(t.querySelectorAll(s))};
+        return {ws:t.dataset.ws,feature:t.dataset.feature,error:(t.querySelector('.tmerr')||{}).textContent||'',
+          members:q('.tm').map(function(m){return m.dataset.alias+'|'+m.querySelector('.tmstate').textContent+'|'+m.querySelector('.tmlive').textContent}),
+          cands:q('.tcand').map(function(c){return c.textContent}),
+          verdicts:q('.tv').map(function(v){return v.querySelector('.t').textContent+'|'+v.dataset.fresh}),
+          owes:q('.towe').map(function(o){return o.textContent})}})`;
+      await until(`document.querySelector('#grid .w[data-id=teams] .team')`, 5000);
+      out.title = await evaluate(`document.querySelector('#grid .w[data-id=teams] h3 .ttl').textContent`);
+      out.teams = await evaluate(read);
+      await evaluate(`(function(){var s=document.getElementById('wsf');s.value='bundle';s.dispatchEvent(new Event('change',{bubbles:true}));return 1})()`);
+      await sleep(1500);
+      out.bundle = (await evaluate(read)).map((t) => t.feature);
+      out.asked = sent.filter((s) => s.path === '/api/v2/teams').length;
+      await shot('teams-1400.png', 1400);
+    }
+
     if (scenario === 'shots') {
       await shot('v2-1400.png', 1400);
       await shot('v2-390.png', 390);

@@ -1,0 +1,19 @@
+{"items":[
+ {"ws":"alpha","feature":"checkout-v2","product":"widget","lead":"widget-orch","state":"open","repos":["widget"],"created":"2026-11-08T09:00:00.000Z",
+  "members":[
+   {"alias":"widget-checkout-v2-builder","role":"builder","focus":"frontend","repo":"widget","state":"working","live":"working","since":null},
+   {"alias":"widget-checkout-v2-qa","role":"qa","focus":"browser","repo":null,"state":"reserved","live":"not running","since":"2026-11-08T09:30:00.000Z"},
+   {"alias":"widget-checkout-v2-design","role":"design","focus":"ux","repo":null,"state":"retired","live":"not running","since":null}],
+  "candidates":[{"repo":"widget","head":"2222222222222222222222222222222222222222","at":"2026-11-08T10:00:00.000Z"}],
+  "verdicts":[
+   {"role":"qa","focus":"browser","repo":"widget","head":"1111111111111111111111111111111111111111","verdict":"pass","by":"widget-checkout-v2-qa","at":"2026-11-08T09:40:00.000Z","fresh":"stale"},
+   {"role":"reviewer","focus":"security","repo":"widget","head":"2222222222222222222222222222222222222222","verdict":"changes","by":"widget-pr-7-review","at":"2026-11-08T10:05:00.000Z","fresh":"fresh"}],
+  "owes":[
+   {"who":"widget-orch","what":"widget-checkout-v2-qa reserved 45m ago - launch unconfirmed: look, then retire it or add it again"},
+   {"who":"widget-orch","what":"widget@222222222222: reviewer/security says changes"}]},
+ {"ws":"bundle","feature":"gadget-api","product":"bundle","lead":"bundle-orch","state":"open","repos":["gadget"],"created":"2026-11-08T08:00:00.000Z",
+  "members":[{"alias":"bundle-gadget-api-builder","role":"builder","focus":"backend","repo":"gadget","state":"ready","live":"idle","since":null}],
+  "candidates":[],"verdicts":[],
+  "owes":[{"who":"bundle-gadget-api-builder","what":"a contribution (task.ready) for the lead to make a candidate"}]},
+ {"ws":"bundle","feature":"broken","error":"team.json does not parse"}
+]}

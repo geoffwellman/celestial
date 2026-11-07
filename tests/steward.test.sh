@@ -2418,3 +2418,208 @@ test_steward_unledgered_report_retries_only_the_product_it_failed_to_reach() {
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
   rm -rf "$T"
 }
+
+# --- a solo PR sent back: the recorded `changes` verdict -------------------------
+# `cel solo review ... changes` lands in .cel/solo-reviews.json and never on the
+# forge, so only this sweep can see it. The heads are the forge layer's (the gh
+# stub is forge.sh's `gh`), never a branch.
+SC_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SC_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+_solo_changes_fixture() {
+  source "$CEL_ROOT/lib/solo.sh"
+  T="$(mktemp -d)"
+  cp "$CEL_ROOT/tests/fixtures/ws-products/workspace.yaml" "$T/"
+  mkdir -p "$T/repos/widget" "$T/repos/gadget" "$T/repos/lone" "$T/.cel"
+  export CEL_REGISTRY="$T/registry.yaml"; registry_add demo "$T" ""
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  : > "$T/mail"; : > "$T/gh.log"
+  cmd_inbox() { printf '%s\n' "$*" >> "$T/mail"; }
+  solo_ready_prs() { :; }   # the approved half: tests/solo-visibility.test.sh
+  _sc_head "$SC_A"
+  cat > "$T/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$1 \$2" in
+  "pr list") case "\$*" in *someone/widget*) cat "$T/list.json";; *) echo '[]';; esac;;
+  "pr view") if [ -f "$T/reviews.json" ]; then cat "$T/reviews.json"; else echo '{"reviewDecision":"","reviews":[]}'; fi;;
+  *) echo '{}';;
+esac
+EOF
+  chmod +x "$T/gh"; export GH="$T/gh"
+}
+_sc_head() { # <head>: widget#7 is open at <head>
+  jq -nc --arg h "$1" '[{number: 7, state: "OPEN", headRefOid: $h, headRefName: "AH-1-thing", baseRefName: "main",
+    author: {login: "me"}, isDraft: false, mergeable: "MERGEABLE"}]' > "$T/list.json"
+}
+_sc_verdict() { # <verdict> <head>
+  jq -nc --arg v "$1" --arg h "$2" '{"widget#7": {verdict: $v, by: "widget-pr-7-review", note: "the empty cart crashes", head: $h, at: "2026-11-08T10:00:00Z"}}' \
+    > "$T/.cel/solo-reviews.json"
+}
+
+test_steward_nudges_a_solo_changes_verdict_once_per_head_and_rearms_on_a_new_head() {
+  _solo_changes_fixture
+  _sc_verdict changes "$SC_A"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 1
+  assert_contains "$(cat "$T/mail")" "send bundle-orch"
+  assert_contains "$(cat "$T/mail")" "widget#7 has a recorded \`changes\` verdict from widget-pr-7-review at its current head ${SC_A:0:12}"
+  assert_contains "$(cat "$T/mail")" "the empty cart crashes"
+  # the heads came through the forge layer: its list of this account's open PRs
+  assert_contains "$(cat "$T/gh.log")" "pr list --repo someone/widget --state open --author @me"
+  # once per head, however long it sits (five days)
+  sed -i "s/^\(solo-changes-[^ ]*\) [0-9]*\$/\1 $(( $(date +%s) - 432000 ))/" "$T/state"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 1
+  # a push: the verdict no longer covers the head - nothing until it is re-reviewed
+  _sc_head "$SC_B"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 1
+  # changes again at the new head: a new fact, said once
+  _sc_verdict changes "$SC_B"
+  _steward_solo_sweep >/dev/null
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 2
+  assert_contains "$(sed -n 2p "$T/mail")" "${SC_B:0:12}"
+  # approved at the head: nothing more to say about changes
+  _sc_verdict approved "$SC_B"
+  rm -f "$T/state"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 2
+  rm -rf "$T"
+}
+
+# A changes request GitHub already carries at that head is mailed by the review
+# sweep's reviewDecision nudge; the recorded verdict is the same finding and is
+# not said a second time. A request on an older head does not count.
+test_steward_solo_changes_verdict_is_not_doubled_with_the_github_change_request() {
+  _solo_changes_fixture
+  _sc_verdict changes "$SC_A"
+  jq -nc --arg h "$SC_A" '{reviewDecision: "CHANGES_REQUESTED", reviews: [{author: {login: "rev"}, state: "CHANGES_REQUESTED",
+    commit: {oid: $h}, submittedAt: "2026-11-08T09:00:00Z"}]}' > "$T/reviews.json"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail" || true)" 0
+  jq -nc --arg h "$SC_B" '{reviewDecision: "CHANGES_REQUESTED", reviews: [{author: {login: "rev"}, state: "CHANGES_REQUESTED",
+    commit: {oid: $h}, submittedAt: "2026-11-08T09:00:00Z"}]}' > "$T/reviews.json"
+  _steward_solo_sweep >/dev/null
+  assert_eq "$(grep -c . "$T/mail")" 1
+  rm -rf "$T"
+}
+
+# --- feature teams ---------------------------------------------------------------
+# Read from the team's own files only (T2's .cel/teams/<feature>/ format). The
+# lead hears about a reservation nobody confirmed and a verdict a newer
+# candidate outdated - once each - and nothing is ever retired.
+TM_H1=1111111111111111111111111111111111111111
+TM_H2=2222222222222222222222222222222222222222
+TM_H3=3333333333333333333333333333333333333333
+_team_fixture() {
+  T="$(mktemp -d)"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_INBOX_ME=steward
+  mkdir -p "$T/alpha/.cel/teams" "$CEL_INBOX_DIR"
+  printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
+  printf 'name: alpha\nrepos: [{name: widget}]\n' > "$T/alpha/workspace.yaml"
+  CEL_STEWARD_STATE="$T/state"; _STEWARD_STATE="$T/state"
+}
+_tm_iso() { date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
+_tm_dir() { printf '%s/alpha/.cel/teams/%s' "$T" "$1"; }
+_tm_member() { # <alias> <role> <state> <created-secs-ago>
+  jq -nc --arg a "$1" --arg r "$2" --arg s "$3" --arg c "$(_tm_iso "$4")" \
+    '{alias: $a, role: $r, focus: null, repo: "widget", branch: null, worktree: null, base_sha: null, owns: [], state: $s, model: null, created: $c}'
+}
+_tm_team() { # <feature> <state> <member-json>...
+  local f="$1" st="$2"; shift 2
+  mkdir -p "$(_tm_dir "$f")"
+  printf '%s\n' "$@" | jq -s --arg f "$f" --arg s "$st" --arg c "$(_tm_iso 7200)" \
+    '{feature: $f, product: "bundle", workspace: "alpha", lead: "bundle-orch", repos: ["widget"], created: $c, state: $s, members: .}' \
+    > "$(_tm_dir "$f")/team.json"
+}
+_tm_event() { # <feature> <type> <data-json> <secs-ago>
+  jq -nc --arg ts "$(_tm_iso "$4")" --arg t "$2" --argjson d "$3" '{ts: $ts, by: "bundle-orch", type: $t, data: $d}' \
+    >> "$(_tm_dir "$1")/events.jsonl"
+}
+_tm_lead_mail() { jq -r 'select(.to == "bundle-orch" and .from == "steward") | .message' "$CEL_INBOX_DIR/alpha.jsonl" 2>/dev/null || true; }
+
+test_steward_team_nudges_the_lead_once_about_a_member_reserved_over_ten_minutes() {
+  _team_fixture
+  _tm_team checkout open \
+    "$(_tm_member bundle-checkout-builder builder reserved 900)" \
+    "$(_tm_member bundle-checkout-qa qa reserved 1500)" \
+    "$(_tm_member bundle-checkout-design design ready 3600)"
+  _tm_event checkout member.reserved '{"alias":"bundle-checkout-builder","role":"builder"}' 900
+  # reserved 25 minutes ago, but reserved AGAIN two minutes ago: that is the reservation
+  _tm_event checkout member.reserved '{"alias":"bundle-checkout-qa","role":"qa"}' 1500
+  _tm_event checkout member.reserved '{"alias":"bundle-checkout-qa","role":"qa"}' 120
+  # a closed team is history: its stale reservation says nothing
+  _tm_team shipped closed "$(_tm_member bundle-shipped-builder builder reserved 9000)"
+  local before; before="$(cat "$(_tm_dir checkout)/team.json")"
+  _steward_team_sweep >/dev/null
+  _steward_team_sweep >/dev/null
+  local mail; mail="$(_tm_lead_mail)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'reserved' || true)" 1
+  assert_contains "$mail" "team checkout: member bundle-checkout-builder (builder) has been reserved for 15m"
+  assert_contains "$mail" "cel team retire checkout bundle-checkout-builder"
+  case "$mail" in *bundle-checkout-qa*|*bundle-shipped*|*design*) echo "nudged about a member that is fine: $mail"; return 1;; esac
+  # it retires nothing: the team's files are exactly as they were
+  assert_eq "$(cat "$(_tm_dir checkout)/team.json")" "$before"
+  # a fresh reservation of the same member is a new fact once it, too, is overdue
+  _tm_event checkout member.reserved '{"alias":"bundle-checkout-builder","role":"builder"}' 660
+  _steward_team_sweep >/dev/null
+  assert_eq "$(_tm_lead_mail | grep -c 'bundle-checkout-builder (builder) has been reserved for 11m' || true)" 1
+  rm -rf "$T"
+}
+
+test_steward_team_nudges_the_lead_once_per_candidate_about_a_stale_verdict() {
+  _team_fixture
+  _tm_team checkout open "$(_tm_member bundle-checkout-qa qa working 3600)"
+  _tm_event checkout candidate.updated "{\"repo\":\"widget\",\"head\":\"$TM_H1\"}" 3000
+  _tm_event checkout candidate.updated "{\"repo\":\"widget\",\"head\":\"$TM_H2\"}" 100
+  # qa judged H1 only; the reviewer judged H1, then H2 (its latest covers the candidate)
+  jq -n --arg h1 "$TM_H1" --arg h2 "$TM_H2" --arg a "$(_tm_iso 2000)" --arg b "$(_tm_iso 50)" '[
+    {role: "qa", focus: "browser", repo: "widget", head: $h1, verdict: "pass", by: "bundle-checkout-qa", at: $a, evidence: []},
+    {role: "reviewer", focus: "security", repo: "widget", head: $h1, verdict: "changes", by: "widget-pr-7-review", at: $a, evidence: []},
+    {role: "reviewer", focus: "security", repo: "widget", head: $h2, verdict: "pass", by: "widget-pr-7-review", at: $b, evidence: []},
+    {role: "qa", focus: "browser", repo: "gadget", head: $h1, verdict: "pass", by: "bundle-checkout-qa", at: $a, evidence: []}]' \
+    > "$(_tm_dir checkout)/verdicts.json"
+  _steward_team_sweep >/dev/null
+  _steward_team_sweep >/dev/null
+  local mail; mail="$(_tm_lead_mail)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'candidate is now' || true)" 1
+  assert_contains "$mail" "team checkout: widget's candidate is now ${TM_H2:0:12}, but these verdicts are for older heads: qa/browser pass at ${TM_H1:0:12} - "
+  case "$mail" in *reviewer/security*|*gadget*) echo "a verdict at the candidate, or a repo with no candidate, was called stale: $mail"; return 1;; esac
+  # the next candidate re-arms it, and now both verdicts are behind
+  _tm_event checkout candidate.updated "{\"repo\":\"widget\",\"head\":\"$TM_H3\"}" 10
+  _steward_team_sweep >/dev/null
+  mail="$(_tm_lead_mail)"
+  assert_eq "$(printf '%s\n' "$mail" | grep -c 'candidate is now' || true)" 2
+  assert_contains "$mail" "candidate is now ${TM_H3:0:12}, but these verdicts are for older heads: qa/browser pass at ${TM_H1:0:12}, reviewer/security pass at ${TM_H2:0:12}"
+  rm -rf "$T"
+}
+
+# A team file the steward cannot read is reported to root - not skipped as if
+# the team were healthy - once per change, and taken down when it reads again.
+# One broken team does not stop the sweep over the others.
+test_steward_team_reports_a_malformed_team_json_and_clears_it_when_fixed() {
+  _team_fixture
+  mkdir -p "$(_tm_dir broken)"; printf '{"feature": "broken", "members": [' > "$(_tm_dir broken)/team.json"
+  _tm_team checkout open "$(_tm_member bundle-checkout-builder builder reserved 900)"
+  local out; out="$(_steward_team_sweep)"
+  assert_contains "$out" "team alpha/broken: team.json does not parse"
+  _steward_team_sweep >/dev/null
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  assert_eq "$(printf '%s\n' "$open" | grep -c 'team broken' || true)" 1
+  assert_contains "$open" "team broken in alpha: team.json does not parse"
+  assert_contains "$(_tm_lead_mail)" "bundle-checkout-builder (builder) has been reserved"
+  # the right shape, wrong content is still not a team the steward can read
+  printf '{"feature":"broken","product":"bundle","members":[{"role":"builder","state":"reserved"}]}\n' > "$(_tm_dir broken)/team.json"
+  _steward_team_sweep >/dev/null
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "a team.json member has no alias or state"
+  _tm_team broken open "$(_tm_member bundle-broken-qa qa ready 60)"
+  printf 'not json' > "$(_tm_dir broken)/verdicts.json"
+  _steward_team_sweep >/dev/null
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "verdicts.json does not parse"
+  rm -f "$(_tm_dir broken)/verdicts.json"
+  _steward_team_sweep >/dev/null
+  assert_eq "$(cmd_inbox open --for root --workspace alpha | grep -c 'team broken' || true)" 0
+  assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared: team broken in alpha reads cleanly again"
+  rm -rf "$T"
+}

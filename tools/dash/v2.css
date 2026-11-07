@@ -180,3 +180,9 @@ details.ev.err summary{color:var(--bad)}details.ev .body{white-space:pre-wrap;pa
 #room #needsyou>h2,#room #needsyou .nychips,#room #needsyou .nygroup>summary{display:none}
 .ev .md{white-space:normal}.ev .md ul,.ev .md ol{margin:4px 0;padding-left:20px}.ev .md code{background:#0b0f15;border-radius:4px;padding:0 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .ev .md pre{white-space:pre-wrap;background:#0b0f15;border-radius:6px;padding:6px 8px;margin:4px 0}.ev .md a{color:var(--blue)}
+/* Feature teams: one block per team, its sections side by side when wide */
+.team{border-top:1px solid var(--line);padding:6px 0 10px}.team:first-child{border-top:0}
+.team .tsec{margin:4px 0 0 16px}.team h4{margin:6px 0 2px;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.5px}
+.team .row{padding:3px 0}.tcands{display:flex;flex-wrap:wrap;gap:6px}.tcand{font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:0 6px}
+.tmlive{color:var(--faint)}.tmlive.up{color:var(--ok)}.tv[data-fresh=stale] .tvfresh{color:var(--warn)}.tv[data-fresh=fresh] .tvfresh{color:var(--ok)}
+.towe{padding:2px 0}.towe b{color:var(--gold)}.tmerr{color:var(--bad)}
