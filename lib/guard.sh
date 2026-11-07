@@ -137,9 +137,9 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
 # whitespace is collapsed, and from the front of each piece go: env
 # assignments, wrappers (bash/sh -c, env, command, exec, nohup, time, xargs,
-# timeout N), a path in front of cel/cel-fanout/gh/herdr, and the global
-# options between a tool and its verb (`-C`/`--workspace` for cel, `-R`/`--repo`
-# for gh). The rules then match the START of a piece only.
+# timeout N), a path in front of cel/cel-fanout/gh/herdr/tea/curl, and the
+# global options between a tool and its verb (`-C`/`--workspace` for cel,
+# `-R`/`--repo` for gh). The rules then match the START of a piece only.
 #
 # A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
 # command (`c=cel-fanout; $c land`) or a script file still runs. What this
@@ -152,7 +152,7 @@ _guard_segments() { # <command> -> one normalised command per line
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
         s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
         s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
-    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr)( |$)#\1\2#' \
+    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr|tea|curl)( |$)#\1\2#' \
     | sed -E ':b
         s#^(cel-fanout|cel) (-C [^ ]+|--workspace[= ][^ ]+)( |$)#\1\3#; tb
         s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
@@ -170,6 +170,102 @@ _guard_starts() { # <command> <ERE...> -> 0 when one does
   return 1
 }
 
+# A FORGE CHANGED BY HAND: curl writing to a Forgejo (/api/v1/) or GitHub
+# (api.github.com) API, `tea api` with anything but a plain GET, or one of
+# tea's write verbs. `cel forge` and the land doors are the sanctioned paths;
+# these are the same writes with every check skipped.
+_guard_forge_raw_write() { # <command> -> 0 when a piece writes to a forge by hand
+  local seg
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    case "$seg" in
+      curl|curl\ *) _guard_curl_writes "$seg" && return 0 ;;
+      tea\ *) _guard_tea_writes "$seg" && return 0 ;;
+    esac
+  done < <(_guard_segments "$1")
+  return 1
+}
+
+# curl at a forge API that writes: a request body in any spelling (-d@x, -dX,
+# --data*, --json, -F/--form*, -T/--upload-file), a method other than GET or
+# HEAD in any spelling (-X M, -XM, -sXM, --request[=]M), or options read from
+# a file (-K/--config), which could carry either. Short options are walked
+# letter by letter: one that takes a value ends its group (`-oFILE`).
+_guard_curl_writes() { # <segment>
+  local seg="$1" w c i j n method="" write=0
+  [[ "$seg" == */api/v1/* || "$seg" == *api.github.com* ]] || return 1
+  local -a t; read -r -a t <<<"$seg"; n=${#t[@]}
+  for ((i = 1; i < n; i++)); do
+    w="${t[i]}"
+    case "$w" in
+      --request=*) method="${w#--request=}" ;;
+      --request) method="${t[i+1]:-}" ;;
+      --data|--data[=-]*|--json|--json=*|--form|--form[=-]*|--upload-file|--upload-file=*|--config|--config=*) write=1 ;;
+      --*) ;;
+      -?*)
+        for ((j = 1; j < ${#w}; j++)); do
+          c="${w:j:1}"
+          case "$c" in
+            d|F|T|K) write=1; break ;;
+            X) method="${w:j+1}"; [ -n "$method" ] || method="${t[i+1]:-}"; break ;;
+            [HouAebcxwrmEyYzCDPQtU]) break ;;
+          esac
+        done ;;
+    esac
+  done
+  [ "$write" = 0 ] || return 0
+  case "${method^^}" in ""|GET|HEAD) return 1 ;; esac
+  return 0
+}
+
+# tea: `tea api` unless it is a plain GET with no body, and the write verbs
+# of pulls, releases, repos and branches - read past tea's own options (and
+# the values of the ones that take one) to find the verb.
+_guard_tea_writes() { # <segment>
+  local -a t words=(); read -r -a t <<<"$1"
+  local i n=${#t[@]} w
+  for ((i = 1; i < n; i++)); do
+    w="${t[i]}"
+    case "$w" in
+      --repo|-r|--login|-l|--remote|-R|--output|-o) i=$((i + 1)) ;;
+      -*) ;;
+      *) words+=("$w") ;;
+    esac
+  done
+  case "${words[0]:-}" in
+    api)
+      local method=""
+      for ((i = 1; i < n; i++)); do
+        w="${t[i]}"
+        case "$w" in
+          -X|--method) method="${t[i+1]:-}" ;;
+          --method=*) method="${w#--method=}" ;;
+          -X?*) method="${w#-X}" ;;
+          -f|-F|-d|--field|--field=*|--raw-field|--raw-field=*|--data|--data=*|--input|--input=*|-f?*|-F?*|-d?*) return 0 ;;
+        esac
+      done
+      case "${method^^}" in ""|GET) return 1 ;; esac
+      return 0 ;;
+    pr|pulls|pull)
+      case "${words[1]:-}" in merge|m|close|create|c|reopen|open|edit|e|approve|lgtm|a|reject|review) return 0 ;; esac ;;
+    release|releases|r)
+      case "${words[1]:-}" in create|c|delete|rm|edit|e) return 0 ;; esac ;;
+    repo|repos)
+      case "${words[1]:-}" in create|fork|delete|migrate|edit) return 0 ;; esac ;;
+    branch|branches|b)
+      case "${words[1]:-}" in protect|P|unprotect|U) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# THE FORGE TOKEN IS NOBODY'S TO READ: ~/.config/cel/forge holds the API key
+# lib/forge.sh sends to Forgejo. Any command naming that directory is refused
+# for every role - reading, copying, listing, rewriting alike. A tripwire like
+# the rest: a command that reaches it without naming it still runs.
+_guard_names_forge_token() { # <command-or-path>
+  [[ "$1" =~ cel/forge([^A-Za-z0-9_.-]|$) ]]
+}
+_GUARD_TOKEN_DENY='deny the forge API token (~/.config/cel/forge) is read by `cel forge` and the land doors only - no agent reads, copies or writes it'
+
 # A WORKER MAKES ONE DELIVERABLE AND REPORTS. A worker that lands its own PR
 # holds the ledger lock for the whole gate and merges without its
 # orchestrator. This is a SHORT deny list, not an allowlist: a worker's job is
@@ -185,6 +281,12 @@ _guard_worker() { # <command> -> allow | deny <reason>
   fi
   if _guard_starts "$1" 'cel here'; then
     printf 'deny cel here is the owner'"'"'s in-pane commands for core and product agents, not a worker'"'"'s'
+    return 0
+  fi
+  # A worker opens and updates PRs with gh or `cel forge`, as before; a
+  # forge changed by hand (curl at its API, tea) skips every check those make.
+  if _guard_forge_raw_write "$1"; then
+    printf 'deny a worker changes a forge through gh or `cel forge` (pr create), never curl at its API or tea'
     return 0
   fi
   printf allow
@@ -211,8 +313,14 @@ _guard_solo() { # <command> -> allow | deny <reason>
     printf 'deny a solo agent does not review its own PR - its reviewer records the verdict'
     return 0
   fi
-  if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge'; then
+  if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge' 'tea (pr|pulls|pull) (merge|m)' 'curl .*/pulls/[0-9]+/merge[^ ]*'; then
     printf 'deny a solo agent merges through `cel solo land <repo>#<pr>`, which checks policy, review of the exact head and CI before it merges'
+    return 0
+  fi
+  # Nor does it change its forge by hand at all - close, delete, branch
+  # protection, merge: `cel forge` opens PRs and `cel solo land` merges them.
+  if _guard_forge_raw_write "$1"; then
+    printf 'deny a solo agent changes its forge only through `cel forge` and `cel solo land`, never curl at its API or tea'
     return 0
   fi
   printf allow
@@ -249,6 +357,8 @@ _guard_core() { # <command> -> deny <reason>, or nothing
 
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
+  # Every role, `other` included (a reviewer stands outside any workspace).
+  if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
   if [ "$role" = core ]; then
     local cd; cd="$(_guard_core "$cmd")"
     [ -z "$cd" ] || { printf '%s' "$cd"; return 0; }
@@ -259,8 +369,20 @@ guard_classify() { # <role> <command>
   case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in other) printf allow; return 0;; esac
 
+  # A forge changed by hand (curl at its API, tea): checked before the
+  # sanctioned paths below, so `cel ...; curl -XPOST ...` is not waved through
+  # on the strength of its first half.
+  if _guard_forge_raw_write "$cmd"; then
+    printf 'deny orchestrators do not change forge state directly - merges go through `cel-fanout land <id>` / `cel solo land`; workers open and update PRs'
+    return 0
+  fi
   # The sanctioned write paths. These are the mechanism; refusing them would
-  # refuse the orchestrator's actual job.
+  # refuse the orchestrator's actual job. Opening a PR is not among them: a
+  # worker (or a solo agent) opens PRs, an orchestrator reads them.
+  if _guard_starts "$cmd" 'cel forge pr create'; then
+    printf 'deny workers open pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
+    return 0
+  fi
   case "$cmd" in
     cel-fanout\ *|*\ cel-fanout\ *|*/cel-fanout\ *) printf allow; return 0;;
     cel-linear\ *|*\ cel-linear\ *|*/cel-linear\ *) printf allow; return 0;;
@@ -343,9 +465,10 @@ guard_classify() { # <role> <command>
 # For the native edit tools (Edit/Write/MultiEdit/NotebookEdit), which never
 # pass through a shell: a path under any workspace's repos/ is a repository
 # write. Everything else - specs and notes under <ws>/.cel/, the workspace
-# file, scratch - is the orchestrator's to write.
+# file, scratch - is the orchestrator's to write. The forge token is nobody's.
 guard_classify_path() { # <role> <file_path>
   local role="$1" path="$2"
+  if _guard_names_forge_token "$path"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
   # Core writes its own notes and nothing else: it has no workspace, so every
   # path outside its directory belongs to someone whose job it is not.
   if [ "$role" = core ]; then
@@ -359,5 +482,12 @@ guard_classify_path() { # <role> <file_path>
   case "$path" in
     */repos/*) printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'; return 0;;
   esac
+  printf allow
+}
+
+# For the native read tools (Read, read): every role reads freely - except the
+# forge token.
+guard_classify_read() { # <role> <file_path>
+  if _guard_names_forge_token "$2"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
   printf allow
 }

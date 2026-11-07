@@ -15,6 +15,10 @@
 # head. Protected CI on the exact head is the preferred evidence; when the base
 # branch has no required checks, the repo gate runs locally in a clean
 # checkout at exactly that head instead (_solo_local_gate).
+#
+# Both speak to the PR's forge through lib/forge.sh, so a repo on GitHub and
+# a repo on Forgejo land the same way; the verdict itself lives here, in
+# Celestial's own file, whichever forge serves the repo.
 [ -n "${_CEL_SOLO:-}" ] && return 0
 _CEL_SOLO=1
 # shellcheck source=lib/mode.sh
@@ -25,6 +29,8 @@ _CEL_SOLO=1
 . "${BASH_SOURCE[0]%/*}/afk.sh"
 # shellcheck source=lib/guard.sh
 . "${BASH_SOURCE[0]%/*}/guard.sh"  # guard_role_of: who is asking to land
+# shellcheck source=lib/forge.sh
+. "${BASH_SOURCE[0]%/*}/forge.sh"  # forge_*: the PR, its checks, reviews and merge
 
 # One verdict per PR, keyed `<repo>#<n>`, beside the workspace's other state.
 _solo_reviews() { printf '%s' "$1/.cel/solo-reviews.json"; }
@@ -60,35 +66,35 @@ solo_review_get() { # <wsdir> <repo> <pr> -> the verdict object, or nothing
 
 # A solo product's PRs that `cel solo land` would merge right now - by the
 # same rules, never looser, or the steward would nag about a PR land refuses:
-# merge: self, the workspace account ready, the PR opened by that account,
-# open, not a draft, not conflicting, every check concluded and none red,
-# approved at its exact current head (GitHub's review or the recorded
-# verdict), and land_ci_gate passing (every protected check green on that
-# head). One `<repo><TAB><pr><TAB><head>` line each. The steward nudges the
-# product's agent with these; it never lands them itself. A gh failure
-# yields nothing - silence, never a guess.
+# merge: self, the PR opened by this workspace's account on its forge, open,
+# not a draft, not conflicting, every check concluded and none red, approved
+# at its exact current head (the forge's review decision or the recorded
+# verdict), and land_ci_gate passing (every required check green on that
+# head). GitHub and Forgejo repos alike, through lib/forge.sh. One
+# `<repo><TAB><pr><TAB><head>` line each. The steward nudges the product's
+# agent with these; it never lands them itself. A forge that cannot be read
+# yields nothing for that repo - silence, never a guess.
 solo_ready_prs() { # <wsdir> <product>
-  local wsdir="$1" product="$2" repo slug rows pr
+  local wsdir="$1" product="$2" repo prs pr num head v checks
   [ "$(ws_policy "$wsdir" merge)" = self ] || return 0
-  ws_github_ready "$wsdir" "${GH:-gh}" || return 0
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    slug="$(ws_repo_github_slug "$wsdir" "$repo")" || continue
-    rows="$(_land_gh "$wsdir" pr list --repo "$slug" --author @me --state open --limit 50 \
-      --json number,headRefOid,baseRefName,isDraft,mergeable,reviewDecision,statusCheckRollup 2>/dev/null)" || continue
+    prs="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author @me --limit 50 2>/dev/null)" || continue
     while IFS= read -r pr; do
       [ -n "$pr" ] || continue
-      land_ci_gate "$wsdir" "$slug" "$pr" >/dev/null || continue
-      printf '%s\t%s\t%s\n' "$repo" "$(printf '%s' "$pr" | jq -r .number)" "$(printf '%s' "$pr" | jq -r .headRefOid)"
-    done < <(printf '%s' "$rows" | jq -c --arg repo "$repo" --slurpfile v <(jq -c . "$(_solo_reviews "$wsdir")" 2>/dev/null || printf '{}') "$CEL_JQ_LATEST_CHECKS"'
-      ($v[0] // {}) as $verdicts
-      | .[]? | select(.isDraft == false and .mergeable != "CONFLICTING")
-      | select((.headRefOid // "") | test("^[0-9a-f]{40}$"))
-      | select((.statusCheckRollup // []) | length > 0)
-      | select(all(.statusCheckRollup | latest_checks[]; ((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "SKIPPED" or $s == "NEUTRAL")))
-      | .headRefOid as $head
-      | select(.reviewDecision == "APPROVED"
-               or (($verdicts["\($repo)#\(.number)"] // {}) | .verdict == "approved" and .head == $head))' 2>/dev/null || true)
+      num="$(printf '%s' "$pr" | jq -r .number)" head="$(printf '%s' "$pr" | jq -r .head_sha)"
+      v="$(solo_review_get "$wsdir" "$repo" "$num")"
+      if [ "$(printf '%s' "$v" | jq -r 'if .verdict == "approved" then .head else "" end' 2>/dev/null)" != "$head" ]; then
+        [ "$(_solo_forge forge_pr_reviews "$wsdir" "$repo" "$num" 2>/dev/null | jq -r '.decision // ""' 2>/dev/null)" = approved ] || continue
+      fi
+      checks="$(_solo_forge forge_pr_checks "$wsdir" "$repo" "$num" 2>/dev/null)" || continue
+      printf '%s' "$checks" | jq -e --arg h "$head" '.head_sha == $h and (.checks | length > 0)
+        and all(.checks[]; .status == "completed" and (.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral"))' >/dev/null 2>&1 \
+        || continue
+      land_ci_gate "$wsdir" "$repo" "$pr" >/dev/null || continue
+      printf '%s\t%s\t%s\n' "$repo" "$num" "$head"
+    done < <(printf '%s' "$prs" | jq -c '.[]? | select(.draft == false and .mergeable != "conflicting")
+      | select((.head_sha // "") | test("^[0-9a-f]{40}$"))' 2>/dev/null || true)
   done < <(ws_product_repos "$wsdir" "$product")
 }
 
@@ -123,10 +129,9 @@ _solo_resolve() { # <ref> <workspace-or-empty>
   SOLO_REPO="$repo"; SOLO_PR="$pr"
 }
 
-_solo_pr_json() { # <wsdir> <slug> <pr>
-  _land_gh "$1" pr view "$3" --repo "$2" \
-    --json number,author,reviewDecision,statusCheckRollup,isDraft,mergeable,state,headRefOid,baseRefName 2>/dev/null
-}
+# Forge calls go through gh as GH when a caller (a test, cel-fanout) set it,
+# as lib/land.sh's do.
+_solo_forge() { CEL_FORGE_GH="${GH:-gh}" "$@"; }
 
 cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note T] [--workspace W]
   local usage="usage: cel solo review <repo>#<pr> <approved|changes> --head <full-40-char-sha> --by <reviewer-alias> [--note TEXT] [--workspace NAME]"
@@ -159,19 +164,18 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
 
   if [ "$verdict" = approved ]; then
     # AN APPROVAL IS ONLY EVER FOR THE PR'S CURRENT REMOTE HEAD, on a PR this
-    # workspace's account opened. The API validates; it never supplies the SHA.
-    local slug pr me author state rhead
-    slug="$(ws_repo_github_slug "$SOLO_WSDIR" "$SOLO_REPO")" || die "cel solo review: cannot resolve the GitHub repo for '$SOLO_REPO' - nothing recorded"
-    ws_github_ready "$SOLO_WSDIR" "${GH:-gh}" \
-      || die "cel solo review: $(ws_github_fix "$(ws_github_user "$SOLO_WSDIR")") - an approval is not recorded unverified"
-    pr="$(_solo_pr_json "$SOLO_WSDIR" "$slug" "$SOLO_PR")" || die "cel solo review: no PR #$SOLO_PR on $slug - nothing recorded"
-    me="$(_land_gh "$SOLO_WSDIR" api user --jq .login 2>/dev/null || true)"
-    author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
+    # workspace's account opened. The forge validates; it never supplies the SHA.
+    local pr me author state rhead
+    me="$(_solo_forge forge_whoami "$SOLO_WSDIR" "$SOLO_REPO")" \
+      || die "cel solo review: cannot establish the account this workspace acts as on $SOLO_REPO's forge (see above) - an approval is not recorded unverified"
+    me="$(printf '%s' "$me" | jq -r '.login // ""')"
+    pr="$(_solo_forge forge_pr_view "$SOLO_WSDIR" "$SOLO_REPO" "$SOLO_PR")" || die "cel solo review: cannot read $SOLO_REPO#$SOLO_PR from its forge - nothing recorded"
+    author="$(printf '%s' "$pr" | jq -r '.author // ""')"
     state="$(printf '%s' "$pr" | jq -r '.state // ""')"
-    rhead="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+    rhead="$(printf '%s' "$pr" | jq -r '.head_sha // ""')"
     [ -n "$me" ] && [ "$author" = "$me" ] \
       || die "cel solo review: #$SOLO_PR was opened by '${author:-?}', not this workspace's account ('${me:-?}') - nothing recorded"
-    [ "$state" = OPEN ] || die "cel solo review: #$SOLO_PR is $state, not OPEN - nothing recorded"
+    [ "$state" = open ] || die "cel solo review: #$SOLO_PR is ${state:-in no known state}, not open - nothing recorded"
     [ "$rhead" = "$head" ] \
       || die "cel solo review: --head $head is not #$SOLO_PR's current head (${rhead:-unknown}) - re-review the current head. Nothing recorded"
   fi
@@ -188,10 +192,12 @@ cmd_solo_review() { # <ref> <approved|changes> --head <sha> --by <alias> [--note
 # this repo whose HEAD is that commit with nothing modified, staged or
 # untracked - the solo agent's own worktree for the branch (its dependencies
 # installed, as a worker's are for the fleet land). No such checkout is a
-# refusal, never a guess. Prints the merge-body line on success, the reason
-# on failure.
-_solo_local_gate() { # <wsdir> <repo> <head> <gate>
-  local wsdir="$1" repo="$2" head="$3" gate="$4" repodir wt="" w h rc=0 t0 secs
+# refusal, never a guess. The commit is also fetched from the forge as the
+# PR's own ref (refs/pull/<n>/head, which GitHub and Forgejo both serve): the
+# head the gate passes must be the head the forge would merge. Prints the
+# merge-body line on success, the reason on failure.
+_solo_local_gate() { # <wsdir> <repo> <pr> <head> <gate>
+  local wsdir="$1" repo="$2" pr="$3" head="$4" gate="$5" repodir wt="" w h rc=0 t0 secs
   repodir="$wsdir/repos/$repo"
   # WHICH checkout: the one the caller stands in when it qualifies (the solo
   # agent's prepared worktree, dependencies installed), else the first other
@@ -210,6 +216,13 @@ _solo_local_gate() { # <wsdir> <repo> <head> <gate>
   wt="${cands[0]:-}"
   [ -n "$wt" ] || { printf '%s' "no clean checkout of $repo is at $head - the base branch gates nothing, so the repo gate (\`$gate\`) must run at exactly that head: check it out (your branch worktree, nothing modified or untracked) and land again"; return 1; }
   [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" = "$head" ] || { printf '%s' "$wt moved off $head"; return 1; }
+  local pref="refs/cel/land/pull-$pr" fetched
+  git -C "$repodir" fetch -q origin "+refs/pull/$pr/head:$pref" 2>/dev/null \
+    || { printf '%s' "could not fetch refs/pull/$pr/head from $repo's origin - nothing proves the forge would merge $head"; return 1; }
+  fetched="$(git -C "$repodir" rev-parse "$pref" 2>/dev/null)"
+  git -C "$repodir" update-ref -d "$pref" 2>/dev/null || true
+  [ "$fetched" = "$head" ] \
+    || { printf '%s' "the forge's refs/pull/$pr/head is ${fetched:-nothing}, not $head - the PR moved; land again"; return 1; }
   c_warn "cel solo land: the base branch gates nothing - running the repo gate \`$gate\` in $wt at ${head:0:12}" >&2
   t0="$(date +%s)"
   ( cd "$wt" && timeout "${CEL_SOLO_GATE_TIMEOUT:-5400}" bash -c "$gate" ) >&2 || rc=$?
@@ -238,50 +251,56 @@ cmd_solo_land() { # <ref> [--workspace W]
     esac
   done
   _solo_resolve "$ref" "$workspace"
-  local wsdir="$SOLO_WSDIR" num="$SOLO_PR" slug
-  slug="$(ws_repo_github_slug "$wsdir" "$SOLO_REPO")" || die "cel solo land: cannot resolve the GitHub repo for '$SOLO_REPO'"
+  local wsdir="$SOLO_WSDIR" num="$SOLO_PR" desc provider forge slug
+  desc="$(forge_repo "$wsdir" "$SOLO_REPO" "$wsdir/repos/$SOLO_REPO")" || die "cel solo land: cannot resolve the forge for '$SOLO_REPO'"
+  provider="$(printf '%s' "$desc" | jq -r .provider)"
+  slug="$(printf '%s' "$desc" | jq -r '"\(.owner)/\(.repo)"')"
+  case "$provider" in github) forge=GitHub ;; forgejo) forge=Forgejo ;; *) forge="$provider" ;; esac
 
-  ws_github_ready "$wsdir" "${GH:-gh}" \
-    || die "cel solo land: refusing to act for workspace '$(ws_name "$wsdir")': $(ws_github_fix "$(ws_github_user "$wsdir")")"
+  local me
+  me="$(_solo_forge forge_whoami "$wsdir" "$SOLO_REPO")" \
+    || die "cel solo land: refusing to act for workspace '$(ws_name "$wsdir")': the account it acts as on $forge cannot be established (see above)"
+  me="$(printf '%s' "$me" | jq -r '.login // ""')"
   [ "$(ws_policy "$wsdir" merge)" = self ] \
     || die "cel solo land: this workspace's policy.merge is humans-only - tell the owner #$num is ready; do not merge it"
 
-  local pr; pr="$(_solo_pr_json "$wsdir" "$slug" "$num")" || die "cel solo land: no PR #$num on $slug"
-  local me author head
-  me="$(_land_gh "$wsdir" api user --jq .login 2>/dev/null || true)"
-  author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
-  head="$(printf '%s' "$pr" | jq -r '.headRefOid // ""')"
+  local pr; pr="$(_solo_forge forge_pr_view "$wsdir" "$SOLO_REPO" "$num")" || die "cel solo land: no PR #$num on $slug ($forge)"
+  local author head
+  author="$(printf '%s' "$pr" | jq -r '.author // ""')"
+  head="$(printf '%s' "$pr" | jq -r '.head_sha // ""')"
   [ -n "$me" ] && [ "$author" = "$me" ] \
     || die "cel solo land: #$num was opened by '$author', not this workspace's account ('$me') - someone else's PR is theirs to land"
-  [ "$(printf '%s' "$pr" | jq -r .state)" = OPEN ] || die "cel solo land: #$num is not open"
-  [ "$(printf '%s' "$pr" | jq -r .isDraft)" = false ] || die "cel solo land: #$num is still a draft"
+  [ "$(printf '%s' "$pr" | jq -r .state)" = open ] || die "cel solo land: #$num is not open"
+  [ "$(printf '%s' "$pr" | jq -r .draft)" = false ] || die "cel solo land: #$num is still a draft"
   [ -n "$head" ] || die "cel solo land: #$num reports no head commit - cannot pin the merge to a reviewed head. Nothing merged."
 
-  # WHO SAYS THIS IS APPROVED: GitHub where it can; where the author would
-  # have to approve their own PR, the recorded verdict - for this exact head.
-  local rd rv review_by="" review_note="" approved_via=""
-  rd="$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')"
+  # WHO SAYS THIS IS APPROVED: the forge's own review decision where it can;
+  # where the author would have to approve their own PR, the recorded
+  # verdict - for this exact head.
+  local reviews rd rv review_by="" review_note="" approved_via=""
+  reviews="$(_solo_forge forge_pr_reviews "$wsdir" "$SOLO_REPO" "$num")" || die "cel solo land: cannot read #$num's reviews from $forge. Nothing merged."
+  rd="$(printf '%s' "$reviews" | jq -r '.decision // "none"')"
   rv="$(solo_review_get "$wsdir" "$SOLO_REPO" "$num")"
-  if [ "$rd" = APPROVED ]; then
-    approved_via="GitHub approval"
+  if [ "$rd" = approved ]; then
+    approved_via="$forge approval"
   elif [ "$(printf '%s' "$rv" | jq -r '.verdict // ""')" = approved ]; then
     [ "$(printf '%s' "$rv" | jq -r '.head // ""')" = "$head" ] \
       || die "cel solo land: the recorded approval is for head $(printf '%s' "$rv" | jq -r '.head // "?"' | cut -c1-12), but #$num is at ${head:0:12} - the PR moved since its review; re-review it. Nothing merged."
     review_by="$(printf '%s' "$rv" | jq -r '.by // ""')"
     review_note="$(printf '%s' "$rv" | jq -r '.note // ""')"
-    approved_via="verdict by $review_by (GitHub cannot approve a PR its own author would review)"
+    approved_via="verdict by $review_by ($forge cannot approve a PR its own author would review)"
   else
-    die "cel solo land: #$num is not approved (reviewDecision=${rd:-none}, recorded verdict=$(printf '%s' "$rv" | jq -r '.verdict // "none"' 2>/dev/null || printf none))"
+    die "cel solo land: #$num is not approved (review decision=$rd, recorded verdict=$(printf '%s' "$rv" | jq -r '.verdict // "none"' 2>/dev/null || printf none))"
   fi
 
-  local red; red="$(printf '%s' "$pr" | jq "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[] | select((.conclusion // .state) as $s | $s == "FAILURE" or $s == "ERROR")] | length')"
+  # The latest run of each check, from the forge.
+  local checks; checks="$(_solo_forge forge_pr_checks "$wsdir" "$SOLO_REPO" "$num")" || die "cel solo land: cannot read #$num's checks from $forge. Nothing merged."
+  local red; red="$(printf '%s' "$checks" | jq '[.checks[] | select(.conclusion == "failure" or .conclusion == "error")] | length')"
   [ "$red" = 0 ] || die "cel solo land: #$num has $red failing check(s) - a red check is a finding, not a formality"
   # A latest run still going is not green yet (a re-run, a slow suite).
-  local pending; pending="$(printf '%s' "$pr" | jq -r "$CEL_JQ_LATEST_CHECKS"'[.statusCheckRollup // [] | latest_checks[]
-    | select(((.status // "COMPLETED") != "COMPLETED") or ((.state // "") == "PENDING" or (.state // "") == "EXPECTED"))
-    | (.name // .context // "?")] | join(", ")')"
+  local pending; pending="$(printf '%s' "$checks" | jq -r '[.checks[] | select(.status != "completed") | (.name // "?")] | join(", ")')"
   [ -z "$pending" ] || die "cel solo land: #$num still has check(s) running: $pending - land once they finish. Nothing merged."
-  [ "$(printf '%s' "$pr" | jq -r '.mergeable // "MERGEABLE"')" != CONFLICTING ] \
+  [ "$(printf '%s' "$pr" | jq -r .mergeable)" != conflicting ] \
     || die "cel solo land: #$num has conflicts - rebase it, then land again"
   # CI stands in for the gate when the base branch's required checks are all
   # green on this head. When the base branch gates nothing at all, the repo's
@@ -289,12 +308,12 @@ cmd_solo_land() { # <ref> [--workspace W]
   # exactly this head - the same evidence the fleet land collects locally.
   local gate_body gate_out rc=0
   gate_out="$(mktemp)"
-  land_ci_gate "$wsdir" "$slug" "$pr" > "$gate_out" || rc=$?
+  land_ci_gate "$wsdir" "$SOLO_REPO" "$pr" > "$gate_out" || rc=$?
   gate_body="$(cat "$gate_out")"; rm -f "$gate_out"
   if [ "$rc" -ne 0 ]; then
     local gate; gate="$(ws_repo_get "$wsdir" "$SOLO_REPO" gate)"; [ "$gate" = null ] && gate=""
     [ "${LAND_CI_UNPROTECTED:-0}" = 1 ] && [ -n "$gate" ] || die "cel solo land: $gate_body. Nothing merged."
-    gate_body="$(_solo_local_gate "$wsdir" "$SOLO_REPO" "$head" "$gate")" \
+    gate_body="$(_solo_local_gate "$wsdir" "$SOLO_REPO" "$num" "$head" "$gate")" \
       || die "cel solo land: $gate_body. Nothing merged."
   fi
 
@@ -315,9 +334,8 @@ cmd_solo_land() { # <ref> [--workspace W]
   fi
   local bad; bad="$(land_body_hygiene "$body")" || die "cel solo land: could not run the hygiene check on the commit body - nothing was merged"
   [ -z "$bad" ] || die "cel solo land: the review note carries a ticket-shaped token the hygiene scan rejects: $(printf '%s' "$bad" | tr '\n' ' ')- re-record the review without it. Nothing was merged."
-  # MERGE ONLY THE HEAD THAT WAS CHECKED: GitHub refuses if it moved since.
-  if ! _land_gh "$wsdir" pr merge "$num" --repo "$slug" --squash --delete-branch \
-    --match-head-commit "$head" --body "$body" >/dev/null 2>&1; then
+  # MERGE ONLY THE HEAD THAT WAS CHECKED: the forge refuses if it moved since.
+  if ! _solo_forge forge_pr_merge "$wsdir" "$SOLO_REPO" "$num" "$head" "$body" >/dev/null 2>&1; then
     afk_end failed "the merge did not go through"
     die "cel solo land: merge of #$num failed - check the PR page; nothing here retries a merge"
   fi

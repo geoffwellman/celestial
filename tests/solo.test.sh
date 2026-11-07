@@ -17,8 +17,9 @@ _solo_setup() { # [author] [reviewDecision] [rollup-conclusion] [draft] [state]
   sed -i 's/merge: humans-only/merge: self/' "$T/workspace.yaml"
   ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
   GH_LOG="$T/gh.log"; : > "$GH_LOG"
-  export STUB_HEAD="$H" STUB_CHECKS='{"check_runs":[{"name":"suite","conclusion":"success"}]}'
-  export STUB_ROLLUP_DEFAULT="[{\"conclusion\":\"${3:-SUCCESS}\"}]"
+  # the head's checks, latest run of each: `suite`, green unless the third
+  # argument (or STUB_ROLLUP) says otherwise
+  export STUB_HEAD="$H" STUB_ROLLUP_DEFAULT="[{\"name\":\"suite\",\"conclusion\":\"${3:-SUCCESS}\"}]"
   cat > "$T/gh" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
@@ -34,7 +35,6 @@ case "\$1 \$2" in
                      echo '{"required_status_checks":{"contexts":["suite"]}}';;
        */rules/branches/*) [ "\${STUB_RULES:-}" != denied ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
                            printf '%s' "\${STUB_RULES:-[[]]}";;
-       *check-runs)  printf '%s' "\$STUB_CHECKS";;
        *) echo '{}';;
      esac;;
 esac
@@ -132,7 +132,7 @@ test_solo_land_refuses_a_red_check() {
 # Green on SOME check is not green on the one that gates the branch.
 test_solo_land_refuses_when_the_protected_check_is_not_green() {
   _solo_setup fleetbot APPROVED
-  export STUB_CHECKS='{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  export STUB_ROLLUP='[{"name":"docs","conclusion":"SUCCESS"}]'
   local out; out="$(_land widget#7 2>&1)" && { echo "merged without the suite"; rm -rf "$T"; return 1; }
   assert_contains "$out" "suite"
   ! _merged || { rm -rf "$T"; return 1; }
@@ -148,11 +148,14 @@ test_solo_land_refuses_a_check_still_running() {
   rm -rf "$T"
 }
 # A base branch that gates nothing: the repo's own gate runs in a clean
-# checkout at exactly the PR head, and its result decides.
+# checkout at exactly the PR head, and its result decides. The forge serves
+# that head as refs/pull/7/head (a local bare `origin` here).
 _solo_gate_repo() { # <gate-cmd> -> sets STUB_HEAD to a real commit in repos/widget
   local r="$T/repos/widget"
   git -C "$r" init -q && git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
   STUB_HEAD="$(git -C "$r" rev-parse HEAD)"; export STUB_HEAD STUB_UNPROTECTED=1
+  git init -q --bare "$T/origin.git" && git -C "$r" remote add origin "$T/origin.git"
+  git -C "$r" push -q origin "HEAD:refs/pull/7/head"
   yq -y --arg g "$1" '(.repos[] | select(.name == "widget")).gate = $g' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
 }
 test_solo_land_runs_the_repo_gate_when_the_base_gates_nothing() {
@@ -171,6 +174,24 @@ test_solo_land_refuses_a_failing_repo_gate_or_no_checkout_at_the_head() {
   out="$(_land widget#7 2>&1)" && { echo "merged with no checkout at the head"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
   assert_contains "$out" "no clean checkout"
   unset STUB_UNPROTECTED; rm -rf "$T"
+}
+# The head the gate passes must be the one the forge would merge: its
+# refs/pull/<n>/head is fetched and must be exactly that commit.
+test_solo_land_gate_refuses_a_head_the_forge_does_not_serve() {
+  _solo_setup fleetbot APPROVED; _solo_gate_repo "touch $T/gate-ran"
+  local r="$T/repos/widget" moved out
+  git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m pushed-later
+  moved="$(git -C "$r" rev-parse HEAD)"
+  git -C "$r" push -q -f origin "HEAD:refs/pull/7/head"
+  git -C "$r" checkout -q --detach "$STUB_HEAD"
+  out="$(_land widget#7 2>&1)" && { echo "gated a head the forge does not serve"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "refs/pull/7/head is $moved, not $STUB_HEAD" || { rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "ran the gate anyway"; rm -rf "$T"; return 1; }
+  ! _merged || { rm -rf "$T"; return 1; }
+  git -C "$r" remote remove origin
+  out="$(_land widget#7 2>&1)" && { echo "gated without asking the forge"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "could not fetch refs/pull/7/head" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
 }
 # Only GitHub's "Branch not protected" opens the local path; any other failure
 # to read protection is unknown and refuses. A gate that changes the tree
@@ -196,7 +217,7 @@ test_solo_land_refuses_unreadable_protection_and_a_gate_that_dirties_the_tree() 
 test_solo_land_requires_a_ruleset_check_on_a_base_classic_protection_calls_unprotected() {
   _solo_setup fleetbot APPROVED; _solo_gate_repo "touch $T/gate-ran"
   export STUB_RULES='[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"suite"}],"strict_required_status_checks_policy":false}}]]'
-  export STUB_CHECKS='{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  export STUB_ROLLUP='[{"name":"docs","conclusion":"SUCCESS"}]'
   local out; out="$(_land widget#7 2>&1)" && { echo "merged with the ruleset's required check absent"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
   assert_contains "$out" "suite" || { unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
   [ ! -f "$T/gate-ran" ] || { echo "took the local-gate path on a ruleset-gated base"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
@@ -209,7 +230,7 @@ test_solo_land_requires_a_ruleset_check_on_a_base_classic_protection_calls_unpro
     [ ! -f "$T/gate-ran" ] || { echo "ran the local gate on unknown rules ($rules)"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
   done
   export STUB_RULES='[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"suite"}],"strict_required_status_checks_policy":false}}]]'
-  export STUB_CHECKS='{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  unset STUB_ROLLUP
   _land widget#7 >/dev/null 2>&1 || { echo "refused a green ruleset check"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
   [ ! -f "$T/gate-ran" ] || { echo "ran the local gate although CI stood in"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$GH_LOG")" "Gate: CI (suite) on $STUB_HEAD"
@@ -223,10 +244,10 @@ test_solo_land_gate_prefers_the_callers_checkout_over_a_reviewers() {
   git -C "$r" worktree add -q --detach "$T/state/cel/reviews/widget-pr-7" "$STUB_HEAD"
   git -C "$r" worktree add -q --detach "$T/mine" "$STUB_HEAD"
   # the main checkout ($r) is also clean at the head and listed first
-  ( cd "$T/mine" && _solo_local_gate "$T" widget "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
+  ( cd "$T/mine" && _solo_local_gate "$T" widget 7 "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
   assert_eq "$(cat "$T/gate-cwd")" "$(readlink -f "$T/mine")"
   # standing elsewhere: any non-reviewer checkout, never the reviewer's
-  ( cd /tmp && _solo_local_gate "$T" widget "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
+  ( cd /tmp && _solo_local_gate "$T" widget 7 "$STUB_HEAD" "pwd > $T/gate-cwd" ) >/dev/null 2>&1
   case "$(cat "$T/gate-cwd")" in */cel/reviews/*) echo "gate ran in the reviewer checkout"; rm -rf "$T"; return 1;; esac
   unset STUB_UNPROTECTED; rm -rf "$T"
 }
@@ -286,6 +307,100 @@ test_solo_land_refuses_a_review_note_the_history_scan_would_reject() {
   _review widget#7 approved --head "$H" --by r --note "see $bad" >/dev/null
   local out; out="$(_land widget#7 2>&1)" && { echo "merged a dirty body"; rm -rf "$T"; return 1; }
   assert_contains "$out" "$bad"; ! _merged || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# ---- a Forgejo repo ----------------------------------------------------------
+# widget served by an internal Forgejo (tests/lib/forgejo-stub.sh: spec-
+# derived fixtures), its PR opened by the token's owner, `geoff`; the base's
+# exact rule requires `ci / test (pull_request)`, green here unless a test
+# says otherwise. gh is never asked.
+_solo_forgejo() {
+  source "$CEL_ROOT/tests/lib/forgejo-stub.sh"; _forgejo_stub "$T"
+  yq -y '(.repos[] | select(.name == "widget")) |= (.url = "git@forgejo-ct.internal:geoff/gizmo.git" | .forge = "forgejo" | .host = "http://forgejo.internal")' \
+    "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  export STUB_FJ_STATUSES='[{"id":61,"context":"ci / test (pull_request)","status":"success","target_url":"http://forgejo.internal/geoff/gizmo/actions/runs/61/jobs/0"}]'
+}
+_fj_merged() { grep -q '^POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/7/merge' "$FJ_LOG"; }
+_fj_msg() { tail -n1 "$FJ_BODY_LOG" | jq -r .MergeMessageField; }
+
+# The live case: an unprotected base (Forgejo's own 404 for the rule, no glob
+# matching it), the recorded verdict for the exact head, the repo gate run in
+# the clean checkout at that head - fetched as the PR's ref from the forge -
+# and a squash merge pinned to it.
+test_solo_land_on_forgejo_runs_the_gate_on_an_unprotected_base_and_merges_at_head() {
+  _solo_setup; _solo_forgejo; _solo_gate_repo "touch $T/gate-ran"
+  export STUB_FJ_HEAD="$STUB_HEAD" STUB_FJ_PROT=none
+  _review widget#7 approved --head "$STUB_HEAD" --by widget-pr-7-review >/dev/null || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  local out; out="$(_land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  [ -f "$T/gate-ran" ] || { echo "the repo gate did not run"; rm -rf "$T"; return 1; }
+  _fj_merged || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(tail -n1 "$FJ_BODY_LOG" | jq -c '[.Do, .head_commit_id, .delete_branch_after_merge]')" "[\"squash\",\"$STUB_HEAD\",true]" || { rm -rf "$T"; return 1; }
+  assert_contains "$(_fj_msg)" "Reviewed-by: widget-pr-7-review (approved)" || { rm -rf "$T"; return 1; }
+  assert_contains "$(_fj_msg)" "Gate: local \`touch $T/gate-ran\` passed on $STUB_HEAD" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "landed widget#7 on geoff/gizmo" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo land reached gh"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A protected base: its required check, green on the head, stands in for the
+# gate; red or absent refuses; protection that cannot be read is unknown and
+# never opens the local path.
+test_solo_land_on_forgejo_takes_ci_on_a_protected_base_and_refuses_unknown_protection() {
+  _solo_setup; _solo_forgejo; _solo_gate_repo "touch $T/gate-ran"
+  export STUB_FJ_HEAD="$STUB_HEAD"
+  _review widget#7 approved --head "$STUB_HEAD" --by widget-pr-7-review >/dev/null || { rm -rf "$T"; return 1; }
+  local out
+  out="$(STUB_FJ_PROT=denied _land widget#7 2>&1)" && { echo "merged on unreadable protection"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "cannot establish which checks main on widget requires" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_STATUSES='[{"id":61,"context":"ci / test (pull_request)","status":"failure"}]' _land widget#7 2>&1)" && { echo "merged on red"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "1 failing check" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_STATUSES='[{"id":62,"context":"ci / docs","status":"success"}]' _land widget#7 2>&1)" && { echo "merged without the required check"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "required check(s) not green on $STUB_HEAD: ci / test (pull_request)" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_STATUSES='[{"id":63,"context":"ci / test (pull_request)","status":"pending"}]' _land widget#7 2>&1)" && { echo "merged a running check"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "still has check(s) running: ci / test (pull_request)" || { rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "the local gate ran in place of a protected base's CI"; rm -rf "$T"; return 1; }
+  ! _fj_merged || { rm -rf "$T"; return 1; }
+  _land widget#7 >/dev/null 2>&1 || { echo "refused a green required check"; rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "ran the local gate although CI stood in"; rm -rf "$T"; return 1; }
+  assert_contains "$(_fj_msg)" "Gate: CI (ci / test (pull_request)) on $STUB_HEAD" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# Forgejo's own approval counts only for the current head; someone else's
+# PR is theirs to land.
+test_solo_land_on_forgejo_accepts_its_approval_of_the_head_only() {
+  _solo_setup; _solo_forgejo
+  local out
+  out="$(STUB_FJ_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb _land widget#7 2>&1)" && { echo "merged an approval of an older head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not approved" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_LOGIN=someone-else _land widget#7 2>&1)" && { echo "landed a colleague's PR"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "not this workspace's account ('geoff')" || { rm -rf "$T"; return 1; }
+  ! _fj_merged || { rm -rf "$T"; return 1; }
+  out="$(_land widget#7 2>&1)" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "approved via Forgejo approval" || { rm -rf "$T"; return 1; }
+  assert_eq "$(tail -n1 "$FJ_BODY_LOG" | jq -r .head_commit_id)" "$FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# land_ci_gate itself, on Forgejo (the one rule `cel solo land` and
+# `cel-fanout land` share): the base's exact rule requires
+# `ci / test (pull_request)`. Pending on the head is not green; green is the
+# CI evidence, named; a head that moved since it was read decides nothing;
+# an unprotected base tells the caller its own gate may run. No gh at all.
+test_land_ci_gate_reads_a_forgejo_base_and_the_heads_statuses() {
+  _solo_setup; _solo_forgejo
+  local pr out
+  pr="$(jq -nc --arg h "$FJ_FIXTURE_HEAD" '{number: 31, head_sha: $h, base_ref: "main"}')"
+  out="$(STUB_FJ_STATUSES='[{"id":70,"context":"ci / test (pull_request)","status":"pending"}]' land_ci_gate "$T" widget "$pr")" \
+    && { echo "a pending required check stood in for the gate"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "required check(s) not green on $FJ_FIXTURE_HEAD: ci / test (pull_request)" || { rm -rf "$T"; return 1; }
+  out="$(land_ci_gate "$T" widget "$pr")" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "Gate: CI (ci / test (pull_request)) on $FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb land_ci_gate "$T" widget "$pr")" && { echo "decided on a moved head"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "moved to bbbbbbbbbbbb" || { rm -rf "$T"; return 1; }
+  STUB_FJ_PROT=none land_ci_gate "$T" widget "$pr" >/dev/null && { echo "CI stood in for an unprotected base"; rm -rf "$T"; return 1; }
+  assert_eq "$LAND_CI_UNPROTECTED" 1 || { rm -rf "$T"; return 1; }
+  STUB_FJ_PROT=denied land_ci_gate "$T" widget "$pr" >/dev/null && { rm -rf "$T"; return 1; }
+  assert_eq "$LAND_CI_UNPROTECTED" 0 || { echo "unknown protection opened the local gate"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo gate reached gh"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # The author does not approve its own work, and a reviewer or worker does not

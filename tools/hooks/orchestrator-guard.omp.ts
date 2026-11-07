@@ -20,7 +20,7 @@ function celRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-function classify(mode: "command" | "path", arg: string): string {
+function classify(mode: "command" | "path" | "read", arg: string): string {
   try {
     return execFileSync("bash", [path.join(celRoot(), "tools/hooks/guard-classify.sh"), mode, process.cwd(), arg], {
       encoding: "utf8",
@@ -37,7 +37,7 @@ export default function celestialGuard(pi): void {
   if (process.env.CEL_GUARD === "0") return;
   pi.on("tool_call", (event) => {
     const input = (event && event.input) || {};
-    let mode: "command" | "path";
+    let mode: "command" | "path" | "read";
     let arg: string;
     switch (event.toolName) {
       case "bash":
@@ -50,6 +50,10 @@ export default function celestialGuard(pi): void {
       case "edit":
       case "write":
         mode = "path";
+        arg = String(input.path ?? input.file_path ?? input.filePath ?? "");
+        break;
+      case "read":
+        mode = "read";
         arg = String(input.path ?? input.file_path ?? input.filePath ?? "");
         break;
       default:

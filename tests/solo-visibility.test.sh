@@ -52,7 +52,8 @@ test_fleet_shows_a_solo_products_live_lanes() {
 # --- the ready-PR finder the steward nudges with -----------------------------
 H=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # merge: self, so land would merge at all; `suite` is the protected check and
-# is green on every head unless SV_RED_CHECK names one.
+# is green on every head unless SV_RED_CHECK names one. A PR read on its own
+# (`pr view`) is the list's entry for it.
 _sv_gh() { # <pr-list-json>
   printf '%s' "$1" > "$T/list.json"
   sed -i 's/merge: humans-only/merge: self/' "$T/workspace.yaml"
@@ -60,11 +61,11 @@ _sv_gh() { # <pr-list-json>
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "pr list") cat "$T/list.json";;
+  "pr view") jq -c --argjson n "\$3" --arg red "\${SV_RED_CHECK:-none}" '.[] | select(.number == \$n)
+               | if .headRefOid == \$red then .statusCheckRollup = [{name: "suite", conclusion: "FAILURE"}] else . end' "$T/list.json";;
   *) case "\$2" in
        */protection) [ -z "\${SV_NO_PROTECTION:-}" ] && echo '{"required_status_checks":{"contexts":["suite"]}}';;
        */rules/branches/*) echo '[[]]';;
-       *check-runs)  case "\$2" in *"\${SV_RED_CHECK:-none}"*) echo '{"check_runs":[{"name":"suite","conclusion":"failure"}]}';;
-                       *) echo '{"check_runs":[{"name":"suite","conclusion":"success"}]}';; esac;;
        *) echo '{}';;
      esac;;
 esac
@@ -73,7 +74,7 @@ EOF
 }
 _pr() { # <num> <review> <rollup> [draft] [mergeable] [head]
   jq -nc --argjson n "$1" --arg r "$2" --arg c "$3" --argjson d "${4:-false}" --arg m "${5:-MERGEABLE}" --arg h "${6:-$H}" \
-    '{number:$n, headRefOid:$h, baseRefName:"main", isDraft:$d, mergeable:$m, reviewDecision:$r, statusCheckRollup:[{conclusion:$c}]}'
+    '{number:$n, state:"OPEN", headRefOid:$h, baseRefName:"main", isDraft:$d, mergeable:$m, reviewDecision:$r, statusCheckRollup:[{name:"suite", conclusion:$c}]}'
 }
 test_solo_ready_prs_lists_only_what_land_would_merge() {
   _sv_ws
@@ -102,6 +103,24 @@ test_solo_ready_prs_is_never_looser_than_land() {
   assert_eq "$(SV_NO_PROTECTION=1 solo_ready_prs "$T" bundle)" ""
   assert_eq "$(SV_RED_CHECK="$H" solo_ready_prs "$T" bundle)" ""
   assert_contains "$(solo_ready_prs "$T" bundle)" "widget	1	$H"
+  rm -rf "$T"
+}
+# A Forgejo repo is listed by the same rules, not skipped: its open PRs by
+# this account (every page), approved at the head, every check green and the
+# base's required one among them.
+test_solo_ready_prs_lists_a_forgejo_pr_land_would_merge() {
+  _sv_ws
+  _sv_gh "[]"
+  source "$CEL_ROOT/tests/lib/forgejo-stub.sh"; _forgejo_stub "$T"
+  yq -y '(.repos[] | select(.name == "widget")) |= (.url = "git@forgejo-ct.internal:geoff/gizmo.git" | .forge = "forgejo" | .host = "http://forgejo.internal")' \
+    "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
+  export STUB_FJ_STATUSES='[{"id":61,"context":"ci / test (pull_request)","status":"success"}]'
+  assert_eq "$(solo_ready_prs "$T" bundle)" "widget	31	$FJ_FIXTURE_HEAD" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "pulls?state=open&poster=geoff" || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_STATUSES='[{"id":62,"context":"ci / test (pull_request)","status":"pending"}]' solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_STATUSES='[{"id":63,"context":"ci / docs","status":"success"}]' solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_PROT=denied solo_ready_prs "$T" bundle)" "" || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb solo_ready_prs "$T" bundle)" "" || { echo "listed an approval of an older head"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

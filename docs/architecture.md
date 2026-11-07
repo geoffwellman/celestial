@@ -207,16 +207,78 @@ uses, and returns `{provider, host, owner, repo, ssh_host, web_url, api_url}`.
 github.com, or the workspace's `github.ssh_host` alias, is GitHub. Any other
 host is Forgejo only when the repo declares `forge: forgejo` or a `host:` of
 its own (the web/API host, for a url that dials an ssh alias); an undeclared
-host, a lookalike, or a declaration the url contradicts is refused.
+host, a lookalike, or a declaration the url contradicts is refused. Web and
+API are https unless the repo's own `host:` is written `http://<host>` - a
+forge that serves plain HTTP only (an internal box) is declared, never
+guessed, and never beside an https clone url. A plain `http://` host sends
+the API token unencrypted on every request - only for a trusted LAN. For
+example:
+
+```yaml
+  - name: gizmo
+    url: git@forgejo-ssh.example.net:acme/gizmo.git   # what git dials (ssh)
+    forge: forgejo
+    host: http://forgejo.example.net                  # web + /api/v1, plain HTTP
+```
 
 `lib/forge.sh` holds pull-request operations in Celestial's own vocabulary
 (`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`, `forge_pr_reviews`,
-`forge_pr_merge`, `forge_whoami`): each prints one normalised JSON value or
-fails. GitHub is served through `gh` as the workspace's account (`ws_gh`);
-`CEL_FORGE_GH` is its only test seam. A Forgejo repo is refused by every
-operation ("Forgejo backend not built yet") until that backend exists.
-Existing callers still call `gh` directly and move onto these operations
-separately.
+`forge_pr_merge`, `forge_pr_create`, `forge_whoami`): each prints one
+normalised JSON value or fails, with the same shape from either backend.
+`cel forge` puts them on the command line (`repo`, `whoami`, `pr
+view|checks|reviews|list|create`, `--json` for the normalised value); the
+guard leaves its reads to every role and refuses `pr create` to orchestrators
+and core, as it refuses `gh pr create`, and a reviewer never opens a PR.
+There is no merge verb: merging goes through `cel solo land` /
+`cel-fanout land`. The same writes by hand - curl at a forge API with a body
+or a non-GET method in any spelling, `tea api` beyond a plain GET, tea's
+write verbs - are refused to orchestrators, root, core, workers and solo
+agents alike, and no role may read, copy or write `~/.config/cel/forge` (by
+shell, or by the native read and edit tools where the guard hook runs).
+
+- **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
+  `CEL_FORGE_GH` is its test seam.
+- **Forgejo** is served over its REST API with curl, as the account whose
+  token is in `${XDG_CONFIG_HOME:-~/.config}/cel/forge/<host>.token` (mode
+  600, owned by the user; the host as the descriptor names it, e.g.
+  `forgejo.internal.token`). A missing token, or one open to the group or
+  others, is refused by name before any request. The token is read only for
+  a request to that exact host and reaches curl as a config line on its
+  stdin - never in argv, a file or a log - and curl follows no redirect.
+  `CEL_FORGE_CURL` is its test seam, honoured only under `CEL_TESTING`; on
+  a plain-http repo every operation says on stderr that the token is sent
+  unencrypted. List endpoints are read page by page
+  until a page comes back empty (a short page proves nothing: the server
+  caps `limit`). Where Forgejo cannot say what GitHub says, the answer is the
+  conservative one: a draft is the `WIP:` title prefix (added by
+  `forge_pr_create` only where `policy.pr_open` is not `ready`; a WIP title
+  under a ready policy is refused); `mergeable: false` reads as
+  `conflicting`; review `decision` is `approved` only for a non-stale,
+  undismissed approval whose `commit_id` is the current head, and no
+  reviewer's latest verdict requesting changes. Checks are the head's
+  combined status (latest status per context). The base's required checks
+  come from its branch protection: the exact rule, else every glob rule
+  matching the branch; `unprotected` only on Forgejo's own 404 for the exact
+  rule AND no matching glob, `unknown` on any other error, a glob this cannot
+  evaluate, a context that is a pattern, or status checks on with no context
+  named. A merge re-reads the head first and refuses a moved one before
+  sending anything, then posts `Do: squash`, `head_commit_id` and
+  `delete_branch_after_merge`.
+
+`cel solo land` and `cel solo review` (`lib/solo.sh`), the steward's list of
+solo PRs ready to land (`solo_ready_prs`) and the reviewer's PR facts (`cel
+run reviewer`, `lib/run.sh`) speak to the PR's forge through these
+operations, so a Forgejo repo opens, reviews and lands like a GitHub one: the
+review verdict is Celestial's own (`.cel/solo-reviews.json`), bound to the
+exact head; the reviewer's checkout and the local gate fetch
+`refs/pull/<n>/head`, which both forges serve, and the local gate refuses
+unless that ref is the head it ran on. Whether CI may stand in for the gate
+is `land_ci_gate` (`lib/land.sh`), shared with `cel-fanout land`: it takes
+`{number, head_sha, base_ref}` and one `forge_pr_checks` read, so the base's
+required checks (GitHub classic protection and rulesets, or Forgejo's
+branch protection rules) and their latest runs on the head come from the
+same provider-dispatched answer. The rest of `cel-fanout`, gc and release
+still call `gh` directly and move onto these operations separately.
 
 ## Credentials
 
