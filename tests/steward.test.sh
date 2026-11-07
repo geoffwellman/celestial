@@ -1810,6 +1810,27 @@ test_steward_restarts_a_deaf_solo_lane_as_a_lane() {
   rm -rf "$T"
 }
 
+test_steward_zero_confirm_deaf_lane_restarts_across_second_rollover() {
+  _hook_fixture idle empty
+  _steward_restart_orch() { printf '%s\n' "$*" >> "$T/restarted"; }
+  printf 'bundle-disk-cleanup\talpha\tbundle\tw:p3\tidle\tdeaf\tcel run solo --product bundle --lane disk-cleanup --workspace alpha --restart\tdisk-cleanup\n' > "$T/rows"
+  printf '1700000000\n' > "$T/clock"
+  date() {
+    if [ "${1:-}" = +%s ]; then
+      local clock
+      read -r clock < "$T/clock"
+      printf '%s\n' "$((clock + 1))" > "$T/clock"
+      printf '%s\n' "$clock"
+    else
+      command date "$@"
+    fi
+  }
+  CEL_STEWARD_DEAF_CONFIRM=0 _steward_inbox_hooks >/dev/null
+  assert_eq "$(cat "$T/restarted")" 'bundle alpha disk-cleanup'
+  assert_contains "$(_root_mail)" 'bundle-disk-cleanup has its inbox hook but no live inbox watcher'
+  rm -rf "$T"
+}
+
 
 # The composer is empty only when the pane PROVES it: an editor box between
 # two dividers with nothing in it. Anything else - text, no box, no read - is

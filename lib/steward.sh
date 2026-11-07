@@ -535,7 +535,7 @@ _steward_forget_unseen() { # <prefix> [key...]
 }
 
 _steward_inbox_hooks() {
-  local name ws p pane status state cmd lane unit fp stuck key seen now last why deaf_seen=()
+  local name ws p pane status state cmd lane unit fp stuck key seen seen_at now last why deaf_seen=()
   local gone hint still has_no fixed cleared lost
   while IFS=$'\t' read -r name ws p pane status state cmd lane; do
     [ -n "$name" ] || continue
@@ -569,8 +569,11 @@ _steward_inbox_hooks() {
       deaf)
         # Deaf must outlast the hook's own restart backoff (60s): a watcher
         # caught between two of the hook's restarts is not deafness.
+        # Record a new sighting before sampling decision time: otherwise a
+        # second rollover makes its age negative even with no confirm delay.
+        seen_at="$(_steward_first_seen "$seen")"
         now="$(date +%s)"
-        [ $((now - $(_steward_first_seen "$seen"))) -ge "${CEL_STEWARD_DEAF_CONFIRM:-120}" ] || continue
+        [ $((now - seen_at)) -ge "${CEL_STEWARD_DEAF_CONFIRM:-120}" ] || continue
         gone="has its inbox hook but no live inbox watcher"; hint=" (its cel inbox watch --parent child is gone)"
         still="still without a live inbox watcher"; has_no="has no live inbox watcher"
         fixed="restarted it so its inbox hook starts a new watcher"; cleared="was restarted so its hook starts a new watcher"
