@@ -448,10 +448,10 @@ _v2_hit_everything_without_the_ledger() { # <worktree>
   assert_eq "$(printf '%s' "$st" | jq -r '.inflight[] | select(.branch == "ABC-1-widget") | .agent')" "pi" || return 1
   assert_eq "$(printf '%s' "$st" | jq '[.inflight[] | keys[] | select(. == "model" or . == "shape" or . == "why" or . == "verdict")] | length')" "0" || return 1
   local f
-  for f in fleet services since activity stuck lanes load merges cycle heat usage; do
+  for f in fleet services since activity stuck lanes load merges cycle heat usage teams; do
     curl -sf -m 20 -o "$T/feed.$f" "$(_v2_url "$f?ws=all")" || { echo "feed $f failed"; return 1; }
   done
-  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq '[.feeds[] | .v != null] | all and length == 11')" "true" || return 1
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq '[.feeds[] | .v != null] | all and length == 12')" "true" || return 1
   assert_eq "$(jq 'has("workers")' "$T/feed.fleet")" "false" || return 1
   assert_eq "$(jq '[.items[].kind | select(. == "worker" or . == "review")] | length' "$T/feed.activity")" "0" || return 1
   assert_eq "$(jq -r '[.items[].reason] | unique | join(",")' "$T/feed.stuck")" "merge_conflict" || return 1
@@ -634,7 +634,7 @@ test_v2_snapshot_carries_every_card_feed_with_its_age() {
   _v2_boot
   local s; s="$(_v2_get "$(_v2_url 'snapshot?ws=all')")"
   local f
-  for f in fleet services since activity stuck lanes load merges cycle heat usage; do
+  for f in fleet services since activity stuck lanes load merges cycle heat usage teams; do
     assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].v != null')" "true"
     assert_eq "$(printf '%s' "$s" | jq --arg f "$f" '.feeds[$f].at | test("^[0-9]{4}-")')" "true"
   done
@@ -642,6 +642,65 @@ test_v2_snapshot_carries_every_card_feed_with_its_age() {
   assert_eq "$(printf '%s' "$s" | jq '.feeds.merges.v.days | length')" "14"
   local h; h="$(curl -sf -m 20 -D - -o /dev/null "$(_v2_url 'heat?ws=all')" | tr -d '\r' | grep -i '^x-cel-computed-at:' || true)"
   assert_contains "$h" "x-cel-computed-at"
+  _v2_down
+}
+
+# --- Feature teams ------------------------------------------------------------
+# The card's feed reads each workspace's .cel/teams/<feature>/ - team.json,
+# events.jsonl, verdicts.json - and nothing else: the candidate is the latest
+# candidate.updated event (a member's recorded branch is never read as one),
+# live is an agent of exactly the member's alias, and a team.json that does
+# not parse is a row saying so.
+_V2_H1=1111111111111111111111111111111111111111
+_V2_H2=2222222222222222222222222222222222222222
+_v2_team_fixture() {
+  local d="$T/alpha/.cel/teams/checkout-v2" g="$T/alpha/.cel/teams/gadget-api"
+  mkdir -p "$d" "$g" "$T/alpha/.cel/teams/broken" "$T/alpha/.cel/teams/no-roster-yet" "$g/wt/alpha-gadget-api-builder"
+  jq -n --arg c "$(_v2_ago 1200)" '{feature: "checkout-v2", product: "widget", workspace: "alpha", lead: "widget-orch", repos: ["widget"],
+    created: $c, state: "open", members: [
+      {alias: "widget-checkout-v2-builder", role: "builder", focus: "frontend", repo: "widget", branch: "team/checkout-v2/builder", state: "working", created: $c},
+      {alias: "widget-checkout-v2-qa", role: "qa", focus: "browser", repo: null, state: "reserved", created: $c},
+      {alias: "widget-checkout-v2-design", role: "design", focus: "ux", state: "retired", created: $c}]}' > "$d/team.json"
+  {
+    jq -nc --arg t "$(_v2_ago 1200)" '{ts: $t, by: "widget-orch", type: "member.reserved", data: {alias: "widget-checkout-v2-qa"}}'
+    jq -nc --arg t "$(_v2_ago 3000)" --arg h "$_V2_H1" '{ts: $t, by: "widget-orch", type: "candidate.updated", data: {repo: "widget", head: $h}}'
+    printf '{"torn line\n'
+    jq -nc --arg t "$(_v2_ago 100)" --arg h "$_V2_H2" '{ts: $t, by: "widget-orch", type: "candidate.updated", data: {repo: "widget", head: $h}}'
+  } > "$d/events.jsonl"
+  jq -n --arg h1 "$_V2_H1" --arg h2 "$_V2_H2" --arg a "$(_v2_ago 2000)" --arg b "$(_v2_ago 50)" '[
+    {role: "qa", focus: "browser", repo: "widget", head: $h1, verdict: "pass", by: "widget-checkout-v2-qa", at: $a, evidence: []},
+    {role: "reviewer", focus: "security", repo: "widget", head: $h1, verdict: "pass", by: "widget-pr-7-review", at: $a, evidence: []},
+    {role: "reviewer", focus: "security", repo: "widget", head: $h2, verdict: "changes", by: "widget-pr-7-review", at: $b, evidence: []}]' > "$d/verdicts.json"
+  # a builder with a branch and a checkout on disk, and no candidate recorded:
+  # nothing on disk is promoted to a candidate
+  jq -n --arg c "$(_v2_ago 600)" --arg wt "$g/wt/alpha-gadget-api-builder" '{feature: "gadget-api", product: "widget", lead: "widget-orch",
+    repos: ["widget"], created: $c, state: "open", members: [{alias: "alpha-gadget-api-builder", role: "builder", focus: "backend",
+    repo: "widget", branch: "team/gadget-api/builder", worktree: $wt, state: "ready", created: $c}]}' > "$g/team.json"
+  printf 'gitdir: /nowhere\n' > "$g/wt/alpha-gadget-api-builder/.git"
+  printf '{"feature": "broken", "members": [' > "$T/alpha/.cel/teams/broken/team.json"
+  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"widget-checkout-v2-builder\",\"agent\":\"pi\",\"agent_status\":\"working\",\"cwd\":\"$d\",\"pane_id\":\"w5:p1\"}],\"workspaces\":[]}}'" > "$T/bin/herdr"
+}
+
+test_v2_teams_feed_reads_the_team_files_only() {
+  _v2_boot; _v2_team_fixture
+  local f; f="$(_v2_get "$(_v2_url 'teams?ws=alpha')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.items[].feature] | join(",")')" "broken,checkout-v2,gadget-api"
+  assert_eq "$(printf '%s' "$f" | jq -r '.items[0].error')" "team.json does not parse"
+  local t; t="$(printf '%s' "$f" | jq -c '.items[1]')"
+  assert_eq "$(printf '%s' "$t" | jq -r '"\(.product)|\(.lead)|\(.state)"')" "widget|widget-orch|open"
+  assert_eq "$(printf '%s' "$t" | jq -r '[.members[] | "\(.alias)|\(.role)/\(.focus)|\(.state)|\(.live)"] | join(",")')" \
+    "widget-checkout-v2-builder|builder/frontend|working|working,widget-checkout-v2-qa|qa/browser|reserved|not running,widget-checkout-v2-design|design/ux|retired|not running"
+  assert_eq "$(printf '%s' "$t" | jq -r '[.candidates[] | "\(.repo)@\(.head)"] | join(",")')" "widget@$_V2_H2"
+  # each role's latest word; qa's is for the old head, the reviewer's for the candidate
+  assert_eq "$(printf '%s' "$t" | jq -r '[.verdicts[] | "\(.role)/\(.focus) \(.verdict) \(.head[0:4]) \(.fresh)"] | sort | join(",")')" \
+    "qa/browser pass 1111 stale,reviewer/security changes 2222 fresh"
+  assert_eq "$(printf '%s' "$t" | jq -r '[.owes[] | "\(.who): \(.what)"] | join(" | ")')" \
+    "widget-orch: widget-checkout-v2-qa reserved 20m ago - launch unconfirmed: look, then retire it or add it again | widget-orch: widget@222222222222: reviewer/security says changes"
+  t="$(printf '%s' "$f" | jq -c '.items[2]')"
+  assert_eq "$(printf '%s' "$t" | jq -c '.candidates')" "[]"
+  assert_eq "$(printf '%s' "$t" | jq -r '.owes[0].who')" "alpha-gadget-api-builder"
+  # another workspace's view has none of alpha's teams
+  assert_eq "$(_v2_get "$(_v2_url 'teams?ws=bundle')" | jq -c '.items')" "[]"
   _v2_down
 }
 

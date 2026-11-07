@@ -10,7 +10,7 @@
 #   forge_pr_view   <wsdir> <repo> <number>
 #       {number, state: open|closed|merged, head_sha, head_ref, base_ref,
 #        author, draft, mergeable: clean|conflicting|behind|unknown,
-#        merged_at, url}
+#        merged_at, url, labels: [name, ...]}
 #   forge_pr_list   <wsdir> <repo> <open|closed|merged|all> [--author LOGIN|@me] [--head BRANCH] [--limit N]
 #       [<the forge_pr_view object>, ...]
 #   forge_pr_checks <wsdir> <repo> <number>
@@ -122,7 +122,7 @@ _forge_gh() { # <wsdir> <gh args...>
   CEL_WS_GH_BIN="${CEL_FORGE_GH:-gh}" ws_gh "$@"
 }
 
-_FORGE_GH_PR_FIELDS=number,state,headRefOid,headRefName,baseRefName,author,isDraft,mergeable,mergeStateStatus,mergedAt,url
+_FORGE_GH_PR_FIELDS=number,state,headRefOid,headRefName,baseRefName,author,isDraft,mergeable,mergeStateStatus,mergedAt,url,labels
 
 # GitHub's PR fields in Celestial's words. An empty string is absence (null),
 # and anything gh did not state plainly is `unknown`, never `clean`: GitHub
@@ -140,7 +140,8 @@ def gh_pr:
                   elif .mergeable == "MERGEABLE" and .mergeStateStatus == "BEHIND" then "behind"
                   elif .mergeable == "MERGEABLE" then "clean"
                   else "unknown" end),
-      merged_at: (.mergedAt | _s), url: (.url | _s) };
+      merged_at: (.mergedAt | _s), url: (.url | _s),
+      labels: [(.labels // [])[]? | .name? | strings] };
 def gh_check:
   if .__typename == "StatusContext" or (.context != null and .name == null) then
     { name: (.context | _s),
@@ -418,7 +419,8 @@ def fj_pr:
                   elif .mergeable != true then "unknown"
                   elif (.merge_base | _s) != null and (.base.sha | _s) != null and .merge_base != .base.sha then "behind"
                   else "clean" end),
-      merged_at: (.merged_at | _s), url: (.html_url | _s) };
+      merged_at: (.merged_at | _s), url: (.html_url | _s),
+      labels: [(.labels // [])[]? | .name? | strings] };
 def fj_latest: group_by(.context // "") | map(max_by(.id // 0));
 def fj_check:
   ((.status // .state) | _s) as $st

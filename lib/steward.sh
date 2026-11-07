@@ -661,17 +661,27 @@ _steward_inbox_hooks() {
   return 0
 }
 
+# WAITING ON THE OWNER IS NOT A WORKER FINDING: no worker can, say, pay an
+# external review bot's bill. An open decision filed with
+# `cel decide ask --pr <repo>#<n>` silences every nudge about exactly that PR
+# until it is closed - the review sweep's and the solo changes-verdict one
+# alike. Only the explicit link counts: free text naming "#7" is too loose to
+# identify a PR. One `<repo>#<n>` per line.
+_steward_owner_prs() { # <ws>
+  # shellcheck source=lib/decide.sh
+  . "${BASH_SOURCE[0]%/*}/decide.sh"
+  decide_open_json "$1" 2>/dev/null | jq -r '.prs[]?.ref // empty' 2>/dev/null || true
+}
+# "LEAVE IT" IS SAYABLE. A `superseded` or `hold` label tells the steward to
+# stop nudging about a PR (e.g. one whose code reached main through others).
+# A jq definition over a PR's label NAMES, for every sweep that nudges.
+_STEWARD_JQ_LEFT_ALONE='def left_alone: any(.[]?; strings | ascii_downcase | . == "superseded" or . == "hold");'
+
 _steward_review_sweep() { # <agents-json>
   local agents_json="$1" ws wsdir repo slug orch prsj ref
   printf '%s' "$agents_json" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
-  # WAITING ON THE OWNER IS NOT A WORKER FINDING: no worker can, say, pay an
-  # external review bot's bill. An open decision filed with
-  # `cel decide ask --pr <repo>#<n>` silences the red, changes-requested and
-  # no-worker nudges for exactly that PR until it is closed. Only the explicit
-  # link counts: free text naming "#7" is too loose to identify a PR. Read once
-  # per workspace.
-  # shellcheck source=lib/decide.sh
-  . "${BASH_SOURCE[0]%/*}/decide.sh"
+  # Owner cards (_steward_owner_prs) silence the red, changes-requested and
+  # no-worker nudges for their PRs. Read once per workspace.
   local -A owner_prs
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
@@ -679,7 +689,7 @@ _steward_review_sweep() { # <agents-json>
     owner_prs=()
     while IFS= read -r ref; do
       [ -n "$ref" ] && owner_prs["$ref"]=1
-    done < <(decide_open_json "$ws" 2>/dev/null | jq -r '.prs[]?.ref // empty' 2>/dev/null || true)
+    done < <(_steward_owner_prs "$ws")
     for repo in $(ws_repo_names "$wsdir"); do
       slug="$(ws_repo_get "$wsdir" "$repo" url \
               | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
@@ -705,11 +715,9 @@ _steward_review_sweep() { # <agents-json>
       # below it, including reminders about our ticket naming convention.
       prsj="$(ws_gh "$wsdir" pr list --repo "$slug" --author @me \
               --json number,headRefName,headRefOid,reviewDecision,isDraft,statusCheckRollup,createdAt,labels,reviews 2>/dev/null)" || continue
-      # "LEAVE IT" IS SAYABLE. A `superseded` or `hold` label tells the steward
-      # to stop nudging about a PR (e.g. one whose code reached main through
-      # others); such a PR is dropped before any check below sees it.
-      prsj="$(printf '%s' "$prsj" | jq -c '[.[] | select([.labels[]?.name | ascii_downcase]
-        | any(. == "superseded" or . == "hold") | not)]' 2>/dev/null)" || continue
+      # A `superseded` or `hold` PR (_STEWARD_JQ_LEFT_ALONE) is dropped before
+      # any check below sees it.
+      prsj="$(printf '%s' "$prsj" | jq -c "$_STEWARD_JQ_LEFT_ALONE"'[.[] | select([.labels[]?.name] | left_alone | not)]' 2>/dev/null)" || continue
 
       # UNTICKETED PRs. Linear links a PR to its ticket purely from the branch
       # name, so a branch with no identifier can never be tracked: no status to
@@ -792,13 +800,25 @@ _steward_review_sweep() { # <agents-json>
 # stall is the last step: a PR approved at its head with every check green,
 # waiting on its own agent to land it. That agent is told once per head (the
 # key carries it, so a new push is a new fact); the steward never lands it.
+#
+# AND ITS PRS SENT BACK. A solo PR's reviewer records its verdict with `cel
+# solo review` in the workspace's .cel/solo-reviews.json, and that verdict
+# never reaches the forge - so a `changes` verdict is invisible to the review
+# sweep above, and an agent that missed the reviewer's mail leaves the PR
+# sitting. The product's agent is told once per head when the verdict on
+# record is `changes` at the PR's CURRENT head: a push since means the verdict
+# no longer covers the head (nothing to say until the reviewer records the new
+# one), and a `changes` verdict at the new head is a new key, a new nudge.
+# It is silenced exactly as the review sweep is: an open owner card on the PR,
+# or a `hold`/`superseded` label.
 _steward_solo_sweep() {
-  local ws wsdir product repo pr head
+  local ws wsdir product repo pr head by note owner
   # shellcheck source=lib/solo.sh
   . "${BASH_SOURCE[0]%/*}/solo.sh"
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ -f "$wsdir/workspace.yaml" ] || continue
+    owner=""
     for product in $(ws_product_names "$wsdir"); do
       [ "$(ws_build_mode "$wsdir" "$product")" = solo ] || continue
       while IFS=$'\t' read -r repo pr head; do
@@ -808,8 +828,215 @@ _steward_solo_sweep() {
         _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "solo-ready-$ws-$repo-$pr-${head:0:12}" \
           "steward: $repo#$pr is approved at its current head and every check is green - land it: cel solo land $repo#$pr"
       done < <(solo_ready_prs "$wsdir" "$product")
+      # the owner cards are read once per workspace, and only when there is
+      # a solo verdict file to weigh them against
+      [ -s "$(_solo_reviews "$wsdir")" ] || continue
+      [ -n "$owner" ] || owner="$(_steward_owner_prs "$ws")"$'\n'
+      while IFS=$'\t' read -r repo pr head by note; do
+        [ -n "$pr" ] || continue
+        _STEWARD_WINDOW=999999999 _steward_nudge "$product-orch" "$ws" "$(_steward_solo_changes_key "$ws" "$repo" "$pr" "$head")" \
+          "steward: $repo#$pr has a recorded \`changes\` verdict from $by at its current head ${head:0:12}${note:+ (\"$note\")} and nothing was pushed since - address it on the PR's branch, push, and ask $by to re-review the new head."
+      done < <(_steward_solo_changes "$ws" "$wsdir" "$product" "$owner")
     done
   done
+}
+
+_steward_solo_changes_key() { printf 'solo-changes-%s-%s-%s-%s' "$1" "$2" "$3" "${4:0:12}"; } # <ws> <repo> <pr> <head>
+
+# Read-only looks at the steward's state, for a check that must come BEFORE
+# a forge call: is the key recorded at all / recorded inside <window> seconds?
+_steward_state_has() { # <key>
+  [ -f "$_STEWARD_STATE" ] && awk -v k="$1" '$1 == k { f = 1 } END { exit !f }' "$_STEWARD_STATE"
+}
+_steward_state_within() { # <key> <window>
+  [ -f "$_STEWARD_STATE" ] && awk -v k="$1" -v now="$(date +%s)" -v w="$2" \
+    '$1 == k { t = $2 } END { exit !(t != "" && now - t < w) }' "$_STEWARD_STATE"
+}
+
+# The open PRs of <product> whose recorded solo verdict is `changes` at their
+# current head, one `<repo>\t<pr>\t<head>\t<by>\t<note>` line each.
+#
+# THE FORGE IS ASKED ONLY ABOUT WHAT COULD STILL BE NEWS. A nudge needs the
+# PR's head to equal the verdict's, so the nudge key is known from the verdict
+# file alone: a verdict already nudged at its head, under an open owner card,
+# or set aside in the last day costs no forge call. Only for the rest is the
+# repo's open-PR list read (forge_pr_list, either forge - heads never come
+# from a branch), once per repo. A verdict whose PR is not open, is a draft,
+# has moved on, carries a `hold`/`superseded` label, or already carries the
+# same changes request on GitHub (the review sweep's to say) is set aside for
+# a day (`solo-changes-idle-*`): long-merged PRs whose old verdicts linger in
+# the file cost one list a day, not one a tick.
+# A verdict file that does not parse is said, never read as "no verdicts".
+_steward_solo_changes() { # <ws> <wsdir> <product> <owner-pr-refs, one per line>
+  local ws="$1" wsdir="$2" product="$3" owner=$'\n'"$4" f verdicts repo prs num vhead pr by note idle
+  local -a pending
+  f="$(_solo_reviews "$wsdir")"
+  [ -s "$f" ] || return 0
+  verdicts="$(jq -ce 'if type == "object" then . else error("not an object") end' "$f" 2>/dev/null)" \
+    || { c_warn "$f does not parse - no solo changes-verdict nudges for $ws this tick" >&2; return 0; }
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    pending=()
+    while IFS=$'\t' read -r num vhead; do
+      [ -n "$num" ] || continue
+      case "$owner" in *$'\n'"$repo#$num"$'\n'*) continue ;; esac
+      _steward_state_has "$(_steward_solo_changes_key "$ws" "$repo" "$num" "$vhead")" && continue
+      _steward_state_within "solo-changes-idle-$ws-$repo-$num-${vhead:0:12}" 86400 && continue
+      pending+=("$num $vhead")
+    done < <(printf '%s' "$verdicts" | jq -r --arg p "$repo#" '
+      to_entries[] | select((.key | startswith($p)) and (.key | ltrimstr($p) | test("^[0-9]+$"))
+                            and .value.verdict? == "changes" and ((.value.head? // "") | test("^[0-9a-f]{40}$")))
+      | [(.key | ltrimstr($p)), .value.head] | @tsv' 2>/dev/null || true)
+    [ "${#pending[@]}" -gt 0 ] || continue
+    prs="$(_solo_forge forge_pr_list "$wsdir" "$repo" open --author @me --limit 50 2>/dev/null)" || continue
+    for pr in "${pending[@]}"; do
+      num="${pr%% *}" vhead="${pr#* }"
+      idle="solo-changes-idle-$ws-$repo-$num-${vhead:0:12}"
+      if ! printf '%s' "$prs" | jq -e --argjson n "$num" --arg h "$vhead" "$_STEWARD_JQ_LEFT_ALONE"'
+           any(.[]?; .number == $n and .draft == false and .head_sha == $h and ((.labels // []) | left_alone | not))' >/dev/null 2>&1 \
+         || _steward_forge_changes_at "$wsdir" "$repo" "$num" "$vhead"; then
+        _STEWARD_WINDOW=86400 _steward_due "$idle" || true
+        continue
+      fi
+      IFS=$'\t' read -r by note < <(printf '%s' "$verdicts" | jq -r --arg k "$repo#$num" '.[$k] as $r
+        | [(if ($r.by | type) == "string" and $r.by != "" then $r.by else "its reviewer" end),
+           (($r.note // "") | tostring | gsub("[\t\n\r]+"; " ") | .[0:200])] | @tsv') || true
+      printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$num" "$vhead" "$by" "$note"
+    done
+  done < <(ws_product_repos "$wsdir" "$product")
+}
+
+# True when <repo> is on GitHub and its PR's own reviews request changes at
+# <head> - the condition the review sweep's `<slug>#<n>-changes` nudge mails
+# about (the PR has passed the same owner-card and label checks there and
+# here). The recorded verdict is then the same finding, said once.
+_steward_forge_changes_at() { # <wsdir> <repo> <pr> <head>
+  [ "$(forge_repo "$1" "$2" "$1/repos/$2" 2>/dev/null | jq -r '.provider // ""' 2>/dev/null)" = github ] || return 1
+  _solo_forge forge_pr_reviews "$1" "$2" "$3" 2>/dev/null | jq -e --arg h "$4" \
+    '.decision == "changes_requested" and any(.reviews[]?; .state == "changes_requested" and .head_sha == $h)' >/dev/null 2>&1
+}
+
+# FEATURE TEAMS (`cel team ...`, lib/team.sh). The steward reads each team's
+# own files - <wsdir>/.cel/teams/<feature>/team.json, events.jsonl and
+# verdicts.json - and nothing else: no ledger, no branch names. Two things
+# stall a team that nobody inside it will notice, and its lead (team.json
+# `lead`, else `<product>-orch`) is told about each once:
+#   - a member still `reserved` ten minutes after its reservation (the latest
+#     member.reserved event for it, else its row's `created`): `cel team add`
+#     never confirmed the launch, so whether an agent runs is unknown. Keyed
+#     on the reservation time, so a new reservation is a new fact.
+#   - a specialist verdict for a head older than its repo's candidate (the
+#     latest candidate.updated event): it no longer covers what would land.
+#     Only each role/focus's latest verdict for the repo counts - one already
+#     at the candidate leaves nothing stale. Keyed on the candidate head, so
+#     the next candidate re-arms it.
+# It retires, relaunches and closes nothing: the lead decides. A closed team
+# is history and says nothing.
+#
+# A team.json or verdicts.json that does not parse, or lacks the fields the
+# sweep reads, is not a team the steward can supervise - and silence would
+# read as a healthy team - so root is told, once per change, and the item is
+# taken down when the files read cleanly again, or when the team (its
+# team.json, its directory, the whole teams folder) is gone: the steward's
+# state remembers each team it raised (`team-bad/<ws>/<feature>`), so a
+# removal is noticed even though nothing is left on disk to read.
+_STEWARD_TEAM_RESERVED_SECS="${CEL_TEAM_RESERVED_SECS:-600}"
+_steward_team_sweep() {
+  local ws wsdir dir feature out lead age kind a b c now k
+  local -A bad
+  now="$(date +%s)"
+  for ws in $(registry_names); do
+    wsdir="$(registry_path "$ws")" || continue
+    bad=()
+    for dir in "$wsdir/.cel/teams"/*/; do
+      dir="${dir%/}"; feature="${dir##*/}"
+      # a directory without a team.json is not a team (yet)
+      [ -e "$dir/team.json" ] || continue
+      out="$(_steward_team_read "$dir" "$feature" "$now")"
+      if [ "${out%%$'\t'*}" = bad ]; then
+        out="${out#bad$'\t'}"; bad["$feature"]=1
+        c_err "team $ws/$feature: $out - not supervised this tick"
+        _steward_raise_on_change "$ws" "team-bad-$feature" blocked \
+          "steward: team $feature in $ws: $out ($dir) - the steward cannot supervise this team until it reads cleanly; nothing was retired or changed"
+        _steward_state_edit "$_STEWARD_STATE" _steward_state_note "team-bad/$ws/$feature" "$now" || true
+        continue
+      fi
+      if _steward_state_has "team-bad/$ws/$feature"; then
+        _steward_clear "$ws" "team-bad-$feature" "team $feature in $ws reads cleanly again"
+        _steward_forget "team-bad/$ws/$feature"
+      fi
+      lead=""
+      # every field is non-empty ("-" for an unknown time): IFS tab is
+      # whitespace to `read`, so an empty field would shift the next one
+      while IFS=$'\t' read -r kind a b c; do
+        case "$kind" in
+          lead) lead="$a" ;;
+          reserved)
+            if [ "$b" != - ]; then age="for $(( (now - b) / 60 ))m"; else age="with no reservation time on record"; fi
+            _STEWARD_WINDOW=999999999 _steward_nudge "$lead" "$ws" "team-reserved-$ws-$feature-$a-$b" \
+              "steward: team $feature: member $a ($c) has been reserved $age - cel team add never confirmed its launch, so whether it is running is unknown. Look (cel team status $feature), then retire it (cel team retire $feature $a) or add it again; the steward retires nothing." ;;
+          stale)
+            _STEWARD_WINDOW=999999999 _steward_nudge "$lead" "$ws" "team-stale-$ws-$feature-${a// /_}-${b:0:12}" \
+              "steward: team $feature: $a's candidate is now ${b:0:12}, but these verdicts are for older heads: $c - they do not cover what would land. Ask for fresh verdicts on ${b:0:12} (cel team status $feature); the steward retires nothing." ;;
+        esac
+      done <<< "$out"
+    done
+    # raised once, and no longer here to read: the item comes down
+    while read -r k _; do
+      feature="${k#"team-bad/$ws/"}"
+      [ -z "${bad["$feature"]:-}" ] || continue
+      _steward_clear "$ws" "team-bad-$feature" "team $feature in $ws is gone (no team.json any more)"
+      _steward_forget "$k"
+    done < <(awk -v p="team-bad/$ws/" 'index($1, p) == 1' "$_STEWARD_STATE" 2>/dev/null || true)
+  done
+}
+
+# One team's files, read into what the sweep acts on: `bad\t<why>` alone, or
+# `lead\t<alias>`, then `reserved\t<alias>\t<since-epoch|->\t<role>` per overdue
+# reservation and `stale\t<repo>\t<candidate>\t<verdicts>` per repo.
+# events.jsonl is append-only, so its last line can be one still being
+# written: an unparseable line is passed over, never a reason to stop.
+_steward_team_read() { # <dir> <feature> <now>
+  local dir="$1" team events verdicts='[]'
+  team="$(jq -c . "$dir/team.json" 2>/dev/null)" && [ -n "$team" ] \
+    || { printf 'bad\tteam.json does not parse'; return 0; }
+  if [ -s "$dir/verdicts.json" ]; then
+    verdicts="$(jq -c 'if type == "array" then . elif type == "object" then [.[]] else error("no") end' "$dir/verdicts.json" 2>/dev/null)" \
+      || { printf 'bad\tverdicts.json does not parse'; return 0; }
+  fi
+  events="$(jq -cR 'fromjson? | select(type == "object")' "$dir/events.jsonl" 2>/dev/null | jq -cs . 2>/dev/null)"
+  [ -n "$events" ] || events='[]'
+  printf '%s' "$team" | jq -r --arg feature "$2" --argjson now "$3" --argjson max "$_STEWARD_TEAM_RESERVED_SECS" \
+    --argjson ev "$events" --argjson vs "$verdicts" '
+    def ep: if type == "number" then . elif type == "string"
+      then (sub("\\.[0-9]+"; "") | sub("[+]00:?00$"; "Z") | (try fromdateiso8601 catch null)) else null end;
+    def bad($w): "bad\t" + $w;
+    if type != "object" then bad("team.json is not an object")
+    elif .feature != $feature then bad("team.json names feature \(.feature | tojson), not its directory")
+    elif (.product | type) != "string" or .product == "" then bad("team.json has no product")
+    elif (.members | type) != "array" then bad("team.json has no members list")
+    elif any(.members[]; type != "object" or (.alias | type) != "string" or .alias == "" or (.state | type) != "string")
+      then bad("a team.json member has no alias or state")
+    elif any($vs[]; type != "object" or (.repo | type) != "string" or (.head | type) != "string")
+      then bad("a verdicts.json entry has no repo or head")
+    else
+      "lead\t\(if (.lead | type) == "string" and .lead != "" then .lead else .product + "-orch" end)",
+      (if (.state // "open") == "closed" then empty else
+        (.members[] | select(.state == "reserved") | . as $m
+          | ([$ev[] | select(.type == "member.reserved" and (.data.alias? // "") == $m.alias) | .ts] | last) as $rts
+          | (($rts | ep) // ($m.created | ep)) as $since
+          | select($since == null or ($now - $since) >= $max)
+          | "reserved\t\($m.alias)\t\(if $since == null then "-" else ($since | floor) end)\t\($m.role // "?")"),
+        ((reduce ($ev[] | select(.type == "candidate.updated" and (.data.repo? | type) == "string"
+                                  and (.data.head? | type) == "string")) as $e
+            ({}; .[$e.data.repo] = $e.data.head)) as $cand
+          | [$vs[] | select($cand[.repo] != null)]
+          | group_by([.repo, (.role // ""), (.focus // "")]) | map(sort_by(.at | ep // 0) | last)
+          | map(select(.head != $cand[.repo])) | group_by(.repo)[]
+          | "stale\t\(.[0].repo)\t\($cand[.[0].repo])\t"
+            + (map("\(.role // "?")\(if (.focus | type) == "string" and .focus != "" then "/" + .focus else "" end) \(.verdict // "?") at \(.head[0:12])") | join(", ")))
+      end)
+    end' 2>/dev/null || printf 'bad\tteam.json could not be read'
 }
 
 # TICKETS THAT ARE READY TO BUILD. Moving a ticket into the trigger state
@@ -1894,6 +2121,9 @@ cmd_steward() { # [--no-gc] [--install [--interval MIN] [--remove]]
 
   _steward_review_sweep "$agents_json"
   _steward_solo_sweep
+  # feature teams: reservations nobody confirmed, verdicts a newer candidate
+  # outdated - the lead is told; nothing is retired
+  _steward_team_sweep
   # (No ledger reconcile or stalled-worker sweep: fan-out was retired on
   # 2026-11-08 and the steward reads no delegation ledger any more.)
   # An item naming a pane that no longer exists cannot be acted on by anyone.
