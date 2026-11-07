@@ -1864,6 +1864,30 @@ test_cel82_status_mail_alone_raises_no_unread_reminder() {
   rm -rf "$T"
 }
 
+# A mailbox that does not parse is unknown, not "nothing actionable": the
+# sweep says so naming the file, wherever the torn line sits, and concludes
+# nothing from it - no reminder, nothing written.
+test_steward_mail_sweep_reports_a_corrupt_mailbox_as_unknown_not_empty() {
+  _orch_fixture; _nudge_herdr_stub
+  mkdir -p "$CEL_INBOX_DIR"
+  local f="$CEL_INBOX_DIR/alpha.jsonl" torn out before
+  local roster='{"result":{"agents":[{"name":"bundle-orch","pane_id":"w:p2","cwd":"/x"}]}}'
+  local decision='{"id":"1","ts":"2020-01-01T00:00:00Z","from":"w","to":"bundle-orch","kind":"decision","message":"merge or wait?"}'
+  for torn in first last; do
+    { [ "$torn" = first ] && printf '{"id":"0","ts":\n'
+      printf '%s\n' "$decision"
+      [ "$torn" = last ] && printf '{"id":"2","ts":\n'; } > "$f"
+    before="$(cksum < "$f")"
+    out="$(PATH="$T/bin:$PATH" _STEWARD_WINDOW=0 _steward_mail_sweep "$roster" 2>&1)"
+    assert_contains "$out" "alpha: mailbox $f is corrupt - its unread mail is unknown" || { echo "torn line $torn"; rm -rf "$T"; return 1; }
+    assert_eq "$(cksum < "$f")" "$before" || { echo "torn line $torn: the sweep wrote to a mailbox it could not read"; rm -rf "$T"; return 1; }
+    if _steward_unread_actionable alpha bundle-orch >/dev/null 2>&1; then
+      echo "torn line $torn: a corrupt mailbox read as nothing actionable"; rm -rf "$T"; return 1
+    fi
+  done
+  rm -rf "$T"
+}
+
 test_cel82_credit_alert_clears_once_credit_is_above_the_floor() {
   _rollup_fixture
   _STEWARD_WINDOW=0 _steward_quota >/dev/null 2>&1

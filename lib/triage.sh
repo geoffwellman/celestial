@@ -181,8 +181,10 @@ _triage_score() { # <json-lines on stdin>
 # The unread mail for a reader, each item carrying a `rank`, highest first.
 # THE ORDERING IS THE CODE'S: rank descending, then oldest first, so the line
 # at the top is the most urgent thing that has been waiting longest.
+# A corrupt mailbox is unknown, not empty: inbox_unread_json has named the
+# file on stderr, and this returns 1 with nothing ranked.
 triage_ranked() { # <ws> <who>
-  local items; items="$(inbox_unread_json "$1" "$2")"
+  local items; items="$(inbox_unread_json "$1" "$2")" || return 1
   [ -n "$items" ] || return 0
   local cached unscored id
   unscored=""
@@ -219,7 +221,7 @@ triage_ranked() { # <ws> <who>
 # to hide something by scoring it low AND shortening the list.
 triage_render() { # <ws> <who> [json]
   local ws="$1" who="$2" json="${3:-0}" n top ranked
-  ranked="$(triage_ranked "$ws" "$who")"
+  ranked="$(triage_ranked "$ws" "$who")" || return 1
   [ -n "$ranked" ] || return 0
   if [ "$json" = 1 ]; then printf '%s\n' "$ranked"; return 0; fi
   top="$(triage_top_n)"

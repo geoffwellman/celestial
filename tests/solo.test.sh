@@ -32,6 +32,8 @@ case "\$1 \$2" in
                        err) echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1;;
                      esac
                      echo '{"required_status_checks":{"contexts":["suite"]}}';;
+       */rules/branches/*) [ "\${STUB_RULES:-}" != denied ] || { echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; }
+                           printf '%s' "\${STUB_RULES:-[[]]}";;
        *check-runs)  printf '%s' "\$STUB_CHECKS";;
        *) echo '{}';;
      esac;;
@@ -184,6 +186,34 @@ test_solo_land_refuses_unreadable_protection_and_a_gate_that_dirties_the_tree() 
   out="$(_land widget#7 2>&1)" && { echo "merged after the gate dirtied the tree"; unset STUB_UNPROTECTED; rm -rf "$T"; return 1; }
   assert_contains "$out" "changed files"
   unset STUB_UNPROTECTED; rm -rf "$T"
+}
+# A base gated only by a repository ruleset: classic protection answers
+# "Branch not protected", but the ruleset requires `suite`. That check is
+# required - land refuses until it is green on the head - and the branch is
+# not one "nothing gates", so the local gate never runs in its place. A
+# ruleset this token cannot read, or a rule requiring checks it does not
+# name, is unknown: refused, local gate not run.
+test_solo_land_requires_a_ruleset_check_on_a_base_classic_protection_calls_unprotected() {
+  _solo_setup fleetbot APPROVED; _solo_gate_repo "touch $T/gate-ran"
+  export STUB_RULES='[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"suite"}],"strict_required_status_checks_policy":false}}]]'
+  export STUB_CHECKS='{"check_runs":[{"name":"docs","conclusion":"success"}]}'
+  local out; out="$(_land widget#7 2>&1)" && { echo "merged with the ruleset's required check absent"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  assert_contains "$out" "suite" || { unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "took the local-gate path on a ruleset-gated base"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  ! _merged || { unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  local rules
+  for rules in denied 'not json' '[[{"type":"workflows","parameters":{"workflows":[]}}]]'; do
+    export STUB_RULES="$rules"
+    out="$(_land widget#7 2>&1)" && { echo "merged on unknown rules ($rules)"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+    assert_contains "$out" "cannot establish" || { unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+    [ ! -f "$T/gate-ran" ] || { echo "ran the local gate on unknown rules ($rules)"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  done
+  export STUB_RULES='[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"suite"}],"strict_required_status_checks_policy":false}}]]'
+  export STUB_CHECKS='{"check_runs":[{"name":"suite","conclusion":"success"}]}'
+  _land widget#7 >/dev/null 2>&1 || { echo "refused a green ruleset check"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  [ ! -f "$T/gate-ran" ] || { echo "ran the local gate although CI stood in"; unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "Gate: CI (suite) on $STUB_HEAD"
+  unset STUB_UNPROTECTED STUB_RULES; rm -rf "$T"
 }
 # The gate runs in the caller's own clean checkout at the head, never in a
 # reviewer's dependency-less one, even when that one is listed first.

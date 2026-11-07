@@ -203,7 +203,14 @@ _steward_mail_sweep() { # <agents-json>
     wsdir="$(registry_path "$ws")" || continue
     local f; f="$(_inbox_file "$ws")"
     [ -s "$f" ] || continue
-    for who in $(jq -r '.to' "$f" 2>/dev/null | sort -u); do
+    # A corrupt mailbox is unknown, not "nothing actionable": said once for
+    # the file (every recipient in it reads the same), and nothing concluded.
+    local whos
+    if ! whos="$(jq -r '.to' "$f" 2>/dev/null)"; then
+      c_warn "$ws: mailbox $f is corrupt - its unread mail is unknown"
+      continue
+    fi
+    for who in $(printf '%s\n' "$whos" | sort -u); do
       case "$who" in *:*) continue;; esac   # pane-addressed, not a mailbox
       # the owner's queue is `cel decide`, summarised once a day below
       [ "$who" = owner ] && continue
@@ -211,7 +218,11 @@ _steward_mail_sweep() { # <agents-json>
       # other senders. Done-reports (`status`) and the steward's own earlier
       # reminders ask nothing of anyone.
       local waiting
-      waiting="$(_steward_unread_actionable "$ws" "$who")"
+      # (the file can tear between the two reads)
+      if ! waiting="$(_steward_unread_actionable "$ws" "$who")"; then
+        c_warn "$ws: mailbox $f is corrupt - its unread mail is unknown"
+        continue 2
+      fi
       n="$(printf '%s\n' "$waiting" | grep -c . || true)"
       [ "${n:-0}" -gt 0 ] || continue
       # age of the OLDEST unread, not the newest: that is how long the
@@ -321,8 +332,12 @@ _steward_stale_nudge_once() { # <ws> <asker> <open-json-lines>
 
 # Unread mail for <who> that someone must answer, decide or unblock - one JSON
 # object per line. Never `status`, never the steward's own reminders.
+# Returns 1 with nothing when the mailbox is corrupt: unknown, never empty.
 _steward_unread_actionable() { # <ws> <who>
-  inbox_unread_json "$1" "$2" | jq -c '
+  local items
+  items="$(inbox_unread_json "$1" "$2" 2>/dev/null)" || return 1
+  [ -n "$items" ] || return 0
+  printf '%s\n' "$items" | jq -c '
     select(.kind == "escalation" or .kind == "decision" or .kind == "blocked")
     | select(.from != "steward")' 2>/dev/null || true
 }

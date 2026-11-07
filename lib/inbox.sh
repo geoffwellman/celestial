@@ -983,15 +983,17 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   if [ "$ranked" -eq 1 ]; then
     # shellcheck source=lib/triage.sh
     . "${BASH_SOURCE[0]%/*}/triage.sh"
+    # One corrupt mailbox does not hide the others' ranked mail; it has said
+    # so on stderr, and the status says one could not be answered.
     if [ "$every" -eq 1 ]; then
-      local m
+      local m bad=0
       for m in $(_inbox_every_ws "$ws"); do
-        triage_render "$m" "$who" "$json" | sed "s/^/[$m] /"
+        ( triage_render "$m" "$who" "$json" | sed "s/^/[$m] /"; exit "${PIPESTATUS[0]}" ) || bad=1
       done
-      return 0
+      return "$bad"
     fi
     triage_render "$(_inbox_ws "$ws")" "$who" "$json"
-    return 0
+    return
   fi
   # Everything waiting on one reader, in ONE call: "what is waiting on me" is
   # not a per-workspace question.

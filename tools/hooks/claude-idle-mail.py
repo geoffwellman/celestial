@@ -78,7 +78,14 @@ def unread(root, target):
     result = subprocess.run(
         ["bash", "-c", 'source "$1/lib/inbox.sh"; inbox_unread_json "$2" "$3"',
          "cel-claude-inbox", root, target["workspace"], target["name"]],
-        capture_output=True, timeout=10, check=True)
+        capture_output=True, timeout=10)
+    if result.returncode != 0:
+        # A selector that FAILED (a corrupt mailbox exits 1 naming the file)
+        # is unknown, not empty: wake, so the session's own read surfaces what
+        # is wrong. The fingerprint is the mailbox's own, not the poll's, so
+        # the wake is sent once for it - retried only until a native receipt,
+        # like any unread set - and re-arms when the mailbox reads again.
+        return hashlib.sha256(("unreadable-mailbox\0" + target["workspace"]).encode()).hexdigest()
     rows = [json.loads(line) for line in result.stdout.splitlines()]
     if not rows:
         return None
