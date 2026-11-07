@@ -127,10 +127,18 @@ _gc_solo_fixture() {
     esac
   }
 }
+# The deletion gate sweeps the box's process table; an unrelated same-uid
+# process whose cwd is unreadable reads as "unknown" and keeps the worktree.
+# Pin the table to this test's own shell, which sits outside the worktree.
 test_gc_removes_a_merged_clean_solo_worktree() {
   _gc_solo_fixture
-  GC_PR=MERGED cmd_gc >/dev/null 2>&1
-  assert_eq "$(cat "$GC_SINK")" "git remove"
+  pgrep() { printf '%s\n' "$$"; }
+  local out="$T/gc.out"
+  GC_PR=MERGED cmd_gc >"$out" 2>&1
+  [ "$(cat "$GC_SINK")" = "git remove" ] || {
+    echo "expected the merged solo worktree removed; sink: '$(cat "$GC_SINK")'; gc said:"
+    cat "$out"; return 1
+  }
   rm -rf "$T"
 }
 test_gc_keeps_a_solo_worktree_with_no_pr_open_pr_or_unsaved_work() {

@@ -33,9 +33,12 @@ $CEL_ROOT/bin/cel publish <file> [name]
 ## Index
 
 `http://<tailscale-ip>:7780/` lists everything published, newest first. The
-server is `cel pages`, kept running in a herdr pane; if a publish URL does not
-respond, the server pane has died - restart it with `cel pages` rather than
-falling back to artifacts.
+server is a user systemd service (`cel-pages`; the public tier is
+`cel-pages-public`) that the steward keeps running. If a publish URL does not
+respond, run `cel pages --ensure` (add `--public` for the public tier) - it
+starts the service only when nothing is serving; `cel pages --restart` stops
+and re-ensures it. Never start a bare `cel pages` in a pane: that is a second,
+unmanaged server. Do not fall back to artifacts.
 
 ## Feedback comes back to YOU
 

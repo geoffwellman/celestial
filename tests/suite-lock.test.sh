@@ -332,6 +332,19 @@ test_a_parallel_run_reports_the_same_results_as_a_serial_one() {
   rm -rf "$T"
 }
 
+# A file name selects that file's tests, all of them, and nothing else.
+test_a_test_file_name_runs_exactly_that_file() {
+  _suite_fixture
+  rm -f "$T/tests/slow.test.sh"
+  printf 'test_one_a() { :; }\ntest_one_b() { :; }\n' > "$T/tests/one.test.sh"
+  printf 'test_two_a() { false; }\n' > "$T/tests/two.test.sh"
+  local out rc=0
+  out="$(bash "$T/tests/run.sh" --no-lock one.test.sh 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "2 passed, 0 failed"
+  rm -rf "$T"
+}
+
 # ---- CEL-100: the watchdog does not outlive its test --------------------------
 # On 2026-10-04 one worker's suite left 385 `sleep 120` processes on PID 1: the
 # watchdog's bash was killed when its test finished, its sleep was not. A run
