@@ -37,7 +37,9 @@ guard_role_of() { # <cwd>
   # A console launched before its retirement carries CEL_ROLE=console and
   # stands in the old console dir; it is guarded as core, never as `other`.
   case "${CEL_ROLE:-}" in core|console) printf core; return 0;; esac
-  [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
+  # worker|scout|spike are retired fan-out roles; a process still carrying one
+  # stays restricted as solo, never `other`.
+  case "${CEL_ROLE:-}" in solo|worker|scout|spike) printf solo; return 0;; esac
   local core="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
   local cons="${XDG_DATA_HOME:-$HOME/.local/share}/cel/console"
   case "$p" in "$core"|"$core"/*|"$cons"|"$cons"/*) printf core; return 0;; esac

@@ -324,6 +324,29 @@ test_hook_lets_a_solo_pane_commit() {
     || { echo "solo commit blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
+# A worker, scout or spike launched before fan-out retired still carries its
+# CEL_ROLE. It stays restricted as a solo agent - never `other`, which would
+# wave everything through: it still writes and pushes its own branch, and is
+# still refused merges, raw forge writes, the forge token and starting agents.
+test_retired_fanout_roles_are_guarded_as_solo() {
+  _gws
+  local r c fj=http://forgejo.internal/api/v1/repos/o/r
+  for r in worker scout spike; do
+    assert_eq "$(CEL_ROLE=$r guard_role_of "$T/repos/widget")" solo || { rm -rf "$T"; return 1; }
+    assert_eq "$(CEL_ROLE=$r guard_role_of /tmp)" solo || { rm -rf "$T"; return 1; }
+    for c in 'gh pr merge 12 --squash' "curl -XPOST $fj/pulls/3/merge" \
+             'cat ~/.config/cel/forge/x.token' 'cel run solo --product bundle' \
+             'cel run orchestrator --product bundle' 'herdr agent start foo --kind pi'; do
+      CEL_ROLE=$r _hook /tmp Bash "{\"command\":\"$c\"}" \
+        && { echo "$r pane allowed: $c"; rm -rf "$T"; return 1; }
+    done
+    CEL_ROLE=$r _hook /tmp Bash '{"command":"git commit -m x"}' \
+      || { echo "$r commit blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
+    CEL_ROLE=$r _hook /tmp Bash '{"command":"git push -u origin WG-1-x"}' \
+      || { echo "$r push blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
 
 # --- the hook end to end ---------------------------------------------------
 _hook() { # <cwd> <tool> <input-json> -> exit code, stderr in $HOOK_ERR
