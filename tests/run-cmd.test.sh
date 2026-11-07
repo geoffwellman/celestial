@@ -162,7 +162,9 @@ test_run_reviewer_targets_review_tab_with_model() {
   # review.runtime names claude, and the reviewer runs on pi: the launch says
   # the field is ignored rather than quietly contradicting it.
   assert_contains "$out" "review.runtime: claude, which is ignored"
-  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
+  # The guard extension rides too: a reviewer is guarded as `other` (no
+  # token, no `cel run member`).
+  assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --extension $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
   assert_contains "$out" "OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   _ws_gateway_clean
@@ -2239,8 +2241,11 @@ _team_fixture() { # <role> -> $T workspace, team "login", member $ALIAS reserved
                 owns:["src/**"], state:"reserved", model:"", created:"2026-11-08T00:00:00Z"}]}' > "$TD/team.json"
   printf '# Scope packet for %s\nBuild the login backend.\n' "$ALIAS" > "$TD/members/$ALIAS.md"
   _team_token
-  # herdr: the roster shows what `agent start` started, in the pane it was given.
   printf '[]' > "$T/started.json"
+  _team_fixture_herdr
+}
+# herdr: the roster shows what `agent start` started, in the pane it was given.
+_team_fixture_herdr() {
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
@@ -2330,7 +2335,7 @@ test_run_member_env_mailbox_and_identity_are_exact() {
   local kv
   for kv in "CEL_ROLE=member" "CEL_WORKSPACE=$T" "CEL_TEAM=login" "CEL_TEAM_ROLE=builder" \
             "CEL_TEAM_MEMBER=$ALIAS" "CEL_INBOX_ME=$ALIAS" "CEL_INBOX_WS=alpha" "CEL_PRODUCT=widget" \
-            "CEL_ROLE_FILE=$TD/members/$ALIAS.role-member.md"; do
+            "CEL_TEAM_BRANCH=team/login/builder" "CEL_ROLE_FILE=$TD/members/$ALIAS.role-member.md"; do
     assert_contains "$sent " " $kv " || { rm -rf "$T"; return 1; }
   done
   assert_contains "$(cat "$HERDR_LOG")" "agent start $ALIAS --kind claude --pane w1:p9"
@@ -2480,7 +2485,7 @@ test_member_retire_keeps_an_unpushed_worktree_and_removes_a_pushed_one() {
   git -C "$T/repos/widget" worktree add -q -b team/login/builder "$wt" "$BASE_SHA"
   "${g[@]}" -C "$wt" commit -q --allow-empty -m 'member work'
   out="$(member_retire "$T" login "$ALIAS" 2>&1)"
-  assert_contains "$out" "kept worktree $wt (team/login/builder was never pushed)"
+  assert_contains "$out" "kept worktree $wt (1 commit(s) origin does not have)"
   [ -d "$wt" ] || { echo "an unpushed worktree was removed"; rm -rf "$T"; return 1; }
   git -C "$wt" push -q origin team/login/builder 2>/dev/null
   printf 'scratch\n' > "$wt/dirty.txt"
@@ -2489,6 +2494,37 @@ test_member_retire_keeps_an_unpushed_worktree_and_removes_a_pushed_one() {
   rm -f "$wt/dirty.txt"
   out="$(member_retire "$T" login "$ALIAS" 2>&1)"
   [ ! -e "$wt" ] || { echo "a clean pushed worktree was kept: $out"; rm -rf "$T"; return 1; }
+  ! git -C "$T/repos/widget" show-ref --verify -q refs/heads/team/login/builder \
+    || { echo "the pushed local branch was kept"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A launch that failed after its worktree was cut leaves a checkout at the
+# base with nothing origin lacks: retiring it removes the worktree AND the
+# branch, so a relaunch is not refused for "branch exists".
+test_member_retire_cleans_a_worktree_still_at_its_base() {
+  _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  printf '[]' > "$T/started.json"
+  local wt="$TD/wt/$ALIAS" out
+  git -C "$T/repos/widget" worktree add -q -b team/login/builder "$wt" "$BASE_SHA"
+  out="$(member_retire "$T" login "$ALIAS" 2>&1)"
+  [ ! -e "$wt" ] || { echo "a worktree at its base was kept: $out"; rm -rf "$T"; return 1; }
+  ! git -C "$T/repos/widget" show-ref --verify -q refs/heads/team/login/builder \
+    || { echo "the base-only branch was kept"; rm -rf "$T"; return 1; }
+  _team_token; jq '.members[0].state = "reserved"' "$TD/team.json" > "$TD/t" && mv "$TD/t" "$TD/team.json"
+  _team_fixture_herdr
+  local rc=0; _member_run >/dev/null || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$T"
+}
+test_member_retire_keep_never_touches_the_worktree() {
+  _retire_fixture CEL_ROLE=member CEL_WORKSPACE=@T@ CEL_TEAM=login "CEL_TEAM_MEMBER=widget-login-builder"
+  local wt="$TD/wt/$ALIAS" out rc=0
+  git -C "$T/repos/widget" worktree add -q -b team/login/builder "$wt" "$BASE_SHA"
+  out="$(member_retire "$T" login "$ALIAS" --keep 2>&1)" || rc=$?
+  assert_eq "$rc" 0
+  assert_contains "$(cat "$HERDR_LOG")" "pane close w1:p9"
+  assert_contains "$out" "kept worktree $wt (--keep)"
+  [ -d "$wt" ] || { echo "--keep removed the worktree"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 test_member_retire_refuses_when_the_inventory_is_unreadable() {

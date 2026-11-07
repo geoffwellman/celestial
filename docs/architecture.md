@@ -71,11 +71,18 @@ token that `cel run member` spends before any check (the guard refuses every
 agent both `cel run member` and the token directory). The launcher admits the
 member under the same launch lock as every `cel run`, gives a builder its own
 worktree on `team/<feature>/<name>` at the recorded base, marks the process
-`CEL_ROLE=member` with `CEL_TEAM`, `CEL_TEAM_ROLE` and `CEL_TEAM_MEMBER`, and
-reports success only when the inventory shows that agent in that pane.
-`member_retire` closes a member's pane only after the pane's process proves
-that launch identity - the same `/proc/<pid>/environ` proof that attributes a
-reviewer to its workspace.
+`CEL_ROLE=member` with `CEL_TEAM`, `CEL_TEAM_ROLE`, `CEL_TEAM_MEMBER` (and a
+builder's `CEL_TEAM_BRANCH`), and reports success only when the inventory
+shows that agent in that pane. `member_retire` closes a member's pane only
+after the pane's process proves that launch identity - the same
+`/proc/<pid>/environ` proof that attributes a reviewer to its workspace.
+The member guard compares paths resolved (realpath against the pane's
+directory and every `cd` in the line), runs git only from known verbs and
+options, lets a builder push only `origin <its branch>`, confines writes to
+the builder's worktree or a read-only role's `artifacts/<role>/` and
+`notes/<alias>/`, gives a member no one-off override and fails closed. Like
+every guard rule it is a tripwire: an interpreter or a script it does not
+parse still runs.
 
 Prompt policy guides agents; it is not a sandbox. Agent commands run with the
 launching user's filesystem and account privileges. Several runtime launch

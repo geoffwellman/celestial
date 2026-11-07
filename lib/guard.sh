@@ -153,7 +153,7 @@ _guard_segments() { # <command> -> one normalised command per line
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
         s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
         s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
-    | sed -E 's#^[^ ]*/(cel|gh|herdr|tea|curl)( |$)#\1\2#' \
+    | sed -E 's#^[^ ]*/(cel|gh|herdr|tea|curl|git)( |$)#\1\2#' \
     | sed -E ':b
         s#^cel (-C [^ ]+|--workspace[= ][^ ]+)( |$)#cel\2#; tb
         s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
@@ -270,11 +270,108 @@ _GUARD_TOKEN_DENY='deny the forge API token (~/.config/cel/forge) is read by `ce
 # A TEAM MEMBER'S LAUNCH TOKEN IS NOBODY'S TO READ EITHER: cel team add writes
 # <ws>/.cel/teams/<feature>/launch/<alias>.token and `cel run member` spends
 # it, both inside one process. An agent that could read or write one could
-# start a member past cel team add's admission.
-_guard_names_launch_token() { # <command-or-path>
+# start a member past cel team add's admission. Matched on the literal
+# spelling AND on every path a command names once resolved against the
+# directories it may run in (_guard_walk, _guard_resolve): a member stands in
+# its team directory, where `launch/x`, `members/../launch` and a symlink all
+# reach the same files.
+_guard_names_launch_token() { # <command-or-path> - the literal spelling
   [[ "$1" =~ \.cel/teams/[^/[:space:]]+/launch([^A-Za-z0-9_.-]|$) ]]
 }
+_guard_launch_path() { # <absolute path> -> 0 when it is a launch dir or in one
+  [[ "$1" =~ /\.cel/teams/[^/]+/launch(/|$) ]]
+}
 _GUARD_LAUNCH_TOKEN_DENY='deny team launch tokens (<ws>/.cel/teams/<feature>/launch/) are written by cel team add and spent by its launcher only - no agent reads, lists or writes them'
+
+# PATHS ARE COMPARED RESOLVED. _guard_norm makes a word absolute against a
+# base and folds `.`, `..` and `//` without touching the disk, into _GN. A word
+# whose value is not in the text - a variable, a glob, ~user, a substitution -
+# has none: rc 1, and callers that need it refuse. _guard_resolve then follows
+# existing symlinks (realpath -m), every path in one call.
+_guard_norm() { # <base> <word> -> 0 and _GN, or 1
+  local base="$1" w="$2" p part
+  local -a out=()
+  _GN=""
+  case "$w" in ''|*'$'*|*'`'*|*'*'*|*'?'*|*'['*|*'{'*) return 1 ;; esac
+  case "$w" in '~') w="$HOME" ;; '~/'*) w="$HOME/${w#'~/'}" ;; '~'*) return 1 ;; esac
+  case "$w" in
+    /*) p="$w" ;;
+    *) [ -n "$base" ] && [ "$base" != '?' ] || return 1; p="$base/$w" ;;
+  esac
+  local IFS=/
+  for part in $p; do
+    case "$part" in
+      ''|.) ;;
+      ..) [ "${#out[@]}" -eq 0 ] || out=("${out[@]:0:${#out[@]}-1}") ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  _GN="/${out[*]}"
+}
+_guard_resolve() { # <absolute path...> -> each with symlinks followed, one per line
+  [ $# -gt 0 ] || return 0
+  realpath -m -- "$@" 2>/dev/null || printf '%s\n' "$@"
+}
+
+# EVERY COMMAND IN THE LINE WITH THE DIRECTORIES IT MAY RUN IN: the pane's
+# (_GUARD_CWD) and every directory a cd/pushd before it named - from each
+# earlier candidate, and the earlier ones kept, since a subshell's cd may have
+# ended. `?` is a directory that cannot be told (cd -, cd $X). File-descriptor
+# duplications (2>&1, &>) are folded first so their `&` does not split a
+# command. Sets _GW_SEG[i] and _GW_DIRS[i] (tab-separated).
+_guard_walk() { # <command>
+  local seg w d
+  local -a dirs=("${_GUARD_CWD:-$PWD}") t nds
+  _GW_SEG=(); _GW_DIRS=()
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [ -n "$seg" ] || continue
+    _GW_SEG+=("$seg")
+    _GW_DIRS+=("$(IFS=$'\t'; printf '%s' "${dirs[*]}")")
+    case "$seg" in
+      cd|"cd "*|pushd|"pushd "*|popd|"popd "*)
+        read -r -a t <<< "$seg"
+        w="${t[1]:-~}"; case "$w" in -[LPe@]) w="${t[2]:-~}" ;; esac
+        [ "${t[0]}" != popd ] || w=-
+        nds=()
+        for d in "${dirs[@]}"; do
+          if [ "$w" != - ] && _guard_norm "$d" "$w"; then nds+=("$_GN"); else nds+=('?'); fi
+        done
+        dirs+=("${nds[@]}") ;;
+    esac
+  done < <(_guard_segments "$(printf '%s' "$1" | sed -E 's/[0-9]*>&[0-9-]+/ /g; s/\|&/|/g; s/&>/>/g')")
+}
+
+# Does any word of the command, resolved, name a launch directory?
+_guard_cmd_reaches_launch() { # <command> -> 0 when it does
+  _guard_names_launch_token "$1" && return 0
+  local i w c d r
+  local -a t ds cands abs=()
+  _guard_walk "$1"
+  for i in "${!_GW_SEG[@]}"; do
+    IFS=$'\t' read -r -a ds <<< "${_GW_DIRS[i]}"
+    read -r -a t <<< "${_GW_SEG[i]}"
+    for w in "${t[@]}"; do
+      cands=("$w")
+      [[ "$w" != *=* ]] || cands+=("${w#*=}")
+      [[ "$w" != *[\<\>]* ]] || cands+=("${w##*[<>]}")
+      for c in "${cands[@]}"; do
+        [ -n "$c" ] && [[ "$c" != -* ]] || continue
+        for d in "${ds[@]}"; do
+          _guard_norm "$d" "$c" && abs+=("$_GN")
+        done
+      done
+    done
+  done
+  [ "${#abs[@]}" -gt 0 ] || return 1
+  for r in "${abs[@]}"; do _guard_launch_path "$r" && return 0; done
+  while IFS= read -r r; do _guard_launch_path "$r" && return 0; done < <(_guard_resolve "${abs[@]}")
+  return 1
+}
+_guard_path_reaches_launch() { # <file path> -> 0 when it is in a launch dir
+  _guard_names_launch_token "$1" && return 0
+  _guard_norm "${_GUARD_CWD:-$PWD}" "$1" || return 1
+  _guard_launch_path "$_GN" || _guard_launch_path "$(_guard_resolve "$_GN")"
+}
 
 # A GIT WRITE anywhere in the line. `git -C <dir> commit`, `git --git-dir=x
 # push`, `git -c k=v merge`: the verb is no longer adjacent to `git`, so those
@@ -353,21 +450,37 @@ _guard_shell_edits_repos() { # <command> -> 0 when it edits under repos/
 }
 
 # ── team members (CEL_ROLE=member; lib/run.sh `cel run member`) ─────────────
-# A member is scoped by CEL_TEAM (its feature) and CEL_TEAM_ROLE, both fixed
-# by its launch. A BUILDER builds like a solo agent, minus every door to the
-# outside: it commits in its own worktree and pushes ONLY team/<feature>/*;
-# it opens no PR, lands nothing - the lead integrates. Every OTHER role reads
-# the repositories and writes only under its team directory
-# (<ws>/.cel/teams/<feature>/), through the cel verbs a member reports with.
+# A member is scoped by its launch: CEL_TEAM (the feature), CEL_TEAM_ROLE,
+# CEL_TEAM_MEMBER (its alias), CEL_WORKSPACE and, for a builder,
+# CEL_TEAM_BRANCH. Without a whole scope everything is refused.
+#
+# A BUILDER writes its own worktree (<team>/wt/<alias>) and nothing else - a
+# shell write may also go to /tmp - commits there, and pushes ONLY
+# `git push origin <its branch>` (or HEAD:<its branch>). It opens no PR and
+# lands nothing: the lead integrates. Every OTHER role reads repositories and
+# writes only <team>/artifacts/<role>/ and <team>/notes/<alias>/ (a product
+# member also brief.md and acceptance.yaml); team.json, events, verdicts,
+# packets, contracts and launch/ change only through `cel team` verbs.
 # No member merges, lands, starts or stops an agent or pane, reads a token or
-# writes to a forge by hand.
+# writes to a forge by hand, and git runs only from a list of known verbs: an
+# unknown one may be an alias for anything.
 _GUARD_TEAM_READONLY_ROLES=' product design qa platform release analyst '
+_GUARD_MEMBER_NO_SCOPE='deny a team member without a whole launch scope (CEL_TEAM, CEL_TEAM_ROLE, CEL_TEAM_MEMBER, CEL_WORKSPACE, and a builder'"'"'s CEL_TEAM_BRANCH) has no scope - ask the lead to retire it and add it again (cel team add)'
 
-_guard_member_scope_ok() {
-  [[ "${CEL_TEAM:-}" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || return 1
-  [ "${CEL_TEAM_ROLE:-}" = builder ] || [[ "$_GUARD_TEAM_READONLY_ROLES" == *" ${CEL_TEAM_ROLE:-} "* ]]
+_guard_member_scope() { # -> 0 and _GM_* set, or 1
+  _GM_TEAM="${CEL_TEAM:-}" _GM_ROLE="${CEL_TEAM_ROLE:-}" _GM_ME="${CEL_TEAM_MEMBER:-}" _GM_BRANCH="${CEL_TEAM_BRANCH:-}"
+  [[ "$_GM_TEAM" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] && [[ "$_GM_ME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+    && [[ "${CEL_WORKSPACE:-}" == /* ]] || return 1
+  if [ "$_GM_ROLE" = builder ]; then
+    [[ "$_GM_BRANCH" =~ ^team/"$_GM_TEAM"/[A-Za-z0-9._-]+$ ]] || return 1
+  else
+    [[ "$_GUARD_TEAM_READONLY_ROLES" == *" $_GM_ROLE "* ]] || return 1
+  fi
+  local -a r
+  mapfile -t r < <(_guard_resolve "$CEL_WORKSPACE/.cel/teams/$_GM_TEAM" "$CEL_WORKSPACE/.cel/teams/$_GM_TEAM/wt/$_GM_ME" "$CEL_WORKSPACE")
+  _GM_TDIR="${r[0]:-}" _GM_WT="${r[1]:-}" _GM_WS="${r[2]:-}"
+  [ -n "$_GM_TDIR" ] && [ -n "$_GM_WT" ] && [ -n "$_GM_WS" ]
 }
-_GUARD_MEMBER_NO_SCOPE='deny a team member without a valid CEL_TEAM and CEL_TEAM_ROLE has no scope - ask the lead to retire it and add it again (cel team add)'
 
 # gh api with a write: a non-GET method or a request body.
 _guard_gh_api_writes() { # <command>
@@ -389,74 +502,311 @@ _guard_gh_api_writes() { # <command>
   return 1
 }
 
-# git's verb in a segment, past its global options; the -C directory too.
-_guard_git_verb() { # <segment> -> "verb<TAB>dir<TAB>index-after-verb", or nothing
-  local -a t; read -r -a t <<< "$1"
-  local i=1 n=${#t[@]} dir=""
-  [ "${t[0]:-}" = git ] || return 0
-  while [ "$i" -lt "$n" ]; do
-    case "${t[i]}" in
-      -C) dir="${t[i+1]:-}"; i=$((i + 2)) ;;
-      -c) i=$((i + 2)) ;;
-      -*) i=$((i + 1)) ;;
-      *) printf '%s\t%s\t%s' "${t[i]}" "${dir:--}" "$((i + 1))"; return 0 ;;
+# May this member write this (absolute, resolved) path? <how>: tool for the
+# native edit tools, bash for a shell write.
+_guard_member_may_write() { # <path> <tool|bash>
+  local p="$1"
+  if [ "$2" = bash ]; then
+    case "$p" in /dev/null|/dev/stdout|/dev/stderr|/dev/tty|/dev/fd/*) return 0 ;; esac
+  fi
+  if [ "$_GM_ROLE" = builder ]; then
+    case "$p" in
+      "$_GM_WT/.git"|"$_GM_WT/.git/"*) return 1 ;;
+      "$_GM_WT"|"$_GM_WT/"*) return 0 ;;
     esac
+    # Scratch, but never the workspace - which may itself sit under /tmp.
+    if [ "$2" = bash ]; then
+      case "$p" in "$_GM_WS"|"$_GM_WS/"*) return 1 ;; /tmp/*|"${TMPDIR:-/tmp}"/*) return 0 ;; esac
+    fi
+    return 1
+  fi
+  case "$p" in
+    "$_GM_TDIR/artifacts/$_GM_ROLE"|"$_GM_TDIR/artifacts/$_GM_ROLE/"*) return 0 ;;
+    "$_GM_TDIR/notes/$_GM_ME"|"$_GM_TDIR/notes/$_GM_ME/"*) return 0 ;;
+  esac
+  if [ "$_GM_ROLE" = product ]; then
+    case "$p" in "$_GM_TDIR/brief.md"|"$_GM_TDIR/acceptance.yaml") return 0 ;; esac
+  fi
+  return 1
+}
+_guard_member_where() { # -> where this member may write, for a refusal
+  if [ "$_GM_ROLE" = builder ]; then
+    printf 'a builder writes only in its own worktree, %s (a shell write also /tmp)' "$_GM_WT"
+  else
+    printf 'a %s team member writes only under %s/artifacts/%s/ and %s/notes/%s/%s - team.json, events, verdicts, packets, contracts and launch/ change only through cel team verbs' \
+      "$_GM_ROLE" "$_GM_TDIR" "$_GM_ROLE" "$_GM_TDIR" "$_GM_ME" "$([ "$_GM_ROLE" != product ] || printf ' (and brief.md, acceptance.yaml)')"
+  fi
+}
+
+# WHAT A SHELL COMMAND WRITES: its redirection targets and the file
+# arguments of the commands that write files. `?` = it writes, but where
+# cannot be told from the text (wget without -O, patch, tar x, unzip).
+# Interpreters (python -c, node -e, a script) are not parsed: a tripwire.
+_guard_seg_targets() { # <segment> -> one word per line
+  local -a t a=() args pos
+  read -r -a t <<< "$1"
+  local i n=${#t[@]} w pre post cmd tgt inplace script
+  for ((i = 0; i < n; i++)); do
+    w="${t[i]}"
+    if [[ "$w" == *'>'* ]]; then
+      pre="${w%%>*}"; post="${w#*>}"; post="${post#>}"; post="${post#|}"
+      [[ "$pre" =~ ^[0-9]*$ ]] || a+=("$pre")
+      if [ -z "$post" ]; then i=$((i + 1)); post="${t[i]:-?}"; fi
+      printf '%s\n' "$post"
+    elif [[ "$w" == *'<'* ]]; then
+      pre="${w%%<*}"; [ -z "$pre" ] || a+=("$pre")
+      [ -n "${w##*<}" ] || i=$((i + 1))
+    else
+      a+=("$w")
+    fi
+  done
+  [ "${#a[@]}" -gt 0 ] || return 0
+  cmd="${a[0]##*/}"; args=("${a[@]:1}"); pos=(); n=${#args[@]}
+  case "$cmd" in
+    tee)
+      for w in "${args[@]}"; do [[ "$w" == -* ]] || printf '%s\n' "$w"; done ;;
+    cp|mv|install|ln|rsync)
+      tgt=""
+      for ((i = 0; i < n; i++)); do
+        w="${args[i]}"
+        case "$w" in
+          -t|--target-directory) tgt="${args[i+1]:-?}"; i=$((i + 1)) ;;
+          --target-directory=*) tgt="${w#*=}" ;;
+          -S|--suffix|-m|--mode|-o|--owner|-g|--group) i=$((i + 1)) ;;
+          -*) ;;
+          *) pos+=("$w") ;;
+        esac
+      done
+      if [ -n "$tgt" ]; then printf '%s\n' "$tgt"
+      elif [ "${#pos[@]}" -ge 2 ]; then printf '%s\n' "${pos[${#pos[@]}-1]}"
+      else printf '?\n'; fi ;;
+    rm|rmdir|touch|mkdir|truncate|unlink|shred)
+      for ((i = 0; i < n; i++)); do
+        w="${args[i]}"
+        case "$w" in
+          -s|--size|-m|--mode|-r|--reference|-n|--iterations) i=$((i + 1)) ;;
+          -*) ;;
+          *) printf '%s\n' "$w" ;;
+        esac
+      done ;;
+    chmod|chown|chgrp)
+      for w in "${args[@]}"; do [[ "$w" == -* ]] || pos+=("$w"); done
+      [[ " ${args[*]} " == *" --reference="* ]] || pos=("${pos[@]:1}")
+      [ "${#pos[@]}" -eq 0 ] || printf '%s\n' "${pos[@]}" ;;
+    sed|perl)
+      inplace=0 script=0
+      for ((i = 0; i < n; i++)); do
+        w="${args[i]}"
+        case "$w" in
+          --in-place*) inplace=1 ;;
+          -e|--expression|-f|--file) script=1; i=$((i + 1)) ;;
+          --*) ;;
+          -*)
+            [[ "$w" != -*i* ]] || inplace=1
+            if [ "$cmd" = perl ] && [[ "$w" == -*e ]]; then script=1; i=$((i + 1)); fi ;;
+          *) pos+=("$w") ;;
+        esac
+      done
+      if [ "$inplace" = 1 ]; then
+        [ "$script" = 1 ] || pos=("${pos[@]:1}")
+        if [ "${#pos[@]}" -gt 0 ]; then printf '%s\n' "${pos[@]}"; else printf '?\n'; fi
+      fi ;;
+    dd)
+      for w in "${args[@]}"; do case "$w" in of=*) printf '%s\n' "${w#of=}" ;; esac; done ;;
+    curl)
+      for ((i = 0; i < n; i++)); do
+        w="${args[i]}"
+        case "$w" in
+          -o|--output) printf '%s\n' "${args[i+1]:-?}"; i=$((i + 1)) ;;
+          --output=*) printf '%s\n' "${w#*=}" ;;
+          -O|--remote-name|--remote-name-all) printf '?\n' ;;
+        esac
+      done ;;
+    wget)
+      tgt='?'
+      for ((i = 0; i < n; i++)); do
+        w="${args[i]}"
+        case "$w" in
+          -O|--output-document) tgt="${args[i+1]:-?}"; i=$((i + 1)) ;;
+          --output-document=*) tgt="${w#*=}" ;;
+          -*O-) tgt=- ;;
+          -*O?*) tgt="${w#*O}" ;;
+        esac
+      done
+      [ "$tgt" = - ] || printf '%s\n' "$tgt" ;;
+    patch|unzip) printf '?\n' ;;
+    tar) if [[ " ${args[*]} " =~ \ (-?[A-Za-z]*x[A-Za-z]*|--extract|--get)\  ]]; then printf '?\n'; fi ;;
+  esac
+  return 0
+}
+
+# Every write target of the walked command, against every directory it may
+# run in, must be one this member may write.
+_guard_member_targets() { # (after _guard_walk) -> deny <reason>, or nothing
+  local i t d k r
+  local -a ds abs=() src=() res
+  for i in "${!_GW_SEG[@]}"; do
+    IFS=$'\t' read -r -a ds <<< "${_GW_DIRS[i]}"
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      if [ "$t" = '?' ]; then
+        printf 'deny %s - and where `%s` writes cannot be told' "$(_guard_member_where)" "${_GW_SEG[i]}"; return 0
+      fi
+      for d in "${ds[@]}"; do
+        _guard_norm "$d" "$t" || { printf 'deny %s - and where %s is (in `%s`) cannot be told' "$(_guard_member_where)" "$t" "${_GW_SEG[i]}"; return 0; }
+        abs+=("$_GN"); src+=("$t")
+      done
+    done < <(_guard_seg_targets "${_GW_SEG[i]}")
+  done
+  [ "${#abs[@]}" -gt 0 ] || return 0
+  mapfile -t res < <(_guard_resolve "${abs[@]}")
+  for k in "${!abs[@]}"; do
+    for r in "${res[k]:-${abs[k]}}"; do
+      _guard_member_may_write "$r" bash \
+        || { printf 'deny %s - not %s' "$(_guard_member_where)" "${src[k]}"; return 0; }
+    done
   done
 }
 
-# A BUILDER'S PUSH: every destination must be team/<feature>/<something>. A
-# destination left to git (a bare `git push`, or HEAD) is the branch the
-# checkout is on, read from the pane's directory (_GUARD_CWD, set by the
-# hook adapters). Pushing everything (--all, --mirror, --tags), deleting
-# (--delete, -d, `:dst`) or naming another remote URL (--repo) is refused.
-_guard_builder_push() { # <segment> -> deny <reason>, or nothing
-  local seg="$1" team="$CEL_TEAM" verb dir at i n w remote="" r src dst cur="" base
-  IFS=$'\t' read -r verb dir at <<< "$(_guard_git_verb "$seg")"
-  [ "$verb" = push ] || return 0
-  local -a t refs=(); read -r -a t <<< "$seg"; n=${#t[@]}
-  local why="a builder pushes only its own branches, team/$team/<name> (git push -u origin HEAD from its worktree)"
-  for ((i = at; i < n; i++)); do
+# git for a member: a known verb, known global options only, and for a
+# builder a write only inside its own worktree.
+_GUARD_GIT_READ=' status log diff show fetch rev-parse rev-list ls-files ls-tree ls-remote cat-file blame annotate grep describe shortlog merge-base name-rev show-ref for-each-ref version help count-objects check-ignore check-attr cherry range-diff whatchanged var diff-tree diff-files diff-index '
+_GUARD_GIT_BUILD=' add commit restore rm mv checkout switch reset rebase merge cherry-pick revert apply am clean pull '
+_guard_member_git() { # <segment> <dirs, tab-separated> -> deny <reason>, or nothing
+  local seg="$1" w kv verb="" kind="" cdir="" i n d listing key builder=0
+  local -a t args pos=() ds locs=() res
+  [ "$_GM_ROLE" != builder ] || builder=1
+  read -r -a t <<< "$seg"; n=${#t[@]}; i=1
+  while [ "$i" -lt "$n" ]; do
     w="${t[i]}"
     case "$w" in
-      --all|--mirror|--tags|--delete|--prune|--repo|--repo=*) printf 'deny %s - not %s' "$why" "$w"; return 0 ;;
-      -o|--push-option|--receive-pack|--exec) i=$((i + 1)) ;;
-      --*) ;;
-      -*) case "$w" in *d*) printf 'deny %s - no deleting' "$why"; return 0 ;; esac ;;
-      *) if [ -z "$remote" ]; then remote="$w"; else refs+=("$w"); fi ;;
+      -C) cdir="${t[i+1]:-}"; [ -n "$cdir" ] || { printf 'deny git -C names no directory'; return 0; }; i=$((i + 2)) ;;
+      -c)
+        kv="${t[i+1]:-}"
+        if [ "$builder" = 1 ] && [[ "$kv" =~ ^(user\.(name|email)|commit\.gpgsign)= ]]; then i=$((i + 2))
+        else printf 'deny a team member sets no git config on the command line (git -c %s): one can redirect a push or run a command' "${kv%%=*}"; return 0; fi ;;
+      --no-pager|-P|-p|--paginate|--no-optional-locks|--literal-pathspecs|--no-replace-objects) i=$((i + 1)) ;;
+      --version|--help|-h) return 0 ;;
+      -*) printf 'deny git %s is not a git option a team member uses (no --git-dir, --work-tree, --exec-path or other global options)' "$w"; return 0 ;;
+      *) verb="$w"; i=$((i + 1)); break ;;
     esac
   done
-  [ "${#refs[@]}" -gt 0 ] || refs=(HEAD)
-  for r in "${refs[@]}"; do
-    r="${r#+}"
-    if [[ "$r" == *:* ]]; then src="${r%%:*}"; dst="${r#*:}"
-      [ -n "$src" ] || { printf 'deny %s - no deleting' "$why"; return 0; }
-    else src="$r"; dst="$r"; fi
-    if [ "$dst" = HEAD ] || [ "$dst" = @ ]; then
-      if [ -z "$cur" ]; then
-        base="${_GUARD_CWD:-$PWD}"
-        [ "$dir" = - ] || { case "$dir" in /*) base="$dir" ;; *) base="$base/$dir" ;; esac; }
-        cur="$(git -C "$base" symbolic-ref -q --short HEAD 2>/dev/null)" || cur=""
-      fi
-      [ -n "$cur" ] || { printf 'deny %s - which branch HEAD is cannot be read here; name it (git push origin HEAD:team/%s/<name>)' "$why" "$team"; return 0; }
-      dst="$cur"
-    fi
-    dst="${dst#refs/heads/}"
-    [[ "$dst" =~ ^team/"$team"/[^/].* ]] || { printf 'deny %s - not %s' "$why" "$dst"; return 0; }
+  [ -n "$verb" ] || return 0
+  args=("${t[@]:i}")
+  for w in "${args[@]}"; do
+    case "$w" in
+      --upload-pack*|--receive-pack*|--exec|--exec=*|--output|--output=*|--open-files-in-pager*|-O|-O?*|--ext-diff|--textconv)
+        printf 'deny git %s %s: a team member runs no git option that writes a file or runs a command' "$verb" "$w"; return 0 ;;
+    esac
+    [[ "$w" == -* ]] || pos+=("$w")
   done
+  case "$_GUARD_GIT_READ" in *" $verb "*) kind=read ;; esac
+  if [ -z "$kind" ]; then
+    case "$_GUARD_GIT_BUILD" in *" $verb "*) kind=write ;; esac
+  fi
+  if [ -z "$kind" ]; then
+    case "$verb" in
+      branch|tag)
+        kind=read listing=0
+        for w in "${args[@]}"; do
+          case "$verb:$w" in
+            *:-d|*:-f|*:--delete|*:--force|*:--create-reflog) kind=write ;;
+            branch:-D|branch:-m|branch:-M|branch:-c|branch:-C|branch:-u|branch:-t|branch:--move|branch:--copy|branch:--set-upstream-to*|branch:--unset-upstream|branch:--edit-description|branch:--track*) kind=write ;;
+            tag:-a|tag:-s|tag:-u|tag:-m|tag:-F|tag:--annotate|tag:--sign) kind=write ;;
+            *:-l|*:--list|*:--contains*|*:--no-contains*|*:--merged*|*:--no-merged*|*:--points-at*) listing=1 ;;
+          esac
+        done
+        [ "${#pos[@]}" -eq 0 ] || [ "$listing" = 1 ] || kind=write ;;
+      remote)
+        if [ "${#pos[@]}" -eq 0 ] || [ "${pos[0]}" = show ] || [ "${pos[0]}" = get-url ]; then kind=read
+        else printf 'deny a team member never changes a git remote (git remote %s)' "${pos[0]}"; return 0; fi ;;
+      stash) case "${pos[0]:-push}" in list|show) kind=read ;; *) kind=write ;; esac ;;
+      reflog) case "${pos[0]:-show}" in show|exists) kind=read ;; *) kind=write ;; esac ;;
+      worktree)
+        [ "${pos[0]:-}" = list ] || { printf 'deny a team member makes no git worktree (git worktree %s): cel run member made its own' "${pos[0]:-}"; return 0; }
+        kind=read ;;
+      symbolic-ref)
+        [ "${#pos[@]}" -le 1 ] || { printf 'deny a team member moves no symbolic ref'; return 0; }
+        kind=read ;;
+      config)
+        if [[ " ${args[*]} " =~ \ (--get|--get-all|--get-regexp|--get-urlmatch|--list|-l|--show-origin|--show-scope|--name-only)\  ]] \
+           || [ "${pos[0]:-}" = get ] || [ "${pos[0]:-}" = list ]; then
+          kind=read
+        else
+          key="${pos[0]:-}"; [ "$key" != set ] || key="${pos[1]:-}"
+          if [ "$builder" = 1 ] && [[ "$key" =~ ^user\.(name|email)$ ]] \
+             && ! [[ " ${args[*]} " =~ \ (--global|--system|--file|-f|--blob|--worktree|--unset|--unset-all|--rename-section|--remove-section|--add|--replace-all)\  ]]; then
+            kind=write
+          else
+            printf 'deny a team member changes no git config but a builder'"'"'s own user.name/user.email (git config %s): remote, push, alias and url settings redirect a push' "${key:-?}"; return 0
+          fi
+        fi ;;
+      push) kind=push ;;
+      *) printf 'deny git %s is not a git verb a team member may run - an unknown verb may be an alias for anything' "$verb"; return 0 ;;
+    esac
+  fi
+  [ "$kind" != read ] || return 0
+  [ "$builder" = 1 ] || { printf 'deny a %s team member reads repositories and never writes one (git %s) - a builder does' "$_GM_ROLE" "$verb"; return 0; }
+  # Where: every directory the command may run in (and -C from it).
+  IFS=$'\t' read -r -a ds <<< "$2"
+  for d in "${ds[@]}"; do
+    if [ -n "$cdir" ]; then
+      _guard_norm "$d" "$cdir" || { printf 'deny %s - and which checkout git -C %s names cannot be told' "$(_guard_member_where)" "$cdir"; return 0; }
+      locs+=("$_GN")
+    else
+      [ "$d" != '?' ] || { printf 'deny %s - and which checkout this git runs in cannot be told (after cd)' "$(_guard_member_where)"; return 0; }
+      locs+=("$d")
+    fi
+  done
+  mapfile -t res < <(_guard_resolve "${locs[@]}")
+  for d in "${res[@]}"; do
+    case "$d" in
+      "$_GM_WT/.git"|"$_GM_WT/.git/"*) printf 'deny %s - not its .git' "$(_guard_member_where)"; return 0 ;;
+      "$_GM_WT"|"$_GM_WT/"*) ;;
+      *) printf 'deny %s - git %s would run in %s' "$(_guard_member_where)" "$verb" "$d"; return 0 ;;
+    esac
+  done
+  [ "$kind" != push ] || _guard_builder_push "${args[@]}"
+}
+
+# A BUILDER'S PUSH, the one shape: `git push [options] origin <refspec>...`,
+# every refspec its own branch (B, B:B, HEAD:B, refs/heads/B). The remote is
+# literally `origin`; a push with no refspec follows config and is refused.
+_guard_builder_push() { # <push arguments...> -> deny <reason>, or nothing
+  local b="$_GM_BRANCH" w r src dst remote="" n=0
+  local why="a builder pushes only its own branch: git push origin $b (or HEAD:$b)"
+  for w in "$@"; do
+    case "$w" in
+      -u|--set-upstream|-f|--force|--force-with-lease|--force-with-lease=*|--force-if-includes|-q|--quiet|-v|--verbose|-n|--dry-run|--no-verify|--atomic|--porcelain|--progress|--no-progress) ;;
+      -*) [[ "$w" =~ ^-[ufqvn]+$ ]] || { printf 'deny %s - not %s' "$why" "$w"; return 0; } ;;
+      *)
+        if [ -z "$remote" ]; then
+          remote="$w"
+          [ "$remote" = origin ] || { printf 'deny %s - the remote is origin, not %s' "$why" "$w"; return 0; }
+        else
+          n=$((n + 1)); r="${w#+}"
+          if [[ "$r" == *:* ]]; then src="${r%%:*}"; dst="${r#*:}"; else src="$r"; dst="$r"; fi
+          case "$src" in HEAD|"$b"|"refs/heads/$b") ;; *) printf 'deny %s - not from %s' "$why" "${src:-nothing (a delete)}"; return 0 ;; esac
+          case "$dst" in "$b"|"refs/heads/$b") ;; *) printf 'deny %s - not to %s' "$why" "$dst"; return 0 ;; esac
+        fi ;;
+    esac
+  done
+  [ -n "$remote" ] && [ "$n" -gt 0 ] \
+    || printf 'deny %s - name the remote and the branch: a push without a refspec follows config' "$why"
 }
 
 _guard_member() { # <command> -> allow | deny <reason>
-  local cmd="$1" team="${CEL_TEAM:-}" trole="${CEL_TEAM_ROLE:-}" seg d
-  _guard_member_scope_ok || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
+  local cmd="$1" i seg d
+  _guard_member_scope || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
   # Every member, whatever its role.
-  if _guard_starts "$cmd" 'cel run' 'cel (core|console)' 'cel ws (up|down|reset)' 'cel team (start|add|retire|close)' \
+  if _guard_starts "$cmd" 'cel run' 'cel (core|console)' 'cel ws (up|down|reset)' 'cel team (start|add|retire|close|cap)' \
        'herdr agent (start|stop)' 'herdr worktree' 'herdr pane (close|split|send-text|send-keys|run)' 'herdr (tab|workspace) (create|close)' 'rex new'; then
-    printf 'deny a team member starts and stops no agents or panes - ask the lead (cel team event %s <type> --to <lead>)' "$team"
+    printf 'deny a team member starts and stops no agents or panes and runs no lead verb - ask the lead (cel team event %s <type> --to <lead>)' "$_GM_TEAM"
     return 0
   fi
   if _guard_starts "$cmd" 'cel (solo|here) (land|review)' 'cel afk' 'gh pr merge' 'gh api .*pulls/[0-9]+/merge' \
        'tea (pr|pulls|pull) (merge|m)' 'curl .*/pulls/[0-9]+/merge[^ ]*'; then
-    printf 'deny a team member never merges, lands or records a PR verdict - the lead integrates and lands (cel solo land); report with cel team event|verdict %s' "$team"
+    printf 'deny a team member never merges, lands or records a PR verdict - the lead integrates and lands (cel solo land); report with cel team event|verdict %s' "$_GM_TEAM"
     return 0
   fi
   if _guard_forge_raw_write "$cmd" || _guard_gh_api_writes "$cmd" \
@@ -464,34 +814,25 @@ _guard_member() { # <command> -> allow | deny <reason>
           'gh issue (create|close|reopen|edit|comment|delete|transfer|lock|unlock|pin|unpin)' \
           'gh release (create|delete|edit|upload)' 'gh repo (create|delete|edit|fork|rename|archive|unarchive|sync)' \
           'gh run (rerun|cancel|delete)' 'gh workflow (run|enable|disable)'; then
-    printf 'deny a team member writes to no forge - no PR, comment, review or API write; the lead opens and lands the integration PR, and members report with cel team event|verdict %s' "$team"
+    printf 'deny a team member writes to no forge - no PR, comment, review or API write; the lead opens and lands the integration PR, and members report with cel team event|verdict %s' "$_GM_TEAM"
     return 0
   fi
-  if [ "$trole" = builder ]; then
-    while IFS= read -r seg || [ -n "$seg" ]; do
-      d="$(_guard_builder_push "$seg")"
-      [ -z "$d" ] || { printf '%s' "$d"; return 0; }
-    done < <(_guard_segments "$cmd")
-    # Its own worktree and nothing else: the product's checkouts, solo
-    # worktrees and herdr worktrees are other agents'.
-    if { _guard_git_writes "$cmd" && [[ "$cmd" == *repos/* || "$cmd" == *.herdr/worktrees* || "$cmd" == *.cel/solo/* ]]; } \
-       || _guard_shell_edits_repos "$cmd"; then
-      printf 'deny a builder writes only in its own worktree (<ws>/.cel/teams/%s/wt/<alias>), never in repos/ or another agent'"'"'s worktree' "$team"
-      return 0
-    fi
-    printf allow; return 0
-  fi
-  # Read-only roles: the repositories are read, the cel verbs are the ones a
-  # member reports and previews with, and nothing else is written by git.
-  if _guard_git_writes "$cmd"; then
-    printf 'deny a %s team member reads repositories and never writes one - a builder does (cel team event %s ... --to <lead> asks for it)' "$trole" "$team"
+  # git reads its environment before its options: GIT_DIR, GIT_CONFIG_* and
+  # the like would move a push or define an alias out of sight.
+  if [[ "$cmd" =~ (^|[^A-Za-z0-9_])GIT_[A-Z0-9_]+= ]]; then
+    printf 'deny a team member sets no GIT_* environment: it could point git at another repository or config'
     return 0
   fi
-  if _guard_shell_edits_repos "$cmd"; then
-    printf 'deny a %s team member writes only under <ws>/.cel/teams/%s/' "$trole" "$team"
-    return 0
-  fi
-  while IFS= read -r seg || [ -n "$seg" ]; do
+  _guard_walk "$cmd"
+  for i in "${!_GW_SEG[@]}"; do
+    seg="${_GW_SEG[i]}"
+    case "$seg" in
+      git|"git "*)
+        d="$(_guard_member_git "$seg" "${_GW_DIRS[i]}")"
+        [ -z "$d" ] || { printf '%s' "$d"; return 0; } ;;
+    esac
+    # Read-only roles: the cel verbs a member reports and previews with.
+    [ "$_GM_ROLE" != builder ] || continue
     case "$seg" in cel|cel\ *) ;; *) continue ;; esac
     [[ "$seg" =~ ^cel\ (serve|inbox|budget|fleet|version|services|help)(\ |$) \
     || "$seg" =~ ^cel\ team\ (event|verdict|ack|status)(\ |$) \
@@ -499,45 +840,35 @@ _guard_member() { # <command> -> allow | deny <reason>
     || "$seg" =~ ^cel\ forge\ pr\ (view|checks|reviews|list)(\ |$) \
     || "$seg" =~ ^cel\ decide\ (ask|list)(\ |$) \
     || "$seg" =~ ^cel\ learn\ list(\ |$) ]] && continue
-    printf 'deny a %s team member runs only cel serve, inbox, budget, fleet, forge reads, decide ask|list and cel team event|verdict|ack|status - not: %s' "$trole" "$seg"
+    printf 'deny a %s team member runs only cel serve, inbox, budget, fleet, forge reads, decide ask|list and cel team event|verdict|ack|status - not: %s' "$_GM_ROLE" "$seg"
     return 0
-  done < <(_guard_segments "$cmd")
+  done
+  d="$(_guard_member_targets)"
+  [ -z "$d" ] || { printf '%s' "$d"; return 0; }
   printf allow
 }
 
-# The native edit tools for a member. A relative path is the pane's
-# (_GUARD_CWD); `..` is resolved before anything is compared.
+# The native edit tools for a member: the same places a shell write may go,
+# minus /tmp for a builder. A relative path is the pane's (_GUARD_CWD).
 _guard_member_path() { # <file_path> -> allow | deny <reason>
-  local p="$1" team="${CEL_TEAM:-}" me="${CEL_TEAM_MEMBER:-}" ws="${CEL_WORKSPACE:-}" tdir
-  _guard_member_scope_ok && [ -n "$ws" ] || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
-  case "$p" in /*) ;; *) p="${_GUARD_CWD:-$PWD}/$p" ;; esac
-  p="$(realpath -m -- "$p" 2>/dev/null)" || p="$1"
-  tdir="$(realpath -m -- "$ws/.cel/teams/$team" 2>/dev/null)" || tdir="$ws/.cel/teams/$team"
-  if [ "${CEL_TEAM_ROLE:-}" = builder ]; then
-    case "$p" in
-      "$tdir/wt/$me"|"$tdir/wt/$me"/*) printf allow ;;
-      "$tdir/wt"|"$tdir/wt"/*|*/.cel/teams/*|*/repos/*|*/.cel/solo/*|*/.herdr/worktrees/*)
-        printf 'deny a builder writes only in its own worktree (%s/wt/%s) and its team directory' "$tdir" "$me" ;;
-      "$tdir"/*) printf allow ;;
-      *) printf allow ;;
-    esac
-    return 0
-  fi
-  case "$p" in
-    "$tdir/wt"|"$tdir/wt"/*) printf 'deny a %s team member does not write in a builder'"'"'s worktree' "${CEL_TEAM_ROLE:-}" ;;
-    "$tdir"/*) printf allow ;;
-    *) printf 'deny a %s team member writes only under %s/' "${CEL_TEAM_ROLE:-}" "$tdir" ;;
-  esac
+  local p="$1" r
+  _guard_member_scope || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
+  _guard_norm "${_GUARD_CWD:-$PWD}" "$p" || { printf 'deny %s - and where %s is cannot be told' "$(_guard_member_where)" "$p"; return 0; }
+  for r in "$(_guard_resolve "$_GN")"; do
+    _guard_member_may_write "$r" tool || { printf 'deny %s - not %s' "$(_guard_member_where)" "$p"; return 0; }
+  done
+  printf allow
 }
 
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   # Every role, `other` included (a reviewer stands outside any workspace).
   if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
-  if _guard_names_launch_token "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
-  # cel team add's launcher is not a door any agent opens by hand: a member
-  # is added (and admitted against the box budget) by `cel team add`.
-  if [ "$role" != other ] && _guard_starts "$cmd" 'cel run member'; then
+  if _guard_cmd_reaches_launch "$cmd"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
+  # cel team add's launcher is not a door any agent opens by hand - `other`
+  # (a reviewer) included: a member is added, and admitted against the box
+  # budget, by `cel team add`.
+  if _guard_starts "$cmd" 'cel run member'; then
     printf 'deny cel run member is cel team add'"'"'s internal launcher - add a member with: cel team add <feature> <role> [--focus f] [--repo r]'
     return 0
   fi
@@ -632,7 +963,7 @@ guard_classify() { # <role> <command>
 guard_classify_path() { # <role> <file_path>
   local role="$1" path="$2"
   if _guard_names_forge_token "$path"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
-  if _guard_names_launch_token "$path"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
+  if _guard_path_reaches_launch "$path"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   if [ "$role" = member ]; then _guard_member_path "$path"; return 0; fi
   # Core writes its own notes and nothing else: it has no workspace, so every
   # path outside its directory belongs to someone whose job it is not.
@@ -654,6 +985,6 @@ guard_classify_path() { # <role> <file_path>
 # forge token and the team launch tokens.
 guard_classify_read() { # <role> <file_path>
   if _guard_names_forge_token "$2"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
-  if _guard_names_launch_token "$2"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
+  if _guard_path_reaches_launch "$2"; then printf '%s' "$_GUARD_LAUNCH_TOKEN_DENY"; return 0; fi
   printf allow
 }

@@ -68,31 +68,46 @@ _budget_breakdown() { # <counts-json>
 # convention). <kind>: team-member | reviewer | product. A product agent's
 # refusal is the caller's warning, never its block. The optional roster is a
 # cel_agent_list document the caller has already read for its own checks.
-budget_admit() { # <kind> [agents-json]
-  local kind="${1:-}" counts total members max max_members what verdict mem
+# --pending N counts N team members that are reserved but not launched yet
+# (cel team add counts them from every team.json): they are added to the live
+# total and to the team members before either limit is compared.
+budget_admit() { # <kind> [agents-json] [--pending N]
+  local kind="${1:-}" roster="" pending=0 counts total members max max_members what verdict mem held=""
+  [ $# -eq 0 ] || shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pending) pending="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
+      --pending=*) pending="${1#--pending=}"; shift ;;
+      *) roster="$1"; shift ;;
+    esac
+  done
   case "$kind" in
     team-member) what="a team member" ;;
     reviewer)    what="a reviewer" ;;
     product)     what="a product agent" ;;
     *) printf 'box agent budget: unknown launch kind %q - not starting it\n' "$kind"; return 1 ;;
   esac
+  [[ "$pending" =~ ^[0-9]+$ ]] \
+    || { printf 'box agent budget: --pending wants a count of reserved members, got %q - not starting %s\n' "$pending" "$what"; return 1; }
   verdict="not starting $what"
   [ "$kind" != product ] || verdict="the product agent starts anyway (product agents are counted, never blocked)"
-  if ! counts="$(budget_counts "${2:-}")" || [ -z "$counts" ]; then
+  if ! counts="$(budget_counts "$roster")" || [ -z "$counts" ]; then
     printf 'box agent budget: the live agent inventory (herdr agent list / Rex receipts) is unreadable, so how many agents run is unknown - %s (fail closed; check herdr, then retry)\n' "$verdict"
     return 1
   fi
   max="$(budget_max_live_agents)"; max_members="$(budget_max_team_members)"
-  total="$(printf '%s' "$counts" | jq -r .total)"
-  members="$(printf '%s' "$counts" | jq -r .members)"
+  pending=$((10#$pending))
+  total=$(( $(printf '%s' "$counts" | jq -r .total) + pending ))
+  members=$(( $(printf '%s' "$counts" | jq -r .members) + pending ))
+  [ "$pending" -eq 0 ] || held=" ($pending reserved, not launched yet)"
   if [ "$total" -ge "$max" ]; then
-    printf 'box agent budget: %s live agents, the limit is %s (%s) - %s; retire a team member or a finished reviewer first (cel budget; budget.max_live_agents in %s)\n' \
-      "$total" "$max" "$(_budget_breakdown "$counts")" "$verdict" "$(cel_config_file)"
+    printf 'box agent budget: %s live agents%s, the limit is %s (%s) - %s; retire a team member or a finished reviewer first (cel budget; budget.max_live_agents in %s)\n' \
+      "$total" "$held" "$max" "$(_budget_breakdown "$counts")" "$verdict" "$(cel_config_file)"
     return 1
   fi
   if [ "$kind" = team-member ] && [ "$members" -ge "$max_members" ]; then
-    printf 'box agent budget: %s team members live, the limit is %s - not starting another; retire one first (cel budget; budget.max_team_members in %s)\n' \
-      "$members" "$max_members" "$(cel_config_file)"
+    printf 'box agent budget: %s team members live%s, the limit is %s - not starting another; retire one first (cel budget; budget.max_team_members in %s)\n' \
+      "$members" "$held" "$max_members" "$(cel_config_file)"
     return 1
   fi
   if ! mem="$(boxguard_admit)"; then

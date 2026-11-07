@@ -1917,12 +1917,16 @@ _run_member_confirm() { # <name> <pane>
 # process in that pane carries the launch's CEL_ROLE=member, CEL_WORKSPACE,
 # CEL_TEAM and CEL_TEAM_MEMBER (_run_pane_launch_env, the proof a reviewer's
 # workspace is read by). A builder's worktree is removed only when it is clean
-# and its branch is pushed; otherwise it is kept and said so on stdout.
-# team.json is the caller's (cel team retire): this never touches it.
+# and holds no commit that origin lacks - its branch pushed, or a launch that
+# never got past its base - and its local branch goes with it, so a relaunch
+# is not refused for it; otherwise it is kept and said so on stdout. --keep
+# keeps it whatever its state. team.json is the caller's (cel team retire):
+# this never touches it.
 # 0 = closed, or already gone. 1 = refused, nothing closed, reason on stderr.
-member_retire() { # <wsdir> <feature> <alias>
-  local wsdir="${1:-}" feature="${2:-}" alias="${3:-}" dir roster rows n pane backend proof pws pteam palias
+member_retire() { # <wsdir> <feature> <alias> [--keep]
+  local wsdir="${1:-}" feature="${2:-}" alias="${3:-}" keep=0 dir roster rows n pane backend proof pws pteam palias
   _mr_refuse() { printf 'member_retire: %s - nothing closed\n' "$1" >&2; return 1; }
+  case "${4:-}" in "") ;; --keep) keep=1 ;; *) _mr_refuse "unknown argument '$4' (want --keep)"; return 1 ;; esac
   [[ "$feature" =~ $_RUN_TEAM_FEATURE_RE ]] || { _mr_refuse "feature '$feature' is not a feature id"; return 1; }
   [ -n "$alias" ] && [ "$(cel_alias_norm "$alias")" = "$alias" ] || { _mr_refuse "'$alias' is not an agent alias"; return 1; }
   dir="$(run_team_dir "$wsdir" "$feature")"
@@ -1946,12 +1950,17 @@ member_retire() { # <wsdir> <feature> <alias>
       c_ok "closed $alias (pane $pane)" ;;
     *) _mr_refuse "$n live agents are named $alias - which one is the member is unknown"; return 1 ;;
   esac
+  if [ "$keep" = 1 ]; then
+    [ ! -d "$dir/wt/$alias" ] || printf 'kept worktree %s (--keep)\n' "$dir/wt/$alias"
+    return 0
+  fi
   _run_member_worktree_retire "$wsdir" "$dir" "$alias"
   return 0
 }
 
 _run_member_worktree_retire() { # <wsdir> <team-dir> <alias>
-  local wsdir="$1" dir="$2" alias="$3" row role repo branch wt dirty ahead
+  local wsdir="$1" dir="$2" alias="$3" row role repo branch wt dirty ahead repodir
+  local -a heads=(HEAD)
   row="$(jq -c --arg a "$alias" '[.members[]? | select(.alias == $a)] | if length == 1 then .[0] else empty end' "$dir/team.json" 2>/dev/null)" || row=""
   [ -n "$row" ] || return 0
   IFS=$'\t' read -r role repo branch < <(printf '%s' "$row" | jq -r '[(.role // "-"), (.repo // "-"), (.branch // "-")] | @tsv')
@@ -1961,15 +1970,22 @@ _run_member_worktree_retire() { # <wsdir> <team-dir> <alias>
     printf 'kept worktree %s (its state cannot be read)\n' "$wt"; return 0
   fi
   if [ -n "$dirty" ]; then printf 'kept worktree %s (uncommitted changes)\n' "$wt"; return 0; fi
-  if ! git -C "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null 2>&1; then
-    printf 'kept worktree %s (%s was never pushed)\n' "$wt" "$branch"; return 0
+  # The checkout and its branch hold nothing origin lacks: pushed, or never
+  # moved past the base it was cut from.
+  repodir="$wsdir/repos/$repo"
+  ! git -C "$repodir" show-ref --verify -q "refs/heads/$branch" || heads+=("refs/heads/$branch")
+  ahead="$(git -C "$wt" rev-list --count "${heads[@]}" --not --remotes=origin 2>/dev/null)" || ahead=""
+  if [ "$ahead" != 0 ]; then
+    printf 'kept worktree %s (%s commit(s) origin does not have)\n' "$wt" "${ahead:-an unknown number of}"; return 0
   fi
-  ahead="$(git -C "$wt" rev-list --count "refs/remotes/origin/$branch..HEAD" 2>/dev/null)" || ahead=""
-  if [ "$ahead" != 0 ]; then printf 'kept worktree %s (%s commit(s) not pushed)\n' "$wt" "${ahead:-unknown}"; return 0; fi
-  if git -C "$wsdir/repos/$repo" worktree remove "$wt" >/dev/null 2>&1; then
-    c_ok "removed worktree $wt ($branch is pushed)"
-  else
-    printf 'kept worktree %s (git worktree remove refused)\n' "$wt"
+  if ! git -C "$repodir" worktree remove "$wt" >/dev/null 2>&1; then
+    printf 'kept worktree %s (git worktree remove refused)\n' "$wt"; return 0
+  fi
+  c_ok "removed worktree $wt (nothing in it origin lacks)"
+  if [ "${#heads[@]}" -gt 1 ]; then
+    git -C "$repodir" branch -D "$branch" >/dev/null 2>&1 \
+      && c_ok "deleted the local branch $branch (origin has every commit on it)" \
+      || printf 'kept branch %s (git branch -D refused)\n' "$branch"
   fi
 }
 
@@ -2570,14 +2586,15 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     AGENT_ARGS+=(--prompt "Read the complete migration handoff at $handoff before acting. This is a NEW OpenCode-native session, not a native resume of the archived OMP history. Preserve the model, account route, approvals, data and dirty work in that handoff. Never dump environments, credentials, resolved provider configs or full debug/config responses: use explicit non-secret identity allowlists only. Acknowledge intake through cel inbox, then wait for core to release the migration hold.")
   fi
 
-  # THE GUARD HOOK. Root, the product agents and team members get the
+  # THE GUARD HOOK. Root, product agents, team members and reviewers get the
   # runtime's guard hook, so a refused command is refused at the tool call
-  # (lib/guard.sh: root is read-only over repositories, a solo agent may not
-  # merge by hand or start other agents, a member stays inside its team's
-  # scope); a reviewer only reads. Enforced here, not requested in the role
-  # text: a prompt is not a guard.
+  # (lib/guard.sh: root is read-only over
+  # repositories, a solo agent may not merge by hand or start other agents, a
+  # member stays inside its team's scope, and a reviewer - guarded as `other`
+  # - reads no token and runs no `cel run member`). Enforced here, not
+  # requested in the role text: a prompt is not a guard.
   case "$role" in
-    root|orchestrator|member)
+    root|orchestrator|member|reviewer)
       local gflag gfile
       gflag="$(agent_guard_hook "$runtime" flag)"; gfile="$(agent_guard_hook "$runtime" file)"
       if [ -n "$gflag" ] && [ -n "$gfile" ]; then
@@ -2612,7 +2629,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # A team member: its alias is its mailbox, and the guard reads its team
     # and role from these.
     member) inbox_me="$agent_name"
-      LAUNCH_ENV_EXTRA=("CEL_PRODUCT=$product" "CEL_TEAM=$team" "CEL_TEAM_ROLE=$MEMBER_ROLE" "CEL_TEAM_MEMBER=$agent_name") ;;
+      LAUNCH_ENV_EXTRA=("CEL_PRODUCT=$product" "CEL_TEAM=$team" "CEL_TEAM_ROLE=$MEMBER_ROLE" "CEL_TEAM_MEMBER=$agent_name")
+      # The one branch a builder may push (lib/guard.sh _guard_builder_push).
+      [ "$MEMBER_ROLE" != builder ] || LAUNCH_ENV_EXTRA+=("CEL_TEAM_BRANCH=$MEMBER_BRANCH") ;;
   esac
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0

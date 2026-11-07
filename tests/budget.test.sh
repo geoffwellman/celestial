@@ -151,3 +151,21 @@ test_cel_budget_prints_counts_against_limits() {
   assert_fails "$CEL_ROOT/bin/cel" budget
   rm -rf "$T"
 }
+
+# Reserved members that have not launched yet count too (cel team add passes
+# them as --pending N, the flag anywhere after the kind).
+test_budget_counts_pending_reserved_members() {
+  _bud; _roster widget-orch /w/.cel/teams/login
+  local out rc=0
+  assert_eq "$(budget_admit team-member --pending 2 >/dev/null; echo $?)" 0
+  out="$(budget_admit team-member --pending 3)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "4 team members live (3 reserved, not launched yet), the limit is 4"
+  rc=0; out="$(budget_admit team-member "$(cat "$T/roster.json")" --pending=6)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "8 live agents (6 reserved, not launched yet), the limit is 8"
+  rc=0; out="$(budget_admit team-member --pending lots)" || rc=$?
+  assert_eq "$rc" 1; assert_contains "$out" "--pending wants a count"
+  assert_eq "$(budget_admit team-member --pending 08 >/dev/null; echo $?)" 1
+  rm -rf "$T"
+}
