@@ -86,7 +86,10 @@ test_here_review_resolves_the_repo_within_the_product() {
 # fan-out was retired, and no delegation ledger is consulted.
 test_here_land_takes_the_solo_checked_path() {
   _hws
-  mkdir "$T/.cel/delegations.json"   # any attempt to read a ledger would fail
+  # A directory with a sentinel row inside: a [ -f ] guard sees no ledger, and
+  # any open or jq read of it fails loudly.
+  mkdir "$T/.cel/delegations.json"
+  printf '[{"id":"SENTINEL","repo":"lone","branch":"x","state":"running"}]\n' > "$T/.cel/delegations.json/sentinel"
   _as orchestrator lone-orch land 3 >/dev/null
   assert_eq "$(sed -n 1p "$T/calls")" "cel solo land lone#3 --workspace bundled" || { rm -rf "$T"; return 1; }
   assert_contains "$(_as orchestrator lone-orch land 3 --gate-from-ci 2>&1)" "takes no extra flags"

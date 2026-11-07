@@ -112,7 +112,7 @@ test_the_escalation_carries_ticket_pane_age_and_risk() {
 test_a_safe_stalled_worker_says_so() {
   local m; m="$(stall_message vanished WG-24 w2:p1 4000 yes '' wg-24-feature)"
   assert_contains "$m" "GONE from the roster"
-  assert_contains "$m" "safe to release"
+  assert_contains "$m" "safe to let go"
   ! printf '%s' "$m" | grep -q "AT RISK" || { echo "safe worker claimed work at risk"; return 1; }
 }
 test_an_untracked_delegation_still_names_itself() {

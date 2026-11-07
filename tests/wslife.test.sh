@@ -359,6 +359,7 @@ test_down_ignores_the_retired_delegation_ledger() {
   cmd_ws_up alpha >/dev/null
   : >"$STUB_DIR/calls.log"
   mkdir -p "$T/alpha/.cel/delegations.json"
+  printf '[{"id":"SENTINEL","state":"running"}]\n' > "$T/alpha/.cel/delegations.json/sentinel"
   local out; out="$(cmd_ws_down alpha)" || { _wslife_teardown; return 1; }
   assert_contains "$out" "closed"
   _wslife_teardown

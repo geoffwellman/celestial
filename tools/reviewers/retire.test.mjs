@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound } from './retire.mjs';
+import { parseNative as parseNativeAtLeaf, emptyComposer, checkoutPreserved, validateNativeResponse, validateExitCommitment, validateArchivedRole, validatedProcessEvidence, sessionTopology, selectedRound, durableRound } from './retire.mjs';
 
 // These are parser/preservation fixtures, not evidence of real review quality
 // or of the production Rex lifecycle (the latter requires a supported smoke).
@@ -210,6 +210,21 @@ test('durable verdict freshness follows only the exact selected own round', () =
   assert.deepEqual(selectedRound({ ...ledger, 'widget#99': { verdict: 'approved', at: at(8) } }, soloSelector), original);
   assert.notEqual(selectedRound({ ...ledger, 'widget#7': { ...round, head: 'b'.repeat(40) } }, soloSelector).hash, original.hash);
   refusal(() => selectedRound([{ id: 'WG-7', review: round }], { kind: 'fleet', id: 'WG-7' }), 'unknown_solo_review_ledger');
+});
+
+test('only an approved round of the current head retires a reviewer; a changes round keeps it for re-review', () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'widget-rounds-'));
+  try {
+    const head = 'a'.repeat(40), r = { workspace: ws, repo: 'widget', pr: 7, name: 'widget-pr-7-review' }, pr = { headRefOid: head };
+    fs.mkdirSync(path.join(ws, '.cel'), { mode: 0o700 });
+    const file = path.join(ws, '.cel', 'solo-reviews.json');
+    const save = (verdict) => { fs.rmSync(file, { force: true }); fs.writeFileSync(file,
+      JSON.stringify({ 'widget#7': { verdict, by: r.name, head, at: at(3) } }), { mode: 0o600 }); };
+    save('changes');
+    refusal(() => durableRound(r, pr), 'no_completed_current_head_round');
+    save('approved');
+    assert.equal(durableRound(r, pr).round.verdict, 'approved');
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
 
 test('archived role bytes remain verifiable after a later round rewrites the canonical role', () => {

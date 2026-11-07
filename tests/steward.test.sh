@@ -2181,15 +2181,37 @@ test_regression_steward_tick_does_not_claim_without_the_flock() {
 
 # ---- the retired delegation ledger is never read ----------------------------
 # Fan-out was retired on 2026-11-08, so a whole tick - every sweep cmd_steward
-# runs - must leave a workspace's old `.cel/delegations.json` alone, however
-# big it is. The tick runs in its own bash against a fixture box: stub herdr,
-# gh, omp, tailscale, systemd, curl and node, a git that cannot reach the
-# network, and the box web servers (dash, pages) not started.
-_ledger_tick() { # [tracer argv...] - one real `cmd_steward --no-gc` tick
+# runs, and the detached fleet refill it starts - must leave a workspace's old
+# `.cel/delegations.json` alone, however big it is. The tick runs in its own
+# bash against a fixture box: stub herdr, gh, omp, tailscale, systemd, curl and
+# node, a git that cannot reach the network, and the box web servers (dash,
+# pages) not started.
+_ledger_tick() { # [tracer argv...] - one real `cmd_steward --no-gc` tick, refill included
+  local rc=0 i pid=""
+  : > "$CEL_FLEET_REFILL_LOG"; rm -f "$CEL_CACHE/fleet.json"
   timeout 60 "$@" bash -c '
     source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/steward.sh"
     cmd_dash() { :; }; cmd_pages() { :; }
-    cmd_steward --no-gc'
+    cmd_steward --no-gc' || rc=$?
+  # fleet_cache_warm hands the rebuild to a detached refill; it is part of the
+  # tick, so it has finished, and written its cache, before anything is judged.
+  for i in $(seq 1 120); do pid="$(head -n1 "$CEL_FLEET_REFILL_LOG" 2>/dev/null)"; [ -z "$pid" ] || break; sleep 0.5; done
+  [ -n "$pid" ] || { echo "the tick started no fleet refill"; return 1; }
+  for i in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  ! kill -0 "$pid" 2>/dev/null || { echo "the fleet refill $pid did not finish within 60s"; return 1; }
+  [ -s "$CEL_CACHE/fleet.json" ] || { echo "the fleet refill wrote no cache"; return 1; }
+  return "$rc"
+}
+
+# Who touched it: each offending pid, then the programs it descends from.
+_ledger_culprits() { # <strace -f output>
+  awk '
+    / = [0-9]+$/ && (/(clone3?|v?fork)\(/ || /<\.\.\. (clone3?|v?fork) resumed>/) { parent[$NF] = $1 }
+    / execve\(/ && !/ = -1 / { a = $0; sub(/^[0-9]+ execve\(/, "", a); cmd[$1] = substr(a, 1, 220) }
+    /delegations\.json/ && !/ execve\(/ { bad[$1] = 1 }
+    END { for (p in bad) { printf "  pid %s", p; q = p
+            while (q != "") { if (q in cmd) printf "\n    <- %s", cmd[q]; q = (q in parent) ? parent[q] : "" }
+            printf "\n" } }' "$1"
 }
 
 test_regression_steward_tick_never_reads_the_retired_delegation_ledger() {
@@ -2202,15 +2224,17 @@ test_regression_steward_tick_never_reads_the_retired_delegation_ledger() {
   export CEL_WORKTREE_ROOT="$T/wt" CEL_SUITE_LOCK="$T/suite.lock" CEL_UPDATE_DIR="$T/update"
   export CEL_CONFIG_FILE="$T/config.yaml" CEL_MANIFEST="$T/agents.yaml" CEL_CACHE="$T/cache"
   export CEL_STEWARD_HERDR="$T/bin/herdr" CEL_SERVICES_HERDR="$T/bin/herdr"
-  mkdir -p "$HOME" "$T/bin" "$T/proc" "$T/inbox" "$T/alpha/.cel"
+  # The fleet cache ON, as on a box, so the tick's warm-up really refills.
+  export CEL_FLEET_CACHE_SECS=30 CEL_FLEET_REFILL_LOG="$T/refill.log"
+  mkdir -p "$HOME" "$T/bin" "$T/proc" "$T/inbox" "$T/cache" "$T/alpha/.cel"
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n' "$T" > "$CEL_REGISTRY"
   printf 'name: alpha\nrepos: [{name: widget, prefix: WG}]\nproducts:\n  - {name: bundle, repos: [widget]}\n' \
     > "$T/alpha/workspace.yaml"
   # A big ledger whose every row is long over: what a retired box keeps.
   local led="$T/alpha/.cel/delegations.json"
   jq -n '[range(2000) | {id: "WG-\(.)-x", ticket: "WG-\(.)", repo: "widget", branch: "WG-\(.)-x",
-    pane: "w:p\(.)", worktree: "/nonexistent/wg-\(.)", state: (["landed", "released", "abandoned"][. % 3])}]' > "$led"
-  assert_eq "$(jq length "$led")" "2000" || { rm -rf "$T"; return 1; }
+    pane: "w:p\(.)", worktree: "/nonexistent/wg-\(.)", state: (["landed", "released", "abandoned"][. % 3])}]' > "$T/ledger.json"
+  assert_eq "$(jq length "$T/ledger.json")" "2000" || { rm -rf "$T"; return 1; }
   printf '#!/usr/bin/env bash\ncase "$1 $2" in "agent list") echo %s ;; *) echo "{}" ;; esac\n' \
     "'{\"result\":{\"agents\":[]}}'" > "$T/bin/herdr"
   printf '#!/usr/bin/env bash\necho "[]"\n' > "$T/bin/gh"
@@ -2221,34 +2245,64 @@ test_regression_steward_tick_never_reads_the_retired_delegation_ledger() {
     "$real_git" > "$T/bin/git"
   chmod +x "$T/bin/"*
   export PATH="$T/bin:$PATH"
-  local out rc
+  local out rc sum
 
-  # Unreadable: a sweep that still opened it would say so, or die on it.
-  chmod 000 "$led"
+  # A: the ledger is a DIRECTORY holding the big ledger as a sentinel. A
+  # reader guarded by `[ -f ]` sees nothing; any open or jq of it errors.
+  mkdir "$led"; cp "$T/ledger.json" "$led/sentinel"; sum="$(cksum < "$led/sentinel")"
   rc=0; out="$(_ledger_tick 2>&1)" || rc=$?
   assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
   assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
   if printf '%s' "$out" | grep -q delegations; then echo "the tick spoke of the ledger: $out"; rm -rf "$T"; return 1; fi
+  [ "$(ls -A "$led")" = sentinel ] && [ "$(cksum < "$led/sentinel")" = "$sum" ] \
+    || { echo "the tick changed the ledger directory"; rm -rf "$T"; return 1; }
+  rm -rf "$led"
 
-  # Root reads a mode-000 file, so the proof cannot rest on chmod: watch every
-  # path the tick touches, or - with no strace - make the ledger a FIFO that
-  # any open blocks on until the timeout fails the tick.
-  if strace -f -qq -e trace=%file -o /dev/null true >/dev/null 2>&1; then
-    rc=0; out="$(_ledger_tick strace -f -qq -e trace=%file -o "$T/strace" 2>&1)" || rc=$?
-    assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
-    assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
-    # the trace saw the tick walk this very workspace...
-    grep -qF "$T/alpha/workspace.yaml" "$T/strace" || { echo "the trace never saw the workspace"; rm -rf "$T"; return 1; }
-    # ...and never once touch the ledger in it
-    if grep -n delegations "$T/strace"; then echo "the tick touched the ledger"; rm -rf "$T"; return 1; fi
-  else
-    rm -f "$led"; mkfifo "$led"
-    rc=0; out="$(_ledger_tick 2>&1)" || rc=$?
-    [ "$rc" != 124 ] || { echo "the tick blocked opening the ledger FIFO"; rm -rf "$T"; return 1; }
-    assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
-    assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
+  # B: a regular-file ledger, every access to it watched - by strace, else
+  # inotifywait, else its access time (relatime moves an atime older than the
+  # mtime on any read).
+  cp "$T/ledger.json" "$led"
+  local method=atime iw="" i
+  if command -v strace >/dev/null 2>&1 && strace -f -qq -e trace=%file -o /dev/null true >/dev/null 2>&1; then
+    method=strace
+  elif command -v inotifywait >/dev/null 2>&1; then
+    method=inotifywait
   fi
+  echo "ledger-read check: $method"
+  case "$method" in
+    strace)
+      rc=0; out="$(_ledger_tick strace -f -qq -s 200 -e trace=%file,%process -o "$T/strace" 2>&1)" || rc=$? ;;
+    inotifywait)
+      inotifywait -m -e access,open --format '%e %w%f' "$led" > "$T/inotify" 2> "$T/inotify.err" & iw=$!
+      for i in $(seq 1 50); do grep -q 'Watches established' "$T/inotify.err" && break; sleep 0.1; done
+      grep -q 'Watches established' "$T/inotify.err" || { echo "inotifywait never watched the ledger"; rm -rf "$T"; return 1; }
+      rc=0; out="$(_ledger_tick 2>&1)" || rc=$?
+      kill "$iw" 2>/dev/null || true; wait "$iw" 2>/dev/null || true ;;
+    atime)
+      printf 'x\n' > "$T/alpha/.cel/probe"; touch -a -d @0 "$T/alpha/.cel/probe"; cat "$T/alpha/.cel/probe" >/dev/null
+      [ "$(stat -c %X "$T/alpha/.cel/probe")" != 0 ] \
+        || { echo "no strace, no inotifywait, and this filesystem keeps no access times: nothing can see a read"; rm -rf "$T"; return 1; }
+      touch -a -d @0 "$led"
+      assert_eq "$(stat -c %X "$led")" "0" || { rm -rf "$T"; return 1; }
+      rc=0; out="$(_ledger_tick 2>&1)" || rc=$? ;;
+  esac
+  assert_eq "$rc" "0" || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "tick complete" || { rm -rf "$T"; return 1; }
   if printf '%s' "$out" | grep -q delegations; then echo "the tick spoke of the ledger: $out"; rm -rf "$T"; return 1; fi
+  case "$method" in
+    strace)
+      # the trace saw the tick walk this very workspace...
+      grep -qF "$T/alpha/workspace.yaml" "$T/strace" || { echo "the trace never saw the workspace"; rm -rf "$T"; return 1; }
+      # ...and never once touch the ledger in it
+      if grep -q 'delegations\.json' "$T/strace"; then
+        echo "the tick touched the ledger:"; grep 'delegations\.json' "$T/strace" | grep -v ' execve(' | head -n 5
+        _ledger_culprits "$T/strace"; rm -rf "$T"; return 1
+      fi ;;
+    inotifywait)
+      [ ! -s "$T/inotify" ] || { echo "the tick touched the ledger:"; head -n 5 "$T/inotify"; rm -rf "$T"; return 1; } ;;
+    atime)
+      assert_eq "$(stat -c %X "$led")" "0" || { echo "the tick read the ledger (its atime moved)"; rm -rf "$T"; return 1; } ;;
+  esac
   rm -rf "$T"
 }
 

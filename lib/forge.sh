@@ -212,8 +212,8 @@ _forge_github_pr_checks() { # <wsdir> <slug> <number>
 # protection and the rulesets in effect on the branch (rules/branches/<b>,
 # which covers repository and organisation rulesets). A branch gated only by
 # a ruleset answers "Branch not protected" from the classic endpoint, so that
-# answer alone proves nothing. `cel solo land` and `cel-fanout land`
-# (lib/land.sh) ask this same question.
+# answer alone proves nothing. `cel solo land` (lib/land.sh) asks this same
+# question.
 #
 #   - either read fails (permission, rate limit, network, garbage): unknown
 #   - a rule requiring checks it does not name as contexts - required
@@ -603,7 +603,7 @@ _forge_forgejo_whoami() { # <wsdir> <desc>
 # provider. Reads for everyone; `pr create` for whoever opens PRs (a worker,
 # a solo agent) - the guard refuses it to orchestrators and core, and a
 # reviewer never opens one. There is no merge verb: merges go through
-# `cel solo land` / `cel-fanout land`, which check what a merge must prove.
+# `cel solo land`, which checks what a merge must prove.
 #
 #   cel forge repo   <repo>                         the descriptor (JSON)
 #   cel forge whoami <repo> [--json]

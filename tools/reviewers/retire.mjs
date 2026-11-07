@@ -336,14 +336,16 @@ function currentRoundHash(proof) {
   return selectedRound(jsonFile(proof.path).value, proof.selector).hash;
 }
 
-function durableRound(r, pr) {
+// Only an APPROVED round of the current head ends a reviewer's job, as in gc:
+// a reviewer that asked for changes must stay alive to re-review the fix.
+export function durableRound(r, pr) {
   const solo = path.join(r.workspace, '.cel', 'solo-reviews.json');
   const candidates = [];
   if (fs.existsSync(solo)) {
     const selector = { kind: 'solo', key: `${r.repo}#${r.pr}` }, saved = jsonFile(solo);
     if (saved.value[selector.key]) candidates.push({ path: solo, selector, ...selectedRound(saved.value, selector) });
   }
-  const matches = candidates.filter(c => ['approved', 'changes'].includes(c.round.verdict) && c.round.head === pr.headRefOid && c.round.by === r.name && Number.isFinite(timestamp(c.round.at)));
+  const matches = candidates.filter(c => c.round.verdict === 'approved' && c.round.head === pr.headRefOid && c.round.by === r.name && Number.isFinite(timestamp(c.round.at)));
   requireProof(matches.length > 0, 'no_completed_current_head_round', 'protected');
   return matches.sort((a, b) => timestamp(b.round.at) - timestamp(a.round.at))[0];
 }

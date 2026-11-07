@@ -173,21 +173,47 @@ test_gc_keeps_a_closed_solo_worktree_with_unmerged_commits() {
   rm -rf "$T"
 }
 
-# GC NEVER READS THE RETIRED DELEGATION LEDGER. A delegations.json and
-# delegations.lock that cannot be opened at all (directories: chmod is no
-# barrier to root) and garbage bindings beside a merged solo worktree change
-# nothing: the sweep runs, removes it, and never mentions them.
+# GC NEVER READS THE RETIRED DELEGATION LEDGER. Beside a merged solo worktree,
+# .cel/delegations.json is a DIRECTORY holding a sentinel rows file - any
+# open or jq read of it errors, while a `[ -f ]` guard would see nothing -
+# and delegations.lock is a directory too. The sweep runs, removes the solo
+# worktree, and never mentions them. Then, proof that the name is not even
+# looked up: every file syscall of a second sweep under strace, or, without
+# strace, a regular ledger file whose access time must stay at the epoch.
 test_gc_never_reads_the_delegation_ledger() {
   _gc_solo_fixture
   pgrep() { printf '%s\n' "$$"; }
-  mkdir -p "$GC_WS/.cel/delegations.json/x" "$GC_WS/.cel/delegations.lock/x"
-  printf '{not json' > "$GC_WS/.cel/bindings"
+  local ledger="$GC_WS/.cel/delegations.json" rows='[{"id":"X-1","state":"running","worktree":"/nowhere"}]'
+  mkdir -p "$ledger" "$GC_WS/.cel/delegations.lock"
+  printf '%s\n' "$rows" > "$ledger/rows.json"
   local out="$T/gc.out" rc=0
   GC_PR=MERGED cmd_gc >"$out" 2>&1 || rc=$?
   assert_eq "$rc" 0 || { cat "$out"; return 1; }
   assert_eq "$(cat "$GC_SINK")" "git remove" || { cat "$out"; return 1; }
-  if grep -qiE 'delegation|ledger|binding|skipped|directory|denied' "$out"; then
+  if grep -qiE 'delegation|ledger|skipped|directory|denied' "$out"; then
     echo "gc touched the ledger:"; cat "$out"; return 1
+  fi
+  : > "$GC_SINK"; rc=0
+  if command -v strace >/dev/null 2>&1; then
+    # A child shell, because strace may only trace its own descendants; it
+    # gets the fixture's stubs and state through the environment.
+    export -f herdr gh git pgrep
+    export GC_PR=MERGED GC_SINK GC_SOLO GC_AGENTS CEL_ROOT
+    strace -f -qq -e trace=%file -o "$T/trace" bash -c \
+      'source "$CEL_ROOT/lib/common.sh"; source "$CEL_ROOT/lib/registry.sh"; source "$CEL_ROOT/lib/gc.sh"; cmd_gc' \
+      >"$out" 2>&1 || rc=$?
+    assert_eq "$rc" 0 || { cat "$out"; return 1; }
+    assert_eq "$(cat "$GC_SINK")" "git remove" || { cat "$out"; return 1; }
+    assert_contains "$(cat "$T/trace")" "$GC_SOLO" || return 1   # the trace saw the sweep
+    if grep -q 'delegations' "$T/trace"; then
+      echo "gc named the ledger:"; grep 'delegations' "$T/trace"; return 1
+    fi
+  else
+    rm -rf "$ledger"; printf '%s\n' "$rows" > "$ledger"; touch -a -d @0 "$ledger"
+    GC_PR=MERGED cmd_gc >"$out" 2>&1 || rc=$?
+    assert_eq "$rc" 0 || { cat "$out"; return 1; }
+    assert_eq "$(cat "$GC_SINK")" "git remove" || { cat "$out"; return 1; }
+    assert_eq "$(stat -c %X "$ledger")" 0 || { echo "gc read the ledger file"; return 1; }
   fi
   rm -rf "$T"
 }

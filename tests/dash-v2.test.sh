@@ -433,33 +433,58 @@ test_v2_fleet_lists_orchestrators_and_prs_across_workspaces() {
 }
 
 # The delegation ledger is retired: a workspace's .cel/delegations.json stays
-# on disk but the dashboard never reads it. Here it is one no read survives -
-# a FIFO (a reader blocks forever) and a directory (a reader throws) - and
-# /api/state and every v2 feed still answer, with no ledger-derived field.
-test_v2_unreadable_ledger_is_never_read() {
-  _v2_boot
-  mkfifo "$T/alpha/.cel/delegations.json"
-  mkdir -p "$T/bundle/.cel/delegations.json"
-  # a pane in a herdr worktree, so /api/state has a worktree row to join onto
-  local wt="$T/home/.herdr/worktrees/widget/ABC-1-widget"
-  mkdir -p "$wt"
-  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"working\",\"cwd\":\"$wt\",\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\"}],\"workspaces\":[],\"panes\":[]}}'" > "$T/bin/herdr"
-  local st; st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" || { echo "/api/state failed"; _v2_down; return 1; }
-  assert_eq "$(printf '%s' "$st" | jq -r .workspace)" "alpha"
-  assert_eq "$(printf '%s' "$st" | jq -r '.inflight[] | select(.branch == "ABC-1-widget") | .agent')" "pi"
-  assert_eq "$(printf '%s' "$st" | jq '[.inflight[] | keys[] | select(. == "model" or . == "shape" or . == "why" or . == "verdict")] | length')" "0"
-  local f out
+# on disk but the dashboard never reads it. Its rows would make a worker, a
+# lane, activity and usage attribution if anything read them.
+_v2_ledger_rows() { # <worktree>
+  jq -n --arg wt "$1" --arg at "$(_v2_ago 20000)" '[{id: "ABC-1-widget", repo: "widget", branch: "ABC-1-widget",
+    alias: "widget-abc-1", worktree: $wt, state: "running", model: "anthropic/opus", profile: "opus-pi", shape: "ship",
+    verdict: "green", review: {verdict: "approved", by: "rev", at: $at}, history: [{state: "running", at: $at, by: "root"}]}]'
+}
+# /api/state and every v2 feed answer, and none carries a ledger-derived field
+_v2_hit_everything_without_the_ledger() { # <worktree>
+  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"working\",\"cwd\":\"$1\",\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\"}],\"workspaces\":[],\"panes\":[]}}'" > "$T/bin/herdr"
+  local st; st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" || { echo "/api/state failed"; return 1; }
+  assert_eq "$(printf '%s' "$st" | jq -r .workspace)" "alpha" || return 1
+  assert_eq "$(printf '%s' "$st" | jq -r '.inflight[] | select(.branch == "ABC-1-widget") | .agent')" "pi" || return 1
+  assert_eq "$(printf '%s' "$st" | jq '[.inflight[] | keys[] | select(. == "model" or . == "shape" or . == "why" or . == "verdict")] | length')" "0" || return 1
+  local f
   for f in fleet services since activity stuck lanes load merges cycle heat usage; do
-    out="$(curl -sf -m 20 "$(_v2_url "$f?ws=all")")" || { echo "feed $f failed"; _v2_down; return 1; }
-    printf '%s' "$out" > "$T/feed.$f"
+    curl -sf -m 20 -o "$T/feed.$f" "$(_v2_url "$f?ws=all")" || { echo "feed $f failed"; return 1; }
   done
-  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq '[.feeds[] | .v != null] | all and length == 11')" "true"
-  # nothing a ledger row would have made
-  assert_eq "$(jq 'has("workers")' "$T/feed.fleet")" "false"
-  assert_eq "$(jq '[.items[].kind | select(. == "worker" or . == "review")] | length' "$T/feed.activity")" "0"
-  assert_eq "$(jq -r '[.items[].reason] | unique | join(",")' "$T/feed.stuck")" "merge_conflict"
-  assert_eq "$(jq '[.workspaces[].lanes[]] | length' "$T/feed.lanes")" "0"
-  assert_eq "$(jq '[.. | objects | select(has("used_by") or has("profiles"))] | length' "$T/feed.usage")" "0"
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq '[.feeds[] | .v != null] | all and length == 11')" "true" || return 1
+  assert_eq "$(jq 'has("workers")' "$T/feed.fleet")" "false" || return 1
+  assert_eq "$(jq '[.items[].kind | select(. == "worker" or . == "review")] | length' "$T/feed.activity")" "0" || return 1
+  assert_eq "$(jq -r '[.items[].reason] | unique | join(",")' "$T/feed.stuck")" "merge_conflict" || return 1
+  assert_eq "$(jq '[.workspaces[].lanes[]] | length' "$T/feed.lanes")" "0" || return 1
+  assert_eq "$(jq '[.. | objects | select(has("used_by") or has("profiles"))] | length' "$T/feed.usage")" "0" || return 1
+  if grep -q 'anthropic/opus\|opus-pi' "$T"/feed.*; then echo "a ledger row reached a feed"; return 1; fi
+}
+test_v2_unreadable_ledger_is_never_read() {
+  # a pane in a herdr worktree, so /api/state has a worktree row to join onto
+  local wt w
+  # leg 1: a directory where the ledger was (a reader throws), rows beside it
+  _v2_boot
+  wt="$T/home/.herdr/worktrees/widget/ABC-1-widget"; mkdir -p "$wt"
+  for w in alpha bundle; do
+    mkdir -p "$T/$w/.cel/delegations.json"
+    _v2_ledger_rows "$wt" > "$T/$w/.cel/delegations.json/rows.json"
+  done
+  _v2_hit_everything_without_the_ledger "$wt" || { _v2_down; return 1; }
+  _v2_down
+  # leg 2: a readable ledger of real rows, its atime at the epoch - a read on
+  # this relatime filesystem moves it, so it staying 0 is proof nothing read it
+  _v2_boot
+  wt="$T/home/.herdr/worktrees/widget/ABC-1-widget"; mkdir -p "$wt"
+  _v2_ledger_rows "$wt" > "$T/probe"; touch -a -d @0 "$T/probe"; cat "$T/probe" >/dev/null
+  [ "$(stat -c %X "$T/probe")" != 0 ] || { echo "this filesystem does not record reads (noatime): the probe proves nothing"; _v2_down; return 1; }
+  for w in alpha bundle; do
+    mkdir -p "$T/$w/.cel"; _v2_ledger_rows "$wt" > "$T/$w/.cel/delegations.json"
+    touch -a -d @0 "$T/$w/.cel/delegations.json"
+  done
+  _v2_hit_everything_without_the_ledger "$wt" || { _v2_down; return 1; }
+  for w in alpha bundle; do
+    assert_eq "$(stat -c %X "$T/$w/.cel/delegations.json")" "0" || { echo "$w ledger was read"; _v2_down; return 1; }
+  done
   _v2_down
 }
 
