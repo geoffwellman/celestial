@@ -16,6 +16,29 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# The owner's Hermes desktop starts per-profile SSH servers, not previews or
+# abandoned fixtures. Match executable ownership plus an actual argv option;
+# code/prompt text mentioning the option is not evidence. Never open its token.
+_cel_hermes_desktop_server() { # <resolved-exe> <NUL-cmdline-file>
+  case "$1" in "${HOME%/}/.hermes/"*) ;; *) return 1 ;; esac
+  local arg value expected=0
+  while IFS= read -r -d '' arg || [ -n "$arg" ]; do
+    if [ "$expected" -eq 1 ]; then
+      [[ -n "$arg" && "$arg" != --* ]] && return 0
+      expected=0
+    fi
+    case "$arg" in
+      --) return 1 ;;
+      --ssh-session-token-file) expected=1 ;;
+      --ssh-session-token-file=*)
+        value="${arg#--ssh-session-token-file=}"
+        [[ -n "$value" && "$value" != --* ]] && return 0 ;;
+    esac
+  done 2>/dev/null < "$2"
+  return 1
+}
+
+
 # THE LATEST RESULT OF EACH CHECK. gh's statusCheckRollup lists every run a
 # commit ever had, so a check that failed and then passed on a re-run (a new
 # event, a corrected base) still showed as FAILURE beside its SUCCESS and

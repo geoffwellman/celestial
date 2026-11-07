@@ -448,3 +448,47 @@ test_orphans_list_keeps_a_final_argument_with_no_trailing_nul() {
   assert_eq "$(_class_of "$rows" 4030)" "runner"
   rm -rf "$T"
 }
+
+test_orphans_hermes_desktop_signature_keeps_only_owner_servers() {
+  _orphans_fixture
+  export HOME="$T/owner home"; mkdir -p "$HOME"
+  local exe="$HOME/.hermes/tools/python/bin/python3" rows pid
+  _hermes_orphan_proc() {
+    local pid="$1" binary="$2"; shift 2
+    _proc_add "$P" "$pid" 1 hermes 200000 "$T/gone" "$@"
+    ln -s "$binary" "$P/$pid/exe"
+  }
+  _hermes_orphan_proc 5001 "$exe" "$exe" -I -c 'import hermes' serve --ssh-session-token-file /tmp/token
+  _hermes_orphan_proc 5002 "$exe" "$exe" serve
+  _hermes_orphan_proc 5003 /usr/bin/python3 python3 serve --ssh-session-token-file /tmp/token
+  _hermes_orphan_proc 5004 "$HOME/.hermes-other/python3" python3 serve --ssh-session-token-file /tmp/token
+  _hermes_orphan_proc 5005 "$exe" "$exe" -c 'print("--ssh-session-token-file /tmp/token")'
+  _hermes_orphan_proc 5006 "$exe" "$exe" serve --ssh-session-token-file=/tmp/token
+  _hermes_orphan_proc 5007 "$exe" "$exe" serve --ssh-session-token-file
+  _hermes_orphan_proc 5008 "$exe" "$exe" serve -- --ssh-session-token-file /tmp/token
+  rows="$(orphans_list)"
+  assert_eq "$(_class_of "$rows" 5001)" ''
+  assert_eq "$(_class_of "$rows" 5006)" ''
+  for pid in 5002 5003 5004 5005 5007 5008; do
+    assert_eq "$(_class_of "$rows" "$pid")" fixture
+  done
+  rm -rf "$T"
+}
+
+test_orphans_hermes_desktop_reaper_preserves_the_owned_process() {
+  local t p child alive=0 exe
+  t="$(mktemp -d)"; p="$t/proc"
+  export HOME="$t/owner home" CEL_PROC="$p" CEL_ORPHAN_GRACE=1
+  mkdir -p "$p" "$HOME"
+  _herdr_stub "$t/bin"
+  sleep 60 & child=$!
+  exe="$HOME/.hermes/tools/python/bin/python3"
+  _proc_add "$p" "$child" 1 hermes 200000 "$t/deleted-worktree" "$exe" -I -c 'import hermes' serve --ssh-session-token-file /tmp/token
+  ln -s "$exe" "$p/$child/exe"
+  orphans_reap >/dev/null
+  kill -0 "$child" 2>/dev/null && alive=1
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  rm -rf "$t"
+  assert_eq "$alive" 1
+}

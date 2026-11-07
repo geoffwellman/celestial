@@ -243,6 +243,7 @@ _serve_pid_in_ledgered_unit() { # <pid> <unit...>
 #   - a process inside a running user SERVICE whose name the unit pass below
 #     would not offer (hermes-gateway, cel-dash, ...): services are judged as
 #     units, by name, never as loose pids;
+#   - owner-managed Hermes desktop SSH servers, by executable and NUL argv;
 #   - anything whose command contains an entry of box config `serve.ignore`
 #     (comma-separated substrings) - the operator's own standing tools.
 _serve_ignored() { # <command> -> 0 when box config serve.ignore matches it
@@ -255,7 +256,7 @@ _serve_ignored() { # <command> -> 0 when box config serve.ignore matches it
   return 1
 }
 _serve_not_a_preview() { # <pid> <command>
-  local pid="$1" cmd="$2" a0 a1 n cg unit
+  local pid="$1" cmd="$2" a0 a1 n cg unit exe proc="${CEL_SERVE_PROC_ROOT:-/proc}"
   read -r a0 a1 _ <<<"$cmd"
   n="${a0##*/}"
   # argv[1] names the program only when argv[0] is a script host; for
@@ -263,7 +264,9 @@ _serve_not_a_preview() { # <pid> <command>
   case "$n" in node|nodejs|bun|deno|python|python3*) n="${a1##*/}" ;; esac
   case "$n" in omp|pi|claude|codex|opencode|omp.*|pi.*) return 0 ;; esac
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-    cg="$(awk -F: '$1 == "0" {print $3; exit}' "${CEL_SERVE_PROC_ROOT:-/proc}/$pid/cgroup" 2>/dev/null || true)"
+    exe="$(readlink "$proc/$pid/exe" 2>/dev/null || true)"
+    _cel_hermes_desktop_server "$exe" "$proc/$pid/cmdline" && return 0
+    cg="$(awk -F: '$1 == "0" {print $3; exit}' "$proc/$pid/cgroup" 2>/dev/null || true)"
     unit="${cg##*/}"
     # only services of the user's own manager - a system service (a CI
     # runner, sshd) says nothing about what the process inside it serves
