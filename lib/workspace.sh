@@ -674,14 +674,16 @@ ws_policy_block() { # <wsdir> [product] [fleet|solo]
   else
     printf -- '- reviewer: none (the pr-loop skill is disabled here)\n'
   fi
+  # Reviewers always run on pi (lib/run.sh: idle inbox delivery), whatever
+  # review.runtime says, so the policy names pi - not the ignored field.
   local rrt rmodel
   rrt="$(ws_review "$d" runtime)"; rmodel="$(ws_review "$d" model)"
-  if [ -n "$rrt" ] && [ "$mode" = solo ]; then
-    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR); it records its verdict with `cel solo review` and sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
-      "$rrt" "${rmodel:+ model $rmodel}" "${product:-<product>}"
-  elif [ -n "$rrt" ]; then
-    printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (%s%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
-      "$rrt" "${rmodel:+ model $rmodel}"
+  if [ -n "$rrt$rmodel" ] && [ "$mode" = solo ]; then
+    printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (pi%s, one pane per PR); it records its verdict with `cel solo review` and sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
+      "${rmodel:+ model $rmodel}" "${product:-<product>}"
+  elif [ -n "$rrt$rmodel" ]; then
+    printf -- '- pr review: after opening a PR, start a reviewer pane with `cel run reviewer --repo <repo> --pr <n>` (pi%s, one pane per PR in the "PR reviewer" tab); its first prompt names the repo, PR number, ticket scope, the worker'\''s herdr alias and your own alias - reviewer and worker then hand off to each other directly, and you hear back only on approval or escalation\n' \
+      "${rmodel:+ model $rmodel}"
     if [ "$(ws_review_post "$d")" = "github" ]; then
       printf -- '- review verdicts: recorded with `cel-fanout review <id> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
     else

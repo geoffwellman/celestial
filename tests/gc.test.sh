@@ -688,11 +688,11 @@ test_gc_rejects_unknown_arguments_and_names_box() {
 _gc_reviewer_fixture() {
   T="$(mktemp -d)"
   export HOME="$T/home" CEL_REVIEWERS_STATE="$T/reviewers.json"
-  mkdir -p "$HOME"
+  mkdir -p "$HOME" "$T/ws/repos/widget"
   GC_SINK="$T/sink"; : > "$GC_SINK"
   GC_PR_STATE=MERGED
   GC_REVIEW_STATUS=idle
-  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  reviewers_record "$T/ws" widget 71 w1:p3 widget-pr-71-review
   herdr() {
     case "$1 $2" in
       "pane close") printf 'close %s\n' "$3" >> "$GC_SINK";;
@@ -719,7 +719,7 @@ test_gc_keeps_rex_reviewers_without_herdr_controls_or_checkout_release() {
   reviewer_checkout_release() { printf 'release\n' >> "$GC_SINK"; }
   _gc_reviewers 0 "$agents" >/dev/null 2>&1
   assert_eq "$(cat "$GC_SINK")" ''
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$pane"
+  assert_eq "$(reviewers_find "$T/ws" widget 71 | jq -r .pane)" "$pane"
   assert_eq "$reviewers_closed" 0
   rm -rf "$T"
 }
@@ -732,8 +732,8 @@ test_gc_adopts_rex_reviewers_with_backend_identity_and_does_not_close_them() {
   herdr() { printf '%s\n' "$*" >> "$GC_SINK"; return 1; }
   _gc_reviewers 0 "$agents" >/dev/null 2>&1
   assert_eq "$(cat "$GC_SINK")" ''
-  assert_eq "$(reviewers_find widget 71 | jq -r .backend)" rex
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$pane"
+  assert_eq "$(reviewers_find "$T/ws" widget 71 | jq -r .backend)" rex
+  assert_eq "$(reviewers_find "$T/ws" widget 71 | jq -r .pane)" "$pane"
   rm -rf "$T"
 }
 
@@ -743,6 +743,52 @@ test_gc_unreadable_roster_cannot_drop_reviewer_records_or_checkouts() {
   _gc_reviewers 0 '{}' >/dev/null 2>&1
   assert_eq "$(cat "$GC_SINK")" ''
   assert_eq "$(reviewers_rows | jq length)" 1
+  rm -rf "$T"
+}
+
+# An unreadable registry refuses admission (tests/run-cmd.test.sh); the sweep
+# is what recovers it. It has just read the live roster, so the reviewers it
+# keeps become the new index, and the unreadable file is kept aside as
+# evidence - with live reviewers to write back, and without.
+test_gc_rebuilds_an_unreadable_reviewer_registry_from_the_live_roster() {
+  _gc_reviewer_fixture
+  GC_PR_STATE=OPEN
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(reviewers_rows | jq -c '[.[] | [.repo, (.pr | tostring), .pane]]')" '[["widget","71","w1:p3"]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$CEL_REVIEWERS_STATE".corrupt-*)" 'not json' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _gc_reviewer_fixture
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
+  assert_eq "$(reviewers_rows)" '[]' || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A dry run rebuilds nothing: the unreadable file stays exactly as it was.
+test_gc_dry_run_leaves_an_unreadable_reviewer_registry_alone() {
+  _gc_reviewer_fixture
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  _gc_reviewers 1 "$(_gc_reviewer_agents)" >/dev/null 2>&1
+  assert_eq "$(cat "$CEL_REVIEWERS_STATE")" 'not json'
+  rm -rf "$T"
+}
+
+# The targeted retirement asked from workspace B never picks a row with no
+# workspace while workspace A also has the repo: that reviewer may be A's.
+test_gc_targeted_retirement_ignores_a_workspace_less_row_another_workspace_may_own() {
+  _gc_reviewer_fixture
+  local a="$T/a" b="$T/b" out rc=0
+  mkdir -p "$a/repos/widget" "$b/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml"
+  registry_add alpha "$a" ""; registry_add beta "$b" ""
+  printf '%s\n' '[{"repo":"widget","pr":12,"pane":"rex/s/b","agent":"widget-pr-12-review","backend":"rex"}]' > "$CEL_REVIEWERS_STATE"
+  cel_agent_list() { printf '%s\n' '{"result":{"agents":[]}}'; }
+  rex_reviewer_retire() { printf 'retire %s\n' "$*" >> "$GC_SINK"; printf '{"status":"eligible"}\n'; }
+  out="$(reviewer_retire_target "$b" widget 12 1)" || rc=$?
+  assert_eq "$rc" 4 || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -r .reason)" no_reviewer_for_pull_request || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$GC_SINK")" ''
   rm -rf "$T"
 }
 
@@ -846,7 +892,7 @@ test_gc_adopts_an_unrecorded_reviewer_whose_pr_is_still_open() {
   GC_PR_STATE=OPEN
   _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
   assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  assert_eq "$(reviewers_find "$T/ws" widget 71 | jq -r .pane)" w1:p3
   rm -rf "$T"
 }
 
@@ -885,13 +931,13 @@ test_gc_does_not_erase_a_reviewer_recorded_while_it_was_sweeping() {
   _gc_reviewer_fixture
   gh() {
     # `cel run reviewer --pr 99` lands while this sweep is mid-flight.
-    reviewers_record gadget 99 w1:p9 gadget-pr-99-review
+    reviewers_record "$T/ws" gadget 99 w1:p9 gadget-pr-99-review
     jq -n --arg s "$GC_PR_STATE" '{state:$s}'
   }
   _gc_reviewers 0 "$(_gc_reviewer_agents)" >/dev/null
   assert_eq "$(cat "$GC_SINK")" "close w1:p3"
-  assert_eq "$(reviewers_find gadget 99 | jq -r .pane)" w1:p9
-  assert_fails reviewers_find widget 71
+  assert_eq "$(reviewers_find "$T/ws" gadget 99 | jq -r .pane)" w1:p9
+  assert_fails reviewers_find "$T/ws" widget 71
   rm -rf "$T"
 }
 
@@ -1333,7 +1379,7 @@ test_gc_keeps_a_deleted_folder_reviewer_whose_pr_is_open() {
   GC_PR_STATE=OPEN
   _gc_reviewers 0 "$(_gc_deleted_reviewer_agents)" >/dev/null 2>&1
   assert_eq "$(cat "$GC_SINK")" ""
-  assert_eq "$(reviewers_find widget 41 | jq -r .pane)" w1:p5
+  assert_eq "$(reviewers_find "$T/ws" widget 41 | jq -r .pane)" w1:p5
   rm -rf "$T"
 }
 
@@ -1404,7 +1450,7 @@ _gc_live_checkout_fixture() { # roster comes from GC_ROSTER
   _gc_reviewer_fixture
   export CEL_REVIEW_DIR="$T/reviews"
   CO="$T/reviews/widget-pr-71"; mkdir -p "$CO/src"; : > "$CO/src/file"
-  reviewers_record widget 71 w1:p3 widget-pr-71-review "$CO" "" ""
+  reviewers_record "$T/ws" widget 71 w1:p3 widget-pr-71-review "$CO" "" ""
   GC_ROSTER='{"result":{"agents":[]}}'
   herdr() {
     case "$1 $2" in
@@ -1455,7 +1501,7 @@ test_a_malformed_roster_keeps_the_checkout() {
 
 test_an_adopted_rows_checkout_is_released_when_its_pane_is_gone() {
   _gc_live_checkout_fixture
-  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  reviewers_record "$T/ws" widget 71 w1:p3 widget-pr-71-review
   _gc_reviewers 0 '{"result":{"agents":[]}}' >/dev/null 2>&1
   [ ! -e "$CO" ] || { echo "an adopted reviewer's checkout outlived it"; rm -rf "$T"; return 1; }
   rm -rf "$T"
@@ -1741,6 +1787,37 @@ test_gc_keeps_a_reviewer_whose_verdict_is_changes_even_for_the_current_head() {
   assert_eq "$(cat "$GC_SINK")" ""
   assert_eq "$(reviewers_rows | jq -r length)" 1
   rm -rf "$T"
+}
+
+# A solo product's reviewer records its verdict with `cel solo review`, in the
+# workspace's .cel/solo-reviews.json - there is no delegation. Its approval of
+# exactly the current head finishes it just the same; an approval of an older
+# head, or a CHANGES verdict, keeps it.
+_gc_rv_solo_fixture() { # <verdict> <review-head> <pr-head>
+  _gc_rv_fixture "$2" "$3"
+  rm -f "$GC_WS/.cel/delegations.json"
+  jq -n --arg v "$1" --arg h "$2" \
+    '{"widget#71": {verdict:$v, by:"widget-pr-71-review", head:$h, at:"2026-01-01T00:00:00Z"}}' > "$GC_WS/.cel/solo-reviews.json"
+}
+
+test_gc_closes_a_finished_solo_reviewer_whose_approval_is_for_the_current_head() {
+  _gc_rv_solo_fixture approved aaa111 aaa111
+  reviewer_checkout_release() { :; }
+  local out; out="$(_gc_rv_run 30)"
+  assert_eq "$(cat "$GC_SINK")" "close w1:p3" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "verdict recorded"
+  rm -rf "$T"
+}
+
+test_gc_keeps_a_solo_reviewer_without_an_approval_of_the_current_head() {
+  local case
+  for case in "approved aaa111 bbb222" "changes aaa111 aaa111"; do
+    # shellcheck disable=SC2086 # the case is three words on purpose
+    _gc_rv_solo_fixture $case
+    _gc_rv_run 60 >/dev/null
+    assert_eq "$(cat "$GC_SINK")" "" || { echo "closed on: $case"; rm -rf "$T"; return 1; }
+    rm -rf "$T"
+  done
 }
 
 # ----------------------------------- retirement ownership

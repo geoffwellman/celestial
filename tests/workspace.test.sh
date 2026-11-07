@@ -76,7 +76,10 @@ test_ws_policy_block_renders_review_instruction_only_when_declared() {
   assert_eq "$(ws_review "$tmp" runtime)" "omp"
   local b; b="$(ws_policy_block "$tmp")"
   assert_contains "$b" 'cel run reviewer --repo <repo> --pr <n>'
-  assert_contains "$b" 'omp model gpt-5.6-sol'
+  # Reviewers always run on pi; the policy must not promise the ignored
+  # review.runtime to the agent that starts them.
+  assert_contains "$b" '(pi model gpt-5.6-sol'
+  case "$b" in *'omp model'*) echo "policy names the ignored review.runtime"; rm -rf "$tmp"; return 1;; esac
   assert_contains "$b" 'PR reviewer'
   rm -rf "$tmp"
 }

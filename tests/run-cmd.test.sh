@@ -135,10 +135,26 @@ test_run_reviewer_targets_review_tab_with_model() {
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>&1)"
   assert_contains "$out" 'tab "PR reviewer"'
   assert_contains "$out" "agent start widget-pr-12-review --kind pi"
+  # review.runtime names claude, and the reviewer runs on pi: the launch says
+  # the field is ignored rather than quietly contradicting it.
+  assert_contains "$out" "review.runtime: claude, which is ignored"
   assert_contains "$out" " -- --extension $CEL_ROOT/tools/hooks/inbox.omp.ts --model ompgw-claude/claude-opus-5-5 --thinking high --append-system-prompt"
   assert_contains "$out" "OMP_GATEWAY_TOKEN="
   ! printf '%s' "$out" | grep -q "workspace create" || { echo "reviewer created a workspace"; return 1; }
   _ws_gateway_clean
+}
+# A review block that names pi, or only a model, launches without the warning.
+test_run_reviewer_on_pi_or_model_only_is_not_warned_about_runtime() {
+  local block out
+  for block in 'review:\n  runtime: pi\n  model: claude-opus-5-5\n' 'review:\n  model: claude-opus-5-5\n'; do
+    _reviewer_gateway_fixture
+    printf '%b' "$block" >> "$T/workspace.yaml"
+    out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run 2>&1)" \
+      || { printf 'reviewer refused: %s\n' "$out" >&2; _ws_gateway_clean; return 1; }
+    assert_contains "$out" "agent start widget-pr-12-review --kind pi" || { _ws_gateway_clean; return 1; }
+    case "$out" in *'is ignored'*) echo "warned about a runtime it honours"; _ws_gateway_clean; return 1;; esac
+    _ws_gateway_clean
+  done
 }
 test_run_reviewer_requires_pr_and_review_block() {
   _ws_review; ( cd "$T" && assert_fails _cmd_run_in_subshell reviewer --repo widget --dry-run )
@@ -991,21 +1007,145 @@ _reviewers_fixture() { export CEL_REVIEWERS_STATE="$T/reviewers.json"; }
 
 test_reviewer_row_records_the_pr_and_is_found_and_dropped_again() {
   _ws; _reviewers_fixture
-  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  reviewers_record "$T" widget 71 w1:p3 widget-pr-71-review
   assert_eq "$(reviewers_rows | jq -r length)" 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
-  assert_fails reviewers_find widget 72
-  reviewers_drop widget 71
+  assert_eq "$(reviewers_find "$T" widget 71 | jq -r .pane)" w1:p3
+  assert_eq "$(reviewers_find "$T" widget 71 | jq -r .workspace)" "$T"
+  assert_fails reviewers_find "$T" widget 72
+  reviewers_drop "$T" widget 71
   assert_eq "$(reviewers_rows | jq -r length)" 0
   rm -rf "$T"
 }
 
-# A missing or corrupt registry is an empty one, never an error: a stale file
-# must not make the launcher - or the sweep that reads it - fail.
-test_reviewer_registry_reads_a_corrupt_file_as_empty() {
+# The registry is box-wide, and two workspaces may both hold a `widget` with
+# a #12. They are two reviews: one workspace's launch must neither find, nor
+# replace, nor drop the other's row.
+test_reviewer_rows_for_one_repo_and_pr_in_two_workspaces_are_two_reviews() {
   _ws; _reviewers_fixture
+  local other="$T/other"; mkdir -p "$other/repos/widget"
+  reviewers_record "$T" widget 12 w1:p1 widget-pr-12-review
+  reviewers_record "$other" widget 12 w2:p1 widget-pr-12-review
+  assert_eq "$(reviewers_rows | jq -r length)" 2 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .pane)" w1:p1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$other" widget 12 | jq -r .pane)" w2:p1 || { rm -rf "$T"; return 1; }
+  reviewers_drop "$T" widget 12
+  assert_fails reviewers_find "$T" widget 12 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$other" widget 12 | jq -r .pane)" w2:p1
+  rm -rf "$T"
+}
+
+# Rows written before the key carried a workspace are read by where they were
+# cut from (`repodir` is <workspace>/repos/<repo>); one with no such evidence
+# belongs only to a workspace that has the repo. Recording the key again
+# replaces that workspace's legacy row and leaves the other's alone.
+test_legacy_reviewer_rows_are_keyed_by_the_workspace_they_were_cut_from() {
+  _ws; _reviewers_fixture
+  local other="$T/other" bare="$T/bare"; mkdir -p "$other/repos/widget" "$bare"
+  printf '%s\n' "$(jq -nc --arg a "$T/repos/widget" --arg b "$other/repos/widget" '[
+    {repo:"widget", pr:12, pane:"w1:p1", agent:"widget-pr-12-review", repodir:$a},
+    {repo:"widget", pr:12, pane:"w2:p1", agent:"widget-pr-12-review", repodir:$b},
+    {repo:"widget", pr:13, pane:"w3:p1", agent:"widget-pr-13-review"}]')" > "$CEL_REVIEWERS_STATE"
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .pane)" w1:p1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$other" widget 12 | jq -r .pane)" w2:p1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$T" widget 13 | jq -r .pane)" w3:p1 || { rm -rf "$T"; return 1; }
+  assert_fails reviewers_find "$bare" widget 13 || { rm -rf "$T"; return 1; }
+  reviewers_record "$T" widget 12 w1:p9 widget-pr-12-review
+  assert_eq "$(reviewers_rows | jq -r length)" 3 || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -c '[.pane, .workspace]')" "$(jq -nc --arg w "$T" '["w1:p9", $w]')" || { rm -rf "$T"; return 1; }
+  assert_eq "$(reviewers_find "$other" widget 12 | jq -r .pane)" w2:p1
+  rm -rf "$T"
+}
+
+# A row with no workspace and no repodir (one `cel gc` adopted from the
+# roster, say) when TWO registered workspaces hold the repo is neither's: it
+# is not found by either, and recording the key in one never deletes it.
+test_workspace_less_reviewer_row_is_nobodys_while_two_workspaces_have_the_repo() {
+  _ws; _reviewers_fixture
+  local b="$T/b"; mkdir -p "$b/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml"
+  registry_add alpha "$T" ""; registry_add beta "$b" ""
+  printf '%s\n' '[{"repo":"widget","pr":12,"pane":"wA:p1","agent":"widget-pr-12-review"}]' > "$CEL_REVIEWERS_STATE"
+  assert_fails reviewers_find "$T" widget 12 || { rm -rf "$T"; return 1; }
+  assert_fails reviewers_find "$b" widget 12 || { rm -rf "$T"; return 1; }
+  reviewers_record "$b" widget 12 wB:p1 widget-pr-12-review
+  assert_eq "$(reviewers_rows | jq -c '[.[] | .pane] | sort')" '["wA:p1","wB:p1"]' || { rm -rf "$T"; return 1; }
+  reviewers_drop "$T" widget 12
+  assert_eq "$(reviewers_rows | jq -c '[.[] | .pane] | sort')" '["wA:p1","wB:p1"]'
+  rm -rf "$T"
+}
+
+# A corrupt registry rebuilt by `cel gc` keeps each live reviewer's
+# workspace when its process proves it (CEL_WORKSPACE in the environ of the
+# pane's foreground process). Workspace B, holding the same repo and asking
+# for the same PR, is refused - it neither reuses nor re-records A's
+# reviewer. Unproven, the rebuilt row is nobody's and B is refused all the same.
+_reviewers_two_ws_rebuild() { # <proven 0|1> -> T (workspace A), RW_B (workspace B)
+  _ws_review; _reviewers_fixture
+  . "$CEL_ROOT/lib/gc.sh"
+  RW_B="$(mktemp -d)"; cp "$T/workspace.yaml" "$RW_B/"; mkdir -p "$RW_B/repos/widget"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_REVIEW_DIR="$T/reviews" CEL_PROC_DIR="$T/proc"
+  registry_add alpha "$T" ""; registry_add beta "$RW_B" ""
+  local co="$T/reviews/widget-pr-12"; mkdir -p "$co" "$T/proc/4242"
+  printf 'CEL_ROLE=reviewer\0CEL_WORKSPACE=%s\0HERDR_PANE_ID=wA:p1\0' "$T" > "$T/proc/4242/environ"
+  local info='{}'
+  [ "$1" = 0 ] || info='{"result":{"process_info":{"pane_id":"wA:p1","foreground_processes":[{"pid":4242}]}}}'
+  cat > "$T/bin/herdr" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "agent list") printf '%s\n' '{"result":{"agents":[{"name":"widget-pr-12-review","agent_status":"idle","pane_id":"wA:p1","cwd":"$co"}]}}' ;;
+  "pane process-info") printf '%s\n' '$info' ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+  chmod +x "$T/bin/herdr"
+  gh() { return 1; }
   printf 'not json' > "$CEL_REVIEWERS_STATE"
-  assert_eq "$(reviewers_rows | jq -r length)" 0
+  _gc_reviewers 0 "$(cel_agent_list)" >/dev/null 2>&1
+}
+
+test_gc_rebuild_keeps_a_proven_workspace_and_another_workspace_cannot_take_the_reviewer() {
+  _reviewers_two_ws_rebuild 1
+  local out rc=0 rows
+  rows="$(reviewers_rows)"
+  assert_eq "$(printf '%s' "$rows" | jq -c '[.[] | [.pane, .workspace]]')" "$(jq -nc --arg w "$T" '[["wA:p1", $w]]')" \
+    || { rm -rf "$T" "$RW_B"; return 1; }
+  out="$(cd "$RW_B" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'workspace B took over A'"'"'s reviewer: %s\n' "$out" >&2; rm -rf "$T" "$RW_B"; return 1; }
+  assert_contains "$out" "belongs to workspace $T" || { rm -rf "$T" "$RW_B"; return 1; }
+  assert_eq "$(reviewers_rows)" "$rows"
+  rm -rf "$T" "$RW_B"
+}
+
+test_gc_rebuild_without_proof_leaves_a_row_another_workspace_cannot_take() {
+  _reviewers_two_ws_rebuild 0
+  local out rc=0 rows
+  rows="$(reviewers_rows)"
+  assert_eq "$(printf '%s' "$rows" | jq -c '[.[] | [.pane, (.workspace // "")]]')" '[["wA:p1",""]]' \
+    || { rm -rf "$T" "$RW_B"; return 1; }
+  out="$(cd "$RW_B" && _cmd_run_in_subshell reviewer --repo widget --pr 12 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'workspace B took over an unattributed reviewer: %s\n' "$out" >&2; rm -rf "$T" "$RW_B"; return 1; }
+  assert_contains "$out" "cannot be proven" || { rm -rf "$T" "$RW_B"; return 1; }
+  assert_eq "$(reviewers_rows)" "$rows"
+  rm -rf "$T" "$RW_B"
+}
+
+# A registry that does not parse is UNKNOWN, not empty: read as empty, it
+# admits a second reviewer beside one whose row was in it. Nothing is written
+# over it, and admission refuses until `cel gc` rebuilds it.
+test_reviewer_registry_that_does_not_parse_is_unknown_and_refuses_admission() {
+  _ws_review; _reviewers_fixture
+  _run_stub_roster "$T/elsewhere" -
+  printf 'not json' > "$CEL_REVIEWERS_STATE"
+  local rc=0 out
+  reviewers_rows >/dev/null || rc=$?
+  assert_eq "$rc" 2 || { rm -rf "$T"; return 1; }
+  rc=0; reviewers_find "$T" widget 12 >/dev/null || rc=$?
+  assert_eq "$rc" 2 || { rm -rf "$T"; return 1; }
+  assert_fails reviewers_record "$T" widget 12 w1:p1 widget-pr-12-review 2>/dev/null || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$CEL_REVIEWERS_STATE")" 'not json' || { rm -rf "$T"; return 1; }
+  rc=0; out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { printf 'admitted a reviewer over an unreadable registry: %s\n' "$out" >&2; rm -rf "$T"; return 1; }
+  assert_contains "$out" "reviewer registry"
   rm -rf "$T"
 }
 
@@ -1014,7 +1154,7 @@ test_reviewer_registry_reads_a_corrupt_file_as_empty() {
 test_second_reviewer_for_the_same_pr_reuses_the_pane_and_adds_no_row() {
   _ws_review; _reviewers_fixture
   _run_stub_roster "$T/repos/widget" widget-pr-12-review
-  reviewers_record widget 12 wQ:p1 widget-pr-12-review
+  reviewers_record "$T" widget 12 wQ:p1 widget-pr-12-review
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run)"
   assert_contains "$out" wQ:p1
   case "$out" in *'tab "PR reviewer"'*) printf 'a second pane was split for one PR\n' >&2; return 1;; esac
@@ -1038,7 +1178,7 @@ test_reviewer_relaunches_after_gc_drops_a_gone_rex_reviewers_row() {
       pane_id:"rex/widget-review/terminal",backend:"rex",rex_session:"widget-review",rex_block:"terminal",
       pid:$pid,pid_start:"1",agent_status:"idle"}' > "$receipt"
   chmod 600 "$receipt"
-  reviewers_record widget 12 rex/widget-review/terminal widget-pr-12-review
+  reviewers_record "$T" widget 12 rex/widget-review/terminal widget-pr-12-review
   reviewers_write "$(reviewers_rows | jq 'map(.backend="rex")')"
   out="$(cd "$T" && _cmd_run_in_subshell reviewer --repo widget --pr 12 --dry-run 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || { echo "a stale Rex row was reused: $out"; _ws_gateway_clean; return 1; }
@@ -1057,12 +1197,12 @@ test_reviewer_relaunches_after_gc_drops_a_gone_rex_reviewers_row() {
 # somebody else is holding is REFUSED rather than clobbered.
 test_reviewer_registry_update_is_refused_while_another_writer_holds_it() {
   _ws; _reviewers_fixture
-  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  reviewers_record "$T" widget 71 w1:p3 widget-pr-71-review
   local fd; exec {fd}>"$CEL_REVIEWERS_STATE.lock"; flock "$fd"
-  ( CEL_REVIEWERS_LOCK_WAIT=1 assert_fails reviewers_record gadget 99 w1:p9 gadget-pr-99-review )
+  ( CEL_REVIEWERS_LOCK_WAIT=1 assert_fails reviewers_record "$T" gadget 99 w1:p9 gadget-pr-99-review )
   exec {fd}>&-
   assert_eq "$(reviewers_rows | jq -r length)" 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  assert_eq "$(reviewers_find "$T" widget 71 | jq -r .pane)" w1:p3
   rm -rf "$T"
 }
 
@@ -1073,9 +1213,9 @@ test_regression_reviewer_registry_write_leaves_later_stderr_visible() {
   have flock || return 0
   _ws; _reviewers_fixture
   local err
-  err="$( { reviewers_record widget 71 w1:p3 widget-pr-71-review >/dev/null; printf 'later-stderr\n' >&2; } 2>&1 )"
+  err="$( { reviewers_record "$T" widget 71 w1:p3 widget-pr-71-review >/dev/null; printf 'later-stderr\n' >&2; } 2>&1 )"
   assert_contains "$err" later-stderr || { rm -rf "$T"; return 1; }
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" w1:p3
+  assert_eq "$(reviewers_find "$T" widget 71 | jq -r .pane)" w1:p3
   rm -rf "$T"
 }
 
@@ -1132,7 +1272,7 @@ test_reviewer_reads_the_prs_own_tree_not_the_orchestrator_checkout() {
   assert_eq "$(git -C "$cwd" rev-parse HEAD)" "$HEAD_SHA"
   # ...and it is detached, so nothing in it is a branch anyone could push.
   assert_fails git -C "$cwd" symbolic-ref -q HEAD
-  assert_eq "$(reviewers_find widget 12 | jq -r .checkout)" "$cwd"
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .checkout)" "$cwd"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
@@ -1216,7 +1356,7 @@ test_reviewer_brief_names_the_head_sha_and_the_base() {
 test_reviewer_checkout_is_removed_when_the_reviewer_is_released() {
   _ws_pr_fixture
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
-  local cwd; cwd="$(reviewers_find widget 12 | jq -r .checkout)"
+  local cwd; cwd="$(reviewers_find "$T" widget 12 | jq -r .checkout)"
   [ -d "$cwd" ] || { echo "no reviewer checkout was made"; return 1; }
   reviewer_checkout_release widget 12
   [ ! -e "$cwd" ] || { echo "the reviewer's checkout outlived it"; return 1; }
@@ -1240,7 +1380,7 @@ test_reviewer_asks_github_by_slug_not_local_name() {
   }
   ( cd "$T" && cmd_run reviewer --repo widget --pr 12 ) >/dev/null
   assert_contains "$(cat "$GH_LOG")" "--repo acme/widget-gh"
-  assert_eq "$(git -C "$(reviewers_find widget 12 | jq -r .checkout)" rev-parse HEAD)" "$HEAD_SHA"
+  assert_eq "$(git -C "$(reviewers_find "$T" widget 12 | jq -r .checkout)" rev-parse HEAD)" "$HEAD_SHA"
   reviewer_checkout_release widget 12
   rm -rf "$T"
 }
@@ -1434,13 +1574,15 @@ test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded
     case "$1 $2" in
       "agent list") jq -nc --arg c "$RC_CO" \
         '{result:{agents:[{pane_id:"w1:p7",name:"widget-pr-12-review",cwd:$c,agent_status:"working"}]}}';;
+      # the read-only probe of whose workspace the live reviewer serves
+      "pane process-info") return 1;;
       *) printf 'herdr %s\n' "$*" >> "$T/herdr.log"; return 1;;
     esac
   }
   local out; out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 2>&1)"
   assert_contains "$out" "reusing"
-  assert_eq "$(reviewers_find widget 12 | jq -r .pane)" w1:p7
-  assert_eq "$(reviewers_find widget 12 | jq -r .checkout)" "$co"
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .pane)" w1:p7
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .checkout)" "$co"
   [ -e "$co/keep" ] || { echo "the live checkout was deleted"; return 1; }
   [ ! -s "$T/herdr.log" ] || { echo "a pane was started: $(cat "$T/herdr.log")"; return 1; }
   unset -f herdr; rm -rf "$T"
@@ -1478,7 +1620,7 @@ _pf_reviewer() { # run the reviewer launch with fake knobs; leaves $out and $rc
 _pf_no_launch() { # nothing typed, nothing started, nothing recorded
   assert_eq "$(_pf_calls 'pane send-text')" 0
   assert_eq "$(_pf_calls 'agent start')" 0
-  assert_fails reviewers_find widget 12
+  assert_fails reviewers_find "$T" widget 12
 }
 _pf_clean() { reviewer_checkout_release widget 12 2>/dev/null; rm -rf "$T"; }
 
@@ -1492,7 +1634,7 @@ test_launch_waits_for_a_slow_shell_then_types_the_prefix_exactly_once() {
   local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
   local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w1:p9 *$' || true)"
   [ "$before" -ge 9 ] || { echo "typed after only $before readiness probes"; _pf_clean; return 1; }
-  assert_eq "$(reviewers_find widget 12 | jq -r .pane)" w1:p9
+  assert_eq "$(reviewers_find "$T" widget 12 | jq -r .pane)" w1:p9
   unset PF_BUSY_GETS; _pf_clean
 }
 
@@ -1563,7 +1705,7 @@ test_launch_refuses_to_start_when_the_shell_changes_after_the_prefix_is_typed() 
   assert_eq "$(_pf_calls 'pane send-text')" 1
   assert_eq "$(_pf_calls 'agent start')" 0
   assert_eq "$(_pf_calls 'pane send-keys')" 0
-  assert_fails reviewers_find widget 12
+  assert_fails reviewers_find "$T" widget 12
   case "$out" in *reviewer-test-api-key*) echo "the gateway key leaked"; _pf_clean; return 1;; esac
   unset PF_SWAP_SHELL_ON_SEND; _pf_clean
 }
@@ -1578,7 +1720,7 @@ test_a_start_refused_after_the_prefix_is_not_retried_and_is_not_a_launch() {
   assert_eq "$(_pf_calls 'pane send-text')" 1
   assert_eq "$(_pf_calls 'agent start')" 1
   assert_eq "$(_pf_calls 'pane send-keys')" 0
-  assert_fails reviewers_find widget 12
+  assert_fails reviewers_find "$T" widget 12
   case "$out" in *reviewer-test-api-key*|*OMP_GATEWAY_TOKEN=*) echo "the pending launch line leaked"; _pf_clean; return 1;; esac
   unset PF_START_FAIL; _pf_clean
 }

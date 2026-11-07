@@ -534,10 +534,16 @@ _reviewer_worktree_drop() { # <repodir> <path>; fails, deleting nothing, while a
 }
 
 # A reviewer's checkout goes with its pane: whatever closes the reviewer calls
-# this - `cel gc` does, right after the pane goes.
-reviewer_checkout_release() { # <repo> <pr>
-  local row path repodir
-  row="$(reviewers_find "$1" "$2")" || return 0
+# this - `cel gc` does, right after the pane goes, naming the pane so the row
+# is the one it closed whichever workspace recorded it. More than one row
+# answering is not a checkout anyone can name, so nothing is dropped.
+reviewer_checkout_release() { # <repo> <pr> [pane]
+  local rows row path repodir
+  rows="$(reviewers_rows)" || return 0
+  row="$(printf '%s' "$rows" | jq -c --arg r "$1" --arg p "$2" --arg pane "${3:-}" \
+    '[.[] | select(.repo == $r and ((.pr | tostring) == $p) and ($pane == "" or .pane == $pane))]
+     | if length == 1 then .[0] else empty end')" || return 0
+  [ -n "$row" ] || return 0
   path="$(printf '%s' "$row" | jq -r '.checkout // ""')"
   repodir="$(printf '%s' "$row" | jq -r '.repodir // ""')"
   # A row `cel gc` adopted carries no checkout; the path is derived from repo
@@ -702,19 +708,106 @@ _run_claude_trust_dir() { # <dir>
 #
 # Deliberately NOT the delegation ledger: a reviewer is not a delegation and
 # must not appear in `cel-fanout status`. It is box-level state, so it lives
-# where the rest of the box's state does, beside gc-kept.json.
+# where the rest of the box's state does, beside gc-kept.json - and because it
+# is box-level, a row is keyed by WORKSPACE + repo + PR: two workspaces may
+# both hold a `widget` with a #12, and they are two reviews.
 _reviewers_state() { printf '%s' "${CEL_REVIEWERS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/reviewers.json}"; }
 
-# A missing or corrupt file is an EMPTY registry, never an error: a stale file
-# must break neither the launcher nor the sweep that reads it.
-reviewers_rows() { # -> JSON array
-  local f rows
+# A missing file is an empty registry. A file that does not parse as rows is
+# UNKNOWN, not empty: status 2 and nothing printed. Admission refuses on it -
+# an empty answer would let a second reviewer in beside one whose row was in
+# that file - and only `cel gc`, which rebuilds the index from the live
+# roster, writes over it (reviewers_update --recover).
+reviewers_rows() { # -> JSON array; 2 = the file exists and is not a registry
+  local f
   f="$(_reviewers_state)"
-  [ -r "$f" ] || { printf '[]'; return 0; }
-  rows="$(jq -ce 'if type == "array" and all(.[];
+  [ -e "$f" ] || { printf '[]'; return 0; }
+  jq -ce 'if type == "array" and all(.[];
       (.repo | type == "string") and (.pane | type == "string") and (.pr != null))
-    then . else [] end' "$f" 2>/dev/null)" || rows='[]'
-  printf '%s' "$rows"
+    then . else error("not a reviewer registry") end' "$f" 2>/dev/null || return 2
+}
+
+# WHICH WORKSPACE A ROW BELONGS TO. Rows written before the key carried a
+# workspace still say where they were cut from: `repodir` is
+# <workspace>/repos/<repo>. A row without even that ($here) belongs to the
+# asking workspace only when no OTHER registered workspace has the repo: a
+# workspace without it cannot have launched the reviewer, and with two
+# candidates the row is nobody's - never matched, never replaced by a record,
+# left for `cel gc` to attribute from the live process.
+_REVIEWERS_JQ_SCOPE='
+  def rv_ws: . as $x | ("/repos/" + ($x.repo // "")) as $tail
+    | if (($x.workspace // "") | type == "string" and length > 0) then $x.workspace
+      elif (($x.repodir // "") | type == "string" and endswith($tail) and length > ($tail | length))
+        then ($x.repodir | .[0:(length - ($tail | length))])
+      else null end;
+  def rv_key($ws; $here; $r; $p): .repo == $r and ((.pr | tostring) == $p)
+    and (rv_ws as $w | if $w == null then $here else $w == $ws end);'
+
+_reviewers_here() { # <wsdir> <repo> -> true|false: may a workspace-less row be this workspace's?
+  local names ws d
+  [ -d "$1/repos/$2" ] || { printf false; return 0; }
+  # A workspace registry that cannot be read cannot rule the others out.
+  names="$(registry_names 2>/dev/null)" || { printf false; return 0; }
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    d="$(registry_path "$ws" 2>/dev/null)" || { printf false; return 0; }
+    [ -n "$d" ] && ! [ "$d" -ef "$1" ] || continue
+    [ ! -d "$d/repos/$2" ] || { printf false; return 0; }
+  done <<< "$names"
+  printf true
+}
+
+# WHICH WORKSPACE A LIVE REVIEWER WAS LAUNCHED FOR, proven from the process,
+# never guessed from a name or a box-wide checkout path. A Rex reviewer's
+# receipt records it (validated by rex_agent_list). A Herdr reviewer's runtime
+# carries CEL_WORKSPACE in /proc/<pid>/environ, fixed at exec by the launch
+# line (_run_launch_env); the pid must be in the pane's foreground group and
+# carry this pane's HERDR_PANE_ID and CEL_ROLE=reviewer. No proof, or two
+# different answers, prints nothing.
+reviewer_pane_workspace() { # <agents-json> <pane> -> workspace directory, or nothing
+  local pane="$2" row info pid item envws envpane envrole found=""
+  row="$(printf '%s' "$1" | jq -c --arg p "$pane" \
+    '[.result.agents[]? | select(.pane_id == $p)] | if length == 1 then .[0] else empty end' 2>/dev/null)" || return 0
+  [ -n "$row" ] || return 0
+  if [[ "$pane" == rex/* ]] || printf '%s' "$row" | jq -e '.backend == "rex"' >/dev/null 2>&1; then
+    printf '%s' "$row" | jq -r 'select(.backend == "rex" and .role == "reviewer"
+      and (.workspace | type == "string" and length > 0)) | .workspace' 2>/dev/null
+    return 0
+  fi
+  have herdr || return 0
+  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || return 0
+  for pid in $(printf '%s' "$info" | jq -r --arg p "$pane" \
+      '.result.process_info | select(.pane_id == $p) | .foreground_processes[]?.pid | select(type == "number")' 2>/dev/null); do
+    envws="" envpane="" envrole=""
+    while IFS= read -r -d '' item; do
+      case "$item" in
+        CEL_WORKSPACE=*) envws="${item#*=}" ;;
+        HERDR_PANE_ID=*) envpane="${item#*=}" ;;
+        CEL_ROLE=*) envrole="${item#*=}" ;;
+      esac
+    done < <({ cat "${CEL_PROC_DIR:-/proc}/$pid/environ"; } 2>/dev/null)
+    [ "$envpane" = "$pane" ] && [ "$envrole" = reviewer ] && [ -n "$envws" ] || continue
+    [ -z "$found" ] || [ "$found" = "$envws" ] || return 0
+    found="$envws"
+  done
+  printf '%s' "$found"
+}
+
+# A LIVE REVIEWER FOUND BY NAME OR CHECKOUT IS REUSED ONLY WHEN IT IS THIS
+# WORKSPACE'S. Its alias and checkout path are box-wide, so another
+# workspace's review of the same repo and PR answers to both. Proven to be
+# another workspace's: refused. Unproven, while another registered workspace
+# also has the repo: refused too - which of them it serves is unknown.
+_run_reviewer_owned() { # <agents-json> <pane> <wsdir> <repo> <pr>; dies unless reusable
+  local owner
+  owner="$(reviewer_pane_workspace "$1" "$2")"
+  if [ -n "$owner" ]; then
+    [ "$owner" -ef "$3" ] || [ "$owner" = "$3" ] \
+      || die "cel run reviewer: the live reviewer for $4#$5 in pane $2 belongs to workspace $owner, not this one; no checkout changed"
+    return 0
+  fi
+  [ "$(_reviewers_here "$3" "$4")" = true ] \
+    || die "cel run reviewer: the live reviewer for $4#$5 in pane $2 cannot be proven to be this workspace's, and another workspace has $4; no checkout changed"
 }
 
 reviewers_write() { # <json-array> - the whole file, under the lock
@@ -735,9 +828,13 @@ _reviewers_write_raw() { # <json-array> - the write itself; callers hold the loc
 #
 # A registry somebody else is holding is REFUSED, never clobbered: the
 # caller is told, and the worst case is a reviewer that is not indexed,
-# which the gc pass discovers and adopts anyway.
-reviewers_update() { # [jq-args...] <filter>
-  local f lock fd="" rows next rc=0
+# which the gc pass discovers and adopts anyway. So is a registry that does
+# not parse - except under --recover, the gc pass that has just read the live
+# roster: it moves the unreadable file aside, as evidence, and starts the
+# index again from what it found.
+reviewers_update() { # [--recover] [jq-args...] <filter>
+  local f lock fd="" rows next rc=0 recover=0 aside
+  [ "${1:-}" != --recover ] || { recover=1; shift; }
   f="$(_reviewers_state)"; lock="$f.lock"
   mkdir -p "$(dirname "$f")" || return 1
   # The braces scope the silencing to the open: `exec {fd}>"$lock" 2>/dev/null`
@@ -751,43 +848,66 @@ reviewers_update() { # [jq-args...] <filter>
   else
     fd=""
   fi
-  rows="$(reviewers_rows)"
-  if next="$(printf '%s' "$rows" | jq -c "$@")"; then
-    _reviewers_write_raw "$next" || rc=1
+  if rows="$(reviewers_rows)"; then
+    :
+  elif [ "$recover" = 1 ]; then
+    aside="$f.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+    if mv -f -- "$f" "$aside"; then
+      c_warn "the reviewer registry $f did not parse - moved aside to $aside and rebuilt from the live roster"
+      rows='[]'
+    else
+      rc=1
+    fi
   else
+    c_warn "the reviewer registry $f does not parse - not updated (cel gc rebuilds it from the live roster)"
     rc=1
+  fi
+  if [ "$rc" = 0 ]; then
+    if next="$(printf '%s' "$rows" | jq -c "$@")"; then
+      _reviewers_write_raw "$next" || rc=1
+    else
+      rc=1
+    fi
   fi
   if [ -n "$fd" ]; then flock -u "$fd"; exec {fd}>&-; fi
   return "$rc"
 }
 
-reviewers_find() { # <repo> <pr> -> the row, or fail
-  local row
-  row="$(reviewers_rows | jq -c --arg r "$1" --arg p "$2" \
-    '[.[] | select(.repo == $r and ((.pr | tostring) == $p))][0] // empty')" || return 1
+# 0 with the row; 1 when this workspace has no reviewer recorded for the PR;
+# 2 when the registry cannot be read - which is not "none".
+reviewers_find() { # <wsdir> <repo> <pr> -> the row
+  local rows row
+  rows="$(reviewers_rows)" || return 2
+  row="$(printf '%s' "$rows" | jq -c --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
+    --arg r "$2" --arg p "$3" "$_REVIEWERS_JQ_SCOPE"'
+    [.[] | select(rv_key($ws; $here; $r; $p))][0] // empty')" || return 2
   [ -n "$row" ] || return 1
   printf '%s' "$row"
 }
 
-# Replaces any row for the same repo+PR rather than appending: one pull
-# request has one reviewer, and two rows for it are two panes nobody can tell
-# apart.
+# Replaces any row for the same workspace+repo+PR rather than appending: one
+# pull request has one reviewer, and two rows for it are two panes nobody can
+# tell apart. A legacy row for the same key is replaced too - that is its
+# migration - while another workspace's row is never touched.
 #
 # The checkout, the clone it was cut from and the head it was cut at are
 # carried with the row because the sweep that closes the reviewer is the only
 # thing left that can remove the worktree, and it knows nothing else about it.
-reviewers_record() { # <repo> <pr> <pane> <agent> [checkout] [repodir] [head]
-  reviewers_update --arg r "$1" --arg p "$2" --arg pane "$3" --arg a "$4" \
-    --arg co "${5:-}" --arg rd "${6:-}" --arg head "${7:-}" \
+reviewers_record() { # <wsdir> <repo> <pr> <pane> <agent> [checkout] [repodir] [head]
+  reviewers_update --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
+    --arg r "$2" --arg p "$3" --arg pane "$4" --arg a "$5" \
+    --arg co "${6:-}" --arg rd "${7:-}" --arg head "${8:-}" \
     --argjson t "$(date +%s)" \
-    'map(select(.repo != $r or ((.pr | tostring) != $p)))
-     + [{repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t,
+    "$_REVIEWERS_JQ_SCOPE"'
+    map(select(rv_key($ws; $here; $r; $p) | not))
+     + [{workspace:$ws, repo:$r, pr:$p, pane:$pane, agent:$a, started_at:$t,
          checkout:$co, repodir:$rd, head:$head} + (if ($pane | startswith("rex/")) then {backend:"rex"} else {} end)]'
 }
 
-reviewers_drop() { # <repo> <pr>
-  reviewers_update --arg r "$1" --arg p "$2" \
-    'map(select(.repo != $r or ((.pr | tostring) != $p)))'
+reviewers_drop() { # <wsdir> <repo> <pr>
+  reviewers_update --arg ws "$1" --argjson here "$(_reviewers_here "$1" "$2")" \
+    --arg r "$2" --arg p "$3" "$_REVIEWERS_JQ_SCOPE"'
+    map(select(rv_key($ws; $here; $r; $p) | not))'
 }
 
 # THE REGISTRY IS AN INDEX, NOT THE DEFINITION OF EXISTENCE. A reviewer with no
@@ -1934,11 +2054,17 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
-      # Reviewers use pi because its inbox extension wakes an idle session on
-      # incoming mail; the workspace review block continues to own the model.
+      # Reviewers ALWAYS run on pi: its inbox extension wakes an idle session
+      # on incoming mail, which is how a re-review request reaches a reviewer
+      # nobody is typing to. The workspace review block owns the model only;
+      # a `review.runtime` naming anything else is ignored, and said so.
       runtime=pi
-      [ -n "$(ws_review "$wsdir" runtime)" ] \
+      local review_runtime
+      review_runtime="$(ws_review "$wsdir" runtime)"
+      [ -n "$review_runtime$(ws_review "$wsdir" model)" ] \
         || die "cel run reviewer: workspace '$(ws_name "$wsdir")' declares no review: block"
+      [ -z "$review_runtime" ] || [ "$review_runtime" = pi ] \
+        || c_warn "cel run reviewer: workspace '$(ws_name "$wsdir")' sets review.runtime: $review_runtime, which is ignored - reviewers run on pi, the runtime that delivers mail to an idle reviewer; review.model still applies (set review.runtime: pi, or remove it)"
       alias_name="$repo/pr-$pr-review"
       cwd="$wsdir/repos/$repo"
       rolefile="$CEL_ROOT/core/roles/pr-reviewer.md"
@@ -1950,7 +2076,10 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       reviewer_roster="$(cel_agent_list 2>/dev/null)" || die 'cel run reviewer: native inventory is unreadable; no checkout changed'
       printf '%s' "$reviewer_roster" | jq -e '.result.agents | type == "array"' >/dev/null \
         || die 'cel run reviewer: native inventory is invalid; no checkout changed'
-      if existing="$(reviewers_find "$repo" "$pr")"; then
+      local find_rc=0
+      existing="$(reviewers_find "$wsdir" "$repo" "$pr")" || find_rc=$?
+      [ "$find_rc" != 2 ] || die "cel run reviewer: the reviewer registry $(_reviewers_state) does not parse - whether $repo#$pr already has a reviewer is unknown, so none is started; cel gc rebuilds it from the live roster"
+      if [ "$find_rc" = 0 ]; then
         recorded_pane="$(printf '%s' "$existing" | jq -r .pane)"
         recorded_agent="$(printf '%s' "$existing" | jq -r '.agent // ""')"
         [ -n "$recorded_agent" ] || die 'cel run reviewer: recorded reviewer identity is incomplete'
@@ -1972,10 +2101,11 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
         alias_cwd="$(pane_cwd "$alias_cwd")"
         alias_base="$(reviewer_checkout_path "$repo" "$pr")"
         case "$alias_cwd" in "$alias_base"|"$alias_base".round.*) scoped_alias=1 ;; esac
-        if printf '%s' "$alias_rows" | jq -e --arg r "$repo" --arg p "$pr" \
-          '.[0] | .backend == "rex" and .role == "reviewer" and .repo == $r and (.pr|tostring) == $p' >/dev/null; then scoped_alias=1; fi
+        if printf '%s' "$alias_rows" | jq -e --arg r "$repo" --arg p "$pr" --arg ws "$wsdir" \
+          '.[0] | .backend == "rex" and .role == "reviewer" and .repo == $r and (.pr|tostring) == $p and .workspace == $ws' >/dev/null; then scoped_alias=1; fi
         [ "$scoped_alias" = 1 ] || die 'cel run reviewer: matching alias is not bound to this review scope; no checkout changed'
-        [ "$dry_run" = 1 ] || reviewers_record "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" \
+        _run_reviewer_owned "$reviewer_roster" "$alias_pane" "$wsdir" "$repo" "$pr"
+        [ "$dry_run" = 1 ] || reviewers_record "$wsdir" "$repo" "$pr" "$alias_pane" "$reviewer_alias" "$alias_cwd" "$cwd" "" \
           || die 'cel run reviewer: could not retain the existing native reviewer identity'
         c_ok "reviewer for $repo#$pr is already running as $reviewer_alias in pane $alias_pane - reusing it"
         return 0
@@ -1989,8 +2119,9 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
          && [ "${live%%$'\t'*}" != unknown ]; then
         local lpane lname live_checkout
         IFS=$'\t' read -r lpane lname live_checkout <<< "$live"
+        _run_reviewer_owned "$reviewer_roster" "$lpane" "$wsdir" "$repo" "$pr"
         if [ "$dry_run" -eq 0 ]; then
-          reviewers_record "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" \
+          reviewers_record "$wsdir" "$repo" "$pr" "$lpane" "$lname" "$live_checkout" "$cwd" "" \
             || c_warn "could not record the reviewer for $repo#$pr"
         fi
         c_ok "reviewer for $repo#$pr is already running as $lname in pane $lpane (found by its checkout) - reusing it"
@@ -2343,7 +2474,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
     [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run" || return $?
     if [ "$role" = reviewer ]; then
-      reviewers_record "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
+      reviewers_record "$wsdir" "$repo" "$pr" "$_REX_PANE" "$agent_name" "$review_path" "$repodir" "$review_head"
     fi
     return 0
   fi
@@ -2367,7 +2498,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     # Recorded AFTER the launch: a row for a pane that never started is a row
     # `cel gc` would carry forever. A failed record is a warning, not a
     # failure - the reviewer is alive and reviewing either way.
-    reviewers_record "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" \
+    reviewers_record "$wsdir" "$repo" "$pr" "$pane_id" "$agent_name" "$review_path" "$repodir" "$review_head" \
       || c_warn "could not record the reviewer for $repo#$pr - cel gc will not close it, and its checkout at $review_path will outlive it"
     return 0
   fi

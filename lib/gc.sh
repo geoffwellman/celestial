@@ -704,8 +704,8 @@ _gc_unknown_clear() { # <pane> <repo> <pr>
 # in both is ONE reviewer - keyed by pane id, so it is never closed or
 # counted twice.
 _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
-  local out='[]' repo pr pane agent status rd backend observed
-  while IFS=$'\x1f' read -r repo pr pane agent rd backend; do
+  local out='[]' repo pr pane agent status rd backend observed ws attributed
+  while IFS=$'\x1f' read -r repo pr pane agent rd backend ws; do
     [ -n "$repo" ] && [ -n "$pane" ] || continue
     # A recorded pane that is not on the roster has gone by other means.
     # `gone` is a stale row, dropped as bookkeeping rather than closed.
@@ -713,16 +713,25 @@ _gc_reviewer_candidates() { # <rows> <agents-json> -> one JSON object per line
       '[.result.agents[]? | select(.pane_id == $p)][0].agent_status // "gone"' 2>/dev/null)" || status=unknown
     observed="$(printf '%s' "$2" | jq -r --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)][0].backend // empty' 2>/dev/null)"
     backend="${observed:-${backend:-herdr}}"
+    # A row with no workspace of its own gets the one its live process
+    # proves (reviewer_pane_workspace); the write-back records it.
+    attributed=false
+    if [ -z "$ws" ] && [ "$status" != gone ]; then
+      ws="$(reviewer_pane_workspace "$2" "$pane")"
+      [ -z "$ws" ] || attributed=true
+    fi
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" --arg b "$backend" \
-      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, backend:$b, recorded:true}]')"
-  done < <(printf '%s' "$1" | jq -r '.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // ""), (.backend // "herdr")] | join("\u001f")')
+      --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg rd "$rd" --arg b "$backend" --arg ws "$ws" \
+      --argjson attributed "$attributed" \
+      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, repodir:$rd, backend:$b, workspace:$ws, recorded:true, attributed:$attributed}]')"
+  done < <(printf '%s' "$1" | jq -r "$_REVIEWERS_JQ_SCOPE"'.[] | [.repo, (.pr | tostring), .pane, (.agent // ""), (.repodir // ""), (.backend // "herdr"), (rv_ws // "")] | join("\u001f")')
   while IFS=$'\t' read -r repo pr pane agent status backend; do
     [ -n "$pane" ] || continue
     printf '%s' "$out" | jq -e --arg p "$pane" 'any(.[]; .pane == $p)' >/dev/null 2>&1 && continue
     out="$(printf '%s' "$out" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
       --arg a "$agent" --arg s "$status" --arg c "$(_gc_reviewer_cwd "$2" "$pane")" --arg b "${backend:-herdr}" \
-      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, backend:$b, recorded:false}]')"
+      --arg ws "$(reviewer_pane_workspace "$2" "$pane")" \
+      '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, status:$s, cwd:$c, backend:$b, workspace:$ws, recorded:false}]')"
   done < <(reviewers_discover "$2")
   printf '%s' "$out" | jq -c '.[]'
 }
@@ -750,13 +759,16 @@ _gc_reviewer_cwd() { # <agents-json> <pane> -> the pane's cwd, or empty
 # panes had no row - and applies them under the registry lock to whatever
 # the file says by then. A row this sweep never saw is never touched.
 _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
-  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' repo pr pane agent status cwd state repodir backend
+  local dry="$1" agents="$2" rows cand drop='[]' adopt='[]' attrib='[]' repo pr pane agent status cwd state repodir backend recover=()
   reviewers_closed=0
   printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 || return 0
   local rv_what="" rv_prev='{}' rv_next='{}' rv_file
   rv_file="$(_gc_reviewer_stop_state)"
   [ -f "$rv_file" ] && rv_prev="$(jq -c 'if type == "object" then . else {} end' "$rv_file" 2>/dev/null || printf '{}')"
-  rows="$(reviewers_rows)"
+  # An unreadable registry refuses `cel run reviewer`; this pass is what
+  # recovers it. Every live reviewer is then unrecorded, so the ones this
+  # sweep keeps are adopted, and the write below rebuilds the index from them.
+  rows="$(reviewers_rows)" || { rows='[]'; recover=(--recover); }
   while IFS= read -r cand; do
     [ -n "$cand" ] || continue
     IFS=$'\t' read -r repo pr pane agent status cwd < <(printf '%s' "$cand" \
@@ -801,7 +813,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
       # A recorded pane that is no longer on the roster has gone by other
       # means. Dropping the row is bookkeeping, not a closure - but its
       # checkout is now owned by nobody, so it goes too.
-      [ "$dry" -eq 1 ] || { reviewer_checkout_release "$repo" "$pr"
+      [ "$dry" -eq 1 ] || { reviewer_checkout_release "$repo" "$pr" "$pane"
         drop="$(printf '%s' "$drop" | jq -c --arg p "$pane" '. + [$p]')"; }
       continue
     fi
@@ -854,7 +866,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     # The pane is gone; its checkout goes with it - a reviewer checkout that
     # outlives its reviewer is litter. Released before the row is dropped,
     # because the row is where the path is written down.
-    reviewer_checkout_release "$repo" "$pr"
+    reviewer_checkout_release "$repo" "$pr" "$pane"
     c_ok "closed the reviewer for $repo#$pr (PR $state, pane $pane)"
     reviewers_closed=$((reviewers_closed + 1))
   done < <(_gc_reviewer_candidates "$rows" "$agents")
@@ -864,9 +876,11 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
   # The steward's pressure warning names what was stopped.
   [ -z "$rv_what" ] || printf '%s\n' "$rv_what" >> "$(_gc_idle_stop_last)" 2>/dev/null || true
-  printf '%s' "$drop$adopt" | grep -q '[^][]' || return 0
-  reviewers_update --argjson drop "$drop" --argjson adopt "$adopt" \
+  [ "${#recover[@]}" -gt 0 ] || printf '%s' "$drop$adopt$attrib" | grep -q '[^][]' || return 0
+  reviewers_update "${recover[@]}" --argjson drop "$drop" --argjson adopt "$adopt" --argjson attrib "$attrib" \
     'map(select((.pane as $p | $drop | index($p)) == null))
+     | map(. as $row | ([$attrib[] | select(.pane == $row.pane)][0]) as $a
+           | if $a != null and (($row.workspace // "") == "") then .workspace = $a.workspace else . end)
      | . as $cur
      | $cur + [$adopt[] | select((.pane as $p | $cur | map(.pane) | index($p)) == null)]' \
     || c_warn "could not update the reviewer registry - stale rows remain"
@@ -897,12 +911,18 @@ _gc_rex_row_runtime_gone() { # <agent> <pane> <retirement-json>
 # PR has no Rex reviewer to retire - none at all, or a Herdr one, which keeps
 # its canonical GC path.
 reviewer_retire_target() { # <wsdir> <repo> <pr> <dry 0|1>
-  local wsdir="$1" repo="$2" pr="$3" dry="$4" roster selected pane agent backend result rc=0 status
+  local wsdir="$1" repo="$2" pr="$3" dry="$4" roster rows selected pane agent backend result rc=0 status
   roster="$(cel_agent_list 2>/dev/null)" \
     && printf '%s' "$roster" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1 \
     || { printf '%s\n' '{"status":"unknown","reason":"native_inventory_unreadable"}'; return 2; }
-  selected="$(_gc_reviewer_candidates "$(reviewers_rows)" "$roster" \
-    | jq -sc --arg r "$repo" --arg p "$pr" '[.[] | select(.repo == $r and (.pr|tostring) == $p)]')" \
+  rows="$(reviewers_rows)" || { printf '%s\n' '{"status":"unknown","reason":"reviewer_registry_unreadable"}'; return 2; }
+  # Another workspace's row for the same repo and PR is another review, and a
+  # row with no proven workspace is this one's only by the registry key's own
+  # rule (lib/run.sh rv_key: no other workspace has the repo).
+  selected="$(_gc_reviewer_candidates "$rows" "$roster" \
+    | jq -sc --arg r "$repo" --arg p "$pr" --arg ws "$wsdir" --argjson here "$(_reviewers_here "$wsdir" "$repo")" \
+      '[.[] | select(.repo == $r and (.pr|tostring) == $p
+          and (if (.workspace // "") == "" then $here else .workspace == $ws end))]')" \
     || { printf '%s\n' '{"status":"unknown","reason":"candidate_inventory_invalid"}'; return 2; }
   case "$(printf '%s' "$selected" | jq length)" in
     0) printf '%s\n' '{"status":"absent","reason":"no_reviewer_for_pull_request"}'; return 4 ;;
@@ -961,8 +981,8 @@ cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
   return "$rc"
 }
 
-# THE FINISHED REVIEWER. A reviewer whose verdict
-# is in the ledger for the PR's CURRENT head has nothing left to do until the
+# THE FINISHED REVIEWER. A reviewer whose verdict is recorded (delegation
+# ledger or solo verdict file) for the PR's CURRENT head has nothing left to do until the
 # worker pushes again - and a push is a new head, which its recorded verdict
 # no longer covers. N minutes quiet (gc.reviewer_stop_minutes, default 30;
 # ~5 under memory pressure) and its pane goes.
@@ -988,7 +1008,7 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
   head="$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null)"
   branch="$(printf '%s' "$out" | jq -r '.headRefName // empty' 2>/dev/null)"
   [ -n "$head" ] && [ -n "$branch" ] || return 1
-  _gc_verdict_recorded "$repo" "$branch" "$head" || return 1
+  _gc_verdict_recorded "$repo" "$pr" "$branch" "$head" || return 1
   now="${CEL_GC_NOW:-$(date +%s)}"; key="$pane@$head"
   since="$(printf '%s' "$rv_prev" | jq -r --arg k "$key" '.[$k] // empty')"
   [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
@@ -1000,28 +1020,43 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
   return 0
 }
 
-# An APPROVED verdict `cel-fanout review` wrote for exactly this head, in any
-# ledger. A CHANGES verdict is a reviewer waiting on the worker's re-push:
-# closing it would leave "pushed - re-review" with nobody to read it.
-_gc_verdict_recorded() { # <repo> <branch> <head>
+# An APPROVED verdict for exactly this head, in any workspace: written by
+# `cel-fanout review` into a delegation ledger, or by `cel solo review` into
+# the workspace's .cel/solo-reviews.json (keyed `<repo>#<pr>`, lib/solo.sh) -
+# a solo product's PR has no delegation, and its finished reviewer must not
+# wait for the merge to be closed. A CHANGES verdict is a reviewer waiting on
+# a re-push: closing it would leave "pushed - re-review" with nobody to read it.
+_gc_verdict_recorded() { # <repo> <pr> <branch> <head>
   local ws wsdir f
   while IFS= read -r ws; do
     [ -n "$ws" ] || continue
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
-    f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
-    jq -e --arg r "$1" --arg b "$2" --arg h "$3" \
+    f="$wsdir/.cel/delegations.json"
+    [ -f "$f" ] && jq -e --arg r "$1" --arg b "$3" --arg h "$4" \
       'any(.[]?; .repo == $r and .branch == $b and .review.verdict == "approved" and .review.head == $h)' \
+      "$f" >/dev/null 2>&1 && return 0
+    f="$wsdir/.cel/solo-reviews.json"
+    [ -f "$f" ] && jq -e --arg k "$1#$2" --arg h "$4" \
+      '.[$k] | type == "object" and .verdict == "approved" and .head == $h' \
       "$f" >/dev/null 2>&1 && return 0
   done < <(registry_names 2>/dev/null || true)
   return 1
 }
 
 # A reviewer that is staying and has no row gets one, with the facts the
-# roster gave us. A recorded one is left exactly as it is: its started-at is
-# when it started, not when a sweep noticed it.
+# roster gave us and the workspace its live process proves, if any - a row
+# without one belongs to no workspace while another also has the repo
+# (lib/run.sh _reviewers_here). A recorded one is left exactly as it is: its
+# started-at is when it started, not when a sweep noticed it - except that a
+# row with no workspace gets the one its process proved.
 _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
-  printf '%s' "$cand" | jq -e '.recorded' >/dev/null 2>&1 && return 0
   [ "$dry" -eq 0 ] || return 0
+  if printf '%s' "$cand" | jq -e '.recorded' >/dev/null 2>&1; then
+    printf '%s' "$cand" | jq -e '.attributed == true' >/dev/null 2>&1 || return 0
+    attrib="$(printf '%s' "$attrib" | jq -c --argjson c "$cand" '. + [{pane:$c.pane, workspace:$c.workspace}]')"
+    return 0
+  fi
+  local ws; ws="$(printf '%s' "$cand" | jq -r '.workspace // ""')"
   local checkout base suffix
   checkout="$(printf '%s' "$cand" | jq -r '.cwd // ""')"
   checkout="$(pane_cwd "$checkout")"
@@ -1034,8 +1069,9 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
     *) checkout="" ;;
   esac
   adopt="$(printf '%s' "$adopt" | jq -c --arg r "$repo" --arg p "$pr" --arg pane "$pane" \
-    --arg a "$agent" --arg b "${backend:-herdr}" --arg co "$checkout" --arg rd "${repodir:-}" --argjson t "$(date +%s)" \
+    --arg a "$agent" --arg b "${backend:-herdr}" --arg co "$checkout" --arg rd "${repodir:-}" --arg ws "$ws" --argjson t "$(date +%s)" \
     '. + [{repo:$r, pr:$p, pane:$pane, agent:$a, backend:$b, started_at:$t}
+      + (if $ws != "" then {workspace:$ws} else {} end)
       + (if $co != "" then {checkout:$co} else {} end)
       + (if $rd != "" then {repodir:$rd} else {} end)]')"
   return 0
