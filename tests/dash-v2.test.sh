@@ -28,6 +28,8 @@ EOF
   cat >"$T/bin/cel" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/cel.log"
+# a launch is only recorded, argument by argument: a test never starts a pane
+if [ "\$1" = run ]; then printf '%q ' "\$@" >> "$T/run.log"; printf '\n' >> "$T/run.log"; exit 0; fi
 if [ "\$1" = serve ]; then
   case "\$2 \$3" in
     "list --json") printf '[{"name":"widget-preview","owner":"alpha-orch","workspace":"alpha","port":5173,"memory_mb":81,"age_seconds":120,"managed":true}]'; exit 0;;
@@ -294,6 +296,105 @@ test_v2_orchestrators_are_known_by_their_canonical_alias() {
       || { cat "$T/act.out"; _v2_down; return 1; }
     assert_eq "$(jq -r --arg w "$who" 'select(.to == $w and .from == "dashboard") | .message' "$T/inbox/bundle.jsonl")" "hi $who"
   done
+  _v2_down
+}
+
+# A solo product, named so its agents' names are cel_alias_norm's and not the
+# product's own ("Thor Games" -> thor-games-*): its main agent, two live
+# lanes (ui working; api idle, standing on a branch with an open PR), a lane
+# made but not running (docs), a reviewer, and two panes that only LOOK like
+# lanes - a stranger in a lane's directory and a lane whose directory is gone.
+_v2_solo_fixture() {
+  SOLO="$T/bundle/.cel/solo/Thor Games"
+  mkdir -p "$T/bundle/products/Thor Games" "$SOLO/lane-ui" "$SOLO/lane-api" "$SOLO/lane-docs" "$T/gitdirs/api" "$T/reviews/gadget-pr-10"
+  printf 'name: bundle\nrepos:\n  - name: gadget\n    url: git@example.invalid:bundle/gadget.git\nproducts:\n  - name: Thor Games\n    mode: solo\n    repos: [gadget]\n' > "$T/bundle/workspace.yaml"
+  printf 'gitdir: %s/gitdirs/api\n' "$T" > "$SOLO/lane-api/.git"
+  printf 'ref: refs/heads/ABC-4-redo\n' > "$T/gitdirs/api/HEAD"
+  jq -n --arg b "$T/bundle" --arg s "$SOLO" --arg r "$T/reviews" '{result: {agents: [
+    {name: "thor-games-orch", agent: "omp", agent_status: "working", cwd: ($b + "/products/Thor Games"), pane_id: "w2:p1"},
+    {name: "thor-games-ui", agent: "claude", agent_status: "working", cwd: ($s + "/lane-ui"), pane_id: "w2:p2"},
+    {name: "thor-games-api", agent: "omp", agent_status: "idle", cwd: ($s + "/lane-api"), pane_id: "w2:p3"},
+    {name: "gadget-pr-10-review", agent: "pi", agent_status: "working", cwd: ($r + "/gadget-pr-10"), pane_id: "w2:p4"},
+    {name: "intruder", agent: "pi", agent_status: "working", cwd: ($s + "/lane-ui"), pane_id: "w2:p5"},
+    {name: "thor-games-old", agent: "pi", agent_status: "working", cwd: ($s + "/lane-old (deleted)"), pane_id: "w2:p6"}],
+    workspaces: [], panes: []}}' > "$T/agents.json"
+  printf '#!/usr/bin/env bash\ncat %q\n' "$T/agents.json" > "$T/bin/herdr"
+}
+
+# Solo agents have no ledger row and lanes' names do not end -orch: each is
+# known by the directory and name cel gave it.
+test_v2_solo_fleet_knows_agents_lanes_and_reviewers_by_identity() {
+  _v2_boot; _v2_solo_fixture
+  local f; f="$(_v2_get "$(_v2_url 'fleet?ws=bundle')")"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | "\(.name)|\(.mode)|\(.product)|\(.lane // "-")|\(.status)"] | sort | join(",")')" \
+    "thor-games-api|solo|Thor Games|api|idle,thor-games-orch|solo|Thor Games|-|working,thor-games-ui|solo|Thor Games|ui|working"
+  # where a solo agent's pane stands on a branch, it says so, with that PR
+  assert_eq "$(printf '%s' "$f" | jq -r '.orchestrators[] | select(.name == "thor-games-api") | "\(.branch) \(.repo)#\(.pr)"')" "ABC-4-redo gadget#10"
+  assert_eq "$(printf '%s' "$f" | jq -r '[.reviewers[] | "\(.name)|\(.repo)#\(.pr)|\(.branch)|\(.status)"] | join(",")')" \
+    "gadget-pr-10-review|gadget#10|ABC-4-redo|working"
+  # a stranger in a lane's directory, or a lane whose directory is gone, is no lane
+  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .workers[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old")] | length')" "0"
+  _v2_down
+}
+
+# Restart binds the exact agent named: lane B's own command, the product's
+# main agent by its product - never the workspace's default orchestrator.
+test_v2_solo_restart_binds_the_exact_product_or_lane() {
+  _v2_boot; _v2_solo_fixture
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-api","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-orch","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  # a made lane that is not running restarts the same way
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-docs","args":{"ws":"bundle"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_eq "$(cat "$T/run.log")" "$(printf '%s\n' \
+    'run solo --workspace bundle --product Thor\ Games --lane api --restart ' \
+    'run orchestrator --workspace bundle --product Thor\ Games --restart ' \
+    'run solo --workspace bundle --product Thor\ Games --lane docs --restart ')"
+  # nothing else is restartable: a reviewer, a stranger, the workspace's own
+  # name (it is no product), a lane of another workspace
+  local who
+  for who in gadget-pr-10-review intruder bundle-orch thor-games-nope; do
+    assert_eq "$(_v2_act "{\"action\":\"orch.restart\",\"target\":\"$who\",\"args\":{\"ws\":\"bundle\"}}" -H "x-cel-csrf: $TOKEN")" "400"
+  done
+  assert_eq "$(_v2_act '{"action":"orch.restart","target":"thor-games-api","args":{"ws":"alpha"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  assert_eq "$(wc -l < "$T/run.log" | tr -d ' ')" "3"
+  _v2_down
+}
+
+# A lane's mailbox is one somebody reads - running or not - and so is a live
+# reviewer's; a lane-shaped name the workspace never made is not.
+test_v2_solo_message_reaches_lanes_and_reviewers() {
+  _v2_boot; _v2_solo_fixture
+  local who
+  for who in thor-games-ui thor-games-docs gadget-pr-10-review; do
+    assert_eq "$(_v2_act "{\"action\":\"message\",\"target\":\"$who\",\"args\":{\"ws\":\"bundle\",\"text\":\"hi $who\"}}" -H "x-cel-csrf: $TOKEN")" "200" \
+      || { cat "$T/act.out"; return 1; }
+    assert_eq "$(jq -r --arg w "$who" 'select(.to == $w and .from == "dashboard") | .message' "$T/inbox/bundle.jsonl")" "hi $who"
+  done
+  assert_eq "$(_v2_act '{"action":"message","target":"thor-games-nope","args":{"ws":"bundle","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  assert_eq "$(_v2_act '{"action":"message","target":"intruder","args":{"ws":"bundle","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
+  _v2_down
+}
+
+# A workspace whose product builds solo has no ledger rows, yet its agents are
+# at work: each live one is a row of its own, from its own pane's samples,
+# the live pane having the last word - never "no workers".
+test_v2_solo_today_shows_live_agents_without_a_ledger() {
+  _v2_boot; _v2_solo_fixture
+  {
+    printf '{"ts":"%s","load":1,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/lane-ui","status":"blocked"}]}\n' "$(_v2_ago 1200)" "$SOLO"
+    printf '{"ts":"%s","load":1,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/lane-ui","status":"working"}]}\n' "$(_v2_ago 300)" "$SOLO"
+  } >> "$T/state/samples.jsonl"
+  local l; l="$(_v2_get "$(_v2_url 'lanes?range=3d&ws=bundle')")"
+  assert_eq "$(printf '%s' "$l" | jq -r '[.workspaces[0].lanes[] | "\(.agent)|\(.kind)|\(.lane // "-")"] | sort | join(",")')" \
+    "thor-games-api|lane|api,thor-games-orch|solo|-,thor-games-ui|lane|ui"
+  assert_eq "$(printf '%s' "$l" | jq -r '.workspaces[0].lanes[] | select(.agent == "thor-games-ui") | [.segments[].state] | join(",")')" "waiting,running"
+  assert_eq "$(printf '%s' "$l" | jq -r '.workspaces[0].lanes[] | select(.agent == "thor-games-api") | "\(.branch)#\(.pr)"')" "ABC-4-redo#10"
+  # every live row reaches now, in the live pane's own state
+  assert_eq "$(printf '%s' "$l" | jq -r '.now as $now | [.workspaces[0].lanes[] | .segments[-1].to == $now] | all')" "true"
+  assert_eq "$(printf '%s' "$l" | jq -r '.workspaces[0].lanes[] | select(.agent == "thor-games-orch") | .segments[-1].state')" "running"
+  # and today, the card's own range, shows the active solo agent
+  l="$(_v2_get "$(_v2_url 'lanes?range=today&ws=bundle')")"
+  assert_eq "$(printf '%s' "$l" | jq -r '[.workspaces[0].lanes[].agent] | index("thor-games-orch") != null')" "true"
   _v2_down
 }
 
