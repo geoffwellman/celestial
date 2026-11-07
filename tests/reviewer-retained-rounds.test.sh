@@ -63,7 +63,7 @@ test_reviewer_unnamed_round_recovery_records_actual_checkout_not_prior_base() {
   git -C "$RRP_REPO" worktree add -q --detach "$round" "$RRP_HEAD"
   jq -n --arg cwd "$round" '{result:{agents:[{name:"",agent:"pi",backend:"herdr",pane_id:"window:review",cwd:$cwd,agent_status:"idle"}]}}' > "$RRP_T/roster.json"
   cmd_run reviewer --repo widget --pr 71 --workspace demo >/dev/null
-  row="$(reviewers_find widget 71)"
+  row="$(reviewers_find "$RRP_WS" widget 71)"
   assert_eq "$(jq -r .checkout <<< "$row")" "$round"
   assert_eq "$(jq -r .pane <<< "$row")" window:review
   assert_eq "$(git -C "$RRP_REPO" worktree list --porcelain | grep -c '^worktree ')" 2

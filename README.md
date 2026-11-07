@@ -827,7 +827,8 @@ Orchestrators start one reviewer pane per PR on pi. Its inbox extension wakes
 the idle reviewer when new mail arrives, so request-changes and re-review
 round trips do not wait for someone to type. `review.runtime` stays in the
 workspace schema for compatibility but no longer selects the reviewer
-runtime; `review.model` selects the requested Claude model. A reviewer delivers
+runtime: a value other than `pi` is ignored, and `cel run reviewer` warns
+naming the field. `review.model` selects the requested model. A reviewer delivers
 one verdict per round and **records it in the delegation ledger** — `cel-fanout
 review <id> approved|changes --head <sha> --by <alias>` — which is where a review exists,
 bound to the exact commit the reviewer names (`--head`, 40 characters, required);

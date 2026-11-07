@@ -192,7 +192,7 @@ NODE
   jq -n --arg head "$RR_HEAD" --arg by "$RR_ALIAS" \
     '{"widget#71":{verdict:"approved",by:$by,head:$head,at:"2026-01-01T00:01:00Z",note:"Fixture review"}}' > "$RR_WS/.cel/solo-reviews.json"
   _rr_start || { printf 'retirement fixture native protocol startup failed\n' >&2; exit 1; }
-  reviewers_record widget 71 "$RR_PANE" "$RR_ALIAS"
+  reviewers_record "$RR_WS" widget 71 "$RR_PANE" "$RR_ALIAS"
   reviewers_write "$(reviewers_rows | jq --arg c "$RR_CO" --arg r "$RR_WS/repos/widget" 'map(.backend="rex" | .checkout=$c | .repodir=$r)')"
   RR_VERDICT_BEFORE="$(sha256sum "$RR_WS/.cel/solo-reviews.json")"
   RR_NATIVE_BEFORE="$(sha256sum "$RR_NATIVE")"
@@ -269,7 +269,7 @@ _rr_preserved() {
 _rr_kept() {
   kill -0 "$RR_PID" || return 1
   [ -f "$RR_RECEIPT" ] || return 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   assert_eq "$reviewers_closed" 0 || return
   [ "$(jq -s '[.[] | select(.cmd=="rex" and (.args|index("kill")))] | length' "$RR_T/calls.jsonl")" = 0 ] || return 1
   _rr_preserved
@@ -484,7 +484,7 @@ test_gc_rex_failed_close_and_surviving_process_never_drop_registry() {
     _rr_fixture; _rr_set "$condition"
     _rr_gc
     [ -f "$RR_RECEIPT" ] || return 1
-    assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+    assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
     assert_eq "$reviewers_closed" 0 || return
     _rr_preserved || return
     if [ "$condition" = '.processSurvives=true' ]; then
@@ -510,7 +510,7 @@ test_gc_gone_rex_row_is_dropped_but_its_evidence_is_kept() {
   _rr_fixture
   kill "$RR_PID"; wait "$RR_PID" 2>/dev/null || true
   _rr_gc 1 '{"result":{"agents":[]}}'
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   _rr_gc 0 '{"result":{"agents":[]}}'
   assert_eq "$(reviewers_rows | jq length)" 0 || return
   [ -f "$RR_RECEIPT" ] || return 1
@@ -524,7 +524,7 @@ test_gc_rex_row_with_a_live_generation_is_kept_when_its_pane_is_unlisted() {
   _rr_fixture
   _rr_set '.prState="OPEN"'
   _rr_gc 0 '{"result":{"agents":[]}}'
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   kill -0 "$RR_PID" && [ -f "$RR_RECEIPT" ] || return 1
   _rr_preserved
 }
@@ -534,7 +534,7 @@ test_gc_rex_retirement_does_not_drop_a_concurrently_rebound_registry_row() {
   _rr_set '.rebindRegistry=true'
   _rr_gc
   _rr_exited || return
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" rex/replacement/terminal || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" rex/replacement/terminal || return
   _rr_preserved
 }
 
@@ -601,7 +601,7 @@ test_gc_rex_completed_retirement_replay_clears_only_stale_registry() {
   _rr_gc
   _rr_exited || return
   [ ! -f "$RR_RECEIPT" ] || return 1
-  reviewers_record widget 71 "$RR_PANE" "$RR_ALIAS"
+  reviewers_record "$RR_WS" widget 71 "$RR_PANE" "$RR_ALIAS"
   reviewers_write "$(reviewers_rows | jq 'map(.backend="rex")')"
   _rr_gc 0 '{"result":{"agents":[]}}'
   assert_eq "$(reviewers_rows | jq length)" 0 || return
@@ -616,7 +616,7 @@ test_gc_rex_retirement_replay_rejects_unknown_session_and_changed_evidence() {
     _rr_gc
     _rr_exited || return
     [ ! -f "$RR_RECEIPT" ] || return 1
-    reviewers_record widget 71 "$RR_PANE" "$RR_ALIAS"
+    reviewers_record "$RR_WS" widget 71 "$RR_PANE" "$RR_ALIAS"
     reviewers_write "$(reviewers_rows | jq 'map(.backend="rex")')"
     case "$condition" in
       listfailure) _rr_set '.listFailure=true' ;;
@@ -631,7 +631,7 @@ test_gc_rex_retirement_replay_rejects_unknown_session_and_changed_evidence() {
         done ;;
     esac
     _rr_gc 0 '{"result":{"agents":[]}}'
-    assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+    assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
     assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return
     _rr_preserved || return
     _rr_cleanup
@@ -661,7 +661,7 @@ test_gc_rex_prepared_only_verification_debt_recovers_without_second_close() {
   _rr_gc
   _rr_exited || return
   [ -f "$RR_RECEIPT" ] || return 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   local completed
   for completed in "$CEL_REX_STATE"/retirements/*.retired.json; do [ ! -e "$completed" ] || return 1; done
   _rr_set '.listFailure=false'
@@ -697,7 +697,7 @@ test_gc_rex_unknown_exit_or_replacement_terminal_keeps_retirement_debt() {
     _rr_gc
     _rr_exited || return
     [ -f "$RR_RECEIPT" ] || return 1
-    assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+    assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
     assert_eq "$reviewers_closed" 0 || return
     assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 0 || return
     _rr_preserved || return
@@ -735,7 +735,7 @@ test_gc_rex_accepted_native_exit_recovers_missing_controller_sidecar() {
   _rr_set '.listFailure=false'
   _rr_gc 1 '{"result":{"agents":[]}}'
   [ -f "$RR_RECEIPT" ] && [ ! -e "$exit_proof" ] || return 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   _rr_gc 0 '{"result":{"agents":[]}}'
   [ ! -f "$RR_RECEIPT" ] && [ -f "$exit_proof" ] || return 1
   assert_eq "$(reviewers_rows | jq length)" 0 || return
@@ -769,7 +769,7 @@ test_gc_rex_prepared_debt_without_valid_native_exit_proof_cannot_settle() {
     _rr_set '.listFailure=false'
     _rr_gc 0 '{"result":{"agents":[]}}'
     [ -f "$RR_RECEIPT" ] || return 1
-    assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+    assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
     assert_eq "$reviewers_closed" 0 || return
     assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return
     _rr_preserved || return
@@ -783,14 +783,14 @@ test_gc_rex_failed_empty_session_close_retries_without_native_shutdown_again() {
   _rr_gc
   _rr_exited || return
   [ -f "$RR_RECEIPT" ] || return 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   assert_eq "$reviewers_closed" 0 || return
   assert_eq "$(jq -s '[.[]|select(.type=="sdk-shutdown")]|length' "$RR_T/producer-events.jsonl")" 1 || return
   assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return
   _rr_set '.closeFailure=false'
   _rr_gc 1 '{"result":{"agents":[]}}'
   [ -f "$RR_RECEIPT" ] || return 1
-  assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+  assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
   assert_eq "$(jq -s '[.[]|select(.type=="sdk-shutdown")]|length' "$RR_T/producer-events.jsonl")" 1 || return
   assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return
   _rr_gc 0 '{"result":{"agents":[]}}'
@@ -813,7 +813,7 @@ test_gc_rex_failed_close_retry_protects_changed_or_unknown_terminal() {
     _rr_set ".closeFailure=false | $condition"
     _rr_gc 0 '{"result":{"agents":[]}}'
     [ -f "$RR_RECEIPT" ] || return 1
-    assert_eq "$(reviewers_find widget 71 | jq -r .pane)" "$RR_PANE" || return
+    assert_eq "$(reviewers_find "$RR_WS" widget 71 | jq -r .pane)" "$RR_PANE" || return
     assert_eq "$reviewers_closed" 0 || return
     assert_eq "$(jq -s '[.[]|select(.type=="sdk-shutdown")]|length' "$RR_T/producer-events.jsonl")" 1 || return
     assert_eq "$(jq -s '[.[]|select(.cmd=="rex" and (.args|index("kill"))!=null)]|length' "$RR_T/calls.jsonl")" 1 || return

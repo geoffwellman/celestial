@@ -266,7 +266,7 @@ test_doctor_line_fires_below_the_floor_and_names_the_remedy() {
 # ------------------------------------------------------------- the reviewers
 # Idle reviewer panes are reported alongside the disk rows.
 _box_reviewer_rows() {
-  reviewers_record widget 71 w1:p3 widget-pr-71-review
+  reviewers_record "$T/ws" widget 71 w1:p3 widget-pr-71-review
   # An empty roster still (discovery must not reach the live box), plus one
   # readable process for the recorded pane.
   herdr() {
