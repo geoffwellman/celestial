@@ -980,14 +980,13 @@ _steward_stalled_workers() { # <agents-json>
   done
 }
 
-# Which mailbox should a ready ticket go to? Its prefix names a repo, the repo
-# names a product, and that product's orchestrator can take the work without
-# the hop through root. Ambiguity (two products answering to one prefix) or
-# a product whose orchestrator is not on the roster falls back to root.
-_steward_ready_ticket_dest() { # <wsdir> <ticket-id> <agents-json>
-  local wsdir="$1" id="$2" agents_json="$3" repo pfx prods
+# Resolve ticket ownership independently of liveness: an absent orchestrator
+# still owns its tickets, and its covering owner card must hold their nudges.
+# Unknown or ambiguous prefix ownership stays actionable through root.
+_steward_ready_ticket_product() { # <wsdir> <ticket-id> -> unique product or empty
+  local wsdir="$1" id="$2" repo pfx prods
   pfx="${id%-*}"
-  [ -n "$pfx" ] && [ "$pfx" != "$id" ] || { printf root; return 0; }
+  [ -n "$pfx" ] && [ "$pfx" != "$id" ] || return 0
   prods=""
   for repo in $(ws_repo_names "$wsdir"); do
     if ws_repo_prefixes "$wsdir" "$repo" | grep -qix -- "$pfx"; then
@@ -995,17 +994,22 @@ _steward_ready_ticket_dest() { # <wsdir> <ticket-id> <agents-json>
     fi
   done
   prods="$(printf '%s' "$prods" | sed '/^$/d' | sort -u)"
-  case "$prods" in ""|*$'\n'*) printf root; return 0;; esac
-  local live
-  live="$(printf '%s' "$agents_json" | jq -r --arg n "$(_run_agent_name "$prods-orch")" \
+  case "$prods" in ""|*$'\n'*) return 0 ;; esac
+  printf '%s' "$prods"
+}
+
+_steward_ready_ticket_dest() { # <resolved-product> <agents-json>
+  local product="$1" agents_json="$2" live
+  [ -n "$product" ] || { printf root; return 0; }
+  live="$(printf '%s' "$agents_json" | jq -r --arg n "$(_run_agent_name "$product-orch")" \
     '[.result.agents[]? | select(.name == $n)] | length' 2>/dev/null || printf 0)"
-  [ "$live" = "0" ] && { printf root; return 0; }
-  printf '%s-orch' "$prods"
+  [ "${live:-0}" = "0" ] && { printf root; return 0; }
+  printf '%s-orch' "$product"
 }
 
 _steward_ready_tickets() { # [agents-json]
   local agents_json="${1:-}"
-  local ws wsdir trigger teams key ids id title repo found
+  local ws wsdir trigger teams key ids id title repo found product owner card dest
   for ws in $(registry_names); do
     wsdir="$(registry_path "$ws")" || continue
     [ "$(ws_ticket "$wsdir" system)" = "linear" ] || continue
@@ -1018,6 +1022,7 @@ _steward_ready_tickets() { # [agents-json]
     [ -n "${LINEAR_API_KEY:-}" ] || exit 0
     teams="$(_yqr -r '[.repos[].linear_team // empty] | unique | .[]' "$wsdir/workspace.yaml" 2>/dev/null)"
     [ -n "$teams" ] || exit 0
+    local -A owner_cards=()
     for key in $teams; do
       # curl reads sensitive headers from stdin, not the process argument list.
       ids="$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
@@ -1062,12 +1067,28 @@ _steward_ready_tickets() { # [agents-json]
           [ "$found" = 1 ] && break
         done
         [ "$found" = 1 ] && continue
+        product="$(_steward_ready_ticket_product "$wsdir" "$id")"
+        if [ -n "$product" ]; then
+          # Match the owner before a missing agent falls back to root. Cache
+          # once per product for this workspace sweep, never across ticks.
+          if [ -z "${owner_cards[$product]+present}" ]; then
+            owner="$(_run_agent_name "$product-orch")"
+            owner_cards["$product"]="$(_steward_owner_card "$ws" "$owner" "$product")"
+          fi
+          card="${owner_cards[$product]}"
+          if [ -n "$card" ]; then
+            # A card opened after an earlier nudge must re-arm that ticket
+            # when it closes, not wait out the old four-hour report stamp.
+            _steward_forget "ready-$id"
+            continue
+          fi
+        fi
         _steward_due "ready-$id" || continue
         # NEVER offer to move it back. The trigger state is the HUMAN'S signal
         # that they want this built; an agent reversing it erases the request
         # with nobody informed. If it genuinely cannot be started, say so ON the
         # ticket and leave the state for the human to change.
-        local dest; dest="$(_steward_ready_ticket_dest "$wsdir" "$id" "$agents_json")"
+        dest="$(_steward_ready_ticket_dest "$product" "$agents_json")"
         cmd_inbox send "$dest" \
           "steward: $id is in '$trigger' with no branch anywhere - $title. The owner moved it there to say BUILD THIS: plan it and delegate to the owning repo orchestrator. DO NOT change its state out of '$trigger' yourself - if it cannot be started, comment on the ticket saying exactly what is missing and leave the state alone for the owner to decide." \
           --from steward --workspace "$ws" --kind status >/dev/null 2>&1 \
