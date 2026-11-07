@@ -4,6 +4,7 @@
 #
 #   tests/run.sh              run everything
 #   tests/run.sh expand       run tests whose name contains "expand"
+#   tests/run.sh gc.test.sh   run every test in tests/gc.test.sh
 #   tests/run.sh --no-lock    run without queueing behind other suites
 #
 # A file that fails to source is reported as a failure, never skipped: a suite
@@ -37,10 +38,11 @@ _suite_clear_caller_env() {
   done
 }
 _suite_clear_caller_env
-FILTER="" NO_LOCK=0
+FILTER="" FILE_FILTER="" NO_LOCK=0
 for arg in "$@"; do
   case "$arg" in
     --no-lock) NO_LOCK=1 ;;
+    *.test.sh) FILE_FILTER="$(basename "$arg")" ;;
     *) FILTER="$arg" ;;
   esac
 done
@@ -316,7 +318,14 @@ trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"'
 trap '_kill_runners; _kill_current_group; _kill_tmpdir_strays; rm -rf "$TMPDIR"; exit 130' INT TERM
 
 FILES=() ORDER=()
-for f in "$CEL_ROOT"/tests/*.test.sh; do [ -f "$f" ] && FILES+=("$f"); done
+for f in "$CEL_ROOT"/tests/*.test.sh; do
+  [ -f "$f" ] || continue
+  [ -z "$FILE_FILTER" ] || [ "$(basename "$f")" = "$FILE_FILTER" ] || continue
+  FILES+=("$f")
+done
+if [ -n "$FILE_FILTER" ] && [ "${#FILES[@]}" -eq 0 ]; then
+  echo "no test file named $FILE_FILTER in tests/" >&2; exit 1
+fi
 # Parallel-safe files first (their pool starts at once), serial files after.
 for i in "${!FILES[@]}"; do
   case "$SERIAL_FILES" in *" $(basename "${FILES[$i]}") "*) ;; *) ORDER+=("$i") ;; esac

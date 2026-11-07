@@ -41,8 +41,11 @@ fixture at a real workspace, provider account, private page store or live fleet.
 - Dependency changes must identify an exact release/commit, verify published
   checksums where used, and exercise failure propagation without installing
   into another contributor's machine state.
-- Update affected usage documentation and `CHANGELOG.md`. Describe verification
-  and any remaining limits in the pull request. Keep unrelated cleanup out.
+- Update affected usage documentation and add one changelog fragment,
+  `changelog.d/<branch>.md`, under `### Added`, `### Changed`, `### Fixed` or
+  `### Removed` headings. Never edit `CHANGELOG.md` directly: the release cut
+  moves fragments into it. Describe verification and any remaining limits in
+  the pull request. Keep unrelated cleanup out.
 
 Use fictional names and domains such as `example.invalid`. Do not submit real
 workspace names, organisation identifiers, ticket keys, machine paths, session

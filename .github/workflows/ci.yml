@@ -17,14 +17,23 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# THE REQUIRED CHECK IS "Tests and publication hygiene" (branch protection
+# names it exactly). It is now the `verify` gate job below, which passes only
+# when BOTH the suite and the scans passed - so renaming it, or letting it
+# pass while either is skipped or cancelled, silently drops the gate.
+# The suite and the scans are separate jobs with their own time limits, so a
+# slow suite can no longer get the scans cancelled. None of them runs on the
+# nightly schedule; that is the every-ref job's alone.
 jobs:
-  verify:
-    name: Tests and publication hygiene
+  suite:
+    name: Regression suite
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Measured 14-19 minutes end to end on main (Nov 2026); headroom for a slow
+    # runner without letting a hung run sit for the 6-hour default.
+    timeout-minutes: 30
     steps:
-      - name: Check out complete publication history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -43,6 +52,19 @@ jobs:
         run: bash tests/run.sh
       - name: Run HTTP security regressions
         run: node --test tests/http-server.test.mjs
+
+  hygiene:
+    name: Publication and credential scans
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    # Measured about 1 minute (hygiene ~60s, gitleaks ~1s).
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete publication history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Scan source and every published local ref
         env:
           CEL_PRIVATE_PATTERNS: ${{ secrets.CEL_PRIVATE_PATTERNS }}
@@ -80,6 +102,23 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
       - name: Scan complete Git history for credentials
         run: '"$RUNNER_TEMP/gitleaks-bin/gitleaks" git --redact --log-opts="--all" .'
+
+  verify:
+    name: Tests and publication hygiene
+    needs: [suite, hygiene]
+    # always(): a failed or cancelled dependency must turn this check RED, not
+    # skip it - GitHub counts a skipped required check as passing.
+    if: always() && github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require both the suite and the scans to have passed
+        env:
+          SUITE: ${{ needs.suite.result }}
+          HYGIENE: ${{ needs.hygiene.result }}
+        run: |
+          echo "suite: $SUITE, scans: $HYGIENE"
+          [ "$SUITE" = success ] && [ "$HYGIENE" = success ]
 
   every-ref-hygiene:
     name: Every-ref publication hygiene (nightly)
