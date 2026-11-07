@@ -505,12 +505,12 @@ test_solo_review_bare_number_on_a_one_repo_product() {
 }
 
 # The reviewer of a solo PR is told the solo commands and who to report to.
-test_solo_reviewer_brief_names_solo_commands_only_for_solo_products() {
+test_solo_reviewer_brief_names_solo_commands() {
   _solo_setup
   source "$CEL_ROOT/lib/run.sh"
   local b; b="$(_run_reviewer_solo_brief "$T" widget 7)"
   assert_contains "$b" "cel solo review widget#7"
   assert_contains "$b" "bundle-orch"
-  assert_eq "$(_run_reviewer_solo_brief "$T" lone 7)" ""
+  assert_contains "$(_run_reviewer_solo_brief "$T" lone 7)" "cel solo review lone#7"
   rm -rf "$T"
 }
