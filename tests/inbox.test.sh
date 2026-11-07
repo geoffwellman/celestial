@@ -145,7 +145,69 @@ test_inbox_read_all_workspaces_delivers_past_a_corrupt_mailbox() {
   out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces 2>"$CEL_INBOX_DIR/err")" || rc=$?
   [ "$rc" -ne 0 ] || { echo "a sweep that could not read a mailbox exited 0"; return 1; }
   ! grep -q 'no unread mail' "$CEL_INBOX_DIR/err" || { echo "a corrupt sweep reported as no unread mail"; return 1; }
+  # --json names the corrupt mailbox on stdout, for hooks that never see stderr
+  out="$(CEL_INBOX_ME=console _inbox_read --for root --all-workspaces --json 2>/dev/null)" || true
+  assert_eq "$(printf '%s' "$out" | sed 's/^\[alpha\] //' | jq -r '.state + " " + .file')" "corrupt $CEL_INBOX_DIR/alpha.jsonl"
   rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+# The count is what the hooks ask before they read, so a corrupt mailbox must
+# not count as 0 there either. stdout stays a number - the unread items before
+# the first bad line, a floor - while the status is 1 and stderr names the
+# file, whether the bad line is the first one or a later one.
+test_inbox_count_of_a_corrupt_mailbox_fails_with_a_floor() {
+  _inbox_sandbox; export CEL_INBOX_ME=root
+  local f="$CEL_INBOX_DIR/demo.jsonl" out rc=0
+  printf 'not json\n' > "$f"
+  _inbox_send root "behind the bad line" --workspace demo >/dev/null 2>&1
+  out="$(_inbox_count --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "count of a mailbox torn at line 1 exited 0"; return 1; }
+  assert_eq "$out" "0"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  ! grep -q 'no unread mail' "$CEL_INBOX_DIR/err" || { echo "a corrupt count reported as no unread mail"; return 1; }
+  : > "$f"
+  _inbox_send root "one" --workspace demo >/dev/null 2>&1
+  _inbox_send root "two" --workspace demo >/dev/null 2>&1
+  printf '{"id":"9' >> "$f"
+  _inbox_send root "three" --workspace demo >/dev/null 2>&1
+  rc=0; out="$(_inbox_count --for root --workspace demo 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "count of a mailbox torn at line 3 exited 0"; return 1; }
+  assert_eq "$out" "2"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  rm -rf "$CEL_INBOX_DIR"
+}
+# A hook asks for ONE number across every mailbox: the others still count.
+test_inbox_count_all_workspaces_sums_past_a_corrupt_mailbox() {
+  _inbox_registry_fixture
+  ( CEL_INBOX_ME=t _inbox_send root "one" --workspace alpha ) >/dev/null 2>&1
+  printf 'not json\n' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  ( CEL_INBOX_ME=t _inbox_send root "two" --workspace beta ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "three" --workspace beta ) >/dev/null 2>&1
+  local out rc=0
+  out="$(CEL_INBOX_ME=console _inbox_count --for root --all-workspaces 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a sum over a corrupt mailbox exited 0"; return 1; }
+  assert_eq "$out" "3"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$CEL_INBOX_DIR/alpha.jsonl is corrupt"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
+# Every other look at a corrupt mailbox is unknown too: the facts every view
+# reads say corrupt rather than 0, and a condition-key lookup fails - while a
+# send that carries a key still lands, as a new item, instead of being lost.
+test_inbox_mail_json_oldest_and_open_fp_of_a_corrupt_mailbox_are_unknown() {
+  _inbox_corrupt_fixture; _INBOX_ROSTER_OK=0   # no live herdr: the reader is not the question
+  local f="$CEL_INBOX_DIR/demo.jsonl" out rc=0
+  out="$(inbox_mail_json demo root 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "inbox_mail_json exited 0 on a corrupt mailbox"; return 1; }
+  assert_eq "$(printf '%s' "$out" | jq -c '{to_root_unread, oldest_secs, corrupt}')" \
+    '{"to_root_unread":null,"oldest_secs":null,"corrupt":true}'
+  rc=0; out="$(inbox_oldest_unread_secs demo root 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "inbox_oldest_unread_secs exited 0 on a corrupt mailbox"; return 1; }
+  assert_eq "$out" ""
+  rc=0; out="$(_inbox_open_fp demo a-condition 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "_inbox_open_fp exited 0 on a corrupt mailbox"; return 1; }
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$f is corrupt"
+  _inbox_send root "still delivered" --kind blocked --fp a-condition --workspace demo >/dev/null 2>&1
+  grep -q 'still delivered' "$f" || { echo "a keyed send into a corrupt mailbox was dropped"; return 1; }
+  rm -rf "$CEL_INBOX_DIR"
 }
 
 # ---- decisions are a ledger, not a queue ----------------------------------

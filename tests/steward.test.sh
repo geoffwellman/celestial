@@ -1363,6 +1363,21 @@ test_steward_clears_the_root_mail_blocker_once_the_mail_is_read() {
   assert_contains "$(cmd_inbox read --for root --workspace alpha --all)" "cleared:"
   rm -rf "$T"
 }
+# A root mailbox that does not parse is not one whose mail was read: the open
+# blocker stays, nothing is cleared, and the steward says why in its log.
+test_steward_neither_clears_nor_raises_root_mail_it_cannot_parse() {
+  _root_unread_fixture
+  _STEWARD_WINDOW=0 _steward_root_unread >/dev/null 2>&1
+  local before; before="$(cksum < "$CEL_INBOX_DIR/alpha.jsonl")"
+  { printf 'not json\n'; cat "$CEL_INBOX_DIR/alpha.jsonl"; } > "$T/torn"; cat "$T/torn" > "$CEL_INBOX_DIR/alpha.jsonl"
+  local out; out="$(_STEWARD_WINDOW=0 _steward_root_unread 2>&1)"
+  assert_contains "$out" "alpha: root's mailbox $CEL_INBOX_DIR/alpha.jsonl is corrupt - its unread mail is unknown"
+  ! grep -q 'cleared:' "$CEL_INBOX_DIR/alpha.jsonl" || { echo "the steward cleared root mail it could not read"; rm -rf "$T"; return 1; }
+  tail -n +2 "$CEL_INBOX_DIR/alpha.jsonl" > "$T/good"; cat "$T/good" > "$CEL_INBOX_DIR/alpha.jsonl"
+  assert_eq "$(cksum < "$CEL_INBOX_DIR/alpha.jsonl")" "$before"
+  assert_contains "$(cmd_inbox open --for root --workspace alpha)" "nobody is reading"
+  rm -rf "$T"
+}
 
 # --- the steward and `up` must agree ---------------------------------------
 # The steward and `cel ws up` both resolve a product's orchestrator mode

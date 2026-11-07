@@ -510,6 +510,22 @@ test_fleet_mail_doctor_line_names_the_mailbox_nobody_reads() {
   _fleet_teardown
 }
 
+# A root mailbox that does not parse is UNKNOWN in every view, never 0: the
+# json counts are null and say corrupt, the text says so, and so does doctor.
+test_fleet_shows_a_corrupt_root_mailbox_as_unknown_not_zero() {
+  _fleet_setup
+  local f="$CEL_INBOX_DIR/alpha.jsonl"
+  { printf 'not json\n'; cat "$f"; } > "$T/torn"; cat "$T/torn" > "$f"
+  local doc alpha
+  doc="$(cmd_fleet --json)"
+  alpha="$(printf '%s' "$doc" | jq -c '.workspaces[] | select(.name=="alpha")')"
+  assert_eq "$(printf '%s' "$alpha" | jq -c '{root, unread: .mail.to_root_unread, corrupt: .mail.corrupt, orch_counted: ([.orchestrators[] | select(.unread != null or .open != null)] | length)}')" \
+    '{"root":{"unread":null,"open":null},"unread":null,"corrupt":true,"orch_counted":0}'
+  assert_contains "$(cmd_fleet)" "root mail: UNKNOWN (mailbox corrupt)"
+  assert_contains "$(fleet_mail_doctor_line alpha)" "alpha: root's mailbox $f is corrupt"
+  _fleet_teardown
+}
+
 # --- mail to a pane that is not there -------------------------------------
 #
 # A message accepted for an alias with no live pane goes nowhere, which is the

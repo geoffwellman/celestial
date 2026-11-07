@@ -334,10 +334,12 @@ _INBOX_UNREAD_DEF='def unread($cs): . as $m
 
 # How long the OLDEST unread item has waited, in seconds; 0 when there is
 # none. The age of the newest says how busy the senders are; the age of the
-# oldest says how far behind the reader is, which is the question.
+# oldest says how far behind the reader is, which is the question. Nothing and
+# rc 1 when the mailbox does not parse: 0 would say nothing is waiting.
 inbox_oldest_unread_secs() { # <ws> <who> [kinds-regex]
-  local ts
-  ts="$(inbox_unread_json "$1" "$2" \
+  local items ts
+  items="$(inbox_unread_json "$1" "$2")" || return 1
+  ts="$(printf '%s\n' "$items" \
     | jq -r --arg k "${3:-}" 'select($k == "" or (.kind | test($k))) | .ts' 2>/dev/null | sed -n 1p)"
   [ -n "$ts" ] || { printf '0'; return 0; }
   local then now
@@ -348,12 +350,19 @@ inbox_oldest_unread_secs() { # <ws> <who> [kinds-regex]
 }
 
 # The three facts every view of this box needs about one mailbox, as one JSON
-# object so text and --json cannot drift apart.
+# object so text and --json cannot drift apart. A mailbox that does not parse
+# answers {to_root_unread: null, oldest_secs: null, corrupt: true} and rc 1:
+# unknown, which a view must show as unknown and never as 0.
 inbox_mail_json() { # <ws> [who]
-  local ws="$1" who="${2:-root}" n secs reader
-  n="$(inbox_unread_json "$ws" "$who" | grep -c . || true)"
+  local ws="$1" who="${2:-root}" items n secs reader
+  if ! items="$(inbox_unread_json "$ws" "$who")"; then
+    reader="$(inbox_reader_of "$ws" "$who" 2>/dev/null || true)"
+    jq -nc --arg reader "$reader" '{to_root_unread: null, oldest_secs: null, reader: $reader, corrupt: true}'
+    return 1
+  fi
+  n="$(printf '%s' "$items" | grep -c . || true)"
   [ -n "$n" ] || n=0
-  secs="$(inbox_oldest_unread_secs "$ws" "$who")"
+  secs="$(inbox_oldest_unread_secs "$ws" "$who")" || secs=0
   reader="$(inbox_reader_of "$ws" "$who" 2>/dev/null || true)"
   jq -nc --argjson n "${n:-0}" --argjson secs "${secs:-0}" --arg reader "$reader" \
     '{to_root_unread: $n, oldest_secs: $secs, reader: $reader}'
@@ -467,6 +476,8 @@ cel inbox - messages between agents that never type into a pane
       recipients (root, <repo>-orch) are never pruned - they come back.
   cel inbox count [--for <who>] [--workspace w|--all-workspaces]  unread count
       stdout is the number; the state behind a 0 is said on stderr.
+      A corrupt mailbox exits 1 naming the file; stdout is still a number,
+      the unread items before the first bad line (a floor, not the backlog).
   cel inbox watch [--for <who>] [--workspace w|--all-workspaces] [--parent <pid>]
       tail new items, one line each for a runtime task that monitors stdout.
       The command itself does not wake an agent. Decisions/blockers also raise
@@ -571,12 +582,13 @@ _inbox_prune_run() { # <ws> <live roster> <dry 0|1>
 # The id of the OPEN item carrying this condition key, or nothing. Resolved
 # items do not count: a condition that came back is news again.
 # Any kind: a `status` with an fp rolls up too, though it stays out of
-# `cel inbox open` (it asks nobody for anything).
+# `cel inbox open` (it asks nobody for anything). Nothing and rc 1 when the
+# mailbox does not parse: whether the item is open is unknown.
 _inbox_open_fp() { # <ws> <fp> [from] [to]
-  local f; f="$(_inbox_file "$1")"
+  local f out; f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
   [ -n "${2:-}" ] || return 0
-  jq -r -s --arg fp "$2" --arg from "${3:-}" --arg to "${4:-}" '
+  out="$(jq -r -s --arg fp "$2" --arg from "${3:-}" --arg to "${4:-}" '
     ([.[] | select(.kind == "resolution") | .ref]) as $done
     | [ .[]
         | select((.fp // "") == $fp)
@@ -584,7 +596,8 @@ _inbox_open_fp() { # <ws> <fp> [from] [to]
         | select($from == "" or .from == $from)
         | select($to == "" or .to == $to)
         | select([.id] | inside($done) | not) ]
-    | last | (.id // empty)' "$f" 2>/dev/null
+    | last | (.id // empty)' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
+  [ -z "$out" ] || printf '%s\n' "$out"
 }
 
 _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key]
@@ -634,7 +647,9 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
 _inbox_send_locked() { # <ws> <to> <from> <kind> <message> <fp>  - under _inbox_with_lock
   local ws="$1" to="$2" from="$3" kind="$4" message="$5" fp="$6" id line ref=""
   id="$(date +%s%N)"
-  [ -n "$fp" ] && ref="$(_inbox_open_fp "$ws" "$fp" "$from" "$to")"
+  # An unknown roll-up target (a corrupt mailbox, said on stderr) opens a new
+  # item rather than dropping the message.
+  if [ -n "$fp" ]; then ref="$(_inbox_open_fp "$ws" "$fp" "$from" "$to")" || ref=""; fi
   if [ -n "$ref" ]; then
     line="$(jq -nc --arg id "$id" --arg ts "$(date -Is)" --arg to "$to" --arg from "$from" \
       --arg ref "$ref" --arg msg "$message" \
@@ -670,16 +685,18 @@ _inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
   done
   [ -n "$who" ] || who="$(_inbox_me)"
   if [ "$every" -eq 1 ]; then
-    local n out="" one bad=0
+    local n one delivered=0 bad=0
     for n in $(_inbox_every_ws "$ws"); do
-      one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /"; exit "${PIPESTATUS[0]}")" || bad=1
-      [ -n "$one" ] || continue
-      printf '%s\n' "$one"; out=1
+      if one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /"; exit "${PIPESTATUS[0]}")"; then
+        [ -z "$one" ] || delivered=1
+      else bad=1; fi
+      [ -z "$one" ] || printf '%s\n' "$one"
     done
-    # A corrupt mailbox has said so on stderr. Mail delivered from the others
-    # already moved their cursors, and the hooks drop stdout on a non-zero
-    # read, so the status fails only when nothing was delivered.
-    [ -z "$out" ] || return 0
+    # A corrupt mailbox has said so on stderr (and with --json, as a
+    # {state: corrupt} line). Mail delivered from the others already moved
+    # their cursors, and the hooks drop stdout on a non-zero read, so the
+    # status fails only when nothing was delivered.
+    [ "$delivered" -eq 0 ] || return 0
     [ "$bad" -eq 0 ] || return 1
     c_ok "$who: no unread mail in any registered workspace" >&2
     return 0
@@ -728,7 +745,7 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
     # Unknown is not empty: fail naming the file, cursor untouched.
     [ -z "$lkfd" ] || exec {lkfd}>&-
     _inbox_corrupt "$f"
-    if [ -z "$quiet" ] && [ "$json" -eq 1 ]; then
+    if [ "$json" -eq 1 ]; then
       jq -nc --arg reader "$who" --arg ws "$ws" --arg file "$f" \
         '{state: "corrupt", reader: $reader, workspace: $ws, file: $file, unread: null}'
     fi
@@ -771,27 +788,34 @@ _inbox_count() { # [--for who] [--workspace w|--all-workspaces]
   done
   [ -n "$who" ] || who="$(_inbox_me)"
   if [ "$every" -eq 1 ]; then
-    # a hook wants ONE number: the operator has one attention, not one per box
-    local n total=0
+    # a hook wants ONE number: the operator has one attention, not one per box.
+    # A corrupt mailbox adds its floor and makes the status 1; the rest still count.
+    local n c total=0 bad=0
     for n in $(_inbox_every_ws "$ws"); do
-      total=$(( total + $(_inbox_count_one "$n" "$who") ))
+      c="$(_inbox_count_one "$n" "$who")" || bad=1
+      total=$(( total + ${c:-0} ))
     done
-    printf '%s\n' "$total"; return 0
+    printf '%s\n' "$total"; return "$bad"
   fi
   local wsname
   wsname="$(_inbox_ws_here "$ws")" || { _inbox_no_workspace count; return 2; }
   # STDOUT STAYS A NUMBER. The steward and the hooks do arithmetic on this, so
   # the sentence that tells a human which of the three states they are in goes
   # to stderr beside it rather than into the sum.
-  local n; n="$(_inbox_count_one "$wsname" "$who")"
+  local n rc=0; n="$(_inbox_count_one "$wsname" "$who")" || rc=$?
   printf '%s\n' "$n"
+  [ "$rc" -eq 0 ] || return 1
   [ "$n" -eq 0 ] || return 0
   _inbox_empty_report "$wsname" "$who" 0
 }
 
+# The unread count on stdout. A mailbox that does not parse still prints a
+# NUMBER - the unread items before the first bad line, a floor and not the
+# backlog, since callers do arithmetic on it - and returns 1 with the corrupt
+# report on stderr: a 0 from a torn first line is not "no mail".
 _inbox_count_one() { # <ws> <who>
   local ws="$1" who="$2"
-  local f cs
+  local f cs out rc=0
   f="$(_inbox_file "$ws")"
   [ -f "$f" ] || { printf '0\n'; return 0; }
   # THE RECIPIENT'S BACKLOG, NOT THE CALLER'S. Three cursors can each prove
@@ -801,9 +825,10 @@ _inbox_count_one() { # <ws> <who>
   # time order.
   cs="$(_inbox_cursors_json "$(_inbox_dir)/$ws.$who.cursor" "$(_inbox_cursor "$ws" "$who")" \
           $([ "$who" = root ] && printf '%s' "$(_inbox_dir)/$ws.root.console.cursor"))"
-  jq -c --arg who "$who" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
-    select(.kind != "resolution") | select(.to == $who or .to == "all") | select(unread($cs))' "$f" 2>/dev/null \
-    | wc -l | tr -d ' '
+  out="$(jq -c --arg who "$who" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
+    select(.kind != "resolution") | select(.to == $who or .to == "all") | select(unread($cs))' "$f" 2>/dev/null)" || rc=$?
+  if [ -n "$out" ]; then printf '%s\n' "$out" | wc -l | tr -d ' '; else printf '0\n'; fi
+  [ "$rc" -eq 0 ] || { _inbox_corrupt "$f"; return 1; }
 }
 
 # What a runtime-provided persistent monitor may run: one compact line per

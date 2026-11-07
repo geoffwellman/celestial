@@ -188,7 +188,7 @@ test_omp_inbox_rejecting_send_keeps_mail_and_rearms() { command -v node >/dev/nu
 # Mail ALREADY waiting when the session starts produces no watcher line (the
 # watcher only reacts to new lines), so session_start arms the same coalesced
 # wake new mail uses.
-_omp_backlog_harness() { # <inbox-dir> <mode: idle|draft|none>
+_omp_backlog_harness() { # <inbox-dir> <mode: idle|draft|none|corrupt>
   CEL_INBOX_DIR="$1" MODE="$2" CEL_INBOX_ME=widget-orch CEL_INBOX_WS=demo CEL_ROOT="$CEL_ROOT" \
   CEL_WATCH_PARENT_POLL=1 CEL_INBOX_WAKE_MS=400 HOOK="$HOOK" node --no-warnings - <<'JS'
 const { execFileSync } = require('node:child_process');
@@ -201,6 +201,7 @@ const { execFileSync } = require('node:child_process');
       getEditorText: () => (mode === 'draft' ? 'half a thought' : '') } };
   const fire = async (ev, e) => { let r; for (const fn of handlers[ev] || []) { const x = await fn({ type: ev, ...e }, ctx); if (x) r = x; } return r; };
   const send = (msg) => execFileSync('bash', [process.env.CEL_ROOT + '/bin/cel', 'inbox', 'send', 'widget-orch', msg, '--workspace', 'demo'], { stdio: 'ignore' });
+  if (mode === 'corrupt') require('node:fs').writeFileSync(process.env.CEL_INBOX_DIR + '/demo.jsonl', 'not json\n');
   if (mode !== 'none') { send('backlog-1'); send('backlog-2'); }
   const mod = await import(process.env.HOOK);
   mod.default(pi);
@@ -240,6 +241,18 @@ test_omp_inbox_no_backlog_no_wake() {
   assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
   assert_eq "$(jq -r '.sent|length' <<<"$out")" "0"
   assert_eq "$(jq -r '.notes|length' <<<"$out")" "0"
+}
+
+# A mailbox torn at its first line counts as 0 to a count that swallows the
+# error, and the count is what the hook asks first. A count that fails must
+# still read, so the agent is told the mailbox is corrupt - once, not per turn.
+test_omp_inbox_corrupt_mailbox_reaches_the_agent_once() {
+  command -v node >/dev/null || return 0
+  local out; out="$(_backlog corrupt)"
+  assert_eq "$(jq -r '.error // ""' <<<"$out")" ""
+  assert_eq "$(jq -r '.sent|length' <<<"$out")" "1"
+  assert_contains "$(jq -r '.sent[0].m.content' <<<"$out")" "demo.jsonl is corrupt"
+  assert_eq "$(jq -r '.turn' <<<"$out")" "null"
 }
 
 # An orchestrator with an explicit identity (CEL_INBOX_ME)

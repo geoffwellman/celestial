@@ -357,6 +357,27 @@ test('recurring observer delivers already-idle later mail and retains failed adm
   } finally { await f.cleanup(); }
 });
 
+test('a failed count still reads, and a corrupt mailbox is said once, not on every idle tick', async () => {
+  const corrupt = '[sandbox] {"state":"corrupt","reader":"widget-orch","workspace":"sandbox","file":"/inbox/sandbox.jsonl","unread":null}\n';
+  let reads = 0;
+  const f = await fixture({ deps: { run: async (_bin, args) => {
+    if (args[0] === 'inbox' && args[1] === 'count') throw Object.assign(new Error('exit 1'), { code: 1, stdout: '0\n' });
+    if (args[0] === 'inbox' && args[1] === 'read') { reads++; throw Object.assign(new Error('exit 1'), { code: 1, stdout: corrupt }); }
+    return '';
+  } } });
+  try {
+    await f.emit(created());
+    await f.tick();
+    assert.equal(reads, 1, 'a count that failed must not stand for an empty mailbox');
+    assert.equal(f.delivered.length, 1);
+    assert.match(f.delivered[0].text, /\[sandbox\] celestial inbox: mailbox \/inbox\/sandbox\.jsonl is corrupt/);
+    await f.emit(status('idle'));
+    await f.tick();
+    assert.equal(reads, 2);
+    assert.equal(f.delivered.length, 1, 'the same corrupt mailbox must not wake the agent every tick');
+  } finally { await f.cleanup(); }
+});
+
 test('native idle hook admits steer in the current execution, never waits and never adopts other roots', async () => {
   const f = await fixture();
   try {

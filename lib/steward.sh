@@ -75,7 +75,8 @@ _steward_raise() { # <ws> <fp> <kind> <message>
 # clock times.
 _steward_raise_on_change() { # <ws> <fp> <kind> <message>
   local id last
-  id="$(_inbox_open_fp "$1" "$2" steward root)"
+  # a mailbox that does not parse says nothing this tick: unknown is not absent
+  id="$(_inbox_open_fp "$1" "$2" steward root)" || return 0
   if [ -n "$id" ]; then
     last="$(jq -r -s --arg i "$id" \
       '[.[] | select(.id == $i or (.kind == "update" and .ref == $i)) | .message] | last // ""' \
@@ -98,7 +99,7 @@ _steward_clear_id() { # <ws> <id> <message>
 }
 
 _steward_clear() { # <ws> <fp> <message>
-  local id; id="$(_inbox_open_fp "$1" "$2" steward root)"
+  local id; id="$(_inbox_open_fp "$1" "$2" steward root)" || return 0
   [ -n "$id" ] || return 0
   _steward_clear_id "$1" "$id" "$3"
 }
@@ -536,7 +537,7 @@ _steward_forget_unseen() { # <prefix> [key...]
 
 _steward_inbox_hooks() {
   local name ws p pane status state cmd lane unit fp stuck key seen seen_at now last why deaf_seen=()
-  local gone hint still has_no fixed cleared lost
+  local gone hint still has_no fixed cleared lost esc
   while IFS=$'\t' read -r name ws p pane status state cmd lane; do
     [ -n "$name" ] || continue
     [ "$lane" != - ] || lane=""
@@ -581,7 +582,9 @@ _steward_inbox_hooks() {
       *) continue ;;
     esac
     # Once escalated, a human owns it: never loop restarts behind their back.
-    [ -z "$(_inbox_open_fp "$ws" "$stuck" steward root)" ] || continue
+    # A mailbox that does not parse cannot prove it was not: no restart.
+    esc="$(_inbox_open_fp "$ws" "$stuck" steward root)" || continue
+    [ -z "$esc" ] || continue
     now="$(date +%s)"
     last="$(awk -v k="$key" '$1==k{t=$2} END{print t+0}' "$_STEWARD_STATE" 2>/dev/null || printf 0)"
     if [ "${last:-0}" -gt 0 ] && [ $((now - last)) -lt 1800 ]; then
@@ -611,7 +614,8 @@ _steward_inbox_hooks() {
     fi
     c_warn "$name $has_no and $why - not restarting it: $cmd"
     # Said once: a stripped or deaf agent stays so tick after tick.
-    [ -z "$(_inbox_open_fp "$ws" "$fp" steward root)" ] || continue
+    esc="$(_inbox_open_fp "$ws" "$fp" steward root)" || continue
+    [ -z "$esc" ] || continue
     _steward_remind "$ws" root "$fp" blocked \
       "steward: $name cannot receive mail - $lost, and $why, so the steward will not restart it. When it is safe, run: $cmd" || true
   done < <(run_stripped_orchestrators)
@@ -1696,8 +1700,14 @@ _steward_root_unread() {
     [ -s "$f" ] || continue
     # Only what a person must answer, decide or unblock. Status is the
     # ledger's job.
-    local waiting
-    waiting="$(inbox_unread_json "$ws" root \
+    # A mailbox that does not parse is unknown: neither "read" (which would
+    # clear the item) nor news. Said in the log; nothing raised or cleared.
+    local unread waiting
+    if ! unread="$(inbox_unread_json "$ws" root 2>/dev/null)"; then
+      c_warn "$ws: root's mailbox $f is corrupt - its unread mail is unknown"
+      continue
+    fi
+    waiting="$(printf '%s' "$unread" \
       | jq -sc --argjson age "$_STEWARD_ROOT_UNREAD_SECS" --arg now "$(date -Is)" '
           [ .[] | select(.kind == "escalation" or .kind == "decision" or .kind == "blocked")
                 | select(.from != "steward") ]
@@ -1707,7 +1717,7 @@ _steward_root_unread() {
       _steward_clear "$ws" "root-unread-$ws" "root's mail in $ws has been read"
       continue
     fi
-    oldest_secs="$(inbox_oldest_unread_secs "$ws" root 'escalation|decision|blocked')"
+    oldest_secs="$(inbox_oldest_unread_secs "$ws" root 'escalation|decision|blocked')" || continue
     [ "${oldest_secs:-0}" -ge "$_STEWARD_ROOT_UNREAD_SECS" ] || continue
     # herdr unreachable is NOT evidence that nobody is reading - the same rule
     # as `cel inbox prune` and the orchestrator sweep. Unknown says nothing

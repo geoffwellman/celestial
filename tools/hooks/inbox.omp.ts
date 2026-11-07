@@ -293,7 +293,9 @@ export default function celestialInbox(pi): void {
   // The watcher tails from the end, so mail already waiting when the session
   // starts never produces a line. Count it (the count does not move the cursor),
   // say so out of band, and arm the SAME coalesced wake new mail uses: its
-  // idle/empty-composer rules decide, nothing else delivers.
+  // idle/empty-composer rules decide, nothing else delivers. -1 is a count that
+  // FAILED (a corrupt mailbox exits 1 with only a floor on stdout): unknown is
+  // not empty, so the wake still reads, and the read says what is wrong.
   function unreadCount(ctx): number {
     try {
       const n = execFileSync("bash", [celBin(), "inbox", "count", ...wsArgs()], {
@@ -301,15 +303,26 @@ export default function celestialInbox(pi): void {
         encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
       }).trim();
       return Number(n) || 0;
-    } catch { return 0; }
+    } catch { return -1; }
   }
 
   function wakeForBacklog(ctx): void {
     const n = unreadCount(ctx);
-    if (n <= 0) return;
-    try { ctx && ctx.ui && ctx.ui.notify(`INBOX ${n} unread message(s) waiting`, "info"); } catch {}
+    if (n === 0) return;
+    const note = n > 0 ? `INBOX ${n} unread message(s) waiting` : "INBOX could not be counted - reading it";
+    try { ctx && ctx.ui && ctx.ui.notify(note, "info"); } catch {}
     owed = true;
     scheduleWake(ctx);
+  }
+
+  // A MAILBOX THAT DOES NOT PARSE is reported by the read as {state: corrupt},
+  // said once per file in this session: its mail is unknown, and repeating
+  // that every turn tells nobody anything new.
+  const corruptSaid = new Set<string>();
+  function corruptNotice(ws: string, file: string): string {
+    if (corruptSaid.has(file)) return "";
+    corruptSaid.add(file);
+    return `${ws}celestial inbox: mailbox ${file} is corrupt (a line does not parse) - its mail is unknown, not empty, and nothing was marked read. Tell the owner.`;
   }
 
   // Every delivered item carries `[<id>]` so `cel drive receipt` can
@@ -320,19 +333,25 @@ export default function celestialInbox(pi): void {
     const m = /^(\[[^\]]+\] )?(\{.*\})$/.exec(line);
     if (!m) return line;
     let o; try { o = JSON.parse(m[2]); } catch { return line; }
-    if (!o || !o.id) return ""; // an empty-mailbox report, not mail
+    if (!o || !o.id) return o && o.state === "corrupt" ? corruptNotice(m[1] || "", String(o.file || "")) : ""; // an empty-mailbox report, not mail
     const ws = m[1] || "";
     if (o.kind === "update") return `[${o.id}] ${ws}\u21bb ${o.from} (\u00d7${o.count || 2}): ${o.message}`;
     return `[${o.id}] ${ws}[${String(o.ts || "").slice(11, 16)} ${o.kind} from ${o.from}] ${o.message}`;
   }
   function drain(ctx): string {
+    let out;
     try {
-      const out = execFileSync("bash", [celBin(), "inbox", "read", "--json", ...wsArgs()], {
+      out = execFileSync("bash", [celBin(), "inbox", "read", "--json", ...wsArgs()], {
         cwd: (ctx && ctx.cwd) || process.cwd(),
         encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"],
       });
-      return out.split("\n").map((l) => l.trim()).filter(Boolean).map(renderItem).filter(Boolean).join("\n");
-    } catch { return null; }
+    } catch (e) {
+      // A corrupt mailbox fails the read with its report on stdout: that is
+      // an answer to deliver, not a failed drain to retry forever.
+      out = String((e && e.stdout) || "");
+      if (!/"state":"corrupt"/.test(out)) return null;
+    }
+    return out.split("\n").map((l) => l.trim()).filter(Boolean).map(renderItem).filter(Boolean).join("\n");
   }
 
   // THE IN-AGENT COMMANDS (lib/here.sh). Each /cel-<verb> runs `cel here <verb>`
