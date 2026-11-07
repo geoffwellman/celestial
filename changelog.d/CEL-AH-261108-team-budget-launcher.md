@@ -1,0 +1,17 @@
+### Added
+- One box-wide live agent budget (`lib/budget.sh`, `cel budget [--json]`). It counts live Celestial agents from the native inventory (herdr + Rex) by role: product agents, reviewers, team members and core/root. The limits are `budget.max_live_agents` (default 8) and `budget.max_team_members` (default 4) in `~/.local/share/cel/config.yaml`, plus the memory floor. `--pending N` adds reserved members that have not launched yet. An unreadable inventory refuses (fail closed). A new `cel run reviewer` is admitted against the budget; product agents are counted and only warned, never blocked.
+- `cel run member --workspace w --team <feature> --member <alias>`: the scoped-role launcher behind `cel team add`.
+  - It starts nothing without a one-time launch token (`<ws>/.cel/teams/<feature>/launch/<alias>.token`), which it spends before any check.
+  - It launches only a `reserved` member row and admits it against the team budget.
+  - A builder gets its own worktree on `team/<feature>/<name>` at the recorded base and `CEL_TEAM_BRANCH`; every other role starts in the team directory.
+  - It sets `CEL_ROLE=member`, `CEL_TEAM`, `CEL_TEAM_ROLE` and `CEL_TEAM_MEMBER`, and the mailbox is the alias.
+  - It resolves `role_profiles.team-<role>`, then `role_profiles.member`.
+  - It places the pane in one `team <feature>` tab, and reports success only once the inventory shows that exact agent in that pane (exit 3 when unconfirmed).
+- `member_retire <wsdir> <feature> <alias> [--keep]` closes a member's pane only after proving its launch identity from the process. It removes a builder's worktree and local branch only when they hold nothing origin lacks; with `--keep` it never touches them.
+- Guard rules for team members. All paths are compared resolved: realpath against the pane's directory and every `cd` in the line.
+  - A builder writes only its own worktree (a shell write may also go to /tmp outside the workspace). Its only push is `git push origin <its branch>` or `HEAD:<its branch>`.
+  - Members run git only from known verbs and options, with no remote/push/alias/url config, `-c`, `--git-dir`, `--work-tree` or `GIT_*` environment.
+  - Every other role writes only `artifacts/<role>/` and `notes/<alias>/` (product also `brief.md` and `acceptance.yaml`), by tool or by shell, and runs only the cel verbs a member reports with.
+  - No member merges, lands, starts agents or panes, or writes to a forge by hand.
+  - A member pane gets no `CEL_GUARD_ALLOW_ONCE` override, and its guard fails closed.
+  - No role, reviewers included, runs `cel run member` or reaches a team launch directory. Reviewers now load the guard extension.

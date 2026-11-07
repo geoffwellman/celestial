@@ -6,7 +6,8 @@
 # --dangerously-skip-permissions too - that flag suppresses permission
 # PROMPTS, not hooks, which is exactly why this is a hook and not a permission
 # rule. Never exits non-zero for any reason other than a deny: a broken guard
-# must fail open, not take down every tool call on the box.
+# must fail open, not take down every tool call on the box - except in a team
+# member's pane (CEL_ROLE=member), whose scope IS this guard: it fails closed.
 set -uo pipefail
 # A pane that lives in a workspace directory but is NOT an orchestrator - the
 # owner's own assistant, a scratch session - opts out for its whole life with
@@ -14,9 +15,14 @@ set -uo pipefail
 # session's env, so that is per pane, not per box.
 [ "${CEL_GUARD:-1}" = 0 ] && exit 0
 CEL_ROOT="${CEL_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
+_broken() { # the guard cannot run: open, or closed for a member
+  [ "${CEL_ROLE:-}" = member ] || exit 0
+  printf 'celestial guard (member pane): the guard cannot run (%s), and a team member'"'"'s scope is the guard - nothing ran\n' "$1" >&2
+  exit 2
+}
 # shellcheck source=lib/guard.sh
-. "$CEL_ROOT/lib/guard.sh" 2>/dev/null || exit 0
-command -v jq >/dev/null 2>&1 || exit 0
+. "$CEL_ROOT/lib/guard.sh" 2>/dev/null || _broken "lib/guard.sh does not load"
+command -v jq >/dev/null 2>&1 || _broken "jq is not on PATH"
 
 in="$(cat 2>/dev/null)" || exit 0
 tool="$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null)"
@@ -28,34 +34,28 @@ tool="$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null)"
 # and covers nothing but the call it was set on.
 cwd="$(printf '%s' "$in" | jq -r '.cwd // empty' 2>/dev/null)"; [ -n "$cwd" ] || cwd="$PWD"
 role="$(guard_role_of "$cwd")"
+_GUARD_CWD="$cwd"   # a builder's bare `git push` and relative paths resolve here (lib/guard.sh)
 cmd="$(printf '%s' "$in" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' 2>/dev/null)"
 
+# Panes outside the plane (`other`: a reviewer, a scratch session) go through
+# the same classifiers, which refuse them only the tokens and `cel run member`.
+# A team member has no one-off: nobody stands over its pane to approve one.
 verdict=allow
-case "$role" in
-  # Panes outside the plane (a reviewer, a scratch session) are otherwise
-  # untouched; the forge API token is the one thing no agent reads.
-  other)
-    case "$tool" in
-      Bash) case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
-            _guard_names_forge_token "$cmd" && verdict="$_GUARD_TOKEN_DENY" ;;
-      Read|Edit|Write|MultiEdit|NotebookEdit) _guard_names_forge_token "$path" && verdict="$_GUARD_TOKEN_DENY" ;;
-    esac ;;
-  *)
-    case "$tool" in
-      Bash)
-        case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
-        verdict="$(guard_classify "$role" "$cmd")" ;;
-      Read) verdict="$(guard_classify_read "$role" "$path")" ;;
-      Edit|Write|MultiEdit|NotebookEdit) verdict="$(guard_classify_path "$role" "$path")" ;;
-    esac ;;
+case "$tool" in
+  Bash)
+    case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) [ "$role" = member ] || exit 0;; esac
+    verdict="$(guard_classify "$role" "$cmd")" ;;
+  Read) verdict="$(guard_classify_read "$role" "$path")" ;;
+  Edit|Write|MultiEdit|NotebookEdit) verdict="$(guard_classify_path "$role" "$path")" ;;
 esac
 
 case "$verdict" in
   allow) exit 0;;
   deny*)
     printf 'celestial guard (%s pane): %s\n' "$role" "${verdict#deny }" >&2
-    printf 'If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>\n' >&2
+    [ "$role" = member ] \
+      || printf 'If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>\n' >&2
     exit 2;;
 esac
 exit 0
