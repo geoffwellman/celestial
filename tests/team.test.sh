@@ -502,3 +502,82 @@ test_refused_launch_cleans_up_and_reserved_rows_count() {
   assert_contains "$out" "shop-login-design IS RUNNING, but recording its launch failed 3 times"
   rm -rf "$T"
 }
+
+# END TO END, NOTHING OF T1 STUBBED: `cel team add` runs the real
+# budget_admit (lib/budget.sh) and the real `bin/cel run member` (lib/run.sh)
+# as a separate process. Only herdr is replaced, by an executable on PATH
+# whose roster shows what `agent start` started (the pane probes go to the
+# shared tests/lib/fake-herdr).
+_team_e2e_fixture() {
+  T="$(mktemp -d)"; W="$T/ws"
+  mkdir -p "$W/repos" "$T/bin" "$T/rex" "$T/claude" "$T/inbox"
+  cat > "$W/workspace.yaml" <<'EOS'
+name: alpha
+products:
+  - name: shop
+    repos: [web]
+repos:
+  - name: web
+    url: git@github.com:someone/web.git
+EOS
+  printf 'workspaces:\n  alpha: {path: "%s"}\n' "$W" > "$T/registry.yaml"
+  export CEL_REGISTRY="$T/registry.yaml" CEL_INBOX_DIR="$T/inbox" CEL_REX_STATE="$T/rex"
+  export CEL_CONFIG_FILE="$T/config.yaml" CLAUDE_CONFIG_DIR="$T/claude"
+  export HERDR_WORKSPACE_ID=w1 HERDR_LOG="$T/herdr.log" CEL_MEMBER_CONFIRM_MS=300
+  export CEL_PANE_READY_POLL_MS=5 CEL_PANE_READY_MS=3000 CEL_PANE_READY_STABLE=3
+  export TEAM_E2E="$T" PF_DIR="$T/pf"; : > "$HERDR_LOG"; printf '[]' > "$T/started.json"
+  _git init -q --bare --initial-branch=main "$T/origin.git"
+  _git clone -q "$T/origin.git" "$T/seed" 2>/dev/null
+  _git -C "$T/seed" commit -q --allow-empty -m base && _git -C "$T/seed" push -q origin HEAD:main 2>/dev/null
+  _git clone -q "$T/origin.git" "$W/repos/web" 2>/dev/null
+  BASE="$(git -C "$W/repos/web" rev-parse HEAD)"
+  cat > "$T/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HERDR_LOG"
+case "$1 $2" in
+  "agent list") jq -c '{result:{agents:.}}' "$TEAM_E2E/started.json" ;;
+  "tab list") printf '{"result":{"tabs":[]}}' ;;
+  "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
+  "pane get"|"pane process-info") PF_NOLOG=1 exec "$CEL_ROOT/tests/lib/fake-herdr" "$@" ;;
+  "agent start")
+    PF_NOLOG=1 "$CEL_ROOT/tests/lib/fake-herdr" "$@" || exit 1
+    jq -c --arg n "$3" --arg p "$7" --arg c "$TEAM_E2E/ws/.cel/teams/login" \
+      '. + [{name:$n, pane_id:$p, cwd:$c, agent_status:"idle"}]' "$TEAM_E2E/started.json" > "$TEAM_E2E/started.tmp" \
+      && mv "$TEAM_E2E/started.tmp" "$TEAM_E2E/started.json" ;;
+  *) : ;;
+esac
+SH
+  chmod +x "$T/bin/herdr"
+  export PATH="$T/bin:$PATH"
+}
+
+test_end_to_end_add_through_the_real_budget_and_launcher() {
+  _team_e2e_fixture
+  declare -F budget_admit >/dev/null && { echo "fixture: budget_admit is stubbed"; rm -rf "$T"; return 1; }
+  _t start login --product shop >/dev/null
+  _cand web "$BASE"
+  local out rc=0 a=shop-login-builder
+  out="$(_t add login builder --repo web --owns 'src/**')" || rc=$?
+  assert_eq "$rc" 0 || { echo "$out"; rm -rf "$T"; return 1; }
+  # the launcher read the row cel team add reserved, spent the token, made
+  # the worktree on the team branch at the base, and started that exact alias
+  assert_contains "$out" "member $a pane w1:p9"
+  [ -z "$(ls -A "$W/.cel/teams/login/launch")" ] || { echo "the token was not spent"; rm -rf "$T"; return 1; }
+  local wt; wt="$(_row "$a" | jq -r .worktree)"
+  assert_eq "$(git -C "$wt" symbolic-ref --short HEAD)" "team/login/builder"
+  assert_eq "$(git -C "$wt" rev-parse HEAD)" "$BASE"
+  assert_contains "$(cat "$HERDR_LOG")" "agent start $a --kind"
+  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_TEAM_MEMBER=$a"
+  assert_eq "$(_row "$a" | jq -c '[.state, .launched]')" '["reserved",true]'
+  CEL_ROLE=member CEL_TEAM=login CEL_TEAM_MEMBER="$a" _t ack login >/dev/null
+  assert_eq "$(_state "$a")" ready
+  assert_eq "$(_t status login --json | jq -r --arg a "$a" '.members[] | select(.alias == $a) | .live')" up
+  # the real budget counts the live member (and reserved rows) and refuses
+  # past budget.max_team_members - before anything is written
+  local before; before="$(sha256sum "$W/.cel/teams/login/team.json")"
+  out="$(CEL_BUDGET_MAX_TEAM_MEMBERS=1 _t add login qa)" && { echo "the real budget admitted over its limit"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "1 team members live, the limit is 1"
+  assert_eq "$(sha256sum "$W/.cel/teams/login/team.json")" "$before"
+  assert_eq "$(grep -c '^agent start' "$HERDR_LOG")" 1
+  rm -rf "$T"
+}

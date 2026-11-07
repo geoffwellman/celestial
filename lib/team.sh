@@ -332,13 +332,13 @@ _team_start() {
   _team_require_feature "$feature"
   [ -n "$product" ] || die "cel team start: --product <p> is required - a team belongs to one product"
   local wsdir; wsdir="$(_team_wsdir "$workspace")" || exit 1
-  ws_product_names "$wsdir" | grep -qxF "$product" \
+  ws_product_names "$wsdir" | grep -xF -- "$product" >/dev/null \
     || die "cel team start: '$product' is not a product of workspace '$(ws_name "$wsdir")'"
   _team_require_lead "$wsdir" "$product" start "$(cel_alias_norm "$product-orch")"
   local -a own; mapfile -t own < <(ws_product_repos "$wsdir" "$product")
   if [ "${#repos[@]}" -eq 0 ]; then repos=("${own[@]}"); fi
   for r in "${repos[@]}"; do
-    printf '%s\n' "${own[@]}" | grep -qxF "$r" || die "cel team start: '$r' is not a repo of product '$product' (${own[*]})"
+    printf '%s\n' "${own[@]}" | grep -xF -- "$r" >/dev/null || die "cel team start: '$r' is not a repo of product '$product' (${own[*]})"
   done
   [ -z "$brief" ] || [ -f "$brief" ] || die "cel team start: no brief file at $brief"
   local dir teams lead tmp now
@@ -543,7 +543,7 @@ _team_add() {
   [ "$(jq -r .state "$dir/team.json")" = open ] || die "cel team add: team '$feature' is closed"
   local -a trepos; mapfile -t trepos < <(jq -r '.repos[]' "$dir/team.json")
   if [ -n "$repo" ]; then
-    printf '%s\n' "${trepos[@]}" | grep -qxF "$repo" || die "cel team add: '$repo' is not one of this team's repos (${trepos[*]})"
+    printf '%s\n' "${trepos[@]}" | grep -xF -- "$repo" >/dev/null || die "cel team add: '$repo' is not one of this team's repos (${trepos[*]})"
   elif [ "$role" = builder ]; then
     [ "${#trepos[@]}" -eq 1 ] || die "cel team add: a builder works in one repo - say which with --repo (${trepos[*]})"
     repo="${trepos[0]}"
@@ -575,6 +575,10 @@ _team_add() {
   # ADMISSION BEFORE ANY WRITE: a refused member leaves no row, no packet and
   # no token behind.
   local verdict max
+  # Loaded HERE, not inside the admission's command substitution, so
+  # budget_max_team_members is defined for the check under the lock.
+  _team_budget_lib \
+    || die "cel team add: the box-wide agent budget (lib/budget.sh) is not installed, so no launch can be admitted. Nothing was reserved"
   if ! verdict="$(_team_admit "$wsdir" 2>&1)"; then
     die "cel team add: the box budget refused a team member: ${verdict:-no reason given}. Nothing was reserved"
   fi

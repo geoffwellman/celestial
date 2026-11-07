@@ -1840,7 +1840,9 @@ _run_member_load() { # <wsdir> <feature> <alias>; dies on anything but one valid
   [ -n "$row" ] || die "cel run member: team $feature has no single member row for $alias"
   MEMBER_DIR="$dir"
   MEMBER_PRODUCT="$(printf '%s' "$tj" | jq -r .product)"
-  { ws_product_names "$wsdir"; ws_repo_names "$wsdir"; } | grep -qxF -- "$MEMBER_PRODUCT" \
+  # grep reads ALL of its input (no -q): under pipefail, -q exiting on the
+  # first match SIGPIPEs the second writer and the pipeline reads as a miss.
+  { ws_product_names "$wsdir"; ws_repo_names "$wsdir"; } | grep -xF -- "$MEMBER_PRODUCT" >/dev/null \
     || die "cel run member: team $feature names product '$MEMBER_PRODUCT', which workspace '$(ws_name "$wsdir")' does not have"
   IFS=$'\t' read -r MEMBER_ROLE MEMBER_FOCUS MEMBER_REPO MEMBER_BRANCH MEMBER_WT MEMBER_BASE MEMBER_MODEL < <(
     printf '%s' "$row" | jq -r '[.role, .focus, .repo, .branch, .worktree, .base_sha, .model]
@@ -1855,7 +1857,7 @@ _run_member_load() { # <wsdir> <feature> <alias>; dies on anything but one valid
   [ -f "$dir/members/$alias.md" ] \
     || die "cel run member: no scope packet $dir/members/$alias.md - a member is launched with its task, never into an empty pane"
   if [ -n "$MEMBER_REPO" ]; then
-    ws_repo_names "$wsdir" | grep -qxF -- "$MEMBER_REPO" \
+    ws_repo_names "$wsdir" | grep -xF -- "$MEMBER_REPO" >/dev/null \
       || die "cel run member: $alias names repo '$MEMBER_REPO', which this workspace does not have"
   fi
   [ "$MEMBER_ROLE" = builder ] || return 0
