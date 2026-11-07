@@ -19,9 +19,10 @@
 #        protection: protected|unprotected|unknown}
 #       `checks` holds the LATEST run of each check (a re-run supersedes the
 #       run it repeats); `conclusion` is null until a check completes.
-#       `required` names the checks the base branch is protected by;
-#       `unknown` means protection could not be read, which is never
-#       permission: only `unprotected` says the branch gates nothing.
+#       `required` names the checks the base branch requires, from classic
+#       branch protection and repository/organisation rulesets together;
+#       `unknown` means that could not be established, which is never
+#       permission: only `unprotected` says the branch requires no check.
 #   forge_pr_reviews <wsdir> <repo> <number>
 #       {decision: approved|changes_requested|review_required|none,
 #        reviews: [{author, state, head_sha, submitted_at}]}
@@ -147,24 +148,49 @@ _forge_github_pr_list() { # <wsdir> <slug> <state> [--author L] [--head B] [--li
 }
 
 # The PR's checks from its rollup (latest run of each, CEL_JQ_LATEST_CHECKS)
-# and the base branch's required checks from its protection. GitHub's own
-# "Branch not protected" is the only failure that means `unprotected`; a
-# permission error, rate limit or network failure is `unknown`.
+# and the base branch's required checks from BOTH places GitHub keeps them:
+# classic branch protection and the rulesets in effect on the branch
+# (rules/branches/<b>, which covers repository and organisation rulesets).
+# A branch gated only by a ruleset answers "Branch not protected" from the
+# classic endpoint, so that answer alone proves nothing.
+#
+#   - either read fails (permission, rate limit, network, garbage): unknown
+#   - a rule requiring checks it does not name as contexts - required
+#     workflows (`workflows`), code scanning (`code_scanning`), deployments
+#     (`required_deployments`): unknown, since no list of names can be complete
+#   - classic protection readable, or a `required_status_checks` rule:
+#     protected, with the union of their contexts
+#   - classic "Branch not protected" and no such rule: unprotected
+# Review, signature, history and merge-queue rules gate other things than
+# checks and are not this answer's business.
 _forge_github_pr_checks() { # <wsdir> <slug> <number>
   _forge_number_ok pr_checks "${3:-}" || return 1
-  local wsdir="$1" slug="$2" pr base prot prc=0 protection=unknown required='[]'
+  local wsdir="$1" slug="$2" pr base prot prc=0 rules rrc=0
+  local classic=unknown classic_req='[]' rinfo='' protection=unknown required='[]'
   pr="$(_forge_gh "$wsdir" pr view "$3" --repo "$slug" --json headRefOid,baseRefName,statusCheckRollup)" || return 1
   base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')" || return 1
   if [ -n "$base" ]; then
     prot="$(_forge_gh "$wsdir" api "repos/$slug/branches/$base/protection" 2>&1)" || prc=$?
     if [ "$prc" -eq 0 ] && [ -n "$prot" ]; then
-      if required="$(printf '%s' "$prot" | jq -ce '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique' 2>/dev/null)"; then
-        protection=protected
-      else
-        required='[]'
-      fi
+      classic_req="$(printf '%s' "$prot" | jq -ce '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique' 2>/dev/null)" \
+        && classic=protected || classic_req='[]'
     else
-      case "$prot" in *"Branch not protected"*) protection=unprotected ;; esac
+      case "$prot" in *"Branch not protected"*) classic=none ;; esac
+    fi
+    rules="$(_forge_gh "$wsdir" api "repos/$slug/rules/branches/$base" --paginate --slurp 2>/dev/null)" || rrc=$?
+    [ "$rrc" -ne 0 ] || rinfo="$(printf '%s' "$rules" | jq -ce '
+      if type == "array" and all(.[]; type == "array") then add // [] else error("not rule pages") end
+      | { names: [.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context | strings],
+          gated: any(.[]; .type == "required_status_checks"),
+          unnamed: any(.[]; .type == "workflows" or .type == "code_scanning" or .type == "required_deployments") }' 2>/dev/null)" \
+      || rinfo=''
+  fi
+  if [ "$classic" != unknown ] && [ -n "$rinfo" ] && [ "$(printf '%s' "$rinfo" | jq -r .unnamed)" = false ]; then
+    if [ "$classic" = protected ] || [ "$(printf '%s' "$rinfo" | jq -r .gated)" = true ]; then
+      protection=protected
+      required="$(jq -cn --argjson a "$classic_req" --argjson r "$rinfo" '$a + $r.names | unique')"
+    else
+      protection=unprotected
     fi
   fi
   printf '%s' "$pr" | jq -c --arg p "$protection" --argjson req "$required" "$CEL_JQ_LATEST_CHECKS$_FORGE_JQ_GH"'

@@ -45,6 +45,12 @@ case "$1 $2" in
               echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1 ;;
     esac
     cat "$FX/protection.json" ;;
+  "api repos/acme/widget/rules/branches/main")
+    case "${STUB_RULES:-none}" in
+      denied) echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1 ;;
+      garbage) echo '{"message":"Server Error"}' ;;
+      *) cat "$FX/rules-${STUB_RULES:-none}.json" ;;
+    esac ;;
   *) echo "unexpected gh call: $*" >&2; exit 9 ;;
 esac
 SH
@@ -201,12 +207,27 @@ test_forge_pr_checks_normalises_the_rollup_and_required_checks() {
   rm -rf "$T"
 }
 
-# Only GitHub's own "Branch not protected" says the branch gates nothing; a
-# protection read that is refused is unknown, never unprotected.
-test_forge_pr_checks_tells_unprotected_from_unknown() {
+# The required checks are the union of classic protection and the rulesets in
+# effect. Only GitHub's own "Branch not protected" AND no ruleset requiring a
+# check says the branch requires none; a refused or unreadable read of either
+# is unknown, never unprotected.
+test_forge_pr_checks_reads_rulesets_and_tells_unprotected_from_unknown() {
   _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
-  assert_eq "$(STUB_PROTECTION=none forge_pr_checks "$T" widget 12 | jq -c '[.protection, .required]')" '["unprotected",[]]' || { rm -rf "$T"; return 1; }
-  assert_eq "$(STUB_PROTECTION=denied forge_pr_checks "$T" widget 12 | jq -c '[.protection, .required]')" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  _pv() { forge_pr_checks "$T" widget 12 | jq -c '[.protection, .required]'; }
+  # gated by a ruleset alone: classic says "Branch not protected"
+  assert_eq "$(STUB_PROTECTION=none STUB_RULES=ruleset _pv)" '["protected",["Build","Tests"]]' || { rm -rf "$T"; return 1; }
+  # both: the union
+  assert_eq "$(STUB_RULES=ruleset _pv)" '["protected",["Build","Tests"]]' || { rm -rf "$T"; return 1; }
+  # neither gates anything
+  assert_eq "$(STUB_PROTECTION=none _pv)" '["unprotected",[]]' || { rm -rf "$T"; return 1; }
+  # either read refused or unreadable
+  assert_eq "$(STUB_PROTECTION=denied _pv)" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_PROTECTION=none STUB_RULES=denied _pv)" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_RULES=denied _pv)" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_PROTECTION=none STUB_RULES=garbage _pv)" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  # a required workflow gates on checks no list of names can carry
+  assert_eq "$(STUB_PROTECTION=none STUB_RULES=workflows _pv)" '["unknown",[]]' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "api repos/acme/widget/rules/branches/main --paginate --slurp" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
