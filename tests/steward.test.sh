@@ -378,6 +378,64 @@ test_ready_ticket_with_an_unknown_prefix_goes_to_root() {
   rm -rf "$T"
 }
 
+_ready_owner_fixture() {
+  _orch_fixture
+  sed -i 's/trigger_state: Ready/trigger_state: Todo/' "$T/alpha/workspace.yaml"
+  printf 'LINEAR_API_KEY=fixture-alpha\n' > "$T/alpha/env.local"
+  READY_OWNER_NODES='[{"identifier":"WG-1","title":"widget work","assignee":null,"state":{"name":"Todo","type":"unstarted"},"labels":{"nodes":[]}}]'
+  curl() { jq -nc --argjson nodes "$READY_OWNER_NODES" '{data:{issues:{nodes:$nodes}}}'; }
+}
+_ready_owner_root_count() {
+  jq -s '[.[] | select(.from == "steward" and .to == "root")] | length' "$CEL_INBOX_DIR/alpha.jsonl"
+}
+
+test_ready_owner_card_holds_and_rearms_without_waiting_for_window() {
+  _ready_owner_fixture
+  _owner_card alpha 1700000000000000001 "Restore Bundle solo agent through the gateway" "Main Bundle solo agent taking turns"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 0
+  printf '{"id":"1700000000000000002","kind":"resolution","ref":"1700000000000000001","by":"owner","to":"root"}\n' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 1
+  assert_contains "$(_root_mail)" 'WG-1'
+  _owner_card alpha 1700000000000000003 "Restore bundle-orch" "bundle-orch is blocked"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 1
+  printf '{"id":"1700000000000000004","kind":"resolution","ref":"1700000000000000003","by":"owner","to":"root"}\n' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 2
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 2
+  rm -rf "$T"
+}
+
+test_ready_owner_card_does_not_hide_other_products_or_workspaces() {
+  _ready_owner_fixture
+  READY_OWNER_NODES='[{"identifier":"WG-1","title":"widget"},{"identifier":"OT-2","title":"other product"}]'
+  _owner_card alpha 1700000000000000001 "Restore Bundle solo agent" "bundle-orch taking turns"
+  _owner_card beta 1700000000000000002 "Restore lone-orch" "lone-orch taking turns"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 1
+  local mail; mail="$(_root_mail)"
+  assert_contains "$mail" 'OT-2'
+  if [[ "$mail" == *WG-1* ]]; then echo 'covered product was nudged'; return 1; fi
+  rm -rf "$T"
+}
+
+test_ready_owner_card_keeps_ambiguous_and_unknown_ownership_actionable() {
+  _ready_owner_fixture
+  sed -i 's/prefix: OT/prefix: WG/' "$T/alpha/workspace.yaml"
+  READY_OWNER_NODES='[{"identifier":"WG-1","title":"ambiguous owner"},{"identifier":"ABCD-9","title":"unknown owner"}]'
+  _owner_card alpha 1700000000000000001 "Restore Bundle solo agent" "bundle-orch taking turns"
+  _steward_ready_tickets "$ROSTER" >/dev/null
+  assert_eq "$(_ready_owner_root_count)" 2
+  local mail; mail="$(_root_mail)"
+  assert_contains "$mail" 'WG-1'
+  assert_contains "$mail" 'ABCD-9'
+  rm -rf "$T"
+}
+
 # --- the review sweep finds the PRODUCT's orchestrator ---------------------
 # A repo in a declared product has no orchestrator of its own, so the nudge
 # goes to the product's orchestrator.
