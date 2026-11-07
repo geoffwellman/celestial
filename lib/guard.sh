@@ -137,9 +137,9 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
 # whitespace is collapsed, and from the front of each piece go: env
 # assignments, wrappers (bash/sh -c, env, command, exec, nohup, time, xargs,
-# timeout N), a path in front of cel/cel-fanout/gh/herdr, and the global
-# options between a tool and its verb (`-C`/`--workspace` for cel, `-R`/`--repo`
-# for gh). The rules then match the START of a piece only.
+# timeout N), a path in front of cel/cel-fanout/gh/herdr/tea/curl, and the
+# global options between a tool and its verb (`-C`/`--workspace` for cel,
+# `-R`/`--repo` for gh). The rules then match the START of a piece only.
 #
 # A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
 # command (`c=cel-fanout; $c land`) or a script file still runs. What this
@@ -152,7 +152,7 @@ _guard_segments() { # <command> -> one normalised command per line
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
         s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
         s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
-    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr)( |$)#\1\2#' \
+    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr|tea|curl)( |$)#\1\2#' \
     | sed -E ':b
         s#^(cel-fanout|cel) (-C [^ ]+|--workspace[= ][^ ]+)( |$)#\1\3#; tb
         s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
@@ -167,6 +167,20 @@ _guard_starts() { # <command> <ERE...> -> 0 when one does
       [[ "$seg" =~ ^($p)( |$) ]] && return 0
     done
   done < <(_guard_segments "$cmd")
+  return 1
+}
+
+# A FORGE'S REST API BY HAND: `curl` writing to a Forgejo (/api/v1/) or
+# GitHub (api.github.com) endpoint - a method that writes, or a request body.
+# A read (`curl .../api/v1/...` with neither) is a read.
+_guard_forge_api_write() { # <command> -> 0 when a piece writes to a forge API
+  local seg
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    [[ "$seg" =~ ^curl( |$) ]] || continue
+    [[ "$seg" == */api/v1/* || "$seg" == *api.github.com* ]] || continue
+    [[ "$seg" =~ (^| )(-X|--request)(=| )?(POST|PUT|PATCH|DELETE)( |$) \
+       || "$seg" =~ (^| )(-d|--data|--data-[a-z]+|--json|-F|--form|-T|--upload-file)(=| |$) ]] && return 0
+  done < <(_guard_segments "$1")
   return 1
 }
 
@@ -211,7 +225,7 @@ _guard_solo() { # <command> -> allow | deny <reason>
     printf 'deny a solo agent does not review its own PR - its reviewer records the verdict'
     return 0
   fi
-  if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge'; then
+  if _guard_starts "$1" 'gh pr merge' 'gh api .*pulls/[0-9]+/merge' 'tea (pr|pulls|pull) (merge|m)' 'curl .*/pulls/[0-9]+/merge[^ ]*'; then
     printf 'deny a solo agent merges through `cel solo land <repo>#<pr>`, which checks policy, review of the exact head and CI before it merges'
     return 0
   fi
@@ -260,7 +274,12 @@ guard_classify() { # <role> <command>
   case "$role" in other) printf allow; return 0;; esac
 
   # The sanctioned write paths. These are the mechanism; refusing them would
-  # refuse the orchestrator's actual job.
+  # refuse the orchestrator's actual job. Opening a PR is not among them: a
+  # worker (or a solo agent) opens PRs, an orchestrator reads them.
+  if _guard_starts "$cmd" 'cel forge pr create'; then
+    printf 'deny workers open pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
+    return 0
+  fi
   case "$cmd" in
     cel-fanout\ *|*\ cel-fanout\ *|*/cel-fanout\ *) printf allow; return 0;;
     cel-linear\ *|*\ cel-linear\ *|*/cel-linear\ *) printf allow; return 0;;
@@ -326,6 +345,13 @@ guard_classify() { # <role> <command>
       printf 'deny orchestrators do not change GitHub state directly'
       return 0;;
   esac
+  # The same on a Forgejo, through tea or its REST API by hand.
+  if _guard_starts "$cmd" 'tea (pr|pulls|pull) (merge|m|close|create|c|reopen|open|edit|e|approve|lgtm|a|reject|review)' \
+       'tea (release|releases|r) (create|c|delete|rm|edit|e)' 'tea (repo|repos) (create|fork|delete|migrate|edit)' \
+     || _guard_forge_api_write "$cmd"; then
+    printf 'deny orchestrators do not change forge state directly - merges go through `cel-fanout land <id>`; workers open and update PRs'
+    return 0
+  fi
 
   # Editing files under repos/ by shell. (The native edit tools are checked
   # separately by the hook, by path.)

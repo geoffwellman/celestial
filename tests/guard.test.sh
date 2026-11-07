@@ -202,8 +202,42 @@ test_solo_may_not_fan_out_or_start_agents() {
 test_solo_may_not_merge_by_hand() {
   local c
   for c in 'gh pr merge 12 --squash' 'gh -R a/b pr merge 5' 'gh --repo=a/b pr merge 5' \
-           'gh api -X PUT repos/a/b/pulls/5/merge'; do
+           'gh api -X PUT repos/a/b/pulls/5/merge' 'tea pr merge 5' 'tea pulls m 5' \
+           'curl -X POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge' \
+           '/usr/bin/curl --config - http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge -d @b.json'; do
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
+  done
+}
+# `cel forge` is a door on both forges: its reads are everyone's, opening a
+# PR is the builder's (worker, solo) and never an orchestrator's, and the
+# same writes by hand - tea, or curl at a forge's API - stay refused.
+test_cel_forge_reads_are_open_and_pr_create_is_the_builders() {
+  local role c
+  for role in orchestrator root core solo worker; do
+    for c in 'cel forge pr view gizmo#31' 'cel forge pr checks gizmo#31 --json' 'cel forge pr reviews gizmo#31' \
+             'cel forge pr list gizmo open' 'cel forge whoami gizmo' 'cel forge repo gizmo'; do
+      assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
+    done
+  done
+  for role in solo worker; do
+    assert_eq "$(guard_classify "$role" 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md')" allow || return 1
+  done
+  for role in orchestrator root core; do
+    for c in 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md' \
+             'cel --workspace sandbox forge pr create gizmo --head a --base main --title t --body-file b'; do
+      case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
+    done
+  done
+  for c in 'tea pr merge 31' 'tea pulls create --title x' 'tea pr close 31' 'tea pr approve 31' \
+           'curl -X POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge' \
+           'curl --request=PATCH http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31' \
+           'curl -XDELETE http://forgejo.internal/api/v1/repos/geoff/gizmo/branch_protections/main' \
+           'curl -d @body.json http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls' \
+           'curl --json {} https://api.github.com/repos/o/r/pulls'; do
+    case "$(guard_classify orchestrator "$c")" in deny*) ;; *) echo "orchestrator allowed: $c"; return 1;; esac
+  done
+  for c in 'curl -s http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31' 'tea pr list' 'tea pr 31'; do
+    assert_eq "$(guard_classify orchestrator "$c")" allow || { echo "orchestrator refused a read: $c"; return 1; }
   done
 }
 # The solo agent lands through `cel solo land` but never records its own

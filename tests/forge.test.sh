@@ -27,6 +27,7 @@ printf '%s|GH_TOKEN=%s\n' "$*" "${GH_TOKEN-<unset>}" >> "$GH_LOG"
 case "$1 $2" in
   "auth token") [ "${4:-}" = acct-b ] && { echo tok-b; exit 0; }; echo "no account $4" >&2; exit 1 ;;
   "api user") echo octo-bot ;;
+  "pr create") echo "https://github.com/acme/widget/pull/12" ;;
   "pr view")
     case "$*" in
       *statusCheckRollup*) cat "$FX/pr-checks.json" ;;
@@ -289,22 +290,242 @@ test_forge_ops_refuse_a_pr_that_is_not_a_number() {
   rm -rf "$T"
 }
 
-# Forgejo has no backend yet: every operation refuses by name, says so, and
-# touches no forge at all - no fake answer, no fallback to gh.
-test_forge_ops_refuse_forgejo_repos_explicitly() {
-  _forge_ws https://code.example.net/acme/gizmo.git forgejo; _forge_gh_stub
-  local call out err
-  for call in "forge_pr_view 12" "forge_pr_list open" "forge_pr_checks 12" "forge_pr_reviews 12" "forge_pr_merge 12 $H" "forge_whoami"; do
-    # shellcheck disable=SC2086
-    set -- $call
-    local op="$1"; shift
-    if out="$("$op" "$T" widget "$@" 2>"$T/err")"; then echo "$op answered for a Forgejo repo: $out"; rm -rf "$T"; return 1; fi
-    err="$(cat "$T/err")"
-    assert_eq "$out" "" || { rm -rf "$T"; return 1; }
-    assert_contains "$err" "Forgejo backend not built yet" || { rm -rf "$T"; return 1; }
-    assert_contains "$err" "code.example.net" || { rm -rf "$T"; return 1; }
+# ---- Forgejo operations, from spec-derived fixtures -------------------------
+# tests/lib/forgejo-stub.sh answers as Forgejo 17's API does (fixtures in
+# tests/fixtures/forge/forgejo - see PROVENANCE) for a gizmo-like repo: cloned
+# over the forgejo-ct.internal ssh host, web and API on plain-HTTP
+# forgejo.internal.
+source "$CEL_ROOT/tests/lib/forgejo-stub.sh"
+MOVED=2222222222222222222222222222222222222222
+GIZMO='{"provider":"forgejo","host":"forgejo.internal","owner":"geoff","repo":"gizmo","ssh_host":"forgejo-ct.internal","web_url":"http://forgejo.internal/geoff/gizmo","api_url":"http://forgejo.internal/api/v1/repos/geoff/gizmo"}'
+_fj_ws() { # [extra-yaml]
+  _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo http://forgejo.internal "${1:-}"
+  _forge_gh_stub; _forgejo_stub "$T"
+}
+_fj_no_gh() { assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo repo reached gh"; return 1; }; }
+
+test_forge_repo_describes_an_internal_forgejo_on_plain_http() {
+  _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo http://forgejo.internal
+  _json_eq "$(_desc)" "$GIZMO" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # a host of its own marks it Forgejo, as before
+  _forge_ws git@forgejo-ct.internal:geoff/gizmo.git "" http://forgejo.internal
+  _json_eq "$(_desc)" "$GIZMO" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # https stays the default: plain http is declared, never implied...
+  _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo forgejo.internal
+  assert_eq "$(_field api_url)" https://forgejo.internal/api/v1/repos/geoff/gizmo || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # ...and an https clone url is not served over http
+  _forge_ws https://forgejo.internal/geoff/gizmo.git forgejo http://forgejo.internal
+  assert_fails _desc || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_forgejo_whoami_and_pr_view_normalise_the_api() {
+  _fj_ws
+  _json_eq "$(forge_whoami "$T" widget)" '{"login":"geoff"}' || { rm -rf "$T"; return 1; }
+  local out; out="$(forge_pr_view "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" "{\"number\":31,\"state\":\"open\",\"head_sha\":\"$FJ_FIXTURE_HEAD\",\"head_ref\":\"WG-31-session-beds\",\"base_ref\":\"main\",\"author\":\"geoff\",\"draft\":false,\"mergeable\":\"clean\",\"merged_at\":null,\"url\":\"http://forgejo.internal/geoff/gizmo/pulls/31\"}" \
+    || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/user" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_STATE=merged forge_pr_view "$T" widget 31 | jq -c '[.state, .mergeable]')" '["merged","unknown"]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_MERGEABLE=false forge_pr_view "$T" widget 31 | jq -r .mergeable)" conflicting || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The stub serves three PRs a page whatever `limit` asks - as a server whose
+# MAX_RESPONSE_ITEMS is lower would - so a short page is not the last one.
+test_forgejo_pr_list_reads_every_page_and_filters_like_github() {
+  _fj_ws
+  _pl() { forge_pr_list "$T" widget "$@" | jq -r 'map("\(.number):\(.state):\(.mergeable):\(.draft):\(.author)") | join(" ")'; }
+  assert_eq "$(_pl open)" "31:open:clean:false:geoff 30:open:conflicting:true:geoff 29:open:behind:false:helper-bot" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_pl merged)" "27:merged:unknown:false:geoff" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_pl closed)" "27:merged:unknown:false:geoff 26:closed:unknown:false:geoff" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_eq "$(_pl all | wc -w)" 5 || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "pulls?state=all&limit=50&page=3" || { rm -rf "$T"; return 1; }
+  assert_eq "$(_pl all --limit 2)" "31:open:clean:false:geoff 30:open:conflicting:true:geoff" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_eq "$(forge_pr_list "$T" widget open --author @me | jq -r 'map(.number) | join(" ")')" "31 30" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "pulls?state=open&poster=geoff&limit=50&page=1" || { rm -rf "$T"; return 1; }
+  assert_eq "$(forge_pr_list "$T" widget all --head docs-mixer | jq -r 'map(.number) | join(" ")')" 29 || { rm -rf "$T"; return 1; }
+  assert_fails forge_pr_list "$T" widget opened || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The head's combined status, latest status per context, every page of it;
+# the required checks from the base's exact protection rule.
+test_forgejo_pr_checks_reads_the_heads_latest_statuses_and_the_rule() {
+  _fj_ws
+  local out; out="$(forge_pr_checks "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '{head_sha, base_ref, required, protection}' <<<"$out")" \
+    "{\"head_sha\":\"$FJ_FIXTURE_HEAD\",\"base_ref\":\"main\",\"required\":[\"ci / test (pull_request)\"],\"protection\":\"protected\"}" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.checks | sort_by(.name) | map("\(.name)=\(.status)/\(.conclusion)") | join(" ")' <<<"$out")" \
+    "ci / docs (pull_request)=completed/failure ci / lint (pull_request)=in_progress/null ci / test (pull_request)=completed/success" || { rm -rf "$T"; return 1; }
+  _json_eq "$(jq -c '.checks[] | select(.name == "ci / test (pull_request)")' <<<"$out")" \
+    '{"name":"ci / test (pull_request)","status":"completed","conclusion":"success","url":"http://forgejo.internal/geoff/gizmo/actions/runs/41/jobs/0"}' || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/commits/$FJ_FIXTURE_HEAD/status?limit=50&page=2" || { rm -rf "$T"; return 1; }
+  # a re-run supersedes the run it repeats
+  out="$(STUB_FJ_STATUSES='[{"id":50,"context":"ci / test (pull_request)","status":"failure"},{"id":51,"context":"ci / test (pull_request)","status":"success"}]' forge_pr_checks "$T" widget 31)"
+  assert_eq "$(jq -r '.checks | map("\(.name)=\(.conclusion)") | join(" ")' <<<"$out")" "ci / test (pull_request)=success" || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Only Forgejo's own 404 for the exact rule AND no glob rule matching the
+# base says it requires nothing; a glob rule that matches gates it; any
+# other answer - refused, broken, a server error, a rule naming no context, a
+# glob this cannot read - is unknown, never unprotected.
+test_forgejo_protection_is_unprotected_only_on_a_genuine_404_and_no_matching_glob() {
+  _fj_ws
+  _pv() { forge_pr_checks "$T" widget 31 | jq -c '[.protection, .required]'; }
+  assert_eq "$(STUB_FJ_PROT=none _pv)" '["unprotected",[]]' || { rm -rf "$T"; return 1; }
+  assert_eq "$(STUB_FJ_PROT=glob _pv)" '["protected",["ci / test (pull_request)"]]' || { rm -rf "$T"; return 1; }
+  local p
+  for p in unreadable-glob unnamed denied broken-404 error; do
+    assert_eq "$(STUB_FJ_PROT=$p _pv)" '["unknown",[]]' || { echo "protection answer: $p"; rm -rf "$T"; return 1; }
   done
-  assert_eq "$(cat "$GH_LOG")" "" || { echo "a Forgejo repo reached gh"; rm -rf "$T"; return 1; }
+  grep -qx 'GET http://forgejo.internal/api/v1/repos/geoff/gizmo/branch_protections' "$FJ_LOG" \
+    || { echo "the rule list was not read"; rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_forgejo_pr_reviews_normalise_states_and_bind_approval_to_the_head() {
+  _fj_ws
+  local out; out="$(forge_pr_reviews "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .decision <<<"$out")" approved || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r '.reviews | map("\(.author):\(.state):\(.head_sha[0:4])") | join(" ")' <<<"$out")" \
+    "reviewer-one:changes_requested:1111 reviewer-one:approved:3c1f reviewer-two:commented:3c1f reviewer-three:dismissed:1111" || { rm -rf "$T"; return 1; }
+  _json_eq "$(jq -c '.reviews[1]' <<<"$out")" \
+    "{\"author\":\"reviewer-one\",\"state\":\"approved\",\"head_sha\":\"$FJ_FIXTURE_HEAD\",\"submitted_at\":\"2026-11-07T16:30:00Z\"}" || { rm -rf "$T"; return 1; }
+  # the head moved past the approval: it approves nothing now
+  assert_eq "$(STUB_FJ_HEAD=$MOVED forge_pr_reviews "$T" widget 31 | jq -r .decision)" none || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# A squash of exactly the expected head, branch deleted. A head that moved is
+# refused before anything is sent; the forge's own refusal is a refusal; and
+# stdout carries only the result.
+test_forgejo_pr_merge_squashes_only_the_expected_head() {
+  _fj_ws
+  local out; out="$(forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" "Reviewed-by: r (approved)" 2>/dev/null)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  _json_eq "$out" "{\"merged\":true,\"number\":31,\"head_sha\":\"$FJ_FIXTURE_HEAD\"}" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$FJ_LOG")" "POST http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31/merge" || { rm -rf "$T"; return 1; }
+  _json_eq "$(tail -n1 "$FJ_BODY_LOG")" \
+    "{\"Do\":\"squash\",\"head_commit_id\":\"$FJ_FIXTURE_HEAD\",\"delete_branch_after_merge\":true,\"MergeMessageField\":\"Reviewed-by: r (approved)\"}" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  out="$(STUB_FJ_HEAD=$MOVED forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" 2>"$T/err")" && { echo "merged a moved head"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "is now at $MOVED, not the expected $FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
+  out="$(STUB_FJ_MERGE=conflict forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" 2>"$T/err")" && { echo "a refused merge reported success"; rm -rf "$T"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "HTTP 409" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^POST' "$FJ_LOG")" 1 || { echo "a moved head reached the merge endpoint"; rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_fails forge_pr_merge "$T" widget 31 3c1f0e9 || { rm -rf "$T"; return 1; }
+  STUB_FJ_STATE=closed assert_fails forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# Ready or draft is the workspace's policy; on Forgejo a draft is the WIP:
+# title prefix, so a WIP title under a ready policy is refused, not opened.
+test_forgejo_pr_create_opens_ready_or_wip_as_the_policy_says() {
+  _fj_ws $'policy:\n  pr_open: ready'
+  printf 'What and why.\n' > "$T/body.md"
+  local out; out="$(forge_pr_create "$T" widget WG-32-mixer main "Mixer gain staging" "$T/body.md")" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -c '[.number, .draft, .head_ref, .base_ref, .url]' <<<"$out")" '[32,false,"WG-32-mixer","main","http://forgejo.internal/geoff/gizmo/pulls/32"]' || { rm -rf "$T"; return 1; }
+  _json_eq "$(tail -n1 "$FJ_BODY_LOG")" '{"head":"WG-32-mixer","base":"main","title":"Mixer gain staging","body":"What and why.\n"}' || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_fails forge_pr_create "$T" widget WG-32-mixer main "WIP: mixer" "$T/body.md" || { rm -rf "$T"; return 1; }
+  assert_fails forge_pr_create "$T" widget WG-32-mixer main "Mixer" "$T/missing.md" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_LOG")" "" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _fj_ws
+  printf 'x\n' > "$T/body.md"
+  out="$(forge_pr_create "$T" widget WG-32-mixer main "Mixer gain staging" "$T/body.md")" || { rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .draft <<<"$out")" true || { rm -rf "$T"; return 1; }
+  assert_eq "$(tail -n1 "$FJ_BODY_LOG" | jq -r .title)" "WIP: Mixer gain staging" || { rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+test_forge_pr_create_on_github_follows_the_same_policy() {
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  printf 'x\n' > "$T/body.md"
+  local out; out="$(forge_pr_create "$T" widget fix-widget-sizing main "Fix sizing" "$T/body.md")" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
+  assert_eq "$(jq -r .number <<<"$out")" 12 || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "pr create --repo acme/widget --head fix-widget-sizing --base main --title Fix sizing --body-file $T/body.md --draft|" || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _forge_ws git@github.com:acme/widget.git "" "" $'policy:\n  pr_open: ready'; _forge_gh_stub
+  printf 'x\n' > "$T/body.md"
+  forge_pr_create "$T" widget fix-widget-sizing main "Fix sizing" "$T/body.md" >/dev/null || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" "--body-file $T/body.md|GH_TOKEN" || { echo "a ready PR opened as a draft"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# No usable token, no request: missing, or open to anyone but its owner, is
+# refused by name before curl runs.
+test_forgejo_token_missing_or_open_to_others_is_refused_before_any_request() {
+  _fj_ws
+  local tok="$XDG_CONFIG_HOME/cel/forge/forgejo.internal.token"
+  chmod 640 "$tok"
+  forge_whoami "$T" widget >/dev/null 2>"$T/err" && { echo "used a group-readable token"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "chmod 600" || { rm -rf "$T"; return 1; }
+  chmod 604 "$tok"
+  assert_fails forge_pr_view "$T" widget 31 || { rm -rf "$T"; return 1; }
+  rm -f "$tok"
+  forge_pr_checks "$T" widget 31 >/dev/null 2>"$T/err" && { echo "acted without a token"; rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$T/err")" "save it to $tok with mode 600" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_LOG")" "" || { echo "a request went out without a usable token"; rm -rf "$T"; return 1; }
+  _fj_no_gh || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# The token reaches curl on stdin as a config line - never in any argv, where
+# `ps` would show it - and only for its own host.
+test_forgejo_token_travels_on_stdin_never_in_argv_and_only_to_its_host() {
+  _fj_ws
+  forge_whoami "$T" widget >/dev/null && forge_pr_checks "$T" widget 31 >/dev/null \
+    && forge_pr_merge "$T" widget 31 "$FJ_FIXTURE_HEAD" "body" >/dev/null 2>&1 || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
+  [ -s "$FJ_ARGV_LOG" ] || { rm -rf "$T"; return 1; }
+  if grep -qF "$FJ_TOKEN" "$FJ_ARGV_LOG"; then echo "the token reached curl's argv"; rm -rf "$T"; return 1; fi
+  assert_eq "$(grep -c -- '--config -' "$FJ_ARGV_LOG")" "$(wc -l < "$FJ_ARGV_LOG")" || { rm -rf "$T"; return 1; }
+  assert_eq "$(sort -u "$FJ_STDIN_LOG")" "header = \"Authorization: token $FJ_TOKEN\"" || { rm -rf "$T"; return 1; }
+  : > "$FJ_LOG"
+  assert_fails _forge_fj forgejo.internal GET http://forgejo.internal.evil.example/api/v1/user || { rm -rf "$T"; return 1; }
+  assert_fails _forge_fj forgejo.internal GET https://example.net/api/v1/user || { rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_LOG")" "" || { echo "the token went to another host"; rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# `cel forge`: the same answers from a shell, on either forge.
+test_cel_forge_cli_reads_either_forge() {
+  _fj_ws
+  local out
+  out="$(cd "$T" && cmd_forge pr view widget#31)" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "#31 open by geoff" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "head $FJ_FIXTURE_HEAD (WG-31-session-beds) -> main" || { rm -rf "$T"; return 1; }
+  assert_eq "$(cd "$T" && cmd_forge pr checks widget#31 --json | jq -r .protection)" protected || { rm -rf "$T"; return 1; }
+  assert_contains "$(cd "$T" && cmd_forge pr reviews widget#31)" "decision: approved" || { rm -rf "$T"; return 1; }
+  _json_eq "$(cd "$T" && cmd_forge repo widget)" "$GIZMO" || { rm -rf "$T"; return 1; }
+  # the workspace from the pane's own environment, standing outside it
+  assert_eq "$(cd /tmp && CEL_WORKSPACE="$T" cmd_forge whoami widget)" geoff || { rm -rf "$T"; return 1; }
+  printf 'x\n' > "$T/body.md"
+  ( cd "$T" && CEL_ROLE=reviewer cmd_forge pr create widget --head a --base main --title t --body-file "$T/body.md" ) >/dev/null 2>&1 \
+    && { echo "a reviewer opened a PR"; rm -rf "$T"; return 1; }
+  ( cd "$T" && cmd_forge pr view nope#1 ) >/dev/null 2>&1 && { echo "read a repo the workspace lacks"; rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^POST' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
+  assert_eq "$(cd "$T" && cmd_forge pr view widget#12 --json | jq -r .head_sha)" "$H" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

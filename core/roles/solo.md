@@ -38,13 +38,18 @@ How work ships
    Heavy compiles go through `cel build-slot -- <cmd>`.
 3. A change worth a CHANGELOG line goes in `changelog.d/<branch>.md`.
 4. Push the branch and open the PR as your policy block says (ready or
-   draft). Where a `pr: none` repo is named, follow that line instead.
+   draft) with `cel forge pr create <repo> --head <branch> --base <base>
+   --title "..." --body-file <file>`: it applies the policy and works on
+   GitHub and Forgejo alike (`cel forge repo <repo>` says which). Read PRs
+   the same way: `cel forge pr view|checks|reviews <repo>#<n>`. Where a
+   `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by
    `cel inbox send <reviewer-alias> "..."` what the PR is for. It records its
    verdict with `cel solo review` and sends findings back to you. Fix them on
    the same branch, push, and say which head to re-review. One reviewer per PR.
-6. Merging: `cel solo land <repo>#<n>`, never `gh pr merge`. It refuses
+6. Merging: `cel solo land <repo>#<n>`, never a forge's own merge button,
+   `gh pr merge`, `tea` or its API. It refuses
    unless the policy is `merge: self`, the PR is yours, its review approved the
    exact current head, nothing is red and every protected check is green on
    that head - and then merges only that head. Where the policy is

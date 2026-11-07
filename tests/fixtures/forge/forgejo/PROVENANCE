@@ -1,0 +1,24 @@
+Forgejo API fixtures (tests/forge.test.sh, tests/solo.test.sh, tests/run-cmd.test.sh).
+
+ALL OF THESE ARE SPEC-DERIVED, not recorded: no API token for forgejo.internal
+existed while they were written, and the API refuses anonymous calls ("Only
+signed in user is allowed to call APIs."). Each is shaped from the server's own
+OpenAPI document - Forgejo 17.0.1 (gitea-1.22.0), http://forgejo.internal/swagger.v1.json -
+using exactly its definitions and field names:
+
+  user.json                         User                 GET /user
+  pull.json, pulls-page1.json,
+  pulls-page2.json                  PullRequest          GET /repos/{owner}/{repo}/pulls[/{index}]
+  status.json                       CombinedStatus       GET /repos/{owner}/{repo}/commits/{ref}/status
+  protection-*.json                 BranchProtection     GET /repos/{owner}/{repo}/branch_protections/{name}
+  protections-*.json                []BranchProtection   GET /repos/{owner}/{repo}/branch_protections
+  reviews.json                      []PullReview         GET /repos/{owner}/{repo}/pulls/{index}/reviews
+  not-found.json                    APINotFound (404)    the not-found answer
+  forbidden.json, merge-conflict.json  APIError          403 / 409 answers
+
+Values (shas, ids, names, timestamps) are invented; emails are empty. Replace
+any of these with a recorded answer (token in ~/.config/cel/forge/
+forgejo.internal.token, GET only, strip emails and tokens) and move its line
+below.
+
+RECORDED: none yet.
