@@ -175,7 +175,7 @@ test_forge_repo_refuses_a_repo_with_no_url_and_no_origin() {
 test_forge_pr_view_normalises_recorded_gh_output() {
   _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
   local out; out="$(forge_pr_view "$T" widget 12)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
-  _json_eq "$out" "{\"number\":12,\"state\":\"open\",\"head_sha\":\"$H\",\"head_ref\":\"fix-widget-sizing\",\"base_ref\":\"main\",\"author\":\"octo-bot\",\"draft\":false,\"mergeable\":\"behind\",\"merged_at\":null,\"url\":\"https://github.com/acme/widget/pull/12\"}" \
+  _json_eq "$out" "{\"number\":12,\"state\":\"open\",\"head_sha\":\"$H\",\"head_ref\":\"fix-widget-sizing\",\"base_ref\":\"main\",\"author\":\"octo-bot\",\"draft\":false,\"mergeable\":\"behind\",\"merged_at\":null,\"url\":\"https://github.com/acme/widget/pull/12\",\"labels\":[]}" \
     || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$GH_LOG")" "pr view 12 --repo acme/widget --json" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
@@ -185,6 +185,10 @@ test_forge_pr_list_passes_filters_and_normalises_each_pr() {
   _forge_ws git@github.com:acme/widget.git; _forge_gh_stub
   local out; out="$(forge_pr_list "$T" widget open --author @me --limit 50)" || { cat "$GH_LOG"; rm -rf "$T"; return 1; }
   assert_contains "$(cat "$GH_LOG")" "pr list --repo acme/widget --state open --author @me --limit 50 --json" || { rm -rf "$T"; return 1; }
+  assert_contains "$(cat "$GH_LOG")" ",url,labels|" || { rm -rf "$T"; return 1; }
+  # a PR's labels are its names, so a caller can honour `hold` on either forge
+  assert_eq "$(printf '[{"number":3,"labels":[{"id":"L1","name":"Hold","color":"fff"},{"name":"superseded"}]}]' \
+    | jq -c "$_FORGE_JQ_GH"' map(gh_pr) | .[0].labels')" '["Hold","superseded"]' || { rm -rf "$T"; return 1; }
   assert_eq "$(printf '%s' "$out" | jq -r 'map("\(.number):\(.mergeable):\(.draft):\(.author)") | join(" ")')" \
     "12:clean:false:octo-bot 14:conflicting:true:app/dependabot" || { rm -rf "$T"; return 1; }
   assert_fails forge_pr_list "$T" widget opened || { rm -rf "$T"; return 1; }
@@ -326,12 +330,13 @@ test_forgejo_whoami_and_pr_view_normalise_the_api() {
   _fj_ws
   _json_eq "$(forge_whoami "$T" widget)" '{"login":"geoff"}' || { rm -rf "$T"; return 1; }
   local out; out="$(forge_pr_view "$T" widget 31)" || { cat "$FJ_LOG"; rm -rf "$T"; return 1; }
-  _json_eq "$out" "{\"number\":31,\"state\":\"open\",\"head_sha\":\"$FJ_FIXTURE_HEAD\",\"head_ref\":\"WG-31-session-beds\",\"base_ref\":\"main\",\"author\":\"geoff\",\"draft\":false,\"mergeable\":\"clean\",\"merged_at\":null,\"url\":\"http://forgejo.internal/geoff/gizmo/pulls/31\"}" \
+  _json_eq "$out" "{\"number\":31,\"state\":\"open\",\"head_sha\":\"$FJ_FIXTURE_HEAD\",\"head_ref\":\"WG-31-session-beds\",\"base_ref\":\"main\",\"author\":\"geoff\",\"draft\":false,\"mergeable\":\"clean\",\"merged_at\":null,\"url\":\"http://forgejo.internal/geoff/gizmo/pulls/31\",\"labels\":[]}" \
     || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/user" || { rm -rf "$T"; return 1; }
   assert_contains "$(cat "$FJ_LOG")" "GET http://forgejo.internal/api/v1/repos/geoff/gizmo/pulls/31" || { rm -rf "$T"; return 1; }
   assert_eq "$(STUB_FJ_STATE=merged forge_pr_view "$T" widget 31 | jq -c '[.state, .mergeable]')" '["merged","unknown"]' || { rm -rf "$T"; return 1; }
   assert_eq "$(STUB_FJ_MERGEABLE=false forge_pr_view "$T" widget 31 | jq -r .mergeable)" conflicting || { rm -rf "$T"; return 1; }
+  assert_eq "$(printf '{"number":4,"state":"open","labels":[{"id":7,"name":"hold"}]}' | jq -c "$_FORGE_JQ_FJ"' fj_pr | .labels')" '["hold"]' || { rm -rf "$T"; return 1; }
   _fj_no_gh || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
