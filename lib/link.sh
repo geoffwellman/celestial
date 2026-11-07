@@ -9,8 +9,11 @@ _CEL_LINK=1
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 
+# A link into core/skills/ whose skill was retired (fanout, pr-loop) is
+# removed: a dangling skill link is listed by some runtimes and read as an
+# instruction to use a tool that no longer exists.
 link_core_skills() {
-  local a sd s
+  local a sd s l
   for a in $(agent_names); do
     sd="$(agent_skills_dir "$a")"
     [ -z "$sd" ] && continue
@@ -18,6 +21,12 @@ link_core_skills() {
     for s in "$CEL_ROOT"/core/skills/*/; do
       [ -d "$s" ] || continue
       ln -sfn "${s%/}" "$sd/$(basename "${s%/}")"
+    done
+    for l in "$sd"/*; do
+      [ -L "$l" ] && [ ! -e "$l" ] || continue
+      case "$(readlink "$l")" in
+        "$CEL_ROOT"/core/skills/*) rm -f "$l"; c_warn "removed retired skill link: $l" ;;
+      esac
     done
     c_ok "$a skills -> $sd"
   done

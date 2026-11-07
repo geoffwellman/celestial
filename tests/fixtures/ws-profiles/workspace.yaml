@@ -2,8 +2,8 @@ name: profiled
 kind: hustle
 org: someone
 tickets: { system: none, adhoc: "AH-<yymmdd>" }
-policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
-runtime: { root: claude, orchestrator: claude, worker: omp }
+policy: { merge: humans-only, pr: required }
+runtime: { root: claude, orchestrator: claude }
 tools: []
 thinking: xhigh
 
@@ -24,7 +24,7 @@ worker_profiles:
 # Bindings: what each role launches on when no --profile is passed.
 role_profiles:
   root: swap
-  worker: bare
+  direct: bare
 
 repos:
   - name: widget

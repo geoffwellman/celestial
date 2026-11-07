@@ -24,8 +24,8 @@ _inbox_dir() { printf '%s' "${CEL_INBOX_DIR:-${XDG_DATA_HOME:-$HOME/.local/share
 # content, so it lives beside the registry rather than in the workspace repo.
 _inbox_ws() { # [name]
   if [ -n "${1:-}" ]; then printf '%s' "$1"; return 0; fi
-  # The launch names the workspace (run.sh exports CEL_INBOX_WS), so a worker
-  # standing outside every workspace still sends to its orchestrator's.
+  # The launch names the workspace (run.sh exports CEL_INBOX_WS), so a reviewer
+  # standing outside every workspace still sends to its product's.
   if [ -n "${CEL_INBOX_WS:-}" ]; then printf '%s' "$CEL_INBOX_WS"; return 0; fi
   local d; d="$(ws_current 2>/dev/null)" || { printf 'default'; return 0; }
   local n; n="$(ws_name "$d")"; printf '%s' "${n:-default}"
@@ -37,7 +37,6 @@ _inbox_ws() { # [name]
 #   <ws>                        -> root
 #   <ws>/products/<product>     -> <product>-orch
 #   <ws>/repos/<repo>           -> <repo>-orch
-#   ~/.herdr/worktrees/<r>/<b>  -> <r>-<b>   (the worker alias cel run gave it)
 #   the console directory       -> console   (also CEL_ROLE=console)
 #   the core directory          -> root      (also CEL_ROLE=core): core IS the
 #                                  reader of root's mailbox in every workspace
@@ -49,7 +48,7 @@ _inbox_me() {
   # canonical alias is unchanged (the rule is idempotent), and one that was
   # typed rather than derived still lands in the mailbox mail is sent to.
   [ -n "${CEL_INBOX_ME:-}" ] && { _inbox_sanitise "$CEL_INBOX_ME"; return 0; }
-  local p wt rest repo branch d c
+  local p rest repo d c
   p="$PWD"
   [ "${CEL_ROLE:-}" = core ] && { printf 'root'; return 0; }
   [ "${CEL_ROLE:-}" = console ] && { printf 'console'; return 0; }
@@ -57,16 +56,6 @@ _inbox_me() {
   { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'root'; return 0; }
   c="${CEL_CONSOLE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/console}"
   { [ "$p" = "$c" ] || [ "${p#"$c/"}" != "$p" ]; } && { printf 'console'; return 0; }
-  wt="$HOME/.herdr/worktrees"
-  if [ "${p#"$wt/"}" != "$p" ]; then
-    rest="${p#"$wt/"}"
-    repo="${rest%%/*}"
-    rest="${rest#"$repo"}"; rest="${rest#/}"
-    branch="${rest%%/*}"
-    if [ -n "$repo" ] && [ -n "$branch" ]; then
-      _inbox_sanitise "$repo-$branch"; return 0
-    fi
-  fi
   d="$(ws_current 2>/dev/null)" || { _inbox_pane_name; return 0; }
   if [ "${p#"$d/products/"}" != "$p" ]; then
     rest="${p#"$d/products/"}"
@@ -455,7 +444,7 @@ cel inbox - messages between agents that never type into a pane
       unread items; marks them read (cursor), --all is a look that does not.
       --for defaults to WHO YOU ARE, derived from your cwd: a workspace root
       is "root", <ws>/repos/<repo> and <ws>/products/<p> are "<name>-orch",
-      a worktree is its worker alias, the console dir is "console". Override
+      the console dir is "console". Override
       with CEL_INBOX_ME.
       --all-workspaces reads every registered mailbox, each line prefixed
       [<ws>]. The cursor is per READER, so the console reading root's mail
@@ -510,18 +499,18 @@ cel inbox - messages between agents that never type into a pane
   kinds: status (default) | escalation | decision | blocked. A decision or
   blocker stays in `open` until someone resolves it, however much mail lands
   after it - a buried question is the failure this exists to prevent.
-  MAIL TO root IS FOR A PERSON: escalation, decision, blocked. Ticket status
-  belongs in the ledger (`cel-fanout status`), which every view already reads;
-  `--kind status` to root warns and still sends.
+  MAIL TO root IS FOR A PERSON: escalation, decision, blocked. Progress
+  belongs in durable state (PRs, `cel fleet`, the dashboard), which every
+  view already reads; `--kind status` to root warns and still sends.
 EOS
 }
 
-# Mail to a worker that no longer exists can never be read: a worker mailbox
-# is named for one worktree on one branch. Left in place it is permanent
-# noise in every backlog report.
+# Mail to an agent that no longer exists can never be read: a reviewer's
+# mailbox is named for one PR. Left in place it is permanent noise in every
+# backlog report.
 #
-# Archived rather than deleted: it is the record of what was said to a worker
-# that never heard it - evidence for why a ticket stalled.
+# Archived rather than deleted: it is the record of what was said to an
+# agent that never heard it.
 #
 # ROOT AND ORCHESTRATORS ARE NEVER PRUNED. They are restarted routinely, and
 # mail sent while one was down is the mail it most needs on the way back up.
@@ -576,7 +565,7 @@ _inbox_prune_run() { # <ws> <live roster> <dry 0|1>
   # In place, not mv: senders waiting on the lock hold this inode.
   cat "$keep" > "$f"
   rm -f "$keep" "$archive"
-  c_ok "$ws: archived $n_a message(s) addressed to workers that no longer exist -> $ws.archive.jsonl"
+  c_ok "$ws: archived $n_a message(s) addressed to agents that no longer exist -> $ws.archive.jsonl"
 }
 
 # The id of the OPEN item carrying this condition key, or nothing. Resolved
@@ -627,12 +616,12 @@ _inbox_send() { # <to> <message> [--from x] [--workspace w] [--kind k] [--fp key
   # should know a person is waiting, not automation.
   case "$kind" in status|escalation|decision|blocked|owner) ;;
     *) die "cel inbox send: --kind must be status, escalation, decision, blocked or owner (got '$kind')";; esac
-  # STATUS TO ROOT IS WRITE-ONLY TELEMETRY: ticket status already lives in the
-  # ledger (`cel fleet`, `cel-fanout status`, the dashboard). Mail to root is
+  # STATUS TO ROOT IS WRITE-ONLY TELEMETRY: progress already lives in durable
+  # state (`cel fleet`, the PRs, the dashboard). Mail to root is
   # for something a person must answer, decide or unblock. Warned, not
   # refused, so role files that still do it keep working.
   if [ "$to" = root ] && [ "$kind" = status ]; then
-    c_warn "status to root is not read by anyone; the ledger already carries it" >&2
+    c_warn "status to root is not read by anyone; the PRs and cel fleet already carry it" >&2
   fi
   ws="$(_inbox_ws "$ws")"
   [ -n "$from" ] || from="$(_inbox_me)"

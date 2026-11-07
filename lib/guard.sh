@@ -1,16 +1,14 @@
 # shellcheck shell=bash
-# Read-only orchestrators.
+# Read-only coordinators, guarded builders.
 #
-# The agents that DECIDE what happens to a codebase are not the agents that
-# can CHANGE it: root and the sub-orchestrators plan, delegate, supervise and
-# judge; workers in worktrees write; anything that lands on main goes through
-# `cel-fanout land`, which checks policy before it merges.
+# Coordinators (core, root, a cwd-derived orchestrator) read, plan and ask;
+# they never write to a repository. Builders are solo agents: one per product,
+# they write, open PRs and land them with `cel solo land`, which checks review
+# of the exact head and CI. Reviewers stand outside any workspace (`other`).
 #
-# The guard limits the CAPABILITY, so a bad prompt - a misread ticket, a
+# The guard limits the CAPABILITY, so a bad prompt - a misread request, a
 # confusing inbox message, an invented instruction - produces a refusal, not
-# a write. It also keeps orchestrator changes visible: anything changed in an
-# orchestrator's own checkout has no ticket, worker, ledger row or PR, so all
-# work goes through a delegated worker.
+# a write.
 #
 # Sourced by tools/hooks/orchestrator-guard.sh (claude PreToolUse) and by the
 # tests. Sources no other library, so the hook stays fast and cannot be taken
@@ -21,12 +19,11 @@ _CEL_GUARD=1
 # Which role a process is playing, from where it is standing. The SAME
 # derivation lib/inbox.sh uses for mail identity, duplicated on purpose: the
 # guard must not import inbox state to decide whether to block a command.
-#   ~/.herdr/worktrees/...        worker       (writes are its whole job)
 #   the core dir                  core         (coordinates; orchestrator-class,
-#                                 minus the product agent's factory verbs)
-#   <ws>/repos/<repo>[/...]       orchestrator (reads, delegates, lands)
-#   <ws>/products/<p>[/...]       orchestrator (a product orchestrator: same
-#                                 powers, same refusals, different standpoint)
+#                                 minus the product agent's verbs)
+#   <ws>/repos/<repo>[/...]       orchestrator (reads; the solo agent builds)
+#   <ws>/products/<p>[/...]       orchestrator (same powers, same refusals,
+#                                 different standpoint)
 #   <ws>[/...not under repos]     root
 #   anywhere else                 other        (not the plane's concern)
 #
@@ -36,7 +33,7 @@ _CEL_GUARD=1
 # exactly where an orchestrator stands (the product's directory), so only the
 # launch can say which of the two it is.
 guard_role_of() { # <cwd>
-  local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
+  local p="$1"
   # A console launched before its retirement carries CEL_ROLE=console and
   # stands in the old console dir; it is guarded as core, never as `other`.
   case "${CEL_ROLE:-}" in core|console) printf core; return 0;; esac
@@ -44,7 +41,6 @@ guard_role_of() { # <cwd>
   local core="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
   local cons="${XDG_DATA_HOME:-$HOME/.local/share}/cel/console"
   case "$p" in "$core"|"$core"/*|"$cons"|"$cons"/*) printf core; return 0;; esac
-  case "$p" in "$wt"/*) printf worker; return 0;; esac
   local d="$p"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
     if [ -f "$d/workspace.yaml" ]; then
@@ -62,10 +58,10 @@ guard_role_of() { # <cwd>
 # allow | deny <reason>.
 #
 # The deny list is EXPLICIT VERBS paired with the thing they mutate, not a
-# heuristic about "dangerous-looking" commands. The cost of a false deny is an
-# orchestrator that has to delegate a typo fix; the cost of a false allow is
-# an unreviewed write. When in doubt the list errs towards deny, and the
-# refusal always says what to do instead.
+# heuristic about "dangerous-looking" commands. The cost of a false deny is a
+# coordinator that has to hand a typo fix to the solo agent; the cost of a
+# false allow is an unreviewed write. When in doubt the list errs towards deny,
+# and the refusal always says what to do instead.
 
 # An orchestrator owns the STATE of its own checkout, never its authorship:
 # nobody else stands over that checkout, so keeping `main` current in it (and
@@ -75,7 +71,7 @@ guard_role_of() { # <cwd>
 # The line: exactly one ref, no flag that creates (-b/-B/-c/-C/--orphan/
 # --track/--detach), no `--` or path (that discards working-tree state), and
 # nothing that reaches into ANOTHER checkout (-C, --git-dir, --work-tree, or
-# a worker's worktree - that one is the worker's).
+# a herdr worktree).
 _guard_orch_owns_checkout() { # <command> -> 0 = allow
   local c="$1"
   c="${c#"${c%%[![:space:]]*}"}"
@@ -133,16 +129,16 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # THE COMMANDS A SHELL LINE WOULD RUN, one per line, each reduced to the verb
 # that would execute. A substring test on the raw text is evaded by spacing,
 # quotes, global options before the verb or a chain (`cd x && ...`), and
-# refuses `grep "cel-fanout land"`. So the line is split where a new command
+# refuses `grep "cel solo land"`. So the line is split where a new command
 # starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
 # whitespace is collapsed, and from the front of each piece go: env
 # assignments, wrappers (bash/sh -c, env, command, exec, nohup, time, xargs,
-# timeout N), a path in front of cel/cel-fanout/gh/herdr/tea/curl, and the
+# timeout N), a path in front of cel/gh/herdr/tea/curl, and the
 # global options between a tool and its verb (`-C`/`--workspace` for cel,
 # `-R`/`--repo` for gh). The rules then match the START of a piece only.
 #
 # A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
-# command (`c=cel-fanout; $c land`) or a script file still runs. What this
+# command (`c=cel; $c solo land`) or a script file still runs. What this
 # stops is the plausible mistake, spelled any of the ways an agent writes it.
 _guard_segments() { # <command> -> one normalised command per line
   printf '%s' "$1" | tr '\t\r\n' '   ' \
@@ -152,9 +148,9 @@ _guard_segments() { # <command> -> one normalised command per line
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
         s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
         s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
-    | sed -E 's#^[^ ]*/(cel-fanout|cel|gh|herdr|tea|curl)( |$)#\1\2#' \
+    | sed -E 's#^[^ ]*/(cel|gh|herdr|tea|curl)( |$)#\1\2#' \
     | sed -E ':b
-        s#^(cel-fanout|cel) (-C [^ ]+|--workspace[= ][^ ]+)( |$)#\1\3#; tb
+        s#^cel (-C [^ ]+|--workspace[= ][^ ]+)( |$)#cel\2#; tb
         s#^gh (-R [^ ]+|--repo[= ][^ ]+)( |$)#gh\2#; tb'
 }
 
@@ -266,50 +262,17 @@ _guard_names_forge_token() { # <command-or-path>
 }
 _GUARD_TOKEN_DENY='deny the forge API token (~/.config/cel/forge) is read by `cel forge` and the land doors only - no agent reads, copies or writes it'
 
-# A WORKER MAKES ONE DELIVERABLE AND REPORTS. A worker that lands its own PR
-# holds the ledger lock for the whole gate and merges without its
-# orchestrator. This is a SHORT deny list, not an allowlist: a worker's job is
-# to write code and its dangerous verbs are the few that drive the factory.
-_guard_worker() { # <command> -> allow | deny <reason>
-  if _guard_starts "$1" 'cel-fanout (land|release|delegate|scout|spike|collect|reconcile)' 'cel solo (land|review)'; then
-    printf 'deny a worker ships a PR and reports; the owning orchestrator lands, releases and delegates (cel-fanout land is not yours)'
-    return 0
-  fi
-  if _guard_starts "$1" 'cel run (orchestrator|root|console|core|worker|reviewer|solo)' 'cel (core|console)'; then
-    printf 'deny a worker does not start agents'
-    return 0
-  fi
-  if _guard_starts "$1" 'cel here'; then
-    printf 'deny cel here is the owner'"'"'s in-pane commands for core and product agents, not a worker'"'"'s'
-    return 0
-  fi
-  # A worker opens and updates PRs with gh or `cel forge`, as before; a
-  # forge changed by hand (curl at its API, tea) skips every check those make.
-  if _guard_forge_raw_write "$1"; then
-    printf 'deny a worker changes a forge through gh or `cel forge` (pr create), never curl at its API or tea'
-    return 0
-  fi
-  printf allow
-}
-
-# A SOLO AGENT IS THE BUILDER, so it gets the worker's freedom: it edits,
-# commits, pushes, opens PRs, makes its own git worktrees and runs its own
-# subagents. What it does NOT get is the factory: fan-out verbs and starting
-# other Celestial agents or panes are refused (a reviewer for its own PR
-# excepted), because a solo product has no orchestrator to collect, review or
-# land what a delegated worker would produce. A manual merge is refused too:
-# the solo merge door is `cel solo land`, which checks review of the exact
-# head and CI the way `cel-fanout land` does.
+# A SOLO AGENT IS THE BUILDER: it edits, commits, pushes, opens PRs, makes its
+# own git worktrees and runs its own subagents. What it does NOT do is start
+# other Celestial agents or panes (a reviewer for its own PR excepted), review
+# its own PR, or merge by hand: the solo merge door is `cel solo land`, which
+# checks review of the exact head and CI.
 _guard_solo() { # <command> -> allow | deny <reason>
-  if _guard_starts "$1" 'cel-fanout (delegate|scout|spike|collect|release|reconcile|replace|recover|handback|land)'; then
-    printf 'deny this product is in solo mode: you build it yourself (your own worktrees and subagents are fine); Celestial fan-out is off - `cel mode <product> fleet` switches back to workers'
-    return 0
-  fi
-  if _guard_starts "$1" 'cel run (orchestrator|root|console|core|worker|solo)' 'cel (core|console)' 'herdr agent start' 'herdr worktree (create|open)'; then
+  if _guard_starts "$1" 'cel run (orchestrator|root|console|core|solo)' 'cel (core|console)' 'herdr agent start' 'herdr worktree (create|open)'; then
     printf 'deny a solo agent starts no other Celestial agents or panes (only `cel run reviewer` for its own PR)'
     return 0
   fi
-  if _guard_starts "$1" 'cel solo review' 'cel-fanout review'; then
+  if _guard_starts "$1" 'cel solo review'; then
     printf 'deny a solo agent does not review its own PR - its reviewer records the verdict'
     return 0
   fi
@@ -326,27 +289,20 @@ _guard_solo() { # <command> -> allow | deny <reason>
   printf allow
 }
 
-# CORE COORDINATES; IT DOES NOT RUN A FACTORY. It is orchestrator-class (every
+# CORE COORDINATES; IT DOES NOT BUILD. It is orchestrator-class (every
 # repository and GitHub write an orchestrator is refused, it is refused too),
 # and on top of that the verbs that belong to a PRODUCT's agent are refused
-# here, before guard_classify's blanket allow of `cel`/`cel-fanout`: every
-# cel-fanout verb but the read-only ones (an ALLOWLIST, so a verb added later
-# is refused until someone decides core may use it), landing and review
-# verdicts, starting workers or reviewers, and the box's own configuration
-# and release (`cel mode` is core's one config write, and it is a `cel`
-# command, so it passes).
+# here, before guard_classify's blanket allow of `cel`: landing and review
+# verdicts, starting reviewers, and the box's own configuration and release
+# (`cel mode` is core's one config write, and it is a `cel` command, so it
+# passes).
 _guard_core() { # <command> -> deny <reason>, or nothing
-  local seg fanout_write=0
-  while IFS= read -r seg || [ -n "$seg" ]; do
-    [[ "$seg" =~ ^cel-fanout( |$) ]] || continue
-    [[ "$seg" =~ ^cel-fanout\ (status|why|wait)( |$) ]] || { fanout_write=1; break; }
-  done < <(_guard_segments "$1")
-  if [ "$fanout_write" -eq 1 ] || _guard_starts "$1" 'cel solo (land|review)' 'cel spike'; then
-    printf 'deny core coordinates; the product'"'"'s own agent delegates, reviews and lands (core may run cel-fanout status|why|wait) - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
+  if _guard_starts "$1" 'cel solo (land|review)' 'cel spike'; then
+    printf 'deny core coordinates; the product'"'"'s own agent builds, reviews and lands - ask it: cel inbox send <product>-orch "<what you want>" --workspace <w>'
     return 0
   fi
-  if _guard_starts "$1" 'cel run (worker|reviewer|root)' 'herdr agent start' 'herdr worktree (create|open|remove)'; then
-    printf 'deny core starts product agents only (cel run orchestrator --product <p> --workspace <w>, add --restart to relaunch one); workers and reviewers are the product agent'"'"'s'
+  if _guard_starts "$1" 'cel run (reviewer|root)' 'herdr agent start' 'herdr worktree (create|open|remove)'; then
+    printf 'deny core starts product agents only (cel run orchestrator --product <p> --workspace <w>, add --restart to relaunch one); reviewers are the product agent'"'"'s'
     return 0
   fi
   if _guard_starts "$1" 'cel (learn|release|promote|update|setup)'; then
@@ -363,9 +319,7 @@ guard_classify() { # <role> <command>
     local cd; cd="$(_guard_core "$cmd")"
     [ -z "$cd" ] || { printf '%s' "$cd"; return 0; }
   fi
-  # `other` is not the plane's concern; a worker has exactly the refusals above
-  # and is otherwise unrestricted, writing code being its whole job.
-  case "$role" in worker) _guard_worker "$cmd"; return 0;; esac
+  # `other` is not the plane's concern.
   case "$role" in solo) _guard_solo "$cmd"; return 0;; esac
   case "$role" in other) printf allow; return 0;; esac
 
@@ -373,18 +327,17 @@ guard_classify() { # <role> <command>
   # sanctioned paths below, so `cel ...; curl -XPOST ...` is not waved through
   # on the strength of its first half.
   if _guard_forge_raw_write "$cmd"; then
-    printf 'deny orchestrators do not change forge state directly - merges go through `cel-fanout land <id>` / `cel solo land`; workers open and update PRs'
+    printf 'deny orchestrators do not change forge state directly - the product'"'"'s solo agent opens PRs and lands them (cel solo land)'
     return 0
   fi
   # The sanctioned write paths. These are the mechanism; refusing them would
-  # refuse the orchestrator's actual job. Opening a PR is not among them: a
-  # worker (or a solo agent) opens PRs, an orchestrator reads them.
+  # refuse the orchestrator's actual job. Opening a PR is not among them: the
+  # solo agent opens PRs, an orchestrator reads them.
   if _guard_starts "$cmd" 'cel forge pr create'; then
-    printf 'deny workers open pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
+    printf 'deny the product'"'"'s solo agent opens pull requests; an orchestrator reads them (cel forge pr view|checks|reviews|list)'
     return 0
   fi
   case "$cmd" in
-    cel-fanout\ *|*\ cel-fanout\ *|*/cel-fanout\ *) printf allow; return 0;;
     cel-linear\ *|*\ cel-linear\ *|*/cel-linear\ *) printf allow; return 0;;
     cel\ *|*\ cel\ *|*/bin/cel\ *)                  printf allow; return 0;;
     *gh\ pr\ comment*|*gh\ pr\ review*|*gh\ issue\ comment*|*gh\ pr\ checks*) printf allow; return 0;;
@@ -392,18 +345,18 @@ guard_classify() { # <role> <command>
 
   # The orchestrator's own checkout state: see _guard_orch_owns_checkout above.
   # Root is untouched - its rules below already allow git in its config repo
-  # and deny anything reaching into repos/ or a worker's worktree.
+  # and deny anything reaching into repos/ or a herdr worktree.
   if [ "$role" = orchestrator ] && _guard_orch_owns_checkout "$cmd"; then
     printf allow; return 0
   fi
 
   # Repository mutation. An ORCHESTRATOR's cwd is a product checkout, so any
   # git write from it is a product write - denied, in its own checkout or a
-  # worker's worktree alike. ROOT's cwd is the workspace directory, which is
+  # herdr worktree alike. ROOT's cwd is the workspace directory, which is
   # itself a small git repo of config (workspace.yaml, layouts, notes) that
   # root and the owner legitimately commit to; so for root a git write is
   # denied only when the command reaches INTO a product checkout (repos/) or a
-  # worker's worktree.
+  # herdr worktree.
   # `git -C <dir> commit`, `git --git-dir=x push`, `git -c k=v merge`: the verb
   # is no longer adjacent to `git`, so those options are stripped before
   # matching. The ORIGINAL command is still what the root/product check below
@@ -424,17 +377,16 @@ guard_classify() { # <role> <command>
       case "$cmd" in *repos/*|*.herdr/worktrees*|*\ -C\ *) product=1;; esac
     fi
     if [ "$product" -eq 1 ]; then
-      printf 'deny orchestrators do not write to repositories - delegate it (cel-fanout delegate) or land it (cel-fanout land)'
+      printf 'deny orchestrators do not write to repositories - the product'"'"'s solo agent builds it, opens the PR and lands it (cel solo land)'
       return 0
     fi
   fi
 
-  # Worktree and workspace lifecycle goes through cel-fanout (release refuses
-  # to destroy unlanded work; delegate refuses an occupied path). A direct
-  # `herdr worktree remove --force` skips every one of those checks.
+  # Worktrees belong to the solo agent that builds in them. A direct
+  # `herdr worktree remove --force` from a coordinator can destroy unlanded work.
   case "$cmd" in
     *herdr\ worktree\ remove*|*herdr\ worktree\ create*)
-      printf 'deny worktree lifecycle goes through cel-fanout (delegate / release), which refuses to destroy unlanded work; herdr worktree is not called directly from an orchestrator pane'
+      printf 'deny herdr worktree is not called from an orchestrator pane; the product'"'"'s solo agent manages its own worktrees'
       return 0;;
   esac
 
@@ -442,7 +394,7 @@ guard_classify() { # <role> <command>
   # path, and it is the one that checks whose PR it is.
   case "$cmd" in
     *gh\ pr\ merge*|*gh\ pr\ close*|*gh\ pr\ ready*|*gh\ pr\ edit*|*gh\ pr\ create*|*gh\ pr\ reopen*)
-      printf 'deny merges go through `cel-fanout land <id>`, which checks policy and ownership; workers open and update PRs'
+      printf 'deny the product'"'"'s solo agent opens and updates PRs and lands them (cel solo land), which checks review and CI'
       return 0;;
     *gh\ release\ *|*gh\ repo\ *|*gh\ api\ *-X\ *|*gh\ api\ *--method*|*gh\ api\ *\ -[fF]\ *|*gh\ api\ *--field*|*gh\ api\ *--raw-field*)
       printf 'deny orchestrators do not change GitHub state directly'
@@ -455,7 +407,7 @@ guard_classify() { # <role> <command>
     *sed\ -i*repos/*|*perl\ -pi*repos/*|*\>\ *repos/*|*\>\>\ *repos/*|*tee\ *repos/*|\
     *rm\ *repos/*|*mv\ *repos/*|*cp\ *repos/*|*touch\ *repos/*|*mkdir\ *repos/*|*chmod\ *repos/*|\
     *truncate\ *repos/*|*install\ *repos/*|*rsync\ *repos/*|*ln\ *repos/*)
-      printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'
+      printf 'deny orchestrators do not edit files under repos/ - the product'"'"'s solo agent does'
       return 0;;
   esac
 
@@ -478,9 +430,9 @@ guard_classify_path() { # <role> <file_path>
       *) printf 'deny core writes only its own notes (%s) - a product agent changes everything else; send it the request' "$core"; return 0;;
     esac
   fi
-  case "$role" in worker|solo|other) printf allow; return 0;; esac
+  case "$role" in solo|other) printf allow; return 0;; esac
   case "$path" in
-    */repos/*) printf 'deny orchestrators do not edit files under repos/ - a worker in a worktree does'; return 0;;
+    */repos/*) printf 'deny orchestrators do not edit files under repos/ - the product'"'"'s solo agent does'; return 0;;
   esac
   printf allow
 }

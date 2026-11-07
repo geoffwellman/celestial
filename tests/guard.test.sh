@@ -3,7 +3,7 @@ source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/guard.sh"
 HOOK="$CEL_ROOT/tools/hooks/orchestrator-guard.sh"
 
-# Read-only orchestrators. The agents that decide are not the agents that can
+# Read-only coordinators. The agents that decide are not the agents that can
 # change; a bad prompt produces a refusal, not an incident.
 
 _gws() { # a workspace dir with one repo, returned in $T
@@ -12,8 +12,13 @@ _gws() { # a workspace dir with one repo, returned in $T
 }
 
 # --- who am I --------------------------------------------------------------
-test_role_worker_from_worktree_path() {
-  assert_eq "$(CEL_WORKTREES=/tmp/wt guard_role_of /tmp/wt/repo/WG-1-x)" worker
+# A herdr worktree is no Celestial agent's home: it falls through to the
+# workspace walk like any other path.
+test_role_of_a_herdr_worktree_path_is_not_special() {
+  assert_eq "$(CEL_WORKTREES=/tmp/wt guard_role_of /tmp/wt/repo/WG-1-x)" other
+  _gws; mkdir -p "$T/wt/repo"
+  assert_eq "$(CEL_WORKTREES="$T/wt" guard_role_of "$T/wt/repo")" root
+  rm -rf "$T"
 }
 test_role_orchestrator_from_repo_checkout() {
   _gws; assert_eq "$(guard_role_of "$T/repos/widget")" orchestrator
@@ -37,12 +42,9 @@ test_orchestrator_may_read() {
   assert_eq "$(guard_classify orchestrator 'git fetch origin && git pull --ff-only')" allow
 }
 test_orchestrator_may_use_the_mechanism() {
-  assert_eq "$(guard_classify orchestrator 'cel-fanout delegate widget WG-1-x spec.md')" allow
-  assert_eq "$(guard_classify orchestrator 'cel-fanout land WG-1-x')" allow
-  assert_eq "$(guard_classify orchestrator 'cel-fanout release WG-1-x --discard')" allow
   assert_eq "$(guard_classify orchestrator 'cel-linear state WG-1 "In Progress"')" allow
   assert_eq "$(guard_classify orchestrator 'cel inbox send root "status"')" allow
-  assert_eq "$(guard_classify orchestrator 'cd /x && cel-fanout status')" allow
+  assert_eq "$(guard_classify orchestrator 'cd /x && cel fleet')" allow
 }
 test_orchestrator_may_comment_and_review() {
   assert_eq "$(guard_classify orchestrator 'gh pr comment 12 --body "looks right"')" allow
@@ -80,14 +82,9 @@ test_orchestrator_may_not_author_via_checkout() {
     assert_contains "$(guard_classify orchestrator "$c")" deny
   done
 }
-# The same table from the other two standpoints is untouched: a worker writes,
-# and root's own config repo is not a product checkout.
-test_checkout_table_unchanged_for_root_and_worker() {
-  local c
-  for c in 'git checkout main' 'git checkout -b new' 'git branch -d W-49-slug' \
-           'gh pr edit 12 --title x' 'gh pr merge 12'; do
-    assert_eq "$(guard_classify worker "$c")" allow
-  done
+# The same table from root's standpoint: its own config repo is not a
+# product checkout.
+test_checkout_table_for_root() {
   assert_eq "$(guard_classify root 'git checkout main')" allow
   assert_eq "$(guard_classify root 'git checkout -b new')" allow
   assert_contains "$(guard_classify root 'git -C repos/widget checkout main')" deny
@@ -118,14 +115,12 @@ test_orchestrator_may_not_evade_with_git_options() {
     assert_contains "$(guard_classify orchestrator "$c")" deny
   done
 }
-# Worktree lifecycle has a checked path (cel-fanout release/delegate); the
-# raw herdr command skips the checks. Seen from root on the day: --force on a
-# worktree the fail-closed release had already handled.
+# A coordinator does not drive herdr worktrees: the solo agent manages its own.
 test_orchestrator_may_not_drive_herdr_worktrees_directly() {
   assert_contains "$(guard_classify orchestrator 'herdr worktree remove --workspace w9Z --force')" deny
   assert_contains "$(guard_classify root 'sleep 5; herdr worktree remove --workspace w9Z --force 2>&1 | jq .')" deny
   assert_contains "$(guard_classify orchestrator 'herdr worktree create --workspace w1 --branch x')" deny
-  assert_eq "$(guard_classify orchestrator 'cel-fanout release WG-1 --discard')" allow
+  assert_contains "$(guard_classify orchestrator 'herdr worktree remove --workspace w9Z')" 'solo agent'
   assert_eq "$(guard_classify orchestrator 'herdr workspace list')" allow
   assert_eq "$(guard_classify orchestrator 'herdr agent list')" allow
 }
@@ -165,12 +160,6 @@ test_hook_opt_out_per_pane() {
   CEL_GUARD=0 _hook "$T/repos/widget" Bash '{"command":"git commit -m x"}' || { echo "CEL_GUARD=0 ignored"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-test_workers_are_unrestricted() {
-  assert_eq "$(guard_classify worker 'git commit -m x')" allow
-  assert_eq "$(guard_classify worker 'git push -u origin WG-1')" allow
-  assert_eq "$(guard_classify worker 'gh pr create --fill')" allow
-  assert_eq "$(guard_classify_path worker /any/repos/x.ts)" allow
-}
 
 # --- solo: the builder, without the factory ----------------------------------
 # A solo agent stands where an orchestrator stands, so only CEL_ROLE can tell
@@ -190,12 +179,10 @@ test_solo_may_build_and_ship() {
   assert_eq "$(guard_classify solo 'cel mode bundle fleet')" allow
   assert_eq "$(guard_classify_path solo /ws/repos/widget/src/x.ts)" allow
 }
-test_solo_may_not_fan_out_or_start_agents() {
+test_solo_may_not_start_agents() {
   local c
-  for c in 'cel-fanout delegate widget WG-1-x spec.md' 'bash /x/bin/cel-fanout scout widget b.md' \
-           'cel-fanout land WG-1-x' 'cel-fanout release WG-1-x' \
-           'cel run worker --repo widget --branch WG-1-x' 'cel run orchestrator --product bundle' \
-           'herdr agent start foo --kind pi'; do
+  for c in 'cel run orchestrator --product bundle' 'cel run solo --product bundle --lane x' \
+           'cel run core' 'cel core' 'herdr agent start foo --kind pi' 'herdr worktree create --branch x'; do
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
   done
 }
@@ -209,19 +196,17 @@ test_solo_may_not_merge_by_hand() {
   done
 }
 # `cel forge` is a door on both forges: its reads are everyone's, opening a
-# PR is the builder's (worker, solo) and never an orchestrator's, and the
+# PR is the builder's (solo) and never an orchestrator's, and the
 # same writes by hand - tea, or curl at a forge's API - stay refused.
 test_cel_forge_reads_are_open_and_pr_create_is_the_builders() {
   local role c
-  for role in orchestrator root core solo worker; do
+  for role in orchestrator root core solo; do
     for c in 'cel forge pr view gizmo#31' 'cel forge pr checks gizmo#31 --json' 'cel forge pr reviews gizmo#31' \
              'cel forge pr list gizmo open' 'cel forge whoami gizmo' 'cel forge repo gizmo'; do
       assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused: $c"; return 1; }
     done
   done
-  for role in solo worker; do
-    assert_eq "$(guard_classify "$role" 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md')" allow || return 1
-  done
+  assert_eq "$(guard_classify solo 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md')" allow || return 1
   for role in orchestrator root core; do
     for c in 'cel forge pr create gizmo --head WG-1-x --base main --title t --body-file b.md' \
              'cel --workspace sandbox forge pr create gizmo --head a --base main --title t --body-file b'; do
@@ -246,8 +231,8 @@ test_cel_forge_reads_are_open_and_pr_create_is_the_builders() {
 # case) or options from a file (-K/--config); `tea api` with anything but a
 # plain GET; tea's write verbs with its global flags before them. Every role
 # that can run the guard: orchestrators, root and core change no forge state,
-# a worker uses gh / `cel forge` as before, and a solo agent changes its forge
-# only through `cel forge` and `cel solo land`.
+# and a solo agent changes its forge only through `cel forge` and
+# `cel solo land`.
 test_raw_forge_writes_are_refused_however_they_are_spelled() {
   local fj=http://forgejo.internal/api/v1/repos/o/r role c
   local -a writes=(
@@ -263,13 +248,13 @@ test_raw_forge_writes_are_refused_however_they_are_spelled() {
     'tea pulls --repo o/r merge 3' 'tea --login fj pr close 3' 'tea pr --repo o/r create --title x'
     'tea -l fj pulls -r o/r m 3' 'tea branches protect main' 'tea releases delete v1'
   )
-  for role in orchestrator root core worker solo; do
+  for role in orchestrator root core solo; do
     for c in "${writes[@]}"; do
       case "$(guard_classify "$role" "$c")" in deny*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
   # reads stay reads
-  for role in orchestrator worker solo; do
+  for role in orchestrator solo other; do
     for c in "curl -s $fj/pulls/3" "curl -sSfL $fj/pulls" "curl -o out.json $fj/pulls" "curl -X GET $fj/pulls/3" \
              "curl -sI $fj/pulls/3" 'tea api repos/o/r/pulls/3' 'tea api -X GET repos/o/r/pulls/3' 'tea pr list --repo o/r' 'tea pr 31'; do
       assert_eq "$(guard_classify "$role" "$c")" allow || { echo "$role refused a read: $c"; return 1; }
@@ -280,7 +265,7 @@ test_raw_forge_writes_are_refused_however_they_are_spelled() {
 # it, whichever role it plays and however it names the file.
 test_no_agent_reads_or_writes_the_forge_token() {
   local role c
-  for role in orchestrator root core worker solo other; do
+  for role in orchestrator root core solo other; do
     for c in 'cat ~/.config/cel/forge/forgejo.internal.token' 'less $HOME/.config/cel/forge/x.token' \
              'head -c5 ${XDG_CONFIG_HOME:-~/.config}/cel/forge/forgejo.internal.token' \
              'cp ~/.config/cel/forge/forgejo.internal.token /tmp/t' 'base64 /home/u/.config/cel/forge/*' \
@@ -294,47 +279,43 @@ test_no_agent_reads_or_writes_the_forge_token() {
   # the plane's own files are not the token
   assert_eq "$(guard_classify orchestrator 'cat lib/forge.sh tests/fixtures/forge/forgejo/pull.json')" allow
 }
-# ...and the hook enforces it where it runs: a claude worker or reviewer pane
-# (otherwise untouched) included, the native Read tool included.
+# ...and the hook enforces it where it runs: a reviewer pane outside any
+# workspace (otherwise untouched) included, the native Read tool included.
 test_hook_refuses_the_forge_token_to_every_pane() {
   _gws
   local tok='/home/u/.config/cel/forge/forgejo.internal.token' cwd
-  for cwd in "$T/repos/widget" "${CEL_WORKTREES:-$HOME/.herdr/worktrees}/repo/WG-1" /tmp; do
+  for cwd in "$T/repos/widget" /tmp; do
     _hook "$cwd" Bash "{\"command\":\"cat $tok\"}" && { echo "hook let $cwd cat the token"; rm -rf "$T"; return 1; }
     assert_contains "$HOOK_ERR" "forge API token" || { rm -rf "$T"; return 1; }
     _hook "$cwd" Read "{\"file_path\":\"$tok\"}" && { echo "hook let $cwd Read the token"; rm -rf "$T"; return 1; }
     _hook "$cwd" Read '{"file_path":"/tmp/notes.md"}' || { echo "hook blocked an ordinary Read in $cwd"; rm -rf "$T"; return 1; }
   done
-  _hook "${CEL_WORKTREES:-$HOME/.herdr/worktrees}/repo/WG-1" Bash '{"command":"git push"}' || { echo "hook blocked a worker push"; rm -rf "$T"; return 1; }
+  _hook /tmp Bash '{"command":"git push"}' || { echo "hook blocked a push outside any workspace"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 # The solo agent lands through `cel solo land` but never records its own
-# verdict; a worker does neither.
+# verdict.
 test_solo_lands_but_never_reviews_itself() {
   assert_eq "$(guard_classify solo 'cel solo land widget#7')" allow
   case "$(guard_classify solo 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
-  case "$(guard_classify worker 'cel solo land widget#7')" in deny*) ;; *) return 1;; esac
-  case "$(guard_classify worker 'cel solo review widget#7 approved --head x --by me')" in deny*) ;; *) return 1;; esac
 }
 # The spellings that slipped past a substring match - spacing, tabs, quotes,
 # options before the verb, chains, wrappers - are the SAME command.
 test_factory_verbs_are_refused_however_they_are_spelled() {
   local c
-  for c in 'cel-fanout  delegate x' "$(printf 'cel-fanout\tdelegate x')" '"cel-fanout" land x' \
-           'cel-fanout --workspace plane delegate x' 'cel -C /ws --workspace p run worker' \
-           'cel run "worker"' 'cd x && cel-fanout land y' 'bash -c "cel-fanout land y"' \
-           'FOO=1 timeout 30 /home/x/bin/cel-fanout delegate a b c' 'echo $(cel-fanout land y)'; do
-    case "$(guard_classify worker "$c")" in deny*) ;; *) echo "worker allowed: $c"; return 1;; esac
+  for c in 'cel  run core' "$(printf 'cel\trun core')" '"cel" run core' \
+           'cel --workspace plane solo review x' 'cel -C /ws --workspace p run orchestrator' \
+           'cel run "core"' 'cd x && cel solo review y' 'bash -c "cel solo review y"' \
+           'FOO=1 timeout 30 /home/x/bin/cel run core' 'echo $(cel solo review y)'; do
     case "$(guard_classify solo "$c")" in deny*) ;; *) echo "solo allowed: $c"; return 1;; esac
   done
 }
 # ...and text that merely MENTIONS a verb is not running it.
 test_factory_verbs_in_arguments_are_not_commands() {
   local c
-  for c in 'grep -n "cel-fanout land" lib/guard.sh' 'git commit -m "never cel-fanout land here"' \
+  for c in 'grep -n "cel solo review" lib/guard.sh' 'git commit -m "never cel solo review here"' \
            'rg "gh pr merge" docs'; do
     assert_eq "$(guard_classify solo "$c")" allow
-    assert_eq "$(guard_classify worker "$c")" allow
   done
 }
 test_hook_lets_a_solo_pane_commit() {
@@ -355,7 +336,7 @@ test_hook_blocks_an_orchestrator_commit_with_a_reason() {
   _gws
   _hook "$T/repos/widget" Bash '{"command":"git commit -m x"}' && { echo "hook allowed a commit"; rm -rf "$T"; return 1; }
   assert_contains "$HOOK_ERR" "celestial guard (orchestrator pane)"
-  assert_contains "$HOOK_ERR" "cel-fanout delegate"
+  assert_contains "$HOOK_ERR" "cel solo land"
   rm -rf "$T"
 }
 test_hook_blocks_an_orchestrator_edit_tool_under_repos() {
@@ -369,8 +350,8 @@ test_hook_allows_an_orchestrator_spec_write() {
   _hook "$T/repos/widget" Write "{\"file_path\":\"$T/.cel/spec.md\",\"content\":\"x\"}" || { echo "hook blocked a spec write: $HOOK_ERR"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-test_hook_lets_a_worker_through() {
-  _hook "${CEL_WORKTREES:-$HOME/.herdr/worktrees}/repo/WG-1" Bash '{"command":"git push"}' || { echo "hook blocked a worker: $HOOK_ERR"; return 1; }
+test_hook_lets_a_pane_outside_any_workspace_through() {
+  _hook /tmp Bash '{"command":"git push"}' || { echo "hook blocked a push outside any workspace: $HOOK_ERR"; return 1; }
 }
 test_hook_honours_the_one_off_override() {
   _gws
@@ -403,7 +384,7 @@ test_product_orchestrator_writes_its_own_dir_but_no_repo() {
   rm -rf "$T"
 }
 
-# --- core: orchestrator-class, minus the product agent's factory -------------
+# --- core: orchestrator-class, minus the product agent's verbs --------------
 test_role_core_from_its_dir_and_the_environment() {
   local C; C="$(mktemp -d)/core"; mkdir -p "$C/notes"
   assert_eq "$(CEL_ROLE='' CEL_CORE_DIR="$C" guard_role_of "$C/notes")" core
@@ -424,28 +405,21 @@ test_a_legacy_console_agent_is_guarded_as_core() {
 test_core_may_read_coordinate_and_switch_mode() {
   local c
   for c in 'cel fleet --json' 'cel inbox send games-orch "x" --workspace w' 'cel decide list' \
-           'cel-fanout status --workspace w' 'cel mode games solo --workspace w' \
+           'cel mode games solo --workspace w' \
            'cel run orchestrator --product games --workspace w --restart' \
            'gh pr view 3' 'gh pr diff 3' 'git -C repos/x log --oneline' 'herdr agent focus w1:p1'; do
     assert_eq "$(guard_classify core "$c")" allow
   done
 }
-test_core_does_not_build_delegate_or_land() {
+test_core_does_not_build_review_or_land() {
   local c
-  for c in 'cel-fanout delegate x' 'cel-fanout land CEL-1' 'cel-fanout review CEL-1 approved' \
-           'cel solo land celestial#3' 'cel run worker --repo x --branch y' 'cel run reviewer --repo x --pr 1' \
-           'gh pr merge 3' 'git -C repos/x commit -m y' 'git push' 'cel learn add x' 'cel release celestial 1.0.0' \
-           'herdr worktree create --cwd x' 'cel-fanout request-review CEL-1 --head abc' 'cel-fanout try CEL-1' \
-           'cel-fanout some-future-verb x' 'cd /tmp && cel-fanout --workspace w land CEL-1'; do
+  for c in 'cel solo land celestial#3' 'cel solo review celestial#3 approved' 'cel run reviewer --repo x --pr 1' \
+           'cel run root' 'cel spike x' 'gh pr merge 3' 'git -C repos/x commit -m y' 'git push' 'cel learn add x' \
+           'cel release celestial 1.0.0' 'herdr worktree create --cwd x' 'herdr agent start foo --kind pi' \
+           'cd /tmp && cel --workspace w solo land celestial#3'; do
     assert_contains "$(guard_classify core "$c")" deny
   done
-}
-test_core_may_read_the_ledger() {
-  local c
-  for c in 'cel-fanout status --workspace w' 'cel-fanout why CEL-1' 'cel-fanout wait CEL-1' \
-           'cel-fanout --workspace w status'; do
-    assert_eq "$(guard_classify core "$c")" allow
-  done
+  assert_contains "$(guard_classify core 'cel solo land celestial#3')" 'builds, reviews and lands'
 }
 test_core_writes_only_its_own_directory() {
   local C; C="$(mktemp -d)/core"
@@ -453,57 +427,9 @@ test_core_writes_only_its_own_directory() {
   assert_contains "$(CEL_CORE_DIR="$C" guard_classify_path core "/home/x/ws/p/.cel/specs/a.md")" deny
   rm -rf "${C%/core}"
 }
-test_workers_and_solo_agents_do_not_start_core() {
-  assert_contains "$(guard_classify worker 'cel core')" deny
+test_solo_agents_do_not_start_core() {
   assert_contains "$(guard_classify solo 'cel run core')" deny
-}
-test_workers_do_not_run_the_owners_in_pane_commands() {
-  assert_contains "$(guard_classify worker 'cel here --restart-core-when-idle')" deny
-  assert_contains "$(guard_classify worker 'CEL_ROLE=core cel here mode x solo')" deny
-}
-
-# --- the bottom tier reports; it does not run the factory --------------------
-# A worker whose PR had just been approved ran `cel-fanout land <its own id>`
-# from its own worktree: the ledger lock was held for three minutes while the
-# gate ran, the orchestrator's `status` hung on it, and only branch protection
-# stopped the merge. The role file already said "never merge"; nothing enforced
-# it, because every command was allowed for the worker role before any check.
-test_worker_may_not_land_release_or_delegate() {
-  local v
-  for v in land release delegate scout spike collect reconcile; do
-    assert_contains "$(guard_classify worker "cel-fanout $v ABC-1")" deny
-  done
-  assert_contains "$(guard_classify worker 'cel-fanout land ABC-1')" 'not yours'
-  assert_contains "$(guard_classify worker '/home/x/.local/share/cel/core/skills/fanout/bin/cel-fanout land ABC-1')" deny
-  assert_contains "$(guard_classify worker 'bash /home/x/core/skills/fanout/bin/cel-fanout release ABC-1')" deny
-  assert_contains "$(guard_classify worker 'cel-fanout land ABC-1 --workspace alpha')" deny
-  assert_contains "$(guard_classify worker 'cel-fanout -C /tmp/ws land ABC-1')" deny
-}
-test_worker_may_not_start_agents() {
-  local r
-  for r in orchestrator root console worker reviewer; do
-    assert_contains "$(guard_classify worker "cel run $r --repo widget")" deny
-  done
-  assert_contains "$(guard_classify worker 'cel console')" 'does not start agents'
   assert_contains "$(guard_classify solo 'cel console')" deny
-  assert_contains "$(guard_classify worker 'cel run worker --repo widget')" 'does not start agents'
-}
-test_worker_keeps_the_rest_of_its_job() {
-  assert_eq "$(guard_classify worker 'cel-fanout status')" allow
-  assert_eq "$(guard_classify worker 'cel-fanout try ABC-1')" allow
-  assert_eq "$(guard_classify worker 'cel-fanout why ABC-1')" allow
-  assert_eq "$(guard_classify worker 'cel-fanout wait')" allow
-  assert_eq "$(guard_classify worker 'cel inbox send alpha-orch "done"')" allow
-  assert_eq "$(guard_classify worker 'cel-verify ABC-1')" allow
-  assert_eq "$(guard_classify worker 'gh pr create --fill')" allow
-  assert_eq "$(guard_classify worker 'gh pr edit 3 --title x')" allow
-  assert_eq "$(guard_classify worker 'gh pr ready 3')" allow
-}
-test_the_deny_is_the_workers_alone() {
-  assert_eq "$(guard_classify orchestrator 'cel-fanout land ABC-1')" allow
-  assert_eq "$(guard_classify root 'cel-fanout land ABC-1')" allow
-  assert_eq "$(guard_classify other 'cel-fanout land ABC-1')" allow
-  assert_eq "$(guard_classify other 'cel run worker --repo widget')" allow
 }
 
 # THE CLASSIFIER'S OWN FAILURE IS NOT `allow`. A mode it does not know or a

@@ -12,9 +12,9 @@ setup_sandbox() {
 test_core_skills_are_linked_into_every_skills_dir() {
   setup_sandbox
   link_core_skills >/dev/null
-  [ -L "$HOME/.claude/skills/fanout" ] || return 1
-  [ -L "$HOME/.omp/skills/fanout" ]    || return 1
-  [ -L "$HOME/.codex/skills/fanout" ]  || return 1
+  [ -L "$HOME/.claude/skills/linear" ] || return 1
+  [ -L "$HOME/.omp/skills/linear" ]    || return 1
+  [ -L "$HOME/.codex/skills/linear" ]  || return 1
 }
 
 test_links_are_symlinks_not_copies() {
@@ -27,7 +27,19 @@ test_linking_twice_is_idempotent() {
   setup_sandbox
   link_core_skills >/dev/null
   link_core_skills >/dev/null
-  assert_eq "$(find "$HOME/.claude/skills" -maxdepth 1 -name fanout | wc -l)" "1"
+  assert_eq "$(find "$HOME/.claude/skills" -maxdepth 1 -name linear | wc -l)" "1"
+}
+
+# A retired core skill (fanout, pr-loop) leaves a dangling link behind; the
+# next link pass removes it, and leaves a user's own dangling link alone.
+test_links_to_retired_core_skills_are_removed() {
+  setup_sandbox
+  mkdir -p "$HOME/.claude/skills"
+  ln -s "$CEL_ROOT/core/skills/fanout" "$HOME/.claude/skills/fanout"
+  ln -s "$SANDBOX/gone" "$HOME/.claude/skills/mine"
+  link_core_skills >/dev/null 2>&1
+  [ ! -L "$HOME/.claude/skills/fanout" ] || { echo "retired link kept"; return 1; }
+  [ -L "$HOME/.claude/skills/mine" ] || { echo "removed a link that is not ours"; return 1; }
 }
 
 # Role bodies reference panes, worktrees and .agent/result.md. A Claude agents
@@ -36,16 +48,16 @@ test_linking_twice_is_idempotent() {
 test_roles_are_never_linked_into_an_agents_dir() {
   setup_sandbox
   link_core_agents >/dev/null
-  [ ! -e "$HOME/.claude/agents/worker.md" ] || return 1
+  [ ! -e "$HOME/.claude/agents/solo.md" ] || return 1
   [ ! -e "$HOME/.claude/agents/root-orchestrator.md" ] || return 1
 }
 
 test_stale_role_links_are_removed() {
   setup_sandbox
   mkdir -p "$HOME/.claude/agents"
-  ln -s "$CEL_ROOT/core/roles/worker.md" "$HOME/.claude/agents/worker.md"
+  ln -s "$CEL_ROOT/core/roles/solo.md" "$HOME/.claude/agents/solo.md"
   unlink_stale_roles >/dev/null
-  [ ! -e "$HOME/.claude/agents/worker.md" ] || return 1
+  [ ! -e "$HOME/.claude/agents/solo.md" ] || return 1
 }
 
 test_unrelated_files_in_an_agents_dir_survive() {
@@ -59,5 +71,5 @@ test_unrelated_files_in_an_agents_dir_survive() {
 test_an_agent_without_a_skills_dir_is_skipped_not_linked_into_home() {
   setup_sandbox
   link_core_skills >/dev/null
-  [ ! -e "$HOME/fanout" ] || return 1
+  [ ! -e "$HOME/linear" ] || return 1
 }

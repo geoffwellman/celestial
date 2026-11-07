@@ -58,13 +58,11 @@ test_plain_run_over_absent_orchestrator_resumes_last_recorded_session() {
   orch_stub_teardown
 }
 
-test_workers_and_reviewers_never_resume() {
+test_reviewers_never_resume() {
   orch_stub_setup omp
   printf '{"result":{"agents":[]}}\n' > "$T/roster.json"
   _run_sessions_record "$T/ws/repos/widget" "$T/old.jsonl"
   local out
-  out="$( (cd "$T/ws" && cmd_run worker --repo widget --branch WG-1-x --dry-run) 2>&1)"
-  ! printf '%s' "$out" | grep -q -- "--resume" || { echo "worker resumed"; orch_stub_teardown; return 1; }
   export CEL_CONFIG_FILE="$T/gateway-config"
   printf 'gateway:\n  port: 8317\n' > "$CEL_CONFIG_FILE"
   export CEL_GATEWAY_STATE="$T/gateway"
@@ -130,8 +128,8 @@ test_restart_relabels_the_pane() {
   orch_stub_setup omp
   orch_stub_roster widget-orch "$T/ws/repos/widget" idle "$T/s.jsonl"
   _restart >/dev/null || true
-  assert_contains "$(grep '^pane rename' "$HLOG")" "pane rename w1:p1 widget orchestrator"
-  assert_contains "$(grep '^tab rename' "$HLOG")" "tab rename w1:t1 widget orchestrator"
+  assert_contains "$(grep '^pane rename' "$HLOG")" "pane rename w1:p1 widget solo"
+  assert_contains "$(grep '^tab rename' "$HLOG")" "tab rename w1:t1 widget solo"
   orch_stub_teardown
 }
 

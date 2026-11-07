@@ -135,9 +135,8 @@ test_a_filtered_run_still_takes_the_lock() {
   rm -rf "$T"
 }
 
-# RE-ENTRANT BY INHERITANCE, or the suite deadlocks on itself. CI found this
-# the honest way: tests/fanout.test.sh runs `cel-fanout collect`, which runs
-# cel-verify, which runs a gate - all of it INSIDE a suite that is already
+# RE-ENTRANT BY INHERITANCE, or the suite deadlocks on itself. A test that
+# runs cel-verify runs a gate - all of it INSIDE a suite that is already
 # holding the lock. Inner and outer compute the same path (no XDG_RUNTIME_DIR
 # on the runner), so the suite waited twenty minutes for itself and the job was
 # cancelled. Anything started under a held lock is already inside it: the

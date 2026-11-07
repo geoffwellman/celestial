@@ -1,14 +1,13 @@
 # shellcheck shell=bash
-# THE BOX SURVIVES MEMORY PRESSURE: nothing may start a worker or a heavy
-# build the box cannot afford, and an OOM-killed user manager comes back.
+# THE BOX SURVIVES MEMORY PRESSURE: nothing heavy starts when the box cannot
+# afford it, and an OOM-killed user manager comes back.
 #
 # Four guards live here, all small and all overridable by env for the suite:
-#   - admission: no new worker while MemAvailable is under a floor, or under
-#     twice it while the kernel shows real memory stalls (PSI), or - only where
-#     PSI cannot be read - with swap mostly used (boxguard_admit,
-#     cel-fanout delegate/scout);
-#   - the warning line: below it the steward warns orchestrators and gc stops
-#     idle agents sooner (boxguard_pressure);
+#   - the admission floor: MemAvailable under a floor, or under twice it while
+#     the kernel shows real memory stalls (PSI), or - only where PSI cannot be
+#     read - with swap mostly used (boxguard_admit);
+#   - the warning line: below it the steward warns the product agents and gc
+#     stops idle agents sooner (boxguard_pressure);
 #   - one heavy build at a time across the box (cel build-slot -- <cmd>);
 #   - a system-level watchdog for the user manager (cel watchdog).
 [ -n "${_CEL_BOXGUARD:-}" ] && return 0
@@ -160,8 +159,8 @@ boxguard_pressure() {
   _boxguard_under "$avail" "$swap" "$(boxguard_min_avail_mb)"
 }
 
-# The sentence the steward sends. "Stop delegating" only when admission would
-# actually refuse; above the floor it says what is happening, nothing more.
+# The sentence the steward sends. "Start nothing heavy" only when the box is
+# under the admission floor; above it it says what is happening, nothing more.
 boxguard_warning_text() { # [what-gc-did]
   local avail swap
   read -r avail swap <<<"$(boxguard_read)"
@@ -174,9 +173,9 @@ boxguard_warning_text() { # [what-gc-did]
   else
     why="$(_boxguard_driver "$avail" "$swap" "$(boxguard_min_avail_mb)")"
   fi
-  local msg="box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% ($why) - ${1:-no idle worker was stoppable}."
+  local msg="box memory under the warning line: $(_boxguard_gb "$avail") GB free, swap ${swap}% ($why) - ${1:-no idle agent was stoppable}."
   if ! boxguard_admit >/dev/null; then
-    msg="$msg Stop delegating until it recovers (new workers are refused below $(_boxguard_gb "$(boxguard_min_avail_mb)") GB$(_boxguard_band_text))."
+    msg="$msg Start nothing heavy until it recovers (the floor is $(_boxguard_gb "$(boxguard_min_avail_mb)") GB free$(_boxguard_band_text))."
   fi
   printf '%s\n' "$msg"
 }

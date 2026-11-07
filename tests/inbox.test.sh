@@ -790,7 +790,7 @@ test_status_to_root_warns_and_still_delivers() {
   _inbox_sandbox
   local err
   err="$( ( _inbox_send root "widget: ABC-9 landed" --from widget-orch --workspace demo >/dev/null ) 2>&1 )"
-  assert_contains "$err" "status to root is not read by anyone; the ledger already carries it"
+  assert_contains "$err" "status to root is not read by anyone; the PRs and cel fleet already carry it"
   assert_contains "$(_inbox_read --for root --workspace demo)" "widget: ABC-9 landed"
   local n; n="$(_inbox_lines)"
   err="$( ( _inbox_send root "ship or hold?" --kind decision --workspace demo >/dev/null ) 2>&1 )"

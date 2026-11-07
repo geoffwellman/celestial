@@ -125,7 +125,7 @@ agents:
     # that is a path to an existing file is read as the file. Same herdr
     # multi-line constraint as claude, so we always pass the path.
     role_injection: { strategy: append_flag_file, flag: --append-system-prompt }
-    # Approval prompts block unattended workers and reviewers.
+    # Approval prompts block unattended agents and reviewers.
     launch_args: [--auto-approve]
     # Fuzzy-matches a bare id ("opus") and accepts the explicit `provider/model`
     # form, which is what every cross-provider profile uses - `omp models`
@@ -143,15 +143,15 @@ agents:
     # So an exported key does not identify the billed account. The probe lets
     # the plane compare the effective credential and refuse a mismatch.
     credential_probe: "omp token"
-    # Read-only orchestrators (lib/guard.sh). cel run loads this on ROOT and
-    # ORCHESTRATOR launches only; workers write, that is their job. The file
-    # is an adapter over tools/hooks/guard-classify.sh, so the rules stay in
-    # one place. claude needs no entry: its guard is a global PreToolUse hook
-    # that decides by the pane's cwd.
+    # Guarded launches (lib/guard.sh): cel run loads this on root, core and
+    # product-agent launches, and the guard decides per role what is refused.
+    # The file is an adapter over tools/hooks/guard-classify.sh, so the
+    # rules stay in one place. claude needs no entry: its guard is a global
+    # PreToolUse hook that decides by the pane's cwd.
     guard_hook: { flag: --hook, file: tools/hooks/orchestrator-guard.omp.ts }
-    # Inbox delivery for every launch (CEL-65, CEL-95 for workers): omp has no
-    # Monitor or UserPromptSubmit, so this hook watches the mailbox, raises
-    # ui.notify for new mail and drains unread mail into the next turn.
+    # Inbox delivery for every launch: omp has no Monitor or
+    # UserPromptSubmit, so this hook watches the mailbox, raises ui.notify for
+    # new mail and drains unread mail into the next turn.
     inbox_hook: { flag: --hook, file: tools/hooks/inbox.omp.ts }
     # By the exact session FILE herdr recorded for the pane, never
     # --continue: several omp sessions share one cwd and --continue picks the
@@ -204,11 +204,11 @@ agents:
       levels: [off, minimal, low, medium, high, xhigh, max]
     # Same extension API as omp (pi-family), same adapter.
     guard_hook: { flag: --extension, file: tools/hooks/orchestrator-guard.omp.ts }
-    # Inbox delivery (CEL-95), loaded on every pi launch - workers and
-    # reviewers too: PR reviewers send CHANGES by inbox, and a pi worker with
-    # no hook sat on them for eight hours. Same adapter as omp; the APIs it
-    # uses (sendMessage triggerTurn, ctx.isIdle, ui.getEditorText,
-    # session_start/agent_end) were checked against the installed pi.
+    # Inbox delivery, loaded on every pi launch - solo agents and reviewers
+    # alike: a reviewer sends CHANGES by inbox and its author must wake on it.
+    # Same adapter as omp; the APIs it uses (sendMessage triggerTurn,
+    # ctx.isIdle, ui.getEditorText, session_start/agent_end) were checked
+    # against the installed pi.
     inbox_hook: { flag: --extension, file: tools/hooks/inbox.omp.ts }
     notes: >
       earendil-works/pi. Install ONLY the scoped package above - bare `pi` on npm
@@ -226,16 +226,15 @@ agents:
     herdr_integration: codex
     required: false
     # codex has no system-prompt flag: the role arrives as the positional
-    # prompt and therefore does not survive compaction. Short workers only.
+    # prompt and therefore does not survive compaction. Short sessions only.
     role_injection: { strategy: prompt_arg }
     # Same intent as claude's skip-permissions and omp's --auto-approve: an
-    # unattended worker that stops for approval is indistinguishable from one
+    # unattended agent that stops for approval is indistinguishable from one
     # thinking hard. Deliberately NOT
     # `--dangerously-bypass-approvals-and-sandbox`, which also removes the
-    # sandbox - a worker only ever needs to write inside its own worktree, so
-    # it keeps workspace-write and just stops asking. Network access is turned
-    # back on explicitly because workspace-write disables it by default and the
-    # worker's last two steps are `git push` and `gh pr create`.
+    # sandbox - it keeps workspace-write and just stops asking. Network access
+    # is turned back on explicitly because workspace-write disables it by
+    # default and an agent that ships needs `git push` and its forge CLI.
     launch_args:
       - --ask-for-approval
       - never
@@ -281,7 +280,7 @@ agents:
     notes: >
       anomalyco/opencode. Native release binary, not a Node global package.
 
-# Model providers a worker profile can name, and the credential each one needs.
+# Model providers a profile can name, and the credential each one needs.
 #
 # This exists for ONE job: deciding whether a profile's primary model is
 # actually reachable on this box before a pane is spawned. A profile names a
@@ -290,7 +289,7 @@ agents:
 # here, and if its key_env is unset in the workspace environment the profile
 # falls back to its declared alternative. Without this the failure surfaces as
 # an agent pane that starts, prints an auth error and sits there idle - which
-# reads exactly like a worker thinking hard.
+# reads exactly like an agent thinking hard.
 #
 # Keys themselves NEVER live here or anywhere else in this repo: they belong in
 # the workspace's gitignored env.local (see lib/workspace.sh ws_env_exports).
@@ -317,7 +316,7 @@ providers:
   # 2026-09-12: DeepSeek reports an overdrawn account as a negative
   # total_balance with is_available=false; OpenRouter's credits endpoint gives
   # lifetime totals, so remaining is the difference. `floor` is where a route
-  # is vetoed - a worker that dies mid-flight when the account hits zero is
+  # is vetoed - an agent that dies mid-flight when the account hits zero is
   # worse than one never started.
   deepseek:
     key_env: DEEPSEEK_API_KEY
@@ -350,7 +349,7 @@ providers:
 # Precedence, widest last: this -> workspace.yaml `thinking:` -> the profile's
 # own `thinking:` -> an explicit `--thinking` on the command line. `high`
 # because these are unattended agents working from a written spec with no human
-# to catch a shallow answer; the cost of re-running a botched worker dwarfs the
+# to catch a shallow answer; the cost of re-running a botched session dwarfs the
 # extra tokens. Levels above this (`xhigh`, `max`) are worth setting per profile
 # on architectural work, not globally.
 defaults:

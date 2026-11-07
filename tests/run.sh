@@ -89,12 +89,12 @@ _suite_spawn() ( # <fd> <cmd> [args...] - lock_spawn, inlined
 _suite_lock_take() {
   local path; path="$(suite_lock_path)"
   # --no-lock means the whole run stays out of the queue, nested gates
-  # included: tests/fanout.test.sh runs collect, which runs cel-verify, which
-  # would otherwise queue on the box lock from inside a run that chose not to.
+  # included: a test that runs cel-verify runs a gate, which would otherwise
+  # queue on the box lock from inside a run that chose not to.
   if [ "$NO_LOCK" -eq 1 ]; then export CEL_SUITE_LOCK_HELD=1; return 0; fi
   [ "$path" = none ] && return 0
-  # RE-ENTRANT BY INHERITANCE. tests/fanout.test.sh runs `cel-fanout collect`,
-  # which runs cel-verify, which runs a gate - a whole second suite, started
+  # RE-ENTRANT BY INHERITANCE. A test that runs cel-verify runs a gate - a
+  # whole second suite, started
   # from inside a suite that is already holding this lock. Where both resolve
   # the same path (CI: no XDG_RUNTIME_DIR) queueing would deadlock. A process
   # started under a held lock is ALREADY INSIDE IT and must not queue; the

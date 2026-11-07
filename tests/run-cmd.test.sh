@@ -48,14 +48,35 @@ test_run_orchestrator_targets_repo() {
   assert_contains "$out" "--append-system-prompt"
   rm -rf "$T"
 }
-test_run_worker_creates_a_herdr_worktree() {
-  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" "worktree create"
-  assert_contains "$out" "--kind omp"
+# FAN-OUT IS RETIRED. The old worker/scout/spike roles are refused for a
+# release with an answer, not a launch, and the cel-fanout stub says the same.
+_FANOUT_RETIRED="fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
+test_run_worker_is_refused_as_retired() {
+  _ws; local out
+  out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --dry-run 2>&1)" \
+    && { echo "cel run worker launched: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$_FANOUT_RETIRED"
   rm -rf "$T"
 }
-test_run_worker_requires_branch() {
-  _ws; ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --dry-run ); rm -rf "$T"
+test_run_scout_is_refused_as_retired() {
+  _ws; local out
+  out="$(cd "$T" && _cmd_run_in_subshell scout --repo widget --dry-run 2>&1)" \
+    && { echo "cel run scout launched: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$_FANOUT_RETIRED"
+  rm -rf "$T"
+}
+test_run_spike_is_refused_as_retired() {
+  _ws; local out
+  out="$(cd "$T" && _cmd_run_in_subshell spike --repo widget --dry-run 2>&1)" \
+    && { echo "cel run spike launched: $out"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "$_FANOUT_RETIRED"
+  rm -rf "$T"
+}
+test_cel_fanout_is_refused_as_retired() {
+  local out
+  out="$("$CEL_ROOT/bin/cel-fanout" delegate x 2>&1)" \
+    && { echo "cel-fanout delegate succeeded: $out"; return 1; }
+  assert_contains "$out" "$_FANOUT_RETIRED"
 }
 test_run_outside_a_workspace_dies() {
   ( cd /tmp && assert_fails _cmd_run_in_subshell --dry-run )
@@ -65,17 +86,19 @@ test_run_outside_a_workspace_dies() {
 test_run_agent_start_uses_a_herdr_legal_name() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" "agent start alpha-root"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" "agent start widget-wg-1-x"
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "agent start widget-orch"
   rm -rf "$T"
 }
 # herdr agent start rejects any argument it cannot encode on one line
-# (invalid_agent_argument), so multi-line role bodies must travel as files.
+# (invalid_agent_argument), so multi-line role bodies must travel as files -
+# on claude's file flag and on omp's path-taking flag alike.
 test_run_role_body_travels_as_a_file_path() {
   _ws; local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" "--append-system-prompt-file $T/.cel/role-root.md"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" "--append-system-prompt $T/.cel/role-worker.md"
+  printf 'runtime: { root: claude, orchestrator: omp }\n' >> "$T/workspace.yaml"
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--append-system-prompt $T/.cel/role-orchestrator.md"
   rm -rf "$T"
 }
 test_append_flag_file_writes_the_body_and_no_arg_holds_a_newline() {
@@ -103,9 +126,10 @@ test_run_launch_args_precede_role_injection_and_no_prompt_submit_duplicate() {
   assert_contains "$out" 'claude-session.sh'
   assert_contains "$out" 'SessionStart'
   assert_contains "$out" 'UserPromptSubmit'
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" " -- --auto-approve --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --thinking high --append-system-prompt"
-  ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp worker got claude launch args"; return 1; }
+  printf 'runtime: { root: claude, orchestrator: omp }\n' >> "$T/workspace.yaml"
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" " -- --auto-approve --config=$CEL_ROOT/core/omp-orchestrator.yml --no-prewalk --hook $CEL_ROOT/tools/hooks/inbox.omp.ts --hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts --thinking high --append-system-prompt"
+  ! printf '%s' "$out" | grep -q 'dangerously' || { echo "omp solo agent got claude launch args"; return 1; }
   rm -rf "$T"
 }
 
@@ -117,8 +141,8 @@ test_run_root_applies_declared_layout() {
   printf 'layout: example\n' >> "$T/workspace.yaml"
   local out; out="$(cd "$T" && cmd_run root --dry-run)"
   assert_contains "$out" "herdr-workspace-manager apply example"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "worker applied a layout"; return 1; }
+  out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  ! printf '%s' "$out" | grep -q "workspace-manager" || { echo "a solo agent applied a layout"; return 1; }
   rm -rf "$T"
 }
 test_run_without_layout_skips_apply() {
@@ -181,40 +205,33 @@ test_layout_config_resolves_workspace_first() {
   rm -rf "$T"
 }
 
-# READ-ONLY ORCHESTRATORS: root and orchestrator launches on a runtime that
-# has a guard_hook get it; workers never do - writing is their whole job.
-test_run_loads_the_guard_hook_for_orchestrators_only() {
-  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+# THE GUARD HOOK: root and product-agent launches on a runtime that has a
+# guard_hook get it, and both get the inbox hook and their own identity.
+test_run_loads_the_guard_hook_for_root_and_product_agents() {
+  _ws; printf 'runtime: { root: omp, orchestrator: omp }\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
   assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
-  # an orchestrator reads ITS mailbox wherever it cds to
+  # a product agent reads ITS mailbox wherever it cds to
   assert_contains "$out" "CEL_INBOX_ME=widget-orch"
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "orchestrator-guard.omp.ts"
   assert_contains "$out" "inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=root"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
-  # a worker DOES get the inbox hook - reviewers send it CHANGES by inbox,
-  # and without delivery a review round stalls.
-  assert_contains "$out" "--hook $CEL_ROOT/tools/hooks/inbox.omp.ts"
-  assert_contains "$out" "CEL_INBOX_ME=widget-wg-1-x"
   rm -rf "$T"
 }
 
-# Pi workers and reviewers carry the inbox extension and their own
+# Pi solo agents and reviewers carry the inbox extension and their own
 # identity, so mail addressed to the pane's alias wakes it.
-test_run_pi_worker_and_reviewer_get_inbox_extension_and_identity() {
+test_run_pi_solo_agent_and_reviewer_get_inbox_extension_and_identity() {
   _reviewer_gateway_fixture
-  printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\nreview:\n  runtime: pi\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
+  printf 'runtime: { root: claude, orchestrator: pi }\nreview:\n  runtime: pi\n  model: claude-opus-5-5\n' >> "$T/workspace.yaml"
   local out
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
+  out="$(cd "$T" && cmd_run solo --product widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
-  assert_contains "$out" "CEL_INBOX_ME=widget-wg-7-thing"
+  assert_contains "$out" "CEL_INBOX_ME=widget-orch"
   assert_contains "$out" "CEL_INBOX_WS=alpha"
-  ! printf '%s' "$out" | grep -q "orchestrator-guard" || { echo "worker got the guard"; rm -rf "$T"; return 1; }
   out="$(cd "$T" && cmd_run reviewer --repo widget --pr 12 --dry-run 2>/dev/null)"
   assert_contains "$out" "--extension $CEL_ROOT/tools/hooks/inbox.omp.ts"
   assert_contains "$out" "CEL_INBOX_ME=widget-pr-12-review"
@@ -343,14 +360,14 @@ EOS
   assert_contains "$out" "gateway catalog advertises no Claude Sonnet model"
   _ws_gateway_clean
 }
-# Claude's UserPromptSubmit hook must run on workers, and their mailbox
-# identity must be explicit. (Reviewers always run on pi now; their identity
-# is asserted by the pi reviewer tests above.)
-test_run_claude_worker_gets_inbox_delivery_identity() {
-  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: claude }\n' >> "$T/workspace.yaml"
+# Claude's UserPromptSubmit hook must run on a Claude solo agent, and its
+# mailbox identity must be explicit. (Reviewers always run on pi; their
+# identity is asserted by the pi reviewer tests above.)
+test_run_claude_solo_agent_gets_inbox_delivery_identity() {
+  _ws; printf 'runtime: { root: claude, orchestrator: claude }\n' >> "$T/workspace.yaml"
   local out
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-7-thing --dry-run 2>/dev/null)"
-  assert_contains "$out" "CEL_INBOX_ME=widget-wg-7-thing"
+  out="$(cd "$T" && cmd_run solo --product widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "CEL_INBOX_ME=widget-orch"
   assert_contains "$out" "CEL_INBOX_WS=alpha"
   rm -rf "$T"
 }
@@ -359,22 +376,20 @@ test_run_claude_worker_gets_inbox_delivery_identity() {
 # model and the launch must keep it, so EVERY omp launch gets --no-prewalk and
 # no other runtime does.
 test_run_disables_prewalk_for_every_omp_launch() {
-  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  _ws; printf 'runtime: { root: omp, orchestrator: omp }\n' >> "$T/workspace.yaml"
   local out
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--no-prewalk"
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "--no-prewalk"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  assert_contains "$out" "--no-prewalk"
   rm -rf "$T"
 }
 test_run_gives_no_prewalk_flag_to_other_runtimes() {
-  _ws; printf 'runtime: { root: claude, orchestrator: claude, worker: pi }\n' >> "$T/workspace.yaml"
+  _ws; printf 'runtime: { root: claude, orchestrator: pi }\n' >> "$T/workspace.yaml"
   local out
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "pi worker got --no-prewalk"; rm -rf "$T"; return 1; }
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "pi got --no-prewalk"; rm -rf "$T"; return 1; }
+  out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   ! printf '%s' "$out" | grep -q -- "--no-prewalk" || { echo "claude got --no-prewalk"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
@@ -440,13 +455,13 @@ _ws_solo() { # <product> -> a products workspace with that product in solo mode
 }
 test_run_orchestrator_on_a_solo_product_launches_the_solo_agent() {
   _ws_solo bundle
-  printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  printf 'runtime: { root: omp, orchestrator: omp }\n' >> "$T/workspace.yaml"
   local out; out="$(cd "$T" && cmd_run orchestrator --product bundle --dry-run 2>/dev/null)"
   assert_contains "$out" "CEL_ROLE=solo"
   assert_contains "$out" "--cwd $T/products/bundle"
   assert_contains "$out" "agent start bundle-orch"
   assert_contains "$out" "CEL_INBOX_ME=bundle-orch"
-  # the guard still rides along: it is what refuses fan-out to a solo agent
+  # the guard still rides along: it refuses a solo agent a hand merge
   assert_contains "$out" "orchestrator-guard.omp.ts"
   rm -rf "$T"
 }
@@ -456,44 +471,49 @@ test_run_solo_body_drops_worker_instructions_and_says_solo() {
   assert_contains "$body" "build mode: solo"
   ! printf '%s' "$body" | grep -q -e 'worker runtime:' -e 'max concurrent workers' -e 'investigations are SCOUTS' \
     || { echo "solo body still tells it to delegate"; rm -rf "$T"; return 1; }
-  # and a fleet product's body is untouched by any of this
-  body="$(ws_policy_block "$T" lone)"
-  assert_contains "$body" "worker runtime:"
-  ! printf '%s' "$body" | grep -q 'build mode:' || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-test_run_solo_forces_solo_once_on_a_fleet_product() {
+# A product that names no mode is solo: `cel run orchestrator` and `cel run
+# solo` both launch its solo agent, on the solo role body.
+test_run_a_product_with_no_mode_launches_solo() {
   _ws_products
-  local out; out="$(cd "$T" && cmd_run solo --product bundle --dry-run 2>/dev/null)"
-  assert_contains "$out" "CEL_ROLE=solo"
-  assert_eq "$(ws_build_mode "$T" bundle)" fleet
+  _run_agent_start() { :; }; _run_mark_launch() { :; }; pane_label_set() { :; }; tab_label_set() { :; }
+  herdr() { printf '{"result":{"workspace_id":"w9","pane_id":"w9:p1","agents":[]}}\n'; }
+  local role out f="$T/.cel/products/bundle/role-orchestrator.md"
+  for role in orchestrator solo; do
+    out="$(cd "$T" && cmd_run "$role" --product bundle --dry-run 2>/dev/null)"
+    assert_contains "$out" "CEL_ROLE=solo" || { rm -rf "$T"; return 1; }
+    rm -f "$f"
+    ( cd "$T" && cmd_run "$role" --product bundle ) >/dev/null 2>&1
+    assert_contains "$(cat "$f" 2>/dev/null)" "You are the solo agent for one product" \
+      || { echo "cel run $role did not launch on solo.md"; rm -rf "$T"; return 1; }
+  done
   rm -rf "$T"
 }
-test_run_solo_refuses_while_fleet_work_is_in_flight() {
+# A product still set to the retired `mode: fleet` is refused - by both doors
+# - with the retirement and the command that switches it.
+test_run_refuses_a_product_still_set_to_fleet() {
   _ws_products
-  mkdir -p "$T/.cel"
-  printf '[{"id":"WG-1-x","repo":"gadget","state":"running"}]' > "$T/.cel/delegations.json"
-  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --dry-run )
+  sed -i 's/^    workers: 2$/    workers: 2\n    mode: fleet/' "$T/workspace.yaml"
+  local role out
+  for role in orchestrator solo; do
+    out="$(cd "$T" && _cmd_run_in_subshell "$role" --product bundle --dry-run 2>&1)" \
+      && { echo "cel run $role launched a fleet product: $out"; rm -rf "$T"; return 1; }
+    assert_contains "$out" "$_FANOUT_RETIRED" || { rm -rf "$T"; return 1; }
+    assert_contains "$out" "cel mode bundle solo" || { rm -rf "$T"; return 1; }
+  done
   rm -rf "$T"
 }
 test_run_refuses_an_unknown_build_mode() {
   _ws_products
   sed -i 's/^    workers: 2$/    workers: 2\n    mode: sideways/' "$T/workspace.yaml"
   ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --dry-run )
   rm -rf "$T"
 }
 test_run_solo_keeps_the_one_agent_per_product_refusal() {
   _ws_solo bundle; _run_stub_roster "$T/products/bundle" bundle-orch
   ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --product bundle --dry-run )
-  rm -rf "$T"
-}
-# Solo is the PRODUCT agent's role; a worker or reviewer launched on a solo
-# product's repo is still exactly a worker or reviewer.
-test_run_solo_does_not_leak_into_worker_launches() {
-  _ws_solo bundle
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  assert_contains "$out" "CEL_ROLE=worker"
-  ! printf '%s' "$out" | grep -q 'CEL_ROLE=solo' || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
@@ -518,14 +538,12 @@ test_run_solo_lane_body_names_the_lane_and_its_peers() {
   assert_contains "$body" "Land only your own PRs"
   rm -rf "$T"
 }
-# One agent per lane, as one per product; and lanes are a solo thing.
+# One agent per lane, as one per product, and a lane's name must be legal.
 test_run_solo_lane_refusals() {
   _ws_solo bundle; _run_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui
   ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane ui --dry-run )
   ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane orch --dry-run )
   ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product bundle --lane 'Bad Name' --dry-run )
-  ( cd "$T" && assert_fails _cmd_run_in_subshell solo --product lone --lane ui --dry-run )
-  ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --lane ui --dry-run )
   rm -rf "$T"
 }
 # A lane name that normalises, truncates or spells into another agent's name
@@ -751,7 +769,7 @@ EOS
   printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
 }
 
-test_run_worker_via_gateway_claude_model_and_token_env_match_written_provider() {
+test_run_solo_agent_via_gateway_claude_model_and_token_env_match_written_provider() {
   _ws_gateway
   cat >>"$T/workspace.yaml" <<'YAML'
 worker_profiles:
@@ -767,7 +785,7 @@ EOS
   chmod +x "$GWT/gwstub"
   export CEL_PI_AGENT_DIR="$GWT/pi"
   printf '{}' >"$GWT/state/auth/claude-aaaaaa11-someone@example.invalid.json"
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run 2>&1)"
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --profile gw --dry-run 2>&1)"
   assert_contains "$out" "--model ompgw-claude/claude-sonnet-4-6"
   assert_contains "$out" "OMP_GATEWAY_TOKEN="
   _ws_gateway_clean
@@ -788,7 +806,7 @@ EOF
   local old_path="$PATH" output omp_calls=""
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
-  _run_gateway_env pi pi-worker
+  _run_gateway_env pi pi-agent
   output="$(bash -c "env ${GATEWAY_ENV[*]} printenv OMP_GATEWAY_TOKEN")"
   [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
@@ -814,13 +832,13 @@ EOF
   local old_path="$PATH" output omp_calls=""
   export PATH="$T/bin:$PATH" PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
-  _run_gateway_env omp omp-worker
+  _run_gateway_env omp omp-agent
   output="$(bash -c "env ${GATEWAY_ENV[*]} sh -c 'printf \"%s|%s\" \"\$OMP_GATEWAY_TOKEN\" \"\$CEL_SESSION_ID\"'")"
   [ ! -f "$T/omp.log" ] || omp_calls="$(cat "$T/omp.log")"
   PATH="$old_path"
   unset PROFILE_VIA CEL_GATEWAY_STATE
   rm -rf "$T"
-  assert_eq "$output" "omp-gw-test-value|omp-worker"
+  assert_eq "$output" "omp-gw-test-value|omp-agent"
   assert_eq "$omp_calls" ""
 }
 
@@ -849,9 +867,9 @@ EOS
 }
 _ws_omp_gateway_clean() { unset CEL_OMP_AGENT_DIR; _ws_gateway_clean; }
 
-test_run_omp_worker_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
+test_run_omp_solo_agent_via_gateway_uses_the_prefixed_model_and_keeps_thinking() {
   _ws_omp_gateway "me@personal.invalid"
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)"
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --profile ompgw --dry-run 2>&1)"
   assert_contains "$out" "--model celgw/omp/claude-opus-5-5"
   assert_contains "$out" "--thinking low"
   assert_contains "$out" "OMP_GATEWAY_TOKEN=****"
@@ -868,8 +886,8 @@ test_run_omp_gateway_env_pins_the_omp_agent_dir() {
   _ws_omp_gateway "me@personal.invalid"
   export PROFILE_VIA=gateway
   local -a GATEWAY_ENV=()
-  _run_profile_gateway_setup omp omp-worker 1 0
-  local line; line="$(_run_launch_env worker "$T" /r.md "" omp)"
+  _run_profile_gateway_setup omp omp-agent 1 0
+  local line; line="$(_run_launch_env solo "$T" /r.md "" omp)"
   local out; out="$(PI_CODING_AGENT_DIR=/elsewhere/pi CEL_PI_AGENT_DIR=/elsewhere/pi bash -c "$line sh -c 'printf \"%s|%s\" \"\$PI_CODING_AGENT_DIR\" \"\$OMP_GATEWAY_TOKEN\"'")"
   unset PROFILE_VIA
   assert_eq "$out" "$GWT/omp|omp-gw-test-value"
@@ -877,24 +895,24 @@ test_run_omp_gateway_env_pins_the_omp_agent_dir() {
 }
 
 # No configured exclusion is a VETO, not a widened pool.
-test_run_omp_worker_via_gateway_is_vetoed_without_an_exclusion() {
+test_run_omp_solo_agent_via_gateway_is_vetoed_without_an_exclusion() {
   _ws_omp_gateway
-  ( cd "$T" && assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run )
+  ( cd "$T" && assert_fails _cmd_run_in_subshell orchestrator --repo widget --profile ompgw --dry-run )
   _ws_omp_gateway_clean
 }
 
 # An excluded account carrying the omp prefix is in omp's pool right now.
-test_run_omp_worker_via_gateway_is_vetoed_when_personal_is_prefixed() {
+test_run_omp_solo_agent_via_gateway_is_vetoed_when_personal_is_prefixed() {
   _ws_omp_gateway "me@personal.invalid"
   printf '{"type":"claude","email":"me@personal.invalid","prefix":"omp"}' >"$GWT/state/auth/claude-11111111-me@personal.invalid.json"
-  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched with personal in the pool"; _ws_omp_gateway_clean; return 1; }
+  local out; out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --profile ompgw --dry-run 2>&1)" && { echo "launched with personal in the pool"; _ws_omp_gateway_clean; return 1; }
   assert_contains "$out" "cel gateway omp-scope"
   _ws_omp_gateway_clean
 }
 
 # A model the gateway does not publish under the omp prefix is refused by
 # name - never swapped for another model.
-test_run_omp_worker_via_gateway_is_vetoed_when_the_prefixed_model_is_missing() {
+test_run_omp_solo_agent_via_gateway_is_vetoed_when_the_prefixed_model_is_missing() {
   _ws_omp_gateway "me@personal.invalid"
   cat >"$GWT/gwstub" <<'EOS'
 #!/usr/bin/env bash
@@ -903,27 +921,27 @@ case "$1" in
   models) printf '%s\n' '{"data":[{"id":"claude-opus-5-5"},{"id":"omp/claude-sonnet-4-6"}]}' ;;
 esac
 EOS
-  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile ompgw --dry-run 2>&1)" && { echo "launched without the model"; _ws_omp_gateway_clean; return 1; }
+  local out; out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --profile ompgw --dry-run 2>&1)" && { echo "launched without the model"; _ws_omp_gateway_clean; return 1; }
   assert_contains "$out" "omp/claude-opus-5-5"
   _ws_omp_gateway_clean
 }
 
 # A dry run is a PREVIEW. models.json is the owner's file and writing it for a
 # launch that never happened is a side effect nobody asked for.
-test_run_worker_via_gateway_writes_no_models_json_on_a_dry_run() {
+test_run_solo_agent_via_gateway_writes_no_models_json_on_a_dry_run() {
   _ws_gateway
   export CEL_PI_AGENT_DIR="$GWT/pi"
-  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile gw --dry-run >/dev/null 2>&1 )
+  ( cd "$T" && cmd_run orchestrator --repo widget --profile gw --dry-run >/dev/null 2>&1 )
   [ ! -e "$GWT/pi/models.json" ] || { echo "a dry run wrote models.json"; unset CEL_PI_AGENT_DIR; _ws_gateway_clean; return 1; }
   unset CEL_PI_AGENT_DIR
   _ws_gateway_clean
 }
 
 # Gateway down means every account behind it is unreachable, and a pane that
-# starts against a dead provider looks exactly like a worker thinking hard.
-test_run_worker_via_gateway_dies_when_the_gateway_is_down() {
+# starts against a dead provider looks exactly like an agent thinking hard.
+test_run_solo_agent_via_gateway_dies_when_the_gateway_is_down() {
   _ws_gateway
-  ( cd "$T" && GW_STUB_DOWN=1 assert_fails _cmd_run_in_subshell worker --repo widget --branch WG-1-x --profile gw --dry-run )
+  ( cd "$T" && GW_STUB_DOWN=1 assert_fails _cmd_run_in_subshell orchestrator --repo widget --profile gw --dry-run )
   _ws_gateway_clean
 }
 
@@ -933,10 +951,10 @@ test_run_worker_via_gateway_dies_when_the_gateway_is_down() {
 # life of the process. `herdr agent start` has no --env option, so the three
 # variables are typed as an `env K=V ...` PREFIX to the launch line - set for
 # that command only, never exported into the pane's shell for good.
-test_run_worker_launch_carries_role_rolefile_and_workspace() {
-  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" "CEL_ROLE=worker"
-  assert_contains "$out" "CEL_ROLE_FILE=$T/.cel/role-worker.md"
+test_run_solo_agent_launch_carries_role_rolefile_and_workspace() {
+  _ws; local out; out="$(cd "$T" && cmd_run solo --product widget --dry-run)"
+  assert_contains "$out" "CEL_ROLE=solo"
+  assert_contains "$out" "CEL_ROLE_FILE=$T/.cel/role-orchestrator.md"
   assert_contains "$out" "CEL_WORKSPACE=$T"
   rm -rf "$T"
 }
@@ -946,14 +964,14 @@ test_run_root_and_orchestrator_are_marked_too() {
   assert_contains "$out" "CEL_ROLE=root"
   assert_contains "$out" "CEL_ROLE_FILE=$T/.cel/role-root.md"
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
-  assert_contains "$out" "CEL_ROLE=orchestrator"
+  assert_contains "$out" "CEL_ROLE=solo"
   rm -rf "$T"
 }
 # The values are a role name and two paths - nothing here is a secret, and the
 # preview is worthless if it hides what the pane will actually carry.
 test_run_dry_run_shows_the_prefix_ahead_of_the_agent_command() {
-  _ws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run)"
-  assert_contains "$out" "env CEL_ROLE=worker"
+  _ws; local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run)"
+  assert_contains "$out" "env CEL_ROLE=solo"
   rm -rf "$T"
 }
 
@@ -1442,7 +1460,7 @@ _ws_gh_acct() { # <user>
 }
 test_launch_env_without_github_block_is_unchanged() {
   _ws
-  assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env worker "$T" /r.md)" "env CEL_ROLE=worker CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md CARGO_BUILD_JOBS=3 "
+  assert_eq "$(CEL_CARGO_JOBS=3 _run_launch_env solo "$T" /r.md)" "env CEL_ROLE=solo CEL_WORKSPACE=$T CEL_ROLE_FILE=/r.md "
   rm -rf "$T"
 }
 test_every_role_launch_carries_the_token_substitution_not_the_token() {
@@ -1450,7 +1468,7 @@ test_every_role_launch_carries_the_token_substitution_not_the_token() {
   printf 'review:\n  runtime: pi\n  model: sonnet\n' >> "$T/workspace.yaml"
   _gh_acct_setup acct-b
   local out role
-  for role in "orchestrator --repo widget" "worker --repo widget --branch WG-1-x" "reviewer --repo widget --pr 12" "root"; do
+  for role in "orchestrator --repo widget" "solo --product widget" "reviewer --repo widget --pr 12" "root"; do
     # shellcheck disable=SC2086
     out="$(cd "$T" && cmd_run $role --dry-run 2>&1)"
     assert_contains "$out" 'gh auth token --user acct-b'
@@ -1460,7 +1478,7 @@ test_every_role_launch_carries_the_token_substitution_not_the_token() {
 }
 test_launch_refuses_when_the_declared_user_is_not_logged_in() {
   _ws_gh_acct acct-z
-  local out; out="$(cd "$T" && _cmd_run_in_subshell worker --repo widget --branch WG-1-x --dry-run 2>&1)" && {
+  local out; out="$(cd "$T" && _cmd_run_in_subshell orchestrator --repo widget --dry-run 2>&1)" && {
     echo "launched as an account that is not logged in"; rm -rf "$T"; return 1; }
   assert_contains "$out" "gh auth login"
   rm -rf "$T"
@@ -1492,7 +1510,7 @@ test_reviewer_pr_facts_come_from_forgejo() {
 # pane must say how to fix it.
 test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
   _ws_gh_acct acct-b
-  local line; line="$(_run_launch_env worker "$T" /r.md)touch $T/agent-ran"
+  local line; line="$(_run_launch_env solo "$T" /r.md)touch $T/agent-ran"
   # auth disappears after the readiness check
   printf '#!/usr/bin/env bash\necho "no oauth token" >&2; exit 1\n' > "$T/bin/gh"
   local err; err="$(bash -c "$line" 2>&1)" || true
@@ -1500,7 +1518,7 @@ test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
   assert_contains "$err" "gh auth login"
   # and with auth present the same line starts it, the token in its env
   printf '#!/usr/bin/env bash\necho tok-b\n' > "$T/bin/gh"
-  line="$(_run_launch_env worker "$T" /r.md)sh -c 'printf %s \"\$GH_TOKEN\" > $T/agent-ran'"
+  line="$(_run_launch_env solo "$T" /r.md)sh -c 'printf %s \"\$GH_TOKEN\" > $T/agent-ran'"
   bash -c "$line"
   assert_eq "$(cat "$T/agent-ran")" "tok-b"
   rm -rf "$T"
@@ -1511,17 +1529,21 @@ test_typed_launch_fails_closed_in_the_pane_when_the_token_command_fails() {
 # badly in the sidebar; every pane the plane starts also gets a free-text label.
 _label_len() { LC_ALL=C.UTF-8 awk '{print length($0)}' <<<"$1"; }
 test_pane_label_shapes() {
-  assert_eq "$(pane_label worker ABC-12-fix-the-widget)" "ABC-12 · fix the widget"
-  assert_eq "$(pane_label worker someone/abc-12-fix)" "ABC-12 · fix"
-  assert_eq "$(pane_label scout gadget-survey)" "scout · gadget survey"
   assert_eq "$(pane_label reviewer widget 71)" "review · widget #71"
-  assert_eq "$(pane_label orchestrator widget)" "widget orchestrator"
   assert_eq "$(pane_label root alpha)" "alpha root"
+  assert_eq "$(pane_label solo widget)" "widget solo"
+  assert_eq "$(pane_label solo bundle/ui)" "bundle/ui solo"
 }
-test_pane_label_cuts_long_slugs_on_a_word_boundary() {
-  local l; l="$(pane_label worker ABC-12-make-the-widget-and-the-gadget-agree-about-everything)"
+test_pane_label_cuts_long_names_to_the_cap() {
+  local l
+  # on a word boundary where there is one...
+  l="$(pane_label solo make-the-widget-and-the-gadget-agree)"
   [ "$(_label_len "$l")" -le "$CEL_PANE_LABEL_MAX" ] || { echo "too long: $l"; return 1; }
-  assert_eq "$l" "ABC-12 · make the widget and the gadget…"
+  assert_eq "$l" "make-the-widget-and-the-gadget-agree…"
+  # ...and mid-word when the name alone is past the cap
+  l="$(pane_label solo make-the-widget-and-the-gadget-agree-about-everything)"
+  [ "$(_label_len "$l")" -le "$CEL_PANE_LABEL_MAX" ] || { echo "too long: $l"; return 1; }
+  assert_eq "$l" "make-the-widget-and-the-gadget-agree-ab…"
 }
 _label_herdr() { # stub herdr that records argv; FAIL_RENAME makes rename fail
   export HERDR_LOG="$T/herdr.log"; : > "$HERDR_LOG"
@@ -1554,13 +1576,11 @@ _label_check() { # <expected-label>
     assert_contains "$(grep '^tab rename' "$HERDR_LOG")" "tab rename w7:t1 $1"
   fi
 }
-test_run_labels_root_orchestrator_and_worker_panes() {
+test_run_labels_root_and_solo_panes() {
   _ws; _label_herdr
   ( cd "$T" && cmd_run root ) >/dev/null 2>&1; _label_check "alpha root"
   : > "$HERDR_LOG"
-  ( cd "$T" && cmd_run orchestrator --repo widget ) >/dev/null 2>&1; _label_check "widget orchestrator"
-  : > "$HERDR_LOG"
-  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-fix-it ) >/dev/null 2>&1; _label_check "WG-1 · fix it"
+  ( cd "$T" && cmd_run orchestrator --repo widget ) >/dev/null 2>&1; _label_check "widget solo"
   rm -rf "$T"
 }
 test_run_labels_the_reviewer_pane() {
@@ -1606,18 +1626,15 @@ test_reviewer_with_no_row_but_a_live_pane_in_its_checkout_is_reused_and_recorded
 
 # A spent Claude budget answers 429 with retry-after-ms around 5.5M,
 # and omp's default retry.maxDelayMs (300000) refuses that wait, stopping the
-# orchestrator's turn until a human types. Root and the orchestrators
-# on omp carry a --config overlay raising it past a 5h reset; workers do not -
-# a worker that sleeps for hours holds a slot better given to another.
+# orchestrator's turn until a human types. Root and the product agents
+# on omp carry a --config overlay raising it past a 5h reset.
 test_run_omp_orchestrators_wait_out_a_spent_budget() {
-  _ws; printf 'runtime: { root: omp, orchestrator: omp, worker: omp }\n' >> "$T/workspace.yaml"
+  _ws; printf 'runtime: { root: omp, orchestrator: omp }\n' >> "$T/workspace.yaml"
   local out ov="$CEL_ROOT/core/omp-orchestrator.yml"
   out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--config=$ov"
   out="$(cd "$T" && cmd_run root --dry-run 2>/dev/null)"
   assert_contains "$out" "--config=$ov"
-  out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  ! printf '%s' "$out" | grep -q -- "--config=" || { echo "worker got the orchestrator retry overlay"; rm -rf "$T"; return 1; }
   # and the overlay itself holds at least six hours
   assert_eq "$(yq -r '.retry.maxDelayMs >= 21600000' "$ov")" true
   rm -rf "$T"
@@ -1753,7 +1770,7 @@ test_cli_orchestrator_launch_waits_for_the_shell_then_starts_once() {
     || { echo "launch failed: $(cat "$HERDR_LOG")"; return 1; }
   assert_eq "$(_pf_calls 'pane send-text')" 1
   assert_eq "$(_pf_calls 'agent start')" 1
-  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_ROLE=orchestrator"
+  assert_contains "$(grep '^pane send-text' "$HERDR_LOG")" "CEL_ROLE=solo"
   local typed_at; typed_at="$(grep -n '^pane send-text' "$HERDR_LOG" | cut -d: -f1)"
   local before; before="$(head -n "$typed_at" "$HERDR_LOG" | grep -c '^pane get w7:p1 *$' || true)"
   [ "$before" -ge 7 ] || { echo "typed after only $before probes"; return 1; }
@@ -1769,15 +1786,6 @@ test_cli_root_and_console_never_type_into_a_pane_that_is_not_ready() {
   assert_eq "$(_pf_calls 'pane send-text')" 0
   assert_eq "$(_pf_calls 'agent start')" 0
   unset PF_ALWAYS; export CEL_PANE_READY_MS=3000; rm -rf "$T"
-}
-test_cli_worker_start_refusal_is_reported_not_retried() {
-  _pf_cli_fixture; export PF_START_FAIL=1
-  local out; out="$(cd "$T" && "$CEL_ROOT/bin/cel" run worker --repo widget --branch WG-1-x 2>&1)" \
-    && { echo "a refused start was reported as a launch"; return 1; }
-  assert_contains "$out" "NOT retried"
-  assert_eq "$(_pf_calls 'agent start')" 1
-  assert_eq "$(_pf_calls 'pane send-keys')" 0
-  unset PF_START_FAIL; rm -rf "$T"
 }
 
 # herdr's own prompt predicate also requires the foreground process GROUP to be
@@ -1816,11 +1824,12 @@ PY
   STUB_PORT="$(cat "$d/port")"
 }
 
-_omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # runs a native-omp worker launch; prints "<http>|<session>|<dir>"
+_omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # runs a native-omp solo-agent launch; prints "<http>|<session>|<dir>"
   local typed_prefix=""
   herdr() {
     printf '%s\n' "$*" >> "$HERDR_LOG"
     case "$1 $2" in
+      "agent list") printf '{"result":{"agents":[]}}' ;;
       "workspace create"|"worktree create") printf '{"result":{"workspace_id":"w7","pane_id":"w7:p1"}}' ;;
       "tab list") printf '{"result":{"tabs":[]}}' ;;
       "tab create") printf '{"result":{"root_pane":{"pane_id":"w1:p9"}}}' ;;
@@ -1832,7 +1841,7 @@ _omp_native_launch_probe() { export HERDR_LOG="$T/herdr.log"; : >"$HERDR_LOG" # 
       *) : ;;
     esac
   }
-  ( cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile codexomp ) >/dev/null 2>&1
+  ( cd "$T" && cmd_run orchestrator --repo widget --profile codexomp ) >/dev/null 2>&1
   cat "$T/agent-env" 2>/dev/null
 }
 
@@ -1849,7 +1858,7 @@ YAML
   unset CEL_OMP_AGENT_DIR
   _ws_gateway_clean
   assert_contains "$out" "200|"
-  assert_contains "$out" "|widget-wg-1-x|"
+  assert_contains "$out" "|widget-orch|"
   assert_contains "$out" "/omp"
 }
 
@@ -1862,7 +1871,7 @@ YAML
   rm -f "$GWT/state/api-key"
   local -a GATEWAY_ENV=(stale)
   local PROFILE_VIA=""
-  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  _run_profile_gateway_setup omp omp-agent 1 1 || { _ws_gateway_clean; return 1; }
   local n="${#GATEWAY_ENV[@]}"
   _ws_gateway_clean
   assert_eq "$n" "0"
@@ -1873,7 +1882,7 @@ test_run_native_omp_start_with_an_empty_key_file_launches_without_credentials() 
   : >"$GWT/state/api-key"
   local -a GATEWAY_ENV=()
   local PROFILE_VIA=""
-  _run_profile_gateway_setup omp omp-worker 1 1 || { _ws_gateway_clean; return 1; }
+  _run_profile_gateway_setup omp omp-agent 1 1 || { _ws_gateway_clean; return 1; }
   local n="${#GATEWAY_ENV[@]}"
   _ws_gateway_clean
   assert_eq "$n" "0"
@@ -1884,7 +1893,7 @@ test_run_native_pi_start_gets_no_gateway_credentials() {
   printf 'k\n' >"$GWT/state/api-key"
   local -a GATEWAY_ENV=()
   local PROFILE_VIA=""
-  _run_profile_gateway_setup pi pi-worker 1 1
+  _run_profile_gateway_setup pi pi-agent 1 1
   local n="${#GATEWAY_ENV[@]}"
   _ws_gateway_clean
   assert_eq "$n" "0"
@@ -1894,7 +1903,7 @@ test_run_required_gateway_with_missing_key_still_refuses() {
   _ws_gateway
   rm -f "$GWT/state/api-key"
   local PROFILE_VIA=gateway
-  ( _run_profile_gateway_setup omp omp-worker 1 0 ) >/dev/null 2>&1 && { _ws_gateway_clean; echo "required gateway launched without a key"; return 1; }
+  ( _run_profile_gateway_setup omp omp-agent 1 0 ) >/dev/null 2>&1 && { _ws_gateway_clean; echo "required gateway launched without a key"; return 1; }
   _ws_gateway_clean
 }
 

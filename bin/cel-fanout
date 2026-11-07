@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# cel-fanout was retired on 2026-11-08. This stub stays on PATH for one
+# release so a script or habit that still calls it gets a plain refusal
+# instead of "command not found". The delegation ledgers are left on disk
+# untouched; nothing reads them any more.
+printf 'cel-fanout: fan-out was retired on 2026-11-08: build in the product'"'"'s solo agent (feature teams are coming)\n' >&2
+exit 2

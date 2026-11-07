@@ -1,12 +1,10 @@
 # shellcheck shell=bash
-# Worker profiles - a named (runtime, model, thinking level) triple a workspace
-# can point any agent launch at.
+# Profiles - a named (runtime, model, thinking level) triple a workspace can
+# point any agent launch at (solo agents, lanes, root, reviewers).
 #
 # The problem this solves: `runtime:` already chose the CLI per role, but a CLI
-# is not a model. Trying a different model meant editing workspace.yaml, and
-# comparing two models on the same ticket meant editing it twice and
-# remembering which pane was which. A profile is the smallest thing that makes
-# "run this worker on something else" a flag:
+# is not a model. A profile is the smallest thing that makes "run this agent
+# on something else" a flag or a role binding (the yaml key keeps its name):
 #
 #   worker_profiles:
 #     default:  { runtime: omp,      model: gpt-5.6-sol }
@@ -14,8 +12,7 @@
 #     deepseek: { runtime: omp,      model: deepseek/deepseek-v4-flash,
 #                 fallback: openrouter/deepseek/deepseek-v4.1-flash }
 #
-#   cel run worker --repo r --branch b --profile astra
-#   cel-fanout delegate r b spec.md --profile deepseek
+#   cel run solo --product p --profile astra
 #
 # Two behaviours are worth knowing about before reading the code:
 #
@@ -24,7 +21,7 @@
 # only when the primary's provider has no credential on this box, and that is
 # decided BEFORE the pane spawns - because the alternative is an agent that
 # starts, prints an auth error and idles, which from the outside is
-# indistinguishable from a worker thinking hard.
+# indistinguishable from an agent thinking hard.
 #
 # THE LEVEL IS CLAMPED, NOT PASSED THROUGH. Runtimes accept different ladders
 # (claude has no `minimal`, codex has no `off`), so a level outside a runtime's
@@ -49,26 +46,24 @@ profile_names() { _yqr_ws -r '.worker_profiles // {} | keys_unsorted[]' "$1"; }
 # Which profile a role launches on when nobody passes --profile.
 #
 # This exists because THE ROLES THAT MOST NEED A FIXED MODEL ARE THE ONES
-# NOBODY LAUNCHES BY HAND: root comes up from the layout when the workspace
-# boots, and the sub-orchestrators are started by root itself. A per-launch
-# flag for those two is really an instruction to an agent, and agents forget.
-# Keyed by the same role names cel run takes - root, orchestrator, worker,
-# reviewer, direct.
+# NOBODY LAUNCHES BY HAND: root and the product agents come up from the layout
+# or the steward. A per-launch flag for those is really an instruction to an
+# agent, and agents forget. Keyed by the same role names cel run takes - root,
+# orchestrator, solo, reviewer, direct.
 role_profile() { # <wsdir> <role>
   _yqr_ws -r --arg r "$2" '.role_profiles[$r] // "" | tostring' "$1"
 }
 
 # The same binding, narrowed to one product or repo. A workspace's products are
 # not alike: the one under active research wants a different orchestrator from
-# the one grinding through well-specified tickets, and a repo with a heavy gate
-# may want a stronger worker than its neighbours. Without this the only choices
-# were to re-point EVERY orchestrator in the workspace or to pass --profile by
+# the one grinding through well-specified work. Without this the only choices
+# were to re-point EVERY product agent in the workspace or to pass --profile by
 # hand at each launch - and a flag nobody is there to type is the exact thing
 # role bindings exist to avoid.
 #
 # Resolution order, strongest first: a products[] entry whose name is $3, then
 # a repos[] entry whose name is $3, then the workspace's own role_profiles.
-# Products come first because an orchestrator is launched per PRODUCT - its
+# Products come first because a product agent is launched per PRODUCT - its
 # name is a product name, and a repo that happens to share it must not steal
 # the binding.
 #   products:
@@ -166,13 +161,13 @@ profile_clamp() { # <runtime> <level>
 #   PROFILE_VIA      "gateway" when the model is reached through the box's
 #                    auth-gateway rather than a provider directly
 # Fails only for a profile that does not exist; everything else degrades with a
-# warning, because refusing to start a worker is worse than starting a slower one.
+# warning, because refusing to start an agent is worse than starting a slower one.
 profile_resolve() { # <wsdir> <name> [<default-runtime>]
   local d="$1" name="$2" rt_default="${3:-}"
   PROFILE_WSDIR="$d"
   PROFILE_RUNTIME=""; PROFILE_MODEL=""; PROFILE_THINKING=""; PROFILE_NOTE=""; PROFILE_VETO=""; PROFILE_VIA=""
   profile_exists "$d" "$name" \
-    || die "no worker profile '$name' in $(ws_name "$d")/workspace.yaml (have: $(profile_names "$d" | tr '\n' ' '))"
+    || die "no profile '$name' in $(ws_name "$d")/workspace.yaml worker_profiles (have: $(profile_names "$d" | tr '\n' ' '))"
 
   PROFILE_RUNTIME="$(profile_get "$d" "$name" runtime)"
   [ -n "$PROFILE_RUNTIME" ] || PROFILE_RUNTIME="$rt_default"
@@ -223,8 +218,8 @@ profile_resolve() { # <wsdir> <name> [<default-runtime>]
 # to, and no balance endpoint - the account table is `cel gateway status`.
 # What IS the plane's business is the pair of ways this fails silently. A
 # gateway that is down serves no models at all, and a credential the gateway
-# has disabled vanishes from /v1/models entirely, so a worker sent there dies
-# with "Unknown model" and looks from the outside like a worker thinking hard.
+# has disabled vanishes from /v1/models entirely, so an agent sent there dies
+# with "Unknown model" and looks from the outside like an agent thinking hard.
 # Both are vetoes, decided here, before a pane spawns.
 _profile_gateway_route() { # <profile name> [runtime]
   local name="$1"
@@ -354,11 +349,9 @@ _profile_gateway_route_omp() { # <profile name>
 # QUOTA PREFLIGHT. A provider that is running dry is vetoed before the pane
 # spawns. If the profile declares a fallback on a DIFFERENT provider that is
 # not also dry, the route swaps and says so; otherwise PROFILE_VETO carries
-# the refusal for the caller (cel run, cel-fanout) to die on - `cel profiles`
-# prints it instead, so a dead account never breaks the listing. `unknown`
-# never vetoes: refusing to work because a balance endpoint was down would be
-# a worse outage than the one this prevents (firstmate: "unknown runway
-# remains eligible with disclosed uncertainty").
+# the refusal for the caller (cel run) to die on - `cel profiles` prints it
+# instead, so a dead account never breaks the listing. Unknown balance never
+# vetoes: an unavailable balance endpoint must not stop work.
 #
 # A veto swaps ROUTE, never reasoning class. Silently dropping the thinking
 # level to stretch a budget would trade a visible refusal for invisible
@@ -385,7 +378,7 @@ _profile_quota_check() { # <wsdir> <name> <fallback-model>
       return 0
     fi
   fi
-  PROFILE_VETO="$prov balance is $rem $(provider_balance "$prov" unit), below its floor of $floor - a worker sent there would die mid-flight. Top up at $(provider_get "$prov" console), or point the profile at another provider."
+  PROFILE_VETO="$prov balance is $rem $(provider_balance "$prov" unit), below its floor of $floor - an agent sent there would die mid-flight. Top up at $(provider_get "$prov" console), or point the profile at another provider."
   PROFILE_NOTE="${PROFILE_NOTE:+$PROFILE_NOTE; }VETOED: $prov balance $rem below floor $floor"
   c_err "profile $name: $PROFILE_VETO"
 }
@@ -400,7 +393,7 @@ _profile_quota_check() { # <wsdir> <name> <fallback-model>
 #
 # Keys are compared by HASH and never printed, and a mismatch is a warning
 # rather than a refusal: the run may well be what you wanted, but you should
-# know whose credit it is spending before a worker starts.
+# know whose credit it is spending before an agent starts.
 _profile_credential_check() { # <runtime> <provider> <wsdir>
   local rt="$1" prov="$2" d="$3" probe wskey rtkey
   # The probe shells out to the runtime and reads a real credential store, so
@@ -483,7 +476,7 @@ profile_launch_args() { # <runtime> <model> <thinking> [isolate-name]
   esac
 }
 
-cmd_profiles() { # [name]
+cmd_profiles() { # [name] - the profiles agent launches can use, and the role bindings
   local wsdir; wsdir="$(ws_current)" \
     || die "cel profiles: not inside a workspace (cd into one)"
   local names; mapfile -t names < <(profile_names "$wsdir")
@@ -529,7 +522,7 @@ EOS
   # Which roles are BOUND to a profile - the part that applies without anyone
   # typing a flag, and therefore the part worth showing unprompted.
   local role bound any=0
-  for role in root orchestrator worker scout reviewer direct; do
+  for role in root orchestrator solo reviewer direct; do
     bound="$(role_profile "$wsdir" "$role")"
     [ -n "$bound" ] || continue
     [ "$any" -eq 1 ] || { printf '\nbound by role (no --profile needed):\n'; any=1; }
@@ -542,5 +535,5 @@ EOS
   done
   [ "$any" -eq 1 ] || printf '\nNo role_profiles: bindings - every role uses runtime: + the default level.\n'
 
-  printf '\nOverride once: cel run worker --repo <r> --branch <b> --profile <name>\n'
+  printf '\nOverride once: cel run solo --product <p> --profile <name>\n'
 }

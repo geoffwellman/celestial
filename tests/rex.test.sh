@@ -74,7 +74,7 @@ test_rex_run_preserves_role_inbox_args_and_working_directory() {
   [ "$rc" = 0 ] || { echo "$out"; _rext_down; return 1; }
   local i
   for ((i=0;i<50;i++)); do [ -f "$CEL_REX_STATE/observed" ] && break; sleep 0.1; done
-  assert_eq "$(cat "$CEL_REX_STATE/observed")" "$(printf 'orchestrator\nwidget-orch\nrex\n%s' "$RT/ws/repos/widget")"
+  assert_eq "$(cat "$CEL_REX_STATE/observed")" "$(printf 'solo\nwidget-orch\nrex\n%s' "$RT/ws/repos/widget")"
   assert_contains "$(cat "$CEL_REX_STATE/args")" '--append-system-prompt'
   assert_eq "$(cat "$CEL_REX_STATE/workspace-env")" "$(printf 'declared workspace value\nlocal workspace value')"
   assert_eq "$(cel_agent_list | jq -r '.result.agents[0].pane_id')" 'rex/session:test/block:test'
@@ -260,36 +260,6 @@ test_rex_live_receipt_without_turn_state_is_unknown_not_absent() {
     echo 'incomplete live record was treated as a trustworthy inventory'; _rext_down; return 1
   fi
   rm -f "$CEL_REX_STATE/widget-orch.json"
-  _rext_down
-}
-
-test_rex_worker_creates_its_own_new_branch_without_switching_the_shared_checkout() {
-  _rext_setup
-  local repo="$RT/ws/repos/widget"
-  git -C "$repo" init -q -b main
-  git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m base
-  git -C "$repo" update-ref refs/remotes/origin/main HEAD
-  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-  local out
-  if (cd "$RT/ws" && CEL_REX_BIN="$RT/missing-rex" cmd_run worker --repo widget --branch WG-7-example --session-backend rex >/dev/null 2>&1); then
-    echo 'worker launched without Rex'; _rext_down; return 1
-  fi
-  if git -C "$repo" show-ref --verify --quiet refs/heads/WG-7-example; then
-    echo 'missing backend left a worker branch behind'; _rext_down; return 1
-  fi
-  if ! out="$(cd "$RT/ws" && cmd_run worker --repo widget --branch WG-7-example --session-backend rex 2>&1)"; then
-    echo "$out"; _rext_down; return 1
-  fi
-  local wt; wt="$(jq -r .cwd "$CEL_REX_STATE/widget-wg-7-example.json")"
-  assert_eq "$(git -C "$wt" branch --show-current)" WG-7-example
-  assert_eq "$(git -C "$repo" branch --show-current)" main
-  assert_eq "$(git -C "$wt" rev-parse HEAD)" "$(git -C "$repo" rev-parse main)"
-  rex_agent_stop "$(jq -r .pane_id "$CEL_REX_STATE/widget-wg-7-example.json")"
-  printf 'keep this edit\n' > "$wt/local-work.txt"
-  if ! out="$(cd "$RT/ws" && cmd_run worker --repo widget --branch WG-7-example --session-backend rex 2>&1)"; then
-    echo "$out"; _rext_down; return 1
-  fi
-  assert_eq "$(cat "$wt/local-work.txt")" 'keep this edit'
   _rext_down
 }
 

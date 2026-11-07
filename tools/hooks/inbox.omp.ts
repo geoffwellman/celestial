@@ -358,10 +358,10 @@ export default function celestialInbox(pi): void {
   // - itself a thin wrapper over one `cel` command - and posts what it printed
   // into the conversation without starting a turn, so the agent sees what its
   // owner ran. Registered for the agents that own a product or the box (core,
-  // root, orchestrators, solo agents); workers and reviewers get none. The
+  // root, orchestrators, solo agents); reviewers get none. The
   // `cel-` prefix: omp has built-in /review and /restart.
   const HERE_VERBS = {
-    mode: "Show or switch this product's mode: /cel-mode [product] [solo|fleet]",
+    mode: "Show this product's mode, or set it to solo: /cel-mode [product] [solo]",
     status: "cel fleet for this product's workspace (core: the whole box)",
     inbox: "Read unread celestial mail now",
     decide: "Open owner questions (core: all; others: your own)",

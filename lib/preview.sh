@@ -6,8 +6,8 @@
 #   cel preview <repo>#<pr> --stop
 #   cel preview --list [--json]
 #
-# The repo says how in workspace.yaml - the same `preview:` block
-# `cel-fanout try` reads, with two optional steps added:
+# The repo says how in workspace.yaml, in a `preview:` block with two
+# optional steps:
 #
 #   repos:
 #     - name: widget
@@ -53,7 +53,7 @@ _preview_host() { # the address a phone or laptop on the tailnet reaches
   dash_host
 }
 _preview_port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-# A block of ten from 4600 - away from `cel-fanout try`'s 4400 - because a
+# A block of ten from 4600 because a
 # preview is often several processes ({port+N}).
 _preview_alloc_port() {
   local base="${CEL_PREVIEW_PORT_BASE:-4600}" i ok

@@ -28,7 +28,6 @@ export CEL_ROOT="$CEL_ROOT"
 export PATH="\$HOME/.local/bin:\$PATH"
 [ -d "\$HOME/.local/share/mise/shims" ] && export PATH="\$HOME/.local/share/mise/shims:\$PATH"
 export PATH="$CEL_ROOT/bin:\$PATH"
-export PATH="$CEL_ROOT/core/skills/fanout/bin:\$PATH"
 export PATH="$CEL_ROOT/core/skills/linear/bin:\$PATH"
 # A shell that starts inside a workspace inherits its env: map and env.local
 # overrides. Silent no-op elsewhere; re-run by hand after cd-ing between
@@ -98,8 +97,7 @@ cel - the celestial plane
                                 the name of. Idempotent; never destructive
   cel ws down <name> [--force]  stop the agents it owns and close its panes;
                                 refuses over work that is neither pushed nor
-                                landed. PANES, never worktrees - letting work
-                                go is `cel-fanout release`
+                                landed. PANES, never worktrees
   cel ws reset <name>           down, then up, with the same refusals
   cel ws status [name] [--json] declared versus live, per member
   cel core [--restart [--force] [--pane p]] [--fresh] [--model m] [--thinking l] [--dry-run]
@@ -118,15 +116,13 @@ cel - the celestial plane
                                 unless --force; picks by name, never the
                                 first agent in a shared cwd); a plain run over a dead one
                                 resumes its last session, --fresh does not
-  cel run solo [--product p]    start the product's agent in solo mode for this
-                                launch: it builds and ships itself, no fan-out
-                                (cel run orchestrator does this on its own for
-                                a product whose mode is solo)
+  cel run solo [--product p]    start the product's agent: it builds, tests,
+                                opens PRs and lands them itself (cel run
+                                orchestrator starts the same agent)
   cel run solo --product p --lane <name>
                                 a further solo agent on the same product for a
                                 separate goal: pane/mailbox <p>-<name>, its own
-                                directory and session; restart with --restart.
-                                Back to fleet is refused while a lane is live
+                                directory and session; restart with --restart
   cel run solo --product p --lane n --model m --remember-current-model PID
                                 save a verified live Rex lane model for future
                                 restarts, without restarting it (--dry-run to preview)
@@ -134,13 +130,11 @@ cel - the celestial plane
                                 the pane's own product: mode, status, inbox,
                                 decide, review, land, restart (core: + focus).
                                 cel here help for the list
-  cel mode [product] [solo|fleet] [--no-restart]
-                                show or set how a product is built: fleet
-                                (orchestrator + workers) or solo (one agent).
-                                Setting it writes workspace.yaml and restarts
-                                the live agent into the new role on the same
-                                session once its turn ends; refuses solo while
-                                fleet work is still in flight
+  cel mode [product] [solo]     show a product's build mode, or set it to
+                                solo (the only mode since fan-out retired;
+                                `fleet` is refused). Setting it writes
+                                workspace.yaml and restarts the live agent on
+                                the same session once its turn ends
   cel solo review <repo>#<pr> approved|changes --head <sha> --by <alias> [--note t]
                                 a reviewer's verdict on a solo product's PR,
                                 bound to the exact head it read
@@ -162,7 +156,7 @@ cel - the celestial plane
                                 and cel gc closes it when the PR closes
                                 --profile p / --model m / --thinking l:
                                 launch on a different CLI, model or effort
-  cel profiles [name]           worker profiles this workspace declares, and
+  cel profiles [name]           launch profiles this workspace declares, and
                                 the exact launch flags each one resolves to
   cel quota [provider] [--json] the signed-in Claude and Codex subscriptions -
                                 each window, its percentage and when it resets -
@@ -203,24 +197,13 @@ cel - the celestial plane
                                 tiered (pinned / aging 30d / perishable 7d) and
                                 budgeted into every agent's policy block
   cel effects install|status    optional Canvas UI dashboard effects (Chrome)
-  cel work [<ws>] [<key>]       THE WORK ITEM: ticket + worktree + PR + mail
-                                as one thing, grouped by stage with the next
-                                action per row. No workspace = every one of
-                                them; a key renders that item and its events
-                                --stage S / --product P / --json / --fresh
-  cel history [<ws>] [--since 7d] [--key K] [--json]
-                                the vertical timeline: every event grouped by
-                                work item, newest group first, drawn with a
-                                spine - what actually happened to ABC-49
-  cel fleet [--json] [--workspace w]  the whole box in one read: per repo,
-                                orchestrator liveness, workers n/cap, stalled
-                                and unlanded work, plus root's mail
+  cel fleet [--json] [--workspace w]  the whole box in one read: per product,
+                                its agent and lanes, plus root's mail
   cel afk on|off|status|log     away from keyboard: while it is on, the factory
                                 may resolve a verified bot-review thread, land
                                 a PR that is approved + green + gate-verified,
-                                rebase one pushed behind by another merge, and
-                                dispatch a follow-up a reviewer or scout wrote
-                                down - and NOTHING else. AFK changes who
+                                and rebase one pushed behind by another
+                                merge - and NOTHING else. AFK changes who
                                 decides, never what is required. `on --until
                                 <when>` expires on its own, `--scope <ws>`
                                 confines it to one workspace; `log` is the one
@@ -242,7 +225,7 @@ cel - the celestial plane
   cel steward --install         run it every 5 min via a systemd user timer -
                                 without this NOTHING is proactive; --interval
                                 <min> to retune, --remove to stop
-  cel gc [--reap <hours>]       remove merged/closed worker worktrees, and
+  cel gc [--reap <hours>]       remove merged/closed solo worktrees, and
                                 close the reviewer panes whose PR is merged
                                 or closed (an open PR's reviewer is left
                                 alone however long it has waited); --reap
@@ -282,6 +265,10 @@ cel - the celestial plane
   cel preview <repo>#<pr> --stop | --list [--json]
   cel spike <name>              throwaway repo in the current workspace
   cel promote <spike>           spike -> real repo + manifest entry
+
+  Retired with fan-out on 2026-11-08 (refused, kept one release so a habit
+  gets an answer): cel-fanout, cel run worker|scout|spike, cel mode <p> fleet,
+  cel work, cel history
 EOS
 }
 
@@ -320,8 +307,9 @@ case "${1:-help}" in
             printf 'celestial v%s (%s, %s)\n' "$(cel_build_version)" \
               "$(cel_build_sha)" "$(cel_build_branch)";;
   fleet)    shift; . "$CEL_ROOT/lib/fleet.sh";   cmd_fleet "$@";;
-  work)     shift; . "$CEL_ROOT/lib/work.sh";    cmd_work "$@";;
-  history)  shift; . "$CEL_ROOT/lib/work.sh";    cmd_history "$@";;
+  work|history)
+            c_err "cel $1: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming) - cel fleet, cel forge pr list and cel dash show products, PRs and mail"
+            exit 2;;
   steward)  shift; . "$CEL_ROOT/lib/steward.sh"; cmd_steward "$@";;
   afk)      shift; . "$CEL_ROOT/lib/afk.sh";     cmd_afk "$@";;
   dash)     shift; . "$CEL_ROOT/lib/dash.sh";    cmd_dash "$@";;

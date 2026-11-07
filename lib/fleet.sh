@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # cel fleet - the whole box in one read.
 #
-# Every other view is per workspace: `cel-fanout status` needs you standing in
-# one, a dashboard serves one, the steward warns about one at a time. This
+# Per workspace and product: the product's agent (`<product>-orch`) and its
+# lanes, the solo worktrees they keep, root's mail, orphans and memory. This
 # file answers the question an operator asks first - "what is the state of
 # everything?" - as a single deterministic call: no tokens, no agent
 # judgement, only numbers that are true at the moment of the read.
@@ -12,22 +12,12 @@
 # afraid to run.
 [ -n "${_CEL_FLEET:-}" ] && return 0
 _CEL_FLEET=1
-# The field separator this file passes its own facts around with. A TAB will
-# not do: tab is IFS whitespace, so `IFS=$'\t' read` silently COLLAPSES a run
-# of them and an empty verdict beside an empty severity turns into one field
-# and a row shifted by two. Unit Separator is not whitespace and appears in
-# nothing git, jq or herdr can hand us.
-_FLEET_US=$'\x1f'
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/inbox.sh
 . "${BASH_SOURCE[0]%/*}/inbox.sh"
-# shellcheck source=lib/stall.sh
-. "${BASH_SOURCE[0]%/*}/stall.sh"
-# shellcheck source=lib/liveness.sh
-. "${BASH_SOURCE[0]%/*}/liveness.sh"
 # shellcheck source=lib/run.sh
 . "${BASH_SOURCE[0]%/*}/run.sh"
 # shellcheck source=lib/memory.sh
@@ -48,8 +38,8 @@ fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are P
 }
 
 # One herdr roster for the whole run. The sweep below asks about every
-# orchestrator and every running worker, and a call per question turned a
-# read into a visible pause.
+# product agent and lane, and a call per question turned a read into a
+# visible pause.
 #
 # AND IT IS A DOCUMENT OR IT IS NOTHING. herdr answering with a truncated
 # document - killed mid-write, or dead between the opening brace and the rest
@@ -62,7 +52,7 @@ fleet_orphans_json() { # -> {count, rss_mb}  (rss_mb fields here and below are P
 # AND SHAPE-VALID IS NOT ANSWERED. Checking only that the bytes PARSE admits
 # `{}`, `[]`, an error envelope, and any document about something other than
 # agents - each of which then reads as a roster that knows about nobody, and
-# so as `gone` for every worker on the box. Only a document with
+# so as `gone` for every agent on the box. Only a document with
 # `.result.agents` as an ARRAY has said anything about who is alive; anything
 # else is the no-roster path, and `-`.
 _fleet_roster() {
@@ -76,321 +66,27 @@ _fleet_roster() {
   printf '%s' "$out"
 }
 
-# ONE PASS OVER THE LEDGER, NOT ONE PER ROW.
-#
-# The ledger is read with jq, deliberately, and not by sourcing cel-fanout:
-# cel-fanout is a BINARY that runs a delegation when sourced, not a library.
-#
-# One jq per REPO answers everything the loop reads, the roster join
-# included: a jq per row to pull fields back out, or to ask the roster about
-# that row's pane, multiplies with the worker count.
-#
-# ONLY THE STATES THAT ARE STILL SOMEBODY'S CONCERN. `landed`, `salvaged` and
-# `orphaned` rows are finished business - `live: gone`, no readable worktree -
-# and listing them buries the rows that matter. `running`, `unconfirmed` and
-# `blocked` are a worker still in play; `finished` and `collected` are waiting
-# on a human to land them or let them go. Everything else is history, and
-# history is what `cel-fanout status --json` is for - that view still carries
-# every state, `released` included.
-#
-# An empty roster means herdr did not answer, and `-` says that about the
-# OBSERVER; `gone` says it about the worker. lib/stall.sh draws the same
-# distinction, and the two must not be folded together here.
-_fleet_unit_rows() { # <wsdir> <repo> <roster-json> -> entry US pane US worktree US state US live US harness US id US backend
-  local led="$1/.cel/delegations.json"
-  [ -f "$led" ] || return 0
-  # The roster arrives as a STRING and is parsed inside the program, not as
-  # --argjson: a malformed document there fails jq before it has opened the
-  # ledger, the `|| true` below swallows it, and the fleet renders with every
-  # worker row missing - a box that looks idle because the pane manager
-  # stuttered. `fromjson?` yields nothing rather than raising, so an
-  # unreadable roster degrades to the no-roster path instead of to silence.
-  #
-  # PARSING IS NOT ENOUGH, and this is the second half of the same lesson:
-  # `{}` and `[]` parse. A document without `.result.agents` as an array
-  # cannot be searched for a pane, so it must not answer for one - it is the
-  # no-roster path, `-`, a fact about the OBSERVER. (`[]` is worse than wrong:
-  # `.result` on an array raises, and the `|| true` below turns that into a
-  # fleet with no rows at all.) _fleet_roster screens the same shape one level
-  # up; this program is called with a roster string by callers of its own and
-  # does not get to assume that happened.
-  jq -r --arg r "$2" --arg roster "${3:-}" --arg us "$_FLEET_US" '
-    (($roster | fromjson?) // null
-      | if (type == "object" and (.result | type) == "object"
-             and (.result.agents | type) == "array") then . else null end) as $roster
-    | def agent($p): if $roster == null then null
-                   else ((($roster.result.agents? // []) | map(select(.pane_id == $p)))[0] // {}) end;
-    .[]?
-    | select(.repo == $r and ((.state // "") | IN("running", "unconfirmed", "finished", "collected", "blocked")))
-    | select((.replacement.role // "") != "source")   # its worker now belongs to the replacement row
-    | . as $e
-    | (.pane // "") as $p
-    | agent($p) as $a
-    | (if $a == null then "-" else (if ($a.agent_status // "") == "" then "gone" else $a.agent_status end) end) as $live
-    | [($e | tojson), $p, (.worktree // ""), (.state // ""), $live,
-       (if $a == null then "" else ($a.agent // "") end), (.id // ""), ($a.backend // "herdr")]
-    | join($us)' \
-    "$led" 2>/dev/null || true
-}
-
-# EVERY GIT QUESTION THIS VIEW ASKS OF ONE WORKTREE, ASKED ONCE.
-#
-# Every git call is a fork, and the forks - not the work - dominate the
-# render; both `unlanded` and the row's own severity want the same at-risk
-# answer.
-#
-# So: ONE `for-each-ref` covering every ref the questions are about (which
-# branch is checked out, whether it has a remote twin, where origin/HEAD
-# points), ONE `status --porcelain`, and at most two `rev-list --count` -
-# reduced to one when both counts have the same base. The answer is
-# remembered per worktree for the length of the read, so the second caller
-# pays nothing.
-#
-# IT STAYS FORGIVING. A batched query that turns "could not ask" into an
-# error would convict a detached HEAD, a branch the remote has never seen, or
-# a checkout with no origin at all. Unknown is `?` and at-risk is empty.
-declare -gA _FLEET_GIT_FACTS=()
-_FLEET_GIT_AHEAD='?'
-_FLEET_GIT_RISK=''
-# It sets two variables rather than printing them, because a memo written
-# inside `$(...)` is written in a subshell and thrown away.
-_fleet_git_load() { # <worktree> -> sets _FLEET_GIT_AHEAD, _FLEET_GIT_RISK
-  local wt="${1:-}"
-  if [ -n "$wt" ] && [ -n "${_FLEET_GIT_FACTS[$wt]+x}" ]; then
-    local memo="${_FLEET_GIT_FACTS[$wt]}"
-    _FLEET_GIT_AHEAD="${memo%%"$_FLEET_US"*}"
-    _FLEET_GIT_RISK="${memo#*"$_FLEET_US"}"
-    return 0
-  fi
-  local ahead='?' risk='' br='' origin_head=''
-  local refs mark name symref
-  declare -A have=()
-  if [ -n "$wt" ] && [ -d "$wt" ]; then
-    # %(HEAD) is this worktree's HEAD, so the checked-out branch comes out of
-    # the same read as the refs, and a detached HEAD simply marks nothing. The
-    # marker is emitted as `*` or `-` rather than as git's "* or a space",
-    # because a leading empty field and `read` do not survive each other.
-    refs="$(git -C "$wt" for-each-ref \
-      --format='%(if)%(HEAD)%(then)*%(else)-%(end) %(refname) %(symref)' \
-      refs/heads refs/remotes/origin 2>/dev/null || true)"
-    while read -r mark name symref; do
-      [ -n "$name" ] || continue
-      case "$name" in
-        refs/heads/*)
-          have["${name#refs/heads/}"]=1
-          [ "$mark" = '*' ] && br="${name#refs/heads/}" ;;
-        refs/remotes/*)
-          have["${name#refs/remotes/}"]=1
-          [ "$name" = refs/remotes/origin/HEAD ] && origin_head="${symref#refs/remotes/}" ;;
-      esac
-    done <<<"$refs"
-
-    # The base `fleet_ahead` counts from: repo_default_ref's answer, derived
-    # from the same read. A malformed origin/HEAD (a direct ref with no
-    # target) is a failure there and unknown here, not a silent fall back to
-    # main.
-    local base=""
-    if [ -n "${have[origin/HEAD]:-}" ]; then
-      case "$origin_head" in origin/*) base="$origin_head" ;; esac
-    elif [ -n "${have[origin/main]:-}" ]; then
-      base=origin/main
-    elif [ -n "${have[origin/master]:-}" ]; then
-      base=origin/master
-    fi
-
-    local n=''
-    if [ -n "$br" ] && [ -n "$base" ]; then
-      n="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || true)"
-      [[ "$n" =~ ^[0-9]+$ ]] && ahead="$n"
-    fi
-
-    # `.agent/` is the worker's REPORT - result.md and verdict.json, written
-    # at the end and never committed - so counting it would make every
-    # finished worker look like one holding work at risk. Same filter as
-    # lib/stall.sh, on the same output.
-    local dirty unpushed=0
-    dirty="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v ' \.agent/' | grep -c . || true)"
-    if [ -n "$br" ] && [ "$br" != HEAD ]; then
-      if [ -n "${have[origin/$br]:-}" ]; then
-        unpushed="$(git -C "$wt" rev-list --count "origin/$br..HEAD" 2>/dev/null || printf 0)"
-      elif [ -n "${have[origin/main]:-}" ]; then
-        # No remote branch AT ALL: everything this worktree has ever committed
-        # is unpushed, counted from origin/main exactly as stall_work_at_risk
-        # counts it, and reusing the number above when that is the base it
-        # already asked for.
-        if [ "$base" = origin/main ] && [[ "$ahead" =~ ^[0-9]+$ ]]; then
-          unpushed="$ahead"
-        else
-          unpushed="$(git -C "$wt" rev-list --count "origin/main..HEAD" 2>/dev/null || printf 0)"
-        fi
-      fi
-    fi
-    [ "${dirty:-0}" -gt 0 ] || [ "${unpushed:-0}" -gt 0 ] \
-      && risk="$(printf 'unpushed=%s dirty=%s' "${unpushed:-0}" "${dirty:-0}")"
-  fi
-  [ -n "$wt" ] && _FLEET_GIT_FACTS[$wt]="$ahead$_FLEET_US$risk"
-  _FLEET_GIT_AHEAD="$ahead"
-  _FLEET_GIT_RISK="$risk"
-}
-
-# How many commits this worktree carries beyond the verified remote default.
-# The same answer `cel-fanout status` prints in its AHEAD column, computed the
-# same way: unknown stays visible as `?` rather than being flattened to zero,
-# because "no commits" and "could not ask" lead an operator to opposite acts.
-fleet_ahead() { # <worktree> -> count | ?
-  _fleet_git_load "$1"
-  printf '%s' "$_FLEET_GIT_AHEAD"
-}
-
-# EVERYTHING A ROW IS JUDGED ON, COMPUTED ONCE.
-#
-# One call, one set of facts - the verdict, the age, the footprint and the
-# at-risk answer - shared by the row and the unit's counts, so the count an
-# operator compares against the list is literally the same value the list
-# carries.
-#
-# THE VERDICT IS ONLY EVER PASSED ON A RUNNING ROW. A collected or finished
-# worker is idle with nothing written since, by design - convicting it of
-# being stalled is how a watcher earns its reputation for crying wolf, and it
-# would put this list permanently out of step with the `stalled` count beside
-# it. An empty `live` (herdr did not answer at all) is not evidence either.
-_fleet_row_facts() { # <live> <text> <worktree> <state> <id> [backend] -> 8 lines
-  local live="$1" text="$2" wt="$3" state="$4" id="$5" backend="${6:-herdr}"
-  local quiet="" verdict="" severity="" risk="" activity="" aconf="" cached
-  # Quiet time is a question about a RUNNING worker: answering it for every
-  # row would `find` over every worktree on the box on every fleet call.
-  # Other rows show '-'.
-  [ "$state" = running ] && quiet="$(stall_quiet_secs "$wt")"
-  # The batched git query, and the only place it is asked from: both the
-  # at-risk answer and the ahead count come out of it, so stall_work_at_risk
-  # is not called here (it would ask the same questions a second time).
-  _fleet_git_load "$wt"
-  risk="$_FLEET_GIT_RISK"
-  if [ "$backend" != rex ] && [ "$state" = running ] && [ "$live" != "-" ]; then
-    verdict="$(stall_verdict "$live" "$text" "$quiet")"
-    severity="$(stall_severity "$verdict" "$risk")"
-  fi
-  # -1, not 0: a worktree that cannot be read has an UNKNOWN age, and zero
-  # would render as a worker that wrote something a moment ago.
-  [ -n "$quiet" ] || quiet=-1
-  # WHAT THE PANE IS DOING, when somebody has recently asked. The
-  # fleet never asks itself: this view is read in a loop and a network call per
-  # row is a view people stop running. It carries the steward's last answer,
-  # which is why a row nobody has classified simply has neither field filled -
-  # and why a stale answer is dropped rather than shown as current.
-  cached=""
-  [ "$backend" = rex ] || cached="$(liveness_cached "$id")"
-  if [ -n "$cached" ]; then
-    activity="${cached%%	*}"
-    aconf="${cached#*	}"
-  fi
-  # Newline-separated, not tab: see _FLEET_US above for what `read` does to a
-  # run of tabs, and these fields are empty most of the time. The trailing `.`
-  # is not decoration - `$(...)` eats trailing newlines, so without it a row
-  # whose last facts are empty comes back short, the caller's last `read` hits
-  # EOF and returns non-zero, and under `set -e` that kills
-  # `cel-fanout status --json`.
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n.' \
-    "$quiet" "$verdict" "$severity" "$_FLEET_GIT_AHEAD" \
-    "$(mem_tree_rss_mb "$wt")" "$activity" "$aconf" "$risk"
-}
-
-# ONE LEDGER ROW AS THE THING AN OPERATOR ACTUALLY ASKS ABOUT.
-#
-# The console and the model answer "why is this worker stalled?" from this
-# state - id, verdict, reason - not from a stalled COUNT. `cel fleet --json`
-# and `cel-fanout status --json` both render from HERE, so the two surfaces
-# cannot describe the same worker differently; the shape is a contract the
-# console is written against.
-#
-# The last argument is the facts above when the caller already has them (the
-# fleet's own sweep does), and absent when it does not (cel-fanout calls this
-# with three arguments, and must keep being able to).
-fleet_worker_row() { # <ledger-entry-json> <live> <pane-text> [worktree] [state] [facts]
-  local e="$1" live="${2:--}" text="${3:-}"
-  [ -n "$live" ] || live="-"
-  local wt="${4:-}" state="${5:-}" facts="${6:-}"
-  if [ -z "$facts" ]; then
-    # One jq for all three when the caller did not already have them: every
-    # jq is a process, and this runs once per row.
-    local ewt estate id
-    { read -r ewt; read -r estate; read -r id; } < <(printf '%s' "$e" |
-      jq -r '[(.worktree // ""), (.state // ""), (.id // "")] | .[]')
-    [ -n "$wt" ] || wt="$ewt"
-    [ -n "$state" ] || state="$estate"
-    facts="$(_fleet_row_facts "$live" "$text" "$wt" "$state" "$id")"
-  fi
-  # ...AND WHAT THE PANE IS, which needs nobody asked at all. A pane
-  # holding an unsubmitted prompt, erroring on every turn, or refused by its
-  # provider all render as a worker thinking, and all three are visible in the
-  # text. Carried as its own field so a view can show `running` and the reason
-  # it is not moving in the same row.
-  local silence="" sreset=""
-  if [ "$state" = running ] || [ "$state" = unconfirmed ]; then
-    silence="$(liveness_pane_silence "$text" "$(printf '%s' "$e" | jq -r '.provider // ""')")"
-    sreset="$(printf '%s' "$silence" | cut -f2 -s)"
-    silence="$(printf '%s' "$silence" | cut -f1)"
-  fi
-  local quiet verdict severity ahead rss activity aconf
-  { read -r quiet; read -r verdict; read -r severity; read -r ahead
-    read -r rss; read -r activity; read -r aconf; } <<<"$facts"
-  printf '%s' "$e" | jq -c \
-    --arg silence "$silence" --arg silence_reset "$sreset" \
-    --arg live "$live" --argjson quiet "$quiet" \
-    --arg activity "$activity" --arg aconf "$aconf" \
-    --arg verdict "$verdict" --arg severity "$severity" \
-    --arg ahead "$ahead" \
-    --argjson rss "$rss" \
-    --arg harness "${FLEET_HARNESS:-}" \
-    '{id: (.id // ""), ticket: (.ticket // ""), repo: (.repo // ""),
-      branch: (.branch // ""), shape: (.shape // "ship"), state: (.state // ""),
-      live: $live, quiet_secs: $quiet, verdict: $verdict, severity: $severity,
-      ahead: $ahead, rss_mb: $rss, pr: (.pr // ""), created: (.created // ""),
-      alias: (.alias // ""), pane: (.pane // ""), worktree: (.worktree // ""),
-      profile: (.profile // ""), runtime: (.runtime // ""), model: (.model // ""),
-      activity: $activity, activity_confidence: $aconf,
-      silence: $silence, silence_reset: $silence_reset,
-      harness: $harness}'
-}
-
-# MAIL TO A PANE THAT IS NOT THERE. A message accepted for an alias with no
-# live pane goes nowhere, which is worse than a refusal - the sender believes
-# it was delivered. Prints the sentence and returns 0 when the alias has no
-# live pane.
-#
-# A roster nobody could read is NOT evidence that anyone died: an empty
-# agents document says nothing at all.
-fleet_alias_undeliverable() { # <agents-json> <alias>
-  local agents="${1:-}" alias="${2:-}"
-  [ -n "$agents" ] && [ -n "$alias" ] || return 1
-  printf '%s' "$agents" | jq -e '.result.agents? | length > 0' >/dev/null 2>&1 || return 1
-  printf '%s' "$agents" | jq -e --arg a "$alias" \
-    '[.result.agents[]? | select((.name // .agent_id // "") == $a)] | length > 0' >/dev/null 2>&1 \
-    && return 1
-  printf '%s has no live pane - anything sent to it is filed, not delivered; start the agent before writing to it' "$alias"
-  return 0
-}
-
-# The unit line. The unit is the PRODUCT: the thing one orchestrator stands
-# over. A declared product names its repos after itself, because `bundle` on
-# its own tells an operator nothing about which checkouts are moving; an
-# implicit product IS its repo and renders as its bare name.
-_fleet_unit_line() { # <label> <orch> <workers> <cap> <stalled> <unlanded> <mem>
-  printf '  %-12s orch %-5s workers %s/%s   stalled %s   unlanded %s   mem %s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7"
-}
-# A solo product has no workers to count: its agent, any lanes (extra solo
-# agents on separate goals), and the git worktrees they keep for branches.
+# The unit line. The unit is the PRODUCT: the thing one agent stands over. A
+# declared product names its repos after itself, because `bundle` on its own
+# tells an operator nothing about which checkouts are moving; an implicit
+# product IS its repo and renders as its bare name. A solo product shows its
+# agent, any lanes (extra solo agents on separate goals), and the git
+# worktrees they keep for branches.
 _fleet_solo_line() { # <label> <agent> <worktrees> <mem> [lanes]
   printf '  %-12s solo %-5s worktrees %s   mem %s%s\n' "$1" "$2" "$3" "$4" "${5:+   lanes: $5}"
 }
+# A product still declaring the retired `mode: fleet`: its agent is not
+# launched until the product is switched.
+_fleet_legacy_line() { # <label> <agent> <mem> <product>
+  printf '  %-12s fleet %-5s mem %s   (retired: cel mode %s solo)\n' "$1" "$2" "$3" "$4"
+}
 
-# WHERE THE ORCHESTRATOR PANE STANDS, which is the directory its memory is
+# WHERE THE PRODUCT AGENT STANDS, which is the directory its memory is
 # attributed to. A declared product has its own directory under products/; an
 # implicit product is only a repo checkout. The same derivation lib/steward.sh
 # makes for the same reason - identity in this plane comes from paths - and
 # reading the wrong one reports zero for a live pane, which an operator cannot
-# tell apart from an orchestrator that is not running.
+# tell apart from an agent that is not running.
 _fleet_orch_dir() { # <wsdir> <product>
   if ws_product_declared "$1" "$2"; then printf '%s/products/%s' "$1" "$2"
   else printf '%s/repos/%s' "$1" "$2"; fi
@@ -400,7 +96,7 @@ _fleet_orch_dir() { # <wsdir> <product>
 # render from this.
 _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   local wsdir="$1" product="$2" roster="$3"
-  local orch="-" workers=0 stalled=0 unlanded=0 cap declared=false
+  local orch="-" declared=false
 
   local repos=() repo
   while IFS= read -r repo; do
@@ -412,20 +108,12 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
   local mode solo_wt=0
   if [ "$declared" = true ]; then mode="$(ws_product_get "$wsdir" "$product" mode)"
   else mode="$(ws_repo_get "$wsdir" "$product" mode)"; fi
-  mode="${mode:-fleet}"
+  mode="${mode:-solo}"
   [ "$mode" != solo ] || solo_wt="$(ws_solo_worktrees "$wsdir" "$product" | grep -c . || true)"
 
-  # THE CAP BELONGS TO THE ORCHESTRATOR, NOT THE REPO - the same precedence
-  # `cel-fanout delegate` uses when it refuses a worker. A view that counted
-  # per repo would show a two-repo product as half as busy as the thing that
-  # actually stops it, and the two numbers people compare must be one number.
-  cap="$(ws_product_get "$wsdir" "$product" workers)"
-  [ -n "$cap" ] || cap="$(ws_policy "$wsdir" workers)"
-  [ -n "$cap" ] || cap=4
-
   # An empty roster means herdr did not answer. That is not evidence that
-  # anyone died, so with no roster every orchestrator reads as unknown and
-  # nothing is convicted.
+  # anyone died, so with no roster every agent reads as unknown and nothing
+  # is convicted.
   local have_roster=0
   [ -n "$roster" ] && have_roster=1
 
@@ -440,11 +128,11 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
         *)       orch="LIVE" ;;
       esac
     else
-      # NO ALIAS IS NOT NO ORCHESTRATOR. herdr can clear a live agent's name
-      # on restart, and `orch -` invites starting a second orchestrator on top
-      # of the live one. An agent alive in the product's OWN directory is that
-      # product's orchestrator whatever herdr calls it, and `unnamed` is a
-      # state with a cure: cel ws up <workspace>.
+      # NO ALIAS IS NOT NO AGENT. herdr can clear a live agent's name on
+      # restart, and `orch -` invites starting a second agent on top of the
+      # live one. An agent alive in the product's OWN directory is that
+      # product's agent whatever herdr calls it, and `unnamed` is a state
+      # with a cure: cel ws up <workspace>.
       local here
       here="$(printf '%s' "$roster" | jq -r --arg c "$(_fleet_orch_dir "$wsdir" "$product")" \
         '[.result.agents[]? | select((.cwd // "") == $c) | select((.agent_status // "") != "")] | length' 2>/dev/null || printf 0)"
@@ -452,60 +140,23 @@ _fleet_unit() { # <wsdir> <product> <roster-json> -> JSON
     fi
   fi
 
-  local rss=0 orch_rss
+  local orch_rss
   orch_rss="$(mem_tree_rss_mb "$(_fleet_orch_dir "$wsdir" "$product")")"
 
-  local row rows=""
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    local entry pane wt state live harness id backend text
-    IFS="$_FLEET_US" read -r entry pane wt state live harness id backend <<<"$row"
-
-    if [ "$have_roster" = 1 ] && [ "$backend" != rex ] && [[ "$pane" != rex/* ]] && [ "$state" = running ] && [ -n "$pane" ] && [ "$live" != gone ]; then
-      text="$(herdr pane read "$pane" --source detection --lines 40 2>/dev/null || true)"
-    else
-      text=""
-    fi
-
-    local facts quiet verdict severity ahead orss activity aconf risk
-    facts="$(_fleet_row_facts "$live" "$text" "$wt" "$state" "$id" "$backend")"
-    { read -r quiet; read -r verdict; read -r severity; read -r ahead
-      read -r orss; read -r activity; read -r aconf; read -r risk; } <<<"$facts"
-
-    if [ "$state" = running ]; then
-      workers=$((workers + 1))
-      [ -n "$risk" ] && unlanded=$((unlanded + 1))
-    fi
-
-    rows="$rows$(FLEET_HARNESS="$harness" fleet_worker_row "$entry" "$live" "$text" "$wt" "$state" "$facts")
-"
-    # The unit's footprint is the sum of its workers' - every state the list
-    # carries, not only `running`: a collected worker whose pane is still up
-    # is still holding the memory, and leaving it out would lose that memory
-    # between the row and the box.
-    rss=$((rss + ${orss:-0}))
-    # The count IS the list: counted from the same verdict the row carries, so
-    # the two numbers an operator compares can never disagree.
-    [ -n "$verdict" ] && stalled=$((stalled + 1))
-  done < <(for repo in "${repos[@]}"; do _fleet_unit_rows "$wsdir" "$repo" "$roster"; done)
-
-  # The rows are folded by the same jq that builds the unit, and the repo list
-  # arrives as positional arguments - no extra jq to assemble either.
   # Live lanes, from the roster this read already holds: agents standing in
-  # .cel/solo/<product>/lane-<name> (not in a deleted one). Solo units only -
-  # a fleet unit's document is unchanged - one jq, no herdr call.
+  # .cel/solo/<product>/lane-<name> (not in a deleted one). One jq, no herdr
+  # call.
   local lanes="[]"
   if [ "$mode" = solo ] && [ "$have_roster" = 1 ]; then
     lanes="$(printf '%s' "$roster" | jq -c --arg b "$(ws_solo_dir "$wsdir" "$product")/lane-" \
       '[.result.agents[]? | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not)) | (.cwd | ltrimstr($b))] | unique' 2>/dev/null || printf '[]')"
   fi
-  printf '%s' "$rows" | jq -sc --arg name "$product" --arg orch "$orch" \
-    --argjson workers "$workers" --argjson cap "$cap" \
-    --argjson stalled "$stalled" --argjson unlanded "$unlanded" \
+  # The repo list arrives as positional arguments - no extra jq to assemble it.
+  jq -nc --arg name "$product" --arg orch "$orch" \
     --argjson declared "$declared" --arg mode "$mode" --argjson solo_wt "${solo_wt:-0}" \
-    --argjson rss "$rss" --argjson orch_rss "$orch_rss" --argjson lanes "${lanes:-[]}" \
-    '{name: $name, mode: $mode, orch: $orch, workers: $workers, cap: $cap, stalled: $stalled, unlanded: $unlanded, rss_mb: $rss, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt}
-     + (if $mode == "solo" then {lanes: $lanes} else {} end) + {workers_list: .}' \
+    --argjson orch_rss "$orch_rss" --argjson lanes "${lanes:-[]}" \
+    '{name: $name, mode: $mode, orch: $orch, orch_rss_mb: $orch_rss, repos: $ARGS.positional, declared: $declared, solo_worktrees: $solo_wt}
+     + (if $mode == "solo" then {lanes: $lanes} else {} end)' \
     --args "${repos[@]}"
 }
 
@@ -533,7 +184,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
     [ -n "$open" ] || open=0
   fi
 
-  # The orchestrator candidates are one jq over the workspace and the roster,
+  # The agent candidates are one jq over the workspace and the roster,
   # and the product list is read off them rather than asked of the YAML a
   # second time (the fleet read is held to a spawn budget).
   local cands
@@ -544,9 +195,9 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
 "
   done
 
-  # The orchestrator rows are folded into THIS jq, mail included:
+  # The agent rows are folded into THIS jq, mail included:
   # the rows arrive as TSV with each mailbox's name and cursor state, and the inbox file is
-  # read here once for all of them - no jq per orchestrator (the budget).
+  # read here once for all of them - no jq per agent (the budget).
   local orows ifile
   orows="$(_fleet_orch_tsv "$ws" "$wsdir" "$roster" "$cands")"
   ifile="$(_inbox_file "$ws")"
@@ -569,7 +220,7 @@ _fleet_workspace() { # <name> <roster-json> -> JSON or nothing
                      | select(.to == $who or .to == "all") | select([.id] | inside($done) | not)] | length) end)}]}'
 }
 
-# EVERY ORCHESTRATOR'S STATE AND LAUNCH LINE, from the same rows
+# EVERY PRODUCT AGENT'S STATE AND LAUNCH LINE, from the same rows
 # `cel update` acts on, so the console shows what `--restart-orchestrators`
 # would do and never runs a probe of its own. Each row gains the mailbox's
 # cursor state (mark and holes), the same rule _inbox_count_one applies (the recipient's
@@ -583,7 +234,7 @@ _fleet_orch_tsv() { # <ws> <wsdir> <roster-json> <candidates>
     IFS=$'\t' read -r name ws pane status since model launch detail cmd role product <<< "$row"
     # THE MAILBOX NAME IS THE ALIAS RULE'S, not a bare "$product-orch": a long
     # product's name is cut to 32 characters (and may then end in a dash), and
-    # the orchestrator reads - and the cursor is filed under - that name.
+    # the agent reads - and the cursor is filed under - that name.
     if [ "$role" = root ]; then who=root; else who="$(_run_agent_name "$product-orch")"; fi
     # hole-aware, like every other unread view (_inbox_cursors_json)
     cs="$(_inbox_cursors_json "$(_inbox_dir)/$1.$who.cursor" "$(_inbox_dir)/$1.$who.console.cursor")"
@@ -632,14 +283,14 @@ _fleet_render() { # <doc>
     | [$head] + [.units[]
         | (if .declared then "\(.name) (\(.repos | join(", ")))" else .name end) as $label
         | if .mode == "solo"
-          then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\((.rss_mb // 0) + (.orch_rss_mb // 0))\t\((.lanes // []) | join(","))"
-          else "UNIT\t\($label)\t\(.orch)\t\(.workers)\t\(.cap)\t\(.stalled)\t\(.unlanded)\t\(.rss_mb // 0)" end]
+          then "SOLO\t\($label)\t\(.orch)\t\(.solo_worktrees // 0)\t\(.orch_rss_mb // 0)\t\((.lanes // []) | join(","))"
+          else "LEGACY\t\($label)\t\(.orch)\t\(.orch_rss_mb // 0)\t\(.name)" end]
     | .[]' \
   | while IFS= read -r line; do
       case "$line" in
-        UNIT*)
-          IFS=$'\t' read -r _ n o w c s u m <<<"$line"
-          _fleet_unit_line "$n" "$o" "$w" "$c" "$s" "$u" "$(mem_human "$m")"
+        LEGACY*)
+          IFS=$'\t' read -r _ n o m p <<<"$line"
+          _fleet_legacy_line "$n" "$o" "$(mem_human "$m")" "$p"
           ;;
         SOLO*)
           IFS=$'\t' read -r _ n o t m l <<<"$line"
@@ -701,20 +352,15 @@ _fleet_cache_young() { # <file> <secs>
 _fleet_doc() { # <only> -> the JSON document
   local only="$1" roster names ws blocks=""
   roster="$(_fleet_roster)"
-  # The batched git answers are remembered for the length of ONE read and no
-  # longer: a console refreshing every few seconds must see a worktree that
-  # has just been committed to, not the answer from the last draw.
-  _FLEET_GIT_FACTS=()
   # The mailbox reader is asked of the roster this pass already holds, not of
   # a fresh `herdr agent list` per workspace.
   _INBOX_ROSTER_HELD="$(printf '%s' "$roster" | jq -r '.result.agents[]?.name // empty' 2>/dev/null || true)"
   [ -n "$roster" ] || _INBOX_ROSTER_HELD=""
   _INBOX_ROSTER_OK=0; [ -n "$roster" ] && _INBOX_ROSTER_OK=1
   export _INBOX_ROSTER_HELD _INBOX_ROSTER_OK
-  # ONE /proc WALK FOR THE WHOLE READ. Every worker, every orchestrator and
-  # the box's own total are answered from this one snapshot; a walk per
-  # question made the cost of the view scale with the number of workers, which
-  # is the one thing a view of the workers must not do.
+  # ONE /proc WALK FOR THE WHOLE READ. Every agent and the box's own total
+  # are answered from this one snapshot; a walk per question made the cost of
+  # the view scale with the number of agents.
   mem_tree_snapshot
   if [ -n "$only" ]; then names="$only"; else names="$(registry_names)"; fi
 
@@ -733,7 +379,7 @@ _fleet_doc() { # <only> -> the JSON document
     --arg gen "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{generated_at: $gen, workspaces: ., subscriptions: $subs}
      | .box = {total_mb: $total, available_mb: $avail, used_pct: $used, orphans: $orphans,
-               agents_rss_mb: ([.workspaces[].units[] | (.rss_mb // 0) + (.orch_rss_mb // 0)] | add // 0)}'
+               agents_rss_mb: ([.workspaces[].units[] | .orch_rss_mb // 0] | add // 0)}'
   mem_tree_snapshot_clear
 }
 
