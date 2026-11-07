@@ -44,8 +44,8 @@ allow repository writes while refusing agent starts and manual merges.
 result as data, and hands the restart to a transient user unit that waits
 for the agent to leave its turn before `cel run orchestrator --restart`;
 `cel mode <p> fleet` is refused and writes nothing. The orchestrator role file
-(`core/roles/project-orchestrator.md`) is kept for planned feature teams and is not
-launched today.
+(`core/roles/project-orchestrator.md`) carries no body: the orchestrator is the
+solo role, which also leads feature teams.
 
 Launch environment is scoped to the launched process: `_run_launch_env` is the
 single construction (used by every `cel run` launch) and renders role
@@ -93,6 +93,56 @@ The steward performs a deterministic sweep: cleanup, review/ticket/mailbox
 nudges, stalled-agent reporting, server maintenance and update checks. The
 optional systemd user timer defaults to five minutes. A sweep itself makes no
 model call, but a prompted agent may start paid work.
+
+### Feature teams (`lib/team.sh`)
+
+A team is one folder, `<ws>/.cel/teams/<feature>/`, and nothing else: no
+ledger, no state inferred from branches. `team.json` is the roster (members
+with role, focus, repo, branch, worktree, base commit, owned globs and state
+`reserved|ready|working|done|retired`), `events.jsonl` an append-only log,
+`verdicts.json` an array of head-bound verdicts, `members/<alias>.md` each
+member's scope packet. Every write holds the folder's `.lock` (flock) and
+calls nothing external while holding it - the budget, git, the launcher,
+herdr and the inbox are all called outside it - and JSON is written temp +
+rename. `cel team start` builds the folder aside and renames it into place,
+so a half-made team is never visible and a second start of the id fails.
+Authority is checked in `cel team` itself: start, add, retire, close and
+`cap` belong to `<product>-orch` (the lead) or the owner's shell; a
+`decision` event and the spend cap (`team.json` `spend_cap`) are the lead's
+or the owner's only, so nothing a member writes - brief.md included - can
+grant spend or authority.
+
+`cel team add` validates first (role, focus, repo, builder `--owns`), then
+asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
+so a refusal leaves nothing behind; N counts team-member rows that are
+reserved but not yet launched in every registered workspace, which the live
+inventory cannot see. Under the lock it counts the team's non-retired rows
+against `budget.max_team_members`, so two adds to one team cannot both pass
+at the limit (two adds to different teams at once can still both pass the
+box-wide check - the window is the admission call). It then re-checks
+ownership, writes the reserved row, the packet and a one-time token
+`launch/<alias>.token` (mode 600, random hex), and outside the lock runs `cel
+run member --workspace <name> --team <f> --member <alias>`, which consumes
+the token before it launches. Exit 0 marks the row `launched` (retried, and
+reported as a running member to retire if it cannot be written); exit 1 is a
+refusal that may still have left a worktree, branch or pane, so
+`member_retire` clears what it can prove is ours before the row is retired;
+anything else leaves it `reserved` and never relaunches. `ready` needs both
+`launched` and the member's own `cel team ack`, whichever lands second.
+Retirement goes through `member_retire` (lib/run.sh), which confirms the
+pane's identity. Keeping a builder's worktree is decided here: `cel team
+retire` checks it for uncommitted changes or commits on no origin ref and
+passes `--keep` when it finds any; `cel team close` checks every live
+builder first, refuses before retiring anyone, and with `--force-keep`
+passes `--keep` for every builder.
+
+Builder ownership: each glob is split into `/` segments with an implicit
+trailing `**` (a path owns its subtree). Two globs overlap when some path
+matches both: `**` matches zero or more segments, literal segments compare
+exactly, a literal against a pattern is a bash pattern match, and two
+`*`-only patterns overlap exactly when their fixed prefixes and suffixes are
+compatible. Anything else (`?`, `[..]`, braces on both sides) cannot be
+decided here and is refused as overlapping, with the reason.
 
 ### Preview server ownership
 

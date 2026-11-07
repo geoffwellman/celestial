@@ -141,6 +141,13 @@ cel - the celestial plane
   cel solo land <repo>#<pr>     merge a solo product's PR: policy self, own
                                 PR, approved at its current head, no red
                                 check, every protected check green there
+  cel team start|add|ack|event|verdict|status|retire|close <feature> ...
+                                a feature team under the product's lead: the
+                                lead starts it and adds scoped members (each
+                                admitted against the box budget, reserved,
+                                ready once up AND acked); members report by
+                                event and verdict; close refuses to drop a
+                                builder's unpushed work. cel team help
   cel forge repo|whoami <repo>  a repo's forge (GitHub or Forgejo) and the
                                 account this workspace acts as on it
   cel forge pr view|checks|reviews <repo>#<n> [--json]
@@ -299,6 +306,7 @@ case "${1:-help}" in
   mode)     shift; . "$CEL_ROOT/lib/mode.sh";    cmd_mode "$@";;
   here)     shift; . "$CEL_ROOT/lib/here.sh";    cmd_here "$@";;
   solo)     shift; . "$CEL_ROOT/lib/solo.sh";    cmd_solo "$@";;
+  team)     shift; . "$CEL_ROOT/lib/team.sh";    cmd_team "$@";;
   forge)    shift; . "$CEL_ROOT/lib/forge.sh";   cmd_forge "$@";;
   profiles) shift; . "$CEL_ROOT/lib/profiles.sh"; cmd_profiles "$@";;
   quota)    shift; . "$CEL_ROOT/lib/quota.sh";    cmd_quota "$@";;

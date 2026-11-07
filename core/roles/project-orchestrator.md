@@ -1,19 +1,23 @@
 ---
 name: project-orchestrator
-description: Held for the feature-team rewrite. Not launched today - every product agent runs the solo role (core/roles/solo.md).
+description: The product orchestrator is the solo role plus feature-team lead - one body, core/roles/solo.md.
 ---
-THIS ROLE IS NOT LIVE. Nothing launches it: every product agent - `cel run
-orchestrator`, `cel run solo`, its lanes - runs the solo role
-(`core/roles/solo.md`). This file is held for the feature-team rewrite and
-describes no current behaviour.
+The product orchestrator and the solo agent are ONE role, written in
+`core/roles/solo.md`. Every product agent - `cel run orchestrator`, `cel run
+solo`, its lanes - is launched with that body; this file has none of its own
+so the two can never drift apart.
 
-Until feature teams arrive, a product's agent builds and ships the product
-itself: it plans, writes the code, runs the gate, opens the PRs, starts a
-reviewer per PR (`cel run reviewer`) and lands with `cel solo land`.
+What the orchestrator is (solo.md has the detail):
+- It builds small work itself: plans, writes the code, runs the gate, opens
+  the PR, starts its reviewer (`cel run reviewer`) and lands with `cel solo
+  land`.
+- For a feature with two or more independent parts, or a specialist need, it
+  starts a feature team (`cel team start`) and LEADS it: it is the team's
+  only integration owner - one integration branch and PR per repo - adds
+  members through `cel team add` (each admitted against the box-wide agent
+  budget: by default 8 agents and 4 team members across every product; see
+  `cel budget`), hands each one a scope packet, sets the spend cap, takes owner
+  decisions through `cel decide`, and closes the team with `cel team close`.
 
-History: this role used to hand tickets to per-ticket worker agents. That
-fan-out was retired on 2026-11-08: build in the product's solo agent (feature
-teams are coming).
-
-If you were started with this role, say so to the owner
+If you were started with this file as your role, say so to the owner
 (`cel inbox send root "..."`) and stop.

@@ -1,0 +1,10 @@
+### Added
+
+- Feature teams: `cel team start|add|ack|event|verdict|status|retire|close|cap` (lib/team.sh). A product's orchestrator builds small work itself and, for a feature that needs it, leads a team kept in `<ws>/.cel/teams/<feature>/` (team.json, brief.md, acceptance.yaml, contracts/, events.jsonl, verdicts.json, per-member scope packets). Only `<product>-orch` or the owner starts and runs a team; only the lead or the owner records a `decision` or sets the spend cap. Every write holds the folder's lock and calls nothing external while holding it.
+- `cel team add` admits each member against the box-wide agent budget before writing anything (reserved, not-yet-launched members count, and one team never holds more than `budget.max_team_members`), reserves its row, writes its scope packet and a one-time launch token, and launches it with `cel run member`; it becomes ready only once the launch is confirmed and the member ran `cel team ack`. An unconfirmed launch stays reserved and is never relaunched. Builder `--owns` globs may not overlap another live builder's in the same repo; an overlap that cannot be decided exactly is refused with the reason.
+- Verdicts are bound to a full head and show as stale in `cel team status` once the lead posts a newer candidate; `cel team close` refuses while a builder's work is not on origin unless `--force-keep`, and retiring a builder with unpushed work keeps its worktree explicitly.
+- Team role files `core/roles/team-{product,design,builder,qa,platform,release,analyst}.md` and focus packs under `core/roles/focus/<role>/`. The solo role now carries the team-lead guidance (when to form a team, waves, the box-wide budget and `cel budget`, the integration-branch rule, hand-off, owner decisions, the lead-only spend cap `cel team cap`); `project-orchestrator.md` points at it.
+
+### Fixed
+
+- `cel run member` no longer refuses a team whose product is a declared product listed before the repos: its product and repo checks used `grep -q` under `pipefail`, which turned a match into a SIGPIPE failure.
