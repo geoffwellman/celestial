@@ -5,4 +5,4 @@
 
 ### Removed
 - The Ink terminal console (`tools/console/`), its launcher, its npm dependency install in `cel setup`, its `cel doctor` dependency check and its tests.
-- The guard's `console` role, its allowlist and its notes-directory rule.
+- The guard's `console` role, its allowlist and its notes-directory rule. A console still running from before this change (`CEL_ROLE=console`, or standing in the old console directory) is guarded as core.

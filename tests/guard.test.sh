@@ -308,6 +308,17 @@ test_role_core_from_its_dir_and_the_environment() {
   assert_eq "$(CEL_ROLE=core guard_role_of /tmp)" core
   rm -rf "${C%/core}"
 }
+# A console agent launched before the TUI was retired still carries
+# CEL_ROLE=console and stands in the old console directory. It must stay
+# restricted - as core, which `cel console` now starts - never fall to `other`.
+test_a_legacy_console_agent_is_guarded_as_core() {
+  local D; D="$(mktemp -d)"; mkdir -p "$D/cel/console/notes"
+  assert_eq "$(CEL_ROLE=console guard_role_of /tmp)" core
+  assert_eq "$(CEL_ROLE='' XDG_DATA_HOME="$D" guard_role_of "$D/cel/console/notes")" core
+  local role; role="$(CEL_ROLE=console guard_role_of /tmp)"
+  assert_contains "$(guard_classify "$role" 'git commit -m x')" deny
+  rm -rf "$D"
+}
 test_core_may_read_coordinate_and_switch_mode() {
   local c
   for c in 'cel fleet --json' 'cel inbox send games-orch "x" --workspace w' 'cel decide list' \

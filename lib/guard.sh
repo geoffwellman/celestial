@@ -37,10 +37,13 @@ _CEL_GUARD=1
 # launch can say which of the two it is.
 guard_role_of() { # <cwd>
   local p="$1" wt="${CEL_WORKTREES:-$HOME/.herdr/worktrees}"
-  [ "${CEL_ROLE:-}" = core ] && { printf core; return 0; }
+  # A console launched before its retirement carries CEL_ROLE=console and
+  # stands in the old console dir; it is guarded as core, never as `other`.
+  case "${CEL_ROLE:-}" in core|console) printf core; return 0;; esac
   [ "${CEL_ROLE:-}" = solo ] && { printf solo; return 0; }
   local core="${CEL_CORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cel/core}"
-  case "$p" in "$core"|"$core"/*) printf core; return 0;; esac
+  local cons="${XDG_DATA_HOME:-$HOME/.local/share}/cel/console"
+  case "$p" in "$core"|"$core"/*|"$cons"|"$cons"/*) printf core; return 0;; esac
   case "$p" in "$wt"/*) printf worker; return 0;; esac
   local d="$p"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
