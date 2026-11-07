@@ -553,10 +553,12 @@ the key instead of a delegation:
 - `cel solo land <repo>#<n>` merges with the same checks as `cel-fanout land`
   (`lib/land.sh`): `merge: self`, the workspace account's own open non-draft
   PR, an approval of the exact head, no red check, no conflict, and every
-  protected check green on that head. It merges only that head
-  (`--match-head-commit`). There is no local gate run: the solo agent runs the
-  repo gate before pushing, and CI on the head is the evidence the squash body
-  cites.
+  check the base branch requires - through classic branch protection or a
+  repository/organisation ruleset - green on that head. It merges only that
+  head (`--match-head-commit`), and CI on the head is the evidence the squash
+  body cites. Only when neither protection nor any ruleset requires a check
+  does the repo gate run locally instead, in a clean checkout at exactly that
+  head; requirements that cannot be read refuse the land.
 
 The rest of the box sees a solo product for what it is: `cel fleet` draws it as
 `solo <agent state>  worktrees N` (JSON: `mode`, `solo_worktrees`), the

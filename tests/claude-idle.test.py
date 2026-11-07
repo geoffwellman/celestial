@@ -181,7 +181,37 @@ class IdleMailTests(unittest.TestCase):
             self.assertEqual(self.state["status"], "native_received_mail_unread")
         self.assertEqual(cursor.read_text(), "unconsumed")
 
-
+    def test_corrupt_mailbox_wakes_once_without_raising_or_advancing_cursor(self):
+        # A mailbox the canonical selector cannot parse is unknown, not empty:
+        # the watcher wakes the session (whose own read names the corrupt
+        # file) instead of raising, and wakes once for it - not every poll.
+        inbox = self.path / "inbox"
+        inbox.mkdir()
+        message = {"id": "00000000000000000001", "to": "lane", "from": "sender",
+                   "kind": "status", "message": "retained native mail", "ts": "2026-11-06T00:00:00Z"}
+        good = json.dumps(message) + "\n"
+        (inbox / "demo.jsonl").write_text(good + '{"id":"00000000000000000002","ts":\n')
+        with patch.dict(os.environ, {"CEL_INBOX_DIR": str(inbox), "CEL_INBOX_ME": "lane"}), \
+                patch.object(idle, "send_wake") as send:
+            corrupt = idle.unread(str(ROOT), self.target)
+            self.assertIsNotNone(corrupt)
+            self.assertEqual(idle.unread(str(ROOT), self.target), corrupt)
+            idle.tick(str(ROOT), str(self.record), self.state_path, self.target, self.state, 1000)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(self.state["status"], "notified_not_delivered")
+            Path(self.target["transcript"]).write_text(json.dumps({"type": "queue-operation", "operation": "enqueue",
+                "sessionId": self.native, "content": idle.wake_content(self.target, self.state["message_id"])}) + "\n")
+            for now in (1005, 1200, 100000):
+                idle.tick(str(ROOT), str(self.record), self.state_path, self.target, self.state, now)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(self.state["status"], "native_received_mail_unread")
+            self.assertFalse((inbox / "demo.lane.cursor").exists())
+            # repaired, the mailbox's real unread mail is a new fact
+            (inbox / "demo.jsonl").write_text(good)
+            repaired = idle.unread(str(ROOT), self.target)
+            self.assertNotIn(repaired, (None, corrupt))
+            idle.tick(str(ROOT), str(self.record), self.state_path, self.target, self.state, 100005)
+            self.assertEqual(send.call_count, 2)
 
 
 if __name__ == "__main__":

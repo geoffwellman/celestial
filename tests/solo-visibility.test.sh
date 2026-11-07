@@ -62,6 +62,7 @@ case "\$1 \$2" in
   "pr list") cat "$T/list.json";;
   *) case "\$2" in
        */protection) [ -z "\${SV_NO_PROTECTION:-}" ] && echo '{"required_status_checks":{"contexts":["suite"]}}';;
+       */rules/branches/*) echo '[[]]';;
        *check-runs)  case "\$2" in *"\${SV_RED_CHECK:-none}"*) echo '{"check_runs":[{"name":"suite","conclusion":"failure"}]}';;
                        *) echo '{"check_runs":[{"name":"suite","conclusion":"success"}]}';; esac;;
        *) echo '{}';;

@@ -148,11 +148,27 @@ _forge_github_pr_list() { # <wsdir> <slug> <state> [--author L] [--head B] [--li
 }
 
 # The PR's checks from its rollup (latest run of each, CEL_JQ_LATEST_CHECKS)
-# and the base branch's required checks from BOTH places GitHub keeps them:
-# classic branch protection and the rulesets in effect on the branch
-# (rules/branches/<b>, which covers repository and organisation rulesets).
-# A branch gated only by a ruleset answers "Branch not protected" from the
-# classic endpoint, so that answer alone proves nothing.
+# and the base branch's required checks (_forge_github_base_required).
+_forge_github_pr_checks() { # <wsdir> <slug> <number>
+  _forge_number_ok pr_checks "${3:-}" || return 1
+  local wsdir="$1" slug="$2" pr base gate='{"protection":"unknown","required":[]}'
+  pr="$(_forge_gh "$wsdir" pr view "$3" --repo "$slug" --json headRefOid,baseRefName,statusCheckRollup)" || return 1
+  base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')" || return 1
+  [ -z "$base" ] || gate="$(_forge_github_base_required "$wsdir" "$slug" "$base")"
+  printf '%s' "$pr" | jq -c --argjson g "$gate" "$CEL_JQ_LATEST_CHECKS$_FORGE_JQ_GH"'
+    if type == "object" then . else error("not a pull request") end
+    | { head_sha: (.headRefOid | _s), base_ref: (.baseRefName | _s),
+        checks: [(.statusCheckRollup // []) | latest_checks[] | gh_check],
+        required: $g.required, protection: $g.protection }'
+}
+
+# {protection: protected|unprotected|unknown, required: [name, ...]} for a
+# base branch, from BOTH places GitHub keeps required checks: classic branch
+# protection and the rulesets in effect on the branch (rules/branches/<b>,
+# which covers repository and organisation rulesets). A branch gated only by
+# a ruleset answers "Branch not protected" from the classic endpoint, so that
+# answer alone proves nothing. `cel solo land` and `cel-fanout land`
+# (lib/land.sh) ask this same question.
 #
 #   - either read fails (permission, rate limit, network, garbage): unknown
 #   - a rule requiring checks it does not name as contexts - required
@@ -162,29 +178,24 @@ _forge_github_pr_list() { # <wsdir> <slug> <state> [--author L] [--head B] [--li
 #     protected, with the union of their contexts
 #   - classic "Branch not protected" and no such rule: unprotected
 # Review, signature, history and merge-queue rules gate other things than
-# checks and are not this answer's business.
-_forge_github_pr_checks() { # <wsdir> <slug> <number>
-  _forge_number_ok pr_checks "${3:-}" || return 1
-  local wsdir="$1" slug="$2" pr base prot prc=0 rules rrc=0
+# checks and are not this answer's business. Always prints the object.
+_forge_github_base_required() { # <wsdir> <slug> <base>
+  local wsdir="$1" slug="$2" base="$3" prot prc=0 rules rrc=0
   local classic=unknown classic_req='[]' rinfo='' protection=unknown required='[]'
-  pr="$(_forge_gh "$wsdir" pr view "$3" --repo "$slug" --json headRefOid,baseRefName,statusCheckRollup)" || return 1
-  base="$(printf '%s' "$pr" | jq -r '.baseRefName // ""')" || return 1
-  if [ -n "$base" ]; then
-    prot="$(_forge_gh "$wsdir" api "repos/$slug/branches/$base/protection" 2>&1)" || prc=$?
-    if [ "$prc" -eq 0 ] && [ -n "$prot" ]; then
-      classic_req="$(printf '%s' "$prot" | jq -ce '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique' 2>/dev/null)" \
-        && classic=protected || classic_req='[]'
-    else
-      case "$prot" in *"Branch not protected"*) classic=none ;; esac
-    fi
-    rules="$(_forge_gh "$wsdir" api "repos/$slug/rules/branches/$base" --paginate --slurp 2>/dev/null)" || rrc=$?
-    [ "$rrc" -ne 0 ] || rinfo="$(printf '%s' "$rules" | jq -ce '
-      if type == "array" and all(.[]; type == "array") then add // [] else error("not rule pages") end
-      | { names: [.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context | strings],
-          gated: any(.[]; .type == "required_status_checks"),
-          unnamed: any(.[]; .type == "workflows" or .type == "code_scanning" or .type == "required_deployments") }' 2>/dev/null)" \
-      || rinfo=''
+  prot="$(_forge_gh "$wsdir" api "repos/$slug/branches/$base/protection" 2>&1)" || prc=$?
+  if [ "$prc" -eq 0 ] && [ -n "$prot" ]; then
+    classic_req="$(printf '%s' "$prot" | jq -ce '[.required_status_checks.contexts[]?, (.required_status_checks.checks[]?.context)] | unique' 2>/dev/null)" \
+      && classic=protected || classic_req='[]'
+  else
+    case "$prot" in *"Branch not protected"*) classic=none ;; esac
   fi
+  rules="$(_forge_gh "$wsdir" api "repos/$slug/rules/branches/$base" --paginate --slurp 2>/dev/null)" || rrc=$?
+  [ "$rrc" -ne 0 ] || rinfo="$(printf '%s' "$rules" | jq -ce '
+    if type == "array" and all(.[]; type == "array") then add // [] else error("not rule pages") end
+    | { names: [.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context | strings],
+        gated: any(.[]; .type == "required_status_checks"),
+        unnamed: any(.[]; .type == "workflows" or .type == "code_scanning" or .type == "required_deployments") }' 2>/dev/null)" \
+    || rinfo=''
   if [ "$classic" != unknown ] && [ -n "$rinfo" ] && [ "$(printf '%s' "$rinfo" | jq -r .unnamed)" = false ]; then
     if [ "$classic" = protected ] || [ "$(printf '%s' "$rinfo" | jq -r .gated)" = true ]; then
       protection=protected
@@ -193,11 +204,7 @@ _forge_github_pr_checks() { # <wsdir> <slug> <number>
       protection=unprotected
     fi
   fi
-  printf '%s' "$pr" | jq -c --arg p "$protection" --argjson req "$required" "$CEL_JQ_LATEST_CHECKS$_FORGE_JQ_GH"'
-    if type == "object" then . else error("not a pull request") end
-    | { head_sha: (.headRefOid | _s), base_ref: (.baseRefName | _s),
-        checks: [(.statusCheckRollup // []) | latest_checks[] | gh_check],
-        required: $req, protection: $p }'
+  jq -cn --arg p "$protection" --argjson req "$required" '{protection: $p, required: $req}'
 }
 
 _forge_github_pr_reviews() { # <wsdir> <slug> <number>

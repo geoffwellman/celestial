@@ -1814,6 +1814,7 @@ case "\$1 \$2" in
   "pr merge") exit 0;;
   *) case "\$2" in
        */protection) [ -n '$1' ] || exit 1; printf '%s' '$1';;
+       */rules/branches/*) echo '[[]]';;
        *check-runs)  printf '%s' '$2';;
        *) echo '{}';;
      esac;;
