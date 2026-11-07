@@ -202,6 +202,18 @@ _inbox_empty_report() { # <ws> <who> <json> -> 2 when the workspace is unknown
   return 0
 }
 
+# A MAILBOX THAT DOES NOT PARSE IS UNKNOWN, NOT EMPTY. A torn append (a disk
+# that filled mid-write) or a bad hand edit leaves a line jq cannot read, and a
+# selector that swallowed the error would answer "no unread mail" - the false
+# calm the report above exists to prevent. Said on stderr, naming the file and
+# where it breaks; the caller returns non-zero and moves no cursor. Nothing
+# here repairs the file: which lines to keep is a person's decision.
+_inbox_corrupt() { # <file>
+  local why
+  why="$(jq -c . "$1" 2>&1 >/dev/null | tail -n 1)" || true
+  c_err "inbox: $1 is corrupt (${why:-a line is not a JSON object}) - its mail is unknown, not empty; nothing was marked read" >&2
+}
+
 # --- WHO IS ALIVE TO READ THIS MAILBOX -------------------------------------
 #
 # `root` is a NAME - the top, whoever is listening - and may have no live
@@ -269,14 +281,17 @@ inbox_reader_of() { # <ws> <mailbox> -> reader name, or empty
 # what unread means; _inbox_count_one also honours the caller's per-reader
 # cursor.
 inbox_unread_json() { # <ws> <who>
-  local f cs
+  local f cs out
   f="$(_inbox_file "$1")"
   [ -f "$f" ] || return 0
   cs="$(_inbox_cursors_json "$(_inbox_dir)/$1.$2.cursor" \
           $([ "$2" = root ] && printf '%s' "$(_inbox_dir)/$1.root.console.cursor"))"
-  jq -c --arg who "$2" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
+  # Captured, not streamed: a line that does not parse makes the whole answer
+  # unknown, not the prefix before it passed off as all the unread mail.
+  out="$(jq -c --arg who "$2" --argjson cs "$cs" "$_INBOX_UNREAD_DEF"'
     select(.kind != "resolution") | select(.to == $who or .to == "all")
-     | select(unread($cs))' "$f" 2>/dev/null
+     | select(unread($cs))' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
+  [ -z "$out" ] || printf '%s\n' "$out"
 }
 
 # A CURSOR IS A HIGH-WATER MARK PLUS HOLES. Ids are fixed-width digits, so a
@@ -444,6 +459,9 @@ cel inbox - messages between agents that never type into a pane
       workspace. A cwd that names no workspace is REFUSED, not answered with
       emptiness - pass --workspace or --all-workspaces. --json carries the
       three states as {state: empty|no_mailbox|no_workspace, elsewhere: [...]}.
+      A mailbox holding a line that does not parse is CORRUPT, not empty:
+      the read fails naming the file and moves no cursor; --json says
+      {state: corrupt, file: ...}. `open` and `resolve` fail the same way.
   cel inbox prune [--workspace w] [--dry-run]
       archive mail addressed to a WORKER that no longer exists. Long-lived
       recipients (root, <repo>-orch) are never pruned - they come back.
@@ -463,10 +481,13 @@ cel inbox - messages between agents that never type into a pane
       (lib/triage.sh) and the top `inbox.top_n` are shown, then `and N more`.
       Looking, not reading: the cursor does not move.
   cel inbox resolve <id> [--by <who>] [--workspace w]  close a decision/blocker
+      an id that is already resolved is refused, naming who closed it.
   cel inbox resolve --all [--from <who>] [--matching <substr>] [--kind k]
                     [--older-than <hours>] [--by <who>] [--workspace w]
       close every open item that matches every filter given. No filter means
       everything open for the reader; the count is printed either way.
+      Selecting and closing hold the mailbox lock, so resolvers running at
+      once close each item exactly once.
   cel inbox migrate --workspace w [--apply] [--only <legacy-name>]
       repair a mailbox the old alias sanitiser split in two (a 31-character
       name beside its 32-character alias): merges mail AND each reader's
@@ -649,13 +670,18 @@ _inbox_read() { # [--for who] [--workspace w|--all-workspaces] [--all] [--json]
   done
   [ -n "$who" ] || who="$(_inbox_me)"
   if [ "$every" -eq 1 ]; then
-    local n out="" one
+    local n out="" one bad=0
     for n in $(_inbox_every_ws "$ws"); do
-      one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /")"
+      one="$(_inbox_read_one "$n" "$who" "$all" "$json" quiet | sed "s/^/[$n] /"; exit "${PIPESTATUS[0]}")" || bad=1
       [ -n "$one" ] || continue
       printf '%s\n' "$one"; out=1
     done
-    [ -n "$out" ] || c_ok "$who: no unread mail in any registered workspace" >&2
+    # A corrupt mailbox has said so on stderr. Mail delivered from the others
+    # already moved their cursors, and the hooks drop stdout on a non-zero
+    # read, so the status fails only when nothing was delivered.
+    [ -z "$out" ] || return 0
+    [ "$bad" -eq 0 ] || return 1
+    c_ok "$who: no unread mail in any registered workspace" >&2
     return 0
   fi
   local wsname
@@ -698,7 +724,15 @@ _inbox_read_one() { # <ws> <who> <all> <json> [quiet]
           then (.ref as $r | .id as $i
                 | . + {count: (1 + ([$all[] | select(.kind == "update" and .ref == $r and .id <= $i)] | length))})
           else . end)
-    | .[]' "$f" 2>/dev/null)"
+    | .[]' "$f" 2>/dev/null)" || {
+    # Unknown is not empty: fail naming the file, cursor untouched.
+    [ -z "$lkfd" ] || exec {lkfd}>&-
+    _inbox_corrupt "$f"
+    if [ -z "$quiet" ] && [ "$json" -eq 1 ]; then
+      jq -nc --arg reader "$who" --arg ws "$ws" --arg file "$f" \
+        '{state: "corrupt", reader: $reader, workspace: $ws, file: $file, unread: null}'
+    fi
+    return 1; }
   if [ -z "$items" ]; then
     [ -z "$lkfd" ] || exec {lkfd}>&-
     [ -n "$quiet" ] && return 0
@@ -937,11 +971,13 @@ _inbox_open() { # [--for who] [--workspace w|--all-workspaces] [--json] [--ranke
   # Everything waiting on one reader, in ONE call: "what is waiting on me" is
   # not a per-workspace question.
   if [ "$every" -eq 1 ]; then
-    local n
+    # One corrupt mailbox does not hide the others' open items; it has said
+    # so on stderr, and the status says one could not be answered.
+    local n bad=0
     for n in $(_inbox_every_ws "$ws"); do
-      _inbox_open_one "$n" "$who" "$json" | sed "s/^/[$n] /"
+      ( _inbox_open_one "$n" "$who" "$json" | sed "s/^/[$n] /"; exit "${PIPESTATUS[0]}" ) || bad=1
     done
-    return 0
+    return "$bad"
   fi
   _inbox_open_one "$(_inbox_ws "$ws")" "$who" "$json"
 }
@@ -963,7 +999,7 @@ _inbox_open_one() { # <ws> <who> <json>
             | ([$all[] | select(.kind == "update" and .ref == $i)]) as $u
             | . + {count: (1 + ($u | length)),
                    last_ts: (($u | map(.ts) | max) // .ts)})
-      | .[]' "$f" 2>/dev/null)"
+      | .[]' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
   [ -n "$items" ] || return 0
   if [ "$json" -eq 1 ]; then printf '%s\n' "$items"
   else printf '%s\n' "$items" | jq -r 'if (.count // 1) > 1
@@ -971,12 +1007,16 @@ _inbox_open_one() { # <ws> <who> <json>
     else "[\(.id)] \(.ts[0:16]) \(.kind) from \(.from): \(.message)" end'; fi
 }
 
-# One resolution record. The file is append-only and has many writers, so a
-# closed item is a later line naming it, never an edit in place.
+# One resolution record, as the line to append. The file is append-only and
+# has many writers, so a closed item is a later line naming it, never an edit
+# in place.
+_inbox_resolution_line() { # <ref> <to> <by>
+  jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$1" \
+    --arg by "$3" --arg to "$2" \
+    '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: $to, message: ("resolved by " + $by)}'
+}
 _inbox_append_resolution() { # <file> <ref> <to> <by>
-  _inbox_append "$1" "$(jq -nc --arg id "$(date +%s%N)" --arg ts "$(date -Is)" --arg ref "$2" \
-    --arg by "$4" --arg to "$3" \
-    '{id: $id, ts: $ts, kind: "resolution", ref: $ref, by: $by, to: $to, message: ("resolved by " + $by)}')"
+  _inbox_append "$1" "$(_inbox_resolution_line "$2" "$3" "$4")"
 }
 
 # Bulk resolve: resolving by id fits an answer to one question, not a mailbox
@@ -1006,18 +1046,28 @@ _inbox_resolve_all() { # [--from w] [--matching s] [--kind k] [--older-than h] [
   [ -f "$f" ] || { c_ok "resolved 0 (by $by)"; return 0; }
   local cutoff=""
   [ -n "$older" ] && cutoff="$(date -Is -d "$older hours ago" 2>/dev/null || true)"
-  local n=0 id to
-  while IFS=$'\t' read -r id to; do
-    [ -n "$id" ] || continue
-    _inbox_append_resolution "$f" "$id" "$to" "$by"
-    n=$((n + 1))
-  done < <(_inbox_open_one "$ws" "$who" 1 \
-    | jq -r --arg from "$from" --arg m "$matching" --arg k "$kind" --arg cut "$cutoff" '
+  _inbox_with_lock "$f" _inbox_resolve_all_locked "$ws" "$who" "$by" "$from" "$matching" "$kind" "$cutoff"
+}
+
+# SELECTING AND CLOSING ARE ONE ACT. The open set is read under the mailbox
+# lock every sender and resolver takes, and every resolution is appended
+# before the lock is let go. Selected outside it, an item another resolver
+# closed in between is closed again, and two bulk runs each close everything.
+_inbox_resolve_all_locked() { # <ws> <who> <by> <from> <matching> <kind> <cutoff>  - under _inbox_with_lock
+  local ws="$1" who="$2" by="$3" open rows id to n=0
+  open="$(_inbox_open_one "$ws" "$who" 1)" || return 1
+  rows="$(printf '%s\n' "$open" \
+    | jq -r --arg from "$4" --arg m "$5" --arg k "$6" --arg cut "$7" '
         select($from == "" or .from == $from)
         | select($m == "" or (.message | contains($m)))
         | select($k == "" or .kind == $k)
         | select($cut == "" or (.ts < $cut))
-        | [.id, .to] | @tsv')
+        | [.id, .to] | @tsv')"
+  while IFS=$'\t' read -r id to; do
+    [ -n "$id" ] || continue
+    _inbox_write_line "$(_inbox_resolution_line "$id" "$to" "$by")"
+    n=$((n + 1))
+  done <<< "$rows"
   c_ok "resolved $n (by $by)"
 }
 
@@ -1037,13 +1087,34 @@ _inbox_resolve() { # <id> [--by who] [--workspace w] | --all [filters]
   [ -n "$by" ] || by="$(_inbox_me)"
   local f; f="$(_inbox_file "$ws")"
   [ -f "$f" ] || die "cel inbox resolve: no mailbox for $ws"
-  local target
-  target="$(jq -c --arg id "$id" 'select(.id == $id and (.kind == "decision" or .kind == "blocked"
-           or ((.fp // "") != "" and .kind != "update" and .kind != "resolution")))' "$f" 2>/dev/null | sed -n 1p || true)"
-  [ -n "$target" ] || die "cel inbox resolve: no open decision or blocker with id $id in $ws"
-  local to; to="$(printf '%s' "$target" | jq -r .to)"
-  _inbox_append_resolution "$f" "$id" "$to" "$by"
+  _inbox_with_lock "$f" _inbox_resolve_locked "$ws" "$id" "$by" || return 1
   c_ok "resolved $id (by $by)" >&2
+}
+
+# STILL OPEN NOW, UNDER THE LOCK (as `cel decide` closes its records): the
+# item is looked up in the same locked snapshot the resolution is appended
+# to, so whoever got there first closed it and the second is told so rather
+# than handed a success and a duplicate record.
+_inbox_resolve_locked() { # <ws> <id> <by>  - under _inbox_with_lock
+  local ws="$1" id="$2" by="$3" f state rby rts
+  f="$(_inbox_file "$ws")"
+  state="$(jq -rs --arg id "$id" '
+      (map(select(.kind == "resolution" and .ref == $id)) | first) as $done
+      | (map(select(.id == $id and (.kind == "decision" or .kind == "blocked"
+           or ((.fp // "") != "" and .kind != "update" and .kind != "resolution")))) | first) as $t
+      | if $t == null then "missing"
+        elif $done != null then "closed\t\($done.by // "unknown")\t\($done.ts // "unknown")"
+        else "open\t\($t.to)" end' "$f" 2>/dev/null)" || { _inbox_corrupt "$f"; return 1; }
+  case "$state" in
+    missing)
+      c_err "cel inbox resolve: no decision or blocker with id $id in $ws" >&2
+      return 1 ;;
+    closed*)
+      IFS=$'\t' read -r _ rby rts <<< "$state"
+      c_err "cel inbox resolve: $id in $ws is already resolved (by $rby at $rts); nothing recorded" >&2
+      return 1 ;;
+  esac
+  _inbox_write_line "$(_inbox_resolution_line "$id" "${state#open$'\t'}" "$by")"
 }
 
 # shellcheck source=lib/inbox-migrate.sh

@@ -1,0 +1,4 @@
+### Fixed
+- `cel inbox resolve <id>` checks that the item is still open and appends its resolution under one mailbox lock. Resolving an item that is already closed now fails and names who closed it and when. It no longer reports success and writes a duplicate record.
+- `cel inbox resolve --all` selects the open items and appends every resolution under one mailbox lock. When several resolvers run at once, each item gets exactly one resolution.
+- A mailbox with a torn or malformed line is now reported as corrupt instead of empty. `cel inbox read`, `cel inbox open` and `cel inbox resolve` fail with an error naming the mailbox file, and `inbox_unread_json` does the same. A failed read never moves the cursor, and `--json` reports `state: corrupt`. In an `--all-workspaces` read, a corrupt mailbox no longer hides mail delivered from the other mailboxes.
