@@ -166,16 +166,30 @@ test_doctor_remedy_for_a_stale_default_branch_clears_the_finding() {
 }
 
 # A feature branch is behind the default branch by design, and pulling it
-# would not change that: no finding, and no fetch.
+# would not change that: no finding - and no network, so an unreachable
+# origin changes nothing (any fetch or remote query would print UNKNOWN).
 test_doctor_says_nothing_about_a_checkout_on_a_feature_branch() {
   _doctor_repo_fixture 3
   git -C "$T/clone" checkout -q -b feature
+  git -C "$T/clone" remote set-url origin "$T/unreachable"
   local out
   out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)" \
     || { echo "the check itself failed on a feature branch"; rm -rf "$T"; return 1; }
   assert_eq "$out" "" || { rm -rf "$T"; return 1; }
   git -C "$T/clone" checkout -q --detach
   assert_eq "$(doctor_checkout_behind_line "$T/clone" alpha/widget)" ""
+  rm -rf "$T"
+}
+
+# The default branch is read from the local origin/HEAD, never asked of the
+# network; without it the check says it cannot tell, and how to fix that.
+test_doctor_without_a_local_origin_head_says_so_without_asking_the_network() {
+  _doctor_repo_fixture 3
+  git -C "$T/clone" remote set-head origin -d
+  git -C "$T/clone" remote set-url origin "$T/unreachable"
+  local out; out="$(doctor_checkout_behind_line "$T/clone" alpha/widget)"
+  assert_contains "$out" "UNKNOWN" || { rm -rf "$T"; return 1; }
+  assert_contains "$out" "git -C $T/clone remote set-head origin --auto"
   rm -rf "$T"
 }
 

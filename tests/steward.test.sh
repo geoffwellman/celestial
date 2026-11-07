@@ -48,6 +48,24 @@ test_steward_concurrent_due_on_different_keys_loses_none() {
   rm -rf "$T"
 }
 
+# A writer killed between its temp file and the rename leaves the temp behind.
+# The next edit sweeps the file's own temps once they are an hour old - the
+# current mktemp names and the old fixed `.tmp` / `.tmp.<pid>` ones - and
+# never a fresh temp (a writer still mid-edit) or a sibling state or lock file.
+test_steward_state_edit_sweeps_stale_temps_only() {
+  local T f; T="$(mktemp -d)"
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  for f in state.tmp state.tmp.4242 state.Ab12Cd state.services state.lock state.suite-lock \
+           state.decide-stale.lock state.services.Qx81Lm; do
+    printf 'x\n' > "$T/$f"; touch -d '2 hours ago' "$T/$f"
+  done
+  printf 'x\n' > "$T/state.Zz99Yy"   # a temp another writer is still filling
+  _steward_due "repo#1-changes"
+  local left; left="$(cd "$T" && ls -A | LC_ALL=C sort | paste -sd' ' -)"
+  assert_eq "$left" "state state.Zz99Yy state.decide-stale.lock state.lock state.services state.services.Qx81Lm state.suite-lock"
+  rm -rf "$T"
+}
+
 # The same for every other shared writer: first-seen records, forgets and the
 # service down-counts, interleaved.
 test_steward_concurrent_first_seen_forget_and_service_writes_lose_none() {
@@ -992,9 +1010,9 @@ SH
   export CEL_STEWARD_FANOUT="$T/bin/cel-fanout-stub"
 }
 
-_reconcile_ledger() { # <ws> <json>
+_reconcile_ledger() { # <ws> <json> - written byte for byte; '' is a zero-byte file
   mkdir -p "$T/$1/.cel"
-  printf '%s\n' "$2" > "$T/$1/.cel/delegations.json"
+  printf '%s' "$2" > "$T/$1/.cel/delegations.json"
 }
 
 test_steward_reconciles_every_workspace_with_live_rows_once_per_tick() {
@@ -1051,6 +1069,30 @@ test_stall_sweep_over_a_finished_ledger_takes_down_only_its_stall_items() {
   case "$open" in *"STALLED WORKER"*) echo "stall item outlived its finished row: $open"; rm -rf "$T"; return 1 ;; esac
   assert_contains "$open" "some other blocker"
   rm -rf "$T"
+}
+
+# A ledger is "over" only when it is a list of rows, every one terminal. A
+# document of any other shape - and an empty file - says nothing about what
+# is running, so reconcile still runs and no open stall item is taken down.
+test_fanout_sweeps_treat_an_unrecognised_ledger_as_live() {
+  local shape out
+  for shape in 'null' '{}' '{"delegations":null}' ''; do
+    _reconcile_tick_fixture
+    _reconcile_ledger alpha "$shape"
+    _steward_reconcile >/dev/null 2>&1
+    out="$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)"
+    rm -rf "$T"
+    [ "$out" = 1 ] || { echo "reconcile skipped for a ledger of shape '$shape'"; return 1; }
+
+    _rollup_fixture
+    _reconcile_ledger alpha "$shape"
+    cmd_inbox send root "STALLED WORKER WG-1 (w:p9): stalled" \
+      --from steward --kind blocked --fp stall-w1 --workspace alpha >/dev/null 2>&1
+    _steward_stalled_workers '{"result":{"agents":[]}}' >/dev/null 2>&1
+    out="$(cmd_inbox open --for root --workspace alpha)"
+    rm -rf "$T"
+    case "$out" in *"STALLED WORKER"*) ;; *) echo "stall item closed over a ledger of shape '$shape'"; return 1 ;; esac
+  done
 }
 
 # ── services ─────────────────────────────────────────────────────────────────

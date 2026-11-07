@@ -86,11 +86,15 @@ doctor_serve_line() {
 #
 # ONLY A CHECKOUT ON ITS DEFAULT BRANCH IS ASKED. A feature branch (or a
 # detached head) is behind the default branch by design, and no pull on it
-# would change that, so it says nothing - and costs no fetch.
+# would change that, so it says nothing - and touches no network: which branch
+# is checked out and which is the default (refs/remotes/origin/HEAD) are both
+# read locally, before any fetch. The cost: a default branch that has fallen
+# behind is not reported while the checkout sits on a feature branch.
 #
-# A CHECKOUT THAT CANNOT BE ASKED IS UNKNOWN. No remote, no network, a remote
-# that refuses - all of them say so out loud, because silence here reads as
-# "up to date", which is exactly the failure being guarded.
+# A CHECKOUT THAT CANNOT BE ASKED IS UNKNOWN. No remote, no local record of
+# the default branch, no network, a remote that refuses - all of them say so
+# out loud, because silence here reads as "up to date", which is exactly the
+# failure being guarded.
 doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
   local dir="$1" label="$2" br cur n
   git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
@@ -98,13 +102,13 @@ doctor_checkout_behind_line() { # <dir> <label> -> one line, or nothing
     printf '%s: UNKNOWN - no origin remote, so how current it is cannot be asked\n' "$label"
     return 0
   fi
+  cur="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [ -n "$cur" ] || return 0
   br="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
   br="${br#origin/}"
-  [ -n "$br" ] || br="$(git -C "$dir" remote show origin 2>/dev/null \
-    | awk '/HEAD branch:/{print $NF; exit}' || true)"
-  [ -n "$br" ] && [ "$br" != "(unknown)" ] || {
-    printf '%s: UNKNOWN - origin names no default branch\n' "$label"; return 0; }
-  cur="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [ -n "$br" ] || {
+    printf '%s: UNKNOWN - origin/HEAD is not set locally, so the default branch is unknown - git -C %s remote set-head origin --auto\n' "$label" "$dir"
+    return 0; }
   [ "$cur" = "$br" ] || return 0
   if ! git -C "$dir" fetch -q origin "$br" 2>/dev/null; then
     printf '%s: UNKNOWN - origin/%s could not be fetched (offline?), so staleness is unknown\n' "$label" "$br"

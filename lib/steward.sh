@@ -56,11 +56,20 @@ _STEWARD_WINDOW="${CEL_STEWARD_WINDOW:-14400}"   # repeat-nudge window, seconds
 # unique temp file in the same directory and a rename. A non-zero <fn> leaves
 # the file as it was and is the return status, so a check and its record (is
 # this key due?) are one step that no other writer can get between.
+#
+# A writer killed between its temp file and the rename leaves the temp behind,
+# so each edit first sweeps this file's own leftovers: mktemp's names, and the
+# fixed `.tmp` / `.tmp.<pid>` names older code used. Only ones an hour old -
+# an edit takes milliseconds - and never a sibling state or lock file.
 _steward_state_edit() { # <file> <fn> [args...]
-  local f="$1" rc=0; shift
+  local f="$1" rc=0 an='[A-Za-z0-9]'; shift
   mkdir -p "$(dirname "$f")" && touch "$f" || return 1
   (
     if have flock; then flock 9 || exit 1; fi
+    base="$(basename "$f")"
+    find "$(dirname "$f")" -maxdepth 1 -type f -mmin +60 \
+      \( -name "$base.$an$an$an$an$an$an" -o -name "$base.tmp" -o -name "$base.tmp.[0-9]*" \) \
+      ! -name "$base.lock" -delete 2>/dev/null || true
     tmp="$(mktemp "$f.XXXXXX")" || exit 1
     chmod --reference="$f" "$tmp" 2>/dev/null || true
     "$@" < "$f" > "$tmp" || { st=$?; rm -f "$tmp"; exit "$st"; }
