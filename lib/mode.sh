@@ -1,18 +1,16 @@
 # shellcheck shell=bash
-# cel mode - how a product is built: `fleet` or `solo`.
+# cel mode - how a product is built. `solo` is the only mode: one agent plans,
+# builds and ships the product itself, with whatever its runtime offers (its
+# own worktrees and subagents included). A product that declares no mode is
+# solo. `fleet` (an orchestrator handing tickets to workers) was retired with
+# fan-out on 2026-11-08: `cel mode <p> fleet` is refused, and a product still
+# set to it is refused at launch until `cel mode <p> solo` moves it over.
 #
-# FLEET is the factory: an orchestrator plans and judges, workers build in
-# delegated worktrees, everything is on the ledger. SOLO is one agent that
-# plans, builds and ships the product itself, with whatever its runtime offers
-# (its own worktrees and subagents included) and none of the fan-out. Neither
-# is better; the owner picks per product, and sometimes per week.
-#
-# The setting lives in workspace.yaml (lib/workspace.sh ws_build_mode), so a
-# restart, `cel ws up` and `cel update --restart-orchestrators` all start the
-# right kind of agent without anyone remembering a flag. Changing it here also
-# restarts the product's live agent into the new role on the SAME session, so
-# the conversation carries over. The restart waits for the agent to finish its
-# turn: an agent can switch its own mode, and its reply is not cut off.
+# The setting lives in workspace.yaml (lib/workspace.sh ws_build_mode).
+# Changing it here also restarts the product's live agent on the SAME
+# session, so the conversation carries over. The restart waits for the agent
+# to finish its turn: an agent can switch its own mode, and its reply is not
+# cut off.
 [ -n "${_CEL_MODE:-}" ] && return 0
 _CEL_MODE=1
 # shellcheck source=lib/common.sh
@@ -152,19 +150,6 @@ _mode_agent_status() { # <wsdir> <product> [lane]
     || return 1
 }
 
-# The product's live lanes (cel run solo --lane): one `<name>\t<lane>` line
-# each - an agent standing in .cel/solo/<product>/lane-<lane>. A pane whose
-# directory was deleted is no live lane. Returns 2 when herdr cannot be asked:
-# an unreadable roster is not "no lanes".
-_mode_live_lanes() { # <wsdir> <product>
-  have jq || return 2
-  local base roster; base="$(ws_solo_dir "$1" "$2")/lane-"
-  roster="$(cel_agent_list 2>/dev/null)" || return 2
-  printf '%s' "$roster" | jq -r --arg b "$base" \
-    '.result.agents[] | select((.cwd // "") | startswith($b) and (endswith(" (deleted)") | not))
-     | "\(.name // "-")\t\(.cwd | ltrimstr($b))"' 2>/dev/null || return 2
-}
-
 # The restart, detached from whoever asked: when the product's own agent runs
 # `cel mode`, it is mid-turn, and restarting it then would kill the turn that
 # asked. A transient user unit outlives the caller and has its own cgroup (a
@@ -174,8 +159,8 @@ _mode_live_lanes() { # <wsdir> <product>
 # ONE PENDING RESTART PER PRODUCT, AND IT IS NEVER STOPPED. Stopping an earlier
 # waiter could kill a restart already half done (exit keys sent, relaunch not
 # yet), leaving the pane dead. A pending one is left alone instead: the
-# relaunch reads `mode:` when it fires, so a solo->fleet->solo flip lands on
-# the latest word anyway. The waiter also holds a per-product lock, so the
+# relaunch reads `mode:` when it fires, so it lands on the latest word anyway.
+# The waiter also holds a per-product lock, so the
 # setsid fallback cannot double-restart either.
 _mode_unit() { # <ws> <product>
   printf 'cel-mode-%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '-'
@@ -249,7 +234,7 @@ _mode_restart_when_idle() { # <wsdir> <product> [lane]
     -- _mode_agent_status "$1" "$2" ${3:+"$3"} -- _mode_relaunch "$1" "$2" ${3:+"$3"}
 }
 
-cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
+cmd_mode() { # [product] [solo] [--workspace w] [--no-restart]
   local product="" want="" workspace="" restart=1 when_idle=0 lane=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -257,9 +242,12 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
       --no-restart) restart=0; shift ;;
       --restart-when-idle) when_idle=1; shift ;;
       --lane) lane="$2"; shift 2 ;;
-      solo|fleet) want="$1"; shift ;;
+      solo) want="$1"; shift ;;
+      # Retired with fan-out; refused for one release so a habit gets an
+      # answer. Nothing is written.
+      fleet) die "cel mode: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)" ;;
       -h|--help)
-        printf 'usage: cel mode [<product>] [solo|fleet] [--workspace <w>] [--no-restart]\n'
+        printf 'usage: cel mode [<product>] [solo] [--workspace <w>] [--no-restart]\n'
         return 0 ;;
       -*) die "cel mode: unknown argument '$1'" ;;
       *) [ -z "$product" ] || die "cel mode: one product at a time (got '$product' and '$1')"
@@ -291,32 +279,6 @@ cmd_mode() { # [product] [solo|fleet] [--workspace w] [--no-restart]
   if [ "$have_mode" = "$want" ]; then
     c_ok "$product is already $want"
     return 0
-  fi
-
-  # Lanes are solo agents with no fleet role to restart into: back to fleet
-  # only once they are closed, or their goals would be left half-built.
-  if [ "$want" = fleet ]; then
-    local lanes lrc=0; lanes="$(_mode_live_lanes "$wsdir" "$product")" || lrc=$?
-    if [ "$lrc" -ne 0 ]; then
-      c_err "cel mode: cannot read $product's live lanes (herdr did not answer) - not switching to fleet while lanes may still run; try again"
-      return 1
-    fi
-    if [ -n "$lanes" ]; then
-      c_err "cel mode: $product has live lanes - finish and close them first (fleet has one orchestrator):"
-      printf '%s\n' "$lanes" | sed 's/^/    /' >&2
-      return 1
-    fi
-  fi
-
-  # Fleet work in flight has an orchestrator to collect, review and land it.
-  # A solo agent has none of that machinery, so the work would be stranded.
-  if [ "$want" = solo ]; then
-    local live; live="$(ws_product_live_delegations "$wsdir" "$product")"
-    if [ -n "$live" ]; then
-      c_err "cel mode: $product still has fleet work in flight - land or release it first (cel-fanout status):"
-      printf '%s\n' "$live" | sed 's/^/    /' >&2
-      return 1
-    fi
   fi
 
   local wrc=0; _mode_write "$wsdir" "$product" "$want" || wrc=$?

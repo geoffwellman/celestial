@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # The dashboard v2 data feeds (/api/v2/*) and its one control door
-# (/api/v2/act). Every feed is read against a fixture ledger, inbox, sample
+# (/api/v2/act). Every feed is read against a fixture inbox, sample
 # ring and a stub gh that logs its argv - so "one gh pass serves three cards"
 # is a line count, not a hope.
 source "$CEL_ROOT/lib/common.sh"
@@ -49,25 +49,13 @@ EOF
   printf 'workspaces:\n  alpha: {path: "%s/alpha"}\n  bundle: {path: "%s/bundle"}\n' "$T" "$T" > "$T/registry.yaml"
   printf 'name: alpha\nrepos:\n  - name: widget\n    url: git@example.invalid:alpha/widget.git\n' > "$T/alpha/workspace.yaml"
   printf 'name: bundle\n' > "$T/bundle/workspace.yaml"
-  local old; old="$(_v2_ago 1900000)"
-  cat >"$T/alpha/.cel/delegations.json" <<EOF
-[
- {"id":"ABC-1-widget","repo":"widget","branch":"ABC-1-widget","alias":"widget-abc-1","worktree":"$T/wt/widget-ok","state":"running",
-  "history":[{"state":"running","at":"$(_v2_ago 20000)","by":"root"}]},
- {"id":"ABC-5-approved","repo":"widget","branch":"ABC-5-approved","alias":"widget-abc-5","worktree":"$T/wt/x","state":"finished",
-  "review":{"verdict":"approved","by":"rev","at":"$(_v2_ago 400000)"},
-  "history":[{"state":"running","at":"$(_v2_ago 500000)","by":"root"},{"state":"finished","at":"$(_v2_ago 450000)","by":"root"}]},
- {"id":"ABC-6-quiet","repo":"widget","branch":"ABC-6-quiet","alias":"widget-abc-6","worktree":"$T/wt/q","state":"running",
-  "history":[{"state":"running","at":"$old","by":"root"}]}
-]
-EOF
   cat >"$T/inbox/alpha.jsonl" <<EOF
 {"id":"1000000000000000001","ts":"$(_v2_ago 3000)","to":"alpha-orch","from":"steward","kind":"decision","message":"pick a style"}
 {"id":"1000000000000000002","ts":"$(_v2_ago 2000)","to":"root","from":"steward","kind":"resolution","ref":"1000000000000000001","message":"resolved"}
 {"id":"1000000000000000003","ts":"$(_v2_ago 1000)","to":"root","from":"steward","kind":"blocked","message":"provider down"}
-{"id":"1000000000000000004","ts":"$(_v2_ago 500)","to":"widget-abc-1","from":"alpha-orch","kind":"status","message":"rebase please"}
+{"id":"1000000000000000004","ts":"$(_v2_ago 500)","to":"widget-orch","from":"alpha-orch","kind":"status","message":"rebase please"}
 EOF
-  # the steward's ring: two load samples and the worker's pane status
+  # the steward's ring: two load samples and a pane's status
   {
     printf '{"ts":"%s","load":1.5,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/wt/widget-ok","status":"working"}]}\n' "$(_v2_ago 7000)" "$T"
     printf '{"ts":"%s","load":2.5,"mem_pct":50,"swap_pct":3,"panes":[{"cwd":"%s/wt/widget-ok","status":"idle"}]}\n' "$(_v2_ago 600)" "$T"
@@ -138,8 +126,8 @@ test_v2_activity_is_newest_first_and_paged() {
   assert_contains "$kinds" "merge"
   assert_contains "$kinds" "decision"
   assert_contains "$kinds" "incident"
-  assert_contains "$kinds" "worker"
-  assert_contains "$kinds" "review"
+  # the retired delegation ledger's kinds are gone
+  assert_eq "$(printf '%s' "$a" | jq '[.items[].kind | select(. == "worker" or . == "review")] | length')" "0"
   # sorted newest first
   assert_eq "$(printf '%s' "$a" | jq '[.items[].ts] == ([.items[].ts] | sort | reverse)')" "true"
   local first before p2
@@ -154,12 +142,8 @@ test_v2_activity_is_newest_first_and_paged() {
 test_v2_stuck_names_real_reasons_with_named_fixes() {
   _v2_boot
   local s; s="$(_v2_get "$(_v2_url stuck)")"
-  local reasons; reasons="$(printf '%s' "$s" | jq -r '[.items[].reason] | sort | join(",")')"
-  assert_contains "$reasons" "approved_not_landed"
-  assert_contains "$reasons" "merge_conflict"
-  assert_contains "$reasons" "changes_no_worker"
-  assert_contains "$reasons" "idle_with_mail"
-  assert_contains "$reasons" "no_activity"
+  # an open PR that conflicts is the one stuck reason the dashboard can see
+  assert_eq "$(printf '%s' "$s" | jq -r '[.items[] | .ref + ":" + .reason] | join(",")')" "widget/ABC-3-clash:merge_conflict"
   # a fix is an action NAME, never a command line
   assert_eq "$(printf '%s' "$s" | jq '[.items[].fix.action | test("^stuck\\.[a-z_]+$")] | all')" "true"
   _v2_down
@@ -184,17 +168,6 @@ test_v2_since_counts_and_seen_is_per_browser_cookie() {
   _v2_down
 }
 
-test_v2_lanes_from_ledger_and_samples() {
-  _v2_boot
-  local l; l="$(_v2_get "$(_v2_url 'lanes?range=3d')")"
-  assert_eq "$(printf '%s' "$l" | jq -r '.workspaces[0].ws')" "alpha"
-  local lane; lane="$(printf '%s' "$l" | jq -c '.workspaces[0].lanes[] | select(.ref == "widget/ABC-1-widget")')"
-  assert_contains "$(printf '%s' "$lane" | jq -r '[.segments[].state] | join(",")')" "running"
-  assert_contains "$(printf '%s' "$lane" | jq -r '[.segments[].state] | join(",")')" "idle"
-  assert_eq "$(printf '%s' "$l" | jq '.start < .now and .now <= .end')" "true"
-  _v2_down
-}
-
 test_v2_load_reads_the_sample_ring() {
   _v2_boot
   local l; l="$(_v2_get "$(_v2_url 'load?hours=24')")"
@@ -215,23 +188,23 @@ test_v2_act_message_goes_to_the_inbox_never_a_pane() {
   _v2_boot
   : > "$T/herdr.argv"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %s/herdr.argv\nprintf "{}"\n' "$T" > "$T/bin/herdr"
-  assert_eq "$(_v2_act '{"action":"message","target":"widget-abc-1","args":{"ws":"alpha","text":"hello widget","urgent":true,"kind":"ask"}}' -H "x-cel-csrf: $TOKEN")" "200"
-  assert_contains "$(jq -r 'select(.to == "widget-abc-1") | .message' "$T/inbox/alpha.jsonl")" "[ask] hello widget"
-  assert_eq "$(jq -r 'select(.to == "widget-abc-1" and .from == "dashboard") | .kind' "$T/inbox/alpha.jsonl")" "escalation"
+  assert_eq "$(_v2_act '{"action":"message","target":"widget-orch","args":{"ws":"alpha","text":"hello widget","urgent":true,"kind":"ask"}}' -H "x-cel-csrf: $TOKEN")" "200"
+  assert_contains "$(jq -r 'select(.to == "widget-orch" and .from == "dashboard") | .message' "$T/inbox/alpha.jsonl")" "[ask] hello widget"
+  assert_eq "$(jq -r 'select(.to == "widget-orch" and .from == "dashboard") | .kind' "$T/inbox/alpha.jsonl")" "escalation"
   if grep -q 'prompt\|send-keys\|input' "$T/herdr.argv"; then echo "pane input used" >&2; return 1; fi
   # and the act is in the activity feed
-  assert_contains "$(_v2_get "$(_v2_url 'activity?limit=5')" | jq -r '.items[].text')" "message to widget-abc-1"
+  assert_contains "$(_v2_get "$(_v2_url 'activity?limit=5')" | jq -r '.items[].text')" "message to widget-orch"
   _v2_down
 }
 
 test_v2_act_refuses_unknown_action_csrf_and_host() {
   _v2_boot
-  local body='{"action":"message","target":"widget-abc-1","args":{"ws":"alpha","text":"x"}}'
+  local body='{"action":"message","target":"widget-orch","args":{"ws":"alpha","text":"x"}}'
   assert_eq "$(_v2_act '{"action":"rm -rf","target":"x"}' -H "x-cel-csrf: $TOKEN")" "400"
   assert_eq "$(_v2_act "$body")" "403"
   assert_eq "$(_v2_act "$body" -H "x-cel-csrf: $TOKEN" -H 'Host: evil.example')" "403"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' "$(_v2_url act)")" "404"
-  if jq -e 'select(.to == "widget-abc-1" and .message == "x")' "$T/inbox/alpha.jsonl" >/dev/null; then
+  if jq -e 'select(.to == "widget-orch" and .message == "x")' "$T/inbox/alpha.jsonl" >/dev/null; then
     echo "a refused act was delivered" >&2; return 1
   fi
   _v2_down
@@ -266,9 +239,9 @@ test_steward_sample_appends_and_trims_the_ring() {
   rm -rf "$t"
 }
 
-# A target is a mailbox somebody reads - a ledger alias, an
-# orchestrator the workspace has, or root - and a stuck fix's repo is one the
-# workspace declares. Anything else would mint a phantom mailbox.
+# A target is a mailbox somebody reads - a main agent, a solo lane, a live
+# reviewer, or root - and a stuck fix's repo is one the workspace declares.
+# Anything else would mint a phantom mailbox.
 test_v2_act_refuses_phantom_targets_and_repos() {
   _v2_boot
   assert_eq "$(_v2_act '{"action":"message","target":"nobody-here","args":{"ws":"alpha","text":"x"}}' -H "x-cel-csrf: $TOKEN")" "400"
@@ -324,7 +297,7 @@ _v2_solo_fixture() {
   printf '#!/usr/bin/env bash\ncat %q\n' "$T/agents.json" > "$T/bin/herdr"
 }
 
-# Solo agents have no ledger row and lanes' names do not end -orch: each is
+# Solo agents' and lanes' names do not end -orch: each is
 # known by the directory and name cel gave it.
 test_v2_solo_fleet_knows_agents_lanes_and_reviewers_by_identity() {
   _v2_boot; _v2_solo_fixture
@@ -337,7 +310,7 @@ test_v2_solo_fleet_knows_agents_lanes_and_reviewers_by_identity() {
     "gadget-pr-10-review|gadget#10|ABC-4-redo|working"
   # a stranger in a lane's directory, a lane whose directory is gone, or a
   # reviewer's name outside its review checkout, is none of them
-  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .workers[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old" or .name == "gadget-pr-9-review")] | length')" "0"
+  assert_eq "$(printf '%s' "$f" | jq '[.orchestrators[], .reviewers[] | select(.name == "intruder" or .name == "thor-games-old" or .name == "gadget-pr-9-review")] | length')" "0"
   _v2_down
 }
 
@@ -386,10 +359,10 @@ test_v2_solo_message_reaches_lanes_and_reviewers() {
   _v2_down
 }
 
-# A workspace whose product builds solo has no ledger rows, yet its agents are
-# at work: each live one is a row of its own, from its own pane's samples,
-# the live pane having the last word - never "no workers".
-test_v2_solo_today_shows_live_agents_without_a_ledger() {
+# A workspace whose product builds solo has its agents at work: each live one
+# is a row of its own, from its own pane's samples, the live pane having the
+# last word.
+test_v2_solo_today_shows_live_agents() {
   _v2_boot; _v2_solo_fixture
   {
     printf '{"ts":"%s","load":1,"mem_pct":40,"swap_pct":2,"panes":[{"cwd":"%s/lane-ui","status":"blocked"}]}\n' "$(_v2_ago 1200)" "$SOLO"
@@ -442,13 +415,14 @@ test_v2_activity_log_is_bounded() {
   _v2_down
 }
 
-# The fleet feed covers every workspace in scope.
-test_v2_fleet_lists_orchestrators_workers_and_prs_across_workspaces() {
+# The fleet feed covers every workspace in scope; a pane in a herdr worktree
+# is no agent the dashboard lists (the fan-out workers it named are retired).
+test_v2_fleet_lists_orchestrators_and_prs_across_workspaces() {
   _v2_boot
   printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"alpha-orch\",\"agent\":\"omp\",\"agent_status\":\"working\",\"cwd\":\"$T/alpha\",\"pane_id\":\"w0:p1\"},{\"name\":\"bundle-orch\",\"agent\":\"omp\",\"agent_status\":\"idle\",\"cwd\":\"$T/bundle\",\"pane_id\":\"w0:p2\"},{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"blocked\",\"cwd\":\"$T/wt/widget-ok\",\"pane_id\":\"w1:p1\"},{\"name\":\"stranger\",\"agent\":\"pi\",\"agent_status\":\"idle\",\"cwd\":\"/elsewhere\",\"pane_id\":\"w9:p1\"}],\"workspaces\":[]}}'" > "$T/bin/herdr"
   local f; f="$(_v2_get "$(_v2_url 'fleet?ws=all')")"
   assert_eq "$(printf '%s' "$f" | jq -r '[.orchestrators[] | .name + "@" + .ws + ":" + .status] | sort | join(",")')" "alpha-orch@alpha:working,bundle-orch@bundle:idle"
-  assert_eq "$(printf '%s' "$f" | jq -r '[.workers[] | .name + "@" + .ws + ":" + .status + ":" + .id] | join(",")')" "widget-abc-1@alpha:blocked:ABC-1-widget"
+  assert_eq "$(printf '%s' "$f" | jq 'has("workers")')" "false"
   assert_eq "$(printf '%s' "$f" | jq -r '[.prs[] | .repo + "#" + (.number|tostring) + "@" + .ws] | sort | join(",")')" "widget#10@alpha,widget#9@alpha"
   assert_eq "$(printf '%s' "$f" | jq -r '.prs[] | select(.number == 10) | .review')" "CHANGES_REQUESTED"
   # one workspace: only its own
@@ -458,14 +432,59 @@ test_v2_fleet_lists_orchestrators_workers_and_prs_across_workspaces() {
   _v2_down
 }
 
-# Lanes show only work active in the range; finished is not waiting; an
-# open-ended "running" with no live pane is not running now.
-test_v2_lanes_show_only_live_work_and_never_call_finished_waiting() {
+# The delegation ledger is retired: a workspace's .cel/delegations.json stays
+# on disk but the dashboard never reads it. Its rows would make a worker, a
+# lane, activity and usage attribution if anything read them.
+_v2_ledger_rows() { # <worktree>
+  jq -n --arg wt "$1" --arg at "$(_v2_ago 20000)" '[{id: "ABC-1-widget", repo: "widget", branch: "ABC-1-widget",
+    alias: "widget-abc-1", worktree: $wt, state: "running", model: "anthropic/opus", profile: "opus-pi", shape: "ship",
+    verdict: "green", review: {verdict: "approved", by: "rev", at: $at}, history: [{state: "running", at: $at, by: "root"}]}]'
+}
+# /api/state and every v2 feed answer, and none carries a ledger-derived field
+_v2_hit_everything_without_the_ledger() { # <worktree>
+  printf '#!/usr/bin/env bash\necho %s\n' "'{\"result\":{\"agents\":[{\"name\":\"widget-abc-1\",\"agent\":\"pi\",\"agent_status\":\"working\",\"cwd\":\"$1\",\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\"}],\"workspaces\":[],\"panes\":[]}}'" > "$T/bin/herdr"
+  local st; st="$(curl -sf -m 20 "http://127.0.0.1:$DASH_PORT/api/state")" || { echo "/api/state failed"; return 1; }
+  assert_eq "$(printf '%s' "$st" | jq -r .workspace)" "alpha" || return 1
+  assert_eq "$(printf '%s' "$st" | jq -r '.inflight[] | select(.branch == "ABC-1-widget") | .agent')" "pi" || return 1
+  assert_eq "$(printf '%s' "$st" | jq '[.inflight[] | keys[] | select(. == "model" or . == "shape" or . == "why" or . == "verdict")] | length')" "0" || return 1
+  local f
+  for f in fleet services since activity stuck lanes load merges cycle heat usage; do
+    curl -sf -m 20 -o "$T/feed.$f" "$(_v2_url "$f?ws=all")" || { echo "feed $f failed"; return 1; }
+  done
+  assert_eq "$(_v2_get "$(_v2_url 'snapshot?ws=all')" | jq '[.feeds[] | .v != null] | all and length == 11')" "true" || return 1
+  assert_eq "$(jq 'has("workers")' "$T/feed.fleet")" "false" || return 1
+  assert_eq "$(jq '[.items[].kind | select(. == "worker" or . == "review")] | length' "$T/feed.activity")" "0" || return 1
+  assert_eq "$(jq -r '[.items[].reason] | unique | join(",")' "$T/feed.stuck")" "merge_conflict" || return 1
+  assert_eq "$(jq '[.workspaces[].lanes[]] | length' "$T/feed.lanes")" "0" || return 1
+  assert_eq "$(jq '[.. | objects | select(has("used_by") or has("profiles"))] | length' "$T/feed.usage")" "0" || return 1
+  if grep -q 'anthropic/opus\|opus-pi' "$T"/feed.*; then echo "a ledger row reached a feed"; return 1; fi
+}
+test_v2_unreadable_ledger_is_never_read() {
+  # a pane in a herdr worktree, so /api/state has a worktree row to join onto
+  local wt w
+  # leg 1: a directory where the ledger was (a reader throws), rows beside it
   _v2_boot
-  local l; l="$(_v2_get "$(_v2_url 'lanes?range=3d')")"
-  local refs; refs="$(printf '%s' "$l" | jq -r '[.workspaces[].lanes[].ref] | join(",")')"
-  assert_eq "$refs" "widget/ABC-1-widget"
-  assert_eq "$(printf '%s' "$l" | jq '[.workspaces[].lanes[].segments[] | select(.state == "waiting")] | length')" "0"
+  wt="$T/home/.herdr/worktrees/widget/ABC-1-widget"; mkdir -p "$wt"
+  for w in alpha bundle; do
+    mkdir -p "$T/$w/.cel/delegations.json"
+    _v2_ledger_rows "$wt" > "$T/$w/.cel/delegations.json/rows.json"
+  done
+  _v2_hit_everything_without_the_ledger "$wt" || { _v2_down; return 1; }
+  _v2_down
+  # leg 2: a readable ledger of real rows, its atime at the epoch - a read on
+  # this relatime filesystem moves it, so it staying 0 is proof nothing read it
+  _v2_boot
+  wt="$T/home/.herdr/worktrees/widget/ABC-1-widget"; mkdir -p "$wt"
+  _v2_ledger_rows "$wt" > "$T/probe"; touch -a -d @0 "$T/probe"; cat "$T/probe" >/dev/null
+  [ "$(stat -c %X "$T/probe")" != 0 ] || { echo "this filesystem does not record reads (noatime): the probe proves nothing"; _v2_down; return 1; }
+  for w in alpha bundle; do
+    mkdir -p "$T/$w/.cel"; _v2_ledger_rows "$wt" > "$T/$w/.cel/delegations.json"
+    touch -a -d @0 "$T/$w/.cel/delegations.json"
+  done
+  _v2_hit_everything_without_the_ledger "$wt" || { _v2_down; return 1; }
+  for w in alpha bundle; do
+    assert_eq "$(stat -c %X "$T/$w/.cel/delegations.json")" "0" || { echo "$w ledger was read"; _v2_down; return 1; }
+  done
   _v2_down
 }
 
@@ -557,9 +576,6 @@ _v2_quota_fixture() {
       {provider: "deepseek", workspace: "alpha", remaining: "22.54", state: "ok", floor: "1", unit: "usd", account: "bbbbbbbbbbbb", vetoed: false}],
     orch_pool: {live: ["ana@alpha.test"], disabled: ["ben@alpha.test"]},
     gateway: ["claude|ana@alpha.test", "claude|ben@alpha.test"]}' > "$T/quota.json"
-  # one worker this week on a codex model, so that account can say who used it
-  jq '.[0].profile = "luna" | .[0].model = "gpt-6"' "$T/alpha/.cel/delegations.json" > "$T/d.json" \
-    && mv "$T/d.json" "$T/alpha/.cel/delegations.json"
 }
 
 test_v2_usage_groups_by_provider_and_tags_who_runs_on_each_account() {
@@ -609,16 +625,6 @@ test_v2_usage_merges_a_shared_balance_and_counts_below_floor() {
   u="$(_v2_get "$(_v2_url 'usage?ws=bundle')")"
   assert_eq "$(printf '%s' "$u" | jq -r '[.balances[].provider] | join(",")')" "openrouter"
   assert_eq "$(printf '%s' "$u" | jq '.groups | length')" "2"
-  _v2_down
-}
-
-test_v2_usage_says_who_used_an_account_only_when_it_can_tell() {
-  _v2_boot; _v2_quota_fixture
-  local u; u="$(_v2_get "$(_v2_url 'usage?ws=all')")"
-  # one codex account: the ledger's codex-model work is that account's
-  assert_eq "$(printf '%s' "$u" | jq -c '.groups[1].accounts[0].used_by')" '[{"ws":"alpha","profile":"luna","n":1}]'
-  # two claude accounts behind one gateway: no way to split it, so no offer
-  assert_eq "$(printf '%s' "$u" | jq -c '[.groups[0].accounts[].used_by]')" '[null,null]'
   _v2_down
 }
 

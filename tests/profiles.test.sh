@@ -152,7 +152,7 @@ test_resolve_dies_on_an_unknown_profile() {
 # not just the model - which is why it resolves before the role is injected.
 test_run_profile_switches_the_runtime_and_model() {
   _pws
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --profile swap --dry-run 2>/dev/null)"
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --profile swap --dry-run 2>/dev/null)"
   assert_contains "$out" "--kind codex"
   assert_contains "$out" "--model gpt-6-astra"
   assert_contains "$out" "-c model_reasoning_effort=max"
@@ -160,14 +160,14 @@ test_run_profile_switches_the_runtime_and_model() {
 }
 test_run_without_a_profile_still_gets_the_default_thinking_level() {
   _pws
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
-  assert_contains "$out" "--kind omp"
-  assert_contains "$out" "--thinking xhigh"
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
+  assert_contains "$out" "--kind claude"
+  assert_contains "$out" "--effort xhigh"
   rm -rf "$T"
 }
 test_run_explicit_flags_beat_the_profile() {
   _pws
-  local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x \
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget \
                     --profile swap --model gpt-5.6-sol --thinking low --dry-run 2>/dev/null)"
   assert_contains "$out" "--model gpt-5.6-sol"
   assert_contains "$out" "-c model_reasoning_effort=low"
@@ -175,7 +175,7 @@ test_run_explicit_flags_beat_the_profile() {
 }
 test_run_dies_on_an_unknown_profile() {
   _pws
-  ( cd "$T" && assert_fails _in_subshell cmd_run worker --repo widget --branch WG-1-x --profile nope --dry-run )
+  ( cd "$T" && assert_fails _in_subshell cmd_run orchestrator --repo widget --profile nope --dry-run )
   rm -rf "$T"
 }
 
@@ -189,8 +189,10 @@ test_role_binding_applies_to_root_without_a_flag() {
   assert_contains "$out" "--model gpt-6-astra"
   rm -rf "$T"
 }
-test_role_binding_applies_to_workers() {
-  _pws; local out; out="$(cd "$T" && cmd_run worker --repo widget --branch WG-1-x --dry-run 2>/dev/null)"
+# A product agent runs the solo role, so a `solo:` binding reaches it.
+test_role_binding_applies_to_solo_agents() {
+  _pws; yq -y -i '.role_profiles.solo = "bare"' "$T/workspace.yaml"
+  local out; out="$(cd "$T" && cmd_run orchestrator --repo widget --dry-run 2>/dev/null)"
   assert_contains "$out" "--model some-model"
   rm -rf "$T"
 }
@@ -238,6 +240,7 @@ test_bindings_are_listed_by_cel_profiles() {
   _pws; local out; out="$(cd "$T" && cmd_profiles 2>/dev/null)"
   assert_contains "$out" "bound by role"
   assert_contains "$out" "root         -> swap"
+  assert_contains "$out" "Override once: cel run solo --product <p> --profile <name>"
   rm -rf "$T"
 }
 test_no_bindings_says_so() {
@@ -245,14 +248,6 @@ test_no_bindings_says_so() {
   printf 'worker_profiles:\n  only: { runtime: omp, model: m }\n' >> "$T/workspace.yaml"
   local out; out="$(cd "$T" && cmd_profiles 2>/dev/null)"
   assert_contains "$out" "No role_profiles"
-  rm -rf "$T"
-}
-# The policy block is how root LEARNS profiles exist - it is injected at launch
-# and is the only place an agent is told.
-test_policy_block_advertises_profiles_and_the_worker_binding() {
-  _pws; local out; out="$(ws_policy_block "$T")"
-  assert_contains "$out" "worker profiles:"
-  assert_contains "$out" "default here: bare"
   rm -rf "$T"
 }
 
@@ -348,7 +343,7 @@ test_quota_above_floor_is_untouched() {
 # The refusal reaches the launcher: cel run must not start the pane.
 test_run_refuses_a_vetoed_profile() {
   _quota_setup 0.5 50
-  ( cd "$T" && DEEPSEEK_API_KEY=x assert_fails _in_subshell cmd_run worker --repo widget --branch WG-1-x --profile stranded --dry-run )
+  ( cd "$T" && DEEPSEEK_API_KEY=x assert_fails _in_subshell cmd_run orchestrator --repo widget --profile stranded --dry-run )
   _quota_teardown
 }
 # A negative balance (an overdrawn account, as DeepSeek reports one) is below any floor.
@@ -375,7 +370,7 @@ repos:
     url: git@github.com:someone/widget.git
     prefix: WG
     gate: bun test
-    role_profiles: { orchestrator: bare, worker: bare }
+    role_profiles: { orchestrator: bare }
   - name: other
     url: git@github.com:someone/other.git
     prefix: OT
@@ -463,12 +458,12 @@ _pws_product_binding() {
 name: profiled
 kind: hustle
 org: someone
-policy: { merge: humans-only, pr: required, workers: 4, reviewer: null }
-runtime: { root: claude, orchestrator: claude, worker: omp }
+policy: { merge: humans-only, pr: required }
+runtime: { root: claude, orchestrator: claude }
 worker_profiles:
   swap: { runtime: codex, model: gpt-6-astra }
   bare: { runtime: omp, model: some-model }
-role_profiles: { orchestrator: swap, worker: bare }
+role_profiles: { orchestrator: swap, solo: bare }
 products:
   - name: bundle
     repos: [widget, gadget]
@@ -494,7 +489,7 @@ test_product_binding_beats_repo_and_workspace() {
 test_repo_binding_beats_the_workspace_when_no_product_matches() {
   _pws_product_binding
   assert_eq "$(role_profile_for "$T" orchestrator widget)" bare
-  assert_eq "$(role_profile_for "$T" worker gadget)" "$(role_profile "$T" worker)"
+  assert_eq "$(role_profile_for "$T" solo gadget)" "$(role_profile "$T" solo)"
   rm -rf "$T"
 }
 
@@ -502,7 +497,7 @@ test_repo_binding_beats_the_workspace_when_no_product_matches() {
 # A profile may reach its model through the box's auth-gateway rather than a
 # provider directly. `cel profiles` has to say so - and has to say how many
 # accounts are actually usable, because the whole feature is worthless with
-# none and the failure a worker sees is "Unknown model", not "auth expired".
+# none and the failure an agent sees is "Unknown model", not "auth expired".
 _gws() {
   _aws
   cat >>"$T/workspace.yaml" <<'YAML'
@@ -610,11 +605,11 @@ test_local_file_overrides_the_workspace_role_binding() {
 }
 test_local_file_leaves_an_unmentioned_role_alone() {
   _pws_local
-  # base fixture binds worker: bare; local names nothing for it
-  assert_eq "$(role_profile "$T" worker)" bare
+  # base fixture binds direct: bare; local names nothing for it
+  assert_eq "$(role_profile "$T" direct)" bare
   rm -rf "$T"
 }
-test_local_file_adds_a_worker_profile() {
+test_local_file_adds_a_profile() {
   _pws_local
   profile_exists "$T" localonly || { echo "profile_exists: localonly missing" >&2; rm -rf "$T"; return 1; }
   assert_eq "$(profile_get "$T" localonly model)" claude-sonnet-5
@@ -686,10 +681,10 @@ _pws_products3() {
 products:
   - name: alpha
     repos: [widget]
-    role_profiles: { worker: bare }
+    role_profiles: { solo: bare }
   - name: beta
     repos: [widget]
-    role_profiles: { worker: bare }
+    role_profiles: { solo: bare }
   - name: gamma
     repos: [widget]
 repos:
@@ -705,13 +700,13 @@ test_local_override_reaches_every_matched_product_not_only_the_first() {
   cat > "$T/workspace.local.yaml" <<'YAML'
 products:
   - name: alpha
-    role_profiles: { worker: swap }
+    role_profiles: { solo: swap }
   - name: beta
-    role_profiles: { worker: inherit }
+    role_profiles: { solo: inherit }
 YAML
-  assert_eq "$(role_profile_for "$T" worker alpha)" swap
-  assert_eq "$(role_profile_for "$T" worker beta)" inherit
-  assert_eq "$(role_profile_for "$T" worker gamma)" "$(role_profile "$T" worker)"
+  assert_eq "$(role_profile_for "$T" solo alpha)" swap
+  assert_eq "$(role_profile_for "$T" solo beta)" inherit
+  assert_eq "$(role_profile_for "$T" solo gamma)" "$(role_profile "$T" solo)"
   rm -rf "$T"
 }
 
@@ -724,11 +719,11 @@ repos:
     url: git@github.com:someone/widget.git
     prefix: WG
     gate: bun test
-    role_profiles: { worker: bare }
+    role_profiles: { solo: bare }
   - name: gadget
     url: git@github.com:someone/gadget.git
     prefix: GD
-    role_profiles: { worker: bare }
+    role_profiles: { solo: bare }
 YAML
 }
 
@@ -737,23 +732,23 @@ test_local_override_reaches_every_matched_repo_not_only_the_first() {
   cat > "$T/workspace.local.yaml" <<'YAML'
 repos:
   - name: widget
-    role_profiles: { worker: swap }
+    role_profiles: { solo: swap }
   - name: gadget
-    role_profiles: { worker: inherit }
+    role_profiles: { solo: inherit }
 YAML
-  assert_eq "$(role_profile_for "$T" worker widget)" swap
-  assert_eq "$(role_profile_for "$T" worker gadget)" inherit
+  assert_eq "$(role_profile_for "$T" solo widget)" swap
+  assert_eq "$(role_profile_for "$T" solo gadget)" inherit
   rm -rf "$T"
 }
 
-# --- same-name worker_profiles: replace whole, never field-merge ---------
+# --- same-name profiles: replace whole, never field-merge -----------------
 #
 # `via:`, `fallback:` and `thinking:` are runtime-specific routing, not
 # defaults to inherit across a runtime switch - via especially, since it
 # points at the box's shared auth-gateway, the exact credential this file
 # exists to let a login avoid.
 
-test_local_worker_profile_replaces_the_whole_body_not_merges_it() {
+test_local_profile_replaces_the_whole_body_not_merges_it() {
   T="$(mktemp -d)"
   cat > "$T/workspace.yaml" <<'YAML'
 worker_profiles:
@@ -778,7 +773,7 @@ test_malformed_local_file_falls_back_to_the_base_workspace() {
   _pws
   printf 'role_profiles: [this is not a mapping\n' > "$T/workspace.local.yaml"
   assert_eq "$(role_profile "$T" root)" swap
-  assert_eq "$(role_profile "$T" worker)" bare
+  assert_eq "$(role_profile "$T" direct)" bare
   assert_eq "$(profile_get "$T" swap model)" gpt-6-astra
   rm -rf "$T"
 }

@@ -294,10 +294,6 @@ const main = async () => {
       out.amber = await evaluate(`document.querySelectorAll('${q('.ubar i.warn')}').length`);
       out.tags = await evaluate(`[].slice.call(document.querySelectorAll('${q('.uacct .utag')}')).map(function(e){return e.textContent}).join(',')`);
       out.money = await evaluate(`[].slice.call(document.querySelectorAll('${q('.umoney b')}')).map(function(e){return e.textContent}).join('|')`);
-      out.offers = await evaluate(`document.querySelectorAll('${q('.uacct.can')}').length`);
-      await evaluate(`(function(){var b=document.querySelector('${q('.uacct.can .un b')}');if(b)b.click();return 1})()`);
-      await sleep(300);
-      out.usedBy = await evaluate(`(document.querySelector('${q('.uused')}')||{}).textContent||''`);
       await evaluate(`document.querySelector('#grid .w[data-id=usage] .ex').click()`);
       await sleep(300);
       out.overlaySparks = await evaluate(`document.querySelectorAll('#ovb .uspark').length`);

@@ -31,10 +31,6 @@ _CEL_RUN=1
 # herdr's free-text label. The cap is for readability, not a herdr limit.
 CEL_PANE_LABEL_MAX=40
 
-_pane_label_words() { # <slug> -> words separated by single spaces
-  printf '%s' "$1" | tr -s -- '-_.' '   ' | sed -E 's/^ +| +$//g'
-}
-
 _pane_label_cap() { # <label> -> label cut on a word boundary with an ellipsis
   local LC_ALL=C.UTF-8 s="$1" max="$CEL_PANE_LABEL_MAX"
   if [ "${#s}" -le "$max" ]; then printf '%s' "$s"; return 0; fi
@@ -48,22 +44,11 @@ _pane_label_cap() { # <label> -> label cut on a word boundary with an ellipsis
   printf '%s…' "${cut% ·}"
 }
 
-pane_label() { # <worker|scout|spike|reviewer|orchestrator|root|direct> <args...>
+pane_label() { # <reviewer|solo|root|direct> <args...>
   local kind="$1"; shift
   local l
   case "$kind" in
-    worker)
-      local b="${1##*/}" t rest
-      if [[ "$b" =~ ^([A-Za-z]+-[0-9]+)(-(.*))?$ ]]; then
-        t="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
-        rest="$(_pane_label_words "${BASH_REMATCH[3]}")"
-        l="$t${rest:+ · $rest}"
-      else
-        l="$(_pane_label_words "$b")"
-      fi ;;
-    scout|spike) l="$kind · $(_pane_label_words "$1")" ;;
     reviewer)    l="review · $1 #$2" ;;
-    orchestrator) l="$1 orchestrator" ;;
     root)        l="$1 root" ;;
     *)           l="$1 $kind" ;;
   esac
@@ -111,7 +96,7 @@ _run_role_file() { # <wsdir> <tag> [product]
 }
 
 # KEEP THE MODEL THE LAUNCH NAMED: omp prewalk would swap to the box's `smol`
-# model after the first write, and the ledger's model provenance would lie.
+# model after the first write, and the session's model provenance would lie.
 # Every omp launch goes through here; prepends --no-prewalk to AGENT_ARGS.
 _run_keep_model_args() { # <runtime>
   [ "$1" != omp ] || AGENT_ARGS=(--no-prewalk "${AGENT_ARGS[@]}")
@@ -186,8 +171,7 @@ _run_agent_args() { # <runtime> <tag> <body> <dry-run 0|1> <wsdir> [rolefile]
 }
 
 # Prepend the runtime's inbox hook (agents.yaml inbox_hook) to AGENT_ARGS, if
-# it has one. Shared by `cel run` and `cel-fanout delegate` so a worker gets
-# the same delivery whichever path launched it.
+# it has one, so every role launched gets the same delivery.
 _run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
   local hflag hfile
   hflag="$(agent_inbox_hook "$1" flag)"; hfile="$(agent_inbox_hook "$1" file)"
@@ -221,10 +205,6 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   # A runtime whose role is injected as a prompt argument has no file to name;
   # the other two still say whose the process is.
   [ -z "$file" ] || printf -v out '%s CEL_ROLE_FILE=%q' "$out" "$file"
-  # Workers compile: half the cores each, not all of them.
-  case "$role" in worker|scout|spike)
-    printf -v out '%s CARGO_BUILD_JOBS=%q' "$out" "$(boxguard_cargo_jobs)" ;;
-  esac
   # ...and, for a workspace with `github.user`, the account it acts as: the
   # token is a substitution the PANE evaluates (lib/workspace.sh), never a value.
   # The guard goes AHEAD of `env`, so the agent's start is chained on it.
@@ -581,25 +561,22 @@ review, not a detail. Nothing here is a branch, so there is nothing to push.
 EOF
 }
 
-# A SOLO PRODUCT'S PR HAS NO DELEGATION, so the role body's `cel-fanout
-# review <id>` has no id to name, and there is no worker to hand findings to:
-# the product's one agent wrote it. Empty for a fleet product.
+# WHOSE PR THIS IS AND HOW IT SHIPS: the product's solo agent wrote it, so
+# the reviewer's verdict and findings go to that agent, and the PR lands with
+# `cel solo land` on exactly the head that verdict approved.
 _run_reviewer_solo_brief() { # <wsdir> <repo> <pr>
   local product; product="$(ws_product_of_repo "$1" "$2")"
-  [ "$(ws_build_mode "$1" "$product")" = solo ] || return 0
   # Findings go to the solo agent that asked for this reviewer: the product's
   # main agent, or the lane that opened the PR.
   local author="$product-orch"
   [ "${CEL_ROLE:-}" = solo ] && [ -n "${CEL_INBOX_ME:-}" ] && author="$CEL_INBOX_ME"
   cat <<EOF
 
-## This PR belongs to a solo product
-\`$product\` is built by solo agents, with no delegated workers - there is no
-delegation id and no worker pane. This PR is \`$author\`'s. So, in place of the
-ledger steps in your role:
+## Whose PR this is
+\`$product\` is built by its solo agents. This PR is \`$author\`'s. So:
 - record your verdict with
   \`cel solo review $2#$3 <approved|changes> --head <reviewed-sha> --by <your alias> --note "<one line>"\`
-  (same rules: the full 40-character SHA you read; an approval must equal
+  (the full 40-character SHA you read; an approval must equal
   the PR's current head);
 - send findings and your verdict to \`$author\` by \`cel inbox send\`.
 It merges with \`cel solo land $2#$3\`, which honours only your recorded
@@ -701,12 +678,10 @@ _run_claude_trust_dir() { # <dir>
   return "$rc"
 }
 
-# THE REVIEWER REGISTRY. A worker is a DELEGATION with a ledger row, a release
-# verb and a gc pass; a reviewer needs its own record, or nothing can know it is
-# finished and its idle pane outlives its PR.
+# THE REVIEWER REGISTRY. A reviewer needs its own record, or nothing can know
+# it is finished and its idle pane outlives its PR.
 #
-# Deliberately NOT the delegation ledger: a reviewer is not a delegation and
-# must not appear in `cel-fanout status`. It is box-level state, so it lives
+# It is box-level state, so it lives
 # where the rest of the box's state does, beside gc-kept.json - and because it
 # is box-level, a row is keyed by WORKSPACE + repo + PR: two workspaces may
 # both hold a `widget` with a #12, and they are two reviews.
@@ -1296,8 +1271,8 @@ _run_resume_parent_session() { # <session> -> the session to resume
   fi
 }
 
-# RESUME. Root, core and the orchestrators carry their conversation across a
-# restart; workers and reviewers never do - each is one ticket or one PR.
+# RESUME. Root, core and the product agents carry their conversation across a
+# restart; reviewers never do - each is one PR.
 # Sets RESUME_SESSION and RESTART_PANE in the caller and appends the resume
 # flag to its AGENT_ARGS.
 _run_resume_resolve() { # <role> <agent-name> <cwd> <runtime> <pane-opt> <restart> <fresh> <force> <dry-run> <relaunch-cmd> <adopt-hint> [wsdir]
@@ -1882,17 +1857,17 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
 
   if [ $# -gt 0 ]; then
     case "$1" in
-      root|orchestrator|worker|reviewer) role="$1"; shift ;;
+      root|orchestrator|reviewer) role="$1"; shift ;;
+      # Retired with fan-out; refused for one release so a habit gets an answer.
+      worker|scout|spike) die "cel run $1: fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)" ;;
       # `console` is core's old name and stays an alias of it.
       core|console) role=core; shift ;;
-      # SOLO IS THE PRODUCT'S AGENT IN ANOTHER ROLE, not a new kind of pane: same
-      # directory, mailbox, alias, resume and one-per-product refusal as an
-      # orchestrator, so every surface that finds "the product's agent" still
-      # finds it. Only the role body, the guard and CEL_ROLE differ. The product's
-      # `mode:` picks it for `cel run orchestrator`; `cel run solo` forces it once.
+      # SOLO IS THE PRODUCT'S AGENT, not a new kind of pane: same directory,
+      # mailbox, alias, resume and one-per-product refusal whether it is
+      # started as `cel run solo` or `cel run orchestrator`.
       solo) role=orchestrator; solo_forced=1; shift ;;
       --*) : ;;
-      *) die "cel run: unknown role '$1' (want core, root, orchestrator, solo, worker or reviewer; omit for direct)" ;;
+      *) die "cel run: unknown role '$1' (want core, root, orchestrator, solo or reviewer; omit for direct)" ;;
     esac
   fi
 
@@ -1901,7 +1876,6 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       --repo)      repo="$2"; shift 2 ;;
       --product)   product="$2"; shift 2 ;;
       --workspace) workspace="$2"; shift 2 ;;
-      --branch)    branch="$2"; shift 2 ;;
       --pr)        pr="$2"; shift 2 ;;
       --profile)   profile="$2"; shift 2 ;;
       --model)     model_opt="$2"; shift 2 ;;
@@ -1923,7 +1897,7 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   local profile_opt="$profile"
   if [ -n "$remember_model_pid" ]; then
     [ "$solo_forced" = 1 ] && [ -n "$lane" ] && [ -n "$model_opt" ] \
-      && [ -z "$profile$thinking_opt$backend_opt$repo$branch$pr$pane_opt$handoff" ] \
+      && [ -z "$profile$thinking_opt$backend_opt$repo$pr$pane_opt$handoff" ] \
       && [ "$restart$fresh$force" = 000 ] \
       || die 'cel run: --remember-current-model PID requires solo --lane and --model only (plus product/workspace/dry-run)'
   fi
@@ -1935,11 +1909,11 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
   case "$role" in
     root|orchestrator|core) ;;
     *) [ "$restart" -eq 0 ] && [ "$fresh" -eq 0 ] \
-         || die "cel run: --restart and --fresh are for core, root and orchestrators only - workers and reviewers never resume" ;;
+         || die "cel run: --restart and --fresh are for core, root and product agents only - reviewers never resume" ;;
   esac
   if [ "$role" = core ]; then
-    [ -z "$repo$product$workspace$branch$pr" ] \
-      || die "cel core: core stands in no workspace - --repo/--product/--workspace/--branch/--pr do not apply"
+    [ -z "$repo$product$workspace$pr" ] \
+      || die "cel core: core stands in no workspace - --repo/--product/--workspace/--pr do not apply"
     _run_core "$profile" "$model_opt" "$thinking_opt" "$dry_run" "$restart" "$fresh" "$force" "$pane_opt"
     return $?
   fi
@@ -2012,24 +1986,23 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
       alias_name="$product/orch"
       cwd="$(ws_product_dir "$wsdir" "$product")"
       runtime="$(ws_runtime "$wsdir" orchestrator)"
-      rolefile="$CEL_ROOT/core/roles/project-orchestrator.md"
-      # The product's build mode decides which agent this is. An unknown value
-      # is refused: guessing would hand a product to the wrong kind of agent.
+      # Every product's agent is its solo agent: it builds and ships the
+      # product itself. A product still set to the retired `mode: fleet` is
+      # refused rather than started as something it no longer is; an unknown
+      # value is refused too - guessing would hand a product to the wrong agent.
       build_mode="$(ws_build_mode "$wsdir" "$product")"
       case "$build_mode" in
-        fleet|solo) ;;
-        *) die "cel run: product '$product' has mode '$build_mode' - want solo or fleet (workspace.yaml)" ;;
+        solo) ;;
+        fleet) die "cel run: $product is set to mode: fleet - fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming). Switch it with: cel mode $product solo" ;;
+        *) die "cel run: product '$product' has mode '$build_mode' - want solo (workspace.yaml)" ;;
       esac
-      if [ "$solo_forced" -eq 1 ] || [ "$build_mode" = solo ]; then
-        solo=1
-        rolefile="$CEL_ROOT/core/roles/solo.md"
-      fi
+      solo=1
+      rolefile="$CEL_ROOT/core/roles/solo.md"
       # A LANE is a second (third, ...) solo agent on the same product, for a
       # separate goal: its own pane, name (<product>-<lane>), mailbox,
       # directory and session, working in the product's repos through its
-      # own worktrees. Solo only - in fleet the workers are the parallelism.
+      # own worktrees.
       if [ -n "$lane" ]; then
-        [ "$build_mode" = solo ] || die "cel run solo --lane: $product is in $build_mode mode - lanes are for solo products (cel mode $product solo)"
         [ "$lane" != orch ] || die "cel run solo --lane: 'orch' is the product's main agent - leave --lane off for it"
         [[ "$lane" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
           || die "cel run solo --lane: '$lane' - use lowercase letters and digits, single dashes between them"
@@ -2037,19 +2010,6 @@ _cmd_run() { # shared role/runtime resolution; cmd_run holds admission for actua
         _run_lane_name_free "$wsdir" "$product" "$lane"
         cwd="$(ws_solo_dir "$wsdir" "$product")/lane-$lane"
       fi
-      # A one-off solo launch over a fleet product with work in flight would
-      # leave that work with no orchestrator to collect, review or land it.
-      if [ "$solo_forced" -eq 1 ] && [ "$build_mode" = fleet ]; then
-        local inflight; inflight="$(ws_product_live_delegations "$wsdir" "$product")"
-        [ -z "$inflight" ] || die "cel run solo: $product still has fleet work in flight - land or release it first (cel-fanout status):
-$(printf '%s\n' "$inflight" | sed 's/^/    /')"
-      fi
-      ;;
-    worker)
-      [ -n "$branch" ] || die "cel run worker: --branch is required"
-      alias_name="$repo/$branch"
-      runtime="$(ws_runtime "$wsdir" worker)"
-      rolefile="$CEL_ROOT/core/roles/worker.md"
       ;;
     reviewer)
       [ -n "$pr" ] || die "cel run reviewer: --pr is required"
@@ -2145,19 +2105,16 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
       fi
       ;;
   esac
-  # What the launched process is told it is (CEL_ROLE, read by the guard) and
-  # which build mode its policy block is worded for. Plumbing keeps `$tag`
-  # (orchestrator): the role FILE must keep ending in role-orchestrator.md,
-  # which lib/gc.sh reads as "long-lived agent, never reap".
-  local env_role="$tag" build_mode_eff="$build_mode"
-  if [ "$solo" -eq 1 ]; then env_role=solo; build_mode_eff=solo; fi
+  # What the launched process is told it is (CEL_ROLE, read by the guard).
+  # Plumbing keeps `$tag` (orchestrator): the role FILE must keep ending in
+  # role-orchestrator.md, which lib/gc.sh reads as "long-lived agent, never
+  # reap".
+  local env_role="$tag"
+  if [ "$solo" -eq 1 ]; then env_role=solo; fi
   case "$role" in
     "")           label="$(pane_label direct "$repo")" ;;
     root)         label="$(pane_label root "$(ws_name "$wsdir")")" ;;
-    orchestrator)
-      if [ "$solo" -eq 1 ]; then label="$(pane_label solo "$product${lane:+/$lane}")"
-      else label="$(pane_label orchestrator "$product")"; fi ;;
-    worker)       label="$(pane_label worker "$branch")" ;;
+    orchestrator) label="$(pane_label solo "$product${lane:+/$lane}")" ;;
     reviewer)     label="$(pane_label reviewer "$repo" "$pr")" ;;
   esac
 
@@ -2249,8 +2206,8 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
   # Reviewers never let pi infer a provider: aliases resolve from the current
   # gateway catalog, and explicit Claude IDs are routed through that gateway.
   # A Codex-family id (gpt-6.1-sol, ompgw-codex/gpt-6-astra) goes through the
-  # gateway's codex provider - the same route and vetoes a worker profile
-  # with that model gets.
+  # gateway's codex provider - the same route and vetoes a profile with that
+  # model gets.
   if [ "$role" = reviewer ] && gateway_codex_model_p "$model"; then
     PROFILE_MODEL="$model" PROFILE_WSDIR="$wsdir" PROFILE_VIA=gateway PROFILE_VETO=""
     _profile_gateway_route_codex reviewer pi
@@ -2298,7 +2255,7 @@ $(printf '%s\n' "$inflight" | sed 's/^/    /')"
 
   local RUN_BODY
   if [ -n "$rolefile" ]; then
-    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}" "$build_mode_eff")"
+    RUN_BODY="$(ws_render_role "$wsdir" "$rolefile" "${product:-}")"
   else
     RUN_BODY="$(ws_policy_block "$wsdir")"
   fi
@@ -2345,11 +2302,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     AGENT_ARGS+=(--prompt "Read the complete migration handoff at $handoff before acting. This is a NEW OpenCode-native session, not a native resume of the archived OMP history. Preserve the model, account route, approvals, data and dirty work in that handoff. Never dump environments, credentials, resolved provider configs or full debug/config responses: use explicit non-secret identity allowlists only. Acknowledge intake through cel inbox, then wait for core to release the migration hold.")
   fi
 
-  # READ-ONLY ORCHESTRATORS. Root and the sub-orchestrators get the runtime's
-  # guard hook so repository writes from their panes are refused at the tool
-  # call; workers and reviewers do not - writing is a worker's whole job, and a
-  # reviewer only reads. Enforced here, not requested in the role text: a prompt
-  # is not a guard.
+  # THE GUARD HOOK. Root and the product agents get the runtime's guard hook,
+  # so a refused command is refused at the tool call (lib/guard.sh: root is
+  # read-only over repositories, a solo agent may not merge by hand or start
+  # other agents); a reviewer only reads. Enforced here, not requested in the
+  # role text: a prompt is not a guard.
   case "$role" in
     root|orchestrator)
       local gflag gfile
@@ -2359,9 +2316,9 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       fi
       ;;
   esac
-  # Add runtime-specific inbox extension args to every role, not just
-  # orchestrators: reviewers send worker revisions through mail too. Claude's
-  # global UserPromptSubmit and launch-time Stop hooks are configured elsewhere.
+  # Add runtime-specific inbox extension args to every role: reviewers and
+  # their authors trade findings by mail. Claude's global UserPromptSubmit and
+  # launch-time Stop hooks are configured elsewhere.
   _run_inbox_hook_args "$runtime"
   _run_keep_model_args "$runtime"
   _run_retry_overlay_args "$runtime" "$role"
@@ -2382,7 +2339,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       [ -z "$lane" ] || LAUNCH_ENV_EXTRA+=("CEL_LANE=$lane") ;;
     # Pane alias is the reader identity, passed explicitly so delivery never
     # depends on the pane's cwd.
-    worker|reviewer) inbox_me="$agent_name" ;;
+    reviewer) inbox_me="$agent_name" ;;
   esac
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
@@ -2418,8 +2375,8 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
   #
   # OMP_GATEWAY_TOKEN is resolved in the pane from the file-backed CLIProxyAPI
   # key, for pi and omp alike (omp: the celgw provider in models.yml).
-  # CEL_SESSION_ID is the balancer's key. One worker, one key, one account
-  # for its life; the next worker may land on another.
+  # CEL_SESSION_ID is the balancer's key. One agent, one key, one account
+  # for its life; the next agent may land on another.
   local -a GATEWAY_ENV=()
   local affinity=""
   # A new OpenCode controller must not inherit core's gateway affinity.
@@ -2448,26 +2405,7 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       return 0
     fi
     _rex_preflight "$agent_name" "$runtime"
-    if [ "$role" = worker ]; then
-      git check-ref-format --branch "$branch" >/dev/null || die 'invalid worker branch name'
-      cwd="$wsdir/.cel/worktrees/$repo/$branch"
-      mkdir -p "$(dirname "$cwd")"
-      if [ -e "$cwd" ]; then
-        local source_git worker_git
-        source_git="$(git -C "$wsdir/repos/$repo" rev-parse --path-format=absolute --git-common-dir)" || die 'cannot identify source repository'
-        worker_git="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)" || die 'worker path is not a registered checkout'
-        [ ! -L "$cwd" ] && [ "$source_git" = "$worker_git" ] && [ "$(git -C "$cwd" branch --show-current)" = "$branch" ] \
-          || die 'worker path belongs to a different checkout; nothing was reset'
-      elif git -C "$wsdir/repos/$repo" show-ref --verify --quiet "refs/heads/$branch"; then
-        git -C "$wsdir/repos/$repo" worktree add "$cwd" "$branch" || die 'could not open worker checkout'
-      else
-        local base
-        base="$(repo_default_ref "$wsdir/repos/$repo")" || die 'cannot resolve worker base branch'
-        git -C "$wsdir/repos/$repo" worktree add -b "$branch" "$cwd" "$base" || die 'could not create worker checkout'
-      fi
-    else
-      mkdir -p "$cwd"
-    fi
+    mkdir -p "$cwd"
     _rex_launch "$agent_name" "$runtime" "$cwd" "$label" "$envprefix" "${AGENT_ARGS[@]}" || return $?
     [ -z "$lane" ] || _run_lane_choices_commit "$cwd" "$lane_profile_explicit" "$lane_model_explicit" "$runtime" "$dry_run" || return $?
     if [ "$role" = reviewer ]; then
@@ -2500,19 +2438,13 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
     return 0
   fi
 
-  local -a CREATE_ARGS
-  if [ "$role" = "worker" ]; then
-    local repodir="$wsdir/repos/$repo"
-    CREATE_ARGS=(worktree create --cwd "$repodir" --branch "$branch" --label "$branch" --no-focus)
-  else
-    # A declared product's directory is cel's to make: it is not a checkout,
-    # so nothing else ever creates it and herdr would refuse a missing cwd.
-    if [ "$role" = "orchestrator" ] && [ "$dry_run" -eq 0 ] \
-       && { [ -n "$lane" ] || ws_product_declared "$wsdir" "$product"; }; then
-      mkdir -p "$cwd"
-    fi
-    CREATE_ARGS=(workspace create --cwd "$cwd" --label "$alias_name")
+  # A declared product's directory is cel's to make: it is not a checkout,
+  # so nothing else ever creates it and herdr would refuse a missing cwd.
+  if [ "$role" = "orchestrator" ] && [ "$dry_run" -eq 0 ] \
+     && { [ -n "$lane" ] || ws_product_declared "$wsdir" "$product"; }; then
+    mkdir -p "$cwd"
   fi
+  local -a CREATE_ARGS=(workspace create --cwd "$cwd" --label "$alias_name")
 
   # Root mode is the workspace's whole working view, so it also applies the
   # workspace's declared herdr layout (services, watch panes, ...) - the other

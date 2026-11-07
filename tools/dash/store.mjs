@@ -1,4 +1,4 @@
-// PARSE ONCE, KEEP WARM. Many feeds read the same inbox and ledger files, so
+// PARSE ONCE, KEEP WARM. Many feeds read the same inbox and ring files, so
 // a file is parsed once and kept, keyed by path, and looked at again only
 // when its size, mtime or inode moves. Inboxes are append-only, so
 // growth reads only the appended tail; a shrink, a new inode or a changed
@@ -20,7 +20,6 @@ const parseLines = (text) => {
 
 export const createStore = () => {
   const jl = new Map();
-  const js = new Map();
   const same = (e, s) => e && e.ino === s.ino && e.size === s.size && e.mtime === s.mtime;
   // rows of a JSONL file; the returned array is shared - callers must not
   // mutate it. Missing is empty; any other read failure (a directory where
@@ -51,18 +50,7 @@ export const createStore = () => {
       return rows;
     } catch (err) { jl.delete(f); throw err; }
   };
-  // a whole-JSON file (a ledger); null when missing or unparsable
-  const json = (f) => {
-    const s = sig(f);
-    if (!s) { js.delete(f); return null; }
-    const e = js.get(f);
-    if (same(e, s)) return e.v;
-    let v = null;
-    try { v = JSON.parse(readFileSync(f, 'utf8')); } catch { v = null; }
-    js.set(f, { ...s, v });
-    return v;
-  };
-  return { jsonl, json };
+  return { jsonl };
 };
 
 // one per process: /api/state and the v2 feeds read the same files

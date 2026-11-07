@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude PreToolUse hook: orchestrators are read-only over repositories.
+# claude PreToolUse hook: coordinators are read-only over repositories.
 #
 # Reads the tool call as JSON on stdin. Exit 2 with a reason on stderr blocks
 # the call and shows the agent the reason; exit 0 lets it through. Runs under
@@ -33,9 +33,9 @@ path="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.notebook
 
 verdict=allow
 case "$role" in
-  # Workers and panes outside the plane are otherwise untouched; the forge
-  # API token is the one thing no agent reads.
-  worker|other)
+  # Panes outside the plane (a reviewer, a scratch session) are otherwise
+  # untouched; the forge API token is the one thing no agent reads.
+  other)
     case "$tool" in
       Bash) case "$cmd" in CEL_GUARD_ALLOW_ONCE=1*) exit 0;; esac
             _guard_names_forge_token "$cmd" && verdict="$_GUARD_TOKEN_DENY" ;;

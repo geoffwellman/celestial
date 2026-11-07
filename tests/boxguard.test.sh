@@ -83,19 +83,10 @@ test_boxguard_warning_ignores_cold_swap_above_twice_the_floor() {
 test_boxguard_warning_text_says_stop_only_when_admission_refuses() {
   _bg_meminfo 4194304 0 0               # 4 GB: warned, still admitted
   local out; out="$(boxguard_warning_text)"
-  case "$out" in *"top delegating"*) echo "said stop above the floor: $out"; return 1;; esac
+  case "$out" in *"nothing heavy"*) echo "said stop above the floor: $out"; return 1;; esac
   _bg_meminfo 1048576 0 0               # 1 GB: refused
   out="$(boxguard_warning_text)"
-  assert_contains "$out" "Stop delegating"
-  rm -rf "$T"
-}
-
-test_fanout_delegate_refuses_on_a_full_box() {
-  _bg_meminfo 524288 0 0
-  local out rc=0
-  out="$(cd "$T" && HOME="$T" bash "$CEL_ROOT/core/skills/fanout/bin/cel-fanout" delegate widget b1 /nonexistent 2>&1)" || rc=$?
-  [ "$rc" -ne 0 ] || { echo "delegate started on a full box"; return 1; }
-  assert_contains "$out" "box memory low"
+  assert_contains "$out" "Start nothing heavy"
   rm -rf "$T"
 }
 

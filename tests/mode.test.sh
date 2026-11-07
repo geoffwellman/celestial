@@ -10,6 +10,13 @@ _mws() {
   mkdir -p "$T/repos/widget" "$T/repos/gadget" "$T/repos/lone" "$T/.cel"
   ORIG="$T/orig.yaml"; cp "$T/workspace.yaml" "$ORIG"
 }
+# Both products still set to the retired `mode: fleet`, the one state left
+# that `cel mode <p> solo` has to write over.
+_mws_legacy() {
+  _mws
+  _mode_write "$T" bundle fleet && _mode_write "$T" lone fleet || return 1
+  cp "$T/workspace.yaml" "$ORIG"
+}
 _cmd_mode_in_subshell() { ( cmd_mode "$@" ); }
 _changed_lines() { diff "$ORIG" "$T/workspace.yaml" | grep -c '^[<>]'; }
 # The data must be the original with exactly one key set.
@@ -18,35 +25,52 @@ _data_is_orig_plus() { # <section> <name> <mode>
     = "$(yq -cS . "$T/workspace.yaml")" ]
 }
 
-test_mode_defaults_to_fleet_for_declared_and_implicit_products() {
+test_mode_defaults_to_solo_for_declared_and_implicit_products() {
   _mws
-  assert_eq "$(ws_build_mode "$T" bundle)" fleet
-  assert_eq "$(ws_build_mode "$T" lone)" fleet
+  assert_eq "$(ws_build_mode "$T" bundle)" solo
+  assert_eq "$(ws_build_mode "$T" lone)" solo
+  assert_eq "$(cd "$T" && cmd_mode bundle)" "bundle: solo"
   rm -rf "$T"
 }
 
-test_mode_switch_is_one_added_line_and_reads_back() {
+# A product that already reads solo is left alone: nothing is written.
+test_mode_solo_on_a_solo_product_writes_nothing() {
   _mws
+  local out; out="$( cd "$T" && cmd_mode bundle solo --no-restart 2>&1 )"
+  assert_contains "$out" "already solo"
+  assert_eq "$(_changed_lines)" 0
+  rm -rf "$T"
+}
+
+test_mode_switch_from_legacy_fleet_replaces_the_line_and_reads_back() {
+  _mws_legacy
+  assert_eq "$(ws_build_mode "$T" bundle)" fleet
   ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
   assert_eq "$(ws_build_mode "$T" bundle)" solo
   assert_eq "$(ws_build_mode "$T" lone)" fleet
-  assert_eq "$(_changed_lines)" 1
+  assert_eq "$(_changed_lines)" 2   # one line out, one line in
   _data_is_orig_plus products bundle solo || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 
-test_mode_switch_back_replaces_the_same_line() {
+# Fleet was retired: asking for it is refused and writes nothing, whatever
+# the product reads now.
+test_mode_fleet_is_refused_and_writes_nothing() {
   _mws
-  _mode_stub_roster "$T/elsewhere" someone idle
-  ( cd "$T" && cmd_mode bundle solo --no-restart && cmd_mode bundle fleet --no-restart ) >/dev/null
-  assert_eq "$(ws_build_mode "$T" bundle)" fleet
-  assert_eq "$(_changed_lines)" 1
-  assert_eq "$(grep -c 'mode: ' "$T/workspace.yaml")" 1
+  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet --no-restart 2>&1 )" \
+    && { echo "switched to fleet"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "fan-out was retired on 2026-11-08: build in the product's solo agent (feature teams are coming)"
+  assert_eq "$(_changed_lines)" 0
+  rm -rf "$T"
+  _mws_legacy
+  out="$( cd "$T" && _cmd_mode_in_subshell lone fleet 2>&1 )" && { echo "accepted fleet"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "fan-out was retired"
+  assert_eq "$(_changed_lines)" 0
   rm -rf "$T"
 }
 
 test_mode_on_an_implicit_product_writes_its_repo_entry() {
-  _mws
+  _mws_legacy
   ( cd "$T" && cmd_mode lone solo --no-restart ) >/dev/null
   assert_eq "$(yq -r '.repos[] | select(.name == "lone") | .mode' "$T/workspace.yaml")" solo
   assert_eq "$(ws_build_mode "$T" bundle)" fleet
@@ -94,7 +118,7 @@ test_mode_edits_an_unindented_sequence() {
 
 # A symlinked workspace.yaml stays a symlink; the file it names is edited.
 test_mode_writes_through_a_symlink() {
-  _mws
+  _mws_legacy
   mv "$T/workspace.yaml" "$T/real.yaml"; ln -s real.yaml "$T/workspace.yaml"
   ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
   [ -L "$T/workspace.yaml" ] || { echo "the link was replaced"; rm -rf "$T"; return 1; }
@@ -105,7 +129,7 @@ test_mode_writes_through_a_symlink() {
 # A flow-style item cannot be edited as one line; it is refused, untouched.
 test_mode_refuses_a_flow_style_entry_and_leaves_the_file_alone() {
   _mws
-  sed -i 's/^  - name: lone$/  - { name: lone, url: x, prefix: OT, gate: t }/' "$T/workspace.yaml"
+  sed -i 's/^  - name: lone$/  - { name: lone, url: x, prefix: OT, gate: t, mode: fleet }/' "$T/workspace.yaml"
   awk '/name: lone, url/ {print; skip=3; next} skip>0 {skip--; next} {print}' "$T/workspace.yaml" > "$T/w" && mv "$T/w" "$T/workspace.yaml"
   cp "$T/workspace.yaml" "$ORIG"
   local out; out="$( cd "$T" && _cmd_mode_in_subshell lone solo --no-restart 2>&1 )" && { rm -rf "$T"; return 1; }
@@ -118,7 +142,7 @@ test_mode_refuses_a_flow_style_entry_and_leaves_the_file_alone() {
 # being validated must not lose that edit: the source is checked right before
 # the rename and the write is refused, untouched, when it moved.
 test_mode_write_over_a_concurrent_edit_is_fail_safe() {
-  _mws
+  _mws_legacy
   chmod() { printf '# edited meanwhile\n' >> "$T/workspace.yaml"; command chmod "$@"; }
   local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
     && { unset -f chmod; echo "overwrote a concurrent edit"; rm -rf "$T"; return 1; }
@@ -131,7 +155,7 @@ test_mode_write_over_a_concurrent_edit_is_fail_safe() {
 }
 # Two cel mode writers queue on one lock; one that cannot get it writes nothing.
 test_mode_write_under_another_writers_lock_is_fail_safe() {
-  _mws
+  _mws_legacy
   local hfd; exec {hfd}>"$T/.cel/workspace.lock"; flock "$hfd"
   local out; out="$( cd "$T" && CEL_MODE_WRITE_LOCK_WAIT=1 _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
     && { exec {hfd}>&-; echo "wrote under another writer's lock"; rm -rf "$T"; return 1; }
@@ -142,26 +166,12 @@ test_mode_write_under_another_writers_lock_is_fail_safe() {
 }
 # A box with no flock(1) writes as it always did - no lock is not a conflict.
 test_mode_write_with_no_flock_still_writes() {
-  _mws
+  _mws_legacy
   source "$CEL_ROOT/tests/lib/no-flock.sh"
   local out; out="$( cd "$T" && PATH="$(no_flock_path "$T")" _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" \
     || { echo "refused without flock: $out"; rm -rf "$T"; return 1; }
   assert_eq "$(ws_build_mode "$T" bundle)" solo
   _data_is_orig_plus products bundle solo || { rm -rf "$T"; return 1; }
-  rm -rf "$T"
-}
-
-# Fleet work still in flight has nobody to land it once the product is solo.
-test_mode_refuses_solo_while_fleet_work_is_in_flight() {
-  _mws
-  printf '[{"id":"WG-1-x","repo":"widget","state":"finished"},{"id":"OT-2-y","repo":"lone","state":"released"}]' \
-    > "$T/.cel/delegations.json"
-  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle solo --no-restart 2>&1 )" && { echo "switched"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "WG-1-x finished"
-  assert_eq "$(ws_build_mode "$T" bundle)" fleet
-  # a released row on another product blocks nothing
-  ( cd "$T" && cmd_mode lone solo --no-restart ) >/dev/null
-  assert_eq "$(ws_build_mode "$T" lone)" solo
   rm -rf "$T"
 }
 
@@ -183,31 +193,8 @@ EOF
 }
 _rec() { printf '%s\n' "$*" >> "$T/launched"; }
 
-# LANES. Back to fleet is refused while a lane is live; a lane's restart
-# waiter watches and relaunches the lane, never the main agent.
-test_mode_refuses_fleet_while_a_lane_is_live() {
-  _mws
-  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
-  _mode_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui idle
-  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet 2>&1 )" \
-    && { echo "switched to fleet over a live lane"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "bundle-ui"
-  assert_eq "$(ws_build_mode "$T" bundle)" solo
-  rm -rf "$T"
-}
-# A roster herdr cannot give is not "no lanes": back to fleet is refused
-# until the lanes can be seen, never assumed away.
-test_mode_fleet_switch_with_an_unreadable_roster_is_fail_safe() {
-  _mws
-  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
-  mkdir -p "$T/bin"; printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/herdr"; chmod +x "$T/bin/herdr"
-  PATH="$T/bin:$PATH"
-  local out; out="$( cd "$T" && _cmd_mode_in_subshell bundle fleet --no-restart 2>&1 )" \
-    && { echo "switched to fleet without seeing the lanes"; rm -rf "$T"; return 1; }
-  assert_contains "$out" "cannot read"
-  assert_eq "$(ws_build_mode "$T" bundle)" solo
-  rm -rf "$T"
-}
+# LANES. A lane's restart waiter watches and relaunches the lane, never the
+# main agent.
 test_mode_lane_waiter_relaunches_the_lane() {
   _mws
   _mode_stub_roster "$T/.cel/solo/bundle/lane-ui" bundle-ui idle
@@ -231,15 +218,6 @@ test_mode_lane_restart_keys_differ_from_a_lookalike_product() {
   [ "$(sort -u "$T/locks" | wc -l)" -eq 2 ] || { echo "one lock for both: $(cat "$T/locks")"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-# A lane pane whose directory was deleted does not hold the product in solo.
-test_mode_a_deleted_lane_does_not_block_fleet() {
-  _mws
-  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
-  _mode_stub_roster "$T/.cel/solo/bundle/lane-ui (deleted)" bundle-ui idle
-  ( cd "$T" && cmd_mode bundle fleet --no-restart ) >/dev/null 2>&1
-  assert_eq "$(ws_build_mode "$T" bundle)" fleet
-  rm -rf "$T"
-}
 # A lane's mailbox is not <product>-orch: the launch's CEL_PRODUCT names it.
 test_mode_product_comes_from_the_launch_for_a_lane() {
   _mws
@@ -250,16 +228,17 @@ test_mode_product_comes_from_the_launch_for_a_lane() {
 # The product's own agent is restarted - scheduled, never inline, so the agent
 # that ran `cel mode` is not killed mid-turn - and only when asked.
 test_mode_schedules_a_restart_for_the_product_agent_only_when_asked() {
-  _mws; _mode_stub_roster "$T/products/bundle" bundle-orch working
+  _mws_legacy; _mode_stub_roster "$T/products/bundle" bundle-orch working
   ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
   [ ! -s "$T/launched" ] || { echo "restarted despite --no-restart"; rm -rf "$T"; return 1; }
-  ( cd "$T" && CEL_MODE_LAUNCH=_rec cmd_mode bundle fleet ) >/dev/null
+  _mode_write "$T" bundle fleet
+  ( cd "$T" && CEL_MODE_LAUNCH=_rec cmd_mode bundle solo ) >/dev/null
   assert_contains "$(cat "$T/launched")" "mode --restart-when-idle bundle"
   rm -rf "$T"
 }
 # Somebody else's pane standing in the directory is not the product's agent.
 test_mode_does_not_restart_another_agent_in_the_product_dir() {
-  _mws; _mode_stub_roster "$T/products/bundle" someones-shell idle
+  _mws_legacy; _mode_stub_roster "$T/products/bundle" someones-shell idle
   local out; out="$( cd "$T" && CEL_MODE_LAUNCH=_rec cmd_mode bundle solo )"
   [ ! -s "$T/launched" ] || { echo "scheduled a restart of someone else's pane"; rm -rf "$T"; return 1; }
   assert_contains "$out" "not live"

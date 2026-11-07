@@ -65,13 +65,8 @@ test_full_name_and_canonical_alias_reach_the_same_worker_mailbox() {
   _ia_cel inbox send "$FULL" "via the full name" --from orch --workspace demo >/dev/null 2>&1
   _ia_cel inbox send "$CANON" "via the alias" --from orch --workspace demo >/dev/null 2>&1
   assert_eq "$(_ia_tos)" "$CANON " || { echo "mail split across mailboxes"; return 1; }
-  # explicit identity and a cwd-derived one are the same reader
+  # the explicit identity reads the one mailbox both names reach
   assert_eq "$(CEL_INBOX_ME="$CANON" _ia_cel inbox count --workspace demo 2>/dev/null)" "2"
-  mkdir -p "$HOME/.herdr/worktrees/widget-platform/workstream-0042-chat-launch"
-  assert_eq "$(cd "$HOME/.herdr/worktrees/widget-platform/workstream-0042-chat-launch" \
-    && _ia_cel inbox whoami)" "$CANON"
-  assert_eq "$(cd "$HOME/.herdr/worktrees/widget-platform/workstream-0042-chat-launch" \
-    && _ia_cel inbox count --workspace demo 2>/dev/null)" "2"
   # delivered once: first read gets both, the second gets nothing
   local out; out="$(CEL_INBOX_ME="$CANON" _ia_cel inbox read --workspace demo 2>/dev/null)"
   assert_contains "$out" "via the full name"

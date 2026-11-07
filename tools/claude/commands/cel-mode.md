@@ -1,6 +1,6 @@
 ---
-description: Show or switch this product's mode (Celestial)
-argument-hint: [product] [solo|fleet]
+description: Show this product's mode, or set it to solo (Celestial)
+argument-hint: [product] [solo]
 allowed-tools: Bash(cel here:*)
 ---
 !`cel here mode $ARGUMENTS 2>&1`

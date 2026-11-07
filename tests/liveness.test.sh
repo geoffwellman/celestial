@@ -361,37 +361,8 @@ test_the_sentence_is_empty_without_an_answer() {
 test_no_path_from_an_answer_to_a_kill() {
   local bad
   bad="$(grep -vE '^[[:space:]]*#' "$CEL_ROOT/lib/liveness.sh" \
-    | grep -nE 'herdr|kill|terminate|cel-fanout|tmux' || true)"
+    | grep -nE 'herdr|kill|terminate|tmux' || true)"
   assert_eq "$bad" ""
-}
-
-# --- `why` says it in words -------------------------------------------------
-
-# The operator's question is "why is this one stuck", and "quiet for 38m" was
-# never the answer. The sentence is the answer, and `why` is where it is read.
-test_why_renders_the_sentence_for_a_classified_worker() {
-  _liveness_setup
-  cp "$CEL_ROOT/tests/fixtures/ws-alpha/workspace.yaml" "$T/"
-  mkdir -p "$T/.cel" "$T/wt"
-  printf '[{"id":"WG-WHY","repo":"widget","branch":"WG-WHY","pane":"wA:p1","alias":"widget-WG-WHY","worktree":"%s/wt","state":"running","ticket":"WG-WHY"}]\n' \
-    "$T" > "$T/.cel/delegations.json"
-  cat > "$T/herdr" <<'EOF'
-#!/usr/bin/env bash
-case "$1 $2" in
-  "agent list") echo '{"result":{"agents":[{"pane_id":"wA:p1","agent_status":"working"}]}}' ;;
-  "pane read"|"agent read") printf 'npm test\n' ;;
-  *) echo '{}' ;;
-esac
-EOF
-  chmod +x "$T/herdr"
-  liveness_remember WG-WHY looping 0.81
-  local out
-  out="$(cd "$T" && CEL_FANOUT_HERDR="$T/herdr" CEL_INBOX_DIR="$T/inbox" \
-    "$CEL_ROOT/core/skills/fanout/bin/cel-fanout" why WG-WHY)"
-  assert_contains "$out" 'looping'
-  assert_contains "$out" 'model 0.81'
-  assert_contains "$out" 'the timer would not have flagged this'
-  rm -rf "$T"
 }
 
 # --- the three silences -----------------------------------------------------

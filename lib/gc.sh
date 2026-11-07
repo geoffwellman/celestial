@@ -1,15 +1,15 @@
 # shellcheck shell=bash
-# cel gc reclaims only positively identified, settled delegation worktrees.
+# cel gc reclaims only positively identified, settled worktrees and panes.
 # A closed PR, a missing pane, or elapsed process lifetime is not proof that
-# work is disposable. Unknown discovery, ledger, or Git state always keeps it.
+# work is disposable. Unknown discovery, process, or Git state always keeps it.
 [ -n "${_CEL_GC:-}" ] && return 0
 _CEL_GC=1
 # shellcheck source=lib/common.sh
 . "${BASH_SOURCE[0]%/*}/common.sh"
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
-# shellcheck source=lib/ledger_states.sh
-. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
+# shellcheck source=lib/solo.sh
+. "${BASH_SOURCE[0]%/*}/solo.sh"   # solo_review_get: the recorded reviewer verdicts
 # shellcheck source=lib/manifest.sh
 . "${BASH_SOURCE[0]%/*}/manifest.sh"
 # shellcheck source=lib/orphans.sh
@@ -93,88 +93,6 @@ _gc_solo_pr_state() { # <worktree-dir> -> MERGED|CLOSED|OPEN|NONE|UNKNOWN
         elif ($s | index("CLOSED")) then "CLOSED" else "NONE" end end' 2>/dev/null || printf UNKNOWN
 }
 
-# Return success to VETO deletion on running OR unverifiable state. A missing
-# row is not evidence of retirement: admission may still be creating it.
-# cmd_gc holds the registry and every ledger's writer lock while using this.
-_gc_delegated_live() { # <worktree-dir> [allow-unlisted] -> 0 veto, 1 safe
-  local names ws wsdir f match found=0
-  names="$(registry_names 2>/dev/null)" || return 0
-  [ -f "$CEL_REGISTRY" ] && [ -r "$CEL_REGISTRY" ] || return 0
-  while IFS= read -r ws; do
-    [ -n "$ws" ] || continue
-    wsdir="$(registry_path "$ws" 2>/dev/null)" || return 0
-    [ -n "$wsdir" ] && [ -d "$wsdir" ] && [ -r "$wsdir" ] && [ -x "$wsdir" ] || return 0
-    if [ -e "$wsdir/.cel" ] || [ -L "$wsdir/.cel" ]; then
-      [ -d "$wsdir/.cel" ] && [ -r "$wsdir/.cel" ] && [ -x "$wsdir/.cel" ] || return 0
-    fi
-    f="$wsdir/.cel/delegations.json"
-    if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
-    # /proc reports a canonical cwd, possibly below the checkout root.
-    # Resolve ledger aliases too; missing/unresolvable running paths are
-    # unknown, never permission to bypass the live-delegation veto.
-    match="$(python3 - "$1" "$f" "$CEL_LEDGER_STATES" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-try:
-    with open(sys.argv[2]) as source:
-        rows = json.load(source)
-    # One shared list (lib/ledger_states.sh). A row in a state outside it is
-    # UNKNOWN for its own worktree - vetoed - and nobody else's.
-    states = set(sys.argv[3].split())
-    if not isinstance(rows, list) or not all(
-        isinstance(row, dict) and isinstance(row.get("worktree"), str)
-        and row["worktree"] and isinstance(row.get("state"), str) for row in rows
-    ):
-        raise ValueError("invalid delegation ledger")
-    target = Path(sys.argv[1]).resolve(strict=True)
-    found = False
-    for row in rows:
-        # A bound replacement retains the checkout it was moved off (private
-        # evidence, dirty by design): that path is vetoed whatever the state.
-        binding = row.get("binding") if isinstance(row.get("binding"), dict) else {}
-        retained = (binding.get("old_tree") or {}).get("path") if binding else None
-        if isinstance(retained, str) and retained:
-            try:
-                kept = Path(retained).resolve(strict=True)
-            except OSError:
-                kept = None
-            if kept is not None and (target == kept or kept in target.parents):
-                print("live")
-                break
-        worktree = Path(row["worktree"])
-        if not worktree.is_absolute():
-            raise ValueError("unanchored worktree")
-        unknown = row["state"] not in states
-        worktree = worktree.resolve(strict=row["state"] in ("running", "unconfirmed"))
-        if target == worktree or worktree in target.parents:
-            # unconfirmed: a worker whose prompt may yet be accepted.
-            launch = row.get("launch") if isinstance(row.get("launch"), dict) else {}
-            debt = launch.get("phase") in ("starting", "start-failed", "started", "dispatch-unconfirmed") \
-                and row["state"] not in ("abandoned", "landed", "released")
-            # A release that said --keep-worktree kept the checkout on
-            # purpose: no later sweep may take it (any row sharing the path).
-            if row["state"] in ("running", "unconfirmed") or unknown or debt or row.get("worktree_kept") is True:
-                print("live")
-                break
-            found = True
-    else:
-        print("found" if found else "absent")
-except (OSError, ValueError, RuntimeError):
-    sys.exit(1)
-PY
-)" || return 0
-    case "$match" in
-      live) return 0 ;;
-      found) found=1 ;;
-      absent) ;;
-      *) return 0 ;;
-    esac
-  done <<< "$names"
-  [ "$found" -ne 1 ] && [ "${2:-}" != allow-unlisted ]
-}
-
 _gc_panes_known() { # <pane-list-json>
   printf '%s' "$1" | jq -e '
     .result.panes | type == "array" and length > 0 and all(.[];
@@ -248,12 +166,11 @@ _gc_has_process_live() { # <worktree-dir> -> 0 present/unknown, 1 absent
   _gc_has_process "$1"
 }
 
-# The three variables `cel run` and fanout put in every agent's environment
-# (lib/run.sh). /proc/<pid>/environ is fixed at exec, so they survive a
-# runtime that rewrites its own argv - which is the whole reason they exist:
-# pi sets process.title, so a live pi worker's cmdline is `pi` plus padding
-# and the role path the argv scan below looks for is never in it. GC was
-# blind to every pi worker on the box for weeks because of that.
+# The variables `cel run` puts in every agent's environment (lib/run.sh).
+# /proc/<pid>/environ is fixed at exec, so they survive a runtime that
+# rewrites its own argv - which is the whole reason they exist: pi sets
+# process.title, so a live pi agent's cmdline is `pi` plus padding and the
+# role path the argv scan below looks for is never in it.
 
 # A readable-looking /proc/<pid>/environ can still refuse to open - a setuid
 # process, or one that exited between the check and the read. Failing quietly
@@ -278,7 +195,7 @@ _gc_env_role() { # <pid> <registry-names> -> role file path, or fail
     wsdir="$(registry_path "$ws")" || return 1
     [ "$wsdir" = "$wsvar" ] || continue
     case "$role" in
-      "$wsdir/.cel/role-worker.md"|"$wsdir/.cel/role-scout.md"|"$wsdir/.cel/role-spike.md"|"$wsdir/.cel/role-reviewer.md")
+      "$wsdir/.cel/role-reviewer.md")
         [ -f "$role" ] || return 1
         printf '%s' "$role"; return 0 ;;
     esac
@@ -422,7 +339,7 @@ _gc_process_identity() { # <pid> <agents-json> <registry-names>
       for ((i=0; i+1<${#args[@]}; i++)); do
         [ "${args[i]}" = "$flag" ] || continue
         case "${args[i+1]}" in
-          "$wsdir/.cel/role-worker.md"|"$wsdir/.cel/role-scout.md"|"$wsdir/.cel/role-spike.md"|"$wsdir/.cel/role-reviewer.md") role="${args[i+1]}";;
+          "$wsdir/.cel/role-reviewer.md") role="${args[i+1]}";;
         esac
       done
     done <<< "$names"
@@ -577,7 +494,6 @@ _gc_reap() { # <hours> <dry> <agents-json> <registry-names>; sets reaped
   done
   while IFS= read -r identity; do
     pid="$(printf '%s' "$identity" | jq -r .pid)"
-    _gc_delegated_live "$(printf '%s' "$identity" | jq -r .cwd)" allow-unlisted && continue
     key="$identity"
     since="$(printf '%s' "$previous" | jq -r --arg k "$key" '.[$k] // empty')"
     [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
@@ -826,7 +742,7 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
     fi
     case "$state" in
       OPEN)
-        # FINISHED IS A FACT TOO: idle, verdict in the ledger for
+        # FINISHED IS A FACT TOO: idle, an approved verdict recorded for
         # the head GitHub shows now, and quiet for the window. Its checkout is
         # kept - `cel run reviewer --repo --pr` brings the reviewer back.
         if _gc_reviewer_finished "$repo" "$pr" "$cwd" "$repodir" "$pane" "$status"; then
@@ -874,8 +790,13 @@ _gc_reviewers() { # <dry> <agents-json>; sets reviewers_closed
   # stale row and adopts nothing.
   [ "$dry" -eq 1 ] && return 0
   mkdir -p "$(dirname "$rv_file")" 2>/dev/null && printf '%s\n' "$rv_next" > "$rv_file" 2>/dev/null || true
-  # The steward's pressure warning names what was stopped.
-  [ -z "$rv_what" ] || printf '%s\n' "$rv_what" >> "$(_gc_idle_stop_last)" 2>/dev/null || true
+  # The steward's pressure warning names what this sweep stopped; an empty
+  # file says nothing was. Best effort: stderr is redirected before the file
+  # is opened, so a write that cannot open it stays quiet.
+  local idle_last; idle_last="$(_gc_idle_stop_last)"
+  mkdir -p "$(dirname "$idle_last")" 2>/dev/null || true
+  if [ -n "$rv_what" ]; then printf '%s\n' "$rv_what" 2>/dev/null > "$idle_last" || true
+  else : 2>/dev/null > "$idle_last" || true; fi
   [ "${#recover[@]}" -gt 0 ] || printf '%s' "$drop$adopt$attrib" | grep -q '[^][]' || return 0
   reviewers_update "${recover[@]}" --argjson drop "$drop" --argjson adopt "$adopt" --argjson attrib "$attrib" \
     'map(select((.pane as $p | $drop | index($p)) == null))
@@ -981,9 +902,9 @@ cmd_reviewer_retire() { # repo#pr [--workspace W] [--dry-run]
   return "$rc"
 }
 
-# THE FINISHED REVIEWER. A reviewer whose verdict is recorded (delegation
-# ledger or solo verdict file) for the PR's CURRENT head has nothing left to do until the
-# worker pushes again - and a push is a new head, which its recorded verdict
+# THE FINISHED REVIEWER. A reviewer whose approved verdict is recorded (the
+# solo verdict file) for the PR's CURRENT head has nothing left to do until the
+# author pushes again - and a push is a new head, which its recorded verdict
 # no longer covers. N minutes quiet (gc.reviewer_stop_minutes, default 30;
 # ~5 under memory pressure) and its pane goes.
 _gc_reviewer_stop_state() { printf '%s' "${CEL_GC_REVIEWER_STOP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-reviewer-stop.json}"; }
@@ -1002,13 +923,12 @@ gc_reviewer_stop_minutes() {
 # Reads/writes rv_prev/rv_next from _gc_reviewers. The clock is keyed by pane
 # AND head, so a push restarts it.
 _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
-  local repo="$1" pr="$2" cwd="$3" repodir="$4" pane="$5" now since key out head branch mins
+  local repo="$1" pr="$2" cwd="$3" repodir="$4" pane="$5" now since key out head mins
   case "$6" in idle|done) ;; *) return 1 ;; esac
-  out="$(_gc_reviewer_pr_json "$repo" "$pr" "$cwd" "$repodir" headRefOid,headRefName)" || return 1
+  out="$(_gc_reviewer_pr_json "$repo" "$pr" "$cwd" "$repodir" headRefOid)" || return 1
   head="$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null)"
-  branch="$(printf '%s' "$out" | jq -r '.headRefName // empty' 2>/dev/null)"
-  [ -n "$head" ] && [ -n "$branch" ] || return 1
-  _gc_verdict_recorded "$repo" "$pr" "$branch" "$head" || return 1
+  [ -n "$head" ] || return 1
+  _gc_verdict_recorded "$repo" "$pr" "$head" || return 1
   now="${CEL_GC_NOW:-$(date +%s)}"; key="$pane@$head"
   since="$(printf '%s' "$rv_prev" | jq -r --arg k "$key" '.[$k] // empty')"
   [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
@@ -1020,25 +940,18 @@ _gc_reviewer_finished() { # <repo> <pr> <cwd> <repodir> <pane> <status>
   return 0
 }
 
-# An APPROVED verdict for exactly this head, in any workspace: written by
-# `cel-fanout review` into a delegation ledger, or by `cel solo review` into
-# the workspace's .cel/solo-reviews.json (keyed `<repo>#<pr>`, lib/solo.sh) -
-# a solo product's PR has no delegation, and its finished reviewer must not
-# wait for the merge to be closed. A CHANGES verdict is a reviewer waiting on
-# a re-push: closing it would leave "pushed - re-review" with nobody to read it.
-_gc_verdict_recorded() { # <repo> <pr> <branch> <head>
-  local ws wsdir f
+# An APPROVED verdict for exactly this head, in any workspace, as `cel solo
+# review` records it (solo_review_get, lib/solo.sh) - a finished reviewer
+# must not wait for the merge to be closed. A CHANGES verdict is a reviewer
+# waiting on a re-push: closing it would leave "pushed - re-review" with
+# nobody to read it.
+_gc_verdict_recorded() { # <repo> <pr> <head>
+  local ws wsdir
   while IFS= read -r ws; do
     [ -n "$ws" ] || continue
     wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
-    f="$wsdir/.cel/delegations.json"
-    [ -f "$f" ] && jq -e --arg r "$1" --arg b "$3" --arg h "$4" \
-      'any(.[]?; .repo == $r and .branch == $b and .review.verdict == "approved" and .review.head == $h)' \
-      "$f" >/dev/null 2>&1 && return 0
-    f="$wsdir/.cel/solo-reviews.json"
-    [ -f "$f" ] && jq -e --arg k "$1#$2" --arg h "$4" \
-      '.[$k] | type == "object" and .verdict == "approved" and .head == $h' \
-      "$f" >/dev/null 2>&1 && return 0
+    solo_review_get "$wsdir" "$1" "$2" | jq -e --arg h "$3" \
+      'type == "object" and .verdict == "approved" and .head == $h' >/dev/null 2>&1 && return 0
   done < <(registry_names 2>/dev/null || true)
   return 1
 }
@@ -1077,124 +990,11 @@ _gc_reviewers_adopt() { # reads repo/pr/pane/agent/cand from its caller
   return 0
 }
 
-# THE FINISHED WORKERS. Workers nest as tabs in their repo's herdr
-# workspace, and the worktree pass above only knows a workspace whose FIRST
-# pane sits in a worktree, so a finished worker's pane is nobody else's to
-# close. The ledger records the pane each delegation ran in; this pass starts
-# there.
-#
-# A pane is closed only when every one of these is a fact: the delegation is
-# landed/released/abandoned (a `finished` row whose PR merged is reconciled to
-# landed first), the pane is still in that delegation's worktree (a pane id
-# herdr has reused is somebody else's), its agent is idle or done, its PR is
-# merged or closed, and its checkout holds nothing dirty or unpushed. Anything
-# that cannot be read keeps the pane. The worktree itself goes on the
-# worktree pass, as it always has, once nothing is running in it.
-# One kept pane, by reason; reads why/done_kept/dry/id/pane from its caller.
-_gc_done_kept() {
-  why[$1]=$(( ${why[$1]:-0} + 1 )); done_kept=$((done_kept + 1))
-  [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): %s\n' "$id" "$pane" "$1"
-  return 0
-}
-
-_gc_done_panes() { # <dry> <agents-json> <registry-names>; sets done_closed
-  local dry="$1" agents="$2" names="$3" ws wsdir f row id state pane wt agent status pr n
-  local -A why=()
-  done_closed=0
-  local done_kept=0
-  while IFS= read -r ws; do
-    [ -n "$ws" ] || continue
-    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
-    f="$wsdir/.cel/delegations.json"
-    [ -f "$f" ] || continue
-    while IFS= read -r row; do
-      [ -n "$row" ] || continue
-      { IFS= read -r id; IFS= read -r state; IFS= read -r pane; IFS= read -r wt; } \
-        <<< "$(printf '%s' "$row" | jq -r '.id, .state, (.pane // ""), (.worktree // "")')"
-      [ -n "$pane" ] && [ -n "$wt" ] || continue
-      agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" \
-        '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
-      [ -n "$agent" ] || continue          # the pane is already gone
-      if printf '%s' "$agent" | jq -e '.backend == "rex"' >/dev/null || [[ "$pane" == rex/* ]]; then
-        _gc_done_kept unknown; continue
-      fi
-      # Still in this delegation's checkout, or it is not this delegation's.
-      case "$(printf '%s' "$agent" | jq -r '.cwd // ""')" in
-        "$wt"|"$wt"/*) ;;
-        *) continue ;;
-      esac
-      status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
-      case "$status" in
-        idle|done) ;;
-        working|blocked) _gc_done_kept working; continue ;;
-        *) _gc_done_kept unknown; continue ;;
-      esac
-      if [ -d "$wt" ]; then
-        pr="$(_gc_pr_state "$wt")"
-      else
-        pr=NONE
-      fi
-      if [ "$state" = finished ]; then
-        [ "$pr" = MERGED ] || { _gc_done_kept unmerged; continue; }
-        if [ "$dry" -eq 1 ]; then
-          printf '  would reconcile %s: finished, PR merged -> landed\n' "$id"
-        else
-          # gc holds this ledger's writer lock for the whole sweep, so the
-          # write is the same guarded read-modify-write fanout itself does.
-          local tmp; tmp="$(mktemp "$f.XXXXXX")" || { _gc_done_kept unknown; continue; }
-          jq --arg id "$id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            'map(if .id == $id then .state = "landed"
-                 | .history = ((.history // []) + [{state: "landed", at: $at, by: "gc"}]) else . end)' \
-            "$f" > "$tmp" && mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; _gc_done_kept unknown; continue; }
-          printf '  reconciled %s: finished, PR merged -> landed\n' "$id"
-        fi
-        state=landed
-      fi
-      case "$state" in landed|released|abandoned) ;; *) continue ;; esac
-      case "$pr" in
-        MERGED|CLOSED) ;;
-        NONE) [ ! -d "$wt" ] || { _gc_done_kept unknown; continue; } ;;
-        OPEN) _gc_done_kept open-pr; continue ;;
-        *) _gc_done_kept unknown; continue ;;
-      esac
-      if [ -d "$wt" ]; then
-        # Dirty or unpushed work keeps the pane: the pane is how somebody
-        # finds the checkout that holds it.
-        local st up
-        st="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null)" \
-          && up="$(git -C "$wt" rev-list HEAD --not --remotes 2>/dev/null | head -1)" \
-          || { _gc_done_kept unknown; continue; }
-        [ -z "$st" ] && [ -z "$up" ] || { _gc_done_kept dirty; continue; }
-      fi
-      if [ "$dry" -eq 1 ]; then
-        printf '  would close pane %s (%s, %s, agent %s)\n' "$pane" "$id" "$state" "$status"
-        done_closed=$((done_closed + 1))
-        continue
-      fi
-      if lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
-        c_ok "closed pane $pane ($id, $state, agent $status)"
-        done_closed=$((done_closed + 1))
-      else
-        c_warn "could not close pane $pane for $id - kept"; _gc_done_kept refused
-      fi
-    done < <(jq -c '.[]? | select(.state == "finished" or .state == "landed" or .state == "released" or .state == "abandoned")
-                     | select((.replacement.role // "") != "source")' "$f" 2>/dev/null)
-  done <<< "$names"
-  local parts="" r
-  for r in working dirty open-pr unmerged unknown refused; do
-    n="${why[$r]:-0}"; [ "$n" -gt 0 ] && parts="${parts:+$parts, }$n $r"
-  done
-  printf 'gc: %s %d done panes, kept %d%s\n' "$([ "$dry" -eq 1 ] && printf 'would close' || printf closed)" \
-    "$done_closed" "$done_kept" "${parts:+: $parts}"
-  return 0
-}
-
-# THE EMPTY PANES. The finished-worker pass closes a landed delegation's pane
-# while its agent sits idle, but a worker that already QUIT leaves its shell
+# THE EMPTY PANES. An agent that already QUIT leaves its shell
 # behind. Agentless panes also host proxies, scripts, editors and the owner's
 # own shells - so "no agent" alone is never enough. A pane is empty only when herdr reports no
 # agent, its foreground is a bare interactive shell with no child, it sits in
-# a worker/scout/reviewer checkout under ~/.herdr/worktrees (or a directory
+# a checkout under ~/.herdr/worktrees (or a directory
 # that no longer exists), that checkout holds nothing uncommitted or unpushed
 # beyond .pi/ and .agent/ scratch, and no layout declared it. Closing a pane
 # never removes its worktree; that stays the worktree pass's own decision.
@@ -1271,159 +1071,10 @@ _gc_idle_panes() { # <dry> <pane-list-json>; sets idle_closed
   return 0
 }
 
-# IDLE AGENTS ARE STOPPED BY TIME AND MEMORY, NOT ONLY BY LEDGER: every other
-# pass waits for the ledger row to close, while idle runtimes hold hundreds of
-# MB each. A `done`/`idle` worker that has sat for N minutes
-# (gc.idle_stop_minutes, default 60; ~10 below the box warning line) with
-# nothing uncommitted and nothing unpushed has its PANE closed: the process
-# goes, the session file stays (resume with `cel-fanout delegate --reuse`),
-# and the ledger row and worktree are untouched. Only delegated rows are
-# considered - orchestrators and reviewers are never in the ledger - and a
-# working, blocked or unknown agent is never touched.
-# The last pass's stops, one line, read by the steward's pressure warning so
-# it can name what was done rather than promise it.
+# The last sweep's stops, one line - the finished reviewers it closed - read
+# by the steward's pressure warning so it can name what was done rather than
+# promise it.
 _gc_idle_stop_last() { printf '%s' "${CEL_GC_IDLE_STOP_LAST:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle-stop-last.txt}"; }
-_gc_idle_stop_state() { printf '%s' "${CEL_GC_IDLE_STOP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cel/gc-idle-stop.json}"; }
-
-gc_idle_stop_minutes() {
-  local n="${CEL_GC_IDLE_STOP_MIN:-}"
-  [[ "$n" =~ ^[0-9]+$ ]] || n="$(cel_config_get gc idle_stop_minutes 2>/dev/null || true)"
-  [[ "$n" =~ ^[0-9]+$ ]] || n=60
-  if boxguard_pressure; then
-    local p="${CEL_GC_IDLE_STOP_PRESSURE_MIN:-10}"
-    [ "$p" -lt "$n" ] && n="$p"
-  fi
-  printf '%s' "$n"
-}
-
-# The orchestrator hears which review-waiting workers went, because the
-# next thing that happens to each is a reviewer's hand-back resuming it.
-_gc_tell_waiter_stopped() { # <wsdir> <ws> <ledger> <id> <mb>
-  local repo product
-  repo="$(jq -r --arg id "$4" '[.[]? | select(.id == $id)][0].repo // ""' "$3" 2>/dev/null || true)"
-  product="$(ws_product_of_repo "$1" "$repo" 2>/dev/null || true)"
-  [ -n "$product" ] && [ "$product" != null ] || product="$repo"
-  [ -n "$product" ] || return 0
-  cmd_inbox send "$(_run_agent_name "$product-orch")" \
-    "gc: stopped $4 (~$5M) under memory pressure - idle, pushed, waiting only on review. Session kept; \`cel-fanout handback $4 ...\` resumes it for the next round." \
-    --from gc --workspace "$2" --kind status >/dev/null 2>&1 || true
-}
-
-# RUNTIME RETIREMENT IS NOT WORKTREE DELETION. This pass closes a pane - the
-# process goes - and nothing else: the worktree, its branch, dirty or unpushed
-# work (which VETOES the stop), the native session file, the delegation row and
-# every artifact stay exactly as they were, and `cel-fanout delegate --reuse`
-# resumes it. The states it considers are every state in which a live agent
-# may still sit behind a retained row: `collected`, `reported` and `salvaged`
-# hold a runtime exactly like `running`/`finished` do.
-# `landed`, `released`, `abandoned` rows belong to the done/worktree passes.
-_GC_RETIRE_STATES="running finished collected reported salvaged"
-_gc_idle_stop() { # <dry> <agents-json> <registry-names> [minutes]; sets idle_stopped
-  local dry="$1" agents="$2" names="$3" mins="${4:-}" ws wsdir f id pane wt alias agent status now since mb head waiter prst
-  [ -n "$mins" ] || mins="$(gc_idle_stop_minutes)"
-  now="${CEL_GC_NOW:-$(date +%s)}"
-  local file prev='{}' next='{}' freed=0 kept=0 what=""
-  file="$(_gc_idle_stop_state)"
-  [ -f "$file" ] && prev="$(jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}')"
-  idle_stopped=0
-  while IFS= read -r ws; do
-    [ -n "$ws" ] || continue
-    wsdir="$(registry_path "$ws" 2>/dev/null)" || continue
-    f="$wsdir/.cel/delegations.json"; [ -f "$f" ] || continue
-    while IFS=$'\t' read -r id pane wt alias; do
-      [ -n "$pane" ] && [ -n "$wt" ] && [ -d "$wt" ] || continue
-      agent="$(printf '%s' "$agents" | jq -c --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p)] | .[0] // empty')"
-      # A STALE PANE BINDING: the row names a pane that no longer
-      # hosts this worktree's agent (renumbered, closed and re-created, or
-      # re-bound by a recovery). The worktree's own agent is then found by
-      # its cwd - and only when EXACTLY ONE live agent sits in it. Two or
-      # none is ambiguity, and ambiguity retires nothing.
-      case "$(printf '%s' "${agent:-}" | jq -r '.cwd // ""' 2>/dev/null)" in
-        "$wt"|"$wt"/*) ;;
-        *)
-          agent="$(printf '%s' "$agents" | jq -c --arg w "$wt" '
-            [.result.agents[]? | select((.cwd // "") as $c | $c == $w or ($c | startswith($w + "/")))]
-            | if length == 1 then .[0] else empty end')"
-          [ -n "$agent" ] || continue
-          pane="$(printf '%s' "$agent" | jq -r '.pane_id // ""')"
-          [ -n "$pane" ] || continue
-          # BOUND TO THE ROW: the sole agent in the worktree is this row's only
-          # if herdr's name for it IS the row's alias. A different (or any
-          # unnamed) occupant is somebody else's runtime and is kept.
-          { [ "$alias" != "-" ] && [ -n "$alias" ] \
-            && [ "$(printf '%s' "$agent" | jq -r '.name // ""')" = "$alias" ]; } || continue ;;
-      esac
-      # No Herdr close, idle clock or synthetic liveness proof for Rex.
-      if printf '%s' "$agent" | jq -e '.backend == "rex"' >/dev/null || [[ "$pane" == rex/* ]]; then continue; fi
-      status="$(printf '%s' "$agent" | jq -r '.agent_status // "unknown"')"
-      case "$status" in idle|done) ;; *) continue ;; esac
-      since="$(printf '%s' "$prev" | jq -r --arg k "$pane" '.[$k] // empty')"
-      [[ "$since" =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since="$now"
-      # The clock belongs to a HEAD as well as a pane: a worker that
-      # committed since it was first seen idle has been working, whatever its
-      # status says now, and "unchanged since it reported" starts over.
-      head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
-      [ "$(printf '%s' "$prev" | jq -r --arg k "$pane#head" '.[$k] // empty')" = "$head" ] || since="$now"
-      next="$(printf '%s' "$next" | jq -c --arg k "$pane#head" --arg h "$head" '.[$k] = $h')"
-      if [ $(( now - since )) -lt $(( mins * 60 )) ]; then
-        next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
-      fi
-      if ! _gc_worktree_clean "$wt"; then
-        kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): uncommitted or unpushed work\n' "$id" "$pane"
-        next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue
-      fi
-      # An OPEN PR means a reviewer or orchestrator will prompt this agent for
-      # a revision round: closing it breaks that hand-off. Unknown is kept too.
-      # Under memory pressure a worker waiting ONLY on review may go -
-      # clean, pushed, and its PR's head is the head it has sat on for the
-      # whole window. `cel-fanout handback` resumes it in place for the next
-      # round and delivers the findings by inbox, so nothing types into a
-      # pane that is no longer there. Its orchestrator is told.
-      waiter=0
-      prst="$(_gc_pr_state "$wt")"
-      if [ "$prst" = OPEN ] && boxguard_pressure \
-         && [ -n "$head" ] && [ "$(_gc_gh "$wt" pr view --json headRefOid 2>/dev/null | jq -r '.headRefOid // empty' 2>/dev/null)" = "$head" ]; then
-        waiter=1
-      fi
-      case "$prst" in
-        MERGED|CLOSED|NONE) ;;
-        OPEN) [ "$waiter" -eq 1 ] || { kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
-           next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue; } ;;
-        *) kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): PR open or unreadable\n' "$id" "$pane"
-           next="$(printf '%s' "$next" | jq -c --arg k "$pane" --argjson n "$since" '.[$k] = $n')"; continue ;;
-      esac
-      # And the same strict proof the worktree pass demands before touching
-      # anything: every agent in this checkout is a process this plane launched.
-      if ! _gc_agents_removable "$agents" "$wt" "$names"; then
-        kept=$((kept + 1)); [ "$dry" -eq 1 ] && printf '  kept %s (pane %s): identity unproven\n' "$id" "$pane"
-        continue
-      fi
-      mb="$(mem_tree_rss_mb "$wt" 2>/dev/null || printf 0)"; [[ "$mb" =~ ^[0-9]+$ ]] || mb=0
-      if [ "$dry" -eq 1 ]; then
-        printf '  would stop %s (pane %s, %s %dm, ~%sM)\n' "$id" "$pane" "$status" $(( (now - since) / 60 )) "$mb"
-      elif lock_spawn "${lock_fd:-}" herdr pane close "$pane" >/dev/null 2>&1; then
-        c_ok "stopped $id (pane $pane, $status $(( (now - since) / 60 ))m, freed ~${mb}M; resume with cel-fanout delegate --reuse)"
-      else
-        c_warn "could not stop $id (pane $pane) - kept"; kept=$((kept + 1)); continue
-      fi
-      [ "$dry" -eq 1 ] || [ "$waiter" -eq 0 ] || _gc_tell_waiter_stopped "$wsdir" "$ws" "$f" "$id" "$mb"
-      idle_stopped=$((idle_stopped + 1)); freed=$((freed + mb)); what="$what${what:+, }$id ~${mb}M"
-    done < <(jq -r --arg states "$_GC_RETIRE_STATES" '.[]? | select((.state // "") as $s | ($states | split(" ")) | index($s))
-                    | select((.replacement.role // "") != "source")
-                    | [(.id // ""), ((.pane // "") | if . == "" then "-" else . end), (.worktree // ""), ((.alias // "") | if . == "" then "-" else . end)] | @tsv' "$f" 2>/dev/null)
-  done <<< "$names"
-  if [ "$dry" -eq 0 ]; then
-    mkdir -p "$(dirname "$file")" 2>/dev/null && printf '%s\n' "$next" > "$file" 2>/dev/null || true
-    if [ "$idle_stopped" -gt 0 ]; then
-      printf '%s (~%sM freed)\n' "$what" "$freed" > "$(_gc_idle_stop_last)" 2>/dev/null || true
-    else
-      : > "$(_gc_idle_stop_last)" 2>/dev/null || true
-    fi
-  fi
-  printf 'gc: %s %d idle agents (idle > %dm, ~%sM freed), kept %d\n' \
-    "$([ "$dry" -eq 1 ] && printf 'would stop' || printf stopped)" "$idle_stopped" "$mins" "$freed" "$kept"
-  return 0
-}
 
 cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns lock descriptors
   local reap_hours="" dry=0 orphans=0 box=0
@@ -1440,8 +1091,8 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
   done
 
   # THE PROCESS SWEEP IS ITS OWN VERB, deliberately not a stage of the
-  # worktree GC. The worktree GC needs herdr, gh and every ledger's writer
-  # lock, and skips itself entirely when any of them is unavailable - which is
+  # worktree GC. The worktree GC needs herdr, gh and the registry lock, and
+  # skips itself entirely when any of them is unavailable - which is
   # the state a box is in precisely when it is covered in orphans. A sweep of
   # processes nobody owns needs none of that, so it must not inherit the
   # reasons not to run.
@@ -1453,46 +1104,30 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     return 0
   fi
 
-  have herdr && have jq && have gh && have flock && have python3 || die "cel gc: herdr, jq, gh, flock and python3 are required"
+  have herdr && have jq && have gh && have flock || die "cel gc: herdr, jq, gh and flock are required"
 
-  # A missing registry or failed roster is not an empty fleet. Writer locks
-  # also fence delegate's pre-ledger creation window and concurrent re-use.
-  # Both locks are held on inherited descriptors for the whole of this
+  # A missing registry or failed roster is not an empty fleet. The registry
+  # lock is held on an inherited descriptor for the whole of this
   # subshell, so anything spawned from here - every herdr call, any of which
   # may start a daemon that never exits - is spawned through lock_spawn.
-  local lock_fd names ws wsdir roster ids agents panes ws_id cwd state row known=1
+  local lock_fd names ws wsdir roster ids agents panes ws_id cwd state row
   [ -f "$CEL_REGISTRY" ] && [ -r "$CEL_REGISTRY" ] || { c_warn "registry unavailable - GC skipped"; return 0; }
   exec {lock_fd}>"$CEL_REGISTRY.lock" || { c_warn "registry lock unavailable - GC skipped"; return 0; }
   flock -n "$lock_fd" || { c_warn "registry busy - GC skipped"; return 0; }
   names="$(registry_names 2>/dev/null)" || { c_warn "registry unreadable - GC skipped"; return 0; }
-  while IFS= read -r ws; do
-    [ -n "$ws" ] || continue
-    wsdir="$(registry_path "$ws" 2>/dev/null)" || { known=0; break; }
-    [ -n "$wsdir" ] && [ -d "$wsdir" ] && [ -r "$wsdir" ] && [ -x "$wsdir" ] \
-      && mkdir -p "$wsdir/.cel" \
-      && [ -r "$wsdir/.cel" ] && [ -x "$wsdir/.cel" ] \
-      && exec {lock_fd}>"$wsdir/.cel/delegations.lock" \
-      && flock -n "$lock_fd" || { known=0; break; }
-  done <<< "$names"
-  [ "$known" -eq 1 ] || { c_warn "delegation discovery busy or unavailable - GC skipped"; return 0; }
   roster="$(lock_spawn "${lock_fd:-}" herdr workspace list 2>/dev/null)" \
     && ids="$(printf '%s' "$roster" | jq -er '.result.workspaces | if type == "array" and all(.[]; .workspace_id | type == "string" and length > 0) then map(.workspace_id) | join("\n") else error("invalid workspace list") end')" \
     && agents="$(lock_spawn "${lock_fd:-}" cel_agent_list 2>/dev/null)" \
     && printf '%s' "$agents" | jq -e '.result.agents | type == "array" and all(.[]; (.cwd | type == "string") and (.pane_id | type == "string") and (.agent_status | type == "string"))' >/dev/null \
     || { c_warn "herdr discovery unavailable - GC skipped"; return 0; }
 
-  local removed=0 reaped=0 kept=0 reviewers_closed=0 done_closed=0 managed=$'\n' candidates='[]'
+  local removed=0 reaped=0 kept=0 reviewers_closed=0 managed=$'\n' candidates='[]'
   _gc_keep_reset; _gc_cwd_reset
   # NEVER SILENT: announce the sweep up front, so a slow run is
   # distinguishable from a hung one.
   printf 'gc: sweeping %d workspace(s)%s\n' "$(printf '%s\n' "$names" | grep -c . || true)" \
     "$([ "$dry" -eq 1 ] && printf ' (dry run)')" >&2
-  # Finished workers' panes first: a closed pane is one fewer live process
-  # holding its worktree on the next pass.
-  _gc_done_panes "$dry" "$agents" "$names"
-  local idle_stopped=0
-  _gc_idle_stop "$dry" "$agents" "$names"
-  # Then the panes whose agent is gone entirely. Its own roster read: the
+  # The panes whose agent is gone entirely. Its own roster read: the
   # agent list omits exactly the panes this pass is for.
   local all_panes idle_closed=0
   if all_panes="$(lock_spawn "${lock_fd:-}" herdr pane list 2>/dev/null)" \
@@ -1519,10 +1154,9 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     case "$managed" in *$'\n'"$d"$'\n'*) continue;; esac
     candidates="$(printf '%s' "$candidates" | jq --arg d "$d" '. + [{workspace:"", dir:$d}]')"
   done
-  # A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>). No
-  # ledger row will ever name them, so the unlisted veto below is waived for
-  # exactly these - and in exchange they must show a MERGED or CLOSED PR: a
-  # clean worktree with no PR yet may be one the agent has only just made.
+  # A SOLO AGENT'S OWN WORKTREES (<ws>/.cel/solo/<product>/<branch>). They
+  # must show a MERGED or CLOSED PR for their exact head: a clean worktree
+  # with no PR yet may be one the agent has only just made.
   local sp sd
   while IFS= read -r ws; do
     [ -n "$ws" ] || continue
@@ -1540,7 +1174,6 @@ cmd_gc() ( # [--reap <hours>] [--orphans] [--box] [--dry-run]; subshell owns loc
     local solo_wt; solo_wt="$(printf '%s' "$row" | jq -r '.solo // false')"
     [ "$(readlink -f "$cwd" 2>/dev/null)" = "$cwd" ] || { _gc_keep symlink; continue; }
     if [ -z "$ws_id" ] && _gc_has_process "$cwd"; then _gc_keep live; continue; fi
-    if _gc_delegated_live "$cwd" "$([ "$solo_wt" = true ] && printf allow-unlisted)"; then _gc_keep live; continue; fi
     # No force removal: Git/herdr must still refuse newly dirty work. Only
     # linked Git worktrees qualify, never an ordinary repository in this dir.
     local gitdir common

@@ -53,9 +53,7 @@ afk_authorisation() { # <act> -> the pre-authorisation that covers it
     resolve_thread) printf 'pre-authorisation 1 (bot review thread verified fixed and reviewer-confirmed)' ;;
     land)           printf 'pre-authorisation 2 (approved, green, gate-verified, mergeable)' ;;
     rebase_retry)   printf 'pre-authorisation 3 (pushed behind by another merge, no new work)' ;;
-    dispatch)       printf 'pre-authorisation 4 (a follow-up a reviewer or scout wrote down)' ;;
-    ordered_work)   printf 'pre-authorisation 5 (work ordered before AFK went on: a spec already under .cel/specs/)' ;;
-    release)        printf 'pre-authorisation 5 (a release the owner named before AFK went on: --allow release:<product>@<version>)' ;;
+    release)        printf 'pre-authorisation 4 (a release the owner named before AFK went on: --allow release:<product>@<version>)' ;;
     *) return 1 ;;
   esac
 }
@@ -169,15 +167,15 @@ _afk_check_land() { # <evidence-json>
   gate="$(jq -r '.gate // ""' <<<"$e")"
   case "$gate" in
     pass|ci) ;;
-    fail) _afk_refuse land "the repo's gate did not pass - a worker fixes it, then land again"; return 1 ;;
+    fail) _afk_refuse land "the repo's gate did not pass - its agent fixes it, then land again"; return 1 ;;
     # A gate that reported nothing neither failed nor passed: there is nothing
-    # to merge on and nothing to send a worker after.
-    *) _afk_refuse land "the gate produced no verdict ($gate) - re-run collect and find out what is killing it"; return 1 ;;
+    # to merge on and nothing to fix.
+    *) _afk_refuse land "the gate produced no verdict ($gate) - re-run it and find out what is killing it"; return 1 ;;
   esac
   [ "$(jq -r '.mergeable // false' <<<"$e")" = true ] \
-    || { _afk_refuse land "the PR conflicts with its base - a worker rebases it, then land again"; return 1; }
-  [ "$(jq -r '.author // ""' <<<"$e")" = fleet ] \
-    || { _afk_refuse land "not this fleet's PR - a colleague's PR is theirs to land"; return 1; }
+    || { _afk_refuse land "the PR conflicts with its base - its agent rebases it, then land again"; return 1; }
+  [ "$(jq -r '.author // ""' <<<"$e")" = solo ] \
+    || { _afk_refuse land "not this product's own PR - a colleague's PR is theirs to land"; return 1; }
 }
 
 _afk_check_rebase_retry() { # <evidence-json>
@@ -192,60 +190,6 @@ _afk_check_rebase_retry() { # <evidence-json>
     || { _afk_refuse rebase_retry "the rebase conflicts - stop, record it, and leave it for the morning"; return 1; }
 }
 
-_afk_check_dispatch() { # <evidence-json>
-  local e="$1"
-  case "$(jq -r '.source // ""' <<<"$e")" in
-    reviewer|scout) ;;
-    *) _afk_refuse dispatch "no reviewer or scout finding behind it - AFK dispatches what was written down, not what looked like a good idea"; return 1 ;;
-  esac
-  [ -n "$(jq -r '.quote // ""' <<<"$e")" ] \
-    || { _afk_refuse dispatch "no reviewer or scout finding is quoted in the spec"; return 1; }
-  [ "$(jq -r '(.workers // 0) < (.cap // 0)' <<<"$e")" = true ] \
-    || { _afk_refuse dispatch "the worker cap is full ($(jq -r '.workers // 0' <<<"$e")/$(jq -r '.cap // 0' <<<"$e"))"; return 1; }
-  # A queue emptied overnight into an exhausted account helps nobody. A floor of
-  # zero is no declared floor, and unknown remaining is only a refusal where a
-  # floor WAS declared: "unknown never vetoes" is the plane's rule everywhere
-  # else (lib/quota.sh), but a declared floor nobody can measure against is not
-  # permission to spend - it is a reading this process could not take.
-  local floor pct
-  floor="$(jq -r '.quota_floor // 0' <<<"$e")"; pct="$(jq -r '.quota_pct // -1' <<<"$e")"
-  if awk -v f="$floor" 'BEGIN { exit !(f+0 > 0) }'; then
-    awk -v p="$pct" 'BEGIN { exit !(p+0 >= 0) }' \
-      || { _afk_refuse dispatch "a quota floor of $floor is declared and this process could not read what is left"; return 1; }
-    awk -v p="$pct" -v f="$floor" 'BEGIN { exit !(p+0 > f+0) }' \
-      || { _afk_refuse dispatch "below the declared quota floor ($pct left, floor $floor)"; return 1; }
-  fi
-}
-
-# PRE-AUTHORISATION 5: WORK ALREADY ORDERED. A spec the orchestrator wrote
-# under the workspace's .cel/specs/ BEFORE AFK went on is work the owner asked
-# for awake; turning AFK on must not stop it. A spec written after needs a
-# written-down finding (pre-authorisation 4). The evidence is the spec's path
-# and mtime, recorded in the act log.
-_afk_since_epoch() { afk_state_json | jq -r '.since_epoch // ((.since // "") | if . == "" then 0 else (fromdateiso8601? // 0) end)'; }
-afk_spec_ordered() { # <spec-path>
-  local p="$1" m s
-  case "$p" in */.cel/specs/*) ;; *) return 1 ;; esac
-  [ -f "$p" ] || return 1
-  m="$(stat -c %Y "$p" 2>/dev/null)" || return 1
-  s="$(_afk_since_epoch)"
-  [ "${s:-0}" -gt 0 ] && [ "$m" -lt "$s" ]
-}
-afk_ordered_evidence() { # <spec-path> <workers> <cap> -> evidence json
-  local m; m="$(stat -c %Y "$1" 2>/dev/null || printf 0)"
-  jq -nc --arg s "$1" --argjson m "$m" --argjson w "${2:-0}" --argjson c "${3:-0}" \
-    '{spec:$s, spec_mtime:$m, workers:$w, cap:$c}'
-}
-_afk_check_ordered_work() { # <evidence-json>
-  local e="$1" p m s
-  p="$(jq -r '.spec // ""' <<<"$e")"; m="$(jq -r '.spec_mtime // 0' <<<"$e")"
-  case "$p" in */.cel/specs/*) ;; *) _afk_refuse ordered_work "the spec is not under the workspace's .cel/specs/ - it is not work anyone ordered"; return 1 ;; esac
-  s="$(_afk_since_epoch)"
-  [ "$m" -gt 0 ] && [ "${s:-0}" -gt 0 ] && [ "$m" -lt "$s" ] \
-    || { _afk_refuse ordered_work "the spec was written after AFK went on - that needs a reviewer or scout finding (pre-authorisation 4)"; return 1; }
-  [ "$(jq -r '(.workers // 0) < (.cap // 0)' <<<"$e")" = true ] \
-    || { _afk_refuse ordered_work "the worker cap is full ($(jq -r '.workers // 0' <<<"$e")/$(jq -r '.cap // 0' <<<"$e"))"; return 1; }
-}
 # A RELEASE IS NEVER INFERRED. It is allowed only when the owner named that
 # exact product@version with `cel afk on --allow release:<product>@<version>`.
 _afk_check_release() { # <evidence-json>
@@ -263,7 +207,7 @@ _afk_check_release() { # <evidence-json>
 afk_admit() { # <act> <evidence-json>
   local act="$1" e="${2:-{\}}"
   afk_authorisation "$act" >/dev/null \
-    || { _afk_refuse "$act" "that is not one of the five pre-authorised acts"; return 1; }
+    || { _afk_refuse "$act" "that is not one of the four pre-authorised acts"; return 1; }
   if ! afk_active; then
     if afk_expired; then
       _afk_refuse "$act" "AFK expired at $(afk_state_json | jq -r '.until_text // .until // "an hour that has passed"') - turn it on again, or do this awake"
@@ -286,10 +230,10 @@ afk_admit() { # <act> <evidence-json>
   "_afk_check_$act" "$e" || return 1
 }
 
-# THE DOOR FOR AN ACT ITS CALLER CARRIES OUT (land, dispatch, ordered work):
+# THE DOOR FOR AN ACT ITS CALLER CARRIES OUT (land):
 # admitted here, and recorded ONCE, after the effect, by afk_end with how it
 # ended. A caller that exits between this door and its afk_end - a die before
-# the merge, a launch that never came up - is still recorded, by the EXIT trap
+# the merge - is still recorded, by the EXIT trap
 # set here: `partial` once afk_step has said some of the act is out there,
 # `failed` otherwise. An act let through and never written down is exactly
 # what this log exists to rule out.
@@ -297,9 +241,6 @@ _AFK_OPEN_ACT="" _AFK_OPEN_DETAIL="" _AFK_OPEN_STEP="" _AFK_PREV_EXIT=""
 afk_begin() { # <act> <evidence-json> [detail]
   local act="$1" e="${2:-{\}}" detail="${3:-}"
   afk_admit "$act" "$e" || return 1
-  if [ "$act" = ordered_work ] && [ -z "$detail" ]; then
-    detail="$(jq -r '"spec \(.spec) (mtime \(.spec_mtime | todate))"' <<<"$e")"
-  fi
   [ -n "$detail" ] || detail="$(jq -rc '. | tostring' <<<"$e" 2>/dev/null || printf '%s' "$e")"
   _AFK_OPEN_ACT="$act" _AFK_OPEN_DETAIL="$detail" _AFK_OPEN_STEP=""
   _AFK_PREV_EXIT="$(trap -p EXIT)"
@@ -336,7 +277,7 @@ afk_resolve_thread() { # <slug> <pr-number> <thread-id> <evidence-json>
   afk_admit resolve_thread "$e" || return 1
   auth="$(afk_authorisation resolve_thread)"; what="$slug#$pr thread $thread"
   w="$(_afk_wsdir_for_slug "$slug")"
-  body="$(jq -r '"Fixed in \(.fixed_commit): \(.fixed_summary). Resolved by the fleet while the operator is away (cel afk, pre-authorisation 1); a reviewer confirmed the fix after that commit."' <<<"$e")"
+  body="$(jq -r '"Fixed in \(.fixed_commit): \(.fixed_summary). Resolved by the product agent while the operator is away (cel afk, pre-authorisation 1); a reviewer confirmed the fix after that commit."' <<<"$e")"
   if ! _afk_ws_gh "$w" api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){clientMutationId}}' \
     -f t="$thread" -f b="$body" >/dev/null; then
     afk_record resolve_thread "$auth" "$what - the reply did not post; the thread is left open" failed
@@ -392,8 +333,8 @@ afk_rebase_retry() { # <worktree> [--base <ref>]
     new_work=true   # nothing pushed at all: there is no PR-behind to retry
   fi
   # Asked WITHOUT touching the index: a rebase started to find out whether it
-  # conflicts is a rebase somebody has to abort, and an aborted rebase in a
-  # worker's worktree at 03:00 is exactly the mess this must not make.
+  # conflicts is a rebase somebody has to abort, and an aborted rebase in an
+  # agent's worktree at 03:00 is exactly the mess this must not make.
   #
   # TWO SPELLINGS, BECAUSE THE ANSWER MUST NOT DEPEND ON THE BOX. `merge-tree
   # --write-tree` (git 2.38+) reports conflicts through its exit status; older
@@ -485,7 +426,7 @@ cmd_afk() {
       fi
       # SAY WHAT KEEPS MOVING, so the owner sees it before walking away.
       printf 'While AFK is on, these keep moving (each logged with its evidence):\n'
-      local a; for a in resolve_thread land rebase_retry dispatch ordered_work; do
+      local a; for a in resolve_thread land rebase_retry; do
         printf '  - %s: %s\n' "$a" "$(afk_authorisation "$a")"
       done
       if [ "$(jq 'length' <<<"$allow")" -gt 0 ]; then

@@ -2,7 +2,7 @@
 
 Celestial is an AI software factory implemented as a GNU/Linux command-line
 control plane around Git worktrees, [herdr](https://herdr.dev), coding-agent CLIs and a small pair of Node HTTP
-servers. It is not a scheduler with its own worker runtime or an isolation
+servers. It is not a scheduler with its own agent runtime or an isolation
 boundary against the local user.
 
 ## Code and state
@@ -11,13 +11,13 @@ boundary against the local user.
   commands. `lib/` owns the mechanisms; `agents.yaml` describes agent commands,
   injection strategies and fresh-install pins.
 - `core/roles/` contains role prompts. `core/skills/` contains reusable workflows
-  and their executables, including `cel-fanout` and `cel-linear`.
+  and their executables, including `cel-verify` and `cel-linear`.
 - A separately owned workspace contains `workspace.yaml`, optional layouts,
   skills and dependency overlays, plus product clones under `repos/`.
   Workspace content and credentials do not belong in this repository.
-- `~/.local/share/cel/registry.yaml` locates workspaces. A workspace's
-  `.cel/delegations.json` records delegated work; `.cel/delegations.lock` fences
-  cooperating admission, reconciliation, collection and release operations.
+- `~/.local/share/cel/registry.yaml` locates workspaces. A workspace's `.cel/`
+  holds its own machine state: solo review verdicts in `.cel/solo-reviews.json`,
+  solo worktrees and lane directories under `.cel/solo/<product>/`.
 - `~/.local/share/cel/` also holds pages, logs and steward bookkeeping.
   `~/.local/state/cel/gc-idle.json` holds observed-idle evidence. These paths
   are machine state, not publication inputs.
@@ -26,25 +26,29 @@ boundary against the local user.
 
 Workspace resolution supplies policy, role, runtime, profile and environment.
 `cel run` starts the selected role in a visible Herdr pane by default, or an
-explicitly selected managed Rex session. Fanout creates a
-Git worktree for a delegated worker, starts the pane and records the resulting
-identity. Worker/reviewer roles use the same GitHub and ticket interfaces that
-an operator can invoke directly.
+explicitly selected managed Rex session. Solo agents and reviewers use the
+same GitHub and ticket interfaces that an operator can invoke directly.
 
-A product's build mode (`ws_build_mode`: `fleet` by default, or `solo`) picks
-which agent `cel run orchestrator` starts for it. A solo agent reuses the
-orchestrator's launch plumbing unchanged - product directory, alias, mailbox,
-resume, the one-agent-per-product refusal, and a role file still named
-`role-orchestrator.md` so GC never reaps it - and differs only in its role
-body (`core/roles/solo.md`, policy block worded without workers) and in
-`CEL_ROLE=solo`, which `lib/guard.sh` reads to allow repository writes while
-refusing fan-out, agent starts and manual merges. `cel mode` (lib/mode.sh)
-edits the one `mode:` line in place, verifies the result as data, and hands
-the restart to a transient user unit that waits for the agent to leave its
-turn before `cel run orchestrator --restart`.
+A product's build mode (`ws_build_mode`) is `solo` when the product declares
+no `mode:`, and `mode: solo` is valid as written. Every launch path for a
+product agent - `cel run orchestrator`, `cel run solo`, `cel ws up` and the
+steward's `orchestrator: auto` - starts the solo role. A legacy explicit
+`mode: fleet` is still read back as `fleet`, but `cel run orchestrator`
+refuses to launch it and names `cel mode <p> solo`. A solo agent reuses the
+orchestrator's launch plumbing - product directory, alias, mailbox, resume,
+the one-agent-per-product refusal, and a role file still named
+`role-orchestrator.md` so GC never reaps it - and differs in its role body
+(`core/roles/solo.md`) and in `CEL_ROLE=solo`, which `lib/guard.sh` reads to
+allow repository writes while refusing agent starts and manual merges.
+`cel mode` (lib/mode.sh) edits the one `mode:` line in place, verifies the
+result as data, and hands the restart to a transient user unit that waits
+for the agent to leave its turn before `cel run orchestrator --restart`;
+`cel mode <p> fleet` is refused and writes nothing. The orchestrator role file
+(`core/roles/project-orchestrator.md`) is kept for planned feature teams and is not
+launched today.
 
 Launch environment is scoped to the launched process: `_run_launch_env` is the
-single construction (used by `cel run` and `cel-fanout`) and renders role
+single construction (used by every `cel run` launch) and renders role
 marks, gateway credentials, the per-agent `CEL_SESSION_ID` and the agent root as
 one `env K=V ...` prefix - never an `export` into the pane shell, which outlives
 the agent. Pi and OMP agent roots are resolved once (`gateway_pi_dir`,
@@ -62,7 +66,7 @@ strategies pre-approve tool permissions. Only use trusted workspace content,
 skills and dependencies, and understand the accounts available to each agent.
 
 The steward performs a deterministic sweep: cleanup, review/ticket/mailbox
-nudges, stalled-worker reporting, server maintenance and update checks. The
+nudges, stalled-agent reporting, server maintenance and update checks. The
 optional systemd user timer defaults to five minutes. A sweep itself makes no
 model call, but a prompted agent may start paid work.
 
@@ -82,12 +86,11 @@ worktree removal, and mails their owner with the recorded restart command.
 
 ## Preservation before cleanup
 
-Every GC deletion path checks registry/delegation/process evidence and Git
-state. Dirty work, running delegations, incomplete discovery and unknown
-comparisons are retained. An attached clean HEAD must be proven contained in
-the verified default branch, or match the exact head of a GitHub-merged PR;
-additional local commits invalidate that proof. Fanout release reports unknown
-work as held, with explicit keep/discard decisions rather than a zero count.
+Every GC deletion path checks registry/process evidence and Git state. Dirty
+work, incomplete discovery and unknown comparisons are retained. An attached
+clean HEAD must be proven contained in the verified default branch, or match
+the exact head of a GitHub-merged PR; additional local commits invalidate
+that proof.
 
 ### Gateway credentials for an omp that starts native
 
@@ -115,8 +118,8 @@ within `CEL_PANE_READY_MS` (30000). Past the deadline, or when herdr cannot
 describe the pane, or an agent occupies it, the launch dies before anything is
 typed: no prefix, no agent start, no reviewer record. A terminal or shell that
 changes while waiting, or after the text is typed, is refused as a change of
-owner. The same gate covers core, root, orchestrator, worker, reviewer,
-`--restart` and `cel-fanout delegate` (which has its own launch sequence).
+owner. The same gate covers core, root, orchestrator, solo, reviewer and
+`--restart`.
 Limit: herdr 0.9.1 exposes no structured "prompt drawn" field, so the 3-probe
 stability is a mitigation, not proof the prompt is ready; a supported herdr
 field is the upstream prerequisite. The foreground process group must equal the
@@ -138,16 +141,16 @@ box-wide core and other workspaces are excluded. A failed stop prevents reset
 from launching replacements. This stops runtimes without deleting worktrees.
 
 Rex verdict recording binds the calling process's live PID ancestry to its
-reviewer receipt, including alias, workspace, repository and PR. Both solo and
-fleet verdicts validate that exact target before writing; a reviewer for one
-PR cannot attribute a verdict on another PR to itself.
+reviewer receipt, including alias, workspace, repository and PR. Solo
+verdicts validate that exact target before writing; a reviewer for one PR
+cannot attribute a verdict on another PR to itself.
 
 Reaping is separate from worktree deletion. It requires a named plane-owned
-worker, proof of the role it was launched for, inherited pane identity,
+agent, proof of the role it was launched for, inherited pane identity,
 herdr's foreground-process attestation, and the same `/proc` PID/start time.
 That role proof is read from the launch environment (`CEL_ROLE`,
 `CEL_ROLE_FILE`, `CEL_WORKSPACE`, set as a prefix on the launch line by `cel
-run` and fanout), because a runtime may rewrite its own argv and leave nothing
+run`), because a runtime may rewrite its own argv and leave nothing
 recognisable in `/proc/<pid>/cmdline`; the older role-file argument scan
 remains as a fallback for panes started by an earlier build. The idle clock
 additionally binds boot, session, terminal and state-change sequence. First
@@ -159,44 +162,18 @@ GC never sends SIGKILL. The summary line splits `kept` by reason, and names
 the directories it could not identify, so a blind sweep cannot read as an idle
 one.
 
-Locks serialize cooperating Celestial lifecycle writers. Registry and ledger
-updates use temporary files beside their destination followed by atomic
+Locks serialize cooperating Celestial lifecycle writers. Registry and state
+file updates use temporary files beside their destination followed by atomic
 rename, so readers do not see a partial replacement. This is not fsync-based
 power-loss durability, nor an atomic transaction with arbitrary external
 Git/herdr writers. Keep independent backups of important work.
-
-### Replacing a published PR (`cel-fanout replace`)
-
-A published branch is never rewritten; a PR opened outside the fleet has no
-delegation row. `replace reserve` / `replace attach` are the two durable,
-individually atomic stages that give a clean candidate a row of its own. The
-child row carries `replacement.{role:child, of, original_head, original_pr,
-target_head, stage}`; the original carries `replacement.{role:source, child}`.
-The `replacement` namespace is separate from any recovery metadata. Consumers
-treat a `source` row as history only: capacity, fleet rows, gc pane handling
-and the held-work refusal skip it, `release` refuses to remove the worktree
-the child now owns, and `_ledger_append` keeps lineage across a re-delegation.
-No new ledger state exists - the child is an ordinary `running` row whose
-collect/review/land are gated on `stage: attached`.
-
-`replace bind` rebinds an attached child's source checkout to the
-clean candidate's worktree. The native contract: herdr reports an agent's name,
-pane, native session and cwd but offers no way to change a running agent's
-cwd, so the actor is never moved or restarted; instead the child row carries
-`binding.{worktree, from_worktree, head, actor:{alias, pane, session,
-native_cwd}, old_tree:{path, ref, head, dirty_entries, status_sha256,
-retained}, superseded:{review, verdict}}` and `row.worktree` is the clean
-checkout. Acting verbs call `_replace_bound_guard`, which refuses when the
-checkout left the child branch or the agent named by the binding is a
-different native session. gc vetoes `binding.old_tree.path` whatever the
-state, and `_ledger_append` keeps the binding across a re-delegation.
 
 ### Gateway transports, agent updates and runtime retirement
 
 - **Codex over Responses.** The gateway serves Chat Completions, Anthropic Messages and OpenAI Responses (`/v1/responses`, `/v1/responses/compact`, and the Responses websocket upgrade on the same path) over one vault. Claude uses `anthropic-messages`; Codex-family ids use `openai-responses` (pi provider `ompgw-codex`, omp provider `celgw-codex`) so compaction and reasoning items are not dropped by a chat-completions substitution. Which transport a live turn actually negotiates (SSE or websocket) is a property of the runtime and is proven with an authenticated turn, not asserted by the writer.
 - **Native start, gateway later.** An omp launched on a native model still receives the gateway client environment and the registered gateway providers; a running process's environment is fixed, so a session started earlier is recovered through its own native session resume (`cel run <role> --restart`, which passes `--resume` for omp and `--session` for pi), never by pretending new variables reach it.
 - **`cel update`** runs the agent and gateway components on every update (agents.yaml `update:`), each through the agent's own installer, with an honest per-component report. A component that fails, or that is still behind the published latest after its updater ran, makes the update a non-success; rerun is the recovery.
-- **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch, session file and the delegation row are untouched.
+- **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch and session file are untouched.
 
 ## Source-control forges
 
@@ -229,11 +206,11 @@ normalised JSON value or fails, with the same shape from either backend.
 view|checks|reviews|list|create`, `--json` for the normalised value); the
 guard leaves its reads to every role and refuses `pr create` to orchestrators
 and core, as it refuses `gh pr create`, and a reviewer never opens a PR.
-There is no merge verb: merging goes through `cel solo land` /
-`cel-fanout land`. The same writes by hand - curl at a forge API with a body
-or a non-GET method in any spelling, `tea api` beyond a plain GET, tea's
-write verbs - are refused to orchestrators, root, core, workers and solo
-agents alike, and no role may read, copy or write `~/.config/cel/forge` (by
+There is no merge verb: merging goes through `cel solo land`. The same writes
+by hand - curl at a forge API with a body or a non-GET method in any
+spelling, `tea api` beyond a plain GET, tea's write verbs - are refused to
+orchestrators, root, core and solo agents alike, and no role may read, copy
+or write `~/.config/cel/forge` (by
 shell, or by the native read and edit tools where the guard hook runs).
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
@@ -273,12 +250,12 @@ review verdict is Celestial's own (`.cel/solo-reviews.json`), bound to the
 exact head; the reviewer's checkout and the local gate fetch
 `refs/pull/<n>/head`, which both forges serve, and the local gate refuses
 unless that ref is the head it ran on. Whether CI may stand in for the gate
-is `land_ci_gate` (`lib/land.sh`), shared with `cel-fanout land`: it takes
-`{number, head_sha, base_ref}` and one `forge_pr_checks` read, so the base's
-required checks (GitHub classic protection and rulesets, or Forgejo's
-branch protection rules) and their latest runs on the head come from the
-same provider-dispatched answer. The rest of `cel-fanout`, gc and release
-still call `gh` directly and move onto these operations separately.
+is `land_ci_gate` (`lib/land.sh`): it takes `{number, head_sha, base_ref}`
+and one `forge_pr_checks` read, so the base's required checks (GitHub
+classic protection and rulesets, or Forgejo's branch protection rules) and
+their latest runs on the head come from the same provider-dispatched answer.
+gc and release still call `gh` directly and move onto these operations
+separately.
 
 ## Credentials
 
@@ -291,7 +268,7 @@ list. A signed-in subscription is identified by where the credential lives
 (`claude/pi`, `claude/claude-code`, `codex/<account id>`,
 `gateway/<provider>/<id>`), never by a hash of the token, so a token refresh
 overwrites one cache entry instead of inventing an account; `cel quota`,
-`cel fleet --json`, the console's QUOTA view and the dashboard all render that
+`cel fleet --json` and the dashboard all render that
 one list, and no token is ever printed. Credentials still exist in process environments/memory; the local user
 and root are trusted. Linear's private temporary header file is removed on
 normal exit and handled signals, but cannot promise cleanup after SIGKILL.

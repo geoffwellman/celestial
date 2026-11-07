@@ -64,7 +64,7 @@ stall_quiet_secs() { # <worktree>
 # What would be LOST if this worktree went away right now.
 #   ""                     nothing - everything is pushed and clean
 #   "unpushed=K dirty=M"   K commits the remote has never seen, M dirty files
-# Mirrors cel-fanout's own release check, on purpose: the number that decides
+# Shared on purpose: the number that decides
 # whether losing this worktree costs work should be computed the same way by
 # whoever is asking.
 # `.agent/` is excluded: result.md and verdict.json are the worker's REPORT,
@@ -180,7 +180,6 @@ stall_verdict() { # <live-status> <pane-text> <quiet-secs> [has-result 0|1] [liv
   esac
   # A WORKER THAT WROTE ITS RESULT IS FINISHED, NOT STALLED: it was told to
   # write .agent/result.md and stop, so idle and quiet is expected.
-  # `cel-fanout status` reconciles these to `finished`; they are its business.
   [ "$done_" = 1 ] && return 0
   local marker; marker="$(stall_marker "$text")"
   if [ -n "$marker" ]; then
@@ -225,6 +224,6 @@ stall_message() { # <verdict> <ticket> <pane> <quiet-secs> <pushed> <at-risk> <b
     "${ticket:-untracked}" "${pane:-no-pane}" "$what" "${branch:-?}" "$pushed" \
     "${risk:+ - UNLANDED $risk}" \
     "$([ -n "$risk" ] \
-        && printf 'THE WORK IS AT RISK: it exists only in this worktree and gc removes uncommitted worktrees. Salvage it BEFORE re-delegating: cel-fanout collect, or commit and push from the worktree.' \
-        || printf 'Its work is pushed, so it is safe to release and re-delegate.')"
+        && printf 'THE WORK IS AT RISK: it exists only in this worktree and gc removes uncommitted worktrees. Salvage it first: commit and push from the worktree.' \
+        || printf 'Its work is pushed, so it is safe to let go.')"
 }

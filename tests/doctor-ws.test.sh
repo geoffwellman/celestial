@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # check_workspaces walks every registered workspace and audits it against
 # workspace.yaml, its repos and its gitignore. Warnings (local-only, uncloned
-# repos, missing gate binaries, stale delegations) never fail the pass - only
+# repos, missing gate binaries) never fail the pass - only
 # c_err findings do.
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/registry.sh"
@@ -58,7 +58,7 @@ test_check_workspaces_fails_for_dangling_skill_symlink() {
 test_check_workspaces_fails_for_unregistered_runtime_bin() {
   _doctor_ws_setup
   local tmp; tmp="$(mktemp)"
-  yq -y '.runtime.worker = "no-such-agent"' "$T/alpha/workspace.yaml" > "$tmp" \
+  yq -y '.runtime.orchestrator = "no-such-agent"' "$T/alpha/workspace.yaml" > "$tmp" \
     && mv "$tmp" "$T/alpha/workspace.yaml"
   assert_fails check_workspaces
   rm -rf "$T"

@@ -8,9 +8,10 @@ _CEL_WS=1
 # shellcheck source=lib/wslife.sh
 . "${BASH_SOURCE[0]%/*}/wslife.sh"
 
-# What a workspace root ignores: cloned repos, disposable spikes, the fanout
-# ledger, and the per-box files - secrets and the local role-routing
-# override - neither of which belongs in the workspace's own git history.
+# What a workspace root ignores: cloned repos, disposable spikes, the box
+# state under .cel/, and the per-box files - secrets and the local
+# role-routing override - neither of which belongs in the workspace's own git
+# history.
 # `*.local.*` catches the next per-box file too; its `.example.` twin is the
 # committed template, so it is let back in.
 _WS_GITIGNORE_LINES="repos/
@@ -116,7 +117,7 @@ _ws_local_example() {
 # role_profiles:                 # which profile each role launches on
 #   root: mine
 #   orchestrator: mine
-#   worker: mine
+#   solo: mine
 #
 # worker_profiles:               # add a profile, or replace one whole by name
 #   mine: { runtime: omp, model: some-model, thinking: high, for: my login's model }
@@ -170,8 +171,8 @@ name: $name
 kind: $kind
 org: $org
 tickets: { system: none, adhoc: "AH-<yymmdd>" }
-policy: { merge: $merge, pr: required, workers: 4, reviewer: null }   # pr: required | none. A repo entry may set its own pr: (it wins for that repo). none = workers push straight to main, fast-forward only, no PR; set here it applies to EVERY repo without its own pr:
-runtime: { root: claude, orchestrator: claude, worker: omp }
+policy: { merge: $merge, pr: required }   # pr: required | none. A repo entry may set its own pr: (it wins for that repo). none = the product's agent pushes straight to main, fast-forward only, no PR; set here it applies to EVERY repo without its own pr:
+runtime: { root: claude, orchestrator: claude }
 tools: []
 env: {}                       # exported into every shell that starts in this workspace. SECRETS GO IN env.local (gitignored, never committed) - that is the one place this workspace's keys live, and the only one cel doctor and cel ws env read
 repos: []

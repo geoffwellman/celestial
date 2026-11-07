@@ -62,7 +62,7 @@ cel_agent_list() {
   jq -cn --argjson h "$h" --argjson r "$r" '$h | .result.agents += $r.result.agents'
 }
 
-_rex_preflight() { # name runtime; no mutation before provisioning a worker checkout
+_rex_preflight() { # name runtime; checked before anything is created
   local file; file="$(_rex_file "$1")"
   command -v "${CEL_REX_BIN:-rex}" >/dev/null || die 'cel run: rex is not on PATH'
   command -v "$(agent_get "$2" bin)" >/dev/null || die "cel run: executable for $2 is unavailable"
@@ -260,8 +260,8 @@ rex_session_note() { # pid state [native session file/id]
 # Rows: <outcome>\t<name>\t<workspace>\t<detail>, outcome one of
 #   resumed        running again; detail is the session it resumed
 #   failed         its relaunch ran and did not leave a live runtime
-#   held           not resumed: no recorded relaunch line (reviewers and
-#                  workers never resume; older receipts), no saved session, a
+#   held           not resumed: no recorded relaunch line (reviewers never
+#                  resume; older receipts), no saved session, a
 #                  session record that disagrees with its receipt, no server
 #   skipped        stopped, retired, relaunched or still running
 #   server         a fact about the server (version/API revision, closed shells,
@@ -331,7 +331,6 @@ _rex_resume_veto() { # <receipt>
         ws="$(ws_name "$(jq -r '.workspace // ""' "$f")" 2>/dev/null || true)"
         printf 'reviewers never resume - if %s#%s is still open: cel run reviewer --repo %s --pr %s%s' \
           "$repo" "$pr" "$repo" "$pr" "${ws:+ --workspace $ws}" ;;
-      worker) printf 'workers resume through cel-fanout delegate --reuse' ;;
       *) printf 'its launch predates recorded relaunch lines - resume it by hand once (cel run ... --restart), which records one' ;;
     esac
     return 0

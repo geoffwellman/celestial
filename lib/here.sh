@@ -23,13 +23,12 @@ _CEL_HERE=1
 _here_usage() {
   cat <<'EOF'
 usage: cel here <verb> [args]   (inside an agent: /cel-<verb>)
-  mode [<product>] [solo|fleet]  show or switch the product's mode (restart at end of turn)
+  mode [<product>] [solo]        show or switch the product's mode (restart at end of turn)
   status [<product>]             cel fleet for the product's workspace (core: the whole box)
   inbox                          unread mail now, without waiting for the hook
   decide                         open owner questions (core: all; others: your own)
   review [<repo>#]<pr>           start a reviewer pane for a PR
-  land [<repo>#]<pr> [flags]     merge through this mode's checked path
-                                 (fleet: cel-fanout land <id> [flags]; solo: cel solo land)
+  land [<repo>#]<pr>             merge through the checked path (cel solo land)
   restart                        restart this agent on its own session at end of turn
   focus <product>                core only: bring that product's agent forward
 EOF
@@ -38,7 +37,6 @@ EOF
 # The commands each verb wraps, as functions: the seam tests/here.test.sh
 # replaces to see exactly what a verb would run.
 _here_cel() { "$CEL_ROOT/bin/cel" "$@"; }
-_here_fanout() { ( cd "$HERE_WSDIR" && "$CEL_ROOT/core/skills/fanout/bin/cel-fanout" "$@" ); }
 
 # Who is asking: HERE_ROLE (core|orchestrator|solo|root|other), and for a
 # product agent HERE_WSDIR and HERE_PRODUCT. Never guesses a product for core.
@@ -112,19 +110,6 @@ _here_pr_ref() { # <ref>
     || die "cel here: $HERE_REPO is not a repo of $HERE_PRODUCT"
 }
 
-# The delegation that owns a fleet PR: its head branch, matched on the
-# ledger. Sets HERE_ID.
-_here_ledger_id() { # <repo> <pr>
-  local slug branch
-  slug="$(ws_repo_github_slug "$HERE_WSDIR" "$1")" || die "cel here: no GitHub slug for $1"
-  branch="$(gh pr view "$2" --repo "$slug" --json headRefName --jq .headRefName 2>/dev/null)" \
-    || die "cel here: could not read $slug#$2"
-  HERE_ID="$(jq -r --arg r "$1" --arg b "$branch" \
-        '[.[] | select(.repo == $r and .branch == $b) | .id] | last // empty' \
-        "$HERE_WSDIR/.cel/delegations.json" 2>/dev/null)"
-  [ -n "$HERE_ID" ] || die "cel here: $slug#$2 (branch $branch) has no delegation on the ledger - cel-fanout land lands only what the fleet delegated"
-}
-
 # Core restarts itself the way `cel mode` restarts a product agent: detached,
 # once it has been quiet for two polls, on its own session.
 _here_core_status() {
@@ -186,18 +171,12 @@ cmd_here() {
       _here_cel run reviewer --repo "$HERE_REPO" --pr "$HERE_PR" --workspace "$(ws_name "$HERE_WSDIR")" ;;
     land)
       [ "$who" != core ] || die "cel here land: core does not land PRs - the product's agent does"
-      [ -n "${1:-}" ] || die "usage: cel here land [<repo>#]<pr> [cel-fanout land flags]"
+      [ -n "${1:-}" ] || die "usage: cel here land [<repo>#]<pr>"
       _here_target ""
       local ref="$1"; shift
       _here_pr_ref "$ref"
-      local ws; ws="$(ws_name "$HERE_WSDIR")"
-      if [ "$(ws_build_mode "$HERE_WSDIR" "$HERE_PRODUCT")" = solo ]; then
-        [ $# -eq 0 ] || die "cel here land: cel solo land takes no extra flags (got: $*)"
-        _here_cel solo land "$HERE_REPO#$HERE_PR" --workspace "$ws"
-      else
-        _here_ledger_id "$HERE_REPO" "$HERE_PR"
-        _here_fanout land "$HERE_ID" --workspace "$ws" "$@"
-      fi ;;
+      [ $# -eq 0 ] || die "cel here land: cel solo land takes no extra flags (got: $*)"
+      _here_cel solo land "$HERE_REPO#$HERE_PR" --workspace "$(ws_name "$HERE_WSDIR")" ;;
     restart)
       local rc=0
       if [ "$who" = core ]; then

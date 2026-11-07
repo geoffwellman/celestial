@@ -14,10 +14,11 @@ test_ws_ticket_and_policy() {
   assert_eq "$(ws_policy "$WSA" reviewer)" ""
 }
 test_ws_runtime_reads_and_defaults() {
-  assert_eq "$(ws_runtime "$WSA" worker)" "omp"
-  local tmp; tmp="$(mktemp -d)"; printf 'name: bare\n' > "$tmp/workspace.yaml"
-  assert_eq "$(ws_runtime "$tmp" worker)" "omp"
+  assert_eq "$(ws_runtime "$WSA" root)" "claude"
+  local tmp; tmp="$(mktemp -d)"; printf 'name: bare\nruntime: { solo: omp }\n' > "$tmp/workspace.yaml"
+  assert_eq "$(ws_runtime "$tmp" solo)" "omp"
   assert_eq "$(ws_runtime "$tmp" root)" "claude"
+  assert_eq "$(ws_runtime "$tmp" orchestrator)" "claude"
   rm -rf "$tmp"
 }
 test_ws_repos() {
@@ -60,10 +61,19 @@ test_ws_policy_block_carries_the_rules() {
   local b; b="$(ws_policy_block "$WSA")"
   assert_contains "$b" "humans-only"
   assert_contains "$b" "never invent ticket references"
-  assert_contains "$b" "worker runtime: omp"
-  assert_contains "$b" "never start workers on the orchestrator runtime"
+  assert_contains "$b" "build mode: solo - you build and ship this product yourself"
   assert_contains "$b" "widget"
   assert_contains "$b" "bun test"
+  # Fan-out is retired: nothing in the block may instruct it.
+  ! printf '%s' "$b" | grep -qiE 'cel-fanout|worker|scout|pr-loop|delegat' \
+    || { echo "policy block still instructs fan-out"; return 1; }
+}
+test_ws_policy_block_merge_self_lands_with_cel_solo_land() {
+  local tmp; tmp="$(mktemp -d)"
+  cp "$WSA/workspace.yaml" "$tmp/"
+  yq -y -i '.policy.merge = "self"' "$tmp/workspace.yaml"
+  assert_contains "$(ws_policy_block "$tmp")" 'cel solo land <repo>#<n>'
+  rm -rf "$tmp"
 }
 # The review: block is optional; when present the policy block tells the
 # orchestrator to start reviewer panes, and when absent it says nothing.
@@ -80,7 +90,7 @@ test_ws_policy_block_renders_review_instruction_only_when_declared() {
   # review.runtime to the agent that starts them.
   assert_contains "$b" '(pi model gpt-5.6-sol'
   case "$b" in *'omp model'*) echo "policy names the ignored review.runtime"; rm -rf "$tmp"; return 1;; esac
-  assert_contains "$b" 'PR reviewer'
+  assert_contains "$b" 'it sends findings to you (`<product>-orch`)'
   rm -rf "$tmp"
 }
 # Where a reviewer's verdict goes. On a repo whose only GitHub identity is the
@@ -100,7 +110,7 @@ test_ws_policy_block_review_line_follows_review_post() {
   cp "$WSA/workspace.yaml" "$tmp/"
   printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$tmp/workspace.yaml"
   local b; b="$(ws_policy_block "$tmp")"
-  assert_contains "$b" 'cel-fanout review <id>'
+  assert_contains "$b" 'cel solo review <repo>#<n> <approved|changes>'
   assert_contains "$b" '--head <reviewed-commit-sha>'
   assert_contains "$b" 'GitHub is **not** posted to'
   printf '  post: github\n' >> "$tmp/workspace.yaml"
@@ -118,14 +128,23 @@ test_pr_reviewer_role_does_not_post_to_github_unconditionally() {
     || { echo "role still promises a GitHub review"; return 1; }
   ! grep -qE '^[0-9]+\. Submit ONE review per round: `gh pr review' "$f" \
     || { echo "role posts a GitHub review unconditionally"; return 1; }
-  assert_contains "$(cat "$f")" 'cel-fanout review <id>'
+  assert_contains "$(cat "$f")" 'cel solo review <repo>#<n>'
+  ! grep -q 'cel-fanout' "$f" || { echo "reviewer role still records verdicts with cel-fanout"; return 1; }
   assert_contains "$(cat "$f")" '--head <reviewed-sha>'
   assert_contains "$(cat "$f")" 'post: github'
 }
 test_ws_render_role_appends_policy() {
-  local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/worker.md")"
-  assert_contains "$out" "one ticket and one worktree"
+  local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/solo.md")"
+  assert_contains "$out" "You are the solo agent for one product"
   assert_contains "$out" "Workspace policy"
+}
+# The orchestrator role is held for the feature-team rewrite; it must say it
+# is not launched, so nobody mistakes it for live behaviour.
+test_project_orchestrator_role_says_it_is_not_launched() {
+  local f="$CEL_ROOT/core/roles/project-orchestrator.md"
+  assert_contains "$(cat "$f")" "name: project-orchestrator"
+  assert_contains "$(cat "$f")" "THIS ROLE IS NOT LIVE"
+  assert_contains "$(cat "$f")" "core/roles/solo.md"
 }
 test_ws_render_claude_block_is_idempotent() {
   local tmp; tmp="$(mktemp -d)"
@@ -193,24 +212,6 @@ PY
   rm -rf "$tmp"
 }
 
-# Profiles carry a `for:` so the orchestrator can choose per ticket; the
-# policy block is where it learns them, and scouts are named there too.
-test_ws_policy_block_lists_profile_purposes_and_scouts() {
-  local tmp; tmp="$(mktemp -d)"
-  cp "$WSA/workspace.yaml" "$tmp/"
-  printf 'worker_profiles:\n  fast: { runtime: omp, model: m, for: "small well-specified fixes" }\n' >> "$tmp/workspace.yaml"
-  local b; b="$(ws_policy_block "$tmp")"
-  assert_contains "$b" "fast: small well-specified fixes"
-  assert_contains "$b" "cel-fanout scout"
-  assert_contains "$b" "--because"
-  ! printf '%s' "$b" | grep -q "scouts run on profile" || { echo "unbound scout claimed a profile"; rm -rf "$tmp"; return 1; }
-  # Bind one and the orchestrator is told not to pass --profile itself.
-  printf 'role_profiles: { scout: fast }\n' >> "$tmp/workspace.yaml"
-  b="$(ws_policy_block "$tmp")"
-  assert_contains "$b" "scouts run on profile fast automatically"
-  rm -rf "$tmp"
-}
-
 # --- products: the 1..n-repo unit an orchestrator owns ---------------------
 # ws-products declares `bundle` over widget+gadget and leaves `lone` out of
 # it. An undeclared repo is its own implicit product, in place - that is what
@@ -240,10 +241,23 @@ test_ws_product_declared_exit_codes() {
   assert_fails ws_product_declared "$WSP" nosuch
 }
 test_ws_product_get_reads_keys_and_never_fails() {
-  assert_eq "$(ws_product_get "$WSP" bundle workers)" "2"
   assert_eq "$(ws_product_get "$WSP" bundle orchestrator)" "auto"
   assert_eq "$(ws_product_get "$WSP" bundle nosuchkey)" ""
-  assert_eq "$(ws_product_get "$WSP" lone workers)" ""
+  assert_eq "$(ws_product_get "$WSP" lone orchestrator)" ""
+}
+# Build mode: absent is solo; `mode: solo` is solo; a legacy `mode: fleet`
+# reads back as written so launchers can refuse it.
+test_ws_build_mode_defaults_to_solo() {
+  assert_eq "$(ws_build_mode "$WSP" bundle)" "solo"
+  assert_eq "$(ws_build_mode "$WSP" lone)" "solo"
+  local tmp; tmp="$(mktemp -d)"
+  cp "$WSP/workspace.yaml" "$tmp/"
+  yq -y -i '.products[0].mode = "solo" | (.repos[] | select(.name=="lone") | .mode) = "fleet"' "$tmp/workspace.yaml"
+  assert_eq "$(ws_build_mode "$tmp" bundle)" "solo"
+  assert_eq "$(ws_build_mode "$tmp" lone)" "fleet"
+  # Every product agent runs solo, so the block is the solo build either way.
+  assert_contains "$(ws_policy_block "$tmp" lone)" "build mode: solo"
+  rm -rf "$tmp"
 }
 test_ws_product_dir_declared_vs_implicit() {
   assert_eq "$(ws_product_dir "$WSP" bundle)" "$WSP/products/bundle"
@@ -260,9 +274,10 @@ test_ws_policy_block_names_the_product_only_when_given_one() {
     || { echo "product line rendered with no product"; return 1; }
 }
 test_ws_render_role_passes_the_product_through() {
-  local out; out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/project-orchestrator.md" bundle)"
+  local out; out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/solo.md" bundle)"
   assert_contains "$out" "- product: bundle (repos: widget, gadget)"
-  out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/project-orchestrator.md")"
+  assert_contains "$out" "/.cel/solo/bundle/"
+  out="$(ws_render_role "$WSP" "$CEL_ROOT/core/roles/solo.md")"
   ! printf '%s' "$out" | grep -q '^- product:' || { echo "product line with no product"; return 1; }
 }
 
@@ -295,12 +310,6 @@ test_ws_repo_preview_is_empty_without_a_preview_block() {
   assert_eq "$(ws_repo_preview "$WSA" widget cmd)" ""
   assert_eq "$(ws_repo_preview "$WSA" widget url)" ""
   assert_eq "$(ws_repo_preview_env "$WSA" widget)" ""
-}
-
-# The role says in one line what the guard and the binary now enforce.
-test_worker_role_forbids_landing() {
-  local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/worker.md")"
-  assert_contains "$out" "Land, release, collect or delegate"
 }
 
 # RELEASE DECLARATIONS. A repo says how it is released - which workflow file,

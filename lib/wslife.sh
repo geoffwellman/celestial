@@ -11,11 +11,8 @@
 #     dead. `up` renames it rather than starting a second one on top of it,
 #     which is why this is a reconcile and not a launcher.
 #
-# WHAT THIS FILE NEVER DOES: remove a worktree, or write the delegation
-# ledger. `down` is about PANES. Work is landed and let go by `cel-fanout
-# release`, which knows what a scout is, what --discard means and how to log
-# the loss - and a second path to the same destruction is how one of them ends
-# up without the refusals.
+# WHAT THIS FILE NEVER DOES: remove a worktree. `down` is about PANES; work is
+# landed by its solo agent, and gc retires worktrees with its own refusals.
 [ -n "${_CEL_WSLIFE:-}" ] && return 0
 _CEL_WSLIFE=1
 # shellcheck source=lib/registry.sh
@@ -67,37 +64,20 @@ wslife_orchestrators() { # <wsdir>
   done
 }
 
-# The worktrees under this workspace that still hold something - and whether
-# the ledger could be read at all. Read exactly the way `cel-fanout release`
-# reads them (lib/stall.sh) so the two refusals cannot disagree about what
-# "unlanded" means - a `down` that let go of work `release` would have refused
-# is the same loss by another door.
-#
-# FAIL CLOSED WHEN IT CANNOT SEE. A missing, unreadable or malformed ledger
-# returns 3 with the reason on stdout - never an empty "nothing is held". Only
-# a ledger that was actually read returns 0, with one line per worktree at
-# risk (empty when it genuinely holds nothing).
-_wslife_held_work() { # <wsdir> -> lines; return 0 read ok, 3 cannot tell
-  local led="$1/.cel/delegations.json" branch wt risk rows
-  if [ ! -e "$led" ]; then
-    printf 'no delegation ledger at %s\n' "$led"; return 3
-  fi
-  if [ ! -r "$led" ]; then
-    printf 'the delegation ledger %s is not readable\n' "$led"; return 3
-  fi
-  # Parse once, and treat a parse failure as "cannot tell", never as empty: a
-  # jq that ends `|| true` swallows a malformed ledger into a silent yes.
-  if ! rows="$(jq -r '.[]? | select(((.state // "") | IN("running","finished","collected","blocked")))
-                     | select((.replacement.role // "") != "source")
-                     | [(.branch // ""), (.worktree // "")] | @tsv' "$led" 2>/dev/null)"; then
-    printf 'the delegation ledger %s is not valid JSON\n' "$led"; return 3
-  fi
-  while IFS=$'\t' read -r branch wt; do
-    [ -n "$wt" ] || continue
-    risk="$(stall_work_at_risk "$wt" 2>/dev/null || true)"
-    [ -n "$risk" ] || continue
-    printf '    %s (%s) at %s\n' "${branch:-?}" "$risk" "$wt"
-  done <<< "$rows"
+# The solo worktrees under this workspace that still hold something unpushed
+# or unlanded (lib/stall.sh stall_work_at_risk), one line per worktree at
+# risk; empty when nothing is held.
+_wslife_held_work() { # <wsdir> -> lines
+  local p wt risk branch
+  for p in $(ws_product_names "$1"); do
+    while IFS= read -r wt; do
+      [ -n "$wt" ] || continue
+      risk="$(stall_work_at_risk "$wt" 2>/dev/null || true)"
+      [ -n "$risk" ] || continue
+      branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+      printf '    %s (%s) at %s\n' "${branch:-?}" "$risk" "$wt"
+    done < <(ws_solo_worktrees "$1" "$p")
+  done
   return 0
 }
 
@@ -247,29 +227,16 @@ cmd_ws_down() { # <name> [--force]
   have herdr || die "cel ws down: herdr is not on PATH"
   have jq    || die "cel ws down: jq is not on PATH"
 
-  # FAIL CLOSED, exactly as `cel-fanout release` does. Closing a pane does not
-  # destroy a worktree, but it takes away the agent that was about to push it.
-  # The refusal NAMES the branches at risk, and a ledger it CANNOT read stops
-  # with the reason rather than reading as a quiet yes.
-  local held rc=0
-  held="$(_wslife_held_work "$wsdir")" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    if [ "$force" -eq 0 ]; then
-      die "cel ws down: $name - cannot tell what work is at risk:
-    $held
-  Closing the panes might strand unpushed work, and you would never see which.
-  Fix the ledger, or say you mean it:
-    cel ws down $name --force
-  (nothing here removes a worktree or touches the ledger - that is cel-fanout release)"
-    fi
-    c_warn "cel ws down --force with a ledger it cannot read:
-    $held"
-  elif [ -n "$held" ] && [ "$force" -eq 0 ]; then
+  # NAME THE WORK AT RISK. Closing a pane does not destroy a worktree, but it
+  # takes away the agent that was about to push it.
+  local held
+  held="$(_wslife_held_work "$wsdir")"
+  if [ -n "$held" ] && [ "$force" -eq 0 ]; then
     die "cel ws down: $name still has work that is neither pushed nor landed:
 $held
   Closing the panes strands it. Land it, push it, or say you mean it:
     cel ws down $name --force
-  (nothing here removes a worktree or touches the ledger - that is cel-fanout release)"
+  (nothing here removes a worktree)"
   elif [ -n "$held" ]; then
     c_warn "cel ws down --force over unlanded work:
 $held"

@@ -507,14 +507,21 @@ test_forgejo_token_travels_on_stdin_never_in_argv_and_only_to_its_host() {
   rm -rf "$T"
 }
 
-# A plain-http forge says, at every operation, that the token is crossing the
-# network unencrypted; an https one says nothing.
+# A plain-http forge says, for every request that sends its token, that the
+# token is crossing the network unencrypted; an https one says nothing.
 test_forgejo_over_plain_http_warns_that_the_token_is_unencrypted() {
   _fj_ws
   forge_whoami "$T" widget >/dev/null 2>"$T/err" || { cat "$T/err"; rm -rf "$T"; return 1; }
   assert_eq "$(cat "$T/err")" "forge: token sent unencrypted to forgejo.internal - plain http is declared for this repo" || { rm -rf "$T"; return 1; }
   forge_pr_view "$T" widget 31 >/dev/null 2>"$T/err" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -c 'token sent unencrypted' "$T/err")" 1 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+  # No token on disk: nothing is sent, so nothing is said to have been sent.
+  _fj_ws
+  rm -f "$(_forge_forgejo_token_path forgejo.internal)"
+  forge_whoami "$T" widget >/dev/null 2>"$T/err" && { echo "succeeded without a token"; rm -rf "$T"; return 1; }
+  if grep -q 'unencrypted' "$T/err"; then echo "warned before any request was sent"; rm -rf "$T"; return 1; fi
+  assert_contains "$(cat "$T/err")" "no Forgejo API token" || { rm -rf "$T"; return 1; }
   rm -rf "$T"
   _forge_ws git@forgejo-ct.internal:geoff/gizmo.git forgejo forgejo.internal; _forge_gh_stub; _forgejo_stub "$T"
   forge_whoami "$T" widget >/dev/null 2>"$T/err" || true

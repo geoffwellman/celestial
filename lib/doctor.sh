@@ -11,8 +11,6 @@ _CEL_DOCTOR=1
 . "${BASH_SOURCE[0]%/*}/externals.sh"
 # shellcheck source=lib/registry.sh
 . "${BASH_SOURCE[0]%/*}/registry.sh"
-# shellcheck source=lib/ledger_states.sh
-. "${BASH_SOURCE[0]%/*}/ledger_states.sh"
 # shellcheck source=lib/workspace.sh
 . "${BASH_SOURCE[0]%/*}/workspace.sh"
 # shellcheck source=lib/install.sh
@@ -193,49 +191,6 @@ doctor_github_account() { # <name> <wsdir>
   return "$rc"
 }
 
-# A ROW IN A STATE NOBODY KNOWS is vetoed by gc for its own worktree forever,
-# and the orchestrator that owns it is not told; naming it here is how anyone
-# finds out.
-doctor_ledger_states() { # <wsdir> <ws-name>
-  local f="$1/.cel/delegations.json" bad
-  [ -f "$f" ] || return 0
-  bad="$(jq -r --arg ok " $CEL_LEDGER_STATES " \
-    '.[]? | select((" " + ((.state // "") | tostring) + " ") as $s | $ok | contains($s) | not)
-     | "\(.id // "?") (state: \(.state // "none"))"' "$f" 2>/dev/null)" || bad=""
-  [ -z "$bad" ] && return 0
-  local l
-  while IFS= read -r l; do
-    c_warn "$2: ledger row $l is not a ledger state - gc keeps its worktree as unknown"
-  done <<< "$bad"
-}
-
-# A WORKSPACE WITH WORKERS AND NO CONTAINER TO HOLD THEM. herdr shows a worker
-# worktree nested under the `<repo>/workers` workspace it was cut from, and
-# closes that container when its last child is released - which can detach the
-# survivors to the sidebar's top level with nothing saying so. `release` puts
-# the container straight back; this is what notices when something else took
-# it away. herdr is read through the same override the fanout tests stub, so
-# this check is testable without a server.
-doctor_worker_containers() { # <wsdir>
-  local wsdir="$1" r top h ledger
-  ledger="$wsdir/.cel/delegations.json"
-  h="${CEL_FANOUT_HERDR:-herdr}"
-  [ -f "$ledger" ] || return 0
-  have "$h" || [ -x "$h" ] || return 0
-  for r in $(ws_repo_names "$wsdir"); do
-    jq -e --arg r "$r" '[.[] | select(.repo == $r)
-      | select(.state != "released") | select((.worktree // "") != "")] | length > 0' \
-      "$ledger" >/dev/null 2>&1 || continue
-    top="$(git -C "$wsdir/repos/$r" rev-parse --show-toplevel 2>/dev/null || true)"
-    [ -n "$top" ] || continue
-    "$h" workspace list 2>/dev/null | jq -e --arg t "$top" \
-      '[.result.workspaces[]? | select(.worktree.is_linked_worktree == false)
-        | select(.worktree.repo_root == $t)] | length > 0' >/dev/null 2>&1 \
-      || c_warn "$r: worker worktrees on the roster but no $r/workers container - they are detached in the sidebar; the next cel-fanout delegate or release recreates it"
-  done
-  return 0
-}
-
 # A WORKSPACE IS JUDGED WITH ITS OWN ENV LOADED. A `setup:` check such as
 # `test -n "$WIDGET_KEY"` reads a value that lives in the workspace's
 # gitignored env.local; run in a bare login shell it would fail on a box that
@@ -399,13 +354,9 @@ doctor_ws_contract_lines() { # <wsdir> <name> -> 1 if the contract is not commit
 }
 
 # Per-registered-workspace audit. Warnings (local-only, uncloned
-# repos, missing gate binaries, stale delegations) never fail the pass; only
-# c_err findings do. Herdr/ledger checks are guarded behind `have herdr` so
-# this runs on a box with no server, and behind the ledger file existing so a
-# workspace that has never fanned out is never penalised for it.
+# repos, missing gate binaries) never fail the pass; only c_err findings do.
 check_workspaces() {
   local fail=0 n path remote r url gate first role rt bin_
-  local ledger agents id pane
 
   # Every managed worktree belongs to herdr. A worker-created one here is drift
   # from the same bug class check_roles_and_runtimes guards at the box level.
@@ -454,7 +405,7 @@ check_workspaces() {
       gate="$(ws_repo_get "$path" "$r" gate)"
       if [ -z "$gate" ] || [ "$gate" = null ]; then
         # Without a gate the only verification is a reviewer's prose, and
-        # `cel-fanout land` has nothing to refuse on. Said every doctor run
+        # `cel solo land` has nothing to refuse on. Said every doctor run
         # until someone declares one.
         c_warn "$n/$r: no test gate declared - verification here is prose; set repos[].gate to a command that fails when the code is wrong"
       elif [ -n "$gate" ]; then
@@ -503,7 +454,7 @@ check_workspaces() {
     doctor_ws_local_lines "$path" "$n" || fail=1
     doctor_ws_contract_lines "$path" "$n" || fail=1
 
-    for role in root orchestrator worker; do
+    for role in root orchestrator; do
       rt="$(ws_runtime "$path" "$role")"
       bin_="$(agent_get "$rt" bin)"
       if [ -z "$bin_" ] || ! have "$bin_"; then
@@ -512,20 +463,6 @@ check_workspaces() {
       fi
     done
 
-    ledger="$path/.cel/delegations.json"
-    if [ -f "$ledger" ] && agents="$(cel_agent_list 2>/dev/null)" \
-       && printf '%s' "$agents" | jq -e '.result.agents | type == "array"' >/dev/null 2>&1; then
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        pane="$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pane' "$ledger")"
-        if ! printf '%s' "$agents" \
-          | jq -e --arg p "$pane" '.result.agents[]? | select(.pane_id == $p)' >/dev/null 2>&1; then
-          c_warn "stale delegation $id - cel-fanout status"
-        fi
-      done < <(jq -r '.[] | select(.state == "running") | .id' "$ledger" 2>/dev/null)
-    fi
-    doctor_ledger_states "$path" "$n"
-    doctor_worker_containers "$path"
   done
 
   return "$fail"
@@ -628,7 +565,7 @@ doctor_afk_line() { # -> one line about AFK, or nothing
     printf 'AFK expired at %s and is still on - the factory reads it as off, so nothing is acting, but say so: cel afk off\n' "$until_t"
     return 0
   fi
-  printf 'AFK on until %s%s - the factory may land, rebase, dispatch and resolve bot threads on its own (cel afk log)\n' \
+  printf 'AFK on until %s%s - solo agents may land, rebase and resolve bot threads on their own (cel afk log)\n' \
     "$until_t" "$(printf '%s' "$s" | jq -r 'if (.reason // "") == "" then "" else " (" + .reason + ")" end')"
 }
 

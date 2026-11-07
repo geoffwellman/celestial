@@ -206,7 +206,7 @@ test_dash_v2page_working_now_lists_only_working_and_blocked() {
 }
 
 # In solo the agents at work are the product's own: its main agent, its lanes
-# and the reviewers they start are watched beside any workers, by name.
+# and the reviewers they start are watched, by name.
 test_dash_v2page_working_now_lists_solo_agents_lanes_and_reviewers() {
   _vp_boot
   cp -r "$CEL_ROOT/tests/fixtures/dash-v2" "$T/fix"
@@ -223,8 +223,8 @@ test_dash_v2page_working_now_lists_solo_agents_lanes_and_reviewers() {
 
 # One Usage card (no separate forecast or accounts cards) - a
 # summary strip, a group per provider with a bar per window and a pace tick,
-# who-uses-it tags, merged pay-as-you-go rows, a row that opens to who used it
-# only when the feed could tell, and per-window history when expanded.
+# who-uses-it tags, merged pay-as-you-go rows, and per-window history when
+# expanded.
 test_dash_v2page_usage_card_is_structured_from_the_mockup() {
   _vp_boot
   local rc=0; _vp_run usage || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
@@ -236,8 +236,6 @@ test_dash_v2page_usage_card_is_structured_from_the_mockup() {
   assert_eq "$(_vpj .amber)" "1"
   assert_eq "$(_vpj .tags)" "orch,workers,workers,not orch"
   assert_eq "$(_vpj .money)" "deepseek · alpha, bundle|openrouter · bundle|openrouter · gadget"
-  assert_eq "$(_vpj .offers)" "1"
-  assert_contains "$(_vpj .usedBy)" "bundle · luna ×2"
   assert_eq "$(_vpj .overlaySparks)" "2"
   if [ -n "${CEL_DASH_SHOTS:-}" ]; then cp "$T"/shots/usage-*.png "$CEL_DASH_SHOTS"/ 2>/dev/null || true; fi
   _vp_down
@@ -254,7 +252,6 @@ test_dash_v2page_room_opens_from_the_grid_with_transcript_composer_and_status() 
   assert_contains "$(_vpj .mail)" "widget-abc-12-colour"
   assert_contains "$(_vpj .side)" "working"
   assert_contains "$(_vpj .side)" "gadget-1"
-  assert_contains "$(_vpj .side)" "widget-abc-12-colour"
   assert_contains "$(_vpj .side)" "widget#12"
   assert_contains "$(_vpj .side)" "ABC-13-sprocket"
   assert_eq "$(_vpj .decisions)" "2"

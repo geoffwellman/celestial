@@ -3,17 +3,15 @@ source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/fleet.sh"
 source "$CEL_ROOT/lib/solo.sh"
 
-# A products workspace with `bundle` (widget+gadget) in solo mode; `lone`
-# stays fleet.
+# A products workspace with `bundle` (widget+gadget) and `lone`; neither
+# declares a mode, so both are solo.
 _sv_ws() {
   T="$(mktemp -d)"; cp "$CEL_ROOT/tests/fixtures/ws-products/workspace.yaml" "$T/"
   mkdir -p "$T/repos/widget" "$T/repos/gadget" "$T/repos/lone" "$T/.cel"
-  ( cd "$T" && cmd_mode bundle solo --no-restart ) >/dev/null
 }
 
 # --- fleet -------------------------------------------------------------------
-# A solo unit says so, and counts the worktrees its agent keeps instead of
-# workers it has none of.
+# A solo unit says so, and counts the worktrees its agent keeps.
 test_fleet_unit_carries_the_mode_and_the_solo_worktrees() {
   _sv_ws
   mkdir -p "$T/.cel/solo/bundle/feat-a" "$T/.cel/solo/bundle/feat-b" "$T/.cel/solo/bundle/scratch"
@@ -22,19 +20,20 @@ test_fleet_unit_carries_the_mode_and_the_solo_worktrees() {
   assert_eq "$(printf '%s' "$u" | jq -r .mode)" solo
   assert_eq "$(printf '%s' "$u" | jq -r .solo_worktrees)" 2
   u="$(_fleet_unit "$T" lone "")"
-  assert_eq "$(printf '%s' "$u" | jq -r .mode)" fleet
+  assert_eq "$(printf '%s' "$u" | jq -r .mode)" solo
   assert_eq "$(printf '%s' "$u" | jq -r .solo_worktrees)" 0
   rm -rf "$T"
 }
-test_fleet_text_draws_a_solo_unit_without_worker_counts() {
+# A product still set to the retired fleet mode is drawn with the way out.
+test_fleet_text_draws_a_solo_unit_and_a_legacy_fleet_one() {
   local doc out
   doc='{"box":{"available_mb":1,"total_mb":2},"workspaces":[{"name":"w","root":{"unread":0,"open":0},"units":[
-    {"name":"bundle","mode":"solo","orch":"LIVE","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":5,"repos":["a","b"],"declared":true,"solo_worktrees":3},
-    {"name":"lone","mode":"fleet","orch":"-","workers":1,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"repos":["lone"],"declared":false}]}]}'
+    {"name":"bundle","mode":"solo","orch":"LIVE","orch_rss_mb":5,"repos":["a","b"],"declared":true,"solo_worktrees":3},
+    {"name":"lone","mode":"fleet","orch":"-","orch_rss_mb":0,"repos":["lone"],"declared":false}]}]}'
   out="$(_fleet_render "$doc")"
   assert_contains "$(printf '%s\n' "$out" | grep bundle)" "solo LIVE  worktrees 3"
-  ! printf '%s\n' "$out" | grep bundle | grep -q 'workers' || { echo "solo row counts workers"; return 1; }
-  assert_contains "$(printf '%s\n' "$out" | grep lone)" "workers 1/4"
+  ! printf '%s\n' "$out" | grep -q 'workers' || { echo "a row counts workers"; return 1; }
+  assert_contains "$(printf '%s\n' "$out" | grep lone)" "(retired: cel mode lone solo)"
 }
 # Live lanes show on the solo unit, from the roster the fleet read holds.
 test_fleet_shows_a_solo_products_live_lanes() {
@@ -44,7 +43,7 @@ test_fleet_shows_a_solo_products_live_lanes() {
     '{result:{agents:[{name:"bundle-ui",cwd:$a,agent_status:"idle"},{name:"bundle-api",cwd:$b,agent_status:"working"}]}}')"
   assert_eq "$(_fleet_unit "$T" bundle "$roster" | jq -c .lanes)" '["api","ui"]'
   local doc='{"box":{"available_mb":1,"total_mb":2},"workspaces":[{"name":"w","root":{"unread":0,"open":0},"units":[
-    {"name":"bundle","mode":"solo","orch":"LIVE","workers":0,"cap":4,"stalled":0,"unlanded":0,"rss_mb":0,"orch_rss_mb":5,"repos":["a"],"declared":true,"solo_worktrees":1,"lanes":["api","ui"]}]}]}'
+    {"name":"bundle","mode":"solo","orch":"LIVE","orch_rss_mb":5,"repos":["a"],"declared":true,"solo_worktrees":1,"lanes":["api","ui"]}]}]}'
   assert_contains "$(_fleet_render "$doc" | grep bundle)" "lanes: api,ui"
   rm -rf "$T"
 }

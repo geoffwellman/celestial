@@ -1,8 +1,7 @@
 # shellcheck shell=bash
-# What a merge must prove, shared by the two doors that merge: `cel-fanout
-# land` (a fleet delegation) and `cel solo land` (a solo product's own PR).
-# Two copies of "is CI green enough to stand in for a gate" would drift, and
-# the one that drifted would be the one nobody was watching.
+# What a merge must prove, for the door that merges: `cel solo land` (a
+# product's own PR, merged by its solo agent). One definition of "is CI green
+# enough to stand in for a gate", so it cannot drift between callers.
 [ -n "${_CEL_LAND:-}" ] && return 0
 _CEL_LAND=1
 # shellcheck source=lib/common.sh
@@ -12,7 +11,7 @@ _CEL_LAND=1
 # shellcheck source=lib/forge.sh
 . "${BASH_SOURCE[0]%/*}/forge.sh" # forge_pr_checks: the head's checks and what the base requires
 
-# gh as the workspace's account; GH (cel-fanout's stub seam) when set.
+# gh as the workspace's account; GH (a test stub seam) when set.
 _land_gh() { # <wsdir> <gh args...>
   CEL_WS_GH_BIN="${GH:-gh}" ws_gh "$@"
 }

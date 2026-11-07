@@ -11,7 +11,6 @@ _hws() {
   export CEL_REGISTRY="$T/registry.yaml"
   printf 'workspaces:\n  bundled:\n    path: %s\n' "$T" > "$CEL_REGISTRY"
   _here_cel() { printf 'cel %s\n' "$*" >> "$T/calls"; }
-  _here_fanout() { printf 'cel-fanout %s\n' "$*" >> "$T/calls"; }
 }
 # <role> <me> <verb> [args...] - as the agent of that role would run it
 _as() {
@@ -83,22 +82,18 @@ test_here_review_resolves_the_repo_within_the_product() {
   rm -rf "$T"
 }
 
-# Landing takes the product's checked path: solo -> cel solo land; fleet ->
-# cel-fanout land on the delegation whose branch is the PR's head.
-test_here_land_takes_the_checked_path_for_the_mode() {
+# Landing takes the one checked path, cel solo land, whatever the mode says:
+# fan-out was retired, and no delegation ledger is consulted.
+test_here_land_takes_the_solo_checked_path() {
   _hws
-  local B; B="$(mktemp -d)"
-  printf '#!/usr/bin/env bash\necho ABC-3-fix\n' > "$B/gh"; chmod +x "$B/gh"
-  printf '[{"id":"ABC-2-old","repo":"lone","branch":"ABC-2-old"},{"id":"ABC-3-fix","repo":"lone","branch":"ABC-3-fix"}]\n' > "$T/.cel/delegations.json"
-  ws_repo_github_slug() { printf 'someone/%s' "$2"; }
-  PATH="$B:$PATH" _as orchestrator lone-orch land 3 --gate-from-ci >/dev/null
-  assert_eq "$(sed -n 1p "$T/calls")" "cel-fanout land ABC-3-fix --workspace bundled --gate-from-ci"
-  printf '#!/usr/bin/env bash\necho ABC-9-stray\n' > "$B/gh"
-  assert_contains "$(PATH="$B:$PATH" _as orchestrator lone-orch land 9 2>&1)" "has no delegation on the ledger"
-  ws_build_mode() { printf solo; }
-  _as solo lone-orch land 4 >/dev/null
-  assert_eq "$(sed -n 2p "$T/calls")" "cel solo land lone#4 --workspace bundled"
-  rm -rf "$T" "$B"
+  # A directory with a sentinel row inside: a [ -f ] guard sees no ledger, and
+  # any open or jq read of it fails loudly.
+  mkdir "$T/.cel/delegations.json"
+  printf '[{"id":"SENTINEL","repo":"lone","branch":"x","state":"running"}]\n' > "$T/.cel/delegations.json/sentinel"
+  _as orchestrator lone-orch land 3 >/dev/null
+  assert_eq "$(sed -n 1p "$T/calls")" "cel solo land lone#3 --workspace bundled" || { rm -rf "$T"; return 1; }
+  assert_contains "$(_as orchestrator lone-orch land 3 --gate-from-ci 2>&1)" "takes no extra flags"
+  rm -rf "$T"
 }
 
 # A product agent acts on its own product only: naming a sibling (whose mode

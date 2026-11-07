@@ -1,6 +1,6 @@
 ---
 name: linear
-description: Work with Linear tickets - read, create, comment, move states - in workspaces whose policy block says tickets are linear. Use whenever a task references a ticket ID, when starting/finishing delegated work that must update its ticket, or when filing follow-up issues.
+description: Work with Linear tickets - read, create, comment, move states - in workspaces whose policy block says tickets are linear. Use whenever a task references a ticket ID, when starting/finishing ticketed work that must update its ticket, or when filing follow-up issues.
 ---
 
 # Linear tickets
@@ -44,7 +44,7 @@ gated on a search, every time:
 1. `cel-linear search <key terms> --team <KEY>` (or the MCP search tool).
 2. A live match (not Done/Canceled/Duplicate) exists:
    - **assigned to someone else and In Progress → the work is CLAIMED.**
-     Do not create, do not delegate; comment your context on their ticket and
+     Do not create, do not start it; comment your context on their ticket and
      report to root.
    - unassigned or stale → comment your intent on the existing ticket and use
      it instead of creating a twin.
@@ -55,26 +55,28 @@ gated on a search, every time:
 5. Discover a duplicate late → move YOURS to Duplicate and comment the
    survivor's id; never the other way around.
 
-## Lifecycle convention (the handoff contract)
+## Lifecycle convention
 
-- Orchestrator delegates a ticketed task → worker spec names the issue ID, and
-  the orchestrator moves it to **In Progress**.
+Nothing moves your tickets for you; the agent doing the work moves them.
+
+- You start a ticketed task → branch named for the issue ID, and move it to
+  **In Progress**.
 - PR opened for the work → move to **In Review** and `comment` the PR URL on
   the issue.
-- PR merged → **Done**. Rejected/abandoned → comment why; the orchestrator
-  decides the state.
+- PR merged → **Done**. Rejected/abandoned → comment why and set the state
+  that fits.
 - The team key for each repo is in your policy block; file new issues there.
   One issue per ticket, titles imperative, descriptions carry the acceptance
-  criteria from the spec.
+  criteria.
 
 ## Starting work from the board
 
 A human moves a ticket into the workspace's TRIGGER STATE
 (`tickets.trigger_state` in workspace.yaml, default `Ready`) to say "build
 this". The steward notices tickets in that state with no branch anywhere and
-puts them in root's inbox; root plans them and delegates as normal. Nothing
-auto-delegates straight from a ticket - a title is not a spec, and a worker
-started without acceptance criteria wastes a worktree.
+puts them in root's inbox; root hands them to the product's agent, which plans
+and builds them. Nothing starts straight from a ticket - a title is not a
+spec, and work started without acceptance criteria wastes a worktree.
 
 The trigger state belongs to the OWNER. Never move a ticket out of it
 yourself: an agent reversing it erases the request. If it cannot be started,
@@ -88,10 +90,11 @@ an unassigned ticket appears on nobody's list — including the "assigned to me"
 view the dashboard is built on — so it lands on the board and is still
 invisible.
 
-That default is only correct while the fleet owns the work. **Never leave a
-ticket assigned to the key owner when it tracks someone else's pull request.**
-The API key is the fleet's identity, not a claim on other people's work, and a
-colleague's PR appearing on the owner's list reads as "yours to deliver".
+That default is only correct while the box's agents own the work. **Never
+leave a ticket assigned to the key owner when it tracks someone else's pull
+request.** The API key is the box's identity, not a claim on other people's
+work, and a colleague's PR appearing on the owner's list reads as "yours to
+deliver".
 
 ```
 cel-linear create --team K --title T            # assigned to the key owner
@@ -110,15 +113,15 @@ When you establish a durable fact - a runtime quirk, a provider behaviour, a
 team convention, a decision and the reason for it - record it with
 `cel learn add "<fact>"` (`--pin` for a standing rule, `--perishable` for one
 with a known expiry). It reaches every agent's policy block from then on. Do
-NOT record task status there; that is the ledger and the inbox.
+NOT record task status there; that is the PR and the inbox.
 
 ## Cross-repo tickets
 
 One Linear team can serve several repos, so a ticket may need work in more
 than one. The rules:
 
-- The ROOT orchestrator owns the ticket's state; project orchestrators own
-  only their repo's branch and PR.
+- The product's agent owns the ticket's state across its repos; where the
+  ticket spans products, root decides who owns the state.
 - One branch per repo, all named for the same ticket (`ABC-123-<slug>` in
   each repo) - branch namespaces are per-repo, so identical ids never clash.
 - Comment EVERY PR link on the ticket as it opens. The ticket moves to
