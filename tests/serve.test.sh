@@ -353,3 +353,36 @@ EOS
   [ -f "$CEL_SERVE_STATE/stuck.json" ] || { echo "stuck unit's record dropped"; rm -rf "$t"; return 1; }
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL; rm -rf "$t"
 }
+
+test_serve_hermes_desktop_signature_is_not_a_preview() {
+  local t pid exe out
+  t="$(mktemp -d)"
+  export HOME="$t/owner home" CEL_SERVE_STATE="$t/state" CEL_SERVE_PROC_ROOT="$t/proc"
+  export CEL_SERVE_SYSTEMCTL="$t/systemctl" CEL_CONFIG_FILE="$t/config.yaml"
+  export CEL_SERVE_ADOPT_DATA='[]' CEL_SERVE_PROC_DATA=''
+  mkdir -p "$HOME" "$CEL_SERVE_STATE" "$CEL_SERVE_PROC_ROOT"
+  printf '{}\n' > "$CEL_CONFIG_FILE"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  _serve_hermes_proc() {
+    local pid="$1" exe="$2"; shift 2
+    mkdir -p "$CEL_SERVE_PROC_ROOT/$pid"
+    ln -s "$exe" "$CEL_SERVE_PROC_ROOT/$pid/exe"
+    printf '%s\0' "$@" > "$CEL_SERVE_PROC_ROOT/$pid/cmdline"
+    CEL_SERVE_PROC_DATA+="$pid"$'\t5173\t4096\t60\t/tmp/fixture\tpython3 serve\n'
+  }
+  exe="$HOME/.hermes/tools/python/bin/python3"
+  _serve_hermes_proc 5001 "$exe" "$exe" -I -c 'import hermes' serve --ssh-session-token-file "$HOME/.hermes/desktop-ssh/not-opened"
+  _serve_hermes_proc 5002 "$exe" "$exe" serve
+  _serve_hermes_proc 5003 /usr/bin/python3 python3 serve --ssh-session-token-file /tmp/token
+  _serve_hermes_proc 5004 "$HOME/.hermes-other/python3" python3 serve --ssh-session-token-file /tmp/token
+  _serve_hermes_proc 5005 "$exe" "$exe" -c 'print("--ssh-session-token-file /tmp/token")'
+  _serve_hermes_proc 5006 "$exe" "$exe" serve --ssh-session-token-file=/tmp/token
+  _serve_hermes_proc 5007 "$exe" "$exe" serve --ssh-session-token-file
+  _serve_hermes_proc 5008 "$exe" "$exe" serve -- --ssh-session-token-file /tmp/token
+  _serve_hermes_proc 5009 "$exe" "$exe" serve --ssh-session-token-file /tmp/token
+  rm "$CEL_SERVE_PROC_ROOT/5009/cmdline"
+  out="$(serve_adopt_json)"
+  assert_eq "$(printf '%s' "$out" | jq -c '[.[].pid] | sort')" '[5002,5003,5004,5005,5007,5008,5009]'
+  rm -rf "$t"
+}

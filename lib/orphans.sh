@@ -170,8 +170,8 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
 
   # NO SUBPROCESS PER PID: a fork per process makes the walk scale with the
   # very process count it measures and blows the console's time budget. Every
-  # per-pid fact is read with bash builtins, and the two symlinks bash cannot
-  # read are resolved for the few candidates in ONE batched `find` after the walk.
+  # per-pid fact is read with bash builtins, and candidate cwd/exe/stdin
+  # symlinks are resolved in ONE batched `find` after the walk.
   local -A st_name st_ppid st_uid st_rss
   local -a order=()
   local parents=$'\n' pidmap="" key val rest n p u r
@@ -214,7 +214,7 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     _orphans_protected "$args" && continue
     st_args[$pid]="$args"
     cands+=("$pid")
-    links+=("$proc/$pid/cwd")
+    links+=("$proc/$pid/cwd" "$proc/$pid/exe")
     if [ -L "$proc/$pid/fd/0" ]; then links+=("$proc/$pid/fd/0"); fi
   done
   [ "${#cands[@]}" -gt 0 ] || return 0
@@ -235,6 +235,7 @@ orphans_list() { # -> class<TAB>pid<TAB>rss_kb<TAB>age_s<TAB>cwd<TAB>args
     d="$proc/$pid"
     local name="${st_name[$pid]}" rss="${st_rss[$pid]}" args="${st_args[$pid]}"
     local cwd="${link_of[$d/cwd]:-}"
+    _cel_hermes_desktop_server "${link_of[$d/exe]:-}" "$d/cmdline" && continue
 
     local class=""
     # a. the watcher a console armed and never killed.
