@@ -40,9 +40,9 @@ _vp_down() {
 }
 # run one scenario; a missing browser fails in CI and says so loudly elsewhere
 # (a skip that reads as a pass is how a browser test went unrun before)
-_vp_run() { # <scenario>
+_vp_run() { # <scenario> [fixture-dir]
   OUT="$(CEL_TEST_CHROME="$V2_CHROME" node "$CEL_ROOT/tests/lib/dash-v2-browser.mjs" \
-    "http://127.0.0.1:$DASH_PORT" "$CEL_ROOT/tests/fixtures/dash-v2" "$1" "$T/shots")"
+    "http://127.0.0.1:$DASH_PORT" "${2:-$CEL_ROOT/tests/fixtures/dash-v2}" "$1" "$T/shots")"
   if printf '%s' "$OUT" | jq -e .skip >/dev/null 2>&1; then
     echo "SKIP: $(printf '%s' "$OUT" | jq -r .skip) - set CEL_TEST_CHROME" >&2
     [ -z "${CI:-}" ] && return 2
@@ -202,6 +202,22 @@ test_dash_v2page_working_now_lists_only_working_and_blocked() {
   _vp_boot
   local rc=0; _vp_run working || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
   assert_eq "$(_vpj .working)" "widget-abc-12-colour,gadget-wg-7-beta"
+  _vp_down
+}
+
+# In solo the agents at work are the product's own: its main agent, its lanes
+# and the reviewers they start are watched beside any workers, by name.
+test_dash_v2page_working_now_lists_solo_agents_lanes_and_reviewers() {
+  _vp_boot
+  cp -r "$CEL_ROOT/tests/fixtures/dash-v2" "$T/fix"
+  jq '.orchestrators += [
+      {name: "gadget-orch", ws: "bundle", status: "working", pane: "w3:p1", mode: "solo", product: "gadget"},
+      {name: "gadget-ui", ws: "bundle", status: "blocked", pane: "w3:p2", mode: "solo", product: "gadget", lane: "ui"},
+      {name: "gadget-api", ws: "bundle", status: "idle", pane: "w3:p3", mode: "solo", product: "gadget", lane: "api"}]
+    | .reviewers = [{name: "gadget-pr-7-review", ws: "bundle", status: "working", pane: "w3:p4", repo: "gadget", pr: 7}]' \
+    "$CEL_ROOT/tests/fixtures/dash-v2/fleet.json" > "$T/fix/fleet.json"
+  local rc=0; _vp_run working "$T/fix" || rc=$?; [ "$rc" = 2 ] && { _vp_down; return 0; }; [ "$rc" = 0 ] || return 1
+  assert_eq "$(_vpj .working)" "widget-abc-12-colour,gadget-orch,gadget-pr-7-review,gadget-wg-7-beta,gadget-ui"
   _vp_down
 }
 

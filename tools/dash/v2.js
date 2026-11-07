@@ -121,10 +121,16 @@ function none(t){return '<div class="sub">'+esc(t)+'</div>'}
 // every workspace in the filter; /api/state is one workspace's view, so
 // "All workspaces" would show no orchestrators, workers or PRs.
 function orchs(){return ((F.fleet||{}).orchestrators)||[]}
+// a solo product's agents - its main one and each lane - build and ship
+// themselves: in solo they are the ones at work
+function solos(){return orchs().filter(function(o){return o.mode==='solo'})}
+function soloWhat(o){return (o.product||'')+(o.lane?' · lane '+o.lane:'')+(o.branch?' · '+o.branch+(o.pr?' #'+o.pr:''):'')}
+function revs(){return ((F.fleet||{}).reviewers)||[]}
 // working and blocked first: a pane that finished hours ago is still listed,
 // below the ones that need watching
 var WRANK={working:0,blocked:1,idle:2,done:3};
-function workers(){return (((F.fleet||{}).workers)||[]).slice().sort(function(a,b){return (WRANK[a.status]==null?4:WRANK[a.status])-(WRANK[b.status]==null?4:WRANK[b.status])})}
+function byRank(a,b){return (WRANK[a.status]==null?4:WRANK[a.status])-(WRANK[b.status]==null?4:WRANK[b.status])}
+function workers(){return (((F.fleet||{}).workers)||[]).slice().sort(byRank)}
 function prRows(){var w={};workers().forEach(function(x){if(x.pr)w[x.repo+'#'+x.pr]=x.name});
   return (((F.fleet||{}).prs)||[]).map(function(p){return {ws:p.ws,repo:p.repo,number:p.number,title:p.title,url:p.url,review:p.review,
     checks:p.mergeable==='CONFLICTING'?'failing':'',draft:p.draft,agent:w[p.repo+'#'+p.number]||''}})}
@@ -143,16 +149,22 @@ var BODY={
   return it.map(function(r){return '<div class="row" data-ws="'+esc(r.ws)+'" data-ref="'+esc(r.ref)+'"><span class="dot '+(/conflict/i.test(r.reason)?'bad':'warn')+'"></span><span class="t"><b>'+esc(r.ref)+'</b> '+wsTag(r.ws)+'<br><span class="sub">'+esc(r.reason)+(r.since?' · '+ago(r.since):'')+'</span></span>'+
    (r.fix?'<button class="btn" data-act="'+esc(r.fix.action)+'" data-target="'+esc(r.ref)+'" data-ws="'+esc(r.ws)+'" data-label="'+esc(r.fix.label)+'">'+esc(r.fix.label)+'</button>':'')+'</div>'}).join('')||none('nothing stuck')},
  working:function(){
-  // only panes that need watching; idle and finished ones show in lanes
-  var it=workers().filter(function(w){return inWs(w.ws)&&(w.status==='working'||w.status==='blocked')});
-  return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.repo+'/'+w.branch)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
+  // only panes that need watching - workers, solo agents and lanes,
+  // reviewers; idle and finished ones show in lanes
+  var it=workers().map(function(w){return {name:w.name,ws:w.ws,status:w.status,what:w.repo+'/'+w.branch,model:w.model}})
+   .concat(solos().map(function(o){return {name:o.name,ws:o.ws,status:o.status,what:'solo '+soloWhat(o)}}))
+   .concat(revs().map(function(r){return {name:r.name,ws:r.ws,status:r.status,what:'reviewing '+r.repo+'#'+r.pr}}))
+   .filter(function(w){return inWs(w.ws)&&(w.status==='working'||w.status==='blocked')}).sort(byRank);
+  return it.map(function(w){return '<div class="row" data-ws="'+esc(w.ws)+'"><span class="dot '+(w.status==='working'?'ok':w.status==='blocked'?'warn':'idle')+'"></span><span class="t"><b class="link" data-agent="'+esc(w.name)+'">'+esc(w.name)+'</b> '+wsTag(w.ws)+'<br><span class="sub">'+esc(w.what)+' · '+esc(w.status||'')+'</span></span><span class="sub">'+esc((w.model||'').split('/').pop())+'</span></div>'}).join('')||none('nothing running')},
  activity:function(){var it=feedItems('activity');if(!F.activity)return none('waiting for the activity feed');
   return '<div class="feed">'+it.slice(0,12).map(actRow).join('')+'</div>'||none('quiet')},
  prs:function(){var it=prRows().filter(function(p){return inWs(p.ws)});
   return it.map(function(p){var ok=p.review==='APPROVED';return '<div class="row" data-ws="'+esc(p.ws)+'" data-pr="'+esc(p.repo+'#'+p.number)+'"><span class="dot '+(p.checks==='failing'?'bad':ok?'ok':'warn')+'"></span><span class="t">'+esc(p.title)+'</span>'+wsTag(p.ws)+'<a class="sub mono" href="'+esc(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo+'#'+p.number)+'</a><span class="sub">'+(ok?'approved':p.review==='CHANGES_REQUESTED'?'changes':'in review')+'</span></div>'}).join('')||none('no open PRs')},
  orchs:function(){var it=orchs().filter(function(o){return inWs(o.ws)});
-  return it.map(function(o){return '<div class="row" data-ws="'+esc(o.ws)+'"><span class="dot '+(o.status==='working'?'ok':'idle')+'"></span><span class="t"><b class="link" data-room="'+esc(o.name)+'" title="open its room">'+esc(o.name)+'</b> <span class="sub">'+esc(o.status)+(o.mode==='solo'?' · solo (builds and ships itself)':'')+'</span></span>'+wsTag(o.ws)+
-   '<button class="btn" data-room="'+esc(o.name)+'">open room</button><button class="btn" data-act="orch.restart" data-target="'+esc(o.name)+'" data-ws="'+esc(o.ws)+'" data-label="restart '+esc(o.name)+'">restart</button></div>'}).join('')||none('no orchestrators here')},
+  // a lane has no room (rooms are the `-orch` agents cel drive lists): its
+  // name opens it like any other agent
+  return it.map(function(o){var lane=!!o.lane;return '<div class="row" data-ws="'+esc(o.ws)+'"><span class="dot '+(o.status==='working'?'ok':'idle')+'"></span><span class="t"><b class="link" '+(lane?'data-agent':'data-room')+'="'+esc(o.name)+'" title="'+(lane?'open it':'open its room')+'">'+esc(o.name)+'</b> <span class="sub">'+esc(o.status)+(o.mode==='solo'?(lane?' · solo lane '+esc(o.lane)+' of '+esc(o.product):' · solo (builds and ships itself)')+(o.branch?' · '+esc(o.branch)+(o.pr?' #'+esc(o.pr):''):''):'')+'</span></span>'+wsTag(o.ws)+
+   (lane?'':'<button class="btn" data-room="'+esc(o.name)+'">open room</button>')+'<button class="btn" data-act="orch.restart" data-target="'+esc(o.name)+'" data-ws="'+esc(o.ws)+'" data-label="restart '+esc(o.name)+'">restart</button></div>'}).join('')||none('no orchestrators here')},
  merges:function(){var days=((F.merges||{}).days)||[];if(!F.merges)return none('waiting for the merges feed');var rw=repoWs();
   var vals=days.map(function(d){var n=0;Object.keys(d.counts||{}).forEach(function(r){if(WSF==='all'||rw[r]===WSF)n+=d.counts[r]});return [d.day,n]});
   var mx=Math.max.apply(null,[1].concat(vals.map(function(v){return v[1]})));var tot=vals.reduce(function(a,v){return a+v[1]},0);
@@ -275,11 +287,13 @@ function lanesHtml(d,all){
       var on=segs.filter(function(s){return new Date(s.from).getTime()<b&&new Date(s.to).getTime()>a});
       var n=on.length,cls=on.some(function(s){return s.state==='waiting'})?'warn':on.some(function(s){return s.state==='running'})?'ok':n?'idle':'';
       cells+='<i class="'+cls+'" style="opacity:'+(n?0.35+Math.min(n,6)/6*0.65:1)+'" title="'+n+' at '+hhmm(new Date(a).toISOString())+'">'+(n>1?n:'')+'</i>'}
-    return '<div class="wsrow" data-lane="'+esc(w.ws)+'" data-ws="'+esc(w.ws)+'"><span class="ln2">'+(w.lanes.length?(open?'▾ ':'▸ '):'  ')+'<b>'+esc(w.ws)+'</b><br><span class="sub">'+w.lanes.length+' lanes'+(waiting?' · <span class="w8">'+waiting+' waiting</span>':'')+'</span></span><div class="strip" style="grid-template-columns:repeat('+ns+',1fr)">'+(w.lanes.length?cells:'<em>no workers</em>')+nowl+'</div></div>'+
-     (open?w.lanes.map(function(l){return '<div class="sublane" data-ws="'+esc(w.ws)+'"><span class="ln2 sub">'+esc(l.ref+(l.pr?' #'+l.pr:' (no PR yet)'))+'</span><div class="lt2">'+l.segments.map(function(s){var a=new Date(s.from).getTime(),b=new Date(s.to).getTime();
+    return '<div class="wsrow" data-lane="'+esc(w.ws)+'" data-ws="'+esc(w.ws)+'"><span class="ln2">'+(w.lanes.length?(open?'▾ ':'▸ '):'  ')+'<b>'+esc(w.ws)+'</b><br><span class="sub">'+w.lanes.length+' at work'+(waiting?' · <span class="w8">'+waiting+' waiting</span>':'')+'</span></span><div class="strip" style="grid-template-columns:repeat('+ns+',1fr)">'+(w.lanes.length?cells:'<em>nothing at work</em>')+nowl+'</div></div>'+
+     // a solo agent's row names it, its lane and - where known - its branch
+     // and PR; a worker's names its branch and PR
+     (open?w.lanes.map(function(l){return '<div class="sublane" data-ws="'+esc(w.ws)+'"><span class="ln2 sub">'+esc(l.agent?l.agent+' · '+(l.lane?'lane '+l.lane:'solo')+(l.branch?' · '+l.branch+(l.pr?' #'+l.pr:''):''):l.ref+(l.pr?' #'+l.pr:' (no PR yet)'))+'</span><div class="lt2">'+l.segments.map(function(s){var a=new Date(s.from).getTime(),b=new Date(s.to).getTime();
        return '<b class="'+esc(s.state)+'" style="left:'+pct(a)+'%;width:'+Math.max(0.5,pct(b)-pct(a))+'%" title="'+esc(l.label+' - '+s.state)+'">'+esc(l.label)+'</b>'}).join('')+nowl+'</div></div>'}).join(''):'')});
   return '<div class="lanes2"><div class="lh2"><span></span><div class="ticks">'+ticks+nowl+'</div></div>'+rows.join('')+'</div>'+
-   (rows.length?'<div class="sub">The strip counts workers per half hour (amber = waiting on a person). Click a workspace for one lane per PR.</div>':none('no workspaces in range'));
+   (rows.length?'<div class="sub">The strip counts workers and solo agents at work per half hour (amber = waiting on a person). Click a workspace for a row per PR or solo agent.</div>':none('no workspaces in range'));
 }
 
 function cardEl(w){
@@ -436,12 +450,15 @@ function findAgent(name){
   var w=workers().filter(function(x){return x.name===name})[0];
   if(w)return {name:name,ws:w.ws,status:w.status,pane:w.pane,pr:prOf(w),model:w.model,now:w.repo+'/'+w.branch};
   var o=orchs().filter(function(x){return x.name===name})[0];
-  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:null,model:'',now:o.status};
+  if(o)return {name:name,ws:o.ws,status:o.status,pane:o.pane,pr:prOf(o),model:'',now:o.mode==='solo'?o.status+' · solo '+soloWhat(o):o.status};
+  var r=revs().filter(function(x){return x.name===name})[0];
+  if(r)return {name:name,ws:r.ws,status:r.status,pane:r.pane,pr:prOf(r),model:'',now:'reviewing '+r.repo+'#'+r.pr};
   return {name:name,ws:'',status:'unknown',pane:null,pr:null,model:'',now:''};
 }
 function openDrawer(name){
-  // an orchestrator is opened as its room, wherever it is named
-  if(orchs().some(function(o){return o.name===name})){openRoom(name);return}
+  // an orchestrator is opened as its room, wherever it is named; a solo lane
+  // has no room, so it opens here like any other agent
+  if(orchs().some(function(o){return o.name===name&&!o.lane})){openRoom(name);return}
   DRAWER=name;$('drawer').classList.add('open');renderDrawer();remember('agent',name)}
 function renderDrawer(){
   if(!DRAWER)return;var a=findAgent(DRAWER);
@@ -538,6 +555,7 @@ function palItems(){
   prRows().forEach(function(p){it.push({k:'PR',ws:p.ws,text:p.repo+'#'+p.number+' '+p.title,key:p.repo+'#'+p.number,url:p.url})});
   workers().forEach(function(w){it.push({k:'agent',ws:w.ws,text:w.name,key:w.name})});
   orchs().forEach(function(o){it.push({k:'agent',ws:o.ws,text:o.name,key:o.name})});
+  revs().forEach(function(r){it.push({k:'agent',ws:r.ws,text:r.name,key:r.name})});
   ((F.stuck||{}).items||[]).forEach(function(s){it.push({k:'stuck',ws:s.ws,text:s.ref+' - '+s.reason,key:s.ref})});
   it.push({k:'action',ws:'',text:'Give work…',key:'compose'});
   it.push({k:'action',ws:'',text:'Go away (away mode on)',key:'afk.on',act:'afk.on'});

@@ -1,0 +1,5 @@
+### Fixed
+- The dashboard now recognises solo lanes (agents in `.cel/solo/<product>/lane-<name>` named `<product>-<name>`), a product's main solo agent and PR reviewers (named `<repo>-pr-<n>-review` and standing in their review checkout) by the directory and name `cel` gave them, not by an `-orch` suffix or a delegation row. Lanes show in the Orchestrators card, the composer, search and Working now; solo agents and reviewers that are working or blocked show in Working now.
+- The dashboard's restart button restarts exactly the agent it is on: a product's main agent with `cel run orchestrator --workspace <ws> --product <p> --restart`, a repo's with `--repo <repo>`, the workspace's own with `--workspace <ws>` alone, and a lane with `cel run solo --workspace <ws> --product <p> --lane <lane> --restart`. Any other name is refused.
+- Messages from the dashboard can go to a solo lane (running or not) and to a live reviewer.
+- "Today by workspace" no longer says "no workers" while solo agents are busy: each live solo agent and lane is a row of its own, drawn from its pane's samples, with its branch and PR where its pane stands in a checkout.

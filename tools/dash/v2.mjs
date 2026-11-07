@@ -1,12 +1,13 @@
 // THE DATA BEHIND DASHBOARD V2. Every card on the v2 page reads one
 // feed here; none of them is a new store. Activity is what the inbox, the
 // delegation ledger and gh already say; lanes are the ledger's own history
-// with the steward's pane-status samples laid over it; load is the same ring.
+// with the steward's pane-status samples laid over it, and each live solo
+// agent's own samples; load is the same ring.
 // The one write path is /api/v2/act, and it maps a NAME to one existing
 // command - the page never sends a command line, and nothing here types into
 // a pane: a dashboard that could would be a remote shell behind a cookie.
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { homedir, cpus, loadavg, totalmem, freemem, networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
 import { execFile } from 'node:child_process';
@@ -45,7 +46,12 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   // ---- where to look ------------------------------------------------------
   const BOOT = new Date().toISOString();
   const slugExpr = '[(.repos // [])[] | {name: .name, slug: ((.url // "") | sub("^git@[^:]+:"; "") | sub("^https?://[^/]+/"; "") | sub("\\\\.git$"; ""))}]';
-  const soloExpr = '[((.products // [])[] | select(.mode == "solo") | .name), ((.repos // [])[] | select(.mode == "solo") | .name)]';
+  // every product the workspace builds (lib/workspace.sh ws_product_names):
+  // the declared ones in file order, then each repo no product claims - each
+  // with its build mode (ws_build_mode: absent is fleet)
+  const productExpr = '(.products // []) as $ps | ([$ps[].repos // []] | flatten) as $used'
+    + ' | [($ps[] | {name: .name, mode: (.mode // "fleet")}),'
+    + ' ((.repos // [])[] | select(.name as $n | $used | any(. == $n) | not) | {name: .name, mode: (.mode // "fleet")})]';
   // Agent and mailbox names are lib/common.sh's cel_alias_norm, asked of that
   // one rule and never re-derived here: raw name -> canonical alias, and no
   // entry when the shell cannot answer, so nothing is matched or mailed by
@@ -76,22 +82,28 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       else {
         try { repos = JSON.parse(await run('yq', ['-c', slugExpr, join(path, 'workspace.yaml')], 8000) || '[]'); } catch { repos = []; }
       }
-      // which products build solo: their `-orch` agent is then the one agent
-      // that builds and ships, and the fleet row says so
-      let solo = [];
-      try { solo = JSON.parse(await run('yq', ['-c', soloExpr, join(w.name === cfg.name ? cfg.wsdir : path, 'workspace.yaml')], 8000) || '[]'); } catch { solo = []; }
-      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [], solo: Array.isArray(solo) ? solo : [] });
+      // the products it builds and how: a solo product's `-orch` agent is the
+      // one that builds and ships, and its lanes are further solo agents
+      let products = [];
+      try { products = JSON.parse(await run('yq', ['-c', productExpr, join(w.name === cfg.name ? cfg.wsdir : path, 'workspace.yaml')], 8000) || '[]'); } catch { products = []; }
+      out.push({ name: w.name, path: w.name === cfg.name ? cfg.wsdir : path, repos: Array.isArray(repos) ? repos : [],
+        products: Array.isArray(products) ? products.filter((p) => p && p.name) : [] });
     }
-    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], solo: [] });
-    // each workspace's orchestrators by the names their agents and mailboxes
-    // carry: its own, one per declared repo, one per solo product
+    if (!out.some((w) => w.name === cfg.name)) out.unshift({ name: cfg.name, path: cfg.wsdir, repos: cfg.repos || [], products: [] });
+    // each workspace's main agents by the names their panes and mailboxes
+    // carry, each with how `cel run orchestrator` names it for a restart: one
+    // per product (--product), one per declared repo (--repo) and the
+    // workspace's own (no selector); a product's name wins a clash
     const orch = (n) => `${n}-orch`;
-    const names = (w) => ({ own: [w.name], repos: w.repos.map((r) => r && r.name).filter(Boolean), solo: w.solo.filter(Boolean) });
-    const canon = await canonical(out.flatMap((w) => Object.values(names(w)).flat().map(orch)));
-    const known = (ns) => ns.map((n) => canon.get(orch(n))).filter(Boolean);
+    const canon = await canonical(out.flatMap((w) => [w.name, ...w.repos.map((r) => r && r.name), ...w.products.map((p) => p.name)]
+      .filter(Boolean).map(orch)));
     for (const w of out) {
-      const n = names(w);
-      w.orchs = { own: known(n.own), repos: known(n.repos), solo: known(n.solo) };
+      const mains = new Map();
+      const put = (n, v) => { const a = canon.get(orch(n)); if (a) mains.set(a, v); };
+      put(w.name, { product: null, mode: 'fleet' });
+      for (const r of w.repos) if (r && r.name) put(r.name, { product: null, repo: r.name, mode: 'fleet' });
+      for (const p of w.products) put(p.name, { product: p.name, mode: p.mode === 'solo' ? 'solo' : 'fleet' });
+      w.mains = mains;
     }
     return out;
   });
@@ -427,6 +439,116 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     };
   };
 
+  // ---- who each live agent is ---------------------------------------------
+  // By the identity cel gave it - a directory and a cel_alias_norm name -
+  // never by a name's shape alone:
+  //  - a fleet worker stands in its ledger row's worktree (or herdr's);
+  //  - a solo LANE (cel run solo --lane) stands in
+  //    <ws>/.cel/solo/<product>/lane-<lane> and is named <product>-<lane>;
+  //  - a reviewer (cel run reviewer) stands in its review checkout of
+  //    <repo>#<n> and is named <repo>-pr-<n>-review, for a repo the
+  //    workspace declares;
+  //  - a main agent carries one of the workspace's `-orch` names (w.mains)
+  //    and stands in that workspace.
+  const WORKTREES = () => join(homedir(), '.herdr', 'worktrees');
+  const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
+  const LANE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+  const REVIEWER = /-pr-(\d+)-review$/;
+  // where `cel run reviewer` checks a PR out and stands its reviewer
+  // (lib/run.sh _run_review_dir, reviewer_checkout_path): <dir>/<repo>-pr-<n>,
+  // or a later round's <dir>/<repo>-pr-<n>.round.<k>
+  const REVIEWS = () => process.env.CEL_REVIEW_DIR
+    || join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'cel', 'reviews');
+  const inReview = (cwd, repo, pr) => {
+    const c = cwd.replace(/ \(deleted\)$/, '');
+    const at = join(REVIEWS(), `${repo}-pr-${pr}`);
+    return under(c, at) || c.startsWith(`${at}.round.`);
+  };
+  const laneBase = (w, product) => join(w.path, '.cel', 'solo', product, 'lane-');
+  const soloProducts = (w) => w.products.filter((p) => p.mode === 'solo').map((p) => p.name);
+  const identities = async (wss) => {
+    const ag = await agents();
+    const workers = []; const mains = []; const lanes = []; const reviewers = []; const rest = []; const keys = [];
+    for (const a of ag) {
+      const cwd = a.cwd || '';
+      const me = { name: String(a.name || ''), status: a.agent_status || 'unknown', pane: a.pane_id || null, cwd };
+      let ws = null; let row = null;
+      for (const w of wss) {
+        row = ledgerOf(w).find((r) => r.worktree && r.worktree === cwd) || null;
+        if (row || w.repos.some((r) => under(cwd, join(WORKTREES(), r.name)))) { ws = w; break; }
+      }
+      if (ws) { workers.push({ ...me, name: me.name || (row && row.alias) || a.pane_id, ws: ws.name, row }); continue; }
+      if (!me.name) continue;
+      // a pane whose directory was deleted is no live lane (lib/mode.sh)
+      const lane = [];
+      if (!cwd.endsWith(' (deleted)')) {
+        for (const w of wss) for (const product of soloProducts(w)) {
+          const b = laneBase(w, product);
+          const l = cwd.startsWith(b) ? cwd.slice(b.length).split('/')[0] : '';
+          if (LANE.test(l) && l !== 'orch') lane.push({ w, product, lane: l, key: `${product}/${l}` });
+        }
+      }
+      const review = [];
+      const m = REVIEWER.exec(me.name);
+      // a reviewer is its canonical name AND its own review checkout
+      if (m) for (const w of wss) for (const r of w.repos) {
+        if (r && r.name && inReview(cwd, r.name, m[1])) review.push({ w, repo: r.name, pr: Number(m[1]), key: `${r.name}/pr-${m[1]}-review` });
+      }
+      for (const c of [...lane, ...review]) keys.push(c.key);
+      rest.push({ me, lane, review });
+    }
+    const canon = keys.length ? await canonical(keys) : new Map();
+    for (const { me, lane, review } of rest) {
+      const l = lane.find((c) => canon.get(c.key) === me.name);
+      if (l) { lanes.push({ ...me, ws: l.w.name, mode: 'solo', product: l.product, lane: l.lane }); continue; }
+      const rv = review.find((c) => canon.get(c.key) === me.name);
+      if (rv) { reviewers.push({ ...me, ws: rv.w.name, repo: rv.repo, pr: rv.pr }); continue; }
+      const home = wss.find((w) => under(me.cwd, w.path) && w.mains.has(me.name));
+      if (home) mains.push({ ...me, ws: home.name, ...home.mains.get(me.name) });
+    }
+    return { workers, mains, lanes, reviewers };
+  };
+  // A workspace's solo lanes as cel made them - every lane-<name> directory
+  // of a solo product, live or not - each by its canonical name. This, not a
+  // live pane, is what a lane's mailbox and restart bind to.
+  const laneDirs = async (w) => {
+    const found = [];
+    for (const product of soloProducts(w)) {
+      let names = [];
+      try { names = readdirSync(join(w.path, '.cel', 'solo', product)); } catch { names = []; }
+      for (const d of names) {
+        const l = d.startsWith('lane-') ? d.slice(5) : '';
+        if (LANE.test(l) && l !== 'orch') found.push({ product, lane: l, key: `${product}/${l}` });
+      }
+    }
+    const canon = found.length ? await canonical(found.map((x) => x.key)) : new Map();
+    return found.filter((x) => canon.get(x.key)).map((x) => ({ ...x, name: canon.get(x.key) }));
+  };
+  // The branch a checkout stands on, read from its own .git (a worktree's is
+  // a file naming its gitdir); '' for a directory that is no checkout, or a
+  // detached head. A solo agent has no ledger row: this is the one place its
+  // current branch is written down.
+  const branchAt = (dir) => {
+    let head;
+    try {
+      const g = /^gitdir:\s*(.+)$/m.exec(readFileSync(join(dir, '.git'), 'utf8'));
+      if (!g) return '';
+      head = join(resolve(dir, g[1].trim()), 'HEAD');
+    } catch (e) {
+      if (!e || e.code !== 'EISDIR') return '';
+      head = join(dir, '.git', 'HEAD');
+    }
+    try { const m = /^ref: refs\/heads\/(.+)$/m.exec(readFileSync(head, 'utf8')); return m ? m[1].trim() : ''; } catch { return ''; }
+  };
+  // a solo agent's branch, where its pane stands in a checkout, and the PR
+  // from that branch in its workspace
+  const soloWork = (x, prs) => {
+    const branch = branchAt(x.cwd);
+    if (!branch) return {};
+    const pr = prs.find((p) => p.ws === x.ws && String(p.headRefName).toLowerCase() === branch.toLowerCase());
+    return { branch, ...(pr ? { repo: pr.repo, pr: pr.number } : {}) };
+  };
+
   // ---- lanes --------------------------------------------------------------
   // The ledger contributes only its running spans, so a stale row never
   // draws one segment across the whole window; an open-ended "running"
@@ -455,6 +577,33 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     paneMemo = { rows, idx };
     return idx;
   };
+  // spans clipped to the window, touching same-state spans merged
+  const clipSpans = (spans, start, clipTo) => {
+    const clipped = [];
+    for (const s2 of spans) {
+      const from = Math.max(s2.from, start); const to = Math.min(s2.to, clipTo);
+      if (to <= from) continue;
+      const prev = clipped[clipped.length - 1];
+      if (prev && prev.state === s2.state && prev.to >= from) prev.to = Math.max(prev.to, to);
+      else clipped.push({ from, to, state: s2.state });
+    }
+    return clipped.map((x) => ({ from: iso(x.from), to: iso(x.to), state: x.state }));
+  };
+  // A solo agent has no ledger: its own pane's samples are its spans. A
+  // sample stands for at most SAMPLE_SPAN - the strip's half-hour slot - so a
+  // steward that stopped sampling is not drawn as work, and the live pane has
+  // the last word from its last sample on (or, with none that recent, for the
+  // minute it was just seen live).
+  const SAMPLE_SPAN = 1800e3;
+  const soloSpans = (x, byCwd, now) => {
+    const mine = (byCwd.get(x.cwd) || []).filter((m) => m.t <= now);
+    const spans = mine.map((m, i) => ({ from: m.t, to: Math.min(i + 1 < mine.length ? mine[i + 1].t : now, m.t + SAMPLE_SPAN), state: m.state }));
+    const live = PANE_STATE[x.status] || 'idle';
+    const last = spans[spans.length - 1];
+    if (last && now - last.from <= SAMPLE_SPAN) { last.to = now; last.state = live; }
+    else spans.push({ from: now - 60e3, to: now, state: live });
+    return spans;
+  };
   const lanes = async (url, wss) => {
     const range = url.searchParams.get('range') || 'today';
     const now = Date.now();
@@ -463,6 +612,7 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     else { start = now - (range === '3d' ? 3 : 7) * DAY; end = now; }
     const byCwd = paneIndex();
     const ag = await agents();
+    const id = await identities(wss);
     let prs = [];
     try { prs = [...await open(wss), ...await merged(wss)]; } catch { prs = []; }
     const clipTo = Math.min(end, now);
@@ -490,18 +640,19 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
             // the live pane has the last word on the open span
             state: (sg.open && i === inside.length - 1) ? sg.state : m.state }));
         }
-        const clipped = [];
-        for (const s2 of final) {
-          const from = Math.max(s2.from, start); const to = Math.min(s2.to, clipTo);
-          if (to <= from) continue;
-          const prev = clipped[clipped.length - 1];
-          if (prev && prev.state === s2.state && prev.to >= from) prev.to = Math.max(prev.to, to);
-          else clipped.push({ from, to, state: s2.state });
-        }
-        if (!clipped.length) continue;
+        const segments = clipSpans(final, start, clipTo);
+        if (!segments.length) continue;
         const pr = prs.find((p) => p.repo === r.repo && String(p.headRefName).toLowerCase() === String(r.branch).toLowerCase());
-        lanesOut.push({ ref: `${r.repo}/${r.branch}`, ...(pr ? { pr: pr.number } : {}), label: r.id || r.branch,
-          segments: clipped.map((x) => ({ from: iso(x.from), to: iso(x.to), state: x.state })) });
+        lanesOut.push({ ref: `${r.repo}/${r.branch}`, ...(pr ? { pr: pr.number } : {}), label: r.id || r.branch, segments });
+      }
+      // a solo product's agents - its main one and each live lane - are at
+      // work with no ledger row at all: each is a row of its own
+      for (const x of [...id.mains.filter((m) => m.mode === 'solo'), ...id.lanes]) {
+        if (x.ws !== ws.name) continue;
+        const segments = clipSpans(soloSpans(x, byCwd, now), start, clipTo);
+        if (!segments.length) continue;
+        lanesOut.push({ ref: x.name, kind: x.lane ? 'lane' : 'solo', agent: x.name, product: x.product,
+          ...(x.lane ? { lane: x.lane } : {}), ...soloWork(x, prs), label: x.name, segments });
       }
       out.push({ ws: ws.name, lanes: lanesOut });
     }
@@ -509,35 +660,24 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
   };
 
   // ---- fleet: who is running and what is open, across workspaces ----------
-  const WORKTREES = () => join(homedir(), '.herdr', 'worktrees');
-  const under = (cwd, dir) => !!cwd && !!dir && (cwd === dir || cwd.startsWith(dir + '/'));
   const fleet = async (wss) => {
-    const ag = await agents();
+    const id = await identities(wss);
     const pulls = await open(wss);
-    const orchestrators = []; const workers = [];
-    for (const a of ag) {
-      const cwd = a.cwd || '';
-      let ws = null; let row = null;
-      for (const w of wss) {
-        row = ledgerOf(w).find((r) => r.worktree && r.worktree === cwd) || null;
-        if (row || w.repos.some((r) => under(cwd, join(WORKTREES(), r.name)))) { ws = w; break; }
-      }
-      if (ws) {
-        const pr = row ? pulls.find((p) => p.repo === row.repo && String(p.headRefName).toLowerCase() === String(row.branch).toLowerCase()) : null;
-        workers.push({ name: a.name || (row && row.alias) || a.pane_id, ws: ws.name, status: a.agent_status || 'unknown', pane: a.pane_id || null,
-          repo: row ? row.repo : cwd.split('/').slice(-2)[0], branch: row ? row.branch : cwd.split('/').pop(),
-          id: row ? row.id || row.branch : '', model: row ? row.model || '' : '', ...(pr ? { pr: pr.number } : {}) });
-        continue;
-      }
-      const home = wss.find((w) => under(cwd, w.path));
-      if (home && /-orch$/.test(String(a.name || ''))) {
-        const solo = home.orchs.solo.includes(a.name);
-        orchestrators.push({ name: a.name, ws: home.name, status: a.agent_status || 'unknown', pane: a.pane_id || null, mode: solo ? 'solo' : 'fleet' });
-      }
-    }
+    const workers = id.workers.map(({ row, cwd, ...x }) => {
+      const pr = row ? pulls.find((p) => p.repo === row.repo && String(p.headRefName).toLowerCase() === String(row.branch).toLowerCase()) : null;
+      return { ...x, repo: row ? row.repo : cwd.split('/').slice(-2)[0], branch: row ? row.branch : cwd.split('/').pop(),
+        id: row ? row.id || row.branch : '', model: row ? row.model || '' : '', ...(pr ? { pr: pr.number } : {}) };
+    });
+    // main agents and solo lanes: each restartable and mailable by its name;
+    // a solo one says which branch and PR it is on where its pane shows it
+    const orchestrators = [...id.mains, ...id.lanes].map(({ cwd, ...x }) => ({ ...x, ...(x.mode === 'solo' ? soloWork({ ...x, cwd }, pulls) : {}) }));
+    const reviewers = id.reviewers.map(({ cwd, ...x }) => {
+      const pr = pulls.find((p) => p.ws === x.ws && p.repo === x.repo && p.number === x.pr);
+      return { ...x, ...(pr ? { branch: pr.headRefName, title: pr.title } : {}) };
+    });
     const prs = pulls.map((p) => ({ ws: p.ws, repo: p.repo, number: p.number, title: p.title, url: p.url, branch: p.headRefName,
       review: p.reviewDecision || 'REVIEW_REQUIRED', mergeable: p.mergeable || '', draft: !!p.isDraft }));
-    return { orchestrators, workers, prs };
+    return { orchestrators, workers, reviewers, prs };
   };
 
   // ---- services: the box's own and each workspace's ---------------------
@@ -939,16 +1079,16 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
     const cel = (argv) => run(CEL(), argv, 30000);
     // A mailbox is only one somebody reads. `cel inbox send`
     // will write to any name, so the dashboard checks first: a ledger alias,
-    // the workspace's own orchestrator, a repo orchestrator it declares or a
-    // solo product's agent - each by its canonical alias, the name the page
-    // shows - or root. A typo here would otherwise be a message nobody sees.
+    // one of the workspace's main agents, a solo lane it has made, a live
+    // reviewer of one of its repos - each by its canonical alias, the name the
+    // page shows - or root. A typo here would otherwise be a message nobody sees.
     const ws = all.find((w) => w.name === wsName);
     const repos = new Set(ws.repos.map((r) => r.name));
-    const known = new Set(['root', ...ws.orchs.own, ...ws.orchs.repos, ...ws.orchs.solo,
-      ...ledgerOf(ws).map((r) => r.alias).filter(Boolean)]);
     if (action === 'message') {
       const text = String(args.text || '').trim();
       if (!NAME.test(String(target || '')) || !text || text.length > 4000) return [400, 'message needs a target and text'];
+      const known = new Set(['root', ...ws.mains.keys(), ...ledgerOf(ws).map((r) => r.alias).filter(Boolean),
+        ...(await laneDirs(ws)).map((l) => l.name), ...(await identities([ws])).reviewers.map((r) => r.name)]);
       if (!known.has(String(target))) return [400, 'unknown recipient'];
       // urgent goes as an escalation so it notifies; an ask is labelled so
       // the recipient knows a reply is wanted
@@ -958,11 +1098,25 @@ export const createV2 = ({ cfg, run, cached, cache, CEL_ROOT, INBOX_DIR, REGISTR
       logAct(wsName, `dashboard: message to ${target}`);
       return [200, 'ok'];
     }
+    // Restart exactly the agent the page named, with the selector
+    // `cel run` knows it by: a product's main agent by --product, a declared
+    // repo's by --repo, the workspace's own by the workspace alone, and a solo
+    // lane by its product and --lane. Any other name is refused.
     if (action === 'orch.restart') {
-      const argv = ['run', 'orchestrator', '--workspace', wsName, '--restart'];
-      if (args.repo) { if (!NAME.test(String(args.repo))) return [400, 'bad repo']; argv.push('--repo', String(args.repo)); }
+      const name = String(target || '');
+      if (!NAME.test(name)) return [400, 'restart needs a target'];
+      const main = ws.mains.get(name);
+      const lane = main ? null : (await laneDirs(ws)).find((l) => l.name === name);
+      let argv;
+      if (main) {
+        argv = ['run', 'orchestrator', '--workspace', wsName];
+        if (main.product) argv.push('--product', main.product);
+        else if (main.repo) argv.push('--repo', main.repo);
+        argv.push('--restart');
+      } else if (lane) argv = ['run', 'solo', '--workspace', wsName, '--product', lane.product, '--lane', lane.lane, '--restart'];
+      else return [400, 'not a main agent or solo lane of this workspace'];
       if (await run(CEL(), argv, 120000) === null) return [502, 'restart failed'];
-      logAct(wsName, `dashboard: restarted the orchestrator${args.repo ? ` for ${args.repo}` : ''}`);
+      logAct(wsName, `dashboard: restarted ${name}`);
       return [200, 'ok'];
     }
     if (action === 'afk.on' || action === 'afk.off') {
