@@ -162,32 +162,61 @@ ws_repo_pr() { # <wsdir> <repo> -> required|none
   esac
 }
 
+# THE ONE REMOTE-URL GRAMMAR. Every place that reads a repo's identity out of
+# a remote url parses it here, so GitHub's slug and a Forgejo repo's
+# descriptor can never disagree about what a url says. Three spellings, as
+# git writes them:
+#
+#   <user>@<host>:<owner>/<name>[.git]                scp
+#   ssh://<user>@<host>[:<port>]/<owner>/<name>[.git] ssh
+#   https://<host>[:<port>]/<owner>/<name>[.git]      https
+#
+# Nothing is normalised: no case folding, no extra path segments, no userinfo
+# on https, no plain http. The path must be exactly owner/name, so a lookalike
+# such as https://gitlab.com/github.com/o/r has host gitlab.com, not a slug.
+# Sets FORGE_URL_SCHEME, FORGE_URL_USER, FORGE_URL_HOST, FORGE_URL_PORT and
+# FORGE_URL_PATH (owner/name, one trailing .git removed); a caller that wants
+# them kept to itself declares them `local` first.
+forge_url_parse() { # <url>
+  FORGE_URL_SCHEME="" FORGE_URL_USER="" FORGE_URL_HOST="" FORGE_URL_PORT="" FORGE_URL_PATH=""
+  local u="$1" path
+  if [[ "$u" =~ ^https://([A-Za-z0-9.-]+)(:([0-9]+))?/(.*)$ ]]; then
+    FORGE_URL_SCHEME=https FORGE_URL_HOST="${BASH_REMATCH[1]}" FORGE_URL_PORT="${BASH_REMATCH[3]}" path="${BASH_REMATCH[4]}"
+  elif [[ "$u" =~ ^ssh://([A-Za-z0-9._-]+)@([A-Za-z0-9._-]+)(:([0-9]+))?/(.*)$ ]]; then
+    FORGE_URL_SCHEME=ssh FORGE_URL_USER="${BASH_REMATCH[1]}" FORGE_URL_HOST="${BASH_REMATCH[2]}"
+    FORGE_URL_PORT="${BASH_REMATCH[4]}" path="${BASH_REMATCH[5]}"
+  elif [[ "$u" != *://* && "$u" =~ ^([A-Za-z0-9._-]+)@([A-Za-z0-9._-]+):(.*)$ ]]; then
+    FORGE_URL_SCHEME=scp FORGE_URL_USER="${BASH_REMATCH[1]}" FORGE_URL_HOST="${BASH_REMATCH[2]}" path="${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+  path="${path%.git}"
+  [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  FORGE_URL_PATH="$path"
+}
+
 # `owner/name` from a GitHub remote url - SSH (git@github.com:o/r.git,
 # ssh://git@github.com/o/r) or HTTPS. Fails on anything that is not GitHub,
 # so a caller that needs `gh --repo` refuses rather than guesses.
 github_slug_from_url() { # <url> [ssh-alias-host] -> owner/name
-  # The host is matched EXACTLY, anchored at the start: a substring match
-  # turned git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
+  # The host is matched EXACTLY: a substring match turned
+  # git@evilgithub.com:o/r and https://evil.github.com/o/r into slugs.
   # A workspace's declared `github.ssh_host` is github.com under an
   # ~/.ssh/config alias, so `git@<alias>:o/r` is accepted - that exact host
   # only, passed by the caller that read the declaration. Never a pattern:
-  # `github-*` would let any lookalike alias name a GitHub slug.
-  local s alias="${2:-}"
-  if [ -n "$alias" ] && [ "${1#git@"$alias":}" != "$1" ]; then
-    s="${1#git@"$alias":}"
-    s="${s%.git}"
-    [[ "$s" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
-    printf '%s' "$s"; return 0
-  fi
-  case "$1" in
-    git@github.com:*)         s="${1#git@github.com:}" ;;
-    ssh://git@github.com/*)   s="${1#ssh://git@github.com/}" ;;
-    https://github.com/*)     s="${1#https://github.com/}" ;;
-    *) return 1 ;;
+  # `github-*` would let any lookalike alias name a GitHub slug. No port and
+  # no user other than git: github.com is reached exactly one way.
+  local alias="${2:-}"
+  local FORGE_URL_SCHEME FORGE_URL_USER FORGE_URL_HOST FORGE_URL_PORT FORGE_URL_PATH
+  forge_url_parse "$1" || return 1
+  case "$FORGE_URL_SCHEME" in
+    scp)   [ "$FORGE_URL_USER" = git ] || return 1
+           [ "$FORGE_URL_HOST" = github.com ] || { [ -n "$alias" ] && [ "$FORGE_URL_HOST" = "$alias" ]; } || return 1 ;;
+    ssh)   [ "$FORGE_URL_USER" = git ] && [ "$FORGE_URL_HOST" = github.com ] && [ -z "$FORGE_URL_PORT" ] || return 1 ;;
+    https) [ "$FORGE_URL_HOST" = github.com ] && [ -z "$FORGE_URL_PORT" ] || return 1 ;;
+    *)     return 1 ;;
   esac
-  s="${s%.git}"
-  [[ "$s" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
-  printf '%s' "$s"
+  printf '%s' "$FORGE_URL_PATH"
 }
 
 # A repo's GitHub identity: its declared url, else the checkout's origin.
@@ -280,6 +309,91 @@ ws_github_clone_url() { # <wsdir> <url>
     git@github.com:*) [ -z "$host" ] || url="git@$host:${url#git@github.com:}" ;;
   esac
   printf '%s' "$url"
+}
+
+# A REPO'S FORGE: which provider serves it, at which host, and how git dials it.
+#
+#   repos:
+#     - name: widget
+#       url: git@code.example.net:acme/widget.git
+#       forge: forgejo          # optional: github | forgejo
+#       host: code.example.net  # optional: the web/API host, when the url's
+#                               # host is an ~/.ssh/config alias
+#
+# The url - declared, else the checkout's origin - is the identity. GitHub is
+# whatever github_slug_from_url accepts (github.com, or this workspace's
+# github.ssh_host alias), so this and ws_repo_github_slug cannot disagree.
+# Any other host is Forgejo only when the repo says so, by `forge: forgejo` or
+# a `host:` of its own: an undeclared host is refused, never guessed, so
+# git@evilgithub.com:o/r is nobody's repo. A declaration the url contradicts
+# (forge: github on another host, an https url to a host other than `host:`,
+# Forgejo behind the GitHub account's alias) is refused too.
+#
+# Prints one JSON object: provider, host (web/API host), owner, repo, ssh_host
+# (what git dials - the alias when one is declared), web_url, and api_url (the
+# repository's API root).
+forge_repo() { # <wsdir> <repo> [repodir]
+  local wsdir="$1" repo="$2" repodir="${3:-}" url forge host gh_alias provider web_host ssh_host api url_web
+  local FORGE_URL_SCHEME FORGE_URL_USER FORGE_URL_HOST FORGE_URL_PORT FORGE_URL_PATH
+  url="$(ws_repo_get "$wsdir" "$repo" url)" || return 1
+  if [ -z "$url" ] && [ -n "$repodir" ]; then
+    url="$(git -C "$repodir" remote get-url origin 2>/dev/null)" || url=""
+  fi
+  [ -n "$url" ] || { _forge_repo_no "$repo" "it declares no url and has no origin remote - nothing names its forge"; return 1; }
+  forge_url_parse "$url" \
+    || { _forge_repo_no "$repo" "'$url' is not a remote url this plane reads (git@host:owner/name, ssh://git@host[:port]/owner/name or https://host[:port]/owner/name)"; return 1; }
+  forge="$(ws_repo_get "$wsdir" "$repo" forge)"
+  host="$(ws_repo_get "$wsdir" "$repo" host)"
+  gh_alias="$(ws_github_ssh_host "$wsdir")"
+  case "$forge" in
+    github|forgejo) provider="$forge" ;;
+    "")
+      if github_slug_from_url "$url" "$gh_alias" >/dev/null; then provider=github
+      elif [ -n "$host" ]; then provider=forgejo
+      else
+        _forge_repo_no "$repo" "cannot tell which forge serves $FORGE_URL_HOST - declare forge: forgejo (and host: <web host> when $FORGE_URL_HOST is an ssh alias) on the repo"
+        return 1
+      fi ;;
+    *) _forge_repo_no "$repo" "forge: must be github or forgejo (got: $forge)"; return 1 ;;
+  esac
+
+  if [ "$provider" = github ]; then
+    github_slug_from_url "$url" "$gh_alias" >/dev/null \
+      || { _forge_repo_no "$repo" "forge: github, but '$url' is not a github.com remote (or this workspace's github.ssh_host alias)"; return 1; }
+    [ -z "$host" ] || [ "$host" = github.com ] \
+      || { _forge_repo_no "$repo" "forge github is github.com - host: $host contradicts it"; return 1; }
+    web_host=github.com ssh_host="${gh_alias:-github.com}"
+    api="https://api.github.com/repos/$FORGE_URL_PATH"
+  else
+    [ "$FORGE_URL_HOST" != github.com ] \
+      || { _forge_repo_no "$repo" "forge: forgejo, but '$url' is on github.com"; return 1; }
+    [ -z "$gh_alias" ] || [ "$FORGE_URL_HOST" != "$gh_alias" ] \
+      || { _forge_repo_no "$repo" "$FORGE_URL_HOST is this workspace's GitHub ssh alias (github.ssh_host), not a Forgejo host"; return 1; }
+    url_web="$FORGE_URL_HOST${FORGE_URL_PORT:+:$FORGE_URL_PORT}"
+    if [ -n "$host" ]; then
+      # An https url names the web host itself; only an ssh url may reach the
+      # forge under another name (its alias).
+      [ "$FORGE_URL_SCHEME" != https ] || [ "$url_web" = "$host" ] \
+        || { _forge_repo_no "$repo" "host: $host contradicts the url's host $url_web"; return 1; }
+      web_host="$host"
+    elif [ "$FORGE_URL_SCHEME" = https ]; then web_host="$url_web"
+    else web_host="$FORGE_URL_HOST"
+    fi
+    # A dotted host name: an undotted ssh host is an alias, and an alias
+    # names no web or API endpoint.
+    [[ "$web_host" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(:[0-9]+)?$ ]] \
+      || { _forge_repo_no "$repo" "'$web_host' is not a web host name (an ssh alias?) - declare host: <the Forgejo web host> on the repo"; return 1; }
+    [ "${web_host%%:*}" != github.com ] \
+      || { _forge_repo_no "$repo" "host: github.com is GitHub, not Forgejo"; return 1; }
+    case "$FORGE_URL_SCHEME" in https) ssh_host="${web_host%%:*}" ;; *) ssh_host="$FORGE_URL_HOST" ;; esac
+    api="https://$web_host/api/v1/repos/$FORGE_URL_PATH"
+  fi
+  jq -nc --arg p "$provider" --arg h "$web_host" --arg o "${FORGE_URL_PATH%%/*}" --arg r "${FORGE_URL_PATH#*/}" \
+    --arg s "$ssh_host" --arg w "https://$web_host/$FORGE_URL_PATH" --arg a "$api" \
+    '{provider:$p, host:$h, owner:$o, repo:$r, ssh_host:$s, web_url:$w, api_url:$a}'
+}
+_forge_repo_no() { # <repo> <reason>
+  printf "forge: repo '%s': %s\n" "$1" "$2" >&2
 }
 
 # The workspace a checkout belongs to. A herdr worktree lives OUTSIDE its

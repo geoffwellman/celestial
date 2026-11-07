@@ -198,6 +198,26 @@ state, and `_ledger_append` keeps the binding across a re-delegation.
 - **`cel update`** runs the agent and gateway components on every update (agents.yaml `update:`), each through the agent's own installer, with an honest per-component report. A component that fails, or that is still behind the published latest after its updater ran, makes the update a non-success; rerun is the recovery.
 - **Runtime retirement is not worktree deletion.** `cel gc` closes the pane of an idle, clean, pushed agent proven to be this plane's own (exact pid, birth, pane, role; foreground group = the runtime plus its declared direct helper only). Worktree, branch, session file and the delegation row are untouched.
 
+## Source-control forges
+
+A repo's forge is chosen per repo, never per workspace. `forge_repo`
+(`lib/workspace.sh`) reads the repo's declared `url:` (else its clone's
+`origin`) through the one remote-url grammar that `github_slug_from_url` also
+uses, and returns `{provider, host, owner, repo, ssh_host, web_url, api_url}`.
+github.com, or the workspace's `github.ssh_host` alias, is GitHub. Any other
+host is Forgejo only when the repo declares `forge: forgejo` or a `host:` of
+its own (the web/API host, for a url that dials an ssh alias); an undeclared
+host, a lookalike, or a declaration the url contradicts is refused.
+
+`lib/forge.sh` holds pull-request operations in Celestial's own vocabulary
+(`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`, `forge_pr_reviews`,
+`forge_pr_merge`, `forge_whoami`): each prints one normalised JSON value or
+fails. GitHub is served through `gh` as the workspace's account (`ws_gh`);
+`CEL_FORGE_GH` is its only test seam. A Forgejo repo is refused by every
+operation ("Forgejo backend not built yet") until that backend exists.
+Existing callers still call `gh` directly and move onto these operations
+separately.
+
 ## Credentials
 
 Workspace `env:` and gitignored `env.local` layer over the caller's environment.
