@@ -966,6 +966,47 @@ test_open_ranked_shows_the_top_three_and_then_how_many_more() {
   assert_eq "$(_inbox_lines)" "$n"
   rm -rf "$TB" "$CEL_INBOX_DIR"
 }
+# A corrupt mailbox ranks as unknown, never as nothing waiting: triage fails
+# naming the file, asks the model nothing, and `open --ranked` fails too -
+# the same answer `open` gives for it.
+test_triage_of_a_corrupt_mailbox_fails_naming_it_instead_of_ranking_nothing() {
+  _triage_fixture
+  _triage_send blocked "LEVEL3 the gate cannot run"
+  local f="$CEL_INBOX_DIR/demo.jsonl" out rc=0 sum
+  printf '{"id":"9' >> "$f"
+  sum="$(cksum < "$f")"
+  out="$(triage_ranked demo root 2>"$TB/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "triage_ranked exited 0 on a corrupt mailbox"; rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+  assert_eq "$out" "" || { rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+  assert_contains "$(cat "$TB/err")" "$f is corrupt" || { rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+  local j
+  for j in "" --json; do
+    rc=0; out="$(_inbox_open --for root --workspace demo --ranked $j 2>"$TB/err")" || rc=$?
+    [ "$rc" -ne 0 ] || { echo "open --ranked $j of a corrupt mailbox exited 0"; rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+    assert_eq "$out" "" || { rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+    assert_contains "$(cat "$TB/err")" "$f is corrupt" || { rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+  done
+  assert_eq "$(grep -c . "$CEL_TRIAGE_CALLS")" "0" || { rm -rf "$TB" "$CEL_INBOX_DIR"; return 1; }
+  assert_eq "$(cksum < "$f")" "$sum"
+  rm -rf "$TB" "$CEL_INBOX_DIR"
+}
+# In an --all-workspaces ranking a corrupt mailbox does not hide the others'
+# mail, and the status says one could not be answered.
+test_open_ranked_all_workspaces_ranks_past_a_corrupt_mailbox() {
+  _inbox_registry_fixture
+  source "$CEL_ROOT/lib/triage.sh"
+  export CEL_TRIAGE_POST=/bin/false CEL_TRIAGE_CACHE="$CEL_INBOX_DIR/triage-cache"
+  ( CEL_INBOX_ME=t _inbox_send root "from beta" --workspace beta --kind blocked ) >/dev/null 2>&1
+  ( CEL_INBOX_ME=t _inbox_send root "from alpha" --workspace alpha --kind blocked ) >/dev/null 2>&1
+  printf '{"id":"9' >> "$CEL_INBOX_DIR/alpha.jsonl"
+  local out rc=0
+  out="$(_inbox_open --for root --all-workspaces --ranked 2>"$CEL_INBOX_DIR/err")" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a ranking with a corrupt mailbox in it exited 0"; return 1; }
+  assert_contains "$out" "[beta]"
+  assert_contains "$out" "from beta"
+  assert_contains "$(cat "$CEL_INBOX_DIR/err")" "$CEL_INBOX_DIR/alpha.jsonl is corrupt"
+  rm -rf "$CEL_INBOX_DIR" "$REG"
+}
 
 # ---- an empty answer is not the same as an answer that could not be given --
 # Three states must not share one output: no mail, mail somewhere else, and
