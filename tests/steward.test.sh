@@ -14,6 +14,86 @@ test_steward_due_rate_limits_per_key() {
   assert_contains "$(cat "$T/state")" "repo#1-changes"
   rm -rf "$T"
 }
+
+# Runs "<fn> <i>" for i = 1..n in parallel, every writer released at the same
+# instant: each reports ready, then blocks on a lock the test holds until all
+# n have reported. A barrier, not a sleep, so the overlap is the point of the
+# test rather than an accident of timing.
+_steward_barrier_run() { # <n> <fn>
+  local n="$1" fn="$2" i ready
+  mkfifo "$T/ready"; exec 7<>"$T/ready"
+  exec 8>"$T/gate"; flock -x 8
+  for i in $(seq 1 "$n"); do
+    ( exec 8>&-; exec 9<"$T/gate"; printf 'r\n' >&7; flock -s 9; "$fn" "$i" ) &
+  done
+  for i in $(seq 1 "$n"); do read -r -u 7 ready; done
+  exec 8>&-
+  wait
+  exec 7>&-
+}
+
+# Writers on different keys, released together, lose none of each other's
+# records - and leave no temp file behind.
+test_steward_concurrent_due_on_different_keys_loses_none() {
+  have flock || return 0
+  local T i missing=0; T="$(mktemp -d)"
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  _due_key() { _steward_due "repo#$1-changes"; }
+  _steward_barrier_run 24 _due_key
+  for i in $(seq 1 24); do
+    grep -q "^repo#$i-changes " "$T/state" || missing=$((missing + 1))
+  done
+  assert_eq "$missing" 0 || { rm -rf "$T"; return 1; }
+  assert_eq "$(find "$T" -name 'state.*' ! -name state.lock | wc -l | tr -d ' ')" 0
+  rm -rf "$T"
+}
+
+# A writer killed between its temp file and the rename leaves the temp behind.
+# The next edit sweeps the file's own temps once they are an hour old - the
+# current mktemp names and the old fixed `.tmp` / `.tmp.<pid>` ones - and
+# never a fresh temp (a writer still mid-edit) or a sibling state or lock file.
+test_steward_state_edit_sweeps_stale_temps_only() {
+  local T f; T="$(mktemp -d)"
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  for f in state.tmp state.tmp.4242 state.Ab12Cd state.services state.lock state.suite-lock \
+           state.decide-stale.lock state.services.Qx81Lm; do
+    printf 'x\n' > "$T/$f"; touch -d '2 hours ago' "$T/$f"
+  done
+  printf 'x\n' > "$T/state.Zz99Yy"   # a temp another writer is still filling
+  _steward_due "repo#1-changes"
+  local left; left="$(cd "$T" && ls -A | LC_ALL=C sort | paste -sd' ' -)"
+  assert_eq "$left" "state state.Zz99Yy state.decide-stale.lock state.lock state.services state.services.Qx81Lm state.suite-lock"
+  rm -rf "$T"
+}
+
+# The same for every other shared writer: first-seen records, forgets and the
+# service down-counts, interleaved.
+test_steward_concurrent_first_seen_forget_and_service_writes_lose_none() {
+  have flock || return 0
+  local T i bad=0; T="$(mktemp -d)"
+  CEL_STEWARD_STATE="$T/state" _STEWARD_STATE="$T/state"
+  for i in $(seq 1 24); do printf 'old-%s 100\n' "$i"; done > "$T/state"
+  _mixed_write() {
+    case $(( $1 % 3 )) in
+      0) _steward_first_seen "seen-$1" >/dev/null ;;
+      1) _steward_forget "old-$1" ;;
+      2) _steward_svc_write "alpha/svc$1" 2 1 ;;
+    esac
+  }
+  _steward_barrier_run 24 _mixed_write
+  for i in $(seq 1 24); do
+    case $(( i % 3 )) in
+      0) grep -q "^seen-$i " "$T/state" || bad=$((bad + 1))
+         grep -q "^old-$i " "$T/state" || bad=$((bad + 1)) ;;
+      1) ! grep -q "^old-$i " "$T/state" || bad=$((bad + 1)) ;;
+      2) grep -q "^alpha/svc$i 2 1$" "$T/state.services" || bad=$((bad + 1))
+         grep -q "^old-$i " "$T/state" || bad=$((bad + 1)) ;;
+    esac
+  done
+  assert_eq "$bad" 0
+  rm -rf "$T"
+}
+
 test_steward_agent_name_matches_cel_run() {
   assert_eq "$(_steward_agent_name 'widget-games/orch')" "widget-games-orch"
 }
@@ -489,6 +569,43 @@ SH
   rm -rf "$T"
 }
 
+# A SOLO PRODUCT HAS NO WORKERS. Its red or changes-requested PR goes to its
+# own agent as a fix-it-on-the-branch finding: no worker lookup on the branch,
+# and no "get a worker" or "restart the worker" remedy it cannot follow.
+test_review_sweep_routes_a_solo_red_pr_to_its_agent_without_fleet_remedies() {
+  _orch_fixture
+  sed -i 's/{name: bundle, repos: \[widget\], orchestrator: auto}/{name: bundle, repos: [widget], orchestrator: auto, mode: solo}/' \
+    "$T/alpha/workspace.yaml"
+  mkdir -p "$T/bin" "$T/alpha/.cel" "$T/wt"
+  # a leftover fleet row on the same branch, with an idle pane standing in it
+  printf '[{"id":"old","repo":"widget","branch":"WG-1-x","state":"running","worktree":"%s/wt"}]\n' "$T" \
+    > "$T/alpha/.cel/delegations.json"
+  local roster
+  roster="$(printf '{"result":{"agents":[{"name":"bundle-orch","agent_status":"idle","pane_id":"w:p2"},{"name":"old-worker","agent_status":"idle","pane_id":"w:p3","cwd":"%s/wt"}]}}' "$T")"
+  cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '[{"number":7,"headRefName":"WG-1-x","headRefOid":"h7","reviewDecision":"","isDraft":false,"statusCheckRollup":[{"conclusion":"FAILURE"}],"createdAt":"2020-01-01T00:00:00Z","reviews":[]},
+             {"number":8,"headRefName":"WG-2-y","headRefOid":"h8","reviewDecision":"CHANGES_REQUESTED","isDraft":false,"statusCheckRollup":[],"createdAt":"2020-01-01T00:00:00Z","reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2020-01-02T00:00:00Z","commit":{"oid":"h8"}}]}]'
+SH
+  cat > "$T/bin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/herdr.argv"
+case "\$1 \$2" in
+  "agent get") [ "\$3" = bundle-orch ] && exit 0 || exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$T/bin/gh" "$T/bin/herdr"
+  PATH="$T/bin:$PATH" _steward_review_sweep "$roster" >/dev/null
+  local mail; mail="$(cmd_inbox read --for bundle-orch --workspace alpha --all)"
+  assert_contains "$mail" "PR #7 on widget has FAILING checks" || { rm -rf "$T"; return 1; }
+  assert_contains "$mail" "PR #8 on widget has changes requested" || { rm -rf "$T"; return 1; }
+  case "$mail" in *worker*|*delegate*) echo "fleet remedy mailed to a solo product: $mail"; rm -rf "$T"; return 1 ;; esac
+  # nobody's pane was read to decide who stands on the branch
+  if grep -q '^agent read' "$T/herdr.argv" 2>/dev/null; then echo "solo sweep read a worker pane"; rm -rf "$T"; return 1; fi
+  rm -rf "$T"
+}
+
 # ---- orphaned test servers ---------------------------------------------------
 # A test server whose worktree no longer has an agent can hold a workspace's
 # ledger lock while nothing names it. The steward names it with pid and port,
@@ -893,8 +1010,15 @@ SH
   export CEL_STEWARD_FANOUT="$T/bin/cel-fanout-stub"
 }
 
-test_steward_reconciles_every_workspace_once_per_tick() {
+_reconcile_ledger() { # <ws> <json> - written byte for byte; '' is a zero-byte file
+  mkdir -p "$T/$1/.cel"
+  printf '%s' "$2" > "$T/$1/.cel/delegations.json"
+}
+
+test_steward_reconciles_every_workspace_with_live_rows_once_per_tick() {
   _reconcile_tick_fixture
+  _reconcile_ledger alpha '[{"id":"a1","state":"running"}]'
+  _reconcile_ledger beta '[{"id":"b1","state":"landed"},{"id":"b2","state":"finished"}]'
   local out; out="$(_steward_reconcile 2>&1)"
   assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "1"
   assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "1"
@@ -903,14 +1027,72 @@ test_steward_reconciles_every_workspace_once_per_tick() {
   rm -rf "$T"
 }
 
+# A workspace with no ledger, or one whose every row is over, has nothing to
+# reconcile: no `gh pr list` per repo every five minutes for it.
+test_steward_skips_reconcile_where_no_delegation_is_live() {
+  _reconcile_tick_fixture
+  _reconcile_ledger alpha '[{"id":"a1","state":"landed"},{"id":"a2","state":"released"},{"id":"a3","state":"abandoned"}]'
+  _steward_reconcile >/dev/null 2>&1
+  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "0" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "0" || { rm -rf "$T"; return 1; }
+  # a row in a state nobody knows, or a ledger nobody can read, is not "over"
+  _reconcile_ledger alpha '[{"id":"a1","state":"landed"},{"id":"a4","state":"mystery"}]'
+  _reconcile_ledger beta '{not json'
+  _steward_reconcile >/dev/null 2>&1
+  assert_eq "$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)" "1"
+  assert_eq "$(grep -c 'reconcile --workspace beta' "$T/reconciled" || true)" "1"
+  rm -rf "$T"
+}
+
 # A reconcile that cannot run is one sweep failing, not a tick dying: the
 # stalled-worker sweep below it is the one that costs work.
 test_steward_survives_a_reconcile_that_fails() {
   _reconcile_tick_fixture
+  _reconcile_ledger alpha '[{"id":"a1","state":"running"}]'
   printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/cel-fanout-stub"
   local out; out="$(_steward_reconcile 2>&1)"
-  assert_contains "$out" "reconcile"
+  assert_contains "$out" "reconcile failed"
   rm -rf "$T"
+}
+
+# The stalled-worker sweep skips a ledger whose rows are all over, and the
+# stall items raised while a row was running go with it; nothing else does.
+test_stall_sweep_over_a_finished_ledger_takes_down_only_its_stall_items() {
+  _rollup_fixture
+  _reconcile_ledger alpha '[{"id":"w1","state":"landed","pane":"w:p9"}]'
+  cmd_inbox send root "STALLED WORKER WG-1 (w:p9): stalled" \
+    --from steward --kind blocked --fp stall-w1 --workspace alpha >/dev/null 2>&1
+  cmd_inbox send root "some other blocker" \
+    --from steward --kind blocked --fp quota-x --workspace alpha >/dev/null 2>&1
+  _steward_stalled_workers '{"result":{"agents":[]}}' >/dev/null 2>&1
+  local open; open="$(cmd_inbox open --for root --workspace alpha)"
+  case "$open" in *"STALLED WORKER"*) echo "stall item outlived its finished row: $open"; rm -rf "$T"; return 1 ;; esac
+  assert_contains "$open" "some other blocker"
+  rm -rf "$T"
+}
+
+# A ledger is "over" only when it is a list of rows, every one terminal. A
+# document of any other shape - and an empty file - says nothing about what
+# is running, so reconcile still runs and no open stall item is taken down.
+test_fanout_sweeps_treat_an_unrecognised_ledger_as_live() {
+  local shape out
+  for shape in 'null' '{}' '{"delegations":null}' ''; do
+    _reconcile_tick_fixture
+    _reconcile_ledger alpha "$shape"
+    _steward_reconcile >/dev/null 2>&1
+    out="$(grep -c 'reconcile --workspace alpha' "$T/reconciled" || true)"
+    rm -rf "$T"
+    [ "$out" = 1 ] || { echo "reconcile skipped for a ledger of shape '$shape'"; return 1; }
+
+    _rollup_fixture
+    _reconcile_ledger alpha "$shape"
+    cmd_inbox send root "STALLED WORKER WG-1 (w:p9): stalled" \
+      --from steward --kind blocked --fp stall-w1 --workspace alpha >/dev/null 2>&1
+    _steward_stalled_workers '{"result":{"agents":[]}}' >/dev/null 2>&1
+    out="$(cmd_inbox open --for root --workspace alpha)"
+    rm -rf "$T"
+    case "$out" in *"STALLED WORKER"*) ;; *) echo "stall item closed over a ledger of shape '$shape'"; return 1 ;; esac
+  done
 }
 
 # ── services ─────────────────────────────────────────────────────────────────
@@ -2435,6 +2617,35 @@ test_steward_reports_unledgered_servers_to_product_once_a_day() {
   assert_contains "$(cat "$T/sent")" "widget-orch"
   assert_contains "$(cat "$T/sent")" "240MB"
   assert_contains "$(cat "$T/sent")" "nothing unledgered was stopped"
+  unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
+  rm -rf "$T"
+}
+
+# A delivery that fails is not stamped: that product is tried again on the
+# next tick, while the one that did get it is not mailed twice.
+test_steward_unledgered_report_retries_only_the_product_it_failed_to_reach() {
+  local T; T="$(mktemp -d)"
+  export CEL_SERVE_STATE="$T/state" CEL_SERVE_SYSTEMCTL="$T/systemctl" CEL_SERVE_PROC_DATA=''
+  mkdir -p "$CEL_SERVE_STATE" "$T/alpha"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CEL_SERVE_SYSTEMCTL"
+  chmod +x "$CEL_SERVE_SYSTEMCTL"
+  CEL_SERVE_ADOPT_DATA='[{"pid":1234,"memory_mb":240,"age_seconds":4000,"worktree":"/tmp/demo","managed":false}]'
+  export CEL_SERVE_ADOPT_DATA
+  registry_names() { printf 'alpha\n'; }
+  registry_path() { printf '%s/alpha' "$T"; }
+  ws_product_names() { printf 'widget\ngadget\n'; }
+  cmd_inbox() { printf '%s\n' "$2" >> "$T/sent"; [ "$2" != gadget-orch ] || [ -e "$T/inbox-up" ]; }
+  date() { [ "$*" = '-u +%F' ] && printf '2026-10-15\n' || command date "$@"; }
+  _serve_unledgered_report >/dev/null 2>&1
+  _serve_unledgered_report >/dev/null 2>&1
+  assert_eq "$(grep -cx widget-orch "$T/sent")" 1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cx gadget-orch "$T/sent")" 2 || { rm -rf "$T"; return 1; }
+  # once it is delivered, it is stamped like any other
+  touch "$T/inbox-up"
+  _serve_unledgered_report >/dev/null 2>&1
+  _serve_unledgered_report >/dev/null 2>&1
+  assert_eq "$(grep -cx gadget-orch "$T/sent")" 3
+  assert_eq "$(grep -cx widget-orch "$T/sent")" 1
   unset CEL_SERVE_STATE CEL_SERVE_SYSTEMCTL CEL_SERVE_PROC_DATA CEL_SERVE_ADOPT_DATA
   rm -rf "$T"
 }

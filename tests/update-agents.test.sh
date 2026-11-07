@@ -365,6 +365,24 @@ test_update_previous_record_survives_a_torn_temp_file_and_parallel_writers() {
   _uag_cleanup
 }
 
+# A rollback drops each entry as it succeeds - without losing an entry another
+# update recorded while it ran, and without a torn file if it is killed. Here
+# the other writer lands exactly between the rollback's read and its write.
+test_update_rollback_keeps_an_entry_recorded_while_it_ran() {
+  _uag_fixture
+  mkdir -p "$CEL_UPDATE_DIR"
+  printf '{"alpha":"1.0.0"}\n' >"$CEL_UPDATE_DIR/agents-previous.json"
+  printf '1.1.0\n' >"$T/alpha.ver"
+  eval "$(declare -f _update_agent_version | sed '1s/_update_agent_version/_uag_real_agent_version/')"
+  _update_agent_version() { _update_record_previous gamma 1.0.0; _uag_real_agent_version "$@"; }
+  _update_agents_rollback >/dev/null 2>&1 || { echo "rollback failed"; _uag_cleanup; return 1; }
+  assert_eq "$(cat "$T/alpha.ver")" 1.0.0 || { _uag_cleanup; return 1; }
+  jq -e . "$CEL_UPDATE_DIR/agents-previous.json" >/dev/null || { echo "record is not valid JSON"; _uag_cleanup; return 1; }
+  # alpha is rolled back and gone from the record; gamma's way back survives
+  assert_eq "$(jq -c . "$CEL_UPDATE_DIR/agents-previous.json")" '{"gamma":"1.0.0"}'
+  _uag_cleanup
+}
+
 # ------------------------------------------------- MCP migration continuity
 test_update_keeps_the_adapter_when_two_host_configs_define_one_server_differently() {
   _uag_pi_fixture

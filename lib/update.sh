@@ -197,22 +197,25 @@ _update_agents_check() { # read-only: installed vs latest per installed agent; 1
 
 # The way back is recorded THE MOMENT a version moved - success, failure and
 # still-behind alike (an updater can move the version and then fail) - and
-# durably: merged under a lock, written to a unique temp file and renamed, so a
-# kill mid-write leaves the previous record intact, never a torn file.
-_update_record_previous() { # <agent> <old version>
-  local a="$1" old="$2" f tmp
+# durably: every change to the record, adding an entry or dropping one that was
+# rolled back, is merged under a lock, written to a unique temp file and
+# renamed, so a kill mid-write leaves the previous record intact, never a torn
+# file, and two writers never lose each other's entries.
+_update_previous_edit() { # <jq-filter> [jq-args...]
+  local filter="$1" f tmp; shift
   f="$(_update_dir)/agents-previous.json"
   mkdir -p "$(_update_dir)" || return 1
   (
     flock -x 9 || exit 1
     tmp="$(mktemp "$f.XXXXXX")" || exit 1
-    if [ -s "$f" ] && jq -e . "$f" >/dev/null 2>&1; then
-      jq -c --arg a "$a" --arg v "$old" '.[$a] = (.[$a] // $v)' "$f" >"$tmp" || { rm -f "$tmp"; exit 1; }
-    else
-      jq -nc --arg a "$a" --arg v "$old" '{($a): $v}' >"$tmp" || { rm -f "$tmp"; exit 1; }
-    fi
+    { if [ -s "$f" ] && jq -e . "$f" >/dev/null 2>&1; then cat "$f"; else printf '{}'; fi; } \
+      | jq -c "$@" "$filter" >"$tmp" || { rm -f "$tmp"; exit 1; }
     mv -f "$tmp" "$f"
   ) 9>"$f.lock"
+}
+
+_update_record_previous() { # <agent> <old version>
+  _update_previous_edit '.[$a] = (.[$a] // $v)' --arg a "$1" --arg v "$2"
 }
 
 _update_agents() { # returns 1 when any component failed or is still behind
@@ -439,11 +442,10 @@ _update_pi_mcp() {
 # update.rollback); one that does not is named with its old version, never
 # guessed at. Entries are dropped as they succeed, so a rerun resumes.
 _update_agents_rollback() {
-  local f a old cmd now rc=0 left
+  local f a old cmd now rc=0
   f="$(_update_dir)/agents-previous.json"
   [ -s "$f" ] || return 0
   c_hd "Rolling agents back"
-  left="$(cat "$f")"
   for a in $(jq -r 'keys[]' "$f"); do
     old="$(jq -r --arg a "$a" '.[$a]' "$f")"
     cmd="$(agent_update_get "$a" rollback)"
@@ -453,12 +455,12 @@ _update_agents_rollback() {
     if CEL_OLD_VERSION="$old" _update_timeout "${CEL_UPDATE_AGENT_TIMEOUT:-900}" bash -e -u -o pipefail -c "$cmd" >/dev/null 2>&1 \
         && now="$(_update_agent_version "$a")" && [ "$now" = "$old" ]; then
       printf '  %s -> %s\n' "$a" "$old"
-      left="$(jq -c --arg a "$a" 'del(.[$a])' <<<"$left")"
+      _update_previous_edit 'del(.[$a])' --arg a "$a" \
+        || { c_err "$a: rolled back to $old, but its record could not be dropped - a rerun repeats it"; rc=1; }
     else
       c_err "$a: rollback to $old FAILED - rerun cel update --rollback"; rc=1
     fi
   done
-  printf '%s\n' "$left" >"$f"
   return "$rc"
 }
 
