@@ -1006,8 +1006,7 @@ quota_vetoed() { # <provider> <remaining>
   awk -v r="$2" -v f="$floor" 'BEGIN { exit !(r+0 < f+0) }'
 }
 
-# A BAR, IN THE ONE PLACE BASH DRAWS ONE. The rule is the renderer's rule in
-# tools/console/views.mjs and it is the same rule for a reason: a filled
+# A BAR, IN THE ONE PLACE BASH DRAWS ONE: a filled
 # prefix of a fixed-width track, 100% the only percentage that fills it, so
 # "the next delegation refuses" never looks like "there is room for one more";
 # and never wider than the track, because a bar that wraps is worse than no

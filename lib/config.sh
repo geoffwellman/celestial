@@ -1,11 +1,9 @@
 # shellcheck shell=bash
 # The box-level config file: `~/.local/share/cel/config.yaml`, two levels deep,
-# one section per subject (`console:`, `update:`). The console reads it from
-# JavaScript (`tools/console/translate.mjs readConfig`); this is the bash twin,
-# and the two must agree on the shape - a section, then indented scalar keys,
-# nothing nested further.
+# one section per subject (`console:`, `update:`), a section then indented
+# scalar keys, nothing nested further.
 #
-# The file holds the console's provider key, so anything that CREATES it
+# The file can hold a provider key (`console.key`), so anything that CREATES it
 # creates it 0600. A config file holding `key:` that is world-readable is an
 # API key readable by every process on a box that runs other people's agents.
 [ -n "${_CEL_CONFIG:-}" ] && return 0

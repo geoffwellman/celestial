@@ -296,9 +296,9 @@ agents:
 # the workspace's gitignored env.local (see lib/workspace.sh ws_env_exports).
 # `auth: cli` means the runtime carries its own OAuth session and there is no
 # key to test, so a profile on that provider is always considered reachable.
-# `api:` is where `cel console`'s translator POSTs (tools/console/translate.mjs):
-# one endpoint per provider, here rather than in the JavaScript, so the box has
-# ONE answer to "how do I reach <provider>" and a moved endpoint is one edit.
+# `api:` is the provider's chat endpoint; liveness and triage derive their
+# decisions endpoint from it. One endpoint per provider, so the box has ONE
+# answer to "how do I reach <provider>" and a moved endpoint is one edit.
 # Anthropic speaks its own Messages API; everything else here is
 # OpenAI-compatible chat completions.
 providers:
@@ -341,9 +341,9 @@ providers:
   google:       { key_env: GEMINI_API_KEY,     console: https://aistudio.google.com/apikey }
   # A DECISION model, not a chat one: it answers typed questions about a state
   # (`choice` returns one option plus the whole distribution) and never writes
-  # prose. The console's router uses it to classify a sentence into an intent;
-  # it is here so the endpoint lives in the same table as every other
-  # provider's, which is the only way the two stay in agreement.
+  # prose. Liveness and inbox triage use it; it is here so the endpoint lives
+  # in the same table as every other provider's, which is the only way the two
+  # stay in agreement.
   typesafe:     { key_env: TYPESAFE_API_KEY,   api: https://api.typesafe.ai/v1/systemone, console: https://typesafe.ai/keys }
 
 # The reasoning level every plane-launched agent gets when nothing overrides it.

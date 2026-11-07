@@ -802,7 +802,7 @@ _inbox_watch() { # [--workspace w|--all-workspaces] [--for who] [--parent <pid>]
   fi
   # The watcher follows the pid it was told owns it and goes when that pid
   # goes, so a parent that exits uncleanly cannot leave it tailing a dead
-  # pane's mailbox (the console also kills the group: tools/console/watcher.mjs).
+  # pane's mailbox.
   #
   # FOLLOWING THE PARENT IS THE TAIL'S OWN JOB (`--pid`), NOT A SIDE PROCESS'S.
   # It used to be a subshell forking `sleep` every five seconds - the one

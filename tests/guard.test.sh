@@ -301,52 +301,23 @@ test_product_orchestrator_writes_its_own_dir_but_no_repo() {
   rm -rf "$T"
 }
 
-# --- the console -----------------------------------------------------------
-# The console's vocabulary is an ALLOWLIST: its job is narrow, so everything
-# outside it is a mistake rather than a judgement call.
-_cons() { CONS="$(mktemp -d)/console"; mkdir -p "$CONS"; }
-
-test_role_console_from_the_console_dir() {
-  _cons
-  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_role_of "$CONS")" console
-  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_role_of "$CONS/notes")" console
-  rm -rf "$CONS"
-}
-# The console's cwd is a plain directory a human could also stand in, so the
-# environment can say so outright.
-test_role_console_from_the_environment() {
-  assert_eq "$(CEL_ROLE=console guard_role_of /tmp)" console
-}
-test_console_may_route() {
-  assert_eq "$(guard_classify console 'cel fleet --json')" allow
-  assert_eq "$(guard_classify console 'cel inbox send x "y" --workspace w')" allow
-  assert_eq "$(guard_classify console 'cel-fanout status --workspace w')" allow
-  assert_eq "$(guard_classify console 'gh pr view 3')" allow
-  assert_eq "$(guard_classify console 'herdr agent focus a')" allow
-  assert_eq "$(guard_classify console 'git log --oneline')" allow
-  assert_eq "$(guard_classify console 'jq -r .x /tmp/a.json')" allow
-}
-test_console_may_not_build() {
-  local c
-  for c in 'git commit -m x' 'gh pr merge 3' 'herdr worktree remove --force' \
-           'npm install' 'sed -i s/a/b/ x.ts' 'git -C repos/x status'; do
-    assert_contains "$(guard_classify console "$c")" "deny the console routes; it does not build -"
-  done
-}
-test_console_writes_only_its_own_directory() {
-  _cons; _gws
-  assert_eq "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$CONS/notes.md")" allow
-  assert_contains "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$T/repos/x/a.ts")" deny
-  assert_contains "$(CEL_CONSOLE_DIR="$CONS" guard_classify_path console "$T/products/p/spec.md")" deny
-  rm -rf "$CONS" "$T"
-}
-
 # --- core: orchestrator-class, minus the product agent's factory -------------
 test_role_core_from_its_dir_and_the_environment() {
   local C; C="$(mktemp -d)/core"; mkdir -p "$C/notes"
   assert_eq "$(CEL_ROLE='' CEL_CORE_DIR="$C" guard_role_of "$C/notes")" core
   assert_eq "$(CEL_ROLE=core guard_role_of /tmp)" core
   rm -rf "${C%/core}"
+}
+# A console agent launched before the TUI was retired still carries
+# CEL_ROLE=console and stands in the old console directory. It must stay
+# restricted - as core, which `cel console` now starts - never fall to `other`.
+test_a_legacy_console_agent_is_guarded_as_core() {
+  local D; D="$(mktemp -d)"; mkdir -p "$D/cel/console/notes"
+  assert_eq "$(CEL_ROLE=console guard_role_of /tmp)" core
+  assert_eq "$(CEL_ROLE='' XDG_DATA_HOME="$D" guard_role_of "$D/cel/console/notes")" core
+  local role; role="$(CEL_ROLE=console guard_role_of /tmp)"
+  assert_contains "$(guard_classify "$role" 'git commit -m x')" deny
+  rm -rf "$D"
 }
 test_core_may_read_coordinate_and_switch_mode() {
   local c
@@ -411,6 +382,8 @@ test_worker_may_not_start_agents() {
   for r in orchestrator root console worker reviewer; do
     assert_contains "$(guard_classify worker "cel run $r --repo widget")" deny
   done
+  assert_contains "$(guard_classify worker 'cel console')" 'does not start agents'
+  assert_contains "$(guard_classify solo 'cel console')" deny
   assert_contains "$(guard_classify worker 'cel run worker --repo widget')" 'does not start agents'
 }
 test_worker_keeps_the_rest_of_its_job() {

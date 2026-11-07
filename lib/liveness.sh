@@ -26,8 +26,7 @@ _CEL_LIVENESS=1
 : "${CEL_LIVENESS_WAIT_SECS:=900}"
 : "${CEL_LIVENESS_LINES:=40}"
 : "${CEL_LIVENESS_MIN_CONFIDENCE:=0.6}"
-# One request, ten seconds, no retries - the router's rule (tools/console/
-# router.mjs), for the same reason: a watcher that retries costs most on
+# One request, ten seconds, no retries: a watcher that retries costs most on
 # exactly the days the provider is unwell, and its fall-back already works.
 : "${CEL_LIVENESS_TIMEOUT:=10}"
 # How long a remembered answer is worth showing in a view. The steward sweeps
@@ -67,17 +66,16 @@ liveness_key() {
   env_name="$(cel_config_get console.router key_env)"
   [ -n "$env_name" ] || env_name="$(cel_config_get console key_env)"
   [ -n "$env_name" ] && v="${!env_name:-}"
-  # The console's own `key:` is the fall-back, exactly as the router reads it
-  # (tools/console/router.mjs routerConfig): a box that put its key in the
-  # config rather than the environment has configured a router, and liveness
-  # must not decide it has not.
+  # The `console.key` config value is the fall-back: a box that put its key in
+  # the config rather than the environment has configured a router, and
+  # liveness must not decide it has not.
   [ -n "${v:-}" ] || v="$(cel_config_get console key)"
   printf '%s' "${v:-}"
 }
 
-# Where the decisions live. Derived from the chat URL already in agents.yaml
-# exactly as the console's router derives it (tools/console/router.mjs
-# decisionsUrl): two copies of an endpoint is how the two start disagreeing.
+# Where the decisions live. Derived from the chat URL already in agents.yaml,
+# the same way lib/triage.sh derives it: two copies of an endpoint is how the
+# two start disagreeing.
 liveness_url() {
   [ -n "${CEL_LIVENESS_URL:-}" ] && { printf '%s' "$CEL_LIVENESS_URL"; return 0; }
   local provider api

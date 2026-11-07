@@ -15,8 +15,7 @@
 # evaluates every question in a request in parallel, and the messages share no
 # state, so a question each is the shape that fits. `score` returns a
 # probability-weighted position over ORDERED LEVEL DESCRIPTIONS, which is a
-# thing a classifier can do - "rate this 0-3" is not (the same reasoning as
-# tools/console/router.mjs's ATTENTION_LEVELS).
+# thing a classifier can do - "rate this 0-3" is not.
 [ -n "${_CEL_TRIAGE:-}" ] && return 0
 _CEL_TRIAGE=1
 # shellcheck source=lib/common.sh
@@ -76,13 +75,12 @@ _triage_remember() { # <id> <rank>
   printf '%s\t%s\n' "$1" "$2" >> "$f"
 }
 
-# Where the decisions endpoint is. The console's router block already names a
-# provider, a model and a key for exactly this kind of question
-# (`console.router` in config.yaml), so triage reuses it rather than asking an
-# operator to configure a second one. The URL derivation is the bash twin of
-# tools/console/router.mjs's decisionsUrl - two copies of an endpoint is how
-# the two start disagreeing, so it is written the same way in both places and
-# tested here.
+# Where the decisions endpoint is. The `console.router` block in config.yaml
+# already names a provider, a model and a key for exactly this kind of
+# question, so triage reuses it rather than asking an operator to configure a
+# second one. The URL derivation matches lib/liveness.sh liveness_url - two
+# copies of an endpoint is how the two start disagreeing, so it is written the
+# same way in both places and tested here.
 triage_decisions_url() { # <provider> <api>
   [ -n "${2:-}" ] || return 0
   case "$1" in
@@ -202,8 +200,7 @@ triage_ranked() { # <ws> <who>
   # One pass over the cache in jq rather than a shell loop per message: a
   # mailbox with hundreds of unread items is exactly the case this exists for.
   # Unscored kinds fall back to what they mean: a blocker is somebody stopped,
-  # a decision or an escalation wants an answer, status wants nothing. The
-  # console's KIND_RANK (tools/console/board.mjs) is the same table.
+  # a decision or an escalation wants an answer, status wants nothing.
   local cache raw; cache="$(_triage_cache_file)"
   raw="$(cat "$cache" 2>/dev/null || true)"
   printf '%s\n' "$items" | jq -sc --arg raw "$raw" '
