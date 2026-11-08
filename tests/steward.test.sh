@@ -2021,10 +2021,10 @@ test_steward_says_a_rex_upgrade_blocked_for_a_day_once_more() {
 test_steward_resolves_the_blocked_rex_item_when_the_block_clears_or_rex_is_installed() {
   _rexup_fixture
   _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
-  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tanother Rex server change is in progress')"
+  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tanother Rex server change is in progress\tprecheck')"
   _steward_rex_upgrade >/dev/null 2>&1
   assert_contains "$(_rexup_open)" "rex 0.0.2-gbbb"
-  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle within 120s: alpha-orch (working)')"
+  REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle within 120s: alpha-orch (working)\tbusy')"
   _steward_rex_upgrade >/dev/null 2>&1
   assert_eq "$(_rexup_open)" ""
   _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
@@ -2043,6 +2043,55 @@ test_steward_resolves_the_blocked_rex_item_when_the_block_clears_or_rex_is_insta
   _steward_rex_upgrade >/dev/null 2>&1
   assert_eq "$(_rexup_open)" ""
   assert_eq "$(grep -c '^rex-upgrade-blocked ' "$T/state" || true)" 0
+  rm -rf "$T"
+}
+
+# The steward decides on the round's reason code, never its wording: a skip
+# that got past every blocking check clears the item, one that did not keeps
+# it, and a code it does not know - or none - keeps it too.
+test_steward_maps_each_rex_waiting_code_to_clear_or_keep() {
+  local code want
+  for code in busy:clear admission:clear record:clear precheck:keep rechecked:keep bogus:keep :keep; do
+    want="${code#*:}"; code="${code%%:*}"
+    _rexup_fixture
+    _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+    # the same words every time: only the code decides
+    if [ -n "$code" ]; then
+      REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle within 120s: x\t%s' "$code")"
+    else
+      REXUP_ROUND="$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle within 120s: x')"
+    fi
+    _steward_rex_upgrade >/dev/null 2>&1
+    if [ "$want" = clear ]; then
+      assert_eq "$(_rexup_open)" "" || { echo "code '$code' kept the item"; rm -rf "$T"; return 1; }
+    else
+      assert_contains "$(_rexup_open)" "rex 0.0.2-gbbb" || { echo "code '$code' cleared the item"; rm -rf "$T"; return 1; }
+    fi
+    rm -rf "$T"
+  done
+}
+
+# An alert that was not delivered is not recorded as said: the next round
+# says it.
+test_steward_does_not_record_a_blocked_rex_alert_that_failed_to_send() {
+  _rexup_fixture
+  local real; real="$(declare -f cmd_inbox)"
+  cmd_inbox() { [ "$1" != send ] || return 1; }
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  eval "$real"
+  assert_eq "$(cat "$T/state" 2>/dev/null | grep -c '^rex-upgrade-blocked ' || true)" 0 || { rm -rf "$T"; return 1; }
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-7-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 1 || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^rex-upgrade-blocked 0.0.2-gbbb .* 0$' "$T/state")" 1 || { rm -rf "$T"; return 1; }
+  # the day-old reminder too: a failed send leaves stage 0 for the next round
+  printf 'rex-upgrade-blocked 0.0.2-gbbb %s 0\n' "$(( $(date +%s) - 90000 ))" > "$T/state"
+  cmd_inbox() { [ "$1" != send ] || return 1; }
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
+  eval "$real"
+  assert_eq "$(grep -c '^rex-upgrade-blocked 0.0.2-gbbb .* 0$' "$T/state")" 1 || { rm -rf "$T"; return 1; }
+  _rexup_blocked 0.0.2-gbbb 'widget-pr-8-review: a reviewer'
+  assert_eq "$(_rexup_alerts)" 2 || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -c '^rex-upgrade-blocked 0.0.2-gbbb .* 1$' "$T/state")" 1 || { rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

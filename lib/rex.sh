@@ -944,7 +944,20 @@ _rex_wait_instance() { # <instance-to-leave|""> <present 0|1> -> instance; bound
 
 # One round. Output, first line:
 #   (nothing)                      no newer rex from its origin
-#   waiting\t<candidate>\t<why>    skipped (busy agents, a lock); the next round retries
+#   waiting\t<candidate>\t<why>\t<code>
+#                                  skipped; the next round retries. <code> says
+#                                  how far the round got, for code to act on
+#                                  (the <why> is for people and may be reworded):
+#                                    precheck   another server change held the
+#                                               lock; no blocking check ran
+#                                    busy       every blocking check passed; an
+#                                               agent stayed busy
+#                                    admission  every blocking check passed;
+#                                               launch admission was not had
+#                                    rechecked  the re-check under admission
+#                                               found something changed
+#                                    record     every check passed; the agents
+#                                               to restore could not be recorded
 #   blocked\t<candidate>\t<why>    skipped until a person acts (an agent that could
 #                                  not be resumed, a session Celestial does not
 #                                  manage, an unreadable receipt or session list)
@@ -958,7 +971,7 @@ rex_upgrade_round() {
   IFS=$'\t' read -r inst cand <<<"$versions"
   mkdir -p "$(_rex_state)"; chmod 700 "$(_rex_state)"
   if ! _rex_generation_lock; then
-    printf 'waiting\t%s\tanother Rex server change is in progress\n' "$cand"; return 0
+    printf 'waiting\t%s\tanother Rex server change is in progress\tprecheck\n' "$cand"; return 0
   fi
   # Nothing changes before every live agent is idle and resumable. Busy
   # agents get a bounded wait; an unresumable one skips the round at once.
@@ -984,20 +997,20 @@ rex_upgrade_round() {
     [ -n "$_REX_BUSY" ] || break
     if [ "$SECONDS" -ge "$deadline" ]; then
       _rex_generation_unlock
-      printf 'waiting\t%s\tnot every Rex agent went idle within %ss: %s\n' "$cand" "${CEL_REX_UPGRADE_IDLE_SECS:-120}" "$_REX_BUSY"; return 0
+      printf 'waiting\t%s\tnot every Rex agent went idle within %ss: %s\tbusy\n' "$cand" "${CEL_REX_UPGRADE_IDLE_SECS:-120}" "$_REX_BUSY"; return 0
     fi
     sleep "${CEL_REX_UPGRADE_POLL_SECS:-10}"
   done
   # No Celestial launch may start between the last idle check and the stop.
-  exec {lock}>>"$(_rex_state)/launch.lock" || { _rex_generation_unlock; printf 'waiting\t%s\tlaunch admission is unavailable\n' "$cand"; return 0; }
+  exec {lock}>>"$(_rex_state)/launch.lock" || { _rex_generation_unlock; printf 'waiting\t%s\tlaunch admission is unavailable\tadmission\n' "$cand"; return 0; }
   if ! flock -w 60 "$lock"; then
     exec {lock}>&-; _rex_generation_unlock
-    printf 'waiting\t%s\tanother agent launch holds admission\n' "$cand"; return 0
+    printf 'waiting\t%s\tanother agent launch holds admission\tadmission\n' "$cand"; return 0
   fi
   local _RUN_ADMISSION_FD="$lock"
   if ! _rex_upgrade_plan || [ -n "$_REX_HELD$_REX_BUSY$_REX_FOREIGN" ]; then
     exec {lock}>&-; _rex_generation_unlock
-    printf 'waiting\t%s\tsomething changed at the last check: %s\n' "$cand" "${_REX_BUSY:-${_REX_HELD:-${_REX_FOREIGN:-unreadable inventory}}}"; return 0
+    printf 'waiting\t%s\tsomething changed at the last check: %s\trechecked\n' "$cand" "${_REX_BUSY:-${_REX_HELD:-${_REX_FOREIGN:-unreadable inventory}}}"; return 0
   fi
   local oldstatus oldrec=""
   oldstatus="$(_rex_server_status || true)"
@@ -1009,7 +1022,7 @@ rex_upgrade_round() {
   if [ -n "$oldstatus" ]; then
     _rex_generation_commit "$oldstatus" "$(printf '%s' "$_REX_PLAN" \
       | jq -Rcs '[split("\n")[] | select(length > 0) | split("\t") | {name: .[0], pid: (.[1] | tonumber), pid_start: .[2]}]')" \
-      || { exec {lock}>&-; _rex_generation_unlock; printf 'waiting\t%s\tcould not record the Rex agents to restore\n' "$cand"; return 0; }
+      || { exec {lock}>&-; _rex_generation_unlock; printf 'waiting\t%s\tcould not record the Rex agents to restore\trecord\n' "$cand"; return 0; }
     oldrec="$(cat "$(_rex_generation_file)")"
   fi
   # Exactly the version vetted above, never whatever apt resolves by then.
