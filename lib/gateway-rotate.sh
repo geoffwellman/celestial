@@ -85,6 +85,21 @@ _gwr_await() { # <key> <code>
   done
 }
 
+# Wait for <key1> to get <code1>, then <key2> <code2>. Prints the last status
+# each key got, "<c1> <c2>": when the first wait fails the second key is
+# probed once, so a failure reports what both keys get now, not an earlier
+# answer.
+_gwr_await_both() { # <key1> <code1> <key2> <code2>
+  local c1 c2
+  if c1="$(_gwr_await "$1" "$2")"; then
+    if c2="$(_gwr_await "$3" "$4")"; then printf '%s %s' "$c1" "$c2"; return 0; fi
+  else
+    c2="$(_gwr_http_code "$3")"
+  fi
+  printf '%s %s' "$c1" "$c2"
+  return 1
+}
+
 # The keys config.yaml lists, one per line - fed to a hash, never printed.
 _gwr_config_keys() {
   local f; f="$(gateway_config_file)"
@@ -101,6 +116,42 @@ _gwr_config_keys() {
 # the owner-only check or the holder scan.
 _gwr_proc() {
   if [ -n "${CEL_PROC_DIR:-}" ] && cel_under_suite; then printf '%s' "$CEL_PROC_DIR"; else printf /proc; fi
+}
+
+# THE CRASH SEAM: CEL_GATEWAY_ROTATE_CRASH_AFTER=<step> SIGKILLs the verb
+# right after that file operation, so the suite can prove every point a kill
+# can land on stays recoverable. Honoured only under this checkout's own
+# tests/run.sh (cel_under_suite, as _gwr_proc), never for the variable alone.
+_gwr_step() { # <step>
+  [ -n "${CEL_GATEWAY_ROTATE_CRASH_AFTER:-}" ] && [ "$CEL_GATEWAY_ROTATE_CRASH_AFTER" = "$1" ] || return 0
+  cel_under_suite || return 0
+  kill -KILL "$BASHPID"
+}
+
+# config.yaml listing the current api-key alone, the rotation files left on
+# disk. --finish and --abort rewrite and prove the config FIRST and delete
+# api-key.previous / api-key.next LAST, so a kill at any point leaves the
+# files saying what is still to do (_gateway_accepted_keys lists whatever key
+# files exist; here the two rotation files read as absent).
+_gwr_config_write_current_only() {
+  ( _gateway_key_previous_file() { printf /dev/null; }
+    _gateway_key_next_file() { printf /dev/null; }
+    _gateway_config_write )
+}
+
+# The sha256s of the keys in the key files, and of the keys config.yaml
+# lists: sorted, one per line. They differ only when something was cut short.
+_gwr_files_fps() {
+  local f fp
+  for f in "$(_gateway_key_previous_file)" "$(_gateway_key_file)" "$(_gateway_key_next_file)"; do
+    fp="$(_gwr_file_fp "$f")" && printf '%s\n' "$fp"
+  done | sort -u
+}
+_gwr_config_fps() {
+  local k
+  while IFS= read -r k; do
+    [ -z "$k" ] || printf '%s\n' "$(_gwr_fp_of "$k")"
+  done < <(_gwr_config_keys) | sort -u
 }
 
 # --- who holds a key -------------------------------------------------------
@@ -225,8 +276,17 @@ _gwr_print_plan() { # <rows>
 
 # --- the verbs ---------------------------------------------------------------
 
+# none, staged, or interrupted - a --stage cut short. That is api-key.next
+# without api-key.previous (killed before the switch), or api-key.previous
+# holding the very key api-key holds (killed between keeping the old key and
+# moving the new one over api-key; api-key.next still accepted). A staged
+# rotation may still carry a leftover api-key.next: --finish removes it.
 _gwr_state() { # -> none | staged | interrupted
-  if [ -e "$(_gateway_key_previous_file)" ]; then printf staged
+  local prev cur
+  if [ -e "$(_gateway_key_previous_file)" ]; then
+    prev="$(_gwr_file_fp "$(_gateway_key_previous_file)")" || prev=""
+    cur="$(_gwr_file_fp "$(_gateway_key_file)")" || cur=""
+    if [ -n "$prev" ] && [ "$prev" = "$cur" ]; then printf interrupted; else printf staged; fi
   elif [ -e "$(_gateway_key_next_file)" ]; then printf interrupted
   else printf none; fi
 }
@@ -241,8 +301,8 @@ _gwr_print_accepted() { # <state>
     [ -n "$k" ] || continue
     fp="$(_gwr_fp_of "$k")"; k=""
     case "$fp" in
-      "$prev") label=old ;;
       "$cur") if [ "$1" = staged ]; then label=new; else label=current; fi ;;
+      "$prev") label=old ;;
       "$next") label=next ;;
       *) label="UNKNOWN (in no key file)" ;;
     esac
@@ -254,14 +314,25 @@ _gwr_print_accepted() { # <state>
 
 _gwr_status() {
   if ! gateway_installed; then c_warn "no gateway on this box - cel gateway install"; return 0; fi
-  local state old new rows count procs
+  local state old new next rows count procs
   state="$(_gwr_state)"
   case "$state" in
     none)        printf '  rotation   none - the current key is the only key\n' ;;
-    interrupted) printf '  rotation   an interrupted --stage left api-key.next behind - cel gateway rotate-key --abort clears it\n' ;;
+    interrupted)
+      if [ -e "$(_gateway_key_previous_file)" ]; then
+        printf '  rotation   INTERRUPTED - a --stage was cut short after keeping api-key.previous: api-key still holds the old key and api-key.next is still accepted. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
+      else
+        printf '  rotation   INTERRUPTED - a --stage was cut short and left api-key.next behind. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
+      fi ;;
     staged)      printf '  rotation   staged - the gateway accepts the old and the new key; new launches get the new key\n' ;;
   esac
   _gwr_print_accepted "$state"
+  if [ "$state" != interrupted ] && [ "$(_gwr_config_fps)" != "$(_gwr_files_fps)" ]; then
+    printf '  MISMATCH   config.yaml does not accept exactly the keys in the key files. Fix: a --finish cut short completes with cel gateway rotate-key --finish again; otherwise cel gateway refresh rewrites config.yaml from the key files\n'
+  fi
+  if [ "$state" = staged ] && next="$(_gwr_file_fp "$(_gateway_key_next_file)")"; then
+    printf '  leftover   api-key.next (sha256 %s) is still accepted - cel gateway rotate-key --finish removes it\n' "${next:0:12}"
+  fi
   if [ "$state" != staged ]; then
     new="$(_gwr_file_fp "$(_gateway_key_file)")" || new=""
     if [ -n "$new" ]; then
@@ -298,10 +369,10 @@ _gwr_count() { # <rows> -> how many
 }
 
 _gwr_stage() {
-  local cur new code_old code_new
+  local cur new codes code_old code_new
   case "$(_gwr_state)" in
     staged) die "cel gateway rotate-key --stage: a rotation is already staged - cel gateway rotate-key --status, then --finish or --abort; nothing changed" ;;
-    interrupted) die "cel gateway rotate-key --stage: an interrupted --stage left api-key.next - cel gateway rotate-key --abort clears it; nothing changed" ;;
+    interrupted) die "cel gateway rotate-key --stage: an interrupted --stage left its rotation files - cel gateway rotate-key --abort clears it; nothing changed" ;;
   esac
   cur="$(_gwr_read_key "$(_gateway_key_file)")" \
     || die "cel gateway rotate-key --stage: no private (0600) api-key of yours in $(gateway_state_dir) - cel gateway install; nothing changed"
@@ -314,18 +385,23 @@ _gwr_stage() {
   chmod 600 "$(_gateway_key_next_file)"
   new="$(_gwr_read_key "$(_gateway_key_next_file)")" \
     || die "cel gateway rotate-key --stage: could not mint api-key.next - cel gateway rotate-key --abort clears what is left"
+  _gwr_step minted
   _gateway_config_write
-  if ! code_new="$(_gwr_await "$new" 200)" || ! code_old="$(_gwr_await "$cur" 200)"; then
+  _gwr_step config-listed
+  if ! codes="$(_gwr_await_both "$new" 200 "$cur" 200)"; then
+    read -r code_new code_old <<< "$codes"
     rm -f -- "$(_gateway_key_next_file)"
     _gateway_config_write
     die "cel gateway rotate-key --stage: the gateway did not accept both keys within $(_gwr_wait)s (old: HTTP ${code_old:-000}, new: HTTP ${code_new:-000}) - api-key.next removed and config.yaml back to the current key alone; nothing else changed"
   fi
+  read -r code_new code_old <<< "$codes"
   c_ok "the gateway accepts both keys: old (sha256 $(_gwr_fp_of "$cur" | cut -c1-12)) HTTP $code_old, new (sha256 $(_gwr_fp_of "$new" | cut -c1-12)) HTTP $code_new"
   # The switch: the old key is kept beside the new one first, then the new
   # key becomes the file every launch reads - one rename, so a launch reads
   # a whole key, old or new, and the config accepts both throughout.
   printf '%s' "$cur" | _gwr_write_key "$(_gateway_key_previous_file)" \
     || die "cel gateway rotate-key --stage: could not write api-key.previous - both keys stay accepted; cel gateway rotate-key --abort undoes the stage"
+  _gwr_step previous-written
   mv -f -- "$(_gateway_key_next_file)" "$(_gateway_key_file)" \
     || die "cel gateway rotate-key --stage: could not move api-key.next over api-key - both keys stay accepted and launches still get the old key; cel gateway rotate-key --abort undoes the stage"
   cur="" new=""
@@ -335,10 +411,10 @@ _gwr_stage() {
 }
 
 _gwr_finish() { # <force 0|1>
-  local force="$1" old new fp rows count code_old code_new
+  local force="$1" old new fp rows count codes code_old code_new
   case "$(_gwr_state)" in
     none) die "cel gateway rotate-key --finish: no rotation is staged - cel gateway rotate-key --stage starts one" ;;
-    interrupted) die "cel gateway rotate-key --finish: an interrupted --stage left api-key.next - cel gateway rotate-key --abort clears it" ;;
+    interrupted) die "cel gateway rotate-key --finish: an interrupted --stage never handed api-key the new key, so there is nothing to finish - cel gateway rotate-key --abort clears it, then --stage again; nothing changed" ;;
   esac
   old="$(_gwr_read_key "$(_gateway_key_previous_file)")" \
     || die "cel gateway rotate-key --finish: api-key.previous is not a private (0600) file of yours - nothing changed"
@@ -359,61 +435,86 @@ _gwr_finish() { # <force 0|1>
   fi
   gateway_ready \
     || die "cel gateway rotate-key --finish: the gateway is not answering on $(gateway_url) - nothing changed"
-  rm -f -- "$(_gateway_key_previous_file)"
-  _gateway_config_write
-  if ! code_old="$(_gwr_await "$old" 401)" || ! code_new="$(_gwr_await "$new" 200)"; then
-    printf '%s' "$old" | _gwr_write_key "$(_gateway_key_previous_file)" || true
+  # The config first, proven; the files last. Killed anywhere before the
+  # last delete, api-key.previous is still there: --status reports the
+  # rotation staged (and the config short of the old key), and --finish
+  # runs again.
+  _gwr_config_write_current_only
+  _gwr_step config-rewritten
+  if ! codes="$(_gwr_await_both "$old" 401 "$new" 200)"; then
+    read -r code_old code_new <<< "$codes"
     _gateway_config_write
     old="" new=""
-    die "cel gateway rotate-key --finish: the gateway did not drop the old key within $(_gwr_wait)s (old: HTTP ${code_old:-000}, new: HTTP ${code_new:-000}) - api-key.previous restored and both keys accepted again; the rotation is still staged"
+    die "cel gateway rotate-key --finish: the gateway did not drop the old key within $(_gwr_wait)s (old: HTTP ${code_old:-000}, new: HTTP ${code_new:-000}) - config.yaml accepts both keys again; the rotation is still staged"
   fi
+  read -r code_old code_new <<< "$codes"
   old="" new=""
+  if [ -e "$(_gateway_key_next_file)" ]; then
+    rm -f -- "$(_gateway_key_next_file)"
+    _gwr_step next-removed
+  fi
+  rm -f -- "$(_gateway_key_previous_file)"
+  _gwr_step previous-removed
   c_ok "rotation finished: the old key gets HTTP $code_old, the new key HTTP $code_new; api-key.previous deleted"
 }
 
+# Back to the old key alone, from a staged rotation or an interrupted stage.
+# api-key gets the old key back first (a kill there reads as an interrupted
+# stage: api-key.previous == api-key), then the config lists it alone and is
+# proven, and the rotation files go last - --abort again finishes any of it.
 _gwr_abort() { # <force 0|1>
-  local force="$1" old new rows count code_old code_new
-  case "$(_gwr_state)" in
-    none) die "cel gateway rotate-key --abort: no rotation to abort" ;;
-    interrupted)
-      old="$(_gwr_read_key "$(_gateway_key_file)")" \
-        || die "cel gateway rotate-key --abort: api-key is not a private (0600) file of yours - nothing changed"
-      rm -f -- "$(_gateway_key_next_file)"
-      _gateway_config_write
-      code_old="$(_gwr_await "$old" 200)" \
-        || die "cel gateway rotate-key --abort: api-key.next removed, but the current key gets HTTP $code_old within $(_gwr_wait)s - cel gateway status"
-      old=""
-      c_ok "the interrupted stage is cleared: the current key is the only key (HTTP $code_old)"
-      return 0 ;;
-  esac
-  old="$(_gwr_read_key "$(_gateway_key_previous_file)")" \
-    || die "cel gateway rotate-key --abort: api-key.previous is not a private (0600) file of yours - nothing changed"
-  new="$(_gwr_read_key "$(_gateway_key_file)")" \
-    || die "cel gateway rotate-key --abort: api-key is not a private (0600) file of yours - nothing changed"
-  # Abort cuts off whatever started since --stage, the mirror of --finish.
-  rows="$(_gwr_holders "$(_gwr_fp_of "$new")")"
-  count="$(_gwr_count "$rows")"
-  if [ "$count" -gt 0 ]; then
-    if [ "$force" != 1 ]; then
-      c_err "cel gateway rotate-key --abort: $count launch(es) started since --stage hold the new key - aborting would 401 them:"
+  local force="$1" state old new="" rows count codes code_old code_new
+  state="$(_gwr_state)"
+  [ "$state" != none ] || die "cel gateway rotate-key --abort: no rotation to abort"
+  if [ "$state" = staged ]; then
+    old="$(_gwr_read_key "$(_gateway_key_previous_file)")" \
+      || die "cel gateway rotate-key --abort: api-key.previous is not a private (0600) file of yours - nothing changed"
+    new="$(_gwr_read_key "$(_gateway_key_file)")" \
+      || die "cel gateway rotate-key --abort: api-key is not a private (0600) file of yours - nothing changed"
+    # Abort cuts off whatever started since --stage, the mirror of --finish.
+    rows="$(_gwr_holders "$(_gwr_fp_of "$new")")"
+    count="$(_gwr_count "$rows")"
+    if [ "$count" -gt 0 ]; then
+      if [ "$force" != 1 ]; then
+        c_err "cel gateway rotate-key --abort: $count launch(es) started since --stage hold the new key - aborting would 401 them:"
+        _gwr_print_holders "$rows"
+        printf '  --abort --force restores the old key anyway; restart those afterwards and they get the old key back. Nothing changed.\n'
+        return 1
+      fi
+      c_warn "--force: $count launch(es) on the new key are cut off (HTTP 401) until they are restarted:"
       _gwr_print_holders "$rows"
-      printf '  --abort --force restores the old key anyway; restart those afterwards and they get the old key back. Nothing changed.\n'
-      return 1
     fi
-    c_warn "--force: $count launch(es) on the new key are cut off (HTTP 401) until they are restarted:"
-    _gwr_print_holders "$rows"
+    printf '%s' "$old" | _gwr_write_key "$(_gateway_key_file)" \
+      || die "cel gateway rotate-key --abort: could not write api-key - nothing changed"
+    _gwr_step api-key-restored
+  else
+    old="$(_gwr_read_key "$(_gateway_key_file)")" \
+      || die "cel gateway rotate-key --abort: api-key is not a private (0600) file of yours - nothing changed"
+    new="$(_gwr_read_key "$(_gateway_key_next_file)")" || new=""
   fi
-  rm -f -- "$(_gateway_key_next_file)"
-  printf '%s' "$old" | _gwr_write_key "$(_gateway_key_file)" \
-    || die "cel gateway rotate-key --abort: could not write api-key - nothing changed"
-  rm -f -- "$(_gateway_key_previous_file)"
-  _gateway_config_write
-  if ! code_old="$(_gwr_await "$old" 200)" || ! code_new="$(_gwr_await "$new" 401)"; then
-    old="" new=""
-    die "cel gateway rotate-key --abort: api-key is the old key again and config.yaml lists it alone, but the gateway answers old HTTP ${code_old:-000}, new HTTP ${code_new:-000} after $(_gwr_wait)s - cel gateway status"
+  _gwr_config_write_current_only
+  _gwr_step config-rewritten
+  if [ -n "$new" ]; then
+    codes="$(_gwr_await_both "$old" 200 "$new" 401)" || {
+      read -r code_old code_new <<< "$codes"
+      old="" new=""
+      die "cel gateway rotate-key --abort: api-key holds the old key and config.yaml lists it alone, but the gateway answers old HTTP ${code_old:-000}, new HTTP ${code_new:-000} after $(_gwr_wait)s - cel gateway status, then cel gateway rotate-key --abort again"
+    }
+    read -r code_old code_new <<< "$codes"
+  else
+    code_old="$(_gwr_await "$old" 200)" \
+      || die "cel gateway rotate-key --abort: config.yaml lists the current key alone, but it gets HTTP $code_old within $(_gwr_wait)s - cel gateway status, then cel gateway rotate-key --abort again"
   fi
   old="" new=""
-  c_ok "rotation aborted: the old key is the only key again (HTTP $code_old; the new one HTTP $code_new)"
+  rm -f -- "$(_gateway_key_next_file)"
+  _gwr_step next-removed
+  rm -f -- "$(_gateway_key_previous_file)"
+  _gwr_step previous-removed
+  if [ "$state" = staged ]; then
+    c_ok "rotation aborted: the old key is the only key again (HTTP $code_old; the new one HTTP $code_new)"
+  else
+    c_ok "the interrupted stage is cleared: the current key is the only key (HTTP $code_old)"
+  fi
 }
 
 # OWNER ONLY: a process carrying an agent launch's marks, or with one above

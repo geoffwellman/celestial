@@ -323,3 +323,193 @@ test_rotate_stage_refuses_a_gateway_that_is_down() {
   _rk_no_key_printed || { _rk_teardown; return 1; }
   _rk_teardown
 }
+
+# --- a kill at every step stays recoverable -------------------------------
+#
+# CEL_GATEWAY_ROTATE_CRASH_AFTER=<step> (lib/gateway-rotate.sh _gwr_step)
+# SIGKILLs the verb right after that file operation; it is honoured only under
+# this suite. Each body returns 1 at its first failed check; the wrapper tears
+# the fixture down either way.
+_rk_case() { # <body> [args...]
+  local rc=0
+  _rk_setup
+  "$@" || rc=1
+  _rk_teardown
+  return "$rc"
+}
+
+# The verb, killed after <step>: it must die by SIGKILL, not finish or refuse.
+_rk_crash() { # <step> <args...>
+  local step="$1" out rc=0; shift
+  out="$(CEL_GATEWAY_ROTATE_CRASH_AFTER="$step" _rk "$@")" || rc=$?
+  [ "$rc" = 137 ] || { echo "--${1#--} was not killed after $step (rc $rc): $out"; return 1; }
+}
+
+_rk_key_is() { # <file> <key> - by sha256
+  assert_eq "$(_gwr_fp_of "$(cat "$CEL_GATEWAY_STATE/$1")")" "$(_gwr_fp_of "$2")"
+}
+
+# The old key the only key again, no rotation file left, a fresh --stage works.
+_rk_back_to_old_alone() {
+  _rk_key_is api-key "$OLD" || return 1
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.previous" ] && [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] \
+    || { echo "a rotation file was left behind"; return 1; }
+  assert_eq "$(_rk_config_fps | tr '\n' ' ')" "$(_gwr_fp_of "$OLD") " || return 1
+  assert_eq "$(_rk_code "$OLD")" 200 || return 1
+  [ -z "${NEW:-}" ] || assert_eq "$(_rk_code "$NEW")" 401 || return 1
+  local out; out="$(_rk --status)"
+  assert_contains "$out" "rotation   none" || return 1
+  case "$out" in *MISMATCH*) echo "a mismatch after recovery: $out"; return 1 ;; esac
+  out="$(_rk --stage)" || { echo "a fresh stage failed: $out"; return 1; }
+}
+
+_rk_stage_killed_body() { # <step>
+  local out
+  _rk_crash "$1" --stage || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key.next")"
+  # launches still get the old key, and the gateway still takes it
+  _rk_key_is api-key "$OLD" || return 1
+  assert_eq "$(_rk_code "$OLD")" 200 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   INTERRUPTED" || return 1
+  assert_contains "$out" "cel gateway rotate-key --abort clears it" || return 1
+  # --finish has nothing to finish: it says so and changes nothing
+  out="$(_rk --finish)" && { echo "finish ran over an interrupted stage: $out"; return 1; }
+  assert_contains "$out" "nothing to finish" || return 1
+  assert_contains "$out" "--abort clears it" || return 1
+  _rk_key_is api-key "$OLD" || return 1
+  assert_eq "$(_rk_code "$OLD")" 200 || return 1
+  out="$(_rk --stage)" && { echo "staged over an interrupted stage: $out"; return 1; }
+  out="$(_rk --abort)" || { echo "$out"; return 1; }
+  assert_contains "$out" "interrupted stage is cleared" || return 1
+  _rk_back_to_old_alone || return 1
+  _rk_no_key_printed
+}
+test_rotate_stage_killed_after_minting_reads_interrupted_and_abort_recovers() {
+  _rk_case _rk_stage_killed_body minted
+}
+test_rotate_stage_killed_after_listing_both_keys_reads_interrupted_and_abort_recovers() {
+  _rk_case _rk_stage_killed_body config-listed
+}
+test_rotate_stage_killed_after_keeping_previous_reads_interrupted_and_abort_recovers() {
+  _rk_case _rk_stage_killed_body previous-written
+}
+
+# --finish killed after <step>: the old key never comes back on its own, the
+# new key keeps working, and --finish again completes the rotation.
+_rk_finish_killed_body() { # <step> [leftover]
+  local out
+  _rk --stage >/dev/null || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  if [ "${2:-}" = leftover ]; then
+    _gateway_mint_secret "$CEL_GATEWAY_STATE/api-key.next"
+    chmod 600 "$CEL_GATEWAY_STATE/api-key.next"
+    _gateway_config_write
+    out="$(_rk --status)" || { echo "$out"; return 1; }
+    assert_contains "$out" "rotation   staged" || return 1
+    assert_contains "$out" "leftover   api-key.next" || return 1
+  fi
+  _rk_crash "$1" --finish || return 1
+  _rk_key_is api-key "$NEW" || return 1
+  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  assert_eq "$(_rk_code "$OLD")" 401 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  if [ -e "$CEL_GATEWAY_STATE/api-key.previous" ]; then
+    # the config dropped the old key, the files still name it: a cut-short
+    # --finish, and status names both ways out
+    assert_contains "$out" "rotation   staged" || return 1
+    assert_contains "$out" "MISMATCH" || return 1
+    assert_contains "$out" "cel gateway rotate-key --finish again" || return 1
+    assert_contains "$out" "cel gateway refresh" || return 1
+    out="$(_rk --finish)" || { echo "finish again failed: $out"; return 1; }
+    assert_contains "$out" "rotation finished" || return 1
+  fi
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.previous" ] && [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] \
+    || { echo "a rotation file was left behind"; return 1; }
+  assert_eq "$(_rk_config_fps | tr '\n' ' ')" "$(_gwr_fp_of "$NEW") " || return 1
+  assert_eq "$(_rk_code "$OLD")" 401 || return 1
+  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  out="$(_rk --status)"
+  assert_contains "$out" "rotation   none" || return 1
+  case "$out" in *MISMATCH*) echo "a mismatch after finishing: $out"; return 1 ;; esac
+  _rk_no_key_printed
+}
+test_rotate_finish_killed_after_rewriting_the_config_finishes_when_run_again() {
+  _rk_case _rk_finish_killed_body config-rewritten
+}
+test_rotate_finish_killed_after_removing_previous_is_finished() {
+  _rk_case _rk_finish_killed_body previous-removed
+}
+test_rotate_finish_removes_a_leftover_next_and_survives_a_kill_after_it() {
+  _rk_case _rk_finish_killed_body config-rewritten leftover || return 1
+  _rk_case _rk_finish_killed_body next-removed leftover
+}
+
+# --abort killed after <step>: --abort again restores the old key alone.
+_rk_abort_killed_body() { # <step>
+  local out
+  _rk --stage >/dev/null || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  _rk_crash "$1" --abort || return 1
+  assert_eq "$(_rk_code "$OLD")" 200 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  if [ -e "$CEL_GATEWAY_STATE/api-key.previous" ] || [ -e "$CEL_GATEWAY_STATE/api-key.next" ]; then
+    assert_contains "$out" "INTERRUPTED" || return 1
+    out="$(_rk --abort)" || { echo "abort again failed: $out"; return 1; }
+  fi
+  _rk_back_to_old_alone || return 1
+  _rk_no_key_printed
+}
+test_rotate_abort_killed_after_restoring_api_key_aborts_when_run_again() {
+  _rk_case _rk_abort_killed_body api-key-restored
+}
+test_rotate_abort_killed_after_rewriting_the_config_aborts_when_run_again() {
+  _rk_case _rk_abort_killed_body config-rewritten
+}
+test_rotate_abort_killed_after_removing_next_aborts_when_run_again() {
+  _rk_case _rk_abort_killed_body next-removed
+}
+
+# Any config the key files do not match is named, with the fix: here the
+# state a --finish killed between deleting api-key.previous and rewriting the
+# config used to leave - the old key still accepted, no rotation on record.
+_rk_mismatch_body() {
+  local out
+  _rk --stage >/dev/null || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  rm -f "$CEL_GATEWAY_STATE/api-key.previous"
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   none" || return 1
+  assert_contains "$out" "UNKNOWN (in no key file)" || return 1
+  assert_contains "$out" "MISMATCH" || return 1
+  assert_contains "$out" "cel gateway refresh rewrites config.yaml from the key files" || return 1
+  _gateway_config_write
+  out="$(_rk --status)"
+  case "$out" in *MISMATCH*) echo "a mismatch after a refresh: $out"; return 1 ;; esac
+  assert_eq "$(_rk_code "$OLD")" 401 || return 1
+  _rk_no_key_printed
+}
+test_rotate_status_names_the_fix_for_a_config_the_key_files_do_not_match() {
+  _rk_case _rk_mismatch_body
+}
+
+# A stage whose first wait fails reports what both keys get NOW: the old
+# key's answer is probed again, not the 200 it got before anything changed.
+_rk_stage_codes_body() {
+  local out real
+  export CEL_GATEWAY_ROTATE_WAIT=1
+  real="$(declare -f _gwr_http_code)"; eval "_rk_real_${real#_}"
+  _gwr_http_code() {
+    if [ "$(_gwr_fp_of "$1")" != "$(_gwr_fp_of "$OLD")" ]; then printf 401
+    elif [ -e "$CEL_GATEWAY_STATE/api-key.next" ]; then printf 418
+    else _rk_real_gwr_http_code "$1"; fi
+  }
+  out="$(_rk --stage)" && { echo "staged with the new key refused: $out"; return 1; }
+  assert_contains "$out" "(old: HTTP 418, new: HTTP 401)" || return 1
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "api-key.next left behind"; return 1; }
+  _rk_key_is api-key "$OLD" || return 1
+  _rk_no_key_printed
+}
+test_rotate_stage_failure_reports_the_codes_the_keys_get_now() {
+  _rk_case _rk_stage_codes_body
+}

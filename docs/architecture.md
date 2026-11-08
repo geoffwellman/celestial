@@ -396,13 +396,27 @@ during a rotation (`cel update`) therefore keeps both keys.
    and lanes, a note for reviewers (they finish their round; a later round
    starts a fresh one), and `cel run root` and `cel core --restart` last.
 3. `--finish` (owner) is refused while any launch still holds the old key.
-   `--force` cuts those launches off. It then drops the old key from the
-   config, waits for old 401 and new 200, and deletes `api-key.previous`. If
-   the gateway does not drop the old key in time, `api-key.previous` and the
-   two-key config are restored, and the rotation stays staged.
+   `--force` cuts those launches off. It then rewrites the config with the
+   current key alone, waits for old 401 and new 200, and only then deletes
+   `api-key.previous` (and a leftover `api-key.next`). If the gateway does
+   not drop the old key in time, the two-key config is written again and the
+   rotation stays staged.
 4. `--abort` (owner, before `--finish`) restores the old key as the only key.
    Like `--finish`, it is refused while launches started since `--stage` hold
    the new key, unless `--force`. It also clears an interrupted `--stage`.
+   It writes `api-key` back first, then the one-key config (proven), and
+   deletes the rotation files last.
+
+Crash safety: every verb changes the config before it deletes a key file, so
+a kill at any point leaves files that say what is left to do. A `--stage`
+killed before the rename leaves `api-key.next`, or `api-key.previous` equal to
+`api-key`. `--status` reports that as INTERRUPTED, `--abort` clears it, and
+`--finish` refuses it. A kill during `--finish` or `--abort` is completed by
+running the verb again. `--status` also flags any mismatch between the keys
+`config.yaml` accepts and the key files, and names the fix (`--finish` again,
+or `cel gateway refresh`). The suite proves each step by killing the verb
+after it (`CEL_GATEWAY_ROTATE_CRASH_AFTER`, honoured only under
+`cel_under_suite`).
 
 Owner only: `--stage`, `--finish` and `--abort` refuse a process that carries
 an agent launch's marks (`CEL_ROLE`, `CEL_INBOX_ME`, `CEL_SESSION_ID`,
