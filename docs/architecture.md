@@ -98,6 +98,45 @@ nudges, stalled-agent reporting, server maintenance and update checks. The
 optional systemd user timer defaults to five minutes. A sweep itself makes no
 model call, but a prompted agent may start paid work.
 
+### Launch environment by role
+
+A runtime inherits its pane's shell: the environment Herdr or Rex was started
+with, the workspace's `env:` and `env.local` (loaded by `cel shellenv` in a
+Herdr pane's shell, exported by the private Rex launch script), and then the
+launch line's own `K=V` words. Reviewers and team members are helpers and get
+only what their role needs: their line ends in a scrub (`_run_launch_scrub`),
+run after every `K=V` word and immediately before the runtime, that unsets
+each inherited variable whose NAME looks like a credential - `*_TOKEN`,
+`*_API_KEY`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`, `*_PAT`,
+`*_DSN`, `DATABASE_URL`, `AWS_*`, `CLOUDFLARE_*`, `CF_API_*`, `OPENROUTER_*`
+and their plural/short forms (`_RUN_SECRET_NAMES`, case-insensitive). Kept:
+every name the launch line itself sets, plus `LAUNCH_ENV_KEEP`. The scrub's
+argv carries names, never values.
+
+| Role | Secret-named variables it keeps | Why |
+|---|---|---|
+| reviewer | `OMP_GATEWAY_TOKEN`, `CEL_SESSION_ID` | always gateway-routed (Claude or Codex through `cel gateway`): the client key and the affinity key the provider block names |
+| reviewer, member | `GH_TOKEN`, only for a workspace with `github.user` | the workspace's account, produced by `gh auth token --user` in the pane (`ws_github_env_word`); a caller's `GH_TOKEN`/`GITHUB_TOKEN` is dropped |
+| member | `OMP_GATEWAY_TOKEN`, `CEL_SESSION_ID`, when `_run_profile_gateway_setup` sets them (a `via: gateway` profile, or omp on a box with a gateway key) | as for a reviewer |
+| member | the provider `key_env` of a direct profile's model (e.g. `OPENROUTER_API_KEY` for `openrouter/...`), from `_run_provider_key_env` | the one key that profile authenticates with; none for a gateway route, a CLI-signed-in provider, or a model naming no provider |
+
+Everything else secret-named - an owner's Cloudflare, AWS or deploy tokens,
+other providers' keys, an inherited gateway key on a launch that is not
+gateway-routed - is gone from the runtime. Non-secret names (`PATH`, `HOME`,
+`HERDR_PANE_ID`, the `CEL_*` role marks) are untouched. This is environment
+containment, not a sandbox: a helper runs as the same user and can still read
+`env.local` or a key file from disk, and `cel-linear` loads the workspace env
+itself when its key is absent.
+
+Product agents (`solo`, `orchestrator`, lanes, `root`, a role-less `direct`
+agent) and core are NOT scrubbed. Today they inherit the whole pane
+environment above - every owner credential the launching shell, the Herdr or
+Rex server, `env:` and `env.local` carry - plus the gateway words and the
+workspace `GH_TOKEN`. They may legitimately deploy, so narrowing them is the
+owner's decision. Proposed: the same scrub, with a per-workspace declared
+allowlist for product agents (the deploy credentials the owner grants them by
+name) and, for core, the gateway words and provider keys only.
+
 ### Feature teams (`lib/team.sh`)
 
 A team is one folder, `<ws>/.cel/teams/<feature>/`, and nothing else: no

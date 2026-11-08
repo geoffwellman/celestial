@@ -182,9 +182,47 @@ _run_inbox_hook_args() { # <runtime>  (mutates caller's AGENT_ARGS)
   fi
 }
 
+# A HELPER STARTS CLEAN. A reviewer or team member inherits its pane's shell
+# (the caller's environment, plus the workspace's env and env.local that the
+# shell or a Rex launch script loads), and a reviewer pane once ran with the
+# owner's CLOUDFLARE_API_TOKEN in it for a debug trace to print. So their
+# launch line ends in a scrub, run in the pane after every K=V word and
+# before the runtime: each inherited variable whose NAME looks like a
+# credential is unset, except the names this launch line sets itself (the
+# gateway key and session id when gateway-routed, the workspace account's
+# GH_TOKEN, the role marks) and LAUNCH_ENV_KEEP (the provider key a direct
+# profile authenticates with - _run_provider_key_env). Values never pass
+# through the scrub: its argv holds names only. Matched case-insensitively.
+# Product agents and core are not scrubbed (docs/architecture.md, "Launch
+# environment by role").
+_RUN_SECRET_NAMES='*_TOKEN|*_TOKENS|*_API_KEY|*_KEY|*_KEYS|*_SECRET|*_SECRETS|*_PASSWORD|*_PASSWD|*_PASS|*_CREDENTIAL|*_CREDENTIALS|*_PAT|*_DSN|DATABASE_URL|*_DATABASE_URL|AWS_*|CLOUDFLARE_*|CF_API_*|OPENROUTER_*'
+_run_launch_scrub() { # <keep-name...> -> ` bash -c '<scrub>' cel-launch-clean '<keep>'` for the end of an env prefix
+  local n keep=""
+  for n in "$@"; do
+    [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && keep="$keep $n"
+  done
+  # No single quote inside: the whole program is one single-quoted word in the
+  # pane, whatever its shell.
+  printf "bash -c 'k=\" \$1 \"; shift; for n in \$(compgen -e); do case \$k in *\" \$n \"*) continue ;; esac; shopt -s nocasematch; case \$n in %s) unset \"\$n\" ;; esac; shopt -u nocasematch; done; exec \"\$@\"' cel-launch-clean '%s'" \
+    "$_RUN_SECRET_NAMES" "${keep# }"
+}
+
+# The one credential a direct (non-gateway) profile authenticates with: its
+# model's provider `key_env` (agents.yaml providers). Nothing for a gateway
+# route, a provider signed in through its CLI, or a model naming no provider
+# (the runtime's own sign-in decides).
+_run_provider_key_env() { # <model> <via> -> KEY_ENV name, or nothing
+  [ "$2" != gateway ] || return 0
+  local prov; prov="$(profile_provider "$1")"
+  [ -n "$prov" ] || return 0
+  [ "$(provider_get "$prov" auth)" != cli ] || return 0
+  provider_get "$prov" key_env
+}
+
 # THE LAUNCHER MARKS ITS CHILDREN in /proc/<pid>/environ, fixed at exec, which
 # `cel gc` reads to prove ownership (pi rewrites its argv). As an `env K=V ...`
 # prefix, not an `export`: an export would outlive the agent in the pane's shell.
+# A reviewer's or member's prefix ends in the scrub above (_run_launch_scrub).
 _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V K=V K=V `
   local role="$1" wsdir="$2" file="${3:-}" me="${4:-}" runtime="${5:-}" out
   printf -v out 'env CEL_ROLE=%q CEL_WORKSPACE=%q' "$role" "$wsdir"
@@ -199,8 +237,10 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   # Gateway credentials and the per-agent session key (_run_profile_gateway_setup
   # fills GATEWAY_ENV in the caller): the same launch-scoped K=V words, so they
   # exist only in the launched process and never in the pane's shell.
-  local gw
-  for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"} ${LAUNCH_ENV_EXTRA[@]+"${LAUNCH_ENV_EXTRA[@]}"}; do out="$out $gw"; done
+  local gw sets=""
+  for gw in ${GATEWAY_ENV[@]+"${GATEWAY_ENV[@]}"} ${LAUNCH_ENV_EXTRA[@]+"${LAUNCH_ENV_EXTRA[@]}"}; do
+    out="$out $gw"; sets="$sets ${gw%%=*}"
+  done
   # WHOSE MAILBOX: `cel inbox` derives the reader from cwd, which an agent can
   # leave; root and orchestrators carry their identity from the launch instead.
   [ -z "$me" ] || printf -v out '%s CEL_INBOX_ME=%q CEL_INBOX_WS=%q' "$out" "$me" "$(ws_name "$wsdir")"
@@ -214,11 +254,18 @@ _run_launch_env() { # <role> <wsdir> [rolefile] [inbox-me] [runtime] -> `env K=V
   if [ -f "$wsdir/workspace.yaml" ]; then
     ghw="$(ws_github_env_word "$wsdir")"; ghg="$(ws_github_launch_guard "$wsdir")"
   fi
-  [ -z "$ghw" ] || out="$ghg$out $ghw"
+  [ -z "$ghw" ] || { out="$ghg$out $ghw"; sets="$sets ${ghw%%=*}"; }
+  local oc_cmd=""
   if [ "$runtime" = opencode ] && [ -n "${CEL_OPENCODE_CONFIG_FILE:-}" ]; then
     out="$(opencode_launch_guard "$CEL_OPENCODE_CONFIG_FILE")$out $(opencode_launch_env)"
-    [ "${session_backend:-herdr}" = rex ] || out="$out $(opencode_launch_command)"
+    [ "${session_backend:-herdr}" = rex ] || oc_cmd="$(opencode_launch_command)"
   fi
+  case "$role" in
+    reviewer|member)
+      # shellcheck disable=SC2086  # $sets is a word list on purpose
+      out="$out $(_run_launch_scrub $sets ${LAUNCH_ENV_KEEP[@]+"${LAUNCH_ENV_KEEP[@]}"})" ;;
+  esac
+  [ -z "$oc_cmd" ] || out="$out $oc_cmd"
   printf '%s ' "$out"
 }
 
@@ -2748,6 +2795,11 @@ $(_run_reviewer_brief "$repo" "$pr" "$review_head" "$review_base" "$review_path"
       # The one branch a builder may push (lib/guard.sh _guard_builder_push).
       [ "$MEMBER_ROLE" != builder ] || LAUNCH_ENV_EXTRA+=("CEL_TEAM_BRANCH=$MEMBER_BRANCH") ;;
   esac
+  # A scrubbed helper (_run_launch_scrub) still needs the provider key its
+  # profile authenticates with when it reaches a provider directly.
+  local -a LAUNCH_ENV_KEEP=()
+  local provider_key; provider_key="$(_run_provider_key_env "$model" "${PROFILE_VIA:-}")"
+  [ -z "$provider_key" ] || LAUNCH_ENV_KEEP=("$provider_key")
   envprefix="$(_run_launch_env "$env_role" "$wsdir" "$AGENT_ROLE_FILE" "$inbox_me" "$runtime")"
   local dry_envprefix="$envprefix" prefix_required=0
 
