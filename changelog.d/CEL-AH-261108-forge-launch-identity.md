@@ -1,5 +1,7 @@
 ### Fixed
 - `cel forge pr close`, `pr ready` and `run rerun` check the caller's identity against its launch, as `cel team`'s writing verbs do: the nearest process above `cel` whose `/proc/<pid>/environ` carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`, `CEL_INBOX_WS` and `CEL_TEAM*`. A product agent that exports another product's `CEL_PRODUCT` (however indirectly) is refused before any write, and so is a role with no launch above it.
+- No environment variable skips or redirects that check any more. `CEL_TESTING` without `CEL_PROC_DIR` used to skip it for `cel team` (and an indirected `export $X=1` got past the guard). Now the check always runs, and the test seams `CEL_PROC_DIR` (identity, inbox console liveness, pane launch env) and `CEL_FORGE_CURL` (where the forge token goes) are honoured only for a process under its own checkout's `tests/run.sh`, decided from the process's ancestry in `/proc`, which no variable can set. Outside it, `/proc` and the `curl` on `PATH` are used.
+- The guard refuses a line that runs `cel` while setting a variable whose name is an expansion (`export $X=1`, `declare -x "${X}=…"`, `eval "$X=1"`, `env "$X=1"`, `printf -v "$X"`, `read "$X"`) or declaring a nameref (`declare -n`).
 
 ### Changed
 - The launch-environ check moved from `lib/team.sh` (`_team_launch_identity`) to the shared `lib/identity.sh` (`cel_launch_identity`); `cel team`'s behaviour and messages are unchanged.

@@ -1,11 +1,15 @@
 # shellcheck shell=bash
 source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/forge.sh"
+source "$CEL_ROOT/tests/lib/launch-mirror.sh"
+# cel forge's writes check the caller against its launch: every call gets one
+# that carries exactly its identity, unless a test builds its own proc tree.
+launch_mirror_wrap cmd_forge
 
 # A workspace with one repo, `widget`, whose url and per-repo forge keys a
 # test sets; `extra` is appended at the top level (a github: block).
 _forge_ws() { # <url-or-empty> [forge] [host] [extra-yaml]
-  T="$(mktemp -d)"
+  T="$(mktemp -d)"; launch_mirror_at "$T/launch-proc"
   printf 'name: forgetest\n%s\nrepos:\n  - name: widget\n    prefix: WG\n' "${4:-}" > "$T/workspace.yaml"
   [ -z "$1" ] || printf '    url: %s\n' "$1" >> "$T/workspace.yaml"
   [ -z "${2:-}" ] || printf '    forge: %s\n' "$2" >> "$T/workspace.yaml"
@@ -616,6 +620,53 @@ test_forge_writes_act_only_as_the_launch_environ_says() {
     && { echo "a detached agent reran a job"; rm -rf "$T"; return 1; }
   assert_contains "$out" "no agent launch above it" || { rm -rf "$T"; return 1; }
   assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  rm -rf "$T"
+}
+
+# NOTHING EXPORTED SKIPS OR REDIRECTS THAT CHECK. CEL_TESTING alone used to
+# skip it, and `X=CEL_TESTING; export $X=1` slips past the guard's literal
+# spellings. Now the check always runs, and its seam (CEL_PROC_DIR) and the
+# forge's curl seam (CEL_FORGE_CURL) are honoured only for a process under
+# this checkout's own tests/run.sh - its ancestry, which no variable sets.
+test_forge_writes_check_the_launch_whatever_the_environment_says() {
+  _fj_ws $'products:\n  - name: shop\n    repos: [web]\n  - name: tools\n    repos: [widget]'
+  local out
+  # under the suite with no proc fixture: the real /proc decides, and nothing
+  # above this test was launched as tools' agent
+  out="$(cd "$T" && X=CEL_TESTING; export "$X=1"; unset CEL_PROC_DIR; CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch cmd_forge pr close widget#31 2>&1)" \
+    && { echo "CEL_TESTING without a proc fixture skipped the check"; rm -rf "$T"; return 1; }
+  assert_contains "$out" "launch" || { rm -rf "$T"; return 1; }
+  assert_eq "$(grep -cE '^(POST|PATCH|DELETE)' "$FJ_LOG")" 0 || { rm -rf "$T"; return 1; }
+  cel_under_suite || { echo "this test is not under the suite"; rm -rf "$T"; return 1; }
+  # OUTSIDE the suite - a process the runner did not start (detached, then
+  # reparented away from it) - exporting CEL_TESTING, a proc tree that vouches
+  # for tools and a stub curl changes nothing: the seams are not honoured
+  local P="$T/fake-proc" pc="$T/pathbin" o="$T/outside"
+  mkdir -p "$pc"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\necho "$*" >> %q\nprintf "%%s\\n%%s" %q 200\n' "$T/path-curl.log" '{"login":"path-curl"}' > "$pc/curl"
+  chmod +x "$pc/curl"
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  OUT_P="$P" OUT_T="$T" OUT_PC="$pc" setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    # the fake tree vouches for this shell as tools agent launch
+    mkdir -p "$OUT_P/$$"; printf "%s\0" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch > "$OUT_P/$$/environ"
+    printf "%s (bash) S 1 1 1" "$$" > "$OUT_P/$$/stat"
+    cd "$OUT_T"
+    CEL_TESTING=1 CEL_PROC_DIR="$OUT_P" CEL_ROLE=solo CEL_PRODUCT=tools CEL_INBOX_ME=tools-orch \
+      bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; cmd_forge pr close widget#31" && echo closed
+    CEL_TESTING=1 PATH="$OUT_PC:$PATH" bash -c ". \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/forge.sh\"; forge_whoami \"\$OUT_T\" widget"
+  ' > "$o" 2>&1 < /dev/null
+  local i=0
+  until grep -q 'login' "$o" 2>/dev/null || [ "$i" -ge 200 ]; do sleep 0.05; i=$((i + 1)); done
+  out="$(cat "$o")"
+  assert_contains "$out" outside || { echo "$out"; rm -rf "$T"; return 1; }
+  case "$out" in *under*|*closed*) echo "outside the suite the seams were honoured: $out"; rm -rf "$T"; return 1 ;; esac
+  assert_contains "$out" "launch" || { echo "$out"; rm -rf "$T"; return 1; }
+  # the token went to the curl on PATH, never to CEL_FORGE_CURL's stub
+  assert_contains "$out" '{"login":"path-curl"}' || { echo "$out"; rm -rf "$T"; return 1; }
+  assert_eq "$(cat "$FJ_LOG")" "" || { echo "the stub named by CEL_FORGE_CURL ran outside the suite"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
 

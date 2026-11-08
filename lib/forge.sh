@@ -75,8 +75,10 @@
 # line - never in argv, a log or an error. A repo declared on plain http://
 # says so on stderr for every request that sends its token: it crosses the
 # network unencrypted. CEL_FORGE_CURL names the curl binary - that backend's one
-# stub seam, honoured only under CEL_TESTING (set by tests/run.sh), so a
-# stray variable cannot hand the token to another binary. The token's
+# stub seam, honoured only under CEL_TESTING inside this checkout's own suite
+# (cel_under_suite, lib/common.sh: the process's ancestry, which no exported
+# variable changes), so a stray or forged variable cannot hand the token to
+# another binary. The token's
 # directory follows XDG_CONFIG_HOME, the standard per-user config root.
 # Where Forgejo cannot say what GitHub says, the answer is the conservative
 # one, never a guess:
@@ -527,7 +529,7 @@ _forge_fj() { # <host> <METHOD> <url> [json-body]
     args+=(--header 'Content-Type: application/json' --data-binary "@$bodyf")
   fi
   local curl=curl
-  [ -z "${CEL_TESTING:-}" ] || curl="${CEL_FORGE_CURL:-curl}"
+  if [ -n "${CEL_TESTING:-}" ] && [ -n "${CEL_FORGE_CURL:-}" ] && cel_under_suite; then curl="$CEL_FORGE_CURL"; fi
   out="$(printf 'header = "Authorization: token %s"\n' "$tok" | "$curl" "${args[@]}" "$url")" || rc=$?
   [ -z "$bodyf" ] || rm -f -- "$bodyf"
   [ "$rc" -eq 0 ] || { printf 'forge: %s failed (curl exit %s)\n' "$FJ_REQ" "$rc" >&2; return 1; }

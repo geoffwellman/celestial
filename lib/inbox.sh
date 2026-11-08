@@ -229,12 +229,14 @@ _inbox_roster() {
 # roster cannot see it. Its CEL_ROLE=console marker can: `cel console` exports
 # it, and /proc/<pid>/environ is fixed at exec, so it survives a
 # runtime that rewrites its own argv (the reason lib/gc.sh reads environ too).
-# CEL_PROC_DIR is the seam a test drives this through; nothing else moves it.
+# CEL_PROC_DIR is the seam a test drives this through, honoured only under
+# this checkout's own suite (cel_under_suite); nothing else moves it.
 _inbox_console_live() {
   # One grep over every environ, not forks per process: per-pid forks cost
   # seconds on a loaded box. -z makes NUL the record separator, so -x still
   # matches a whole variable.
-  local d="${CEL_PROC_DIR:-/proc}"
+  local d=/proc
+  if [ -n "${CEL_PROC_DIR:-}" ] && cel_under_suite; then d="$CEL_PROC_DIR"; fi
   grep -qszx 'CEL_ROLE=console' "$d"/[0-9]*/environ 2>/dev/null
 }
 

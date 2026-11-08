@@ -128,6 +128,13 @@ carries `CEL_ROLE` must agree on `CEL_ROLE`, `CEL_PRODUCT`, `CEL_INBOX_ME`,
 above it (detached by `setsid` or a double fork). A process that execs a
 fresh environment carrying `CEL_ROLE` is its own nearest launch; that
 spelling is the guard's to refuse. `cel forge`'s writes run the same check.
+Nothing in the environment skips or redirects it: its test seam, a fixture
+proc root in `CEL_PROC_DIR` (also read by lib/inbox.sh and lib/run.sh), is
+honoured only for a process under that checkout's own `tests/run.sh`
+(`cel_under_suite`, lib/common.sh), decided from the process's ancestry in
+`/proc` - an ancestor that is the same bash running that `run.sh` as its
+script - which no exported variable changes. The forge's curl seam
+(`CEL_FORGE_CURL`) is gated the same way.
 
 `cel team add` validates first (role, focus, repo, builder `--owns`), then
 asks `budget_admit team-member --pending N` (lib/budget.sh) BEFORE any write,
@@ -373,7 +380,9 @@ role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions
 (also in `bash -c`, `$(...)`, `eval`, or through a variable holding the
 name), which carry the token without `cel forge`'s checks; and no role may
 run any `cel` command on a line that sets a `CEL_*` or `HERDR_*` variable,
-even to empty (`VAR=`, `env VAR=`, `export`, `declare`) - dressing up as
+even to empty (`VAR=`, `env VAR=`, `export`, `declare`), or any variable
+whose name the guard cannot read - an expansion (`export $X=1`, `eval
+"$X=1"`, `printf -v "$X"`) or a nameref (`declare -n`) - dressing up as
 another product, lead, member or mailbox (`CEL_GUARD_ALLOW_ONCE`, the human's
 approval, does not count; `cel inbox send --from` is a flag). Shedding one
 (`unset`, `env -u`, `env -i`, `setsid`) is left to `cel forge` and `cel

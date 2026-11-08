@@ -25,8 +25,8 @@
 #   STUB_FJ_MERGE      ok (default) | conflict
 #   STUB_FJ_WRITE      ok (default) | denied: a PATCH or comment POST answers 403
 # The token is minted per harness from /dev/urandom - a synthetic value, never
-# a committed literal. CEL_FORGE_CURL is honoured only under CEL_TESTING,
-# which tests/run.sh sets.
+# a committed literal. CEL_FORGE_CURL is honoured only under CEL_TESTING and
+# for a process under this checkout's tests/run.sh (cel_under_suite).
 FJ_FIXTURE_HEAD=3c1f0e9a8b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e
 _forgejo_stub() { # <dir>
   local d="$1"

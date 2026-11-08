@@ -13,9 +13,12 @@
 # vouches for it. Limit: a process that execs a fresh environment carrying
 # CEL_ROLE (`env CEL_ROLE=solo CEL_PRODUCT=x bash -c ...`) is its own nearest
 # launch; that spelling is the guard's to refuse (_guard_cel_env_tamper).
-# Under the suite the proc root is CEL_PROC_DIR (the seam lib/inbox.sh
-# uses), and without one the check is skipped: a test must never read the
-# environ of the agent that happens to run it.
+# The check always runs. Its one seam, CEL_PROC_DIR (the proc root a test
+# builds, as lib/inbox.sh's), is honoured only under this checkout's own
+# suite (cel_under_suite, lib/common.sh: decided by the process's ancestry,
+# never by a variable); anywhere else the root is /proc. So a test that runs
+# a writing verb as an agent gives it a launch fixture - nothing exported
+# skips or redirects the check.
 #
 # Callers: `cel team`'s writing verbs (lib/team.sh) and `cel forge`'s writes
 # (lib/forge.sh _forge_cli_authorise). A process with no identity at all
@@ -23,7 +26,7 @@
 _CEL_IDENTITY_VARS='CEL_ROLE CEL_PRODUCT CEL_INBOX_ME CEL_INBOX_WS CEL_TEAM CEL_TEAM_ROLE CEL_TEAM_MEMBER'
 cel_launch_identity() { # <what, e.g. "cel team start"> -> dies unless this identity is its launch's
   local proc=/proc pid="$PPID" n=0 stat item v
-  if [ -n "${CEL_TESTING:-}" ]; then proc="${CEL_PROC_DIR:-}"; [ -n "$proc" ] || return 0; fi
+  if [ -n "${CEL_PROC_DIR:-}" ] && cel_under_suite; then proc="$CEL_PROC_DIR"; fi
   [ -n "${CEL_ROLE:-}${CEL_TEAM_MEMBER:-}" ] || return 0   # no identity: the caller refuses it
   local -A env=()
   while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do

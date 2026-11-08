@@ -16,6 +16,38 @@ c_hd()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
 die()    { c_err "$*"; exit 1; }
 
+# IS THIS PROCESS UNDER ITS OWN CHECKOUT'S TEST SUITE? The test seams that
+# redirect what cel trusts - CEL_PROC_DIR (whose /proc an identity is proven
+# from) and CEL_FORGE_CURL (which binary the forge token goes to) - are
+# honoured only then, and the environment alone never says so: an agent can
+# export anything (`X=CEL_TESTING; export $X=1` included) but cannot change
+# which processes are its ancestors. So the answer is read from the kernel:
+# some ancestor is the same bash as this shell (its /proc/<pid>/exe) running,
+# as its script, this file's own tests/run.sh - located from where this
+# function was defined, never from CEL_ROOT, which common.sh inherits. Only
+# `bash <that run.sh>` counts: an argument elsewhere (`bash -c '...' run.sh`,
+# `find run.sh -exec ...`) or another program renamed with `exec -a` does not.
+# Reads only, no forks. The limit is the runner itself: whatever its test
+# files run is under the suite, so seams are as trusted as that checkout.
+cel_under_suite() {
+  local runner="${BASH_SOURCE[0]%/*}/../tests/run.sh" pid="$$" n=0 stat arg
+  local -a argv
+  [ -f "$runner" ] || return 1
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && [ "$n" -lt 64 ]; do
+    argv=()
+    { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null
+    if [ "${#argv[@]}" -ge 2 ] && [ "/proc/$pid/exe" -ef "/proc/$$/exe" ]; then
+      arg="${argv[1]}"
+      case "$arg" in /*) ;; *) arg="/proc/$pid/cwd/$arg" ;; esac
+      [ "$arg" -ef "$runner" ] && return 0
+    fi
+    { read -r stat < "/proc/$pid/stat"; } 2>/dev/null || return 1
+    stat="${stat##*) }"; stat="${stat#* }"; pid="${stat%% *}"
+    n=$((n + 1))
+  done
+  return 1
+}
+
 # The owner's Hermes desktop starts per-profile SSH servers, not previews or
 # abandoned fixtures. Match executable ownership plus an actual argv option;
 # code/prompt text mentioning the option is not evidence. Never open its token.

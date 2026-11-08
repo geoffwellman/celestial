@@ -351,7 +351,9 @@ test_cel_forge_runs_are_everyones_and_close_ready_the_product_agents() {
 # another product, lead, member or mailbox. Shedding marks (unset, env -u,
 # env -i) gains nothing: cel forge and cel team refuse a process with no
 # agent identity, so the guard leaves those lines to them. The human's
-# CEL_GUARD_ALLOW_ONCE is not an identity and does not count.
+# CEL_GUARD_ALLOW_ONCE is not an identity and does not count. A name the
+# guard cannot read - an expansion (`X=CEL_TESTING; export $X=1`), a
+# nameref - is refused on a cel line the same way.
 test_cel_with_a_tampered_cel_environment_is_refused() {
   local role c
   for role in orchestrator root core solo other member; do
@@ -363,7 +365,15 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
              'export CEL_PRODUCT=other; cel team cap login "x"' 'CEL_TEAM_MEMBER=other-login-qa cel team verdict login --repo web --head x pass' \
              'CEL_INBOX_ME=widget-orch cel inbox read' 'env CEL_INBOX_WS=other cel inbox send root hi' \
              'HERDR_PANE_ID=p9 cel run reviewer --repo r --pr 1' 'typeset -x HERDR_PANE_ID=p9; cel status' \
-             'CEL_WORKSPACE=/w cel team status' 'CEL_GUARD_ALLOW_ONCE=1 CEL_PRODUCT=other cel team start x --product other'; do
+             'CEL_WORKSPACE=/w cel team status' 'CEL_GUARD_ALLOW_ONCE=1 CEL_PRODUCT=other cel team start x --product other' \
+             'X=CEL_TESTING; export $X=1; cel forge pr close gizmo#3' 'X=CEL_TESTING; export "$X=1"; cel forge pr close gizmo#3' \
+             'X=CEL_PROC_DIR; export ${X}=/tmp/p; cel team cap login 5' 'X=CEL_PROC_DIR; declare -x "$X"=/tmp/p && cel forge pr ready gizmo#3' \
+             'export $(printf CEL_TESTING)=1; cel forge run rerun gizmo 15' 'typeset -gx "${X}=1"; cel forge pr close gizmo#3' \
+             'readonly $X=1; cel team status' 'X=CEL_PRODUCT; declare -x "$X=tools"; cel forge pr close gizmo#3' \
+             'declare -n r=$X; r=1; cel forge pr close gizmo#3' 'local -n r; cel team status' \
+             'X=CEL_TESTING; eval "$X=1"; cel forge pr close gizmo#3' 'env "$X=1" cel forge pr close gizmo#3' \
+             'printf -v "$X" 1; cel forge pr close gizmo#3' 'read -r "$X" <<< 1; cel forge pr close gizmo#3' \
+             'eval "${X}=1" && cel forge run rerun gizmo 15'; do
       case "$(guard_classify "$role" "$c")" in "deny cel reads who is asking"*) ;; *) echo "$role allowed: $c"; return 1;; esac
     done
   done
@@ -371,7 +381,9 @@ test_cel_with_a_tampered_cel_environment_is_refused() {
            'env -u CEL_ROLE cel forge pr close gizmo#3' 'unset CEL_INBOX_ME CEL_ROLE && cel forge run list gizmo' \
            'env -i PATH=/usr/bin cel forge pr close gizmo#3' 'cel team status login' \
            'cel inbox send celestial-orch "done" --from celestial-pr-1-review --workspace plane' \
-           'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x'; do
+           'CEL_GUARD_ALLOW_ONCE=1 cel team status' 'grep -r CEL_ROLE= lib/' 'X=1 make -C ~/.cel/solo/x' \
+           'export PATH="$HOME/bin:$PATH"; cel status' 'for x in a b; do cel inbox send "$x" hi; done' \
+           'cel inbox send root "a=$b" --workspace plane' 'X=CEL_TESTING; export $X=1; make test'; do
     case "$(guard_classify solo "$c")" in "deny cel reads who is asking"*) echo "refused: $c"; return 1;; esac
   done
 }
