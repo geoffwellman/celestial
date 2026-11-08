@@ -463,13 +463,15 @@ test_the_spend_cap_is_lead_only_and_the_brief_cannot_widen_it() {
   rm -rf "$T"
 }
 
-# The lead's guidance says the budget is box-wide, its
+# The lead's guidance says the budget is box-wide, counts helpers only, its
 # defaults, where to see it, and that a reviewer launch can be refused too.
 test_solo_role_explains_the_box_wide_budget() {
   local s; s="$(cat "$CEL_ROOT/core/roles/solo.md")"
   assert_contains "$s" "THE BUDGET IS BOX-WIDE"
-  assert_contains "$s" "by default 8 agents in total and
-  4 team members"
+  assert_contains "$s" "by default 8 helpers in total and 4 team
+  members"
+  assert_contains "$s" "Product
+  agents and core are not counted"
   assert_contains "$s" '`cel budget` shows the counts and limits'
   assert_contains "$s" '`cel team add` can be refused, and so can `cel run reviewer`'
   assert_contains "$s" "not a promise"

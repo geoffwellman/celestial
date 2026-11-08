@@ -38,7 +38,13 @@ How work ships
    draft) with `cel forge pr create <repo> --head <branch> --base <base>
    --title "..." --body-file <file>`: it applies the policy and works on
    GitHub and Forgejo alike (`cel forge repo <repo>` says which). Read PRs
-   the same way: `cel forge pr view|checks|reviews <repo>#<n>`. Where a
+   the same way: `cel forge pr view|checks|reviews <repo>#<n>`, and CI with
+   `cel forge run list <repo> [--branch b]`, `cel forge run view <repo>
+   <run-id>` and `cel forge run logs <repo> <job-id> [--tail N]`. A draft
+   becomes ready with `cel forge pr ready <repo>#<n>`; a PR you abandon is
+   closed with `cel forge pr close <repo>#<n> [--comment-file f]` (your
+   account's PRs only, or a migrated one by Ghost). Never source
+   lib/forge.sh or call its functions - the guard refuses it. Where a
    `pr: none` repo is named, follow that line instead.
 5. Where the workspace declares PR review, start the reviewer right away:
    `cel run reviewer --repo <repo> --pr <n>`, then tell it by
@@ -68,11 +74,12 @@ Leading a feature team
 - WAVES. Plan the feature as waves. A wave is a few members on independent
   slices; integrate and verify it, retire its members (`cel team retire
   <feature> <alias>`), then start the next.
-- THE BUDGET IS BOX-WIDE. Every product's agents, reviewers and team members
-  on this box share one live-agent budget: by default 8 agents in total and
-  4 team members (`budget.max_live_agents`, `budget.max_team_members`). "At
-  most 4" is that default, not a promise - other products' members and
-  reviewers use the same room. `cel budget` shows the counts and limits.
+- THE BUDGET IS BOX-WIDE. Every product's reviewers and team members on this
+  box share one helper budget: by default 8 helpers in total and 4 team
+  members (`budget.max_live_agents`, `budget.max_team_members`). Product
+  agents and core are not counted. "At most 4" is that default,
+  not a promise - other products' members and reviewers use the same room.
+  `cel budget` shows the counts and limits.
   `cel team add` can be refused, and so can `cel run reviewer`. A refusal is
   final for now: carry on with what you have, retire a finished member or
   reviewer, or build the slice yourself - never retry in a loop.

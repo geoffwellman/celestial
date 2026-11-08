@@ -1,25 +1,29 @@
 # shellcheck shell=bash
 # A Forgejo for tests: a curl stub that answers the REST paths lib/forge.sh
 # uses, for the repo geoff/gizmo on http://forgejo.internal, from
-# tests/fixtures/forge/forgejo (spec-derived - see PROVENANCE there), and the
-# token file the backend reads. Per call it records:
+# tests/fixtures/forge/forgejo (recorded from Forgejo 17.0.1, anonymised -
+# see PROVENANCE there), and the token file the backend reads. Per call it
+# records:
 #   $FJ_ARGV_LOG   curl's argv, one line per call (the token must never be here)
 #   $FJ_STDIN_LOG  the config curl read from its stdin (where the token is)
 #   $FJ_LOG        "<METHOD> <url>"
 #   $FJ_BODY_LOG   each request body, one line
 #
 # Knobs, read on every call:
+#   STUB_FJ_PULL       the PR fixture file (default pull.json; pull-migrated.json
+#                      is a recorded migrated PR: author Ghost, merged)
 #   STUB_FJ_HEAD       the PR's head sha (default: the fixture's, $FJ_FIXTURE_HEAD)
-#   STUB_FJ_LOGIN      the PR author (default geoff, who is also GET /user)
+#   STUB_FJ_LOGIN      the PR author (default the fixture's - geoff, who is also GET /user)
 #   STUB_FJ_STATE      open (default) | closed | merged
 #   STUB_FJ_MERGEABLE  true | false (default the fixture's, true)
+#   STUB_FJ_TITLE      the PR title; a WIP: / [WIP] prefix makes it a draft
 #   STUB_FJ_STATUSES   a JSON array of CommitStatus replacing the fixture's
 #   STUB_FJ_PROT       main (an exact rule requiring `ci / test (pull_request)`,
-#                      the default) | none (genuine 404, no matching glob) |
+#                      the default) | none (genuine 404, no rule at all) |
 #                      glob | unreadable-glob | unnamed | denied | broken-404 |
 #                      error | list-denied (genuine 404, rule list refused)
 #   STUB_FJ_MERGE      ok (default) | conflict
-#
+#   STUB_FJ_WRITE      ok (default) | denied: a PATCH or comment POST answers 403
 # The token is minted per harness from /dev/urandom - a synthetic value, never
 # a committed literal. CEL_FORGE_CURL is honoured only under CEL_TESTING,
 # which tests/run.sh sets.
@@ -58,12 +62,14 @@ page=1 state=open
 [[ "$query" =~ (^|&)state=([a-z]+) ]] && state="${BASH_REMATCH[2]}"
 say() { printf '%s\n%s' "$2" "$1"; exit 0; }   # <code> <body>, as --write-out '\n%{http_code}' would
 pr() {
-  jq -c --arg n "$1" --arg h "${STUB_FJ_HEAD:-}" --arg u "${STUB_FJ_LOGIN:-}" --arg s "${STUB_FJ_STATE:-open}" --arg m "${STUB_FJ_MERGEABLE:-}" '
+  jq -c --arg n "$1" --arg h "${STUB_FJ_HEAD:-}" --arg u "${STUB_FJ_LOGIN:-}" --arg s "${STUB_FJ_STATE:-open}" --arg m "${STUB_FJ_MERGEABLE:-}" \
+    --arg t "${STUB_FJ_TITLE:-}" '
     .number = ($n | tonumber) | .html_url = "http://forgejo.internal/geoff/gizmo/pulls/\($n)"
     | if $h != "" then .head.sha = $h else . end
     | if $u != "" then .user.login = $u else . end
     | if $s == "merged" then .state = "closed" | .merged = true elif $s == "closed" then .state = "closed" else . end
-    | if $m != "" then .mergeable = ($m == "true") else . end' "$FJX/pull.json"
+    | if $m != "" then .mergeable = ($m == "true") else . end
+    | if $t != "" then .title = $t | .draft = ($t | test("^(wip:|\\[wip\\])"; "i")) else . end' "$FJX/${STUB_FJ_PULL:-pull.json}"
 }
 prot="${STUB_FJ_PROT:-main}"
 case "$method $path" in
@@ -79,6 +85,23 @@ case "$method $path" in
   "GET $R/pulls/"*/reviews) [ "$page" = 1 ] && say 200 "$(cat "$FJX/reviews.json")"; say 200 '[]' ;;
   "POST $R/pulls/"*/merge) [ "${STUB_FJ_MERGE:-ok}" = ok ] && say 200 ''; say 409 "$(cat "$FJX/merge-conflict.json")" ;;
   "GET $R/pulls/"*) say 200 "$(pr "${path##*/}")" ;;
+  # Forgejo answers an edit with the edited PR (201): a state, or a title -
+  # whose WIP prefix is the draft.
+  "PATCH $R/pulls/"*)
+    [ "${STUB_FJ_WRITE:-ok}" = ok ] || say 403 "$(cat "$FJX/forbidden.json")"
+    say 201 "$(pr "${path##*/}" | jq -c --argjson b "$body" '
+      if $b.state then .state = $b.state | .closed_at = "2026-11-08T12:00:00Z" else . end
+      | if $b.title then .title = $b.title | .draft = ($b.title | test("^(wip:|\\[wip\\])"; "i")) else . end')" ;;
+  "POST $R/issues/"*/comments)
+    [ "${STUB_FJ_WRITE:-ok}" = ok ] || say 403 "$(cat "$FJX/forbidden.json")"
+    say 201 "$(jq -nc --argjson b "$body" '{id: 901, body: $b.body}')" ;;
+  # Actions: runs page by page; run 9 and its jobs; job 15's plain-text log.
+  "GET $R/actions/runs")
+    [ "$page" = 1 ] && say 200 "$(cat "$FJX/actions-runs.json")"
+    say 200 '{"workflow_runs":[],"total_count":6}' ;;
+  "GET $R/actions/runs/9/jobs") say 200 "$(cat "$FJX/actions-jobs.json")" ;;
+  "GET $R/actions/runs/9") say 200 "$(cat "$FJX/actions-run.json")" ;;
+  "GET $R/actions/jobs/15/logs") say 200 "$(cat "$FJX/actions-job.log")" ;;
   "GET $R/commits/"*/status)
     [ "$page" = 1 ] || say 200 '{"statuses":[]}'
     [ -z "${STUB_FJ_STATUSES:-}" ] || say 200 "$(jq -c --argjson s "$STUB_FJ_STATUSES" '.statuses = $s' "$FJX/status.json")"
@@ -94,7 +117,8 @@ case "$method $path" in
     esac ;;
   "GET $R/branch_protections")
     case "$prot" in
-      none|broken-404) say 200 "$(cat "$FJX/protections-other.json")" ;;
+      none)            say 200 "$(cat "$FJX/protections-empty.json")" ;;
+      broken-404)      say 200 "$(cat "$FJX/protections-other.json")" ;;
       glob)            say 200 "$(cat "$FJX/protections-glob.json")" ;;
       unreadable-glob) say 200 "$(cat "$FJX/protections-unreadable-glob.json")" ;;
       unnamed)         say 200 "$(cat "$FJX/protections-unnamed.json")" ;;

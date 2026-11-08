@@ -3,8 +3,9 @@ source "$CEL_ROOT/lib/common.sh"
 source "$CEL_ROOT/lib/budget.sh"
 
 # ONE BOX-WIDE AGENT BUDGET (lib/budget.sh): team members and reviewers start
-# only while the live inventory is under the limits and the memory floor
-# admits; unknown inventory refuses; product agents are only warned.
+# only while the live HELPERS (reviewers, team members, other) are under the
+# limits and the memory floor admits; unknown inventory refuses; product
+# agents and core/root are shown but never counted, and never blocked.
 
 _bud() { # a private herdr roster ($T/roster.json) and no Rex receipts
   T="$(mktemp -d)"; mkdir -p "$T/bin" "$T/rex"
@@ -41,19 +42,43 @@ test_budget_admits_under_the_limit() {
 }
 
 test_budget_refuses_at_the_limit_for_members_and_reviewers() {
-  _bud; _roster core alpha-root a-orch b-orch c-orch widget-pr-1-review widget-pr-2-review stray
+  _bud; _roster core alpha-root a-orch b-orch c-orch widget-pr-1-review widget-pr-2-review stray \
+    w-pr-3-review w-pr-4-review w-pr-5-review w-pr-6-review w-pr-7-review
   local out rc=0
   out="$(budget_admit team-member)" || rc=$?
   assert_eq "$rc" 1
-  assert_contains "$out" "8 live agents, the limit is 8"
-  assert_contains "$out" "product 3, reviewers 2, team members 0, core/root 2, other 1"
+  assert_contains "$out" "8 helper agents live, the limit is 8"
+  assert_contains "$out" "reviewers 7, team members 0, other 1; not counted: product 3, core/root 2"
   assert_contains "$out" "not starting a team member"
   rc=0; out="$(budget_admit reviewer)" || rc=$?
   assert_eq "$rc" 1
   assert_contains "$out" "not starting a reviewer"
   # one fewer is admitted: the limit is "fewer than", counted exactly
-  _roster core alpha-root a-orch b-orch c-orch widget-pr-1-review widget-pr-2-review
+  _roster core alpha-root a-orch b-orch c-orch widget-pr-1-review widget-pr-2-review stray \
+    w-pr-3-review w-pr-4-review w-pr-5-review w-pr-6-review
   assert_eq "$(budget_admit reviewer >/dev/null; echo $?)" 0
+  rm -rf "$T"
+}
+
+# The owner's box runs 10 product agents and core: none of them is a helper,
+# so a reviewer is admitted with no helper live, and the helper limit alone
+# refuses - however many product agents run beside it.
+test_budget_product_agents_and_core_are_not_counted() {
+  _bud; _roster core p1-orch p2-orch p3-orch p4-orch p5-orch p6-orch p7-orch p8-orch \
+    /w/.cel/solo/p9/lane-ui /w/.cel/solo/p10/lane-api
+  local out rc=0
+  out="$(budget_admit reviewer)" || rc=$?
+  assert_eq "$rc:$out" "0:"
+  assert_eq "$(budget_admit team-member >/dev/null; echo $?)" 0
+  assert_eq "$(budget_counts | jq -c '[.total, .products, .core_root, .helpers]')" '[11,10,1,0]'
+  # at the helper limit: 8 helpers beside the same 10 products refuse
+  _roster core p1-orch p2-orch p3-orch p4-orch p5-orch p6-orch p7-orch p8-orch \
+    /w/.cel/solo/p9/lane-ui /w/.cel/solo/p10/lane-api \
+    a-pr-1-review a-pr-2-review /w/.cel/teams/login /w/.cel/teams/login /w/.cel/teams/pay /w/.cel/teams/pay stray1 stray2
+  rc=0; out="$(budget_admit reviewer)" || rc=$?
+  assert_eq "$rc" 1
+  assert_contains "$out" "8 helper agents live, the limit is 8"
+  assert_contains "$out" "not counted: product 10, core/root 1"
   rm -rf "$T"
 }
 
@@ -64,18 +89,18 @@ test_budget_team_member_limit_is_separate() {
   out="$(budget_admit team-member)" || rc=$?
   assert_eq "$rc" 1
   assert_contains "$out" "4 team members live, the limit is 4"
-  # a reviewer is not a team member: 5 of 8 admits it
+  # a reviewer is not a team member: 4 helpers of 8 admits it
   assert_eq "$(budget_admit reviewer >/dev/null; echo $?)" 0
   rm -rf "$T"
 }
 
 test_budget_reads_limits_from_box_config() {
-  _bud; _roster core widget-orch
+  _bud; _roster core widget-orch widget-pr-1-review stray
   printf 'budget:\n  max_live_agents: 2\n  max_team_members: 1\n' > "$CEL_CONFIG_FILE"
   local out rc=0
   out="$(budget_admit reviewer)" || rc=$?
   assert_eq "$rc" 1
-  assert_contains "$out" "2 live agents, the limit is 2"
+  assert_contains "$out" "2 helper agents live, the limit is 2"
   assert_eq "$(budget_max_team_members)" 1
   rm -rf "$T"
 }
@@ -111,11 +136,15 @@ test_budget_unknown_kind_is_refused() {
   rm -rf "$T"
 }
 
-# Product agents are counted, never blocked: the sentence is a warning.
+# Product agents are never counted and never blocked: a full helper budget
+# says nothing to them; only the memory floor warns, and they start anyway.
 test_budget_product_kind_says_it_starts_anyway() {
   _bud; _roster a b c d e f g h
   local out rc=0
   out="$(budget_admit product)" || rc=$?
+  assert_eq "$rc:$out" "0:"
+  printf 'MemTotal: 16000000 kB\nMemAvailable: 1024000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' > "$T/meminfo"
+  rc=0; out="$(CEL_MEMINFO="$T/meminfo" budget_admit product)" || rc=$?
   assert_eq "$rc" 1
   assert_contains "$out" "starts anyway"
   rm -rf "$T"
@@ -134,7 +163,7 @@ test_budget_classifies_by_role() {
     {"name":"widget-login-qa","pane_id":"g","cwd":"/w/.cel/teams/login"},
     {"name":"","pane_id":"h","cwd":"/tmp"},
     {"name":"x","pane_id":"rex/s/b","backend":"rex","role":"reviewer","cwd":"/r"}]}}'
-  assert_eq "$(budget_counts "$rows")" '{"total":9,"products":2,"reviewers":2,"members":2,"core_root":2,"other":1}'
+  assert_eq "$(budget_counts "$rows")" '{"total":9,"products":2,"reviewers":2,"members":2,"core_root":2,"other":1,"helpers":5}'
   rm -rf "$T"
 }
 
@@ -142,11 +171,12 @@ test_cel_budget_prints_counts_against_limits() {
   _bud; _roster core widget-orch /w/.cel/teams/login
   local out
   out="$("$CEL_ROOT/bin/cel" budget)"
-  assert_contains "$out" "live agents   3 of 8"
+  assert_contains "$out" "helpers       1 of 8"
+  assert_contains "$out" "live agents   3  (product 1, core/root 1: shown, not counted)"
   assert_contains "$out" "team members  1 of 4"
   assert_contains "$out" "memory        admits"
   out="$("$CEL_ROOT/bin/cel" budget --json)"
-  assert_eq "$(jq -r '[.live.total, .limits.max_live_agents, .live.members, .memory.admit] | @tsv' <<< "$out")" $'3\t8\t1\ttrue'
+  assert_eq "$(jq -r '[.live.total, .live.helpers, .limits.max_live_agents, .live.members, .memory.admit] | @tsv' <<< "$out")" $'3\t1\t8\t1\ttrue'
   touch "$T/herdr-down"
   assert_fails "$CEL_ROOT/bin/cel" budget
   rm -rf "$T"
@@ -161,9 +191,9 @@ test_budget_counts_pending_reserved_members() {
   out="$(budget_admit team-member --pending 3)" || rc=$?
   assert_eq "$rc" 1
   assert_contains "$out" "4 team members live (3 reserved, not launched yet), the limit is 4"
-  rc=0; out="$(budget_admit team-member "$(cat "$T/roster.json")" --pending=6)" || rc=$?
+  rc=0; out="$(budget_admit team-member "$(cat "$T/roster.json")" --pending=7)" || rc=$?
   assert_eq "$rc" 1
-  assert_contains "$out" "8 live agents (6 reserved, not launched yet), the limit is 8"
+  assert_contains "$out" "8 helper agents live (7 reserved, not launched yet), the limit is 8"
   rc=0; out="$(budget_admit team-member --pending lots)" || rc=$?
   assert_eq "$rc" 1; assert_contains "$out" "--pending wants a count"
   assert_eq "$(budget_admit team-member --pending 08 >/dev/null; echo $?)" 1

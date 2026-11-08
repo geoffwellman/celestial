@@ -1,0 +1,13 @@
+Regression suite	Run regression suite	﻿2026-11-07T21:13:50.5699128Z ##[group]Run bash tests/run.sh
+Regression suite	Run regression suite	2026-11-07T21:13:50.5699394Z ^[[36;1mbash tests/run.sh^[[0m
+Regression suite	Run regression suite	2026-11-07T21:13:50.5717881Z shell: /usr/bin/bash -e {0}
+Regression suite	Run regression suite	2026-11-07T21:13:50.5718098Z ##[endgroup]
+Regression suite	Run regression suite	2026-11-07T21:18:07.1650739Z   ^[[32mok^[[0m   test_gc_rex_active_pending_tools_and_later_user_work_keep_registry
+Regression suite	Run regression suite	2026-11-07T21:18:07.1651736Z   ^[[32mok^[[0m   test_gc_rex_changed_head_identity_native_and_user_terminal_are_protected
+Regression suite	Run regression suite	2026-11-07T21:18:07.1652676Z   ^[[31mFAIL^[[0m test_gc_rex_completed_exact_head_rounds_retire_and_preserve_evidence
+Regression suite	Run regression suite	2026-11-07T21:18:07.1658550Z          ^[[32m✓^[[0m retired native reviewer for widget#71 (pane rex/widget-review/terminal; native evidence and checkout kept)
+Regression suite	Run regression suite	2026-11-07T21:18:07.1660376Z        /home/runner/work/widget/widget/lib/gc.sh: line 796: /tmp/cel-tests.gcmC9p/xdg/30.6/state/cel/gc-idle-stop-last.txt: No such file or directory
+Regression suite	Run regression suite	2026-11-07T21:18:07.1661818Z          ^[[32m✓^[[0m retired native reviewer for widget#71 (pane rex/widget-review/terminal; native evidence and checkout kept)
+Regression suite	Run regression suite	2026-11-07T21:22:20.6387704Z 
+Regression suite	Run regression suite	2026-11-07T21:22:20.6387974Z 1896 passed, 1 failed
+Regression suite	Run regression suite	2026-11-07T21:22:21.4455254Z ##[error]Process completed with exit code 1.

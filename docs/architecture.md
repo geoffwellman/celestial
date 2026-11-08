@@ -60,12 +60,16 @@ directories under its root with no liveness check. This prevents new
 collisions only; it does not repair already-relocated sessions or running
 processes, which belong to the retained-runtime lifecycle.
 
-One box-wide live agent budget (`lib/budget.sh`) admits team members and new
+One box-wide helper budget (`lib/budget.sh`) admits team members and new
 reviewers: `budget_admit <kind>` counts the native inventory
-(`cel_agent_list`) by role against `budget.max_live_agents` and
-`budget.max_team_members` in the box config, then asks `boxguard_admit` for
-the memory floor; an unreadable inventory refuses. Product agents are counted
-and warned, never blocked. Team members start through one door,
+(`cel_agent_list`) by role; the HELPERS (reviewers, team members, any other
+agent) are held under `budget.max_live_agents` (default 8) and the members
+under `budget.max_team_members` (default 4) in the box config, then
+`boxguard_admit` answers for the memory floor; an unreadable inventory
+refuses. Product agents (`*-orch`, solo lanes) and core/root are shown by
+`cel budget` but never counted - a box running ten products keeps the whole
+helper budget for their reviewers - and a product launch is never blocked,
+only warned by the memory floor. Team members start through one door,
 `cel team add`, which reserves the member row and writes a one-time launch
 token that `cel run member` spends before any check (the guard refuses every
 agent both `cel run member` and the token directory). The launcher admits the
@@ -313,20 +317,31 @@ example:
     host: http://forgejo.example.net                  # web + /api/v1, plain HTTP
 ```
 
-`lib/forge.sh` holds pull-request operations in Celestial's own vocabulary
-(`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`, `forge_pr_reviews`,
-`forge_pr_merge`, `forge_pr_create`, `forge_whoami`): each prints one
-normalised JSON value or fails, with the same shape from either backend.
-`cel forge` puts them on the command line (`repo`, `whoami`, `pr
-view|checks|reviews|list|create`, `--json` for the normalised value); the
-guard leaves its reads to every role and refuses `pr create` to orchestrators
-and core, as it refuses `gh pr create`, and a reviewer never opens a PR.
+`lib/forge.sh` holds pull-request and CI operations in Celestial's own
+vocabulary (`forge_pr_view`, `forge_pr_list`, `forge_pr_checks`,
+`forge_pr_reviews`, `forge_pr_merge`, `forge_pr_create`, `forge_pr_close`,
+`forge_pr_ready`, `forge_whoami`, `forge_run_list`, `forge_run_view`): each
+prints one normalised JSON value or fails, with the same shape from either
+backend; `forge_run_logs` prints a job's log as plain text. `cel forge` puts
+them on the command line (`repo`, `whoami`, `pr
+view|checks|reviews|list|create|close|ready`, `run list|view|logs`, `--json`
+for the normalised value). The guard leaves its reads - CI runs and job logs
+included - to every role; it refuses `pr create` to orchestrators and core, as
+it refuses `gh pr create`, and a reviewer never opens a PR; `pr close` and
+`pr ready` belong to the product's own agent (solo or orchestrator) and the
+owner, refused to core, root, members and reviewers, and `cel forge` itself
+lets an agent change only a PR its workspace's account authored, or a
+migrated Forgejo PR (author `Ghost`). Closing never deletes the branch.
 There is no merge verb: merging goes through `cel solo land`. The same writes
 by hand - curl at a forge API with a body or a non-GET method in any
 spelling, `tea api` beyond a plain GET, tea's write verbs - are refused to
-orchestrators, root, core and solo agents alike, and no role may read, copy
+orchestrators, root, core and solo agents alike; no role may read, copy
 or write `~/.config/cel/forge` (by
-shell, or by the native read and edit tools where the guard hook runs).
+shell, or by the native read and edit tools where the guard hook runs); and no
+role may source `lib/forge.sh` or call its `_forge_*`/`forge_*` functions,
+which carry the token without `cel forge`'s checks. Like the rest of the
+guard these are tripwires, not a sandbox: a script file that sources the
+library still runs.
 
 - **GitHub** is served through `gh` as the workspace's account (`ws_gh`);
   `CEL_FORGE_GH` is its test seam.
@@ -344,8 +359,12 @@ shell, or by the native read and edit tools where the guard hook runs).
   caps `limit`). Where Forgejo cannot say what GitHub says, the answer is the
   conservative one: a draft is the `WIP:` title prefix (added by
   `forge_pr_create` only where `policy.pr_open` is not `ready`; a WIP title
-  under a ready policy is refused); `mergeable: false` reads as
-  `conflicting`; review `decision` is `approved` only for a non-stale,
+  under a ready policy is refused, and `forge_pr_ready` removes it);
+  `mergeable: false` reads as `unknown`, never `conflicting` - Forgejo also
+  answers false for a PR it has not (re)computed, as recorded on a clean
+  fast-forward, and its API has no field that proves a conflict; a
+  status's site-relative `target_url` is made absolute; Actions runs and jobs
+  say their state in `status` with `conclusion` null; review `decision` is `approved` only for a non-stale,
   undismissed approval whose `commit_id` is the current head, and no
   reviewer's latest verdict requesting changes. Checks are the head's
   combined status (latest status per context). The base's required checks

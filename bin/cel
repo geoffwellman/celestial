@@ -158,6 +158,14 @@ cel - the celestial plane
   cel forge pr create <repo> --head <branch> --base <branch> --title t --body-file f
                                 open a PR, ready or draft as the policy says
                                 (Forgejo's draft is a WIP: title prefix)
+  cel forge pr close <repo>#<n> [--comment-file f]
+  cel forge pr ready <repo>#<n>  close a PR (branch kept) / take it out of
+                                draft; the product's own agent on its own
+                                account's PRs (or a migrated one by Ghost)
+  cel forge run list <repo> [--branch b] [--limit N]
+  cel forge run view <repo> <run-id> | logs <repo> <job-id> [--tail N] [--raw]
+                                CI runs, a run's jobs, a job's log - read-only,
+                                Forgejo Actions or GitHub alike
   cel run reviewer --repo r --pr n   review pane in the "PR reviewer" tab;
                                 one reviewer per PR (a second call reuses it),
                                 and cel gc closes it when the PR closes
@@ -261,11 +269,12 @@ cel - the celestial plane
                                 see an orchestrator's conversation (from its
                                 session file) and mail it as owner, with a
                                 receipt; never types into a pane
-  cel budget [--json]           live agents box-wide by role against
-                                budget.max_live_agents (8) and
+  cel budget [--json]           live helpers box-wide (reviewers, team members,
+                                other) against budget.max_live_agents (8) and
                                 budget.max_team_members (4), and the memory
                                 floor; team members and reviewers start only
-                                inside it, product agents are only warned
+                                inside it; product agents and core are shown,
+                                never counted, only warned by memory
   cel build-slot -- <cmd>       run a heavy build (cargo build/test...) in the
                                 box-wide build slot: one at a time by default
                                 (build.slots), CARGO_BUILD_JOBS = half the cores

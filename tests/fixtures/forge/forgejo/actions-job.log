@@ -1,0 +1,8 @@
+2026-11-07T12:47:47.9121203Z Runner 00000000-0000-0000-0000-000000000000 (version:v13.2.1) received task 15 of job linux, triggered by event: push
+2026-11-07T12:47:47.9144216Z workflow prepared
+2026-11-07T12:47:47.9194967Z 🚀  Start image=catthehacker/ubuntu:act-24.04
+2026-11-07T12:47:47.9195850Z The network alias is build___test___headless_snapshot (sanitized version of build · test · headless snapshot)
+2026-11-07T12:47:47.9347336Z Cleaning up network for job build · test · headless snapshot, and network name is: WORKFLOW-anonymised
+2026-11-07T12:50:18.1491264Z   ✅  Success - Post actions/checkout@v5
+2026-11-07T12:50:18.1628555Z 🏁  Job failed
+2026-11-07T12:50:19.2160309Z Job 'build · test · headless snapshot' failed

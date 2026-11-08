@@ -1,12 +1,17 @@
 # shellcheck shell=bash
-# ONE BOX-WIDE AGENT BUDGET. Every agent the plane starts costs memory and
+# ONE BOX-WIDE HELPER BUDGET. Every agent the plane starts costs memory and
 # attention, and the pressure that retired fan-out came from starting one per
 # ticket. So a team member or a reviewer is started only while the box holds
-# fewer live Celestial agents than `budget.max_live_agents` (default 8,
-# everything counted) - a team member also only while fewer than
-# `budget.max_team_members` (default 4) members are live - and only while the
-# memory floor admits it (boxguard_admit). Product agents are counted but
-# never blocked: their launcher warns (lib/run.sh).
+# fewer live HELPERS than `budget.max_live_agents` (default 8) - a team member
+# also only while fewer than `budget.max_team_members` (default 4) members are
+# live - and only while the memory floor admits it (boxguard_admit).
+#
+# A helper is what a product launches beside itself: reviewers, team members
+# and any other agent on the roster. Product agents (<product>-orch, solo
+# lanes) and core/root are the box's standing crew, not helpers: they are
+# shown (cel budget) but never counted, so a box running ten products still
+# has the whole helper budget for their reviewers. Product agents are never
+# blocked; only the memory floor warns them (lib/run.sh).
 #
 # The count is the native inventory (cel_agent_list: herdr + managed Rex),
 # not a ledger: a ledger can say an agent is gone that is still running. An
@@ -30,11 +35,11 @@ budget_max_team_members() { _boxguard_cfg "${CEL_BUDGET_MAX_TEAM_MEMBERS:-}" bud
 
 # WHO IS LIVE, BY ROLE. A Rex row says its role; a herdr row is classified by
 # what cel run named it and where it stands:
-#   team member  stands under <ws>/.cel/teams/ (its worktree or its team dir)
-#   reviewer     <repo>-pr-<n>-review
-#   core/root    core, <ws>-root
-#   product      <product>-orch, or a solo lane (<ws>/.cel/solo/<p>/lane-<l>)
-#   other        anything else on the roster - still an agent, still counted
+#   team member  stands under <ws>/.cel/teams/ (its worktree or its team dir)   helper
+#   reviewer     <repo>-pr-<n>-review                                           helper
+#   core/root    core, <ws>-root                                                not counted
+#   product      <product>-orch, or a solo lane (<ws>/.cel/solo/<p>/lane-<l>)   not counted
+#   other        anything else on the roster - still an agent                  helper
 _BUDGET_JQ_COUNTS='
   def class:
     ((.role // "") | tostring) as $r | ((.name // "") | tostring) as $n | ((.cwd // "") | tostring) as $c
@@ -49,7 +54,8 @@ _BUDGET_JQ_COUNTS='
      reviewers: ([$a[] | select(class == "reviewers")] | length),
      members: ([$a[] | select(class == "members")] | length),
      core_root: ([$a[] | select(class == "core_root")] | length),
-     other: ([$a[] | select(class == "other")] | length)}'
+     other: ([$a[] | select(class == "other")] | length)}
+  | .helpers = .reviewers + .members + .other'
 
 # Counts as one JSON object; rc 1 (nothing printed) when the inventory is
 # unreadable or not a roster.
@@ -61,18 +67,19 @@ budget_counts() { # [agents-json]
 }
 
 _budget_breakdown() { # <counts-json>
-  printf '%s' "$1" | jq -r '"product \(.products), reviewers \(.reviewers), team members \(.members), core/root \(.core_root), other \(.other)"'
+  printf '%s' "$1" | jq -r '"reviewers \(.reviewers), team members \(.members), other \(.other); not counted: product \(.products), core/root \(.core_root)"'
 }
 
 # 0 = admit. 1 = refuse, with ONE plain sentence on stdout (boxguard_admit's
-# convention). <kind>: team-member | reviewer | product. A product agent's
-# refusal is the caller's warning, never its block. The optional roster is a
-# cel_agent_list document the caller has already read for its own checks.
+# convention). <kind>: team-member | reviewer | product. A product agent is
+# not a helper, so only the memory floor can answer it, and that answer is the
+# caller's warning, never its block. The optional roster is a cel_agent_list
+# document the caller has already read for its own checks.
 # --pending N counts N team members that are reserved but not launched yet
 # (cel team add counts them from every team.json): they are added to the live
-# total and to the team members before either limit is compared.
+# helpers and to the team members before either limit is compared.
 budget_admit() { # <kind> [agents-json] [--pending N]
-  local kind="${1:-}" roster="" pending=0 counts total members max max_members what verdict mem held=""
+  local kind="${1:-}" roster="" pending=0 counts helpers members max max_members what verdict mem held=""
   [ $# -eq 0 ] || shift
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -90,19 +97,19 @@ budget_admit() { # <kind> [agents-json] [--pending N]
   [[ "$pending" =~ ^[0-9]+$ ]] \
     || { printf 'box agent budget: --pending wants a count of reserved members, got %q - not starting %s\n' "$pending" "$what"; return 1; }
   verdict="not starting $what"
-  [ "$kind" != product ] || verdict="the product agent starts anyway (product agents are counted, never blocked)"
+  [ "$kind" != product ] || verdict="the product agent starts anyway (product agents are not counted, never blocked)"
   if ! counts="$(budget_counts "$roster")" || [ -z "$counts" ]; then
     printf 'box agent budget: the live agent inventory (herdr agent list / Rex receipts) is unreadable, so how many agents run is unknown - %s (fail closed; check herdr, then retry)\n' "$verdict"
     return 1
   fi
   max="$(budget_max_live_agents)"; max_members="$(budget_max_team_members)"
   pending=$((10#$pending))
-  total=$(( $(printf '%s' "$counts" | jq -r .total) + pending ))
+  helpers=$(( $(printf '%s' "$counts" | jq -r .helpers) + pending ))
   members=$(( $(printf '%s' "$counts" | jq -r .members) + pending ))
   [ "$pending" -eq 0 ] || held=" ($pending reserved, not launched yet)"
-  if [ "$total" -ge "$max" ]; then
-    printf 'box agent budget: %s live agents%s, the limit is %s (%s) - %s; retire a team member or a finished reviewer first (cel budget; budget.max_live_agents in %s)\n' \
-      "$total" "$held" "$max" "$(_budget_breakdown "$counts")" "$verdict" "$(cel_config_file)"
+  if [ "$kind" != product ] && [ "$helpers" -ge "$max" ]; then
+    printf 'box agent budget: %s helper agents live%s, the limit is %s (%s) - %s; retire a team member or a finished reviewer first (cel budget; budget.max_live_agents in %s)\n' \
+      "$helpers" "$held" "$max" "$(_budget_breakdown "$counts")" "$verdict" "$(cel_config_file)"
     return 1
   fi
   if [ "$kind" = team-member ] && [ "$members" -ge "$max_members" ]; then
@@ -121,8 +128,8 @@ budget_admit() { # <kind> [agents-json] [--pending N]
   return 0
 }
 
-# `cel budget [--json]`: current counts against the limits, and the memory
-# floor's answer.
+# `cel budget [--json]`: helpers against the limits, every live agent by role
+# (product agents and core/root shown, not counted), and the memory floor.
 cmd_budget() {
   local json=0 counts max max_members mem="" admit=true
   while [ $# -gt 0 ]; do
@@ -142,7 +149,11 @@ cmd_budget() {
       '{live: ., limits: {max_live_agents: $max, max_team_members: $mm}, memory: {admit: $ok, reason: $why}}'
     return 0
   fi
-  printf 'live agents   %s of %s  (%s)\n' "$(printf '%s' "$counts" | jq -r .total)" "$max" "$(_budget_breakdown "$counts")"
+  printf 'helpers       %s of %s  (reviewers %s, team members %s, other %s)\n' \
+    "$(printf '%s' "$counts" | jq -r .helpers)" "$max" \
+    "$(printf '%s' "$counts" | jq -r .reviewers)" "$(printf '%s' "$counts" | jq -r .members)" "$(printf '%s' "$counts" | jq -r .other)"
+  printf 'live agents   %s  (product %s, core/root %s: shown, not counted)\n' \
+    "$(printf '%s' "$counts" | jq -r .total)" "$(printf '%s' "$counts" | jq -r .products)" "$(printf '%s' "$counts" | jq -r .core_root)"
   printf 'team members  %s of %s\n' "$(printf '%s' "$counts" | jq -r .members)" "$max_members"
   if [ "$admit" = true ]; then
     printf 'memory        admits\n'

@@ -562,11 +562,14 @@ that can be built at the same time, or one that needs a specialist (device
 QA, design, data, a release check), gets a **team** that the product's agent
 leads. The lead stays the only integrator: one integration branch and PR per
 repo, reviewed by `cel run reviewer` and landed with `cel solo land` as above.
-Members are short-lived scoped agents, admitted against the box-wide agent
-budget that every product's agents and reviewers share - by default 8 agents
-and 4 team members in all (`cel budget` shows the counts; `cel run reviewer`
-can be refused too). Only the product's orchestrator (`<product>-orch`) or the
-owner starts and leads a team.
+Members are short-lived scoped agents, admitted against the box-wide helper
+budget that every product's reviewers and team members share - by default 8
+helpers and 4 team members in all (`budget.max_live_agents`,
+`budget.max_team_members`; `cel run reviewer` can be refused too). Product
+agents (`<product>-orch`, solo lanes) and core are shown by `cel budget` but
+never counted: a box running ten products still has all 8 helpers for their
+reviewers. Only the product's orchestrator (`<product>-orch`) or the owner
+starts and leads a team.
 
 ```
 cel team start login --product shop --brief-file brief.md      # lead only
@@ -940,7 +943,7 @@ them. Hook programs fail open on their own errors:
 | `inbox-stop.sh` | Claude `Stop` | blocks once for mail arriving during the active turn; it does not wake an idle session |
 | `claude-session.sh` / `claude-idle-mail.py` | Claude async session/submit hooks, then native peer socket | reports the exact native session and retains one lifetime-bound watcher as Claude's own child; never writes terminal input |
 | `inbox-guard.sh` | Claude `Stop` | when configured, blocks once for unresolved decisions/blockers and gives resolution steps; it does not wake an idle session |
-| `orchestrator-guard.sh` | `PreToolUse` | **read-only coordinators**: from a root, core or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools); a solo pane may write and push but not start other agents or `gh pr merge`. In every pane the hook runs in - claude panes of any role; omp/pi root, orchestrator and solo panes - the forge API token (`~/.config/cel/forge`) is refused to shell commands and the native read/edit tools. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
+| `orchestrator-guard.sh` | `PreToolUse` | **read-only coordinators**: from a root, core or orchestrator pane, refuses commits, pushes, merges, branch switches and edits under `repos/` (by shell or by the native edit tools); a solo pane may write and push but not start other agents or `gh pr merge`. In every pane the hook runs in - claude panes of any role; omp/pi root, orchestrator and solo panes - the forge API token (`~/.config/cel/forge`) is refused to shell commands and the native read/edit tools, and so is sourcing `lib/forge.sh` or calling its `_forge_*`/`forge_*` functions (they reach the forge without `cel forge`'s checks; use `cel forge`). `cel forge pr close|ready` is the product agent's and the owner's, refused to core, root, members and reviewers. `CEL_GUARD=0` opts a pane out; `CEL_GUARD_ALLOW_ONCE=1` approves one call |
 | `learn-stow.sh` | `SessionEnd` | decays and budgets the workspace's `learnings.md` |
 
 Inbox hooks use explicit `CEL_INBOX_ME`/`CEL_INBOX_WS` when the launcher
@@ -1359,6 +1362,10 @@ policy block into every agent.
 | `cel run [root·orchestrator·reviewer]` | start an agent, role injected; `orchestrator` starts the product's solo agent |
 | `cel mode [<p>] [solo]` | show a product's mode, or set it to solo |
 | `cel solo review · land <repo>#<n>` | record a reviewer's verdict bound to the head / merge an approved, green PR |
+| `cel forge pr view · checks · reviews · list · create <repo>[#<n>]` | a PR in Celestial's words on GitHub or Forgejo alike (`--json` for the normalised value) |
+| `cel forge pr close <repo>#<n> [--comment-file f]` · `cel forge pr ready <repo>#<n>` | close a PR (the comment posted first, the branch kept) or take it out of draft (Forgejo: the `WIP:` title prefix removed; a no-op if it is not a draft) - the product's own agent on its own account's PRs (or a migrated Forgejo PR, author Ghost), or the owner |
+| `cel forge run list <repo> [--branch b] · view <repo> <run-id> · logs <repo> <job-id> [--tail N] [--raw]` | CI runs, a run's jobs and a job's log, read-only for every role: Forgejo Actions over its API (no web login, no token in the agent's hands), GitHub through `gh run`; states are success · failure · cancelled · skipped · running · queued; `logs` drops per-line timestamps unless `--raw` (GitHub shows the job's failed steps) |
+| `cel budget [--json]` | live helpers (reviewers, team members, other) against `budget.max_live_agents` (default 8) and team members against `budget.max_team_members` (default 4); product agents and core shown, not counted; and the memory floor |
 | `cel team start · add · ack · event · verdict · status · retire · close` | a [feature team](#feature-teams) under the product's lead: budget-admitted, scoped members, head-bound verdicts, close that keeps unpushed work |
 | `cel here <verb>` | what `/cel-<verb>` runs inside an agent |
 | `cel profiles` | profiles, role bindings and the exact launch flags each resolves to |
