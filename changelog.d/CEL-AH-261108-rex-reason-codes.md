@@ -1,0 +1,3 @@
+### Fixed
+- The steward no longer takes down a blocked-rex-upgrade item on a skipped round whose answer about the block is unknown. A `waiting` line from the managed upgrade round now ends in a reason code (`precheck`, `busy`, `admission`, `rechecked`, `record`), and the steward acts on the code instead of matching the message: `busy`, `admission` and `record` (the round passed every blocking check) clear the item; `precheck`, `rechecked`, any other code, or none keep it open.
+- A blocked-rex-upgrade alert is recorded as said only after it was sent: a send that fails records nothing, so the next round says it again.

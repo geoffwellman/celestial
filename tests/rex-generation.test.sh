@@ -360,6 +360,8 @@ test_rex_upgrade_waits_for_idle_agents_then_upgrades_restarts_and_resumes_once()
   # A busy agent: the round is skipped within its bound and nothing happens.
   out="$(CEL_REX_UPGRADE_IDLE_SECS=0 CEL_ROOT="$RT/celroot" rex_upgrade_round)"
   assert_contains "$out" "$(printf 'waiting\t0.0.2-gbbb\tnot every Rex agent went idle')"
+  # the steward acts on the reason code, the 4th field, never on the words
+  assert_eq "$(sed -n 1p <<<"$out" | cut -f1,4)" "$(printf 'waiting\tbusy')"
   [ ! -e "$REXT_CALLS" ] || { echo "changed the box with a busy agent: $(cat "$REXT_CALLS")"; _rg_down; return 1; }
   _rex_live "$CEL_REX_STATE/alpha-orch.json" || { echo 'busy agent was stopped'; _rg_down; return 1; }
 

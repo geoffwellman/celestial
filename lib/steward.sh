@@ -2033,6 +2033,8 @@ _steward_rex_generation() {
 # between. A new version replaces an older version's open item. The record
 # outlives the item: a block that clears and comes back for the same version is
 # not news. It goes when that version, or a later one, is installed.
+# THE WORD IS SENT BEFORE IT IS RECORDED: a send that fails records nothing,
+# so the next round says it again instead of believing root was told.
 _steward_rex_blocked() { # <ws> <version> <why>
   local ver since stage now msg id
   read -r ver since stage < <(awk '$1 == "rex-upgrade-blocked" { r = $2 " " $3 " " $4 } END { print r }' "$_STEWARD_STATE" 2>/dev/null || true) || true
@@ -2041,18 +2043,21 @@ _steward_rex_blocked() { # <ws> <version> <why>
   if [ "$ver" != "$2" ]; then
     # The older version's item says nothing true any more; the new one says it
     # all. A mailbox that does not parse says nothing this round, and records
-    # nothing, so the next round says it.
+    # nothing, so the next round says it. The old item goes first, or the new
+    # word would land on it as an update and go down with it.
     id="$(_inbox_open_fp "$1" rex-upgrade-blocked steward root)" || return 0
-    _steward_state_edit "$_STEWARD_STATE" _steward_state_set rex-upgrade-blocked "$2" "$now" 0 || return 0
     [ -z "$id" ] || cmd_inbox resolve "$id" --by steward --workspace "$1" >/dev/null 2>&1 || true
     msg="steward: rex $2 is available, but the managed upgrade will not restart the Rex server: $3"
+    set -- "$1" "$2" "$now" 0 "$msg"
   elif [ "${stage:-0}" = 0 ] && [ $((now - since)) -ge 86400 ]; then
-    _steward_state_edit "$_STEWARD_STATE" _steward_state_set rex-upgrade-blocked "$2" "$since" 1 || return 0
     msg="steward: rex $2 has been blocked for over a day - the managed upgrade still will not restart the Rex server: $3"
+    set -- "$1" "$2" "$since" 1 "$msg"
   else
     return 0
   fi
-  _steward_raise "$1" rex-upgrade-blocked blocked "$msg"
+  cmd_inbox send root "$5" --from steward --workspace "$1" --kind blocked --fp rex-upgrade-blocked \
+    >/dev/null 2>&1 || return 0
+  _steward_state_edit "$_STEWARD_STATE" _steward_state_set rex-upgrade-blocked "$2" "$3" "$4" || true
 }
 
 # No round output: no newer rex from its origin - or apt could not say. Only an
@@ -2081,12 +2086,12 @@ _steward_rex_upgrade() {
   case "$status" in
     waiting)
       c_warn "rex $a is available; the managed upgrade skipped this round: $b"
-      # Skipped for a busy agent or launch admission, the round got past every
-      # blocking check, so the block has cleared. These two skip before the
-      # checks ran, or with their answer changed: the block is unknown.
-      case "$b" in
-        'another Rex server change is in progress'|'something changed at the last check'*) ;;
-        *) [ -z "$ws" ] || _steward_clear "$ws" rex-upgrade-blocked "the rex $a upgrade is no longer blocked: $b" ;;
+      # The reason CODE (4th field, see rex_upgrade_round), never the words,
+      # says whether the round got past every blocking check. Only those that
+      # did clear the block; any other code, or none, leaves it as it was.
+      case "$c" in
+        busy|admission|record) [ -z "$ws" ] || _steward_clear "$ws" rex-upgrade-blocked "the rex $a upgrade is no longer blocked: $b" ;;
+        *) ;;
       esac ;;
     blocked)
       c_err "rex $a is available; the managed upgrade is blocked: $b"
