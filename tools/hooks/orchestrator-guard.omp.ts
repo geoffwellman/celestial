@@ -8,7 +8,10 @@
 //
 // Fails OPEN on any error of its own: a guard that cannot run must never take
 // an agent down with it - except a team member's (CEL_ROLE=member), whose
-// scope IS this guard, so it fails closed. The event contract is pi's
+// scope IS this guard, and a shell command that looks like a forge review
+// verdict (VERDICT_SHAPED: no agent posts one, so refusing it - or a
+// lookalike - while the guard is down costs little), both of which fail
+// closed. The event contract is pi's
 // ToolCallEvent / ToolCallEventResult ({ block, reason }).
 // @ts-nocheck
 import { execFileSync } from "node:child_process";
@@ -21,6 +24,9 @@ function celRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
+// The same text in every adapter (orchestrator-guard.sh, tools/opencode/runtime.mjs).
+const VERDICT_SHAPED = /pr\s+review\b|eviews|pullrequestreview|reviewmutation|approve\b|lgtm|reject|\bgh\s+alias\b|\btea\b|graphql/i;
+
 function classify(mode: "command" | "path" | "read", arg: string): string {
   try {
     return execFileSync("bash", [path.join(celRoot(), "tools/hooks/guard-classify.sh"), mode, process.cwd(), arg], {
@@ -29,9 +35,11 @@ function classify(mode: "command" | "path" | "read", arg: string): string {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {
-    return process.env.CEL_ROLE === "member"
-      ? "deny the guard could not classify this call, and a team member's scope is the guard - nothing ran"
-      : "allow";
+    if (process.env.CEL_ROLE === "member")
+      return "deny the guard could not classify this call, and a team member's scope is the guard - nothing ran";
+    if (mode === "command" && VERDICT_SHAPED.test(arg))
+      return "deny the guard could not classify this call, and it looks like a forge review verdict, which no agent posts (cel solo review records one) - nothing ran. No CEL_GUARD_ALLOW_ONCE override covers this";
+    return "allow";
   }
 }
 
@@ -50,9 +58,8 @@ export default function celestialGuard(pi): void {
       case "powershell":
         mode = "command";
         arg = String(input.command ?? "");
-        // the human-approved one-off, same spelling as the claude adapter;
-        // a team member has none - nobody stands over its pane to approve one
-        if (arg.startsWith("CEL_GUARD_ALLOW_ONCE=1") && !member) return;
+        // the human-approved one-off (CEL_GUARD_ALLOW_ONCE=1 <command>) is the
+        // classifier's to honour: never for a member, never for a forge verdict
         break;
       case "edit":
       case "write":
@@ -72,7 +79,7 @@ export default function celestialGuard(pi): void {
         block: true,
         reason:
           "celestial guard: " + verdict.slice(5).trim() +
-          (member ? "" : " If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>"),
+          (member || verdict.includes("CEL_GUARD_ALLOW_ONCE") ? "" : " If a human has approved this exact call, prefix it: CEL_GUARD_ALLOW_ONCE=1 <command>"),
       };
     }
   });

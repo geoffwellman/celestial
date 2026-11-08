@@ -6,6 +6,9 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { catalogModels, allowsSelection, nativeModel } from './model-contract.mjs';
 const execute = promisify(execFile);
+// A command that looks like a forge review verdict: refused when the guard
+// cannot classify it. The same text in every adapter (tools/hooks/orchestrator-guard.*).
+const VERDICT_SHAPED = /pr\s+review\b|eviews|pullrequestreview|reviewmutation|approve\b|lgtm|reject|\bgh\s+alias\b|\btea\b|graphql/i;
 
 // OpenCode 2.2.5 Promise plugin API. All registrations and availability edits
 // belong to this location; no global config, credentials or fetch is replaced.
@@ -225,15 +228,22 @@ export async function createPlugin(context, deps = {}) {
   async function classify(mode, arg) {
     if (env.CEL_GUARD === '0') return;
     if (typeof arg !== 'string' || !arg.trim()) throw new Error(`celestial guard: cannot classify ${mode}`);
-    if (mode === 'command' && /^CEL_GUARD_ALLOW_ONCE=1(?:\s|$)/.test(arg)) return;
+    // The human's CEL_GUARD_ALLOW_ONCE=1 one-off is decided by the shared
+    // classifier, as in the other adapters: never for a member or a forge verdict.
     if (mode === 'path') arg = path.resolve(directory, arg);
     let verdict;
     // Exit 2 is the classifier reporting its own error (bad mode or policy).
     // It used to print `allow` instead, so allow here keeps OpenCode's behaviour
-    // until the owner picks one fail-open/closed policy; any other failure of the
-    // classifier itself still refuses.
+    // until the owner picks one fail-open/closed policy - except for a command
+    // that looks like a forge review verdict, which no agent posts (the same
+    // VERDICT_SHAPED text as the omp and claude adapters). Any other failure
+    // of the classifier itself still refuses.
     try { verdict = (await run('bash', [path.join(root, 'tools/hooks/guard-classify.sh'), mode, directory, arg])).trim(); }
-    catch (error) { if (error?.code === 2) return; throw error; }
+    catch (error) {
+      if (error?.code !== 2) throw error;
+      if (mode === 'command' && VERDICT_SHAPED.test(arg)) throw new Error('celestial guard: the guard could not classify this call, and it looks like a forge review verdict, which no agent posts (cel solo review records one) - nothing ran');
+      return;
+    }
     if (verdict.startsWith('deny')) throw new Error(`celestial guard: ${verdict.slice(4).trim()}`);
   }
   // A MAILBOX THAT DOES NOT PARSE is said once per file in this session: its

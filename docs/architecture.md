@@ -526,6 +526,32 @@ the guard these are tripwires matched as text, not a sandbox: a script file
 that sources the library, or a name assembled at run time, still runs -
 which is why `cel forge` checks who is asking itself.
 
+A forge review verdict is a person's. No role - reviewers and panes outside
+any workspace included - posts an approval or a request for changes: `gh pr
+review` with `--approve`/`-a`/`--request-changes`/`-r` (flags after the PR,
+`--approve=...`, short groups), a `gh api` write to `.../pulls/<n>/reviews`
+or below it (events, dismissals), a graphql add/submit/dismiss of a
+`PullRequestReview` or a graphql call whose query the guard cannot read
+(`--input`, `query=@file`, an expansion), curl writing there on a forge
+API, and tea's `approve|lgtm|reject|review` (and any prefix of them, such as
+`tea pr r`) or `tea api` writing there. Paths are read percent-decoded,
+case-folded and without a `#fragment`; wrappers are stripped with their
+options (`env -u X`, `/usr/bin/env`, `xargs -n1`, `xargs -I{}`, `sudo -u`);
+a line with a newline is read both as separate commands and joined. No role
+sets, imports or deletes a `gh alias` either, since an alias hides what a
+later `gh` command runs. An agent's verdict is recorded with `cel solo
+review` and reported by inbox - the reviewer role and the rendered policy
+say so, and the retired `review.post: github` no longer posts anything
+(`cel doctor` warns where it is still set). Comments (`gh pr review
+--comment`, `gh pr comment`) stay where they were allowed.
+The human's one-off `CEL_GUARD_ALLOW_ONCE=1 <command>` (spelled exactly)
+is decided in one place, `guard_override_honoured` in lib/guard.sh, which
+every adapter - claude, omp/pi and OpenCode - asks: it never covers a forge
+verdict, a `gh alias` write or a team member. An adapter whose classifier
+cannot run fails open for everyone but a member, except for a shell command
+that looks like a verdict (the same `VERDICT_SHAPED` text in each adapter),
+which it refuses.
+
 The binaries that see a token or decide a write are not the caller's to
 choose. Every forge operation (`cel forge`, and the library under `cel solo
 land`, the reviewer's PR facts and the steward) and every `cel team` verb runs

@@ -285,6 +285,15 @@ doctor_pi_anthropic_lines() { # <wsdir> <workspace name> -> one status line or n
   fi
 }
 
+# `review.post` once let a reviewer post its verdict as a GitHub review. No
+# agent posts a verdict to a forge any more (lib/guard.sh refuses it in every
+# role), so a workspace still setting it is told it does nothing.
+doctor_review_post_line() { # <wsdir> <workspace name> -> one warning line or nothing
+  local p; p="$(ws_review "$1" post 2>/dev/null)"
+  [ -n "$p" ] || return 0
+  printf '%s: review.post: %s no longer posts verdicts - a reviewer records its verdict with cel solo review and reports it by inbox; on the forge an agent only comments. Remove review.post\n' "$2" "$p"
+}
+
 # workspace.local.yaml is allowed to override role_profiles, add
 # worker_profiles and override env: keys (see lib/yaml.sh:_ws_effective_json;
 # the allowed keys are _WS_LOCAL_KEYS there).
@@ -541,6 +550,8 @@ check_workspaces() {
     while IFS= read -r setupline; do
       [ -z "$setupline" ] || c_warn "$setupline"
     done < <(doctor_setup_lines "$path" "$n")
+    setupline="$(doctor_review_post_line "$path" "$n")"
+    [ -z "$setupline" ] || c_warn "$setupline"
 
     doctor_ws_local_summary "$path" "$n"
     doctor_ws_local_lines "$path" "$n" || fail=1

@@ -137,10 +137,13 @@ _guard_orch_owns_checkout() { # <command> -> 0 = allow
 # refuses `grep "cel solo land"`. So the line is split where a new command
 # starts (`;`, `&`, `|`, `(`, `)`, `$(`, backtick), quotes are dropped,
 # whitespace is collapsed, and from the front of each piece go: env
-# assignments, wrappers (bash/sh -c, env, command, exec, nohup, time, xargs,
-# timeout N), a path in front of cel/gh/herdr/tea/curl, and the
-# global options between a tool and its verb (`-C`/`--workspace` for cel,
-# `-R`/`--repo` for gh). The rules then match the START of a piece only.
+# assignments, wrappers given by name or by path (bash/sh -c, env, command,
+# exec, nohup, time, xargs, sudo/doas, nice/ionice, stdbuf, setsid, timeout
+# N) together with their options and the values of the ones that take one
+# (`env -u X`, `xargs -n 1`, `xargs -I {}`, `sudo -u root`), a path in front
+# of cel/gh/herdr/tea/curl, and the global options between a tool and its
+# verb (`-C`/`--workspace` for cel, `-R`/`--repo` for gh). The rules then
+# match the START of a piece only.
 #
 # A TRIPWIRE, NOT A SANDBOX (docs/architecture.md): a variable holding the
 # command (`c=cel; $c solo land`) or a script file still runs. What this
@@ -151,8 +154,16 @@ _guard_segments() { # <command> -> one normalised command per line
     | sed -E "s/[\"']//g; s/ +/ /g; s/^ //; s/ $//" \
     | sed -E ':a
         s#^[A-Za-z_][A-Za-z0-9_]*=[^ ]* ##; ta
-        s#^(bash|sh|env|command|exec|nohup|time|xargs)( -[A-Za-z]+)* ##; ta
-        s#^timeout( -[A-Za-z]+( [^ ]+)?)* [0-9.]+[smhd]? ##; ta' \
+        s#^[^ ]*/(bash|sh|env|command|exec|nohup|time|xargs|sudo|doas|nice|ionice|stdbuf|setsid|timeout)( |$)#\1\2#; ta
+        s#^(bash|sh|command|nohup|setsid)( (-o [^ ]+|-[^ ]+))* ##; ta
+        s#^env( (-[uC] [^ ]+|--(unset|chdir) [^ ]+|-[^ ]+))* ##; ta
+        s#^exec( (-a [^ ]+|-[^ ]+))* ##; ta
+        s#^time( (-[fo] [^ ]+|-[^ ]+))* ##; ta
+        s#^xargs( (-[adEILnPs] [^ ]+|--(arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var) [^ ]+|-[^ ]+))* ##; ta
+        s#^(sudo|doas)( (-[ugCDhprtTU] [^ ]+|--(user|group|close-from|chdir|host|prompt|role|type|other-user|command-timeout) [^ ]+|-[^ ]+))* ##; ta
+        s#^(nice|ionice)( (-[nct] [^ ]+|--adjustment [^ ]+|-[^ ]+))* ##; ta
+        s#^stdbuf( (-[ioe] [^ ]+|-[^ ]+))* ##; ta
+        s#^timeout( (-[sk] [^ ]+|-[^ ]+))* [0-9.]+[smhd]? ##; ta' \
     | sed -E 's#^[^ ]*/(cel|gh|herdr|tea|curl|git)( |$)#\1\2#' \
     | sed -E ':b
         s#^cel (-C [^ ]+|--workspace[= ][^ ]+)( |$)#cel\2#; tb
@@ -222,16 +233,9 @@ _guard_curl_writes() { # <segment>
 # of pulls, releases, repos and branches - read past tea's own options (and
 # the values of the ones that take one) to find the verb.
 _guard_tea_writes() { # <segment>
-  local -a t words=(); read -r -a t <<<"$1"
+  local -a t words; read -r -a t <<<"$1"
+  mapfile -t words < <(_guard_tea_words "$1")
   local i n=${#t[@]} w
-  for ((i = 1; i < n; i++)); do
-    w="${t[i]}"
-    case "$w" in
-      --repo|-r|--login|-l|--remote|-R|--output|-o) i=$((i + 1)) ;;
-      -*) ;;
-      *) words+=("$w") ;;
-    esac
-  done
   case "${words[0]:-}" in
     api)
       local method=""
@@ -256,6 +260,161 @@ _guard_tea_writes() { # <segment>
       case "${words[1]:-}" in protect|P|unprotect|U) return 0 ;; esac ;;
   esac
   return 1
+}
+
+# tea's words: the verb and its arguments, read past tea's own options (and
+# the values of the ones that take one).
+_guard_tea_words() { # <segment> -> one word per line
+  local -a t; read -r -a t <<<"$1"
+  local i n=${#t[@]} w
+  for ((i = 1; i < n; i++)); do
+    w="${t[i]}"
+    case "$w" in
+      --repo|-r|--login|-l|--remote|-R|--output|-o) i=$((i + 1)) ;;
+      -*) ;;
+      *) printf '%s\n' "$w" ;;
+    esac
+  done
+}
+
+# A FORGE REVIEW VERDICT IS A PERSON'S. An approval or a request for changes
+# posted to the forge reads as a human's code review (lib/solo.sh lets one
+# stand in for the recorded verdict), so no agent posts one, in any role:
+# - `gh pr review` with --approve/-a or --request-changes/-r (flags after the
+#   PR, `--approve=...`, a short group such as `-cr`; the value of -b/-F/-R
+#   is skipped);
+# - a gh api write to a PR's reviews (`.../pulls/<n>/reviews` and below it:
+#   events, dismissals; `repos/<o>/<r>/` or `repositories/<id>/` in front);
+# - `gh api graphql` that names add/submit/dismiss of a PullRequestReview, or
+#   whose query the guard cannot read: `--input`, a field value from a file
+#   (`query=@q.graphql`), an expansion (`$Q`) or one cut off by `$(...)`;
+# - curl writing to that path on a forge API;
+# - tea's approve (lgtm, a), reject and review, and `tea api` writing to that
+#   path. Every prefix of those verbs and of `pulls` counts too (`tea pr r`):
+#   tea's own alias table (cmd/pulls/*.go) has only lgtm and a, but its CLI
+#   library can match commands by prefix.
+# A path is read percent-decoded, case-folded, with doubled slashes squeezed
+# and a `#fragment` ignored; a line with a newline in it is read both as
+# separate commands and with the newline removed (a path split across lines).
+# A comment is not a verdict. Quotes are dropped by _guard_segments, so a
+# comment body that itself spells `-a` after `gh pr review` is refused too:
+# the guard errs towards deny.
+_GUARD_FORGE_REVIEWS_RE='(^|/)pulls/[^/]+/reviews([/?#]|$)'
+_guard_reviews_path() { # <word> -> 0 when it names a PR's reviews (or below)
+  local w="${1,,}"
+  while [[ "$w" == *//* ]]; do w="${w//\/\//\/}"; done
+  [[ "$w" =~ $_GUARD_FORGE_REVIEWS_RE ]]
+}
+# The prefixes of tea's verdict verbs: what `tea pulls <word>` may resolve to.
+_guard_tea_verdict_word() { # <word>
+  local v
+  [ -n "$1" ] || return 1
+  for v in approve lgtm reject review; do [[ "$v" == "$1"* ]] && return 0; done
+  return 1
+}
+_guard_forge_verdict() { # <command> -> 0 when a piece posts a forge review verdict
+  local s="$1" h
+  _guard_forge_verdict_in "$s" && return 0
+  # %XX decoded: `pulls/5/%72eviews` is the same path to the forge
+  while [[ "$s" =~ %([0-9A-Fa-f]{2}) ]]; do
+    printf -v h "\\x${BASH_REMATCH[1]}"
+    s="${s//"${BASH_REMATCH[0]}"/"$h"}"
+  done
+  [ "$s" = "$1" ] || ! _guard_forge_verdict_in "$s" || return 0
+  case "$s" in
+    *[$'\n\r']*)
+      _guard_forge_verdict_in "${s//[$'\n\r']/;}" && return 0
+      _guard_forge_verdict_in "${s//[$'\n\r']/}" && return 0 ;;
+  esac
+  return 1
+}
+_guard_forge_verdict_in() { # <command>
+  local seg w c i j n v graphql
+  local -a t words
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    read -r -a t <<<"$seg"; n=${#t[@]}
+    case "$seg" in
+      "gh pr "*)
+        i=2
+        while [ "$i" -lt "$n" ]; do
+          case "${t[i]}" in -R|--repo) i=$((i + 2)) ;; -R?*|--repo=*) i=$((i + 1)) ;; *) break ;; esac
+        done
+        [ "${t[i]:-}" = review ] || continue
+        for ((i = i + 1; i < n; i++)); do
+          w="${t[i]}"
+          case "$w" in
+            --approve|--approve=*|--request-changes|--request-changes=*) return 0 ;;
+            --body|--body-file|--repo) i=$((i + 1)) ;;
+            --*) ;;
+            -?*)
+              for ((j = 1; j < ${#w}; j++)); do
+                c="${w:j:1}"
+                case "$c" in
+                  a|r) return 0 ;;
+                  b|F|R) [ "$j" -lt $((${#w} - 1)) ] || i=$((i + 1)); break ;;
+                esac
+              done ;;
+          esac
+        done ;;
+      "gh api "*)
+        [[ "$seg" =~ (add|submit|dismiss)PullRequestReview([^A-Za-z]|$) ]] && return 0
+        graphql=0
+        for w in "${t[@]:2}"; do case "${w,,}" in graphql|*/graphql|*/graphql\?*) graphql=1 ;; esac; done
+        if [ "$graphql" = 1 ]; then
+          for ((i = 2; i < n; i++)); do
+            w="${t[i]}"; v=""
+            case "$w" in
+              --input|--input=*) return 0 ;;
+              -f|-F|--field|--raw-field) v="${t[i+1]-}"; i=$((i + 1)) ;;
+              --field=*|--raw-field=*) v="${w#*=}" ;;
+              -f?*|-F?*) v="${w:2}" ;;
+              *) continue ;;
+            esac
+            [[ "$v" == *=* ]] || return 0
+            v="${v#*=}"
+            case "$v" in ""|@*|*\$*) return 0 ;; esac
+          done
+        fi
+        _guard_gh_api_writes "$seg" || continue
+        for w in "${t[@]:2}"; do _guard_reviews_path "$w" && return 0; done ;;
+      curl\ *)
+        _guard_curl_writes "$seg" || continue
+        for w in "${t[@]:1}"; do _guard_reviews_path "$w" && return 0; done ;;
+      tea\ *)
+        mapfile -t words < <(_guard_tea_words "$seg")
+        if [ "${words[0]:-}" = pr ] || [[ -n "${words[0]:-}" && pulls == "${words[0]}"* ]]; then
+          _guard_tea_verdict_word "${words[1]:-}" && return 0
+          continue
+        fi
+        case "${words[0]:-}" in
+          api)
+            _guard_tea_writes "$seg" || continue
+            for w in "${words[@]:1}"; do _guard_reviews_path "$w" && return 0; done ;;
+        esac ;;
+    esac
+  done < <(_guard_segments "$1")
+  return 1
+}
+_GUARD_FORGE_VERDICT_DENY='deny an agent never posts a review verdict (an approval or a request for changes) to a forge - that is a person'"'"'s to give; an agent'"'"'s verdict is recorded with cel solo review <repo>#<pr> <approved|changes> --head <sha> --by <alias> (the PR'"'"'s reviewer runs it). A comment is fine (gh pr review --comment, gh pr comment). A graphql call whose query the guard cannot read counts as a verdict. No CEL_GUARD_ALLOW_ONCE override covers this'
+
+# A GH ALIAS hides what a later command runs: `gh alias set ap "pr review
+# --approve"` makes `gh ap 5` an approval the guard cannot see. So no agent
+# sets, imports or deletes one, in any role, and no one-off covers it.
+_guard_gh_alias_write() { # <command>
+  _guard_starts "$1" 'gh alias (set|import|delete|rm)'
+}
+_GUARD_GH_ALIAS_DENY='deny no agent sets, imports or deletes a gh alias - an alias hides from the guard what a later gh command runs; spell the gh command out. No CEL_GUARD_ALLOW_ONCE override covers this'
+
+# THE HUMAN'S ONE-OFF: `CEL_GUARD_ALLOW_ONCE=1 <command>`, spelled exactly,
+# lets that one call skip the rules. Every runtime adapter asks this, through
+# guard-classify.sh or directly, so they agree on it. A team member has none
+# (nobody stands over its pane to approve one), and it never covers a forge
+# review verdict: a person gives that on the forge themselves.
+guard_override_honoured() { # <role> <command> -> 0 when the one-off lets the call through
+  [[ "$2" =~ ^CEL_GUARD_ALLOW_ONCE=1([[:space:]]|$) ]] || return 1
+  if [ "$1" = member ] || [ "${CEL_ROLE:-}" = member ]; then return 1; fi
+  if _guard_forge_verdict "$2" || _guard_gh_alias_write "$2"; then return 1; fi
+  return 0
 }
 
 # THE FORGE TOKEN IS NOBODY'S TO READ: ~/.config/cel/forge holds the API key
@@ -1041,6 +1200,8 @@ guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   # Every role, `other` included (a reviewer stands outside any workspace).
   if _guard_names_forge_token "$cmd"; then printf '%s' "$_GUARD_TOKEN_DENY"; return 0; fi
+  if _guard_forge_verdict "$cmd"; then printf '%s' "$_GUARD_FORGE_VERDICT_DENY"; return 0; fi
+  if _guard_gh_alias_write "$cmd"; then printf '%s' "$_GUARD_GH_ALIAS_DENY"; return 0; fi
   if _guard_forge_lib "$cmd"; then printf '%s' "$_GUARD_FORGE_LIB_DENY"; return 0; fi
   if _guard_cel_env_tamper "$cmd"; then printf '%s' "$_GUARD_CEL_ENV_DENY"; return 0; fi
   if _guard_suite_tamper "$cmd"; then printf '%s' "$_GUARD_SUITE_TAMPER_DENY"; return 0; fi

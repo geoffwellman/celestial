@@ -115,19 +115,6 @@ ws_env_exports() { # <wsdir>
 # The `review:` block configures local PR reviewer panes (cel run reviewer).
 ws_review() { _yqr -r --arg k "$2" '.review[$k] // "" | tostring' "$1/workspace.yaml"; }
 
-# Where a reviewer's verdict is published. On a public repo whose only GitHub
-# identity is the owner's, a reviewer agent posting a review is the owner
-# reviewing his own PR in public - and GitHub refuses the approval anyway. So
-# the review is recorded with `cel solo review` and reported by inbox, and `github` is
-# opt-in for repos where the reviewer has an identity of its own (a GitHub App
-# or a second account). The default lives HERE and nowhere else: a second
-# copy of it in a role file or a launch path is how the two drift apart.
-ws_review_post() { # <wsdir>
-  local p; p="$(ws_review "$1" post)"
-  [ "$p" = "github" ] && { printf 'github\n'; return 0; }
-  printf 'inbox\n'
-}
-
 # Every ticket prefix this repo answers to, CURRENT ONE FIRST then any
 # `prefix_aliases`. Aliases exist because a Linear team can be re-keyed
 # (ABC -> ABCD) without renumbering its issues: Linear still resolves the old
@@ -706,11 +693,9 @@ ws_policy_block() { # <wsdir> [product]
   if [ -n "$rrt$rmodel" ]; then
     printf -- '- pr review: after opening a PR, start its reviewer with `cel run reviewer --repo <repo> --pr <n>` (pi%s, one pane per PR); it sends findings to you (`%s-orch`). Fix them on the same branch, push, and tell it the new head to re-review\n' \
       "${rmodel:+ model $rmodel}" "$p"
-    if [ "$(ws_review_post "$d")" = "github" ]; then
-      printf -- '- review verdicts: recorded by the reviewer with `cel solo review <repo>#<n> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"`, reported by inbox, and posted as a GitHub review\n'
-    else
-      printf -- '- review verdicts: recorded by the reviewer with `cel solo review <repo>#<n> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; GitHub is **not** posted to\n'
-    fi
+    # An agent's verdict is never posted to the forge (lib/guard.sh refuses it
+    # in every role); `review.post` no longer does anything (cel doctor says so).
+    printf -- '- review verdicts: recorded by the reviewer with `cel solo review <repo>#<n> <approved|changes> --head <reviewed-commit-sha> --by <reviewer-alias> --note "<one line>"` and reported by inbox; no agent posts a verdict to the forge (comments only)\n'
   fi
   local lt rpr
   for r in $(ws_repo_names "$d"); do
