@@ -373,6 +373,14 @@ _rk_stage_killed_body() { # <step>
   out="$(_rk --status)" || { echo "$out"; return 1; }
   assert_contains "$out" "rotation   INTERRUPTED" || return 1
   assert_contains "$out" "cel gateway rotate-key --abort clears it" || return 1
+  # minted: the config lists only the current key (an --abort of an
+  # interrupted stage killed after its rewrite looks the same); after it, the
+  # config also accepts api-key.next, which only a --stage leaves
+  if [ "$1" = minted ]; then
+    assert_contains "$out" "INTERRUPTED - a rotation step was cut short: config.yaml accepts the current key; api-key.next is left over and not accepted" || return 1
+  else
+    assert_contains "$out" "INTERRUPTED - a --stage was cut short: config.yaml accepts the current key and api-key.next" || return 1
+  fi
   # --finish has nothing to finish: it says so and changes nothing
   out="$(_rk --finish)" && { echo "finish ran over an interrupted stage: $out"; return 1; }
   assert_contains "$out" "nothing to finish" || return 1
@@ -468,6 +476,99 @@ test_rotate_abort_killed_after_rewriting_the_config_aborts_when_run_again() {
 }
 test_rotate_abort_killed_after_removing_next_aborts_when_run_again() {
   _rk_case _rk_abort_killed_body next-removed
+}
+
+# An --abort killed after <step>: --status reads what config.yaml accepts,
+# not which files exist - the keys it accepts (the new key in no key file
+# once api-key holds the old one again), the files left over, the verb cut
+# short, and the fix. With "leftover", a stray api-key.next is staged too:
+# the --abort removes it only after it rewrote the config.
+_rk_abort_killed_status_body() { # <step> [leftover]
+  local out left=""
+  _rk --stage >/dev/null || return 1
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  if [ "${2:-}" = leftover ]; then
+    _gateway_mint_secret "$CEL_GATEWAY_STATE/api-key.next"
+    chmod 600 "$CEL_GATEWAY_STATE/api-key.next"
+    _gateway_config_write
+    left="$(cat "$CEL_GATEWAY_STATE/api-key.next")"
+  fi
+  _rk_crash "$1" --abort || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   INTERRUPTED - an --abort was cut short: " || return 1
+  assert_contains "$out" "api-key.previous is left over, holding the key api-key holds" || return 1
+  case "$out" in *"--stage was cut short"*|*"still accepted"*) echo "status blames a --stage: $out"; return 1 ;; esac
+  case "$1:${2:-}" in
+    api-key-restored:)
+      [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "an api-key.next appeared"; return 1; }
+      assert_eq "$(_rk_code "$NEW")" 200 || return 1
+      assert_contains "$out" "config.yaml accepts the current key and a key that is in no key file;" || return 1
+      case "$out" in *"api-key.next"*) echo "status names an api-key.next that is not there: $out"; return 1 ;; esac ;;
+    api-key-restored:leftover)
+      assert_eq "$(_rk_code "$NEW")" 200 || return 1
+      assert_eq "$(_rk_code "$left")" 200 || return 1
+      assert_contains "$out" "config.yaml accepts the current key, api-key.next and a key that is in no key file;" || return 1 ;;
+    config-rewritten:leftover)
+      assert_eq "$(_rk_code "$NEW")" 401 || return 1
+      assert_eq "$(_rk_code "$left")" 401 || return 1
+      assert_contains "$out" "config.yaml accepts the current key; api-key.next is left over and not accepted;" || return 1
+      assert_contains "$out" "Fix: cel gateway rotate-key --abort again clears it"$'\n' || return 1 ;;
+    *) echo "no expectation for $1 ${2:-}"; return 1 ;;
+  esac
+  if [ "$1" = api-key-restored ]; then
+    assert_contains "$out" "Fix: cel gateway rotate-key --abort again clears it and stops accepting the key in no key file (cel gateway refresh also stops accepting it)" || return 1
+    assert_contains "$out" "UNKNOWN (in no key file) (sha256 $(_gwr_fp_of "$NEW" | cut -c1-12))" || return 1
+  fi
+  out="$(_rk --abort)" || { echo "abort again failed: $out"; return 1; }
+  _rk_back_to_old_alone || return 1
+  [ -z "$left" ] || assert_eq "$(_rk_code "$left")" 401 || return 1
+  [ -z "$left" ] || case "$(cat "$T/outs")" in *"$left"*) echo "the leftover key value reached the output"; return 1 ;; esac
+  _rk_no_key_printed
+}
+test_rotate_abort_killed_after_restoring_api_key_status_names_the_key_in_no_file() {
+  _rk_case _rk_abort_killed_status_body api-key-restored
+}
+test_rotate_abort_with_a_leftover_next_killed_after_restoring_api_key_status_names_every_accepted_key() {
+  _rk_case _rk_abort_killed_status_body api-key-restored leftover
+}
+test_rotate_abort_with_a_leftover_next_killed_after_rewriting_the_config_status_says_next_is_not_accepted() {
+  _rk_case _rk_abort_killed_status_body config-rewritten leftover
+}
+
+# THE CRASH SEAM IS INERT OUTSIDE THE SUITE: a process the runner did not
+# start (detached, then reparented away from it), with
+# CEL_GATEWAY_ROTATE_CRASH_AFTER set, runs --stage to the end - not killed.
+_rk_crash_seam_outside_body() {
+  local o="$T/outside" out i=0
+  cel_under_suite || { echo "this test is not under the suite"; return 1; }
+  # shellcheck disable=SC2016  # expanded by the detached shell
+  setsid -f bash -c '
+    while p="$(cut -d" " -f4 /proc/$$/stat)"; [ "$(cat "/proc/$p/comm" 2>/dev/null)" = setsid ]; do sleep 0.05; done
+    . "$CEL_ROOT/lib/common.sh"
+    if cel_under_suite; then echo under; else echo outside; fi
+    CEL_GATEWAY_ROTATE_CRASH_AFTER=minted bash -c "
+      . \"\$CEL_ROOT/lib/common.sh\"; . \"\$CEL_ROOT/lib/gateway-rotate.sh\"
+      _gateway_claude_cli_version() { return 1; }
+      cmd_gateway rotate-key --stage" 2>&1
+    echo "rc $?"
+    echo finished
+  ' > "$o" 2>&1 < /dev/null
+  until grep -q '^finished' "$o" 2>/dev/null || [ "$i" -ge 400 ]; do sleep 0.05; i=$((i + 1)); done
+  out="$(cat "$o")"
+  printf '%s\n' "$out" >>"$T/outs"
+  assert_contains "$out" outside || { echo "$out"; return 1; }
+  case "$out" in *under*) echo "the detached shell was under the suite: $out"; return 1 ;; esac
+  assert_contains "$out" "rc 0" || { echo "--stage did not complete outside the suite: $out"; return 1; }
+  NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
+  _rk_key_is api-key.previous "$OLD" || return 1
+  [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "the stage stopped at api-key.next"; return 1; }
+  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  out="$(_rk --status)" || { echo "$out"; return 1; }
+  assert_contains "$out" "rotation   staged" || return 1
+  _rk_no_key_printed
+}
+test_rotate_crash_seam_is_inert_outside_the_suite() {
+  _rk_case _rk_crash_seam_outside_body
 }
 
 # Any config the key files do not match is named, with the fix: here the

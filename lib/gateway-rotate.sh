@@ -276,11 +276,15 @@ _gwr_print_plan() { # <rows>
 
 # --- the verbs ---------------------------------------------------------------
 
-# none, staged, or interrupted - a --stage cut short. That is api-key.next
-# without api-key.previous (killed before the switch), or api-key.previous
-# holding the very key api-key holds (killed between keeping the old key and
-# moving the new one over api-key; api-key.next still accepted). A staged
-# rotation may still carry a leftover api-key.next: --finish removes it.
+# none, staged, or interrupted - a --stage or an --abort cut short. That is
+# api-key.next without api-key.previous (a --stage killed before the switch),
+# or api-key.previous holding the very key api-key holds: a --stage killed
+# between keeping the old key and moving the new one over api-key
+# (api-key.next still accepted), or an --abort killed after putting the old
+# key back in api-key (until it rewrote config.yaml, the new key is still
+# accepted from no key file; api-key.next only if one was left over).
+# A staged rotation may still carry a leftover api-key.next: --finish
+# removes it.
 _gwr_state() { # -> none | staged | interrupted
   local prev cur
   if [ -e "$(_gateway_key_previous_file)" ]; then
@@ -312,18 +316,58 @@ _gwr_print_accepted() { # <state>
   printf '  config     accepts %d key(s): %s\n' "$n" "${out:-none}"
 }
 
+# The INTERRUPTED line, read from what config.yaml accepts against the key
+# files - never from which files exist alone. It names the keys the config
+# accepts, the rotation files left over, the verb cut short when the state
+# tells (a --stage never leaves api-key.previous without api-key.next
+# accepted, nor a key in no key file; an --abort rewrites the config before it
+# removes a file), and the fix.
+_gwr_print_interrupted() {
+  local fp prev="" cur="" next="" cur_acc=0 next_acc=0 unknown=0 who acc fix
+  local -a parts=()
+  prev="$(_gwr_file_fp "$(_gateway_key_previous_file)")" || prev=""
+  cur="$(_gwr_file_fp "$(_gateway_key_file)")" || cur=""
+  next="$(_gwr_file_fp "$(_gateway_key_next_file)")" || next=""
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    if [ "$fp" = "$cur" ]; then cur_acc=1
+    elif [ -n "$next" ] && [ "$fp" = "$next" ]; then next_acc=1
+    elif [ "$fp" != "$prev" ]; then unknown=$((unknown + 1)); fi
+  done < <(_gwr_config_fps)
+  if [ -e "$(_gateway_key_previous_file)" ]; then
+    if [ "$unknown" = 0 ] && [ "$next_acc" = 1 ]; then who="a --stage"; else who="an --abort"; fi
+  elif [ "$unknown" = 0 ] && [ "$next_acc" = 1 ]; then who="a --stage"
+  else who="a rotation step"; fi
+  [ "$cur_acc" = 0 ] || parts+=("the current key")
+  [ "$next_acc" = 0 ] || parts+=("api-key.next")
+  if [ "$unknown" = 1 ]; then parts+=("a key that is in no key file")
+  elif [ "$unknown" -gt 1 ]; then parts+=("$unknown keys that are in no key file"); fi
+  case "${#parts[@]}" in
+    0) acc="config.yaml accepts no key" ;;
+    1) acc="config.yaml accepts ${parts[0]}" ;;
+    2) acc="config.yaml accepts ${parts[0]} and ${parts[1]}" ;;
+    *) acc="config.yaml accepts ${parts[0]}, ${parts[1]} and ${parts[2]}" ;;
+  esac
+  [ "$cur_acc" = 1 ] || acc="$acc, not the current key"
+  [ -z "$next" ] || [ "$next_acc" = 1 ] || acc="$acc; api-key.next is left over and not accepted"
+  [ ! -e "$(_gateway_key_previous_file)" ] || acc="$acc; api-key.previous is left over, holding the key api-key holds"
+  if [ "$who" = "an --abort" ]; then fix="cel gateway rotate-key --abort again clears it"
+  else fix="cel gateway rotate-key --abort clears it"; fi
+  [ "$unknown" = 0 ] || fix="$fix and stops accepting the key in no key file (cel gateway refresh also stops accepting it)"
+  case "$who" in
+    "a --stage")       fix="$fix, then --stage again" ;;
+    "a rotation step") fix="$fix, then --stage again to rotate" ;;
+  esac
+  printf '  rotation   INTERRUPTED - %s was cut short: %s. Fix: %s\n' "$who" "$acc" "$fix"
+}
+
 _gwr_status() {
   if ! gateway_installed; then c_warn "no gateway on this box - cel gateway install"; return 0; fi
   local state old new next rows count procs
   state="$(_gwr_state)"
   case "$state" in
     none)        printf '  rotation   none - the current key is the only key\n' ;;
-    interrupted)
-      if [ -e "$(_gateway_key_previous_file)" ]; then
-        printf '  rotation   INTERRUPTED - a --stage was cut short after keeping api-key.previous: api-key still holds the old key and api-key.next is still accepted. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
-      else
-        printf '  rotation   INTERRUPTED - a --stage was cut short and left api-key.next behind. Fix: cel gateway rotate-key --abort clears it, then --stage again\n'
-      fi ;;
+    interrupted) _gwr_print_interrupted ;;
     staged)      printf '  rotation   staged - the gateway accepts the old and the new key; new launches get the new key\n' ;;
   esac
   _gwr_print_accepted "$state"
