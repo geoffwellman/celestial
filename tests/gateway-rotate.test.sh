@@ -373,6 +373,14 @@ _rk_stage_killed_body() { # <step>
   out="$(_rk --status)" || { echo "$out"; return 1; }
   assert_contains "$out" "rotation   INTERRUPTED" || return 1
   assert_contains "$out" "cel gateway rotate-key --abort clears it" || return 1
+  # minted: the config lists only the current key (an --abort of an
+  # interrupted stage killed after its rewrite looks the same); after it, the
+  # config also accepts api-key.next, which only a --stage leaves
+  if [ "$1" = minted ]; then
+    assert_contains "$out" "INTERRUPTED - a rotation step was cut short: config.yaml accepts the current key; api-key.next is left over and not accepted" || return 1
+  else
+    assert_contains "$out" "INTERRUPTED - a --stage was cut short: config.yaml accepts the current key and api-key.next" || return 1
+  fi
   # --finish has nothing to finish: it says so and changes nothing
   out="$(_rk --finish)" && { echo "finish ran over an interrupted stage: $out"; return 1; }
   assert_contains "$out" "nothing to finish" || return 1
@@ -470,28 +478,61 @@ test_rotate_abort_killed_after_removing_next_aborts_when_run_again() {
   _rk_case _rk_abort_killed_body next-removed
 }
 
-# An --abort killed right after putting the old key back in api-key leaves no
-# api-key.next: the new key is accepted from no key file. --status says so,
-# names both fixes, and never claims an api-key.next.
-_rk_abort_killed_after_restore_status_body() {
-  local out
+# An --abort killed after <step>: --status reads what config.yaml accepts,
+# not which files exist - the keys it accepts (the new key in no key file
+# once api-key holds the old one again), the files left over, the verb cut
+# short, and the fix. With "leftover", a stray api-key.next is staged too:
+# the --abort removes it only after it rewrote the config.
+_rk_abort_killed_status_body() { # <step> [leftover]
+  local out left=""
   _rk --stage >/dev/null || return 1
   NEW="$(cat "$CEL_GATEWAY_STATE/api-key")"
-  _rk_crash api-key-restored --abort || return 1
-  [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "an api-key.next appeared"; return 1; }
-  assert_eq "$(_rk_code "$NEW")" 200 || return 1
+  if [ "${2:-}" = leftover ]; then
+    _gateway_mint_secret "$CEL_GATEWAY_STATE/api-key.next"
+    chmod 600 "$CEL_GATEWAY_STATE/api-key.next"
+    _gateway_config_write
+    left="$(cat "$CEL_GATEWAY_STATE/api-key.next")"
+  fi
+  _rk_crash "$1" --abort || return 1
   out="$(_rk --status)" || { echo "$out"; return 1; }
-  assert_contains "$out" "rotation   INTERRUPTED - an --abort was cut short" || return 1
-  assert_contains "$out" "config.yaml still accepts a key that is in no key file" || return 1
-  assert_contains "$out" "cel gateway rotate-key --abort again (or cel gateway refresh) removes it" || return 1
-  assert_contains "$out" "UNKNOWN (in no key file) (sha256 $(_gwr_fp_of "$NEW" | cut -c1-12))" || return 1
-  case "$out" in *"api-key.next"*) echo "status names an api-key.next that is not there: $out"; return 1 ;; esac
+  assert_contains "$out" "rotation   INTERRUPTED - an --abort was cut short: " || return 1
+  assert_contains "$out" "api-key.previous is left over, holding the key api-key holds" || return 1
+  case "$out" in *"--stage was cut short"*|*"still accepted"*) echo "status blames a --stage: $out"; return 1 ;; esac
+  case "$1:${2:-}" in
+    api-key-restored:)
+      [ ! -e "$CEL_GATEWAY_STATE/api-key.next" ] || { echo "an api-key.next appeared"; return 1; }
+      assert_eq "$(_rk_code "$NEW")" 200 || return 1
+      assert_contains "$out" "config.yaml accepts the current key and a key that is in no key file;" || return 1
+      case "$out" in *"api-key.next"*) echo "status names an api-key.next that is not there: $out"; return 1 ;; esac ;;
+    api-key-restored:leftover)
+      assert_eq "$(_rk_code "$NEW")" 200 || return 1
+      assert_eq "$(_rk_code "$left")" 200 || return 1
+      assert_contains "$out" "config.yaml accepts the current key, api-key.next and a key that is in no key file;" || return 1 ;;
+    config-rewritten:leftover)
+      assert_eq "$(_rk_code "$NEW")" 401 || return 1
+      assert_eq "$(_rk_code "$left")" 401 || return 1
+      assert_contains "$out" "config.yaml accepts the current key; api-key.next is left over and not accepted;" || return 1
+      assert_contains "$out" "Fix: cel gateway rotate-key --abort again clears it"$'\n' || return 1 ;;
+    *) echo "no expectation for $1 ${2:-}"; return 1 ;;
+  esac
+  if [ "$1" = api-key-restored ]; then
+    assert_contains "$out" "Fix: cel gateway rotate-key --abort again clears it and stops accepting the key in no key file (cel gateway refresh also stops accepting it)" || return 1
+    assert_contains "$out" "UNKNOWN (in no key file) (sha256 $(_gwr_fp_of "$NEW" | cut -c1-12))" || return 1
+  fi
   out="$(_rk --abort)" || { echo "abort again failed: $out"; return 1; }
   _rk_back_to_old_alone || return 1
+  [ -z "$left" ] || assert_eq "$(_rk_code "$left")" 401 || return 1
+  [ -z "$left" ] || case "$(cat "$T/outs")" in *"$left"*) echo "the leftover key value reached the output"; return 1 ;; esac
   _rk_no_key_printed
 }
 test_rotate_abort_killed_after_restoring_api_key_status_names_the_key_in_no_file() {
-  _rk_case _rk_abort_killed_after_restore_status_body
+  _rk_case _rk_abort_killed_status_body api-key-restored
+}
+test_rotate_abort_with_a_leftover_next_killed_after_restoring_api_key_status_names_every_accepted_key() {
+  _rk_case _rk_abort_killed_status_body api-key-restored leftover
+}
+test_rotate_abort_with_a_leftover_next_killed_after_rewriting_the_config_status_says_next_is_not_accepted() {
+  _rk_case _rk_abort_killed_status_body config-rewritten leftover
 }
 
 # THE CRASH SEAM IS INERT OUTSIDE THE SUITE: a process the runner did not
