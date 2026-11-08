@@ -334,9 +334,11 @@ test('the override is decided by the shared guard: no member override, no forge 
   try {
     await f.emit(created());
     for (const command of ['gh pr review 3 --approve', 'CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 -a', 'gh pr review 3 --request-changes=true -b x',
-      'gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE', 'tea pr approve 3']) {
+      'gh api -X POST repos/o/r/pulls/3/reviews -f event=APPROVE', 'tea pr approve 3', 'tea pr r 3', 'env -u X gh pr review 3 -a',
+      'CEL_GUARD_ALLOW_ONCE=1 gh api graphql -F query=@q.graphql', 'gh api -X POST repos/o/r/pulls/3/%72eviews']) {
       await assert.rejects(f.shell(command), /cel solo review/, command);
     }
+    await assert.rejects(f.shell('CEL_GUARD_ALLOW_ONCE=1 gh alias set ap "pr review --approve"'), /gh alias/);
     await f.shell('gh pr review 3 --comment -b x');
     await f.shell(`CEL_GUARD_ALLOW_ONCE=1 touch ${temp}/marker`);
     role = 'member';
@@ -344,13 +346,18 @@ test('the override is decided by the shared guard: no member override, no forge 
   } finally { await f.cleanup(); await rm(temp, { recursive: true, force: true }); }
 });
 
-test('a classifier that reports its own error (exit 2) allows as before; other classifier failures still refuse', async () => {
+test('a classifier that reports its own error (exit 2) allows as before, except a verdict-shaped command; other classifier failures still refuse', async () => {
   let failure;
   const f = await fixture({ env: { CEL_ROOT: repo }, deps: { run: async () => { throw failure; } } });
   try {
     await f.emit(created());
     failure = Object.assign(new Error('guard-classify: policy failed to load'), { code: 2 });
     await f.tool('write', { path: 'allowed', content: 'x' });
+    await f.shell('ls -la');
+    for (const command of ['gh pr review 3 --approve', 'gh api -X POST repos/o/r/pulls/3/%72eviews', 'gh api graphql --input q.json',
+      'tea pr r 3', 'gh alias set ap x']) {
+      await assert.rejects(f.shell(command), /forge review verdict/, command);
+    }
     failure = Object.assign(new Error('spawn bash ENOENT'), { code: 'ENOENT' });
     await assert.rejects(f.tool('write', { path: 'allowed', content: 'x' }), /ENOENT/);
   } finally { await f.cleanup(); }

@@ -409,3 +409,15 @@ test_doctor_check_workspaces_runs_github_account_check() {
   assert_contains "$out" "github-account-check alpha"
   _doctor_teardown
 }
+
+# A workspace still setting the retired review.post is told it posts nothing.
+test_doctor_says_review_post_no_longer_posts_verdicts() {
+  local w; w="$(mktemp -d)"
+  printf 'name: alpha\nreview:\n  model: m\n' > "$w/workspace.yaml"
+  assert_eq "$(doctor_review_post_line "$w" alpha)" "" || { rm -rf "$w"; return 1; }
+  printf '  post: github\n' >> "$w/workspace.yaml"
+  local out; out="$(doctor_review_post_line "$w" alpha)"
+  assert_contains "$out" "alpha: review.post: github no longer posts verdicts" || { rm -rf "$w"; return 1; }
+  assert_contains "$out" "cel solo review" || { rm -rf "$w"; return 1; }
+  rm -rf "$w"
+}

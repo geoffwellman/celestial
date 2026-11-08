@@ -7,7 +7,9 @@
 # PROMPTS, not hooks, which is exactly why this is a hook and not a permission
 # rule. Never exits non-zero for any reason other than a deny: a broken guard
 # must fail open, not take down every tool call on the box - except in a team
-# member's pane (CEL_ROLE=member), whose scope IS this guard: it fails closed.
+# member's pane (CEL_ROLE=member), whose scope IS this guard, and for a shell
+# command that looks like a forge review verdict (no agent posts one; the
+# same VERDICT_SHAPED text as the omp and OpenCode adapters): those fail closed.
 set -uo pipefail
 # A pane that lives in a workspace directory but is NOT an orchestrator - the
 # owner's own assistant, a scratch session - opts out for its whole life with
@@ -15,9 +17,19 @@ set -uo pipefail
 # session's env, so that is per pane, not per box.
 [ "${CEL_GUARD:-1}" = 0 ] && exit 0
 CEL_ROOT="${CEL_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
-_broken() { # the guard cannot run: open, or closed for a member
-  [ "${CEL_ROLE:-}" = member ] || exit 0
-  printf 'celestial guard (member pane): the guard cannot run (%s), and a team member'"'"'s scope is the guard - nothing ran\n' "$1" >&2
+_broken() { # the guard cannot run: open, or closed for a member or a verdict-shaped command
+  if [ "${CEL_ROLE:-}" = member ]; then
+    printf 'celestial guard (member pane): the guard cannot run (%s), and a team member'"'"'s scope is the guard - nothing ran\n' "$1" >&2
+    exit 2
+  fi
+  local raw re='pr[[:space:]]+review([^a-z0-9_]|$)|eviews|pullrequestreview|reviewmutation|approve([^a-z0-9_]|$)|lgtm|reject|(^|[^a-z0-9_])gh[[:space:]]+alias([^a-z0-9_]|$)|(^|[^a-z0-9_])tea([^a-z0-9_]|$)|graphql'
+  # no jq to rely on here: the command string is read off the raw JSON
+  raw="$(cat 2>/dev/null)"; raw="${raw,,}"
+  local tre='"tool_name"[[:space:]]*:[[:space:]]*"bash"' cre='"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+  [[ "$raw" =~ $tre ]] || exit 0
+  [[ "$raw" =~ $cre ]] || exit 0
+  [[ "${BASH_REMATCH[1]}" =~ $re ]] || exit 0
+  printf 'celestial guard: the guard cannot run (%s), and this looks like a forge review verdict, which no agent posts (cel solo review records one) - nothing ran\n' "$1" >&2
   exit 2
 }
 # shellcheck source=lib/guard.sh

@@ -93,45 +93,33 @@ test_ws_policy_block_renders_review_instruction_only_when_declared() {
   assert_contains "$b" 'it sends findings to you (`<product>-orch`)'
   rm -rf "$tmp"
 }
-# Where a reviewer's verdict goes. On a repo whose only GitHub identity is the
-# owner's, a posted review is the owner reviewing his own PR - so the default
-# is the inbox and GitHub is opt-in, decided in ONE place.
-test_ws_review_post_defaults_to_inbox() {
-  local tmp; tmp="$(mktemp -d)"; printf 'name: t\n' > "$tmp/workspace.yaml"
-  assert_eq "$(ws_review_post "$tmp")" "inbox"
-  printf 'review:\n  runtime: omp\n' >> "$tmp/workspace.yaml"
-  assert_eq "$(ws_review_post "$tmp")" "inbox"
-  printf '  post: github\n' >> "$tmp/workspace.yaml"
-  assert_eq "$(ws_review_post "$tmp")" "github"
-  rm -rf "$tmp"
-}
-test_ws_policy_block_review_line_follows_review_post() {
+# Where a reviewer's verdict goes: recorded with `cel solo review` and reported
+# by inbox, never posted to the forge by an agent - whatever the retired
+# `review.post` says (cel doctor names it).
+test_ws_policy_block_review_verdicts_are_never_posted() {
   local tmp; tmp="$(mktemp -d)"
   cp "$WSA/workspace.yaml" "$tmp/"
   printf 'review:\n  runtime: omp\n  model: gpt-5.6-sol\n' >> "$tmp/workspace.yaml"
   local b; b="$(ws_policy_block "$tmp")"
   assert_contains "$b" 'cel solo review <repo>#<n> <approved|changes>'
   assert_contains "$b" '--head <reviewed-commit-sha>'
-  assert_contains "$b" 'GitHub is **not** posted to'
+  assert_contains "$b" 'no agent posts a verdict to the forge (comments only)'
   printf '  post: github\n' >> "$tmp/workspace.yaml"
-  b="$(ws_policy_block "$tmp")"
-  assert_contains "$b" 'posted as a GitHub review'
-  ! printf '%s' "$b" | grep -q 'GitHub is \*\*not\*\* posted to' \
-    || { echo "inbox wording rendered for post: github"; return 1; }
+  assert_eq "$(ws_policy_block "$tmp")" "$b" || { rm -rf "$tmp"; return 1; }
+  ! declare -F ws_review_post >/dev/null || { echo "ws_review_post still decides a posting path"; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
 }
-# The role file must never tell a reviewer to post unconditionally; posting is
-# the policy block's call.
-test_pr_reviewer_role_does_not_post_to_github_unconditionally() {
+# The role file never tells a reviewer to post a verdict to the forge.
+test_pr_reviewer_role_never_posts_a_verdict_to_the_forge() {
   local f="$CEL_ROOT/core/roles/pr-reviewer.md"
   ! grep -qi 'submits a real GitHub review' "$f" \
     || { echo "role still promises a GitHub review"; return 1; }
-  ! grep -qE '^[0-9]+\. Submit ONE review per round: `gh pr review' "$f" \
-    || { echo "role posts a GitHub review unconditionally"; return 1; }
+  ! grep -qE 'gh pr review [^`]*--approve`|post: github|Post to GitHub' "$f" \
+    || { echo "role still tells a reviewer to post a verdict"; return 1; }
   assert_contains "$(cat "$f")" 'cel solo review <repo>#<n>'
   ! grep -q 'cel-fanout' "$f" || { echo "reviewer role still records verdicts with cel-fanout"; return 1; }
   assert_contains "$(cat "$f")" '--head <reviewed-sha>'
-  assert_contains "$(cat "$f")" 'post: github'
+  assert_contains "$(cat "$f")" 'A verdict is never posted to the forge'
 }
 test_ws_render_role_appends_policy() {
   local out; out="$(ws_render_role "$WSA" "$CEL_ROOT/core/roles/solo.md")"

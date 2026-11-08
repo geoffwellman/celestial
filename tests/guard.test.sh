@@ -877,11 +877,21 @@ test_hook_guards_member_panes_and_launch_tokens() {
   _hook /tmp Bash '{"command":"git push origin main"}' || { echo "other pane blocked: $HOOK_ERR"; rm -rf "$T"; return 1; }
   rm -rf "$T"
 }
-# A member's guard that cannot run refuses; everyone else's fails open.
+# A member's guard that cannot run refuses; everyone else's fails open -
+# except for a command that looks like a forge review verdict.
 test_hook_fails_closed_for_a_member_only() {
   local R; R="$(mktemp -d)"
   CEL_ROOT="$R" CEL_ROLE=member _hook /tmp Bash '{"command":"ls"}' && { echo "a broken guard let a member through"; rm -rf "$R"; return 1; }
   CEL_ROOT="$R" _hook /tmp Bash '{"command":"ls"}' || { echo "a broken guard blocked a non-member"; rm -rf "$R"; return 1; }
+  CEL_ROOT="$R" _hook /tmp/reviews/widget-pr-3 Bash '{"command":"git diff origin/main...HEAD","description":"reviews"}' \
+    || { echo "a broken guard blocked a reviewer's read: $HOOK_ERR"; rm -rf "$R"; return 1; }
+  local c
+  for c in 'gh pr review 3 --approve' 'GH_REPO=o/r gh pr review 3 -a' 'gh api -X POST repos/o/r/pulls/3/reviews' \
+           'gh api graphql --input q.json' 'tea pr r 3' 'gh alias set ap x'; do
+    CEL_ROOT="$R" CEL_ROLE=solo _hook /tmp Bash "{\"command\":\"$c\"}" \
+      && { echo "a broken guard let a verdict through: $c"; rm -rf "$R"; return 1; }
+    assert_contains "$HOOK_ERR" "forge review verdict" || { rm -rf "$R"; return 1; }
+  done
   rm -rf "$R"
 }
 # THE PRODUCT AGENT LEADS TEAMS: `cel team ...` is its own, as solo agent or
@@ -942,6 +952,61 @@ test_no_role_posts_a_forge_review_verdict() {
   done
   rm -rf "$T"
 }
+# The spellings that slipped past the first cut (review of #278): a graphql
+# query the guard cannot read (a file, stdin, an expansion, a `$(...)`); a
+# wrapper with options that take a value, or given by path (env -u X,
+# /usr/bin/env, xargs -n1 / -I{}, sudo -u, timeout --signal); a path that is
+# percent-encoded, has a fragment, other case or doubled slashes, goes
+# through repositories/<id>, or is split by a newline; a newline as the
+# command separator; tea's verbs by prefix (`tea pr r` is reject). Every role
+# is refused each, with no one-off.
+test_no_role_posts_a_forge_verdict_by_a_bypass_spelling() {
+  _team_ws
+  local e c v
+  for e in "${_FV_ROLES[@]}"; do
+    for c in 'gh api graphql -F query=@q.graphql' 'gh api graphql -f query=@q' 'gh api graphql --input -' \
+             'gh api graphql --input q.json' 'gh api graphql --input=q.json' 'gh api graphql -Fquery=@q.graphql' \
+             'gh api graphql --field=query=@q.graphql' 'gh api graphql -f query=$Q' 'gh api graphql -f query="$(cat q.graphql)"' \
+             'gh api https://api.github.com/graphql -F query=@q.graphql' \
+             'env -u X gh pr review 5 -a' '/usr/bin/env gh pr review -a' 'env -C /tmp gh pr review 5 --approve' \
+             'xargs -n1 gh pr review -a' 'xargs -n 1 gh pr review -a' 'xargs -I{} gh pr review {} -a' 'xargs -I {} gh pr review {} -a' \
+             'sudo gh pr review 5 -a' 'sudo -u root gh pr review 5 -a' '/usr/bin/sudo -E gh pr review 5 -a' \
+             'timeout --signal=KILL 5 gh pr review 5 -a' 'timeout -s KILL 5 gh pr review 5 -a' 'nice -n 5 gh pr review 5 -a' \
+             'gh api -X POST repos/o/r/pulls/5/%72eviews' 'gh api -X POST repos/o/r/pulls/5%2Freviews' \
+             'gh api -X POST repos/o/r/pulls/5/reviews#x' 'gh api -X POST repos/o/r/pulls/5/REVIEWS' \
+             'gh api -X POST repos/o/r/pulls/5//reviews' 'gh api -X POST repositories/9/pulls/5/reviews' \
+             $'gh api -X POST "repos/o/r/pulls/5/re\nviews"' $'true\ngh pr review 5 -a' \
+             'curl -XPOST https://api.github.com/repos/o/r/pulls/5/%72eviews' \
+             'tea pr r 5' 'tea pr rej 5 no' 'tea pr rev 5' 'tea pr ap 5' 'tea pr l 5' 'tea pull a 5' 'tea pu approve 5'; do
+      v="$(_fv "${e%%|*}" "${e#*|}" "$c")"
+      case "$v" in deny*cel\ solo\ review*) ;; *) echo "CEL_ROLE=${e%%|*} at ${e#*|}: '$c' -> $v"; rm -rf "$T"; return 1 ;; esac
+      ! guard_override_honoured solo "CEL_GUARD_ALLOW_ONCE=1 $c" || { echo "the override covers '$c'"; rm -rf "$T"; return 1; }
+    done
+  done
+  # a graphql read the guard can read, and tea's non-verdict verbs, are not verdicts
+  for c in 'gh api graphql -f query="query { viewer { login } }"' 'tea pr reply 5 1 x' 'tea pr resolve 9' \
+           'tea pr reopen 5' 'tea pr 5' 'xargs -r gh pr view 5' 'env -u X gh pr review 5 --comment -b ok'; do
+    case "$(_fv solo repos/widget "$c")" in *cel\ solo\ review*) echo "refused as a verdict: '$c'"; rm -rf "$T"; return 1 ;; esac
+  done
+  rm -rf "$T"
+}
+# A gh alias hides what a later gh command runs (`gh alias set ap "pr review
+# --approve"`, then `gh ap 5`), so no role sets, imports or deletes one, and
+# no one-off covers it. Listing aliases is a read.
+test_no_role_writes_a_gh_alias() {
+  _team_ws
+  local e c v
+  for e in "${_FV_ROLES[@]}"; do
+    for c in 'gh alias set ap "pr review --approve"' 'gh alias set --shell ap "gh pr review -a"' 'gh alias import aliases.yml' \
+             'gh alias import -' 'gh alias delete ap' '/usr/bin/gh alias set ap "pr review -a"' 'env -u X gh alias set ap x'; do
+      v="$(_fv "${e%%|*}" "${e#*|}" "$c")"
+      case "$v" in deny*gh\ alias*) ;; *) echo "CEL_ROLE=${e%%|*} at ${e#*|}: '$c' -> $v"; rm -rf "$T"; return 1 ;; esac
+      ! guard_override_honoured solo "CEL_GUARD_ALLOW_ONCE=1 $c" || { echo "the override covers '$c'"; rm -rf "$T"; return 1; }
+    done
+  done
+  case "$(_fv solo repos/widget 'gh alias list')" in *gh\ alias*) echo "gh alias list refused"; rm -rf "$T"; return 1 ;; esac
+  rm -rf "$T"
+}
 # A comment, a comment-only review and every read of reviews are not
 # verdicts: no role is refused them as one, and the roles that comment today
 # still may.
@@ -982,7 +1047,7 @@ test_hook_override_does_not_cover_a_forge_verdict() {
 }
 # The omp/pi adapter asks the same classifier, override included.
 _omp_guard() { # <cwd> <command> -> the adapter's tool_call result as JSON (null: allowed)
-  (cd "$1" && HOOK="$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts" CMD="$2" node --no-warnings - <<'JS'
+  (cd "$1" && HOOK="${_OMP_HOOK:-$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts}" CMD="$2" node --no-warnings - <<'JS'
 (async () => {
   let handler;
   (await import(process.env.HOOK)).default({ on(_e, f) { handler = f; } });
@@ -1005,4 +1070,21 @@ test_omp_adapter_refuses_a_forge_verdict_and_override() {
   assert_eq "$(CEL_ROLE= _omp_guard "$T/repos/widget" 'CEL_GUARD_ALLOW_ONCE=1 git commit -m x')" null || { rm -rf "$T"; return 1; }
   assert_eq "$(CEL_ROLE=solo _omp_guard "$T/repos/widget" 'gh pr review 3 --comment -b x')" null || { rm -rf "$T"; return 1; }
   rm -rf "$T"
+}
+# The omp adapter's own failure (no classifier: CEL_ROOT points nowhere) is
+# open for a non-member - but never for a command that looks like a verdict.
+test_omp_adapter_fails_closed_on_a_verdict_shaped_command() {
+  local R c out; R="$(mktemp -d)"
+  local hook="$CEL_ROOT/tools/hooks/orchestrator-guard.omp.ts"
+  for c in 'gh pr review 3 --approve' 'gh api -X POST repos/o/r/pulls/3/%72eviews' 'gh api graphql -F query=@q.graphql' \
+           'gh api graphql --input -' 'tea pr r 3' 'tea pulls lgtm 3' 'gh alias set ap "pr review -a"' \
+           'env -u X gh pr review 3 -a' 'CEL_GUARD_ALLOW_ONCE=1 gh pr review 3 -a'; do
+    out="$(_OMP_HOOK="$hook" CEL_ROOT="$R" CEL_ROLE=solo _omp_guard /tmp "$c")"
+    assert_eq "$(jq -r .block <<<"$out")" true || { echo "broken omp guard let through: $c"; rm -rf "$R"; return 1; }
+    assert_contains "$(jq -r .reason <<<"$out")" "forge review verdict" || { rm -rf "$R"; return 1; }
+  done
+  assert_eq "$(_OMP_HOOK="$hook" CEL_ROOT="$R" CEL_ROLE=solo _omp_guard /tmp 'ls -la')" null || { rm -rf "$R"; return 1; }
+  out="$(_OMP_HOOK="$hook" CEL_ROOT="$R" CEL_ROLE=member _omp_guard /tmp 'ls -la')"
+  assert_eq "$(jq -r .block <<<"$out")" true || { rm -rf "$R"; return 1; }
+  rm -rf "$R"
 }
