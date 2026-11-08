@@ -233,6 +233,23 @@ agent resumes through its recorded line, and a reviewer relaunched by `cel run
 reviewer` (or a member re-added by `cel team add`) opens as a window in the
 resumed product agent's session.
 
+Known Rex API limits (revision 10): Rex has no compare-and-swap for these
+calls, so two check-then-act gaps remain and are narrowed, not closed. (1)
+Between the host-session proof and `rex window new` the product agent can
+exit or its session can change; `session.new_window` takes no expected
+revision or owner, so the guest may open in a session whose agent has just
+gone. The guest's own identity is its own receipt either way, and nothing is
+closed on the strength of the host proof. (2) Between the last container
+proof (re-run immediately before the close) and `rex window close` / `rex
+kill`, someone can add a terminal to that window or session;
+`session.close_window` (session and window id only; extra fields are
+rejected) and `session.destroy` (an unknown `if_revision` is ignored, not
+enforced) take no revision guard, so that terminal would close with it. Both
+gaps close once Rex offers a conditional create/close.
+Members and reviewers are guarded to read-only `rex` commands (`ls`,
+`inspect`, `capture`, `block call process`), so neither can type into or
+close its product agent's window.
+
 `cel ws down` (and therefore `reset`) explicitly stops managed Rex agents whose
 receipt names that exact workspace, after the existing held-work check; the
 box-wide core and other workspaces are excluded. A failed stop prevents reset

@@ -293,3 +293,20 @@ test_rex_roster_refuses_an_incomplete_window_receipt() {
   if rex_agent_list >/dev/null 2>&1; then echo 'unknown scope was listed'; _sg_down; return 1; fi
   _sg_down
 }
+
+# Receipts written before scopes existed - every live product agent and
+# reviewer at upgrade - carry no rex_scope or rex_window. They are session
+# scoped: listed, and a proven host a reviewer can join.
+test_rex_pre_scope_receipt_lists_as_session_scope_and_hosts() {
+  _sg_setup
+  _sg_host
+  local f="$CEL_REX_STATE/widget-orch.json" host
+  jq 'del(.rex_scope, .rex_window)' "$f" > "$RT/r" && cp "$RT/r" "$f"
+  host="$(_sg_field widget-orch .rex_session)"
+  assert_eq "$(rex_agent_list | jq -r '.result.agents[] | select(.name == "widget-orch") | (.rex_scope // "absent")')" absent
+  assert_eq "$(_rex_host_session widget-orch "$WS")" "$host"
+  _sg_reviewer >/dev/null || { _sg_down; return 1; }
+  assert_eq "$(_sg_field widget-pr-7-review '[.rex_scope, .rex_session] | @tsv')" "$(printf 'window\t%s' "$host")"
+  assert_eq "$(rex_agent_list | jq '.result.agents | length')" 2
+  _sg_down
+}

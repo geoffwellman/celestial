@@ -34,11 +34,15 @@ _rex_live() { # record -> prove this is the same process, not a reused PID
 }
 
 # WHERE A MANAGED AGENT'S TERMINAL LIVES. A product agent (and core, root, a
-# lane) owns the session it opened: rex_scope "session" (receipts older than
-# scopes have none and mean the same). A reviewer or team member opens a
-# WINDOW in its product agent's session instead - rex_scope "window", with
-# rex_window and rex_host (that product agent) - so a product's whole team is
-# one Rex session group. Either way the agent's own terminal is rex_block.
+# lane) owns the session it opened: rex_scope "session". A reviewer or team
+# member opens a WINDOW in its product agent's session instead - rex_scope
+# "window", with rex_window and rex_host (that product agent) - so a product's
+# whole team is one Rex session group. Either way the agent's own terminal is
+# rex_block.
+# A MISSING rex_scope IS "session", deliberately: every receipt written before
+# scopes existed - each live product agent's and reviewer's - has none, and
+# each of them did open a session of its own. Refusing them would hide every
+# live agent from the roster. An unknown non-empty scope is still refused.
 _REX_SCOPE_JQ='((.rex_scope // "session") as $s
   | if $s == "window" then (.rex_window | type == "string" and length > 0) and (.rex_host | type == "string" and length > 0)
     else $s == "session" end)'

@@ -798,11 +798,10 @@ _guard_builder_push() { # <push arguments...> -> deny <reason>, or nothing
 _guard_member() { # <command> -> allow | deny <reason>
   local cmd="$1" i seg d
   _guard_member_scope || { printf '%s' "$_GUARD_MEMBER_NO_SCOPE"; return 0; }
-  # Every member, whatever its role. A Rex member is a window in its lead's
-  # session, so no Rex control that opens, closes or types into terminals.
+  # Every member, whatever its role. (Rex controls: _guard_rex_writes, in
+  # guard_classify, for members and reviewers alike.)
   if _guard_starts "$cmd" 'cel run' 'cel (core|console)' 'cel ws (up|down|reset)' 'cel team (start|add|retire|close|cap)' \
-       'herdr agent (start|stop)' 'herdr worktree' 'herdr pane (close|split|send-text|send-keys|run)' 'herdr (tab|workspace) (create|close)' \
-       'rex (new|run|split|kill|send|send-key)' 'rex (window|block|session) (new|close|kill|destroy)'; then
+       'herdr agent (start|stop)' 'herdr worktree' 'herdr pane (close|split|send-text|send-keys|run)' 'herdr (tab|workspace) (create|close)'; then
     printf 'deny a team member starts and stops no agents or panes and runs no lead verb - ask the lead (cel team event %s <type> --to <lead>)' "$_GM_TEAM"
     return 0
   fi
@@ -862,6 +861,59 @@ _guard_member_path() { # <file_path> -> allow | deny <reason>
   printf allow
 }
 
+# A REX COMMAND THAT IS NOT A READ. Team members and reviewers are windows in
+# their product agent's Rex session (lib/rex.sh), so a Rex control that opens,
+# closes, moves or types into a terminal would reach the lead's own window.
+# The argv is parsed, not prefix-matched: global flags (-S/--server,
+# -C/--client, --timeout, --color with a value; --autostart[=..], -v) are
+# skipped wherever they stand before the verb, and the verb path must be one
+# of the reads - ls/list, session|window|block ls|list|inspect, capture,
+# `block call process`, actions, api list|describe, version, whoami, help.
+# Everything else, an unknown flag before the verb and `rex api call` and
+# `rex do` (which cannot be told apart from writes) included, is a write.
+_guard_rex_writes() { # <command> -> 0 when a piece runs a non-read rex command
+  local seg i n w verb sub pos
+  local -a a
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    read -ra a <<< "$seg"
+    [ "${#a[@]}" -gt 0 ] && [ "${a[0]##*/}" = rex ] || continue
+    n="${#a[@]}"; i=1
+    while [ "$i" -lt "$n" ]; do
+      case "${a[$i]}" in
+        -S|--server|-C|--client|--timeout|--color) i=$((i + 2)) ;;
+        --server=*|--client=*|--timeout=*|--color=*|--autostart|--autostart=*|-v|-vv|-vvv|--verbose) i=$((i + 1)) ;;
+        -h|--help) continue 2 ;;
+        -*) return 0 ;;
+        *) break ;;
+      esac
+    done
+    [ "$i" -lt "$n" ] || continue
+    verb="${a[$i]}"; sub="${a[$((i + 1))]:-}"
+    case "$verb" in
+      ls|list|capture|actions|version|whoami|help) continue ;;
+      session|window|block)
+        case "$sub" in ls|list|inspect) continue ;; esac
+        if [ "$verb $sub" = 'block call' ]; then
+          # the method is the first positional after `call`
+          pos=""; i=$((i + 2))
+          while [ "$i" -lt "$n" ]; do
+            w="${a[$i]}"
+            case "$w" in
+              -s|--session|-w|--window|-b|--block|-S|--server|-C|--client|--timeout|--color) i=$((i + 2)) ;;
+              -*) i=$((i + 1)) ;;
+              *) pos="$w"; break ;;
+            esac
+          done
+          [ "$pos" != process ] || continue
+        fi
+        return 0 ;;
+      api) case "$sub" in list|ls|describe) continue ;; esac; return 0 ;;
+      *) return 0 ;;
+    esac
+  done < <(_guard_segments "$1")
+  return 1
+}
+
 guard_classify() { # <role> <command>
   local role="$1" cmd="$2"
   # Every role, `other` included (a reviewer stands outside any workspace).
@@ -872,6 +924,12 @@ guard_classify() { # <role> <command>
   # budget, by `cel team add`.
   if _guard_starts "$cmd" 'cel run member'; then
     printf 'deny cel run member is cel team add'"'"'s internal launcher - add a member with: cel team add <feature> <role> [--focus f] [--repo r]'
+    return 0
+  fi
+  # A member or a reviewer (by role, or by its launch's CEL_ROLE, whatever
+  # directory it stands in) shares its product agent's Rex session.
+  if { [ "$role" = member ] || [ "${CEL_ROLE:-}" = member ] || [ "${CEL_ROLE:-}" = reviewer ]; } && _guard_rex_writes "$cmd"; then
+    printf 'deny a team member or reviewer is a window in its product agent'"'"'s Rex session: it runs only read-only rex commands (ls, inspect, capture, block call process) - ask the product agent'
     return 0
   fi
   if [ "$role" = core ]; then
